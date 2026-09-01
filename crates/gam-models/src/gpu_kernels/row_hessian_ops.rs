@@ -15,7 +15,7 @@
 //!
 //! Both kernels assume the cached layout produced by Phase 1 (FullRowMajor:
 //! `n_rows × r × r` doubles, fully symmetric per row). The design-row pullback
-//! (`marginal_design.axpy_row_into` / `logslope_design.axpy_row_into` /
+//! (`marginal_design.axpy_row_into` / `slope_design.axpy_row_into` /
 //! `pullback_primary_vector`) stays on the host in Phase 2/3; Phase 5 will
 //! move it device-resident alongside the PCG loop.
 //!

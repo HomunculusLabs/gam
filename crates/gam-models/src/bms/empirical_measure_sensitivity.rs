@@ -52,7 +52,7 @@
 //! rescaling them all, moves every raw node and no standardized one. So the
 //! cross-row channel only ever transmits the SHAPE of a node perturbation —
 //! which is why it is materially smaller in the published standard error than
-//! its own matrix norm suggests, and why what it scales with is the logslope
+//! its own matrix norm suggests, and why what it scales with is the slope
 //! (the thing that lets a row see the latent axis at all) rather than the grid
 //! size. Both identities are gated in `empirical_measure_2484_tests`, and the
 //! standard-error sweep behind the claim is
@@ -538,33 +538,33 @@ pub(crate) fn rigid_empirical_score_zeta_channels(
     probit_scale: f64,
     grid: &EmpiricalZGrid,
     marginal_design: ArrayView2<'_, f64>,
-    logslope_design: ArrayView2<'_, f64>,
+    slope_design: ArrayView2<'_, f64>,
     p_beta: usize,
 ) -> Result<EmpiricalRigidZetaChannels, String> {
     let n = marginal_eta.len();
     let p_m = marginal_design.ncols();
-    let r = logslope_design.ncols();
+    let r = slope_design.ncols();
     if slope_eta.len() != n
         || zeta.len() != n
         || y.len() != n
         || weights.len() != n
         || marginal_design.nrows() != n
-        || logslope_design.nrows() != n
+        || slope_design.nrows() != n
     {
         return Err(format!(
             "empirical score_zeta channels row mismatch: marginal_eta={n}, slope_eta={}, zeta={}, \
-             y={}, weights={}, marginal_design rows={}, logslope_design rows={}",
+             y={}, weights={}, marginal_design rows={}, slope_design rows={}",
             slope_eta.len(),
             zeta.len(),
             y.len(),
             weights.len(),
             marginal_design.nrows(),
-            logslope_design.nrows()
+            slope_design.nrows()
         ));
     }
     if p_m + r != p_beta {
         return Err(format!(
-            "empirical score_zeta channels width mismatch: marginal({p_m}) + logslope({r}) != \
+            "empirical score_zeta channels width mismatch: marginal({p_m}) + slope({r}) != \
              p_beta({p_beta})"
         ));
     }
@@ -575,7 +575,7 @@ pub(crate) fn rigid_empirical_score_zeta_channels(
     // Per-row node coefficients, kept as two `n × m` blocks so the contraction
     // into `U_Qᵀ` is two GEMMs rather than an `O(n·m·p_β)` scalar scatter.
     let mut node_coeff_marginal = Array2::<f64>::zeros((n, m));
-    let mut node_coeff_logslope = Array2::<f64>::zeros((n, m));
+    let mut node_coeff_slope = Array2::<f64>::zeros((n, m));
 
     let mut phi1 = vec![0.0_f64; m];
     let mut phi2 = vec![0.0_f64; m];
@@ -643,7 +643,7 @@ pub(crate) fn rigid_empirical_score_zeta_channels(
             }
         }
         if direct_g != 0.0 {
-            for (j, &x) in logslope_design.row(i).iter().enumerate() {
+            for (j, &x) in slope_design.row(i).iter().enumerate() {
                 direct[[i, p_m + j]] = direct_g * x;
             }
         }
@@ -656,20 +656,20 @@ pub(crate) fn rigid_empirical_score_zeta_channels(
             let a_m_xb = -a_m * d_psi1 / psi1;
             let a_g_xb = -(d_xi1 + a_g * d_psi1) / psi1;
             node_coeff_marginal[[i, b]] = -k[2] * e_m * a_xb - sigma * k[1] * a_m_xb;
-            node_coeff_logslope[[i, b]] = -k[2] * e_g * a_xb - sigma * k[1] * a_g_xb;
+            node_coeff_slope[[i, b]] = -k[2] * e_g * a_xb - sigma * k[1] * a_g_xb;
         }
     }
 
     // `U_Qᵀ[b, ·] = Σ_i coeff[i, b]·design.row(i)`, i.e. `Cᵀ·X` per block.
     let node_marginal =
         gam_linalg::faer_ndarray::fast_atb(&node_coeff_marginal.view(), &marginal_design);
-    let node_logslope =
-        gam_linalg::faer_ndarray::fast_atb(&node_coeff_logslope.view(), &logslope_design);
+    let node_slope =
+        gam_linalg::faer_ndarray::fast_atb(&node_coeff_slope.view(), &slope_design);
     let mut node = Array2::<f64>::zeros((m, p_beta));
     node.slice_mut(ndarray::s![.., ..p_m])
         .assign(&node_marginal);
     node.slice_mut(ndarray::s![.., p_m..])
-        .assign(&node_logslope);
+        .assign(&node_slope);
 
     if !direct.iter().all(|v| v.is_finite()) || !node.iter().all(|v| v.is_finite()) {
         return Err("empirical score_zeta channels produced a non-finite sensitivity".to_string());

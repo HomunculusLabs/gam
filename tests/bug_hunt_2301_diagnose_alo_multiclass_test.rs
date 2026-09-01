@@ -231,7 +231,7 @@ fn leading_coordinate_design(
 /// Production saved-model ALO over the full fit.
 ///
 /// Marginal-slope routes through the exact CLI input builder (which also
-/// assembles the log-slope and latent-score channels). Transformation-normal
+/// assembles the slope and latent-score channels). Transformation-normal
 /// cannot: its predict input carries the response-scale conditional mean, not
 /// the covariate design ALO needs, so we assemble the covariate-design affine
 /// carrier here exactly as `gam diagnose --alo` does.
@@ -459,7 +459,7 @@ fn diagnose_alo_marginal_slope_matches_brute_force_loo_2301() {
         .arg(&full_csv)
         .arg(fit_formula)
         .args(["--z-column", "z"])
-        .args(["--logslope-formula", "1"])
+        .args(["--slope-formula", "1"])
         .arg("--out")
         .arg(&full_model);
     run_or_panic(fit, "gam fit Bernoulli marginal-slope (#2301 ALO numeric)");
@@ -488,7 +488,7 @@ fn diagnose_alo_marginal_slope_matches_brute_force_loo_2301() {
             .arg(&fold_csv)
             .arg(fit_formula)
             .args(["--z-column", "z"])
-            .args(["--logslope-formula", "1"])
+            .args(["--slope-formula", "1"])
             .arg("--out")
             .arg(&refit_model);
         run_or_panic(refit, "gam refit marginal-slope leave-one-out fold (#2301)");

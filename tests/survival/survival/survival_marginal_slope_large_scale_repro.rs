@@ -4,10 +4,10 @@
 //! the formulas
 //!     Surv(entry_age, exit_age, event) ~ duchon(PC1, PC2, PC3, centers=10, order=1)
 //!                                        + sex + linkwiggle()
-//!     logslope: duchon(PC1, PC2, PC3, centers=10, order=1) + linkwiggle()
+//!     slope: duchon(PC1, PC2, PC3, centers=10, order=1) + linkwiggle()
 //! stalled in "pilot ignored-error" after ~56 minutes. Under V-only the
 //! canonicalize gate failed closed because the duplicated duchon term
-//! across the marginal and log-slope formulas produced a multi-dimensional
+//! across the marginal and slope formulas produced a multi-dimensional
 //! null-space among shared-constant columns. Under V+M the joint design
 //! reduces correctly and the fit completes.
 //!
@@ -147,7 +147,7 @@ fn survival_marginal_slope_large_scale_repro_vm_exact_engages_and_converges() {
 
     let data = build_dataset();
 
-    // The duplicated duchon term across mean and log-slope formulas, plus
+    // The duplicated duchon term across mean and slope formulas, plus
     // a parametric `sex` term and a `linkwiggle()` deviation block,
     // recreates the original large-scale failure shape that overwhelmed the
     // V-only canonicalize path. centers=CENTERS keeps p_total small.
@@ -156,12 +156,12 @@ fn survival_marginal_slope_large_scale_repro_vm_exact_engages_and_converges() {
         "Surv(entry_age, exit_age, event) ~ {} + sex + linkwiggle()",
         duchon
     );
-    let logslope = format!("{} + linkwiggle()", duchon);
+    let slope = format!("{} + linkwiggle()", duchon);
 
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("prs".to_string()),
-        logslope_formula: Some(logslope),
+        slope_formula: Some(slope),
         baseline_target: "linear".to_string(),
         gpu_policy: if cfg!(target_os = "macos") {
             gam::gpu::GpuPolicy::Off
@@ -244,7 +244,7 @@ fn survival_marginal_slope_large_scale_repro_vm_exact_engages_and_converges() {
     // The compiled-map log reports per-channel drops; at least one block
     // must report a non-zero drop on this duplicated-duchon shape.
     let saw_drop = compiled_map_lines.iter().any(|line| {
-        // Log format: "drops time=N, marginal=M, logslope=P"
+        // Log format: "drops time=N, marginal=M, slope=P"
         if let Some(idx) = line.find("drops ") {
             let tail = &line[idx..];
             tail.chars().any(|c| matches!(c, '1'..='9'))
@@ -262,7 +262,7 @@ fn survival_marginal_slope_large_scale_repro_vm_exact_engages_and_converges() {
 
     // After lift, β block widths must match RAW design widths.
     let raw_marginal_width = result.marginal_design.design.ncols();
-    let raw_logslope_width = result.logslope_design.design.ncols();
+    let raw_slope_width = result.slope_design.design.ncols();
     let block_widths: Vec<usize> = result.fit.blocks.iter().map(|b| b.beta.len()).collect();
 
     assert!(
@@ -272,9 +272,9 @@ fn survival_marginal_slope_large_scale_repro_vm_exact_engages_and_converges() {
         block_widths
     );
     assert!(
-        block_widths.contains(&raw_logslope_width),
-        "no fitted block matches raw log-slope design width {}: widths={:?}",
-        raw_logslope_width,
+        block_widths.contains(&raw_slope_width),
+        "no fitted block matches raw slope design width {}: widths={:?}",
+        raw_slope_width,
         block_widths
     );
 

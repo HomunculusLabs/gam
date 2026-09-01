@@ -161,7 +161,7 @@ struct ArmSummary {
     /// index is not a stable contract but `∂(X_m β_m)/∂x` is.
     marginal_x_slope: f64,
     /// Weighted-mean fitted conditional slope on the latent score.
-    mean_logslope: f64,
+    mean_slope: f64,
     calibration: &'static str,
 }
 
@@ -181,20 +181,20 @@ fn slope_on_x(values: &Array1<f64>, x: &Array1<f64>) -> f64 {
 
 /// The fit shape both arms use. Smooth on both channels because the
 /// marginal-slope joint Newton is measurably better conditioned there: an
-/// intercept-only log-slope block leaves the joint Hessian with a rank-1 block
+/// intercept-only slope block leaves the joint Hessian with a rank-1 block
 /// whose null-space shrinkage direction is the whole block, and every candidate
 /// rho seed's inner solve then stalls at its cycle budget (measured on this very
 /// fixture before the shape was changed). The truth is linear in `x` and so lies
 /// inside both smooths' spans, which is what lets the projection below read it
 /// back without assuming a coefficient index.
 const MARGINAL_FORMULA: &str = "Surv(time, event) ~ smooth(x)";
-const LOGSLOPE_FORMULA: &str = "smooth(x)";
+const SLOPE_FORMULA: &str = "smooth(x)";
 
 fn fit_arm(fixture: &Fixture, z_column: &str) -> ArmSummary {
     let cfg = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some(z_column.to_string()),
-        logslope_formula: Some(LOGSLOPE_FORMULA.to_string()),
+        slope_formula: Some(SLOPE_FORMULA.to_string()),
         baseline_target: "linear".to_string(),
         ..FitConfig::default()
     };
@@ -206,10 +206,10 @@ fn fit_arm(fixture: &Fixture, z_column: &str) -> ArmSummary {
 
     let beta_marginal = &fit.fit.blocks[1].beta;
     let marginal_eta = fit.marginal_design.design.dot(beta_marginal);
-    let beta_logslope = &fit.fit.blocks[2].beta;
-    let logslope_eta = fit.logslope_design.design.dot(beta_logslope);
-    let mean_logslope = fit.baseline_slope
-        + logslope_eta.iter().sum::<f64>() / logslope_eta.len() as f64;
+    let beta_slope = &fit.fit.blocks[2].beta;
+    let slope_eta = fit.slope_design.design.dot(beta_slope);
+    let mean_slope = fit.baseline_slope
+        + slope_eta.iter().sum::<f64>() / slope_eta.len() as f64;
 
     let calibration = match fit
         .latent_z_calibrations
@@ -223,7 +223,7 @@ fn fit_arm(fixture: &Fixture, z_column: &str) -> ArmSummary {
 
     ArmSummary {
         marginal_x_slope: slope_on_x(&marginal_eta, &fixture.x),
-        mean_logslope,
+        mean_slope,
         calibration,
     }
 }
@@ -258,10 +258,10 @@ fn survival_marginal_slope_removes_the_conditional_latent_shift() {
          uncalibrated beta_x={uncalibrated:.4}",
         shifted.calibration,
         shifted.marginal_x_slope,
-        shifted.mean_logslope,
+        shifted.mean_slope,
         clean.calibration,
         clean.marginal_x_slope,
-        clean.mean_logslope,
+        clean.mean_slope,
     );
 
     // 1. The gate fires on the shifted axis and stays quiet on the clean one.
@@ -283,9 +283,9 @@ fn survival_marginal_slope_removes_the_conditional_latent_shift() {
             arm.marginal_x_slope
         );
         assert!(
-            (arm.mean_logslope - TRUE_SLOPE).abs() < 0.08,
+            (arm.mean_slope - TRUE_SLOPE).abs() < 0.08,
             "{label} arm must recover the conditional slope {TRUE_SLOPE}; got {:.4}",
-            arm.mean_logslope
+            arm.mean_slope
         );
     }
 

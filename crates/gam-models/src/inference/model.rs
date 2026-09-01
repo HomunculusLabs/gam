@@ -423,9 +423,9 @@ pub struct FittedModelPayload {
     #[serde(default)]
     pub formula_noise: Option<String>,
     #[serde(default)]
-    pub formula_logslope: Option<String>,
+    pub slope_formula: Option<String>,
     #[serde(default)]
-    pub formula_logslopes: Option<Vec<String>>,
+    pub slope_formulas: Option<Vec<String>>,
     #[serde(default)]
     pub offset_column: Option<String>,
     #[serde(default)]
@@ -517,20 +517,20 @@ pub struct FittedModelPayload {
     #[serde(default)]
     pub marginal_baseline: Option<f64>,
     #[serde(default)]
-    pub logslope_baseline: Option<f64>,
+    pub baseline_slope: Option<f64>,
     #[serde(default)]
-    pub logslope_baselines: Option<Vec<f64>>,
-    /// Resolved follow-up time margin of the survival marginal-slope log-slope
+    pub baseline_slopes: Option<Vec<f64>>,
+    /// Resolved follow-up time margin of the survival marginal-slope slope
     /// block (gam#2765, gam#2767). `None` is the time-constant slope every model
     /// saved before this existed carries.
     ///
     /// With a margin present the fitted block's design is `X_cov ⊗ᵣ B(log t)`
-    /// while `resolved_termspec_logslope` still names only the covariate factor,
+    /// while `resolved_slopespec` still names only the covariate factor,
     /// so prediction MUST rebuild the tensor product against these knots. They
     /// are fit-time values, never prediction-time estimates — the same contract
     /// `threshold_time_basis` / `log_sigma_time_basis` hold for location-scale.
     #[serde(default)]
-    pub logslope_time_basis: Option<SurvivalCovariateTimeBasis>,
+    pub slope_time_basis: Option<SurvivalCovariateTimeBasis>,
     #[serde(default)]
     pub score_warp_runtime: Option<SavedCompiledFlexBlock>,
     #[serde(default)]
@@ -670,9 +670,9 @@ pub struct FittedModelPayload {
     #[serde(default)]
     pub resolved_termspec_noise: Option<TermCollectionSpec>,
     #[serde(default)]
-    pub resolved_termspec_logslope: Option<TermCollectionSpec>,
+    pub resolved_slopespec: Option<TermCollectionSpec>,
     #[serde(default)]
-    pub resolved_termspec_logslopes: Option<Vec<TermCollectionSpec>>,
+    pub resolved_slopespecs: Option<Vec<TermCollectionSpec>>,
     #[serde(default)]
     pub adaptive_regularization_diagnostics: Option<AdaptiveRegularizationDiagnostics>,
     /// Precomputed exact Gaussian-identity jackknife+ statistics (#942).
@@ -871,8 +871,8 @@ impl FittedModelPayload {
             mixture_link_param_covariance: None,
             sas_param_covariance: None,
             formula_noise: None,
-            formula_logslope: None,
-            formula_logslopes: None,
+            slope_formula: None,
+            slope_formulas: None,
             offset_column: None,
             noise_offset_column: None,
             weight_column: None,
@@ -902,9 +902,9 @@ impl FittedModelPayload {
             latent_z_rank_int_calibration: None,
             latent_z_conditional_calibration: None,
             marginal_baseline: None,
-            logslope_baseline: None,
-            logslope_baselines: None,
-            logslope_time_basis: None,
+            baseline_slope: None,
+            baseline_slopes: None,
+            slope_time_basis: None,
             score_warp_runtime: None,
             link_deviation_runtime: None,
             influence_absorber_width: None,
@@ -948,8 +948,8 @@ impl FittedModelPayload {
             transformation_score_calibration: None,
             resolved_termspec: None,
             resolved_termspec_noise: None,
-            resolved_termspec_logslope: None,
-            resolved_termspec_logslopes: None,
+            resolved_slopespec: None,
+            resolved_slopespecs: None,
             adaptive_regularization_diagnostics: None,
             gaussian_jackknife_plus: None,
             full_conformal: None,
@@ -1553,7 +1553,7 @@ fn validate_marginal_slope_saved_fit(
         fit_label,
         "bernoulli",
         2,
-        "marginal, logslope",
+        "marginal, slope",
         None,
     )
 }
@@ -1581,7 +1581,7 @@ fn validate_survival_marginal_slope_saved_fit(
 /// inputs are the family kind string ("bernoulli" / "survival"), the base
 /// block count (2 for bernoulli, 3 for survival — the survival path has an
 /// extra time block), and the base-block role list rendered in the error
-/// message ("marginal, logslope" / "time, marginal, slope"). The score-warp
+/// message ("marginal, slope" / "time, marginal, slope"). The score-warp
 /// / link-deviation tail follows the same shape in both families.
 fn validate_marginal_slope_saved_fit_impl(
     fit: &UnifiedFitResult,
@@ -1685,23 +1685,23 @@ fn validate_survival_marginal_slope_replay_state(
             ),
         });
     }
-    // gam#2765 / gam#2767: with a follow-up margin the log-slope block's design
+    // gam#2765 / gam#2767: with a follow-up margin the slope block's design
     // is `X_cov ⊗ᵣ B(log t)`, so its coefficient count is `p_cov · p_time` and
     // must be divisible by the saved margin's width. A model whose block width
     // is not a multiple of its own margin cannot be replayed under ANY covariate
     // design, so this is a corrupt-payload check, not a compatibility one — and
     // catching it here is what stops the predictor from silently reshaping a
     // coefficient vector against the wrong factorization.
-    if let Some(basis) = payload.logslope_time_basis.as_ref() {
+    if let Some(basis) = payload.slope_time_basis.as_ref() {
         let width = validate_survival_covariate_time_basis(
             basis,
-            &format!("survival marginal-slope {fit_label} log-slope time basis"),
+            &format!("survival marginal-slope {fit_label} slope time basis"),
         )?;
-        let p_logslope = fit.blocks[2].beta.len();
-        if width == 0 || p_logslope % width != 0 {
+        let p_slope = fit.blocks[2].beta.len();
+        if width == 0 || p_slope % width != 0 {
             return Err(FittedModelError::SchemaMismatch {
                 reason: format!(
-                    "survival marginal-slope saved {fit_label} log-slope width {p_logslope} is not divisible by its saved time-margin width {width}"
+                    "survival marginal-slope saved {fit_label} slope width {p_slope} is not divisible by its saved time-margin width {width}"
                 ),
             });
         }
@@ -2534,7 +2534,7 @@ impl SavedCompiledFlexBlock {
     ///
     /// `n_anchor_rows` is the n × d matrix of stacked parametric anchor
     /// rows at the prediction rows (concatenation of the marginal and
-    /// logslope design rows in component order). Returns `None` when the
+    /// slope design rows in component order). Returns `None` when the
     /// runtime has no anchor residual (zero-cost path).
     pub fn anchor_correction_matrix(
         &self,
@@ -2897,13 +2897,13 @@ impl FittedModel {
         let mut specs: Vec<&TermCollectionSpec> = [
             self.resolved_termspec.as_ref(),
             self.resolved_termspec_noise.as_ref(),
-            self.resolved_termspec_logslope.as_ref(),
+            self.resolved_slopespec.as_ref(),
         ]
         .into_iter()
         .flatten()
         .collect();
-        if let Some(logslopes) = self.resolved_termspec_logslopes.as_ref() {
-            specs.extend(logslopes.iter());
+        if let Some(slopes) = self.resolved_slopespecs.as_ref() {
+            specs.extend(slopes.iter());
         }
         specs
     }
@@ -2982,7 +2982,7 @@ impl FittedModel {
     }
 
     /// Collect the set of training-column indices that feed a parametric/linear
-    /// term — on *any* modelled surface (mean, noise/scale, log-slope). A
+    /// term — on *any* modelled surface (mean, noise/scale, slope). A
     /// linear term realises the design column `∏ feature_cols` and contributes
     /// `β·(that product)` to the linear predictor, so its inputs must be allowed
     /// to take any real value at predict time: clamping them to the training
@@ -3027,7 +3027,7 @@ impl FittedModel {
 
     /// Collect the set of training-column indices that feed a non-parametric
     /// smooth whose basis performs its own *bounded* extrapolation outside the
-    /// training hull — on any modelled surface (mean, noise/scale, log-slope).
+    /// training hull — on any modelled surface (mean, noise/scale, slope).
     ///
     /// These columns must be exempt from the predict-time axis clip for the same
     /// reason periodic/linear/random-effect axes are: the clip clamps a new value
@@ -3355,7 +3355,7 @@ impl FittedModel {
     /// Every variable named by the main formula (features, interaction margins,
     /// random-effect groups, and a smooth's `by=` column), the survival
     /// entry/exit columns or the transformation-normal response, the auxiliary
-    /// noise / logslope formula columns, and the offset / noise-offset /
+    /// noise / slope formula columns, and the offset / noise-offset /
     /// latent-`z` columns. The event-indicator and the plain response of a
     /// standard model are deliberately excluded: they are not needed to *form*
     /// a prediction (the conformal-calibration fold layers the response back on
@@ -3416,11 +3416,11 @@ impl FittedModel {
                 parsed.response.as_str(),
             )?;
         }
-        if let Some(logslope_formula) = payload.formula_logslope.as_ref() {
-            if logslope_formula != "same-as-main" {
+        if let Some(slope_formula) = payload.slope_formula.as_ref() {
+            if slope_formula != "same-as-main" {
                 self.add_auxiliary_formula_columns(
                     &mut required,
-                    logslope_formula,
+                    slope_formula,
                     parsed.response.as_str(),
                 )?;
             }
@@ -3499,7 +3499,7 @@ impl FittedModel {
         Ok(extras)
     }
 
-    /// Add the columns referenced by an auxiliary (noise / logslope) formula,
+    /// Add the columns referenced by an auxiliary (noise / slope) formula,
     /// which may be supplied as a full `lhs ~ rhs` formula or as a bare RHS.
     fn add_auxiliary_formula_columns(
         &self,
@@ -5035,9 +5035,9 @@ impl FittedModel {
             }
         }
         if matches!(self.family_state, FittedFamily::MarginalSlope { .. }) {
-            if self.formula_logslope.is_none() {
+            if self.slope_formula.is_none() {
                 return Err(FittedModelError::MissingField {
-                    reason: "marginal-slope model is missing formula_logslope; refit".to_string(),
+                    reason: "marginal-slope model is missing slope_formula; refit".to_string(),
                 });
             }
             if self.z_column.is_none() {
@@ -5061,14 +5061,14 @@ impl FittedModel {
             latent_measure
                 .validate("marginal-slope model latent_measure")
                 .map_err(|reason| FittedModelError::PayloadCorrupt { reason })?;
-            if self.marginal_baseline.is_none() || self.logslope_baseline.is_none() {
+            if self.marginal_baseline.is_none() || self.baseline_slope.is_none() {
                 return Err(FittedModelError::MissingField {
                     reason: "marginal-slope model is missing baseline offsets; refit".to_string(),
                 });
             }
-            if self.resolved_termspec_logslope.as_ref().is_none() {
+            if self.resolved_slopespec.as_ref().is_none() {
                 return Err(FittedModelError::MissingField {
-                    reason: "marginal-slope model is missing resolved_termspec_logslope for the logslope surface"
+                    reason: "marginal-slope model is missing resolved_slopespec for the slope surface"
                         .to_string(),
                 });
             }
@@ -5116,9 +5116,9 @@ impl FittedModel {
                 });
             }
             if survival_likelihood.as_deref() == Some("marginal-slope") {
-                if self.formula_logslope.is_none() {
+                if self.slope_formula.is_none() {
                     return Err(FittedModelError::MissingField {
-                        reason: "survival marginal-slope model is missing formula_logslope; refit"
+                        reason: "survival marginal-slope model is missing slope_formula; refit"
                             .to_string(),
                     });
                 }
@@ -5149,15 +5149,15 @@ impl FittedModel {
                 latent_measure
                     .validate("survival marginal-slope model latent_measure")
                     .map_err(|reason| FittedModelError::PayloadCorrupt { reason })?;
-                if self.logslope_baseline.is_none() {
+                if self.baseline_slope.is_none() {
                     return Err(FittedModelError::MissingField {
-                        reason: "survival marginal-slope model is missing logslope_baseline; refit"
+                        reason: "survival marginal-slope model is missing baseline_slope; refit"
                             .to_string(),
                     });
                 }
-                if self.resolved_termspec_logslope.as_ref().is_none() {
+                if self.resolved_slopespec.as_ref().is_none() {
                     return Err(FittedModelError::MissingField {
-                        reason: "survival marginal-slope model is missing resolved_termspec_logslope for the logslope surface"
+                        reason: "survival marginal-slope model is missing resolved_slopespec for the slope surface"
                             .to_string(),
                     });
                 }
@@ -6343,13 +6343,13 @@ mod tests {
         });
         payload.set_training_feature_metadata(vec!["z".to_string()], vec![(0.0, 0.0)]);
         payload.resolved_termspec = Some(empty_termspec());
-        payload.resolved_termspec_logslope = Some(empty_termspec());
-        payload.formula_logslope = Some("1".to_string());
+        payload.resolved_slopespec = Some(empty_termspec());
+        payload.slope_formula = Some("1".to_string());
         payload.z_column = Some("z".to_string());
         payload.latent_z_normalization = Some(SavedLatentZNormalization { mean: 0.0, sd: 1.0 });
         payload.latent_measure = Some(LatentMeasureKind::StandardNormal);
         payload.marginal_baseline = Some(0.0);
-        payload.logslope_baseline = Some(0.0);
+        payload.baseline_slope = Some(0.0);
         payload.link = Some(InverseLink::Standard(StandardLink::Probit));
         payload
     }
@@ -6406,12 +6406,12 @@ mod tests {
         });
         payload.set_training_feature_metadata(vec!["z".to_string()], vec![(0.0, 0.0)]);
         payload.resolved_termspec = Some(empty_termspec());
-        payload.resolved_termspec_logslope = Some(empty_termspec());
-        payload.formula_logslope = Some("1".to_string());
+        payload.resolved_slopespec = Some(empty_termspec());
+        payload.slope_formula = Some("1".to_string());
         payload.z_column = Some("z".to_string());
         payload.latent_z_normalization = Some(SavedLatentZNormalization { mean: 0.0, sd: 1.0 });
         payload.survival_marginal_slope_score_covariance = Some(vec![vec![1.0]]);
-        payload.logslope_baseline = Some(0.0);
+        payload.baseline_slope = Some(0.0);
         payload.link = Some(InverseLink::Standard(StandardLink::Probit));
         payload
     }

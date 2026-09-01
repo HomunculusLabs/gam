@@ -154,7 +154,7 @@ fn fit_arm(fixture: &Fixture, z_column: &str) -> Arm {
     let cfg = FitConfig {
         family: Some("bernoulli-marginal-slope".to_string()),
         z_column: Some(z_column.to_string()),
-        logslope_formula: Some("1".to_string()),
+        slope_formula: Some("1".to_string()),
         ..FitConfig::default()
     };
     let result = fit_from_formula("y ~ x", &fixture.dataset, &cfg)
@@ -163,9 +163,9 @@ fn fit_arm(fixture: &Fixture, z_column: &str) -> Arm {
         panic!("expected a BernoulliMarginalSlope fit for z_column={z_column}");
     };
     let marginal_eta = fit.marginal_design.design.dot(&fit.fit.blocks[0].beta);
-    let logslope_eta = fit.logslope_design.design.dot(&fit.fit.blocks[1].beta);
+    let slope_eta = fit.slope_design.design.dot(&fit.fit.blocks[1].beta);
     let mean_slope =
-        fit.baseline_logslope + logslope_eta.iter().sum::<f64>() / logslope_eta.len() as f64;
+        fit.baseline_slope + slope_eta.iter().sum::<f64>() / slope_eta.len() as f64;
     let calibration = match (
         fit.latent_z_conditional_calibration.as_ref(),
         fit.latent_z_rank_int_calibration.as_ref(),

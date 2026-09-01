@@ -4661,10 +4661,10 @@ fn set_single_term_spatial_aniso_log_scales(
 /// realized auto value with no outer REML enrollment.
 ///
 /// Used by COUPLED-block families (bernoulli marginal-slope: a shared mjs
-/// surface feeds both the marginal mean and the log-slope). In that coupling a
+/// surface feeds both the marginal mean and the slope). In that coupling a
 /// design-moving kernel-scale dial on the shared covariates is an
 /// identifiability hazard: the outer search can reach a sharp ℓ at which a
-/// marginal smooth direction trades off against the log-slope into a
+/// marginal smooth direction trades off against the slope into a
 /// separation-scale runaway (#1116). A single Gaussian surface has no such
 /// coupling and keeps ℓ learnable. Returns the number of terms frozen.
 /// The signed sectional curvature κ of a constant-curvature smooth at

@@ -8,7 +8,7 @@ use super::*;
 /// Which coefficient sub-block a psi row lives in.
 ///
 /// `SurvivalMarginalSlopeFamily::psi_block_info` resolves a psi index to
-/// spatial block 1 (marginal) or 2 (logslope) and rejects everything else, so
+/// spatial block 1 (marginal) or 2 (slope) and rejects everything else, so
 /// the accumulator only ever sees those two. Carrying that fact as a
 /// two-variant type lets the rank-1 routines match exhaustively — a new
 /// spatial block forces every scatter site to be revisited instead of silently
@@ -16,7 +16,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PsiBlock {
     Marginal,
-    Logslope,
+    Slope,
 }
 
 impl PsiBlock {
@@ -24,10 +24,10 @@ impl PsiBlock {
     pub(crate) fn from_index(block_idx: usize) -> Result<Self, String> {
         match block_idx {
             1 => Ok(Self::Marginal),
-            2 => Ok(Self::Logslope),
+            2 => Ok(Self::Slope),
             other => Err(format!(
                 "survival marginal-slope psi Hessian: spatial block {other} has no psi \
-                 coefficient sub-block (expected 1 = marginal or 2 = logslope)"
+                 coefficient sub-block (expected 1 = marginal or 2 = slope)"
             )),
         }
     }
@@ -54,7 +54,7 @@ pub(crate) struct BlockHessianAccumulator {
     pub(crate) h_mi: Array2<f64>,
     pub(crate) h_gh: Array2<f64>,
     pub(crate) h_gw: Array2<f64>,
-    /// logslope × influence cross-block.
+    /// slope × influence cross-block.
     pub(crate) h_gi: Array2<f64>,
     pub(crate) h_hw: Array2<f64>,
     /// score_warp × influence cross-block.
@@ -214,9 +214,9 @@ impl BlockHessianAccumulator {
             .syr_row_into(row, mm_weight, &mut self.h_mm)
             .map_err(|e| format!("add_pullback marginal syr_row_into: {e}"))?;
 
-        // Logslope×logslope: one rank-1 per follow-up channel pair (exactly one
+        // Slope×slope: one rank-1 per follow-up channel pair (exactly one
         // pair when the slope is time-constant).
-        let slope_channels = family.logslope_layout.primary_channels();
+        let slope_channels = family.slope_layout.primary_channels();
         let slope_designs = slope_channels.as_slice();
         for &(left_primary, left_design) in slope_designs {
             for &(right_primary, right_design) in slope_designs {
@@ -227,15 +227,15 @@ impl BlockHessianAccumulator {
                 if left_primary == right_primary {
                     left_design
                         .syr_row_into(row, weight, &mut self.h_gg)
-                        .map_err(|e| format!("add_pullback logslope syr_row_into: {e}"))?;
+                        .map_err(|e| format!("add_pullback slope syr_row_into: {e}"))?;
                     continue;
                 }
                 let left_chunk = left_design
                     .try_row_chunk(row..row + 1)
-                    .map_err(|e| format!("add_pullback logslope try_row_chunk: {e}"))?;
+                    .map_err(|e| format!("add_pullback slope try_row_chunk: {e}"))?;
                 let right_chunk = right_design
                     .try_row_chunk(row..row + 1)
-                    .map_err(|e| format!("add_pullback logslope try_row_chunk: {e}"))?;
+                    .map_err(|e| format!("add_pullback slope try_row_chunk: {e}"))?;
                 ndarray::linalg::general_mat_mul(
                     weight,
                     &left_chunk.row(0).view().insert_axis(Axis(1)),
@@ -247,7 +247,7 @@ impl BlockHessianAccumulator {
         }
 
         for &(slope_primary, slope_design) in slope_designs {
-        // Marginal×logslope cross-block
+        // Marginal×slope cross-block
         let mg_weight =
             primary_hessian[[0, slope_primary]] + primary_hessian[[1, slope_primary]];
         if mg_weight != 0.0 {
@@ -258,7 +258,7 @@ impl BlockHessianAccumulator {
             let m_row = m_chunk.row(0);
             let g_chunk = slope_design
                 .try_row_chunk(row..row + 1)
-                .map_err(|e| format!("add_pullback logslope_design try_row_chunk: {e}"))?;
+                .map_err(|e| format!("add_pullback slope_design try_row_chunk: {e}"))?;
             let g_row = g_chunk.row(0);
             ndarray::linalg::general_mat_mul(
                 mg_weight,
@@ -269,7 +269,7 @@ impl BlockHessianAccumulator {
             );
         }
 
-        // Time×logslope cross-block
+        // Time×slope cross-block
         let tg_weights = [
             primary_hessian[[0, slope_primary]],
             primary_hessian[[1, slope_primary]],
@@ -277,7 +277,7 @@ impl BlockHessianAccumulator {
         ];
         let g_chunk = slope_design
             .try_row_chunk(row..row + 1)
-            .map_err(|e| format!("add_pullback logslope_design try_row_chunk: {e}"))?;
+            .map_err(|e| format!("add_pullback slope_design try_row_chunk: {e}"))?;
         let g_row = g_chunk.row(0);
         for (des, alpha) in time_designs.iter().zip(tg_weights.iter()) {
             if *alpha == 0.0 {
@@ -362,10 +362,10 @@ impl BlockHessianAccumulator {
                 let gh_weight = primary_hessian[[3, idx]];
                 if gh_weight != 0.0 {
                     let g_chunk = family
-                        .logslope_layout
+                        .slope_layout
                         .coefficient_design()
                         .try_row_chunk(row..row + 1)
-                        .map_err(|e| format!("add_pullback logslope_design try_row_chunk: {e}"))?;
+                        .map_err(|e| format!("add_pullback slope_design try_row_chunk: {e}"))?;
                     let g_row = g_chunk.row(0);
                     for coeff_idx in 0..g_row.len() {
                         self.h_gh[[coeff_idx, local_idx]] += gh_weight * g_row[coeff_idx];
@@ -417,10 +417,10 @@ impl BlockHessianAccumulator {
                 let gw_weight = primary_hessian[[3, idx]];
                 if gw_weight != 0.0 {
                     let g_chunk = family
-                        .logslope_layout
+                        .slope_layout
                         .coefficient_design()
                         .try_row_chunk(row..row + 1)
-                        .map_err(|e| format!("add_pullback logslope_design try_row_chunk: {e}"))?;
+                        .map_err(|e| format!("add_pullback slope_design try_row_chunk: {e}"))?;
                     let g_row = g_chunk.row(0);
                     for coeff_idx in 0..g_row.len() {
                         self.h_gw[[coeff_idx, local_idx]] += gw_weight * g_row[coeff_idx];
@@ -448,11 +448,11 @@ impl BlockHessianAccumulator {
         // Absorbed-influence block (#461). The absorber contributes a single
         // primary scalar `o_infl` at index `primary.infl`, whose design row is
         // `Z̃_infl[row,:]` (the residualized leakage columns). It projects exactly
-        // like the single-scalar logslope `g` index (primary 3 → logslope_design)
+        // like the single-scalar slope `g` index (primary 3 → slope_design)
         // but through `Z̃` and crossed with every block, plus the diagonal
         // `h_ii = primary_hessian[[infl, infl]]·Z̃Z̃ᵀ`. `o_infl` is an additive η₁
         // shift (∂η₁/∂o_infl = 1), so the per-block primary weights mirror the
-        // existing channels: time uses {q0,q1,qd1}, marginal {q0,q1}, logslope
+        // existing channels: time uses {q0,q1,qd1}, marginal {q0,q1}, slope
         // {g}, score_warp/link_dev their own primary ranges.
         if let Some(infl_idx) = primary.infl {
             let z_tilde = family.influence_absorber.as_ref().ok_or_else(|| {
@@ -511,14 +511,14 @@ impl BlockHessianAccumulator {
                 }
             }
 
-            // Logslope × influence (logslope uses g, primary index 3).
+            // Slope × influence (slope uses g, primary index 3).
             let gi_weight = primary_hessian[[3, infl_idx]];
             if gi_weight != 0.0 {
                 let g_chunk = family
-                    .logslope_layout
+                    .slope_layout
                     .coefficient_design()
                     .try_row_chunk(row..row + 1)
-                    .map_err(|e| format!("add_pullback logslope_design try_row_chunk: {e}"))?;
+                    .map_err(|e| format!("add_pullback slope_design try_row_chunk: {e}"))?;
                 let g_row = g_chunk.row(0);
                 for (g_coeff, &g_val) in g_row.iter().enumerate() {
                     for i_coeff in 0..p_i {
@@ -571,7 +571,7 @@ impl BlockHessianAccumulator {
         // right_primary components mapped to blocks:
         // time:     entry*rp[0] + exit*rp[1] + deriv*rp[2]
         // marginal: marginal*(rp[0] + rp[1])
-        // logslope: logslope*rp[3]
+        // slope: slope*rp[3]
         let psi_block = PsiBlock::from_index(psi_block_idx)?;
         let psi_col = psi_row.view().insert_axis(Axis(1));
 
@@ -592,12 +592,12 @@ impl BlockHessianAccumulator {
             let t_row = t_chunk.row(0);
             let t_col = t_row.view().insert_axis(Axis(1));
             // psi=marginal: (time, marginal) block = h_tm
-            // psi=logslope: (time, logslope) block = h_tg
+            // psi=slope: (time, slope) block = h_tg
             // right⊗left: right_time ⊗ psi_row → the cross block.
             // left⊗right: psi_row ⊗ right_time → its transpose (by symmetry).
             let target = match psi_block {
                 PsiBlock::Marginal => &mut self.h_tm,
-                PsiBlock::Logslope => &mut self.h_tg,
+                PsiBlock::Slope => &mut self.h_tg,
             };
             ndarray::linalg::general_mat_mul(
                 *alpha,
@@ -634,10 +634,10 @@ impl BlockHessianAccumulator {
                         &mut self.h_mm,
                     );
                 }
-                PsiBlock::Logslope => {
-                    // psi=logslope: (marginal, logslope) block = h_mg
-                    // left⊗right: psi_row(logslope) ⊗ m_row → goes to h_mg^T
-                    // right⊗left: m_row ⊗ psi_row(logslope) → goes to h_mg
+                PsiBlock::Slope => {
+                    // psi=slope: (marginal, slope) block = h_mg
+                    // left⊗right: psi_row(slope) ⊗ m_row → goes to h_mg^T
+                    // right⊗left: m_row ⊗ psi_row(slope) → goes to h_mg
                     ndarray::linalg::general_mat_mul(
                         m_alpha,
                         &m_row.view().insert_axis(Axis(1)),
@@ -649,21 +649,21 @@ impl BlockHessianAccumulator {
             }
         }
 
-        // Block (psi, logslope) or (logslope, psi), once per follow-up channel.
+        // Block (psi, slope) or (slope, psi), once per follow-up channel.
         // A single `right_primary[3]` against `coefficient_design()` dropped the
         // `g₁`/`ġ₁` cross terms on a varying slope (#2765).
-        let slope_channels = family.logslope_layout.primary_channels();
+        let slope_channels = family.slope_layout.primary_channels();
         for &(slope_primary, slope_design) in slope_channels.as_slice() {
             if right_primary[slope_primary] == 0.0 {
                 continue;
             }
             let g_chunk = slope_design
                 .try_row_chunk(row..row + 1)
-                .map_err(|e| format!("add_rank1_psi_cross logslope_design try_row_chunk: {e}"))?;
+                .map_err(|e| format!("add_rank1_psi_cross slope_design try_row_chunk: {e}"))?;
             let g_row = g_chunk.row(0);
             match psi_block {
                 PsiBlock::Marginal => {
-                    // psi=marginal: (marginal, logslope) = h_mg
+                    // psi=marginal: (marginal, slope) = h_mg
                     ndarray::linalg::general_mat_mul(
                         right_primary[slope_primary],
                         &psi_col,
@@ -672,8 +672,8 @@ impl BlockHessianAccumulator {
                         &mut self.h_mg,
                     );
                 }
-                PsiBlock::Logslope => {
-                    // psi=logslope: (logslope, logslope) = h_gg, symmetric rank-2
+                PsiBlock::Slope => {
+                    // psi=slope: (slope, slope) = h_gg, symmetric rank-2
                     ndarray::linalg::general_mat_mul(
                         right_primary[slope_primary],
                         &psi_col,
@@ -701,7 +701,7 @@ impl BlockHessianAccumulator {
                 }
                 let target = match psi_block {
                     PsiBlock::Marginal => &mut self.h_mh,
-                    PsiBlock::Logslope => &mut self.h_gh,
+                    PsiBlock::Slope => &mut self.h_gh,
                 };
                 for coeff_idx in 0..psi_row.len() {
                     target[[coeff_idx, local_idx]] += alpha * psi_row[coeff_idx];
@@ -716,7 +716,7 @@ impl BlockHessianAccumulator {
                 }
                 let target = match psi_block {
                     PsiBlock::Marginal => &mut self.h_mw,
-                    PsiBlock::Logslope => &mut self.h_gw,
+                    PsiBlock::Slope => &mut self.h_gw,
                 };
                 for coeff_idx in 0..psi_row.len() {
                     target[[coeff_idx, local_idx]] += alpha * psi_row[coeff_idx];
@@ -732,7 +732,7 @@ impl BlockHessianAccumulator {
     /// The full p×p symmetric Hessian has blocks:
     ///   (block_i, block_j) += α · psi_row_i ⊗ psi_row_j
     ///   (block_j, block_i) += α · psi_row_j ⊗ psi_row_i   (= transpose)
-    /// Our off-diagonal storage convention (h_mg = marginal×logslope) handles
+    /// Our off-diagonal storage convention (h_mg = marginal×slope) handles
     /// the transpose automatically in to_dense/operator assembly.
     pub(crate) fn add_psi_psi_outer(
         &mut self,
@@ -772,30 +772,30 @@ impl BlockHessianAccumulator {
         match (row, col) {
             (Time, Time) => self.h_tt.view(),
             (Marginal, Marginal) => self.h_mm.view(),
-            (Logslope, Logslope) => self.h_gg.view(),
+            (Slope, Slope) => self.h_gg.view(),
             (ScoreWarp, ScoreWarp) => self.h_hh.view(),
             (LinkDev, LinkDev) => self.h_ww.view(),
 
             (Time, Marginal) => self.h_tm.view(),
             (Marginal, Time) => self.h_tm.t(),
-            (Time, Logslope) => self.h_tg.view(),
-            (Logslope, Time) => self.h_tg.t(),
+            (Time, Slope) => self.h_tg.view(),
+            (Slope, Time) => self.h_tg.t(),
             (Time, ScoreWarp) => self.h_th.view(),
             (ScoreWarp, Time) => self.h_th.t(),
             (Time, LinkDev) => self.h_tw.view(),
             (LinkDev, Time) => self.h_tw.t(),
 
-            (Marginal, Logslope) => self.h_mg.view(),
-            (Logslope, Marginal) => self.h_mg.t(),
+            (Marginal, Slope) => self.h_mg.view(),
+            (Slope, Marginal) => self.h_mg.t(),
             (Marginal, ScoreWarp) => self.h_mh.view(),
             (ScoreWarp, Marginal) => self.h_mh.t(),
             (Marginal, LinkDev) => self.h_mw.view(),
             (LinkDev, Marginal) => self.h_mw.t(),
 
-            (Logslope, ScoreWarp) => self.h_gh.view(),
-            (ScoreWarp, Logslope) => self.h_gh.t(),
-            (Logslope, LinkDev) => self.h_gw.view(),
-            (LinkDev, Logslope) => self.h_gw.t(),
+            (Slope, ScoreWarp) => self.h_gh.view(),
+            (ScoreWarp, Slope) => self.h_gh.t(),
+            (Slope, LinkDev) => self.h_gw.view(),
+            (LinkDev, Slope) => self.h_gw.t(),
 
             (ScoreWarp, LinkDev) => self.h_hw.view(),
             (LinkDev, ScoreWarp) => self.h_hw.t(),
@@ -805,8 +805,8 @@ impl BlockHessianAccumulator {
             (Influence, Time) => self.h_ti.t(),
             (Marginal, Influence) => self.h_mi.view(),
             (Influence, Marginal) => self.h_mi.t(),
-            (Logslope, Influence) => self.h_gi.view(),
-            (Influence, Logslope) => self.h_gi.t(),
+            (Slope, Influence) => self.h_gi.view(),
+            (Influence, Slope) => self.h_gi.t(),
             (ScoreWarp, Influence) => self.h_hi.view(),
             (Influence, ScoreWarp) => self.h_hi.t(),
             (LinkDev, Influence) => self.h_wi.view(),
@@ -971,13 +971,13 @@ impl BlockHessianAccumulator {
                 self.h_mm[[a, b]] += v;
             }
         }
-        // Logslope×logslope: one rank-1 per follow-up channel PAIR (exactly one
+        // Slope×slope: one rank-1 per follow-up channel PAIR (exactly one
         // pair when the slope is time-constant). `ph[[3, 3]]` against
         // `coefficient_design()` alone dropped the `g₁`/`ġ₁` rows and columns of
         // `∂H/∂ψ` entirely on a varying slope — the same omission `add_pullback`
         // was repaired for in `c9ad097f1`, on the q-geometry sibling it did not
         // reach (#2765).
-        let slope_channels = family.logslope_layout.primary_channels();
+        let slope_channels = family.slope_layout.primary_channels();
         let slope_designs = slope_channels.as_slice();
         for &(left_primary, left_design) in slope_designs {
             for &(right_primary, right_design) in slope_designs {
@@ -992,10 +992,10 @@ impl BlockHessianAccumulator {
                     continue;
                 }
                 let left_chunk = left_design.try_row_chunk(row..row + 1).map_err(|e| {
-                    format!("add_pullback_with_q_geometry logslope try_row_chunk: {e}")
+                    format!("add_pullback_with_q_geometry slope try_row_chunk: {e}")
                 })?;
                 let right_chunk = right_design.try_row_chunk(row..row + 1).map_err(|e| {
-                    format!("add_pullback_with_q_geometry logslope try_row_chunk: {e}")
+                    format!("add_pullback_with_q_geometry slope try_row_chunk: {e}")
                 })?;
                 ndarray::linalg::general_mat_mul(
                     weight,
@@ -1020,11 +1020,11 @@ impl BlockHessianAccumulator {
                 self.h_tm[[a, b]] += v;
             }
         }
-        // Time×logslope and marginal×logslope: once per follow-up channel, each
+        // Time×slope and marginal×slope: once per follow-up channel, each
         // against its OWN design row (#2765).
         for &(slope_primary, slope_design) in slope_designs {
             let gc = slope_design.try_row_chunk(row..row + 1).map_err(|e| {
-                format!("add_pullback_with_q_geometry logslope try_row_chunk: {e}")
+                format!("add_pullback_with_q_geometry slope try_row_chunk: {e}")
             })?;
             let gr = gc.row(0);
             for a in 0..pt {
@@ -1056,10 +1056,10 @@ impl BlockHessianAccumulator {
         // runs. Binding it to a name keeps that assumption readable rather than
         // implicit in an index.
         let gc = family
-            .logslope_layout
+            .slope_layout
             .coefficient_design()
             .try_row_chunk(row..row + 1)
-            .map_err(|e| format!("add_pullback_with_q_geometry logslope try_row_chunk: {e}"))?;
+            .map_err(|e| format!("add_pullback_with_q_geometry slope try_row_chunk: {e}"))?;
         let gr = gc.row(0);
         let pl = flex_primary_slices(family);
         if let Some(hr) = pl.h.as_ref() {
@@ -1147,10 +1147,10 @@ impl BlockHessianAccumulator {
         // guard against a future caller rather than a reachable branch — but an
         // unguarded index here would silently assemble the Hessian of a
         // different model (gam#2765).
-        if family.logslope_layout.is_follow_up_varying() {
+        if family.slope_layout.is_follow_up_varying() {
             return Err(
                 "the flex / time-wiggle pullback assembler does not carry a \
-                 follow-up-varying log-slope's three primary channels"
+                 follow-up-varying slope's three primary channels"
                     .to_string(),
             );
         }
@@ -1199,10 +1199,10 @@ impl BlockHessianAccumulator {
             }
         }
         let gc = family
-            .logslope_layout
+            .slope_layout
             .coefficient_design()
             .try_row_chunk(row..row + 1)
-            .map_err(|e| format!("add_timewiggle_psi_u_cross logslope try_row_chunk: {e}"))?;
+            .map_err(|e| format!("add_timewiggle_psi_u_cross slope try_row_chunk: {e}"))?;
         let gr = gc.row(0);
         for a in 0..pt {
             let mut wt = 0.0;
@@ -1478,7 +1478,7 @@ impl BlockHessianAccumulator {
             }
             let tgt = match psi_block {
                 PsiBlock::Marginal => &mut self.h_tm,
-                PsiBlock::Logslope => &mut self.h_tg,
+                PsiBlock::Slope => &mut self.h_tg,
             };
             for b in 0..psi_row.len() {
                 tgt[[a, b]] += w * psi_row[b];
@@ -1499,7 +1499,7 @@ impl BlockHessianAccumulator {
                         self.h_mm[[b, a]] += w * psi_row[b];
                     }
                 }
-                PsiBlock::Logslope => {
+                PsiBlock::Slope => {
                     for b in 0..psi_row.len() {
                         self.h_mg[[a, b]] += w * psi_row[b];
                     }
@@ -1507,14 +1507,14 @@ impl BlockHessianAccumulator {
             }
         }
         // Once per follow-up channel, each against its own design row (#2765).
-        let slope_channels = family.logslope_layout.primary_channels();
+        let slope_channels = family.slope_layout.primary_channels();
         for &(slope_primary, slope_design) in slope_channels.as_slice() {
             let gw = rp[slope_primary];
             if gw == 0.0 {
                 continue;
             }
             let gc = slope_design.try_row_chunk(row..row + 1).map_err(|e| {
-                format!("add_rank1_psi_cross_with_q_geometry logslope try_row_chunk: {e}")
+                format!("add_rank1_psi_cross_with_q_geometry slope try_row_chunk: {e}")
             })?;
             let gr = gc.row(0);
             match psi_block {
@@ -1525,7 +1525,7 @@ impl BlockHessianAccumulator {
                         }
                     }
                 }
-                PsiBlock::Logslope => {
+                PsiBlock::Slope => {
                     for a in 0..gr.len() {
                         for b in 0..psi_row.len() {
                             self.h_gg[[a, b]] += gw * gr[a] * psi_row[b];
@@ -1544,7 +1544,7 @@ impl BlockHessianAccumulator {
                 }
                 let target = match psi_block {
                     PsiBlock::Marginal => &mut self.h_mh,
-                    PsiBlock::Logslope => &mut self.h_gh,
+                    PsiBlock::Slope => &mut self.h_gh,
                 };
                 for b in 0..psi_row.len() {
                     target[[b, li]] += hw * psi_row[b];
@@ -1559,7 +1559,7 @@ impl BlockHessianAccumulator {
                 }
                 let target = match psi_block {
                     PsiBlock::Marginal => &mut self.h_mw,
-                    PsiBlock::Logslope => &mut self.h_gw,
+                    PsiBlock::Slope => &mut self.h_gw,
                 };
                 for b in 0..psi_row.len() {
                     target[[b, li]] += ww * psi_row[b];

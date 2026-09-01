@@ -93,6 +93,20 @@ impl MaternFactor {
                 "factor {factor} length_scale must be finite and positive"
             )));
         }
+        if self.order == MaternMarkovOrder::ThreeHalves {
+            let rate = 3.0_f64.sqrt() / self.length_scale;
+            let derivative_scale = rate * self.marginal_variance.sqrt();
+            let derivative_variance = derivative_scale * derivative_scale;
+            if !rate.is_finite()
+                || rate <= 0.0
+                || !derivative_variance.is_finite()
+                || derivative_variance <= 0.0
+            {
+                return Err(invalid(format!(
+                    "factor {factor} Matérn-3/2 derivative scale is not representable"
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -227,9 +241,11 @@ impl MarkedPointProcessModel {
             covariance[[offset, offset]] = variance;
             if factor.order == MaternMarkovOrder::ThreeHalves {
                 let rate = 3.0_f64.sqrt() / factor.length_scale;
-                covariance[[offset + 1, offset + 1]] = rate * rate * variance;
+                let derivative_scale = rate * variance.sqrt();
+                covariance[[offset + 1, offset + 1]] = derivative_scale * derivative_scale;
             }
         }
+        ensure_finite_matrix(&covariance, "stationary state covariance")?;
         Ok(covariance)
     }
 
@@ -249,17 +265,48 @@ impl MarkedPointProcessModel {
             match factor.order {
                 MaternMarkovOrder::Half => {
                     let scaled_time = elapsed / factor.length_scale;
-                    let decay = (-scaled_time).exp();
-                    transition[[offset, offset]] = decay;
-                    innovation[[offset, offset]] = variance * -(-2.0 * scaled_time).exp_m1();
+                    if scaled_time == 0.0 {
+                        return Err(MarkedPointProcessError::NumericalFailure {
+                            context: "Matérn-1/2 elapsed-time resolution",
+                        });
+                    }
+                    if scaled_time.is_infinite() {
+                        innovation[[offset, offset]] = variance;
+                    } else {
+                        let decay = (-scaled_time).exp();
+                        transition[[offset, offset]] = decay;
+                        innovation[[offset, offset]] = variance * -(-2.0 * scaled_time).exp_m1();
+                    }
+                    if !innovation[[offset, offset]].is_finite()
+                        || innovation[[offset, offset]] <= 0.0
+                    {
+                        return Err(MarkedPointProcessError::NonPositiveDefinite {
+                            context: "Matérn-1/2 innovation covariance",
+                            diagonal: offset,
+                            value: innovation[[offset, offset]],
+                        });
+                    }
                 }
                 MaternMarkovOrder::ThreeHalves => {
                     let rate = 3.0_f64.sqrt() / factor.length_scale;
+                    let position_scale = variance.sqrt();
+                    let derivative_scale = rate * position_scale;
+                    let derivative_variance = derivative_scale * derivative_scale;
                     let scaled_time = rate * elapsed;
+                    if scaled_time == 0.0 {
+                        return Err(MarkedPointProcessError::NumericalFailure {
+                            context: "Matérn-3/2 elapsed-time resolution",
+                        });
+                    }
                     let decay = (-scaled_time).exp();
+                    if scaled_time.is_infinite() || decay == 0.0 {
+                        innovation[[offset, offset]] = variance;
+                        innovation[[offset + 1, offset + 1]] = derivative_variance;
+                        continue;
+                    }
                     transition[[offset, offset]] = decay * (1.0 + scaled_time);
                     transition[[offset, offset + 1]] = decay * elapsed;
-                    transition[[offset + 1, offset]] = -decay * rate * rate * elapsed;
+                    transition[[offset + 1, offset]] = -(decay * rate) * scaled_time;
                     transition[[offset + 1, offset + 1]] = decay * (1.0 - scaled_time);
 
                     let twice_scaled_time = 2.0 * scaled_time;
@@ -267,16 +314,33 @@ impl MarkedPointProcessModel {
                     let scaled_time2 = scaled_time * scaled_time;
                     innovation[[offset, offset]] = variance
                         * matern_three_halves_position_innovation_fraction(twice_scaled_time);
-                    let cross = 2.0 * variance * decay2 * rate * scaled_time2;
+                    let variance_rate = position_scale * derivative_scale;
+                    let cross = 2.0 * variance_rate * decay2 * scaled_time2;
                     innovation[[offset, offset + 1]] = cross;
                     innovation[[offset + 1, offset]] = cross;
-                    innovation[[offset + 1, offset + 1]] = variance
-                        * rate
-                        * rate
+                    innovation[[offset + 1, offset + 1]] = derivative_variance
                         * (-(-twice_scaled_time).exp_m1()
                             + decay2
                                 * (twice_scaled_time
                                     - 0.5 * twice_scaled_time * twice_scaled_time));
+                    let position_pivot = innovation[[offset, offset]];
+                    if !position_pivot.is_finite() || position_pivot <= 0.0 {
+                        return Err(MarkedPointProcessError::NonPositiveDefinite {
+                            context: "Matérn-3/2 innovation covariance",
+                            diagonal: offset,
+                            value: position_pivot,
+                        });
+                    }
+                    let derivative_residual = cross / position_pivot.sqrt();
+                    let derivative_pivot =
+                        innovation[[offset + 1, offset + 1]] - derivative_residual.powi(2);
+                    if !derivative_pivot.is_finite() || derivative_pivot <= 0.0 {
+                        return Err(MarkedPointProcessError::NonPositiveDefinite {
+                            context: "Matérn-3/2 innovation covariance",
+                            diagonal: offset + 1,
+                            value: derivative_pivot,
+                        });
+                    }
                 }
             }
         }
@@ -307,9 +371,14 @@ impl MarkedPointProcessModel {
         if lag == 0.0 {
             return Ok(impulse);
         }
-        Ok(self.transition(lag)?.transition.dot(&impulse))
+        let response = self.transition(lag)?.transition.dot(&impulse);
+        if response.iter().any(|value| !value.is_finite()) {
+            return Err(MarkedPointProcessError::NumericalFailure {
+                context: "state impulse response",
+            });
+        }
+        Ok(response)
     }
-
 
     /// Stationary mark-level covariance induced by the latent factor values.
     ///
@@ -321,7 +390,9 @@ impl MarkedPointProcessModel {
         let factor_variances =
             Array1::from_iter(self.factors.iter().map(|factor| factor.marginal_variance));
         let variance_weighted_loadings = &self.loadings * &factor_variances.insert_axis(Axis(0));
-        Ok(variance_weighted_loadings.dot(&self.loadings.t()))
+        let covariance = variance_weighted_loadings.dot(&self.loadings.t());
+        ensure_finite_matrix(&covariance, "loading covariance")?;
+        Ok(covariance)
     }
 }
 
@@ -390,9 +461,10 @@ impl SubjectHistory {
             if !interval.entry.is_finite()
                 || !interval.exit.is_finite()
                 || interval.exit <= interval.entry
+                || !interval.exposure().is_finite()
             {
                 return Err(invalid(format!(
-                    "subject {:?} interval {index} must have finite entry < exit",
+                    "subject {:?} interval {index} must have finite entry < exit and finite exposure",
                     self.subject
                 )));
             }
@@ -458,23 +530,29 @@ pub fn evaluate_poisson_interval(
     if log_intensity.iter().any(|value| !value.is_finite()) {
         return Err(invalid("log_intensity must contain only finite values"));
     }
+    let log_exposure = exposure.ln();
     let mut log_likelihood = 0.0;
     let mut gradient = Array1::zeros(counts.len());
     let mut negative_hessian = Array1::zeros(counts.len());
     let mut expected_counts = Array1::zeros(counts.len());
     for mark in 0..counts.len() {
-        let mean = exposure * log_intensity[mark].exp();
+        let log_mean = log_exposure + log_intensity[mark];
+        let mean = log_mean.exp();
         if !mean.is_finite() {
             return Err(MarkedPointProcessError::NumericalFailure {
                 context: "piecewise-Poisson mean",
             });
         }
         let count = f64::from(counts[mark]);
-        log_likelihood +=
-            count * (log_intensity[mark] + exposure.ln()) - mean - ln_gamma(count + 1.0);
+        log_likelihood += count * log_mean - mean - ln_gamma(count + 1.0);
         gradient[mark] = count - mean;
         negative_hessian[mark] = mean;
         expected_counts[mark] = mean;
+    }
+    if !log_likelihood.is_finite() {
+        return Err(MarkedPointProcessError::NumericalFailure {
+            context: "piecewise-Poisson log likelihood",
+        });
     }
     Ok(PoissonIntervalEvaluation {
         log_likelihood,
@@ -1009,6 +1087,7 @@ pub fn gaussian_mean_intensity(
         return Err(invalid("Gaussian intensity inputs must be finite"));
     }
     ensure_finite_matrix(state_covariance, "state covariance")?;
+    cholesky(state_covariance, "state covariance")?;
     let observation = model.observation_matrix();
     let mut intensity = Array1::zeros(model.mark_count());
     for mark in 0..model.mark_count() {
@@ -1115,6 +1194,8 @@ pub fn forecast_cumulative_incidence(
         .enumerate()
         .filter_map(|(mark, role)| (*role == MarkRole::Absorbing).then_some(mark))
         .collect();
+    let mut elapsed = 0.0;
+    let mut horizons = Vec::with_capacity(future.len());
     for (index, interval) in future.iter().enumerate() {
         if !interval.duration.is_finite() || interval.duration <= 0.0 {
             return Err(invalid(format!(
@@ -1131,6 +1212,11 @@ pub fn forecast_cumulative_incidence(
                 "forecast interval {index} fixed predictor is incompatible or non-finite"
             )));
         }
+        elapsed += interval.duration;
+        if !elapsed.is_finite() {
+            return Err(invalid("forecast cumulative horizon must be finite"));
+        }
+        horizons.push(elapsed);
     }
     let initial_cholesky = cholesky(&landmark.covariance, "landmark covariance")?;
     let transitions: Vec<(StateTransition, Array2<f64>)> = future
@@ -1152,6 +1238,7 @@ pub fn forecast_cumulative_incidence(
     let mut survival_sum: Array1<f64> = Array1::zeros(intervals);
     let mut survival_square_sum: Array1<f64> = Array1::zeros(intervals);
     let mut normals = NormalStream::new(monte_carlo.seed);
+    let log_max_f64 = f64::MAX.ln();
 
     for _ in 0..monte_carlo.trajectories {
         let initial_noise = normals.vector(model.state_dimension());
@@ -1163,26 +1250,35 @@ pub fn forecast_cumulative_incidence(
             state =
                 transitions[index].0.transition.dot(&state) + transitions[index].1.dot(&innovation);
             let eta = &future[index].fixed_log_intensity + &observation.dot(&state);
-            let mut rates: Array1<f64> = Array1::zeros(causes);
-            for (cause, &mark) in competing_marks.iter().enumerate() {
-                rates[cause] = eta[mark].exp();
-            }
-            let total_rate = absorbing_marks
-                .iter()
-                .map(|&mark| eta[mark].exp())
-                .sum::<f64>();
-            if !total_rate.is_finite() {
+            if eta.iter().any(|value| !value.is_finite()) {
                 return Err(MarkedPointProcessError::NumericalFailure {
-                    context: "forecast competing intensity",
+                    context: "forecast log intensity",
                 });
             }
-            if total_rate > 0.0 {
-                let event_probability = -(-total_rate * future[index].duration).exp_m1();
+            let maximum_log_rate = absorbing_marks
+                .iter()
+                .map(|&mark| eta[mark])
+                .fold(f64::NEG_INFINITY, f64::max);
+            let scaled_total_rate = absorbing_marks
+                .iter()
+                .map(|&mark| (eta[mark] - maximum_log_rate).exp())
+                .sum::<f64>();
+            let log_integrated_rate =
+                maximum_log_rate + scaled_total_rate.ln() + future[index].duration.ln();
+            let integrated_rate = if log_integrated_rate >= log_max_f64 {
+                f64::INFINITY
+            } else {
+                log_integrated_rate.exp()
+            };
+            let event_probability = -(-integrated_rate).exp_m1();
+            if event_probability > 0.0 {
                 let event_mass = survival * event_probability;
-                for cause in 0..causes {
-                    cif[cause] += event_mass * rates[cause] / total_rate;
+                for (cause, &mark) in competing_marks.iter().enumerate() {
+                    let cause_probability =
+                        (eta[mark] - maximum_log_rate).exp() / scaled_total_rate;
+                    cif[cause] += event_mass * cause_probability;
                 }
-                survival *= (-total_rate * future[index].duration).exp();
+                survival *= (-integrated_rate).exp();
             }
             for cause in 0..causes {
                 cif_sum[[index, cause]] += cif[cause];
@@ -1211,13 +1307,8 @@ pub fn forecast_cumulative_incidence(
             (survival_square_sum[index] - trajectories * mean * mean) / (trajectories - 1.0);
         survival_monte_carlo_se[index] = (sample_variance.max(0.0) / trajectories).sqrt();
     }
-    let mut elapsed = 0.0;
-    let horizons = Array1::from_iter(future.iter().map(|interval| {
-        elapsed += interval.duration;
-        elapsed
-    }));
     Ok(CumulativeIncidenceForecast {
-        horizons,
+        horizons: Array1::from_vec(horizons),
         cumulative_incidence,
         cumulative_incidence_monte_carlo_se,
         survival,
@@ -1345,6 +1436,7 @@ fn cholesky(
         )));
     }
     ensure_finite_matrix(matrix, context)?;
+    ensure_symmetric_matrix(matrix, context)?;
     let dimension = matrix.nrows();
     let mut lower = Array2::zeros((dimension, dimension));
     for row in 0..dimension {
@@ -1483,6 +1575,23 @@ fn ensure_finite_matrix(
 ) -> Result<(), MarkedPointProcessError> {
     if matrix.iter().any(|value| !value.is_finite()) {
         return Err(invalid(format!("{name} must contain only finite values")));
+    }
+    Ok(())
+}
+
+fn ensure_symmetric_matrix(
+    matrix: &Array2<f64>,
+    name: &'static str,
+) -> Result<(), MarkedPointProcessError> {
+    let dimension = matrix.nrows();
+    let scale = matrix.iter().map(|value| value.abs()).fold(0.0, f64::max);
+    let tolerance = 64.0 * f64::EPSILON * dimension as f64 * scale;
+    for row in 0..dimension {
+        for column in 0..row {
+            if (matrix[[row, column]] - matrix[[column, row]]).abs() > tolerance {
+                return Err(invalid(format!("{name} must be symmetric")));
+            }
+        }
     }
     Ok(())
 }

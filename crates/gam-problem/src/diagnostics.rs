@@ -974,7 +974,7 @@ impl KktRefusalDiagnosis {
             KktRefusalDiagnosis::PhantomMultiplierWithWellConditionedH => {
                 "check whether the named block has a near-separated or weakly identified \
                  direction despite a well-conditioned penalized Hessian; in marginal-slope \
-                 fits this often indicates marginal/logslope coupling rather than a \
+                 fits this often indicates marginal/slope coupling rather than a \
                  Matérn/Duchon polynomial-nullspace failure"
             }
             KktRefusalDiagnosis::ActiveSetIncomplete => {

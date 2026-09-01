@@ -227,7 +227,7 @@ def main() -> None:
         ok, elapsed = run([
             "fit", enriched_csv,
             "case ~ duchon(pc1, pc2, pc3, pc4, centers=20) + linkwiggle(internal_knots=8)",
-            "--logslope-formula",
+            "--slope-formula",
             "duchon(pc1, pc2, pc3, pc4, centers=20) + linkwiggle(internal_knots=8)",
             "--z-column", "z",
             "--scale-dimensions",
@@ -242,7 +242,7 @@ def main() -> None:
             "Surv(age0, age1, event) ~ duchon(pc1, pc2, pc3, pc4, centers=20) + survmodel(spec=net, distribution=gaussian) + linkwiggle(internal_knots=8) + timewiggle(internal_knots=8)",
             "--survival-likelihood", "marginal-slope",
             "--baseline-target", "gompertz-makeham",
-            "--logslope-formula",
+            "--slope-formula",
             "duchon(pc1, pc2, pc3, pc4, centers=20) + linkwiggle(internal_knots=8)",
             "--z-column", "z",
             "--scale-dimensions",

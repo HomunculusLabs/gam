@@ -138,10 +138,10 @@ fn build_problem(
         random_effect_terms: vec![],
         smooth_terms: vec![nuisance("nuisance_mean")],
     };
-    let logslopespec = TermCollectionSpec {
+    let slopespec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
-        smooth_terms: vec![nuisance("nuisance_logslope")],
+        smooth_terms: vec![nuisance("nuisance_slope")],
     };
 
     (
@@ -152,9 +152,9 @@ fn build_problem(
             z,
             base_link: InverseLink::Standard(StandardLink::Probit),
             marginalspec,
-            logslopespec,
+            slopespec,
             marginal_offset: Array1::zeros(N),
-            logslope_offset: Array1::zeros(N),
+            slope_offset: Array1::zeros(N),
             frailty: FrailtySpec::None,
             score_warp: None,
             link_dev: None,

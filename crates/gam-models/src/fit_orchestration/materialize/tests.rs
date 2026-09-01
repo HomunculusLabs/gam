@@ -74,7 +74,7 @@ fn survival_marginal_slope_materialize_rejects_z_column_in_main_formula() {
     let data = load_survival_dataset();
     let mut config = FitConfig::default();
     config.survival_likelihood = Some("marginal-slope".to_string());
-    config.logslope_formula = Some("1".to_string());
+    config.slope_formula = Some("1".to_string());
     config.z_column = Some("z".to_string());
 
     let err = materialize("Surv(entry, exit, event) ~ x + z", &data, &config)
@@ -89,26 +89,26 @@ fn survival_marginal_slope_materialize_rejects_z_column_in_main_formula() {
 }
 
 #[test]
-fn survival_marginal_slope_materialize_rejects_z_column_in_logslope_formula() {
+fn survival_marginal_slope_materialize_rejects_z_column_in_slope_formula() {
     let data = load_survival_dataset();
     let mut config = FitConfig::default();
     config.survival_likelihood = Some("marginal-slope".to_string());
-    config.logslope_formula = Some("1 + z".to_string());
+    config.slope_formula = Some("1 + z".to_string());
     config.z_column = Some("z".to_string());
 
     let err = materialize("Surv(entry, exit, event) ~ x", &data, &config)
         .err()
-        .expect("logslope formula should reject z-column reuse");
+        .expect("slope formula should reject z-column reuse");
 
     assert!(
         err.to_string()
             .contains("survival marginal-slope reserves z column 'z'")
     );
-    assert!(err.to_string().contains("logslope_formula"));
+    assert!(err.to_string().contains("slope_formula"));
 }
 
 #[test]
-fn survival_marginal_slope_materialize_rejects_z_column_when_logslope_defaults_to_main_spec() {
+fn survival_marginal_slope_materialize_rejects_z_column_when_slope_defaults_to_main_spec() {
     let data = load_survival_dataset();
     let mut config = FitConfig::default();
     config.survival_likelihood = Some("marginal-slope".to_string());
@@ -116,7 +116,7 @@ fn survival_marginal_slope_materialize_rejects_z_column_when_logslope_defaults_t
 
     let err = materialize("Surv(entry, exit, event) ~ x + z", &data, &config)
         .err()
-        .expect("defaulted logslope spec should still reject z-column reuse");
+        .expect("defaulted slope spec should still reject z-column reuse");
 
     assert!(
         err.to_string()
@@ -461,7 +461,7 @@ fn precompute_conformal_false_drops_both_substrates_2633() {
 }
 
 #[test]
-fn survival_marginal_slope_matern_logslope_penalties_keep_surface_width() {
+fn survival_marginal_slope_matern_slope_penalties_keep_surface_width() {
     let n = 24usize;
     let mut values = Array2::<f64>::zeros((n, 8));
     for i in 0..n {
@@ -554,7 +554,7 @@ fn survival_marginal_slope_matern_logslope_penalties_keep_surface_width() {
     ] {
         let config = FitConfig {
             survival_likelihood: Some("marginal-slope".to_string()),
-            logslope_formula: Some("matern(PC1, PC2, PC3, centers=6)".to_string()),
+            slope_formula: Some("matern(PC1, PC2, PC3, centers=6)".to_string()),
             z_column: Some("z".to_string()),
             ..FitConfig::default()
         };
@@ -570,7 +570,7 @@ fn survival_marginal_slope_matern_logslope_penalties_keep_surface_width() {
         };
         let specs = vec![
             request.spec.marginalspec.clone(),
-            request.spec.logslopespec.clone(),
+            request.spec.slopespec.clone(),
         ];
         let (designs, frozen_specs) =
             crate::fit_orchestration::drivers::build_term_collection_designs_and_freeze_joint(
@@ -591,9 +591,9 @@ fn survival_marginal_slope_matern_logslope_penalties_keep_surface_width() {
 
         for (label, design) in [
             ("raw marginal", &designs[0]),
-            ("raw logslope", &designs[1]),
+            ("raw slope", &designs[1]),
             ("frozen marginal", &rebuilt[0]),
-            ("frozen logslope", &rebuilt[1]),
+            ("frozen slope", &rebuilt[1]),
         ] {
             let width = design.design.ncols();
             assert!(
@@ -1000,7 +1000,7 @@ fn issue_789_transformation_normal_rejects_marginal_slope_controls_before_dispat
     let config = FitConfig {
         transformation_normal: true,
         family: Some("bernoulli-marginal-slope".to_string()),
-        logslope_formula: Some("1".to_string()),
+        slope_formula: Some("1".to_string()),
         z_column: Some("z".to_string()),
         ..FitConfig::default()
     };
@@ -1037,7 +1037,7 @@ fn bernoulli_marginal_slope_ctn_stage1_recipe_only_dispatches_to_bms_issue_2139(
         .expect("recipe-only BMS request should reach BMS validation");
     let msg = err.to_string();
     assert!(
-        msg.contains("Bernoulli marginal-slope requires logslope_formula"),
+        msg.contains("Bernoulli marginal-slope requires slope_formula"),
         "recipe-only BMS request should fail with BMS-specific validation, got: {msg}"
     );
     assert!(
@@ -1089,7 +1089,7 @@ fn survival_marginal_slope_rejects_zero_event_data_before_fit() {
     data.values.column_mut(2).fill(0.0);
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
-        logslope_formula: Some("1".to_string()),
+        slope_formula: Some("1".to_string()),
         z_column: Some("z".to_string()),
         ..FitConfig::default()
     };
@@ -1758,20 +1758,20 @@ fn materialize_standard_duchon_length_scale_opts_into_hybrid_basis() {
 }
 
 #[test]
-fn workflow_survival_marginal_slope_routes_logslope_linkwiggle_into_score_warp_only() {
+fn workflow_survival_marginal_slope_routes_slope_linkwiggle_into_score_warp_only() {
     let data = workflow_test_dataset();
     // #384: the score-warp / link-deviation runtime is structurally cubic, so
     // only `degree=3` is realizable on these blocks; non-cubic degrees are
     // rejected up front (see
     // `linkwiggle_noncubic_degree_is_rejected_at_the_routing_boundary_issue_384`).
     // This test exercises the orthogonal routing/metadata contract: the
-    // logslope_formula linkwiggle lands on `score_warp` and the main-formula
+    // slope_formula linkwiggle lands on `score_warp` and the main-formula
     // linkwiggle on `link_dev`, with knots/penalty orders carried through. The
     // two blocks are distinguished here by `internal_knots` (9 vs 7) and
     // `penalty_order` (1 vs 2,3), not by an unrealizable degree.
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
-        logslope_formula: Some(
+        slope_formula: Some(
             "1 + linkwiggle(degree=3, internal_knots=7, penalty_order=\"2,3\")".to_string(),
         ),
         z_column: Some("z".to_string()),
@@ -1794,7 +1794,7 @@ fn workflow_survival_marginal_slope_routes_logslope_linkwiggle_into_score_warp_o
     };
 
     let link_dev = request.spec.link_dev.expect("main-formula link-dev");
-    let score_warp = request.spec.score_warp.expect("logslope score-warp");
+    let score_warp = request.spec.score_warp.expect("slope score-warp");
     assert_eq!(link_dev.degree, 3);
     assert_eq!(link_dev.num_internal_knots, 9);
     assert_eq!(link_dev.penalty_order, 1);
@@ -1813,15 +1813,15 @@ fn workflow_survival_marginal_slope_routes_logslope_linkwiggle_into_score_warp_o
         inference_notes
             .iter()
             .any(|note| note.contains("score-warp block")),
-        "workflow notes should mention logslope_formula linkwiggle routing"
+        "workflow notes should mention slope_formula linkwiggle routing"
     );
 }
 
 #[test]
-fn materialize_routes_bernoulli_marginal_slope_when_logslope_and_z_are_set() {
+fn materialize_routes_bernoulli_marginal_slope_when_slope_and_z_are_set() {
     let data = workflow_test_dataset();
     let config = FitConfig {
-        logslope_formula: Some("1".to_string()),
+        slope_formula: Some("1".to_string()),
         z_column: Some("z".to_string()),
         ..FitConfig::default()
     };
@@ -1904,7 +1904,7 @@ fn materialize_bernoulli_marginal_slope_prunes_redundant_scalar_term() {
         ],
     };
     let config = FitConfig {
-        logslope_formula: Some("matern(PC1, PC2, PC3, centers=3)".to_string()),
+        slope_formula: Some("matern(PC1, PC2, PC3, centers=3)".to_string()),
         z_column: Some("prs_z".to_string()),
         ..FitConfig::default()
     };
@@ -1931,7 +1931,7 @@ fn materialize_bernoulli_marginal_slope_prunes_redundant_scalar_term() {
         .collect();
     assert_eq!(kept, vec!["x"]);
     assert_eq!(request.spec.marginalspec.smooth_terms.len(), 1);
-    assert_eq!(request.spec.logslopespec.smooth_terms.len(), 1);
+    assert_eq!(request.spec.slopespec.smooth_terms.len(), 1);
     assert!(
         inference_notes
             .iter()
@@ -2042,7 +2042,7 @@ fn materialize_bernoulli_marginal_slope_prunes_binary_outcome_style_scalar_alias
         ],
     };
     let config = FitConfig {
-        logslope_formula: Some("matern(PC1, PC2, PC3, centers=3)".to_string()),
+        slope_formula: Some("matern(PC1, PC2, PC3, centers=3)".to_string()),
         z_column: Some("prs_z".to_string()),
         ..FitConfig::default()
     };
@@ -2073,7 +2073,7 @@ fn materialize_bernoulli_marginal_slope_prunes_binary_outcome_style_scalar_alias
         ]
     );
     assert_eq!(request.spec.marginalspec.smooth_terms.len(), 1);
-    assert_eq!(request.spec.logslopespec.smooth_terms.len(), 1);
+    assert_eq!(request.spec.slopespec.smooth_terms.len(), 1);
     assert!(
         materialized
             .inference_notes
@@ -2133,7 +2133,7 @@ fn materialize_bernoulli_marginal_slope_rejects_constrained_redundant_scalar_ter
         ],
     };
     let config = FitConfig {
-        logslope_formula: Some("1".to_string()),
+        slope_formula: Some("1".to_string()),
         z_column: Some("prs_z".to_string()),
         ..FitConfig::default()
     };
@@ -2244,7 +2244,7 @@ fn materialize_bernoulli_marginal_slope_names_constant_z_column() {
         ],
     };
     let config = FitConfig {
-        logslope_formula: Some("1".to_string()),
+        slope_formula: Some("1".to_string()),
         z_column: Some("prs_z".to_string()),
         ..FitConfig::default()
     };
@@ -2302,7 +2302,7 @@ fn linkwiggle_noncubic_degree_is_rejected_at_the_routing_boundary_issue_384() {
             "parser must carry the degree through verbatim"
         );
 
-        // logslope_formula = linkwiggle(...) is the score-warp route the Python
+        // slope_formula = linkwiggle(...) is the score-warp route the Python
         // marginal-slope path uses.
         let err = route_marginal_slope_deviation_blocks(None, Some(&spec))
             .err()
@@ -2368,7 +2368,7 @@ fn survival_marginal_slope_accepts_explicit_probit_link() {
     let data = workflow_test_dataset();
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
-        logslope_formula: Some("1".to_string()),
+        slope_formula: Some("1".to_string()),
         z_column: Some("z".to_string()),
         ..FitConfig::default()
     };

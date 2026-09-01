@@ -4,7 +4,7 @@
 //! signature observed in production survival_marginal_slope fits at
 //! n=195,780 (5/5 outer seeds rejected). From the production trace:
 //!
-//!   block_widths   = [12, 11, 10]            # time, marginal, logslope
+//!   block_widths   = [12, 11, 10]            # time, marginal, slope
 //!   block_beta_inf = [2.3e-4, 15.3, 20.0]    # time barely moved
 //!   block_grad_inf = [5.6e8,  1.5e3, 2.3e3]  # time carries the gradient
 //!   cycle 0 unconstrained proposal:  |prop|∞ = 2.173e5
@@ -98,7 +98,7 @@ fn truncate_block_metric(
 /// other blocks are well-conditioned, and a gradient g aligned so that:
 ///
 ///   * δ̂ = H⁻¹ (-g) has a single huge component (~2e5) in the
-///     near-null direction of the logslope block
+///     near-null direction of the slope block
 ///   * the other components of δ̂ are O(1)
 ///
 /// Returns (H, g, unconstrained δ̂).
@@ -137,16 +137,16 @@ fn build_anisotropic_block_fixture() -> (Array2<f64>, Array1<f64>, Array1<f64>) 
         };
     }
 
-    // Logslope block: one near-null direction (σ_min = 1e-10) plus 9
+    // Slope block: one near-null direction (σ_min = 1e-10) plus 9
     // well-conditioned diagonal entries. The first coordinate of the
-    // logslope block IS the near-null direction; its gradient component
+    // slope block IS the near-null direction; its gradient component
     // is O(1) but its inverse-Hessian image is ~1e10, the source of
     // the huge unconstrained Newton step.
     for k in 0..LOGSL_W {
         let row = TIME_W + MARG_W + k;
         if k == 0 {
             // Near-singular eigenvalue of the joint Hessian. Pick the
-            // magnitude so that g_logslope[0] / H_logslope[0,0] gives
+            // magnitude so that g_slope[0] / H_slope[0,0] gives
             // the production cycle-0 |prop|∞ = 2.173e5.
             h[[row, row]] = 1.0e-5;
             g[row] = -2.173e0;

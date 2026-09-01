@@ -375,7 +375,7 @@ impl RowPrimaryEvalCache {
 /// the outer-derivative fast path (gam#683). Every outer-derivative consumer
 /// contracts the per-row third/fourth tensors against ψ-axis directions that
 /// are *single-axis* in primary space — nonzero only at `primary.q` (block 0,
-/// "q") or `primary.logslope` (block 1, "g"). By the (bi)linearity of the
+/// "q") or `primary.slope` (block 1, "g"). By the (bi)linearity of the
 /// contraction,
 ///
 /// ```text
@@ -393,7 +393,7 @@ impl RowPrimaryEvalCache {
 /// force degree-21 fourth-order cell work.
 pub(super) struct FlexAxisThirdRowTensors {
     /// Third-derivative tensor contracted with the q-axis basis vector
-    /// (`third[0]`) and the logslope-axis basis vector (`third[1]`).
+    /// (`third[0]`) and the slope-axis basis vector (`third[1]`).
     pub(super) third: [Array2<f64>; 2],
 }
 

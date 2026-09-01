@@ -4,7 +4,7 @@ use super::*;
 /// Which coefficient sub-block a psi row lives in.
 ///
 /// `resolve_psi_axis_spec` admits only block 0 (marginal) and block 1
-/// (log-slope) and rejects every other index before an axis exists, so the
+/// (slope) and rejects every other index before an axis exists, so the
 /// Hessian scatter paths only ever see those two. Carrying that as a
 /// two-variant type lets them match exhaustively — a third spatial block
 /// forces each scatter site to be revisited rather than having its
@@ -12,7 +12,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PsiBlock {
     Marginal,
-    Logslope,
+    Slope,
 }
 
 impl PsiBlock {
@@ -20,19 +20,19 @@ impl PsiBlock {
     pub(super) fn from_index(block_idx: usize) -> Result<Self, String> {
         match block_idx {
             0 => Ok(Self::Marginal),
-            1 => Ok(Self::Logslope),
+            1 => Ok(Self::Slope),
             other => Err(format!(
                 "bernoulli marginal-slope psi Hessian: spatial block {other} has no psi \
-                 coefficient sub-block (expected 0 = marginal or 1 = log-slope)"
+                 coefficient sub-block (expected 0 = marginal or 1 = slope)"
             )),
         }
     }
 }
 
 /// Block-local psi derivative row: avoids allocating a full p-vector
-/// when the psi derivative lives in a single channel (marginal or logslope).
+/// when the psi derivative lives in a single channel (marginal or slope).
 pub(super) struct BlockPsiRow {
-    /// Which parameter block (0 = marginal, 1 = logslope).
+    /// Which parameter block (0 = marginal, 1 = slope).
     pub(super) block_idx: usize,
     /// Coefficient range in global (flat) space for this block.
     pub(super) range: std::ops::Range<usize>,
@@ -49,7 +49,7 @@ pub(super) struct PsiAxisSpec {
 #[derive(Clone)]
 pub(super) struct BlockSlices {
     pub(super) marginal: std::ops::Range<usize>,
-    pub(super) logslope: std::ops::Range<usize>,
+    pub(super) slope: std::ops::Range<usize>,
     pub(super) h: Option<std::ops::Range<usize>>,
     pub(super) w: Option<std::ops::Range<usize>>,
     pub(super) total: usize,
@@ -59,8 +59,8 @@ pub(super) fn block_slices(family: &BernoulliMarginalSlopeFamily) -> BlockSlices
     let mut cursor = 0usize;
     let marginal = cursor..cursor + family.marginal_design.ncols();
     cursor = marginal.end;
-    let logslope = cursor..cursor + family.logslope_design.ncols();
-    cursor = logslope.end;
+    let slope = cursor..cursor + family.slope_design.ncols();
+    cursor = slope.end;
     let h = family.score_warp.as_ref().map(|runtime| {
         let range = cursor..cursor + runtime.basis_dim();
         cursor = range.end;
@@ -73,7 +73,7 @@ pub(super) fn block_slices(family: &BernoulliMarginalSlopeFamily) -> BlockSlices
     });
     BlockSlices {
         marginal,
-        logslope,
+        slope,
         h,
         w,
         total: cursor,
@@ -83,7 +83,7 @@ pub(super) fn block_slices(family: &BernoulliMarginalSlopeFamily) -> BlockSlices
 #[derive(Clone)]
 pub(super) struct PrimarySlices {
     pub(super) q: usize,
-    pub(super) logslope: usize,
+    pub(super) slope: usize,
     pub(super) h: Option<std::ops::Range<usize>>,
     pub(super) w: Option<std::ops::Range<usize>>,
     pub(super) total: usize,
@@ -91,7 +91,7 @@ pub(super) struct PrimarySlices {
 
 pub(super) fn primary_slices(slices: &BlockSlices) -> PrimarySlices {
     let q = 0usize;
-    let logslope = 1usize;
+    let slope = 1usize;
     let mut cursor = 2usize;
     let h = slices.h.as_ref().map(|range| {
         let out = cursor..cursor + range.len();
@@ -105,7 +105,7 @@ pub(super) fn primary_slices(slices: &BlockSlices) -> PrimarySlices {
     });
     PrimarySlices {
         q,
-        logslope,
+        slope,
         h,
         w,
         total: cursor,
@@ -113,7 +113,7 @@ pub(super) fn primary_slices(slices: &BlockSlices) -> PrimarySlices {
 }
 // ── Block-local Hessian accumulator for Bernoulli marginal-slope ─────
 //
-// The two large blocks are marginal (p_m) and logslope (p_g).
+// The two large blocks are marginal (p_m) and slope (p_g).
 // Optional h/w blocks are tiny (1-5 params each), so their contributions
 // go into a dense p_total x p_total correction matrix.  The main savings
 // is avoiding O(n * (p_m^2 + p_g^2)) dense accumulation into a full p*p target.
@@ -128,7 +128,7 @@ pub(super) struct BernoulliBlockHessianAccumulator {
 impl BernoulliBlockHessianAccumulator {
     pub(super) fn new(slices: &BlockSlices) -> Self {
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         let has_hw = slices.h.is_some() || slices.w.is_some();
         Self {
             h_mm: Array2::zeros((p_m, p_m)),
@@ -143,7 +143,7 @@ impl BernoulliBlockHessianAccumulator {
     }
 
     /// Accumulate a primary-space Hessian into block-local matrices.
-    /// The marginal block uses H[0,0], logslope uses H[1,1],
+    /// The marginal block uses H[0,0], slope uses H[1,1],
     /// cross uses H[0,1].  All h/w cross-blocks go to dense_correction.
     pub(super) fn add_pullback(
         &mut self,
@@ -161,23 +161,23 @@ impl BernoulliBlockHessianAccumulator {
             .syr_row_into(row, h[[0, 0]], &mut self.h_mm)
             .expect("marginal syr_row_into dimension mismatch");
 
-        // logslope x logslope: H[1,1] * g_row outer g_row
+        // slope x slope: H[1,1] * g_row outer g_row
         family
-            .logslope_design
+            .slope_design
             .syr_row_into(row, h[[1, 1]], &mut self.h_gg)
-            .expect("logslope syr_row_into dimension mismatch");
+            .expect("slope syr_row_into dimension mismatch");
 
-        // marginal x logslope: H[0,1] * x_row outer g_row
+        // marginal x slope: H[0,1] * x_row outer g_row
         if h[[0, 1]] != 0.0 {
             family
                 .marginal_design
                 .row_outer_into_view(
                     row,
-                    &family.logslope_design,
+                    &family.slope_design,
                     h[[0, 1]],
                     self.h_mg.view_mut(),
                 )
-                .expect("marginal-logslope row_outer_into dimension mismatch");
+                .expect("marginal-slope row_outer_into dimension mismatch");
         }
 
         // h/w cross-blocks -> dense_correction
@@ -216,15 +216,15 @@ impl BernoulliBlockHessianAccumulator {
             .expect("marginal syr_row_into dimension mismatch");
 
         family
-            .logslope_design
+            .slope_design
             .syr_row_into(row, h11, &mut self.h_gg)
-            .expect("logslope syr_row_into dimension mismatch");
+            .expect("slope syr_row_into dimension mismatch");
 
         if h01 != 0.0 {
             family
                 .marginal_design
-                .row_outer_into_view(row, &family.logslope_design, h01, self.h_mg.view_mut())
-                .expect("marginal-logslope row_outer_into dimension mismatch");
+                .row_outer_into_view(row, &family.slope_design, h01, self.h_mg.view_mut())
+                .expect("marginal-slope row_outer_into dimension mismatch");
         }
     }
 
@@ -266,7 +266,7 @@ impl BernoulliBlockHessianAccumulator {
         // arithmetic — exact, just without the copy.
         if let (Some(x_full), Some(g_full)) = (
             family.marginal_design.as_dense_ref(),
-            family.logslope_design.as_dense_ref(),
+            family.slope_design.as_dense_ref(),
         ) {
             let x = x_full.slice(s![rows.clone(), ..]);
             let g = g_full.slice(s![rows, ..]);
@@ -278,9 +278,9 @@ impl BernoulliBlockHessianAccumulator {
             .try_row_chunk(rows.clone())
             .map_err(|e| format!("bernoulli marginal_design try_row_chunk: {e}"))?;
         let g = family
-            .logslope_design
+            .slope_design
             .try_row_chunk(rows)
-            .map_err(|e| format!("bernoulli logslope_design try_row_chunk: {e}"))?;
+            .map_err(|e| format!("bernoulli slope_design try_row_chunk: {e}"))?;
         self.add_weighted_design_grams_from_chunks(&x, &g, w_mm, w_mg, w_gg)?;
         Ok(())
     }
@@ -296,7 +296,7 @@ impl BernoulliBlockHessianAccumulator {
         w_mg: &Array1<f64>,
         w_gg: &Array1<f64>,
     ) -> Result<(), String> {
-        // Biobank-scale lever: the marginal (`h_mm`) and logslope (`h_gg`)
+        // Biobank-scale lever: the marginal (`h_mm`) and slope (`h_gg`)
         // weighted Gram blocks are the dominant `Xᵀ diag(w) X` reductions over
         // n ≈ 356k rows. Route each to the CUDA f64 GEMM when a device is
         // present and the chunk clears the device flop floor. CPU execution is
@@ -322,7 +322,7 @@ impl BernoulliBlockHessianAccumulator {
 
     /// Batch the exact h/w pullback terms for one row chunk.
     ///
-    /// The large marginal/logslope blocks are already accumulated as chunked
+    /// The large marginal/slope blocks are already accumulated as chunked
     /// weighted Gram products.  h/w used to be the remaining per-row dense
     /// path: for every sampled row and every h/w coordinate we performed two
     /// design-row AXPYs (column plus symmetric row).  At large-scale `n` that
@@ -348,7 +348,7 @@ impl BernoulliBlockHessianAccumulator {
         };
 
         let need_marginal = h_q.is_some() || w_q.is_some();
-        let need_logslope = h_g.is_some() || w_g.is_some();
+        let need_slope = h_g.is_some() || w_g.is_some();
         // Zero-copy fast path: when a design is materialised dense, borrow the
         // chunk rows as an `ArrayView2` (wrapped in `CowArray`) instead of
         // `.to_owned()`-copying a fresh `Array2` per chunk per cycle. `fast_atb`
@@ -366,13 +366,13 @@ impl BernoulliBlockHessianAccumulator {
         } else {
             None
         };
-        let g: Option<ndarray::CowArray<'_, f64, ndarray::Ix2>> = if need_logslope {
-            Some(match family.logslope_design.as_dense_ref() {
+        let g: Option<ndarray::CowArray<'_, f64, ndarray::Ix2>> = if need_slope {
+            Some(match family.slope_design.as_dense_ref() {
                 Some(g_full) => g_full.slice(s![rows.clone(), ..]).into(),
                 None => family
-                    .logslope_design
+                    .slope_design
                     .try_row_chunk(rows.clone())
-                    .map_err(|e| format!("bernoulli logslope_design try_row_chunk: {e}"))?
+                    .map_err(|e| format!("bernoulli slope_design try_row_chunk: {e}"))?
                     .into(),
             })
         } else {
@@ -391,13 +391,13 @@ impl BernoulliBlockHessianAccumulator {
             }
         }
         if let (Some(block_h), Some(hg)) = (slices.h.as_ref(), h_g) {
-            let g = g.as_ref().expect("logslope chunk for h/g cross");
+            let g = g.as_ref().expect("slope chunk for h/g cross");
             let cross = gam_linalg::faer_ndarray::fast_atb(g, hg);
             for (local_idx, global_idx) in block_h.clone().enumerate() {
                 let col = cross.column(local_idx);
-                dc.slice_mut(s![slices.logslope.clone(), global_idx])
+                dc.slice_mut(s![slices.slope.clone(), global_idx])
                     .scaled_add(1.0, &col);
-                dc.slice_mut(s![global_idx, slices.logslope.clone()])
+                dc.slice_mut(s![global_idx, slices.slope.clone()])
                     .scaled_add(1.0, &col);
             }
         }
@@ -418,13 +418,13 @@ impl BernoulliBlockHessianAccumulator {
             }
         }
         if let (Some(block_w), Some(wg)) = (slices.w.as_ref(), w_g) {
-            let g = g.as_ref().expect("logslope chunk for w/g cross");
+            let g = g.as_ref().expect("slope chunk for w/g cross");
             let cross = gam_linalg::faer_ndarray::fast_atb(g, wg);
             for (local_idx, global_idx) in block_w.clone().enumerate() {
                 let col = cross.column(local_idx);
-                dc.slice_mut(s![slices.logslope.clone(), global_idx])
+                dc.slice_mut(s![slices.slope.clone(), global_idx])
                     .scaled_add(1.0, &col);
-                dc.slice_mut(s![global_idx, slices.logslope.clone()])
+                dc.slice_mut(s![global_idx, slices.slope.clone()])
                     .scaled_add(1.0, &col);
             }
         }
@@ -447,9 +447,9 @@ impl BernoulliBlockHessianAccumulator {
     /// Add a rank-1 update from psi_row (in the psi block) crossed with the
     /// pullback of a primary-space vector.  Adds both left outer right and right outer left.
     ///
-    /// psi_row lives in block `psi_block_idx` (0=marginal, 1=logslope).
+    /// psi_row lives in block `psi_block_idx` (0=marginal, 1=slope).
     /// right_primary is a primary-space vector; its [0] component maps to marginal,
-    /// [1] to logslope, and the rest to h/w (dense correction).
+    /// [1] to slope, and the rest to h/w (dense correction).
     ///
     /// Design rows are materialized once via `try_row_chunk` and reused across
     /// the psi-index rank-1 sweeps.  Without that, `axpy_row_into` on a Lazy
@@ -482,9 +482,9 @@ impl BernoulliBlockHessianAccumulator {
         let log_chunk = if need_log {
             Some(
                 family
-                    .logslope_design
+                    .slope_design
                     .try_row_chunk(row..row + 1)
-                    .expect("logslope try_row_chunk in add_rank1_psi_cross"),
+                    .expect("slope try_row_chunk in add_rank1_psi_cross"),
             )
         } else {
             None
@@ -519,8 +519,8 @@ impl BernoulliBlockHessianAccumulator {
                         }
                     }
                 }
-                PsiBlock::Logslope => {
-                    // psi=logslope, right=marginal -> h_mg (marginal x logslope)
+                PsiBlock::Slope => {
+                    // psi=slope, right=marginal -> h_mg (marginal x slope)
                     // h_mg += right_primary[0] * outer(x_row, psi)
                     let s = right_primary[0];
                     let pm = x_row.len();
@@ -541,11 +541,11 @@ impl BernoulliBlockHessianAccumulator {
             }
         }
 
-        // Logslope component of right_primary
+        // Slope component of right_primary
         if let Some(g_row) = g_row {
             match psi_block {
                 PsiBlock::Marginal => {
-                    // psi=marginal, right=logslope -> h_mg (marginal x logslope)
+                    // psi=marginal, right=slope -> h_mg (marginal x slope)
                     // h_mg += right_primary[1] * outer(psi, g_row)
                     let s = right_primary[1];
                     let pm = psi_row.len();
@@ -564,8 +564,8 @@ impl BernoulliBlockHessianAccumulator {
                         }
                     }
                 }
-                PsiBlock::Logslope => {
-                    // psi=logslope, right=logslope -> h_gg, symmetric rank-2
+                PsiBlock::Slope => {
+                    // psi=slope, right=slope -> h_gg, symmetric rank-2
                     // h_gg += s * (psi outer g_row + g_row outer psi)
                     let s = right_primary[1];
                     let p = g_row.len();
@@ -594,7 +594,7 @@ impl BernoulliBlockHessianAccumulator {
         if let Some(ref mut dc) = self.dense_correction {
             let psi_range = match psi_block {
                 PsiBlock::Marginal => slices.marginal.clone(),
-                PsiBlock::Logslope => slices.logslope.clone(),
+                PsiBlock::Slope => slices.slope.clone(),
             };
             if let (Some(ph), Some(bh)) = (primary.h.as_ref(), slices.h.as_ref()) {
                 let h_part = right_primary.slice(ndarray::s![ph.start..ph.end]);
@@ -661,11 +661,11 @@ impl BernoulliBlockHessianAccumulator {
         let mut out = Array2::zeros((slices.total, slices.total));
         out.slice_mut(s![slices.marginal.clone(), slices.marginal.clone()])
             .assign(&self.h_mm);
-        out.slice_mut(s![slices.logslope.clone(), slices.logslope.clone()])
+        out.slice_mut(s![slices.slope.clone(), slices.slope.clone()])
             .assign(&self.h_gg);
-        out.slice_mut(s![slices.marginal.clone(), slices.logslope.clone()])
+        out.slice_mut(s![slices.marginal.clone(), slices.slope.clone()])
             .assign(&self.h_mg);
-        out.slice_mut(s![slices.logslope.clone(), slices.marginal.clone()])
+        out.slice_mut(s![slices.slope.clone(), slices.marginal.clone()])
             .assign(&self.h_mg.t());
         if let Some(ref dc) = self.dense_correction {
             out += dc;
@@ -680,7 +680,7 @@ impl BernoulliBlockHessianAccumulator {
             h_mg: self.h_mg,
             dense_correction: self.dense_correction,
             marginal: slices.marginal.clone(),
-            logslope: slices.logslope.clone(),
+            slope: slices.slope.clone(),
             total: slices.total,
         }
     }
@@ -696,7 +696,7 @@ pub(super) struct BernoulliBlockHessianOperator {
     pub(super) h_mg: Array2<f64>,
     pub(super) dense_correction: Option<Array2<f64>>,
     pub(super) marginal: std::ops::Range<usize>,
-    pub(super) logslope: std::ops::Range<usize>,
+    pub(super) slope: std::ops::Range<usize>,
     pub(super) total: usize,
 }
 
@@ -725,7 +725,7 @@ impl HyperOperator for BernoulliBlockHessianOperator {
     /// is ~64 allocations per REML gradient step.
     fn mul_vec_into(&self, v: ArrayView1<'_, f64>, mut out: ArrayViewMut1<'_, f64>) {
         let v_m = v.slice(s![self.marginal.clone()]);
-        let v_g = v.slice(s![self.logslope.clone()]);
+        let v_g = v.slice(s![self.slope.clone()]);
         out.fill(0.0);
         {
             let mut o_m = out.slice_mut(s![self.marginal.clone()]);
@@ -733,7 +733,7 @@ impl HyperOperator for BernoulliBlockHessianOperator {
             o_m += &self.h_mg.dot(&v_g);
         }
         {
-            let mut o_g = out.slice_mut(s![self.logslope.clone()]);
+            let mut o_g = out.slice_mut(s![self.slope.clone()]);
             o_g += &self.h_mg.t().dot(&v_m);
             o_g += &self.h_gg.dot(&v_g);
         }
@@ -744,9 +744,9 @@ impl HyperOperator for BernoulliBlockHessianOperator {
 
     fn bilinear(&self, v: &Array1<f64>, u: &Array1<f64>) -> f64 {
         let v_m = v.slice(s![self.marginal.clone()]);
-        let v_g = v.slice(s![self.logslope.clone()]);
+        let v_g = v.slice(s![self.slope.clone()]);
         let u_m = u.slice(s![self.marginal.clone()]);
-        let u_g = u.slice(s![self.logslope.clone()]);
+        let u_g = u.slice(s![self.slope.clone()]);
         // Diagonal blocks
         let mut total = v_m.dot(&self.h_mm.dot(&u_m));
         total += v_g.dot(&self.h_gg.dot(&u_g));
@@ -764,11 +764,11 @@ impl HyperOperator for BernoulliBlockHessianOperator {
         let mut out = Array2::zeros((self.total, self.total));
         out.slice_mut(s![self.marginal.clone(), self.marginal.clone()])
             .assign(&self.h_mm);
-        out.slice_mut(s![self.logslope.clone(), self.logslope.clone()])
+        out.slice_mut(s![self.slope.clone(), self.slope.clone()])
             .assign(&self.h_gg);
-        out.slice_mut(s![self.marginal.clone(), self.logslope.clone()])
+        out.slice_mut(s![self.marginal.clone(), self.slope.clone()])
             .assign(&self.h_mg);
-        out.slice_mut(s![self.logslope.clone(), self.marginal.clone()])
+        out.slice_mut(s![self.slope.clone(), self.marginal.clone()])
             .assign(&self.h_mg.t());
         if let Some(ref dc) = self.dense_correction {
             out += dc;
@@ -886,7 +886,7 @@ pub(super) struct BernoulliMarginalSlopeFlexRowScratch {
     pub(super) g_au_fixed: Vec<[f64; 4]>,
     pub(super) g_bu_fixed: Vec<[f64; 4]>,
     // Sparse primary schedule compiled for one empirical-grid cell. The
-    // logslope direction is always present; deviation directions are retained
+    // slope direction is always present; deviation directions are retained
     // only when at least one coefficient-jet channel is nonzero. Reusing this
     // buffer makes the moment compiler allocation-free in the warmed row path.
     pub(super) active_cell_primaries: Vec<usize>,
@@ -993,9 +993,9 @@ pub(super) const COEFF_SUPPORT_W: CoeffSupport = CoeffSupport {
 pub(super) struct BernoulliExactNewtonAccumulator {
     pub(super) ll: f64,
     pub(super) grad_marginal: Array1<f64>,
-    pub(super) grad_logslope: Array1<f64>,
+    pub(super) grad_slope: Array1<f64>,
     pub(super) hess_marginal: Array2<f64>,
-    pub(super) hess_logslope: Array2<f64>,
+    pub(super) hess_slope: Array2<f64>,
     pub(super) grad_h: Option<Array1<f64>>,
     pub(super) grad_w: Option<Array1<f64>>,
     pub(super) hess_h: Option<Array2<f64>>,
@@ -1007,9 +1007,9 @@ impl BernoulliExactNewtonAccumulator {
         Self {
             ll: 0.0,
             grad_marginal: Array1::zeros(slices.marginal.len()),
-            grad_logslope: Array1::zeros(slices.logslope.len()),
+            grad_slope: Array1::zeros(slices.slope.len()),
             hess_marginal: Array2::zeros((slices.marginal.len(), slices.marginal.len())),
-            hess_logslope: Array2::zeros((slices.logslope.len(), slices.logslope.len())),
+            hess_slope: Array2::zeros((slices.slope.len(), slices.slope.len())),
             grad_h: slices.h.as_ref().map(|range| Array1::zeros(range.len())),
             grad_w: slices.w.as_ref().map(|range| Array1::zeros(range.len())),
             hess_h: slices
@@ -1047,21 +1047,21 @@ impl BernoulliExactNewtonAccumulator {
             )?;
         }
         {
-            let mut logslope = self.grad_logslope.view_mut();
-            family.logslope_design.axpy_row_into(
+            let mut slope = self.grad_slope.view_mut();
+            family.slope_design.axpy_row_into(
                 row,
                 BernoulliMarginalSlopeFamily::exact_newton_score_component_from_objective_gradient(
                     scratch.grad[1],
                 ),
-                &mut logslope,
+                &mut slope,
             )?;
         }
         family
             .marginal_design
             .syr_row_into(row, scratch.hess[[0, 0]], &mut self.hess_marginal)?;
         family
-            .logslope_design
-            .syr_row_into(row, scratch.hess[[1, 1]], &mut self.hess_logslope)?;
+            .slope_design
+            .syr_row_into(row, scratch.hess[[1, 1]], &mut self.hess_slope)?;
 
         if let (Some(primary_h), Some(grad_h), Some(hess_h)) = (
             primary.h.as_ref(),
@@ -1083,9 +1083,9 @@ impl BernoulliExactNewtonAccumulator {
     pub(super) fn add(&mut self, other: &Self) {
         self.ll += other.ll;
         self.grad_marginal += &other.grad_marginal;
-        self.grad_logslope += &other.grad_logslope;
+        self.grad_slope += &other.grad_slope;
         self.hess_marginal += &other.hess_marginal;
-        self.hess_logslope += &other.hess_logslope;
+        self.hess_slope += &other.hess_slope;
         add_optional_vector(&mut self.grad_h, &other.grad_h);
         add_optional_vector(&mut self.grad_w, &other.grad_w);
         add_optional_matrix(&mut self.hess_h, &other.hess_h);
@@ -1195,7 +1195,7 @@ fn try_gpu_xt_diag_x<S: ndarray::Data<Elem = f64>>(
 
 /// GPU-routed `Xᵀ diag(w) Y` cross-Gram for one materialized row chunk.
 ///
-/// Companion to [`try_gpu_xt_diag_x`] for the marginal↔logslope cross block
+/// Companion to [`try_gpu_xt_diag_x`] for the marginal↔slope cross block
 /// (`h_mg`). Gates on `xtwy_target_is_gpu` (keyed on `(rows, p_x, q)`) and
 /// dispatches to [`gam_gpu::blas::xt_diag_y_cuda`]. CPU is chosen only before
 /// admission; an admitted CUDA execution that returns no result is an error.

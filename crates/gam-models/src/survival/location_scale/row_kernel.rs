@@ -5777,10 +5777,9 @@ mod patterned_order2_perf_tests {
 
     /// #932 release speed gate for the location-scale row. Production is the
     /// complete build-time symbolic lowering emitted from [`sls_row_program`];
-    /// the opponent is the retired strongest manually fused schedule. Both
-    /// consume the same frozen kernel and force their complete V/G/H tuple
-    /// through an optimization barrier. The harness-parsed
-    /// `hand_over_production` token is hand time over generated time.
+    /// the opponents are the retired strongest manually fused schedule and the
+    /// dense generic tower the lowering specialises. Both consume the same
+    /// frozen kernel; each is a `faster` contract on the shared [`SpeedGate`].
     #[test]
     fn release_measure_sls_compiled_vs_strongest_hand_932() {
         let (p, kernel) = fixture();

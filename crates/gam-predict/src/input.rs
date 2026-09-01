@@ -974,23 +974,23 @@ fn build_predict_input_for_model_inner(
                     })?;
             let z_col = resolve_role_col(col_map, z_name, "z")?;
             let z = data.column(z_col).to_owned();
-            let spec_logslope = resolve_termspec_for_prediction(
-                &model.resolved_termspec_logslope.as_ref().cloned(),
+            let spec_slope = resolve_termspec_for_prediction(
+                &model.resolved_slopespec.as_ref().cloned(),
                 training_headers,
                 col_map,
-                "resolved_termspec_logslope",
+                "resolved_slopespec",
             )?;
-            let design_logslope = build_term_collection_design(design_input, &spec_logslope)
+            let design_slope = build_term_collection_design(design_input, &spec_slope)
                 .map_err(|e| PredictInputError::InvalidInput {
-                    reason: format!("failed to build logslope prediction design: {e}"),
+                    reason: format!("failed to build slope prediction design: {e}"),
                 })?;
             let mean_offset = design
                 .compose_offset(offset.view(), "marginal-slope mean prediction")
                 .map_err(|error| PredictInputError::InvalidInput {
                     reason: error.to_string(),
                 })?;
-            let logslope_offset = design_logslope
-                .compose_offset(offset_noise.view(), "marginal-slope logslope prediction")
+            let slope_offset = design_slope
+                .compose_offset(offset_noise.view(), "marginal-slope slope prediction")
                 .map_err(|error| PredictInputError::InvalidInput {
                     reason: error.to_string(),
                 })?;
@@ -999,8 +999,8 @@ fn build_predict_input_for_model_inner(
             Ok(PredictInput {
                 design: design.design.clone(),
                 offset: mean_offset,
-                design_noise: Some(design_logslope.design.clone()),
-                offset_noise: Some(logslope_offset),
+                design_noise: Some(design_slope.design.clone()),
+                offset_noise: Some(slope_offset),
                 auxiliary_scalar: Some(z),
                 auxiliary_matrix,
             })

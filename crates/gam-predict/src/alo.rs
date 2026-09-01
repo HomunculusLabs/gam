@@ -78,11 +78,11 @@ pub struct SavedMarginalSlopeSurvivalAloInput {
     derivative_offset_exit: Array1<f64>,
     marginal_design: DesignMatrix,
     marginal_offset: Array1<f64>,
-    logslope_design: DesignMatrix,
-    /// Entry-time and exit-derivative log-slope designs for a slope that varies
+    slope_design: DesignMatrix,
+    /// Entry-time and exit-derivative slope designs for a slope that varies
     /// along follow-up (gam#2765, gam#2767). `None` is the time-constant slope.
-    logslope_follow_up: Option<(DesignMatrix, DesignMatrix)>,
-    logslope_offset: Array1<f64>,
+    slope_follow_up: Option<(DesignMatrix, DesignMatrix)>,
+    slope_offset: Array1<f64>,
 }
 
 /// One fitted affine block evaluated on survival entry, exit, and exit-time
@@ -399,9 +399,9 @@ impl SavedMarginalSlopeSurvivalAloInput {
         derivative_offset_exit: Array1<f64>,
         marginal_design: DesignMatrix,
         marginal_offset: Array1<f64>,
-        logslope_design: DesignMatrix,
-        logslope_follow_up: Option<(DesignMatrix, DesignMatrix)>,
-        logslope_offset: Array1<f64>,
+        slope_design: DesignMatrix,
+        slope_follow_up: Option<(DesignMatrix, DesignMatrix)>,
+        slope_offset: Array1<f64>,
     ) -> Result<Self, String> {
         let n = event.len();
         if n == 0
@@ -410,12 +410,12 @@ impl SavedMarginalSlopeSurvivalAloInput {
             || offset_exit.len() != n
             || derivative_offset_exit.len() != n
             || marginal_offset.len() != n
-            || logslope_offset.len() != n
+            || slope_offset.len() != n
             || design_entry.nrows() != n
             || design_exit.nrows() != n
             || design_derivative_exit.nrows() != n
             || marginal_design.nrows() != n
-            || logslope_design.nrows() != n
+            || slope_design.nrows() != n
         {
             return Err(
                 "saved survival marginal-slope ALO row channels are not aligned".to_string(),
@@ -425,33 +425,33 @@ impl SavedMarginalSlopeSurvivalAloInput {
             || design_entry.ncols() != design_exit.ncols()
             || design_entry.ncols() != design_derivative_exit.ncols()
             || marginal_design.ncols() == 0
-            || logslope_design.ncols() == 0
+            || slope_design.ncols() == 0
         {
             return Err(format!(
-                "saved survival marginal-slope ALO design topology is invalid: time entry/exit/derivative={}/{}/{}, marginal={}, logslope={}",
+                "saved survival marginal-slope ALO design topology is invalid: time entry/exit/derivative={}/{}/{}, marginal={}, slope={}",
                 design_entry.ncols(),
                 design_exit.ncols(),
                 design_derivative_exit.ncols(),
                 marginal_design.ncols(),
-                logslope_design.ncols(),
+                slope_design.ncols(),
             ));
         }
-        if let Some((entry, derivative_exit)) = logslope_follow_up.as_ref() {
+        if let Some((entry, derivative_exit)) = slope_follow_up.as_ref() {
             // A follow-up channel that is not the same map at a different time
             // is not a follow-up channel. Checking the shape here means the
             // replay can index all three without a per-row guard.
             if entry.nrows() != n
                 || derivative_exit.nrows() != n
-                || entry.ncols() != logslope_design.ncols()
-                || derivative_exit.ncols() != logslope_design.ncols()
+                || entry.ncols() != slope_design.ncols()
+                || derivative_exit.ncols() != slope_design.ncols()
             {
                 return Err(format!(
-                    "saved survival marginal-slope ALO log-slope follow-up channels are {}x{} and {}x{} against an exit design of {n}x{}",
+                    "saved survival marginal-slope ALO slope follow-up channels are {}x{} and {}x{} against an exit design of {n}x{}",
                     entry.nrows(),
                     entry.ncols(),
                     derivative_exit.nrows(),
                     derivative_exit.ncols(),
-                    logslope_design.ncols(),
+                    slope_design.ncols(),
                 ));
             }
         }
@@ -476,9 +476,9 @@ impl SavedMarginalSlopeSurvivalAloInput {
             derivative_offset_exit,
             marginal_design,
             marginal_offset,
-            logslope_design,
-            logslope_follow_up,
-            logslope_offset,
+            slope_design,
+            slope_follow_up,
+            slope_offset,
         })
     }
 }
@@ -1483,9 +1483,9 @@ fn compute_saved_bernoulli_marginal_slope_alo(
     let replay =
         predictor.saved_alo_replay(input, observations.response, observations.prior_weights)?;
     let marginal_dimension = predictor.beta_marginal.len();
-    let logslope_dimension = predictor.beta_logslope.len();
+    let slope_dimension = predictor.beta_slope.len();
     let parameter_dimension = marginal_dimension
-        + logslope_dimension
+        + slope_dimension
         + replay.score_warp_dimension
         + replay.link_deviation_dimension;
     let geometry = require_saved_geometry(model, class, parameter_dimension)?;
@@ -1515,9 +1515,9 @@ fn compute_saved_bernoulli_marginal_slope_alo(
     coordinate_ranges.push(0..marginal_dimension);
     coordinate_names.push("marginal-eta".to_string());
     coordinate_designs.push(secondary_design.clone());
-    coordinate_ranges.push(marginal_dimension..marginal_dimension + logslope_dimension);
+    coordinate_ranges.push(marginal_dimension..marginal_dimension + slope_dimension);
     coordinate_names.push("slope".to_string());
-    let mut coefficient = marginal_dimension + logslope_dimension;
+    let mut coefficient = marginal_dimension + slope_dimension;
     for coordinate in 0..replay.score_warp_dimension {
         coordinate_designs.push(constant_scalar_design(n));
         coordinate_ranges.push(coefficient..coefficient + 1);
@@ -2751,19 +2751,19 @@ fn compute_saved_marginal_slope_survival_alo(
     }
     let time_beta = &fit.blocks[0].beta;
     let marginal_beta = &fit.blocks[1].beta;
-    let logslope_beta = &fit.blocks[2].beta;
+    let slope_beta = &fit.blocks[2].beta;
     if input.design_entry.ncols() != time_beta.len()
         || input.marginal_design.ncols() != marginal_beta.len()
-        || input.logslope_design.ncols() != logslope_beta.len()
+        || input.slope_design.ncols() != slope_beta.len()
     {
         return Err(invalid(format!(
-            "saved survival marginal-slope ALO raw design/beta mismatch: time={}/{}, marginal={}/{}, logslope={}/{}",
+            "saved survival marginal-slope ALO raw design/beta mismatch: time={}/{}, marginal={}/{}, slope={}/{}",
             input.design_entry.ncols(),
             time_beta.len(),
             input.marginal_design.ncols(),
             marginal_beta.len(),
-            input.logslope_design.ncols(),
-            logslope_beta.len(),
+            input.slope_design.ncols(),
+            slope_beta.len(),
         )));
     }
     let mut cursor = 3usize;
@@ -2891,12 +2891,12 @@ fn compute_saved_marginal_slope_survival_alo(
             derivative_offset_exit: &input.derivative_offset_exit,
             marginal_design: &input.marginal_design,
             marginal_offset: &input.marginal_offset,
-            logslope_design: &input.logslope_design,
-            logslope_follow_up: input
-                .logslope_follow_up
+            slope_design: &input.slope_design,
+            slope_follow_up: input
+                .slope_follow_up
                 .as_ref()
                 .map(|(entry, derivative_exit)| (entry, derivative_exit)),
-            logslope_offset: &input.logslope_offset,
+            slope_offset: &input.slope_offset,
             latent_z: &normalized_z,
             event: &input.event,
             prior_weights: observations.prior_weights,
@@ -2909,7 +2909,7 @@ fn compute_saved_marginal_slope_survival_alo(
             time_wiggle_ncols,
             time_beta,
             marginal_beta,
-            logslope_beta,
+            slope_beta,
             score_warp_beta,
             link_deviation_beta,
             influence_beta,
@@ -2939,7 +2939,7 @@ fn compute_saved_marginal_slope_survival_alo(
             let label = match block {
                 0 => "time",
                 1 => "marginal",
-                2 => "logslope",
+                2 => "slope",
                 _ if runtime.score_warp.is_some() && block == 3 => "score-warp",
                 _ if runtime.link_deviation.is_some()
                     && block == 3 + usize::from(runtime.score_warp.is_some()) =>

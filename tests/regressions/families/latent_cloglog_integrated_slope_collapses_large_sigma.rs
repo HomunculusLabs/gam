@@ -42,7 +42,7 @@ use gam::families::survival::lognormal_kernel::latent_cloglog_jet5;
 use gam::quadrature::QuadratureContext;
 
 #[test]
-fn integrated_cloglog_slope_matches_its_own_mean_finite_difference() {
+fn integrated_cslope_matches_its_own_mean_finite_difference() {
     let ctx = QuadratureContext::new();
 
     // (eta, sigma) points in the large-σ regime. All have a strictly positive,

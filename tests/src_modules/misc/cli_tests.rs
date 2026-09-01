@@ -632,7 +632,7 @@ fn location_scale_fit_args(
         analytic_penalties: None,
         smooth_descriptors: None,
         predict_noise: Some(noise_formula.to_string()),
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -660,8 +660,8 @@ fn location_scale_fit_args(
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
@@ -913,7 +913,7 @@ fn required_columns_for_fit_includes_auxiliary_formula_columns() {
         "y ~ x + s(pc1, pc2, type=tensor)",
         "z + smooth(w)",
     );
-    args.logslope_formula = Some("slope_x + slope_z".to_string());
+    args.slope_formula = Some("slope_x + slope_z".to_string());
     args.z_column = Some("z_anchor".to_string());
 
     let required = required_columns_for_fit(&args, &parsed)
@@ -1254,7 +1254,7 @@ fn cli_firth_preflight_accepts_redundant_survival_marginal_slope_flag() {
         "unused",
     );
     args.predict_noise = None;
-    args.logslope_formula = Some("1".to_string());
+    args.slope_formula = Some("1".to_string());
     args.z_column = Some("z".to_string());
     args.survival_likelihood = Some("marginal-slope".to_string());
     args.firth = true;
@@ -1349,7 +1349,7 @@ fn issue_2116_cli_standard_fit_gates_duchon_operator_penalties_for_poisson() {
         analytic_penalties: None,
         smooth_descriptors: None,
         predict_noise: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -1382,8 +1382,8 @@ fn issue_2116_cli_standard_fit_gates_duchon_operator_penalties_for_poisson() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
@@ -1499,7 +1499,7 @@ fn cli_and_engine_agree_on_the_left_truncated_survival_anchor_2631() {
         analytic_penalties: None,
         smooth_descriptors: None,
         predict_noise: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -1527,8 +1527,8 @@ fn cli_and_engine_agree_on_the_left_truncated_survival_anchor_2631() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
@@ -1614,7 +1614,7 @@ fn cli_survival_time_anchor_is_honored_on_the_default_transformation_route_2631(
         analytic_penalties: None,
         smooth_descriptors: None,
         predict_noise: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -1645,8 +1645,8 @@ fn cli_survival_time_anchor_is_honored_on_the_default_transformation_route_2631(
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
@@ -1720,7 +1720,7 @@ fn cli_weibull_route_anchors_left_truncated_data_and_honors_the_override_2631() 
             analytic_penalties: None,
             smooth_descriptors: None,
             predict_noise: None,
-            logslope_formula: None,
+            slope_formula: None,
             z_column: None,
             weights_column: None,
             offset_column: None,
@@ -1748,8 +1748,8 @@ fn cli_weibull_route_anchors_left_truncated_data_and_honors_the_override_2631() 
             threshold_time_degree: 3,
             sigma_time_k: None,
             sigma_time_degree: 3,
-            logslope_time_k: None,
-            logslope_time_degree: 3,
+            slope_time_k: None,
+            slope_time_degree: 3,
             adaptive_regularization: false,
             scale_dimensions: false,
             precompute_conformal: true,
@@ -1878,7 +1878,7 @@ fn cli_surv_predict_noise_routes_to_survival_location_scale() {
         analytic_penalties: None,
         smooth_descriptors: None,
         predict_noise: Some("1".to_string()),
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -1906,8 +1906,8 @@ fn cli_surv_predict_noise_routes_to_survival_location_scale() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
@@ -2176,7 +2176,7 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
         analytic_penalties: None,
         smooth_descriptors: None,
         predict_noise: None,
-        logslope_formula: Some("1".to_string()),
+        slope_formula: Some("1".to_string()),
         z_column: Some("z".to_string()),
         weights_column: None,
         offset_column: None,
@@ -2214,8 +2214,8 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
@@ -2303,7 +2303,7 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_main_formula() {
         analytic_penalties: None,
         smooth_descriptors: None,
         predict_noise: None,
-        logslope_formula: Some("1".to_string()),
+        slope_formula: Some("1".to_string()),
         z_column: Some("z".to_string()),
         weights_column: None,
         offset_column: None,
@@ -2331,8 +2331,8 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_main_formula() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
@@ -2347,7 +2347,7 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_main_formula() {
 }
 
 #[test]
-fn cli_bernoulli_marginal_slope_rejects_z_column_in_logslope_formula() {
+fn cli_bernoulli_marginal_slope_rejects_z_column_in_slope_formula() {
     let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
     let train_path = td.path().join("train.csv");
     write_bernoulli_marginal_slope_train_csv(&train_path);
@@ -2364,7 +2364,7 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_logslope_formula() {
         analytic_penalties: None,
         smooth_descriptors: None,
         predict_noise: None,
-        logslope_formula: Some("1 + s(z, type=duchon, centers=6)".to_string()),
+        slope_formula: Some("1 + s(z, type=duchon, centers=6)".to_string()),
         z_column: Some("z".to_string()),
         weights_column: None,
         offset_column: None,
@@ -2392,8 +2392,8 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_logslope_formula() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
@@ -2401,14 +2401,14 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_logslope_formula() {
         pilot_subsample_threshold: 0,
         out: None,
     })
-    .expect_err("logslope formula should reject z-column reuse");
+    .expect_err("slope formula should reject z-column reuse");
 
     assert!(err.contains("bernoulli marginal-slope reserves z column 'z'"));
-    assert!(err.contains("--logslope-formula"));
+    assert!(err.contains("--slope-formula"));
 }
 
 #[test]
-fn saved_bernoulli_marginal_slope_replays_main_and_logslope_deviation_runtimes() {
+fn saved_bernoulli_marginal_slope_replays_main_and_slope_deviation_runtimes() {
     let saved_runtime = || SavedCompiledFlexBlock {
         kernel: exact_kernel::ANCHORED_DEVIATION_KERNEL.to_string(),
         breakpoints: vec![-1.0, 1.0],
@@ -2493,13 +2493,13 @@ fn saved_bernoulli_marginal_slope_replays_main_and_logslope_deviation_runtimes()
     payload.data_schema = Some(DataSchema { columns: vec![] });
     payload.set_training_feature_metadata(vec![], vec![]);
     payload.resolved_termspec = Some(empty_termspec());
-    payload.resolved_termspec_logslope = Some(empty_termspec());
-    payload.formula_logslope =
+    payload.resolved_slopespec = Some(empty_termspec());
+    payload.slope_formula =
         Some("1 + linkwiggle(degree=3, internal_knots=4, penalty_order=\"2\")".to_string());
     payload.z_column = Some("z".to_string());
     payload.latent_z_normalization = Some(SavedLatentZNormalization { mean: 0.0, sd: 1.0 });
     payload.marginal_baseline = Some(0.0);
-    payload.logslope_baseline = Some(0.0);
+    payload.baseline_slope = Some(0.0);
     payload.link = Some(InverseLink::Standard(StandardLink::Probit));
     payload.score_warp_runtime = Some(saved_runtime());
     payload.link_deviation_runtime = Some(saved_runtime());
@@ -2513,7 +2513,7 @@ fn saved_bernoulli_marginal_slope_replays_main_and_logslope_deviation_runtimes()
     });
     assert!(
         runtime.score_warp.is_some(),
-        "logslope-formula linkwiggle should persist score-warp runtime"
+        "slope-formula linkwiggle should persist score-warp runtime"
     );
     assert!(
         runtime.link_deviation.is_some(),
@@ -2845,7 +2845,7 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         analytic_penalties: None,
         smooth_descriptors: None,
         predict_noise: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -2883,8 +2883,8 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         adaptive_regularization: true,
         scale_dimensions: false,
         precompute_conformal: true,
@@ -2968,7 +2968,12 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
     let band_text = fs::read_to_string(&band_path)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "read band csv", e));
     let band_header = band_text.lines().next().unwrap_or("");
-    for required in ["mean", "std_error", "mean_lower", "mean_upper"] {
+    for required in [
+        "posterior_mean",
+        "posterior_mean_standard_error",
+        "posterior_mean_lower",
+        "posterior_mean_upper",
+    ] {
         assert!(
             band_header.contains(required),
             "posterior-mean prediction with uncertainty is missing {required}: {band_header}"
@@ -2992,7 +2997,7 @@ fn binomial_link_fit_args(data: PathBuf, out: PathBuf, formula: &str) -> FitArgs
         analytic_penalties: None,
         smooth_descriptors: None,
         predict_noise: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -3030,8 +3035,8 @@ fn binomial_link_fit_args(data: PathBuf, out: PathBuf, formula: &str) -> FitArgs
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
@@ -3160,7 +3165,7 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         analytic_penalties: None,
         smooth_descriptors: None,
         predict_noise: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -3193,8 +3198,8 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         adaptive_regularization: false,
         scale_dimensions: false,
         precompute_conformal: true,
@@ -3278,7 +3283,12 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
     let band_text = fs::read_to_string(&band_path)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "read band csv", e));
     let band_header = band_text.lines().next().unwrap_or("");
-    for required in ["mean", "std_error", "mean_lower", "mean_upper"] {
+    for required in [
+        "posterior_mean",
+        "posterior_mean_standard_error",
+        "posterior_mean_lower",
+        "posterior_mean_upper",
+    ] {
         assert!(
             band_header.contains(required),
             "posterior-mean prediction with uncertainty is missing {required}: {band_header}"
@@ -4591,20 +4601,20 @@ fn marginal_slope_linkwiggle_rejects_non_cubic_degree_at_routing_boundary() {
 }
 
 #[test]
-fn marginal_slope_deviation_routing_splits_main_and_logslope_linkwiggles() {
+fn marginal_slope_deviation_routing_splits_main_and_slope_linkwiggles() {
     let parsed_main = parse_formula(
             "y ~ x + linkwiggle(degree=3, internal_knots=9, penalty_order=\"1,3\", double_penalty=false)",
         )
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "main formula", e));
-    let (_, parsed_logslope) = parse_matching_auxiliary_formula(
+    let (_, parsed_slope) = parse_matching_auxiliary_formula(
         "1 + linkwiggle(degree=3, internal_knots=7, penalty_order=\"2,3\")",
         "y",
-        "--logslope-formula",
+        "--slope-formula",
     )
-    .unwrap_or_else(|e| panic!("{} failed: {:?}", "logslope formula", e));
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "slope formula", e));
     let routed = super::route_marginal_slope_deviation_blocks(
         parsed_main.linkwiggle.as_ref(),
-        parsed_logslope.linkwiggle.as_ref(),
+        parsed_slope.linkwiggle.as_ref(),
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "routing", e));
     let link_dev = routed
@@ -4612,7 +4622,7 @@ fn marginal_slope_deviation_routing_splits_main_and_logslope_linkwiggles() {
         .unwrap_or_else(|| panic!("{} failed", "main link-deviation config"));
     let score_warp = routed
         .score_warp
-        .unwrap_or_else(|| panic!("{} failed", "logslope score-warp config"));
+        .unwrap_or_else(|| panic!("{} failed", "slope score-warp config"));
     assert_eq!(link_dev.degree, 3);
     assert_eq!(link_dev.num_internal_knots, 9);
     assert_eq!(link_dev.penalty_order, 3);
@@ -4628,22 +4638,22 @@ fn marginal_slope_deviation_routing_splits_main_and_logslope_linkwiggles() {
 #[test]
 fn marginal_slope_routing_rejects_non_cubic_in_either_slot() {
     // #384: rejection must trigger from either the main (link-deviation)
-    // or logslope (score-warp) slot, since both feed the cubic runtime.
+    // or slope (score-warp) slot, since both feed the cubic runtime.
     let parsed_main = parse_formula("y ~ x + linkwiggle(degree=4, internal_knots=9)")
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "main formula parses", e));
     let err = super::route_marginal_slope_deviation_blocks(parsed_main.linkwiggle.as_ref(), None)
         .expect_err("non-cubic main linkwiggle must be rejected at routing");
     assert!(err.contains("degree must be 3"), "got: {err}");
 
-    let (_, parsed_logslope) = parse_matching_auxiliary_formula(
+    let (_, parsed_slope) = parse_matching_auxiliary_formula(
         "1 + linkwiggle(degree=5, internal_knots=7)",
         "y",
-        "--logslope-formula",
+        "--slope-formula",
     )
-    .unwrap_or_else(|e| panic!("{} failed: {:?}", "logslope formula parses", e));
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "slope formula parses", e));
     let err =
-        super::route_marginal_slope_deviation_blocks(None, parsed_logslope.linkwiggle.as_ref())
-            .expect_err("non-cubic logslope linkwiggle must be rejected at routing");
+        super::route_marginal_slope_deviation_blocks(None, parsed_slope.linkwiggle.as_ref())
+            .expect_err("non-cubic slope linkwiggle must be rejected at routing");
     assert!(err.contains("degree must be 3"), "got: {err}");
 }
 
@@ -4766,7 +4776,7 @@ fn bernoulli_marginal_slope_saved_model_persists_exact_kernel_metadata_only() {
         Some(SavedLatentZNormalization { mean: 0.2, sd: 1.3 })
     );
     assert_eq!(model.payload().marginal_baseline, Some(0.0));
-    assert_eq!(model.payload().logslope_baseline, Some(0.0));
+    assert_eq!(model.payload().baseline_slope, Some(0.0));
     assert_eq!(
         model.payload().link.as_ref(),
         Some(&InverseLink::Standard(StandardLink::Probit))
@@ -4802,10 +4812,10 @@ fn cli_and_ffi_bernoulli_marginal_slope_payloads_have_one_contract() {
     let make_inputs = || BernoulliMarginalSlopeInputs {
         formula: "y ~ 1".to_string(),
         data_schema: schema.clone(),
-        logslope_formula: "y ~ z".to_string(),
+        slope_formula: "y ~ z".to_string(),
         z_column: "z".to_string(),
         resolved_marginalspec: empty_termspec(),
-        resolved_logslopespec: empty_termspec(),
+        resolved_slopespec: empty_termspec(),
         fit_result: core_saved_fit_result(
             array![0.3],
             Array1::zeros(0),
@@ -4818,7 +4828,7 @@ fn cli_and_ffi_bernoulli_marginal_slope_payloads_have_one_contract() {
         // is a no-op (p_marginal == block-0 width).
         p_marginal: 1,
         baseline_marginal: -0.2,
-        baseline_logslope: 0.7,
+        baseline_slope: 0.7,
         latent_z_normalization: SavedLatentZNormalization { mean: 1.1, sd: 2.2 },
         latent_measure: LatentMeasureKind::StandardNormal,
         latent_z_rank_int_calibration: None,
@@ -4855,14 +4865,14 @@ fn cli_and_ffi_bernoulli_marginal_slope_payloads_have_one_contract() {
 
     // The semantic mirror fields the marginal-slope contract depends on must
     // match exactly between the two routes — this is what used to drift.
-    assert_eq!(cli_payload.formula_logslope, ffi_payload.formula_logslope);
-    assert_eq!(cli_payload.formula_logslopes, ffi_payload.formula_logslopes);
+    assert_eq!(cli_payload.slope_formula, ffi_payload.slope_formula);
+    assert_eq!(cli_payload.slope_formulas, ffi_payload.slope_formulas);
     assert_eq!(cli_payload.z_column, ffi_payload.z_column);
     assert_eq!(cli_payload.z_columns, ffi_payload.z_columns);
-    assert_eq!(cli_payload.logslope_baseline, ffi_payload.logslope_baseline);
+    assert_eq!(cli_payload.baseline_slope, ffi_payload.baseline_slope);
     assert_eq!(
-        cli_payload.logslope_baselines,
-        ffi_payload.logslope_baselines
+        cli_payload.baseline_slopes,
+        ffi_payload.baseline_slopes
     );
     assert_eq!(cli_payload.marginal_baseline, ffi_payload.marginal_baseline);
     // `TermCollectionSpec` is not `PartialEq`; the resolved-termspec
@@ -4877,16 +4887,16 @@ fn cli_and_ffi_bernoulli_marginal_slope_payloads_have_one_contract() {
     // The vector mirror fields must be the singletons of their scalar peers
     // — the core assembler is the single place that guarantees this.
     assert_eq!(
-        cli_payload.formula_logslopes.as_deref(),
-        Some([cli_payload.formula_logslope.clone().unwrap()].as_slice())
+        cli_payload.slope_formulas.as_deref(),
+        Some([cli_payload.slope_formula.clone().unwrap()].as_slice())
     );
     assert_eq!(
         cli_payload.z_columns.as_deref(),
         Some([cli_payload.z_column.clone().unwrap()].as_slice())
     );
     assert_eq!(
-        cli_payload.logslope_baselines.as_deref(),
-        Some([cli_payload.logslope_baseline.unwrap()].as_slice())
+        cli_payload.baseline_slopes.as_deref(),
+        Some([cli_payload.baseline_slope.unwrap()].as_slice())
     );
 
     // Full snapshot parity: serialize both, normalize away the
@@ -5091,9 +5101,9 @@ fn saved_marginal_slope_models_require_latent_z_normalization() {
     survival.set_training_feature_metadata(vec![], vec![]);
     survival.resolved_termspec = Some(empty_termspec());
     survival.resolved_termspec_noise = Some(empty_termspec());
-    survival.formula_logslope = Some("1".to_string());
+    survival.slope_formula = Some("1".to_string());
     survival.z_column = Some("z".to_string());
-    survival.logslope_baseline = Some(0.0);
+    survival.baseline_slope = Some(0.0);
     survival.survival_entry = Some("entry".to_string());
     survival.survival_exit = Some("exit".to_string());
     survival.survival_event = Some("event".to_string());
@@ -5904,12 +5914,12 @@ fn parse_survival_time_basis_accepts_ispline() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -5959,12 +5969,12 @@ fn parse_survival_time_basis_rejects_nonstructural_bases() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -6285,7 +6295,7 @@ fn saved_survival_marginal_slope_predictor_keeps_operator_backed_designs_lazy() 
     let time_exit_dense = array![[0.2], [0.6]];
     let time_deriv_dense = array![[1.0], [1.0]];
     let cov_dense = array![[1.0, -0.5], [0.3, 0.8]];
-    let logslope_dense = array![[0.7], [-0.2]];
+    let slope_dense = array![[0.7], [-0.2]];
     let time_build = gam::families::survival::construction::SurvivalTimeBuildOutput {
         x_entry_time: nondensify_design(time_entry_dense.clone()),
         x_exit_time: nondensify_design(time_exit_dense.clone()),
@@ -6351,7 +6361,7 @@ fn saved_survival_marginal_slope_predictor_keeps_operator_backed_designs_lazy() 
     payload.survival_likelihood = Some("marginal-slope".to_string());
     payload.survival_distribution = Some(ResidualDistribution::Gaussian);
     payload.survival_time_basis = Some("ispline".to_string());
-    payload.formula_logslope = Some("ls ~ 1".to_string());
+    payload.slope_formula = Some("ls ~ 1".to_string());
     payload.z_column = Some("z".to_string());
     payload.latent_z_normalization = Some(SavedLatentZNormalization { mean: 0.0, sd: 1.0 });
     // Marginal-slope saved-model invariant requires `latent_measure` to be
@@ -6366,12 +6376,12 @@ fn saved_survival_marginal_slope_predictor_keeps_operator_backed_designs_lazy() 
     // invariant without standing in for anything the assertions read. Same
     // rationale as the minimal `beta_covariance` above.
     payload.survival_marginal_slope_score_covariance = Some(vec![vec![1.0]]);
-    payload.logslope_baseline = Some(0.0);
+    payload.baseline_slope = Some(0.0);
     payload.link = Some(InverseLink::Standard(StandardLink::Probit));
     let model = SavedModel::from_payload(payload);
 
     let cov_design = nondensify_design(cov_dense.clone());
-    let logslope_design = nondensify_design(logslope_dense.clone());
+    let slope_design = nondensify_design(slope_dense.clone());
     let z = array![-1.0, 0.5];
     let eta_offset_entry = array![0.05, -0.02];
     let eta_offset_exit = array![0.1, -0.03];
@@ -6385,7 +6395,7 @@ fn saved_survival_marginal_slope_predictor_keeps_operator_backed_designs_lazy() 
         "z",
         &z,
         &cov_design,
-        &logslope_design,
+        &slope_design,
         &time_build,
         &eta_offset_entry,
         &eta_offset_exit,
@@ -6408,10 +6418,10 @@ fn saved_survival_marginal_slope_predictor_keeps_operator_backed_designs_lazy() 
         pred_input
             .design_noise
             .as_ref()
-            .unwrap_or_else(|| panic!("{} failed", "logslope design"))
+            .unwrap_or_else(|| panic!("{} failed", "slope design"))
             .as_dense_ref()
             .is_none(),
-        "saved survival predictor should keep the logslope design operator-backed"
+        "saved survival predictor should keep the slope design operator-backed"
     );
 
     let prediction = predictor
@@ -6426,7 +6436,7 @@ fn saved_survival_marginal_slope_predictor_keeps_operator_backed_designs_lazy() 
         + cov_dense.dot(&array![0.5, -0.25])
         + &eta_offset_exit
         + &primary_offset;
-    let slope = logslope_dense.dot(&array![0.8]) + &noise_offset;
+    let slope = slope_dense.dot(&array![0.8]) + &noise_offset;
     let (expected_eta, expected_mean) =
             saved_survival_marginal_slope_test_support::predict_saved_survival_marginal_slope_flex_exit(
                 &q_exit,
@@ -6542,7 +6552,7 @@ fn saved_survival_marginal_slope_prediction_replays_latent_z_normalization() {
     );
     payload.resolved_termspec = Some(empty_termspec());
     payload.resolved_termspec_noise = Some(empty_termspec());
-    payload.resolved_termspec_logslope = Some(empty_termspec());
+    payload.resolved_slopespec = Some(empty_termspec());
     payload.survival_entry = Some("entry".to_string());
     payload.survival_exit = Some("exit".to_string());
     payload.survival_event = Some("event".to_string());
@@ -6552,7 +6562,7 @@ fn saved_survival_marginal_slope_prediction_replays_latent_z_normalization() {
     payload.survival_distribution = Some(ResidualDistribution::Gaussian);
     payload.survival_time_basis = Some("ispline".to_string());
     payload.survival_time_anchor = Some(0.0);
-    payload.formula_logslope = Some("1".to_string());
+    payload.slope_formula = Some("1".to_string());
     payload.z_column = Some("z".to_string());
     payload.latent_z_normalization = Some(SavedLatentZNormalization { mean: 1.0, sd: 2.0 });
     // Marginal-slope saved-model invariant requires `latent_measure`; this
@@ -6567,7 +6577,7 @@ fn saved_survival_marginal_slope_prediction_replays_latent_z_normalization() {
     // invariant without standing in for anything the assertions read. Same
     // rationale as the minimal `beta_covariance` above.
     payload.survival_marginal_slope_score_covariance = Some(vec![vec![1.0]]);
-    payload.logslope_baseline = Some(0.0);
+    payload.baseline_slope = Some(0.0);
     payload.link = Some(InverseLink::Standard(StandardLink::Probit));
     let model = SavedModel::from_payload(payload);
     model.validate_for_persistence().unwrap_or_else(|e| {
@@ -6590,7 +6600,7 @@ fn saved_survival_marginal_slope_prediction_replays_latent_z_normalization() {
         smooth_lambda: None,
     };
     let cov_design = DesignMatrix::from(Array2::<f64>::zeros((1, 0)));
-    let logslope_design = DesignMatrix::from(array![[1.0]]);
+    let slope_design = DesignMatrix::from(array![[1.0]]);
     let z_raw = array![3.0];
     let eta_offset_entry = array![0.0];
     let eta_offset_exit = array![0.0];
@@ -6604,7 +6614,7 @@ fn saved_survival_marginal_slope_prediction_replays_latent_z_normalization() {
         "z",
         &z_raw,
         &cov_design,
-        &logslope_design,
+        &slope_design,
         &time_build,
         &eta_offset_entry,
         &eta_offset_exit,
@@ -7361,12 +7371,12 @@ fn parse_survival_inverse_link_accepts_sas_init() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -7424,12 +7434,12 @@ fn survival_args_for_inverse_link_test() -> SurvivalArgs {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -7548,12 +7558,12 @@ fn parse_survival_inverse_link_supports_loglog_and_cauchit() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -7633,12 +7643,12 @@ fn parse_survival_inverse_link_accepts_flexible_standard_links() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -7684,12 +7694,12 @@ fn parse_survival_inverse_link_rejects_flexible_blended_links() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -7736,12 +7746,12 @@ fn parse_survival_inverse_link_reports_survival_specific_supported_links() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -7790,12 +7800,12 @@ fn parse_survival_inverse_link_accepts_loglog_and_cauchit() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -8245,12 +8255,12 @@ fn survival_integration_small_dataset_converges() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: Some(out_path.clone()),
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -8313,12 +8323,12 @@ fn survival_timewiggle_with_parametric_baseline_skips_base_basis_requirement() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: Some(out_path.clone()),
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -8385,12 +8395,12 @@ fn survival_location_scale_rejects_linkwiggle_for_mixture_inverse_link() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: None,
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -8453,12 +8463,12 @@ fn survival_location_scale_saved_fit_preserves_linkwiggle_metadata() {
         threshold_time_degree: 3,
         sigma_time_k: None,
         sigma_time_degree: 3,
-        logslope_time_k: None,
-        logslope_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
         scale_dimensions: false,
         pilot_subsample_threshold: 0,
         out: Some(out_path.clone()),
-        logslope_formula: None,
+        slope_formula: None,
         z_column: None,
         weights_column: None,
         offset_column: None,
@@ -9313,12 +9323,12 @@ fn probe_2695_live_warp() {
             threshold_time_degree: 3,
             sigma_time_k: None,
             sigma_time_degree: 3,
-            logslope_time_k: None,
-            logslope_time_degree: 3,
+            slope_time_k: None,
+            slope_time_degree: 3,
             scale_dimensions: false,
             pilot_subsample_threshold: 0,
             out: Some(out_path.clone()),
-            logslope_formula: None,
+            slope_formula: None,
             z_column: None,
             weights_column: None,
             offset_column: None,
@@ -9351,4 +9361,3 @@ fn probe_2695_live_warp() {
         }
     }
 }
-

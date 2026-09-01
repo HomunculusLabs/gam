@@ -82,7 +82,7 @@ fn build_problem(n: usize, flex: bool) -> (Array2<f64>, BernoulliMarginalSlopeTe
     }));
     let weights = Array1::ones(n);
     let marginal_offset = Array1::<f64>::zeros(n);
-    let logslope_offset = Array1::<f64>::zeros(n);
+    let slope_offset = Array1::<f64>::zeros(n);
 
     let smooth = SmoothTermSpec {
         frozen_parametric_residualization: None,
@@ -110,7 +110,7 @@ fn build_problem(n: usize, flex: bool) -> (Array2<f64>, BernoulliMarginalSlopeTe
         random_effect_terms: vec![],
         smooth_terms: vec![smooth],
     };
-    let logslopespec = TermCollectionSpec {
+    let slopespec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![],
@@ -127,9 +127,9 @@ fn build_problem(n: usize, flex: bool) -> (Array2<f64>, BernoulliMarginalSlopeTe
         z,
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginalspec,
-        logslopespec,
+        slopespec,
         marginal_offset,
-        logslope_offset,
+        slope_offset,
         frailty: FrailtySpec::None,
         score_warp,
         link_dev,

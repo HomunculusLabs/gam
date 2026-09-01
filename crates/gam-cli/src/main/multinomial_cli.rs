@@ -118,9 +118,9 @@ pub(crate) fn run_fit_multinomial(
     if args.predict_noise.is_some() {
         return Err("--predict-noise is not supported for --family multinomial".to_string());
     }
-    if args.logslope_formula.is_some() || args.z_column.is_some() {
+    if args.slope_formula.is_some() || args.z_column.is_some() {
         return Err(
-            "--logslope-formula/--z-column is not supported for --family multinomial".to_string(),
+            "--slope-formula/--z-column is not supported for --family multinomial".to_string(),
         );
     }
     if fit_config.transformation_normal {

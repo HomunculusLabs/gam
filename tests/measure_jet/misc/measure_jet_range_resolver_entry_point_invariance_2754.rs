@@ -14,7 +14,7 @@
 //! ```text
 //!   gaussian entry, screened   ell = 2.5197
 //!   BMS marginal, geometry     ell = 1.0807     (2.33x apart)
-//!   BMS logslope, geometry     ell = 1.0807
+//!   BMS slope, geometry     ell = 1.0807
 //!   ...on the SAME 10 centers, the same extent, the same band floor 1.0807.
 //! ```
 //!
@@ -39,7 +39,7 @@
 //!
 //! The comparison arm pins `learn_length_scale=false` because the standard entry
 //! LEARNS the range after seeding it, and this test is about the seed. BMS
-//! freezes the dial itself (its coupled marginal/log-slope pair cannot carry a
+//! freezes the dial itself (its coupled marginal/slope pair cannot carry a
 //! design-moving coordinate), so its realized range IS the seed.
 
 use gam::families::bms::BernoulliMarginalSlopeFitResult;
@@ -165,7 +165,7 @@ fn fit_bms(body: &str, ds: &gam::data::EncodedDataset) -> BernoulliMarginalSlope
     let config = FitConfig {
         family: Some("bernoulli-marginal-slope".to_string()),
         link: Some("probit".to_string()),
-        logslope_formula: Some(body.to_string()),
+        slope_formula: Some(body.to_string()),
         z_column: Some("z".to_string()),
         ..FitConfig::default()
     };
@@ -200,11 +200,11 @@ fn measure_jet_auto_range_is_the_same_through_every_family_entry_point_2754() {
     let bms = fit_bms(&format!("mjs(x1, x2, centers={CENTERS})"), &ds);
     let marginal_ell = realized_ell(&bms.marginalspec_resolved, "bms marginal");
     let marginal_geometry = realized_geometry(&bms.marginalspec_resolved, "bms marginal");
-    let logslope_ell = realized_ell(&bms.logslopespec_resolved, "bms logslope");
+    let slope_ell = realized_ell(&bms.slopespec_resolved, "bms slope");
 
     println!(
         "[#2754 entry-point] standard ell={standard_ell:.6} bms-marginal ell={marginal_ell:.6} \
-         bms-logslope ell={logslope_ell:.6} | geometry standard={standard_geometry:?} \
+         bms-slope ell={slope_ell:.6} | geometry standard={standard_geometry:?} \
          bms={marginal_geometry:?}"
     );
 
@@ -240,27 +240,27 @@ fn measure_jet_auto_range_is_the_same_through_every_family_entry_point_2754() {
     // the fit that follows. When gam#2600 lifts, the exact-equality assertion
     // above is the stronger statement to move there.
 
-    // The log-slope block is screened against its OWN target (the first-order
+    // The slope block is screened against its OWN target (the first-order
     // score surrogate), so it is not required to equal the marginal's range, and
     // this gate deliberately does not assert a value for it.
     //
-    // It is tempting to assert `logslope_ell != eps_band[0]` — the unscreened
+    // It is tempting to assert `slope_ell != eps_band[0]` — the unscreened
     // geometry heuristic is exactly the band floor by construction, so that
     // inequality reads like "the screen ran". It is not: a screen that RAN and
     // whose criterion preferred the floor produces the identical number, and on
     // this fixture it does. An assertion that cannot distinguish its two
     // outcomes is not a gate, it is a coin, so what is pinned here is only that
-    // the range is a usable one, and the log-slope target itself is graded where
+    // the range is a usable one, and the slope target itself is graded where
     // it can be — against its derivation, in
-    // `logslope_screen_surrogate_tracks_the_slope_surface_not_the_marginal_2754`.
+    // `slope_screen_surrogate_tracks_the_slope_surface_not_the_marginal_2754`.
     let band_floor = marginal_geometry.1.first().copied().unwrap_or(f64::NAN);
     assert!(
         band_floor.is_finite() && band_floor > 0.0,
         "the frozen quadrature must carry a positive band floor"
     );
     assert!(
-        logslope_ell.is_finite() && logslope_ell >= band_floor,
-        "the BMS log-slope range {logslope_ell} must be finite and at or above the node-spacing \
+        slope_ell.is_finite() && slope_ell >= band_floor,
+        "the BMS slope range {slope_ell} must be finite and at or above the node-spacing \
          floor {band_floor} — below it neighbouring representers stop overlapping at all"
     );
 }

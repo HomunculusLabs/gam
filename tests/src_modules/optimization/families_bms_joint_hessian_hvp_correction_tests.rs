@@ -20,7 +20,7 @@ fn bernoulli_jointhessian_directional_derivative_from_cache_subsample_full_equal
     let slices = &cache.slices;
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let baseline = family
         .exact_newton_joint_hessian_directional_derivative_from_cache(&states, &d_beta_flat, &cache)
@@ -60,7 +60,7 @@ fn bernoulli_jointhessian_batched_directional_operators_match_single_direction_p
         .map(|rep| {
             let mut d = Array1::<f64>::zeros(slices.total);
             d[slices.marginal.start] = 0.03 * (rep as f64 + 1.0);
-            d[slices.logslope.start] = -0.02 * (rep as f64 + 1.0);
+            d[slices.slope.start] = -0.02 * (rep as f64 + 1.0);
             d
         })
         .collect();
@@ -132,7 +132,7 @@ fn make_flex_hvp_cache_test_family(
             -0.4 + 0.8 * ((i * 19 + 7) % n) as f64 / n as f64
         }
     });
-    let logslope_x = Array2::from_shape_fn((n, 2), |(i, j)| {
+    let slope_x = Array2::from_shape_fn((n, 2), |(i, j)| {
         if j == 0 {
             1.0
         } else {
@@ -147,8 +147,8 @@ fn make_flex_hvp_cache_test_family(
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             marginal_x.clone(),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
-            logslope_x.clone(),
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            slope_x.clone(),
         )),
         score_warp: Some(score_prepared.runtime.clone()),
         link_dev: Some(link_prepared.runtime.clone()),
@@ -169,7 +169,7 @@ fn make_flex_hvp_cache_test_family(
         },
         ParameterBlockState {
             beta: beta_g.clone(),
-            eta: logslope_x.dot(&beta_g),
+            eta: slope_x.dot(&beta_g),
         },
         ParameterBlockState {
             beta: beta_h,
@@ -197,7 +197,7 @@ fn bernoulli_flex_axis_tensor_cache_matches_slow_recompute() {
         .expect("flex exact eval cache");
     let r = cache.primary.total;
     let q = cache.primary.q;
-    let g = cache.primary.logslope;
+    let g = cache.primary.slope;
     let mut max_rel_third = 0.0_f64;
     let mut max_rel_fourth = 0.0_f64;
     for row in 0..family.y.len() {
@@ -414,9 +414,9 @@ fn bernoulli_flex_paired_subsample_ll_delta_sign_matches_full_ll() {
     trial_states[0].beta[0] += 0.015;
     trial_states[0].eta += 0.015;
     trial_states[1].beta[1] -= 0.01;
-    let logslope_col =
+    let slope_col =
         Array1::from_iter((0..96).map(|i| 0.3 - 0.6 * ((i * 23 + 11) % 96) as f64 / 96.0));
-    trial_states[1].eta.scaled_add(-0.01, &logslope_col);
+    trial_states[1].eta.scaled_add(-0.01, &slope_col);
 
     let full_old = family
         .log_likelihood_only(&old_states)
@@ -913,7 +913,7 @@ fn bernoulli_jointhessian_directional_operator_matches_dense_small_case() {
     let slices = &cache.slices;
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let dense = family
         .exact_newton_joint_hessian_directional_derivative_from_cache_with_options(
@@ -949,10 +949,10 @@ fn bernoulli_jointhessian_second_directional_operator_matches_dense_small_case()
     let slices = &cache.slices;
     let mut d_beta_u = Array1::<f64>::zeros(slices.total);
     d_beta_u[slices.marginal.start] = 0.05;
-    d_beta_u[slices.logslope.start] = -0.04;
+    d_beta_u[slices.slope.start] = -0.04;
     let mut d_beta_v = Array1::<f64>::zeros(slices.total);
     d_beta_v[slices.marginal.start] = -0.03;
-    d_beta_v[slices.logslope.start] = 0.02;
+    d_beta_v[slices.slope.start] = 0.02;
 
     let dense = family
         .exact_newton_joint_hessiansecond_directional_derivative_from_cache_with_options(
@@ -1005,7 +1005,7 @@ fn bernoulli_jointhessian_directional_derivative_from_cache_subsample_half_scale
     let slices = &cache.slices;
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let even_mask: Vec<usize> = (0..n).filter(|i| i % 2 == 0).collect();
     let m = even_mask.len();
@@ -1167,7 +1167,7 @@ fn bernoulli_contracted_psi_second_order_matches_per_pair_contraction() {
     use crate::custom_family::CustomFamilyBlockPsiDerivative;
 
     let n = 40usize;
-    // Two-column marginal block + one-column logslope block, so the marginal ψ
+    // Two-column marginal block + one-column slope block, so the marginal ψ
     // axes carry a genuine multi-coefficient design derivative `x_psi`.
     let y: Array1<f64> =
         Array1::from_iter((0..n).map(|i| if (i * 37 + 11) % 5 >= 3 { 1.0 } else { 0.0 }));
@@ -1181,7 +1181,7 @@ fn bernoulli_contracted_psi_second_order_matches_per_pair_contraction() {
             ((r * 13 + 5) % 11) as f64 / 11.0 - 0.5
         }
     });
-    let logslope = Array2::from_shape_fn((n, 1), |_| 1.0);
+    let slope = Array2::from_shape_fn((n, 1), |_| 1.0);
     let family = BernoulliMarginalSlopeFamily {
         y: Arc::new(y),
         weights: Arc::new(weights),
@@ -1189,7 +1189,7 @@ fn bernoulli_contracted_psi_second_order_matches_per_pair_contraction() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             marginal.clone(),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(logslope)),
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(slope)),
         ..default_test_family()
     };
 
@@ -1351,7 +1351,7 @@ fn bernoulli_contracted_psi_hook_matches_per_pair_with_penalty() {
             ((r * 17 + 3) % 13) as f64 / 13.0 - 0.5
         }
     });
-    let logslope = Array2::from_shape_fn((n, 1), |_| 1.0);
+    let slope = Array2::from_shape_fn((n, 1), |_| 1.0);
     let family = BernoulliMarginalSlopeFamily {
         y: Arc::new(y),
         weights: Arc::new(weights),
@@ -1359,7 +1359,7 @@ fn bernoulli_contracted_psi_hook_matches_per_pair_with_penalty() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             marginal.clone(),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(logslope)),
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(slope)),
         ..default_test_family()
     };
 
@@ -1639,7 +1639,7 @@ fn bernoulli_batched_outer_gradient_matches_hypercoord_path_for_rho_and_psi() {
             ((r * 17 + 3) % 13) as f64 / 13.0 - 0.5
         }
     });
-    let logslope = Array2::from_shape_fn((n, 1), |_| 1.0);
+    let slope = Array2::from_shape_fn((n, 1), |_| 1.0);
     let family = BernoulliMarginalSlopeFamily {
         y: Arc::new(y),
         weights: Arc::new(weights),
@@ -1647,7 +1647,7 @@ fn bernoulli_batched_outer_gradient_matches_hypercoord_path_for_rho_and_psi() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             marginal.clone(),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(logslope)),
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(slope)),
         ..default_test_family()
     };
 
@@ -1966,7 +1966,7 @@ fn bernoulli_isotropic_matern_psi_psi_joint_hessian_matches_fd_of_first() {
         random_effect_terms: Vec::new(),
         smooth_terms: vec![SmoothTermSpec {
             frozen_parametric_residualization: None,
-            name: "spatial_logslope".to_string(),
+            name: "spatial_slope".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],
                 spec: MaternBasisSpec {
@@ -2004,11 +2004,11 @@ fn bernoulli_isotropic_matern_psi_psi_joint_hessian_matches_fd_of_first() {
                 .set_resolved(base_length_scale * (-psi_offset).exp());
         }
         let design = build_term_collection_design(data.view(), &spec).expect("design");
-        let logslope_psi = build_block_spatial_psi_derivatives(data.view(), &spec, &design)
+        let slope_psi = build_block_spatial_psi_derivatives(data.view(), &spec, &design)
             .expect("psi deriv")
             .expect("psi deriv rows");
         let hyper_layout = bms_test_design_hyper_layout(
-            vec![Vec::new(), logslope_psi],
+            vec![Vec::new(), slope_psi],
             array![psi_offset],
         );
         let marginal_mat =
@@ -2016,13 +2016,13 @@ fn bernoulli_isotropic_matern_psi_psi_joint_hessian_matches_fd_of_first() {
         let marginal_design = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             marginal_mat.clone(),
         ));
-        let logslope_design = design.design.clone();
+        let slope_design = design.design.clone();
         let family = BernoulliMarginalSlopeFamily {
             y: Arc::new(y.clone()),
             weights: Arc::new(weights.clone()),
             z: Arc::new(z.clone()),
             marginal_design: marginal_design.clone(),
-            logslope_design: logslope_design.clone(),
+            slope_design: slope_design.clone(),
             ..default_test_family()
         };
         let states = vec![
@@ -2032,14 +2032,14 @@ fn bernoulli_isotropic_matern_psi_psi_joint_hessian_matches_fd_of_first() {
             },
             ParameterBlockState {
                 beta: beta_log.clone(),
-                eta: logslope_design.dot(&beta_log),
+                eta: slope_design.dot(&beta_log),
             },
         ];
         let penalties: Vec<PenaltyMatrix> = design.penalties_as_penalty_matrix();
         let mut m_spec = dummy_blockspec(2, n);
         m_spec.design = marginal_design;
         let mut l_spec = dummy_blockspec(p_log, n);
-        l_spec.design = logslope_design;
+        l_spec.design = slope_design;
         l_spec.initial_log_lambdas = Array1::zeros(penalties.len());
         l_spec.nullspace_dims = design.nullspace_dims.clone();
         l_spec.penalties = penalties;
@@ -2164,7 +2164,7 @@ fn profiled_theta_hvp_outer_hessian_matches_fd_of_gradient_psi_and_mixed() {
     // marginal-slope inner Newton converges (a hard-threshold y on small n +
     // an intercept-only marginal triggers the #979 phantom-multiplier grind).
     let n = 160usize;
-    // 2D spatial covariate for the matern logslope smooth + a marginal covariate.
+    // 2D spatial covariate for the matern slope smooth + a marginal covariate.
     let mut data = Array2::<f64>::zeros((n, 3));
     for i in 0..n {
         let x0 = (i as f64 / (n as f64 - 1.0)) * 2.0 - 1.0;
@@ -2190,17 +2190,17 @@ fn profiled_theta_hvp_outer_hessian_matches_fd_of_gradient_psi_and_mixed() {
     // less-coupled marginal block.
     let marginal_cov: Array1<f64> = data.column(2).to_owned();
 
-    // Base matern logslope spec. Freeze the centers ONCE at the base
+    // Base matern slope spec. Freeze the centers ONCE at the base
     // length-scale so the FD perturbations only move `length_scale`, not the
     // basis centers (centers held fixed ⇒ the ψ FD is well-defined). Fewer
-    // centers ⇒ fewer penalty components ⇒ less marginal/logslope coupling.
+    // centers ⇒ fewer penalty components ⇒ less marginal/slope coupling.
     let base_length_scale = 1.1_f64;
     let make_spec = |length_scale: f64| TermCollectionSpec {
         linear_terms: Vec::new(),
         random_effect_terms: Vec::new(),
         smooth_terms: vec![SmoothTermSpec {
             frozen_parametric_residualization: None,
-            name: "spatial_logslope".to_string(),
+            name: "spatial_slope".to_string(),
             basis: SmoothBasisSpec::Matern {
                 feature_cols: vec![0, 1],
                 spec: MaternBasisSpec {
@@ -2226,7 +2226,7 @@ fn profiled_theta_hvp_outer_hessian_matches_fd_of_gradient_psi_and_mixed() {
         .expect("freeze spatial spec (locks centers)");
     // A matern block produces SEVERAL penalty components (main smoothness +
     // nullspace/aux blocks), not one — so θ carries `n_rho` ρ coordinates on the
-    // logslope block plus the ψ length-scale axes. Discover the real count from
+    // slope block plus the ψ length-scale axes. Discover the real count from
     // the design rather than assuming 1 (it's structural: same at every
     // length-scale).
     let n_rho = base_design.penalties_as_penalty_matrix().len();
@@ -2249,51 +2249,51 @@ fn profiled_theta_hvp_outer_hessian_matches_fd_of_gradient_psi_and_mixed() {
                 .set_resolved(base_length_scale * (-psi_offset).exp());
         }
         let design = build_term_collection_design(data.view(), &spec).expect("perturbed design");
-        // ψ derivative blocks for the logslope spatial block at this length-scale.
-        let logslope_psi = build_block_spatial_psi_derivatives(data.view(), &spec, &design)
+        // ψ derivative blocks for the slope spatial block at this length-scale.
+        let slope_psi = build_block_spatial_psi_derivatives(data.view(), &spec, &design)
             .expect("spatial psi derivatives")
             .expect("spatial psi derivative rows");
         let hyper_layout = bms_test_design_hyper_layout(
-            vec![Vec::new(), logslope_psi],
+            vec![Vec::new(), slope_psi],
             array![psi_offset],
         );
 
         // Well-identified marginal block: [intercept | covariate] (p=2), so the
-        // marginal is not degenerate and is less coupled to the logslope block.
-        // The matern logslope block carries the spatial design + its penalties.
+        // marginal is not degenerate and is less coupled to the slope block.
+        // The matern slope block carries the spatial design + its penalties.
         let p_log = design.design.ncols();
         let marginal_mat =
             Array2::from_shape_fn((n, 2), |(r, c)| if c == 0 { 1.0 } else { marginal_cov[r] });
         let marginal_design =
             DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(marginal_mat));
-        let logslope_design = design.design.clone();
+        let slope_design = design.design.clone();
 
         let family = BernoulliMarginalSlopeFamily {
             y: Arc::clone(&y_arc),
             weights: Arc::clone(&w_arc),
             z: Arc::clone(&z_arc),
             marginal_design: marginal_design.clone(),
-            logslope_design: logslope_design.clone(),
+            slope_design: slope_design.clone(),
             ..default_test_family()
         };
 
-        // Block specs: marginal (intercept, no penalty), logslope (matern design
+        // Block specs: marginal (intercept, no penalty), slope (matern design
         // + its `n_rho` penalty components).
-        let logslope_penalties: Vec<PenaltyMatrix> = design.penalties_as_penalty_matrix();
+        let slope_penalties: Vec<PenaltyMatrix> = design.penalties_as_penalty_matrix();
         assert_eq!(
-            logslope_penalties.len(),
+            slope_penalties.len(),
             n_rho,
             "matern penalty count must be structural (same as the base design)"
         );
         let mut marginal_spec = dummy_blockspec(2, n);
         marginal_spec.design = marginal_design;
-        let mut logslope_spec = dummy_blockspec(p_log, n);
-        logslope_spec.design = logslope_design;
+        let mut slope_spec = dummy_blockspec(p_log, n);
+        slope_spec.design = slope_design;
         // initial_log_lambdas MUST match penalty count (validate_blockspec_consistency).
-        logslope_spec.initial_log_lambdas = Array1::zeros(logslope_penalties.len());
-        logslope_spec.nullspace_dims = design.nullspace_dims.clone();
-        logslope_spec.penalties = logslope_penalties;
-        let specs = vec![marginal_spec, logslope_spec];
+        slope_spec.initial_log_lambdas = Array1::zeros(slope_penalties.len());
+        slope_spec.nullspace_dims = design.nullspace_dims.clone();
+        slope_spec.penalties = slope_penalties;
+        let specs = vec![marginal_spec, slope_spec];
 
         // θ = [ρ_0..ρ_{n_rho-1}, ψ_0..]. The ρ block is shifted UNIFORMLY by
         // rho_offset (so the ρ-FD direction below is the all-ones ρ block); ψ_dim
@@ -2620,7 +2620,7 @@ fn bernoulli_rigid_batched_all_axes_second_directional_matches_per_axis_scatter(
 
     let n = 40usize;
     // Multi-column designs so the per-axis sweep is nontrivial in BOTH blocks
-    // (p_m = 3 marginal axes, p_g = 2 logslope axes ⇒ p = 5).
+    // (p_m = 3 marginal axes, p_g = 2 slope axes ⇒ p = 5).
     let y: Array1<f64> =
         Array1::from_iter((0..n).map(|i| if (i * 31 + 7) % 5 >= 3 { 1.0 } else { 0.0 }));
     let weights: Array1<f64> =
@@ -2630,11 +2630,11 @@ fn bernoulli_rigid_batched_all_axes_second_directional_matches_per_axis_scatter(
     let marginal_design = Array2::from_shape_fn((n, 3), |(i, j)| {
         1.0 + 0.37 * (((i * 7 + j * 11) % 9) as f64 - 4.0)
     });
-    let logslope_design = Array2::from_shape_fn((n, 2), |(i, j)| {
+    let slope_design = Array2::from_shape_fn((n, 2), |(i, j)| {
         0.5 + 0.21 * (((i * 5 + j * 3) % 7) as f64 - 3.0)
     });
     let p_m = marginal_design.ncols();
-    let p_g = logslope_design.ncols();
+    let p_g = slope_design.ncols();
     let p = p_m + p_g;
 
     for frailty in [None, Some(0.7_f64)] {
@@ -2645,7 +2645,7 @@ fn bernoulli_rigid_batched_all_axes_second_directional_matches_per_axis_scatter(
                 weights.clone(),
                 z.clone(),
                 marginal_design.clone(),
-                logslope_design.clone(),
+                slope_design.clone(),
             )
         };
         // Per-row varying primaries (the cached fourth tensor must vary by row).
@@ -2733,7 +2733,7 @@ fn bernoulli_rigid_batched_all_axes_first_directional_matches_per_axis_scatter()
 
     let n = 40usize;
     // Multi-column designs so the per-axis sweep is nontrivial in BOTH blocks
-    // (p_m = 3 marginal axes, p_g = 2 logslope axes ⇒ p = 5).
+    // (p_m = 3 marginal axes, p_g = 2 slope axes ⇒ p = 5).
     let y: Array1<f64> =
         Array1::from_iter((0..n).map(|i| if (i * 31 + 7) % 5 >= 3 { 1.0 } else { 0.0 }));
     let weights: Array1<f64> =
@@ -2743,11 +2743,11 @@ fn bernoulli_rigid_batched_all_axes_first_directional_matches_per_axis_scatter()
     let marginal_design = Array2::from_shape_fn((n, 3), |(i, j)| {
         1.0 + 0.37 * (((i * 7 + j * 11) % 9) as f64 - 4.0)
     });
-    let logslope_design = Array2::from_shape_fn((n, 2), |(i, j)| {
+    let slope_design = Array2::from_shape_fn((n, 2), |(i, j)| {
         0.5 + 0.21 * (((i * 5 + j * 3) % 7) as f64 - 3.0)
     });
     let p_m = marginal_design.ncols();
-    let p_g = logslope_design.ncols();
+    let p_g = slope_design.ncols();
     let p = p_m + p_g;
 
     for frailty in [None, Some(0.7_f64)] {
@@ -2758,7 +2758,7 @@ fn bernoulli_rigid_batched_all_axes_first_directional_matches_per_axis_scatter()
                 weights.clone(),
                 z.clone(),
                 marginal_design.clone(),
-                logslope_design.clone(),
+                slope_design.clone(),
             )
         };
         // Per-row varying primaries (the cached third tensor must vary by row).
@@ -3057,7 +3057,7 @@ fn score_zeta_sensitivity_equals_jacobian_transpose_of_mixed_z_partial() {
     // Jacobian transpose `J_iᵀ` applied to the primary log-likelihood-score
     // mixed-z 2-vector:
     //   s_i[marginal_range] = (∂²logL/∂q∂z) · M_i,
-    //   s_i[logslope_range] = (∂²logL/∂g∂z) · G_i.
+    //   s_i[slope_range] = (∂²logL/∂g∂z) · G_i.
     // This pins the reduced-frame contraction the seam feeds to
     // `generated_regressor_correction`.
     let link = bernoulli_marginal_slope_probit_link();
@@ -3066,7 +3066,7 @@ fn score_zeta_sensitivity_equals_jacobian_transpose_of_mixed_z_partial() {
     let p_m = 2usize;
     let r = 2usize;
     let marginal_design = ndarray::array![[1.0, 0.3], [1.0, -0.6], [1.0, 0.9], [1.0, -0.2]];
-    let logslope_design = ndarray::array![[0.4, -0.1], [0.7, 0.2], [-0.3, 0.8], [0.5, -0.5]];
+    let slope_design = ndarray::array![[0.4, -0.1], [0.7, 0.2], [-0.3, 0.8], [0.5, -0.5]];
     let marginal_eta = ndarray::array![0.2, -0.5, 0.7, -0.1];
     let slope_eta = ndarray::array![0.3, 0.8, -0.4, 1.1];
     let z = ndarray::array![0.6, -0.9, 0.25, 1.3];
@@ -3083,7 +3083,7 @@ fn score_zeta_sensitivity_equals_jacobian_transpose_of_mixed_z_partial() {
         &weights,
         probit_scale,
         marginal_design.view(),
-        logslope_design.view(),
+        slope_design.view(),
         p_beta,
     )
     .expect("assemble score_zeta_sensitivity");
@@ -3110,10 +3110,10 @@ fn score_zeta_sensitivity_equals_jacobian_transpose_of_mixed_z_partial() {
             );
         }
         for j in 0..r {
-            let expected = s_g * logslope_design[[i, j]];
+            let expected = s_g * slope_design[[i, j]];
             assert!(
                 (s[[i, p_m + j]] - expected).abs() < 1e-12,
-                "logslope contraction mismatch at row {i} col {j}: got={:.6e} expected={:.6e}",
+                "slope contraction mismatch at row {i} col {j}: got={:.6e} expected={:.6e}",
                 s[[i, p_m + j]],
                 expected
             );
@@ -3513,7 +3513,7 @@ fn murphy_topel_correction_matches_two_stage_sampling_variance() {
 // ── gam#979 Jeffreys wide-p contracted-trace-Hessian FD verification ──
 
 /// Rigid two-column-per-block fixture for the contracted-trace-Hessian FD
-/// check: `p_marginal = p_logslope = 2` (intercept + slope column each) so
+/// check: `p_marginal = p_slope = 2` (intercept + slope column each) so
 /// the O(p_block²) row contraction exercises off-diagonal (a≠b) terms, not
 /// just the degenerate p=1 case covered elsewhere in this file.
 fn make_jeffreys_contracted_trace_test_family(n: usize) -> BernoulliMarginalSlopeFamily {
@@ -3531,18 +3531,18 @@ fn make_jeffreys_contracted_trace_test_family(n: usize) -> BernoulliMarginalSlop
             -0.5 + 1.0 * (((i * 31 + 11) % n) as f64) / (n as f64)
         }
     });
-    let logslope_design = Array2::from_shape_fn((n, 2), |(i, j)| {
+    let slope_design = Array2::from_shape_fn((n, 2), |(i, j)| {
         if j == 0 {
             1.0
         } else {
             -0.4 + 0.8 * (((i * 37 + 13) % n) as f64) / (n as f64)
         }
     });
-    test_family_with_dense_designs(y, weights, z, marginal_design, logslope_design)
+    test_family_with_dense_designs(y, weights, z, marginal_design, slope_design)
 }
 
 /// `tr(W · H(β_flat))` for the rigid marginal-slope observed joint Hessian,
-/// where `β_flat = [β_marginal (2), β_logslope (2)]`. Used as the scalar
+/// where `β_flat = [β_marginal (2), β_slope (2)]`. Used as the scalar
 /// probe function for the central-second-difference oracle below.
 fn jeffreys_trace_test_trace_of_hessian_at(
     family: &BernoulliMarginalSlopeFamily,
@@ -3552,7 +3552,7 @@ fn jeffreys_trace_test_trace_of_hessian_at(
     let beta_m = beta_flat.slice(ndarray::s![0..2]).to_owned();
     let beta_g = beta_flat.slice(ndarray::s![2..4]).to_owned();
     let eta_m = family.marginal_design.to_dense().to_owned().dot(&beta_m);
-    let eta_g = family.logslope_design.to_dense().to_owned().dot(&beta_g);
+    let eta_g = family.slope_design.to_dense().to_owned().dot(&beta_g);
     let states = vec![
         ParameterBlockState {
             beta: beta_m,
@@ -3580,7 +3580,7 @@ fn bernoulli_jeffreys_contracted_trace_hessian_matches_fd_of_trace() {
     let beta_m0 = beta0.slice(ndarray::s![0..2]).to_owned();
     let beta_g0 = beta0.slice(ndarray::s![2..4]).to_owned();
     let eta_m0 = family.marginal_design.to_dense().to_owned().dot(&beta_m0);
-    let eta_g0 = family.logslope_design.to_dense().to_owned().dot(&beta_g0);
+    let eta_g0 = family.slope_design.to_dense().to_owned().dot(&beta_g0);
     let states0 = vec![
         ParameterBlockState {
             beta: beta_m0,
@@ -3641,7 +3641,7 @@ fn bernoulli_jeffreys_contracted_trace_hessian_matches_fd_of_trace() {
 /// This is deliberately not an outer fit: both smoothing coordinates are fixed
 /// at `rho=-4`, so every emitted cycle belongs to one coefficient objective.
 /// Twelve deterministic Matérn-5/2 radial directions seed each BMS block.
-/// The marginal block alone owns the shared intercept. The log-slope chart uses
+/// The marginal block alone owns the shared intercept. The slope chart uses
 /// genuinely distinct covariate geometry and is sample-orthogonalized against
 /// the complete marginal chart, then internally orthonormalized. Thus it is a
 /// full-rank c12 chart in the quotient by the marginal sample space, rather
@@ -3699,14 +3699,14 @@ fn bms_true_hessian_fixed_theta_c12_probe() {
             marginal_radial[[row, column - 1]]
         }
     });
-    let logslope_raw = make_radial_design(&u1, &u2, 0.31);
+    let slope_raw = make_radial_design(&u1, &u2, 0.31);
 
     // The identifiability contract is about realized sample-space directions,
     // not center labels. Build an orthonormal frame for the complete marginal
-    // chart, then place each raw log-slope radial direction in its orthogonal
+    // chart, then place each raw slope radial direction in its orthogonal
     // complement. A second modified-Gram-Schmidt pass controls round-off for
     // the strongly overlapping positive Matérn columns. Appending each accepted
-    // log-slope direction to the frame also makes the resulting c12 block
+    // slope direction to the frame also makes the resulting c12 block
     // internally full rank. Unit empirical RMS keeps its numerical scale
     // comparable to the marginal chart without changing orthogonality.
     let orthogonalize = |mut direction: Array1<f64>, basis: &[Array1<f64>]| {
@@ -3736,11 +3736,11 @@ fn bms_true_hessian_fixed_theta_c12_probe() {
         sample_frame.push(unit);
     }
     let empirical_scale = (N as f64).sqrt();
-    let mut logslope_design = Array2::<f64>::zeros((N, CENTERS));
+    let mut slope_design = Array2::<f64>::zeros((N, CENTERS));
     for column in 0..CENTERS {
-        let unit = orthogonalize(logslope_raw.column(column).to_owned(), &sample_frame);
+        let unit = orthogonalize(slope_raw.column(column).to_owned(), &sample_frame);
         for row in 0..N {
-            logslope_design[[row, column]] = empirical_scale * unit[row];
+            slope_design[[row, column]] = empirical_scale * unit[row];
         }
         sample_frame.push(unit);
     }
@@ -3749,7 +3749,7 @@ fn bms_true_hessian_fixed_theta_c12_probe() {
     });
     let latent = Array1::from_shape_fn(N, |row| {
         3.2 * (marginal_design[[row, 1]] - marginal_design[[row, 7]])
-            + (0.35 + 0.8 * logslope_design[[row, 4]]).exp() * z[row]
+            + (0.35 + 0.8 * slope_design[[row, 4]]).exp() * z[row]
     });
     let y = latent.mapv(|value| if value >= 0.0 { 1.0 } else { 0.0 });
     let weights = Array1::ones(N);
@@ -3758,7 +3758,7 @@ fn bms_true_hessian_fixed_theta_c12_probe() {
         weights,
         z,
         marginal_design.clone(),
-        logslope_design.clone(),
+        slope_design.clone(),
     );
 
     let make_spec = |name: &str, design: Array2<f64>, owns_intercept: bool| {
@@ -3785,7 +3785,7 @@ fn bms_true_hessian_fixed_theta_c12_probe() {
     };
     let specs = vec![
         make_spec("marginal_c12", marginal_design, true),
-        make_spec("logslope_c12", logslope_design, false),
+        make_spec("slope_c12", slope_design, false),
     ];
     let options = BlockwiseFitOptions {
         inner_tol: 1.0e-6,

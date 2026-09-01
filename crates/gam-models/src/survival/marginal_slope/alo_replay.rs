@@ -19,7 +19,7 @@ pub struct SurvivalMarginalSlopeSavedAloReplayInput<'a> {
     pub derivative_offset_exit: &'a Array1<f64>,
     pub marginal_design: &'a DesignMatrix,
     pub marginal_offset: &'a Array1<f64>,
-    pub logslope_design: &'a DesignMatrix,
+    pub slope_design: &'a DesignMatrix,
     /// The other two follow-up channels of a slope that varies along follow-up
     /// (gam#2765, gam#2767): the same coefficients read against the time margin
     /// at the row's ENTRY time, and against the exit-time derivative of that
@@ -28,9 +28,9 @@ pub struct SurvivalMarginalSlopeSavedAloReplayInput<'a> {
     ///
     /// Passing `None` for a fit that HAS a margin does not merely lose
     /// precision — it replays a different model, so the caller must supply these
-    /// whenever the saved model carries a log-slope time basis.
-    pub logslope_follow_up: Option<(&'a DesignMatrix, &'a DesignMatrix)>,
-    pub logslope_offset: &'a Array1<f64>,
+    /// whenever the saved model carries a slope time basis.
+    pub slope_follow_up: Option<(&'a DesignMatrix, &'a DesignMatrix)>,
+    pub slope_offset: &'a Array1<f64>,
     pub latent_z: &'a Array1<f64>,
     pub event: &'a Array1<f64>,
     pub prior_weights: &'a Array1<f64>,
@@ -41,7 +41,7 @@ pub struct SurvivalMarginalSlopeSavedAloReplayInput<'a> {
     pub time_wiggle_ncols: usize,
     pub time_beta: &'a Array1<f64>,
     pub marginal_beta: &'a Array1<f64>,
-    pub logslope_beta: &'a Array1<f64>,
+    pub slope_beta: &'a Array1<f64>,
     pub score_warp_beta: Option<&'a Array1<f64>>,
     pub link_deviation_beta: Option<&'a Array1<f64>>,
     pub influence_beta: Option<&'a Array1<f64>>,
@@ -154,12 +154,12 @@ fn validate_replay_input(
         || input.offset_exit.len() != n
         || input.derivative_offset_exit.len() != n
         || input.marginal_offset.len() != n
-        || input.logslope_offset.len() != n
+        || input.slope_offset.len() != n
         || input.design_entry.nrows() != n
         || input.design_exit.nrows() != n
         || input.design_derivative_exit.nrows() != n
         || input.marginal_design.nrows() != n
-        || input.logslope_design.nrows() != n
+        || input.slope_design.nrows() != n
     {
         return Err("saved survival marginal-slope ALO row channels are not aligned".to_string());
     }
@@ -172,7 +172,7 @@ fn validate_replay_input(
             input.time_beta,
         ),
         ("marginal", input.marginal_design, input.marginal_beta),
-        ("logslope", input.logslope_design, input.logslope_beta),
+        ("slope", input.slope_design, input.slope_beta),
     ] {
         if design.ncols() != beta.len() {
             return Err(format!(
@@ -292,17 +292,17 @@ pub fn replay_saved_survival_marginal_slope_alo(
         &[input.design_exit.clone(), input.marginal_design.clone()],
         "saved survival marginal-slope location anchor",
     )?;
-    let logslope_dense = input
-        .logslope_design
-        .try_to_dense_arc("saved survival marginal-slope logslope anchor")?;
+    let slope_dense = input
+        .slope_design
+        .try_to_dense_arc("saved survival marginal-slope slope anchor")?;
     let mut parametric_anchor =
-        Array2::<f64>::zeros((n, location_anchor.ncols() + logslope_dense.ncols()));
+        Array2::<f64>::zeros((n, location_anchor.ncols() + slope_dense.ncols()));
     parametric_anchor
         .slice_mut(s![.., ..location_anchor.ncols()])
         .assign(&location_anchor);
     parametric_anchor
         .slice_mut(s![.., location_anchor.ncols()..])
-        .assign(&logslope_dense.view());
+        .assign(&slope_dense.view());
 
     let score_anchor = input
         .score_warp_runtime
@@ -342,10 +342,10 @@ pub fn replay_saved_survival_marginal_slope_alo(
     let z_matrix = input.latent_z.clone().insert_axis(Axis(1));
     let score_covariance =
         MarginalSlopeCovariance::diagonal(Array1::from_vec(vec![input.score_variance]))?;
-    let logslope_layout = {
-        let shared = LogslopeTopology::shared()
-            .materialize_identity(input.logslope_design.clone(), input.logslope_offset)?;
-        match input.logslope_follow_up {
+    let slope_layout = {
+        let shared = SlopeTopology::shared()
+            .materialize_identity(input.slope_design.clone(), input.slope_offset)?;
+        match input.slope_follow_up {
             None => shared,
             Some((entry, derivative_exit)) => {
                 shared.with_follow_up(entry.clone(), derivative_exit.clone())?
@@ -368,7 +368,7 @@ pub fn replay_saved_survival_marginal_slope_alo(
         offset_exit: Arc::new(input.offset_exit.clone()),
         derivative_offset_exit: Arc::new(input.derivative_offset_exit.clone()),
         marginal_design: input.marginal_design.clone(),
-        logslope_layout,
+        slope_layout,
         score_warp,
         link_dev,
         influence_absorber: input.influence_design.cloned(),
@@ -390,8 +390,8 @@ pub fn replay_saved_survival_marginal_slope_alo(
             eta: input.marginal_design.dot(input.marginal_beta) + input.marginal_offset,
         },
         ParameterBlockState {
-            beta: input.logslope_beta.clone(),
-            eta: input.logslope_design.dot(input.logslope_beta) + input.logslope_offset,
+            beta: input.slope_beta.clone(),
+            eta: input.slope_design.dot(input.slope_beta) + input.slope_offset,
         },
     ];
     for beta in [input.score_warp_beta, input.link_deviation_beta]
@@ -492,7 +492,7 @@ mod tests {
         let event = 1.0_f64;
         let time_beta = Array1::from_vec(vec![q0, q1, qd]);
         let marginal_beta = Array1::zeros(1);
-        let logslope_beta = Array1::from_vec(vec![g]);
+        let slope_beta = Array1::from_vec(vec![g]);
         let n = 3;
         let time_entry = dense(Array2::from_shape_fn((n, 3), |(_, column)| {
             if column == 0 { 1.0 } else { 0.0 }
@@ -504,7 +504,7 @@ mod tests {
             if column == 2 { 1.0 } else { 0.0 }
         }));
         let marginal_design = dense(Array2::zeros((n, 1)));
-        let logslope_design = dense(Array2::ones((n, 1)));
+        let slope_design = dense(Array2::ones((n, 1)));
         let zero = Array1::zeros(n);
         let latent_z = Array1::from_vec(vec![-1.5_f64.sqrt(), 0.0, 1.5_f64.sqrt()]);
         let events = Array1::from_elem(n, event);
@@ -519,9 +519,9 @@ mod tests {
                 derivative_offset_exit: &zero,
                 marginal_design: &marginal_design,
                 marginal_offset: &zero,
-                logslope_design: &logslope_design,
-                logslope_follow_up: None,
-                logslope_offset: &zero,
+                slope_design: &slope_design,
+                slope_follow_up: None,
+                slope_offset: &zero,
                 latent_z: &latent_z,
                 event: &events,
                 prior_weights: &weights,
@@ -532,7 +532,7 @@ mod tests {
                 time_wiggle_ncols: 0,
                 time_beta: &time_beta,
                 marginal_beta: &marginal_beta,
-                logslope_beta: &logslope_beta,
+                slope_beta: &slope_beta,
                 score_warp_beta: None,
                 link_deviation_beta: None,
                 influence_beta: None,

@@ -32,10 +32,10 @@ const N: usize = 2_400;
 /// the request and the assertion on the RESOLVED margin cannot drift: this test
 /// previously asked for a quadratic margin and asserted a cubic one, which is
 /// two different claims about the same object.
-const LOGSLOPE_TIME_DEGREE: usize = 2;
+const SLOPE_TIME_DEGREE: usize = 2;
 /// Columns in that margin. `k >= degree + 1` is the admission rule; four columns
 /// over a quadratic margin leaves one internal knot.
-const LOGSLOPE_TIME_K: usize = 4;
+const SLOPE_TIME_K: usize = 4;
 /// Slope at `t = 1` (`log t = 0`).
 const SLOPE_LEVEL: f64 = 0.85;
 /// Slope drift per unit `log t`. Negative = the score's effect attenuates.
@@ -193,15 +193,15 @@ fn survival_marginal_slope_recovers_a_follow_up_varying_slope_2765() {
     let cfg = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("z".to_string()),
-        logslope_formula: Some("1".to_string()),
+        slope_formula: Some("1".to_string()),
         // The slope's own follow-up margin — the whole point of #2765/#2767.
         // A quadratic margin with four columns spans the planted linear-in-log-t
         // slope with room to spare while staying well clear of the baseline
         // time surface, which is also a smooth function of `log t`: the two are
         // separated by the `z` interaction, not by their time shapes, so a very
         // rich margin buys nothing and costs conditioning.
-        logslope_time_k: Some(LOGSLOPE_TIME_K),
-        logslope_time_degree: LOGSLOPE_TIME_DEGREE,
+        slope_time_k: Some(SLOPE_TIME_K),
+        slope_time_degree: SLOPE_TIME_DEGREE,
         // Keep the baseline time surface only as flexible as the planted
         // `q(t) = a₀ + a₁·log t` needs.
         time_num_internal_knots: 3,
@@ -211,7 +211,7 @@ fn survival_marginal_slope_recovers_a_follow_up_varying_slope_2765() {
         // leaves the joint outer problem with zero auxiliary and zero kappa
         // axes, which today takes a driver fast path that returns no outer
         // certificate and makes the survival marginal-slope entry refuse. That
-        // refusal reproduces identically with `logslope_time_k` unset, so it is
+        // refusal reproduces identically with `slope_time_k` unset, so it is
         // a pre-existing property of that model shape and not of the follow-up
         // margin.
         baseline_target: "weibull".to_string(),
@@ -219,7 +219,7 @@ fn survival_marginal_slope_recovers_a_follow_up_varying_slope_2765() {
     };
 
     let result = fit_from_formula("Surv(time, event) ~ 1", &data, &cfg)
-        .expect("survival marginal-slope fit with a follow-up-varying log-slope");
+        .expect("survival marginal-slope fit with a follow-up-varying slope");
     let FitResult::SurvivalMarginalSlope(fit) = result else {
         panic!("expected a SurvivalMarginalSlope fit result");
     };
@@ -227,35 +227,35 @@ fn survival_marginal_slope_recovers_a_follow_up_varying_slope_2765() {
     // The resolved margin is carried on the fit result so a predictor replays it
     // against the same knots.
     let basis = fit
-        .logslope_time_basis
+        .slope_time_basis
         .as_ref()
-        .expect("a fit with logslope_time_k must carry its resolved time margin");
+        .expect("a fit with slope_time_k must carry its resolved time margin");
     assert_eq!(
-        basis.degree, LOGSLOPE_TIME_DEGREE,
+        basis.degree, SLOPE_TIME_DEGREE,
         "the resolved margin must keep the requested degree"
     );
     assert_eq!(
         basis.knots.len(),
-        LOGSLOPE_TIME_K + LOGSLOPE_TIME_DEGREE + 1,
+        SLOPE_TIME_K + SLOPE_TIME_DEGREE + 1,
         "a `k`-column B-spline of this degree owns `k + degree + 1` knots, and \
          those knots are the whole authority a predictor gets"
     );
 
-    // With an intercept-only log-slope covariate formula the tensored design IS
+    // With an intercept-only slope covariate formula the tensored design IS
     // the time margin at each row's exit time, so `design · β` is the fitted
     // slope deviation from the baseline at that row's follow-up time.
     let beta = &fit.fit.blocks[2].beta;
     assert_eq!(
-        fit.logslope_design.design.ncols(),
+        fit.slope_design.design.ncols(),
         beta.len(),
-        "the log-slope block's coefficients must match its tensored design width"
+        "the slope block's coefficients must match its tensored design width"
     );
     assert!(
         beta.len() > 1,
         "a follow-up-varying slope must own more than one coefficient; got {}",
         beta.len()
     );
-    let design = fit.logslope_design.design.to_dense();
+    let design = fit.slope_design.design.to_dense();
     let fitted: Vec<f64> = (0..times.len())
         .map(|row| design.row(row).dot(beta) + fit.baseline_slope)
         .collect();

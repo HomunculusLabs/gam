@@ -65,7 +65,7 @@ def _fit(family: str, gen) -> "gamfit.Model":
 def _se(model: "gamfit.Model", mode: str) -> np.ndarray:
     grid = pd.DataFrame({"x": np.linspace(0.05, 0.95, 12)})
     out = model.predict(grid, interval=0.95, covariance_mode=mode)
-    return np.asarray(out["std_error"], dtype=float)
+    return np.asarray(out["posterior_mean_standard_error"], dtype=float)
 
 
 def test_binomial_smooth_se_responds_to_covariance_mode() -> None:

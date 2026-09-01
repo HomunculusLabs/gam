@@ -12,7 +12,7 @@
 //! ```
 //!
 //! where `M` is the marginal baseline surface and `S` is the score-weighted
-//! ("logslope") surface. Because the exposure `z` correlates with the same PC
+//! ("slope") surface. Because the exposure `z` correlates with the same PC
 //! smooths that both `M` and `S` are built from, a component of `M·β_m` can be
 //! explained almost equally well by `diag(z)·S·β_s`. That structural confound
 //! makes the *joint* design rank-soft: the inner Newton sees a near-singular

@@ -6,7 +6,7 @@
 //! aliasing, the V+M cutover engages, the fit converges, and predict
 //! still runs on raw-width β.
 //!
-//! Aliasing is induced by the formula choosing a `duchon` log-slope
+//! Aliasing is induced by the formula choosing a `duchon` slope
 //! surface that includes the constant (parametric intercept) column,
 //! while the time block carries its own structural baseline. The shared
 //! constant forces the V+M compile to drop at least one column, which
@@ -142,9 +142,9 @@ fn survival_marginal_slope_v_plus_m_exact_engages_and_lifts_beta_to_raw_width() 
     let data = build_dataset();
 
     // Marginal side carries a `duchon` smooth over three covariates plus
-    // a parametric intercept. The log-slope side carries the SAME duchon
+    // a parametric intercept. The slope side carries the SAME duchon
     // surface — the shared constant column (intercept) between marginal
-    // and log-slope forces the V+M parametric compile to drop at least
+    // and slope forces the V+M parametric compile to drop at least
     // one column, which engages phase-4b.
     let duchon = "duchon(x1, x2, x3, centers=6, order=1)".to_string();
     let formula = format!("Surv(entry_age, exit_age, event) ~ {} + 1", duchon);
@@ -152,7 +152,7 @@ fn survival_marginal_slope_v_plus_m_exact_engages_and_lifts_beta_to_raw_width() 
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("prs_z".to_string()),
-        logslope_formula: Some(duchon.clone()),
+        slope_formula: Some(duchon.clone()),
         baseline_target: "linear".to_string(),
         gpu_policy: if cfg!(target_os = "macos") {
             gam::gpu::GpuPolicy::Off
@@ -190,18 +190,18 @@ fn survival_marginal_slope_v_plus_m_exact_engages_and_lifts_beta_to_raw_width() 
     );
 
     // After the lift, β block widths must match the RAW design widths
-    // (i.e. `marginal_design.ncols()` / `logslope_design.ncols()`), not
+    // (i.e. `marginal_design.ncols()` / `slope_design.ncols()`), not
     // the compiled (post-drop) widths. If lift were skipped, block β
     // would still be at compiled width.
     let raw_marginal_width = result.marginal_design.design.ncols();
-    let raw_logslope_width = result.logslope_design.design.ncols();
+    let raw_slope_width = result.slope_design.design.ncols();
 
-    // Find the marginal block and the logslope block in the fitted
+    // Find the marginal block and the slope block in the fitted
     // result. Survival marginal-slope concatenates blocks in order
-    // [time, marginal, logslope, (deviation blocks...)]. The exact
+    // [time, marginal, slope, (deviation blocks...)]. The exact
     // role label depends on `BlockRole` definitions but at minimum
     // the block widths in order must contain the raw marginal width
-    // and the raw logslope width as distinct entries — we assert
+    // and the raw slope width as distinct entries — we assert
     // structural width preservation rather than role naming so the
     // test is robust to the role-enum churn around the cutover.
     let block_widths: Vec<usize> = result.fit.blocks.iter().map(|b| b.beta.len()).collect();
@@ -213,9 +213,9 @@ fn survival_marginal_slope_v_plus_m_exact_engages_and_lifts_beta_to_raw_width() 
         block_widths
     );
     assert!(
-        block_widths.contains(&raw_logslope_width),
-        "no fitted block matches raw log-slope design width {}: widths={:?}",
-        raw_logslope_width,
+        block_widths.contains(&raw_slope_width),
+        "no fitted block matches raw slope design width {}: widths={:?}",
+        raw_slope_width,
         block_widths
     );
 

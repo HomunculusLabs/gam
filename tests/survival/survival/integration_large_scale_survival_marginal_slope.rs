@@ -3,7 +3,7 @@
 //! Exactly mirrors the production large-scale failure shape:
 //!   formula      = Surv(entry_age, exit_age, event)
 //!                  ~ duchon(PC1, PC2, PC3, centers=10, order=1) + sex + linkwiggle()
-//!   logslope     =   duchon(PC1, PC2, PC3, centers=10, order=1) + linkwiggle()
+//!   slope     =   duchon(PC1, PC2, PC3, centers=10, order=1) + linkwiggle()
 //!
 //! The duplicated `duchon(PC1,PC2,PC3)` term across both formulas is the
 //! exact alias pencil that caused the original large-scale job to fail closed.
@@ -14,10 +14,10 @@
 //!   1. The fit COMPLETES — `fit_from_formula` returns `Ok(FitResult::SurvivalMarginalSlope(...))`.
 //!   2. convergence — certified by construction: a minted fit is the sealed
 //!      convergence proof (SPEC 20).
-//!   3. Any V+M drop is attributed to the LOGSLOPE block only (gauge_priority=120,
+//!   3. Any V+M drop is attributed to the SLOPE block only (gauge_priority=120,
 //!      the lowest-priority parametric block); drops to time (200) or marginal (150)
 //!      are a regression.
-//!   4. The joint design [marginal | logslope] at the final β has full column
+//!   4. The joint design [marginal | slope] at the final β has full column
 //!      rank (detected by RRQR), demonstrating the V+M reduction eliminated
 //!      the alias before the inner solve.
 //!   5. The diagnostic string
@@ -25,7 +25,7 @@
 //!      does NOT appear in the log after the fix — the V+M active path
 //!      eliminates the alias before the flat joint-rank diagnostic fires.
 //!   6. The string "block 2 fully aliased" does NOT appear in the log —
-//!      the compiler no longer reports a hard-alias error on logslope.
+//!      the compiler no longer reports a hard-alias error on slope.
 //!   7. Every fitted β coefficient is finite.
 //!   8. Predictions (η = X_marginal β_marginal) on training rows are finite.
 
@@ -221,15 +221,15 @@ fn large_scale_survival_marginal_slope_canonical_gauge_fix() {
     let data = build_dataset();
 
     // Exactly the large-scale formula shape: shared duchon + linkwiggle on both
-    // the main (marginal) formula and the logslope formula.
+    // the main (marginal) formula and the slope formula.
     let duchon = format!("duchon(PC1, PC2, PC3, centers={CENTERS}, order=1)");
     let formula = format!("Surv(entry_age, exit_age, event) ~ {duchon} + sex + linkwiggle()");
-    let logslope = format!("{duchon} + linkwiggle()");
+    let slope = format!("{duchon} + linkwiggle()");
 
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("prs_z".to_string()),
-        logslope_formula: Some(logslope),
+        slope_formula: Some(slope),
         baseline_target: "linear".to_string(),
         gpu_policy: if cfg!(target_os = "macos") {
             gam::gpu::GpuPolicy::Off
@@ -254,14 +254,14 @@ fn large_scale_survival_marginal_slope_canonical_gauge_fix() {
     // ── Assertion 2 retired: fit existence is the sealed convergence proof
     // (SPEC 20).
 
-    // ── Assertions 3a-b: drop attribution must target logslope only ───────
+    // ── Assertions 3a-b: drop attribution must target slope only ───────
     //
     // After T13's channel-aware Gram migration the closed-form path emits:
-    //   "[smgs phase-4b compiled-map] applying CompiledMap T: … (drops time=T, marginal=M, logslope=G); …"
+    //   "[smgs phase-4b compiled-map] applying CompiledMap T: … (drops time=T, marginal=M, slope=G); …"
     //
-    // The canonical-gauge contract (gauge_priority time=200 > marginal=150 > logslope=120)
+    // The canonical-gauge contract (gauge_priority time=200 > marginal=150 > slope=120)
     // guarantees that any alias between the shared duchon term on both formulas
-    // is attributed entirely to the logslope block (the lower-priority participant).
+    // is attributed entirely to the slope block (the lower-priority participant).
     //
     // T must be 0 and M must be 0. G >= 0 is allowed (may be 0 if the V+M
     // path detected no aliasing via the W-metric path at this n).
@@ -274,7 +274,7 @@ fn large_scale_survival_marginal_slope_canonical_gauge_fix() {
 
     // If the compiled-map path fired, check that time and marginal drops are zero.
     for line in &active_lines {
-        // Parse "drops time=T, marginal=M, logslope=G" from the log string.
+        // Parse "drops time=T, marginal=M, slope=G" from the log string.
         let time_drops = parse_drops_field(line, "time");
         let marginal_drops = parse_drops_field(line, "marginal");
         assert_eq!(
@@ -288,7 +288,7 @@ fn large_scale_survival_marginal_slope_canonical_gauge_fix() {
             marginal_drops,
             Some(0),
             "regression: V+M active path reported a DROP to the MARGINAL block \
-             (gauge_priority=150 > logslope=120 — drops must route to logslope); \
+             (gauge_priority=150 > slope=120 — drops must route to slope); \
              log line: {line}"
         );
     }
@@ -296,7 +296,7 @@ fn large_scale_survival_marginal_slope_canonical_gauge_fix() {
     // ── Assertion 4: joint design has full column rank post-reduction ─────
     //
     // After V+M the design columns should be linearly independent. Build the
-    // joint matrix [X_marginal | X_logslope] at training rows, run RRQR, and
+    // joint matrix [X_marginal | X_slope] at training rows, run RRQR, and
     // assert rank == ncols. A genuine rank deficiency (finite sample, near-
     // collinear data) would manifest as rank < ncols; any such residual
     // deficiency is handled by the downstream canonical-gauge pipeline and
@@ -307,23 +307,23 @@ fn large_scale_survival_marginal_slope_canonical_gauge_fix() {
             .design
             .try_to_dense_by_chunks("joint rank check marginal")
             .expect("marginal design must densify for rank check");
-        let raw_logslope = result
-            .logslope_design
+        let raw_slope = result
+            .slope_design
             .design
-            .try_to_dense_by_chunks("joint rank check logslope")
-            .expect("logslope design must densify for rank check");
+            .try_to_dense_by_chunks("joint rank check slope")
+            .expect("slope design must densify for rank check");
 
         let n_rows = raw_marginal.nrows();
         let p_marg = raw_marginal.ncols();
-        let p_log = raw_logslope.ncols();
+        let p_log = raw_slope.ncols();
         let p_total = p_marg + p_log;
 
         let mut joint = Array2::<f64>::zeros((n_rows, p_total));
         joint.slice_mut(s![.., ..p_marg]).assign(&raw_marginal);
-        joint.slice_mut(s![.., p_marg..]).assign(&raw_logslope);
+        joint.slice_mut(s![.., p_marg..]).assign(&raw_slope);
 
         let rrqr = rrqr_with_permutation(&joint, default_rrqr_rank_alpha())
-            .expect("RRQR on joint [marginal | logslope] design must not fail");
+            .expect("RRQR on joint [marginal | slope] design must not fail");
 
         // Allow at most 1 residual rank deficiency: at n=5000 with centers=10
         // a genuine coincidence of data directions is vanishingly unlikely but
@@ -331,7 +331,7 @@ fn large_scale_survival_marginal_slope_canonical_gauge_fix() {
         let max_rank_deficiency: usize = 1;
         assert!(
             p_total.saturating_sub(rrqr.rank) <= max_rank_deficiency,
-            "joint [marginal|logslope] design has residual rank deficiency {} > {} \
+            "joint [marginal|slope] design has residual rank deficiency {} > {} \
              after V+M reduction (p_marg={}, p_log={}, joint_rank={}, p_total={}); \
              this indicates the canonical-gauge alias fix is not active",
             p_total.saturating_sub(rrqr.rank),
@@ -367,7 +367,7 @@ fn large_scale_survival_marginal_slope_canonical_gauge_fix() {
     // ── Assertion 6: "block 2 fully aliased" ABSENT ───────────────────────
     //
     // The identifiability compiler emits "block 2 fully aliased: …" when the
-    // logslope block's residual Gram has no positive eigenspace — the symptom
+    // slope block's residual Gram has no positive eigenspace — the symptom
     // of the pre-fix bug. Post-fix the block's columns have been reduced by V
     // so this condition never arises.
     let forbidden_block_aliased = "block 2 fully aliased";
@@ -377,7 +377,7 @@ fn large_scale_survival_marginal_slope_canonical_gauge_fix() {
         .collect();
     assert!(
         block_aliased_lines.is_empty(),
-        "post-fix diagnostic string {:?} MUST NOT appear: the logslope block \
+        "post-fix diagnostic string {:?} MUST NOT appear: the slope block \
          must not be declared fully aliased after V+M reduction. Found {} \
          matching log line(s): {:?}",
         forbidden_block_aliased,
@@ -418,7 +418,7 @@ fn large_scale_survival_marginal_slope_canonical_gauge_fix() {
 /// clause in a log line.
 ///
 /// The V+M active log line has the shape:
-///   `… (drops time=T, marginal=M, logslope=G)`
+///   `… (drops time=T, marginal=M, slope=G)`
 /// so the individual fields are separated by ", " after the opening
 /// "(drops " that marks the start of the parenthesised clause.
 /// We look for the substring `"<field>="` and parse the digits that follow.

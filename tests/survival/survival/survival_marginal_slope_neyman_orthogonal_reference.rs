@@ -20,7 +20,7 @@
 //!
 //! Stage 1 (CTN) gaussianizes a continuous score conditional on `x` into a
 //! latent `z`. Stage 2 (survival marginal-slope) fits a probit-on-time index
-//! whose log-slope surface `β(x)` is the scientific target. Because `z` is a
+//! whose slope surface `β(x)` is the scientific target. Because `z` is a
 //! generated regressor depending on θ̂₁, an x-structured Stage-1 miscalibration
 //! projects onto `β` and manufactures spurious spatial heterogeneity in `β̂(x)`
 //! even when the true `β(x)` is flat. The orthogonalized arm absorbs the realized
@@ -52,11 +52,11 @@ use gam::{
 };
 use ndarray::Array2;
 
-// Stage-1 CTN covariate RHS and Stage-2 marginal/logslope formulas, kept in one
+// Stage-1 CTN covariate RHS and Stage-2 marginal/slope formulas, kept in one
 // place so the orthogonalized recipe and the naive control fit identical bases.
 const COVARIATE_RHS: &str = "s(x, k=8)";
 const SURVIVAL_FORMULA: &str = "Surv(entry, exit, event) ~ s(x, k=8)";
-const LOGSLOPE_FORMULA: &str = "s(x, k=8)";
+const SLOPE_FORMULA: &str = "s(x, k=8)";
 
 use gam::utils::splitmix64;
 // ---------------------------------------------------------------------------
@@ -152,7 +152,7 @@ fn stage1_config() -> TransformationNormalConfig {
 fn stage2_config() -> FitConfig {
     FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
-        logslope_formula: Some(LOGSLOPE_FORMULA.to_string()),
+        slope_formula: Some(SLOPE_FORMULA.to_string()),
         baseline_target: "linear".to_string(),
         ..FitConfig::default()
     }
@@ -254,9 +254,9 @@ fn full_data_ctn_z(x: &[f64], score: &[f64]) -> ndarray::Array1<f64> {
 // β̂(x) readout off the survival fit.
 // ---------------------------------------------------------------------------
 
-/// Evaluate the fitted log-slope surface `β̂(x)` at a grid. Survival block layout
-/// is `[time, marginal, logslope, …]`, so block 2 is the logslope surface:
-/// `β̂(x_i) = baseline_slope + design(x_i)·β_logslope`. The survival absorber is a
+/// Evaluate the fitted slope surface `β̂(x)` at a grid. Survival block layout
+/// is `[time, marginal, slope, …]`, so block 2 is the slope surface:
+/// `β̂(x_i) = baseline_slope + design(x_i)·β_slope`. The survival absorber is a
 /// dedicated trailing block dropped at predict, so it never touches this readout.
 fn beta_of_x(fit: &SurvivalMarginalSlopeFitResult, x_grid: &[f64]) -> Vec<f64> {
     let n = x_grid.len();
@@ -264,22 +264,22 @@ fn beta_of_x(fit: &SurvivalMarginalSlopeFitResult, x_grid: &[f64]) -> Vec<f64> {
     for i in 0..n {
         data[[i, 0]] = x_grid[i];
     }
-    let design = build_term_collection_design(data.view(), &fit.logslopespec_resolved)
-        .expect("rebuild logslope design from resolved spec");
+    let design = build_term_collection_design(data.view(), &fit.slopespec_resolved)
+        .expect("rebuild slope design from resolved spec");
     let dense = design.design.to_dense();
-    let beta_logslope = &fit.fit.blocks[2].beta;
+    let beta_slope = &fit.fit.blocks[2].beta;
     assert_eq!(
         dense.ncols(),
-        beta_logslope.len(),
-        "logslope design width {} != logslope beta length {}",
+        beta_slope.len(),
+        "slope design width {} != slope beta length {}",
         dense.ncols(),
-        beta_logslope.len()
+        beta_slope.len()
     );
     let mut out = vec![0.0; n];
     for i in 0..n {
         let mut acc = fit.baseline_slope;
         for j in 0..dense.ncols() {
-            acc += dense[[i, j]] * beta_logslope[j];
+            acc += dense[[i, j]] * beta_slope[j];
         }
         out[i] = acc;
     }
@@ -287,7 +287,7 @@ fn beta_of_x(fit: &SurvivalMarginalSlopeFitResult, x_grid: &[f64]) -> Vec<f64> {
 }
 
 /// Spatial-heterogeneity statistic of a fitted `β̂(x)`: the sample variance of the
-/// log-slope surface across the grid, normalized by its mean magnitude so it is
+/// slope surface across the grid, normalized by its mean magnitude so it is
 /// dimensionless. Under a truly flat `β(x) ≡ const` it sits near zero; an
 /// x-structured Stage-1 leakage inflates the across-grid variance. (Survival
 /// marginal-slope fits with `compute_covariance: false`, so unlike the BMS sim we
@@ -297,7 +297,7 @@ fn spatial_heterogeneity_ratio(fit: &SurvivalMarginalSlopeFitResult, x_grid: &[f
     let m = beta.len() as f64;
     let mean = beta.iter().sum::<f64>() / m;
     let var_x = beta.iter().map(|b| (b - mean) * (b - mean)).sum::<f64>() / (m - 1.0).max(1.0);
-    // Self-calibrating scale: the squared mean log-slope, floored so a near-zero
+    // Self-calibrating scale: the squared mean slope, floored so a near-zero
     // mean cannot blow the ratio up. This keeps the statistic comparable across
     // arms that recover the same overall slope magnitude.
     let scale = (mean * mean).max(1e-3);
@@ -377,7 +377,7 @@ fn rmse_after_affine_align(a: &[f64], b: &[f64]) -> f64 {
 // TRUE β(x) ≡ constant, but Stage-1 is given an x-DEPENDENT miscalibration: the
 // continuous score's conditional SCALE is inflated for x in the right half of
 // the domain. The naive arm projects that structured Stage-1 error onto the
-// survival log-slope surface and reports spurious spatial heterogeneity; the
+// survival slope surface and reports spurious spatial heterogeneity; the
 // orthogonalized arm absorbs it through the dedicated η₁ channel.
 //
 // ASSERTION: the spatial-heterogeneity ratio of the NAIVE β̂(x) exceeds its null

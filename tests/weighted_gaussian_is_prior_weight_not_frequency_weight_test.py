@@ -80,8 +80,8 @@ def test_gaussian_weights_are_prior_weights_rescale_invariant() -> None:
         m = gamfit.fit(df, "y ~ s(x)", family="gaussian", weights="w")
         p = m.predict(grid, interval=0.95)
         return (
-            np.asarray(p["mean"], dtype=float),
-            np.asarray(p["std_error"], dtype=float),
+            np.asarray(p["posterior_mean"], dtype=float),
+            np.asarray(p["posterior_mean_standard_error"], dtype=float),
             float(m.summary().edf_total),
         )
 
@@ -131,8 +131,8 @@ def test_gaussian_weighted_se_is_not_row_expansion_se() -> None:
 
     # SEs intentionally differ by ~sqrt(sum(w)/n): prior-weight (row-count)
     # scale, NOT the frequency (sum-of-weights) scale that row expansion gives.
-    se_ratio = np.asarray(fw["std_error"], dtype=float) / np.asarray(
-        fe["std_error"], dtype=float
+    se_ratio = np.asarray(fw["posterior_mean_standard_error"], dtype=float) / np.asarray(
+        fe["posterior_mean_standard_error"], dtype=float
     )
     expected = float(np.sqrt(w.sum() / n))
     assert np.allclose(se_ratio, expected, rtol=5e-2), (

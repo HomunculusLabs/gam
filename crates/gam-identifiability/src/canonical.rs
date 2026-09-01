@@ -9,7 +9,7 @@
 //
 // Naively substituting a column-reduced `ParameterBlockSpec` under a family
 // that captures its design at construction time was unsafe: blockwise families
-// (e.g. `SurvivalMarginalSlopeFamily::marginal_design`, `::logslope_design`)
+// (e.g. `SurvivalMarginalSlopeFamily::marginal_design`, `::slope_design`)
 // run `evaluate_blockwise_exact_newton` row-Hessian assembly through
 // `DesignMatrix::syr_row_into_view` / `::row_outer_into_view`, which assert that
 // the target slice's column count equals the captured design's column count.
@@ -375,7 +375,7 @@ pub struct CanonicalSpecs {
 ///
 /// When any spec's `jacobian_callback` reports `n_outputs > 1` (i.e.
 /// the block contributes to multiple stacked output channels — as in
-/// survival marginal-slope where marginal and logslope blocks target
+/// survival marginal-slope where marginal and slope blocks target
 /// orthogonal channels of the per-row Jacobian), this function routes
 /// through [`audit_identifiability_channel_aware`] instead of the flat
 /// [`audit_identifiability`].
@@ -431,7 +431,7 @@ pub fn canonicalize_for_identifiability(
 /// Determinism: the audit verdict now depends on the pilot operating point, so
 /// that point must be bit-deterministic (it is — the survival pilot is a
 /// fixed one-step IRLS linearization). A degenerate all-zero pilot (e.g. flat
-/// early-data logslope with `g ≈ 0`) legitimately cannot distinguish the
+/// early-data slope with `g ≈ 0`) legitimately cannot distinguish the
 /// surfaces — `c` and `f` coincide there — so it reproduces the zero-state
 /// refusal; that is correct, an uninformative pilot genuinely carries no
 /// identifying curvature.
@@ -451,7 +451,7 @@ pub fn canonicalize_for_identifiability_with_operating_scalars(
 /// specs are audited without re-orthogonalising.
 ///
 /// When orthogonalisation runs, a general exact W-metric pass reparameterises
-/// overlapping design blocks (e.g. a logslope surface confounded with the
+/// overlapping design blocks (e.g. a slope surface confounded with the
 /// marginal surface) so the lower-priority block's overlap with the
 /// higher-priority anchor is removed exactly, rather than being penalised by a
 /// hand-tuned ridge. The reparam `V_b` is folded into each block's design via
@@ -990,7 +990,7 @@ fn canonicalize_for_identifiability_inner(
     // first column dropped). The #933 reduction path wraps the callback in
     // `GaugeComposedJacobian` so the family captures the REDUCED design, which is
     // sound only when the family's effective geometry is DERIVED from that
-    // callback (marginal-slope logslope). It is NOT sound
+    // callback (marginal-slope slope). It is NOT sound
     // for a family that materialises its own raw-width designs and merely exposes
     // an `AdditiveBlockJacobian` to declare its output channel to the audit — the
     // cause-specific competing-risks Royston-Parmar family, whose likelihood
@@ -1731,7 +1731,7 @@ fn try_orthogonalize_blocks(
     // Families whose blocks carry a `jacobian_callback` (BMS marginal-slope,
     // survival LS, …) own their effective geometry: the family reconstructs the
     // additive predictor from internal full-width designs (e.g. BMS reads its
-    // own `marginal_design`/`logslope_design` per row), and the block `design`
+    // own `marginal_design`/`slope_design` per row), and the block `design`
     // here is only the *raw* basis the callback consumes. A per-block reparam
     // `X_b · V_b` that drops the callback does NOT change what the family
     // computes, but it shrinks the block coefficient width below the family's
@@ -2210,7 +2210,7 @@ mod tests {
     /// Five-block large-scale aliasing repro. Each block carries an
     /// intercept-like constant column; gauge_priority is set per the
     /// survival marginal-slope ownership policy (time=200 > marginal=150
-    /// > logslope=120 > score_warp=80 > link_dev=60). The joint design
+    /// > slope=120 > score_warp=80 > link_dev=60). The joint design
     /// has a 4-D null space among the five constants.
     ///
     /// Under the gauge-aware contract the canonicalisation must SUCCEED
@@ -2230,11 +2230,11 @@ mod tests {
         // The joint design therefore has a 4-D null space among the
         // five constant columns; priority decides which four are
         // dropped. We expect canonicalize to drop one constant from
-        // each of (marginal, logslope, score_warp, link_dev) and keep
+        // each of (marginal, slope, score_warp, link_dev) and keep
         // the time block's constant.
         let mut time = Array2::<f64>::zeros((n, 3));
         let mut marginal = Array2::<f64>::zeros((n, 3));
-        let mut logslope = Array2::<f64>::zeros((n, 3));
+        let mut slope = Array2::<f64>::zeros((n, 3));
         let mut score_warp = Array2::<f64>::zeros((n, 2));
         let mut link_dev = Array2::<f64>::zeros((n, 2));
         for i in 0..n {
@@ -2244,9 +2244,9 @@ mod tests {
             marginal[[i, 0]] = 1.0;
             marginal[[i, 1]] = x[i] * x[i];
             marginal[[i, 2]] = x[i].sin();
-            logslope[[i, 0]] = 1.0;
-            logslope[[i, 1]] = (3.0 * x[i]).sin();
-            logslope[[i, 2]] = (6.0 * x[i]).sin();
+            slope[[i, 0]] = 1.0;
+            slope[[i, 1]] = (3.0 * x[i]).sin();
+            slope[[i, 2]] = (6.0 * x[i]).sin();
             score_warp[[i, 0]] = 1.0;
             score_warp[[i, 1]] = (5.0 * x[i]).cos();
             link_dev[[i, 0]] = 1.0;
@@ -2256,7 +2256,7 @@ mod tests {
         t_spec.gauge_priority = 200;
         let mut m_spec = spec_from_dense("marginal_surface", marginal);
         m_spec.gauge_priority = 150;
-        let mut g_spec = spec_from_dense("logslope_surface", logslope);
+        let mut g_spec = spec_from_dense("slope_surface", slope);
         g_spec.gauge_priority = 120;
         let mut w_spec = spec_from_dense("score_warp_dev", score_warp);
         w_spec.gauge_priority = 80;
@@ -3088,7 +3088,7 @@ mod tests {
 
         let anchor_spec = spec_from_dense_with_priority("marginal_surface", anchor, 150);
         let mut callback_spec =
-            spec_from_dense_with_priority("logslope_surface", callback_owned.clone(), 120);
+            spec_from_dense_with_priority("slope_surface", callback_owned.clone(), 120);
         let raw_callback: Arc<dyn BlockEffectiveJacobian> = Arc::new(AdditiveBlockJacobian {
             design: callback_owned.clone(),
             own_output: 0,
@@ -3110,8 +3110,8 @@ mod tests {
                 .audit
                 .dropped_columns
                 .iter()
-                .any(|drop| drop.block == "logslope_surface"),
-            "test must exercise an attributed logslope drop; got {:?}",
+                .any(|drop| drop.block == "slope_surface"),
+            "test must exercise an attributed slope drop; got {:?}",
             canon.audit.dropped_columns,
         );
         // Anchor (higher priority) keeps both columns; the aliased callback block
@@ -3210,7 +3210,7 @@ mod tests {
         // let this test pass without exercising the reduced callback path.
         let anchor_spec = spec_from_dense_with_priority("marginal_surface", anchor, 150);
         let mut callback_spec =
-            spec_from_dense_with_priority("logslope_surface", callback_owned.clone(), 120);
+            spec_from_dense_with_priority("slope_surface", callback_owned.clone(), 120);
         let raw_callback: Arc<dyn BlockEffectiveJacobian> = Arc::new(AdditiveBlockJacobian {
             design: callback_owned.clone(),
             own_output: 0,
@@ -3231,7 +3231,7 @@ mod tests {
                 .audit
                 .dropped_columns
                 .iter()
-                .any(|drop| drop.block == "logslope_surface"),
+                .any(|drop| drop.block == "slope_surface"),
             "test must exercise a real callback-owned gauge drop; got {:?}",
             canon.audit.dropped_columns,
         );
@@ -3324,7 +3324,7 @@ mod tests {
 
         let anchor_spec = spec_from_dense_with_priority("location_anchor", anchor, 150);
         let mut callback_spec =
-            spec_from_dense_with_priority("scale_logslope", callback_owned.clone(), 120);
+            spec_from_dense_with_priority("scale_slope", callback_owned.clone(), 120);
         // A 2-output (location-scale) callback: this block drives output 1 (the
         // scale channel); its raw Jacobian is (2·n × 2) with the block design in
         // the channel-1 row band and zeros in channel 0.

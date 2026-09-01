@@ -71,7 +71,7 @@ def _fit_large_scale_survival_marginal_slope_worker(result_queue: typing.Any) ->
             f"Surv(entry_age, exit_age, event) ~ {duchon} + sex",
             survival_likelihood="marginal-slope",
             z_column="prs_z",
-            logslope_formula=duchon,
+            slope_formula=duchon,
         )
         elapsed = time.monotonic() - started
         pred = model.predict(df.iloc[:16].copy())

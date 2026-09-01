@@ -1,11 +1,11 @@
-//! Regression test: survival marginal-slope logslope block Jacobian
+//! Regression test: survival marginal-slope slope block Jacobian
 //! faithfully implements the hyperbolic correction at non-zero β.
 //!
 //! # Background
 //!
-//! For the survival marginal-slope family the logslope block maps β through
+//! For the survival marginal-slope family the slope block maps β through
 //!
-//!   g_i = Phi_{i,:} · β         (logslope design row)
+//!   g_i = Phi_{i,:} · β         (slope design row)
 //!   c_i = sqrt(1 + (s_f · g_i)^2)
 //!   c1_i = s_f^2 · g_i / c_i   (dc/dg at row i)
 //!
@@ -15,7 +15,7 @@
 //!   η1_i = q1_i · c_i + s_f · g_i · z_i
 //!   ad1_i = qd1_i · c_i
 //!
-//! The logslope block's Jacobian w.r.t. β_logslope is therefore
+//! The slope block's Jacobian w.r.t. β_slope is therefore
 //!
 //!   ∂η0_i/∂β_s = (q0_i · c1_i + s_f · z_i) · Phi_{i,s}
 //!   ∂η1_i/∂β_s = (q1_i · c1_i + s_f · z_i) · Phi_{i,s}
@@ -27,7 +27,7 @@
 //!
 //! # What this test guards
 //!
-//! T1's `BlockEffectiveJacobian` implementation for the logslope block must
+//! T1's `BlockEffectiveJacobian` implementation for the slope block must
 //! return the FULL formula above — not the simpler `s_f·diag(z)·Phi` shortcut
 //! that only holds at β=0.  A static diagonal-scaling shortcut would
 //! pass the β=0 point but fail the moderate-β finite-difference check below.
@@ -42,11 +42,11 @@
 //!
 //! ## Channel-aware audit at moderate β
 //!
-//! With the correct Jacobian, marginal and logslope blocks have DIFFERENT
+//! With the correct Jacobian, marginal and slope blocks have DIFFERENT
 //! per-row scale factors (c_i vs. q·c1_i + s_f·z_i), so their effective
 //! designs in the (n·K=3·n) channel-stacked space are NOT collinear.  The
 //! pairwise overlap is strictly less than 1.0.  With a static diagonal shortcut,
-//! both marginal and logslope blocks would have scale factor s_f·z_i,
+//! both marginal and slope blocks would have scale factor s_f·z_i,
 //! yielding overlap = 1.0 — triggering a spurious fatal audit halt.
 
 use gam::custom_family::{
@@ -103,7 +103,7 @@ const P_BLOCK: usize = 1 + D_PC + N_DUCHON_CENTERS;
 struct SyntheticData {
     /// Standardised PRS / latent-z scores, shape (N,).
     z: Array1<f64>,
-    /// Logslope design matrix Phi, shape (N, P_BLOCK).
+    /// Slope design matrix Phi, shape (N, P_BLOCK).
     phi: Array2<f64>,
     /// Marginal design matrix, shape (N, P_BLOCK).
     phi_marg: Array2<f64>,
@@ -137,7 +137,7 @@ fn make_synthetic_data(seed: u64) -> SyntheticData {
         }
     }
 
-    // Build logslope design: [1 | pcs | duchon_rbf(pcs, centers)]
+    // Build slope design: [1 | pcs | duchon_rbf(pcs, centers)]
     // Duchon centers are fixed random points in the PC space.
     let mut centers = Array2::<f64>::zeros((N_DUCHON_CENTERS, D_PC));
     for k in 0..N_DUCHON_CENTERS {
@@ -196,7 +196,7 @@ fn make_synthetic_data(seed: u64) -> SyntheticData {
     }
 }
 
-// ── Per-row primary scalars at a given β_logslope ─────────────────────────
+// ── Per-row primary scalars at a given β_slope ─────────────────────────
 
 struct RowScalars {
     g: Array1<f64>,
@@ -225,7 +225,7 @@ fn compute_row_scalars(phi: &Array2<f64>, beta: &[f64], s_f: f64) -> RowScalars 
     RowScalars { g, c, c1 }
 }
 
-// ── Compute stacked η at a given β_logslope ───────────────────────────────
+// ── Compute stacked η at a given β_slope ───────────────────────────────
 //
 // Stacked η = [η0; η1; ad1], each of length N.  The q0/q1/qd1 vectors are
 // the pilot primary scalars from the time/marginal blocks (treated as fixed
@@ -254,9 +254,9 @@ fn compute_eta_stack(
 
 // ── Analytical Jacobian ───────────────────────────────────────────────────
 //
-// Computes the correct (3*N, P) Jacobian for the logslope block.
+// Computes the correct (3*N, P) Jacobian for the slope block.
 
-fn analytical_logslope_jacobian(
+fn analytical_slope_jacobian(
     phi: &Array2<f64>,
     beta: &[f64],
     q0: &Array1<f64>,
@@ -282,24 +282,24 @@ fn analytical_logslope_jacobian(
     jac
 }
 
-// ── BlockEffectiveJacobian impl for logslope block ───────────────────────
+// ── BlockEffectiveJacobian impl for slope block ───────────────────────
 //
 // This struct carries the design + per-row family scalars and implements the
 // full β-dependent Jacobian. The `family_scalars` arc carries
-// `LogslopeFamilyScalars` which contains q0, q1, qd1, z, s_f computed at
+// `SlopeFamilyScalars` which contains q0, q1, qd1, z, s_f computed at
 // the current linearization point (updated each time β changes).
 
 // `s_f` (probit frailty scale) is read from `state.probit_frailty_scale` at
 // evaluation time, not carried inside this struct: that lets the same scalars
 // instance stay correct across outer-loop σ updates without rebuilding.
-struct LogslopeFamilyScalars {
+struct SlopeFamilyScalars {
     q0: Array1<f64>,
     q1: Array1<f64>,
     qd1: Array1<f64>,
     z: Array1<f64>,
 }
 
-struct LogslopeJacobianImpl {
+struct SlopeJacobianImpl {
     phi: Array2<f64>,
     s_f: f64,
     q0: Array1<f64>,
@@ -308,7 +308,7 @@ struct LogslopeJacobianImpl {
     z: Array1<f64>,
 }
 
-impl BlockEffectiveJacobian for LogslopeJacobianImpl {
+impl BlockEffectiveJacobian for SlopeJacobianImpl {
     fn effective_jacobian_rows(
         &self,
         state: &FamilyLinearizationState<'_>,
@@ -317,7 +317,7 @@ impl BlockEffectiveJacobian for LogslopeJacobianImpl {
         // Prefer family_scalars if provided (they carry updated q0/q1/qd1
         // from the linearization state). Fall back to self.q0/q1/qd1.
         let (q0, q1, qd1, z) = if let Some(arc) = state.family_scalars.as_ref() {
-            if let Some(fs) = arc.downcast_ref::<LogslopeFamilyScalars>() {
+            if let Some(fs) = arc.downcast_ref::<SlopeFamilyScalars>() {
                 (&fs.q0, &fs.q1, &fs.qd1, &fs.z)
             } else {
                 (&self.q0, &self.q1, &self.qd1, &self.z)
@@ -328,7 +328,7 @@ impl BlockEffectiveJacobian for LogslopeJacobianImpl {
 
         let n = self.phi.nrows();
         let rows = rows.start.min(n)..rows.end.min(n);
-        let full = analytical_logslope_jacobian(&self.phi, state.beta, q0, q1, qd1, z, self.s_f);
+        let full = analytical_slope_jacobian(&self.phi, state.beta, q0, q1, qd1, z, self.s_f);
         // `full` is channel-major: rows [0..n) = η0, [n..2n) = η1, [2n..3n) = ad1.
         // Re-stack the requested row range per channel into the same channel-major
         // layout, matching the trait's `effective_jacobian_rows` contract.
@@ -354,7 +354,7 @@ impl BlockEffectiveJacobian for LogslopeJacobianImpl {
 
 // ── RowJacobianOperator wrapper (for channel-aware audit) ─────────────────
 
-struct LogslopeOperator {
+struct SlopeOperator {
     phi: Array2<f64>,
     s_f: f64,
     q0: Array1<f64>,
@@ -364,7 +364,7 @@ struct LogslopeOperator {
     beta: Vec<f64>,
 }
 
-impl RowJacobianOperator for LogslopeOperator {
+impl RowJacobianOperator for SlopeOperator {
     fn k(&self) -> usize {
         3
     }
@@ -502,7 +502,7 @@ fn make_spec_from_dense(name: &str, phi: Array2<f64>) -> ParameterBlockSpec {
     }
 }
 
-fn make_logslope_spec(
+fn make_slope_spec(
     phi: Array2<f64>,
     q0: Array1<f64>,
     q1: Array1<f64>,
@@ -511,7 +511,7 @@ fn make_logslope_spec(
     s_f: f64,
 ) -> ParameterBlockSpec {
     let n = phi.nrows();
-    let cb = Arc::new(LogslopeJacobianImpl {
+    let cb = Arc::new(SlopeJacobianImpl {
         phi: phi.clone(),
         s_f,
         q0,
@@ -520,7 +520,7 @@ fn make_logslope_spec(
         z,
     });
     ParameterBlockSpec {
-        name: "logslope".to_string(),
+        name: "slope".to_string(),
         design: DesignMatrix::Dense(DenseDesignMatrix::from(phi)),
         offset: Array1::<f64>::zeros(n),
         penalties: Vec::new(),
@@ -541,9 +541,9 @@ fn make_logslope_spec(
 // that the error is O(h^2) ~ 1e-12 for smooth functions, so 1e-5 is an
 // extremely generous bound that will catch any O(1) shortcut error.
 
-fn check_logslope_jacobian(
+fn check_slope_jacobian(
     data: &SyntheticData,
-    beta_logslope: &[f64],
+    beta_slope: &[f64],
     q0: &Array1<f64>,
     q1: &Array1<f64>,
     qd1: &Array1<f64>,
@@ -551,8 +551,8 @@ fn check_logslope_jacobian(
     label: &str,
 ) {
     let analytic =
-        analytical_logslope_jacobian(&data.phi, beta_logslope, q0, q1, qd1, &data.z, s_f);
-    let beta_arr = Array1::from(beta_logslope.to_vec());
+        analytical_slope_jacobian(&data.phi, beta_slope, q0, q1, qd1, &data.z, s_f);
+    let beta_arr = Array1::from(beta_slope.to_vec());
     let phi_ref = &data.phi;
     let q0_ref = q0;
     let q1_ref = q1;
@@ -576,7 +576,7 @@ fn check_logslope_jacobian(
     let rel_err = max_col_rel_error(&analytic, &fd);
     assert!(
         rel_err < 1e-5,
-        "{label}: analytical logslope Jacobian rel-error vs FD = {rel_err:.3e} (expected < 1e-5); \
+        "{label}: analytical slope Jacobian rel-error vs FD = {rel_err:.3e} (expected < 1e-5); \
          the hyperbolic correction formula is wrong",
     );
 }
@@ -635,15 +635,15 @@ fn check_effective_jacobian_matches_fd(
 
 // ── Main tests ───────────────────────────────────────────────────────────
 
-/// At β_logslope = 0: g_i = 0 for all i, c_i = 1, c1_i = 0.
-/// The logslope Jacobian must equal s_f · diag(z) · Phi — NOT raw Phi.
+/// At β_slope = 0: g_i = 0 for all i, c_i = 1, c1_i = 0.
+/// The slope Jacobian must equal s_f · diag(z) · Phi — NOT raw Phi.
 #[test]
-fn logslope_jacobian_at_zero_beta_equals_sf_diag_z_phi() {
+fn slope_jacobian_at_zero_beta_equals_sf_diag_z_phi() {
     let data = make_synthetic_data(42);
     for s_f in [1.0_f64, 0.8] {
         let beta_zero = vec![0.0; P_BLOCK];
         // At g=0: c=1, c1=0, so ∂η_r/∂β = s_f·z·Phi for η0/η1, and 0 for ad1.
-        let analytic = analytical_logslope_jacobian(
+        let analytic = analytical_slope_jacobian(
             &data.phi,
             &beta_zero,
             &data.q0_base,
@@ -678,7 +678,7 @@ fn logslope_jacobian_at_zero_beta_equals_sf_diag_z_phi() {
         }
         // FD check.
         let label = format!("beta=0 s_f={s_f}");
-        check_logslope_jacobian(
+        check_slope_jacobian(
             &data,
             &beta_zero,
             &data.q0_base,
@@ -693,14 +693,14 @@ fn logslope_jacobian_at_zero_beta_equals_sf_diag_z_phi() {
 /// At small random β: g_i small but nonzero, c1_i ≈ 0 but not exactly 0.
 /// FD must still agree with analytical formula.
 #[test]
-fn logslope_jacobian_at_small_beta_matches_fd() {
+fn slope_jacobian_at_small_beta_matches_fd() {
     let data = make_synthetic_data(123);
     assert_eq!(data.phi.nrows(), N, "synthetic data must have N rows");
     let mut rng = Splitmix64::new(0xDEAD_BEEF_u64);
     for s_f in [1.0_f64, 0.8] {
         let beta_small: Vec<f64> = (0..P_BLOCK).map(|_| rng.next_gauss() * 0.05).collect();
         let label = format!("beta=small s_f={s_f}");
-        check_logslope_jacobian(
+        check_slope_jacobian(
             &data,
             &beta_small,
             &data.q0_base,
@@ -718,7 +718,7 @@ fn logslope_jacobian_at_small_beta_matches_fd() {
 /// SENTINEL: if this test fails while the β=0 test passes, T1's impl uses
 /// a static diagonal shortcut (s_f·z) everywhere, which is only correct at g=0.
 #[test]
-fn logslope_jacobian_at_moderate_beta_has_hyperbolic_correction() {
+fn slope_jacobian_at_moderate_beta_has_hyperbolic_correction() {
     let data = make_synthetic_data(777);
     let mut rng = Splitmix64::new(0xC0_FFEE_u64);
     for s_f in [1.0_f64, 0.8] {
@@ -729,7 +729,7 @@ fn logslope_jacobian_at_moderate_beta_has_hyperbolic_correction() {
         let beta_moderate: Vec<f64> = (0..P_BLOCK).map(|_| rng.next_gauss() * scale).collect();
 
         let label = format!("beta=moderate s_f={s_f}");
-        check_logslope_jacobian(
+        check_slope_jacobian(
             &data,
             &beta_moderate,
             &data.q0_base,
@@ -758,7 +758,7 @@ fn logslope_jacobian_at_moderate_beta_has_hyperbolic_correction() {
         );
 
         // Confirm ad1 rows are nonzero at moderate β (since qd1·c1 ≠ 0 when g ≠ 0).
-        let analytic = analytical_logslope_jacobian(
+        let analytic = analytical_slope_jacobian(
             &data.phi,
             &beta_moderate,
             &data.q0_base,
@@ -782,7 +782,7 @@ fn logslope_jacobian_at_moderate_beta_has_hyperbolic_correction() {
 }
 
 /// Call `spec.effective_jacobian_at` on a `ParameterBlockSpec` with a
-/// `LogslopeJacobianImpl` callback, and verify it matches FD at three β
+/// `SlopeJacobianImpl` callback, and verify it matches FD at three β
 /// points: β=0, small, moderate.
 #[test]
 fn effective_jacobian_at_matches_fd_at_three_linearization_points() {
@@ -791,7 +791,7 @@ fn effective_jacobian_at_matches_fd_at_three_linearization_points() {
     let mut rng = Splitmix64::new(0x1337_u64);
 
     for s_f in [1.0_f64, 0.8] {
-        let spec = make_logslope_spec(
+        let spec = make_slope_spec(
             data.phi.clone(),
             data.q0_base.clone(),
             data.q1_base.clone(),
@@ -865,7 +865,7 @@ fn effective_jacobian_uses_family_scalars_when_provided() {
 
     // Build spec with STALE q0/q1/qd1 (all zeros).
     let stale_q = Array1::<f64>::zeros(N);
-    let spec = make_logslope_spec(
+    let spec = make_slope_spec(
         data.phi.clone(),
         stale_q.clone(),
         stale_q.clone(),
@@ -878,7 +878,7 @@ fn effective_jacobian_uses_family_scalars_when_provided() {
     let beta: Vec<f64> = (0..P_BLOCK).map(|_| rng.next_gauss() * scale).collect();
 
     // Provide correct scalars via family_scalars.
-    let fs: Arc<dyn Any + Send + Sync> = Arc::new(LogslopeFamilyScalars {
+    let fs: Arc<dyn Any + Send + Sync> = Arc::new(SlopeFamilyScalars {
         q0: data.q0_base.clone(),
         q1: data.q1_base.clone(),
         qd1: data.qd1_base.clone(),
@@ -900,9 +900,9 @@ fn effective_jacobian_uses_family_scalars_when_provided() {
     );
 }
 
-/// Channel-aware audit: marginal and logslope blocks at moderate β have
+/// Channel-aware audit: marginal and slope blocks at moderate β have
 /// DIFFERENT per-row scalings (c_i for marginal vs (q·c1+s_f·z)_i for
-/// logslope), so their pairwise overlap in (n·K=3·n) space is < 1.0.
+/// slope), so their pairwise overlap in (n·K=3·n) space is < 1.0.
 ///
 /// With a static diagonal shortcut, both blocks would use s_f·z_i as their
 /// row scaling, making the overlap = 1.0 and triggering a spurious fatal halt.
@@ -913,21 +913,21 @@ fn channel_aware_audit_overlap_below_one_at_moderate_beta() {
     let mut rng = Splitmix64::new(0xFACE_u64);
 
     let scale = 1.0 / (s_f * (P_BLOCK as f64).sqrt());
-    let beta_logslope: Vec<f64> = (0..P_BLOCK).map(|_| rng.next_gauss() * scale).collect();
+    let beta_slope: Vec<f64> = (0..P_BLOCK).map(|_| rng.next_gauss() * scale).collect();
 
     // Marginal block: its c_i is from the marginal block's own g_marg = phi_marg · β_marg.
     // At β_marg = 0 (no marginal predictor shift), g_marg = 0, c_i = 1 for all i.
     let c_marginal = Array1::<f64>::ones(N);
 
     // Build RowJacobianOperator instances.
-    let logslope_op = Arc::new(LogslopeOperator {
+    let slope_op = Arc::new(SlopeOperator {
         phi: data.phi.clone(),
         s_f,
         q0: data.q0_base.clone(),
         q1: data.q1_base.clone(),
         qd1: data.qd1_base.clone(),
         z: data.z.clone(),
-        beta: beta_logslope.clone(),
+        beta: beta_slope.clone(),
     });
 
     let marg_op = Arc::new(MarginalOperator {
@@ -937,11 +937,11 @@ fn channel_aware_audit_overlap_below_one_at_moderate_beta() {
 
     let specs = [
         make_spec_from_dense("marginal", data.phi_marg.clone()),
-        make_spec_from_dense("logslope", data.phi.clone()),
+        make_spec_from_dense("slope", data.phi.clone()),
     ];
     let operators: Vec<Arc<dyn RowJacobianOperator>> = vec![
         marg_op as Arc<dyn RowJacobianOperator>,
-        logslope_op as Arc<dyn RowJacobianOperator>,
+        slope_op as Arc<dyn RowJacobianOperator>,
     ];
     let row_hess = IdentityRowHessian::new(N, 3);
 
@@ -959,7 +959,7 @@ fn channel_aware_audit_overlap_below_one_at_moderate_beta() {
     assert!(
         max_overlap < 0.99,
         "channel-aware audit: max cross-block overlap = {max_overlap:.4} (expected < 0.99). \
-         With a static diagonal shortcut, marginal and logslope blocks both scale by s_f·z \
+         With a static diagonal shortcut, marginal and slope blocks both scale by s_f·z \
          and this overlap would be 1.0, triggering a fatal halt. The correct hyperbolic \
          Jacobian has distinct per-row scalings and this overlap must be < 1. \
          Summary: {}",
@@ -979,7 +979,7 @@ fn channel_aware_audit_overlap_below_one_at_moderate_beta() {
     assert!(
         !audit.fatal,
         "channel-aware audit should NOT be fatal for correctly-implemented hyperbolic \
-         Jacobian; marginal and logslope blocks are separately identifiable. \
+         Jacobian; marginal and slope blocks are separately identifiable. \
          Summary: {}",
         audit.summary,
     );
@@ -1108,8 +1108,8 @@ fn time_and_marginal_blocks_at_zero_beta_have_trivial_scaling() {
     }
 }
 
-// The production `LogslopeBlockJacobian` contract test moved in-crate
+// The production `SlopeBlockJacobian` contract test moved in-crate
 // (crates/gam-models/src/survival/marginal_slope/tests.rs::
-// logslope_jacobian_hyperbolic_correction_matches_fd_with_scalars) when the
+// slope_jacobian_hyperbolic_correction_matches_fd_with_scalars) when the
 // constructor went crate-internal (#2352). The local-model tests above keep
 // guarding the hyperbolic-correction formula through the public trait.

@@ -66,7 +66,7 @@ const SEED: u64 = 0x5CA1_AB1E_5C0F_E5A1;
 
 /// Builds a synthetic margslope problem with one cubic B-spline smooth on
 /// a covariate column `x ~ Uniform[0,1]` for the marginal block, and an
-/// intercept-only logslope block. The latent score `z` is sampled
+/// intercept-only slope block. The latent score `z` is sampled
 /// standard-normal independently of `x`. `y` is drawn from a probit link
 /// applied to `f(x) + 0.3·z` with a moderately nonlinear `f`.
 struct Problem {
@@ -117,7 +117,7 @@ fn build_problem(n: usize, flex: bool) -> Problem {
     }));
     let weights = Array1::ones(n);
     let marginal_offset = Array1::<f64>::zeros(n);
-    let logslope_offset = Array1::<f64>::zeros(n);
+    let slope_offset = Array1::<f64>::zeros(n);
 
     // Single 1D cubic B-spline smooth on `x` (column 0). 8 internal knots.
     let smooth = SmoothTermSpec {
@@ -146,7 +146,7 @@ fn build_problem(n: usize, flex: bool) -> Problem {
         random_effect_terms: vec![],
         smooth_terms: vec![smooth],
     };
-    let logslopespec = TermCollectionSpec {
+    let slopespec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![],
@@ -163,9 +163,9 @@ fn build_problem(n: usize, flex: bool) -> Problem {
         z,
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginalspec,
-        logslopespec,
+        slopespec,
         marginal_offset,
-        logslope_offset,
+        slope_offset,
         frailty: FrailtySpec::None,
         score_warp,
         link_dev,

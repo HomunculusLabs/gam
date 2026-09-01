@@ -89,14 +89,14 @@ fn test_family_with_dense_designs(
     weights: Array1<f64>,
     z: Array1<f64>,
     marginal_design: Array2<f64>,
-    logslope_design: Array2<f64>,
+    slope_design: Array2<f64>,
 ) -> BernoulliMarginalSlopeFamily {
     BernoulliMarginalSlopeFamily {
         y: Arc::new(y),
         weights: Arc::new(weights),
         z: Arc::new(z),
         marginal_design: dense_design(marginal_design),
-        logslope_design: dense_design(logslope_design),
+        slope_design: dense_design(slope_design),
         ..default_test_family()
     }
 }
@@ -127,7 +127,7 @@ fn default_test_family() -> BernoulliMarginalSlopeFamily {
         weights: Arc::new(Array1::zeros(0)),
         z: Arc::new(Array1::zeros(0)),
         marginal_design: empty_design.clone(),
-        logslope_design: empty_design,
+        slope_design: empty_design,
         latent_measure: LatentMeasureKind::StandardNormal,
         gaussian_frailty_sd: None,
         base_link: InverseLink::Standard(gam_spec::StandardLink::Probit),
@@ -254,19 +254,19 @@ fn flex_hessian_matvec_fixture(
         ..test_family_with_dense_designs(y, weights, z.clone(), design.clone(), design)
     };
     let marginal_beta = array![0.05, 0.08];
-    let logslope_beta = array![-0.15, 0.04];
+    let slope_beta = array![-0.15, 0.04];
     let marginal_eta =
         Array1::from_iter(z.iter().map(|zi| marginal_beta[0] + marginal_beta[1] * zi));
-    let logslope_eta =
-        Array1::from_iter(z.iter().map(|zi| logslope_beta[0] + logslope_beta[1] * zi));
+    let slope_eta =
+        Array1::from_iter(z.iter().map(|zi| slope_beta[0] + slope_beta[1] * zi));
     let states = vec![
         ParameterBlockState {
             beta: marginal_beta,
             eta: marginal_eta,
         },
         ParameterBlockState {
-            beta: logslope_beta,
-            eta: logslope_eta,
+            beta: slope_beta,
+            eta: slope_eta,
         },
         ParameterBlockState {
             beta: Array1::zeros(score_prepared.block.design.ncols()),
@@ -918,7 +918,7 @@ fn bernoulli_margslope_warm_start_cache_persists_across_eval_cache_builds() {
             marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 Array2::ones((n, 1)),
             )),
-            logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 Array2::ones((n, 1)),
             )),
             score_warp: Some(score_prepared.runtime.clone()),
@@ -1008,7 +1008,7 @@ fn bernoulli_margslope_flex_ll_early_exit_is_exact_or_provably_rejected() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::ones((n, 1)),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::ones((n, 1)),
         )),
         score_warp: Some(score_prepared.runtime.clone()),
@@ -1115,9 +1115,9 @@ fn base_spec(
         z,
         base_link: bernoulli_marginal_slope_probit_link(),
         marginalspec: empty_termspec(),
-        logslopespec: empty_termspec(),
+        slopespec: empty_termspec(),
         marginal_offset: Array1::zeros(n),
-        logslope_offset: Array1::zeros(n),
+        slope_offset: Array1::zeros(n),
         frailty: FrailtySpec::None,
         score_warp: None,
         link_dev: None,
@@ -1748,7 +1748,7 @@ fn pair_distance(lhs: (f64, f64), rhs: (f64, f64)) -> f64 {
 }
 
 /// Build a tiny synthetic rigid-probit family with `n` rows. The marginal
-/// and log-slope blocks each carry a single all-ones column so the
+/// and slope blocks each carry a single all-ones column so the
 /// per-row eta is simply the scalar block beta. No flex deviations are
 /// active, so `log_likelihood_only` takes the closed-form rigid path.
 fn make_rigid_test_family(n: usize) -> BernoulliMarginalSlopeFamily {
@@ -2117,7 +2117,7 @@ fn bernoulli_psi_workspace_with_options_threads_subsample_to_first_order() {
     use crate::outer_subsample::OuterScoreSubsample;
 
     // Build a sigma-aware family at n=200 with the sigma-aux derivative
-    // entry on the logslope block (last block).
+    // entry on the slope block (last block).
     let n = 200usize;
     let family = make_sigma_aware_test_family(n);
     let states = rigid_block_states(&family, 0.3, 0.4);
@@ -2378,9 +2378,9 @@ fn bernoulli_marginal_slope_rejects_nonprobit_base_link() {
         z,
         base_link: InverseLink::Standard(StandardLink::Logit),
         marginalspec: empty_termspec(),
-        logslopespec: empty_termspec(),
+        slopespec: empty_termspec(),
         marginal_offset: Array1::zeros(2),
-        logslope_offset: Array1::zeros(2),
+        slope_offset: Array1::zeros(2),
         frailty: FrailtySpec::None,
         score_warp: None,
         link_dev: None,
@@ -2462,9 +2462,9 @@ fn link_dev_without_score_warp_exposes_structural_derivative_lower_bounds() {
         "zero-column marginal design should not contribute coefficient coordinates"
     );
     assert_eq!(
-        slices.logslope.len(),
+        slices.slope.len(),
         0,
-        "zero-column logslope design should not contribute coefficient coordinates"
+        "zero-column slope design should not contribute coefficient coordinates"
     );
     assert_eq!(
         link_slice.start, 0,
@@ -2624,7 +2624,7 @@ fn exact_layout_ignores_dummy_beta_widths_for_empty_design_blocks() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
         score_warp: Some(score_prepared.runtime.clone()),
@@ -2645,7 +2645,7 @@ fn exact_layout_ignores_dummy_beta_widths_for_empty_design_blocks() {
         .build_exact_eval_cache(&block_states)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "exact eval cache", e));
     assert_eq!(cache.slices.marginal.len(), 0);
-    assert_eq!(cache.slices.logslope.len(), 0);
+    assert_eq!(cache.slices.slope.len(), 0);
     assert_eq!(cache.slices.h.as_ref().expect("h slice").start, 0);
     assert_eq!(
         cache.slices.w.as_ref().expect("w slice").start,
@@ -2656,7 +2656,7 @@ fn exact_layout_ignores_dummy_beta_widths_for_empty_design_blocks() {
         score_prepared.runtime.basis_dim() + link_prepared.runtime.basis_dim()
     );
     assert_eq!(cache.primary.q, 0);
-    assert_eq!(cache.primary.logslope, 1);
+    assert_eq!(cache.primary.slope, 1);
     assert_eq!(cache.primary.h.as_ref().expect("primary h").start, 2);
     assert_eq!(
         cache.primary.w.as_ref().expect("primary w").start,
@@ -2688,7 +2688,7 @@ fn score_warp_block_exposes_structural_derivative_lower_bounds() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
         score_warp: Some(prepared.runtime.clone()),
@@ -2744,7 +2744,7 @@ fn post_update_block_beta_clamps_infeasible_score_warp_step_to_the_feasible_segm
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
         score_warp: Some(prepared.runtime.clone()),
@@ -3614,7 +3614,7 @@ fn observed_denested_partials_include_third_a_derivative_for_piecewise_cubic_lin
             marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 array![[1.0], [1.0], [1.0]],
             )),
-            logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 array![[1.0], [1.0], [1.0]],
             )),
             link_dev: Some(link_prepared.runtime.clone()),
@@ -3783,7 +3783,7 @@ fn flexible_family_routes_outer_derivatives_by_scale() {
             marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 array![[1.0], [1.0], [1.0]],
             )),
-            logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 array![[1.0], [1.0], [1.0]],
             )),
             score_warp: Some(score_prepared.runtime.clone()),
@@ -3919,7 +3919,7 @@ fn bms_advertises_exact_outer_hvp_and_plans_arc_outer_newton() {
         weights: Arc::new(Array1::ones(3)),
         z: Arc::new(seed.clone()),
         marginal_design: dense_design(array![[1.0], [1.0], [1.0]]),
-        logslope_design: dense_design(array![[1.0], [1.0], [1.0]]),
+        slope_design: dense_design(array![[1.0], [1.0], [1.0]]),
         score_warp: Some(score_prepared.runtime.clone()),
         ..default_test_family()
     };
@@ -4077,7 +4077,7 @@ fn bernoulli_marginal_slope_coefficient_cost_uses_joint_coupled_formula() {
     use crate::custom_family::default_coefficient_hessian_cost;
     use gam_linalg::matrix::DesignMatrix;
 
-    // Two-block rigid marginal-slope shape: marginal p=20, log-slope p=8,
+    // Two-block rigid marginal-slope shape: marginal p=20, slope p=8,
     // n=1000. The default block-diagonal formula gives Σ n·p_b² =
     // 1000·(400 + 64) = 464_000. The joint-coupled override must add
     // the cross-block outer-product fill 2·n·p_marg·p_log = 320_000,
@@ -4096,7 +4096,7 @@ fn bernoulli_marginal_slope_coefficient_cost_uses_joint_coupled_formula() {
         weights: Arc::new(Array1::from_elem(n, 1.0)),
         z: Arc::new(Array1::zeros(n)),
         marginal_design: marg_design.clone(),
-        logslope_design: log_design.clone(),
+        slope_design: log_design.clone(),
         ..default_test_family()
     };
     let specs = vec![
@@ -4116,7 +4116,7 @@ fn bernoulli_marginal_slope_coefficient_cost_uses_joint_coupled_formula() {
             stacked_offset: None,
         },
         ParameterBlockSpec {
-            name: "logslope".to_string(),
+            name: "slope".to_string(),
             design: log_design,
             offset: Array1::zeros(n),
             penalties: vec![crate::custom_family::PenaltyMatrix::Dense(Array2::zeros((
@@ -4152,7 +4152,7 @@ fn rigid_fast_path_matches_loglik_finite_differences() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![
             [1.0]
         ])),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(array![
             [1.0]
         ])),
         ..default_test_family()
@@ -4184,7 +4184,7 @@ fn rigid_fast_path_matches_loglik_finite_differences() {
     let grad_g = match &eval.blockworking_sets[1] {
         BlockWorkingSet::ExactNewton { gradient, .. } => gradient[0],
         BlockWorkingSet::Diagonal { .. } => {
-            panic!("expected exact-newton log-slope block")
+            panic!("expected exact-newton slope block")
         }
     };
     let hess_qq = match &eval.blockworking_sets[0] {
@@ -4199,10 +4199,10 @@ fn rigid_fast_path_matches_loglik_finite_differences() {
     let hess_gg = match &eval.blockworking_sets[1] {
         BlockWorkingSet::ExactNewton { hessian, .. } => match hessian {
             SymmetricMatrix::Dense(h) => h[[0, 0]],
-            _ => panic!("expected dense log-slope Hessian"),
+            _ => panic!("expected dense slope Hessian"),
         },
         BlockWorkingSet::Diagonal { .. } => {
-            panic!("expected exact-newton log-slope block")
+            panic!("expected exact-newton slope block")
         }
     };
 
@@ -4230,7 +4230,7 @@ fn rigid_fast_path_matches_loglik_finite_differences() {
     );
     assert!(
         (grad_g - expected_score_g).abs() < 1e-10,
-        "logslope gradient mismatch: fast={grad_g:.12e}, exact={expected_score_g:.12e}"
+        "slope gradient mismatch: fast={grad_g:.12e}, exact={expected_score_g:.12e}"
     );
     assert!(
         (hess_qq - primary_hess[[0, 0]]).abs() < 1e-10,
@@ -4239,7 +4239,7 @@ fn rigid_fast_path_matches_loglik_finite_differences() {
     );
     assert!(
         (hess_gg - primary_hess[[1, 1]]).abs() < 1e-10,
-        "logslope Hessian mismatch: fast={hess_gg:.12e}, exact={:.12e}",
+        "slope Hessian mismatch: fast={hess_gg:.12e}, exact={:.12e}",
         primary_hess[[1, 1]]
     );
 }
@@ -4279,14 +4279,14 @@ fn w_only_gradient_hessian_finite_and_symmetric() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
         link_dev: Some(prepared.runtime.clone()),
         ..default_test_family()
     };
 
-    // Three blocks: marginal (dim 0), logslope (dim 0), link_dev.
+    // Three blocks: marginal (dim 0), slope (dim 0), link_dev.
     // eta is irrelevant for zero-column designs; use zeros.
     let block_states = vec![
         dummy_block_state(array![0.0], seed.len()),
@@ -4374,7 +4374,7 @@ fn h_only_gradient_hessian_finite_and_symmetric() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
         score_warp: Some(prepared.runtime.clone()),
@@ -4441,7 +4441,7 @@ fn h_only_gradient_hessian_finite_and_symmetric() {
 #[test]
 fn w_only_exact_outer_directional_derivatives_are_present_and_finite() {
     // #2347 PRINCIPLED FIX (mirrors the h_only sibling). This test previously
-    // used zero-width marginal/logslope designs, forcing b ≡ 0. At b = 0 the
+    // used zero-width marginal/slope designs, forcing b ≡ 0. At b = 0 the
     // link argument u = a + b·z is constant in z, so the link-warp deviation
     // L(u) = L(a) does not vary across the row and its outer directional
     // derivatives are STRUCTURALLY zero — the FD of the joint Hessian in a
@@ -4450,7 +4450,7 @@ fn w_only_exact_outer_directional_derivatives_are_present_and_finite() {
     // nonzero value; the corrected third matches the FD (~0), so `max > 1e-10`
     // is analytically impossible for the degenerate fixture. As with h_only,
     // restore the geometry the test is meant to exercise: scalar marginal /
-    // logslope designs at nondegenerate values (b ≠ 0) and a direction on all
+    // slope designs at nondegenerate values (b ≠ 0) and a direction on all
     // three blocks, so the w-only derivatives are genuinely nonzero.
     let seed = array![-1.5, -0.5, 0.0, 0.5, 1.5];
     let prepared = build_test_link_deviation_block_from_seed(
@@ -4479,7 +4479,7 @@ fn w_only_exact_outer_directional_derivatives_are_present_and_finite() {
         weights: Arc::new(Array1::ones(seed.len())),
         z: Arc::new(seed.clone()),
         marginal_design: scalar_design(),
-        logslope_design: scalar_design(),
+        slope_design: scalar_design(),
         link_dev: Some(prepared.runtime.clone()),
         ..default_test_family()
     };
@@ -4503,7 +4503,7 @@ fn w_only_exact_outer_directional_derivatives_are_present_and_finite() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[slices.marginal.start] = -0.35;
-    dir_u[slices.logslope.start] = 0.28;
+    dir_u[slices.slope.start] = 0.28;
     let w_range = slices.w.as_ref().expect("w slice");
     dir_u[w_range.start] = 0.15;
     if w_range.len() > 1 {
@@ -4511,7 +4511,7 @@ fn w_only_exact_outer_directional_derivatives_are_present_and_finite() {
     }
 
     dir_v[slices.marginal.start] = 0.18;
-    dir_v[slices.logslope.start] = -0.22;
+    dir_v[slices.slope.start] = -0.22;
     dir_v[w_range.start] = 0.09;
     if w_range.len() > 1 {
         dir_v[w_range.start + 1] = 0.03;
@@ -4556,19 +4556,19 @@ fn w_only_exact_outer_directional_derivatives_are_present_and_finite() {
 #[test]
 fn h_only_exact_outer_directional_derivatives_are_present_and_finite() {
     // ROOT CAUSE (pre-4250aa07 vs current).  The pre-refactor `block_slices`
-    // sized its marginal/logslope slices from `states[block_idx].beta.len()`
+    // sized its marginal/slope slices from `states[block_idx].beta.len()`
     // (1 each from `dummy_block_state(array![0.0], ...)`), giving a 3-slot
-    // block-space {marginal, logslope, h...} even though the design matrices
+    // block-space {marginal, slope, h...} even though the design matrices
     // were zero-width.  After the refactor, `block_slices` sizes slices from
-    // `design.ncols()`, so zero-width designs collapse marginal and logslope
+    // `design.ncols()`, so zero-width designs collapse marginal and slope
     // to empty ranges.  Any write to `dir_u[slices.marginal.start]` then
-    // aliases `dir_u[slices.logslope.start]` and `dir_u[h_range.start]`,
+    // aliases `dir_u[slices.slope.start]` and `dir_u[h_range.start]`,
     // which is why the refactor dropped those writes — but that also
     // dropped the only path by which `exact_newton_joint_hessian_directional_derivative`
     // (which maps block-space direction → primary-space direction via
     // `marginal_design·β_marginal` → `row_dir[primary.q]` and
-    // `logslope_design·β_logslope` → `row_dir[primary.logslope]`) could
-    // inject nonzero q / logslope components.
+    // `slope_design·β_slope` → `row_dir[primary.slope]`) could
+    // inject nonzero q / slope components.
     //
     // At the current state (b ≡ block_states[1].eta[row] = 0 and pure
     // h-only block-space direction), the third directional derivative is
@@ -4580,15 +4580,15 @@ fn h_only_exact_outer_directional_derivatives_are_present_and_finite() {
     //                      = s · [b·h0, b·h1, b·h2, b·h3]   (cubic_cell_kernel.rs:815)
     //   At b = 0 this vanishes, and the only other h-index term —
     //   coeff_bu[idx_h] = s · [h0, h1, h2, h3] — is reached via
-    //   `param_directional_from_b_family` only when `dir[primary.logslope] ≠ 0`
+    //   `param_directional_from_b_family` only when `dir[primary.slope] ≠ 0`
     //   (bernoulli_marginal_slope.rs:1799-1815).  With row_dir[q] and
-    //   row_dir[logslope] both zero, every directional contraction
+    //   row_dir[slope] both zero, every directional contraction
     //   (coeff_dir, coeff_a_dir, coeff_aa_dir, coeff_u_dir[u], coeff_au_dir[u],
     //   pair_directional_from_bb_family(...)) collapses to zero.
     //   Therefore `max_abs_third > 1e-10` is analytically impossible.
     //
     // PRINCIPLED FIX.  Restore the block-space geometry the test is
-    // actually designed to exercise: give marginal_design and logslope_design
+    // actually designed to exercise: give marginal_design and slope_design
     // single columns of ones (the canonical "scalar" parameterisation used
     // by the sigma FD test at rs:13436), set block_states so row-wise
     // q_internal and b are at typical nondegenerate values, and populate
@@ -4624,7 +4624,7 @@ fn h_only_exact_outer_directional_derivatives_are_present_and_finite() {
         weights: Arc::new(Array1::ones(seed.len())),
         z: Arc::new(seed.clone()),
         marginal_design: scalar_design(),
-        logslope_design: scalar_design(),
+        slope_design: scalar_design(),
         score_warp: Some(prepared.runtime.clone()),
         ..default_test_family()
     };
@@ -4648,7 +4648,7 @@ fn h_only_exact_outer_directional_derivatives_are_present_and_finite() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[slices.marginal.start] = -0.35;
-    dir_u[slices.logslope.start] = 0.28;
+    dir_u[slices.slope.start] = 0.28;
     let h_range = slices.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.12;
     if h_range.len() > 1 {
@@ -4656,7 +4656,7 @@ fn h_only_exact_outer_directional_derivatives_are_present_and_finite() {
     }
 
     dir_v[slices.marginal.start] = 0.18;
-    dir_v[slices.logslope.start] = -0.22;
+    dir_v[slices.slope.start] = -0.22;
     dir_v[h_range.start] = 0.07;
     if h_range.len() > 1 {
         dir_v[h_range.start + 1] = 0.05;
@@ -4724,7 +4724,7 @@ fn h_only_row_primary_higher_order_contractions_are_finite_and_symmetric() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
         score_warp: Some(prepared.runtime.clone()),
@@ -4744,7 +4744,7 @@ fn h_only_row_primary_higher_order_contractions_are_finite_and_symmetric() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[cache.primary.q] = -0.35;
-    dir_u[cache.primary.logslope] = 0.28;
+    dir_u[cache.primary.slope] = 0.28;
     let h_range = cache.primary.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.12;
     if h_range.len() > 1 {
@@ -4752,7 +4752,7 @@ fn h_only_row_primary_higher_order_contractions_are_finite_and_symmetric() {
     }
 
     dir_v[cache.primary.q] = 0.18;
-    dir_v[cache.primary.logslope] = -0.22;
+    dir_v[cache.primary.slope] = -0.22;
     dir_v[h_range.start] = 0.07;
     if h_range.len() > 1 {
         dir_v[h_range.start + 1] = 0.05;
@@ -4829,7 +4829,7 @@ fn w_only_row_primary_higher_order_contractions_are_finite_and_symmetric() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::zeros((seed.len(), 0)),
         )),
         link_dev: Some(prepared.runtime.clone()),
@@ -4849,7 +4849,7 @@ fn w_only_row_primary_higher_order_contractions_are_finite_and_symmetric() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[cache.primary.q] = 0.4;
-    dir_u[cache.primary.logslope] = -0.3;
+    dir_u[cache.primary.slope] = -0.3;
     let w_range = cache.primary.w.as_ref().expect("w slice");
     dir_u[w_range.start] = 0.15;
     if w_range.len() > 1 {
@@ -4857,7 +4857,7 @@ fn w_only_row_primary_higher_order_contractions_are_finite_and_symmetric() {
     }
 
     dir_v[cache.primary.q] = -0.2;
-    dir_v[cache.primary.logslope] = 0.25;
+    dir_v[cache.primary.slope] = 0.25;
     dir_v[w_range.start] = 0.09;
     if w_range.len() > 1 {
         dir_v[w_range.start + 1] = 0.03;
@@ -4919,7 +4919,7 @@ fn dual_flex_row_primary_higher_order_contractions_are_finite_and_symmetric() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[cache.primary.q] = 0.7;
-    dir_u[cache.primary.logslope] = -0.2;
+    dir_u[cache.primary.slope] = -0.2;
     let h_range = cache.primary.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.1;
     if h_range.len() > 1 {
@@ -4929,7 +4929,7 @@ fn dual_flex_row_primary_higher_order_contractions_are_finite_and_symmetric() {
     dir_u[w_range.start] = 0.08;
 
     dir_v[cache.primary.q] = -0.4;
-    dir_v[cache.primary.logslope] = 0.3;
+    dir_v[cache.primary.slope] = 0.3;
     dir_v[h_range.start] = -0.03;
     dir_v[w_range.start] = 0.06;
     if w_range.len() > 1 {
@@ -5113,7 +5113,7 @@ fn dual_flex_exact_outer_fourth_direction_swap_is_symmetric() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[slices.marginal.start] = 0.7;
-    dir_u[slices.logslope.start] = -0.2;
+    dir_u[slices.slope.start] = -0.2;
     let h_range = slices.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.1;
     if h_range.len() > 1 {
@@ -5123,7 +5123,7 @@ fn dual_flex_exact_outer_fourth_direction_swap_is_symmetric() {
     dir_u[w_range.start] = 0.08;
 
     dir_v[slices.marginal.start] = -0.4;
-    dir_v[slices.logslope.start] = 0.3;
+    dir_v[slices.slope.start] = 0.3;
     dir_v[h_range.start] = -0.03;
     dir_v[w_range.start] = 0.06;
     if w_range.len() > 1 {
@@ -5172,7 +5172,7 @@ fn dual_flex_row_primary_fourth_direction_swap_is_symmetric() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[cache.primary.q] = 0.7;
-    dir_u[cache.primary.logslope] = -0.2;
+    dir_u[cache.primary.slope] = -0.2;
     let h_range = cache.primary.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.1;
     if h_range.len() > 1 {
@@ -5182,7 +5182,7 @@ fn dual_flex_row_primary_fourth_direction_swap_is_symmetric() {
     dir_u[w_range.start] = 0.08;
 
     dir_v[cache.primary.q] = -0.4;
-    dir_v[cache.primary.logslope] = 0.3;
+    dir_v[cache.primary.slope] = 0.3;
     dir_v[h_range.start] = -0.03;
     dir_v[w_range.start] = 0.06;
     if w_range.len() > 1 {
@@ -5224,7 +5224,7 @@ fn dual_flex_row_primary_higher_order_direction_sign_rules_hold() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[cache.primary.q] = 0.7;
-    dir_u[cache.primary.logslope] = -0.2;
+    dir_u[cache.primary.slope] = -0.2;
     let h_range = cache.primary.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.1;
     if h_range.len() > 1 {
@@ -5234,7 +5234,7 @@ fn dual_flex_row_primary_higher_order_direction_sign_rules_hold() {
     dir_u[w_range.start] = 0.08;
 
     dir_v[cache.primary.q] = -0.4;
-    dir_v[cache.primary.logslope] = 0.3;
+    dir_v[cache.primary.slope] = 0.3;
     dir_v[h_range.start] = -0.03;
     dir_v[w_range.start] = 0.06;
     if w_range.len() > 1 {
@@ -5284,7 +5284,7 @@ fn h_only_row_primary_fourth_direction_swap_is_symmetric() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[cache.primary.q] = -0.35;
-    dir_u[cache.primary.logslope] = 0.28;
+    dir_u[cache.primary.slope] = 0.28;
     let h_range = cache.primary.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.12;
     if h_range.len() > 1 {
@@ -5292,7 +5292,7 @@ fn h_only_row_primary_fourth_direction_swap_is_symmetric() {
     }
 
     dir_v[cache.primary.q] = 0.18;
-    dir_v[cache.primary.logslope] = -0.22;
+    dir_v[cache.primary.slope] = -0.22;
     dir_v[h_range.start] = 0.07;
     if h_range.len() > 1 {
         dir_v[h_range.start + 1] = 0.05;
@@ -5330,7 +5330,7 @@ fn w_only_row_primary_fourth_direction_swap_is_symmetric() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[cache.primary.q] = 0.4;
-    dir_u[cache.primary.logslope] = -0.3;
+    dir_u[cache.primary.slope] = -0.3;
     let w_range = cache.primary.w.as_ref().expect("w slice");
     dir_u[w_range.start] = 0.15;
     if w_range.len() > 1 {
@@ -5338,7 +5338,7 @@ fn w_only_row_primary_fourth_direction_swap_is_symmetric() {
     }
 
     dir_v[cache.primary.q] = -0.2;
-    dir_v[cache.primary.logslope] = 0.25;
+    dir_v[cache.primary.slope] = 0.25;
     dir_v[w_range.start] = 0.09;
     if w_range.len() > 1 {
         dir_v[w_range.start + 1] = 0.03;
@@ -5375,7 +5375,7 @@ fn h_only_row_primary_higher_order_direction_sign_rules_hold() {
     let total = cache.primary.total;
     let mut dir = Array1::<f64>::zeros(total);
     dir[cache.primary.q] = -0.35;
-    dir[cache.primary.logslope] = 0.28;
+    dir[cache.primary.slope] = 0.28;
     let h_range = cache.primary.h.as_ref().expect("h slice");
     dir[h_range.start] = 0.12;
     if h_range.len() > 1 {
@@ -5424,7 +5424,7 @@ fn w_only_row_primary_higher_order_direction_sign_rules_hold() {
     let total = cache.primary.total;
     let mut dir = Array1::<f64>::zeros(total);
     dir[cache.primary.q] = 0.4;
-    dir[cache.primary.logslope] = -0.3;
+    dir[cache.primary.slope] = -0.3;
     let w_range = cache.primary.w.as_ref().expect("w slice");
     dir[w_range.start] = 0.15;
     if w_range.len() > 1 {
@@ -5473,7 +5473,7 @@ fn dual_flex_exact_outer_direction_sign_rules_hold() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[slices.marginal.start] = 0.7;
-    dir_u[slices.logslope.start] = -0.2;
+    dir_u[slices.slope.start] = -0.2;
     let h_range = slices.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.1;
     if h_range.len() > 1 {
@@ -5483,7 +5483,7 @@ fn dual_flex_exact_outer_direction_sign_rules_hold() {
     dir_u[w_range.start] = 0.08;
 
     dir_v[slices.marginal.start] = -0.4;
-    dir_v[slices.logslope.start] = 0.3;
+    dir_v[slices.slope.start] = 0.3;
     dir_v[h_range.start] = -0.03;
     dir_v[w_range.start] = 0.06;
     if w_range.len() > 1 {
@@ -5555,7 +5555,7 @@ fn dual_flex_exact_outer_fourth_double_sign_flip_is_invariant() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[slices.marginal.start] = 0.7;
-    dir_u[slices.logslope.start] = -0.2;
+    dir_u[slices.slope.start] = -0.2;
     let h_range = slices.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.1;
     if h_range.len() > 1 {
@@ -5565,7 +5565,7 @@ fn dual_flex_exact_outer_fourth_double_sign_flip_is_invariant() {
     dir_u[w_range.start] = 0.08;
 
     dir_v[slices.marginal.start] = -0.4;
-    dir_v[slices.logslope.start] = 0.3;
+    dir_v[slices.slope.start] = 0.3;
     dir_v[h_range.start] = -0.03;
     dir_v[w_range.start] = 0.06;
     if w_range.len() > 1 {
@@ -5618,7 +5618,7 @@ fn dual_flex_exact_outer_third_direction_is_linear() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[slices.marginal.start] = 0.7;
-    dir_u[slices.logslope.start] = -0.2;
+    dir_u[slices.slope.start] = -0.2;
     let h_range = slices.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.1;
     if h_range.len() > 1 {
@@ -5628,7 +5628,7 @@ fn dual_flex_exact_outer_third_direction_is_linear() {
     dir_u[w_range.start] = 0.08;
 
     dir_v[slices.marginal.start] = -0.4;
-    dir_v[slices.logslope.start] = 0.3;
+    dir_v[slices.slope.start] = 0.3;
     dir_v[h_range.start] = -0.03;
     dir_v[w_range.start] = 0.06;
     if w_range.len() > 1 {
@@ -5686,7 +5686,7 @@ fn dual_flex_row_primary_third_direction_is_linear() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[cache.primary.q] = 0.7;
-    dir_u[cache.primary.logslope] = -0.2;
+    dir_u[cache.primary.slope] = -0.2;
     let h_range = cache.primary.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.1;
     if h_range.len() > 1 {
@@ -5696,7 +5696,7 @@ fn dual_flex_row_primary_third_direction_is_linear() {
     dir_u[w_range.start] = 0.08;
 
     dir_v[cache.primary.q] = -0.4;
-    dir_v[cache.primary.logslope] = 0.3;
+    dir_v[cache.primary.slope] = 0.3;
     dir_v[h_range.start] = -0.03;
     dir_v[w_range.start] = 0.06;
     if w_range.len() > 1 {
@@ -5740,7 +5740,7 @@ fn h_only_row_primary_third_direction_is_linear() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[cache.primary.q] = -0.35;
-    dir_u[cache.primary.logslope] = 0.28;
+    dir_u[cache.primary.slope] = 0.28;
     let h_range = cache.primary.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.12;
     if h_range.len() > 1 {
@@ -5748,7 +5748,7 @@ fn h_only_row_primary_third_direction_is_linear() {
     }
 
     dir_v[cache.primary.q] = 0.18;
-    dir_v[cache.primary.logslope] = -0.22;
+    dir_v[cache.primary.slope] = -0.22;
     dir_v[h_range.start] = 0.07;
     if h_range.len() > 1 {
         dir_v[h_range.start + 1] = 0.05;
@@ -5791,7 +5791,7 @@ fn w_only_row_primary_third_direction_is_linear() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[cache.primary.q] = 0.4;
-    dir_u[cache.primary.logslope] = -0.3;
+    dir_u[cache.primary.slope] = -0.3;
     let w_range = cache.primary.w.as_ref().expect("w slice");
     dir_u[w_range.start] = 0.15;
     if w_range.len() > 1 {
@@ -5799,7 +5799,7 @@ fn w_only_row_primary_third_direction_is_linear() {
     }
 
     dir_v[cache.primary.q] = -0.2;
-    dir_v[cache.primary.logslope] = 0.25;
+    dir_v[cache.primary.slope] = 0.25;
     dir_v[w_range.start] = 0.09;
     if w_range.len() > 1 {
         dir_v[w_range.start + 1] = 0.03;
@@ -5842,7 +5842,7 @@ fn dual_flex_exact_outer_fourth_first_direction_is_linear() {
     let mut dir_v = Array1::<f64>::zeros(total);
     let mut dir_w = Array1::<f64>::zeros(total);
     dir_u[slices.marginal.start] = 0.7;
-    dir_u[slices.logslope.start] = -0.2;
+    dir_u[slices.slope.start] = -0.2;
     let h_range = slices.h.as_ref().expect("h slice");
     dir_u[h_range.start] = 0.1;
     if h_range.len() > 1 {
@@ -5852,7 +5852,7 @@ fn dual_flex_exact_outer_fourth_first_direction_is_linear() {
     dir_u[w_range.start] = 0.08;
 
     dir_v[slices.marginal.start] = -0.4;
-    dir_v[slices.logslope.start] = 0.3;
+    dir_v[slices.slope.start] = 0.3;
     dir_v[h_range.start] = -0.03;
     dir_v[w_range.start] = 0.06;
     if w_range.len() > 1 {
@@ -5860,7 +5860,7 @@ fn dual_flex_exact_outer_fourth_first_direction_is_linear() {
     }
 
     dir_w[slices.marginal.start] = 0.11;
-    dir_w[slices.logslope.start] = -0.09;
+    dir_w[slices.slope.start] = -0.09;
     dir_w[h_range.start] = 0.04;
     dir_w[w_range.start] = -0.05;
 
@@ -6282,7 +6282,7 @@ fn w_only_gradient_matches_loglik_finite_differences() {
             marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 array![[1.0], [1.0], [1.0]],
             )),
-            logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 array![[1.0], [1.0], [1.0]],
             )),
             link_dev: Some(link_prepared.runtime.clone()),
@@ -6389,7 +6389,7 @@ fn h_only_gradient_matches_loglik_finite_differences() {
             marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 array![[1.0], [1.0], [1.0]],
             )),
-            logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 array![[1.0], [1.0], [1.0]],
             )),
             score_warp: Some(score_prepared.runtime.clone()),
@@ -6505,7 +6505,7 @@ fn flexible_denested_gradient_matches_loglik_finite_differences() {
             marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 array![[1.0], [1.0], [1.0]],
             )),
-            logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 array![[1.0], [1.0], [1.0]],
             )),
             score_warp: Some(score_prepared.runtime.clone()),
@@ -6647,7 +6647,7 @@ fn flexible_exact_outer_directional_derivatives_are_present_and_finite() {
             marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 array![[1.0], [1.0], [1.0]],
             )),
-            logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
                 array![[1.0], [1.0], [1.0]],
             )),
             score_warp: Some(score_prepared.runtime.clone()),
@@ -6684,7 +6684,7 @@ fn flexible_exact_outer_directional_derivatives_are_present_and_finite() {
     let mut dir_u = Array1::<f64>::zeros(total);
     let mut dir_v = Array1::<f64>::zeros(total);
     dir_u[slices.marginal.start] = 0.7;
-    dir_u[slices.logslope.start] = -0.2;
+    dir_u[slices.slope.start] = -0.2;
     if let Some(h_range) = slices.h.as_ref() {
         dir_u[h_range.start] = 0.1;
         if h_range.len() > 1 {
@@ -6696,7 +6696,7 @@ fn flexible_exact_outer_directional_derivatives_are_present_and_finite() {
     }
 
     dir_v[slices.marginal.start] = -0.4;
-    dir_v[slices.logslope.start] = 0.3;
+    dir_v[slices.slope.start] = 0.3;
     if let Some(h_range) = slices.h.as_ref() {
         dir_v[h_range.start] = -0.03;
     }
@@ -6766,7 +6766,7 @@ fn flexible_evaluate_block_diagonals_match_joint_exact_oracle() {
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "link block", e));
     let marginal_x = array![[1.0, -0.4], [1.0, 0.2], [1.0, 0.7], [1.0, 1.1]];
-    let logslope_x = array![[1.0, 0.3], [1.0, -0.6], [1.0, 0.5], [1.0, -1.0]];
+    let slope_x = array![[1.0, 0.3], [1.0, -0.6], [1.0, 0.5], [1.0, -1.0]];
     let family = BernoulliMarginalSlopeFamily {
         y: Arc::new(y.clone()),
         weights: Arc::new(weights.clone()),
@@ -6774,8 +6774,8 @@ fn flexible_evaluate_block_diagonals_match_joint_exact_oracle() {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             marginal_x.clone(),
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
-            logslope_x.clone(),
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            slope_x.clone(),
         )),
         score_warp: Some(score_prepared.runtime.clone()),
         link_dev: Some(link_prepared.runtime.clone()),
@@ -6796,7 +6796,7 @@ fn flexible_evaluate_block_diagonals_match_joint_exact_oracle() {
         },
         ParameterBlockState {
             beta: beta_g.clone(),
-            eta: logslope_x.dot(&beta_g),
+            eta: slope_x.dot(&beta_g),
         },
         ParameterBlockState {
             beta: beta_h,
@@ -6821,7 +6821,7 @@ fn flexible_evaluate_block_diagonals_match_joint_exact_oracle() {
     let slices = block_slices(&family);
     let ranges = [
         slices.marginal.clone(),
-        slices.logslope.clone(),
+        slices.slope.clone(),
         slices.h.clone().expect("score-warp block"),
         slices.w.clone().expect("link-deviation block"),
     ];
@@ -8049,7 +8049,7 @@ fn sigma_exact_joint_psi_terms_returns_analytic_terms() {
     assert!((terms.objective_psi - objective_fd).abs() < 1e-5);
 }
 
-/// Multi-row rigid-probit family with non-trivial marginal/logslope
+/// Multi-row rigid-probit family with non-trivial marginal/slope
 /// designs (per-row eta varies), so half-mask Horvitz-Thompson rescaling
 /// over even rows is a representative subsample for the block-path
 /// `exact_newton_joint_psi_terms_from_cache` and its second-order sibling.
@@ -8064,7 +8064,7 @@ fn make_block_psi_test_family(n: usize) -> BernoulliMarginalSlopeFamily {
     let marginal_design = Array2::from_shape_fn((n, 1), |(i, _)| {
         0.3 + 0.4 * (((i * 29 + 11) % n) as f64) / (n as f64)
     });
-    let logslope_design = Array2::from_shape_fn((n, 1), |(i, _)| {
+    let slope_design = Array2::from_shape_fn((n, 1), |(i, _)| {
         0.2 + 0.5 * (((i * 37 + 9) % n) as f64) / (n as f64)
     });
     BernoulliMarginalSlopeFamily {
@@ -8074,8 +8074,8 @@ fn make_block_psi_test_family(n: usize) -> BernoulliMarginalSlopeFamily {
         marginal_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             marginal_design,
         )),
-        logslope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
-            logslope_design,
+        slope_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            slope_design,
         )),
         ..default_test_family()
     }
@@ -8087,7 +8087,7 @@ fn block_psi_test_block_states(
     g_beta: f64,
 ) -> Vec<ParameterBlockState> {
     let m_design = family.marginal_design.to_dense().to_owned();
-    let g_design = family.logslope_design.to_dense().to_owned();
+    let g_design = family.slope_design.to_dense().to_owned();
     let m_eta = m_design.dot(&array![m_beta]);
     let g_eta = g_design.dot(&array![g_beta]);
     vec![
@@ -8359,7 +8359,7 @@ fn bernoulli_psihessian_directional_derivative_from_cache_subsample_full_equals_
     let slices = &cache.slices;
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let baseline = family
         .exact_newton_joint_psihessian_directional_derivative_from_cache(
@@ -8405,7 +8405,7 @@ fn bernoulli_psihessian_directional_derivative_from_cache_subsample_half_scales_
     let slices = &cache.slices;
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let even_mask: Vec<usize> = (0..n).filter(|i| i % 2 == 0).collect();
     let m = even_mask.len();
@@ -8461,7 +8461,7 @@ fn bernoulli_psihessian_operator_from_cache_subsample_full_equals_unsampled() {
     let slices = &cache.slices;
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let baseline = family
         .exact_newton_joint_psihessian_directional_derivative_operator_from_cache_with_options(
@@ -8510,7 +8510,7 @@ fn bernoulli_psihessian_operator_from_cache_subsample_half_scales_correctly() {
     let slices = &cache.slices;
     let mut d_beta_flat = Array1::<f64>::zeros(slices.total);
     d_beta_flat[slices.marginal.start] = 0.05;
-    d_beta_flat[slices.logslope.start] = -0.04;
+    d_beta_flat[slices.slope.start] = -0.04;
 
     let even_mask: Vec<usize> = (0..n).filter(|i| i % 2 == 0).collect();
     let m = even_mask.len();

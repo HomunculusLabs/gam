@@ -313,9 +313,9 @@ fn duplicate_pc_binary_outcome_shape_dataset() -> EncodedDataset {
 }
 
 const MARGINAL_FORMULA_CENTERS6: &str = "event ~ matern(PC1, PC2, PC3, centers=6, length_scale=1.0) + sex + entry_age_z + current_age_ns_1 + current_age_ns_2 + current_age_ns_3 + current_age_ns_4";
-const LOGSLOPE_FORMULA_CENTERS6: &str = "matern(PC1, PC2, PC3, centers=6, length_scale=1.0)";
+const SLOPE_FORMULA_CENTERS6: &str = "matern(PC1, PC2, PC3, centers=6, length_scale=1.0)";
 const MARGINAL_FORMULA_CENTERS60: &str = "event ~ matern(PC1, PC2, PC3, centers=60, length_scale=1.0) + sex + entry_age_z + current_age_ns_1 + current_age_ns_2 + current_age_ns_3 + current_age_ns_4";
-const LOGSLOPE_FORMULA_CENTERS60: &str = "matern(PC1, PC2, PC3, centers=60, length_scale=1.0)";
+const SLOPE_FORMULA_CENTERS60: &str = "matern(PC1, PC2, PC3, centers=60, length_scale=1.0)";
 
 /// The witness fixture: `prs_z` is made an exact affine function of PC1/PC2, so
 /// the conditional `E[z|C]`/`Var(z|C)` Rao gate fires and the calibrated
@@ -349,11 +349,11 @@ fn prs_pc_confounded_dataset() -> EncodedDataset {
 fn fit_bms(
     data: &EncodedDataset,
     marginal: &str,
-    logslope: &str,
+    slope: &str,
     label: &str,
 ) -> gam::families::bms::BernoulliMarginalSlopeFitResult {
     let cfg = FitConfig {
-        logslope_formula: Some(logslope.to_string()),
+        slope_formula: Some(slope.to_string()),
         z_column: Some("prs_z".to_string()),
         ..FitConfig::default()
     };
@@ -375,7 +375,7 @@ fn bms_publishes_the_corrected_covariance_on_a_global_empirical_measure_2484() {
     let out = fit_bms(
         &data,
         MARGINAL_FORMULA_CENTERS6,
-        LOGSLOPE_FORMULA_CENTERS6,
+        SLOPE_FORMULA_CENTERS6,
         "prs/pc-confounded BMS fit",
     );
 
@@ -458,7 +458,7 @@ fn bms_standard_normal_latent_measure_declares_nothing_2718() {
     let out = fit_bms(
         &data,
         MARGINAL_FORMULA_CENTERS60,
-        LOGSLOPE_FORMULA_CENTERS60,
+        SLOPE_FORMULA_CENTERS60,
         "rank-reduced centers=60 BMS fit",
     );
 
@@ -575,7 +575,7 @@ fn a_published_fit_ships_the_curvature_a_declination_would_be_about_2718() {
     let out = fit_bms(
         &data,
         MARGINAL_FORMULA_CENTERS6,
-        LOGSLOPE_FORMULA_CENTERS6,
+        SLOPE_FORMULA_CENTERS6,
         "prs/pc-confounded BMS fit (persistence arm)",
     );
 

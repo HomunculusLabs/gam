@@ -1017,16 +1017,24 @@ pub struct PredictionRequest {
     pub point_estimate: PointEstimate,
 }
 
-/// The columns every prediction surface publishes, before it renames or
-/// serializes them.
+/// The estimands every standard prediction surface publishes before
+/// serialization.
+///
+/// The plug-in pair is deliberately complete: `mean_plugin` is the response
+/// transform of `linear_predictor_plugin`. `posterior_mean` is the separate
+/// response-scale estimand `E[T(eta) | data]`, and is absent only when a caller
+/// explicitly forces a curved-link plug-in prediction. Keeping all three
+/// quantities distinct here prevents presenters from pairing a plug-in linear
+/// predictor with a posterior response mean under generic names (#2785).
 pub struct PredictionColumns {
-    pub eta: Array1<f64>,
-    pub mean: Array1<f64>,
+    pub linear_predictor_plugin: Array1<f64>,
+    pub mean_plugin: Array1<f64>,
+    pub posterior_mean: Option<Array1<f64>>,
     /// Response-scale SE — the SE the response-scale band is built from, never
     /// the link-scale `σ_η` (#1536).
-    pub mean_standard_error: Option<Array1<f64>>,
-    pub mean_lower: Option<Array1<f64>>,
-    pub mean_upper: Option<Array1<f64>>,
+    pub posterior_mean_standard_error: Option<Array1<f64>>,
+    pub posterior_mean_lower: Option<Array1<f64>>,
+    pub posterior_mean_upper: Option<Array1<f64>>,
     pub observation_lower: Option<Array1<f64>>,
     pub observation_upper: Option<Array1<f64>>,
     /// Covariance consulted to form the point. `None` for a plug-in point,
@@ -1067,6 +1075,7 @@ pub fn resolve_prediction_request(
         // Curved inverse link + interval: add SE and bounds on top of the same
         // posterior-mean point the no-interval branch reports.
         (Some(level), true) => {
+            let plugin = predictor.predict_plugin_response(input)?;
             let options = PosteriorMeanOptions {
                 confidence_level: Some(level),
                 covariance_mode: request.covariance_mode,
@@ -1088,13 +1097,14 @@ pub fn resolve_prediction_request(
                     EstimationError::InvalidInput(
                         "posterior-mean prediction did not return confidence bounds".to_string(),
                     )
-                })?;
+            })?;
             Ok(PredictionColumns {
-                eta: prediction.eta,
-                mean: prediction.mean,
-                mean_standard_error: Some(mean_standard_error),
-                mean_lower: Some(mean_lower),
-                mean_upper: Some(mean_upper),
+                linear_predictor_plugin: plugin.eta,
+                mean_plugin: plugin.mean,
+                posterior_mean: Some(prediction.mean),
+                posterior_mean_standard_error: Some(mean_standard_error),
+                posterior_mean_lower: Some(mean_lower),
+                posterior_mean_upper: Some(mean_upper),
                 observation_lower: prediction.observation_lower,
                 observation_upper: prediction.observation_upper,
                 point_covariance_source: Some(prediction.point_covariance_source),
@@ -1117,12 +1127,14 @@ pub fn resolve_prediction_request(
                 ..PredictUncertaintyOptions::default()
             };
             let prediction = predictor.predict_full_uncertainty(input, fit, &options)?;
+            let mean_plugin = prediction.mean.clone();
             Ok(PredictionColumns {
-                eta: prediction.eta,
-                mean: prediction.mean,
-                mean_standard_error: Some(prediction.mean_standard_error),
-                mean_lower: Some(prediction.mean_lower),
-                mean_upper: Some(prediction.mean_upper),
+                linear_predictor_plugin: prediction.eta,
+                mean_plugin: mean_plugin.clone(),
+                posterior_mean: Some(mean_plugin),
+                posterior_mean_standard_error: Some(prediction.mean_standard_error),
+                posterior_mean_lower: Some(prediction.mean_lower),
+                posterior_mean_upper: Some(prediction.mean_upper),
                 observation_lower: prediction.observation_lower,
                 observation_upper: prediction.observation_upper,
                 // A linear-link plug-in point consults no coefficient
@@ -1137,31 +1149,54 @@ pub fn resolve_prediction_request(
         // switch that populates SE/bounds, and the surfaces emit whatever
         // optionals come back (#2136).
         (None, true) if request.point_estimate == PointEstimate::PosteriorMeanWhenCurved => {
+            let plugin = predictor.predict_plugin_response(input)?;
             let prediction = predictor.predict_posterior_mean(
                 input,
                 fit,
                 &PosteriorMeanOptions::point_only(),
             )?;
             Ok(PredictionColumns {
-                eta: prediction.eta,
-                mean: prediction.mean,
-                mean_standard_error: None,
-                mean_lower: None,
-                mean_upper: None,
+                linear_predictor_plugin: plugin.eta,
+                mean_plugin: plugin.mean,
+                posterior_mean: Some(prediction.mean),
+                posterior_mean_standard_error: None,
+                posterior_mean_lower: None,
+                posterior_mean_upper: None,
                 observation_lower: None,
                 observation_upper: None,
                 point_covariance_source: Some(prediction.point_covariance_source),
                 uncertainty_covariance_source: None,
             })
         }
-        (None, _) => {
+        // Effectively linear response: the posterior mean and plug-in response
+        // are the same estimand, so both explicit columns are populated.
+        (None, false) => {
+            let prediction = predictor.predict_plugin_response(input)?;
+            let mean_plugin = prediction.mean.clone();
+            Ok(PredictionColumns {
+                linear_predictor_plugin: prediction.eta,
+                mean_plugin: mean_plugin.clone(),
+                posterior_mean: Some(mean_plugin),
+                posterior_mean_standard_error: None,
+                posterior_mean_lower: None,
+                posterior_mean_upper: None,
+                observation_lower: None,
+                observation_upper: None,
+                point_covariance_source: None,
+                uncertainty_covariance_source: None,
+            })
+        }
+        // The sole request that has no posterior estimand: an explicit
+        // curved-link plug-in point.
+        (None, true) => {
             let prediction = predictor.predict_plugin_response(input)?;
             Ok(PredictionColumns {
-                eta: prediction.eta,
-                mean: prediction.mean,
-                mean_standard_error: None,
-                mean_lower: None,
-                mean_upper: None,
+                linear_predictor_plugin: prediction.eta,
+                mean_plugin: prediction.mean,
+                posterior_mean: None,
+                posterior_mean_standard_error: None,
+                posterior_mean_lower: None,
+                posterior_mean_upper: None,
                 observation_lower: None,
                 observation_upper: None,
                 point_covariance_source: None,

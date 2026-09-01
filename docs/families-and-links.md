@@ -45,8 +45,8 @@ The `family=` kwarg accepts `"gaussian"`, `"binomial"` (aliases
 `family=` triggers auto-detection. Survival, transformation-normal,
 and Bernoulli marginal-slope families are selected via `Surv(...)` or
 dedicated fit options (Python: `transformation_normal=True`,
-`z_column=`/`logslope_formula=`; CLI: `--transformation-normal`,
-`--z-column`/`--logslope-formula`). In `gamfit`, set standard-family
+`z_column=`/`slope_formula=`; CLI: `--transformation-normal`,
+`--z-column`/`--slope-formula`). In `gamfit`, set standard-family
 links with the `link=` kwarg. In the CLI, set them in the formula via
 `link(type=...)`.
 

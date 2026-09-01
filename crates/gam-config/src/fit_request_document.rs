@@ -118,7 +118,7 @@ pub struct FitRequestConfigDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub logslope_formula: Option<String>,
+    pub slope_formula: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub negative_binomial_theta: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -163,12 +163,12 @@ pub struct FitRequestConfigDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scale_dimensions: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub logslope_time_degree: Option<usize>,
+    pub slope_time_degree: Option<usize>,
     /// Number of B-spline basis functions on the `log t` margin of the
-    /// survival marginal-slope log-slope block (gam#2765, gam#2767). Omitted =
+    /// survival marginal-slope slope block (gam#2765, gam#2767). Omitted =
     /// a slope that does not move along follow-up.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub logslope_time_k: Option<usize>,
+    pub slope_time_k: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sigma_time_degree: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -147,10 +147,10 @@ pub(crate) struct SurvivalMarginalSlopeFamily {
     pub(crate) derivative_offset_exit: Arc<Array1<f64>>,
     /// Baseline covariate block: contributes additively to q0 and q1, but not qd1.
     pub(crate) marginal_design: DesignMatrix,
-    /// The log-slope coefficient design, its physical channels in current
+    /// The slope coefficient design, its physical channels in current
     /// coordinates, and their baseline + smooth offsets. This is the sole
-    /// source of truth for both scalar and per-score log-slope geometry.
-    pub(crate) logslope_layout: LogslopeLayout,
+    /// source of truth for both scalar and per-score slope geometry.
+    pub(crate) slope_layout: SlopeLayout,
     pub(crate) score_warp: Option<DeviationRuntime>,
     pub(crate) link_dev: Option<DeviationRuntime>,
     /// Absorbed Stage-1 influence columns `Z̃_infl` at the training rows
@@ -207,7 +207,7 @@ impl SurvivalMarginalSlopeFamily {
     /// The row's slope index on its three follow-up channels (gam#2765).
     ///
     /// The block's own linear predictor is already the EXIT-time slope — the
-    /// log-slope block's `ParameterBlockSpec` design is the exit design, exactly
+    /// slope block's `ParameterBlockSpec` design is the exit design, exactly
     /// as the time block's is. A time-constant slope is the degenerate case
     /// `g₀ = g₁`, `ġ₁ = 0`; a follow-up-varying one reads the other two channels
     /// off the layout's entry / exit-derivative designs at the same
@@ -219,10 +219,10 @@ impl SurvivalMarginalSlopeFamily {
         block_states: &[ParameterBlockState],
     ) -> Result<SlopeRowChannels, String> {
         let state = block_states.get(2).ok_or_else(|| {
-            "survival marginal-slope row slope channels require the log-slope block state"
+            "survival marginal-slope row slope channels require the slope block state"
                 .to_string()
         })?;
-        self.logslope_layout
+        self.slope_layout
             .row_channels(row, &state.beta, state.eta[row])
     }
 
@@ -230,7 +230,7 @@ impl SurvivalMarginalSlopeFamily {
     /// six-primary row frame over the four-primary one.
     #[inline]
     pub(crate) fn slope_is_follow_up_varying(&self) -> bool {
-        self.logslope_layout.is_follow_up_varying()
+        self.slope_layout.is_follow_up_varying()
     }
 
     /// How many primaries the family's CORE (non-flex) row frame carries. The
@@ -407,7 +407,7 @@ pub(crate) fn hash_intercept_warm_start_key(
 pub(crate) struct ThetaHints {
     pub(crate) time_beta: Option<Array1<f64>>,
     pub(crate) marginal_beta: Option<Array1<f64>>,
-    pub(crate) logslope_beta: Option<Array1<f64>>,
+    pub(crate) slope_beta: Option<Array1<f64>>,
     pub(crate) score_warp_beta: Option<Array1<f64>>,
     pub(crate) link_dev_beta: Option<Array1<f64>>,
     pub(crate) influence_beta: Option<Array1<f64>>,

@@ -2,15 +2,15 @@
 //!
 //! Constructs a deterministic, confounded Bernoulli marginal-slope (BMS) probit
 //! cohort: a shared smooth covariate `x` drives BOTH the marginal surface and a
-//! log-slope surface, and the exposure `z` is built to correlate strongly with
+//! slope surface, and the exposure `z` is built to correlate strongly with
 //! that same smooth covariate (the structural confound). Without the robustness
-//! machinery the marginal index `M·β_m` and the score-weighted log-slope
+//! machinery the marginal index `M·β_m` and the score-weighted slope
 //! `diag(s·z)·G·β_s` overlap in the same column span, leaving the joint penalised
 //! Hessian rank-soft and the outer REML poorly conditioned — the marginal
 //! coefficients drift large.
 //!
 //! The (now unconditional) `orthogonalize_confounds` mechanism reparameterizes
-//! the log-slope design `G̃ = G − M·B` so its columns are
+//! the slope design `G̃ = G − M·B` so its columns are
 //! exactly W-orthogonal (in the rigid-pilot IRLS row metric) to the marginal
 //! span; the cross-block Gram vanishes, the pinned overlap ridge is retired, and
 //! the original-basis coefficients are recovered exactly. We assert:
@@ -62,7 +62,7 @@ fn normal_cdf(x: f64) -> f64 {
 /// Build the confounded BMS-probit cohort.
 ///
 /// Returns `(data, spec)` where the single covariate column is `x`. Both the
-/// marginal and log-slope surfaces are B-splines over `x`; `z` correlates with
+/// marginal and slope surfaces are B-splines over `x`; `z` correlates with
 /// `x` (the confound). No spatial terms ⇒ the κ-locked fixed-design regime, so
 /// the construction-time orthogonalization swap is exact.
 fn build_confounded_cohort(n: usize) -> (Array2<f64>, BernoulliMarginalSlopeTermSpec) {
@@ -97,7 +97,7 @@ fn build_confounded_cohort(n: usize) -> (Array2<f64>, BernoulliMarginalSlopeTerm
 
     // True surfaces (probit scale):
     //   marginal index q(x) = a smooth in x
-    //   log-slope     g(x) = a smaller smooth in x
+    //   slope     g(x) = a smaller smooth in x
     // observed η = q·sqrt(1+(s g)²) + s·g·z  (s = 1 with no frailty)
     let two_pi = std::f64::consts::TAU;
     let y = Array1::from_iter((0..n).map(|i| {
@@ -112,7 +112,7 @@ fn build_confounded_cohort(n: usize) -> (Array2<f64>, BernoulliMarginalSlopeTerm
 
     let weights = Array1::ones(n);
     let marginal_offset = Array1::<f64>::zeros(n);
-    let logslope_offset = Array1::<f64>::zeros(n);
+    let slope_offset = Array1::<f64>::zeros(n);
 
     let make_bspline = |name: &str, internal_knots: usize| SmoothTermSpec {
         frozen_parametric_residualization: None,
@@ -141,12 +141,12 @@ fn build_confounded_cohort(n: usize) -> (Array2<f64>, BernoulliMarginalSlopeTerm
         random_effect_terms: vec![],
         smooth_terms: vec![make_bspline("f_marginal", 10)],
     };
-    // Log-slope surface over the SAME covariate x — this is what overlaps the
+    // Slope surface over the SAME covariate x — this is what overlaps the
     // marginal span once weighted by the x-correlated exposure z.
-    let logslopespec = TermCollectionSpec {
+    let slopespec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
-        smooth_terms: vec![make_bspline("f_logslope", 8)],
+        smooth_terms: vec![make_bspline("f_slope", 8)],
     };
 
     let spec = BernoulliMarginalSlopeTermSpec {
@@ -155,9 +155,9 @@ fn build_confounded_cohort(n: usize) -> (Array2<f64>, BernoulliMarginalSlopeTerm
         z,
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginalspec,
-        logslopespec,
+        slopespec,
         marginal_offset,
-        logslope_offset,
+        slope_offset,
         frailty: FrailtySpec::None,
         score_warp: None,
         link_dev: None,
@@ -174,7 +174,7 @@ struct FitSummary {
     all_finite: bool,
     /// `Some(message)` when `fit_model` returned `Err`, `None` on a successful
     /// fit. Lets a test distinguish *which* failure mode fired — e.g. the
-    /// pre-fix "logslope beta length mismatch" width-desync error versus a
+    /// pre-fix "slope beta length mismatch" width-desync error versus a
     /// genuine "joint Newton budget exhausted" non-convergence.
     err_text: Option<String>,
 }
@@ -249,7 +249,7 @@ fn run_fit() -> FitSummary {
 // still pinned by the three tests below.
 
 /// Exactness of the structural reparameterization on a design pair that mirrors
-/// the cohort's overlap: build a marginal block `M` and a log-slope block `G`
+/// the cohort's overlap: build a marginal block `M` and a slope block `G`
 /// that overlaps it, orthogonalize under a positive pilot metric `W`, and
 /// assert MᵀW·G̃ ≈ 0 (< 1e-10) and the coefficient round-trip is exact (< 1e-12).
 #[test]
@@ -259,7 +259,7 @@ fn orthogonalization_is_exact_and_round_trip_is_lossless() {
 
     // Marginal block: constant + two smooth-ish columns in x.
     let mut m = Array2::<f64>::zeros((n, 3));
-    // Log-slope block: overlaps M (its first column is M's smooth plus noise),
+    // Slope block: overlaps M (its first column is M's smooth plus noise),
     // second column is a fresh direction.
     let mut g = Array2::<f64>::zeros((n, 2));
     let mut w = Array1::<f64>::zeros(n);
@@ -319,25 +319,25 @@ fn orthogonalization_is_exact_and_round_trip_is_lossless() {
         max_dpred < 1e-12,
         "additive predictor changed under round-trip: max|Δη|={max_dpred:e}"
     );
-    // Log-slope coefficients are untouched by the reparameterization.
+    // Slope coefficients are untouched by the reparameterization.
     let max_dbetas = (&beta_s_out - &beta_s)
         .iter()
         .fold(0.0_f64, |acc, v| acc.max(v.abs()));
     assert!(
         max_dbetas == 0.0,
-        "log-slope coefficients changed under round-trip: {max_dbetas:e}"
+        "slope coefficients changed under round-trip: {max_dbetas:e}"
     );
 }
 
-/// Parse the reduced logslope width `r` and the per-block coefficient
-/// inf-norms `[β_marginal_inf, β_logslope_inf]` out of the BMS inner-solver
+/// Parse the reduced slope width `r` and the per-block coefficient
+/// inf-norms `[β_marginal_inf, β_slope_inf]` out of the BMS inner-solver
 /// diagnostic string, which is the only place the joint-Newton β is surfaced
 /// when the outer optimiser does not fully settle. The diagnostic shape is:
 ///
 ///   `... block_widths = [14, R], block_names = ["marginal_surface",
-///    "logslope_surface"], block_beta_inf = [BM, BL] ...`
+///    "slope_surface"], block_beta_inf = [BM, BL] ...`
 ///
-/// Returns `(r, beta_marginal_inf, beta_logslope_inf)`.
+/// Returns `(r, beta_marginal_inf, beta_slope_inf)`.
 fn parse_block_diagnostics(err: &str) -> Option<(usize, f64, f64)> {
     let widths = err.split_once("block_widths = [")?.1;
     let widths = widths.split_once(']')?.0;
@@ -351,28 +351,28 @@ fn parse_block_diagnostics(err: &str) -> Option<(usize, f64, f64)> {
 }
 
 /// THE CURE (reduced-basis orthogonalisation through the BMS family's own
-/// logslope geometry, this change set). Under the always-on robustness machinery
-/// the logslope design is reparameterised to a FULL-RANK REDUCED BASIS `G·T` whose
+/// slope geometry, this change set). Under the always-on robustness machinery
+/// the slope design is reparameterised to a FULL-RANK REDUCED BASIS `G·T` whose
 /// columns are W-orthogonalised (in the rigid-pilot IRLS row metric) against the
 /// marginal span and whose marginal-overlapping directions are dropped — the
 /// structural confound the released solver merely penalised with a pinned ridge
 /// is removed by construction. The reparameterisation flows *through* the
-/// family's internal `logslope_design` (design `G·T`, penalty `Tᵀ S T`, jacobian
-/// `factor·(G·T)`, round-trip `β_logslope = T·β'`), so the inner solve's
+/// family's internal `slope_design` (design `G·T`, penalty `Tᵀ S T`, jacobian
+/// `factor·(G·T)`, round-trip `β_slope = T·β'`), so the inner solve's
 /// coordinates and the family's full design agree at the reduced width. The
 /// inner joint-Newton KKT certificate additionally folds the Firth/Jeffreys
 /// score `∇Φ` into the stationarity residual so the convergence test matches the
 /// augmented objective the step descends.
 ///
 /// PROVEN HERE (deterministic, reproducible on this confounded cohort):
-///   1. The reparameterisation FIRES: the logslope block width drops from its
+///   1. The reparameterisation FIRES: the slope block width drops from its
 ///      raw `12` to a full-rank reduced `r < 12` (`r == 6` on this cohort — the
 ///      four exactly-confounded + two hardest soft-confounded directions are
 ///      removed).
 ///   2. The joint coefficients are BOUNDED to O(1): `max(|β_marginal|∞,
-///      |β_logslope|∞) < 6`, materially better than the released solver's
-///      marginal/logslope runaway (the pre-cure signature drove the shared
-///      direction's coefficient to ~10–60). The marginal logslope coupling no
+///      |β_slope|∞) < 6`, materially better than the released solver's
+///      marginal/slope runaway (the pre-cure signature drove the shared
+///      direction's coefficient to ~10–60). The marginal slope coupling no
 ///      longer drives a separation-scale coefficient.
 ///   3. The smoothing parameters are SANE, not pinned at the REML box corner
 ///      (`log λ < 9`, i.e. `λ ≲ 30`, vs. the released pinned `log λ ≈ 10`,
@@ -380,20 +380,20 @@ fn parse_block_diagnostics(err: &str) -> Option<(usize, f64, f64)> {
 ///
 /// RESIDUAL (reported honestly — NOT papered over): the OUTER REML does not yet
 /// reach a strict KKT certificate on this deliberately-adversarial cohort under
-/// the present solver. After the logslope confound is removed, the MARGINAL
+/// the present solver. After the slope confound is removed, the MARGINAL
 /// block retains a near-separation on a *penalised* spline direction (outside
 /// the Firth/Jeffreys penalty null-space the Tier-B term covers), so its inner
 /// stationarity residual floors at ~7·10⁻³ — well below the released runaway but
 /// above the `inner_tol·(1+‖∇L‖∞)` ≈ 7·10⁻⁶ KKT threshold — and the outer BFGS
 /// line search stalls at `|g| ≈ 0.49`. This is a *distinct* pathology from the
-/// marginal↔logslope structural confound this cure targets: it is a single-block
+/// marginal↔slope structural confound this cure targets: it is a single-block
 /// near-separation on a penalised direction, which the null-space-scoped
 /// Jeffreys curvature does not reach. The reduced-basis orthogonalisation
 /// genuinely resolves the confound it was built for (bounded β, reduced width,
 /// sane λ); the remaining outer non-convergence is documented here rather than
 /// asserted away.
 #[test]
-fn reduced_basis_orthogonalization_bounds_beta_and_reduces_logslope() {
+fn reduced_basis_orthogonalization_bounds_beta_and_reduces_slope() {
     let on = run_fit();
     eprintln!(
         "[confound-cure ON] max|β_m|={:.4e} conv={} |g|={:?} finite={} err={:?}",
@@ -412,9 +412,9 @@ fn reduced_basis_orthogonalization_bounds_beta_and_reduces_logslope() {
     if let Some(err) = on.err_text.as_ref() {
         assert!(
             !err.contains("beta length mismatch"),
-            "Force hit the coefficient WIDTH DESYNC: the reduced logslope β and the \
+            "Force hit the coefficient WIDTH DESYNC: the reduced slope β and the \
              family's full-width design disagree — the reparameterisation is not flowing \
-             through the family's internal logslope_design consistently: {err}",
+             through the family's internal slope_design consistently: {err}",
         );
 
         // (1) Joint coefficients BOUNDED to O(1) and reduced-basis FIRED — when
@@ -424,18 +424,18 @@ fn reduced_basis_orthogonalization_bounds_beta_and_reduces_logslope() {
         //     outer instead stalls with every inner trial converged, no block
         //     diagnostic is attached — that is a strictly BETTER state (inner
         //     KKT met), and the λ-sanity check below still pins the cure.
-        if let Some((r, beta_marginal_inf, beta_logslope_inf)) = parse_block_diagnostics(err) {
+        if let Some((r, beta_marginal_inf, beta_slope_inf)) = parse_block_diagnostics(err) {
             assert!(
                 r < 12 && r > 0,
-                "reduced-basis orthogonalisation did not fire: logslope width r={r} \
+                "reduced-basis orthogonalisation did not fire: slope width r={r} \
                  (expected 0 < r < 12 — the confounded directions removed by construction)",
             );
-            let max_block_beta = beta_marginal_inf.max(beta_logslope_inf);
+            let max_block_beta = beta_marginal_inf.max(beta_slope_inf);
             assert!(
                 max_block_beta.is_finite() && max_block_beta < 6.0,
                 "Force did not bound the joint coefficients: max(|β_m|∞={beta_marginal_inf:.4e}, \
-                 |β_s|∞={beta_logslope_inf:.4e}) = {max_block_beta:.4e} (cure requires < 6, \
-                 materially below the released marginal/logslope runaway scale ~10–60)",
+                 |β_s|∞={beta_slope_inf:.4e}) = {max_block_beta:.4e} (cure requires < 6, \
+                 materially below the released marginal/slope runaway scale ~10–60)",
             );
         }
 
@@ -489,7 +489,7 @@ fn reduced_basis_orthogonalization_bounds_beta_and_reduces_logslope() {
 /// On the deliberately-confounded BMS-probit cohort, the principled zero-downside
 /// cure (full identifiable-span Jeffreys + the always-on robustness machinery)
 /// NEVER FAILS. The self-limiting Jeffreys curvature makes the joint inner
-/// objective coercive on the under-identified marginal↔logslope overlap, so the
+/// objective coercive on the under-identified marginal↔slope overlap, so the
 /// fit returns a FINITE, BOUNDED estimate — it does NOT return an error (no
 /// width-desync, no runaway/refusal) and does NOT produce a NaN. The marginal
 /// coefficient is bounded to a sane O(1)–O(10) scale, materially below the
@@ -502,7 +502,7 @@ fn reduced_basis_orthogonalization_bounds_beta_and_reduces_logslope() {
 /// outer-KKT certificate: on this adversarial cohort the marginal block retains a
 /// near-separation on a penalised spline direction whose residual the outer BFGS
 /// does not yet drive to the KKT floor (documented in
-/// `reduced_basis_orthogonalization_bounds_beta_and_reduces_logslope`).
+/// `reduced_basis_orthogonalization_bounds_beta_and_reduces_slope`).
 /// Convergence and |g| are REPORTED for the record; the load-bearing positive
 /// claim is "the robust fit returns a finite bounded estimate and never errors".
 #[test]

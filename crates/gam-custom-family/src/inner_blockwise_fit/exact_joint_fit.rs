@@ -296,7 +296,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // geometric descent at the certificate-refusal gate. A still-converging
     // Newton direction (residual dropping by a steady factor < 1 each cycle)
     // must not be misclassified as a multiplier/null plateau and exited
-    // early (gam#787 duchon centers≥20: the logslope block converges
+    // early (gam#787 duchon centers≥20: the slope block converges
     // geometrically — residual ~0.33×/cycle — but `linearized_rel ≥ 0.5`
     // routed it into the plateau-refusal break a few cycles short of tol).
     const RESIDUAL_DESCENT_WINDOW: usize = 3;
@@ -394,7 +394,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     // AND (ii) the joint trust radius has NOT shrunk relative to the
     // previous fully-rejected cycle. Condition (i) was originally
     // objective-only (`objective_rejects == MAX`, others 0), which never
-    // fired on the biobank gauge-flat marginal/logslope fit: there the
+    // fired on the biobank gauge-flat marginal/slope fit: there the
     // objective is flat to f64 precision along the residual direction and
     // the BMS line search rejects every trial on the LIKELIHOOD early-exit
     // path, so the guard's increment was unreachable and the loop spun to
@@ -447,7 +447,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
     //     value, floor or not — and only fires after 8 cycles.
     //   * `consecutive_identical_rejected_cycles` requires the trial
     //     objective to repeat BIT-FOR-BIT, which a near-singular coupled
-    //     marginal↔logslope system need not do: tiny non-deterministic
+    //     marginal↔slope system need not do: tiny non-deterministic
     //     round-off in the per-row tower contraction perturbs the trial
     //     objective in its last ULPs even while the step is otherwise
     //     stuck, so the byte-identical detector never latches.
@@ -1350,7 +1350,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // MODIFIED-NEWTON CONVEXIFICATION (gam#1040 / gam#979). The
             // exact survival marginal-slope joint NLL Hessian is INDEFINITE
             // on the flat baseline-hazard λ valley (the linear baseline +
-            // the z·exp(logslope) cross-coupling carry genuine negative
+            // the z·exp(slope) cross-coupling carry genuine negative
             // curvature away from the optimum). The active-set QP below
             // minimizes `½βᵀHβ − rhs_betaᵀβ`; with an indefinite `H` that
             // model has a direction that LOWERS the local quadratic
@@ -1375,7 +1375,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // Newton-decrement exit can terminate the geometric/linear tail
             // when the achievable model descent `½ Σ c_k²/|γ_k|` drops below
             // `objective_tol`. The constrained branch never set it, so a
-            // weakly-identified survival-MS fit (the n≈2e5 logslope block,
+            // weakly-identified survival-MS fit (the n≈2e5 slope block,
             // step clamped by the trust region, residual creeping ~7%/cycle)
             // had no early-exit and ground the whole budget. Build the same
             // D-whitened spectrum from the penalized `lhs` (decrement reflects
@@ -4026,7 +4026,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             //
             // The earlier form required objective_rejects ==
             // JOINT_TRUST_MAX_ATTEMPTS && likelihood_rejects == 0, so it
-            // NEVER fired on the biobank gauge-flat marginal/logslope fit:
+            // NEVER fired on the biobank gauge-flat marginal/slope fit:
             // there the objective is flat to f64 precision along the
             // residual direction and the BMS line search rejects every
             // trial on the *likelihood* early-exit path
@@ -4637,9 +4637,9 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // gam#979 discriminator: the PER-BLOCK projected stationarity
         // breakdown. The aggregate `residual` alone cannot distinguish a
         // genuinely-coupled stall from one block dragging the others — for
-        // the survival marginal↔logslope grind the question "is the total
+        // the survival marginal↔slope grind the question "is the total
         // residual dominated by a single block (the multiplicative
-        // z·exp(logslope) coupling channel), or spread evenly (global
+        // z·exp(slope) coupling channel), or spread evenly (global
         // conditioning)?" is answerable only from the split. `block_resid`
         // is already computed above for the convergence test, so surfacing
         // it per cycle is free; reading it across a 75 s repro under
@@ -4791,7 +4791,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // The strict / identified-subspace / constrained certificates all
         // gate on the penalized stationarity residual ‖∇L − Sβ‖∞ reaching
         // `residual_tol`. On a weakly-identified (near-flat) carrying block
-        // — the survival marginal↔logslope alias, the binomial link-wiggle
+        // — the survival marginal↔slope alias, the binomial link-wiggle
         // block, the gaussian/binomial location-scale μ block — that residual
         // can stall ORDERS above tol (`g` is O(1e2) along a direction whose
         // penalized curvature `γ` is tiny) while every step the trust region
@@ -5174,7 +5174,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 // unable to decompose `r = A_activeᵀ λ` and the residual stuck
                 // far above tol on an iterate that is EXACTLY the constrained
                 // optimum (the `active_set_incomplete` refusal; gam#797 survival
-                // marginal/logslope/time blocks).
+                // marginal/slope/time blocks).
                 //
                 // When (a) the joint Newton has reached a numerical FIXED POINT
                 // — the accepted step and objective change are both at the
@@ -5302,7 +5302,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 // certificates above all declined, so the iterate would be
                 // refused as a multiplier/null plateau. But the
                 // `linearized_rel ≥ 0.5` + flat-objective signature that
-                // routed us here ALSO holds for a logslope block whose
+                // routed us here ALSO holds for a slope block whose
                 // objective is already at its Φ-bounded floor while the KKT
                 // residual is still polishing by a STEADY geometric factor
                 // each cycle. Refusing there rejects the seed a few cycles

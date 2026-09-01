@@ -70,7 +70,7 @@ pub enum LatentConditioningSpan {
 
 pub struct BernoulliMarginalSlopePredictor {
     pub beta_marginal: Array1<f64>,
-    pub beta_logslope: Array1<f64>,
+    pub beta_slope: Array1<f64>,
     pub beta_score_warp: Option<Array1<f64>>,
     pub beta_link_dev: Option<Array1<f64>>,
     pub base_link: InverseLink,
@@ -78,7 +78,7 @@ pub struct BernoulliMarginalSlopePredictor {
     pub latent_z_normalization: SavedLatentZNormalization,
     pub latent_measure: LatentMeasureKind,
     pub baseline_marginal: f64,
-    pub baseline_logslope: f64,
+    pub baseline_slope: f64,
     pub covariance: Option<Array2<f64>>,
     pub score_warp_runtime: Option<SavedCompiledFlexBlock>,
     pub link_deviation_runtime: Option<SavedCompiledFlexBlock>,
@@ -101,28 +101,28 @@ struct BernoulliMarginalSlopeSavedAloAffineState {
 
 /// Per-runtime predict-time anchor correction matrices.
 ///
-/// Built once per top-level predict call from the marginal + logslope
+/// Built once per top-level predict call from the marginal + slope
 /// designs at the prediction rows. Each `Array2<f64>` is shaped
 /// `n_predict × runtime.basis_dim` and holds `n_row(i) · M` for every
 /// prediction row, where `n_row(i)` is the concatenation of the marginal
-/// and logslope design rows in the runtime's anchor component order.
+/// and slope design rows in the runtime's anchor component order.
 ///
 /// At any `local_cubic_at` / `basis_cubic_at` / `design` call site we
 /// subtract the appropriate slice of these matrices from the raw cubic
 /// output to apply the cross-block residual `n_row · M` correction.
 ///
 /// `n_anchor_rows` is the underlying `n × d` parametric anchor stack
-/// (per-runtime layouts: score_warp gets `[marginal | logslope]`;
-/// link_dev gets `[marginal | logslope | score_warp_design(z)]` when the
+/// (per-runtime layouts: score_warp gets `[marginal | slope]`;
+/// link_dev gets `[marginal | slope | score_warp_design(z)]` when the
 /// fit-time identifiability stage threaded the score-warp basis in as a
 /// flex-evaluation anchor). These layouts must match the column order
 /// `install_compiled_flex_block_into_runtime` used at fit time.
 #[derive(Default)]
 struct BmsAnchorCorrections {
-    /// `[marginal | logslope]` at predict rows. `Some` whenever any
+    /// `[marginal | slope]` at predict rows. `Some` whenever any
     /// runtime carries an anchor residual.
     score_warp_anchor_rows: Option<Array2<f64>>,
-    /// `[marginal | logslope | score_warp_design(z)]` at predict rows.
+    /// `[marginal | slope | score_warp_design(z)]` at predict rows.
     /// `Some` whenever the link-deviation runtime carries an anchor
     /// residual; the score-warp tail is included iff the saved
     /// link-deviation runtime's residual components include a
@@ -156,13 +156,13 @@ impl BernoulliMarginalSlopePredictor {
     /// Returns an empty bundle (all `None`) when neither runtime carries
     /// an anchor residual — this is the fast path for fits without
     /// cross-block residualisation. When at least one runtime has a
-    /// residual, materialises the marginal + logslope designs at the
+    /// residual, materialises the marginal + slope designs at the
     /// predict rows once and computes the per-runtime correction matrices
     /// against each runtime's stored `M`.
     fn build_anchor_correction_matrices(
         &self,
         input: &PredictInput,
-        design_logslope: &DesignMatrix,
+        design_slope: &DesignMatrix,
         z: &Array1<f64>,
     ) -> Result<BmsAnchorCorrections, EstimationError> {
         use crate::inference::model::SavedAnchorKind;
@@ -177,27 +177,27 @@ impl BernoulliMarginalSlopePredictor {
         if !needs_score && !needs_link {
             return Ok(BmsAnchorCorrections::default());
         }
-        // Materialise the marginal + logslope designs at predict rows.
+        // Materialise the marginal + slope designs at predict rows.
         // For large-scale predict batches the caller already chunks via
         // `prediction_chunk_rows`, so this densification is bounded per
-        // chunk by `chunk_size × (p_marginal + p_logslope)`.
+        // chunk by `chunk_size × (p_marginal + p_slope)`.
         let marginal_dense = input
             .design
             .try_to_dense_arc(
                 "bernoulli marginal-slope predict-time marginal anchor materialisation",
             )
             .map_err(EstimationError::InvalidInput)?;
-        let logslope_dense = design_logslope
+        let slope_dense = design_slope
             .try_to_dense_arc(
-                "bernoulli marginal-slope predict-time logslope anchor materialisation",
+                "bernoulli marginal-slope predict-time slope anchor materialisation",
             )
             .map_err(EstimationError::InvalidInput)?;
         let n_rows = marginal_dense.nrows();
-        if logslope_dense.nrows() != n_rows {
+        if slope_dense.nrows() != n_rows {
             return Err(EstimationError::InvalidInput(format!(
-                "bernoulli marginal-slope predict anchor materialisation row mismatch: marginal {} vs logslope {}",
+                "bernoulli marginal-slope predict anchor materialisation row mismatch: marginal {} vs slope {}",
                 n_rows,
-                logslope_dense.nrows()
+                slope_dense.nrows()
             )));
         }
         if z.len() != n_rows {
@@ -208,17 +208,17 @@ impl BernoulliMarginalSlopePredictor {
             )));
         }
         let p_marginal = marginal_dense.ncols();
-        let p_logslope = logslope_dense.ncols();
-        let d_parametric = p_marginal + p_logslope;
+        let p_slope = slope_dense.ncols();
+        let d_parametric = p_marginal + p_slope;
         let mut parametric_rows = Array2::<f64>::zeros((n_rows, d_parametric));
         parametric_rows
             .slice_mut(ndarray::s![.., 0..p_marginal])
             .assign(&marginal_dense.view());
         parametric_rows
             .slice_mut(ndarray::s![.., p_marginal..d_parametric])
-            .assign(&logslope_dense.view());
+            .assign(&slope_dense.view());
 
-        // Score-warp anchor layout is `[marginal | logslope]` (parametric
+        // Score-warp anchor layout is `[marginal | slope]` (parametric
         // only; flex-flex anchoring goes the other direction).
         let score_warp = if needs_score {
             let runtime = self
@@ -406,14 +406,14 @@ impl BernoulliMarginalSlopePredictor {
             )));
         }
         if input.design.ncols() != self.beta_marginal.len()
-            || secondary_design.ncols() != self.beta_logslope.len()
+            || secondary_design.ncols() != self.beta_slope.len()
         {
             return Err(EstimationError::InvalidInput(format!(
                 "saved marginal-slope ALO coefficient mismatch: marginal design/beta={}/{}, slope design/beta={}/{}",
                 input.design.ncols(),
                 self.beta_marginal.len(),
                 secondary_design.ncols(),
-                self.beta_logslope.len(),
+                self.beta_slope.len(),
             )));
         }
 
@@ -433,8 +433,8 @@ impl BernoulliMarginalSlopePredictor {
             .as_ref()
             .map_or_else(|| Array1::zeros(n), Clone::clone);
         let slope = secondary_design
-            .dot(&self.beta_logslope)
-            .mapv(|value| value + self.baseline_logslope)
+            .dot(&self.beta_slope)
+            .mapv(|value| value + self.baseline_slope)
             + &slope_offset;
         Ok(BernoulliMarginalSlopeSavedAloAffineState {
             marginal_eta,
@@ -507,20 +507,20 @@ impl BernoulliMarginalSlopePredictor {
         prior_weights: &Array1<f64>,
     ) -> Result<BernoulliMarginalSlopeSavedAloReplay, EstimationError> {
         let affine = self.saved_alo_affine_state(input)?;
-        let logslope_design = input.design_noise.as_ref().ok_or_else(|| {
+        let slope_design = input.design_noise.as_ref().ok_or_else(|| {
             EstimationError::InvalidInput(
                 "saved BMS ALO requires the persisted slope design".to_string(),
             )
         })?;
         let anchor_corrections =
-            self.build_anchor_correction_matrices(input, logslope_design, &affine.latent_z)?;
+            self.build_anchor_correction_matrices(input, slope_design, &affine.latent_z)?;
         let latent_measure = self.saved_alo_latent_measure(input, response.len())?;
         replay_saved_bernoulli_marginal_slope_alo(BernoulliMarginalSlopeSavedAloReplayInput {
             base_link: &self.base_link,
             marginal_design: &input.design,
-            logslope_design,
+            slope_design,
             marginal_beta: &self.beta_marginal,
-            logslope_beta: &self.beta_logslope,
+            slope_beta: &self.beta_slope,
             score_warp_beta: self.beta_score_warp.as_ref(),
             link_deviation_beta: self.beta_link_dev.as_ref(),
             marginal_eta: &affine.marginal_eta,
@@ -1159,7 +1159,7 @@ impl BernoulliMarginalSlopePredictor {
         latent_z_normalization: SavedLatentZNormalization,
         latent_measure: LatentMeasureKind,
         baseline_marginal: f64,
-        baseline_logslope: f64,
+        baseline_slope: f64,
         base_link: InverseLink,
         frailty: FrailtySpec,
         score_warp_runtime: Option<SavedCompiledFlexBlock>,
@@ -1254,7 +1254,7 @@ impl BernoulliMarginalSlopePredictor {
         };
         Ok(Self {
             beta_marginal: blocks[0].beta.clone(),
-            beta_logslope: blocks[1].beta.clone(),
+            beta_slope: blocks[1].beta.clone(),
             beta_score_warp,
             beta_link_dev,
             base_link,
@@ -1262,7 +1262,7 @@ impl BernoulliMarginalSlopePredictor {
             latent_z_normalization,
             latent_measure,
             baseline_marginal,
-            baseline_logslope,
+            baseline_slope,
             covariance: unified.beta_covariance().cloned(),
             score_warp_runtime,
             link_deviation_runtime,
@@ -1275,7 +1275,7 @@ impl BernoulliMarginalSlopePredictor {
 
     pub fn theta(&self) -> Array1<f64> {
         let total = self.beta_marginal.len()
-            + self.beta_logslope.len()
+            + self.beta_slope.len()
             + self.beta_score_warp.as_ref().map_or(0, |b| b.len())
             + self.beta_link_dev.as_ref().map_or(0, |b| b.len());
         let mut theta = Array1::<f64>::zeros(total);
@@ -1285,9 +1285,9 @@ impl BernoulliMarginalSlopePredictor {
             .assign(&self.beta_marginal);
         cursor += self.beta_marginal.len();
         theta
-            .slice_mut(ndarray::s![cursor..cursor + self.beta_logslope.len()])
-            .assign(&self.beta_logslope);
-        cursor += self.beta_logslope.len();
+            .slice_mut(ndarray::s![cursor..cursor + self.beta_slope.len()])
+            .assign(&self.beta_slope);
+        cursor += self.beta_slope.len();
         if let Some(beta) = self.beta_score_warp.as_ref() {
             theta
                 .slice_mut(ndarray::s![cursor..cursor + beta.len()])
@@ -1324,8 +1324,8 @@ impl BernoulliMarginalSlopePredictor {
         let mut cursor = 0usize;
         let marginal = theta.slice(ndarray::s![cursor..cursor + self.beta_marginal.len()]);
         cursor += self.beta_marginal.len();
-        let logslope = theta.slice(ndarray::s![cursor..cursor + self.beta_logslope.len()]);
-        cursor += self.beta_logslope.len();
+        let slope = theta.slice(ndarray::s![cursor..cursor + self.beta_slope.len()]);
+        cursor += self.beta_slope.len();
         let score_warp = self.beta_score_warp.as_ref().map(|beta| {
             let view = theta.slice(ndarray::s![cursor..cursor + beta.len()]);
             cursor += beta.len();
@@ -1335,7 +1335,7 @@ impl BernoulliMarginalSlopePredictor {
             .beta_link_dev
             .as_ref()
             .map(|beta| theta.slice(ndarray::s![cursor..cursor + beta.len()]));
-        Ok((marginal, logslope, score_warp, link_dev))
+        Ok((marginal, slope, score_warp, link_dev))
     }
 
     /// Safeguarded monotone root solve for the marginal intercept under the
@@ -1379,8 +1379,8 @@ impl BernoulliMarginalSlopePredictor {
             let ell1 = l_d1[0];
             if ell1 > 1e-8 {
                 let ell0 = l_val[0] - ell1 * a_rigid;
-                let observed_logslope = probit_scale * ell1 * slope;
-                intercept = (marginal.q * (1.0 + observed_logslope * observed_logslope).sqrt()
+                let observed_slope = probit_scale * ell1 * slope;
+                intercept = (marginal.q * (1.0 + observed_slope * observed_slope).sqrt()
                     / probit_scale
                     - ell0)
                     / ell1;
@@ -1439,12 +1439,12 @@ impl BernoulliMarginalSlopePredictor {
         // conditional Auto gate (no-op otherwise; mutually exclusive with the
         // rank-INT calibration above).
         let z = self.apply_latent_z_conditional_calibration(&z, input)?;
-        let design_logslope = input.design_noise.as_ref().ok_or_else(|| {
+        let design_slope = input.design_noise.as_ref().ok_or_else(|| {
             EstimationError::InvalidInput(
-                "bernoulli marginal-slope prediction requires logslope design".to_string(),
+                "bernoulli marginal-slope prediction requires slope design".to_string(),
             )
         })?;
-        let (beta_marginal, beta_logslope, beta_score_warp, beta_link_dev) =
+        let (beta_marginal, beta_slope, beta_score_warp, beta_link_dev) =
             self.split_theta(theta)?;
         if self.score_warp_runtime.is_some() != beta_score_warp.is_some() {
             return Err(EstimationError::InvalidInput(
@@ -1465,14 +1465,14 @@ impl BernoulliMarginalSlopePredictor {
                 input.offset.len()
             )));
         }
-        let logslope_offset = input
+        let slope_offset = input
             .offset_noise
             .as_ref()
             .map_or_else(|| Array1::zeros(n), Clone::clone);
-        if logslope_offset.len() != n {
+        if slope_offset.len() != n {
             return Err(EstimationError::InvalidInput(format!(
-                "bernoulli marginal-slope prediction logslope offset length mismatch: rows={n}, offset_noise={}",
-                logslope_offset.len()
+                "bernoulli marginal-slope prediction slope offset length mismatch: rows={n}, offset_noise={}",
+                slope_offset.len()
             )));
         }
         let marginal_eta = input
@@ -1480,18 +1480,18 @@ impl BernoulliMarginalSlopePredictor {
             .dot(&beta_marginal.to_owned())
             .mapv(|v| v + self.baseline_marginal)
             + &input.offset;
-        let logslope_eta = design_logslope
-            .dot(&beta_logslope.to_owned())
-            .mapv(|v| v + self.baseline_logslope)
-            + &logslope_offset;
+        let slope_eta = design_slope
+            .dot(&beta_slope.to_owned())
+            .mapv(|v| v + self.baseline_slope)
+            + &slope_offset;
         let flex_active =
             self.score_warp_runtime.is_some() || self.link_deviation_runtime.is_some();
         let marginal_dim = self.beta_marginal.len();
-        let logslope_dim = self.beta_logslope.len();
+        let slope_dim = self.beta_slope.len();
         let score_warp_dim = self.beta_score_warp.as_ref().map_or(0, Array1::len);
         let link_dev_dim = self.beta_link_dev.as_ref().map_or(0, Array1::len);
-        let logslope_offset = marginal_dim;
-        let score_warp_offset = logslope_offset + logslope_dim;
+        let slope_offset = marginal_dim;
+        let score_warp_offset = slope_offset + slope_dim;
         let link_dev_offset = score_warp_offset + score_warp_dim;
         let chunk_size = prediction_chunk_rows(theta.len(), 1, n);
         let num_chunks = n.div_ceil(chunk_size);
@@ -1503,7 +1503,7 @@ impl BernoulliMarginalSlopePredictor {
         // cubic-span basis output. When neither runtime has a residual,
         // the returned bundle is empty and threading is a no-op.
         let anchor_corrections =
-            self.build_anchor_correction_matrices(input, design_logslope, &z)?;
+            self.build_anchor_correction_matrices(input, design_slope, &z)?;
         let marginal_map = marginal_eta
             .iter()
             .map(|&eta| {
@@ -1513,43 +1513,43 @@ impl BernoulliMarginalSlopePredictor {
             .collect::<Result<Vec<_>, _>>()?;
 
         if !flex_active {
-            let (final_eta_internal, marginal_scales, logslope_scales) = match &self.latent_measure
+            let (final_eta_internal, marginal_scales, slope_scales) = match &self.latent_measure
             {
                 LatentMeasureKind::StandardNormal => {
-                    let sb_vec = logslope_eta.mapv(|b| scale * b);
+                    let sb_vec = slope_eta.mapv(|b| scale * b);
                     let c_vec = sb_vec.mapv(|sb| (1.0 + sb * sb).sqrt());
                     let final_eta_internal = Array1::from_iter(
                         (0..n).map(|i| c_vec[i] * marginal_eta[i] + sb_vec[i] * z[i]),
                     );
                     let marginal_scales = c_vec;
-                    let logslope_scales = Array1::from_iter((0..n).map(|i| {
-                        marginal_eta[i] * (scale * scale) * logslope_eta[i] / marginal_scales[i]
+                    let slope_scales = Array1::from_iter((0..n).map(|i| {
+                        marginal_eta[i] * (scale * scale) * slope_eta[i] / marginal_scales[i]
                             + scale * z[i]
                     }));
-                    (final_eta_internal, marginal_scales, logslope_scales)
+                    (final_eta_internal, marginal_scales, slope_scales)
                 }
                 LatentMeasureKind::GlobalEmpirical { grid } => {
                     let mut final_eta = Array1::<f64>::zeros(n);
                     let mut marginal_scales = Array1::<f64>::zeros(n);
-                    let mut logslope_scales = Array1::<f64>::zeros(n);
+                    let mut slope_scales = Array1::<f64>::zeros(n);
                     for i in 0..n {
                         let (intercept, a_marginal, a_slope) = self
                             .empirical_rigid_intercept_and_gradient(
                                 marginal_eta[i],
-                                logslope_eta[i],
+                                slope_eta[i],
                                 &grid.nodes,
                                 &grid.weights,
                             )?;
-                        final_eta[i] = intercept + scale * logslope_eta[i] * z[i];
+                        final_eta[i] = intercept + scale * slope_eta[i] * z[i];
                         marginal_scales[i] = a_marginal;
-                        logslope_scales[i] = a_slope + scale * z[i];
+                        slope_scales[i] = a_slope + scale * z[i];
                     }
-                    (final_eta, marginal_scales, logslope_scales)
+                    (final_eta, marginal_scales, slope_scales)
                 }
                 LatentMeasureKind::LocalEmpirical { .. } => {
                     let mut final_eta = Array1::<f64>::zeros(n);
                     let mut marginal_scales = Array1::<f64>::zeros(n);
-                    let mut logslope_scales = Array1::<f64>::zeros(n);
+                    let mut slope_scales = Array1::<f64>::zeros(n);
                     for i in 0..n {
                         let grid = self
                             .empirical_grid_for_prediction_row(input, i)?
@@ -1562,15 +1562,15 @@ impl BernoulliMarginalSlopePredictor {
                         let (intercept, a_marginal, a_slope) = self
                             .empirical_rigid_intercept_and_gradient(
                                 marginal_eta[i],
-                                logslope_eta[i],
+                                slope_eta[i],
                                 &grid.nodes,
                                 &grid.weights,
                             )?;
-                        final_eta[i] = intercept + scale * logslope_eta[i] * z[i];
+                        final_eta[i] = intercept + scale * slope_eta[i] * z[i];
                         marginal_scales[i] = a_marginal;
-                        logslope_scales[i] = a_slope + scale * z[i];
+                        slope_scales[i] = a_slope + scale * z[i];
                     }
-                    (final_eta, marginal_scales, logslope_scales)
+                    (final_eta, marginal_scales, slope_scales)
                 }
             };
 
@@ -1587,20 +1587,20 @@ impl BernoulliMarginalSlopePredictor {
                     .design
                     .try_row_chunk(start..end)
                     .map_err(|e| EstimationError::InvalidInput(e.to_string()))?;
-                let lc = design_logslope
+                let lc = design_slope
                     .try_row_chunk(start..end)
                     .map_err(|e| EstimationError::InvalidInput(e.to_string()))?;
 
                 for li in 0..(end - start) {
                     let i = start + li;
                     let c = marginal_scales[i];
-                    let g_scale = logslope_scales[i];
+                    let g_scale = slope_scales[i];
                     let mut row = grad_internal.row_mut(i);
                     for j in 0..marginal_dim {
                         row[j] = c * mc[[li, j]];
                     }
-                    for j in 0..logslope_dim {
-                        row[logslope_offset + j] = g_scale * lc[[li, j]];
+                    for j in 0..slope_dim {
+                        row[slope_offset + j] = g_scale * lc[[li, j]];
                     }
                 }
 
@@ -1766,7 +1766,7 @@ impl BernoulliMarginalSlopePredictor {
 
                 for local_row in 0..rows {
                     let i = start + local_row;
-                    let slope = logslope_eta[i];
+                    let slope = slope_eta[i];
                     let q = marginal_eta[i];
                     let empirical_grid = self.empirical_grid_for_prediction_row(input, i)?;
                     let score_corr_row = anchor_corrections.score_warp_row(i);
@@ -1968,7 +1968,7 @@ impl BernoulliMarginalSlopePredictor {
         };
         solve_result?;
 
-        let eta_base = &intercepts + &(&logslope_eta * &z);
+        let eta_base = &intercepts + &(&slope_eta * &z);
 
         let mut link_c_obs: Option<Array1<f64>> = None;
         let mut link_basis_obs: Option<Array2<f64>> = None;
@@ -2008,7 +2008,7 @@ impl BernoulliMarginalSlopePredictor {
             Array1::zeros(n)
         };
         let final_eta_internal =
-            (&eta_base + &(&logslope_eta * &score_dev_obs) + &link_dev_obs).mapv(|v| scale * v);
+            (&eta_base + &(&slope_eta * &score_dev_obs) + &link_dev_obs).mapv(|v| scale * v);
 
         if !need_gradient {
             return self.transform_internal_eta_to_base_scale(final_eta_internal, None);
@@ -2038,7 +2038,7 @@ impl BernoulliMarginalSlopePredictor {
                         .design
                         .try_row_chunk(start..end)
                         .map_err(|e| e.to_string())?;
-                    let lc = design_logslope
+                    let lc = design_slope
                         .try_row_chunk(start..end)
                         .map_err(|e| e.to_string())?;
                     let rows = end - start;
@@ -2054,14 +2054,14 @@ impl BernoulliMarginalSlopePredictor {
 
                         let base_multiplier = link_c_obs.as_ref().map_or(1.0, |c| c[i]);
                         let g_scale = base_multiplier * (a_b_vec[i] + z[i]) + score_dev_obs[i];
-                        for j in 0..logslope_dim {
-                            row[logslope_offset + j] = g_scale * lc[[li, j]];
+                        for j in 0..slope_dim {
+                            row[slope_offset + j] = g_scale * lc[[li, j]];
                         }
 
                         if let (Some(a_h_rows), Some(obs_design)) =
                             (a_h_rows.as_ref(), score_warp_obs_design.as_ref())
                         {
-                            let slope = logslope_eta[i];
+                            let slope = slope_eta[i];
                             for j in 0..score_warp_dim {
                                 row[score_warp_offset + j] =
                                     base_multiplier * a_h_rows[[i, j]] + slope * obs_design[[i, j]];
@@ -2098,7 +2098,7 @@ impl BernoulliMarginalSlopePredictor {
     }
 
     /// Per-row final (base-scale) linear predictor for an arbitrary
-    /// coefficient vector `theta` in the saved `[marginal | logslope |
+    /// coefficient vector `theta` in the saved `[marginal | slope |
     /// score_warp? | link_dev?]` block order. The marginal-slope rigid
     /// kernel is applied exactly per row, so the returned η is the same
     /// object the point predictor consumes — only parameterised by an
@@ -2116,12 +2116,12 @@ impl BernoulliMarginalSlopePredictor {
     }
 
     /// Length of the concatenated coefficient vector this predictor
-    /// consumes (`marginal + logslope + score_warp? + link_dev?`). The
+    /// consumes (`marginal + slope + score_warp? + link_dev?`). The
     /// posterior predictive path validates each saved draw against this
     /// before mapping it through [`Self::final_eta_from_theta`].
     pub fn theta_len(&self) -> usize {
         self.beta_marginal.len()
-            + self.beta_logslope.len()
+            + self.beta_slope.len()
             + self.beta_score_warp.as_ref().map_or(0, Array1::len)
             + self.beta_link_dev.as_ref().map_or(0, Array1::len)
     }
@@ -2166,9 +2166,9 @@ impl BernoulliMarginalSlopePredictor {
         // conditional Auto gate (no-op otherwise; mutually exclusive with the
         // rank-INT calibration above).
         let z = self.apply_latent_z_conditional_calibration(&z, input)?;
-        let design_logslope = input.design_noise.as_ref().ok_or_else(|| {
+        let design_slope = input.design_noise.as_ref().ok_or_else(|| {
             EstimationError::InvalidInput(
-                "bernoulli marginal-slope prediction requires logslope design".to_string(),
+                "bernoulli marginal-slope prediction requires slope design".to_string(),
             )
         })?;
         let n = z.len();
@@ -2178,14 +2178,14 @@ impl BernoulliMarginalSlopePredictor {
                 input.offset.len()
             )));
         }
-        let logslope_offset = input
+        let slope_offset = input
             .offset_noise
             .as_ref()
             .map_or_else(|| Array1::zeros(n), Clone::clone);
-        if logslope_offset.len() != n {
+        if slope_offset.len() != n {
             return Err(EstimationError::InvalidInput(format!(
-                "bernoulli marginal-slope prediction logslope offset length mismatch: rows={n}, offset_noise={}",
-                logslope_offset.len()
+                "bernoulli marginal-slope prediction slope offset length mismatch: rows={n}, offset_noise={}",
+                slope_offset.len()
             )));
         }
         let marginal_eta = input
@@ -2193,10 +2193,10 @@ impl BernoulliMarginalSlopePredictor {
             .dot(&self.beta_marginal)
             .mapv(|v| v + self.baseline_marginal)
             + &input.offset;
-        let logslope_eta = design_logslope
-            .dot(&self.beta_logslope)
-            .mapv(|v| v + self.baseline_logslope)
-            + &logslope_offset;
+        let slope_eta = design_slope
+            .dot(&self.beta_slope)
+            .mapv(|v| v + self.baseline_slope)
+            + &slope_offset;
         let scale = self.probit_frailty_scale();
         let flex_active =
             self.score_warp_runtime.is_some() || self.link_deviation_runtime.is_some();
@@ -2206,9 +2206,9 @@ impl BernoulliMarginalSlopePredictor {
         if !flex_active {
             match &self.latent_measure {
                 LatentMeasureKind::StandardNormal => {
-                    // Vectorize: sb = scale·logslope, c = sqrt(1 + sb²),
+                    // Vectorize: sb = scale·slope, c = sqrt(1 + sb²),
                     // eta = c·marginal_eta + sb·z, ∂eta/∂q = c.
-                    let sb = logslope_eta.mapv(|x| scale * x);
+                    let sb = slope_eta.mapv(|x| scale * x);
                     let deta_dq = sb.mapv(|s| (1.0 + s * s).sqrt());
                     let eta = &deta_dq * marginal_eta + &sb * z;
                     return Ok((eta, deta_dq));
@@ -2228,11 +2228,11 @@ impl BernoulliMarginalSlopePredictor {
                         let (intercept, a_marginal, _) = self
                             .empirical_rigid_intercept_and_gradient(
                                 marginal_eta[i],
-                                logslope_eta[i],
+                                slope_eta[i],
                                 &grid.nodes,
                                 &grid.weights,
                             )?;
-                        eta[i] = intercept + scale * logslope_eta[i] * z[i];
+                        eta[i] = intercept + scale * slope_eta[i] * z[i];
                         deta_dq[i] = a_marginal;
                     }
                     return Ok((eta, deta_dq));
@@ -2255,7 +2255,7 @@ impl BernoulliMarginalSlopePredictor {
         // Cross-block anchor corrections (see final_eta_and_gradient_from_theta
         // for the design); precompute once before the per-row loop.
         let anchor_corrections =
-            self.build_anchor_correction_matrices(input, design_logslope, &z)?;
+            self.build_anchor_correction_matrices(input, design_slope, &z)?;
         // Per-row: solve intercept scalar, evaluate denested calibration,
         // record (intercept, a_q). The `warm_start_buf` is just per-call
         // scratch — give each rayon worker its own buffer via fold init.
@@ -2266,7 +2266,7 @@ impl BernoulliMarginalSlopePredictor {
                 || Array1::<f64>::zeros(1),
                 |warm_start_buf, i| {
                     let q = marginal_eta[i];
-                    let slope = logslope_eta[i];
+                    let slope = slope_eta[i];
                     let empirical_grid = self.empirical_grid_for_prediction_row(input, i)?;
                     let score_corr_row = anchor_corrections.score_warp_row(i);
                     let link_corr_row = anchor_corrections.link_dev_row(i);
@@ -2327,7 +2327,7 @@ impl BernoulliMarginalSlopePredictor {
         } else {
             Array1::zeros(n)
         };
-        let eta_base = &intercepts + &(&logslope_eta * &z);
+        let eta_base = &intercepts + &(&slope_eta * &z);
         let (link_dev_obs, link_c_obs) = if let (Some(runtime), Some(beta)) = (
             self.link_deviation_runtime.as_ref(),
             self.beta_link_dev.as_ref(),
@@ -2360,7 +2360,7 @@ impl BernoulliMarginalSlopePredictor {
             (Array1::zeros(n), Array1::ones(n))
         };
         let final_eta_internal =
-            (&eta_base + &(&logslope_eta * &score_dev_obs) + &link_dev_obs).mapv(|v| scale * v);
+            (&eta_base + &(&slope_eta * &score_dev_obs) + &link_dev_obs).mapv(|v| scale * v);
         let deta_dq = (&link_c_obs * &a_q).mapv(|v| scale * v);
         Ok((final_eta_internal, deta_dq))
     }

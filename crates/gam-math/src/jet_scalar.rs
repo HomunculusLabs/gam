@@ -7592,7 +7592,7 @@ mod unit_tests {
     /// the Faà di Bruno composition.
     #[test]
     fn runtime_shaped_value_primitives_are_exact_and_skip_constant_composition_932() {
-        use crate::paired_timing::{SpeedGate, paired_interleaved};
+        use crate::paired_timing::{SpeedGate, batched, paired_interleaved};
 
         const K: usize = 48;
         let arena = DynamicJetArena::new();
@@ -7623,20 +7623,20 @@ mod unit_tests {
         let mut composed_arena = DynamicJetArena::new();
         let timing = paired_interleaved(
             15,
-            20_000,
+            1_000,
             0x9320_C057,
-            |nudge| {
+            batched(16, |nudge| {
                 direct_arena.reset();
                 let variable = DynamicOrder2::variable(0.75 + nudge, 7, K, &direct_arena);
                 let constant = variable.constant_like(1.25);
                 constant.value() + constant.g()[K - 1] + constant.h()[K * K - 1]
-            },
-            |nudge| {
+            }),
+            batched(16, |nudge| {
                 composed_arena.reset();
                 let variable = DynamicOrder2::variable(0.75 + nudge, 7, K, &composed_arena);
                 let constant = variable.compose_unary([1.25, 0.0, 0.0, 0.0, 0.0]);
                 constant.value() + constant.g()[K - 1] + constant.h()[K * K - 1]
-            },
+            }),
         );
         gate.faster(&format!("dimension={K}"), &timing, "direct", "composed");
         gate.finish();

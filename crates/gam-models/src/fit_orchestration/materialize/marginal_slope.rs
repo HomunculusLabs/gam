@@ -84,10 +84,10 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
         .into());
     }
 
-    let logslope_formula = config
-        .logslope_formula
+    let slope_formula = config
+        .slope_formula
         .as_deref()
-        .ok_or_else(|| "Bernoulli marginal-slope requires logslope_formula".to_string())?;
+        .ok_or_else(|| "Bernoulli marginal-slope requires slope_formula".to_string())?;
     // `z_column` is OPTIONAL when a CTN Stage-1 recipe is present: the calibrated
     // chain produces `z` out-of-fold from the cross-fitted CTN, so there is no
     // raw dose column to read (and no throwaway pre-fit column — that round-trip
@@ -102,21 +102,21 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
         });
     }
 
-    let (_, parsed_logslope) =
-        parse_matching_auxiliary_formula(logslope_formula, &parsed.response, "logslope_formula")?;
-    if parsed_logslope.linkspec.is_some() {
+    let (_, parsed_slope) =
+        parse_matching_auxiliary_formula(slope_formula, &parsed.response, "slope_formula")?;
+    if parsed_slope.linkspec.is_some() {
         return Err(WorkflowError::InvalidConfig {
-            reason: "link(...) is not supported inside logslope_formula".to_string(),
+            reason: "link(...) is not supported inside slope_formula".to_string(),
         }
         .into());
     }
     if let Some(z_column) = z_column {
         validate_marginal_slope_z_column_exclusion(
             parsed,
-            &parsed_logslope,
+            &parsed_slope,
             z_column,
             "Bernoulli marginal-slope",
-            "logslope_formula",
+            "slope_formula",
         )?;
         // The literal-name check above cannot see the score entering the main
         // formula under its canonical alias `z` (gam#2432); the alias is
@@ -162,8 +162,8 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
         "bernoulli marginal-slope marginal formula",
         &mut inference_notes,
     )?;
-    let mut logslopespec = build_termspec_with_geometry_and_overrides(
-        &parsed_logslope.terms,
+    let mut slopespec = build_termspec_with_geometry_and_overrides(
+        &parsed_slope.terms,
         data,
         &aliased_col_map,
         &mut inference_notes,
@@ -173,18 +173,18 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
         None,
     )?;
     prune_unidentified_linear_terms_for_marginal_slope(
-        &mut logslopespec,
+        &mut slopespec,
         data,
-        "bernoulli marginal-slope logslope_formula",
+        "bernoulli marginal-slope slope_formula",
         &mut inference_notes,
     )?;
     let weights = resolve_weight_column(data, col_map, config.weight_column.as_deref())?;
     let marginal_offset = resolve_offset_column(data, col_map, config.offset_column.as_deref())?;
-    let logslope_offset =
+    let slope_offset =
         resolve_offset_column(data, col_map, config.noise_offset_column.as_deref())?;
     let routing = route_marginal_slope_deviation_blocks(
         parsed.linkwiggle.as_ref(),
-        parsed_logslope.linkwiggle.as_ref(),
+        parsed_slope.linkwiggle.as_ref(),
     )?;
 
     // Auto-enable Neyman-orthogonal, cross-fitted score calibration when a CTN
@@ -218,9 +218,9 @@ pub(crate) fn materialize_bernoulli_marginal_slope<'a>(
         z,
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginalspec,
-        logslopespec,
+        slopespec,
         marginal_offset,
-        logslope_offset,
+        slope_offset,
         frailty: config.frailty.clone(),
         score_warp: routing.score_warp,
         link_dev: routing.link_dev,

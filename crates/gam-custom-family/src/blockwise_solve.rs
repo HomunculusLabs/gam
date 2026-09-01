@@ -570,8 +570,8 @@ fn stabilizing_shift_core(
     // eigenvalue lies in some disc `[H_ii − R_i, H_ii + R_i]` with
     // `R_i = Σ_{j≠i} |H_ij|`, so `λ_min ≥ min_i (H_ii − R_i) =: g` — gives a
     // *guaranteed-PD* shift `floor − g` in one pass. But on a dense, coupled data
-    // Hessian (e.g. the survival marginal/logslope aliasing of gam#979, where the
-    // marginal and logslope smooths share covariates and every row is full) the
+    // Hessian (e.g. the survival marginal/slope aliasing of gam#979, where the
+    // marginal and slope smooths share covariates and every row is full) the
     // disc radius `R_i` is enormous relative to the true spectrum, so `g` sits
     // *far* below the actual `λ_min` and `floor − g` over-shifts by an order of
     // magnitude. That inflated ridge does NOT just guarantee positive-definiteness
@@ -2387,7 +2387,7 @@ pub(crate) struct ConstrainedHessianGeometry {
 /// the raw penalized Hessian to `solve_quadratic_with_linear_constraints`. On the
 /// survival marginal-slope flat baseline-hazard λ valley the EXACT joint NLL
 /// Hessian is INDEFINITE away from the optimum (the linear baseline + the
-/// z·exp(logslope) cross-coupling carry genuine negative curvature there). An
+/// z·exp(slope) cross-coupling carry genuine negative curvature there). An
 /// indefinite QP model has a direction that lowers the local quadratic objective
 /// while moving AWAY from the KKT point, so the trust region — which gates on the
 /// objective-reduction ratio ρ, not the stationarity residual — happily accepts

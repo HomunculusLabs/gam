@@ -72,8 +72,8 @@ fn unit_score_covariance() -> ScoreCovarianceField {
 enum PsiAxis {
     /// A design-moving ψ on block 1 — the marginal (population index) design.
     MarginalDesign,
-    /// A design-moving ψ on block 2 — the log-slope design.
-    LogSlopeDesign,
+    /// A design-moving ψ on block 2 — the slope design.
+    SlopeDesign,
     /// A baseline-chart coordinate. Moves the offset channels of the location
     /// index on every row and touches no design.
     Baseline(usize),
@@ -132,7 +132,7 @@ fn base_marginal_design() -> Array2<f64> {
     })
 }
 
-fn base_logslope_exit_design() -> Array2<f64> {
+fn base_slope_exit_design() -> Array2<f64> {
     Array2::from_shape_fn((N_ROWS, 2), |(i, j)| {
         let t = (i as f64 + 0.5) / (N_ROWS as f64);
         match j {
@@ -145,7 +145,7 @@ fn base_logslope_exit_design() -> Array2<f64> {
 /// The entry-time margin of a follow-up-varying slope. Deliberately unequal to
 /// the exit design: `g₀ = g₁` is exactly the degeneracy the static frame
 /// already covers.
-fn base_logslope_entry_design() -> Array2<f64> {
+fn base_slope_entry_design() -> Array2<f64> {
     Array2::from_shape_fn((N_ROWS, 2), |(i, j)| {
         let t = (i as f64 + 0.5) / (N_ROWS as f64);
         match j {
@@ -156,7 +156,7 @@ fn base_logslope_entry_design() -> Array2<f64> {
 }
 
 /// The exit-RATE margin `∂B(log t)/∂t` of a follow-up-varying slope.
-fn base_logslope_rate_design() -> Array2<f64> {
+fn base_slope_rate_design() -> Array2<f64> {
     Array2::from_shape_fn((N_ROWS, 2), |(i, j)| {
         let t = (i as f64 + 0.5) / (N_ROWS as f64);
         match j {
@@ -176,7 +176,7 @@ fn marginal_design_derivative() -> Array2<f64> {
     })
 }
 
-fn logslope_design_derivative() -> Array2<f64> {
+fn slope_design_derivative() -> Array2<f64> {
     Array2::from_shape_fn((N_ROWS, 2), |(i, j)| {
         let t = (i as f64 + 0.5) / (N_ROWS as f64);
         match j {
@@ -192,7 +192,7 @@ fn logslope_design_derivative() -> Array2<f64> {
 /// the slope carries a time margin the SAME ψ moves all three of its channels.
 /// Handing the derivative only to the exit channel would differentiate a model
 /// nobody fitted.
-fn logslope_entry_design_derivative() -> Array2<f64> {
+fn slope_entry_design_derivative() -> Array2<f64> {
     Array2::from_shape_fn((N_ROWS, 2), |(i, j)| {
         let t = (i as f64 + 0.5) / (N_ROWS as f64);
         match j {
@@ -202,7 +202,7 @@ fn logslope_entry_design_derivative() -> Array2<f64> {
     })
 }
 
-fn logslope_rate_design_derivative() -> Array2<f64> {
+fn slope_rate_design_derivative() -> Array2<f64> {
     Array2::from_shape_fn((N_ROWS, 2), |(i, j)| {
         let t = (i as f64 + 0.5) / (N_ROWS as f64);
         match j {
@@ -245,29 +245,29 @@ fn family_at(axis: PsiAxis, frame: SlopeFrame, t: f64) -> SurvivalMarginalSlopeF
     );
 
     let mut marginal = base_marginal_design();
-    let mut logslope_exit = base_logslope_exit_design();
-    let mut logslope_entry = base_logslope_entry_design();
-    let mut logslope_rate = base_logslope_rate_design();
+    let mut slope_exit = base_slope_exit_design();
+    let mut slope_entry = base_slope_entry_design();
+    let mut slope_rate = base_slope_rate_design();
     match axis {
         PsiAxis::MarginalDesign => marginal.scaled_add(t, &marginal_design_derivative()),
-        PsiAxis::LogSlopeDesign => {
-            logslope_exit.scaled_add(t, &logslope_design_derivative());
-            logslope_entry.scaled_add(t, &logslope_entry_design_derivative());
-            logslope_rate.scaled_add(t, &logslope_rate_design_derivative());
+        PsiAxis::SlopeDesign => {
+            slope_exit.scaled_add(t, &slope_design_derivative());
+            slope_entry.scaled_add(t, &slope_entry_design_derivative());
+            slope_rate.scaled_add(t, &slope_rate_design_derivative());
         }
         PsiAxis::Baseline(_) => {}
     }
 
-    let logslope_layout: LogslopeLayout = match frame {
-        SlopeFrame::Static => (DesignMatrix::from(logslope_exit)).into(),
+    let slope_layout: SlopeLayout = match frame {
+        SlopeFrame::Static => (DesignMatrix::from(slope_exit)).into(),
         SlopeFrame::FollowUpVarying => {
-            let layout: LogslopeLayout = (DesignMatrix::from(logslope_exit)).into();
+            let layout: SlopeLayout = (DesignMatrix::from(slope_exit)).into();
             layout
                 .with_follow_up(
-                    DesignMatrix::from(logslope_entry),
-                    DesignMatrix::from(logslope_rate),
+                    DesignMatrix::from(slope_entry),
+                    DesignMatrix::from(slope_rate),
                 )
-                .expect("a shared log-slope layout accepts a follow-up margin")
+                .expect("a shared slope layout accepts a follow-up margin")
         }
     };
 
@@ -288,7 +288,7 @@ fn family_at(axis: PsiAxis, frame: SlopeFrame, t: f64) -> SurvivalMarginalSlopeF
         offset_exit: Arc::new(geometry.offset_exit.clone()),
         derivative_offset_exit: Arc::new(geometry.derivative_offset_exit.clone()),
         marginal_design: DesignMatrix::from(marginal),
-        logslope_layout,
+        slope_layout,
         score_warp: None,
         link_dev: None,
         influence_absorber: None,
@@ -306,7 +306,7 @@ fn marginal_beta() -> Array1<f64> {
     ndarray::array![0.35, -0.18]
 }
 
-fn logslope_beta() -> Array1<f64> {
+fn slope_beta() -> Array1<f64> {
     ndarray::array![0.22, 0.13]
 }
 
@@ -318,10 +318,10 @@ fn logslope_beta() -> Array1<f64> {
 /// differentiate.
 fn states_at(family: &SurvivalMarginalSlopeFamily) -> Vec<ParameterBlockState> {
     let m_beta = marginal_beta();
-    let g_beta = logslope_beta();
+    let g_beta = slope_beta();
     let m_design = family.marginal_design.to_dense().to_owned();
     let g_design = family
-        .logslope_layout
+        .slope_layout
         .coefficient_design()
         .to_dense()
         .to_owned();
@@ -345,7 +345,7 @@ fn specs_for(family: &SurvivalMarginalSlopeFamily) -> Vec<ParameterBlockSpec> {
     vec![
         fd_blockspec(0),
         fd_blockspec(family.marginal_design.ncols()),
-        fd_blockspec(family.logslope_layout.coefficient_design().ncols()),
+        fd_blockspec(family.slope_layout.coefficient_design().ncols()),
     ]
 }
 
@@ -373,7 +373,7 @@ fn fd_blockspec(cols: usize) -> ParameterBlockSpec {
 fn derivative_blocks(axis: PsiAxis) -> Vec<Vec<CustomFamilyBlockPsiDerivative>> {
     let x_psi = match axis {
         PsiAxis::MarginalDesign => marginal_design_derivative(),
-        PsiAxis::LogSlopeDesign => logslope_design_derivative(),
+        PsiAxis::SlopeDesign => slope_design_derivative(),
         PsiAxis::Baseline(_) => panic!("a baseline ψ axis owns no design derivative"),
     };
     let entry = vec![CustomFamilyBlockPsiDerivative::new(
@@ -387,7 +387,7 @@ fn derivative_blocks(axis: PsiAxis) -> Vec<Vec<CustomFamilyBlockPsiDerivative>> 
     )];
     match axis {
         PsiAxis::MarginalDesign => vec![Vec::new(), entry, Vec::new()],
-        PsiAxis::LogSlopeDesign => vec![Vec::new(), Vec::new(), entry],
+        PsiAxis::SlopeDesign => vec![Vec::new(), Vec::new(), entry],
         PsiAxis::Baseline(_) => unreachable!(),
     }
 }
@@ -606,13 +606,13 @@ fn marginal_design_psi_terms_match_finite_difference_static_2765() {
     run_first_order_gate(PsiAxis::MarginalDesign, SlopeFrame::Static);
 }
 
-/// The log-slope design ψ axis in the four-primary frame. Filed separately from
+/// The slope design ψ axis in the four-primary frame. Filed separately from
 /// the marginal axis because the two enter the row program through different
 /// primary channels (`q₀,q₁` versus `g`), so one being right says nothing about
 /// the other.
 #[test]
-fn logslope_design_psi_terms_match_finite_difference_static_2765() {
-    run_first_order_gate(PsiAxis::LogSlopeDesign, SlopeFrame::Static);
+fn slope_design_psi_terms_match_finite_difference_static_2765() {
+    run_first_order_gate(PsiAxis::SlopeDesign, SlopeFrame::Static);
 }
 
 /// The marginal design ψ axis with a follow-up-varying slope. The location
@@ -623,7 +623,7 @@ fn marginal_design_psi_terms_match_finite_difference_follow_up_2765() {
     run_first_order_gate(PsiAxis::MarginalDesign, SlopeFrame::FollowUpVarying);
 }
 
-/// A design ψ on the log-slope surface of a follow-up-varying slope must be
+/// A design ψ on the slope surface of a follow-up-varying slope must be
 /// REFUSED, by name, rather than lowered through one of its three channels.
 ///
 /// With a time margin the block's channel designs are `X_cov ⊗ B_entry`,
@@ -635,15 +635,15 @@ fn marginal_design_psi_terms_match_finite_difference_follow_up_2765() {
 /// future caller reaching the primary-space helpers directly cannot get silent
 /// wrong math instead.
 #[test]
-fn a_logslope_design_psi_on_a_follow_up_varying_slope_is_refused_2765() {
-    let family = family_at(PsiAxis::LogSlopeDesign, SlopeFrame::FollowUpVarying, 0.0);
+fn a_slope_design_psi_on_a_follow_up_varying_slope_is_refused_2765() {
+    let family = family_at(PsiAxis::SlopeDesign, SlopeFrame::FollowUpVarying, 0.0);
     let states = states_at(&family);
-    let layout = hyper_layout(PsiAxis::LogSlopeDesign);
+    let layout = hyper_layout(PsiAxis::SlopeDesign);
     let error = family
         .psi_terms(&states, layout.design_derivative_blocks(), 0)
-        .expect_err("a log-slope design ψ has no lowering into the follow-up frame");
+        .expect_err("a slope design ψ has no lowering into the follow-up frame");
     assert!(
-        error.contains("follow-up-varying log-slope"),
+        error.contains("follow-up-varying slope"),
         "the refusal must name the surface it refuses: {error}"
     );
 }
@@ -715,12 +715,12 @@ fn a_constant_follow_up_margin_reproduces_the_static_frame_2765() {
     let static_family = family_at(PsiAxis::Baseline(0), SlopeFrame::Static, 0.0);
     let mut degenerate = family_at(PsiAxis::Baseline(0), SlopeFrame::Static, 0.0);
     let exit = degenerate
-        .logslope_layout
+        .slope_layout
         .coefficient_design()
         .to_dense()
         .to_owned();
-    degenerate.logslope_layout = degenerate
-        .logslope_layout
+    degenerate.slope_layout = degenerate
+        .slope_layout
         .clone()
         .with_follow_up(
             DesignMatrix::from(exit),
@@ -728,7 +728,7 @@ fn a_constant_follow_up_margin_reproduces_the_static_frame_2765() {
         )
         .expect("a constant margin is a valid follow-up layout");
     assert!(
-        degenerate.logslope_layout.is_follow_up_varying(),
+        degenerate.slope_layout.is_follow_up_varying(),
         "the degenerate layout must still take the six-primary frame, or this \
          test compares the static path with itself"
     );
@@ -862,18 +862,18 @@ fn states_at_beta(
 ) -> Vec<ParameterBlockState> {
     let t_cols = family.design_exit.ncols();
     let m_cols = family.marginal_design.ncols();
-    let g_cols = family.logslope_layout.coefficient_design().ncols();
+    let g_cols = family.slope_layout.coefficient_design().ncols();
     assert_eq!(
         beta_flat.len(),
         t_cols + m_cols + g_cols,
-        "the fixture's flat β is the time block, then the marginal block, then the log-slope block"
+        "the fixture's flat β is the time block, then the marginal block, then the slope block"
     );
     let t_beta = beta_flat.slice(ndarray::s![..t_cols]).to_owned();
     let m_beta = beta_flat.slice(ndarray::s![t_cols..t_cols + m_cols]).to_owned();
     let g_beta = beta_flat.slice(ndarray::s![t_cols + m_cols..]).to_owned();
     let m_design = family.marginal_design.to_dense().to_owned();
     let g_design = family
-        .logslope_layout
+        .slope_layout
         .coefficient_design()
         .to_dense()
         .to_owned();
@@ -921,7 +921,7 @@ fn joint_hessian_at(
 ///
 /// [`family_at`] leaves the three time designs empty, which is the right fixture
 /// for a ψ lane that never touches them — but it means the time↔marginal and
-/// time↔log-slope halves of the pullback are never exercised. `D_β H` reads
+/// time↔slope halves of the pullback are never exercised. `D_β H` reads
 /// every block, so its gate builds them: `X_entry = (1, log t₀)`,
 /// `X_exit = (1, log t₁)` and `X_derivative = (0, 1/t₁)`, which is the exact
 /// derivative pair the row program's monotonicity contract expects (`q̇₁ > 0`
@@ -959,7 +959,7 @@ fn drift_family_and_states(
     let mut beta = Array1::<f64>::zeros(6);
     beta.slice_mut(ndarray::s![..2]).assign(&time_beta());
     beta.slice_mut(ndarray::s![2..4]).assign(&marginal_beta());
-    beta.slice_mut(ndarray::s![4..]).assign(&logslope_beta());
+    beta.slice_mut(ndarray::s![4..]).assign(&slope_beta());
     (family, beta)
 }
 
@@ -1024,7 +1024,7 @@ fn beta_hessian_drift_matches_finite_difference_follow_up_2765() {
     );
 }
 
-/// A direction confined to the MARGINAL block, so a defect in the log-slope
+/// A direction confined to the MARGINAL block, so a defect in the slope
 /// pullback cannot mask (or be masked by) one in the marginal pullback.
 #[test]
 fn beta_hessian_drift_matches_finite_difference_marginal_direction_2765() {
@@ -1037,20 +1037,20 @@ fn beta_hessian_drift_matches_finite_difference_marginal_direction_2765() {
     }
 }
 
-/// A direction confined to the LOG-SLOPE block — the one #2765 generalized from
+/// A direction confined to the SLOPE block — the one #2765 generalized from
 /// one channel to three.
 #[test]
-fn beta_hessian_drift_matches_finite_difference_logslope_direction_2765() {
+fn beta_hessian_drift_matches_finite_difference_slope_direction_2765() {
     for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
         run_beta_drift_gate(
             frame,
             ndarray::array![0.0, 0.0, 0.0, 0.0, 0.47, 0.23],
-            "logslope-only",
+            "slope-only",
         );
     }
 }
 
-/// A direction confined to the TIME block. The time↔log-slope half of the
+/// A direction confined to the TIME block. The time↔slope half of the
 /// pullback has its own channel loop, and a direction that never moves the
 /// slope block is the only one that isolates it.
 #[test]
@@ -1075,19 +1075,19 @@ fn beta_hessian_drift_matches_finite_difference_time_direction_2765() {
 /// EQUAL, a site that keeps only `g₀`'s design is short by exactly the dropped
 /// channels' contribution rather than by something that could be argued small.
 /// Before the pullback was converted this failed by `1.7e0` relative on the
-/// marginal↔log-slope cross block.
+/// marginal↔slope cross block.
 #[test]
 fn a_constant_follow_up_margin_reproduces_the_static_beta_drift_2765() {
     let (static_family, beta) = drift_family_and_states(SlopeFrame::Static);
     let mut degenerate = static_family.clone();
     let exit = degenerate
-        .logslope_layout
+        .slope_layout
         .coefficient_design()
         .to_dense()
         .to_owned();
     let width = exit.ncols();
-    degenerate.logslope_layout = degenerate
-        .logslope_layout
+    degenerate.slope_layout = degenerate
+        .slope_layout
         .clone()
         .with_follow_up(
             DesignMatrix::from(exit),
@@ -1095,7 +1095,7 @@ fn a_constant_follow_up_margin_reproduces_the_static_beta_drift_2765() {
         )
         .expect("a constant margin is a valid follow-up layout");
     assert!(
-        degenerate.logslope_layout.is_follow_up_varying(),
+        degenerate.slope_layout.is_follow_up_varying(),
         "the degenerate layout must still take the six-primary frame, or this \
          test compares the static path with itself"
     );
@@ -1215,16 +1215,16 @@ fn beta_hessian_second_drift_matches_finite_difference_follow_up_2765() {
     );
 }
 
-/// A log-slope-only pair, so a defect in the slope channels' fourth-order
+/// A slope-only pair, so a defect in the slope channels' fourth-order
 /// contraction cannot be masked by the time/marginal blocks.
 #[test]
-fn beta_hessian_second_drift_matches_finite_difference_logslope_pair_2765() {
+fn beta_hessian_second_drift_matches_finite_difference_slope_pair_2765() {
     for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
         run_beta_second_drift_gate(
             frame,
             ndarray::array![0.0, 0.0, 0.0, 0.0, 0.47, 0.23],
             ndarray::array![0.0, 0.0, 0.0, 0.0, -0.19, 0.35],
-            "logslope-pair",
+            "slope-pair",
         );
     }
 }

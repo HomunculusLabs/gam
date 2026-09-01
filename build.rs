@@ -4165,10 +4165,21 @@ fn decode_index_varint(buf: &[u8]) -> Result<(usize, usize), String> {
 /// could never be redeemed either, since it cannot be cut to the probation
 /// floor. Both audits therefore skip them; every hand-written file, including
 /// line-oriented data assets, stays in scope.
+///
+/// The names are the resolver-owned lockfiles of the toolchains this tree
+/// carries: cargo, uv, and npm/yarn/pnpm for the JavaScript tooling under
+/// `tools/` (#2799 — the npm lockfile tripped the gate the day it was tracked).
 fn is_generated_lockfile(rel: &Path) -> bool {
     matches!(
         rel.file_name().and_then(|name| name.to_str()),
-        Some("Cargo.lock" | "uv.lock")
+        Some(
+            "Cargo.lock"
+                | "uv.lock"
+                | "package-lock.json"
+                | "npm-shrinkwrap.json"
+                | "yarn.lock"
+                | "pnpm-lock.yaml"
+        )
     )
 }
 

@@ -121,7 +121,7 @@ pub(crate) fn custom_family_block_role(
         "eta" | "mean" | "beta" => BlockRole::Mean,
         "mu" | "location" | "marginal_surface" => BlockRole::Location,
         "threshold" => BlockRole::Threshold,
-        "log_sigma" | "scale" | "logslope_surface" => BlockRole::Scale,
+        "log_sigma" | "scale" | "slope_surface" => BlockRole::Scale,
         "time" | "time_transform" | "time_surface" => BlockRole::Time,
         name if name.starts_with("time_cause_") => BlockRole::Time,
         "wiggle" | "linkwiggle" => BlockRole::LinkWiggle,

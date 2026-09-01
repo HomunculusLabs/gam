@@ -932,7 +932,7 @@ mod tests {
     /// this is not evidence against an optimized hand-written opponent.
     #[test]
     fn release_measure_binomial_q_closed_forms_vs_generic_jet_932() {
-        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
 
         let y = 0.7_f64;
         let w = 1.3_f64;
@@ -966,15 +966,15 @@ mod tests {
         let mut gate = SpeedGate::open("BINOMIAL-Q-DISPATCH-932");
         let timing = paired_interleaved(
             15,
-            300_000,
+            5_000,
             0x9320_D15B,
-            |nudge| {
+            batched(64, |nudge| {
                 let q = q0 + nudge;
                 let (m1, m2, m3) = binomial_neglog_q_derivatives_logit_closed_form(y, w, q);
                 let m4 = binomial_neglog_q_fourth_derivative_logit_closed_form(y, w, q);
                 m1 + m2 + m3 + m4
-            },
-            |nudge| {
+            }),
+            batched(64, |nudge| {
                 let q = q0 + nudge;
                 let (jet_mu, jet_d1, jet_d2, jet_d3, jet_d4) = logit_jet(q);
                 let (m1, m2, m3) =
@@ -983,7 +983,7 @@ mod tests {
                     y, w, jet_mu, jet_d1, jet_d2, jet_d3, jet_d4,
                 );
                 m1 + m2 + m3 + m4
-            },
+            }),
         );
         gate.faster("link=logit", &timing, "production_closed", "generic_jet");
         gate.finish();
@@ -996,16 +996,12 @@ mod tests {
     /// are jet lowerings of the same expression — there is no hand-vs-jet
     /// claim here, and at K=1 the skipped fourth-order seeding is a
     /// sub-nanosecond effect that timing noise can invert — so this cell
-    /// asserts the prune's real contracts (bit-identity on every read
-    /// channel, and the twin not being a measurable pessimization beyond
-    /// noise) and reports the ratio as a DIAGNOSTIC token
-    /// (`tower4_over_tower3`), deliberately NOT the fail-closed
-    /// `hand_over_production` token.
+    /// asserts the prune's real contracts: bit-identity on every read
+    /// channel, and — since it does strictly less arithmetic — being the
+    /// faster arm under the shared [`SpeedGate`].
     #[test]
     fn release_measure_binomial_q_tower3_prune_vs_tower4_932() {
-        // `std::time::Instant` was imported here for the local `best_ns`; the
-        // paired harness owns the clock now.
-        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
 
         let y = 0.7_f64;
         let w = 1.3_f64;
@@ -1053,18 +1049,18 @@ mod tests {
         let mut gate = SpeedGate::open("BINOMIAL-Q-PRUNE-932");
         let timing = paired_interleaved(
             15,
-            300_000,
+            5_000,
             0x9320_09E1,
-            |nudge| {
+            batched(64, |nudge| {
                 let (jet_mu, jet_d1, jet_d2, jet_d3, _) = logit_jet(q0 + nudge);
                 let (m1, m2, m3) =
                     binomial_neglog_q_derivatives_from_jet(y, w, jet_mu, jet_d1, jet_d2, jet_d3);
                 m1 + m2 + m3
-            },
-            |nudge| {
+            }),
+            batched(64, |nudge| {
                 let (m1, m2, m3) = tower4_m123(q0 + nudge);
                 m1 + m2 + m3
-            },
+            }),
         );
         gate.faster("m1..m3", &timing, "production_tower3", "full_tower4");
         gate.finish();

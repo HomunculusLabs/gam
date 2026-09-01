@@ -460,7 +460,7 @@ mod oracle_tests {
     /// (`generic_tower_ns / faa_top_ns`); this is not a strongest-hand gate.
     #[test]
     fn release_measure_binomial_q_coeffs_faa_top_vs_generic_tower_932() {
-        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
 
         // Parity pins run in every build; the cells below are recorded only in
         // the release profile (`SpeedGate::open` documents why).
@@ -489,10 +489,10 @@ mod oracle_tests {
             if let Some(gate) = gate.as_mut() {
                 let timing = paired_interleaved(
                     15,
-                    200_000,
+                    3_000,
                     0x9320_0002,
-                    |nudge| hessian_coeff_fromobjective_q_terms(m1, m2, q_a + nudge, q_b, q_ab),
-                    |nudge| hessian_via_tower(m1, m2, q_a + nudge, q_b, q_ab),
+                    batched(64, |nudge| hessian_coeff_fromobjective_q_terms(m1, m2, q_a + nudge, q_b, q_ab)),
+                    batched(64, |nudge| hessian_via_tower(m1, m2, q_a + nudge, q_b, q_ab)),
                 );
                 // At order 2 the top-coefficient extraction and the tiny
                 // `Tower2<2>` are the same handful of fused multiplies -- measured
@@ -522,16 +522,16 @@ mod oracle_tests {
             if let Some(gate) = gate.as_mut() {
                 let timing = paired_interleaved(
                     15,
-                    60_000,
+                    1_000,
                     0x9320_0003,
-                    |nudge| {
+                    batched(64, |nudge| {
                         directionalhessian_coeff_fromobjective_q_terms(
                             m1, m2, m3, dq, q_a + nudge, q_b, q_ab, dq_a, dq_b, dq_ab,
                         )
-                    },
-                    |nudge| {
+                    }),
+                    batched(64, |nudge| {
                         tower_order3(m1, m2, m3, dq, q_a + nudge, q_b, q_ab, dq_a, dq_b, dq_ab)
-                    },
+                    }),
                 );
                 gate.faster("order=3", &timing, "production_faatop", "generic_tower");
             }
@@ -572,20 +572,20 @@ mod oracle_tests {
             if let Some(gate) = gate.as_mut() {
                 let timing = paired_interleaved(
                     15,
-                    20_000,
+                    400,
                     0x9320_0004,
-                    |nudge| {
+                    batched(64, |nudge| {
                         second_directionalhessian_coeff_fromobjective_q_terms(
                             m1, m2, m3, m4, dq_u, dqv, d2q_uv, q_a + nudge, q_b, q_ab, dq_a_u,
                             dq_av, dq_b_u, dq_bv, d2q_a_uv, d2q_b_uv, dq_ab_u, dq_abv, d2q_ab_uv,
                         )
-                    },
-                    |nudge| {
+                    }),
+                    batched(64, |nudge| {
                         tower_order4(
                             m1, m2, m3, m4, dq_u, dqv, d2q_uv, q_a + nudge, q_b, q_ab, dq_a_u,
                             dq_av, dq_b_u, dq_bv, d2q_a_uv, d2q_b_uv, dq_ab_u, dq_abv, d2q_ab_uv,
                         )
-                    },
+                    }),
                 );
                 gate.faster("order=4", &timing, "production_faatop", "generic_tower");
             }
@@ -642,7 +642,7 @@ mod oracle_tests {
                 + m1 * d2q_ab_uv
         }
 
-        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
 
         let mut next = stream(0x9320_0bad);
         let input = std::array::from_fn(|_| next());
@@ -655,22 +655,24 @@ mod oracle_tests {
         }
         let mut gate = SpeedGate::open("BINOMIAL-Q-HAND-932");
 
-        // This gate ALREADY interleaved (median-of-7 with alternating order), so
-        // the migration is not about ordering here -- it is about what the old
-        // helper could not report. `paired_medians` returned two medians and
-        // nothing else, so a verdict carried no way to tell whether its margin
-        // was larger than the measurement could resolve. `wins_fraction` and
-        // `ratio_resolution` are exactly that missing half, and this cell is one
-        // of the three release-gate failures where it decides the reading.
-        let timing = paired_interleaved(15, 60_000, 0x9320_0BAD, |nudge| {
-            let mut x = input;
-            x[0] += nudge;
-            production_order4(x)
-        }, |nudge| {
-            let mut x = input;
-            x[0] += nudge;
-            hand_order4(x)
-        });
+        // One arm call evaluates 64 inputs: a single order-4 channel is ~20 ns,
+        // of the same order as a closure call, and the harness must not be
+        // what is measured.
+        let timing = paired_interleaved(
+            15,
+            1_000,
+            0x9320_0BAD,
+            batched(64, |nudge| {
+                let mut x = input;
+                x[0] += nudge;
+                production_order4(x)
+            }),
+            batched(64, |nudge| {
+                let mut x = input;
+                x[0] += nudge;
+                hand_order4(x)
+            }),
+        );
         gate.faster("order=4", &timing, "production", "strongest_hand");
         gate.finish();
     }

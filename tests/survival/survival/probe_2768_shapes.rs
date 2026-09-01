@@ -125,8 +125,8 @@ fn probe_2768_which_shapes_converge() {
     init_parallelism();
     #[cfg(target_os = "macos")]
     gam::gpu::configure_global_policy(gam::gpu::GpuPolicy::Off);
-    let logslope = "smooth(bmi) + smooth(hba1c)";
-    let formula = format!("Surv(entry, exit, event) ~ {logslope}");
+    let slope = "smooth(bmi) + smooth(hba1c)";
+    let formula = format!("Surv(entry, exit, event) ~ {slope}");
     let mut any = false;
     for strength in [-0.10_f64, -0.45] {
         let (data, bmi_z) = build(strength, 0x2768_0BEE_F00D_0001 ^ strength.to_bits());
@@ -134,16 +134,16 @@ fn probe_2768_which_shapes_converge() {
             let cfg = FitConfig {
                 survival_likelihood: Some("marginal-slope".to_string()),
                 z_column: Some(z_column.to_string()),
-                logslope_formula: Some(logslope.to_string()),
+                slope_formula: Some(slope.to_string()),
                 ..FitConfig::default()
             };
             match fit_from_formula(&formula, &data, &cfg) {
                 Ok(FitResult::SurvivalMarginalSlope(fit)) => {
                     any = true;
                     let marginal_eta = fit.marginal_design.design.dot(&fit.fit.blocks[1].beta);
-                    let logslope_eta = fit.logslope_design.design.dot(&fit.fit.blocks[2].beta);
+                    let slope_eta = fit.slope_design.design.dot(&fit.fit.blocks[2].beta);
                     let mean_slope = fit.baseline_slope
-                        + logslope_eta.iter().sum::<f64>() / logslope_eta.len() as f64;
+                        + slope_eta.iter().sum::<f64>() / slope_eta.len() as f64;
                     let cal = match fit.latent_z_calibrations.first() {
                         Some(gam::families::bms::LatentMeasureCalibration::None) => "none",
                         Some(gam::families::bms::LatentMeasureCalibration::RankInverseNormal(_)) => {

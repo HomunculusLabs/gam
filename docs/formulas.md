@@ -343,11 +343,11 @@ path through a distinct `type=`:
   overrides the convention in either direction.
   On the coupled marginal-slope families the outer *search* over `ℓ` is
   switched off — a design-moving dial on covariates shared by the marginal and
-  log-slope surfaces lets the search trade one against the other into a
+  slope surfaces lets the search trade one against the other into a
   separation-scale runaway — so there `ℓ` is fixed at the value the response
   **screen** picks before the fit rather than refined during it. It is still
   data-chosen, not a geometry default: the marginal surface's range is screened
-  against the response and the log-slope surface's against the conditional
+  against the response and the slope surface's against the conditional
   covariance of the response with the latent driver, which is the function that
   surface actually carries.
 - `curv(...)` (aliases `curvature`, `constant_curvature`, `mkappa`) —

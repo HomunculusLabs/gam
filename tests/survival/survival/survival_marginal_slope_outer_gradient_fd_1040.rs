@@ -133,7 +133,7 @@ fn run_basis(basis_term: &str) {
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("prs_z".to_string()),
-        logslope_formula: Some(basis_term.to_string()),
+        slope_formula: Some(basis_term.to_string()),
         baseline_target: "linear".to_string(),
         // The marginal-slope baseline must certify before the n-block joint
         // spatial problem exists. Cap only that joint problem after its seed

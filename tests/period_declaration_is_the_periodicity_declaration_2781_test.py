@@ -59,7 +59,9 @@ def _cylinder() -> dict[str, Any]:
 
 
 def _mean(model: Any, frame: dict[str, Any]) -> Any:
-    return np.asarray(model.predict(frame, return_type="dict")["mean"], dtype=float)
+    return np.asarray(
+        model.predict(frame, return_type="dict")["posterior_mean"], dtype=float
+    )
 
 
 @pytest.mark.parametrize(

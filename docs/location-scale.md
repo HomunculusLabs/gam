@@ -59,7 +59,7 @@ gamfit.fit(
 )
 ```
 
-`--predict-noise` cannot be combined with `--logslope-formula` /
+`--predict-noise` cannot be combined with `--slope-formula` /
 `--z-column`, with `--transformation-normal`, or with `--firth`.
 
 ## Deviance and log-likelihood

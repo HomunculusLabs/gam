@@ -134,9 +134,9 @@ pub struct BernoulliMarginalSlopeTermSpec {
     pub z: Array1<f64>,
     pub base_link: InverseLink,
     pub marginalspec: TermCollectionSpec,
-    pub logslopespec: TermCollectionSpec,
+    pub slopespec: TermCollectionSpec,
     pub marginal_offset: Array1<f64>,
-    pub logslope_offset: Array1<f64>,
+    pub slope_offset: Array1<f64>,
     /// GaussianShift frailty on the final probit index: U ~ N(0, σ²) added
     /// to the scalar argument of Φ.  This is exact because the sextic
     /// microcell kernel is preserved — the Gaussian-decoupling identity
@@ -166,11 +166,11 @@ pub struct BernoulliMarginalSlopeTermSpec {
 pub struct BernoulliMarginalSlopeFitResult {
     pub fit: UnifiedFitResult,
     pub marginalspec_resolved: TermCollectionSpec,
-    pub logslopespec_resolved: TermCollectionSpec,
+    pub slopespec_resolved: TermCollectionSpec,
     pub marginal_design: TermCollectionDesign,
-    pub logslope_design: TermCollectionDesign,
+    pub slope_design: TermCollectionDesign,
     pub baseline_marginal: f64,
-    pub baseline_logslope: f64,
+    pub baseline_slope: f64,
     pub z_normalization: LatentZNormalization,
     pub latent_measure: LatentMeasureKind,
     pub score_warp_runtime: Option<DeviationRuntime>,
@@ -2868,7 +2868,7 @@ pub(crate) use install_flex::FlexCompileOutcome;
 
 // pub(crate) re-exports for internal callers:
 pub(crate) use block_specs::push_deviation_aux_blockspecs;
-pub use block_specs::{BmsLogslopeJacobian, BmsMarginalJacobian};
+pub use block_specs::{BmsSlopeJacobian, BmsMarginalJacobian};
 pub(crate) use family::{
     BernoulliMarginalLinkMap, bernoulli_marginal_link_map,
     build_link_deviation_block_from_knots_design_seed_and_weights,

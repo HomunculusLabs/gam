@@ -222,10 +222,20 @@ impl CtnKappaFixture {
         .expect("transformation exact geometry")
     }
 
+    /// One criterion evaluation at `theta`, from `anchor` — the coefficient
+    /// mode the probe restarts from. `fit_transformation_normal` freezes the
+    /// mode selected at the first derivative-bearing evaluation as the branch
+    /// anchor and restarts every later trial from it, because the finite-
+    /// support criterion has several coefficient modes and a cold start at
+    /// `ψ + h` can land on a different one than a cold start at `ψ`: the
+    /// difference quotient then measures a mode switch, not a derivative. The
+    /// gate therefore anchors every probe of one ladder to the mode converged
+    /// at the ladder's base point, exactly as the optimizer's branch does.
     fn evaluate(
         &self,
         theta: &Array1<f64>,
         options: &BlockwiseFitOptions,
+        anchor: Option<&CustomFamilyWarmStart>,
         eval_mode: gam_problem::EvalMode,
     ) -> CustomFamilyJointHyperModeSelection {
         let geometry = self.geometry_at(theta);
@@ -236,20 +246,29 @@ impl CtnKappaFixture {
             options,
             &rho,
             Arc::clone(&geometry.hyper_layout),
-            &[None],
+            &[anchor.cloned()],
             eval_mode,
         )
         .expect("transformation exact joint evaluation")
     }
-}
 
-/// Inner solve far tighter than any gradient gap the oracle resolves, so the
-/// differenced criterion is the criterion.
-fn fd_gate_options() -> BlockwiseFitOptions {
-    BlockwiseFitOptions {
-        inner_tol: 1e-10,
-        compute_covariance: false,
-        ..BlockwiseFitOptions::default()
+    /// The inner cycle budget `fit_transformation_normal` scopes to this
+    /// tensor width, so a probe converges under the same cap production does.
+    fn options(&self) -> BlockwiseFitOptions {
+        let geometry = self.geometry_at(&Array1::<f64>::zeros(self.rho_dim + 1));
+        let realized_p_total = geometry.family.p_total();
+        let ctn_inner_cap = CTN_INNER_MAX_CYCLES_BASE
+            .saturating_add(realized_p_total.saturating_mul(CTN_INNER_MAX_CYCLES_PER_DIM))
+            .min(CTN_INNER_MAX_CYCLES_CEILING);
+        let defaults = BlockwiseFitOptions::default();
+        BlockwiseFitOptions {
+            // Far tighter than any gradient gap the oracle resolves, so the
+            // differenced criterion is the criterion.
+            inner_tol: 1e-10,
+            inner_max_cycles: defaults.inner_max_cycles.min(ctn_inner_cap),
+            compute_covariance: false,
+            ..defaults
+        }
     }
 }
 
@@ -260,7 +279,7 @@ struct CtnKappaFdReport {
 }
 
 fn ctn_kappa_fd_driver(label: &str, fixture: &CtnKappaFixture) -> CtnKappaFdReport {
-    let options = fd_gate_options();
+    let options = fixture.options();
     let theta_dim = fixture.rho_dim + 1;
     // Probe grid: the production seed (penalty-scale ρ, ψ = 0 for the
     // shipped `length_scale=1`), a shorter and a longer kernel, and a
@@ -275,14 +294,14 @@ fn ctn_kappa_fd_driver(label: &str, fixture: &CtnKappaFixture) -> CtnKappaFdRepo
     let mut theta_seed = Array1::<f64>::zeros(theta_dim);
     theta_seed.slice_mut(s![..fixture.rho_dim]).assign(&rho_seed);
     let mut theta_short = theta_seed.clone();
-    theta_short[fixture.rho_dim] = 0.6;
+    theta_short[fixture.rho_dim] = 0.3;
     let mut theta_long = theta_seed.clone();
-    theta_long[fixture.rho_dim] = -0.5;
+    theta_long[fixture.rho_dim] = -0.3;
     let mut theta_smooth = theta_seed.clone();
     for j in 0..fixture.rho_dim {
         theta_smooth[j] = rho_seed[j] + 2.0;
     }
-    theta_smooth[fixture.rho_dim] = 0.25;
+    theta_smooth[fixture.rho_dim] = 0.15;
     let probes: [(&str, &Array1<f64>); 4] = [
         ("seed", &theta_seed),
         ("short_kernel", &theta_short),
@@ -296,13 +315,17 @@ fn ctn_kappa_fd_driver(label: &str, fixture: &CtnKappaFixture) -> CtnKappaFdRepo
     let mut violations = Vec::new();
     let mut worst_psi_rel = 0.0_f64;
     for (probe, theta) in probes {
-        let analytic = fixture.evaluate(theta, &options, gam_problem::EvalMode::ValueAndGradient);
+        // Cold start ONCE per probe, then anchor the whole ladder to the mode
+        // that evaluation converged to.
+        let analytic =
+            fixture.evaluate(theta, &options, None, gam_problem::EvalMode::ValueAndGradient);
+        let anchor = analytic.result.warm_start.clone();
         let cost_an = analytic.result.objective;
         let grad_an = analytic.result.gradient.clone();
         assert!(cost_an.is_finite(), "{label} {probe}: analytic cost not finite");
         assert_eq!(grad_an.len(), theta_dim, "{label} {probe}: gradient dimension");
         let cost_value_path = fixture
-            .evaluate(theta, &options, gam_problem::EvalMode::ValueOnly)
+            .evaluate(theta, &options, Some(&anchor), gam_problem::EvalMode::ValueOnly)
             .result
             .objective;
         eprintln!(
@@ -316,7 +339,12 @@ fn ctn_kappa_fd_driver(label: &str, fixture: &CtnKappaFixture) -> CtnKappaFdRepo
                     let mut probe_theta = theta.clone();
                     probe_theta[j] += t;
                     fixture
-                        .evaluate(&probe_theta, &options, gam_problem::EvalMode::ValueOnly)
+                        .evaluate(
+                            &probe_theta,
+                            &options,
+                            Some(&anchor),
+                            gam_problem::EvalMode::ValueOnly,
+                        )
                         .result
                         .objective
                 },

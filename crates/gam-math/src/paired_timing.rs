@@ -555,6 +555,26 @@ impl Drop for SpeedGate {
     }
 }
 
+/// Make one arm call evaluate `rows` rows, so the arm is large relative to the
+/// harness's per-call cost (see the module documentation: a single-row arm of a
+/// few tens of nanoseconds lets a few nanoseconds of closure-inlining asymmetry
+/// decide a small margin, and a 43 ns arm changed sign under batching).
+///
+/// The batch is a feedback chain: row `i + 1` sees a perturbation derived from
+/// the fold of rows `0..=i`, so no row can be hoisted out of the batch or
+/// vectorised across it, exactly as the harness chains its own iterations.
+/// The returned closure has the `FnMut(f64) -> f64` shape the harness times.
+pub fn batched<F: FnMut(f64) -> f64>(rows: usize, mut arm: F) -> impl FnMut(f64) -> f64 {
+    assert!(rows > 0, "a batched arm needs at least one row");
+    move |nudge| {
+        let mut fold = 0.0_f64;
+        for _ in 0..rows {
+            fold += arm(nudge + fold * 1e-18);
+        }
+        fold
+    }
+}
+
 /// Nanoseconds per iteration for one arm of one repetition.
 ///
 /// The `checksum * 1e-18` perturbation is a feedback barrier, not a nudge: it

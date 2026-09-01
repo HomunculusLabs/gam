@@ -36,7 +36,7 @@ impl SurvivalMarginalSlopeFamily {
         // is time-constant, three when it varies. Reading a single `primary[3]`
         // against `coefficient_design()` assembled the score of a DIFFERENT
         // model on a varying slope (#2765).
-        for &(slope_primary, design) in self.logslope_layout.primary_channels().as_slice() {
+        for &(slope_primary, design) in self.slope_layout.primary_channels().as_slice() {
             design.axpy_row_into(row, primary[slope_primary], &mut score_g.view_mut())?;
         }
         Ok(())
@@ -86,7 +86,7 @@ impl SurvivalMarginalSlopeFamily {
         }
         // One rank-1 update per follow-up channel; see
         // `accumulate_score_blockwise` (#2765).
-        for &(slope_primary, design) in self.logslope_layout.primary_channels().as_slice() {
+        for &(slope_primary, design) in self.slope_layout.primary_channels().as_slice() {
             design.axpy_row_into(row, primary[slope_primary], &mut score_g.view_mut())?;
         }
         Ok(())
@@ -237,7 +237,7 @@ impl SurvivalMarginalSlopeFamily {
         // block path with lifted Jacobians below.
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         let p_h = slices.score_warp.as_ref().map_or(0, |range| range.len());
         let p_w = slices.link_dev.as_ref().map_or(0, |range| range.len());
         let p_i = slices.influence.as_ref().map_or(0, |range| range.len());
@@ -430,7 +430,7 @@ impl SurvivalMarginalSlopeFamily {
             .slice_mut(s![slices.marginal.clone()])
             .assign(&score_m);
         score_psi
-            .slice_mut(s![slices.logslope.clone()])
+            .slice_mut(s![slices.slope.clone()])
             .assign(&score_g);
         if let Some(range) = slices.score_warp.as_ref() {
             score_psi.slice_mut(s![range.clone()]).assign(&score_h);
@@ -525,7 +525,7 @@ impl SurvivalMarginalSlopeFamily {
 
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         let p_h = slices.score_warp.as_ref().map_or(0, |range| range.len());
         let p_w = slices.link_dev.as_ref().map_or(0, |range| range.len());
         let p_i = slices.influence.as_ref().map_or(0, |range| range.len());
@@ -608,7 +608,7 @@ impl SurvivalMarginalSlopeFamily {
                     acc.objective_psi += w * f_pi.dot(&dir);
 
                     // score_psi += w * (f_pi · loading) * psi_row, routed to
-                    // the marginal or logslope block depending on axis.
+                    // the marginal or slope block depending on axis.
                     let s1 = w * f_pi.dot(&axis.loading);
                     match axis.block_idx {
                         1 => acc.score_m.scaled_add(s1, &psi_row),
@@ -671,7 +671,7 @@ impl SurvivalMarginalSlopeFamily {
                 .slice_mut(s![slices.marginal.clone()])
                 .assign(&acc.score_m);
             score_psi
-                .slice_mut(s![slices.logslope.clone()])
+                .slice_mut(s![slices.slope.clone()])
                 .assign(&acc.score_g);
             if let Some(range) = slices.score_warp.as_ref() {
                 score_psi.slice_mut(s![range.clone()]).assign(&acc.score_h);
@@ -769,7 +769,7 @@ impl SurvivalMarginalSlopeFamily {
 
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         let p_h = slices.score_warp.as_ref().map_or(0, |range| range.len());
         let p_w = slices.link_dev.as_ref().map_or(0, |range| range.len());
         let p_i = slices.influence.as_ref().map_or(0, |range| range.len());
@@ -1173,7 +1173,7 @@ impl SurvivalMarginalSlopeFamily {
             .slice_mut(s![slices.marginal.clone()])
             .assign(&score_m);
         score_psi_psi
-            .slice_mut(s![slices.logslope.clone()])
+            .slice_mut(s![slices.slope.clone()])
             .assign(&score_g);
         if let Some(range) = slices.score_warp.as_ref() {
             score_psi_psi.slice_mut(s![range.clone()]).assign(&score_h);
@@ -1254,7 +1254,7 @@ impl SurvivalMarginalSlopeFamily {
         };
         let d_beta_block = match block_idx {
             1 => d_beta_flat.slice(s![slices.marginal.clone()]),
-            _ => d_beta_flat.slice(s![slices.logslope.clone()]),
+            _ => d_beta_flat.slice(s![slices.slope.clone()]),
         };
 
         let timewiggle_active = self.flex_timewiggle_active();
@@ -1262,7 +1262,7 @@ impl SurvivalMarginalSlopeFamily {
 
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         let p_h = slices.score_warp.as_ref().map_or(0, |range| range.len());
         let p_w = slices.link_dev.as_ref().map_or(0, |range| range.len());
         let p_i = slices.influence.as_ref().map_or(0, |range| range.len());

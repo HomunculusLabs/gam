@@ -383,7 +383,7 @@ pub fn build_termspec(
     // Generic ingestion deliberately preserves missing cells because it runs
     // before a formula exists. This is the first layer that knows the complete
     // set of columns consumed by term construction (including `by=` and nested
-    // log-slope surfaces), so completeness is enforced here and nowhere wider.
+    // slope surfaces), so completeness is enforced here and nowhere wider.
     let mut consumed_columns = BTreeSet::new();
     parsed_term_column_names(terms, &mut consumed_columns);
     for name in consumed_columns {
@@ -717,9 +717,9 @@ pub fn build_termspec(
             | ParsedTerm::SurvivalConfig { .. } => {
                 // Consumed at formula level, not design terms.
             }
-            ParsedTerm::LogSlopeSurface { .. } => {
+            ParsedTerm::SlopeSurface { .. } => {
                 return Err(TermBuilderError::malformed_formula(
-                    "logslope(...) declarations must be resolved by the marginal-slope formula path before building a term spec",
+                    "slope(...) declarations must be resolved by the marginal-slope formula path before building a term spec",
                 ));
             }
             ParsedTerm::Interaction {

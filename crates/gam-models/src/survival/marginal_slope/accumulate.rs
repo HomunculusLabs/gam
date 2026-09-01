@@ -33,11 +33,11 @@ impl SurvivalMarginalSlopeFamily {
                     primary_gradient[q_idx] * dq[coeff_idx];
             }
         }
-        for &(primary, design) in self.logslope_layout.primary_channels().as_slice() {
+        for &(primary, design) in self.slope_layout.primary_channels().as_slice() {
             design.axpy_row_into(
                 row,
                 -primary_gradient[primary],
-                &mut joint_gradient.slice_mut(s![slices.logslope.clone()]),
+                &mut joint_gradient.slice_mut(s![slices.slope.clone()]),
             )?;
         }
         Ok(())
@@ -70,11 +70,11 @@ impl SurvivalMarginalSlopeFamily {
                     primary_gradient[q_idx] * dq[coeff_idx];
             }
         }
-        for &(primary, design) in self.logslope_layout.primary_channels().as_slice() {
+        for &(primary, design) in self.slope_layout.primary_channels().as_slice() {
             design.axpy_row_into(
                 row,
                 -primary_gradient[primary],
-                &mut joint_gradient.slice_mut(s![slices.logslope.clone()]),
+                &mut joint_gradient.slice_mut(s![slices.slope.clone()]),
             )?;
         }
         Ok(())
@@ -93,13 +93,13 @@ impl SurvivalMarginalSlopeFamily {
         // directly into `joint_hessian` as it is computed, instead of building
         // six fresh `Array2` per row in `dynamic_q_core_hessian_blocks` and
         // then copying them in. This removes the per-row heap traffic (6×p²
-        // allocations + zero-fills + the logslope-row `to_owned`) and the
+        // allocations + zero-fills + the slope-row `to_owned`) and the
         // extra read/write pass over the temporaries. Each cell receives the
         // identical `value` it did before (the temporaries were written with
         // `=` then added here), so the accumulated result is bit-identical.
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
 
         let dq_time = [&q_geom.dq0_time, &q_geom.dq1_time, &q_geom.dqd1_time];
         let dq_marginal = [
@@ -122,11 +122,11 @@ impl SurvivalMarginalSlopeFamily {
             &q_geom.d2q1_time_marginal,
             &q_geom.d2qd1_time_marginal,
         ];
-        // One design row per log-slope follow-up channel: exactly one when the
+        // One design row per slope follow-up channel: exactly one when the
         // slope is time-constant, three when it varies (gam#2765). Every
-        // log-slope contraction below is a loop over these, so the static case
+        // slope contraction below is a loop over these, so the static case
         // still does exactly one rank-1 update per row.
-        let slope_channels = self.logslope_layout.primary_channels();
+        let slope_channels = self.slope_layout.primary_channels();
         let slope_designs = slope_channels.as_slice();
         let slope_chunks = slope_designs
             .iter()
@@ -134,13 +134,13 @@ impl SurvivalMarginalSlopeFamily {
                 design
                     .try_row_chunk(row..row + 1)
                     .map(|chunk| (primary, chunk))
-                    .map_err(|e| format!("accumulate_dynamic_q_core_hessian logslope: {e}"))
+                    .map_err(|e| format!("accumulate_dynamic_q_core_hessian slope: {e}"))
             })
             .collect::<Result<Vec<_>, String>>()?;
 
         let t0 = slices.time.start;
         let m0 = slices.marginal.start;
-        let g0 = slices.logslope.start;
+        let g0 = slices.slope.start;
 
         // time × time
         for a in 0..p_t {
@@ -169,7 +169,7 @@ impl SurvivalMarginalSlopeFamily {
                 joint_hessian[[m0 + a, m0 + b]] += value;
             }
         }
-        // logslope × logslope (rank-1 per channel pair: h_uv · x_u x_vᵀ); zero
+        // slope × slope (rank-1 per channel pair: h_uv · x_u x_vᵀ); zero
         // cells skipped exactly as the prior `Array2::zeros`-backed block left
         // them zero.
         for (left_primary, left_chunk) in &slope_chunks {
@@ -207,7 +207,7 @@ impl SurvivalMarginalSlopeFamily {
                 joint_hessian[[m0 + b, t0 + a]] += value;
             }
         }
-        // time × logslope (symmetric scatter)
+        // time × slope (symmetric scatter)
         for (slope_primary, slope_chunk) in &slope_chunks {
             let slope_row = slope_chunk.row(0);
             for a in 0..p_t {
@@ -223,7 +223,7 @@ impl SurvivalMarginalSlopeFamily {
                     }
                 }
             }
-            // marginal × logslope (symmetric scatter)
+            // marginal × slope (symmetric scatter)
             for a in 0..p_m {
                 let mut weight = 0.0;
                 for q_u in 0..3 {
@@ -248,7 +248,7 @@ impl SurvivalMarginalSlopeFamily {
         primary_gradient: ndarray::ArrayView1<'_, f64>,
         grad_time: &mut Array1<f64>,
         grad_marginal: &mut Array1<f64>,
-        grad_logslope: &mut Array1<f64>,
+        grad_slope: &mut Array1<f64>,
     ) -> Result<(), String> {
         let dq_time = [&q_geom.dq0_time, &q_geom.dq1_time, &q_geom.dqd1_time];
         let dq_marginal = [
@@ -266,11 +266,11 @@ impl SurvivalMarginalSlopeFamily {
                 grad_marginal[coeff_idx] -= primary_gradient[q_idx] * dq[coeff_idx];
             }
         }
-        for &(primary, design) in self.logslope_layout.primary_channels().as_slice() {
+        for &(primary, design) in self.slope_layout.primary_channels().as_slice() {
             design.axpy_row_into(
                 row,
                 -primary_gradient[primary],
-                &mut grad_logslope.view_mut(),
+                &mut grad_slope.view_mut(),
             )?;
         }
         Ok(())
@@ -284,7 +284,7 @@ impl SurvivalMarginalSlopeFamily {
         primary_hessian: ArrayView2<'_, f64>,
         hess_time: &mut Array2<f64>,
         hess_marginal: &mut Array2<f64>,
-        hess_logslope: &mut Array2<f64>,
+        hess_slope: &mut Array2<f64>,
     ) -> Result<(), String> {
         // Perf (#large-scale): accumulate the three diagonal block-Hessian
         // contributions directly into the caller's per-thread workspace
@@ -294,11 +294,11 @@ impl SurvivalMarginalSlopeFamily {
         // O(n·p²) heap allocation + zero-fill + a redundant add pass. The
         // arithmetic per cell is identical: the old path wrote `value` into a
         // zeroed local then added it here, so accumulating `value` directly is
-        // bit-identical. The logslope block skips zero cells exactly as before
+        // bit-identical. The slope block skips zero cells exactly as before
         // (adding the implicit zeros was a no-op).
         let p_t = hess_time.nrows();
         let p_m = hess_marginal.nrows();
-        let p_g = hess_logslope.nrows();
+        let p_g = hess_slope.nrows();
 
         let dq_time = [&q_geom.dq0_time, &q_geom.dq1_time, &q_geom.dqd1_time];
         let dq_marginal = [
@@ -316,7 +316,7 @@ impl SurvivalMarginalSlopeFamily {
             &q_geom.d2q1_marginal_marginal,
             &q_geom.d2qd1_marginal_marginal,
         ];
-        let slope_channels = self.logslope_layout.primary_channels();
+        let slope_channels = self.slope_layout.primary_channels();
         let slope_chunks = slope_channels
             .as_slice()
             .iter()
@@ -325,7 +325,7 @@ impl SurvivalMarginalSlopeFamily {
                     .try_row_chunk(row..row + 1)
                     .map(|chunk| (primary, chunk))
                     .map_err(|e| {
-                        format!("accumulate_dynamic_q_core_block_hessians logslope: {e}")
+                        format!("accumulate_dynamic_q_core_block_hessians slope: {e}")
                     })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -370,7 +370,7 @@ impl SurvivalMarginalSlopeFamily {
                     }
                     let row_scale = h_gg_scale * xa;
                     for b in 0..p_g {
-                        hess_logslope[[a, b]] += row_scale * right_row[b];
+                        hess_slope[[a, b]] += row_scale * right_row[b];
                     }
                 }
             }
@@ -393,7 +393,7 @@ impl SurvivalMarginalSlopeFamily {
             primary_gradient.slice(s![0..self.core_primary_dimension()]),
             &mut acc.grad_time,
             &mut acc.grad_marginal,
-            &mut acc.grad_logslope,
+            &mut acc.grad_slope,
         )?;
         self.accumulate_dynamic_q_core_block_hessians(
             row,
@@ -402,7 +402,7 @@ impl SurvivalMarginalSlopeFamily {
             primary_hessian.slice(s![0..self.core_primary_dimension(), 0..self.core_primary_dimension()]),
             &mut acc.hess_time,
             &mut acc.hess_marginal,
-            &mut acc.hess_logslope,
+            &mut acc.hess_slope,
         )?;
         if let (Some(primary_range), Some(gradient), Some(hessian)) = (
             primary.h.as_ref(),
@@ -489,20 +489,20 @@ impl SurvivalMarginalSlopeFamily {
             joint_hessian[[slices.marginal.start + coeff_idx, joint_idx]] += value;
             joint_hessian[[joint_idx, slices.marginal.start + coeff_idx]] += value;
         }
-        let logslope_chunk = self
-            .logslope_layout
+        let slope_chunk = self
+            .slope_layout
             .coefficient_design()
             .try_row_chunk(row..row + 1)
             .map_err(|e| {
-                format!("accumulate_identity_primary_cross_hessian logslope try_row_chunk: {e}")
+                format!("accumulate_identity_primary_cross_hessian slope try_row_chunk: {e}")
             })?;
-        let logslope_row = logslope_chunk.row(0);
-        let logslope_weight = core_hessian_column[3];
-        if logslope_weight != 0.0 {
-            for coeff_idx in 0..slices.logslope.len() {
-                let value = logslope_weight * logslope_row[coeff_idx];
-                joint_hessian[[slices.logslope.start + coeff_idx, joint_idx]] += value;
-                joint_hessian[[joint_idx, slices.logslope.start + coeff_idx]] += value;
+        let slope_row = slope_chunk.row(0);
+        let slope_weight = core_hessian_column[3];
+        if slope_weight != 0.0 {
+            for coeff_idx in 0..slices.slope.len() {
+                let value = slope_weight * slope_row[coeff_idx];
+                joint_hessian[[slices.slope.start + coeff_idx, joint_idx]] += value;
+                joint_hessian[[joint_idx, slices.slope.start + coeff_idx]] += value;
             }
         }
         Ok(())
@@ -561,21 +561,21 @@ impl SurvivalMarginalSlopeFamily {
             joint_hessian[[slices.marginal.start + coeff_idx, joint_idx]] += value;
             joint_hessian[[joint_idx, slices.marginal.start + coeff_idx]] += value;
         }
-        let logslope_weight = core_hessian_column[3] * scale;
-        if logslope_weight != 0.0 {
-            let logslope_chunk = self
-                .logslope_layout.coefficient_design()
+        let slope_weight = core_hessian_column[3] * scale;
+        if slope_weight != 0.0 {
+            let slope_chunk = self
+                .slope_layout.coefficient_design()
                 .try_row_chunk(row..row + 1)
                 .map_err(|e| {
                     format!(
-                        "accumulate_identity_primary_cross_hessian_scaled logslope try_row_chunk: {e}"
+                        "accumulate_identity_primary_cross_hessian_scaled slope try_row_chunk: {e}"
                     )
                 })?;
-            let logslope_row = logslope_chunk.row(0);
-            for coeff_idx in 0..slices.logslope.len() {
-                let value = logslope_weight * logslope_row[coeff_idx];
-                joint_hessian[[slices.logslope.start + coeff_idx, joint_idx]] += value;
-                joint_hessian[[joint_idx, slices.logslope.start + coeff_idx]] += value;
+            let slope_row = slope_chunk.row(0);
+            for coeff_idx in 0..slices.slope.len() {
+                let value = slope_weight * slope_row[coeff_idx];
+                joint_hessian[[slices.slope.start + coeff_idx, joint_idx]] += value;
+                joint_hessian[[joint_idx, slices.slope.start + coeff_idx]] += value;
             }
         }
         Ok(())
@@ -687,7 +687,7 @@ impl SurvivalMarginalSlopeFamily {
         // whose bases are themselves primary coordinates). It therefore projects
         // like a non-identity single-scalar channel: each γ-coefficient `i` acts
         // as a copy of the `o_infl` primary direction scaled by `Z̃[row,i]`, so
-        // its gradient and all cross-Hessians (vs core time/marginal/logslope and
+        // its gradient and all cross-Hessians (vs core time/marginal/slope and
         // vs the identity flex blocks) and its own diagonal are the `o_infl`
         // primary entries weighted by `Z̃[row,·]`.
         if let (Some(infl_primary), Some(infl_joint)) =
@@ -700,7 +700,7 @@ impl SurvivalMarginalSlopeFamily {
             let z_row = z_tilde.row(row);
             let core_col = primary_hessian.slice(s![0..self.core_primary_dimension(), infl_primary]);
             // Per-coefficient gradient + cross with core blocks (time/marginal/
-            // logslope), reusing the identity-channel core-cross helper with the
+            // slope), reusing the identity-channel core-cross helper with the
             // `o_infl` core Hessian column scaled by `Z̃[row, i]`.
             for i in 0..z_row.len() {
                 let z_i = z_row[i];

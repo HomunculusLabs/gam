@@ -42,10 +42,10 @@ pub struct MarginalSlopeDeviationRouting {
 
 pub fn route_marginal_slope_deviation_blocks(
     main_linkwiggle: Option<&LinkWiggleFormulaSpec>,
-    logslope_linkwiggle: Option<&LinkWiggleFormulaSpec>,
+    slope_linkwiggle: Option<&LinkWiggleFormulaSpec>,
 ) -> Result<MarginalSlopeDeviationRouting, String> {
     Ok(MarginalSlopeDeviationRouting {
-        score_warp: logslope_linkwiggle
+        score_warp: slope_linkwiggle
             .map(deviation_block_config_from_formula_linkwiggle)
             .transpose()?,
         link_dev: main_linkwiggle

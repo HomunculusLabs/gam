@@ -353,7 +353,7 @@ impl SlopeRowGeometry<DYNAMIC_SLOPE_PRIMARIES> for DynamicSlopeGeometry {
 }
 
 
-/// Run a block in whichever primary frame the family's log-slope layout selects.
+/// Run a block in whichever primary frame the family's slope layout selects.
 ///
 /// The two frames have different primary counts, so a value that still carries
 /// `P` cannot cross this boundary — the block must reduce to a frame-free type
@@ -635,7 +635,7 @@ mod tests {
         let offset = array![0.125, -0.25];
         let beta = array![3.0, -1.5];
 
-        let static_layout = LogslopeTopology::shared()
+        let static_layout = SlopeTopology::shared()
             .materialize_identity(exit.clone(), &offset)
             .expect("shared layout");
         assert!(!static_layout.is_follow_up_varying());
@@ -673,7 +673,7 @@ mod tests {
     #[test]
     fn per_score_layout_refuses_a_follow_up_margin_2765() {
         let raw = array![[2.0, 3.0], [7.0, 11.0]];
-        let layout = LogslopeTopology::per_score(vec![0..1, 1..2], 2)
+        let layout = SlopeTopology::per_score(vec![0..1, 1..2], 2)
             .expect("per-score topology")
             .materialize_identity(DesignMatrix::from(raw.clone()), &array![0.0, 0.0])
             .expect("per-score layout");

@@ -98,7 +98,7 @@ fn the_screen_walk_and_the_search_window_stop_at_the_same_wall_2761() {
     //
     // That reconciliation holds only while something else keeps searching past
     // the stopping rule. On a term whose ell dial is FROZEN -- the BMS
-    // marginal/log-slope pair, or any `learn_length_scale=false` -- nothing
+    // marginal/slope pair, or any `learn_length_scale=false` -- nothing
     // does, and the stopping rule becomes the wall. So there is one wall now,
     // read from one definition, and this pins that they agree exactly.
     let data = chart(1.0);

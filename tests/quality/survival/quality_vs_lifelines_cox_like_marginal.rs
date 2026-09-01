@@ -25,10 +25,10 @@
 //! gam's survival link is `S(t | z) = Φ(−η)`,
 //!   η = q(t)·c(g) + (probit_scale · g) · z_std,
 //! where `z` is the modeled covariate (here EJECTION_FRACTION), `g` is the per-row
-//! log-slope (`baseline_slope + logslope_design·β_logslope`, with
-//! `logslope = s(age, bs='tp', k=6)` — an age-modulated EF effect; the z column
+//! slope (`baseline_slope + slope_design·β_slope`, with
+//! `slope = s(age, bs='tp', k=6)` — an age-modulated EF effect; the z column
 //! itself is structurally reserved as the latent score and cannot appear in the
-//! logslope surface), and SEX + AGE enter the marginal block. The cumulative
+//! slope surface), and SEX + AGE enter the marginal block. The cumulative
 //! hazard is `Λ = −log Φ(−η)`, strictly increasing
 //! in η. For proportional-hazards risk **ranking** the time term is a common
 //! monotone factor across subjects, so we evaluate η at the time anchor q(t)=0:
@@ -36,7 +36,7 @@
 //! cumulative hazard ⇒ higher predicted risk. We reconstruct η with the *public*
 //! `survival_marginal_slope_vector_eta`, the exact routine the inner likelihood
 //! and saved predictor call, so the test-row scores are self-consistent with the
-//! trained fit (no hand-rederived offsets). The logslope design is rebuilt for
+//! trained fit (no hand-rederived offsets). The slope design is rebuilt for
 //! each held-out AGE from the frozen spec, so test rows are scored by the trained
 //! coefficients exactly as a deployed predictor would.
 //!
@@ -238,17 +238,17 @@ fn gam_marginal_slope_heldout_concordance_matches_or_beats_lifelines_coxph() {
 
     // ---- fit gam on TRAIN rows only: survival marginal-slope --------------
     // Right-censored shorthand Surv(time, event); SEX + AGE in the marginal
-    // block; EJECTION_FRACTION is the latent score `z`. The log-slope surface
+    // block; EJECTION_FRACTION is the latent score `z`. The slope surface
     // is a smooth of AGE — an age-modulated EF effect. The z column itself is
-    // structurally excluded from logslope_formula (the model reserves it as
+    // structurally excluded from slope_formula (the model reserves it as
     // the latent score; nonlinearity IN z is the score-warp channel, and a
-    // g(z)·z term would alias it — the exact marginal/logslope coupling
+    // g(z)·z term would alias it — the exact marginal/slope coupling
     // degeneracy of gam#979). baseline_target="linear" is the marginal-slope
     // baseline; frailty=None ⇒ probit_scale = 1.
     let cfg = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("ejection_fraction".to_string()),
-        logslope_formula: Some("s(age, bs='tp', k=4)".to_string()),
+        slope_formula: Some("s(age, bs='tp', k=4)".to_string()),
         baseline_target: "linear".to_string(),
         ..FitConfig::default()
     };
@@ -271,17 +271,17 @@ fn gam_marginal_slope_heldout_concordance_matches_or_beats_lifelines_coxph() {
     );
     // Fit existence is the sealed convergence proof (SPEC 20).
 
-    // Block layout is [time, marginal, logslope, (score-warp), (link-dev)].
+    // Block layout is [time, marginal, slope, (score-warp), (link-dev)].
     assert!(
         fit.fit.blocks.len() >= 3,
-        "expected >=3 coefficient blocks [time, marginal, logslope], got {}",
+        "expected >=3 coefficient blocks [time, marginal, slope], got {}",
         fit.fit.blocks.len()
     );
-    let beta_logslope = fit.fit.blocks[2].beta.clone();
+    let beta_slope = fit.fit.blocks[2].beta.clone();
     assert_eq!(
-        beta_logslope.len(),
-        fit.logslope_design.design.ncols(),
-        "logslope β width must match the resolved logslope design"
+        beta_slope.len(),
+        fit.slope_design.design.ncols(),
+        "slope β width must match the resolved slope design"
     );
 
     // probit_scale (= 1 with no frailty) and the marginal-preserving score
@@ -303,22 +303,22 @@ fn gam_marginal_slope_heldout_concordance_matches_or_beats_lifelines_coxph() {
     // gam's predicted covariate-driven cumulative hazard at the time anchor
     // q(t)=0 for any (EF, AGE). η = probit_scale·g(AGE)·z_std(EF); Λ =
     // −log Φ(−η) is strictly increasing in η, so this is a valid
-    // proportional-hazards risk score for ranking. The logslope design is
+    // proportional-hazards risk score for ranking. The slope design is
     // rebuilt per AGE from the frozen TRAIN spec.
-    let logslope_eta_at = |age_value: f64| -> f64 {
+    let slope_eta_at = |age_value: f64| -> f64 {
         let mut grid = Array2::<f64>::zeros((1, ds.headers.len()));
         grid[[0, age_idx]] = age_value;
-        let design = build_term_collection_design(grid.view(), &fit.logslopespec_resolved)
-            .expect("rebuild logslope design at an AGE point");
+        let design = build_term_collection_design(grid.view(), &fit.slopespec_resolved)
+            .expect("rebuild slope design at an AGE point");
         assert_eq!(
             design.design.ncols(),
-            beta_logslope.len(),
-            "logslope design width must equal β_logslope length"
+            beta_slope.len(),
+            "slope design width must equal β_slope length"
         );
-        design.design.apply(&beta_logslope)[0]
+        design.design.apply(&beta_slope)[0]
     };
     let gam_cum_at = |ef_value: f64, age_value: f64| -> f64 {
-        let g = fit.baseline_slope + logslope_eta_at(age_value);
+        let g = fit.baseline_slope + slope_eta_at(age_value);
         let z_std = (ef_value - z_mean) / z_sd;
         let eta =
             survival_marginal_slope_vector_eta(0.0, &[z_std], &[g], &covariance, probit_scale)

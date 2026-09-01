@@ -2047,7 +2047,7 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
     // flat-increasing profile (gh#752), the coupled inner joint-Newton can no
     // longer certify stationarity on the now-ill-conditioned trend, and the
     // envelope-theorem outer gradient — valid only at a stationary β̂ — diverges
-    // on the coupled (logslope) block while the objective stalls, so ARC never
+    // on the coupled (slope) block while the objective stalls, so ARC never
     // reaches a KKT point.
     //
     // The correct generalized determinant (mgcv's treatment) takes both terms

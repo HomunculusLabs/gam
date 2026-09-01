@@ -284,7 +284,7 @@ mod tests {
                 "cycle=7 cert REFUSED: residual=5.000e+05 > 4·tol=4.000e+03; \
                  carrying-block: time_surface (idx=0, |g|=5.000e+05, |Sβ|=1.000e-03, \
                  |∇L-Sβ|=5.000e+05, |β|=1.000e+00, width=12); \
-                 block_names=[\"time_surface\", \"marginal\", \"logslope\"], \
+                 block_names=[\"time_surface\", \"marginal\", \"slope\"], \
                  block_widths=[12, 11, 10], block_grad_inf=[5.0e+05, 1.0e-03, 1.0e-03], \
                  block_penalty_grad_inf=[1.0e-03, 1.0e-03, 1.0e-03], \
                  block_residual_inf=[5.0e+05, 1.0e-03, 1.0e-03]; \

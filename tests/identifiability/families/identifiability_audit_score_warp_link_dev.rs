@@ -1,5 +1,5 @@
 //! Regression tests for the identifiability audit on a synthetic
-//! 5-block survival marginal-slope setup (time / marginal / logslope /
+//! 5-block survival marginal-slope setup (time / marginal / slope /
 //! score_warp_dev / link_dev).
 //!
 //! # Scope
@@ -19,15 +19,15 @@
 //! with synthetic K=4 channel-aware block designs, verifying:
 //!
 //! - When score_warp_dev / link_dev carry genuinely redundant directions
-//!   (aliased by marginal or logslope): `audit.fatal == false`,
+//!   (aliased by marginal or slope): `audit.fatal == false`,
 //!   `audit.dropped_columns` names score_warp_dev or link_dev,
 //!   `audit.aliased_pairs` is non-empty.
 //!
 //! - When score_warp_dev / link_dev carry genuinely distinct directions
-//!   (orthogonal complement of marginal/logslope after IFT Jacobian
+//!   (orthogonal complement of marginal/slope after IFT Jacobian
 //!   residualisation): audit is clean, no drops, no alias pairs.
 //!
-//! The gauge_priority ordering (time=200 / marginal=150 / logslope=120 /
+//! The gauge_priority ordering (time=200 / marginal=150 / slope=120 /
 //! score_warp=80 / link_dev=60) is replicated from the family's actual
 //! blockspec assignment so the canonical-gauge contract is exercised here.
 
@@ -69,7 +69,7 @@ fn spec(name: &str, design: Array2<f64>, gauge_priority: u8) -> ParameterBlockSp
 /// Marginal block (priority 150): [1, z, z²] — overlaps time's constant but
 ///   different covariates; in the flat audit `t` and `z` are treated as separate
 ///   directions so the overlap is partial, not perfect (no drop expected here).
-/// Logslope block (priority 120): [sin(t), sin(2t)] — 2 columns.
+/// Slope block (priority 120): [sin(t), sin(2t)] — 2 columns.
 /// score_warp_dev block (priority 80): configurable.
 /// link_dev block (priority 60): configurable.
 fn time_design() -> Array2<f64> {
@@ -111,7 +111,7 @@ fn marginal_design() -> Array2<f64> {
     out
 }
 
-fn logslope_design() -> Array2<f64> {
+fn slope_design() -> Array2<f64> {
     let t = linspace(0.0, 1.0, N);
     let mut out = Array2::<f64>::zeros((N, 2));
     for i in 0..N {
@@ -149,12 +149,12 @@ fn score_warp_design_clean() -> Array2<f64> {
     out
 }
 
-/// link_dev that duplicates logslope column 0 exactly.
+/// link_dev that duplicates slope column 0 exactly.
 fn link_dev_design_aliased() -> Array2<f64> {
     let t = linspace(0.0, 1.0, N);
     let mut out = Array2::<f64>::zeros((N, 2));
     for i in 0..N {
-        out[[i, 0]] = (std::f64::consts::PI * t[i]).sin(); // exact copy of logslope col 0
+        out[[i, 0]] = (std::f64::consts::PI * t[i]).sin(); // exact copy of slope col 0
         out[[i, 1]] = (9.0 * std::f64::consts::PI * t[i]).sin(); // genuinely new
     }
     out
@@ -178,7 +178,7 @@ fn score_warp_dev_alias_attributed_to_score_warp_not_marginal() {
     let specs = [
         spec("time", time_design(), 200),
         spec("marginal", marginal_design(), 150),
-        spec("logslope", logslope_design(), 120),
+        spec("slope", slope_design(), 120),
         spec("score_warp_dev", score_warp_design_aliased(), 80),
         spec("link_dev", link_dev_design_clean(), 60),
     ];
@@ -222,23 +222,23 @@ fn score_warp_dev_alias_attributed_to_score_warp_not_marginal() {
     );
 }
 
-// ── Test 2: link_dev column exactly aliased with logslope ────────────────────
+// ── Test 2: link_dev column exactly aliased with slope ────────────────────
 
 #[test]
-fn link_dev_alias_attributed_to_link_dev_not_logslope() {
+fn link_dev_alias_attributed_to_link_dev_not_slope() {
     let specs = [
         spec("time", time_design(), 200),
         spec("marginal", marginal_design(), 150),
-        spec("logslope", logslope_design(), 120),
+        spec("slope", slope_design(), 120),
         spec("score_warp_dev", score_warp_design_clean(), 80),
         spec("link_dev", link_dev_design_aliased(), 60),
     ];
     let audit = audit_identifiability(&specs).expect("audit must succeed");
 
-    // link_dev (60) < logslope (120): gauge-resolvable, non-fatal.
+    // link_dev (60) < slope (120): gauge-resolvable, non-fatal.
     assert!(
         !audit.fatal,
-        "link_dev alias with logslope must be gauge-resolvable (non-fatal); \
+        "link_dev alias with slope must be gauge-resolvable (non-fatal); \
          summary: {}",
         audit.summary,
     );
@@ -256,13 +256,13 @@ fn link_dev_alias_attributed_to_link_dev_not_logslope() {
             drop.block, audit.summary,
         );
     }
-    let has_ld_logslope_pair = audit.aliased_pairs.iter().any(|p| {
-        (p.block_a == "logslope" && p.block_b == "link_dev")
-            || (p.block_a == "link_dev" && p.block_b == "logslope")
+    let has_ld_slope_pair = audit.aliased_pairs.iter().any(|p| {
+        (p.block_a == "slope" && p.block_b == "link_dev")
+            || (p.block_a == "link_dev" && p.block_b == "slope")
     });
     assert!(
-        has_ld_logslope_pair,
-        "aliased_pairs must include the (logslope, link_dev) pair; \
+        has_ld_slope_pair,
+        "aliased_pairs must include the (slope, link_dev) pair; \
          got: {:?}",
         audit.aliased_pairs,
     );
@@ -275,7 +275,7 @@ fn both_flex_blocks_aliased_both_attributed_non_fatal() {
     let specs = [
         spec("time", time_design(), 200),
         spec("marginal", marginal_design(), 150),
-        spec("logslope", logslope_design(), 120),
+        spec("slope", slope_design(), 120),
         spec("score_warp_dev", score_warp_design_aliased(), 80),
         spec("link_dev", link_dev_design_aliased(), 60),
     ];
@@ -316,7 +316,7 @@ fn all_five_blocks_clean_audit_passes() {
     let specs = [
         spec("time", time_design(), 200),
         spec("marginal", marginal_design(), 150),
-        spec("logslope", logslope_design(), 120),
+        spec("slope", slope_design(), 120),
         spec("score_warp_dev", score_warp_design_clean(), 80),
         spec("link_dev", link_dev_design_clean(), 60),
     ];
@@ -348,7 +348,7 @@ fn gauge_priority_resolves_score_warp_alias_correctly() {
     let specs = [
         spec("time", time_design(), 200),
         spec("marginal", marginal_design(), 150),
-        spec("logslope", logslope_design(), 120),
+        spec("slope", slope_design(), 120),
         spec("score_warp_dev", score_warp_design_aliased(), 80),
         spec("link_dev", link_dev_design_clean(), 60),
     ];
@@ -378,7 +378,7 @@ fn gauge_priority_resolves_score_warp_alias_correctly() {
         sw.original_dim,
     );
     // Effective dims of higher-priority blocks must be unchanged.
-    for name in ["time", "marginal", "logslope"] {
+    for name in ["time", "marginal", "slope"] {
         if let Some(b) = audit.blocks.iter().find(|b| b.block_name == name) {
             assert_eq!(
                 b.effective_dim, b.original_dim,

@@ -158,12 +158,12 @@ pub fn build_large_scale_shape_problem(n: usize) -> LargeScaleShapeProblem {
             age_smooth(LARGE_SCALE_SHAPE_PC_DIM, "age_entry_std_mean"),
         ],
     };
-    let logslopespec = TermCollectionSpec {
+    let slopespec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![
-            pc16_duchon_smooth("pc16_duchon_logslope"),
-            age_smooth(LARGE_SCALE_SHAPE_PC_DIM, "age_entry_std_logslope"),
+            pc16_duchon_smooth("pc16_duchon_slope"),
+            age_smooth(LARGE_SCALE_SHAPE_PC_DIM, "age_entry_std_slope"),
         ],
     };
     let dev_cfg = DeviationBlockConfig::triple_penalty_default();
@@ -175,9 +175,9 @@ pub fn build_large_scale_shape_problem(n: usize) -> LargeScaleShapeProblem {
             z,
             base_link: InverseLink::Standard(StandardLink::Probit),
             marginalspec,
-            logslopespec,
+            slopespec,
             marginal_offset: Array1::zeros(n),
-            logslope_offset: Array1::zeros(n),
+            slope_offset: Array1::zeros(n),
             frailty: FrailtySpec::None,
             score_warp: Some(dev_cfg.clone()),
             link_dev: Some(dev_cfg),

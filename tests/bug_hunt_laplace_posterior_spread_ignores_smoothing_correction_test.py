@@ -88,8 +88,8 @@ def _fit_and_sample(formula: str) -> tuple[Any, Any, np.ndarray, np.ndarray]:
 def _band_width(table: Any) -> float:
     return float(
         np.mean(
-            np.asarray(table["mean_upper"], dtype=float)
-            - np.asarray(table["mean_lower"], dtype=float)
+            np.asarray(table["posterior_mean_upper"], dtype=float)
+            - np.asarray(table["posterior_mean_lower"], dtype=float)
         )
     )
 

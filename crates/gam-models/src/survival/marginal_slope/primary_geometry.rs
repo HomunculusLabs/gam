@@ -10,10 +10,10 @@ pub(crate) struct DynamicQBlockwiseAccumulator {
     pub(crate) log_likelihood: f64,
     pub(crate) grad_time: Array1<f64>,
     pub(crate) grad_marginal: Array1<f64>,
-    pub(crate) grad_logslope: Array1<f64>,
+    pub(crate) grad_slope: Array1<f64>,
     pub(crate) hess_time: Array2<f64>,
     pub(crate) hess_marginal: Array2<f64>,
-    pub(crate) hess_logslope: Array2<f64>,
+    pub(crate) hess_slope: Array2<f64>,
     pub(crate) grad_score_warp: Option<Array1<f64>>,
     pub(crate) hess_score_warp: Option<Array2<f64>>,
     pub(crate) grad_link_dev: Option<Array1<f64>>,
@@ -31,10 +31,10 @@ impl DynamicQBlockwiseAccumulator {
             log_likelihood: 0.0,
             grad_time: Array1::zeros(slices.time.len()),
             grad_marginal: Array1::zeros(slices.marginal.len()),
-            grad_logslope: Array1::zeros(slices.logslope.len()),
+            grad_slope: Array1::zeros(slices.slope.len()),
             hess_time: Array2::zeros((slices.time.len(), slices.time.len())),
             hess_marginal: Array2::zeros((slices.marginal.len(), slices.marginal.len())),
-            hess_logslope: Array2::zeros((slices.logslope.len(), slices.logslope.len())),
+            hess_slope: Array2::zeros((slices.slope.len(), slices.slope.len())),
             grad_score_warp: slices
                 .score_warp
                 .as_ref()
@@ -66,10 +66,10 @@ impl DynamicQBlockwiseAccumulator {
         self.log_likelihood += other.log_likelihood;
         self.grad_time += &other.grad_time;
         self.grad_marginal += &other.grad_marginal;
-        self.grad_logslope += &other.grad_logslope;
+        self.grad_slope += &other.grad_slope;
         self.hess_time += &other.hess_time;
         self.hess_marginal += &other.hess_marginal;
-        self.hess_logslope += &other.hess_logslope;
+        self.hess_slope += &other.hess_slope;
         add_optional_vector(&mut self.grad_score_warp, &other.grad_score_warp);
         add_optional_vector(&mut self.grad_link_dev, &other.grad_link_dev);
         add_optional_vector(&mut self.grad_influence, &other.grad_influence);
@@ -89,8 +89,8 @@ impl DynamicQBlockwiseAccumulator {
                 hessian: SymmetricMatrix::Dense(self.hess_marginal),
             },
             BlockWorkingSet::ExactNewton {
-                gradient: self.grad_logslope,
-                hessian: SymmetricMatrix::Dense(self.hess_logslope),
+                gradient: self.grad_slope,
+                hessian: SymmetricMatrix::Dense(self.hess_slope),
             },
         ];
         if let (Some(gradient), Some(hessian)) = (self.grad_score_warp, self.hess_score_warp) {
@@ -365,7 +365,7 @@ pub(crate) struct TimewiggleMarginalPsiRowLift {
 /// length-6 primary gradient is a shape error, not an approximation (#2765).
 ///
 /// The marginal block loads onto `q₀` and `q₁` in EITHER frame — the location
-/// index is what the frame does not change. The log-slope block is the one that
+/// index is what the frame does not change. The slope block is the one that
 /// gains channels, and a ψ that moves its design is refused by name rather than
 /// lowered through one of them: with a time margin the block's three channel
 /// designs are `X_cov ⊗ B_entry`, `X_cov ⊗ B_exit` and `X_cov ⊗ B′_exit`, while
@@ -398,18 +398,18 @@ pub(crate) fn spatial_block_primary_loading(
     }
 }
 
-/// A ψ that moves the LOG-SLOPE design cannot be lowered through a
+/// A ψ that moves the SLOPE design cannot be lowered through a
 /// follow-up-varying frame from a single `X_ψ`. See
 /// [`spatial_block_primary_loading`].
 fn refuse_follow_up_varying_design_psi(
     family: &SurvivalMarginalSlopeFamily,
 ) -> Result<(), String> {
-    if family.logslope_layout.is_follow_up_varying() {
+    if family.slope_layout.is_follow_up_varying() {
         return Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
-            reason: "a follow-up-varying log-slope carries three channel designs \
+            reason: "a follow-up-varying slope carries three channel designs \
                      (X_cov ⊗ B_entry, X_cov ⊗ B_exit, X_cov ⊗ B′_exit) and the ψ \
                      design-derivative contract carries one X_ψ, so a spatial \
-                     length scale on the log-slope surface cannot be lowered \
+                     length scale on the slope surface cannot be lowered \
                      through this frame"
                 .to_string(),
         }

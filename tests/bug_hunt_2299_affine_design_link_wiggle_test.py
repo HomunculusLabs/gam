@@ -67,7 +67,7 @@ import gamfit
 
 def _linear_predictor(model, data) -> np.ndarray:
     prediction = model.predict(data, return_type="dict")
-    return np.asarray(prediction["linear_predictor"], dtype=float)
+    return np.asarray(prediction["linear_predictor_plugin"], dtype=float)
 
 
 def _assert_affine_identity(model, data, expected_frame: str) -> gamfit.AffineDesign:

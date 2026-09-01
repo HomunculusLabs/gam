@@ -1,4 +1,4 @@
-//! gam#2765 / gam#2767 end-to-end gate: on a follow-up-varying log-slope the
+//! gam#2765 / gam#2767 end-to-end gate: on a follow-up-varying slope the
 //! criterion's coefficient mode response `dβ̂/dψ` must match a finite difference
 //! of the fit's own β̂.
 //!
@@ -14,7 +14,7 @@
 //! beside its own Ridders-certified finite difference.
 //!
 //! Measured at the acceptance fixture's shape (`n = 400`, Weibull baseline,
-//! `logslope_time_k = 4`): `3.3e-2` and `3.2e-2` relative before the repair,
+//! `slope_time_k = 4`): `3.3e-2` and `3.2e-2` relative before the repair,
 //! `5.0e-8` and `8.6e-9` after — six orders, on a quantity whose oracle is the
 //! same inner solve the fit runs. The `1e-5` bar below sits four orders above
 //! the repaired value and three below the broken one, so it cannot be cleared by
@@ -22,7 +22,7 @@
 //!
 //! This grades the mode response, NOT the total outer gradient: that total still
 //! carries the `logdet_h` disagreement the `#979`/`#1040` lane owns, which
-//! reproduces identically with `logslope_time_k` unset and is therefore not this
+//! reproduces identically with `slope_time_k` unset and is therefore not this
 //! issue's to assert on.
 
 use csv::StringRecord;
@@ -32,8 +32,8 @@ use gam::{FitConfig, encode_recordswith_inferred_schema, fit_from_formula, init_
 /// Small enough to keep this gate a few minutes, large enough that the outer
 /// runner reaches a bounded joint seed with both ψ coordinates enrolled.
 const N: usize = 200;
-const LOGSLOPE_TIME_DEGREE: usize = 2;
-const LOGSLOPE_TIME_K: usize = 4;
+const SLOPE_TIME_DEGREE: usize = 2;
+const SLOPE_TIME_K: usize = 4;
 const SLOPE_LEVEL: f64 = 0.85;
 const SLOPE_TREND: f64 = -0.32;
 const LOCATION_LEVEL: f64 = -1.15;
@@ -148,9 +148,9 @@ fn survival_marginal_slope_follow_up_mode_response_matches_fd_2765() {
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("z".to_string()),
-        logslope_formula: Some("1".to_string()),
-        logslope_time_k: Some(LOGSLOPE_TIME_K),
-        logslope_time_degree: LOGSLOPE_TIME_DEGREE,
+        slope_formula: Some("1".to_string()),
+        slope_time_k: Some(SLOPE_TIME_K),
+        slope_time_degree: SLOPE_TIME_DEGREE,
         time_num_internal_knots: 3,
         baseline_target: "weibull".to_string(),
         // The audit fires at the first bounded joint seed; capping the joint
@@ -210,7 +210,7 @@ fn survival_marginal_slope_follow_up_mode_response_matches_fd_2765() {
             "psi coordinate {j}: the coefficient mode response dbeta/dpsi disagrees with \
              its own finite difference by {:.3e} relative (max_abs={:.3e}, \
              analytic_norm={:.6e}, fd_norm={:.6e}) — on a follow-up-varying slope this is \
-             the signature of a pullback that reads the log-slope through one channel \
+             the signature of a pullback that reads the slope through one channel \
              (gam#2765)",
             atoms.mode_response_relative_error[j],
             atoms.mode_response_max_abs_error[j],

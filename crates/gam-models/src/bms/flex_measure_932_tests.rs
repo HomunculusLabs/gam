@@ -187,7 +187,7 @@ fn mfixture(is_score_warp: bool) -> MFixture {
         gaussian_frailty_sd: None,
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginal_design: dummy(),
-        logslope_design: dummy(),
+        slope_design: dummy(),
         score_warp: if is_score_warp {
             Some(runtime.clone())
         } else {
@@ -203,7 +203,7 @@ fn mfixture(is_score_warp: bool) -> MFixture {
     };
     let primary = PrimarySlices {
         q: 0,
-        logslope: 1,
+        slope: 1,
         h: if is_score_warp {
             Some(2..2 + basis_dim)
         } else {
@@ -529,7 +529,7 @@ fn build_fixture_with_runtime(is_score_warp: bool, runtime: DeviationRuntime) ->
         gaussian_frailty_sd: None,
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginal_design: dummy(),
-        logslope_design: dummy(),
+        slope_design: dummy(),
         score_warp: if is_score_warp {
             Some(runtime.clone())
         } else {
@@ -545,7 +545,7 @@ fn build_fixture_with_runtime(is_score_warp: bool, runtime: DeviationRuntime) ->
     };
     let primary = PrimarySlices {
         q: 0,
-        logslope: 1,
+        slope: 1,
         h: if is_score_warp {
             Some(2..2 + basis_dim)
         } else {

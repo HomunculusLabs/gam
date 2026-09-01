@@ -164,7 +164,7 @@ impl BernoulliMarginalSlopeFamily {
     /// Fill `J_row * weight * J_row^T` in primary coordinates from the two
     /// design-dependent projected rows and the constant identity-tail block.
     /// This is the row-local inverse of `pullback_primary_vector`: marginal and
-    /// log-slope primaries carry design rows, while h/w primaries map directly
+    /// slope primaries carry design rows, while h/w primaries map directly
     /// to their coefficient slots.
     fn fill_explicit_psi_primary_sandwich(
         slices: &BlockSlices,
@@ -172,9 +172,9 @@ impl BernoulliMarginalSlopeFamily {
         tail_pairs: &[(usize, usize)],
         tail_tail: &[f64],
         marginal_row: ndarray::ArrayView1<'_, f64>,
-        logslope_row: ndarray::ArrayView1<'_, f64>,
+        slope_row: ndarray::ArrayView1<'_, f64>,
         marginal_weight_projection: ndarray::ArrayView1<'_, f64>,
-        logslope_weight_projection: ndarray::ArrayView1<'_, f64>,
+        slope_weight_projection: ndarray::ArrayView1<'_, f64>,
         out: &mut [f64],
     ) -> Result<(), String> {
         let r = primary.total;
@@ -195,25 +195,25 @@ impl BernoulliMarginalSlopeFamily {
             qq += design_value * marginal_weight_projection[slices.marginal.start + local];
         }
         let mut qg = 0.0;
-        for (local, &design_value) in logslope_row.iter().enumerate() {
-            qg += design_value * marginal_weight_projection[slices.logslope.start + local];
+        for (local, &design_value) in slope_row.iter().enumerate() {
+            qg += design_value * marginal_weight_projection[slices.slope.start + local];
         }
         let mut gg = 0.0;
-        for (local, &design_value) in logslope_row.iter().enumerate() {
-            gg += design_value * logslope_weight_projection[slices.logslope.start + local];
+        for (local, &design_value) in slope_row.iter().enumerate() {
+            gg += design_value * slope_weight_projection[slices.slope.start + local];
         }
         out[primary.q * r + primary.q] = qq;
-        out[primary.q * r + primary.logslope] = qg;
-        out[primary.logslope * r + primary.q] = qg;
-        out[primary.logslope * r + primary.logslope] = gg;
+        out[primary.q * r + primary.slope] = qg;
+        out[primary.slope * r + primary.q] = qg;
+        out[primary.slope * r + primary.slope] = gg;
 
         for &(primary_idx, block_idx) in tail_pairs {
             let q_tail = marginal_weight_projection[block_idx];
             out[primary.q * r + primary_idx] = q_tail;
             out[primary_idx * r + primary.q] = q_tail;
-            let g_tail = logslope_weight_projection[block_idx];
-            out[primary.logslope * r + primary_idx] = g_tail;
-            out[primary_idx * r + primary.logslope] = g_tail;
+            let g_tail = slope_weight_projection[block_idx];
+            out[primary.slope * r + primary_idx] = g_tail;
+            out[primary_idx * r + primary.slope] = g_tail;
         }
         Ok(())
     }
@@ -262,10 +262,10 @@ impl BernoulliMarginalSlopeFamily {
         }
         let (axis_range, expected_primary) = match axis.block_idx {
             0 => (slices.marginal.clone(), primary.q),
-            1 => (slices.logslope.clone(), primary.logslope),
+            1 => (slices.slope.clone(), primary.slope),
             block => {
                 return Err(format!(
-                    "BMS explicit-psi Jeffreys pullback only supports marginal/log-slope axes, got block {block}"
+                    "BMS explicit-psi Jeffreys pullback only supports marginal/slope axes, got block {block}"
                 ));
             }
         };
@@ -333,7 +333,7 @@ impl BernoulliMarginalSlopeFamily {
         let panel_width = 5usize
             .saturating_mul(total)
             .saturating_add(slices.marginal.len())
-            .saturating_add(slices.logslope.len())
+            .saturating_add(slices.slope.len())
             .saturating_add(axis_range.len())
             .max(1);
         let rows_per_chunk = (TARGET_PANEL_BYTES / (8 * panel_width)).max(64).min(n);
@@ -344,13 +344,13 @@ impl BernoulliMarginalSlopeFamily {
             .slice(s![slices.marginal.clone(), ..]);
         let a_g_block = weights
             .beta_information
-            .slice(s![slices.logslope.clone(), ..]);
+            .slice(s![slices.slope.clone(), ..]);
         let b_m_block = weights
             .mixed_information
             .slice(s![slices.marginal.clone(), ..]);
         let b_g_block = weights
             .mixed_information
-            .slice(s![slices.logslope.clone(), ..]);
+            .slice(s![slices.slope.clone(), ..]);
         let b_axis_block = weights
             .mixed_information
             .slice(s![axis_range.clone(), ..]);
@@ -378,19 +378,19 @@ impl BernoulliMarginalSlopeFamily {
                             marginal_owned.view()
                         }
                     };
-                    let logslope_owned;
-                    let logslope = match self.logslope_design.as_dense_ref() {
+                    let slope_owned;
+                    let slope = match self.slope_design.as_dense_ref() {
                         Some(dense) => dense.slice(s![rows.clone(), ..]),
                         None => {
-                            logslope_owned = self
-                                .logslope_design
+                            slope_owned = self
+                                .slope_design
                                 .try_row_chunk(rows.clone())
                                 .map_err(|error| {
                                     format!(
-                                        "BMS explicit-psi Jeffreys log-slope panel failed: {error}"
+                                        "BMS explicit-psi Jeffreys slope panel failed: {error}"
                                     )
                                 })?;
-                            logslope_owned.view()
+                            slope_owned.view()
                         }
                     };
                     let psi = axis.psi_map.row_chunk(rows.clone()).map_err(|error| {
@@ -399,9 +399,9 @@ impl BernoulliMarginalSlopeFamily {
                     let (a_m, a_g, b_m, b_g, b_r) = gam_problem::with_nested_parallel(|| {
                         (
                             gam_linalg::faer_ndarray::fast_ab(&marginal, &a_m_block),
-                            gam_linalg::faer_ndarray::fast_ab(&logslope, &a_g_block),
+                            gam_linalg::faer_ndarray::fast_ab(&slope, &a_g_block),
                             gam_linalg::faer_ndarray::fast_ab(&marginal, &b_m_block),
-                            gam_linalg::faer_ndarray::fast_ab(&logslope, &b_g_block),
+                            gam_linalg::faer_ndarray::fast_ab(&slope, &b_g_block),
                             gam_linalg::faer_ndarray::fast_ab(&psi, &b_axis_block),
                         )
                     });
@@ -411,14 +411,14 @@ impl BernoulliMarginalSlopeFamily {
                     for local in 0..(end - start) {
                         let row = start + local;
                         let marginal_row = marginal.row(local);
-                        let logslope_row = logslope.row(local);
+                        let slope_row = slope.row(local);
                         Self::fill_explicit_psi_primary_sandwich(
                             slices,
                             primary,
                             &tail_pairs,
                             &a_tail_tail,
                             marginal_row,
-                            logslope_row,
+                            slope_row,
                             a_m.row(local),
                             a_g.row(local),
                             &mut gram_a_x,
@@ -429,7 +429,7 @@ impl BernoulliMarginalSlopeFamily {
                             &tail_pairs,
                             &b_tail_tail,
                             marginal_row,
-                            logslope_row,
+                            slope_row,
                             b_m.row(local),
                             b_g.row(local),
                             &mut gram_b,
@@ -443,9 +443,9 @@ impl BernoulliMarginalSlopeFamily {
                             cross_primary[primary.q] +=
                                 design_value * b_r_row[slices.marginal.start + offset];
                         }
-                        for (offset, &design_value) in logslope_row.iter().enumerate() {
-                            cross_primary[primary.logslope] +=
-                                design_value * b_r_row[slices.logslope.start + offset];
+                        for (offset, &design_value) in slope_row.iter().enumerate() {
+                            cross_primary[primary.slope] +=
+                                design_value * b_r_row[slices.slope.start + offset];
                         }
                         for &(primary_idx, block_idx) in &tail_pairs {
                             cross_primary[primary_idx] = b_r_row[block_idx];
@@ -579,7 +579,7 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     /// When a flex deviation block is active (`score_warp` / `link_dev`) the
     /// joint inner solve takes the CONSTRAINED active-set QP path
     /// (`block_linear_constraints` emits the structural monotonicity rows). The
-    /// marginal and log-slope surfaces share one matern PC basis, so even with
+    /// marginal and slope surfaces share one matern PC basis, so even with
     /// the β-independent null-space drop that lifts `σ_min(H+S)` off `ridge_floor`
     /// (see `pseudo_logdet_mode` above), `H_pen` stays full-rank yet severely
     /// ill-conditioned (cond ≫ 1e4) for the probit-over-2–3-PCs fits. With the
@@ -592,7 +592,7 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     /// The self-vanishing μ
     /// (∝ projected KKT residual → 0 at the fixed point) gives the near-null
     /// mode a tiny positive curvature so the minimiser is unique and `step_inf`
-    /// exhausts, WITHOUT moving the converged β (the link-deviation / log-slope
+    /// exhausts, WITHOUT moving the converged β (the link-deviation / slope
     /// target is preserved exactly). Applied only when genuinely ill-conditioned
     /// (`cond > LEVENBERG_ILL_CONDITIONING_THRESHOLD`); the rigid
     /// (no-flex / unconstrained) fit keeps the EXACT undamped Newton/KKT solve
@@ -604,7 +604,7 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
         // Operator-aware: rigid Bernoulli marginal-slope wires the K=2
         // RowKernel through a matrix-free workspace that applies joint Hv at
-        // O(n · (p_marginal + p_logslope + p_flex)) per call. Only fall back
+        // O(n · (p_marginal + p_slope + p_flex)) per call. Only fall back
         // to the dense `n · (Σ p_b)²` build when `use_joint_matrix_free_path`
         // declines the operator path.
         crate::location_scale_engine::location_scale_coefficient_hessian_cost(
@@ -1304,7 +1304,7 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         //
         // The single-pass form below evaluates the per-row primary Hessian
         // exactly once per row and lets the existing accumulator distribute
-        // every (a, b) entry into the marginal/logslope/h/w block targets.
+        // every (a, b) entry into the marginal/slope/h/w block targets.
         let cache = self.build_exact_eval_cache_with_order(block_states)?;
         self.exact_newton_joint_hessian_dense_from_cache(block_states, &cache)
             .map(Some)
@@ -1444,7 +1444,7 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     /// Force the matrix-free inner-Newton/PCG path for BMS flex at large-scale
     /// scale, on top of the generic `use_joint_matrix_free_path` heuristic.
     ///
-    /// At n≈195k with `linkwiggle()` / `logslope_formula linkwiggle()`, dense
+    /// At n≈195k with `linkwiggle()` / `slope_formula linkwiggle()`, dense
     /// joint-H assembly streams every row through the expensive flex row
     /// kernel and pays a BLAS-3 design-matrix gram per chunk on top — ~63s
     /// per inner cycle. Each HVP reuses the row stream at near-gradient cost
@@ -1630,7 +1630,7 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     /// (`joint_jeffreys_information_matches_observed_hessian` stays `true`),
     /// so this contracts the OBSERVED joint Newton Hessian rather than a
     /// separate expected-information object. Only the rigid two-primary
-    /// `(marginal, logslope)` path has the closed-form fourth-order tensor
+    /// `(marginal, slope)` path has the closed-form fourth-order tensor
     /// this needs (`rigid_row_fourth_full` / `fourth_full_cache`); the flex
     /// score-warp/link-deviation extension widens the primary space beyond
     /// what that tensor covers, so flex-active fits fall back to `None` (the
@@ -1651,7 +1651,7 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         }
         let slices = block_slices(self);
         let pt = slices.marginal.len();
-        let pg = slices.logslope.len();
+        let pg = slices.slope.len();
         let total = slices.total;
         if weight.dim() != (total, total) {
             return Err(format!(
@@ -1697,11 +1697,11 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
                         }
                     };
                     let x_g_owned;
-                    let x_g_view = match self.logslope_design.as_dense_ref() {
+                    let x_g_view = match self.slope_design.as_dense_ref() {
                         Some(dense) => dense.slice(s![rows.clone(), ..]),
                         None => {
-                            x_g_owned = self.logslope_design.try_row_chunk(rows.clone()).map_err(
-                                |e| format!("BMS jeffreys contracted-trace: logslope row chunk failed: {e}"),
+                            x_g_owned = self.slope_design.try_row_chunk(rows.clone()).map_err(
+                                |e| format!("BMS jeffreys contracted-trace: slope row chunk failed: {e}"),
                             )?;
                             x_g_owned.view()
                         }
@@ -2677,9 +2677,9 @@ impl BernoulliMarginalSlopeFamily {
             out[primary.q * rank + col] = self
                 .marginal_design
                 .dot_row_view(row, factor.slice(s![slices.marginal.clone(), col]));
-            out[primary.logslope * rank + col] = self
-                .logslope_design
-                .dot_row_view(row, factor.slice(s![slices.logslope.clone(), col]));
+            out[primary.slope * rank + col] = self
+                .slope_design
+                .dot_row_view(row, factor.slice(s![slices.slope.clone(), col]));
         }
         if let (Some(block_range), Some(primary_range)) = (slices.h.as_ref(), primary.h.as_ref()) {
             for (local, block_idx) in block_range.clone().enumerate() {
@@ -3243,10 +3243,10 @@ impl BernoulliMarginalSlopeFamily {
                                 row,
                                 directions.slice(s![slices.marginal.clone(), dir_idx]),
                             );
-                        trace += trace_gradient[primary.logslope]
-                            * self.logslope_design.dot_row_view(
+                        trace += trace_gradient[primary.slope]
+                            * self.slope_design.dot_row_view(
                                 row,
-                                directions.slice(s![slices.logslope.clone(), dir_idx]),
+                                directions.slice(s![slices.slope.clone(), dir_idx]),
                             );
                         if let (Some(block_range), Some(primary_range)) =
                             (slices.h.as_ref(), primary.h.as_ref())
@@ -3315,9 +3315,9 @@ impl BernoulliMarginalSlopeFamily {
             (TARGET_BYTES / (panels * width.max(1) * 8)).max(512).min(n)
         };
         let factor_m = factor.slice(s![slices.marginal.clone(), ..]);
-        let factor_g = factor.slice(s![slices.logslope.clone(), ..]);
+        let factor_g = factor.slice(s![slices.slope.clone(), ..]);
         let dir_m = directions.slice(s![slices.marginal.clone(), ..]);
-        let dir_g = directions.slice(s![slices.logslope.clone(), ..]);
+        let dir_g = directions.slice(s![slices.slope.clone(), ..]);
         let tail_pairs = Self::primary_tail_block_pairs(slices, primary);
         let tail_tail_gram = Self::primary_tail_tail_gram(primary.total, rank, factor, &tail_pairs);
         let n_chunks = n.div_ceil(rows_per_chunk);
@@ -3361,7 +3361,7 @@ impl BernoulliMarginalSlopeFamily {
                 // the identical BLAS-3 kernel with identical arithmetic.
                 let (proj_m, proj_g, dir_proj_m, dir_proj_g) = match (
                     self.marginal_design.as_dense_ref(),
-                    self.logslope_design.as_dense_ref(),
+                    self.slope_design.as_dense_ref(),
                 ) {
                     (Some(x_full), Some(g_full)) => {
                         let x_chunk = x_full.slice(s![rows.clone(), ..]);
@@ -3379,9 +3379,9 @@ impl BernoulliMarginalSlopeFamily {
                             .try_row_chunk(rows.clone())
                             .map_err(|err| format!("marginal trace row chunk failed: {err}"))?;
                         let g_chunk = self
-                            .logslope_design
+                            .slope_design
                             .try_row_chunk(rows.clone())
-                            .map_err(|err| format!("logslope trace row chunk failed: {err}"))?;
+                            .map_err(|err| format!("slope trace row chunk failed: {err}"))?;
                         (
                             gam_linalg::faer_ndarray::fast_ab(&x_chunk, &factor_m),
                             gam_linalg::faer_ndarray::fast_ab(&g_chunk, &factor_g),
@@ -3407,9 +3407,9 @@ impl BernoulliMarginalSlopeFamily {
                         gg += gv * gv;
                     }
                     gram[primary.q * primary.total + primary.q] = qq;
-                    gram[primary.q * primary.total + primary.logslope] = qg;
-                    gram[primary.logslope * primary.total + primary.q] = qg;
-                    gram[primary.logslope * primary.total + primary.logslope] = gg;
+                    gram[primary.q * primary.total + primary.slope] = qg;
+                    gram[primary.slope * primary.total + primary.q] = qg;
+                    gram[primary.slope * primary.total + primary.slope] = gg;
                     for &(primary_idx, block_idx) in &tail_pairs {
                         let mut q_tail = 0.0;
                         let mut g_tail = 0.0;
@@ -3420,14 +3420,14 @@ impl BernoulliMarginalSlopeFamily {
                         }
                         gram[primary.q * primary.total + primary_idx] = q_tail;
                         gram[primary_idx * primary.total + primary.q] = q_tail;
-                        gram[primary.logslope * primary.total + primary_idx] = g_tail;
-                        gram[primary_idx * primary.total + primary.logslope] = g_tail;
+                        gram[primary.slope * primary.total + primary_idx] = g_tail;
+                        gram[primary_idx * primary.total + primary.slope] = g_tail;
                     }
                     let row_ctx = Self::row_ctx(cache, row);
                     if n_dirs == 1 {
                         row_dir.fill(0.0);
                         row_dir[primary.q] = dir_proj_m[[local, 0]];
-                        row_dir[primary.logslope] = dir_proj_g[[local, 0]];
+                        row_dir[primary.slope] = dir_proj_g[[local, 0]];
                         if let (Some(block_range), Some(primary_range)) =
                             (slices.h.as_ref(), primary.h.as_ref())
                         {
@@ -3462,7 +3462,7 @@ impl BernoulliMarginalSlopeFamily {
                     )?;
                     for dir_idx in 0..n_dirs {
                         let mut trace = trace_gradient[primary.q] * dir_proj_m[[local, dir_idx]]
-                            + trace_gradient[primary.logslope] * dir_proj_g[[local, dir_idx]];
+                            + trace_gradient[primary.slope] * dir_proj_g[[local, dir_idx]];
                         if let (Some(block_range), Some(primary_range)) =
                             (slices.h.as_ref(), primary.h.as_ref())
                         {

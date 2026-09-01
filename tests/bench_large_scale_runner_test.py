@@ -68,9 +68,9 @@ class LargeScaleRunnerTests(unittest.TestCase):
             self.assertEqual(lane.z_column, "pgs_ctn_z", f"{lane.name} must read CTN z column")
             self.assertEqual(lane.centers, 24)
         self.assertIsNone(rigid.mean_linkwiggle_knots)
-        self.assertIsNone(rigid.logslope_linkwiggle_knots)
+        self.assertIsNone(rigid.slope_linkwiggle_knots)
         self.assertEqual(warped.mean_linkwiggle_knots, 8)
-        self.assertEqual(warped.logslope_linkwiggle_knots, 8)
+        self.assertEqual(warped.slope_linkwiggle_knots, 8)
 
     def test_marginal_slope_formula_supports_linkwiggle_and_scorewarp(self) -> None:
         spec = _RUNNER.MethodSpec(
@@ -83,9 +83,9 @@ class LargeScaleRunnerTests(unittest.TestCase):
             scale_dimensions=True,
             z_column="pgs_ctn_z",
             mean_linkwiggle_knots=8,
-            logslope_linkwiggle_knots=7,
+            slope_linkwiggle_knots=7,
         )
-        mean_formula, logslope_formula = _RUNNER.rust_marginal_slope_formula_classification(spec, centers=20)
+        mean_formula, slope_formula = _RUNNER.rust_marginal_slope_formula_classification(spec, centers=20)
         self.assertIn("duchon(pc1_std, pc2_std", mean_formula)
         self.assertIn("centers=20", mean_formula)
         self.assertIn("order=0", mean_formula)
@@ -93,7 +93,7 @@ class LargeScaleRunnerTests(unittest.TestCase):
         self.assertIn("length_scale=1", mean_formula)
         self.assertNotIn("pgs_ctn_z", mean_formula)
         self.assertIn("linkwiggle(internal_knots=8)", mean_formula)
-        self.assertIn("linkwiggle(internal_knots=7)", logslope_formula)
+        self.assertIn("linkwiggle(internal_knots=7)", slope_formula)
 
     def test_large_scale_preflight_rejects_unsafe_dense_duchon_width_before_allocation(self) -> None:
         report = _RUNNER.preflight_marginal_slope_large_scale(
@@ -288,12 +288,12 @@ class LargeScaleRunnerTests(unittest.TestCase):
             marginal_slope=True,
             pc_count=4,
         )
-        mean_formula, logslope_formula = _RUNNER.rust_marginal_slope_formula_classification(
+        mean_formula, slope_formula = _RUNNER.rust_marginal_slope_formula_classification(
             spec,
             centers=18,
         )
         self.assertIn("matern(pc1_std, pc2_std, pc3_std, pc4_std, centers=18)", mean_formula)
-        self.assertIn("smooth(age_entry_std)", logslope_formula)
+        self.assertIn("smooth(age_entry_std)", slope_formula)
 
     def _survival_contract_train_rows(self) -> list[dict[str, float]]:
         return [

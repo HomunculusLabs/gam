@@ -328,10 +328,10 @@ fn screen_measure_jet_range(
     Some(chosen.0.exp())
 }
 
-/// The screening response for the LOG-SLOPE surface of a marginal-slope family.
+/// The screening response for the SLOPE surface of a marginal-slope family.
 ///
 /// The marginal-slope construction is `η_i = α(x_i) + β(x_i)·z_i` with a
-/// binomial link `F`, so the log-slope surface `β` never appears in `E[y | x]`
+/// binomial link `F`, so the slope surface `β` never appears in `E[y | x]`
 /// and screening its span against `y` would rank spans by how well they carry
 /// the MARGINAL surface — the wrong function. What `β` does appear in is the
 /// conditional covariance of the response with the latent driver: for
@@ -345,7 +345,7 @@ fn screen_measure_jet_range(
 ///
 /// by expanding `F` about `α(x)` (the odd moments of `z` kill the even terms).
 /// So the empirical cross-product `s_i = (y_i − ȳ)·(z_i − z̄)` has conditional
-/// mean `F'(α(x))·β(x)` to first order: the planted log-slope surface times a
+/// mean `F'(α(x))·β(x)` to first order: the planted slope surface times a
 /// strictly positive, smooth modulation. A span that represents `β` well
 /// represents `F'(α)·β` well, which is exactly the ranking a SEED needs — the
 /// joint ψ/ρ search that follows is the estimator.
@@ -364,7 +364,7 @@ fn screen_measure_jet_range(
 /// that same wrong function with none of the right one added, or not screening
 /// at all, which is the pure-geometry heuristic gam#2750 measured landing in
 /// the wrong basin.
-pub(crate) fn marginal_slope_logslope_screen_response(
+pub(crate) fn marginal_slope_screen_response(
     y: ArrayView1<'_, f64>,
     z: ArrayView1<'_, f64>,
     weights: ArrayView1<'_, f64>,
@@ -391,7 +391,7 @@ pub(crate) fn marginal_slope_logslope_screen_response(
     let surrogate =
         Array1::from_iter((0..n).map(|i| (y[i] - y_bar) * (z[i] - z_bar)));
     // A degenerate driver (no variation left after centering) carries no
-    // log-slope signal at all; screening on a constant would rank every span
+    // slope signal at all; screening on a constant would rank every span
     // identically and is better declined than reported. The surrogate mean is
     // hoisted: this runs once per fit on every row, so recomputing it inside the
     // scan would make a linear check quadratic.
@@ -425,7 +425,7 @@ pub(crate) fn marginal_slope_logslope_screen_response(
 /// | entry point | screening response | status |
 /// |---|---|---|
 /// | `fit_standard_model` | `y` | screened (#2750) |
-/// | `fit_bernoulli_marginal_slope_terms` | marginal: `y`; log-slope: `(y−ȳ)(z−z̄)` | screened (#2754) |
+/// | `fit_bernoulli_marginal_slope_terms` | marginal: `y`; slope: `(y−ȳ)(z−z̄)` | screened (#2754) |
 /// | `fit_transformation_normal` | `response` | screened (#2754) |
 /// | the CTN cross-fit Stage-1 builder | full `response`, BEFORE the freeze | screened (#2754) |
 /// | `fit_survival_marginal_slope_terms` | — | **not derived** |
@@ -556,17 +556,17 @@ mod marginal_slope_screen_response_tests {
         sab / (saa.sqrt() * sbb.sqrt())
     }
 
-    /// The derivation the log-slope screening surrogate rests on, checked
+    /// The derivation the slope screening surrogate rests on, checked
     /// against a probit sample rather than asserted: binning `s = (y−ȳ)(z−z̄)`
     /// by `x` must recover `F'(α(x))·β(x)`, NOT `α(x)`.
     ///
     /// This is the property that makes the surrogate the right ranking target
-    /// for the log-slope span. Screening against `y` — the only other response
+    /// for the slope span. Screening against `y` — the only other response
     /// on hand at that point in the fit — recovers `α` instead, which is a
     /// different function; the test pins the separation by scoring the binned
     /// surrogate against BOTH candidate truths on the same bins.
     #[test]
-    fn logslope_screen_surrogate_tracks_the_slope_surface_not_the_marginal_2754() {
+    fn slope_screen_surrogate_tracks_the_slope_surface_not_the_marginal_2754() {
         const N: usize = 200_000;
         const BINS: usize = 20;
         let alpha_true = |x: f64| -0.2 + 0.7 * (std::f64::consts::PI * x).sin();
@@ -588,7 +588,7 @@ mod marginal_slope_screen_response_tests {
         let y = Array1::from(ys.clone());
         let z = Array1::from(zs.clone());
         let surrogate =
-            marginal_slope_logslope_screen_response(y.view(), z.view(), weights.view())
+            marginal_slope_screen_response(y.view(), z.view(), weights.view())
                 .expect("a non-degenerate driver must produce a surrogate");
         assert_eq!(surrogate.len(), N);
 
@@ -621,33 +621,33 @@ mod marginal_slope_screen_response_tests {
         );
         assert!(
             to_predicted > 0.95,
-            "the log-slope screening surrogate must track F'(alpha)*beta (got {to_predicted:.4}); \
-             the derivation behind `marginal_slope_logslope_screen_response` is what the screen's \
+            "the slope screening surrogate must track F'(alpha)*beta (got {to_predicted:.4}); \
+             the derivation behind `marginal_slope_screen_response` is what the screen's \
              ranking rests on"
         );
         assert!(
             to_predicted > to_marginal + 0.2,
-            "the surrogate must separate the log-slope surface from the marginal one: \
+            "the surrogate must separate the slope surface from the marginal one: \
              corr to F'(alpha)*beta = {to_predicted:.4} vs corr to E[y|x] = {to_marginal:.4}"
         );
     }
 
-    /// A driver with no variation carries no log-slope signal, so the surrogate
+    /// A driver with no variation carries no slope signal, so the surrogate
     /// declines instead of handing the screen a constant every span fits equally.
     #[test]
-    fn logslope_screen_surrogate_declines_a_degenerate_driver_2754() {
+    fn slope_screen_surrogate_declines_a_degenerate_driver_2754() {
         let y = Array1::from(vec![0.0, 1.0, 1.0, 0.0]);
         let z = Array1::from(vec![0.5, 0.5, 0.5, 0.5]);
         let w = Array1::<f64>::ones(4);
         assert!(
-            marginal_slope_logslope_screen_response(y.view(), z.view(), w.view()).is_none(),
+            marginal_slope_screen_response(y.view(), z.view(), w.view()).is_none(),
             "a constant latent driver must not be screened against"
         );
         // Weighted means, not arithmetic ones: a weighted fit screens on its own
         // measure. With all mass on rows 0 and 1 the centering must use those.
         let w2 = Array1::from(vec![1.0, 1.0, 0.0, 0.0]);
         let z2 = Array1::from(vec![-1.0, 1.0, 7.0, -7.0]);
-        let s = marginal_slope_logslope_screen_response(y.view(), z2.view(), w2.view())
+        let s = marginal_slope_screen_response(y.view(), z2.view(), w2.view())
             .expect("a varying driver must produce a surrogate");
         // y_bar = 0.5, z_bar = 0.0 under w2.
         assert!((s[0] - 0.5).abs() < 1e-12, "s[0]={} != 0.5", s[0]);

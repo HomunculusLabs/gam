@@ -220,14 +220,14 @@ fn audit_partial_overlap_below_threshold_does_not_halt() {
 /// Regression test for issue #292: survival marginal-slope cross-block alias.
 ///
 /// Reproduces the 33-col / rank-23 scenario where `marginal_surface` and
-/// `logslope_surface` share the same raw basis (overlap=1.0) but the
+/// `slope_surface` share the same raw basis (overlap=1.0) but the
 /// canonical-gauge pipeline is configured to handle it via gauge_priority
-/// (time=200, marginal=150, logslope=120).
+/// (time=200, marginal=150, slope=120).
 ///
 /// The pre-fix audit FATALed on this configuration.  Post-fix it must:
 ///   - return `fatal=false` (gauge resolves the alias)
-///   - populate `dropped_columns` attributing drops to `logslope_surface`
-///   - NOT halt on the `marginal_surface ~ logslope_surface` alias pair
+///   - populate `dropped_columns` attributing drops to `slope_surface`
+///   - NOT halt on the `marginal_surface ~ slope_surface` alias pair
 ///   - survive both the pilot path AND the outer-inner-fit path.
 #[test]
 fn cross_block_alias_with_distinct_priorities_is_not_fatal() {
@@ -257,20 +257,20 @@ fn cross_block_alias_with_distinct_priorities_is_not_fatal() {
         }
     }
 
-    // logslope_surface: 10 columns — SAME basis as marginal (the large-scale case:
-    // marginal and logslope share the Duchon-PC basis evaluated at training
+    // slope_surface: 10 columns — SAME basis as marginal (the large-scale case:
+    // marginal and slope share the Duchon-PC basis evaluated at training
     // rows). The raw audit sees overlap=1.0 between marginal[:,k] and
-    // logslope[:,k] for every k.
-    let mut logslope = ndarray::Array2::<f64>::zeros((n, 10));
+    // slope[:,k] for every k.
+    let mut slope = ndarray::Array2::<f64>::zeros((n, 10));
     for i in 0..n {
         for k in 0..10 {
-            logslope[[i, k]] = ((k as f64 + 1.0) * x[i]).sin();
+            slope[[i, k]] = ((k as f64 + 1.0) * x[i]).sin();
         }
     }
 
     // z_primary: per-row z values (PRS or score covariate, varies row-by-row).
-    // The logslope block's effective design for identifiability is diag(z) ·
-    // logslope: scaling by z[i] makes it linearly independent of marginal.
+    // The slope block's effective design for identifiability is diag(z) ·
+    // slope: scaling by z[i] makes it linearly independent of marginal.
     let z_primary: ndarray::Array1<f64> =
         ndarray::Array1::from_iter((0..n).map(|i| 0.2 + 0.8 * i as f64 / (n as f64 - 1.0)));
 
@@ -291,13 +291,13 @@ fn cross_block_alias_with_distinct_priorities_is_not_fatal() {
         }
     };
 
-    // Flat audit on raw designs (no z-scaling): the marginal~logslope overlap
+    // Flat audit on raw designs (no z-scaling): the marginal~slope overlap
     // is 1.0.  With equal priorities this would be fatal.
     {
         let specs_equal_priority = [
             make_spec("time_surface", time.clone(), 100),
             make_spec("marginal_surface", marginal.clone(), 100),
-            make_spec("logslope_surface", logslope.clone(), 100),
+            make_spec("slope_surface", slope.clone(), 100),
         ];
         let audit = audit_identifiability(&specs_equal_priority)
             .expect("flat audit on equal-priority must run");
@@ -309,13 +309,13 @@ fn cross_block_alias_with_distinct_priorities_is_not_fatal() {
     }
 
     // Flat audit with DISTINCT priorities but WITHOUT z-scaling: the raw
-    // marginal~logslope overlap is still 1.0, but now gauge can resolve it.
-    // Post-fix: fatal=false, drops attributed to logslope_surface.
+    // marginal~slope overlap is still 1.0, but now gauge can resolve it.
+    // Post-fix: fatal=false, drops attributed to slope_surface.
     {
         let specs_distinct_priority = [
             make_spec("time_surface", time.clone(), 200),
             make_spec("marginal_surface", marginal.clone(), 150),
-            make_spec("logslope_surface", logslope.clone(), 120),
+            make_spec("slope_surface", slope.clone(), 120),
         ];
         let audit = audit_identifiability(&specs_distinct_priority)
             .expect("flat audit with distinct priorities must run");
@@ -330,17 +330,17 @@ fn cross_block_alias_with_distinct_priorities_is_not_fatal() {
             "gauge-resolved drops must be populated; summary: {}",
             audit.summary,
         );
-        // Every drop must be from logslope_surface (lowest priority = 120),
+        // Every drop must be from slope_surface (lowest priority = 120),
         // never from time_surface (priority = 200) or marginal_surface (150).
         for drop in &audit.dropped_columns {
             assert_eq!(
-                drop.block, "logslope_surface",
-                "gauge must attribute drops to the lowest-priority block (logslope_surface); \
+                drop.block, "slope_surface",
+                "gauge must attribute drops to the lowest-priority block (slope_surface); \
                  got drop on '{}' (summary: {})",
                 drop.block, audit.summary,
             );
         }
-        // Total kept = 33 − 10 = 23 (the 10 logslope columns are aliases
+        // Total kept = 33 − 10 = 23 (the 10 slope columns are aliases
         // of the first 10 marginal columns and get dropped).
         let total_kept: usize = audit.blocks.iter().map(|b| b.effective_dim).sum();
         assert_eq!(
@@ -350,7 +350,7 @@ fn cross_block_alias_with_distinct_priorities_is_not_fatal() {
         );
     }
 
-    // Flat audit WITH z-scaling on logslope: the scaled rows are linearly
+    // Flat audit WITH z-scaling on slope: the scaled rows are linearly
     // independent of the unscaled marginal rows (z varies row-by-row), so
     // the joint rank is full and no drops are needed.
     {
@@ -359,9 +359,9 @@ fn cross_block_alias_with_distinct_priorities_is_not_fatal() {
                 .as_slice()
                 .expect("z_primary must be C-contiguous"),
         );
-        let logslope_scaled_spec = ParameterBlockSpec {
-            name: "logslope_surface".to_string(),
-            design: DesignMatrix::Dense(DenseDesignMatrix::from(logslope.clone())),
+        let slope_scaled_spec = ParameterBlockSpec {
+            name: "slope_surface".to_string(),
+            design: DesignMatrix::Dense(DenseDesignMatrix::from(slope.clone())),
             offset: Array1::<f64>::zeros(n),
             penalties: Vec::new(),
             nullspace_dims: Vec::new(),
@@ -369,7 +369,7 @@ fn cross_block_alias_with_distinct_priorities_is_not_fatal() {
             initial_beta: None,
             gauge_priority: 120,
             jacobian_callback: Some(std::sync::Arc::new(RowScaledJacobian {
-                design: std::sync::Arc::new(logslope.clone()),
+                design: std::sync::Arc::new(slope.clone()),
                 eta_scaling: z_scaling,
             })),
             stacked_design: None,
@@ -378,12 +378,12 @@ fn cross_block_alias_with_distinct_priorities_is_not_fatal() {
         let specs_with_z_scaling = [
             make_spec("time_surface", time, 200),
             make_spec("marginal_surface", marginal, 150),
-            logslope_scaled_spec,
+            slope_scaled_spec,
         ];
         let audit = audit_identifiability(&specs_with_z_scaling).expect("z-scaled audit must run");
         assert!(
             !audit.fatal,
-            "z-scaled logslope audit must be non-fatal (diag(z)·basis is independent \
+            "z-scaled slope audit must be non-fatal (diag(z)·basis is independent \
              of unscaled marginal basis when z varies); summary: {}",
             audit.summary,
         );
@@ -391,7 +391,7 @@ fn cross_block_alias_with_distinct_priorities_is_not_fatal() {
         let total_kept: usize = audit.blocks.iter().map(|b| b.effective_dim).sum();
         assert_eq!(
             total_kept, 33,
-            "z-scaled logslope: all 33 columns must be kept (full rank); \
+            "z-scaled slope: all 33 columns must be kept (full rank); \
              got {total_kept} (summary: {})",
             audit.summary,
         );

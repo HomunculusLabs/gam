@@ -1,4 +1,4 @@
-//! Exact survival counterpart to the binary #979 Matérn marginal/log-slope
+//! Exact survival counterpart to the binary #979 Matérn marginal/slope
 //! regression. The public formula omits `length_scale` in both channels, so
 //! this must enter the joint automatic-κ optimizer rather than the cheaper
 //! fixed-geometry route.
@@ -147,7 +147,7 @@ fn resolved_auto_matern_scale(spec: &TermCollectionSpec, channel: &str) -> f64 {
 }
 
 #[test]
-fn survival_marginal_slope_auto_matern_logslope_centers12_converges() {
+fn survival_marginal_slope_auto_matern_slope_centers12_converges() {
     init_parallelism();
     // The production fitter already emits deterministic phase/evaluation
     // telemetry. Install the repository's flush-per-record test backend so a
@@ -163,21 +163,21 @@ fn survival_marginal_slope_auto_matern_logslope_centers12_converges() {
     let data = build_dataset();
 
     // The issue's shape: matern spatial surface on the marginal block and the
-    // same matern surface on the log-slope block, latent score `z`, right-
+    // same matern surface on the slope block, latent score `z`, right-
     // censored Surv(time, event).
     let matern = format!("matern(PC1, PC2, centers={CENTERS})");
     let formula = format!("Surv(time, event) ~ {matern}");
     let cfg = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("z".to_string()),
-        logslope_formula: Some(matern.clone()),
+        slope_formula: Some(matern.clone()),
         baseline_target: "linear".to_string(),
         ..FitConfig::default()
     };
 
     let start = Instant::now();
     let result = fit_from_formula(&formula, &data, &cfg)
-        .expect("survival marginal-slope matern/logslope fit (#1040)");
+        .expect("survival marginal-slope matern/slope fit (#1040)");
     let elapsed = start.elapsed().as_secs_f64();
 
     let FitResult::SurvivalMarginalSlope(fit) = result else {
@@ -185,12 +185,12 @@ fn survival_marginal_slope_auto_matern_logslope_centers12_converges() {
     };
 
     let marginal_scale = resolved_auto_matern_scale(&fit.marginalspec_resolved, "marginal channel");
-    let logslope_scale =
-        resolved_auto_matern_scale(&fit.logslopespec_resolved, "log-slope channel");
+    let slope_scale =
+        resolved_auto_matern_scale(&fit.slopespec_resolved, "slope channel");
 
     eprintln!(
         "[979-SURVIVAL] n={N} centers={CENTERS} total_s={elapsed:.3} \
-         marginal_scale={marginal_scale:.6e} logslope_scale={logslope_scale:.6e} \
+         marginal_scale={marginal_scale:.6e} slope_scale={slope_scale:.6e} \
          outer_iters={} inner_cycles={} converged=certified auto_kappa=both \
          requested_centers_strategy=farthest_point resolved_centers_strategy=user_provided nu=5/2",
         fit.fit.outer_iterations, fit.fit.inner_cycles

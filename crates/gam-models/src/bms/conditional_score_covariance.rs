@@ -1250,7 +1250,7 @@ mod tests {
                     );
                 }
             }
-            // `1ᵀΣ1` is the cached scalar the SHARED log-slope lane consumes; it
+            // `1ᵀΣ1` is the cached scalar the SHARED slope lane consumes; it
             // must be the same number the dense matrix implies.
             let ones_form: f64 = dense.iter().sum();
             assert!(

@@ -47,7 +47,7 @@ fn signed_probit_stack(signed_margin: f64, weight: f64) -> [f64; 5] {
 row_program! {
     fn generated_rigid_bms(
         marginal_eta,
-        logslope;
+        slope;
         marginal_q,
         marginal_q1,
         marginal_q2,
@@ -75,11 +75,11 @@ row_program! {
             marginal_q3,
             marginal_q4
         );
-        let observed_logslope = scale(logslope, probit_scale);
-        let observed_scale_value = compose(observed_scale, observed_logslope);
+        let observed_slope = scale(slope, probit_scale);
+        let observed_scale_value = compose(observed_scale, observed_slope);
         let latent_index = add(
             mul(q, observed_scale_value),
-            scale(observed_logslope, latent_score)
+            scale(observed_slope, latent_score)
         );
         let signed_margin = scale(latent_index, outcome_sign);
         return compose(signed_probit, signed_margin, weight);
@@ -91,7 +91,7 @@ type Channels = (f64, [f64; 2], [[f64; 2]; 2]);
 #[derive(Clone, Copy)]
 struct Row {
     marginal_eta: f64,
-    logslope: f64,
+    slope: f64,
     marginal: [f64; 5],
     probit_scale: f64,
     latent_score: f64,
@@ -105,7 +105,7 @@ struct Row {
 fn generated(row: Row) -> Channels {
     let (value, gradient, hessian, []) = generated_rigid_bms_order2(
         row.marginal_eta,
-        row.logslope,
+        row.slope,
         row.marginal[0],
         row.marginal[1],
         row.marginal[2],
@@ -121,7 +121,7 @@ fn generated(row: Row) -> Channels {
 
 #[inline(never)]
 fn strongest_hand(row: Row) -> Channels {
-    let observed_slope = row.probit_scale * row.logslope;
+    let observed_slope = row.probit_scale * row.slope;
     let scale = (1.0 + observed_slope * observed_slope).sqrt();
     let inverse_scale = scale.recip();
     let scale_first = row.probit_scale * observed_slope * inverse_scale;
@@ -133,10 +133,10 @@ fn strongest_hand(row: Row) -> Channels {
     let outer_first = row.outcome_sign * outer[1];
     let outer_second = outer[2];
     let eta_marginal = row.marginal[1] * scale;
-    let eta_logslope = row.marginal[0] * scale_first + row.probit_scale * row.latent_score;
-    let gradient = [outer_first * eta_marginal, outer_first * eta_logslope];
+    let eta_slope = row.marginal[0] * scale_first + row.probit_scale * row.latent_score;
+    let gradient = [outer_first * eta_marginal, outer_first * eta_slope];
     let cross =
-        outer_second * eta_marginal * eta_logslope + outer_first * row.marginal[1] * scale_first;
+        outer_second * eta_marginal * eta_slope + outer_first * row.marginal[1] * scale_first;
     (
         outer[0],
         gradient,
@@ -147,7 +147,7 @@ fn strongest_hand(row: Row) -> Channels {
             ],
             [
                 cross,
-                outer_second * eta_logslope * eta_logslope
+                outer_second * eta_slope * eta_slope
                     + outer_first * row.marginal[0] * scale_second,
             ],
         ],
@@ -158,7 +158,7 @@ fn strongest_hand(row: Row) -> Channels {
 fn generated_third(row: Row) -> [[f64; 2]; 2] {
     generated_rigid_bms_third_contracted(
         row.marginal_eta,
-        row.logslope,
+        row.slope,
         row.marginal[0],
         row.marginal[1],
         row.marginal[2],
@@ -176,7 +176,7 @@ fn generated_third(row: Row) -> [[f64; 2]; 2] {
 fn generated_fourth(row: Row) -> [[f64; 2]; 2] {
     generated_rigid_bms_fourth_contracted(
         row.marginal_eta,
-        row.logslope,
+        row.slope,
         row.marginal[0],
         row.marginal[1],
         row.marginal[2],
@@ -195,7 +195,7 @@ fn generated_fourth(row: Row) -> [[f64; 2]; 2] {
 fn generated_third_full(row: Row) -> [[[f64; 2]; 2]; 2] {
     generated_rigid_bms_third_full(
         row.marginal_eta,
-        row.logslope,
+        row.slope,
         row.marginal[0],
         row.marginal[1],
         row.marginal[2],
@@ -212,7 +212,7 @@ fn generated_third_full(row: Row) -> [[[f64; 2]; 2]; 2] {
 fn generated_fourth_full(row: Row) -> [[[[f64; 2]; 2]; 2]; 2] {
     generated_rigid_bms_fourth_full(
         row.marginal_eta,
-        row.logslope,
+        row.slope,
         row.marginal[0],
         row.marginal[1],
         row.marginal[2],
@@ -227,7 +227,7 @@ fn generated_fourth_full(row: Row) -> [[[[f64; 2]; 2]; 2]; 2] {
 
 #[inline(always)]
 fn margin_chain(row: Row) -> ([f64; 5], [f64; 2], [f64; 3], [f64; 4], [f64; 5]) {
-    let observed_slope = row.probit_scale * row.logslope;
+    let observed_slope = row.probit_scale * row.slope;
     let observed_stack = observed_scale_stack(observed_slope);
     let mut scale_stack = [0.0; 5];
     let mut scale_power = 1.0;
@@ -392,7 +392,7 @@ fn rows() -> Vec<Row> {
             let q = 0.8 * marginal_eta + 0.12 * marginal_eta * marginal_eta;
             Row {
                 marginal_eta,
-                logslope: 0.7 * (x * 0.11 + 0.4).cos(),
+                slope: 0.7 * (x * 0.11 + 0.4).cos(),
                 marginal: [q, 0.8 + 0.24 * marginal_eta, 0.24, 0.0, 0.0],
                 probit_scale: 0.8,
                 latent_score: 1.4 * (x * 0.13 + 0.2).sin(),
@@ -459,7 +459,7 @@ fn sample(rows: &[Row], evaluate: impl Fn(Row) -> Channels) -> f64 {
     for iteration in 0..4096 {
         for row in rows {
             let mut perturbed = *row;
-            perturbed.logslope += checksum * 1e-24;
+            perturbed.slope += checksum * 1e-24;
             let channels = std::hint::black_box(evaluate(perturbed));
             checksum += channels.0
                 + channels.1.iter().sum::<f64>()
@@ -477,7 +477,7 @@ fn sample_matrix(rows: &[Row], evaluate: impl Fn(Row) -> [[f64; 2]; 2]) -> f64 {
     for iteration in 0..4096 {
         for row in rows {
             let mut perturbed = *row;
-            perturbed.logslope += checksum * 1e-24;
+            perturbed.slope += checksum * 1e-24;
             let matrix = std::hint::black_box(evaluate(perturbed));
             checksum += matrix.iter().flat_map(|line| line.iter()).sum::<f64>();
         }
@@ -493,7 +493,7 @@ fn sample_third_full(rows: &[Row], evaluate: impl Fn(Row) -> [[[f64; 2]; 2]; 2])
     for iteration in 0..4096 {
         for row in rows {
             let mut perturbed = *row;
-            perturbed.logslope += checksum * 1e-24;
+            perturbed.slope += checksum * 1e-24;
             let tensor = std::hint::black_box(evaluate(perturbed));
             checksum += tensor
                 .iter()
@@ -513,7 +513,7 @@ fn sample_fourth_full(rows: &[Row], evaluate: impl Fn(Row) -> [[[[f64; 2]; 2]; 2
     for iteration in 0..4096 {
         for row in rows {
             let mut perturbed = *row;
-            perturbed.logslope += checksum * 1e-24;
+            perturbed.slope += checksum * 1e-24;
             let tensor = std::hint::black_box(evaluate(perturbed));
             checksum += tensor
                 .iter()

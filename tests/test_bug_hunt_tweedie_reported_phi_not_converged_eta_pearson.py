@@ -93,7 +93,9 @@ def test_reported_phi_is_converged_eta_pearson_and_recovers_truth(seed):
     p_hat = powers[-1]
 
     eta = np.asarray(
-        m.predict(df, interval=0.9, return_type="pandas")["linear_predictor"]
+        m.predict(df, interval=0.9, return_type="pandas")[
+            "linear_predictor_plugin"
+        ]
     )
     mu_hat = np.exp(eta)
 

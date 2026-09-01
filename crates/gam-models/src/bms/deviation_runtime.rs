@@ -104,7 +104,7 @@ pub struct InstalledFlexBlock {
 #[derive(Clone, Debug)]
 pub enum AnchorComponentTag {
     /// Parametric anchor — at predict time the parent predictor reconstructs
-    /// the per-row vector from the saved marginal/logslope blocks; the
+    /// the per-row vector from the saved marginal/slope blocks; the
     /// runtime only needs to know which block and how many columns. The
     /// `block` tag is consumed by the serde plumbing in
     /// `inference::model::SavedAnchorComponent`.
@@ -122,7 +122,7 @@ pub enum AnchorComponentTag {
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum ParametricAnchorBlock {
     Marginal,
-    Logslope,
+    Slope,
 }
 
 pub(crate) fn integrate_polynomial_product(left: &[f64], right: &[f64], width: f64) -> f64 {
@@ -743,7 +743,7 @@ impl DeviationRuntime {
     // `Aβ_A + Cβ_C = A(β_A + Bβ_C) + (C − AB)β_C` with `B = (AᵀWA)⁻¹AᵀWC`
     // means dropping a direction in C̃ drops *exactly* a direction
     // span(C) shares with span(A) under W, leaving no aliasing in the
-    // joint design `[X_loc | X_logslope | A | C·V − N·M]` (full column
+    // joint design `[X_loc | X_slope | A | C·V − N·M]` (full column
     // rank up to numerical tolerance, so `σ_min(joint H+S) ≥ λ_min(S₊)`
     // regardless of how β shifts the linear-predictor distribution).
     //

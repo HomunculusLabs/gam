@@ -27,8 +27,8 @@ def _fit_at_weight(y, x, grid, C):
     df = pd.DataFrame(dict(y=y, x=x, w=np.full(len(y), float(C))))
     m = gamfit.fit(df, "y ~ s(x)", weights="w")
     p = m.predict(grid, interval=0.95)
-    mean = np.asarray(p["mean"], dtype=float)
-    std_error = np.asarray(p["std_error"], dtype=float)
+    mean = np.asarray(p["posterior_mean"], dtype=float)
+    std_error = np.asarray(p["posterior_mean_standard_error"], dtype=float)
     sps = list(m.smoothing_parameters().values())
     return mean, std_error, sps
 

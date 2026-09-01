@@ -3165,7 +3165,7 @@ pub(crate) fn frozen_spatial_identifiability_transform(
 ///   projection.
 ///
 /// - *Does not consume*: cross-block aliases that arise when the same Duchon
-///   smooth appears in multiple formula channels (e.g. marginal and logslope).
+///   smooth appears in multiple formula channels (e.g. marginal and slope).
 ///   Two channels with identical raw bases have cosine-similarity 1.0 between
 ///   the corresponding columns; that aliasing is detected and resolved by the
 ///   joint cross-block identifiability audit (`audit_identifiability` /

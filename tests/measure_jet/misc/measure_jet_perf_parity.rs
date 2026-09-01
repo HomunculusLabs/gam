@@ -313,7 +313,7 @@ fn dense_of(op: &dyn LinearOperator) -> Array2<f64> {
 /// #2761 control, from the direction the accuracy gates cannot see.
 ///
 /// Every accuracy number in the measure-jet cluster — this file's, the sweep's,
-/// the BMS logslope correlation — is scored by applying the fitted coefficients
+/// the BMS slope correlation — is scored by applying the fitted coefficients
 /// to a design **rebuilt from the frozen spec** on a fresh grid, not to the
 /// design they were estimated on. So a freeze/replay defect and a smoothing
 /// defect are indistinguishable from any of those numbers alone: both show up

@@ -50,18 +50,18 @@ pub struct SurvivalMarginalSlopeTermSpec {
     pub baseline_hyper: SurvivalMarginalSlopeBaselineHyperSpec,
     pub time_block: TimeBlockInput,
     pub timewiggle_block: Option<TimeWiggleBlockInput>,
-    pub logslopespec: TermCollectionSpec,
-    pub logslopespecs: Option<Vec<TermCollectionSpec>>,
-    pub logslope_offset: Array1<f64>,
-    /// Time margin for the log-slope block (gam#2765, gam#2767).
+    pub slopespec: TermCollectionSpec,
+    pub slopespecs: Option<Vec<TermCollectionSpec>>,
+    pub slope_offset: Array1<f64>,
+    /// Time margin for the slope block (gam#2765, gam#2767).
     ///
     /// `Static` — the default and everything built before this existed — is a
     /// slope that is constant along follow-up. `TimeVarying` tensors the
-    /// log-slope covariate design against a B-spline margin in `log t`, exactly
+    /// slope covariate design against a B-spline margin in `log t`, exactly
     /// as `threshold_time_k` / `sigma_time_k` already do for the location-scale
     /// family, and the row program then carries `b` at entry, at exit, and its
     /// exit-time rate instead of a single per-row scalar.
-    pub logslope_template: SurvivalCovariateTermBlockTemplate,
+    pub slope_template: SurvivalCovariateTermBlockTemplate,
     pub score_warp: Option<DeviationBlockConfig>,
     pub link_dev: Option<DeviationBlockConfig>,
     /// Out-of-fold Stage-1 score-influence Jacobian `J = ∂z/∂θ₁` (n × p₁) for a
@@ -71,7 +71,7 @@ pub struct SurvivalMarginalSlopeTermSpec {
     /// `Z_infl = diag(s_f · β̂₀(x_i)) · J` instead of the free-spline score-warp:
     /// the realized x-dependent Stage-1 leakage directions in η-space are
     /// appended as a null-penalized absorbed block (gauge priority 80,
-    /// orthogonalized against marginal ⊕ logslope), making the β estimating
+    /// orthogonalized against marginal ⊕ slope), making the β estimating
     /// equation Neyman-orthogonal to `span(Z_infl)`. When `None` (raw `z` with
     /// no Stage-1 model), the free-warp `score_warp` path is used unchanged.
     /// Populated out-of-fold by `crossfit_score_calibration` in
@@ -125,26 +125,26 @@ pub(crate) fn survival_derivative_guard_violated(qd1: f64, derivative_guard: f64
 pub struct SurvivalMarginalSlopeFitResult {
     pub fit: UnifiedFitResult,
     pub marginalspec_resolved: TermCollectionSpec,
-    pub logslopespec_resolved: TermCollectionSpec,
+    pub slopespec_resolved: TermCollectionSpec,
     pub marginal_design: TermCollectionDesign,
     /// Learned or fixed Gaussian-shift frailty SD.  `None` = no frailty.
     pub gaussian_frailty_sd: Option<f64>,
     /// Certified nonlinear baseline selected by the joint LAML solve. Linear
     /// baselines have no family-owned coordinates and therefore return `None`.
     pub baseline_config: crate::survival::construction::SurvivalBaselineConfig,
-    pub logslope_design: TermCollectionDesign,
-    /// The resolved follow-up time margin of the log-slope block, when the fit
+    pub slope_design: TermCollectionDesign,
+    /// The resolved follow-up time margin of the slope block, when the fit
     /// asked for a slope that varies along follow-up (gam#2765, gam#2767).
     ///
     /// This is fit state a predictor would have to replay: with a margin
-    /// present, `logslope_design` is the tensor product `X_cov ⊗ᵣ B(log t)` and
-    /// `logslopespec_resolved` still describes only the covariate factor, so a
+    /// present, `slope_design` is the tensor product `X_cov ⊗ᵣ B(log t)` and
+    /// `slopespec_resolved` still describes only the covariate factor, so a
     /// predictor that rebuilt the design from the spec alone would produce
     /// `p_cov` columns against a `p_cov·p_time` coefficient vector. The knots
     /// are carried here for exactly the reason the threshold and sigma margins
     /// carry theirs — a prediction sample must never be allowed to move the
     /// basis by re-estimating quantile knots.
-    pub logslope_time_basis: Option<crate::survival::location_scale::SurvivalCovariateTimeBasis>,
+    pub slope_time_basis: Option<crate::survival::location_scale::SurvivalCovariateTimeBasis>,
     pub baseline_slope: f64,
     pub baseline_offset_residuals: OffsetChannelResiduals,
     pub baseline_offset_curvatures: OffsetChannelCurvatures,
@@ -228,7 +228,7 @@ impl SurvivalMarginalSlopeFitResult {
     /// rank-INT, never alongside it.
     ///
     /// `K > 1` is a refusal, not a truncation. The saved payload carries one
-    /// `z_column`, one logslope term collection and one calibration, so a
+    /// `z_column`, one slope term collection and one calibration, so a
     /// multi-surface fit whose second-or-later score was calibrated cannot be
     /// represented: prediction would rebuild that column's latent axis WITHOUT
     /// the map the fit applied to it and evaluate a different model. Dropping it
@@ -330,14 +330,14 @@ pub(crate) fn split_persisted_latent_calibrations(
 pub(crate) fn validate_spec(spec: &SurvivalMarginalSlopeTermSpec) -> Result<(), String> {
     let n = spec.age_entry.len();
     log::info!(
-        "[survival-marginal-slope] fit start n={} marginal_terms={} logslope_terms={}",
+        "[survival-marginal-slope] fit start n={} marginal_terms={} slope_terms={}",
         n,
         spec.marginalspec.linear_terms.len()
             + spec.marginalspec.random_effect_terms.len()
             + spec.marginalspec.smooth_terms.len(),
-        spec.logslopespec.linear_terms.len()
-            + spec.logslopespec.random_effect_terms.len()
-            + spec.logslopespec.smooth_terms.len(),
+        spec.slopespec.linear_terms.len()
+            + spec.slopespec.random_effect_terms.len()
+            + spec.slopespec.smooth_terms.len(),
     );
     if spec.age_exit.len() != n
         || spec.event_target.len() != n
@@ -345,11 +345,11 @@ pub(crate) fn validate_spec(spec: &SurvivalMarginalSlopeTermSpec) -> Result<(), 
         || spec.z.nrows() != n
         || spec.z.ncols() == 0
         || spec.marginal_offset.len() != n
-        || spec.logslope_offset.len() != n
+        || spec.slope_offset.len() != n
     {
         return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
             reason: format!(
-                "survival-marginal-slope row mismatch: entry={}, exit={}, event={}, weights={}, z={}x{}, marginal_offset={}, logslope_offset={}",
+                "survival-marginal-slope row mismatch: entry={}, exit={}, event={}, weights={}, z={}x{}, marginal_offset={}, slope_offset={}",
                 n,
                 spec.age_exit.len(),
                 spec.event_target.len(),
@@ -357,7 +357,7 @@ pub(crate) fn validate_spec(spec: &SurvivalMarginalSlopeTermSpec) -> Result<(), 
                 spec.z.nrows(),
                 spec.z.ncols(),
                 spec.marginal_offset.len(),
-                spec.logslope_offset.len()
+                spec.slope_offset.len()
             ),
         }
         .into());
@@ -403,9 +403,9 @@ pub(crate) fn validate_spec(spec: &SurvivalMarginalSlopeTermSpec) -> Result<(), 
         }
         .into());
     }
-    if spec.logslope_offset.iter().any(|&value| !value.is_finite()) {
+    if spec.slope_offset.iter().any(|&value| !value.is_finite()) {
         return Err(SurvivalMarginalSlopeError::InvalidInput {
-            reason: "survival-marginal-slope requires finite logslope offsets".to_string(),
+            reason: "survival-marginal-slope requires finite slope offsets".to_string(),
         }
         .into());
     }

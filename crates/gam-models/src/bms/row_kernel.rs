@@ -338,8 +338,8 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
                 .marginal_design
                 .dot_row_view(row, d_beta.slice(s![self.slices.marginal.clone()])),
             self.family
-                .logslope_design
-                .dot_row_view(row, d_beta.slice(s![self.slices.logslope.clone()])),
+                .slope_design
+                .dot_row_view(row, d_beta.slice(s![self.slices.slope.clone()])),
         ]
     }
 
@@ -352,11 +352,11 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
                 .expect("marginal axpy dim mismatch");
         }
         {
-            let mut g = ndarray::ArrayViewMut1::from(&mut out[self.slices.logslope.clone()]);
+            let mut g = ndarray::ArrayViewMut1::from(&mut out[self.slices.slope.clone()]);
             self.family
-                .logslope_design
+                .slope_design
                 .axpy_row_into(row, v[1], &mut g)
-                .expect("logslope axpy dim mismatch");
+                .expect("slope axpy dim mismatch");
         }
     }
 
@@ -377,38 +377,38 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
                 .marginal_design
                 .row_outer_into_view(
                     row,
-                    &self.family.logslope_design,
+                    &self.family.slope_design,
                     h[0][1],
                     target.slice_mut(s![
                         self.slices.marginal.clone(),
-                        self.slices.logslope.clone()
+                        self.slices.slope.clone()
                     ]),
                 )
-                .expect("marginal-logslope outer dim mismatch");
+                .expect("marginal-slope outer dim mismatch");
             self.family
-                .logslope_design
+                .slope_design
                 .row_outer_into_view(
                     row,
                     &self.family.marginal_design,
                     h[0][1],
                     target.slice_mut(s![
-                        self.slices.logslope.clone(),
+                        self.slices.slope.clone(),
                         self.slices.marginal.clone()
                     ]),
                 )
-                .expect("logslope-marginal outer dim mismatch");
+                .expect("slope-marginal outer dim mismatch");
         }
         self.family
-            .logslope_design
+            .slope_design
             .syr_row_into_view(
                 row,
                 h[1][1],
                 target.slice_mut(s![
-                    self.slices.logslope.clone(),
-                    self.slices.logslope.clone()
+                    self.slices.slope.clone(),
+                    self.slices.slope.clone()
                 ]),
             )
-            .expect("logslope syr dim mismatch");
+            .expect("slope syr dim mismatch");
     }
 
     fn add_diagonal_quadratic(&self, row: usize, h: &[[f64; 2]; 2], diag: &mut [f64]) {
@@ -420,11 +420,11 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
                 .expect("marginal squared_axpy dim mismatch");
         }
         {
-            let mut gd = ndarray::ArrayViewMut1::from(&mut diag[self.slices.logslope.clone()]);
+            let mut gd = ndarray::ArrayViewMut1::from(&mut diag[self.slices.slope.clone()]);
             self.family
-                .logslope_design
+                .slope_design
                 .squared_axpy_row_into(row, h[1][1], &mut gd)
-                .expect("logslope squared_axpy dim mismatch");
+                .expect("slope squared_axpy dim mismatch");
         }
     }
 
@@ -512,7 +512,7 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
     ///
     /// ```text
     ///   jacobian_action(r, β)[0] = marginal_design.row(r) · β[marg_range]
-    ///   jacobian_action(r, β)[1] = logslope_design.row(r) · β[logs_range]
+    ///   jacobian_action(r, β)[1] = slope_design.row(r) · β[logs_range]
     /// ```
     ///
     /// So the full `(n × 2·rank)` projection is two dense matrix-matrix
@@ -543,7 +543,7 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
             .as_standard_layout()
             .into_owned();
         let f_logs = factor
-            .slice(s![self.slices.logslope.clone(), ..])
+            .slice(s![self.slices.slope.clone(), ..])
             .as_standard_layout()
             .into_owned();
 
@@ -556,7 +556,7 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
             n_rows,
         );
         let jf_logs = crate::row_kernel::row_kernel_design_jf(
-            &self.family.logslope_design,
+            &self.family.slope_design,
             f_logs.view(),
             n_rows,
         );
@@ -587,7 +587,7 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
             .as_standard_layout()
             .into_owned();
         let f_logs = factor
-            .slice(s![self.slices.logslope.clone(), ..])
+            .slice(s![self.slices.slope.clone(), ..])
             .as_standard_layout()
             .into_owned();
         let jf_marg = crate::row_kernel::row_kernel_design_jf_rows(
@@ -597,7 +597,7 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
             end,
         );
         let jf_logs = crate::row_kernel::row_kernel_design_jf_rows(
-            &self.family.logslope_design,
+            &self.family.slope_design,
             f_logs.view(),
             start,
             end,
@@ -614,7 +614,7 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
     ///
     /// ```text
     ///   H_drift = Σ_row Xᵣᵀ · contract_third_full(T³ᵣ, dq_r, dg_r) · Xᵣ,
-    ///   dq_r = marginal_design.row(r)·d_beta[marg],  dg_r = logslope.row(r)·d_beta[logs].
+    ///   dq_r = marginal_design.row(r)·d_beta[marg],  dg_r = slope.row(r)·d_beta[logs].
     /// ```
     ///
     /// We accumulate the per-row `2×2` contraction weights `(w_mm, w_mg, w_gg)`
@@ -656,12 +656,12 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
         // row-chunk), so the only structurally-inapplicable case is a sparse
         // design block — gate on that, not on the presence of a pre-materialised
         // `as_dense_ref`. Without this, a biobank rigid fit whose marginal /
-        // logslope design is operator-backed (residualised absorber, overlap-Z)
+        // slope design is operator-backed (residualised absorber, overlap-Z)
         // fell through to the generic per-row third-tensor scatter — the ~8s
         // per-cycle `gradient_reload` / Jeffreys-column floor.
         let marginal_sparse = self.family.marginal_design.is_sparse();
-        let logslope_sparse = self.family.logslope_design.is_sparse();
-        if marginal_sparse || logslope_sparse {
+        let slope_sparse = self.family.slope_design.is_sparse();
+        if marginal_sparse || slope_sparse {
             return None;
         }
         Some(self.directional_derivative_dense_blas3(d_beta))
@@ -679,7 +679,7 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
     /// third tensor `T³ᵣ` is built ONCE (cached `third_full`) and the axis
     /// projection enters LINEARLY: a marginal axis `j` has primary projection
     /// `(vq, vg) = (X[r,j], 0)` and `contract_third_full(T³ᵣ, X[r,j], 0) =
-    /// X[r,j] · contract_third_full(T³ᵣ, 1, 0)`; a logslope axis has
+    /// X[r,j] · contract_third_full(T³ᵣ, 1, 0)`; a slope axis has
     /// `(0, G[r,j])`. So we read each row's `A_r = contract_third_full(T³ᵣ, 1, 0)`
     /// and `B_r = contract_third_full(T³ᵣ, 0, 1)` once and close every axis with
     /// the same chunked `Xᵀ diag(w) X` / `Xᵀ diag(w) G` BLAS-3 machinery the
@@ -709,8 +709,8 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
             return None;
         }
         let marginal_sparse = self.family.marginal_design.is_sparse();
-        let logslope_sparse = self.family.logslope_design.is_sparse();
-        if marginal_sparse || logslope_sparse {
+        let slope_sparse = self.family.slope_design.is_sparse();
+        if marginal_sparse || slope_sparse {
             return None;
         }
         Some(self.directional_derivative_all_axes_blas3())
@@ -749,13 +749,13 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
         // The chunked `Xᵀ diag(w) X` build slices contiguous design rows via
         // `try_row_chunk`, which every dense-backed design (materialised OR
         // operator-backed / residualised) supports — so the BLAS-3 path fires
-        // for the biobank rigid fit regardless of whether the marginal/logslope
+        // for the biobank rigid fit regardless of whether the marginal/slope
         // designs expose a pre-materialised `as_dense_ref`. Sparse designs are
         // the only structurally-inapplicable case; route those to the generic
         // per-row scatter so the design-row Gram never densifies a sparse block.
         let marginal_sparse = self.family.marginal_design.is_sparse();
-        let logslope_sparse = self.family.logslope_design.is_sparse();
-        if marginal_sparse || logslope_sparse {
+        let slope_sparse = self.family.slope_design.is_sparse();
+        if marginal_sparse || slope_sparse {
             // Diagnostic fires once per process, not once per inner-Newton kernel
             // call: `hessian_dense_override` runs on every joint-Hessian assembly,
             // so an unguarded line floods the biobank fit log.
@@ -763,7 +763,7 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
             H_NOT_TAKEN_LOGGED.call_once(|| {
                 log::info!(
                     "[STAGE] BMS rigid hessian_dense BLAS-3 path NOT taken: sparse design \
-                     (marginal_sparse={marginal_sparse} logslope_sparse={logslope_sparse}) \
+                     (marginal_sparse={marginal_sparse} slope_sparse={slope_sparse}) \
                      -> generic per-row scatter"
                 );
             });
@@ -775,7 +775,7 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
         // device result is an error and cannot select the CPU algorithm.
         match rigid_joint_hessian_on_gpu(
             &self.family.marginal_design,
-            &self.family.logslope_design,
+            &self.family.slope_design,
             row_hessians,
         ) {
             Ok(Some(joint)) => return Some(Ok(joint)),
@@ -812,7 +812,7 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
     ///
     /// are INDEPENDENT of the swept axis. A marginal-block axis `j` has
     /// `(vq_r, vg_r) = (X[r,j], 0)` so its row weight is `X[r,j]·A_r`; a
-    /// logslope-block axis `j` has `(0, G[r,j])` so its row weight is
+    /// slope-block axis `j` has `(0, G[r,j])` so its row weight is
     /// `G[r,j]·B_r`. Thus we read the cached fourth tensor and build `A_r, B_r`
     /// ONCE per row (hoisted out of the `p`-loop, the `~p×` reduction), then
     /// close each axis with the same chunked `Xᵀ diag(w) X` / `Xᵀ diag(w) G`
@@ -839,8 +839,8 @@ impl RowKernel<2> for BernoulliRigidRowKernel {
         // which every dense-backed design (materialised OR operator-backed)
         // supports; only a sparse design block is structurally inapplicable.
         let marginal_sparse = self.family.marginal_design.is_sparse();
-        let logslope_sparse = self.family.logslope_design.is_sparse();
-        if marginal_sparse || logslope_sparse {
+        let slope_sparse = self.family.slope_design.is_sparse();
+        if marginal_sparse || slope_sparse {
             return None;
         }
         Some(self.second_directional_derivative_all_axes_blas3(d_beta_u))
@@ -886,21 +886,21 @@ fn blas3_gram_chunk_rows(n: usize) -> usize {
 #[inline]
 fn rigid_joint_hessian_on_gpu(
     marginal_design: &gam_linalg::matrix::DesignMatrix,
-    logslope_design: &gam_linalg::matrix::DesignMatrix,
+    slope_design: &gam_linalg::matrix::DesignMatrix,
     row_hessians: &[[[f64; 2]; 2]],
 ) -> Result<Option<Array2<f64>>, String> {
     let Some(x_full) = marginal_design.as_dense_ref() else {
         return Ok(None);
     };
-    let Some(g_full) = logslope_design.as_dense_ref() else {
+    let Some(g_full) = slope_design.as_dense_ref() else {
         return Ok(None);
     };
     let rows = x_full.nrows();
-    let logslope_rows = g_full.nrows();
-    if rows != logslope_rows || rows != row_hessians.len() {
+    let slope_rows = g_full.nrows();
+    if rows != slope_rows || rows != row_hessians.len() {
         return Err(format!(
             "BMS rigid joint-Hessian dimensions disagree: marginal_rows={rows}, \
-             logslope_rows={logslope_rows}, row_hessians={}",
+             slope_rows={slope_rows}, row_hessians={}",
             row_hessians.len()
         ));
     }
@@ -912,11 +912,11 @@ fn rigid_joint_hessian_on_gpu(
     #[cfg(target_os = "linux")]
     {
         let marginal_cols = x_full.ncols();
-        let logslope_cols = g_full.ncols();
+        let slope_cols = g_full.ncols();
         let operation = gam_gpu::linalg_dispatch::DispatchOp::JointHessian2x2 {
             n: rows,
             pa: marginal_cols,
-            pb: logslope_cols,
+            pb: slope_cols,
         };
         if gam_gpu::linalg_dispatch::route_through_gpu(operation).is_none() {
             return Ok(None);
@@ -929,7 +929,7 @@ fn rigid_joint_hessian_on_gpu(
             "rigid joint Hessian",
             rows,
             marginal_cols,
-            logslope_cols,
+            slope_cols,
             gam_gpu::linalg_dispatch::try_fast_joint_hessian_2x2(
                 x_full.view(),
                 g_full.view(),
@@ -1006,15 +1006,15 @@ impl BernoulliRigidRowKernel {
                             .into(),
                     };
                 let g_chunk: ndarray::CowArray<'_, f64, ndarray::Ix2> =
-                    match self.family.logslope_design.as_dense_ref() {
+                    match self.family.slope_design.as_dense_ref() {
                         Some(g_full) => g_full.slice(s![start..end, ..]).into(),
                         None => self
                             .family
-                            .logslope_design
+                            .slope_design
                             .try_row_chunk(start..end)
                             .map_err(|e| {
                                 format!(
-                                    "bernoulli rigid hessian_dense_blas3 logslope_design \
+                                    "bernoulli rigid hessian_dense_blas3 slope_design \
                                      try_row_chunk({start}..{end}): {e}"
                                 )
                             })?
@@ -1072,8 +1072,8 @@ impl BernoulliRigidRowKernel {
             .slice(s![slices.marginal.clone()])
             .to_owned()
             .insert_axis(ndarray::Axis(1));
-        let logslope_dir_mat = d_beta
-            .slice(s![slices.logslope.clone()])
+        let slope_dir_mat = d_beta
+            .slice(s![slices.slope.clone()])
             .to_owned()
             .insert_axis(ndarray::Axis(1));
         // Force the shared per-row third tensor build at top-level rayon before
@@ -1112,25 +1112,25 @@ impl BernoulliRigidRowKernel {
                                 .into(),
                         };
                     let g_chunk: ndarray::CowArray<'_, f64, ndarray::Ix2> =
-                        match self.family.logslope_design.as_dense_ref() {
+                        match self.family.slope_design.as_dense_ref() {
                             Some(g_full) => g_full.slice(s![start..end, ..]).into(),
                             None => self
                                 .family
-                                .logslope_design
+                                .slope_design
                                 .try_row_chunk(start..end)
                                 .map_err(|e| {
-                                    format!("bernoulli logslope_design try_row_chunk: {e}")
+                                    format!("bernoulli slope_design try_row_chunk: {e}")
                                 })?
                                 .into(),
                         };
                     let marginal_projected =
                         gam_linalg::faer_ndarray::fast_ab(&x_chunk, &marginal_dir_mat);
-                    let logslope_projected =
-                        gam_linalg::faer_ndarray::fast_ab(&g_chunk, &logslope_dir_mat);
+                    let slope_projected =
+                        gam_linalg::faer_ndarray::fast_ab(&g_chunk, &slope_dir_mat);
                     for row in start..end {
                         let local = row - start;
                         let dq = marginal_projected[[local, 0]];
-                        let dg = logslope_projected[[local, 0]];
+                        let dg = slope_projected[[local, 0]];
                         let t = contract_third_full(&third_full[row], dq, dg);
                         w_mm[local] = t[0][0];
                         w_mg[local] = t[0][1];
@@ -1195,7 +1195,7 @@ impl BernoulliRigidRowKernel {
     /// `contract_fourth_full(T⁴ᵣ, uq_r, ug_r, vq_r, vg_r)` with the SAME
     /// arguments the generic `row_fourth_contracted` receives — `dir_u` is the
     /// row `u`-projection, `dir_v` is the row `e_a`-projection
-    /// (`(X[r,j], 0)` for a marginal axis, `(0, G[r,j])` for a logslope axis,
+    /// (`(X[r,j], 0)` for a marginal axis, `(0, G[r,j])` for a slope axis,
     /// the exact value `jacobian_action(row, e_a)` returns). The Gram swap from
     /// BLAS-1 syr scatter to `fast_xt_diag_*` reduces in the identical in-row
     /// order (same contract as `hessian_dense_blas3`), so axis `a` matches
@@ -1208,7 +1208,7 @@ impl BernoulliRigidRowKernel {
         let slices = &self.slices;
         let n = self.family.y.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         let d_beta_u = ndarray::ArrayView1::from(d_beta_u);
         // Fixed-direction blocks for the single-column `u`-projection GEMMs.
         let u_marg_mat = d_beta_u
@@ -1216,7 +1216,7 @@ impl BernoulliRigidRowKernel {
             .to_owned()
             .insert_axis(ndarray::Axis(1));
         let u_logs_mat = d_beta_u
-            .slice(s![slices.logslope.clone()])
+            .slice(s![slices.slope.clone()])
             .to_owned()
             .insert_axis(ndarray::Axis(1));
         // Force the shared per-row fourth tensor build at top-level rayon before
@@ -1253,13 +1253,13 @@ impl BernoulliRigidRowKernel {
                             .into(),
                     };
                 let g_chunk: ndarray::CowArray<'_, f64, ndarray::Ix2> =
-                    match self.family.logslope_design.as_dense_ref() {
+                    match self.family.slope_design.as_dense_ref() {
                         Some(g_full) => g_full.slice(s![start..end, ..]).into(),
                         None => self
                             .family
-                            .logslope_design
+                            .slope_design
                             .try_row_chunk(start..end)
-                            .map_err(|e| format!("bernoulli logslope_design try_row_chunk: {e}"))?
+                            .map_err(|e| format!("bernoulli slope_design try_row_chunk: {e}"))?
                             .into(),
                     };
                 let uq_chunk = gam_linalg::faer_ndarray::fast_ab(&x_chunk, &u_marg_mat);
@@ -1274,7 +1274,7 @@ impl BernoulliRigidRowKernel {
 
         // One axis = one independent full-data design-row Gram. Marginal axes
         // are `e_a` with the unit in the marginal block (axis projection
-        // `(X[r,j], 0)`); logslope axes have it in the logslope block
+        // `(X[r,j], 0)`); slope axes have it in the slope block
         // (`(0, G[r,j])`). Fan the `p` axes across the pool (each is a pure
         // evaluation reading the shared `uq/ug` and the cached fourth tensor);
         // the nested-BLAS guard pins each axis's chunk GEMMs to `Par::Seq`.
@@ -1306,14 +1306,14 @@ impl BernoulliRigidRowKernel {
                                     .into(),
                             };
                         let g_chunk: ndarray::CowArray<'_, f64, ndarray::Ix2> =
-                            match self.family.logslope_design.as_dense_ref() {
+                            match self.family.slope_design.as_dense_ref() {
                                 Some(g_full) => g_full.slice(s![start..end, ..]).into(),
                                 None => self
                                     .family
-                                    .logslope_design
+                                    .slope_design
                                     .try_row_chunk(start..end)
                                     .map_err(|e| {
-                                        format!("bernoulli logslope_design try_row_chunk: {e}")
+                                        format!("bernoulli slope_design try_row_chunk: {e}")
                                     })?
                                     .into(),
                             };
@@ -1380,9 +1380,9 @@ impl BernoulliRigidRowKernel {
     /// Returns the `p` dense matrices `{Hdot[e_a]}_{a=0..p}`. Each axis's per-row
     /// weight is `contract_third_full(T³ᵣ, vq_r, vg_r)` with `(vq_r, vg_r) =
     /// jacobian_action(row, e_a)` — `(X[r,j], 0)` for a marginal axis,
-    /// `(0, G[r,j])` for a logslope axis. `contract_third_full` is LINEAR in
+    /// `(0, G[r,j])` for a slope axis. `contract_third_full` is LINEAR in
     /// `(vq, vg)`, so a marginal axis's weight is `X[r,j] · A_r` with
-    /// `A_r = contract_third_full(T³ᵣ, 1, 0)`, and a logslope axis's is
+    /// `A_r = contract_third_full(T³ᵣ, 1, 0)`, and a slope axis's is
     /// `G[r,j] · B_r` with `B_r = contract_third_full(T³ᵣ, 0, 1)`. We read the
     /// cached third tensor and build `A_r, B_r` ONCE per row (the `~p×`
     /// reduction over the per-axis path's repeated kernel/tensor rebuilds), then
@@ -1399,7 +1399,7 @@ impl BernoulliRigidRowKernel {
         let slices = &self.slices;
         let n = self.family.y.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         // Force the shared per-row third tensor build at top-level rayon before
         // any chunk/axis fold, so the bodies do an O(1) lookup.
         let third_full = self.third_full_cache();
@@ -1417,7 +1417,7 @@ impl BernoulliRigidRowKernel {
 
         // Per-row axis-independent partial contractions, built ONCE:
         //   A_r = contract_third_full(T³ᵣ, 1, 0)   (marginal-axis unit weight)
-        //   B_r = contract_third_full(T³ᵣ, 0, 1)   (logslope-axis unit weight)
+        //   B_r = contract_third_full(T³ᵣ, 0, 1)   (slope-axis unit weight)
         // Each is a symmetric `2×2`; we keep the three independent entries
         // `(mm, mg, gg)` the design-row Gram consumes.
         let mut a_mm = Array1::<f64>::zeros(n);
@@ -1439,7 +1439,7 @@ impl BernoulliRigidRowKernel {
 
         // One axis = one independent full-data design-row Gram. A marginal axis
         // `j` projects to `(X[r,j], 0)`, so its row weight is `X[r,j]·A_r`; a
-        // logslope axis `j` projects to `(0, G[r,j])`, so its row weight is
+        // slope axis `j` projects to `(0, G[r,j])`, so its row weight is
         // `G[r,j]·B_r`. Fan the `p` axes across the pool (each reads the shared
         // `A/B` weights); the nested-BLAS guard pins each axis's chunk GEMMs to
         // `Par::Seq`. Index-ordered collection keeps the output bit-identical to
@@ -1469,14 +1469,14 @@ impl BernoulliRigidRowKernel {
                                     .into(),
                             };
                         let g_chunk: ndarray::CowArray<'_, f64, ndarray::Ix2> =
-                            match self.family.logslope_design.as_dense_ref() {
+                            match self.family.slope_design.as_dense_ref() {
                                 Some(g_full) => g_full.slice(s![start..end, ..]).into(),
                                 None => self
                                     .family
-                                    .logslope_design
+                                    .slope_design
                                     .try_row_chunk(start..end)
                                     .map_err(|e| {
-                                        format!("bernoulli logslope_design try_row_chunk: {e}")
+                                        format!("bernoulli slope_design try_row_chunk: {e}")
                                     })?
                                     .into(),
                             };
@@ -1725,7 +1725,7 @@ mod early_exit_soundness_tests {
     /// only cross-path accumulation round-off (≈1 ULP) must NOT be early-
     /// rejected: the early exit defers the borderline decision to the exact
     /// full LL return value and the caller's objective/ρ accept test. This is
-    /// the biobank gauge-flat marginal/logslope hang — the line search rejected
+    /// the biobank gauge-flat marginal/slope hang — the line search rejected
     /// every trial by ~3e-11 at NLL≈1.5e5 (1 ULP) so the trust radius collapsed
     /// and the inner solve spun to its cap. A trial that is genuinely worse by
     /// more than the round-off band must still reject.

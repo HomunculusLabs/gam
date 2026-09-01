@@ -6,7 +6,7 @@
 //!       + sex + entry_age_z
 //!       + current_age_ns_1 + current_age_ns_2 + current_age_ns_3 + current_age_ns_4
 //!
-//! with a Matérn log-slope surface over the same PCs. The pre-fit
+//! with a Matérn slope surface over the same PCs. The pre-fit
 //! identifiability audit reported `marginal_surface` rank 14/15 and attributed
 //! the dropped local column to the scalar prefix (`local column 3`), before the
 //! Matérn basis columns. In the real pipeline `current_age_ns_1` can be the
@@ -424,7 +424,7 @@ fn binary_outcome_shape_bms_matern_fit_is_not_refused_by_identifiability_audit()
     gam::init_parallelism();
     let data = binary_outcome_shape_dataset();
     let cfg = FitConfig {
-        logslope_formula: Some("matern(PC1, PC2, PC3, centers=4)".to_string()),
+        slope_formula: Some("matern(PC1, PC2, PC3, centers=4)".to_string()),
         z_column: Some("prs_z".to_string()),
         ..FitConfig::default()
     };
@@ -459,7 +459,7 @@ fn binary_outcome_shape_bms_matern_centers60_are_rank_reduced() {
     gam::init_parallelism();
     let data = duplicate_pc_binary_outcome_shape_dataset();
     let cfg = FitConfig {
-        logslope_formula: Some("matern(PC1, PC2, PC3, centers=60, length_scale=1.0)".to_string()),
+        slope_formula: Some("matern(PC1, PC2, PC3, centers=60, length_scale=1.0)".to_string()),
         z_column: Some("prs_z".to_string()),
         ..FitConfig::default()
     };
@@ -515,7 +515,7 @@ fn binary_outcome_shape_bms_shared_matern_prs_pc_confound_starts_outer_solver() 
     }
 
     let cfg = FitConfig {
-        logslope_formula: Some("matern(PC1, PC2, PC3, centers=6, length_scale=1.0)".to_string()),
+        slope_formula: Some("matern(PC1, PC2, PC3, centers=6, length_scale=1.0)".to_string()),
         z_column: Some("prs_z".to_string()),
         ..FitConfig::default()
     };
@@ -552,7 +552,7 @@ fn production_like_binary_outcome_shared_matern_centers10_confound_starts_outer_
     gam::init_parallelism();
     let data = production_like_pc_confound_dataset();
     let cfg = FitConfig {
-        logslope_formula: Some("matern(PC1, PC2, PC3, centers=10, length_scale=1.0)".to_string()),
+        slope_formula: Some("matern(PC1, PC2, PC3, centers=10, length_scale=1.0)".to_string()),
         z_column: Some("prs_z".to_string()),
         ..FitConfig::default()
     };
@@ -595,7 +595,7 @@ fn production_like_binary_outcome_shared_matern_learned_kappa_starts_outer_solve
     gam::init_parallelism();
     let data = production_like_pc_confound_dataset();
     let cfg = FitConfig {
-        logslope_formula: Some("matern(PC1, PC2, PC3, centers=6)".to_string()),
+        slope_formula: Some("matern(PC1, PC2, PC3, centers=6)".to_string()),
         z_column: Some("prs_z".to_string()),
         ..FitConfig::default()
     };

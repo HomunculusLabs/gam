@@ -264,20 +264,20 @@ pub(crate) fn materialize_survival<'a>(
     if matches!(survival_mode, SurvivalLikelihoodMode::MarginalSlope)
         && let Some(z_column) = config.z_column.as_deref()
     {
-        let logslope_parsed_for_check = match config.logslope_formula.as_deref() {
+        let slope_parsed_for_check = match config.slope_formula.as_deref() {
             Some(ls_formula) => Some(
-                parse_matching_auxiliary_formula(ls_formula, &parsed.response, "logslope_formula")?
+                parse_matching_auxiliary_formula(ls_formula, &parsed.response, "slope_formula")?
                     .1,
             ),
             None => None,
         };
-        let logslope_ref = logslope_parsed_for_check.as_ref().unwrap_or(parsed);
+        let slope_ref = slope_parsed_for_check.as_ref().unwrap_or(parsed);
         validate_marginal_slope_z_column_exclusion(
             parsed,
-            logslope_ref,
+            slope_ref,
             z_column,
             "survival marginal-slope",
-            "logslope_formula",
+            "slope_formula",
         )?;
         // Same alias hole as the Bernoulli path (gam#2432): this survival
         // entry installs `column_map_with_alias(col_map, "z", z_column)` below,
@@ -482,14 +482,14 @@ pub(crate) fn materialize_survival<'a>(
     } else {
         SurvivalCovariateTermBlockTemplate::Static
     };
-    // The log-slope time margin (gam#2765, gam#2767). Built from the same
+    // The slope time margin (gam#2765, gam#2767). Built from the same
     // primitive the threshold and sigma margins use, so the three blocks share
     // one knot rule, one degree admission check and one replay path.
-    let logslope_template = if let Some(k) = config.logslope_time_k {
+    let slope_template = if let Some(k) = config.slope_time_k {
         if survival_mode != SurvivalLikelihoodMode::MarginalSlope {
             return Err(WorkflowError::InvalidConfig {
-                reason: "logslope_time_k applies to the survival marginal-slope likelihood; \
-                         the log-slope block does not exist in the other survival modes"
+                reason: "slope_time_k applies to the survival marginal-slope likelihood; \
+                         the slope block does not exist in the other survival modes"
                     .to_string(),
             });
         }
@@ -497,8 +497,8 @@ pub(crate) fn materialize_survival<'a>(
             &age_entry,
             &age_exit,
             k,
-            config.logslope_time_degree,
-            "logslope",
+            config.slope_time_degree,
+            "slope",
         )?
     } else {
         SurvivalCovariateTermBlockTemplate::Static
@@ -508,7 +508,7 @@ pub(crate) fn materialize_survival<'a>(
         apply_secondary_predictor_basis_parsimony(&mut noise_parsed.terms, data.values.nrows());
         // Use the same aliased col_map as the main termspec — survival
         // marginal-slope reserves `z` as a placeholder for `--z-column`,
-        // and the logslope/noise formula may reference it too.
+        // and the slope/noise formula may reference it too.
         build_termspec_with_geometry_and_overrides(
             &noise_parsed.terms,
             data,
@@ -568,8 +568,8 @@ pub(crate) fn materialize_survival<'a>(
     };
     let (
         marginal_z,
-        marginal_logslopespec,
-        marginal_logslopespecs,
+        marginal_slopespec,
+        marginal_slopespecs,
         marginal_slope_deviation_routing,
         marginal_slope_base_link,
     ) = if survival_mode == SurvivalLikelihoodMode::MarginalSlope {
@@ -578,34 +578,34 @@ pub(crate) fn materialize_survival<'a>(
             // Calibrated chain: the CTN Stage-1 recipe produces a SINGLE z surface
             // out-of-fold, so no dose column is read. Stand in an n×1 placeholder
             // surface (the cross-fit below overrides column 0) and build the
-            // logslope surface from the formula (or the marginal termspec). The
+            // slope surface from the formula (or the marginal termspec). The
             // single-surface invariant matches the cross-fit guard further down.
             let placeholder_z = Array2::<f64>::zeros((data.values.nrows(), 1));
-            let (logslopespec, routing) = if let Some(ls_formula) =
-                config.logslope_formula.as_deref()
+            let (slopespec, routing) = if let Some(ls_formula) =
+                config.slope_formula.as_deref()
             {
                 let (_, ls_parsed) = parse_matching_auxiliary_formula(
                     ls_formula,
                     &parsed.response,
-                    "logslope_formula",
+                    "slope_formula",
                 )?;
                 if ls_parsed.linkspec.is_some() {
                     return Err(
-                        "link(...) is not supported in logslope_formula for the survival marginal-slope family"
+                        "link(...) is not supported in slope_formula for the survival marginal-slope family"
                             .to_string()
                             .into(),
                     );
                 }
                 if ls_parsed.timewiggle.is_some() {
                     return Err(
-                        "timewiggle(...) is not supported in logslope_formula for the survival marginal-slope family"
+                        "timewiggle(...) is not supported in slope_formula for the survival marginal-slope family"
                             .to_string()
                             .into(),
                     );
                 }
                 if ls_parsed.survivalspec.is_some() {
                     return Err(
-                        "survmodel(...) is not supported in logslope_formula for the survival marginal-slope family"
+                        "survmodel(...) is not supported in slope_formula for the survival marginal-slope family"
                             .to_string()
                             .into(),
                     );
@@ -623,7 +623,7 @@ pub(crate) fn materialize_survival<'a>(
                 prune_unidentified_linear_terms_for_marginal_slope(
                     &mut spec,
                     data,
-                    "survival marginal-slope logslope_formula",
+                    "survival marginal-slope slope_formula",
                     &mut inference_notes,
                 )?;
                 let routing = route_marginal_slope_deviation_blocks(
@@ -639,32 +639,32 @@ pub(crate) fn materialize_survival<'a>(
             };
             (
                 Some(placeholder_z),
-                Some(logslopespec.clone()),
-                Some(vec![logslopespec]),
+                Some(slopespec.clone()),
+                Some(vec![slopespec]),
                 routing,
                 Some(base_link),
             )
-        } else if let Some(ls_formula) = config.logslope_formula.as_deref() {
+        } else if let Some(ls_formula) = config.slope_formula.as_deref() {
             let default_z_column = marginal_z_column_name.expect("z column present when no recipe");
             let (_, ls_parsed) =
-                parse_matching_auxiliary_formula(ls_formula, &parsed.response, "logslope_formula")?;
+                parse_matching_auxiliary_formula(ls_formula, &parsed.response, "slope_formula")?;
             if ls_parsed.linkspec.is_some() {
                 return Err(
-                        "link(...) is not supported in logslope_formula for the survival marginal-slope family"
+                        "link(...) is not supported in slope_formula for the survival marginal-slope family"
                             .to_string()
                             .into(),
                     );
             }
             if ls_parsed.timewiggle.is_some() {
                 return Err(
-                        "timewiggle(...) is not supported in logslope_formula for the survival marginal-slope family"
+                        "timewiggle(...) is not supported in slope_formula for the survival marginal-slope family"
                             .to_string()
                             .into(),
                     );
             }
             if ls_parsed.survivalspec.is_some() {
                 return Err(
-                        "survmodel(...) is not supported in logslope_formula for the survival marginal-slope family"
+                        "survmodel(...) is not supported in slope_formula for the survival marginal-slope family"
                             .to_string()
                             .into(),
                     );
@@ -674,9 +674,9 @@ pub(crate) fn materialize_survival<'a>(
                 &ls_parsed,
                 default_z_column,
                 "survival marginal-slope",
-                "logslope_formula",
+                "slope_formula",
             )?;
-            let surfaces = marginal_slope_logslope_surfaces(&ls_parsed, default_z_column)?;
+            let surfaces = marginal_slope_surfaces(&ls_parsed, default_z_column)?;
             let mut z = Array2::<f64>::zeros((data.values.nrows(), surfaces.len()));
             let mut specs = Vec::with_capacity(surfaces.len());
             for (surface_idx, surface) in surfaces.iter().enumerate() {
@@ -696,7 +696,7 @@ pub(crate) fn materialize_survival<'a>(
                 prune_unidentified_linear_terms_for_marginal_slope(
                     &mut spec,
                     data,
-                    "survival marginal-slope logslope_formula",
+                    "survival marginal-slope slope_formula",
                     &mut inference_notes,
                 )?;
                 specs.push(spec);
@@ -718,7 +718,7 @@ pub(crate) fn materialize_survival<'a>(
                 parsed,
                 default_z_column,
                 "survival marginal-slope",
-                "logslope_formula",
+                "slope_formula",
             )?;
             let z_idx = resolve_role_col(col_map, default_z_column, "z")?;
             let z = data.values.column(z_idx).to_owned().insert_axis(Axis(1));
@@ -767,7 +767,7 @@ pub(crate) fn materialize_survival<'a>(
                     reason: format!(
                         "cross-fitted score calibration applies to a single CTN-generated z \
                          surface, but the survival marginal-slope model has {} z surfaces; \
-                         multi-surface logslope is incompatible with the CTN Stage-1 chain",
+                         multi-surface slope is incompatible with the CTN Stage-1 chain",
                         z_surfaces.ncols()
                     ),
                 });
@@ -786,7 +786,7 @@ pub(crate) fn materialize_survival<'a>(
         }
         if marginal_slope_score_warp.is_some() {
             inference_notes.push(
-                "survival marginal-slope routes logslope_formula linkwiggle(...) into its anchored internal score-warp block while keeping the probit survival base link".to_string(),
+                "survival marginal-slope routes slope_formula linkwiggle(...) into its anchored internal score-warp block while keeping the probit survival base link".to_string(),
             );
         }
         if marginal_slope_link_dev.is_none() && marginal_slope_score_warp.is_none() {
@@ -1039,12 +1039,12 @@ pub(crate) fn materialize_survival<'a>(
                 baseline_hyper: baseline_hyper.clone(),
                 time_block,
                 timewiggle_block: prepared.timewiggle_block.clone(),
-                logslope_template: logslope_template.clone(),
-                logslopespec: marginal_logslopespec.clone().ok_or_else(|| {
-                    "marginal-slope survival is missing logslope spec".to_string()
+                slope_template: slope_template.clone(),
+                slopespec: marginal_slopespec.clone().ok_or_else(|| {
+                    "marginal-slope survival is missing slope spec".to_string()
                 })?,
-                logslopespecs: marginal_logslopespecs.clone(),
-                logslope_offset: log_sigma_offset.clone(),
+                slopespecs: marginal_slopespecs.clone(),
+                slope_offset: log_sigma_offset.clone(),
                 score_warp: marginal_slope_score_warp.clone(),
                 link_dev: marginal_slope_link_dev.clone(),
                 latent_z_policy: Default::default(),

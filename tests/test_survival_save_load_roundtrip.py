@@ -114,7 +114,7 @@ def _marginal_slope_roundtrip_worker(result_queue: Any) -> None:
             "Surv(entry, exit, event) ~ bmi + hba1c",
             survival_likelihood="marginal-slope",
             z_column="age",
-            logslope_formula="bmi + hba1c",
+            slope_formula="bmi + hba1c",
         )
         _roundtrip_survival(model, prediction_rows())
     except BaseException as exc:  # pragma: no cover - child process reporting

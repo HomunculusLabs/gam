@@ -65,7 +65,7 @@ def test_bug_custom_family_coefficient_group_labels_are_stably_routed() -> None:
         "Surv(entry, exit, event) ~ age + bmi",
         survival_likelihood="marginal-slope",
         z_column="prs_z",
-        logslope_formula="bmi",
+        slope_formula="bmi",
     )
     blocks = {b.name: (b.kind, b.start, b.end) for b in model.term_blocks}
     assert blocks["intercept"] == ("intercept", 0, 1)

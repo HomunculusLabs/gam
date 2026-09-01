@@ -154,8 +154,10 @@ class Model:
             Single uncertainty knob. ``None`` returns the point prediction(s)
             only. A float in ``(0, 1)`` (e.g. ``0.95``) requests the full
             uncertainty decomposition at that pointwise coverage; the output
-            gains ``std_error``, ``mean_lower``, and ``mean_upper`` columns
-            alongside ``linear_predictor`` / ``mean``. On survival models it
+            gains ``posterior_mean_standard_error``,
+            ``posterior_mean_lower``, and ``posterior_mean_upper`` columns
+            alongside ``linear_predictor_plugin`` / ``mean_plugin`` /
+            ``posterior_mean``. On survival models it
             also produces per-cell hazard / survival SEs. Issue #342
             collapsed the previous overlapping ``with_uncertainty`` boolean
             into this single flag (use ``interval=0.95`` for the SE-only
@@ -184,7 +186,7 @@ class Model:
             parameter matches the honest ρ-re-selecting set, under a
             grid-checked Lipschitz assumption); rows with 0.0 carry no
             finite-sample guarantee. Same eligibility as ``"conformal"``;
-            ``mean_lower`` / ``mean_upper`` report the outer envelope of the
+            ``posterior_mean_lower`` / ``posterior_mean_upper`` report the outer envelope of the
             (possibly multi-interval) set.
         conformal_level : float, default 0.9
             Target marginal coverage in ``(0, 1)`` when ``interval="conformal"``
@@ -215,7 +217,8 @@ class Model:
             ``Var(y_new|x) = Var(mu_hat) + Var(Y|mu)`` — for families that
             support it (Gaussian, Poisson, Gamma, Negative-Binomial, Beta,
             Tweedie, and binomial/Bernoulli via the conditional ``p(1-p)``
-            variance). The credible ``mean_lower`` / ``mean_upper`` are left
+            variance). The credible ``posterior_mean_lower`` /
+            ``posterior_mean_upper`` are left
             untouched.
         return_type : {"dict", "pandas", "numpy", "polars", "pyarrow", "list"}, optional
             Force a specific output container. ``None`` (default) mirrors the
@@ -235,16 +238,16 @@ class Model:
               posterior-mean fitted value).
             * Standard GAM with ``interval`` / ``id_column`` / ``return_type``:
               a table (dict / DataFrame / ...) with columns
-              ``linear_predictor`` (linear-predictor scale; equals ``mean``
-              for identity-link models), ``mean`` (response scale; the point
-              prediction), and — when ``interval`` is set — ``std_error``
-              (response-scale standard error including both fixed-effect and
-              smoothing uncertainty) plus ``mean_lower`` / ``mean_upper``
-              (interval endpoints).
+              ``linear_predictor_plugin`` (``X·beta_hat``), ``mean_plugin``
+              (its inverse-link image), and ``posterior_mean`` (the default
+              response-scale point prediction). When ``interval`` is set it
+              adds ``posterior_mean_standard_error`` plus
+              ``posterior_mean_lower`` / ``posterior_mean_upper``.
               When the requested table container is ``"dict"``, the return is
               a ``PredictionResult``: it supports normal mapping access
-              (``pred["mean"]``) and column attributes (``pred.mean``,
-              ``pred.std_error``, ``pred.mean_lower``, ``pred.mean_upper``).
+              (``pred["posterior_mean"]``) and column attributes
+              (``pred.posterior_mean``, ``pred.posterior_mean_standard_error``,
+              ``pred.posterior_mean_lower``, ``pred.posterior_mean_upper``).
             * Bernoulli marginal-slope: a 1-D ``ndarray`` of probabilities.
             * Transformation-normal: a 1-D ``ndarray`` of the response-scale
               conditional mean ``E[Y|x]`` (issue #1612), a covariate-only
@@ -254,7 +257,7 @@ class Model:
 
         Notes
         -----
-        The response-scale ``mean`` is the **posterior mean** point estimate,
+        The response-scale ``posterior_mean`` is the **posterior mean** point estimate,
         never the plug-in mode: for a curved inverse link it is the
         coefficient-uncertainty-integrated ``E[link^{-1}(X·beta)]`` (the value
         the ``gam predict`` CLI reports by default), not ``link^{-1}(X·beta_hat)``.
@@ -263,17 +266,13 @@ class Model:
         (identity-link Gaussian, …) the integral collapses to the plug-in, so
         the two coincide exactly.
 
-        For Gaussian / identity-link GLMs, ``linear_predictor`` and ``mean``
-        are numerically identical (linear-predictor scale == response scale).
-        For non-identity links (logit, log, ...) ``linear_predictor`` is the
-        plug-in linear predictor ``X·beta_hat`` while ``mean`` is the
-        response-scale posterior mean, so the two carry distinct information and
-        — under the posterior-mean integration above — ``mean`` is not simply
-        ``link^{-1}(linear_predictor)``. Issues #310, #313, #342
-        renamed the columns from the engine-internal ``eta`` /
-        ``effective_se`` / ``effective_variance`` labels to the standard
-        statistical names; ``effective_variance`` was dropped (it was always
-        exactly ``std_error ** 2``, trivial to compute downstream).
+        ``mean_plugin`` is always exactly
+        ``link^{-1}(linear_predictor_plugin)``. For Gaussian / identity-link
+        GLMs all three explicit estimands are numerically identical. For a
+        curved inverse link, ``posterior_mean`` generally differs from
+        ``mean_plugin`` by Jensen's term. The names intentionally expose that
+        distinction instead of presenting two different estimands as a generic
+        ``linear_predictor`` / ``mean`` pair (#2785).
         """
         headers, rows, table_kind = normalize_table(data)
         row_ids = extract_row_ids(headers, rows, id_column)
@@ -432,8 +431,9 @@ class Model:
         if interval is None:
             # Parity with :meth:`predict` (#1537): with no interval the result is
             # the 1-D response-scale prediction vector, not the engine's
-            # `[linear_predictor, mean]` column matrix. The FFI returns the lone
-            # response-scale `mean` column as `(n, 1)`; drop the trailing axis.
+            # full estimand-explicit column matrix. The FFI returns the lone
+            # response-scale `posterior_mean` column as `(n, 1)`; drop the
+            # trailing axis.
             import numpy as np
 
             return np.asarray(result).reshape(-1)
@@ -453,7 +453,7 @@ class Model:
         """Predict with distribution-free conformal prediction intervals.
 
         Runs the standard predictor on ``data``, then REPLACES the
-        response-scale ``mean_lower`` / ``mean_upper`` columns with the
+        response-scale ``posterior_mean_lower`` / ``posterior_mean_upper`` columns with the
         split-conformal interval ``mu_hat(x) +/- q_hat * s(x)`` calibrated at
         ``conformal_level`` from the held-out ``calibration`` fold. The
         resulting interval carries finite-sample marginal coverage
@@ -486,9 +486,10 @@ class Model:
         Returns
         -------
         table
-            A table with ``linear_predictor``, ``mean``, ``std_error``, and
-            the conformal ``mean_lower`` / ``mean_upper`` columns. Currently
-            supported for standard GAM models only.
+            A table with ``linear_predictor_plugin``, ``mean_plugin``,
+            ``posterior_mean``, ``posterior_mean_standard_error``, and the
+            conformal ``posterior_mean_lower`` / ``posterior_mean_upper``
+            columns. Currently supported for standard GAM models only.
         """
         headers, rows, table_kind = normalize_table(data)
         cal_headers, cal_rows, _ = normalize_table(calibration)

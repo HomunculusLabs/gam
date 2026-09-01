@@ -196,7 +196,7 @@ pub(crate) fn build_per_z_score_warp_aux_blockspec(
     // Survival marginal-slope gauge ownership: score-warp deviations
     // are pure shape modifications around the latent score axis and
     // should never own a shared affine direction with time, marginal,
-    // or logslope blocks. Set a low priority so the canonical-gauge
+    // or slope blocks. Set a low priority so the canonical-gauge
     // selector drops shared directions from score_warp_dev before any
     // parametric block loses a column.
     spec.gauge_priority = 80;
@@ -236,7 +236,7 @@ pub(crate) fn build_per_z_score_warp_aux_blockspec(
 pub(crate) struct BlockSlices {
     pub(crate) time: std::ops::Range<usize>,
     pub(crate) marginal: std::ops::Range<usize>,
-    pub(crate) logslope: std::ops::Range<usize>,
+    pub(crate) slope: std::ops::Range<usize>,
     pub(crate) score_warp: Option<std::ops::Range<usize>>,
     pub(crate) link_dev: Option<std::ops::Range<usize>>,
     /// Absorbed Stage-1 influence block (#461), trailing the flex blocks. Its
@@ -248,7 +248,7 @@ pub(crate) struct BlockSlices {
 
 /// Identifies one coefficient block of the survival marginal-slope joint
 /// Hessian. The discriminant order *is* the coordinate layout order
-/// (`time | marginal | logslope | score_warp? | link_dev?`), so it doubles as
+/// (`time | marginal | slope | score_warp? | link_dev?`), so it doubles as
 /// the upper-triangle ordering used to pick the stored half of each symmetric
 /// off-diagonal block. `ScoreWarp` and `LinkDev` are optional: they are absent
 /// from the layout unless the corresponding flex deviation block is active.
@@ -262,7 +262,7 @@ pub(crate) struct BlockSlices {
 pub(crate) enum HessBlock {
     Time,
     Marginal,
-    Logslope,
+    Slope,
     ScoreWarp,
     LinkDev,
     /// Absorbed Stage-1 influence block (#461). Placed LAST in the canonical
@@ -279,7 +279,7 @@ impl HessBlock {
     pub(crate) const ALL: [HessBlock; 6] = [
         HessBlock::Time,
         HessBlock::Marginal,
-        HessBlock::Logslope,
+        HessBlock::Slope,
         HessBlock::ScoreWarp,
         HessBlock::LinkDev,
         HessBlock::Influence,
@@ -288,13 +288,13 @@ impl HessBlock {
 
 impl BlockSlices {
     /// Coordinate range occupied by `block`, or `None` when the (optional)
-    /// flex block is inactive. `time`/`marginal`/`logslope` are always present.
+    /// flex block is inactive. `time`/`marginal`/`slope` are always present.
     #[inline]
     pub(crate) fn range_of(&self, block: HessBlock) -> Option<std::ops::Range<usize>> {
         match block {
             HessBlock::Time => Some(self.time.clone()),
             HessBlock::Marginal => Some(self.marginal.clone()),
-            HessBlock::Logslope => Some(self.logslope.clone()),
+            HessBlock::Slope => Some(self.slope.clone()),
             HessBlock::ScoreWarp => self.score_warp.clone(),
             HessBlock::LinkDev => self.link_dev.clone(),
             HessBlock::Influence => self.influence.clone(),
@@ -320,8 +320,8 @@ pub(crate) fn block_slices(
     }
     let time = 0..family.design_entry.ncols();
     let marginal = time.end..time.end + family.marginal_design.ncols();
-    let logslope = marginal.end..marginal.end + family.logslope_layout.coefficient_design().ncols();
-    let mut cursor = logslope.end;
+    let slope = marginal.end..marginal.end + family.slope_layout.coefficient_design().ncols();
+    let mut cursor = slope.end;
     let score_warp = family.score_warp.as_ref().map(|runtime| {
         let range = cursor..cursor + runtime.basis_dim() * family.score_dim();
         cursor = range.end;
@@ -343,7 +343,7 @@ pub(crate) fn block_slices(
     BlockSlices {
         time,
         marginal,
-        logslope,
+        slope,
         score_warp,
         link_dev,
         influence,

@@ -1003,6 +1003,16 @@ fn sample_standard(
     let offset_vec = design
         .compose_offset(base_offset.view(), "saved standard model sampling")
         .map_err(|error| error.to_string())?;
+    // `η = Xβ` exactly when the composed offset is identically zero, and that
+    // is the premise the Pólya-Gamma Gibbs route checks by `offset.is_none()`.
+    // Handing it a zero vector instead of `None` sent every Bernoulli-logit
+    // fit — offset or not — to NUTS, and the documented Gibbs route was dead
+    // (found by #2778's badge test). A genuinely non-zero offset still routes
+    // to NUTS, which carries it through.
+    let offset = offset_vec
+        .iter()
+        .any(|value| *value != 0.0)
+        .then(|| offset_vec.view());
 
     let result = run_nuts_sampling_flattened_family(
         likelihood,
@@ -1016,7 +1026,7 @@ fn sample_standard(
             likelihood_scale: fit.likelihood_scale,
             dispersion: resolved_fit_dispersion(&fit, "standard saved-model NUTS")?,
             firth_bias_reduction: fit.artifacts.firth_bias_reduction,
-            offset: Some(offset_vec.view()),
+            offset,
         }),
         cfg,
     )

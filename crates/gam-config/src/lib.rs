@@ -220,13 +220,13 @@ pub fn resolve_fit_request_config(
     if let Some(value) = json_config.sigma_time_degree {
         fit_config.sigma_time_degree = value;
     }
-    fit_config.logslope_time_k = json_config.logslope_time_k;
-    if let Some(value) = json_config.logslope_time_degree {
-        fit_config.logslope_time_degree = value;
+    fit_config.slope_time_k = json_config.slope_time_k;
+    if let Some(value) = json_config.slope_time_degree {
+        fit_config.slope_time_degree = value;
     }
     fit_config.z_column = json_config.z_column;
-    if let Some(formula) = json_config.logslope_formula {
-        fit_config.logslope_formula = Some(formula);
+    if let Some(formula) = json_config.slope_formula {
+        fit_config.slope_formula = Some(formula);
     }
     if let Some(stage1) = json_config.ctn_stage1 {
         fit_config.ctn_stage1 = Some(stage1.into_recipe()?);
@@ -961,18 +961,18 @@ mod tests {
                 }),
             },
             ParityCase {
-                name: "noise formula logslope z column and scale dimensions",
+                name: "noise formula slope z column and scale dimensions",
                 cli: {
                     let mut input = base_cli();
                     input.noise_formula = Some("~ s(age) + treatment".to_string());
-                    input.logslope_formula = Some("~ s(dose)".to_string());
+                    input.slope_formula = Some("~ s(dose)".to_string());
                     input.z_column = Some("dose".to_string());
                     input.scale_dimensions = true;
                     input
                 },
                 json: json!({
                     "noise_formula": "~ s(age) + treatment",
-                    "logslope_formula": "~ s(dose)",
+                    "slope_formula": "~ s(dose)",
                     "z_column": "dose",
                     "scale_dimensions": true
                 }),

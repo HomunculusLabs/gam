@@ -67,7 +67,7 @@ def test_point_invariant_to_covariance_mode_and_observation() -> None:
     # linear predictor is available via the dict return type.
     ref_mean = np.asarray(model.predict(grid), dtype=float)
     ref_lp = np.asarray(
-        model.predict(grid, return_type="dict")["linear_predictor"], dtype=float
+        model.predict(grid, return_type="dict")["linear_predictor_plugin"], dtype=float
     )
 
     for cm in ("conditional", "smoothing"):
@@ -76,14 +76,14 @@ def test_point_invariant_to_covariance_mode_and_observation() -> None:
                 grid, interval=0.95, covariance_mode=cm, observation_interval=obs
             )
             np.testing.assert_allclose(
-                np.asarray(out["mean"], dtype=float),
+                np.asarray(out["posterior_mean"], dtype=float),
                 ref_mean,
                 atol=1e-9,
                 rtol=0.0,
                 err_msg=f"mean moved for covariance_mode={cm}, observation={obs}",
             )
             np.testing.assert_allclose(
-                np.asarray(out["linear_predictor"], dtype=float),
+                np.asarray(out["linear_predictor_plugin"], dtype=float),
                 ref_lp,
                 atol=1e-9,
                 rtol=0.0,
@@ -101,7 +101,9 @@ def test_smoothing_covariance_mode_is_nontrivial() -> None:
 
     def se(mode: str) -> np.ndarray:
         return np.asarray(
-            model.predict(grid, interval=0.95, covariance_mode=mode)["std_error"],
+            model.predict(grid, interval=0.95, covariance_mode=mode)[
+                "posterior_mean_standard_error"
+            ],
             dtype=float,
         )
 
@@ -120,11 +122,11 @@ def test_mean_credible_band_widens_under_smoothing() -> None:
     grid = _grid(12)
     cond = model.predict(grid, interval=0.95, covariance_mode="conditional")
     smooth = model.predict(grid, interval=0.95, covariance_mode="smoothing")
-    cond_w = np.asarray(cond["mean_upper"], dtype=float) - np.asarray(
-        cond["mean_lower"], dtype=float
+    cond_w = np.asarray(cond["posterior_mean_upper"], dtype=float) - np.asarray(
+        cond["posterior_mean_lower"], dtype=float
     )
-    smooth_w = np.asarray(smooth["mean_upper"], dtype=float) - np.asarray(
-        smooth["mean_lower"], dtype=float
+    smooth_w = np.asarray(smooth["posterior_mean_upper"], dtype=float) - np.asarray(
+        smooth["posterior_mean_lower"], dtype=float
     )
     assert np.all(smooth_w >= cond_w - 1e-9)
     assert np.any(smooth_w > cond_w + 1e-9), (
@@ -145,7 +147,7 @@ def test_rare_event_observation_band_is_informative() -> None:
     model = gamfit.fit(pd.DataFrame({"y": y, "x": x}), "y ~ s(x)", family="binomial")
 
     out = model.predict(_grid(), interval=0.95, observation_interval=True)
-    mean = np.asarray(out["mean"], dtype=float)
+    mean = np.asarray(out["posterior_mean"], dtype=float)
     olo = np.asarray(out["observation_lower"], dtype=float)
     ohi = np.asarray(out["observation_upper"], dtype=float)
 
@@ -157,8 +159,8 @@ def test_rare_event_observation_band_is_informative() -> None:
     # Observation band is never narrower than the mean credible band (it adds the
     # non-negative p(1-p) observation-noise term on top of estimation variance).
     obs_w = ohi - olo
-    mean_w = np.asarray(out["mean_upper"], dtype=float) - np.asarray(
-        out["mean_lower"], dtype=float
+    mean_w = np.asarray(out["posterior_mean_upper"], dtype=float) - np.asarray(
+        out["posterior_mean_lower"], dtype=float
     )
     assert np.all(obs_w >= mean_w - 1e-7)
 
@@ -176,7 +178,7 @@ def test_observation_interval_emitted_for_nondefault_links() -> None:
         )
         olo = np.asarray(out["observation_lower"], dtype=float)
         ohi = np.asarray(out["observation_upper"], dtype=float)
-        mean = np.asarray(out["mean"], dtype=float)
+        mean = np.asarray(out["posterior_mean"], dtype=float)
         tol = 1e-9
         assert np.all(olo >= -tol) and np.all(ohi <= 1.0 + tol)
         assert np.all(olo <= mean + tol) and np.all(ohi >= mean - tol)

@@ -1,6 +1,6 @@
 //! Per-block effective Jacobians: the family scalars and the rigid / flex /
 //! time-wiggle `BlockEffectiveJacobian` implementations (time, marginal,
-//! logslope, score-warp, link-dev) plus the primary->joint row chain.
+//! slope, score-warp, link-dev) plus the primary->joint row chain.
 
 use super::*;
 use gam_math::jet_scalar::SymmetricQuadraticCoefficients;
@@ -147,28 +147,28 @@ impl SurvivalMarginalSlopeFamilyScalars {
     }
 }
 
-/// Three-output effective Jacobian for a shared or per-score log-slope layout.
+/// Three-output effective Jacobian for a shared or per-score slope layout.
 ///
 /// For physical slopes `g ∈ R^K`, full-width channel rows `G_k`, covariance
 /// `Σ`, and `c = sqrt(1 + s² gᵀΣg)`, this emits
 /// `q0·dc + dlinear`, `q1·dc + dlinear`, and `qd1·dc`, where
 /// `dc = s²(Σg)ᵀG/c` and `dlinear = s zᵀG`.
-pub struct LogslopeBlockJacobian {
-    pub(crate) layout: LogslopeLayout,
+pub struct SlopeBlockJacobian {
+    pub(crate) layout: SlopeLayout,
     pub(crate) z: Arc<Array2<f64>>,
     pub(crate) covariance: ScoreCovarianceField,
 }
 
-impl LogslopeBlockJacobian {
+impl SlopeBlockJacobian {
     pub(crate) fn new(
-        layout: LogslopeLayout,
+        layout: SlopeLayout,
         z: Arc<Array2<f64>>,
         covariance: ScoreCovarianceField,
     ) -> Result<Self, String> {
         layout.validate_for(z.ncols())?;
         if covariance.dim() != z.ncols() {
             return Err(format!(
-                "logslope effective Jacobian covariance dimension {} does not match score dimension {}",
+                "slope effective Jacobian covariance dimension {} does not match score dimension {}",
                 covariance.dim(),
                 z.ncols(),
             ));
@@ -181,7 +181,7 @@ impl LogslopeBlockJacobian {
     }
 }
 
-impl LogslopeBlockJacobian {
+impl SlopeBlockJacobian {
     /// Exact `(η₀, η₁, η′₁)` rows when the slope moves along follow-up
     /// (gam#2765).
     ///
@@ -212,7 +212,7 @@ impl LogslopeBlockJacobian {
     ) -> Result<(), String> {
         if self.z.ncols() != 1 {
             return Err(format!(
-                "a follow-up-varying log-slope effective Jacobian is scalar-score only, got K={}",
+                "a follow-up-varying slope effective Jacobian is scalar-score only, got K={}",
                 self.z.ncols(),
             ));
         }
@@ -220,7 +220,7 @@ impl LogslopeBlockJacobian {
         let designs = channels.as_slice();
         if designs.len() != 3 {
             return Err(format!(
-                "a follow-up-varying log-slope must expose three design channels, got {}",
+                "a follow-up-varying slope must expose three design channels, got {}",
                 designs.len(),
             ));
         }
@@ -233,7 +233,7 @@ impl LogslopeBlockJacobian {
             let slope = self.layout.row_channels_from_beta(i, beta)?;
             if !slope.entry.is_finite() || !slope.exit.is_finite() || !slope.rate.is_finite() {
                 return Err(format!(
-                    "follow-up-varying log-slope effective Jacobian row {i} has a non-finite \
+                    "follow-up-varying slope effective Jacobian row {i} has a non-finite \
                      slope channel"
                 ));
             }
@@ -256,13 +256,13 @@ impl LogslopeBlockJacobian {
             let rate_from_exit = qd1 * c_first_exit + q1 * c_second_exit * slope.rate;
             let entry_row = entry_design
                 .try_row_chunk(i..i + 1)
-                .map_err(|e| format!("logslope follow-up entry row {i}: {e}"))?;
+                .map_err(|e| format!("slope follow-up entry row {i}: {e}"))?;
             let exit_row = exit_design
                 .try_row_chunk(i..i + 1)
-                .map_err(|e| format!("logslope follow-up exit row {i}: {e}"))?;
+                .map_err(|e| format!("slope follow-up exit row {i}: {e}"))?;
             let rate_row = rate_design
                 .try_row_chunk(i..i + 1)
-                .map_err(|e| format!("logslope follow-up derivative row {i}: {e}"))?;
+                .map_err(|e| format!("slope follow-up derivative row {i}: {e}"))?;
             for j in 0..p {
                 let entry_column = entry_row[[0, j]];
                 let exit_column = exit_row[[0, j]];
@@ -277,7 +277,7 @@ impl LogslopeBlockJacobian {
     }
 }
 
-impl crate::custom_family::BlockEffectiveJacobian for LogslopeBlockJacobian {
+impl crate::custom_family::BlockEffectiveJacobian for SlopeBlockJacobian {
     fn effective_jacobian_rows(
         &self,
         state: &crate::custom_family::FamilyLinearizationState<'_>,
@@ -289,19 +289,19 @@ impl crate::custom_family::BlockEffectiveJacobian for LogslopeBlockJacobian {
         let chunk = rows.end - rows.start;
         if self.z.nrows() != n {
             return Err(format!(
-                "logslope effective Jacobian score rows {} do not match layout rows {n}",
+                "slope effective Jacobian score rows {} do not match layout rows {n}",
                 self.z.nrows(),
             ));
         }
         let s = state.probit_frailty_scale;
         if !(s.is_finite() && s > 0.0) {
             return Err(format!(
-                "logslope effective Jacobian requires a positive finite probit scale, got {s}"
+                "slope effective Jacobian requires a positive finite probit scale, got {s}"
             ));
         }
         if !state.beta.is_empty() && state.beta.len() != p {
             return Err(format!(
-                "logslope effective Jacobian beta length {} does not match width {p}",
+                "slope effective Jacobian beta length {} does not match width {p}",
                 state.beta.len(),
             ));
         }
@@ -317,7 +317,7 @@ impl crate::custom_family::BlockEffectiveJacobian for LogslopeBlockJacobian {
                 value
                     .downcast_ref::<SurvivalMarginalSlopeFamilyScalars>()
                     .ok_or_else(|| {
-                        "logslope effective Jacobian received the wrong family-scalar type"
+                        "slope effective Jacobian received the wrong family-scalar type"
                             .to_string()
                     })
             })
@@ -330,7 +330,7 @@ impl crate::custom_family::BlockEffectiveJacobian for LogslopeBlockJacobian {
             ] {
                 if values.len() != n {
                     return Err(format!(
-                        "logslope effective Jacobian {name} scalar length {} does not match n={n}",
+                        "slope effective Jacobian {name} scalar length {} does not match n={n}",
                         values.len(),
                     ));
                 }
@@ -350,7 +350,7 @@ impl crate::custom_family::BlockEffectiveJacobian for LogslopeBlockJacobian {
             let values = workspace.values();
             if values.iter().any(|value| !value.is_finite()) {
                 return Err(format!(
-                    "logslope effective Jacobian row {i} contains a non-finite physical slope"
+                    "slope effective Jacobian row {i} contains a non-finite physical slope"
                 ));
             }
             let covariance = self.covariance.at_row(i);
@@ -358,7 +358,7 @@ impl crate::custom_family::BlockEffectiveJacobian for LogslopeBlockJacobian {
             let variance = covariance.quadratic_form_unchecked(values);
             if !variance.is_finite() {
                 return Err(format!(
-                    "logslope effective Jacobian covariance quadratic form is non-finite at row {i}: {variance}"
+                    "slope effective Jacobian covariance quadratic form is non-finite at row {i}: {variance}"
                 ));
             }
             let c = (1.0 + s * s * variance).sqrt();
@@ -393,7 +393,7 @@ impl crate::custom_family::BlockEffectiveJacobian for LogslopeBlockJacobian {
 
     fn locks_raw_width_reduction(&self) -> bool {
         // The exact survival workspace evaluates its family-owned raw
-        // LogslopeLayout, not this audit callback. A selection gauge applied
+        // SlopeLayout, not this audit callback. A selection gauge applied
         // only to the spec would therefore hand that workspace a reduced beta
         // against a raw-width layout.
         true
@@ -437,8 +437,8 @@ impl crate::custom_family::BlockEffectiveJacobian for MarginalBlockJacobian {
         let rows = rows.start.min(n)..rows.end.min(n);
         let chunk = rows.end - rows.start;
 
-        // c_i = sqrt(1 + (s * g_i)^2) depends on the logslope block's g at the
-        // current beta.  This block does not own the logslope design so it cannot
+        // c_i = sqrt(1 + (s * g_i)^2) depends on the slope block's g at the
+        // current beta.  This block does not own the slope design so it cannot
         // compute c from beta alone.  Hard contract: when state.beta is non-empty
         // (post-init), family_scalars must carry SurvivalMarginalSlopeFamilyScalars
         // so the correct c_i is used.  At init (beta empty or all-zero), c_i = 1
@@ -549,8 +549,8 @@ impl crate::custom_family::BlockEffectiveJacobian for TimeBlockJacobian {
             ));
         }
 
-        // c_i = sqrt(1 + (s * g_i)^2) depends on the logslope block's g.  This block
-        // does not own the logslope design.  Hard contract: when beta is non-empty/nonzero,
+        // c_i = sqrt(1 + (s * g_i)^2) depends on the slope block's g.  This block
+        // does not own the slope design.  Hard contract: when beta is non-empty/nonzero,
         // family_scalars must carry SurvivalMarginalSlopeFamilyScalars with the correct c_i.
         // At init (beta empty or all-zero), c_i = 1 exactly.
         let scalars: Option<&SurvivalMarginalSlopeFamilyScalars> = state
@@ -632,7 +632,7 @@ impl crate::custom_family::BlockEffectiveJacobian for TimeBlockJacobian {
 
 /// n_outputs = 3 stacked Jacobian for the **time** block when timewiggle
 /// is active. Current `c_i` values come from the family-owned vector
-/// log-slope state, so nonzero β requires `family_scalars`.
+/// slope state, so nonzero β requires `family_scalars`.
 pub struct SmsTimewiggleTimeJacobian {
     pub(crate) design_entry: Arc<Array2<f64>>,
     pub(crate) design_exit: Arc<Array2<f64>>,
@@ -1102,14 +1102,14 @@ mod tests {
     use ndarray::array;
 
     #[test]
-    fn per_score_logslope_callback_uses_offsets_covariance_and_full_width_rows() {
-        let topology = LogslopeTopology::per_score(vec![0..1, 1..2], 2).unwrap();
+    fn per_score_slope_callback_uses_offsets_covariance_and_full_width_rows() {
+        let topology = SlopeTopology::per_score(vec![0..1, 1..2], 2).unwrap();
         let layout = topology
             .materialize_identity(DesignMatrix::from(array![[2.0, 3.0]]), &array![0.4])
             .unwrap();
         let covariance = MarginalSlopeCovariance::diagonal(array![2.0, 0.5]).unwrap();
         let callback =
-            LogslopeBlockJacobian::new(
+            SlopeBlockJacobian::new(
                 layout,
                 Arc::new(array![[1.5, -0.5]]),
                 covariance.clone().into(),

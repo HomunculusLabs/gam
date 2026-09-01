@@ -1052,7 +1052,7 @@ mod packed_scalar_oracle_tests {
     /// codegen layout is the shipped one -- `SpeedGate::open` documents why).
     #[test]
     fn measure_gradient_order1_vs_tower4_932() {
-        use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
 
         let links = [
             InverseLink::Standard(StandardLink::Logit),
@@ -1088,9 +1088,9 @@ mod packed_scalar_oracle_tests {
             // channel back into the harness checksum.
             let timing = paired_interleaved(
                 15,
-                250_000,
+                5_000,
                 0x9320_B1A5,
-                |nudge| {
+                batched(64, |nudge| {
                     binomial_location_scale_nll_gradient(
                         y,
                         weight,
@@ -1104,8 +1104,8 @@ mod packed_scalar_oracle_tests {
                         link,
                     )
                     .expect("order1 timing")[0]
-                },
-                |nudge| {
+                }),
+                batched(64, |nudge| {
                     binomial_location_scale_nll_tower(
                         y,
                         weight,
@@ -1121,7 +1121,7 @@ mod packed_scalar_oracle_tests {
                     )
                     .expect("tower timing")
                     .g[0]
-                },
+                }),
             );
             gate.faster(&format!("link={link:?}"), &timing, "order1", "tower4");
         }

@@ -27,11 +27,11 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
 
     /// #808: engage the inner self-vanishing Levenberg–Marquardt μ on a
     /// full-rank-but-ill-conditioned penalized Hessian. Clustered-PC marginal +
-    /// log-slope share a matern PC basis → `H_pen` is full rank (`nullity == 0`)
+    /// slope share a matern PC basis → `H_pen` is full rank (`nullity == 0`)
     /// yet cond ≈ 5.8e6; the nullity-only μ gate would leave the trust-region
     /// Newton oscillating on the near-singular mode. μ is self-vanishing
     /// (∝ ‖∇L − Sβ‖∞ → 0 at the fixed point), so the converged β is the exact
-    /// unconditioned solution — log-slope conditioned, NOT reduced. Survival-local.
+    /// unconditioned solution — slope conditioned, NOT reduced. Survival-local.
     fn levenberg_on_ill_conditioning(&self) -> bool {
         true
     }
@@ -108,7 +108,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
     fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
         // Operator-aware: the rigid K=4 RowKernel + RowKernelHessianWorkspace
         // adapter (see `exact_newton_joint_hessian_workspace`) applies joint
-        // Hv at O(n · (p_time + p_marginal + p_logslope + p_flex)) per call.
+        // Hv at O(n · (p_time + p_marginal + p_slope + p_flex)) per call.
         // Report the operator work model so diagnostics and first-order-only
         // policies reflect the representation that actually executes.
         crate::coefficient_cost::joint_coupled_operator_aware_hessian_cost(self.n as u64, specs)
@@ -186,12 +186,12 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
     ) -> Result<Option<Arc<dyn std::any::Any + Send + Sync>>, String> {
         if block_states.len() < 3 {
             return Err(format!(
-                "survival marginal-slope identifiability state requires time, marginal, and logslope blocks; got {}",
+                "survival marginal-slope identifiability state requires time, marginal, and slope blocks; got {}",
                 block_states.len(),
             ));
         }
         let slopes = self
-            .logslope_layout
+            .slope_layout
             .physical_values(self.score_dim(), block_states[2].beta.view())?;
         let mut q0 = Vec::with_capacity(self.n);
         let mut q1 = Vec::with_capacity(self.n);
@@ -283,7 +283,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         if total >= 512 {
             return Ok(None);
         }
-        if self.per_z_logslope_active() {
+        if self.per_z_slope_active() {
             return Ok(Some(
                 self.evaluate_exact_newton_joint_dense_per_z(block_states)?
                     .2,
@@ -306,7 +306,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
                 block_states.len()
             ));
         }
-        if self.per_z_logslope_active() {
+        if self.per_z_slope_active() {
             let (log_likelihood, gradient, _) =
                 self.evaluate_exact_newton_joint_dense_per_z(block_states)?;
             return Ok(Some(ExactNewtonJointGradientEvaluation {
@@ -350,7 +350,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
                 block_states.len()
             ));
         }
-        if self.per_z_logslope_active() {
+        if self.per_z_slope_active() {
             return Ok(None);
         }
         if !self.effective_flex_active(block_states)? && !self.flex_timewiggle_active() {
@@ -387,7 +387,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
                 block_states.len()
             ));
         }
-        if self.per_z_logslope_active() {
+        if self.per_z_slope_active() {
             return Ok(None);
         }
         if !self.effective_flex_active(block_states)? && !self.flex_timewiggle_active() {
@@ -445,7 +445,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         // `SurvivalMarginalSlopeExactNewtonJointHessianWorkspace`. Both
         // route the joint Hessian through Hv operators rather than dense
         // assembly.
-        !self.per_z_logslope_active() && parameter_block_specs_match_rows(specs, self.n)
+        !self.per_z_slope_active() && parameter_block_specs_match_rows(specs, self.n)
     }
 
     fn inner_joint_workspace_gradient_available(&self, specs: &[ParameterBlockSpec]) -> bool {
@@ -455,7 +455,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         // timewiggle stores joint_gradient in its typed workspace. Advertising
         // this capability lets an accepted trial carry that workspace into the
         // reload instead of streaming every row again at identical beta.
-        !self.per_z_logslope_active() && parameter_block_specs_match_rows(specs, self.n)
+        !self.per_z_slope_active() && parameter_block_specs_match_rows(specs, self.n)
     }
 
     fn inner_joint_workspace_log_likelihood_available(
@@ -465,7 +465,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         // Exact twin of the gradient capability above. The first trust attempt
         // may read the workspace's cached scalar likelihood for its acceptance
         // test and retain the same workspace for the post-accept gradient.
-        !self.per_z_logslope_active() && parameter_block_specs_match_rows(specs, self.n)
+        !self.per_z_slope_active() && parameter_block_specs_match_rows(specs, self.n)
     }
 
     fn outer_hyper_hessian_hvp_available(&self, specs: &[ParameterBlockSpec]) -> bool {
@@ -476,7 +476,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         // `DriftDerivResult::Operator`. Advertising this capability lets the
         // outer planner keep ARC/Newton curvature at large n or large ψ_dim
         // while routing the representation through matrix-free HVPs.
-        !self.per_z_logslope_active() && parameter_block_specs_match_rows(specs, self.n)
+        !self.per_z_slope_active() && parameter_block_specs_match_rows(specs, self.n)
     }
 
     fn exact_newton_joint_hessian_directional_derivative(
@@ -484,7 +484,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         block_states: &[ParameterBlockState],
         d_beta_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        if self.per_z_logslope_active() {
+        if self.per_z_slope_active() {
             return Ok(None);
         }
         if self.effective_flex_active(block_states)? {
@@ -528,7 +528,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         d_beta_u_flat: &Array1<f64>,
         d_beta_v_flat: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, String> {
-        if self.per_z_logslope_active() {
+        if self.per_z_slope_active() {
             return Ok(None);
         }
         if self.effective_flex_active(block_states)? {
@@ -595,7 +595,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         // override when present, falling back to the bit-identical per-axis sweep
         // otherwise. Flex / time-wiggle / per-z directional derivatives route
         // through their own dynamic-q evaluators, so they keep the per-axis path.
-        if !self.per_z_logslope_active()
+        if !self.per_z_slope_active()
             && !self.effective_flex_active(block_states)?
             && !self.flex_timewiggle_active()
         {
@@ -618,7 +618,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         // per-axis loop below that rebuilds that geometry `p` times. This is the
         // #979 flex marginal-slope hot path. Same per-row assembler as the
         // per-axis sweep (equal up to the cross-row reduction order).
-        if !self.per_z_logslope_active()
+        if !self.per_z_slope_active()
             && self.effective_flex_active(block_states)?
             && !self.flex_timewiggle_active()
         {
@@ -673,7 +673,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         // kernel once and dispatches to the kernel's build-once all-axes override
         // (which builds each row's tower once and contracts every axis off it),
         // falling back to the bit-identical per-axis sweep otherwise.
-        if !self.per_z_logslope_active()
+        if !self.per_z_slope_active()
             && !self.effective_flex_active(block_states)?
             && !self.flex_timewiggle_active()
         {
@@ -745,7 +745,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         {
             return Ok(None);
         }
-        if self.per_z_logslope_active()
+        if self.per_z_slope_active()
             || self.effective_flex_active(block_states)?
             || self.flex_timewiggle_active()
         {
@@ -893,7 +893,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         specs: &[ParameterBlockSpec],
         hyper_layout: &crate::custom_family::CustomFamilyHyperLayout,
     ) -> Result<Option<Arc<dyn ExactNewtonJointPsiWorkspace>>, String> {
-        if self.per_z_logslope_active() {
+        if self.per_z_slope_active() {
             return Ok(None);
         }
         Ok(Some(Arc::new(SurvivalMarginalSlopePsiWorkspace::new(
@@ -997,7 +997,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
 
     /// The follow-up-varying likelihood domain `η′₁ > 0` (gam#2765 / gam#2767).
     ///
-    /// It reads the time, marginal and log-slope blocks at once, so it cannot be
+    /// It reads the time, marginal and slope blocks at once, so it cannot be
     /// stated through `max_feasible_step_size`, which is asked one block at a
     /// time: every block answers "unconstrained" while the joint step walks out
     /// of the domain. `None` on the time-constant frame, where the time block's

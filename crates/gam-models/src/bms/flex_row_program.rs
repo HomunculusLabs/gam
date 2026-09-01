@@ -238,7 +238,7 @@ impl<'a> BmsFlexProgramPoint<'a> {
         scale: f64,
         mu_stack: [f64; 5],
     ) -> Result<Self, String> {
-        if primary.total < 2 || primary.q >= primary.total || primary.logslope >= primary.total {
+        if primary.total < 2 || primary.q >= primary.total || primary.slope >= primary.total {
             return Err("BMS FLEX row program has an invalid primary layout".to_string());
         }
         match (primary.h.as_ref(), beta_h) {
@@ -853,7 +853,7 @@ impl BmsFlexRowProgram {
         workspace: &'arena S::Workspace,
     ) -> S {
         let dimension = self.primary.total;
-        let b = &vars[self.primary.logslope];
+        let b = &vars[self.primary.slope];
         let u = a.add(&b.scale(index.z));
         let mut inside = u.clone();
 

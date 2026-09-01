@@ -2677,7 +2677,7 @@ fn zz_measure_k2_wide_p_schur_floor_clamps_the_residual_2080() {
 /// Ordinary least-squares slope of `ln y` on `ln x`, plus the largest absolute
 /// residual in `ln y`. A cost exponent is only readable when the fit is tight,
 /// so the residual travels with the slope and callers report both.
-fn log_log_slope(xs: &[f64], ys: &[f64]) -> (f64, f64) {
+fn log_slope(xs: &[f64], ys: &[f64]) -> (f64, f64) {
     assert_eq!(xs.len(), ys.len(), "log-log fit needs paired samples");
     assert!(xs.len() >= 2, "a slope needs at least two samples");
     let lx: Vec<f64> = xs.iter().map(|v| v.ln()).collect();
@@ -3029,11 +3029,11 @@ fn zz_measure_wide_p_cost_exponent_2080() {
             .map(|r| r.iter().copied().fold(f64::INFINITY, f64::min))
             .collect();
         let meds: Vec<f64> = series.iter().map(|r| median_of(r)).collect();
-        let (slope_min, resid_min) = log_log_slope(&xs, &mins);
-        let (slope_med, resid_med) = log_log_slope(&xs, &meds);
+        let (slope_min, resid_min) = log_slope(&xs, &mins);
+        let (slope_med, resid_med) = log_slope(&xs, &meds);
         let dim_varies = dims.iter().any(|d| *d != dims[0]);
         if dim_varies {
-            let (slope_dim, resid_dim) = log_log_slope(&dims, &mins);
+            let (slope_dim, resid_dim) = log_slope(&dims, &mins);
             eprintln!(
                 "[2080-SLOPE] {label:>12} vs p: min={slope_min:+.3} (max ln-resid \
                  {resid_min:.3}) med={slope_med:+.3} (max ln-resid {resid_med:.3}) | vs dim: \

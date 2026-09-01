@@ -170,7 +170,7 @@ impl SurvivalMarginalSlopeFamily {
         let slices = block_slices(self, block_states);
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         let p_h = slices.score_warp.as_ref().map_or(0, |range| range.len());
         let p_w = slices.link_dev.as_ref().map_or(0, |range| range.len());
         let p_i = slices.influence.as_ref().map_or(0, |range| range.len());
@@ -234,7 +234,7 @@ impl SurvivalMarginalSlopeFamily {
             .slice_mut(s![slices.marginal.clone()])
             .assign(&score_m);
         score
-            .slice_mut(s![slices.logslope.clone()])
+            .slice_mut(s![slices.slope.clone()])
             .assign(&score_g);
         if let Some(range) = slices.score_warp.as_ref() {
             score.slice_mut(s![range.clone()]).assign(&score_h);
@@ -335,7 +335,7 @@ impl SurvivalMarginalSlopeFamily {
         primary_first: [f64; P],
         primary_second: [f64; P],
     ) -> Result<(RigidFamilyPrimaryTerms, RigidFamilyPrimaryTerms), String> {
-        if self.flex_active() || self.flex_timewiggle_active() || self.per_z_logslope_active() {
+        if self.flex_active() || self.flex_timewiggle_active() || self.per_z_slope_active() {
             return Err(
                 "rigid family-direction calculus requires scalar/shared non-FLEX, non-time-wiggle geometry"
                     .to_string(),
@@ -374,7 +374,7 @@ impl SurvivalMarginalSlopeFamily {
         primary_first: [f64; P],
         primary_beta_direction: [f64; P],
     ) -> Result<RigidFamilyPrimaryTerms, String> {
-        if self.flex_active() || self.flex_timewiggle_active() || self.per_z_logslope_active() {
+        if self.flex_active() || self.flex_timewiggle_active() || self.per_z_slope_active() {
             return Err(
                 "rigid family-direction drift requires scalar/shared non-FLEX, non-time-wiggle geometry"
                     .to_string(),
@@ -403,9 +403,9 @@ impl SurvivalMarginalSlopeFamily {
         options: &BlockwiseFitOptions,
     ) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
         let geometry = self.rigid_baseline_geometry()?;
-        if self.per_z_logslope_active() {
+        if self.per_z_slope_active() {
             return Err(
-                "survival marginal-slope baseline family derivatives do not support per-score logslope geometry"
+                "survival marginal-slope baseline family derivatives do not support per-score slope geometry"
                     .to_string(),
             );
         }
@@ -452,9 +452,9 @@ impl SurvivalMarginalSlopeFamily {
         options: &BlockwiseFitOptions,
     ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
         let geometry = self.rigid_baseline_geometry()?;
-        if self.per_z_logslope_active() {
+        if self.per_z_slope_active() {
             return Err(
-                "survival marginal-slope baseline family pairs do not support per-score logslope geometry"
+                "survival marginal-slope baseline family pairs do not support per-score slope geometry"
                     .to_string(),
             );
         }
@@ -600,9 +600,9 @@ impl SurvivalMarginalSlopeFamily {
         options: &BlockwiseFitOptions,
     ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
         let geometry = self.rigid_baseline_geometry()?;
-        if self.per_z_logslope_active() {
+        if self.per_z_slope_active() {
             return Err(
-                "survival marginal-slope baseline-by-design calculus does not support per-score logslope geometry"
+                "survival marginal-slope baseline-by-design calculus does not support per-score slope geometry"
                     .to_string(),
             );
         }
@@ -665,9 +665,9 @@ impl SurvivalMarginalSlopeFamily {
         options: &BlockwiseFitOptions,
     ) -> Result<Option<Array2<f64>>, String> {
         let geometry = self.rigid_baseline_geometry()?;
-        if self.per_z_logslope_active() {
+        if self.per_z_slope_active() {
             return Err(
-                "survival marginal-slope baseline family Hessian drift does not support per-score logslope geometry"
+                "survival marginal-slope baseline family Hessian drift does not support per-score slope geometry"
                     .to_string(),
             );
         }

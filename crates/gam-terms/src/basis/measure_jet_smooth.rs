@@ -91,7 +91,7 @@
 //!   not change the frozen basis rank. FD-gated by
 //!   `psi_producer_matches_fd_length_scale`. Frozen only where a design-moving
 //!   kernel scale on covariates SHARED by two coupled blocks is an
-//!   identifiability hazard — the BMS marginal/log-slope pair, at its own entry
+//!   identifiability hazard — the BMS marginal/slope pair, at its own entry
 //!   point (`freeze_measure_jet_length_scale_learning`, #1116/`a3afd17a2`) —
 //!   and where the user pins `length_scale=` outright.
 //! - **Exact (s, α) penalty jets are shipped**:
@@ -321,7 +321,7 @@ pub struct MeasureJetBasisSpec {
     /// `299c83ffc` (#1116) introduced this dial default-ON precisely to remove
     /// this fixture's 13x. `a3afd17a2` then found the one place it is unsafe —
     /// a BMS fit shares ONE mjs basis between the marginal mean and the
-    /// log-slope surface, and a design-moving kernel scale on shared covariates
+    /// slope surface, and a design-moving kernel scale on shared covariates
     /// is an identifiability hazard that reached a separation runaway — and
     /// contained it AT THE BMS ENTRY POINT with
     /// [`crate::smooth::freeze_measure_jet_length_scale_learning`], which is
@@ -1115,7 +1115,7 @@ pub(crate) fn bounding_box_diagonal(points: ArrayView2<'_, f64>) -> f64 {
 /// `the_search_window_reaches_past_where_the_screen_stops_walking` pins the
 /// search window as strictly wider. Those reconcile only while something else
 /// keeps searching past the stopping rule. On a term whose `ℓ` dial is FROZEN —
-/// the BMS marginal/log-slope pair, or any `learn_length_scale=false` — nothing
+/// the BMS marginal/slope pair, or any `learn_length_scale=false` — nothing
 /// does, and the stopping rule becomes the wall.
 ///
 /// Measured on the #1041 parity fixture (`m = 10`, extent `[2.671, 2.726]`):

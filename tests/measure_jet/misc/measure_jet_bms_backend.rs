@@ -3,23 +3,23 @@
 //! the duchon/matern backbones do.
 //!
 //! Pattern mirrored from `tests/marginal_slope_neyman_orthogonal_reference.rs`
-//! (the shipped `fit_from_formula` + `FitConfig{family, logslope_formula,
+//! (the shipped `fit_from_formula` + `FitConfig{family, slope_formula,
 //! z_column}` arm, its SplitMix64 data law, and its Sim-B truth-recovery
 //! bound): a known smooth marginal surface alpha(x1, x2) plus a planted
-//! logslope surface beta(x1) = 0.2 + 0.9*x1 drive a single principled
+//! slope surface beta(x1) = 0.2 + 0.9*x1 drive a single principled
 //! Bernoulli-probit draw per row on the latent driver z ~ N(0,1), which is
 //! handed to Stage 2 directly as the `z` column. Both the marginal and the
-//! logslope surfaces are declared as `mjs(x1, x2, ...)`.
+//! slope surfaces are declared as `mjs(x1, x2, ...)`.
 //!
 //! Assertions, in order of importance:
 //!   (a) the fit SUCCEEDS through the standard `fit_from_formula` entry point
 //!       and returns the BernoulliMarginalSlope variant with finite
 //!       coefficients and finite smoothing parameters;
-//!   (b) the recovered logslope surface tracks the planted truth: Pearson
+//!   (b) the recovered slope surface tracks the planted truth: Pearson
 //!       correlation of beta_hat(grid) with beta_true(grid) > 0.8 — the exact
 //!       truth-recovery bound the template's Sim B asserts for its own
-//!       logslope readout (read off `logslopespec_resolved` + block 1 +
-//!       `baseline_logslope`, the same reconstruction the family uses);
+//!       slope readout (read off `slopespec_resolved` + block 1 +
+//!       `baseline_slope`, the same reconstruction the family uses);
 //!   (c) the measure-jet diagnostic analogue of the template family's
 //!       EDF/lambda-count checks: in spectral (per-level) mode each mjs term
 //!       contributes one penalty candidate PER realized scale plus the
@@ -33,7 +33,7 @@ use gam::test_support::reference::pearson;
 use gam::{FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula};
 use ndarray::Array2;
 
-/// Both surfaces share one declaration so the marginal and logslope blocks
+/// Both surfaces share one declaration so the marginal and slope blocks
 /// exercise the identical measure-jet backbone. `scales=3` pins the realized
 /// band (the unit square is far from degenerate), `centers=16` keeps the
 /// quadrature modest at n=1500, and the default tau (1e-3 > 0) keeps the
@@ -77,7 +77,7 @@ fn normal_cdf(x: f64) -> f64 {
     0.5 * (1.0 + statrs::function::erf::erf(x / std::f64::consts::SQRT_2))
 }
 
-/// Planted logslope truth: monotone in x1, flat in x2 — the template Sim B's
+/// Planted slope truth: monotone in x1, flat in x2 — the template Sim B's
 /// slope law lifted onto the 2-covariate surface.
 fn beta_true(x1: f64) -> f64 {
     0.2 + 0.9 * x1
@@ -90,7 +90,7 @@ fn alpha_true(x1: f64, x2: f64) -> f64 {
 
 /// In-memory dataset with columns `x1`, `x2`, `y`, `z` — the covariates first
 /// so the resolved specs' feature columns (0, 1) line up with the 2-column
-/// grid arrays used for the logslope readout, mirroring the template.
+/// grid arrays used for the slope readout, mirroring the template.
 fn build_dataset(x1: &[f64], x2: &[f64], y: &[f64], z: &[f64]) -> gam::data::EncodedDataset {
     let n = x1.len();
     assert_eq!(x2.len(), n, "x1/x2 length mismatch");
@@ -115,33 +115,33 @@ fn build_dataset(x1: &[f64], x2: &[f64], y: &[f64], z: &[f64]) -> gam::data::Enc
     encode_recordswith_inferred_schema(headers, records).expect("encode mjs BMS dataset")
 }
 
-/// Evaluate the fitted logslope surface beta_hat at grid points, reconstructed
-/// exactly as the family does (block 1 = logslope, `bms/block_specs.rs`):
-/// `beta_hat(x_i) = baseline_logslope + design(x_i) . beta_logslope`. Same
+/// Evaluate the fitted slope surface beta_hat at grid points, reconstructed
+/// exactly as the family does (block 1 = slope, `bms/block_specs.rs`):
+/// `beta_hat(x_i) = baseline_slope + design(x_i) . beta_slope`. Same
 /// readout as the template's `beta_of_x`, widened to two ambient coordinates.
-fn logslope_surface(fit: &BernoulliMarginalSlopeFitResult, grid: &[(f64, f64)]) -> Vec<f64> {
+fn slope_surface(fit: &BernoulliMarginalSlopeFitResult, grid: &[(f64, f64)]) -> Vec<f64> {
     let n = grid.len();
     let mut data = Array2::<f64>::zeros((n, 2));
     for (i, &(g1, g2)) in grid.iter().enumerate() {
         data[[i, 0]] = g1;
         data[[i, 1]] = g2;
     }
-    let design = build_term_collection_design(data.view(), &fit.logslopespec_resolved)
-        .expect("rebuild mjs logslope design from the frozen resolved spec");
+    let design = build_term_collection_design(data.view(), &fit.slopespec_resolved)
+        .expect("rebuild mjs slope design from the frozen resolved spec");
     let dense = design.design.to_dense();
-    let beta_logslope = &fit.fit.blocks[1].beta;
+    let beta_slope = &fit.fit.blocks[1].beta;
     assert_eq!(
         dense.ncols(),
-        beta_logslope.len(),
-        "mjs logslope design width {} != logslope beta length {}",
+        beta_slope.len(),
+        "mjs slope design width {} != slope beta length {}",
         dense.ncols(),
-        beta_logslope.len()
+        beta_slope.len()
     );
     let mut out = vec![0.0; n];
     for i in 0..n {
-        let mut acc = fit.baseline_logslope;
+        let mut acc = fit.baseline_slope;
         for j in 0..dense.ncols() {
-            acc += dense[[i, j]] * beta_logslope[j];
+            acc += dense[[i, j]] * beta_slope[j];
         }
         out[i] = acc;
     }
@@ -197,7 +197,7 @@ fn bms_marginal_slope_accepts_measure_jet_backbone() {
     let data = build_dataset(&x1, &x2, &y, &z);
     let config = FitConfig {
         family: Some("bernoulli-marginal-slope".to_string()),
-        logslope_formula: Some(MJS_SURFACE.to_string()),
+        slope_formula: Some(MJS_SURFACE.to_string()),
         z_column: Some("z".to_string()),
         ..FitConfig::default()
     };
@@ -205,7 +205,7 @@ fn bms_marginal_slope_accepts_measure_jet_backbone() {
     // (a) The fit must SUCCEED through the standard entry point with the
     // measure-jet backbone on BOTH surfaces, exactly as duchon/matern do.
     let result = fit_from_formula(&format!("y ~ {MJS_SURFACE}"), &data, &config)
-        .expect("BMS fit with mjs marginal + mjs logslope surfaces must succeed");
+        .expect("BMS fit with mjs marginal + mjs slope surfaces must succeed");
     let out = match result {
         FitResult::BernoulliMarginalSlope(out) => out,
         _ => panic!("mjs-backed BMS fit returned the wrong family variant"),
@@ -221,21 +221,21 @@ fn bms_marginal_slope_accepts_measure_jet_backbone() {
         out.fit.log_lambdas
     );
 
-    // (b) Truth recovery: the fitted logslope surface must track the planted
+    // (b) Truth recovery: the fitted slope surface must track the planted
     // increasing slope. Same readout and the same Pearson > 0.8 bound the
-    // template's Sim B asserts for its logslope surface.
+    // template's Sim B asserts for its slope surface.
     let mut grid = Vec::with_capacity(49);
     for k1 in 0..7 {
         for k2 in 0..7 {
             grid.push((k1 as f64 / 6.0, k2 as f64 / 6.0));
         }
     }
-    let beta_hat = logslope_surface(&out, &grid);
+    let beta_hat = slope_surface(&out, &grid);
     let truth: Vec<f64> = grid.iter().map(|&(g1, _)| beta_true(g1)).collect();
     let corr = pearson(&beta_hat, &truth);
     assert!(
         corr > 0.8,
-        "mjs-backed BMS logslope surface failed to track the planted increasing \
+        "mjs-backed BMS slope surface failed to track the planted increasing \
          slope beta(x1) = 0.2 + 0.9*x1 (Pearson {corr:.3} <= 0.8); the measure-jet \
          backbone is not recovering the marginal-slope signal"
     );
@@ -267,10 +267,10 @@ fn bms_marginal_slope_accepts_measure_jet_backbone() {
         out.marginal_design.penalties.len()
     );
     assert_eq!(
-        out.logslope_design.penalties.len(),
+        out.slope_design.penalties.len(),
         2,
-        "single-scale logslope mjs surface must carry the fused jet-energy Primary plus the \
+        "single-scale slope mjs surface must carry the fused jet-energy Primary plus the \
          double-penalty null component, got {}",
-        out.logslope_design.penalties.len()
+        out.slope_design.penalties.len()
     );
 }

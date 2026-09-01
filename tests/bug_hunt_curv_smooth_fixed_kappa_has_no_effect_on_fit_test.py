@@ -183,7 +183,7 @@ def test_curv_fixed_kappa_changes_the_cli_fit(tmp_path: Path) -> None:
             text=True,
         )
         assert pred.returncode == 0, f"gam predict kappa={kappa} failed:\n{pred.stdout}\n{pred.stderr}"
-        return pd.read_csv(pred_path)["mean"].to_numpy(dtype=float)
+        return pd.read_csv(pred_path)["posterior_mean"].to_numpy(dtype=float)
 
     pred_sph = fit_predict(3.0)
     pred_hyp = fit_predict(-3.0)

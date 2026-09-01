@@ -1,6 +1,6 @@
 //! Exact public-API regression for #979: a Bernoulli marginal-slope/probit
 //! model with the same omitted-scale Matérn surface in the marginal and
-//! log-slope channels.
+//! slope channels.
 //!
 //! The old fixture manually assembled a different estimator: equal-mass
 //! centers, ν=3/2, and direct fit-request internals. These cases deliberately
@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! event ~ matern(PC1, PC2, centers=...)
-//! logslope = matern(PC1, PC2, centers=...)
+//! slope = matern(PC1, PC2, centers=...)
 //! family = bernoulli-marginal-slope, link = probit, z_column = z
 //! ```
 //!
@@ -85,8 +85,8 @@ fn build_dataset() -> gam::inference::data::EncodedDataset {
     for row in 0..N {
         let z = (z_raw[row] - z_mean) / z_sd;
         let marginal = (0.8 * pc1[row]).sin() + 0.5 * (0.6 * pc2[row]).cos();
-        let log_slope = -0.55 + 0.16 * pc1[row] - 0.10 * pc2[row];
-        let eta = marginal + log_slope.exp() * z;
+        let slope = -0.55 + 0.16 * pc1[row] - 0.10 * pc2[row];
+        let eta = marginal + slope.exp() * z;
         let probability = normal_cdf(eta).clamp(1e-9, 1.0 - 1e-9);
         let event = u8::from(next_unit(&mut state) < probability);
         rows.push(StringRecord::from(vec![
@@ -162,7 +162,7 @@ fn fit_issue_case(centers: usize) {
         family: Some("bernoulli-marginal-slope".to_string()),
         link: Some("probit".to_string()),
         z_column: Some("z".to_string()),
-        logslope_formula: Some(matern),
+        slope_formula: Some(matern),
         ..FitConfig::default()
     };
 
@@ -176,8 +176,8 @@ fn fit_issue_case(centers: usize) {
 
     let marginal_scale =
         resolved_auto_matern_scale(&fit.marginalspec_resolved, "marginal channel", centers);
-    let logslope_scale =
-        resolved_auto_matern_scale(&fit.logslopespec_resolved, "log-slope channel", centers);
+    let slope_scale =
+        resolved_auto_matern_scale(&fit.slopespec_resolved, "slope channel", centers);
     for block in &fit.fit.blocks {
         for &coefficient in block.beta.iter() {
             assert!(
@@ -189,7 +189,7 @@ fn fit_issue_case(centers: usize) {
 
     eprintln!(
         "[979-BINARY] n={N} centers={centers} total_s={elapsed:.3} \
-         marginal_scale={marginal_scale:.6e} logslope_scale={logslope_scale:.6e} \
+         marginal_scale={marginal_scale:.6e} slope_scale={slope_scale:.6e} \
          outer_iters={} inner_cycles={} converged=certified auto_kappa=both \
          requested_centers_strategy=farthest_point resolved_centers_strategy=user_provided nu=5/2",
         fit.fit.outer_iterations, fit.fit.inner_cycles
@@ -197,16 +197,16 @@ fn fit_issue_case(centers: usize) {
 }
 
 #[test]
-fn margslope_matern_logslope_timing() {
+fn margslope_matern_slope_timing() {
     fit_issue_case(4);
 }
 
 #[test]
-fn margslope_matern_logslope_above_cliff() {
+fn margslope_matern_slope_above_cliff() {
     fit_issue_case(12);
 }
 
 #[test]
-fn margslope_matern_logslope_centers20_issue_scale() {
+fn margslope_matern_slope_centers20_issue_scale() {
     fit_issue_case(20);
 }

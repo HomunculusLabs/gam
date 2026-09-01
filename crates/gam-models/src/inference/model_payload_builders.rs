@@ -496,10 +496,10 @@ pub fn assemble_standard_payload(
 pub struct BernoulliMarginalSlopeInputs<'a> {
     pub formula: String,
     pub data_schema: DataSchema,
-    pub logslope_formula: String,
+    pub slope_formula: String,
     pub z_column: String,
     pub resolved_marginalspec: TermCollectionSpec,
-    pub resolved_logslopespec: TermCollectionSpec,
+    pub resolved_slopespec: TermCollectionSpec,
     pub fit_result: UnifiedFitResult,
     /// Number of *raw* marginal design columns `p_m` (= the term-collection
     /// marginal design's `ncols()` BEFORE any #461 influence-absorber widening).
@@ -515,7 +515,7 @@ pub struct BernoulliMarginalSlopeInputs<'a> {
     /// fitted block width and the truncation is a no-op.
     pub p_marginal: usize,
     pub baseline_marginal: f64,
-    pub baseline_logslope: f64,
+    pub baseline_slope: f64,
     pub latent_z_normalization: SavedLatentZNormalization,
     pub latent_measure: LatentMeasureKind,
     pub latent_z_rank_int_calibration: Option<LatentZRankIntCalibration>,
@@ -544,7 +544,7 @@ pub struct BernoulliMarginalSlopeInputs<'a> {
 ///  * **marginalizes** `γ` out of the joint Gaussian by dropping the `γ`
 ///    rows/cols from the conditional covariance — taking the corresponding
 ///    SUB-BLOCK of `Σ` is the exact marginal of a joint Gaussian (no
-///    re-inversion), so the kept `[β_m | β_logslope | …]` covariance is the
+///    re-inversion), so the kept `[β_m | β_slope | …]` covariance is the
 ///    correct predictive uncertainty accounting for the fitted absorber,
 ///  * drops the persisted joint penalized-Hessian geometry: it is a precision
 ///    over the *widened* joint coefficient vector, so a sub-block would be the
@@ -754,8 +754,8 @@ pub fn assemble_residual_cascade_payload(
 ///
 /// This is the single place that decides which payload fields a marginal-slope
 /// model carries and how the singular/vector mirror fields
-/// (`formula_logslope(s)`, `z_column(s)`, `logslope_baseline(s)`,
-/// `resolved_termspec_logslope(s)`) are kept consistent — so the CLI and FFI
+/// (`slope_formula(s)`, `z_column(s)`, `baseline_slope(s)`,
+/// `resolved_slopespec(s)`) are kept consistent — so the CLI and FFI
 /// saved models are byte-equivalent for identical semantic content.
 pub fn assemble_bernoulli_marginal_slope_payload(
     inputs: BernoulliMarginalSlopeInputs<'_>,
@@ -764,14 +764,14 @@ pub fn assemble_bernoulli_marginal_slope_payload(
     let BernoulliMarginalSlopeInputs {
         formula,
         data_schema,
-        logslope_formula,
+        slope_formula,
         z_column,
         resolved_marginalspec,
-        resolved_logslopespec,
+        resolved_slopespec,
         fit_result,
         p_marginal,
         baseline_marginal,
-        baseline_logslope,
+        baseline_slope,
         latent_z_normalization,
         latent_measure,
         latent_z_rank_int_calibration,
@@ -804,21 +804,21 @@ pub fn assemble_bernoulli_marginal_slope_payload(
     payload.unified = Some(fit_result.clone());
     payload.fit_result = Some(fit_result);
     payload.data_schema = Some(data_schema);
-    payload.formula_logslope = Some(logslope_formula.clone());
+    payload.slope_formula = Some(slope_formula.clone());
     payload.z_column = Some(z_column.clone());
-    payload.formula_logslopes = Some(vec![logslope_formula]);
+    payload.slope_formulas = Some(vec![slope_formula]);
     payload.z_columns = Some(vec![z_column]);
     payload.latent_z_normalization = Some(latent_z_normalization);
     payload.latent_measure = Some(latent_measure);
     payload.latent_z_rank_int_calibration = latent_z_rank_int_calibration;
     payload.latent_z_conditional_calibration = latent_z_conditional_calibration;
     payload.marginal_baseline = Some(baseline_marginal);
-    payload.logslope_baseline = Some(baseline_logslope);
-    payload.logslope_baselines = Some(vec![baseline_logslope]);
+    payload.baseline_slope = Some(baseline_slope);
+    payload.baseline_slopes = Some(vec![baseline_slope]);
     payload.link = Some(base_link);
     payload.resolved_termspec = Some(resolved_marginalspec);
-    payload.resolved_termspec_logslopes = Some(vec![resolved_logslopespec.clone()]);
-    payload.resolved_termspec_logslope = Some(resolved_logslopespec);
+    payload.resolved_slopespecs = Some(vec![resolved_slopespec.clone()]);
+    payload.resolved_slopespec = Some(resolved_slopespec);
     payload.score_warp_runtime = score_warp_runtime.map(serialize_anchored_deviation_runtime);
     payload.link_deviation_runtime = link_dev_runtime.map(serialize_anchored_deviation_runtime);
     source.apply_to(&mut payload);
@@ -1083,7 +1083,7 @@ pub fn assemble_location_scale_payload(
 
 /// Source-agnostic semantic content of a survival marginal-slope
 /// (Royston-Parmar net) saved model. Centralizing assembly also fixes the
-/// FFI's prior omission of the `*_logslopes`/`*_columns`/`formula_logslopes`
+/// FFI's prior omission of the `*_slopes`/`*_columns`/`slope_formulas`
 /// vector mirrors the CLI wrote.
 pub struct SurvivalMarginalSlopeInputs<'a> {
     pub formula: String,
@@ -1099,15 +1099,15 @@ pub struct SurvivalMarginalSlopeInputs<'a> {
     pub ridge_lambda: f64,
     pub survival_likelihood_label: String,
     pub resolved_marginalspec: TermCollectionSpec,
-    pub resolved_logslopespec: TermCollectionSpec,
-    /// The fit's resolved log-slope follow-up time margin (gam#2765, gam#2767),
+    pub resolved_slopespec: TermCollectionSpec,
+    /// The fit's resolved slope follow-up time margin (gam#2765, gam#2767),
     /// or `None` for a slope that is constant within a person.
     ///
-    /// `resolved_logslopespec` names the covariate factor only; with a margin
+    /// `resolved_slopespec` names the covariate factor only; with a margin
     /// present the fitted coefficients live against `X_cov ⊗ᵣ B(log t)`, so this
     /// is the half of the block's authority the term spec cannot carry.
-    pub logslope_time_basis: Option<SurvivalCovariateTimeBasis>,
-    pub logslope_formula: String,
+    pub slope_time_basis: Option<SurvivalCovariateTimeBasis>,
+    pub slope_formula: String,
     pub z_column: String,
     pub latent_z_normalization: SavedLatentZNormalization,
     /// The automatic latent-measure gate's decision for the persisted score
@@ -1116,7 +1116,7 @@ pub struct SurvivalMarginalSlopeInputs<'a> {
     /// Mutually exclusive; both `None` when the gate did not fire.
     pub latent_z_rank_int_calibration: Option<LatentZRankIntCalibration>,
     pub latent_z_conditional_calibration: Option<LatentZConditionalCalibration>,
-    pub baseline_logslope: f64,
+    pub baseline_slope: f64,
     /// Frozen nonlinear time-wiggle authority, including the raw fitted tail.
     pub timewiggle: Option<SurvivalTimewiggle>,
     pub score_warp_runtime: Option<&'a DeviationRuntime>,
@@ -1196,11 +1196,11 @@ pub fn assemble_survival_marginal_slope_payload(
     payload.survival_distribution = Some(ResidualDistribution::Gaussian);
     payload.link = Some(InverseLink::Standard(StandardLink::Probit));
     payload.resolved_termspec = Some(inputs.resolved_marginalspec);
-    payload.resolved_termspec_logslopes = Some(vec![inputs.resolved_logslopespec.clone()]);
-    payload.resolved_termspec_logslope = Some(inputs.resolved_logslopespec);
-    payload.logslope_time_basis = inputs.logslope_time_basis;
-    payload.formula_logslope = Some(inputs.logslope_formula.clone());
-    payload.formula_logslopes = Some(vec![inputs.logslope_formula]);
+    payload.resolved_slopespecs = Some(vec![inputs.resolved_slopespec.clone()]);
+    payload.resolved_slopespec = Some(inputs.resolved_slopespec);
+    payload.slope_time_basis = inputs.slope_time_basis;
+    payload.slope_formula = Some(inputs.slope_formula.clone());
+    payload.slope_formulas = Some(vec![inputs.slope_formula]);
     payload.z_column = Some(inputs.z_column.clone());
     payload.z_columns = Some(vec![inputs.z_column]);
     payload.latent_z_normalization = Some(inputs.latent_z_normalization);
@@ -1214,8 +1214,8 @@ pub fn assemble_survival_marginal_slope_payload(
     payload.latent_measure = Some(LatentMeasureKind::StandardNormal);
     payload.latent_z_rank_int_calibration = inputs.latent_z_rank_int_calibration;
     payload.latent_z_conditional_calibration = inputs.latent_z_conditional_calibration;
-    payload.logslope_baseline = Some(inputs.baseline_logslope);
-    payload.logslope_baselines = Some(vec![inputs.baseline_logslope]);
+    payload.baseline_slope = Some(inputs.baseline_slope);
+    payload.baseline_slopes = Some(vec![inputs.baseline_slope]);
     if let Some(timewiggle) = inputs.timewiggle {
         payload.baseline_timewiggle_degree = Some(timewiggle.degree);
         payload.baseline_timewiggle_knots = Some(timewiggle.knots);
@@ -1932,16 +1932,16 @@ fn payload_for_bernoulli_marginal_slope(
         &ms_result.marginal_design,
     )
     .map_err(|err| format!("failed to freeze marginal spec: {err}"))?;
-    let frozen_logslope = freeze_term_collection_from_design(
-        &ms_result.logslopespec_resolved,
-        &ms_result.logslope_design,
+    let frozen_slope = freeze_term_collection_from_design(
+        &ms_result.slopespec_resolved,
+        &ms_result.slope_design,
     )
-    .map_err(|err| format!("failed to freeze logslope spec: {err}"))?;
+    .map_err(|err| format!("failed to freeze slope spec: {err}"))?;
 
-    let logslope_formula = fit_config
-        .logslope_formula
+    let slope_formula = fit_config
+        .slope_formula
         .clone()
-        .ok_or_else(|| "bernoulli marginal-slope requires logslope_formula".to_string())?;
+        .ok_or_else(|| "bernoulli marginal-slope requires slope_formula".to_string())?;
     let z_column = fit_config
         .z_column
         .clone()
@@ -1949,7 +1949,7 @@ fn payload_for_bernoulli_marginal_slope(
 
     // Thin adapter over the shared core assembler. The FFI's source-specific
     // work is freezing term collections from their designs, reading the
-    // logslope formula / z column / offset columns from the FitConfig, and
+    // slope formula / z column / offset columns from the FitConfig, and
     // persisting headers without per-feature ranges; the semantic payload is
     // assembled by the same core path the CLI uses, so the two save routes
     // produce identical contracts.
@@ -1957,14 +1957,14 @@ fn payload_for_bernoulli_marginal_slope(
         BernoulliMarginalSlopeInputs {
             formula,
             data_schema: dataset.schema.clone(),
-            logslope_formula,
+            slope_formula,
             z_column,
             resolved_marginalspec: frozen_marginal,
-            resolved_logslopespec: frozen_logslope,
+            resolved_slopespec: frozen_slope,
             fit_result: ms_result.fit.clone(),
             p_marginal: ms_result.marginal_design.design.ncols(),
             baseline_marginal: ms_result.baseline_marginal,
-            baseline_logslope: ms_result.baseline_logslope,
+            baseline_slope: ms_result.baseline_slope,
             latent_z_normalization: SavedLatentZNormalization {
                 mean: ms_result.z_normalization.mean,
                 sd: ms_result.z_normalization.sd,
@@ -2009,14 +2009,14 @@ fn payload_for_survival_marginal_slope(
         &ms_result.marginal_design,
     )
     .map_err(|err| format!("failed to freeze survival marginal spec: {err}"))?;
-    let frozen_logslope = freeze_term_collection_from_design(
-        &ms_result.logslopespec_resolved,
-        &ms_result.logslope_design,
+    let frozen_slope = freeze_term_collection_from_design(
+        &ms_result.slopespec_resolved,
+        &ms_result.slope_design,
     )
-    .map_err(|err| format!("failed to freeze survival logslope spec: {err}"))?;
+    .map_err(|err| format!("failed to freeze survival slope spec: {err}"))?;
 
-    let logslope_formula = fit_config
-        .logslope_formula
+    let slope_formula = fit_config
+        .slope_formula
         .clone()
         .unwrap_or_else(|| "same-as-main".to_string());
     let z_column = fit_config
@@ -2163,9 +2163,9 @@ fn payload_for_survival_marginal_slope(
             ridge_lambda: fit_config.ridge_lambda,
             survival_likelihood_label: survival_likelihood_modename(likelihood_mode).to_string(),
             resolved_marginalspec: frozen_marginal,
-            resolved_logslopespec: frozen_logslope,
-            logslope_time_basis: ms_result.logslope_time_basis.clone(),
-            logslope_formula,
+            resolved_slopespec: frozen_slope,
+            slope_time_basis: ms_result.slope_time_basis.clone(),
+            slope_formula,
             z_column,
             latent_z_normalization: SavedLatentZNormalization {
                 mean: ms_result.z_normalization.mean,
@@ -2173,7 +2173,7 @@ fn payload_for_survival_marginal_slope(
             },
             latent_z_rank_int_calibration: persisted_rank_int,
             latent_z_conditional_calibration: persisted_conditional,
-            baseline_logslope: ms_result.baseline_slope,
+            baseline_slope: ms_result.baseline_slope,
             timewiggle,
             score_warp_runtime: ms_result.score_warp_runtime.as_ref(),
             link_dev_runtime: ms_result.link_dev_runtime.as_ref(),

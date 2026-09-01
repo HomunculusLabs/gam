@@ -724,7 +724,7 @@ pub trait CustomFamily {
     /// ```
     ///
     /// reads the time block (`q′`, `q`), the marginal block (`q`) and the
-    /// log-slope block (`b`, `b′`) at once. With a time-CONSTANT slope the last
+    /// slope block (`b`, `b′`) at once. With a time-CONSTANT slope the last
     /// two terms vanish and `η′ = q′·c ≥ q′`, so the time block's own linear
     /// guard `q′ ≥ guard > 0` implies the domain — which is why a per-block
     /// hook sufficed until the slope was allowed to move.
@@ -1911,7 +1911,7 @@ pub trait CustomFamily {
     /// rank-deficient one (`nullity > 0`). Default `false` (binary / AFT /
     /// others byte-identical). Survival marginal-slope overrides to `true`
     /// (#808: full-rank but cond ≈ 5.8e6; the self-vanishing μ shapes only the
-    /// trajectory, so the converged β is unbiased and the log-slope target is
+    /// trajectory, so the converged β is unbiased and the slope target is
     /// preserved). Survival-local by trait override so the shared spectral-range
     /// solver stays byte-identical for every other family — in particular AFT
     /// (`survival_location_scale`), whose intercept-only-scale fits can be

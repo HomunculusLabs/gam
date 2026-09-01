@@ -384,7 +384,7 @@ class ResponseGeometryModel:
             tangent_cols: list[Any] = []
             for model in self.models:
                 pred = model.predict(data, return_type="dict")
-                tangent_cols.append(np.asarray(pred["mean"], dtype=float))
+                tangent_cols.append(np.asarray(pred["posterior_mean"], dtype=float))
             tangent = np.column_stack(tangent_cols)
         response = geometry_exp_map(
             tangent,

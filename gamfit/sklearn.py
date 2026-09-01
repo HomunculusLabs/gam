@@ -182,7 +182,7 @@ class GAMRegressor(RegressorMixin, _BaseGAMEstimator):
         """
         check_is_fitted(self, "model_")
         predicted = self.model_.predict(X, return_type="dict")
-        return np.asarray(predicted["mean"], dtype=float)
+        return np.asarray(predicted["posterior_mean"], dtype=float)
 
 
 class GAMClassifier(ClassifierMixin, _BaseGAMEstimator):
@@ -349,7 +349,9 @@ class GAMClassifier(ClassifierMixin, _BaseGAMEstimator):
         check_is_fitted(self, "model_")
         serving = self._strip_response_column(X)
         predicted = self.model_.predict(serving, return_type="dict")
-        positive = np.clip(np.asarray(predicted["mean"], dtype=float), 0.0, 1.0)
+        positive = np.clip(
+            np.asarray(predicted["posterior_mean"], dtype=float), 0.0, 1.0
+        )
         negative = 1.0 - positive
         return np.column_stack([negative, positive])
 

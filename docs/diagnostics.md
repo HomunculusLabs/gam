@@ -203,7 +203,7 @@ v.supported_by_python      # bool
 Returns a `FormulaValidation` dataclass that wraps the parsed payload.
 Accepts parser/materialization keyword arguments from `gamfit.fit`
 (family, offset, weights, transformation/survival/baseline settings,
-`z_column`, link, logslope formula, frailty, hazard loading, dimension
+`z_column`, link, slope formula, frailty, hazard loading, dimension
 scaling, adaptive regularization, Firth, and `config`) but does no
 fitting.
 

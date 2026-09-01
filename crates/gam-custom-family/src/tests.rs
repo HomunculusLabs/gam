@@ -1042,8 +1042,8 @@ pub(crate) fn large_scale_rho_scan_joint_outer_evaluate_is_projection_invariant(
 // test uses single-block, p=3, nullspace_dims=1, and supplies
 // `compute_dh = Ok(None)` — that path SKIPS the trace pair entirely and
 // therefore cannot reproduce the failure. The large-scale fit has:
-//   - 3 blocks (time_surface, marginal_surface, logslope_surface)
-//   - 4 penalty coords (time:1, marginal:2 [anisotropic], logslope:1)
+//   - 3 blocks (time_surface, marginal_surface, slope_surface)
+//   - 4 penalty coords (time:1, marginal:2 [anisotropic], slope:1)
 //   - Duchon-shape penalties: large nullspace_dims (d+1=4 for d=3 PCs)
 //     producing rank-deficient S with many zero eigenvalues
 //   - n ~ 2e5 → H_unpen scale ~ n × diag-of-design-Gram
@@ -1054,7 +1054,7 @@ pub(crate) fn large_scale_rho_scan_joint_outer_evaluate_is_projection_invariant(
 // with rank-deficient Duchon-shape penalties, scales H to large-scale
 // magnitude, supplies a realistic penalty-drift `compute_dh`, evaluates
 // `joint_outer_evaluate` at the actual failure ρ point
-// [time=10, marg=10, marg=10, logslope=4.5], and asserts every gradient
+// [time=10, marg=10, marg=10, slope=4.5], and asserts every gradient
 // entry is BOUNDED by a physically reasonable multiple of the dominant
 // ½λβ'Sβ term.
 //
@@ -1130,7 +1130,7 @@ pub(crate) fn large_scale_multiblock_outer_gradient_with_realistic_drift_is_boun
     // marginal_surface: 2 penalties (nullspace=4 each, anisotropic).
     let s_marg_0 = build_duchon_shape(p_marg, 4, 1.0);
     let s_marg_1 = build_duchon_shape(p_marg, 4, 0.7);
-    // logslope_surface: 1 penalty (nullspace=4).
+    // slope_surface: 1 penalty (nullspace=4).
     let s_logs = build_duchon_shape(p_logs, 4, 1.0);
 
     // ── Failure-point ρ = [10, 10, 10, 4.5]. λ = exp(ρ).
@@ -1236,7 +1236,7 @@ pub(crate) fn large_scale_multiblock_outer_gradient_with_realistic_drift_is_boun
             array![rho[1], rho[2]],
         ),
         mk_spec(
-            "logslope_surface",
+            "slope_surface",
             p_logs,
             vec![s_logs.clone()],
             4,

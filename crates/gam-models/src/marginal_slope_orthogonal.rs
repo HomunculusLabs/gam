@@ -347,7 +347,7 @@ pub fn score_influence_jacobian(
 
 /// Build the absorbed influence block `Z_infl = diag(s_f·β̂₀)·J` for Stage 2
 /// (design §3): row-scale each Jacobian row `i` by `s_f · pilot_beta0[i]`,
-/// where `pilot_beta0` is the rigid-pilot logslope `β̂₀(x_i)` (length `n`).
+/// where `pilot_beta0` is the rigid-pilot slope `β̂₀(x_i)` (length `n`).
 ///
 /// The returned `n × p₁` matrix spans the realized η-space leakage directions
 /// at the rigid pilot. Stage 2 appends it as a **plain additive** absorbed
@@ -356,8 +356,8 @@ pub fn score_influence_jacobian(
 /// NOT routed through the multiplicative `score_warp` / `DeviationRuntime`
 /// path — that path evaluates a scalar 1-D cubic in η and cannot carry the
 /// arbitrary x-dependent `n × p₁` matrix. The absorber is orthogonalized
-/// against the marginal block but deliberately overlaps logslope, with gauge
-/// priority above logslope, and is dropped at predict time.
+/// against the marginal block but deliberately overlaps slope, with gauge
+/// priority above slope, and is dropped at predict time.
 pub fn influence_block_design(
     jac: &ScoreInfluenceJacobian,
     pilot_beta0: &Array1<f64>,
@@ -378,14 +378,14 @@ pub fn influence_block_design(
 }
 
 /// Residualize the influence columns `Z_infl` against the **marginal** design
-/// span in the rigid-pilot row metric `W`, retaining the logslope overlap
+/// span in the rigid-pilot row metric `W`, retaining the slope overlap
 /// (#461, design §3 — single source of truth for the BMS and survival absorbed
 /// blocks):
 ///
 ///   Z̃ = Z − M·(MᵀWM + εI)⁻¹·MᵀW·Z.
 ///
 /// Residualizing against **marginal only** deliberately keeps the
-/// logslope-aligned component, so the absorber soaks the leakage direction that
+/// slope-aligned component, so the absorber soaks the leakage direction that
 /// would otherwise manufacture spurious `β(x)` heterogeneity. `W` is the PIRLS
 /// row inner product at the rigid pilot, so the resulting orthogonality
 /// `MᵀW Z̃ ≈ 0` holds in the same metric the penalized joint solve sees, not
@@ -464,7 +464,7 @@ pub(crate) const INFLUENCE_PROJECTION_RIDGE_FLOOR: f64 = 1.0e-12;
 ///     `Z̃ = Z_infl − M·(MᵀWM + εI)⁻¹·MᵀW·Z_infl`.
 ///
 /// Returns `Err` if the residualized columns are not all finite (e.g. a
-/// non-finite pilot logslope or row metric propagated through) — the finite
+/// non-finite pilot slope or row metric propagated through) — the finite
 /// guard is baked in so neither call site repeats it. The two families differ
 /// ONLY in how they install the returned `Z̃` (BMS widens `[M | Z̃]`; survival
 /// adds a dedicated additive η₁ channel), never in this math.

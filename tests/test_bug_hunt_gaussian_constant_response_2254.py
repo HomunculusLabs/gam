@@ -38,7 +38,7 @@ def _pred(model, data) -> np.ndarray:
     out = model.predict(data)
     if isinstance(out, np.ndarray):
         return np.asarray(out, dtype=float).ravel()
-    return np.asarray(out["mean"], dtype=float).ravel()
+    return np.asarray(out["posterior_mean"], dtype=float).ravel()
 
 
 @pytest.mark.parametrize("formula", FORMULAS)

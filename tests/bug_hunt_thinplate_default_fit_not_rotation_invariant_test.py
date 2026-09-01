@@ -79,7 +79,9 @@ def _fit_predict(workdir, tag, train_xy, y, grid_xy):
         text=True,
     )
     assert pr.returncode == 0, f"predict ({tag}) failed: {pr.stderr}"
-    return np.array([float(r["mean"]) for r in csv.DictReader(open(pred))])
+    return np.array(
+        [float(r["posterior_mean"]) for r in csv.DictReader(open(pred))]
+    )
 
 
 @pytest.mark.skipif(GAM is None, reason="gam CLI not on PATH")

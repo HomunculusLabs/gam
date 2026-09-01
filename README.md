@@ -200,7 +200,7 @@ gamfit.fit(
     df,
     "case ~ matern(pc1, pc2, pc3)",
     family="bernoulli-marginal-slope",
-    logslope_formula="matern(pc1, pc2, pc3)",
+    slope_formula="matern(pc1, pc2, pc3)",
     transformation_normal_stage1=gamfit.CtnStage1(
         response="pgs",
         covariates="matern(pc1, pc2, pc3)",

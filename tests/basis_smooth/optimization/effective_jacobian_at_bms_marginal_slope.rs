@@ -1,7 +1,7 @@
 //! Finite-difference regression test for the BMS per-block Jacobian formulas.
 //!
 //! Validates that the closed-form expressions installed as `jacobian_callback`
-//! in `build_marginal_blockspec_bms` / `build_logslope_blockspec_bms` agree
+//! in `build_marginal_blockspec_bms` / `build_slope_blockspec_bms` agree
 //! with central finite differences on the per-row observed η:
 //!
 //!   η_i(β) = q_i · c_i + s · g_i · z_i
@@ -138,10 +138,10 @@ fn bms_marginal_jacobian_matches_finite_difference() {
     }
 }
 
-// ── test: logslope block ──────────────────────────────────────────────────────
+// ── test: slope block ──────────────────────────────────────────────────────
 
 #[test]
-fn bms_logslope_jacobian_matches_finite_difference() {
+fn bms_slope_jacobian_matches_finite_difference() {
     const N: usize = 8;
     const P_M: usize = 3;
     const P_S: usize = 2;
@@ -199,7 +199,7 @@ fn bms_logslope_jacobian_matches_finite_difference() {
             );
             assert!(
                 (analytic - fd).abs() < 1e-6,
-                "logslope Jacobian row={i} col={k}: analytic={analytic:.8e} fd={fd:.8e}",
+                "slope Jacobian row={i} col={k}: analytic={analytic:.8e} fd={fd:.8e}",
             );
         }
     }
@@ -264,7 +264,7 @@ fn bms_jacobians_with_frailty_scale_match_fd() {
             );
         }
 
-        // logslope block
+        // slope block
         let q_i: f64 = offset_m[i]
             + m_arr
                 .row(i)
@@ -290,7 +290,7 @@ fn bms_jacobians_with_frailty_scale_match_fd() {
             );
             assert!(
                 (analytic - fd).abs() < 1e-6,
-                "frailty logslope row={i} col={k}: analytic={analytic:.8e} fd={fd:.8e}",
+                "frailty slope row={i} col={k}: analytic={analytic:.8e} fd={fd:.8e}",
             );
         }
     }

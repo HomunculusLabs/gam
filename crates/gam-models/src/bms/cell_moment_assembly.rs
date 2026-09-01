@@ -675,7 +675,7 @@ impl BernoulliMarginalSlopeFamily {
         intercept_seed: f64,
         grid: &EmpiricalZGrid,
     ) -> Result<BmsFlexRowProgram, String> {
-        if primary.total < 2 || primary.q >= primary.total || primary.logslope >= primary.total {
+        if primary.total < 2 || primary.q >= primary.total || primary.slope >= primary.total {
             return Err("empirical BMS row plan has an invalid primary layout".to_string());
         }
         match (primary.h.as_ref(), beta_h) {
@@ -840,7 +840,7 @@ impl BernoulliMarginalSlopeFamily {
         )?;
         let primary = PrimarySlices {
             q: 0,
-            logslope: 1,
+            slope: 1,
             h: None,
             w: None,
             total: 2,
@@ -2043,19 +2043,19 @@ impl BernoulliMarginalSlopeFamily {
     // `joint_jeffreys_information_matches_observed_hessian` staying `true`).
     //
     // `H` is block-structured over the two rigid primaries
-    // `(marginal, logslope)`; for row `i` it equals
+    // `(marginal, slope)`; for row `i` it equals
     // `X_pᵀ h_i[p][q] X_q` summed over the primary block pair `(p, q)`, so
     // `tr(W H) = Σ_i (trace_qq[i]·h_i[q][q] + trace_qg[i]·h_i[q][g] +
     // trace_gg[i]·h_i[g][g])` where `trace_pq[i] = x_p[i]ᵀ W_pq x_q[i]`
     // (the reference's `trace_tt`/`trace_tl`/`trace_ll`, renamed to this
-    // family's `(marginal=q, logslope=g)` primaries). Differentiating this
+    // family's `(marginal=q, slope=g)` primaries). Differentiating this
     // linear functional of the row's local Hessian twice through
     // `η_q[i] = x_q[i]·β_q`, `η_g[i] = x_g[i]·β_g` requires exactly the
     // row's uncontracted FOURTH-order primary tensor (one order higher than
     // the reference's third-order expected-information coefficients, because
     // BMS's `H` is the observed Hessian — second order in the log-likelihood
     // — rather than an expected/Fisher information already one order lower).
-    // `contract_fourth_full` at each of the three unit (marginal, logslope)
+    // `contract_fourth_full` at each of the three unit (marginal, slope)
     // direction pairs gives that second directional derivative of the row's
     // full local Hessian in one call; combining with the trace scalars
     // mirrors the reference's `coeff_tt[i] = trace_tt·tt_tt + trace_tl·tt_tl +
@@ -2296,9 +2296,9 @@ impl BernoulliMarginalSlopeFamily {
                 .axpy_row_into(row, primary_grad[0], &mut marginal)?;
         }
         {
-            let mut logslope = score.slice_mut(s![slices.logslope.clone()]);
-            self.logslope_design
-                .axpy_row_into(row, primary_grad[1], &mut logslope)?;
+            let mut slope = score.slice_mut(s![slices.slope.clone()]);
+            self.slope_design
+                .axpy_row_into(row, primary_grad[1], &mut slope)?;
         }
         hessian.add_pullback(self, row, slices, &primary_slices(slices), primary_hessian);
         Ok(())
@@ -2657,19 +2657,19 @@ impl BernoulliMarginalSlopeFamily {
             ));
         }
 
-        let logslope = &block_states[1];
-        let logslope_ncols = self.logslope_design.ncols();
-        if logslope_ncols > 0 && logslope.beta.len() != logslope_ncols {
+        let slope = &block_states[1];
+        let slope_ncols = self.slope_design.ncols();
+        if slope_ncols > 0 && slope.beta.len() != slope_ncols {
             return Err(format!(
-                "bernoulli marginal-slope logslope beta length mismatch: got {}, expected {}",
-                logslope.beta.len(),
-                logslope_ncols
+                "bernoulli marginal-slope slope beta length mismatch: got {}, expected {}",
+                slope.beta.len(),
+                slope_ncols
             ));
         }
-        if logslope.eta.len() != n_rows {
+        if slope.eta.len() != n_rows {
             return Err(format!(
-                "bernoulli marginal-slope logslope eta length mismatch: got {}, expected {}",
-                logslope.eta.len(),
+                "bernoulli marginal-slope slope eta length mismatch: got {}, expected {}",
+                slope.eta.len(),
                 n_rows
             ));
         }
@@ -2958,7 +2958,7 @@ impl BernoulliMarginalSlopeFamily {
     /// called once per training row from `solve_row_intercept_base`; each
     /// call needs `ℓ(η_a) = η_a + Φ(η_a) · β` evaluated at the row's pre-
     /// scale rigid intercept `a_rigid_pre_scale`. When the link-deviation
-    /// runtime has been reparameterised against the marginal+logslope
+    /// runtime has been reparameterised against the marginal+slope
     /// parametric anchor, the per-row reparameterised basis is
     ///
     ///   Φ_new[row, :] = Φ_raw(η_a) − parametric_anchor[row, :] · M
@@ -3010,9 +3010,9 @@ impl BernoulliMarginalSlopeFamily {
             let (l_val, l_d1) = self.link_terms_value_d1_at_row(row, a_rigid_pre_scale, beta_w)?;
             if l_d1 > BMS_DERIV_TOL {
                 let ell0 = l_val - l_d1 * a_rigid_pre_scale;
-                let observed_logslope = probit_scale * l_d1 * slope;
+                let observed_slope = probit_scale * l_d1 * slope;
                 return Ok(
-                    (marginal.q * (1.0 + observed_logslope * observed_logslope).sqrt()
+                    (marginal.q * (1.0 + observed_slope * observed_slope).sqrt()
                         / probit_scale
                         - ell0)
                         / l_d1,
@@ -3069,7 +3069,7 @@ impl BernoulliMarginalSlopeFamily {
         // is the row-i link deviation. After
         // `install_compiled_flex_block_into_runtime`
         // reparameterised the link-deviation runtime against the
-        // marginal+logslope parametric anchor union, the per-row
+        // marginal+slope parametric anchor union, the per-row
         // reparameterised basis is
         //
         //   Φ_new[i, :] = Φ_raw(η_i) − parametric_anchor[i, :] · M
@@ -3103,8 +3103,8 @@ impl BernoulliMarginalSlopeFamily {
                 let ell1 = l_d1_vec[row];
                 if ell1 > BMS_DERIV_TOL {
                     let ell0 = l_val_vec[row] - ell1 * a;
-                    let observed_logslope = probit_scale * ell1 * slope_eta[row];
-                    (marginals[row].q * (1.0 + observed_logslope * observed_logslope).sqrt()
+                    let observed_slope = probit_scale * ell1 * slope_eta[row];
+                    (marginals[row].q * (1.0 + observed_slope * observed_slope).sqrt()
                         / probit_scale
                         - ell0)
                         / ell1
@@ -3220,8 +3220,8 @@ impl BernoulliMarginalSlopeFamily {
                 let ell1 = l_d1_vec[row];
                 let seed = if ell1 > BMS_DERIV_TOL {
                     let ell0 = l_val_vec[row] - ell1 * a;
-                    let observed_logslope = probit_scale * ell1 * slope_eta[row];
-                    (m.q * (1.0 + observed_logslope * observed_logslope).sqrt() / probit_scale
+                    let observed_slope = probit_scale * ell1 * slope_eta[row];
+                    (m.q * (1.0 + observed_slope * observed_slope).sqrt() / probit_scale
                         - ell0)
                         / ell1
                 } else {
@@ -3513,7 +3513,7 @@ mod empirical_rigid_jet_oracle_tests {
             gaussian_frailty_sd: frailty_sd,
             base_link: InverseLink::Standard(gam_problem::StandardLink::Probit),
             marginal_design: dummy(),
-            logslope_design: dummy(),
+            slope_design: dummy(),
             score_warp: None,
             link_dev: None,
             policy: policy.clone(),
@@ -4159,7 +4159,7 @@ mod empirical_flex_jet_oracle_tests {
             gaussian_frailty_sd: None,
             base_link: InverseLink::Standard(gam_problem::StandardLink::Probit),
             marginal_design: dummy(),
-            logslope_design: dummy(),
+            slope_design: dummy(),
             score_warp: if is_score_warp {
                 Some(runtime.clone())
             } else {
@@ -4177,10 +4177,10 @@ mod empirical_flex_jet_oracle_tests {
             auto_subsample_phase_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             auto_subsample_last_rho: Arc::new(Mutex::new(None)),
         };
-        // Primary layout: [q, logslope, then the single active deviation block].
+        // Primary layout: [q, slope, then the single active deviation block].
         let primary = PrimarySlices {
             q: 0,
-            logslope: 1,
+            slope: 1,
             h: if is_score_warp {
                 Some(2..2 + basis_dim)
             } else {
@@ -4322,7 +4322,7 @@ mod empirical_flex_jet_oracle_tests {
     /// `p = [q, b, β...]` (length `primary.total`).
     fn witness_nll(fx: &FlexFixture, p: &[f64]) -> f64 {
         let q = p[fx.primary.q];
-        let b = p[fx.primary.logslope];
+        let b = p[fx.primary.slope];
         let dev_range = if fx.is_score_warp {
             fx.primary.h.clone().unwrap()
         } else {
@@ -4407,7 +4407,7 @@ mod empirical_flex_jet_oracle_tests {
     /// The observed-index tower `η(a; node) = scale·(a + b·node + warp)` over
     /// the `K` primaries, with the deviation basis entering exactly as the model
     /// (score-warp: `b·Σβⱼ·Φⱼ(node)`; link-dev: `Σβⱼ·Φⱼ(u)`, `u = a + b·node`).
-    /// `a`, `b`, `beta0` are the intercept / log-slope / active-β₀ towers; the
+    /// `a`, `b`, `beta0` are the intercept / slope / active-β₀ towers; the
     /// inactive deviation coefficients are folded in as constants from `beta`.
     fn witness_eta_tower<const K: usize>(
         fx: &FlexFixture,
@@ -4454,7 +4454,7 @@ mod empirical_flex_jet_oracle_tests {
     fn flex_tower_witness(fx: &FlexFixture, p0: &[f64]) -> gam_math::jet_tower::Tower4<3> {
         use gam_math::jet_tower::{Tower4, implicit_solve};
         let q0 = p0[fx.primary.q];
-        let b0 = p0[fx.primary.logslope];
+        let b0 = p0[fx.primary.slope];
         let dev_range = if fx.is_score_warp {
             fx.primary.h.clone().unwrap()
         } else {
@@ -4549,7 +4549,7 @@ mod empirical_flex_jet_oracle_tests {
         let slot = |idx: usize| -> usize {
             if idx == fx.primary.q {
                 0
-            } else if idx == fx.primary.logslope {
+            } else if idx == fx.primary.slope {
                 1
             } else if idx == dev0 {
                 2
@@ -4627,7 +4627,7 @@ mod empirical_flex_jet_oracle_tests {
         let r = fx.primary.total;
         assert_eq!(p0.len(), r, "canonical flex fixture primary width");
         let q = p0[fx.primary.q];
-        let b = p0[fx.primary.logslope];
+        let b = p0[fx.primary.slope];
         let dev_range = if fx.is_score_warp {
             fx.primary.h.clone().unwrap()
         } else {
@@ -4739,7 +4739,7 @@ mod empirical_flex_jet_oracle_tests {
         let b0 = 0.35_f64;
         let mut p0 = vec![0.0; r];
         p0[fx.primary.q] = q0;
-        p0[fx.primary.logslope] = b0;
+        p0[fx.primary.slope] = b0;
         let dev_range = if is_score_warp {
             fx.primary.h.clone().unwrap()
         } else {
@@ -4754,7 +4754,7 @@ mod empirical_flex_jet_oracle_tests {
         // multiplicative / composed deviation couplings) is exercised.
         let dev0 = dev_range.start;
         let q = fx.primary.q;
-        let b = fx.primary.logslope;
+        let b = fx.primary.slope;
 
         let label = if is_score_warp {
             "score-warp"
@@ -4865,14 +4865,14 @@ mod empirical_flex_jet_oracle_tests {
         let q0 = 0.2_f64;
         let b0 = 0.35_f64;
         let q = fx.primary.q;
-        let b = fx.primary.logslope;
+        let b = fx.primary.slope;
         let dev_range = fx.primary.w.clone().unwrap();
         for scale in [0.1_f64, 0.2, 0.3, 0.4, 0.5, 1.0] {
             let mut fxs = make_fixture(false);
             fxs.beta_dev = fx.beta_dev.mapv(|v| v * scale);
             let mut p0 = vec![0.0; r];
             p0[fx.primary.q] = q0;
-            p0[fx.primary.logslope] = b0;
+            p0[fx.primary.slope] = b0;
             for (k, i) in dev_range.clone().enumerate() {
                 p0[i] = fxs.beta_dev[k];
             }
@@ -4913,7 +4913,7 @@ mod empirical_flex_jet_oracle_tests {
         let b0 = 0.4_f64;
         let mut p0 = vec![0.0; r];
         p0[fx.primary.q] = q0;
-        p0[fx.primary.logslope] = b0;
+        p0[fx.primary.slope] = b0;
         let dev_range = fx.primary.w.clone().unwrap();
         for (k, i) in dev_range.clone().enumerate() {
             p0[i] = fx.beta_dev[k];
@@ -4938,7 +4938,7 @@ mod empirical_flex_jet_oracle_tests {
         };
 
         // Third-contracted along the slope direction e_b: out[u][v] = ∂³ℓ[e_u,e_v,e_b].
-        let b = fx.primary.logslope;
+        let b = fx.primary.slope;
         let dir_b = unit_primary_direction(r, b);
         let third = fx
             .family
@@ -5025,7 +5025,7 @@ mod empirical_flex_jet_oracle_tests {
             let b0 = 0.35_f64;
             let mut p0 = vec![0.0; r];
             p0[fx.primary.q] = q0;
-            p0[fx.primary.logslope] = b0;
+            p0[fx.primary.slope] = b0;
             let dev_range = if is_score_warp {
                 fx.primary.h.clone().unwrap()
             } else {
@@ -5035,7 +5035,7 @@ mod empirical_flex_jet_oracle_tests {
                 p0[i] = fx.beta_dev[k];
             }
             let q = fx.primary.q;
-            let b = fx.primary.logslope;
+            let b = fx.primary.slope;
             let dev0 = dev_range.start;
             let label = if is_score_warp {
                 "score-warp"
@@ -5121,7 +5121,7 @@ mod empirical_flex_jet_oracle_tests {
             let b0 = 0.35_f64;
             let mut p0 = vec![0.0; r];
             p0[fx.primary.q] = q0;
-            p0[fx.primary.logslope] = b0;
+            p0[fx.primary.slope] = b0;
             let dev_range = if is_score_warp {
                 fx.primary.h.clone().unwrap()
             } else {
@@ -5256,7 +5256,7 @@ mod empirical_flex_jet_oracle_tests {
                 let q0 = 0.2_f64;
                 let mut p0 = vec![0.0; r];
                 p0[fx.primary.q] = q0;
-                p0[fx.primary.logslope] = b0;
+                p0[fx.primary.slope] = b0;
                 let dev_range = if is_score_warp {
                     fx.primary.h.clone().unwrap()
                 } else {
@@ -5374,7 +5374,7 @@ mod empirical_flex_jet_oracle_tests {
         fixture.family.link_dev = (!is_score_warp).then(|| runtime.clone());
         fixture.primary = PrimarySlices {
             q: 0,
-            logslope: 1,
+            slope: 1,
             h: is_score_warp.then_some(2..2 + basis_dim),
             w: (!is_score_warp).then_some(2..2 + basis_dim),
             total: 2 + basis_dim,

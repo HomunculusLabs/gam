@@ -24,7 +24,7 @@ pub(crate) fn required_columns_for_formula(parsed: &ParsedFormula) -> Result<Vec
         out.insert(parsed.response.clone());
     }
     collect_term_column_names(&parsed.terms, &mut out);
-    for surface in &parsed.logslope_surfaces {
+    for surface in &parsed.slope_surfaces {
         out.insert(surface.z_column.clone());
         collect_term_column_names(&surface.terms, &mut out);
     }
@@ -51,15 +51,15 @@ pub(crate) fn required_columns_for_fit(
         merge_required_columns(&mut required, required_columns_for_formula(&parsed_noise)?);
     }
 
-    if let Some(logslope_formula_raw) = args.logslope_formula.as_deref() {
-        let (_, parsed_logslope) = parse_matching_auxiliary_formula(
-            logslope_formula_raw,
+    if let Some(slope_formula_raw) = args.slope_formula.as_deref() {
+        let (_, parsed_slope) = parse_matching_auxiliary_formula(
+            slope_formula_raw,
             &parsed.response,
-            "--logslope-formula",
+            "--slope-formula",
         )?;
         merge_required_columns(
             &mut required,
-            required_columns_for_formula(&parsed_logslope)?,
+            required_columns_for_formula(&parsed_slope)?,
         );
     }
 
@@ -155,7 +155,7 @@ fn collect_categorical_role_columns(terms: &[ParsedTerm], out: &mut BTreeSet<Str
             ParsedTerm::RandomEffect { name, .. } => {
                 out.insert(name.clone());
             }
-            ParsedTerm::LogSlopeSurface { terms, .. } => {
+            ParsedTerm::SlopeSurface { terms, .. } => {
                 collect_categorical_role_columns(terms, out);
             }
             // Deliberately not categorical-by-role — see the doc comment above

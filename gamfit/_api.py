@@ -265,7 +265,7 @@ def _build_fit_payload(
     baseline_makeham: float | None,
     z_column: str | None,
     link: str | None,
-    logslope_formula: str | None,
+    slope_formula: str | None,
     frailty_kind: str | None,
     frailty_sd: float | None,
     hazard_loading: str | None,
@@ -300,7 +300,7 @@ def _build_fit_payload(
         "baseline_makeham": baseline_makeham,
         "z_column": z_column,
         "link": link,
-        "logslope_formula": logslope_formula,
+        "slope_formula": slope_formula,
         "frailty_kind": frailty_kind,
         "frailty_sd": frailty_sd,
         "hazard_loading": hazard_loading,
@@ -728,7 +728,7 @@ def fit(
     baseline_makeham: float | None = ...,
     z_column: str | None = ...,
     link: str | None = ...,
-    logslope_formula: str | None = ...,
+    slope_formula: str | None = ...,
     frailty_kind: str | None = ...,
     frailty_sd: float | None = ...,
     hazard_loading: str | None = ...,
@@ -772,7 +772,7 @@ def fit(
     baseline_makeham: float | None = ...,
     z_column: str | None = ...,
     link: str | None = ...,
-    logslope_formula: str | None = ...,
+    slope_formula: str | None = ...,
     frailty_kind: str | None = ...,
     frailty_sd: float | None = ...,
     hazard_loading: str | None = ...,
@@ -815,7 +815,7 @@ def fit(
     baseline_makeham: float | None = None,
     z_column: str | None = None,
     link: str | None = None,
-    logslope_formula: str | None = None,
+    slope_formula: str | None = None,
     frailty_kind: str | None = None,
     frailty_sd: float | None = None,
     hazard_loading: str | None = None,
@@ -932,9 +932,9 @@ def fit(
         and latent transformation models. Corresponds to ``--z-column``.
     link:
         Override the default link function. Corresponds to ``--link``.
-    logslope_formula:
-        Secondary formula for the logslope / score-warp submodel. Corresponds to
-        ``--logslope-formula``.
+    slope_formula:
+        Secondary formula for the slope / score-warp submodel. Corresponds to
+        ``--slope-formula``.
     frailty_kind:
         Frailty family for frailty-aware survival models. One of
         ``"gaussian-shift"`` or ``"hazard-multiplier"``. Corresponds to
@@ -1136,7 +1136,7 @@ def fit(
             ("baseline_makeham", baseline_makeham),
             ("z_column", z_column),
             ("link", link),
-            ("logslope_formula", logslope_formula),
+            ("slope_formula", slope_formula),
             ("frailty_kind", frailty_kind),
             ("frailty_sd", frailty_sd),
             ("hazard_loading", hazard_loading),
@@ -1212,7 +1212,7 @@ def fit(
         baseline_makeham=baseline_makeham,
         z_column=z_column,
         link=link,
-        logslope_formula=logslope_formula,
+        slope_formula=slope_formula,
         frailty_kind=frailty_kind,
         frailty_sd=frailty_sd,
         hazard_loading=hazard_loading,
@@ -1306,7 +1306,7 @@ def fit_array(
     baseline_makeham: float | None = None,
     z_column: str | None = None,
     link: str | None = None,
-    logslope_formula: str | None = None,
+    slope_formula: str | None = None,
     frailty_kind: str | None = None,
     frailty_sd: float | None = None,
     hazard_loading: str | None = None,
@@ -1373,7 +1373,7 @@ def fit_array(
         baseline_makeham=baseline_makeham,
         z_column=z_column,
         link=link,
-        logslope_formula=logslope_formula,
+        slope_formula=slope_formula,
         frailty_kind=frailty_kind,
         frailty_sd=frailty_sd,
         hazard_loading=hazard_loading,
@@ -1618,7 +1618,7 @@ def validate_formula(
     baseline_makeham: float | None = None,
     z_column: str | None = None,
     link: str | None = None,
-    logslope_formula: str | None = None,
+    slope_formula: str | None = None,
     frailty_kind: str | None = None,
     frailty_sd: float | None = None,
     hazard_loading: str | None = None,
@@ -1668,7 +1668,7 @@ def validate_formula(
         baseline_makeham=baseline_makeham,
         z_column=z_column,
         link=link,
-        logslope_formula=logslope_formula,
+        slope_formula=slope_formula,
         frailty_kind=frailty_kind,
         frailty_sd=frailty_sd,
         hazard_loading=hazard_loading,

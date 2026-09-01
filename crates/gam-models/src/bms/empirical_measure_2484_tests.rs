@@ -229,10 +229,10 @@ fn the_tie_certificate_fires_only_where_a_boundary_cuts_a_tie_2484() {
 // ---------------------------------------------------------------------------
 
 /// A two-block rigid empirical-grid BMS fixture: `n` rows, a `p_m`-column
-/// marginal design and a `p_g`-column logslope design, so `β = [β_m; β_g]`.
+/// marginal design and a `p_g`-column slope design, so `β = [β_m; β_g]`.
 struct RowFixture {
     marginal_design: Array2<f64>,
-    logslope_design: Array2<f64>,
+    slope_design: Array2<f64>,
     y: Array1<f64>,
     weights: Array1<f64>,
     zeta: Array1<f64>,
@@ -245,7 +245,7 @@ impl RowFixture {
     fn new() -> Self {
         let n = 10;
         let mut marginal_design = Array2::<f64>::zeros((n, 2));
-        let mut logslope_design = Array2::<f64>::zeros((n, 2));
+        let mut slope_design = Array2::<f64>::zeros((n, 2));
         let mut y = Array1::<f64>::zeros(n);
         let mut zeta = Array1::<f64>::zeros(n);
         let mut weights = Array1::<f64>::zeros(n);
@@ -254,8 +254,8 @@ impl RowFixture {
             let t = (i as f64) / (n as f64 - 1.0);
             marginal_design[[i, 0]] = 1.0;
             marginal_design[[i, 1]] = 2.0 * t - 1.0;
-            logslope_design[[i, 0]] = 1.0;
-            logslope_design[[i, 1]] = (3.0 * t - 1.4).sin();
+            slope_design[[i, 0]] = 1.0;
+            slope_design[[i, 1]] = (3.0 * t - 1.4).sin();
             y[i] = if i % 3 == 0 { 1.0 } else { 0.0 };
             // Deliberately untied and irregularly spaced.
             zeta[i] = -1.7 + 0.41 * (i as f64) + 0.07 * ((i * i) as f64).sqrt();
@@ -264,7 +264,7 @@ impl RowFixture {
         }
         Self {
             marginal_design,
-            logslope_design,
+            slope_design,
             y,
             weights,
             zeta,
@@ -279,14 +279,14 @@ impl RowFixture {
     }
 
     fn p_beta(&self) -> usize {
-        self.marginal_design.ncols() + self.logslope_design.ncols()
+        self.marginal_design.ncols() + self.slope_design.ncols()
     }
 
     fn linear_predictors(&self, beta: &Array1<f64>) -> (Array1<f64>, Array1<f64>) {
         let p_m = self.p_m();
         let marginal = self.marginal_design.dot(&beta.slice(ndarray::s![..p_m]));
-        let logslope = self.logslope_design.dot(&beta.slice(ndarray::s![p_m..]));
-        (marginal, logslope)
+        let slope = self.slope_design.dot(&beta.slice(ndarray::s![p_m..]));
+        (marginal, slope)
     }
 
     /// The production log-likelihood of the rigid empirical-grid kernel at
@@ -345,7 +345,7 @@ impl RowFixture {
             self.probit_scale,
             &build.grid,
             self.marginal_design.view(),
-            self.logslope_design.view(),
+            self.slope_design.view(),
             self.p_beta(),
         )
         .expect("channels");
@@ -452,7 +452,7 @@ fn the_cross_row_channel_is_a_first_class_part_of_the_total_2484() {
     // three contractions (`G = S_effᵀJ`, `Vb·G`, the `V₁` congruence) sit
     // between the two, and the sweep in
     // `scripts/probe_2484_empirical_measure_sensitivity.py` measures the SE
-    // effect at 1.2e-5 to 9.0e-3 relative, growing with the LOGSLOPE rather
+    // effect at 1.2e-5 to 9.0e-3 relative, growing with the SLOPE rather
     // than with the grid size. Small enough that a direct-only implementation
     // would pass casual inspection, which is the reason to be exact rather than
     // a reason not to bother.
@@ -475,7 +475,7 @@ fn the_cross_row_channel_is_a_first_class_part_of_the_total_2484() {
         fixture.probit_scale,
         &build.grid,
         fixture.marginal_design.view(),
-        fixture.logslope_design.view(),
+        fixture.slope_design.view(),
         fixture.p_beta(),
     )
     .expect("channels");

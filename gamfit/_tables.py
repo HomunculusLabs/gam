@@ -16,21 +16,15 @@ class PredictionResult(dict[str, Any]):
     ``Model.predict(..., return_type="dict")`` and dict-shaped tabular
     defaults return this class. It behaves like a normal ``dict`` for
     subscription and iteration, while also allowing field access such as
-    ``pred.mean``, ``pred.std_error``, and ``pred.mean_lower``.
+    ``pred.posterior_mean``, ``pred.posterior_mean_standard_error``, and
+    ``pred.posterior_mean_lower``.
     Model-based interval results also carry the scalar metadata field
     ``pred.covariance_source`` / ``pred["covariance_source"]``.
     """
 
-    _ALIASES = {
-        "lower": "mean_lower",
-        "upper": "mean_upper",
-        "se_mean": "std_error",
-    }
-
     def __getattr__(self, name: str) -> Any:
-        key = self._ALIASES.get(name, name)
         try:
-            return self[key]
+            return self[name]
         except KeyError as exc:
             raise AttributeError(
                 f"{type(self).__name__!s} has no prediction column {name!r}"

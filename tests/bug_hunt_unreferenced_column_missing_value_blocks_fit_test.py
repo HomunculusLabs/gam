@@ -68,7 +68,7 @@ def _reference_fit() -> tuple[Any, np.ndarray, np.ndarray]:
     model = gamfit.fit(data, "y ~ s(x)", family="gaussian")
     grid = np.linspace(0.05, 0.95, 11)
     preds = np.asarray(
-        model.predict({"x": grid}, return_type="dict")["mean"], dtype=float
+        model.predict({"x": grid}, return_type="dict")["posterior_mean"], dtype=float
     )
     return model, grid, preds
 
@@ -109,7 +109,7 @@ def test_fit_ignores_missing_values_in_unreferenced_columns(
         f"{summary.deviance} vs {reference.deviance}"
     )
     got = np.asarray(
-        model.predict({"x": grid}, return_type="dict")["mean"], dtype=float
+        model.predict({"x": grid}, return_type="dict")["posterior_mean"], dtype=float
     )
     np.testing.assert_allclose(
         got,
@@ -125,7 +125,9 @@ def test_predict_ignores_missing_values_in_unreferenced_columns() -> None:
     model, grid, expected = _reference_fit()
 
     padded: dict[str, Any] = {"x": grid, "unused": np.full(grid.size, np.nan)}
-    got = np.asarray(model.predict(padded, return_type="dict")["mean"], dtype=float)
+    got = np.asarray(
+        model.predict(padded, return_type="dict")["posterior_mean"], dtype=float
+    )
 
     np.testing.assert_allclose(
         got,

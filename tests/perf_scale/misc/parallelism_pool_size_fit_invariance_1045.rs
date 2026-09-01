@@ -9,7 +9,7 @@
 //! and a perturbed sum fed into the iterative REML optimizer near a flat
 //! optimum can in principle steer it to a different `(ρ, λ)` selection.
 //!
-//! This test fits ONE fixed Bernoulli-marginal-slope matern-logslope model
+//! This test fits ONE fixed Bernoulli-marginal-slope matern-slope model
 //! twice — once on a wide worker pool and once on a narrow one — using scoped
 //! `rayon::ThreadPool::install`, which sets `rayon::current_num_threads()` for
 //! both the codebase's `into_par_iter` folds and faer's `Par::rayon(0)`
@@ -109,7 +109,7 @@ fn build(n: usize, centers: usize) -> (Array2<f64>, BernoulliMarginalSlopeTermSp
         random_effect_terms: vec![],
         smooth_terms: vec![matern_smooth("f_pc", centers)],
     };
-    let logslopespec = TermCollectionSpec {
+    let slopespec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![matern_smooth("ls_pc", centers)],
@@ -120,9 +120,9 @@ fn build(n: usize, centers: usize) -> (Array2<f64>, BernoulliMarginalSlopeTermSp
         z,
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginalspec,
-        logslopespec,
+        slopespec,
         marginal_offset: Array1::<f64>::zeros(n),
-        logslope_offset: Array1::<f64>::zeros(n),
+        slope_offset: Array1::<f64>::zeros(n),
         frailty: FrailtySpec::None,
         score_warp: None,
         link_dev: None,

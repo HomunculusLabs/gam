@@ -432,45 +432,45 @@ fn build_saved_marginal_slope_survival_alo_input(
             "saved survival marginal-slope ALO marginal block",
         )
         .map_err(|error| error.to_string())?;
-    let logslopespec = resolve_termspec_for_prediction(
-        &model.resolved_termspec_logslope.as_ref().cloned(),
+    let slopespec = resolve_termspec_for_prediction(
+        &model.resolved_slopespec.as_ref().cloned(),
         training_headers,
         col_map,
-        "resolved_termspec_logslope",
+        "resolved_slopespec",
     )?;
-    let logslope_build =
-        build_term_collection_design(design_input, &logslopespec).map_err(|error| {
-            format!("failed to build saved marginal-slope logslope design: {error}")
+    let slope_build =
+        build_term_collection_design(design_input, &slopespec).map_err(|error| {
+            format!("failed to build saved marginal-slope slope design: {error}")
         })?;
-    let mut logslope_offset = logslope_build
+    let mut slope_offset = slope_build
         .compose_offset(
             noise_offset.view(),
-            "saved survival marginal-slope ALO logslope block",
+            "saved survival marginal-slope ALO slope block",
         )
         .map_err(|error| error.to_string())?;
-    logslope_offset += model.logslope_baseline.ok_or_else(|| {
-        "saved survival marginal-slope ALO model is missing its fitted logslope baseline"
+    slope_offset += model.baseline_slope.ok_or_else(|| {
+        "saved survival marginal-slope ALO model is missing its fitted slope baseline"
             .to_string()
     })?;
     // gam#2765 / gam#2767: the leave-one-out replay re-evaluates the row
     // program, which reads the slope at entry, at exit, and as an exit-time
     // rate. Replaying only the exit channel would compute the influence of a
     // time-CONSTANT slope, so all three are rebuilt from the saved margin.
-    let logslope_replay = match model.logslope_time_basis.as_ref() {
+    let slope_replay = match model.slope_time_basis.as_ref() {
         None => None,
         Some(time_basis) => Some(
-            gam::families::survival::replay_logslope_follow_up_designs(
+            gam::families::survival::replay_slope_follow_up_designs(
                 &age_entry,
                 &age_exit,
                 time_basis,
-                &logslope_build.design,
+                &slope_build.design,
             )?,
         ),
     };
-    let logslope_exit_design = logslope_replay
+    let slope_exit_design = slope_replay
         .as_ref()
-        .map_or_else(|| logslope_build.design.clone(), |replay| replay.exit.clone());
-    let logslope_follow_up = logslope_replay
+        .map_or_else(|| slope_build.design.clone(), |replay| replay.exit.clone());
+    let slope_follow_up = slope_replay
         .map(|replay| (replay.entry, replay.derivative_exit));
 
     let time_config = load_survival_time_basis_config_from_model(model)?;
@@ -537,17 +537,17 @@ fn build_saved_marginal_slope_survival_alo_input(
     if fit.blocks.len() < 3
         || fit.blocks[0].beta.len() != time_build.x_exit_time.ncols()
         || fit.blocks[1].beta.len() != marginal_build.design.ncols()
-        || fit.blocks[2].beta.len() != logslope_exit_design.ncols()
+        || fit.blocks[2].beta.len() != slope_exit_design.ncols()
     {
         return Err(format!(
-            "saved survival marginal-slope ALO fitted/design topology mismatch: blocks={}, time={}/{}, marginal={}/{}, logslope={}/{}",
+            "saved survival marginal-slope ALO fitted/design topology mismatch: blocks={}, time={}/{}, marginal={}/{}, slope={}/{}",
             fit.blocks.len(),
             fit.blocks.first().map_or(0, |block| block.beta.len()),
             time_build.x_exit_time.ncols(),
             fit.blocks.get(1).map_or(0, |block| block.beta.len()),
             marginal_build.design.ncols(),
             fit.blocks.get(2).map_or(0, |block| block.beta.len()),
-            logslope_exit_design.ncols(),
+            slope_exit_design.ncols(),
         ));
     }
     let input = gam_predict::SavedMarginalSlopeSurvivalAloInput::new(
@@ -561,9 +561,9 @@ fn build_saved_marginal_slope_survival_alo_input(
         derivative_offset_exit,
         marginal_build.design,
         marginal_offset,
-        logslope_exit_design,
-        logslope_follow_up,
-        logslope_offset,
+        slope_exit_design,
+        slope_follow_up,
+        slope_offset,
     )?;
     Ok(gam_predict::SavedModelAloInput::survival(
         gam_predict::SavedSurvivalAloInput::MarginalSlope(input),
@@ -1040,15 +1040,32 @@ pub(crate) fn run_predict_unified(
         &request,
     )
     .map_err(|e| format!("prediction failed: {e}"))?;
-    let (eta, mean, se_opt, mean_lo, mean_hi, point_covariance, uncertainty_covariance) = (
-        columns.eta,
-        columns.mean,
-        columns.mean_standard_error,
-        columns.mean_lower,
-        columns.mean_upper,
+    let (
+        linear_predictor_plugin,
+        mean_plugin,
+        posterior_mean,
+        posterior_mean_standard_error,
+        posterior_mean_lower,
+        posterior_mean_upper,
+        point_covariance,
+        uncertainty_covariance,
+    ) = (
+        columns.linear_predictor_plugin,
+        columns.mean_plugin,
+        columns.posterior_mean,
+        columns.posterior_mean_standard_error,
+        columns.posterior_mean_lower,
+        columns.posterior_mean_upper,
         columns.point_covariance_source,
         columns.uncertainty_covariance_source,
     );
+    let specialised_point = match (args.mode, posterior_mean.as_ref()) {
+        (PredictModeArg::PosteriorMean, Some(posterior_mean)) => posterior_mean,
+        (PredictModeArg::PosteriorMean, None) => {
+            return Err("posterior-mean prediction did not produce a posterior mean".to_string());
+        }
+        (PredictModeArg::Map, _) => &mean_plugin,
+    };
 
     // --- Write CSV output ---
 
@@ -1060,12 +1077,12 @@ pub(crate) fn run_predict_unified(
             })?;
             write_gaussian_location_scale_prediction_csv(
                 &args.out,
-                eta.view(),
-                mean.view(),
+                linear_predictor_plugin.view(),
+                specialised_point.view(),
                 sigma.view(),
-                se_opt.as_ref().map(|a| a.view()),
-                mean_lo.as_ref().map(|a| a.view()),
-                mean_hi.as_ref().map(|a| a.view()),
+                posterior_mean_standard_error.as_ref().map(|a| a.view()),
+                posterior_mean_lower.as_ref().map(|a| a.view()),
+                posterior_mean_upper.as_ref().map(|a| a.view()),
             )?;
         }
         PredictModelClass::BernoulliMarginalSlope => {
@@ -1091,21 +1108,32 @@ pub(crate) fn run_predict_unified(
             // need.
             write_survival_binary_prediction_csv(
                 &args.out,
-                eta.view(),
-                mean.view(),
-                se_opt.as_ref().map(|a| a.view()),
-                mean_lo.as_ref().map(|a| a.view()),
-                mean_hi.as_ref().map(|a| a.view()),
+                linear_predictor_plugin.view(),
+                specialised_point.view(),
+                posterior_mean_standard_error.as_ref().map(|a| a.view()),
+                posterior_mean_lower.as_ref().map(|a| a.view()),
+                posterior_mean_upper.as_ref().map(|a| a.view()),
+            )?;
+        }
+        PredictModelClass::Standard => {
+            write_standard_prediction_csv(
+                &args.out,
+                linear_predictor_plugin.view(),
+                mean_plugin.view(),
+                posterior_mean.as_ref().map(|values| values.view()),
+                posterior_mean_standard_error.as_ref().map(|a| a.view()),
+                posterior_mean_lower.as_ref().map(|a| a.view()),
+                posterior_mean_upper.as_ref().map(|a| a.view()),
             )?;
         }
         _ => {
             write_prediction_csv(
                 &args.out,
-                eta.view(),
-                mean.view(),
-                se_opt.as_ref().map(|a| a.view()),
-                mean_lo.as_ref().map(|a| a.view()),
-                mean_hi.as_ref().map(|a| a.view()),
+                linear_predictor_plugin.view(),
+                specialised_point.view(),
+                posterior_mean_standard_error.as_ref().map(|a| a.view()),
+                posterior_mean_lower.as_ref().map(|a| a.view()),
+                posterior_mean_upper.as_ref().map(|a| a.view()),
             )?;
         }
     }
@@ -1113,7 +1141,7 @@ pub(crate) fn run_predict_unified(
     cli_out!(
         "wrote predictions: {} (rows={}){}",
         args.out.display(),
-        mean.len(),
+        specialised_point.len(),
         covariance_provenance_note(point_covariance, uncertainty_covariance)
     );
     Ok(())
@@ -1218,10 +1246,11 @@ pub(crate) fn run_predict_spline_scan(
     } else {
         (None, None, None)
     };
-    write_prediction_csv(
+    write_standard_prediction_csv(
         &args.out,
         mean.view(),
         mean.view(),
+        Some(mean.view()),
         se_opt.as_ref().map(|a| a.view()),
         mean_lo.as_ref().map(|a| a.view()),
         mean_hi.as_ref().map(|a| a.view()),
@@ -1297,10 +1326,11 @@ pub(crate) fn run_predict_residual_cascade(
     } else {
         (None, None, None)
     };
-    write_prediction_csv(
+    write_standard_prediction_csv(
         &args.out,
         mean.view(),
         mean.view(),
+        Some(mean.view()),
         se_opt.as_ref().map(|a| a.view()),
         mean_lo.as_ref().map(|a| a.view()),
         mean_hi.as_ref().map(|a| a.view()),
@@ -2505,35 +2535,35 @@ pub(crate) fn run_predict_survival(
             .ok_or_else(|| "saved survival marginal-slope model missing z_column".to_string())?;
         let z_col = resolve_role_col(col_map, z_name, "z")?;
         let z = data.column(z_col).to_owned();
-        let logslopespec = resolve_termspec_for_prediction(
-            &model.resolved_termspec_logslope.as_ref().cloned(),
+        let slopespec = resolve_termspec_for_prediction(
+            &model.resolved_slopespec.as_ref().cloned(),
             training_headers,
             col_map,
-            "resolved_termspec_logslope",
+            "resolved_slopespec",
         )?;
-        let logslope_clipped = model.axis_clip_to_training_ranges(data, col_map);
-        let logslope_input = logslope_clipped.as_ref().map_or(data, |arr| arr.view());
-        let logslope_design = build_term_collection_design(logslope_input, &logslopespec)
-            .map_err(|e| format!("failed to build survival marginal-slope logslope design: {e}"))?;
-        let effective_noise_offset = logslope_design
+        let slope_clipped = model.axis_clip_to_training_ranges(data, col_map);
+        let slope_input = slope_clipped.as_ref().map_or(data, |arr| arr.view());
+        let slope_design = build_term_collection_design(slope_input, &slopespec)
+            .map_err(|e| format!("failed to build survival marginal-slope slope design: {e}"))?;
+        let effective_noise_offset = slope_design
             .compose_offset(
                 noise_offset.view(),
-                "survival CLI marginal-slope logslope block",
+                "survival CLI marginal-slope slope block",
             )
             .map_err(|error| error.to_string())?;
         // gam#2765 / gam#2767. The term spec names the covariate factor; when
         // the fit gave the slope a follow-up margin the coefficients live
         // against `X_cov ⊗ᵣ B(log t)` at each row's exit time, so the design has
         // to be rebuilt as that product against the fit's OWN knots. The offset
-        // is composed before this deliberately: an external log-slope offset is
+        // is composed before this deliberately: an external slope offset is
         // a contribution to `g` itself, not to a coefficient, so it is
         // time-constant and does not ride the margin.
-        let logslope_design_matrix = match model.logslope_time_basis.as_ref() {
-            None => logslope_design.design.clone(),
-            Some(time_basis) => gam::families::survival::replay_logslope_time_margin_design(
+        let slope_design_matrix = match model.slope_time_basis.as_ref() {
+            None => slope_design.design.clone(),
+            Some(time_basis) => gam::families::survival::replay_slope_time_margin_design(
                 age_exit.view(),
                 time_basis,
-                &logslope_design.design,
+                &slope_design.design,
             )?,
         };
         let fit_saved = fit_result_from_saved_model_for_prediction(model)?;
@@ -2543,7 +2573,7 @@ pub(crate) fn run_predict_survival(
             z_name,
             &z,
             &cov_design.design,
-            &logslope_design_matrix,
+            &slope_design_matrix,
             &time_build,
             &eta_offset_entry,
             &eta_offset_exit,

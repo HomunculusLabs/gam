@@ -4,7 +4,7 @@
 //! Duchon–Matérn mode) but **no explicit `power=`** crashed at basis-generation
 //! time for even covariate dimensions `d ≥ 4` (originally surfaced as a
 //! "non-finite values in self-adjoint eigendecomposition" error inside a
-//! `bernoulli-marginal-slope` logslope surface; later a clean fit-time
+//! `bernoulli-marginal-slope` slope surface; later a clean fit-time
 //! "Duchon pointwise kernel values require 2*(p+s) > dimension" validation
 //! error).
 //!

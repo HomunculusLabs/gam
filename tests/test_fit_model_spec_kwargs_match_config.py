@@ -46,7 +46,7 @@ _BASE: dict[str, typing.Any] = {
     "baseline_makeham": None,
     "z_column": None,
     "link": None,
-    "logslope_formula": None,
+    "slope_formula": None,
     "frailty_kind": None,
     "frailty_sd": None,
     "hazard_loading": None,

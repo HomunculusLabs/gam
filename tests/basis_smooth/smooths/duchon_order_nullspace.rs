@@ -360,7 +360,7 @@ fn duchon_order1_polynomial_block_is_independent_of_the_kernel_block() {
 ///
 /// This is the structural precondition for the "channel-aware audit passes but
 /// flat audit would FATAL" scenario: when two formula channels (e.g. marginal
-/// and logslope in a survival model) both carry `duchon(PC1,PC2,PC3,centers=k,
+/// and slope in a survival model) both carry `duchon(PC1,PC2,PC3,centers=k,
 /// order=1)`, the RAW designs are identical (cosine 1.0), but the row Jacobians
 /// are orthogonal across channels, so the channel-aware audit classifies the
 /// blocks as separately identifiable.

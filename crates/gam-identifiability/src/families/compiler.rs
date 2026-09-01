@@ -303,7 +303,7 @@ impl std::error::Error for CompilerError {}
 pub enum BlockOrder {
     Time,
     Marginal,
-    Logslope,
+    Slope,
     ScoreWarp,
     LinkDev,
 }
@@ -2108,7 +2108,7 @@ mod tests {
         });
         let hess = IdentityRowHessian::new(n, 1);
         let ops = vec![op(a.clone()), op(b.clone())];
-        let compiled = compile(&ops, &hess, &[BlockOrder::Marginal, BlockOrder::Logslope])
+        let compiled = compile(&ops, &hess, &[BlockOrder::Marginal, BlockOrder::Slope])
             .expect("compile should succeed");
         // Build A's design (no rotation) and B's compiled design B·V − A·M.
         let v_b = &compiled.blocks[1].t_lw;
@@ -2146,7 +2146,7 @@ mod tests {
             &hess,
             &[
                 BlockOrder::Marginal,
-                BlockOrder::Logslope,
+                BlockOrder::Slope,
                 BlockOrder::LinkDev,
             ],
         )
@@ -2220,7 +2220,7 @@ mod tests {
         let w = Array1::from_shape_fn(n, |i| 0.5 + (i as f64 * 0.2).sin().abs());
         let hess = DiagonalScalarRowHessian::new(w.clone());
         let ops = vec![op(a.clone()), op(b.clone())];
-        let compiled = compile(&ops, &hess, &[BlockOrder::Marginal, BlockOrder::Logslope])
+        let compiled = compile(&ops, &hess, &[BlockOrder::Marginal, BlockOrder::Slope])
             .expect("compile should succeed");
         let m = compiled.blocks[1]
             .anchor_correction
@@ -2338,7 +2338,7 @@ mod tests {
         // the first block after metric projection — already covered by the
         // eigenvalue threshold inside `compile`. Verify either drop path
         // (eigen-threshold or audit) attributes loss to block index 1.
-        let compiled = compile(&ops, &hess, &[BlockOrder::Marginal, BlockOrder::Logslope])
+        let compiled = compile(&ops, &hess, &[BlockOrder::Marginal, BlockOrder::Slope])
             .expect("compile should succeed");
         // Either the eigen-threshold dropped a column from block 1, or
         // the audit did. In both cases block 1's V must have fewer than
@@ -2381,7 +2381,7 @@ mod tests {
         });
         let hess = IdentityRowHessian::new(n, 1);
         let ops = vec![op(a), op(c)];
-        let compiled = compile(&ops, &hess, &[BlockOrder::Marginal, BlockOrder::Logslope])
+        let compiled = compile(&ops, &hess, &[BlockOrder::Marginal, BlockOrder::Slope])
             .expect("compile should succeed");
         for (idx, block) in compiled.blocks.iter().enumerate() {
             let k_kept = block.t_lw.ncols();
@@ -2428,7 +2428,7 @@ mod tests {
         let compiled_param = compile(
             &ops_param,
             &hess,
-            &[BlockOrder::Marginal, BlockOrder::Logslope],
+            &[BlockOrder::Marginal, BlockOrder::Slope],
         )
         .expect("compile should succeed");
 
@@ -2484,7 +2484,7 @@ mod tests {
         });
         let hess = IdentityRowHessian::new(n, 1);
         let ops = vec![op(a.clone()), op(b.clone())];
-        let compiled = compile(&ops, &hess, &[BlockOrder::Marginal, BlockOrder::Logslope])
+        let compiled = compile(&ops, &hess, &[BlockOrder::Marginal, BlockOrder::Slope])
             .expect("compile should succeed");
         let v_b = &compiled.blocks[1].t_lw;
         let m_b = compiled.blocks[1].anchor_correction.as_ref().unwrap();
@@ -2517,7 +2517,7 @@ mod tests {
         });
         let hess = IdentityRowHessian::new(n, 1);
         let ops = vec![op(a.clone()), op(b.clone())];
-        let compiled = compile(&ops, &hess, &[BlockOrder::Marginal, BlockOrder::Logslope])
+        let compiled = compile(&ops, &hess, &[BlockOrder::Marginal, BlockOrder::Slope])
             .expect("compile should succeed");
 
         // First block: no anchor → both fields None.
@@ -2824,7 +2824,7 @@ mod tests {
         });
         let w = Array1::from_shape_fn(n, |i| 0.5 + (i as f64 * 0.17).sin().abs());
         let curvature = diag_hess(w.clone());
-        let ordering = [BlockOrder::Marginal, BlockOrder::Logslope];
+        let ordering = [BlockOrder::Marginal, BlockOrder::Slope];
 
         let ops_single = vec![op(a.clone()), op(b.clone())];
         let single = compile(&ops_single, &curvature, &ordering)
@@ -2900,7 +2900,7 @@ mod tests {
         // which now routes through identity-structural). For this test we
         // explicitly invoke the dual-metric API both ways.
         let id_struct = IdentityRowHessian::new(n, 1);
-        let ordering = [BlockOrder::Marginal, BlockOrder::Logslope];
+        let ordering = [BlockOrder::Marginal, BlockOrder::Slope];
 
         // Path 1: dual-metric with identity-structural (the new default).
         // Structural pass: B is independent of A across all rows → keep
@@ -2978,7 +2978,7 @@ mod tests {
         let w = Array1::from_shape_fn(n, |i| 0.4 + (i as f64 * 0.05).sin().powi(2));
         let curvature = diag_hess(w.clone());
         let id_struct = IdentityRowHessian::new(n, 1);
-        let ordering = [BlockOrder::Marginal, BlockOrder::Logslope];
+        let ordering = [BlockOrder::Marginal, BlockOrder::Slope];
 
         let ops = vec![op(a.clone()), op(b.clone())];
         let out =
@@ -3101,7 +3101,7 @@ mod tests {
             &gram_h,
             &gram_struct,
             &raw_ranges,
-            &[BlockOrder::Marginal, BlockOrder::Logslope],
+            &[BlockOrder::Marginal, BlockOrder::Slope],
         )
         .expect("lower-priority full alias should compile to zero width");
         assert_eq!(res.compiled_block_ranges[0].len(), 2);
@@ -3135,7 +3135,7 @@ mod tests {
             &gram_h,
             &gram_struct,
             &raw_ranges,
-            &[BlockOrder::Marginal, BlockOrder::Logslope],
+            &[BlockOrder::Marginal, BlockOrder::Slope],
         )
         .expect("zero-width first block must be trivially identifiable, not FullyAliased");
         assert_eq!(
@@ -3276,16 +3276,16 @@ mod tests {
     }
 
     #[test]
-    fn compile_from_raw_grams_three_block_full_logslope_alias_keeps_fast_path() {
+    fn compile_from_raw_grams_three_block_full_slope_alias_keeps_fast_path() {
         let n = 24;
         let time = Array2::from_shape_fn((n, 2), |(i, j)| {
             ((i + 1) as f64 * (j + 2) as f64 * 0.17).sin()
         });
         let marginal = Array2::from_shape_fn((n, 1), |(i, _)| ((i + 3) as f64 * 0.11).cos());
-        let logslope = marginal.clone();
+        let slope = marginal.clone();
         let p_time = time.ncols();
         let p_marg = marginal.ncols();
-        let p_log = logslope.ncols();
+        let p_log = slope.ncols();
         let raw_ranges = vec![
             0..p_time,
             p_time..(p_time + p_marg),
@@ -3295,7 +3295,7 @@ mod tests {
             blocks: vec![
                 vec![Some(time.clone())],
                 vec![Some(marginal.clone())],
-                vec![Some(logslope.clone())],
+                vec![Some(slope.clone())],
             ],
         };
         let row_hess = DiagonalScalarRowHessian::new(Array1::ones(n));
@@ -3307,9 +3307,9 @@ mod tests {
             &gram_h,
             &gram_struct,
             &raw_ranges,
-            &[BlockOrder::Time, BlockOrder::Marginal, BlockOrder::Logslope],
+            &[BlockOrder::Time, BlockOrder::Marginal, BlockOrder::Slope],
         )
-        .expect("fully aliased logslope block should not skip the compiled-map path");
+        .expect("fully aliased slope block should not skip the compiled-map path");
 
         assert_eq!(map.compiled_block_ranges[0].len(), p_time);
         assert_eq!(map.compiled_block_ranges[1].len(), p_marg);
@@ -3324,7 +3324,7 @@ mod tests {
             out.slice_mut(s![.., raw_ranges[1].clone()])
                 .assign(&marginal);
             out.slice_mut(s![.., raw_ranges[2].clone()])
-                .assign(&logslope);
+                .assign(&slope);
             out
         };
         let x_compiled = fast_ab(&x_raw, &map.raw_from_compiled);
@@ -3355,7 +3355,7 @@ mod tests {
             &gram_h,
             &gram_struct,
             &raw_ranges,
-            &[BlockOrder::Marginal, BlockOrder::Logslope],
+            &[BlockOrder::Marginal, BlockOrder::Slope],
         )
         .expect("closed-form compile must succeed");
         let p_a = a.ncols();
@@ -3407,7 +3407,7 @@ mod tests {
             &ops_dual,
             &curvature,
             &id_struct,
-            &[BlockOrder::Marginal, BlockOrder::Logslope],
+            &[BlockOrder::Marginal, BlockOrder::Slope],
         )
         .expect("dual metric compile should succeed");
         let dual_total: usize = dual.blocks.iter().map(|b| b.t_lw.ncols()).sum();
@@ -3465,7 +3465,7 @@ mod tests {
             &rr,
             &[
                 BlockOrder::Marginal,
-                BlockOrder::Logslope,
+                BlockOrder::Slope,
                 BlockOrder::LinkDev,
             ],
         )
@@ -3483,7 +3483,7 @@ mod tests {
             &rr2,
             &[
                 BlockOrder::Marginal,
-                BlockOrder::Logslope,
+                BlockOrder::Slope,
                 BlockOrder::LinkDev,
             ],
         )
@@ -3541,7 +3541,7 @@ mod tests {
             &gh,
             &gs,
             &raw_ranges,
-            &[BlockOrder::Marginal, BlockOrder::Logslope],
+            &[BlockOrder::Marginal, BlockOrder::Slope],
         )
         .expect("full-rank compile");
         // Jointly independent ⇒ no columns absorbed.
@@ -3592,7 +3592,7 @@ mod tests {
             &gh,
             &gs,
             &raw_ranges,
-            &[BlockOrder::Marginal, BlockOrder::Logslope],
+            &[BlockOrder::Marginal, BlockOrder::Slope],
         )
         .expect("compile");
         let x_compiled = map.reduce_design(&x).expect("reduce_design");
@@ -3636,7 +3636,7 @@ mod tests {
             &gh,
             &gs,
             &raw_ranges,
-            &[BlockOrder::Marginal, BlockOrder::Logslope],
+            &[BlockOrder::Marginal, BlockOrder::Slope],
         )
         .expect("compile with alias");
         assert!(

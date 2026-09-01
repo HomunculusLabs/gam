@@ -4412,7 +4412,7 @@ pub(crate) fn constrained_stationary_certificate_keeps_iterating_when_step_is_la
 #[test]
 pub(crate) fn residual_steady_geometric_descent_distinguishes_converging_from_plateau() {
     use std::collections::VecDeque;
-    // gam#787 duchon centers≥20: the logslope block converged geometrically
+    // gam#787 duchon centers≥20: the slope block converged geometrically
     // (~0.33×/cycle) but `linearized_rel ≥ 0.5` + flat objective routed it
     // into the plateau-refusal break a few cycles short of tol. The
     // steady-descent guard must keep it iterating.
@@ -5220,7 +5220,7 @@ pub(crate) fn joint_trust_region_growth_requires_predicted_decrease_above_object
     assert_eq!(non_boundary.radius, OLD_RADIUS);
 }
 
-/// gam#979: the coupled marginal↔logslope inner joint-Newton must NOT grind its
+/// gam#979: the coupled marginal↔slope inner joint-Newton must NOT grind its
 /// full cycle budget on a near-singular system whose trust region has collapsed
 /// to the absolute `1e-12` floor with every line-search attempt rejected
 /// (`phantom_multiplier_with_well_conditioned_H`). The deterministic guard fires
@@ -6399,7 +6399,7 @@ pub(crate) fn kkt_refusal_diagnosis_string_round_trip_through_bubbled_error_pars
 pub(crate) fn kkt_refusal_guidance_distinguishes_marginal_slope_coupling_from_polynomial_nullspace()
 {
     let phantom = KktRefusalDiagnosis::PhantomMultiplierWithWellConditionedH.guidance();
-    assert!(phantom.contains("marginal/logslope coupling"));
+    assert!(phantom.contains("marginal/slope coupling"));
     assert!(phantom.contains("rather than a"));
     assert!(phantom.contains("Matérn/Duchon polynomial-nullspace failure"));
 

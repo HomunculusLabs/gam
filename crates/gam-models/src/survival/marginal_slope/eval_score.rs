@@ -1,7 +1,7 @@
-//! Score-warp and logslope-surface evaluation: querying score-basis
+//! Score-warp and slope-surface evaluation: querying score-basis
 //! dimensions, evaluating the local-cubic score warp at a row, projecting
 //! the observed/integration score onto the basis, and reading the per-row
-//! logslope surface values.
+//! slope surface values.
 
 use super::*;
 
@@ -185,22 +185,22 @@ impl SurvivalMarginalSlopeFamily {
         Ok([multiplier * basis_span.evaluate(z_coord), 0.0, 0.0, 0.0])
     }
 
-    pub(crate) fn per_z_logslope_active(&self) -> bool {
-        self.score_dim() > 1 && self.logslope_layout.is_per_score()
+    pub(crate) fn per_z_slope_active(&self) -> bool {
+        self.score_dim() > 1 && self.slope_layout.is_per_score()
     }
 
-    pub(crate) fn logslope_row_workspace(&self) -> Result<LogslopeRowWorkspace, String> {
-        self.logslope_layout.row_workspace(self.score_dim())
+    pub(crate) fn slope_row_workspace(&self) -> Result<SlopeRowWorkspace, String> {
+        self.slope_layout.row_workspace(self.score_dim())
     }
 
-    pub(crate) fn fill_logslope_values_for_row(
+    pub(crate) fn fill_slope_values_for_row(
         &self,
         row: usize,
         block_states: &[ParameterBlockState],
-        workspace: &mut LogslopeRowWorkspace,
+        workspace: &mut SlopeRowWorkspace,
     ) -> Result<(), String> {
-        if self.per_z_logslope_active() {
-            return self.logslope_layout.fill_per_score_row(
+        if self.per_z_slope_active() {
+            return self.slope_layout.fill_per_score_row(
                 row,
                 block_states[2].beta.view(),
                 workspace,
@@ -209,25 +209,25 @@ impl SurvivalMarginalSlopeFamily {
         if block_states[2].eta.len() != self.n {
             return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
                 reason: format!(
-                    "shared survival marginal-slope logslope eta length {} does not match n={}",
+                    "shared survival marginal-slope slope eta length {} does not match n={}",
                     block_states[2].eta.len(),
                     self.n,
                 ),
             }
             .into());
         }
-        self.logslope_layout
+        self.slope_layout
             .fill_shared_values(block_states[2].eta[row], workspace)
     }
 
-    /// `1ᵀΣ(a_row)1`, the whole covariance dependence of the SHARED log-slope
+    /// `1ᵀΣ(a_row)1`, the whole covariance dependence of the SHARED slope
     /// lane: with one slope `g` shared across all `K` scores the row's variance
     /// is `g²·1ᵀΣ1`, so the row program needs this scalar and nothing else.
     ///
     /// Row-indexed since gam#2766. It is the cached quadratic form of that row's
     /// own covariance, so a pooled field returns the same number for every row
     /// exactly as before.
-    pub(crate) fn shared_logslope_covariance_scale(&self, row: usize) -> f64 {
+    pub(crate) fn shared_slope_covariance_scale(&self, row: usize) -> f64 {
         self.score_covariance.at_row(row).ones_quadratic_form()
     }
 
@@ -243,17 +243,17 @@ impl SurvivalMarginalSlopeFamily {
         } else {
             self.z.row(row).sum()
         };
-        let logslope_eta_len = block_states[2].eta.len();
-        if k > 1 && logslope_eta_len != self.n {
+        let slope_eta_len = block_states[2].eta.len();
+        if k > 1 && slope_eta_len != self.n {
             return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
                 reason: format!(
-                    "{context}: survival marginal-slope exact shared-slope calculus for K={k} requires one log-slope eta per row (n={}); got eta len {logslope_eta_len}. Per-z log-slope derivatives require a {}-primary row kernel.",
+                    "{context}: survival marginal-slope exact shared-slope calculus for K={k} requires one slope eta per row (n={}); got eta len {slope_eta_len}. Per-z slope derivatives require a {}-primary row kernel.",
                     self.n,
                     3 + k
                 ),
             }
             .into());
         }
-        Ok((z_sum, self.shared_logslope_covariance_scale(row)))
+        Ok((z_sum, self.shared_slope_covariance_scale(row)))
     }
 }

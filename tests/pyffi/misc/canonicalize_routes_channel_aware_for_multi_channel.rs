@@ -10,7 +10,7 @@
 //!     The raw design is identical to the time block's design (same Duchon-like
 //!     polynomial basis), so the flat audit sees `[M | M | ...]` and flags a
 //!     hard-alias.
-//!   - `logslope` block: p_m columns, contributes to channel 2 (ad1) only.
+//!   - `slope` block: p_m columns, contributes to channel 2 (ad1) only.
 //!     Raw design = diag(z) · M with z drawn from the standard normal;
 //!     the flat audit sees `[M | M | diag(z)·M]` and flags a fatal alias.
 //!     The channel-aware audit sees three orthogonal channels → full rank.
@@ -103,7 +103,7 @@ fn flat_audit_flags_fatal_on_shared_raw_columns() {
 
     let time_design = m.clone();
     let marginal_design = m.clone(); // identical raw columns — flat sees alias
-    let logslope_design = Array2::from_shape_fn((N, p), |(i, j)| m[[i, j]] * z[i]);
+    let slope_design = Array2::from_shape_fn((N, p), |(i, j)| m[[i, j]] * z[i]);
 
     // Specs without callbacks (flat-only).
     let flat_spec = |name: &str, d: Array2<f64>| {
@@ -126,7 +126,7 @@ fn flat_audit_flags_fatal_on_shared_raw_columns() {
     let specs_flat = [
         flat_spec("time", time_design),
         flat_spec("marginal", marginal_design),
-        flat_spec("logslope", logslope_design),
+        flat_spec("slope", slope_design),
     ];
     let flat_audit = audit_identifiability(&specs_flat).expect("flat audit must run");
     assert!(
@@ -144,12 +144,12 @@ fn channel_aware_routing_chosen_for_multi_output_blocks() {
     let p = 4;
     let m = duchon_basis(&x, p);
     let z: Array1<f64> = Array1::from_iter((0..N).map(|i| (i as f64 * 0.73 + 1.23).sin()));
-    let logslope_design = Array2::from_shape_fn((N, p), |(i, j)| m[[i, j]] * z[i]);
+    let slope_design = Array2::from_shape_fn((N, p), |(i, j)| m[[i, j]] * z[i]);
 
     let specs = [
         spec_with_callback("time", m.clone(), 0, K),
         spec_with_callback("marginal", m.clone(), 1, K),
-        spec_with_callback("logslope", logslope_design, 2, K),
+        spec_with_callback("slope", slope_design, 2, K),
     ];
 
     let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs)).expect(
@@ -170,12 +170,12 @@ fn channel_aware_audit_passes_with_full_rank_for_orthogonal_channel_blocks() {
     let p = 4;
     let m = duchon_basis(&x, p);
     let z: Array1<f64> = Array1::from_iter((0..N).map(|i| (i as f64 * 0.73 + 1.23).sin()));
-    let logslope_design = Array2::from_shape_fn((N, p), |(i, j)| m[[i, j]] * z[i]);
+    let slope_design = Array2::from_shape_fn((N, p), |(i, j)| m[[i, j]] * z[i]);
 
     let specs = [
         spec_with_callback("time", m.clone(), 0, K),
         spec_with_callback("marginal", m.clone(), 1, K),
-        spec_with_callback("logslope", logslope_design, 2, K),
+        spec_with_callback("slope", slope_design, 2, K),
     ];
 
     let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs)).expect(
@@ -214,12 +214,12 @@ fn post_canonicalize_t_is_identity_for_full_rank_3_block_case() {
     let p = 4;
     let m = duchon_basis(&x, p);
     let z: Array1<f64> = Array1::from_iter((0..N).map(|i| (i as f64 * 0.73 + 1.23).sin()));
-    let logslope_design = Array2::from_shape_fn((N, p), |(i, j)| m[[i, j]] * z[i]);
+    let slope_design = Array2::from_shape_fn((N, p), |(i, j)| m[[i, j]] * z[i]);
 
     let specs = [
         spec_with_callback("time", m.clone(), 0, K),
         spec_with_callback("marginal", m.clone(), 1, K),
-        spec_with_callback("logslope", logslope_design, 2, K),
+        spec_with_callback("slope", slope_design, 2, K),
     ];
 
     let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))

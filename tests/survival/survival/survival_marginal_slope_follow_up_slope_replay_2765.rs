@@ -2,8 +2,8 @@
 //!
 //! The kernel work made `b(x, t)` a fitted surface. This module is about the
 //! other half — whether that surface can leave the process. Until this landed,
-//! persistence refused a fit with `logslope_time_k` outright, because the
-//! on-disk contract rebuilds the log-slope block from its covariate term spec
+//! persistence refused a fit with `slope_time_k` outright, because the
+//! on-disk contract rebuilds the slope block from its covariate term spec
 //! alone: `p_cov` columns against a `p_cov·p_time` coefficient vector.
 //!
 //! The property under test is REPLAY EXACTNESS, not statistical recovery (that
@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use csv::StringRecord;
-use gam::families::survival::replay_logslope_time_margin_design;
+use gam::families::survival::replay_slope_time_margin_design;
 use gam::inference::model::FittedModel;
 use gam::inference::model_payload_builders::fit_formula_to_payload;
 use gam::{FitConfig, encode_recordswith_inferred_schema, init_parallelism};
@@ -30,8 +30,8 @@ const SLOPE_LEVEL: f64 = 0.85;
 const SLOPE_TREND: f64 = -0.32;
 const LOCATION_LEVEL: f64 = -1.15;
 const LOCATION_TREND: f64 = 0.95;
-const LOGSLOPE_TIME_DEGREE: usize = 2;
-const LOGSLOPE_TIME_K: usize = 4;
+const SLOPE_TIME_DEGREE: usize = 2;
+const SLOPE_TIME_K: usize = 4;
 
 fn next_unit(state: &mut u64) -> f64 {
     (splitmix64(state) >> 11) as f64 / (1u64 << 53) as f64
@@ -140,9 +140,9 @@ fn fit_config() -> FitConfig {
     FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("z".to_string()),
-        logslope_formula: Some("1".to_string()),
-        logslope_time_k: Some(LOGSLOPE_TIME_K),
-        logslope_time_degree: LOGSLOPE_TIME_DEGREE,
+        slope_formula: Some("1".to_string()),
+        slope_time_k: Some(SLOPE_TIME_K),
+        slope_time_degree: SLOPE_TIME_DEGREE,
         time_num_internal_knots: 3,
         baseline_target: "weibull".to_string(),
         ..FitConfig::default()
@@ -150,7 +150,7 @@ fn fit_config() -> FitConfig {
 }
 
 /// Saving a follow-up-varying slope carries the margin, and the saved model
-/// rebuilds the SAME log-slope design the fit used.
+/// rebuilds the SAME slope design the fit used.
 ///
 /// The bit-for-bit comparison is deliberate. Two designs that agree to `1e-6`
 /// are two different models; a replay that is nearly right produces a slope
@@ -170,25 +170,25 @@ fn a_saved_follow_up_varying_slope_replays_the_design_it_was_fitted_against_2765
 
     // One call: fits, and assembles the on-disk payload from that fit. Before
     // this issue it returned an error here — the refusal was unconditional on
-    // `logslope_time_k`.
+    // `slope_time_k`.
     let payload = fit_formula_to_payload("Surv(time, event) ~ 1".to_string(), &data, &cfg)
         .expect("a follow-up-varying marginal-slope fit must be savable");
 
     let basis = payload
-        .logslope_time_basis
+        .slope_time_basis
         .as_ref()
-        .expect("the saved payload must carry the log-slope time margin");
-    assert_eq!(basis.degree, LOGSLOPE_TIME_DEGREE);
+        .expect("the saved payload must carry the slope time margin");
+    assert_eq!(basis.degree, SLOPE_TIME_DEGREE);
     assert_eq!(
         basis.knots.len(),
-        LOGSLOPE_TIME_K + LOGSLOPE_TIME_DEGREE + 1,
+        SLOPE_TIME_K + SLOPE_TIME_DEGREE + 1,
         "the saved knot vector is the predictor's entire authority over the margin"
     );
 
     // The load gate has to accept it, and it validates that the fitted block's
     // width is a multiple of the margin's — a payload failing that cannot be
     // replayed under any covariate design at all. `from_payload` is infallible
-    // (it only classifies the payload); the gate that reads the log-slope
+    // (it only classifies the payload); the gate that reads the slope
     // margin is `validate_for_persistence`, via
     // `validate_survival_marginal_slope_replay_state`, so that is what has to
     // be exercised here.
@@ -197,7 +197,7 @@ fn a_saved_follow_up_varying_slope_replays_the_design_it_was_fitted_against_2765
         .validate_for_persistence()
         .expect("a saved follow-up-varying slope must pass the load gate");
 
-    let p_logslope = model
+    let p_slope = model
         .fit_result
         .as_ref()
         .expect("saved fit result")
@@ -206,9 +206,9 @@ fn a_saved_follow_up_varying_slope_replays_the_design_it_was_fitted_against_2765
         .len();
     let p_time = basis.knots.len() - basis.degree - 1;
     assert_eq!(
-        p_logslope % p_time,
+        p_slope % p_time,
         0,
-        "the fitted log-slope width must factor through its own margin"
+        "the fitted slope width must factor through its own margin"
     );
 
     // Rebuild the covariate factor exactly as predict does, then replay the
@@ -219,27 +219,27 @@ fn a_saved_follow_up_varying_slope_replays_the_design_it_was_fitted_against_2765
         .enumerate()
         .map(|(index, name)| (name.clone(), index))
         .collect();
-    let logslopespec = gam::families::survival::resolve_termspec_for_prediction(
-        &model.resolved_termspec_logslope.as_ref().cloned(),
+    let slopespec = gam::families::survival::resolve_termspec_for_prediction(
+        &model.resolved_slopespec.as_ref().cloned(),
         Some(&headers),
         &col_map,
-        "resolved_termspec_logslope",
+        "resolved_slopespec",
     )
-    .expect("the saved log-slope term spec must resolve against its own headers");
+    .expect("the saved slope term spec must resolve against its own headers");
     let covariate_design =
-        gam_terms::smooth::build_term_collection_design(data.values.view(), &logslopespec)
-            .expect("rebuild the log-slope covariate factor");
+        gam_terms::smooth::build_term_collection_design(data.values.view(), &slopespec)
+            .expect("rebuild the slope covariate factor");
     let exit_times = ndarray::Array1::from_vec(times.clone());
-    let replayed = replay_logslope_time_margin_design(
+    let replayed = replay_slope_time_margin_design(
         exit_times.view(),
         basis,
         &covariate_design.design,
     )
-    .expect("replay the log-slope design from the saved margin");
+    .expect("replay the slope design from the saved margin");
 
     assert_eq!(
         replayed.ncols(),
-        p_logslope,
+        p_slope,
         "the replayed design must be exactly as wide as the coefficient vector it multiplies"
     );
 
@@ -254,10 +254,10 @@ fn a_saved_follow_up_varying_slope_replays_the_design_it_was_fitted_against_2765
         .blocks[2]
         .beta;
     let baseline = model
-        .logslope_baseline
-        .expect("a saved marginal-slope model carries its fitted log-slope baseline");
+        .baseline_slope
+        .expect("a saved marginal-slope model carries its fitted slope baseline");
     let replayed_dense = replayed
-        .try_to_dense_arc("replayed log-slope design")
+        .try_to_dense_arc("replayed slope design")
         .expect("dense replayed design");
 
     let mut minimum = f64::INFINITY;
@@ -269,7 +269,7 @@ fn a_saved_follow_up_varying_slope_replays_the_design_it_was_fitted_against_2765
         maximum = maximum.max(slope);
     }
     eprintln!(
-        "[2765-replay] n={N} p_logslope={p_logslope} p_time={p_time} \
+        "[2765-replay] n={N} p_slope={p_slope} p_time={p_time} \
          replayed_slope_range=[{minimum:.6}, {maximum:.6}]"
     );
     // A replay that collapsed the margin — for instance by keeping only the

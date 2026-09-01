@@ -71,7 +71,7 @@ fn build_clean_cohort(n: usize) -> (Array2<f64>, BernoulliMarginalSlopeTermSpec)
     let x: Vec<f64> = (0..n).map(|i| (i as f64 + 0.5) / n as f64).collect();
 
     // Exposure z is INDEPENDENT of x (pure Gaussian draw), standardized — no
-    // confound, so the marginal and logslope spans do not overlap.
+    // confound, so the marginal and slope spans do not overlap.
     let mut z = Array1::<f64>::zeros(n);
     for v in z.iter_mut() {
         let u1: f64 = rng.random_range(1e-12..1.0);
@@ -104,7 +104,7 @@ fn build_clean_cohort(n: usize) -> (Array2<f64>, BernoulliMarginalSlopeTermSpec)
 
     let weights = Array1::ones(n);
     let marginal_offset = Array1::<f64>::zeros(n);
-    let logslope_offset = Array1::<f64>::zeros(n);
+    let slope_offset = Array1::<f64>::zeros(n);
 
     let make_bspline = |name: &str, internal_knots: usize| SmoothTermSpec {
         frozen_parametric_residualization: None,
@@ -133,10 +133,10 @@ fn build_clean_cohort(n: usize) -> (Array2<f64>, BernoulliMarginalSlopeTermSpec)
         random_effect_terms: vec![],
         smooth_terms: vec![make_bspline("f_marginal", 6)],
     };
-    let logslopespec = TermCollectionSpec {
+    let slopespec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
-        smooth_terms: vec![make_bspline("f_logslope", 5)],
+        smooth_terms: vec![make_bspline("f_slope", 5)],
     };
 
     let spec = BernoulliMarginalSlopeTermSpec {
@@ -145,9 +145,9 @@ fn build_clean_cohort(n: usize) -> (Array2<f64>, BernoulliMarginalSlopeTermSpec)
         z,
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginalspec,
-        logslopespec,
+        slopespec,
         marginal_offset,
-        logslope_offset,
+        slope_offset,
         frailty: FrailtySpec::None,
         score_warp: None,
         link_dev: None,

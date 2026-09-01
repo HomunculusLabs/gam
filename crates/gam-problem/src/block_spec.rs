@@ -101,7 +101,7 @@ pub struct FamilyLinearizationState<'a> {
     pub channel_hessian: Option<Arc<dyn FamilyChannelHessian>>,
     /// Probit frailty scale factor `s_f = 1/√(1+σ²)`.
     ///
-    /// For survival marginal-slope families the logslope η contribution is
+    /// For survival marginal-slope families the slope η contribution is
     /// `s_f · g · z`, so any Jacobian callback that depends on g or z must
     /// read `s_f` from here rather than from a captured-at-construction value.
     /// When σ = 0 (no frailty) or for non-frailty families, set this to 1.0.
@@ -185,7 +185,7 @@ pub trait BlockEffectiveJacobian: Send + Sync {
     /// The `#933` reduction path wraps a `jacobian_callback` block in a
     /// gauge-composed Jacobian so the family fits in a reduced section — sound
     /// only when the family's effective geometry is DERIVED from the callback
-    /// (marginal-slope logslope). It is NOT sound for a callback whose
+    /// (marginal-slope slope). It is NOT sound for a callback whose
     /// effective Jacobian is a **fixed nonlinear functional basis** recomputed
     /// at the raw coefficient width on every evaluation (the survival
     /// marginal-slope monotone time-wiggle time block), nor for one that merely

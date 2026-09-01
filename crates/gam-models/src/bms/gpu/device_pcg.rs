@@ -642,7 +642,7 @@ mod pcg_device_parity_tests {
     fn cpu_dense_joint_hessian(
         row_hessians: &[f64],
         marginal: &[f64],
-        logslope: &[f64],
+        slope: &[f64],
         block: &BmsFlexBlockLayout,
         primary: &BmsFlexPrimaryLayout,
         n: usize,
@@ -665,7 +665,7 @@ mod pcg_device_parity_tests {
                 col.iter_mut().for_each(|v| *v = 0.0);
             }
             let mrow = &marginal[row * p_m..(row + 1) * p_m];
-            let grow = &logslope[row * p_g..(row + 1) * p_g];
+            let grow = &slope[row * p_g..(row + 1) * p_g];
             for k in 0..p_m {
                 phi[0][k] = mrow[k];
             }
@@ -788,7 +788,7 @@ mod pcg_device_parity_tests {
                     scale * (std::f64::consts::PI * (row as f64 + 0.5) * j as f64 / n as f64).cos();
             }
         }
-        let mut logslope = vec![0.0_f64; n * p_g];
+        let mut slope = vec![0.0_f64; n * p_g];
         for row in 0..n {
             for j in 0..p_g {
                 let scale = if j == 0 {
@@ -796,7 +796,7 @@ mod pcg_device_parity_tests {
                 } else {
                     (2.0 / n as f64).sqrt()
                 };
-                logslope[row * p_g + j] =
+                slope[row * p_g + j] =
                     scale * (std::f64::consts::PI * (row as f64 + 0.5) * j as f64 / n as f64).cos();
             }
         }
@@ -810,7 +810,7 @@ mod pcg_device_parity_tests {
             .collect();
 
         let h_dense =
-            cpu_dense_joint_hessian(&row_hessians, &marginal, &logslope, &block, &primary, n);
+            cpu_dense_joint_hessian(&row_hessians, &marginal, &slope, &block, &primary, n);
         let x_oracle = cpu_pcg_oracle(&h_dense, &b, 1e-12);
 
         // #2422 EVERY HOST: the fixture's SPD certificate. The oracle must
@@ -858,8 +858,8 @@ mod pcg_device_parity_tests {
             .clone_htod(&marginal)
             .expect("[pcg_device parity] upload marginal must succeed on a CUDA host");
         let d_g = stream
-            .clone_htod(&logslope)
-            .expect("[pcg_device parity] upload logslope must succeed on a CUDA host");
+            .clone_htod(&slope)
+            .expect("[pcg_device parity] upload slope must succeed on a CUDA host");
         let storage = DeviceResidentRowHess {
             neglog: stream
                 .alloc_zeros::<f64>(n)
@@ -869,7 +869,7 @@ mod pcg_device_parity_tests {
                 .expect("[pcg_device parity] alloc grad"),
             hess: d_h,
             marginal_design: d_m,
-            logslope_design: d_g,
+            slope_design: d_g,
             n,
             r,
             block,

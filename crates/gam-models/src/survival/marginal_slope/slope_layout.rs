@@ -1,7 +1,7 @@
-//! Canonical log-slope channel layout.
+//! Canonical slope channel layout.
 //!
 //! The coefficient block owns one current-coordinate vector, but a vector
-//! latent score owns one physical log-slope channel per score coordinate.
+//! latent score owns one physical slope channel per score coordinate.
 //! Raw coefficient ranges are therefore construction metadata only: after a
 //! coefficient transform, every physical channel may depend on every current
 //! coefficient.  This module keeps the raw partition and the raw-to-current
@@ -12,14 +12,14 @@ use super::*;
 const CHANNEL_SCAN_ROWS: usize = 256;
 
 #[derive(Clone)]
-pub(crate) enum LogslopeTopology {
+pub(crate) enum SlopeTopology {
     Shared,
     PerScore {
         raw_ranges: Arc<[std::ops::Range<usize>]>,
     },
 }
 
-impl LogslopeTopology {
+impl SlopeTopology {
     pub(crate) fn shared() -> Self {
         Self::Shared
     }
@@ -28,15 +28,15 @@ impl LogslopeTopology {
         raw_ranges: Vec<std::ops::Range<usize>>,
         raw_width: usize,
     ) -> Result<Self, String> {
-        validate_partition(&raw_ranges, raw_width, "logslope topology")?;
+        validate_partition(&raw_ranges, raw_width, "slope topology")?;
         if raw_ranges.len() < 2 {
             return Err(
-                "per-score logslope topology requires at least two physical channels".to_string(),
+                "per-score slope topology requires at least two physical channels".to_string(),
             );
         }
         if raw_ranges.iter().any(std::ops::Range::is_empty) {
             return Err(
-                "per-score logslope topology contains an empty physical channel".to_string(),
+                "per-score slope topology contains an empty physical channel".to_string(),
             );
         }
         Ok(Self::PerScore {
@@ -60,7 +60,7 @@ impl LogslopeTopology {
         &self,
         raw_design: DesignMatrix,
         common_offset: &Array1<f64>,
-    ) -> Result<LogslopeLayout, String> {
+    ) -> Result<SlopeLayout, String> {
         let width = raw_design.ncols();
         self.materialize_with_design(
             raw_design.clone(),
@@ -76,33 +76,33 @@ impl LogslopeTopology {
         coefficient_design: DesignMatrix,
         current_from_raw: Array2<f64>,
         common_offset: &Array1<f64>,
-    ) -> Result<LogslopeLayout, String> {
+    ) -> Result<SlopeLayout, String> {
         if raw_design.nrows() != common_offset.len() {
             return Err(format!(
-                "logslope layout offset length {} does not match design rows {}",
+                "slope layout offset length {} does not match design rows {}",
                 common_offset.len(),
                 raw_design.nrows(),
             ));
         }
         if current_from_raw.nrows() != raw_design.ncols() {
             return Err(format!(
-                "logslope layout transform has {} raw rows but design has {} columns",
+                "slope layout transform has {} raw rows but design has {} columns",
                 current_from_raw.nrows(),
                 raw_design.ncols(),
             ));
         }
         if current_from_raw.iter().any(|value| !value.is_finite()) {
-            return Err("logslope layout transform contains a non-finite value".to_string());
+            return Err("slope layout transform contains a non-finite value".to_string());
         }
         if common_offset.iter().any(|value| !value.is_finite()) {
-            return Err("logslope layout offset contains a non-finite value".to_string());
+            return Err("slope layout offset contains a non-finite value".to_string());
         }
 
         let nrows = raw_design.nrows();
         let current_width = current_from_raw.ncols();
         if coefficient_design.nrows() != nrows || coefficient_design.ncols() != current_width {
             return Err(format!(
-                "logslope current design is {}x{} but raw-design transform emits {nrows}x{current_width}",
+                "slope current design is {}x{} but raw-design transform emits {nrows}x{current_width}",
                 coefficient_design.nrows(),
                 coefficient_design.ncols(),
             ));
@@ -114,39 +114,39 @@ impl LogslopeTopology {
                     &current_from_raw,
                     &(0..raw_design.ncols()),
                     0,
-                    "shared logslope",
+                    "shared slope",
                 )?;
-                Ok(LogslopeLayout {
+                Ok(SlopeLayout {
                     coefficient_design,
                     follow_up: None,
                     nrows,
                     current_width,
-                    channels: LogslopeChannels::Shared {
+                    channels: SlopeChannels::Shared {
                         offset: Arc::new(common_offset.clone()),
                     },
                 })
             }
             Self::PerScore { raw_ranges } => {
-                validate_partition(raw_ranges, raw_design.ncols(), "per-score logslope layout")?;
+                validate_partition(raw_ranges, raw_design.ncols(), "per-score slope layout")?;
                 for (channel, range) in raw_ranges.iter().enumerate() {
                     certify_channel_nonzero(
                         &raw_design,
                         &current_from_raw,
                         range,
                         channel,
-                        "per-score logslope",
+                        "per-score slope",
                     )?;
                 }
                 let mut offsets = Array2::<f64>::zeros((nrows, raw_ranges.len()));
                 for mut column in offsets.columns_mut() {
                     column.assign(common_offset);
                 }
-                Ok(LogslopeLayout {
+                Ok(SlopeLayout {
                     coefficient_design,
                     follow_up: None,
                     nrows,
                     current_width,
-                    channels: LogslopeChannels::PerScore {
+                    channels: SlopeChannels::PerScore {
                         raw_design,
                         current_from_raw: Arc::new(current_from_raw),
                         raw_ranges: Arc::clone(raw_ranges),
@@ -159,7 +159,7 @@ impl LogslopeTopology {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum LogslopeChannels {
+pub(crate) enum SlopeChannels {
     Shared {
         offset: Arc<Array1<f64>>,
     },
@@ -171,7 +171,7 @@ pub(crate) enum LogslopeChannels {
     },
 }
 
-/// The log-slope block's follow-up designs (gam#2765, gam#2767).
+/// The slope block's follow-up designs (gam#2765, gam#2767).
 ///
 /// The coefficient design is the slope at the row's EXIT time — the same
 /// convention the time block uses, so the block's `ParameterBlockSpec` eta is
@@ -182,21 +182,21 @@ pub(crate) enum LogslopeChannels {
 /// `None` on a layout is the time-constant slope: `g₀ = g₁` and `ġ₁ = 0`
 /// identically, which is what every model built before this existed asks for.
 #[derive(Clone, Debug)]
-pub(crate) struct LogslopeFollowUpDesigns {
+pub(crate) struct SlopeFollowUpDesigns {
     pub(crate) entry: DesignMatrix,
     pub(crate) derivative_exit: DesignMatrix,
 }
 
-/// The log-slope block's `(primary, design)` channels for one layout.
+/// The slope block's `(primary, design)` channels for one layout.
 ///
 /// A time-constant slope has exactly one; a follow-up-varying slope has three,
 /// in primary order.
-pub(crate) struct LogslopeChannelDesigns<'a> {
+pub(crate) struct SlopeChannelDesigns<'a> {
     entries: [(usize, &'a DesignMatrix); 3],
     len: usize,
 }
 
-impl<'a> LogslopeChannelDesigns<'a> {
+impl<'a> SlopeChannelDesigns<'a> {
     #[inline]
     pub(crate) fn as_slice(&self) -> &[(usize, &'a DesignMatrix)] {
         &self.entries[..self.len]
@@ -212,22 +212,22 @@ pub(crate) struct SlopeRowChannels {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct LogslopeLayout {
+pub(crate) struct SlopeLayout {
     coefficient_design: DesignMatrix,
-    follow_up: Option<LogslopeFollowUpDesigns>,
+    follow_up: Option<SlopeFollowUpDesigns>,
     nrows: usize,
     current_width: usize,
-    channels: LogslopeChannels,
+    channels: SlopeChannels,
 }
 
-impl LogslopeLayout {
+impl SlopeLayout {
     #[inline]
     pub(crate) fn is_per_score(&self) -> bool {
-        matches!(self.channels, LogslopeChannels::PerScore { .. })
+        matches!(self.channels, SlopeChannels::PerScore { .. })
     }
 
     #[inline]
-    pub(crate) fn follow_up(&self) -> Option<&LogslopeFollowUpDesigns> {
+    pub(crate) fn follow_up(&self) -> Option<&SlopeFollowUpDesigns> {
         self.follow_up.as_ref()
     }
 
@@ -252,7 +252,7 @@ impl LogslopeLayout {
     ) -> Result<Self, String> {
         if self.is_per_score() {
             return Err(
-                "a follow-up-varying log-slope is not supported for a per-score log-slope \
+                "a follow-up-varying slope is not supported for a per-score slope \
                  topology: each physical score channel would need its own time margin"
                     .to_string(),
             );
@@ -260,7 +260,7 @@ impl LogslopeLayout {
         for (name, design) in [("entry", &entry), ("derivative", &derivative_exit)] {
             if design.nrows() != self.nrows || design.ncols() != self.current_width {
                 return Err(format!(
-                    "logslope follow-up {name} design is {}x{} but the layout is {}x{}",
+                    "slope follow-up {name} design is {}x{} but the layout is {}x{}",
                     design.nrows(),
                     design.ncols(),
                     self.nrows,
@@ -268,7 +268,7 @@ impl LogslopeLayout {
                 ));
             }
         }
-        self.follow_up = Some(LogslopeFollowUpDesigns {
+        self.follow_up = Some(SlopeFollowUpDesigns {
             entry,
             derivative_exit,
         });
@@ -282,9 +282,9 @@ impl LogslopeLayout {
     /// three primaries and a time-constant one feeds a single primary, so every
     /// Jacobian / pullback / assembly site downstream is written once as a loop
     /// over channels instead of once per geometry.
-    pub(crate) fn primary_channels(&self) -> LogslopeChannelDesigns<'_> {
+    pub(crate) fn primary_channels(&self) -> SlopeChannelDesigns<'_> {
         match self.follow_up.as_ref() {
-            None => LogslopeChannelDesigns {
+            None => SlopeChannelDesigns {
                 entries: [
                     (PRIMARY_SLOPE, &self.coefficient_design),
                     (PRIMARY_SLOPE, &self.coefficient_design),
@@ -292,7 +292,7 @@ impl LogslopeLayout {
                 ],
                 len: 1,
             },
-            Some(follow_up) => LogslopeChannelDesigns {
+            Some(follow_up) => SlopeChannelDesigns {
                 entries: [
                     (PRIMARY_SLOPE, &follow_up.entry),
                     (PRIMARY_SLOPE_EXIT, &self.coefficient_design),
@@ -303,15 +303,15 @@ impl LogslopeLayout {
         }
     }
 
-    /// The row's shared-channel offset. The log-slope offset is an external,
+    /// The row's shared-channel offset. The slope offset is an external,
     /// time-constant slope contribution, so it enters `g₀` and `g₁` alike and
     /// contributes nothing to `ġ₁`.
     #[inline]
     pub(crate) fn shared_offset(&self, row: usize) -> Result<f64, String> {
         match &self.channels {
-            LogslopeChannels::Shared { offset } => Ok(offset[row]),
-            LogslopeChannels::PerScore { .. } => Err(
-                "shared logslope offset requested from a per-score layout".to_string(),
+            SlopeChannels::Shared { offset } => Ok(offset[row]),
+            SlopeChannels::PerScore { .. } => Err(
+                "shared slope offset requested from a per-score layout".to_string(),
             ),
         }
     }
@@ -368,8 +368,8 @@ impl LogslopeLayout {
 
     pub(crate) fn score_count(&self) -> usize {
         match &self.channels {
-            LogslopeChannels::Shared { .. } => 1,
-            LogslopeChannels::PerScore { raw_ranges, .. } => raw_ranges.len(),
+            SlopeChannels::Shared { .. } => 1,
+            SlopeChannels::PerScore { raw_ranges, .. } => raw_ranges.len(),
         }
     }
 
@@ -382,45 +382,45 @@ impl LogslopeLayout {
         if self.coefficient_design.nrows() != self.nrows
             || self.coefficient_design.ncols() != self.current_width
         {
-            return Err("logslope layout coefficient-design invariant is broken".to_string());
+            return Err("slope layout coefficient-design invariant is broken".to_string());
         }
-        if let LogslopeChannels::Shared { offset } = &self.channels
+        if let SlopeChannels::Shared { offset } = &self.channels
             && offset.len() != self.nrows
         {
             return Err(format!(
-                "shared logslope offset has length {} but layout has {} rows",
+                "shared slope offset has length {} but layout has {} rows",
                 offset.len(),
                 self.nrows,
             ));
         }
         if self.is_per_score() && self.score_count() != score_dim {
             return Err(format!(
-                "per-score logslope layout has {} channels but latent score has dimension {score_dim}",
+                "per-score slope layout has {} channels but latent score has dimension {score_dim}",
                 self.score_count(),
             ));
         }
         Ok(())
     }
 
-    pub(crate) fn row_workspace(&self, score_dim: usize) -> Result<LogslopeRowWorkspace, String> {
+    pub(crate) fn row_workspace(&self, score_dim: usize) -> Result<SlopeRowWorkspace, String> {
         if self.is_per_score() && self.score_count() != score_dim {
             return Err(format!(
-                "cannot build logslope row workspace: {} channels for score dimension {score_dim}",
+                "cannot build slope row workspace: {} channels for score dimension {score_dim}",
                 self.score_count(),
             ));
         }
         let raw_width = match &self.channels {
-            LogslopeChannels::Shared { .. } => 0,
-            LogslopeChannels::PerScore { raw_design, .. } => raw_design.ncols(),
+            SlopeChannels::Shared { .. } => 0,
+            SlopeChannels::PerScore { raw_design, .. } => raw_design.ncols(),
         };
-        Ok(LogslopeRowWorkspace {
+        Ok(SlopeRowWorkspace {
             raw_row: Array2::<f64>::zeros((1, raw_width)),
             channel_rows: Array2::<f64>::zeros((score_dim, self.current_width)),
             values: vec![0.0; score_dim],
         })
     }
 
-    /// Materialize every physical log-slope channel at one coefficient vector.
+    /// Materialize every physical slope channel at one coefficient vector.
     /// This is the sole batch boundary; row semantics remain owned by
     /// [`Self::fill_callback_row`].
     pub(crate) fn physical_values(
@@ -431,7 +431,7 @@ impl LogslopeLayout {
         self.validate_for(score_dim)?;
         if beta.len() != self.current_width {
             return Err(format!(
-                "logslope physical-value beta length {} does not match current width {}",
+                "slope physical-value beta length {} does not match current width {}",
                 beta.len(),
                 self.current_width,
             ));
@@ -450,10 +450,10 @@ impl LogslopeLayout {
     pub(crate) fn fill_shared_values(
         &self,
         value: f64,
-        workspace: &mut LogslopeRowWorkspace,
+        workspace: &mut SlopeRowWorkspace,
     ) -> Result<(), String> {
         if self.is_per_score() {
-            return Err("cannot fill shared values for a per-score logslope layout".to_string());
+            return Err("cannot fill shared values for a per-score slope layout".to_string());
         }
         workspace.values.fill(value);
         Ok(())
@@ -463,26 +463,26 @@ impl LogslopeLayout {
         &self,
         row: usize,
         beta: ArrayView1<'_, f64>,
-        workspace: &mut LogslopeRowWorkspace,
+        workspace: &mut SlopeRowWorkspace,
     ) -> Result<(), String> {
-        let LogslopeChannels::PerScore {
+        let SlopeChannels::PerScore {
             raw_design,
             current_from_raw,
             raw_ranges,
             offsets,
         } = &self.channels
         else {
-            return Err("per-score logslope row requested from a shared layout".to_string());
+            return Err("per-score slope row requested from a shared layout".to_string());
         };
         if row >= self.nrows {
             return Err(format!(
-                "logslope row {row} is out of bounds for {} rows",
+                "slope row {row} is out of bounds for {} rows",
                 self.nrows
             ));
         }
         if beta.len() != self.current_width {
             return Err(format!(
-                "logslope beta length {} does not match current width {}",
+                "slope beta length {} does not match current width {}",
                 beta.len(),
                 self.current_width,
             ));
@@ -491,12 +491,12 @@ impl LogslopeLayout {
             || workspace.channel_rows.dim() != (raw_ranges.len(), self.current_width)
             || workspace.values.len() != raw_ranges.len()
         {
-            return Err("logslope row workspace shape does not match layout".to_string());
+            return Err("slope row workspace shape does not match layout".to_string());
         }
 
         raw_design
             .row_chunk_into(row..row + 1, workspace.raw_row.view_mut())
-            .map_err(|error| format!("logslope layout row materialization failed: {error}"))?;
+            .map_err(|error| format!("slope layout row materialization failed: {error}"))?;
         workspace.channel_rows.fill(0.0);
         let raw_row = workspace.raw_row.row(0);
         for (channel, range) in raw_ranges.iter().enumerate() {
@@ -516,7 +516,7 @@ impl LogslopeLayout {
         Ok(())
     }
 
-    /// Fill physical log-slope values and their full-width
+    /// Fill physical slope values and their full-width
     /// current-coordinate rows directly from a coefficient vector. Unlike the
     /// likelihood's shared-channel fast path, this includes the layout-owned
     /// offset and is therefore the authoritative source for effective-Jacobian
@@ -525,20 +525,20 @@ impl LogslopeLayout {
         &self,
         row: usize,
         beta: ArrayView1<'_, f64>,
-        workspace: &mut LogslopeRowWorkspace,
+        workspace: &mut SlopeRowWorkspace,
     ) -> Result<(), String> {
         match &self.channels {
-            LogslopeChannels::PerScore { .. } => self.fill_per_score_row(row, beta, workspace),
-            LogslopeChannels::Shared { offset } => {
+            SlopeChannels::PerScore { .. } => self.fill_per_score_row(row, beta, workspace),
+            SlopeChannels::Shared { offset } => {
                 if row >= self.nrows {
                     return Err(format!(
-                        "logslope callback row {row} is out of bounds for {} rows",
+                        "slope callback row {row} is out of bounds for {} rows",
                         self.nrows
                     ));
                 }
                 if beta.len() != self.current_width {
                     return Err(format!(
-                        "logslope callback beta length {} does not match current width {}",
+                        "slope callback beta length {} does not match current width {}",
                         beta.len(),
                         self.current_width,
                     ));
@@ -547,14 +547,14 @@ impl LogslopeLayout {
                     || workspace.values.len() != workspace.channel_rows.nrows()
                 {
                     return Err(
-                        "shared logslope callback workspace shape does not match layout"
+                        "shared slope callback workspace shape does not match layout"
                             .to_string(),
                     );
                 }
                 self.coefficient_design
                     .row_chunk_into(row..row + 1, workspace.channel_rows.slice_mut(s![0..1, ..]))
                     .map_err(|error| {
-                        format!("shared logslope callback row materialization failed: {error}")
+                        format!("shared slope callback row materialization failed: {error}")
                     })?;
                 for channel in 1..workspace.channel_rows.nrows() {
                     for col in 0..self.current_width {
@@ -569,13 +569,13 @@ impl LogslopeLayout {
     }
 }
 
-pub(crate) struct LogslopeRowWorkspace {
+pub(crate) struct SlopeRowWorkspace {
     raw_row: Array2<f64>,
     channel_rows: Array2<f64>,
     values: Vec<f64>,
 }
 
-impl LogslopeRowWorkspace {
+impl SlopeRowWorkspace {
     #[inline]
     pub(crate) fn values(&self) -> &[f64] {
         &self.values
@@ -661,9 +661,9 @@ mod tests {
     use super::*;
     use ndarray::array;
 
-    impl LogslopeLayout {
+    impl SlopeLayout {
         /// Test-only shared-channel constructor. Production paths use
-        /// [`LogslopeTopology::materialize_identity`] so topology validation
+        /// [`SlopeTopology::materialize_identity`] so topology validation
         /// stays at the construction boundary.
         pub(crate) fn shared(coefficient_design: DesignMatrix, offset: Array1<f64>) -> Self {
             let nrows = coefficient_design.nrows();
@@ -673,7 +673,7 @@ mod tests {
                 follow_up: None,
                 nrows,
                 current_width,
-                channels: LogslopeChannels::Shared {
+                channels: SlopeChannels::Shared {
                     offset: Arc::new(offset),
                 },
             }
@@ -683,14 +683,14 @@ mod tests {
             assert_eq!(
                 design.nrows(),
                 self.nrows,
-                "test replacement must preserve logslope layout row count"
+                "test replacement must preserve slope layout row count"
             );
             self.current_width = design.ncols();
             self.coefficient_design = design;
         }
     }
 
-    impl From<DesignMatrix> for LogslopeLayout {
+    impl From<DesignMatrix> for SlopeLayout {
         fn from(design: DesignMatrix) -> Self {
             let nrows = design.nrows();
             Self::shared(design, Array1::<f64>::zeros(nrows))
@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn unequal_raw_widths_emit_full_width_channel_rows_and_offsets() {
         let raw = array![[2.0, 3.0, 5.0], [7.0, 11.0, 13.0]];
-        let topology = LogslopeTopology::per_score(vec![0..1, 1..3], 3).unwrap();
+        let topology = SlopeTopology::per_score(vec![0..1, 1..3], 3).unwrap();
         let layout = topology
             .materialize_identity(DesignMatrix::from(raw), &array![0.5, -0.25])
             .unwrap();
@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn shared_zero_width_physical_channel_is_rejected_exactly() {
-        let topology = LogslopeTopology::shared();
+        let topology = SlopeTopology::shared();
         let raw_design = DesignMatrix::from(array![[1.0], [2.0]]);
         let error = topology
             .materialize_with_design(
@@ -731,7 +731,7 @@ mod tests {
             .err()
             .expect("shared physical channel cannot have zero current width");
         assert!(
-            error.contains("shared logslope channel 0 has no current-coordinate derivative"),
+            error.contains("shared slope channel 0 has no current-coordinate derivative"),
             "{error}"
         );
     }

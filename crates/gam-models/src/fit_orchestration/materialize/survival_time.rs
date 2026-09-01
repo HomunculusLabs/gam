@@ -68,7 +68,7 @@ pub fn prepare_survival_time_stack(
         // search is introduced. With shape = 1 the Weibull baseline-hazard
         // derivative is `1/age_exit` (the natural data hazard scale), so the seed
         // starts with `qd1` at O(1/T) interior — barrier gradient O(10-10²),
-        // comparable to the marginal/logslope blocks — and `β_time ≈ 0`. This
+        // comparable to the marginal/slope blocks — and `β_time ≈ 0`. This
         // changes only the STARTING point / offset split: the I-spline still learns
         // the data-driven deviation from this parametric baseline (the converged
         // fitted hazard is the same flexible family), so the fix is a pure

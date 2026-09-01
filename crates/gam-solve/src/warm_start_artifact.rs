@@ -36,13 +36,13 @@ pub(crate) const RHO_SATURATION: f64 = 9.0;
 ///
 /// Derived from the block name / channel at capture time. The role is part
 /// of the term identity so a "mean" smooth never transfers ρ to a
-/// "log-slope" smooth of the same variables.
+/// "slope" smooth of the same variables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TermRole {
     /// Location / mean channel (the default for a single-channel family).
     Mean,
-    /// Log-scale / dispersion / log-slope channel.
-    LogSlope,
+    /// Log-scale / dispersion / slope channel.
+    Slope,
     /// Any other channel (multinomial categories, frailty, …).
     Generic,
 }
@@ -52,24 +52,23 @@ impl TermRole {
     fn discriminant(self) -> u8 {
         match self {
             TermRole::Mean => 0,
-            TermRole::LogSlope => 1,
+            TermRole::Slope => 1,
             TermRole::Generic => 2,
         }
     }
 
     /// Heuristic role from a block / channel name. Names are produced by the
-    /// family construction layer (e.g. `"<scale>"`, `"logslope"`, `"mean"`);
+    /// family construction layer (e.g. `"<scale>"`, `"slope"`, `"mean"`);
     /// the classification is structural and deliberately coarse.
     pub fn from_block_name(name: &str) -> TermRole {
         let lower = name.to_ascii_lowercase();
-        if lower.contains("logslope")
-            || lower.contains("log_slope")
+        if lower.contains("slope")
             || lower.contains("scale")
             || lower.contains("sigma")
             || lower.contains("dispersion")
             || lower.contains("disp")
         {
-            TermRole::LogSlope
+            TermRole::Slope
         } else if lower.contains("mean") || lower.contains("loc") || lower.contains("marginal") {
             TermRole::Mean
         } else {
@@ -338,7 +337,7 @@ mod tests {
     #[test]
     fn block_identity_splits_on_role() {
         let mean = block_id(TermRole::Mean, "s(x)");
-        let slope = block_id(TermRole::LogSlope, "s(x)");
+        let slope = block_id(TermRole::Slope, "s(x)");
         assert_ne!(mean, slope, "different role must split identity");
     }
 

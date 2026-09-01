@@ -2578,7 +2578,7 @@ pub(crate) const JOINT_COLLAPSED_FLOOR_ALL_REJECT_MAX_CYCLES: usize = 4;
 /// further) AND a fully-rejected cycle was just observed AND that pattern has now
 /// persisted for `JOINT_COLLAPSED_FLOOR_ALL_REJECT_MAX_CYCLES` consecutive cycles.
 /// When all three hold the inner loop is provably grinding to its budget on a
-/// near-singular coupled marginal↔logslope system (the survival-hang root cause):
+/// near-singular coupled marginal↔slope system (the survival-hang root cause):
 /// the step makes no progress and the radius cannot adapt, so every further cycle
 /// reproduces this one. The caller exits through the existing identified-subspace /
 /// fixed-point certificate path (converged if stationary, give-best otherwise).
@@ -2980,7 +2980,7 @@ pub(crate) fn apply_joint_feasibility_limit<F: CustomFamily + ?Sized>(
     //
     // Production survival_marginal_slope failure mode at large scale:
     // the time block returned α ≈ 1e-4 (monotonicity guard); per-block
-    // scaling crushed δ_time to ~2.3e-4 while logslope kept its full
+    // scaling crushed δ_time to ~2.3e-4 while slope kept its full
     // unconstrained Newton step. The joint step was no longer a Newton
     // direction; the time-block gradient stayed at ‖g_time‖ ≈ 5.6e8 for
     // the next 15+ cycles, triggering the linearized-rate stall
@@ -3325,7 +3325,7 @@ pub(crate) mod whitened_spectrum {
     ///
     /// # Why this exists (gam#979)
     ///
-    /// The coupled marginal↔logslope inner Newton needs ONE globalization, not a
+    /// The coupled marginal↔slope inner Newton needs ONE globalization, not a
     /// stack of approximations. Historically the joint step was a *modified-Newton*
     /// (reflect indefinite eigenvalues to `|λ|`) wrapped in a *heuristically gated*
     /// multiplicative Marquardt damping (engaged on `nullity>0`, or condition number
@@ -3601,7 +3601,7 @@ pub(crate) mod whitened_spectrum {
         ///
         /// This is the curvature-aware convergence quantity the coupled
         /// joint-Newton needs on a weakly-identified (near-flat) carrying block
-        /// (survival marginal↔logslope, link-wiggle, location-scale — gam#1040 /
+        /// (survival marginal↔slope, link-wiggle, location-scale — gam#1040 /
         /// gam#1088): a large penalized stationarity residual `‖∇L − Sβ‖∞` along
         /// a low-curvature direction (`g` large, `γ` tiny) gives an enormous raw
         /// Newton step that the trust region clamps, so the residual- and
@@ -5633,7 +5633,7 @@ pub(crate) fn constrained_numerical_fixed_point_reached(
 /// This distinguishes a still-converging Newton direction from a genuine
 /// multiplier/null plateau at the certificate-refusal gate (gam#787 duchon
 /// centers≥20). The constrained-stationary refusal fires on a flat objective +
-/// `linearized_rel ≥ 0.5`, but those signals ALSO hold for a logslope block
+/// `linearized_rel ≥ 0.5`, but those signals ALSO hold for a slope block
 /// whose residual is dropping by a steady factor each cycle (objective already
 /// at its Φ-bounded floor while the KKT residual still polishes): refusing there
 /// rejects the seed a few cycles short of `residual_tol`. Requiring a STEADY

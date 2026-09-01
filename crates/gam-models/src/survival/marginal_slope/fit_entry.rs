@@ -75,24 +75,24 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         };
     let probit_scale = probit_frailty_scale(initial_sigma);
 
-    let logslope_specs_input = spec
-        .logslopespecs
+    let slope_specs_input = spec
+        .slopespecs
         .clone()
-        .unwrap_or_else(|| vec![spec.logslopespec.clone()]);
-    if logslope_specs_input.len() != spec.z.ncols() && logslope_specs_input.len() != 1 {
+        .unwrap_or_else(|| vec![spec.slopespec.clone()]);
+    if slope_specs_input.len() != spec.z.ncols() && slope_specs_input.len() != 1 {
         return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
             reason: format!(
-                "survival marginal-slope expected either one shared logslope spec or one spec per z coordinate (K={}); got {}",
+                "survival marginal-slope expected either one shared slope spec or one spec per z coordinate (K={}); got {}",
                 spec.z.ncols(),
-                logslope_specs_input.len()
+                slope_specs_input.len()
             ),
         }
         .into());
     }
-    let mut design_specs = Vec::with_capacity(1 + logslope_specs_input.len());
+    let mut design_specs = Vec::with_capacity(1 + slope_specs_input.len());
     design_specs.push(spec.marginalspec.clone());
-    design_specs.extend(logslope_specs_input.iter().cloned());
-    // gam#979: give the marginal + logslope smooth surfaces the Marra & Wood
+    design_specs.extend(slope_specs_input.iter().cloned());
+    // gam#979: give the marginal + slope smooth surfaces the Marra & Wood
     // double penalty so their polynomial-trend null space is identified rather
     // than left flat. Without it that trend direction is a large-signal /
     // tiny-curvature mode that deadlocks the inner joint-Newton (the spectral
@@ -124,8 +124,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         .map_err(|e| format!("failed to rebuild frozen probe SMGS joint designs: {e}"))?;
     let marginal_design = joint_designs.remove(0);
     let marginalspec_boot = joint_specs.remove(0);
-    let (logslope_design, logslopespec_boot, logslope_topology) =
-        combine_logslope_surface_designs(joint_designs, &joint_specs)?;
+    let (slope_design, slopespec_boot, slope_topology) =
+        combine_slope_surface_designs(joint_designs, &joint_specs)?;
     // gam#2765 / gam#2767: if the request asked for a follow-up-varying slope,
     // the block's coefficient design is the covariate design tensored against a
     // time margin, and the layout carries the other two follow-up channels. The
@@ -135,22 +135,22 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // and `make_family` apply the time margin themselves (the outer spatial
     // search hands them a freshly rebuilt covariate design on every probe), so
     // handing them the already-tensored design would tensor it twice.
-    let logslope_cov_design = logslope_design;
-    let (logslope_design, logslope_follow_up) = tensorize_logslope_design_over_time(
-        logslope_cov_design.clone(),
-        &spec.logslope_template,
+    let slope_cov_design = slope_design;
+    let (slope_design, slope_follow_up) = tensorize_slope_design_over_time(
+        slope_cov_design.clone(),
+        &spec.slope_template,
     )?;
-    if logslope_follow_up.is_some() {
+    if slope_follow_up.is_some() {
         // The spatial-psi hyperparameter path, the learned-frailty scale jet and
         // the flex/time-wiggle surfaces all evaluate the row program through the
         // four-primary frame. Each is a real combination to support, and each is
         // a separate piece of chain rule; refusing by name is honest, whereas
         // running them would silently differentiate a model that is not the one
         // being fitted.
-        if !spatial_length_scale_term_indices(&logslopespec_boot).is_empty() {
+        if !spatial_length_scale_term_indices(&slopespec_boot).is_empty() {
             return Err(SurvivalMarginalSlopeError::InvalidInput {
-                reason: "a follow-up-varying log-slope is not yet supported together with a \
-                         spatial (automatic length-scale) term on the log-slope surface: the \
+                reason: "a follow-up-varying slope is not yet supported together with a \
+                         spatial (automatic length-scale) term on the slope surface: the \
                          spatial hyperparameter derivatives are lowered through the \
                          time-constant primary frame"
                     .to_string(),
@@ -159,7 +159,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         }
         if !matches!(spec.frailty, FrailtySpec::None) {
             return Err(SurvivalMarginalSlopeError::InvalidInput {
-                reason: "a follow-up-varying log-slope is not yet supported together with a \
+                reason: "a follow-up-varying slope is not yet supported together with a \
                          Gaussian-shift frailty: the frailty scale jet is lowered through the \
                          time-constant primary frame"
                     .to_string(),
@@ -168,7 +168,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         }
         if spec.score_warp.is_some() || spec.link_dev.is_some() {
             return Err(SurvivalMarginalSlopeError::InvalidInput {
-                reason: "a follow-up-varying log-slope is not yet supported together with a \
+                reason: "a follow-up-varying slope is not yet supported together with a \
                          score-warp or link-deviation flex block: those surfaces add their own \
                          primaries on top of the time-constant frame"
                     .to_string(),
@@ -177,7 +177,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         }
         if spec.score_influence_jacobian.is_some() {
             return Err(SurvivalMarginalSlopeError::InvalidInput {
-                reason: "a follow-up-varying log-slope is not yet supported together with a CTN \
+                reason: "a follow-up-varying slope is not yet supported together with a CTN \
                          Stage-1 influence absorber: the absorber adds a trailing primary that \
                          the time-constant frame's cross-block assembly indexes by position"
                     .to_string(),
@@ -186,20 +186,20 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         }
         if spec.timewiggle_block.is_some() {
             return Err(SurvivalMarginalSlopeError::InvalidInput {
-                reason: "a follow-up-varying log-slope is not yet supported together with a \
+                reason: "a follow-up-varying slope is not yet supported together with a \
                          time-wiggle baseline"
                     .to_string(),
             }
             .into());
         }
     }
-    let logslope_template = spec.logslope_template.clone();
+    let slope_template = spec.slope_template.clone();
     // The outer spatial/kappa search rebuilds the block designs from their term
     // specs on every probe, so the time margin has to be applied where the
     // design is CONSUMED, not once up front. This is that map, applied
     // identically at every consumption site.
-    let tensorize_logslope = move |design: &TermCollectionDesign| {
-        tensorize_logslope_design_over_time(design.clone(), &logslope_template)
+    let tensorize_slope = move |design: &TermCollectionDesign| {
+        tensorize_slope_design_over_time(design.clone(), &slope_template)
     };
     spec.marginal_offset = marginal_design
         .compose_offset(
@@ -207,10 +207,10 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             "survival marginal-slope marginal block",
         )
         .map_err(|error| error.to_string())?;
-    spec.logslope_offset = logslope_design
+    spec.slope_offset = slope_design
         .compose_offset(
-            spec.logslope_offset.view(),
-            "survival marginal-slope logslope block",
+            spec.slope_offset.view(),
+            "survival marginal-slope slope block",
         )
         .map_err(|error| error.to_string())?;
     // gam#2768: the automatic latent-measure gate, on the same marginal-index
@@ -253,12 +253,12 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         baseline_slope,
         baseline_started.elapsed().as_secs_f64(),
     );
-    let common_logslope_offset = &spec.logslope_offset + baseline_slope;
-    if logslope_topology.is_per_score() && logslope_topology.score_count() != spec.z.ncols() {
+    let common_slope_offset = &spec.slope_offset + baseline_slope;
+    if slope_topology.is_per_score() && slope_topology.score_count() != spec.z.ncols() {
         return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
             reason: format!(
-                "survival marginal-slope has {} per-score logslope channels but latent score dimension K={}",
-                logslope_topology.score_count(),
+                "survival marginal-slope has {} per-score slope channels but latent score dimension K={}",
+                slope_topology.score_count(),
                 spec.z.ncols(),
             ),
         }
@@ -304,18 +304,18 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // single direction and lets `link_dev` alias `score_warp_dev` along
     // the scalar PRS-axis path documented in the original audit (item #3
     // of the principled fix: link_dev seed must reflect actual fitted
-    // exit-location and logslope surfaces, not just data offsets). One
+    // exit-location and slope surfaces, not just data offsets). One
     // Newton step is sufficient for the cross-block residualisation: we
     // need a per-row-varying η₁ that respects event/weight structure, not
     // a converged β.
     let pilot = survival_nonrigid_pilot_eta(
         n,
         &location_anchor_design,
-        &logslope_design.design,
+        &slope_design.design,
         &z_primary,
         &spec.time_block.offset_exit,
         &spec.marginal_offset,
-        &spec.logslope_offset,
+        &spec.slope_offset,
         baseline_slope,
         &spec.weights,
         &spec.event_target,
@@ -349,7 +349,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         .location_beta
         .slice(s![pilot_time_width..])
         .to_owned();
-    let pilot_logslope_beta = pilot.logslope_beta;
+    let pilot_slope_beta = pilot.slope_beta;
     let cross_block_pilot_eta = pilot.eta1;
     let cross_block_pilot_w = survival_pilot_irls_row_metric_at_eta(
         &cross_block_pilot_eta,
@@ -362,11 +362,11 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // `spec.score_influence_jacobian` carries the out-of-fold `J = ∂z/∂θ₁`. The
     // realized leakage directions `Z_infl = diag(s_f·β̂₀)·J` are residualized
     // against the marginal location span in the rigid-pilot row metric
-    // (`cross_block_pilot_w`) — keeping the logslope-aligned component — and
+    // (`cross_block_pilot_w`) — keeping the slope-aligned component — and
     // hosted as a dedicated additive absorber block whose coefficient `γ` shifts
     // the de-nested observed index `η₁` by `+Z̃_infl·γ`. β̂₀(x_i) is the
-    // rigid-pilot logslope `baseline_slope + logslope_offset[i]`; `s_f =
-    // probit_scale`. The math (residualize-vs-marginal/retain-logslope +
+    // rigid-pilot slope `baseline_slope + slope_offset[i]`; `s_f =
+    // probit_scale`. The math (residualize-vs-marginal/retain-slope +
     // fixed-ridge absorber) is the single source of truth shared with the BMS
     // family via `marginal_slope_orthogonal`; survival differs only in the host
     // structure — a dedicated `η₁` channel rather than BMS's widened marginal
@@ -383,9 +383,9 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         let marginal_dense = marginal_design
             .design
             .try_to_dense_by_chunks("survival marginal-slope influence-absorber marginal span")?;
-        // `β̂₀(x_i)` is the rigid-pilot logslope; `s_f = probit_scale`; `z_primary`
+        // `β̂₀(x_i)` is the rigid-pilot slope; `s_f = probit_scale`; `z_primary`
         // is the OOF latent z on these rows.
-        let rigid_logslope_at_rows = &spec.logslope_offset + baseline_slope;
+        let rigid_slope_at_rows = &spec.slope_offset + baseline_slope;
         // Z̃_infl = residualize(diag(s_f·β̂₀)·J, marginal, W) — the combined core
         // builder (single source of truth shared with the BMS absorber site). It
         // takes the raw n×p₁ J + OOF z and encapsulates the full §3 sequence: build
@@ -395,7 +395,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         let residualized = residualized_influence_block(
             jac,
             &z_primary,
-            &rigid_logslope_at_rows,
+            &rigid_slope_at_rows,
             probit_scale,
             marginal_dense.view(),
             &cross_block_pilot_w,
@@ -416,7 +416,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // satisfied by a single source of truth.
     // Score-warp: build the scalar base DeviationPrepared, apply cross-
     // block identifiability reparameterisation against the parametric
-    // anchor union (marginal + logslope) on the underlying runtime, then
+    // anchor union (marginal + slope) on the underlying runtime, then
     // re-stripe across z coordinates. Reparameterising on the scalar base
     // BEFORE the direct-sum striping is the principled order: the per-z
     // stripes share a single runtime, so installing the W-metric residual
@@ -425,7 +425,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // `design_at_training_with_residual` is called. Without this, the
     // score-warp block carries its own constant / low-order η-polynomial
     // direction on every z stripe, producing the alias pencil
-    //   score_warp_dev[k] ≡ marginal_surface[m] ≡ logslope_surface[ℓ]
+    //   score_warp_dev[k] ≡ marginal_surface[m] ≡ slope_surface[ℓ]
     // and (against the already-reparameterised link-dev) the
     //   score_warp_dev[k] ≡ link_dev[k]
     // overlap chain documented by the identifiability audit.
@@ -440,7 +440,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         let mut base = build_score_warp_deviation_block_from_seed(&z_primary, cfg)?;
         let parametric_anchors: [(&DesignMatrix, ParametricAnchorBlock); 2] = [
             (&location_anchor_design, ParametricAnchorBlock::Marginal),
-            (&logslope_design.design, ParametricAnchorBlock::Logslope),
+            (&slope_design.design, ParametricAnchorBlock::Slope),
         ];
         let outcome = install_compiled_flex_block_into_runtime(
             &mut base,
@@ -462,12 +462,12 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 // unified audit's canonicalize_for_identifiability sees it
                 // and attributes the drop to score_warp_dev via
                 // dropped_columns (gauge_priority=80 is below marginal=150
-                // and logslope=120 so RRQR correctly demotes score_warp_dev).
+                // and slope=120 so RRQR correctly demotes score_warp_dev).
                 // No family-side log.warn — the audit's DroppedColumn record
                 // IS the authoritative structured report.
                 cross_block_warnings.push(CrossBlockIdentifiabilityWarning {
                     candidate_label: "score_warp",
-                    anchor_summary: "marginal+logslope".to_string(),
+                    anchor_summary: "marginal+slope".to_string(),
                     reason,
                 });
                 Some(stripe_score_warp_across_z_coords(
@@ -494,18 +494,18 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             cfg,
         )?;
         // Cross-block identifiability: residualise the link-deviation
-        // basis against the parametric anchor union (marginal + logslope
+        // basis against the parametric anchor union (marginal + slope
         // designs) at training rows so its column span is orthogonal
-        // to span(X_marginal, X_logslope). Without this, the link-dev
+        // to span(X_marginal, X_slope). Without this, the link-dev
         // basis's constant / low-order η-polynomial directions are
         // exactly the constant columns carried by marginal_surface and
-        // logslope_surface, producing the alias pencil
-        //   link_dev[k] ≡ marginal_surface[m] ≡ logslope_surface[ℓ]
+        // slope_surface, producing the alias pencil
+        //   link_dev[k] ≡ marginal_surface[m] ≡ slope_surface[ℓ]
         // documented by the identifiability audit (joint rank collapse
         // from 51 → 38 on the large-scale binary-outcome fit). After
         // the W-metric eigendecomposition installs `T_lw` on the
         // DeviationRuntime, the joint design has full numerical column
-        // rank with respect to (marginal, logslope) and the joint
+        // rank with respect to (marginal, slope) and the joint
         // penalised Hessian satisfies `σ_min(joint H + S) ≥ λ_min(S) > 0`
         // for every β. This mirrors the BMS construction site at
         // bernoulli_marginal_slope.rs:18236, transplanted here because
@@ -518,7 +518,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         // holding only under uniform `spec.weights`.
         // Thread the now-reparameterised score-warp basis at training rows
         // as a flex-evaluation anchor so the link-deviation basis is jointly
-        // orthogonal to span(marginal, logslope, score_warp). Mirrors BMS at
+        // orthogonal to span(marginal, slope, score_warp). Mirrors BMS at
         // bernoulli_marginal_slope.rs:18291-18307. For the per-z striped
         // score-warp, only the primary-coordinate basis is needed as a flex
         // anchor (score-warp's per-z stripes share a single underlying
@@ -531,7 +531,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             .transpose()?;
         let parametric_anchors: [(&DesignMatrix, ParametricAnchorBlock); 2] = [
             (&location_anchor_design, ParametricAnchorBlock::Marginal),
-            (&logslope_design.design, ParametricAnchorBlock::Logslope),
+            (&slope_design.design, ParametricAnchorBlock::Slope),
         ];
         let flex_anchor_slot: Option<&Array2<f64>> = score_warp_anchor_design.as_ref();
         let flex_anchors: Vec<&Array2<f64>> = flex_anchor_slot.into_iter().collect();
@@ -550,10 +550,10 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 // (non-compiled) design so the unified audit sees link_dev
                 // with its original columns and attributes the alias drop
                 // via dropped_columns (gauge_priority=60 < marginal=150 /
-                // logslope=120 so RRQR correctly demotes link_dev).
+                // slope=120 so RRQR correctly demotes link_dev).
                 cross_block_warnings.push(CrossBlockIdentifiabilityWarning {
                     candidate_label: "link_deviation",
-                    anchor_summary: "marginal+logslope".to_string(),
+                    anchor_summary: "marginal+slope".to_string(),
                     reason,
                 });
                 Some(prepared)
@@ -563,7 +563,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         None
     };
     // Penalty seeds for the flex/aux blocks beyond the core (time/marginal/
-    // logslope). The absorbed influence block (#461) contributes ONE trailing
+    // slope). The absorbed influence block (#461) contributes ONE trailing
     // REML-learned identity penalty on γ: the outer optimizer selects the
     // absorber precision like any other random-effect variance, seeded at the
     // ln(n) leakage scale (SPEC: shrinkage is explicit or REML-selected, never
@@ -590,7 +590,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     };
     let core_rho0_seed: Vec<f64> = {
         let mut seeds = Vec::with_capacity(
-            time_penalties_len + marginal_design.penalties.len() + logslope_design.penalties.len(),
+            time_penalties_len + marginal_design.penalties.len() + slope_design.penalties.len(),
         );
         seeds.extend(block_log_lambda_seeds(
             &spec.time_block.design_exit,
@@ -601,8 +601,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             marginal_design.penalties.iter().map(|bp| &bp.local),
         ));
         seeds.extend(block_log_lambda_seeds(
-            &logslope_design.design,
-            logslope_design.penalties.iter().map(|bp| &bp.local),
+            &slope_design.design,
+            slope_design.penalties.iter().map(|bp| &bp.local),
         ));
         seeds
     };
@@ -611,8 +611,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         time_penalties_len,
         &marginalspec_boot,
         marginal_design.penalties.len(),
-        &logslopespec_boot,
-        logslope_design.penalties.len(),
+        &slopespec_boot,
+        slope_design.penalties.len(),
         &core_rho0_seed,
         &extra_rho0,
         &baseline_initial_theta,
@@ -624,31 +624,31 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     .map_err(|error| error.to_string())?;
 
     let hints = RefCell::new(ThetaHints::default());
-    // #808 operating-point warm start for the logslope block. The inner
-    // joint-Newton seeds each block at `spec.initial_beta` (→ `hints.logslope_beta`
-    // via `build_logslope_blockspec`). At the default `g = 0` seed the logslope
+    // #808 operating-point warm start for the slope block. The inner
+    // joint-Newton seeds each block at `spec.initial_beta` (→ `hints.slope_beta`
+    // via `build_slope_blockspec`). At the default `g = 0` seed the slope
     // block is W-null (the slope-channel IRLS weight vanishes at the null slope),
     // so the inner cannot take its first step and freezes (the #808 stall). Seed
-    // it instead at the one-step non-rigid pilot's logslope coefficients, which
+    // it instead at the one-step non-rigid pilot's slope coefficients, which
     // put `g` at the operating point (`g ≈ 0.3`) where the slope channel carries
     // information and the block is full-rank — breaking the chicken-and-egg so the
     // inner moves and converges to the true data optimum. It is only a warm start,
-    // so the converged β is the data optimum (zero bias; the log-slope estimand is
+    // so the converged β is the data optimum (zero bias; the slope estimand is
     // recovered, NOT dropped or pinned to zero). Width-guarded against any
-    // logslope design rebuild.
-    if pilot_logslope_beta.len() == logslope_design.design.ncols()
-        && pilot_logslope_beta.iter().all(|v| v.is_finite())
+    // slope design rebuild.
+    if pilot_slope_beta.len() == slope_design.design.ncols()
+        && pilot_slope_beta.iter().all(|v| v.is_finite())
     {
-        hints.borrow_mut().logslope_beta = Some(pilot_logslope_beta.clone());
+        hints.borrow_mut().slope_beta = Some(pilot_slope_beta.clone());
     }
     // #2627 operating-point warm start for the time and marginal blocks — the
     // other half of the very same one-step joint Newton solve that produced
-    // the logslope seed above. Until now that half was computed, used to form
+    // the slope seed above. Until now that half was computed, used to form
     // the pilot's per-row `q_delta`, and then discarded, so both blocks
     // cold-started at β = 0: the time surface pinned to the guard-linear
     // baseline `q'(t) ≡ derivative_guard` and the covariate location surface
     // flat. The joint objective is not concave in β (the effective row weight
-    // `c(g) = √(1 + s(g)²)` couples logslope with location multiplicatively;
+    // `c(g) = √(1 + s(g)²)` couples slope with location multiplicatively;
     // `custom_family_impl.rs` opts into `levenberg_on_ill_conditioning` and
     // `exact_newton_joint_hessian_beta_dependent` for exactly that reason), so
     // an out-of-basin start is not recoverable by the inner solver: every ρ
@@ -823,7 +823,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // accidentally; the named enum makes the intent and audit obvious at every
     // call site.
     let make_family = |marginal_design: &TermCollectionDesign,
-                       logslope_design: &TermCollectionDesign,
+                       slope_design: &TermCollectionDesign,
                        theta: &Array1<f64>,
                        flex: FlexActivation|
      -> Result<SurvivalMarginalSlopeFamily, String> {
@@ -847,20 +847,20 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             FlexActivation::On => (score_warp_runtime.clone(), link_dev_runtime.clone()),
         };
         // The absorber is suppressed during the rigid-pilot pass: its pilot
-        // logslope β̂₀ and the residualization W metric are *derived from* that
+        // slope β̂₀ and the residualization W metric are *derived from* that
         // pilot, so it can only enter the full (non-rigid) fit (mirror of the
         // score_warp/link_dev `FlexActivation` gating above).
         let influence_absorber_active = match flex {
             FlexActivation::OffForRigidPilot => None,
             FlexActivation::On => influence_absorber_residualized.clone(),
         };
-        let (logslope_design, logslope_follow_up) = tensorize_logslope(logslope_design)?;
-        let logslope_layout = attach_logslope_follow_up(
-            logslope_topology
-                .materialize_identity(logslope_design.design.clone(), &common_logslope_offset)?,
-            logslope_follow_up.as_ref(),
+        let (slope_design, slope_follow_up) = tensorize_slope(slope_design)?;
+        let slope_layout = attach_slope_follow_up(
+            slope_topology
+                .materialize_identity(slope_design.design.clone(), &common_slope_offset)?,
+            slope_follow_up.as_ref(),
         )?;
-        logslope_layout.validate_for(spec.z.ncols())?;
+        slope_layout.validate_for(spec.z.ncols())?;
         Ok(SurvivalMarginalSlopeFamily {
             n,
             event: Arc::clone(&event),
@@ -877,7 +877,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             offset_exit: family_offset_exit,
             derivative_offset_exit: family_derivative_offset_exit,
             marginal_design: marginal_design.design.clone(),
-            logslope_layout,
+            slope_layout,
             score_warp: score_warp_active,
             link_dev: link_dev_active,
             influence_absorber: influence_absorber_active,
@@ -893,18 +893,18 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
 
     let build_blocks = |rho: &Array1<f64>,
                         marginal_design: &TermCollectionDesign,
-                        logslope_design: &TermCollectionDesign,
+                        slope_design: &TermCollectionDesign,
                         flex: FlexActivation|
      -> Result<Vec<ParameterBlockSpec>, String> {
         let hints = hints.borrow();
-        let (owned_logslope_design, logslope_follow_up) = tensorize_logslope(logslope_design)?;
-        let logslope_design = &owned_logslope_design;
-        let block_logslope_layout = attach_logslope_follow_up(
-            logslope_topology
-                .materialize_identity(logslope_design.design.clone(), &common_logslope_offset)?,
-            logslope_follow_up.as_ref(),
+        let (owned_slope_design, slope_follow_up) = tensorize_slope(slope_design)?;
+        let slope_design = &owned_slope_design;
+        let block_slope_layout = attach_slope_follow_up(
+            slope_topology
+                .materialize_identity(slope_design.design.clone(), &common_slope_offset)?,
+            slope_follow_up.as_ref(),
         )?;
-        block_logslope_layout.validate_for(spec.z.ncols())?;
+        block_slope_layout.validate_for(spec.z.ncols())?;
         let mut cursor = 0usize;
         let rho_time = rho
             .slice(s![cursor..cursor + time_penalties_len])
@@ -914,10 +914,10 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             .slice(s![cursor..cursor + marginal_design.penalties.len()])
             .to_owned();
         cursor += marginal_design.penalties.len();
-        let rho_logslope = rho
-            .slice(s![cursor..cursor + logslope_design.penalties.len()])
+        let rho_slope = rho
+            .slice(s![cursor..cursor + slope_design.penalties.len()])
             .to_owned();
-        cursor += logslope_design.penalties.len();
+        cursor += slope_design.penalties.len();
         let score_warp_active = match flex {
             FlexActivation::On => score_warp_prepared.as_ref(),
             FlexActivation::OffForRigidPilot => None,
@@ -936,7 +936,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         // pilot's time block (line ~21559). After the pilot's identifiability
         // reduction the stored β can have a *lower* dimension than the raw
         // `design_exit.ncols()` used to build `time_linear_constraints` here
-        // (issue #374: with `logslope_formula="1"` the rigid pilot fires,
+        // (issue #374: with `slope_formula="1"` the rigid pilot fires,
         // seeds a reduced-width `time_beta`, and feeding it straight into the
         // raw-width projection panicked on an ndarray shape mismatch). Only a
         // hint whose length matches the projection dimension is geometrically
@@ -976,10 +976,10 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             .as_ref()
             .filter(|beta| beta.len() == marginal_design.design.ncols())
             .cloned();
-        let logslope_beta_hint = hints
-            .logslope_beta
+        let slope_beta_hint = hints
+            .slope_beta
             .as_ref()
-            .filter(|beta| beta.len() == block_logslope_layout.coefficient_design().ncols())
+            .filter(|beta| beta.len() == block_slope_layout.coefficient_design().ncols())
             .cloned();
         let mut blocks = vec![
             build_time_blockspec(&time_block_ref, &design_exit, rho_time, time_beta_hint),
@@ -989,13 +989,13 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 rho_marginal,
                 marginal_beta_hint,
             ),
-            build_logslope_blockspec(
-                logslope_design,
-                &block_logslope_layout,
+            build_slope_blockspec(
+                slope_design,
+                &block_slope_layout,
                 baseline_slope,
-                &spec.logslope_offset,
-                rho_logslope,
-                logslope_beta_hint,
+                &spec.slope_offset,
+                rho_slope,
+                slope_beta_hint,
                 Arc::clone(&z),
                 score_covariance.clone(),
             )?,
@@ -1024,10 +1024,10 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         // design is the residualized leakage columns `Z̃_infl` and whose single
         // identity penalty `½·λ·‖γ‖²` is REML-learned from the trailing rho slot
         // (seeded at `influence_absorber_log_lambda(n)`). Its
-        // gauge priority (130) sits strictly between marginal (150) and logslope
+        // gauge priority (130) sits strictly between marginal (150) and slope
         // (120): the residualization already removes the marginal-aligned
         // component, and the 130 tier makes the canonical-gauge RRQR demote the
-        // *logslope* direction (not the absorber) on any shared leakage axis — the
+        // *slope* direction (not the absorber) on any shared leakage axis — the
         // discrete realization of `ψ − Π_η[ψ]`. Dropped at predict.
         if let Some(z_tilde) = influence_active {
             let p_i = z_tilde.ncols();
@@ -1163,28 +1163,28 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     } else {
         let pilot_started = std::time::Instant::now();
         log::info!(
-            "[survival-marginal-slope/pilot] start n={} time_p={} marginal_p={} logslope_p={}",
+            "[survival-marginal-slope/pilot] start n={} time_p={} marginal_p={} slope_p={}",
             n,
             design_exit.ncols(),
             marginal_design.design.ncols(),
-            logslope_design.design.ncols(),
+            slope_design.design.ncols(),
         );
         // Pilot ρ has exactly the parametric block sizes — score_warp and
         // link_dev are excluded via FlexActivation::OffForRigidPilot below.
         // Sizing must match build_blocks(... OffForRigidPilot) or the cursor
         // walk inside the closure would slice past the end of the array.
         let rigid_rho = Array1::<f64>::zeros(
-            time_penalties_len + marginal_design.penalties.len() + logslope_design.penalties.len(),
+            time_penalties_len + marginal_design.penalties.len() + slope_design.penalties.len(),
         );
         let rigid_blocks = build_blocks(
             &rigid_rho,
             &marginal_design,
-            &logslope_cov_design,
+            &slope_cov_design,
             FlexActivation::OffForRigidPilot,
         )?;
         let rigid_family = make_family(
             &marginal_design,
-            &logslope_cov_design,
+            &slope_cov_design,
             &initial_hyper_theta,
             FlexActivation::OffForRigidPilot,
         )?;
@@ -1237,7 +1237,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                         hints_mut.marginal_beta = Some(beta.clone());
                     }
                     if let Some(beta) = block_beta.get(2) {
-                        hints_mut.logslope_beta = Some(beta.clone());
+                        hints_mut.slope_beta = Some(beta.clone());
                     }
                 }
                 log::info!(
@@ -1284,11 +1284,11 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     }
 
     let marginal_terms = spatial_length_scale_term_indices(&marginalspec_boot);
-    let logslope_terms = spatial_length_scale_term_indices(&logslopespec_boot);
+    let slope_terms = spatial_length_scale_term_indices(&slopespec_boot);
     let marginal_has_spatial = !marginal_terms.is_empty();
-    let logslope_has_spatial = !logslope_terms.is_empty();
+    let slope_has_spatial = !slope_terms.is_empty();
     let analytic_joint_derivatives_available =
-        marginal_has_spatial || logslope_has_spatial || setup.log_kappa_dim() == 0;
+        marginal_has_spatial || slope_has_spatial || setup.log_kappa_dim() == 0;
 
     if setup.log_kappa_dim() > 0 && !analytic_joint_derivatives_available {
         return Err(
@@ -1307,7 +1307,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     let initial_blocks = build_blocks(
         &initial_rho,
         &marginal_design,
-        &logslope_cov_design,
+        &slope_cov_design,
         FlexActivation::On,
     )?;
     // Validate the assembled block specs at the construction boundary so any
@@ -1323,7 +1323,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     })?;
     let initial_family = make_family(
         &marginal_design,
-        &logslope_cov_design,
+        &slope_cov_design,
         &initial_hyper_theta,
         FlexActivation::On,
     )?;
@@ -1383,10 +1383,10 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             } else {
                 Vec::new()
             },
-            if logslope_has_spatial {
+            if slope_has_spatial {
                 build_block_spatial_psi_derivatives(data, &specs[1], &designs[1])?.ok_or_else(
                     || {
-                        "survival marginal-slope: logslope block has spatial terms but spatial psi derivatives are unavailable"
+                        "survival marginal-slope: slope block has spatial terms but spatial psi derivatives are unavailable"
                             .to_string()
                     },
                 )?
@@ -1431,8 +1431,8 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     let exact_spatial_outer_tol = kappa_options_ref.rel_tol.max(1e-6);
     let solved = optimize_spatial_length_scale_exact_joint(
         data,
-        &[marginalspec_boot.clone(), logslopespec_boot.clone()],
-        &[marginal_terms.clone(), logslope_terms.clone()],
+        &[marginalspec_boot.clone(), slopespec_boot.clone()],
+        &[marginal_terms.clone(), slope_terms.clone()],
         kappa_options_ref,
         &setup,
         crate::seeding::SeedRiskProfile::Survival,
@@ -1486,7 +1486,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 hints_mut.marginal_beta = Some(block.beta.clone());
             }
             if let Some(block) = fit.block_states.get(2) {
-                hints_mut.logslope_beta = Some(block.beta.clone());
+                hints_mut.slope_beta = Some(block.beta.clone());
             }
             if score_warp_prepared.is_some()
                 && let Some(block) = fit.block_states.get(3)
@@ -1820,13 +1820,13 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     Ok(SurvivalMarginalSlopeFitResult {
         fit: solved_fit,
         marginalspec_resolved: resolved_specs.remove(0),
-        logslopespec_resolved: resolved_specs.remove(0),
+        slopespec_resolved: resolved_specs.remove(0),
         marginal_design: designs[0].clone(),
         // The tensor product, not the covariate factor: this is the design the
         // fitted coefficients live against.
-        logslope_design: tensorize_logslope(&designs[1])?.0,
-        logslope_time_basis: spec
-            .logslope_template
+        slope_design: tensorize_slope(&designs[1])?.0,
+        slope_time_basis: spec
+            .slope_template
             .resolved_time_basis()
             .cloned(),
         gaussian_frailty_sd: final_sigma,

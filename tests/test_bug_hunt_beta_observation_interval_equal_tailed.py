@@ -68,7 +68,7 @@ def test_beta_observation_edges_track_true_quantiles():
     m = gamfit.fit(train, "y ~ s(x)", family="beta")
     p = m.predict(test, interval=0.95, observation_interval=True)
 
-    mu_hat = p["mean"].to_numpy()
+    mu_hat = p["posterior_mean"].to_numpy()
     lo = p["observation_lower"].to_numpy()
     hi = p["observation_upper"].to_numpy()
     mu = 1.0 / (1.0 + np.exp(-(-1.6 + 1.3 * np.sin(2 * np.pi * test["x"].to_numpy()))))

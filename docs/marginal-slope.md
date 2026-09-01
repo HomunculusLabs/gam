@@ -14,8 +14,8 @@ the probit/slope scale and varies smoothly with covariates.
 Two families:
 
 - Bernoulli marginal-slope for binary outcomes. In Python, pass
-  `family="bernoulli-marginal-slope"` with `logslope_formula=`; in the
-  CLI, `--z-column` and `--logslope-formula` route to this fit.
+  `family="bernoulli-marginal-slope"` with `slope_formula=`; in the
+  CLI, `--z-column` and `--slope-formula` route to this fit.
 - Survival marginal-slope (`survival_likelihood="marginal-slope"`) for
   time-to-event outcomes.
 
@@ -58,7 +58,7 @@ model = gamfit.fit(
     df,
     "case ~ s(age) + matern(pc1, pc2, pc3)",
     family="bernoulli-marginal-slope",
-    logslope_formula="matern(pc1, pc2, pc3)",
+    slope_formula="matern(pc1, pc2, pc3)",
     transformation_normal_stage1=gamfit.CtnStage1(
         response="raw_score",
         covariates="duchon(pc1, pc2, pc3, pc4, centers=20)",
@@ -76,7 +76,7 @@ array of probabilities. Passing `return_type=` asks for a table. Passing
 values are clipped to `[0, 1]`.
 
 - `family="bernoulli-marginal-slope"` names the likelihood;
-  `logslope_formula=` is the slope surface as a function of covariates.
+  `slope_formula=` is the slope surface as a function of covariates.
 - `transformation_normal_stage1=gamfit.CtnStage1(response=..., covariates=...)`
   is the Stage-1 recipe: `response` is the raw score column to condition,
   `covariates` is the covariate-side formula right-hand side used to fit
@@ -85,7 +85,7 @@ values are clipped to `[0, 1]`.
 - The base link is fixed to probit. The Python `link=` keyword is not
   needed for marginal-slope fits.
 
-The main formula controls the baseline risk; `logslope_formula` controls
+The main formula controls the baseline risk; `slope_formula` controls
 the strength of the score effect at each point in covariate space.
 
 The same recipe drives the survival likelihood:
@@ -95,7 +95,7 @@ model = gamfit.fit(
     df,
     "Surv(entry, exit, event) ~ s(bmi) + s(hba1c)",
     survival_likelihood="marginal-slope",
-    logslope_formula="s(bmi) + s(hba1c)",
+    slope_formula="s(bmi) + s(hba1c)",
     transformation_normal_stage1=gamfit.CtnStage1(
         response="raw_score",
         covariates="s(bmi) + s(hba1c)",
@@ -108,13 +108,13 @@ S = pred.survival_at([1, 5, 10])
 
 The main formula specifies the baseline survival surface; the score's
 slope on the marginal-calibrated probit survival scale is a smooth
-function of covariates given by `logslope_formula`. In the Python API,
-omitting `logslope_formula` reuses the main covariate formula for the
+function of covariates given by `slope_formula`. In the Python API,
+omitting `slope_formula` reuses the main covariate formula for the
 slope surface.
 
-### A note on the name: `logslope_formula` is the SLOPE surface
+### A note on the name: `slope_formula` is the SLOPE surface
 
-The keyword says `logslope`; the map is the identity. `logslope_formula=`
+The keyword says `slope`; the map is the identity. `slope_formula=`
 gives the surface `b(x)` that the latent score enters the probit index
 with directly, not its logarithm, and that is deliberate rather than an
 oversight:
@@ -141,7 +141,7 @@ spelling. Inside the library the function that states the map is called
 
 ## Letting the slope vary along follow-up (survival)
 
-`logslope_formula` makes the slope a surface in *covariates*. On the survival
+`slope_formula` makes the slope a surface in *covariates*. On the survival
 likelihood it can also be a surface in *follow-up time*, which is the natural
 question for a score whose effect is thought to attenuate with age:
 
@@ -151,18 +151,18 @@ model = gamfit.fit(
     "Surv(entry, exit, event) ~ s(bmi)",
     survival_likelihood="marginal-slope",
     z_column="z",
-    logslope_formula="s(bmi)",
-    config={"logslope_time_k": 6},   # B-spline margin in log(time)
+    slope_formula="s(bmi)",
+    config={"slope_time_k": 6},   # B-spline margin in log(time)
 )
 ```
 
-`logslope_time_k` tensors the log-slope covariate design against a B-spline
+`slope_time_k` tensors the slope covariate design against a B-spline
 margin in `log t`, exactly as `threshold_time_k` and `sigma_time_k` do for the
 location-scale family, so `b` becomes a fitted surface `b(x, t)` with
 independent smoothing parameters for the covariate and time directions.
-`logslope_time_degree` (default `3`) sets the margin's polynomial degree; the
-same `k >= degree + 1` rule applies. The CLI spelling is `--logslope-time-k` /
-`--logslope-time-degree`.
+`slope_time_degree` (default `3`) sets the margin's polynomial degree; the
+same `k >= degree + 1` rule applies. The CLI spelling is `--slope-time-k` /
+`--slope-time-degree`.
 
 Why this needs family support rather than data reshaping: the marginal-slope
 likelihood is a *transformation* model, `S(t | x, z) = Φ(−η(t))`, not a hazard
@@ -179,10 +179,10 @@ picks up the two terms a constant slope zeroes out:
 Current boundaries, all of which are refused with a message rather than
 silently reinterpreted:
 
-- a per-score log-slope topology (a vector latent score with one slope surface
+- a per-score slope topology (a vector latent score with one slope surface
   per coordinate) cannot take a single time margin;
 - a non-zero smooth anchor, coefficient bounds, or linear constraints on the
-  log-slope surface are stated in the covariate coordinate chart, and the time
+  slope surface are stated in the covariate coordinate chart, and the time
   tensor product is a different chart.
 
 Saving and prediction carry the margin. The resolved knots ride on the saved
@@ -216,7 +216,7 @@ model = gamfit.fit(
     "case ~ s(age) + matern(pc1, pc2, pc3)",
     family="bernoulli-marginal-slope",
     z_column="z",
-    logslope_formula="matern(pc1, pc2, pc3)",
+    slope_formula="matern(pc1, pc2, pc3)",
     scale_dimensions=True,
 )
 ```
@@ -228,7 +228,7 @@ CLI equivalent:
 
 ```bash
 gam fit data.csv 'case ~ s(age) + matern(pc1, pc2, pc3)' \
-    --logslope-formula 'matern(pc1, pc2, pc3)' --z-column z \
+    --slope-formula 'matern(pc1, pc2, pc3)' --z-column z \
     --scale-dimensions --out model.gam
 ```
 
@@ -285,7 +285,7 @@ uncorrected.
 ### Several scores at once, and the covariance between them
 
 The survival family accepts more than one latent score — one `z(...)`
-surface per score in `logslope_formula=`, each with its own log-slope
+surface per score in `slope_formula=`, each with its own slope
 surface. With `K` scores the row index is
 
 ```text
@@ -354,7 +354,7 @@ at fit time.
 gamfit.fit(df,
     "Surv(entry, exit, event) ~ s(age)",
     survival_likelihood="marginal-slope",
-    logslope_formula="s(age)",
+    slope_formula="s(age)",
     transformation_normal_stage1=gamfit.CtnStage1(
         response="raw_score", covariates="s(age)",
     ),
@@ -412,7 +412,7 @@ model = gamfit.fit(
     df,
     "disease ~ matern(pc1, pc2, pc3, centers=20)",
     family="bernoulli-marginal-slope",
-    logslope_formula="matern(pc1, pc2, pc3, centers=20)",
+    slope_formula="matern(pc1, pc2, pc3, centers=20)",
     transformation_normal_stage1=gamfit.CtnStage1(
         response="PGS",
         covariates="matern(pc1, pc2, pc3, centers=20)",

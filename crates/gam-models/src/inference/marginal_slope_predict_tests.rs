@@ -70,7 +70,7 @@ fn bernoulli_marginal_slope_predictor_rejects_structurally_invalid_or_unknown_ru
     let production_runtime = saved_runtime_from_deviation_runtime(&prepared.runtime);
     let score_only = BernoulliMarginalSlopePredictor {
         beta_marginal: array![0.8],
-        beta_logslope: array![1.6],
+        beta_slope: array![1.6],
         beta_score_warp: Some(array![0.7, -0.4]),
         beta_link_dev: None,
         base_link: InverseLink::Standard(gam_problem::types::StandardLink::Probit),
@@ -78,7 +78,7 @@ fn bernoulli_marginal_slope_predictor_rejects_structurally_invalid_or_unknown_ru
         latent_z_normalization: SavedLatentZNormalization { mean: 0.0, sd: 1.0 },
         latent_measure: LatentMeasureKind::StandardNormal,
         baseline_marginal: 0.0,
-        baseline_logslope: 0.0,
+        baseline_slope: 0.0,
         covariance: None,
         score_warp_runtime: Some(SavedCompiledFlexBlock {
             kernel: "OldQuadrature".to_string(),
@@ -252,7 +252,7 @@ fn saved_anchored_deviation_runtime_design_with_anchor_rows_applies_residual() {
 fn bernoulli_marginal_slope_rigid_gaussian_frailty_uses_scaled_closed_form() {
     let predictor = BernoulliMarginalSlopePredictor {
         beta_marginal: array![0.7],
-        beta_logslope: array![-0.4],
+        beta_slope: array![-0.4],
         beta_score_warp: None,
         beta_link_dev: None,
         base_link: InverseLink::Standard(gam_problem::types::StandardLink::Probit),
@@ -260,7 +260,7 @@ fn bernoulli_marginal_slope_rigid_gaussian_frailty_uses_scaled_closed_form() {
         latent_z_normalization: SavedLatentZNormalization { mean: 0.0, sd: 1.0 },
         latent_measure: LatentMeasureKind::StandardNormal,
         baseline_marginal: 0.1,
-        baseline_logslope: -0.2,
+        baseline_slope: -0.2,
         covariance: None,
         score_warp_runtime: None,
         link_deviation_runtime: None,
@@ -285,19 +285,19 @@ fn bernoulli_marginal_slope_rigid_gaussian_frailty_uses_scaled_closed_form() {
 
     let scale = predictor.probit_frailty_scale();
     let marginal_eta = array![0.8, 0.85];
-    let logslope_eta = array![-0.6, -0.7];
+    let slope_eta = array![-0.6, -0.7];
     let z = array![-0.3, 1.2];
     for i in 0..eta.len() {
-        let sb = scale * logslope_eta[i];
+        let sb = scale * slope_eta[i];
         let c = (1.0 + sb * sb).sqrt();
         let expected_eta = marginal_eta[i] * c + sb * z[i];
         assert!((eta[i] - expected_eta).abs() <= 1e-12);
         let expected_d_marginal = c;
-        let expected_d_logslope =
-            marginal_eta[i] * scale * scale * logslope_eta[i] / c + scale * z[i];
+        let expected_d_slope =
+            marginal_eta[i] * scale * scale * slope_eta[i] / c + scale * z[i];
         let grad = grad.as_ref().expect("gradient should be returned");
         assert!((grad[[i, 0]] - expected_d_marginal).abs() <= 1e-12);
-        assert!((grad[[i, 1]] - expected_d_logslope).abs() <= 1e-12);
+        assert!((grad[[i, 1]] - expected_d_slope).abs() <= 1e-12);
     }
 }
 
@@ -315,7 +315,7 @@ fn bernoulli_marginal_slope_predictor_uses_local_empirical_latent_law() {
     ];
     let predictor = BernoulliMarginalSlopePredictor {
         beta_marginal: array![0.2],
-        beta_logslope: array![0.9],
+        beta_slope: array![0.9],
         beta_score_warp: None,
         beta_link_dev: None,
         base_link: InverseLink::Standard(gam_problem::types::StandardLink::Probit),
@@ -331,7 +331,7 @@ fn bernoulli_marginal_slope_predictor_uses_local_empirical_latent_law() {
             train_row_mixtures: std::sync::Arc::new(Vec::new()),
         },
         baseline_marginal: 0.0,
-        baseline_logslope: 0.0,
+        baseline_slope: 0.0,
         covariance: None,
         score_warp_runtime: None,
         link_deviation_runtime: None,
@@ -377,7 +377,7 @@ fn bernoulli_marginal_slope_predictor_uses_local_empirical_latent_law() {
 fn bernoulli_marginal_slope_predictor_rejects_nonprobit_base_link_scale() {
     let predictor = BernoulliMarginalSlopePredictor {
         beta_marginal: array![0.7],
-        beta_logslope: array![-0.4],
+        beta_slope: array![-0.4],
         beta_score_warp: None,
         beta_link_dev: None,
         base_link: InverseLink::Standard(gam_problem::types::StandardLink::Logit),
@@ -385,7 +385,7 @@ fn bernoulli_marginal_slope_predictor_rejects_nonprobit_base_link_scale() {
         latent_z_normalization: SavedLatentZNormalization { mean: 0.0, sd: 1.0 },
         latent_measure: LatentMeasureKind::StandardNormal,
         baseline_marginal: 0.1,
-        baseline_logslope: -0.2,
+        baseline_slope: -0.2,
         covariance: None,
         score_warp_runtime: None,
         link_deviation_runtime: None,
@@ -480,7 +480,7 @@ fn conditional_latent_calibration_conditions_on_the_named_design_block() {
 
     let predictor_with = |span: LatentConditioningSpan| BernoulliMarginalSlopePredictor {
         beta_marginal: array![0.0],
-        beta_logslope: array![0.0],
+        beta_slope: array![0.0],
         beta_score_warp: None,
         beta_link_dev: None,
         base_link: InverseLink::Standard(gam_problem::types::StandardLink::Probit),
@@ -488,7 +488,7 @@ fn conditional_latent_calibration_conditions_on_the_named_design_block() {
         latent_z_normalization: SavedLatentZNormalization { mean: 0.0, sd: 1.0 },
         latent_measure: LatentMeasureKind::StandardNormal,
         baseline_marginal: 0.0,
-        baseline_logslope: 0.0,
+        baseline_slope: 0.0,
         covariance: None,
         score_warp_runtime: None,
         link_deviation_runtime: None,

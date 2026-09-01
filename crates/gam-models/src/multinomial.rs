@@ -3102,7 +3102,7 @@ fn scale_multinomial_formula_penalty(penalty: PenaltyMatrix, scale: f64) -> Pena
 /// per caller. `config` is the same canonical [`FitConfig`] the scalar formula
 /// families consume: `weight_column` is resolved against the dataset and
 /// honored as per-row case weights, and fields the softmax family cannot
-/// consume (offsets, noise/log-slope formulas, manual Firth, frailty, ...) are
+/// consume (offsets, noise/slope formulas, manual Firth, frailty, ...) are
 /// rejected with a typed error instead of being silently dropped.
 #[derive(Clone, Copy)]
 pub struct MultinomialFitRequest<'a> {
@@ -3151,9 +3151,9 @@ fn reject_unsupported_multinomial_config(config: &FitConfig) -> Result<(), Estim
              has no dispersion predictor"
         );
     }
-    if config.logslope_formula.is_some() || config.z_column.is_some() {
+    if config.slope_formula.is_some() || config.z_column.is_some() {
         crate::bail_invalid_estim!(
-            "logslope_formula/z_column is not supported for the multinomial family"
+            "slope_formula/z_column is not supported for the multinomial family"
         );
     }
     if config.transformation_normal {

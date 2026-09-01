@@ -113,9 +113,9 @@ pub(crate) fn build_time_blockspec(
     }
 }
 
-pub(crate) fn build_logslope_blockspec(
+pub(crate) fn build_slope_blockspec(
     design: &TermCollectionDesign,
-    layout: &LogslopeLayout,
+    layout: &SlopeLayout,
     baseline: f64,
     offset: &Array1<f64>,
     rho: Array1<f64>,
@@ -124,11 +124,11 @@ pub(crate) fn build_logslope_blockspec(
     covariance: ScoreCovarianceField,
 ) -> Result<ParameterBlockSpec, String> {
     let jac_cb: Option<Arc<dyn crate::custom_family::BlockEffectiveJacobian>> = Some(Arc::new(
-        LogslopeBlockJacobian::new(layout.clone(), z, covariance)?,
+        SlopeBlockJacobian::new(layout.clone(), z, covariance)?,
     ));
 
     Ok(ParameterBlockSpec {
-        name: "logslope_surface".to_string(),
+        name: "slope_surface".to_string(),
         design: layout.coefficient_design().clone(),
         offset: offset + baseline,
         penalties: design.penalties_as_penalty_matrix(),
@@ -359,8 +359,8 @@ pub(crate) fn joint_setup(
     time_penalties: usize,
     marginalspec: &TermCollectionSpec,
     marginal_penalties: usize,
-    logslopespec: &TermCollectionSpec,
-    logslope_penalties: usize,
+    slopespec: &TermCollectionSpec,
+    slope_penalties: usize,
     core_rho0_seed: &[f64],
     extra_rho0: &[f64],
     baseline_initial_theta: &[f64],
@@ -369,21 +369,21 @@ pub(crate) fn joint_setup(
     learned_log_sigma_coordinate: Option<(f64, f64, f64)>,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<ExactJointHyperSetup, gam_terms::basis::BasisError> {
-    let (marginal_terms, logslope_terms) = if kappa_options.enabled {
+    let (marginal_terms, slope_terms) = if kappa_options.enabled {
         (
             spatial_length_scale_term_indices(marginalspec),
-            spatial_length_scale_term_indices(logslopespec),
+            spatial_length_scale_term_indices(slopespec),
         )
     } else {
         (Vec::new(), Vec::new())
     };
-    let core_len = time_penalties + marginal_penalties + logslope_penalties;
+    let core_len = time_penalties + marginal_penalties + slope_penalties;
     let rho_dim = core_len + extra_rho0.len();
     let mut rho0vec = Array1::<f64>::zeros(rho_dim);
     assert_eq!(
         core_rho0_seed.len(),
         core_len,
-        "core_rho0_seed length must equal time+marginal+logslope penalty count"
+        "core_rho0_seed length must equal time+marginal+slope penalty count"
     );
     for (idx, value) in core_rho0_seed.iter().copied().enumerate().take(core_len) {
         rho0vec[idx] = value;
@@ -404,23 +404,23 @@ pub(crate) fn joint_setup(
         kappa_options,
     )
     .reseed_from_data(data, marginalspec, &marginal_terms, kappa_options)?;
-    let logslope_kappa = SpatialLogKappaCoords::from_length_scales_aniso(
-        logslopespec,
-        &logslope_terms,
+    let slope_kappa = SpatialLogKappaCoords::from_length_scales_aniso(
+        slopespec,
+        &slope_terms,
         kappa_options,
     )
-    .reseed_from_data(data, logslopespec, &logslope_terms, kappa_options)?;
+    .reseed_from_data(data, slopespec, &slope_terms, kappa_options)?;
     let mut values = empty_kappa.as_array().to_vec();
     values.extend(marginal_kappa.as_array().iter());
-    values.extend(logslope_kappa.as_array().iter());
+    values.extend(slope_kappa.as_array().iter());
     let marginal_dims = marginal_kappa.dims_per_term().to_vec();
-    let logslope_dims = logslope_kappa.dims_per_term().to_vec();
+    let slope_dims = slope_kappa.dims_per_term().to_vec();
     let mut dims = empty_kappa.dims_per_term().to_vec();
     dims.extend(marginal_dims.iter().copied());
-    dims.extend(logslope_dims.iter().copied());
+    dims.extend(slope_dims.iter().copied());
     let log_kappa0 =
         SpatialLogKappaCoords::new_with_dims(Array1::from_vec(values.clone()), dims.clone());
-    // Bounds: concatenate [empty | marginal data-aware | logslope data-aware]
+    // Bounds: concatenate [empty | marginal data-aware | slope data-aware]
     let marginal_lower = SpatialLogKappaCoords::lower_bounds_aniso_from_data(
         data,
         marginalspec,
@@ -428,16 +428,16 @@ pub(crate) fn joint_setup(
         &marginal_dims,
         kappa_options,
     )?;
-    let logslope_lower = SpatialLogKappaCoords::lower_bounds_aniso_from_data(
+    let slope_lower = SpatialLogKappaCoords::lower_bounds_aniso_from_data(
         data,
-        logslopespec,
-        &logslope_terms,
-        &logslope_dims,
+        slopespec,
+        &slope_terms,
+        &slope_dims,
         kappa_options,
     )?;
     let mut lower_vals = Vec::with_capacity(dims.iter().sum());
     lower_vals.extend(marginal_lower.as_array().iter());
-    lower_vals.extend(logslope_lower.as_array().iter());
+    lower_vals.extend(slope_lower.as_array().iter());
     let log_kappa_lower =
         SpatialLogKappaCoords::new_with_dims(Array1::from_vec(lower_vals), dims.clone());
     let marginal_upper = SpatialLogKappaCoords::upper_bounds_aniso_from_data(
@@ -447,16 +447,16 @@ pub(crate) fn joint_setup(
         &marginal_dims,
         kappa_options,
     )?;
-    let logslope_upper = SpatialLogKappaCoords::upper_bounds_aniso_from_data(
+    let slope_upper = SpatialLogKappaCoords::upper_bounds_aniso_from_data(
         data,
-        logslopespec,
-        &logslope_terms,
-        &logslope_dims,
+        slopespec,
+        &slope_terms,
+        &slope_dims,
         kappa_options,
     )?;
     let mut upper_vals = Vec::with_capacity(dims.iter().sum());
     upper_vals.extend(marginal_upper.as_array().iter());
-    upper_vals.extend(logslope_upper.as_array().iter());
+    upper_vals.extend(slope_upper.as_array().iter());
     let log_kappa_upper = SpatialLogKappaCoords::new_with_dims(Array1::from_vec(upper_vals), dims);
     // Project seed onto bounds; spec.length_scale is a hint, not a constraint.
     let log_kappa0 = log_kappa0.clamp_to_bounds(&log_kappa_lower, &log_kappa_upper);
@@ -598,7 +598,7 @@ pub(crate) fn install_time_nullspace_shrinkage_penalty(
 /// basis carries an unpenalized polynomial null space, so that "trend"
 /// direction is identified rather than left flat.
 ///
-/// gam#979: the survival marginal-slope marginal/logslope smooth surfaces are
+/// gam#979: the survival marginal-slope marginal/slope smooth surfaces are
 /// built with `double_penalty=false` (the default), so the general basis
 /// builder leaves their penalty null space (the polynomial trend the
 /// wiggliness penalty does not touch) unpenalized. At the REML optimum that
@@ -609,7 +609,7 @@ pub(crate) fn install_time_nullspace_shrinkage_penalty(
 /// certify and grinds to the cycle cap on every outer ρ-evaluation (the
 /// measured n=3000 ~1976 s hang). The survival TIME block already avoids this
 /// via [`install_time_nullspace_shrinkage_penalty`]; this brings the
-/// marginal/logslope surfaces to the same footing through the ordinary basis
+/// marginal/slope surfaces to the same footing through the ordinary basis
 /// builder (which keeps the layered penalty representation self-consistent
 /// across every probe/frozen/kappa rebuild). Duchon bases are skipped because
 /// their function-norm penalty already spans the polynomial null space (and
@@ -661,13 +661,13 @@ pub(crate) fn shift_penalty(mut penalty: BlockwisePenalty, offset: usize) -> Blo
     penalty
 }
 
-pub(crate) fn combine_logslope_surface_designs(
+pub(crate) fn combine_slope_surface_designs(
     mut designs: Vec<TermCollectionDesign>,
     specs: &[TermCollectionSpec],
-) -> Result<(TermCollectionDesign, TermCollectionSpec, LogslopeTopology), String> {
+) -> Result<(TermCollectionDesign, TermCollectionSpec, SlopeTopology), String> {
     if designs.is_empty() {
         return Err(
-            "survival marginal-slope requires at least one logslope surface design".to_string(),
+            "survival marginal-slope requires at least one slope surface design".to_string(),
         );
     }
     if designs.len() == 1 {
@@ -675,14 +675,14 @@ pub(crate) fn combine_logslope_surface_designs(
         let spec = specs
             .first()
             .cloned()
-            .ok_or_else(|| "missing logslope surface spec".to_string())?;
-        return Ok((design, spec, LogslopeTopology::shared()));
+            .ok_or_else(|| "missing slope surface spec".to_string())?;
+        return Ok((design, spec, SlopeTopology::shared()));
     }
     if designs.iter().any(|design| {
         design.linear_constraints.is_some() || design.coefficient_lower_bounds.is_some()
     }) {
         return Err(
-            "per-z logslope surface concatenation does not support coefficient bounds or linear constraints"
+            "per-z slope surface concatenation does not support coefficient bounds or linear constraints"
                 .to_string(),
         );
     }
@@ -691,9 +691,9 @@ pub(crate) fn combine_logslope_surface_designs(
         .any(|design| design.affine_offset.iter().any(|value| *value != 0.0))
     {
         return Err(
-            "per-score logslope surfaces do not support non-zero smooth anchors: each affine \
+            "per-score slope surfaces do not support non-zero smooth anchors: each affine \
              surface lift must be coupled to its own latent-score coordinate, but the shared \
-             logslope offset channel is scalar"
+             slope offset channel is scalar"
                 .to_string(),
         );
     }
@@ -729,7 +729,7 @@ pub(crate) fn combine_logslope_surface_designs(
                 let mut info = info.clone();
                 info.global_index = global_index;
                 if let Some(termname) = info.termname.as_mut() {
-                    *termname = format!("logslope[z{surface_idx}]::{termname}");
+                    *termname = format!("slope[z{surface_idx}]::{termname}");
                 }
                 penaltyinfo.push(info);
             }
@@ -738,14 +738,14 @@ pub(crate) fn combine_logslope_surface_designs(
         dropped_penaltyinfo.extend(design.dropped_penaltyinfo.iter().cloned());
         linear_ranges.extend(design.linear_ranges.iter().cloned().map(|(name, range)| {
             (
-                format!("logslope[z{surface_idx}]::{name}"),
+                format!("slope[z{surface_idx}]::{name}"),
                 (range.start + offset)..(range.end + offset),
             )
         }));
         random_effect_ranges.extend(design.random_effect_ranges.iter().cloned().map(
             |(name, range)| {
                 (
-                    format!("logslope[z{surface_idx}]::{name}"),
+                    format!("slope[z{surface_idx}]::{name}"),
                     (range.start + offset)..(range.end + offset),
                 )
             },
@@ -754,7 +754,7 @@ pub(crate) fn combine_logslope_surface_designs(
         offset += width;
     }
     combined.design = DesignMatrix::hstack(blocks)
-        .map_err(|e| format!("survival marginal-slope logslope hstack: {e}"))?;
+        .map_err(|e| format!("survival marginal-slope slope hstack: {e}"))?;
     combined.penalties = penalties;
     combined.nullspace_dims = nullspace_dims;
     combined.penaltyinfo = penaltyinfo;
@@ -765,7 +765,7 @@ pub(crate) fn combine_logslope_surface_designs(
     combined.linear_ranges = linear_ranges;
     combined.random_effect_ranges = random_effect_ranges;
     combined.random_effect_levels = random_effect_levels;
-    let topology = LogslopeTopology::per_score(ranges, combined.design.ncols())?;
+    let topology = SlopeTopology::per_score(ranges, combined.design.ncols())?;
     Ok((combined, concatenate_term_specs(specs), topology))
 }
 
@@ -938,7 +938,7 @@ pub(crate) enum FlexActivation {
     On,
 }
 
-/// Tensor the log-slope covariate design against a follow-up time margin
+/// Tensor the slope covariate design against a follow-up time margin
 /// (gam#2765, gam#2767).
 ///
 /// The block's coefficient design becomes the row-wise Kronecker product
@@ -961,11 +961,11 @@ pub(crate) enum FlexActivation {
 ///   guessing one would change the fitted surface;
 /// * coefficient bounds or linear constraints — those are stated in the
 ///   covariate coordinate chart, and the tensor product is a different chart;
-/// * a per-score topology — see [`LogslopeLayout::with_follow_up`].
-pub(crate) fn tensorize_logslope_design_over_time(
+/// * a per-score topology — see [`SlopeLayout::with_follow_up`].
+pub(crate) fn tensorize_slope_design_over_time(
     design: TermCollectionDesign,
     template: &SurvivalCovariateTermBlockTemplate,
-) -> Result<(TermCollectionDesign, Option<LogslopeFollowUpDesigns>), String> {
+) -> Result<(TermCollectionDesign, Option<SlopeFollowUpDesigns>), String> {
     let SurvivalCovariateTermBlockTemplate::TimeVarying {
         time_basis_entry,
         time_basis_exit,
@@ -979,7 +979,7 @@ pub(crate) fn tensorize_logslope_design_over_time(
 
     if design.affine_offset.iter().any(|value| *value != 0.0) {
         return Err(
-            "a follow-up-varying log-slope does not support a non-zero smooth anchor: tensoring \
+            "a follow-up-varying slope does not support a non-zero smooth anchor: tensoring \
              a scalar boundary lift over the time basis requires an explicit time-dependent \
              anchor function"
                 .to_string(),
@@ -987,7 +987,7 @@ pub(crate) fn tensorize_logslope_design_over_time(
     }
     if design.coefficient_lower_bounds.is_some() || design.linear_constraints.is_some() {
         return Err(
-            "a follow-up-varying log-slope does not support coefficient bounds or linear \
+            "a follow-up-varying slope does not support coefficient bounds or linear \
              constraints: they are stated in the covariate coordinate chart, and the time tensor \
              product is a different chart"
                 .to_string(),
@@ -998,7 +998,7 @@ pub(crate) fn tensorize_logslope_design_over_time(
     let p_time = time_basis_exit.ncols();
     if p_cov == 0 || p_time == 0 {
         return Err(format!(
-            "a follow-up-varying log-slope needs a non-empty tensor product, got {p_cov}x{p_time}"
+            "a follow-up-varying slope needs a non-empty tensor product, got {p_cov}x{p_time}"
         ));
     }
     let identity_time = Array2::<f64>::eye(p_time);
@@ -1031,7 +1031,7 @@ pub(crate) fn tensorize_logslope_design_over_time(
     for time_penalty in time_penalties {
         if time_penalty.dim() != (p_time, p_time) {
             return Err(format!(
-                "log-slope time-margin penalty is {}x{} but the margin has {p_time} columns",
+                "slope time-margin penalty is {}x{} but the margin has {p_time} columns",
                 time_penalty.nrows(),
                 time_penalty.ncols(),
             ));
@@ -1048,7 +1048,7 @@ pub(crate) fn tensorize_logslope_design_over_time(
     }
 
     let cov_design = design.design.clone();
-    let follow_up = LogslopeFollowUpDesigns {
+    let follow_up = SlopeFollowUpDesigns {
         entry: crate::survival::location_scale::rowwise_kronecker(&cov_design, time_basis_entry),
         derivative_exit: crate::survival::location_scale::rowwise_kronecker(&cov_design, time_basis_derivative_exit),
     };
@@ -1080,7 +1080,7 @@ fn symmetric_nullspace_dimension(matrix: &Array2<f64>) -> Result<usize, String> 
     use faer::Side;
     let (eigenvalues, _) = matrix
         .eigh(Side::Lower)
-        .map_err(|error| format!("log-slope time-margin penalty eigendecomposition: {error}"))?;
+        .map_err(|error| format!("slope time-margin penalty eigendecomposition: {error}"))?;
     let largest = eigenvalues.iter().fold(0.0_f64, |acc, value| acc.max(*value));
     if largest <= 0.0 {
         return Ok(matrix.nrows());
@@ -1089,13 +1089,13 @@ fn symmetric_nullspace_dimension(matrix: &Array2<f64>) -> Result<usize, String> 
     Ok(eigenvalues.iter().filter(|value| **value <= floor).count())
 }
 
-/// Attach the follow-up channels a time-margined log-slope design produced, if
+/// Attach the follow-up channels a time-margined slope design produced, if
 /// any. Kept as one helper so the two layout-materialisation sites in the fit
 /// entry cannot disagree about whether the slope varies.
-pub(crate) fn attach_logslope_follow_up(
-    layout: LogslopeLayout,
-    follow_up: Option<&LogslopeFollowUpDesigns>,
-) -> Result<LogslopeLayout, String> {
+pub(crate) fn attach_slope_follow_up(
+    layout: SlopeLayout,
+    follow_up: Option<&SlopeFollowUpDesigns>,
+) -> Result<SlopeLayout, String> {
     match follow_up {
         None => Ok(layout),
         Some(follow_up) => {

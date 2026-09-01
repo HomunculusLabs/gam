@@ -186,13 +186,17 @@ def test_fit_predict_summary_check_report_and_roundtrip(tmp_path: pathlib.Path) 
     np.testing.assert_allclose(predicted_arr, expected_mean, atol=1e-3)
 
     full_table = model.predict(prediction_rows(), return_type="dict")
-    assert list(full_table) == ["linear_predictor", "mean"]
-    # For the identity link, linear_predictor and mean are computed from the
-    # same beta·x — a swap would still be detected here because the
-    # comparison is bit close, just not strict bit-equality (allowing for any
-    # post-link copy).
+    assert list(full_table) == [
+        "linear_predictor_plugin",
+        "mean_plugin",
+        "posterior_mean",
+    ]
+    # The identity link collapses all three explicit estimands.
     np.testing.assert_allclose(
-        full_table["linear_predictor"], full_table["mean"], atol=1e-9
+        full_table["linear_predictor_plugin"], full_table["mean_plugin"], atol=1e-9
+    )
+    np.testing.assert_allclose(
+        full_table["mean_plugin"], full_table["posterior_mean"], atol=1e-9
     )
 
     with_interval = model.predict(prediction_rows(), interval=0.95)
@@ -200,19 +204,22 @@ def test_fit_predict_summary_check_report_and_roundtrip(tmp_path: pathlib.Path) 
     # assertion was one column behind it, even though the same file already
     # asserts the field's presence and value at two other predict sites.
     assert list(with_interval) == [
-        "linear_predictor",
-        "mean",
-        "std_error",
-        "mean_lower",
-        "mean_upper",
+        "linear_predictor_plugin",
+        "mean_plugin",
+        "posterior_mean",
+        "posterior_mean_standard_error",
+        "posterior_mean_lower",
+        "posterior_mean_upper",
         "covariance_source",
     ]
     # The mean point estimate must sit strictly inside the 95% interval and
     # the interval must be non-degenerate for a well-conditioned fit.
-    interval_mean = np.asarray(with_interval["mean"], dtype=float)
-    interval_lower = np.asarray(with_interval["mean_lower"], dtype=float)
-    interval_upper = np.asarray(with_interval["mean_upper"], dtype=float)
-    interval_se = np.asarray(with_interval["std_error"], dtype=float)
+    interval_mean = np.asarray(with_interval["posterior_mean"], dtype=float)
+    interval_lower = np.asarray(with_interval["posterior_mean_lower"], dtype=float)
+    interval_upper = np.asarray(with_interval["posterior_mean_upper"], dtype=float)
+    interval_se = np.asarray(
+        with_interval["posterior_mean_standard_error"], dtype=float
+    )
     assert np.all(interval_lower <= interval_mean + 1e-12)
     assert np.all(interval_mean <= interval_upper + 1e-12)
     assert np.all(interval_upper > interval_lower)
@@ -306,7 +313,11 @@ def test_pandas_diagnostics_and_plotting() -> None:
     assert predicted_arr.shape == (3,)
     tabular = model.predict(prediction_frame(), return_type="pandas")
     assert isinstance(tabular, pd.DataFrame)
-    assert list(tabular.columns) == ["linear_predictor", "mean"]
+    assert list(tabular.columns) == [
+        "linear_predictor_plugin",
+        "mean_plugin",
+        "posterior_mean",
+    ]
 
     diagnostics = model.diagnose(training_frame())
     assert diagnostics.metrics["rmse"] < 1e-3
@@ -624,10 +635,10 @@ def test_predict_point_estimate_is_invariant_to_interval_request() -> None:
 
         plain = np.asarray(model.predict(grid), dtype=float)
         tab = model.predict(grid, interval=0.95)
-        interval_mean = np.asarray(tab["mean"], dtype=float)
-        interval_lp = np.asarray(tab["linear_predictor"], dtype=float)
+        interval_mean = np.asarray(tab["posterior_mean"], dtype=float)
+        interval_lp = np.asarray(tab["linear_predictor_plugin"], dtype=float)
         plain_tab = model.predict(grid, return_type="dict")
-        plain_lp = np.asarray(plain_tab["linear_predictor"], dtype=float)
+        plain_lp = np.asarray(plain_tab["linear_predictor_plugin"], dtype=float)
 
         # The point estimate must not depend on whether an interval was asked
         # for: both ``mean`` and ``linear_predictor`` agree to floating-point
@@ -648,11 +659,13 @@ def test_predict_point_estimate_is_invariant_to_interval_request() -> None:
         )
 
         # The reported mean must remain the centre of (i.e. inside) the band.
-        lower = np.asarray(tab["mean_lower"], dtype=float)
-        upper = np.asarray(tab["mean_upper"], dtype=float)
+        lower = np.asarray(tab["posterior_mean_lower"], dtype=float)
+        upper = np.asarray(tab["posterior_mean_upper"], dtype=float)
         assert np.all(lower <= interval_mean + 1e-9)
         assert np.all(interval_mean <= upper + 1e-9)
-        assert np.all(np.asarray(tab["std_error"], dtype=float) > 0.0)
+        assert np.all(
+            np.asarray(tab["posterior_mean_standard_error"], dtype=float) > 0.0
+        )
 
         # SPEC: the default point estimate is the posterior mean, not the
         # plug-in mode. For the logit link this is observable: the reported
@@ -839,8 +852,8 @@ def test_bernoulli_marginal_slope_roundtrip_tracks_calibrated_score(
     **The baseline formula must not contain the score.** This previously read
     ``disease ~ z``, and ``z`` is not a column of the frame — it is the
     canonical alias the engine binds to ``z_column``. So the score entered the
-    marginal design, and with an intercept-only log-slope the effective
-    log-slope direction ``f = a*1 + s*z`` lies in the span of the effective
+    marginal design, and with an intercept-only slope the effective
+    slope direction ``f = a*1 + s*z`` lies in the span of the effective
     marginal design ``[1, z]`` row by row, for any data. The fit was degenerate
     by construction and the engine refused it. The baseline is now ``pc1``,
     which is the covariate the fixture actually gives the disease process
@@ -864,7 +877,7 @@ def test_bernoulli_marginal_slope_roundtrip_tracks_calibrated_score(
         link="probit",
         scale_dimensions=True,
         z_column="pgs_ctn_z",
-        logslope_formula="1",
+        slope_formula="1",
     )
 
     path = tmp_path / "bernoulli_ms.gam"
@@ -919,7 +932,7 @@ def test_survival_marginal_slope_weibull_n3000_returns_under_60s() -> None:
         "Surv(entry, exit, event) ~ smooth(bmi) + smooth(hba1c)",
         survival_likelihood="marginal-slope",
         z_column="age",
-        logslope_formula="smooth(bmi) + smooth(hba1c)",
+        slope_formula="smooth(bmi) + smooth(hba1c)",
     )
     elapsed = time.monotonic() - started
     assert elapsed < 60.0, f"survival marginal-slope fit took {elapsed:.1f}s"
@@ -1357,9 +1370,9 @@ def test_geometric_smooths_round_trip_via_python_binding(formula: str) -> None:
     df = _geometric_smoke_dataset(seed=0, n=200)
     model = gamfit.fit(df, formula)
     preds = model.predict(df, interval=0.95)
-    mean = np.asarray(preds["mean"], dtype=float)
-    lo = np.asarray(preds["mean_lower"], dtype=float)
-    hi = np.asarray(preds["mean_upper"], dtype=float)
+    mean = np.asarray(preds["posterior_mean"], dtype=float)
+    lo = np.asarray(preds["posterior_mean_lower"], dtype=float)
+    hi = np.asarray(preds["posterior_mean_upper"], dtype=float)
     assert mean.shape == (len(df),), f"row count mismatch for {formula!r}"
     assert np.isfinite(mean).all(), f"NaN/Inf in mean for {formula!r}"
     assert np.isfinite(lo).all() and np.isfinite(hi).all(), \

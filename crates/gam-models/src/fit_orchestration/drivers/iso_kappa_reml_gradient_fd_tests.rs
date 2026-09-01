@@ -372,6 +372,8 @@ fn duchon_power_from_label(label: &str) -> f64 {
 fn duchon_dims_from_label(label: &str) -> usize {
     if label.contains("_16d") {
         16
+    } else if label.contains("_3d") {
+        3
     } else if label.ends_with("_2d") || label.contains("_2d_") {
         2
     } else {
@@ -3393,6 +3395,186 @@ fn zz_measure_rho_gradient_part_decomposition_binomial_2623() {
             );
         }
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// gam#979 — component attribution: the Duchon ψ-derivative OBJECTS, differenced
+// one at a time against the rebuilt forward objects.
+//
+// The criterion-level gates above answer "is ∇V right?". When one fails, the
+// answer says nothing about WHICH of the assembled pieces moved: the design
+// derivative `∂X/∂ψ`, or the penalty derivatives `∂S_k/∂ψ`. This harness
+// differences each analytic block against a central difference of the SAME
+// realized object the κ-optimizer rebuilds at `ψ ± h` (`ensure_theta`), and
+// reports the Frobenius norms beside the gap — a derivative that is merely
+// off by a factor and one that is missing altogether (norm ratio ≈ 0) are
+// different defects, and the norm ratio is what tells them apart.
+// ---------------------------------------------------------------------------
+
+struct DuchonPsiComponentReport {
+    design_rel_gap: f64,
+    design_norm_ratio: f64,
+    penalty_rel_gaps: Vec<f64>,
+    penalty_norm_ratios: Vec<f64>,
+}
+
+fn frobenius(m: &Array2<f64>) -> f64 {
+    m.iter().map(|v| v * v).sum::<f64>().sqrt()
+}
+
+fn duchon_psi_component_report(label: &str, n: usize) -> DuchonPsiComponentReport {
+    let fixture = build_iso_kappa_fixture(label, n, LikelihoodSpec::gaussian_identity(), false);
+    assert_eq!(fixture.psi_dim, 1, "{label}: one isotropic ψ axis");
+    let mut cache = fixture.cache();
+    let theta_dim = fixture.rho_dim + fixture.psi_dim;
+    // ψ = 0 is the shipped `length_scale=1` seed, where the large-scale line
+    // searches fail.
+    let theta = Array1::<f64>::zeros(theta_dim);
+    let psi_slot = fixture.rho_dim;
+    cache.ensure_theta(&theta).expect("ensure_theta at the seed");
+    let p_total = cache.design().design.ncols();
+    let derivs = crate::spatial_psi_bridge::build_block_spatial_psi_derivatives(
+        fixture.data.view(),
+        cache.spec(),
+        cache.design(),
+    )
+    .expect("spatial psi derivatives build")
+    .expect("spatial psi derivatives present");
+    assert_eq!(derivs.len(), 1, "{label}: one ψ block");
+    let deriv = &derivs[0];
+    let x_psi_an: Array2<f64> = if deriv.x_psi.nrows() == n && deriv.x_psi.ncols() == p_total {
+        deriv.x_psi.clone()
+    } else {
+        let op = deriv
+            .implicit_operator
+            .as_ref()
+            .expect("dense x_psi placeholder implies an implicit operator");
+        crate::custom_family::CustomFamilyPsiDerivativeOperator::as_materializable(op.as_ref())
+            .expect("materializable implicit operator")
+            .materialize_first(deriv.implicit_axis)
+            .expect("materialize ∂X/∂ψ")
+    };
+    assert_eq!(x_psi_an.dim(), (n, p_total), "{label}: ∂X/∂ψ shape");
+    let penalty_components: Vec<(usize, Array2<f64>)> = deriv
+        .s_psi_penalty_components
+        .as_ref()
+        .expect("penalty psi components")
+        .iter()
+        .map(|(idx, component)| (*idx, component.to_dense()))
+        .collect();
+    assert!(!penalty_components.is_empty(), "{label}: at least one penalty ψ block");
+
+    // The forward objects at ψ ± h, through the κ-optimizer's own realizer.
+    let realize = |cache: &mut SingleBlockExactJointDesignCache<'_>,
+                   psi: f64|
+     -> (Array2<f64>, Vec<Array2<f64>>) {
+        let mut probe = theta.clone();
+        probe[psi_slot] = psi;
+        cache.ensure_theta(&probe).expect("ensure_theta at ψ ± h");
+        let design = cache.design();
+        let x = design.design.to_dense();
+        let penalties = penalty_components
+            .iter()
+            .map(|(idx, _)| design.penalties[*idx].to_penalty_matrix(p_total).to_dense())
+            .collect();
+        (x, penalties)
+    };
+    // Two central-difference steps, ratio 2: a truncation-limited estimate
+    // moves by 4× between them, a defect does not.
+    let mut best_design_gap = f64::INFINITY;
+    let mut design_norm_ratio = f64::NAN;
+    let mut best_penalty_gaps = vec![f64::INFINITY; penalty_components.len()];
+    let mut penalty_norm_ratios = vec![f64::NAN; penalty_components.len()];
+    for &h in &[2.0e-3_f64, 1.0e-3] {
+        let (x_plus, s_plus) = realize(&mut cache, h);
+        let (x_minus, s_minus) = realize(&mut cache, -h);
+        let x_fd = (&x_plus - &x_minus) / (2.0 * h);
+        let design_gap = frobenius(&(&x_psi_an - &x_fd)) / frobenius(&x_fd).max(1e-300);
+        eprintln!(
+            "[{label} COMPONENT] h={h:.1e} design |an|={:.6e} |fd|={:.6e} rel_gap={design_gap:.3e}",
+            frobenius(&x_psi_an),
+            frobenius(&x_fd)
+        );
+        if design_gap < best_design_gap {
+            best_design_gap = design_gap;
+            design_norm_ratio = frobenius(&x_psi_an) / frobenius(&x_fd).max(1e-300);
+        }
+        for (k, (idx, analytic)) in penalty_components.iter().enumerate() {
+            let s_fd = (&s_plus[k] - &s_minus[k]) / (2.0 * h);
+            let gap = frobenius(&(analytic - &s_fd)) / frobenius(&s_fd).max(1e-300);
+            eprintln!(
+                "[{label} COMPONENT] h={h:.1e} penalty[{idx}] |an|={:.6e} |fd|={:.6e} rel_gap={gap:.3e}",
+                frobenius(analytic),
+                frobenius(&s_fd)
+            );
+            if gap < best_penalty_gaps[k] {
+                best_penalty_gaps[k] = gap;
+                penalty_norm_ratios[k] = frobenius(analytic) / frobenius(&s_fd).max(1e-300);
+            }
+        }
+    }
+    // Restore the seed so the cache is left where it was found.
+    cache.ensure_theta(&theta).expect("ensure_theta back at the seed");
+    DuchonPsiComponentReport {
+        design_rel_gap: best_design_gap,
+        design_norm_ratio,
+        penalty_rel_gaps: best_penalty_gaps,
+        penalty_norm_ratios,
+    }
+}
+
+fn assert_duchon_psi_components(label: &str, n: usize) {
+    let report = duchon_psi_component_report(label, n);
+    eprintln!(
+        "[{label} COMPONENT SUMMARY] design rel_gap={:.3e} norm_ratio={:.3e} penalties rel_gaps={:?} norm_ratios={:?}",
+        report.design_rel_gap,
+        report.design_norm_ratio,
+        report.penalty_rel_gaps,
+        report.penalty_norm_ratios
+    );
+    // A central difference at h = 1e-3 on an analytic interpoland is accurate
+    // to ~1e-6 relative; 1e-4 leaves room for the evaluator's own rounding at
+    // the tiny-magnitude high-dimensional kernels without admitting a defect.
+    let tol = 1e-4;
+    assert!(
+        report.design_rel_gap < tol,
+        "{label}: analytic ∂X/∂ψ differs from the rebuilt design by {:.3e} (norm ratio {:.3e})",
+        report.design_rel_gap,
+        report.design_norm_ratio
+    );
+    for (k, gap) in report.penalty_rel_gaps.iter().enumerate() {
+        assert!(
+            *gap < tol,
+            "{label}: analytic ∂S_{k}/∂ψ differs from the rebuilt penalty by {gap:.3e} (norm ratio {:.3e})",
+            report.penalty_norm_ratios[k]
+        );
+    }
+}
+
+/// gam#979 — the `Linear` control at 3-D, power 9.
+#[test]
+fn duchon_hybrid_psi_components_match_fd_linear_power9_3d() {
+    assert_duchon_psi_components("duchon_gaussian_linear_power9_3d", 240);
+}
+
+/// gam#979 — the shipped null-space order at 3-D, power 9.
+#[test]
+fn duchon_hybrid_psi_components_match_fd_order0_power9_3d() {
+    assert_duchon_psi_components("duchon_gaussian_order0_power9_3d", 240);
+}
+
+/// gam#979 — the `Linear` control at the benchmark shape.
+#[test]
+fn duchon_hybrid_psi_components_match_fd_linear_power9_16d() {
+    assert_duchon_psi_components("duchon_gaussian_linear_power9_16d_centers24", 1700);
+}
+
+/// gam#979 — the benchmark shape itself: sixteen axes, 24 centers, power 9,
+/// constant-only null space, radial-profile row counts.
+#[test]
+fn duchon_hybrid_psi_components_match_fd_order0_power9_16d() {
+    assert_duchon_psi_components("duchon_gaussian_order0_power9_16d_centers24", 1700);
 }
 
 }

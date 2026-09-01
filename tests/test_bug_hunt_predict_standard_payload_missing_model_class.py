@@ -53,7 +53,7 @@ def _mean(out: object) -> np.ndarray:
     """Response-scale point predictions from any ``Model.predict`` return shape."""
     if isinstance(out, np.ndarray):
         return np.asarray(out, dtype=float).ravel()
-    return np.asarray(out["mean"], dtype=float)
+    return np.asarray(out["posterior_mean"], dtype=float)
 
 
 def test_gaussian_smooth_predict_round_trips() -> None:
@@ -100,8 +100,8 @@ def test_gaussian_smooth_predict_with_interval_round_trips() -> None:
     assert mean.shape[0] == grid.shape[0]
     assert np.all(np.isfinite(mean))
     # An interval predict returns a table carrying the uncertainty band.
-    lower = np.asarray(out["mean_lower"], dtype=float)
-    upper = np.asarray(out["mean_upper"], dtype=float)
+    lower = np.asarray(out["posterior_mean_lower"], dtype=float)
+    upper = np.asarray(out["posterior_mean_upper"], dtype=float)
     assert np.all(lower <= mean + 1e-9)
     assert np.all(mean <= upper + 1e-9)
 

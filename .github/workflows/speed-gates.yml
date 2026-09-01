@@ -37,9 +37,16 @@ on:
     - cron: "17 6 * * *"
   workflow_dispatch:
 
+# Let a running build FINISH. `main` receives a push every minute or two, and
+# a release build of the gam-models test target takes tens of minutes; with
+# cancel-in-progress the first four runs of this lane were all cancelled by
+# the next push and no verdict was ever produced. Without it GitHub keeps at
+# most one PENDING run per group (the newest push replaces older pending
+# ones) while the in-progress run completes, so every completed run is a
+# verdict on a tree at most one build behind the tip.
 concurrency:
   group: speed-gates-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read

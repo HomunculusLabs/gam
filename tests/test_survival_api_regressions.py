@@ -367,7 +367,7 @@ def _fit_marginal_slope_worker(result_queue) -> None:
             "Surv(entry, exit, event) ~ bmi + hba1c",
             survival_likelihood="marginal-slope",
             z_column="age",
-            logslope_formula="bmi + hba1c",
+            slope_formula="bmi + hba1c",
         )
     except BaseException as exc:  # pragma: no cover - child process reporting
         result_queue.put(("error", type(exc).__name__, str(exc)))

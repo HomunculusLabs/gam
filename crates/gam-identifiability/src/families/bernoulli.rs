@@ -139,7 +139,7 @@ impl FamilyChannelHessian for BernoulliRowHessian {
 }
 
 /// Row Jacobian operator backed by a dense design matrix. K=1 — the only
-/// channel is `δη = design.row(i) · δβ`. Covers BMS's marginal, logslope,
+/// channel is `δη = design.row(i) · δβ`. Covers BMS's marginal, slope,
 /// score-warp, and link-deviation blocks uniformly.
 pub struct BernoulliDenseDesignOperator {
     design: Array2<f64>,

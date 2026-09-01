@@ -1937,7 +1937,7 @@ fn audit_identifiability_impl(
         // Non-fatal: the canonical-gauge pipeline will attribute the
         // alias drops to the lower-priority blocks and proceed with
         // reduced specs. This is the expected outcome for families like
-        // survival marginal-slope where time/marginal/logslope carry
+        // survival marginal-slope where time/marginal/slope carry
         // overlapping directions that the priority ordering resolves.
         format!(
             " — gauge-attributed drops: {} column(s) attributed to lower-priority blocks \

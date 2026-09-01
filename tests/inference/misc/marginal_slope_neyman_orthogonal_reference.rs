@@ -8,7 +8,7 @@
 //! transformation-normal) gaussianizes a continuous score conditional on
 //! covariates `x` into a latent `z = Φ⁻¹(u)`. Stage 2 (Bernoulli marginal-
 //! slope) fits a probit model `η = α(x) + s_f·β(x)·z` for a binary outcome,
-//! where `β(x)` (the *logslope surface*) is the scientific target.
+//! where `β(x)` (the *slope surface*) is the scientific target.
 //!
 //! Because `z` is a **generated regressor** that depends on the fitted Stage-1
 //! parameters `θ̂₁`, an x-structured Stage-1 *miscalibration* (e.g. the
@@ -43,8 +43,8 @@
 //! Both arms share the identical `(x, y)` and the same Stage-1 *recipe* /
 //! response basis, so they differ only by the orthogonalization — isolating the
 //! effect under test. β̂(x) and its posterior covariance are read off the
-//! returned [`BernoulliMarginalSlopeFitResult`] (block 1 = logslope; the joint
-//! covariance offset to the logslope block is the marginal block's *actual*
+//! returned [`BernoulliMarginalSlopeFitResult`] (block 1 = slope; the joint
+//! covariance offset to the slope block is the marginal block's *actual*
 //! widened coefficient count `blocks[0].beta.len()`, which the A2 absorber
 //! grows by `p₁` on the orthogonalized arm).
 //!
@@ -66,11 +66,11 @@ use gam::{
 };
 use ndarray::{Array1, Array2};
 
-// Stage-1 CTN covariate RHS and Stage-2 marginal/logslope formulas. Kept in one
+// Stage-1 CTN covariate RHS and Stage-2 marginal/slope formulas. Kept in one
 // place so the orthogonalized recipe and the naive control fit identical bases.
 const COVARIATE_RHS: &str = "s(x, k=8)";
 const STAGE2_FORMULA: &str = "y ~ s(x, k=8)";
-const LOGSLOPE_FORMULA: &str = "s(x, k=8)";
+const SLOPE_FORMULA: &str = "s(x, k=8)";
 
 use gam::utils::splitmix64;
 // ---------------------------------------------------------------------------
@@ -157,14 +157,14 @@ fn stage1_config() -> TransformationNormalConfig {
     config
 }
 
-/// Stage-2 marginal-slope `FitConfig` (Bernoulli probit base; logslope surface
+/// Stage-2 marginal-slope `FitConfig` (Bernoulli probit base; slope surface
 /// `s(x)`). Both arms start from this base: the orthogonalized arm then sets
 /// `ctn_stage1 = Some(recipe)` (and NO `z_column`), the naive arm sets
 /// `z_column` and leaves `ctn_stage1` `None`.
 fn stage2_config() -> FitConfig {
     FitConfig {
         family: Some("bernoulli-marginal-slope".to_string()),
-        logslope_formula: Some(LOGSLOPE_FORMULA.to_string()),
+        slope_formula: Some(SLOPE_FORMULA.to_string()),
         ..FitConfig::default()
     }
 }
@@ -264,33 +264,33 @@ fn full_data_ctn_z(x: &[f64], score: &[f64]) -> Array1<f64> {
 // β̂(x) and pointwise-variance readouts off the Stage-2 fit.
 // ---------------------------------------------------------------------------
 
-/// Evaluate the fitted logslope surface `β̂(x)` at a fresh grid. Reconstructed
-/// exactly as the family does (block 1 = logslope, see `bms/block_specs.rs`):
-/// `β̂(x_i) = baseline_logslope + design(x_i)·β_logslope` (offset zero here).
+/// Evaluate the fitted slope surface `β̂(x)` at a fresh grid. Reconstructed
+/// exactly as the family does (block 1 = slope, see `bms/block_specs.rs`):
+/// `β̂(x_i) = baseline_slope + design(x_i)·β_slope` (offset zero here).
 /// The A2 absorber columns ride the *marginal* block and are dropped at predict,
-/// so they never touch this logslope readout — valid for both arms.
+/// so they never touch this slope readout — valid for both arms.
 fn beta_of_x(fit: &BernoulliMarginalSlopeFitResult, x_grid: &[f64]) -> Vec<f64> {
     let n = x_grid.len();
     let mut data = Array2::<f64>::zeros((n, 1));
     for i in 0..n {
         data[[i, 0]] = x_grid[i];
     }
-    let design = build_term_collection_design(data.view(), &fit.logslopespec_resolved)
-        .expect("rebuild logslope design from resolved spec");
+    let design = build_term_collection_design(data.view(), &fit.slopespec_resolved)
+        .expect("rebuild slope design from resolved spec");
     let dense = design.design.to_dense();
-    let beta_logslope = &fit.fit.blocks[1].beta;
+    let beta_slope = &fit.fit.blocks[1].beta;
     assert_eq!(
         dense.ncols(),
-        beta_logslope.len(),
-        "logslope design width {} != logslope beta length {}",
+        beta_slope.len(),
+        "slope design width {} != slope beta length {}",
         dense.ncols(),
-        beta_logslope.len()
+        beta_slope.len()
     );
     let mut out = vec![0.0; n];
     for i in 0..n {
-        let mut acc = fit.baseline_logslope;
+        let mut acc = fit.baseline_slope;
         for j in 0..dense.ncols() {
-            acc += dense[[i, j]] * beta_logslope[j];
+            acc += dense[[i, j]] * beta_slope[j];
         }
         out[i] = acc;
     }
@@ -299,14 +299,14 @@ fn beta_of_x(fit: &BernoulliMarginalSlopeFitResult, x_grid: &[f64]) -> Vec<f64> 
 
 /// Spatial-heterogeneity statistic of a fitted `β̂(x)`: the **spatial variance
 /// ratio** `Var_x(β̂(x)) / σ̂_β²`, the across-grid sample variance of the fitted
-/// logslope surface scaled by an estimate of its own sampling noise.
+/// slope surface scaled by an estimate of its own sampling noise.
 ///
 /// Interpretation: under a truly flat `β(x) ≡ const`, `β̂(x)` should vary across
 /// `x` only by sampling noise, so this ratio sits near its null band; an
 /// x-structured Stage-1 leakage inflates `Var_x(β̂(x))` well above that band —
 /// the false positive #461 is about. `σ̂_β²` is the median across the grid of
 /// the per-point posterior variance of `β̂(x)`, propagated from the joint
-/// covariance through the logslope design, so the statistic is dimensionless
+/// covariance through the slope design, so the statistic is dimensionless
 /// and self-calibrating.
 fn spatial_heterogeneity_ratio(fit: &BernoulliMarginalSlopeFitResult, x_grid: &[f64]) -> f64 {
     let beta = beta_of_x(fit, x_grid);
@@ -319,23 +319,23 @@ fn spatial_heterogeneity_ratio(fit: &BernoulliMarginalSlopeFitResult, x_grid: &[
 }
 
 /// Median over the grid of the pointwise posterior variance of `β̂(x)`:
-/// `r(x)ᵀ Σ_ℓℓ r(x)`, where `r(x)` is the logslope design row at `x` and `Σ_ℓℓ`
-/// is the logslope-block sub-covariance of the joint posterior.
+/// `r(x)ᵀ Σ_ℓℓ r(x)`, where `r(x)` is the slope design row at `x` and `Σ_ℓℓ`
+/// is the slope-block sub-covariance of the joint posterior.
 fn median_pointwise_beta_variance(fit: &BernoulliMarginalSlopeFitResult, x_grid: &[f64]) -> f64 {
     let n = x_grid.len();
     let mut data = Array2::<f64>::zeros((n, 1));
     for i in 0..n {
         data[[i, 0]] = x_grid[i];
     }
-    let design = build_term_collection_design(data.view(), &fit.logslopespec_resolved)
-        .expect("rebuild logslope design for variance readout");
+    let design = build_term_collection_design(data.view(), &fit.slopespec_resolved)
+        .expect("rebuild slope design for variance readout");
     let dense = design.design.to_dense();
-    let p_logslope = dense.ncols();
+    let p_slope = dense.ncols();
 
-    // Locate the logslope block's coefficient slice in the joint covariance:
-    // block 0 = marginal, block 1 = logslope (bms/block_specs.rs). The joint
+    // Locate the slope block's coefficient slice in the joint covariance:
+    // block 0 = marginal, block 1 = slope (bms/block_specs.rs). The joint
     // covariance is over the concatenated per-block β in block order, so the
-    // logslope slice starts at the marginal block's ACTUAL coefficient count —
+    // slope slice starts at the marginal block's ACTUAL coefficient count —
     // `blocks[0].beta.len()`, NOT `marginal_design.design.ncols()`. Under the
     // #461 orthogonalized arm the marginal block is widened to `[M | Z̃_infl]`
     // (its β grows by p₁), while `marginal_design` still reports the raw `M`
@@ -350,8 +350,8 @@ fn median_pointwise_beta_variance(fit: &BernoulliMarginalSlopeFitResult, x_grid:
         .as_ref()
         .expect("Stage-2 fit must carry a conditional covariance");
     assert!(
-        cov.nrows() >= p_marginal + p_logslope,
-        "joint covariance {}x{} too small for marginal({p_marginal})+logslope({p_logslope})",
+        cov.nrows() >= p_marginal + p_slope,
+        "joint covariance {}x{} too small for marginal({p_marginal})+slope({p_slope})",
         cov.nrows(),
         cov.ncols()
     );
@@ -359,12 +359,12 @@ fn median_pointwise_beta_variance(fit: &BernoulliMarginalSlopeFitResult, x_grid:
     let mut variances: Vec<f64> = Vec::with_capacity(n);
     for i in 0..n {
         let mut v = 0.0;
-        for a in 0..p_logslope {
+        for a in 0..p_slope {
             let ra = dense[[i, a]];
             if ra == 0.0 {
                 continue;
             }
-            for b in 0..p_logslope {
+            for b in 0..p_slope {
                 v += ra * cov[[p_marginal + a, p_marginal + b]] * dense[[i, b]];
             }
         }

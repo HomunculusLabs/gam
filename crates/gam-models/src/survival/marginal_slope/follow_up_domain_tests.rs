@@ -36,10 +36,10 @@ fn unit_score_covariance() -> ScoreCovarianceField {
     )
 }
 
-/// The log-slope exit design: an intercept and one covariate, which is the
-/// tensored shape the acceptance fixture's `logslope_formula = "1"` produces
+/// The slope exit design: an intercept and one covariate, which is the
+/// tensored shape the acceptance fixture's `slope_formula = "1"` produces
 /// against a two-column time margin.
-fn logslope_exit_design() -> Array2<f64> {
+fn slope_exit_design() -> Array2<f64> {
     Array2::from_shape_fn((N_ROWS, 2), |(row, col)| {
         let t = (row as f64 + 0.5) / (N_ROWS as f64);
         match col {
@@ -51,7 +51,7 @@ fn logslope_exit_design() -> Array2<f64> {
 
 /// The entry channel: the same covariate chart read at the row's ENTRY time, so
 /// it differs from the exit channel without being unrelated to it.
-fn logslope_entry_design() -> Array2<f64> {
+fn slope_entry_design() -> Array2<f64> {
     Array2::from_shape_fn((N_ROWS, 2), |(row, col)| {
         let t = (row as f64 + 0.5) / (N_ROWS as f64);
         match col {
@@ -63,7 +63,7 @@ fn logslope_entry_design() -> Array2<f64> {
 
 /// The exit-RATE channel `∂/∂t` of the exit design. It carries no offset — the
 /// property that makes `β_g = 0` a provably interior point.
-fn logslope_rate_design() -> Array2<f64> {
+fn slope_rate_design() -> Array2<f64> {
     Array2::from_shape_fn((N_ROWS, 2), |(row, col)| {
         let t = (row as f64 + 0.5) / (N_ROWS as f64);
         match col {
@@ -97,14 +97,14 @@ fn latent_scores() -> Array1<f64> {
 /// that can drive `η′₁` negative is the slope's follow-up motion — which is
 /// what these gates are about.
 fn family(frame_is_follow_up_varying: bool) -> SurvivalMarginalSlopeFamily {
-    let layout: LogslopeLayout = DesignMatrix::from(logslope_exit_design()).into();
-    let logslope_layout = if frame_is_follow_up_varying {
+    let layout: SlopeLayout = DesignMatrix::from(slope_exit_design()).into();
+    let slope_layout = if frame_is_follow_up_varying {
         layout
             .with_follow_up(
-                DesignMatrix::from(logslope_entry_design()),
-                DesignMatrix::from(logslope_rate_design()),
+                DesignMatrix::from(slope_entry_design()),
+                DesignMatrix::from(slope_rate_design()),
             )
-            .expect("a shared log-slope layout accepts a follow-up margin")
+            .expect("a shared slope layout accepts a follow-up margin")
     } else {
         layout
     };
@@ -125,7 +125,7 @@ fn family(frame_is_follow_up_varying: bool) -> SurvivalMarginalSlopeFamily {
         offset_exit: Arc::new(Array1::from_elem(N_ROWS, -0.3)),
         derivative_offset_exit: Arc::new(Array1::from_elem(N_ROWS, 1.0)),
         marginal_design: DesignMatrix::from(marginal_design()),
-        logslope_layout,
+        slope_layout,
         score_warp: None,
         link_dev: None,
         influence_absorber: None,
@@ -139,11 +139,11 @@ fn family(frame_is_follow_up_varying: bool) -> SurvivalMarginalSlopeFamily {
     }
 }
 
-fn states(family: &SurvivalMarginalSlopeFamily, logslope_beta: Array1<f64>) -> Vec<ParameterBlockState> {
+fn states(family: &SurvivalMarginalSlopeFamily, slope_beta: Array1<f64>) -> Vec<ParameterBlockState> {
     let marginal_beta = ndarray::array![0.30];
     let marginal = family.marginal_design.to_dense().to_owned();
-    let logslope = family
-        .logslope_layout
+    let slope = family
+        .slope_layout
         .coefficient_design()
         .to_dense()
         .to_owned();
@@ -157,22 +157,22 @@ fn states(family: &SurvivalMarginalSlopeFamily, logslope_beta: Array1<f64>) -> V
             beta: marginal_beta,
         },
         ParameterBlockState {
-            eta: logslope.dot(&logslope_beta),
-            beta: logslope_beta,
+            eta: slope.dot(&slope_beta),
+            beta: slope_beta,
         },
     ]
 }
 
-/// An interior log-slope coefficient: a moderate level and a mild follow-up
+/// An interior slope coefficient: a moderate level and a mild follow-up
 /// trend.
-fn interior_logslope_beta() -> Array1<f64> {
+fn interior_slope_beta() -> Array1<f64> {
     ndarray::array![0.20, -0.05]
 }
 
 /// The step direction that leaves the domain: it drives the slope's follow-up
 /// RATE hard, which is the channel a time-constant slope does not have.
 fn exiting_direction() -> Array1<f64> {
-    // (time: 0 coefficients | marginal: 1 | log-slope: 2)
+    // (time: 0 coefficients | marginal: 1 | slope: 2)
     ndarray::array![0.0, 0.0, -6.0]
 }
 
@@ -225,7 +225,7 @@ fn margin_along(
 #[test]
 fn the_fixture_step_really_leaves_the_domain_2765() {
     let family = family(true);
-    let base = states(&family, interior_logslope_beta());
+    let base = states(&family, interior_slope_beta());
     let direction = exiting_direction();
     let base_margin = margin_along(&family, &base, &direction, 0.0);
     let full_margin = margin_along(&family, &base, &direction, 1.0);
@@ -260,7 +260,7 @@ fn the_fixture_step_really_leaves_the_domain_2765() {
 #[test]
 fn the_joint_step_limit_lands_on_a_point_the_row_program_admits_2765() {
     let family = family(true);
-    let base = states(&family, interior_logslope_beta());
+    let base = states(&family, interior_slope_beta());
     let direction = exiting_direction();
 
     let alpha = family
@@ -313,7 +313,7 @@ fn the_joint_step_limit_lands_on_a_point_the_row_program_admits_2765() {
 #[test]
 fn a_time_constant_slope_declines_the_joint_step_limit_2765() {
     let family = family(false);
-    let base = states(&family, interior_logslope_beta());
+    let base = states(&family, interior_slope_beta());
     for scale in [-9.0_f64, -1.0, 0.0, 1.0, 9.0] {
         let direction = &exiting_direction() * scale;
         assert!(
@@ -340,7 +340,7 @@ fn a_time_constant_slope_declines_the_joint_step_limit_2765() {
 #[test]
 fn an_interior_step_is_not_limited_2765() {
     let family = family(true);
-    let base = states(&family, interior_logslope_beta());
+    let base = states(&family, interior_slope_beta());
     let inward = &exiting_direction() * -0.05;
     assert!(
         margin_along(&family, &base, &inward, 1.0) > 0.0,
@@ -356,14 +356,14 @@ fn an_interior_step_is_not_limited_2765() {
 }
 
 /// The warm-start restoration: a seed outside the domain is retreated toward the
-/// log-slope block's origin until the row program admits it, and a seed already
+/// slope block's origin until the row program admits it, and a seed already
 /// inside is left bit-identical.
 #[test]
 fn an_exterior_warm_start_is_retreated_into_the_domain_2765() {
     let family = family(true);
     // The seed the outer step left behind: the interior base plus the whole
     // exiting step, i.e. exactly the exterior point the previous gate pinned.
-    let exterior_beta = &interior_logslope_beta() + &ndarray::array![0.0, -6.0];
+    let exterior_beta = &interior_slope_beta() + &ndarray::array![0.0, -6.0];
     let mut blocks = blocks_for(&family, exterior_beta.clone());
     let fraction = family
         .retreat_seed_into_follow_up_domain(&mut blocks)
@@ -387,7 +387,7 @@ fn an_exterior_warm_start_is_retreated_into_the_domain_2765() {
     row_program_admits(&family, &states(&family, restored.clone())).unwrap_or_else(|error| {
         panic!("the retreated seed is still outside the domain: {error}")
     });
-    // The retreat is toward the ORIGIN of the log-slope block, so every
+    // The retreat is toward the ORIGIN of the slope block, so every
     // coordinate shrinks by the same factor and none changes sign.
     for (restored_value, seed_value) in restored.iter().zip(exterior_beta.iter()) {
         assert!(
@@ -404,7 +404,7 @@ fn an_exterior_warm_start_is_retreated_into_the_domain_2765() {
 #[test]
 fn an_interior_warm_start_is_left_alone_2765() {
     let family = family(true);
-    let seed = interior_logslope_beta();
+    let seed = interior_slope_beta();
     let mut blocks = blocks_for(&family, seed.clone());
     let fraction = family
         .retreat_seed_into_follow_up_domain(&mut blocks)
@@ -428,7 +428,7 @@ fn an_interior_warm_start_is_left_alone_2765() {
 #[test]
 fn a_time_constant_warm_start_is_never_retreated_2765() {
     let family = family(false);
-    let seed = &interior_logslope_beta() + &ndarray::array![0.0, -6.0];
+    let seed = &interior_slope_beta() + &ndarray::array![0.0, -6.0];
     let mut blocks = blocks_for(&family, seed.clone());
     let fraction = family
         .retreat_seed_into_follow_up_domain(&mut blocks)
@@ -447,13 +447,13 @@ fn a_time_constant_warm_start_is_never_retreated_2765() {
 
 fn blocks_for(
     family: &SurvivalMarginalSlopeFamily,
-    logslope_beta: Array1<f64>,
+    slope_beta: Array1<f64>,
 ) -> Vec<ParameterBlockSpec> {
-    let state = states(family, logslope_beta);
+    let state = states(family, slope_beta);
     let designs: [DesignMatrix; 3] = [
         family.design_exit.clone(),
         family.marginal_design.clone(),
-        family.logslope_layout.coefficient_design().clone(),
+        family.slope_layout.coefficient_design().clone(),
     ];
     state
         .into_iter()

@@ -1,7 +1,7 @@
 """Regression guard for #808 (survival-marginal-slope clustered-PC stall).
 
 #808: on a clustered-PC large-scale-style survival marginal-slope design (a matern
-PC surface shared by the marginal-mean and log-slope channels, with enough
+PC surface shared by the marginal-mean and slope channels, with enough
 well-separated centers to create an operating-point alias), the inner
 joint-Newton solve freezes with a huge non-stationary residual
 (``residual ~= 3.7e8`` vs ``tol ~= 1.6e-4``) that never drops, the outer
@@ -15,7 +15,7 @@ the reproducer is preserved in-tree.
 
 Status: #808 is OPEN. The v2 "W-aware operating-point identifiability
 reduction" landed but does NOT fix it: on this design the priority-ordered
-Gram-Schmidt selector drops the *entire* logslope block (``logslope N -> 0``,
+Gram-Schmidt selector drops the *entire* slope block (``slope N -> 0``,
 because time+marginal already span its W-metric directions) yet the frozen
 residual lives in the *time* block (``block_grad_inf ~= [159, 19, 2]``), so the
 stall persists. The test therefore asserts the DESIRED post-fix contract
@@ -86,7 +86,7 @@ _CHILD = textwrap.dedent(
         "Surv(age_entry, age_exit, event) ~ " + s,
         survival_likelihood="marginal-slope",
         z_column="PGS_z",
-        logslope_formula=s,
+        slope_formula=s,
     )
     # If we get here the outer solve converged (a non-converged outer raises
     # "outer optimization did not converge"). Sanity-check the fit is usable:
@@ -100,7 +100,7 @@ _CHILD = textwrap.dedent(
 # #1512 / SPEC.md (xfail is never allowed): this stands FAILING as the signal of
 # the open #808 bug — clustered-PC survival marginal-slope inner solve stalls
 # (residual ~3.7e8 >> tol, frozen |g|=1.863); v2 W-aware reduction drops the
-# whole logslope block but the residual lives in the time block, so the outer
+# whole slope block but the residual lives in the time block, so the outer
 # REML never converges. Fix #808 to green this.
 def test_survival_marginal_slope_clustered_pc_converges_808() -> None:
     env = dict(os.environ)

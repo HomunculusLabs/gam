@@ -147,15 +147,15 @@ def main():
         def mp(name):
             return os.path.join(tmpdir, f"{name}.gam")
 
-        def bern(name, logslope_formula, extra):
+        def bern(name, slope_formula, extra):
             R[name] = run(
                 ["fit", dp, "disease ~ s(bmi)", "--z-column", "z",
-                 "--logslope-formula", logslope_formula, "--out", mp(name)] + extra, name)
+                 "--slope-formula", slope_formula, "--out", mp(name)] + extra, name)
 
-        def surv(name, rhs, extra, logslope_formula=None):
+        def surv(name, rhs, extra, slope_formula=None):
             args = ["fit", dp, f"Surv(age_entry, age_exit, event) ~ {rhs}"]
-            if logslope_formula is not None:
-                args += ["--logslope-formula", logslope_formula]
+            if slope_formula is not None:
+                args += ["--slope-formula", slope_formula]
             args += ["--out", mp(name)] + extra
             R[name] = run(args, name)
 
@@ -174,15 +174,15 @@ def main():
 
         surv("surv_ms_rigid", "s(bmi)",
              ["--z-column", "z", "--survival-likelihood", "marginal-slope"],
-             logslope_formula="1")
+             slope_formula="1")
         surv("surv_ms_scorewarp", "s(bmi)",
              ["--z-column", "z", "--survival-likelihood", "marginal-slope"],
-             logslope_formula="1 + linkwiggle(internal_knots=6)")
+             slope_formula="1 + linkwiggle(internal_knots=6)")
         surv("surv_ms_frailty", "s(bmi)",
              ["--z-column", "z",
               "--survival-likelihood", "marginal-slope",
               "--frailty-kind", "gaussian-shift", "--frailty-sd", "0.3"],
-             logslope_formula="1")
+             slope_formula="1")
 
         surv("surv_latent", "z + bmi",
              ["--survival-likelihood", "latent",

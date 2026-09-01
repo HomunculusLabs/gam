@@ -304,20 +304,20 @@ impl SurvivalMarginalSlopeFamily {
             }
         }
         let gc = self
-            .logslope_layout
+            .slope_layout
             .coefficient_design()
             .try_row_chunk(row..row + 1)
-            .map_err(|e| format!("logslope_design try_row_chunk: {e}"))?;
+            .map_err(|e| format!("slope_design try_row_chunk: {e}"))?;
         let gr = gc.row(0);
         for a in 0..p_time {
             let mut w = 0.0;
             for qu in 0..3 {
                 w += h_pi[[qu, 3]] * djt[qu][a];
             }
-            for b in 0..slices.logslope.len() {
+            for b in 0..slices.slope.len() {
                 let v = w * gr[b];
-                acc[[slices.time.start + a, slices.logslope.start + b]] += v;
-                acc[[slices.logslope.start + b, slices.time.start + a]] += v;
+                acc[[slices.time.start + a, slices.slope.start + b]] += v;
+                acc[[slices.slope.start + b, slices.time.start + a]] += v;
             }
         }
         for a in 0..p_marginal {
@@ -325,10 +325,10 @@ impl SurvivalMarginalSlopeFamily {
             for qu in 0..3 {
                 w += h_pi[[qu, 3]] * djm[qu][a];
             }
-            for b in 0..slices.logslope.len() {
+            for b in 0..slices.slope.len() {
                 let v = w * gr[b];
-                acc[[slices.marginal.start + a, slices.logslope.start + b]] += v;
-                acc[[slices.logslope.start + b, slices.marginal.start + a]] += v;
+                acc[[slices.marginal.start + a, slices.slope.start + b]] += v;
+                acc[[slices.slope.start + b, slices.marginal.start + a]] += v;
             }
         }
 
@@ -450,14 +450,14 @@ impl SurvivalMarginalSlopeFamily {
                     };
                     // Inline primary direction from already-computed q_geom
                     // (avoids redundant row_dynamic_q_geometry call)
-                    let d_logslope = d_beta_flat.slice(s![slices.logslope.clone()]);
+                    let d_slope = d_beta_flat.slice(s![slices.slope.clone()]);
                     let u_d = Array1::from_vec(vec![
                         q_geom.dq0_time.dot(&d_time) + q_geom.dq0_marginal.dot(&d_marginal),
                         q_geom.dq1_time.dot(&d_time) + q_geom.dq1_marginal.dot(&d_marginal),
                         q_geom.dqd1_time.dot(&d_time) + q_geom.dqd1_marginal.dot(&d_marginal),
-                        self.logslope_layout
+                        self.slope_layout
                             .coefficient_design()
-                            .dot_row_view(row, d_logslope),
+                            .dot_row_view(row, d_slope),
                     ]);
                     let t_ud = self.row_primary_third_contracted(row, block_states, u_d.view())?;
                     let h_ud = h_pi.dot(&u_d);
@@ -628,10 +628,10 @@ impl SurvivalMarginalSlopeFamily {
         let p_base = time_tail.start;
         let du_t = d_u.slice(s![slices.time.clone()]);
         let du_m = d_u.slice(s![slices.marginal.clone()]);
-        let du_g = d_u.slice(s![slices.logslope.clone()]);
+        let du_g = d_u.slice(s![slices.slope.clone()]);
         let dv_t = d_v.slice(s![slices.time.clone()]);
         let dv_m = d_v.slice(s![slices.marginal.clone()]);
-        let dv_g = d_v.slice(s![slices.logslope.clone()]);
+        let dv_g = d_v.slice(s![slices.slope.clone()]);
         let beta_time = &block_states[0].beta;
         let beta_tw = beta_time.slice(s![time_tail.clone()]);
 
@@ -649,7 +649,7 @@ impl SurvivalMarginalSlopeFamily {
                         q_geom.dq0_time.dot(&du_t) + q_geom.dq0_marginal.dot(&du_m),
                         q_geom.dq1_time.dot(&du_t) + q_geom.dq1_marginal.dot(&du_m),
                         q_geom.dqd1_time.dot(&du_t) + q_geom.dqd1_marginal.dot(&du_m),
-                        self.logslope_layout
+                        self.slope_layout
                             .coefficient_design()
                             .dot_row_view(row, du_g),
                     ]);
@@ -657,7 +657,7 @@ impl SurvivalMarginalSlopeFamily {
                         q_geom.dq0_time.dot(&dv_t) + q_geom.dq0_marginal.dot(&dv_m),
                         q_geom.dq1_time.dot(&dv_t) + q_geom.dq1_marginal.dot(&dv_m),
                         q_geom.dqd1_time.dot(&dv_t) + q_geom.dqd1_marginal.dot(&dv_m),
-                        self.logslope_layout
+                        self.slope_layout
                             .coefficient_design()
                             .dot_row_view(row, dv_g),
                     ]);
@@ -749,7 +749,7 @@ impl SurvivalMarginalSlopeFamily {
                             v[1] += m2_ex * dh1d * mr[a] * dv_m[a];
                             v[2] += (m3_ex * dh1d * dr * mr[a] + m2_ex * ddrd * mr[a]) * dv_m[a];
                         }
-                        // v[3] = 0 (logslope J is constant)
+                        // v[3] = 0 (slope J is constant)
                         Array1::from_vec(v.to_vec())
                     };
 
@@ -778,10 +778,10 @@ impl SurvivalMarginalSlopeFamily {
                         &q_geom.dqd1_marginal,
                     ];
                     let gc = self
-                        .logslope_layout
+                        .slope_layout
                         .coefficient_design()
                         .try_row_chunk(row..row + 1)
-                        .map_err(|e| format!("logslope_design try_row_chunk: {e}"))?;
+                        .map_err(|e| format!("slope_design try_row_chunk: {e}"))?;
                     let gr = gc.row(0);
 
                     // ── Helper: accumulate a symmetrized bilinear term ──
@@ -835,10 +835,10 @@ impl SurvivalMarginalSlopeFamily {
                                 for qu in 0..3 {
                                     w2 += $w[[qu, 3]] * $lt[qu][a];
                                 }
-                                for b in 0..slices.logslope.len() {
+                                for b in 0..slices.slope.len() {
                                     let v = w2 * gr[b];
-                                    acc[[slices.time.start + a, slices.logslope.start + b]] += v;
-                                    acc[[slices.logslope.start + b, slices.time.start + a]] += v;
+                                    acc[[slices.time.start + a, slices.slope.start + b]] += v;
+                                    acc[[slices.slope.start + b, slices.time.start + a]] += v;
                                 }
                             }
                             for a in 0..p_marginal {
@@ -846,11 +846,11 @@ impl SurvivalMarginalSlopeFamily {
                                 for qu in 0..3 {
                                     w2 += $w[[qu, 3]] * $lm[qu][a];
                                 }
-                                for b in 0..slices.logslope.len() {
+                                for b in 0..slices.slope.len() {
                                     let v = w2 * gr[b];
-                                    acc[[slices.marginal.start + a, slices.logslope.start + b]] +=
+                                    acc[[slices.marginal.start + a, slices.slope.start + b]] +=
                                         v;
-                                    acc[[slices.logslope.start + b, slices.marginal.start + a]] +=
+                                    acc[[slices.slope.start + b, slices.marginal.start + a]] +=
                                         v;
                                 }
                             }
@@ -1399,7 +1399,7 @@ impl SurvivalMarginalSlopeFamily {
         &self,
         block_states: &[ParameterBlockState],
     ) -> Result<FamilyEvaluation, String> {
-        if self.per_z_logslope_active() {
+        if self.per_z_slope_active() {
             return self.evaluate_blockwise_exact_newton_per_z(block_states);
         }
         if self.effective_flex_active(block_states)? {
@@ -1418,7 +1418,7 @@ impl SurvivalMarginalSlopeFamily {
             return self.evaluate_blockwise_exact_newton_dense(block_states);
         }
         // A follow-up-varying slope keeps the DENSE blockwise route whatever `p`
-        // is (gam#2765). The sparse/mixed routes below scatter the log-slope
+        // is (gam#2765). The sparse/mixed routes below scatter the slope
         // block as ONE `f_pipi[[3,3]]` rank-1 over ONE CSR — a shape that cannot
         // express `Σ_{c,d} f_pipi[[c,d]] · D_c ⊗ D_d` over the three channel
         // designs `X_cov ⊗ B_entry`, `X_cov ⊗ B_exit`, `X_cov ⊗ B′_exit`. They
@@ -1448,19 +1448,19 @@ impl SurvivalMarginalSlopeFamily {
             .marginal_design
             .as_sparse()
             .and_then(|s| s.to_csr_arc());
-        let logslope_csr = self
-            .logslope_layout
+        let slope_csr = self
+            .slope_layout
             .coefficient_design()
             .as_sparse()
             .and_then(|s| s.to_csr_arc());
 
-        match (&time_csrs, &marginal_csr, &logslope_csr) {
-            (Some(time), Some(marginal), Some(logslope)) => self
+        match (&time_csrs, &marginal_csr, &slope_csr) {
+            (Some(time), Some(marginal), Some(slope)) => self
                 .evaluate_blockwise_exact_newton_sparse(
                     block_states,
                     time,
                     marginal,
-                    logslope,
+                    slope,
                 ),
             (None, None, None) => self.evaluate_blockwise_exact_newton_dense(block_states),
             _ => {
@@ -1468,7 +1468,7 @@ impl SurvivalMarginalSlopeFamily {
                     block_states,
                     time_csrs.as_ref(),
                     marginal_csr.as_ref(),
-                    logslope_csr.as_ref(),
+                    slope_csr.as_ref(),
                 )
             }
         }
@@ -1480,14 +1480,14 @@ impl SurvivalMarginalSlopeFamily {
     ) -> Result<FamilyEvaluation, String> {
         if self.effective_flex_active(block_states)? || self.flex_timewiggle_active() {
             return Err(
-                "survival marginal-slope per-z logslope surfaces currently require the rigid row kernel"
+                "survival marginal-slope per-z slope surfaces currently require the rigid row kernel"
                     .to_string(),
             );
         }
         let slices = block_slices(self, block_states);
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         let k = self.score_dim();
         let beta_time = &block_states[0].beta;
         let probit_scale = self.probit_frailty_scale();
@@ -1517,7 +1517,7 @@ impl SurvivalMarginalSlopeFamily {
                 |range| -> Result<_, String> {
                     let mut acc = make_per_z_acc();
                     let mut row_jet_arena = RigidVectorRowWorkspace::new(&self.score_covariance)?;
-                    let mut logslope_workspace = self.logslope_row_workspace()?;
+                    let mut slope_workspace = self.slope_row_workspace()?;
                     for row in range {
                         let q0 = self.design_entry.dot_row(row, beta_time)
                             + self.offset_entry[row]
@@ -1527,10 +1527,10 @@ impl SurvivalMarginalSlopeFamily {
                             + block_states[1].eta[row];
                         let qd1 = self.design_derivative_exit.dot_row(row, beta_time)
                             + self.derivative_offset_exit[row];
-                        self.fill_logslope_values_for_row(
+                        self.fill_slope_values_for_row(
                             row,
                             block_states,
-                            &mut logslope_workspace,
+                            &mut slope_workspace,
                         )?;
                         let z_row = self.z.row(row);
                         let z = z_row.as_slice().ok_or_else(|| {
@@ -1541,7 +1541,7 @@ impl SurvivalMarginalSlopeFamily {
                             q0,
                             q1,
                             qd1,
-                            logslope_workspace.values(),
+                            slope_workspace.values(),
                             z,
                             self.weights[row],
                             self.event[row],
@@ -1565,7 +1565,7 @@ impl SurvivalMarginalSlopeFamily {
                             -(f_pi[0] + f_pi[1]),
                             &mut acc.2.view_mut(),
                         )?;
-                        let channel_rows = logslope_workspace.channel_rows();
+                        let channel_rows = slope_workspace.channel_rows();
                         for coord in 0..k {
                             let alpha = -f_pi[3 + coord];
                             for col in 0..p_g {
@@ -1663,7 +1663,7 @@ impl SurvivalMarginalSlopeFamily {
                 |range| -> Result<_, String> {
                     let mut acc = make_per_z_joint_acc();
                     let mut row_jet_arena = RigidVectorRowWorkspace::new(&self.score_covariance)?;
-                    let mut logslope_workspace = self.logslope_row_workspace()?;
+                    let mut slope_workspace = self.slope_row_workspace()?;
                     let mut j = Array2::<f64>::zeros((dim, total));
                     for row in range {
                         let q0 = self.design_entry.dot_row(row, beta_time)
@@ -1674,10 +1674,10 @@ impl SurvivalMarginalSlopeFamily {
                             + block_states[1].eta[row];
                         let qd1 = self.design_derivative_exit.dot_row(row, beta_time)
                             + self.derivative_offset_exit[row];
-                        self.fill_logslope_values_for_row(
+                        self.fill_slope_values_for_row(
                             row,
                             block_states,
-                            &mut logslope_workspace,
+                            &mut slope_workspace,
                         )?;
                         let z_row = self.z.row(row);
                         let z = z_row.as_slice().ok_or_else(|| {
@@ -1688,7 +1688,7 @@ impl SurvivalMarginalSlopeFamily {
                             q0,
                             q1,
                             qd1,
-                            logslope_workspace.values(),
+                            slope_workspace.values(),
                             z,
                             self.weights[row],
                             self.event[row],
@@ -1735,9 +1735,9 @@ impl SurvivalMarginalSlopeFamily {
                         for col in slices.marginal.clone() {
                             j[[1, col]] = j[[0, col]];
                         }
-                        let channel_rows = logslope_workspace.channel_rows();
+                        let channel_rows = slope_workspace.channel_rows();
                         for coord in 0..k {
-                            j.slice_mut(s![3 + coord, slices.logslope.clone()])
+                            j.slice_mut(s![3 + coord, slices.slope.clone()])
                                 .assign(&channel_rows.row(coord));
                         }
                         for a in 0..dim {
@@ -1822,7 +1822,7 @@ impl SurvivalMarginalSlopeFamily {
             Arc<faer::sparse::SparseRowMat<usize, f64>>,
         )>,
         marginal_csr: Option<&Arc<faer::sparse::SparseRowMat<usize, f64>>>,
-        logslope_csr: Option<&Arc<faer::sparse::SparseRowMat<usize, f64>>>,
+        slope_csr: Option<&Arc<faer::sparse::SparseRowMat<usize, f64>>>,
     ) -> Result<FamilyEvaluation, String> {
         use gam_linalg::matrix::SparseHessianAccumulator;
 
@@ -1837,7 +1837,7 @@ impl SurvivalMarginalSlopeFamily {
                     (Self::Dense(lhs), Self::Dense(rhs)) => *lhs += rhs,
                     (Self::Sparse(lhs), Self::Sparse(rhs)) => lhs.add_values(&rhs.values),
                     // Per-block accumulators all share one storage decision
-                    // (marginal_csr / logslope_csr) made at the top of
+                    // (marginal_csr / slope_csr) made at the top of
                     // `family_evaluate_blockwise`.
                     // SAFETY: mismatch ⇒ a newly added partial picked the
                     // wrong storage variant — invariant violation. Zeroing the
@@ -1858,7 +1858,7 @@ impl SurvivalMarginalSlopeFamily {
         let slices = block_slices(self, block_states);
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
 
         let time_pattern = time_csrs.map(|(entry, exit, deriv)| {
             SparseHessianAccumulator::from_multi_csr(
@@ -1868,8 +1868,8 @@ impl SurvivalMarginalSlopeFamily {
         });
         let marginal_pattern =
             marginal_csr.map(|csr| SparseHessianAccumulator::from_single_csr(csr.as_ref(), p_m));
-        let logslope_pattern =
-            logslope_csr.map(|csr| SparseHessianAccumulator::from_single_csr(csr.as_ref(), p_g));
+        let slope_pattern =
+            slope_csr.map(|csr| SparseHessianAccumulator::from_single_csr(csr.as_ref(), p_g));
 
         let e_sparse = time_csrs.map(|(entry, _, _)| {
             let sym = entry.symbolic();
@@ -1887,7 +1887,7 @@ impl SurvivalMarginalSlopeFamily {
             let sym = csr.symbolic();
             (sym.row_ptr(), sym.col_idx(), csr.val())
         });
-        let g_sparse = logslope_csr.map(|csr| {
+        let g_sparse = slope_csr.map(|csr| {
             let sym = csr.symbolic();
             (sym.row_ptr(), sym.col_idx(), csr.val())
         });
@@ -1916,7 +1916,7 @@ impl SurvivalMarginalSlopeFamily {
                     || BlockwiseHessianAccumulator::Dense(Array2::zeros((p_m, p_m))),
                     |pattern| BlockwiseHessianAccumulator::Sparse(pattern.empty_clone()),
                 ),
-                logslope_pattern.as_ref().map_or_else(
+                slope_pattern.as_ref().map_or_else(
                     || BlockwiseHessianAccumulator::Dense(Array2::zeros((p_g, p_g))),
                     |pattern| BlockwiseHessianAccumulator::Sparse(pattern.empty_clone()),
                 ),
@@ -1927,10 +1927,10 @@ impl SurvivalMarginalSlopeFamily {
             ll,
             grad_time,
             grad_marginal,
-            grad_logslope,
+            grad_slope,
             hess_time,
             hess_marginal,
-            hess_logslope,
+            hess_slope,
         ): MixedAcc = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
             self.n,
             |range| -> Result<_, String> {
@@ -1998,10 +1998,10 @@ impl SurvivalMarginalSlopeFamily {
                             }
                         }
                         None => {
-                            self.logslope_layout.coefficient_design()
+                            self.slope_layout.coefficient_design()
                                 .axpy_row_into(row, -f_pi[3], &mut acc.3.view_mut())
                                 .expect(
-                                    "survival logslope block axpy should match block dimensions",
+                                    "survival slope block axpy should match block dimensions",
                                 );
                         }
                     }
@@ -2094,17 +2094,17 @@ impl SurvivalMarginalSlopeFamily {
 
                     let alpha_g = f_pipi[[3, 3]];
                     match &mut acc.6 {
-                        BlockwiseHessianAccumulator::Dense(hess_logslope) => {
-                            self.logslope_layout.coefficient_design()
-                                .syr_row_into(row, alpha_g, &mut *hess_logslope)
+                        BlockwiseHessianAccumulator::Dense(hess_slope) => {
+                            self.slope_layout.coefficient_design()
+                                .syr_row_into(row, alpha_g, &mut *hess_slope)
                                 .expect(
-                                    "survival logslope block syr should match block dimensions",
+                                    "survival slope block syr should match block dimensions",
                                 );
                         }
-                        BlockwiseHessianAccumulator::Sparse(hess_logslope) => {
+                        BlockwiseHessianAccumulator::Sparse(hess_slope) => {
                             if alpha_g != 0.0 {
                                 let (g_rp, g_ci, g_v) = g_sparse.as_ref().expect(
-                                    "logslope sparse metadata should be present for sparse block",
+                                    "slope sparse metadata should be present for sparse block",
                                 );
                                 for pi in g_rp[row]..g_rp[row + 1] {
                                     let ca = g_ci[pi];
@@ -2112,7 +2112,7 @@ impl SurvivalMarginalSlopeFamily {
                                     for pj in g_rp[row]..g_rp[row + 1] {
                                         let cb = g_ci[pj];
                                         if ca <= cb {
-                                            hess_logslope.add_upper(ca, cb, xia * g_v[pj]);
+                                            hess_slope.add_upper(ca, cb, xia * g_v[pj]);
                                         }
                                     }
                                 }
@@ -2150,8 +2150,8 @@ impl SurvivalMarginalSlopeFamily {
                         hessian: hess_marginal.into_symmetric(),
                     },
                     BlockWorkingSet::ExactNewton {
-                        gradient: grad_logslope,
-                        hessian: hess_logslope.into_symmetric(),
+                        gradient: grad_slope,
+                        hessian: hess_slope.into_symmetric(),
                     },
                 ];
                 if let Some(range) = slices.score_warp.as_ref() {
@@ -2212,10 +2212,10 @@ impl SurvivalMarginalSlopeFamily {
         let slices = block_slices(self, block_states);
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         let mut hess_time = Array2::<f64>::zeros((p_t, p_t));
         let mut hess_marginal = Array2::<f64>::zeros((p_m, p_m));
-        let mut hess_logslope = Array2::<f64>::zeros((p_g, p_g));
+        let mut hess_slope = Array2::<f64>::zeros((p_g, p_g));
         for row in 0..cache.n {
             let h = &cache.hessians[row];
             let mut h_arr = Array2::<f64>::zeros((P, P));
@@ -2229,7 +2229,7 @@ impl SurvivalMarginalSlopeFamily {
                 &h_arr,
                 &mut hess_time,
                 &mut hess_marginal,
-                &mut hess_logslope,
+                &mut hess_slope,
             );
         }
 
@@ -2243,8 +2243,8 @@ impl SurvivalMarginalSlopeFamily {
                 hessian: SymmetricMatrix::Dense(hess_marginal),
             },
             BlockWorkingSet::ExactNewton {
-                gradient: joint_gradient.slice(s![slices.logslope.clone()]).to_owned(),
-                hessian: SymmetricMatrix::Dense(hess_logslope),
+                gradient: joint_gradient.slice(s![slices.slope.clone()]).to_owned(),
+                hessian: SymmetricMatrix::Dense(hess_slope),
             },
         ];
         if let Some(range) = slices.score_warp.as_ref() {
@@ -2279,14 +2279,14 @@ impl SurvivalMarginalSlopeFamily {
             Arc<faer::sparse::SparseRowMat<usize, f64>>,
         ),
         marginal_csr: &Arc<faer::sparse::SparseRowMat<usize, f64>>,
-        logslope_csr: &Arc<faer::sparse::SparseRowMat<usize, f64>>,
+        slope_csr: &Arc<faer::sparse::SparseRowMat<usize, f64>>,
     ) -> Result<FamilyEvaluation, String> {
         use gam_linalg::matrix::SparseHessianAccumulator;
 
         let slices = block_slices(self, block_states);
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
 
         let (ref csr_entry, ref csr_exit, ref csr_deriv) = *time_csrs;
 
@@ -2297,8 +2297,8 @@ impl SurvivalMarginalSlopeFamily {
         );
         let pattern_marginal =
             SparseHessianAccumulator::from_single_csr(marginal_csr.as_ref(), p_m);
-        let pattern_logslope =
-            SparseHessianAccumulator::from_single_csr(logslope_csr.as_ref(), p_g);
+        let pattern_slope =
+            SparseHessianAccumulator::from_single_csr(slope_csr.as_ref(), p_g);
 
         // Pre-extract CSR symbolic parts for zero-overhead inner loop access.
         let e_sym = csr_entry.symbolic();
@@ -2321,10 +2321,10 @@ impl SurvivalMarginalSlopeFamily {
         let m_ci = m_sym.col_idx();
         let m_v = marginal_csr.val();
 
-        let g_sym = logslope_csr.symbolic();
+        let g_sym = slope_csr.symbolic();
         let g_rp = g_sym.row_ptr();
         let g_ci = g_sym.col_idx();
-        let g_v = logslope_csr.val();
+        let g_v = slope_csr.val();
 
         // Accumulator type: gradients dense, Hessians sparse value buffers.
         type SAcc = (
@@ -2345,7 +2345,7 @@ impl SurvivalMarginalSlopeFamily {
                 Array1::zeros(p_g),
                 pattern_time.empty_clone(),
                 pattern_marginal.empty_clone(),
-                pattern_logslope.empty_clone(),
+                pattern_slope.empty_clone(),
             )
         };
 
@@ -2353,10 +2353,10 @@ impl SurvivalMarginalSlopeFamily {
             ll,
             grad_time,
             grad_marginal,
-            grad_logslope,
+            grad_slope,
             acc_time,
             acc_marginal,
-            acc_logslope,
+            acc_slope,
         ): SAcc = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
             self.n,
             |range| -> Result<_, String> {
@@ -2442,7 +2442,7 @@ impl SurvivalMarginalSlopeFamily {
                         }
                     }
 
-                    // ── logslope Hessian: symmetric rank-1 scatter ───────
+                    // ── slope Hessian: symmetric rank-1 scatter ───────
                     let alpha_g = f_pipi[[3, 3]];
                     if alpha_g != 0.0 {
                         let hg = &mut acc.6;
@@ -2490,8 +2490,8 @@ impl SurvivalMarginalSlopeFamily {
                         hessian: SymmetricMatrix::Sparse(acc_marginal.into_sparse_col_mat()),
                     },
                     BlockWorkingSet::ExactNewton {
-                        gradient: grad_logslope,
-                        hessian: SymmetricMatrix::Sparse(acc_logslope.into_sparse_col_mat()),
+                        gradient: grad_slope,
+                        hessian: SymmetricMatrix::Sparse(acc_slope.into_sparse_col_mat()),
                     },
                 ];
                 if let Some(range) = slices.score_warp.as_ref() {

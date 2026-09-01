@@ -79,9 +79,9 @@ pub struct BernoulliMarginalSlopeSavedAloReplay {
 pub(crate) struct BernoulliMarginalSlopeSavedAloReplayInput<'a> {
     pub base_link: &'a InverseLink,
     pub marginal_design: &'a DesignMatrix,
-    pub logslope_design: &'a DesignMatrix,
+    pub slope_design: &'a DesignMatrix,
     pub marginal_beta: &'a Array1<f64>,
-    pub logslope_beta: &'a Array1<f64>,
+    pub slope_beta: &'a Array1<f64>,
     pub score_warp_beta: Option<&'a Array1<f64>>,
     pub link_deviation_beta: Option<&'a Array1<f64>>,
     pub marginal_eta: &'a Array1<f64>,
@@ -260,30 +260,30 @@ pub(crate) fn replay_saved_bernoulli_marginal_slope_alo(
     if n == 0
         || input.prior_weights.len() != n
         || input.marginal_design.nrows() != n
-        || input.logslope_design.nrows() != n
+        || input.slope_design.nrows() != n
         || input.marginal_eta.len() != n
         || input.slope.len() != n
         || input.latent_z.len() != n
     {
         return Err(format!(
-            "saved BMS ALO row mismatch: response={n}, weights={}, marginal_design={}, logslope_design={}, marginal_eta={}, slope={}, z={}",
+            "saved BMS ALO row mismatch: response={n}, weights={}, marginal_design={}, slope_design={}, marginal_eta={}, slope={}, z={}",
             input.prior_weights.len(),
             input.marginal_design.nrows(),
-            input.logslope_design.nrows(),
+            input.slope_design.nrows(),
             input.marginal_eta.len(),
             input.slope.len(),
             input.latent_z.len(),
         ));
     }
     if input.marginal_design.ncols() != input.marginal_beta.len()
-        || input.logslope_design.ncols() != input.logslope_beta.len()
+        || input.slope_design.ncols() != input.slope_beta.len()
     {
         return Err(format!(
-            "saved BMS ALO affine frame mismatch: marginal design/beta={}/{}, logslope design/beta={}/{}",
+            "saved BMS ALO affine frame mismatch: marginal design/beta={}/{}, slope design/beta={}/{}",
             input.marginal_design.ncols(),
             input.marginal_beta.len(),
-            input.logslope_design.ncols(),
-            input.logslope_beta.len(),
+            input.slope_design.ncols(),
+            input.slope_beta.len(),
         ));
     }
     if let Some((row, weight)) = input
@@ -313,7 +313,7 @@ pub(crate) fn replay_saved_bernoulli_marginal_slope_alo(
         ("slope", input.slope),
         ("latent z", input.latent_z),
         ("marginal beta", input.marginal_beta),
-        ("logslope beta", input.logslope_beta),
+        ("slope beta", input.slope_beta),
     ] {
         if let Some((row, value)) = values
             .iter()
@@ -389,7 +389,7 @@ pub(crate) fn replay_saved_bernoulli_marginal_slope_alo(
         gaussian_frailty_sd: input.gaussian_frailty_sd,
         base_link: input.base_link.clone(),
         marginal_design: input.marginal_design.clone(),
-        logslope_design: input.logslope_design.clone(),
+        slope_design: input.slope_design.clone(),
         score_warp,
         link_dev,
         policy: policy.clone(),
@@ -407,7 +407,7 @@ pub(crate) fn replay_saved_bernoulli_marginal_slope_alo(
             eta: input.marginal_eta.clone(),
         },
         ParameterBlockState {
-            beta: input.logslope_beta.clone(),
+            beta: input.slope_beta.clone(),
             eta: input.slope.clone(),
         },
     ];
@@ -454,7 +454,7 @@ pub(crate) fn replay_saved_bernoulli_marginal_slope_alo(
         }
         let mut coordinate_values = Array1::<f64>::zeros(primary.total);
         coordinate_values[primary.q] = input.marginal_eta[row];
-        coordinate_values[primary.logslope] = input.slope[row];
+        coordinate_values[primary.slope] = input.slope[row];
         if let (Some(range), Some(beta)) = (primary.h.as_ref(), input.score_warp_beta) {
             coordinate_values
                 .slice_mut(ndarray::s![range.clone()])
@@ -620,9 +620,9 @@ mod tests {
             anchor_components: Vec::new(),
         };
         let marginal_design = DesignMatrix::Dense(DenseDesignMatrix::from(Array2::ones((1, 1))));
-        let logslope_design = DesignMatrix::Dense(DenseDesignMatrix::from(Array2::ones((1, 1))));
+        let slope_design = DesignMatrix::Dense(DenseDesignMatrix::from(Array2::ones((1, 1))));
         let marginal_beta = Array1::from_vec(vec![marginal_eta]);
-        let logslope_beta = Array1::from_vec(vec![slope]);
+        let slope_beta = Array1::from_vec(vec![slope]);
         let score_warp_beta = Array1::from_vec(vec![score_beta]);
         let marginal_rows = Array1::from_vec(vec![marginal_eta]);
         let slope_rows = Array1::from_vec(vec![slope]);
@@ -633,9 +633,9 @@ mod tests {
             replay_saved_bernoulli_marginal_slope_alo(BernoulliMarginalSlopeSavedAloReplayInput {
                 base_link: &InverseLink::Standard(StandardLink::Probit),
                 marginal_design: &marginal_design,
-                logslope_design: &logslope_design,
+                slope_design: &slope_design,
                 marginal_beta: &marginal_beta,
-                logslope_beta: &logslope_beta,
+                slope_beta: &slope_beta,
                 score_warp_beta: Some(&score_warp_beta),
                 link_deviation_beta: None,
                 marginal_eta: &marginal_rows,

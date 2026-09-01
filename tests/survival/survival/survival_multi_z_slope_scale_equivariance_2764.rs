@@ -1,4 +1,4 @@
-//! gam#2764 — the block is named "logslope" and the map is the identity: the
+//! gam#2764 — the block is named "slope" and the map is the identity: the
 //! two properties that decide whether that is a defect or a name.
 //!
 //! The issue proposes making the map a genuine log, on two grounds: a penalty on

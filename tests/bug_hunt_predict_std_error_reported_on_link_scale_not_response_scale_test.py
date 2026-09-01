@@ -55,10 +55,10 @@ _Z_90 = 1.6448536269514722
 
 def _predict_table(model, grid, level=0.9):
     out = model.predict({"x": grid}, interval=level, return_type="dict")
-    mean = np.asarray(out["mean"], dtype=float)
-    se = np.asarray(out["std_error"], dtype=float)
-    lower = np.asarray(out["mean_lower"], dtype=float)
-    upper = np.asarray(out["mean_upper"], dtype=float)
+    mean = np.asarray(out["posterior_mean"], dtype=float)
+    se = np.asarray(out["posterior_mean_standard_error"], dtype=float)
+    lower = np.asarray(out["posterior_mean_lower"], dtype=float)
+    upper = np.asarray(out["posterior_mean_upper"], dtype=float)
     return mean, se, lower, upper
 
 

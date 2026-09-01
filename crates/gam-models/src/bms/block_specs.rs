@@ -34,19 +34,19 @@ pub(crate) const BMS_PROBIT_SEPARATION_ETA_INF: f64 = 35.0;
 // into the lowest-priority block that still spans the aliased direction. The
 // values below form a single ordered ladder so the relationships that the
 // architecture depends on (anchors > parametric surfaces > flex deviations,
-// marginal > logslope, score_warp > link_dev) are expressed once here rather
+// marginal > slope, score_warp > link_dev) are expressed once here rather
 // than re-derived from comments at each `gauge_priority:` site. The ladder
 // mirrors the survival marginal-slope entry (time=200 / marginal=150 /
-// logslope=120 / score_warp=80 / link_dev=60).
+// slope=120 / score_warp=80 / link_dev=60).
 
 /// Audit-only anchor blocks sit at the top of the ladder so the candidate
 /// flex block always yields to them in the cross-block identifiability audit.
 pub(super) const GAUGE_PRIORITY_ANCHOR: u8 = 200;
-/// Marginal surface: strictly above the logslope surface so a shared affine
-/// direction is demoted out of logslope, never out of marginal.
+/// Marginal surface: strictly above the slope surface so a shared affine
+/// direction is demoted out of slope, never out of marginal.
 pub(super) const GAUGE_PRIORITY_MARGINAL: u8 = 150;
-/// Logslope surface: one rung below the marginal surface.
-pub(super) const GAUGE_PRIORITY_LOGSLOPE: u8 = 120;
+/// Slope surface: one rung below the marginal surface.
+pub(super) const GAUGE_PRIORITY_SLOPE: u8 = 120;
 /// Candidate flex block under audit: below every parametric anchor so the
 /// audit demotes the candidate when it aliases an anchor.
 pub(super) const GAUGE_PRIORITY_CANDIDATE_FLEX: u8 = 100;
@@ -75,7 +75,7 @@ pub(crate) const EXACT_SPATIAL_OUTER_TOL_FLOOR: f64 = 1e-6;
 //
 // where
 //   q_i   = marginal_design[i,:] · β_m + offset_m[i]      (marginal η)
-//   g_i   = logslope_design[i,:] · β_s + offset_s[i]      (log-slope η)
+//   g_i   = slope_design[i,:] · β_s + offset_s[i]      (slope η)
 //   s     = probit_frailty_scale(gaussian_frailty_sd)
 //   c_i   = sqrt(1 + (s·g_i)²)
 //
@@ -84,8 +84,8 @@ pub(crate) const EXACT_SPATIAL_OUTER_TOL_FLOOR: f64 = 1e-6;
 //   Marginal block  → ∂η_i/∂β_m = c_i · M_i
 //     (M_i = marginal_design row i; c_i is β-dependent but does not involve β_m)
 //
-//   Logslope block  → ∂η_i/∂β_s = (q_i · s²·g_i / c_i + s·z_i) · G_i
-//     (G_i = logslope_design row i)
+//   Slope block  → ∂η_i/∂β_s = (q_i · s²·g_i / c_i + s·z_i) · G_i
+//     (G_i = slope_design row i)
 //
 // score_warp_dev and link_dev blocks use IFT-corrected η, but their
 // contribution to the identifiability audit is captured by the raw design
@@ -108,8 +108,8 @@ pub(crate) const EXACT_SPATIAL_OUTER_TOL_FLOOR: f64 = 1e-6;
 pub struct BmsMarginalJacobian {
     /// Dense marginal design: n × p_m.
     pub marginal_dense: Arc<Array2<f64>>,
-    /// Dense logslope design: n × p_s.
-    pub logslope_dense: Arc<Array2<f64>>,
+    /// Dense slope design: n × p_s.
+    pub slope_dense: Arc<Array2<f64>>,
     pub offset_m: Array1<f64>,
     pub offset_s: Array1<f64>,
     /// Number of marginal columns (= size of β_m slice in the full β vector).
@@ -119,14 +119,14 @@ pub struct BmsMarginalJacobian {
 impl BmsMarginalJacobian {
     pub fn new(
         marginal_dense: Arc<Array2<f64>>,
-        logslope_dense: Arc<Array2<f64>>,
+        slope_dense: Arc<Array2<f64>>,
         offset_m: Array1<f64>,
         offset_s: Array1<f64>,
         p_marginal: usize,
     ) -> Self {
         Self {
             marginal_dense,
-            logslope_dense,
+            slope_dense,
             offset_m,
             offset_s,
             p_marginal,
@@ -143,7 +143,7 @@ impl BlockEffectiveJacobian for BmsMarginalJacobian {
         let beta = state.beta;
         let s = state.probit_frailty_scale;
         let p_m = self.p_marginal;
-        let p_s_block = self.logslope_dense.ncols();
+        let p_s_block = self.slope_dense.ncols();
         let beta_s_raw = if beta.len() > p_m {
             &beta[p_m..]
         } else {
@@ -158,17 +158,17 @@ impl BlockEffectiveJacobian for BmsMarginalJacobian {
         // ∂η_i/∂β_m = c_i · M[i,:], with c_i = sqrt(1 + (s·g_i)²) and
         //   g_i = G[i, :p_s_use] · β_s + offset_s[i].
         //
-        // This block owns the logslope design and offset, so g_i — and hence
+        // This block owns the slope design and offset, so g_i — and hence
         // c_i — is fully self-computable at the current β for every row,
         // including β = 0 (where g_i = offset_s[i], which carries the fitted
-        // logslope baseline and is generically nonzero).  There is no external
+        // slope baseline and is generically nonzero).  There is no external
         // scalar this block cannot reconstruct, so the Jacobian is evaluated
         // directly from owned data with no caller-supplied contract.
         let mut out = Array2::<f64>::zeros((rows.end - rows.start, p_block));
         for i in rows.clone() {
             let g_i = self.offset_s[i]
                 + self
-                    .logslope_dense
+                    .slope_dense
                     .row(i)
                     .slice(ndarray::s![..p_s_use])
                     .dot(&ArrayView1::from(beta_s));
@@ -199,7 +199,7 @@ impl BlockEffectiveJacobian for BmsMarginalJacobian {
     }
 }
 
-/// β-dependent Jacobian for the BMS logslope block.
+/// β-dependent Jacobian for the BMS slope block.
 ///
 /// ∂η_i/∂β_s = (q_i · s²·g_i / c_i + s·z_i) · G\[i,:\]
 /// where q_i = M\[i,:\] · β_m + offset_m\[i\],
@@ -210,11 +210,11 @@ impl BlockEffectiveJacobian for BmsMarginalJacobian {
 /// `probit_frailty_scale` is read from the evaluation state at call time.
 ///
 /// Designs are pre-densified at construction to avoid repeated materialisation.
-pub struct BmsLogslopeJacobian {
+pub struct BmsSlopeJacobian {
     /// Dense marginal design: n × p_m.
     pub marginal_dense: Arc<Array2<f64>>,
-    /// Dense logslope design: n × p_s.
-    pub logslope_dense: Arc<Array2<f64>>,
+    /// Dense slope design: n × p_s.
+    pub slope_dense: Arc<Array2<f64>>,
     pub offset_m: Array1<f64>,
     pub offset_s: Array1<f64>,
     pub z: Arc<Array1<f64>>,
@@ -222,10 +222,10 @@ pub struct BmsLogslopeJacobian {
     pub p_marginal: usize,
 }
 
-impl BmsLogslopeJacobian {
+impl BmsSlopeJacobian {
     pub fn new(
         marginal_dense: Arc<Array2<f64>>,
-        logslope_dense: Arc<Array2<f64>>,
+        slope_dense: Arc<Array2<f64>>,
         offset_m: Array1<f64>,
         offset_s: Array1<f64>,
         z: Arc<Array1<f64>>,
@@ -233,7 +233,7 @@ impl BmsLogslopeJacobian {
     ) -> Self {
         Self {
             marginal_dense,
-            logslope_dense,
+            slope_dense,
             offset_m,
             offset_s,
             z,
@@ -242,7 +242,7 @@ impl BmsLogslopeJacobian {
     }
 }
 
-impl BlockEffectiveJacobian for BmsLogslopeJacobian {
+impl BlockEffectiveJacobian for BmsSlopeJacobian {
     fn effective_jacobian_rows(
         &self,
         state: &FamilyLinearizationState<'_>,
@@ -258,10 +258,10 @@ impl BlockEffectiveJacobian for BmsLogslopeJacobian {
         } else {
             &[][..]
         };
-        let p_s_block = self.logslope_dense.ncols();
+        let p_s_block = self.slope_dense.ncols();
         let p_s_use = p_s_block.min(beta_s_raw.len());
         let beta_s = &beta_s_raw[..p_s_use];
-        let n = self.logslope_dense.nrows();
+        let n = self.slope_dense.nrows();
         let rows = rows.start.min(n)..rows.end.min(n);
 
         // ∂η_i/∂β_s = (q_i · s²·g_i / c_i + s·z_i) · G[i,:] where
@@ -270,10 +270,10 @@ impl BlockEffectiveJacobian for BmsLogslopeJacobian {
         //   c_i = sqrt(1 + (s·g_i)²),
         //   z_i = self.z[i].
         //
-        // This block owns the marginal design, logslope design, both offsets,
+        // This block owns the marginal design, slope design, both offsets,
         // and z, so q_i, g_i, c_i, z_i are all closed-form functions of the
         // current β and owned data — for every row at every β, including β = 0
-        // (where g_i = offset_s[i] carries the nonzero fitted logslope
+        // (where g_i = offset_s[i] carries the nonzero fitted slope
         // baseline).  The Jacobian is therefore evaluated directly from owned
         // data with no caller-supplied scalar contract.
         let mut out = Array2::<f64>::zeros((rows.end - rows.start, p_s_block));
@@ -286,7 +286,7 @@ impl BlockEffectiveJacobian for BmsLogslopeJacobian {
                     .dot(&ArrayView1::from(beta_m));
             let g_i = self.offset_s[i]
                 + self
-                    .logslope_dense
+                    .slope_dense
                     .row(i)
                     .slice(ndarray::s![..p_s_use])
                     .dot(&ArrayView1::from(beta_s));
@@ -296,7 +296,7 @@ impl BlockEffectiveJacobian for BmsLogslopeJacobian {
             // per-row scalar factor: q_i · s²·g_i / c_i + s·z_i
             let factor = q_i * s * s * g_i / c_i + s * z_i;
             // J[i,:] = factor · G[i,:]
-            let g_row = self.logslope_dense.row(i);
+            let g_row = self.slope_dense.row(i);
             out.row_mut(i - rows.start)
                 .assign(&g_row.mapv(|x| factor * x));
         }
@@ -308,9 +308,9 @@ impl BlockEffectiveJacobian for BmsLogslopeJacobian {
     }
 
     fn locks_raw_width_reduction(&self) -> bool {
-        // The BMS family reads its raw-width internal `logslope_design` and
+        // The BMS family reads its raw-width internal `slope_design` and
         // `validate_exact_block_state_shapes` asserts `beta.len() ==
-        // logslope_design.ncols()`. An intercept-only logslope (`logslope_formula
+        // slope_design.ncols()`. An intercept-only slope (`slope_formula
         // = "1"`) is a constant column perfectly aliased with the marginal
         // intercept; the effective reduced-reparam leaves a width-1 block at raw
         // width (a zero-width reduction would delete the score-effect surface), so
@@ -356,37 +356,37 @@ pub(crate) fn widen_marginal_dense_with_influence(
 }
 
 /// Tolerance (relative to the dominant retained eigenvalue) below which a
-/// reduced-basis direction of the W-orthogonalised effective logslope Gram is
+/// reduced-basis direction of the W-orthogonalised effective slope Gram is
 /// treated as a confounded null direction and dropped. Directions whose
 /// effective weighted image is (near-)explained by the marginal span collapse to
-/// ~0 eigenvalue in `Gtt` (see [`build_reduced_logslope_reparam`]); this keeps
+/// ~0 eigenvalue in `Gtt` (see [`build_reduced_slope_reparam`]); this keeps
 /// the cut well above floating-point noise but well below any genuine surviving
-/// logslope curvature.
-pub(crate) const LOGSLOPE_REDUCED_BASIS_RELATIVE_TOL: f64 = 1.0e-6;
+/// slope curvature.
+pub(crate) const SLOPE_REDUCED_BASIS_RELATIVE_TOL: f64 = 1.0e-6;
 
-/// An exact reduced-basis reparameterization of the BMS logslope design through
-/// the family's OWN internal `logslope_design` geometry, expressed as a single
-/// linear map `T` (`p_logslope × r`, `r ≤ p_logslope`).
+/// An exact reduced-basis reparameterization of the BMS slope design through
+/// the family's OWN internal `slope_design` geometry, expressed as a single
+/// linear map `T` (`p_slope × r`, `r ≤ p_slope`).
 ///
 /// # Why a reduced basis (not a dense design swap)
 ///
-/// The structural confound is that the score-weighted logslope channel
+/// The structural confound is that the score-weighted slope channel
 /// `diag(factor)·G·β_s` overlaps the effective marginal channel `diag(c)·M·β_m`
 /// in the PIRLS row metric `W`, leaving the joint penalised Hessian rank-soft
 /// along the shared direction. The shared-solver primitive
 /// [`OrthogonalReparam`](gam_solve::orthogonal_reparam::OrthogonalReparam)
 /// forms `C̃ = C − M·B`, exactly W-orthogonal to `span(M)` — but `C̃` is a dense
 /// design the BMS family's row kernel does NOT consume: the family reads
-/// `η_logslope = G·β_s` from its own `logslope_design` and reconstructs the
+/// `η_slope = G·β_s` from its own `slope_design` and reconstructs the
 /// per-row Jacobian `factor_i · G_i` from that same matrix. A block-level design
 /// swap is therefore ignored by the family, and feeding a rank-deficient `C̃` at
 /// full width desynchronises the inner identifiable-subspace reduction from the
 /// stored design width.
 ///
 /// This builds instead a TRUE reparameterization the family consumes: a
-/// full-rank reduced logslope design `G_reduced = G·T` (width `r`) plus the
+/// full-rank reduced slope design `G_reduced = G·T` (width `r`) plus the
 /// penalty projection `S_reduced = Tᵀ S T`. The map is constructed so that the
-/// directions of raw logslope coefficient space whose effective weighted image
+/// directions of raw slope coefficient space whose effective weighted image
 /// is W-explained by the marginal span are removed (they carry ~zero curvature
 /// in the W-orthogonalised effective Gram), and the surviving `r` directions are
 /// full-rank.
@@ -400,30 +400,30 @@ pub(crate) const LOGSLOPE_REDUCED_BASIS_RELATIVE_TOL: f64 = 1.0e-6;
 ///     G_eff = diag(f) · G        (n × p_g),   f_i = q_i·s²·g_i/c_i + s·z_i
 /// ```
 ///
-/// In the row metric `W` the component of the effective logslope design that is
+/// In the row metric `W` the component of the effective slope design that is
 /// W-orthogonal to `span(M_eff)` has the raw-coordinate Gram
 ///
 /// ```text
 ///     Gtt = G_effᵀ W G_eff − (G_effᵀ W M_eff)(M_effᵀ W M_eff + εI)⁻¹(M_effᵀ W G_eff)
 /// ```
 ///
-/// (a `p_g × p_g` PSD matrix in the raw logslope coefficient coordinates). Its
-/// range = the logslope directions that survive the confound removal; its null
+/// (a `p_g × p_g` PSD matrix in the raw slope coefficient coordinates). Its
+/// range = the slope directions that survive the confound removal; its null
 /// space = the confounded directions absorbed by the marginal span. The reduced
 /// transform `T` is the orthonormal eigenbasis of `Gtt` for eigenvalues above a
 /// relative tolerance; `r = rank(Gtt)`. The new design `G_reduced = G·T`, the
 /// reparameterized penalty `S_reduced = Tᵀ S T`, and the round-trip
-/// `β_logslope = T·β'` make the family's geometry consistent at width `r` and
-/// recover the original-basis logslope coefficients for prediction/reporting.
+/// `β_slope = T·β'` make the family's geometry consistent at width `r` and
+/// recover the original-basis slope coefficients for prediction/reporting.
 #[derive(Debug, Clone)]
-pub(super) struct ReducedLogslopeReparam {
-    /// Reduced transform `T` (`p_logslope × r`). `G_reduced = G·T`,
-    /// `β_logslope = T·β'`, `S_reduced = Tᵀ S T`.
+pub(super) struct ReducedSlopeReparam {
+    /// Reduced transform `T` (`p_slope × r`). `G_reduced = G·T`,
+    /// `β_slope = T·β'`, `S_reduced = Tᵀ S T`.
     transform: Array2<f64>,
 }
 
-impl ReducedLogslopeReparam {
-    /// Original (full) logslope width `p_logslope`.
+impl ReducedSlopeReparam {
+    /// Original (full) slope width `p_slope`.
     #[inline]
     pub(super) fn original_cols(&self) -> usize {
         self.transform.nrows()
@@ -435,16 +435,16 @@ impl ReducedLogslopeReparam {
         self.transform.ncols()
     }
 
-    /// Map a reduced-basis logslope coefficient `β'` (length `r`) back to the
-    /// original logslope basis `β_logslope = T·β'` (length `p_logslope`), so
+    /// Map a reduced-basis slope coefficient `β'` (length `r`) back to the
+    /// original slope basis `β_slope = T·β'` (length `p_slope`), so
     /// prediction/reporting are unchanged-in-meaning.
-    pub(super) fn recover_original_logslope_beta(
+    pub(super) fn recover_original_slope_beta(
         &self,
         beta_reduced: &Array1<f64>,
     ) -> Result<Array1<f64>, String> {
         if beta_reduced.len() != self.reduced_cols() {
             return Err(format!(
-                "reduced logslope reparam: β' length ({}) != reduced width ({})",
+                "reduced slope reparam: β' length ({}) != reduced width ({})",
                 beta_reduced.len(),
                 self.reduced_cols()
             ));
@@ -453,66 +453,66 @@ impl ReducedLogslopeReparam {
     }
 }
 
-/// Build the reduced-basis logslope reparameterization (see
-/// [`ReducedLogslopeReparam`]) from the rigid-pilot EFFECTIVE Jacobian geometry,
+/// Build the reduced-basis slope reparameterization (see
+/// [`ReducedSlopeReparam`]) from the rigid-pilot EFFECTIVE Jacobian geometry,
 /// in the PIRLS row metric `W`. Extracts the dense pilot designs and delegates
-/// the geometry to [`reduced_logslope_transform_effective`]. Returns `Ok(None)`
-/// when there is no logslope/marginal span or no effective-confounded direction
+/// the geometry to [`reduced_slope_transform_effective`]. Returns `Ok(None)`
+/// when there is no slope/marginal span or no effective-confounded direction
 /// to remove (`r == p_g`); the caller then keeps the raw design. A fully
-/// confounded block (`r == 0`: the entire effective logslope image is
+/// confounded block (`r == 0`: the entire effective slope image is
 /// W-explained by the effective marginal span) is an error: the data identify
 /// only the sum of the marginal and score-slope surfaces, so any fitted
 /// decomposition would be an arbitrary penalty artifact.
-fn build_reduced_logslope_reparam(
+fn build_reduced_slope_reparam(
     marginal_design: &TermCollectionDesign,
-    logslope_design: &TermCollectionDesign,
+    slope_design: &TermCollectionDesign,
     z: &Array1<f64>,
     row_metric: &Array1<f64>,
     marginal_offset: &Array1<f64>,
-    logslope_offset: &Array1<f64>,
+    slope_offset: &Array1<f64>,
     marginal_baseline: f64,
-    logslope_baseline: f64,
+    baseline_slope: f64,
     probit_scale: f64,
-) -> Result<Option<ReducedLogslopeReparam>, String> {
+) -> Result<Option<ReducedSlopeReparam>, String> {
     let marginal = marginal_design
         .design
-        .try_to_dense_arc("build_reduced_logslope_reparam::marginal")?;
-    let logslope = logslope_design
+        .try_to_dense_arc("build_reduced_slope_reparam::marginal")?;
+    let slope = slope_design
         .design
-        .try_to_dense_arc("build_reduced_logslope_reparam::logslope")?;
+        .try_to_dense_arc("build_reduced_slope_reparam::slope")?;
     let n = marginal.nrows();
-    if logslope.nrows() != n
+    if slope.nrows() != n
         || z.len() != n
         || row_metric.len() != n
         || marginal_offset.len() != n
-        || logslope_offset.len() != n
+        || slope_offset.len() != n
     {
         return Err(format!(
-            "reduced logslope reparam row mismatch: marginal={}, logslope={}, z={}, row_metric={}, marginal_offset={}, logslope_offset={}",
+            "reduced slope reparam row mismatch: marginal={}, slope={}, z={}, row_metric={}, marginal_offset={}, slope_offset={}",
             marginal.nrows(),
-            logslope.nrows(),
+            slope.nrows(),
             z.len(),
             row_metric.len(),
             marginal_offset.len(),
-            logslope_offset.len(),
+            slope_offset.len(),
         ));
     }
     let p_m = marginal.ncols();
-    let p_g = logslope.ncols();
+    let p_g = slope.ncols();
     if p_m == 0 || p_g == 0 {
         return Ok(None);
     }
     if !marginal_baseline.is_finite()
-        || !logslope_baseline.is_finite()
+        || !baseline_slope.is_finite()
         || !probit_scale.is_finite()
         || probit_scale <= 0.0
         || z.iter().any(|v| !v.is_finite())
         || row_metric.iter().any(|v| !v.is_finite() || *v < 0.0)
         || marginal_offset.iter().any(|v| !v.is_finite())
-        || logslope_offset.iter().any(|v| !v.is_finite())
+        || slope_offset.iter().any(|v| !v.is_finite())
     {
         return Err(
-            "reduced logslope reparam requires finite pilot geometry and finite non-negative row metric"
+            "reduced slope reparam requires finite pilot geometry and finite non-negative row metric"
                 .to_string(),
         );
     }
@@ -521,30 +521,30 @@ fn build_reduced_logslope_reparam(
     // BMS Jacobians, not the raw design. At the rigid pilot,
     //   ∂η_i/∂β_m = c_i · M_i,   c_i = sqrt(1 + (s·g_i)²)
     //   ∂η_i/∂β_s = f_i · G_i,   f_i = q_i·s²·g_i/c_i + s·z_i
-    // so a raw logslope direction `v` is rank-soft in the joint Hessian iff its
+    // so a raw slope direction `v` is rank-soft in the joint Hessian iff its
     // EFFECTIVE image `diag(f)·G·v` is W-explained by `span(diag(c)·M)` — NOT iff
     // raw `G·v` is W-explained by `span(M)`. Auditing the raw design removes the
     // wrong directions; the reduced basis is built from the effective Schur Gram.
-    // The pure-array geometry lives in `reduced_logslope_transform_effective` so
+    // The pure-array geometry lives in `reduced_slope_transform_effective` so
     // it can be unit-tested directly against the raw-vs-effective counterexample.
-    match reduced_logslope_transform_effective(
+    match reduced_slope_transform_effective(
         marginal.view(),
-        logslope.view(),
+        slope.view(),
         z,
         row_metric,
         marginal_offset,
-        logslope_offset,
+        slope_offset,
         marginal_baseline,
-        logslope_baseline,
+        baseline_slope,
         probit_scale,
     )? {
-        ReducedLogslopeOutcome::Reduced(transform) => {
-            Ok(Some(ReducedLogslopeReparam { transform }))
+        ReducedSlopeOutcome::Reduced(transform) => {
+            Ok(Some(ReducedSlopeReparam { transform }))
         }
-        ReducedLogslopeOutcome::FullRank => Ok(None),
-        ReducedLogslopeOutcome::FullyConfounded => Err(
+        ReducedSlopeOutcome::FullRank => Ok(None),
+        ReducedSlopeOutcome::FullyConfounded => Err(
             "BMS score-slope block is fully confounded with the marginal index: every \
-             effective logslope direction diag(f)·G·v is W-explained by the effective \
+             effective slope direction diag(f)·G·v is W-explained by the effective \
              marginal span at the rigid pilot, so the data identify only the sum of the \
              marginal and score-slope surfaces and the smoothing penalty would select an \
              arbitrary decomposition between them. Refusing to fit; remove the score-slope \
@@ -554,60 +554,60 @@ fn build_reduced_logslope_reparam(
     }
 }
 
-/// Distinct outcomes of the effective logslope confound audit. `FullRank`
+/// Distinct outcomes of the effective slope confound audit. `FullRank`
 /// (nothing to reduce, `r == p_g`) and `FullyConfounded` (`r == 0`) must not
 /// share a signal: keeping the raw design is correct for the former, while for
 /// the latter the data identify only a combination of the marginal and
 /// score-slope surfaces, and silently retaining the raw columns would let the
 /// penalty pick an arbitrary decomposition and report it as an estimate.
 #[derive(Debug)]
-pub(crate) enum ReducedLogslopeOutcome {
-    /// Every effective logslope direction carries its own curvature; keep the
+pub(crate) enum ReducedSlopeOutcome {
+    /// Every effective slope direction carries its own curvature; keep the
     /// raw design.
     FullRank,
     /// `0 < r < p_g`: the reduced basis `T` (`p_g × r`) spanning the
     /// identifiable directions.
     Reduced(Array2<f64>),
-    /// `r == 0`: the entire effective logslope image is W-explained by the
+    /// `r == 0`: the entire effective slope image is W-explained by the
     /// effective marginal span — the block is unidentified.
     FullyConfounded,
 }
 
-/// Build the reduced logslope basis `T` (p_g × r) from the EFFECTIVE BMS pilot
-/// geometry, in the PIRLS row metric `W`. `T`'s columns span the raw logslope
+/// Build the reduced slope basis `T` (p_g × r) from the EFFECTIVE BMS pilot
+/// geometry, in the PIRLS row metric `W`. `T`'s columns span the raw slope
 /// coefficient directions whose effective image `diag(f)·G·v` is NOT W-explained
 /// by `span(diag(c)·M)` — i.e. the directions the joint Hessian retains real
-/// curvature along. Returns [`ReducedLogslopeOutcome::FullRank`] when there is
+/// curvature along. Returns [`ReducedSlopeOutcome::FullRank`] when there is
 /// nothing to reduce (`r == p_g`, raw design kept) and
-/// [`ReducedLogslopeOutcome::FullyConfounded`] when the entire effective
-/// logslope image collapses into the effective marginal span (`r == 0`), so the
+/// [`ReducedSlopeOutcome::FullyConfounded`] when the entire effective
+/// slope image collapses into the effective marginal span (`r == 0`), so the
 /// caller can refuse the unidentified block instead of conflating the two
 /// cases.
 ///
 /// At the rigid pilot the effective Jacobians are
 ///     M_eff = diag(c) · M,   c_i = sqrt(1 + (s·g_i)²)
 ///     G_eff = diag(f) · G,   f_i = q_i·s²·g_i/c_i + s·z_i
-/// and the raw-coordinate Gram of the logslope component W-orthogonal to
+/// and the raw-coordinate Gram of the slope component W-orthogonal to
 /// `span(M_eff)` is the Schur complement
 ///     Gtt = G_effᵀ W G_eff − (G_effᵀ W M_eff)(M_effᵀ W M_eff + εI)⁻¹(M_effᵀ W G_eff).
 /// `T` is the orthonormal eigenbasis of `Gtt` for eigenvalues above a tolerance
-/// relative to the effective logslope energy scale.
-pub(crate) fn reduced_logslope_transform_effective(
+/// relative to the effective slope energy scale.
+pub(crate) fn reduced_slope_transform_effective(
     marginal: ArrayView2<'_, f64>,
-    logslope: ArrayView2<'_, f64>,
+    slope: ArrayView2<'_, f64>,
     z: &Array1<f64>,
     row_metric: &Array1<f64>,
     marginal_offset: &Array1<f64>,
-    logslope_offset: &Array1<f64>,
+    slope_offset: &Array1<f64>,
     marginal_baseline: f64,
-    logslope_baseline: f64,
+    baseline_slope: f64,
     probit_scale: f64,
-) -> Result<ReducedLogslopeOutcome, String> {
+) -> Result<ReducedSlopeOutcome, String> {
     let n = marginal.nrows();
     let p_m = marginal.ncols();
-    let p_g = logslope.ncols();
+    let p_g = slope.ncols();
     if p_m == 0 || p_g == 0 {
-        return Ok(ReducedLogslopeOutcome::FullRank);
+        return Ok(ReducedSlopeOutcome::FullRank);
     }
 
     // Effective pilot Jacobians M_eff = diag(c)·M and G_eff = diag(f)·G.
@@ -615,7 +615,7 @@ pub(crate) fn reduced_logslope_transform_effective(
     let mut g_eff = Array2::<f64>::zeros((n, p_g));
     for i in 0..n {
         let q_i = marginal_offset[i] + marginal_baseline;
-        let g_i = logslope_offset[i] + logslope_baseline;
+        let g_i = slope_offset[i] + baseline_slope;
         let sg = probit_scale * g_i;
         let c_i = (1.0 + sg * sg).sqrt();
         let f_i = q_i * probit_scale * probit_scale * g_i / c_i + probit_scale * z[i];
@@ -623,24 +623,24 @@ pub(crate) fn reduced_logslope_transform_effective(
             m_eff[[i, j]] = c_i * marginal[[i, j]];
         }
         for j in 0..p_g {
-            g_eff[[i, j]] = f_i * logslope[[i, j]];
+            g_eff[[i, j]] = f_i * slope[[i, j]];
         }
     }
 
-    // C = G_effᵀ W G_eff (raw-coordinate effective logslope Gram); its diagonal
+    // C = G_effᵀ W G_eff (raw-coordinate effective slope Gram); its diagonal
     // sets the energy scale for the relative kept-direction tolerance.
     let c_gram = fast_xt_diag_x(&g_eff, row_metric);
     let energy_scale = (0..p_g).map(|i| c_gram[[i, i]]).fold(0.0_f64, f64::max);
     if !energy_scale.is_finite() {
         return Err(
-            "reduced logslope reparam: effective logslope Gram produced non-finite energy"
+            "reduced slope reparam: effective slope Gram produced non-finite energy"
                 .to_string(),
         );
     }
     if energy_scale <= 0.0 {
-        // A zero effective logslope image (f_i·G_i ≡ 0 in W) carries no joint-
+        // A zero effective slope image (f_i·G_i ≡ 0 in W) carries no joint-
         // Hessian curvature at all — trivially W-explained by any span.
-        return Ok(ReducedLogslopeOutcome::FullyConfounded);
+        return Ok(ReducedSlopeOutcome::FullyConfounded);
     }
 
     // A = M_effᵀ W M_eff + εI (ridge relative to the marginal effective energy so
@@ -648,7 +648,7 @@ pub(crate) fn reduced_logslope_transform_effective(
     // rank-soft; the ridge only under-removes, i.e. is conservative).
     let mut a_gram = fast_xt_diag_x(&m_eff, row_metric);
     let a_scale = (0..p_m).map(|i| a_gram[[i, i]]).fold(0.0_f64, f64::max);
-    let a_ridge = (a_scale * LOGSLOPE_REDUCED_BASIS_RELATIVE_TOL).max(f64::EPSILON);
+    let a_ridge = (a_scale * SLOPE_REDUCED_BASIS_RELATIVE_TOL).max(f64::EPSILON);
     for i in 0..p_m {
         a_gram[[i, i]] += a_ridge;
     }
@@ -660,7 +660,7 @@ pub(crate) fn reduced_logslope_transform_effective(
         gam_linalg::faer_ndarray::factorize_symmetricwith_fallback(a_view.as_ref(), Side::Lower)
             .map_err(|e| {
                 format!(
-                    "reduced logslope reparam: effective marginal Gram factorization failed: {e}"
+                    "reduced slope reparam: effective marginal Gram factorization failed: {e}"
                 )
             })?;
     let b_view = gam_linalg::faer_ndarray::FaerArrayView::new(&b_cross);
@@ -671,18 +671,18 @@ pub(crate) fn reduced_logslope_transform_effective(
     stt = (&stt + &stt.t()) * 0.5;
     if stt.iter().any(|v| !v.is_finite()) {
         return Err(
-            "reduced logslope reparam: effective Schur Gram produced non-finite entries"
+            "reduced slope reparam: effective Schur Gram produced non-finite entries"
                 .to_string(),
         );
     }
 
     let (evals, evecs) = stt
         .eigh(Side::Lower)
-        .map_err(|e| format!("reduced logslope reparam: eigendecomposition failed: {e:?}"))?;
-    // A `Gtt` eigenvalue far below the effective logslope energy scale means that
-    // direction's effective logslope column is W-explained by the effective
+        .map_err(|e| format!("reduced slope reparam: eigendecomposition failed: {e:?}"))?;
+    // A `Gtt` eigenvalue far below the effective slope energy scale means that
+    // direction's effective slope column is W-explained by the effective
     // marginal span — exactly the joint-Hessian rank-soft confounded direction.
-    let tol = energy_scale * LOGSLOPE_REDUCED_BASIS_RELATIVE_TOL;
+    let tol = energy_scale * SLOPE_REDUCED_BASIS_RELATIVE_TOL;
     let mut kept: Vec<usize> = (0..evals.len()).filter(|&i| evals[i] > tol).collect();
     kept.sort_by(|&a, &b| {
         evals[b]
@@ -691,15 +691,15 @@ pub(crate) fn reduced_logslope_transform_effective(
     });
     let r = kept.len();
     // r == p_g: no effective-confounded direction to remove — keep the raw
-    // design. r == 0: the whole effective logslope image is in the effective
+    // design. r == 0: the whole effective slope image is in the effective
     // marginal span — a distinct outcome the caller must refuse, never a
     // keep-the-raw-design signal (the raw columns would be an arbitrary
     // penalty-selected decomposition of an unidentified sum).
     if r == p_g {
-        return Ok(ReducedLogslopeOutcome::FullRank);
+        return Ok(ReducedSlopeOutcome::FullRank);
     }
     if r == 0 {
-        return Ok(ReducedLogslopeOutcome::FullyConfounded);
+        return Ok(ReducedSlopeOutcome::FullyConfounded);
     }
     let mut transform = Array2::<f64>::zeros((p_g, r));
     for (out_col, &src) in kept.iter().enumerate() {
@@ -707,29 +707,29 @@ pub(crate) fn reduced_logslope_transform_effective(
     }
     if transform.iter().any(|v| !v.is_finite()) {
         return Err(
-            "reduced logslope reparam: reduced transform produced non-finite entries".to_string(),
+            "reduced slope reparam: reduced transform produced non-finite entries".to_string(),
         );
     }
-    Ok(ReducedLogslopeOutcome::Reduced(transform))
+    Ok(ReducedSlopeOutcome::Reduced(transform))
 }
 
-/// Apply a [`ReducedLogslopeReparam`] to a logslope `TermCollectionDesign`,
+/// Apply a [`ReducedSlopeReparam`] to a slope `TermCollectionDesign`,
 /// producing a new design at the reduced width `r`: the design becomes
 /// `G_reduced = G·T`, and every blockwise penalty `S` is reparameterized to
 /// `S_reduced = Tᵀ S T` over the full reduced column range `0..r`. The reduced
 /// penalty's null space is recomputed from its numerical rank so the REML
 /// log-determinant accounting stays consistent at the reduced width.
-fn reparameterize_logslope_design_reduced(
-    logslope_design: &TermCollectionDesign,
-    reparam: &ReducedLogslopeReparam,
+fn reparameterize_slope_design_reduced(
+    slope_design: &TermCollectionDesign,
+    reparam: &ReducedSlopeReparam,
 ) -> Result<TermCollectionDesign, String> {
-    let g = logslope_design
+    let g = slope_design
         .design
-        .try_to_dense_arc("reparameterize_logslope_design_reduced::logslope")?;
+        .try_to_dense_arc("reparameterize_slope_design_reduced::slope")?;
     let p_g = g.ncols();
     if p_g != reparam.original_cols() {
         return Err(format!(
-            "reduced logslope reparam width mismatch: design has {p_g} cols, transform expects {}",
+            "reduced slope reparam width mismatch: design has {p_g} cols, transform expects {}",
             reparam.original_cols()
         ));
     }
@@ -741,9 +741,9 @@ fn reparameterize_logslope_design_reduced(
     // Reparameterize each penalty: embed its local block at full width p_g, then
     // form S_reduced = Tᵀ S T (r × r) over the whole reduced column range.
     let mut new_penalties: Vec<gam_terms::smooth::BlockwisePenalty> =
-        Vec::with_capacity(logslope_design.penalties.len());
-    let mut new_nullspace_dims: Vec<usize> = Vec::with_capacity(logslope_design.penalties.len());
-    for bp in &logslope_design.penalties {
+        Vec::with_capacity(slope_design.penalties.len());
+    let mut new_nullspace_dims: Vec<usize> = Vec::with_capacity(slope_design.penalties.len());
+    for bp in &slope_design.penalties {
         let mut full = Array2::<f64>::zeros((p_g, p_g));
         full.slice_mut(s![bp.col_range.clone(), bp.col_range.clone()])
             .assign(&bp.local);
@@ -754,7 +754,7 @@ fn reparameterize_logslope_design_reduced(
         // Null-space dimension of the reduced penalty = r − rank(S_reduced).
         let (evals, _) = s_reduced
             .eigh(Side::Lower)
-            .map_err(|e| format!("reduced logslope penalty eigendecomposition failed: {e:?}"))?;
+            .map_err(|e| format!("reduced slope penalty eigendecomposition failed: {e:?}"))?;
         let max_eval = evals.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
         let pen_tol = (max_eval * 1.0e-12).max(f64::EPSILON);
         let rank = evals.iter().filter(|&&v| v.abs() > pen_tol).count();
@@ -764,7 +764,7 @@ fn reparameterize_logslope_design_reduced(
     }
 
     let new_design = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(g_reduced));
-    // The reduced logslope block is a single dense smooth-like surface over the
+    // The reduced slope block is a single dense smooth-like surface over the
     // reparameterized coordinates; it carries no parametric/random-effect/
     // intercept structure of its own (those live in the marginal block), so the
     // structural ranges collapse to empty and the smooth metadata is cleared.
@@ -774,7 +774,7 @@ fn reparameterize_logslope_design_reduced(
         // Reparameterization changes only the coefficient chart G -> G T.
         // The known affine row function is coefficient-independent and must
         // therefore pass through unchanged.
-        affine_offset: logslope_design.affine_offset.clone(),
+        affine_offset: slope_design.affine_offset.clone(),
         penalties: new_penalties,
         nullspace_dims: new_nullspace_dims,
         penaltyinfo: Vec::new(),
@@ -806,12 +806,12 @@ fn reparameterize_logslope_design_reduced(
 ///  the influence columns `p_m..p_m+p₁`.
 ///
 /// The two former gam#754 pinned ridges — the marginal nullspace-shrinkage ridge
-/// and the marginal↔logslope overlap ridge — are DELETED: robustness is now
+/// and the marginal↔slope overlap ridge — are DELETED: robustness is now
 /// unconditional, so the full-identifiable-span Jeffreys term (`Z_J = I`, see
 /// `jeffreys_subspace_from_penalty`) supplies automatic O(n)-scaled curvature on
 /// every under-identified direction (subsuming the nullspace ridge), and the
-/// exact orthogonal reparameterization of the logslope design (now unconditional,
-/// see `build_reduced_logslope_reparam`) resolves the marginal↔logslope confound
+/// exact orthogonal reparameterization of the slope design (now unconditional,
+/// see `build_reduced_slope_reparam`) resolves the marginal↔slope confound
 /// by construction (subsuming the overlap ridge).
 ///
 /// The genuine marginal smooth penalties keep their `col_range` (marginal
@@ -987,7 +987,7 @@ pub(crate) fn bernoulli_marginal_slope_runaway_error_from_beta(
     } else if eta_full >= BMS_PROBIT_SEPARATION_ETA_INF {
         (
             eta_full,
-            "a marginal direction is trading off against the logslope surface; this is the under-constrained marginal/logslope coupling that appears when the score is correlated with the shared surface covariates",
+            "a marginal direction is trading off against the slope surface; this is the under-constrained marginal/slope coupling that appears when the score is correlated with the shared surface covariates",
         )
     } else {
         // |η|∞ is bounded: even if raw coefficients are large (ill-conditioned
@@ -1009,7 +1009,7 @@ pub(crate) fn bernoulli_marginal_slope_runaway_error_from_beta(
         .fold(0.0_f64, |acc, v| acc.max(v.abs()));
 
     Some(format!(
-        "bernoulli marginal-slope probit marginal/logslope runaway detected in block \
+        "bernoulli marginal-slope probit marginal/slope runaway detected in block \
          'marginal_surface' during {eval_label}: the fitted marginal predictor has \
          |η|∞={eta_inf:.3e} (numerical-degeneracy threshold \
          {BMS_PROBIT_SEPARATION_ETA_INF:.1}; raw |β|∞={beta_abs:.3e} is reported for \
@@ -1018,8 +1018,8 @@ pub(crate) fn bernoulli_marginal_slope_runaway_error_from_beta(
          path is already installed for this fit, so this diagnostic means the current \
          coupled surface still drives the linear predictor to the probit underflow \
          scale rather than a request for an external bias-reduction prior. Reduce or \
-         reparameterize the coupled marginal/logslope surface, or use a \
-         lower-dimensional logslope interaction. This is not a \
+         reparameterize the coupled marginal/slope surface, or use a \
+         lower-dimensional slope interaction. This is not a \
          Matérn/Duchon polynomial-nullspace or cross-block gauge-priority \
          failure."
     ))
@@ -1050,84 +1050,84 @@ mod runaway_tests {
     };
     use gam_terms::smooth::{LinearCoefficientGeometry, LinearTermSpec};
 
-    // The marginal↔logslope overlap penalty is no longer installed as a pinned
-    // ridge (subsumed by the now-unconditional exact logslope orthogonalisation in
-    // `build_reduced_logslope_reparam`). The geometry helper is retained here under
+    // The marginal↔slope overlap penalty is no longer installed as a pinned
+    // ridge (subsumed by the now-unconditional exact slope orthogonalisation in
+    // `build_reduced_slope_reparam`). The geometry helper is retained here under
     // the test module because the basis-independence/weight-orthogonality unit tests
     // below exercise it directly as the canonical overlap-direction reference.
-    pub(crate) fn marginal_logslope_overlap_penalty(
+    pub(crate) fn marginal_slope_overlap_penalty(
         marginal_design: &DesignMatrix,
-        logslope_design: &DesignMatrix,
+        slope_design: &DesignMatrix,
         z: &Array1<f64>,
         row_metric: &Array1<f64>,
         marginal_offset: &Array1<f64>,
-        logslope_offset: &Array1<f64>,
+        slope_offset: &Array1<f64>,
         marginal_baseline: f64,
-        logslope_baseline: f64,
+        baseline_slope: f64,
         probit_scale: f64,
     ) -> Result<Option<Array2<f64>>, String> {
         let marginal =
-            marginal_design.try_to_dense_arc("marginal_logslope_overlap_penalty::marginal")?;
-        let logslope =
-            logslope_design.try_to_dense_arc("marginal_logslope_overlap_penalty::logslope")?;
+            marginal_design.try_to_dense_arc("marginal_slope_overlap_penalty::marginal")?;
+        let slope =
+            slope_design.try_to_dense_arc("marginal_slope_overlap_penalty::slope")?;
         let n = marginal.nrows();
-        if logslope.nrows() != n
+        if slope.nrows() != n
             || z.len() != n
             || row_metric.len() != n
             || marginal_offset.len() != n
-            || logslope_offset.len() != n
+            || slope_offset.len() != n
         {
             return Err(format!(
-                "marginal/logslope overlap penalty row mismatch: marginal={}, logslope={}, z={}, row_metric={}, marginal_offset={}, logslope_offset={}",
+                "marginal/slope overlap penalty row mismatch: marginal={}, slope={}, z={}, row_metric={}, marginal_offset={}, slope_offset={}",
                 marginal.nrows(),
-                logslope.nrows(),
+                slope.nrows(),
                 z.len(),
                 row_metric.len(),
                 marginal_offset.len(),
-                logslope_offset.len(),
+                slope_offset.len(),
             ));
         }
         let p_m = marginal.ncols();
-        let p_g = logslope.ncols();
+        let p_g = slope.ncols();
         if p_m == 0 || p_g == 0 {
             return Ok(None);
         }
         if !marginal_baseline.is_finite()
-            || !logslope_baseline.is_finite()
+            || !baseline_slope.is_finite()
             || !probit_scale.is_finite()
             || probit_scale <= 0.0
             || z.iter().any(|v| !v.is_finite())
             || row_metric.iter().any(|v| !v.is_finite() || *v < 0.0)
             || marginal_offset.iter().any(|v| !v.is_finite())
-            || logslope_offset.iter().any(|v| !v.is_finite())
+            || slope_offset.iter().any(|v| !v.is_finite())
         {
             return Err(
-                "marginal/logslope overlap penalty requires finite pilot geometry and finite non-negative row metric"
+                "marginal/slope overlap penalty requires finite pilot geometry and finite non-negative row metric"
                     .to_string(),
             );
         }
 
         let mut marginal_effective = Array2::<f64>::zeros((n, p_m));
-        let mut effective_logslope = Array2::<f64>::zeros((n, p_g));
+        let mut effective_slope = Array2::<f64>::zeros((n, p_g));
         for i in 0..n {
             let q_i = marginal_offset[i] + marginal_baseline;
-            let g_i = logslope_offset[i] + logslope_baseline;
+            let g_i = slope_offset[i] + baseline_slope;
             let sg = probit_scale * g_i;
             let c_i = (1.0 + sg * sg).sqrt();
-            let logslope_factor =
+            let slope_factor =
                 q_i * probit_scale * probit_scale * g_i / c_i + probit_scale * z[i];
             for j in 0..p_m {
                 marginal_effective[[i, j]] = c_i * marginal[[i, j]];
             }
             for j in 0..p_g {
-                effective_logslope[[i, j]] = logslope_factor * logslope[[i, j]];
+                effective_slope[[i, j]] = slope_factor * slope[[i, j]];
             }
         }
-        if effective_logslope.iter().all(|v| v.abs() <= f64::EPSILON) {
+        if effective_slope.iter().all(|v| v.abs() <= f64::EPSILON) {
             return Ok(None);
         }
 
-        let mut gram = fast_xt_diag_x(&effective_logslope, row_metric);
+        let mut gram = fast_xt_diag_x(&effective_slope, row_metric);
         let gram_scale = gram.diag().iter().copied().fold(0.0_f64, f64::max);
         if !gram_scale.is_finite() || gram_scale <= 0.0 {
             return Ok(None);
@@ -1136,14 +1136,14 @@ mod runaway_tests {
         for i in 0..p_g {
             gram[[i, i]] += projection_ridge;
         }
-        let cross = fast_xt_diag_y(&effective_logslope, row_metric, &marginal_effective);
+        let cross = fast_xt_diag_y(&effective_slope, row_metric, &marginal_effective);
         let gram_view = FaerArrayView::new(&gram);
         let factor = factorize_symmetricwith_fallback(gram_view.as_ref(), Side::Lower)
-            .map_err(|e| format!("marginal/logslope overlap Gram factorization failed: {e}"))?;
+            .map_err(|e| format!("marginal/slope overlap Gram factorization failed: {e}"))?;
         let rhsview = FaerArrayView::new(&cross);
         let coeffs_mat = factor.solve(rhsview.as_ref());
         let coeffs = Array2::from_shape_fn((p_g, p_m), |(i, j)| coeffs_mat[(i, j)]);
-        let projected_marginal = fast_ab(&effective_logslope, &coeffs);
+        let projected_marginal = fast_ab(&effective_slope, &coeffs);
         let mut penalty = fast_xt_diag_y(&marginal_effective, row_metric, &projected_marginal);
         penalty = (&penalty + &penalty.t()) * 0.5;
         let max_abs = penalty.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
@@ -1154,7 +1154,7 @@ mod runaway_tests {
     }
 
     // The raw-vs-effective counterexample. With q=g=0, s=1: c_i=1 (so M_eff=M)
-    // and f_i=z_i (so G_eff=diag(z)·G). Pick M=[1,1,1]ᵀ and a two-column logslope
+    // and f_i=z_i (so G_eff=diag(z)·G). Pick M=[1,1,1]ᵀ and a two-column slope
     // G whose RAW columns are both linearly independent of M (raw orthogonalising
     // [M|G] would keep BOTH — the old code returned None, no reduction), but whose
     // first EFFECTIVE column diag(z)·G[:,0] equals M_eff exactly. The effective
@@ -1171,7 +1171,7 @@ mod runaway_tests {
 
         // diag(z)·G[:,0] = [1·1, 0.5·2, (1/3)·3] = [1,1,1] = M_eff (fully aliased);
         // diag(z)·G[:,1] = [1·1, 0.5·2, (1/3)·9] = [1,1,3] (NOT in span([1,1,1])).
-        let reparam = match reduced_logslope_transform_effective(
+        let reparam = match reduced_slope_transform_effective(
             m.view(),
             g.view(),
             &z,
@@ -1184,20 +1184,20 @@ mod runaway_tests {
         )
         .expect("effective reduction must succeed")
         {
-            ReducedLogslopeOutcome::Reduced(t) => t,
+            ReducedSlopeOutcome::Reduced(t) => t,
             other => panic!(
                 "effective audit must reduce the score-weighted confound (raw audit would not), got {}",
                 match other {
-                    ReducedLogslopeOutcome::FullRank => "FullRank",
-                    ReducedLogslopeOutcome::FullyConfounded => "FullyConfounded",
-                    ReducedLogslopeOutcome::Reduced(_) => unreachable!(),
+                    ReducedSlopeOutcome::FullRank => "FullRank",
+                    ReducedSlopeOutcome::FullyConfounded => "FullyConfounded",
+                    ReducedSlopeOutcome::Reduced(_) => unreachable!(),
                 }
             ),
         };
         assert_eq!(
             reparam.ncols(),
             1,
-            "exactly one effective-identifiable logslope direction should survive"
+            "exactly one effective-identifiable slope direction should survive"
         );
 
         // The surviving raw direction's EFFECTIVE image diag(z)·G·t must carry the
@@ -1222,7 +1222,7 @@ mod runaway_tests {
     }
 
     // The single-column fully-confounded case: G=[1,2,3]ᵀ, z=[1,1/2,1/3] gives
-    // G_eff=[1,1,1]=M_eff, so the entire effective logslope image is in the
+    // G_eff=[1,1,1]=M_eff, so the entire effective slope image is in the
     // effective marginal span (r==0). The helper must report the distinct
     // FullyConfounded outcome — NOT the FullRank keep-the-raw-design signal —
     // because the data identify only the sum of the two surfaces and the
@@ -1234,7 +1234,7 @@ mod runaway_tests {
         let z = Array1::from_vec(vec![1.0, 0.5, 1.0 / 3.0]);
         let w = Array1::<f64>::ones(3);
         let zero = Array1::<f64>::zeros(3);
-        let outcome = reduced_logslope_transform_effective(
+        let outcome = reduced_slope_transform_effective(
             m.view(),
             g.view(),
             &z,
@@ -1247,12 +1247,12 @@ mod runaway_tests {
         )
         .expect("effective reduction must succeed");
         assert!(
-            matches!(outcome, ReducedLogslopeOutcome::FullyConfounded),
-            "fully effective-confounded logslope must surface the distinct FullyConfounded outcome"
+            matches!(outcome, ReducedSlopeOutcome::FullyConfounded),
+            "fully effective-confounded slope must surface the distinct FullyConfounded outcome"
         );
     }
 
-    // No effective confound: both effective logslope columns stay independent of
+    // No effective confound: both effective slope columns stay independent of
     // M_eff, so nothing is reduced (r==p_g ⇒ None) and healthy fits are untouched.
     #[test]
     pub(crate) fn effective_reduction_no_confound_returns_none() {
@@ -1262,7 +1262,7 @@ mod runaway_tests {
         let z = Array1::from_vec(vec![1.0, 2.0, 3.0]);
         let w = Array1::<f64>::ones(3);
         let zero = Array1::<f64>::zeros(3);
-        let outcome = reduced_logslope_transform_effective(
+        let outcome = reduced_slope_transform_effective(
             m.view(),
             g.view(),
             &z,
@@ -1275,7 +1275,7 @@ mod runaway_tests {
         )
         .expect("effective reduction must succeed");
         assert!(
-            matches!(outcome, ReducedLogslopeOutcome::FullRank),
+            matches!(outcome, ReducedSlopeOutcome::FullRank),
             "no effective confound ⇒ FullRank (raw design kept unchanged)"
         );
     }
@@ -1303,7 +1303,7 @@ mod runaway_tests {
         assert_eq!(
             setup.rho_dim(),
             6,
-            "BMS spatial setup rho holds every learned marginal/logslope/auxiliary penalty; the #461 absorber ridge occupies the trailing marginal slot"
+            "BMS spatial setup rho holds every learned marginal/slope/auxiliary penalty; the #461 absorber ridge occupies the trailing marginal slot"
         );
         assert_eq!(
             setup.theta0()[1],
@@ -1313,20 +1313,20 @@ mod runaway_tests {
     }
 
     #[test]
-    pub(crate) fn overlap_penalty_targets_score_weighted_logslope_span() {
+    pub(crate) fn overlap_penalty_targets_score_weighted_slope_span() {
         let marginal = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::from_shape_vec((4, 1), vec![0.0, 1.0, 2.0, 3.0]).unwrap(),
         ));
-        let logslope = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        let slope = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::from_shape_vec((4, 1), vec![1.0, 1.0, 1.0, 1.0]).unwrap(),
         ));
         let z = Array1::from_vec(vec![0.0, 1.0, 2.0, 3.0]);
         let row_metric = Array1::ones(4);
         let offsets = Array1::zeros(4);
 
-        let penalty = marginal_logslope_overlap_penalty(
+        let penalty = marginal_slope_overlap_penalty(
             &marginal,
-            &logslope,
+            &slope,
             &z,
             &row_metric,
             &offsets,
@@ -1336,7 +1336,7 @@ mod runaway_tests {
             1.0,
         )
         .expect("overlap penalty should build")
-        .expect("marginal signal lies in the pilot logslope Jacobian span");
+        .expect("marginal signal lies in the pilot slope Jacobian span");
 
         assert_eq!(penalty.dim(), (1, 1));
         assert!((penalty[[0, 0]] - 14.0).abs() < 1.0e-6);
@@ -1347,16 +1347,16 @@ mod runaway_tests {
         let marginal = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::from_shape_vec((4, 1), vec![-1.0, 1.0, -1.0, 1.0]).unwrap(),
         ));
-        let logslope = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+        let slope = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
             Array2::from_shape_vec((4, 1), vec![1.0, 1.0, 1.0, 1.0]).unwrap(),
         ));
         let z = Array1::ones(4);
         let row_metric = Array1::ones(4);
         let offsets = Array1::zeros(4);
 
-        let penalty = marginal_logslope_overlap_penalty(
+        let penalty = marginal_slope_overlap_penalty(
             &marginal,
-            &logslope,
+            &slope,
             &z,
             &row_metric,
             &offsets,
@@ -1460,7 +1460,7 @@ mod runaway_tests {
 
     /// A genuinely separating full marginal surface: a single column with a
     /// large coefficient drives `|η|∞ = 40 ≥ 35`, so the guard fires and names
-    /// the marginal/logslope coupling explanation.
+    /// the marginal/slope coupling explanation.
     #[test]
     pub(crate) fn runaway_guard_fires_when_fitted_eta_exceeds_threshold() {
         let x = Array2::<f64>::from_shape_vec((3, 1), vec![1.0, 1.0, 1.0]).unwrap();
@@ -1476,7 +1476,7 @@ mod runaway_tests {
         )
         .expect("fitted |η|∞=40 ≥ 35 must trip the runaway guard");
 
-        assert!(msg.contains("marginal/logslope runaway"));
+        assert!(msg.contains("marginal/slope runaway"));
         assert!(msg.contains("|η|∞"));
         assert!(msg.contains("4.000e1"));
         assert!(msg.contains("score is correlated with the shared surface covariates"));
@@ -1556,26 +1556,26 @@ mod runaway_tests {
 
     /// Regression lock for gam#370: the pre-fit identifiability audit evaluates
     /// every block's effective Jacobian at the empty/zero β with
-    /// `family_scalars: None`. The BMS marginal and logslope blocks own the
-    /// logslope design + offset, so `g_i = offset_s[i]` (the fitted logslope
+    /// `family_scalars: None`. The BMS marginal and slope blocks own the
+    /// slope design + offset, so `g_i = offset_s[i]` (the fitted slope
     /// baseline, generically nonzero) at β = 0 — and the old code hard-errored
     /// ("requires BmsFamilyScalars when beta != 0 … got family_scalars: None")
     /// because it read `any_nonzero_g` and demanded a caller-supplied scalar it
     /// could in fact reconstruct itself. Both blocks must now self-compute the
-    /// closed-form `c_i = sqrt(1 + (s·g_i)²)` (and the logslope factor) from
+    /// closed-form `c_i = sqrt(1 + (s·g_i)²)` (and the slope factor) from
     /// owned data and return a finite Jacobian, NOT an error. This makes every
-    /// `logslope_formula` / `linkwiggle(...)` BMS fit reachable through the
+    /// `slope_formula` / `linkwiggle(...)` BMS fit reachable through the
     /// Python `gamfit.fit` API (the audit no longer aborts before the fit).
     #[test]
-    pub(crate) fn bms_block_jacobians_self_compute_at_audit_empty_beta_nonzero_logslope_baseline() {
+    pub(crate) fn bms_block_jacobians_self_compute_at_audit_empty_beta_nonzero_slope_baseline() {
         use std::sync::Arc;
         let n = 4usize;
         let marginal =
             Arc::new(Array2::<f64>::from_shape_vec((n, 1), vec![1.0, 1.0, 1.0, 1.0]).unwrap());
-        let logslope =
+        let slope =
             Arc::new(Array2::<f64>::from_shape_vec((n, 1), vec![1.0, 1.0, 1.0, 1.0]).unwrap());
         let offset_m = Array1::<f64>::zeros(n);
-        // Nonzero logslope baseline absorbed into offset_s — the exact pooled
+        // Nonzero slope baseline absorbed into offset_s — the exact pooled
         // probit pilot value that is "essentially never exactly 0".
         let g_baseline = 0.3_f64;
         let offset_s = Array1::<f64>::from_elem(n, g_baseline);
@@ -1593,7 +1593,7 @@ mod runaway_tests {
 
         let marginal_jac = BmsMarginalJacobian::new(
             Arc::clone(&marginal),
-            Arc::clone(&logslope),
+            Arc::clone(&slope),
             offset_m.clone(),
             offset_s.clone(),
             1,
@@ -1612,17 +1612,17 @@ mod runaway_tests {
             );
         }
 
-        let logslope_jac = BmsLogslopeJacobian::new(
+        let slope_jac = BmsSlopeJacobian::new(
             Arc::clone(&marginal),
-            Arc::clone(&logslope),
+            Arc::clone(&slope),
             offset_m,
             offset_s,
             Arc::clone(&z),
             1,
         );
-        let j_s = logslope_jac
+        let j_s = slope_jac
             .effective_jacobian_rows(&state, 0..n)
-            .expect("BMS logslope Jacobian must self-compute at audit empty β (gam#370)");
+            .expect("BMS slope Jacobian must self-compute at audit empty β (gam#370)");
         // ∂η_i/∂β_s = (q_i·s²·g_i/c_i + s·z_i)·G[i,:]; at empty β, q_i = 0 and
         // g_i = g_baseline, so the factor is s²·0·… + s·z_i = s·z_i (G[i,0]=1).
         assert_eq!(j_s.dim(), (n, 1));
@@ -1630,7 +1630,7 @@ mod runaway_tests {
             let expected = s * z[i];
             assert!(
                 (j_s[[i, 0]] - expected).abs() < 1e-12,
-                "logslope J[{i}] = {} != closed-form factor {expected}",
+                "slope J[{i}] = {} != closed-form factor {expected}",
                 j_s[[i, 0]]
             );
             assert!(j_s[[i, 0]].is_finite());
@@ -1644,25 +1644,25 @@ pub(crate) fn build_marginal_blockspec_bms(
     offset: &Array1<f64>,
     rho: Array1<f64>,
     beta_hint: Option<Array1<f64>>,
-    logslope_design: &TermCollectionDesign,
-    logslope_offset: &Array1<f64>,
-    logslope_baseline: f64,
+    slope_design: &TermCollectionDesign,
+    slope_offset: &Array1<f64>,
+    baseline_slope: f64,
     p_marginal: usize,
     influence_columns: Option<&Array2<f64>>,
 ) -> Result<ParameterBlockSpec, String> {
     let offset_m = offset + baseline;
-    let offset_s = logslope_offset + logslope_baseline;
+    let offset_s = slope_offset + baseline_slope;
     let raw_marginal_dense = design
         .design
         .try_to_dense_arc("build_marginal_blockspec_bms::marginal")?;
     let marginal_dense =
         widen_marginal_dense_with_influence(&raw_marginal_dense, influence_columns)?;
-    let logslope_dense = logslope_design
+    let slope_dense = slope_design
         .design
-        .try_to_dense_arc("build_marginal_blockspec_bms::logslope")?;
+        .try_to_dense_arc("build_marginal_blockspec_bms::slope")?;
     let callback: Arc<dyn BlockEffectiveJacobian> = Arc::new(BmsMarginalJacobian {
         marginal_dense: Arc::clone(&marginal_dense),
-        logslope_dense,
+        slope_dense,
         offset_m: offset_m.clone(),
         offset_s,
         p_marginal,
@@ -1680,17 +1680,17 @@ pub(crate) fn build_marginal_blockspec_bms(
         initial_log_lambdas,
         initial_beta: widen_marginal_beta_hint(beta_hint, p_marginal),
         // Canonical-gauge architecture (issue #322): give marginal_surface
-        // strictly higher priority than logslope_surface so the priority-
+        // strictly higher priority than slope_surface so the priority-
         // ordered RRQR in `canonicalize_for_identifiability` presents
         // marginal columns first and routes any cross-block alias drop into
-        // logslope.  Equal priorities (the previous default of 100/100)
+        // slope.  Equal priorities (the previous default of 100/100)
         // produced a same-priority `hard_alias_pair` whenever a
         // high-dimensional smooth — e.g. `s(x, type=duchon, centers>=6)`
-        // in the location block — accidentally spanned the logslope basis
+        // in the location block — accidentally spanned the slope basis
         // direction, leaving the joint Hessian with a structural null and
         // the spectral Newton solve refusing to step.  The values mirror
         // the canonical-gauge entry for survival marginal-slope
-        // (marginal=150, logslope=120).
+        // (marginal=150, slope=120).
         gauge_priority: GAUGE_PRIORITY_MARGINAL,
         jacobian_callback: Some(callback),
         stacked_design: None,
@@ -1698,7 +1698,7 @@ pub(crate) fn build_marginal_blockspec_bms(
     })
 }
 
-pub(crate) fn build_logslope_blockspec_bms(
+pub(crate) fn build_slope_blockspec_bms(
     design: &TermCollectionDesign,
     baseline: f64,
     offset: &Array1<f64>,
@@ -1715,42 +1715,42 @@ pub(crate) fn build_logslope_blockspec_bms(
     let offset_m = marginal_offset + marginal_baseline;
     let raw_marginal_dense = marginal_design
         .design
-        .try_to_dense_arc("build_logslope_blockspec_bms::marginal")?;
-    // The logslope Jacobian reconstructs q_i = M·β_m + offset_m; with the
+        .try_to_dense_arc("build_slope_blockspec_bms::marginal")?;
+    // The slope Jacobian reconstructs q_i = M·β_m + offset_m; with the
     // absorbed influence columns folded into the marginal index, the marginal
     // reference design and p_marginal MUST be the widened [M | Z̃] / (p_m+p₁)
     // so β_m slices to the absorber and q_i carries the Z̃·γ shift (#461).
     let marginal_dense =
         widen_marginal_dense_with_influence(&raw_marginal_dense, influence_columns)?;
-    let logslope_dense = design
+    let slope_dense = design
         .design
-        .try_to_dense_arc("build_logslope_blockspec_bms::logslope")?;
-    let callback: Arc<dyn BlockEffectiveJacobian> = Arc::new(BmsLogslopeJacobian {
+        .try_to_dense_arc("build_slope_blockspec_bms::slope")?;
+    let callback: Arc<dyn BlockEffectiveJacobian> = Arc::new(BmsSlopeJacobian {
         marginal_dense,
-        logslope_dense: Arc::clone(&logslope_dense),
+        slope_dense: Arc::clone(&slope_dense),
         offset_m,
         offset_s: offset_s.clone(),
         z,
         p_marginal,
     });
     Ok(ParameterBlockSpec {
-        name: "logslope_surface".to_string(),
+        name: "slope_surface".to_string(),
         design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
-            (*logslope_dense).clone(),
+            (*slope_dense).clone(),
         )),
         offset: offset_s,
         penalties: design.penalties_as_penalty_matrix(),
         nullspace_dims: design.nullspace_dims.clone(),
         initial_log_lambdas: rho,
         initial_beta: beta_hint,
-        // Canonical-gauge architecture (issue #322): logslope is strictly
+        // Canonical-gauge architecture (issue #322): slope is strictly
         // lower priority than marginal so the priority-ordered RRQR in
         // `canonicalize_for_identifiability` demotes a shared cross-block
         // direction here, not in marginal.  Mirrors the survival-mgs
-        // value (marginal=150, logslope=120).  See the matching comment
+        // value (marginal=150, slope=120).  See the matching comment
         // on `build_marginal_blockspec_bms` for the failure mode this
         // resolves.
-        gauge_priority: GAUGE_PRIORITY_LOGSLOPE,
+        gauge_priority: GAUGE_PRIORITY_SLOPE,
         jacobian_callback: Some(callback),
         stacked_design: None,
         stacked_offset: None,
@@ -1777,7 +1777,7 @@ pub(crate) fn build_deviation_aux_blockspec(
     // future flex block routed through this builder) model pure
     // shape modifications on top of parametric anchors. They must
     // never own a shared affine direction with the parametric
-    // (time / marginal / logslope) blocks. The canonical-gauge
+    // (time / marginal / slope) blocks. The canonical-gauge
     // selector drops shared directions from blocks with lower
     // gauge_priority first; assigning a value below the parametric
     // default (GAUGE_PRIORITY_CANDIDATE_FLEX) realises that contract
@@ -1968,28 +1968,28 @@ pub fn fit_bernoulli_marginal_slope_terms(
     let data_view = data;
     validate_spec(data_view, &spec)?;
     // Freeze the measure-jet representer length-scale dial on the coupled
-    // marginal + log-slope surfaces (#1116). A shared mjs basis feeds BOTH
+    // marginal + slope surfaces (#1116). A shared mjs basis feeds BOTH
     // blocks; a design-moving ℓ on those shared covariates lets the outer
     // search reach a sharp ℓ where a marginal smooth direction trades off
-    // against the log-slope into a separation-scale runaway (|β|→1e3). The auto
+    // against the slope into a separation-scale runaway (|β|→1e3). The auto
     // (frozen) ℓ is well-conditioned here — the pre-#1116 behavior this
     // restores. ℓ-learning stays on for single-surface (e.g. Gaussian) fits,
-    // where there is no marginal/log-slope coupling to destabilize.
+    // where there is no marginal/slope coupling to destabilize.
     let mjs_frozen_marginal =
         gam_terms::smooth::freeze_measure_jet_length_scale_learning(&mut spec.marginalspec);
-    let mjs_frozen_logslope =
-        gam_terms::smooth::freeze_measure_jet_length_scale_learning(&mut spec.logslopespec);
-    if mjs_frozen_marginal + mjs_frozen_logslope > 0 {
+    let mjs_frozen_slope =
+        gam_terms::smooth::freeze_measure_jet_length_scale_learning(&mut spec.slopespec);
+    if mjs_frozen_marginal + mjs_frozen_slope > 0 {
         log::info!(
-            "[BMS spatial] froze measure-jet length-scale learning on {} marginal + {} log-slope \
+            "[BMS spatial] froze measure-jet length-scale learning on {} marginal + {} slope \
              term(s): the coupled surface keeps ℓ at its conditioned auto value (#1116)",
             mjs_frozen_marginal,
-            mjs_frozen_logslope
+            mjs_frozen_slope
         );
     }
     let mut effective_kappa_options = kappa_options.clone();
     // Honor explicit `length_scale=X` in the user's formula: when every
-    // spatial term in BOTH the marginal mean and log-slope blocks carries
+    // spatial term in BOTH the marginal mean and slope blocks carries
     // a user-supplied scalar length scale and no per-axis anisotropy is
     // requested, there is nothing for the joint-spatial outer optimizer
     // to do. Routing through it anyway spends ~80 outer ARC iters stalled
@@ -1999,9 +1999,9 @@ pub fn fit_bernoulli_marginal_slope_terms(
     // Short-circuit straight to the ρ-only path.
     let kappa_locked_marginal =
         gam_terms::smooth::all_spatial_terms_kappa_fixed(&spec.marginalspec);
-    let kappa_locked_logslope =
-        gam_terms::smooth::all_spatial_terms_kappa_fixed(&spec.logslopespec);
-    if effective_kappa_options.enabled && kappa_locked_marginal && kappa_locked_logslope {
+    let kappa_locked_slope =
+        gam_terms::smooth::all_spatial_terms_kappa_fixed(&spec.slopespec);
+    if effective_kappa_options.enabled && kappa_locked_marginal && kappa_locked_slope {
         log::info!(
             "[BMS spatial] disabling κ/ψ optimization: every spatial term has an \
              explicit length_scale and no anisotropy; user-supplied kernel scale is fixed"
@@ -2013,7 +2013,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
         && effective_kappa_options.enabled;
     if flex_spatial_pilot_path {
         let marginal_terms = spatial_length_scale_term_indices(&spec.marginalspec);
-        let logslope_terms = spatial_length_scale_term_indices(&spec.logslopespec);
+        let slope_terms = spatial_length_scale_term_indices(&spec.slopespec);
         let marginal_updates = apply_spatial_anisotropy_pilot_initializer(
             data_view,
             &mut spec.marginalspec,
@@ -2022,10 +2022,10 @@ pub fn fit_bernoulli_marginal_slope_terms(
             &effective_kappa_options,
         )
         .map_err(|error| error.to_string())?;
-        let logslope_updates = apply_spatial_anisotropy_pilot_initializer(
+        let slope_updates = apply_spatial_anisotropy_pilot_initializer(
             data_view,
-            &mut spec.logslopespec,
-            &logslope_terms,
+            &mut spec.slopespec,
+            &slope_terms,
             effective_kappa_options.pilot_subsample_threshold,
             &effective_kappa_options,
         )
@@ -2034,7 +2034,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
         log::info!(
             "[BMS spatial] n={} flex=true pilot_geometry_updates={} iterative_spatial_outer=false reason=large-flex-spatial-pilot",
             spec.y.len(),
-            marginal_updates + logslope_updates,
+            marginal_updates + slope_updates,
         );
     }
     let (z_standardized, z_normalization) = standardize_latent_z_with_policy(
@@ -2061,7 +2061,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
     //
     // This is NOT in tension with the ℓ-learning freeze above. The freeze is
     // about the SEARCH: a design-moving dial on covariates shared by the coupled
-    // marginal/log-slope pair lets the outer optimizer trade one surface against
+    // marginal/slope pair lets the outer optimizer trade one surface against
     // the other into a separation-scale runaway. The screen is about the SEED:
     // it runs once, before the fit, and hands the frozen dial a data-chosen
     // basin instead of a geometry heuristic the repo has already measured
@@ -2070,9 +2070,9 @@ pub fn fit_bernoulli_marginal_slope_terms(
     // not a reason to seed it worse.
     //
     // Each surface is screened against its OWN target: the marginal block
-    // against `y`, the log-slope block against the first-order score surrogate
+    // against `y`, the slope block against the first-order score surrogate
     // `(y − ȳ)(z − z̄)`, whose conditional mean is `F'(α(x))·β(x)` (see
-    // `marginal_slope_logslope_screen_response`). Screening the log-slope span
+    // `marginal_slope_screen_response`). Screening the slope span
     // against `y` would rank spans by their fit to the MARGINAL surface.
     //
     // Runs after the latent-z standardization so the surrogate is built on the
@@ -2087,8 +2087,8 @@ pub fn fit_bernoulli_marginal_slope_terms(
             spec.weights.view(),
             &mut spec.marginalspec,
         );
-        let logslope_seeded = match
-            crate::fit_orchestration::drivers::marginal_slope_logslope_screen_response(
+        let slope_seeded = match
+            crate::fit_orchestration::drivers::marginal_slope_screen_response(
                 spec.y.view(),
                 spec.z.view(),
                 spec.weights.view(),
@@ -2097,14 +2097,14 @@ pub fn fit_bernoulli_marginal_slope_terms(
                 data_view,
                 surrogate.view(),
                 spec.weights.view(),
-                &mut spec.logslopespec,
+                &mut spec.slopespec,
             ),
             None => 0,
         };
-        if marginal_seeded + logslope_seeded > 0 {
+        if marginal_seeded + slope_seeded > 0 {
             log::info!(
                 "[BMS spatial] #2750 screened the representer range of {marginal_seeded} marginal \
-                 + {logslope_seeded} log-slope auto measure-jet term(s) against the response \
+                 + {slope_seeded} slope auto measure-jet term(s) against the response \
                  before the BMS design build"
             );
         }
@@ -2133,37 +2133,37 @@ pub fn fit_bernoulli_marginal_slope_terms(
     let probit_scale = probit_frailty_scale(initial_sigma);
     let (_raw_joint_designs, mut joint_specs) = build_term_collection_designs_and_freeze_joint(
         data_view,
-        &[spec.marginalspec.clone(), spec.logslopespec.clone()],
+        &[spec.marginalspec.clone(), spec.slopespec.clone()],
     )
     .map_err(|e| e.to_string())?;
     let marginalspec_boot = joint_specs.remove(0);
-    let logslopespec_boot = joint_specs.remove(0);
+    let slopespec_boot = joint_specs.remove(0);
     // Rebuild the probe designs from the frozen `*_boot` specs so the probe's
     // penalty topology matches the topology produced by every other build path
     // in this optimization. The spatial optimizer's own bootstrap
     // (`build_term_collection_designs_and_freeze_joint(data, &[marginalspec_boot,
-    // logslopespec_boot])` inside `optimize_spatial_length_scale_exact_joint`)
+    // slopespec_boot])` inside `optimize_spatial_length_scale_exact_joint`)
     // and every subsequent kappa-driven rebuild feed the basis builder the
     // captured `FrozenTransform` identifiability. Applying that captured
     // transform changes the exact coefficient chart of the penalty blocks.
     // Without this rebuild,
-    // `marginal_penalty_count` / `logslope_design.penalties.len()` are taken
+    // `marginal_penalty_count` / `slope_design.penalties.len()` are taken
     // from the raw build but every subsequent evaluator measures the frozen
     // build, and `evaluate_custom_family_joint_hyper` refuses with a
     // "joint hyper rho dimension mismatch". Mirrors the CTN-side fix in
     // `fit_transformation_normal`.
     let (mut joint_designs, _) = build_term_collection_designs_and_freeze_joint(
         data_view,
-        &[marginalspec_boot.clone(), logslopespec_boot.clone()],
+        &[marginalspec_boot.clone(), slopespec_boot.clone()],
     )
     .map_err(|e| format!("failed to rebuild frozen probe BMS joint designs: {e}"))?;
     let marginal_design = joint_designs.remove(0);
-    let logslope_design = joint_designs.remove(0);
+    let slope_design = joint_designs.remove(0);
     spec.marginal_offset = marginal_design
         .compose_offset(spec.marginal_offset.view(), "BMS marginal block")
         .map_err(|error| error.to_string())?;
-    spec.logslope_offset = logslope_design
-        .compose_offset(spec.logslope_offset.view(), "BMS logslope block")
+    spec.slope_offset = slope_design
+        .compose_offset(spec.slope_offset.view(), "BMS slope block")
         .map_err(|error| error.to_string())?;
     // #905: the conditional `E[z|C]`/`Var(z|C)` Rao gate conditions on the
     // marginal-index span a(C) (= the marginal design columns), which is
@@ -2237,13 +2237,13 @@ pub fn fit_bernoulli_marginal_slope_terms(
     // intercept solve in `build_row_exact_context_with_stats`, not in the
     // deviation basis.
     // Score-warp basis is built first, then immediately reparameterised
-    // against the parametric span (marginal + logslope columns at the n
+    // against the parametric span (marginal + slope columns at the n
     // training rows) so its column span is orthogonal to span(X_marginal,
-    // X_logslope) by construction. This is the first half of the joint-
+    // X_slope) by construction. This is the first half of the joint-
     // design identifiability invariant; the second half (link-deviation
     // orthogonalised against parametric + the now-reparameterised score-
     // warp) runs inside the link-deviation closure below. Together they
-    // ensure `[X_marginal | X_logslope | Φ_score_warp · T_sw |
+    // ensure `[X_marginal | X_slope | Φ_score_warp · T_sw |
     // Φ_link_dev · T_lw]` has full numerical column rank, structurally
     // bounding `σ_min(joint H + S) ≥ λ_min(S) > 0` regardless of how β
     // drifts the linear predictor distribution during PIRLS.
@@ -2274,7 +2274,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
         &spec.base_link,
         z_train,
         &spec.marginal_offset,
-        &spec.logslope_offset,
+        &spec.slope_offset,
         baseline.0,
         baseline.1,
         probit_scale,
@@ -2286,12 +2286,12 @@ pub fn fit_bernoulli_marginal_slope_terms(
     // chained a CTN Stage-1 into this marginal-slope fit, `spec.score_influence_
     // jacobian` carries the out-of-fold `J = ∂z/∂θ₁`; the realized leakage
     // directions `Z_infl = diag(s_f·β̂₀)·J` are residualised against the fitted
-    // marginal+logslope target span and appended to the additive marginal-index
+    // marginal+slope target span and appended to the additive marginal-index
     // block as a fixed-ridge absorber, so the joint penalised solve makes the
     // (α,β) score orthogonal to the remaining nuisance span without letting the
     // absorber compete for identifiable β(x) signal. `None` ⇒ raw z, and the
     // free score_warp spline below is the x-free-column fallback. β̂₀(x_i) is
-    // the rigid-pilot logslope `baseline.1 + logslope_offset[i]`; s_f =
+    // the rigid-pilot slope `baseline.1 + slope_offset[i]`; s_f =
     // probit_scale.
     let influence_columns = if let Some(jac) = spec
         .score_influence_jacobian
@@ -2300,11 +2300,11 @@ pub fn fit_bernoulli_marginal_slope_terms(
     {
         let protected_design = DesignMatrix::hstack(vec![
             marginal_design.design.clone(),
-            logslope_design.design.clone(),
+            slope_design.design.clone(),
         ])
         .map_err(|e| {
             format!(
-                "bernoulli marginal-slope influence-block protected projection stack failed to concatenate marginal + logslope design: {e}"
+                "bernoulli marginal-slope influence-block protected projection stack failed to concatenate marginal + slope design: {e}"
             )
         })?;
         let protected_dense_for_proj = protected_design
@@ -2320,18 +2320,18 @@ pub fn fit_bernoulli_marginal_slope_terms(
         // Z̃ = residualize(diag(s_f·β̂₀)·J) against the fitted target span in
         // the rigid-pilot W-metric.  For BMS the absorbed columns are installed
         // in the same additive predictor as the marginal surface; if we protect
-        // only M, any component of Z_infl aligned with the logslope design G can
+        // only M, any component of Z_infl aligned with the slope design G can
         // be assigned to the fixed-ridge absorber by the joint solve, erasing
         // genuine β(x) heterogeneity.  Projecting out [M | G] keeps the nuisance
         // absorber orthogonal to both parametric target surfaces while still
         // absorbing Stage-1 leakage directions outside that identifiable target
-        // span. β̂₀(x_i) = baseline.1 + logslope_offset[i]; s_f = probit_scale;
+        // span. β̂₀(x_i) = baseline.1 + slope_offset[i]; s_f = probit_scale;
         // W = the rigid-pilot PIRLS row metric.
-        let rigid_logslope_at_rows = &spec.logslope_offset + baseline.1;
+        let rigid_slope_at_rows = &spec.slope_offset + baseline.1;
         let residualized = crate::marginal_slope_orthogonal::residualized_influence_block(
             jac,
             z_train,
-            &rigid_logslope_at_rows,
+            &rigid_slope_at_rows,
             probit_scale,
             protected_dense.view(),
             &cross_block_pilot_w_score_warp,
@@ -2354,7 +2354,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
             cfg,
             &[
                 (&marginal_design.design, ParametricAnchorBlock::Marginal),
-                (&logslope_design.design, ParametricAnchorBlock::Logslope),
+                (&slope_design.design, ParametricAnchorBlock::Slope),
             ],
             &[],
             &cross_block_pilot_w_score_warp,
@@ -2365,11 +2365,11 @@ pub fn fit_bernoulli_marginal_slope_terms(
                 // Record via the structured channel. Keep the original
                 // (non-compiled) design so the unified audit sees score_warp_dev
                 // and attributes the drop via dropped_columns (gauge_priority=80
-                // is below marginal=150 / logslope=120, so RRQR correctly
+                // is below marginal=150 / slope=120, so RRQR correctly
                 // demotes score_warp_dev when it aliases those blocks).
                 cross_block_warnings.push(CrossBlockIdentifiabilityWarning {
                     candidate_label: "score_warp",
-                    anchor_summary: "marginal+logslope".to_string(),
+                    anchor_summary: "marginal+slope".to_string(),
                     reason,
                 });
                 Some(prepared)
@@ -2411,7 +2411,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
             &spec.weights,
             &marginal_design.design,
             &spec.marginal_offset,
-            &spec.logslope_offset,
+            &spec.slope_offset,
             baseline.0,
             baseline.1,
             probit_scale,
@@ -2425,7 +2425,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
         // Cross-block identifiability for the link-deviation basis. The
         // anchor union covers BOTH possible aliasing channels:
         //
-        //  - Parametric: location and logslope designs evaluated at the n
+        //  - Parametric: location and slope designs evaluated at the n
         //    training rows. Columns of `Φ_link_dev(q0)` that reproduce
         //    parametric features become null-direction targets in the
         //    joint penalised Hessian since `S_link_dev` has no mass on
@@ -2438,7 +2438,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
         //    column spans can still overlap inside the orthogonal
         //    complement of `{1, η_pilot}`.
         //
-        // After the orthogonalisation, `[X_marginal | X_logslope |
+        // After the orthogonalisation, `[X_marginal | X_slope |
         // Φ_score_warp · T_sw | Φ_link_dev · T_lw]` has full numerical
         // column rank at training rows, so `σ_min(joint H+S) ≥ λ_min(S)
         // > 0` for every β. This is the standard GAM `gam.side`
@@ -2446,7 +2446,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
         // sequentially across smooths sharing a covariate).
         // When `install_compiled_flex_block_into_runtime`
         // reparameterised the score-warp runtime against the parametric
-        // anchor union (marginal + logslope), it installed an
+        // anchor union (marginal + slope), it installed an
         // `anchor_residual` and cached the training-row parametric
         // anchor matrix on the runtime. `runtime.design()` on a
         // residualised runtime returns the *raw* basis evaluation,
@@ -2465,7 +2465,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
         use super::deviation_runtime::ParametricAnchorBlock;
         let parametric_anchors: [(&DesignMatrix, ParametricAnchorBlock); 2] = [
             (&marginal_design.design, ParametricAnchorBlock::Marginal),
-            (&logslope_design.design, ParametricAnchorBlock::Logslope),
+            (&slope_design.design, ParametricAnchorBlock::Slope),
         ];
         let flex_anchor_slot: Option<&Array2<f64>> = score_warp_anchor_design.as_ref();
         let flex_anchors: Vec<&Array2<f64>> = flex_anchor_slot.into_iter().collect();
@@ -2490,10 +2490,10 @@ pub fn fit_bernoulli_marginal_slope_terms(
                 // (non-compiled) design so the unified audit sees link_dev
                 // and attributes the drop via dropped_columns (gauge_priority=60
                 // is below all parametric blocks so RRQR correctly demotes
-                // link_dev when it aliases marginal / logslope / score_warp).
+                // link_dev when it aliases marginal / slope / score_warp).
                 cross_block_warnings.push(CrossBlockIdentifiabilityWarning {
                     candidate_label: "link_deviation",
-                    anchor_summary: "marginal+logslope+score_warp".to_string(),
+                    anchor_summary: "marginal+slope+score_warp".to_string(),
                     reason,
                 });
                 Some(prepared)
@@ -2512,39 +2512,39 @@ pub fn fit_bernoulli_marginal_slope_terms(
         }
         out
     };
-    // Reduced-basis orthogonalisation of the logslope design through the BMS
-    // family's OWN internal `logslope_design` geometry (robust cure for the
-    // marginal↔logslope structural confound). Robustness is unconditional, so we
-    // always reparameterize the logslope coordinate space to a full-rank reduced
+    // Reduced-basis orthogonalisation of the slope design through the BMS
+    // family's OWN internal `slope_design` geometry (robust cure for the
+    // marginal↔slope structural confound). Robustness is unconditional, so we
+    // always reparameterize the slope coordinate space to a full-rank reduced
     // basis `T` whose effective weighted columns are W-orthogonal to the marginal
     // span at the rigid pilot — removing the rank-soft confounded direction the
     // former pinned overlap ridge merely penalised. The transform is
     // β/ρ-independent (pilot geometry only), so it is a one-shot construction-
-    // time map applied to every per-iteration logslope design inside
+    // time map applied to every per-iteration slope design inside
     // `build_blocks` / `make_family`, and inverted at fit-result assembly so the
-    // reported logslope β is in the original basis. `None` ⇒ nothing to reduce
+    // reported slope β is in the original basis. `None` ⇒ nothing to reduce
     // (no rank-soft confounded direction) ⇒ raw design used everywhere.
-    let logslope_reduced_reparam: Option<ReducedLogslopeReparam> = build_reduced_logslope_reparam(
+    let slope_reduced_reparam: Option<ReducedSlopeReparam> = build_reduced_slope_reparam(
         &marginal_design,
-        &logslope_design,
+        &slope_design,
         z.as_ref(),
         &cross_block_pilot_w_score_warp,
         &spec.marginal_offset,
-        &spec.logslope_offset,
+        &spec.slope_offset,
         baseline.0,
         baseline.1,
         probit_scale,
     )?;
-    // Apply the reduced reparam to a logslope `TermCollectionDesign`, or return
+    // Apply the reduced reparam to a slope `TermCollectionDesign`, or return
     // the raw design clone when the reparam is absent (flag off / nothing to
     // reduce). Used by both `build_blocks` and `make_family` so the family's
     // internal design, the block design, β width, jacobian, penalty, and the
     // `validate_exact_block_state_shapes` check all agree at the reduced width.
-    let reduce_logslope_design =
-        |logslope_design: &TermCollectionDesign| -> Result<TermCollectionDesign, String> {
-            match logslope_reduced_reparam.as_ref() {
-                Some(reparam) => reparameterize_logslope_design_reduced(logslope_design, reparam),
-                None => Ok(logslope_design.clone()),
+    let reduce_slope_design =
+        |slope_design: &TermCollectionDesign| -> Result<TermCollectionDesign, String> {
+            match slope_reduced_reparam.as_ref() {
+                Some(reparam) => reparameterize_slope_design_reduced(slope_design, reparam),
+                None => Ok(slope_design.clone()),
             }
         };
 
@@ -2559,9 +2559,9 @@ pub fn fit_bernoulli_marginal_slope_terms(
     let setup = joint_setup(
         data_view,
         &marginalspec_boot,
-        &logslopespec_boot,
+        &slopespec_boot,
         marginal_penalty_count,
-        logslope_design.penalties.len(),
+        slope_design.penalties.len(),
         absorber_rho0,
         &extra_rho0,
         &effective_kappa_options,
@@ -2592,18 +2592,18 @@ pub fn fit_bernoulli_marginal_slope_terms(
 
     let build_blocks = |rho: &Array1<f64>,
                         marginal_design: &TermCollectionDesign,
-                        logslope_design: &TermCollectionDesign|
+                        slope_design: &TermCollectionDesign|
      -> Result<Vec<ParameterBlockSpec>, String> {
         let hints = hints.borrow();
         let mut cursor = 0usize;
-        // Reduced-basis orthogonalisation: replace the per-iteration logslope
+        // Reduced-basis orthogonalisation: replace the per-iteration slope
         // design with its full-rank reduced reparameterization `G·T` (flag ON);
         // a no-op clone when off. The reduced design carries the SAME number of
-        // penalties (each S → Tᵀ S T), so the `rho_logslope` slice width below
-        // is unchanged. Every consumer (marginal jacobian's c_i, logslope
+        // penalties (each S → Tᵀ S T), so the `rho_slope` slice width below
+        // is unchanged. Every consumer (marginal jacobian's c_i, slope
         // blockspec design/β/penalty/jacobian) now agrees at the reduced width.
-        let logslope_design_reduced = reduce_logslope_design(logslope_design)?;
-        let logslope_design = &logslope_design_reduced;
+        let slope_design_reduced = reduce_slope_design(slope_design)?;
+        let slope_design = &slope_design_reduced;
         // The marginal slice carries the genuine smooth penalties plus, when
         // the #461 influence absorber is active, one TRAILING coordinate for
         // the absorber ridge — its precision is REML-learned like every other
@@ -2611,10 +2611,10 @@ pub fn fit_bernoulli_marginal_slope_terms(
         let marginal_rho_len = marginal_design.penalties.len() + absorber_slots;
         let rho_marginal = rho.slice(s![cursor..cursor + marginal_rho_len]).to_owned();
         cursor += marginal_rho_len;
-        let rho_logslope = rho
-            .slice(s![cursor..cursor + logslope_design.penalties.len()])
+        let rho_slope = rho
+            .slice(s![cursor..cursor + slope_design.penalties.len()])
             .to_owned();
-        cursor += logslope_design.penalties.len();
+        cursor += slope_design.penalties.len();
         let p_m = marginal_design.design.ncols()
             + influence_columns.as_ref().map(|z| z.ncols()).unwrap_or(0);
         let mut blocks = vec![
@@ -2624,18 +2624,18 @@ pub fn fit_bernoulli_marginal_slope_terms(
                 &spec.marginal_offset,
                 rho_marginal,
                 hints.marginal_beta.clone(),
-                logslope_design,
-                &spec.logslope_offset,
+                slope_design,
+                &spec.slope_offset,
                 baseline.1,
                 p_m,
                 influence_columns.as_ref(),
             )?,
-            build_logslope_blockspec_bms(
-                logslope_design,
+            build_slope_blockspec_bms(
+                slope_design,
                 baseline.1,
-                &spec.logslope_offset,
-                rho_logslope,
-                hints.logslope_beta.clone(),
+                &spec.slope_offset,
+                rho_slope,
+                hints.slope_beta.clone(),
                 marginal_design,
                 &spec.marginal_offset,
                 baseline.0,
@@ -2660,7 +2660,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
     let cell_moment_lru = new_cell_moment_lru_cache(policy);
     let cell_moment_cache_stats = new_cell_moment_cache_stats();
     let make_family = |marginal_design: &TermCollectionDesign,
-                       logslope_design: &TermCollectionDesign,
+                       slope_design: &TermCollectionDesign,
                        sigma: Option<f64>|
      -> BernoulliMarginalSlopeFamily {
         // The kernel reads the marginal index from a matched (self.marginal_
@@ -2682,13 +2682,13 @@ pub fn fit_bernoulli_marginal_slope_terms(
             }
             None => marginal_design.design.clone(),
         };
-        // The family's row kernel reconstructs η_logslope = G·β_s and the
-        // logslope Jacobian factor_i·G_i from this matched (logslope_design,
+        // The family's row kernel reconstructs η_slope = G·β_s and the
+        // slope Jacobian factor_i·G_i from this matched (slope_design,
         // β_s) pair, so it MUST be the SAME reduced design `G·T` the block specs
         // fit against — otherwise β_s (reduced width) and the family design
         // (full width) desync. A no-op clone when the reparam is absent.
-        let kernel_logslope_design = reduce_logslope_design(logslope_design)
-            .expect("reduce logslope design for family construction")
+        let kernel_slope_design = reduce_slope_design(slope_design)
+            .expect("reduce slope design for family construction")
             .design;
         BernoulliMarginalSlopeFamily {
             y: Arc::clone(&y),
@@ -2698,7 +2698,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
             gaussian_frailty_sd: sigma,
             base_link: spec.base_link.clone(),
             marginal_design: kernel_marginal_design,
-            logslope_design: kernel_logslope_design,
+            slope_design: kernel_slope_design,
             score_warp: score_warp_runtime.clone(),
             link_dev: link_dev_runtime.clone(),
             policy: policy.clone(),
@@ -2711,18 +2711,18 @@ pub fn fit_bernoulli_marginal_slope_terms(
     };
 
     let marginal_terms = spatial_length_scale_term_indices(&marginalspec_boot);
-    let logslope_terms = spatial_length_scale_term_indices(&logslopespec_boot);
+    let slope_terms = spatial_length_scale_term_indices(&slopespec_boot);
     let marginal_has_spatial = !marginal_terms.is_empty();
-    let logslope_has_spatial = !logslope_terms.is_empty();
+    let slope_has_spatial = !slope_terms.is_empty();
     let analytic_joint_derivatives_available =
-        marginal_has_spatial || logslope_has_spatial || setup.log_kappa_dim() == 0;
+        marginal_has_spatial || slope_has_spatial || setup.log_kappa_dim() == 0;
     if setup.log_kappa_dim() > 0 && !analytic_joint_derivatives_available {
         return Err("exact bernoulli marginal-slope spatial optimization requires analytic joint psi derivatives"
                     .to_string());
     }
     let initial_rho = setup.theta0().slice(s![..setup.rho_dim()]).to_owned();
-    let initial_blocks = build_blocks(&initial_rho, &marginal_design, &logslope_design)?;
-    let initial_family = make_family(&marginal_design, &logslope_design, initial_sigma);
+    let initial_blocks = build_blocks(&initial_rho, &marginal_design, &slope_design)?;
+    let initial_family = make_family(&marginal_design, &slope_design, initial_sigma);
     let (joint_gradient, joint_hessian) =
         custom_family_outer_derivatives(&initial_family, &initial_blocks, options);
     let analytic_joint_gradient_available = analytic_joint_derivatives_available
@@ -2782,8 +2782,8 @@ pub fn fit_bernoulli_marginal_slope_terms(
                 } else {
                     Vec::new()
                 };
-                let logslope_psi_derivs = if logslope_has_spatial {
-                    let built = if let Some(reparam) = logslope_reduced_reparam.as_ref() {
+                let slope_psi_derivs = if slope_has_spatial {
+                    let built = if let Some(reparam) = slope_reduced_reparam.as_ref() {
                         let transform =
                             CoefficientSpatialPsiBlockTransform::new(&reparam.transform)?;
                         build_block_spatial_psi_derivatives_with_transform(
@@ -2796,14 +2796,14 @@ pub fn fit_bernoulli_marginal_slope_terms(
                         build_block_spatial_psi_derivatives(data_view, &specs[1], &designs[1])?
                     };
                     built.ok_or_else(|| {
-                        "bernoulli marginal-slope: logslope block has spatial terms \
+                        "bernoulli marginal-slope: slope block has spatial terms \
                      but spatial psi derivatives are unavailable"
                             .to_string()
                     })?
                 } else {
                     Vec::new()
                 };
-                let mut derivative_blocks = vec![marginal_psi_derivs, logslope_psi_derivs];
+                let mut derivative_blocks = vec![marginal_psi_derivs, slope_psi_derivs];
                 if score_warp_runtime.is_some() {
                     derivative_blocks.push(Vec::new());
                 }
@@ -2834,8 +2834,8 @@ pub fn fit_bernoulli_marginal_slope_terms(
     let exact_spatial_outer_tol = kappa_options_ref.rel_tol.max(EXACT_SPATIAL_OUTER_TOL_FLOOR);
     let solved = optimize_spatial_length_scale_exact_joint(
         data_view,
-        &[marginalspec_boot.clone(), logslopespec_boot.clone()],
-        &[marginal_terms.clone(), logslope_terms.clone()],
+        &[marginalspec_boot.clone(), slopespec_boot.clone()],
+        &[marginal_terms.clone(), slope_terms.clone()],
         kappa_options_ref,
         &setup,
         gam_solve::seeding::SeedRiskProfile::GeneralizedLinear,
@@ -2883,7 +2883,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
             }
             bidx += 1;
             if let Some(block) = fit.block_states.get(bidx) {
-                hints_mut.logslope_beta = Some(block.beta.clone());
+                hints_mut.slope_beta = Some(block.beta.clone());
             }
             bidx += 1;
             if score_warp_prepared.is_some() {
@@ -3039,7 +3039,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
     // time (see `LatentZConditionalCalibration::{theta1_covariance,
     // zeta_theta1_jacobian_row, generated_regressor_term}`), so the correction
     // is consumable wherever the slope information `G` (the per-row
-    // `∂score_β/∂ζ_i` of the marginal/logslope blocks) is available.
+    // `∂score_β/∂ζ_i` of the marginal/slope blocks) is available.
     //
     // The full correction is assembled by
     // `LatentZConditionalCalibration::generated_regressor_correction` (mod.rs):
@@ -3160,7 +3160,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
             ));
         }
         let correction_family =
-            make_family(&marginal_design, &logslope_design, final_sigma_cell.get());
+            make_family(&marginal_design, &slope_design, final_sigma_cell.get());
         let s = if flex_active {
             correction_family.flex_score_zeta_sensitivity(
                 &solved_fit.block_states,
@@ -3169,20 +3169,20 @@ pub fn fit_bernoulli_marginal_slope_terms(
             )?
         } else {
             // Use the FAMILY designs here, not the raw reporting designs: they
-            // are exactly the widened-marginal/reduced-logslope coefficient
+            // are exactly the widened-marginal/reduced-slope coefficient
             // frame carried by Vb (including an active influence absorber).
             let score_marginal_dense = correction_family
                 .marginal_design
                 .try_to_dense_arc("bms generated-regressor fitted marginal design")?;
-            let score_logslope_dense = correction_family
-                .logslope_design
-                .try_to_dense_arc("bms generated-regressor fitted logslope design")?;
-            let p_score = score_marginal_dense.ncols() + score_logslope_dense.ncols();
+            let score_slope_dense = correction_family
+                .slope_design
+                .try_to_dense_arc("bms generated-regressor fitted slope design")?;
+            let p_score = score_marginal_dense.ncols() + score_slope_dense.ncols();
             if p_beta != p_score {
                 return Err(format!(
-                    "bms generated-regressor rigid covariance/frame mismatch: covariance width {p_beta} != marginal({}) + logslope({})",
+                    "bms generated-regressor rigid covariance/frame mismatch: covariance width {p_beta} != marginal({}) + slope({})",
                     score_marginal_dense.ncols(),
-                    score_logslope_dense.ncols()
+                    score_slope_dense.ncols()
                 ));
             }
             let marginal_eta = &solved_fit.block_states[0].eta;
@@ -3217,7 +3217,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
                         probit_scale,
                         grid,
                         score_marginal_dense.view(),
-                        score_logslope_dense.view(),
+                        score_slope_dense.view(),
                         p_beta,
                     )?;
                     let cross_row = build.node_zeta_vjp(channels.node.view())?;
@@ -3251,7 +3251,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
                         weights.as_ref(),
                         probit_scale,
                         score_marginal_dense.view(),
-                        score_logslope_dense.view(),
+                        score_slope_dense.view(),
                         p_beta,
                     )?
                 }
@@ -3292,20 +3292,20 @@ pub fn fit_bernoulli_marginal_slope_terms(
                 .fold(0.0_f64, f64::max),
         );
     }
-    // Only after covariance correction is complete may the reported logslope
+    // Only after covariance correction is complete may the reported slope
     // coefficients be lifted from fitted G*T coordinates into the original
     // full-width G frame used by prediction and reporting.
-    if let Some(reparam) = logslope_reduced_reparam.as_ref() {
+    if let Some(reparam) = slope_reduced_reparam.as_ref() {
         let r = reparam.reduced_cols();
         if let Some(block) = solved_fit.blocks.get_mut(1)
             && block.beta.len() == r
         {
-            block.beta = reparam.recover_original_logslope_beta(&block.beta)?;
+            block.beta = reparam.recover_original_slope_beta(&block.beta)?;
         }
         if let Some(state) = solved_fit.block_states.get_mut(1)
             && state.beta.len() == r
         {
-            state.beta = reparam.recover_original_logslope_beta(&state.beta)?;
+            state.beta = reparam.recover_original_slope_beta(&state.beta)?;
         }
     }
     // #461: PREDICT SEAM — when the Stage-1 influence absorber is active
@@ -3323,11 +3323,11 @@ pub fn fit_bernoulli_marginal_slope_terms(
     Ok(BernoulliMarginalSlopeFitResult {
         fit: solved_fit,
         marginalspec_resolved: resolved_specs.remove(0),
-        logslopespec_resolved: resolved_specs.remove(0),
+        slopespec_resolved: resolved_specs.remove(0),
         marginal_design: designs.remove(0),
-        logslope_design: designs.remove(0),
+        slope_design: designs.remove(0),
         baseline_marginal: baseline.0,
-        baseline_logslope: baseline.1,
+        baseline_slope: baseline.1,
         z_normalization,
         latent_measure,
         score_warp_runtime,

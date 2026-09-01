@@ -98,7 +98,7 @@ def _fit_model():
         family="bernoulli-marginal-slope",
         link="probit",
         z_column="z",
-        logslope_formula="1",
+        slope_formula="1",
     )
     return model, data, p_true
 

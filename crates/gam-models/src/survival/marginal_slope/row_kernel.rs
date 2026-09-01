@@ -647,7 +647,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
         assert_eq!(
             family.slope_is_follow_up_varying(),
             G::FOLLOW_UP_VARYING,
-            "row kernel primary frame does not match the family's log-slope layout",
+            "row kernel primary frame does not match the family's slope layout",
         );
         let slices = block_slices(&family, &block_states);
         Self {
@@ -658,10 +658,10 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
         }
     }
 
-    /// The log-slope block's `(primary, design)` channels for this frame.
+    /// The slope block's `(primary, design)` channels for this frame.
     #[inline]
-    pub(crate) fn logslope_channels(&self) -> LogslopeChannelDesigns<'_> {
-        self.family.logslope_layout.primary_channels()
+    pub(crate) fn slope_channels(&self) -> SlopeChannelDesigns<'_> {
+        self.family.slope_layout.primary_channels()
     }
 }
 
@@ -716,7 +716,7 @@ mod rigid_row_admission_tests {
 /// The row's primary point in the frame `G` declares.
 ///
 /// The three location channels come from the family's dynamic-`q` geometry. The
-/// slope channels come from the log-slope layout: one channel when the slope is
+/// slope channels come from the slope layout: one channel when the slope is
 /// time-constant, three (entry, exit, exit-rate) when it varies along follow-up
 /// (gam#2765).
 pub(crate) fn rigid_row_kernel_primaries<const P: usize, G: SlopeRowGeometry<P>>(
@@ -1145,7 +1145,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
         let d_beta = ndarray::ArrayView1::from(d_beta);
         let d_time = d_beta.slice(s![self.slices.time.clone()]);
         let d_marginal = d_beta.slice(s![self.slices.marginal.clone()]);
-        let d_logslope = d_beta.slice(s![self.slices.logslope.clone()]);
+        let d_slope = d_beta.slice(s![self.slices.slope.clone()]);
         let mut action = [0.0; P];
         let marginal = self.family.marginal_design.dot_row_view(row, d_marginal);
         action[PRIMARY_Q0] = self.family.design_entry.dot_row_view(row, d_time) + marginal;
@@ -1154,8 +1154,8 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
             .family
             .design_derivative_exit
             .dot_row_view(row, d_time);
-        for &(primary, design) in self.logslope_channels().as_slice() {
-            action[primary] = design.dot_row_view(row, d_logslope);
+        for &(primary, design) in self.slope_channels().as_slice() {
+            action[primary] = design.dot_row_view(row, d_slope);
         }
         action
     }
@@ -1218,11 +1218,11 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
                 .expect("marginal axpy dim mismatch");
         }
         {
-            let mut logslope = ndarray::ArrayViewMut1::from(&mut out[self.slices.logslope.clone()]);
-            for &(primary, design) in self.logslope_channels().as_slice() {
+            let mut slope = ndarray::ArrayViewMut1::from(&mut out[self.slices.slope.clone()]);
+            for &(primary, design) in self.slope_channels().as_slice() {
                 design
-                    .axpy_row_into(row, v[primary], &mut logslope)
-                    .expect("logslope axpy dim mismatch");
+                    .axpy_row_into(row, v[primary], &mut slope)
+                    .expect("slope axpy dim mismatch");
             }
         }
     }
@@ -1280,8 +1280,8 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
             &self.family.design_derivative_exit,
         ];
         let marginal_design = &self.family.marginal_design;
-        let logslope_channels = self.logslope_channels();
-        let logslope_designs = logslope_channels.as_slice();
+        let slope_channels = self.slope_channels();
+        let slope_designs = slope_channels.as_slice();
 
         Some((|| {
             fn dense_chunk<'a>(
@@ -1388,9 +1388,9 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
             ]
             .into_iter()
             .chain(
-                logslope_designs
+                slope_designs
                     .iter()
-                    .map(|&(_, design)| ("logslope", design)),
+                    .map(|&(_, design)| ("slope", design)),
             ) {
                 if design.nrows() != n {
                     return Err(format!(
@@ -1438,17 +1438,17 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
                 ]),
                 "marginal/marginal",
             )?;
-            for &(primary_left, design_left) in logslope_designs {
-                for &(primary_right, design_right) in logslope_designs {
+            for &(primary_left, design_left) in slope_designs {
+                for &(primary_right, design_right) in slope_designs {
                     add_weighted_cross(
                         design_left,
                         design_right,
                         &weights[primary_left][primary_right],
                         dense.slice_mut(s![
-                            self.slices.logslope.clone(),
-                            self.slices.logslope.clone()
+                            self.slices.slope.clone(),
+                            self.slices.slope.clone()
                         ]),
-                        "logslope/logslope",
+                        "slope/slope",
                     )?;
                 }
                 let mg_weight =
@@ -1459,23 +1459,23 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
                     &mg_weight,
                     dense.slice_mut(s![
                         self.slices.marginal.clone(),
-                        self.slices.logslope.clone()
+                        self.slices.slope.clone()
                     ]),
-                    "marginal/logslope",
+                    "marginal/slope",
                 )?;
             }
 
             for primary_a in 0..3 {
-                for &(primary_slope, design_slope) in logslope_designs {
+                for &(primary_slope, design_slope) in slope_designs {
                     add_weighted_cross(
                         time_designs[primary_a],
                         design_slope,
                         &weights[primary_a][primary_slope],
                         dense.slice_mut(s![
                             self.slices.time.clone(),
-                            self.slices.logslope.clone()
+                            self.slices.slope.clone()
                         ]),
-                        "time/logslope",
+                        "time/slope",
                     )?;
                 }
                 let tm_weight = &weights[primary_a][0] + &weights[primary_a][1];
@@ -1497,14 +1497,14 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
             for (upper_rows, upper_columns, lower_rows, lower_columns) in [
                 (
                     self.slices.marginal.clone(),
-                    self.slices.logslope.clone(),
-                    self.slices.logslope.clone(),
+                    self.slices.slope.clone(),
+                    self.slices.slope.clone(),
                     self.slices.marginal.clone(),
                 ),
                 (
                     self.slices.time.clone(),
-                    self.slices.logslope.clone(),
-                    self.slices.logslope.clone(),
+                    self.slices.slope.clone(),
+                    self.slices.slope.clone(),
                     self.slices.time.clone(),
                 ),
                 (
@@ -1531,12 +1531,12 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
                     time_designs[1].is_sparse(),
                     time_designs[2].is_sparse(),
                     marginal_design.is_sparse(),
-                    logslope_designs.iter().any(|&(_, d)| d.is_sparse()),
+                    slope_designs.iter().any(|&(_, d)| d.is_sparse()),
                     time_designs[0].ncols(),
                     time_designs[1].ncols(),
                     time_designs[2].ncols(),
                     marginal_design.ncols(),
-                    logslope_designs[0].1.ncols(),
+                    slope_designs[0].1.ncols(),
                 );
             });
             Ok(dense)
@@ -1574,14 +1574,14 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
                 .expect("marginal squared_axpy dim mismatch");
         }
         {
-            let channels = self.logslope_channels();
+            let channels = self.slope_channels();
             let slope_designs = channels.as_slice();
             for (index, &(primary, design)) in slope_designs.iter().enumerate() {
                 let mut gd =
-                    ndarray::ArrayViewMut1::from(&mut diag[self.slices.logslope.clone()]);
+                    ndarray::ArrayViewMut1::from(&mut diag[self.slices.slope.clone()]);
                 design
                     .squared_axpy_row_into(row, h[primary][primary], &mut gd)
-                    .expect("logslope squared_axpy dim mismatch");
+                    .expect("slope squared_axpy dim mismatch");
                 for &(other_primary, other_design) in &slope_designs[index + 1..] {
                     design
                         .crossdiag_axpy_row_into(
@@ -1590,7 +1590,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
                             2.0 * h[primary][other_primary],
                             &mut gd,
                         )
-                        .expect("logslope crossdiag dim mismatch");
+                        .expect("slope crossdiag dim mismatch");
                 }
             }
         }
@@ -1676,7 +1676,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> RowKernel<P>
 impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G> {
     /// Assemble the `(n_out × P·rank)` joint Jacobian-action projection `Jᵢ · F`
     /// from the four primary axes — `[entry+marginal | exit+marginal |
-    /// derivative | logslope]` — given a per-axis builder `axis(design,
+    /// derivative | slope]` — given a per-axis builder `axis(design,
     /// factor_block)` that produces that design's `n_out × rank` contribution.
     /// The whole-projection path passes the batched builder; the block-tiled
     /// path passes the row-range builder. Either way at most one axis transient
@@ -1699,7 +1699,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
         }
         let f_time = factor.slice(s![self.slices.time.clone(), ..]);
         let f_marginal = factor.slice(s![self.slices.marginal.clone(), ..]);
-        let f_logslope = factor.slice(s![self.slices.logslope.clone(), ..]);
+        let f_slope = factor.slice(s![self.slices.slope.clone(), ..]);
 
         let jf_marginal = axis(&self.family.marginal_design, f_marginal);
         let mut axis0 = axis(&self.family.design_entry, f_time);
@@ -1714,15 +1714,15 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
         slots[PRIMARY_Q0] = Some(axis0);
         slots[PRIMARY_Q1] = Some(axis1);
         slots[PRIMARY_QD1] = Some(axis2);
-        for &(primary, design) in self.logslope_channels().as_slice() {
-            slots[primary] = Some(axis(design, f_logslope));
+        for &(primary, design) in self.slope_channels().as_slice() {
+            slots[primary] = Some(axis(design, f_slope));
         }
         let axes: [(usize, Array2<f64>); P] = std::array::from_fn(|primary| {
             (
                 primary,
                 slots[primary].take().expect(
                     "every primary of the frame owns exactly one J·F axis: the three location \
-                     channels plus the log-slope layout's follow-up channels",
+                     channels plus the slope layout's follow-up channels",
                 ),
             )
         });
@@ -2016,14 +2016,14 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
     /// `(design row, coefficient range)` pair) rather than a materialized
     /// dense length-`p` vector — `q0 = (entry design, time) + (marginal
     /// design, marginal)`, `q1 = (exit design, time) + (marginal design,
-    /// marginal)`, `qd1 = (derivative-exit design, time)`, `g = (logslope
-    /// design, logslope)`. Summing `component(a)·W[range,range]·component(b)`
+    /// marginal)`, `qd1 = (derivative-exit design, time)`, `g = (slope
+    /// design, slope)`. Summing `component(a)·W[range,range]·component(b)`
     /// over every pair of components is exactly `jᵃᵀ·W·jᵇ` since `W`
     /// restricted to any range pair not covered by a component is multiplied
     /// by an implicit zero there. Cost is `O(Σ p_block²)` per row (the same
     /// complexity class as BMS's per-row trace contraction), not
     /// `O(p_total²)`, since only the 3 real blocks (`time, marginal,
-    /// logslope`) — never the optional flex/influence ones, which this hook
+    /// slope`) — never the optional flex/influence ones, which this hook
     /// only runs when inactive — are read.
     fn primary_trace_weight(
         &self,
@@ -2052,7 +2052,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
             .marginal_design
             .try_row_chunk(row..row + 1)
             .map_err(|e| format!("primary_trace_weight: marginal_design row chunk failed: {e}"))?;
-        let channels = self.logslope_channels();
+        let channels = self.slope_channels();
         let slope_designs = channels.as_slice();
         let slope_rows = slope_designs
             .iter()
@@ -2061,7 +2061,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                     .try_row_chunk(row..row + 1)
                     .map(|chunk| (primary, chunk))
                     .map_err(|e| {
-                        format!("primary_trace_weight: logslope_design row chunk failed: {e}")
+                        format!("primary_trace_weight: slope_design row chunk failed: {e}")
                     })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -2094,7 +2094,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
         for (primary, chunk) in &slope_rows {
             components[*primary].push(Component {
                 vec: chunk.row(0),
-                range: self.slices.logslope.clone(),
+                range: self.slices.slope.clone(),
             });
         }
 

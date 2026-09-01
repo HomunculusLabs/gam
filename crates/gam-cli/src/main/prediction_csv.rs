@@ -1,6 +1,15 @@
 use super::*;
 
-pub(crate) const STANDARD_PREDICTION_BASE_COLUMNS: [&str; 2] = ["eta", "mean"];
+pub(crate) const STANDARD_PREDICTION_BASE_COLUMNS: [&str; 3] = [
+    "linear_predictor_plugin",
+    "mean_plugin",
+    "posterior_mean",
+];
+pub(crate) const STANDARD_PREDICTION_INTERVAL_COLUMNS: [&str; 2] =
+    ["posterior_mean_lower", "posterior_mean_upper"];
+pub(crate) const STANDARD_PREDICTION_STD_ERROR_COLUMN: &str =
+    "posterior_mean_standard_error";
+pub(crate) const SPECIALIZED_PREDICTION_BASE_COLUMNS: [&str; 2] = ["eta", "mean"];
 pub(crate) const GAUSSIAN_LOCATION_SCALE_BASE_COLUMNS: [&str; 3] = ["eta", "mean", "sigma"];
 pub(crate) const SURVIVAL_PREDICTION_BASE_COLUMNS: [&str; 4] =
     ["eta", "survival_prob", "failure_prob", "risk_score"];
@@ -227,8 +236,8 @@ pub(crate) fn write_prediction_csv(
     let mean_v: Vec<f64> = mean.to_vec();
 
     let mut cols: Vec<(&str, &[f64])> = vec![
-        (STANDARD_PREDICTION_BASE_COLUMNS[0], &eta_v),
-        (STANDARD_PREDICTION_BASE_COLUMNS[1], &mean_v),
+        (SPECIALIZED_PREDICTION_BASE_COLUMNS[0], &eta_v),
+        (SPECIALIZED_PREDICTION_BASE_COLUMNS[1], &mean_v),
     ];
 
     let se_v: Vec<f64>;
@@ -265,6 +274,63 @@ pub(crate) fn write_prediction_csv(
     }
 
     write_prediction_csv_unified(path, &cols)
+}
+
+/// Standard GAM/GLM prediction writer with an estimand-explicit schema
+/// (#2785). The plug-in pair is always present and coherent; the posterior
+/// response mean is present unless the caller explicitly forced a curved-link
+/// plug-in prediction. Posterior uncertainty columns are named for the
+/// posterior estimand they accompany.
+pub(crate) fn write_standard_prediction_csv(
+    path: &Path,
+    linear_predictor_plugin: ArrayView1<'_, f64>,
+    mean_plugin: ArrayView1<'_, f64>,
+    posterior_mean: Option<ArrayView1<'_, f64>>,
+    posterior_mean_standard_error: Option<ArrayView1<'_, f64>>,
+    posterior_mean_lower: Option<ArrayView1<'_, f64>>,
+    posterior_mean_upper: Option<ArrayView1<'_, f64>>,
+) -> CliResult<()> {
+    let linear_predictor_plugin = linear_predictor_plugin.to_vec();
+    let mean_plugin = mean_plugin.to_vec();
+    let posterior_mean = posterior_mean.map(|values| values.to_vec());
+    let mut columns: Vec<(&str, &[f64])> = vec![
+        (
+            STANDARD_PREDICTION_BASE_COLUMNS[0],
+            &linear_predictor_plugin,
+        ),
+        (STANDARD_PREDICTION_BASE_COLUMNS[1], &mean_plugin),
+    ];
+    if let Some(values) = posterior_mean.as_ref() {
+        columns.push((STANDARD_PREDICTION_BASE_COLUMNS[2], values));
+    }
+
+    let standard_error = posterior_mean_standard_error.map(|values| values.to_vec());
+    let lower = posterior_mean_lower.map(|values| values.to_vec());
+    let upper = posterior_mean_upper.map(|values| values.to_vec());
+    match (standard_error.as_ref(), lower.as_ref(), upper.as_ref()) {
+        (Some(standard_error), Some(lower), Some(upper)) => {
+            if posterior_mean.is_none() {
+                return Err(CliError::Internal {
+                    reason: "posterior uncertainty cannot be emitted without posterior_mean"
+                        .to_string(),
+                });
+            }
+            columns.push((
+                STANDARD_PREDICTION_STD_ERROR_COLUMN,
+                standard_error,
+            ));
+            columns.push((STANDARD_PREDICTION_INTERVAL_COLUMNS[0], lower));
+            columns.push((STANDARD_PREDICTION_INTERVAL_COLUMNS[1], upper));
+        }
+        (None, None, None) => {}
+        _ => {
+            return Err(CliError::Internal {
+                reason: "standard prediction requires posterior standard error and both bounds together"
+                    .to_string(),
+            });
+        }
+    }
+    write_prediction_csv_unified(path, &columns)
 }
 
 /// Convenience wrapper for Gaussian location-scale predictions (always

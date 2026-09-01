@@ -494,15 +494,15 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
     )?;
     print_inference_summary(&inference_notes);
 
-    // `--logslope-time-k` names a margin on a block only the marginal-slope
+    // `--slope-time-k` names a margin on a block only the marginal-slope
     // likelihood has. Ignoring it elsewhere would report a fit that is not the
     // one asked for; mirrors the library-side refusal in
     // `fit_orchestration::materialize::survival`.
-    if effective_config.logslope_time_k.is_some()
+    if effective_config.slope_time_k.is_some()
         && likelihood_mode != SurvivalLikelihoodMode::MarginalSlope
     {
         return Err(
-            "--logslope-time-k applies to --survival-likelihood marginal-slope; the log-slope \
+            "--slope-time-k applies to --survival-likelihood marginal-slope; the slope \
              block does not exist in the other survival modes"
                 .to_string(),
         );
@@ -833,24 +833,24 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
     }
 
     if likelihood_mode == SurvivalLikelihoodMode::MarginalSlope {
-        // The log-slope time margin (gam#2765 / gam#2767): how much the latent
+        // The slope time margin (gam#2765 / gam#2767): how much the latent
         // score's effect is allowed to move along the follow-up axis. Built
         // from the same primitive the threshold and sigma margins above use, so
         // the three blocks share one knot rule and one degree admission check.
         // `None` keeps the pre-#2767 behaviour — a slope constant within a
         // person — which is what `SurvivalCovariateTermBlockTemplate::Static`
         // means.
-        let logslope_template = if let Some(lk) = effective_config.logslope_time_k {
+        let slope_template = if let Some(lk) = effective_config.slope_time_k {
             cli_err!(
-                "[survival marginal-slope] building time-varying log-slope: k={lk}, degree={}",
-                effective_config.logslope_time_degree
+                "[survival marginal-slope] building time-varying slope: k={lk}, degree={}",
+                effective_config.slope_time_degree
             );
             build_time_varying_survival_covariate_template(
                 &age_entry,
                 &age_exit,
                 lk,
-                effective_config.logslope_time_degree,
-                "logslope",
+                effective_config.slope_time_degree,
+                "slope",
             )?
         } else {
             SurvivalCovariateTermBlockTemplate::Static
@@ -859,45 +859,45 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             parsed.linkspec.as_ref(),
             "survival marginal-slope",
         )?;
-        let logslope_formula_raw =
+        let slope_formula_raw =
             effective_config
-                .logslope_formula
+                .slope_formula
                 .as_deref()
                 .ok_or_else(|| {
-                    "--logslope-formula is required with --survival-likelihood marginal-slope"
+                    "--slope-formula is required with --survival-likelihood marginal-slope"
                         .to_string()
                 })?;
         let z_column_name = effective_config.z_column.as_ref().ok_or_else(|| {
             "--z-column is required with --survival-likelihood marginal-slope".to_string()
         })?;
         let response_expr = surv_response_expr(args.entry.as_deref(), &args.exit, &args.event);
-        let (logslope_formula, parsed_logslope) = parse_matching_auxiliary_formula(
-            logslope_formula_raw,
+        let (slope_formula, parsed_slope) = parse_matching_auxiliary_formula(
+            slope_formula_raw,
             &response_expr,
-            "--logslope-formula",
+            "--slope-formula",
         )?;
-        if parsed_logslope.linkspec.is_some() {
+        if parsed_slope.linkspec.is_some() {
             return Err(
-                "link(...) is not supported in --logslope-formula for the survival marginal-slope family"
+                "link(...) is not supported in --slope-formula for the survival marginal-slope family"
                     .to_string(),
             );
         }
         validate_marginal_slope_z_column_exclusion(
             &parsed,
-            &parsed_logslope,
+            &parsed_slope,
             z_column_name,
             "survival marginal-slope",
-            "--logslope-formula",
+            "--slope-formula",
         )?;
-        let mut logslopespec = build_termspec(
-            &parsed_logslope.terms,
+        let mut slopespec = build_termspec(
+            &parsed_slope.terms,
             &ds,
             col_map_for_termspec,
             &mut inference_notes,
             &gam::ResourcePolicy::default_library(),
         )?;
         if effective_config.scale_dimensions {
-            enable_scale_dimensions(&mut logslopespec);
+            enable_scale_dimensions(&mut slopespec);
         }
 
         let z_col = resolve_role_col(&col_map, z_column_name, "z")?;
@@ -905,7 +905,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
 
         let routed_deviations = route_marginal_slope_deviation_blocks(
             parsed.linkwiggle.as_ref(),
-            parsed_logslope.linkwiggle.as_ref(),
+            parsed_slope.linkwiggle.as_ref(),
         )?;
         let routed_link_dev = routed_deviations.link_dev;
         let routed_score_warp = routed_deviations.score_warp;
@@ -914,9 +914,9 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                 "survival marginal-slope routes main-formula linkwiggle(...) into its anchored internal link-deviation block while keeping the probit survival base link".to_string(),
             );
         }
-        if parsed_logslope.linkwiggle.is_some() {
+        if parsed_slope.linkwiggle.is_some() {
             inference_notes.push(
-                "survival marginal-slope routes --logslope-formula linkwiggle(...) into its anchored internal score-warp block while keeping the probit survival base link".to_string(),
+                "survival marginal-slope routes --slope-formula linkwiggle(...) into its anchored internal score-warp block while keeping the probit survival base link".to_string(),
             );
         }
         if routed_link_dev.is_none() && routed_score_warp.is_none() {
@@ -1011,10 +1011,10 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                 )),
             },
             timewiggle_block: prepared.timewiggle_block.clone(),
-            logslopespec: logslopespec.clone(),
-            logslopespecs: None,
-            logslope_template: logslope_template.clone(),
-            logslope_offset: log_sigma_offset.clone(),
+            slopespec: slopespec.clone(),
+            slopespecs: None,
+            slope_template: slope_template.clone(),
+            slope_offset: log_sigma_offset.clone(),
             score_warp: routed_score_warp.clone(),
             link_dev: routed_link_dev.clone(),
             latent_z_policy: LatentZPolicy::default(),
@@ -1085,9 +1085,9 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                 &fit.marginal_design,
             )
             .map_err(|e| e.to_string())?;
-            let resolved_logslopespec = freeze_term_collection_from_design(
-                &fit.logslopespec_resolved,
-                &fit.logslope_design,
+            let resolved_slopespec = freeze_term_collection_from_design(
+                &fit.slopespec_resolved,
+                &fit.slope_design,
             )
             .map_err(|e| e.to_string())?;
             let baseline_timewiggle = match prepared.timewiggle_build.as_ref() {
@@ -1143,9 +1143,9 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                     survival_likelihood_label: survival_likelihood_modename(likelihood_mode)
                         .to_string(),
                     resolved_marginalspec,
-                    resolved_logslopespec,
-                    logslope_time_basis: fit.logslope_time_basis.clone(),
-                    logslope_formula,
+                    resolved_slopespec,
+                    slope_time_basis: fit.slope_time_basis.clone(),
+                    slope_formula,
                     z_column: z_column_name.clone(),
                     latent_z_normalization: SavedLatentZNormalization {
                         mean: fit.z_normalization.mean,
@@ -1153,7 +1153,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                     },
                     latent_z_rank_int_calibration: persisted_rank_int,
                     latent_z_conditional_calibration: persisted_conditional,
-                    baseline_logslope: fit.baseline_slope,
+                    baseline_slope: fit.baseline_slope,
                     timewiggle: baseline_timewiggle,
                     score_warp_runtime: fit.score_warp_runtime.as_ref(),
                     link_dev_runtime: fit.link_dev_runtime.as_ref(),

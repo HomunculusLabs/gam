@@ -81,12 +81,12 @@ def test_predict_conformal_is_reachable_and_covers() -> None:
         conformal_level=0.9,
         return_type="dict",
     )
-    # The conformal bounds replace mean_lower / mean_upper in the table.
-    assert "mean_lower" in out
-    assert "mean_upper" in out
-    lower = np.asarray(out["mean_lower"], dtype=float)
-    upper = np.asarray(out["mean_upper"], dtype=float)
-    mean = np.asarray(out["mean"], dtype=float)
+    # The conformal bounds replace posterior-mean bounds in the table.
+    assert "posterior_mean_lower" in out
+    assert "posterior_mean_upper" in out
+    lower = np.asarray(out["posterior_mean_lower"], dtype=float)
+    upper = np.asarray(out["posterior_mean_upper"], dtype=float)
+    mean = np.asarray(out["posterior_mean"], dtype=float)
     assert np.all(upper >= lower)
     assert np.all(mean <= upper + 1e-9)
     assert np.all(mean >= lower - 1e-9)
@@ -123,7 +123,7 @@ def test_predict_covariance_mode_is_reachable() -> None:
     se_by_mode = {}
     for mode in ("conditional", "smoothing"):
         tab = model.predict(grid, interval=0.95, covariance_mode=mode, return_type="dict")
-        se = np.asarray(tab["std_error"], dtype=float)
+        se = np.asarray(tab["posterior_mean_standard_error"], dtype=float)
         assert np.all(se > 0.0)
         se_by_mode[mode] = se
 
@@ -153,8 +153,8 @@ def test_predict_observation_interval_is_reachable_and_wider() -> None:
     )
     assert "observation_lower" in tab
     assert "observation_upper" in tab
-    mean_lower = np.asarray(tab["mean_lower"], dtype=float)
-    mean_upper = np.asarray(tab["mean_upper"], dtype=float)
+    mean_lower = np.asarray(tab["posterior_mean_lower"], dtype=float)
+    mean_upper = np.asarray(tab["posterior_mean_upper"], dtype=float)
     obs_lower = np.asarray(tab["observation_lower"], dtype=float)
     obs_upper = np.asarray(tab["observation_upper"], dtype=float)
     # Observation (prediction) intervals add residual noise variance, so they

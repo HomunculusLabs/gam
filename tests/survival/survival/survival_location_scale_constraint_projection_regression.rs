@@ -45,7 +45,7 @@ fn project_onto_linear_constraints_enforces_equalities_encoded_as_opposing_inequ
 }
 
 /// Regression for issue #374: a survival marginal-slope fit with
-/// `logslope_formula="1"` fired the rigid pilot, which seeded an
+/// `slope_formula="1"` fired the rigid pilot, which seeded an
 /// identifiability-reduced `time_beta` hint whose length no longer matched the
 /// raw `design_exit.ncols()` used to build the time-block constraints. That
 /// hint was fed straight into `project_onto_linear_constraints`, where

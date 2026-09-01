@@ -232,7 +232,7 @@ model = gamfit.fit(
     df,
     "case ~ s(age) + matern(pc1, pc2, pc3, pc4, centers=20)",
     family="bernoulli-marginal-slope",
-    logslope_formula="matern(pc1, pc2, pc3, pc4, centers=20)",
+    slope_formula="matern(pc1, pc2, pc3, pc4, centers=20)",
     transformation_normal_stage1=gamfit.CtnStage1(
         response="PGS",
         covariates="matern(pc1, pc2, pc3, pc4, centers=20)",
@@ -249,7 +249,7 @@ gamfit.fit(
     df,
     "Surv(entry, exit, event) ~ s(bmi) + s(hba1c)",
     survival_likelihood="marginal-slope",
-    logslope_formula="s(bmi) + s(hba1c)",
+    slope_formula="s(bmi) + s(hba1c)",
     transformation_normal_stage1=gamfit.CtnStage1(
         response="PGS",
         covariates="s(bmi) + s(hba1c)",

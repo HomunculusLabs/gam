@@ -1,5 +1,5 @@
 //! Issue #370 regression: a Bernoulli marginal-slope (BMS) model with a nonzero
-//! log-slope value at `beta = 0` must fit to completion through the pre-fit
+//! slope value at `beta = 0` must fit to completion through the pre-fit
 //! identifiability audit — both *without crashing* and *without hanging*.
 //!
 //! ## The bug
@@ -10,16 +10,16 @@
 //! ```text
 //!   η_i = q_i·c_i + s·g_i·z_i,   c_i = sqrt(1 + (s·g_i)²)
 //!   q_i = M[i,:]·β_m + offset_m[i]      (marginal η)
-//!   g_i = G[i,:]·β_s + offset_s[i]      (log-slope η)
+//!   g_i = G[i,:]·β_s + offset_s[i]      (slope η)
 //! ```
 //!
-//! where `offset_s = logslope_offset + logslope_baseline` and `logslope_baseline`
+//! where `offset_s = slope_offset + baseline_slope` and `baseline_slope`
 //! is a *data-driven pooled-probit pilot* value that is essentially never exactly
 //! zero. The old block contract assumed "at β=0 every g_i == 0, so no
 //! `BmsFamilyScalars` are needed" and hard-errored when it saw any nonzero g_i
 //! while `family_scalars` was `None`. Because the fitted baseline (and any
-//! user-supplied logslope offset) makes `g_i = offset_s[i] != 0` at β=0, that
-//! guard fired for *every* BMS model — including the rigid `logslope_formula="1"`
+//! user-supplied slope offset) makes `g_i = offset_s[i] != 0` at β=0, that
+//! guard fired for *every* BMS model — including the rigid `slope_formula="1"`
 //! control — making the entire score-warp / link-wiggle Python surface
 //! unreachable. The issue was surfaced from CI as a **>600s timeout** of the
 //! flex Bernoulli marginal-slope audit.
@@ -34,10 +34,10 @@
 //!    or the solver end to end, so on its own it cannot catch a re-introduced
 //!    crash *inside* the audit driver or a fit that hangs (the issue's reported
 //!    symptom was a timeout, not a panic).
-//! 2. `bms_{rigid,flex}_nonzero_logslope_offset_audit_fits_in_time_370` — the
+//! 2. `bms_{rigid,flex}_nonzero_slope_offset_audit_fits_in_time_370` — the
 //!    angle the issue was actually filed from: drive a complete `fit_model` BMS
 //!    fit (which runs the pre-fit audit end to end) with a *forced large nonzero
-//!    log-slope offset*, so `g_i = offset_s[i]` is guaranteed far from zero at
+//!    slope offset*, so `g_i = offset_s[i]` is guaranteed far from zero at
 //!    β=0. Each asserts the fit (a) returns a finite, nonempty coefficient
 //!    vector (no audit crash) and (b) terminates on convergence rather than by
 //!    exhausting its configured outer x inner iteration budget (no >600s hang
@@ -45,7 +45,7 @@
 
 use gam::ResourcePolicy;
 use gam::families::bms::{BernoulliMarginalSlopeTermSpec, DeviationBlockConfig, LatentZPolicy};
-use gam::families::bms::{BmsLogslopeJacobian, BmsMarginalJacobian};
+use gam::families::bms::{BmsSlopeJacobian, BmsMarginalJacobian};
 use gam::families::custom_family::{
     BlockEffectiveJacobian, BlockwiseFitOptions, DEFAULT_CUSTOM_FAMILY_INNER_MAX_CYCLES,
     FamilyLinearizationState,
@@ -97,12 +97,12 @@ fn normal_cdf(x: f64) -> f64 {
 }
 
 /// Build a small `disease ~ s(bmi)` BMS problem (the issue's repro shape) with a
-/// **forced large nonzero log-slope offset** so that `g_i = offset_s[i]` is far
+/// **forced large nonzero slope offset** so that `g_i = offset_s[i]` is far
 /// from zero at β=0, independent of the data-driven pilot baseline.
 fn build_problem(
     n: usize,
     flex: bool,
-    logslope_offset_value: f64,
+    slope_offset_value: f64,
 ) -> (Array2<f64>, BernoulliMarginalSlopeTermSpec) {
     let mut rng = StdRng::seed_from_u64(SEED.wrapping_add(n as u64));
 
@@ -162,9 +162,9 @@ fn build_problem(
         random_effect_terms: vec![],
         smooth_terms: vec![smooth],
     };
-    // Empty log-slope smooth == rigid `logslope_formula = "1"`: the log-slope
+    // Empty slope smooth == rigid `slope_formula = "1"`: the slope
     // channel is driven purely by its offset, which we set large and nonzero.
-    let logslopespec = TermCollectionSpec {
+    let slopespec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![],
@@ -184,12 +184,12 @@ fn build_problem(
         z,
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginalspec,
-        logslopespec,
+        slopespec,
         marginal_offset: Array1::zeros(n),
-        // The crux of #370: a large nonzero log-slope offset guarantees
-        // g_i = offset_s[i] = logslope_offset + logslope_baseline is far from
+        // The crux of #370: a large nonzero slope offset guarantees
+        // g_i = offset_s[i] = slope_offset + baseline_slope is far from
         // zero at β=0, the precondition that aborted the pre-fit audit.
-        logslope_offset: Array1::from_elem(n, logslope_offset_value),
+        slope_offset: Array1::from_elem(n, slope_offset_value),
         frailty: FrailtySpec::None,
         score_warp,
         link_dev,
@@ -202,10 +202,10 @@ fn build_problem(
 fn run_fit(
     n: usize,
     flex: bool,
-    logslope_offset_value: f64,
+    slope_offset_value: f64,
 ) -> (gam::families::bms::BernoulliMarginalSlopeFitResult, f64) {
     gam::init_parallelism();
-    let (data, spec) = build_problem(n, flex, logslope_offset_value);
+    let (data, spec) = build_problem(n, flex, slope_offset_value);
     let request = FitRequest::BernoulliMarginalSlope(BernoulliMarginalSlopeFitRequest {
         data: data.view(),
         spec,
@@ -222,8 +222,8 @@ fn run_fit(
         // A panic here on the audit message is the #370 regression: the pre-fit
         // identifiability audit must not reject a nonzero-baseline BMS model.
         Err(e) => panic!(
-            "issue #370 regression: BMS fit with a large nonzero log-slope offset \
-             (flex={flex}, offset={logslope_offset_value}) failed before producing a \
+            "issue #370 regression: BMS fit with a large nonzero slope offset \
+             (flex={flex}, offset={slope_offset_value}) failed before producing a \
              model — the pre-fit identifiability audit must self-compute the block \
              Jacobian scalars at β=0 rather than demanding family_scalars. error: {e}"
         ),
@@ -270,11 +270,11 @@ fn assert_full_fit(
     );
 }
 
-/// Rigid control: `disease ~ s(bmi)` with `logslope_formula = "1"` and a large
-/// nonzero log-slope offset. This is the exact case the issue says crashed for
-/// *every* logslope formula, independent of linkwiggle.
+/// Rigid control: `disease ~ s(bmi)` with `slope_formula = "1"` and a large
+/// nonzero slope offset. This is the exact case the issue says crashed for
+/// *every* slope formula, independent of linkwiggle.
 #[test]
-fn bms_rigid_nonzero_logslope_offset_audit_fits_in_time_370() {
+fn bms_rigid_nonzero_slope_offset_audit_fits_in_time_370() {
     let (out, elapsed) = run_fit(400, false, 1.7);
     assert_full_fit(&out, elapsed, false);
 }
@@ -292,7 +292,7 @@ fn bms_rigid_nonzero_logslope_offset_audit_fits_in_time_370() {
 // ~20s/cycle, which presents as an effectively non-terminating fit.
 //
 // Diagnosis (captured with iteration budgets capped to 8×8 and a small,
-// realistic log-slope offset of 0.15, so this is NOT an artifact of a forced
+// realistic slope offset of 0.15, so this is NOT an artifact of a forced
 // large offset):
 //
 //   [PIRLS/joint-Newton terminal] converged=false terminator=budget-exhausted
@@ -300,7 +300,7 @@ fn bms_rigid_nonzero_logslope_offset_audit_fits_in_time_370() {
 //   last_newton_math={old_kkt=3.918e1, linearized_next=3.918e1,
 //     actual=+3.046e-9, pred=+3.139e-9, rho=+9.704e-1, scalar_relerr=9.280e-11,
 //     step_inf=1.498e-10, proposal_inf=1.026e0}
-//   block_grad_inf=[5.709, 13.105, 0.732, 0.984]  (block 1 = scalar logslope)
+//   block_grad_inf=[5.709, 13.105, 0.732, 0.984]  (block 1 = scalar slope)
 //
 // The objective is numerically flat (|Δobj| ~ 3e-9 ≪ tol) yet the KKT residual
 // is pinned at ~3.9e1 — the iterate is stalled at a *non-KKT* point, so more
@@ -308,7 +308,7 @@ fn bms_rigid_nonzero_logslope_offset_audit_fits_in_time_370() {
 // (rho≈0.97, scalar_relerr≈1e-10), but the full proposal step (proposal_inf≈1)
 // is predicted to leave the KKT residual unchanged (`linearized_next == old_kkt`)
 // and is shrunk to ~1e-10 by the line search every cycle. The dominant unmoved
-// gradient lives in the width-1 logslope-intercept block (|g|∞≈13), a very stiff
+// gradient lives in the width-1 slope-intercept block (|g|∞≈13), a very stiff
 // direction whose Newton step is negligible against a large diagonal Hessian.
 // This is a joint-Newton convergence defect on the BMS flex deviation-block
 // path — a separate, deeper bug than the #367 audit crash this file pins.
@@ -325,7 +325,7 @@ fn bms_rigid_nonzero_logslope_offset_audit_fits_in_time_370() {
 /// from owned data, with no caller-supplied `BmsFamilyScalars`. Cheap unit
 /// complement to the full-fit guards above.
 #[test]
-fn bms_callbacks_self_compute_nonzero_logslope_baseline_at_beta_zero_370() {
+fn bms_callbacks_self_compute_nonzero_slope_baseline_at_beta_zero_370() {
     let marginal = Arc::new(
         Array2::from_shape_vec(
             (3, 2),
@@ -337,7 +337,7 @@ fn bms_callbacks_self_compute_nonzero_logslope_baseline_at_beta_zero_370() {
         )
         .unwrap(),
     );
-    let logslope = Arc::new(
+    let slope = Arc::new(
         Array2::from_shape_vec(
             (3, 2),
             vec![
@@ -361,14 +361,14 @@ fn bms_callbacks_self_compute_nonzero_logslope_baseline_at_beta_zero_370() {
 
     let marginal_cb = BmsMarginalJacobian::new(
         Arc::clone(&marginal),
-        Arc::clone(&logslope),
+        Arc::clone(&slope),
         offset_m.clone(),
         offset_s.clone(),
         marginal.ncols(),
     );
-    let logslope_cb = BmsLogslopeJacobian::new(
+    let slope_cb = BmsSlopeJacobian::new(
         Arc::clone(&marginal),
-        Arc::clone(&logslope),
+        Arc::clone(&slope),
         offset_m.clone(),
         offset_s.clone(),
         Arc::clone(&z),
@@ -378,12 +378,12 @@ fn bms_callbacks_self_compute_nonzero_logslope_baseline_at_beta_zero_370() {
     let marginal_j = marginal_cb
         .effective_jacobian_at(&state)
         .expect("marginal callback must not demand family scalars at beta=0");
-    let logslope_j = logslope_cb
+    let slope_j = slope_cb
         .effective_jacobian_at(&state)
-        .expect("logslope callback must not demand family scalars at beta=0");
+        .expect("slope callback must not demand family scalars at beta=0");
 
     assert_eq!(marginal_j.dim(), (marginal.nrows(), marginal.ncols()));
-    assert_eq!(logslope_j.dim(), (logslope.nrows(), logslope.ncols()));
+    assert_eq!(slope_j.dim(), (slope.nrows(), slope.ncols()));
 
     for i in 0..marginal.nrows() {
         let q_i = offset_m[i];
@@ -393,7 +393,7 @@ fn bms_callbacks_self_compute_nonzero_logslope_baseline_at_beta_zero_370() {
             "fixture must keep the #370 precondition g_i != 0 at beta=0"
         );
         let c_i = (1.0 + (probit_scale * g_i).powi(2)).sqrt();
-        let logslope_factor = q_i * probit_scale * probit_scale * g_i / c_i + probit_scale * z[i];
+        let slope_factor = q_i * probit_scale * probit_scale * g_i / c_i + probit_scale * z[i];
 
         for j in 0..marginal.ncols() {
             assert_close(
@@ -402,9 +402,9 @@ fn bms_callbacks_self_compute_nonzero_logslope_baseline_at_beta_zero_370() {
                 c_i * marginal[[i, j]],
             );
             assert_close(
-                &format!("logslope row {i} col {j}"),
-                logslope_j[[i, j]],
-                logslope_factor * logslope[[i, j]],
+                &format!("slope row {i} col {j}"),
+                slope_j[[i, j]],
+                slope_factor * slope[[i, j]],
             );
         }
     }

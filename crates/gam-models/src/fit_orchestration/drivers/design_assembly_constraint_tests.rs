@@ -5358,15 +5358,15 @@ fn joint_build_and_freeze_shares_auto_spatial_centers_across_blocks() {
         random_effect_terms: vec![],
         smooth_terms: vec![matern_term("marginal")],
     };
-    let logslopespec = TermCollectionSpec {
+    let slopespec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
-        smooth_terms: vec![matern_term("logslope")],
+        smooth_terms: vec![matern_term("slope")],
     };
 
     let (designs, resolved_specs) = build_term_collection_designs_and_freeze_joint(
         data.view(),
-        &[marginalspec.clone(), logslopespec.clone()],
+        &[marginalspec.clone(), slopespec.clone()],
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "joint build and freeze should succeed", e));
 
@@ -5382,7 +5382,7 @@ fn joint_build_and_freeze_shares_auto_spatial_centers_across_blocks() {
     };
 
     let marginal_centers = extract_centers(&resolved_specs[0]);
-    let logslope_centers = extract_centers(&resolved_specs[1]);
+    let slope_centers = extract_centers(&resolved_specs[1]);
     let separate_marginal_design =
         build_term_collection_design(data.view(), &marginalspec).unwrap_or_else(|e| panic!("{} failed: {:?}", "separate marginal", e));
     let separate_marginal =
@@ -5390,7 +5390,7 @@ fn joint_build_and_freeze_shares_auto_spatial_centers_across_blocks() {
             .unwrap_or_else(|e| panic!("{} failed: {:?}", "freeze separate marginal", e));
     let separate_marginal_centers = extract_centers(&separate_marginal);
 
-    assert_eq!(marginal_centers, logslope_centers);
+    assert_eq!(marginal_centers, slope_centers);
     assert_eq!(marginal_centers.ncols(), 2);
     assert_eq!(marginal_centers.nrows(), separate_marginal_centers.nrows());
 }

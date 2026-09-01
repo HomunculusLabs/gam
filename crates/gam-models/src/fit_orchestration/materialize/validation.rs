@@ -7,7 +7,7 @@ pub(crate) fn requests_bernoulli_marginal_slope(config: &FitConfig) -> bool {
         canonical == "bernoulli-marginal-slope" || canonical == "binary-marginal-slope"
     });
     family_requests_marginal_slope
-        || config.logslope_formula.is_some()
+        || config.slope_formula.is_some()
         || config.z_column.is_some()
         || config.ctn_stage1.is_some()
 }

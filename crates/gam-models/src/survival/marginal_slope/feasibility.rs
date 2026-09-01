@@ -240,7 +240,7 @@ impl SurvivalMarginalSlopeFamily {
 // `max_feasible_step_size` sufficed.
 //
 // A follow-up-varying slope breaks the implication: `q·c′` and `b′ᵀz` carry no
-// sign, and they read the marginal and log-slope blocks. The condition was
+// sign, and they read the marginal and slope blocks. The condition was
 // therefore placed in the likelihood DOMAIN — `+∞` outside, refusal at the row
 // evaluator — rather than in the FEASIBLE SET. Measured on the #2765 acceptance
 // fixture that costs the fit its convergence: the criterion is finite on one
@@ -421,7 +421,7 @@ impl SurvivalMarginalSlopeFamily {
     /// The follow-up-varying frame refuses every optional block (score-warp,
     /// link-deviation, CTN influence absorber, time-wiggle, frailty) at
     /// construction, so the layout here is exactly `[time, marginal,
-    /// log-slope]` and each design is one the family itself owns.
+    /// slope]` and each design is one the family itself owns.
     pub(crate) fn displaced_block_states(
         &self,
         block_states: &[ParameterBlockState],
@@ -431,13 +431,13 @@ impl SurvivalMarginalSlopeFamily {
         let designs: [&DesignMatrix; 3] = [
             &self.design_exit,
             &self.marginal_design,
-            self.logslope_layout.coefficient_design(),
+            self.slope_layout.coefficient_design(),
         ];
         if block_states.len() != designs.len() {
             return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
                 reason: format!(
                     "a follow-up-varying survival marginal-slope fit carries exactly {} \
-                     coefficient blocks (time, marginal, log-slope); got {}",
+                     coefficient blocks (time, marginal, slope); got {}",
                     designs.len(),
                     block_states.len(),
                 ),
@@ -483,7 +483,7 @@ impl SurvivalMarginalSlopeFamily {
 
 
     /// Bring a WARM-START coefficient vector back inside the follow-up-varying
-    /// likelihood domain, by retreating the log-slope block toward its own
+    /// likelihood domain, by retreating the slope block toward its own
     /// origin.
     ///
     /// # Why a seed can be outside a domain it was inside
@@ -503,7 +503,7 @@ impl SurvivalMarginalSlopeFamily {
     /// is the exact analogue of what the time block already does: its warm start
     /// is projected onto `q′ ≥ derivative_guard` before it is used
     /// (`project_onto_linear_constraints` in the block builder). This is the
-    /// log-slope block's half of the same contract.
+    /// slope block's half of the same contract.
     ///
     /// # Why the origin is the retreat target
     ///
@@ -514,7 +514,7 @@ impl SurvivalMarginalSlopeFamily {
     /// The retreat therefore has a PROVABLY interior endpoint, which is what
     /// makes the bisection below terminate rather than merely usually succeed.
     /// It is also the block's own cold start, so the worst case is "start this
-    /// evaluation's log-slope block from scratch", not "start it somewhere
+    /// evaluation's slope block from scratch", not "start it somewhere
     /// arbitrary".
     ///
     /// Returns the retreat fraction actually applied (`0.0` when the seed was
@@ -547,19 +547,19 @@ impl SurvivalMarginalSlopeFamily {
         if margin > 0.0 {
             return Ok(0.0);
         }
-        // The retreat direction: the log-slope block's own coefficients, pointing
+        // The retreat direction: the slope block's own coefficients, pointing
         // at the origin. Every other block is held, because they are not what
         // made the domain condition non-trivial.
-        let logslope = 2usize;
+        let slope = 2usize;
         let total: usize = states.iter().map(|state| state.beta.len()).sum();
         let mut direction = Array1::<f64>::zeros(total);
-        let start: usize = states[..logslope]
+        let start: usize = states[..slope]
             .iter()
             .map(|state| state.beta.len())
             .sum();
-        let width = states[logslope].beta.len();
+        let width = states[slope].beta.len();
         for column in 0..width {
-            direction[start + column] = -states[logslope].beta[column];
+            direction[start + column] = -states[slope].beta[column];
         }
         let margin_at = |fraction: f64| -> Result<f64, String> {
             let moved = self.displaced_block_states(&states, &direction, fraction)?;
@@ -573,7 +573,7 @@ impl SurvivalMarginalSlopeFamily {
             // a different defect and this rule must not paper over it: leave the
             // seed alone and let the row evaluator refuse and name its row.
             log::warn!(
-                "[survival-marginal-slope/follow-up-domain] the log-slope origin does not                  restore the domain (min η′₁ = {:.6e} there, {margin:.6e} at the seed); the                  time block's derivative guard must be violated at this theta",
+                "[survival-marginal-slope/follow-up-domain] the slope origin does not                  restore the domain (min η′₁ = {:.6e} there, {margin:.6e} at the seed); the                  time block's derivative guard must be violated at this theta",
                 margin_at(1.0)?,
             );
             return Ok(0.0);
@@ -582,7 +582,7 @@ impl SurvivalMarginalSlopeFamily {
         // fraction this rule has EVALUATED, never an interpolated one.
         let mut exterior = 0.0_f64;
         let mut interior = 1.0_f64;
-        let seed_scale = states[logslope]
+        let seed_scale = states[slope]
             .beta
             .iter()
             .fold(0.0_f64, |acc, v| acc.max(v.abs()));
@@ -602,12 +602,12 @@ impl SurvivalMarginalSlopeFamily {
                 exterior = midpoint;
             }
         }
-        let retreated = &states[logslope].beta * (1.0 - interior);
+        let retreated = &states[slope].beta * (1.0 - interior);
         log::info!(
-            "[survival-marginal-slope/follow-up-domain] warm-start log-slope seed was outside              the domain (min η′₁ = {margin:.6e}); retreated {:.4}% toward the block origin",
+            "[survival-marginal-slope/follow-up-domain] warm-start slope seed was outside              the domain (min η′₁ = {margin:.6e}); retreated {:.4}% toward the block origin",
             100.0 * interior,
         );
-        blocks[logslope].initial_beta = Some(retreated);
+        blocks[slope].initial_beta = Some(retreated);
         Ok(interior)
     }
 

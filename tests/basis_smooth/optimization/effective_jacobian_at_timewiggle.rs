@@ -4,11 +4,11 @@
 //!
 //! Setup: n=6 rows, p_base=2 time-base columns, p_tw=3 wiggle columns
 //! (degree-3 monotone I-spline from an 8-knot clamped vector — the minimal
-//! valid degree-3 wiggle), p_m=3 marginal columns, p_g=1 logslope column.
+//! valid degree-3 wiggle), p_m=3 marginal columns, p_g=1 slope column.
 //! The joint β is [β_t_base (2), β_tw (3), β_m (3), β_g (1)] = 9 entries.
 //!
 //! We evaluate the Jacobian at a non-trivial β with β_tw ≠ 0, so the
-//! timewiggle corrections are genuinely active.  The logslope β is set to
+//! timewiggle corrections are genuinely active.  The slope β is set to
 //! zero so c_i = 1 and the ground-truth per-row (η0, η1, ad1) can be
 //! computed directly from the q-values.
 
@@ -26,7 +26,7 @@ const P_BASE: usize = 2; // non-wiggle time columns
 const P_TW: usize = 3; // wiggle tail columns (degree-3 I-spline, 8 clamped knots)
 const P_TIME: usize = P_BASE + P_TW; // 5
 const P_M: usize = 3; // marginal columns
-const P_G: usize = 1; // logslope columns
+const P_G: usize = 1; // slope columns
 const P_JOINT: usize = P_TIME + P_M + P_G; // 9
 
 /// Dense n × p_base entry design.
@@ -59,8 +59,8 @@ fn design_marginal() -> Array2<f64> {
     Array2::from_shape_vec((N, P_M), data).unwrap()
 }
 
-/// Dense n × p_g logslope design.
-fn design_logslope() -> Array2<f64> {
+/// Dense n × p_g slope design.
+fn design_slope() -> Array2<f64> {
     let data: Vec<f64> = (0..N * P_G).map(|k| 0.5 + 0.1 * k as f64).collect();
     Array2::from_shape_vec((N, P_G), data).unwrap()
 }
@@ -146,7 +146,7 @@ fn row_eta(i: usize, beta: &[f64]) -> (f64, f64, f64) {
 
     // c_i from β_g (= 1 here since β_g = 0)
     let g_i: f64 = (0..P_G)
-        .map(|j| design_logslope()[[i, j]] * beta_g[j])
+        .map(|j| design_slope()[[i, j]] * beta_g[j])
         .sum();
     let s = 1.0_f64; // probit_scale
     let c_i = (1.0_f64 + (s * g_i).powi(2)).sqrt();

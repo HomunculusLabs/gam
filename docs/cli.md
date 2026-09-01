@@ -74,12 +74,12 @@ gam fit train.csv 'Surv(entry, exit, event) ~ s(age) + bmi' \
 | `--time-basis ispline|none` | Structural survival time basis. `linear` and `bspline` are rejected by the CLI. |
 | `--time-degree N`, `--time-num-internal-knots N`, `--time-smooth-lambda VALUE` | I-spline time basis controls (defaults `3`, `8`, `1e-2`). |
 | `--threshold-time-k N`, `--sigma-time-k N` | Enable time-varying threshold or scale tensor blocks. |
-| `--logslope-time-k N` | Let the marginal-slope effect vary along follow-up: tensors the log-slope design against a B-spline margin in `log(time)`. |
+| `--slope-time-k N` | Let the marginal-slope effect vary along follow-up: tensors the slope design against a B-spline margin in `log(time)`. |
 | `--threshold-time-degree N`, `--sigma-time-degree N` | B-spline degree for the time margin of the threshold / log-sigma tensors (default `3`). |
 | `--survival-time-anchor VALUE` | Centering anchor for the baseline time basis, in the data's own time units, honored by every survival likelihood. Omit it to let the fit choose: the robust interior median exit for `marginal-slope` and for any genuinely left-truncated dataset (any row entering above the time origin), the earliest entry age otherwise. Re-centering is an exact affine reparameterization of the baseline offset, so this picks the frame the smoothing selection sees, not the model. Also settable as `survival_time_anchor` in a `--request` document and as `survival_time_anchor=` in `gamfit.fit`. |
 | `--ridge-lambda VALUE` | Survival solver ridge regularization (default `1e-6`). |
 | `--pilot-subsample-threshold N` | Row count above which spatial length-scale optimization uses a pilot subsample (default `10000`). |
-| `--logslope-formula RHS`, `--z-column COLUMN` | Marginal-slope score-effect model. |
+| `--slope-formula RHS`, `--z-column COLUMN` | Marginal-slope score-effect model. |
 | `--frailty-kind gaussian-shift|hazard-multiplier`, `--frailty-sd VALUE`, `--hazard-loading full|loaded-vs-unloaded` | Frailty controls. |
 
 ## Predict
@@ -95,7 +95,7 @@ gam predict model.gam new.csv --out predictions.csv --uncertainty --level 0.95
 | `--level VALUE` | Coverage for uncertainty intervals; default `0.95`. |
 | `--covariance-mode conditional|corrected` | Conditional covariance or smoothing-corrected covariance. Absent, the definition the saved fit publishes (the one `gam summary` prices its standard errors from) is used and labeled; naming one is a requirement that refuses when the fit cannot supply it. |
 | `--mode posterior-mean|map` | Point-prediction mode. |
-| `--no-bias-correction` | Disable the prediction-time `O(n^-1)` bias correction. |
+| `--no-bias-correction` | Disable the `O(n^-1)` frequentist bias correction in the survival uncertainty paths. The standard `posterior_mean` point prediction is never moved by this flag. |
 | `--id-column COLUMN` | Carry an identifier column into the prediction CSV. |
 | `--offset-column COLUMN`, `--noise-offset-column COLUMN` | Prediction-time offsets matching the fitted model. |
 
@@ -154,7 +154,7 @@ The CLI and Python API share the same formula DSL:
   `group(...)`, `linear(...)`, `bounded(...)`.
 - `link(type=...)`, `linkwiggle(...)`, `timewiggle(...)`, and
   `survmodel(...)` are formula-level configuration terms.
-- `--predict-noise`, `--logslope-formula`, and survival options take
+- `--predict-noise`, `--slope-formula`, and survival options take
   RHS-only formulas. Do not include `y ~` in those arguments.
 
 See [Formula DSL reference](formulas.md), [Families and link

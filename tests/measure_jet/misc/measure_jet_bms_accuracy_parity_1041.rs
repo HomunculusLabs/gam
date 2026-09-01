@@ -100,7 +100,7 @@ fn normal_cdf(x: f64) -> f64 {
     0.5 * (1.0 + statrs::function::erf::erf(x / std::f64::consts::SQRT_2))
 }
 
-/// Planted logslope truth: monotone in x1, flat in x2.
+/// Planted slope truth: monotone in x1, flat in x2.
 fn beta_true(x1: f64) -> f64 {
     0.2 + 0.9 * x1
 }
@@ -166,7 +166,7 @@ fn fit_bms(body: &str, ds: &gam::data::EncodedDataset) -> BernoulliMarginalSlope
     let config = FitConfig {
         family: Some("bernoulli-marginal-slope".to_string()),
         link: Some("probit".to_string()),
-        logslope_formula: Some(body.to_string()),
+        slope_formula: Some(body.to_string()),
         z_column: Some("z".to_string()),
         ..FitConfig::default()
     };

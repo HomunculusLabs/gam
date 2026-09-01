@@ -33,11 +33,11 @@ class _StubFit:
             lower = [m - z * self._sd for m in means]
             upper = [m + z * self._sd for m in means]
             return {
-                "mean": means,
+                "posterior_mean": means,
                 "observation_lower": lower,
                 "observation_upper": upper,
             }
-        return {"mean": means}
+        return {"posterior_mean": means}
 
 
 class _CapturingRust:
@@ -194,8 +194,8 @@ def test_non_positive_sd_rows_are_dropped_from_a_candidate(monkeypatch):
             out = super().predict(data, **kwargs)
             if kwargs.get("observation_interval"):
                 # Collapse the band on the first row.
-                out["observation_lower"][0] = out["mean"][0]
-                out["observation_upper"][0] = out["mean"][0]
+                out["observation_lower"][0] = out["posterior_mean"][0]
+                out["observation_upper"][0] = out["posterior_mean"][0]
             return out
 
     fits = {

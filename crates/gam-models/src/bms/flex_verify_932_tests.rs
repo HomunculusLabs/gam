@@ -11,7 +11,7 @@
 //! compiled lowering of the canonical BMS FLEX program to get its analytic
 //! value/gradient/Hessian, then central-difference that lowering's OWN returned
 //! value `ℓ(θ) = −w·logΦ(s_y·η(z; a(θ), θ))` w.r.t.
-//! every primary `θ = [q, logslope, β…]`, re-solving the calibrated intercept
+//! every primary `θ = [q, slope, β…]`, re-solving the calibrated intercept
 //! `a(θ)` at every stencil point (the value is intercept-Jacobian-independent, so
 //! the re-solve shares no derivative-chain code with the analytic path). A
 //! 4th-order Richardson stencil pins grad to ≤1e-7 and Hessian to ≤1e-5 with no
@@ -92,7 +92,7 @@ fn vfixture(is_score_warp: bool) -> VFixture {
         gaussian_frailty_sd: None,
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginal_design: dummy(),
-        logslope_design: dummy(),
+        slope_design: dummy(),
         score_warp: if is_score_warp {
             Some(runtime.clone())
         } else {
@@ -112,7 +112,7 @@ fn vfixture(is_score_warp: bool) -> VFixture {
     };
     let primary = PrimarySlices {
         q: 0,
-        logslope: 1,
+        slope: 1,
         h: if is_score_warp {
             Some(2..2 + basis_dim)
         } else {
@@ -222,7 +222,7 @@ fn vintercept(fx: &VFixture, mu: f64, b: f64, beta: &Array1<f64>, scale: f64) ->
 /// a(θ) re-solved by the independent bracketed solver.
 fn vnll(fx: &VFixture, p: &[f64]) -> f64 {
     let q = p[fx.primary.q];
-    let b = p[fx.primary.logslope];
+    let b = p[fx.primary.slope];
     let dev = if fx.is_score_warp {
         fx.primary.h.clone().expect("the flex fixture declares a primary Hessian")
     } else {
@@ -264,7 +264,7 @@ fn beta_vec(fx: &VFixture, p: &[f64]) -> Array1<f64> {
 /// only through the separate analytic call in `production_grad_hess`.
 fn production_value(fx: &VFixture, p: &[f64]) -> f64 {
     let q = p[fx.primary.q];
-    let b = p[fx.primary.logslope];
+    let b = p[fx.primary.slope];
     let beta = beta_vec(fx, p);
     let (beta_h, beta_w) = if fx.is_score_warp {
         (Some(&beta), None)
@@ -303,7 +303,7 @@ fn production_value(fx: &VFixture, p: &[f64]) -> f64 {
 fn production_grad_hess(fx: &VFixture, p: &[f64]) -> (f64, Vec<f64>, Vec<f64>) {
     let r = fx.primary.total;
     let q = p[fx.primary.q];
-    let b = p[fx.primary.logslope];
+    let b = p[fx.primary.slope];
     let beta = beta_vec(fx, p);
     let (beta_h, beta_w) = if fx.is_score_warp {
         (Some(&beta), None)
@@ -429,7 +429,7 @@ fn run_production_gate_at(is_score_warp: bool, q0: f64, b0: f64) {
     };
     let mut p0 = vec![0.0; r];
     p0[fx.primary.q] = q0;
-    p0[fx.primary.logslope] = b0;
+    p0[fx.primary.slope] = b0;
     let dev = if is_score_warp {
         fx.primary.h.clone().expect("the flex fixture declares a primary Hessian")
     } else {
@@ -566,7 +566,7 @@ fn standard_normal_flex_fixture() -> (BernoulliMarginalSlopeFamily, Vec<Paramete
     // A one-row fitted state keeps this fourth-order lock focused while still
     // traversing the genuine StandardNormal cell partition and moment ladder.
     let marginal_x = Array2::ones((1, 1));
-    let logslope_x = Array2::ones((1, 1));
+    let slope_x = Array2::ones((1, 1));
     let policy = gam_runtime::resource::ResourcePolicy::default_library();
     let family = BernoulliMarginalSlopeFamily {
         y: Arc::new(Array1::from_vec(vec![1.0])),
@@ -576,7 +576,7 @@ fn standard_normal_flex_fixture() -> (BernoulliMarginalSlopeFamily, Vec<Paramete
         gaussian_frailty_sd: Some(0.15),
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginal_design: DesignMatrix::Dense(DenseDesignMatrix::from(marginal_x.clone())),
-        logslope_design: DesignMatrix::Dense(DenseDesignMatrix::from(logslope_x.clone())),
+        slope_design: DesignMatrix::Dense(DenseDesignMatrix::from(slope_x.clone())),
         score_warp: Some(score.runtime.clone()),
         link_dev: Some(link.runtime.clone()),
         policy: policy.clone(),
@@ -588,7 +588,7 @@ fn standard_normal_flex_fixture() -> (BernoulliMarginalSlopeFamily, Vec<Paramete
     };
 
     let marginal_beta = Array1::from_vec(vec![0.18]);
-    let logslope_beta = Array1::from_vec(vec![0.32]);
+    let slope_beta = Array1::from_vec(vec![0.32]);
     let score_beta = Array1::from_shape_fn(score.runtime.basis_dim(), |index| {
         0.0015 * (index as f64 + 1.0)
     });
@@ -601,8 +601,8 @@ fn standard_normal_flex_fixture() -> (BernoulliMarginalSlopeFamily, Vec<Paramete
             beta: marginal_beta,
         },
         ParameterBlockState {
-            eta: logslope_x.dot(&logslope_beta),
-            beta: logslope_beta,
+            eta: slope_x.dot(&slope_beta),
+            beta: slope_beta,
         },
         ParameterBlockState {
             eta: Array1::zeros(1),
@@ -687,9 +687,9 @@ fn perturb_standard_normal_flex_states(
     let marginal_delta = step * direction[primary.q];
     perturbed[0].eta[row] += marginal_delta;
     perturbed[0].beta[0] += marginal_delta;
-    let logslope_delta = step * direction[primary.logslope];
-    perturbed[1].eta[row] += logslope_delta;
-    perturbed[1].beta[0] += logslope_delta;
+    let slope_delta = step * direction[primary.slope];
+    perturbed[1].eta[row] += slope_delta;
+    perturbed[1].beta[0] += slope_delta;
     if let Some(range) = primary.h.as_ref() {
         for (local, index) in range.clone().enumerate() {
             perturbed[2].beta[local] += step * direction[index];
@@ -719,12 +719,12 @@ fn standard_normal_flex_canonical_derivative_ladder_matches_vgh_t3_t4_932() {
     let w_range = primary.w.as_ref().expect("active link-deviation range");
     assert!(!h_range.is_empty() && !w_range.is_empty());
 
-    // One mixed direction forces q, logslope, score-warp, and link-deviation
+    // One mixed direction forces q, slope, score-warp, and link-deviation
     // cross terms through every derivative order without materializing a dense
     // t3/t4 tensor.
     let mut direction = Array1::<f64>::zeros(primary.total);
     direction[primary.q] = 0.55;
-    direction[primary.logslope] = -0.35;
+    direction[primary.slope] = -0.35;
     direction[h_range.start] = 0.45;
     direction[w_range.start] = -0.40;
 
@@ -793,8 +793,8 @@ fn standard_normal_flex_canonical_derivative_ladder_matches_vgh_t3_t4_932() {
     let classify = |idx: usize| -> String {
         if idx == primary.q {
             "q".to_string()
-        } else if idx == primary.logslope {
-            "logslope".to_string()
+        } else if idx == primary.slope {
+            "slope".to_string()
         } else if h_range.contains(&idx) {
             format!("h{}", idx - h_range.start)
         } else if w_range.contains(&idx) {
@@ -804,8 +804,8 @@ fn standard_normal_flex_canonical_derivative_ladder_matches_vgh_t3_t4_932() {
         }
     };
     eprintln!(
-        "#2347 layout: total={} q={} logslope={} h={:?} w={:?}",
-        primary.total, primary.q, primary.logslope, h_range, w_range
+        "#2347 layout: total={} q={} slope={} h={:?} w={:?}",
+        primary.total, primary.q, primary.slope, h_range, w_range
     );
     let gradient_fd_vec: Vec<f64> = (0..primary.total)
         .map(|u| (plus.gradient[u] - minus.gradient[u]) / (2.0 * step))
@@ -875,7 +875,7 @@ fn zz_measure_2347_t4_richardson() {
         .clone();
     let mut direction = Array1::<f64>::zeros(primary.total);
     direction[primary.q] = 0.55;
-    direction[primary.logslope] = -0.35;
+    direction[primary.slope] = -0.35;
     direction[h_range.start] = 0.45;
     direction[w_range.start] = -0.40;
 
@@ -884,8 +884,8 @@ fn zz_measure_2347_t4_richardson() {
     let classify = |idx: usize| -> String {
         if idx == primary.q {
             "q".to_string()
-        } else if idx == primary.logslope {
-            "logslope".to_string()
+        } else if idx == primary.slope {
+            "slope".to_string()
         } else if h_range.contains(&idx) {
             format!("h{}", idx - h_range.start)
         } else if w_range.contains(&idx) {
@@ -1046,8 +1046,8 @@ fn zz_measure_2347_pure_direction_h_to_t3_ladder() {
     let classify = |idx: usize| -> String {
         if idx == primary.q {
             "q".to_string()
-        } else if idx == primary.logslope {
-            "logslope".to_string()
+        } else if idx == primary.slope {
+            "slope".to_string()
         } else if h_range.contains(&idx) {
             format!("h{}", idx - h_range.start)
         } else if w_range.contains(&idx) {
@@ -1059,7 +1059,7 @@ fn zz_measure_2347_pure_direction_h_to_t3_ladder() {
 
     let channels: Vec<(String, usize, f64)> = vec![
         ("q".to_string(), primary.q, 0.55),
-        ("logslope".to_string(), primary.logslope, -0.35),
+        ("slope".to_string(), primary.slope, -0.35),
         ("h0".to_string(), h_range.start, 0.45),
         ("w0".to_string(), w_range.start, -0.40),
     ];

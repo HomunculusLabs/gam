@@ -1,17 +1,17 @@
 //! Plumbing test: frailty scale s_f = 1/√(1+σ²) flows correctly through the
-//! effective Jacobian for the survival marginal-slope logslope block when σ is
+//! effective Jacobian for the survival marginal-slope slope block when σ is
 //! non-trivial (σ > 0, so s_f < 1).
 //!
 //! # What this verifies
 //!
 //! 1. `FamilyLinearizationState::probit_frailty_scale` is read by
-//!    `LogslopeBlockJacobian::effective_jacobian_at` and changes the Jacobian
-//!    output proportionally: the β=0 logslope Jacobian row for output η0 is
+//!    `SlopeBlockJacobian::effective_jacobian_at` and changes the Jacobian
+//!    output proportionally: the β=0 slope Jacobian row for output η0 is
 //!    `s_f · z_i · G[i,:]`, so doubling s_f doubles the Jacobian.
 //!
-//! 2. The flat identifiability audit (`audit_identifiability`) sees the logslope
+//! 2. The flat identifiability audit (`audit_identifiability`) sees the slope
 //!    spec's `RowScaledJacobian` with s_f · z scaling and correctly identifies
-//!    the logslope block as non-aliased with the marginal block (which has no
+//!    the slope block as non-aliased with the marginal block (which has no
 //!    scaling callback and contributes via a different column design).
 //!
 //! 3. A state with `probit_frailty_scale = 1.0` (no frailty) yields a
@@ -30,9 +30,9 @@
 //! evaluation time, ensuring outer-loop σ updates (which rebuild the family
 //! with a new fixed σ) are reflected without requiring spec reconstruction.
 
-// The direct `LogslopeBlockJacobian` construction tests moved in-crate
+// The direct `SlopeBlockJacobian` construction tests moved in-crate
 // (crates/gam-models/src/survival/marginal_slope/tests.rs::
-// logslope_jacobian_reads_probit_scale_from_state_at_beta_zero) when the
+// slope_jacobian_reads_probit_scale_from_state_at_beta_zero) when the
 // constructor went crate-internal (#2352). The public-surface guards below
 // (RowScaledJacobian scaling and the identifiability audit) remain here.
 
@@ -75,19 +75,19 @@ fn make_z(seed: u64) -> Vec<f64> {
         .collect()
 }
 
-/// Build a logslope spec with a `RowScaledJacobian` callback using s_f·z scaling.
+/// Build a slope spec with a `RowScaledJacobian` callback using s_f·z scaling.
 ///
 /// This expresses the β=0 flat single-output effective design `diag(s_f·z)·design`
 /// through the unified `jacobian_callback` path.  For tests that need the full
-/// β-dependent multi-output `LogslopeBlockJacobian`, construct it directly.
-fn make_logslope_spec(design: &Array2<f64>, z: &[f64], s_f: f64) -> ParameterBlockSpec {
+/// β-dependent multi-output `SlopeBlockJacobian`, construct it directly.
+fn make_slope_spec(design: &Array2<f64>, z: &[f64], s_f: f64) -> ParameterBlockSpec {
     let sf_z: Arc<[f64]> = z.iter().map(|&zi| s_f * zi).collect::<Vec<f64>>().into();
     let jac_cb: Arc<dyn BlockEffectiveJacobian> = Arc::new(RowScaledJacobian {
         design: Arc::new(design.clone()),
         eta_scaling: sf_z,
     });
     ParameterBlockSpec {
-        name: "logslope_surface".to_string(),
+        name: "slope_surface".to_string(),
         design: DesignMatrix::Dense(DenseDesignMatrix::from(design.clone())),
         offset: Array1::<f64>::zeros(N),
         penalties: Vec::new(),
@@ -118,16 +118,16 @@ fn make_marginal_spec(design: &Array2<f64>) -> ParameterBlockSpec {
     }
 }
 
-/// The logslope spec's `RowScaledJacobian` uses s_f·z, not bare z.
+/// The slope spec's `RowScaledJacobian` uses s_f·z, not bare z.
 /// Verify that the flat single-output effective Jacobian (via `RowScaledJacobian`)
 /// has the correct s_f factor.
 #[test]
-fn logslope_row_scaled_jacobian_includes_sf() {
+fn slope_row_scaled_jacobian_includes_sf() {
     let design = make_design(7);
     let z = make_z(7);
     let s_f = 0.82_f64;
 
-    let spec = make_logslope_spec(&design, &z, s_f);
+    let spec = make_slope_spec(&design, &z, s_f);
 
     // The `RowScaledJacobian` callback returns the single-output (N×P) scaled design.
     // Verify jac[i, j] == s_f * z[i] * design[i, j].
@@ -159,26 +159,26 @@ fn logslope_row_scaled_jacobian_includes_sf() {
     }
 }
 
-/// The identifiability audit on a marginal + logslope pair with non-trivial
-/// s_f must pass (no fatal alias) because the logslope effective design is
+/// The identifiability audit on a marginal + slope pair with non-trivial
+/// s_f must pass (no fatal alias) because the slope effective design is
 /// s_f·z·G (different row-weights than the marginal's unscaled design M).
 #[test]
-fn audit_marginal_logslope_not_aliased_under_nontrivial_sf() {
-    // Use different designs for marginal and logslope so they are structurally distinct.
+fn audit_marginal_slope_not_aliased_under_nontrivial_sf() {
+    // Use different designs for marginal and slope so they are structurally distinct.
     let design_log = make_design(100);
     let design_marg = make_design(200); // deliberately different
     let z = make_z(100);
     let s_f = 0.6_f64;
 
-    let logslope_spec = make_logslope_spec(&design_log, &z, s_f);
+    let slope_spec = make_slope_spec(&design_log, &z, s_f);
     let marginal_spec = make_marginal_spec(&design_marg);
 
-    let specs = [marginal_spec, logslope_spec];
+    let specs = [marginal_spec, slope_spec];
     let audit = audit_identifiability(&specs).expect("audit must succeed");
 
     assert!(
         !audit.fatal,
-        "marginal + logslope with s_f={s_f} must not be fatal; summary: {}",
+        "marginal + slope with s_f={s_f} must not be fatal; summary: {}",
         audit.summary,
     );
     assert!(

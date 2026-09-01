@@ -13,7 +13,7 @@ impl SurvivalMarginalSlopeFamily {
         let slices = block_slices(self, block_states);
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         let p_h = slices.score_warp.as_ref().map_or(0, |range| range.len());
         let p_w = slices.link_dev.as_ref().map_or(0, |range| range.len());
         let p_i = slices.influence.as_ref().map_or(0, |range| range.len());
@@ -94,7 +94,7 @@ impl SurvivalMarginalSlopeFamily {
                     // nll: sum over weighted rows. Sign mirrors
                     // `evaluate_exact_newton_joint_dynamic_q_dense` (state.0 -= row_nll).
                     nll_acc -= row_nll * w;
-                    // Joint gradient: q-geometry pullback for time/marginal/logslope
+                    // Joint gradient: q-geometry pullback for time/marginal/slope
                     // primary outputs, plus identity contribution for flex blocks
                     // (score_warp_dev, link_dev). Matches the gradient half of
                     // `accumulate_dynamic_q_joint_row`.
@@ -156,7 +156,7 @@ impl SurvivalMarginalSlopeFamily {
         let primary = flex_primary_slices(self);
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         let p_h = slices.score_warp.as_ref().map_or(0, |range| range.len());
         let p_w = slices.link_dev.as_ref().map_or(0, |range| range.len());
         let p_i = slices.influence.as_ref().map_or(0, |range| range.len());
@@ -229,7 +229,7 @@ impl SurvivalMarginalSlopeFamily {
         let slices = block_slices(self, block_states);
         let p_t = slices.time.len();
         let p_m = slices.marginal.len();
-        let p_g = slices.logslope.len();
+        let p_g = slices.slope.len();
         let p_h = slices.score_warp.as_ref().map_or(0, |range| range.len());
         let p_w = slices.link_dev.as_ref().map_or(0, |range| range.len());
         let p_i = slices.influence.as_ref().map_or(0, |range| range.len());

@@ -11,7 +11,7 @@ pub(super) struct BernoulliMarginalSlopeFamily {
     pub(super) gaussian_frailty_sd: Option<f64>,
     pub(super) base_link: InverseLink,
     pub(super) marginal_design: DesignMatrix,
-    pub(super) logslope_design: DesignMatrix,
+    pub(super) slope_design: DesignMatrix,
     pub(super) score_warp: Option<DeviationRuntime>,
     pub(super) link_dev: Option<DeviationRuntime>,
     /// Resource policy controlling materialization decisions for psi design
@@ -270,7 +270,7 @@ pub(super) fn hash_intercept_warm_start_key_flex(
 #[derive(Clone, Default)]
 pub(super) struct ThetaHints {
     pub(super) marginal_beta: Option<Array1<f64>>,
-    pub(super) logslope_beta: Option<Array1<f64>>,
+    pub(super) slope_beta: Option<Array1<f64>>,
     pub(super) score_warp_beta: Option<Array1<f64>>,
     pub(super) link_dev_beta: Option<Array1<f64>>,
 }

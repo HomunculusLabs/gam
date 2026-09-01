@@ -50,7 +50,7 @@ impl SurvivalMarginalSlopeFamily {
             )
             .expect("marginal syr_row_into dimension mismatch");
 
-        // Every log-slope contribution below runs once per follow-up CHANNEL —
+        // Every slope contribution below runs once per follow-up CHANNEL —
         // exactly one for a time-constant slope, three (`g₀`, `g₁`, `ġ₁`) for a
         // follow-up-varying one, each against its own design (gam#2765). This
         // sibling of `BlockHessianAccumulator::add_pullback` was the sixth site
@@ -61,10 +61,10 @@ impl SurvivalMarginalSlopeFamily {
         // model, while the joint Hessian itself (which takes the BLAS-3
         // `hessian_dense_override` path) was right. That is why every gate on
         // `H` passed while the outer `½ tr(K·D_β H[v])` did not.
-        let slope_channels = self.logslope_layout.primary_channels();
+        let slope_channels = self.slope_layout.primary_channels();
         let slope_designs = slope_channels.as_slice();
 
-        // logslope-logslope block: Σ_{c,d} H[c,d] * g_c_row ⊗ g_d_row
+        // slope-slope block: Σ_{c,d} H[c,d] * g_c_row ⊗ g_d_row
         for &(left_primary, left_design) in slope_designs {
             for &(right_primary, right_design) in slope_designs {
                 let alpha = h[[left_primary, right_primary]];
@@ -72,20 +72,20 @@ impl SurvivalMarginalSlopeFamily {
                     continue;
                 }
                 let block =
-                    target.slice_mut(s![slices.logslope.clone(), slices.logslope.clone()]);
+                    target.slice_mut(s![slices.slope.clone(), slices.slope.clone()]);
                 if left_primary == right_primary {
                     left_design
                         .syr_row_into_view(row, alpha, block)
-                        .expect("logslope syr_row_into dimension mismatch");
+                        .expect("slope syr_row_into dimension mismatch");
                 } else {
                     left_design
                         .row_outer_into_view(row, right_design, alpha, block)
-                        .expect("logslope channel row_outer_into dimension mismatch");
+                        .expect("slope channel row_outer_into dimension mismatch");
                 }
             }
         }
 
-        // marginal-logslope block: Σ_c (H[0,c]+H[1,c]) * m_row ⊗ g_c_row  (+ transpose)
+        // marginal-slope block: Σ_c (H[0,c]+H[1,c]) * m_row ⊗ g_c_row  (+ transpose)
         for &(slope_primary, slope_design) in slope_designs {
             let alpha_mg = h[[0, slope_primary]] + h[[1, slope_primary]];
             if alpha_mg == 0.0 {
@@ -96,20 +96,20 @@ impl SurvivalMarginalSlopeFamily {
                     row,
                     slope_design,
                     alpha_mg,
-                    target.slice_mut(s![slices.marginal.clone(), slices.logslope.clone()]),
+                    target.slice_mut(s![slices.marginal.clone(), slices.slope.clone()]),
                 )
-                .expect("marginal-logslope row_outer_into dimension mismatch");
+                .expect("marginal-slope row_outer_into dimension mismatch");
             slope_design
                 .row_outer_into_view(
                     row,
                     &self.marginal_design,
                     alpha_mg,
-                    target.slice_mut(s![slices.logslope.clone(), slices.marginal.clone()]),
+                    target.slice_mut(s![slices.slope.clone(), slices.marginal.clone()]),
                 )
-                .expect("logslope-marginal row_outer_into dimension mismatch");
+                .expect("slope-marginal row_outer_into dimension mismatch");
         }
 
-        // time-logslope block: Σ_c H[a,c] * time_a_row ⊗ g_c_row  (+ transpose)
+        // time-slope block: Σ_c H[a,c] * time_a_row ⊗ g_c_row  (+ transpose)
         for &(slope_primary, slope_design) in slope_designs {
             for a in 0..3 {
                 let alpha = h[[a, slope_primary]];
@@ -121,17 +121,17 @@ impl SurvivalMarginalSlopeFamily {
                         row,
                         slope_design,
                         alpha,
-                        target.slice_mut(s![slices.time.clone(), slices.logslope.clone()]),
+                        target.slice_mut(s![slices.time.clone(), slices.slope.clone()]),
                     )
-                    .expect("time-logslope row_outer_into dimension mismatch");
+                    .expect("time-slope row_outer_into dimension mismatch");
                 slope_design
                     .row_outer_into_view(
                         row,
                         time_designs[a],
                         alpha,
-                        target.slice_mut(s![slices.logslope.clone(), slices.time.clone()]),
+                        target.slice_mut(s![slices.slope.clone(), slices.time.clone()]),
                     )
-                    .expect("logslope-time row_outer_into dimension mismatch");
+                    .expect("slope-time row_outer_into dimension mismatch");
             }
         }
 
@@ -161,7 +161,7 @@ impl SurvivalMarginalSlopeFamily {
     }
 
     /// Block-diagonal-only pullback: writes only the principal time-time,
-    /// marginal-marginal, and logslope-logslope rowwise contributions into
+    /// marginal-marginal, and slope-slope rowwise contributions into
     /// per-block targets. Used by `evaluate()` to populate per-block working
     /// sets without ever materializing the cross blocks.
     pub(crate) fn add_pullback_block_diagonals(
@@ -170,7 +170,7 @@ impl SurvivalMarginalSlopeFamily {
         primary_hessian: &Array2<f64>,
         time_target: &mut Array2<f64>,
         marginal_target: &mut Array2<f64>,
-        logslope_target: &mut Array2<f64>,
+        slope_target: &mut Array2<f64>,
     ) {
         let h = primary_hessian;
         let time_designs = [
@@ -195,7 +195,7 @@ impl SurvivalMarginalSlopeFamily {
             .expect("marginal syr_row_into dimension mismatch");
         // One rank-1 per follow-up channel PAIR, as in the full pullback above
         // (gam#2765): a time-constant slope has one, a varying one has nine.
-        let slope_channels = self.logslope_layout.primary_channels();
+        let slope_channels = self.slope_layout.primary_channels();
         let slope_designs = slope_channels.as_slice();
         for &(left_primary, left_design) in slope_designs {
             for &(right_primary, right_design) in slope_designs {
@@ -205,12 +205,12 @@ impl SurvivalMarginalSlopeFamily {
                 }
                 if left_primary == right_primary {
                     left_design
-                        .syr_row_into_view(row, alpha, logslope_target.view_mut())
-                        .expect("logslope syr_row_into dimension mismatch");
+                        .syr_row_into_view(row, alpha, slope_target.view_mut())
+                        .expect("slope syr_row_into dimension mismatch");
                 } else {
                     left_design
-                        .row_outer_into_view(row, right_design, alpha, logslope_target.view_mut())
-                        .expect("logslope channel row_outer_into dimension mismatch");
+                        .row_outer_into_view(row, right_design, alpha, slope_target.view_mut())
+                        .expect("slope channel row_outer_into dimension mismatch");
                 }
             }
         }
@@ -255,17 +255,17 @@ impl SurvivalMarginalSlopeFamily {
         let q0_dir = q_geom.dq0_time.dot(&d_time) + q_geom.dq0_marginal.dot(&d_marginal);
         let q1_dir = q_geom.dq1_time.dot(&d_time) + q_geom.dq1_marginal.dot(&d_marginal);
         let qd1_dir = q_geom.dqd1_time.dot(&d_time) + q_geom.dqd1_marginal.dot(&d_marginal);
-        let d_logslope = d_beta_flat.slice(s![slices.logslope.clone()]);
-        // One direction entry per log-slope follow-up channel. A time-constant
+        let d_slope = d_beta_flat.slice(s![slices.slope.clone()]);
+        // One direction entry per slope follow-up channel. A time-constant
         // slope has exactly one, at `PRIMARY_SLOPE`; a follow-up-varying slope
         // has three (gam#2765). The flex layout below is time-constant only —
         // the two are refused together at construction — so it keeps reading the
         // single `primary.g` slot.
-        let slope_channels = self.logslope_layout.primary_channels();
+        let slope_channels = self.slope_layout.primary_channels();
         let g_dir = self
-            .logslope_layout
+            .slope_layout
             .coefficient_design()
-            .dot_row_view(row, d_logslope);
+            .dot_row_view(row, d_slope);
 
         if let Some(primary) = flex_primary.as_ref() {
             out[primary.q0] = q0_dir;
@@ -281,7 +281,7 @@ impl SurvivalMarginalSlopeFamily {
             out[PRIMARY_Q1] = q1_dir;
             out[PRIMARY_QD1] = qd1_dir;
             for &(primary, design) in slope_channels.as_slice() {
-                out[primary] = design.dot_row_view(row, d_logslope);
+                out[primary] = design.dot_row_view(row, d_slope);
             }
         }
         Ok(out)
@@ -316,8 +316,8 @@ impl SurvivalMarginalSlopeFamily {
             2 => Ok(Some((
                 block_idx,
                 local_idx,
-                self.logslope_layout.coefficient_design().ncols(),
-                "SurvivalMarginalSlope logslope",
+                self.slope_layout.coefficient_design().ncols(),
+                "SurvivalMarginalSlope slope",
             ))),
             _ => Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
                 reason: format!(

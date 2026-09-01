@@ -15,7 +15,7 @@
 //! L2-norm step constraint over the concatenated δ. When one block (the
 //! time block) has near-singular curvature, the unconstrained Newton step
 //! has huge norm in that direction; the global L2 clamp rescales the
-//! ENTIRE δ uniformly, so the marginal/logslope blocks receive an
+//! ENTIRE δ uniformly, so the marginal/slope blocks receive an
 //! arbitrarily small fraction of their "fair" step and the time gradient
 //! stays large forever.
 //!
@@ -233,7 +233,7 @@ fn survival_marginal_slope_stall_reproduces_residual_stall_early_exit() {
 
     let data = build_dataset();
 
-    // Build the PC-Duchon log-slope formula with the same PC dimensionality
+    // Build the PC-Duchon slope formula with the same PC dimensionality
     // and center count as the failing large-scale fit:
     // `duchon(PC1, PC2, PC3, centers=10, order=1)` on both sides.
     let pcs: Vec<String> = (0..N_PCS).map(|i| format!("PC{}", i + 1)).collect();
@@ -243,7 +243,7 @@ fn survival_marginal_slope_stall_reproduces_residual_stall_early_exit() {
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("prs_z".to_string()),
-        logslope_formula: Some(duchon_term),
+        slope_formula: Some(duchon_term),
         baseline_target: "linear".to_string(),
         gpu_policy: if cfg!(target_os = "macos") {
             gam::gpu::GpuPolicy::Off

@@ -107,7 +107,7 @@ fn fit_request_document_from_fit_args(
         frailty_sd: args.frailty_sd,
         hazard_loading,
         latent_coordinates,
-        logslope_formula: args.logslope_formula.clone(),
+        slope_formula: args.slope_formula.clone(),
         negative_binomial_theta: args.negative_binomial_theta,
         noise_formula: args.predict_noise.clone(),
         noise_offset: args.noise_offset_column.clone(),
@@ -121,8 +121,8 @@ fn fit_request_document_from_fit_args(
         scale_dimensions: args.scale_dimensions.then_some(true),
         sigma_time_degree: Some(args.sigma_time_degree),
         sigma_time_k: args.sigma_time_k,
-        logslope_time_degree: Some(args.logslope_time_degree),
-        logslope_time_k: args.logslope_time_k,
+        slope_time_degree: Some(args.slope_time_degree),
+        slope_time_k: args.slope_time_k,
         smooth_descriptors,
         // `None` (flag unset) flows through so the Surv() seam resolves the one
         // canonical default; `Some(mode)` is the explicit request (#2301).
@@ -191,10 +191,10 @@ pub(crate) fn fit_config_from_survival_args(args: &SurvivalArgs) -> Result<FitCo
         threshold_time_degree: args.threshold_time_degree,
         sigma_time_k: args.sigma_time_k,
         sigma_time_degree: args.sigma_time_degree,
-        logslope_time_k: args.logslope_time_k,
-        logslope_time_degree: args.logslope_time_degree,
+        slope_time_k: args.slope_time_k,
+        slope_time_degree: args.slope_time_degree,
         noise_formula: args.predict_noise.clone(),
-        logslope_formula: args.logslope_formula.clone(),
+        slope_formula: args.slope_formula.clone(),
         z_column: args.z_column.clone(),
         scale_dimensions: args.scale_dimensions,
         spatial_optimization: SpatialLengthScaleOptimizationOptions {
@@ -223,13 +223,13 @@ fn required_columns_for_resolved_fit(
             parse_matching_auxiliary_formula(noise_formula, &parsed.response, "noise_formula")?;
         required.extend(required_columns_for_formula(&parsed_noise)?);
     }
-    if let Some(logslope_formula) = fit_config.logslope_formula.as_deref() {
-        let (_, parsed_logslope) = parse_matching_auxiliary_formula(
-            logslope_formula,
+    if let Some(slope_formula) = fit_config.slope_formula.as_deref() {
+        let (_, parsed_slope) = parse_matching_auxiliary_formula(
+            slope_formula,
             &parsed.response,
-            "logslope_formula",
+            "slope_formula",
         )?;
-        required.extend(required_columns_for_formula(&parsed_logslope)?);
+        required.extend(required_columns_for_formula(&parsed_slope)?);
     }
     required.extend(fit_config.z_column.iter().cloned());
     required.extend(fit_config.weight_column.iter().cloned());
@@ -333,12 +333,12 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
             threshold_time_degree: fit_config.threshold_time_degree,
             sigma_time_k: fit_config.sigma_time_k,
             sigma_time_degree: fit_config.sigma_time_degree,
-            logslope_time_k: fit_config.logslope_time_k,
-            logslope_time_degree: fit_config.logslope_time_degree,
+            slope_time_k: fit_config.slope_time_k,
+            slope_time_degree: fit_config.slope_time_degree,
             scale_dimensions: fit_config.scale_dimensions,
             pilot_subsample_threshold: args.pilot_subsample_threshold,
             out: args.out.clone(),
-            logslope_formula: fit_config.logslope_formula.clone(),
+            slope_formula: fit_config.slope_formula.clone(),
             z_column: fit_config.z_column.clone(),
             weights_column: fit_config.weight_column.clone(),
             offset_column: fit_config.offset_column.clone(),
@@ -394,9 +394,9 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
         );
     }
 
-    if fit_config.logslope_formula.is_some() || fit_config.z_column.is_some() {
-        if fit_config.logslope_formula.is_none() || fit_config.z_column.is_none() {
-            return Err("--logslope-formula and --z-column must be provided together".to_string());
+    if fit_config.slope_formula.is_some() || fit_config.z_column.is_some() {
+        if fit_config.slope_formula.is_none() || fit_config.z_column.is_none() {
+            return Err("--slope-formula and --z-column must be provided together".to_string());
         }
         let y = y.to_owned();
         return run_fit_bernoulli_marginal_slope(
@@ -801,13 +801,13 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
     }
     if args.predict_noise.is_some() {
         return Err(
-            "--predict-noise cannot be combined with --logslope-formula/--z-column".to_string(),
+            "--predict-noise cannot be combined with --slope-formula/--z-column".to_string(),
         );
     }
-    let logslope_formula_raw = args
-        .logslope_formula
+    let slope_formula_raw = args
+        .slope_formula
         .as_deref()
-        .ok_or_else(|| "missing --logslope-formula".to_string())?;
+        .ok_or_else(|| "missing --slope-formula".to_string())?;
     let z_column = args
         .z_column
         .as_ref()
@@ -816,23 +816,23 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
         parsed.linkspec.as_ref(),
         "bernoulli marginal-slope",
     )?;
-    let (logslope_formula, parsed_logslope) = parse_matching_auxiliary_formula(
-        logslope_formula_raw,
+    let (slope_formula, parsed_slope) = parse_matching_auxiliary_formula(
+        slope_formula_raw,
         &parsed.response,
-        "--logslope-formula",
+        "--slope-formula",
     )?;
-    if parsed_logslope.linkspec.is_some() {
+    if parsed_slope.linkspec.is_some() {
         return Err(
-            "link(...) is not supported in --logslope-formula for the bernoulli marginal-slope family"
+            "link(...) is not supported in --slope-formula for the bernoulli marginal-slope family"
                 .to_string(),
         );
     }
     validate_marginal_slope_z_column_exclusion(
         parsed,
-        &parsed_logslope,
+        &parsed_slope,
         z_column,
         "bernoulli marginal-slope",
-        "--logslope-formula",
+        "--slope-formula",
     )?;
 
     // Marginal-slope formulas may reference the literal placeholder `z` to
@@ -848,8 +848,8 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
         inference_notes,
         &gam::ResourcePolicy::default_library(),
     )?;
-    let mut logslopespec = build_termspec(
-        &parsed_logslope.terms,
+    let mut slopespec = build_termspec(
+        &parsed_slope.terms,
         ds,
         col_map_for_termspec,
         inference_notes,
@@ -857,14 +857,14 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
     )?;
     if args.scale_dimensions {
         enable_scale_dimensions(&mut marginalspec);
-        enable_scale_dimensions(&mut logslopespec);
+        enable_scale_dimensions(&mut slopespec);
     }
     let mut spatial_usagewarnings =
         collect_smooth_structure_warnings(&marginalspec, &ds.headers, "marginal model");
     spatial_usagewarnings.extend(collect_smooth_structure_warnings(
-        &logslopespec,
+        &slopespec,
         &ds.headers,
-        "logslope model",
+        "slope model",
     ));
     emit_smooth_structure_warnings("fit-start", &spatial_usagewarnings);
     print_inference_summary(inference_notes);
@@ -873,11 +873,11 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
     let z = ds.values.column(z_col).to_owned();
     let weights = resolve_weight_column(ds, col_map, args.weights_column.as_deref())?;
     let marginal_offset = resolve_offset_column(ds, col_map, args.offset_column.as_deref())?;
-    let logslope_offset = resolve_offset_column(ds, col_map, args.noise_offset_column.as_deref())?;
+    let slope_offset = resolve_offset_column(ds, col_map, args.noise_offset_column.as_deref())?;
     let frailty = fit_frailty_spec_from_args(args, "bernoulli marginal-slope")?;
     let routed_deviations = route_marginal_slope_deviation_blocks(
         parsed.linkwiggle.as_ref(),
-        parsed_logslope.linkwiggle.as_ref(),
+        parsed_slope.linkwiggle.as_ref(),
     )?;
     let routed_link_dev = routed_deviations.link_dev;
     let routed_score_warp = routed_deviations.score_warp;
@@ -892,9 +892,9 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
                 .to_string(),
         );
     }
-    if parsed_logslope.linkwiggle.is_some() {
+    if parsed_slope.linkwiggle.is_some() {
         inference_notes.push(
-            "bernoulli marginal-slope routes --logslope-formula linkwiggle(...) into its anchored internal score-warp block"
+            "bernoulli marginal-slope routes --slope-formula linkwiggle(...) into its anchored internal score-warp block"
                 .to_string(),
         );
     }
@@ -937,9 +937,9 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
                 z,
                 base_link: base_link.clone(),
                 marginalspec: marginalspec.clone(),
-                logslopespec: logslopespec.clone(),
+                slopespec: slopespec.clone(),
                 marginal_offset,
-                logslope_offset,
+                slope_offset,
                 frailty: frailty.clone(),
                 score_warp: routed_score_warp,
                 link_dev: routed_link_dev,
@@ -987,8 +987,8 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
     let frozen_marginal =
         freeze_term_collection_from_design(&solved.marginalspec_resolved, &solved.marginal_design)
             .map_err(|e| e.to_string())?;
-    let frozen_logslope =
-        freeze_term_collection_from_design(&solved.logslopespec_resolved, &solved.logslope_design)
+    let frozen_slope =
+        freeze_term_collection_from_design(&solved.slopespec_resolved, &solved.slope_design)
             .map_err(|e| e.to_string())?;
     cli_out!(
         "model fit complete | family={} | outer_iter={} | status={}",
@@ -997,7 +997,7 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
         solved.fit.convergence_evidence().inner_status().label()
     );
     print_spatial_aniso_scales(&solved.marginalspec_resolved);
-    print_spatial_aniso_scales(&solved.logslopespec_resolved);
+    print_spatial_aniso_scales(&solved.slopespec_resolved);
 
     if let Some(out) = args.out.as_ref() {
         let save_frailty = match (&frailty, solved.gaussian_frailty_sd) {
@@ -1016,16 +1016,16 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
         let mut model = build_bernoulli_marginal_slope_saved_model(
             formula_text.to_string(),
             ds.schema.clone(),
-            logslope_formula,
+            slope_formula,
             z_column.clone(),
             ds.headers.clone(),
             ds.feature_ranges(),
             frozen_marginal,
-            frozen_logslope,
+            frozen_slope,
             solved.fit,
             solved.marginal_design.design.ncols(),
             solved.baseline_marginal,
-            solved.baseline_logslope,
+            solved.baseline_slope,
             SavedLatentZNormalization {
                 mean: solved.z_normalization.mean,
                 sd: solved.z_normalization.sd,
@@ -1693,20 +1693,20 @@ pub(crate) fn validate_fit_args_preflight(
     parsed: &ParsedFormula,
     fit_config: &FitConfig,
 ) -> Result<(), String> {
-    if let (Some(logslope_formula), Some(z_column)) =
-        (args.logslope_formula.as_deref(), args.z_column.as_deref())
+    if let (Some(slope_formula), Some(z_column)) =
+        (args.slope_formula.as_deref(), args.z_column.as_deref())
     {
-        let (_, parsed_logslope) = parse_matching_auxiliary_formula(
-            logslope_formula,
+        let (_, parsed_slope) = parse_matching_auxiliary_formula(
+            slope_formula,
             &parsed.response,
-            "--logslope-formula",
+            "--slope-formula",
         )?;
         validate_marginal_slope_z_column_exclusion(
             parsed,
-            &parsed_logslope,
+            &parsed_slope,
             z_column,
             "bernoulli marginal-slope",
-            "--logslope-formula",
+            "--slope-formula",
         )?;
     }
     if args.out.is_none() {
@@ -1738,9 +1738,9 @@ pub(crate) fn validate_fit_args_preflight(
                 fit_config.sigma_time_degree,
             )?;
             validate_time_margin_args(
-                "request.config.logslope_time_k",
-                fit_config.logslope_time_k,
-                fit_config.logslope_time_degree,
+                "request.config.slope_time_k",
+                fit_config.slope_time_k,
+                fit_config.slope_time_degree,
             )?;
             if fit_config.time_basis.trim().eq_ignore_ascii_case("ispline") {
                 parse_survival_time_basis_config(
@@ -1777,9 +1777,9 @@ pub(crate) fn validate_fit_args_preflight(
         if args.noise_offset_column.is_some() {
             return Err("--transformation-normal conflicts with --noise-offset-column".to_string());
         }
-        if args.logslope_formula.is_some() || args.z_column.is_some() {
+        if args.slope_formula.is_some() || args.z_column.is_some() {
             return Err(
-                "--transformation-normal conflicts with marginal-slope --logslope-formula/--z-column"
+                "--transformation-normal conflicts with marginal-slope --slope-formula/--z-column"
                     .to_string(),
             );
         }
@@ -1796,13 +1796,13 @@ pub(crate) fn validate_fit_args_preflight(
             return Err("--transformation-normal conflicts with frailty flags".to_string());
         }
     }
-    if args.logslope_formula.is_some() != args.z_column.is_some() {
-        return Err("--logslope-formula and --z-column must be provided together".to_string());
+    if args.slope_formula.is_some() != args.z_column.is_some() {
+        return Err("--slope-formula and --z-column must be provided together".to_string());
     }
-    if args.logslope_formula.is_some() {
+    if args.slope_formula.is_some() {
         if args.predict_noise.is_some() {
             return Err(
-                "--predict-noise cannot be combined with --logslope-formula/--z-column".to_string(),
+                "--predict-noise cannot be combined with --slope-formula/--z-column".to_string(),
             );
         }
         if args.firth {
@@ -1864,7 +1864,7 @@ pub(crate) fn validate_fit_args_preflight(
             || fit_config.baseline_makeham.is_some()
             || args.threshold_time_k.is_some()
             || args.sigma_time_k.is_some()
-            || args.logslope_time_k.is_some()
+            || args.slope_time_k.is_some()
             || survival_likelihood_raw != "transformation"
             || baseline_target_raw != "linear"
             || time_basis_raw != "ispline"
@@ -1892,9 +1892,9 @@ pub(crate) fn validate_fit_args_preflight(
     )?;
     validate_time_margin_args("--sigma-time-k", args.sigma_time_k, args.sigma_time_degree)?;
     validate_time_margin_args(
-        "--logslope-time-k",
-        args.logslope_time_k,
-        args.logslope_time_degree,
+        "--slope-time-k",
+        args.slope_time_k,
+        args.slope_time_degree,
     )?;
     if time_basis_raw == "ispline" {
         parse_survival_time_basis_config(

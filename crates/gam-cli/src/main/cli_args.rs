@@ -163,7 +163,7 @@ pub(crate) struct FitArgs {
         conflicts_with_all = [
             "formula_positional",
             "predict_noise",
-            "logslope_formula",
+            "slope_formula",
             "z_column",
             "weights_column",
             "offset_column",
@@ -192,8 +192,8 @@ pub(crate) struct FitArgs {
             "threshold_time_degree",
             "sigma_time_k",
             "sigma_time_degree",
-            "logslope_time_k",
-            "logslope_time_degree",
+            "slope_time_k",
+            "slope_time_degree",
             "adaptive_regularization",
             "scale_dimensions",
             "precompute_conformal",
@@ -240,14 +240,14 @@ pub(crate) struct FitArgs {
     /// want a non-default binomial link.
     #[arg(long = "predict-noise")]
     pub(crate) predict_noise: Option<String>,
-    /// Secondary RHS-only formula for grouping-varying log-slope surface(s)
+    /// Secondary RHS-only formula for grouping-varying slope surface(s)
     /// in the Bernoulli marginal-slope family. Pass terms only, not `y ~ ...`.
-    /// Use additive `logslope(z_col, terms...)` declarations for vector-z
+    /// Use additive `slope(z_col, terms...)` declarations for vector-z
     /// marginal-slope models.
     /// `linkwiggle(...)` here routes into the anchored score-warp block for
     /// marginal-slope families.
-    #[arg(long = "logslope-formula")]
-    pub(crate) logslope_formula: Option<String>,
+    #[arg(long = "slope-formula")]
+    pub(crate) slope_formula: Option<String>,
     /// Column containing the latent score z for the Bernoulli marginal-slope
     /// family. The fit auto-detects whether to use the standard-normal or
     /// empirical latent measure for marginal calibration.
@@ -352,15 +352,15 @@ pub(crate) struct FitArgs {
     /// B-spline degree for the time margin of the log-sigma tensor product.
     #[arg(long = "sigma-time-degree", default_value_t = 3, value_parser = parse_positive_usize_cli)]
     pub(crate) sigma_time_degree: usize,
-    /// Number of B-spline basis functions for the time margin of the log-slope
+    /// Number of B-spline basis functions for the time margin of the slope
     /// tensor product in the survival marginal-slope family, i.e. how much the
     /// latent score's effect is allowed to move along the follow-up axis.
     /// Omitted = a slope that is constant within a person.
-    #[arg(long = "logslope-time-k", value_parser = parse_positive_usize_cli)]
-    pub(crate) logslope_time_k: Option<usize>,
-    /// B-spline degree for the time margin of the log-slope tensor product.
-    #[arg(long = "logslope-time-degree", default_value_t = 3, value_parser = parse_positive_usize_cli)]
-    pub(crate) logslope_time_degree: usize,
+    #[arg(long = "slope-time-k", value_parser = parse_positive_usize_cli)]
+    pub(crate) slope_time_k: Option<usize>,
+    /// B-spline degree for the time margin of the slope tensor product.
+    #[arg(long = "slope-time-degree", default_value_t = 3, value_parser = parse_positive_usize_cli)]
+    pub(crate) slope_time_degree: usize,
     /// Enable MM-based spatial adaptive regularization (Charbonnier majorizer)
     /// for compatible smooth terms. Off by default — pass
     /// `--adaptive-regularization true` to opt in. Only consulted by the bare
@@ -510,12 +510,12 @@ pub(crate) struct SurvivalArgs {
     pub(crate) threshold_time_degree: usize,
     pub(crate) sigma_time_k: Option<usize>,
     pub(crate) sigma_time_degree: usize,
-    pub(crate) logslope_time_k: Option<usize>,
-    pub(crate) logslope_time_degree: usize,
+    pub(crate) slope_time_k: Option<usize>,
+    pub(crate) slope_time_degree: usize,
     pub(crate) scale_dimensions: bool,
     pub(crate) pilot_subsample_threshold: usize,
     pub(crate) out: Option<PathBuf>,
-    pub(crate) logslope_formula: Option<String>,
+    pub(crate) slope_formula: Option<String>,
     pub(crate) z_column: Option<String>,
     pub(crate) weights_column: Option<String>,
     pub(crate) offset_column: Option<String>,

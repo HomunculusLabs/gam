@@ -83,9 +83,9 @@ fn dot4(left: &[f64; 4], right: &[f64; 4]) -> f64 {
 
 /// Sparse second-order coefficient-jet schedule compiled for one spline cell.
 /// The source predictor is linear in deviation coefficients and nonlinear only
-/// through the intercept/logslope geometry, so a cell's exact Hessian support
+/// through the intercept/slope geometry, so a cell's exact Hessian support
 /// is the Cartesian square of its nonzero first-order directions. The only
-/// explicit second-coefficient family is the logslope row (`b_first`).
+/// explicit second-coefficient family is the slope row (`b_first`).
 struct EmpiricalCubicPrimaryJet2Schedule<'a> {
     active: &'a [usize],
     first: &'a [[f64; 4]],
@@ -554,7 +554,7 @@ impl BernoulliMarginalSlopeFamily {
     ) -> Result<BernoulliMarginalSlopeRowExactContext, String> {
         let marginal_eta = block_states[0].eta[row];
         let marginal = self.marginal_link_map(marginal_eta)?;
-        // The log-slope block now parameterizes the signed slope directly.
+        // The slope block now parameterizes the signed slope directly.
         let slope = block_states[1].eta[row];
         let beta_h = self.score_beta(block_states)?;
         let beta_w = self.link_beta(block_states)?;
@@ -1944,18 +1944,18 @@ impl BernoulliMarginalSlopeFamily {
                 .ok_or_else(|| {
                     "BMS FLEX GPU selected for inputs unsupported by the row kernel".to_string()
                 })?;
-            // When both marginal/logslope designs expose a contiguous dense
+            // When both marginal/slope designs expose a contiguous dense
             // view, keep the n×r² row Hessian + designs resident for all
             // subsequent HVP / diagonal launches.
             #[cfg(target_os = "linux")]
             {
                 let marginal_dense = self.marginal_design.as_dense_ref();
-                let logslope_dense = self.logslope_design.as_dense_ref();
-                if let (Some(md), Some(gd)) = (marginal_dense, logslope_dense) {
+                let slope_dense = self.slope_design.as_dense_ref();
+                if let (Some(md), Some(gd)) = (marginal_dense, slope_dense) {
                     if md.is_standard_layout() && gd.is_standard_layout() {
                         let block_layout = crate::bms::gpu::row::BmsFlexBlockLayout {
                             p_m: cache.slices.marginal.len(),
-                            p_g: cache.slices.logslope.len(),
+                            p_g: cache.slices.slope.len(),
                             h: cache.slices.h.clone(),
                             w: cache.slices.w.clone(),
                             p_total: cache.slices.total,
@@ -1970,7 +1970,7 @@ impl BernoulliMarginalSlopeFamily {
                             .expect("dense marginal_design is row-major contiguous");
                         let gd_slice = gd
                             .as_slice()
-                            .expect("dense logslope_design is row-major contiguous");
+                            .expect("dense slope_design is row-major contiguous");
                         let device_state =
                             crate::bms::gpu::row::launch_bms_flex_row_kernel_device_resident(
                                 owned.as_borrowed(),
@@ -2284,9 +2284,9 @@ impl BernoulliMarginalSlopeFamily {
         out[primary.q] = self
             .marginal_design
             .dot_row_view(row, d_beta_flat.slice(s![slices.marginal.clone()]));
-        out[primary.logslope] = self
-            .logslope_design
-            .dot_row_view(row, d_beta_flat.slice(s![slices.logslope.clone()]));
+        out[primary.slope] = self
+            .slope_design
+            .dot_row_view(row, d_beta_flat.slice(s![slices.slope.clone()]));
         if let (Some(block_range), Some(primary_range)) = (slices.h.as_ref(), primary.h.as_ref()) {
             out.slice_mut(s![primary_range.start..primary_range.end])
                 .assign(&d_beta_flat.slice(s![block_range.clone()]).to_owned());
@@ -2316,13 +2316,13 @@ impl BernoulliMarginalSlopeFamily {
         primary: &PrimarySlices,
         d_beta_flats: &[Array1<f64>],
         marginal_projected: &Array2<f64>,
-        logslope_projected: &Array2<f64>,
+        slope_projected: &Array2<f64>,
     ) -> Vec<Array1<f64>> {
         let mut out = Vec::with_capacity(d_beta_flats.len());
         for (dir_idx, d_beta_flat) in d_beta_flats.iter().enumerate() {
             let mut direction = Array1::<f64>::zeros(primary.total);
             direction[primary.q] = marginal_projected[[local_row, dir_idx]];
-            direction[primary.logslope] = logslope_projected[[local_row, dir_idx]];
+            direction[primary.slope] = slope_projected[[local_row, dir_idx]];
             if let (Some(block_range), Some(primary_range)) =
                 (slices.h.as_ref(), primary.h.as_ref())
             {
@@ -2388,11 +2388,11 @@ impl BernoulliMarginalSlopeFamily {
                 let x_row = psi_map
                     .row_vector(row)
                     .map_err(|e| format!("survival rowwise psi map: {e}"))?;
-                out[primary.logslope] = x_row.dot(&block_states[1].beta);
+                out[primary.slope] = x_row.dot(&block_states[1].beta);
             }
             _ => {
                 return Err(format!(
-                    "bernoulli marginal-slope psi direction only supports spatial marginal/logslope blocks, got block {block_idx}"
+                    "bernoulli marginal-slope psi direction only supports spatial marginal/slope blocks, got block {block_idx}"
                 ));
             }
         }
@@ -2421,12 +2421,12 @@ impl BernoulliMarginalSlopeFamily {
                 let x_row = psi_map
                     .row_vector(row)
                     .map_err(|e| format!("survival rowwise psi map: {e}"))?;
-                out[primary.logslope] =
-                    x_row.dot(&d_beta_flat.slice(s![slices.logslope.clone()]).to_owned())
+                out[primary.slope] =
+                    x_row.dot(&d_beta_flat.slice(s![slices.slope.clone()]).to_owned())
             }
             _ => {
                 return Err(format!(
-                    "bernoulli marginal-slope psi action only supports marginal/logslope blocks, got block {block_idx}"
+                    "bernoulli marginal-slope psi action only supports marginal/slope blocks, got block {block_idx}"
                 ));
             }
         }
@@ -2463,11 +2463,11 @@ impl BernoulliMarginalSlopeFamily {
                 .axpy_row_into(row, primary_vec[primary.q], &mut marginal)?;
         }
         {
-            let mut logslope = out.slice_mut(s![slices.logslope.clone()]);
-            self.logslope_design.axpy_row_into(
+            let mut slope = out.slice_mut(s![slices.slope.clone()]);
+            self.slope_design.axpy_row_into(
                 row,
-                primary_vec[primary.logslope],
-                &mut logslope,
+                primary_vec[primary.slope],
+                &mut slope,
             )?;
         }
         if let Some(primary_h) = primary.h.as_ref()
@@ -2512,11 +2512,11 @@ impl BernoulliMarginalSlopeFamily {
                 .axpy_row_into(row, primary_vec[primary.q], &mut marginal)?;
         }
         {
-            let mut logslope = out.slice_mut(s![slices.logslope.clone()]);
-            self.logslope_design.axpy_row_into(
+            let mut slope = out.slice_mut(s![slices.slope.clone()]);
+            self.slope_design.axpy_row_into(
                 row,
-                primary_vec[primary.logslope],
-                &mut logslope,
+                primary_vec[primary.slope],
+                &mut slope,
             )?;
         }
         if let Some(primary_h) = primary.h.as_ref()
@@ -2560,11 +2560,11 @@ impl BernoulliMarginalSlopeFamily {
                 psi_map
                     .row_vector(row)
                     .map_err(|e| format!("survival rowwise psi map: {e}"))?,
-                slices.logslope.clone(),
+                slices.slope.clone(),
             ),
             _ => {
                 return Err(format!(
-                    "bernoulli marginal-slope psi embedding only supports marginal/logslope blocks, got block {block_idx}"
+                    "bernoulli marginal-slope psi embedding only supports marginal/slope blocks, got block {block_idx}"
                 ));
             }
         };
@@ -2676,9 +2676,9 @@ impl BernoulliMarginalSlopeFamily {
     /// `d(score_beta,i)/d z_i` for a flex BMS fit.
     ///
     /// The row kernel produces the exact sensitivity in its compact primary
-    /// coordinates `(q, logslope, score_warp..., link_dev...)`. This method
+    /// coordinates `(q, slope, score_warp..., link_dev...)`. This method
     /// applies the same pullback as the joint score/Hessian assembly: q and
-    /// logslope scatter through their fitted design rows, while deviation
+    /// slope scatter through their fitted design rows, while deviation
     /// primaries already are coefficient coordinates and copy directly. The
     /// returned width must exactly equal the covariance frame; a partial or
     /// padded result is an error.
@@ -2711,9 +2711,9 @@ impl BernoulliMarginalSlopeFamily {
         let marginal = self
             .marginal_design
             .try_to_dense_arc("BMS Murphy-Topel flex marginal design")?;
-        let logslope = self
-            .logslope_design
-            .try_to_dense_arc("BMS Murphy-Topel flex logslope design")?;
+        let slope = self
+            .slope_design
+            .try_to_dense_arc("BMS Murphy-Topel flex slope design")?;
         let n = self.y.len();
         let mut out = Array2::<f64>::zeros((n, expected_beta_dim));
         let out_slice = out
@@ -2747,9 +2747,9 @@ impl BernoulliMarginalSlopeFamily {
                     for (j, &xij) in marginal.row(row).iter().enumerate() {
                         dst[slices.marginal.start + j] = q_sensitivity * xij;
                     }
-                    let g_sensitivity = row_primary[primary.logslope];
-                    for (j, &xij) in logslope.row(row).iter().enumerate() {
-                        dst[slices.logslope.start + j] = g_sensitivity * xij;
+                    let g_sensitivity = row_primary[primary.slope];
+                    for (j, &xij) in slope.row(row).iter().enumerate() {
+                        dst[slices.slope.start + j] = g_sensitivity * xij;
                     }
                     if let (Some(beta_range), Some(primary_range)) =
                         (slices.h.as_ref(), primary.h.as_ref())
@@ -2886,7 +2886,7 @@ impl BernoulliMarginalSlopeFamily {
             let z_probe = exact::interval_probe_point(lo, hi)?;
             let obs = self.observed_denested_cell_partials_at_z(z_probe, a, b, beta_h, beta_w)?;
 
-            // Every live source channel is overwritten below: logslope at
+            // Every live source channel is overwritten below: slope at
             // index 1 and every coefficient in each configured deviation
             // range. Avoid dense zeroing of the whole primary tape per cell.
             coeff_u[1] = obs.dc_db;
@@ -3537,7 +3537,7 @@ impl BernoulliMarginalSlopeFamily {
     ) -> Result<Array1<f64>, String> {
         let mut point = Array1::<f64>::zeros(primary.total);
         point[primary.q] = block_states[0].eta[row];
-        point[primary.logslope] = block_states[1].eta[row];
+        point[primary.slope] = block_states[1].eta[row];
         if let Some(h_range) = primary.h.as_ref() {
             let score = self
                 .score_block_state(block_states)?
@@ -3570,7 +3570,7 @@ impl BernoulliMarginalSlopeFamily {
             .w
             .as_ref()
             .map(|range| point.slice(s![range.start..range.end]).to_owned());
-        (point[primary.q], point[primary.logslope], beta_h, beta_w)
+        (point[primary.q], point[primary.slope], beta_h, beta_w)
     }
 
     pub(super) fn observed_denested_cell_partials(
@@ -3615,7 +3615,7 @@ impl BernoulliMarginalSlopeFamily {
 
     /// Decompose an outer ψ-axis direction into `(axis, scalar)` when it is
     /// *single-axis* in primary space — nonzero only at `primary.q` (axis `0`,
-    /// "q") or `primary.logslope` (axis `1`, "g"). This is the universal shape
+    /// "q") or `primary.slope` (axis `1`, "g"). This is the universal shape
     /// of the nonzero directions every outer-derivative consumer builds (a
     /// ψ-row dotted into one block's β, deposited at that block's primary
     /// slot). Returns `None` for the all-zero vector and for any genuinely
@@ -3636,7 +3636,7 @@ impl BernoulliMarginalSlopeFamily {
             }
             let axis = if idx == primary.q {
                 0usize
-            } else if idx == primary.logslope {
+            } else if idx == primary.slope {
                 1usize
             } else {
                 return None;
@@ -3695,7 +3695,7 @@ impl BernoulliMarginalSlopeFamily {
                     let mut e_q = Array1::<f64>::zeros(r);
                     e_q[cache.primary.q] = 1.0;
                     let mut e_g = Array1::<f64>::zeros(r);
-                    e_g[cache.primary.logslope] = 1.0;
+                    e_g[cache.primary.slope] = 1.0;
                     let row_ctx = Self::row_ctx(cache, row);
                     let [t3_q, t3_g] = if let Some(grid) =
                         self.latent_measure.empirical_grid_for_training_row(row)?
@@ -3771,7 +3771,7 @@ impl BernoulliMarginalSlopeFamily {
                     let mut e_q = Array1::<f64>::zeros(r);
                     e_q[cache.primary.q] = 1.0;
                     let mut e_g = Array1::<f64>::zeros(r);
-                    e_g[cache.primary.logslope] = 1.0;
+                    e_g[cache.primary.slope] = 1.0;
                     let row_ctx = Self::row_ctx(cache, row);
                     let [t4_qq, t4_gg, t4_qg_ordered, t4_qg_swapped] = if let Some(grid) =
                         self.latent_measure.empirical_grid_for_training_row(row)?
@@ -6531,7 +6531,7 @@ impl BernoulliMarginalSlopeFamily {
         // knots contribute; Δc₃ is automatically zero at a score-only boundary.
         {
             let inv_two_pi = 1.0 / (2.0 * std::f64::consts::PI);
-            let lg = primary.logslope;
+            let lg = primary.slope;
             let du_b = dir_u[lg];
             let dv_b = dir_v[lg];
             for window in cells.windows(2) {
@@ -7395,8 +7395,8 @@ impl BernoulliMarginalSlopeFamily {
     }
 
     /// Like `add_pullback_primary_hessian` but only accumulates the h/w
-    /// cross-block contributions. The marginal-marginal, marginal-logslope,
-    /// and logslope-logslope blocks are handled by the weighted-Gram operator.
+    /// cross-block contributions. The marginal-marginal, marginal-slope,
+    /// and slope-slope blocks are handled by the weighted-Gram operator.
     pub(super) fn add_pullback_primary_hessian_hw_only(
         &self,
         target: &mut Array2<f64>,
@@ -7428,17 +7428,17 @@ impl BernoulliMarginalSlopeFamily {
                 let h_g = h[[1, primary_h.start + local_idx]];
                 if h_g != 0.0 {
                     {
-                        let mut col = target.slice_mut(s![slices.logslope.clone(), global_idx]);
-                        self.logslope_design
+                        let mut col = target.slice_mut(s![slices.slope.clone(), global_idx]);
+                        self.slope_design
                             .axpy_row_into(row, h_g, &mut col)
-                            .expect("logslope axpy column mismatch");
+                            .expect("slope axpy column mismatch");
                     }
                     {
                         let mut row_view =
-                            target.slice_mut(s![global_idx, slices.logslope.clone()]);
-                        self.logslope_design
+                            target.slice_mut(s![global_idx, slices.slope.clone()]);
+                        self.slope_design
                             .axpy_row_into(row, h_g, &mut row_view)
-                            .expect("logslope axpy row mismatch");
+                            .expect("slope axpy row mismatch");
                     }
                 }
             }
@@ -7476,17 +7476,17 @@ impl BernoulliMarginalSlopeFamily {
                 let w_g = h[[1, primary_w.start + local_idx]];
                 if w_g != 0.0 {
                     {
-                        let mut col = target.slice_mut(s![slices.logslope.clone(), global_idx]);
-                        self.logslope_design
+                        let mut col = target.slice_mut(s![slices.slope.clone(), global_idx]);
+                        self.slope_design
                             .axpy_row_into(row, w_g, &mut col)
-                            .expect("logslope axpy column mismatch");
+                            .expect("slope axpy column mismatch");
                     }
                     {
                         let mut row_view =
-                            target.slice_mut(s![global_idx, slices.logslope.clone()]);
-                        self.logslope_design
+                            target.slice_mut(s![global_idx, slices.slope.clone()]);
+                        self.slope_design
                             .axpy_row_into(row, w_g, &mut row_view)
-                            .expect("logslope axpy row mismatch");
+                            .expect("slope axpy row mismatch");
                     }
                 }
             }
@@ -7783,7 +7783,7 @@ impl BernoulliMarginalSlopeFamily {
             (
                 0.0_f64,
                 Array1::<f64>::zeros(slices.marginal.len()),
-                Array1::<f64>::zeros(slices.logslope.len()),
+                Array1::<f64>::zeros(slices.slope.len()),
                 slices
                     .h
                     .as_ref()
@@ -7814,7 +7814,7 @@ impl BernoulliMarginalSlopeFamily {
         let n_chunks = gam_solve::parallel_strategy::row_reduction_chunk_count(n, chunk_rows);
         let completed_chunks = AtomicUsize::new(0);
         let progress_step = (n_chunks / 10).max(1);
-        let (log_likelihood, grad_marginal, grad_logslope, grad_h, grad_w, hessian_acc) =
+        let (log_likelihood, grad_marginal, grad_slope, grad_h, grad_w, hessian_acc) =
             (0..n_chunks)
                 .into_par_iter()
                 .try_fold(make_acc, |mut acc, chunk_idx| -> Result<_, String> {
@@ -7916,13 +7916,13 @@ impl BernoulliMarginalSlopeFamily {
                             )?;
                         }
                         {
-                            let mut logslope = acc.2.view_mut();
-                            self.logslope_design.axpy_row_into(
+                            let mut slope = acc.2.view_mut();
+                            self.slope_design.axpy_row_into(
                                 row,
                                 Self::exact_newton_score_component_from_objective_gradient(
                                     grad_ref[1],
                                 ),
-                                &mut logslope,
+                                &mut slope,
                             )?;
                         }
                         if let (Some(primary_h), Some(grad_h)) =
@@ -8039,8 +8039,8 @@ impl BernoulliMarginalSlopeFamily {
             .slice_mut(s![slices.marginal.clone()])
             .assign(&grad_marginal);
         gradient
-            .slice_mut(s![slices.logslope.clone()])
-            .assign(&grad_logslope);
+            .slice_mut(s![slices.slope.clone()])
+            .assign(&grad_slope);
         if let (Some(range), Some(grad_h)) = (slices.h.as_ref(), grad_h.as_ref()) {
             gradient.slice_mut(s![range.clone()]).assign(grad_h);
         }

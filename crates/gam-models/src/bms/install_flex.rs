@@ -654,16 +654,16 @@ pub(super) fn validate_spec(
         || spec.weights.len() != n
         || spec.z.len() != n
         || spec.marginal_offset.len() != n
-        || spec.logslope_offset.len() != n
+        || spec.slope_offset.len() != n
     {
         return Err(format!(
-            "bernoulli-marginal-slope row mismatch: data={}, y={}, weights={}, z={}, marginal_offset={}, logslope_offset={}",
+            "bernoulli-marginal-slope row mismatch: data={}, y={}, weights={}, z={}, marginal_offset={}, slope_offset={}",
             n,
             spec.y.len(),
             spec.weights.len(),
             spec.z.len(),
             spec.marginal_offset.len(),
-            spec.logslope_offset.len()
+            spec.slope_offset.len()
         ));
     }
     if spec
@@ -682,8 +682,8 @@ pub(super) fn validate_spec(
     if spec.marginal_offset.iter().any(|&value| !value.is_finite()) {
         return Err("bernoulli-marginal-slope requires finite marginal offsets".to_string());
     }
-    if spec.logslope_offset.iter().any(|&value| !value.is_finite()) {
-        return Err("bernoulli-marginal-slope requires finite logslope offsets".to_string());
+    if spec.slope_offset.iter().any(|&value| !value.is_finite()) {
+        return Err("bernoulli-marginal-slope requires finite slope offsets".to_string());
     }
     if let Some(jac) = spec.score_influence_jacobian.as_ref() {
         // #461: the absorbed Stage-1 influence Jacobian J = ∂z/∂θ₁ must be an

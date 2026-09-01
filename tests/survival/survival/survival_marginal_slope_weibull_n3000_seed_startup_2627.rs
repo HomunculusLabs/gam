@@ -28,7 +28,7 @@
 //! There was no Rust-side gate for this, which is why the defect could only
 //! be seen in a Python artifact. This test reproduces the same fit shape at
 //! the same n from Rust: same formula, same likelihood mode, same z column,
-//! same log-slope formula, and a Weibull data-generating process with the
+//! same slope formula, and a Weibull data-generating process with the
 //! same structure as the Python fixture's `_make_weibull_survival`.
 //!
 //! Related: `survival_marginal_slope_stall` reproduces a DIFFERENT failure on
@@ -158,13 +158,13 @@ fn survival_marginal_slope_weibull_n3000_starts_its_outer_search() {
     init();
 
     let data = build_dataset();
-    let logslope_formula = "smooth(bmi) + smooth(hba1c)".to_string();
-    let formula = format!("Surv(entry, exit, event) ~ {logslope_formula}");
+    let slope_formula = "smooth(bmi) + smooth(hba1c)".to_string();
+    let formula = format!("Surv(entry, exit, event) ~ {slope_formula}");
 
     let config = FitConfig {
         survival_likelihood: Some("marginal-slope".to_string()),
         z_column: Some("age".to_string()),
-        logslope_formula: Some(logslope_formula),
+        slope_formula: Some(slope_formula),
         gpu_policy: if cfg!(target_os = "macos") {
             gam::gpu::GpuPolicy::Off
         } else {

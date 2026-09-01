@@ -257,7 +257,7 @@ fn h3a_uncapped_vs_capped_subsample_size_ratio_is_about_10x() {
 
 /// Build five overlapping blocks that mimic the large-scale rank
 /// deficiency the user's log reported: joint rank ≪ joint cols, many
-/// near-1.0 aliases across blocks, mirroring time/marginal/logslope/
+/// near-1.0 aliases across blocks, mirroring time/marginal/slope/
 /// score_warp/link_dev sharing the same polynomial/nullspace directions.
 fn build_large_scale_like_aliased_specs() -> Vec<gam::families::custom_family::ParameterBlockSpec> {
     use gam::families::custom_family::ParameterBlockSpec;
@@ -284,7 +284,7 @@ fn build_large_scale_like_aliased_specs() -> Vec<gam::families::custom_family::P
     // high-frequency tail. This produces near-perfect aliases on the
     // low-frequency columns across all blocks — the same structural
     // collinearity pattern the user's log reported between
-    // time_surface / marginal_surface / logslope_surface / etc.
+    // time_surface / marginal_surface / slope_surface / etc.
     let block = |seed: u64, k_common: usize, k_extra: usize| -> Array2<f64> {
         let mut m = Array2::<f64>::zeros((n, k_common + 1 + k_extra));
         let c = common(k_common);
@@ -308,7 +308,7 @@ fn build_large_scale_like_aliased_specs() -> Vec<gam::families::custom_family::P
     let names = [
         "time_surface",
         "marginal_surface",
-        "logslope_surface",
+        "slope_surface",
         "score_warp_dev",
         "link_dev",
     ];

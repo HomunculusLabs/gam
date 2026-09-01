@@ -1134,30 +1134,30 @@ pub(crate) fn launch_linux(
 // `src/families/bernoulli_marginal_slope.rs::exact_newton_joint_hessian_*_from_cache`):
 //
 //   Block layout (joint β):
-//     marginal = [0..p_m), logslope = [p_m..p_m+p_g),
+//     marginal = [0..p_m), slope = [p_m..p_m+p_g),
 //     h        = [h_start..h_end), w = [w_start..w_end), total = p_total.
 //
 //   Primary layout (per-row r-vector):
-//     q = 0, logslope = 1,
+//     q = 0, slope = 1,
 //     h = [h_primary_start..h_primary_end),
 //     w = [w_primary_start..w_primary_end), total = r.
 //
 //   row_dir[u] for u in primary layout:
 //     row_dir[0]   = Σ_j marginal_design[row, j] · v[j]
-//     row_dir[1]   = Σ_j logslope_design[row, j] · v[p_m + j]
+//     row_dir[1]   = Σ_j slope_design[row, j] · v[p_m + j]
 //     row_dir[h_k] = v[h_block_start + (h_k - h_primary_start)]
 //     row_dir[w_k] = v[w_block_start + (w_k - w_primary_start)]
 //
 //   action[u]    = Σ_v row_hessians[row, u*r + v] · row_dir[v]
 //
 //   block_partial[marginal_j] += action[0] · marginal_design[row, j]
-//   block_partial[logslope_j] += action[1] · logslope_design[row, j]
+//   block_partial[slope_j] += action[1] · slope_design[row, j]
 //   block_partial[h_block_start + (h_k - h_primary_start)] += action[h_k]
 //   block_partial[w_block_start + (w_k - w_primary_start)] += action[w_k]
 //
 // Diagonal:
 //   diag[marginal_j] += row_hess[row, 0*r + 0] · marginal_design[row, j]²
-//   diag[logslope_j] += row_hess[row, 1*r + 1] · logslope_design[row, j]²
+//   diag[slope_j] += row_hess[row, 1*r + 1] · slope_design[row, j]²
 //   diag[h_block_start + k] += row_hess[row, ii*r + ii]   (ii = h_primary_start + k)
 //   diag[w_block_start + k] += row_hess[row, ii*r + ii]   (ii = w_primary_start + k)
 //
@@ -1245,7 +1245,7 @@ pub struct DeviceResidentRowHess {
     /// layout supported by the current HVP / diag kernels.
     pub(crate) hess: CudaSlice<f64>,
     pub(crate) marginal_design: CudaSlice<f64>,
-    pub(crate) logslope_design: CudaSlice<f64>,
+    pub(crate) slope_design: CudaSlice<f64>,
     pub(crate) n: usize,
     pub(crate) r: usize,
     pub(crate) block: BmsFlexBlockLayout,
@@ -1328,7 +1328,7 @@ extern "C" __global__ void bms_flex_row_hvp_partial(
     int                  rows_per_cta,
     const double * __restrict__ row_hessians,    // [n, r*r]
     const double * __restrict__ marginal_design, // [n, p_m] row-major
-    const double * __restrict__ logslope_design, // [n, p_g] row-major
+    const double * __restrict__ slope_design, // [n, p_g] row-major
     const double * __restrict__ v,               // [p_total]
     double       * __restrict__ partial)         // [num_chunks, p_total]
 {
@@ -1356,7 +1356,7 @@ extern "C" __global__ void bms_flex_row_hvp_partial(
 
     for (int row = row_lo; row < row_hi; ++row) {
         const double *mrow = marginal_design + (size_t)row * (size_t)p_m;
-        const double *grow = logslope_design + (size_t)row * (size_t)p_g;
+        const double *grow = slope_design + (size_t)row * (size_t)p_g;
         const double *Hrow = row_hessians + (size_t)row * (size_t)r * (size_t)r;
 
         // row_dir[0] = mrow · v[0..p_m]
@@ -1453,7 +1453,7 @@ extern "C" __global__ void bms_flex_row_joint_gradient_partial(
     const double * __restrict__ row_neglog,       // [n]
     const double * __restrict__ row_grad,         // [n, r]
     const double * __restrict__ marginal_design,  // [n, p_m]
-    const double * __restrict__ logslope_design,  // [n, p_g]
+    const double * __restrict__ slope_design,  // [n, p_g]
     double       * __restrict__ partial)          // [num_chunks, 1+p_total]
 {
     int chunk = blockIdx.x;
@@ -1483,7 +1483,7 @@ extern "C" __global__ void bms_flex_row_joint_gradient_partial(
                 int j = beta_idx - p_m;
                 for (int row = row_lo; row < row_hi; ++row) {
                     acc -= row_grad[(size_t)row * (size_t)r + 1]
-                         * logslope_design[(size_t)row * (size_t)p_g + (size_t)j];
+                         * slope_design[(size_t)row * (size_t)p_g + (size_t)j];
                 }
             } else if (beta_idx >= h_block_start && beta_idx < h_block_start + h_block_len) {
                 int primary_idx = h_primary_start + beta_idx - h_block_start;
@@ -1532,7 +1532,7 @@ extern "C" __global__ void bms_flex_row_hvp_multi_partial(
     int                  rhs_count,
     const double * __restrict__ row_hessians,    // [n, r*r]
     const double * __restrict__ marginal_design, // [n, p_m]
-    const double * __restrict__ logslope_design, // [n, p_g]
+    const double * __restrict__ slope_design, // [n, p_g]
     const double * __restrict__ v_rhs,           // [rhs_count, p_total]
     double       * __restrict__ partial)         // [rhs_count, num_chunks, p_total]
 {
@@ -1558,7 +1558,7 @@ extern "C" __global__ void bms_flex_row_hvp_multi_partial(
 
     for (int row = row_lo; row < row_hi; ++row) {
         const double *mrow = marginal_design + (size_t)row * (size_t)p_m;
-        const double *grow = logslope_design + (size_t)row * (size_t)p_g;
+        const double *grow = slope_design + (size_t)row * (size_t)p_g;
         const double *Hrow = row_hessians + (size_t)row * (size_t)r * (size_t)r;
 
         for (int rhs = 0; rhs < rhs_count; ++rhs) {
@@ -1667,7 +1667,7 @@ extern "C" __global__ void bms_flex_row_diag_partial(
     int                  rows_per_cta,
     const double * __restrict__ row_hessians,
     const double * __restrict__ marginal_design,
-    const double * __restrict__ logslope_design,
+    const double * __restrict__ slope_design,
     double       * __restrict__ partial)
 {
     int chunk = blockIdx.x;
@@ -1684,7 +1684,7 @@ extern "C" __global__ void bms_flex_row_diag_partial(
 
     for (int row = row_lo; row < row_hi; ++row) {
         const double *mrow = marginal_design + (size_t)row * (size_t)p_m;
-        const double *grow = logslope_design + (size_t)row * (size_t)p_g;
+        const double *grow = slope_design + (size_t)row * (size_t)p_g;
         const double *Hrow = row_hessians + (size_t)row * (size_t)r * (size_t)r;
         double h00 = Hrow[0];
         double h11 = Hrow[(size_t)r + 1U];
@@ -1754,7 +1754,7 @@ extern "C" __global__ void bms_flex_row_dense_block_partial(
     int                  rows_per_cta,
     const double * __restrict__ row_hessians,    // [n, r*r]
     const double * __restrict__ marginal_design, // [n, p_m]
-    const double * __restrict__ logslope_design, // [n, p_g]
+    const double * __restrict__ slope_design, // [n, p_g]
     double       * __restrict__ partial)         // [num_chunks, p_total, p_total]
 {
     extern __shared__ double shmem[];
@@ -1780,7 +1780,7 @@ extern "C" __global__ void bms_flex_row_dense_block_partial(
     if (tid == 0) {
         for (int row = row_lo; row < row_hi; ++row) {
             const double *mrow = marginal_design + (size_t)row * (size_t)p_m;
-            const double *grow = logslope_design + (size_t)row * (size_t)p_g;
+            const double *grow = slope_design + (size_t)row * (size_t)p_g;
             const double *Hrow = row_hessians + (size_t)row * (size_t)r * (size_t)r;
             for (int u = 0; u < r; ++u) {
                 for (int v = 0; v < r; ++v) {
@@ -1894,10 +1894,10 @@ impl HvpKernelBackend {
 
 /// Build a device-resident row-Hessian cache by launching the row kernel and
 /// keeping the resulting `n × r²` slice resident on the device. Also uploads
-/// the dense marginal + logslope design matrices so subsequent HVPs do not
+/// the dense marginal + slope design matrices so subsequent HVPs do not
 /// re-upload them at every direction.
 ///
-/// `marginal_design_row_major` and `logslope_design_row_major` must be
+/// `marginal_design_row_major` and `slope_design_row_major` must be
 /// row-major `[n, p_m]` and `[n, p_g]` contiguous slices.
 ///
 /// #461 absorber (additive Stage-1 influence block): the orthogonalization is
@@ -1921,7 +1921,7 @@ impl HvpKernelBackend {
 pub(crate) fn launch_bms_flex_row_kernel_device_resident(
     inputs: BmsFlexRowKernelInputs<'_>,
     marginal_design_row_major: &[f64],
-    logslope_design_row_major: &[f64],
+    slope_design_row_major: &[f64],
     block: BmsFlexBlockLayout,
     primary: BmsFlexPrimaryLayout,
 ) -> Result<DeviceResidentRowHess, GpuError> {
@@ -1939,7 +1939,7 @@ pub(crate) fn launch_bms_flex_row_kernel_device_resident(
     let nr = checked_shape_len("device-resident [n,r]", &[n, r])?;
     let nrr = checked_shape_len("device-resident [n,r,r]", &[n, r, r])?;
     let marginal_len = checked_shape_len("device-resident marginal design", &[n, block.p_m])?;
-    let logslope_len = checked_shape_len("device-resident logslope design", &[n, block.p_g])?;
+    let slope_len = checked_shape_len("device-resident slope design", &[n, block.p_g])?;
     if marginal_design_row_major.len() != marginal_len {
         return Err(GpuError::DriverCallFailed {
             reason: format!(
@@ -1949,12 +1949,12 @@ pub(crate) fn launch_bms_flex_row_kernel_device_resident(
             ),
         });
     }
-    if logslope_design_row_major.len() != logslope_len {
+    if slope_design_row_major.len() != slope_len {
         return Err(GpuError::DriverCallFailed {
             reason: format!(
-                "bms_flex_row device-resident: logslope_design len={} != n*p_g={}",
-                logslope_design_row_major.len(),
-                logslope_len
+                "bms_flex_row device-resident: slope_design len={} != n*p_g={}",
+                slope_design_row_major.len(),
+                slope_len
             ),
         });
     }
@@ -2024,7 +2024,7 @@ pub(crate) fn launch_bms_flex_row_kernel_device_resident(
     let d_e_obs = upload_f64(inputs.e_obs, "e_obs")?;
 
     let d_marginal = upload_f64(marginal_design_row_major, "marginal_design")?;
-    let d_logslope = upload_f64(logslope_design_row_major, "logslope_design")?;
+    let d_slope = upload_f64(slope_design_row_major, "slope_design")?;
 
     let mut d_neglog = stream
         .alloc_zeros::<f64>(n)
@@ -2192,7 +2192,7 @@ pub(crate) fn launch_bms_flex_row_kernel_device_resident(
         .checked_add(nr)
         .and_then(|value| value.checked_add(nrr))
         .and_then(|value| value.checked_add(marginal_len))
-        .and_then(|value| value.checked_add(logslope_len))
+        .and_then(|value| value.checked_add(slope_len))
         .ok_or_else(|| GpuError::DriverCallFailed {
             reason: "bms_flex_row device-resident: resident element count overflow".to_string(),
         })?;
@@ -2211,7 +2211,7 @@ pub(crate) fn launch_bms_flex_row_kernel_device_resident(
         grad: d_grad,
         hess: d_hess,
         marginal_design: d_marginal,
-        logslope_design: d_logslope,
+        slope_design: d_slope,
         n,
         r,
         block,
@@ -2306,7 +2306,7 @@ pub(crate) fn launch_bms_flex_row_joint_gradient(
         .arg(&storage.neglog)
         .arg(&storage.grad)
         .arg(&storage.marginal_design)
-        .arg(&storage.logslope_design)
+        .arg(&storage.slope_design)
         .arg(&mut d_partial);
     // SAFETY: all resident buffers were allocated and shape-validated by the
     // row-kernel producer; `d_partial` has `num_chunks * (1+p_total)` entries.
@@ -2549,8 +2549,8 @@ impl PreparedBmsFlexRowLaunchArgs {
             "launch storage marginal design",
             &[storage.n, storage.block.p_m],
         )?;
-        let expected_logslope = checked_shape_len(
-            "launch storage logslope design",
+        let expected_slope = checked_shape_len(
+            "launch storage slope design",
             &[storage.n, storage.block.p_g],
         )?;
         for (name, have, want) in [
@@ -2563,9 +2563,9 @@ impl PreparedBmsFlexRowLaunchArgs {
                 expected_marginal,
             ),
             (
-                "logslope_design",
-                storage.logslope_design.len(),
-                expected_logslope,
+                "slope_design",
+                storage.slope_design.len(),
+                expected_slope,
             ),
         ] {
             if have != want {
@@ -2720,7 +2720,7 @@ pub(crate) fn run_bms_flex_row_partial_reduce(
         .arg(&args.rows_per_cta)
         .arg(&storage.hess)
         .arg(&storage.marginal_design)
-        .arg(&storage.logslope_design);
+        .arg(&storage.slope_design);
     if let Some(d_v) = d_v {
         builder.arg(d_v);
     }
@@ -2967,7 +2967,7 @@ pub(crate) fn run_bms_flex_row_multi_partial_reduce(
         .arg(&rhs_count_i32)
         .arg(&storage.hess)
         .arg(&storage.marginal_design)
-        .arg(&storage.logslope_design)
+        .arg(&storage.slope_design)
         .arg(d_v_rhs)
         .arg(&mut d_partial);
     // SAFETY: storage buffers were validated at construction; `d_v_rhs` and
@@ -3310,7 +3310,7 @@ pub fn launch_bms_flex_row_dense_block(
         .arg(&rows_per_cta_i32)
         .arg(&storage.hess)
         .arg(&storage.marginal_design)
-        .arg(&storage.logslope_design)
+        .arg(&storage.slope_design)
         .arg(&mut d_partial);
     // SAFETY: storage pointers have validated capacities; d_partial sized
     // num_chunks * pp doubles; dynamic shmem matches the kernel's `extern
@@ -3415,7 +3415,7 @@ mod row_kernel_tests {
                     -0.4 + 0.8 * ((i * 19 + 7) % n) as f64 / n as f64
                 }
             });
-            let logslope_x = Array2::from_shape_fn((n, 2), |(i, j)| {
+            let slope_x = Array2::from_shape_fn((n, 2), |(i, j)| {
                 if j == 0 {
                     1.0
                 } else {
@@ -3431,7 +3431,7 @@ mod row_kernel_tests {
                 gaussian_frailty_sd: Some(0.15),
                 base_link: InverseLink::Standard(StandardLink::Probit),
                 marginal_design: DesignMatrix::Dense(DenseDesignMatrix::from(marginal_x.clone())),
-                logslope_design: DesignMatrix::Dense(DenseDesignMatrix::from(logslope_x.clone())),
+                slope_design: DesignMatrix::Dense(DenseDesignMatrix::from(slope_x.clone())),
                 score_warp: Some(score_prepared.runtime.clone()),
                 link_dev: Some(link_prepared.runtime.clone()),
                 policy: gam_runtime::resource::ResourcePolicy::default_library(),
@@ -3456,7 +3456,7 @@ mod row_kernel_tests {
                     beta: beta_m,
                 },
                 ParameterBlockState {
-                    eta: logslope_x.dot(&beta_g),
+                    eta: slope_x.dot(&beta_g),
                     beta: beta_g,
                 },
                 ParameterBlockState {
@@ -3645,7 +3645,7 @@ mod row_kernel_tests {
             assert_eq!(
                 cache.primary.total,
                 2 + score_width + deviation_width,
-                "the canonical primary layout must contain exactly q, logslope, score-warp, and link-deviation coordinates"
+                "the canonical primary layout must contain exactly q, slope, score-warp, and link-deviation coordinates"
             );
             assert!(
                 cache.row_cell_moments.is_some(),
@@ -4016,20 +4016,20 @@ mod tests {
             .marginal_design
             .as_dense_ref()
             .expect("timing fixture marginal design must be dense");
-        let logslope = family
-            .logslope_design
+        let slope = family
+            .slope_design
             .as_dense_ref()
-            .expect("timing fixture logslope design must be dense");
-        assert!(marginal.is_standard_layout() && logslope.is_standard_layout());
+            .expect("timing fixture slope design must be dense");
+        assert!(marginal.is_standard_layout() && slope.is_standard_layout());
         let marginal_slice = marginal
             .as_slice()
             .expect("timing fixture marginal design is contiguous");
-        let logslope_slice = logslope
+        let slope_slice = slope
             .as_slice()
-            .expect("timing fixture logslope design is contiguous");
+            .expect("timing fixture slope design is contiguous");
         let block = BmsFlexBlockLayout {
             p_m: cache.slices.marginal.len(),
-            p_g: cache.slices.logslope.len(),
+            p_g: cache.slices.slope.len(),
             h: cache.slices.h.clone(),
             w: cache.slices.w.clone(),
             p_total: cache.slices.total,
@@ -4069,7 +4069,7 @@ mod tests {
             launch_bms_flex_row_kernel_device_resident(
                 owned.as_borrowed(),
                 marginal_slice,
-                logslope_slice,
+                slope_slice,
                 block.clone(),
                 primary.clone(),
             )
@@ -4665,7 +4665,7 @@ mod tests {
     pub(crate) fn cpu_oracle_bms_flex_row_hvp(
         row_hessians: &[f64],
         marginal_design: &[f64],
-        logslope_design: &[f64],
+        slope_design: &[f64],
         block: &BmsFlexBlockLayout,
         primary: &BmsFlexPrimaryLayout,
         n: usize,
@@ -4677,13 +4677,13 @@ mod tests {
         assert_eq!(v.len(), block.p_total);
         assert_eq!(row_hessians.len(), n * r * r);
         assert_eq!(marginal_design.len(), n * p_m);
-        assert_eq!(logslope_design.len(), n * p_g);
+        assert_eq!(slope_design.len(), n * p_g);
         let mut out = vec![0.0_f64; block.p_total];
         let mut row_dir = vec![0.0_f64; r];
         let mut action = vec![0.0_f64; r];
         for row in 0..n {
             let mrow = &marginal_design[row * p_m..(row + 1) * p_m];
-            let grow = &logslope_design[row * p_g..(row + 1) * p_g];
+            let grow = &slope_design[row * p_g..(row + 1) * p_g];
             let mut acc_q = 0.0_f64;
             for j in 0..p_m {
                 acc_q += mrow[j] * v[j];
@@ -4737,7 +4737,7 @@ mod tests {
     pub(crate) fn cpu_oracle_bms_flex_row_diagonal(
         row_hessians: &[f64],
         marginal_design: &[f64],
-        logslope_design: &[f64],
+        slope_design: &[f64],
         block: &BmsFlexBlockLayout,
         primary: &BmsFlexPrimaryLayout,
         n: usize,
@@ -4751,7 +4751,7 @@ mod tests {
             let h00 = h_slice[0];
             let h11 = h_slice[r + 1];
             let mrow = &marginal_design[row * p_m..(row + 1) * p_m];
-            let grow = &logslope_design[row * p_g..(row + 1) * p_g];
+            let grow = &slope_design[row * p_g..(row + 1) * p_g];
             for j in 0..p_m {
                 out[j] += h00 * mrow[j] * mrow[j];
             }
@@ -4776,7 +4776,7 @@ mod tests {
         row_neglog: &[f64],
         row_grad: &[f64],
         marginal_design: &[f64],
-        logslope_design: &[f64],
+        slope_design: &[f64],
         block: &BmsFlexBlockLayout,
         primary: &BmsFlexPrimaryLayout,
         n: usize,
@@ -4785,7 +4785,7 @@ mod tests {
         assert_eq!(row_neglog.len(), n);
         assert_eq!(row_grad.len(), n * r);
         assert_eq!(marginal_design.len(), n * block.p_m);
-        assert_eq!(logslope_design.len(), n * block.p_g);
+        assert_eq!(slope_design.len(), n * block.p_g);
         let mut log_likelihood = 0.0_f64;
         let mut gradient = vec![0.0_f64; block.p_total];
         for row in 0..n {
@@ -4795,7 +4795,7 @@ mod tests {
                 gradient[j] -= grow[0] * marginal_design[row * block.p_m + j];
             }
             for j in 0..block.p_g {
-                gradient[block.p_m + j] -= grow[1] * logslope_design[row * block.p_g + j];
+                gradient[block.p_m + j] -= grow[1] * slope_design[row * block.p_g + j];
             }
             if let (Some(primary_h), Some(block_h)) = (primary.h.as_ref(), block.h.as_ref()) {
                 for (offset, primary_idx) in primary_h.clone().enumerate() {
@@ -4833,12 +4833,12 @@ mod tests {
             -13.0, 17.0, -19.0, 23.0, -29.0, // row 1
         ];
         let marginal = [1.0, 2.0, -0.5, 3.0];
-        let logslope = [4.0, -2.0];
+        let slope = [4.0, -2.0];
         let (log_likelihood, gradient) = cpu_oracle_bms_flex_row_joint_gradient(
             &row_neglog,
             &row_grad,
             &marginal,
-            &logslope,
+            &slope,
             &block,
             &primary,
             n,
@@ -4857,7 +4857,7 @@ mod tests {
     #[test]
     pub(crate) fn cpu_oracle_hvp_matches_hand_computation_no_hw() {
         let n = 4_usize;
-        let r = 4_usize; // q, logslope, h(1), w(1)
+        let r = 4_usize; // q, slope, h(1), w(1)
         let p_m = 2_usize;
         let p_g = 2_usize;
         let p_h_dim = 1_usize;
@@ -4892,17 +4892,17 @@ mod tests {
                 marginal[row * p_m + j] = 0.5 + (row as f64) * 0.1 - (j as f64) * 0.2;
             }
         }
-        let mut logslope = vec![0.0_f64; n * p_g];
+        let mut slope = vec![0.0_f64; n * p_g];
         for row in 0..n {
             for j in 0..p_g {
-                logslope[row * p_g + j] = -0.3 + (row as f64) * 0.05 + (j as f64) * 0.15;
+                slope[row * p_g + j] = -0.3 + (row as f64) * 0.05 + (j as f64) * 0.15;
             }
         }
         let v: Vec<f64> = (0..p_total).map(|i| 0.1 + (i as f64) * 0.25).collect();
         let out = cpu_oracle_bms_flex_row_hvp(
             &row_hessians,
             &marginal,
-            &logslope,
+            &slope,
             &block,
             &primary,
             n,
@@ -4912,7 +4912,7 @@ mod tests {
         let mut expect_out_0 = 0.0_f64;
         for row in 0..n {
             let mrow = &marginal[row * p_m..(row + 1) * p_m];
-            let grow = &logslope[row * p_g..(row + 1) * p_g];
+            let grow = &slope[row * p_g..(row + 1) * p_g];
             let mut row_dir = vec![0.0_f64; r];
             row_dir[0] = mrow[0] * v[0] + mrow[1] * v[1];
             row_dir[1] = grow[0] * v[p_m] + grow[1] * v[p_m + 1];
@@ -4967,19 +4967,19 @@ mod tests {
             }
         }
         let mut marginal = vec![0.0_f64; n * p_m];
-        let mut logslope = vec![0.0_f64; n * p_g];
+        let mut slope = vec![0.0_f64; n * p_g];
         for row in 0..n {
             for j in 0..p_m {
                 marginal[row * p_m + j] = 0.2 + (row as f64) * 0.3 + (j as f64) * 0.1;
             }
             for j in 0..p_g {
-                logslope[row * p_g + j] = -0.4 + (row as f64) * 0.1 + (j as f64) * 0.2;
+                slope[row * p_g + j] = -0.4 + (row as f64) * 0.1 + (j as f64) * 0.2;
             }
         }
         let out = cpu_oracle_bms_flex_row_diagonal(
             &row_hessians,
             &marginal,
-            &logslope,
+            &slope,
             &block,
             &primary,
             n,
@@ -5057,17 +5057,17 @@ mod tests {
                 marginal[row * p_m + j] = 0.5 + (row as f64) * 0.1 - (j as f64) * 0.2;
             }
         }
-        let mut logslope = vec![0.0_f64; n * p_g];
+        let mut slope = vec![0.0_f64; n * p_g];
         for row in 0..n {
             for j in 0..p_g {
-                logslope[row * p_g + j] = -0.3 + (row as f64) * 0.05 + (j as f64) * 0.15;
+                slope[row * p_g + j] = -0.3 + (row as f64) * 0.05 + (j as f64) * 0.15;
             }
         }
         let v: Vec<f64> = (0..p_total).map(|i| 0.1 + (i as f64) * 0.25).collect();
         let cpu_hvp = cpu_oracle_bms_flex_row_hvp(
             &row_hessians,
             &marginal,
-            &logslope,
+            &slope,
             &block,
             &primary,
             n,
@@ -5076,7 +5076,7 @@ mod tests {
         let cpu_diag = cpu_oracle_bms_flex_row_diagonal(
             &row_hessians,
             &marginal,
-            &logslope,
+            &slope,
             &block,
             &primary,
             n,
@@ -5095,7 +5095,7 @@ mod tests {
             &row_neglog,
             &row_grad,
             &marginal,
-            &logslope,
+            &slope,
             &block,
             &primary,
             n,
@@ -5107,7 +5107,7 @@ mod tests {
             let image = cpu_oracle_bms_flex_row_hvp(
                 &row_hessians,
                 &marginal,
-                &logslope,
+                &slope,
                 &block,
                 &primary,
                 n,
@@ -5134,8 +5134,8 @@ mod tests {
             .clone_htod(&marginal)
             .expect("[bms_flex_row hvp parity] upload marg must succeed on CUDA host");
         let d_g = stream
-            .clone_htod(&logslope)
-            .expect("[bms_flex_row hvp parity] upload logslope must succeed on CUDA host");
+            .clone_htod(&slope)
+            .expect("[bms_flex_row hvp parity] upload slope must succeed on CUDA host");
         let storage = DeviceResidentRowHess {
             neglog: stream
                 .clone_htod(&row_neglog)
@@ -5145,7 +5145,7 @@ mod tests {
                 .expect("[bms_flex_row hvp parity] upload grad"),
             hess: d_h,
             marginal_design: d_m,
-            logslope_design: d_g,
+            slope_design: d_g,
             n,
             r,
             block: block.clone(),
@@ -5266,13 +5266,13 @@ mod tests {
             }
         }
         let mut marginal = vec![0.0_f64; n * p_m];
-        let mut logslope = vec![0.0_f64; n * p_g];
+        let mut slope = vec![0.0_f64; n * p_g];
         for row in 0..n {
             for j in 0..p_m {
                 marginal[row * p_m + j] = 0.5 + (row as f64) * 0.1 - (j as f64) * 0.2;
             }
             for j in 0..p_g {
-                logslope[row * p_g + j] = -0.3 + (row as f64) * 0.05 + (j as f64) * 0.15;
+                slope[row * p_g + j] = -0.3 + (row as f64) * 0.05 + (j as f64) * 0.15;
             }
         }
         let mut v_rhs = vec![0.0_f64; rhs_count * p_total];
@@ -5296,8 +5296,8 @@ mod tests {
             .clone_htod(&marginal)
             .expect("[bms_flex_row hvp_multi parity] upload marg must succeed on CUDA host");
         let d_g = stream
-            .clone_htod(&logslope)
-            .expect("[bms_flex_row hvp_multi parity] upload logslope must succeed on CUDA host");
+            .clone_htod(&slope)
+            .expect("[bms_flex_row hvp_multi parity] upload slope must succeed on CUDA host");
         let storage = DeviceResidentRowHess {
             neglog: stream
                 .alloc_zeros::<f64>(n)
@@ -5307,7 +5307,7 @@ mod tests {
                 .expect("[bms_flex_row hvp_multi parity] alloc grad"),
             hess: d_h,
             marginal_design: d_m,
-            logslope_design: d_g,
+            slope_design: d_g,
             n,
             r,
             block: block.clone(),
@@ -5330,7 +5330,7 @@ mod tests {
             let cpu = cpu_oracle_bms_flex_row_hvp(
                 &row_hessians,
                 &marginal,
-                &logslope,
+                &slope,
                 &block,
                 &primary,
                 n,
@@ -5414,17 +5414,17 @@ mod tests {
                     marginal[row * p_m + j] = 0.5 + (row as f64) * 0.1 - (j as f64) * 0.2;
                 }
             }
-            let mut logslope = vec![0.0_f64; n * p_g];
+            let mut slope = vec![0.0_f64; n * p_g];
             for row in 0..n {
                 for j in 0..p_g {
-                    logslope[row * p_g + j] = -0.3 + (row as f64) * 0.05 + (j as f64) * 0.15;
+                    slope[row * p_g + j] = -0.3 + (row as f64) * 0.05 + (j as f64) * 0.15;
                 }
             }
             let v: Vec<f64> = (0..p_total).map(|i| 0.1 + (i as f64) * 0.25).collect();
             let cpu_hvp = cpu_oracle_bms_flex_row_hvp(
                 &row_hessians,
                 &marginal,
-                &logslope,
+                &slope,
                 &block,
                 &primary,
                 n,
@@ -5443,8 +5443,8 @@ mod tests {
             let d_m = stream.clone_htod(&marginal).expect(
                 "[bms_flex_row hvp_into_device parity] upload marg must succeed on CUDA host",
             );
-            let d_g = stream.clone_htod(&logslope).expect(
-                "[bms_flex_row hvp_into_device parity] upload logslope must succeed on CUDA host",
+            let d_g = stream.clone_htod(&slope).expect(
+                "[bms_flex_row hvp_into_device parity] upload slope must succeed on CUDA host",
             );
             let storage = DeviceResidentRowHess {
                 neglog: stream
@@ -5455,7 +5455,7 @@ mod tests {
                     .expect("[bms_flex_row hvp_into_device parity] alloc grad"),
                 hess: d_h,
                 marginal_design: d_m,
-                logslope_design: d_g,
+                slope_design: d_g,
                 n,
                 r,
                 block: block.clone(),
@@ -5590,11 +5590,11 @@ mod tests {
                     marginal[row * p_m + j] = seed.sin() * 0.8 - (seed * 0.7).cos() * 0.3;
                 }
             }
-            let mut logslope = vec![0.0_f64; n * p_g];
+            let mut slope = vec![0.0_f64; n * p_g];
             for row in 0..n {
                 for j in 0..p_g {
                     let seed = (row as f64) * 0.091 + (j as f64) * 0.179 - 0.2;
-                    logslope[row * p_g + j] = seed.cos() * 0.7 + (seed * 0.3).sin() * 0.25;
+                    slope[row * p_g + j] = seed.cos() * 0.7 + (seed * 0.3).sin() * 0.25;
                 }
             }
             let v: Vec<f64> = (0..p_total)
@@ -5607,7 +5607,7 @@ mod tests {
             let cpu_hvp = cpu_oracle_bms_flex_row_hvp(
                 &row_hessians,
                 &marginal,
-                &logslope,
+                &slope,
                 &block,
                 &primary,
                 n,
@@ -5616,7 +5616,7 @@ mod tests {
             let cpu_diag = cpu_oracle_bms_flex_row_diagonal(
                 &row_hessians,
                 &marginal,
-                &logslope,
+                &slope,
                 &block,
                 &primary,
                 n,
@@ -5653,11 +5653,11 @@ mod tests {
                     return;
                 }
             };
-            let d_g = match stream.clone_htod(&logslope) {
+            let d_g = match stream.clone_htod(&slope) {
                 Ok(s) => s,
                 Err(err) => {
                     eprintln!(
-                        "[bms_flex_row hvp parity n64_r20_p44] upload logslope \
+                        "[bms_flex_row hvp parity n64_r20_p44] upload slope \
                          failed: {err}"
                     );
                     return;
@@ -5672,7 +5672,7 @@ mod tests {
                     .expect("[bms_flex_row hvp parity n64_r20_p44] alloc grad"),
                 hess: d_h,
                 marginal_design: d_m,
-                logslope_design: d_g,
+                slope_design: d_g,
                 n,
                 r,
                 block: block.clone(),
@@ -5773,11 +5773,11 @@ mod tests {
                     marginal[row * p_m + j] = seed.sin() * 0.7 - (seed * 0.5).cos() * 0.25;
                 }
             }
-            let mut logslope = vec![0.0_f64; n * p_g];
+            let mut slope = vec![0.0_f64; n * p_g];
             for row in 0..n {
                 for j in 0..p_g {
                     let seed = (row as f64) * 0.097 + (j as f64) * 0.143 - 0.15;
-                    logslope[row * p_g + j] = seed.cos() * 0.65 + (seed * 0.4).sin() * 0.2;
+                    slope[row * p_g + j] = seed.cos() * 0.65 + (seed * 0.4).sin() * 0.2;
                 }
             }
 
@@ -5791,7 +5791,7 @@ mod tests {
             let mut h_cpu = vec![0.0_f64; p_total * p_total];
             for row in 0..n {
                 let mrow = &marginal[row * p_m..(row + 1) * p_m];
-                let grow = &logslope[row * p_g..(row + 1) * p_g];
+                let grow = &slope[row * p_g..(row + 1) * p_g];
                 let hrow = &row_hessians[row * r * r..(row + 1) * r * r];
                 // Build per-row phi (r length-p_total vectors).
                 let mut phi = vec![vec![0.0_f64; p_total]; r];
@@ -5841,8 +5841,8 @@ mod tests {
             let d_m = stream
                 .clone_htod(&marginal)
                 .expect("[bms_flex_row dense_block parity] upload marg must succeed on CUDA host");
-            let d_g = stream.clone_htod(&logslope).expect(
-                "[bms_flex_row dense_block parity] upload logslope must succeed on CUDA host",
+            let d_g = stream.clone_htod(&slope).expect(
+                "[bms_flex_row dense_block parity] upload slope must succeed on CUDA host",
             );
             let storage = DeviceResidentRowHess {
                 neglog: stream
@@ -5853,7 +5853,7 @@ mod tests {
                     .expect("[bms_flex_row dense_block parity] alloc grad"),
                 hess: d_h,
                 marginal_design: d_m,
-                logslope_design: d_g,
+                slope_design: d_g,
                 n,
                 r,
                 block: block.clone(),
@@ -5916,7 +5916,7 @@ mod tests {
         let marginal = (0..p_m)
             .map(|column| 0.15 + (column as f64 * 0.17).sin())
             .collect::<Vec<_>>();
-        let logslope = (0..p_g)
+        let slope = (0..p_g)
             .map(|column| -0.2 + (column as f64 * 0.11).cos())
             .collect::<Vec<_>>();
         let mut expected = vec![0.0_f64; p_total * p_total];
@@ -5924,10 +5924,10 @@ mod tests {
             for column in 0..p_total {
                 expected[row * p_total + column] = match (row < p_m, column < p_m) {
                     (true, true) => row_hessians[0] * marginal[row] * marginal[column],
-                    (true, false) => row_hessians[1] * marginal[row] * logslope[column - p_m],
-                    (false, true) => row_hessians[2] * logslope[row - p_m] * marginal[column],
+                    (true, false) => row_hessians[1] * marginal[row] * slope[column - p_m],
+                    (false, true) => row_hessians[2] * slope[row - p_m] * marginal[column],
                     (false, false) => {
-                        row_hessians[3] * logslope[row - p_m] * logslope[column - p_m]
+                        row_hessians[3] * slope[row - p_m] * slope[column - p_m]
                     }
                 };
             }
@@ -5949,9 +5949,9 @@ mod tests {
             marginal_design: stream
                 .clone_htod(&marginal)
                 .expect("dense HVP parity marginal upload"),
-            logslope_design: stream
-                .clone_htod(&logslope)
-                .expect("dense HVP parity logslope upload"),
+            slope_design: stream
+                .clone_htod(&slope)
+                .expect("dense HVP parity slope upload"),
             n,
             r,
             block,
@@ -6052,11 +6052,11 @@ mod tests {
                     marginal[row * p_m + j] = seed.sin() * 0.8 - (seed * 0.7).cos() * 0.3;
                 }
             }
-            let mut logslope = vec![0.0_f64; n * p_g];
+            let mut slope = vec![0.0_f64; n * p_g];
             for row in 0..n {
                 for j in 0..p_g {
                     let seed = (row as f64) * 0.091 + (j as f64) * 0.179 - 0.2;
-                    logslope[row * p_g + j] = seed.cos() * 0.7 + (seed * 0.3).sin() * 0.25;
+                    slope[row * p_g + j] = seed.cos() * 0.7 + (seed * 0.3).sin() * 0.25;
                 }
             }
             let v: Vec<f64> = (0..p_total)
@@ -6089,10 +6089,10 @@ mod tests {
                     return;
                 }
             };
-            let d_g = match stream.clone_htod(&logslope) {
+            let d_g = match stream.clone_htod(&slope) {
                 Ok(s) => s,
                 Err(err) => {
-                    eprintln!("[bms_flex_row hvp hill-climb] upload logslope failed: {err}");
+                    eprintln!("[bms_flex_row hvp hill-climb] upload slope failed: {err}");
                     return;
                 }
             };
@@ -6105,7 +6105,7 @@ mod tests {
                     .expect("[bms_flex_row hvp hill-climb] alloc grad"),
                 hess: d_h,
                 marginal_design: d_m,
-                logslope_design: d_g,
+                slope_design: d_g,
                 n,
                 r,
                 block: block.clone(),
@@ -6150,7 +6150,7 @@ mod tests {
                             let partial = cpu_oracle_bms_flex_row_hvp(
                                 &row_hessians[lo * r * r..hi * r * r],
                                 &marginal[lo * p_m..hi * p_m],
-                                &logslope[lo * p_g..hi * p_g],
+                                &slope[lo * p_g..hi * p_g],
                                 &block,
                                 &primary,
                                 m,
@@ -6265,11 +6265,11 @@ mod tests {
                     marginal[row * p_m + j] = seed.sin() * 0.8 - (seed * 0.7).cos() * 0.3;
                 }
             }
-            let mut logslope = vec![0.0_f64; n * p_g];
+            let mut slope = vec![0.0_f64; n * p_g];
             for row in 0..n {
                 for j in 0..p_g {
                     let seed = (row as f64) * 0.091 + (j as f64) * 0.179 - 0.2;
-                    logslope[row * p_g + j] = seed.cos() * 0.7 + (seed * 0.3).sin() * 0.25;
+                    slope[row * p_g + j] = seed.cos() * 0.7 + (seed * 0.3).sin() * 0.25;
                 }
             }
 
@@ -6303,11 +6303,11 @@ mod tests {
                     return;
                 }
             };
-            let d_g = match stream.clone_htod(&logslope) {
+            let d_g = match stream.clone_htod(&slope) {
                 Ok(s) => s,
                 Err(err) => {
                     eprintln!(
-                        "[bms_flex_row dense_block hill-climb] upload logslope failed: {err}"
+                        "[bms_flex_row dense_block hill-climb] upload slope failed: {err}"
                     );
                     return;
                 }
@@ -6321,7 +6321,7 @@ mod tests {
                     .expect("[bms_flex_row dense_block hill-climb] alloc grad"),
                 hess: d_h,
                 marginal_design: d_m,
-                logslope_design: d_g,
+                slope_design: d_g,
                 n,
                 r,
                 block: block.clone(),
@@ -6373,7 +6373,7 @@ mod tests {
                                     col.iter_mut().for_each(|v| *v = 0.0);
                                 }
                                 let mrow = &marginal[row * p_m..(row + 1) * p_m];
-                                let grow = &logslope[row * p_g..(row + 1) * p_g];
+                                let grow = &slope[row * p_g..(row + 1) * p_g];
                                 for k in 0..p_m {
                                     phi[0][k] = mrow[k];
                                 }

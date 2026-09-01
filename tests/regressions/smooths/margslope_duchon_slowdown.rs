@@ -5,7 +5,7 @@
 //!
 //! The issue's repro:
 //!   event ~ duchon(x1, x2, centers=10)            // d=2, magic cubic default
-//!   logslope: duchon(x1, x2, centers=10)          // same basis on the logslope
+//!   slope: duchon(x1, x2, centers=10)          // same basis on the slope
 //!   family = bernoulli-marginal-slope, link = probit, rigid (no warp/dev), n=2000.
 //!
 //! At n=2000, centers=10, d=2 the binary marginal-slope fit timed out at 600s,
@@ -98,7 +98,7 @@ fn erf_approx(x: f64) -> f64 {
 }
 
 /// Shared simulator: two spatial coordinates in columns 0,1, a latent score `z`,
-/// a smooth spatial field plus a spatially-varying log-slope. Returns the data
+/// a smooth spatial field plus a spatially-varying slope. Returns the data
 /// matrix, the latent score, and the binary response.
 fn simulate(n: usize) -> (Array2<f64>, Array1<f64>, Array1<f64>) {
     let mut rng = StdRng::seed_from_u64(0x9797_0979);
@@ -142,7 +142,7 @@ fn build_margslope(n: usize, centers: usize) -> (Array2<f64>, BernoulliMarginalS
         random_effect_terms: vec![],
         smooth_terms: vec![duchon2_smooth("f_pc", centers)],
     };
-    let logslopespec = TermCollectionSpec {
+    let slopespec = TermCollectionSpec {
         linear_terms: vec![],
         random_effect_terms: vec![],
         smooth_terms: vec![duchon2_smooth("ls_pc", centers)],
@@ -153,9 +153,9 @@ fn build_margslope(n: usize, centers: usize) -> (Array2<f64>, BernoulliMarginalS
         z,
         base_link: InverseLink::Standard(StandardLink::Probit),
         marginalspec,
-        logslopespec,
+        slopespec,
         marginal_offset: Array1::<f64>::zeros(n),
-        logslope_offset: Array1::<f64>::zeros(n),
+        slope_offset: Array1::<f64>::zeros(n),
         frailty: FrailtySpec::None,
         score_warp: None,
         link_dev: None,
