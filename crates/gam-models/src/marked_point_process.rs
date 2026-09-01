@@ -516,6 +516,21 @@ pub struct LaplaceSmootherResult {
     pub stationarity: f64,
 }
 
+/// One subject's contribution to a cohort Laplace approximation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubjectLaplaceResult {
+    pub subject: String,
+    pub approximation: LaplaceSmootherResult,
+}
+
+/// Cohort evidence with independent latent-state chains by subject.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CohortLaplaceResult {
+    pub subjects: Vec<SubjectLaplaceResult>,
+    /// Sum of the normalized subject-level approximate log marginal likelihoods.
+    pub laplace_log_marginal_likelihood: f64,
+}
+
 #[derive(Debug, Clone)]
 struct PriorTransition {
     transition: Array2<f64>,
@@ -750,6 +765,52 @@ pub fn smooth_laplace(
         laplace_log_marginal_likelihood,
         iterations,
         stationarity,
+    })
+}
+
+/// Evaluate the one marginal-likelihood objective across independent subjects.
+///
+/// Every subject receives its own stationary initial state and Markov chain;
+/// loadings, Matérn dynamics, and mark semantics are shared through `model`.
+/// The returned scalar is therefore the cohort objective for outer estimation
+/// of those shared parameters.
+pub fn smooth_laplace_cohort(
+    model: &MarkedPointProcessModel,
+    histories: &[SubjectHistory],
+    control: LaplaceControl,
+) -> Result<CohortLaplaceResult, MarkedPointProcessError> {
+    if histories.is_empty() {
+        return Err(invalid("cohort requires at least one subject history"));
+    }
+    for left in 0..histories.len() {
+        if histories[left + 1..]
+            .iter()
+            .any(|right| right.subject == histories[left].subject)
+        {
+            return Err(invalid(format!(
+                "subject identifier {:?} is duplicated in the cohort",
+                histories[left].subject
+            )));
+        }
+    }
+    let mut subjects = Vec::with_capacity(histories.len());
+    let mut laplace_log_marginal_likelihood = 0.0;
+    for history in histories {
+        let approximation = smooth_laplace(model, history, control)?;
+        laplace_log_marginal_likelihood += approximation.laplace_log_marginal_likelihood;
+        subjects.push(SubjectLaplaceResult {
+            subject: history.subject.clone(),
+            approximation,
+        });
+    }
+    if !laplace_log_marginal_likelihood.is_finite() {
+        return Err(MarkedPointProcessError::NumericalFailure {
+            context: "cohort Laplace marginal likelihood",
+        });
+    }
+    Ok(CohortLaplaceResult {
+        subjects,
+        laplace_log_marginal_likelihood,
     })
 }
 

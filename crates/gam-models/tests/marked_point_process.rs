@@ -127,6 +127,22 @@ fn global_laplace_mode_is_stationary_and_covariance_is_positive() {
 }
 
 #[test]
+fn cohort_evidence_is_the_sum_of_independent_subject_chains() {
+    let model = model(MaternMarkovOrder::Half);
+    let first = history();
+    let mut second = first.clone();
+    second.subject = "patient-2".to_string();
+    let individual = smooth_laplace(&model, &first, control()).unwrap();
+    let cohort = smooth_laplace_cohort(&model, &[first, second], control()).unwrap();
+    assert_eq!(cohort.subjects.len(), 2);
+    assert_abs_diff_eq!(
+        cohort.laplace_log_marginal_likelihood,
+        2.0 * individual.laplace_log_marginal_likelihood,
+        epsilon = 2.0e-14
+    );
+}
+
+#[test]
 fn online_filter_is_recursive_and_finite() {
     let model = model(MaternMarkovOrder::ThreeHalves);
     let filtered = filter_laplace(&model, &history(), control()).unwrap();
