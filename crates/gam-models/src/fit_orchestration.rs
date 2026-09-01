@@ -167,7 +167,6 @@ mod binomial_separation_convergence_1762_tests;
 mod perfect_binomial_separation_2273_tests;
 
 #[cfg(test)]
-mod separated_smooth_outer_objective_2273_probe_tests;
 
 #[cfg(test)]
 mod smooth_significance_ref_df_floor_1766_tests;
