@@ -5822,63 +5822,6 @@ fn enumerate_and_select_rho(
     )
 }
 
-    // #2740: this sum is DIFFERENCED against `logdet_penalty_positive`, which is
-    // reconciled to exactly `penalty_rank` directions. Populating it by an
-    // absolute `δ > 0.0` made the two cover different sets and the limit wrong by
-    // `ln δ` for every disputed direction. Both the range sum and the null mass
-    // below therefore read the spectrum through the one classification, so they
-    // are exact complements of each other and of `penalty_rank`.
-    let spectrum = PenaltyRangeSpectrum::of(cache);
-    let mut sum_log_delta_pos = 0.0;
-    for delta in spectrum.iter() {
-        if delta > 0.0 {
-            sum_log_delta_pos += delta.ln();
-        }
-    }
-    let logdet_limit = cache.logdet_xtwx + sum_log_delta_pos - cache.logdet_penalty_positive;
-    let mut plus_inf = 0.5 * (n_outputs as f64) * logdet_limit;
-    for j in 0..ywy.len() {
-        let mut null_mass = 0.0;
-        for i in 0..spectrum.len() {
-            if spectrum.get(i) == 0.0 {
-                null_mass += projected_rhs_squared[[i, j]];
-            }
-        }
-        let dp_inf = ywy[j] - null_mass;
-        if !(dp_inf.is_finite() && dp_inf > 0.0) {
-            plus_inf = f64::INFINITY;
-            break;
-        }
-        plus_inf += 0.5 * nu * (1.0 + (2.0 * std::f64::consts::PI * dp_inf / nu).ln());
-    }
-    [f64::INFINITY, plus_inf]
-}
-
-/// Certified topology of the profiled-REML ρ-landscape.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RhoLandscape {
-    /// No interior stationary point: `V` is monotone on the window and the
-    /// optimum is a BOUNDARY of the compactified search, not an interior one.
-    ///
-    /// WHICH boundary is not implied by this variant and must be read from
-    /// `selected_rho` against `rho_window`, or from `window_costs` /
-    /// `limit_costs`. This doc used to name the `ρ→+∞` (large-λ) end. The search
-    /// certifies only that no INTERIOR stationary point exists; the end that
-    /// wins is decided by the costs, and #2703 measured both signs of `V′` at
-    /// the lower rail on four fixtures of one family (`+4.5`, `+12`, `−5.0`,
-    /// `−5.0`) — so neither end is implied by the regime either. A variant
-    /// asserting a direction the search never certified is the same species of
-    /// defect as the refusal #2703 was filed on: machinery described instead of
-    /// the fit.
-    NoInteriorOptimum,
-    /// Exactly one interior stationary point — a unique interior optimum.
-    UniqueInterior,
-    /// More than one interior stationary point.
-    MultipleInterior,
-}
-
-
-
 /// Select ρ̂ = ln λ̂ by grid-free stationary-point enumeration (allocating path).
 fn optimize_rho(
     prepared: &GaussianRemlPrepared,
@@ -8291,8 +8234,6 @@ mod tests {
         }
     }
 
-
-
     /// The selected representative must have cost no larger than every isolated
     /// stationary representative and both finite-window endpoints.
     #[test]
@@ -9483,7 +9424,6 @@ mod eigenvalue_range_predicate_agreement_2740_tests {
             "the null set must be the exact complement of the range set"
         );
     }
-
 
     /// `V′` from the log-determinant term is `½d·(Σ t/(1+t) − penalty_rank)`. The
     /// sum and the offset are the same population, so as `λ→∞` the difference goes
