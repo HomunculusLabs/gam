@@ -4245,8 +4245,9 @@ fn count_file_lines(path: &Path) -> std::io::Result<usize> {
 /// exceed the limit, get reported, split the file, and add the path here so the
 /// redemption floor applies to the remainder.
 ///
-/// EMPTY, AND THE FIRST VERSION OF THIS COMMENT READ THAT AS A MEASUREMENT
-/// WHEN IT WAS AN UNDER-MEASUREMENT (#2683). It checked only the three files
+/// THE LIST WAS EMPTY UNTIL #2791 ARMED `term_builder.rs`, AND THE FIRST
+/// VERSION OF THIS COMMENT READ THAT EMPTINESS AS A MEASUREMENT WHEN IT WAS AN
+/// UNDER-MEASUREMENT (#2683). It checked only the three files
 /// nearest the limit — `term_specs.rs` peak 9,846, `rho_optimizer/run.rs`
 /// 9,929, `gpu_kernels/arrow_schur.rs` 9,807, all below 10k across their whole
 /// history — and said outright that files further from the limit had not been
