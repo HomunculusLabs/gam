@@ -1,5 +1,133 @@
 use super::*;
 
+/// The fixed row-space complement a moving-design derivative is represented in.
+///
+/// A smooth collection chooses a row-space constraint block `C` once, while a
+/// spatial hyperparameter move changes the term-local design `X(psi)`.  The
+/// collection may re-whiten its coefficient chart at every `psi`, but that
+/// right-coordinate motion is not part of the statistical derivative.  In the
+/// current coefficient chart the canonical derivative is instead
+///
+/// `P_C X_psi T`, where `P_C = I - Q_C Q_C^T`.
+///
+/// `Q_C` is formed from the thin SVD of column-normalized `C`, so rescaling one
+/// constraint column cannot change the projector or its numerical rank.  The
+/// object is deliberately generic: it composes a fixed left projector with any
+/// design jet without teaching kernel formulae about collection ownership.
+#[derive(Debug, Clone)]
+pub struct FixedRowSpaceProjector {
+    range_basis: Array2<f64>,
+}
+
+impl FixedRowSpaceProjector {
+    pub fn from_constraint_block(constraint: ArrayView2<'_, f64>) -> Result<Self, BasisError> {
+        let (n, q) = constraint.dim();
+        if constraint.iter().any(|value| !value.is_finite()) {
+            return Err(BasisError::InvalidInput(
+                "fixed row-space projector received a non-finite constraint block".to_string(),
+            ));
+        }
+        if q == 0 {
+            return Ok(Self {
+                range_basis: Array2::zeros((n, 0)),
+            });
+        }
+
+        let mut normalized = constraint.to_owned();
+        for column in 0..q {
+            let norm = normalized.column(column).dot(&normalized.column(column)).sqrt();
+            if norm > 0.0 && norm.is_finite() {
+                normalized.column_mut(column).mapv_inplace(|value| value / norm);
+            }
+        }
+        let (left, singular, _) =
+            gam_linalg::faer_ndarray::FaerSvd::svd(&normalized, true, false)
+                .map_err(BasisError::LinalgError)?;
+        let leading = singular.first().copied().unwrap_or(0.0);
+        let cutoff = default_rrqr_rank_alpha()
+            * f64::EPSILON
+            * n.max(q).max(1) as f64
+            * leading.max(1.0);
+        let rank = singular.iter().filter(|&&value| value > cutoff).count();
+        let left = left.ok_or_else(|| {
+            BasisError::InvalidInput(
+                "fixed row-space projector SVD did not return its requested left frame"
+                    .to_string(),
+            )
+        })?;
+        if left.nrows() != n || left.ncols() < rank {
+            return Err(BasisError::InvalidInput(format!(
+                "fixed row-space projector SVD returned a {}x{} left frame for an {n}x{q} constraint block of rank {rank}",
+                left.nrows(),
+                left.ncols(),
+            )));
+        }
+        Ok(Self {
+            range_basis: left.slice(s![.., 0..rank]).to_owned(),
+        })
+    }
+
+    pub fn nrows(&self) -> usize {
+        self.range_basis.nrows()
+    }
+
+    pub fn rank(&self) -> usize {
+        self.range_basis.ncols()
+    }
+
+    fn project_vector_owned(&self, mut values: Array1<f64>) -> Array1<f64> {
+        assert_eq!(values.len(), self.nrows());
+        if self.rank() > 0 {
+            let coordinates = self.range_basis.t().dot(&values);
+            values -= &self.range_basis.dot(&coordinates);
+        }
+        values
+    }
+
+    pub fn project_matrix_in_place(&self, values: &mut Array2<f64>) -> Result<(), BasisError> {
+        if values.nrows() != self.nrows() {
+            crate::bail_dim_basis!(
+                "fixed row-space projector has {} rows but the design jet has {}",
+                self.nrows(),
+                values.nrows()
+            );
+        }
+        if self.rank() > 0 {
+            let coordinates = fast_atb(&self.range_basis, values);
+            *values -= &fast_ab(&self.range_basis, &coordinates);
+        }
+        Ok(())
+    }
+
+    fn project_matrix_owned(&self, mut values: Array2<f64>) -> Array2<f64> {
+        self.project_matrix_in_place(&mut values)
+            .expect("installed fixed row-space projector has the operator's row count");
+        values
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ProjectedJetKey {
+    FirstRaw(usize),
+    SecondDiagonal(usize),
+    SecondCross(usize, usize),
+}
+
+#[derive(Debug)]
+struct ImplicitRowProjection {
+    projector: FixedRowSpaceProjector,
+    corrections: std::sync::Mutex<HashMap<ProjectedJetKey, Arc<Array2<f64>>>>,
+}
+
+impl ImplicitRowProjection {
+    fn new(projector: FixedRowSpaceProjector) -> Self {
+        Self {
+            projector,
+            corrections: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+}
+
 /// Implicit representation of ∂X/∂ψ_d that supports matrix-vector products
 /// without materializing the full (n x p) derivative matrices.
 ///
@@ -102,6 +230,11 @@ pub struct ImplicitDesignPsiDerivative {
     /// `Λ_ab = ∂² ln α/∂ψ_a∂ψ_b` per RAW axis pair (empty ⇒ zero). Enters the
     /// second derivative as the extra `Λ_ab·φ` term beside `g_a g_b φ`.
     pub(crate) chart_second: Array2<f64>,
+
+    /// Optional fixed left projector for a collection-owned row-space gauge.
+    /// Kernel and penalty jets stay in the current coefficient chart; only
+    /// design jets are mapped through `I - Q_C Q_C^T`.
+    row_projection: Option<Arc<ImplicitRowProjection>>,
 
     /// Optional exposed-axis to raw-axis linear combinations.
     /// When present, axis `a` represents Σ_i coeff_i * raw_axis_i.
@@ -830,6 +963,7 @@ impl ImplicitDesignPsiDerivative {
             chart_scale: 1.0,
             chart_first: Vec::new(),
             chart_second: Array2::<f64>::zeros((0, 0)),
+            row_projection: None,
             axis_combinations: None,
         }
     }
@@ -971,6 +1105,7 @@ impl ImplicitDesignPsiDerivative {
             chart_scale: 1.0,
             chart_first: Vec::new(),
             chart_second: Array2::<f64>::zeros((0, 0)),
+            row_projection: None,
             axis_combinations: None,
         }
     }
@@ -1020,6 +1155,7 @@ impl ImplicitDesignPsiDerivative {
             chart_scale: 1.0,
             chart_first: Vec::new(),
             chart_second: Array2::<f64>::zeros((0, 0)),
+            row_projection: None,
             axis_combinations: None,
         }
     }
@@ -1090,6 +1226,12 @@ impl ImplicitDesignPsiDerivative {
     }
 
     pub fn append_full_transform(mut self, transform: &Array2<f64>) -> Result<Self, BasisError> {
+        if self.row_projection.is_some() {
+            return Err(BasisError::InvalidInput(
+                "implicit psi coefficient transforms must be composed before the fixed row-space projector is installed"
+                    .to_string(),
+            ));
+        }
         if transform.nrows() != self.p_out() {
             crate::bail_dim_basis!(
                 "implicit psi derivative transform has {} rows but operator has {} output columns",
@@ -1102,6 +1244,109 @@ impl ImplicitDesignPsiDerivative {
             None => transform.clone(),
         });
         Ok(self)
+    }
+
+    /// Compose the finished coefficient-space derivative operator with a fixed
+    /// collection row-space projector.
+    ///
+    /// This is intentionally the last chart operation.  The projector acts on
+    /// rows, while every kernel/joint-null transform acts on coefficients; the
+    /// two commute, but installing it last lets row-chunk correction caches be
+    /// expressed directly in the final coefficient dimension.
+    pub fn with_fixed_row_space_projection(
+        mut self,
+        projector: FixedRowSpaceProjector,
+    ) -> Result<Self, BasisError> {
+        if projector.nrows() != self.n {
+            crate::bail_dim_basis!(
+                "fixed row-space projector has {} rows but the implicit psi operator has {}",
+                projector.nrows(),
+                self.n
+            );
+        }
+        if projector.rank() > 0 {
+            self.row_projection = Some(Arc::new(ImplicitRowProjection::new(projector)));
+        }
+        Ok(self)
+    }
+
+    fn projected_jet_correction(
+        &self,
+        key: ProjectedJetKey,
+    ) -> Result<Option<Arc<Array2<f64>>>, BasisError> {
+        let Some(row_projection) = self.row_projection.as_ref() else {
+            return Ok(None);
+        };
+        let key = match key {
+            ProjectedJetKey::SecondCross(left, right) if left > right => {
+                ProjectedJetKey::SecondCross(right, left)
+            }
+            key => key,
+        };
+        if let Some(cached) = row_projection
+            .corrections
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&key)
+            .cloned()
+        {
+            return Ok(Some(cached));
+        }
+
+        let width = match key {
+            ProjectedJetKey::FirstRaw(_) => self.n_knots,
+            ProjectedJetKey::SecondDiagonal(_) | ProjectedJetKey::SecondCross(_, _) => {
+                self.p_out()
+            }
+        };
+        let mut correction = Array2::<f64>::zeros((row_projection.projector.rank(), width));
+        for basis_column in 0..row_projection.projector.rank() {
+            let row_direction = row_projection
+                .projector
+                .range_basis
+                .column(basis_column);
+            let values = match key {
+                ProjectedJetKey::FirstRaw(axis) => {
+                    self.transpose_mul_first_raw_unprojected(axis, &row_direction)?
+                }
+                ProjectedJetKey::SecondDiagonal(axis) => {
+                    self.transpose_mul_second_diag_unprojected(axis, &row_direction)?
+                }
+                ProjectedJetKey::SecondCross(left, right) => {
+                    self.transpose_mul_second_cross_unprojected(left, right, &row_direction)?
+                }
+            };
+            correction.row_mut(basis_column).assign(&values);
+        }
+        let correction = Arc::new(correction);
+        let correction = row_projection
+            .corrections
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(key)
+            .or_insert_with(|| Arc::clone(&correction))
+            .clone();
+        Ok(Some(correction))
+    }
+
+    fn subtract_projected_row_chunk_correction(
+        &self,
+        key: ProjectedJetKey,
+        rows: std::ops::Range<usize>,
+        chunk: &mut Array2<f64>,
+    ) -> Result<(), BasisError> {
+        let Some(row_projection) = self.row_projection.as_ref() else {
+            return Ok(());
+        };
+        let Some(correction) = self.projected_jet_correction(key)? else {
+            return Ok(());
+        };
+        let removed = fast_ab(
+            &row_projection.projector.range_basis.slice(s![rows, ..]),
+            correction.as_ref(),
+        );
+        *chunk -= &removed;
+        Ok(())
     }
 
     /// Dimension after kernel constraint + polynomial padding (before full ident).

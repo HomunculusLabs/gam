@@ -1868,11 +1868,12 @@ impl SaeManifoldTerm {
                 // disarmed.
                 if gauge_block_armed {
                     gauge_block_armed = false;
-                    let orbit = self.descend_gauge_orbit(
+                    let orbit = self.descend_gauge_orbit_at_terminal_candidate(
                         target,
                         rho_fixed,
                         registry,
                         &lambda_smooth,
+                        &mut best_seen,
                         // Same bound as the joint fit's: the block returns at the
                         // first round that cannot commit a material decrease, so
                         // this caps a loop that terminates on its own. The refine
@@ -1997,6 +1998,40 @@ impl SaeManifoldTerm {
                 gauge_block_armed = true;
             }
         }
+    }
+
+    /// Run the likelihood-flat-block mover on the state this terminal path
+    /// would actually retain (#2762).
+    ///
+    /// The terminal Newton polish records the smallest `½λ²/scale` state in
+    /// `best_seen`, while the refine loop may subsequently leave a different
+    /// live excursion in `self`.  A terminal descent on that excursion followed
+    /// by the refusal's restore of `best_seen` discards the descent and reports
+    /// the untouched state as the fixed point.  Restore first, so the mover and
+    /// the terminal diagnostic have one state authority.
+    ///
+    /// A committed move invalidates the saved decrement certificate: it belongs
+    /// to the pre-move state and must not restore over the move later.  An inert
+    /// call leaves the certificate in place because `self` is then still exactly
+    /// that saved state.
+    pub(crate) fn descend_gauge_orbit_at_terminal_candidate(
+        &mut self,
+        target: ArrayView2<'_, f64>,
+        rho: &SaeManifoldRho,
+        registry: Option<&AnalyticPenaltyRegistry>,
+        penalized_gram_scale: &[f64],
+        best_seen: &mut Option<(f64, f64, SaeManifoldMutableState)>,
+        max_rounds: usize,
+    ) -> Result<GaugeOrbitDescent, String> {
+        if let Some((_, _, best_state)) = best_seen.as_ref() {
+            self.restore_mutable_state(best_state)?;
+        }
+        let outcome =
+            self.descend_gauge_orbit(target, rho, registry, penalized_gram_scale, max_rounds)?;
+        if outcome.moved() {
+            *best_seen = None;
+        }
+        Ok(outcome)
     }
 
     /// The empty per-row `ArrowRowGaugeDeflation` that opts a system into per-row

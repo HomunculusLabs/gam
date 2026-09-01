@@ -475,7 +475,123 @@ fn gauge_orbit_descent_is_monotone_and_reports_the_decrease_it_made_2762() {
     }
 }
 
-/// ANGLE 4 — THE SOLVER POST-CONDITION, which is what #2762 is actually about.
+/// ANGLE 4 — the refine loop's terminal mover and terminal restore must have
+/// ONE state authority.
+///
+/// `terminal_exact_newton_polish` may save a smaller-decrement state and then
+/// leave a different excursion live.  The historical third #2762 call descended
+/// that excursion; the refusal immediately restored the saved state and threw
+/// the committed descent away.  Plant a material likelihood-flat displacement
+/// in the saved state while leaving the live excursion at the seed.  The
+/// terminal wrapper must restore and descend the planted state, report that
+/// state's measured decrease, and consume its now-stale certificate.
+#[test]
+fn terminal_gauge_descent_moves_the_state_that_best_seen_would_restore_2762() {
+    let k = 2usize;
+    let (mut term, z, rho) = seeded_two_circle_term(48, 16, k);
+    let lambda_smooth = rho.lambda_smooth_vec().expect("one block per atom");
+    let n = term.n_obs();
+    let q = term.assignment.row_block_dim();
+    let dense_len = n * q;
+
+    let seed_objective = term
+        .penalized_objective_total(z.view(), &rho, None, 1.0)
+        .expect("finite objective at the live excursion");
+    let seed_state = term.snapshot_mutable_state();
+    let gradient = dense_gradient(&mut term, &z, &rho);
+    let basis = term
+        .likelihood_flat_block_basis(&lambda_smooth)
+        .expect("the seeded fixture has a likelihood-flat block");
+
+    // Plant in the ASCENT direction of the same projected gradient the mover
+    // descends.  The search endpoints are the production endpoints: the
+    // iterate's own scale and the first-order material-resolution boundary.
+    let mut ascent = Array1::<f64>::zeros(gradient.len());
+    for vector in &basis {
+        let coefficient = gradient.dot(vector);
+        for index in 0..ascent.len() {
+            ascent[index] += coefficient * vector[index];
+        }
+    }
+    let slope = ascent.dot(&ascent).sqrt();
+    assert!(
+        slope.is_finite() && slope > 0.0,
+        "fixture needs live flat-block slope"
+    );
+    for value in ascent.iter_mut() {
+        *value /= slope;
+    }
+    let material_floor = SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * (1.0 + seed_objective.abs());
+    let near_alpha = material_floor / slope;
+    let mut alpha = term.inner_iterate_scale();
+    let mut planted = None;
+    while alpha >= near_alpha {
+        let applied = term
+            .apply_newton_step(
+                ascent.slice(ndarray::s![..dense_len]),
+                ascent.slice(ndarray::s![dense_len..]),
+                alpha,
+            )
+            .is_ok();
+        if applied
+            && let Ok(objective) = term.penalized_objective_total(z.view(), &rho, None, 1.0)
+            && objective.is_finite()
+            && planted.as_ref().is_none_or(|(best, _)| objective > *best)
+        {
+            planted = Some((objective, term.snapshot_mutable_state()));
+        }
+        term.restore_mutable_state(&seed_state)
+            .expect("the live excursion restores");
+        alpha *= 0.5;
+    }
+    let (saved_objective, saved_state) = planted.expect("the production sweep has a finite plant");
+    assert!(
+        saved_objective - seed_objective > material_floor,
+        "fixture must admit a material ascent inside the production sweep: \
+         seed={seed_objective:.9e}, saved={saved_objective:.9e}, floor={material_floor:.6e}"
+    );
+
+    // `self` is the live excursion; `best_seen` names a different terminal
+    // state.  This is the exact state split at the objective-stall refusal.
+    let mut best_seen = Some((0.0, slope, saved_state));
+    let outcome = term
+        .descend_gauge_orbit_at_terminal_candidate(
+            z.view(),
+            &rho,
+            None,
+            &lambda_smooth,
+            &mut best_seen,
+            8,
+        )
+        .expect("terminal candidate descent runs");
+    let after = term
+        .penalized_objective_total(z.view(), &rho, None, 1.0)
+        .expect("finite objective after terminal descent");
+    let resolution = SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * (1.0 + saved_objective.abs());
+
+    assert!(
+        outcome.moved(),
+        "the planted best-seen state has material flat-block descent"
+    );
+    assert!(
+        best_seen.is_none(),
+        "a committed move must consume the certificate for the pre-move state"
+    );
+    assert!(
+        saved_objective - after > resolution,
+        "the mover must descend the saved terminal candidate, not the live excursion: \
+         saved={saved_objective:.9e}, live={seed_objective:.9e}, after={after:.9e}"
+    );
+    assert!(
+        (saved_objective - after - outcome.objective_decrease).abs()
+            <= resolution + 1.0e-6 * outcome.objective_decrease.abs(),
+        "the reported decrease must be measured from best_seen: reported {}, measured {}",
+        outcome.objective_decrease,
+        saved_objective - after,
+    );
+}
+
+/// ANGLE 5 — THE SOLVER POST-CONDITION, which is what #2762 is actually about.
 ///
 /// The defect was never "the descent is missing" in the abstract; it was that
 /// the inner fit could conclude `NoStrictDecrease` or `Heuristic` — the exits
