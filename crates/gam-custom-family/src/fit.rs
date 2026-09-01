@@ -696,7 +696,7 @@ pub(crate) const EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION: f64 = 0.90;
 /// `12.0` (λ ≈ 163k) is the smallest raise that clears the #1561 mean-smooth
 /// optimum (ρ_μ ≈ 11.06 on the plain arm) with real headroom, and it matches the
 /// value the spatial exact-joint location-scale path already boxes ρ to
-/// (`location_scale_engine::EXACT_JOINT_RHO_BOUND`) — a regime that path fits
+/// (`fit_orchestration::drivers::JOINT_RHO_BOUND`, its joint-search prior) — a regime that path fits
 /// stably. Pushing the uniform ceiling further (e.g. 15) let some delicate
 /// wiggle / real-data tp location-scale fits (gagurine, the spatial
 /// engine↔reference parity fixtures) explore a warm-start/inner-solve path where
@@ -708,12 +708,12 @@ pub(crate) const EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION: f64 = 0.90;
 /// #1561 forensic note (2026-07-26): for a location-scale fit with NO spatial
 /// terms, the exact-joint (ρ, ψ) outer optimizer is inactive
 /// (`log_kappa_dim() == 0`), the fit routes through `fit_custom_family`, and
-/// THIS ceiling — not `EXACT_JOINT_RHO_BOUND` — is the operative ρ box. A
+/// THIS ceiling — not `JOINT_RHO_BOUND` — is the operative ρ box. A
 /// selected λ equal to `exp(EFFECTIVE_DF_CEILING)` to the last bit is a
 /// coordinate railed HERE (`ln λ = 12.000000…` ⇒ check this constant first);
 /// widening the location-scale engine's box cannot move it, and was measured
 /// not to (bit-identical λ across a 5× widening of that box). The value
-/// coincidence with `EXACT_JOINT_RHO_BOUND` is what makes the misattribution
+/// coincidence with `JOINT_RHO_BOUND` is what makes the misattribution
 /// cheap. A null-space-ridge coordinate railed here with z² = θ̂²g ≤ 1 is
 /// HARMLESS — the criterion is monotone to +∞ and the shrinkage factor
 /// g/(g+e¹²) ≈ 1e-4 means the λ=∞ limit is already attained — while a
