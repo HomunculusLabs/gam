@@ -6184,6 +6184,43 @@ impl CustomFamily for BoundedLinearFamily {
         true
     }
 
+    /// The latent chart is not a basis (#2748).
+    ///
+    /// `post_update_block_beta` below clamps `theta[term.col_idx]` PER
+    /// COORDINATE, and `block_geometry` above refuses any spec whose width is
+    /// not `designzeroed.ncols()`. Both statements are about these exact
+    /// coordinates, and neither survives `beta -> V' beta`: a rotation mixes a
+    /// bounded latent coordinate with an unbounded one, so the clamp would
+    /// confine the wrong thing, and it narrows the width the rebuild demands.
+    /// The derived default cannot see either hook — this family states its
+    /// feasible set through the clamp rather than through
+    /// `block_linear_constraints` — so the declaration is explicit here.
+    fn block_coefficient_coordinate(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        block_spec: &ParameterBlockSpec,
+    ) -> gam_problem::CoefficientCoordinate {
+        // This family carries exactly ONE block and both hooks that make its
+        // coordinate structural are indexed against that block, so the answer is
+        // the same for every question it can be asked. Say so when the question
+        // does not describe the block this family holds, rather than answering
+        // silently about a coordinate that is not its own: a mismatched index or
+        // width IS the desynchronisation this declaration exists to prevent, and
+        // `Structural` is the safe answer to it too.
+        if block_index != 0 || block_spec.design.ncols() != self.designzeroed.ncols() {
+            log::debug!(
+                "bounded linear family: coefficient coordinate asked for block {block_index} \
+                 at spec width {} ({} block state(s) supplied) while this family carries one \
+                 block of width {}; the coordinate is structural either way",
+                block_spec.design.ncols(),
+                block_states.len(),
+                self.designzeroed.ncols(),
+            );
+        }
+        gam_problem::CoefficientCoordinate::Structural
+    }
+
     /// Confine every bounded coefficient's latent coordinate to the range
     /// where [`bounded_latent_injective_limit`] says the interval map is still
     /// invertible.
@@ -7517,17 +7554,15 @@ pub(crate) fn spatial_length_scale_term_indices(spec: &TermCollectionSpec) -> Ve
         .collect()
 }
 
-/// Returns `true` when every spatial term in `spec` has a locked kernel
-/// scale (explicit `length_scale=X` without anisotropy) and therefore
-/// contributes no outer ψ/κ optimization axis. Empty term collections
-/// also return `true` — there are no kappas to optimize.
+/// The scalar a multi-start / candidate comparison ranks one realized fit by.
 ///
-/// Used by family entry points that want to honor a user-supplied scalar
-/// length scale exactly: when all spatial terms are locked the n-block
-/// joint-spatial outer solver has nothing to optimize, and routing
-/// through it merely spends ~80 outer iters chasing a stalled ARC at the
-/// user's chosen ρ. Skipping straight to the rho-only path avoids that
-/// waste and respects the user's explicit kernel-scale input.
+/// The REML/LAML score is the criterion the outer search itself minimizes, so
+/// it is what a comparison between two realized fits must use when it exists.
+/// A route that produced no outer score (a fixed-ρ path, or a family whose
+/// criterion is not assembled) still has a penalized deviance, and
+/// `½·deviance + ½·stable_penalty_term` is the same objective up to the terms
+/// those routes do not form. A non-finite score is `+∞`, i.e. never preferred,
+/// which is what makes this usable as a plain `total_cmp` key.
 fn fit_score(fit: &UnifiedFitResult) -> f64 {
     if let Some(score) = fit.reml_score().filter(|value| value.is_finite()) {
         return score;
@@ -7674,31 +7709,38 @@ mod spatial_trial_recovery_tests {
     }
 }
 
-fn require_successful_spatial_optimization_result<T>(
-    initial_score: f64,
-    result: Result<Option<(T, f64)>, EstimationError>,
+/// Surface the two ways the exact spatial-κ route can fail to produce a
+/// candidate at all: it was unavailable, or it errored.
+///
+/// # ⚠ It deliberately does NOT grade the candidate's score (#2748)
+///
+/// It used to. A candidate whose realized score was worse than the incumbent's
+/// by more than `max(1e-6, |score|·1e-8)` was turned into a
+/// `RemlOptimizationFailed` and **killed the whole fit** — measured on
+/// `geo_disease_eas_matern_k6`, where a `1.267594e3 → 1.267595e3` regression
+/// (`8e-7` relative, some eighty times that bar) took down all four of its
+/// non-flexible benchmark lanes, `rust_gam` included.
+///
+/// Two things were wrong with that, and neither is the size of the bar.
+///
+/// 1. **The incumbent exists.** κ optimization is a refinement of a fit that
+///    has already been produced and scored. "The refinement did not improve on
+///    the incumbent" is an argument for shipping the incumbent, not for
+///    destroying it — which is exactly what the sibling
+///    `JointSpatialKappaOutcome::DeclinedKeepIncumbent` arm concluded when the
+///    joint route graded its own candidate one level in. Two graders of the
+///    same comparison reaching opposite responses is the defect, and the
+///    response that keeps a valid fit is the right one.
+/// 2. **A comparison between two measured numbers needs no tolerance.** The
+///    caller now keeps whichever of the incumbent and the candidate has the
+///    smaller score. `argmin` over two values is monotone by construction: it
+///    cannot ship something worse than what it was handed, at any drift, so
+///    there is nothing left for a bar to calibrate.
+fn require_available_spatial_optimization_result<T>(
+    result: Result<Option<T>, EstimationError>,
 ) -> Result<T, EstimationError> {
     match result {
-        Ok(Some((value, exact_score))) => {
-            // Allow rounding-level worsening: REML scores accumulate
-            // log-determinant terms whose finite-precision re-evaluation
-            // can drift well past 1e-10 absolute near a converged optimum
-            // (we have seen ~1e-6 between two evaluations whose printed
-            // values round to identical 6-digit scientific). Reject genuine
-            // worsenings (>1 unit) but admit anything within ~1e-6
-            // absolute / 1e-8 relative — meaningful REML gains are
-            // orders of magnitude larger.
-            const SCORE_DRIFT_ABS_TOL: f64 = 1e-6;
-            const SCORE_DRIFT_REL_TOL: f64 = 1e-8;
-            let tol = SCORE_DRIFT_ABS_TOL.max(initial_score.abs() * SCORE_DRIFT_REL_TOL);
-            if exact_score <= initial_score + tol {
-                Ok(value)
-            } else {
-                Err(EstimationError::RemlOptimizationFailed(format!(
-                    "spatial kappa optimization made REML score worse ({initial_score:.6e} -> {exact_score:.6e})"
-                )))
-            }
-        }
+        Ok(Some(value)) => Ok(value),
         Ok(None) => Err(EstimationError::RemlOptimizationFailed(
             "spatial kappa optimization is unavailable for one or more eligible spatial terms"
                 .to_string(),

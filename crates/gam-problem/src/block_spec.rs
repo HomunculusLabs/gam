@@ -819,3 +819,70 @@ impl BlockWorkingSet {
         })
     }
 }
+
+/// What a parameter block's COEFFICIENT COORDINATE is, as opposed to what its
+/// column space is (#2748).
+///
+/// # The distinction, and why one bit is needed to state it
+///
+/// For most blocks the coefficients are an arbitrary basis: any `V` with
+/// `X V` spanning `range(X)` gives the same model, so the identifiability
+/// canonicaliser is free to reparameterise `β ↦ Vᵀβ`, pull the penalties back
+/// as `VᵀSV`, and let [`crate::Gauge`] lift the answer home. That freedom is
+/// what lets it remove a cross-block structural confound EXACTLY instead of
+/// ridging it away.
+///
+/// Some blocks are not like that. The monotone link-wiggle warp is the
+/// canonical case: its family imposes `β_w ≥ 0` **componentwise on those very
+/// coefficients**, because an I-spline with non-negative coefficients is what
+/// makes the learned link monotone. `β ↦ Vᵀβ` maps that cone to
+/// `{A V β̃ ≥ 0}`, and the hook that produces it
+/// (`CustomFamily::block_linear_constraints`) is a function of the block's
+/// WIDTH — it cannot express `A V`, so after a reparameterisation it would
+/// return a cone in rotated coordinates that means nothing, and the
+/// coordinatewise projection beside it (`post_update_block_beta`) would enforce
+/// that nothing. The model would silently stop being monotone.
+///
+/// So "may this block be reparameterised?" is a property of the block's
+/// coordinate, and it is NOT the question [`ParameterBlockSpec::gauge_priority`]
+/// answers. A priority answers "if a shared direction must be given up, whose
+/// is it?" — an ordering AMONG blocks. Reading an ordering as a licence to
+/// rotate is how gam#2748 broke: giving the warp a strictly lower priority
+/// (correctly, so a cross-block alias stops being *unfittable*) also lifted the
+/// canonicaliser's equal-priority guard and authorised rotating the one block
+/// that cannot be rotated.
+///
+/// # Fail-closed
+///
+/// [`Spanning`](Self::Spanning) is the default because it is the common case,
+/// but every DERIVATION of this value must resolve doubt toward
+/// [`Structural`](Self::Structural): declining a reparameterisation always
+/// preserves the model (the canonicaliser falls through to the audit gate,
+/// which is where it lived before the orthogonalisation pass existed), while
+/// performing one on a structural coordinate silently changes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CoefficientCoordinate {
+    /// Only the block's column SPACE is model content. Any basis of it is the
+    /// same model, so a reparameterisation `β ↦ Vᵀβ` with the penalties and the
+    /// warm start pulled back is exact.
+    #[default]
+    Spanning,
+    /// The coordinate ITSELF is model content — a componentwise sign cone, a
+    /// monotonicity ordering, a box the family projects onto, or a geometry the
+    /// family rebuilds at this exact width. No change of basis preserves the
+    /// model, and no change of width preserves the family's own rebuild.
+    Structural,
+}
+
+impl CoefficientCoordinate {
+    /// Is this coordinate free to be reparameterised?
+    pub fn is_spanning(self) -> bool {
+        matches!(self, Self::Spanning)
+    }
+
+    /// Does this coordinate carry model structure a reparameterisation would
+    /// destroy?
+    pub fn is_structural(self) -> bool {
+        matches!(self, Self::Structural)
+    }
+}

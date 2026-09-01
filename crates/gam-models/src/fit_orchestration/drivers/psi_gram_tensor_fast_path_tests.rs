@@ -182,7 +182,9 @@ fn psi_gram_tensor_fast_path_skips_n_row_lane_and_matches_streamed() {
             |psi| {
                 let mut theta_probe = theta_probe_base.clone();
                 theta_probe[rho_dim] = psi;
-                build_cache.ensure_theta(&theta_probe)?;
+                build_cache
+                    .ensure_theta(&theta_probe)
+                    .map_err(|error| error.to_string())?;
                 Ok(build_cache.design().design.clone())
             },
             weights.view(),
@@ -610,7 +612,9 @@ fn psi_gram_skip_forced_rotation_beta_error_ladder_diag() {
             |psi| {
                 let mut theta_probe = theta_probe_base.clone();
                 theta_probe[rho_dim] = psi;
-                build_cache.ensure_theta(&theta_probe)?;
+                build_cache
+                    .ensure_theta(&theta_probe)
+                    .map_err(|error| error.to_string())?;
                 Ok(build_cache.design().design.clone())
             },
             weights.view(),

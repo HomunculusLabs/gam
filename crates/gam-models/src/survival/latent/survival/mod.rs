@@ -1501,6 +1501,13 @@ const LATENT_EXACT_EXPANSION_ORDER4: usize = 1
     + 3 * 2 * LATENT_EXACT_EXPANSION_ORDER2
     + 3 * 2 * LATENT_EXACT_EXPANSION_ORDER3;
 const LATENT_EXACT_EXPANSION_CAPACITY: usize = LATENT_EXACT_EXPANSION_ORDER4 + 1;
+
+/// The one refusal that replaces the pre-gam#2714 product refusal: not "a
+/// monomial underflowed" (which is a fact about binary64 and says nothing about
+/// the derivative) but "what binary64 could not carry is big enough to decide
+/// the answer", which is the statement a certification is entitled to make.
+const LATENT_UNREPRESENTABLE_MASS_REACHES_CELL: &str =
+    "the product mass binary64 cannot represent reaches the cumulant's rounding cell";
 const _: () = assert!(LATENT_EXACT_EXPANSION_ORDER1 == 1);
 const _: () = assert!(LATENT_EXACT_EXPANSION_ORDER2 == 3);
 const _: () = assert!(LATENT_EXACT_EXPANSION_ORDER3 == 15);
@@ -1510,13 +1517,26 @@ const _: () = assert!(LATENT_EXACT_EXPANSION_CAPACITY == 112);
 /// Fixed, increasing-magnitude floating-point expansion.
 ///
 /// Each component is an exact binary64 and their real sum is the represented
-/// value. `TwoSum` and FMA `TwoProduct` retain every arithmetic residual, so the
+/// value TO WITHIN [`Self::unrepresentable_mass`]. `TwoSum` and FMA
+/// `TwoProduct` retain every arithmetic residual the format can hold, so the
 /// pointed cumulant polynomial is evaluated exactly over its rounded binary64
-/// moments. The sole rounding occurs in [`Self::certified_round`].
+/// moments wherever binary64 is capable of it. The sole rounding occurs in
+/// [`Self::certified_round`], which proves its cell against the components AND
+/// that mass.
 #[derive(Clone, Copy)]
 struct LatentExactExpansion {
     components: [f64; LATENT_EXACT_EXPANSION_CAPACITY],
     len: usize,
+    /// Outward upper bound on `|exact value − Σ components|` (gam#2714).
+    ///
+    /// `TwoSum` is exact for every finite pair, and `TwoProduct` is exact
+    /// whenever the product stays at or above `2^-970`, so this is `0.0` on
+    /// every expansion the recurrence could already build. It becomes nonzero
+    /// exactly where an FMA residual needs bits under `2^-1074` — see
+    /// [`Self::two_product`] for the bound and its proof — and it is the reason
+    /// a monomial binary64 cannot carry no longer refuses a derivative binary64
+    /// can round perfectly well.
+    unrepresentable_mass: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1542,7 +1562,38 @@ impl LatentExactExpansion {
     const ZERO: Self = Self {
         components: [0.0; LATENT_EXACT_EXPANSION_CAPACITY],
         len: 0,
+        unrepresentable_mass: 0.0,
     };
+
+    /// One subnormal ulp — the outward bound on a single FMA product residual
+    /// that binary64 cannot represent (gam#2714).
+    ///
+    /// In the guarded band `|p| = |fl(a·b)| < 2^-970` the exact residual obeys
+    /// `|r| = |a·b − p| ≤ ulp(p)/2 ≤ 2^-1023`, so `r` lies inside the subnormal
+    /// range where the grid spacing is exactly `2^-1074`. `fma(a, b, −p)`
+    /// returns `r` correctly rounded onto that grid, so its error is at most a
+    /// half spacing, `2^-1075`. That half is not itself representable, so the
+    /// bound carried here is the full spacing — strictly conservative, and the
+    /// smallest positive binary64 there is. The completely-underflowed case
+    /// `p = 0` is the same statement with `|a·b| ≤ 2^-1075`.
+    const SUBNORMAL_ULP: f64 = f64::from_bits(1);
+
+    /// Round a nonnegative bound outward, so an accumulated bound stays a
+    /// bound under binary64 addition and multiplication.
+    ///
+    /// Exactly zero is returned unchanged: an expansion that has lost nothing
+    /// must not acquire a bound merely by being added or scaled, or the "no
+    /// underflow ⇒ byte-identical" property would not hold.
+    #[inline]
+    fn outward_bound(value: f64) -> Result<f64, &'static str> {
+        if !value.is_finite() || value < 0.0 {
+            return Err("an unrepresentable-mass bound left the finite nonnegative range");
+        }
+        if value == 0.0 {
+            return Ok(0.0);
+        }
+        Ok(Self::next_up(value))
+    }
 
     fn scalar(value: f64) -> Self {
         if value == 0.0 {
@@ -1588,38 +1639,71 @@ impl LatentExactExpansion {
         Ok((sum, error))
     }
 
-    /// Error-free finite product through one fused residual.
+    /// Finite product through one fused residual, with an outward bound on the
+    /// part of the exact product binary64 cannot carry.
+    ///
+    /// An FMA product residual is EXACT provided neither the product nor its
+    /// residual underflows: a product at least `2^-970` has an exact-product
+    /// least-significant bit no smaller than `2^-1074` for binary64 operands,
+    /// so `mul_add(a, b, -product)` IS `a·b − product` with no rounding, and
+    /// the returned bound is `0.0`.
+    ///
+    /// Below that proved range the residual can need bits the format does not
+    /// have. **That is a fact about binary64, not about the derivative**
+    /// (gam#2714). This used to `Err` there, which threw away an entire
+    /// certified cumulant over one monomial — and the monomials that land there
+    /// are, by construction, the ones too small to reach the answer: two
+    /// perfectly ordinary normal moments at `1e-152` multiply to `1e-304`, 252
+    /// orders below the half-ulp of a leading moment of `1`. Measured on the
+    /// #2714 witness, five of seven outer seeds of the veteran latent-frailty
+    /// fit died on exactly that. It is the same shape as the tie-to-even
+    /// refusal fixed for gam#2538 in [`Self::certified_round`]: the
+    /// certification refusing precisely the inputs it can decide.
+    ///
+    /// So the residual is KEPT — it is still the correctly rounded value of
+    /// `a·b − product`, which is the best binary64 has — and the mass it may be
+    /// off by is carried outward in [`Self::unrepresentable_mass`] and proved
+    /// against the rounding cell at the end. See [`Self::SUBNORMAL_ULP`] for
+    /// the bound. Nothing is loosened: an expansion whose products all clear
+    /// `2^-970` carries a bound of exactly zero and certifies bit-identically.
     #[inline]
-    fn two_product(a: f64, b: f64) -> Result<(f64, f64), &'static str> {
+    fn two_product(a: f64, b: f64) -> Result<(f64, f64, f64), &'static str> {
         if a == 0.0 || b == 0.0 {
-            return Ok((0.0, 0.0));
+            return Ok((0.0, 0.0, 0.0));
         }
         let product = a * b;
         if !product.is_finite() {
             return Err("an exact-expansion product overflowed");
         }
-        // An FMA product residual is exact provided neither the product nor its
-        // residual underflows. A product at least 2^-970 has an exact-product
-        // least-significant bit no smaller than 2^-1074 for binary64 operands.
-        // Below that proved range, refuse rather than silently call a rounded
-        // residual error-free.
-        if product.abs() < f64::MIN_POSITIVE / f64::EPSILON {
-            return Err("an exact-expansion product entered the unprovable underflow range");
-        }
         let error = a.mul_add(b, -product);
         if !error.is_finite() {
             return Err("an exact-expansion product residual became non-finite");
         }
-        Ok((product, error))
+        let unrepresentable = if product.abs() < f64::MIN_POSITIVE / f64::EPSILON {
+            Self::SUBNORMAL_ULP
+        } else {
+            0.0
+        };
+        Ok((product, error, unrepresentable))
     }
 
     /// Error-free sum of two increasing-magnitude expansions.
+    ///
+    /// `TwoSum` is exact for every finite pair, so the sum adds no
+    /// unrepresentable mass of its own; the two operands' bounds simply add.
     fn add(self, other: Self) -> Result<Self, &'static str> {
+        let carried = Self::outward_bound(self.unrepresentable_mass + other.unrepresentable_mass)?;
         if self.len == 0 {
-            return Ok(other);
+            return Ok(Self {
+                unrepresentable_mass: carried,
+                ..other
+            });
         }
         if other.len == 0 {
-            return Ok(self);
+            return Ok(Self {
+                unrepresentable_mass: carried,
+                ..self
+            });
         }
         if self.len + other.len > LATENT_EXACT_EXPANSION_CAPACITY {
             return Err("an exact-expansion sum exceeded its structural support bound");
@@ -1659,10 +1743,16 @@ impl LatentExactExpansion {
             q = sum;
         }
         out.push_nonzero(q)?;
+        out.unrepresentable_mass = carried;
         Ok(out)
     }
 
-    /// Exact multiplication by one rounded binary64 moment.
+    /// Multiplication by one rounded binary64 moment, exact wherever binary64
+    /// can be (see [`Self::two_product`]).
+    ///
+    /// The incoming bound scales with the multiplier — `|exact − Σc| ≤ m` gives
+    /// `|s·exact − Σ(s·c)| ≤ |s|·m` — and every product residual the format
+    /// cannot hold adds its own [`Self::SUBNORMAL_ULP`] on top.
     fn scale(self, scalar: f64) -> Result<Self, &'static str> {
         if self.len == 0 || scalar == 0.0 {
             return Ok(Self::ZERO);
@@ -1671,12 +1761,17 @@ impl LatentExactExpansion {
             return Err("a scaled exact expansion exceeded its structural support bound");
         }
 
-        let (mut q, first_error) = Self::two_product(self.component(0), scalar)?;
+        let mut unrepresentable =
+            Self::outward_bound(self.unrepresentable_mass * scalar.abs())?;
+        let (mut q, first_error, first_unrepresentable) =
+            Self::two_product(self.component(0), scalar)?;
+        unrepresentable = Self::outward_bound(unrepresentable + first_unrepresentable)?;
         let mut out = Self::ZERO;
         out.push_nonzero(first_error)?;
         for index in 1..self.len {
-            let (product, product_error) =
+            let (product, product_error, product_unrepresentable) =
                 Self::two_product(self.component(index), scalar)?;
+            unrepresentable = Self::outward_bound(unrepresentable + product_unrepresentable)?;
             let (sum, sum_error) = Self::two_sum(q, product_error)?;
             out.push_nonzero(sum_error)?;
             // The exact scaling recurrence guarantees `|product| >= |sum|`;
@@ -1687,6 +1782,7 @@ impl LatentExactExpansion {
             q = next_q;
         }
         out.push_nonzero(q)?;
+        out.unrepresentable_mass = unrepresentable;
         Ok(out)
     }
 
@@ -1716,11 +1812,26 @@ impl LatentExactExpansion {
     /// sign decision. It does not assume that a preceding error-free transform
     /// happened to retain a particular nonoverlap strength.
     fn exact_sign_after_adding_scalar(self, scalar: f64) -> Result<f64, &'static str> {
+        self.exact_sign_after_adding_scalars(scalar, 0.0)
+    }
+
+    /// As [`Self::exact_sign_after_adding_scalar`], with two addends.
+    ///
+    /// The second is the unrepresentable-mass offset that turns a statement
+    /// about `Σ components` into a statement about the whole interval the exact
+    /// value is known to lie in (gam#2714). Both go through the same exact
+    /// fixed-point accumulator, so nothing about the decision becomes a
+    /// tolerance comparison.
+    fn exact_sign_after_adding_scalars(
+        self,
+        first: f64,
+        second: f64,
+    ) -> Result<f64, &'static str> {
         let ordering = exact_binary64_sum_sign(
             self.components[..self.len]
                 .iter()
                 .copied()
-                .chain(std::iter::once(scalar)),
+                .chain([first, second]),
         )
         .map_err(|_| "the shared exact-sign accumulator rejected its structural finite input")?;
         Ok(match ordering {
@@ -1730,8 +1841,32 @@ impl LatentExactExpansion {
         })
     }
 
+    /// Half the distance from `value` to whichever of its two binary64
+    /// neighbours is nearer — the radius of its rounding cell.
+    #[inline]
+    fn rounding_cell_radius(value: f64) -> f64 {
+        let up = Self::next_up(value) - value;
+        let down = value - Self::next_down(value);
+        0.5 * up.min(down)
+    }
+
+    /// `candidate` is the answer iff the whole interval the exact value is
+    /// known to lie in — `Σ components ± mass` — sits inside its rounding cell.
+    ///
+    /// Used where the components sum to `candidate` EXACTLY, so the only thing
+    /// separating the two is the mass binary64 could not carry (gam#2714).
+    fn certify_exact_sum_against_mass(candidate: f64, mass: f64) -> Result<f64, &'static str> {
+        if mass == 0.0 {
+            return Ok(candidate);
+        }
+        if mass < Self::rounding_cell_radius(candidate) {
+            return Ok(candidate);
+        }
+        Err(LATENT_UNREPRESENTABLE_MASS_REACHES_CELL)
+    }
+
     /// Unique nearest-even binary64 rounding, proved against both adjacent
-    /// midpoint boundaries.
+    /// midpoint boundaries and against the mass binary64 could not carry.
     ///
     /// The starting point is the accumulated sum of the components, which is
     /// only a neighbourhood of the exact value. Where it is not the nearest
@@ -1739,9 +1874,21 @@ impl LatentExactExpansion {
     /// steps one ulp onto the neighbour that comparison names, so the returned
     /// value is the correctly rounded one regardless of how the accumulation
     /// happened to round.
+    ///
+    /// gam#2714 adds the second half of the proof. `Σ components` is the exact
+    /// value only to within [`Self::unrepresentable_mass`], so every boundary
+    /// comparison is made at the END of that interval that is nearest the
+    /// boundary. `mass == 0` — every expansion whose products all cleared
+    /// `2^-970`, which is every expansion this routine could previously be
+    /// handed at all — reduces each comparison to the one made before, so the
+    /// returned value is bit-identical there.
     fn certified_round(self) -> Result<f64, &'static str> {
+        let mass = self.unrepresentable_mass;
+        if !(mass.is_finite() && mass >= 0.0) {
+            return Err("an unrepresentable-mass bound left the finite nonnegative range");
+        }
         if self.len == 0 {
-            return Ok(0.0);
+            return Self::certify_exact_sum_against_mass(0.0, mass);
         }
         let mut candidate = 0.0_f64;
         for index in 0..self.len {
@@ -1769,13 +1916,14 @@ impl LatentExactExpansion {
         loop {
             let residual = self.add(Self::scalar(-candidate))?;
             if residual.len == 0 {
-                return Ok(candidate);
+                return Self::certify_exact_sum_against_mass(candidate, mass);
             }
             let residual_sign = residual.exact_sign_after_adding_scalar(0.0)?;
             if residual_sign == 0.0 {
                 // Nonzero components summing to exactly zero: `candidate` IS the
-                // exact value, and no boundary comparison is meaningful.
-                return Ok(candidate);
+                // components' sum, and only the unrepresentable mass separates
+                // it from the exact value.
+                return Self::certify_exact_sum_against_mass(candidate, mass);
             }
             let adjacent = if residual_sign > 0.0 {
                 Self::next_up(candidate)
@@ -1790,12 +1938,35 @@ impl LatentExactExpansion {
                 return Err("the exact cumulant reached an unrepresentable subnormal midpoint");
             }
             let boundary_offset = -residual_sign * midpoint_distance;
+            // The components' sum is inside `candidate`'s cell; the exact value
+            // is inside it too only if the mass binary64 could not carry fits
+            // in what is left (gam#2714). `mass == 0` makes the widened
+            // comparison the same exact-sign call as the plain one.
+            let cell_holds_the_mass = move |residual: Self| -> Result<f64, &'static str> {
+                let widened = residual
+                    .exact_sign_after_adding_scalars(boundary_offset, residual_sign * mass)?;
+                if widened == -residual_sign {
+                    Ok(candidate)
+                } else {
+                    Err(LATENT_UNREPRESENTABLE_MASS_REACHES_CELL)
+                }
+            };
             match residual
                 .exact_sign_after_adding_scalar(boundary_offset)?
                 .partial_cmp(&0.0)
             {
-                Some(std::cmp::Ordering::Less) if residual_sign > 0.0 => return Ok(candidate),
-                Some(std::cmp::Ordering::Greater) if residual_sign < 0.0 => return Ok(candidate),
+                Some(std::cmp::Ordering::Less) if residual_sign > 0.0 => {
+                    return cell_holds_the_mass(residual);
+                }
+                Some(std::cmp::Ordering::Greater) if residual_sign < 0.0 => {
+                    return cell_holds_the_mass(residual);
+                }
+                Some(std::cmp::Ordering::Equal) if mass != 0.0 => {
+                    // The components land exactly on the midpoint, so the
+                    // exact value straddles it by the mass. A tie is a fact
+                    // about a value that is KNOWN; this one is not.
+                    return Err(LATENT_UNREPRESENTABLE_MASS_REACHES_CELL);
+                }
                 Some(std::cmp::Ordering::Equal) => {
                     // An exact midpoint is not an unroundable value. IEEE-754's
                     // default mode -- round to nearest, ties to EVEN -- makes it
@@ -2624,6 +2795,29 @@ fn latent_certified_cumulants(
         rounded_moments[mask] = moment.sign * magnitude;
     }
 
+    // The moments' own dynamic range is what every refusal below is actually
+    // about, and it is the one number a caller cannot recover from the message
+    // afterwards — recovering it has twice cost this lane a three-quarter-hour
+    // fit (gam#2714). Report it with the refusal, not instead of it.
+    let moment_span = || -> String {
+        let mut lowest = f64::INFINITY;
+        let mut highest = 0.0_f64;
+        for mask in 0usize..16 {
+            let magnitude = rounded_moments[mask].abs();
+            if magnitude > 0.0 {
+                lowest = lowest.min(magnitude);
+                highest = highest.max(magnitude);
+            }
+        }
+        if highest == 0.0 {
+            return "no nonzero rounded moment".to_string();
+        }
+        format!("rounded moment magnitudes span [{lowest:.6e}, {highest:.6e}]")
+    };
+    let unresolved_with_span = |mask: usize, reason: &str| {
+        unresolved(mask, &format!("{reason} ({})", moment_span()))
+    };
+
     let mut exact_cumulants = [LatentExactExpansion::ZERO; 16];
     let mut certificates = [LatentCertifiedCumulant::ZERO; 16];
     for mask in 1usize..16 {
@@ -2648,7 +2842,7 @@ fn latent_certified_cumulants(
                 let subtract = exact_cumulants[block]
                     .scale(-rounded_moments[complement])
                     .and_then(|term| cumulant.add(term))
-                    .map_err(|reason| unresolved(mask, reason))?;
+                    .map_err(|reason| unresolved_with_span(mask, reason))?;
                 cumulant = subtract;
                 let term_mass = LatentExactExpansion::next_up(
                     certificates[block].absolute_term_mass
@@ -2673,7 +2867,7 @@ fn latent_certified_cumulants(
         }
         let value = cumulant
             .certified_round()
-            .map_err(|reason| unresolved(mask, reason))?;
+            .map_err(|reason| unresolved_with_span(mask, reason))?;
         exact_cumulants[mask] = cumulant;
         certificates[mask] = LatentCertifiedCumulant {
             value,

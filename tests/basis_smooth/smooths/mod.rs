@@ -60,6 +60,7 @@ mod psi_gram_tensor_independent_audit;
 mod ridge_2d_smooth_quality;
 mod smooth_rejects_constant_input;
 mod smooth_term_lr_bartlett_calibration;
+mod smooth_term_lr_profiled_scale_2672;
 mod smooth_term_lr_reference_df_provenance_2672;
 mod smooth_term_lr_size_calibration;
 mod spline_k_sweep_easy_truth;

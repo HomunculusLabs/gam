@@ -1324,7 +1324,8 @@ pub(crate) fn evidence_row_spectral_deflates_indefinite_non_gauge_block_at_unit_
     // producing an SPD block. The two sub-floor eigenvalues (−1.0 and 1e-10
     // vs floor = 1e-8·4) are counted; the genuine e_0 (eigenvalue 4.0) is
     // preserved exactly.
-    let spectral = factor_spectral_deflated_criterion_row(&indef, d)
+    let spectral = factor_spectral_deflated_criterion_row(&indef, d, false)
+        .expect("the majorizer policy never refuses on sign")
         .expect("spectral deflation must condition the indefinite non-gauge block");
     assert_eq!(
         spectral.gauge_deflated_directions, 2,
@@ -1366,6 +1367,7 @@ pub(crate) fn evidence_row_spectral_deflates_indefinite_non_gauge_block_at_unit_
         true,
         std::slice::from_ref(&gauge_e1),
         true,
+        false,
     )
     .expect("undamped evidence factor must condition the indefinite block by deflation");
     for a in 0..d {
@@ -1388,7 +1390,8 @@ pub(crate) fn evidence_row_spectral_deflates_indefinite_non_gauge_block_at_unit_
     pd.htbeta = indef.htbeta.clone();
     pd.gt = array![0.0_f64, 0.0, 0.0];
 
-    let result = factor_one_row_result(&pd, 0.0, d, 0, true, std::slice::from_ref(&gauge_e1), true)
+    let result =
+        factor_one_row_result(&pd, 0.0, d, 0, true, std::slice::from_ref(&gauge_e1), true, false)
         .expect("undamped evidence factor must succeed on the genuinely-PD stationary block");
     // Exactly one gauge direction deflated; the non-gauge spectrum is
     // factored as-is (no ridge), so L Lᵀ reproduces H_tt on the two genuine
@@ -1467,7 +1470,7 @@ pub(crate) fn evidence_row_recovers_intrinsic_dimension_flat_block_without_gauge
     // fix would not be exercised. With NO supplied gauge AND spectral
     // deflation withheld (the pre-#1273 behaviour the empty-gauge gate forced
     // on this row), the block is rejected as non-PD.
-    let refused = factor_one_row_result(&flat, 0.0, d, 0, true, &[], false);
+    let refused = factor_one_row_result(&flat, 0.0, d, 0, true, &[], false, false);
     assert!(
         refused.is_err(),
         "fixture precondition: the rank-deficient flat H_tt must be refused by \
@@ -1480,7 +1483,7 @@ pub(crate) fn evidence_row_recovers_intrinsic_dimension_flat_block_without_gauge
     // eigendecomposition and stiffens it to unit curvature, producing an SPD
     // factor — so the factorization SUCCEEDS with no gauge supplied and the
     // #1273 fit no longer aborts on this legitimately-flat geometry.
-    let recovered = factor_one_row_result(&flat, 0.0, d, 0, true, &[], true).expect(
+    let recovered = factor_one_row_result(&flat, 0.0, d, 0, true, &[], true, false).expect(
         "spectral deflation must recover the intrinsic-dimension flat H_tt block on \
          the SAE evidence path even with no supplied gauge (#1273)",
     );
@@ -1565,9 +1568,11 @@ pub(crate) fn evidence_row_spectral_deflation_count_is_stable_across_the_cutoff(
     let mut block_hi = block_lo.clone();
     block_hi.htt[[1, 1]] = near_floor_hi;
 
-    let lo = factor_spectral_deflated_criterion_row(&block_lo, d)
+    let lo = factor_spectral_deflated_criterion_row(&block_lo, d, false)
+        .expect("the majorizer policy never refuses on sign (lo iterate)")
         .expect("indefinite block must spectrally deflate (lo iterate)");
-    let hi = factor_spectral_deflated_criterion_row(&block_hi, d)
+    let hi = factor_spectral_deflated_criterion_row(&block_hi, d, false)
+        .expect("the majorizer policy never refuses on sign (hi iterate)")
         .expect("indefinite block must spectrally deflate (hi iterate)");
 
     // The genuine −1.0 quotient direction is deflated on both sides; the
@@ -5396,7 +5401,8 @@ fn slq_reduced_schur_log_det_matches_dense_evidence() {
         48,
         60,
         seed,
-    );
+    )
+    .expect("the Strict policy never refuses on sign");
     let rel = (slq.estimate - exact_logdet).abs() / exact_logdet.abs();
     eprintln!(
         "matrix-free reduced-Schur log|S|: slq={:.6} exact={:.6} rel={:.3e} std_err={:.3e}",
@@ -5421,7 +5427,8 @@ fn slq_reduced_schur_log_det_matches_dense_evidence() {
         48,
         60,
         seed,
-    );
+    )
+    .expect("the Strict policy never refuses on sign");
     assert_eq!(
         slq.estimate, slq_again.estimate,
         "matrix-free reduced-Schur SLQ log-det must be bit-reproducible for a fixed seed"
@@ -6997,6 +7004,7 @@ fn evidence_beta_schur_boundary_has_unit_logdet_and_authoritative_mask_2308() {
             &schur,
             ReducedSchurPolicy::EvidenceUnitDeflation {
                 relative_floor: SPECTRAL_DEFLATION_REL_FLOOR,
+                refuse_resolved_indefinite: false,
             },
         )
         .expect("evidence unit deflation");
@@ -7078,6 +7086,7 @@ fn evidence_beta_schur_interior_is_raw_and_newton_boundary_is_tikhonov_2308() {
         &interior,
         ReducedSchurPolicy::EvidenceUnitDeflation {
             relative_floor: SPECTRAL_DEFLATION_REL_FLOOR,
+            refuse_resolved_indefinite: false,
         },
     )
     .expect("interior evidence factor");
@@ -7582,6 +7591,426 @@ pub(crate) fn elimination_share_of_the_border_diagonal_is_fixture_dependent_2576
              `reduced_schur_logdet_preconditioner_study` before that verdict is \
              relied on.",
             hi * 100.0
+        );
+    }
+}
+
+/// #2731 — [`CoupledCarrierPenaltyOp`] is EXACTLY the operator its eigen
+/// expansion is, on every surface the solver reads it through.
+///
+/// The barrier's Gauss–Newton β curvature is `Σ_{a,b} C[a,b]·v_a v_bᵀ`. It used
+/// to ship as `Σ_r λ_r w_r w_rᵀ` with `w_r = Σ_a e_r[a] v_a`, one
+/// `SparseRankOnePenaltyOp` per eigenvector — mathematically the same thing, and
+/// the reason it was replaced is cost, not correctness (`ne²·‖v‖₀` to build,
+/// `ne·‖∪ supp v‖₀` to store and apply). This test builds that expansion by hand
+/// from the SAME `C` and carriers and requires the factored operator to
+/// reproduce it through `matvec`, `gradient`, `diagonal`, `block` and
+/// `to_dense`, so the replacement is pinned as an identity rather than as an
+/// intention.
+///
+/// The fixture is built to be able to FAIL:
+///
+/// * three carriers over four blocks, with SHARED support — carriers 0 and 1
+///   both touch block 1, carriers 1 and 2 both touch block 2. A factored form
+///   that forgot the cross terms, or a `diagonal` that missed the overlap of two
+///   carriers on one block, agrees with the expansion only when the supports are
+///   disjoint. The non-vacuity assertion below pins that they are not.
+/// * `C` carries a NEGATIVE eigenvalue. The operator applies `C` as handed over
+///   and must not quietly clamp it: the barrier's own PSD majorization
+///   (`|M|`) happens upstream, and an operator that silently projected here
+///   would hide a caller that forgot to.
+/// * the carrier runs are misaligned across carriers (different starts and
+///   different lengths), so the run-overlap arithmetic is exercised rather than
+///   short-circuited by identical layouts.
+#[test]
+fn coupled_carrier_penalty_op_equals_its_rank_one_expansion_2731() {
+    use ndarray::Array1;
+
+    let k = 24_usize;
+    // (start, values) runs; deliberately different widths and starts.
+    let carriers: Vec<Vec<(usize, Vec<f64>)>> = vec![
+        vec![
+            (0, vec![0.5, -1.25, 0.75]),
+            (6, vec![2.0, 0.25, -0.5, 1.5]),
+        ],
+        vec![
+            (6, vec![-0.75, 1.0, 0.5, -2.25]),
+            (13, vec![0.25, -1.5, 3.0]),
+        ],
+        vec![(13, vec![1.75, 0.5, -0.25]), (18, vec![-1.0, 0.125])],
+    ];
+    let ne = carriers.len();
+    assert_eq!(
+        ne, 3,
+        "the expansion below builds one rank-1 per eigenvector, so the carrier \
+         count and the coupling's dimension must agree"
+    );
+    // Symmetric, deliberately indefinite: eigenvalues of this 3x3 are not all
+    // positive (the trace is 6.0 and the determinant is negative).
+    let coupling = array![[2.0, -1.5, 0.75], [-1.5, 1.0, 2.5], [0.75, 2.5, 3.0]];
+    assert_eq!(coupling.nrows(), ne);
+    let (eigenvalues, eigenvectors) = {
+        use gam_linalg::faer_ndarray::FaerEigh;
+        coupling
+            .eigh(faer::Side::Lower)
+            .expect("3x3 symmetric eigendecomposition")
+    };
+    assert!(
+        eigenvalues.iter().any(|&lam| lam < -1.0e-9),
+        "fixture must exercise an INDEFINITE coupling: {eigenvalues:?}"
+    );
+
+    // Dense carriers, then the historical expansion `Σ_r λ_r w_r w_rᵀ`.
+    let dense_carriers: Vec<Array1<f64>> = carriers
+        .iter()
+        .map(|runs| {
+            let mut v = Array1::<f64>::zeros(k);
+            for (start, values) in runs {
+                for (i, &value) in values.iter().enumerate() {
+                    v[start + i] += value;
+                }
+            }
+            v
+        })
+        .collect();
+    let shared: Vec<usize> = (0..k)
+        .filter(|&i| dense_carriers.iter().filter(|v| v[i] != 0.0).count() >= 2)
+        .collect();
+    assert!(
+        shared.len() >= 4,
+        "fixture must have carriers sharing support, else the cross terms are \
+         untested: shared indices {shared:?}"
+    );
+    let mut expansion = Array2::<f64>::zeros((k, k));
+    for (r, &lam) in eigenvalues.iter().enumerate() {
+        let mut w = Array1::<f64>::zeros(k);
+        for (a, v) in dense_carriers.iter().enumerate() {
+            w = w + eigenvectors[[a, r]] * v;
+        }
+        for i in 0..k {
+            for j in 0..k {
+                expansion[[i, j]] += lam * w[i] * w[j];
+            }
+        }
+    }
+
+    let op = CoupledCarrierPenaltyOp {
+        k,
+        coupling: coupling.clone(),
+        carriers,
+    };
+    let scale = expansion.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    assert!(scale > 1.0, "fixture operator must be non-trivial: {scale}");
+    let tolerance = 1.0e-12 * (1.0 + scale);
+
+    // to_dense
+    let dense = op.to_dense();
+    for i in 0..k {
+        for j in 0..k {
+            assert!(
+                (dense[[i, j]] - expansion[[i, j]]).abs() <= tolerance,
+                "to_dense mismatch at ({i},{j}): {} vs {}",
+                dense[[i, j]],
+                expansion[[i, j]]
+            );
+        }
+    }
+
+    // matvec and gradient (both are `P·vector`), against the expansion.
+    let x: Vec<f64> = (0..k).map(|i| ((i * 7) % 11) as f64 - 5.0).collect();
+    let mut y_op = vec![0.0_f64; k];
+    let mut y_grad = vec![0.0_f64; k];
+    op.matvec(&x, &mut y_op);
+    op.gradient(&x, &mut y_grad);
+    for i in 0..k {
+        let reference: f64 = (0..k).map(|j| expansion[[i, j]] * x[j]).sum();
+        assert!(
+            (y_op[i] - reference).abs() <= tolerance,
+            "matvec mismatch at {i}: {} vs {reference}",
+            y_op[i]
+        );
+        assert!(
+            (y_grad[i] - reference).abs() <= tolerance,
+            "gradient mismatch at {i}: {} vs {reference}",
+            y_grad[i]
+        );
+    }
+
+    // diagonal
+    let mut diag = vec![0.0_f64; k];
+    op.diagonal(&mut diag);
+    for i in 0..k {
+        assert!(
+            (diag[i] - expansion[[i, i]]).abs() <= tolerance,
+            "diagonal mismatch at {i}: {} vs {}",
+            diag[i],
+            expansion[[i, i]]
+        );
+    }
+
+    // block: ranges chosen so one straddles two carriers' shared run.
+    let offsets = [0..6, 6..13, 13..18, 18..k];
+    for (id, range) in offsets.iter().enumerate() {
+        let b = range.end - range.start;
+        let mut blk = Array2::<f64>::zeros((b, b));
+        op.block(BetaBlockId(id), &offsets, &mut blk);
+        for i in 0..b {
+            for j in 0..b {
+                let reference = expansion[[range.start + i, range.start + j]];
+                assert!(
+                    (blk[[i, j]] - reference).abs() <= tolerance,
+                    "block {id} mismatch at ({i},{j}): {} vs {reference}",
+                    blk[[i, j]]
+                );
+            }
+        }
+    }
+
+    // The `ne = 1` case is the historical rank-1 operator, so it must still be
+    // exactly `scale·v vᵀ` — the deleted `SparseRankOnePenaltyOp`'s contract.
+    let rank_one = CoupledCarrierPenaltyOp {
+        k: 4,
+        coupling: array![[2.5]],
+        carriers: vec![vec![(1, vec![3.0, -1.0])]],
+    };
+    let expected = array![
+        [0.0, 0.0, 0.0, 0.0],
+        [0.0, 22.5, -7.5, 0.0],
+        [0.0, -7.5, 2.5, 0.0],
+        [0.0, 0.0, 0.0, 0.0]
+    ];
+    let rank_one_dense = rank_one.to_dense();
+    for i in 0..4 {
+        for j in 0..4 {
+            assert_abs_diff_eq!(rank_one_dense[[i, j]], expected[[i, j]], epsilon = 1.0e-12);
+        }
+    }
+}
+
+/// #2515 — THE BAND IS TWO-SIDED UNDER THE EXACT-OBSERVED-INFORMATION POLICY,
+/// and one-sided under the majorizer one. Both arms are asserted here, because
+/// either alone is satisfiable by a wrong implementation: a policy that refuses
+/// everything passes the refusal arm, and the historical one-sided predicate
+/// passes the pin arm.
+///
+/// The one-sided predicate is `value < deflate_floor`, which admits EVERY
+/// negative eigenvalue however large into the "numerically null" class. For the
+/// Gauss--Newton majorizer that is correct — `B` is PSD by construction, so a
+/// negative eigenvalue there can only be rounding on a direction that is null
+/// anyway. For the exact observed information it prices a saddle direction as the
+/// rho-independent null `log 1 = 0` and inverts it at `1`, and it does so
+/// SILENTLY: the conditioned factor is PD and its log-determinant is finite, so
+/// nothing downstream can tell.
+///
+/// `-7.997610e-3` is not a fabricated magnitude. It is the reduced-Schur
+/// eigenvalue measured on #2712's certified deflated anchor at
+/// `log lambda_smooth = -1.05` (gam-sae's
+/// `zz_attribute_the_broken_ladder_rung_2515`), where the one-sided predicate
+/// pinned it to `+1` while the dense route classified the same direction as #2336
+/// clamp-attributable curvature and priced it at its basin — the two complete
+/// outer gradients then `1.009` RELATIVE apart.
+#[test]
+fn evidence_unit_deflation_refuses_a_resolved_negative_direction_2515() {
+    let majorizer = ReducedSchurPolicy::EvidenceUnitDeflation {
+        relative_floor: SPECTRAL_DEFLATION_REL_FLOOR,
+        refuse_resolved_indefinite: false,
+    };
+    let exact_a = ReducedSchurPolicy::EvidenceUnitDeflation {
+        relative_floor: SPECTRAL_DEFLATION_REL_FLOOR,
+        refuse_resolved_indefinite: true,
+    };
+
+    // A RESOLVED negative direction: relative magnitude 2.0e-3, five decades
+    // outside the 1.0e-8 null band.
+    let resolved_negative = array![[4.0_f64, 0.0], [0.0, -7.997_610e-3]];
+    let pinned = factor_dense_reduced_schur(&resolved_negative, majorizer)
+        .expect("the majorizer policy conditions a negative direction rather than refusing");
+    let spectrum = pinned
+        .beta_deflation
+        .as_ref()
+        .expect("the majorizer policy records the direction it pinned");
+    let pinned_indices: Vec<usize> = (0..spectrum.deflated.len())
+        .filter(|&index| spectrum.deflated[index])
+        .collect();
+    assert_eq!(
+        pinned_indices.len(),
+        1,
+        "exactly the negative direction is pinned under the majorizer policy"
+    );
+    assert_abs_diff_eq!(
+        spectrum.cond_evals[pinned_indices[0]],
+        1.0,
+        epsilon = 0.0
+    );
+    assert!(
+        spectrum.raw_evals[pinned_indices[0]] < 0.0,
+        "the pinned direction is the NEGATIVE one, not the 4.0"
+    );
+
+    let refusal = factor_dense_reduced_schur(&resolved_negative, exact_a)
+        .expect_err(
+            "#2515: the exact-observed-information policy must REFUSE a resolved negative \
+             direction. Pinning it to +1 prices a saddle as the rho-independent null \
+             `log 1 = 0`, which is neither the basin curvature the dense exact-A route \
+             prices an attributable negative direction at nor the typed refusal it \
+             returns for an unattributable one.",
+        )
+        .to_string();
+    assert!(
+        ArrowSchurError::rendered_is_indefinite_evidence(&refusal),
+        "#2515: the refusal must carry the marker its cross-crate reader matches on, or \
+         gam-sae maps this to a fatal defect instead of the same typed \
+         `IndefiniteObservedInformation` verdict the dense route returns. Got: {refusal}"
+    );
+
+    // A direction genuinely INSIDE the null band, on BOTH sides of zero, is still
+    // unit-pinned and must NOT refuse — that is what makes this a two-sided band
+    // rather than a positivity requirement. Relative magnitude 1.0e-12, four
+    // decades inside the 1.0e-8 floor.
+    for (label, band_direction) in [
+        ("positive", 4.0e-12_f64),
+        ("negative", -4.0e-12_f64),
+        ("zero", 0.0_f64),
+    ] {
+        let in_band = array![[4.0_f64, 0.0], [0.0, band_direction]];
+        let conditioned = factor_dense_reduced_schur(&in_band, exact_a).unwrap_or_else(|err| {
+            panic!(
+                "#2515: a {label} direction INSIDE the null band is a numerical null and must \
+                 still be unit-pinned, not refused; the refusal is about RESOLVED negative \
+                 curvature. Got: {err}"
+            )
+        });
+        let spectrum = conditioned
+            .beta_deflation
+            .as_ref()
+            .unwrap_or_else(|| panic!("#2515: the {label} in-band direction must be recorded"));
+        let pinned: Vec<usize> = (0..spectrum.deflated.len())
+            .filter(|&index| spectrum.deflated[index])
+            .collect();
+        assert_eq!(
+            pinned.len(),
+            1,
+            "#2515: exactly the {label} in-band direction is pinned"
+        );
+        assert_abs_diff_eq!(spectrum.cond_evals[pinned[0]], 1.0, epsilon = 0.0);
+    }
+}
+
+/// #2515 — the per-row twin of the reduced-Schur gate above, on the SAME two
+/// arms.
+///
+/// `factor_spectral_deflated_criterion_row`'s own comment says it deflates
+/// "every non-positive/non-finite one", which is the same one-sided predicate and
+/// the same defect on the same operator: by Haynsworth the inertia of the exact
+/// observed information is the inertia of its per-row blocks plus that of its
+/// reduced Schur, so a resolved negative direction can arrive through either and
+/// closing only one of them would leave the verdict route-dependent inside the
+/// arrow route itself.
+#[test]
+fn per_row_evidence_conditioning_refuses_a_resolved_negative_direction_2515() {
+    let d = 2usize;
+    let mut block = ArrowRowBlock::new(d, 1);
+    block.htt = array![[4.0_f64, 0.0], [0.0, -7.997_610e-3]];
+    block.htbeta = array![[1.0_f64], [0.5]];
+    block.gt = array![0.0_f64, 0.0];
+
+    let pinned = factor_spectral_deflated_criterion_row(&block, d, false)
+        .expect("the majorizer policy never refuses on sign")
+        .expect("the majorizer policy conditions the negative direction");
+    assert_eq!(
+        pinned.gauge_deflated_directions, 1,
+        "exactly the negative direction is unit-pinned under the majorizer policy"
+    );
+
+    let refusal = factor_spectral_deflated_criterion_row(&block, d, true).expect_err(
+        "#2515: the exact-observed-information policy must REFUSE a resolved negative \
+         per-row direction rather than pricing it as the rho-independent null",
+    );
+    assert!(
+        ArrowSchurError::rendered_is_indefinite_evidence(&refusal),
+        "#2515: the per-row refusal must carry the same marker the reduced-Schur one does, \
+         or half the verdict is invisible to the cross-crate reader. Got: {refusal}"
+    );
+
+    // In-band on both sides: still a unit pin, never a refusal.
+    for band_direction in [4.0e-12_f64, -4.0e-12, 0.0] {
+        let mut in_band = block.clone();
+        in_band.htt = array![[4.0_f64, 0.0], [0.0, band_direction]];
+        let conditioned = factor_spectral_deflated_criterion_row(&in_band, d, true)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "#2515: a direction inside the null band ({band_direction:e}) is a \
+                     numerical null and must still be unit-pinned, not refused: {err}"
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "#2515: the in-band direction ({band_direction:e}) must still produce a \
+                     conditioned factor"
+                )
+            });
+        assert_eq!(
+            conditioned.gauge_deflated_directions, 1,
+            "#2515: exactly the in-band direction is pinned ({band_direction:e})"
+        );
+    }
+}
+
+/// #2515 — THE MATRIX-FREE LANE'S ONE-SIDED CERTIFICATE, both arms.
+///
+/// The reduced Schur is only an operator on this lane, so there is no spectrum to
+/// classify — only Ritz values from a `lanczos_steps`-dimensional Krylov space per
+/// probe. That is enough for HALF the verdict and this gate pins exactly that
+/// half: every Ritz value of a symmetric operator is a Rayleigh quotient of a
+/// Krylov vector, so it lies in `[lambda_min, lambda_max]`, and one below the null
+/// band PROVES an eigenvalue below the null band. The converse fails, which is why
+/// the predicate is one-sided and why that is the usable direction — a false
+/// refusal would decline a state the dense route legitimately ranks.
+///
+/// Both arms matter. Without the refusal arm the matrix-free value lane would keep
+/// pricing a saddle direction as `log 1 = 0`, which is the defect. Without the
+/// admit arm a policy that refused on any negative Ritz value at all — including
+/// the round-off-negative ones an SPD operator produces routinely — would pass the
+/// refusal arm while making the streaming lane useless.
+#[test]
+fn matrix_free_evidence_certifies_indefiniteness_from_a_ritz_value_2515() {
+    let indefinite = ndarray::Array1::from(vec![4.0_f64, 2.0, -7.997_610e-3]);
+    let positive = ndarray::Array1::from(vec![4.0_f64, 2.0, 1.0e-3]);
+    for (label, spectrum, expect_refusal) in [
+        ("indefinite", &indefinite, true),
+        ("positive-definite", &positive, false),
+    ] {
+        let dim = spectrum.len();
+        let owned = spectrum.clone();
+        let deflated = slq_logdet_unit_deflated(
+            dim,
+            |v| {
+                let mut out = ndarray::Array1::<f64>::zeros(dim);
+                for index in 0..dim {
+                    out[index] = owned[index] * v[index];
+                }
+                out
+            },
+            8,
+            dim,
+            0xC0FFEE,
+            SPECTRAL_DEFLATION_REL_FLOOR,
+        );
+        let certified = deflated.min_ritz < -deflated.deflate_floor;
+        eprintln!(
+            "[#2515 RITZ] {label}: min_ritz={:.6e} deflate_floor={:.6e} \
+             lambda_max_abs={:.6e} certified_indefinite={certified}",
+            deflated.min_ritz, deflated.deflate_floor, deflated.lambda_max_abs
+        );
+        assert_eq!(
+            certified, expect_refusal,
+            "#2515: the {label} operator must{} be certified indefinite by its Ritz \
+             values (min_ritz={:.6e} against a band of {:.6e}). A diagonal operator's \
+             Krylov space is exact at `lanczos_steps = dim`, so this is the case where \
+             the certificate is REQUIRED to fire, not merely allowed to.",
+            if expect_refusal { "" } else { " NOT" },
+            deflated.min_ritz,
+            deflated.deflate_floor
         );
     }
 }

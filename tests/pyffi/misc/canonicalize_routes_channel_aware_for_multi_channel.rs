@@ -29,6 +29,7 @@
 
 use std::sync::Arc;
 
+use gam::families::custom_family::CoefficientCoordinate;
 use gam::families::custom_family::{AdditiveBlockJacobian, ParameterBlockSpec};
 use gam::identifiability::audit::audit_identifiability;
 use gam::identifiability::canonical::canonicalize_for_identifiability;
@@ -37,6 +38,13 @@ use ndarray::{Array1, Array2};
 
 const N: usize = 500;
 const K: usize = 3;
+
+/// Every block's coefficient coordinate is a plain basis of its column space —
+/// the assumption these fixtures are about. A fixture that means to exercise the
+/// structural-coordinate veto declares `Structural` at its own call site (#2748).
+fn spanning_coordinates(specs: &[ParameterBlockSpec]) -> Vec<CoefficientCoordinate> {
+    vec![CoefficientCoordinate::Spanning; specs.len()]
+}
 
 fn linspace(n: usize) -> Array1<f64> {
     if n <= 1 {
@@ -144,7 +152,7 @@ fn channel_aware_routing_chosen_for_multi_output_blocks() {
         spec_with_callback("logslope", logslope_design, 2, K),
     ];
 
-    let canon = canonicalize_for_identifiability(&specs).expect(
+    let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs)).expect(
         "channel-aware audit must pass: blocks in orthogonal channels are fully identifiable",
     );
 
@@ -170,7 +178,7 @@ fn channel_aware_audit_passes_with_full_rank_for_orthogonal_channel_blocks() {
         spec_with_callback("logslope", logslope_design, 2, K),
     ];
 
-    let canon = canonicalize_for_identifiability(&specs).expect(
+    let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs)).expect(
         "channel-aware audit must pass: blocks in orthogonal channels are fully identifiable",
     );
 
@@ -214,8 +222,8 @@ fn post_canonicalize_t_is_identity_for_full_rank_3_block_case() {
         spec_with_callback("logslope", logslope_design, 2, K),
     ];
 
-    let canon =
-        canonicalize_for_identifiability(&specs).expect("full-rank 3-block case must succeed");
+    let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
+        .expect("full-rank 3-block case must succeed");
 
     // Each per-block gauge slice must be the identity (p × p) — no drops.
     for i in 0..canon.gauge.n_blocks() {
@@ -261,7 +269,7 @@ fn channel_aware_audit_flags_fatal_for_same_channel_alias() {
         spec_with_callback("block_c", m.clone(), 2, K), // distinct channel → fine
     ];
 
-    let result = canonicalize_for_identifiability(&specs);
+    let result = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs));
     assert!(
         result.is_err(),
         "same-channel alias must be refused by the channel-aware audit; \
@@ -316,7 +324,7 @@ fn k2_orthogonal_channel_blocks_keep_all_columns() {
         spec_with_callback("location", m.clone(), 0, K2),
         spec_with_callback("scale", m.clone(), 1, K2),
     ];
-    let canon = canonicalize_for_identifiability(&specs)
+    let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
         .expect("K=2 orthogonal-channel case must succeed (full rank)");
     assert!(
         canon.used_channel_aware_audit,
@@ -356,7 +364,7 @@ fn k2_same_channel_alias_is_fatal() {
         spec_with_callback("a", m.clone(), 0, K2),
         spec_with_callback("b", m.clone(), 0, K2),
     ];
-    let result = canonicalize_for_identifiability(&specs);
+    let result = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs));
     assert!(
         result.is_err(),
         "K=2 same-channel alias must be refused by the channel-aware audit",
@@ -379,7 +387,7 @@ fn instrumentation_flat_and_channel_aware_ranks_are_logged() {
         spec_with_callback("marginal", m.clone(), 1, K),
     ];
 
-    let canon = canonicalize_for_identifiability(&specs)
+    let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
         .expect("two-block orthogonal-channel case must succeed");
 
     assert!(

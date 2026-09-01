@@ -599,22 +599,28 @@ fn spectral_pd_floored_schur_with_factor(
 fn factor_evidence_unit_deflated_schur(
     schur: &Array2<f64>,
     relative_floor: f64,
-) -> Option<DenseReducedSchurFactorization> {
+    refuse_resolved_indefinite: bool,
+) -> Result<DenseReducedSchurFactorization, ArrowSchurError> {
+    let declined = |reason: &str| ArrowSchurError::SchurFactorFailed {
+        reason: format!("evidence reduced Schur unit-deflation declined ({reason})"),
+    };
     let n = schur.nrows();
     if n == 0 || schur.ncols() != n || !(relative_floor.is_finite() && relative_floor > 0.0) {
-        return None;
+        return Err(declined("empty, non-square, or invalid relative floor"));
     }
     let mut sym = Array2::<f64>::zeros((n, n));
     for i in 0..n {
         for j in 0..n {
             let value = 0.5 * (schur[[i, j]] + schur[[j, i]]);
             if !value.is_finite() {
-                return None;
+                return Err(declined("non-finite entry"));
             }
             sym[[i, j]] = value;
         }
     }
-    let (raw_evals, evecs) = sym.eigh(Side::Lower).ok()?;
+    let (raw_evals, evecs) = sym
+        .eigh(Side::Lower)
+        .map_err(|_| declined("symmetric eigendecomposition failed"))?;
     let max_abs = raw_evals.iter().fold(0.0_f64, |acc, &value| {
         if value.is_finite() {
             acc.max(value.abs())
@@ -623,9 +629,44 @@ fn factor_evidence_unit_deflated_schur(
         }
     });
     if !(max_abs.is_finite() && max_abs > 0.0) {
-        return None;
+        return Err(declined("no usable spectrum"));
     }
     let deflate_floor = relative_floor * max_abs * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
+    // #2515 — THE BAND IS TWO-SIDED WHEN THE CALLER SAYS THE OPERATOR'S SIGN IS A
+    // VERDICT. `value < deflate_floor` alone is one-sided: it admits every
+    // negative eigenvalue however large into the "numerically null" class, prices
+    // it `log 1 = 0`, and inverts it at `1`. That is correct for the PSD
+    // Gauss--Newton majorizer, where a negative eigenvalue can only be rounding on
+    // a direction that is null anyway. It is wrong for the exact observed
+    // information, where a resolved negative direction is the difference between a
+    // mode and a saddle — and wrong SILENTLY, which is how it survived: the
+    // returned factor is PD, the log-determinant is finite, and nothing downstream
+    // can tell that a `−7.997610e-3` was priced as a `+1`.
+    if refuse_resolved_indefinite {
+        let mut worst = 0.0_f64;
+        let mut worst_index = 0usize;
+        for (index, &value) in raw_evals.iter().enumerate() {
+            if value.is_finite() && value < -deflate_floor && value < worst {
+                worst = value;
+                worst_index = index;
+            }
+        }
+        if worst < 0.0 {
+            return Err(ArrowSchurError::SchurFactorFailed {
+                reason: format!(
+                    "reduced-Schur {}: direction {worst_index} at {worst:.6e} (relative \
+                     {:.6e}), against a null band of {deflate_floor:.6e} and a spectral norm \
+                     of {max_abs:.6e}. Unit-pinning it would price a saddle direction as the \
+                     rho-independent null `log 1 = 0` and invert it at 1, which is neither \
+                     the basin curvature the dense exact-A route prices an attributable \
+                     negative direction at nor the typed refusal it returns for an \
+                     unattributable one (#2515/#2336)",
+                    ArrowSchurError::indefinite_evidence_marker(),
+                    worst / max_abs
+                ),
+            });
+        }
+    }
     let deflated: Vec<bool> = raw_evals
         .iter()
         .map(|&value| !value.is_finite() || value < deflate_floor)
@@ -637,7 +678,7 @@ fn factor_evidence_unit_deflated_schur(
     if !deflated.iter().any(|&is_deflated| is_deflated)
         && let Ok(interior) = factor_dense_reduced_schur(schur, ReducedSchurPolicy::StrictNewton)
     {
-        return Some(interior);
+        return Ok(interior);
     }
 
     let mut cond_evals = raw_evals.clone();
@@ -649,7 +690,7 @@ fn factor_evidence_unit_deflated_schur(
         }
         let lambda = cond_evals[eig_idx];
         if !(lambda.is_finite() && lambda > 0.0) {
-            return None;
+            return Err(declined("conditioned eigenvalue is not finite and positive"));
         }
         let sqrt_lambda = lambda.sqrt();
         for i in 0..n {
@@ -662,7 +703,8 @@ fn factor_evidence_unit_deflated_schur(
             }
         }
     }
-    let factor = spectral_qr_cholesky_factor(&weighted_vt)?;
+    let factor = spectral_qr_cholesky_factor(&weighted_vt)
+        .ok_or_else(|| declined("spectral QR Cholesky of the conditioned spectrum declined"))?;
     let beta_deflation =
         deflated
             .iter()
@@ -673,7 +715,7 @@ fn factor_evidence_unit_deflated_schur(
                 cond_evals,
                 deflated: deflated.into(),
             });
-    Some(DenseReducedSchurFactorization {
+    Ok(DenseReducedSchurFactorization {
         factor,
         conditioned_schur: beta_deflation.as_ref().map(|_| conditioned),
         beta_deflation,
@@ -775,7 +817,12 @@ fn jacobi_diagonal_scale(schur: &Array2<f64>) -> Array1<f64> {
 pub(crate) enum ReducedSchurPolicy {
     StrictNewton,
     NewtonTikhonov { relative_floor: f64 },
-    EvidenceUnitDeflation { relative_floor: f64 },
+    EvidenceUnitDeflation {
+        relative_floor: f64,
+        /// #2515 — refuse a RESOLVED negative direction instead of unit-pinning
+        /// it. See [`ArrowEvidencePolicy::UnitDeflationRefusingIndefinite`].
+        refuse_resolved_indefinite: bool,
+    },
 }
 
 impl ReducedSchurPolicy {
@@ -801,13 +848,15 @@ pub(crate) fn factor_dense_reduced_schur(
     let newton_relative_floor = match policy {
         ReducedSchurPolicy::StrictNewton => None,
         ReducedSchurPolicy::NewtonTikhonov { relative_floor } => Some(relative_floor),
-        ReducedSchurPolicy::EvidenceUnitDeflation { relative_floor } => {
-            return factor_evidence_unit_deflated_schur(schur, relative_floor).ok_or_else(|| {
-                ArrowSchurError::SchurFactorFailed {
-                    reason: "evidence reduced Schur unit-deflation declined (no usable spectrum)"
-                        .to_string(),
-                }
-            });
+        ReducedSchurPolicy::EvidenceUnitDeflation {
+            relative_floor,
+            refuse_resolved_indefinite,
+        } => {
+            return factor_evidence_unit_deflated_schur(
+                schur,
+                relative_floor,
+                refuse_resolved_indefinite,
+            );
         }
     };
     let n = schur.nrows();
@@ -1636,7 +1685,7 @@ pub(crate) fn slq_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
     num_probes: usize,
     lanczos_steps: usize,
     seed: u64,
-) -> SlqLogDet {
+) -> Result<SlqLogDet, ArrowSchurError> {
     let k = sys.k;
     // Stage the reduced-Schur operator ONCE; every probe/Lanczos apply reuses the
     // pre-staged residency (no per-apply operator re-capture). The probes fan
@@ -1657,7 +1706,7 @@ pub(crate) fn slq_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
     // ρ-dependent Occam reward). `Strict` / `PositiveDefinite` keep the plain SPD
     // estimator — they never form an undamped evidence with nulls.
     match evidence_policy {
-        ArrowEvidencePolicy::UnitDeflation { relative_floor } => slq_logdet_unit_deflated(
+        ArrowEvidencePolicy::UnitDeflation { relative_floor } => Ok(slq_logdet_unit_deflated(
             k,
             |v| op.apply(v),
             num_probes,
@@ -1665,9 +1714,45 @@ pub(crate) fn slq_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
             seed,
             relative_floor,
         )
-        .as_logdet(),
+        .as_logdet()),
+        // #2515 — this lane has no eigenvalues, only Ritz values, so it cannot
+        // make the full resolved-negative verdict the dense reduced Schur makes.
+        // What it CAN do is certify one direction of it. Every Ritz value of a
+        // symmetric operator is a Rayleigh quotient of a Krylov vector and so lies
+        // in `[λ_min, λ_max]`; a Ritz value below `−band` therefore PROVES
+        // `λ_min < −band`. The converse fails — an unconverged Krylov space can
+        // miss a negative eigenvalue entirely — so this refuses only states that
+        // really are indefinite and silently admits some that are. One-sided is
+        // the usable direction: a false refusal would decline a state the dense
+        // route legitimately ranks, and there are none.
+        ArrowEvidencePolicy::UnitDeflationRefusingIndefinite { relative_floor } => {
+            let deflated = slq_logdet_unit_deflated(
+                k,
+                |v| op.apply(v),
+                num_probes,
+                lanczos_steps,
+                seed,
+                relative_floor,
+            );
+            if deflated.min_ritz < -deflated.deflate_floor {
+                return Err(ArrowSchurError::SchurFactorFailed {
+                    reason: format!(
+                        "matrix-free reduced-Schur {}: a Ritz value of {:.6e} certifies an \
+                         eigenvalue below the null band of {:.6e} (spectral radius \
+                         {:.6e}). Every Ritz value lies in [lambda_min, lambda_max], so \
+                         this is a proof of indefiniteness and not an estimate of one \
+                         (#2515/#2336)",
+                        ArrowSchurError::indefinite_evidence_marker(),
+                        deflated.min_ritz,
+                        deflated.deflate_floor,
+                        deflated.lambda_max_abs
+                    ),
+                });
+            }
+            Ok(deflated.as_logdet())
+        }
         ArrowEvidencePolicy::Strict | ArrowEvidencePolicy::PositiveDefinite => {
-            slq_logdet(k, |v| op.apply(v), num_probes, lanczos_steps, seed)
+            Ok(slq_logdet(k, |v| op.apply(v), num_probes, lanczos_steps, seed))
         }
     }
 }
@@ -1698,7 +1783,7 @@ pub fn matrix_free_arrow_evidence_log_det(
     let factorization = factor_blocks_for_system(
         sys,
         ridge_t,
-        options.evidence_policy.factors_undamped_evidence(),
+        options.evidence_policy,
         &backend,
         options.gpu_policy,
     )?;
@@ -1741,7 +1826,7 @@ pub fn matrix_free_arrow_evidence_log_det(
         lanczos_steps,
         seed,
     );
-    Ok((log_det_tt, slq))
+    Ok((log_det_tt, slq?))
 }
 
 /// #1017 Phase-3: build the reduced-Schur device matvec ONCE for a matrix-free
@@ -2076,7 +2161,7 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
     let factorization = factor_blocks_for_system(
         sys,
         ridge_t,
-        options.evidence_policy.factors_undamped_evidence(),
+        options.evidence_policy,
         &backend,
         options.gpu_policy,
     )?;
@@ -2124,7 +2209,7 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
                 slq_lanczos_steps,
                 slq_seed,
             );
-            slq.estimate
+            slq?.estimate
         }
         Some(state) => {
             let dim = sys.k;
@@ -6187,6 +6272,29 @@ impl ArrowSchurError {
     pub fn rendered_is_non_pd_schur_complement(rendered: &str) -> bool {
         rendered.contains("Schur complement Cholesky failed")
             && rendered.contains("not positive definite")
+    }
+
+    /// #2515 — the phrase every RESOLVED-INDEFINITE evidence refusal carries,
+    /// and the only place it is written.
+    ///
+    /// The two producers are the reduced-Schur and per-row conditioning under
+    /// [`ArrowEvidencePolicy::UnitDeflationRefusingIndefinite`]. Their consumer
+    /// is in another crate (`gam-sae` maps this to the same typed
+    /// `IndefiniteObservedInformation` verdict the dense exact-`A` route
+    /// returns), which is exactly the arrangement #2598 caught drifting: a
+    /// reworded message in this crate silently reclassified every recoverable
+    /// refusal as a fatal defect. So the wording lives beside its reader, both
+    /// producers interpolate it, and [`Self::rendered_is_indefinite_evidence`]
+    /// matches the same function.
+    pub fn indefinite_evidence_marker() -> &'static str {
+        "evidence operator carries RESOLVED NEGATIVE curvature"
+    }
+
+    /// Whether a rendered refusal is the [`Self::indefinite_evidence_marker`]
+    /// class. `contains` rather than equality because callers wrap the rendered
+    /// text in their own context before it arrives.
+    pub fn rendered_is_indefinite_evidence(rendered: &str) -> bool {
+        rendered.contains(Self::indefinite_evidence_marker())
     }
 }
 

@@ -892,9 +892,7 @@ mod tests {
                     frozen_levels: Some(vec![0.0_f64.to_bits(), by_level_bits]),
                 },
             },
-            factor_spec(FactorSmoothFlavour::Fs {
-                m_null_penalty_orders: vec![1],
-            }),
+            factor_spec(FactorSmoothFlavour::Fs {}),
             factor_spec(FactorSmoothFlavour::Sz),
             factor_spec(FactorSmoothFlavour::Re),
             SmoothBasisSpec::ThinPlate {
@@ -1332,9 +1330,7 @@ mod tests {
                     frozen_levels: Some(levels),
                 },
             },
-            BasisScaleFamily::FactorSmoothFs => factor_smooth(FactorSmoothFlavour::Fs {
-                m_null_penalty_orders: vec![1],
-            }),
+            BasisScaleFamily::FactorSmoothFs => factor_smooth(FactorSmoothFlavour::Fs {}),
             BasisScaleFamily::FactorSmoothSz => factor_smooth(FactorSmoothFlavour::Sz),
             BasisScaleFamily::FactorSmoothRe => factor_smooth(FactorSmoothFlavour::Re),
             BasisScaleFamily::OpenBSpline

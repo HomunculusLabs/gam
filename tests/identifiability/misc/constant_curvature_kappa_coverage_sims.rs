@@ -369,11 +369,32 @@ fn resolve(inf: &CurvatureInference, target: f64) -> Resolution {
     }
 }
 
-/// CI COVERAGE + κ̂ RECOVERY on CURVED truth. Across `R` independent M_κ
-/// datasets at a planted spherical κ⋆, the 95% profile CI must cover κ⋆ at close
-/// to the nominal rate and κ̂ must recover κ⋆ with low bias and correct sign.
-#[test]
-fn profile_ci_covers_planted_curvature_across_replicates() {
+/// CI COVERAGE + κ̂ RECOVERY on CURVED truth, at one planted SIGN.
+///
+/// Across `R` independent `M_κ` datasets at a planted `κ⋆`, the 95% profile CI
+/// must cover `κ⋆` at close to the nominal rate and `κ̂` must recover `κ⋆` with
+/// low bias and the correct sign.
+///
+/// ## Why the sign is a parameter and not a formality (gam#2747)
+///
+/// The issue's acceptance is *"an interior optimum of `V_p(κ)` near the planted
+/// `κ⋆` … **on both curvature signs**"*, and the pre-#2747 estimator's failures
+/// were ASYMMETRIC. Its 3 × 3 curvature × range table reports `κ̂ = −1.410`
+/// (railed) and `κ̂ = −0.352` (2.8× too small) on hyperbolic truth, where the
+/// spherical rows of the same table were merely biased. The mechanism says why:
+/// with `ℓ` pinned, `κ` absorbs the range error, and the range this criterion
+/// wants on hyperbolic data is LARGER. Measured on this fixture's own geometry
+/// by an independent replication of the criterion, `ℓ̂(κ)` runs
+/// `0.68 → 34 000` as `κ` sweeps `+1.41 → −1.41` — so the hyperbolic arm is
+/// the one that pushes the nuisance coordinate against the top of its own
+/// chart, and the arm whose `ℓ̂` the pre-#2747 heuristic was furthest from.
+///
+/// Until this parameterisation the tree measured the range grid only at
+/// `κ⋆ = +1` and `κ⋆ = 0` (both here), and the hyperbolic sign only at the AUTO
+/// range (`constant_curvature_kappa_inference_e2e`) — i.e. exactly the one
+/// configuration a range-blind criterion could already handle. The cell the
+/// defect lived in was covered by neither.
+fn curved_coverage_arm(kappa_star: f64, seed_base: u64) {
     gam::init_parallelism();
     let reps = replicate_count();
     // The planted curvature must lie INSIDE the parameter space whose coverage
@@ -385,8 +406,12 @@ fn profile_ci_covers_planted_curvature_across_replicates() {
     // report, so at 1.5 this arm was measuring nothing about coverage; #2687
     // read the resulting rail as evidence the cap was wrong, which the criterion
     // map refuted. `κ⋆ = 1.0` gives `κ⋆·R² = 0.355`, 71% of the cap, leaving room
-    // on both sides for the profile CI to close.
-    let kappa_star = 1.0_f64;
+    // on both sides for the profile CI to close, and the box is SYMMETRIC about
+    // zero, so the same magnitude is equally interior on the hyperbolic branch.
+    assert!(
+        kappa_star.abs() > 0.0,
+        "the curved arm needs a curved truth; the flat case is the flatness test's job"
+    );
     let mut covered = 0usize;
     let mut missed = 0usize;
     let mut railed = 0usize;
@@ -394,7 +419,7 @@ fn profile_ci_covers_planted_curvature_across_replicates() {
     let mut sum_khat = 0.0_f64;
     let mut khats = Vec::with_capacity(reps);
     for r in 0..reps {
-        let seed = 0x5EED_0944_0000_0000 ^ ((r as u64) << 8);
+        let seed = seed_base ^ ((r as u64) << 8);
         let range_multiplier = RANGE_MULTIPLIERS[r % RANGE_MULTIPLIERS.len()];
         let (feats, y) = dataset_on_m_kappa(120, kappa_star, 0.6, 0.10, range_multiplier, seed);
         let inf = fit_and_infer(&feats, &y);
@@ -406,13 +431,13 @@ fn profile_ci_covers_planted_curvature_across_replicates() {
         if inf.ci.kappa_hat_support.is_railed() {
             railed += 1;
         }
-        if inf.kappa_hat > 0.0 {
+        if inf.kappa_hat * kappa_star > 0.0 {
             sign_correct += 1;
         }
         sum_khat += inf.kappa_hat;
         khats.push(inf.kappa_hat);
         eprintln!(
-            "[cov κ⋆=+{kappa_star}] r={r} range={range_multiplier}×ℓ_ref κ̂={:+.3} \
+            "[cov κ⋆={kappa_star:+}] r={r} range={range_multiplier}×ℓ_ref κ̂={:+.3} \
              support={} CI=[{:+.3},{:+.3}] open=[{},{}] -> {:?}",
             inf.kappa_hat,
             inf.ci.kappa_hat_support.label(),
@@ -426,7 +451,7 @@ fn profile_ci_covers_planted_curvature_across_replicates() {
     let mean_khat = sum_khat / reps as f64;
     let resolved = covered + missed;
     eprintln!(
-        "[cov κ⋆=+{kappa_star}] covered {covered} / missed {missed} / unresolved {} of {reps}  \
+        "[cov κ⋆={kappa_star:+}] covered {covered} / missed {missed} / unresolved {} of {reps}  \
          railed κ̂ {railed}/{reps}  sign_correct {sign_correct}/{reps}  \
          mean κ̂={mean_khat:+.3}  κ̂={khats:?}",
         reps - resolved
@@ -454,23 +479,45 @@ fn profile_ci_covers_planted_curvature_across_replicates() {
     // derived with `REPLICATE_COUNT`; see its table.
     assert!(
         resolved == reps && covered + MAX_MISSES >= reps,
-        "profile CI covered the planted κ⋆=+{kappa_star} in {covered}/{resolved} resolved \
+        "profile CI covered the planted κ⋆={kappa_star:+} in {covered}/{resolved} resolved \
          replicates ({} unresolved of {reps}); the derived bar at n={reps} is at most \
          {MAX_MISSES} misses",
         reps - resolved
     );
-    // (2) SIGN RECOVERY: spherical truth ⇒ κ̂ > 0 in all but the derived bar.
+    // (2) SIGN RECOVERY: curved truth ⇒ κ̂ carries the PLANTED sign in all but
+    // the derived bar. This is the assertion the hyperbolic arm exists for: a
+    // range-blind criterion reports the wrong sign on hyperbolic data at an
+    // off-auto range, and reports it with an interior κ̂ rather than a rail.
     assert!(
         sign_correct + MAX_MISSES >= reps,
-        "κ̂ sign recovered (>0) in only {sign_correct}/{reps} replicates for κ⋆=+{kappa_star}"
+        "κ̂ recovered the planted sign in only {sign_correct}/{reps} replicates for κ⋆={kappa_star:+}"
     );
     // (3) LOW BIAS: the mean estimate tracks the truth within a tolerance honest
     // about the noisy Gaussian signal at n=120 — not railed to a chart bound, not
     // collapsed toward 0.
     assert!(
         (mean_khat - kappa_star).abs() < 1.0,
-        "mean κ̂={mean_khat:+.3} too far from planted κ⋆=+{kappa_star} (bias bar 1.0)"
+        "mean κ̂={mean_khat:+.3} too far from planted κ⋆={kappa_star:+} (bias bar 1.0)"
     );
+}
+
+/// The SPHERICAL arm of [`curved_coverage_arm`]. Seed base unchanged, so every
+/// replicate is byte-identical to the pre-parameterisation fixture's and the
+/// before/after on this thread stays readable.
+#[test]
+fn profile_ci_covers_planted_curvature_across_replicates() {
+    curved_coverage_arm(1.0, 0x5EED_0944_0000_0000);
+}
+
+/// The HYPERBOLIC arm of [`curved_coverage_arm`] — the half of gam#2747's
+/// “on both curvature signs” that no fixture in the tree measured at a range
+/// the auto heuristic does not already supply.
+///
+/// A distinct seed base, so the two arms are independent datasets rather than
+/// one chart cloud carrying two responses.
+#[test]
+fn profile_ci_covers_planted_hyperbolic_curvature_across_replicates() {
+    curved_coverage_arm(-1.0, 0x5EED_0944_2747_0000);
 }
 
 /// SIZE of the interior κ=0 flatness test on FLAT truth. Across `R` flat

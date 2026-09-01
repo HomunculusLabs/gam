@@ -386,7 +386,11 @@ fn h2c_canonicalize_returns_identifiability_failure_on_large_scale_shape() {
     use gam::families::custom_family::CustomFamilyError;
     use gam::identifiability::canonical::canonicalize_for_identifiability;
     let specs = build_large_scale_like_aliased_specs();
-    let outcome = canonicalize_for_identifiability(&specs);
+    let outcome = canonicalize_for_identifiability(
+        &specs,
+        // Ordinary bases: no block here carries a coordinate-local cone (#2748).
+        &vec![gam::families::custom_family::CoefficientCoordinate::Spanning; specs.len()],
+    );
     match outcome {
         Err(CustomFamilyError::IdentifiabilityFailure { audit }) => {
             assert!(

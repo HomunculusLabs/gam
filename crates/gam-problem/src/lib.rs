@@ -78,8 +78,8 @@ pub use block_count_error::BlockCountMismatch;
 pub use block_role::BlockRole;
 pub use block_spec::{
     AdditiveBlockJacobian, BlockEffectiveJacobian, BlockGeometryDirectionalDerivative,
-    BlockWorkingSet, FamilyChannelHessian, FamilyLinearizationState, GaugeComposedJacobian,
-    ParameterBlockSpec, ParameterBlockState, RowScaledJacobian,
+    BlockWorkingSet, CoefficientCoordinate, FamilyChannelHessian, FamilyLinearizationState,
+    GaugeComposedJacobian, ParameterBlockSpec, ParameterBlockState, RowScaledJacobian,
 };
 pub use coefficient_prior_mean::{CoefficientPriorMean, PriorMeanError};
 pub use constraint_set::{

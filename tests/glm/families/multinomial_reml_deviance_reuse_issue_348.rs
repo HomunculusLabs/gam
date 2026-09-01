@@ -14,10 +14,28 @@
 //! identity, so any future change that lets `log_likelihood` drift away from the
 //! unpenalized deviance (e.g. accidentally folding in the penalty term) is
 //! caught.
+//!
+//! # Which probabilities the oracle reads, and why that had to change (gam#2612)
+//!
+//! `p(y_i | x_i)` in the contract above is `softmax(η̂)_{y_i}` — the MODE's own
+//! probability, the quantity `−2 · log L(β̂)` is defined against. This test read
+//! it from `predict_multinomial_formula`, which was that function when #348 was
+//! written and is not any more: gam#2612 made the default predict path publish
+//! the posterior MEAN `E[softmax(η)]`, computed as a ratio of normalising
+//! constants, and moved `softmax(η̂)` to `predict_multinomial_formula_plugin`.
+//!
+//! So the assertion became a comparison of two different estimands and failed on
+//! their difference — `7.502289` against `7.110750` on this fixture — which is
+//! not the drift it exists to catch. Nothing about `log_likelihood` had moved;
+//! the oracle had. The estimand-matched pair is asserted below, and the
+//! MISMATCHED pair is asserted to differ, so this test can never quietly go back
+//! to comparing a mode against a posterior mean and reporting the gap as a
+//! defect in the deviance.
 
 use csv::StringRecord;
 use gam::families::multinomial::{
     MultinomialFitRequest, fit_penalized_multinomial_formula, predict_multinomial_formula,
+    predict_multinomial_formula_plugin,
 };
 use gam::{FitConfig, encode_recordswith_inferred_schema, init_parallelism};
 
@@ -62,26 +80,30 @@ fn multinomial_formula_deviance_equals_independent_softmax_recompute() {
 
     // Independently recompute the unpenalized deviance from the fitted softmax
     // probabilities on the training rows — exactly the quantity the deleted
-    // row-by-row `η = Xβ` + softmax rebuild used to produce.
-    let probs = predict_multinomial_formula(&model, &data).expect("predict probabilities");
-    assert_eq!(probs.nrows(), labels.len());
-    assert_eq!(probs.ncols(), model.class_levels.len());
+    // row-by-row `η = Xβ` + softmax rebuild used to produce, which is
+    // `softmax(η̂)` and therefore the PLUG-IN path (see the module doc).
+    let deviance_from = |probs: &ndarray::Array2<f64>, what: &str| -> f64 {
+        assert_eq!(probs.nrows(), labels.len(), "{what}: row count");
+        assert_eq!(probs.ncols(), model.class_levels.len(), "{what}: col count");
+        let mut total = 0.0_f64;
+        for (i, label) in labels.iter().enumerate() {
+            let class_idx = model
+                .class_levels
+                .iter()
+                .position(|lvl| lvl == label)
+                .expect("training label must be one of the fitted class levels");
+            let p = probs[[i, class_idx]];
+            assert!(
+                p.is_finite() && p > 0.0,
+                "{what}: prob p[{i}] must be finite & positive (got {p})"
+            );
+            total += p.ln();
+        }
+        -2.0 * total
+    };
 
-    let mut recomputed_deviance = 0.0_f64;
-    for (i, label) in labels.iter().enumerate() {
-        let class_idx = model
-            .class_levels
-            .iter()
-            .position(|lvl| lvl == label)
-            .expect("training label must be one of the fitted class levels");
-        let p = probs[[i, class_idx]];
-        assert!(
-            p.is_finite() && p > 0.0,
-            "softmax prob p[{i}] must be finite & positive (got {p})"
-        );
-        recomputed_deviance += p.ln();
-    }
-    recomputed_deviance *= -2.0;
+    let plugin = predict_multinomial_formula_plugin(&model, &data).expect("plug-in probabilities");
+    let recomputed_deviance = deviance_from(&plugin, "plug-in");
 
     assert!(
         model.deviance.is_finite(),
@@ -96,5 +118,24 @@ fn multinomial_formula_deviance_equals_independent_softmax_recompute() {
          log-likelihood the post-fit reuse depends on (issue #348)",
         model.deviance,
         recomputed_deviance
+    );
+
+    // The teeth on the oracle itself (gam#2612): the DEFAULT predict path
+    // publishes the posterior mean `E[softmax(η)]`, which is a different
+    // estimand, and reading it here is what made this gate red on a difference
+    // that is not a defect. Assert the two estimands are genuinely distinct on
+    // this fixture, so a future edit that points the oracle back at the default
+    // path fails HERE, naming the estimand, instead of failing above as if the
+    // deviance had drifted.
+    let posterior_mean =
+        predict_multinomial_formula(&model, &data).expect("posterior-mean probabilities");
+    let posterior_mean_deviance = deviance_from(&posterior_mean, "posterior-mean");
+    assert!(
+        (posterior_mean_deviance - recomputed_deviance).abs()
+            > 1.0e-7 * (1.0 + recomputed_deviance.abs()),
+        "the posterior-mean recompute ({posterior_mean_deviance}) and the plug-in recompute \
+         ({recomputed_deviance}) are indistinguishable on this fixture, so the assertion above \
+         no longer discriminates between the mode's likelihood and a posterior average — pick a \
+         fixture where posterior width is visible, or this gate proves nothing"
     );
 }

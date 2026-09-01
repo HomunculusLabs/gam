@@ -624,6 +624,12 @@ impl<'a> MultinomialPredictiveModel<'a> {
         } else {
             None
         };
+        // `(row, mass, defect)` of the worst row over tolerance, and how many
+        // rows are over it. The refusal below is raised from these rather than
+        // from the first row that trips, so it states the estimand's accuracy
+        // over the whole block instead of naming one witness.
+        let mut worst_defect: Option<(usize, f64, f64)> = None;
+        let mut over_tolerance_rows = 0usize;
 
         for row in 0..rows {
             let design_row = x_new.row(row);
@@ -645,13 +651,16 @@ impl<'a> MultinomialPredictiveModel<'a> {
             }
             mass_defect[row] = (total - 1.0).abs();
             if mass_defect[row] > PREDICTIVE_MASS_DEFECT_TOLERANCE {
-                crate::bail_invalid_estim!(
-                    "multinomial predictive: row {row} has predictive mass {total} \
-                     (|Σ_c E[p_c] − 1| = {defect:e} > {tol:e}); the posterior at this row is not \
-                     described by either Laplace expansion well enough to publish a probability",
-                    defect = mass_defect[row],
-                    tol = PREDICTIVE_MASS_DEFECT_TOLERANCE,
-                );
+                // Recorded, not raised — see the refusal after the loop. Stopping
+                // here would report an EXAMPLE where the estimand's own accuracy
+                // statement is a MEASUREMENT: "row 46 is bad" and "3 of 86 rows
+                // are bad, the worst at 7.2e-2, the 90th percentile at 4e-3" are
+                // different findings, and the first cannot be told from the
+                // second by a caller who only ever sees the first bad row.
+                if worst_defect.is_none_or(|(_, _, defect)| defect < mass_defect[row]) {
+                    worst_defect = Some((row, total, mass_defect[row]));
+                }
+                over_tolerance_rows += 1;
             }
             for class in 0..k {
                 class_mean[[row, class]] = raw[class] / total;
@@ -692,6 +701,31 @@ impl<'a> MultinomialPredictiveModel<'a> {
                     }
                 }
             }
+        }
+
+        if let Some((row, mass, defect)) = worst_defect {
+            // The distribution, not just the extreme: a block where one row in
+            // eighty-six is over and the rest are at `1e-4` is a statement about
+            // that row, while a block where a third of the rows are over is a
+            // statement about the fit. Those need different repairs and used to
+            // print identically.
+            let mut sorted: Vec<f64> = mass_defect.iter().copied().collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let quantile = |q: f64| -> f64 {
+                let index = ((sorted.len() - 1) as f64 * q).round() as usize;
+                sorted[index]
+            };
+            crate::bail_invalid_estim!(
+                "multinomial predictive: {over_tolerance_rows} of {rows} row(s) exceed the \
+                 predictive mass-defect tolerance {tol:e}; the posterior at those rows is not \
+                 described by either Laplace expansion well enough to publish a probability. \
+                 Worst row {row} has predictive mass {mass} (|Σ_c E[p_c] − 1| = {defect:e}). \
+                 Defect over the block: median {median:e}, 90th percentile {p90:e}, max {max:e}",
+                tol = PREDICTIVE_MASS_DEFECT_TOLERANCE,
+                median = quantile(0.5),
+                p90 = quantile(0.9),
+                max = quantile(1.0),
+            );
         }
 
         Ok(MultinomialPredictiveMoments {

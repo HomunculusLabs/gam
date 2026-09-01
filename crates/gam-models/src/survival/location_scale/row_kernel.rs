@@ -1047,9 +1047,18 @@ pub(crate) fn row_set_from_survival_mask(
 /// `survival_ls_wiggle_third_and_fourth_directional_match_fd_932` catches. (#932)
 /// Each inner slice has one entry per wiggle column (`pw` long). Bundling the
 /// eight slices keeps [`sls_row_nll_wiggle`] within the argument budget.
+/// The composed warp basis and every derivative order the row program's jet
+/// composes it at, at one row's entry and exit index.
+///
+/// The tower is FIVE slots — value plus four derivatives — because that is the
+/// order the jet lowerings reach: `H` is an order-2 jet and reads the basis
+/// SHIFTED BY ONE through `m₁ = 1 + Σ βw_j I′_j`, so it consumes `I‴`; the
+/// order-3 and order-4 lowerings that build `∇Φ` and the second directional
+/// derivative consume `I⁗`. Slot 4 used to be the literal `0.0`, which is the
+/// fourth derivative of a degree-`d` I-spline only for `d ≤ 3` (gam#2695).
 pub(crate) struct SlsWiggleRowBasis<'b> {
-    pub(crate) b_u0: [&'b [f64]; 4],
-    pub(crate) b_u1: [&'b [f64]; 4],
+    pub(crate) b_u0: [&'b [f64]; 5],
+    pub(crate) b_u1: [&'b [f64]; 5],
 }
 
 pub(crate) fn sls_row_nll_wiggle<'arena, S: RuntimeJetScalar<'arena>>(
@@ -1063,8 +1072,8 @@ pub(crate) fn sls_row_nll_wiggle<'arena, S: RuntimeJetScalar<'arena>>(
         SLS_ROW_K + pw,
         "link-wiggle row primary layout mismatch"
     );
-    let [b0e, b1e, b2e, b3e] = basis.b_u0;
-    let [b0x, b1x, b2x, b3x] = basis.b_u1;
+    let [b0e, b1e, b2e, b3e, b4e] = basis.b_u0;
+    let [b0x, b1x, b2x, b3x, b4x] = basis.b_u1;
     let inv_sigma_entry = vars[7].neg().exp();
     let q0 = vars[4].mul(&inv_sigma_entry).neg();
     let inv_sigma_exit = vars[6].neg().exp();
@@ -1075,9 +1084,16 @@ pub(crate) fn sls_row_nll_wiggle<'arena, S: RuntimeJetScalar<'arena>>(
     let mut m1 = vars[0].constant_like(1.0);
     for j in 0..pw {
         let bw = &vars[SLS_ROW_K + j];
-        q0w = q0w.add(&bw.mul(&q0.compose_unary([b0e[j], b1e[j], b2e[j], b3e[j], 0.0])));
-        q1w = q1w.add(&bw.mul(&q1.compose_unary([b0x[j], b1x[j], b2x[j], b3x[j], 0.0])));
-        m1 = m1.add(&bw.mul(&q1.compose_unary([b1x[j], b2x[j], b3x[j], 0.0, 0.0])));
+        // The composition stacks are the basis's OWN derivative tower at the
+        // current index; `m₁` reads it shifted by one because it is built from
+        // `I′` rather than `I`. Slot 4 of `m₁` is `I⁗⁗`, the fifth derivative,
+        // which the tower does not carry — that is exact for every degree this
+        // path admits, since a composed warp is built at
+        // `composed_warp_minimum_degree() = 4` and a degree-4 I-spline's fifth
+        // derivative is identically zero (gam#2695).
+        q0w = q0w.add(&bw.mul(&q0.compose_unary([b0e[j], b1e[j], b2e[j], b3e[j], b4e[j]])));
+        q1w = q1w.add(&bw.mul(&q1.compose_unary([b0x[j], b1x[j], b2x[j], b3x[j], b4x[j]])));
+        m1 = m1.add(&bw.mul(&q1.compose_unary([b1x[j], b2x[j], b3x[j], b4x[j], 0.0])));
     }
     let u0w = vars[0].add(&q0w);
     let u1w = vars[1].add(&q1w);
@@ -1439,20 +1455,27 @@ pub fn survival_location_scale_alo_row_geometry(
             let empty: &[f64] = &[];
             let basis = match link_wiggle {
                 None => SlsWiggleRowBasis {
-                    b_u0: [empty, empty, empty, empty],
-                    b_u1: [empty, empty, empty, empty],
+                    b_u0: [empty, empty, empty, empty, empty],
+                    b_u1: [empty, empty, empty, empty, empty],
                 },
+                // The ALO lowering is an ORDER-2 jet, so `compose_unary` reads
+                // slots 0..=2 only and the two top slots are inert. They are
+                // filled with the third derivative the ALO input carries rather
+                // than with a fresh literal, so this site states no fourth
+                // derivative it does not have (gam#2695).
                 Some(wiggle) => SlsWiggleRowBasis {
                     b_u0: [
                         wiggle.entry_basis,
                         wiggle.entry_basis_d1,
                         wiggle.entry_basis_d2,
                         wiggle.entry_basis_d3,
+                        wiggle.entry_basis_d3,
                     ],
                     b_u1: [
                         wiggle.exit_basis,
                         wiggle.exit_basis_d1,
                         wiggle.exit_basis_d2,
+                        wiggle.exit_basis_d3,
                         wiggle.exit_basis_d3,
                     ],
                 },
@@ -1690,10 +1713,12 @@ pub(crate) struct SurvivalLsWiggleRowKernel<'a> {
     b_u0_1: Array2<f64>,
     b_u0_2: Array2<f64>,
     b_u0_3: Array2<f64>,
+    b_u0_4: Array2<f64>,
     b_u1_0: Array2<f64>,
     b_u1_1: Array2<f64>,
     b_u1_2: Array2<f64>,
     b_u1_3: Array2<f64>,
+    b_u1_4: Array2<f64>,
 }
 
 struct SurvivalLsDynamicFold {
@@ -1756,6 +1781,7 @@ impl<'a> SurvivalLsWiggleRowKernel<'a> {
             BasisOptions::second_derivative(),
         )?;
         let b_u0_3 = survival_wiggle_third_basis(q_entry.view(), knots, degree)?;
+        let b_u0_4 = survival_wiggle_fourth_basis(q_entry.view(), knots, degree)?;
         let b_u1_0 = survival_wiggle_basis_with_options(
             q_exit.view(),
             knots,
@@ -1775,6 +1801,7 @@ impl<'a> SurvivalLsWiggleRowKernel<'a> {
             BasisOptions::second_derivative(),
         )?;
         let b_u1_3 = survival_wiggle_third_basis(q_exit.view(), knots, degree)?;
+        let b_u1_4 = survival_wiggle_fourth_basis(q_exit.view(), knots, degree)?;
         let pw = b_u1_0.ncols();
         let design_pw = family
             .x_link_wiggle
@@ -1815,10 +1842,12 @@ impl<'a> SurvivalLsWiggleRowKernel<'a> {
             b_u0_1,
             b_u0_2,
             b_u0_3,
+            b_u0_4,
             b_u1_0,
             b_u1_1,
             b_u1_2,
             b_u1_3,
+            b_u1_4,
         })
     }
 
@@ -1856,22 +1885,26 @@ impl<'a> SurvivalLsWiggleRowKernel<'a> {
         let r_u0_1 = self.b_u0_1.row(row);
         let r_u0_2 = self.b_u0_2.row(row);
         let r_u0_3 = self.b_u0_3.row(row);
+        let r_u0_4 = self.b_u0_4.row(row);
         let r_u1_0 = self.b_u1_0.row(row);
         let r_u1_1 = self.b_u1_1.row(row);
         let r_u1_2 = self.b_u1_2.row(row);
         let r_u1_3 = self.b_u1_3.row(row);
+        let r_u1_4 = self.b_u1_4.row(row);
         let basis = SlsWiggleRowBasis {
             b_u0: [
                 r_u0_0.as_slice().ok_or("non-contiguous wiggle basis row")?,
                 r_u0_1.as_slice().ok_or("non-contiguous wiggle basis row")?,
                 r_u0_2.as_slice().ok_or("non-contiguous wiggle basis row")?,
                 r_u0_3.as_slice().ok_or("non-contiguous wiggle basis row")?,
+                r_u0_4.as_slice().ok_or("non-contiguous wiggle basis row")?,
             ],
             b_u1: [
                 r_u1_0.as_slice().ok_or("non-contiguous wiggle basis row")?,
                 r_u1_1.as_slice().ok_or("non-contiguous wiggle basis row")?,
                 r_u1_2.as_slice().ok_or("non-contiguous wiggle basis row")?,
                 r_u1_3.as_slice().ok_or("non-contiguous wiggle basis row")?,
+                r_u1_4.as_slice().ok_or("non-contiguous wiggle basis row")?,
             ],
         };
         Ok(sls_row_nll_wiggle(vars, &kernel, self.pw, &basis))
@@ -6188,13 +6221,20 @@ mod patterned_order2_perf_tests {
         let b_u0_1 = [-0.11_f64, 0.22, -0.07];
         let b_u0_2 = [0.05_f64, -0.03, 0.14];
         let b_u0_3 = [-0.08_f64, 0.06, -0.02];
+        let b_u0_4 = [0.03_f64, -0.05, 0.11];
         let b_u1_0 = [0.17_f64, 0.12, -0.19];
         let b_u1_1 = [-0.09_f64, 0.04, 0.13];
         let b_u1_2 = [0.06_f64, -0.11, 0.03];
         let b_u1_3 = [-0.04_f64, 0.08, -0.05];
+        // The fourth-derivative slot carries a real, DISTINCT value rather than a
+        // repeat or a zero: this oracle certifies that the dynamic and the padded
+        // static lowering agree on the WHOLE tower, so a slot holding the same
+        // number as its neighbour could hide a lowering reading the wrong one
+        // (gam#2695, which put the true fourth derivative where a literal was).
+        let b_u1_4 = [0.07_f64, -0.02, 0.10];
         let basis = SlsWiggleRowBasis {
-            b_u0: [&b_u0_0, &b_u0_1, &b_u0_2, &b_u0_3],
-            b_u1: [&b_u1_0, &b_u1_1, &b_u1_2, &b_u1_3],
+            b_u0: [&b_u0_0, &b_u0_1, &b_u0_2, &b_u0_3, &b_u0_4],
+            b_u1: [&b_u1_0, &b_u1_1, &b_u1_2, &b_u1_3, &b_u1_4],
         };
 
         let dir_u: [f64; KW] = [

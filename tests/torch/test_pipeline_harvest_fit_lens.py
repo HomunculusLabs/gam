@@ -301,10 +301,19 @@ def test_residual_gauge_present(fit_with_shard: ManifoldSAE) -> None:
         "group_signature",
         "metric_provenance",
         "pinning_rank",
+        "pinning_rank_support",
         "residual_gauge_dim",
         "generators",
     ):
         assert key in gauge, f"residual_gauge missing key {key!r}"
+    # #2757 — the rank never ships without what it is a rank OF. On a coupling
+    # metric wide enough that no materialized form of the curvature is smaller
+    # than `param_dim**2` the certificate streams it, and then the rank it can
+    # measure exactly is over the enumerated generator span rather than over the
+    # whole parameter space. Two fits' pinning ranks are comparable only when
+    # this agrees.
+    assert gauge["pinning_rank_support"] in ("parameter_space", "generator_span")
+    assert int(gauge["pinning_rank"]) >= 0
     # The certificate records the inner product it was computed in.
     assert "OutputFisher" in str(gauge["metric_provenance"])
     assert isinstance(gauge["group_signature"], str)

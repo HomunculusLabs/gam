@@ -416,13 +416,48 @@ fn the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672() {
             );
 
             // The CONDITIONAL half of the published p-value is the exact tail of
-            // the spectrum, to the accuracy the report itself certifies. The
-            // driver resolves that tail only as finely as `W` is known (see
-            // `tail_probability_with_bound`), so the comparison is against
-            // `gam-math`'s strict default THROUGH the published bound: the bound
-            // has to be honest, not decorative.
-            let strict =
-                gam_math::probability::weighted_chi_square_sf(&p.weights, r.statistic_corrected);
+            // the law the statistic HAS, to the accuracy the report itself
+            // certifies. The driver resolves that tail only as finely as `W` is
+            // known (see `tail_probability_with_bound`), so the comparison is
+            // against `gam-math`'s strict default THROUGH the published bound:
+            // the bound has to be honest, not decorative.
+            //
+            // Which law that is depends on whether the fit estimated its own
+            // scale (#2672). This clause used to read `P(Σ w_j χ²₁ > W*)`
+            // unconditionally — the KNOWN-scale law — and that premise expired
+            // for the `gaussian` arm the moment the reference started scoring
+            // `W = n·ln(1 + Q/V) + B` instead of `Q`. It is reassembled here
+            // from the published fields rather than read back off the driver,
+            // so this stays an independent route to the same number.
+            let strict = match p.profiled_scale.as_ref() {
+                None => {
+                    gam_math::probability::weighted_chi_square_sf(&p.weights, r.statistic_corrected)
+                }
+                Some(scale) => {
+                    let ratio = ((r.statistic_corrected - scale.deterministic_offset)
+                        / scale.observations)
+                        .exp_m1();
+                    let mut terms: Vec<gam_math::probability::WeightedChiSquareTerm> = p
+                        .weights
+                        .iter()
+                        .map(|&weight| gam_math::probability::WeightedChiSquareTerm {
+                            weight,
+                            degrees_of_freedom: 1.0,
+                        })
+                        .collect();
+                    terms.extend(scale.residual_weights.iter().map(|&weight| {
+                        gam_math::probability::WeightedChiSquareTerm {
+                            weight: -ratio * weight,
+                            degrees_of_freedom: 1.0,
+                        }
+                    }));
+                    terms.push(gam_math::probability::WeightedChiSquareTerm {
+                        weight: -ratio,
+                        degrees_of_freedom: scale.residual_unit_dimension,
+                    });
+                    gam_math::probability::signed_weighted_chi_square_sf(&terms, 0.0)
+                }
+            };
             assert!(
                 (r.p_value_conditional - strict).abs() <= r.p_value_bound + 1e-12,
                 "{formula} [{family}]: the published conditional p {} differs from the \

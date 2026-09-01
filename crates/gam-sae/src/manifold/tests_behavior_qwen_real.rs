@@ -114,6 +114,19 @@ fn qwen_real_activation_behavior_fit_selects_identifiable_lambda_y() {
 /// terminate".
 #[test]
 fn zz2015_tiny_inner_crawl_terminates() {
+    // #2762 — this is the repro the inner-solve globalization is tuned on, and
+    // the solver emits its whole per-iterate globalization state at `debug`
+    // (`[SAE/inner]`, the gauge-orbit block descent, the polish ladder). Without
+    // a logger installed those lines are unreachable from a test binary, so
+    // every diagnosis of this fixture has had to re-derive them by editing the
+    // engine. `try_init` is fallible only because another test may have won the
+    // race to the global logger, which is not a failure of this one.
+    match env_logger::builder().is_test(false).try_init() {
+        Ok(()) => {}
+        Err(already_installed) => {
+            log::debug!("zz2015: reusing the installed logger ({already_installed})");
+        }
+    }
     let activation_full = read_npy_f32_2d(&olmo_fixture_path("qwen35_9b_actsL21_pca64_2000.npy"));
     let probabilities_full = renormalize_rows(read_npy_f32_2d(&olmo_fixture_path(
         "qwen35_9b_behavior_probs64_2000.npy",

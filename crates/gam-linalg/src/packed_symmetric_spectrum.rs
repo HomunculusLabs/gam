@@ -97,7 +97,7 @@ const PARALLEL_MIN_ROWS: usize = 256;
 ///
 /// * a length mismatch between `n`, `packed` and `probe`;
 /// * a non-finite entry in `packed` or `probe`;
-/// * QL non-convergence within [`QL_MAX_SWEEPS_PER_EIGENVALUE`] per eigenvalue.
+/// * QL non-convergence within `QL_MAX_SWEEPS_PER_EIGENVALUE` per eigenvalue.
 pub fn packed_symmetric_spectrum_with_probe(
     n: usize,
     packed: &mut [f64],

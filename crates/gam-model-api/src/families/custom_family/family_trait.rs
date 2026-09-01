@@ -26,6 +26,9 @@ use gam_problem::{
     ExactNewtonJointPsiTerms, ExactNewtonJointPsiWorkspace, ExactNewtonOuterObjective,
     ExactOuterDerivativeOrder, ParameterBlockSpec, ParameterBlockState, PseudoLogdetMode,
 };
+// The coordinate declaration `block_coefficient_coordinate` returns, re-exported
+// beside the constraint types it is derived from (#2748).
+pub use gam_problem::CoefficientCoordinate;
 use ndarray::{Array1, Array2};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -688,6 +691,53 @@ pub trait CustomFamily {
         Ok(None)
     }
 
+    /// Optional barrier-aware maximum feasible step size for the JOINT update.
+    ///
+    /// [`max_feasible_step_size`](Self::max_feasible_step_size) asks one block
+    /// at a time, which can only express a barrier whose argument is a function
+    /// of that block's coefficients alone. A family whose likelihood domain
+    /// couples blocks has no way to state its constraint there: the per-block
+    /// answers are each `None` — every block is individually free — while the
+    /// joint step walks straight out of the domain.
+    ///
+    /// The survival marginal-slope family with a follow-up-varying slope is
+    /// exactly that shape (gam#2765 / gam#2767). Its row log-density carries
+    /// `log η′(t)`, and
+    ///
+    /// ```text
+    ///     η′(t) = q′(t)·c(t) + q(t)·c′(t) + b′(t)ᵀz,   c = √(1 + bᵀΣb)
+    /// ```
+    ///
+    /// reads the time block (`q′`, `q`), the marginal block (`q`) and the
+    /// log-slope block (`b`, `b′`) at once. With a time-CONSTANT slope the last
+    /// two terms vanish and `η′ = q′·c ≥ q′`, so the time block's own linear
+    /// guard `q′ ≥ guard > 0` implies the domain — which is why a per-block
+    /// hook sufficed until the slope was allowed to move.
+    ///
+    /// `delta` is the full joint step, laid out in the same flattened
+    /// coefficient order as the block states. Return `Some(alpha_max)` with
+    /// `alpha_max ∈ [0, 1]` the largest fraction for which `beta + alpha·delta`
+    /// is strictly inside the domain (apply the fraction-to-boundary safety
+    /// factor internally), or `None` when no joint barrier applies — the
+    /// default, so every existing family is unchanged.
+    fn max_feasible_joint_step_size(
+        &self,
+        block_states: &[ParameterBlockState],
+        delta: &Array1<f64>,
+    ) -> Result<Option<f64>, String> {
+        let total: usize = block_states.iter().map(|state| state.beta.len()).sum();
+        assert_eq!(
+            delta.len(),
+            total,
+            "max feasible joint step size: direction is not in the joint coefficient space"
+        );
+        assert!(
+            delta.iter().all(|v| !v.is_nan()),
+            "max feasible joint step size: NaN entry in the joint coefficient direction"
+        );
+        Ok(None)
+    }
+
     /// Optional scale-aware floor for the joint trust-region metric `D`.
     ///
     /// The joint Newton globalization whitens its step by a positive diagonal
@@ -756,6 +806,54 @@ pub trait CustomFamily {
             "block linear constraints",
         );
         Ok(None)
+    }
+
+    /// Is block `block_index`'s COEFFICIENT COORDINATE model content, or is only
+    /// its column space? (#2748)
+    ///
+    /// The identifiability canonicaliser may reparameterise a block whose
+    /// coordinate is [`CoefficientCoordinate::Spanning`] — `β ↦ Vᵀβ` with the
+    /// penalties pulled back as `VᵀSV` — which is how it removes a cross-block
+    /// structural confound exactly rather than ridging it away. It may NOT do
+    /// that to a coordinate this family has attached meaning to. See
+    /// [`CoefficientCoordinate`] for the full argument; the short form is that a
+    /// monotone warp's `β_w ≥ 0` is a cone on THOSE coefficients, and the hook
+    /// that produces it is a function of the block's width, so it cannot express
+    /// the rotated cone `A V`.
+    ///
+    /// # The default DERIVES the answer rather than assuming it
+    ///
+    /// Any family that states a coordinate-local feasible set through
+    /// [`Self::block_linear_constraints`] is answering this question already, so
+    /// the default reads that answer instead of asking for it twice — a
+    /// declaration that can drift from the constraint it is about is worse than
+    /// no declaration. A family that cannot answer at the supplied state is
+    /// treated as `Structural`, because declining a reparameterisation always
+    /// preserves the model while performing one may not.
+    ///
+    /// # When to override
+    ///
+    /// Only for a coordinate whose structure this family imposes through some
+    /// OTHER hook, which the derivation above cannot see:
+    ///
+    /// * [`Self::post_update_block_beta`] projecting or clamping coordinates
+    ///   (the bounded-linear latent chart);
+    /// * [`Self::block_geometry`] rebuilding this block's design at its raw
+    ///   width, which a narrower spec desynchronises.
+    ///
+    /// Never override to widen the freedom: `Spanning` on a constrained
+    /// coordinate is not a performance choice, it is a wrong model.
+    fn block_coefficient_coordinate(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        block_spec: &ParameterBlockSpec,
+    ) -> CoefficientCoordinate {
+        match self.block_linear_constraints(block_states, block_index, block_spec) {
+            Ok(Some(_)) => CoefficientCoordinate::Structural,
+            Ok(None) => CoefficientCoordinate::Spanning,
+            Err(_) => CoefficientCoordinate::Structural,
+        }
     }
 
     /// Optional exact directional derivative of a block's ExactNewton Hessian.
@@ -1449,6 +1547,14 @@ pub trait CustomFamily {
     ///
     /// # The contract
     ///
+    /// SUPERSEDED, for a family that can measure its span, by
+    /// [`Self::jeffreys_span_basis`] — which answers the question this route only
+    /// approximates. Read that method's doc before adding a caller here: a
+    /// kernel says which directions no `λ` could EVER reach, and the term needs
+    /// the directions the model does not bound at the `λ` it actually selected.
+    /// This route remains correct and remains the default for a family that has
+    /// no certified mode to measure at.
+    ///
     /// Return the `Σ_t M_t` of the family's own joint penalty specs (any
     /// POSITIVE combination has the same kernel, so the returned matrix is
     /// λ-free and therefore constant in both `β` and `ρ` — which is what keeps
@@ -1460,6 +1566,57 @@ pub trait CustomFamily {
     /// direction, which is why the span was widened in the first place, is left
     /// on the full span).
     fn jeffreys_span_aggregate_penalty(&self) -> Result<Option<Array2<f64>>, String> {
+        Ok(None)
+    }
+
+    /// The directions the Jeffreys/Firth term is allowed to act on, stated
+    /// DIRECTLY as an orthonormal `total_p × m` basis, when the family has
+    /// measured them rather than derived them from a penalty's kernel (gam#2612).
+    ///
+    /// Takes precedence over [`Self::jeffreys_span_aggregate_penalty`]. Default
+    /// `None` leaves that route, and therefore every existing family, unchanged.
+    ///
+    /// # Why a kernel is the wrong object to derive it from
+    ///
+    /// `ker(S_λ)` answers *"which directions could no smoothing parameter ever
+    /// reach"*, and the full identifiable span answers *"all of them"*. The
+    /// question the term needs answered is neither: it is **which directions does
+    /// the model, at the smoothing it actually selected, fail to bound**. Those
+    /// three sets differ, and this lane has now measured both of the derived ones
+    /// being wrong on the same fixture:
+    ///
+    /// * the FULL span over-arms — on the penguins witness `H + S_λ` reaches
+    ///   `2298` on directions the penalty bounds perfectly well, and arming them
+    ///   published mean argmax probability `0.828` against accuracy `0.965`;
+    /// * `ker(S_λ)` under-arms — on the same witness the whole identifiable span
+    ///   has `λ_min(H + S_λ) = 5.1e-5`, five orders below one observation-
+    ///   equivalent, on a direction that is NOT in `ker(S_λ)`. It is a `range(S)`
+    ///   direction whose selected `λ` railed at the floor, so the claim that
+    ///   backs the kernel — "on `range(S)` the model already carries a proper
+    ///   prior" — is true in name and false in magnitude: `8e-4`
+    ///   pseudo-observations is not a prior. The coefficient then runs to
+    ///   `|η|∞ ≈ 45`, and the posterior-mean predictive refuses to publish
+    ///   because the posterior at that width is not describable.
+    ///
+    /// The measured set is `{v : vᵀ(H + S_λ)v < 1 observation-equivalent}`, the
+    /// same criterion `CONDITIONING_GATE_ABSOLUTE` already uses to decide the
+    /// term's WEIGHT, now also deciding its SUPPORT. It contains the separating
+    /// members of `ker(S_λ)` and excludes its well-determined members (an
+    /// unpenalized intercept the data pins does not need a prior), so it is
+    /// strictly better on both sides.
+    ///
+    /// # The constancy contract, and how it is met
+    ///
+    /// Every `Φ` derivative formula differentiates through `H` with `Z_J` held
+    /// FIXED, so the returned basis must not move during a fit. `H + S_λ` moves
+    /// with both `β` and `ρ`, which is exactly why reading its deficient subspace
+    /// live was rejected. This route does not read it live: the basis is measured
+    /// ONCE, at the certified mode of the unbiased probe and at the `λ` that
+    /// probe selected, and handed to the armed refit as a constant — the same
+    /// construction, at the same point, that the arming DECISION already uses.
+    /// A family that returns `Some` here is promising the basis is fixed for the
+    /// lifetime of the fit; one that cannot promise that must return `None`.
+    fn jeffreys_span_basis(&self) -> Result<Option<Array2<f64>>, String> {
         Ok(None)
     }
 

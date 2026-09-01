@@ -5399,6 +5399,187 @@ pub(crate) fn joint_trust_region_noise_floor_rejects_genuine_increase() {
     assert!(update.rho.is_infinite() && update.rho < 0.0);
 }
 
+/// One rung of a backtracking ladder, in the quantities the witness reads.
+fn ladder_rung(step_norm: f64, actual: f64, predicted: f64) -> (f64, f64, f64) {
+    (step_norm, actual, predicted)
+}
+
+/// gam#2748: an impossible resolution claim is refused, and gam#2612's real one
+/// is not — the two ladders side by side, both from measured runs.
+///
+/// The witness concludes "one evaluation of `F` carries this much rounding" from
+/// a discrepancy that failed to fall at the model remainder's rate. That
+/// inference has no upper limit of its own, so a ladder whose rungs are far
+/// outside the quadratic model's validity hands it model error and it reports
+/// arithmetic. [`ObjectiveAccumulation`] supplies the limit: rounding in a sum of
+/// `m` terms cannot exceed `m·ε·Σ|terms|`.
+///
+/// The two arms are the two real ladders, so this pins the SEPARATION and not a
+/// threshold: gam#2612's is admitted with ~5 orders of headroom and gam#2748's is
+/// refused by ~9, which is why the ceiling needs no calibration.
+#[test]
+pub(crate) fn an_impossible_resolution_claim_is_refused_and_a_real_one_is_kept_2748() {
+    // ── gam#2612's banded witness. `|β|∞ = 74.7`, `λ = e^8.42 = 4530`, so the
+    // penalty accumulates at `max|S_λ|·‖β‖₁² ≈ 2e8` while returning `O(10)`; the
+    // ladder's discrepancy sits at `~2e-10` across six decades of `‖δ‖`.
+    let banded = ObjectiveAccumulation {
+        summed_terms: 344,
+        magnitude: 2.0e8,
+    };
+    let mut witness = ObjectiveResolutionWitness::default();
+    witness.start_ladder();
+    for (step_norm, actual, predicted) in [
+        ladder_rung(1.0e-1, -2.6e-10, 6.7e-11),
+        ladder_rung(1.0e-4, -2.1e-10, 5.9e-13),
+        ladder_rung(1.0e-7, -1.9e-10, 5.9e-16),
+    ] {
+        witness.observe(step_norm, actual, predicted, banded);
+    }
+    assert!(
+        witness.measured() > 0.0,
+        "gam#2612's measurement must survive the ceiling: a ladder whose discrepancy \
+         is flat across six decades at a scale the penalty demonstrably accumulates IS \
+         the arithmetic, and refusing it restores the ratchet #2612 removed"
+    );
+    assert!(
+        witness.refused().is_none(),
+        "nothing to refuse on the gam#2612 arm: measured={:.3e}, ceiling={:.3e}",
+        witness.measured(),
+        banded.roundoff_ceiling(),
+    );
+    assert!(
+        witness.measured() <= banded.roundoff_ceiling(),
+        "an admitted measurement is by construction under its own ceiling"
+    );
+
+    // ── gam#2748's `papuan_oce4_matern_k6` cycle-0 ladder, verbatim from the
+    // shard log. Five rungs, `‖δ‖` from `2.144e5` down to `8.376e2`; the
+    // objective at the incumbent is `2.0e3` and `‖β‖∞` reaches `1.6e5`.
+    let runaway = ObjectiveAccumulation {
+        summed_terms: 6000,
+        // |old| + |trial| + max|S_λ|·(‖β_old‖₁² + ‖β_trial‖₁²), generously: an
+        // O(1) penalty matrix at ‖β‖₁ ≈ 1e6 and an objective of 8.1e8.
+        magnitude: 2.0e3 + 8.1e8 + 1.0e12,
+    };
+    let mut runaway_witness = ObjectiveResolutionWitness::default();
+    runaway_witness.start_ladder();
+    for (step_norm, actual, predicted) in [
+        ladder_rung(2.144e5, -2.063e11, 2.064e10),
+        ladder_rung(5.361e4, -5.153e10, 9.028e9),
+        ladder_rung(1.340e4, -1.288e10, 2.499e9),
+        ladder_rung(3.350e3, -3.220e9, 6.398e8),
+        ladder_rung(8.376e2, -8.049e8, 1.609e8),
+    ] {
+        runaway_witness.observe(step_norm, actual, predicted, runaway);
+    }
+    assert_eq!(
+        runaway_witness.measured(),
+        0.0,
+        "a rounding claim of ~9.7e8 for an objective of 2.0e3 must not become the trust \
+         controller's noise floor: it licensed its own acceptance of an 8.0e8 INCREASE"
+    );
+    let (claim, ceiling) = runaway_witness
+        .refused()
+        .expect("the ladder DID produce a verdict; the ceiling is what rejected it");
+    assert!(
+        claim > 1.0e8,
+        "NON-VACUITY: the fixture must reproduce the impossible claim itself, else the \
+         refusal above would pass on any code (claim={claim:.6e})"
+    );
+    assert!(
+        ceiling < claim,
+        "the refusal must be a comparison, not an assumption: claim={claim:.6e}, \
+         ceiling={ceiling:.6e}"
+    );
+    // The separation, stated as a ratio so a future change to either side has to
+    // move it by orders rather than by percent.
+    assert!(
+        claim / ceiling > 1.0e6,
+        "claim/ceiling = {:.3e}; this guard is a bound, not a tuned threshold, and a \
+         margin this thin would make it one",
+        claim / ceiling,
+    );
+}
+
+/// The CONSEQUENCE of the refusal, on the attempt that was actually accepted
+/// (gam#2748).
+///
+/// Attempt 5 of `papuan_oce4_matern_k6`'s cycle-0 ladder, verbatim: a realized
+/// change of `-8.049e8` (an INCREASE of eight hundred million) against a
+/// predicted decrease of `+1.609e8`, at an objective of `2.0e3`. Whether the
+/// controller takes that step is decided entirely by which noise floor it is
+/// handed, so the two arms differ in that one argument and nothing else.
+#[test]
+pub(crate) fn the_runaway_step_is_rejected_once_its_resolution_claim_is_refused_2748() {
+    let objective_scale = 2.0e3_f64;
+    let objective_tol = 1.0e-6 * (1.0 + objective_scale.abs());
+    let attempt = |measured_resolution: f64| {
+        update_joint_trust_region_radius(
+            7.899e2,  // radius at the fifth rung
+            8.376e2,  // ||delta|| there
+            -8.049e8, // actual reduction: the objective got WORSE by 8.049e8
+            1.609e8,  // predicted reduction
+            objective_scale,
+            objective_tol,
+            measured_resolution,
+            true, // the stationarity residual is far above tolerance
+        )
+    };
+
+    // NON-VACUITY: with the ladder's own claim installed as the noise floor,
+    // the controller reports `rho = 1` and TAKES the step. This is the defect,
+    // asserted so the fixture cannot stop exercising it.
+    let with_claim = attempt(9.658287e8);
+    assert!(
+        with_claim.accepted,
+        "the measured-resolution floor is what accepted an 8.049e8 increase; if this \
+         stops being true the arm below is no longer a repair of anything"
+    );
+    assert!(
+        (with_claim.rho - 1.0).abs() < 1.0e-12,
+        "the accept is the noise-floor branch's neutral rho, not a genuine gain ratio: \
+         rho={:.6e}",
+        with_claim.rho,
+    );
+
+    // With the claim refused as impossible, `measured_resolution` stays 0 and the
+    // controller falls back to its own `eps|F|` floor, which an 8.049e8 increase
+    // clears by fifteen orders.
+    let refused = attempt(0.0);
+    assert!(
+        !refused.accepted,
+        "an eight-hundred-million objective INCREASE must reject once the impossible \
+         floor is gone"
+    );
+    assert!(
+        refused.rho.is_finite() && refused.rho < 0.0 || refused.rho.is_infinite(),
+        "the rejection must be a model-disagreement rejection: rho={:.6e}",
+        refused.rho,
+    );
+    assert!(
+        refused.radius < 7.899e2,
+        "and it must SHRINK: radius {:.6e} did not fall below the 7.899e2 it started at",
+        refused.radius,
+    );
+}
+
+/// The ceiling is a bound and never a suppressor: a non-finite accumulation
+/// cannot be sized, so it must license everything rather than refuse everything.
+#[test]
+pub(crate) fn an_unsizable_accumulation_refuses_nothing_2748() {
+    let unsizable = ObjectiveAccumulation {
+        summed_terms: 1,
+        magnitude: f64::NAN,
+    };
+    assert!(unsizable.roundoff_ceiling().is_infinite());
+    let mut witness = ObjectiveResolutionWitness::default();
+    witness.start_ladder();
+    witness.observe(1.0e-1, -2.6e-10, 6.7e-11, unsizable);
+    witness.observe(1.0e-4, -2.1e-10, 5.9e-13, unsizable);
+    assert!(witness.measured() > 0.0);
+    assert!(witness.refused().is_none());
+}
+
 #[test]
 pub(crate) fn joint_objective_roundoff_slack_accepts_large_scale_wobble() {
     let old_objective = 1.218530e5;

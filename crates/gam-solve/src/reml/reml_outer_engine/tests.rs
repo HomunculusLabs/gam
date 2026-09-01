@@ -124,6 +124,7 @@ pub(crate) fn xt_projected_kernel_diagonal_iterator_matches_scalar_reference_bit
     let subspace = PenaltySubspaceTrace {
         u_s: u_s.clone(),
         h_proj_inverse: h_proj_inverse.clone(),
+        logdet_correction: 0.0,
     };
     let x = Array2::from_shape_fn((5, 4), |(i, j)| {
         ((i as f64 + 0.3) * 0.19 - (j as f64 + 0.6) * 0.37).sin()
@@ -151,6 +152,7 @@ pub(crate) fn projected_logdet_cross_reduced_uses_trace_product_reference() {
     let kernel = PenaltySubspaceTrace {
         u_s: Array2::<f64>::eye(3),
         h_proj_inverse: array![[1.4, 0.2, -0.1], [0.2, 1.9, 0.3], [-0.1, 0.3, 1.6]],
+        logdet_correction: 0.0,
     };
     let ra = Array2::from_shape_fn((3, 3), |(i, j)| {
         ((i as f64 + 0.6) * 0.22 - (j as f64 + 0.3) * 0.35).sin()
@@ -1290,6 +1292,7 @@ pub(crate) fn batched_penalty_subspace_traces_match_exact_kernel_on_ill_conditio
     let kernel = PenaltySubspaceTrace {
         u_s: u_s.clone(),
         h_proj_inverse: m,
+        logdet_correction: 0.0,
     };
     // Drift concentrated on the STIFFEST direction (kernel eval 1e-6):
     // A = σ_max · u₃u₃ᵀ + a mild symmetric background.
@@ -1434,6 +1437,7 @@ pub(crate) fn active_projected_kkt_residual_is_reduced_before_projected_ift() {
     let kernel = PenaltySubspaceTrace {
         u_s: array![[1.0], [0.0]],
         h_proj_inverse: array![[0.25]],
+        logdet_correction: 0.0,
     };
     let active =
         ProjectedKktResidual::from_active_projected(array![3.0, 1.0e-8]).with_metadata(1.0e-6, 1);
@@ -1463,6 +1467,7 @@ pub(crate) fn active_projected_kkt_residual_drops_gauge_mass_of_any_magnitude() 
     let kernel = PenaltySubspaceTrace {
         u_s: array![[1.0], [0.0]],
         h_proj_inverse: array![[0.25]],
+        logdet_correction: 0.0,
     };
     let active =
         ProjectedKktResidual::from_active_projected(array![3.0, 4.0]).with_metadata(1.0e-6, 1);
@@ -1488,6 +1493,7 @@ pub(crate) fn active_projected_kkt_residual_rejects_retained_range_leak() {
     let kernel = PenaltySubspaceTrace {
         u_s: array![[2.0], [0.0]],
         h_proj_inverse: array![[0.25]],
+        logdet_correction: 0.0,
     };
     let active =
         ProjectedKktResidual::from_active_projected(array![3.0, 4.0]).with_metadata(1.0e-6, 1);
@@ -1543,6 +1549,7 @@ pub(crate) fn build_subspace_kernel(
     PenaltySubspaceTrace {
         u_s: u_s.clone(),
         h_proj_inverse,
+        logdet_correction: 0.0,
     }
 }
 
@@ -2665,6 +2672,7 @@ pub(crate) fn theta_mode_response_kernel_matches_preport_assembly_bitwise() {
     let trace = PenaltySubspaceTrace {
         u_s: array![[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]],
         h_proj_inverse: array![[0.5, 0.1], [0.1, 0.8]],
+        logdet_correction: 0.0,
     };
     let block = ActiveLinearConstraintBlock {
         a: array![[1.0, 1.0, 0.0]],
@@ -3628,6 +3636,7 @@ pub(crate) fn subspace_projected_leverage_and_adjoint_shortcut_match_dense() {
     let subspace = PenaltySubspaceTrace {
         u_s: u_s.clone(),
         h_proj_inverse: h_proj_inverse.clone(),
+        logdet_correction: 0.0,
     };
 
     let x_data = array![
@@ -3694,6 +3703,7 @@ pub(crate) fn subspace_base_h2_traces_match_scalar_projected_kernel_path() {
     let kernel = PenaltySubspaceTrace {
         u_s,
         h_proj_inverse: array![[5.0 / det, -0.1 / det], [-0.1 / det, 3.0 / det]],
+        logdet_correction: 0.0,
     };
 
     let dense_only = array![[0.4, 0.1, 0.0], [0.1, -0.2, 0.3], [0.0, 0.3, 0.6]];
@@ -3826,6 +3836,7 @@ pub(crate) fn outer_hessian_operator_matvec_matches_dense_subspace_with_null_alp
         penalty_subspace_trace: Some(Arc::new(PenaltySubspaceTrace {
             u_s,
             h_proj_inverse,
+            logdet_correction: 0.0,
         })),
         rho_curvature_scale: 1.0,
         rho_prior: gam_problem::RhoPrior::Flat,
@@ -3921,6 +3932,7 @@ pub(crate) fn projected_operator_hessian_matches_dense_subspace_trace() {
         penalty_subspace_trace: Some(Arc::new(PenaltySubspaceTrace {
             u_s: array![[0.0], [1.0]],
             h_proj_inverse: array![[1.0 / h_proj]],
+            logdet_correction: 0.0,
         })),
         rho_curvature_scale: 1.0,
         rho_prior: gam_problem::RhoPrior::Flat,
@@ -3993,6 +4005,7 @@ pub(crate) fn penalty_subspace_batched_reduction_matches_serial_operator_reducti
     let kernel = PenaltySubspaceTrace {
         u_s: array![[1.0, 0.0], [0.2, 0.8], [-0.1, 0.6]],
         h_proj_inverse: array![[0.8, 0.1], [0.1, 0.6]],
+        logdet_correction: 0.0,
     };
     let dense = array![[0.4, 0.1, -0.2], [0.1, 0.7, 0.3], [-0.2, 0.3, 0.5]];
     let op_matrix = array![[0.3, -0.2, 0.1], [-0.2, 0.9, 0.4], [0.1, 0.4, 0.8]];
@@ -4070,6 +4083,7 @@ pub(crate) fn subspace_trace_large_k_routes_to_projected_operator() {
         penalty_subspace_trace: Some(Arc::new(PenaltySubspaceTrace {
             u_s: array![[0.0], [1.0]],
             h_proj_inverse: array![[1.0 / h_proj]],
+            logdet_correction: 0.0,
         })),
         rho_curvature_scale: 1.0,
         rho_prior: gam_problem::RhoPrior::Flat,
@@ -4823,6 +4837,7 @@ pub(crate) fn build_projected_rho_gradient_solution(rho: f64) -> InnerSolution<'
         penalty_subspace_trace: Some(Arc::new(PenaltySubspaceTrace {
             u_s: array![[0.0], [1.0]],
             h_proj_inverse: array![[1.0 / h[[1, 1]]]],
+            logdet_correction: 0.0,
         })),
         rho_curvature_scale: 1.0,
         rho_prior: gam_problem::RhoPrior::Flat,
@@ -7207,6 +7222,7 @@ pub(crate) fn build_leak_proof_solution(
         Some(Arc::new(PenaltySubspaceTrace {
             u_s,
             h_proj_inverse: h_proj_inv,
+            logdet_correction: 0.0,
         }))
     } else {
         None
@@ -9296,4 +9312,89 @@ fn mode_response_operator_is_the_one_the_drift_trace_uses_2612() {
          below would hold vacuously"
     );
     assert_relative_eq!(drift_doubled, 0.5 * drift_inherited, max_relative = 1e-12);
+}
+
+/// gam#2765: **a constraint that holds with equality and carries a zero
+/// multiplier is a description of the mode, not a change of model — so the
+/// outer criterion may not move when it is listed in the active set.**
+///
+/// Take β̂ at the exact unconstrained penalized optimum, so `∇F(β̂) = 0` and
+/// every KKT multiplier is zero. Now list one linear row in the active set.
+/// Nothing about the fitted model changed: the same β̂ maximizes the same
+/// penalized likelihood under the same penalties, and the row it is being
+/// told about is satisfied with slack-free equality and zero force. If the
+/// criterion moves, then it is reading the ACTIVE SET rather than the fit,
+/// and its value depends on a classification whose own inputs (a slack
+/// against a tolerance, the QP's working set) are discontinuous functions of
+/// θ. That is exactly what the #2765 acceptance fit measures at the scale of
+/// the criterion itself: two outer trial points 3e-3 apart in θ, the same β̂
+/// to four digits, and costs `3.585739e2` and `3.568383e2` — a `1.736` jump
+/// that no line search can descend through, taken as the recorded active set
+/// went from 5 rows to 6.
+///
+/// The invariant is stated on the criterion VALUE because that is what the
+/// outer line search compares. `ActiveLinearConstraintBlock` carries only the
+/// normals `A` — not the bounds, not the multipliers — so a criterion that
+/// depends on it at all cannot tell a binding row from a non-binding one, and
+/// the value it returns is a statement about a subspace rather than about a
+/// model.
+#[test]
+pub(crate) fn criterion_value_is_invariant_to_listing_a_zero_multiplier_active_row_2765() {
+    use crate::model_types::ActiveLinearConstraintBlock;
+
+    let rho: Vec<f64> = vec![0.4, -0.3];
+    // The exact unconstrained penalized optimum β̂ = H⁻¹X'y at this ρ, using
+    // the same (X'X, S₁, S₂, X'y) `build_gaussian_solution_at_beta` carries.
+    let xtx = array![[10.0, 2.0, 1.0], [2.0, 8.0, 0.5], [1.0, 0.5, 6.0]];
+    let s1 = array![[1.0, 0.2, 0.0], [0.2, 1.0, 0.0], [0.0, 0.0, 0.0]];
+    let s2 = array![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+    let xty = array![5.0, 3.0, 2.0];
+    let lambdas: Vec<f64> = rho.iter().map(|r| r.exp()).collect();
+    let mut h = xtx.clone();
+    h.scaled_add(lambdas[0], &s1);
+    h.scaled_add(lambdas[1], &s2);
+    let beta_hat = DenseSpectralOperator::from_symmetric(&h).unwrap().solve(&xty);
+    // Certify the premise rather than assume it: at this β̂ the penalized
+    // gradient is zero, so every multiplier of every row is zero and no row
+    // can be "binding" in any sense the criterion is entitled to price.
+    let gradient = &h.dot(&beta_hat) - &xty;
+    let gradient_inf = gradient.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    assert!(
+        gradient_inf <= 1.0e-12,
+        "the premise of this test is an exact-KKT mode; |∇F(β̂)|∞ = {gradient_inf:.3e}"
+    );
+
+    let evaluate = |active: Option<Array2<f64>>| -> f64 {
+        let mut sol = build_gaussian_solution_at_beta(&rho, beta_hat.clone(), false);
+        sol.dispersion = DispersionHandling::Fixed {
+            phi: 1.0,
+            include_logdet_h: true,
+            include_logdet_s: true,
+        };
+        sol.active_constraints = active
+            .map(|a| std::sync::Arc::new(ActiveLinearConstraintBlock { a }));
+        reml_laml_evaluate(&sol, &rho, EvalMode::ValueOnly, None)
+            .expect("the criterion must evaluate in both descriptions")
+            .cost
+    };
+
+    let free = evaluate(None);
+    // Three different rows, so the assertion is about the RULE and not about
+    // one lucky normal: a coordinate row, a row mixing two coefficients, and
+    // a row aligned with the second penalty's only column.
+    for (label, row) in [
+        ("e₀", array![[1.0, 0.0, 0.0]]),
+        ("e₀+e₁", array![[0.6, 0.8, 0.0]]),
+        ("e₂", array![[0.0, 0.0, 1.0]]),
+    ] {
+        let listed = evaluate(Some(row));
+        assert!(
+            (listed - free).abs() <= 1.0e-9 * (1.0 + free.abs()),
+            "listing the zero-multiplier row {label} in the active set moved the \
+             criterion by {:.6e}: free={free:.9e} listed={listed:.9e}. The criterion \
+             must be a function of the fit, not of which rows a solver recorded as \
+             tight (gam#2765).",
+            listed - free,
+        );
+    }
 }

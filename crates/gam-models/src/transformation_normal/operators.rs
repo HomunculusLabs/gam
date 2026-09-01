@@ -498,7 +498,6 @@ impl TransformationNormalPsiHessianOperator {
         row_gamma: Arc<Array2<f64>>,
         row_h: Arc<Array1<f64>>,
         row_h_prime: Arc<Array1<f64>>,
-        endpoint_q: Arc<Vec<LogNormalCdfDiffDerivatives>>,
     ) -> Self {
         Self::new_with_trace_axes(
             family,
@@ -510,7 +509,6 @@ impl TransformationNormalPsiHessianOperator {
             row_gamma,
             row_h,
             row_h_prime,
-            endpoint_q,
         )
     }
 
@@ -524,7 +522,6 @@ impl TransformationNormalPsiHessianOperator {
         row_gamma: Arc<Array2<f64>>,
         row_h: Arc<Array1<f64>>,
         row_h_prime: Arc<Array1<f64>>,
-        endpoint_q: Arc<Vec<LogNormalCdfDiffDerivatives>>,
     ) -> Self {
         let log_likelihood = 0.0;
         let op_ptr = Arc::as_ptr(&op) as *const () as usize;
@@ -542,11 +539,8 @@ impl TransformationNormalPsiHessianOperator {
             row_quantities: TransformationNormalRowQuantityCache {
                 beta: Arc::new(beta),
                 alpha: row_gamma,
-                h_lower: Arc::new(Array1::zeros(row_h.len())),
-                h_upper: Arc::new(Array1::zeros(row_h.len())),
                 h: row_h,
                 h_prime: row_h_prime,
-                endpoint_q,
                 log_likelihood,
             },
         }
@@ -1035,7 +1029,6 @@ pub(crate) struct TransformationNormalPsiPsiHessianOperator {
     pub(crate) row_gamma: Arc<Array2<f64>>,
     pub(crate) row_h: Arc<Array1<f64>>,
     pub(crate) row_h_prime: Arc<Array1<f64>>,
-    pub(crate) endpoint_q: Arc<Vec<LogNormalCdfDiffDerivatives>>,
 }
 
 impl TransformationNormalPsiPsiHessianOperator {
@@ -1048,7 +1041,6 @@ impl TransformationNormalPsiPsiHessianOperator {
         row_gamma: Arc<Array2<f64>>,
         row_h: Arc<Array1<f64>>,
         row_h_prime: Arc<Array1<f64>>,
-        endpoint_q: Arc<Vec<LogNormalCdfDiffDerivatives>>,
     ) -> Self {
         let trace_axes = if axis_i == axis_j {
             Arc::new(vec![axis_i])
@@ -1069,7 +1061,6 @@ impl TransformationNormalPsiPsiHessianOperator {
             row_gamma,
             row_h,
             row_h_prime,
-            endpoint_q,
         )
     }
 
@@ -1085,7 +1076,6 @@ impl TransformationNormalPsiPsiHessianOperator {
         row_gamma: Arc<Array2<f64>>,
         row_h: Arc<Array1<f64>>,
         row_h_prime: Arc<Array1<f64>>,
-        endpoint_q: Arc<Vec<LogNormalCdfDiffDerivatives>>,
     ) -> Self {
         let op_ptr = Arc::as_ptr(&op) as *const () as usize;
         let row_ptr = Arc::as_ptr(&row_gamma) as usize;
@@ -1104,7 +1094,6 @@ impl TransformationNormalPsiPsiHessianOperator {
             row_gamma,
             row_h,
             row_h_prime,
-            endpoint_q,
         }
     }
 
@@ -1129,7 +1118,6 @@ impl TransformationNormalPsiPsiHessianOperator {
                 self.row_gamma.view(),
                 self.row_h.view(),
                 self.row_h_prime.view(),
-                self.endpoint_q.as_slice(),
                 Some(v),
             )
             .expect("validated CTN psi-psi operator inputs should not fail")
@@ -1167,7 +1155,6 @@ impl TransformationNormalPsiPsiHessianOperator {
                     cov_j.view(),
                     cov_ij.view(),
                     row_start,
-                    &self.endpoint_q[row_start..row_end],
                     tile,
                 )
                 .expect("validated CTN psi-psi batched HVP inputs should not fail");
@@ -1197,7 +1184,6 @@ impl TransformationNormalPsiPsiHessianOperator {
                 cov_j.view(),
                 cov_ij.view(),
                 row_start,
-                &self.endpoint_q[row_start..row_end],
                 factor.view(),
             )
             .expect("validated CTN psi-psi projected trace inputs should not fail")
@@ -1281,7 +1267,6 @@ impl HyperOperator for TransformationNormalPsiPsiHessianOperator {
                 self.row_gamma.view(),
                 self.row_h.view(),
                 self.row_h_prime.view(),
-                self.endpoint_q.as_slice(),
                 v,
                 u,
             )

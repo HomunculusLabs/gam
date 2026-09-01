@@ -25,18 +25,12 @@
 //! values rather than mapping onto the full real line.
 
 mod alo_replay;
-mod endpoint_normalizer;
 
 // Shared imports re-exported so every concern submodule pulls them through
 // `use super::*;` without re-listing. `pub(crate)` lets the child globs see them.
 pub use alo_replay::{
     TransformationNormalAloRowGeometry, TransformationNormalAloRowInput,
     transformation_normal_alo_row_geometry,
-};
-pub(crate) use endpoint_normalizer::{
-    LogNormalCdfDiffDerivatives, endpoint_chain_first, endpoint_chain_fourth,
-    endpoint_chain_second, endpoint_chain_third, log_normal_cdf_diff,
-    log_normal_cdf_diff_derivatives,
 };
 
 pub(crate) use crate::custom_family::{
@@ -74,8 +68,8 @@ pub(crate) use gam_problem::{
 };
 pub(crate) use gam_terms::basis::initializewiggle_knots_from_seed;
 pub(crate) use gam_terms::basis::{
-    BasisOptions, Dense, KnotSource, create_basis, create_ispline_derivative_dense,
-    ispline_function_penalties,
+    ISplineBoundary, ispline_function_penalties, ispline_modelling_interval,
+    ispline_value_and_first_derivative,
 };
 pub(crate) use gam_terms::smooth::{
     SpatialLengthScaleOptimizationOptions, SpatialLogKappaCoords, TermCollectionDesign,
@@ -101,6 +95,7 @@ mod kronecker_design;
 mod operators;
 mod penalty_scaling;
 mod psi_operator;
+mod quantile_table;
 mod response_basis;
 mod scop_curvature;
 mod scop_density;
@@ -116,6 +111,7 @@ pub(crate) use kronecker_design::*;
 pub(crate) use operators::*;
 pub(crate) use penalty_scaling::*;
 pub use psi_operator::*;
+pub use quantile_table::*;
 pub use response_basis::effective_response_num_internal_knots;
 pub(crate) use response_basis::{
     affine_shape_direction, assert_rowwise_kronecker_dimensions, build_response_basis,

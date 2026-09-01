@@ -3,7 +3,7 @@
 //! # What this fixes
 //!
 //! The marginal-slope probit identity, transcribed from
-//! [`crate::bms::gradient_paths`], is
+//! `crate::bms::gradient_paths`, is
 //!
 //! ```text
 //!   z | a ~ N(0, Σ(a)),   η = c(a)·q(t, a) + r(a)ᵀ z

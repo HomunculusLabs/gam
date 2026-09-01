@@ -193,6 +193,58 @@ struct SummaryCurvatureRow {
     geometry: &'static str,
 }
 
+
+/// One smooth term's #2774 basis-adequacy row for the FFI summary.
+///
+/// Measured AT FIT TIME and persisted with the model, because the residual
+/// lack-of-fit score needs the converged IRLS row state (weights, working
+/// response, linear predictor) and a saved model carries none of it. A caller
+/// holding the training rows can recompute the whole table — including on a
+/// model saved before this existed — via `basis_adequacy_json` (Python
+/// `Model.basis_check(data)`), which refits at the frozen spec first.
+///
+/// `p_value` is present exactly when `provenance == "radial_enrichment"`; every
+/// other provenance value NAMES the evidence that was missing, so "adequate"
+/// and "not measured" are never confusable.
+#[derive(Serialize)]
+struct SummaryBasisCheckRow {
+    name: String,
+    term_idx: usize,
+    /// Realized coefficient width `k'` of the term.
+    basis_dim: usize,
+    /// Dimension of the term's JOINT penalty null space — the directions no
+    /// penalty on it touches — so `basis_dim − nullspace_dim` is the penalizable
+    /// capacity. `0` for every double-penalized smooth, the radial family
+    /// included: a Duchon term carries an RKHS curvature Gram AND a
+    /// complementary trend ridge on its polynomial block, so nothing in it is
+    /// completely unshrunk. That block is only WEAKLY penalized, though, so it
+    /// carries most of the term's EDF and makes an EDF-vs-`basis_dim` reading
+    /// look saturated on a fit whose problem is its basis's SPAN (#2774).
+    nullspace_dim: usize,
+    /// The term's effective degrees of freedom, carried BESIDE `basis_dim` and
+    /// `nullspace_dim` because the three only mean anything together. The
+    /// penalized occupancy is `edf − nullspace_dim` out of a capacity of
+    /// `basis_dim − nullspace_dim`; the natural summary-table reading of `edf`
+    /// against `basis_dim` counts the always-full null space as evidence of
+    /// saturation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edf: Option<f64>,
+    /// Width of the higher-resolution alternative the residuals were tested
+    /// against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enrichment_dim: Option<usize>,
+    /// Estimable alternative directions after the fitted design was projected
+    /// out — the test's reference d.f., and a direct measure of how much NEW
+    /// resolution the alternative carried.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enrichment_rank: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    statistic: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    p_value: Option<f64>,
+    provenance: &'static str,
+}
+
 #[derive(Serialize)]
 struct SummaryPayload {
     formula: String,
@@ -255,6 +307,15 @@ struct SummaryPayload {
     /// produced on demand by `curvature_inference_json`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     curvature_estimands: Vec<SummaryCurvatureRow>,
+    /// Per-smooth basis-adequacy evidence (#2774): does the fit's residual still
+    /// carry structure in each smooth's covariates that its realized basis
+    /// cannot represent? Empty for a model saved before the check existed, or
+    /// fitted through a route that retains no IRLS row state. The convergence
+    /// certificate below covers the OPTIMIZER only — it makes no statement about
+    /// the adequacy of the basis it converged on, and this table is where that
+    /// separate question is answered.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    basis_checks: Vec<SummaryBasisCheckRow>,
     covariance_kind: Option<String>,
     covariance_n: Option<usize>,
     covariance_flat: Option<Vec<f64>>,

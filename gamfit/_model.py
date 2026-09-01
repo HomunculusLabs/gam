@@ -606,6 +606,26 @@ class Model:
         of the characteristic function. For an unpenalized block every
         :math:`w_j = 1` and this is exactly the textbook :math:`\\chi^2_q`.
 
+        **When the scale is estimated the reference is not that law** (#2672).
+        gam's profiled Gaussian log-likelihood is
+        :math:`\\ell = -\\tfrac12[n\\ln 2\\pi + n\\ln(D/\\nu) - \\sum\\ln w_i +
+        \\nu]`, so with no expansion anywhere
+        :math:`W = n\\ln(1 + Q/V) + B`, where :math:`Q = (D_0 - D_f)/\\sigma^2`
+        is the quantity ``reference_weights`` is the spectrum *of*,
+        :math:`V = D_f/\\sigma^2` is a random variable of the same data, and
+        :math:`B = n\\ln(\\nu_f/\\nu_0) + (\\nu_0 - \\nu_f)`. Scoring :math:`W`
+        against :math:`Q`'s law is anti-conservative at :math:`O(1/\\nu)` —
+        measured ``size@.05 = 0.0792`` against a nominal ``0.05`` at
+        :math:`n \\in \\{30, 50\\}`. Because the map is monotone it inverts
+        exactly: :math:`P(W > w) = P(Q - c(w)V > 0)` with
+        :math:`c(w) = \\mathrm{expm1}((w - B)/n)`, a linear combination of
+        independent chi-squares with a negative weight, evaluated at zero. It is
+        the same reason mgcv's smooth-term p-values take an :math:`F` reference
+        when the scale is estimated and a :math:`\\chi^2` when it is known.
+        ``reference_residual_df`` (:math:`\\nu`) and
+        ``reference_deterministic_offset`` (:math:`B`) are ``None`` on every
+        family that carries its dispersion in the IRLS weight instead.
+
         ``reference_source`` says which lane produced it: ``"null_spectrum"``
         (the exact law above, with ``reference_weights`` carrying :math:`w`),
         ``"spectral_moment_match"`` (the fit could supply only the spectrum's
@@ -621,6 +641,8 @@ class Model:
         denominated in — *not* a chi-square degrees of freedom),
         ``reference_weights``/``reference_source``, ``reference_chi_square_df``
         :math:`\\nu` and ``reference_scale`` :math:`g` (the two-moment summary),
+        ``reference_residual_df``/``reference_deterministic_offset`` (the
+        estimated-scale channel above, ``None`` off the profiled Gaussian),
         ``bartlett_factor``
         :math:`c`, ``statistic_corrected`` :math:`W^*`, ``p_value_uncorrected``,
         ``p_value_corrected`` (the magic-by-default value), ``material`` (the
@@ -644,6 +666,101 @@ class Model:
             raise map_exception(exc) from exc
         payload = json.loads(raw)
         return list(payload.get("smooth_terms", []))
+
+    def basis_check(self, data: Any) -> list[dict[str, Any]]:
+        r"""Per-smooth basis-adequacy report: is each smooth's basis big enough (#2774)?
+
+        A converged, ``certified`` fit says nothing about whether the basis it
+        was given can represent the function it was asked to model. Both a
+        smooth whose basis spans the truth and a smooth that cannot reach it
+        reach a stationary REML point, certify, and report a per-term EDF that
+        is some fraction of the term's column count. What separates them is
+        whether the **residuals still carry structure in that smooth's own
+        covariates**.
+
+        For each smooth term this returns
+
+        * ``basis_dim`` — the realized coefficient width :math:`k'`;
+        * ``nullspace_dim`` — the dimension of the term's **joint** penalty null
+          space, i.e. the directions no penalty on it touches at all, so
+          ``basis_dim − nullspace_dim`` is the penalizable capacity. It is ``0``
+          for every *double-penalized* smooth, which includes the whole radial
+          family;
+        * ``edf`` — the term's effective degrees of freedom, carried here beside
+          the two above because the three only mean anything together. A
+          ``d``-dimensional radial smooth carries an RKHS curvature penalty plus
+          a complementary trend ridge on its ``d + 1``-column polynomial block;
+          that block is only weakly penalized, so it carries most of the term's
+          EDF and makes ``edf`` read near-saturated on a fit whose problem is the
+          *span* of its basis rather than its rank. That reading is exactly what
+          ``p_value`` replaces;
+        * ``enrichment_dim`` / ``enrichment_rank`` — the width of the
+          higher-resolution alternative the residuals were tested against, and
+          how many of its directions survived projecting the fitted design out.
+          The rank is the test's reference degrees of freedom and a direct
+          measure of how much genuinely new resolution the alternative carried;
+        * ``statistic`` / ``p_value`` — the penalized score (Rao) lack-of-fit
+          test. Small ``p_value`` ⇒ there is signal in this smooth's covariates
+          that its realized basis cannot represent;
+        * ``provenance`` — ``"radial_enrichment"`` when a test ran, else the
+          NAME of the evidence that was missing (``"no_continuous_covariates"``,
+          ``"enrichment_budget_below_realized_width"``, ``"no_irls_row_state"``,
+          ``"design_gram_unavailable"``, ...). ``p_value`` is present exactly
+          when a test ran, so "adequate" and "not measured" are never
+          confusable.
+
+        Method
+        ------
+        The alternative is a Duchon kernel at data-driven centers over the
+        term's standardized covariates, orthogonalized against the fitted design
+        in the fit's own IRLS weight metric. The statistic is
+        :math:`T = U^{\top} V^{-} U / \hat\varphi` with
+        :math:`U = \tilde Z^{\top} s` and :math:`V = \tilde Z^{\top} W \tilde Z`,
+        referred to :math:`\chi^2_r` (known dispersion) or :math:`F(r, \nu)`
+        (estimated).
+
+        The projection is **orthogonal in the weight metric**, not the fit's
+        penalized :math:`H^{-1}`. That is deliberate and it is what the test
+        means: a penalized fit is biased, and its shrinkage bias lives entirely
+        inside the span of the fitted design, so projecting it out makes the
+        statistic blind to "λ is large" and sensitive only to structure the
+        design *cannot represent at all*. Asking whether a direction the basis
+        HAS is being over-shrunk is a smoothing-parameter question and this
+        report deliberately declines to answer it.
+
+        What it does not claim
+        ----------------------
+        :math:`\hat\lambda` is held at its fitted value and the alternative is
+        fixed, so the test is conditional on both — exactly as the
+        :meth:`summary` Wald column is conditional on :math:`\hat\lambda`. A
+        rejection says there is signal outside the term's column span; it does
+        not say how much of *your* estimand that signal moves. Refit with a
+        larger basis for the flagged term and compare.
+
+        Relationship to :attr:`Summary.basis_checks`
+        -------------------------------------------
+        :meth:`summary` reports what the FIT measured and persisted, with no
+        data and no work. This method **recomputes** it, which requires refitting
+        at the model's frozen spec first: the score is a function of converged
+        IRLS row state (weights, working response, linear predictor) that a saved
+        model does not carry. Use it for models saved before this check existed,
+        or to run the check against rows other than the training ones. It is as
+        expensive as a refit, exactly like :meth:`smooth_significance`.
+
+        Returns an empty list when the model has no smooth terms.
+
+        Examples
+        --------
+        >>> [(row["name"], row["p_value"]) for row in model.basis_check(train)]
+        [('duchon(pc1, ..., centers=24)', 9.0e-16)]
+        """
+        headers, rows, _ = normalize_table(data)
+        try:
+            raw = rust_module().basis_adequacy_json(self._model_bytes, headers, rows)
+        except Exception as exc:
+            raise map_exception(exc) from exc
+        payload = json.loads(raw)
+        return list(payload.get("basis_checks", []))
 
     def debiased_functional(
         self,

@@ -67,16 +67,37 @@
 //!   the cheap representation is also the accurate one (a Gram squares the
 //!   condition number under a rank tolerance chosen to sit just above an SVD's
 //!   backward error).
+//! * [`TriangularRootAccumulator`] — the same streaming discipline for the
+//!   branch where the metric DOES couple output coordinates and no block
+//!   structure survives: the root's rows are folded into one
+//!   `param_dim`-square upper-triangular factor `T` with `TᵀT = RᵀR`.
 //! * [`ResidualGaugeCurvature`] — the curvature as the builder is able to
 //!   produce it: output-coordinate block roots plus the pin's dense rows when
-//!   the metric does not couple output coordinates; the stacked root `R` when
-//!   `H = RᵀR` has fewer rows than columns; and the dense Gram only when
-//!   neither applies, which is also the only representation whose rank decision
-//!   must be taken on `λ = σ²`.
+//!   the metric does not couple output coordinates, and otherwise the root —
+//!   whole when it has fewer rows than columns, folded into `T` when it has
+//!   more. **Every production representation now carries a ROOT**, so every
+//!   rank decision is taken on `σ`; [`ResidualGaugeCurvature::DenseGram`]
+//!   survives only for callers that hand-build a Gram, and is the one
+//!   representation forced onto `λ = σ²`.
 //! * [`BlockPlusRowsSpectrum`] — the inertia machinery above.
+//!
+//! # What is not solved here, and cannot be
+//!
+//! A metric that couples output coordinates leaves `H` with no exploitable
+//! structure at all: it is a sum of `n · metric_rank` rank-one terms in
+//! `param_dim` dimensions, and its exact spectrum costs
+//! `min(rows, param_dim)²` memory whichever side it is taken from. The fold
+//! above removes the factor of two (`eigh` allocates eigenvectors the reduction
+//! discards; a values-only SVD allocates none), removes the squared rank
+//! tolerance, and removes the second representation — but the surviving
+//! `param_dim²` is the price of asking for an exact full spectrum, not an
+//! artifact of how it is asked for. At production width that branch needs the
+//! certificate to stop asking, which is a change to what
+//! `super::residual_gauge_inner` reads rather than to how this module stores.
 
 use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd};
-use ndarray::{Array2, Array3, ArrayView1, ArrayViewMut2, s};
+use gam_linalg::lanczos::{SymmetricExtremeLanczosOptions, symmetric_extreme_lanczos_eigenpairs};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayViewMut2, s};
 
 /// One atom's slot in the joint frame-column layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -350,6 +371,126 @@ impl OutputBlockRootAccumulator {
         let param_dim = self.layout.param_dim();
         self.finish_with_rows(Array2::<f64>::zeros((0, param_dim)), root_rows)
             .expect("an empty dense-row block is conformable with any layout")
+    }
+}
+
+/// Streaming accumulator for a curvature root with NO output-coordinate
+/// structure to exploit — the branch where the metric couples output
+/// coordinates, so `H`'s off-block entries are genuinely nonzero.
+///
+/// # What it replaces and why
+///
+/// That branch used to fork on whether the root had more rows than columns.
+/// With fewer, it kept the root whole. With more — which at any production row
+/// count is always, since the root has `n · metric_rank` rows — it assembled the
+/// dense `param_dim × param_dim` **Gram** instead, and the certificate then read
+/// its spectrum through a symmetric eigendecomposition. That is #2757's own
+/// defect, verbatim, surviving on the half of the fork the block-structured
+/// curvature never reached.
+///
+/// The Gram is the wrong object on both counts the certificate cares about:
+///
+/// * **Resolution.** `gram_spectral_rank` has to
+///   take the rank decision on `λ = σ²` against a threshold `τ²` that lands
+///   below a symmetric eigensolver's own backward error, so it is floored at
+///   `ε·param_dim·λ_max` and cannot resolve below it — at `param_dim = 65 536`
+///   that is `1.5e-11·λ_max`, where the root-side decision resolves
+///   `(α·ε·N)² ≈ 1e-16·λ_max`. Folding rows in keeps `σ` to full precision
+///   instead of squaring the condition number, exactly as
+///   [`OutputBlockRootAccumulator`] already argues for the block case.
+/// * **Peak memory.** The Gram is `param_dim²`, and `eigh` allocates a second
+///   `param_dim²` for eigenvectors the reduction discards. A values-only SVD of
+///   the triangular factor allocates neither.
+///
+/// # What it does NOT fix, stated plainly
+///
+/// This does not make a coupling metric affordable at production width. `H` for
+/// such a metric is a sum of `n · metric_rank` rank-one terms in `param_dim`
+/// dimensions with no exploitable structure — the per-row Jacobian is
+/// output-coordinate diagonal, but `M_n` couples those coordinates, so the
+/// product is dense — and its exact spectrum costs `min(rows, param_dim)²`
+/// memory whichever side it is taken from. What this removes is the factor of
+/// two, the squared rank tolerance, and the second representation; the
+/// remaining `param_dim²` is a property of asking for an exact full spectrum at
+/// all, not of how it is asked for.
+pub struct TriangularRootAccumulator {
+    factor: Array2<f64>,
+}
+
+impl TriangularRootAccumulator {
+    pub fn new(param_dim: usize) -> Self {
+        Self {
+            factor: Array2::<f64>::zeros((param_dim, param_dim)),
+        }
+    }
+
+    /// Fold one root row into the factor. `row` is consumed (left as the
+    /// annihilated residual) so the caller may reuse one buffer.
+    ///
+    /// A row of the wrong width is a caller that built its root against a
+    /// different parameterization, which the fold would silently absorb into
+    /// the leading columns; it is refused rather than folded.
+    pub fn push_root_row(&mut self, row: &mut [f64]) -> Result<(), String> {
+        if row.len() != self.factor.ncols() {
+            return Err(format!(
+                "residual gauge curvature: root row has {} entries but the factor is over {} \
+                 parameters",
+                row.len(),
+                self.factor.ncols()
+            ));
+        }
+        let mut view = self.factor.view_mut();
+        fold_row_into_triangular_factor(&mut view, row);
+        Ok(())
+    }
+
+    /// Close the accumulation. `root_rows` is the number of rows that were
+    /// folded in — the true row count of `R`, which is what sets the rank
+    /// tolerance's scale, not the `param_dim` rows the factor happens to have.
+    pub fn finish(self, root_rows: usize) -> ResidualGaugeCurvature {
+        ResidualGaugeCurvature::DualRoot {
+            root: self.factor,
+            root_rows,
+        }
+    }
+
+    /// The accumulated upper-triangular factor itself, `T` with `TᵀT = RᵀR`.
+    ///
+    /// Used where the folded object is not a curvature over the model's own
+    /// parameters but over a small basis of them — the `G × G` factor of `R Ξ`
+    /// that [`StreamedFrameCurvature::project_root`] returns — so wrapping it in
+    /// a [`ResidualGaugeCurvature`] would misdescribe what it is a curvature of.
+    pub fn into_factor(self) -> Array2<f64> {
+        self.factor
+    }
+
+    /// Fold another accumulator of the same width into this one, so that
+    /// afterwards `TᵀT` is the sum of the two factors' Grams.
+    ///
+    /// This is what makes the fold associative and therefore splittable: a
+    /// stream can be cut into disjoint pieces, each folded independently, and
+    /// merged — with the same arithmetic, since a merge is just folding the
+    /// other factor's rows in one at a time. It is the reason a parallel pass
+    /// over observations produces the same operator as a serial one (not the
+    /// same bits — Givens rotations do not commute — but the same `TᵀT` to
+    /// rounding, which is the object every consumer reads).
+    pub fn merge(&mut self, other: Self) -> Result<(), String> {
+        if other.factor.ncols() != self.factor.ncols() {
+            return Err(format!(
+                "residual gauge curvature: cannot merge a factor over {} parameters into one \
+                 over {}",
+                other.factor.ncols(),
+                self.factor.ncols()
+            ));
+        }
+        let mut row = vec![0.0_f64; self.factor.ncols()];
+        for r in 0..other.factor.nrows() {
+            for (c, slot) in row.iter_mut().enumerate() {
+                *slot = other.factor[[r, c]];
+            }
+            self.push_root_row(&mut row)?;
+        }
+        Ok(())
     }
 }
 
@@ -761,6 +902,241 @@ impl ResidualGaugeCurvature {
             Self::DenseGram { gram, .. } => gram.clone(),
         }
     }
+}
+
+
+// ============================================================================
+// #2757 — the curvature as an OPERATOR, for the branch where no materialized
+// representation of `H` is smaller than `param_dim²`.
+// ============================================================================
+
+/// The residual-gauge curvature `H = RᵀR`, exposed as an operator over a root
+/// that is **re-streamed on demand** instead of stored.
+///
+/// # Why a fourth representation, and why it is not a storage format
+///
+/// The other three are storage: a shape `H` happens to have, held in the fewest
+/// scalars that shape allows. This one is the statement that `H` has no such
+/// shape. With a per-row metric that couples output coordinates,
+/// `H = Σ_n J_nᵀ M_n J_n` is a sum of `n · metric_rank` rank-one terms in
+/// `param_dim` dimensions whose only exploitable structure — the output-coordinate
+/// diagonality of `J_n` — is destroyed by `M_n`. Every materialized form of it
+/// costs `min(root_rows, param_dim)²` scalars, and an exact full spectrum costs
+/// the cube from whichever side it is taken.
+///
+/// So the fix is not another storage format. It is that **the certificate stops
+/// asking for a full spectrum**. Of the three things it reads off `H`
+///
+/// * `ξᵀHξ` along each enumerated generator — the numerator of every verdict,
+/// * `λ_max(H)` — the denominator of every verdict,
+/// * the pinning rank — reported, and read by no verdict,
+///
+/// the first two are *streamable*: the first exactly, in one pass
+/// ([`Self::project_root`]); the second to a certified relative residual by a
+/// matrix-free Krylov method ([`streamed_lambda_max`]) whose only interaction
+/// with `H` is [`Self::apply`]. The third is not, and the certificate says so
+/// rather than reporting a number it did not measure — see
+/// [`PinningRankSupport`](super::PinningRankSupport).
+///
+/// # The contract
+///
+/// `H` must be positive semi-definite and identical across calls: [`Self::apply`]
+/// and [`Self::project_root`] are two readings of ONE operator, and
+/// [`streamed_lambda_max`] cross-checks them against
+/// [`Self::diagonal`]'s trace, which is a rigorous upper bound on `λ_max` for a
+/// PSD operator. An implementation whose three readings disagree is refused
+/// rather than certified.
+pub trait StreamedFrameCurvature: Sync {
+    /// The parameter dimension `H` acts on.
+    fn param_dim(&self) -> usize;
+
+    /// The number of rows the root `R` would have had — the scale the rank
+    /// tolerance is calibrated against, exactly as for the stored variants.
+    fn root_rows(&self) -> usize;
+
+    /// `y ← H x`. `y` has length `param_dim` and is fully overwritten.
+    fn apply(&self, x: &[f64], y: &mut [f64]) -> Result<(), String>;
+
+    /// `diag(H)`, in one pass.
+    ///
+    /// For a PSD operator `tr(H) = Σ diag(H)` brackets the top of the spectrum
+    /// two-sidedly — `tr(H)/param_dim ≤ λ_max ≤ tr(H)` — which is what makes the
+    /// Krylov solve's breakdown threshold and its acceptance check
+    /// scale-relative rather than absolute, and what lets an identically-zero
+    /// curvature be recognised exactly instead of iterated on.
+    fn diagonal(&self) -> Result<Array1<f64>, String>;
+
+    /// The `G × G` upper-triangular factor `T` of `W = R Ξ`, where `Ξ` has the
+    /// supplied directions as its columns: `TᵀT = WᵀW = ΞᵀHΞ`, in ONE pass.
+    ///
+    /// Returning the ROOT `T` rather than the Gram `ΞᵀHΞ` is the same decision
+    /// [`OutputBlockRootAccumulator`] and [`TriangularRootAccumulator`] take, for
+    /// the same reason: the rank question the certificate asks is about singular
+    /// values, and forming the Gram squares the condition number before it is
+    /// asked. The energies are the factor's own column norms,
+    /// `ξ_jᵀHξ_j = Σ_a T[a, j]²`, so one object answers both.
+    fn project_root(&self, directions: &[ArrayView1<'_, f64>]) -> Result<Array2<f64>, String>;
+}
+
+/// What a matrix-free Krylov read of a streamed curvature resolved.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamedLambdaMax {
+    /// `λ_max(H)`, as the largest Ritz value of the certified Krylov solve. A
+    /// Rayleigh quotient of an explicit vector, hence a LOWER bound on the true
+    /// `λ_max` up to the solve's own rounding.
+    pub lambda_max: f64,
+    /// `β_k·|e_kᵀy|` for the returned pair, relative to `max(λ_max, 1)` — the
+    /// sharp Ritz residual the solve certified against.
+    pub relative_residual: f64,
+    /// `tr(H)`, the rigorous PSD upper bound `λ_max` was checked against.
+    pub trace: f64,
+    /// How many passes over the root the solve took: one for the diagonal, then
+    /// one per Krylov step. This is the certificate's whole cost on this route
+    /// besides the single generator-projection pass, so it is reported rather
+    /// than left to a profiler — a solve that needed hundreds of passes would be
+    /// a spectrum this instrument is wrong for, and the number says so.
+    pub passes: usize,
+}
+
+/// The relative accuracy the certificate requires of a streamed `λ_max`.
+///
+/// `λ_max` is the DENOMINATOR of every generator verdict, which compares
+/// `ξᵀHξ/λ_max` against a tolerance of
+/// [`GENERATOR_FLAT_ENERGY_TOL`](super::GENERATOR_FLAT_ENERGY_TOL) `= 1e-3`, so a
+/// relative error `δ` in `λ_max` moves every fraction by `δ`. The requirement is
+/// therefore bracketed from both sides rather than chosen:
+///
+/// * it cannot be tighter than `≈ ε`, the attainable accuracy of a Ritz value of
+///   an operator of norm `λ_max` (`|θ̃ − θ| ≲ ε‖H‖`);
+/// * it must be far looser than nothing and far tighter than the `1e-3` the
+///   verdict resolves.
+///
+/// `√ε ≈ 1.49e-8` is the standard residual-based stopping point that sits five
+/// orders below the consumer tolerance and eight above the instrument floor —
+/// the same one [`gam_terms`'s Duchon spectral chart] asks of the same solver.
+/// A solve that cannot reach it is a REFUSAL, never a looser certificate.
+fn streamed_lambda_max_relative_tol() -> f64 {
+    f64::EPSILON.sqrt()
+}
+
+/// The deterministic Krylov start vector.
+///
+/// Reproducibility is a property the certificate must have: two runs of the same
+/// fit have to certify the same group, and a start vector selects a
+/// finite-precision Krylov chart. This is the same tiny LCG
+/// `gam_terms::basis::duchon_thinplate` uses on the same solver, so the two
+/// callers do not each invent a source of randomness.
+fn streamed_lanczos_start(dim: usize) -> Vec<f64> {
+    let mut state = 1_u64;
+    let mut start = vec![0.0_f64; dim];
+    for value in &mut start {
+        state = (state * 106 + 1283) % 6075;
+        *value = state as f64 / 6075.0 - 0.5;
+    }
+    start
+}
+
+/// `λ_max(H)` for a streamed curvature, matrix-free and certified.
+///
+/// # Method
+///
+/// One pass computes `diag(H)`. For a PSD operator its sum is `tr(H)`, and
+/// `tr(H) = 0 ⟺ H = 0` — so an identically-flat curvature is recognised exactly,
+/// in one pass, with no iteration and no tolerance. Otherwise the trace is
+/// * the SCALE for the Krylov breakdown threshold (an absolute threshold on a
+///   residual norm is meaningless for an operator whose norm is unknown), and
+/// * a rigorous UPPER bound on `λ_max`, so a returned Ritz value above it is a
+///   contradiction between [`StreamedFrameCurvature::apply`] and
+///   [`StreamedFrameCurvature::diagonal`] and is refused rather than reported.
+///
+/// The solve itself is [`symmetric_extreme_lanczos_eigenpairs`] with full
+/// reorthogonalization, which stops at the first step whose sharp Ritz residual
+/// `β_k|e_kᵀy|` certifies the pair and errors if it never does. Its step budget
+/// is `min(param_dim, root_rows)`: the Krylov space of `H = RᵀR` cannot exceed
+/// `rank(H) ≤ min(param_dim, root_rows)` dimensions, so that bound is the exact
+/// one and not a guess — and a solve that ran to it would have retained the
+/// `param_dim²` basis this route exists to avoid, which is why the honest outcome
+/// there is the solver's own refusal.
+pub fn streamed_lambda_max(
+    operator: &dyn StreamedFrameCurvature,
+) -> Result<StreamedLambdaMax, String> {
+    let dim = operator.param_dim();
+    if dim == 0 || operator.root_rows() == 0 {
+        return Ok(StreamedLambdaMax {
+            lambda_max: 0.0,
+            relative_residual: 0.0,
+            trace: 0.0,
+            passes: 0,
+        });
+    }
+    let diagonal = operator.diagonal()?;
+    if diagonal.len() != dim {
+        return Err(format!(
+            "streamed curvature: diagonal has {} entries but param_dim = {dim}",
+            diagonal.len()
+        ));
+    }
+    if let Some(bad) = diagonal.iter().find(|v| !v.is_finite() || **v < 0.0) {
+        return Err(format!(
+            "streamed curvature: diag(H) must be finite and non-negative for a PSD \
+             curvature; found {bad:.6e}"
+        ));
+    }
+    let trace = diagonal.iter().sum::<f64>();
+    if trace == 0.0 {
+        // A PSD operator with zero trace is the zero operator: every diagonal
+        // entry is a squared norm. No iteration can add to that.
+        return Ok(StreamedLambdaMax {
+            lambda_max: 0.0,
+            relative_residual: 0.0,
+            trace: 0.0,
+            passes: 1,
+        });
+    }
+    let steps = dim.min(operator.root_rows()).max(1);
+    let check_every = 10usize.min((dim / 10).max(1));
+    let start = streamed_lanczos_start(dim);
+    let mut matvecs = 0usize;
+    let pairs = symmetric_extreme_lanczos_eigenpairs(
+        dim,
+        &start,
+        SymmetricExtremeLanczosOptions {
+            target_rank: 1,
+            max_steps: steps,
+            check_every,
+            relative_residual_tol: streamed_lambda_max_relative_tol(),
+            breakdown_tol: f64::EPSILON * trace,
+        },
+        |q, image| {
+            matvecs += 1;
+            operator.apply(q, image)
+        },
+    )
+    .map_err(|e| format!("streamed curvature: λ_max solve did not certify: {e}"))?;
+    let lambda_max = pairs.eigenvalues[0];
+    let residual = pairs.residual_bounds[0];
+    if !lambda_max.is_finite() {
+        return Err("streamed curvature: λ_max solve returned a non-finite Ritz value".to_string());
+    }
+    // `H` is a Gram, so its spectrum is non-negative and bounded by its trace.
+    // Both ends are checked: the operator and the diagonal are two independent
+    // readings of the same object, and this is the one place they can be
+    // compared without materializing anything.
+    let slack = f64::EPSILON * (dim as f64) * trace;
+    if lambda_max < -slack || lambda_max > trace + slack {
+        return Err(format!(
+            "streamed curvature: λ_max = {lambda_max:.6e} is outside the PSD bracket \
+             [0, tr(H) = {trace:.6e}] its own diagonal gives; the operator's matvec and \
+             its diagonal disagree"
+        ));
+    }
+    let lambda_max = lambda_max.clamp(0.0, trace);
+    Ok(StreamedLambdaMax {
+        lambda_max,
+        relative_residual: residual / lambda_max.max(1.0),
+        trace,
+        passes: matvecs + 1,
+    })
 }
 
 #[cfg(test)]

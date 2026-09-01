@@ -4826,6 +4826,9 @@ impl<'a> RemlState<'a> {
             Some(super::reml_outer_engine::PenaltySubspaceTrace {
                 u_s,
                 h_proj_inverse,
+                // Filled by the caller: only it holds the operator's own
+                // `logdet()` that this pseudo-determinant replaces (#2765).
+                logdet_correction: 0.0,
             }),
         ))
     }

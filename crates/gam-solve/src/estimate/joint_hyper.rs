@@ -776,7 +776,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
     /// NB, Binomial) that cannot use the Gaussian Gram tensor n-free shortcut.
     /// The criterion's exact invariance directions at this `rho` (#2676).
     ///
-    /// Forwards to the wrapped [`RemlState`], which owns the canonical penalty
+    /// Forwards to the wrapped `RemlState`, which owns the canonical penalty
     /// map the invariance is a property of. Published so a spatial joint driver
     /// can install the outer certificate's deflation hook without reaching into
     /// the evaluator's internals — and, importantly, so the answer is taken

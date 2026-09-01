@@ -362,3 +362,109 @@ fn zz_probe_2612_penguins_stride3_inner_trail() {
         },
     );
 }
+
+/// The stride-4 split, which is the one the FAILING acceptance arm
+/// (`gam_multinomial_classifies_penguin_species_at_least_as_well_as_nnet`) uses.
+/// Its sibling above is the stride-3 `_on_real_data` arm, which CI records as a
+/// TIMEOUT rather than a FAIL — so the two arms need separate trails, because a
+/// verdict that was never reached is not the same finding as one that was.
+#[test]
+fn zz_probe_2612_penguins_stride4_inner_trail() {
+    init();
+    let (train, test, species) = penguins_split(4);
+    run(
+        "D penguins stride-4",
+        &train,
+        PENGUINS_FORMULA,
+        &test,
+        |model| {
+            species
+                .iter()
+                .map(|name| {
+                    model
+                        .class_levels
+                        .iter()
+                        .position(|level| level == name)
+                        .expect("species level present")
+                })
+                .collect()
+        },
+    );
+}
+
+/// #2612: WHERE the posterior-mean estimand stops being publishable, and what
+/// is different about those rows.
+///
+/// The stride-4 fit now completes, and the acceptance is red one step further
+/// on: `predict_multinomial_formula` refuses because a held-out row's predictive
+/// mass defect exceeds `PREDICTIVE_MASS_DEFECT_TOLERANCE`. That refusal is the
+/// estimand's own exact identity (`Σ_c E[p_c] = 1`) measuring the Laplace
+/// approximation's error at the row being published, so it is a real statement —
+/// but "one row is bad" and "the fit's posterior is undescribable" are different
+/// findings and the message could not tell them apart until the refusal was made
+/// to report the block.
+///
+/// This prints, per held-out row, the plug-in `|η|∞` and the argmax probability
+/// alongside the refusal's own block summary, so the offending rows can be
+/// characterised rather than guessed at. Asserts nothing.
+#[test]
+fn zz_probe_2612_penguins_stride4_predictive_mass() {
+    init();
+    let (train, test, species) = penguins_split(4);
+    let config = FitConfig::default();
+    let started = Instant::now();
+    let model = match fit_penalized_multinomial_formula(&MultinomialFitRequest {
+        data: &train,
+        formula: PENGUINS_FORMULA,
+        config: &config,
+        init_lambda: 1.0,
+        max_iter: 100,
+        tol: 1e-8,
+    }) {
+        Ok(model) => model,
+        Err(error) => {
+            eprintln!("#2612 [mass] FIT FAILED after {:.1}s: {error}", started.elapsed().as_secs_f64());
+            return;
+        }
+    };
+    eprintln!("#2612 [mass] FIT OK in {:.1}s", started.elapsed().as_secs_f64());
+
+    // The refusal, now carrying the whole block rather than one witness.
+    match predict_multinomial_formula(&model, &test) {
+        Ok(_) => eprintln!("#2612 [mass] posterior-mean AVAILABLE for every row"),
+        Err(error) => eprintln!("#2612 [mass] posterior-mean REFUSED: {error}"),
+    }
+
+    // What is different about the rows, in the coordinates the estimand is a
+    // function of: the plug-in linear predictor's magnitude and its confidence.
+    let plugin = predict_multinomial_formula_plugin(&model, &test).expect("plug-in predict");
+    let labels: Vec<usize> = species
+        .iter()
+        .map(|name| {
+            model
+                .class_levels
+                .iter()
+                .position(|level| level == name)
+                .expect("species level present")
+        })
+        .collect();
+    let mut summary: Vec<(usize, f64, bool)> = Vec::new();
+    for row in 0..plugin.nrows() {
+        let mut best = (0usize, f64::NEG_INFINITY);
+        for class in 0..plugin.ncols() {
+            if plugin[[row, class]] > best.1 {
+                best = (class, plugin[[row, class]]);
+            }
+        }
+        summary.push((row, best.1, best.0 == labels[row]));
+    }
+    summary.sort_by(|a, b| a.1.partial_cmp(&b.1).expect("finite"));
+    eprintln!("#2612 [mass] ten LEAST confident held-out rows (plug-in):");
+    for (row, p, correct) in summary.iter().take(10) {
+        eprintln!("#2612 [mass]   row {row:3}  argmax_p={p:.6}  correct={correct}");
+    }
+    eprintln!("#2612 [mass] ten MOST confident held-out rows (plug-in):");
+    for (row, p, correct) in summary.iter().rev().take(10) {
+        eprintln!("#2612 [mass]   row {row:3}  argmax_p={p:.6}  correct={correct}");
+    }
+}

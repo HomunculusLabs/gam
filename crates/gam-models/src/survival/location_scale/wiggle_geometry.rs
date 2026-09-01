@@ -495,6 +495,25 @@ pub(crate) fn survival_wiggle_third_basis(
     monotone_wiggle_basis_with_derivative_order(q0, knots, degree, 3)
 }
 
+/// The FOURTH derivative of the composed warp basis (gam#2695).
+///
+/// The row program's jet composes the warp as a five-slot tower, and its last
+/// slot used to be the literal `0.0`. That literal is the fourth derivative of
+/// a degree-`d` I-spline, which is identically zero only for `d ≤ 3` — and a
+/// composed warp is now built at [`crate::wiggle::composed_warp_minimum_degree`]
+/// `= 4`, where it is not. The two changes are inseparable: raising the degree
+/// so `H` is continuous while leaving the literal in place would make every
+/// order-3 and order-4 lowering (`∇Φ`, the all-axes directional derivatives, the
+/// second directional derivative) differentiate a DIFFERENT function than the
+/// value.
+pub(crate) fn survival_wiggle_fourth_basis(
+    q0: ndarray::ArrayView1<'_, f64>,
+    knots: &Array1<f64>,
+    degree: usize,
+) -> Result<Array2<f64>, String> {
+    monotone_wiggle_basis_with_derivative_order(q0, knots, degree, 4)
+}
+
 pub(crate) fn survival_base_q_scalars(eta_t: f64, eta_ls: f64) -> SurvivalBaseQScalars {
     let (q_t, q_ls, q_tl, q_ll, q_tl_ls, q_ll_ls) = q_chain_derivs_scalar(eta_t, eta_ls);
     let inv_sigma = exp_sigma_inverse_from_eta_scalar(eta_ls);

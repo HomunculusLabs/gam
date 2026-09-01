@@ -115,16 +115,12 @@ pub(crate) struct TransformationNormalRowQuantityCache {
     pub(crate) alpha: Arc<Array2<f64>>,
     pub(crate) h: Arc<Array1<f64>>,
     pub(crate) h_prime: Arc<Array1<f64>>,
-    pub(crate) h_lower: Arc<Array1<f64>>,
-    pub(crate) h_upper: Arc<Array1<f64>>,
-    pub(crate) endpoint_q: Arc<Vec<LogNormalCdfDiffDerivatives>>,
     pub(crate) log_likelihood: f64,
 }
 
 #[derive(Debug)]
 pub(crate) struct TransformationNormalRowDerived {
     pub(crate) log_likelihood: f64,
-    pub(crate) endpoint_q: Vec<LogNormalCdfDiffDerivatives>,
 }
 
 impl TransformationNormalRowQuantityCache {
@@ -136,14 +132,10 @@ impl TransformationNormalRowQuantityCache {
 pub(crate) fn build_transformation_row_derived(
     h: &Array1<f64>,
     h_prime: &Array1<f64>,
-    h_lower: &Array1<f64>,
-    h_upper: &Array1<f64>,
     weights: &Array1<f64>,
 ) -> Result<TransformationNormalRowDerived, String> {
     let n = h_prime.len();
     assert_eq!(h.len(), n);
-    assert_eq!(h_lower.len(), n);
-    assert_eq!(h_upper.len(), n);
     assert_eq!(weights.len(), n);
 
     if let Some((i, value)) = h
@@ -173,19 +165,15 @@ pub(crate) fn build_transformation_row_derived(
         .into());
     }
 
-    // Parallelize the per-row endpoint-normalizer build: each row runs
-    // `log_normal_cdf_diff_derivatives` (two `normal_logcdf` calls, three
-    // 5x5 truncated polynomial multiplies, 32 `signed_normal_pdf_ratio`
-    // calls) which dominates this function's runtime at large scale.
-    // Rows are fully independent — no shared state, no OnceLock guards —
-    // and `LogNormalCdfDiffDerivatives` is a POD struct that's `Send`.
-    // The fast finiteness check rolls all eight derived quantities into
-    // a single short-circuit `||` chain so the named-field error format
-    // only runs on the non-finite slow path.
+    // Rows are fully independent — no shared state, no OnceLock guards — so the
+    // per-row reciprocal-power build parallelizes directly. The fast finiteness
+    // check rolls all seven derived quantities into a single short-circuit `||`
+    // chain so the named-field error format only runs on the non-finite slow
+    // path.
     use rayon::iter::{IntoParallelIterator, ParallelIterator};
-    let rows: Vec<(f64, LogNormalCdfDiffDerivatives)> = (0..n)
+    let rows: Vec<f64> = (0..n)
         .into_par_iter()
-        .map(|i| -> Result<(f64, LogNormalCdfDiffDerivatives), String> {
+        .map(|i| -> Result<f64, String> {
             let hp = h_prime[i];
             let inv_h_prime = 1.0 / hp;
             let inv_h_prime_sq = inv_h_prime * inv_h_prime;
@@ -196,17 +184,13 @@ pub(crate) fn build_transformation_row_derived(
             let weighted_h = w_i * h_i;
             let weighted_inv_h_prime = w_i * inv_h_prime;
             let weighted_inv_h_prime_sq = w_i * inv_h_prime_sq;
-            let q = log_normal_cdf_diff_derivatives(h_upper[i], h_lower[i]).map_err(|e| {
-                format!("TransformationNormalFamily row_quantities: row {i} invalid endpoint normalizer: {e}")
-            })?;
-            let log_z = q.log_z;
-            // Full truncated-normal density log φ(h) + log h' − log Z, including
-            // the −½ln(2π) normalizer so the reported absolute log-likelihood
-            // (and AIC) is comparable to reference tools (mlt/tram). The constant
-            // is coefficient-independent: scores, Hessians, and PIT residuals
-            // are unchanged.
-            let row_ll = w_i
-                * (-0.5 * h_i * h_i - 0.5 * (2.0 * std::f64::consts::PI).ln() + hp.ln() - log_z);
+            // gam#2600: the most-likely-transformation density, log φ(h) + log h',
+            // with NO renormalization by the mass between the fitted support
+            // endpoints. The −½ln(2π) constant is kept so the reported absolute
+            // log-likelihood (and AIC) is comparable to mlt/tram; it is
+            // coefficient-independent.
+            let row_ll =
+                w_i * (-0.5 * h_i * h_i - 0.5 * (2.0 * std::f64::consts::PI).ln() + hp.ln());
             // Fast path: a single short-circuited finiteness check. Only
             // when something is non-finite do we walk the named-field
             // table to produce a precise diagnostic.
@@ -216,8 +200,7 @@ pub(crate) fn build_transformation_row_derived(
                 && inv_h_prime_qu.is_finite()
                 && weighted_h.is_finite()
                 && weighted_inv_h_prime.is_finite()
-                && weighted_inv_h_prime_sq.is_finite()
-                && log_z.is_finite())
+                && weighted_inv_h_prime_sq.is_finite())
             {
                 let derived_values = [
                     ("1/h'", inv_h_prime),
@@ -227,7 +210,6 @@ pub(crate) fn build_transformation_row_derived(
                     ("w*h", weighted_h),
                     ("w/h'", weighted_inv_h_prime),
                     ("w/h'^2", weighted_inv_h_prime_sq),
-                    ("log normalizer", log_z),
                 ];
                 for (name, value) in derived_values {
                     if !value.is_finite() {
@@ -240,7 +222,7 @@ pub(crate) fn build_transformation_row_derived(
                     "TransformationNormalFamily row_quantities: row {i} entered non-finite branch but no named field was non-finite; h'={hp}",
                 ) }.into());
             }
-            Ok((row_ll, q))
+            Ok(row_ll)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -249,11 +231,9 @@ pub(crate) fn build_transformation_row_derived(
     // parallelized the independent per-row computation; the final scalar
     // reduction stays serial to preserve numerical reproducibility against
     // existing tests.
-    let mut log_likelihood = 0.0;
-    let mut endpoint_q = Vec::with_capacity(n);
-    for (row_ll, q) in rows {
+    let mut log_likelihood = 0.0_f64;
+    for row_ll in rows {
         log_likelihood += row_ll;
-        endpoint_q.push(q);
     }
     if !log_likelihood.is_finite() {
         return Err(TransformationNormalError::NonFinite { reason: format!(
@@ -261,10 +241,7 @@ pub(crate) fn build_transformation_row_derived(
         ) }.into());
     }
 
-    Ok(TransformationNormalRowDerived {
-        log_likelihood,
-        endpoint_q,
-    })
+    Ok(TransformationNormalRowDerived { log_likelihood })
 }
 
 impl TransformationNormalFamily {
@@ -944,17 +921,16 @@ impl TransformationNormalFamily {
         let n = alpha.nrows();
         let mut h = Array1::<f64>::zeros(n);
         let mut h_prime = Array1::<f64>::zeros(n);
-        let mut h_lower = Array1::<f64>::zeros(n);
-        let mut h_upper = Array1::<f64>::zeros(n);
-        // Write directly into the four preallocated arrays in parallel; the
-        // previous path collected a `Vec<(f64,f64,f64,f64)>` then serially
-        // scattered into these arrays, costing 32 bytes per row of transient
-        // allocation and a single-threaded post-pass at large scale.
+        // Write directly into the preallocated arrays in parallel; the previous
+        // path collected a `Vec<(f64, f64)>` then serially scattered into these
+        // arrays, costing transient allocation per row and a single-threaded
+        // post-pass at large scale. The chart evaluator also returns the two
+        // support endpoints; since gam#2600 they are not a term of the
+        // likelihood, so the fit does not retain them (predict rebuilds them
+        // from the same evaluator when it needs the certified support).
         ndarray::Zip::indexed(&mut h)
             .and(&mut h_prime)
-            .and(&mut h_lower)
-            .and(&mut h_upper)
-            .par_for_each(|i, h_i, hp_i, lower_i, upper_i| {
+            .par_for_each(|i, h_i, hp_i| {
                 let alpha_row = alpha.row(i);
                 let val_row = self.response_val_basis.row(i);
                 let deriv_row = self.response_deriv_basis.row(i);
@@ -977,8 +953,6 @@ impl TransformationNormalFamily {
                 );
                 *h_i = geometry.h;
                 *hp_i = geometry.h_prime;
-                *lower_i = geometry.lower;
-                *upper_i = geometry.upper;
             });
         for (i, &value) in h.iter().enumerate() {
             if !value.is_finite() {
@@ -1036,21 +1010,13 @@ impl TransformationNormalFamily {
         // is outside the finite representable range, surface an evaluation
         // error so the outer solver can retreat; do not clamp or approximate
         // the analytic Hessian terms.
-        let derived = build_transformation_row_derived(
-            &h,
-            &h_prime,
-            &h_lower,
-            &h_upper,
-            self.effective_weights(),
-        )?;
+        let derived =
+            build_transformation_row_derived(&h, &h_prime, self.effective_weights())?;
         let row_quantities = TransformationNormalRowQuantityCache {
             beta: Arc::new(beta.clone()),
             alpha: Arc::new(alpha),
             h: Arc::new(h),
             h_prime: Arc::new(h_prime),
-            h_lower: Arc::new(h_lower),
-            h_upper: Arc::new(h_upper),
-            endpoint_q: Arc::new(derived.endpoint_q),
             log_likelihood: derived.log_likelihood,
         };
 

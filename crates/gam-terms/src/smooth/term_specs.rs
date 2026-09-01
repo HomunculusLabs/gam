@@ -708,7 +708,17 @@ pub struct FactorSmoothSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FactorSmoothFlavour {
-    Fs { m_null_penalty_orders: Vec<usize> },
+    /// Random factor smooth (`bs='fs'`).
+    ///
+    /// Written as an EMPTY STRUCT variant rather than a unit variant on
+    /// purpose: it used to carry `m_null_penalty_orders: Vec<usize>` (#2791
+    /// retired it — `m` is the marginal penalty order, and the null-penalty
+    /// path is gated by `marginal.double_penalty`), and serde deserializes the
+    /// old `{"Fs":{"m_null_penalty_orders":[2]}}` payload into an empty struct
+    /// variant by ignoring the now-unknown field, whereas a unit variant would
+    /// demand the bare string `"Fs"` and reject every model saved before that
+    /// change.
+    Fs {},
     Sz,
     Re,
 }
@@ -827,6 +837,99 @@ pub struct ParametricResidualizationChart {
     pub correction: Array2<f64>,
 }
 
+/// Which construction `apply_global_smooth_identifiability` chose to make one
+/// term's realized block orthogonal to its constraint block.
+///
+/// Frozen with the block rather than re-decided per rebuild: the containment
+/// test that picks between them is a function of the realized design, hence of
+/// any basis parameter an outer search is moving, and a fit that re-decided it
+/// per trial would step the model DIMENSION mid-search (`Delete` costs a
+/// coefficient direction, `Residualize` costs none).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmoothCollectionGaugeArm {
+    /// `X·Z`, `Z` spanning `null((XᵀC)ᵀ)` — free only under containment, and
+    /// then identical to the pre-`76a520c45` path.
+    Delete,
+    /// `X·T − C·R`, span-preserving — always licensed.
+    Residualize,
+}
+
+/// The COLLECTION's gauge for one smooth term: the realized constraint block it
+/// was made orthogonal to, and which construction did it.
+///
+/// # Why this is freezable, and why a term-local rebuild needs it
+///
+/// `C = [intercept | owned linear axes | owner smooths' realized blocks]` is a
+/// function of the data and of OTHER terms — never of this term's own basis
+/// parameters. So `C` is invariant along an outer search over this term's `ψ`
+/// (a length scale, a curvature, a measure-jet dial), while the two objects
+/// derived FROM it are not: `T` and `R` are both functions of the realized
+/// design, so both move with `ψ`.
+///
+/// That asymmetry is the whole content of gam#2747's second half. The spatial
+/// outer search rebuilds one term LOCALLY per trial and splices the result into
+/// the collection design; a term-local build cannot see `C`, so before this
+/// existed the splice replaced the design and its chart while leaving the
+/// collection's `R` behind, and the fit shipped `X(ψ̂)·Z − C·R(ψ₀)` — a block
+/// orthogonal to nothing, with `‖XᵀC‖/(‖X‖‖C‖)` measured at `4.15e-1` against
+/// the `1e-8` bar the same step asserts whenever it applies a transform.
+///
+/// Carrying the ψ-INDEPENDENT half forward and re-deriving the ψ-dependent half
+/// is therefore not an optimization — it is the only formulation under which
+/// the criterion an outer search minimizes and the model the fit ships are the
+/// same object.
+#[derive(Debug, Clone)]
+pub struct SmoothCollectionGauge {
+    /// Which construction the collection chose.
+    pub arm: SmoothCollectionGaugeArm,
+    /// `C`, `n × q`, exactly as `build_constraint_block` stacked it.
+    pub constraint_block: Array2<f64>,
+    /// Indices into the collection's smooth terms of the owner smooths whose
+    /// realized designs joined `C`, in stack order. Recorded for the same
+    /// reason [`ParametricResidualizationChart::owner_terms`] is.
+    pub owner_terms: Vec<usize>,
+    /// Whether the parametric block led `C`.
+    pub has_parametric_block: bool,
+    /// The TERM-LOCAL identifiability chart the gauged block was derived ON —
+    /// `z_local`, before this gauge composed its own `T` on top of it (gam#2760).
+    ///
+    /// The term's `BasisMetadata` records the COMPOSITION `z_local · T`, which is
+    /// what a predict-time replay wants: predict does not move `ψ`, so replaying
+    /// the composed chart reproduces the fitted block exactly. A caller that DOES
+    /// move `ψ` re-derives `T` here and must therefore rebuild in `z_local`, not
+    /// in the composition — otherwise the collection's orthogonalization is
+    /// applied twice, once in the stale `ψ₀` chart carried by the spec and once
+    /// freshly by this gauge.
+    ///
+    /// Measured before this existed, on a one-Duchon-term collection with
+    /// `C = [1]` and the `Delete` arm: the replay spec carried
+    /// `FrozenTransform(12, 11)`, the doubly-charted rebuild had orthogonality
+    /// residual `1.5e-12` at the fit's own `ℓ` and `9.0e-1` one octave away, so
+    /// the gauge resolved a direction and deleted a column at every `ψ`. The
+    /// term reached the splice one column short and every κ fixture on a Duchon
+    /// term refused in 0.2 s. On the `Residualize` arm the second application is
+    /// idempotent, which is why the same defect was invisible on Matérn.
+    ///
+    /// `None` means the term-local build applied no chart of its own — the usual
+    /// case for the radial families, whose `OrthogonalToParametric` policy defers
+    /// entirely to this gauge.
+    ///
+    /// Like `C` and the arm, this is ψ-INDEPENDENT: it is a center-space
+    /// constraint (`1ᵀα = 0`, a linear-orthogonality frame) or a frozen replay
+    /// chart, never a function of the realized design.
+    pub local_identifiability_transform: Option<Array2<f64>>,
+    /// The width of the TERM-LOCAL block this gauge was derived on, before the
+    /// arm ran (gam#2760).
+    ///
+    /// The collection's realized width is this minus whatever the arm removed,
+    /// and both halves are needed to read a rebuild that comes out narrow. A
+    /// rebuild whose LOCAL width differs from this is not the same basis and is
+    /// a defect; a rebuild that matches here and still comes out narrow after the
+    /// arm has hit a ψ at which the realized design loses rank in this gauge's
+    /// chart — a statement about the trial point, not about the rebuild.
+    pub local_columns: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct SmoothTerm {
     pub name: String,
@@ -886,6 +989,17 @@ pub struct SmoothTerm {
     /// rebuild subtracts the same correction instead of emitting a design the
     /// fitted coefficients do not match.
     pub parametric_residualization: Option<ParametricResidualizationChart>,
+    /// The ψ-INDEPENDENT half of the global step, exported so a TERM-LOCAL
+    /// rebuild can put its result back into this collection's gauge instead of
+    /// silently leaving it out (#2747). `None` when the collection applied no
+    /// global transform to this term, and therefore also on every replay — a
+    /// replay is already in the gauge by construction.
+    ///
+    /// This is deliberately NOT frozen onto `SmoothTermSpec`: it is a fit-time
+    /// object for fit-time rebuilds. Predict-time replay is served by
+    /// [`ParametricResidualizationChart`] / `frozen_global_orthogonality`,
+    /// which carry the ψ-DEPENDENT half the fit settled on.
+    pub collection_gauge: Option<SmoothCollectionGauge>,
 }
 
 impl SmoothTerm {
@@ -3742,6 +3856,17 @@ pub fn spatial_term_has_locked_kappa(spec: &TermCollectionSpec, term_idx: usize)
     explicitly_fixed && !spatial_term_uses_per_axis_psi(spec, term_idx)
 }
 
+/// Returns `true` when every spatial term in `spec` has a locked kernel scale
+/// (explicit `length_scale=X` without anisotropy) and therefore contributes no
+/// outer ψ/κ optimization axis. Empty term collections also return `true` —
+/// there are no kappas to optimize.
+///
+/// Used by family entry points that want to honor a user-supplied scalar length
+/// scale exactly: when all spatial terms are locked the n-block joint-spatial
+/// outer solver has nothing to optimize, and routing through it merely spends
+/// ~80 outer iters chasing a stalled ARC at the user's chosen ρ. Skipping
+/// straight to the rho-only path avoids that waste and respects the user's
+/// explicit kernel-scale input.
 pub fn all_spatial_terms_kappa_fixed(spec: &TermCollectionSpec) -> bool {
     spec.smooth_terms.iter().enumerate().all(|(idx, _)| {
         !spatial_term_supports_hyper_optimization(spec, idx)
@@ -8263,28 +8388,30 @@ pub fn build_factor_smooth(
         );
     }
 
-    // `Fs` (order ≥ 1, the default) is the random-effect flavour: it penalizes
-    // each null-space dimension of the marginal wiggliness penalty separately
-    // below (mgcv's `bs="fs"` construction). That replaces the marginal's single
-    // *combined* double penalty, so disable the latter here to avoid penalizing
-    // the null space twice (once combined, once per dimension). The explicit
-    // `m=0` opt-out keeps the legacy combined double penalty and adds no
-    // per-dimension penalties.
-    let use_per_dim_null = matches!(
-        &spec.flavour,
-        FactorSmoothFlavour::Fs { m_null_penalty_orders }
-            if m_null_penalty_orders.iter().copied().max().unwrap_or(0) >= 1
-    );
+    // `Fs` is the random-effect flavour: it penalizes each null-space dimension
+    // of the marginal wiggliness penalty separately below (mgcv's `bs="fs"`
+    // construction), which REPLACES the marginal's single *combined* double
+    // penalty. `spec.marginal.double_penalty` — the DSL `double_penalty=` — is
+    // the one switch for "is the null space penalized at all" (#2791). The
+    // combined spelling of that same penalty is not separately reachable,
+    // because the per-dimension form strictly generalizes it (equal λ’s recover
+    // it) and REML picks; it used to be reachable as `m=0`, which cost `m` its
+    // meaning as the marginal penalty order.
+    let use_per_dim_null =
+        matches!(&spec.flavour, FactorSmoothFlavour::Fs { .. }) && spec.marginal.double_penalty;
 
     // Build the shared marginal design + penalties from the 1-D B-spline.
     // `Re` forces a degree-1 marginal (linear span) and replaces the marginal
     // wiggliness with an identity ridge below; `Fs` keeps the user's marginal
     // (cubic by default) and, under the per-dimension null path, gets its null
     // space penalized one dimension at a time after replication.
+    // The marginal is always built WITHOUT its combined null ridge on this path.
+    // Under `Fs` the per-dimension null penalties below supply the null-space
+    // shrinkage when it is switched on (building both would penalize the null
+    // space twice); under `Re` the whole marginal penalty set is discarded and
+    // replaced by one identity ridge per parametric coordinate.
     let mut marginal_spec = factor_smooth_marginal_for_replay(&spec.marginal);
-    if use_per_dim_null {
-        marginal_spec.double_penalty = false;
-    }
+    marginal_spec.double_penalty = false;
     let inner_term = SmoothTermSpec {
             frozen_parametric_residualization: None,
         name: format!("{term_name}::marginal"),
@@ -8433,9 +8560,8 @@ pub fn build_factor_smooth(
     // dimension. With linear data REML drives the curvature λ up and degrades
     // `fs` to a linear random slope (edf → ≈2/group); with genuine curvature the
     // wiggliness λ stays small and the wiggle survives (data-adaptive, not a
-    // cap). Gated by `m_null_penalty_orders`: order ≥ 1 (default) enables the
-    // per-dimension null penalties; `m=0` keeps the legacy combined double
-    // penalty and adds nothing here.
+    // cap). Gated by `marginal.double_penalty` (the DSL `double_penalty=`),
+    // which on this flavour means exactly "penalize the null space too".
     if use_per_dim_null
         && let Some(Some(z)) = inner
             .active_penalties
@@ -9714,6 +9840,9 @@ pub fn build_smooth_design_withworkspace_unvalidated(
             kronecker_factored: built.kronecker_factored.take(),
             joint_null_rotation: applied_rotation,
             unabsorbed_global_orthogonality: None,
+            // The RAW build precedes the global step, so it decides no gauge;
+            // `apply_global_smooth_identifiability` fills this in (#2747).
+            collection_gauge: None,
         });
 
         col_start = col_end;
@@ -9840,9 +9969,7 @@ mod factor_smooth_heldout_group_tests {
     fn fs_heldout_group_stays_strict() {
         let data = array![[0.1, 0.0], [0.5, 1.0], [0.9, 7.0]];
         let term = factor_smooth_term(
-            FactorSmoothFlavour::Fs {
-                m_null_penalty_orders: vec![1],
-            },
+            FactorSmoothFlavour::Fs {},
             Some(frozen_bits()),
         );
         let mut workspace = BasisWorkspace::default();

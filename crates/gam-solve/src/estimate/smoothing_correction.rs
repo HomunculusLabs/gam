@@ -980,32 +980,63 @@ pub(crate) fn invert_identified_rho_hessian(
     })
 }
 
-/// Cosine threshold above which two penalty matrices are treated as the
-/// structural-redundancy signature in [INDEF-HESS] diagnostics. Pairs with
-/// cosine above this AND a dominant-negative eigenvector concentrated on
-/// the pair's antisymmetric direction trigger the headline
-/// `structural_redundancy_detected` line.
-const INDEF_HESS_STRUCTURAL_REDUNDANCY_COS: f64 = 0.999;
+/// Relative-defect ceiling under which a pair is reported as a NEAR degeneracy
+/// in `[INDEF-HESS]` diagnostics — the `near_degenerate_not_an_invariance`
+/// line (#2676).
+///
+/// Purely a reporting bound: no verdict is taken on it, and the line it gates
+/// exists to say that the penalty map certifies NOTHING for this pair. The
+/// EXACT case is decided separately, at the residual norm's own arithmetic
+/// floor `sqrt(block_dim^2) * EPSILON`, which is derived rather than chosen.
+///
+/// This replaces a `cos > 0.999` bar, which is `delta > 4.5e-2` — a pair four
+/// per cent apart triggering a line that said "structural_redundancy_detected".
+const INDEF_HESS_NEAR_DEGENERACY_DEFECT: f64 = 1e-1;
+
+/// How much of the dominant-negative eigenvector must lie on a pair's
+/// antisymmetric direction before the pair is named as its cause. `1/sqrt(2)`
+/// is the value that direction takes when the eigenvector IS the pair's
+/// antisymmetric direction and nothing else, so this admits any eigenvector at
+/// least half-aligned with it in energy.
+const INDEF_HESS_ANTISYMMETRIC_ALIGNMENT: f64 = 0.5;
 
 /// Penalty-count crossover at which the [INDEF-HESS] pair dump switches from
 /// the full O(k²) grid to top-3 pairs only. Bounds log volume on large-scale
 /// rho_dim while keeping the per-pair detail useful for small models.
 const INDEF_HESS_PAIR_DUMP_GRID_MAX_K: usize = 16;
 
-/// Number of top-cosine pairs to dump when `n_pen > INDEF_HESS_PAIR_DUMP_GRID_MAX_K`.
+/// Number of smallest-defect pairs to dump when
+/// `n_pen > INDEF_HESS_PAIR_DUMP_GRID_MAX_K`.
 const INDEF_HESS_PAIR_DUMP_TOP_N: usize = 3;
 
 /// Diagnostic emitted whenever the post-fit rho-Hessian has at least one
 /// non-identified direction (active_rank < n). Reports the eigendecomposition,
-/// the dominant-negative eigenvector, per-eigenpair classification, and pairwise
-/// penalty cosines tr(SᵢSⱼ)/√(tr(Sᵢ²)·tr(Sⱼ²)). A pair cosine ≈ 1.0 combined
-/// with the negative eigenvector concentrated on that pair's antisymmetric
-/// direction is the structural Z₂-saddle signature.
+/// the dominant-negative eigenvector, per-eigenpair classification, and the
+/// pairwise proportionality DEFECT
+/// `delta_ij = min_c ||S_j - c S_i||_F / ||S_i||_F`.
 ///
-/// Output is capped: when the penalty count exceeds 16, only the top-3
-/// highest-cosine pairs are dumped instead of the full O(k²) grid. When the
-/// structural-redundancy signature is detected, a single headline line is
-/// emitted with the offending pair, cosine, and antisymmetric projection.
+/// # Why the defect and not the cosine (#2676)
+///
+/// `1 - cos = delta^2 / 2`, so the cosine is the defect squared and loses every
+/// digit of a defect under `sqrt(EPSILON)`. This dump printed
+/// `cos = 1.000000  one_minus_cos = 2.42e-9` on the `geo_disease_matern`
+/// fixture, which is `delta = 7.0e-5` — an operator pair measurably NOT
+/// proportional, reported under a headline that said
+/// `structural_redundancy_detected`. That reading is the whole of #2676's
+/// history. The dump now separates the two cases and names them:
+///
+/// * `structural_redundancy_detected` — `delta` at the residual norm's own
+///   arithmetic floor `sqrt(block_dim^2) * EPSILON`. The criterion IS exactly
+///   constant along the pair's antisymmetric direction and the certificate
+///   deflates it.
+/// * `near_degenerate_not_an_invariance` — `delta` measurably above that floor.
+///   The outer Hessian is ill-conditioned along the direction, the criterion
+///   carries genuine curvature of order `delta^2` there, the penalty map
+///   certifies nothing, and a negative curvature is a resolution question
+///   rather than a structure one.
+///
+/// Output is capped: when the penalty count exceeds 16, only the three
+/// smallest-defect pairs are dumped instead of the full O(k²) grid.
 ///
 /// # The reparameterisation split (#2676)
 ///
@@ -1206,14 +1237,24 @@ fn dump_indefinite_rho_hessian_diagnostic(
         (0..n_pen).map(|i| canonical[i].rank()).collect::<Vec<_>>(),
     );
 
-    // Collect compatible pairs with their cosines.
-    struct PairCos {
+    // Collect compatible pairs with their proportionality DEFECT.
+    //
+    // #2676: this dump used to carry `cos` and `1 - cos`, and that is the
+    // coordinate the whole issue got lost in. With
+    // `delta = min_c ||S_j - c S_i||_F / ||S_i||_F` the relation is
+    // `1 - cos = delta^2 / 2`, so a pair `1.9e-5` apart prints as
+    // `cos = 1.000000` / `one_minus_cos = 1.8e-10` and reads as an identity.
+    // `delta` is formed directly from the residual, never through `1 - cos`,
+    // and it is what the penalty map's Gram is judging when it certifies a
+    // nullity.
+    struct PairDefect {
         i: usize,
         j: usize,
-        cos: f64,
+        defect: f64,
+        scale: f64,
         antisym_proj: f64,
     }
-    let mut pairs: Vec<PairCos> = Vec::new();
+    let mut pairs: Vec<PairDefect> = Vec::new();
     for i in 0..n_pen {
         for j in (i + 1)..n_pen {
             let ci = &canonical[i];
@@ -1229,31 +1270,41 @@ fn dump_indefinite_rho_hessian_diagnostic(
                     dot += local_i[[r, c]] * local_j[[r, c]];
                 }
             }
-            let cos = if tr_aa[i] > 0.0 && tr_aa[j] > 0.0 {
-                dot / (tr_aa[i].sqrt() * tr_aa[j].sqrt())
+            let (defect, scale) = if tr_aa[i] > 0.0 && tr_aa[j] > 0.0 {
+                let scale = dot / tr_aa[i];
+                let mut residual_sq = 0.0;
+                for r in 0..local_i.nrows() {
+                    for c in 0..local_i.ncols() {
+                        let residual = local_j[[r, c]] - scale * local_i[[r, c]];
+                        residual_sq += residual * residual;
+                    }
+                }
+                ((residual_sq / tr_aa[i]).sqrt(), scale)
             } else {
-                f64::NAN
+                (f64::NAN, f64::NAN)
             };
             let antisym_proj = if v_neg.len() == n_pen {
                 (v_neg[i] - v_neg[j]) / std::f64::consts::SQRT_2
             } else {
                 f64::NAN
             };
-            pairs.push(PairCos {
+            pairs.push(PairDefect {
                 i,
                 j,
-                cos,
+                defect,
+                scale,
                 antisym_proj,
             });
         }
     }
 
-    // Headline: structural redundancy detection. Pair cosine above the
-    // structural-redundancy threshold AND the dominant-negative eigenvector's
+    // Headline: structural redundancy detection. Pair defect at the residual
+    // norm's own arithmetic floor AND the dominant-negative eigenvector's
     // top-2 absolute components on indices (i, j) with opposite signs.
     if min_eig < 0.0 && v_neg.len() == n_pen {
         for p in &pairs {
-            if !(p.cos > INDEF_HESS_STRUCTURAL_REDUNDANCY_COS) {
+            let entries = canonical[p.i].local.len() as f64;
+            if !(p.defect <= entries.sqrt() * f64::EPSILON) {
                 continue;
             }
             let mut indexed: Vec<(usize, f64)> = v_neg
@@ -1282,28 +1333,65 @@ fn dump_indefinite_rho_hessian_diagnostic(
                 continue;
             }
             log::warn!(
-                "[INDEF-HESS] structural_redundancy_detected pair=({},{}) cos={:.6} \
-                 one_minus_cos={:.6e} antisym_proj={:.4e}",
+                "[INDEF-HESS] structural_redundancy_detected pair=({},{}) relative_defect={:.6e} \
+                 best_scale={:.6e} antisym_proj={:.4e} (proportional to the arithmetic that \
+                 formed them, so the criterion IS exactly constant along this direction)",
                 p.i,
                 p.j,
-                p.cos,
-                1.0 - p.cos,
+                p.defect,
+                p.scale,
                 p.antisym_proj,
             );
             break;
         }
     }
 
-    // Cap output: dump the full grid when small, otherwise only the top-N
-    // highest-cosine pairs.
+    // A near-degenerate pair that is NOT an invariance, said as such (#2676).
+    //
+    // Without this line the dump was silent about the case that actually
+    // produced every `geo_disease_*_matern` refusal: a pair whose defect is
+    // small enough to make the outer Hessian near-singular along the
+    // antisymmetric direction, and large enough that the criterion carries
+    // genuine curvature there and nothing is deflated. The old dump printed
+    // `cos = 1.000000` for exactly this case and let the reader conclude the
+    // opposite.
+    if min_eig < 0.0 && v_neg.len() == n_pen {
+        for p in &pairs {
+            let entries = canonical[p.i].local.len() as f64;
+            let arithmetic_floor = entries.sqrt() * f64::EPSILON;
+            if !(p.defect > arithmetic_floor)
+                || !(p.defect <= INDEF_HESS_NEAR_DEGENERACY_DEFECT)
+                || p.antisym_proj.abs() < INDEF_HESS_ANTISYMMETRIC_ALIGNMENT
+            {
+                continue;
+            }
+            log::warn!(
+                "[INDEF-HESS] near_degenerate_not_an_invariance pair=({},{}) \
+                 relative_defect={:.6e} arithmetic_floor={arithmetic_floor:.6e} \
+                 antisym_proj={:.4e} — this pair is MEASURABLY distinct ({:.3e}x the floor), so \
+                 the criterion is NOT constant along their antisymmetric direction, the penalty \
+                 map certifies NOTHING here, and no direction is deflated. A negative curvature \
+                 on this direction is a resolution question, not a structure one (#2676)",
+                p.i,
+                p.j,
+                p.defect,
+                p.antisym_proj,
+                p.defect / arithmetic_floor,
+            );
+            break;
+        }
+    }
+
+    // Cap output: dump the full grid when small, otherwise only the N smallest
+    // defects — the near-proportional end is the informative one.
     if n_pen <= INDEF_HESS_PAIR_DUMP_GRID_MAX_K {
         for p in &pairs {
             log::warn!(
-                "[INDEF-HESS] pair=({},{}) cos={:.6} one_minus_cos={:.6e} tr_ii={:.4e} tr_jj={:.4e} v_neg[i]-v_neg[j]/sqrt2={:.4e}",
+                "[INDEF-HESS] pair=({},{}) relative_defect={:.6e} best_scale={:.6e} tr_ii={:.4e} tr_jj={:.4e} v_neg[i]-v_neg[j]/sqrt2={:.4e}",
                 p.i,
                 p.j,
-                p.cos,
-                1.0 - p.cos,
+                p.defect,
+                p.scale,
                 tr_aa[p.i],
                 tr_aa[p.j],
                 p.antisym_proj,
@@ -1312,19 +1400,19 @@ fn dump_indefinite_rho_hessian_diagnostic(
         // Note: we no longer log a "ranges_differ" line per skipped pair to
         // keep the diagnostic O(k). The headline pair already captures intent.
     } else {
-        let mut top: Vec<&PairCos> = pairs.iter().filter(|p| p.cos.is_finite()).collect();
+        let mut top: Vec<&PairDefect> = pairs.iter().filter(|p| p.defect.is_finite()).collect();
         top.sort_by(|a, b| {
-            b.cos
-                .abs()
-                .partial_cmp(&a.cos.abs())
+            a.defect
+                .partial_cmp(&b.defect)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         for p in top.iter().take(INDEF_HESS_PAIR_DUMP_TOP_N) {
             log::warn!(
-                "[INDEF-HESS] top_pair=({},{}) cos={:.6} tr_ii={:.4e} tr_jj={:.4e} v_neg[i]-v_neg[j]/sqrt2={:.4e}",
+                "[INDEF-HESS] top_pair=({},{}) relative_defect={:.6e} best_scale={:.6e} tr_ii={:.4e} tr_jj={:.4e} v_neg[i]-v_neg[j]/sqrt2={:.4e}",
                 p.i,
                 p.j,
-                p.cos,
+                p.defect,
+                p.scale,
                 tr_aa[p.i],
                 tr_aa[p.j],
                 p.antisym_proj,

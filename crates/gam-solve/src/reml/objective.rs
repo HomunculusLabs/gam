@@ -1482,17 +1482,25 @@ impl<'a> RemlState<'a> {
         // benefit. Every c-nontrivial family (Probit / Logit / cloglog /
         // Poisson / Gamma / SAS / GAMLSS noise blocks / …) gets the intrinsic
         // object unconditionally.
-        let (hessian_logdet_correction, penalty_subspace_trace) =
+        //
+        // The corrected value and this kernel are ONE object (#2765): the
+        // scalar rides on the kernel, so no downstream lane can inherit the
+        // corrected `log|H_pen|₊` while declining the `H_pen⁺` that
+        // differentiates it. `InnerSolution::hessian_logdet_correction` keeps
+        // its documented meaning — a uniform curvature rescale — and nothing
+        // else.
+        let penalty_subspace_trace =
             if matches!(hessian_mode, PseudoLogdetMode::Smooth) && c_nontrivial {
                 let (log_det_h_plus, kernel) =
                     Self::intrinsic_hessian_pseudo_logdet_parts(h_for_operator.as_ref(), penalty_rank)?;
-                (
-                    log_det_h_plus - hessian_op.logdet(),
-                    kernel.map(std::sync::Arc::new),
-                )
+                kernel.map(|mut kernel| {
+                    kernel.logdet_correction = log_det_h_plus - hessian_op.logdet();
+                    std::sync::Arc::new(kernel)
+                })
             } else {
-                (0.0, None)
+                None
             };
+        let hessian_logdet_correction = 0.0_f64;
 
         // #1271 diagnostic: dump the REML logdet internals at every dense
         // evaluation so the rank/logdet mechanism is visible in the test log.
@@ -1934,17 +1942,20 @@ impl<'a> RemlState<'a> {
         // for the full #901 derivation (why range(Sλ)-projected value+kernel
         // was the wrong object, and why `tr(H_pen⁺ Ḣ)` is exact for every
         // drift including moving-subspace ψ directions).
-        let (hessian_logdet_correction, penalty_subspace_trace) =
+        // Value and kernel are one object (#2765) — see the twin site in
+        // `build_dense_assembly`.
+        let penalty_subspace_trace =
             if matches!(hessian_mode, PseudoLogdetMode::Smooth) && c_nontrivial {
                 let (log_det_h_plus, kernel) =
                     Self::intrinsic_hessian_pseudo_logdet_parts(&h_total_original, penalty_rank)?;
-                (
-                    log_det_h_plus - hessian_op.logdet(),
-                    kernel.map(std::sync::Arc::new),
-                )
+                kernel.map(|mut kernel| {
+                    kernel.logdet_correction = log_det_h_plus - hessian_op.logdet();
+                    std::sync::Arc::new(kernel)
+                })
             } else {
-                (0.0, None)
+                None
             };
+        let hessian_logdet_correction = 0.0_f64;
 
         // #1271 diagnostic (twin of the build_dense_assembly probe): this is the
         // path the unconstrained Gaussian tp fit actually takes. Dump REML

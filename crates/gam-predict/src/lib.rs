@@ -1448,7 +1448,6 @@ impl PosteriorMeanOptions {
             include_observation_interval: false,
         }
     }
-
 }
 
 /// Compute and attach TransformEta confidence bounds to a posterior-mean result.
@@ -1494,46 +1493,19 @@ pub fn enrich_posterior_mean_bounds(
     )
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InferenceCovarianceMode {
-    /// Use conditional posterior covariance only:
-    ///   Var(beta | lambda_hat) ~= H_{rho_hat}^{-1}.
-    Conditional,
-    /// Require first-order smoothing-corrected covariance:
-    ///   Var(beta) ~= H_{rho_hat}^{-1} + J Var(rho_hat) J^T.
-    /// Absence is an error; this mode never substitutes conditional covariance.
-    SmoothingCorrected,
-}
-
-impl InferenceCovarianceMode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Conditional => "conditional",
-            Self::SmoothingCorrected => "smoothing-corrected",
-        }
-    }
-}
-
-impl std::str::FromStr for InferenceCovarianceMode {
-    type Err = String;
-
-    /// The one public vocabulary for the covariance-mode knob across every
-    /// surface (`gam predict --covariance-mode`, Python `covariance_mode`).
-    /// The CLI historically said "corrected" and the Python bindings said
-    /// "smoothing" for the SAME mode; both spellings (plus the enum's own
-    /// canonical "smoothing-corrected") are accepted here so the vocabulary
-    /// cannot drift per frontend again. Unknown strings are a hard error so a
-    /// typo never silently degrades to a default covariance.
-    fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "conditional" => Ok(Self::Conditional),
-            "corrected" | "smoothing" | "smoothing-corrected" => Ok(Self::SmoothingCorrected),
-            other => Err(format!(
-                "covariance mode must be one of \"conditional\", \"corrected\", or \"smoothing\"; got \"{other}\""
-            )),
-        }
-    }
-}
+/// The covariance-definition axis, re-exported from where the correction it
+/// names is produced.
+///
+/// This enum used to be declared here, which put it ABOVE `gam-models` in the
+/// crate graph and therefore out of reach of the multinomial driver — the one
+/// family that owns its own predict surface. The consequence was not stylistic:
+/// the multinomial had no way to say which covariance its bands were built
+/// from, so it silently published conditional-only intervals while every other
+/// family in the library defaulted to `SmoothingCorrected` (gam#2612). The
+/// vocabulary now lives beside `SmoothingCorrectionMethod` in `gam-solve`,
+/// which both crates already depend on, and is re-exported here so every
+/// existing `gam_predict::InferenceCovarianceMode` path is unchanged.
+pub use gam_solve::model_types::InferenceCovarianceMode;
 
 /// Per-axis training support range used by boundary and OOD corrections.
 /// For each predictor axis we record the empirical [min, max] from training.

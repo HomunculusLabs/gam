@@ -9,7 +9,7 @@
 // `gam_solve::*`, basis/term machinery as `gam_terms::*`).
 use gam_terms::basis::{
     BasisError, BasisMetadata, BasisPsiDerivativeResult, BasisPsiSecondDerivativeResult,
-    BasisWorkspace, CenterStrategy, MaternIdentifiability, PenaltySource,
+    BasisWorkspace, CenterStrategy, MaternIdentifiability, PenaltySource, SpatialIdentifiability,
     build_constant_curvature_basis_kappa_derivatives,
     build_matern_basis_log_kappa_aniso_derivatives, build_matern_basis_log_kappa_derivatives,
     build_matern_collocation_operator_matrices, build_measure_jet_basis_psi_derivatives,
@@ -169,6 +169,11 @@ include!("measure_jet_range_seed.rs");
 // against. A self-contained inference subsystem that only ever consumed the
 // driver's fit; same reason as the three above.
 include!("smooth_term_lr.rs");
+// #2774: the per-smooth basis-adequacy report — the enrichment each smooth is
+// tested against, and the fit-time advisory a failing term produces. Same shape
+// as the LR test above: a self-contained inference subsystem over the driver's
+// fit, kept out of the driver file for the same reason.
+include!("basis_adequacy.rs");
 
 #[cfg(test)]
 mod test_support {

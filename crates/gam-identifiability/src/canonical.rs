@@ -59,8 +59,8 @@ use gam_linalg::faer_ndarray::{
 use gam_linalg::matrix::{CoefficientTransformOperator, DenseDesignMatrix, DesignMatrix};
 use gam_problem::Gauge;
 use gam_problem::{
-    BlockEffectiveJacobian, CustomFamilyError, FamilyLinearizationState, ParameterBlockSpec,
-    PenaltyMatrix,
+    BlockEffectiveJacobian, CoefficientCoordinate, CustomFamilyError, FamilyLinearizationState,
+    ParameterBlockSpec, PenaltyMatrix,
 };
 
 enum BlockJacobianSource {
@@ -400,6 +400,7 @@ pub struct CanonicalSpecs {
 /// `rank(J)`, `rank(J_can)`, and all per-block `T_i` shapes.
 pub fn canonicalize_for_identifiability(
     specs: &[ParameterBlockSpec],
+    coordinates: &[CoefficientCoordinate],
 ) -> Result<CanonicalSpecs, CustomFamilyError> {
     // Robustness is unconditional: always attempt the exact W-metric
     // orthogonalisation pass before the fail-closed audit. `try_orthogonalize_
@@ -409,7 +410,7 @@ pub fn canonicalize_for_identifiability(
     // any multi-channel `stacked_design` block, and on clean designs), so this is
     // byte-identical wherever there is nothing
     // to orthogonalise.
-    canonicalize_for_identifiability_inner(specs, true, None)
+    canonicalize_for_identifiability_inner(specs, coordinates, true, None)
 }
 
 /// Like [`canonicalize_for_identifiability`], but linearizes every family-owned
@@ -436,9 +437,10 @@ pub fn canonicalize_for_identifiability(
 /// identifying curvature.
 pub fn canonicalize_for_identifiability_with_operating_scalars(
     specs: &[ParameterBlockSpec],
+    coordinates: &[CoefficientCoordinate],
     operating_scalars: Option<Arc<dyn std::any::Any + Send + Sync>>,
 ) -> Result<CanonicalSpecs, CustomFamilyError> {
-    canonicalize_for_identifiability_inner(specs, true, operating_scalars)
+    canonicalize_for_identifiability_inner(specs, coordinates, true, operating_scalars)
 }
 
 /// Core canonicalisation worker.
@@ -639,9 +641,23 @@ fn flat_audit_convention_rank(j: &Array2<f64>, blocks: &[FlatRankBlock]) -> usiz
 
 fn canonicalize_for_identifiability_inner(
     specs: &[ParameterBlockSpec],
+    coordinates: &[CoefficientCoordinate],
     orthogonalize: bool,
     operating_scalars: Option<Arc<dyn std::any::Any + Send + Sync>>,
 ) -> Result<CanonicalSpecs, CustomFamilyError> {
+    // One declaration per block or the veto below cannot be read; a caller that
+    // supplied the wrong number of them has not stated the property at all.
+    if coordinates.len() != specs.len() {
+        return Err(CustomFamilyError::DimensionMismatch {
+            reason: format!(
+                "canonicalize_for_identifiability: {} coefficient-coordinate declaration(s) \
+                 for {} parameter block(s); every block must declare whether its coordinate \
+                 is reparameterisable (#2748)",
+                coordinates.len(),
+                specs.len(),
+            ),
+        });
+    }
     // Exact orthogonalisation of structural confounds. Runs only on the top-
     // level entry AND only where the design is single-channel dense (the general
     // multi-channel coupled path is handled by the Tier-B joint-Newton Jeffreys
@@ -649,7 +665,7 @@ fn canonicalize_for_identifiability_inner(
     // the orthogonaliser cannot express as a per-block transform, it falls
     // through to the unmodified audit gate below — never worse than today.
     if orthogonalize {
-        if let Some(canon) = try_orthogonalize_blocks(specs)? {
+        if let Some(canon) = try_orthogonalize_blocks(specs, coordinates)? {
             return Ok(canon);
         }
     }
@@ -1046,10 +1062,27 @@ fn canonicalize_for_identifiability_inner(
                     .is_some_and(|cb| cb.locks_raw_width_reduction())
         })
     };
+    // The DECLARED form of the same property the three predicates above infer
+    // from spec fields (#2748). `stacked_design.is_some()`, a zero effective
+    // Jacobian and `locks_raw_width_reduction()` are each a proxy for "this
+    // block's coefficient coordinate is not just a basis" — a proxy that only
+    // covers the families that happen to use that field. The monotone
+    // link-wiggle warp uses none of them and is the same case: its family
+    // imposes `beta_w >= 0` componentwise on these coordinates and rebuilds its
+    // design at this exact width, so a narrower spec is a different model. A
+    // block whose coordinate is `Structural` keeps its raw width here for
+    // exactly the reason the proxies keep theirs.
+    let coordinate_is_structural = |name: &str| -> bool {
+        specs
+            .iter()
+            .zip(coordinates.iter())
+            .any(|(spec, coordinate)| spec.name == name && coordinate.is_structural())
+    };
     let dropped_on_owned_block = audit.dropped_columns.iter().any(|drop| {
         owns_stacked_geometry(&drop.block)
             || owns_dynamic_zero_jacobian_geometry(&drop.block)
             || locks_raw_width(&drop.block)
+            || coordinate_is_structural(&drop.block)
             || dropped_column_is_dead(drop)
     });
     if dropped_on_owned_block {
@@ -1690,6 +1723,7 @@ fn canonicalize_for_identifiability_inner(
 /// structural condition also yields `None`.
 fn try_orthogonalize_blocks(
     specs: &[ParameterBlockSpec],
+    coordinates: &[CoefficientCoordinate],
 ) -> Result<Option<CanonicalSpecs>, CustomFamilyError> {
     if specs.len() < 2 {
         return Ok(None);
@@ -1813,6 +1847,53 @@ fn try_orthogonalize_blocks(
         }
     }
 
+    // A block whose COEFFICIENT COORDINATE is model content cannot be absorbed
+    // (#2748). The reparameterisation below is exact on the block's column
+    // SPACE — design, penalties and warm start are all pulled through `V_b` —
+    // and that is the whole of the model only when the coordinate is a mere
+    // basis. For the monotone link-wiggle warp it is not: the family's
+    // `block_linear_constraints` returns `I·beta_w >= 0` sized from
+    // `spec.design.ncols()`, so after `beta -> V' beta` it would return a cone
+    // in ROTATED coordinates, `post_update_block_beta` would project onto that
+    // cone, and the learned link would silently stop being monotone. The
+    // width mismatch such a block's `block_geometry` raises is the loud version
+    // of the same defect; on a path where the widths happened to agree there
+    // would be no error at all.
+    //
+    // Declining is safe by construction: the caller falls through to the
+    // unmodified audit gate, which is where every fit lived before this pass
+    // existed. Note this is NOT the equal-priority guard above — an ordering
+    // between the two blocks may well exist (and on this path it does, which is
+    // why `gauge_priority` was demoted in the first place). An ordering says
+    // WHOSE column yields; it does not say that the yielding block's coordinate
+    // may be rotated.
+    for annotation in ortho
+        .direction_annotations
+        .iter()
+        .filter(|annotation| annotation.absorbed_width > 0)
+    {
+        let absorbed = annotation.block_idx;
+        if coordinates
+            .get(absorbed)
+            .is_some_and(|coordinate| coordinate.is_structural())
+        {
+            log::info!(
+                "[CANON] orthogonalisation declined: block {} ('{}') would lose {} of its {} \
+                 columns, but its COEFFICIENT COORDINATE is structural (a componentwise cone, a \
+                 projected box, or a family geometry rebuilt at raw width), so no change of \
+                 basis or width preserves the model; deferring to the audit gate (#2748)",
+                absorbed,
+                specs
+                    .get(absorbed)
+                    .map(|spec| spec.name.as_str())
+                    .unwrap_or("<out of range>"),
+                annotation.absorbed_width,
+                annotation.raw_width,
+            );
+            return Ok(None);
+        }
+    }
+
     for annotation in ortho
         .direction_annotations
         .iter()
@@ -1918,7 +1999,7 @@ fn try_orthogonalize_blocks(
     // and defers on any family-owned-geometry (`jacobian_callback`) block, so the
     // reparameterised specs re-audited here carry no operating-point callbacks;
     // linearize at the zero/init point (`None`).
-    let inner = canonicalize_for_identifiability_inner(&ortho_specs, false, None)?;
+    let inner = canonicalize_for_identifiability_inner(&ortho_specs, coordinates, false, None)?;
 
     // Compose the round-trip transform: β_raw = V_b · (T_inner · θ).
     // `inner.gauge.block_transform(b)` is T_inner (selection/identity from
@@ -2045,6 +2126,14 @@ mod tests {
 
     use ndarray::Array2;
 
+    /// Every block's coefficient coordinate is a plain basis of its column
+    /// space, which is the assumption these fixtures are about. A fixture that
+    /// exercises the structural veto instead declares `Structural` at its own
+    /// call site, so no test inherits the freedom by default (#2748).
+    fn spanning_coordinates(specs: &[ParameterBlockSpec]) -> Vec<CoefficientCoordinate> {
+        vec![CoefficientCoordinate::Spanning; specs.len()]
+    }
+
     fn linspace(n: usize) -> ndarray::Array1<f64> {
         if n <= 1 {
             return ndarray::Array1::<f64>::zeros(n.max(1));
@@ -2065,7 +2154,8 @@ mod tests {
             s[[i, 1]] = x[i] * x[i] * x[i];
         }
         let specs = [spec_from_dense("p", p), spec_from_dense("s", s)];
-        let canon = canonicalize_for_identifiability(&specs).expect("clean canonical must succeed");
+        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
+            .expect("clean canonical must succeed");
         assert_eq!(canon.reduced_specs.len(), 2);
         assert_eq!(canon.gauge.block_transform(0).dim(), (2, 2));
         assert_eq!(canon.gauge.block_transform(1).dim(), (2, 2));
@@ -2097,7 +2187,7 @@ mod tests {
             spec_from_dense("intercept", parametric),
             spec_from_dense("smooth_with_const", smooth),
         ];
-        let err = canonicalize_for_identifiability(&specs)
+        let err = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
             .expect_err("aliased smooth-constant + intercept must refuse, not reduce");
         match err {
             CustomFamilyError::IdentifiabilityFailure { audit } => {
@@ -2177,7 +2267,7 @@ mod tests {
         // With distinct gauge_priority values, the audit recognises that
         // the rank deficiency is gauge-resolvable and returns Ok (non-fatal).
         // The canonical-gauge pipeline proceeds with the column reductions.
-        let canon = canonicalize_for_identifiability(&specs).expect(
+        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs)).expect(
             "five-block aliased joint with distinct gauge_priority must succeed (gauge-resolved)",
         );
 
@@ -2297,7 +2387,7 @@ mod tests {
         // rank-invariant `DimensionMismatch`. It may legitimately reduce
         // (dropping audit-gauge directions) or keep identity — either is fine;
         // what must never happen is the rank(J) != rank(J_can) panic.
-        match canonicalize_for_identifiability(&specs) {
+        match canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs)) {
             Ok(canon) => {
                 // If it reduced, the gauge must round-trip the reduced fit back
                 // to raw width without shape mismatch.
@@ -2402,7 +2492,7 @@ mod tests {
             })
             .collect();
 
-        match canonicalize_for_identifiability(&specs) {
+        match canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs)) {
             Ok(canon) => {
                 assert!(
                     !canon.audit.fatal,
@@ -2484,7 +2574,7 @@ mod tests {
             })
             .collect();
 
-        let canon = canonicalize_for_identifiability(&specs)
+        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
             .expect("dead-column callback block must canonicalise (#1590)");
         // The audit SEES the dead column (it is structurally rank-deficient)...
         assert!(
@@ -2812,7 +2902,7 @@ mod tests {
         smooth_spec.penalties = vec![PenaltyMatrix::Dense(s.clone())];
         smooth_spec.initial_log_lambdas = Array1::from(vec![0.0]);
         let specs = [spec_from_dense("intercept", parametric), smooth_spec];
-        let canon = canonicalize_for_identifiability(&specs)
+        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
             .expect("clean canonical must succeed with identity transforms");
         let smooth_reduced = &canon.reduced_specs[1];
         assert_eq!(smooth_reduced.penalties.len(), 1);
@@ -2831,6 +2921,147 @@ mod tests {
     }
 
     use gam_problem::test_support::{spec_from_dense, spec_from_dense_with_priority};
+
+    /// The geometry gam#2748 broke on, at the shape it broke at: a monotone
+    /// link-wiggle warp residualized against a higher-priority mean block.
+    ///
+    /// `B⊥ = B − X A` is rank-deficient BY CONSTRUCTION — de-aliasing
+    /// annihilates exactly `range(B) ∩ range(X)` — so the warp block arrives
+    /// with `w` columns carrying an exact null direction. Built here in closed
+    /// form so the fixture is a statement rather than a recorded run:
+    /// `warp[.., 0] = mean[.., 1]` makes column 0 of the warp lie exactly in the
+    /// mean block's span, which is the one direction the orthogonaliser absorbs.
+    fn dealiased_warp_against_mean_block_specs(
+        mean_priority: u8,
+        warp_priority: u8,
+    ) -> [ParameterBlockSpec; 2] {
+        let n = 240;
+        let t = linspace(n);
+        let mut mean = Array2::<f64>::zeros((n, 3));
+        let mut warp = Array2::<f64>::zeros((n, 4));
+        for i in 0..n {
+            mean[[i, 0]] = 1.0;
+            mean[[i, 1]] = t[i];
+            mean[[i, 2]] = (2.0 * t[i]).sin();
+            // Exactly in the mean block's span: the de-aliasing null direction.
+            warp[[i, 0]] = t[i];
+            warp[[i, 1]] = t[i] * t[i];
+            warp[[i, 2]] = t[i] * t[i] * t[i];
+            warp[[i, 3]] = (3.0 * t[i]).cos();
+        }
+        [
+            spec_from_dense_with_priority("eta", mean, mean_priority),
+            spec_from_dense_with_priority("wiggle", warp, warp_priority),
+        ]
+    }
+
+    /// NON-VACUITY CONTROL for the test below. With both coordinates declared
+    /// `Spanning` the orthogonaliser DOES absorb the warp's shared direction and
+    /// the block leaves canonicalisation one column narrower — the behaviour that
+    /// desynchronised `BinomialMeanWiggleFamily::block_geometry`'s raw-width
+    /// rebuild and refused every outer seed with `dynamic wiggle design col
+    /// mismatch: got 11, expected 10` (gam#2748).
+    ///
+    /// Asserted so the pair isolates the DECLARATION and nothing else: same
+    /// designs, same priorities, only the coordinate kind moves.
+    #[test]
+    fn a_spanning_warp_coordinate_is_absorbed_by_the_mean_block_2748() {
+        let specs = dealiased_warp_against_mean_block_specs(100, 80);
+        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
+            .expect("a rank-deficient overlap must canonicalise, not fail closed");
+        assert_eq!(
+            canon.reduced_specs[1].design.ncols(),
+            specs[1].design.ncols() - 1,
+            "the fixture must present a shared direction the orthogonaliser actually removes; \
+             it removed none, so the veto test below would be vacuous"
+        );
+        assert_eq!(
+            canon.reduced_specs[0].design.ncols(),
+            specs[0].design.ncols(),
+            "the higher-priority mean block keeps its columns",
+        );
+    }
+
+    /// A block whose COEFFICIENT COORDINATE is structural keeps its basis AND
+    /// its width, even though an ordering to absorb it plainly exists (gam#2748).
+    ///
+    /// This is the whole repair. `gauge_priority` says whose column yields when
+    /// one must; it does not say that the yielding block's coordinate may be
+    /// ROTATED. For the monotone warp it may not: its family's
+    /// `block_linear_constraints` returns `I·β_w ≥ 0` sized from
+    /// `spec.design.ncols()`, so a reparameterised block would be handed a cone
+    /// in coordinates the constraint means nothing in, and
+    /// `post_update_block_beta` would project onto it.
+    #[test]
+    fn a_structural_warp_coordinate_is_never_absorbed_2748() {
+        let specs = dealiased_warp_against_mean_block_specs(100, 80);
+        let canon = canonicalize_for_identifiability(
+            &specs,
+            &[
+                CoefficientCoordinate::Spanning,
+                CoefficientCoordinate::Structural,
+            ],
+        )
+        .expect("declining a reparameterisation must not fail the fit");
+        for (raw, reduced) in specs.iter().zip(canon.reduced_specs.iter()) {
+            assert_eq!(
+                reduced.design.ncols(),
+                raw.design.ncols(),
+                "block '{}' changed width under a structural-coordinate declaration",
+                raw.name,
+            );
+        }
+        assert!(
+            canon.gauge.is_identity(),
+            "a declined reparameterisation must leave the gauge an identity, so the family's \
+             own raw-width geometry and the spec it is graded against stay the same object",
+        );
+    }
+
+    /// The declaration is per BLOCK, not per fit: a structural coordinate must
+    /// not cost an unrelated block its legitimate reduction.
+    ///
+    /// Here the ROLES ARE SWAPPED relative to the two tests above — the warp is
+    /// the higher-priority anchor and the plain mean block is the one absorbed,
+    /// which is exactly the layout the spatial mean-wiggle driver builds
+    /// (`LINK_WIGGLE_GAUGE_PRIORITY` on `eta`, `DEFAULT_GAUGE_PRIORITY` on
+    /// `wiggle`). Declaring the warp structural must leave that path alone.
+    #[test]
+    fn a_structural_coordinate_does_not_veto_another_blocks_reduction_2748() {
+        let specs = dealiased_warp_against_mean_block_specs(80, 100);
+        let canon = canonicalize_for_identifiability(
+            &specs,
+            &[
+                CoefficientCoordinate::Spanning,
+                CoefficientCoordinate::Structural,
+            ],
+        )
+        .expect("a rank-deficient overlap must canonicalise, not fail closed");
+        assert_eq!(
+            canon.reduced_specs[1].design.ncols(),
+            specs[1].design.ncols(),
+            "the structural warp keeps every column",
+        );
+        assert_eq!(
+            canon.reduced_specs[0].design.ncols(),
+            specs[0].design.ncols() - 1,
+            "the plain lower-priority mean block still yields its shared direction",
+        );
+    }
+
+    /// The declaration list is a per-block statement, so a caller that supplied
+    /// the wrong number of them has not made the statement at all.
+    #[test]
+    fn a_mismatched_coordinate_list_is_refused_2748() {
+        let specs = dealiased_warp_against_mean_block_specs(100, 80);
+        let err = canonicalize_for_identifiability(&specs, &[CoefficientCoordinate::Spanning])
+            .expect_err("one declaration for two blocks is not a declaration");
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("coefficient-coordinate declaration"),
+            "the refusal must name what was missing: {text}"
+        );
+    }
 
     /// #933: a `jacobian_callback`-only block (no `stacked_design`) whose audit
     /// attributes a dropped column is now SAFELY REDUCED rather than kept at raw
@@ -2866,7 +3097,7 @@ mod tests {
         callback_spec.jacobian_callback = Some(Arc::clone(&raw_callback));
         let specs = [anchor_spec, callback_spec];
 
-        let canon = canonicalize_for_identifiability(&specs)
+        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
             .expect("callback-only overlap must now reduce safely (#933)");
 
         assert!(
@@ -2987,8 +3218,11 @@ mod tests {
         });
         callback_spec.jacobian_callback = Some(Arc::clone(&raw_callback));
 
-        let canon = canonicalize_for_identifiability(&[anchor_spec, callback_spec])
-            .expect("callback-only overlap must reduce safely (#933)");
+        let canon = canonicalize_for_identifiability(
+            &[anchor_spec, callback_spec],
+            &[CoefficientCoordinate::Spanning; 2],
+        )
+        .expect("callback-only overlap must reduce safely (#933)");
 
         let reduced_block = &canon.reduced_specs[1];
         let reduced_design = &reduced_block.design;
@@ -3101,8 +3335,11 @@ mod tests {
         });
         callback_spec.jacobian_callback = Some(Arc::clone(&raw_callback));
 
-        let canon = canonicalize_for_identifiability(&[anchor_spec, callback_spec])
-            .expect("multi-channel callback overlap must reduce safely (#933)");
+        let canon = canonicalize_for_identifiability(
+            &[anchor_spec, callback_spec],
+            &[CoefficientCoordinate::Spanning; 2],
+        )
+        .expect("multi-channel callback overlap must reduce safely (#933)");
 
         let reduced_block = &canon.reduced_specs[1];
         let reduced_design = &reduced_block.design;
@@ -3184,7 +3421,7 @@ mod tests {
             spec_from_dense_with_priority("anchor", a.clone(), 150),
             spec_from_dense_with_priority("overlap", b.clone(), 120),
         ];
-        let canon = canonicalize_for_identifiability(&specs)
+        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
             .expect("orthogonalisation must resolve the overlap, not refuse");
 
         // Block b shed exactly one direction (the x alias): V_b is 2×1.
@@ -3245,7 +3482,8 @@ mod tests {
             spec_from_dense_with_priority("p", p, 150),
             spec_from_dense_with_priority("s", s, 120),
         ];
-        let canon = canonicalize_for_identifiability(&specs).expect("clean design canonicalises");
+        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
+            .expect("clean design canonicalises");
         // Identity transforms (nothing to orthogonalise) on the clean design.
         assert_eq!(canon.gauge.block_transform(0).dim(), (2, 2));
         assert_eq!(canon.gauge.block_transform(1).dim(), (2, 2));
@@ -3334,7 +3572,7 @@ mod tests {
         time_spec.stacked_offset = Some(Array1::<f64>::zeros(3 * n));
 
         let specs = [mean_spec, time_spec];
-        let canon = canonicalize_for_identifiability(&specs)
+        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs))
             .expect("multi-channel canonicalisation must succeed (defer to audit gate)");
 
         let time_reduced = canon
@@ -3426,7 +3664,7 @@ mod tests {
         th_spec.gauge_priority = 150;
 
         let specs = [t_spec, th_spec];
-        let canon = canonicalize_for_identifiability(&specs).expect(
+        let canon = canonicalize_for_identifiability(&specs, &spanning_coordinates(&specs)).expect(
             "survival-LS AFT aliased-constant joint with distinct gauge_priority must \
              succeed (gauge-resolved, gam#1110)",
         );

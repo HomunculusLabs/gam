@@ -1923,4 +1923,230 @@ mod exact_frozen_monotonicity_tests {
             "a material negative I-spline coefficient must be rejected"
         );
     }
+
+    /// WHY THE OUTER `[rho, psi]` SEARCH MUST RUN ON THE FROZEN ARM (gam#2748).
+    ///
+    /// The exact-joint spatial driver used to hand its outer evaluator this
+    /// family with `frozen_warp_design = None`, while the baseline it starts from
+    /// and the refit it mints are both the FROZEN arm. Two properties separate
+    /// them, and both are read straight off `wiggle_geometry` and the row
+    /// coefficient the joint Hessian is assembled from
+    /// (`bmw_static_hessian_operator`: `coeff_eta = m2*a^2 + m1*b` with
+    /// `a = dq/dq0`, `b = d2q/dq0^2`).
+    ///
+    /// **Convexity.** Frozen, `a = 1` and `b = 0` for every row, so `coeff_eta`
+    /// collapses to `m2 = w*mu*(1-mu) >= 0` and the joint Hessian is
+    /// `[X B_perp]' diag(m2) [X B_perp] + S`, positive semidefinite by
+    /// construction. Dynamic, `b = B''(q0)*beta_w` is signed and `m1 = mu - y` is
+    /// signed, so `coeff_eta` goes NEGATIVE on real rows — the arm is genuinely
+    /// indefinite, which is what `resolvable_negative_curvature=true` on every
+    /// seed of `papuan_oce4_matern_k6` was.
+    ///
+    /// **psi-independence.** The driver declares
+    /// `CustomFamilyHyperLayout::new(vec![eta_derivs, Vec::new()], ..)`, i.e. that
+    /// the wiggle block's design does not move with psi. Frozen, `block_geometry`
+    /// returns the same matrix whatever the eta state is, so that is exactly
+    /// true. Dynamic, it returns `B(eta)` and moves — so the declaration was
+    /// false and the analytic outer gradient was missing
+    /// `dB/dpsi = B'(eta)*(dX/dpsi)*beta`.
+    ///
+    /// Asserted here rather than argued in a comment, and asserted as a PAIR so
+    /// neither half can pass by the fixture going quiet.
+    #[test]
+    fn the_frozen_arm_is_convex_and_psi_independent_and_the_dynamic_arm_is_neither_2748() {
+        let n = 64;
+        let knots = Array1::linspace(-3.0, 3.0, 10);
+        let degree = 3;
+        let dynamic = BinomialMeanWiggleFamily {
+            y: Array1::from_shape_fn(n, |i| if i % 2 == 0 { 1.0 } else { 0.0 }),
+            weights: Array1::ones(n),
+            link_kind: InverseLink::Standard(StandardLink::Logit),
+            wiggle_knots: knots.clone(),
+            wiggle_degree: degree,
+            policy: gam_runtime::resource::ResourcePolicy::default_library(),
+            frozen_warp_design: None,
+        };
+        // An index that spans the knot range, and a SUPERCRITICAL warp: every
+        // coefficient positive and large enough that `max_i B'(q0)_i . beta_w`
+        // exceeds one, which is the regime `papuan_oce4_matern_k6` sits in
+        // (`max_warp_slope` 4.5-9.0 on every pass of its baseline loop).
+        let q0 = Array1::linspace(-2.5, 2.5, n);
+        let basis_width = dynamic
+            .wiggle_design(q0.view())
+            .expect("value basis at the probe index")
+            .ncols();
+        let beta_w = Array1::from_elem(basis_width, 1.5);
+
+        let geom = dynamic
+            .wiggle_geometry(q0.view(), beta_w.view())
+            .expect("dynamic geometry");
+        assert!(
+            geom.dq_dq0.iter().cloned().fold(f64::MIN, f64::max) > 1.0,
+            "NON-VACUITY: the fixture must be in the supercritical warp regime, else the \
+             dynamic arm has nothing to be non-convex about (max dq/dq0 = {})",
+            geom.dq_dq0.iter().cloned().fold(f64::MIN, f64::max),
+        );
+        let dynamic_min_coeff = (0..n)
+            .map(|row| {
+                let q = q0[row] + 0.0;
+                let (m1, m2, _) = dynamic
+                    .neglog_q_derivatives(dynamic.y[row], dynamic.weights[row], q)
+                    .expect("row derivatives");
+                let a = geom.dq_dq0[row];
+                let b = geom.d2q_dq02[row];
+                crate::gamlss::binomial_q_coeffs::hessian_coeff_fromobjective_q_terms(
+                    m1, m2, a, a, b,
+                )
+            })
+            .fold(f64::MAX, f64::min);
+        assert!(
+            dynamic_min_coeff < 0.0,
+            "the dynamic arm's own eta row coefficient must go negative -- that IS the \
+             indefiniteness the outer search could not solve through (min = {dynamic_min_coeff:.6e})"
+        );
+
+        // The frozen arm, on the same data and the same warp.
+        let frozen_basis = dynamic
+            .wiggle_design(q0.view())
+            .expect("frozen basis is the value basis at the frozen index");
+        let frozen = BinomialMeanWiggleFamily {
+            frozen_warp_design: Some(Arc::new(frozen_basis.clone())),
+            ..dynamic.clone()
+        };
+        let frozen_geom = frozen
+            .wiggle_geometry(q0.view(), beta_w.view())
+            .expect("frozen geometry");
+        assert!(
+            frozen_geom.dq_dq0.iter().all(|value| *value == 1.0)
+                && frozen_geom.d2q_dq02.iter().all(|value| *value == 0.0),
+            "the freeze is exactly `dq/dq0 = 1`, `d2q/dq0^2 = 0`"
+        );
+        let frozen_min_coeff = (0..n)
+            .map(|row| {
+                let (m1, m2, _) = frozen
+                    .neglog_q_derivatives(frozen.y[row], frozen.weights[row], q0[row])
+                    .expect("row derivatives");
+                crate::gamlss::binomial_q_coeffs::hessian_coeff_fromobjective_q_terms(
+                    m1, m2, 1.0, 1.0, 0.0,
+                )
+            })
+            .fold(f64::MAX, f64::min);
+        assert!(
+            frozen_min_coeff >= 0.0,
+            "frozen, every row coefficient is `m2 = w*mu*(1-mu) >= 0`, so the joint Hessian \
+             is a Gram plus penalties (min = {frozen_min_coeff:.6e})"
+        );
+
+        // psi-independence: `block_geometry` is a constant function of the eta
+        // state when frozen, and is not when dynamic.
+        let spec = ParameterBlockSpec {
+            name: "wiggle".to_string(),
+            design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+                frozen_basis.clone(),
+            )),
+            offset: Array1::zeros(n),
+            penalties: vec![],
+            nullspace_dims: vec![],
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta: None,
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        };
+        let states_at = |eta: Array1<f64>| {
+            vec![
+                ParameterBlockState {
+                    beta: Array1::zeros(1),
+                    eta,
+                },
+                ParameterBlockState {
+                    beta: beta_w.clone(),
+                    eta: Array1::zeros(n),
+                },
+            ]
+        };
+        let shifted = &q0 + 0.75;
+        let geometry_of = |fam: &BinomialMeanWiggleFamily, eta: Array1<f64>| {
+            fam.block_geometry(&states_at(eta), &spec)
+                .expect("wiggle block geometry")
+                .0
+                .to_dense()
+        };
+        let frozen_here = geometry_of(&frozen, q0.clone());
+        let frozen_there = geometry_of(&frozen, shifted.clone());
+        assert_eq!(
+            frozen_here, frozen_there,
+            "frozen, the wiggle geometry does not move with the index, which is what the \
+             driver's `vec![eta_derivs, Vec::new()]` psi layout asserts"
+        );
+        let dynamic_here = geometry_of(&dynamic, q0.clone());
+        let dynamic_there = geometry_of(&dynamic, shifted);
+        assert_ne!(
+            dynamic_here, dynamic_there,
+            "NON-VACUITY: dynamic, it MUST move -- otherwise the psi-layout claim would have \
+             been true on that arm too and there would be nothing to repair"
+        );
+    }
+
+    /// The two blocks' COEFFICIENT COORDINATES, as this family answers for them
+    /// (gam#2748), at the probe state `pre_fit_coefficient_coordinates` builds:
+    /// warm start or zeros, at RAW block width.
+    ///
+    /// The warp coordinate is structural and the mean coordinate is not, and
+    /// nothing declares that twice — `block_coefficient_coordinate`'s default
+    /// derives it from `block_linear_constraints`, the very hook a
+    /// reparameterisation would misread. So this test pins the DERIVATION
+    /// against the constraint beside it: if the cone ever moves off the wiggle
+    /// block, or onto the eta block, the declaration moves with it and this test
+    /// keeps holding for the right reason rather than by coincidence.
+    #[test]
+    fn the_warp_coordinate_is_structural_and_the_mean_coordinate_is_not_2748() {
+        let (family, wiggle_spec) = frozen_family_and_wiggle_spec();
+        let n = family.y.len();
+        let p_eta = 2;
+        let mut eta_spec = wiggle_spec.clone();
+        eta_spec.name = "eta".to_string();
+        eta_spec.design = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            Array2::<f64>::zeros((n, p_eta)),
+        ));
+        let specs = [eta_spec, wiggle_spec];
+        let states: Vec<ParameterBlockState> = specs
+            .iter()
+            .map(|spec| ParameterBlockState {
+                beta: Array1::zeros(spec.design.ncols()),
+                eta: Array1::zeros(n),
+            })
+            .collect();
+
+        for (index, spec) in specs.iter().enumerate() {
+            let cone = family
+                .block_linear_constraints(&states, index, spec)
+                .expect("constraint query at the probe state");
+            let coordinate = family.block_coefficient_coordinate(&states, index, spec);
+            assert_eq!(
+                coordinate.is_structural(),
+                cone.is_some(),
+                "block '{}' declares coordinate {coordinate:?} while its cone is {}: the \
+                 declaration and the constraint it is about must be one statement",
+                spec.name,
+                if cone.is_some() { "present" } else { "absent" },
+            );
+        }
+
+        // NON-VACUITY: the pair must actually differ, or the loop above would
+        // pass on a family that answered the same way for both blocks.
+        assert!(
+            family
+                .block_coefficient_coordinate(&states, BinomialMeanWiggleFamily::BLOCK_WIGGLE, &specs[1])
+                .is_structural(),
+            "the monotone warp coordinate carries the beta_w >= 0 cone",
+        );
+        assert!(
+            family
+                .block_coefficient_coordinate(&states, BinomialMeanWiggleFamily::BLOCK_ETA, &specs[0])
+                .is_spanning(),
+            "the mean block is an ordinary basis and must stay reparameterisable",
+        );
+    }
 }

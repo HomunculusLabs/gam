@@ -255,6 +255,19 @@ pub struct SlqUnitDeflatedLogDet {
     /// The absolute deflation floor actually applied:
     /// `relative_floor · lambda_max_abs · (1 − hysteresis)`.
     pub deflate_floor: f64,
+    /// #2515 — the smallest Ritz value seen across every probe, and a ONE-SIDED
+    /// CERTIFICATE of indefiniteness.
+    ///
+    /// Every Ritz value of a symmetric operator lies in `[λ_min, λ_max]` (it is a
+    /// Rayleigh quotient of a Krylov vector), so `min_ritz < −band` PROVES
+    /// `λ_min < −band`. The converse does not hold — an unconverged Krylov space
+    /// can miss a negative eigenvalue entirely — so this can only fail to detect
+    /// indefiniteness, never invent it. That asymmetry is what makes it usable as
+    /// a refusal predicate: a false refusal would decline a state the dense route
+    /// legitimately ranks, and there are none.
+    ///
+    /// `f64::INFINITY` when no probe produced a usable Ritz value.
+    pub min_ritz: f64,
 }
 
 impl SlqUnitDeflatedLogDet {
@@ -315,6 +328,7 @@ pub fn slq_logdet_unit_deflated(
             std_err: 0.0,
             lambda_max_abs: 0.0,
             deflate_floor: 0.0,
+            min_ritz: f64::INFINITY,
         };
     }
     let num_probes = num_probes.max(1);
@@ -349,8 +363,15 @@ pub fn slq_logdet_unit_deflated(
             std_err: 0.0,
             lambda_max_abs: 0.0,
             deflate_floor: 0.0,
+            min_ritz: f64::INFINITY,
         };
     }
+    let min_ritz = per_probe
+        .iter()
+        .flatten()
+        .flat_map(|pairs| pairs.eigenvalues.iter())
+        .filter(|value| value.is_finite())
+        .fold(f64::INFINITY, |acc, &value| acc.min(value));
     let deflate_floor =
         relative_floor * lambda_max_abs * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
 
@@ -376,6 +397,7 @@ pub fn slq_logdet_unit_deflated(
         std_err,
         lambda_max_abs,
         deflate_floor,
+        min_ritz,
     }
 }
 

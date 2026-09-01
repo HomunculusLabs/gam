@@ -43,9 +43,7 @@
 use crate::inference::model::{
     TRANSFORMATION_SCORE_PIT_CLIP_EPS, TransformationNormalParameterization,
 };
-use crate::probability::{
-    log1mexp_positive, normal_cdf, normal_logcdf, normal_pdf, standard_normal_quantile,
-};
+use crate::probability::standard_normal_quantile;
 use crate::transformation_normal::{
     CtnRowBases, CtnRowFloors, TRANSFORMATION_MONOTONICITY_EPS, TransformationNormalFitResult,
     ctn_component_sensitivity, ctn_row_geometry, transformation_normal_pit_score,
@@ -237,15 +235,15 @@ pub fn score_influence_jacobian(
     let upper_floor = family.response_upper_floor_offset();
     let median = family.response_median();
 
-    // Saturation boundaries of the PIT score. `transformation_normal_pit_score`
-    // returns Φ⁻¹(u.clamp(clip_eps, 1−clip_eps)), so whenever the raw PIT
-    // probability lies at-or-beyond a clip boundary the emitted z is EXACTLY
-    // the boundary quantile and is locally constant in θ₁. The Jacobian of
-    // that clamped function is identically zero there — reporting the interior
-    // density-ratio chain (as this routine once did, with a floored φ(z))
-    // would differentiate a different function from the one whose value is
-    // consumed downstream. Computing the boundaries with the same quantile
-    // kernel the score uses makes the saturation test exact.
+    // Saturation boundaries of the PIT score. gam#2600: the fitted model's CDF
+    // is `F = Φ(h)`, so `transformation_normal_pit_score` returns
+    // `Φ⁻¹(Φ(h).clamp(clip_eps, 1−clip_eps)) = h` clamped to the same window.
+    // Beyond a boundary the emitted `z` is EXACTLY the boundary quantile and is
+    // locally constant in θ₁, so the Jacobian of the clamped function is
+    // identically zero there — reporting an interior chain (as this routine
+    // once did, with a floored `φ(z)`) would differentiate a different function
+    // from the one whose value is consumed downstream. Computing the boundaries
+    // with the same quantile kernel the score uses makes the test exact.
     let z_saturated_lo = standard_normal_quantile(TRANSFORMATION_SCORE_PIT_CLIP_EPS)
         .map_err(|e| format!("score_influence_jacobian: clip quantile failed: {e}"))?;
     let z_saturated_hi = standard_normal_quantile(1.0 - TRANSFORMATION_SCORE_PIT_CLIP_EPS)
@@ -260,12 +258,13 @@ pub fn score_influence_jacobian(
         let deriv_row = resp_deriv.row(i);
         let x_row = x_cov.row(i);
 
-        // h, L, U exactly as the CTN row-quantity build assembles them
-        // (`row_quantities`): the additive linear-predictor offset enters h, L,
-        // and U identically, so it is added here at all three to place the PIT
-        // operating point (and the emitted z) where the fitted model evaluates
-        // it. The per-row monotonicity floor ε·(y − median) and the endpoint
-        // floors are recomputed from the fitted median.
+        // h exactly as the CTN row-quantity build assembles it
+        // (`row_quantities`): the additive linear-predictor offset enters h, and
+        // the per-row monotonicity floor ε·(y − median) is recomputed from the
+        // fitted median. The endpoints L and U are still evaluated — they are
+        // the certified support the fitted model carries, and the order check
+        // below is a real structural assertion about it — but since gam#2600
+        // they are not part of the score, so they do not enter the chain.
         let geometry = ctn_row_geometry(
             CTN_CHART,
             alpha_row,
@@ -298,14 +297,11 @@ pub fn score_influence_jacobian(
             ));
         }
 
-        // z is the finite-support PIT score, computed by the SAME canonical
-        // kernel the normal Stage-2 path consumes (`calibrate_transformation_scores`
-        // → `transformation_normal_pit_score`). That kernel forms the PIT ratio in
-        // LOG space (`normal_logcdf` + `log1mexp_positive`), which stays accurate
-        // when h/L/U all sit deep in a tail where the direct CDF subtraction
-        // `(Φ(h)−Φ(L))/(Φ(U)−Φ(L))` would cancel catastrophically. Reusing it makes
-        // z bit-identical to Stage-2's z — single source of truth.
-        let z = transformation_normal_pit_score(h, l, u, TRANSFORMATION_SCORE_PIT_CLIP_EPS)
+        // z is the PIT score, computed by the SAME canonical kernel the normal
+        // Stage-2 path consumes (`calibrate_transformation_scores` →
+        // `transformation_normal_pit_score`), so z is bit-identical to
+        // Stage-2's z — single source of truth.
+        let z = transformation_normal_pit_score(h, TRANSFORMATION_SCORE_PIT_CLIP_EPS)
             .map_err(|e| format!("score_influence_jacobian: PIT score failed at row {i}: {e}"))?;
         z_scores[i] = z;
 
@@ -315,88 +311,23 @@ pub fn score_influence_jacobian(
             continue;
         }
 
-        // Interior row: z = Φ⁻¹(u) with u strictly inside the clip band, so
-        // u_pit = Φ(z) exactly inverts the score and the derivative
-        // coefficient and the reported score stay self-consistent without
-        // recomputing the (less stable) direct ratio. The endpoint φ/D ratios
-        // below are the analytic derivatives of that ratio.
-        //
-        // Compute log(D) = log(Φ(U)−Φ(L)) in log-space to avoid catastrophic
-        // cancellation when L and U both sit deep in the same tail (e.g. L=5,
-        // U=6 where normal_cdf returns 1.0 for both in direct form). This
-        // mirrors the `log_normal_cdf_diff` approach in `transformation_normal.rs`:
-        //
-        //   If L > 0 : Φ(U)−Φ(L) = Φ(−L)−Φ(−U)  (reflection, both < 0.5)
-        //              log_denom = normal_logcdf(−L) + log1mexp(normal_logcdf(−L) − normal_logcdf(−U))
-        //   Otherwise: log_denom = normal_logcdf(U) + log1mexp(normal_logcdf(U) − normal_logcdf(L))
-        let log_denom = if l > 0.0 {
-            let log_neg_l = normal_logcdf(-l);
-            let log_neg_u = normal_logcdf(-u);
-            let gap = log_neg_l - log_neg_u;
-            if !(gap.is_finite() && gap > 0.0) {
-                return Err(format!(
-                    "score_influence_jacobian: endpoint mass not resolvable at row {i}: l={l:.6e}, u={u:.6e}"
-                ));
-            }
-            log_neg_l + log1mexp_positive(gap)
-        } else {
-            let log_cu = normal_logcdf(u);
-            let log_cl = normal_logcdf(l);
-            let gap = log_cu - log_cl;
-            if !(gap.is_finite() && gap > 0.0) {
-                return Err(format!(
-                    "score_influence_jacobian: endpoint mass not resolvable at row {i}: l={l:.6e}, u={u:.6e}"
-                ));
-            }
-            log_cu + log1mexp_positive(gap)
-        };
-        if !log_denom.is_finite() {
-            return Err(format!(
-                "score_influence_jacobian: log endpoint mass not finite at row {i}: l={l:.6e}, u={u:.6e}"
-            ));
-        }
-
-        let u_pit = normal_cdf(z);
-
-        // φ(x)/D = exp(log φ(x) − log D).  Using log-space for these ratios
-        // keeps them accurate when D is tiny (deep-tail support intervals).
-        // log φ(x) = −½x² − log(√(2π)).
-        const LOG_SQRT_2PI: f64 = 0.918_938_533_204_672_7;
-        let log_phi = |x: f64| -0.5 * x * x - LOG_SQRT_2PI;
-
-        // φ at h/L/U. An interior z implies the raw PIT probability was strictly
-        // inside (0, 1), so h is strictly inside (L, U) here.
-        let c_h = (log_phi(h) - log_denom).exp();
-        let c_l = (log_phi(l) - log_denom).exp();
-        let c_u = (log_phi(u) - log_denom).exp();
-
-        // ∂z = ∂u / φ(z). Interior z is bounded by the clip quantiles, so
-        // φ(z) ≥ φ(Φ⁻¹(clip_eps)) > 0 — no floor is needed.
-        let pdf_z = normal_pdf(z);
-
+        // Interior row: `z = h` identically, so the whole chain is the chart's
+        // own sensitivity. There is no endpoint mass to differentiate, no
+        // deep-tail `Φ(U)−Φ(L)` cancellation to defend against, and no `1/φ(z)`
+        // to floor — all three were consequences of the endpoint-normalized PIT
+        // that gam#2600 removed.
         let mut row = columns.row_mut(i);
         for k in 0..p_resp {
-            // ∂h/∂A[k,j], ∂L/∂A[k,j], ∂U/∂A[k,j] share the factor Xᶜᵒᵛ_{i,j}.
-            // The direct-α chart is AFFINE in the coefficient matrix, so the
-            // response-side scalar is the basis entry itself for every k —
-            // location block and shape blocks alike, with no chart factor. The
-            // pre-gam#2680 code carried `2·γ_k` on the shape rows here, the
-            // derivative of a squared chart the value path had already left.
-            let (dh_scalar, dl_scalar, du_scalar) = (
-                ctn_component_sensitivity(CTN_CHART, val_row, k),
-                ctn_component_sensitivity(CTN_CHART, lower_basis.view(), k),
-                ctn_component_sensitivity(CTN_CHART, upper_basis.view(), k),
-            );
+            // ∂h/∂A[k,j] shares the factor Xᶜᵒᵛ_{i,j}. The direct-α chart is
+            // AFFINE in the coefficient matrix, so the response-side scalar is
+            // the basis entry itself for every k — location block and shape
+            // blocks alike, with no chart factor. The pre-gam#2680 code carried
+            // `2·γ_k` on the shape rows here, the derivative of a squared chart
+            // the value path had already left.
+            let dh_scalar = ctn_component_sensitivity(CTN_CHART, val_row, k);
             let base = k * p_cov;
             for j in 0..p_cov {
-                let xij = x_row[j];
-                let dh = dh_scalar * xij;
-                let dl = dl_scalar * xij;
-                let du = du_scalar * xij;
-                // ∂u = [φ(h)∂h − u·(φ(U)∂U − φ(L)∂L) − φ(L)∂L] / (Φ(U)−Φ(L))
-                //     = c_h·∂h − u_pit·(c_u·∂U − c_l·∂L) − c_l·∂L
-                let du_pit = c_h * dh - u_pit * (c_u * du - c_l * dl) - c_l * dl;
-                row[base + j] = du_pit / pdf_z;
+                row[base + j] = dh_scalar * x_row[j];
             }
         }
     }

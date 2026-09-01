@@ -1236,8 +1236,15 @@ pub(crate) fn rigid_feature_frame_fourth_contracted(
     )
 }
 
+/// The three scalar witnesses of the sole rigid row program: the two signed
+/// probit margins and `η′₁`, the follow-up derivative of the exit index.
+///
+/// Not gated on the GPU host any more (gam#2765): the follow-up-varying frame's
+/// likelihood domain is `η′₁ > 0`, and the joint fraction-to-boundary rule that
+/// keeps every trial coefficient inside it needs the SAME witness the row
+/// program admits on — reading it from anywhere else would be a second copy of
+/// the model that can disagree with the first.
 #[inline(always)]
-#[cfg(target_os = "linux")]
 pub(crate) fn rigid_feature_frame_witnesses(
     features: &[f64; RIGID_FEATURE_DIMENSION],
     probit_scale: f64,

@@ -505,9 +505,10 @@ pub(crate) const SPECTRAL_DEFLATION_HYSTERESIS_FRACTION: f64 = 1.0e-2;
 pub(crate) fn factor_spectral_deflated_criterion_row(
     row: &ArrowRowBlock,
     d: usize,
-) -> Option<ArrowRowFactorResult> {
+    refuse_resolved_indefinite: bool,
+) -> Result<Option<ArrowRowFactorResult>, String> {
     if d == 0 || row.htt.dim() != (d, d) {
-        return None;
+        return Ok(None);
     }
     // Symmetrise defensively before the eigendecomposition (the assembled
     // block is symmetric up to reduction order; the eig routine assumes exact
@@ -517,18 +518,20 @@ pub(crate) fn factor_spectral_deflated_criterion_row(
         for j in 0..d {
             let v = 0.5 * (row.htt[[i, j]] + row.htt[[j, i]]);
             if !v.is_finite() {
-                return None;
+                return Ok(None);
             }
             sym[[i, j]] = v;
         }
     }
-    let (evals, evecs) = sym.eigh(Side::Lower).ok()?;
+    let Ok((evals, evecs)) = sym.eigh(Side::Lower) else {
+        return Ok(None);
+    };
     let max_abs = evals.iter().fold(
         0.0_f64,
         |acc, &v| if v.is_finite() { acc.max(v.abs()) } else { acc },
     );
     if !(max_abs.is_finite() && max_abs > 0.0) {
-        return None;
+        return Ok(None);
     }
     let floor = SPECTRAL_DEFLATION_REL_FLOOR * max_abs;
     // Hysteresis-banded deflation floor for *positive* near-cutoff eigenvalues.
@@ -541,6 +544,40 @@ pub(crate) fn factor_spectral_deflated_criterion_row(
     // (genuine null / indefinite quotient directions) are still always deflated
     // at the exact-zero boundary, which the guard must continue to honour.
     let deflate_floor = floor * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
+    // #2515 — THE BAND IS TWO-SIDED WHEN THE CALLER SAYS THE OPERATOR'S SIGN IS A
+    // VERDICT. The `else` arm below is documented as deflating "every
+    // non-positive/non-finite one", which is right for the Gauss--Newton
+    // majorizer `B` — PSD by construction, so a negative eigenvalue there can only
+    // be rounding on a direction that is null anyway — and wrong for the exact
+    // observed information `A`, where a RESOLVED negative direction is the
+    // difference between a mode and a saddle. Pinning it to `+1` prices a saddle
+    // direction as the rho-independent null `log 1 = 0` and inverts it at `1`;
+    // nothing downstream can tell, because the conditioned block is PD and its
+    // log-determinant is finite. The sibling refusal on the reduced Schur
+    // (`factor_evidence_unit_deflated_schur`) carries the measurement.
+    if refuse_resolved_indefinite {
+        let mut worst = 0.0_f64;
+        let mut worst_index = 0usize;
+        for (index, &lambda) in evals.iter().enumerate() {
+            if lambda.is_finite() && lambda < -deflate_floor && lambda < worst {
+                worst = lambda;
+                worst_index = index;
+            }
+        }
+        if worst < 0.0 {
+            return Err(format!(
+                "per-row {}: direction {worst_index} at {worst:.6e} (relative {:.6e}), \
+                 against a null band of {deflate_floor:.6e} and a block spectral norm of \
+                 {max_abs:.6e}. Unit-pinning it would price a saddle direction as the \
+                 rho-independent null `log 1 = 0` and invert it at 1, which is neither the \
+                 basin curvature the dense exact-A route prices an attributable negative \
+                 direction at nor the typed refusal it returns for an unattributable one \
+                 (#2515/#2336)",
+                ArrowSchurError::indefinite_evidence_marker(),
+                worst / max_abs
+            ));
+        }
+    }
     // Reconstruct `Σ_i λ̃_i v_i v_iᵀ`, replacing every deflated eigenvalue
     // (every non-positive/non-finite one, plus any positive one that has
     // dropped below the hysteresis floor) with unit stiffness `+1` and keeping
@@ -637,8 +674,10 @@ pub(crate) fn factor_spectral_deflated_criterion_row(
         deflated_directions.clear();
         deflated_directions.push(evecs.column(min_idx).to_owned());
     }
-    let factor = cholesky_lower(&conditioned).ok()?;
-    Some(ArrowRowFactorResult {
+    let Ok(factor) = cholesky_lower(&conditioned) else {
+        return Ok(None);
+    };
+    Ok(Some(ArrowRowFactorResult {
         factor,
         gauge_deflated_directions: deflated_count,
         deflated_directions,
@@ -648,7 +687,7 @@ pub(crate) fn factor_spectral_deflated_criterion_row(
             cond_evals,
             conditioning: conditioning.into(),
         }),
-    })
+    }))
 }
 
 /// The per-row `H_tt` eigen-directions a STEP-side solve must GAUGE-FIX — take
@@ -818,7 +857,16 @@ pub(crate) fn factor_one_row(
     // their outer ridge/rebuild handling. Only the SAE evidence path that
     // installs a `row_gauge_deflation` (via `factor_blocks_for_system`) opts
     // into spectral deflation.
-    factor_one_row_result(row, ridge_t, d, row_idx, evidence_factorization, &[], false)
+    factor_one_row_result(
+        row,
+        ridge_t,
+        d,
+        row_idx,
+        evidence_factorization,
+        &[],
+        false,
+        false,
+    )
         .map(|result| result.factor)
 }
 
@@ -830,6 +878,13 @@ pub(crate) fn factor_one_row_result(
     evidence_factorization: bool,
     row_gauges: &[Array1<f64>],
     allow_spectral_deflation: bool,
+    // #2515 — the evidence policy's verdict on a RESOLVED negative direction of
+    // this block: unit-pin it (the historical behaviour, right for the PSD
+    // majorizer) or refuse (right for the exact observed information, whose sign
+    // is a modelling verdict). Decided once by
+    // `ArrowEvidencePolicy::refuses_resolved_indefinite` and carried here, never
+    // re-derived per site.
+    refuse_resolved_indefinite: bool,
 ) -> Result<ArrowRowFactorResult, ArrowSchurError> {
     // `d` is an UPPER BOUND, not the row's dimension.
     //
@@ -984,9 +1039,19 @@ pub(crate) fn factor_one_row_result(
                     if ridge_t == 0.0 && allow_spectral_deflation {
                         let kappa_est = cholesky_factor_kappa_estimate(&factor);
                         if !cholesky_factor_passes_safe_inversion(&factor, d, diag_scale, kappa_est)
-                            && let Some(deflated) = factor_spectral_deflated_criterion_row(row, d)
                         {
-                            return Ok(deflated);
+                            let deflated = factor_spectral_deflated_criterion_row(
+                                row,
+                                d,
+                                refuse_resolved_indefinite,
+                            )
+                            .map_err(|reason| ArrowSchurError::PerRowFactorFailed {
+                                row: row_idx,
+                                reason,
+                            })?;
+                            if let Some(deflated) = deflated {
+                                return Ok(deflated);
+                            }
                         }
                     }
                     break ArrowRowFactorResult {
@@ -1080,10 +1145,19 @@ pub(crate) fn factor_one_row_result(
                         // gate spuriously withheld this recovery from a row whose
                         // flat direction was intrinsic-dimension deficiency rather
                         // than a supplied gauge — exactly the #1273 abort.
-                        if allow_spectral_deflation
-                            && let Some(deflated) = factor_spectral_deflated_criterion_row(row, d)
-                        {
-                            return Ok(deflated);
+                        if allow_spectral_deflation {
+                            let deflated = factor_spectral_deflated_criterion_row(
+                                row,
+                                d,
+                                refuse_resolved_indefinite,
+                            )
+                            .map_err(|reason| ArrowSchurError::PerRowFactorFailed {
+                                row: row_idx,
+                                reason,
+                            })?;
+                            if let Some(deflated) = deflated {
+                                return Ok(deflated);
+                            }
                         }
                     }
                     return Err(ArrowSchurError::PerRowFactorFailed {

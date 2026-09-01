@@ -1,6 +1,6 @@
 Running 100 trials
-  Seed start:        839290055 [auto]
-  Replay this run:   --seed-start 839290055
+  Seed start:        1222167609 [auto]
+  Replay this run:   --seed-start 1222167609
   Scenario source:   /home/runner/work/gam/gam/bench/scenarios.json
   Filters: family=all model=all basis=all
   Gamfit timeout:    60s
@@ -11,16 +11,13 @@ Running 100 trials
   Metadata: /home/runner/work/gam/gam/bench/fuzz_results.meta.json
 
 Skipped 2 trial(s) above scenario cost cap 200000; max skipped cost=3950000
-  [  1/100] geo_disease_eas3_duchon_k6     bino/gam/ducho auc:gamfit=0.8275 auc:mgcv=0.8275 gap=+0.0000 n=  6000 p=  3 [ok]  gamfit=2.3s mgcv=2.0s
-  [  2/100] geo_disease_eas3_duchon_k12    bino/gam/ducho auc:gamfit=0.8315 auc:mgcv=0.8315 gap=+0.0000 n=  6000 p=  3 [ok]  gamfit=50.4s mgcv=2.0s
-  [  3/100] geo_disease_eas3_duchon_k24    bino/gam/ducho auc:gamfit=0.8262 auc:mgcv=0.8262 gap=+0.0000 n=  6000 p=  3 [ok]  gamfit=19.6s mgcv=2.0s
-  [  4/100] geo_disease_eas3_matern_k6     bino/gam/mater auc:gamfit=0.8221 auc:mgcv=0.8293 gap=+0.0071 n=  6000 p=  3 [ok]  gamfit=7.1s mgcv=2.1s
-  [  5/100] geo_disease_eas3_matern_k12    bino/gam/mater auc:gamfit=0.8201 auc:mgcv=0.8234 gap=+0.0033 n=  6000 p=  3 [ok]  gamfit=28.1s mgcv=1.9s
-  [  6/100] geo_disease_eas3_matern_k24    bino/gam/mater auc:gamfit=0.8208 auc:mgcv=0.8244 gap=+0.0036 n=  6000 p=  3 [ok]  gamfit=21.5s mgcv=1.9s
-  [  7/100] geo_disease_eas3_psperpc_k6    bino/gam/ps    auc:gamfit=0.8279 auc:mgcv=0.8279 gap=-0.0000 n=  6000 p=  3 [ok]  gamfit=75.4s mgcv=1.0s
-  [  8/100] geo_disease_eas3_psperpc_k12   bino/gam/ps    auc:gamfit=0.8269 auc:mgcv=0.8271 gap=+0.0002 n=  6000 p=  3 [ok]  gamfit=56.1s mgcv=1.0s
-  [  9/100] geo_disease_eas3_psperpc_k24   bino/gam/ps    auc:gamfit=0.8274 auc:mgcv=0.8272 gap=-0.0003 n=  6000 p=  3 [ok]  gamfit=80.1s mgcv=2.1s
-  [ 10/100] papuan_oce_tp_k12              bino/gam/tps   auc:gamfit=0.8131 auc:mgcv=  ERR gap= N/A  n=  6000 p= 16 [no-verdict:mgcv_error]  gamfit=18.2s mgcv=0.0s(to-failure)
+  [  1/100] geo_disease_eas3_matern_k12    bino/gam/mater auc:gamfit=0.8201 auc:mgcv=0.8234 gap=+0.0033 n=  6000 p=  3 [ok]  gamfit=22.6s mgcv=1.6s
+  [  2/100] geo_disease_eas3_matern_k24    bino/gam/mater auc:gamfit=0.8208 auc:mgcv=0.8244 gap=+0.0036 n=  6000 p=  3 [ok]  gamfit=21.2s mgcv=1.7s
+  [  3/100] geo_disease_eas3_psperpc_k6    bino/gam/ps    auc:gamfit=0.8279 auc:mgcv=0.8279 gap=-0.0000 n=  6000 p=  3 [ok]  gamfit=88.5s mgcv=0.8s
+  [  4/100] geo_disease_eas3_psperpc_k12   bino/gam/ps    auc:gamfit=0.8269 auc:mgcv=0.8271 gap=+0.0002 n=  6000 p=  3 [ok]  gamfit=62.6s mgcv=0.8s
+  [  5/100] geo_disease_eas3_psperpc_k24   bino/gam/ps    auc:gamfit=0.8274 auc:mgcv=0.8272 gap=-0.0003 n=  6000 p=  3 [ok]  gamfit=81.6s mgcv=1.7s
+  [  6/100] papuan_oce_tp_k12              bino/gam/tps   auc:gamfit=0.8131 auc:mgcv=  ERR gap= N/A  n=  6000 p= 16 [no-verdict:mgcv_error]  gamfit=21.6s mgcv=0.0s(to-failure)
     -- MGCV FAILURE --
     error: r_mgcv fit failed: negative length vectors are not allowed
-  [ 11/100] papuan_oce_duchon_k12          bino/gam/ducho auc:gamfit=0.8136 auc:mgcv=0.8134 gap=-0.0002 n=  6000 p= 16 [ok]  gamfit=33.8s mgcv=3.6s
+  [  7/100] papuan_oce_duchon_k12          bino/gam/ducho auc:gamfit=0.8136 auc:mgcv=0.8134 gap=-0.0002 n=  6000 p= 16 [ok]  gamfit=40.7s mgcv=3.2s
+  [  8/100] papuan_oce_matern_k12          bino/gam/mater auc:gamfit=0.8110 auc:mgcv=0.8144 gap=+0.0034 n=  6000 p= 16 [ok]  gamfit=16.0s mgcv=3.0s

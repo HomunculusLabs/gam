@@ -84,6 +84,64 @@ struct BarrierComponent {
     eps: f64,
 }
 
+/// One co-firing component's exact Gauss–Newton separation-barrier curvature,
+/// in the FACTORED form it is derived in:
+///
+/// ```text
+///   H_sep,C = Σ_{a,b} coupling[a,b] · v_a v_bᵀ
+/// ```
+///
+/// over the component's edges `a, b`, where `v_a = ∂o_a/∂B` is the rank-aware
+/// overlap carrier of edge `a` and `coupling = penalty_scale·|M|` is the
+/// (majorized) overlap-space Hessian of
+/// [`SaeManifoldTerm::add_sae_separation_barrier`].
+///
+/// The alternative — diagonalizing `coupling` and expanding the eigen carriers
+/// `w_r = Σ_a e_r[a] v_a` into `ne` rank-1 terms — yields the identical operator
+/// and is what shipped before #2731. It is strictly worse in every dimension,
+/// because each `v_a` touches exactly TWO atoms while each `w_r` is dense over
+/// the whole component: building the `ne` carriers costs `ne²·2Mp`, storing them
+/// costs `ne·sMp`, and applying them costs `ne·sMp` per matvec, against `ne²`,
+/// `ne·2Mp` and `2·ne·2Mp + ne²` here. At `p = 2048, charts = 32` the build term
+/// alone was 86% of the whole curved-tier fit.
+///
+/// `carriers[a]` lists the `(atom index, dense M_atom·p block)` runs of `v_a`,
+/// in ascending atom order — atom-relative rather than global so the framed
+/// consumer can push each run through that atom's own frame `Φᵀ` without
+/// re-deriving which atom it belongs to. A degenerate edge (mismatched decoder
+/// width, vanishing self-Gram) contributes an EMPTY carrier list rather than
+/// being dropped, so `coupling`'s indexing stays the component's edge order.
+pub(crate) struct SeparationBarrierCurvature {
+    /// Symmetric PSD `ne × ne` coupling, `penalty_scale` already folded in.
+    pub(crate) coupling: Array2<f64>,
+    /// Per-edge carriers `∂o_a/∂B` as `(atom, dense block)` runs.
+    pub(crate) carriers: Vec<Vec<(usize, Vec<f64>)>>,
+}
+
+impl SeparationBarrierCurvature {
+    /// The full-`B` penalty operator: the carriers' atom runs re-based onto the
+    /// global β offsets, with the coupling carried across unchanged.
+    pub(crate) fn as_full_beta_op(
+        &self,
+        beta_dim: usize,
+        beta_offsets: &[usize],
+    ) -> CoupledCarrierPenaltyOp {
+        CoupledCarrierPenaltyOp {
+            k: beta_dim,
+            coupling: self.coupling.clone(),
+            carriers: self
+                .carriers
+                .iter()
+                .map(|runs| {
+                    runs.iter()
+                        .map(|(atom, values)| (beta_offsets[*atom], values.clone()))
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Per-assembly FROZEN separation-barrier support (see
 /// [`SaeManifoldTerm::refresh_barrier_coactivation_gate`]): the co-firing pairs
 /// `(j, k, q_jk)` AND the per-atom effective sample sizes
@@ -1289,7 +1347,7 @@ impl SaeManifoldTerm {
 
     /// Accumulate the SEPARATION barrier's analytic gradient into `sys.gb` and a
     /// PSD majorizer of its curvature into `sys.hbb` (dense path) or the
-    /// `atom_curv` / `sep_rank1` carriers (matrix-free / framed path), in the
+    /// `atom_curv` / `sep_curvature` carriers (matrix-free / framed path), in the
     /// full-`B` β layout. Returns `true` iff anything was written.
     ///
     /// The barrier is the SAE decoder Jeffreys prior
@@ -1317,10 +1375,15 @@ impl SaeManifoldTerm {
     /// is exactly Gauss–Newton and PSD:
     ///   `M[a,b] = ∂²P/∂o_a∂o_b = q_a q_b (G[jₐ,m_b]G[kₐ,l_b] + G[jₐ,l_b]G[kₐ,m_b])`
     /// (`a = (jₐ,kₐ)`, `b = (l_b,m_b)`), and the β-Hessian's PSD part is
-    /// `Σ_{a,b} M[a,b] v_a v_bᵀ`. Eigendecomposing `M = Σ_r λ_r e_r e_rᵀ` gives the
-    /// exact rank-1 carriers `(λ_r, w_r)`, `w_r = Σ_a e_r[a] v_a`, each PSD. For a
-    /// single-edge component this reduces to one rank-1 `∂²P/∂o²·v vᵀ`,
-    /// bit-compatible with the historical self-concordant rank-1. The remaining
+    /// `Σ_{a,b} M[a,b] v_a v_bᵀ`. That is handed out in exactly that FACTORED
+    /// form — the small dense `|M|` beside the per-edge carriers `v_a`
+    /// ([`SeparationBarrierCurvature`]) — and never expanded into the eigen
+    /// carriers `w_r = Σ_a e_r[a] v_a`: each `w_r` is dense over the WHOLE
+    /// component while each `v_a` touches two atoms, so the expansion costs
+    /// `ne²·2Mp` to build and `ne·sMp` to store and apply for an operator that
+    /// is `ne²` + `ne·2Mp` in the form it is derived in (#2731). For a
+    /// single-edge component the factored form IS the historical
+    /// self-concordant rank-1 `∂²P/∂o²·v vᵀ`, with `ne = 1`. The remaining
     /// indefinite `Σ_e (∂P/∂o_e)·∂²o_e/∂B²` part is handled by the per-atom
     /// Levenberg ridge `2|α_e|·o_e/D_·`, which
     /// dominates its NEGATIVE part: the
@@ -1338,7 +1401,7 @@ impl SaeManifoldTerm {
         penalty_scale: f64,
         dense_beta_curvature: bool,
         atom_curv: &mut [f64],
-        sep_rank1: &mut Vec<(f64, Vec<(usize, f64)>)>,
+        sep_curvature: &mut Vec<SeparationBarrierCurvature>,
     ) -> bool {
         if penalty_scale == 0.0 {
             return false;
@@ -1356,6 +1419,16 @@ impl SaeManifoldTerm {
             .collect();
         let floor2 = Self::barrier_norm_floor_sq(&norm_sq);
         let mut wrote = false;
+        // #2731 — this seam was 86% of the curved tier's wall clock and nothing
+        // in the tree said so; it took an external `perf` run on a cluster to
+        // find out. The shape that governs the cost (`ne`, the number of
+        // REALIZED co-firing pairs — NOT `K(K−1)/2`, and not the decoder
+        // dimension) is now printed by the seam itself, so the next reader can
+        // reproduce the attribution from one `--log=debug` run.
+        let started = std::time::Instant::now();
+        let mut telemetry_components = 0_usize;
+        let mut telemetry_edges = 0_usize;
+        let mut telemetry_carrier_values = 0_usize;
         for comp in &self.barrier_components(&norm_sq, floor2) {
             let s = comp.atoms.len();
             let ne = comp.edges.len();
@@ -1404,8 +1477,11 @@ impl SaeManifoldTerm {
                 }
             }
             // Per-edge ∂o/∂B carrier `v_e` and force scalar `α_e`; scatter the
-            // gradient and the bounded Levenberg majorizer as we go.
-            let mut edge_v: Vec<Vec<(usize, f64)>> = Vec::with_capacity(ne);
+            // gradient and the bounded Levenberg majorizer as we go. A carrier
+            // is stored as the ATOM BLOCKS it occupies — an edge touches exactly
+            // two atoms, so `v_e` is two dense `M_t·p` runs, never a scatter over
+            // the whole β vector.
+            let mut edge_v: Vec<Vec<(usize, Vec<f64>)>> = Vec::with_capacity(ne);
             for e in &comp.edges {
                 let bj = self.atoms[e.j].decoder_coefficients();
                 let bk = self.atoms[e.k].decoder_coefficients();
@@ -1442,7 +1518,7 @@ impl SaeManifoldTerm {
                 let alpha = penalty_scale * (-g[[e.jl, e.kl]] * e.q);
                 let off_j = offsets[e.j];
                 let off_k = offsets[e.k];
-                let mut v: Vec<(usize, f64)> = Vec::with_capacity(m_j * p + m_k * p);
+                let mut run_j: Vec<f64> = Vec::with_capacity(m_j * p);
                 for a in 0..m_j {
                     for o in 0..p {
                         let mut mb = 0.0_f64;
@@ -1455,9 +1531,10 @@ impl SaeManifoldTerm {
                         }
                         let do_j = 2.0 * (mb * inv_dd - sh_j * sjb);
                         sys.gb[off_j + a * p + o] += alpha * do_j;
-                        v.push((off_j + a * p + o, do_j));
+                        run_j.push(do_j);
                     }
                 }
+                let mut run_k: Vec<f64> = Vec::with_capacity(m_k * p);
                 for b in 0..m_k {
                     for o in 0..p {
                         let mut mtb = 0.0_f64;
@@ -1470,9 +1547,16 @@ impl SaeManifoldTerm {
                         }
                         let do_k = 2.0 * (mtb * inv_dd - sh_k * skb);
                         sys.gb[off_k + b * p + o] += alpha * do_k;
-                        v.push((off_k + b * p + o, do_k));
+                        run_k.push(do_k);
                     }
                 }
+                // Ascending in the atom index, which is ascending in the global
+                // β offset: the consumers walk the runs in order.
+                let v: Vec<(usize, Vec<f64>)> = if e.j <= e.k {
+                    vec![(e.j, run_j), (e.k, run_k)]
+                } else {
+                    vec![(e.k, run_k), (e.j, run_j)]
+                };
                 if alpha != 0.0 {
                     wrote = true;
                 }
@@ -1509,8 +1593,7 @@ impl SaeManifoldTerm {
                 edge_v.push(v);
             }
             // Exact PSD Gauss–Newton curvature: the overlap-space Hessian `M`
-            // (`F` linear in `o` ⇒ no `∂²F/∂o²` term), eigendecomposed into rank-1
-            // carriers `(penalty_scale·λ_r, w_r)`, `w_r = Σ_a e_r[a] v_a`.
+            // (`F` linear in `o` ⇒ no `∂²F/∂o²` term).
             let mut mm = Array2::<f64>::zeros((ne, ne));
             for a in 0..ne {
                 let ea = &comp.edges[a];
@@ -1522,48 +1605,132 @@ impl SaeManifoldTerm {
                             + g[[ea.jl, eb.jl]] * g[[ea.kl, eb.kl]]);
                 }
             }
-            let (sm, vm) = match mm.svd(false, true) {
-                Ok((_, sm, Some(vm))) => (sm, vm),
-                _ => continue,
-            };
-            for (r_i, &lam) in sm.iter().enumerate() {
-                let scale = penalty_scale * lam;
-                if !(scale > 0.0) {
-                    continue;
-                }
-                // Aggregate `w_r = Σ_a e_r[a] v_a` over global β indices (edges can
-                // share an atom's decoder coefficients, so accumulate into a map).
-                use std::collections::BTreeMap;
-                let mut agg: BTreeMap<usize, f64> = BTreeMap::new();
-                for a in 0..ne {
-                    let coef = vm[[r_i, a]];
-                    if coef == 0.0 {
-                        continue;
-                    }
-                    for &(idx, val) in &edge_v[a] {
-                        *agg.entry(idx).or_insert(0.0) += coef * val;
-                    }
-                }
-                let carrier: Vec<(usize, f64)> =
-                    agg.into_iter().filter(|&(_, v)| v != 0.0).collect();
-                if carrier.is_empty() {
-                    continue;
-                }
-                if dense_beta_curvature {
-                    // Scatter `scale·w wᵀ` into `hbb` (diagonal + true cross coupling).
-                    for &(gi, vi) in &carrier {
-                        let dvi = scale * vi;
-                        for &(gj, vj) in &carrier {
-                            sys.hbb[[gi, gj]] += dvi * vj;
+            // `M` is symmetric but need not be PSD: `M` is the edge-restriction
+            // of the symmetric Kronecker square of `G`, and a FRUSTRATED
+            // component's `G` carries negative eigenvalues (see
+            // `barrier_spectral_m`), whose products then come back negative. The
+            // shipped majorizer is the matrix ABSOLUTE VALUE `|M| = Σ_r|λ_r|e_re_rᵀ`
+            // — which is what the previous `svd`-based expansion computed, since
+            // the singular values of a symmetric matrix are `|λ_r|`. Stating it as
+            // `eigh` + `abs` makes the majorization a declared choice rather than
+            // a side effect of the factorization used, and `|M| ⪰ M` keeps the
+            // metric PSD and dominating on both spectra.
+            let coupling = match mm.eigh(faer::Side::Lower) {
+                Ok((lams_m, vecs_m)) => {
+                    let mut abs_m = Array2::<f64>::zeros((ne, ne));
+                    for (r_i, &lam) in lams_m.iter().enumerate() {
+                        let weight = penalty_scale * lam.abs();
+                        if !(weight > 0.0) {
+                            continue;
+                        }
+                        for a in 0..ne {
+                            let va = vecs_m[[a, r_i]];
+                            if va == 0.0 {
+                                continue;
+                            }
+                            let scaled = weight * va;
+                            for b in 0..ne {
+                                abs_m[[a, b]] += scaled * vecs_m[[b, r_i]];
+                            }
                         }
                     }
-                } else {
-                    sep_rank1.push((scale, carrier));
+                    abs_m
                 }
-                wrote = true;
+                Err(_) => continue,
+            };
+            if coupling.iter().all(|&v| v == 0.0) {
+                continue;
             }
+            if edge_v.iter().all(|runs| runs.is_empty()) {
+                continue;
+            }
+            // The curvature is `Σ_{a,b} coupling[a,b]·v_a v_bᵀ`. Expanding it
+            // into `ne` eigen-carriers `w_r = Σ_a e_r[a] v_a` — the historical
+            // form — costs `ne² · 2Mp` to BUILD and stores `ne` vectors dense
+            // over the whole component (`ne · s·M·p`), even though every `v_a`
+            // touches only two atoms. That expansion, not the fit, was 86% of
+            // the curved tier at `p=2048, charts=32` (#2731): `ne` counts
+            // REALIZED co-firing pairs, so it grows with the chart count and the
+            // square lands on the wall clock. The factored form below is the
+            // same operator, built in `ne²` scalar work and applied in
+            // `2·ne·2Mp + ne²`.
+            telemetry_components += 1;
+            telemetry_edges += ne;
+            telemetry_carrier_values += edge_v
+                .iter()
+                .map(|runs| runs.iter().map(|(_, values)| values.len()).sum::<usize>())
+                .sum::<usize>();
+            if dense_beta_curvature {
+                self.scatter_barrier_curvature_dense(comp, &coupling, &edge_v, &offsets, sys);
+            } else {
+                sep_curvature.push(SeparationBarrierCurvature {
+                    coupling,
+                    carriers: edge_v,
+                });
+            }
+            wrote = true;
+        }
+        if telemetry_components > 0 {
+            log::debug!(
+                "[SAE-BARRIER] separation curvature: components={telemetry_components} \
+                 edges={telemetry_edges} carrier_values={telemetry_carrier_values} \
+                 dense={dense_beta_curvature} in {:.3} s",
+                started.elapsed().as_secs_f64()
+            );
         }
         wrote
+    }
+
+    /// Dense-`hbb` expansion of one component's factored barrier curvature
+    /// `Σ_{a,b} C[a,b]·v_a v_bᵀ`, restricted to the component's own atom blocks.
+    ///
+    /// Only the dense β-curvature path reaches this; the matrix-free / framed
+    /// production path keeps the factored form and never materializes an outer
+    /// product. Runs as two small GEMMs over the component support rather than
+    /// an `ne`-fold scatter of dense carriers, so it is no more expensive than
+    /// the expansion it replaces and does not reintroduce its build cost.
+    fn scatter_barrier_curvature_dense(
+        &self,
+        comp: &BarrierComponent,
+        coupling: &Array2<f64>,
+        edge_v: &[Vec<(usize, Vec<f64>)>],
+        offsets: &[usize],
+        sys: &mut ArrowSchurSystem,
+    ) {
+        let ne = edge_v.len();
+        // Component support: the atoms' β blocks in ascending global order,
+        // with a local index for each.
+        let mut atoms: Vec<usize> = comp.atoms.clone();
+        atoms.sort_unstable();
+        let mut local_base: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
+        let mut support: Vec<usize> = Vec::new();
+        for &atom in &atoms {
+            let width = self.atoms[atom].basis_size() * self.output_dim();
+            local_base.insert(atom, support.len());
+            let start = offsets[atom];
+            support.extend(start..start + width);
+        }
+        if support.is_empty() {
+            return;
+        }
+        let mut vmat = Array2::<f64>::zeros((ne, support.len()));
+        for (a, runs) in edge_v.iter().enumerate() {
+            for (atom, values) in runs {
+                let Some(&base) = local_base.get(atom) else {
+                    continue;
+                };
+                for (i, &value) in values.iter().enumerate() {
+                    vmat[[a, base + i]] = value;
+                }
+            }
+        }
+        let contribution = vmat.t().dot(&coupling.dot(&vmat));
+        for (li, &gi) in support.iter().enumerate() {
+            for (lj, &gj) in support.iter().enumerate() {
+                sys.hbb[[gi, gj]] += contribution[[li, lj]];
+            }
+        }
     }
 
     pub(crate) fn live_mechanism_sparsity_penalties(
@@ -1831,13 +1998,13 @@ impl SaeManifoldTerm {
         sys.gb = Array1::<f64>::zeros(self.beta_dim());
         sys.hbb = Array2::<f64>::zeros((0, 0));
         let mut atom_curv = vec![0.0_f64; self.k_atoms()];
-        let mut sep_rank1 = Vec::new();
+        let mut sep_curvature = Vec::new();
         self.add_sae_separation_barrier(
             &mut sys,
             penalty_scale,
             false,
             &mut atom_curv,
-            &mut sep_rank1,
+            &mut sep_curvature,
         );
         (self.separation_barrier_value(penalty_scale), sys.gb)
     }

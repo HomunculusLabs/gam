@@ -787,7 +787,7 @@ impl MaterializablePsiDerivativeOperator for TensorKroneckerPsiOperator {
 /// The CTN row-streaming first-order ψ kernel ([`scop_psi_terms`]) walks all
 /// `n` rows serially and is invoked once per ψ axis. At large scale that is
 /// the dominant outer-evaluation cost. All `n_psi` axes share the same per-row
-/// state — `γ`, `h`, `h'`, `endpoint_q`, the response basis rows `rv`/`rd`,
+/// state — `γ`, `h`, `h'`, the response basis rows `rv`/`rd`,
 /// the covariate row, and the row weight. The only per-axis input is
 /// `cov_psi[axis] = ∂C/∂ψ_axis`, which this workspace streams in bounded row
 /// chunks so the exact all-axis gradient never has to cache all
@@ -816,7 +816,6 @@ pub(crate) struct TransformationNormalPsiWorkspaceCacheEntry {
     pub(crate) row_gamma: Arc<Array2<f64>>,
     pub(crate) row_h: Arc<Array1<f64>>,
     pub(crate) row_h_prime: Arc<Array1<f64>>,
-    pub(crate) endpoint_q: Arc<Vec<LogNormalCdfDiffDerivatives>>,
     pub(crate) beta: Arc<Array1<f64>>,
 }
 
@@ -826,7 +825,6 @@ pub(crate) struct TransformationNormalPsiWorkspaceAxisSnapshot {
     pub(crate) row_gamma: Arc<Array2<f64>>,
     pub(crate) row_h: Arc<Array1<f64>>,
     pub(crate) row_h_prime: Arc<Array1<f64>>,
-    pub(crate) endpoint_q: Arc<Vec<LogNormalCdfDiffDerivatives>>,
     pub(crate) beta: Arc<Array1<f64>>,
 }
 
@@ -842,7 +840,6 @@ pub(crate) struct TransformationNormalPsiWorkspacePairCacheEntry {
     pub(crate) row_gamma: Arc<Array2<f64>>,
     pub(crate) row_h: Arc<Array1<f64>>,
     pub(crate) row_h_prime: Arc<Array1<f64>>,
-    pub(crate) endpoint_q: Arc<Vec<LogNormalCdfDiffDerivatives>>,
     pub(crate) beta: Arc<Array1<f64>>,
 }
 
@@ -872,7 +869,7 @@ impl TransformationNormalPsiWorkspace {
 
     /// Compute all per-axis ψ first-order terms in a single parallel row pass.
     ///
-    /// Each row's per-row state (γ, h, h', endpoint_q, rv, rd, cov_row, weight)
+    /// Each row's per-row state (γ, h, h', rv, rd, cov_row, weight)
     /// is loaded once and reused across every ψ axis, in contrast to the
     /// per-axis [`scop_psi_terms`] path that reloads it once per axis. Op
     /// counts are identical to the per-axis path; only the loop nesting and
@@ -958,16 +955,6 @@ impl TransformationNormalPsiWorkspace {
         let weights = self.family.effective_weights();
         let h = row.h.as_ref();
         let h_prime = row.h_prime.as_ref();
-        let endpoint_q = row.endpoint_q.as_ref();
-        let endpoint_basis =
-            [
-                self.family.response_upper_basis.as_slice().ok_or_else(|| {
-                    "ψ workspace endpoint upper basis is not contiguous".to_string()
-                })?,
-                self.family.response_lower_basis.as_slice().ok_or_else(|| {
-                    "ψ workspace endpoint lower basis is not contiguous".to_string()
-                })?,
-            ];
 
         // Single-pass row walk: for each row, load the per-row state once and
         // accumulate every axis's `objective_psi`/`score_psi` in lockstep.
@@ -1039,15 +1026,11 @@ impl TransformationNormalPsiWorkspace {
                 let mut acc = PsiAllAxesAccum::new(n_psi, p_total);
                 let mut h_factor = vec![0.0; p_resp];
                 let mut hp_factor = vec![0.0; p_resp];
-                let mut endpoint_factor = vec![[0.0_f64; 2]; p_resp];
                 let mut alpha_psi = vec![0.0; p_resp];
                 let mut hpsi_cov_factor = vec![0.0; p_resp];
                 let mut hppsi_cov_factor = vec![0.0; p_resp];
                 let mut hpsi_psi_factor = vec![0.0; p_resp];
                 let mut hppsi_psi_factor = vec![0.0; p_resp];
-                let mut endpoint_psi = [0.0_f64; 2];
-                let mut endpoint_psi_cov_factor = vec![[0.0_f64; 2]; p_resp];
-                let mut endpoint_psi_psi_factor = vec![[0.0_f64; 2]; p_resp];
 
                 for local_i in 0..(end - start) {
                     let i = start + local_i;
@@ -1059,16 +1042,9 @@ impl TransformationNormalPsiWorkspace {
                     let hp = h_prime[i];
                     let inv_hp = 1.0 / hp;
                     let inv_hp_sq = inv_hp * inv_hp;
-                    let q = &endpoint_q[i];
                     for k in 0..p_resp {
                         h_factor[k] = rv[k];
                         hp_factor[k] = rd[k];
-                    }
-                    for e in 0..2 {
-                        let basis = endpoint_basis[e];
-                        for k in 0..p_resp {
-                            endpoint_factor[k][e] = basis[k];
-                        }
                     }
 
                     for axis_idx in 0..n_psi {
@@ -1085,20 +1061,7 @@ impl TransformationNormalPsiWorkspace {
                             hp_psi += rd[k] * alpha_psi[k];
                         }
 
-                        for e in 0..2 {
-                            let basis = endpoint_basis[e];
-                            endpoint_psi[e] = 0.0;
-                            for k in 0..p_resp {
-                                endpoint_psi[e] += basis[k] * alpha_psi[k];
-                                endpoint_psi_cov_factor[k][e] = 0.0;
-                                endpoint_psi_psi_factor[k][e] = basis[k];
-                            }
-                        }
-
-                        acc.objective_psi[axis_idx] += wi
-                            * (hi * h_psi
-                                - hp_psi * inv_hp
-                                + endpoint_chain_first(q, endpoint_psi));
+                        acc.objective_psi[axis_idx] += wi * (hi * h_psi - hp_psi * inv_hp);
 
                         for k in 0..p_resp {
                             hpsi_cov_factor[k] = 0.0;
@@ -1117,25 +1080,9 @@ impl TransformationNormalPsiWorkspace {
                                     + hpsi_psi_factor[k] * psi_row[c];
                                 let hppsi_a = hppsi_cov_factor[k] * cov_row[c]
                                     + hppsi_psi_factor[k] * psi_row[c];
-                                let endpoint_a = [
-                                    endpoint_factor[k][0] * cov_row[c],
-                                    endpoint_factor[k][1] * cov_row[c],
-                                ];
-                                let endpoint_psi_a = [
-                                    endpoint_psi_cov_factor[k][0] * cov_row[c]
-                                        + endpoint_psi_psi_factor[k][0] * psi_row[c],
-                                    endpoint_psi_cov_factor[k][1] * cov_row[c]
-                                        + endpoint_psi_psi_factor[k][1] * psi_row[c],
-                                ];
                                 score_axis[idx] += wi
                                     * (h_a * h_psi + hi * hpsi_a - hppsi_a * inv_hp
-                                        + hp_psi * hp_a * inv_hp_sq
-                                        + endpoint_chain_second(
-                                            q,
-                                            endpoint_psi,
-                                            endpoint_a,
-                                            endpoint_psi_a,
-                                        ));
+                                        + hp_psi * hp_a * inv_hp_sq);
                             }
                         }
                     }
@@ -1175,7 +1122,6 @@ impl TransformationNormalPsiWorkspace {
                 row_gamma: Arc::clone(&row.alpha),
                 row_h: Arc::clone(&row.h),
                 row_h_prime: Arc::clone(&row.h_prime),
-                endpoint_q: Arc::clone(&row.endpoint_q),
                 beta: Arc::clone(&beta_arc),
             });
         }
@@ -1202,7 +1148,6 @@ impl TransformationNormalPsiWorkspace {
                 row_gamma: Arc::clone(&entry.row_gamma),
                 row_h: Arc::clone(&entry.row_h),
                 row_h_prime: Arc::clone(&entry.row_h_prime),
-                endpoint_q: Arc::clone(&entry.endpoint_q),
                 beta: Arc::clone(&entry.beta),
             })
             .collect())
@@ -1349,7 +1294,6 @@ impl TransformationNormalPsiWorkspace {
                         cov_psi_chunks[psi_j].view(),
                         cov_ij.view(),
                         start,
-                        &entry_i.endpoint_q[start..end],
                         None,
                     )?;
                 accum[pair_idx].objective += objective_chunk;
@@ -1382,7 +1326,6 @@ impl TransformationNormalPsiWorkspace {
                 row_gamma: Arc::clone(&entry_i.row_gamma),
                 row_h: Arc::clone(&entry_i.row_h),
                 row_h_prime: Arc::clone(&entry_i.row_h_prime),
-                endpoint_q: Arc::clone(&entry_i.endpoint_q),
                 beta: Arc::clone(&entry_i.beta),
             });
             table[i][j] = Some(Arc::clone(&entry));
@@ -1426,7 +1369,6 @@ impl ExactNewtonJointPsiWorkspace for TransformationNormalPsiWorkspace {
                 Arc::clone(&entry.row_gamma),
                 Arc::clone(&entry.row_h),
                 Arc::clone(&entry.row_h_prime),
-                Arc::clone(&entry.endpoint_q),
             ));
         Ok(Some(ExactNewtonJointPsiTerms {
             objective_psi: entry.objective_psi,
@@ -1474,7 +1416,6 @@ impl ExactNewtonJointPsiWorkspace for TransformationNormalPsiWorkspace {
                 Arc::clone(&entry.row_gamma),
                 Arc::clone(&entry.row_h),
                 Arc::clone(&entry.row_h_prime),
-                Arc::clone(&entry.endpoint_q),
             ),
         );
         log::info!(
@@ -1526,9 +1467,6 @@ impl ExactNewtonJointPsiWorkspace for TransformationNormalPsiWorkspace {
             alpha: Arc::clone(&entry.row_gamma),
             h: Arc::clone(&entry.row_h),
             h_prime: Arc::clone(&entry.row_h_prime),
-            h_lower: Arc::new(Array1::zeros(entry.row_h.len())),
-            h_upper: Arc::new(Array1::zeros(entry.row_h.len())),
-            endpoint_q: Arc::clone(&entry.endpoint_q),
             log_likelihood: 0.0,
         };
         let op = TransformationNormalPsiDhMatrixFreeOperator::new(

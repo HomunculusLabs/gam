@@ -86,6 +86,26 @@ pub struct PenaltyLogdetDerivs {
 pub struct PenaltySubspaceTrace {
     pub u_s: Array2<f64>,
     pub h_proj_inverse: Array2<f64>,
+    /// The additive scalar that turns the operator's own `logdet()` into the
+    /// pseudo-log-determinant THIS kernel is the derivative kernel of (#2765).
+    ///
+    /// Both producers compute the corrected value and the kernel from one
+    /// eigendecomposition of one matrix, and both used to hand them back as two
+    /// unrelated things: the scalar into `InnerSolution::hessian_logdet_
+    /// correction` (whose documented meaning is a UNIFORM RESCALE `−p·log s`,
+    /// nothing else) and the kernel into `penalty_subspace_trace`. Two fields
+    /// travelling separately can be separated, and the tangent-projection entry
+    /// separated them: it drops the kernel (correctly — a p-space subspace
+    /// kernel does not act on an m-dimensional face) while KEEPING the scalar,
+    /// rescaled by the rank ratio `m/p` as though it were the uniform rescale it
+    /// is not. The criterion's value then carried a θ-varying term with no
+    /// kernel anywhere to differentiate it, and the outer gradient was short by
+    /// exactly that term's derivative — measured on the #2765 fixture as the
+    /// DOMINANT half of the `logdet_h` disagreement on every θ coordinate.
+    ///
+    /// Carrying the scalar HERE makes the pairing structural: a lane that drops
+    /// the kernel drops the correction with it, because they are one object.
+    pub logdet_correction: f64,
 }
 
 impl PenaltySubspaceTrace {

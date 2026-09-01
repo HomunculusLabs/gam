@@ -4403,7 +4403,11 @@ mod tests {
         // BEFORE the fix this returned a `DimensionMismatch` carrying
         // "post-T rank invariant violated"; the fix makes it succeed.
         let canon =
-            crate::canonical::canonicalize_for_identifiability(&specs).unwrap_or_else(|e| {
+            crate::canonical::canonicalize_for_identifiability(
+                &specs,
+                &vec![gam_problem::CoefficientCoordinate::Spanning; specs.len()],
+            )
+            .unwrap_or_else(|e| {
                 panic!(
                     "gam#1590: cause-specific (k=2) canonicalisation must succeed, but \
                  aborted: {e:?}",

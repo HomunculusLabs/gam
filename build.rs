@@ -4268,19 +4268,27 @@ fn count_file_lines(path: &Path) -> std::io::Result<usize> {
 /// 6,116 — under the floor, so it is genuinely redeemed and does not belong
 /// here.)
 ///
-/// The list is still empty, and that is now a stated choice rather than a
-/// finding: adding either Rust path reddens every root-crate build until that
-/// file is cut to at most 7,000 lines, so arming the rule against two files
+/// Neither of those two Rust paths is armed here, and that is a stated choice
+/// rather than a finding: adding either reddens every root-crate build until
+/// that file is cut to at most 7,000 lines, so arming the rule against a file
 /// another author is actively editing is a decision for their owner. What the
 /// sweep buys is that arming it is a one-line edit instead of another
 /// whole-history scan.
+///
+/// `crates/gam-terms/src/term_builder.rs` IS armed, because it is the one entry
+/// that walked the documented sequence in a single lane (#2791): it crossed the
+/// limit at 10,001 lines, the primary gate reported it, its 4,195-line unit-test
+/// module was split into `term_builder/tests.rs`, and the remainder landed at
+/// 5,830 — a real ~42% cut, comfortably under the floor rather than hovering at
+/// 9,999. Arming it therefore costs nothing today and is what stops the parent
+/// from being re-inflated back toward the limit one test module at a time.
 ///
 /// The `.gif` is a third result and points at a different gap: both size audits
 /// count newline BYTES and exempt only generated lockfiles, so a binary asset
 /// can be put on probation and then can never be redeemed, having no line seam
 /// to split along. Whether `scan_for_oversized_tracked_files` should skip
 /// binaries is a question about that function, not about this list.
-const OVERSIZED_PROBATION_PATHS: &[&str] = &[];
+const OVERSIZED_PROBATION_PATHS: &[&str] = &["crates/gam-terms/src/term_builder.rs"];
 
 /// A file on probation (once >10k lines) must drop below this to be redeemed.
 /// The 7k floor forces a ~30% cut off the 10k limit — enough that a thin

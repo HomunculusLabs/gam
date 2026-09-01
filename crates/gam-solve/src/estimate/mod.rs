@@ -99,8 +99,9 @@ pub use joint_hyper::{
 pub(crate) use optimizer::optimize_external_designwith_heuristic_lambdas_andwarm_start;
 pub use optimizer::{optimize_external_design, optimize_external_designwith_heuristic_lambdas};
 pub use outer_eval_capture::{
-    OuterEvalRecord, OuterGradientFdAtoms, OuterGradientFdDecomposition, OuterGradientFdRecord,
-    OuterGradientFdRhoBlock, enable_outer_eval_capture, enable_outer_gradient_fd_capture,
+    OuterCurvatureDriftAudit, OuterCurvatureSnapshot, OuterEvalRecord, OuterGradientFdAtoms,
+    OuterGradientFdDecomposition, OuterGradientFdRecord, OuterGradientFdRhoBlock,
+    enable_outer_eval_capture, enable_outer_gradient_fd_capture,
     enable_outer_gradient_fd_capture_over_theta, take_outer_eval_capture,
     take_outer_gradient_fd_capture,
 };

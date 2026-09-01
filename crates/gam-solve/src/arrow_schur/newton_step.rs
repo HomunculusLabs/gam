@@ -99,7 +99,7 @@ pub fn solve_arrow_newton_step_with_options(
         let undamped = factor_blocks_for_system(
             sys,
             0.0,
-            options.evidence_policy.factors_undamped_evidence(),
+            options.evidence_policy,
             &backend,
             options.gpu_policy,
         )?;
@@ -228,7 +228,7 @@ pub fn probe_undamped_evidence_row_factors(
     factor_blocks_for_system(
         sys,
         0.0,
-        options.evidence_policy.factors_undamped_evidence(),
+        options.evidence_policy,
         &CpuBatchedBlockSolver,
         options.gpu_policy,
     )?;
@@ -1209,10 +1209,16 @@ pub(crate) struct ArrowBlockFactorization {
 pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
     sys: &ArrowSchurSystem,
     ridge_t: f64,
-    evidence_factorization: bool,
+    // #2515 — the whole evidence policy, not just "is this an evidence
+    // factorization". The per-row conditioning needs its verdict on a RESOLVED
+    // negative direction too, and deriving that from a bool at each site is how
+    // the two halves of one policy drift apart.
+    evidence_policy: ArrowEvidencePolicy,
     backend: &B,
     gpu_policy: gam_gpu::GpuPolicy,
 ) -> Result<ArrowBlockFactorization, ArrowSchurError> {
+    let evidence_factorization = evidence_policy.factors_undamped_evidence();
+    let refuse_resolved_indefinite = evidence_policy.refuses_resolved_indefinite();
     let Some(deflation) = sys.row_gauge_deflation.as_ref() else {
         return Ok(ArrowBlockFactorization {
             factors: backend.factor_blocks_with_policy(
@@ -1258,6 +1264,7 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
                         evidence_factorization,
                         deflation.row(row_idx),
                         true,
+                        refuse_resolved_indefinite,
                     )
                 })
             })
@@ -1273,6 +1280,7 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
                 evidence_factorization,
                 deflation.row(row_idx),
                 true,
+                refuse_resolved_indefinite,
             )?);
         }
         results
@@ -1945,7 +1953,17 @@ pub(crate) fn solve_arrow_newton_step_artifacts(
     // (H_tt^(i) + ridge_t · I).  `factor_blocks` reads the actual row
     // dimension from `row.htt.nrows()` so heterogeneous systems work.
     let htt_factors =
-        factor_blocks_for_system(sys, ridge_t, false, &backend, options.gpu_policy)?.factors;
+        factor_blocks_for_system(
+            sys,
+            ridge_t,
+            // A Newton step is never an evidence factorization: it ridge-damps a
+            // non-PD block rather than conditioning it, so no deflation and no
+            // sign verdict apply.
+            ArrowEvidencePolicy::Strict,
+            &backend,
+            options.gpu_policy,
+        )?
+        .factors;
 
     // 2. Reduced RHS r_β = -g_β + Σ_i H_βt^(i) (H_tt^(i))⁻¹ g_t^(i).
     let rhs_beta = reduced_rhs_beta(sys, &htt_factors, &backend);

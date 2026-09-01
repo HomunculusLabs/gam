@@ -2567,6 +2567,57 @@ fn unmeasured_criterion_rise() -> f64 {
     f64::NAN
 }
 
+/// Which posterior covariance definition an uncertainty surface was built from.
+///
+/// This is the library's ONE covariance-definition vocabulary, and it lives
+/// here — beside [`SmoothingCorrectionMethod`], which names how the correction
+/// was produced — rather than in a predict-layer crate, so that every consumer
+/// of a fit can say which of the two matrices it read. A family that owns its
+/// own predict surface (the multinomial) sits BELOW `gam-predict` in the crate
+/// graph; when this enum lived up there, that family had no way to express the
+/// distinction and quietly published conditional-only bands while every other
+/// family defaulted to [`Self::SmoothingCorrected`] (gam#2612).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum InferenceCovarianceMode {
+    /// Use conditional posterior covariance only:
+    ///   Var(beta | lambda_hat) ~= H_{rho_hat}^{-1}.
+    Conditional,
+    /// Require first-order smoothing-corrected covariance:
+    ///   Var(beta) ~= H_{rho_hat}^{-1} + J Var(rho_hat) J^T.
+    /// Absence is an error; this mode never substitutes conditional covariance.
+    SmoothingCorrected,
+}
+
+impl InferenceCovarianceMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Conditional => "conditional",
+            Self::SmoothingCorrected => "smoothing-corrected",
+        }
+    }
+}
+
+impl std::str::FromStr for InferenceCovarianceMode {
+    type Err = String;
+
+    /// The one public vocabulary for the covariance-mode knob across every
+    /// surface (`gam predict --covariance-mode`, Python `covariance_mode`).
+    /// The CLI historically said "corrected" and the Python bindings said
+    /// "smoothing" for the SAME mode; both spellings (plus the enum's own
+    /// canonical "smoothing-corrected") are accepted here so the vocabulary
+    /// cannot drift per frontend again. Unknown strings are a hard error so a
+    /// typo never silently degrades to a default covariance.
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "conditional" => Ok(Self::Conditional),
+            "corrected" | "smoothing" | "smoothing-corrected" => Ok(Self::SmoothingCorrected),
+            other => Err(format!(
+                "covariance mode must be one of \"conditional\", \"corrected\", or \"smoothing\"; got \"{other}\""
+            )),
+        }
+    }
+}
+
 /// Serialized provenance of a retained smoothing-uncertainty correction.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum SmoothingCorrectionMethod {

@@ -1412,7 +1412,10 @@ mod amortized_encoder_tests {
         use ndarray::{Array1, Array2, array, s};
         // This module does not `use super::*`; the arbiter is the first test here
         // to build a `SaeArrowVector`, call `.eigh` (FaerEigh), and name `Side`.
-        use super::{FaerEigh, SaeArrowVector, SaeCriterionError, SaeManifoldTerm, Side};
+        use super::{
+            ArrowMetric, FaerEigh, SaeArrowVector, SaeCriterionError, Side,
+            sae_exact_a_direction_floor,
+        };
         let (mut term, target, rho, _stationary_cache) =
             super::exact_hessian_fixture_tests::converged_state_with_residual();
         let mut rho_eval = rho.clone();
@@ -1480,25 +1483,61 @@ mod amortized_encoder_tests {
         );
         let result = term.exact_observed_information_log_dets(&rho, target.view(), &cache);
         // #2330 Phase-2: the value path classifies the spectrum three ways against
-        // the SHARED floor — kept (λ>floor, contributes ln λ), gauge quotient
+        // the SHARED floor — kept (λ>floor, contributes ln λ), null band
         // (|λ|≤floor, contributes 0), refused (λ<−floor). The arbiter mirrors
-        // that classification exactly, so a future gauge-null-PD A is judged
+        // that classification exactly, so a future null-band-PD A is judged
         // correctly rather than binary PD-vs-refuse.
-        let floor = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_eig.max(1.0);
-        if min_eig >= -floor {
+        //
+        // #2673 — the band is PER DIRECTION now, because the metric it is
+        // relative to is. This oracle keeps its own operands (its own dense `A`,
+        // its own plain `eigh`, its own `B`-applies) and shares only the scalar
+        // rule, so it still oracles the classification while a second copy of the
+        // rule cannot drift from production's.
+        let spectral_norm = eigs.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+        let joint_metric = ArrowMetric::Joint(&cache);
+        let floors: Vec<f64> = (0..dim)
+            .map(|index| {
+                let vbv = joint_metric
+                    .quadratic_form(vecs.column(index))
+                    .expect("B quadratic form on the joint block");
+                sae_exact_a_direction_floor(dim, spectral_norm, vbv)
+            })
+            .collect();
+        let worst_floor = floors.iter().copied().fold(0.0_f64, f64::max);
+        if min_eig >= -worst_floor
+            && eigs
+                .iter()
+                .enumerate()
+                .all(|(index, &lambda)| lambda >= -floors[index])
+        {
             // PD on the gauge quotient (min_eig may be a gauge null in [−floor, floor]).
             let (log_a, log_a_tt) =
                 result.expect("A is PD on the quotient so the log-dets must be Ok");
-            let kept: f64 = eigs.iter().filter(|&&l| l > floor).map(|l| l.ln()).sum();
+            let kept: f64 = eigs
+                .iter()
+                .enumerate()
+                .filter(|&(index, l)| *l > floors[index])
+                .map(|(_, l)| l.ln())
+                .sum();
             assert!(
                 (log_a - kept).abs() <= 1.0e-9 * (1.0 + kept.abs()),
                 "log|A| kept-eigenvalue sum {log_a} != oracle {kept}"
             );
             let a_tt = sym.slice(s![..total_t, ..total_t]).to_owned();
-            let (eigs_tt, _) = a_tt.eigh(Side::Lower).expect("A_tt eigendecomposition");
-            let max_tt = eigs_tt.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let floor_tt = SaeManifoldTerm::SAE_EXACT_A_PD_FLOOR_REL * max_tt.max(1.0);
-            let kept_tt: f64 = eigs_tt.iter().filter(|&&l| l > floor_tt).map(|l| l.ln()).sum();
+            let (eigs_tt, vecs_tt) = a_tt.eigh(Side::Lower).expect("A_tt eigendecomposition");
+            let tt_norm = eigs_tt.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+            let tt_metric = ArrowMetric::Coordinate(&cache);
+            let kept_tt: f64 = eigs_tt
+                .iter()
+                .enumerate()
+                .filter(|&(index, l)| {
+                    let vbv = tt_metric
+                        .quadratic_form(vecs_tt.column(index))
+                        .expect("B quadratic form on the coordinate block");
+                    *l > sae_exact_a_direction_floor(total_t, tt_norm, vbv)
+                })
+                .map(|(_, l)| l.ln())
+                .sum();
             assert!(
                 (log_a_tt - kept_tt).abs() <= 1.0e-9 * (1.0 + kept_tt.abs()),
                 "log|A_tt| kept-eigenvalue sum {log_a_tt} != oracle {kept_tt}"
@@ -1526,6 +1565,7 @@ mod amortized_encoder_tests {
             let mut all_attributable = true;
             let mut priced_log_a = 0.0_f64;
             for (idx, &lambda) in eigs.iter().enumerate() {
+                let floor = floors[idx];
                 let priced = if lambda < -floor {
                     let v = vecs.column(idx);
                     let mut e_v = 0.0_f64;
@@ -1873,6 +1913,49 @@ mod exact_stationarity_solve_1418_tests {
         sae_norm(&resid)
     }
 
+    /// A synthetic spectral block whose per-direction band is one chosen
+    /// constant (#2673).
+    ///
+    /// Production classifies direction `i` at
+    /// `max(dim·ε·‖A‖₂, √ε·vᵢᵀBvᵢ)`, so a UNIFORM metric
+    /// `vᵢᵀBvᵢ = floor/√ε` reproduces the scalar band the fixtures below were
+    /// written against. That is asserted here rather than assumed: a block whose
+    /// realised floor is not the requested one would silently re-tune every
+    /// fixture that uses this helper.
+    fn spectral_block_with_uniform_floor(
+        operator: Array2<f64>,
+        eigenvalues: Array1<f64>,
+        eigenvectors: Array2<f64>,
+        floor: f64,
+    ) -> ExactHessianSpectralBlock {
+        let dimension = eigenvalues.len();
+        let spectral_norm = eigenvalues
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max);
+        let block = ExactHessianSpectralBlock {
+            operator,
+            eigenvalues,
+            eigenvectors,
+            metric_scale: Array1::from_elem(
+                dimension,
+                floor / super::sae_exact_a_identifiability_floor(),
+            ),
+            spectral_norm,
+        };
+        for index in 0..dimension {
+            let realised = block.rank_floor(index);
+            assert!(
+                (realised - floor).abs() <= 1.0e-12 * floor,
+                "#2673: the synthetic block must realise the requested band \
+                 (direction {index}: asked {floor:.6e}, got {realised:.6e}); the arithmetic \
+                 floor dim·ε·‖A‖₂ = {:.6e} may be binding instead",
+                (dimension as f64) * f64::EPSILON * spectral_norm
+            );
+        }
+        block
+    }
+
     /// #2653: the dense owner is a signed Moore--Penrose solve, not an SPD
     /// inverse and not a projected-residual proxy. A resolved negative mode is
     /// retained, the MEASURED spectral null band is removed (#2674 — nothing is
@@ -1881,12 +1964,12 @@ mod exact_stationarity_solve_1418_tests {
     #[test]
     fn dense_exact_stationarity_pseudoinverse_keeps_signed_range_and_drops_null_2653() {
         let eigenvalues = Array1::from_vec(vec![4.0_f64, 1.0e-12, -2.0]);
-        let geometry = ExactHessianSpectralBlock {
-            operator: Array2::from_diag(&eigenvalues),
-            eigenvalues,
-            eigenvectors: Array2::from_diag(&Array1::ones(3)),
-            rank_floor: 1.0e-9,
-        };
+        let geometry = spectral_block_with_uniform_floor(
+                Array2::from_diag(&eigenvalues),
+                eigenvalues,
+                Array2::from_diag(&Array1::ones(3)),
+                1.0e-9,
+            );
         let rhs = SaeArrowVector {
             t: Array1::from_vec(vec![8.0, 3.0]),
             beta: Array1::from_vec(vec![6.0]),
@@ -1911,12 +1994,12 @@ mod exact_stationarity_solve_1418_tests {
     #[test]
     fn damped_residual_step_at_zero_damping_is_the_pseudoinverse_step_2762() {
         let eigenvalues = Array1::from_vec(vec![4.0_f64, 1.0e-12, -2.0]);
-        let geometry = ExactHessianSpectralBlock {
-            operator: Array2::from_diag(&eigenvalues),
-            eigenvalues,
-            eigenvectors: Array2::from_diag(&Array1::ones(3)),
-            rank_floor: 1.0e-9,
-        };
+        let geometry = spectral_block_with_uniform_floor(
+                Array2::from_diag(&eigenvalues),
+                eigenvalues,
+                Array2::from_diag(&Array1::ones(3)),
+                1.0e-9,
+            );
         // The damped path is stated in the RESIDUAL `g`; the pseudoinverse
         // route is stated in `rhs = −g`.
         let residual = SaeArrowVector {
@@ -1966,12 +2049,12 @@ mod exact_stationarity_solve_1418_tests {
         }
         let eigenvalues = Array1::from_vec(vec![3.0_f64, -0.75, 1.0e-5, 0.25]);
         let operator = basis.dot(&Array2::from_diag(&eigenvalues)).dot(&basis.t());
-        let geometry = ExactHessianSpectralBlock {
-            operator: operator.clone(),
-            eigenvalues,
-            eigenvectors: basis,
-            rank_floor: 1.0e-12,
-        };
+        let geometry = spectral_block_with_uniform_floor(
+                operator.clone(),
+                eigenvalues,
+                basis,
+                1.0e-12,
+            );
         let residual = SaeArrowVector {
             t: Array1::from_vec(vec![0.7_f64, -1.3, 0.2]),
             beta: Array1::from_vec(vec![0.9]),
@@ -2024,12 +2107,12 @@ mod exact_stationarity_solve_1418_tests {
     #[test]
     fn damping_separates_a_flat_direction_from_a_resolved_one_2762() {
         let eigenvalues = Array1::from_vec(vec![1.0_f64, 1.0e-6]);
-        let geometry = ExactHessianSpectralBlock {
-            operator: Array2::from_diag(&eigenvalues),
-            eigenvalues,
-            eigenvectors: Array2::from_diag(&Array1::ones(2)),
-            rank_floor: 1.0e-14,
-        };
+        let geometry = spectral_block_with_uniform_floor(
+                Array2::from_diag(&eigenvalues),
+                eigenvalues,
+                Array2::from_diag(&Array1::ones(2)),
+                1.0e-14,
+            );
         let residual = SaeArrowVector {
             t: Array1::from_vec(vec![1.0_f64]),
             beta: Array1::from_vec(vec![1.0]),
@@ -2139,12 +2222,12 @@ mod exact_stationarity_solve_1418_tests {
     #[test]
     fn retained_curvature_extremes_span_the_resolved_band_only_2762() {
         let eigenvalues = Array1::from_vec(vec![-7.0_f64, 1.0e-12, 0.5, 2.0]);
-        let geometry = ExactHessianSpectralBlock {
-            operator: Array2::from_diag(&eigenvalues),
-            eigenvalues,
-            eigenvectors: Array2::from_diag(&Array1::ones(4)),
-            rank_floor: 1.0e-9,
-        };
+        let geometry = spectral_block_with_uniform_floor(
+                Array2::from_diag(&eigenvalues),
+                eigenvalues,
+                Array2::from_diag(&Array1::ones(4)),
+                1.0e-9,
+            );
         let (smallest, largest) = geometry
             .retained_curvature_extremes()
             .expect("three directions clear the null band");
@@ -2154,12 +2237,12 @@ mod exact_stationarity_solve_1418_tests {
         // A block that is entirely inside its own null band has no ladder, and
         // must say so rather than hand back a degenerate span.
         let null_eigenvalues = Array1::from_vec(vec![1.0e-12_f64, -2.0e-12]);
-        let null_geometry = ExactHessianSpectralBlock {
-            operator: Array2::from_diag(&null_eigenvalues),
-            eigenvalues: null_eigenvalues,
-            eigenvectors: Array2::from_diag(&Array1::ones(2)),
-            rank_floor: 1.0e-9,
-        };
+        let null_geometry = spectral_block_with_uniform_floor(
+                Array2::from_diag(&null_eigenvalues),
+                null_eigenvalues,
+                Array2::from_diag(&Array1::ones(2)),
+                1.0e-9,
+            );
         assert!(null_geometry.retained_curvature_extremes().is_none());
     }
 

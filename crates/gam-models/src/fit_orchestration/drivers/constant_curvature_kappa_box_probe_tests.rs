@@ -265,12 +265,13 @@ mod constant_curvature_kappa_range_identification_tests {
     /// `kappa=` pins the geometry — the same mgcv-`sp=` convention on the
     /// smooth's other coordinate.
     ///
-    /// Pinned means pinned: the inner solve must report `LocallyFixed` at every
-    /// κ, hand back the user's value verbatim, and take the plain κ slice for
-    /// the profile's derivatives, because a range the criterion may not move has
-    /// `dη̂/dκ = 0` and the envelope/Schur reduction does not apply to it. The
-    /// resulting κ̂ is a conditional estimate and the report says so
-    /// (`length_scale_estimated = false`).
+    /// Pinned means pinned: the inner solve must report `Pinned` at every κ,
+    /// hand back the user's value verbatim, and take the plain κ slice for the
+    /// profile's derivatives, because a range the criterion may not move has
+    /// `dη̂/dκ = 0` — by construction, not by assumption, which is exactly what
+    /// distinguishes this outcome from `Uncertified` — and the envelope/Schur
+    /// reduction does not apply to it. The resulting κ̂ is a conditional estimate
+    /// and the report says so (`length_scale_estimated = false`).
     #[test]
     fn a_pinned_range_is_honoured_verbatim_and_never_profiled() {
         let n = 240usize;
@@ -292,8 +293,10 @@ mod constant_curvature_kappa_range_identification_tests {
                 .expect("a pinned range still evaluates");
             assert_eq!(
                 outcome,
-                RangeSolveOutcome::LocallyFixed,
-                "a pinned range is never an interior minimizer of the profile"
+                RangeSolveOutcome::Pinned,
+                "a pinned range is not an interior minimizer, and it is not a stalled solve \
+                 either -- `dη̂/dκ = 0` holds by construction, which is what `Pinned` claims \
+                 and `Uncertified` does not"
             );
             assert!(
                 (eta_hat.exp() - pinned).abs() <= 1.0e-12 * pinned,
@@ -358,5 +361,261 @@ mod constant_curvature_kappa_range_identification_tests {
                 fitted
             );
         }
+    }
+
+    /// `V_p(κ)` may not depend on a range the search has ALREADY been to.
+    ///
+    /// The profile's box, bracket and seed are documented as DERIVED from the
+    /// realized center set, and two of the three were. The seed was
+    /// `spec.length_scale`, and `realized_constant_curvature_length_scale`
+    /// returns an explicit positive value VERBATIM — falling back to the derived
+    /// median only on the `0.0` auto sentinel. By the time the CI and the
+    /// flatness LR build their profile, that field is no longer a request: both
+    /// of the fit's write-backs have overwritten it with `ℓ̂`, the range this
+    /// same criterion profiled to AT `κ̂`
+    /// (`cc.length_scale = psi_hat.length_scale` in the free-κ enrollment, and
+    /// `s.length_scale = *length_scale` in `freeze_term_collection_from_design`).
+    ///
+    /// `eta_seed` is pushed into the inner solve's candidate list beside the
+    /// deterministic scan, so seeding it at `ℓ̂` is a warm start from ONE κ.
+    /// `minimize_over_eta` states the rule it breaks: *"a profile likelihood
+    /// that is not a function of its own argument cannot support an interval"*.
+    /// The point estimate is the argmin of the criterion built with the auto
+    /// seed; the interval and the LR are level sets of the criterion built with
+    /// `ℓ̂`. Nothing makes `κ̂` stationary for the second one, and
+    /// `curvature_profile_lr_endpoint` hard-errors — *"fitted curvature is not
+    /// the minimum of its inference profile"* — exactly when it is not.
+    ///
+    /// This is the same argument the constructor already makes one field up
+    /// about `identifiability`, whose frozen transform it un-freezes because it
+    /// *"is the global identifiability frame realized at one particular fitted
+    /// ψ"*. A fitted range is that too.
+    ///
+    /// The bar is BIT equality, not a tolerance. Two profiles that differ in the
+    /// last place are two functions, and the failure this gate exists to catch —
+    /// a search whose answer depends on where a previous search ended — shows up
+    /// there first. The fixture is chosen so the injected seed is genuinely a
+    /// different starting point: on hyperbolic truth at twice the auto range,
+    /// `ℓ̂(κ)` moves by an order of magnitude across the κ box, so a seed pinned
+    /// at one κ's answer is nowhere near the next κ's.
+    #[test]
+    fn the_profile_is_the_same_function_whatever_range_the_spec_arrives_carrying() {
+        let n = 240usize;
+        let centers = 6usize;
+        let radius = 0.6_f64;
+        let seed = 0x5EED_2747_0000_0004_u64;
+        let (probe_feats, _) = dataset_in_span(n, 0.0, radius, 1.0, centers, 0.0, seed);
+        let (ell_ref, cap) = seed_range_and_box(&probe_feats, centers);
+        let (feats, y) = dataset_in_span(n, -1.0, radius, ell_ref * 2.0, centers, 0.03, seed);
+
+        // What the FIT writes back: the range this criterion profiles to at one
+        // κ. Taken at the box's hyperbolic end, which is where `ℓ̂` is furthest
+        // from the auto rule.
+        let derived = ConstantCurvatureProfile::new(feats.view(), y.view(), spec_at(0.0, centers, 0.0))
+            .expect("profile is constructible from an auto-range spec");
+        let anchor_kappa = -0.9 * cap;
+        let (eta_at_anchor, _, _) = derived
+            .minimize_over_eta(anchor_kappa)
+            .expect("the range box is searchable at the anchor");
+        let fitted_ell = eta_at_anchor.exp();
+        assert!(
+            (fitted_ell / ell_ref - 1.0).abs() > 0.1,
+            "this gate needs an ℓ̂ that is NOT the auto rule to be a test at all; \
+             got ℓ̂ = {fitted_ell} against ℓ_ref = {ell_ref}"
+        );
+
+        // The same spec as the fit hands to `curvature_inference_forspec`: the
+        // realized range written back, `length_scale_fixed` still false because
+        // the USER did not pin anything.
+        let mut carried = spec_at(0.0, centers, fitted_ell);
+        assert!(!carried.length_scale_fixed);
+        carried.kappa = anchor_kappa;
+        let replayed = ConstantCurvatureProfile::new(feats.view(), y.view(), carried)
+            .expect("profile is constructible from a fitted spec");
+
+        eprintln!(
+            "[#2747 seed] ℓ_ref={ell_ref:.6} ℓ̂(κ={anchor_kappa:+.4})={fitted_ell:.6}  \
+             box ±{cap:.4}"
+        );
+        for i in 0..=12u32 {
+            let kappa = -cap + 2.0 * cap * f64::from(i) / 12.0;
+            let a = derived.evaluate(kappa);
+            let b = replayed.evaluate(kappa);
+            match (a, b) {
+                (Ok(a), Ok(b)) => assert_eq!(
+                    a, b,
+                    "κ={kappa}: V_p and its two derivatives moved when the spec arrived \
+                     carrying ℓ̂={fitted_ell} instead of the auto sentinel — the profile is \
+                     not a function of κ alone"
+                ),
+                (Err(a), Err(b)) => assert_eq!(
+                    a.to_string(),
+                    b.to_string(),
+                    "κ={kappa}: the two profiles refuse for different reasons"
+                ),
+                (a, b) => panic!(
+                    "κ={kappa}: one profile evaluated and the other refused: {a:?} vs {b:?}"
+                ),
+            }
+        }
+    }
+
+    /// The PROFILED derivatives must be the derivatives of the PROFILED value.
+    ///
+    /// `constant_curvature_kappa_jet_fd_tests` differences `V(κ, η)` at fixed
+    /// `η`. Nothing differences `V_p(κ) = min_η V(κ, η)`, and the reduction from
+    /// one to the other is where the range coordinate's whole cost lands:
+    /// `V_p′ = V_κ` by the envelope theorem, and `V_p″ = V_κκ − V_κη²/V_ηη` by
+    /// one more differentiation. The Schur term is NON-POSITIVE, so a profile
+    /// that fails to apply it does not produce a wrong fit — it produces an
+    /// OVERSTATED curvature, which is what the outer solve's terminal
+    /// stationarity certificate is denominated in (#2458). Exactly the class of
+    /// defect that is invisible in the fitted numbers.
+    ///
+    /// And it was reachable. `minimize_over_eta` decided whether the reduction
+    /// applied from a `converged` flag set by two of its several `break`s, so a
+    /// backtracking search that exhausted BECAUSE the incumbent was already the
+    /// minimum left the flag unset and the reduction unapplied. Six shipped
+    /// fixtures were measured in that state, at `V_η` between `1.7e-6` and
+    /// `1.9e-3` against `V_ηη` between `0.93` and `6.3e3` (gam#2747).
+    ///
+    /// So this gate asks the question in the form that does not depend on the
+    /// classification at all: a central difference. It also asserts its own
+    /// TEETH — that the unreduced `V_κκ` fails the same bar wherever the Schur
+    /// term is material — because a gate on a correction is worthless at a
+    /// fixture where the correction is zero.
+    #[test]
+    fn the_profiled_second_derivative_is_the_derivative_of_the_profiled_first() {
+        let n = 200usize;
+        let centers = 6usize;
+        let radius = 0.6_f64;
+        let seed = 0x5EED_2747_0000_0005_u64;
+        let (probe_feats, _) = dataset_in_span(n, 0.0, radius, 1.0, centers, 0.0, seed);
+        let (ell_ref, cap) = seed_range_and_box(&probe_feats, centers);
+        let (feats, y) = dataset_in_span(n, 0.8, radius, ell_ref * 1.7, centers, 0.03, seed);
+        let profile =
+            ConstantCurvatureProfile::new(feats.view(), y.view(), spec_at(0.0, centers, 0.0))
+                .expect("profile is constructible on the fixture");
+
+        // `h` differences an ANALYTIC first derivative, whose only noise is the
+        // inner solve's `η̂` wobble entering through `V_κη·δη`. A step three
+        // orders inside the κ box keeps the difference in the smooth regime
+        // while staying far above that floor.
+        let h = 1.0e-3_f64 * cap;
+        let mut interior_cells = 0usize;
+        let mut toothy_cells = 0usize;
+        for i in 0..=8u32 {
+            let kappa = -0.8 * cap + 1.6 * cap * f64::from(i) / 8.0;
+            let (_, jet, outcome) = profile
+                .minimize_over_eta(kappa)
+                .expect("the range box is searchable");
+            if outcome != RangeSolveOutcome::InteriorMinimum {
+                eprintln!("[#2747 profile-fd] κ={kappa:+.4}: {outcome:?}, not gated here");
+                continue;
+            }
+            let (value, first, second) = profile.evaluate(kappa).expect("profiled jet");
+            // The two difference points are ordinary profile evaluations and can
+            // land on a κ whose own range solve is uncertified, where `evaluate`
+            // refuses by design. That is not this gate's subject, so the cell is
+            // skipped and the count below is what keeps skipping from becoming a
+            // way to pass.
+            let (Ok((plus, first_plus, _)), Ok((minus, first_minus, _))) =
+                (profile.evaluate(kappa + h), profile.evaluate(kappa - h))
+            else {
+                eprintln!(
+                    "[#2747 profile-fd] κ={kappa:+.4}: a difference point has no profile \
+                     derivative, cell skipped"
+                );
+                continue;
+            };
+            interior_cells += 1;
+            let fd_first = (plus - minus) / (2.0 * h);
+            let fd_second = (first_plus - first_minus) / (2.0 * h);
+            let schur = jet.hessian[0][1] * jet.hessian[0][1] / jet.hessian[1][1];
+            let unreduced = second + schur;
+            let rel_first = (first - fd_first).abs() / (1.0 + fd_first.abs());
+            let rel_second = (second - fd_second).abs() / (1.0 + fd_second.abs());
+            let rel_unreduced = (unreduced - fd_second).abs() / (1.0 + fd_second.abs());
+            eprintln!(
+                "[#2747 profile-fd] κ={kappa:+.4} V_p={value:.6} \
+                 V_p′={first:+.6e} (fd {fd_first:+.6e}, rel {rel_first:.2e})  \
+                 V_p″={second:+.6e} (fd {fd_second:+.6e}, rel {rel_second:.2e})  \
+                 schur={schur:.6e} unreduced rel {rel_unreduced:.2e}"
+            );
+            assert!(
+                rel_first <= 1.0e-4,
+                "κ={kappa}: V_p′={first:.9e} against a central difference of V_p \
+                 {fd_first:.9e} (rel {rel_first:.3e}); the envelope reduction does not \
+                 differentiate the value beside it"
+            );
+            assert!(
+                rel_second <= 1.0e-3,
+                "κ={kappa}: V_p″={second:.9e} against a central difference of V_p′ \
+                 {fd_second:.9e} (rel {rel_second:.3e}); the Schur reduction does not \
+                 differentiate the first derivative beside it"
+            );
+            // Teeth. Where the Schur correction is material, the UNREDUCED
+            // `V_κκ` — what a profile that misfiles an interior minimum
+            // returns — must fail the same bar by an order of magnitude, so a
+            // regression cannot slip through on a cell where the correction
+            // happens to vanish.
+            if rel_unreduced > 1.0e-2 {
+                toothy_cells += 1;
+            }
+        }
+        assert!(
+            interior_cells >= 5,
+            "only {interior_cells} of nine κ reached an interior range minimum; this gate \
+             measures the reduction and cannot do it on a fixture that never applies one"
+        );
+        assert!(
+            toothy_cells >= 1,
+            "the Schur correction was immaterial at every one of {interior_cells} gated κ, so \
+             the bars above would pass on a profile that never applied it"
+        );
+    }
+
+    /// A `double_penalty=` term has no curvature estimate here, and the profile
+    /// says so instead of scoring a different model.
+    ///
+    /// The criterion is a single-λ closed form. `double_penalty = true` makes
+    /// the basis emit TWO active penalties — the RKHS Gram and a ridge `I` —
+    /// which the fit gives two independent smoothing parameters. Both profile
+    /// entry points forced the flag off, so `κ̂` and `ℓ̂` were selected against
+    /// the one-penalty model while the fit realized the two-penalty one: an
+    /// estimate for a model nobody fits, with a CI and a flatness p-value
+    /// attached to it. Nothing anywhere reported the substitution.
+    ///
+    /// The pair below is the whole claim: the flag is the ONLY difference
+    /// between the two specs, one is refused and the other is not, and the
+    /// refusal names both ways out.
+    #[test]
+    fn a_double_penalty_term_is_refused_rather_than_scored_as_a_different_model() {
+        let n = 120usize;
+        let centers = 6usize;
+        let seed = 0x5EED_2747_0000_0006_u64;
+        let (feats, y) = dataset_in_span(n, 0.5, 0.6, 1.0, centers, 0.05, seed);
+
+        let mut ridged = spec_at(0.0, centers, 0.0);
+        ridged.double_penalty = true;
+        let refusal = ConstantCurvatureProfile::new(feats.view(), y.view(), ridged)
+            .expect_err("a two-penalty basis has no single-λ profile");
+        let message = refusal.to_string();
+        eprintln!("[#2747 double-penalty] {message}");
+        // The flag that caused it, the arity that fails, and both ways out. A
+        // refusal a caller cannot act on is a crash with better prose.
+        for needle in ["double_penalty", "two penalties", "kappa="] {
+            assert!(
+                message.contains(needle),
+                "the refusal must name the flag, the arity that fails, and a way out; \
+                 {needle:?} is missing from {message:?}"
+            );
+        }
+
+        // The control: the same spec without the flag builds, and it is the ONLY
+        // difference between them, so the refusal cannot be blamed on the
+        // fixture.
+        ConstantCurvatureProfile::new(feats.view(), y.view(), spec_at(0.0, centers, 0.0))
+            .expect("the default single-penalty term still profiles");
     }
 }

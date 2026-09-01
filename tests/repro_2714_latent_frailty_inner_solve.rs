@@ -37,6 +37,12 @@ const VETERAN_CSV: &str = concat!(
 
 #[test]
 fn latent_hazard_multiplier_frailty_converges_on_veteran_2714() {
+    // The quality binary this fixture was split out of installs no logging
+    // backend, so everything the solver reports about WHY it refused is
+    // discarded before it reaches the failure message. Install one here: a
+    // convergence defect whose only evidence is the terminal string costs a
+    // full fit per question asked of it.
+    gam::test_support::install_diagnostic_logger();
     init_parallelism();
 
     let raw = load_csvwith_inferred_schema(Path::new(VETERAN_CSV)).expect("load veteran_lung.csv");

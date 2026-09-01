@@ -248,12 +248,7 @@ pub(crate) fn calibrate_transformation_scores(
     let mut pit_values = Vec::with_capacity(family.n_obs());
     for i in 0..family.n_obs() {
         pit_values.push(
-            transformation_normal_pit_score(
-                row_quantities.h[i],
-                row_quantities.h_lower[i],
-                row_quantities.h_upper[i],
-                TRANSFORMATION_SCORE_PIT_CLIP_EPS,
-            )
+            transformation_normal_pit_score(row_quantities.h[i], TRANSFORMATION_SCORE_PIT_CLIP_EPS)
             .map_err(|err| {
                 format!("transformation-normal fitted PIT score failed at row {i}: {err}")
             })?,
