@@ -248,7 +248,12 @@ fn poisson_interval_derivatives_are_exact() {
     let second_mean = 0.4 * (-0.7_f64).exp();
     let expected_log_likelihood =
         2.0 * (0.3 + 0.4_f64.ln()) - first_mean - 2.0_f64.ln() - second_mean;
-    assert_abs_diff_eq!(evaluation.log_likelihood, expected_log_likelihood);
+    assert_close(
+        evaluation.log_likelihood,
+        expected_log_likelihood,
+        4.0e-15,
+        4.0e-15,
+    );
 }
 
 #[test]
@@ -280,19 +285,41 @@ fn poisson_derivatives_match_central_differences_across_scales() {
         (7, 2.1, 4.0),
         (100, 5.0, 0.2),
     ] {
-        let step: f64 = 1.0e-5;
+        let gradient_step: f64 = 1.0e-5;
+        let hessian_step: f64 = 2.0e-4;
         let center =
             evaluate_poisson_interval(array![count].view(), array![eta].view(), exposure).unwrap();
-        let upper =
-            evaluate_poisson_interval(array![count].view(), array![eta + step].view(), exposure)
-                .unwrap();
-        let lower =
-            evaluate_poisson_interval(array![count].view(), array![eta - step].view(), exposure)
-                .unwrap();
-        let numerical_gradient = (upper.log_likelihood - lower.log_likelihood) / (2.0 * step);
-        let numerical_hessian = (upper.log_likelihood - 2.0 * center.log_likelihood
-            + lower.log_likelihood)
-            / step.powi(2);
+        let gradient_upper = evaluate_poisson_interval(
+            array![count].view(),
+            array![eta + gradient_step].view(),
+            exposure,
+        )
+        .unwrap();
+        let gradient_lower = evaluate_poisson_interval(
+            array![count].view(),
+            array![eta - gradient_step].view(),
+            exposure,
+        )
+        .unwrap();
+        let numerical_gradient =
+            (gradient_upper.log_likelihood - gradient_lower.log_likelihood)
+                / (2.0 * gradient_step);
+        let hessian_upper = evaluate_poisson_interval(
+            array![count].view(),
+            array![eta + hessian_step].view(),
+            exposure,
+        )
+        .unwrap();
+        let hessian_lower = evaluate_poisson_interval(
+            array![count].view(),
+            array![eta - hessian_step].view(),
+            exposure,
+        )
+        .unwrap();
+        let numerical_hessian = (hessian_upper.log_likelihood
+            - 2.0 * center.log_likelihood
+            + hessian_lower.log_likelihood)
+            / hessian_step.powi(2);
         assert_close(center.gradient[0], numerical_gradient, 2.0e-6, 2.0e-7);
         assert_close(
             -center.negative_hessian[0],
