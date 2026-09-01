@@ -1349,6 +1349,7 @@ mod tests {
             rhat: 1.0,
             ess: 4.0,
             converged: true,
+            sampler: PosteriorSampler::Nuts,
         };
 
         let (lower, upper) = result.posterior_interval_of(|row| row[0], 25.0, 75.0);
@@ -4343,7 +4344,55 @@ impl NutsConfig {
     }
 }
 
-/// Result of NUTS sampling.
+/// The sampler that actually produced a [`NutsResult`].
+///
+/// Every constructor of a draw set stamps its own variant here, so the public
+/// `method` badge is a property of the draws and can never be re-derived from
+/// the model class by a downstream consumer (gam#2778: the Python badge keyed
+/// on `predict_model_class()` and reported `"nuts"` for the Gaussian
+/// closed-form and Pólya-Gamma routes, presenting the Laplace path's
+/// constant `rhat = 1.0` / `ess = n_draws` as measured MCMC diagnostics).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PosteriorSampler {
+    /// No-U-Turn HMC on the exact posterior; `rhat` / `ess` are measured.
+    Nuts,
+    /// Pólya-Gamma Gibbs on the exact Bernoulli-logit posterior; `rhat` /
+    /// `ess` are measured.
+    PolyaGammaGibbs,
+    /// Independent draws from the Gaussian (Laplace) posterior
+    /// approximation, including its exact rejection-truncated and
+    /// latent-chart forms; `rhat = 1.0` and `ess = n_draws` hold by
+    /// construction and diagnose nothing.
+    Laplace,
+    /// Reflective HMC on the inequality-truncated Gaussian posterior
+    /// approximation; `rhat` / `ess` are measured.
+    TruncatedLaplaceHmc,
+}
+
+impl PosteriorSampler {
+    /// The public badge (`PosteriorSamples.method` in Python).
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Nuts => "nuts",
+            Self::PolyaGammaGibbs => "polya-gamma",
+            Self::Laplace => "laplace",
+            Self::TruncatedLaplaceHmc => "truncated-laplace",
+        }
+    }
+
+    /// Whether the draws target the model's exact posterior rather than a
+    /// Gaussian approximation of it. Only the MCMC routes on the exact
+    /// likelihood qualify; every Laplace form is an approximation, however
+    /// its draws are produced.
+    pub const fn targets_exact_posterior(self) -> bool {
+        match self {
+            Self::Nuts | Self::PolyaGammaGibbs => true,
+            Self::Laplace | Self::TruncatedLaplaceHmc => false,
+        }
+    }
+}
+
+/// Result of posterior sampling.
 #[derive(Clone, Debug)]
 pub struct NutsResult {
     /// Coefficient samples in ORIGINAL space: shape (n_total_samples, n_coeffs)
@@ -4358,6 +4407,8 @@ pub struct NutsResult {
     pub ess: f64,
     /// Whether sampling converged (R-hat < 1.1)
     pub converged: bool,
+    /// Which sampler produced the draws.
+    pub sampler: PosteriorSampler,
 }
 
 #[derive(Clone, Copy)]
@@ -4448,6 +4499,7 @@ fn summarize_unwhitened_nuts_samples(
         rhat,
         ess,
         converged,
+        sampler: PosteriorSampler::Nuts,
     }
 }
 
@@ -4685,6 +4737,7 @@ pub fn run_logit_polya_gamma_gibbs(
         rhat,
         ess,
         converged,
+        sampler: PosteriorSampler::PolyaGammaGibbs,
     })
 }
 

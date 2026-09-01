@@ -11,8 +11,8 @@ class; see [Sampler dispatch](#sampler-dispatch) below.
 ```python
 posterior = model.sample(train_df, seed=42)
 print(posterior)
-# PosteriorSamples(n_draws=..., n_coeffs=8, method='nuts',
-#                  rhat=1.0040, ess=..., converged=True)
+# PosteriorSamples(n_draws=..., n_coeffs=8, method='laplace',
+#                  rhat=1.0000, ess=..., converged=True)   # a Gaussian fit
 
 bands = posterior.predict(test_df, level=0.95)
 # {"linear_predictor", "linear_predictor_lower", "linear_predictor_upper",
@@ -119,19 +119,26 @@ likelihood; it is unrelated to the transformation-normal class.
 
 The Laplace path draws iid samples from `N(beta_hat, phi * H_penalized^{-1})`
 using the saved penalized Hessian's Cholesky factor and the saved dispersion
-scale. Regardless of which sampler actually ran, every Laplace draw set
-reports `rhat == 1.0`, `ess == chains * samples`, and `converged == True`
-by construction. The `PosteriorSamples` API is identical either way.
+scale. Every Laplace draw set reports `rhat == 1.0`,
+`ess == chains * samples`, and `converged == True` by construction: no chain
+ran, so those numbers diagnose nothing. The `PosteriorSamples` API is
+identical either way.
 
-The exposed `method` string is derived from the saved-model **class**, not
-from the sampler that ran (`nuts_method_label`): only the dedicated
-location-scale / survival-Laplace / transformation-normal / marginal-slope
-classes report `method == "laplace"`. The `Standard` class always reports
-`method == "nuts"`, so a **Gaussian-identity standard GLM** and a
-**bounded-coefficient standard GLM** are drawn from the closed-form Laplace
-posterior above yet still surface as `method == "nuts"` (and therefore
-`is_exact == True`). The Polya-Gamma Gibbs path likewise surfaces under
-`method == "nuts"`.
+The exposed `method` string is stamped by the sampler that produced the
+draws (`PosteriorSampler` in `gam-inference`), never derived from the
+model class, so it is always one of:
+
+| `method` | Sampler | `is_exact` |
+| --- | --- | --- |
+| `"nuts"` | No-U-Turn HMC on the exact posterior | `True` |
+| `"polya-gamma"` | Polya-Gamma Gibbs on the exact Bernoulli-logit posterior | `True` |
+| `"laplace"` | Independent draws from the Gaussian (Laplace) approximation, including the Gaussian-identity closed form, the bounded latent-chart draws, and the transformation-normal rejection draws | `False` |
+| `"truncated-laplace"` | Reflective HMC on the inequality-truncated Gaussian approximation (shape-constrained standard fits); `rhat` / `ess` are measured | `False` |
+
+`is_exact` therefore means "the draws target the model's exact posterior
+rather than a Gaussian approximation of it". A Gaussian-identity standard
+GLM is sampled by the closed-form Laplace path and reports
+`method == "laplace"`, `is_exact == False`.
 
 ## SamplingConfig
 
@@ -162,12 +169,13 @@ Frozen dataclass holding the draws and convergence diagnostics.
 | `rhat` | `float` | Maximum split-Rhat. `1.0` exactly for Laplace draws. |
 | `ess` | `float` | Minimum effective sample size across coefficients. For Laplace draws this is `chains * samples`. |
 | `converged` | `bool` | Sampler convergence flag. Laplace draws set this to `True`; most NUTS / Gibbs paths require `rhat < 1.1` and enough ESS. |
-| `method` | `str` | `"nuts"` or `"laplace"`. |
+| `method` | `str` | `"nuts"`, `"polya-gamma"`, `"laplace"`, or `"truncated-laplace"` — the sampler that ran (table above). |
+| `exact` | `bool` | Whether `method` targets the exact posterior; the value behind `is_exact`. |
 | `model_class` | `str` | Saved-model predictive class. |
 | `family_kind` | `str` | Inverse-link tag (`"identity"`, `"logit"`, `"probit"`, `"cloglog"`, `"log"`, ...). |
 | `config` | `SamplingConfig` | Echo of the sampler configuration. |
 
-Properties: `n_draws`, `n_coeffs`, `shape`, `is_exact` (`method == "nuts"`).
+Properties: `n_draws`, `n_coeffs`, `shape`, `is_exact` (the `exact` flag).
 
 ### Indexing
 

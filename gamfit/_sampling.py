@@ -138,6 +138,7 @@ class PosteriorSamples:
     ess: float
     converged: bool
     method: str
+    exact: bool
     model_class: str
     family_kind: str
     config: SamplingConfig
@@ -170,7 +171,8 @@ class PosteriorSamples:
                    mean=np.asarray(p.get("posterior_mean", []), dtype=float),
                    std=np.asarray(p.get("posterior_std", []), dtype=float),
                    rhat=float(p["rhat"]), ess=float(p["ess"]), converged=bool(p["converged"]),
-                   method=str(p.get("method", "nuts")), model_class=str(p.get("model_class", "standard")),
+                   method=str(p["method"]), exact=bool(p["exact"]),
+                   model_class=str(p.get("model_class", "standard")),
                    family_kind=str(p.get("family_kind", "identity")),
                    link_spec=(str(p["link_spec"]) if p.get("link_spec") is not None else None),
                    config=_config_from_payload(p.get("config", {})), _model_bytes=model_bytes)
@@ -182,7 +184,11 @@ class PosteriorSamples:
     @property
     def shape(self) -> tuple[int, int]: return (self.n_draws, self.n_coeffs)
     @property
-    def is_exact(self) -> bool: return self.method == "nuts"
+    def is_exact(self) -> bool:
+        """Whether the draws target the exact posterior (NUTS, Polya-Gamma
+        Gibbs) rather than a Gaussian approximation of it (any Laplace form).
+        Decided by the sampler that ran, not by the model class."""
+        return self.exact
 
     def __len__(self) -> int: return self.n_draws
     def __iter__(self) -> Iterator[Any]: return iter(self.samples)
@@ -225,6 +231,7 @@ class PosteriorSamples:
         return Summary.from_dict({
             "kind": "posterior_samples",
             "method": self.method,
+            "exact": self.exact,
             "model_class": self.model_class,
             "family_kind": self.family_kind,
             "n_draws": self.n_draws,
@@ -319,6 +326,7 @@ class PosteriorSamples:
         if out.suffix != ".npz":
             out = out.with_name(out.name + ".npz")
         md = {"coefficient_names": list(self.coefficient_names), "method": self.method,
+              "exact": self.exact,
               "model_class": self.model_class, "family_kind": self.family_kind,
               "link_spec": self.link_spec, "config": self.config.to_dict()}
         np.savez(out, samples=np.asarray(self.samples, dtype=float),
@@ -348,7 +356,8 @@ class PosteriorSamples:
                    mean=np.asarray(npz["mean"], dtype=float), std=np.asarray(npz["std"], dtype=float),
                    rhat=float(npz["rhat"].item()), ess=float(npz["ess"].item()),
                    converged=bool(npz["converged"].item()),
-                   method=str(md.get("method", "nuts")), model_class=str(md.get("model_class", "standard")),
+                   method=str(md["method"]), exact=bool(md["exact"]),
+                   model_class=str(md.get("model_class", "standard")),
                    family_kind=str(md.get("family_kind", "identity")),
                    link_spec=(str(md["link_spec"]) if md.get("link_spec") is not None else None),
                    config=_config_from_payload(md.get("config", {})),

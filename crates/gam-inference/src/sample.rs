@@ -18,7 +18,7 @@ use super::hmc_io::{
     FamilyNutsInputs, GlmFlatInputs, SurvivalFlatInputs, explicit_fit_hessian_for_whitening,
     run_nuts_sampling_flattened_family, run_survival_nuts_sampling_flattened, validate_nuts_config,
 };
-pub use super::hmc_io::{NutsConfig, NutsResult};
+pub use super::hmc_io::{NutsConfig, NutsResult, PosteriorSampler};
 use crate::formula_dsl::{LinkWiggleFormulaSpec, parse_formula};
 use crate::model::{
     FittedModel as SavedModel, PredictModelClass, load_survival_time_basis_config_from_model,
@@ -446,6 +446,7 @@ pub fn laplace_gaussian_fallback(
         rhat: 1.0,
         ess: n_total as f64,
         converged: true,
+        sampler: PosteriorSampler::Laplace,
     })
 }
 
@@ -605,6 +606,7 @@ fn sample_transformation_normal_constrained(
         rhat: 1.0,
         ess: n_total as f64,
         converged: true,
+        sampler: PosteriorSampler::Laplace,
     })
 }
 
@@ -1003,6 +1005,7 @@ fn sample_standard_bounded(
         rhat: 1.0,
         ess: n_total as f64,
         converged: true,
+        sampler: PosteriorSampler::Laplace,
     })
 }
 
@@ -1117,6 +1120,7 @@ fn sample_standard_truncated(
         rhat,
         ess,
         converged,
+        sampler: PosteriorSampler::TruncatedLaplaceHmc,
     })
 }
 

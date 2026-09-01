@@ -300,37 +300,6 @@ fn model_likelihood_spec(model: &FittedModel) -> LikelihoodSpec {
     }
 }
 
-/// Did this `NutsResult` come from exact NUTS or the Laplace fallback?
-///
-/// We badge the payload so the Python wrapper can surface the method
-/// to users without re-deriving it from the model class. The fallback
-/// produces iid draws and reports `rhat = 1.0` exactly with
-/// `ess == n_draws`, which is a stable signature.
-fn nuts_method_label(model: &FittedModel) -> &'static str {
-    match model.predict_model_class() {
-        PredictModelClass::Standard => "nuts",
-        PredictModelClass::Survival => {
-            // Survival latent / latent-binary / location-scale fall
-            // back; everything else uses exact NUTS. Mirror the
-            // dispatch in `gam::inference::sample::sample_saved_model`.
-            match model.survival_likelihood.as_deref() {
-                Some("latent") | Some("latent-binary") | Some("location-scale") => "laplace",
-                None
-                | Some("marginal-slope")
-                | Some("transformation")
-                | Some("weibull")
-                | Some("royston-parmar")
-                | Some(_) => "nuts",
-            }
-        }
-        PredictModelClass::GaussianLocationScale
-        | PredictModelClass::BinomialLocationScale
-        | PredictModelClass::BernoulliMarginalSlope
-        | PredictModelClass::DispersionLocationScale
-        | PredictModelClass::TransformationNormal => "laplace",
-    }
-}
-
 fn build_sample_payload(model: &FittedModel, nuts: NutsResult, cfg: &NutsConfig) -> SamplePayload {
     let n_coeffs = nuts.samples.ncols();
     let coefficient_names: Vec<String> = (0..n_coeffs).map(|j| format!("beta_{j}")).collect();
@@ -352,7 +321,11 @@ fn build_sample_payload(model: &FittedModel, nuts: NutsResult, cfg: &NutsConfig)
         model_class: prediction_model_class_label(model),
         family_kind: family_link_kind(&model_likelihood_spec(&model)).to_string(),
         link_spec: model_link_spec_json(model),
-        method: nuts_method_label(model).to_string(),
+        // The badge is a property of the draws, stamped by the sampler that
+        // produced them (gam#2778); nothing here re-derives it from the
+        // model class.
+        method: nuts.sampler.label().to_string(),
+        exact: nuts.sampler.targets_exact_posterior(),
     }
 }
 

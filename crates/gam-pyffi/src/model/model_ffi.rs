@@ -458,11 +458,14 @@ struct SamplePayload {
     /// transforms. `None` when serialization is unavailable; the wrapper then
     /// falls back to the string tag (issue #1133).
     link_spec: Option<String>,
-    /// Whether the draws came from exact NUTS or the Laplace-Gaussian
-    /// fallback. Currently only "nuts" or "laplace"; callers can use
-    /// this to badge the posterior or to warn when a class has fallen
-    /// back to the approximate path.
+    /// The sampler that produced the draws, stamped by that sampler itself
+    /// (`PosteriorSampler::label`): `"nuts"`, `"polya-gamma"`, `"laplace"`,
+    /// or `"truncated-laplace"`. Callers use it to badge the posterior or to
+    /// warn when a class has fallen back to the approximate path.
     method: String,
+    /// Whether `method` targets the model's exact posterior (the MCMC routes)
+    /// rather than a Gaussian approximation of it (every Laplace form).
+    exact: bool,
 }
 
 #[derive(Serialize)]
@@ -2289,6 +2292,7 @@ fn sample_table(
     out.set_item("family_kind", payload.family_kind)?;
     out.set_item("link_spec", payload.link_spec)?;
     out.set_item("method", payload.method)?;
+    out.set_item("exact", payload.exact)?;
     Ok(out.unbind())
 }
 
