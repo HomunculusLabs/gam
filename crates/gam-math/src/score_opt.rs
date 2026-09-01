@@ -18,9 +18,12 @@
 //! enclosure excludes zero, proving that the first derivative is monotone and
 //! hence that certified endpoint derivative ranges of opposite sign contain
 //! exactly one root. Every other interval is subdivided unless the exact score
-//! range is narrower than the score evaluator's certified pairwise
-//! forward-error floor. Such a region is returned explicitly as a
-//! [`ResolutionFlatRegion`]; it is never mislabeled as a stationary point. A
+//! maximum is indistinguishable from an evaluated representative at the score
+//! evaluator's certified forward-error floor. Such a region is returned
+//! explicitly as a [`ResolutionFlatRegion`]; it is never mislabeled as a
+//! stationary point. This includes both a value-flat cell and a strictly concave
+//! cell whose unique maximum is already closer to the representative than the
+//! evaluator can resolve. A
 //! cell whose exact score upper bound is below an already attained exact
 //! point-score lower bound is retained as a [`DominatedRegion`] and needs no
 //! stationary decomposition: none of its structure can affect the global
@@ -320,13 +323,13 @@ pub struct DerivativeEnclosure {
     pub curvature: ClosedInterval,
 }
 
-/// A region whose unresolved stationary structure is immaterial at the
-/// representable resolution of its score.
+/// A region whose exact maximum is indistinguishable from an evaluated
+/// representative at the representable resolution of its score.
 ///
-/// `max_score_gap` is the width of the cell's exact score-value enclosure.
-/// `score_resolution` is the certified forward-error bound for comparing two
-/// point score evaluations. The search records this region only when
-/// `max_score_gap <= score_resolution`.
+/// `max_score_gap` bounds `max(score over bracket) - score(sample.x)` in exact
+/// score units. `score_resolution` is the certified forward-error scale at
+/// which that improvement is numerically immaterial. The search records this
+/// region only when `max_score_gap <= score_resolution`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResolutionFlatRegion {
     pub sample: ScoreSample,
@@ -966,7 +969,7 @@ enum UniqueRootRefinement {
     Stationary(StationaryPoint),
     ResolutionFlat {
         region: ResolutionFlatRegion,
-        score: ScoreValueEnclosure,
+        maximum: ScoreValueEnclosure,
     },
 }
 
@@ -1143,6 +1146,31 @@ where
             continue;
         }
 
+        // The derivative at the probe is below the interval evaluator's sign
+        // resolution, but strict concavity is already a quantitative
+        // optimality certificate. If f'' <= -mu < 0, then for the unique
+        // maximizer x* and any represented x,
+        //
+        //   f(x*) - f(x) <= f'(x)^2 / (2 mu).
+        //
+        // Evaluate that bound with directed intervals. This is the missing
+        // stopping rule in #2790: demanding a machine-scale LOCATION bracket
+        // after the exact objective gap is below the score evaluator's own
+        // forward error cannot add information. The returned category says
+        // resolution-flat optimum, not stationary point, so no KKT claim is
+        // manufactured from the cancellation-heavy derivative.
+        let point_score = certify_point(&mut sample, enclose)?.score;
+        if let Some((region, maximum)) = score_resolved_concave_maximum(
+            SearchNode { left, right },
+            enclosure,
+            sample.sample,
+            point_derivative,
+            root_curvature,
+            point_score,
+        ) {
+            return Ok(UniqueRootRefinement::ResolutionFlat { region, maximum });
+        }
+
         // The point derivative is itself unresolved at f64 precision. The
         // mean-value theorem gives THREE independent interval-Newton images of
         // the same unique root: one from the point and one from each signed
@@ -1235,7 +1263,7 @@ where
             ) {
                 return Ok(UniqueRootRefinement::ResolutionFlat {
                     region,
-                    score: contracted_enclosure.score,
+                    maximum: contracted_enclosure.score,
                 });
             }
             let new_left_derivative = if new_left.sample.x == sample.sample.x {
@@ -1440,6 +1468,75 @@ fn resolution_flat_region(
         max_score_gap,
         score_resolution,
     })
+}
+
+/// Turn strict concavity plus an unresolved point derivative into a direct
+/// score-optimality certificate.
+///
+/// `curvature.hi < 0` proves a unique maximum in the signed root bracket. The
+/// strong-concavity inequality bounds how much that maximum can improve on the
+/// represented point without requiring its location to be distinguishable.
+/// Unlike [`resolution_flat_region`], this does not require every pair of scores
+/// in the cell to be close; only the maximum and the returned representative
+/// need to be numerically indistinguishable.
+fn score_resolved_concave_maximum(
+    node: SearchNode,
+    enclosure: DerivativeEnclosure,
+    sample: ScoreSample,
+    point_derivative: ClosedInterval,
+    curvature: ClosedInterval,
+    point_score: ScoreValueEnclosure,
+) -> Option<(ResolutionFlatRegion, ScoreValueEnclosure)> {
+    if !(curvature.hi < 0.0 && sample.x >= node.left.sample.x && sample.x <= node.right.sample.x) {
+        return None;
+    }
+
+    // max |g|^2 / (2 mu), where mu = -max f''. Interval multiplication and
+    // division are outward-rounded, including the factor 1/2.
+    let maximum_excess = point_derivative
+        .square()
+        .scale(0.5)
+        .div_positive(curvature.neg())
+        .hi;
+    let comparison_resolution = point_score.evaluation_error;
+    if !(maximum_excess.is_finite()
+        && maximum_excess >= 0.0
+        && comparison_resolution.is_finite()
+        && maximum_excess <= comparison_resolution)
+    {
+        return None;
+    }
+
+    // Intersect the cell-wide score upper bound with the tighter
+    // strong-concavity upper bound anchored at the represented point. The
+    // maximum is at least the point score itself.
+    let maximum = ClosedInterval::new(
+        point_score.value.lo,
+        enclosure
+            .score
+            .value
+            .hi
+            .min(sum_up(point_score.value.hi, maximum_excess)),
+    );
+    if !maximum.is_valid() {
+        return None;
+    }
+    let region = ResolutionFlatRegion {
+        sample,
+        bracket: ClosedInterval::new(node.left.sample.x, node.right.sample.x),
+        score: enclosure.score.value,
+        max_score_gap: maximum_excess,
+        score_resolution: comparison_resolution,
+    };
+    Some((
+        region,
+        ScoreValueEnclosure {
+            value: maximum,
+            evaluation_error: point_score
+                .evaluation_error
+                .max(enclosure.score.evaluation_error),
+        },
+    ))
 }
 
 /// Select a domain boundary only when one proof cell covers the whole domain
@@ -1659,8 +1756,8 @@ where
                     &mut enclose,
                 )? {
                     UniqueRootRefinement::Stationary(stationary) => Some(stationary),
-                    UniqueRootRefinement::ResolutionFlat { region, score } => {
-                        root_flat = Some((region, score));
+                    UniqueRootRefinement::ResolutionFlat { region, maximum } => {
+                        root_flat = Some((region, maximum));
                         None
                     }
                 }
@@ -1686,7 +1783,7 @@ where
                 None
             };
 
-            if let Some((flat, score)) = root_flat {
+            if let Some((flat, maximum)) = root_flat {
                 let index = resolution_flat_regions.len();
                 if flat.sample.value > optimum.value {
                     optimum = flat.sample;
@@ -1699,10 +1796,10 @@ where
                 let representative_score = certify_point(&mut representative, &mut enclose)?.score;
                 incumbent_lower = incumbent_lower.max(representative_score.value.lo);
                 terminal_maxima.push(TerminalScoreCandidate::region(
-                    score,
+                    maximum,
                     representative_score
                         .evaluation_error
-                        .max(score.evaluation_error),
+                        .max(maximum.evaluation_error),
                 ));
                 resolution_flat_regions.push(flat);
                 continue;
@@ -4497,6 +4594,76 @@ mod tests {
             "typed flat proof exceeded its existing evaluator floor: {flat:?}"
         );
         assert!(result.stationary_points.is_empty());
+    }
+
+    #[test]
+    fn strict_concavity_certifies_the_quintic_scan_optimum_at_score_resolution() {
+        // The terminal certificate from #2790, seed 0 at n=100. Its score
+        // range is deliberately wider than pairwise evaluator error, so a
+        // value-flat test cannot close this cell. Strict concavity says much
+        // more: despite cancellation in the derivative enclosure, the maximum
+        // can improve on the represented point by only g^2/(2 mu).
+        let left = SearchSample {
+            sample: ScoreSample {
+                x: -12.105_374_438_144_967,
+                value: 134.053_351_995_058_96,
+                derivative: 1.0e-3,
+                curvature: -1.0,
+                third: 0.0,
+            },
+            point_enclosure: None,
+        };
+        let right = SearchSample {
+            sample: ScoreSample {
+                x: -12.104_760_848_454_575,
+                value: 134.054_279_259_553_65,
+                derivative: -1.0e-3,
+                curvature: -1.0,
+                third: 0.0,
+            },
+            point_enclosure: None,
+        };
+        let sample = ScoreSample {
+            x: left.sample.x + 0.5 * (right.sample.x - left.sample.x),
+            value: 134.053_9,
+            derivative: 0.0,
+            curvature: -1.0,
+            third: 0.0,
+        };
+        let evaluation_error = 3.966_754_013_333_685e-4;
+        let point_score = ScoreValueEnclosure {
+            value: ClosedInterval::point(sample.value),
+            evaluation_error,
+        };
+        let enclosure = DerivativeEnclosure {
+            score: ScoreValueEnclosure {
+                value: ClosedInterval::new(134.053_351_995_058_96, 134.054_279_259_553_65),
+                evaluation_error,
+            },
+            derivative: ClosedInterval::new(-1.8562e-3, 1.6607e-3),
+            curvature: ClosedInterval::new(-2.2666, -0.2358),
+        };
+
+        assert!(
+            resolution_flat_region(SearchNode { left, right }, enclosure).is_none(),
+            "fixture premise: the full score diameter exceeds pairwise evaluation error"
+        );
+        let (flat, maximum) = score_resolved_concave_maximum(
+            SearchNode { left, right },
+            enclosure,
+            sample,
+            enclosure.derivative,
+            enclosure.curvature,
+            point_score,
+        )
+        .expect("strict concavity must close the already score-resolved optimum");
+        assert!(flat.bracket.contains(sample.x));
+        assert!(flat.max_score_gap < 7.4e-6);
+        assert!(flat.max_score_gap <= flat.score_resolution);
+        assert!(
+            maximum.value.hi < enclosure.score.value.hi,
+            "the strong-concavity maximum bound must remove the loose cell-wide score tail"
+        );
     }
 
     #[test]

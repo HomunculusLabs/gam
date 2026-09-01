@@ -4412,9 +4412,10 @@ enum SplineOptimumProof {
         bracket: ClosedInterval,
         kind: SplineKktKind,
     },
-    /// The producer proved every exact score in this region indistinguishable
-    /// at the point evaluator's certified comparison resolution. This is a
-    /// successful typed optimum, not a failed stationary-point certificate.
+    /// The producer proved the region's exact maximum indistinguishable from
+    /// the representative at the point evaluator's certified comparison
+    /// resolution. This is a successful typed optimum, not a failed
+    /// stationary-point certificate.
     ResolutionFlat {
         bracket: ClosedInterval,
         max_score_gap: f64,
@@ -4430,7 +4431,8 @@ enum SplineOptimumProof {
 /// the producer's successful value-resolution theorem. Requiring a stationary
 /// KKT certificate from that category contradicts its contract: its whole
 /// purpose is that unresolved stationary structure is immaterial because the
-/// cell's exact score diameter does not exceed comparison resolution.
+/// maximum's excess over the representative does not exceed comparison
+/// resolution.
 fn spline_optimum_proof(
     search: &ScoreSearchResult,
 ) -> Result<SplineOptimumProof, SplineScoreProofError> {
@@ -4675,7 +4677,7 @@ pub fn fit_spline_scan(
         } => {
             log::debug!(
                 "spline scan: accepting certified resolution-flat REML optimum on \
-                 {bracket:?}; maximum score gap {max_score_gap:e} <= comparison \
+                 {bracket:?}; maximum score excess {max_score_gap:e} <= comparison \
                  resolution {score_resolution:e}"
             );
         }
