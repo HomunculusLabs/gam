@@ -64,7 +64,9 @@ fn ou_transition_preserves_stationary_variance() {
         .dot(&stationary)
         .dot(&transition.transition.t())
         + transition.innovation_covariance;
-    assert_abs_diff_eq!(propagated, stationary, epsilon = 2.0e-15);
+    for (actual, expected) in propagated.iter().zip(stationary.iter()) {
+        assert_abs_diff_eq!(actual, expected, epsilon = 2.0e-15);
+    }
 }
 
 #[test]
@@ -77,7 +79,9 @@ fn matern_three_halves_transition_preserves_stationary_covariance() {
         .dot(&stationary)
         .dot(&transition.transition.t())
         + transition.innovation_covariance;
-    assert_abs_diff_eq!(propagated, stationary, epsilon = 3.0e-15);
+    for (actual, expected) in propagated.iter().zip(stationary.iter()) {
+        assert_abs_diff_eq!(actual, expected, epsilon = 3.0e-15);
+    }
 }
 
 #[test]
@@ -140,7 +144,9 @@ fn impulse_response_is_the_transition_times_impulse() {
         .transition
         .dot(&array![1.2, -0.4]);
     let actual = model.state_impulse_response(0, lag).unwrap();
-    assert_abs_diff_eq!(actual, expected, epsilon = 1.0e-14);
+    for (actual, expected) in actual.iter().zip(expected.iter()) {
+        assert_abs_diff_eq!(actual, expected, epsilon = 1.0e-14);
+    }
 }
 
 #[test]
