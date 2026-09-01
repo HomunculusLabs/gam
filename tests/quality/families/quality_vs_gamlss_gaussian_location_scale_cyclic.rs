@@ -47,8 +47,7 @@
 //! So this test runs BOTH truths. The ORIGINAL arm is kept (a loss that is
 //! understood is worth more than a loss that is deleted); the ABOVE-FUNDAMENTAL
 //! arm is the one that measures cyclic smoothing rather than a null-space
-//! coincidence. Full measurement: issue #1561, commit `e9fa87f5f`, instrument
-//! `tests/zz_measure_1561_cyclic_null_space_arms.rs`.
+//! coincidence. Full measurement: issue #1561, commit `e9fa87f5f`.
 //!
 //! PAIRED over seeds, not one draw (#2395)
 //! ---------------------------------------
