@@ -1,5 +1,29 @@
 ## Unreleased
 
+- **Compiled row derivatives are faster than the hand kernels, and the gate
+  is enforced on every push (#932).** Every live family's row
+  log-likelihood is written once (`row_program!`, `row_atom!`, or the jet
+  algebra's compiled channels) and its whole derivative tower is derived
+  from it; the hand derivative towers that remained are test opponents.
+  `gam_math::paired_timing` is the one wall-clock contract: paired,
+  interleaved, order-randomised, with the measurement's own resolution on
+  every line, and `SpeedGate` cells that assert a strict win against the
+  strongest hand schedule of the same contract (27 gates over four
+  packages, derived from the source and run in release by
+  `speed-gates.yml` on every push that touches a compiler, the algebra, a
+  gated lowering or the harness). The row-program compiler now places
+  work by control flow (gate-exclusive work inside its gate, leaf calls
+  adjacent with nothing live across them, call-independent work before
+  the calls, a mutable read never past the gate that reassigns it),
+  absorbs a scaled composition point into the outer derivative stack, and
+  accepts a `name: sign` constant role (a value in {−1, +1}) so a
+  composition on `scale(x, s)` reads `f''` unscaled; its dense
+  third/fourth-order surfaces carry every `1/k!` as an exact rational in
+  the emitter, so no factorial round-trip reaches the row. `row_atom!`
+  at-zero lowerings choose their Horner order by exact enumeration and
+  return contracted matrices as literals. The mixed-second multinomial
+  Fisher channels use the exponential's separability.
+
 - **Event histories are one family.** `gam_models::event_history` fits marked
   counting processes with smooth covariate and time effects per mark and a
   per-subject latent state of unit-variance Ornstein–Uhlenbeck atoms whose
