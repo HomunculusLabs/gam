@@ -66,17 +66,16 @@ mod ridge_policy_tests {
 
     /// #2670 — the inhabitants are exactly the two the engine selects. A third
     /// would have to be a second answer to the same question, which is what the
-    /// deleted positive-part variant was. This match is exhaustive by
-    /// construction, so re-adding a variant fails to compile here first.
+    /// deleted positive-part variant was. The binding below is irrefutable only
+    /// while that holds: re-adding a variant makes the pattern refutable, and a
+    /// refutable `let` fails to compile here first.
     #[test]
     fn the_policy_has_no_third_inhabitant() {
         for policy in [
             RidgePolicy::exact_full_objective(),
             RidgePolicy::solver_only(),
         ] {
-            match policy {
-                RidgePolicy::ExactFullObjective | RidgePolicy::SolverOnly => {}
-            }
+            let (RidgePolicy::ExactFullObjective | RidgePolicy::SolverOnly) = policy;
         }
     }
 }

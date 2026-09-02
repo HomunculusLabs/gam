@@ -125,9 +125,11 @@ impl SavedTransformationNormalGeometry {
     /// response-basis payload fields (knot count, degree) are done by the
     /// caller in `validate_for_persistence`.
     pub fn validate(&self, context: &str) -> Result<(), FittedModelError> {
-        match self.parameterization {
-            TransformationNormalParameterization::DirectAlpha => {}
-        }
+        // Direct-alpha is the only parameterization the certified geometry is
+        // defined against. This binding is irrefutable only while that is the
+        // whole enum, so a second variant fails to compile here rather than
+        // silently reaching validation written for the first.
+        let TransformationNormalParameterization::DirectAlpha = self.parameterization;
         if self.response_degree < 1 {
             return Err(FittedModelError::PayloadCorrupt {
                 reason: format!(

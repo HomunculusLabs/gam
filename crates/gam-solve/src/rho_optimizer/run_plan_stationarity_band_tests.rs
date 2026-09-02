@@ -808,18 +808,17 @@ fn exactly_one_rung_is_the_derived_standard_2458() {
     );
     // A distinct-label count still cannot see a variant that was never listed,
     // so make the compiler the gate (#2688 added one and this list had to be
-    // edited by hand): this match is exhaustive with no wildcard arm, so the
-    // next variant added to the enum is a compile error HERE, on the test that
-    // owns the "which rungs exist" question.
+    // edited by hand): the binding below names every variant and no wildcard,
+    // so it is irrefutable only while this list is the whole enum. The next
+    // variant added makes it refutable, and a refutable `let` is a compile
+    // error HERE, on the test that owns the "which rungs exist" question.
     for rung in rungs {
-        match rung {
-            StationarityBoundSource::SolverBand
-            | StationarityBoundSource::CertificateScoreRelative
-            | StationarityBoundSource::ProbeNoiseFloor
-            | StationarityBoundSource::CurvatureResolvability
-            | StationarityBoundSource::GradientReproducibility
-            | StationarityBoundSource::FixedPointResidual
-            | StationarityBoundSource::CallerRequirement => {}
-        }
+        let (StationarityBoundSource::SolverBand
+        | StationarityBoundSource::CertificateScoreRelative
+        | StationarityBoundSource::ProbeNoiseFloor
+        | StationarityBoundSource::CurvatureResolvability
+        | StationarityBoundSource::GradientReproducibility
+        | StationarityBoundSource::FixedPointResidual
+        | StationarityBoundSource::CallerRequirement) = rung;
     }
 }
