@@ -1067,6 +1067,7 @@ fn gamlss_gaussian_dispersion_row() -> Vec<GradientChannel> {
         } => x_mu
             .t()
             .dot(&(working_weights * &(working_response - &states[0].eta))),
+        BlockWorkingSet::NaturalDiagonal { score, .. } => x_mu.t().dot(score),
         BlockWorkingSet::ExactNewton { gradient, .. } => gradient.clone(),
     };
     let analytic_ls = match &eval.blockworking_sets[GaussianLocationScaleFamily::BLOCK_LOG_SIGMA] {
@@ -1076,6 +1077,7 @@ fn gamlss_gaussian_dispersion_row() -> Vec<GradientChannel> {
         } => x_ls
             .t()
             .dot(&(working_weights * &(working_response - &states[1].eta))),
+        BlockWorkingSet::NaturalDiagonal { score, .. } => x_ls.t().dot(score),
         BlockWorkingSet::ExactNewton { gradient, .. } => gradient.clone(),
     };
     let value_at = |flat: &Array1<f64>| -> f64 {
