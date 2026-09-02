@@ -919,9 +919,9 @@ fn laplace_value_and_gradient_are_route_invariant_2515() {
 /// test asserts the parity. The residual is not machine precision (`1.57e-14` on a
 /// non-deflating state, [`laplace_value_and_gradient_are_route_invariant_2515`])
 /// and is not left unexplained: see
-/// [`dense_exact_a_prices_a_b_deflated_direction_as_one_plus_delta_c_2515`], which
-/// pins it to the one remaining ordering difference — whether `ΔC` is added before
-/// or after a `B`-deflated direction is unit-pinned.
+/// [`dense_and_arrow_materialize_the_same_raw_exact_a_2515`], which now pins the
+/// root contract directly — both routes first build `B_raw + ΔC`, then apply the
+/// shared evidence classification.
 ///
 /// The non-vacuity arms below are load-bearing in the same way they were when the
 /// assertion pointed the other way: this anchor must really deflate, and the
@@ -1053,9 +1053,9 @@ fn exact_a_route_parity_holds_on_a_deflated_cache_2515() {
     // forced-streaming production gradient to — not a number fitted to what this
     // fixture happens to produce. The measured residual is `1.62e-9` relative
     // (`2.798722e-8` against `‖g‖∞ = 1.726754e1`), three decades inside it, and its
-    // cause is pinned separately by
-    // `dense_exact_a_prices_a_b_deflated_direction_as_one_plus_delta_c_2515` rather
-    // than absorbed here.
+    // root contract is pinned separately by
+    // `dense_and_arrow_materialize_the_same_raw_exact_a_2515` rather than absorbed
+    // here.
     //
     // The history this replaces: `ac66e624d` measured `9.131537e0` against
     // `‖g‖∞ = 5.004339e0` — 1.8 RELATIVE — and asserted the gap was still large so

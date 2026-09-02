@@ -8011,18 +8011,18 @@ fn per_row_evidence_classification_prices_a_clamp_basin_before_a_saddle_2515() {
             true,
             Some(&null_geometry),
         )
-            .unwrap_or_else(|err| {
-                panic!(
-                    "#2515: a direction inside the null band ({band_direction:e}) is a \
-                     numerical null and must still be unit-pinned, not refused: {err}"
-                )
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "#2515: the in-band direction ({band_direction:e}) must still produce a \
-                     conditioned factor"
-                )
-            });
+        .unwrap_or_else(|err| {
+            panic!(
+                "#2515: a direction inside the null band ({band_direction:e}) is a \
+                 numerical null and must still be unit-pinned, not refused: {err}"
+            )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "#2515: the in-band direction ({band_direction:e}) must still produce a \
+                 conditioned factor"
+            )
+        });
         assert_eq!(
             conditioned.gauge_deflated_directions, 1,
             "#2515: exactly the in-band direction is pinned ({band_direction:e})"
