@@ -103,6 +103,12 @@ fn assert_exact_polish_is_bounded(
     n: usize,
     t: &SpatialLengthScaleOptimizationTiming,
 ) {
+    assert!(
+        t.exact_polish_ran,
+        "[{context}] n={n}: the tensor-eligible search never retired its ψ-Gram surrogate and \
+         continued on the exact streamed criterion. Zero post-boundary counters are not evidence \
+         of bounded polishing when the boundary itself was never crossed (gam#2760).",
+    );
     eprintln!(
         "[{context}] n={n} exact_polish_ran={} polish_slow_path_resets={} \
          polish_nfree_skip_row_touches={}",
