@@ -9,13 +9,13 @@
 //! cross-output coefficient Hessian.
 
 use crate::custom_family::{
-    BlockWorkingSet, BlockwiseFitOptions, CustomFamily, CustomFamilyError, FamilyEvaluation,
-    ParameterBlockSpec, ParameterBlockState, fit_custom_family,
+    BlockWorkingSet, CustomFamily, CustomFamilyError, FamilyEvaluation, ParameterBlockSpec,
+    ParameterBlockState, fit_custom_family,
 };
 use gam_model_kernels::bernoulli_link::{
     bernoulli_natural_jet, bernoulli_natural_observation,
 };
-use gam_problem::{EstimationError, ExactOuterDerivativeOrder, OwnedSeparableCellMeasure};
+use gam_problem::{EstimationError, OwnedSeparableCellMeasure};
 use gam_solve::model_types::UnifiedFitResult;
 use gam_spec::{InverseLink, StandardLink};
 use ndarray::{Array1, Array2, ArrayView2};
@@ -55,7 +55,7 @@ impl IndexedBernoulliFamily {
         // Validate the bounded-link contract once at construction. Row kernels
         // still validate every realized eta because parameterized links can
         // leave their representable domain away from zero.
-        let _ = bernoulli_natural_jet(0, 0.0, &link)?;
+        bernoulli_natural_jet(0, 0.0, &link)?;
         for ((row, output), &response) in y.indexed_iter() {
             if measure.is_active(row, output)
                 && !(response.is_finite() && (0.0..=1.0).contains(&response))
@@ -213,17 +213,6 @@ impl CustomFamily for IndexedBernoulliFamily {
                     | StandardLink::LogLog
             )
         )
-    }
-
-    fn exact_outer_derivative_order(
-        &self,
-        _specs: &[ParameterBlockSpec],
-        _options: &BlockwiseFitOptions,
-    ) -> ExactOuterDerivativeOrder {
-        // The natural kernel currently exposes the exact third derivative, so
-        // the LAML gradient is analytic. Advertising a profiled outer Hessian
-        // would require the fourth derivative of every parameterized link.
-        ExactOuterDerivativeOrder::First
     }
 
     fn output_channel_assignment(&self, specs: &[ParameterBlockSpec]) -> Option<Vec<usize>> {
