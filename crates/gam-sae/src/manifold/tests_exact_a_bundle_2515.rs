@@ -1282,8 +1282,78 @@ fn dense_and_arrow_materialize_the_same_raw_exact_a_2515() {
         .exact_a_evidence_system(target.view(), &rho, &sys)
         .expect("#2515: the deflated anchor builds its exact-A evidence system");
 
+    // Reconstruct the entire arrow operator, not only its diagonal row blocks.
+    // Equality on H_tt alone cannot certify one A: a stale H_tβ operator changes
+    // both the reduced Schur and every selected-inverse/logdet channel while the
+    // row-only comparison remains exactly green.
+    let total_t = b_cache.delta_t_len();
+    let dim = total_t + a_sys.k;
+    assert_eq!(a_dense.dim(), (dim, dim));
+    let mut a_arrow = Array2::<f64>::zeros((dim, dim));
+    for (row_index, row) in a_sys.rows.iter().enumerate() {
+        let q = a_sys.row_dims[row_index];
+        let base = a_sys.row_offsets[row_index];
+        a_arrow
+            .slice_mut(s![base..base + q, base..base + q])
+            .assign(&row.htt);
+
+        let use_dense = a_sys.htbeta_dense_supplement || a_sys.htbeta_matvec.is_none();
+        let mut cross = if use_dense && row.htbeta.dim() == (q, a_sys.k) {
+            row.htbeta.clone()
+        } else {
+            Array2::<f64>::zeros((q, a_sys.k))
+        };
+        if let Some(operator) = a_sys.htbeta_matvec.as_ref() {
+            let mut basis = Array1::<f64>::zeros(a_sys.k);
+            let mut column = Array1::<f64>::zeros(q);
+            for beta in 0..a_sys.k {
+                basis[beta] = 1.0;
+                column.fill(0.0);
+                operator(row_index, basis.view(), &mut column);
+                basis[beta] = 0.0;
+                cross.column_mut(beta).scaled_add(1.0, &column);
+            }
+        }
+        a_arrow
+            .slice_mut(s![base..base + q, total_t..])
+            .assign(&cross);
+        a_arrow
+            .slice_mut(s![total_t.., base..base + q])
+            .assign(&cross.t());
+    }
+    let hbb = match a_sys.hbb_matvec.as_ref() {
+        Some(operator) => {
+            let mut dense = Array2::<f64>::zeros((a_sys.k, a_sys.k));
+            let mut basis = Array1::<f64>::zeros(a_sys.k);
+            let mut column = Array1::<f64>::zeros(a_sys.k);
+            for beta in 0..a_sys.k {
+                basis[beta] = 1.0;
+                column.fill(0.0);
+                operator(basis.view(), &mut column);
+                basis[beta] = 0.0;
+                dense.column_mut(beta).assign(&column);
+            }
+            dense
+        }
+        None => a_sys.hbb.clone(),
+    };
+    a_arrow
+        .slice_mut(s![total_t.., total_t..])
+        .assign(&hbb);
+
     let mut worst_operator_gap = 0.0_f64;
     let mut worst_block_scale = 0.0_f64;
+    let mut worst_location = (0usize, 0usize);
+    for row in 0..dim {
+        for column in 0..dim {
+            let gap = (a_dense[[row, column]] - a_arrow[[row, column]]).abs();
+            if gap > worst_operator_gap {
+                worst_operator_gap = gap;
+                worst_location = (row, column);
+            }
+            worst_block_scale = worst_block_scale.max(a_dense[[row, column]].abs());
+        }
+    }
     let mut deflated_directions = 0usize;
     for row in 0..b_cache.n_rows() {
         let q = b_cache.row_dims[row];
@@ -1319,9 +1389,9 @@ fn dense_and_arrow_materialize_the_same_raw_exact_a_2515() {
         }
     }
     println!(
-        "[#2515 ORDERING] |A_dense − A_arrow|∞ = {worst_operator_gap:.6e} \
-         over block scale {worst_block_scale:.6e}; deflated directions inspected = \
-         {deflated_directions}"
+        "[#2515 ORDERING] |A_dense − A_arrow|∞ = {worst_operator_gap:.6e} at \
+         {worst_location:?} over full-operator scale {worst_block_scale:.6e}; \
+         deflated directions inspected = {deflated_directions}"
     );
 
     assert!(
