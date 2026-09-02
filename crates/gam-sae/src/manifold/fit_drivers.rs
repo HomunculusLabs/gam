@@ -3070,8 +3070,8 @@ impl SaeManifoldTerm {
                 }
             }
 
-            let decrease = base_objective - best_value;
-            if !(best_alpha > 0.0 && decrease > material_floor) {
+            let trial_decrease = base_objective - best_value;
+            if !(best_alpha > 0.0 && trial_decrease > material_floor) {
                 self.restore_mutable_state(&snapshot)
                     .map_err(|err| format!("SaeManifoldTerm::descend_gauge_orbit: {err}"))?;
                 return Ok(outcome);
@@ -3082,11 +3082,45 @@ impl SaeManifoldTerm {
                 best_alpha,
             )
             .map_err(|err| format!("SaeManifoldTerm::descend_gauge_orbit: {err}"))?;
+            // The speculative trial value is evidence for choosing `best_alpha`,
+            // not the value authority for the state we actually retain. A trial
+            // is evaluated and then restored through the canonical mutable-state
+            // seam; rebuilding evaluator-backed basis caches on that restore can
+            // change the subsequently committed state's objective at floating-
+            // point resolution. Summing `base_objective - best_value` therefore
+            // need not telescope to entry minus exit, and—more importantly—could
+            // call a move material even when the retained state did not clear the
+            // material floor. Re-evaluate the committed state, apply the same
+            // acceptance law to that authoritative value, and report exactly the
+            // decrease that the retained transition made.
+            let committed_objective =
+                match self.penalized_objective_total(target, rho, registry, 1.0) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.restore_mutable_state(&snapshot).map_err(|restore_err| {
+                            format!(
+                                "SaeManifoldTerm::descend_gauge_orbit: committed objective \
+                                 evaluation failed ({err}); restoring the pre-round state also \
+                                 failed ({restore_err})"
+                            )
+                        })?;
+                        return Err(format!(
+                            "SaeManifoldTerm::descend_gauge_orbit: committed objective \
+                             evaluation: {err}"
+                        ));
+                    }
+                };
+            let decrease = base_objective - committed_objective;
+            if !(committed_objective.is_finite() && decrease > material_floor) {
+                self.restore_mutable_state(&snapshot)
+                    .map_err(|err| format!("SaeManifoldTerm::descend_gauge_orbit: {err}"))?;
+                return Ok(outcome);
+            }
             outcome.rounds += 1;
             outcome.objective_decrease += decrease;
             log::debug!(
                 "SAE gauge-orbit descent: round {} committed {decrease:.6e} at α={best_alpha:.6e} \
-                 (objective {base_objective:.9e} → {best_value:.9e}, span dim {}, \
+                 (objective {base_objective:.9e} → {committed_objective:.9e}, span dim {}, \
                  maxᵢ|gᵀvᵢ|={max_directional:.6e}, floor {material_floor:.6e})",
                 outcome.rounds,
                 outcome.dimension,
