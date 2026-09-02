@@ -2056,6 +2056,12 @@ pub fn row_atom(input: TokenStream) -> TokenStream {
 /// Both direct backends consume the same symbolic SSA lowering,
 /// compute each nonzero gradient and packed Hessian component once, and scatter
 /// Hessian symmetry only at the output seam.
+///
+/// A constant may be declared with the role `name: sign`, a value in
+/// `{-1, +1}`: its square is one, so a composition on `scale(x, s)` forms
+/// `s·f'` once and reads `f''` as it is, as a hand kernel that knows the sign
+/// writes it. The generic and directional surfaces need no such knowledge
+/// (`s·s` is exactly one in floating point), so every surface still agrees.
 #[proc_macro]
 pub fn row_program(input: TokenStream) -> TokenStream {
     match row_program::expand(parse_macro_input!(input as row_program::Input)) {

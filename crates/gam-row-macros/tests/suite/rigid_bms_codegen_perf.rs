@@ -40,7 +40,7 @@ row_program! {
         marginal_q4,
         probit_scale,
         latent_score,
-        outcome_sign,
+        outcome_sign: sign,
         weight
     )
     emit [generic, order2, third, fourth, full];

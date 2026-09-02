@@ -140,6 +140,9 @@ pub(crate) struct Input {
     name: Ident,
     primaries: Vec<Ident>,
     constants: Vec<Ident>,
+    /// Constants declared `name: sign`: a value in `{-1, +1}`, so its square
+    /// is one and a composition on `scale(x, s)` reads `f''` unscaled.
+    signs: Vec<Ident>,
     emissions: EmissionSurfaces,
     leaves: Vec<Leaf>,
     witnesses: Vec<Ident>,
@@ -164,10 +167,23 @@ impl Parse for Input {
             }
         }
         let mut constants = Vec::new();
+        let mut signs = Vec::new();
         if arguments.peek(Token![;]) {
             arguments.parse::<Token![;]>()?;
             while !arguments.is_empty() {
-                constants.push(arguments.parse::<Ident>()?);
+                let constant = arguments.parse::<Ident>()?;
+                if arguments.peek(Token![:]) {
+                    arguments.parse::<Token![:]>()?;
+                    let role = arguments.parse::<Ident>()?;
+                    if role != "sign" {
+                        return Err(syn::Error::new_spanned(
+                            role,
+                            "row_program constant roles: `sign` (a value in {-1, +1})",
+                        ));
+                    }
+                    signs.push(constant.clone());
+                }
+                constants.push(constant);
                 if arguments.peek(Token![,]) {
                     arguments.parse::<Token![,]>()?;
                 } else {
@@ -325,6 +341,7 @@ impl Parse for Input {
             name,
             primaries,
             constants,
+            signs,
             emissions,
             leaves,
             witnesses,
@@ -1226,6 +1243,7 @@ fn symbolic_expression(
     owner: &str,
     leaves: &[Leaf],
     constants: &HashSet<String>,
+    signs: &HashSet<String>,
     bindings: &HashMap<String, SymbolicJet>,
     aliases: &HashMap<String, ScaledAlias>,
     target: SymbolicTarget,
@@ -1239,6 +1257,7 @@ fn symbolic_expression(
             owner,
             leaves,
             constants,
+            signs,
             bindings,
             aliases,
             target,
@@ -1333,13 +1352,23 @@ fn symbolic_expression(
                     let second = format!("{stack}_u2");
                     let (first_value, second_value) = match &alias.scalar {
                         Some(scalar) => {
+                            let is_sign = match scalar {
+                                Expr::Path(path) => path_ident(path)
+                                    .is_ok_and(|ident| signs.contains(&ident.to_string())),
+                                _ => false,
+                            };
                             let scalar = symbolic_scalar(scalar, constants, target)?;
                             (
                                 symbolic_multiply(&format!("{stack}[1]"), &scalar),
-                                symbolic_multiply(
-                                    &symbolic_multiply(&format!("{stack}[2]"), &scalar),
-                                    &scalar,
-                                ),
+                                // A sign squares to one: `f''` is read as is.
+                                if is_sign {
+                                    format!("{stack}[2]")
+                                } else {
+                                    symbolic_multiply(
+                                        &symbolic_multiply(&format!("{stack}[2]"), &scalar),
+                                        &scalar,
+                                    )
+                                },
                             )
                         }
                         None => (symbolic_negate(&format!("{stack}[1]")), format!("{stack}[2]")),
@@ -2830,6 +2859,7 @@ fn symbolic_component(component: &Option<String>) -> &str {
 fn symbolic_schedule(
     primaries: &[Ident],
     constants: &HashSet<String>,
+    signs: &HashSet<String>,
     leaves: &[Leaf],
     statements: &[Statement],
     result: &ProgramExpr,
@@ -2899,6 +2929,7 @@ fn symbolic_schedule(
                     &name.to_string(),
                     leaves,
                     constants,
+                    signs,
                     &bindings,
                     &aliases,
                     target,
@@ -2934,6 +2965,7 @@ fn symbolic_schedule(
                         &target_name.to_string(),
                         leaves,
                         constants,
+                        signs,
                         &bindings,
                         &aliases,
                         target,
@@ -2979,6 +3011,7 @@ fn symbolic_schedule(
         "result",
         leaves,
         constants,
+        signs,
         &bindings,
         &aliases,
         target,
@@ -3804,6 +3837,7 @@ fn rust_directional_body(
 fn rust_order2_body(
     primaries: &[Ident],
     constants: &HashSet<String>,
+    signs: &HashSet<String>,
     leaves: &[Leaf],
     statements: &[Statement],
     result: &ProgramExpr,
@@ -3813,6 +3847,7 @@ fn rust_order2_body(
     let schedule = symbolic_schedule(
         primaries,
         constants,
+        signs,
         leaves,
         statements,
         result,
@@ -3968,6 +4003,7 @@ fn cuda_source(
     name: &Ident,
     primaries: &[Ident],
     constants: &HashSet<String>,
+    signs: &HashSet<String>,
     leaves: &[Leaf],
     statements: &[Statement],
     result: &ProgramExpr,
@@ -3987,6 +4023,7 @@ fn cuda_source(
     let schedule = symbolic_schedule(
         primaries,
         constants,
+        signs,
         leaves,
         statements,
         result,
@@ -4107,6 +4144,7 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         name,
         primaries,
         constants,
+        signs,
         emissions,
         leaves,
         witnesses,
@@ -4123,6 +4161,10 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         }
     }
     let constant_names = constants
+        .iter()
+        .map(ToString::to_string)
+        .collect::<HashSet<_>>();
+    let sign_names = signs
         .iter()
         .map(ToString::to_string)
         .collect::<HashSet<_>>();
@@ -4319,6 +4361,7 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         let order2_body = rust_order2_body(
             &primaries,
             &constant_names,
+            &sign_names,
             &leaves,
             &statements,
             &result,
@@ -4517,6 +4560,7 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
             &name,
             &primaries,
             &constant_names,
+            &sign_names,
             &leaves,
             &statements,
             &result,
@@ -5172,6 +5216,27 @@ mod tests {
         assert!(rust.contains("let out_stack0_u1 : f64 = - (out_stack0 [1])"), "{rust}");
         assert!(rust.contains("let out_stack0_u2 : f64 = out_stack0 [2]"), "{rust}");
         assert!(!rust.contains("let n_g0"), "{rust}");
+
+        // A constant declared `: sign` squares to one: `f''` is read as is,
+        // and the row pays two sign multiplies, the point and `s·f'`, as the
+        // hand kernel that knows the sign does.
+        let program = quote! {
+            fn signed_role(x, y; s: sign, a)
+            emit [order2, cuda];
+            leaves { probit => probit_stack => d_probit }
+            witnesses [];
+            {
+                let p = mul(x, y);
+                let m = scale(p, s);
+                let out = compose(probit, m, a);
+                return out;
+            }
+        };
+        let rust = emitted_function(program.clone(), "signed_role_order2");
+        assert!(rust.contains("let out_stack0_u2 : f64 = out_stack0 [2]"), "{rust}");
+        assert_eq!(rust.matches("* s)").count(), 2, "{rust}");
+        let cuda = emitted_cuda(program);
+        assert!(cuda.contains("double out_stack0_u2 = out_stack0[2];"), "{cuda}");
 
         // A point scaled from a mutable local is not aliased: a gate may
         // reassign the local, and the alias would read the wrong state.
