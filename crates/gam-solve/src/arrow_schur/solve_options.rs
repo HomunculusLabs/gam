@@ -317,11 +317,14 @@ pub enum ArrowEvidencePolicy {
     /// of a direction that is numerically null anyway. For an operator whose
     /// negative curvature is a MODELLING VERDICT it is wrong, and silently so.
     ///
-    /// Under this policy the band is two-sided: `|λ| ≤ floor·max|λ|` is still the
-    /// unit-pinned null, while `λ < −floor·max|λ|` is resolved negative curvature
-    /// and the factorization refuses with the direction and its magnitude named.
-    /// The caller — which is the only layer that knows whether that curvature is
-    /// attributable — decides what the refusal means.
+    /// This policy therefore requires the exact-A system's typed raw
+    /// `B`/`ΔC`/clamp carrier. Every dense, direct-arrow, SLQ, and rational Ritz
+    /// direction uses the common null half-width
+    /// `max(dim·ε·||A||, sqrt(ε)·v'Bv)` and restores `v'Ev` before deciding:
+    /// numerical nulls are unit-pinned, clamp-attributable negatives are priced
+    /// at their positive basin, and only residual negative curvature is refused
+    /// as a saddle. Missing classification geometry is a hard contract error;
+    /// raw sign plus a route-local relative floor is never a substitute.
     ///
     /// Measured on #2712's deflated anchor at `log λ_smooth = −1.05`
     /// (`zz_attribute_the_broken_ladder_rung_2515`): the reduced Schur of the
