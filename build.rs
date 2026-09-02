@@ -216,6 +216,14 @@ fn main() {
     let mut empty_block_offenders: Vec<(PathBuf, usize, String)> = Vec::new();
     scan_for_empty_blocks(&manifest_dir, &manifest_dir, &mut empty_block_offenders);
 
+    // A `match` whose every arm does nothing. Every match that compiles is
+    // exhaustive, so this is the whole-construct form of the empty block above:
+    // the scrutinee is computed, dispatched on, and discarded. Catches the
+    // `A => ()` and single-line spellings that start from no literal `{}` and
+    // so never reach the empty-block scanner at all.
+    let mut no_op_match_offenders: Vec<(PathBuf, usize, String)> = Vec::new();
+    scan_for_no_op_matches(&manifest_dir, &manifest_dir, &mut no_op_match_offenders);
+
     // Underscore function parameter names. `_name: T` silences the
     // unused-parameter warning by hiding it from the lint rather than fixing
     // it. Use the parameter, restructure the API so it isn't passed, or
@@ -511,6 +519,23 @@ fn main() {
             title: "empty block body (handle the case, or restructure so the block does not exist)"
                 .to_string(),
             rows: empty_block_offenders
+                .iter()
+                .map(|(r, l, s)| (r.clone(), *l, None, s.clone()))
+                .collect(),
+        });
+    }
+
+    if !no_op_match_offenders.is_empty() {
+        sections.push(Section {
+            title:
+                "match whose every arm does nothing (`A => {}` / `A => ()`) — the scrutinee is \
+                    computed, dispatched on and thrown away, so the whole dispatch is dead: make \
+                    an arm do the work, or delete the match and whatever feeds it. If the point \
+                    is that adding a variant must fail to compile, spell it as an irrefutable \
+                    `let (A | B) = value;` — same compile error when the enum grows, no branch, \
+                    nothing swallowed."
+                    .to_string(),
+            rows: no_op_match_offenders
                 .iter()
                 .map(|(r, l, s)| (r.clone(), *l, None, s.clone()))
                 .collect(),
@@ -4753,27 +4778,25 @@ fn scan_for_empty_blocks(root: &Path, dir: &Path, offenders: &mut Vec<(PathBuf, 
 /// The enclosing block is found by walking back until a line closes fewer
 /// braces than it opens (the `match ... {` header) and forward to its matching
 /// close. If that header is not a `match`, there is no assertion to speak of.
-fn enclosing_match_asserts(stripped: &[String], idx: usize) -> bool {
+/// The line holding the `match` header whose body encloses line `idx`, if the
+/// innermost enclosing brace block is a `match` at all: walk backwards until
+/// one more brace closes than opens, then check that opener for the keyword.
+fn enclosing_match_opener(stripped: &[String], idx: usize) -> Option<usize> {
     let mut depth: i32 = 0;
-    let mut opener = None;
-    for j in (0..=idx).rev() {
+    for j in (0..idx).rev() {
         let line = &stripped[j];
-        let opens = line.matches('{').count() as i32;
-        let closes = line.matches('}').count() as i32;
-        if j < idx {
-            depth += closes - opens;
-            if depth < 0 {
-                opener = Some(j);
-                break;
-            }
+        depth += line.matches('}').count() as i32 - line.matches('{').count() as i32;
+        if depth < 0 {
+            return line_has_keyword(line, "match").then_some(j);
         }
     }
-    let Some(open_line) = opener else {
+    None
+}
+
+fn enclosing_match_asserts(stripped: &[String], idx: usize) -> bool {
+    let Some(open_line) = enclosing_match_opener(stripped, idx) else {
         return false;
     };
-    if !line_has_keyword(&stripped[open_line], "match") {
-        return false;
-    }
     let mut depth: i32 = 0;
     for line in &stripped[open_line..] {
         depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
@@ -4787,6 +4810,253 @@ fn enclosing_match_asserts(stripped: &[String], idx: usize) -> bool {
         }
     }
     false
+}
+
+/// A `match` whose every arm does nothing.
+///
+/// Every `match` that compiles is exhaustive — rustc rejects the others — so
+/// "an exhaustive match whose every arm does nothing" is simply a match no arm
+/// of which has an effect. The scrutinee is computed, dispatched on, and thrown
+/// away: the same dead value `let _ = x;`, `drop(x)` on a `Copy`, and `_x: T`
+/// spell, wearing exhaustiveness as its costume. Either the scrutinee is needed
+/// — in which case an arm must do something with it — or it is not, in which
+/// case the match and the expression feeding it both go.
+///
+/// Both no-op spellings count, because they are one construct: `A => {}` and
+/// `A => ()`, under any nesting of redundant braces. The empty-block scanner
+/// reaches only the first — it starts from a literal `{}`, so it never sees a
+/// match written entirely with unit bodies, nor one written on a single line —
+/// and that is the hole this closes.
+///
+/// The report sits on the `match` keyword rather than on an arm, because the
+/// defect is the whole dispatch: "fill this arm in" is the wrong instruction
+/// for a branch that should not exist. When the point is that adding a variant
+/// must fail to compile, that intent has a spelling which keeps the guarantee
+/// and drops the branch: an irrefutable `let (A | B) = value;` breaks
+/// identically when the enum grows, with nothing swallowed.
+fn scan_for_no_op_matches(root: &Path, dir: &Path, offenders: &mut Vec<(PathBuf, usize, String)>) {
+    enforce_no_op_match_matcher_invariants();
+    visit_files(root, dir, &mut |rel, content| {
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if rel_str == "build.rs" {
+            return;
+        }
+        if rel.extension().and_then(OsStr::to_str) != Some("rs") {
+            return;
+        }
+        if !content.contains("match") {
+            return;
+        }
+        let lines: Vec<&str> = content.lines().collect();
+        let stripped = strip_file_lines(content);
+        let (stream, owner) = normalized_code_stream(&stripped);
+        for idx in no_op_match_lines(&stream, &owner) {
+            let raw = lines.get(idx).copied().unwrap_or("").trim_end();
+            offenders.push((rel.to_path_buf(), idx + 1, raw.to_string()));
+        }
+    });
+}
+
+/// The zero-based source line of every `match` in `stream` whose arms all do
+/// nothing. Split out from the scanner so the controls below exercise the
+/// whole path — keyword, body, arms — rather than one helper of it.
+fn no_op_match_lines(stream: &str, owner: &[usize]) -> Vec<usize> {
+    let mut lines = Vec::new();
+    for kw in keyword_positions(stream, "match") {
+        let Some(brace) = match_body_brace(stream, kw + "match".len()) else {
+            continue;
+        };
+        if match_arms_all_no_op(stream, brace) {
+            lines.push(owner.get(kw).copied().unwrap_or(0));
+        }
+    }
+    lines
+}
+
+/// Byte offsets at which `kw` stands in `stream` as a whole word. The
+/// ident-boundary test is what stops `matches!(x, A)` reading as the `match`
+/// keyword.
+fn keyword_positions(stream: &str, kw: &str) -> Vec<usize> {
+    let bytes = stream.as_bytes();
+    let kw_bytes = kw.as_bytes();
+    let mut out = Vec::new();
+    if kw_bytes.is_empty() || bytes.len() < kw_bytes.len() {
+        return out;
+    }
+    let mut i = 0usize;
+    while i + kw_bytes.len() <= bytes.len() {
+        if &bytes[i..i + kw_bytes.len()] == kw_bytes {
+            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            let after_ok =
+                i + kw_bytes.len() == bytes.len() || !is_ident_byte(bytes[i + kw_bytes.len()]);
+            if before_ok && after_ok {
+                out.push(i);
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// The `{` opening the body of the `match` whose keyword ends at `from`.
+///
+/// A match scrutinee cannot itself be a brace-delimited struct literal — Rust
+/// forbids that spelling here without parentheses — so the first `{` outside
+/// any `(`/`[` nesting is the body opener. Reaching a `;` first means the
+/// keyword was not introducing a match expression this lexer can read: report
+/// nothing rather than guess at a body.
+fn match_body_brace(stream: &str, from: usize) -> Option<usize> {
+    let bytes = stream.as_bytes();
+    let mut depth: i32 = 0;
+    for (offset, b) in bytes.iter().enumerate().skip(from) {
+        match *b {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b';' if depth == 0 => return None,
+            b'{' if depth == 0 => return Some(offset),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// True when the match body opened at `brace` has at least one arm and every
+/// arm's body does nothing.
+///
+/// Arms are read at body depth zero, so a nested match, closure, or block
+/// inside an arm body is skipped whole rather than contributing arms of its
+/// own; the nested match is reached separately, on its own keyword. A body the
+/// stream ends before closing yields no verdict.
+fn match_arms_all_no_op(stream: &str, brace: usize) -> bool {
+    let bytes = stream.as_bytes();
+    let mut depth: i32 = 0;
+    let mut arms = 0usize;
+    let mut i = brace + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'}' if depth == 0 => return arms >= 1,
+            b'}' => depth -= 1,
+            b'=' if depth == 0 && bytes.get(i + 1) == Some(&b'>') => {
+                let Some((body, next)) = read_arm_body(stream, i + 2) else {
+                    return false;
+                };
+                arms += 1;
+                if !arm_body_is_no_op(body) {
+                    return false;
+                }
+                i = next;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The text of the arm body starting at `start` (just past its `=>`), and the
+/// offset the enclosing match resumes scanning from.
+///
+/// A braced body runs to its matching `}`; a braceless one runs to the `,`
+/// before the next arm, or to the `}` closing the match when it is the last
+/// arm. Either form is brace-balanced on return, so the caller's depth counter
+/// survives the skip.
+fn read_arm_body(stream: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = stream.as_bytes();
+    let mut i = start;
+    while bytes.get(i) == Some(&b' ') {
+        i += 1;
+    }
+    let body_start = i;
+    let mut depth: i32 = 0;
+    if bytes.get(i) == Some(&b'{') {
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((&stream[body_start..=i], i + 1));
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        return None;
+    }
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'}' | b',' if depth == 0 => return Some((&stream[body_start..i], i)),
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// True when an arm body has no effect: the unit expression `()`, an empty
+/// block, or either under any number of redundant braces (`{}`, `{ }`,
+/// `{ () }`, `{{}}`). Anything else — a call, an assignment, a `return`, a
+/// value the match evaluates to — is an effect, and one such arm is enough to
+/// make the match real.
+fn arm_body_is_no_op(body: &str) -> bool {
+    let mut body = body.trim();
+    loop {
+        if body.is_empty() || body == "()" {
+            return true;
+        }
+        match body
+            .strip_prefix('{')
+            .and_then(|inner| inner.strip_suffix('}'))
+        {
+            Some(inner) => body = inner.trim(),
+            None => return false,
+        }
+    }
+}
+
+/// Positive and negative controls for the no-op-match matcher, asserted on
+/// every run. A scanner that has quietly stopped matching is byte-identical to
+/// one that ran and found nothing, so the cases that discriminate between the
+/// two are checked here instead of assumed.
+fn enforce_no_op_match_matcher_invariants() {
+    let has_no_op_match = |src: &str| {
+        let stripped = strip_file_lines(src);
+        let (stream, owner) = normalized_code_stream(&stripped);
+        !no_op_match_lines(&stream, &owner).is_empty()
+    };
+
+    // Both no-op spellings, on one line and over several — including the
+    // all-unit and single-line forms the empty-block scanner cannot see.
+    assert!(has_no_op_match("match e { A => (), B => () }"));
+    assert!(has_no_op_match("match e {\n    A => {}\n    B => {}\n}"));
+    assert!(has_no_op_match("match e {\n    A => {\n    }\n    B => (),\n}"));
+    assert!(has_no_op_match("match e {\n    A => { /* nothing */ }\n}"));
+    // A nested no-op match is caught on its own keyword even when the match
+    // around it does real work.
+    assert!(has_no_op_match(
+        "match a {\n    A => match b {\n        X => {}\n    },\n}"
+    ));
+
+    // One arm with an effect clears the whole match, in either spelling.
+    assert!(!has_no_op_match("match e {\n    A => {}\n    B => step(),\n}"));
+    assert!(!has_no_op_match("match e { A => (), B => count += 1 }"));
+    assert!(!has_no_op_match(
+        "match a {\n    A => match b {\n        X => go(),\n    },\n}"
+    ));
+    // A match that evaluates to a value is not a no-op consumer of it.
+    assert!(!has_no_op_match("let v = match e { A => 1, B => 2 };"));
+    // Neither `matches!`, nor the same text inside a comment or a string
+    // literal, is the `match` keyword.
+    assert!(!has_no_op_match("let f = matches!(e, A);"));
+    assert!(!has_no_op_match("// match e { A => (), B => () }"));
+    assert!(!has_no_op_match("let s = \"match e { A => (), B => () }\";"));
 }
 
 /// Decide whether an empty brace block at this header is a no-op worth
@@ -4818,7 +5088,9 @@ fn enclosing_match_asserts(stripped: &[String], idx: usize) -> bool {
 ///   chosen to make a state unrepresentable.
 /// * `Node::Constant(_) => {}` — a NAMED variant with an empty body is
 ///   honest: adding a variant still breaks the match. Only the wildcard
-///   hides the future.
+///   hides the future. A match in which every arm is empty is not exempt
+///   either, but it is not this scanner's finding: it is one dead dispatch
+///   rather than N empty branches, and `scan_for_no_op_matches` reports it.
 /// * `json!({})`, `quote! { leaves {} }`, `Foo {}` — expression braces. A
 ///   value, not a code path.
 fn classify_empty_block(header: &str, siblings_panic: bool) -> Option<&'static str> {
@@ -4847,6 +5119,12 @@ fn classify_empty_block(header: &str, siblings_panic: bool) -> Option<&'static s
         if line_has_banned_code_fragment(pattern, "Err(") {
             return Some("empty error arm");
         }
+        // A match in which NO arm does anything is a different defect — the
+        // dispatch itself is dead, not this one branch — and belongs to the
+        // whole construct rather than to any arm of it. `scan_for_no_op_matches`
+        // owns that case and reports it once, on the `match` keyword; it also
+        // sees the `A => ()` and single-line spellings this scanner, which
+        // starts from a literal `{}`, cannot reach.
         return None;
     }
     if h.ends_with('|') {
