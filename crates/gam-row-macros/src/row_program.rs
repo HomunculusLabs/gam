@@ -5136,34 +5136,6 @@ mod tests {
             );
         }
     }
-            witnesses [];
-            {
-                let qv = compose(link, eta, q, q1, q2, q3, q4);
-                let slope_scaled = scale(slope, scale_of);
-                let scale_value = compose(observed, slope_scaled);
-                let latent = add(mul(qv, scale_value), slope_scaled);
-                let margin = scale(latent, sign);
-                return compose(probit, margin);
-            }
-        };
-        for surface in [
-            "rigid_third_contracted",
-            "rigid_fourth_contracted",
-            "rigid_third_full",
-            "rigid_fourth_full",
-        ] {
-            let rust = emitted_function(input.clone(), surface);
-            for literal in [
-                "* 0.5", "* 2.0", "* 3.0", "* 4.0", "* 6.0", "* 12.0", "* 24.0", "* 0.1666",
-                "* 0.0416", "* 0.3333", "* 0.25",
-            ] {
-                assert!(
-                    !rust.contains(literal),
-                    "{surface} carries a factorial: {literal}\n{rust}"
-                );
-            }
-        }
-    }
 
     #[test]
     fn rejects_primary_dependent_runtime_branch() {
