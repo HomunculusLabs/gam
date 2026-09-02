@@ -109,7 +109,11 @@ pub struct SubjectHistory {
     /// End of observation. A subject with a terminal event exits at that
     /// event's time.
     pub exit: f64,
-    /// Events in `(entry, exit]`, any order (sorted during validation).
+    /// Events, in any order (sorted during validation). An event at or
+    /// before `entry` is prior history: it is not compensated, but it opens
+    /// the window with the risk sets it leaves behind, so a first-occurrence
+    /// mark that has already fired stays out of the likelihood and out of
+    /// every forecast. An event after `exit` is rejected.
     pub events: Vec<Event>,
     /// Covariate segments; the first must start at or before `entry`, every
     /// later one strictly inside `(entry, exit)`, with distinct starts.
@@ -305,10 +309,15 @@ impl EventHistoryCohort {
             }
             subject.events.sort_by(|a, b| a.time.total_cmp(&b.time));
             for event in &subject.events {
-                if !event.time.is_finite() || event.time <= subject.entry || event.time > subject.exit {
+                // An event at or before entry is prior history: it is not
+                // compensated (its own period is not being modelled) but it
+                // shapes the risk sets the window opens with, which is what
+                // lets a first-occurrence mark know it has already fired.
+                // Only an event after exit is outside the record.
+                if !event.time.is_finite() || event.time > subject.exit {
                     return Err(invalid(format!(
-                        "subject {:?} has an event at {} outside (entry, exit] = ({}, {}]",
-                        subject.id, event.time, subject.entry, subject.exit
+                        "subject {:?} has an event at {}, after its exit {}",
+                        subject.id, event.time, subject.exit
                     )));
                 }
                 if event.mark >= marks {
@@ -331,6 +340,16 @@ impl EventHistoryCohort {
                         d
                     )));
                 }
+            }
+            if let Some(event) = subject
+                .events
+                .iter()
+                .find(|e| kinds[e.mark] == MarkKind::Terminal && e.time <= subject.entry)
+            {
+                return Err(invalid(format!(
+                    "subject {:?} has a terminal event at {}, at or before its entry {}; it has no follow-up to model",
+                    subject.id, event.time, subject.entry
+                )));
             }
             let terminal_events = subject
                 .events
@@ -495,7 +514,7 @@ pub(crate) fn mesh_cells(subject: &SubjectHistory, with_events: bool, refinement
                 .events
                 .iter()
                 .map(|e| e.time)
-                .filter(|&t| t < subject.exit),
+                .filter(|&t| t > subject.entry && t < subject.exit),
         );
     }
     breakpoints.sort_by(|a, b| a.total_cmp(b));
@@ -579,7 +598,10 @@ pub fn expand_nodes(
                 raw.push((t, w, exposure, None));
             }
         }
-        for event in &subject.events {
+        // Prior events carry no count node: they are history, not
+        // observations of this window, and `at_risk` has already read them
+        // into the risk sets.
+        for event in subject.events.iter().filter(|e| e.time > subject.entry) {
             raw.push((event.time, 0.0, vec![0.0; marks], Some(event.mark)));
         }
         raw.sort_by(|a, b| a.0.total_cmp(&b.0));
