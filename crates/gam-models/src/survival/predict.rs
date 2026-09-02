@@ -2947,6 +2947,9 @@ struct MarginalSlopePredictContext {
     beta_time: Array1<f64>,
     /// Covariate (marginal) coefficients.
     beta_marginal: Array1<f64>,
+    /// Slope coefficients, used with the saved time-margin tangent to recover
+    /// `b_t` at each curve point.
+    beta_slope: Array1<f64>,
     saved_timewiggle: Option<SavedBaselineTimeWiggleRuntime>,
     /// Covariate design (n × p_marginal), kept operator-backed when possible.
     cov_design: DesignMatrix,
@@ -3031,11 +3034,14 @@ fn build_marginal_slope_predict_context(
     let slope_cov_design = slope_design.design.clone();
     let slope_exit_design = match slope_time_basis.as_ref() {
         None => slope_cov_design.clone(),
-        Some(time_basis) => crate::survival::construction::replay_slope_time_margin_design(
-            age_exit.view(),
-            time_basis,
-            &slope_cov_design,
-        )?,
+        Some(time_basis) => {
+            crate::survival::construction::replay_slope_time_margin_value_tangent_design(
+                age_exit.view(),
+                time_basis,
+                &slope_cov_design,
+            )?
+            .value
+        }
     };
 
     let fit_saved = fit_result_from_saved_model_for_prediction(model)?;
@@ -3065,6 +3071,7 @@ fn build_marginal_slope_predict_context(
     }
     let beta_time = blocks[0].beta.clone();
     let beta_marginal = blocks[1].beta.clone();
+    let beta_slope = blocks[2].beta.clone();
     let saved_runtime = model.saved_prediction_runtime()?;
     let saved_timewiggle = saved_runtime.baseline_time_wiggle.clone();
 
@@ -3076,6 +3083,7 @@ fn build_marginal_slope_predict_context(
         predictor,
         beta_time,
         beta_marginal,
+        beta_slope,
         saved_timewiggle,
         cov_design: cov_design.clone(),
         slope_design: slope_exit_design,
@@ -3090,13 +3098,12 @@ fn build_marginal_slope_predict_context(
 /// Evaluate one (row, t) cell for the saved survival marginal-slope kernel.
 ///
 /// Calls the saved [`BernoulliMarginalSlopePredictor`]
-/// (`predict_eta_and_q_chain`) to obtain both the linear predictor `eta` and
-/// the exact IFT-pullback factor `∂eta/∂q`. The survival-index time derivative
-/// is then `(∂eta/∂q) · qd_with_wiggle`. In rigid mode this collapses to
-/// `c · qd` (the closed-form probit-frailty composition); under score-warp /
-/// link-deviation it picks up the exact implicit-function pull-back through the
-/// per-row calibration intercept, mirroring `compute_survival_timepoint_exact`
-/// in `survival_marginal_slope.rs`.
+/// (`predict_eta_and_time_tangent`) to obtain both the linear predictor `eta`
+/// and its complete time tangent
+/// `eta_t = (∂eta/∂q) q_t + (∂eta/∂b) b_t`. In rigid mode both partials have
+/// closed forms; empirical and flexible latent laws carry their exact implicit
+/// calibration pull-backs. This mirrors `compute_survival_timepoint_exact` in
+/// `survival_marginal_slope.rs`.
 fn evaluate_marginal_slope_row(
     row_index: usize,
     ctx: &MarginalSlopePredictContext,
@@ -3213,12 +3220,15 @@ fn evaluate_marginal_slope_row(
     // evaluated at rather than frozen at the row's own exit time. Reading the
     // exit-time row here would return `S(t)` computed with `b(t_exit)` — a
     // different model at every point of the curve except one.
-    let slope_row = match ctx.slope_time_basis.as_ref() {
-        None => design_row_owned(
-            &ctx.slope_design,
-            row_index,
-            "survival marginal slope row",
-        )?,
+    let (slope_row, slope_tangent) = match ctx.slope_time_basis.as_ref() {
+        None => (
+            design_row_owned(
+                &ctx.slope_design,
+                row_index,
+                "survival marginal slope row",
+            )?,
+            0.0,
+        ),
         Some(time_basis) => {
             let cov_row = design_row_owned(
                 &ctx.slope_cov_design,
@@ -3230,12 +3240,20 @@ fn evaluate_marginal_slope_row(
                     .into_shape_with_order((1, ctx.slope_cov_design.ncols()))
                     .map_err(|e| format!("survival marginal slope covariate row shape: {e}"))?,
             );
-            let tensored = crate::survival::construction::replay_slope_time_margin_design(
-                Array1::from_elem(1, evaluation_time).view(),
-                time_basis,
-                &cov_row_design,
+            let replay =
+                crate::survival::construction::replay_slope_time_margin_value_tangent_design(
+                    Array1::from_elem(1, evaluation_time).view(),
+                    time_basis,
+                    &cov_row_design,
+                )?;
+            let value = design_row_owned(&replay.value, 0, "survival marginal slope row at t")?;
+            let derivative = design_row_owned(
+                &replay.derivative,
+                0,
+                "survival marginal slope tangent row at t",
             )?;
-            design_row_owned(&tensored, 0, "survival marginal slope row at t")?
+            let tangent = derivative.dot(&ctx.beta_slope);
+            (value, tangent)
         }
     };
     let mut slope_design_2d = Array2::<f64>::zeros((1, slope_row.len()));
@@ -3252,13 +3270,17 @@ fn evaluate_marginal_slope_row(
         auxiliary_matrix: None,
     };
 
-    // Exact IFT pull-back: the predictor returns both `eta` and the analytic
-    // factor `∂eta/∂q` for this (row, t). This gives d eta(t) / dt; the hazard
-    // conversion below divides the event density by S(t).
-    let (eta_arr, deta_dq_arr) = ctx
+    // Exact IFT pull-back: the predictor consumes both moving primary
+    // coordinates. The slope margin contributes even when q is locally flat:
+    // `eta_t = eta_q q_t + eta_b b_t`.
+    let (eta_arr, eta_t_arr) = ctx
         .predictor
-        .predict_eta_and_q_chain(&pred_input)
-        .map_err(|e| format!("saved survival marginal-slope predictor eta failed: {e}"))?;
+        .predict_eta_and_time_tangent(
+            &pred_input,
+            &Array1::from_elem(1, qd_with_wiggle),
+            &Array1::from_elem(1, slope_tangent),
+        )
+        .map_err(|e| format!("saved survival marginal-slope predictor replay failed: {e}"))?;
     let eta = eta_arr[0];
     // `qd_with_wiggle` is the base survival-index time derivative q'(t), built
     // identically to fit-time `qd1 = dq_dq0·d_raw` (the wiggle chain and the
@@ -3279,7 +3301,7 @@ fn evaluate_marginal_slope_row(
     // prediction — clamping keeps the CIF well-posed and monotone. Only a
     // non-finite derivative (a real numerical failure) is surfaced to the strict
     // validator below.
-    let eta_derivative = marginal_slope_index_derivative_at_horizon(deta_dq_arr[0], qd_with_wiggle);
+    let eta_derivative = clamp_marginal_slope_index_derivative_at_horizon(eta_t_arr[0]);
     let (cum, haz) = probit_survival_hazard_components(eta, eta_derivative)?;
     Ok((eta, cum, haz))
 }
@@ -3287,18 +3309,17 @@ fn evaluate_marginal_slope_row(
 /// Reconstruct the marginal-slope survival index time-derivative `eta'(t)` at a
 /// prediction horizon and clamp it to its physical floor.
 ///
-/// `deta_dq = ∂eta/∂q ≥ 1` is the rigid probit-frailty chain factor and
-/// `qd_with_wiggle = q'(t)` is the base survival-index time derivative built
-/// identically to fit-time `qd1`. The instantaneous hazard rate `h(t) = mills ·
-/// eta'(t)` is physically non-negative, so a finite negative `eta'(t)` — which a
+/// The complete derivative already contains both moving fitted coordinates,
+/// `eta'(t) = eta_q q'(t) + eta_b b'(t)`. The instantaneous hazard rate
+/// `h(t) = mills · eta'(t)` is physically non-negative, so a finite negative
+/// `eta'(t)` — which a
 /// penalized baseline spline can legitimately produce when the prediction
 /// horizon lands outside the training exit times the monotonicity guard
 /// constrains — is clamped to its floor 0 (flat hazard, locally constant
 /// survival), keeping the CIF well-posed. Non-finite values pass through
 /// unchanged so the strict validator rejects them as genuine numerical failures.
 #[inline]
-fn marginal_slope_index_derivative_at_horizon(deta_dq: f64, qd_with_wiggle: f64) -> f64 {
-    let eta_derivative = deta_dq * qd_with_wiggle;
+fn clamp_marginal_slope_index_derivative_at_horizon(eta_derivative: f64) -> f64 {
     if eta_derivative.is_finite() {
         eta_derivative.max(0.0)
     } else {
@@ -4908,6 +4929,8 @@ fn stale_weibull_time_basis_hint(basisname: &str, extra_time_coefficient: bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bms::LatentMeasureKind;
+    use crate::inference::model::SavedLatentZNormalization;
     use crate::probability::{normal_cdf, normal_pdf};
 
     #[test]
@@ -5231,6 +5254,88 @@ mod tests {
     }
 
     #[test]
+    fn saved_marginal_slope_hazard_replay_differentiates_moving_slope_2767() {
+        let predictor = BernoulliMarginalSlopePredictor {
+            beta_marginal: ndarray::array![1.0],
+            beta_slope: ndarray::array![1.0],
+            beta_score_warp: None,
+            beta_link_dev: None,
+            base_link: InverseLink::Standard(StandardLink::Probit),
+            z_column: "z".to_string(),
+            latent_z_normalization: SavedLatentZNormalization { mean: 0.0, sd: 1.0 },
+            latent_measure: LatentMeasureKind::StandardNormal,
+            baseline_marginal: 0.0,
+            baseline_slope: 0.0,
+            covariance: None,
+            score_warp_runtime: None,
+            link_deviation_runtime: None,
+            gaussian_frailty_sd: None,
+            latent_z_calibration: None,
+            latent_z_conditional_calibration: None,
+            latent_conditioning_span: LatentConditioningSpan::PrimaryDesign,
+        };
+        let z = 1.1;
+        let q = 0.8;
+        let b = 0.65;
+        let q_t = 0.31;
+        let b_t = 0.22;
+        let input_at = |q_value: f64, b_value: f64| PredictInput {
+            design: DesignMatrix::from(ndarray::array![[q_value]]),
+            offset: ndarray::array![0.0],
+            design_noise: Some(DesignMatrix::from(ndarray::array![[b_value]])),
+            offset_noise: Some(ndarray::array![0.0]),
+            auxiliary_scalar: Some(ndarray::array![z]),
+            auxiliary_matrix: None,
+        };
+
+        let (eta, eta_t) = predictor
+            .predict_eta_and_time_tangent(
+                &input_at(q, b),
+                &ndarray::array![q_t],
+                &ndarray::array![b_t],
+            )
+            .expect("saved value+tangent replay");
+        let step = 1e-6;
+        let eta_plus = predictor
+            .predict_eta_and_time_tangent(
+                &input_at(q + step * q_t, b + step * b_t),
+                &ndarray::array![0.0],
+                &ndarray::array![0.0],
+            )
+            .expect("positive saved replay")
+            .0[0];
+        let eta_minus = predictor
+            .predict_eta_and_time_tangent(
+                &input_at(q - step * q_t, b - step * b_t),
+                &ndarray::array![0.0],
+                &ndarray::array![0.0],
+            )
+            .expect("negative saved replay")
+            .0[0];
+        let eta_t_fd = (eta_plus - eta_minus) / (2.0 * step);
+        assert!(
+            (eta_t[0] - eta_t_fd).abs() <= 2e-9 * (1.0 + eta_t_fd.abs()),
+            "complete saved eta tangent {} != centered FD {eta_t_fd}",
+            eta_t[0]
+        );
+
+        let eta_q = (1.0_f64 + b * b).sqrt();
+        let omitted_slope_chain = eta_q * q_t;
+        assert!(
+            (eta_t[0] - omitted_slope_chain).abs() > 0.1,
+            "fixture must detect omission of eta_b*b_t"
+        );
+        let (_, analytic_hazard) = probit_survival_hazard_components(eta[0], eta_t[0])
+            .expect("positive analytic hazard");
+        let (_, fd_hazard) = probit_survival_hazard_components(eta[0], eta_t_fd)
+            .expect("positive finite-difference hazard");
+        assert!(
+            (analytic_hazard - fd_hazard).abs() <= 2e-9 * (1.0 + fd_hazard.abs()),
+            "analytic saved hazard {analytic_hazard} != FD hazard {fd_hazard}"
+        );
+    }
+
+    #[test]
     fn marginal_slope_index_derivative_clamps_extrapolation_negative_to_flat_hazard() {
         // The #1040 end-to-end blocker: at a prediction horizon outside the
         // training exit times, the penalized baseline derivative q'(t) can dip
@@ -5238,9 +5343,7 @@ mod tests {
         // index time-derivative the strict validator used to reject. The
         // physical hazard floor is 0, so the clamp must turn it into a flat
         // hazard the validator accepts — keeping predict/CIF runnable.
-        let deta_dq = (1.0_f64 + 0.4 * 0.4).sqrt(); // rigid c = sqrt(1+sb^2) >= 1
-        let qd_with_wiggle = -1.35e-3;
-        let eta_t = marginal_slope_index_derivative_at_horizon(deta_dq, qd_with_wiggle);
+        let eta_t = clamp_marginal_slope_index_derivative_at_horizon(-1.35e-3);
         assert_eq!(
             eta_t, 0.0,
             "negative extrapolation derivative must clamp to 0"
@@ -5263,12 +5366,12 @@ mod tests {
         // A genuinely positive derivative passes through unchanged (scaled by
         // the chain factor), and a non-finite value is left for the strict
         // validator to reject as a real numerical failure rather than masked.
-        let positive = marginal_slope_index_derivative_at_horizon(1.25, 0.8);
+        let positive = clamp_marginal_slope_index_derivative_at_horizon(1.0);
         assert!(
             (positive - 1.0).abs() <= 1e-15,
             "positive derivative scaled by chain factor"
         );
-        let nonfinite = marginal_slope_index_derivative_at_horizon(1.25, f64::NAN);
+        let nonfinite = clamp_marginal_slope_index_derivative_at_horizon(f64::NAN);
         assert!(
             nonfinite.is_nan(),
             "non-finite derivative passes through unclamped"

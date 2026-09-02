@@ -4268,10 +4268,15 @@ pub fn replay_time_varying_survival_covariate_template(
 /// is the only B-spline evaluation on the slope time axis, so the batch
 /// replay below and the per-`(row, t)` survival-curve replay cannot disagree
 /// about which basis they are asking for.
+pub struct SlopeTimeMarginRows {
+    pub value: Array2<f64>,
+    pub derivative: Array2<f64>,
+}
+
 pub fn slope_time_margin_rows(
     time_basis: &SurvivalCovariateTimeBasis,
     times: ndarray::ArrayView1<'_, f64>,
-) -> Result<Array2<f64>, String> {
+) -> Result<SlopeTimeMarginRows, String> {
     let log_times = times.mapv(|t| t.max(1e-12).ln());
     let knots = Array1::from_vec(time_basis.knots.clone());
     let build = build_bspline_basis_1d(
@@ -4287,7 +4292,33 @@ pub fn slope_time_margin_rows(
         },
     )
     .map_err(|e| format!("failed to replay the slope time margin: {e}"))?;
-    Ok(build.design.to_dense())
+    let value = build.design.to_dense();
+    let p_time = value.ncols();
+    if p_time == 0 {
+        return Err("the replayed slope time margin has zero columns".to_string());
+    }
+    let mut derivative = Array2::<f64>::zeros((times.len(), p_time));
+    derivative
+        .as_slice_mut()
+        .expect("zeros are contiguous")
+        .chunks_mut(p_time)
+        .enumerate()
+        .try_for_each(|(row, output)| -> Result<(), String> {
+            let mut derivative_log_time = vec![0.0_f64; p_time];
+            evaluate_bspline_derivative_scalar(
+                log_times[row],
+                knots.view(),
+                time_basis.degree,
+                &mut derivative_log_time,
+            )
+            .map_err(|error| format!("failed to replay the slope time-margin tangent: {error}"))?;
+            let log_time_tangent = 1.0 / times[row].max(1e-12);
+            for column in 0..p_time {
+                output[column] = derivative_log_time[column] * log_time_tangent;
+            }
+            Ok(())
+        })?;
+    Ok(SlopeTimeMarginRows { value, derivative })
 }
 
 /// All three follow-up channels of a slope block, replayed from the saved
@@ -4312,41 +4343,36 @@ pub fn replay_slope_follow_up_designs(
     time_basis: &SurvivalCovariateTimeBasis,
     covariate_design: &DesignMatrix,
 ) -> Result<SlopeFollowUpReplayDesigns, String> {
-    let template = replay_time_varying_survival_covariate_template(
-        age_entry, age_exit, time_basis, "slope",
-    )?;
-    let SurvivalCovariateTermBlockTemplate::TimeVarying {
-        time_basis_entry,
-        time_basis_exit,
-        time_basis_derivative_exit,
-        ..
-    } = &template
-    else {
-        return Err(
-            "replaying a slope time margin produced a time-constant template".to_string(),
-        );
-    };
-    if covariate_design.nrows() != time_basis_exit.nrows() {
+    if age_entry.len() != age_exit.len() {
+        return Err(format!(
+            "slope follow-up replay has {} entry rows against {} exit rows",
+            age_entry.len(),
+            age_exit.len(),
+        ));
+    }
+    let entry_rows = slope_time_margin_rows(time_basis, age_entry.view())?;
+    let exit_rows = slope_time_margin_rows(time_basis, age_exit.view())?;
+    if covariate_design.nrows() != exit_rows.value.nrows() {
         return Err(format!(
             "slope follow-up replay has {} covariate rows against {} time rows",
             covariate_design.nrows(),
-            time_basis_exit.nrows(),
+            exit_rows.value.nrows(),
         ));
     }
-    if covariate_design.ncols() == 0 || time_basis_exit.ncols() == 0 {
+    if covariate_design.ncols() == 0 || exit_rows.value.ncols() == 0 {
         return Err(format!(
             "a follow-up-varying slope needs a non-empty tensor product, got {}x{}",
             covariate_design.ncols(),
-            time_basis_exit.ncols(),
+            exit_rows.value.ncols(),
         ));
     }
     let kron = |basis: &Array2<f64>| {
         crate::survival::location_scale::rowwise_kronecker(covariate_design, basis)
     };
     Ok(SlopeFollowUpReplayDesigns {
-        entry: kron(time_basis_entry),
-        exit: kron(time_basis_exit),
-        derivative_exit: kron(time_basis_derivative_exit),
+        entry: kron(&entry_rows.value),
+        exit: kron(&exit_rows.value),
+        derivative_exit: kron(&exit_rows.derivative),
     })
 }
 
@@ -4364,11 +4390,16 @@ pub fn replay_slope_follow_up_designs(
 /// Rebuilding it from the term spec alone — `p_cov` columns against a
 /// `p_cov · p_time` coefficient vector — is the failure this function exists to
 /// make impossible.
-pub fn replay_slope_time_margin_design(
+pub struct SlopeTimeMarginReplayDesign {
+    pub value: DesignMatrix,
+    pub derivative: DesignMatrix,
+}
+
+pub fn replay_slope_time_margin_value_tangent_design(
     times: ndarray::ArrayView1<'_, f64>,
     time_basis: &SurvivalCovariateTimeBasis,
     covariate_design: &DesignMatrix,
-) -> Result<DesignMatrix, String> {
+) -> Result<SlopeTimeMarginReplayDesign, String> {
     if covariate_design.nrows() != times.len() {
         return Err(format!(
             "slope time-margin replay has {} covariate rows against {} times",
@@ -4376,18 +4407,21 @@ pub fn replay_slope_time_margin_design(
             times.len(),
         ));
     }
-    let time_design = slope_time_margin_rows(time_basis, times)?;
-    if covariate_design.ncols() == 0 || time_design.ncols() == 0 {
+    let time_rows = slope_time_margin_rows(time_basis, times)?;
+    if covariate_design.ncols() == 0 || time_rows.value.ncols() == 0 {
         return Err(format!(
             "a follow-up-varying slope needs a non-empty tensor product, got {}x{}",
             covariate_design.ncols(),
-            time_design.ncols(),
+            time_rows.value.ncols(),
         ));
     }
-    Ok(crate::survival::location_scale::rowwise_kronecker(
-        covariate_design,
-        &time_design,
-    ))
+    let tensor = |basis: &Array2<f64>| {
+        crate::survival::location_scale::rowwise_kronecker(covariate_design, basis)
+    };
+    Ok(SlopeTimeMarginReplayDesign {
+        value: tensor(&time_rows.value),
+        derivative: tensor(&time_rows.derivative),
+    })
 }
 
 fn finish_time_varying_survival_covariate_template(
@@ -4491,7 +4525,7 @@ mod tests {
     use super::{
         DesignMatrix, SurvivalCovariateTermBlockTemplate,
         build_time_varying_survival_covariate_template, slope_time_margin_rows,
-        replay_slope_follow_up_designs, replay_slope_time_margin_design,
+        replay_slope_follow_up_designs, replay_slope_time_margin_value_tangent_design,
     };
     use crate::probability::normal_cdf;
     use crate::survival::base::ENTRY_AT_ORIGIN_THRESHOLD;
@@ -6910,12 +6944,22 @@ mod tests {
 
         let replayed_exit = slope_time_margin_rows(time_basis, age_exit.view())
             .expect("replayed exit margin");
-        assert_eq!(replayed_exit.dim(), time_basis_exit.dim());
-        for (fit_value, replay_value) in time_basis_exit.iter().zip(replayed_exit.iter()) {
+        assert_eq!(replayed_exit.value.dim(), time_basis_exit.dim());
+        for (fit_value, replay_value) in time_basis_exit.iter().zip(replayed_exit.value.iter()) {
             assert_eq!(
                 fit_value.to_bits(),
                 replay_value.to_bits(),
                 "the replayed exit margin must be the fitted one, not merely close"
+            );
+        }
+        for (fit_value, replay_value) in time_basis_derivative_exit
+            .iter()
+            .zip(replayed_exit.derivative.iter())
+        {
+            assert_eq!(
+                fit_value.to_bits(),
+                replay_value.to_bits(),
+                "the replayed exit-margin tangent must be the fitted one"
             );
         }
 
@@ -6976,10 +7020,20 @@ mod tests {
             (age_exit.len(), 2),
             |(row, col)| if col == 0 { 1.0 } else { 0.3 * (row as f64) },
         ));
-        let batch = replay_slope_time_margin_design(age_exit.view(), &time_basis, &covariate)
-            .expect("batch replay")
-            .try_to_dense_arc("batch replay")
+        let batch = replay_slope_time_margin_value_tangent_design(
+            age_exit.view(),
+            &time_basis,
+            &covariate,
+        )
+        .expect("batch replay");
+        let batch_value = batch
+            .value
+            .try_to_dense_arc("batch value replay")
             .expect("dense batch");
+        let batch_derivative = batch
+            .derivative
+            .try_to_dense_arc("batch tangent replay")
+            .expect("dense batch tangent");
         let covariate_dense = covariate
             .try_to_dense_arc("covariate")
             .expect("dense covariate");
@@ -6991,19 +7045,30 @@ mod tests {
                     .into_shape_with_order((1, 2))
                     .expect("single covariate row"),
             );
-            let single = replay_slope_time_margin_design(
+            let single = replay_slope_time_margin_value_tangent_design(
                 Array1::from_elem(1, age_exit[row]).view(),
                 &time_basis,
                 &single_covariate,
             )
-            .expect("single-row replay")
-            .try_to_dense_arc("single-row replay")
-            .expect("dense single row");
-            for col in 0..batch.ncols() {
+            .expect("single-row replay");
+            let single_value = single
+                .value
+                .try_to_dense_arc("single-row value replay")
+                .expect("dense single value row");
+            let single_derivative = single
+                .derivative
+                .try_to_dense_arc("single-row tangent replay")
+                .expect("dense single tangent row");
+            for col in 0..batch_value.ncols() {
                 assert_eq!(
-                    batch[[row, col]].to_bits(),
-                    single[[0, col]].to_bits(),
+                    batch_value[[row, col]].to_bits(),
+                    single_value[[0, col]].to_bits(),
                     "single-row replay disagrees with the batch at ({row}, {col})"
+                );
+                assert_eq!(
+                    batch_derivative[[row, col]].to_bits(),
+                    single_derivative[[0, col]].to_bits(),
+                    "single-row tangent replay disagrees with the batch at ({row}, {col})"
                 );
             }
         }

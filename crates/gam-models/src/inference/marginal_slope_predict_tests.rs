@@ -352,9 +352,9 @@ fn bernoulli_marginal_slope_predictor_uses_local_empirical_latent_law() {
     let (eta, _) = predictor
         .final_eta_and_gradient_from_theta(&input, &predictor.theta(), true)
         .expect("local empirical prediction");
-    let (chain_eta, deta_dq) = predictor
-        .predict_eta_and_q_chain(&input)
-        .expect("local empirical q chain");
+    let (chain_eta, eta_q) = predictor
+        .predict_eta_and_time_tangent(&input, &Array1::ones(2), &Array1::zeros(2))
+        .expect("local empirical q tangent");
 
     for (row, grid) in grids.iter().enumerate() {
         let expected_intercept = empirical_intercept_from_marginal(
@@ -369,7 +369,7 @@ fn bernoulli_marginal_slope_predictor_uses_local_empirical_latent_law() {
         .expect("expected empirical intercept");
         assert!((eta[row] - expected_intercept).abs() <= 1e-10);
         assert!((chain_eta[row] - eta[row]).abs() <= 1e-12);
-        assert!(deta_dq[row].is_finite() && deta_dq[row] > 0.0);
+        assert!(eta_q[row].is_finite() && eta_q[row] > 0.0);
     }
 }
 

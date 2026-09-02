@@ -547,7 +547,7 @@ impl BernoulliMarginalSlopePredictor {
     /// is why the BMS standard-normal closed-form kernel is correct on
     /// the calibrated scale. At predict time, every z that flows into a
     /// kernel evaluation site (`final_eta_and_gradient_from_theta`,
-    /// `predict_eta_and_q_chain`, and indirectly the per-row `solve_intercept_scalar`
+    /// `predict_eta_and_time_tangent`, and indirectly the per-row `solve_intercept_scalar`
     /// / `evaluate_prediction_calibration` / `observed_denested_cell_partials_at_z`
     /// helpers that consume per-row scalar z values from the closure-
     /// captured `z` array) must be routed through the same monotone
@@ -2126,25 +2126,23 @@ impl BernoulliMarginalSlopePredictor {
             + self.beta_link_dev.as_ref().map_or(0, Array1::len)
     }
 
-    /// Per-row `(eta, ∂eta/∂q_marginal)` under the exact IFT pull-back.
+    /// Per-row `(eta, eta_t)` under the exact saved-model IFT pull-back.
     ///
     /// Returns the same `eta` as `predict_plugin_response`/`predict_linear_predictor`
-    /// plus the analytic derivative of the internal probit index with respect to
-    /// the per-row marginal q (the linear predictor before the de-nested
-    /// calibration). Survival prediction multiplies the second component by the
-    /// per-row `dq/dt` to obtain the exact hazard time derivative under
-    /// score-warp / link-deviation flex blocks.
+    /// plus the complete tangent of the internal probit index with respect to
+    /// follow-up time. Both moving primary coordinates are explicit inputs:
+    /// `eta_t = eta_q q_t + eta_b b_t`. Keeping value and tangent in one replay
+    /// prevents survival prediction from evaluating `b(t)` while silently
+    /// differentiating the time-constant-slope model.
     ///
-    /// Rigid path (no flex blocks): `∂eta/∂q = c = sqrt(1 + (s b)^2)`, recovering
-    /// the rigid-path probit-frailty composition. Flex path: `∂eta/∂q =
-    /// scale · link_c_obs · a_q` where `link_c_obs = 1 + Δ_w'(eta_base)` is the
-    /// link-deviation slope at the observed `eta_base = a + b z` and `a_q =
-    /// φ(q) / |F_a|` is the implicit-function derivative of the calibration
-    /// intercept (mirrors the bernoulli `final_eta_and_gradient_from_theta`
-    /// flex branch lines 1399-1593).
-    pub fn predict_eta_and_q_chain(
+    /// Rigid, empirical, and flexible latent laws each supply both exact
+    /// partials. In the flexible path `a_q = mu_q/F_a` and `a_b = -F_b/F_a`
+    /// are the two implicit derivatives of the calibrated intercept.
+    pub fn predict_eta_and_time_tangent(
         &self,
         input: &PredictInput,
+        q_t: &Array1<f64>,
+        b_t: &Array1<f64>,
     ) -> Result<(Array1<f64>, Array1<f64>), EstimationError> {
         let z_raw = input.auxiliary_scalar.as_ref().ok_or_else(|| {
             EstimationError::InvalidInput(format!(
@@ -2172,6 +2170,13 @@ impl BernoulliMarginalSlopePredictor {
             )
         })?;
         let n = z.len();
+        if q_t.len() != n || b_t.len() != n {
+            return Err(EstimationError::InvalidInput(format!(
+                "bernoulli marginal-slope tangent length mismatch: rows={n}, q_t={}, b_t={}",
+                q_t.len(),
+                b_t.len(),
+            )));
+        }
         if input.offset.len() != n {
             return Err(EstimationError::InvalidInput(format!(
                 "bernoulli marginal-slope prediction primary offset length mismatch: rows={n}, offset={}",
@@ -2201,21 +2206,26 @@ impl BernoulliMarginalSlopePredictor {
         let flex_active =
             self.score_warp_runtime.is_some() || self.link_deviation_runtime.is_some();
 
-        // Rigid path mirrors `final_eta_and_gradient_from_theta` lines 1342-1383:
-        //   eta = c·q + s·b·z,  ∂eta/∂q = c.
+        // Rigid path mirrors `final_eta_and_gradient_from_theta`:
+        //   eta = c·q + s·b·z,
+        //   eta_q = c,
+        //   eta_b = s²·b·q/c + s·z.
         if !flex_active {
             match &self.latent_measure {
                 LatentMeasureKind::StandardNormal => {
-                    // Vectorize: sb = scale·slope, c = sqrt(1 + sb²),
-                    // eta = c·marginal_eta + sb·z, ∂eta/∂q = c.
                     let sb = slope_eta.mapv(|x| scale * x);
-                    let deta_dq = sb.mapv(|s| (1.0 + s * s).sqrt());
-                    let eta = &deta_dq * marginal_eta + &sb * z;
-                    return Ok((eta, deta_dq));
+                    let eta_q = sb.mapv(|s| (1.0 + s * s).sqrt());
+                    let eta = &eta_q * &marginal_eta + &sb * &z;
+                    let eta_b = Array1::from_iter((0..n).map(|row| {
+                        scale * scale * slope_eta[row] * marginal_eta[row] / eta_q[row]
+                            + scale * z[row]
+                    }));
+                    let eta_t = &eta_q * q_t + &eta_b * b_t;
+                    return Ok((eta, eta_t));
                 }
                 _ => {
                     let mut eta = Array1::<f64>::zeros(n);
-                    let mut deta_dq = Array1::<f64>::zeros(n);
+                    let mut eta_t = Array1::<f64>::zeros(n);
                     for i in 0..n {
                         let grid = self
                             .empirical_grid_for_prediction_row(input, i)?
@@ -2225,7 +2235,7 @@ impl BernoulliMarginalSlopePredictor {
                                         .to_string(),
                                 )
                             })?;
-                        let (intercept, a_marginal, _) = self
+                        let (intercept, eta_q, a_slope) = self
                             .empirical_rigid_intercept_and_gradient(
                                 marginal_eta[i],
                                 slope_eta[i],
@@ -2233,9 +2243,10 @@ impl BernoulliMarginalSlopePredictor {
                                 &grid.weights,
                             )?;
                         eta[i] = intercept + scale * slope_eta[i] * z[i];
-                        deta_dq[i] = a_marginal;
+                        let eta_b = a_slope + scale * z[i];
+                        eta_t[i] = eta_q * q_t[i] + eta_b * b_t[i];
                     }
-                    return Ok((eta, deta_dq));
+                    return Ok((eta, eta_t));
                 }
             }
         }
@@ -2257,10 +2268,10 @@ impl BernoulliMarginalSlopePredictor {
         let anchor_corrections =
             self.build_anchor_correction_matrices(input, design_slope, &z)?;
         // Per-row: solve intercept scalar, evaluate denested calibration,
-        // record (intercept, a_q). The `warm_start_buf` is just per-call
+        // record (intercept, a_q, a_b). The `warm_start_buf` is just per-call
         // scratch — give each rayon worker its own buffer via fold init.
         use rayon::iter::{IntoParallelIterator, ParallelIterator};
-        let pairs: Result<Vec<(f64, f64)>, EstimationError> = (0..n)
+        let chains: Result<Vec<(f64, f64, f64)>, EstimationError> = (0..n)
             .into_par_iter()
             .map_init(
                 || Array1::<f64>::zeros(1),
@@ -2291,16 +2302,64 @@ impl BernoulliMarginalSlopePredictor {
                         link_corr_row,
                     )?;
                     let m_a = m_a_raw.max(1e-12);
-                    Ok((intercept, marginal_map[i].mu1 / m_a))
+                    let mut f_b = 0.0;
+                    if let Some(grid) = empirical_grid.as_ref() {
+                        for (node, weight) in grid.pairs() {
+                            let obs = self.observed_denested_cell_partials_at_z(
+                                node,
+                                intercept,
+                                slope,
+                                self.beta_score_warp.as_ref(),
+                                self.beta_link_dev.as_ref(),
+                                score_corr_row,
+                                link_corr_row,
+                            )?;
+                            let eta = eval_coeff4_at(&obs.coeff, node);
+                            f_b += weight * normal_pdf(eta) * eval_coeff4_at(&obs.dc_db, node);
+                        }
+                    } else {
+                        for partition_cell in self.denested_partition_cells(
+                            intercept,
+                            slope,
+                            self.beta_score_warp.as_ref(),
+                            self.beta_link_dev.as_ref(),
+                            score_corr_row,
+                            link_corr_row,
+                        )? {
+                            let cell = partition_cell.cell;
+                            let state = crate::cubic_cell_kernel::evaluate_cell_moments(cell, 9)
+                                .map_err(EstimationError::InvalidInput)?;
+                            let (_, dc_db_raw) =
+                                crate::cubic_cell_kernel::denested_cell_coefficient_partials(
+                                    partition_cell.score_span,
+                                    partition_cell.link_span,
+                                    intercept,
+                                    slope,
+                                );
+                            let dc_db = scale_coeff4(dc_db_raw, scale);
+                            f_b += crate::cubic_cell_kernel::cell_first_derivative_from_moments(
+                                &dc_db,
+                                &state.moments,
+                            )
+                            .map_err(EstimationError::InvalidInput)?;
+                        }
+                    }
+                    Ok((
+                        intercept,
+                        marginal_map[i].mu1 / m_a,
+                        -f_b / m_a,
+                    ))
                 },
             )
             .collect();
-        let pairs = pairs?;
+        let chains = chains?;
         let mut intercepts = Array1::<f64>::zeros(n);
         let mut a_q = Array1::<f64>::zeros(n);
-        for (i, (intercept, a)) in pairs.into_iter().enumerate() {
+        let mut a_b = Array1::<f64>::zeros(n);
+        for (i, (intercept, q_chain, b_chain)) in chains.into_iter().enumerate() {
             intercepts[i] = intercept;
-            a_q[i] = a;
+            a_q[i] = q_chain;
+            a_b[i] = b_chain;
         }
 
         let score_dev_obs = if let (Some(runtime), Some(beta)) = (
@@ -2361,7 +2420,12 @@ impl BernoulliMarginalSlopePredictor {
         };
         let final_eta_internal =
             (&eta_base + &(&slope_eta * &score_dev_obs) + &link_dev_obs).mapv(|v| scale * v);
-        let deta_dq = (&link_c_obs * &a_q).mapv(|v| scale * v);
-        Ok((final_eta_internal, deta_dq))
+        let eta_q = (&link_c_obs * &a_q).mapv(|value| scale * value);
+        let eta_b = Array1::from_iter((0..n).map(|row| {
+            scale
+                * (link_c_obs[row] * (a_b[row] + z[row]) + score_dev_obs[row])
+        }));
+        let eta_t = &eta_q * q_t + &eta_b * b_t;
+        Ok((final_eta_internal, eta_t))
     }
 }
