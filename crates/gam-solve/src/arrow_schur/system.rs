@@ -3326,7 +3326,7 @@ impl ArrowFactorCache {
     /// pseudo-inverse `M⁺` of the SAME operator `M = L Lᵀ` the plain path
     /// inverts, dropping every eigen-direction at or below the solver's
     /// canonical rank floor `SPECTRAL_DEFLATION_REL_FLOOR · max|λ|` (the exact
-    /// threshold `factor_spectral_deflated_criterion_row` and the per-row
+    /// threshold `factor_spectral_deflated_criterion_row_with_geometry` and the per-row
     /// gauge deflation already use — NOT a new epsilon and NOT a λ-smoothing
     /// floor). A doubly-null direction (`j ≈ 0 ∧ s ≈ 0`) deflates to `0` (it is
     /// unidentifiable, not a real DOF); a penalty-only direction survives. The
