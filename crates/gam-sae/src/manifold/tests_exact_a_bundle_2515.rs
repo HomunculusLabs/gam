@@ -2006,6 +2006,36 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
     let (_, _, a_cache) =
         solve_arrow_newton_step_with_options(&exact_system, 0.0, 0.0, &exact_options)
             .expect("#2515: the dense authority admits this rung, so the arrow route must too");
+    let spectral_rows = a_cache
+        .deflation_row_spectra
+        .iter()
+        .filter(|spectrum| spectrum.is_some())
+        .count();
+    let changed_rows = a_cache
+        .deflation_row_spectra
+        .iter()
+        .flatten()
+        .filter(|spectrum| {
+            spectrum
+                .raw_evals
+                .iter()
+                .zip(spectrum.cond_evals.iter())
+                .any(|(&raw, &conditioned)| raw.to_bits() != conditioned.to_bits())
+        })
+        .count();
+    let listed_directions: usize = a_cache
+        .deflated_row_directions
+        .iter()
+        .map(Vec::len)
+        .sum();
+    println!(
+        "[#2515 QUOTIENT] exact-A row spectra={spectral_rows} \
+         changed_rows={changed_rows} listed_unit_directions={listed_directions}"
+    );
+    assert!(
+        changed_rows > 0,
+        "#2515: this gate must exercise a non-identity row-conditioning map"
+    );
 
     let (dense_joint, dense_coordinate) = term
         .exact_observed_information_log_dets(&rho, target.view(), &b_cache)
