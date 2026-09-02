@@ -164,6 +164,7 @@ fn fit_heteroscedastic(
 #[test]
 fn survival_location_scale_heteroscedastic_sweep_diagnostic() {
     init_parallelism();
+    gam_runtime::test_support::install_diagnostic_logger();
     let configs = [
         (200usize, 0.3f64, 0.4f64, 6usize, 4usize, 1234u64), // mild control
         (180, 0.8, 1.0, 8, 6, 1234),                         // moderate
@@ -192,6 +193,7 @@ fn survival_location_scale_heteroscedastic_sweep_diagnostic() {
 #[test]
 fn survival_location_scale_heteroscedastic_globalization_converges_1569() {
     init_parallelism();
+    gam_runtime::test_support::install_diagnostic_logger();
     let r = fit_heteroscedastic(180, 1.0, 1.2, 8, 8, 7);
     // Convergence is certified by construction: fit_heteroscedastic returning
     // a HeteroFit means the sealed fit minted (SPEC 20).

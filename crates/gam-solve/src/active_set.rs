@@ -3076,6 +3076,26 @@ fn scan_operator_violations(
 /// batched independent-separator scan feed the queue as *ordering hints only*:
 /// the returned minimizer is a function of `(H, rhs, A, b)` alone, so warm-start
 /// history can change how fast this solve runs but never what it returns.
+/// The two dual KKT channels of the metric projection, judged in the same
+/// units as its stationarity channel: a channel is violated only when it
+/// exceeds its tolerance both absolutely AND relative to `gradient_scale`
+/// (`max(1, ‖g‖∞)`). The multipliers solve `g − A_Aᵀμ = 0` on unit rows, so
+/// they carry the gradient's scale and so does `|μ·slack|`; an absolute bar
+/// alone refused every high-λ seed of the survival location-scale fits at
+/// `|μ·slack| ≈ 1e-6` from a `1e-15` roundoff slack under `‖g‖∞ ≈ 2e9`
+/// (gam#2695, gam#2714).
+pub(crate) fn kkt_dual_channel_violations(
+    dual_violation: f64,
+    complementarity: f64,
+    gradient_scale: f64,
+) -> (bool, bool) {
+    let dual_infeasible = dual_violation > ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL
+        && dual_violation / gradient_scale > ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL;
+    let complementarity_violated = complementarity > ACTIVE_SET_KKT_COMPLEMENTARITY_TOL
+        && complementarity / gradient_scale > ACTIVE_SET_KKT_COMPLEMENTARITY_TOL;
+    (dual_infeasible, complementarity_violated)
+}
+
 fn solve_operator_metric_projection_dual_active_set(
     hessian: &Array2<f64>,
     rhs: &Array1<f64>,
@@ -3510,12 +3530,26 @@ fn solve_operator_metric_projection_dual_active_set(
             active_ids.len(),
         )));
     }
-    if dual_violation > ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL
-        || complementarity > ACTIVE_SET_KKT_COMPLEMENTARITY_TOL
-    {
+    // The multipliers carry the gradient's units: `μ` solves `g − A_Aᵀ μ = 0`
+    // on unit rows, so a penalty-dominated system (`‖g‖∞ ≈ 1e9` at a high-λ
+    // seed, `β ≈ 1`) has `μ ≈ 1e9` and a roundoff slack of `1e-15` on a
+    // certified-active row reads as `|μ·slack| ≈ 1e-6` — the absolute bar,
+    // met by exact arithmetic on that very face. Stationarity above is
+    // already judged absolute-OR-relative to `gradient_scale`; the two dual
+    // channels are certified in the same units so the three KKT residuals
+    // share one scale (gam#2695, gam#2714: every seed of the survival
+    // location-scale fits was refused here with `dual = 0`, `complementarity
+    // ≈ 1e-6`, `rhs_inf ≈ 1.9e9`, and the outer search never started).
+    let (dual_infeasible, complementarity_violated) =
+        kkt_dual_channel_violations(dual_violation, complementarity, gradient_scale);
+    if dual_infeasible || complementarity_violated {
         return Err(EstimationError::ParameterConstraintViolation(format!(
             "operator metric projection failed dual/complementarity certification: \
-             dual={dual_violation:.3e}, complementarity={complementarity:.3e}, active={}",
+             dual={dual_violation:.3e}, complementarity={complementarity:.3e} \
+             (relative to gradient_scale={gradient_scale:.3e}: dual={:.3e}, \
+             complementarity={:.3e}), active={}",
+            dual_violation / gradient_scale,
+            complementarity / gradient_scale,
             active_ids.len(),
         )));
     }
@@ -3768,6 +3802,27 @@ pub fn solve_quadratic_with_linear_constraints(
 
 #[cfg(test)]
 mod tests {
+
+    /// The dual KKT channels are judged relative to the gradient scale, as the
+    /// stationarity channel is (gam#2695, gam#2714): the measured refusal —
+    /// `dual = 0`, `|μ·slack| = 4.778e-6` under `‖g‖∞ = 1.913580e9` — is a
+    /// certified face, the same product at unit scale is a real violation, and
+    /// a violation that is material at the gradient's own scale is refused.
+    #[test]
+    fn dual_kkt_channels_are_judged_at_the_gradient_scale_2695() {
+        let (dual, complementarity) = super::kkt_dual_channel_violations(0.0, 4.778e-6, 1.913580e9);
+        assert!(!dual && !complementarity, "a roundoff slack under a 2e9 multiplier is certified");
+        let (dual, complementarity) = super::kkt_dual_channel_violations(0.0, 4.778e-6, 1.0);
+        assert!(!dual && complementarity, "the same product at unit gradient scale is refused");
+        let (dual, complementarity) = super::kkt_dual_channel_violations(0.0, 1.0e-4 * 1.913580e9, 1.913580e9);
+        assert!(!dual && complementarity, "a material relative complementarity is refused");
+        let (dual, complementarity) = super::kkt_dual_channel_violations(0.0, 0.0, 1.0);
+        assert!(!dual && !complementarity, "a zero dual violation is certified");
+        let (dual, complementarity) = super::kkt_dual_channel_violations(3.0e-8, 0.0, 1.0);
+        assert!(dual && !complementarity, "a negative multiplier at unit scale is refused");
+        let (dual, complementarity) = super::kkt_dual_channel_violations(3.0e-8, 0.0, 1.0e9);
+        assert!(!dual && !complementarity, "the same multiplier under a 1e9 gradient is roundoff");
+    }
     use super::{
         ACTIVE_SET_INTERIOR_SEED_MARGIN, ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL,
         ACTIVE_SET_PRIMAL_FEASIBILITY_TOL, ConstraintRowId, ConstraintSet, ConstraintSetOps,
