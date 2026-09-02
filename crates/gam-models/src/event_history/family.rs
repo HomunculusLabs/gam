@@ -30,8 +30,8 @@ pub(crate) trait Directional: JetField + Send + Sync {
 }
 
 #[inline]
-fn debug_validate_seed_directions(directions: [f64; 2]) {
-    debug_assert!(
+fn validate_seed_directions(directions: [f64; 2]) {
+    assert!(
         directions.into_iter().all(f64::is_finite),
         "event-history derivative seed directions must be finite",
     );
@@ -39,7 +39,7 @@ fn debug_validate_seed_directions(directions: [f64; 2]) {
 
 impl Directional for f64 {
     fn seeded(value: f64, u: f64, v: f64) -> Self {
-        debug_validate_seed_directions([u, v]);
+        validate_seed_directions([u, v]);
         value
     }
     fn eps(&self) -> f64 {
@@ -56,7 +56,7 @@ fn scalar0(value: f64) -> Order2<0> {
 
 impl Directional for OneSeed<0> {
     fn seeded(value: f64, u: f64, v: f64) -> Self {
-        debug_validate_seed_directions([u, v]);
+        validate_seed_directions([u, v]);
         OneSeed {
             base: scalar0(value),
             eps: scalar0(u),
