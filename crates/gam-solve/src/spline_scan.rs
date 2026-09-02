@@ -3427,14 +3427,21 @@ pub struct SplineScanFit {
     node_weight: Vec<f64>,
 }
 
-/// Pool tied abscissae and validate inputs. Returns nodes plus the within-tie
-/// weighted residual sum and the raw observation count.
+/// Move the response into its constant-null-space chart, pool tied abscissae,
+/// and validate inputs. Returns nodes plus the within-tie weighted residual
+/// sum, raw observation count, and chart origin.
+///
+/// Centering must precede pooling. A weighted tied-row mean formed from the
+/// absolute response level leaks that level through floating-point products
+/// and sums before the innovation recurrence ever sees the data. Computing
+/// both the pooled mean and within-tie residual energy from the same centered
+/// rows makes the translation-free chart the sole arithmetic authority.
 fn pool_nodes(
     x: &[f64],
     y: &[f64],
     w: &[f64],
     order: usize,
-) -> Result<(Vec<PooledNode>, f64, usize), String> {
+) -> Result<(Vec<PooledNode>, f64, usize, f64), String> {
     let n = x.len();
     if y.len() != n || w.len() != n {
         return Err(format!(
@@ -3453,17 +3460,31 @@ fn pool_nodes(
     }
     let mut perm: Vec<usize> = (0..n).collect();
     perm.sort_by(|&i, &j| x[i].total_cmp(&x[j]));
+    let response_origin = perm
+        .first()
+        .map(|&index| y[index])
+        .ok_or_else(|| "spline scan: cannot pool an empty response".to_string())?;
+    let centered_y = y
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| {
+            let centered = value - response_origin;
+            centered.is_finite().then_some(centered).ok_or_else(|| {
+                format!("spline scan: centered response is non-finite at row {index}")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut nodes: Vec<PooledNode> = Vec::new();
     for &i in &perm {
         match nodes.last_mut() {
             Some(last) if last.x == x[i] => {
                 let w_new = last.w + w[i];
-                last.y = (last.y * last.w + y[i] * w[i]) / w_new;
+                last.y = (last.y * last.w + centered_y[i] * w[i]) / w_new;
                 last.w = w_new;
             }
             _ => nodes.push(PooledNode {
                 x: x[i],
-                y: y[i],
+                y: centered_y[i],
                 w: w[i],
             }),
         }
@@ -3483,38 +3504,10 @@ fn pool_nodes(
         while nodes[k].x != x[i] {
             k += 1;
         }
-        let d = y[i] - nodes[k].y;
+        let d = centered_y[i] - nodes[k].y;
         ssr_within += w[i] * d * d;
     }
-    Ok((nodes, ssr_within, n))
-}
-
-/// Move the response's constant null-space component out of the numerical
-/// recurrence and return it for restoration at the fitted-function boundary.
-///
-/// Every supported spline order leaves constants unpenalized, and the exact
-/// diffuse likelihood is invariant under `y -> y + c`. Feeding the absolute
-/// level through the innovation recurrence nevertheless makes its rounded
-/// residuals and directed balls depend on `c`: this is the origin leak behind
-/// #2790, where the order-3 search refused `y` but accepted `y + 1000` on the
-/// identical frame. The first pooled response is an exact admissible chart
-/// origin; subtracting it keeps the score, every score derivative, sigma2,
-/// covariance and residual energy unchanged. Only the published level of
-/// `f(x)` needs the origin added back.
-fn center_pooled_responses(nodes: &mut [PooledNode]) -> Result<f64, String> {
-    let origin = nodes
-        .first()
-        .ok_or_else(|| "spline scan: cannot center an empty pooled response".to_string())?
-        .y;
-    for (index, node) in nodes.iter_mut().enumerate() {
-        node.y -= origin;
-        if !node.y.is_finite() {
-            return Err(format!(
-                "spline scan: centered pooled response is non-finite at node {index}"
-            ));
-        }
-    }
-    Ok(origin)
+    Ok((nodes, ssr_within, n, response_origin))
 }
 
 /// Concentrated diffuse restricted log-likelihood and its exact first three
@@ -4321,8 +4314,7 @@ pub fn fit_spline_scan_at(
             "spline scan: order must be in 1..={MAX_ORDER}, got {order}"
         ));
     }
-    let (mut nodes, ssr_within, n_obs) = pool_nodes(x, y, w, order)?;
-    let response_origin = center_pooled_responses(&mut nodes)?;
+    let (nodes, ssr_within, n_obs, response_origin) = pool_nodes(x, y, w, order)?;
     let q = gam_problem::checked_exp_log_strength(-log_lambda)
         .map_err(|error| format!("spline scan inverse log strength: {error}"))?;
     let pass = run_filter::<true>(&nodes, q, order)?;
@@ -4595,8 +4587,7 @@ pub fn fit_spline_scan(
             "spline scan: order must be in 1..={MAX_ORDER}, got {order}"
         )));
     }
-    let (mut nodes, ssr_within, n_obs) = pool_nodes(x, y, w, order)?;
-    center_pooled_responses(&mut nodes).map_err(SplineScoreProofError::InvalidInput)?;
+    let (nodes, ssr_within, n_obs, _response_origin) = pool_nodes(x, y, w, order)?;
     // Covariate-rescaling equivariance (#1214). The order-`m` IWP process noise
     // is `Q(δ) ∝ q · δ^{2m−1}`, so under an affine covariate rescale `x → a·x`
     // (all abscissa gaps `δ → a·δ`) the posterior `f(x)` is *exactly* invariant
@@ -5361,7 +5352,8 @@ mod tests {
             for order in 1..=MAX_ORDER {
                 let (x, y, w) = (&x, &y, &w);
                 scope.spawn(move || {
-                    let (nodes, ssr_within, n_obs) = pool_nodes(x, y, w, order).expect("pool");
+                    let (nodes, ssr_within, n_obs, _response_origin) =
+                        pool_nodes(x, y, w, order).expect("pool");
                     let span = nodes.last().unwrap().x - nodes.first().unwrap().x;
                     let scale_shift = (2 * order - 1) as f64 * span.ln();
                     let lo = LOG_LAMBDA_LO + scale_shift;
@@ -5483,7 +5475,8 @@ mod tests {
             6.0,
         ];
         for order in 1..=MAX_ORDER {
-            let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
+            let (nodes, within, n_obs, _response_origin) =
+                pool_nodes(&x, &y, &w, order).expect("pool");
             for &log_lambda in &visited {
                 let certificate = certified_concentrated_criterion_jet(
                     &nodes, within, n_obs, log_lambda, order,
@@ -5527,7 +5520,8 @@ mod tests {
     fn the_certified_jet_contains_the_scalar_jet_and_stays_in_its_closed_form_range() {
         let (x, y, w) = dgp_2300();
         for order in 1..=MAX_ORDER {
-            let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
+            let (nodes, within, n_obs, _response_origin) =
+                pool_nodes(&x, &y, &w, order).expect("pool");
             let proper_modes = (nodes.len() - order) as f64;
             let residual_dof = (n_obs - order) as f64;
             for &rho in &[
@@ -5649,7 +5643,8 @@ mod tests {
         let order = 3;
         // This is the middle of the formerly refusing order-3 tail.
         let log_lambda = -16.6135_f64;
-        let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
+        let (nodes, within, n_obs, _response_origin) =
+            pool_nodes(&x, &y, &w, order).expect("pool");
         let q_value =
             gam_problem::checked_exp_log_strength(-log_lambda).expect("inverse log strength");
         let q = Ball::certified(
@@ -5833,7 +5828,8 @@ mod tests {
         let (x, y, w) = dgp_2300();
         let order = 3;
         let log_lambda = -16.6135_f64;
-        let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pool");
+        let (nodes, within, n_obs, _response_origin) =
+            pool_nodes(&x, &y, &w, order).expect("pool");
         let q_value =
             gam_problem::checked_exp_log_strength(-log_lambda).expect("inverse log strength");
         let q = Ball::certified(
@@ -5897,7 +5893,8 @@ mod tests {
         let y = [0.2, -0.4, 0.8, 0.1, 0.35, -0.2, 0.7, 0.15];
         let w = [1.0, 2.0, 0.7, 1.4, 0.9, 3.0, 1.2, 0.8];
         for order in 1..=MAX_ORDER {
-            let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pooled data");
+            let (nodes, within, n_obs, _response_origin) =
+                pool_nodes(&x, &y, &w, order).expect("pooled data");
             for &rho in &[-4.0, -0.3, 2.5] {
                 let (value, d1, d2, d3) =
                     concentrated_criterion_jet(&nodes, within, n_obs, rho, order)
@@ -5971,7 +5968,7 @@ mod tests {
         for order in 1..=MAX_ORDER {
             for scale in [1.0e-1_f64, 1.0, 1.0e2] {
                 let x: Vec<f64> = base_x.iter().map(|value| scale * value).collect();
-                let (nodes, within, n_obs) =
+                let (nodes, within, n_obs, _response_origin) =
                     pool_nodes(&x, &y, &w, order).expect("adversarial pooled data");
                 let rho = (2 * order - 1) as f64 * scale.ln() + 0.35;
                 let certified =
@@ -6091,7 +6088,8 @@ mod tests {
             .collect();
         let w: Vec<f64> = (0..n).map(|i| 1.0 + 0.5 * (i % 3) as f64).collect();
         let order = 3usize;
-        let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("pooled data");
+        let (nodes, within, n_obs, _response_origin) =
+            pool_nodes(&x, &y, &w, order).expect("pooled data");
         let lo = 13.759_277_343_75;
         let hi = 13.760_375_976_562_5;
         let left = certified_concentrated_criterion_jet(&nodes, within, n_obs, lo, order)
@@ -6433,7 +6431,8 @@ mod tests {
     fn derivative_secant_recovers_weighted_order3_root_curvature_sign() {
         let (x, y, w) = dgp_2300();
         let order = 3usize;
-        let (nodes, within, n_obs) = pool_nodes(&x, &y, &w, order).expect("weighted pool");
+        let (nodes, within, n_obs, _response_origin) =
+            pool_nodes(&x, &y, &w, order).expect("weighted pool");
         // Live cell at evaluation 1024 of the pre-secant #2300 traversal.
         let lo = -2.337_075_252_506_015;
         let hi = -2.337_040_920_230_624;
@@ -6814,21 +6813,30 @@ mod tests {
 
     /// A constant response shift is an exact null-space transformation for
     /// every supported spline order. Pin that theorem at the fixed-lambda
-    /// evaluator seam: all invariant quantities must be bit-identical, and the
-    /// only moving state coordinate must be the published function level.
+    /// evaluator seam, including tied rows with non-unit weights: all invariant
+    /// quantities must be bit-identical, and the only moving state coordinate
+    /// must be the published function level. Ties are essential here because
+    /// centering only after their weighted pooling leaves the old origin leak
+    /// alive before the recurrence starts.
     #[test]
     fn fixed_scan_evaluator_uses_a_response_translation_free_chart_2790() {
-        let x = [0.0, 0.125, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0];
+        let x = [0.0, 0.0, 0.25, 0.5, 0.5, 1.0, 1.5, 2.0];
         let y: [f64; 8] = [0.0, 0.25, -0.5, 0.75, 1.0, -0.25, 0.5, 0.125];
         let shift = 1024.0_f64;
         let shifted_y = y.map(|value| value + shift);
-        let w = [1.0; 8];
+        let w = [0.3, 1.7, 2.25, 0.6, 1.4, 3.1, 0.75, 2.6];
 
         for order in 1..=MAX_ORDER {
             let plain = fit_spline_scan_at(&x, &y, &w, -1.25, None, order)
                 .expect("plain fixed-lambda scan");
             let shifted = fit_spline_scan_at(&x, &shifted_y, &w, -1.25, None, order)
                 .expect("shifted fixed-lambda scan");
+            assert!(
+                plain.knots.len() < x.len(),
+                "fixture must exercise tied-row pooling"
+            );
+            assert_eq!(plain.knots, shifted.knots);
+            assert_eq!(plain.node_weight, shifted.node_weight);
 
             for (label, left, right) in [
                 ("sigma2", plain.sigma2, shifted.sigma2),
@@ -6847,7 +6855,7 @@ mod tests {
                     "order {order}: {label} moved under a constant response shift"
                 );
             }
-            for node in 0..x.len() {
+            for node in 0..plain.knots.len() {
                 assert_eq!(
                     shifted.mean[node].to_bits(),
                     (plain.mean[node] + shift).to_bits(),
