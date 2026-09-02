@@ -1053,9 +1053,47 @@ fn exact_gaussian_coefficients(
         Some(z) => gam_linalg::faer_ndarray::fast_ab(x, z),
         None => x.clone(),
     };
+    if adjusted_response.len() != reduced_x.nrows() || weights.len() != reduced_x.nrows() {
+        return None;
+    }
     let beta = if reduced_x.ncols() == 0 {
         Array1::<f64>::zeros(p)
     } else {
+        // A zero-residual coefficient defines a deterministic Gaussian law
+        // only when it is unique on the positive-weight support.  A certified
+        // solve residual alone cannot establish that: when n < p an
+        // underdetermined design can interpolate arbitrary responses while
+        // still admitting infinitely many coefficient vectors.  Certify the
+        // injectivity promised by `exact_gaussian_boundary` directly on the
+        // reduced design's positive-weight support before forming its Gram
+        // matrix. Positive row scaling cannot change exact rank, so omitting it
+        // here also makes the structural certificate invariant to a uniform
+        // rescaling of all positive likelihood weights.
+        let reduced_p = reduced_x.ncols();
+        let positive_rows: Vec<usize> = weights
+            .iter()
+            .enumerate()
+            .filter_map(|(row, &weight)| (weight > 0.0).then_some(row))
+            .collect();
+        if positive_rows.len() < reduced_p {
+            return None;
+        }
+        let positive_weight_reduced_x = Array2::from_shape_fn(
+            (positive_rows.len(), reduced_p),
+            |(weighted_row, column)| {
+                let row = positive_rows[weighted_row];
+                reduced_x[[row, column]]
+            },
+        );
+        let rank = gam_linalg::faer_ndarray::rrqr_with_permutation(
+            &positive_weight_reduced_x,
+            gam_linalg::faer_ndarray::default_rrqr_rank_alpha(),
+        )
+        .ok()?
+        .rank;
+        if rank != reduced_p {
+            return None;
+        }
         let gram = gam_linalg::faer_ndarray::fast_xt_diag_x(&reduced_x, weights);
         let rhs_matrix = gam_linalg::faer_ndarray::fast_xt_diag_y(
             &reduced_x,
@@ -1098,6 +1136,37 @@ fn exact_gaussian_coefficients(
         }
     }
     Some(beta)
+}
+
+#[cfg(test)]
+mod exact_gaussian_boundary_tests {
+    use super::exact_gaussian_coefficients;
+    use ndarray::array;
+
+    #[test]
+    fn underdetermined_exact_interpolator_is_not_a_deterministic_boundary() {
+        let x = array![[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]];
+        let response = array![1.0, 2.0];
+        let weights = array![1.0, 1.0];
+
+        assert!(
+            exact_gaussian_coefficients(&x, &response, &weights, None).is_none(),
+            "an n < p interpolator does not identify a unique deterministic Gaussian law"
+        );
+    }
+
+    #[test]
+    fn full_rank_exact_interpolator_remains_a_deterministic_boundary() {
+        let x = array![[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let response = array![1.25, -0.75, 0.5];
+        let weights = array![1.0, 2.0, 0.5];
+
+        let beta = exact_gaussian_coefficients(&x, &response, &weights, None)
+            .expect("a full-rank exact design has a unique deterministic coefficient");
+        assert_eq!(beta.len(), 2);
+        assert!((beta[0] - 1.25).abs() <= 16.0 * f64::EPSILON);
+        assert!((beta[1] + 0.75).abs() <= 16.0 * f64::EPSILON);
+    }
 }
 
 /// Certify that a Gaussian design represents its adjusted response exactly and
