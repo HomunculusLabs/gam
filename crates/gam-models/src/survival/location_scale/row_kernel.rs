@@ -661,20 +661,27 @@ fn sls_program_exp_stack(value: f64) -> [f64; 5] {
     [exp; 5]
 }
 
+/// A residual-distribution derivative stack (`logS`, `logφ` or `log g`) at the
+/// program's composition point.
+///
+/// The point is not inspected. The kernel builder evaluates every stack at the
+/// point the program recomputes from the same parameters (`u0 = h0 + q0`, and
+/// likewise `u1`, `g`), and refuses or propagates a non-finite point there, so
+/// a NaN point cannot arrive with a finite stack; an inactive slot never
+/// reaches this leaf at all (the activity gate selects zero without touching
+/// the stack, which the poisoned-stack fuzz below pins). A NaN select here
+/// guarded a state that cannot be constructed, once per composition, three
+/// compositions per row, in the release lowering (`SLS-ROW-VGH-932`).
 #[inline(always)]
 fn sls_program_outer_stack(
-    composition_point: f64,
+    _composition_point: f64,
     value: f64,
     first: f64,
     second: f64,
     third: f64,
     fourth: f64,
 ) -> [f64; 5] {
-    if composition_point.is_nan() {
-        [f64::NAN; 5]
-    } else {
-        [value, first, second, third, fourth]
-    }
+    [value, first, second, third, fourth]
 }
 
 row_program! {
@@ -768,20 +775,33 @@ row_program! {
     }
 }
 
+/// The activity flags and stacks the row program takes from a plan.
+///
+/// An all-zero stack is how the kernel spells "this term is not on this row"
+/// (an untruncated row's entry stack), so a present stack is active exactly
+/// when it is not all zero; an absent slot is inactive by its discriminant
+/// and is not flattened to zeros and rescanned.
 #[inline(always)]
 fn sls_program_activity_and_stacks<const ORDER: usize>(
     plan: &SlsOuterPlan<ORDER>,
 ) -> (f64, [f64; ORDER], f64, [f64; ORDER], f64) {
-    let u0_active = if stack_is_exactly_zero(&plan.u0) {
-        0.0
-    } else {
-        1.0
-    };
-    let u1 = plan.u1.unwrap_or([0.0; ORDER]);
-    let u1_active = if stack_is_exactly_zero(&u1) { 0.0 } else { 1.0 };
-    let g = plan.g.unwrap_or([0.0; ORDER]);
-    let g_active = if stack_is_exactly_zero(&g) { 0.0 } else { 1.0 };
+    let u0_active = stack_activity(&plan.u0);
+    let (u1, u1_active) = slot_activity(plan.u1);
+    let (g, g_active) = slot_activity(plan.g);
     (u0_active, u1, u1_active, g, g_active)
+}
+
+#[inline(always)]
+fn stack_activity<const ORDER: usize>(stack: &[f64; ORDER]) -> f64 {
+    if stack_is_exactly_zero(stack) { 0.0 } else { 1.0 }
+}
+
+#[inline(always)]
+fn slot_activity<const ORDER: usize>(slot: Option<[f64; ORDER]>) -> ([f64; ORDER], f64) {
+    match slot {
+        Some(stack) => (stack, stack_activity(&stack)),
+        None => ([0.0; ORDER], 0.0),
+    }
 }
 
 #[inline(always)]
