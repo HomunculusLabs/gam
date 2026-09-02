@@ -1985,24 +1985,7 @@ fn dense_taylor_composition_partitions(
 /// costs one multiply per order and a short sum. (Multiplying every
 /// partition product by its stack entry and summing the terms of all orders
 /// in one chain put the whole sum behind the call.)
-/// How a composition reads the derivative stack it composes with: a leaf's
-/// returned array by index, or five scalars by name.
-#[derive(Clone)]
-enum DenseTaylorStack {
-    Array(String),
-    Scalars(String),
-}
-
-impl DenseTaylorStack {
-    fn entry(&self, degree: usize) -> String {
-        match self {
-            DenseTaylorStack::Array(name) => format!("{name}[{degree}]"),
-            DenseTaylorStack::Scalars(name) => format!("{name}_{degree}"),
-        }
-    }
-}
-
-fn dense_taylor_compose(input: DenseTaylorJet, stack: &DenseTaylorStack) -> DenseTaylorJet {
+fn dense_taylor_compose(input: DenseTaylorJet, stack: &str) -> DenseTaylorJet {
     let dimension = input.dimension;
     let order = input.order;
     let slots = dense_taylor_slot_count(dimension);
@@ -2022,7 +2005,7 @@ fn dense_taylor_compose(input: DenseTaylorJet, stack: &DenseTaylorStack) -> Dens
             })
         })
         .collect::<Vec<_>>();
-    let mut out = DenseTaylorJet::constant(stack.entry(0), dimension, order);
+    let mut out = DenseTaylorJet::constant(format!("{stack}[0]"), dimension, order);
     let mut terms: Vec<Vec<(usize, (Rational, String))>> = vec![Vec::new(); slots];
     for derivative_order in 1..=order {
         let mut counts = vec![0usize; dimension];
@@ -2053,7 +2036,7 @@ fn dense_taylor_compose(input: DenseTaylorJet, stack: &DenseTaylorStack) -> Dens
         let mut sum: Option<String> = None;
         for (derivative_order, (factor, expression)) in terms {
             let scaled = scaled_by(expression, factor.over(common));
-            let term = symbolic_multiply(&stack.entry(*derivative_order), &scaled);
+            let term = symbolic_multiply(&format!("{stack}[{derivative_order}]"), &scaled);
             sum = symbolic_add_component(&sum, &Some(term));
         }
         out.set(index, sum.map(|sum| (common, sum)));
@@ -2114,90 +2097,9 @@ fn materialize_dense_taylor(
 struct DenseTaylorExpressionEnvironment<'a> {
     leaves: &'a [Leaf],
     constants: &'a HashSet<String>,
-    signs: &'a HashSet<String>,
     bindings: &'a HashMap<String, DenseTaylorJet>,
-    aliases: &'a HashMap<String, ScaledAlias>,
     dimension: usize,
     order: usize,
-}
-
-/// The derivative stack of `f` at `s·x`, read as the stack of `x ↦ f(s·x)`:
-/// entry `d` scaled by `s^d`. A sign squares to one, so only the odd entries
-/// change; a negation is the sign −1. Formed once per composition, where
-/// scaling the point's every coefficient by `s` cost one multiply per
-/// coefficient — fifteen on the rigid Bernoulli fourth-order surface, for
-/// the two this costs (#932). The dense analogue of the order-2 emitter's
-/// absorbed composition point.
-///
-/// The five entries are scalar `let`s, as every other value the emitter
-/// forms is. The first version built them as an `[f64; 5]` literal: a store
-/// of consecutive elements is the seed LLVM's SLP vectoriser grows a tree
-/// from, and from that seed it vectorised the whole post-call composition
-/// into two-lane pairs — the fourth-order surface went from 135 scalar
-/// multiplies and no vector instruction to 14 vector spills, 24 vector
-/// reloads and `mulpd` chains threaded with `unpck`/`shufpd` — whose
-/// shuffle traffic cost more than the pairing saved: 0.90 against the hand
-/// on EPYC 9V74 and third-order surfaces at 0.64–0.73 on a Xeon 8573C, with
-/// the emitted arithmetic unchanged. Five scalars give the vectoriser no
-/// seed, and the surfaces compile as the scalar schedules they were.
-fn dense_taylor_rescaled_stack(
-    stack: &str,
-    alias: &ScaledAlias,
-    constants: &HashSet<String>,
-    signs: &HashSet<String>,
-    preludes: &mut Vec<String>,
-) -> Result<DenseTaylorStack> {
-    let name = format!("{stack}_scaled");
-    let mut entries = Vec::with_capacity(5);
-    match &alias.scalar {
-        None => {
-            for degree in 0..5 {
-                let entry = format!("{stack}[{degree}]");
-                entries.push(if degree % 2 == 1 {
-                    symbolic_negate(&entry)
-                } else {
-                    entry
-                });
-            }
-        }
-        Some(scalar) => {
-            let is_sign = match scalar {
-                Expr::Path(path) => {
-                    path_ident(path).is_ok_and(|ident| signs.contains(&ident.to_string()))
-                }
-                _ => false,
-            };
-            let scalar = symbolic_scalar(scalar, constants, SymbolicTarget::Rust)?;
-            // The powers `s^d` are shared scalars, each one multiply.
-            let mut power = "1.0".to_string();
-            for degree in 0..5 {
-                let factor = if is_sign {
-                    if degree % 2 == 1 {
-                        scalar.clone()
-                    } else {
-                        "1.0".to_string()
-                    }
-                } else {
-                    if degree >= 2 {
-                        let previous = power.clone();
-                        power = format!("{name}_power{degree}");
-                        preludes.push(format!(
-                            "let {power}: f64 = {};",
-                            symbolic_multiply(&previous, &scalar)
-                        ));
-                    } else if degree == 1 {
-                        power = scalar.clone();
-                    }
-                    power.clone()
-                };
-                entries.push(symbolic_multiply(&format!("{stack}[{degree}]"), &factor));
-            }
-        }
-    }
-    for (degree, entry) in entries.iter().enumerate() {
-        preludes.push(format!("let {name}_{degree}: f64 = {entry};"));
-    }
-    Ok(DenseTaylorStack::Scalars(name))
 }
 
 fn dense_taylor_expression(
@@ -2257,26 +2159,18 @@ fn dense_taylor_expression(
             }
             let application = leaves[*leaf].rust_application_source(&point, &leaf_arguments);
             preludes.push(format!("let {stack} = {application};"));
-            // A scaled or negated point: the leaf is applied at the scaled
-            // value, and the composition reads the unscaled binding through
-            // a rescaled stack.
-            let aliased = environment
-                .aliases
-                .get(&value.to_string())
-                .and_then(|alias| bindings.get(&alias.inner).cloned().map(|inner| (alias, inner)));
-            match aliased {
-                Some((alias, inner)) => {
-                    let stack = dense_taylor_rescaled_stack(
-                        &stack,
-                        alias,
-                        constants,
-                        environment.signs,
-                        preludes,
-                    )?;
-                    dense_taylor_compose(inner, &stack)
-                }
-                None => dense_taylor_compose(input, &DenseTaylorStack::Array(stack)),
-            }
+            // The dense path composes on the point as written, scaled or
+            // not. The order-2 emitter absorbs a scaled point into the outer
+            // stack (a measured win on every host); the same rule here —
+            // composing on the unscaled binding through a stack rescaled by
+            // `s^d` — emitted the same arithmetic minus the sign multiplies
+            // and lost 10–35% on three hosts: LLVM scheduled the
+            // observed-scale inverse-power chain and eleven spills of its
+            // results ahead of the probit call instead of overlapping them
+            // with it (30% of the generated arm's samples on the divide and
+            // its consumers), a schedule the scaled point's own coefficients
+            // happen not to provoke (#932).
+            dense_taylor_compose(input, &stack)
         }
     };
     Ok(materialize_dense_taylor(
@@ -2482,7 +2376,7 @@ enum DenseTaylorStatement {
 struct DenseTaylorSchedule {
     statements: Vec<DenseTaylorStatement>,
     result: DenseTaylorJet,
-    root_compose_stack: Option<DenseTaylorStack>,
+    root_compose_stack: Option<String>,
     result_preludes: Vec<String>,
     mutable_support: HashMap<String, Vec<bool>>,
     assigned: HashSet<String>,
@@ -2497,7 +2391,6 @@ fn include_dense_taylor_support(support: &mut [bool], value: &DenseTaylorJet) {
 fn dense_taylor_schedule(
     primaries: &[Ident],
     constants: &HashSet<String>,
-    signs: &HashSet<String>,
     leaves: &[Leaf],
     statements: &[Statement],
     result: &ProgramExpr,
@@ -2505,16 +2398,6 @@ fn dense_taylor_schedule(
     specialize_root_compose: bool,
 ) -> Result<DenseTaylorSchedule> {
     let dimension = primaries.len();
-    let mutable_names = statements
-        .iter()
-        .filter_map(|statement| match statement {
-            Statement::Local {
-                name, mutable: true, ..
-            } => Some(name.to_string()),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
-    let mut aliases = HashMap::<String, ScaledAlias>::new();
     let mut bindings = HashMap::<String, DenseTaylorJet>::new();
     for (axis, primary) in primaries.iter().enumerate() {
         bindings.insert(
@@ -2534,36 +2417,10 @@ fn dense_taylor_schedule(
                 value,
             } => {
                 let mut preludes = Vec::new();
-                if !*mutable {
-                    let alias = match value {
-                        ProgramExpr::Scale(inner, scalar) => match inner.as_ref() {
-                            ProgramExpr::Path(inner) => Some(ScaledAlias {
-                                inner: inner.to_string(),
-                                scalar: Some(scalar.clone()),
-                            }),
-                            _ => None,
-                        },
-                        ProgramExpr::Neg(inner) => match inner.as_ref() {
-                            ProgramExpr::Path(inner) => Some(ScaledAlias {
-                                inner: inner.to_string(),
-                                scalar: None,
-                            }),
-                            _ => None,
-                        },
-                        _ => None,
-                    };
-                    if let Some(alias) = alias
-                        && !mutable_names.contains(&alias.inner)
-                    {
-                        aliases.insert(name.to_string(), alias);
-                    }
-                }
                 let environment = DenseTaylorExpressionEnvironment {
                     leaves,
                     constants,
-                    signs,
                     bindings: &bindings,
-                    aliases: &aliases,
                     dimension,
                     order,
                 };
@@ -2609,9 +2466,7 @@ fn dense_taylor_schedule(
                     let environment = DenseTaylorExpressionEnvironment {
                         leaves,
                         constants,
-                        signs,
                         bindings: &bindings,
-                        aliases: &aliases,
                         dimension,
                         order,
                     };
@@ -2668,30 +2523,13 @@ fn dense_taylor_schedule(
             }
             let application = leaves[*leaf].rust_application_source(&point, &leaf_arguments);
             result_preludes.push(format!("let {stack} = {application};"));
-            let aliased = aliases
-                .get(&value.to_string())
-                .and_then(|alias| bindings.get(&alias.inner).cloned().map(|inner| (alias, inner)));
-            match aliased {
-                Some((alias, inner)) => {
-                    let stack = dense_taylor_rescaled_stack(
-                        &stack,
-                        alias,
-                        constants,
-                        signs,
-                        &mut result_preludes,
-                    )?;
-                    (inner, Some(stack))
-                }
-                None => (input, Some(DenseTaylorStack::Array(stack))),
-            }
+            (input, Some(stack))
         }
         _ => {
             let environment = DenseTaylorExpressionEnvironment {
                 leaves,
                 constants,
-                signs,
                 bindings: &bindings,
-                aliases: &aliases,
                 dimension,
                 order,
             };
@@ -3900,7 +3738,6 @@ fn push_dense_taylor_schedule_body(source: &mut String, schedule: &DenseTaylorSc
 fn rust_dense_taylor_body(
     primaries: &[Ident],
     constants: &HashSet<String>,
-    signs: &HashSet<String>,
     leaves: &[Leaf],
     statements: &[Statement],
     result: &ProgramExpr,
@@ -3909,7 +3746,7 @@ fn rust_dense_taylor_body(
     let dimension = primaries.len();
     let order = if fourth { 4 } else { 3 };
     let schedule = dense_taylor_schedule(
-        primaries, constants, signs, leaves, statements, result, order, true,
+        primaries, constants, leaves, statements, result, order, true,
     )?;
     let mut source = "{\n".to_string();
     push_dense_taylor_schedule_body(&mut source, &schedule);
@@ -3921,7 +3758,6 @@ fn rust_dense_taylor_body(
         // directional form at that order.
         if let Some(root_stack) = &schedule.root_compose_stack {
             assert!(!fourth, "the root composition is specialised at order 3 only");
-            let (root1, root2, root3) = (root_stack.entry(1), root_stack.entry(2), root_stack.entry(3));
             push_dense_taylor_derivative_array(&mut source, "inner_first", &schedule.result, 1);
             push_dense_taylor_derivative_array(&mut source, "inner_second", &schedule.result, 2);
             push_dense_taylor_derivative_array(&mut source, "inner_third", &schedule.result, 3);
@@ -3939,10 +3775,10 @@ fn rust_dense_taylor_body(
                  \x20           + inner_second[other + 1] * direction_u[1];\n\
                  \x20       let inner_abu = inner_third[offset] * direction_u[0]\n\
                  \x20           + inner_third[offset + 1] * direction_u[1];\n\
-                 \x20       {root3} * inner_u * inner_a * inner_b\n\
-                 \x20           + {root2} * (inner_au * inner_b + inner_a * inner_bu\n\
+                 \x20       {root_stack}[3] * inner_u * inner_a * inner_b\n\
+                 \x20           + {root_stack}[2] * (inner_au * inner_b + inner_a * inner_bu\n\
                  \x20               + inner_u * inner_ab)\n\
-                 \x20           + {root1} * inner_abu\n\
+                 \x20           + {root_stack}[1] * inner_abu\n\
                  \x20   }}))\n"
             ));
             source.push_str("}\n");
@@ -4026,7 +3862,6 @@ fn rust_dense_taylor_body(
 fn rust_dense_taylor_uncontracted_body(
     primaries: &[Ident],
     constants: &HashSet<String>,
-    signs: &HashSet<String>,
     leaves: &[Leaf],
     statements: &[Statement],
     result: &ProgramExpr,
@@ -4041,7 +3876,6 @@ fn rust_dense_taylor_uncontracted_body(
     let schedule = dense_taylor_schedule(
         primaries,
         constants,
-        signs,
         leaves,
         statements,
         result,
@@ -4053,7 +3887,6 @@ fn rust_dense_taylor_uncontracted_body(
     if order == 3
         && let Some(root_stack) = &schedule.root_compose_stack
     {
-        let (root1, root2, root3) = (root_stack.entry(1), root_stack.entry(2), root_stack.entry(3));
         push_dense_taylor_derivative_array(&mut source, "inner_first", &schedule.result, 1);
         push_dense_taylor_derivative_array(&mut source, "inner_second", &schedule.result, 2);
         push_dense_taylor_derivative_array(&mut source, "inner_third", &schedule.result, 3);
@@ -4067,10 +3900,10 @@ fn rust_dense_taylor_uncontracted_body(
              \x20           let inner_ac = inner_second[axis_a + axis_c];\n\
              \x20           let inner_bc = inner_second[axis_b + axis_c];\n\
              \x20           let inner_abc = inner_third[axis_a + axis_b + axis_c];\n\
-             \x20           {root3} * inner_a * inner_b * inner_c\n\
-             \x20               + {root2} * (inner_ab * inner_c\n\
+             \x20           {root_stack}[3] * inner_a * inner_b * inner_c\n\
+             \x20               + {root_stack}[2] * (inner_ab * inner_c\n\
              \x20                   + inner_ac * inner_b + inner_bc * inner_a)\n\
-             \x20               + {root1} * inner_abc\n\
+             \x20               + {root_stack}[1] * inner_abc\n\
              \x20       }})\n\
              \x20   }}))\n\
              }}\n"
@@ -4772,7 +4605,6 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
             rust_dense_taylor_body(
                 &primaries,
                 &constant_names,
-                &sign_names,
                 &leaves,
                 &statements,
                 &result,
@@ -4807,7 +4639,6 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
             rust_dense_taylor_body(
                 &primaries,
                 &constant_names,
-                &sign_names,
                 &leaves,
                 &statements,
                 &result,
@@ -4843,7 +4674,6 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         let third_full_body = rust_dense_taylor_uncontracted_body(
             &primaries,
             &constant_names,
-            &sign_names,
             &leaves,
             &statements,
             &result,
@@ -4852,7 +4682,6 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         let fourth_full_body = rust_dense_taylor_uncontracted_body(
             &primaries,
             &constant_names,
-            &sign_names,
             &leaves,
             &statements,
             &result,
@@ -5363,21 +5192,7 @@ mod tests {
                 "{surface} scales a post-call product:\n{rust}"
             );
         }
-        // The root composition on `scale(latent, sign)` reads `latent`'s own
-        // coefficients through a stack whose odd entries carry the sign: the
-        // fifteen sign multiplies of the scaled point are two.
-        let rust = emitted_function(input.clone(), "rigid_fourth_contracted");
-        let root = rust.find("__row_program_result_dense_stack").expect("the root stack");
-        let scaled = &rust[root..];
-        for line in [
-            "_scaled_0 : f64 = __row_program_result_dense_stack8 [0] ;",
-            "_scaled_1 : f64 = (__row_program_result_dense_stack8 [1] * sign) ;",
-            "_scaled_2 : f64 = __row_program_result_dense_stack8 [2] ;",
-            "_scaled_3 : f64 = (__row_program_result_dense_stack8 [3] * sign) ;",
-            "_scaled_4 : f64 = __row_program_result_dense_stack8 [4] ;",
-        ] {
-            assert!(scaled.contains(line), "{line}\n{rust}");
-        }
+    }
         // The five entries are scalars, never an array literal.
         assert!(!rust.contains(": [f64 ; 5] = ["), "{rust}");
         // The observed-scale composition on `scale(slope, scale_of)` reads the
