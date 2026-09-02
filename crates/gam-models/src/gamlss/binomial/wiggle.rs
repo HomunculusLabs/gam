@@ -50,7 +50,7 @@ pub(crate) struct BinomialLocationScaleWiggleRowProgram<'a> {
 /// ([`Self::first_directional_rows`]/[`Self::second_directional_rows`]) are
 /// `Observed`-only by construction and do not accept it.
 #[derive(Clone, Copy)]
-pub(super) enum BinomialWiggleRowOuter {
+pub(crate) enum BinomialWiggleRowOuter {
     Observed,
     ExpectedInformation,
 }
@@ -237,31 +237,48 @@ impl<'a> BinomialLocationScaleWiggleRowProgram<'a> {
         Ok(q.compose_unary(self.outer_stack(row, derivative_order, outer)?))
     }
 
+    /// One row's typed-probe order-2 Hessian over `(eta_t, eta_ls,
+    /// basis-value probe, basis-derivative probe)` at the linear predictors
+    /// given: ONE `Order2<4>` evaluation whose Hessian holds the row's eight
+    /// coefficients. The batch loop passes the row's own predictors; the
+    /// speed gate BLS-WIGGLE-ORDER2-932 passes them nudged, so this is the
+    /// unit it times against the per-column tower assembly, with the batch's
+    /// core and bases built once outside the timed region.
+    pub(crate) fn order2_row(
+        &self,
+        row: usize,
+        eta_t: f64,
+        eta_ls: f64,
+        outer: BinomialWiggleRowOuter,
+    ) -> Result<[[f64; 4]; 4], String> {
+        use gam_math::jet_scalar::{JetScalar, Order2};
+
+        let probe_terms = [
+            (2, [1.0, 0.0, 0.0, 0.0, 0.0]),
+            (3, [0.0, 1.0, 0.0, 0.0, 0.0]),
+        ];
+        let values = [eta_t, eta_ls, 0.0, 0.0];
+        let primaries: [Order2<4>; 4] =
+            std::array::from_fn(|axis| Order2::variable(values[axis], axis));
+        let warp = self.linear_basis_stack(row, self.beta_w.view(), Some(self.etaw[row]));
+        Ok(self
+            .eval_fixed(row, &primaries, warp, &probe_terms, 2, outer)?
+            .into_channels()
+            .2)
+    }
+
     fn order2_rows(
         &self,
         outer: BinomialWiggleRowOuter,
     ) -> Result<BinomialWiggleOrder2Rows, String> {
-        use gam_math::jet_scalar::{JetScalar, Order2};
-
         let n = self.family.y.len();
         let mut rows = BinomialWiggleOrder2Rows::zeros(
             n,
             self.basis_derivatives[0].clone(),
             self.basis_derivatives[1].clone(),
         );
-        let probe_terms = [
-            (2, [1.0, 0.0, 0.0, 0.0, 0.0]),
-            (3, [0.0, 1.0, 0.0, 0.0, 0.0]),
-        ];
         for row in 0..n {
-            let values = [self.eta_t[row], self.eta_ls[row], 0.0, 0.0];
-            let primaries: [Order2<4>; 4] =
-                std::array::from_fn(|axis| Order2::variable(values[axis], axis));
-            let warp = self.linear_basis_stack(row, self.beta_w.view(), Some(self.etaw[row]));
-            let h = self
-                .eval_fixed(row, &primaries, warp, &probe_terms, 2, outer)?
-                .into_channels()
-                .2;
+            let h = self.order2_row(row, self.eta_t[row], self.eta_ls[row], outer)?;
             rows.coeff_tt[row] = h[0][0];
             rows.coeff_tl[row] = h[0][1];
             rows.coeff_ll[row] = h[1][1];
@@ -2678,11 +2695,20 @@ impl BinomialLocationScaleWiggleFamily {
 
     /// Lower the canonical runtime-width row program to the eight structured
     /// order-two coefficient channels consumed by dense and matrix-free paths.
+    /// The order-2 row program of one batch: the core and the wiggle bases
+    /// through second order, built once, over which every row is evaluated.
+    pub(crate) fn wiggle_row_program<'a>(
+        &'a self,
+        block_states: &'a [ParameterBlockState],
+    ) -> Result<BinomialLocationScaleWiggleRowProgram<'a>, String> {
+        BinomialLocationScaleWiggleRowProgram::new(self, block_states, 2)
+    }
+
     pub(crate) fn wiggle_order2_rows(
         &self,
         block_states: &[ParameterBlockState],
     ) -> Result<BinomialWiggleOrder2Rows, String> {
-        BinomialLocationScaleWiggleRowProgram::new(self, block_states, 2)?
+        self.wiggle_row_program(block_states)?
             .order2_rows(BinomialWiggleRowOuter::Observed)
     }
 

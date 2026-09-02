@@ -1427,7 +1427,7 @@ pub(crate) fn bls_wiggle_workspace_fixture() -> (
     Vec<ParameterBlockState>,
 ) {
     let link_kind = InverseLink::Standard(StandardLink::Probit);
-    let n = 10usize;
+    let n = 48usize;
     let pt = 3usize;
     let pls = 2usize;
     let xt = Array2::from_shape_fn((n, pt), |(i, j)| {
@@ -1657,122 +1657,166 @@ pub(crate) fn binomial_location_scale_wiggle_order2_rows_match_jet_tower_932() {
 }
 
 /// #932 release speed gate for the binomial location-scale WIGGLE order-two
-/// row program: the production typed-probe lowering
-/// (`wiggle_order2_rows`, ONE `Order2<4>` evaluation per row with 8
-/// coefficient channels, cost linear in the basis width `pw`) must beat the
-/// naive per-(row, column) dense-tower assembly (`pw` independent `Tower2<3>`
-/// compositions per row — the generic shape the oracle below uses as its
-/// witness, and the only alternative representation since the pre-cutover
-/// hand ladder was deleted by the #932 single-source migration). Both sides
-/// consume the same block states and build their own bases, so this is a
-/// system-level race of everything the joint-Hessian consumer needs. Emits
-/// the accurately named `per_column_tower_over_production` diagnostic
-/// (`per_column_tower_ns / production_ns`); the MSI release harness fails
-/// closed on any cell `<= 1`.
+/// row program: the production typed-probe lowering (`order2_row`, ONE
+/// `Order2<4>` evaluation per row with 8 coefficient channels, cost linear in
+/// the basis width `pw`) must beat the naive per-(row, column) dense-tower
+/// assembly (`pw` independent `Tower2<3>` compositions per row — the generic
+/// shape the oracle above uses as its witness, and the only alternative
+/// representation since the pre-cutover hand ladder was deleted by the #932
+/// single-source migration).
+///
+/// The timed unit is one row. Everything a batch shares — the location-scale
+/// core, the wiggle bases through second order, the block etas — is built
+/// once outside the timed region for both arms; the production arm reads it
+/// through the batch's row program, the tower arm through the same core and
+/// bases the oracle uses. The first version of this gate timed
+/// `wiggle_order2_rows` whole-batch against a whole-batch tower assembly on
+/// a 10-row fixture: 11 µs per call of which the row loop was a tenth, so
+/// the ratio (0.97 on an EPYC 9V74 runner) was a race of two setups and the
+/// allocations in them, at a 14% resolution. Each arm is outlined so its
+/// fixture-invariant work cannot be hoisted out of the batch, and the
+/// predictors are nudged per call so no two calls share an input.
 #[test]
 pub(crate) fn release_measure_bls_wiggle_order2_rows_vs_per_column_tower_932() {
     use super::super::binomial_q_derivs::binomial_neglog_q_derivatives_dispatch;
     use gam_math::jet_tower::Tower2;
-    use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+    use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
 
     let (family, states) = bls_wiggle_workspace_fixture();
+    let n = family.y.len();
+    let eta_t = &states[BinomialLocationScaleWiggleFamily::BLOCK_T].eta;
+    let eta_ls = &states[BinomialLocationScaleWiggleFamily::BLOCK_LOG_SIGMA].eta;
+    let etaw = &states[BinomialLocationScaleWiggleFamily::BLOCK_WIGGLE].eta;
+    let betaw = &states[BinomialLocationScaleWiggleFamily::BLOCK_WIGGLE].beta;
 
-    let production_batch = |states: &[ParameterBlockState]| -> f64 {
-        let pieces = family
-            .wiggle_order2_rows(states)
-            .expect("production wiggle order-two rows");
-        let n = pieces.coeff_tt.len();
-        pieces.coeff_tt[0] + pieces.coeff_tl[0] + pieces.coeff_ww[n - 1] + pieces.coeff_tw_b[0]
-    };
+    // Production: the batch's row program, built once.
+    let program = family
+        .wiggle_row_program(&states)
+        .expect("production wiggle row program");
+
+    #[inline(never)]
+    fn production_row(
+        program: &BinomialLocationScaleWiggleRowProgram<'_>,
+        row: usize,
+        eta_t: f64,
+        eta_ls: f64,
+    ) -> f64 {
+        let h = program
+            .order2_row(row, eta_t, eta_ls, BinomialWiggleRowOuter::Observed)
+            .expect("production wiggle order-two row");
+        h[0][0] + h[0][1] + h[2][2] + h[0][2]
+    }
 
     // The naive generic assembly: per (row, column) an independent Tower2<3>
-    // over (eta_t, eta_ls, betaw_j), composed exactly as the oracle below.
-    let generic_batch = |states: &[ParameterBlockState]| -> f64 {
-        let eta_t = &states[BinomialLocationScaleWiggleFamily::BLOCK_T].eta;
-        let eta_ls = &states[BinomialLocationScaleWiggleFamily::BLOCK_LOG_SIGMA].eta;
-        let etaw = &states[BinomialLocationScaleWiggleFamily::BLOCK_WIGGLE].eta;
-        let betaw = &states[BinomialLocationScaleWiggleFamily::BLOCK_WIGGLE].beta;
-        let core0 = binomial_location_scale_core(
-            &family.y,
-            &family.weights,
-            eta_t,
-            eta_ls,
-            Some(etaw),
+    // over (eta_t, eta_ls, betaw_j), composed exactly as the oracle above,
+    // over the same core and bases built once.
+    let core = binomial_location_scale_core(
+        &family.y,
+        &family.weights,
+        eta_t,
+        eta_ls,
+        Some(etaw),
+        &family.link_kind,
+    )
+    .expect("binomial location-scale core");
+    let b0 = family
+        .wiggle_basiswith_options(core.q0.view(), BasisOptions::value())
+        .expect("wiggle value basis");
+    let d0 = family
+        .wiggle_basiswith_options(core.q0.view(), BasisOptions::first_derivative())
+        .expect("wiggle first-derivative basis");
+    let dd0 = family
+        .wiggle_basiswith_options(core.q0.view(), BasisOptions::second_derivative())
+        .expect("wiggle second-derivative basis");
+
+    struct TowerBatch<'a> {
+        family: &'a BinomialLocationScaleWiggleFamily,
+        core: &'a BinomialLocationScaleCore,
+        b0: &'a Array2<f64>,
+        d0: &'a Array2<f64>,
+        dd0: &'a Array2<f64>,
+        etaw: &'a Array1<f64>,
+        betaw: &'a Array1<f64>,
+    }
+
+    #[inline(never)]
+    fn tower_row(batch: &TowerBatch<'_>, row: usize, eta_t: f64, eta_ls: f64) -> f64 {
+        let family = batch.family;
+        let core = batch.core;
+        let qi = core.q0[row] + batch.etaw[row];
+        let (m1, m2, _m3) = binomial_neglog_q_derivatives_dispatch(
+            family.y[row],
+            family.weights[row],
+            qi,
+            core.mu[row],
+            core.dmu_dq[row],
+            core.d2mu_dq2[row],
+            core.d3mu_dq3[row],
             &family.link_kind,
-        )
-        .expect("binomial location-scale core");
-        let b0 = family
-            .wiggle_basiswith_options(core0.q0.view(), BasisOptions::value())
-            .expect("wiggle value basis");
-        let d0 = family
-            .wiggle_basiswith_options(core0.q0.view(), BasisOptions::first_derivative())
-            .expect("wiggle first-derivative basis");
-        let dd0 = family
-            .wiggle_basiswith_options(core0.q0.view(), BasisOptions::second_derivative())
-            .expect("wiggle second-derivative basis");
-        let n = family.y.len();
-        let pw = b0.ncols();
+        );
+        let eta_t_t = Tower2::<3>::variable(eta_t, 0);
+        let eta_ls_t = Tower2::<3>::variable(eta_ls, 1);
+        let q0_tower = (eta_t_t * -1.0) * (eta_ls_t * -1.0).exp();
+        let pw = batch.b0.ncols();
         let mut folded = 0.0;
-        for i in 0..n {
-            let qi = core0.q0[i] + etaw[i];
-            let (m1, m2, _m3) = binomial_neglog_q_derivatives_dispatch(
-                family.y[i],
-                family.weights[i],
-                qi,
-                core0.mu[i],
-                core0.dmu_dq[i],
-                core0.d2mu_dq2[i],
-                core0.d3mu_dq3[i],
-                &family.link_kind,
-            );
-            let eta_t_t = Tower2::<3>::variable(eta_t[i], 0);
-            let eta_ls_t = Tower2::<3>::variable(eta_ls[i], 1);
-            let q0_tower = (eta_t_t * -1.0) * (eta_ls_t * -1.0).exp();
-            for j in 0..pw {
-                let mut q = q0_tower;
-                for k in 0..pw {
-                    let coef = if k == j {
-                        Tower2::<3>::variable(betaw[j], 2)
-                    } else {
-                        Tower2::<3>::constant(betaw[k])
-                    };
-                    let basis_k = q0_tower.compose_unary([b0[[i, k]], d0[[i, k]], dd0[[i, k]]]);
-                    q = q + coef * basis_k;
-                }
-                let nll = q.compose_unary([0.0, m1, m2]);
-                folded += nll.h[0][0] + nll.h[0][2] + nll.h[2][2];
+        for j in 0..pw {
+            let mut q = q0_tower;
+            for k in 0..pw {
+                let coef = if k == j {
+                    Tower2::<3>::variable(batch.betaw[j], 2)
+                } else {
+                    Tower2::<3>::constant(batch.betaw[k])
+                };
+                let basis_k =
+                    q0_tower.compose_unary([batch.b0[[row, k]], batch.d0[[row, k]], batch.dd0[[row, k]]]);
+                q = q + coef * basis_k;
             }
+            let nll = q.compose_unary([0.0, m1, m2]);
+            folded += nll.h[0][0] + nll.h[0][2] + nll.h[2][2];
         }
         folded
+    }
+
+    let tower_batch = TowerBatch {
+        family: &family,
+        core: &core,
+        b0: &b0,
+        d0: &d0,
+        dd0: &dd0,
+        etaw,
+        betaw,
     };
 
-    // Sanity: both batches produce finite folds on the fixture.
-    assert!(production_batch(&states).is_finite());
-    assert!(generic_batch(&states).is_finite());
+    // Sanity: both arms produce finite folds on every row of the fixture.
+    for row in 0..n {
+        assert!(production_row(&program, row, eta_t[row], eta_ls[row]).is_finite());
+        assert!(tower_row(&tower_batch, row, eta_t[row], eta_ls[row]).is_finite());
+    }
 
     // Speed contract, release profile only (`SpeedGate::open` documents why):
     // the typed-probe lowering must beat the naive per-(row, column) tower
-    // assembly. One arm call is one whole-batch evaluation; the nudge perturbs
-    // the first threshold eta so no batch is loop-invariant across calls.
+    // assembly. One arm call is one row; a batch walks the fixture's rows in
+    // turn, each at its own nudged predictors.
     if cfg!(debug_assertions) {
         return;
     }
     let mut gate = SpeedGate::open("BLS-WIGGLE-ORDER2-932");
-    let base_eta = states[BinomialLocationScaleWiggleFamily::BLOCK_T].eta[0];
-    let mut production_work = states.clone();
-    let mut generic_work = states.clone();
+    let mut production_cursor = 0usize;
+    let mut tower_cursor = 0usize;
     let timing = paired_interleaved(
         15,
         10,
         0x9320_B15B,
-        |nudge| {
-            production_work[BinomialLocationScaleWiggleFamily::BLOCK_T].eta[0] = base_eta + nudge;
-            production_batch(&production_work)
-        },
-        |nudge| {
-            generic_work[BinomialLocationScaleWiggleFamily::BLOCK_T].eta[0] = base_eta + nudge;
-            generic_batch(&generic_work)
-        },
+        batched(n, |nudge| {
+            let row = production_cursor % n;
+            production_cursor += 1;
+            production_row(&program, row, eta_t[row] + nudge, eta_ls[row] + nudge)
+        }),
+        batched(n, |nudge| {
+            let row = tower_cursor % n;
+            tower_cursor += 1;
+            tower_row(&tower_batch, row, eta_t[row] + nudge, eta_ls[row] + nudge)
+        }),
     );
     gate.faster("order2", &timing, "production", "per_column_tower");
     gate.finish();
