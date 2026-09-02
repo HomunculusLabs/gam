@@ -38,6 +38,18 @@ on:
       - "crates/gam-math/src/jet_*.rs"
       - "crates/gam-math/src/fast_channel.rs"
       - "crates/gam-math/src/nested_dual.rs"
+      # The family lowerings the gates measure, and the gates themselves: a
+      # change to a row program, an atom, a jet channel consumer or a hand
+      # opponent runs its package's gates on the push that lands it, not on
+      # the next nightly (#932).
+      - "crates/gam-models/src/bms/**"
+      - "crates/gam-models/src/gamlss/**"
+      - "crates/gam-models/src/survival/**"
+      - "crates/gam-models/src/timepoint_exact/**"
+      - "crates/gam-models/src/multinomial_reml.rs"
+      - "crates/gam-models/src/row_math.rs"
+      - "crates/gam-models/src/tests.rs"
+      - "crates/gam-sae/src/manifold/**"
       - "scripts/speed_gates.py"
       - ".github/workflows/speed-gates.yml"
       - ".github/actions/setup-rust-ci/**"
