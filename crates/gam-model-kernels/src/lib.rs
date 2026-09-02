@@ -17,6 +17,7 @@
 #[macro_use]
 mod macros;
 
+pub mod bernoulli_link;
 pub mod cell_moment_family;
 pub mod cubic_cell_kernel;
 pub mod inverse_link;

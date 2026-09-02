@@ -26,6 +26,8 @@ use gam_custom_family::{
     fit_custom_family, fit_custom_family_fixed_log_lambdas_from_owned_mode,
 };
 
+use gam_model_kernels::bernoulli_link::bernoulli_natural_jet;
+
 use gam_solve::estimate::{
     EstimationError, ExternalOptimOptions, FitInference, FitOptions, FittedLinkState, PenaltySpec,
     UnifiedFitResult, UnifiedFitResultParts, fit_gamwith_heuristic_lambdas,

@@ -15,6 +15,7 @@ gam-linalg = { path = "../gam-linalg", version = "=0.3.152" }
 gam-math = { path = "../gam-math", version = "=0.3.152" }
 gam-problem = { path = "../gam-problem", version = "=0.3.152" }
 gam-runtime = { path = "../gam-runtime", version = "=0.3.152" }
+gam-spec = { path = "../gam-spec", version = "=0.3.152" }
 gam-solve = { path = "../gam-solve", version = "=0.3.153" }
 libm = "0.2.16"
 ndarray = { version = "0.17.2", features = ["serde", "rayon"] }
