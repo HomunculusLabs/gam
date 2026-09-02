@@ -448,12 +448,7 @@ fn bounded_laml_search_estimates_recency_and_reaches_a_coordinate_optimum() {
     let fitted_length_scale = fit.model.factors[0].length_scale;
     assert!(fitted_length_scale >= specification.lower);
     assert!(fitted_length_scale <= specification.upper);
-    assert_close(
-        fit.parameters[0],
-        fitted_length_scale,
-        0.0,
-        f64::EPSILON,
-    );
+    assert_close(fit.parameters[0], fitted_length_scale, 0.0, f64::EPSILON);
     assert!(fit.evaluations > 1);
     assert!(
         fit.approximation.laplace_log_marginal_likelihood
@@ -525,10 +520,7 @@ fn hyperparameter_search_rejects_unidentified_scales_and_incomplete_searches() {
     .unwrap_err();
     assert!(matches!(
         error,
-        MarkedPointProcessError::HyperparameterNonConvergence {
-            evaluations: 1,
-            ..
-        }
+        MarkedPointProcessError::HyperparameterNonConvergence { evaluations: 1, .. }
     ));
 }
 

@@ -600,6 +600,7 @@ fn factor_evidence_unit_deflated_schur(
     schur: &Array2<f64>,
     relative_floor: f64,
     refuse_resolved_indefinite: bool,
+    exact_a: Option<&ExactAReducedClassification>,
 ) -> Result<DenseReducedSchurFactorization, ArrowSchurError> {
     let declined = |reason: &str| ArrowSchurError::SchurFactorFailed {
         reason: format!("evidence reduced Schur unit-deflation declined ({reason})"),
@@ -631,6 +632,14 @@ fn factor_evidence_unit_deflated_schur(
     if !(max_abs.is_finite() && max_abs > 0.0) {
         return Err(declined("no usable spectrum"));
     }
+    if let Some(geometry) = exact_a
+        && (geometry.majorizer_metric.dim() != (n, n)
+            || geometry.clamp_metric.dim() != (n, n))
+    {
+        return Err(declined(
+            "exact-A majorizer/clamp metrics do not match the reduced Schur",
+        ));
+    }
     let deflate_floor = relative_floor * max_abs * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
     // #2515 — THE BAND IS TWO-SIDED WHEN THE CALLER SAYS THE OPERATOR'S SIGN IS A
     // VERDICT. `value < deflate_floor` alone is one-sided: it admits every
@@ -642,7 +651,7 @@ fn factor_evidence_unit_deflated_schur(
     // mode and a saddle — and wrong SILENTLY, which is how it survived: the
     // returned factor is PD, the log-determinant is finite, and nothing downstream
     // can tell that a `−7.997610e-3` was priced as a `+1`.
-    if refuse_resolved_indefinite {
+    if refuse_resolved_indefinite && exact_a.is_none() {
         let mut worst = 0.0_f64;
         let mut worst_index = 0usize;
         for (index, &value) in raw_evals.iter().enumerate() {
@@ -667,27 +676,65 @@ fn factor_evidence_unit_deflated_schur(
             });
         }
     }
-    let deflated: Vec<bool> = raw_evals
-        .iter()
-        .map(|&value| !value.is_finite() || value < deflate_floor)
-        .collect();
+    let mut deflated = vec![false; raw_evals.len()];
+    let mut cond_evals = raw_evals.clone();
+    let mut classification_changed = false;
+    for eig_idx in 0..raw_evals.len() {
+        let value = raw_evals[eig_idx];
+        if let Some(geometry) = exact_a {
+            let direction = evecs.column(eig_idx);
+            let majorizer_curvature =
+                direction.dot(&geometry.majorizer_metric.dot(&direction));
+            let clamp_curvature = direction.dot(&geometry.clamp_metric.dot(&direction));
+            match classify_exact_a_direction(
+                value,
+                n,
+                max_abs,
+                majorizer_curvature,
+                clamp_curvature,
+            ) {
+                ExactADirectionClassification::ResolvedPositive { curvature } => {
+                    cond_evals[eig_idx] = curvature;
+                }
+                ExactADirectionClassification::NumericalNull => {
+                    deflated[eig_idx] = true;
+                    cond_evals[eig_idx] = 1.0;
+                    classification_changed = true;
+                }
+                ExactADirectionClassification::ClampBasin { curvature } => {
+                    cond_evals[eig_idx] = curvature;
+                    classification_changed = true;
+                }
+                ExactADirectionClassification::Saddle { curvature, basin } => {
+                    return Err(ArrowSchurError::SchurFactorFailed {
+                        reason: format!(
+                            "reduced-Schur {}: direction {eig_idx} has raw exact-A curvature \
+                             {curvature:.6e} and clamp basin {basin:.6e}; the shared \
+                             majorizer-metric classifier declares a genuine saddle (#2515/#2336)",
+                            ArrowSchurError::indefinite_evidence_marker(),
+                        ),
+                    });
+                }
+            }
+        } else if !value.is_finite() || value < deflate_floor {
+            deflated[eig_idx] = true;
+            cond_evals[eig_idx] = 1.0;
+        }
+    }
 
     // Preserve the ordinary equilibrated-Cholesky bit path in the interior.
     // If Cholesky alone is numerically unable to factor a spectrally healthy
     // operator, the spectral QR below still factors the identical raw spectrum.
-    if !deflated.iter().any(|&is_deflated| is_deflated)
+    if !classification_changed
+        && !deflated.iter().any(|&is_deflated| is_deflated)
         && let Ok(interior) = factor_dense_reduced_schur(schur, ReducedSchurPolicy::StrictNewton)
     {
         return Ok(interior);
     }
 
-    let mut cond_evals = raw_evals.clone();
     let mut conditioned = Array2::<f64>::zeros((n, n));
     let mut weighted_vt = Array2::<f64>::zeros((n, n));
     for eig_idx in 0..n {
-        if deflated[eig_idx] {
-            cond_evals[eig_idx] = 1.0;
-        }
         let lambda = cond_evals[eig_idx];
         if !(lambda.is_finite() && lambda > 0.0) {
             return Err(declined("conditioned eigenvalue is not finite and positive"));

@@ -125,13 +125,16 @@ pub fn solve_arrow_newton_step_with_options(
             sys,
             build_dense_schur_direct(sys, evidence_htt_factors, 0.0, &backend, options.gpu_policy)?,
         );
+        let exact_a_classification =
+            exact_a_reduced_classification(sys, evidence_htt_factors)?;
         let DenseReducedSchurFactorization {
             factor: evidence_schur_factor,
             conditioned_schur: floored_evidence_schur,
             beta_deflation: evidence_beta_deflation,
-        } = factor_dense_reduced_schur(
+        } = factor_dense_reduced_schur_with_exact_a(
             &evidence_schur,
             options.evidence_policy.reduced_schur_policy(),
+            exact_a_classification.as_ref(),
         )?;
         drop(floored_evidence_schur);
         schur_factor = Some(evidence_schur_factor);

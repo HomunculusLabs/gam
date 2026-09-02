@@ -677,17 +677,12 @@ pub enum LaplaceHyperparameter {
 
 impl LaplaceHyperparameter {
     /// Read this parameter from a validated model on its natural scale.
-    pub fn value(
-        self,
-        model: &MarkedPointProcessModel,
-    ) -> Result<f64, MarkedPointProcessError> {
+    pub fn value(self, model: &MarkedPointProcessModel) -> Result<f64, MarkedPointProcessError> {
         model.validate()?;
         self.validate_index(model)?;
         Ok(match self {
             Self::FactorLengthScale { factor } => model.factors[factor].length_scale,
-            Self::FactorMarginalVariance { factor } => {
-                model.factors[factor].marginal_variance
-            }
+            Self::FactorMarginalVariance { factor } => model.factors[factor].marginal_variance,
             Self::Loading { mark, factor } => model.loadings[[mark, factor]],
         })
     }
@@ -697,8 +692,7 @@ impl LaplaceHyperparameter {
         model: &MarkedPointProcessModel,
     ) -> Result<(), MarkedPointProcessError> {
         match self {
-            Self::FactorLengthScale { factor }
-            | Self::FactorMarginalVariance { factor }
+            Self::FactorLengthScale { factor } | Self::FactorMarginalVariance { factor }
                 if factor >= model.factors.len() =>
             {
                 Err(invalid(format!("factor index {factor} is out of bounds")))
@@ -727,7 +721,9 @@ impl LaplaceHyperparameter {
     ) -> Result<(), MarkedPointProcessError> {
         self.validate_index(model)?;
         if !value.is_finite() || (self.is_positive() && value <= 0.0) {
-            return Err(invalid("hyperparameter value is outside its natural domain"));
+            return Err(invalid(
+                "hyperparameter value is outside its natural domain",
+            ));
         }
         match self {
             Self::FactorLengthScale { factor } => model.factors[factor].length_scale = value,
@@ -780,9 +776,7 @@ impl HyperparameterControl {
                 "hyperparameter step_shrink must lie strictly between zero and one",
             ));
         }
-        if !self.transformed_step_tolerance.is_finite()
-            || self.transformed_step_tolerance <= 0.0
-        {
+        if !self.transformed_step_tolerance.is_finite() || self.transformed_step_tolerance <= 0.0 {
             return Err(invalid(
                 "transformed_step_tolerance must be finite and positive",
             ));
@@ -1192,9 +1186,7 @@ pub fn fit_laplace_hyperparameters(
     let mut steps: Vec<f64> = transformed_lower
         .iter()
         .zip(transformed_upper.iter())
-        .map(|(lower, upper)| {
-            hyperparameter_control.initial_step_fraction * (upper - lower)
-        })
+        .map(|(lower, upper)| hyperparameter_control.initial_step_fraction * (upper - lower))
         .collect();
 
     loop {
@@ -1219,11 +1211,10 @@ pub fn fit_laplace_hyperparameters(
             let mut coordinate_best = None;
             let mut coordinate_best_evidence = best_evidence;
             for direction in [-1.0, 1.0] {
-                let candidate_value = (center + direction * steps[coordinate_index])
-                    .clamp(
-                        transformed_lower[coordinate_index],
-                        transformed_upper[coordinate_index],
-                    );
+                let candidate_value = (center + direction * steps[coordinate_index]).clamp(
+                    transformed_lower[coordinate_index],
+                    transformed_upper[coordinate_index],
+                );
                 if candidate_value == center {
                     continue;
                 }
@@ -1235,17 +1226,15 @@ pub fn fit_laplace_hyperparameters(
                 }
                 let mut candidate_coordinates = coordinates.clone();
                 candidate_coordinates[coordinate_index] = candidate_value;
-                let (candidate_model, candidate_approximation) =
-                    evaluate_hyperparameter_candidate(
-                        initial_model,
-                        histories,
-                        specifications,
-                        &candidate_coordinates,
-                        laplace_control,
-                    )?;
+                let (candidate_model, candidate_approximation) = evaluate_hyperparameter_candidate(
+                    initial_model,
+                    histories,
+                    specifications,
+                    &candidate_coordinates,
+                    laplace_control,
+                )?;
                 evaluations += 1;
-                let candidate_evidence =
-                    candidate_approximation.laplace_log_marginal_likelihood;
+                let candidate_evidence = candidate_approximation.laplace_log_marginal_likelihood;
                 if candidate_evidence
                     > coordinate_best_evidence + hyperparameter_control.evidence_tolerance
                 {
