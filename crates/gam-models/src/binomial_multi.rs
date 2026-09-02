@@ -71,6 +71,9 @@ pub struct BinomialMultiFitInputs<'a> {
     /// proportions / probabilities alike). Entries outside `[0, 1]` are
     /// rejected because the per-entry log-likelihood is then unbounded in `η`.
     pub y: ArrayView2<'a, f64>,
+    /// Optional known additive predictor offset, shape `(N, K)`. The fitted
+    /// predictor is `η = Xβ + offset`; `None` means an exact zero offset.
+    pub offset: Option<ArrayView2<'a, f64>>,
     /// Shared smoothing penalty `S ∈ ℝ^{P×P}` (symmetric, PSD).
     pub penalty: ArrayView2<'a, f64>,
     /// Per-response smoothing parameter `λ_a` (length `K`).
@@ -249,6 +252,7 @@ pub fn fit_penalized_binomial_multi(
     let BinomialMultiFitInputs {
         design,
         y,
+        offset,
         penalty,
         lambdas,
         row_weights,
@@ -339,6 +343,7 @@ pub fn fit_penalized_binomial_multi(
         PenalizedVectorGlmInputs {
             design,
             y,
+            offset,
             penalty,
             lambdas,
             fisher_w_override,
@@ -409,6 +414,7 @@ mod tests {
         let base = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
             row_weights: None,
@@ -421,6 +427,7 @@ mod tests {
         let again = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
             row_weights: None,
@@ -435,11 +442,66 @@ mod tests {
     }
 
     #[test]
+    fn per_cell_offset_is_part_of_the_linear_predictor() {
+        // A zero design makes the known offset the entire predictor. This
+        // isolates the offset channel from coefficient estimation and proves
+        // that different outputs on the same row may carry different known
+        // exposures without being encoded as likelihood weights.
+        let design = Array2::<f64>::zeros((4, 1));
+        let y = ndarray::array![[0.0, 1.0], [1.0, 0.0], [0.0, 0.0], [1.0, 1.0]];
+        let offset = ndarray::array![
+            [-2.0, 1.0],
+            [-1.0, 0.5],
+            [0.0, -0.5],
+            [2.0, -1.0]
+        ];
+        let penalty = Array2::<f64>::eye(1);
+        let lambdas = ndarray::array![1.0, 1.0];
+        let fit = fit_penalized_binomial_multi(BinomialMultiFitInputs {
+            design: design.view(),
+            y: y.view(),
+            offset: Some(offset.view()),
+            penalty: penalty.view(),
+            lambdas: lambdas.view(),
+            row_weights: None,
+            fisher_w_override: None,
+            max_iter: 10,
+            tol: 1.0e-12,
+        })
+        .expect("known-offset fit must converge");
+
+        assert_eq!(fit.coefficients, Array2::<f64>::zeros((1, 2)));
+        for ((row, output), &value) in fit.fitted_probabilities.indexed_iter() {
+            assert_eq!(value, sigmoid_stable(offset[[row, output]]));
+        }
+    }
+
+    #[test]
+    fn malformed_offset_is_rejected_at_the_shared_solver_boundary() {
+        let (design, y, penalty, lambdas) = toy_inputs();
+        let wrong_columns = Array2::<f64>::zeros((design.nrows(), y.ncols() + 1));
+        let error = fit_penalized_binomial_multi(BinomialMultiFitInputs {
+            design: design.view(),
+            y: y.view(),
+            offset: Some(wrong_columns.view()),
+            penalty: penalty.view(),
+            lambdas: lambdas.view(),
+            row_weights: None,
+            fisher_w_override: None,
+            max_iter: 50,
+            tol: 1.0e-9,
+        })
+        .expect_err("an offset outside the active response geometry must fail");
+        assert!(format!("{error}").contains("offset shape"));
+    }
+
+    #[test]
     fn exhausted_fixed_lambda_budget_is_typed_error_not_fit() {
         let (design, y, penalty, lambdas) = toy_inputs();
         let error = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
             row_weights: None,
@@ -471,6 +533,7 @@ mod tests {
         let err = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: bad.view(),
+            offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
             row_weights: None,
@@ -486,6 +549,7 @@ mod tests {
         let err = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: neg.view(),
+            offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
             row_weights: None,
@@ -506,6 +570,7 @@ mod tests {
         let err = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
             row_weights: None,
@@ -537,6 +602,7 @@ mod tests {
             PenalizedVectorGlmInputs {
                 design: design.view(),
                 y: y.view(),
+                offset: None,
                 penalty: penalty.view(),
                 lambdas: lambdas.view(),
                 fisher_w_override: Some(over.view()),
@@ -553,6 +619,7 @@ mod tests {
             PenalizedVectorGlmInputs {
                 design: design.view(),
                 y: y.view(),
+                offset: None,
                 penalty: penalty.view(),
                 lambdas: lambdas.view(),
                 fisher_w_override: None,

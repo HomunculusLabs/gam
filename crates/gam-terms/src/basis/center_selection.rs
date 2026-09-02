@@ -14,6 +14,13 @@ pub struct CollocationOperatorMatrices {
     /// Polynomial block columns appended after the kernel block (Duchon
     /// polynomial null space). Zero for Matérn.
     pub polynomial_block_cols: usize,
+    /// The kernel chart amplitude `α` the collocation blocks carry (gam#979).
+    ///
+    /// The shipped Duchon design is `α·K` (`duchon_kernel_chart`), so the
+    /// operator quadratures of that basis are `α·D_q`; the closed-form Grams
+    /// that replace a quadrature must be scaled by `α²` to sit in the same
+    /// chart. `1.0` for Matérn and for every un-amplified kernel.
+    pub kernel_amplification: f64,
 }
 
 #[derive(Debug, Clone)]

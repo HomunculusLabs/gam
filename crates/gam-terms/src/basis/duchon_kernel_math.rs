@@ -133,6 +133,32 @@ pub fn build_duchon_collocation_operator_matriceswithworkspace(
         duchon_partial_fraction_coeffs(p_order, s_int, 1.0 / scale.max(1e-300))
     });
     let metric_weights: Option<Vec<f64>> = aniso_log_scales.map(centered_aniso_metric_weights);
+    // gam#979: the shipped kernel block is `α·K` (`duchon_kernel_chart`), so
+    // the operator quadratures of that basis carry the same amplitude. Without
+    // it the collocation Grams of a high-dimensional hybrid kernel sit ~30
+    // decades below one — the #2627 "max|λ| ≈ 2e-17" design — where every
+    // absolute floor downstream (the basis-level penalty normalization and its
+    // ψ-derivative, the PSD projection, the factorized-operator rescale) acts on
+    // rounding noise instead of on the penalty. This is the SAME `α` the design
+    // and the `Primary` penalty already carry, computed from the same call.
+    let pure_poly_coeff = if length_scale.is_none() {
+        Some(PolyharmonicBlockCoeff::new(
+            pure_duchon_block_order(p_order, s_order),
+            dim,
+        ))
+    } else {
+        None
+    };
+    let kernel_amplification = duchon_kernel_amplification(
+        centers,
+        length_scale,
+        p_order,
+        duchon_power_to_usize(s_order),
+        dim,
+        aniso_log_scales,
+        coeffs.as_ref(),
+        pure_poly_coeff.as_ref(),
+    );
     let row_scales = if let Some(w) = collocationweights {
         if w.len() != p_colloc {
             crate::bail_dim_basis!(
@@ -231,6 +257,14 @@ pub fn build_duchon_collocation_operator_matriceswithworkspace(
                     "non-finite Duchon collocation operator derivative at (colloc {i}, center {j}), r={r}"
                 );
             }
+            // The chart amplitude multiplies every radial scalar of the block
+            // (the kernel value, `q = φ'/r`, `t`), exactly as it multiplies the
+            // design's kernel column.
+            let (phi, q, t) = (
+                phi * kernel_amplification,
+                q * kernel_amplification,
+                t * kernel_amplification,
+            );
             d0_raw[[i, j]] = scale_i * phi;
             if build_d2 {
                 for axis_a in 0..dim {
@@ -324,6 +358,7 @@ pub fn build_duchon_collocation_operator_matriceswithworkspace(
         collocation_points: collocation_points.to_owned(),
         kernel_nullspace_transform: Some(z),
         polynomial_block_cols: poly_cols,
+        kernel_amplification,
     })
 }
 

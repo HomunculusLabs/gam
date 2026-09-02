@@ -1182,6 +1182,7 @@ pub fn fit_penalized_multinomial(
         PenalizedVectorGlmInputs {
             design,
             y: y_one_hot,
+            offset: None,
             penalty,
             lambdas,
             fisher_w_override,
@@ -5604,6 +5605,7 @@ mod fisher_override_tests {
             PenalizedVectorGlmInputs {
                 design: design.view(),
                 y: y.view(),
+                offset: None,
                 penalty: penalty.view(),
                 lambdas: engine_lambdas.view(),
                 fisher_w_override: Some(over.view()),
@@ -5620,6 +5622,7 @@ mod fisher_override_tests {
             PenalizedVectorGlmInputs {
                 design: design.view(),
                 y: y.view(),
+                offset: None,
                 penalty: penalty.view(),
                 lambdas: engine_lambdas.view(),
                 fisher_w_override: None,

@@ -199,6 +199,11 @@ pub struct PenalizedVectorGlmInputs<'a> {
     pub design: ArrayView2<'a, f64>,
     /// Response `Y ∈ ℝ^{N×·}`, interpreted by the [`VectorLikelihood`].
     pub y: ArrayView2<'a, f64>,
+    /// Optional known additive predictor offset `O ∈ ℝ^{N×M}`. The
+    /// active predictor is `η = Xβ + O`; `None` is exactly the zero-offset
+    /// model. Offsets are part of the statistical predictor (for example
+    /// `log(exposure)` in a rate model), never likelihood weights.
+    pub offset: Option<ArrayView2<'a, f64>>,
     /// Shared smoothing penalty `S ∈ ℝ^{P×P}` (symmetric, PSD).
     pub penalty: ArrayView2<'a, f64>,
     /// Per-output smoothing parameter `λ_a`, length `M`.
@@ -716,6 +721,7 @@ pub fn fit_penalized_vector_glm<L: VectorLikelihood>(
     let PenalizedVectorGlmInputs {
         design,
         y,
+        offset,
         penalty,
         lambdas,
         fisher_w_override,
@@ -737,6 +743,22 @@ pub fn fit_penalized_vector_glm<L: VectorLikelihood>(
     }
     if y.nrows() != n_obs {
         crate::bail_invalid_estim!("{context}: y rows {} ≠ design rows {n_obs}", y.nrows());
+    }
+    if let Some(offset) = offset.as_ref() {
+        if offset.dim() != (n_obs, m) {
+            crate::bail_invalid_estim!(
+                "{context}: offset shape {:?} ≠ (N, M) = ({n_obs}, {m})",
+                offset.dim()
+            );
+        }
+        if let Some(((row, output), value)) = offset
+            .indexed_iter()
+            .find(|(_, value)| !value.is_finite())
+        {
+            crate::bail_invalid_estim!(
+                "{context}: offset[{row},{output}] must be finite (got {value})"
+            );
+        }
     }
     if penalty.dim() != (p, p) {
         crate::bail_invalid_estim!(
@@ -804,12 +826,14 @@ pub fn fit_penalized_vector_glm<L: VectorLikelihood>(
     let mut stall_reason = VectorGlmStallReason::IterationBudgetExhausted;
     let mut last_objective = f64::INFINITY;
 
-    // η = X · β for the current β, reused by the analytic Fisher / gradient.
+    // η = X · β + O for the current β, reused by the analytic Fisher /
+    // gradient. A known offset is copied first and every coefficient
+    // contribution is then accumulated in the same deterministic order.
     let recompute_eta = |beta: &Array2<f64>, eta: &mut Array2<f64>| {
         for a in 0..m {
             let beta_col = beta.column(a);
             for row in 0..n_obs {
-                let mut eta_val = 0.0_f64;
+                let mut eta_val = offset.as_ref().map_or(0.0, |values| values[[row, a]]);
                 for i in 0..p {
                     eta_val += design[[row, i]] * beta_col[i];
                 }
@@ -1525,6 +1549,7 @@ mod parity_tests {
         let fit = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
             row_weights: None,
@@ -1578,6 +1603,7 @@ mod parity_tests {
         let joint = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
             row_weights: None,
@@ -1595,6 +1621,7 @@ mod parity_tests {
             let single = fit_penalized_binomial_multi(BinomialMultiFitInputs {
                 design: design.view(),
                 y: y_col.view(),
+                offset: None,
                 penalty: penalty.view(),
                 lambdas: lam.view(),
                 row_weights: None,
