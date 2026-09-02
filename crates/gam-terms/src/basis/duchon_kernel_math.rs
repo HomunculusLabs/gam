@@ -228,12 +228,28 @@ pub fn build_duchon_collocation_operator_matriceswithworkspace(
             // The gradient/Hessian limits at r→0 are the zeros the `r > R_EPS`
             // guards below already produce, so flooring only avoids the log-case
             // `r²·log r` second-derivative blow-up at exact r=0.
+            let r_exact = r;
             let r = r.max(R_EPS);
             let (phi, q, t) = if let (Some(length_scale), Some(coeffs)) =
                 (length_scale, coeffs.as_ref())
             {
-                let jets =
-                    duchon_radial_jets(r, length_scale, p_order, s_order as usize, dim, coeffs)?;
+                // The hybrid jets floor their own derivative core
+                // (`DUCHON_DERIVATIVE_R_FLOOR_REL`) and take the VALUE at the
+                // exact distance, where `r = 0` is a closed form. Handing them
+                // the `R_EPS` floor instead evaluated the stable integral at
+                // `r = 1e-10`, which for a large Bessel order (3-D, order 0,
+                // power 9: `b = p + s − d/2 = 8.5`) is not the collision value:
+                // the mass Gram of a collocation sample that lands on centers
+                // was 2.4% off its own definition, and its ψ-derivative 3.7×
+                // (gam#979 operator-penalty gate, `opers_3d_order0_power9`).
+                let jets = duchon_radial_jets(
+                    r_exact,
+                    length_scale,
+                    p_order,
+                    s_order as usize,
+                    dim,
+                    coeffs,
+                )?;
                 (jets.phi, jets.q, jets.t)
             } else {
                 let (phi, phi_r, phi_rr) = duchon_kernel_radial_triplet(

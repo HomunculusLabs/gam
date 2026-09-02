@@ -38,9 +38,11 @@
 
 use ndarray::{Array1, Array2, ArrayView2};
 
+use super::radial_shell::{radial_predict, row_sse};
 use super::weight_frame_catalog::{WeightFrameCatalog, WeightFrameSource};
 use crate::frames::{GrassmannFrame, SAE_FRAME_ACTIVATION_MARGIN, SAE_FRAME_MIN_AUTO_OUTPUT_DIM, SAE_FRAME_RANK_CUTOFF};
 use faer::Side;
+use gam_math::serial_dependence::{autocorr_ess, newey_west_se};
 use gam_linalg::faer_ndarray::{FaerEigh, FaerSvd, fast_ab, fast_abt};
 
 /// Bytes per `f64`, matching the streaming-plan ledger.
@@ -802,31 +804,6 @@ fn pca_rank1_reconstruct(train: &Array2<f64>, eval: &Array2<f64>) -> Result<Arra
     Ok(out)
 }
 
-/// Radial-shell chart: project each whitened row to the train mean radius shell.
-fn radial_predict(train: &Array2<f64>, eval: &Array2<f64>) -> Array2<f64> {
-    let d = train.ncols();
-    let mut radius = 0.0;
-    for i in 0..train.nrows() {
-        let mut ss = 0.0;
-        for j in 0..d {
-            ss += train[[i, j]] * train[[i, j]];
-        }
-        radius += ss.sqrt();
-    }
-    radius /= train.nrows().max(1) as f64;
-    let mut out = Array2::<f64>::zeros(eval.dim());
-    for i in 0..eval.nrows() {
-        let mut norm = 0.0;
-        for j in 0..d {
-            norm += eval[[i, j]] * eval[[i, j]];
-        }
-        norm = norm.sqrt().max(1.0e-12);
-        for j in 0..d {
-            out[[i, j]] = radius * eval[[i, j]] / norm;
-        }
-    }
-    out
-}
 
 fn take_rows(x: ArrayView2<'_, f64>, rows: &[usize]) -> Array2<f64> {
     let mut out = Array2::<f64>::zeros((rows.len(), x.ncols()));
@@ -848,63 +825,5 @@ fn take_index(x: &Array2<f64>, rows: &[usize]) -> Array2<f64> {
     out
 }
 
-fn row_sse(a: &Array2<f64>, b: &Array2<f64>, row: usize) -> f64 {
-    let mut s = 0.0;
-    for j in 0..a.ncols() {
-        let d = a[[row, j]] - b[[row, j]];
-        s += d * d;
-    }
-    s
-}
 
-fn autocorr_ess(x: &[f64]) -> f64 {
-    let n = x.len();
-    if n <= 1 {
-        return n as f64;
-    }
-    let mean = x.iter().sum::<f64>() / n as f64;
-    let var = x.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n as f64;
-    if var <= 0.0 {
-        return n as f64;
-    }
-    let lag_cap = (n as f64).sqrt() as usize;
-    let mut rho_sum = 0.0;
-    for lag in 1..=lag_cap.max(1).min(n - 1) {
-        let mut cov = 0.0;
-        for i in lag..n {
-            cov += (x[i] - mean) * (x[i - lag] - mean);
-        }
-        cov /= (n - lag) as f64;
-        let rho = cov / var;
-        if rho <= 0.0 || !rho.is_finite() {
-            break;
-        }
-        rho_sum += rho;
-    }
-    (n as f64 / (1.0 + 2.0 * rho_sum)).max(1.0)
-}
 
-fn newey_west_se(x: &[f64]) -> f64 {
-    let n = x.len();
-    if n <= 1 {
-        return f64::INFINITY;
-    }
-    let mean = x.iter().sum::<f64>() / n as f64;
-    let lag_cap = (n as f64).sqrt() as usize;
-    let mut gamma0 = 0.0;
-    for v in x {
-        gamma0 += (v - mean) * (v - mean);
-    }
-    gamma0 /= n as f64;
-    let mut var = gamma0;
-    for lag in 1..=lag_cap.max(1).min(n - 1) {
-        let mut gamma = 0.0;
-        for i in lag..n {
-            gamma += (x[i] - mean) * (x[i - lag] - mean);
-        }
-        gamma /= n as f64;
-        let w = 1.0 - lag as f64 / (lag_cap as f64 + 1.0);
-        var += 2.0 * w * gamma;
-    }
-    (var.max(0.0) / n as f64).sqrt()
-}

@@ -8740,6 +8740,310 @@ mod tests_atlas_prior_2280 {
              to proposer, which is the only claim this test still licenses."
         );
     }
+
+    /// Column-centred copy of a point cloud.
+    fn centred(x: &Array2<f64>) -> Array2<f64> {
+        let (n, p) = x.dim();
+        let mut mean = vec![0.0_f64; p];
+        for row in 0..n {
+            for col in 0..p {
+                mean[col] += x[[row, col]];
+            }
+        }
+        for value in &mut mean {
+            *value /= n as f64;
+        }
+        Array2::from_shape_fn((n, p), |(r, c)| x[[r, c]] - mean[c])
+    }
+
+    /// Total variance of a point cloud about its column means.
+    fn total_variance(x: &Array2<f64>) -> f64 {
+        let c = centred(x);
+        c.iter().map(|v| v * v).sum::<f64>() / c.nrows() as f64
+    }
+
+    /// The degree-2 Veronese coordinates `x_i x_j` (`i ≤ j`): the even
+    /// functions of the ambient position, which identify `x` with `−x`. A
+    /// centrally symmetric fixture projected onto them is its antipodal
+    /// quotient — the sphere becomes the projective plane, the circle a
+    /// doubly-traversed circle, the torus its hyperelliptic quotient (a
+    /// sphere with four branch points).
+    fn veronese(x: &Array2<f64>) -> Array2<f64> {
+        let (n, p) = x.dim();
+        let q = p * (p + 1) / 2;
+        let mut out = Array2::<f64>::zeros((n, q));
+        for row in 0..n {
+            let mut k = 0;
+            for i in 0..p {
+                for j in i..p {
+                    out[[row, k]] = x[[row, i]] * x[[row, j]];
+                    k += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// `[X | A·v(X)]`: the fixture with a FOLDED copy of itself appended, the
+    /// amplitude `A` set so the fold block carries `ratio ×` the fixture's own
+    /// total variance. The data still lies on the planted manifold (the
+    /// identity block keeps the map injective and immersive), so every LOCAL
+    /// chart sees exactly what it saw before; only the leading principal
+    /// directions — now the fold — change, which is what the global-linear
+    /// seed reads.
+    fn folded_embedding(x: &Array2<f64>, ratio: f64) -> Array2<f64> {
+        let x = centred(x);
+        let v = veronese(&x);
+        let amplitude = (ratio * total_variance(&x) / total_variance(&v).max(f64::MIN_POSITIVE)).sqrt();
+        let (n, p) = x.dim();
+        let q = v.ncols();
+        Array2::from_shape_fn((n, p + q), |(r, c)| {
+            if c < p {
+                x[[r, c]]
+            } else {
+                amplitude * v[[r, c - p]]
+            }
+        })
+    }
+
+    /// `[X | N]`: `p` i.i.d. Gaussian nuisance columns, each with `ratio ×`
+    /// the fixture's mean per-column variance, from a fixed splitmix64 stream.
+    /// Unlike the fold this is NOT a re-embedding of the manifold — the noise
+    /// is present in every neighbourhood at full amplitude — so it is the
+    /// nuisance reading of the registered experiment under which a local
+    /// chart has as little to work with as a global one.
+    fn nuisance_embedding(x: &Array2<f64>, ratio: f64, seed: u64) -> Array2<f64> {
+        let x = centred(x);
+        let (n, p) = x.dim();
+        let sd = (ratio * total_variance(&x) / p as f64).sqrt();
+        let mut state = seed;
+        let mut next = move || -> f64 {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            ((z >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        let mut gaussian = move || -> f64 {
+            let u1 = next();
+            let u2 = next();
+            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+        };
+        let mut out = Array2::<f64>::zeros((n, 2 * p));
+        for r in 0..n {
+            for c in 0..p {
+                out[[r, c]] = x[[r, c]];
+            }
+            for c in p..2 * p {
+                out[[r, c]] = sd * gaussian();
+            }
+        }
+        out
+    }
+
+    /// Manipulation check, part 1: the principal angles (degrees) between the
+    /// seed's top-`d` subspace of the embedded cloud and the planted
+    /// manifold's own ambient span (its first `ambient_dim` coordinates).
+    /// `90°` on every angle means the seed's block is entirely outside the
+    /// manifold's coordinates; `0°` means the embedding did not move it.
+    fn seed_principal_angles_deg(y: &Array2<f64>, d_seed: usize, ambient_dim: usize) -> Vec<f64> {
+        let c = centred(y);
+        let (_u, _s, vt) = c.svd(false, true).expect("embedded fixture SVD must succeed");
+        let vt = vt.expect("embedded fixture SVD must return a right frame");
+        let keep = d_seed.min(vt.nrows());
+        // Rows of `vt` are orthonormal; the manifold span's basis is the
+        // identity block, so the cross-Gram is the first `ambient_dim` columns.
+        let cross = vt.slice(ndarray::s![0..keep, 0..ambient_dim]).to_owned();
+        let (_u, svals, _vt) = cross.svd(false, false).expect("cross-Gram SVD must succeed");
+        let mut angles: Vec<f64> = svals
+            .iter()
+            .map(|&sv| sv.clamp(0.0, 1.0).acos().to_degrees())
+            .collect();
+        angles.resize(keep, 90.0);
+        angles
+    }
+
+    /// Manipulation check, part 2: the fraction of rows whose nearest
+    /// neighbour in the seed's coordinates is NOT an ambient neighbour — the
+    /// seed's projection superimposes distinct regions there. Measured against
+    /// the fixture's own median nearest-neighbour spacing so it is a property
+    /// of the projection, not of the sampling density.
+    fn fold_fraction(seed_coords: &Array2<f64>, ambient: &Array2<f64>) -> f64 {
+        let n = seed_coords.nrows();
+        let dist2 = |a: &Array2<f64>, i: usize, j: usize| -> f64 {
+            (0..a.ncols())
+                .map(|c| {
+                    let d = a[[i, c]] - a[[j, c]];
+                    d * d
+                })
+                .sum::<f64>()
+        };
+        let nearest = |a: &Array2<f64>, i: usize| -> usize {
+            (0..n)
+                .filter(|&j| j != i)
+                .min_by(|&j, &k| dist2(a, i, j).total_cmp(&dist2(a, i, k)))
+                .expect("a fixture has at least two rows")
+        };
+        let mut ambient_spacing: Vec<f64> = (0..n)
+            .map(|i| dist2(ambient, i, nearest(ambient, i)).sqrt())
+            .collect();
+        ambient_spacing.sort_by(f64::total_cmp);
+        let median = ambient_spacing[n / 2];
+        let folded = (0..n)
+            .filter(|&i| {
+                let j = nearest(seed_coords, i);
+                dist2(ambient, i, j).sqrt() > 4.0 * median
+            })
+            .count();
+        folded as f64 / n as f64
+    }
+
+    /// #2280 — the follow-up registered on the issue: the same zoo, re-embedded
+    /// so that the global-linear seed is DEGENERATE, which is the regime the
+    /// atlas was proposed for and the one the planted-zoo comparison above was
+    /// structurally unable to express (it hands both arms a usable seed).
+    ///
+    /// Two embeddings per fixture. `folded`: `[X | A·v(X)]` with the degree-2
+    /// Veronese fold dominating the variance, so the seed's leading block is a
+    /// non-injective projection (antipodal quotient) while every local chart is
+    /// untouched. `nuisance`: `[X | N]` with i.i.d. Gaussian columns dominating
+    /// the variance, present in every neighbourhood.
+    ///
+    /// The manipulation check runs FIRST and is asserted: on the folded
+    /// embedding the seed's block must sit at a large principal angle to the
+    /// manifold's coordinates. Predictions registered before the run: the menu
+    /// race degrades on the fold toward the quotient's name; the atlas holds on
+    /// the fold; both arms may degrade under nuisance. The retired comparative
+    /// gate stays retired — the table is the deliverable — and the one gate
+    /// that predates every measurement is kept: the atlas never MISNAMES.
+    #[test]
+    fn atlas_versus_fixed_menu_on_the_seed_degenerate_zoo_2280() {
+        use crate::manifold::tests_topology_fixtures::{
+            embedded_plane, open_arc, sphere, swiss_roll, torus,
+        };
+
+        let zoo: Vec<(&str, Array2<f64>, usize, AutoTopologyKind)> = vec![
+            ("circle", circle(400, 2.0), 1, AutoTopologyKind::Circle),
+            ("trefoil", trefoil_knot(600, 1.0), 1, AutoTopologyKind::Circle),
+            ("open_arc", open_arc(400, 2.0), 1, AutoTopologyKind::Euclidean),
+            ("plane", embedded_plane(20, 20), 2, AutoTopologyKind::Euclidean),
+            ("swiss_roll", swiss_roll(30, 12), 2, AutoTopologyKind::Euclidean),
+            ("cylinder", cylinder_strip(60, 5), 2, AutoTopologyKind::Cylinder),
+            ("mobius", mobius_strip(60, 5), 2, AutoTopologyKind::Mobius),
+            ("torus", torus(30, 20, 3.0, 1.0), 2, AutoTopologyKind::Torus),
+            ("sphere", sphere(500), 2, AutoTopologyKind::Sphere),
+        ];
+        // The nuisance block carries 16× the fixture's variance (4× its
+        // amplitude): decisively above the manifold's extent, not marginally.
+        const VARIANCE_RATIO: f64 = 16.0;
+
+        let mut table = String::from(
+            "\n#2280 atlas-vs-menu on the SEED-DEGENERATE zoo (manipulation check, then arms)\n\
+             embedding fixture      d  truth        seed∠span(min/max°) fold%  atlas          menu-race\n",
+        );
+        let mut atlas_misnamed: Vec<String> = Vec::new();
+        let mut manipulation_failed: Vec<String> = Vec::new();
+        let mut summary: Vec<String> = Vec::new();
+
+        for (embedding, build) in [
+            ("folded", (|x: &Array2<f64>| folded_embedding(x, VARIANCE_RATIO)) as fn(&Array2<f64>) -> Array2<f64>),
+            ("nuisance", (|x: &Array2<f64>| nuisance_embedding(x, VARIANCE_RATIO, 0x2280)) as fn(&Array2<f64>) -> Array2<f64>),
+        ] {
+            let mut atlas_right_total = 0usize;
+            let mut menu_right_total = 0usize;
+            let mut menu_misnamed: Vec<String> = Vec::new();
+            let mut menu_refused: Vec<String> = Vec::new();
+            let mut atlas_refused: Vec<String> = Vec::new();
+            for (name, target, d, truth) in &zoo {
+                let ambient_dim = target.ncols();
+                let y = build(target);
+                let weights = Array1::<f64>::ones(y.nrows());
+                let d_seed = y.ncols().min(4).max(*d);
+                let coords = global_linear_seed(y.view(), d_seed);
+
+                // Manipulation check before any verdict is read.
+                let angles = seed_principal_angles_deg(&y, *d, ambient_dim);
+                let (angle_min, angle_max) = (
+                    angles.iter().cloned().fold(f64::INFINITY, f64::min),
+                    angles.iter().cloned().fold(0.0_f64, f64::max),
+                );
+                let ambient = centred(target);
+                let top_d = coords.slice(ndarray::s![.., 0..*d]).to_owned();
+                let folded = fold_fraction(&top_d, &ambient);
+                if embedding == "folded" && angle_max < 45.0 {
+                    manipulation_failed.push(format!(
+                        "{embedding}/{name}: seed's top-{d} block is only {angle_max:.1}° from the \
+                         manifold's coordinates — the seed is NOT degenerate here and the arm \
+                         measures nothing"
+                    ));
+                }
+
+                let atlas = atlas_prior_for_coords(y.view(), *d);
+                let atlas_kind = atlas
+                    .as_ref()
+                    .and_then(|readout| readout.observed_manifold())
+                    .and_then(observed_kind_to_auto_topology);
+                let realized = topology_candidates_for_dim(
+                    CandidateBases::with_ambient(coords.view(), y.view()),
+                    *d,
+                )
+                .expect("menu must build");
+                let menu_kind = race_spec_set(realized, y.view(), weights.view(), None)
+                    .expect("the embedded zoo must not error the race")
+                    .and_then(|outcome| outcome.ranking.first().map(|entry| entry.kind));
+
+                let atlas_right = atlas_kind.is_some_and(|kind| names_truth(kind, *truth));
+                let menu_right = menu_kind.is_some_and(|kind| names_truth(kind, *truth));
+                atlas_right_total += usize::from(atlas_right);
+                menu_right_total += usize::from(menu_right);
+                if let Some(kind) = atlas_kind
+                    && !names_truth(kind, *truth)
+                {
+                    atlas_misnamed.push(format!(
+                        "{embedding}/{name}: measured {kind:?}, planted {truth:?}"
+                    ));
+                }
+                match menu_kind {
+                    Some(kind) if !names_truth(kind, *truth) => {
+                        menu_misnamed.push(format!("{name}: raced {kind:?}, planted {truth:?}"));
+                    }
+                    None => menu_refused.push((*name).to_string()),
+                    Some(_) => {}
+                }
+                if atlas_kind.is_none() {
+                    atlas_refused.push((*name).to_string());
+                }
+                table.push_str(&format!(
+                    "{embedding:<9} {name:<12} {d}  {truth:<12?} {angle_min:>5.1}/{angle_max:<5.1}°       {:>4.0}%  {:<14} {:<14}\n",
+                    100.0 * folded,
+                    atlas_kind.map_or("REFUSED".to_string(), |k| format!("{k:?}")),
+                    menu_kind.map_or("REFUSED".to_string(), |k| format!("{k:?}")),
+                ));
+            }
+            summary.push(format!(
+                "{embedding}: atlas named {atlas_right_total}/{} | menu-race named {menu_right_total}/{}\n  \
+                 atlas: refused={atlas_refused:?}\n  menu:  misnamed={menu_misnamed:?} refused={menu_refused:?}",
+                zoo.len(),
+                zoo.len()
+            ));
+        }
+        table.push_str(&summary.join("\n"));
+        table.push('\n');
+        // Printed unconditionally: the table IS the deliverable.
+        println!("{table}");
+
+        assert!(
+            manipulation_failed.is_empty(),
+            "{table}\nThe manipulation did not take: {manipulation_failed:?}. A verdict read on a \
+             seed that is not degenerate is an artifact, not a result."
+        );
+        assert!(
+            atlas_misnamed.is_empty(),
+            "{table}\nThe atlas MISNAMED a planted manifold on a seed-degenerate embedding: \
+             {atlas_misnamed:?}. Its errors must be abstentions."
+        );
+    }
 }
 
 #[cfg(test)]

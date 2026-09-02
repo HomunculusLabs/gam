@@ -187,6 +187,7 @@ mod construction_padded_blocks;
 mod construction_reconstruction;
 mod coordinate_fidelity;
 mod cross_fit;
+pub(crate) mod radial_shell;
 mod crosscoder_drift;
 mod crosscoder_fit;
 mod curl;

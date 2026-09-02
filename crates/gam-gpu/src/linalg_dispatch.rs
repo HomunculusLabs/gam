@@ -925,25 +925,6 @@ impl ResidentDesignGram {
 #[cfg(target_os = "linux")]
 const LEVERAGE_CHUNKS_PER_DEVICE: usize = 4;
 
-/// Byte-balanced row-chunk width for the spectral leverage stream, mirroring
-/// the CPU `byte_balanced_row_chunk` sizing (≈8 MiB live blocks) so a single
-/// tile's `(chunk × p)` row slice plus `(chunk × rank)` GEMM output stay within
-/// the per-device staging budget.
-#[cfg(target_os = "linux")]
-#[inline]
-fn leverage_chunk_rows(cols: usize, n_rows: usize) -> usize {
-    // Imported, not transcribed (#2704): this was a byte-identical copy of
-    // `gam-solve`'s `byte_balanced_row_chunk`, differing only in the final
-    // `.min(n_rows.max(1))`. That tail difference is left alone here — it is
-    // a behaviour question, not a duplication one.
-    const TARGET_BYTES: usize = gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
-    const MIN_CHUNK_ROWS: usize = 512;
-    let bytes_per_row = cols.max(1) * std::mem::size_of::<f64>();
-    (TARGET_BYTES / bytes_per_row)
-        .max(MIN_CHUNK_ROWS)
-        .min(n_rows.max(1))
-}
-
 /// GPU-offloaded spectral leverage diagonal `h[i] = ‖(X G)_{i,:}‖²`.
 ///
 /// `G` is the `(p × rank)` spectral factor with `G_ε(H) = G Gᵀ`; the per-row
@@ -994,7 +975,7 @@ pub fn try_fast_spectral_leverage_diagonal(
         // diagonal is the same O(n·p·rank)-class dense pass over the design.
         let runtime = route_through_gpu(DispatchOp::XtDiagX { n, p })?;
         let device_count = runtime.device_count().max(1);
-        let byte_chunk = leverage_chunk_rows(p + rank, n);
+        let byte_chunk = gam_runtime::resource::byte_balanced_row_chunk(p + rank, n);
         let target_chunks = device_count
             .saturating_mul(LEVERAGE_CHUNKS_PER_DEVICE)
             .max(1);

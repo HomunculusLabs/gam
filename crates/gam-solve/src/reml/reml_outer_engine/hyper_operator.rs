@@ -980,21 +980,10 @@ impl HyperOperator for ImplicitHyperOperator {
     }
 }
 
-/// Row-block size that keeps each streamed `n × cols` chunk near an 8 MiB
-/// working set, with a 512-row floor so a wide design still makes useful BLAS-3
-/// progress per block, capped at the total row count. Shared by the implicit
-/// operator's row-streaming kernels so they cannot drift apart.
-pub(crate) fn byte_balanced_row_chunk(cols: usize, n_rows: usize) -> usize {
-    // Imported, not transcribed (#2704). This function's doc claims its
-    // kernels "cannot drift apart"; that held within this crate while the
-    // target was a local literal that `gam-gpu` had also transcribed.
-    const TARGET_BYTES: usize = gam_runtime::resource::LIBRARY_ROW_CHUNK_TARGET_BYTES;
-    const MIN_CHUNK_ROWS: usize = 512;
-    let bytes_per_row = cols.max(1) * std::mem::size_of::<f64>();
-    (TARGET_BYTES / bytes_per_row)
-        .max(MIN_CHUNK_ROWS)
-        .min(n_rows)
-}
+/// The library's ONE row-chunk rule, re-exported for the implicit operator's
+/// row-streaming kernels: the definition lives beside the byte target it is
+/// derived from, shared with the GPU leverage kernel.
+pub(crate) use gam_runtime::resource::byte_balanced_row_chunk;
 
 impl ImplicitHyperOperator {
     /// Chunked `X · F` via faer SIMD-parallel GEMM. The chunk-row sizing

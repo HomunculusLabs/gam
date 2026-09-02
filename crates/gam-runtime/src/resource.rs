@@ -28,6 +28,20 @@ pub use crate::cgroup_memory::{
 /// Import this constant instead, or derive from it under a name.
 pub const LIBRARY_ROW_CHUNK_TARGET_BYTES: usize = 8 * 1024 * 1024;
 
+/// Row-block size that keeps each streamed `rows × cols` `f64` chunk near the
+/// library row-chunk target, with a 512-row floor so a wide design still makes
+/// useful BLAS-3 progress per block, capped at the total row count and never
+/// zero (a zero-row chunk is not a chunk; every consumer strides by it). The
+/// ONE row-chunk rule for streamed dense kernels — CPU (`gam-solve`) and GPU
+/// (`gam-gpu`) alike — so the two cannot drift apart again (#2469, #2704).
+pub fn byte_balanced_row_chunk(cols: usize, n_rows: usize) -> usize {
+    const MIN_CHUNK_ROWS: usize = 512;
+    let bytes_per_row = cols.max(1) * std::mem::size_of::<f64>();
+    (LIBRARY_ROW_CHUNK_TARGET_BYTES / bytes_per_row)
+        .max(MIN_CHUNK_ROWS)
+        .min(n_rows.max(1))
+}
+
 #[derive(Clone, Debug)]
 pub struct ResourcePolicy {
     pub max_single_materialization_bytes: usize,

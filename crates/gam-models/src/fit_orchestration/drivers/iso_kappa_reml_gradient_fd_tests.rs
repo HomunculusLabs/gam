@@ -38,6 +38,183 @@ mod iso_kappa_reml_gradient_fd_tests {
     };
     use ndarray::{Array1, Array2, s};
 
+/// gam#2735 — the PER-AXIS ψ gate, and the reason it lives beside the
+/// isotropic one rather than in `gam-terms`.
+///
+/// The unit gate in `zz_duchon_axis_psi_2735_tests` verifies the per-axis
+/// derivative of each penalty BLOCK. That is necessary and not sufficient: the
+/// outer REML gradient the κ-optimizer follows also carries the design
+/// derivative, the `tr(S⁺ Ṡ)` log-determinant term, and the moving-subspace
+/// contribution, none of which a block-level test can see. This runs the SAME
+/// self-certifying Ridders oracle the isotropic arm is gated by — central
+/// differences of the production criterion `evaluate_cost_only` against
+/// `evaluate_joint_reml_outer_eval_at_theta` — over a θ whose ψ half is now
+/// TWO raw per-axis coordinates rather than one isotropic log-κ.
+///
+/// The fixture's own topology assertion (`dims_per_term == [2]`) is half the
+/// gate: a regression that re-froze Duchon anisotropy would fail there, before
+/// any gradient is compared.
+#[test]
+fn aniso_psi_duchon_gaussian_joint_gradient_matches_finite_difference_2735() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_aniso_2d",
+        80,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "anisotropic Duchon Gaussian n=80 per-axis ψ FD failed; worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// gam#979 — the benchmark's marginal-slope arms enrol PER-AXIS ψ on the
+/// 16-D order-0 power-9 Duchon term (38 outer coordinates, 32 of them ψ), and
+/// the pinned post-fix rigid arm stalled with `|g| ≈ 2.6` over its last thirty
+/// BFGS iterations while every step passed the strong-Wolfe test — the
+/// signature of a direction that is not the gradient. Every other gate here
+/// is isotropic; this one differentiates all sixteen per-axis coordinates of
+/// the charted design and the charted operator penalties at the benchmark's
+/// shape.
+#[test]
+fn aniso_psi_duchon_order0_power9_16d_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_aniso_order0_power9_16d_centers24",
+        1700,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "anisotropic 16-D order-0 power-9 Duchon Gaussian per-axis ψ FD failed; worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// gam#979 — the production configuration of the benchmark's term, exactly:
+/// 16-D, order 0, power 9, 24 centers, Primary penalty only (the formula
+/// builder's `all_disabled()` operator penalties), isotropic ψ (the CTN
+/// preprocessor's arm).
+#[test]
+fn iso_kappa_duchon_order0_power9_16d_noops_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_order0_power9_16d_centers24_noops",
+        1700,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "16-D order-0 power-9 Primary-only iso-κ FD failed; worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// gam#979 — the marginal-slope arms' configuration: the same term with the
+/// CLI's `--scale-dims` sentinel, which enrols sixteen per-axis ψ coordinates
+/// (the rigid arm's outer problem has 32 of them on two such terms, and its
+/// BFGS stalled at `|g| ≈ 2.6` with every strong-Wolfe step accepted).
+#[test]
+fn aniso_psi_duchon_order0_power9_16d_noops_scaledims_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_scaledims_order0_power9_16d_centers24_noops",
+        1700,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "16-D order-0 power-9 Primary-only per-axis ψ FD failed; worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+#[test]
+fn iso_kappa_duchon_binomial_probit_joint_gradient_matches_finite_difference() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_probit_n80",
+        80,
+        LikelihoodSpec::binomial_probit(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "Duchon BinomialProbit n=80 FD failed; worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// Shared driver for iso-κ joint REML gradient FD variants. Returns the
+/// worst psi rel_err across the four theta probes (zero / psi_only / base /
+/// alt) and panics with full violations only if `assert_pass` is true.
+/// Knobs let one-at-a-time variants of the original BinomialProbit Duchon
+/// failure isolate which dimension triggers the analytic-vs-FD blow-up.
+///
+/// `well_conditioned` selects a label set that keeps the inner probit fit well
+/// inside the smooth IRLS regime (μ near ½, max|η| small). This matters at
+/// small n: the analytic ψ=log κ outer gradient is mathematically exact (the
+/// #901 intrinsic-pseudo-logdet kernel), but its GLM cubic-curvature trace term
+/// `tr(H_pen⁺ · Xᵀdiag(c⊙X_ψβ̂)X)` is the near-cancellation of two O(10³) halves,
+/// so it amplifies the inner PIRLS stationarity floor (‖g‖≈2e-6, the LM-ridge
+/// noise floor on near-separable binary data) by ~1.5e3 ≈ 3e-3. Under genuine
+/// near-separation (max|η|≈8.8 at n=20 with the original boundary-split labels)
+/// BOTH the analytic gradient and the FD oracle inherit that floor on the
+/// converged β̂, and their independent ~2e-6 errors blow up to ~1e-2 in the
+/// amplified cubic — the FD comparison is then ill-posed, not the gradient.
+/// A balanced label set keeps the cancellation halves O(1) so the oracle
+/// verifies the *gradient formula* rather than the *conditioning floor*. Proof:
+/// the same n=20 Duchon-probit config matches FD to 6e-7 under balanced labels
+/// vs 8e-3 under the separated labels (and ρ matches to 1e-5 in both).
+///
+/// `extra_rho_probes` appends probes at large ρ in addition to the historical
+/// near-origin probes. Every historical probe sits at ‖ρ‖ ≤ 1, but the
+/// asymptote-rail certificate (#2348) that decides whether a railed joint fit
+/// may be minted reads the gradient AT the rail — so the analytic gradient in
+/// the only region the certificate consults had never been FD-checked by any
+/// gate. Pass `&[]` for the historical probe set. `#2425`.
+/// What one run of the iso-κ FD probe grid concluded.
+///
+/// A struct rather than a tuple because the fourth thing a caller needs is
+/// `unresolved` — the components the oracle declined to judge — and a gate that
+/// asserts only `violations.is_empty()` cannot tell "everything agreed" from
+/// "nothing could be measured". Both are named here so neither can be read as
+/// the other.
+struct IsoKappaFdReport {
+    pass: bool,
+    worst_psi_rel: f64,
+    violations: Vec<String>,
+    unresolved: Vec<String>,
+}
+
+fn iso_kappa_fd_variant_driver(
+    label: &str,
+    n: usize,
+    family: LikelihoodSpec,
+    skip_psi: bool,
+    well_conditioned: bool,
+    extra_rho_probes: &[f64],
+) -> IsoKappaFdReport {
+    let fixture = build_iso_kappa_fixture(label, n, family, well_conditioned);
+    let report = iso_kappa_fd_variant_driver_on(&fixture, label, skip_psi, extra_rho_probes);
+    // Every component the oracle declined to judge is printed by name, so a
+    // green verdict can be read together with what it did NOT measure.
+    for row in &report.unresolved {
+        eprintln!("[{label} UNRESOLVED] {row}");
+    }
+    report
+}
+
 /// The realized fixture behind [`iso_kappa_fd_variant_driver`], split out so a
 /// targeted diagnostic can probe ONE θ with its own finite-difference stencil
 /// instead of re-running the driver's whole probe grid at the driver's single
@@ -74,7 +251,7 @@ fn build_iso_kappa_fixture(
     // gam#2735: the anisotropic arm enrols `d` per-axis ψ coordinates instead
     // of one isotropic log-κ, so the same oracle differentiates every one of
     // them. Only meaningful for `d ≥ 2`.
-    let aniso = label.contains("_aniso") && two_d;
+    let aniso = (label.contains("_aniso") || label.contains("_scaledims")) && two_d;
     let mut data = Array2::<f64>::zeros((n, d));
     let mut y = Array1::<f64>::zeros(n);
     for i in 0..n {
@@ -181,12 +358,29 @@ fn build_iso_kappa_fixture(
                 // vector is the `auto_seed_aniso_contrasts` sentinel and would
                 // be replaced by knot-cloud geometry, which is a different
                 // (and here nearly symmetric) starting point.
-                aniso_log_scales: if aniso {
+                aniso_log_scales: if label.contains("_scaledims") {
+                    // gam#979 — the CLI's `--scale-dims` sentinel: an all-zero
+                    // vector that the forward resolves into knot-cloud
+                    // contrasts, exactly what the large-scale marginal-slope
+                    // arms ship (32 per-axis ψ on two 16-D terms).
+                    Some(vec![0.0; d])
+                } else if aniso {
                     Some((0..d).map(|a| 0.25 - 0.5 * a as f64).collect())
                 } else {
                     None
                 },
-                operator_penalties: DuchonOperatorPenaltySpec::default(),
+                // gam#979 — a `duchon(...)` term written in a CLI FORMULA gets
+                // `all_disabled()` operator penalties (`term_builder.rs`,
+                // gam#1718), so the benchmark's terms carry the Primary penalty
+                // only; `_noops` fixtures mirror that. Without the `_noops`
+                // token the fixture keeps mass + tension, which is what makes
+                // the operator-penalty jets observable — and what declines
+                // per-axis ψ at 16-D (`duchon_spec_supports_axis_psi`).
+                operator_penalties: if label.contains("_noops") {
+                    DuchonOperatorPenaltySpec::all_disabled()
+                } else {
+                    DuchonOperatorPenaltySpec::default()
+                },
                 boundary: OneDimensionalBoundary::Open,
             },
             input_scale: None,
@@ -259,7 +453,19 @@ fn duchon_nullspace_order_from_label(label: &str) -> DuchonNullspaceOrder {
 /// `"*_power9*"` selects the spectral power the large-scale CTN preprocessor
 /// ships; anything else keeps the historical `s = 1` fixture (gam#979).
 fn duchon_power_from_label(label: &str) -> f64 {
-    if label.contains("_power9") { 9.0 } else { 1.0 }
+    // `_power<N>` names the spectral power; absent, the historical fixtures
+    // are power 1.
+    label
+        .split("_power")
+        .nth(1)
+        .and_then(|rest| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<f64>()
+                .ok()
+        })
+        .unwrap_or(1.0)
 }
 
 /// `"*_16d*"` builds the benchmark's sixteen-PC cloud, `"*_2d"` the historical
@@ -327,6 +533,451 @@ impl IsoKappaFixture {
     fn external_opts(&self) -> ExternalOptimOptions {
         external_opts_for_design(&self.family, &self.frozen_design, &iso_kappa_fd_fit_options())
     }
+}
+
+fn iso_kappa_fd_variant_driver_on(
+    fixture: &IsoKappaFixture,
+    label: &str,
+    skip_psi: bool,
+    extra_rho_probes: &[f64],
+) -> IsoKappaFdReport {
+    let IsoKappaFixture {
+        data,
+        rho_dim,
+        psi_dim,
+        ..
+    } = fixture;
+    let (rho_dim, psi_dim) = (*rho_dim, *psi_dim);
+    let external_opts = fixture.external_opts();
+    let mut cache = fixture.cache();
+    let mut evaluator = fixture.evaluator(&external_opts);
+
+    let cost_at = |theta: &Array1<f64>,
+                   cache: &mut SingleBlockExactJointDesignCache<'_>,
+                   evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
+     -> f64 {
+        cache.ensure_theta(theta).unwrap_or_else(|e| panic!("{} failed: {:?}", "ensure_theta", e));
+        let design = cache.design();
+        evaluator
+            .evaluate_cost_only(
+                &design.design,
+                &design.penalties,
+                &design.nullspace_dims,
+                design.linear_constraints.clone(),
+                theta,
+                rho_dim,
+                None,
+                "iso-κ variant FD cost-only",
+                None,
+            )
+            .unwrap_or_else(|e| panic!("{} failed: {:?}", "cost-only eval", e))
+    };
+
+    let analytic_at = |theta: &Array1<f64>,
+                       cache: &mut SingleBlockExactJointDesignCache<'_>,
+                       evaluator: &mut gam_solve::estimate::ExternalJointHyperEvaluator<'_>|
+     -> (f64, Array1<f64>) {
+        cache.ensure_theta(theta).expect("ensure_theta");
+        let hyper_dirs = try_build_spatial_log_kappa_hyper_dirs(
+            data.view(),
+            cache.spec(),
+            cache.design(),
+            &cache.spatial_terms,
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "hyper dirs build", e))
+        .expect("hyper dirs present");
+        let (cost, grad, _hess) = evaluate_joint_reml_outer_eval_at_theta(
+            evaluator,
+            cache.design(),
+            theta,
+            rho_dim,
+            hyper_dirs,
+            None,
+            gam_solve::rho_optimizer::OuterEvalOrder::ValueAndGradient,
+            None,
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "outer eval", e));
+        (cost, grad)
+    };
+
+    let theta_dim = rho_dim + psi_dim;
+    let theta_zero = Array1::<f64>::zeros(theta_dim);
+    let mut theta_base = Array1::<f64>::zeros(theta_dim);
+    for j in 0..rho_dim {
+        theta_base[j] = 0.2 - 0.1 * j as f64;
+    }
+    let mut theta_psi_only = Array1::<f64>::zeros(theta_dim);
+    for k in 0..psi_dim {
+        theta_psi_only[rho_dim + k] = 0.4;
+    }
+    let mut theta_alt = theta_base.clone();
+    for j in 0..rho_dim {
+        theta_alt[j] = 1.0 + 0.05 * j as f64;
+    }
+    for k in 0..psi_dim {
+        theta_alt[rho_dim + k] = 0.4;
+    }
+    // A LONGER kernel than the seed (gam#979): the CTN gate's `long_kernel`
+    // probe at ψ = −0.3 is where its analytic ψ-gradient blew up (−998 against
+    // a clean central difference of −0.2 at 16-D `Linear`); every probe above
+    // shortens the kernel or leaves it alone.
+    let mut theta_long = theta_base.clone();
+    for k in 0..psi_dim {
+        theta_long[rho_dim + k] = -0.3;
+    }
+
+    // Rail / ladder probes (#2425). For each requested ρ value the driver emits
+    // one probe per ρ coordinate holding that coordinate at the value, plus an
+    // all-ρ probe. `&[11.5]` sits a half e-fold inside `JOINT_RHO_BOUND = 12` so
+    // the centered stencil stays in the box; a longer ladder deliberately walks
+    // PAST the box, because the evaluator is defined on all of θ and the question
+    // "does V saturate at a λ=∞ face" is only answerable outside 12.
+    let mut rail_probes: Vec<(String, Array1<f64>)> = Vec::new();
+    for &value in extra_rho_probes {
+        for j in 0..rho_dim {
+            let mut theta_rail = theta_base.clone();
+            theta_rail[j] = value;
+            rail_probes.push((format!("rho{j}@{value}"), theta_rail));
+        }
+        let mut theta_all_rail = theta_base.clone();
+        for j in 0..rho_dim {
+            theta_all_rail[j] = value;
+        }
+        rail_probes.push((format!("rhoALL@{value}"), theta_all_rail));
+    }
+
+    // The oracle is SELF-CERTIFYING; there is no step to pick (#2461).
+    //
+    // Every earlier revision of this driver differentiated the criterion at one
+    // hard-wired step and reported the answer as fact. Both attempts to derive
+    // that step (`1e-5`, then `3e-4`) fixed it from a noise measurement taken at
+    // ONE probe — `psi_only`, `‖ρ‖ ≤ 1` — under the explicit assumption
+    // `S''' = O(1)`. A central difference's error is
+    //
+    //     ν/h  +  h²·S'''/6            (evaluator noise)  +  (truncation)
+    //
+    // and BOTH coefficients move by many orders across the probe grid this
+    // driver now walks. At `duchon_gaussian rho1@15` the ψ-direction third
+    // derivative is `≈ −9.0e7`, not `O(1)`: the criterion's ψ-profile there has
+    // characteristic scale `s = √(S'/S''') = 1.66e-3`, so a step of `3e-4` costs
+    // the sinc defect `(h/s)²/6 = 5.4e-3` — larger than `rel_tol`, constant in
+    // ρ (because the criterion saturates, so `S'` and `S'''` saturate together),
+    // and therefore indistinguishable from a formula error. That artifact was
+    // filed as #2461. At the other end, ρ ≈ 30, the evaluator's noise floor is
+    // nowhere near the `ν ≈ 1.5e-11` measured near the origin, and the same
+    // fixed step reports a confident `-1.9e-1` against a true gradient of
+    // `+1.3e-7`.
+    //
+    // A gate cannot pick one step for a grid like that, so it must not try.
+    // `ridders_derivative` runs a shrinking geometric ladder of central
+    // differences, Neville-extrapolates across it, and returns the extrapolant
+    // together with an estimate of ITS OWN error. Three consequences, all of
+    // which this driver relies on:
+    //
+    //   * agreement is judged against `rel_tol·denom + oracle uncertainty`, so
+    //     the oracle's error is never charged to the analytic gradient;
+    //   * a component the ladder cannot resolve is reported UNRESOLVED and is
+    //     not a violation — an unresolvable component is a fact about the
+    //     objective at that θ, not about the gradient formula;
+    //   * `worst_psi_rel` is measured against the extrapolant, so it is a
+    //     property of the gradient rather than of the step.
+    let ridders = gam_linalg::test_support::fd_checker::RiddersConfig::default();
+    let rel_tol = 5e-3_f64;
+    // Below this the `rel_tol` band would be tighter than the criterion's own
+    // evaluation noise, which no oracle can see through; it is the historical
+    // `denom` floor, kept because it plays the same role.
+    let abs_floor = 1e-3_f64;
+    let mut violations: Vec<String> = Vec::new();
+    let mut worst_psi_rel = 0.0_f64;
+    let mut unresolved: Vec<String> = Vec::new();
+    // Components the oracle resolved and judged (agree or disagree): the gate
+    // is vacuous unless at least one component was actually measured.
+    let mut judged = 0usize;
+    let base_probes: [(&str, &Array1<f64>); 5] = [
+        ("zero", &theta_zero),
+        ("psi_only", &theta_psi_only),
+        ("base", &theta_base),
+        ("alt", &theta_alt),
+        ("long", &theta_long),
+    ];
+    let all_probes: Vec<(&str, &Array1<f64>)> = base_probes
+        .into_iter()
+        .chain(rail_probes.iter().map(|(n, t)| (n.as_str(), t)))
+        .collect();
+    for (probe, theta) in all_probes {
+        let (cost_an, grad_an) = analytic_at(theta, &mut cache, &mut evaluator);
+        assert!(cost_an.is_finite(), "{label} {probe}: cost not finite");
+        // Objective↔gradient desync probe: the analytic gradient path
+        // (evaluate_joint_reml_outer_eval_at_theta) and the cost-only FD
+        // path (evaluate_cost_only) must agree on the COST itself at the
+        // unperturbed θ. If they disagree, FD differences a different
+        // function than the gradient differentiates and no gradient fix
+        // can make them match. eprintln for the diagnostic build only.
+        let cost_via_fd_path = cost_at(theta, &mut cache, &mut evaluator);
+        eprintln!(
+            "[{label} {probe}] COST an={:+.10e} fd_path={:+.10e} diff={:.3e}",
+            cost_an,
+            cost_via_fd_path,
+            (cost_an - cost_via_fd_path).abs()
+        );
+        // ψ-profile scan (gam#979 diagnostic): the criterion on a uniform
+        // ladder around this probe's ψ, with its forward differences, so a
+        // jump or kink in V(ψ) is read off directly instead of inferred from
+        // an erratic Ridders ladder. Printed always; asserted nowhere.
+        if fixture.psi_dim == 1 {
+            let j = fixture.rho_dim;
+            let h = 5.0e-4_f64;
+            let mut previous: Option<f64> = None;
+            let mut line = String::new();
+            for k in -8..=8_i32 {
+                let mut probe_theta = theta.clone();
+                probe_theta[j] += f64::from(k) * h;
+                let v = cost_at(&probe_theta, &mut cache, &mut evaluator);
+                let slope = previous.map(|p| (v - p) / h);
+                line.push_str(&format!(
+                    " k={k:+}:dV={:+.3e}{}",
+                    v - cost_via_fd_path,
+                    slope.map(|s| format!("(D={s:+.4e})")).unwrap_or_default()
+                ));
+                previous = Some(v);
+            }
+            eprintln!("[{label} {probe}] PSI-SCAN h={h:.1e}{line}");
+        }
+        for j in 0..theta_dim {
+            let is_psi = j >= rho_dim;
+            if skip_psi && is_psi {
+                continue;
+            }
+            let measured = gam_linalg::test_support::fd_checker::ridders_derivative(
+                |t| {
+                    let mut probe_theta = theta.clone();
+                    probe_theta[j] += t;
+                    cost_at(&probe_theta, &mut cache, &mut evaluator)
+                },
+                ridders,
+            );
+            let fd = measured.value;
+            let analytic = grad_an[j];
+            let denom = fd.abs().max(analytic.abs()).max(abs_floor);
+            let gap = (analytic - fd).abs();
+            let rel = gap / denom;
+            let verdict = measured.judge(analytic, rel_tol, abs_floor);
+            let kind = if is_psi { "psi" } else { "rho" };
+            eprintln!(
+                "[{label} {probe}] {kind} j={j} an={analytic:+.4e} fd={fd:+.4e} rel={rel:.3e} \
+                 unc={:.3e} step={:.1e} order={} {verdict:?}",
+                measured.uncertainty, measured.step, measured.order,
+            );
+            if verdict != gam_linalg::test_support::fd_checker::FdVerdict::Agree {
+                // The ladder is the evidence for whichever way the verdict
+                // went; printing it here is what let #2461 be settled from a
+                // log instead of a re-run.
+                eprintln!(
+                    "[{label} {probe}] {kind} j={j} LADDER {}",
+                    measured.ladder_report()
+                );
+            }
+            match verdict {
+                gam_linalg::test_support::fd_checker::FdVerdict::Unresolved => {
+                    unresolved.push(format!(
+                        "{probe} {kind} j={j}: analytic={analytic:+.6e} fd={fd:+.6e} \
+                         unc={:.3e} at h={:.1e} (order {})",
+                        measured.uncertainty, measured.step, measured.order
+                    ));
+                    continue;
+                }
+                gam_linalg::test_support::fd_checker::FdVerdict::Disagree => {
+                    judged += 1;
+                    violations.push(format!(
+                        "{probe} {kind} j={j}: analytic={analytic:+.6e} fd={fd:+.6e} \
+                         rel={rel:.3e} (oracle unc={:.3e} at h={:.1e}, order {})",
+                        measured.uncertainty, measured.step, measured.order
+                    ));
+                }
+                gam_linalg::test_support::fd_checker::FdVerdict::Agree => {
+                    judged += 1;
+                }
+            }
+            if is_psi && rel > worst_psi_rel {
+                worst_psi_rel = rel;
+            }
+        }
+    }
+    let pass = violations.is_empty() && judged > 0;
+    eprintln!(
+        "[{label} SUMMARY] pass={pass} worst_psi_rel={worst_psi_rel:.3e} \
+             judged={judged} violations={} unresolved={}",
+        violations.len(),
+        unresolved.len()
+    );
+    IsoKappaFdReport {
+        pass,
+        worst_psi_rel,
+        violations,
+        unresolved,
+    }
+}
+
+/// gam#979 — the shipped large-scale CTN preprocessor chart, on the standard
+/// Gaussian REML evaluator: hybrid Duchon–Matérn with the constant-only null
+/// space (`order=0` ⇒ `p = 1`) and spectral power `s = 9`. Every other Duchon
+/// ψ gate pins `(Linear, 1)`; this one differences the SAME production criterion
+/// at the orders the benchmark actually runs, so a κ-derivative term that is
+/// only wrong when the polynomial tail is a lone constant cannot hide behind
+/// the `Linear` fixtures.
+#[test]
+fn iso_kappa_duchon_order0_power9_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_order0_power9",
+        80,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "hybrid Duchon (order=0, power=9) Gaussian iso-κ outer-gradient FD failed; \
+         worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// The 2-D twin of `iso_kappa_duchon_order0_power9_gaussian_identity_fd`: the
+/// cross-axis operator blocks only carry off-diagonal structure when `d ≥ 2`
+/// (gam#1122), and the constant-only null space leaves `d` more kernel columns
+/// than `Linear` does, so the two dimensions probe different column layouts.
+#[test]
+fn iso_kappa_duchon_order0_power9_2d_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_order0_power9_2d",
+        120,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "hybrid Duchon (order=0, power=9) 2-D Gaussian iso-κ outer-gradient FD failed; \
+         worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// gam#979 — the benchmark's own shape: sixteen standardized-PC axes, 24
+/// farthest-point centers, and enough rows that every row-center sweep runs
+/// through the certified radial profile rather than pairwise exact kernel
+/// evaluation (`RADIAL_PROFILE_MIN_PAIRS`). The 1-D and 2-D order-0 gates pass;
+/// the shipped `gam fit --transformation-normal` and the standard Gaussian
+/// joint search both fail their strong-Wolfe searches at THIS shape, so this is
+/// the gate that has to fail before any repair is believed.
+#[test]
+fn iso_kappa_duchon_order0_power9_16d_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_order0_power9_16d_centers24",
+        1700,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "hybrid Duchon (order=0, power=9) 16-D Gaussian iso-κ outer-gradient FD failed; \
+         worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// The `Linear` null-space control at the benchmark shape: the same rows,
+/// centers, and power, with the polynomial tail the other Duchon gates pin.
+#[test]
+fn iso_kappa_duchon_linear_power9_16d_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian_linear_power9_16d_centers24",
+        1700,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "hybrid Duchon (order=1, power=9) 16-D Gaussian iso-κ outer-gradient FD failed; \
+         worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+#[test]
+fn iso_kappa_duchon_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "duchon_gaussian",
+        80,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "Gaussian Identity FD failed; worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+/// The Matérn ν=5/2 analogue of `iso_kappa_duchon_gaussian_identity_fd`.
+///
+/// The isotropic-analytic κ optimizer was observed to stall at n≳1000 on a
+/// well-conditioned 1-D Matérn Gaussian fit (grad_norm ≈ 0.5·|f|, nowhere
+/// near stationary) while the Duchon path converges — and the Matérn iso-κ
+/// *outer* REML gradient had no end-to-end FD pin (only basis-level log-κ
+/// derivative tests). This closes that gap: it differences the same exact
+/// analytic ψ=log κ outer gradient that the optimizer follows against a
+/// central finite difference of the REML cost. If the analytic gradient is
+/// wrong, the optimizer's stall is explained and this fails loudly.
+#[test]
+fn iso_kappa_matern_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "matern_gaussian",
+        80,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "Matérn iso-κ Gaussian-identity outer-gradient FD failed; \
+             worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
+}
+/// Fast unit-level reproduction of the #1122 stall: an ordinary 2-D
+/// `matern(x1, x2)` Gaussian fit whose isotropic-κ outer REML gradient must
+/// match a central finite difference of the production REML cost. This is the
+/// d=2 analogue of `iso_kappa_matern_gaussian_identity_fd`: the 1-D Matérn
+/// already matched FD, so the desync that stalled the κ-optimizer at its
+/// iteration cap (analytic ≠ FD on `psi_kappa`, #1122) lives in the cross-axis
+/// tension / mixed-curvature stiffness operator blocks that only carry
+/// off-diagonal structure when d ≥ 2.
+#[test]
+fn iso_kappa_matern_2d_gaussian_identity_fd() {
+    let IsoKappaFdReport { pass, worst_psi_rel: worst, violations, .. } = iso_kappa_fd_variant_driver(
+        "matern_gaussian_2d",
+        120,
+        LikelihoodSpec::gaussian_identity(),
+        false,
+        false,
+        &[],
+    );
+    assert!(
+        pass,
+        "Matérn 2-D iso-κ Gaussian-identity outer-gradient FD failed (the #1122 \
+             cross-axis operator-penalty ψ-derivative desync); worst_psi_rel={worst:.3e}\n  {}",
+        violations.join("\n  ")
+    );
 }
 
 /// DIAGNOSTIC (#1122): is the residual ~1.6e-3 relative gap in the production
@@ -2305,11 +2956,15 @@ fn duchon_psi_component_report(label: &str, n: usize) -> DuchonPsiComponentRepor
         (x, penalties)
     };
     // Two central-difference steps, ratio 2: a truncation-limited estimate
-    // moves by 4× between them, a defect does not.
+    // moves by 4× between them, a defect does not — and the Richardson
+    // combination `(4·D(h) − D(2h))/3` removes the `O(h²)` term outright, so
+    // the reported gap is the formula's, not the oracle's.
     let mut best_design_gap = f64::INFINITY;
     let mut design_norm_ratio = f64::NAN;
     let mut best_penalty_gaps = vec![f64::INFINITY; penalty_components.len()];
     let mut penalty_norm_ratios = vec![f64::NAN; penalty_components.len()];
+    let mut design_fd_by_step: Vec<Array2<f64>> = Vec::new();
+    let mut penalty_fd_by_step: Vec<Vec<Array2<f64>>> = Vec::new();
     for &h in &[2.0e-3_f64, 1.0e-3] {
         let (x_plus, s_plus) = realize(&mut cache, h);
         let (x_minus, s_minus) = realize(&mut cache, -h);
@@ -2324,6 +2979,7 @@ fn duchon_psi_component_report(label: &str, n: usize) -> DuchonPsiComponentRepor
             best_design_gap = design_gap;
             design_norm_ratio = frobenius(&x_psi_an) / frobenius(&x_fd).max(1e-300);
         }
+        let mut penalty_fds = Vec::with_capacity(penalty_components.len());
         for (k, (idx, analytic)) in penalty_components.iter().enumerate() {
             let s_fd = (&s_plus[k] - &s_minus[k]) / (2.0 * h);
             let gap = frobenius(&(analytic - &s_fd)) / frobenius(&s_fd).max(1e-300);
@@ -2335,6 +2991,28 @@ fn duchon_psi_component_report(label: &str, n: usize) -> DuchonPsiComponentRepor
             if gap < best_penalty_gaps[k] {
                 best_penalty_gaps[k] = gap;
                 penalty_norm_ratios[k] = frobenius(analytic) / frobenius(&s_fd).max(1e-300);
+            }
+            penalty_fds.push(s_fd);
+        }
+        design_fd_by_step.push(x_fd);
+        penalty_fd_by_step.push(penalty_fds);
+    }
+    // Richardson: steps were pushed as [2h, h].
+    if design_fd_by_step.len() == 2 {
+        let x_rich = (&design_fd_by_step[1] * 4.0 - &design_fd_by_step[0]) / 3.0;
+        let gap = frobenius(&(&x_psi_an - &x_rich)) / frobenius(&x_rich).max(1e-300);
+        eprintln!("[{label} COMPONENT] Richardson design rel_gap={gap:.3e}");
+        if gap < best_design_gap {
+            best_design_gap = gap;
+            design_norm_ratio = frobenius(&x_psi_an) / frobenius(&x_rich).max(1e-300);
+        }
+        for (k, (idx, analytic)) in penalty_components.iter().enumerate() {
+            let s_rich = (&penalty_fd_by_step[1][k] * 4.0 - &penalty_fd_by_step[0][k]) / 3.0;
+            let gap = frobenius(&(analytic - &s_rich)) / frobenius(&s_rich).max(1e-300);
+            eprintln!("[{label} COMPONENT] Richardson penalty[{idx}] rel_gap={gap:.3e}");
+            if gap < best_penalty_gaps[k] {
+                best_penalty_gaps[k] = gap;
+                penalty_norm_ratios[k] = frobenius(analytic) / frobenius(&s_rich).max(1e-300);
             }
         }
     }
@@ -2376,10 +3054,15 @@ fn assert_duchon_psi_components(label: &str, n: usize) {
     }
 }
 
-/// gam#979 — the `Linear` control at 3-D, power 9.
+/// gam#979 — the `Linear` control at 3-D. Power 2, not 9: with `2p ≥ d` the
+/// hybrid kernel takes the partial-fraction expansion (the stable integral
+/// needs `2p < d`), and at power 9 that expansion cancels catastrophically —
+/// its forward penalties are not smooth in ψ (the central difference of the
+/// mass Gram changed 3.6× between `h = 1e-3` and `2e-3`), so no oracle exists
+/// there. At power 2 the expansion is well-conditioned.
 #[test]
-fn duchon_hybrid_psi_components_match_fd_linear_power9_3d() {
-    assert_duchon_psi_components("duchon_gaussian_linear_power9_3d", 240);
+fn duchon_hybrid_psi_components_match_fd_linear_power2_3d() {
+    assert_duchon_psi_components("duchon_gaussian_linear_power2_3d", 240);
 }
 
 /// gam#979 — the shipped null-space order at 3-D, power 9.

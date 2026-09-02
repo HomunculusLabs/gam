@@ -21,6 +21,7 @@ pub mod paired_timing;
 pub mod probability;
 pub mod quadrature;
 pub mod score_opt;
+pub mod serial_dependence;
 pub mod special;
 
 #[cfg(test)]
