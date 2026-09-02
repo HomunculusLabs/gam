@@ -81,12 +81,6 @@ pub(crate) struct FitEventsArgs {
     pub(crate) formula: String,
     #[arg(
         long,
-        default_value_t = 1,
-        help = "Number of latent atoms offered; each carries its own REML ridge and an unsupported one is switched off by it"
-    )]
-    pub(crate) atoms: usize,
-    #[arg(
-        long,
         value_delimiter = ',',
         value_name = "NAME:KIND",
         help = "The mark vocabulary with each mark's kind (recurrent, once or terminal), e.g. relapse:recurrent,death:terminal; without it the observed marks, all recurrent"
