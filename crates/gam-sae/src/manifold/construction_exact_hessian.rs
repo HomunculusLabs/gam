@@ -1800,18 +1800,19 @@ impl SaeManifoldTerm {
         solve_exact_stationarity_preconditioned(rhs, &apply_a, &apply_b, precondition)
     }
 
-    /// PATH C (#2253) — the per-flat-coordinate penalty curvature operators
-    /// `M_i = ∂H/∂ρ_i` at a frozen inner state, keyed by flat outer coordinate.
-    /// Extracted from [`Self::logdet_daleckii_krein_hessian`] (ch4) so ch4's
-    /// Daleckii–Krein trace and ch5's forward-sensitivity twist read ONE
-    /// operator map (value/gradient/Hessian never differentiate divergent
-    /// curvatures). Each `M_i` is degree-one in `exp(ρ_i)`: `λ_k·½(S_k+S_kᵀ)⊗I`
+    /// PATH C (#2253) — the raw per-flat-coordinate penalty curvature operators
+    /// `M_i = ∂H_raw/∂ρ_i` at a frozen inner state, keyed by flat outer coordinate.
+    /// This is the single assembly source for both consumers: dense statistical
+    /// channels use its raw product, while arrow-factor channels pass that product
+    /// through the conditioning differential in
+    /// [`Self::penalty_curvature_operators_by_flat`]. Each `M_i` is degree-one in
+    /// `exp(ρ_i)`: `λ_k·½(S_k+S_kᵀ)⊗I`
     /// on atom `k`'s β-block for smoothing; `w_row·max(α cos κt,0)` on the active
     /// row-local t-slots for periodic ARD (`w_row·α` Euclidean); the softmax
     /// Gershgorin majorizer `w_row·diag(Σ_j|H_kj|)` on the logit slots for the
     /// sparse coordinate. The sparse refusals (compact top-k layout, non-softmax
     /// prior) match ch4's so both channels decline the same unmodelled cases.
-    pub(crate) fn penalty_curvature_operators_by_flat(
+    fn raw_penalty_curvature_operators_by_flat(
         &self,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
@@ -1999,24 +2000,28 @@ impl SaeManifoldTerm {
             }
         }
 
-        // #2500 — every operator above differentiates the RAW per-row block, but
-        // the block the arrow factors carry (and hence `apply_cached_arrow_hessian`,
-        // `A = B + ΔC`, and every inverse built on them) is the spectrally
-        // CONDITIONED `Φ(H_raw)`: each eigen-direction at or below the deflation
-        // floor — which INCLUDES every negative one — is replaced by the
-        // ρ-independent unit stiffness. So the derivative of the installed operator
-        // is the Daleckii–Krein differential `DΦ[∂H_raw/∂ρ]`, not `∂H_raw/∂ρ`, and a
-        // raw operator over-claims curvature on exactly the deflated directions.
-        //
-        // This is the operator form of the correction the B-majorizer trace channels
-        // already subtract (`deflation_block_correction`), applied here once for
-        // EVERY coordinate rather than per channel — measured on a straddling
-        // threshold-gate fixture the raw operator missed the dense exact-A sparse
-        // logdet trace by 13% (0.4401 analytic vs 0.5081 FD) with all ten rows
-        // deflated, and matched to nine digits with none.
-        self.apply_row_deflation_map_derivative(cache, &mut c_by_flat)?;
-
         Ok(c_by_flat)
+    }
+
+    /// Derivatives of the conditioned operator installed in the row factors.
+    ///
+    /// The dense exact-`A` value differentiates the raw statistical operator and
+    /// consumes [`Self::raw_penalty_curvature_operators_by_flat`] directly. Arrow
+    /// selected-inverse, sensitivity, and Hessian channels instead contract
+    /// against `Φ(H_raw)`, so they push the raw derivatives through `DΦ` once.
+    /// Every null or negative row direction replaced by unit stiffness therefore
+    /// has a rho-independent installed tangent, while healthy raw directions pass
+    /// through unchanged.
+    /// Naming both products prevents a dense spectral value from silently taking
+    /// the arrow-conditioned tangent (#2515).
+    pub(crate) fn penalty_curvature_operators_by_flat(
+        &self,
+        rho: &SaeManifoldRho,
+        cache: &ArrowFactorCache,
+    ) -> Result<std::collections::BTreeMap<usize, Array2<f64>>, String> {
+        let mut operators = self.raw_penalty_curvature_operators_by_flat(rho, cache)?;
+        self.apply_row_deflation_map_derivative(cache, &mut operators)?;
+        Ok(operators)
     }
 
     /// PATH C (#2253) CH5 — the ρ-derivative of the EXACT-minus-majorizer
@@ -5221,7 +5226,9 @@ impl SaeManifoldTerm {
             self.priced_ard_adjoint_extras(rho, cache, &geometry)?;
         let a_pinv = &geometry.priced_joint_inverse + &priced_k_joint;
         let a_tt_pinv = &geometry.priced_coordinate_inverse + &priced_k_tt;
-        let m = self.penalty_curvature_operators_by_flat(rho, cache)?;
+        // This value diagonalizes `A_raw = B_raw + ΔC`; differentiate that raw
+        // operator, not the row-conditioned operator carried by arrow factors.
+        let m = self.raw_penalty_curvature_operators_by_flat(rho, cache)?;
         let d = self.exact_stationarity_penalty_derivative_delta_by_flat(rho, cache)?;
         let frob = |x: &Array2<f64>, y: &Array2<f64>| -> f64 { (x * y).sum() };
         let mut logdet_trace = Array1::<f64>::zeros(n_params);
