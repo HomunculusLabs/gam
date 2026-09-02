@@ -2069,6 +2069,29 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
         .expect("#2515: the exact-A operator derivative assembles")
         .remove(&sparse)
         .expect("#2515: the sparse exact-A operator derivative exists");
+    let spectral_geometry = term
+        .materialize_exact_hessian_quotient_geometry(&rho, target.view(), &b_cache)
+        .expect("#2515: the exact-A quotient geometry materializes");
+    let (priced_delta_trace, _, priced_k_joint, priced_k_tt) = term
+        .priced_ard_adjoint_extras(&rho, &b_cache, &spectral_geometry)
+        .expect("#2515: the clamp-pricing derivative pieces assemble");
+    let frob = |left: &Array2<f64>, right: &Array2<f64>| (left * right).sum();
+    let inverse_trace = 0.5
+        * (frob(&spectral_geometry.priced_joint_inverse, &analytic_da)
+            - frob(
+                &spectral_geometry.priced_coordinate_inverse,
+                &analytic_da,
+            ));
+    let eigenvector_trace =
+        0.5 * (frob(&priced_k_joint, &analytic_da) - frob(&priced_k_tt, &analytic_da));
+    let explicit_pricing_trace = priced_delta_trace[sparse];
+    println!(
+        "[#2515 QUOTIENT] dense sparse trace pieces: inverse={inverse_trace:+.12e} \
+         clamp-eigenvector={eigenvector_trace:+.12e} \
+         explicit-clamp={explicit_pricing_trace:+.12e} \
+         sum={:+.12e}",
+        inverse_trace + eigenvector_trace + explicit_pricing_trace,
+    );
     let (probes, sinv) = full_basis_probe_bundle(&a_cache);
     let arrow_joint_trace = term
         .assignment_log_strength_hessian_trace_from_probes(
