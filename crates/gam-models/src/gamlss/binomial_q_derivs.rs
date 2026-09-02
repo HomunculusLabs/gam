@@ -11,7 +11,7 @@
 //! every consumer selects its required prefix from that stack. Other links use
 //! the same generic inverse-link jet composition. All functions here are pure.
 
-use gam_math::jet_tower::{Tower3, Tower4};
+use gam_math::jet_tower::Tower4;
 use gam_math::probability::normal_logcdf_derivatives;
 use gam_problem::{InverseLink, StandardLink};
 use gam_solve::mixture_link::inverse_link_pdfthird_derivative_for_inverse_link;
@@ -64,28 +64,6 @@ fn binomial_loglik_q_tower(y: f64, mu: f64, d1: f64, d2: f64, d3: f64, d4: f64) 
     mu_tower.t4[0][0][0][0] = d4;
     // ℓ(μ) via Faà di Bruno; slot-0 (the value f(u)) is unused downstream.
     mu_tower.compose_unary([0.0, ellmu, ellmumu, ellmumum, ellmumumum])
-}
-
-/// The third-order truncation of [`binomial_loglik_q_tower`] as a `Tower3<1>`.
-///
-/// The score/curvature/third consumer
-/// ([`binomial_score_curvaturethird_from_jet`]) reads only the `g`/`h`/`t3`
-/// channels — never `t4`. The order-≤3 Faà-di-Bruno partitions never reach the
-/// `f⁗` stack slot (`ellmumumum` and beyond) nor the inner `t4` tensor, so a
-/// `Tower3<1>` produces those three channels BIT-IDENTICALLY to the full
-/// `Tower4<1>` while skipping the discarded fourth-order seeding, composition,
-/// and tensor (proven by the standalone `to_bits` oracle for #1591). The
-/// fourth-derivative consumer keeps using [`binomial_loglik_q_tower`].
-#[inline]
-fn binomial_loglik_q_tower3(y: f64, mu: f64, d1: f64, d2: f64, d3: f64) -> Tower3<1> {
-    let (ellmu, ellmumu, ellmumum, _ellmumumum) = binomial_loglik_mu_derivatives(y, mu);
-    // μ(q) as the inner jet: value mu, derivatives d1..d3 in the single slot.
-    let mut mu_tower = Tower3::<1>::constant(mu);
-    mu_tower.g[0] = d1;
-    mu_tower.h[0][0] = d2;
-    mu_tower.t3[0][0][0] = d3;
-    // ℓ(μ) via the order-≤3 Faà di Bruno; slot-0 (the value f(u)) is unused.
-    mu_tower.compose_unary([0.0, ellmu, ellmumu, ellmumum])
 }
 
 /// Exact derivatives of the per-row binomial log-likelihood in μ-space,
@@ -184,11 +162,13 @@ pub(super) fn binomial_score_curvaturethird_from_jet(
     // The first three q-derivatives of ℓ(μ(q)) come from ONE jet composition
     // (issue #932): the inner μ-jet (d1,d2,d3) composed with the μ-space
     // ℓ-derivative stack. The hand-summed chain rule `ellmumu·d1² + ellmu·d2`
-    // etc. is now the tower's `g`/`h`/`t3` channels. A `Tower3<1>` is used (not
-    // `Tower4<1>`): nothing below reads the fourth channel, so the fourth-order
-    // seeding/compose/tensor would be computed and discarded (#1591 prune,
-    // proven `to_bits`-identical to the `Tower4<1>` read channels).
-    let tower = binomial_loglik_q_tower3(y, mu, d1, d2, d3);
+    // etc. is now the tower's `g`/`h`/`t3` channels. The fourth channel is
+    // never read: its seeding, composition and tensor are dead after inlining
+    // and the compiler drops them, which a separate `Tower3<1>` twin of this
+    // composition (#1591) could only duplicate -- measured against this path
+    // on two Milan hosts it was 0.4-0.5% SLOWER, unanimously, so the twin is
+    // gone and the order-≤3 channels read the one composition (#932).
+    let tower = binomial_loglik_q_tower(y, mu, d1, d2, d3, 0.0);
     let score_q = weight * tower.g[0];
     let curvature_q = -weight * tower.h[0][0];
     let third_q = weight * tower.t3[0][0][0];
@@ -989,85 +969,5 @@ mod tests {
         gate.finish();
     }
 
-    /// #932 parity + not-slower pin for the #1591 order prune: the production
-    /// m1..m3 generic-link path composes a `Tower3<1>` twin
-    /// ([`binomial_neglog_q_derivatives_from_jet`]) instead of the full
-    /// `Tower4<1>` composition whose fourth channel nothing reads. Both sides
-    /// are jet lowerings of the same expression — there is no hand-vs-jet
-    /// claim here, and at K=1 the skipped fourth-order seeding is a
-    /// sub-nanosecond effect that timing noise can invert — so this cell
-    /// asserts the prune's real contracts: bit-identity on every read
-    /// channel, and — since it does strictly less arithmetic — being the
-    /// faster arm under the shared [`SpeedGate`].
-    #[test]
-    fn release_measure_binomial_q_tower3_prune_vs_tower4_932() {
-        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
 
-        let y = 0.7_f64;
-        let w = 1.3_f64;
-        let q0 = -0.6_f64;
-
-        let tower4_m123 = |q: f64| -> (f64, f64, f64) {
-            let (mu, d1, d2, d3, d4) = logit_jet(q);
-            if w == 0.0 || !binomial_mu_is_interior(mu) {
-                return (0.0, 0.0, 0.0);
-            }
-            let tower = binomial_loglik_q_tower(y, mu, d1, d2, d3, d4);
-            (-w * tower.g[0], -w * tower.h[0][0], -w * tower.t3[0][0][0])
-        };
-
-        // Parity pin on the exact benchmarked inputs: the prune is proven
-        // bit-identical on the read channels, so this is an equality check.
-        let (mu, d1, d2, d3, _) = logit_jet(q0);
-        let pruned = binomial_neglog_q_derivatives_from_jet(y, w, mu, d1, d2, d3);
-        let full = tower4_m123(q0);
-        assert_eq!(
-            pruned.0.to_bits(),
-            full.0.to_bits(),
-            "m1 prune bit-identity"
-        );
-        assert_eq!(
-            pruned.1.to_bits(),
-            full.1.to_bits(),
-            "m2 prune bit-identity"
-        );
-        assert_eq!(
-            pruned.2.to_bits(),
-            full.2.to_bits(),
-            "m3 prune bit-identity"
-        );
-
-        // Speed contract, release profile only (`SpeedGate::open` documents
-        // why). The prune does strictly less arithmetic than the full `Tower4`
-        // it prunes -- it drops the fourth-order channel and its cross terms --
-        // but on one variable that channel is one term of a row whose cost is
-        // the logit's exponential, and the saving sits below the instrument's
-        // resolution: 0.992, 1.003, 0.997 and 0.995 on four EPYC hosts, wins
-        // between 0.13 and 0.93. The 1.56x once measured here was one call per
-        // iteration, where the harness's own per-call cost was the arm. The
-        // contract is parity within resolution, `not_slower`, and the
-        // bit-identity pin above is what says the prune reads the same
-        // channels.
-        if cfg!(debug_assertions) {
-            return;
-        }
-        let mut gate = SpeedGate::open("BINOMIAL-Q-PRUNE-932");
-        let timing = paired_interleaved(
-            15,
-            5_000,
-            0x9320_09E1,
-            batched(64, |nudge| {
-                let (jet_mu, jet_d1, jet_d2, jet_d3, _) = logit_jet(q0 + nudge);
-                let (m1, m2, m3) =
-                    binomial_neglog_q_derivatives_from_jet(y, w, jet_mu, jet_d1, jet_d2, jet_d3);
-                m1 + m2 + m3
-            }),
-            batched(64, |nudge| {
-                let (m1, m2, m3) = tower4_m123(q0 + nudge);
-                m1 + m2 + m3
-            }),
-        );
-        gate.not_slower("m1..m3", &timing, "production_tower3", "full_tower4");
-        gate.finish();
-    }
 }

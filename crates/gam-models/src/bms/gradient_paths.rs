@@ -1600,12 +1600,17 @@ row_program! {
 /// margin transcendental enters by composing the certified
 /// [`signed_probit_neglog_unary_stack`] onto the assembled signed margin — the
 /// stability discipline of #932 (humans own primitive stability, the algebra
-/// owns combinatorics). A NaN or `-inf` signed margin is a domain error and is
-/// reported as `Err`; the program's own `signed_margin` witness is what is
-/// checked, after the evaluation, so the guard costs one compare rather than a
-/// second evaluation of the index (every leaf is total on non-finite input:
-/// the probit stack returns `NaN`/its `-inf` limits and nothing panics, and the
-/// result is discarded on that path).
+/// owns combinatorics). A NaN or `-inf` signed margin on an active row is a
+/// domain error and is reported as `Err`. The guard reads the VALUE channel
+/// the program returns anyway: every leaf is total on non-finite input, and
+/// the probit stack carries a `NaN` margin as `NaN` and a `-inf` margin as
+/// its `+inf` limit, so a non-finite row value is exactly a non-finite margin
+/// on a row of nonzero weight. Checking the program's `signed_margin` witness
+/// instead cost one spill and one reload per row: the margin is consumed by
+/// the probit leaf before the call and was kept live across it only for the
+/// guard (measured on the release binary, and the whole 2% by which the
+/// shipped kernel lost to the hand schedule). A row of zero weight is inactive
+/// and its margin is not inspected, which is the leaf's own rule.
 #[inline]
 pub(crate) fn rigid_standard_normal_row_nll_generic<S: gam_math::jet_scalar::JetScalar<2>>(
     p: &[S; 2],
@@ -1616,7 +1621,7 @@ pub(crate) fn rigid_standard_normal_row_nll_generic<S: gam_math::jet_scalar::Jet
     probit_scale: f64,
 ) -> Result<S, String> {
     let outcome_sign = 2.0 * y - 1.0;
-    let (nll, [signed_margin]) = rigid_standard_normal_program(
+    let (nll, [_signed_margin]) = rigid_standard_normal_program(
         &p[0],
         &p[1],
         marginal.q,
@@ -1629,13 +1634,20 @@ pub(crate) fn rigid_standard_normal_row_nll_generic<S: gam_math::jet_scalar::Jet
         outcome_sign,
         w,
     );
-    // The domain is `signed_margin > -inf` (finite or `+inf`; `+inf` is the
-    // certain outcome, `-inf` and NaN are not a margin), one compare that is
-    // false for NaN because comparisons with NaN are.
-    if !(signed_margin > f64::NEG_INFINITY) {
-        return Err(non_finite_signed_margin(signed_margin));
+    // A finite value is a margin in the domain (finite or `+inf`, the certain
+    // outcome); `NaN` or `+inf` here is a `NaN` or `-inf` margin on an active
+    // row, one compare on a value that is live regardless.
+    if !nll.value().is_finite() {
+        return Err(non_finite_signed_margin(marginal, g_value(p), z, y, w, probit_scale));
     }
     Ok(nll)
+}
+
+/// The slope primary's value, for the error path only.
+#[cold]
+#[inline(never)]
+fn g_value<S: gam_math::jet_scalar::JetScalar<2>>(p: &[S; 2]) -> f64 {
+    p[1].value()
 }
 
 /// The shipped value/gradient/Hessian kernel for one rigid standard-normal row.
@@ -1660,7 +1672,7 @@ pub(super) fn rigid_standard_normal_row_kernel(
     probit_scale: f64,
 ) -> Result<(f64, [f64; 2], [[f64; 2]; 2]), String> {
     let outcome_sign = 2.0 * y - 1.0;
-    let (value, gradient, hessian, [signed_margin]) = rigid_standard_normal_program_order2(
+    let (value, gradient, hessian, [_signed_margin]) = rigid_standard_normal_program_order2(
         marginal.eta_value(),
         g,
         marginal.q,
@@ -1673,19 +1685,31 @@ pub(super) fn rigid_standard_normal_row_kernel(
         outcome_sign,
         w,
     );
-    // The domain is `signed_margin > -inf` (finite or `+inf`; `+inf` is the
-    // certain outcome, `-inf` and NaN are not a margin), one compare that is
-    // false for NaN because comparisons with NaN are.
-    if !(signed_margin > f64::NEG_INFINITY) {
-        return Err(non_finite_signed_margin(signed_margin));
+    // A finite value is a margin in the domain; see the generic kernel. The
+    // witness is not read here: reading it after the probit call kept the
+    // margin live across the call, one spill and one reload per row.
+    if !value.is_finite() {
+        return Err(non_finite_signed_margin(marginal, g, z, y, w, probit_scale));
     }
     Ok((value, gradient, hessian))
 }
 
 #[cold]
 #[inline(never)]
-fn non_finite_signed_margin(signed_margin: f64) -> String {
-    format!("non-finite signed margin in rigid probit row NLL: {signed_margin}")
+fn non_finite_signed_margin(
+    marginal: BernoulliMarginalLinkMap,
+    g: f64,
+    z: f64,
+    y: f64,
+    w: f64,
+    probit_scale: f64,
+) -> String {
+    format!(
+        "non-finite signed margin in rigid probit row NLL: marginal eta {} (q {}), slope {g}, \
+         latent score {z}, outcome {y}, weight {w}, probit scale {probit_scale}",
+        marginal.eta_value(),
+        marginal.q
+    )
 }
 
 /// Mixed `(primary, z)` second derivative of the rigid standard-normal row
@@ -2411,7 +2435,10 @@ mod jet_tower_oracle_tests {
     /// standard-normal Bernoulli row. It retains the closed-form chain from the
     /// pre-#932 production code but uses the current fused value/derivative
     /// probit stack, so the opponent pays one tail-kernel evaluation rather
-    /// than preserving the historical redundant two-call implementation.
+    /// than preserving the historical redundant two-call implementation. It
+    /// carries the shipped kernel's domain contract (a non-finite margin on
+    /// an active row is an error), at the same point and the same cost, so
+    /// the race compares two kernels of one contract.
     #[inline(always)]
     fn hand_rigid_vgh(
         marginal: BernoulliMarginalLinkMap,
@@ -2420,7 +2447,7 @@ mod jet_tower_oracle_tests {
         y: f64,
         w: f64,
         probit_scale: f64,
-    ) -> (f64, [f64; 2], [[f64; 2]; 2]) {
+    ) -> Result<(f64, [f64; 2], [[f64; 2]; 2]), String> {
         let s = 2.0 * y - 1.0;
         let observed_slope = probit_scale * g;
         let g2 = observed_slope * observed_slope;
@@ -2439,6 +2466,11 @@ mod jet_tower_oracle_tests {
         let eta_q = c;
         let eta_g = q * c1 + probit_scale * z;
         let value = stack[0];
+        // The same domain contract as the shipped kernel, at the same cost: a
+        // non-finite row value is a non-finite margin on an active row.
+        if !value.is_finite() {
+            return Err(non_finite_signed_margin(marginal, g, z, y, w, probit_scale));
+        }
         // rigid_transformed_gradient (in (η, g) primaries).
         let gradient = [u1 * eta_q * marginal.q1, u1 * eta_g];
         // primary_hessian in (q-index, g).
@@ -2454,7 +2486,7 @@ mod jet_tower_oracle_tests {
             ],
             [h01 * marginal.q1, h11],
         ];
-        (value, gradient, hessian)
+        Ok((value, gradient, hessian))
     }
 
     #[inline(never)]
@@ -2479,7 +2511,7 @@ mod jet_tower_oracle_tests {
         w: f64,
         probit_scale: f64,
     ) -> (f64, [f64; 2], [[f64; 2]; 2]) {
-        hand_rigid_vgh(marginal, g, z, y, w, probit_scale)
+        hand_rigid_vgh(marginal, g, z, y, w, probit_scale).expect("hand rigid row")
     }
 
     /// The shipped jet value/grad/Hessian kernel must equal the original HAND
@@ -2517,7 +2549,8 @@ mod jet_tower_oracle_tests {
                     probit_scale,
                 )
                 .expect("jet kernel");
-                let (hv, hg, hh) = hand_rigid_vgh(marginal, g[r], z[r], y[r], w[r], probit_scale);
+                let (hv, hg, hh) = hand_rigid_vgh(marginal, g[r], z[r], y[r], w[r], probit_scale)
+                    .expect("hand rigid row");
                 close(jv, hv, "value");
                 for a in 0..2 {
                     close(jg[a], hg[a], "grad");
@@ -2576,7 +2609,8 @@ mod jet_tower_oracle_tests {
             let (jet_value, ..) =
                 rigid_standard_normal_row_kernel(marginal, g, z, y, w, probit_scale)
                     .expect("jet kernel");
-            let (hand_value, ..) = hand_rigid_vgh(marginal, g, z, y, w, probit_scale);
+            let (hand_value, ..) =
+                hand_rigid_vgh(marginal, g, z, y, w, probit_scale).expect("hand rigid row");
             let band = 1e-12 + 1e-9 * jet_value.abs().max(hand_value.abs());
             assert!(
                 (jet_value - hand_value).abs() <= band,
