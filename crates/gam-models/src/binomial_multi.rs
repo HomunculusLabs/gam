@@ -60,7 +60,9 @@ use crate::penalized_vector_glm::{
     PenalizedVectorGlmInputs, VectorGlmSolve, fit_penalized_vector_glm,
 };
 use crate::vector_response::{VectorLikelihood, validate_vector_likelihood_inputs};
-use gam_model_kernels::bernoulli_link::bernoulli_natural_jet;
+use gam_model_kernels::bernoulli_link::{
+    bernoulli_natural_jet, bernoulli_natural_observation,
+};
 use gam_problem::{FixedLambdaSolverStage, SeparableCellMeasure};
 use gam_spec::InverseLink;
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3};
@@ -129,17 +131,6 @@ pub struct BinomialMultiFitOutputs {
     pub deviance: f64,
 }
 
-#[inline]
-fn response_mixture(y: f64, when_one: f64, when_zero: f64) -> f64 {
-    if y == 0.0 {
-        when_zero
-    } else if y == 1.0 {
-        when_one
-    } else {
-        y.mul_add(when_one, (1.0 - y) * when_zero)
-    }
-}
-
 /// Row-diagonal multi-output binomial likelihood adapter for the shared
 /// [`crate::penalized_vector_glm`] engine.
 ///
@@ -181,9 +172,9 @@ impl VectorLikelihood for BinomialMultiLikelihood<'_> {
                 if w == 0.0 {
                     continue;
                 }
-                let jet = bernoulli_natural_jet(row, eta[[row, a]], self.link)?;
-                let yv = y[[row, a]];
-                acc += w * response_mixture(yv, jet.log_mu[0], jet.log_one_minus_mu[0]);
+                let observation =
+                    bernoulli_natural_observation(row, y[[row, a]], eta[[row, a]], self.link)?;
+                acc += w * observation.log_likelihood;
             }
         }
         Ok(acc)
@@ -206,9 +197,9 @@ impl VectorLikelihood for BinomialMultiLikelihood<'_> {
                 if w == 0.0 {
                     continue;
                 }
-                let jet = bernoulli_natural_jet(row, eta[[row, a]], self.link)?;
-                out[[row, a]] =
-                    w * response_mixture(y[[row, a]], jet.log_mu[1], jet.log_one_minus_mu[1]);
+                let observation =
+                    bernoulli_natural_observation(row, y[[row, a]], eta[[row, a]], self.link)?;
+                out[[row, a]] = w * observation.score;
             }
         }
         Ok(out)
@@ -231,8 +222,9 @@ impl VectorLikelihood for BinomialMultiLikelihood<'_> {
                 if w == 0.0 {
                     continue;
                 }
-                let jet = bernoulli_natural_jet(row, eta[[row, a]], self.link)?;
-                out[[row, a]] = (w.ln() + jet.log_fisher).exp();
+                let observation =
+                    bernoulli_natural_observation(row, y[[row, a]], eta[[row, a]], self.link)?;
+                out[[row, a]] = (w.ln() + observation.log_fisher).exp();
             }
         }
         Ok(out)

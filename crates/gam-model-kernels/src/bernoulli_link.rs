@@ -25,6 +25,33 @@ pub struct BernoulliNaturalJet {
     pub log_fisher: f64,
 }
 
+/// One unweighted Bernoulli observation evaluated in natural coordinates.
+///
+/// The observed-curvature channels are derivatives of the exact log
+/// likelihood. `log_fisher` is the expected-information channel used by
+/// Fisher scoring. Keeping both is essential for noncanonical links: they are
+/// equal only for the canonical logit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BernoulliNaturalObservation {
+    pub mu: f64,
+    pub log_likelihood: f64,
+    pub score: f64,
+    pub log_fisher: f64,
+    pub negative_hessian: f64,
+    pub negative_hessian_derivative: f64,
+}
+
+#[inline]
+fn response_mixture(y: f64, when_one: f64, when_zero: f64) -> f64 {
+    if y == 0.0 {
+        when_zero
+    } else if y == 1.0 {
+        when_one
+    } else {
+        y.mul_add(when_one, (1.0 - y) * when_zero)
+    }
+}
+
 #[inline]
 fn row_geometry_error(row: usize, quantity: &'static str, eta: f64, value: f64) -> EstimationError {
     EstimationError::PirlsRowGeometryUnrepresentable {
@@ -281,6 +308,38 @@ pub fn bernoulli_natural_jet(
     }
 }
 
+/// Evaluate one unweighted Bernoulli/proportion observation.
+///
+/// Hard `0/1` outcomes select one log-probability tower without multiplying
+/// the other endpoint by zero, so a correct saturated tail never becomes
+/// `0 * infinity = NaN`. Fractional responses use their literal binomial
+/// proportion likelihood and therefore require both sides to be representable.
+pub fn bernoulli_natural_observation(
+    row: usize,
+    y: f64,
+    eta: f64,
+    link: &InverseLink,
+) -> Result<BernoulliNaturalObservation, EstimationError> {
+    if !(y.is_finite() && (0.0..=1.0).contains(&y)) {
+        return Err(EstimationError::InvalidInput(format!(
+            "Bernoulli response at row {row} must be finite and in [0,1], got {y}"
+        )));
+    }
+    let jet = bernoulli_natural_jet(row, eta, link)?;
+    Ok(BernoulliNaturalObservation {
+        mu: jet.mu,
+        log_likelihood: response_mixture(y, jet.log_mu[0], jet.log_one_minus_mu[0]),
+        score: response_mixture(y, jet.log_mu[1], jet.log_one_minus_mu[1]),
+        log_fisher: jet.log_fisher,
+        negative_hessian: -response_mixture(y, jet.log_mu[2], jet.log_one_minus_mu[2]),
+        negative_hessian_derivative: -response_mixture(
+            y,
+            jet.log_mu[3],
+            jet.log_one_minus_mu[3],
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,5 +379,42 @@ mod tests {
         let error = bernoulli_natural_jet(7, 0.5, &InverseLink::Standard(StandardLink::Identity))
             .expect_err("identity must not enter a Bernoulli likelihood");
         assert!(matches!(error, EstimationError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn observation_score_and_curvature_match_log_likelihood_differences() {
+        for link in [
+            StandardLink::Logit,
+            StandardLink::Probit,
+            StandardLink::CLogLog,
+            StandardLink::LogLog,
+            StandardLink::Cauchit,
+        ] {
+            let link = InverseLink::Standard(link);
+            for (row, eta) in [-2.0, -0.25, 0.7, 2.5].into_iter().enumerate() {
+                let h = 2.0e-5;
+                let center = bernoulli_natural_observation(row, 0.3, eta, &link)
+                    .expect("center observation");
+                let plus = bernoulli_natural_observation(row, 0.3, eta + h, &link)
+                    .expect("plus observation");
+                let minus = bernoulli_natural_observation(row, 0.3, eta - h, &link)
+                    .expect("minus observation");
+                let score_fd = (plus.log_likelihood - minus.log_likelihood) / (2.0 * h);
+                let negative_hessian_fd = -(plus.score - minus.score) / (2.0 * h);
+                assert!(
+                    (center.score - score_fd).abs() <= 2.0e-8 * (1.0 + score_fd.abs()),
+                    "{} score at eta={eta}: analytic={} FD={score_fd}",
+                    link.link_function().name(),
+                    center.score,
+                );
+                assert!(
+                    (center.negative_hessian - negative_hessian_fd).abs()
+                        <= 3.0e-7 * (1.0 + negative_hessian_fd.abs()),
+                    "{} curvature at eta={eta}: analytic={} FD={negative_hessian_fd}",
+                    link.link_function().name(),
+                    center.negative_hessian,
+                );
+            }
+        }
     }
 }

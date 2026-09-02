@@ -3585,17 +3585,6 @@ fn weighted_product3(a: f64, b: f64, c: f64) -> f64 {
     crate::gamlss::scaled_signed_product3(a, b, c)
 }
 
-#[inline]
-fn convex_combination(y: f64, left: f64, right: f64) -> f64 {
-    if y == 0.0 {
-        right
-    } else if y == 1.0 {
-        left
-    } else {
-        y.mul_add(left, (1.0 - y) * right)
-    }
-}
-
 fn resolved_bounded_binomial_link(
     family: &LikelihoodSpec,
     latent_cloglog_state: Option<&LatentCLogLogState>,
@@ -3686,11 +3675,11 @@ fn exact_noncanonical_binomial_observation_row(
     eta: f64,
     link: &InverseLink,
 ) -> Result<ExactStandardObservationRow, EstimationError> {
-    let jet = bernoulli_natural_jet(row, eta, link)?;
+    let observation = bernoulli_natural_observation(row, y, eta, link)?;
     if weight == 0.0 {
-        return Ok(ExactStandardObservationRow::zero_weight(jet.mu));
+        return Ok(ExactStandardObservationRow::zero_weight(observation.mu));
     }
-    let fisherweight = weighted_positive_from_log(weight, jet.log_fisher);
+    let fisherweight = weighted_positive_from_log(weight, observation.log_fisher);
     if !(fisherweight.is_finite() && fisherweight > 0.0) {
         return Err(bounded_row_error(
             row,
@@ -3699,21 +3688,16 @@ fn exact_noncanonical_binomial_observation_row(
             fisherweight,
         ));
     }
-    let log_likelihood = weight * convex_combination(y, jet.log_mu[0], jet.log_one_minus_mu[0]);
-    let score = weight * convex_combination(y, jet.log_mu[1], jet.log_one_minus_mu[1]);
-    let neghessian_eta = -weight * convex_combination(y, jet.log_mu[2], jet.log_one_minus_mu[2]);
-    let neghessian_eta_derivative =
-        -weight * convex_combination(y, jet.log_mu[3], jet.log_one_minus_mu[3]);
     certify_bounded_row(
         row,
         eta,
         ExactStandardObservationRow {
-            mu: jet.mu,
-            score,
+            mu: observation.mu,
+            score: weight * observation.score,
             fisherweight,
-            neghessian_eta,
-            neghessian_eta_derivative,
-            log_likelihood,
+            neghessian_eta: weight * observation.negative_hessian,
+            neghessian_eta_derivative: weight * observation.negative_hessian_derivative,
+            log_likelihood: weight * observation.log_likelihood,
         },
     )
 }
