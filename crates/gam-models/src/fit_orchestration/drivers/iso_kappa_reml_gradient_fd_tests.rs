@@ -609,6 +609,29 @@ fn iso_kappa_fd_variant_driver_on(
             cost_via_fd_path,
             (cost_an - cost_via_fd_path).abs()
         );
+        // ψ-profile scan (gam#979 diagnostic): the criterion on a uniform
+        // ladder around this probe's ψ, with its forward differences, so a
+        // jump or kink in V(ψ) is read off directly instead of inferred from
+        // an erratic Ridders ladder. Printed always; asserted nowhere.
+        if fixture.psi_dim == 1 {
+            let j = fixture.rho_dim;
+            let h = 5.0e-4_f64;
+            let mut previous: Option<f64> = None;
+            let mut line = String::new();
+            for k in -8..=8_i32 {
+                let mut probe_theta = theta.clone();
+                probe_theta[j] += f64::from(k) * h;
+                let v = cost_at(&probe_theta, &mut cache, &mut evaluator);
+                let slope = previous.map(|p| (v - p) / h);
+                line.push_str(&format!(
+                    " k={k:+}:dV={:+.3e}{}",
+                    v - cost_via_fd_path,
+                    slope.map(|s| format!("(D={s:+.4e})")).unwrap_or_default()
+                ));
+                previous = Some(v);
+            }
+            eprintln!("[{label} {probe}] PSI-SCAN h={h:.1e}{line}");
+        }
         for j in 0..theta_dim {
             let is_psi = j >= rho_dim;
             if skip_psi && is_psi {

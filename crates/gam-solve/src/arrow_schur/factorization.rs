@@ -556,6 +556,12 @@ pub(crate) fn factor_spectral_deflated_criterion_row_with_geometry(
             geometry.clamp_diag.len(),
         ));
     }
+    if refuse_resolved_indefinite && exact_a.is_none() {
+        return Err(
+            "per-row exact-A evidence classification requires its raw B/delta/clamp carrier"
+                .to_string(),
+        );
+    }
     let floor = SPECTRAL_DEFLATION_REL_FLOOR * max_abs;
     // Hysteresis-banded deflation floor for *positive* near-cutoff eigenvalues.
     // The bare `floor` is a knife-edge: a small positive curvature direction
@@ -567,40 +573,6 @@ pub(crate) fn factor_spectral_deflated_criterion_row_with_geometry(
     // (genuine null / indefinite quotient directions) are still always deflated
     // at the exact-zero boundary, which the guard must continue to honour.
     let deflate_floor = floor * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
-    // #2515 — THE BAND IS TWO-SIDED WHEN THE CALLER SAYS THE OPERATOR'S SIGN IS A
-    // VERDICT. The `else` arm below is documented as deflating "every
-    // non-positive/non-finite one", which is right for the Gauss--Newton
-    // majorizer `B` — PSD by construction, so a negative eigenvalue there can only
-    // be rounding on a direction that is null anyway — and wrong for the exact
-    // observed information `A`, where a RESOLVED negative direction is the
-    // difference between a mode and a saddle. Pinning it to `+1` prices a saddle
-    // direction as the rho-independent null `log 1 = 0` and inverts it at `1`;
-    // nothing downstream can tell, because the conditioned block is PD and its
-    // log-determinant is finite. The sibling refusal on the reduced Schur
-    // (`factor_evidence_unit_deflated_schur`) carries the measurement.
-    if refuse_resolved_indefinite && exact_a.is_none() {
-        let mut worst = 0.0_f64;
-        let mut worst_index = 0usize;
-        for (index, &lambda) in evals.iter().enumerate() {
-            if lambda.is_finite() && lambda < -deflate_floor && lambda < worst {
-                worst = lambda;
-                worst_index = index;
-            }
-        }
-        if worst < 0.0 {
-            return Err(format!(
-                "per-row {}: direction {worst_index} at {worst:.6e} (relative {:.6e}), \
-                 against a null band of {deflate_floor:.6e} and a block spectral norm of \
-                 {max_abs:.6e}. Unit-pinning it would price a saddle direction as the \
-                 rho-independent null `log 1 = 0` and invert it at 1, which is neither the \
-                 basin curvature the dense exact-A route prices an attributable negative \
-                 direction at nor the typed refusal it returns for an unattributable one \
-                 (#2515/#2336)",
-                ArrowSchurError::indefinite_evidence_marker(),
-                worst / max_abs
-            ));
-        }
-    }
     // Reconstruct `Σ_i λ̃_i v_i v_iᵀ`, replacing every deflated eigenvalue
     // (every non-positive/non-finite one, plus any positive one that has
     // dropped below the hysteresis floor) with unit stiffness `+1` and keeping

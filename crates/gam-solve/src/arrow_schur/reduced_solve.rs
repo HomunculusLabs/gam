@@ -640,42 +640,12 @@ fn factor_evidence_unit_deflated_schur(
             "exact-A majorizer/clamp metrics do not match the reduced Schur",
         ));
     }
-    let deflate_floor = relative_floor * max_abs * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
-    // #2515 — THE BAND IS TWO-SIDED WHEN THE CALLER SAYS THE OPERATOR'S SIGN IS A
-    // VERDICT. `value < deflate_floor` alone is one-sided: it admits every
-    // negative eigenvalue however large into the "numerically null" class, prices
-    // it `log 1 = 0`, and inverts it at `1`. That is correct for the PSD
-    // Gauss--Newton majorizer, where a negative eigenvalue can only be rounding on
-    // a direction that is null anyway. It is wrong for the exact observed
-    // information, where a resolved negative direction is the difference between a
-    // mode and a saddle — and wrong SILENTLY, which is how it survived: the
-    // returned factor is PD, the log-determinant is finite, and nothing downstream
-    // can tell that a `−7.997610e-3` was priced as a `+1`.
     if refuse_resolved_indefinite && exact_a.is_none() {
-        let mut worst = 0.0_f64;
-        let mut worst_index = 0usize;
-        for (index, &value) in raw_evals.iter().enumerate() {
-            if value.is_finite() && value < -deflate_floor && value < worst {
-                worst = value;
-                worst_index = index;
-            }
-        }
-        if worst < 0.0 {
-            return Err(ArrowSchurError::SchurFactorFailed {
-                reason: format!(
-                    "reduced-Schur {}: direction {worst_index} at {worst:.6e} (relative \
-                     {:.6e}), against a null band of {deflate_floor:.6e} and a spectral norm \
-                     of {max_abs:.6e}. Unit-pinning it would price a saddle direction as the \
-                     rho-independent null `log 1 = 0` and invert it at 1, which is neither \
-                     the basin curvature the dense exact-A route prices an attributable \
-                     negative direction at nor the typed refusal it returns for an \
-                     unattributable one (#2515/#2336)",
-                    ArrowSchurError::indefinite_evidence_marker(),
-                    worst / max_abs
-                ),
-            });
-        }
+        return Err(declined(
+            "exact-A evidence classification requires its raw B/delta/clamp carrier",
+        ));
     }
+    let deflate_floor = relative_floor * max_abs * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
     let mut deflated = vec![false; raw_evals.len()];
     let mut cond_evals = raw_evals.clone();
     let mut classification_changed = false;

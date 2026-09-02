@@ -1222,6 +1222,12 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
 ) -> Result<ArrowBlockFactorization, ArrowSchurError> {
     let evidence_factorization = evidence_policy.factors_undamped_evidence();
     let refuse_resolved_indefinite = evidence_policy.refuses_resolved_indefinite();
+    if refuse_resolved_indefinite && sys.exact_a_classification.is_none() {
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: "exact-A evidence classification requires the raw B/delta/clamp carrier"
+                .to_string(),
+        });
+    }
     if sys.row_gauge_deflation.is_none() && sys.exact_a_classification.is_none() {
         return Ok(ArrowBlockFactorization {
             factors: backend.factor_blocks_with_policy(

@@ -8079,6 +8079,71 @@ fn matrix_free_exact_a_prices_a_clamp_basin_before_refusing_a_saddle_2515() {
         epsilon = 1.0e-12,
     );
 
+    // Drive both production matrix-free entry arms on an actual arrow system.
+    // A_tt=1, A_tbeta=1, A_betabeta=1/2 gives S_A=-1/2.  With
+    // B_tt=3 and E_tt=2 the lifted Schur direction has B curvature 3/2 and
+    // basin curvature -1/2+2=3/2.
+    let exact_a_system = |clamp_value: f64| {
+        let mut system = ArrowSchurSystem::new(1, 1, 1);
+        system.rows[0].htt[[0, 0]] = 1.0;
+        system.rows[0].htbeta[[0, 0]] = 1.0;
+        system.hbb[[0, 0]] = 0.5;
+        system.exact_a_classification = Some(ExactAClassificationGeometry {
+            rows: vec![ExactAClassificationRow {
+                delta_tt: array![[-2.0_f64]],
+                delta_tbeta: Array2::<f64>::zeros((1, 0)),
+                clamp_diag: array![clamp_value],
+            }]
+            .into(),
+            border_indices: Arc::from([] as [usize; 0]),
+        });
+        system
+    };
+    let options = ArrowSolveOptions::direct()
+        .with_newton_schur_tikhonov(SPECTRAL_DEFLATION_REL_FLOOR)
+        .with_indefinite_refusing_evidence_unit_deflation(
+            SPECTRAL_DEFLATION_REL_FLOOR,
+        );
+    let basin_system = exact_a_system(2.0);
+    let (row_logdet, slq_schur) = matrix_free_arrow_evidence_log_det_surrogate(
+        &basin_system,
+        0.0,
+        0.0,
+        &options,
+        4,
+        1,
+        0x2515,
+        None,
+    )
+    .expect("#2515: the SLQ production arm must price the clamp basin");
+    assert_abs_diff_eq!(row_logdet, 0.0, epsilon = 1.0e-12);
+    assert_abs_diff_eq!(slq_schur, 1.5_f64.ln(), epsilon = 1.0e-12);
+
+    let mut rational_lane = SurrogateLaneState::new(SurrogateLaneConfig {
+        num_probes: 4,
+        seed: 0x2515,
+        rel_tol: 1.0e-10,
+        power_iters: 4,
+        cg_rel_tol: 1.0e-12,
+        cg_max_iters: 64,
+        deflation_max_rank: 0,
+        deflation_subspace_iters: 1,
+        deflation_target_std_err_rel: 1.0,
+    });
+    let (_, rational_schur) = matrix_free_arrow_evidence_log_det_surrogate(
+        &basin_system,
+        0.0,
+        0.0,
+        &options,
+        4,
+        1,
+        0x2515,
+        Some(&mut rational_lane),
+    )
+    .expect("#2515: the rational production arm must solve the priced basin operator");
+    assert!(rational_schur.is_finite());
+    assert_abs_diff_eq!(rational_schur, 1.5_f64.ln(), epsilon = 1.0e-7);
+
     let no_clamp = Array2::<f64>::zeros((2, 2));
     let saddle_metrics = |direction: ArrayView1<'_, f64>| {
         Ok((
@@ -8091,5 +8156,34 @@ fn matrix_free_exact_a_prices_a_clamp_basin_before_refusing_a_saddle_2515() {
     assert!(
         ArrowSchurError::rendered_is_indefinite_evidence(&refusal),
         "#2515: matrix-free and dense saddle refusals must carry one typed marker: {refusal}"
+    );
+
+    let mut rational_saddle_lane = SurrogateLaneState::new(SurrogateLaneConfig {
+        num_probes: 4,
+        seed: 0x2515,
+        rel_tol: 1.0e-10,
+        power_iters: 4,
+        cg_rel_tol: 1.0e-12,
+        cg_max_iters: 64,
+        deflation_max_rank: 0,
+        deflation_subspace_iters: 1,
+        deflation_target_std_err_rel: 1.0,
+    });
+    let rational_refusal = matrix_free_arrow_evidence_log_det_surrogate(
+        &exact_a_system(0.0),
+        0.0,
+        0.0,
+        &options,
+        4,
+        1,
+        0x2515,
+        Some(&mut rational_saddle_lane),
+    )
+    .expect_err("#2515: the rational lane must refuse a genuine saddle")
+    .to_string();
+    assert!(
+        ArrowSchurError::rendered_is_indefinite_evidence(&rational_refusal),
+        "#2515: rational and dense saddle refusals must carry one typed marker: \
+         {rational_refusal}"
     );
 }
