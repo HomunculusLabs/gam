@@ -40,9 +40,17 @@ use crate::penalty_labels::penalty_label_layout_with_joint;
 #[derive(Clone)]
 struct TiltedDoubleWellFamily {
     tilt: f64,
+    outer_curvature_calls: Option<Arc<AtomicUsize>>,
 }
 
 impl TiltedDoubleWellFamily {
+    fn new(tilt: f64) -> Self {
+        Self {
+            tilt,
+            outer_curvature_calls: None,
+        }
+    }
+
     fn beta(block_states: &[ParameterBlockState]) -> Result<f64, String> {
         block_states
             .first()
@@ -88,6 +96,22 @@ impl CustomFamily for TiltedDoubleWellFamily {
         let beta = Self::beta(block_states)?;
         let step = direction.first().copied().unwrap_or(0.0);
         Ok(Some(array![[24.0 * beta * step]]))
+    }
+
+    fn exact_newton_outer_curvature(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<ExactNewtonOuterCurvature>, String> {
+        let Some(calls) = self.outer_curvature_calls.as_ref() else {
+            return Ok(None);
+        };
+        calls.fetch_add(1, Ordering::Relaxed);
+        let beta = Self::beta(block_states)?;
+        Ok(Some(ExactNewtonOuterCurvature {
+            hessian: array![[12.0 * beta * beta - 4.0]],
+            rho_curvature_scale: 1.0,
+            hessian_logdet_correction: 0.0,
+        }))
     }
 }
 
@@ -412,7 +436,11 @@ fn double_well_options() -> BlockwiseFitOptions {
 /// scalar or certificate fact is lost at the endpoint that consumes it.
 #[test]
 fn continuation_corrector_builds_only_the_coefficient_product_2714() {
-    let family = TiltedDoubleWellFamily { tilt: TILT };
+    let outer_curvature_calls = Arc::new(AtomicUsize::new(0));
+    let family = TiltedDoubleWellFamily {
+        tilt: TILT,
+        outer_curvature_calls: Some(Arc::clone(&outer_curvature_calls)),
+    };
     let specs = vec![double_well_spec(-2.0)];
     let options = double_well_options();
     let rho = array![-2.0];
@@ -421,9 +449,19 @@ fn continuation_corrector_builds_only_the_coefficient_product_2714() {
 
     let laplace_ready = inner_blockwise_fit(&family, &specs, &per_block, &options, None)
         .expect("ordinary coefficient solve");
+    assert_eq!(
+        outer_curvature_calls.swap(0, Ordering::Relaxed),
+        1,
+        "the ordinary inner product must construct its determinant curvature once"
+    );
     let coefficient_mode =
         inner_blockwise_coefficient_mode(&family, &specs, &per_block, &options, None)
             .expect("continuation coefficient corrector");
+    assert_eq!(
+        outer_curvature_calls.load(Ordering::Relaxed),
+        0,
+        "a continuation corrector must not enter determinant curvature assembly"
+    );
     assert!(laplace_ready.converged && coefficient_mode.converged);
     assert!(laplace_ready.block_logdet_h.is_some());
     assert!(laplace_ready.block_logdet_s.is_some());
@@ -464,6 +502,11 @@ fn continuation_corrector_builds_only_the_coefficient_product_2714() {
         laplace_ready,
     )
     .expect("endpoint criterion from ordinary mode");
+    assert_eq!(
+        outer_curvature_calls.swap(0, Ordering::Relaxed),
+        1,
+        "one endpoint mode must produce one complete criterion"
+    );
     let actual = evaluate_custom_family_hyper_from_coefficient_mode(
         &family,
         &specs,
@@ -474,6 +517,11 @@ fn continuation_corrector_builds_only_the_coefficient_product_2714() {
         coefficient_mode,
     )
     .expect("endpoint criterion from continuation-owned mode");
+    assert_eq!(
+        outer_curvature_calls.load(Ordering::Relaxed),
+        1,
+        "the owned continuation mode must be scored once without a second coefficient solve"
+    );
     assert_eq!(
         expected.objective.to_bits(),
         actual.objective.to_bits(),
@@ -549,7 +597,7 @@ fn continuation_mode(
 /// load-bearing, not decorative.
 #[test]
 fn cold_direct_mode_depends_on_the_seed_2366() {
-    let family = TiltedDoubleWellFamily { tilt: TILT };
+    let family = TiltedDoubleWellFamily::new(TILT);
     let target_rho = -6.0;
     let from_positive = cold_direct_mode(&family, &[double_well_spec(2.0)], target_rho);
     let from_negative = cold_direct_mode(&family, &[double_well_spec(-2.0)], target_rho);
@@ -567,7 +615,7 @@ fn cold_direct_mode_depends_on_the_seed_2366() {
 /// which is exactly the statement that `θ̂` is a function of ρ.
 #[test]
 fn anchored_continuation_mode_is_independent_of_the_seed_2366() {
-    let family = TiltedDoubleWellFamily { tilt: TILT };
+    let family = TiltedDoubleWellFamily::new(TILT);
     let target_rho = -6.0;
     let from_positive = continuation_mode(&family, &[double_well_spec(2.0)], target_rho);
     let from_negative = continuation_mode(&family, &[double_well_spec(-2.0)], target_rho);
@@ -600,7 +648,7 @@ fn anchored_continuation_mode_is_independent_of_the_seed_2366() {
 /// returning branch dependence. See the discussion on #2366.
 #[test]
 fn production_fit_is_independent_of_the_caller_seed_2366() {
-    let family = TiltedDoubleWellFamily { tilt: TILT };
+    let family = TiltedDoubleWellFamily::new(TILT);
     let options = double_well_options();
     let fit = |seed: f64| {
         let result = fit_custom_family(&family, &[double_well_spec(seed)], &options)
@@ -662,7 +710,7 @@ fn production_fit_is_independent_of_the_caller_seed_2366() {
 /// against the closed-form geometry as well.
 #[test]
 fn anchored_continuation_selects_the_anchor_branch_2366() {
-    let family = TiltedDoubleWellFamily { tilt: TILT };
+    let family = TiltedDoubleWellFamily::new(TILT);
     let target_rho = -6.0;
     let selected = continuation_mode(&family, &[double_well_spec(2.0)], target_rho);
     assert!(
