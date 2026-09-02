@@ -179,6 +179,49 @@ impl DeviceS2KernelMatrix {
         ))
     }
 
+    // Both variants below are reached only from `to_host_array` on the
+    // platform each is compiled for, so a Linux-built call graph saw the
+    // non-Linux one as unreachable and the sweep (d484a091a) removed both;
+    // the `x86_64-pc-windows-gnu` cross-check then failed at the call site
+    // above. A `cfg`-gated item is linked by the platforms the sweep does
+    // not build.
+    /// Copy the underlying `(ld × cols)` column-major payload to a
+    /// caller-provided buffer. Used by `to_host_array` and by the
+    /// device-resident cuSOLVER consumer when it needs to extract the
+    /// coefficient vector.
+    #[cfg(target_os = "linux")]
+    pub fn copy_to_host_col_major(&self, dst: &mut [f64]) -> Result<(), GpuError> {
+        let needed = self.ld * self.cols;
+        if dst.len() != needed {
+            gam_gpu::gpu_bail!(
+                "DeviceS2KernelMatrix::copy_to_host_col_major: dst.len()={} expected {}",
+                dst.len(),
+                needed
+            );
+        }
+        self.stream
+            .memcpy_dtoh(&self.col_major_dev, dst)
+            .gpu_ctx("DeviceS2KernelMatrix dtoh")?;
+        self.stream
+            .synchronize()
+            .gpu_ctx("DeviceS2KernelMatrix synchronize")?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn copy_to_host_col_major(&self, dst: &mut [f64]) -> Result<(), GpuError> {
+        let needed = self.ld * self.cols;
+        if dst.len() != needed {
+            gam_gpu::gpu_bail!(
+                "DeviceS2KernelMatrix::copy_to_host_col_major: dst.len()={} expected {}",
+                dst.len(),
+                needed
+            );
+        }
+        dst.copy_from_slice(&self.col_major_dev);
+        Ok(())
+    }
+
 }
 
 /// Convert a `(ld × cols)` column-major device payload into a row-major
