@@ -56,7 +56,7 @@ impl IndexedBernoulliFamily {
         // still validate every realized eta because parameterized links can
         // leave their representable domain away from zero.
         bernoulli_natural_jet(0, 0.0, &link)?;
-        measure.try_for_each_active(|row, output, _weight| {
+        measure.try_for_each_active(|row, output, _| {
             let response = y
                 .value(row, output)
                 .expect("response and measure shapes were matched above");
