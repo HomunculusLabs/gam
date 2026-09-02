@@ -35,7 +35,7 @@ def gamfit_surface_predict(
 ) -> typing.Any:
     model = gamfit.fit(xy_table(train_xy, z_obs), formula, family="gaussian")
     pred = model.predict(xy_table(eval_xy), return_type="dict")
-    return np.asarray(pred["mean"], dtype=float)
+    return np.asarray(pred["posterior_mean"], dtype=float)
 
 
 def main() -> None:

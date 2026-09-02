@@ -39,7 +39,7 @@ def predict_curve(models: list[gamfit.Model], n_grid: int = 401) -> tuple[np.nda
     grid = np.linspace(0.0, 2.0 * np.pi, n_grid)
     payload = {"theta": grid.tolist()}
     fits = [
-        np.asarray(model.predict(payload, return_type="dict")["mean"], dtype=float)
+        np.asarray(model.predict(payload, return_type="dict")["posterior_mean"], dtype=float)
         for model in models
     ]
     return grid, *fits

@@ -84,15 +84,19 @@ as a standard Gaussian fit:
 
 ```python
 preds = model.predict(test_df, interval=0.95)
-# Columns: linear_predictor, mean, noise_scale, std_error, mean_lower, mean_upper
+# Columns: linear_predictor_plugin, mean_plugin, posterior_mean, noise_scale,
+#          posterior_mean_standard_error, posterior_mean_lower, posterior_mean_upper
 ```
 
-`noise_scale` is the fitted scale / dispersion channel on the response
-model's natural scale. `std_error` is the response-scale delta-method
-standard error. `mean_lower` / `mean_upper` are response-scale pointwise
-Wald bands at the requested `interval`. Without `interval=`, standard
-point-payload models return a 1-D NumPy array of response-scale point
-predictions.
+Location-scale fits publish the same estimand-explicit mean-side schema as a
+standard fit (see [predictions.md](predictions.md)): `linear_predictor_plugin`
+is `η̂`, `mean_plugin` its inverse-link image, and `posterior_mean` the
+default point. `noise_scale` is the fitted scale / dispersion channel on the
+response model's natural scale. `posterior_mean_standard_error` is the
+response-scale standard error of the posterior mean, and
+`posterior_mean_lower` / `posterior_mean_upper` are its pointwise bands at
+the requested `interval`. Without `interval=`, standard point-payload models
+return a 1-D NumPy array of response-scale point predictions.
 
 For survival location-scale, predictions return a
 [`SurvivalPrediction`](predictions.md#survivalprediction). Pass any

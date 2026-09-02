@@ -4093,6 +4093,16 @@ fn assemble_candidate_formula(
 }
 
 const PREFERRED_PREDICTION_COLUMNS: &[&str] = &[
+    // Estimand-explicit schema (#2785): the plug-in pair, the posterior
+    // estimand, then its uncertainty columns, in the order the docs list them.
+    "linear_predictor_plugin",
+    "mean_plugin",
+    "posterior_mean",
+    "posterior_mean_standard_error",
+    "posterior_mean_lower",
+    "posterior_mean_upper",
+    // Class-specific schema retained by the transformation-normal and
+    // Bernoulli marginal-slope classes.
     "linear_predictor",
     "mean",
     "std_error",

@@ -1110,6 +1110,42 @@ pub enum PredictModelClass {
 }
 
 impl PredictModelClass {
+    /// Whether this class publishes the estimand-explicit prediction schema
+    /// (`linear_predictor_plugin`, `mean_plugin`, `posterior_mean`, and the
+    /// `posterior_mean_*` uncertainty columns; #2785). It is the single owner
+    /// of that decision: the Python predict FFI builds its columns from it,
+    /// `predict_array` reads its point column from [`Self::point_column`], and
+    /// the Python shaper's "standard GAM / GLM" branch is exactly this set.
+    ///
+    /// The three location-scale classes are GLM-mean models with a second
+    /// (scale) predictor, so their mean-side estimands are the same objects as
+    /// a standard fit's and carry the same names; the scale itself is the
+    /// separate `noise_scale` column. The classes whose point is a different
+    /// object -- a clipped marginal-slope probability, a transformation-normal
+    /// conditional mean, a survival grid -- keep their class-specific schema.
+    #[inline]
+    pub const fn publishes_estimand_explicit_schema(self) -> bool {
+        matches!(
+            self,
+            Self::Standard
+                | Self::GaussianLocationScale
+                | Self::BinomialLocationScale
+                | Self::DispersionLocationScale
+        )
+    }
+
+    /// The name of the response-scale point column in this class's prediction
+    /// payload: `posterior_mean` under the estimand-explicit schema, the
+    /// class-specific `mean` otherwise.
+    #[inline]
+    pub const fn point_column(self) -> &'static str {
+        if self.publishes_estimand_explicit_schema() {
+            "posterior_mean"
+        } else {
+            "mean"
+        }
+    }
+
     #[inline]
     pub const fn name(self) -> &'static str {
         match self {

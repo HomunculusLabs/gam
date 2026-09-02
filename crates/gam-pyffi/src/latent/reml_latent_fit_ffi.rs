@@ -3315,9 +3315,19 @@ fn posterior_bands_payload_to_py(
         "linear_predictor_upper",
         payload.linear_predictor_upper.into_pyarray(py),
     )?;
-    out.set_item("mean", payload.mean.into_pyarray(py))?;
-    out.set_item("mean_lower", payload.mean_lower.into_pyarray(py))?;
-    out.set_item("mean_upper", payload.mean_upper.into_pyarray(py))?;
+    // The draw-averaged response is the posterior mean of the response and its
+    // quantiles are that estimand's credible band, so the band table carries
+    // the same names as `Model.predict`'s estimand-explicit schema (#2785):
+    // one estimand, one name, on both surfaces.
+    out.set_item("posterior_mean", payload.mean.into_pyarray(py))?;
+    out.set_item(
+        "posterior_mean_lower",
+        payload.mean_lower.into_pyarray(py),
+    )?;
+    out.set_item(
+        "posterior_mean_upper",
+        payload.mean_upper.into_pyarray(py),
+    )?;
     out.set_item("model_class", payload.model_class)?;
     out.set_item("family_kind", payload.family_kind)?;
     Ok(out.unbind())

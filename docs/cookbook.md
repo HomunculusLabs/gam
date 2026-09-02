@@ -15,7 +15,8 @@ train = pd.DataFrame({
 
 model = gamfit.fit(train, "y ~ s(x)")
 preds = model.predict([{"x": 1.5}, {"x": 2.5}], interval=0.95)
-# columns: linear_predictor, mean, std_error, mean_lower, mean_upper
+# columns: linear_predictor_plugin, mean_plugin, posterior_mean,
+#          posterior_mean_standard_error, posterior_mean_lower, posterior_mean_upper
 ```
 
 ## Validate a formula before fitting
@@ -291,7 +292,7 @@ preds = model.predict(
 posterior = model.sample(train, seed=42)
 bands = posterior.predict(test, level=0.95)
 # columns: linear_predictor, linear_predictor_lower, linear_predictor_upper,
-#          mean, mean_lower, mean_upper
+#          posterior_mean, posterior_mean_lower, posterior_mean_upper
 ```
 
 ## Posterior of a derived quantity

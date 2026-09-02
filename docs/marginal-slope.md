@@ -73,7 +73,11 @@ By default, Bernoulli marginal-slope prediction returns a 1-D NumPy
 array of probabilities. Passing `return_type=` asks for a table. Passing
 `interval=0.95` asks for the interval table with `linear_predictor`,
 `mean`, `std_error`, `mean_lower`, and `mean_upper`; probability-scale
-values are clipped to `[0, 1]`.
+values are clipped to `[0, 1]`. `std_error` is the probability-scale
+posterior standard error (the same response-scale quantity every class's
+`std_error` / `posterior_mean_standard_error` column carries); the bounds
+are the inverse probit of the η-scale endpoints `η ± z·se_η`, so they are
+symmetric about `linear_predictor` on the link scale.
 
 - `family="bernoulli-marginal-slope"` names the likelihood;
   `slope_formula=` is the slope surface as a function of covariates.

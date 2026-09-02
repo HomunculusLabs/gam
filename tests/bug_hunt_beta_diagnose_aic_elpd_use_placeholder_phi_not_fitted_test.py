@@ -174,9 +174,11 @@ def test_beta_diagnose_aic_elpd_use_fitted_phi_not_placeholder() -> None:
         # The bug is only meaningful when phi_hat differs substantially from 1.
         assert phi_hat > 5.0, f"phi_hat={phi_hat} too close to the placeholder"
 
-        # Fitted means (response scale) at the training rows.
+        # Fitted means (response scale) at the training rows: the plug-in
+        # `g^-1(eta_hat)` the fit's own likelihood was evaluated at (#2785
+        # names it `mean_plugin`; `posterior_mean` is the integrated estimand).
         _run("predict", model, data, "--out", pred)
-        mu_hat = np.array([float(r["mean"]) for r in csv.DictReader(open(pred))])
+        mu_hat = np.array([float(r["mean_plugin"]) for r in csv.DictReader(open(pred))])
 
         # Two reference total log-likelihoods, evaluated at the SAME fitted means:
         #   L_hat  — at the fitted precision phi_hat (the correct reporting value)

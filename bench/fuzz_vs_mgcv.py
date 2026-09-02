@@ -432,9 +432,9 @@ def select_scenarios_backfilled(
 
 def _prediction_mean(predicted: typing.Any) -> np.ndarray:
     if isinstance(predicted, pd.DataFrame):
-        return predicted["mean"].to_numpy(dtype=float)
+        return predicted["posterior_mean"].to_numpy(dtype=float)
     if isinstance(predicted, dict):
-        return np.asarray(predicted["mean"], dtype=float)
+        return np.asarray(predicted["posterior_mean"], dtype=float)
     # Default ``model.predict`` now returns a 1-D ndarray of fitted means
     # for standard GAMs; preserve that shape here.
     return np.asarray(predicted, dtype=float)

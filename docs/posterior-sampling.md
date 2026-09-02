@@ -22,7 +22,7 @@ print(posterior)
 
 bands = posterior.predict(test_df, level=0.95)
 # {"linear_predictor", "linear_predictor_lower", "linear_predictor_upper",
-#  "mean",             "mean_lower",             "mean_upper"}
+#  "posterior_mean",   "posterior_mean_lower",   "posterior_mean_upper"}
 ```
 
 ## Model.sample
@@ -220,7 +220,7 @@ posterior.to_pandas()         # DataFrame with coefficient_names columns
 ```python
 bands = posterior.predict(test_df, level=0.95)
 # {"linear_predictor", "linear_predictor_lower", "linear_predictor_upper",
-#  "mean",             "mean_lower",             "mean_upper"}
+#  "posterior_mean",   "posterior_mean_lower",   "posterior_mean_upper"}
 ```
 
 `predict` builds the saved model's standard design matrix, computes

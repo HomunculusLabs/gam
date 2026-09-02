@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 from ._diagnostics import Diagnostics
+from ._predict_shape import point_column_name
 from ._survival import _BERNOULLI_FAMILY_PREFIXES
 from ._tables import coerce_numeric_vector, table_columns
 
@@ -75,18 +76,21 @@ def diagnose(
         return_type="dict",
     )
     observed = coerce_numeric_vector(columns[response_name], label=response_name)
+    point_column = point_column_name(model.model_class, model.family_name)
     if _is_binary_family(model.family_name):
         return Diagnostics.from_binary_classification(
             formula=model.formula,
             response_name=response_name,
             observed=observed,
             predicted=predicted,
+            point_column=point_column,
         )
     return Diagnostics.from_predictions(
         formula=model.formula,
         response_name=response_name,
         observed=observed,
         predicted=predicted,
+        point_column=point_column,
     )
 
 
@@ -125,8 +129,9 @@ def plot(
         x_values = coerce_numeric_vector(columns[x_name], label=x_name)
         ordering = sorted(range(len(x_values)), key=lambda index: x_values[index])
         x_sorted = [x_values[index] for index in ordering]
-        mean_sorted = [diagnostics.predicted["mean"][index] for index in ordering]
-        ax.plot(x_sorted, mean_sorted, color="#1d4ed8", linewidth=2, label="mean")
+        point = diagnostics.predicted[diagnostics.point_column]
+        mean_sorted = [point[index] for index in ordering]
+        ax.plot(x_sorted, mean_sorted, color="#1d4ed8", linewidth=2, label=diagnostics.point_column)
         if diagnostics.interval_lower is not None and diagnostics.interval_upper is not None:
             lower = [diagnostics.interval_lower[index] for index in ordering]
             upper = [diagnostics.interval_upper[index] for index in ordering]
@@ -147,7 +152,7 @@ def plot(
         ax.set_ylabel(diagnostics.response_name or "response")
     elif kind == "residuals":
         ax.scatter(
-            diagnostics.predicted["mean"],
+            diagnostics.predicted[diagnostics.point_column],
             diagnostics.residuals,
             color="#0f172a",
             s=18,
@@ -157,15 +162,16 @@ def plot(
         ax.set_xlabel("predicted mean")
         ax.set_ylabel("residual")
     elif kind == "observed_vs_predicted":
+        point = diagnostics.predicted[diagnostics.point_column]
         ax.scatter(
-            diagnostics.predicted["mean"],
+            point,
             diagnostics.observed,
             color="#0f172a",
             s=18,
             alpha=0.75,
         )
-        lo = min(min(diagnostics.predicted["mean"]), min(diagnostics.observed))
-        hi = max(max(diagnostics.predicted["mean"]), max(diagnostics.observed))
+        lo = min(min(point), min(diagnostics.observed))
+        hi = max(max(point), max(diagnostics.observed))
         ax.plot([lo, hi], [lo, hi], color="#94a3b8", linestyle="--", linewidth=1)
         ax.set_xlabel("predicted mean")
         ax.set_ylabel("observed")

@@ -57,9 +57,9 @@ def test_default_uncertainty_uses_and_reports_smoothing_corrected_covariance() -
     assert smoothing.covariance_source == "smoothing-corrected"
     assert conditional.covariance_source == "conditional"
 
-    default_se = np.asarray(default.std_error, dtype=float)
-    smoothing_se = np.asarray(smoothing.std_error, dtype=float)
-    conditional_se = np.asarray(conditional.std_error, dtype=float)
+    default_se = np.asarray(default.posterior_mean_standard_error, dtype=float)
+    smoothing_se = np.asarray(smoothing.posterior_mean_standard_error, dtype=float)
+    conditional_se = np.asarray(conditional.posterior_mean_standard_error, dtype=float)
     np.testing.assert_array_equal(default_se, smoothing_se)
     assert np.all(default_se >= conditional_se - 1e-12)
     assert np.any(default_se > conditional_se + 1e-10), (
@@ -91,7 +91,7 @@ def test_default_uncertainty_publishes_conditional_when_no_correction_exists() -
         "the default band and summary() must price uncertainty off the same "
         f"definition: {summary['coefficient_se_source']!r} vs {default.covariance_source!r}"
     )
-    np.testing.assert_array_equal(np.asarray(default.std_error, dtype=float), np.zeros(3))
+    np.testing.assert_array_equal(np.asarray(default.posterior_mean_standard_error, dtype=float), np.zeros(3))
 
     # Naming the corrected definition is a requirement, not a policy: it
     # refuses rather than delivering the conditional band under a corrected
@@ -120,7 +120,7 @@ def test_default_uncertainty_publishes_conditional_when_no_correction_exists() -
     )
     assert conditional.covariance_source == "conditional"
     np.testing.assert_array_equal(
-        np.asarray(conditional.std_error, dtype=float),
+        np.asarray(conditional.posterior_mean_standard_error, dtype=float),
         np.zeros(3),
     )
 

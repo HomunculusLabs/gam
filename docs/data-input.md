@@ -35,36 +35,43 @@ np.array([[1.0, 0.0], [2.0, 1.0], [3.0, 2.0]])  # columns become x0, x1
 
 ## Validation rules
 
-Cells are stringified before crossing the FFI boundary. Two hard rules
-enforced in `stringify_cell`:
+Numeric columns cross the FFI boundary as one contiguous `float64` block and
+categorical columns as labels (Arrow-capable inputs — pyarrow, polars, and
+pandas with the Arrow C stream — are decoded from Arrow memory directly).
+Table normalization itself enforces only shape rules, because it runs before
+any formula is known:
 
-1. `None` is rejected.
-2. Non-finite floats (NaN, ±inf) and empty strings are rejected.
+- Column lengths must agree. Mismatches raise `ValueError` before the engine
+  sees the data.
+- Tables must have at least one column and at least one row.
+- Duplicate column names in pandas, polars, and pyarrow inputs are rejected,
+  because prediction columns are matched by name.
 
-Error messages include column name and row number when available, making
-data debugging straightforward: `column 'x' has non-finite numeric value at row 42`.
-
-Booleans become `"1"` / `"0"`. Numbers use `repr()`. Other values are
-passed through `str(...)`. The engine handles numeric coercion from
-strings; explicit casting to float is unnecessary.
-
-Column lengths must agree. Mismatches raise `ValueError` before the
-engine sees the data.
-
-Tables must have at least one column and at least one row. Duplicate
-column names in pandas, polars, and pyarrow inputs are rejected because
-prediction columns are matched by name.
-
-String columns are accepted for terms like `group(site)` and are
-encoded by the engine.
+Booleans become `1` / `0`. String columns are accepted for terms like
+`group(site)` and are encoded by the engine as factor levels; a string column
+whose labels happen to parse as numbers (`"0"`, `"1"`, `"2"`) is still a
+factor, one level per label. The engine handles numeric coercion; explicit
+casting to float is unnecessary.
 
 ## Missing data
 
-`gamfit` does not impute. Drop or impute rows upstream:
+A missing cell — `NaN`, `±inf`, `None`, or an empty string — is preserved by
+table normalization and refused **only where a term consumes it**. The
+refusal names the role, the column and the 1-based row, for example
+`response column 'y' contains non-finite value at row 42` or
+`model term column 'x' contains a non-finite value at row 42`. A column the
+formula never references may carry any number of missing cells without
+affecting the fit, so a frame such as R's `airquality` fits `Temp ~ s(Wind)`
+on all 153 rows even though `Ozone` has 37 NAs (#2775). `Model.check(data)`
+reports a missing cell in a modelled column as a `non_finite` issue rather
+than raising (#2776).
 
-- `df.dropna(subset=[...])` in pandas.
+`gamfit` does not impute. When a modelled column has gaps, drop or impute
+those rows upstream:
+
+- `df.dropna(subset=[...])` in pandas, listing the modelled columns.
 - `sklearn.impute` or equivalent.
-- For survival, ensure entry/exit/event columns are complete.
+- For survival, the entry/exit/event columns must be complete.
 
 ## What `predict()` returns
 
@@ -87,8 +94,8 @@ else the training kind, else `dict`. Override with `return_type=`:
 
 ```python
 pred = model.predict(test_df, return_type="dict")
-pred["mean"]
-pred.mean
+pred["posterior_mean"]
+pred.posterior_mean
 model.predict(test_df, return_type="numpy")
 model.predict(test_df, return_type="pandas")
 ```

@@ -17,7 +17,7 @@ those ranking surfaces raise it instead of ranking a stand-in value. Compare
 such a model on predictive accuracy, or refit on data whose response is not
 an exact function of the design.
 | `basis_check(data)` | `list[dict]` | Per-smooth basis-adequacy report: is each smooth's basis rich enough for the function it was asked to represent? |
-| `diagnose(data)` | `Diagnostics` | Observed values, predicted columns, residuals, and aggregate metrics for models whose prediction output includes `"mean"`. |
+| `diagnose(data)` | `Diagnostics` | Observed values, predicted columns, residuals, and aggregate metrics for point-payload models (the point column is the one the model's class publishes: `posterior_mean`, or `mean` for the transformation-normal and Bernoulli marginal-slope classes). |
 | `check(data)` | `SchemaCheck` | Schema validation result with structured issues. |
 | `plot(data, x=, kind=)` | `matplotlib.axes.Axes` | Prediction / residual / observed-vs-predicted plot. |
 | `report(path=None)` | `str` | Self-contained HTML report (string, or written path). |
@@ -157,14 +157,15 @@ Returns a frozen `Diagnostics` dataclass:
 | `formula` | `str` | Fitted formula. |
 | `response_name` | `str` | Resolved response column. |
 | `observed` | `list[float]` | Observed values. |
-| `residuals` | `list[float]` | `observed - predicted["mean"]`. |
-| `predicted` | `dict[str, list[float]]` | The predict-table columns (at least `"mean"`; with `interval` also `"mean_lower"`, `"mean_upper"`). |
+| `residuals` | `list[float]` | `observed - predicted[point_column]`. |
+| `predicted` | `dict[str, list[float]]` | The predict-table columns (at least the point column; with `interval` also its `_lower` / `_upper` bands). |
+| `point_column` | `str` | Name of the response-scale point series in `predicted`: `"posterior_mean"` for standard and location-scale fits, `"mean"` for the transformation-normal and Bernoulli marginal-slope classes. |
 | `metrics` | `dict[str, int \| float]` | `n_obs`, `mae`, `rmse`, `bias`; adds `r_squared` when the response variance is positive. |
-| `interval_lower`, `interval_upper` | `list[float] \| None` | Aliases for the matching `predicted` columns. |
+| `interval_lower`, `interval_upper` | `list[float] \| None` | Aliases for the `f"{point_column}_lower"` / `f"{point_column}_upper"` columns. |
 
 `diagnose` raises `ValueError` when the response column cannot be
-inferred or is missing from `data`. It expects `predict(...,
-return_type="dict")` to return a `"mean"` column.
+inferred or is missing from `data`. The point column it reads is the one
+the model's class publishes through `predict(..., return_type="dict")`.
 
 ## check()
 

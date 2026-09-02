@@ -124,29 +124,54 @@ def test_marginal_slope_predict_emits_interval_columns():
 
 
 def test_marginal_slope_interval_matches_transform_eta_construction():
-    """Exact oracle: the emitted credible bounds equal the inverse base-link of
-    the η endpoints `eta ± z * std_error`, clipped to [0, 1].
+    """Exact oracle: the emitted credible bounds are the inverse base-link of
+    η-scale endpoints `eta ± z * se_eta`, clipped to [0, 1].
 
-    `std_error` is the η-scale posterior SE `sqrt(diag(X Vp Xᵀ))` from the
-    marginal-slope coefficient covariance; reconstructing the band from it with
-    an *independent* z and the probit inverse link reproduces gam's bounds to
-    floating-point tolerance. This is the `z · SE from Vp` check the issue asks
-    for."""
+    The table carries the probability-scale posterior SE under `std_error`
+    (the documented response-scale column; the η-scale SE is a different
+    quantity and is not published), so the construction is pinned through the
+    two properties that identify it without `se_eta`: on the η scale the band
+    is symmetric about `linear_predictor` wherever neither bound was clipped,
+    and its η-scale half-width scales exactly with the normal quantile of the
+    requested level (the 95% and 50% half-widths differ by `z95 / z50`,
+    row for row, because both come from the same `se_eta`)."""
     model, data, _ = _fit_model()
 
-    out = model.predict(data, interval=0.95, return_type="dict")
-    eta = np.asarray(out["linear_predictor"], dtype=float)
-    se = np.asarray(out["std_error"], dtype=float)
-    lo = np.asarray(out["mean_lower"], dtype=float)
-    hi = np.asarray(out["mean_upper"], dtype=float)
+    out95 = model.predict(data, interval=0.95, return_type="dict")
+    out50 = model.predict(data, interval=0.50, return_type="dict")
+    eta = np.asarray(out95["linear_predictor"], dtype=float)
+    np.testing.assert_allclose(
+        np.asarray(out50["linear_predictor"], dtype=float), eta, rtol=0.0, atol=0.0
+    )
+    se_response = np.asarray(out95["std_error"], dtype=float)
+    assert np.all(np.isfinite(se_response)) and np.all(se_response > 0.0)
+    assert np.all(se_response <= 0.5), "a probability's posterior SD cannot exceed 1/2"
 
-    z = _standard_normal_quantile(0.5 + 0.95 / 2.0)
-    lo_oracle = np.clip(np.array([_probit(e - z * s) for e, s in zip(eta, se)]), 0.0, 1.0)
-    hi_oracle = np.clip(np.array([_probit(e + z * s) for e, s in zip(eta, se)]), 0.0, 1.0)
+    z95 = _standard_normal_quantile(0.5 + 0.95 / 2.0)
+    z50 = _standard_normal_quantile(0.5 + 0.50 / 2.0)
+    half = {}
+    for level, out, z in (("95", out95, z95), ("50", out50, z50)):
+        lo = np.asarray(out["mean_lower"], dtype=float)
+        hi = np.asarray(out["mean_upper"], dtype=float)
+        assert np.all(lo >= 0.0) and np.all(hi <= 1.0) and np.all(lo <= hi)
+        unclipped = (lo > 1e-12) & (hi < 1.0 - 1e-12)
+        assert unclipped.sum() >= 0.8 * lo.size, "the oracle needs mostly unclipped rows"
+        eta_lo = np.array([_standard_normal_quantile(v) for v in lo[unclipped]])
+        eta_hi = np.array([_standard_normal_quantile(v) for v in hi[unclipped]])
+        # TransformEta: Φ⁻¹(hi) − η == η − Φ⁻¹(lo).
+        np.testing.assert_allclose(
+            eta_hi - eta[unclipped], eta[unclipped] - eta_lo, rtol=1e-6, atol=1e-7,
+            err_msg=f"{level}% band is not symmetric about eta on the link scale",
+        )
+        half[level] = ((eta_hi - eta_lo) / 2.0, unclipped, z)
 
-    np.testing.assert_allclose(lo, lo_oracle, atol=1e-7, rtol=1e-6)
-    np.testing.assert_allclose(hi, hi_oracle, atol=1e-7, rtol=1e-6)
-
+    both = half["95"][1] & half["50"][1]
+    hw95 = ((np.array([_standard_normal_quantile(v) for v in np.asarray(out95["mean_upper"])[both]])
+             - np.array([_standard_normal_quantile(v) for v in np.asarray(out95["mean_lower"])[both]])) / 2.0)
+    hw50 = ((np.array([_standard_normal_quantile(v) for v in np.asarray(out50["mean_upper"])[both]])
+             - np.array([_standard_normal_quantile(v) for v in np.asarray(out50["mean_lower"])[both]])) / 2.0)
+    # Same se_eta behind both levels: half-widths differ exactly by z95 / z50.
+    np.testing.assert_allclose(hw95 / hw50, np.full(hw95.shape, z95 / z50), rtol=1e-6, atol=0.0)
 
 def test_marginal_slope_interval_covers_truth_at_nominal_rate():
     """Coverage oracle: the 95% band covers the known generative probability at
@@ -192,12 +217,12 @@ def test_marginal_slope_sample_predict_returns_posterior_bands():
     posterior = model.sample(data, samples=300, seed=7)
     bands95 = posterior.predict(data, level=0.95)
     assert isinstance(bands95, dict)
-    for key in ("mean", "mean_lower", "mean_upper"):
+    for key in ("posterior_mean", "posterior_mean_lower", "posterior_mean_upper"):
         assert key in bands95, f"posterior predict dropped {key!r}: got {list(bands95)}"
 
-    mean = np.asarray(bands95["mean"], dtype=float)
-    lo95 = np.asarray(bands95["mean_lower"], dtype=float)
-    hi95 = np.asarray(bands95["mean_upper"], dtype=float)
+    mean = np.asarray(bands95["posterior_mean"], dtype=float)
+    lo95 = np.asarray(bands95["posterior_mean_lower"], dtype=float)
+    hi95 = np.asarray(bands95["posterior_mean_upper"], dtype=float)
     n = len(data["disease"])
     assert mean.shape == (n,) and lo95.shape == (n,) and hi95.shape == (n,)
     # Probability-scale bands: ordered, clipped, non-degenerate.
@@ -214,8 +239,8 @@ def test_marginal_slope_sample_predict_returns_posterior_bands():
 
     # The band responds to the requested level.
     bands50 = posterior.predict(data, level=0.50)
-    lo50 = np.asarray(bands50["mean_lower"], dtype=float)
-    hi50 = np.asarray(bands50["mean_upper"], dtype=float)
+    lo50 = np.asarray(bands50["posterior_mean_lower"], dtype=float)
+    hi50 = np.asarray(bands50["posterior_mean_upper"], dtype=float)
     assert float(np.median(hi50 - lo50)) < float(np.median(hi95 - lo95)), (
         "50% posterior-predictive band is not tighter than the 95% band"
     )

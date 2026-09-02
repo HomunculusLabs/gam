@@ -40,6 +40,16 @@ def run_gam(*args):
     subprocess.run([gam_bin(), *map(str, args)], check=True)
 
 
+# The standard CSV schema is estimand-explicit (#2785): the plug-in pair and the
+# posterior mean always, and the posterior mean's band only under --uncertainty.
+_POINT_COLUMNS = ["linear_predictor_plugin", "mean_plugin", "posterior_mean"]
+_BAND_COLUMNS = [
+    "posterior_mean_standard_error",
+    "posterior_mean_lower",
+    "posterior_mean_upper",
+]
+
+
 def header(path):
     with open(path, newline="") as f:
         return next(csv.reader(f))
@@ -55,14 +65,8 @@ def test_gaussian_reference_honours_uncertainty_flag(tmp_path):
     run_gam("predict", model, gaussian, "--out", no_uncertainty, "-q")
     run_gam("predict", model, gaussian, "--out", yes_uncertainty, "--uncertainty", "-q")
 
-    assert header(no_uncertainty) == ["eta", "mean"]
-    assert header(yes_uncertainty) == [
-        "eta",
-        "mean",
-        "std_error",
-        "mean_lower",
-        "mean_upper",
-    ]
+    assert header(no_uncertainty) == _POINT_COLUMNS
+    assert header(yes_uncertainty) == _POINT_COLUMNS + _BAND_COLUMNS
 
 
 def test_poisson_predict_without_uncertainty_must_not_emit_band_columns(tmp_path):
@@ -73,7 +77,7 @@ def test_poisson_predict_without_uncertainty_must_not_emit_band_columns(tmp_path
     run_gam("fit", poisson, "y ~ s(x)", "--family", "poisson-log", "--out", model, "-q")
     run_gam("predict", model, poisson, "--out", no_uncertainty, "-q")
 
-    assert header(no_uncertainty) == ["eta", "mean"]
+    assert header(no_uncertainty) == _POINT_COLUMNS
 
 
 def test_uncertainty_flag_is_not_a_noop_for_poisson(tmp_path):
@@ -86,11 +90,5 @@ def test_uncertainty_flag_is_not_a_noop_for_poisson(tmp_path):
     run_gam("predict", model, poisson, "--out", no_uncertainty, "-q")
     run_gam("predict", model, poisson, "--out", yes_uncertainty, "--uncertainty", "-q")
 
-    assert header(no_uncertainty) == ["eta", "mean"]
-    assert header(yes_uncertainty) == [
-        "eta",
-        "mean",
-        "std_error",
-        "mean_lower",
-        "mean_upper",
-    ]
+    assert header(no_uncertainty) == _POINT_COLUMNS
+    assert header(yes_uncertainty) == _POINT_COLUMNS + _BAND_COLUMNS

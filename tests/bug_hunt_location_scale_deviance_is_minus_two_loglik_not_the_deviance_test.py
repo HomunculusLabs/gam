@@ -79,7 +79,7 @@ def _pair(family: str) -> tuple[Any, Any, dict[str, Any]]:
 
 
 def _mean(model: Any, data: dict[str, Any]) -> np.ndarray:
-    return np.asarray(model.predict(data, return_type="dict")["mean"], dtype=float)
+    return np.asarray(model.predict(data, return_type="dict")["posterior_mean"], dtype=float)
 
 
 @pytest.mark.parametrize("family", ["gaussian", "gamma"])

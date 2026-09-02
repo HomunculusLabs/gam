@@ -186,9 +186,12 @@ def test_restore_output_table_dict_returns_prediction_result_with_field_access()
     assert restored.std_error == [0.1, 0.2]
     assert restored.mean_lower == [0.8, 1.6]
     assert restored.mean_upper == [1.2, 2.4]
-    assert restored.lower == [0.8, 1.6]
-    assert restored.upper == [1.2, 2.4]
-    assert restored.se_mean == [0.1, 0.2]
+    # Attribute access is by column name only: the historical `lower` /
+    # `upper` / `se_mean` aliases are gone, because under two schemas
+    # (`mean_lower` vs `posterior_mean_lower`) an alias names two columns.
+    for alias in ("lower", "upper", "se_mean"):
+        with pytest.raises(AttributeError, match=f"no prediction column '{alias}'"):
+            _ = getattr(restored, alias)
     with pytest.raises(AttributeError, match="no prediction column 'median'"):
         _ = restored.median
 

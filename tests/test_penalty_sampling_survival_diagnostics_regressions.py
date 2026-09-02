@@ -86,7 +86,11 @@ def test_penalty_specs_sampling_survival_and_diagnostics_regressions():
     assert tail[2] == pytest.approx(0.0), "Survival at infinite time should be exactly 0.0."
 
     observed = [0.0, 1.0, 2.0]
-    predicted = {"mean": [0.0, 1.5, 1.5], "mean_lower": [-0.1, 1.0, 1.0], "mean_upper": [0.1, 2.0, 2.0]}
+    predicted = {
+        "posterior_mean": [0.0, 1.5, 1.5],
+        "posterior_mean_lower": [-0.1, 1.0, 1.0],
+        "posterior_mean_upper": [0.1, 2.0, 2.0],
+    }
     diag = Diagnostics.from_predictions(
         formula="y ~ x",
         response_name="y",
@@ -94,7 +98,7 @@ def test_penalty_specs_sampling_survival_and_diagnostics_regressions():
         predicted=predicted,
     )
     residuals = np.asarray(diag.residuals, dtype=float)
-    expected_residuals = np.asarray(observed, dtype=float) - np.asarray(predicted["mean"], dtype=float)
+    expected_residuals = np.asarray(observed, dtype=float) - np.asarray(predicted["posterior_mean"], dtype=float)
     assert np.allclose(residuals, expected_residuals), "Residuals should equal observed minus predicted mean."
     assert diag.metrics["n_obs"] == pytest.approx(3.0), "n_obs should equal the number of observations."
     assert diag.metrics["mae"] == pytest.approx(np.mean(np.abs(expected_residuals))), "MAE should equal mean absolute residual."
@@ -102,5 +106,5 @@ def test_penalty_specs_sampling_survival_and_diagnostics_regressions():
     assert diag.metrics["bias"] == pytest.approx(np.mean(expected_residuals)), "Bias should equal mean residual."
     y = np.asarray(observed, dtype=float)
     sst = np.sum((y - y.mean()) ** 2)
-    sse = np.sum((y - np.asarray(predicted["mean"], dtype=float)) ** 2)
+    sse = np.sum((y - np.asarray(predicted["posterior_mean"], dtype=float)) ** 2)
     assert diag.metrics["r_squared"] == pytest.approx(1.0 - sse / sst), "R-squared should match one minus SSE over SST."

@@ -8,6 +8,23 @@ from ._binding import rust_module
 from ._exceptions import map_exception
 
 
+def _point_series(predicted: dict[str, list[float]], point_column: str) -> list[float]:
+    """Return ``predicted[point_column]`` or name what is missing.
+
+    A predict table carries one response-scale point series under a
+    class-determined name; reading a different name is a schema disagreement,
+    so it is reported with both the requested column and the columns present
+    rather than surfacing as a bare ``KeyError``.
+    """
+    try:
+        return predicted[point_column]
+    except KeyError:
+        present = ", ".join(sorted(predicted)) or "<none>"
+        raise KeyError(
+            f"prediction table has no '{point_column}' point column (columns present: {present})"
+        ) from None
+
+
 @dataclass(frozen=True, slots=True)
 class Diagnostics:
     """Held-out / in-sample diagnostics for a fitted GAM.
@@ -21,10 +38,14 @@ class Diagnostics:
 
     - ``formula``: the model formula used to produce the predictions.
     - ``response_name``: name of the response column in the input table.
-    - ``observed``: actual response values aligned with ``predicted["mean"]``.
-    - ``residuals``: ``observed - predicted["mean"]`` per row.
-    - ``predicted``: dictionary of prediction series (``mean`` plus optional
-      ``mean_lower`` / ``mean_upper`` interval bounds).
+    - ``observed``: actual response values aligned with
+      ``predicted[point_column]``.
+    - ``residuals``: ``observed - predicted[point_column]`` per row.
+    - ``predicted``: the predict-table columns. ``point_column`` names the
+      response-scale point series in it (``"posterior_mean"`` for standard and
+      location-scale fits, ``"mean"`` for the transformation-normal and
+      Bernoulli marginal-slope classes); the optional interval bounds are
+      ``f"{point_column}_lower"`` / ``f"{point_column}_upper"``.
     - ``metrics``: scalar fit metrics (``n_obs``, ``mae``, ``rmse``, ``bias``,
       and ``r_squared`` when the response varies).
     - ``interval_lower`` / ``interval_upper``: optional pointwise prediction
@@ -45,6 +66,7 @@ class Diagnostics:
     metrics: dict[str, float]
     interval_lower: list[float] | None = None
     interval_upper: list[float] | None = None
+    point_column: str = "posterior_mean"
 
     @classmethod
     def from_predictions(
@@ -54,6 +76,7 @@ class Diagnostics:
         response_name: str,
         observed: list[float],
         predicted: dict[str, list[float]],
+        point_column: str = "posterior_mean",
     ) -> "Diagnostics":
         """Construct a :class:`Diagnostics` from raw observed and predicted series.
 
@@ -69,8 +92,15 @@ class Diagnostics:
         observed : list of float
             Observed response values.
         predicted : dict of str to list of float
-            Prediction series. Must contain key ``"mean"``; may contain
-            ``"mean_lower"`` and ``"mean_upper"`` for interval bands.
+            Prediction series, as returned by ``predict(..., return_type="dict")``.
+            Must contain ``point_column``; may contain ``f"{point_column}_lower"``
+            and ``f"{point_column}_upper"`` for interval bands.
+        point_column : str
+            Name of the response-scale point series in ``predicted``:
+            ``"posterior_mean"`` (the default, and the standard / location-scale
+            predict schema) or ``"mean"`` for the transformation-normal and
+            Bernoulli marginal-slope classes. :func:`gamfit._predict_shape.point_column_name`
+            resolves it from a model's class.
 
         Returns
         -------
@@ -83,21 +113,19 @@ class Diagnostics:
         ...     formula="y ~ s(x)",
         ...     response_name="y",
         ...     observed=[1.0, 2.0, 3.0],
-        ...     predicted={"mean": [1.1, 1.9, 3.2]},
+        ...     predicted={"posterior_mean": [1.1, 1.9, 3.2]},
         ... ).metrics["mae"]
         0.13333333333333336
         """
+        point = _point_series(predicted, point_column)
         try:
             rust = rust_module()
-            diagnostics = rust.diagnostics_from_predictions(
-                observed,
-                predicted["mean"],
-            )
+            diagnostics = rust.diagnostics_from_predictions(observed, point)
             import numpy as np
 
             residuals_array = rust.compute_residuals(
                 np.asarray(observed, dtype=np.float64),
-                np.asarray(predicted["mean"], dtype=np.float64),
+                np.asarray(point, dtype=np.float64),
             )
         except Exception as exc:
             raise map_exception(exc) from exc
@@ -110,8 +138,9 @@ class Diagnostics:
             residuals=residuals,
             predicted=predicted,
             metrics=metrics,
-            interval_lower=predicted.get("mean_lower"),
-            interval_upper=predicted.get("mean_upper"),
+            interval_lower=predicted.get(f"{point_column}_lower"),
+            interval_upper=predicted.get(f"{point_column}_upper"),
+            point_column=point_column,
         )
 
     @classmethod
@@ -122,6 +151,7 @@ class Diagnostics:
         response_name: str,
         observed: list[float],
         predicted: dict[str, list[float]],
+        point_column: str = "posterior_mean",
     ) -> "Diagnostics":
         """Construct a :class:`Diagnostics` for a binary-classification fit.
 
@@ -130,8 +160,8 @@ class Diagnostics:
         this populates ``metrics`` with the classification panel computed by
         the Rust ``classification_metrics`` routine: ``auc``, ``pr_auc``,
         ``brier``, ``logloss``, ``nagelkerke_r2`` (against the observed base
-        rate as the null model), and ``ece``. The ``predicted["mean"]`` series
-        is the model-implied :math:`P(y=1)`.
+        rate as the null model), and ``ece``. The ``predicted[point_column]``
+        series is the model-implied :math:`P(y=1)`.
 
         Parameters
         ----------
@@ -142,8 +172,12 @@ class Diagnostics:
         observed : list of float
             Observed ``{0, 1}`` labels.
         predicted : dict of str to list of float
-            Prediction series. Must contain key ``"mean"`` (the predicted
+            Prediction series. Must contain ``point_column`` (the predicted
             positive-class probability); may carry interval bands.
+        point_column : str
+            Name of the probability series in ``predicted``: ``"posterior_mean"``
+            for a standard binomial fit (the default), ``"mean"`` for the
+            Bernoulli marginal-slope class.
 
         Returns
         -------
@@ -157,15 +191,15 @@ class Diagnostics:
         ...     formula="y ~ s(x)",
         ...     response_name="y",
         ...     observed=[0.0, 0.0, 1.0, 1.0],
-        ...     predicted={"mean": [0.1, 0.3, 0.7, 0.9]},
+        ...     predicted={"posterior_mean": [0.1, 0.3, 0.7, 0.9]},
         ... ).metrics["auc"]
         1.0
         """
+        mean = _point_series(predicted, point_column)
         try:
             rust = rust_module()
             import numpy as np
 
-            mean = predicted["mean"]
             train_prev = float(np.mean(observed)) if len(observed) else 0.0
             metrics = dict(rust.classification_metrics(observed, mean, train_prev))
             metrics["n_obs"] = float(len(observed))
@@ -182,8 +216,9 @@ class Diagnostics:
             residuals=list(residuals_array),
             predicted=predicted,
             metrics=metrics,
-            interval_lower=predicted.get("mean_lower"),
-            interval_upper=predicted.get("mean_upper"),
+            interval_lower=predicted.get(f"{point_column}_lower"),
+            interval_upper=predicted.get(f"{point_column}_upper"),
+            point_column=point_column,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -209,6 +244,7 @@ class Diagnostics:
             "metrics": dict(self.metrics),
             "interval_lower": None if self.interval_lower is None else list(self.interval_lower),
             "interval_upper": None if self.interval_upper is None else list(self.interval_upper),
+            "point_column": self.point_column,
         }
 
     def __repr__(self) -> str:

@@ -204,12 +204,18 @@ def _point_payload_spec(
       them for an ``interval=`` request (#1049). The credible bounds
       are response-scale (probability) quantiles from the marginal-slope
       coefficient covariance, so they are clipped to ``(0, 1)`` exactly like
-      the point ``mean``; ``std_error`` is the η-scale SE and is left untouched.
-    * **standard GAM / GLM** — ``posterior_mean`` as emitted; table form is the
-      *full* Rust estimand-explicit payload (``linear_predictor_plugin``,
-      ``mean_plugin``, and ``posterior_mean`` always, plus
-      ``posterior_mean_standard_error`` / ``posterior_mean_lower`` /
-      ``posterior_mean_upper`` when an interval was set).
+      the point ``mean``; ``std_error`` is the probability-scale posterior SE
+      (the documented response-scale column, not the η-scale SE) and is left
+      untouched.
+    * **standard GAM / GLM, including the location-scale classes** —
+      ``posterior_mean`` as emitted; table form is the *full* Rust
+      estimand-explicit payload (``linear_predictor_plugin``, ``mean_plugin``,
+      and ``posterior_mean`` always, plus ``posterior_mean_standard_error`` /
+      ``posterior_mean_lower`` / ``posterior_mean_upper`` when an interval was
+      set, and ``noise_scale`` when the family fits a response-side scale).
+      The Rust ``PredictModelClass::publishes_estimand_explicit_schema`` is the
+      owner of which classes emit these names; :func:`point_column_name` is its
+      Python-side mirror.
 
     The shared "return the vector, else restore a table" tail lives in
     :func:`_shape_point_payload`; this function owns only the differences.
@@ -232,8 +238,8 @@ def _point_payload_spec(
         # the marginal-slope coefficient covariance. They were silently dropped
         # here, making predict(interval=) a no-op for this family. Carry them
         # into the table when present, clipping the probability-scale bounds to
-        # (0, 1) with the same map as the point mean (std_error is the η-scale
-        # SE — left as emitted), and surface linear_predictor (the η-scale
+        # (0, 1) with the same map as the point mean (std_error is the
+        # probability-scale posterior SE — left as emitted), and surface linear_predictor (the η-scale
         # point) alongside so the band can be reconstructed downstream as the
         # TransformEta construction link^{-1}(η ± z·std_error). Without an
         # interval the table form stays the single `mean` (probability) column.
@@ -324,6 +330,23 @@ def _restore_with_optional_id(
     )
 
 
+def point_column_name(model_class: str, family: str) -> str:
+    """Name of the response-scale point column in a point-payload predict table.
+
+    Mirrors the Rust ``PredictModelClass::point_column``: the transformation-
+    normal and Bernoulli marginal-slope classes keep their class-specific
+    ``mean`` column; every other point-payload class (standard GAM / GLM and
+    the location-scale classes) publishes the estimand-explicit
+    ``posterior_mean``. Interval bands, when present, are the same stem with
+    ``_lower`` / ``_upper`` appended in both schemas.
+    """
+    if model_class in _TRANSFORMATION_NORMAL_MODEL_CLASSES or _is_bernoulli_marginal_slope(
+        model_class, family
+    ):
+        return "mean"
+    return "posterior_mean"
+
+
 def _is_bernoulli_marginal_slope(model_class: str, family: str) -> bool:
     """Distinguish Bernoulli marginal-slope from survival marginal-slope.
 
@@ -342,6 +365,7 @@ def _is_bernoulli_marginal_slope(model_class: str, family: str) -> bool:
 
 
 __all__ = [
+    "point_column_name",
     "shape_predict_response",
     "wants_table",
 ]

@@ -92,7 +92,7 @@ def grid_eval(
     pred = model.predict(
         payload, interval=0.95 if with_se else None, return_type="dict"
     )
-    mean = np.asarray(pred["mean"], dtype=float).reshape(side, side)
+    mean = np.asarray(pred["posterior_mean"], dtype=float).reshape(side, side)
     se = (
         np.asarray(pred["effective_se"], dtype=float).reshape(side, side)
         if with_se and "effective_se" in pred
@@ -391,7 +391,7 @@ def render_marginal_slope_3d() -> None:
             {"pc1": flat_x, "pc2": flat_y, "z": [z_val] * len(flat_x)},
             return_type="dict",
         )
-        m = np.asarray(pred["mean"], dtype=float).reshape(side, side)
+        m = np.asarray(pred["posterior_mean"], dtype=float).reshape(side, side)
         return np.asarray(np.clip(m, 0.0, 1.0))
 
     log("[marginal-slope] predicting baseline (z=0)")

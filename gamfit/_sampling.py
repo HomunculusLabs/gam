@@ -75,7 +75,10 @@ class PosteriorPredictive:
 
         Dispatches to ``posterior_draw_bands`` in Rust. Both matrices already
         come from the model-class-specific prediction kernel, so the reducer
-        owns only posterior means and quantiles.
+        owns only posterior means and quantiles. The response-scale keys are
+        ``posterior_mean`` / ``posterior_mean_lower`` / ``posterior_mean_upper``:
+        the draw average IS the posterior mean of the response, so it carries
+        the same name as ``Model.predict``'s default estimand (#2785).
         """
         import numpy as np
 
@@ -96,9 +99,9 @@ class PosteriorPredictive:
             "linear_predictor": np.asarray(parsed["linear_predictor"], dtype=float),
             "linear_predictor_lower": np.asarray(parsed["linear_predictor_lower"], dtype=float),
             "linear_predictor_upper": np.asarray(parsed["linear_predictor_upper"], dtype=float),
-            "mean": np.asarray(parsed["mean"], dtype=float),
-            "mean_lower": np.asarray(parsed["mean_lower"], dtype=float),
-            "mean_upper": np.asarray(parsed["mean_upper"], dtype=float),
+            "posterior_mean": np.asarray(parsed["posterior_mean"], dtype=float),
+            "posterior_mean_lower": np.asarray(parsed["posterior_mean_lower"], dtype=float),
+            "posterior_mean_upper": np.asarray(parsed["posterior_mean_upper"], dtype=float),
         }
 
     def __repr__(self) -> str:
@@ -293,9 +296,11 @@ class PosteriorSamples:
         Returns a dict with linear-predictor-scale bands
         (``linear_predictor``, ``linear_predictor_lower``,
         ``linear_predictor_upper``) and response-scale summaries
-        (``mean``, ``mean_lower``, ``mean_upper``), each a 1-D array of
-        length ``n_rows``. The vocabulary matches ``Model.predict`` — no
-        engine-internal ``eta`` key is exposed.
+        (``posterior_mean``, ``posterior_mean_lower``,
+        ``posterior_mean_upper``), each a 1-D array of length ``n_rows``.
+        The response-scale vocabulary is ``Model.predict``'s estimand-explicit
+        schema (#2785) — the draw average is the posterior mean of the
+        response — and no engine-internal ``eta`` key is exposed.
         """
         import numpy as np
         self._need_model()
@@ -313,9 +318,9 @@ class PosteriorSamples:
             "linear_predictor": np.asarray(parsed["linear_predictor"], dtype=float),
             "linear_predictor_lower": np.asarray(parsed["linear_predictor_lower"], dtype=float),
             "linear_predictor_upper": np.asarray(parsed["linear_predictor_upper"], dtype=float),
-            "mean": np.asarray(parsed["mean"], dtype=float),
-            "mean_lower": np.asarray(parsed["mean_lower"], dtype=float),
-            "mean_upper": np.asarray(parsed["mean_upper"], dtype=float),
+            "posterior_mean": np.asarray(parsed["posterior_mean"], dtype=float),
+            "posterior_mean_lower": np.asarray(parsed["posterior_mean_lower"], dtype=float),
+            "posterior_mean_upper": np.asarray(parsed["posterior_mean_upper"], dtype=float),
         }
 
     def predict_draws(self, new_data: Any) -> PosteriorPredictive:

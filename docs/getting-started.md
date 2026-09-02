@@ -103,7 +103,8 @@ For pointwise Wald intervals, pass `interval=`:
 
 ```python
 preds = model.predict([{"x": 1.5}, {"x": 2.5}], interval=0.95)
-# Columns: linear_predictor, mean, std_error, mean_lower, mean_upper
+# Columns: linear_predictor_plugin, mean_plugin, posterior_mean,
+#          posterior_mean_standard_error, posterior_mean_lower, posterior_mean_upper
 ```
 
 Transformation-normal and Bernoulli marginal-slope models follow the

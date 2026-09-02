@@ -93,7 +93,7 @@ def build_demo_data(
 def read_prediction_mean(path: Path, expected_rows: int) -> np.ndarray:
     with path.open() as handle:
         reader = csv.DictReader(handle)
-        mean = [float(row["mean"]) for row in reader]
+        mean = [float(row["posterior_mean"]) for row in reader]
     if len(mean) != expected_rows:
         raise RuntimeError(
             f"prediction row mismatch for {path.name}: got {len(mean)}, expected {expected_rows}"

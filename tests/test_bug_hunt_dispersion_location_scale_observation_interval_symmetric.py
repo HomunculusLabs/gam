@@ -59,7 +59,7 @@ def _skewed_gamma_gamlss(rng, n):
 def _band_stats(pred, y):
     lo = pred["observation_lower"].to_numpy()
     hi = pred["observation_upper"].to_numpy()
-    mn = pred["mean"].to_numpy()
+    mn = pred["posterior_mean"].to_numpy()
     two_sided = float(np.mean((y >= lo) & (y <= hi)))
     upper_tail = float(np.mean(y > hi))
     lower_tail = float(np.mean(y < lo))

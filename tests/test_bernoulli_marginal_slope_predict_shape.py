@@ -84,11 +84,11 @@ def test_interval_dict_exposes_exact_covariance_provenance(monkeypatch: Any) -> 
         "standard",
         "identity",
         {
-            "linear_predictor": [1.0, 2.0],
-            "mean": [1.0, 2.0],
-            "std_error": [0.1, 0.2],
-            "mean_lower": [0.8, 1.6],
-            "mean_upper": [1.2, 2.4],
+            "linear_predictor_plugin": [1.0, 2.0],
+            "posterior_mean": [1.0, 2.0],
+            "posterior_mean_standard_error": [0.1, 0.2],
+            "posterior_mean_lower": [0.8, 1.6],
+            "posterior_mean_upper": [1.2, 2.4],
         },
         covariance_source="smoothing-corrected",
     )
@@ -152,7 +152,7 @@ def test_bernoulli_marginal_slope_interval_carries_clipped_bounds(
     ``std_error`` + response-scale credible bounds, the marginal-slope shaper
     must carry them into the table (it previously dropped everything but
     ``mean``). The probability-scale bounds are clipped to ``[0, 1]`` with the
-    same map as the point ``mean``; ``std_error`` (the η-scale SE) is passed
+    same map as the point ``mean``; ``std_error`` (the probability-scale posterior SE) is passed
     through untouched."""
 
     class _ClippingRust(_FakeRust):
@@ -204,14 +204,14 @@ def test_bernoulli_marginal_slope_interval_carries_clipped_bounds(
     np.testing.assert_allclose(out["linear_predictor"], [-1.0, 0.0, 1.0])
     np.testing.assert_allclose(out["mean"], [0.16, 0.50, 0.84])
     np.testing.assert_allclose(out.mean, [0.16, 0.50, 0.84])
-    # std_error is the η-scale SE — untouched, not clipped.
+    # std_error is the probability-scale posterior SE — untouched, not clipped.
     np.testing.assert_allclose(out["std_error"], [0.30, 0.20, 0.30])
-    np.testing.assert_allclose(out.se_mean, [0.30, 0.20, 0.30])
+    np.testing.assert_allclose(out.std_error, [0.30, 0.20, 0.30])
     # Probability-scale bounds clipped into [0, 1].
     np.testing.assert_allclose(out["mean_lower"], [0.0, 0.42, 0.70])
     np.testing.assert_allclose(out["mean_upper"], [0.40, 0.58, 1.0])
-    np.testing.assert_allclose(out.lower, [0.0, 0.42, 0.70])
-    np.testing.assert_allclose(out.upper, [0.40, 0.58, 1.0])
+    np.testing.assert_allclose(out.mean_lower, [0.0, 0.42, 0.70])
+    np.testing.assert_allclose(out.mean_upper, [0.40, 0.58, 1.0])
 
 
 def test_bernoulli_marginal_slope_no_interval_stays_1d(monkeypatch: Any) -> None:
@@ -248,9 +248,9 @@ def test_standard_gam_default_returns_1d_mean(monkeypatch: Any) -> None:
         "standard",
         "gaussian",
         {
-            "linear_predictor": [-1.0, 0.0, 1.0],
-            "mean": [0.2, 0.5, 0.8],
-            "std_error": [0.01, 0.02, 0.03],
+            "linear_predictor_plugin": [-1.0, 0.0, 1.0],
+            "posterior_mean": [0.2, 0.5, 0.8],
+            "posterior_mean_standard_error": [0.01, 0.02, 0.03],
         },
     )
 
@@ -270,8 +270,8 @@ def test_standard_gam_with_return_type_returns_table(monkeypatch: Any) -> None:
         "standard",
         "gaussian",
         {
-            "linear_predictor": [-1.0, 0.0, 1.0],
-            "mean": [0.2, 0.5, 0.8],
+            "linear_predictor_plugin": [-1.0, 0.0, 1.0],
+            "posterior_mean": [0.2, 0.5, 0.8],
         },
     )
 
@@ -283,8 +283,8 @@ def test_standard_gam_with_return_type_returns_table(monkeypatch: Any) -> None:
 
     assert isinstance(out, dict)
     assert isinstance(out, PredictionResult)
-    assert list(out) == ["linear_predictor", "mean"]
-    np.testing.assert_allclose(out.mean, [0.2, 0.5, 0.8])
+    assert list(out) == ["linear_predictor_plugin", "posterior_mean"]
+    np.testing.assert_allclose(out.posterior_mean, [0.2, 0.5, 0.8])
 
 
 def test_standard_gam_with_id_column_returns_table(monkeypatch: Any) -> None:
@@ -294,8 +294,8 @@ def test_standard_gam_with_id_column_returns_table(monkeypatch: Any) -> None:
         "standard",
         "gaussian",
         {
-            "linear_predictor": [-1.0, 0.0, 1.0],
-            "mean": [0.2, 0.5, 0.8],
+            "linear_predictor_plugin": [-1.0, 0.0, 1.0],
+            "posterior_mean": [0.2, 0.5, 0.8],
         },
     )
 
@@ -312,7 +312,7 @@ def test_standard_gam_with_id_column_returns_table(monkeypatch: Any) -> None:
     import pandas as pd
 
     assert isinstance(out, pd.DataFrame)
-    assert list(out.columns) == ["person_id", "linear_predictor", "mean"]
+    assert list(out.columns) == ["person_id", "linear_predictor_plugin", "posterior_mean"]
     assert out["person_id"].tolist() == ["a", "b", "c"]
 
 
@@ -323,11 +323,11 @@ def test_standard_gam_with_interval_returns_table(monkeypatch: Any) -> None:
         "standard",
         "gaussian",
         {
-            "linear_predictor": [-1.0, 0.0, 1.0],
-            "mean": [0.2, 0.5, 0.8],
-            "std_error": [0.01, 0.02, 0.03],
-            "mean_lower": [0.19, 0.48, 0.77],
-            "mean_upper": [0.21, 0.52, 0.83],
+            "linear_predictor_plugin": [-1.0, 0.0, 1.0],
+            "posterior_mean": [0.2, 0.5, 0.8],
+            "posterior_mean_standard_error": [0.01, 0.02, 0.03],
+            "posterior_mean_lower": [0.19, 0.48, 0.77],
+            "posterior_mean_upper": [0.21, 0.52, 0.83],
         },
     )
 
@@ -341,11 +341,11 @@ def test_standard_gam_with_interval_returns_table(monkeypatch: Any) -> None:
 
     assert isinstance(out, pd.DataFrame)
     assert list(out.columns) == [
-        "linear_predictor",
-        "mean",
-        "std_error",
-        "mean_lower",
-        "mean_upper",
+        "linear_predictor_plugin",
+        "posterior_mean",
+        "posterior_mean_standard_error",
+        "posterior_mean_lower",
+        "posterior_mean_upper",
     ]
 
 
@@ -361,8 +361,8 @@ def test_marginal_slope_non_bernoulli_falls_through_to_standard_shaper(
         "marginal-slope",
         "royston-parmar",
         {
-            "linear_predictor": [-1.0, 0.0, 1.0],
-            "mean": [0.2, 0.5, 0.8],
+            "linear_predictor_plugin": [-1.0, 0.0, 1.0],
+            "posterior_mean": [0.2, 0.5, 0.8],
         },
     )
 

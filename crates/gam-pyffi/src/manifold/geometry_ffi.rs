@@ -7283,14 +7283,12 @@ fn predict_array_impl(
     // Parity with `predict()` (#1537): with no interval requested, return the
     // single response-scale point column as an `(n, 1)` array — the Python
     // wrapper ravels it to the documented 1-D response-scale prediction vector.
-    // Standard models name that estimand `posterior_mean` explicitly (#2785);
-    // specialised model classes retain their class-specific point column.
+    // Classes on the estimand-explicit schema name that estimand
+    // `posterior_mean` (#2785); the remaining classes retain their
+    // class-specific point column. `PredictModelClass::point_column` owns
+    // that choice, together with `predict_columns` below.
     if options.interval.is_none() {
-        let point_column = if matches!(model_class, PredictModelClass::Standard) {
-            "posterior_mean"
-        } else {
-            "mean"
-        };
+        let point_column = model_class.point_column();
         let mean = columns
             .get(point_column)
             .ok_or_else(|| format!("predict_array: response `{point_column}` column missing"))?;
@@ -7538,12 +7536,17 @@ fn predict_columns(
     let posterior_mean = resolved.posterior_mean.ok_or_else(|| {
         "default prediction did not produce the required posterior mean".to_string()
     })?;
-    if matches!(model.predict_model_class(), PredictModelClass::Standard) {
+    if model
+        .predict_model_class()
+        .publishes_estimand_explicit_schema()
+    {
         // #2785: publish the complete plug-in pair and the posterior estimand
         // under names that make their different meanings explicit. In
         // particular, `mean_plugin` is exactly the inverse link of
         // `linear_predictor_plugin`; `posterior_mean` remains the SPEC-mandated
-        // default point and is not generally their inverse-link image.
+        // default point and is not generally their inverse-link image. The
+        // location-scale classes are on this schema too (their scale is the
+        // separate `noise_scale` column below); the class enum owns the set.
         columns.insert(
             "linear_predictor_plugin".to_string(),
             resolved.linear_predictor_plugin.to_vec(),

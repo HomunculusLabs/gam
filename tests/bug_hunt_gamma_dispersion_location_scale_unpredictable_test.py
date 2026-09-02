@@ -89,7 +89,7 @@ def _assert_joint_covariance_and_predictable(
     se = m.predict(pred_df, interval=0.95)
     obs = m.predict(pred_df, interval=0.95, observation_interval=True)
     for label, frame in (("interval", se), ("observation_interval", obs)):
-        mean_col = np.asarray(frame["mean"])
+        mean_col = np.asarray(frame["posterior_mean"])
         assert np.all(np.isfinite(mean_col)), (
             f"{family}: predict({label}) produced non-finite means"
         )
