@@ -1283,7 +1283,6 @@ fn forecast_tiers_population_score_and_history_are_one_model_conditioned_on_more
                 &ForecastRequest { history: subject, horizons: &horizons, future: &future },
             )
             .expect("history forecast");
-            let _ = i;
             (score, alone.expected_counts[[1, 0]], with_history.expected_counts[[1, 0]], subject.events.len())
         })
         .collect();
