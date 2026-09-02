@@ -2811,6 +2811,10 @@ fn consuming_anchors(
 /// supplied stack composes without inspecting its point, so the point's value
 /// channel is dead); `primary_parameters` then names the primaries whose
 /// value the body never reads. Gates and the result lines keep program order.
+///
+/// A definition that reads a mutable local reads the state at its place in
+/// the program: it is never sunk past, placed inside a gate behind, or
+/// flushed across a gate that reassigns that local.
 fn schedule_direct_lowering(body: &str) -> String {
     let mut items = emitted_items(body);
     let count = items.len();
@@ -2833,6 +2837,24 @@ fn schedule_direct_lowering(body: &str) -> String {
             }
         }
     }
+    // The gates after item `index` (in program order) that reassign a
+    // mutable the item reads: the item's value is the state before them, so
+    // it must be emitted before the first of them.
+    let reassigning_gates = |index: usize| -> Vec<usize> {
+        items
+            .iter()
+            .enumerate()
+            .filter(|(gate, item)| {
+                *gate > index
+                    && item.kind == ItemKind::Gate
+                    && item
+                        .assigns
+                        .iter()
+                        .any(|assigned| items[index].references.contains(assigned))
+            })
+            .map(|(gate, _)| gate)
+            .collect()
+    };
     let mut memo = vec![None; count];
     let mut placement = vec![Placement::Top; count];
     for index in 0..count {
@@ -2842,7 +2864,11 @@ fn schedule_direct_lowering(body: &str) -> String {
         let anchors = consuming_anchors(index, &items, &users, &mut memo);
         placement[index] = match anchors.as_slice() {
             [] => Placement::Dead,
-            [gate] if items[*gate].kind == ItemKind::Gate && index < *gate => {
+            [gate]
+                if items[*gate].kind == ItemKind::Gate
+                    && index < *gate
+                    && reassigning_gates(index).iter().all(|other| other >= gate) =>
+            {
                 Placement::Inside(*gate)
             }
             _ => Placement::Top,
@@ -3039,6 +3065,21 @@ fn schedule_direct_lowering(body: &str) -> String {
                     rebuilt.push_str(tail);
                     items[index].text = rebuilt;
                 }
+                // What reads a mutable this gate reassigns, and precedes the
+                // gate in the program, reads the state before it: issued here.
+                let mut readers: Vec<String> = Vec::new();
+                for &candidate in &pending {
+                    if candidate < index
+                        && items[index]
+                            .assigns
+                            .iter()
+                            .any(|assigned| items[candidate].references.contains(assigned))
+                        && let Some(name) = &items[candidate].defines
+                    {
+                        readers.push(name.clone());
+                    }
+                }
+                references.extend(readers);
                 let inputs = pending_inputs(&references, &items, &pending, &by_name);
                 pending.retain(|candidate| !inputs.contains(candidate));
                 order.extend(inputs);
@@ -5409,6 +5450,64 @@ mod tests {
         let cuda = emitted_cuda(program);
         assert!(!cuda.contains("double p_v"), "{cuda}");
         assert!(cuda.contains("double p_g0"), "{cuda}");
+    }
+
+    /// A definition that reads a mutable local between two gates that
+    /// reassign it is emitted between them, whatever reads it later: sinking
+    /// it to its first use would read the second gate's state, and the flush
+    /// before a call issued after the second gate would too.
+    #[test]
+    fn a_mutable_read_stays_between_the_gates_that_reassign_it() {
+        let program = quote! {
+            fn snapshot(x, y; a, b)
+            emit [order2, cuda];
+            leaves { exponential => exp_stack => d_exp }
+            witnesses [];
+            {
+                let mut acc = x;
+                if (a != 0.0) { acc = mul(acc, y); }
+                let between = mul(acc, x);
+                if (b != 0.0) { acc = add(acc, x); }
+                let late = compose(exponential, y);
+                return add(mul(between, late), acc);
+            }
+        };
+        let rust = emitted_function(program.clone(), "snapshot_order2");
+        let first_gate = rust.find("if (a != 0.0)").expect("the first gate");
+        let first_close = rust[first_gate..].find('}').expect("the first gate closes") + first_gate;
+        let second_gate = rust.find("if (b != 0.0)").expect("the second gate");
+        for channel in ["let between_v", "let between_g0", "let between_h0_0"] {
+            let at = rust.find(channel).expect(channel);
+            assert!(first_close < at && at < second_gate, "{channel} is not between the gates:\n{rust}");
+        }
+        let cuda = emitted_cuda(program);
+        let first_gate = cuda.find("if ((in.a != 0.0))").expect("the first CUDA gate");
+        let first_close = cuda[first_gate..].find('}').expect("the first CUDA gate closes") + first_gate;
+        let second_gate = cuda.find("if ((in.b != 0.0))").expect("the second CUDA gate");
+        let at = cuda.find("double between_v").expect("the CUDA value");
+        assert!(first_close < at && at < second_gate, "{cuda}");
+
+        // Read only inside a later gate, it is still emitted before the
+        // reassigning gate, not at the top of the gate that reads it.
+        let program = quote! {
+            fn inside(x, y; a, b, c)
+            emit [order2];
+            leaves { exponential => exp_stack => d_exp }
+            witnesses [];
+            {
+                let mut acc = x;
+                if (a != 0.0) { acc = mul(acc, y); }
+                let between = mul(acc, x);
+                if (b != 0.0) { acc = add(acc, x); }
+                let mut out = acc;
+                if (c != 0.0) { out = add(out, between); }
+                return out;
+            }
+        };
+        let rust = emitted_function(program, "inside_order2");
+        let second_gate = rust.find("if (b != 0.0)").expect("the second gate");
+        let at = rust.find("let between_v").expect("the value");
+        assert!(at < second_gate, "{rust}");
     }
 
     /// A composition on `scale(x, s)` forms `s·f'` and `s²·f''` once and
