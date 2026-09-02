@@ -1998,7 +1998,7 @@ fn dense_taylor_compose(input: DenseTaylorJet, stack: &str) -> DenseTaylorJet {
         })
         .collect::<Vec<_>>();
     let mut out = DenseTaylorJet::constant(format!("{stack}[0]"), dimension, order);
-    let mut terms: Vec<Vec<(Rational, String)>> = vec![Vec::new(); slots];
+    let mut terms: Vec<Vec<(usize, (Rational, String))>> = vec![Vec::new(); slots];
     for derivative_order in 1..=order {
         let mut counts = vec![0usize; dimension];
         let mut selected = Vec::with_capacity(derivative_order);
@@ -2011,15 +2011,30 @@ fn dense_taylor_compose(input: DenseTaylorJet, stack: &str) -> DenseTaylorJet {
             products: &mut products,
         };
         dense_taylor_composition_partitions(&mut state, 0, derivative_order, None);
-        let derivative = format!("{stack}[{derivative_order}]");
         for (index, products) in products.iter().enumerate() {
-            if let Some((factor, sum)) = combine_dense_taylor_terms(products) {
-                terms[index].push((factor, symbolic_multiply(&derivative, &sum)));
+            if let Some(sum) = combine_dense_taylor_terms(products) {
+                terms[index].push((derivative_order, sum));
             }
         }
     }
+    // The orders' sums are combined under one factor before the stack
+    // entries multiply them, so a ratio between orders is applied to `B_d`
+    // (input work) and never to the product with the leaf's result.
     for (index, terms) in terms.iter().enumerate().skip(1) {
-        out.set(index, combine_dense_taylor_terms(terms));
+        let factors: Vec<(Rational, String)> = terms
+            .iter()
+            .map(|(_, (factor, _))| (*factor, String::new()))
+            .collect();
+        let Some((common, _)) = combine_dense_taylor_terms(&factors) else {
+            continue;
+        };
+        let mut sum: Option<String> = None;
+        for (derivative_order, (factor, expression)) in terms {
+            let scaled = scaled_by(expression, factor.over(common));
+            let term = symbolic_multiply(&format!("{stack}[{derivative_order}]"), &scaled);
+            sum = symbolic_add_component(&sum, &Some(term));
+        }
+        out.set(index, sum.map(|sum| (common, sum)));
     }
     out
 }
@@ -3679,97 +3694,42 @@ fn rust_dense_taylor_body(
     let mut source = "{\n".to_string();
     push_dense_taylor_schedule_body(&mut source, &schedule);
     if dimension == 2 {
+        // The root-composition specialisation is the third-order surface's:
+        // the inner jet's derivatives contracted in Faà di Bruno's form. The
+        // fourth-order surface composes densely and contracts the four
+        // degree-four coefficients, which is fewer multiplies than the
+        // directional form at that order.
         if let Some(root_stack) = &schedule.root_compose_stack {
+            debug_assert!(!fourth, "the root composition is specialised at order 3 only");
             push_dense_taylor_derivative_array(&mut source, "inner_first", &schedule.result, 1);
             push_dense_taylor_derivative_array(&mut source, "inner_second", &schedule.result, 2);
             push_dense_taylor_derivative_array(&mut source, "inner_third", &schedule.result, 3);
-            if fourth {
-                push_dense_taylor_derivative_array(
-                    &mut source,
-                    "inner_fourth",
-                    &schedule.result,
-                    4,
-                );
-                source.push_str(&format!(
-                    "    let inner_u = inner_first[0] * direction_u[0]\n\
-                     \x20       + inner_first[1] * direction_u[1];\n\
-                     \x20   let inner_v = inner_first[0] * direction_v[0]\n\
-                     \x20       + inner_first[1] * direction_v[1];\n\
-                     \x20   let inner_uv = inner_second[0] * direction_u[0] * direction_v[0]\n\
-                     \x20       + inner_second[1] * (direction_u[0] * direction_v[1]\n\
-                     \x20           + direction_u[1] * direction_v[0])\n\
-                     \x20       + inner_second[2] * direction_u[1] * direction_v[1];\n\
-                     \x20   std::array::from_fn(|axis| std::array::from_fn(|other| {{\n\
-                     \x20       let offset = axis + other;\n\
-                     \x20       let inner_a = inner_first[axis];\n\
-                     \x20       let inner_b = inner_first[other];\n\
-                     \x20       let inner_ab = inner_second[offset];\n\
-                     \x20       let inner_au = inner_second[axis] * direction_u[0]\n\
-                     \x20           + inner_second[axis + 1] * direction_u[1];\n\
-                     \x20       let inner_av = inner_second[axis] * direction_v[0]\n\
-                     \x20           + inner_second[axis + 1] * direction_v[1];\n\
-                     \x20       let inner_bu = inner_second[other] * direction_u[0]\n\
-                     \x20           + inner_second[other + 1] * direction_u[1];\n\
-                     \x20       let inner_bv = inner_second[other] * direction_v[0]\n\
-                     \x20           + inner_second[other + 1] * direction_v[1];\n\
-                     \x20       let inner_abu = inner_third[offset] * direction_u[0]\n\
-                     \x20           + inner_third[offset + 1] * direction_u[1];\n\
-                     \x20       let inner_abv = inner_third[offset] * direction_v[0]\n\
-                     \x20           + inner_third[offset + 1] * direction_v[1];\n\
-                     \x20       let inner_auv = inner_third[axis] * direction_u[0] * direction_v[0]\n\
-                     \x20           + inner_third[axis + 1] * (direction_u[0] * direction_v[1]\n\
-                     \x20               + direction_u[1] * direction_v[0])\n\
-                     \x20           + inner_third[axis + 2] * direction_u[1] * direction_v[1];\n\
-                     \x20       let inner_buv = inner_third[other] * direction_u[0] * direction_v[0]\n\
-                     \x20           + inner_third[other + 1] * (direction_u[0] * direction_v[1]\n\
-                     \x20               + direction_u[1] * direction_v[0])\n\
-                     \x20           + inner_third[other + 2] * direction_u[1] * direction_v[1];\n\
-                     \x20       let inner_abuv = inner_fourth[offset] * direction_u[0] * direction_v[0]\n\
-                     \x20           + inner_fourth[offset + 1] * (direction_u[0] * direction_v[1]\n\
-                     \x20               + direction_u[1] * direction_v[0])\n\
-                     \x20           + inner_fourth[offset + 2] * direction_u[1] * direction_v[1];\n\
-                     \x20       let second_chain = inner_au * inner_b + inner_a * inner_bu\n\
-                     \x20           + inner_u * inner_ab;\n\
-                     \x20       let second_chain_v = inner_auv * inner_b + inner_au * inner_bv\n\
-                     \x20           + inner_av * inner_bu + inner_a * inner_buv\n\
-                     \x20           + inner_uv * inner_ab + inner_u * inner_abv;\n\
-                     \x20       {root_stack}[4] * inner_v * inner_u * inner_a * inner_b\n\
-                     \x20           + {root_stack}[3] * (inner_uv * inner_a * inner_b\n\
-                     \x20               + inner_u * inner_av * inner_b + inner_u * inner_a * inner_bv\n\
-                     \x20               + inner_v * second_chain)\n\
-                     \x20           + {root_stack}[2] * (second_chain_v + inner_v * inner_abu)\n\
-                     \x20           + {root_stack}[1] * inner_abuv\n\
-                     \x20   }}))\n"
-                ));
-            } else {
-                source.push_str(&format!(
-                    "    let inner_u = inner_first[0] * direction_u[0]\n\
-                     \x20       + inner_first[1] * direction_u[1];\n\
-                     \x20   std::array::from_fn(|axis| std::array::from_fn(|other| {{\n\
-                     \x20       let offset = axis + other;\n\
-                     \x20       let inner_a = inner_first[axis];\n\
-                     \x20       let inner_b = inner_first[other];\n\
-                     \x20       let inner_ab = inner_second[offset];\n\
-                     \x20       let inner_au = inner_second[axis] * direction_u[0]\n\
-                     \x20           + inner_second[axis + 1] * direction_u[1];\n\
-                     \x20       let inner_bu = inner_second[other] * direction_u[0]\n\
-                     \x20           + inner_second[other + 1] * direction_u[1];\n\
-                     \x20       let inner_abu = inner_third[offset] * direction_u[0]\n\
-                     \x20           + inner_third[offset + 1] * direction_u[1];\n\
-                     \x20       {root_stack}[3] * inner_u * inner_a * inner_b\n\
-                     \x20           + {root_stack}[2] * (inner_au * inner_b + inner_a * inner_bu\n\
-                     \x20               + inner_u * inner_ab)\n\
-                     \x20           + {root_stack}[1] * inner_abu\n\
-                     \x20   }}))\n"
-                ));
-            }
+            source.push_str(&format!(
+                "    let inner_u = inner_first[0] * direction_u[0]\n\
+                 \x20       + inner_first[1] * direction_u[1];\n\
+                 \x20   std::array::from_fn(|axis| std::array::from_fn(|other| {{\n\
+                 \x20       let offset = axis + other;\n\
+                 \x20       let inner_a = inner_first[axis];\n\
+                 \x20       let inner_b = inner_first[other];\n\
+                 \x20       let inner_ab = inner_second[offset];\n\
+                 \x20       let inner_au = inner_second[axis] * direction_u[0]\n\
+                 \x20           + inner_second[axis + 1] * direction_u[1];\n\
+                 \x20       let inner_bu = inner_second[other] * direction_u[0]\n\
+                 \x20           + inner_second[other + 1] * direction_u[1];\n\
+                 \x20       let inner_abu = inner_third[offset] * direction_u[0]\n\
+                 \x20           + inner_third[offset + 1] * direction_u[1];\n\
+                 \x20       {root_stack}[3] * inner_u * inner_a * inner_b\n\
+                 \x20           + {root_stack}[2] * (inner_au * inner_b + inner_a * inner_bu\n\
+                 \x20               + inner_u * inner_ab)\n\
+                 \x20           + {root_stack}[1] * inner_abu\n\
+                 \x20   }}))\n"
+            ));
             source.push_str("}\n");
-            let order = if fourth { "fourth" } else { "third" };
             return syn::parse_str(&source).map_err(|error| {
                 syn::Error::new(
                     error.span(),
                     format!(
-                        "failed to parse generated Rust dense root-compose {order}-order row program: {error}\n{source}"
+                        "failed to parse generated Rust dense root-compose third-order row program: {error}\n{source}"
                     ),
                 )
             });
@@ -5111,10 +5071,15 @@ mod tests {
     }
 
     /// The `1/k!` a composition on a primary introduces and the `k!` a
-    /// derivative extraction removes cancel in the emitter: no factorial
-    /// reaches the row. The rigid Bernoulli row's fourth channel paid
-    /// seventeen such multiplies, the margin by which its hand kernel won
-    /// on one host (#932).
+    /// derivative extraction removes cancel in the emitter. On the
+    /// third-order surfaces (the root composition specialised, the inner
+    /// jet's derivatives read directly) no constant multiply is emitted at
+    /// all; on the fourth-order surfaces the dense composition keeps its
+    /// Faà di Bruno multiplicities (a `2` for a repeated partition), but the
+    /// extracted derivatives are the coefficients themselves. The rigid
+    /// Bernoulli row's fourth channel paid seventeen round-trip multiplies
+    /// before this, the margin by which its hand kernel won on one host
+    /// (#932).
     #[test]
     fn dense_taylor_factorials_cancel_in_the_emitter() {
         let input = quote! {
@@ -5125,6 +5090,52 @@ mod tests {
                 observed => observed_stack => d_observed,
                 probit => probit_stack => d_probit
             }
+            witnesses [];
+            {
+                let qv = compose(link, eta, q, q1, q2, q3, q4);
+                let slope_scaled = scale(slope, scale_of);
+                let scale_value = compose(observed, slope_scaled);
+                let latent = add(mul(qv, scale_value), slope_scaled);
+                let margin = scale(latent, sign);
+                return compose(probit, margin);
+            }
+        };
+        let literals = [
+            "* 0.5", "* 2.0", "* 3.0", "* 4.0", "* 6.0", "* 8.0", "* 12.0", "* 24.0", "* 0.75",
+            "* 0.1666", "* 0.0416", "* 0.3333", "* 0.25", "* 0.125",
+        ];
+        for surface in ["rigid_third_contracted", "rigid_third_full"] {
+            let rust = emitted_function(input.clone(), surface);
+            for literal in literals {
+                assert!(
+                    !rust.contains(literal),
+                    "{surface} carries a constant multiply: {literal}\n{rust}"
+                );
+            }
+        }
+        for surface in ["rigid_fourth_contracted", "rigid_fourth_full"] {
+            let rust = emitted_function(input.clone(), surface);
+            // The inner jet (through `margin`) carries no constant.
+            let inner = &rust[..rust.find("__row_program_result_dense_stack").expect("root stack")];
+            for literal in literals {
+                assert!(
+                    !inner.contains(literal),
+                    "{surface}'s inner jet carries a constant multiply: {literal}\n{rust}"
+                );
+            }
+            // The extracted derivatives are coefficient names: no multiply.
+            let start = rust.find("let dense_derivatives = [").or_else(|| rust.find("let derivative = ["));
+            let start = start.expect("the extracted derivatives");
+            let array = &rust[start..rust[start..].find(']').expect("the array closes") + start];
+            assert!(!array.contains('*'), "{surface} scales an extracted derivative:\n{array}\n{rust}");
+            // A ratio between orders multiplies the input sum, never the
+            // product with the leaf's stack entry.
+            assert!(
+                !rust.contains("]) * 2.0") && !rust.contains("]) * 0.5"),
+                "{surface} scales a post-call product:\n{rust}"
+            );
+        }
+    }
             witnesses [];
             {
                 let qv = compose(link, eta, q, q1, q2, q3, q4);
