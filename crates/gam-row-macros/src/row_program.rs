@@ -5326,9 +5326,13 @@ mod tests {
         // coefficients through a stack whose odd entries carry the sign: the
         // fifteen sign multiplies of the scaled point are two.
         let rust = emitted_function(input.clone(), "rigid_fourth_contracted");
-        let scaled = rust.find("_scaled : [f64 ; 5] = [").expect("the rescaled stack");
+        let root = rust.find("__row_program_result_dense_stack").expect("the root stack");
+        let scaled = rust[root..].find("_scaled : [f64 ; 5] = [").expect("the rescaled root stack") + root;
         let literal = &rust[scaled..rust[scaled..].find("] ;").expect("the literal closes") + scaled];
         assert_eq!(literal.matches("* sign").count(), 2, "{literal}\n{rust}");
+        // The observed-scale composition on `scale(slope, scale_of)` reads the
+        // same rule with the scalar's powers.
+        assert!(rust.contains("* (scale_of * scale_of))"), "{rust}");
         assert!(rust.contains("_scaled [1] * latent_c"), "{rust}");
         assert!(!rust.contains("_scaled [1] * margin_c"), "{rust}");
         let rust = emitted_function(input, "rigid_third_contracted");
