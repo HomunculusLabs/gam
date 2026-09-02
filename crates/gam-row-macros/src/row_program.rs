@@ -4506,7 +4506,8 @@ mod tests {
         // lint under `deny(warnings)`. Callers stay positional.
         assert!(compact.contains("fngiven_order2(_x:f64,"), "{rust}");
         let cuda = emitted_cuda(program);
-        assert!(cuda.contains("double out_stack0[3] = {a, b, c};"), "{cuda}");
+        // CUDA reads program constants through the row-input struct.
+        assert!(cuda.contains("double out_stack0[3] = {in.a, in.b, in.c};"), "{cuda}");
         assert!(!cuda.contains("supplied"), "{cuda}");
 
         let short = syn::parse2::<Input>(quote! {
