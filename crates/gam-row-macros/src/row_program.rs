@@ -1591,10 +1591,118 @@ struct DirectionalExpressionEnvironment<'a> {
 /// This representation is a compile-time algebra only: emitted production code
 /// contains direct scalar formulas, not an automatic-differentiation runtime.
 #[derive(Clone)]
+/// An exact rational carried beside a dense Taylor coefficient's emitted
+/// expression: the coefficient's value is `factor · expression`, and the
+/// factor never reaches the row until a consumer needs the value.
+///
+/// A composition on a primary introduces `1/k!` per coefficient and a
+/// derivative extraction removes it with `k!`; emitted as two multiplies
+/// they cost the row two multiplies per coefficient (LLVM folds
+/// `(x · 0.5) · 2` only under fast-math). The rigid Bernoulli row's fourth
+/// channel paid seventeen of them, which was the whole margin by which the
+/// hand kernel won on one host (#932). With the factor kept exact in the
+/// emitter, products multiply factors, a sum keeps the most common factor
+/// of its terms out of the arithmetic, and the residual at extraction is
+/// one for every coefficient of a jet built from compositions on primaries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Rational {
+    numerator: i64,
+    denominator: i64,
+}
+
+impl Rational {
+    const ONE: Self = Self {
+        numerator: 1,
+        denominator: 1,
+    };
+
+    fn new(numerator: i64, denominator: i64) -> Self {
+        assert!(denominator != 0, "a dense Taylor factor has a nonzero denominator");
+        fn gcd(left: i64, right: i64) -> i64 {
+            if right == 0 {
+                left.abs()
+            } else {
+                gcd(right, left % right)
+            }
+        }
+        let divisor = gcd(numerator, denominator).max(1);
+        let sign = if denominator < 0 { -1 } else { 1 };
+        Self {
+            numerator: sign * numerator / divisor,
+            denominator: sign * denominator / divisor,
+        }
+    }
+
+    fn factorial(count: usize) -> Self {
+        Self::new((2..=count as i64).product(), 1)
+    }
+
+    fn times(self, other: Self) -> Self {
+        Self::new(
+            self.numerator * other.numerator,
+            self.denominator * other.denominator,
+        )
+    }
+
+    fn over(self, other: Self) -> Self {
+        Self::new(
+            self.numerator * other.denominator,
+            self.denominator * other.numerator,
+        )
+    }
+
+    fn is_one(self) -> bool {
+        self == Self::ONE
+    }
+
+    fn literal(self) -> String {
+        if self.denominator == 1 {
+            format!("{}.0", self.numerator)
+        } else {
+            format!("{:.17}", self.numerator as f64 / self.denominator as f64)
+        }
+    }
+}
+
+/// `expression · factor`, with no multiply when the factor is one.
+fn scaled_by(expression: &str, factor: Rational) -> String {
+    if factor.is_one() {
+        expression.to_string()
+    } else {
+        symbolic_multiply(expression, &factor.literal())
+    }
+}
+
+/// Sum terms `factor · expression` into one `factor · expression`: the most
+/// common factor among the terms is kept out of the arithmetic, and each
+/// term with another factor pays one multiply by the ratio. The terms keep
+/// their order.
+fn combine_dense_taylor_terms(terms: &[(Rational, String)]) -> Option<(Rational, String)> {
+    let mut common = terms.first()?.0;
+    let mut best = 0;
+    for (candidate, _) in terms {
+        let count = terms.iter().filter(|(factor, _)| factor == candidate).count();
+        if count > best {
+            best = count;
+            common = *candidate;
+        }
+    }
+    let mut sum: Option<String> = None;
+    for (factor, expression) in terms {
+        let term = scaled_by(expression, factor.over(common));
+        sum = symbolic_add_component(&sum, &Some(term));
+    }
+    sum.map(|sum| (common, sum))
+}
+
+/// One dense truncated Taylor jet: every coefficient of total degree at most
+/// `order` in `dimension` primaries, each as `factor · expression` (see
+/// [`Rational`]).
 struct DenseTaylorJet {
     dimension: usize,
     order: usize,
     coefficients: Vec<Option<String>>,
+    factors: Vec<Rational>,
 }
 
 fn dense_taylor_slot_count(dimension: usize) -> usize {
@@ -1627,12 +1735,14 @@ fn dense_taylor_component(value: String, index: usize) -> Option<String> {
 
 impl DenseTaylorJet {
     fn zero(dimension: usize, order: usize) -> Self {
-        let mut coefficients = vec![None; dense_taylor_slot_count(dimension)];
+        let slots = dense_taylor_slot_count(dimension);
+        let mut coefficients = vec![None; slots];
         coefficients[0] = Some("0.0".to_string());
         Self {
             dimension,
             order,
             coefficients,
+            factors: vec![Rational::ONE; slots],
         }
     }
 
@@ -1654,23 +1764,69 @@ impl DenseTaylorJet {
         self.coefficients.iter().map(Option::is_some).collect()
     }
 
-    fn reference(name: &str, support: &[bool], dimension: usize, order: usize) -> Self {
+    fn reference(
+        name: &str,
+        support: &[bool],
+        factors: &[Rational],
+        dimension: usize,
+        order: usize,
+    ) -> Self {
         let mut out = Self::zero(dimension, order);
         for (index, present) in support.iter().copied().enumerate() {
             if present {
                 out.coefficients[index] = Some(format!("{name}_c{index}"));
+                out.factors[index] = factors[index];
             }
         }
         out
+    }
+
+    /// The coefficient's value, its factor applied.
+    fn value(&self, index: usize) -> Option<String> {
+        self.coefficients[index]
+            .as_ref()
+            .map(|coefficient| scaled_by(coefficient, self.factors[index]))
+    }
+
+    /// Every factor applied into its expression. A mutable local is stored
+    /// this way: its gates assign it values with factors of their own, and
+    /// one name can carry only one.
+    fn normalized(mut self) -> Self {
+        for index in 0..self.coefficients.len() {
+            self.coefficients[index] = self.value(index);
+            self.factors[index] = Rational::ONE;
+        }
+        self
+    }
+
+    fn set(&mut self, index: usize, term: Option<(Rational, String)>) {
+        let (factor, coefficient) = match term {
+            Some((factor, expression)) => (factor, dense_taylor_component(expression, index)),
+            None => (Rational::ONE, None),
+        };
+        self.factors[index] = if coefficient.is_some() {
+            factor
+        } else {
+            Rational::ONE
+        };
+        self.coefficients[index] = coefficient;
     }
 }
 
 fn dense_taylor_add(left: DenseTaylorJet, right: DenseTaylorJet) -> DenseTaylorJet {
     let mut out = DenseTaylorJet::zero(left.dimension, left.order);
     for index in 0..out.coefficients.len() {
-        out.coefficients[index] =
-            symbolic_add_component(&left.coefficients[index], &right.coefficients[index])
-                .and_then(|value| dense_taylor_component(value, index));
+        let mut terms = Vec::new();
+        if let Some(component) = &left.coefficients[index] {
+            terms.push((left.factors[index], component.clone()));
+        }
+        if let Some(component) = &right.coefficients[index] {
+            terms.push((right.factors[index], component.clone()));
+        }
+        out.set(index, combine_dense_taylor_terms(&terms));
+    }
+    if out.coefficients[0].is_none() {
+        out.coefficients[0] = Some("0.0".to_string());
     }
     out
 }
@@ -1678,10 +1834,13 @@ fn dense_taylor_add(left: DenseTaylorJet, right: DenseTaylorJet) -> DenseTaylorJ
 fn dense_taylor_negate(value: DenseTaylorJet) -> DenseTaylorJet {
     let mut out = DenseTaylorJet::zero(value.dimension, value.order);
     for (index, component) in value.coefficients.iter().enumerate() {
-        out.coefficients[index] = component
+        let negated = component
             .as_ref()
-            .map(|component| symbolic_negate(component))
-            .and_then(|component| dense_taylor_component(component, index));
+            .map(|component| (value.factors[index], symbolic_negate(component)));
+        out.set(index, negated);
+    }
+    if out.coefficients[0].is_none() {
+        out.coefficients[0] = Some("0.0".to_string());
     }
     out
 }
@@ -1689,8 +1848,13 @@ fn dense_taylor_negate(value: DenseTaylorJet) -> DenseTaylorJet {
 fn dense_taylor_scale(value: DenseTaylorJet, scalar: &str) -> DenseTaylorJet {
     let mut out = DenseTaylorJet::zero(value.dimension, value.order);
     for (index, component) in value.coefficients.iter().enumerate() {
-        out.coefficients[index] = symbolic_scale_component(component, scalar)
-            .and_then(|component| dense_taylor_component(component, index));
+        let scaled = component
+            .as_ref()
+            .map(|component| (value.factors[index], symbolic_multiply(component, scalar)));
+        out.set(index, scaled);
+    }
+    if out.coefficients[0].is_none() {
+        out.coefficients[0] = Some("0.0".to_string());
     }
     out
 }
@@ -1698,8 +1862,8 @@ fn dense_taylor_scale(value: DenseTaylorJet, scalar: &str) -> DenseTaylorJet {
 fn dense_taylor_multiply(left: DenseTaylorJet, right: DenseTaylorJet) -> DenseTaylorJet {
     let dimension = left.dimension;
     let order = left.order;
-    let mut out = DenseTaylorJet::zero(dimension, order);
-    out.coefficients.fill(None);
+    let slots = dense_taylor_slot_count(dimension);
+    let mut terms: Vec<Vec<(Rational, String)>> = vec![Vec::new(); slots];
     for (left_index, left_component) in left.coefficients.iter().enumerate() {
         let Some(left_component) = left_component else {
             continue;
@@ -1718,12 +1882,15 @@ fn dense_taylor_multiply(left: DenseTaylorJet, right: DenseTaylorJet) -> DenseTa
             if counts.iter().sum::<usize>() > order {
                 continue;
             }
-            let index = dense_taylor_index(&counts);
-            let product = symbolic_multiply(left_component, right_component);
-            out.coefficients[index] =
-                symbolic_add_component(&out.coefficients[index], &Some(product))
-                    .and_then(|value| dense_taylor_component(value, index));
+            terms[dense_taylor_index(&counts)].push((
+                left.factors[left_index].times(right.factors[right_index]),
+                symbolic_multiply(left_component, right_component),
+            ));
         }
+    }
+    let mut out = DenseTaylorJet::zero(dimension, order);
+    for (index, terms) in terms.iter().enumerate() {
+        out.set(index, combine_dense_taylor_terms(terms));
     }
     if out.coefficients[0].is_none() {
         out.coefficients[0] = Some("0.0".to_string());
@@ -1732,19 +1899,21 @@ fn dense_taylor_multiply(left: DenseTaylorJet, right: DenseTaylorJet) -> DenseTa
 }
 
 struct DenseTaylorCompositionPartitions<'a> {
-    candidates: &'a [(usize, String, Vec<usize>)],
+    candidates: &'a [(usize, String, Rational, Vec<usize>)],
     order: usize,
-    counts: &'a mut [usize],
+    counts: &'a mut Vec<usize>,
     selected: &'a mut Vec<usize>,
-    derivative: &'a str,
-    output: &'a mut DenseTaylorJet,
+    /// Per output index, the partition products of the derivative order
+    /// being enumerated, each with the product of its candidates' factors
+    /// over the multiplicity factorial.
+    products: &'a mut Vec<Vec<(Rational, String)>>,
 }
 
 fn dense_taylor_composition_partitions(
     state: &mut DenseTaylorCompositionPartitions<'_>,
     start: usize,
     remaining: usize,
-    product: Option<String>,
+    product: Option<(Rational, String)>,
 ) {
     if remaining == 0 {
         let index = dense_taylor_index(state.counts);
@@ -1759,27 +1928,19 @@ fn dense_taylor_composition_partitions(
             }
         }
         multiplicity_factorial *= (2..=run).product::<usize>();
-        let mut term = symbolic_multiply(
-            state.derivative,
-            product
-                .as_deref()
-                .expect("composition partition has at least one factor"),
-        );
-        if multiplicity_factorial != 1 {
-            term = symbolic_multiply(
-                &term,
-                &format!("{:.17}", 1.0 / multiplicity_factorial as f64),
-            );
-        }
-        state.output.coefficients[index] =
-            symbolic_add_component(&state.output.coefficients[index], &Some(term))
-                .and_then(|value| dense_taylor_component(value, index));
+        let (factor, expression) =
+            product.expect("composition partition has at least one factor");
+        state.products[index].push((
+            factor.over(Rational::new(multiplicity_factorial as i64, 1)),
+            expression,
+        ));
         return;
     }
 
     for candidate_index in start..state.candidates.len() {
-        let (_, component, candidate_counts) = &state.candidates[candidate_index];
+        let (_, component, factor, candidate_counts) = &state.candidates[candidate_index];
         let component = component.clone();
+        let factor = *factor;
         let candidate_counts = candidate_counts.clone();
         if state
             .counts
@@ -1795,15 +1956,14 @@ fn dense_taylor_composition_partitions(
             *count += added;
         }
         state.selected.push(candidate_index);
-        dense_taylor_composition_partitions(
-            state,
-            candidate_index,
-            remaining - 1,
-            Some(match &product {
-                Some(product) => symbolic_multiply(product, &component),
-                None => component,
-            }),
-        );
+        let next = match &product {
+            Some((product_factor, product)) => (
+                product_factor.times(factor),
+                symbolic_multiply(product, &component),
+            ),
+            None => (factor, component),
+        };
+        dense_taylor_composition_partitions(state, candidate_index, remaining - 1, Some(next));
         state.selected.pop();
         for (count, added) in state.counts.iter_mut().zip(&candidate_counts) {
             *count -= added;
@@ -1811,9 +1971,17 @@ fn dense_taylor_composition_partitions(
     }
 }
 
+/// The composition `f ∘ g` in Faà di Bruno's form: each output coefficient
+/// is `Σ_d stack[d] · B_d`, where `B_d` is the sum over the partitions of
+/// order `d` of the products of `g`'s coefficients. `B_d` is pure input
+/// work, formed before the leaf is called; after the call the coefficient
+/// costs one multiply per order and a short sum. (Multiplying every
+/// partition product by its stack entry and summing the terms of all orders
+/// in one chain put the whole sum behind the call.)
 fn dense_taylor_compose(input: DenseTaylorJet, stack: &str) -> DenseTaylorJet {
     let dimension = input.dimension;
     let order = input.order;
+    let slots = dense_taylor_slot_count(dimension);
     let candidates = input
         .coefficients
         .iter()
@@ -1824,25 +1992,35 @@ fn dense_taylor_compose(input: DenseTaylorJet, stack: &str) -> DenseTaylorJet {
                 (
                     index,
                     component.clone(),
+                    input.factors[index],
                     dense_taylor_counts(index, dimension),
                 )
             })
         })
         .collect::<Vec<_>>();
     let mut out = DenseTaylorJet::constant(format!("{stack}[0]"), dimension, order);
+    let mut terms: Vec<Vec<(Rational, String)>> = vec![Vec::new(); slots];
     for derivative_order in 1..=order {
         let mut counts = vec![0usize; dimension];
         let mut selected = Vec::with_capacity(derivative_order);
-        let derivative = format!("{stack}[{derivative_order}]");
+        let mut products: Vec<Vec<(Rational, String)>> = vec![Vec::new(); slots];
         let mut state = DenseTaylorCompositionPartitions {
             candidates: &candidates,
             order,
             counts: &mut counts,
             selected: &mut selected,
-            derivative: &derivative,
-            output: &mut out,
+            products: &mut products,
         };
         dense_taylor_composition_partitions(&mut state, 0, derivative_order, None);
+        let derivative = format!("{stack}[{derivative_order}]");
+        for (index, products) in products.iter().enumerate() {
+            if let Some((factor, sum)) = combine_dense_taylor_terms(products) {
+                terms[index].push((factor, symbolic_multiply(&derivative, &sum)));
+            }
+        }
+    }
+    for (index, terms) in terms.iter().enumerate().skip(1) {
+        out.set(index, combine_dense_taylor_terms(terms));
     }
     out
 }
@@ -1894,7 +2072,7 @@ fn materialize_dense_taylor(
     let mut source = String::new();
     push_dense_taylor_declaration(&mut source, "", &name, "", &value, &support);
     preludes.push(source);
-    DenseTaylorJet::reference(&name, &support, value.dimension, value.order)
+    DenseTaylorJet::reference(&name, &support, &value.factors, value.dimension, value.order)
 }
 
 struct DenseTaylorExpressionEnvironment<'a> {
@@ -1934,10 +2112,12 @@ fn dense_taylor_expression(
         ),
         ProgramExpr::AddConstant(value, scalar) => {
             let mut value = child(value)?;
+            let point = value.value(0).unwrap_or_else(|| "0.0".to_string());
             value.coefficients[0] = Some(symbolic_add(
-                symbolic_component(&value.coefficients[0]),
+                &point,
                 &symbolic_scalar(scalar, constants, SymbolicTarget::Rust)?,
             ));
+            value.factors[0] = Rational::ONE;
             value
         }
         ProgramExpr::Add(left, right) => dense_taylor_add(child(left)?, child(right)?),
@@ -1953,7 +2133,7 @@ fn dense_taylor_expression(
             let suffix = *temporary_index;
             *temporary_index += 1;
             let stack = format!("__row_program_{owner}_dense_stack{suffix}");
-            let point = symbolic_component(&input.coefficients[0]).to_string();
+            let point = input.value(0).unwrap_or_else(|| "0.0".to_string());
             let mut leaf_arguments = Vec::new();
             for argument in arguments {
                 leaf_arguments.push(symbolic_scalar(argument, constants, SymbolicTarget::Rust)?);
@@ -2214,20 +2394,29 @@ fn dense_taylor_schedule(
                     dimension,
                     order,
                 };
-                let value = dense_taylor_expression(
+                let mut value = dense_taylor_expression(
                     value,
                     &name.to_string(),
                     &environment,
                     &mut temporary_index,
                     &mut preludes,
                 )?;
+                if *mutable {
+                    value = value.normalized();
+                }
                 let support = value.support();
                 if *mutable {
                     mutable_support.insert(name.to_string(), support.clone());
                 }
                 bindings.insert(
                     name.to_string(),
-                    DenseTaylorJet::reference(&name.to_string(), &support, dimension, order),
+                    DenseTaylorJet::reference(
+                        &name.to_string(),
+                        &support,
+                        &value.factors,
+                        dimension,
+                        order,
+                    ),
                 );
                 dense_statements.push(DenseTaylorStatement::Local(DenseTaylorLocal {
                     name: name.to_string(),
@@ -2257,7 +2446,8 @@ fn dense_taylor_schedule(
                         &environment,
                         &mut temporary_index,
                         &mut preludes,
-                    )?;
+                    )?
+                    .normalized();
                     let support = mutable_support
                         .get_mut(&target_name.to_string())
                         .expect("validated mutable dense Taylor target");
@@ -2267,6 +2457,7 @@ fn dense_taylor_schedule(
                         DenseTaylorJet::reference(
                             &target_name.to_string(),
                             support,
+                            &value.factors,
                             dimension,
                             order,
                         ),
@@ -2295,7 +2486,7 @@ fn dense_taylor_schedule(
                 syn::Error::new_spanned(value, "dense root compose input is not defined")
             })?;
             let stack = "__row_program_result_dense_root_stack".to_string();
-            let point = symbolic_component(&input.coefficients[0]).to_string();
+            let point = input.value(0).unwrap_or_else(|| "0.0".to_string());
             let mut leaf_arguments = Vec::new();
             for argument in arguments {
                 leaf_arguments.push(symbolic_scalar(argument, constants, SymbolicTarget::Rust)?);
@@ -3359,18 +3550,13 @@ fn dense_taylor_derivative(value: &DenseTaylorJet, axes: &[usize]) -> Option<Str
     for axis in axes {
         counts[*axis] += 1;
     }
-    let component = value.coefficients[dense_taylor_index(&counts)]
-        .as_ref()?
-        .clone();
+    let index = dense_taylor_index(&counts);
+    let component = value.coefficients[index].as_ref()?.clone();
     let factorial = counts
         .iter()
-        .map(|count| (2..=*count).product::<usize>())
-        .product::<usize>();
-    if factorial == 1 {
-        Some(component)
-    } else {
-        Some(symbolic_multiply(&component, &format!("{factorial}.0")))
-    }
+        .map(|count| Rational::factorial(*count))
+        .fold(Rational::ONE, Rational::times);
+    Some(scaled_by(&component, value.factors[index].times(factorial)))
 }
 
 fn dense_taylor_contracted_component(
@@ -4922,6 +5108,50 @@ mod tests {
             assert!(!rust.contains("SparseOrder2"));
             assert!(!rust.contains("*0.0)"));
             assert!(!rust.contains("0.0*"));
+        }
+    }
+
+    /// The `1/k!` a composition on a primary introduces and the `k!` a
+    /// derivative extraction removes cancel in the emitter: no factorial
+    /// reaches the row. The rigid Bernoulli row's fourth channel paid
+    /// seventeen such multiplies, the margin by which its hand kernel won
+    /// on one host (#932).
+    #[test]
+    fn dense_taylor_factorials_cancel_in_the_emitter() {
+        let input = quote! {
+            fn rigid(eta, slope; q, q1, q2, q3, q4, scale_of, sign: sign)
+            emit [third, fourth, full];
+            leaves {
+                link => supplied,
+                observed => observed_stack => d_observed,
+                probit => probit_stack => d_probit
+            }
+            witnesses [];
+            {
+                let qv = compose(link, eta, q, q1, q2, q3, q4);
+                let slope_scaled = scale(slope, scale_of);
+                let scale_value = compose(observed, slope_scaled);
+                let latent = add(mul(qv, scale_value), slope_scaled);
+                let margin = scale(latent, sign);
+                return compose(probit, margin);
+            }
+        };
+        for surface in [
+            "rigid_third_contracted",
+            "rigid_fourth_contracted",
+            "rigid_third_full",
+            "rigid_fourth_full",
+        ] {
+            let rust = emitted_function(input.clone(), surface);
+            for literal in [
+                "* 0.5", "* 2.0", "* 3.0", "* 4.0", "* 6.0", "* 12.0", "* 24.0", "* 0.1666",
+                "* 0.0416", "* 0.3333", "* 0.25",
+            ] {
+                assert!(
+                    !rust.contains(literal),
+                    "{surface} carries a factorial: {literal}\n{rust}"
+                );
+            }
         }
     }
 
