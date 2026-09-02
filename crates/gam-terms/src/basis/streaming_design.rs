@@ -1,5 +1,11 @@
 use super::*;
 
+/// Tagged component used only for an algebraic raw-axis ψ jet at an exact
+/// direct-PFD Duchon collision. Genuine metric components are non-negative, so
+/// this value is outside their domain and adds no parallel mask allocation to
+/// the O(n·k·d) radial cache.
+pub(crate) const ALGEBRAIC_PER_AXIS_COMPONENT: f64 = -1.0;
+
 /// Which radial kernel family is being used. Stored in the streaming operator
 /// so that (q, t) scalars can be recomputed on the fly without a closure.
 #[derive(Debug, Clone)]
@@ -198,8 +204,10 @@ impl RadialScalarKind {
     /// preserve, so the partial-fraction route uses the exact algebraic carrier
     /// `s_psi = 1` and solves for `(q_psi, t_psi)` from `(K, K_psi,
     /// K_psipsi)`. This represents the direct jet without a singular division,
-    /// at collisions and away from them, while leaving every per-axis route on
-    /// its genuine geometric components.
+    /// at collisions and away from them. The per-axis sibling below retains
+    /// genuine geometric components away from a collision and uses one marked
+    /// algebraic carrier at the collision itself, where every geometric
+    /// component is identically zero.
     pub(crate) fn eval_scalar_total_psi_carriers(
         &self,
         r: f64,
@@ -246,6 +254,85 @@ impl RadialScalarKind {
             );
         }
         Ok((value, q_psi, t_psi, carrier))
+    }
+
+    /// The raw per-axis ψ carrier at an exact center collision.
+    ///
+    /// For the low-dimensional partial-fraction Duchon representative,
+    /// `K_ψ(0) != δ K(0)` in general. A raw axis owns `1/d` of the global
+    /// log-κ direction and its centered anisotropy direction does not move an
+    /// exact collision, hence
+    ///
+    /// ```text
+    /// K_a(0)  = K_ψ(0) / d,       K_ab(0) = K_ψψ(0) / d².
+    /// ```
+    ///
+    /// The ordinary `(q,t,s_a)` representation cannot express these values:
+    /// every genuine `s_a` is zero. Return an algebraic `(q,t)` pair together
+    /// with `marked=true`; `ImplicitDesignPsiDerivative` recognizes the
+    /// negative component marker and evaluates the direct jet. Away from the
+    /// collision the usual geometric carrier remains authoritative.
+    pub(crate) fn eval_per_axis_psi_carriers(
+        &self,
+        r: f64,
+    ) -> Result<(f64, f64, f64, bool), BasisError> {
+        let ordinary = self.eval_design_triplet(r)?;
+        let RadialScalarKind::Duchon {
+            length_scale,
+            p_order,
+            s_order,
+            dim,
+            coeffs,
+        } = self
+        else {
+            return Ok((ordinary.0, ordinary.1, ordinary.2, false));
+        };
+        if r != 0.0 || duchon_hybrid_stable_integral_applies(*p_order, *s_order, *dim) {
+            return Ok((ordinary.0, ordinary.1, ordinary.2, false));
+        }
+        let (value, first, second) = duchon_partial_fraction_kernel_psi_triplet(
+            r,
+            *length_scale,
+            *p_order,
+            *s_order,
+            *dim,
+            coeffs,
+        )?;
+        let scale = ordinary.0.abs().max(value.abs()).max(1.0);
+        if (ordinary.0 - value).abs() > 256.0 * f64::EPSILON * scale {
+            crate::bail_invalid_basis!(
+                "Duchon per-axis psi authority disagrees with its value path at the collision: radial value={}, exact value={value}",
+                ordinary.0
+            );
+        }
+        let inv_d = 1.0 / *dim as f64;
+        let c = duchon_scaling_exponent(*p_order, *s_order, *dim) * inv_d;
+        // The marked evaluator computes
+        //   K_a  = q + g_a K,
+        //   K_ab = t + (g_a+g_b)q + (g_a g_b + Lambda_ab)K.
+        // Store the uncharted remainder after removing the homogeneous share
+        // `c`; chart log-jets can then enter through `g_a = c + L_a` exactly.
+        let q = first * inv_d - c * value;
+        let t = second * inv_d * inv_d - 2.0 * c * q - c * c * value;
+        if !(q.is_finite() && t.is_finite()) {
+            crate::bail_invalid_basis!(
+                "non-finite Duchon per-axis collision carriers: q={q}, t={t}"
+            );
+        }
+        Ok((value, q, t, true))
+    }
+
+    #[inline]
+    pub(crate) fn uses_algebraic_per_axis_collision_carrier(&self) -> bool {
+        matches!(
+            self,
+            RadialScalarKind::Duchon {
+                p_order,
+                s_order,
+                dim,
+                ..
+            } if !duchon_hybrid_stable_integral_applies(*p_order, *s_order, *dim)
+        )
     }
 
     #[inline]
@@ -937,9 +1024,20 @@ impl StreamingRadialState {
                             ..
                         } if !duchon_hybrid_stable_integral_applies(p_order, s_order, dim)
                 );
+                let exact_axis_collision = matches!(
+                    self.axis_mode,
+                    StreamingAxisMode::PerAxis { .. }
+                ) && r == 0.0
+                    && self
+                        .radial_kind
+                        .uses_algebraic_per_axis_collision_carrier();
                 let triplet = if exact_scalar_carrier {
                     self.radial_kind
                         .eval_scalar_total_psi_carriers(r)
+                        .map(|(phi, q, t, _)| (phi, q, t))
+                } else if exact_axis_collision {
+                    self.radial_kind
+                        .eval_per_axis_psi_carriers(r)
                         .map(|(phi, q, t, _)| (phi, q, t))
                 } else {
                     match profile.as_ref() {
@@ -973,7 +1071,15 @@ impl StreamingRadialState {
                     let h = unsafe { self.data.uget((i, a)) - self.centers.uget((j, a)) };
                     s_buf[a] = metric_weights[a] * h * h;
                 }
-                s_buf.iter().sum()
+                let r2 = s_buf.iter().sum();
+                if r2 == 0.0
+                    && self
+                        .radial_kind
+                        .uses_algebraic_per_axis_collision_carrier()
+                {
+                    s_buf.fill(ALGEBRAIC_PER_AXIS_COMPONENT);
+                }
+                r2
             }
             StreamingAxisMode::ScalarTotal { metric_weights } => {
                 assert_eq!(s_buf.len(), 1);
@@ -1005,7 +1111,15 @@ impl StreamingRadialState {
         assert!(i < self.data.nrows() && j < self.centers.nrows());
         let r2 = self.fill_s_buf(i, j, s_buf);
         match &self.axis_mode {
-            StreamingAxisMode::PerAxis { .. } => self.radial_kind.eval_design_triplet(r2.sqrt()),
+            StreamingAxisMode::PerAxis { .. } => self
+                .radial_kind
+                .eval_per_axis_psi_carriers(r2.sqrt())
+                .map(|(phi, q, t, marked)| {
+                    if marked {
+                        s_buf.fill(ALGEBRAIC_PER_AXIS_COMPONENT);
+                    }
+                    (phi, q, t)
+                }),
             StreamingAxisMode::ScalarTotal { .. } => {
                 self.radial_kind
                     .eval_scalar_total_psi_carriers(r2.sqrt())

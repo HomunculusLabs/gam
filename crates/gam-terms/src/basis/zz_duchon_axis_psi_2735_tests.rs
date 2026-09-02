@@ -227,6 +227,87 @@ fn duchon_axis_shares_are_symmetric_at_collision_and_sum_to_one_2735() {
     assert!((shares.iter().sum::<f64>() - 1.0).abs() < 1e-14);
 }
 
+/// The low-dimensional finite-part representative has an algebraic ψ jet at
+/// an exact data/center collision. This is the row topology farthest-point
+/// centers guarantee: every selected center is also a data row. The ordinary
+/// geometric carrier has `s_a = 0` there and therefore cannot represent the
+/// shipped jet.
+#[test]
+fn duchon_direct_pfd_axis_collision_uses_exact_algebraic_carrier_2735() {
+    let length_scale = 0.8_f64;
+    let p_order = 2usize;
+    let s_order = 1usize;
+    let dim = 2usize;
+    assert!(
+        !duchon_hybrid_stable_integral_applies(p_order, s_order, dim),
+        "the discriminator must exercise the direct partial-fraction route"
+    );
+    let coeffs = duchon_partial_fraction_coeffs(p_order, s_order, 1.0 / length_scale);
+    let radial = RadialScalarKind::Duchon {
+        length_scale,
+        p_order,
+        s_order,
+        dim,
+        coeffs: coeffs.clone(),
+    };
+    let (value, global_first, global_second) =
+        duchon_partial_fraction_kernel_psi_triplet(
+            0.0,
+            length_scale,
+            p_order,
+            s_order,
+            dim,
+            &coeffs,
+        )
+        .expect("direct collision ψ jet");
+    let (encoded_value, encoded_q, encoded_t, marked) = radial
+        .eval_per_axis_psi_carriers(0.0)
+        .expect("per-axis collision carrier");
+    assert!(marked, "the direct-PFD collision must use the algebraic carrier");
+    assert_eq!(encoded_value, value);
+
+    let c = duchon_scaling_exponent(p_order, s_order, dim) / dim as f64;
+    let first = ImplicitDesignPsiDerivative::first_kernel_value(
+        1.0,
+        encoded_value,
+        encoded_q,
+        ALGEBRAIC_PER_AXIS_COMPONENT,
+        c,
+    );
+    let second = ImplicitDesignPsiDerivative::second_kernel_value(
+        1.0,
+        encoded_value,
+        encoded_q,
+        encoded_t,
+        ALGEBRAIC_PER_AXIS_COMPONENT,
+        ALGEBRAIC_PER_AXIS_COMPONENT,
+        0.0,
+        c,
+        c,
+        0.0,
+    );
+    let expected_first = global_first / dim as f64;
+    let expected_second = global_second / (dim * dim) as f64;
+    assert!(
+        (first - expected_first).abs() <= 1e-13 * expected_first.abs().max(1.0),
+        "raw-axis collision first jet {first} != exact global share {expected_first}"
+    );
+    assert!(
+        (second - expected_second).abs() <= 1e-13 * expected_second.abs().max(1.0),
+        "raw-axis collision second jet {second} != exact global share {expected_second}"
+    );
+
+    // Prove the row is discriminating: the former homogeneous shortcut reads
+    // only `c*K` because its geometric component is zero, and is not the
+    // derivative of this shipped finite-part representative.
+    let homogeneous_first = c * value;
+    assert!(
+        (homogeneous_first - expected_first).abs()
+            > 1e-6 * expected_first.abs().max(value.abs()).max(1.0),
+        "fixture does not distinguish the direct collision jet from c*K"
+    );
+}
+
 /// Native penalty: the per-axis first derivatives sum to the isotropic one,
 /// block by block.
 #[test]

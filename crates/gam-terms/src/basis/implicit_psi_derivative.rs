@@ -3174,9 +3174,16 @@ impl ImplicitDesignPsiDerivative {
 
     /// One first-order kernel-derivative scalar under the chart:
     /// `scale · (q·s + g·φ)` with `g = c + L_a` (gam#979).
+    /// A negative `s` is the unambiguous exact-collision marker installed by
+    /// `eval_per_axis_psi_carriers`; there `q` is already the algebraic
+    /// remainder after removing `c·φ`, because no geometric carrier exists.
     #[inline]
     pub(crate) fn first_kernel_value(scale: f64, phi: f64, q: f64, s: f64, g: f64) -> f64 {
-        scale * (q * s + g * phi)
+        if s == ALGEBRAIC_PER_AXIS_COMPONENT {
+            scale * (q + g * phi)
+        } else {
+            scale * (q * s + g * phi)
+        }
     }
 
     /// One second-order kernel-derivative scalar under the chart:
@@ -3198,7 +3205,15 @@ impl ImplicitDesignPsiDerivative {
         g_b: f64,
         lam: f64,
     ) -> f64 {
-        scale * (t * s_a * s_b + 2.0 * q * overlap + q * (g_b * s_a + g_a * s_b) + (g_a * g_b + lam) * phi)
+        if s_a == ALGEBRAIC_PER_AXIS_COMPONENT && s_b == ALGEBRAIC_PER_AXIS_COMPONENT {
+            scale * (t + (g_a + g_b) * q + (g_a * g_b + lam) * phi)
+        } else {
+            scale
+                * (t * s_a * s_b
+                    + 2.0 * q * overlap
+                    + q * (g_b * s_a + g_a * s_b)
+                    + (g_a * g_b + lam) * phi)
+        }
     }
 }
 
@@ -3482,12 +3497,24 @@ pub(crate) fn build_aniso_design_psi_derivatives_shared(
                     for a in 0..dim {
                         cb[a] = centers[[j, a]];
                     }
-                    let (r, sv) = aniso_distance_and_components(&drb, &cb, eta);
-                    let triplet = match profile_ref {
-                        Some(profile) => profile.eval_or_exact(&radial_kind, r),
-                        None => radial_kind.eval_design_triplet(r),
+                    let (r, mut sv) = aniso_distance_and_components(&drb, &cb, eta);
+                    let collision = if r == 0.0 {
+                        Some(radial_kind.eval_per_axis_psi_carriers(r))
+                    } else {
+                        None
                     };
-                    let (phi, q, t) = match triplet {
+                    let triplet = match collision {
+                        Some(result) => result,
+                        None => match profile_ref {
+                            Some(profile) => profile
+                                .eval_or_exact(&radial_kind, r)
+                                .map(|(phi, q, t)| (phi, q, t, false)),
+                            None => radial_kind
+                                .eval_design_triplet(r)
+                                .map(|(phi, q, t)| (phi, q, t, false)),
+                        },
+                    };
+                    let (phi, q, t, marked) = match triplet {
                         Ok(p) => p,
                         Err(e) => {
                             let mut slot = ferr.lock().unwrap_or_else(|p| p.into_inner());
@@ -3497,6 +3524,9 @@ pub(crate) fn build_aniso_design_psi_derivatives_shared(
                             return;
                         }
                     };
+                    if marked {
+                        sv.fill(ALGEBRAIC_PER_AXIS_COMPONENT);
+                    }
                     let flat = i * k + j;
                     // SAFETY: each Rayon chunk owns a disjoint i-row range,
                     // so flat=i*k+j stays in 0..nk for phi/q/t and
