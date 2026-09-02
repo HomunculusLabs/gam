@@ -1564,9 +1564,10 @@ impl StreamingArrowSchur {
                 // `allow_spectral_deflation = true` the dense path passes.
                 true,
                 self.refuse_resolved_indefinite,
-                self.exact_a_classification
-                    .as_ref()
-                    .and_then(|geometry| geometry.rows.get(row_idx)),
+                // The streaming system carries no exact-A classification
+                // geometry; the row is factored as it was before that
+                // classification existed.
+                None,
             )
             .map(|result| result.factor),
             None => factor_one_row(row, ridge_t, di, row_idx, self.evidence_factorization),
