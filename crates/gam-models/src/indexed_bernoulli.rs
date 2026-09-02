@@ -9,8 +9,8 @@
 //! cross-output coefficient Hessian.
 
 use crate::custom_family::{
-    BlockWorkingSet, CustomFamily, CustomFamilyError, FamilyEvaluation, ParameterBlockSpec,
-    ParameterBlockState, fit_custom_family,
+    BlockWorkingSet, BlockwiseFitOptions, CustomFamily, CustomFamilyError, FamilyEvaluation,
+    ParameterBlockSpec, ParameterBlockState, fit_custom_family,
 };
 use gam_model_kernels::bernoulli_link::{
     bernoulli_natural_jet, bernoulli_natural_observation,
