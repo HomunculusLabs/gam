@@ -15,6 +15,7 @@ use super::derivative_oracle::{
 use super::dual::{Dual, DualKinkBranch};
 use super::tests::{
     FdAnchorRegime, FdBranchRegime, FiniteDifferenceStratumCertificate,
+    FixedStateLogdetSample,
     certified_branch_stable_central_difference, certified_central_logdet_difference,
     certified_fd_anchor, decisive_logit_homotopy, decisive_logit_pattern,
     fixed_state_logdet_sample, gamma_fd_tiny_fixture, rho_ladder_family,
@@ -1586,6 +1587,306 @@ pub(crate) fn sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330() {
         branch_smooth + branch_roundoff,
         checked,
         "every probed stencil must reach one of the two branch-guard regimes"
+    );
+}
+
+/// #2333 — production acceptance for the softmax Trace cutover.
+///
+/// The row-jet unit tests prove that projecting semantic bases commutes with the
+/// softmax program, but they do not prove that the production log-det adjoint
+/// actually supplies the row's likelihood metric, selected inverse, and
+/// Daleckii--Krein fold to that seam. This fixture keeps the native Softmax gate,
+/// installs a distinct non-identity full-rank metric on every row, and certifies
+/// a genuinely deflated evaluation state. The complete production joint and
+/// coordinate-block adjoints are compared with the independent dense builder;
+/// centered finite differences of `log|H| - log|H_tt|` then arbitrate one live
+/// deflated coordinate and one live decoder coefficient without sharing row-jet
+/// contraction code.
+#[test]
+pub(crate) fn softmax_trace_whitening_prefold_matches_dense_adjoint_2333() {
+    use gam_problem::RowMetric;
+    use std::sync::Arc;
+
+    let (mut term, mut target, mut rho) = gamma_fd_tiny_fixture();
+    assert!(
+        matches!(term.assignment.mode, AssignmentMode::Softmax { .. }),
+        "#2333 acceptance must exercise the production Softmax Trace branch"
+    );
+    term.gpu_policy = gam_gpu::GpuPolicy::Off;
+
+    let (n, p) = (term.n_obs(), term.output_dim());
+    assert_eq!((n, p), (10, 3), "#2333 must retain the bounded 10x3 fixture");
+    let rank = p;
+    let mut factors = Array2::<f64>::zeros((n, p * rank));
+    for row in 0..n {
+        let drift = row as f64 / (n - 1) as f64;
+        let factor = [
+            [1.05 + 0.08 * drift, 0.07, -0.03],
+            [-0.04, 0.90 + 0.05 * (1.0 - drift), 0.06],
+            [0.02, -0.05, 1.15 - 0.07 * drift],
+        ];
+        for out_col in 0..p {
+            for rank_col in 0..rank {
+                factors[[row, out_col * rank + rank_col]] = factor[out_col][rank_col];
+            }
+        }
+    }
+    term.set_row_metric(RowMetric::behavioral_fisher(Arc::new(factors), p, rank).unwrap())
+        .unwrap();
+    let metric = term.row_metric().expect("#2333 row metric");
+    assert!(
+        metric.whitens_likelihood() && term.whiten_logdet_row_jets(),
+        "#2333 metric must engage likelihood whitening"
+    );
+    assert_ne!(
+        metric.factor_entry(0, 0, 0).to_bits(),
+        metric.factor_entry(n - 1, 0, 0).to_bits(),
+        "#2333 metric must vary by row so decoder-border sharing is observable"
+    );
+
+    // Reuse the off-manifold excitation that makes the row-deflation
+    // differential measurable in the sibling #2330 arbiter.
+    for row in 0..n {
+        for col in 0..p {
+            let phase = (row as f64 + 0.35) / n as f64;
+            let theta = std::f64::consts::TAU * phase;
+            target[[row, col]] += 0.6 * (3.0 * theta + 0.5 * col as f64).sin();
+        }
+    }
+    rho.log_lambda_sparse = -0.5;
+    rho.log_lambda_smooth.fill(-1.0);
+    for axis in rho.log_ard.iter_mut() {
+        axis.fill(-0.5);
+    }
+    term.penalized_quasi_laplace_criterion_with_cache(
+        target.view(),
+        &rho,
+        None,
+        40,
+        0.4,
+        1.0e-6,
+        1.0e-6,
+    )
+    .expect("#2333 row-metric fixture converges with both atoms alive");
+
+    let eval_rho_ladder: Vec<(String, SaeManifoldRho)> = [
+        (0.5_f64, -2.0_f64, -1.2_f64, -1.0_f64),
+        (0.5, -1.5, -1.2, -1.0),
+        (0.2, -2.0, -1.2, -1.0),
+        (0.2, -1.5, -1.0, -0.8),
+        (0.0, -1.5, -1.0, -0.8),
+        (-0.2, -1.2, -0.8, -0.6),
+        (-0.5, -1.0, -0.5, -0.5),
+    ]
+    .iter()
+    .map(|&(sparse, smooth, ard0, ard1)| {
+        let mut candidate = rho.clone();
+        candidate.log_lambda_sparse = sparse;
+        candidate.log_lambda_smooth.fill(smooth);
+        candidate.log_ard = vec![ndarray::array![ard0], ndarray::array![ard1]];
+        (
+            format!(
+                "eval rho (sparse={sparse:.1}, smooth={smooth:.1}, ard=[{ard0:.1}, {ard1:.1}])"
+            ),
+            candidate,
+        )
+    })
+    .collect();
+    let anchor = certified_fd_anchor(
+        "#2333 softmax Trace whitening pre-fold",
+        &target,
+        FdAnchorRegime::deflated(),
+        rho_ladder_family(&term, eval_rho_ladder, 0),
+    );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
+
+    let fold_live_rows: Vec<usize> = (0..cache.n_rows())
+        .filter(|&row| {
+            let has_gauge_direction = cache
+                .deflated_row_directions
+                .get(row)
+                .is_some_and(|directions| !directions.is_empty());
+            let has_moving_spectrum = cache
+                .deflation_row_spectra
+                .get(row)
+                .and_then(Option::as_ref)
+                .is_some_and(|spectrum| {
+                    spectrum
+                        .raw_evals
+                        .iter()
+                        .zip(spectrum.cond_evals.iter())
+                        .any(|(&raw, &conditioned)| raw.to_bits() != conditioned.to_bits())
+                });
+            has_gauge_direction || has_moving_spectrum
+        })
+        .collect();
+    assert!(
+        !fold_live_rows.is_empty(),
+        "#2333 anchor must exercise a non-identity deflation fold"
+    );
+
+    // This helper materializes the independent dense inverse and dense dh for
+    // every t and beta entry, then compares them against the production builder.
+    // Bounding both complete legs bounds their joint-minus-coordinate difference.
+    let (dense_joint_gap, dense_coordinate_gap) = term
+        .ch5_dense_theta_adjoint_selfcheck(&rho, &cache)
+        .expect("#2333 complete dense theta-adjoint comparison");
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let joint = term
+        .logdet_theta_adjoint(&rho, &cache, &solver)
+        .expect("#2333 production joint adjoint");
+    let coordinate = term
+        .coordinate_block_logdet_theta_adjoint(
+            &rho,
+            &cache,
+            EvidenceOperator::Majorizer,
+            None,
+        )
+        .expect("#2333 production coordinate-block adjoint");
+    let joint_scale = joint
+        .t
+        .iter()
+        .chain(joint.beta.iter())
+        .fold(0.0_f64, |scale, &value| scale.max(value.abs()));
+    let coordinate_scale = coordinate
+        .t
+        .iter()
+        .chain(coordinate.beta.iter())
+        .fold(0.0_f64, |scale, &value| scale.max(value.abs()));
+    assert!(
+        dense_joint_gap <= 1.0e-12 * (1.0 + joint_scale)
+            && dense_coordinate_gap <= 1.0e-12 * (1.0 + coordinate_scale),
+        "#2333 complete dense/Trace parity exceeded 1e-12 relative: \
+         joint gap={dense_joint_gap:.3e} scale={joint_scale:.3e}, \
+         coordinate gap={dense_coordinate_gap:.3e} scale={coordinate_scale:.3e}"
+    );
+    let mut effective = joint;
+    effective.t -= &coordinate.t;
+    effective.beta -= &coordinate.beta;
+
+    let ranked_logdet_sample = |mut candidate: SaeManifoldTerm| -> FixedStateLogdetSample {
+        let (_value, _loss, candidate_cache) = candidate
+            .penalized_quasi_laplace_criterion_with_cache(
+                target.view(),
+                &rho,
+                None,
+                0,
+                0.4,
+                1.0e-6,
+                1.0e-6,
+            )
+            .expect("#2333 fixed-state ranked logdet cache");
+        let joint_value = arrow_log_det_from_cache(&candidate_cache)
+            .expect("#2333 fixed-state joint logdet");
+        let coordinate_value = super::construction::coordinate_block_log_det(&candidate_cache)
+            .expect("#2333 fixed-state coordinate logdet");
+        FixedStateLogdetSample {
+            value: joint_value - coordinate_value,
+            stratum: FiniteDifferenceStratumCertificate::from_arrow_cache(&candidate_cache),
+        }
+    };
+
+    // Pick the strongest interior coordinate on a row whose E_tt fold is live.
+    // Selection sees only analytic magnitude, never finite-difference agreement.
+    let mut coordinate_probe = None;
+    for &row in &fold_live_rows {
+        let vars = term
+            .row_vars_for_cache_row(row, &cache)
+            .expect("#2333 deflated-row layout");
+        for (local, &var) in vars.iter().enumerate() {
+            let SaeLocalRowVar::Coord { atom, axis } = var else {
+                continue;
+            };
+            let latent = term.assignment.coords[atom].row(row)[axis];
+            if (std::f64::consts::TAU * latent).cos().abs() < 0.2 {
+                continue;
+            }
+            let analytic = effective.t[cache.row_offsets[row] + local];
+            if coordinate_probe
+                .as_ref()
+                .is_none_or(|&(_, _, _, incumbent): &(usize, usize, SaeLocalRowVar, f64)| {
+                    analytic.abs() > incumbent.abs()
+                })
+            {
+                coordinate_probe = Some((row, local, var, analytic));
+            }
+        }
+    }
+    let (row, local, var, coordinate_analytic) = coordinate_probe
+        .expect("#2333 live deflation rows must expose an interior coordinate");
+    assert!(
+        coordinate_analytic.abs() > 1.0e-8,
+        "#2333 deflated-coordinate witness must be non-vacuous"
+    );
+    let h = 1.0e-5;
+    let mut coordinate_plus = term.clone();
+    let mut coordinate_minus = term.clone();
+    perturb_theta_slot_2156(&mut coordinate_plus, row, var, h);
+    perturb_theta_slot_2156(&mut coordinate_minus, row, var, -h);
+    let coordinate_fd = certified_central_logdet_difference(
+        &format!("#2333 ranked logdet coordinate row={row} local={local}"),
+        &anchor.stratum,
+        ranked_logdet_sample(coordinate_plus),
+        ranked_logdet_sample(coordinate_minus),
+        h,
+    );
+    let coordinate_tol = 2.0e-3 * (1.0 + coordinate_fd.abs().max(coordinate_analytic.abs()));
+    assert!(
+        (coordinate_fd - coordinate_analytic).abs() <= coordinate_tol,
+        "#2333 deflated-coordinate ranked-logdet mismatch: \
+         fd={coordinate_fd:.12e}, analytic={coordinate_analytic:.12e}, tol={coordinate_tol:.3e}"
+    );
+
+    let (beta_index, &beta_analytic) = effective
+        .beta
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.abs().total_cmp(&right.abs()))
+        .expect("#2333 fixture has decoder-border variables");
+    assert!(
+        beta_analytic.abs() > 1.0e-8,
+        "#2333 decoder-border witness must be non-vacuous"
+    );
+    let offsets = term.beta_offsets();
+    let atom = offsets
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(atom, &offset)| (offset <= beta_index).then_some(atom))
+        .expect("#2333 beta index belongs to an atom");
+    let local_beta = beta_index - offsets[atom];
+    let basis = local_beta / p;
+    let out_col = local_beta % p;
+    assert!(
+        basis < term.atoms[atom].decoder_coefficients().nrows(),
+        "#2333 beta layout must index the atom decoder"
+    );
+    let mut beta_plus = term.clone();
+    let mut beta_minus = term.clone();
+    beta_plus.atoms[atom].decoder_coefficients_mut()[[basis, out_col]] += h;
+    beta_minus.atoms[atom].decoder_coefficients_mut()[[basis, out_col]] -= h;
+    let beta_fd = certified_central_logdet_difference(
+        &format!("#2333 ranked logdet beta index={beta_index}"),
+        &anchor.stratum,
+        ranked_logdet_sample(beta_plus),
+        ranked_logdet_sample(beta_minus),
+        h,
+    );
+    let beta_tol = 2.0e-3 * (1.0 + beta_fd.abs().max(beta_analytic.abs()));
+    assert!(
+        (beta_fd - beta_analytic).abs() <= beta_tol,
+        "#2333 decoder-border ranked-logdet mismatch: \
+         fd={beta_fd:.12e}, analytic={beta_analytic:.12e}, tol={beta_tol:.3e}"
+    );
+    eprintln!(
+        "#2333 TRACE_ACCEPT live_fold_rows={} dense_joint_gap={dense_joint_gap:.3e} \
+         dense_coordinate_gap={dense_coordinate_gap:.3e} coordinate_fd_gap={:.3e} \
+         beta_fd_gap={:.3e}",
+        fold_live_rows.len(),
+        (coordinate_fd - coordinate_analytic).abs(),
+        (beta_fd - beta_analytic).abs(),
     );
 }
 
