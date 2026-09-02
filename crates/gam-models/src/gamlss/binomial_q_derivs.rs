@@ -1040,9 +1040,14 @@ mod tests {
         // Speed contract, release profile only (`SpeedGate::open` documents
         // why). The prune does strictly less arithmetic than the full `Tower4`
         // it prunes -- it drops the fourth-order channel and its cross terms --
-        // so the contract is "faster", not "not slower": measured 1.56x
-        // (`wins=1.00`, 34x its own resolution) when the paired instrument
-        // first replaced a min-of-N harness that had called it a dead tie.
+        // but on one variable that channel is one term of a row whose cost is
+        // the logit's exponential, and the saving sits below the instrument's
+        // resolution: 0.992, 1.003, 0.997 and 0.995 on four EPYC hosts, wins
+        // between 0.13 and 0.93. The 1.56x once measured here was one call per
+        // iteration, where the harness's own per-call cost was the arm. The
+        // contract is parity within resolution, `not_slower`, and the
+        // bit-identity pin above is what says the prune reads the same
+        // channels.
         if cfg!(debug_assertions) {
             return;
         }
@@ -1062,7 +1067,7 @@ mod tests {
                 m1 + m2 + m3
             }),
         );
-        gate.faster("m1..m3", &timing, "production_tower3", "full_tower4");
+        gate.not_slower("m1..m3", &timing, "production_tower3", "full_tower4");
         gate.finish();
     }
 }
