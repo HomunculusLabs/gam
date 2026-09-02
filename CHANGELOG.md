@@ -1,5 +1,28 @@
 ## Unreleased
 
+- **The wiggle frozen-index fixed point is single-valued and mixes its
+  residual history (#2748).** After the multiplier repair the
+  `geo_disease_matern` flexible cell at n=1000 still failed at 60 passes, and
+  Anderson mixing alone did not fix it: the residual contracted for four or
+  five passes and then jumped, and every jump coincided with the inner solve
+  landing in the other of two optima `2.3e-3` apart in cost, because every
+  pass re-ran the outer seed cascade. Passes after the first are now
+  continuations (`BinomialMeanWiggleFamily::continuation`: one seed, the
+  previous pass's own `ρ`, `screen_initial_rho` off), and the loop advances
+  `[β; η]` by the rank-floored Anderson multisecant step over its pass history
+  (`gam_linalg::anderson`) with the scalar relaxed step as the first-pass and
+  post-reset fallback and the map's own residual norm as the safeguard. The
+  n=1000 cell mints in 44 s (was a 290 s refusal); n=500 in 42 s (was 48 s).
+- **The composed-warp degree floor is the measured `C¹` degree, 4 (#2695).**
+  The floor had been raised to 5 on the reading that `∇Φ` consumes a
+  piecewise-constant `I⁗` at degree 4. Its own non-vacuity arm refused on MSI:
+  driving the production Jeffreys gradient across an event-row knot crossing,
+  the gap shrinks 99.5× for a 100× smaller straddle at degree 4 (and ≈100× at
+  5 and 6) and only 1.02× at degree 3. The required continuous basis order is
+  therefore 3, the floor is degree 4 again, the negative control measures
+  degree 3, and the ladder that produced the table (`knot_ladder_2695`) ships
+  as a fixture that prints it on every run.
+
 - **The composed-warp degree floor is the measured `C¹` degree, 4 (#2695).**
   The floor had been raised to 5 on the reading that `∇Φ` consumes a
   piecewise-constant `I⁗` at degree 4. Its own non-vacuity arm refused on MSI:

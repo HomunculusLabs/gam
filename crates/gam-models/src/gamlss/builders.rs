@@ -1705,6 +1705,112 @@ pub(crate) fn frozen_index_relaxation(dominant_multiplier: f64) -> f64 {
     }
 }
 
+/// Which step the frozen-index loop took on a pass (#2748).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrozenIndexAdvance {
+    /// The multisecant step over `order` stored residual differences.
+    Anderson { order: usize },
+    /// The scalar relaxed step `t · (Φ(x) − x)`: the first pass, and the pass
+    /// after a safeguard reset, which reseeds the history.
+    Relaxed,
+}
+
+impl std::fmt::Display for FrozenIndexAdvance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anderson { order } => write!(f, "anderson(order={order})"),
+            Self::Relaxed => write!(f, "relaxed"),
+        }
+    }
+}
+
+/// Multi-mode acceleration of the frozen-index fixed point (#2748).
+///
+/// A scalar relaxation annihilates ONE mode. The `geo_disease_matern` flexible
+/// cell at n=1000 showed what that costs once the multiplier is read correctly:
+/// `t = 1/(1−mu)` kills the dominant alternating mode (`mu ≈ −5.6`), the
+/// residual is then a mild mode whose own relaxation is `≈ 1`, and that step
+/// regrows the dominant mode by `|1 + (mu − 1)| ≈ 6` per pass — a nine-pass
+/// cycle with `delta` floored at `4.2e-4` against a tolerance of `2.5e-5`.
+///
+/// Anderson mixing is the multisecant generalisation of that relaxation: with
+/// `k` stored residual differences it annihilates `k` modes at once (on a
+/// linear map it is GMRES on the residual). The accelerator is
+/// [`gam_linalg::anderson::AndersonAccelerator`]; its depth is the pass budget
+/// (full memory — the Gram's derived roundoff floor retires the directions the
+/// history cannot resolve, so no separate memory knob is chosen here), and the
+/// safeguard is the map's own residual: a pass whose undamped residual norm is
+/// not below the previous pass's means the last accelerated step was not a
+/// contraction, so the history is discarded and that pass takes the scalar
+/// relaxed step, which reseeds it (Walker & Ni §5; Toth & Kelley 2015).
+///
+/// The state mixed is `[β_source; η]`; both parts move by the same affine
+/// combination, so `η = Xβ + offset` survives every step by construction.
+pub(crate) struct FrozenIndexMixer {
+    accelerator: gam_linalg::anderson::AndersonAccelerator,
+    last_advance: Option<Vec<f64>>,
+    last_residual_norm: Option<f64>,
+}
+
+impl FrozenIndexMixer {
+    pub(crate) fn new(pass_budget: usize) -> Result<Self, String> {
+        let accelerator = gam_linalg::anderson::AndersonAccelerator::new(pass_budget)
+            .map_err(|error| format!("fit_binomial_mean_wiggle: {error}"))?;
+        Ok(Self {
+            accelerator,
+            last_advance: None,
+            last_residual_norm: None,
+        })
+    }
+
+    /// The undamped residual norm recorded by the last [`Self::advance`].
+    pub(crate) fn last_residual_norm(&self) -> Option<f64> {
+        self.last_residual_norm
+    }
+
+    /// Given the undamped map residual `Φ(x_k) − x_k` and the scalar relaxation
+    /// the pass would otherwise apply, return the step to take from `x_k`, which
+    /// kind it is, and whether the history was reset on this pass.
+    pub(crate) fn advance(
+        &mut self,
+        residual: &[f64],
+        relaxation: f64,
+    ) -> Result<(Vec<f64>, FrozenIndexAdvance, bool), String> {
+        let norm = residual.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let mut reset = false;
+        if let Some(previous) = self.last_residual_norm
+            && !(norm < previous)
+        {
+            self.accelerator.reset();
+            self.last_advance = None;
+            reset = true;
+        }
+        self.last_residual_norm = Some(norm);
+        let taken = self
+            .last_advance
+            .take()
+            .unwrap_or_else(|| vec![0.0; residual.len()]);
+        let proposal = self
+            .accelerator
+            .propose(residual, &taken)
+            .map_err(|error| format!("fit_binomial_mean_wiggle: frozen-index mixing: {error}"))?;
+        let (step, kind) = match proposal {
+            Some(step) => (
+                step,
+                FrozenIndexAdvance::Anderson {
+                    order: self.accelerator.history_len(),
+                },
+            ),
+            None => (
+                residual.iter().map(|value| value * relaxation).collect(),
+                FrozenIndexAdvance::Relaxed,
+            ),
+        };
+        self.last_advance = Some(step.clone());
+        Ok((step, kind, reset))
+    }
+}
+
 #[cfg(test)]
 mod dealiased_warp_gauge_priority_tests {
     use super::*;
@@ -1957,6 +2063,69 @@ mod frozen_index_relaxation_tests {
         assert!(
             (product - 1.0 / 6.5).abs() <= 1.0e-2,
             "t_k·t_(k+1) must sit on the 1/(1−mu) involution, got {product}"
+        );
+    }
+
+    /// gam#2748: one scalar relaxation cannot serve a `−5.5` mode and a mild
+    /// mode at once (kill one, and the step that suits the other regrows it).
+    /// The mixer the loop now uses annihilates several modes per pass: on a
+    /// three-mode linear map it must reach the fixed point in a handful of
+    /// passes, driven exactly as the loop drives it — the scalar relaxation as
+    /// the fallback, the residual-norm safeguard resetting the history.
+    #[test]
+    fn the_frozen_index_mixer_converges_a_three_mode_map_in_a_few_passes_2748() {
+        let multipliers = [-5.5_f64, -0.5, 0.7];
+        let fixed_point = [0.75_f64, -0.25, 1.5];
+        let map = |eta: &Array1<f64>| {
+            Array1::from_shape_fn(3, |i| {
+                fixed_point[i] + multipliers[i] * (eta[i] - fixed_point[i])
+            })
+        };
+        let mut eta = array![1.0_f64, 1.0, 1.0];
+        let mut mixer = FrozenIndexMixer::new(60).expect("a positive pass budget");
+        let mut previous: Option<Array1<f64>> = None;
+        let mut previous_t = 1.0_f64;
+        let mut last_measured = f64::NAN;
+        let mut kinds = Vec::new();
+        let mut converged_at = None;
+        for pass in 0..60 {
+            let residual = map(&eta) - &eta;
+            let error = (0..3)
+                .map(|i| (eta[i] - fixed_point[i]).abs())
+                .fold(0.0_f64, f64::max);
+            if error <= 1.0e-10 {
+                converged_at = Some(pass);
+                break;
+            }
+            let mu = fixed_point_dominant_multiplier(previous.as_ref(), previous_t, &residual);
+            if mu.is_finite() {
+                last_measured = mu;
+            }
+            let t = frozen_index_relaxation(if mu.is_finite() { mu } else { last_measured });
+            let (advance, kind, _) = mixer
+                .advance(residual.as_slice().expect("contiguous"), t)
+                .expect("finite residual");
+            kinds.push(kind);
+            previous = Some(residual.clone());
+            previous_t = match kind {
+                FrozenIndexAdvance::Relaxed => t,
+                FrozenIndexAdvance::Anderson { .. } => f64::NAN,
+            };
+            eta = &eta + &Array1::from_iter(advance);
+        }
+        let converged_at = converged_at.unwrap_or_else(|| {
+            panic!("the mixed iteration must converge on three modes; kinds={kinds:?}")
+        });
+        assert!(
+            converged_at <= 10,
+            "three linear modes must be annihilated within a few multisecant passes, took \
+             {converged_at}: kinds={kinds:?}"
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, FrozenIndexAdvance::Anderson { .. })),
+            "the accelerated step must actually have been taken: kinds={kinds:?}"
         );
     }
 }
@@ -2364,6 +2533,7 @@ pub(crate) fn fit_binomial_mean_wiggle(
         wiggle_degree: spec.wiggle_degree,
         policy: gam_runtime::resource::ResourcePolicy::default_library(),
         frozen_warp_design: None,
+        continuation: false,
     };
 
     // Build the de-aliased warp block at a frozen index.  The identifiable
@@ -2491,6 +2661,11 @@ pub(crate) fn fit_binomial_mean_wiggle(
     // the quotient of consecutive residuals measures the RELAXED Jacobian, and
     // this is what recovers the map's own multiplier from it (#2748).
     let mut previous_relaxation = 1.0_f64;
+    // The dominant multiplier is a property of the map, so the last finite
+    // reading serves the scalar fallback on a pass whose own quotient is not
+    // interpretable (the pass after an accelerated step).
+    let mut last_measured_multiplier = f64::NAN;
+    let mut mixer = FrozenIndexMixer::new(options.outer_max_iter)?;
     let mut dominant_multiplier = f64::NAN;
     // The operating point the de-aliasing metric is evaluated at: the composite
     // index `q = X·β + B⊥·β_w` of the previous pass. The pilot carries no warp,
@@ -2520,7 +2695,19 @@ pub(crate) fn fit_binomial_mean_wiggle(
         // and it is not reconstructible from the saved-frame states (#2748).
         let accepted_frozen_warp_design = std::sync::Arc::clone(&bda);
         fam.frozen_warp_design = Some(bda);
-        let fit = fit_custom_family(&fam, &blocks, options).map_err(|e| e.to_string())?;
+        // Every pass after the first is a CONTINUATION of the previous pass's
+        // solve: one seed (the warm ρ the blocks carry) and no screening
+        // cascade, so the frozen-index map is single-valued. See the
+        // `continuation` field for the n=1000 basin flip this removes (#2748).
+        fam.continuation = _outer > 0;
+        let pass_options = if _outer > 0 {
+            let mut continuation_options = options.clone();
+            continuation_options.screen_initial_rho = false;
+            continuation_options
+        } else {
+            options.clone()
+        };
+        let fit = fit_custom_family(&fam, &blocks, &pass_options).map_err(|e| e.to_string())?;
         let mean_state = fit
             .block_states
             .get(BinomialMeanWiggleFamily::BLOCK_ETA)
@@ -2580,7 +2767,14 @@ pub(crate) fn fit_binomial_mean_wiggle(
         };
         dominant_multiplier =
             fixed_point_dominant_multiplier(previous_step.as_ref(), previous_relaxation, &step);
-        let relaxation = frozen_index_relaxation(dominant_multiplier);
+        if dominant_multiplier.is_finite() {
+            last_measured_multiplier = dominant_multiplier;
+        }
+        let relaxation = frozen_index_relaxation(if dominant_multiplier.is_finite() {
+            dominant_multiplier
+        } else {
+            last_measured_multiplier
+        });
         let warp_slope = family.wiggle_dq_dq0(frozen_eta.view(), new_wiggle_beta.view())?;
         let max_slope = warp_slope
             .iter()
@@ -2598,7 +2792,6 @@ pub(crate) fn fit_binomial_mean_wiggle(
             new_wiggle_beta.iter().map(|value| value.abs()).sum::<f64>(),
         );
         previous_step = Some(step.clone());
-        previous_relaxation = relaxation;
         if last_delta <= options.outer_tol * last_scale {
             converged = Some((fit, alias, frozen_source_beta, accepted_frozen_warp_design));
             break;
@@ -2614,11 +2807,33 @@ pub(crate) fn fit_binomial_mean_wiggle(
             }
             .into());
         }
-        // Relaxed advance. `relaxation == 1.0` reproduces the undamped
-        // iteration exactly, which is what every non-oscillating pass gets.
-        let next_source_beta = &frozen_source_beta
-            + &((&new_source_beta - &frozen_source_beta).mapv(|value| value * relaxation));
-        let next_eta = &frozen_eta + &step.mapv(|value| value * relaxation);
+        // Multi-mode advance on the mixed state `[β_source; η]` (#2748): the
+        // Anderson step when the residual history supports one, the scalar
+        // relaxed step otherwise (first pass, and the pass after a safeguard
+        // reset). `relaxation == 1.0` on a relaxed pass reproduces the undamped
+        // iteration exactly.
+        let source_width = frozen_source_beta.len();
+        let residual: Vec<f64> = new_source_beta
+            .iter()
+            .zip(frozen_source_beta.iter())
+            .map(|(new, frozen)| new - frozen)
+            .chain(step.iter().copied())
+            .collect();
+        let (advance, advance_kind, history_reset) = mixer.advance(&residual, relaxation)?;
+        log::info!(
+            "[WIGGLE-OUTER] #2748 pass {_outer}: advance={advance_kind} |residual|={:.6e} \
+             history_reset={history_reset}",
+            mixer.last_residual_norm().unwrap_or(f64::NAN),
+        );
+        // The quotient of the next pass is `(1−t) + t·mu` only after a scalar
+        // relaxed step; after an accelerated step it is not a reading of `mu`.
+        previous_relaxation = match advance_kind {
+            FrozenIndexAdvance::Relaxed => relaxation,
+            FrozenIndexAdvance::Anderson { .. } => f64::NAN,
+        };
+        let next_source_beta =
+            &frozen_source_beta + &Array1::from_iter(advance[..source_width].iter().copied());
+        let next_eta = &frozen_eta + &Array1::from_iter(advance[source_width..].iter().copied());
         eta_block_warm.initial_beta = Some(next_source_beta.clone());
         eta_block_warm.initial_log_lambdas =
             Some(fit.log_lambdas.slice(s![0..eta_penalty_count]).to_owned());
@@ -4388,6 +4603,7 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
         // (#2748): the two are different functions, only this one is convex, and
         // only this one makes the declared ψ-derivative layout complete.
         frozen_warp_design: Some(std::sync::Arc::clone(&frozen_warp_basis)),
+        continuation: false,
     };
     let screening_cap = Arc::new(AtomicUsize::new(0));
     let mut outer_options = options.clone();
