@@ -959,6 +959,40 @@ fn validate_known_options_lists_valid_option_names_for_unknown_parameter() {
 }
 
 #[test]
+fn validate_known_options_exempts_the_engine_injected_namespace() {
+    // The pipeline injects `__by_col` (BySmooth) and `__secondary_center_cap`
+    // (secondary-predictor parsimony) into a term's option map; neither is a
+    // user key, so no arm's whitelist has to know them and none may refuse them.
+    assert!(is_engine_option(SECONDARY_CENTER_CAP_OPTION));
+    assert!(is_engine_option("__by_col"));
+    assert!(!is_engine_option("by"));
+    for (arm, known) in [
+        ("thinplate", THINPLATE_SMOOTH_OPTION_KEYS),
+        ("matern", MATERN_SMOOTH_OPTION_KEYS),
+        ("bspline", BSPLINE_SMOOTH_OPTION_KEYS),
+        ("cyclic", CYCLIC_SMOOTH_OPTION_KEYS),
+    ] {
+        let mut options = BTreeMap::new();
+        options.insert("__by_col".to_string(), "2".to_string());
+        options.insert(SECONDARY_CENTER_CAP_OPTION.to_string(), "12".to_string());
+        validate_known_options(arm, &options, known)
+            .unwrap_or_else(|err| panic!("{arm}: engine-injected options must pass: {err}"));
+        assert!(
+            !known.iter().any(|key| is_engine_option(key)),
+            "{arm}: an engine-injected key is not part of a user-facing vocabulary: {known:?}"
+        );
+
+        // A genuine typo is still refused, and the vocabulary shown to the user
+        // contains no engine key.
+        options.insert("lengt_scale".to_string(), "0.25".to_string());
+        let err = validate_known_options(arm, &options, known)
+            .expect_err("a misspelled user option must still be rejected");
+        assert!(err.contains("does not accept option `lengt_scale`"), "{err}");
+        assert!(!err.contains("__"), "the valid-option list advertised an engine key: {err}");
+    }
+}
+
+#[test]
 fn tensor_k_accepts_square_bracket_per_margin_list() {
     let ds = continuous_dataset(
         &["y", "x", "z"],

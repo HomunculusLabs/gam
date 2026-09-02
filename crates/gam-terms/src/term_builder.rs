@@ -5159,7 +5159,6 @@ pub(crate) const CYCLIC_SMOOTH_OPTION_KEYS: &[&str] = &[
     "domain_origin",
     "double_penalty",
     "id",
-    "__by_col",
     "identifiability",
 ];
 
@@ -5202,7 +5201,6 @@ pub(crate) const BSPLINE_SMOOTH_OPTION_KEYS: &[&str] = &[
     "origin",
     "double_penalty",
     "id",
-    "__by_col",
     "identifiability",
 ];
 
@@ -5220,7 +5218,6 @@ pub(crate) const THINPLATE_SMOOTH_OPTION_KEYS: &[&str] = &[
     "include_intercept",
     "double_penalty",
     "id",
-    "__by_col",
     "identifiability",
     "periodic",
     "cyclic",
@@ -5244,7 +5241,6 @@ pub(crate) const SPHERE_SMOOTH_OPTION_KEYS: &[&str] = &[
     "m",
     "double_penalty",
     "id",
-    "__by_col",
     "kernel",
     "method",
     "radians",
@@ -5272,7 +5268,6 @@ pub(crate) const CURVATURE_SMOOTH_OPTION_KEYS: &[&str] = &[
     "length_scale",
     "double_penalty",
     "id",
-    "__by_col",
 ];
 
 pub(crate) const MEASURE_JET_SMOOTH_OPTION_KEYS: &[&str] = &[
@@ -5294,7 +5289,6 @@ pub(crate) const MEASURE_JET_SMOOTH_OPTION_KEYS: &[&str] = &[
     "multiscale",
     "learn_length_scale",
     "id",
-    "__by_col",
 ];
 
 pub(crate) const MATERN_SMOOTH_OPTION_KEYS: &[&str] = &[
@@ -5312,7 +5306,6 @@ pub(crate) const MATERN_SMOOTH_OPTION_KEYS: &[&str] = &[
     "include_intercept",
     "double_penalty",
     "id",
-    "__by_col",
     "identifiability",
     "periodic",
     "cyclic",
@@ -5347,7 +5340,6 @@ pub(crate) const DUCHON_SMOOTH_OPTION_KEYS: &[&str] = &[
     "scale_dims",
     "double_penalty",
     "id",
-    "__by_col",
 ];
 
 pub(crate) const TENSOR_SMOOTH_OPTION_KEYS: &[&str] = &[
@@ -5379,7 +5371,6 @@ pub(crate) const TENSOR_SMOOTH_OPTION_KEYS: &[&str] = &[
     "bc",
     "identifiability",
     "id",
-    "__by_col",
 ];
 
 pub(crate) const PCA_SMOOTH_OPTION_KEYS: &[&str] = &[
@@ -5398,8 +5389,24 @@ pub(crate) const PCA_SMOOTH_OPTION_KEYS: &[&str] = &[
     "centered",
     "double_penalty",
     "id",
-    "__by_col",
 ];
+
+/// Prefix of the engine-injected option namespace. Options the pipeline adds
+/// to a term's option map on the user's behalf — the `by=` column index the
+/// `BySmooth` wrapper resolves (`__by_col`), the secondary-predictor center cap
+/// ([`SECONDARY_CENTER_CAP_OPTION`]) — carry this prefix. They are never typed
+/// in a formula, so [`validate_known_options`] does not judge them: that
+/// validator answers "is this USER key spelled right?", and an engine key is
+/// neither a user key nor a member of any one arm's vocabulary. Listing
+/// `__by_col` in every arm's whitelist, and the cap in none, is how a
+/// location-scale `noise_formula` with a `thinplate()` smooth came to refuse on
+/// its own injected option (gam#2781 tightened the whitelists).
+pub const ENGINE_OPTION_PREFIX: &str = "__";
+
+/// Whether `key` belongs to the engine-injected option namespace.
+pub fn is_engine_option(key: &str) -> bool {
+    key.starts_with(ENGINE_OPTION_PREFIX)
+}
 
 pub fn validate_known_options(
     term_name: &str,
@@ -5408,6 +5415,9 @@ pub fn validate_known_options(
 ) -> Result<(), String> {
     let known_set: std::collections::BTreeSet<&&str> = known.iter().collect();
     for key in options.keys() {
+        if is_engine_option(key) {
+            continue;
+        }
         if !known_set.contains(&key.as_str()) {
             if term_name == "tensor" && is_tensor_k_axis_option_key(key) {
                 continue;
