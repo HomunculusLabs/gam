@@ -297,11 +297,20 @@ struct SummaryPayload {
     lambdas: Vec<f64>,
     coefficients: Vec<SummaryCoefficientRow>,
     /// Per-smooth significance table (mgcv-style). Empty when the model has no
-    /// smooth/random-effect terms or when the design could not be reconstructed
-    /// to recover the per-term coefficient blocks (e.g. a model saved without
-    /// `resolved_termspec` / training feature ranges).
+    /// smooth/random-effect terms — and ONLY then without a reason: every other
+    /// absence names itself in `smooth_terms_unavailable`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     smooth_terms: Vec<SummarySmoothTermRow>,
+    /// Why `smooth_terms` could not be built: the model was saved without
+    /// `resolved_termspec` / training feature ranges, the frozen spec failed
+    /// validation, or the frozen-basis design replay failed. Present iff the
+    /// table was omitted for one of those reasons, so an absence is never
+    /// reported without its reason — the same contract as
+    /// `reml_score_unavailable`. A replay failure used to be swallowed into an
+    /// empty table indistinguishable from "no smooth terms", which is how a
+    /// categorical main effect erased every co-fitted `s(x)` row (#2787).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    smooth_terms_unavailable: Option<String>,
     /// Fitted curvature estimates for any `curv(...)` constant-curvature smooths
     /// (#944). Empty when the model has no constant-curvature term. κ̂ is the
     /// estimate the fit already produced; the CI and flatness p-value are

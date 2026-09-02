@@ -1165,29 +1165,44 @@ mod whitening_gram_tests {
 /// asserting parity between two implementations is the marker for a wiring that
 /// should have had one.
 ///
-/// Returns an empty vector (rather than erroring) when the design cannot be
-/// rebuilt — e.g. a model saved without `resolved_termspec` or training feature
-/// ranges — so `summary()` always succeeds and simply omits the table when the
-/// information needed to compute it honestly is not available.
+/// `Ok(rows)` is the table (empty exactly when the model has no smooth or
+/// random-effect terms). `Err(reason)` is every other way the table can be
+/// absent — a model saved without `resolved_termspec` or training feature
+/// ranges, a frozen spec that fails validation, or a frozen-basis design
+/// replay that fails — and the caller publishes that reason as
+/// `smooth_terms_unavailable` next to the empty table. `summary()` still
+/// succeeds; what it no longer does is report an absence without its reason.
+/// The replay failure in particular used to be swallowed to an empty vector,
+/// which is how a categorical main effect erased every co-fitted `s(x)` row
+/// (#2787): the table looked exactly like "no smooth terms".
 fn summary_smooth_terms(
     model: &FittedModel,
     fit: &gam::solver::estimate::UnifiedFitResult,
-) -> Vec<SummarySmoothTermRow> {
+) -> Result<Vec<SummarySmoothTermRow>, String> {
     let payload = model.payload();
     let Some(spec) = payload.resolved_termspec.as_ref() else {
-        return Vec::new();
+        return Err("model was saved without `resolved_termspec`; refit to recover the \
+                    per-smooth table"
+            .to_string());
     };
-    if spec.validate_frozen("resolved_termspec").is_err() {
-        return Vec::new();
-    }
+    spec.validate_frozen("resolved_termspec")
+        .map_err(|err| format!("saved `resolved_termspec` failed validation: {err}"))?;
     let Some(ranges) = payload.training_feature_ranges.as_ref() else {
-        return Vec::new();
+        return Err("model was saved without training feature ranges; refit to recover the \
+                    per-smooth table"
+            .to_string());
     };
     let Some(headers) = payload.training_headers.as_ref() else {
-        return Vec::new();
+        return Err("model was saved without training headers; refit to recover the \
+                    per-smooth table"
+            .to_string());
     };
     if ranges.len() != headers.len() {
-        return Vec::new();
+        return Err(format!(
+            "saved training feature ranges ({}) and headers ({}) disagree on the column count",
+            ranges.len(),
+            headers.len()
+        ));
     }
     // Every categorical column — including a fixed main effect represented by
     // a frozen random-effect block — must carry a valid saved level or the
@@ -1197,9 +1212,8 @@ fn summary_smooth_terms(
     // factor vocabulary so every categorical carrier replays coherently.
     let factor_levels = spec.frozen_factor_levels_by_col();
     let data = representative_data_from_ranges(ranges, &factor_levels);
-    let Ok(design) = gam::terms::smooth::build_term_collection_design(data.view(), spec) else {
-        return Vec::new();
-    };
+    let design = gam::terms::smooth::build_term_collection_design(data.view(), spec)
+        .map_err(|err| format!("frozen-basis design replay failed: {err}"))?;
 
     // Wood (2013) design-whitening metric for the Wald smooth test (#2142).
     // Prefer the fit's exact weighted Gram `X'WX` when the inference block
@@ -1227,7 +1241,8 @@ fn summary_smooth_terms(
     // off the fit inside that walk, which is where `fd998d957` put them.
     let rows =
         gam::solver::estimate::smooth_term_summary_rows(&design, spec, fit, whitening_gram_full);
-    rows.into_iter()
+    Ok(rows
+        .into_iter()
         .map(|row| SummarySmoothTermRow {
             name: row.name,
             edf: row.edf,
@@ -1235,7 +1250,7 @@ fn summary_smooth_terms(
             chi_sq: row.chi_sq,
             p_value: row.pvalue,
         })
-        .collect()
+        .collect())
 }
 
 /// Read the fitted κ̂ off every `curv(...)` constant-curvature smooth in the
@@ -1394,6 +1409,7 @@ fn scan_summary_payload(model: &FittedModel, scan: &ScanIntrospection) -> Summar
         lambdas: vec![scan.lambda],
         coefficients: Vec::new(),
         smooth_terms,
+        smooth_terms_unavailable: None,
         covariance_kind: None,
         covariance_n: None,
         covariance_flat: None,
@@ -1479,7 +1495,10 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
             .map_err(|err| format!("failed to serialize summary: {err}"));
     }
     let fit = fit_result_from_saved_model_for_prediction(&model)?;
-    let smooth_terms = summary_smooth_terms(&model, &fit);
+    let (smooth_terms, smooth_terms_unavailable) = match summary_smooth_terms(&model, &fit) {
+        Ok(rows) => (rows, None),
+        Err(reason) => (Vec::new(), Some(reason)),
+    };
     // Definition-consistent coefficient uncertainty (#2296): the SE column,
     // the exported covariance matrix, and their labels all come from ONE
     // covariance definition. Independently selected `corrected.or(conditional)`
@@ -1542,6 +1561,7 @@ fn summary_json_impl(model_bytes: &[u8]) -> Result<String, String> {
         lambdas: fit.lambdas.to_vec(),
         coefficients,
         smooth_terms,
+        smooth_terms_unavailable,
         curvature_estimands: summary_curvature_estimands(&model),
         basis_checks: summary_basis_checks(&model),
         covariance_kind: covariance.as_ref().map(|(kind, _)| kind.clone()),

@@ -17,6 +17,9 @@ from typing import Any, Iterator, Mapping, overload
 from ._binding import rust_module
 
 
+#: Columns of :meth:`Summary.smooth_terms_frame`, in the documented order.
+_SMOOTH_TERM_COLUMNS: tuple[str, ...] = ("name", "edf", "ref_df", "chi_sq", "p_value")
+
 # Canonical schema mirrors ``SummaryPayload`` in
 # ``crates/gam-pyffi/src/lib.rs::summary_json_impl``. Adding a new field on the
 # Rust side that should be a typed Summary attribute means adding it here too;
@@ -39,6 +42,7 @@ _SUMMARY_FIELDS: tuple[str, ...] = (
     "lambdas",
     "coefficients",
     "smooth_terms",
+    "smooth_terms_unavailable",
     "curvature_estimands",
     "basis_checks",
     "covariance_kind",
@@ -206,8 +210,14 @@ class Summary:
         smooth / random-effect term with keys ``name``, ``edf``, ``ref_df``,
         and — for penalized smooths — ``chi_sq`` (Wood 2013 rank-truncated
         Wald statistic) and ``p_value``. Random-effect smooths report ``edf``
-        only. Empty when the model has no smooth terms or when the design
-        could not be reconstructed to recover per-term coefficient blocks.
+        only. Empty when the model has no smooth or random-effect terms; every
+        other absence is labeled by :attr:`smooth_terms_unavailable`.
+    smooth_terms_unavailable : str or None
+        Why :attr:`smooth_terms` could not be built (a model saved without its
+        frozen term spec or training ranges, or a frozen-basis design replay
+        that failed). Present exactly when the table was omitted for such a
+        reason, so an absence is never reported without its reason — the same
+        contract as :attr:`reml_score_unavailable`.
 
         This ``p_value`` is the *first-order* Wald reference; computing it needs
         only the saved model. For the **second-order-accurate**, Bartlett-corrected
@@ -292,6 +302,7 @@ class Summary:
     lambdas: list[float] = field(default_factory=list)
     coefficients: Sequence[Mapping[str, Any]] = field(default_factory=list)
     smooth_terms: list[dict[str, Any]] = field(default_factory=list)
+    smooth_terms_unavailable: str | None = None
     #: Fitted curvature κ̂ point estimates for any ``curv(...)`` constant-curvature
     #: smooths (#944): one dict per term with ``name``, ``term_idx``,
     #: ``kappa_hat``, and a sign-of-κ̂ ``geometry`` tag. The profile CI and the
@@ -422,6 +433,11 @@ class Summary:
         """
         import pandas as pd
 
+        if not self.smooth_terms:
+            # Zero rows keep the documented schema: an empty table with no
+            # column headers is what a swallowed replay failure looked like
+            # (#2787), and it is not the same object as an empty table.
+            return pd.DataFrame(columns=list(_SMOOTH_TERM_COLUMNS))
         return pd.DataFrame(self.smooth_terms)
 
     # -- presentation -----------------------------------------------------------
