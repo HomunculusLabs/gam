@@ -19,7 +19,7 @@ use super::cohort::{
     expand_nodes,
 };
 use super::family::EventHistoryFit;
-use super::marginal::{SubjectInputs, forward_filter};
+use super::marginal::{SubjectInputs, forward_filter, log_intensity};
 use gam_terms::smooth::build_term_collection_design;
 use ndarray::{Array1, Array2};
 
@@ -226,13 +226,15 @@ pub fn forecast(
         let grid = &pass.grids[n];
         let predicted = &pass.predicted[n];
         let survival_before = log_survival.exp();
+        let mut z = vec![0.0; atoms];
         for d in 0..marks {
+            let loadings_d = &loadings[d * atoms..(d + 1) * atoms];
             let mut intensity = 0.0;
             for i in 0..grid.size() {
-                let mut eta = eta_future[n * marks + d];
-                for k in 0..atoms {
-                    eta += loadings[d * atoms + k] * grid.coordinate(i, k);
+                for (k, zk) in z.iter_mut().enumerate() {
+                    *zk = *grid.coordinate(i, k);
                 }
+                let eta = log_intensity(&eta_future[n * marks + d], loadings_d, &z);
                 intensity += grid.weights[i] * predicted[i] * eta.exp();
             }
             counts[d] += w * survival_before * intensity;

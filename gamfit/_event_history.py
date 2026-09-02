@@ -85,6 +85,9 @@ class EventHistoryModel:
         return dict(self._native.quadrature())
 
     def coefficients(self, mark: int | str) -> np.ndarray:
+        """Coefficients of one mark's population log-intensity surface: the
+        latent term enters as the deviation from a population rate, so
+        ``exp(η⁰)`` is the intensity averaged over the latent state."""
         if isinstance(mark, str):
             mark = self.mark_names.index(mark)
         return np.asarray(self._native.coefficients(int(mark)))
@@ -146,8 +149,11 @@ def fit_event_history(
     per covariate segment (a subject's covariates are constant from ``start``
     until its next segment). ``formula`` is the right-hand side of a gam
     formula over the covariate columns and ``time``, e.g. ``"x + s(time)"``.
-    ``atoms`` is the maximum number of latent atoms; the evidence switches off
-    the ones the data do not support.
+    An observed risk score enters as a penalised slope surface,
+    ``"s(time, by=prs, identifiability=none)"``: its effect on every mark
+    may bend with time as much as the evidence supports and collapses to
+    zero when the score carries nothing. ``atoms`` is the maximum number of
+    latent atoms; the evidence switches off the ones the data do not support.
     """
     rust = rust_module()
     subject_ids = [str(v) for v in _column(subjects, id_column)]

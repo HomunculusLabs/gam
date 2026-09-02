@@ -5,13 +5,18 @@ use super::chain::{
 use super::cohort::{
     CovariateSegment, Event, EventHistoryCohort, SubjectHistory, SubjectNodes, expand_nodes,
 };
-use super::family::{Directional, EventHistoryFamily, EventHistorySpec, fit_event_history};
+use super::family::{
+    Directional, EventHistoryFamily, EventHistoryFit, EventHistorySpec, fit_event_history,
+    fit_event_history_formula,
+};
 use super::forecast::{ForecastRequest, forecast, kolmogorov_smirnov_uniform, predictive_pit};
 use super::marginal::{SubjectInputs, subject_marginal};
-use crate::custom_family::ParameterBlockState;
+use crate::custom_family::{BlockwiseFitOptions, ParameterBlockState};
 use gam_math::jet_scalar::{OneSeed, TwoSeed};
 use gam_math::nested_dual::JetField;
-use gam_terms::smooth::{LinearCoefficientGeometry, LinearTermSpec, TermCollectionSpec};
+use gam_terms::smooth::{
+    LinearCoefficientGeometry, LinearTermSpec, TermCollectionSpec, build_term_collection_design,
+};
 use ndarray::{Array1, Array2, array};
 use std::sync::Arc;
 
@@ -164,14 +169,14 @@ fn single_node_marginal_matches_numerical_integration() {
         continuation_gap: 0.0,
     };
     let out = subject_marginal(&inputs, false).expect("marginal");
-    // ∫ exp(y η − w e^η) N(z) dz with η = η0 + a z, on a fine grid.
+    // ∫ exp(y η − w e^η) N(z) dz with η = η0 − ½a² + a z, on a fine grid.
     let mut integral = 0.0;
     let steps = 200_000;
     let (lo, hi) = (-9.0, 9.0);
     let dz = (hi - lo) / steps as f64;
     for i in 0..=steps {
         let z = lo + i as f64 * dz;
-        let eta = eta0[0] + loadings[0] * z;
+        let eta = eta0[0] - 0.5 * loadings[0] * loadings[0] + loadings[0] * z;
         let weight = if i == 0 || i == steps { 0.5 } else { 1.0 };
         integral += weight * dz * (2.0 * eta - 0.8 * eta.exp()).exp() * gaussian(z, 0.0, 1.0);
     }
@@ -209,13 +214,14 @@ fn two_node_marginal_matches_brute_force_double_integral() {
     for i in 0..=steps {
         let z1 = lo + i as f64 * dz;
         let w1 = if i == 0 || i == steps { 0.5 } else { 1.0 };
-        let eta1 = eta0[0] + loadings[0] * z1;
+        let shift = -0.5 * loadings[0] * loadings[0];
+        let eta1 = eta0[0] + shift + loadings[0] * z1;
         let l1 = (eta1 - 0.5 * eta1.exp()).exp() * gaussian(z1, 0.0, 1.0);
         let mut inner = 0.0;
         for j in 0..=steps {
             let z2 = lo + j as f64 * dz;
             let w2 = if j == 0 || j == steps { 0.5 } else { 1.0 };
-            let eta2 = eta0[1] + loadings[0] * z2;
+            let eta2 = eta0[1] + shift + loadings[0] * z2;
             inner += w2 * dz * (-0.6 * eta2.exp()).exp() * gaussian(z2, phi * z1, q);
         }
         integral += w1 * dz * l1 * inner;
@@ -496,6 +502,21 @@ fn node_expansion_integrates_exposure_and_places_events() {
     }
 }
 
+struct Rng(u64);
+impl Rng {
+    fn uniform(&mut self) -> f64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 11) as f64 / (1u64 << 53) as f64
+    }
+    fn normal(&mut self) -> f64 {
+        let u1 = self.uniform().max(1e-300);
+        let u2 = self.uniform();
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    }
+}
+
 /// Simulate a cohort whose log-intensity is `β₀ + β₁ x + a z(t)` with `z` a
 /// unit-variance Ornstein–Uhlenbeck atom of the given rate, by thinning.
 fn simulate_cohort(
@@ -507,20 +528,6 @@ fn simulate_cohort(
     rate: f64,
     seed: u64,
 ) -> EventHistoryCohort {
-    struct Rng(u64);
-    impl Rng {
-        fn uniform(&mut self) -> f64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            (self.0 >> 11) as f64 / (1u64 << 53) as f64
-        }
-        fn normal(&mut self) -> f64 {
-            let u1 = self.uniform().max(1e-300);
-            let u2 = self.uniform();
-            (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
-        }
-    }
     let mut rng = Rng(seed);
     let steps = 400;
     let dt = follow_up / steps as f64;
@@ -702,21 +709,32 @@ fn fit_recovers_the_covariate_effect_and_a_positive_shared_risk_loading() {
     let mut spec = EventHistorySpec::new(1, vec![linear_spec()]);
     spec.gauss_hermite_order = 11;
     let fit = fit_event_history(&mut cohort, &spec).expect("fit");
+    let beta = fit.mark_coefficients(0);
     println!(
-        "[fit] {:.1}s outer_iterations={} gh_order={} loading={} rate={} log_lambda={:?}",
+        "[fit] {:.1}s outer_iterations={} gh_order={} beta={:?} loading={} rate={} log_lambda={:?}",
         started.elapsed().as_secs_f64(),
         fit.fit.outer_iterations,
         fit.quadrature.order,
+        beta.to_vec(),
         fit.loadings[[0, 0]],
         fit.rates[0],
         fit.atom_log_lambdas
     );
-    let beta = fit.mark_coefficients(0);
     assert_eq!(beta.len(), 2, "intercept and slope");
     assert!(
         (beta[1] - 0.5).abs() < 0.25,
         "slope {} should recover 0.5 within its sampling error",
         beta[1]
+    );
+    // The simulated intensity `exp(β₀ + β₁x + a z)` averages over the
+    // stationary `z` to `exp(β₀ + ½a² + β₁x)`, and the fitted `η⁰` is
+    // parameterised as that average, so the intercept estimates the
+    // population log-rate `−0.8 + ½·1² = −0.3`, not the conditional `−0.8`.
+    let population_log_rate = -0.8 + 0.5;
+    assert!(
+        (beta[0] - population_log_rate).abs() < 0.25,
+        "intercept {} should be the population log-rate {population_log_rate}",
+        beta[0]
     );
     let loading = fit.loadings[[0, 0]].abs();
     assert!(
@@ -1183,10 +1201,14 @@ fn louis_hessian_against_finite_differences_at_the_loaded_cohort_optimum() {
     // The state the fixed-λ inner solve reaches on the loaded cohort. Louis'
     // Hessian is compared with finite differences of the exact gradient at
     // two step sizes (a ripple in the objective shows up as step-size
-    // dependence) and at two quadrature orders.
+    // dependence) and at two quadrature orders. The solve reached the
+    // conditional intercept −0.9485 with loading 1.2054; the latent term now
+    // enters as `−½a² + a z`, so the same model has the population intercept
+    // `−0.9485 + ½·1.2054²`.
     let cohort = loaded_cohort();
-    let beta = array![-0.9485, 0.5452];
-    let latent = array![1.2054, 1.0587];
+    let loading = 1.2054_f64;
+    let beta = array![-0.9485 + 0.5 * loading * loading, 0.5452];
+    let latent = array![loading, 1.0587];
     for order in [11usize, 21] {
         let (family, design_dense, base_states) = loaded_family(&cohort, order);
         let at = |beta: &Array1<f64>, latent: &Array1<f64>| -> Vec<ParameterBlockState> {
@@ -1671,4 +1693,154 @@ fn traced_fixed_lambda_inner_solve_on_the_loaded_cohort_reports_its_cost() {
         }
         Err(error) => emit(&format!("[cost] error after {:.1}s: {error}", clock.elapsed().as_secs_f64())),
     }
+}
+
+/// Simulate a single-mark cohort whose log-intensity is `β₀ + b(t) g` for a
+/// subject-level standard-normal score `g` and no latent state, by thinning
+/// under the bound `exp(β₀ + slope_bound · |g|)` with `slope_bound ≥ max |b|`.
+fn simulate_score_cohort(
+    subjects: usize,
+    follow_up: f64,
+    intercept: f64,
+    slope: &dyn Fn(f64) -> f64,
+    slope_bound: f64,
+    seed: u64,
+) -> EventHistoryCohort {
+    let mut rng = Rng(seed);
+    let mut covariates = Array2::<f64>::zeros((subjects, 1));
+    let mut histories = Vec::with_capacity(subjects);
+    for s in 0..subjects {
+        let g = rng.normal();
+        covariates[[s, 0]] = g;
+        let bound = (intercept + slope_bound * g.abs()).exp();
+        let mut events = Vec::new();
+        let mut t = 0.0;
+        loop {
+            t -= bound.recip() * rng.uniform().max(1e-300).ln();
+            if t >= follow_up {
+                break;
+            }
+            let intensity = (intercept + slope(t) * g).exp();
+            assert!(intensity <= bound, "thinning bound violated");
+            if rng.uniform() * bound < intensity {
+                events.push(Event { time: t, mark: 0 });
+            }
+        }
+        histories.push(SubjectHistory {
+            id: format!("s{s}"),
+            entry: 0.0,
+            exit: follow_up,
+            events,
+            segments: vec![CovariateSegment {
+                start: 0.0,
+                row: s,
+            }],
+        });
+    }
+    EventHistoryCohort {
+        mark_names: vec!["event".to_string()],
+        covariate_names: vec!["g".to_string()],
+        covariates,
+        subjects: histories,
+    }
+}
+
+/// The fitted score slope `b(t) = η(g = 1, t) − η(g = 0, t)` of mark 0, for
+/// a fit whose node columns are `[g, time]`.
+fn fitted_score_slope(fit: &EventHistoryFit, times: &[f64]) -> Vec<f64> {
+    let mut rows = Array2::<f64>::zeros((2 * times.len(), 2));
+    for (i, &t) in times.iter().enumerate() {
+        rows[[2 * i, 0]] = 1.0;
+        rows[[2 * i, 1]] = t;
+        rows[[2 * i + 1, 1]] = t;
+    }
+    let design =
+        build_term_collection_design(rows.view(), &fit.frozen_specs[0]).expect("prediction design");
+    let dense = design
+        .design
+        .try_to_dense_arc("score slope design")
+        .expect("dense design");
+    let beta = fit.mark_coefficients(0);
+    let eta = |r: usize| -> f64 {
+        design.affine_offset[r]
+            + dense
+                .row(r)
+                .iter()
+                .zip(beta.iter())
+                .map(|(x, b)| x * b)
+                .sum::<f64>()
+    };
+    (0..times.len()).map(|i| eta(2 * i) - eta(2 * i + 1)).collect()
+}
+
+/// An observed subject-level score enters the intensity as one penalised
+/// slope surface `b(t) · g`: `s(time, by=g, identifiability=none)` keeps the
+/// constant of the by-smooth, so its wiggliness ridge decides how much the
+/// score's effect bends with time and its null-space ridge decides whether
+/// the effect exists at all, both selected by REML. A declining effect is
+/// recovered as a decline; a score carrying nothing collapses to zero.
+#[test]
+fn an_observed_score_enters_as_a_penalised_slope_surface() {
+    install_test_logger();
+    let times = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5];
+    let formula = "s(time, by=g, identifiability=none)";
+    let truth = |t: f64| 1.0 - 0.15 * t;
+    let mut cohort = simulate_score_cohort(300, 6.0, -0.5, &truth, 1.0, 19);
+    let events: usize = cohort.subjects.iter().map(|s| s.events.len()).sum();
+    let started = std::time::Instant::now();
+    let fit = fit_event_history_formula(&mut cohort, formula, 0, BlockwiseFitOptions::default())
+        .expect("fit with a declining score effect");
+    let slope = fitted_score_slope(&fit, &times);
+    emit(&format!(
+        "[score-slope] declining arm: {events} events, {:.1}s, outer_iterations={} log_lambdas={:?}",
+        started.elapsed().as_secs_f64(),
+        fit.fit.outer_iterations,
+        fit.fit.log_lambdas
+    ));
+    for (t, b) in times.iter().zip(slope.iter()) {
+        emit(&format!("[score-slope]   t={t} fitted={b:.3} truth={:.3}", truth(*t)));
+    }
+    // The whole fitted surface, densely, for plotting.
+    let dense: Vec<f64> = (0..=60).map(|i| 0.1 * i as f64).collect();
+    for (t, b) in dense.iter().zip(fitted_score_slope(&fit, &dense).iter()) {
+        emit(&format!("[score-slope-curve] arm=declining t={t:.2} fitted={b:.5} truth={:.5}", truth(*t)));
+    }
+    assert!(
+        slope[0] - slope[5] > 0.35,
+        "the score's effect declines by 0.75 over the follow-up; the fit shows {} → {}",
+        slope[0],
+        slope[5]
+    );
+    for (t, b) in times.iter().zip(slope.iter()) {
+        assert!(
+            (b - truth(*t)).abs() < 0.3,
+            "slope at t={t}: fitted {b}, truth {}",
+            truth(*t)
+        );
+    }
+
+    // Control: the score carries nothing. The same surface must collapse.
+    let mut null = simulate_score_cohort(300, 6.0, -0.5, &|_| 0.0, 0.0, 23);
+    let null_events: usize = null.subjects.iter().map(|s| s.events.len()).sum();
+    let started = std::time::Instant::now();
+    let null_fit = fit_event_history_formula(&mut null, formula, 0, BlockwiseFitOptions::default())
+        .expect("fit with an uninformative score");
+    let null_slope = fitted_score_slope(&null_fit, &times);
+    emit(&format!(
+        "[score-slope] null arm: {null_events} events, {:.1}s, outer_iterations={} log_lambdas={:?}",
+        started.elapsed().as_secs_f64(),
+        null_fit.fit.outer_iterations,
+        null_fit.fit.log_lambdas
+    ));
+    for (t, b) in times.iter().zip(null_slope.iter()) {
+        emit(&format!("[score-slope]   t={t} fitted={b:.3} truth=0.000"));
+    }
+    for (t, b) in dense.iter().zip(fitted_score_slope(&null_fit, &dense).iter()) {
+        emit(&format!("[score-slope-curve] arm=null t={t:.2} fitted={b:.5} truth=0.00000"));
+    }
+    let amplitude = null_slope.iter().fold(0.0f64, |m, b| m.max(b.abs()));
+    assert!(
+        amplitude < 0.15,
+        "an uninformative score should collapse to zero; the fitted surface reaches {amplitude}"
+    );
 }

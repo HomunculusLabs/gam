@@ -896,12 +896,15 @@ impl EventHistoryFit {
         self.log_rates.len()
     }
 
-    /// Fitted coefficients of the mark-`d` block.
+    /// Fitted coefficients of the mark-`d` block: the population
+    /// log-intensity surface's coefficients (see [`Self::mark_eta`]).
     pub fn mark_coefficients(&self, d: usize) -> &Array1<f64> {
         &self.fit.block_states[d].beta
     }
 
-    /// Node log-intensity offsets `η⁰` for mark `d` on the training nodes.
+    /// Population log-intensity `η⁰` of mark `d` on the training nodes:
+    /// `exp(η⁰)` is the intensity averaged over the latent state, since the
+    /// latent term enters as `−½|a_d|² + a_d · z` (see [`super::marginal`]).
     pub fn mark_eta(&self, d: usize) -> &Array1<f64> {
         &self.fit.block_states[d].eta
     }

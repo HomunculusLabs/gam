@@ -3,6 +3,19 @@
 //! sees: its node log-intensities `η⁰`, the loadings `a`, and the log-rates
 //! `ρ`.
 //!
+//! The log-intensity of mark `d` at a node is
+//!
+//! ```text
+//! η_d(z) = η⁰_d − ½ Σ_k a_{dk}² + Σ_k a_{dk} z_k
+//! ```
+//!
+//! The atoms are stationary and standard at every time, so
+//! `E_z exp(Σ_k a_{dk} z_k) = exp(½ Σ_k a_{dk}²)` and the shift cancels it:
+//! `exp(η⁰_d)` is the population-average intensity whatever the loadings,
+//! and the latent term is the individual deviation from it. Without the
+//! shift, raising the heterogeneity would raise the population rate unless
+//! the baseline moved to compensate.
+//!
 //! The chain is marginalised by forward filtering on the adaptive product
 //! Gauss-Hermite grid of [`super::chain`]; derivatives come from the two
 //! identities that hold for any latent-variable model whose complete-data
@@ -212,6 +225,24 @@ pub fn transition_score_polynomials(kappa: f64) -> (Vec<f64>, Vec<f64>) {
     (t.c, dt.c)
 }
 
+/// `−½ Σ_k a_{dk}²` for one mark's loadings: the shift that makes
+/// `exp(η⁰_d)` the population-average intensity (see the module docs).
+pub(crate) fn marginal_shift<S: JetField>(loadings_d: &[S], like: &S) -> S {
+    loadings_d
+        .iter()
+        .fold(like.constant_like(0.0), |acc, a| acc.sub(&square(a).scale(0.5)))
+}
+
+/// The log-intensity of mark `d` at latent state `z`, given the mark's
+/// `η⁰` and loadings: `η⁰ − ½|a_d|² + a_d · z`.
+pub(crate) fn log_intensity<S: JetField>(eta0: &S, loadings_d: &[S], z: &[S]) -> S {
+    let mut eta = eta0.add(&marginal_shift(loadings_d, eta0));
+    for (a, zk) in loadings_d.iter().zip(z.iter()) {
+        eta = eta.add(&a.mul(zk));
+    }
+    eta
+}
+
 fn pointwise<S: JetField>(a: &[S], b: &[S]) -> Vec<S> {
     a.iter().zip(b.iter()).map(|(x, y)| x.mul(y)).collect()
 }
@@ -276,10 +307,12 @@ fn node_likelihood<S: JetField>(
         } else {
             0.0
         };
+        let loadings_d = &loadings[d * atoms..(d + 1) * atoms];
+        let base = eta0[d].add(&marginal_shift(loadings_d, &eta0[d]));
         for i in 0..size {
-            let mut eta = eta0[d].clone();
-            for k in 0..atoms {
-                eta = eta.add(&loadings[d * atoms + k].mul(grid.coordinate(i, k)));
+            let mut eta = base.clone();
+            for (k, a) in loadings_d.iter().enumerate() {
+                eta = eta.add(&a.mul(grid.coordinate(i, k)));
             }
             let e = exp(&eta);
             let y = counts[d];
@@ -671,10 +704,11 @@ pub(crate) fn subject_marginal<S: JetField>(
         let node_log_lik = |zeta: &[S]| -> S {
             let mut ell = like.constant_like(0.0);
             for d in 0..marks {
-                let mut eta = inputs.eta0[(n + 1) * marks + d].clone();
-                for k in 0..atoms {
-                    eta = eta.add(&inputs.loadings[d * atoms + k].mul(&zeta[k]));
-                }
+                let eta = log_intensity(
+                    &inputs.eta0[(n + 1) * marks + d],
+                    &inputs.loadings[d * atoms..(d + 1) * atoms],
+                    zeta,
+                );
                 let y = counts_rows[n + 1][d];
                 if y != 0.0 {
                     ell = ell.add(&eta.scale(y));
@@ -773,13 +807,21 @@ pub(crate) fn subject_marginal<S: JetField>(
         .collect();
 
     // ---- node functions -------------------------------------------------
-    // Slot layout per node: [s_d (marks)] [s_d z_k (marks × atoms)] [gap slot (atoms)].
+    // The complete-data node term is `y η − w e^η` with
+    // `η = η⁰ − ½|a_d|² + a_d · z`, so with the centred coordinate
+    // `ζ_{dk} = z_k − a_{dk}` (the derivative of `η` in `a_{dk}`):
+    //   ∂L/∂η⁰ = s,  ∂L/∂a_{dk} = s ζ_{dk},
+    //   ∂²L/∂η⁰² = −c,  ∂²L/∂η⁰∂a_{dk} = −c ζ_{dk},
+    //   ∂²L/∂a_{dk}∂a_{dj} = −c ζ_{dk} ζ_{dj} − s δ_{kj}.
+    // Slot layout per node: [s_d (marks)] [s_d ζ_{dk} (marks × atoms)] [gap slot (atoms)].
     let f0 = marks + marks * atoms;
     let f_total = f0 + atoms;
     let mut left: Vec<Vec<Vec<S>>> = Vec::with_capacity(n_nodes);
     let mut right: Vec<Vec<Vec<S>>> = Vec::with_capacity(n_nodes);
     let mut mean_node: Vec<Vec<S>> = Vec::with_capacity(n_nodes);
-    // E[c_{nd}], E[c_{nd} z_k], E[c_{nd} z_k z_j]
+    // E[c_{nd}], E[c_{nd} ζ_{dk}], E[c_{nd} ζ_{dk} ζ_{dj}] + δ_{kj} E[s_{nd}]:
+    // the negatives of the expected complete-data curvatures in
+    // (η⁰, η⁰), (η⁰, a) and (a, a).
     let mut expected_curvature: Vec<Vec<S>> = Vec::with_capacity(n_nodes);
     let mut expected_curvature_z: Vec<Vec<S>> = Vec::with_capacity(n_nodes);
     let mut expected_curvature_zz: Vec<Vec<S>> = Vec::with_capacity(n_nodes);
@@ -788,6 +830,10 @@ pub(crate) fn subject_marginal<S: JetField>(
         let size = grid.size();
         let exposure = nodes.exposures[n];
         let smoothed = &smoothed_all[n];
+        let centred = |d: usize, k: usize| -> Vec<S> {
+            let a = &inputs.loadings[d * atoms + k];
+            (0..size).map(|i| grid.coordinate(i, k).sub(a)).collect()
+        };
         let mut left_n = Vec::with_capacity(f_total);
         let mut right_n = Vec::with_capacity(f_total);
         let mut means = Vec::with_capacity(f_total);
@@ -806,22 +852,27 @@ pub(crate) fn subject_marginal<S: JetField>(
             let curvature: Vec<S> = (0..size)
                 .map(|i| likelihoods[n].expeta[d * size + i].scale(exposure))
                 .collect();
+            let expected_score = weighted_sum3(&grid.weights, smoothed, &score);
             ec.push(weighted_sum3(&grid.weights, smoothed, &curvature));
             for k in 0..atoms {
-                let zk: Vec<S> = (0..size).map(|i| grid.coordinate(i, k).clone()).collect();
+                let zk = centred(d, k);
                 let cz = pointwise(&curvature, &zk);
                 ecz.push(weighted_sum3(&grid.weights, smoothed, &cz));
                 for j in 0..atoms {
-                    let zj: Vec<S> = (0..size).map(|i| grid.coordinate(i, j).clone()).collect();
+                    let zj = centred(d, j);
                     let czz = pointwise(&cz, &zj);
-                    eczz.push(weighted_sum3(&grid.weights, smoothed, &czz));
+                    let mut value = weighted_sum3(&grid.weights, smoothed, &czz);
+                    if j == k {
+                        value = value.add(&expected_score);
+                    }
+                    eczz.push(value);
                 }
             }
             node_functions.push(score);
         }
         for d in 0..marks {
             for k in 0..atoms {
-                let zk: Vec<S> = (0..size).map(|i| grid.coordinate(i, k).clone()).collect();
+                let zk = centred(d, k);
                 node_functions.push(pointwise(&node_functions[d], &zk));
             }
         }

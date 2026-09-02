@@ -227,10 +227,15 @@ Event histories. `gam_models::event_history` fits marked counting
 processes: smooth covariate and time effects per mark, plus a per-subject
 latent state of unit-variance Ornstein–Uhlenbeck atoms whose loadings and
 rates are selected by the evidence (an unsupported atom is switched off by
-its own REML ridge). The latent chain is marginalised exactly by adaptive
-Gauss-Hermite–Lagrange filtering, so recurrent events, competing risks,
-dynamic frailty and history-conditioned forecasts are one family. Forecasts
-and the predictive PIT are exact expectations under the filtered state.
+its own REML ridge). The latent term is the individual's deviation from a
+population rate — `exp(η⁰)` is the intensity averaged over the latent state
+— and an observed risk score enters as a penalised slope surface
+`s(time, by=score, identifiability=none)` whose bend with time and whose very
+existence the evidence selects. The latent chain is marginalised exactly by
+adaptive Gauss-Hermite–Lagrange filtering, so recurrent events, competing
+risks, dynamic frailty and history-conditioned forecasts are one family.
+Forecasts and the predictive PIT are exact expectations under the filtered
+state.
 
 Posterior sampling. `model.sample(...)` draws from the coefficient
 posterior conditional on the fitted smoothing parameters. Predictive

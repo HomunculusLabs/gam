@@ -1,6 +1,9 @@
 //! Event histories: marked counting processes with smooth covariate and time
 //! effects, a per-subject latent state made of unit-variance
-//! Ornstein–Uhlenbeck atoms with evidence-selected loadings and rates, exact
+//! Ornstein–Uhlenbeck atoms with evidence-selected loadings and rates that
+//! enters as the individual deviation from a population log-intensity (the
+//! loadings' Gaussian mixing is cancelled in the intensity, so the smooth
+//! surfaces are population-average rates), exact
 //! marginalisation of the latent chain by adaptive Gauss-Hermite–Lagrange
 //! filtering on grids centred at each node's posterior mean, the exact
 //! gradient of that computed likelihood from forward-mode
