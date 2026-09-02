@@ -773,6 +773,28 @@ pub enum BlockWorkingSet {
         /// no correction since observed = Fisher.
         working_weights: Array1<f64>,
     },
+    /// Exact natural-coordinate score and observed curvature for a separable
+    /// likelihood block.
+    ///
+    /// Unlike [`Self::Diagonal`], this representation does not divide the row
+    /// score by curvature to manufacture an IRLS pseudo-response.  That
+    /// distinction is load-bearing in valid likelihood tails where
+    /// `-d²ℓ/dη² = 0` while `dℓ/dη != 0`: the natural pair remains
+    /// finite and exact, whereas `z = η + score / curvature` does not exist.
+    /// The coefficient-space quantities are
+    ///
+    /// ```text
+    /// gradient = Xᵀ score
+    /// hessian  = Xᵀ diag(observed_curvature) X.
+    /// ```
+    ///
+    /// Curvature is signed because a non-canonical link need not be globally
+    /// log-concave.  Stabilization and saddle handling belong to the solver,
+    /// not to the likelihood carrier.
+    NaturalDiagonal {
+        score: Array1<f64>,
+        observed_curvature: Array1<f64>,
+    },
     /// Exact Newton block update in coefficient space.
     ///
     /// `gradient` is nabla log L wrt block coefficients.
@@ -816,6 +838,36 @@ impl BlockWorkingSet {
         Ok(Self::Diagonal {
             working_response,
             working_weights,
+        })
+    }
+
+    /// Construct an exact natural-coordinate diagonal working set with length
+    /// and finite-value invariants enforced at the type boundary.
+    #[inline]
+    pub fn natural_diagonal_checked(
+        score: Array1<f64>,
+        observed_curvature: Array1<f64>,
+    ) -> Result<Self, String> {
+        if score.len() != observed_curvature.len() {
+            return Err(format!(
+                "BlockWorkingSet::NaturalDiagonal length mismatch: score={}, observed_curvature={}",
+                score.len(),
+                observed_curvature.len(),
+            ));
+        }
+        if let Some((row, value)) = score
+            .iter()
+            .chain(observed_curvature.iter())
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(format!(
+                "BlockWorkingSet::NaturalDiagonal contains a non-finite value at flattened index {row}: {value}"
+            ));
+        }
+        Ok(Self::NaturalDiagonal {
+            score,
+            observed_curvature,
         })
     }
 }

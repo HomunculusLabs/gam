@@ -3646,6 +3646,22 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     );
                     (rhs, hpen)
                 }
+                BlockWorkingSet::NaturalDiagonal { score, .. } => {
+                    let mut rhs = spec.solver_design().transpose_vector_multiply(score);
+                    rhs -= &s_lambda.dot(&beta_old);
+                    if options.ridge_policy.accounts_for_objective() && ridge > 0.0 {
+                        rhs.scaled_add(-ridge, &beta_old);
+                    }
+                    let hpen = block_penalized_hessian_vector(
+                        spec,
+                        work,
+                        s_lambda,
+                        &delta,
+                        ridge,
+                        options.ridge_policy,
+                    );
+                    (rhs, hpen)
+                }
             };
             let rhs_dot_delta = rhs_block.dot(&delta);
             let delta_dot_hpen = delta.dot(&hpen_delta_full);

@@ -136,6 +136,10 @@ pub(crate) fn exact_newton_joint_hessian_from_working_sets<F: CustomFamily + ?Si
             BlockWorkingSet::ExactNewton { hessian, .. } => hessian.to_dense(),
             BlockWorkingSet::Diagonal {
                 working_weights, ..
+            }
+            | BlockWorkingSet::NaturalDiagonal {
+                observed_curvature: working_weights,
+                ..
             } => spec
                 .design
                 .xt_diag_x_signed_op(FiniteSignedWeightsView::try_from_array(working_weights)?)?,
@@ -316,6 +320,10 @@ pub(crate) fn exact_newton_joint_hessian_directional_derivative_from_working_set
                 )?,
             BlockWorkingSet::Diagonal {
                 working_weights, ..
+            }
+            | BlockWorkingSet::NaturalDiagonal {
+                observed_curvature: working_weights,
+                ..
             } => {
                 let solver_design = spec.solver_design();
                 let mut d_eta = solver_design.apply(&d_beta_block);

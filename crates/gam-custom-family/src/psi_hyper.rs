@@ -2563,6 +2563,10 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
         BlockWorkingSet::Diagonal {
             working_response: _,
             working_weights,
+        }
+        | BlockWorkingSet::NaturalDiagonal {
+            observed_curvature: working_weights,
+            ..
         } => with_block_geometry(family, &inner.block_states, spec, b, |x_dyn, _| {
             let w = certify_finite_working_weights(working_weights)?;
             let (xtwx, _) = weighted_normal_equations(x_dyn, w, None)?;
@@ -2613,6 +2617,10 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             BlockWorkingSet::Diagonal {
                 working_response: _,
                 working_weights,
+            }
+            | BlockWorkingSet::NaturalDiagonal {
+                observed_curvature: working_weights,
+                ..
             } => {
                 let x_dyn = diagonal_design.as_ref().ok_or_else(|| {
                     format!("missing dynamic design for block {b} diagonal correction")
@@ -2714,7 +2722,8 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
             BlockWorkingSet::Diagonal {
                 working_response: _,
                 working_weights: _,
-            } => {
+            }
+            | BlockWorkingSet::NaturalDiagonal { .. } => {
                 let x_dyn = diagonal_design.as_ref().ok_or_else(|| {
                     format!("missing dynamic design for block {b} diagonal second correction")
                 })?;

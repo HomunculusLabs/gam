@@ -1727,6 +1727,10 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
             BlockWorkingSet::Diagonal {
                 working_response: _,
                 working_weights,
+            }
+            | BlockWorkingSet::NaturalDiagonal {
+                observed_curvature: working_weights,
+                ..
             } => with_block_geometry(family, states, spec, b, |x_dyn, _| {
                 let w = certify_finite_working_weights(working_weights)?;
                 let (xtwx, _) = weighted_normal_equations(x_dyn, w, None)?;

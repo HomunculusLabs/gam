@@ -311,6 +311,18 @@ pub(crate) fn gamlss_joint_gradient_from_working_sets(
                 }
                 spec.design.transpose_vector_multiply(&weighted)
             }
+            BlockWorkingSet::NaturalDiagonal { score, .. } => {
+                if score.len() != state.eta.len() || spec.solver_design().nrows() != score.len() {
+                    return Err(GamlssError::DimensionMismatch { reason: format!(
+                        "gamlss joint gradient: natural-diagonal length mismatch (score={}, η={}, X_rows={})",
+                        score.len(),
+                        state.eta.len(),
+                        spec.solver_design().nrows(),
+                    ) }
+                    .into());
+                }
+                spec.solver_design().transpose_vector_multiply(score)
+            }
             BlockWorkingSet::ExactNewton {
                 gradient: block_gradient,
                 ..

@@ -749,6 +749,21 @@ pub(crate) fn exact_newton_joint_gradient_from_eval(
                     .slice_mut(ndarray::s![offset..offset + width])
                     .assign(&block_gradient);
             }
+            BlockWorkingSet::NaturalDiagonal { score, .. } => {
+                let n = score.len();
+                if state.eta.len() != n || spec.solver_design().nrows() != n {
+                    return Err(CustomFamilyError::DimensionMismatch { reason: format!(
+                        "exact-newton joint gradient extraction: natural-diagonal length mismatch (score={}, η={}, X_rows={})",
+                        score.len(),
+                        state.eta.len(),
+                        spec.solver_design().nrows(),
+                    ) });
+                }
+                let block_gradient = spec.solver_design().transpose_vector_multiply(score);
+                gradient
+                    .slice_mut(ndarray::s![offset..offset + width])
+                    .assign(&block_gradient);
+            }
         }
         offset += width;
     }
@@ -1442,6 +1457,28 @@ pub(crate) fn materialize_owned_terminal_unpenalized_hessian<
                     Ok(xtwx)
                 })?
             }
+            BlockWorkingSet::NaturalDiagonal {
+                score,
+                observed_curvature,
+            } => {
+                let expected_rows = spec.solver_design().nrows();
+                if score.len() != expected_rows
+                    || observed_curvature.len() != expected_rows
+                    || state.eta.len() != expected_rows
+                {
+                    return Err(CustomFamilyError::trial_point(format!(
+                        "{context}: block {block_idx} natural-diagonal terminal evidence has score/curvature/eta lengths {}/{}/{}, expected {expected_rows}",
+                        score.len(),
+                        observed_curvature.len(),
+                        state.eta.len(),
+                    )));
+                }
+                with_block_geometry(family, states, spec, block_idx, |design, _| {
+                    let curvature = certify_finite_working_weights(observed_curvature)?;
+                    let (xtwx, _) = weighted_normal_equations(design, curvature, None)?;
+                    Ok(xtwx)
+                })?
+            }
             BlockWorkingSet::ExactNewton { hessian, .. } => {
                 if hessian.nrows() != width || hessian.ncols() != width {
                     return Err(CustomFamilyError::trial_point(format!(
@@ -1591,6 +1628,21 @@ fn terminal_score_from_working_sets(
                         .map(|((&weight, &response), &eta)| weight * (response - eta)),
                 );
                 <DesignMatrix as LinearOperator>::apply_transpose(design, &weighted_score)
+            }
+            BlockWorkingSet::NaturalDiagonal {
+                score: natural_score,
+                ..
+            } => {
+                let design = spec.solver_design();
+                if natural_score.len() != design.nrows() || state.eta.len() != design.nrows() {
+                    return Err(CustomFamilyError::trial_point(format!(
+                        "terminal score block {block_idx} has natural-score/eta lengths {}/{}, expected {}",
+                        natural_score.len(),
+                        state.eta.len(),
+                        design.nrows(),
+                    )));
+                }
+                <DesignMatrix as LinearOperator>::apply_transpose(design, natural_score)
             }
         };
         score
@@ -1777,6 +1829,7 @@ pub(crate) fn compute_joint_posterior<F: CustomFamily + Clone + Send + Sync + 's
                 response: working_response.clone(),
             }),
             Some([BlockWorkingSet::ExactNewton { .. }]) => None,
+            Some([BlockWorkingSet::NaturalDiagonal { .. }]) => None,
             Some(working_sets) => {
                 return Err(CustomFamilyError::trial_point(format!(
                     "single-block terminal geometry requires exactly one owned working set, got {}",

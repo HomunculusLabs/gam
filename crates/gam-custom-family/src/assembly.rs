@@ -2106,6 +2106,10 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                 BlockWorkingSet::Diagonal {
                     working_response: _,
                     working_weights,
+                }
+                | BlockWorkingSet::NaturalDiagonal {
+                    observed_curvature: working_weights,
+                    ..
                 } => with_block_geometry(
                     family,
                     &inner.block_states,
@@ -2163,6 +2167,10 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                     BlockWorkingSet::Diagonal {
                         working_response: _,
                         working_weights,
+                    }
+                    | BlockWorkingSet::NaturalDiagonal {
+                        observed_curvature: working_weights,
+                        ..
                     } => {
                         let x_dyn = diagonal_design.as_ref().ok_or_else(|| {
                                     format!(
@@ -2264,7 +2272,8 @@ pub(crate) fn outerobjectiveefs<F: CustomFamily + Clone + Send + Sync + 'static>
                         // `diagonalworking_weights_second_directional_derivative`
                         // (`d2w` below), so the base working weights are unused here.
                         working_weights: _,
-                    } => {
+                    }
+                    | BlockWorkingSet::NaturalDiagonal { .. } => {
                         let x_dyn = diagonal_design.as_ref().ok_or_else(|| {
                             format!(
                                 "missing dynamic design for block {block_idx} diagonal fixed-point second correction"

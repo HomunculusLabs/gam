@@ -1303,6 +1303,52 @@ pub(crate) struct DiagonalBlockUpdater<'a> {
     pub(crate) working_weights: &'a Array1<f64>,
 }
 
+pub(crate) struct NaturalDiagonalBlockUpdater<'a> {
+    pub(crate) score: &'a Array1<f64>,
+    pub(crate) observed_curvature: &'a Array1<f64>,
+}
+
+impl ParameterBlockUpdater for NaturalDiagonalBlockUpdater<'_> {
+    fn compute_update_step(
+        &self,
+        ctx: &BlockUpdateContext<'_>,
+    ) -> Result<BlockUpdateResult, CustomFamilyError> {
+        let n = ctx.spec.solver_design().nrows();
+        if self.score.len() != n || self.observed_curvature.len() != n {
+            return Err(CustomFamilyError::DimensionMismatch {
+                reason: format!(
+                    "family natural-diagonal working-set size mismatch on block {} ({}): score={}, curvature={}, rows={n}",
+                    ctx.block_idx,
+                    ctx.spec.name,
+                    self.score.len(),
+                    self.observed_curvature.len(),
+                ),
+            });
+        }
+        if let Some((row, value)) = self
+            .score
+            .iter()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(CustomFamilyError::trial_point(format!(
+                "invalid natural-coordinate score at row {row}: {value}"
+            )));
+        }
+        let curvature = certify_finite_working_weights(self.observed_curvature)?;
+        with_block_geometry(ctx.family, ctx.states, ctx.spec, ctx.block_idx, |design, _| {
+            let gradient = design.transpose_vector_multiply(self.score);
+            let hessian = design
+                .xt_diag_x_signed_op(FiniteSignedWeightsView::try_from_array(curvature)?)?;
+            ExactNewtonBlockUpdater {
+                gradient: &gradient,
+                hessian: &SymmetricMatrix::Dense(hessian),
+            }
+            .compute_update_step(ctx)
+        })
+    }
+}
+
 impl ParameterBlockUpdater for DiagonalBlockUpdater<'_> {
     fn compute_update_step(
         &self,
@@ -1638,6 +1684,13 @@ impl BlockWorkingSetUpdaterExt for BlockWorkingSet {
                 working_response,
                 working_weights,
             }),
+            BlockWorkingSet::NaturalDiagonal {
+                score,
+                observed_curvature,
+            } => Box::new(NaturalDiagonalBlockUpdater {
+                score,
+                observed_curvature,
+            }),
             BlockWorkingSet::ExactNewton { gradient, hessian } => {
                 Box::new(ExactNewtonBlockUpdater { gradient, hessian })
             }
@@ -1760,6 +1813,10 @@ pub(crate) fn block_penalized_hessian_vector(
         BlockWorkingSet::ExactNewton { hessian, .. } => hessian.dot(direction),
         BlockWorkingSet::Diagonal {
             working_weights, ..
+        }
+        | BlockWorkingSet::NaturalDiagonal {
+            observed_curvature: working_weights,
+            ..
         } => {
             let solver_design = spec.solver_design();
             let x_direction = solver_design.matrixvectormultiply(direction);
@@ -1805,6 +1862,10 @@ pub(crate) fn block_penalized_metric_diagonal(
         BlockWorkingSet::ExactNewton { hessian, .. } => symmetric_matrix_diagonal(hessian),
         BlockWorkingSet::Diagonal {
             working_weights, ..
+        }
+        | BlockWorkingSet::NaturalDiagonal {
+            observed_curvature: working_weights,
+            ..
         } => spec.design.diag_gram(working_weights)?,
     };
     if diagonal.len() != s_lambda.nrows() || s_lambda.nrows() != s_lambda.ncols() {
