@@ -175,6 +175,7 @@ enum Node {
     Select(usize, usize, usize),
 }
 
+#[derive(Clone)]
 struct Graph {
     nodes: Vec<Node>,
     interned: HashMap<Node, usize>,
@@ -188,6 +189,24 @@ type RingPolynomial = BTreeMap<Vec<usize>, f64>;
 enum ScaleDistribution {
     Value,
     Derivative,
+}
+
+/// Advance `values` to the next permutation in lexicographic order; `false`
+/// once the last one has been reached.
+fn next_permutation(values: &mut [usize]) -> bool {
+    let Some(pivot) = (0..values.len().saturating_sub(1))
+        .rev()
+        .find(|&i| values[i] < values[i + 1])
+    else {
+        return false;
+    };
+    let successor = (pivot + 1..values.len())
+        .rev()
+        .find(|&j| values[j] > values[pivot])
+        .expect("a larger element follows the pivot");
+    values.swap(pivot, successor);
+    values[pivot + 1..].reverse();
+    true
 }
 
 impl Graph {
@@ -291,6 +310,13 @@ impl Graph {
         }
         if let (Some(left), Some(right)) = (self.constant_value(left), self.constant_value(right)) {
             return self.constant(left * right);
+        }
+        // A coefficient of -1 is a sign, not a multiply.
+        if self.constant_value(left) == Some(-1.0) {
+            return self.neg(right);
+        }
+        if self.constant_value(right) == Some(-1.0) {
+            return self.neg(left);
         }
         if let Node::Neg(inner) = self.nodes[left] {
             let product = self.mul(inner, right);
@@ -734,6 +760,16 @@ impl Graph {
         polynomial
     }
 
+    /// Horner's rule over the parameters in order, with every power of a
+    /// parameter taken from the graph's interned power table rather than as a
+    /// chain of multiplications.
+    ///
+    /// A lowering emits several channels (value, gradient, Hessian) of one
+    /// polynomial map, and a chain `r * (r * X)` is specific to the channel
+    /// whose `X` it wraps, so no channel shares its powers with another; the
+    /// interned `r * r` is one node every channel reads. On the Gaussian
+    /// joint row that was the whole margin by which the hand kernel, which
+    /// names `r²` once, beat the lowering (#932).
     fn polynomial_horner(&mut self, polynomial: &Polynomial, variables: &[usize]) -> usize {
         if polynomial.is_empty() {
             return self.constant(0.0);
@@ -758,24 +794,112 @@ impl Graph {
         let mut result = self.polynomial_horner(leading, &variables[1..]);
         let mut previous = highest;
         for (&exponent, coefficient) in descending {
-            for _ in exponent..previous {
-                result = self.mul(result, parameter);
+            if previous > exponent {
+                let power = self.positive_integer_power(parameter, previous - exponent);
+                result = self.mul(result, power);
             }
             let coefficient = self.polynomial_horner(coefficient, &variables[1..]);
             result = self.add(result, coefficient);
             previous = exponent;
         }
-        for _ in 0..previous {
-            result = self.mul(result, parameter);
+        if previous > 0 {
+            let power = self.positive_integer_power(parameter, previous);
+            result = self.mul(result, power);
         }
         result
     }
 
-    fn normalize_polynomial(&mut self, id: usize, parameter_count: usize) -> usize {
-        let Some(polynomial) = self.polynomial(id, parameter_count, &mut HashMap::new()) else {
-            return id;
-        };
-        self.polynomial_horner(&polynomial, &(0..parameter_count).collect::<Vec<_>>())
+    /// Every at-zero channel of one lowering as a Horner schedule, all over
+    /// ONE parameter order, chosen to minimise the multiply count of the
+    /// whole lowering.
+    ///
+    /// Horner's rule is per channel, and which products two channels share
+    /// depends on the variable order: with the observation weight outermost
+    /// every channel ends in its own `w * (...)`, while an order that nests
+    /// the weight inside lets `w * r`, `w * q` and `w * k` be one node each
+    /// (the hand kernel of the Gaussian joint row names exactly those). The
+    /// order is not a heuristic: every order of the parameters is emitted on
+    /// a scratch copy of the graph and the one with the fewest distinct
+    /// multiplies (then the fewest additions, then the declaration order)
+    /// is kept. At most 720 orders for six parameters; a lowering with more
+    /// parameters keeps the declaration order.
+    fn normalize_polynomials(&mut self, ids: &[usize], parameter_count: usize) -> Vec<usize> {
+        let mut memo = HashMap::new();
+        let polynomials = ids
+            .iter()
+            .map(|&id| self.polynomial(id, parameter_count, &mut memo))
+            .collect::<Vec<_>>();
+        let order = self.horner_order(&polynomials, parameter_count);
+        ids.iter()
+            .zip(&polynomials)
+            .map(|(&id, polynomial)| match polynomial {
+                Some(polynomial) => self.polynomial_horner(polynomial, &order),
+                None => id,
+            })
+            .collect()
+    }
+
+    fn horner_order(&self, polynomials: &[Option<Polynomial>], parameter_count: usize) -> Vec<usize> {
+        let declaration = (0..parameter_count).collect::<Vec<_>>();
+        if parameter_count > 6 || polynomials.iter().all(Option::is_none) {
+            return declaration;
+        }
+        let mut order = declaration.clone();
+        let mut best: Option<((usize, usize), Vec<usize>)> = None;
+        loop {
+            let mut scratch = self.clone();
+            let roots = polynomials
+                .iter()
+                .flatten()
+                .map(|polynomial| scratch.polynomial_horner(polynomial, &order))
+                .collect::<Vec<_>>();
+            let cost = scratch.operation_count(&roots);
+            if best.as_ref().is_none_or(|(best_cost, _)| cost < *best_cost) {
+                best = Some((cost, order.clone()));
+            }
+            if !next_permutation(&mut order) {
+                break;
+            }
+        }
+        best.expect("at least the declaration order was tried").1
+    }
+
+    /// Distinct multiplies (and divisions) and distinct additions (and
+    /// subtractions) reachable from `roots`; a node shared by several roots
+    /// is counted once, which is what interning buys.
+    fn operation_count(&self, roots: &[usize]) -> (usize, usize) {
+        let mut seen = HashSet::new();
+        let mut stack = roots.to_vec();
+        let (mut multiplies, mut additions) = (0, 0);
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            match self.nodes[id] {
+                Node::Mul(left, right) | Node::Div(left, right) => {
+                    multiplies += 1;
+                    stack.push(left);
+                    stack.push(right);
+                }
+                Node::Add(left, right) | Node::Sub(left, right) => {
+                    additions += 1;
+                    stack.push(left);
+                    stack.push(right);
+                }
+                Node::Neg(value)
+                | Node::Exp(value)
+                | Node::Ln(value)
+                | Node::Sqrt(value)
+                | Node::Recip(value) => stack.push(value),
+                Node::Select(activity, when_true, when_false) => {
+                    stack.push(activity);
+                    stack.push(when_true);
+                    stack.push(when_false);
+                }
+                Node::Constant(_) | Node::Variable(_) | Node::Parameter(_) => {}
+            }
+        }
+        (multiplies, additions)
     }
 
     fn ring_polynomial(
@@ -1609,25 +1733,24 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         let order2_name = format_ident!("{name}_{suffix}");
         let (value, gradient, hessian) = if at_zero {
             let mut memo = HashMap::new();
-            let value = graph.substitute_zero_primaries(value, &mut memo);
-            let value = graph.normalize_polynomial(value, constants.len());
-            let gradient = gradient
-                .iter()
-                .map(|&id| {
-                    let id = graph.substitute_zero_primaries(id, &mut memo);
-                    graph.normalize_polynomial(id, constants.len())
-                })
-                .collect::<Vec<_>>();
-            let hessian = hessian
-                .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|&id| {
-                            let id = graph.substitute_zero_primaries(id, &mut memo);
-                            graph.normalize_polynomial(id, constants.len())
-                        })
-                        .collect::<Vec<_>>()
-                })
+            let mut channels = vec![graph.substitute_zero_primaries(value, &mut memo)];
+            channels.extend(
+                gradient
+                    .iter()
+                    .map(|&id| graph.substitute_zero_primaries(id, &mut memo)),
+            );
+            channels.extend(
+                hessian
+                    .iter()
+                    .flatten()
+                    .map(|&id| graph.substitute_zero_primaries(id, &mut memo)),
+            );
+            let normalized = graph.normalize_polynomials(&channels, constants.len());
+            let value = normalized[0];
+            let gradient = normalized[1..1 + dimension].to_vec();
+            let hessian = normalized[1 + dimension..]
+                .chunks(dimension)
+                .map(<[usize]>::to_vec)
                 .collect::<Vec<_>>();
             (value, gradient, hessian)
         } else {
@@ -1717,10 +1840,17 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                 if at_zero {
                     for derivative in &mut derivatives {
                         *derivative = graph.substitute_zero_primaries(*derivative, &mut memo);
-                        *derivative = graph.normalize_polynomial(*derivative, constants.len());
                     }
                 }
                 channels[row][column] = derivatives;
+            }
+        }
+        if at_zero {
+            let flat = channels.iter().flatten().flatten().copied().collect::<Vec<_>>();
+            let normalized = graph.normalize_polynomials(&flat, constants.len());
+            let mut next = normalized.into_iter();
+            for derivative in channels.iter_mut().flatten().flatten() {
+                *derivative = next.next().expect("one normalized channel per derivative");
             }
         }
         let mut roots = Vec::new();
@@ -1812,10 +1942,23 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                 if at_zero {
                     for derivative in fourth.iter_mut().flatten() {
                         *derivative = graph.substitute_zero_primaries(*derivative, &mut memo);
-                        *derivative = graph.normalize_polynomial(*derivative, constants.len());
                     }
                 }
                 channels[row][column] = fourth;
+            }
+        }
+        if at_zero {
+            let flat = channels
+                .iter()
+                .flatten()
+                .flatten()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            let normalized = graph.normalize_polynomials(&flat, constants.len());
+            let mut next = normalized.into_iter();
+            for derivative in channels.iter_mut().flatten().flatten().flatten() {
+                *derivative = next.next().expect("one normalized channel per derivative");
             }
         }
         let mut roots = Vec::new();
@@ -1966,6 +2109,41 @@ mod row_atom_tests {
         assert_eq!(expanded.matches(".exp()").count(), 4, "{expanded}");
         // An inactive contribution is `0.0`, never `-0.0`.
         assert!(!expanded.contains("-0.0"), "{expanded}");
+    }
+
+    /// The at-zero lowering of the Gaussian joint row (#932): one Horner
+    /// order for every channel, chosen for the fewest multiplies, so the
+    /// residual's square is one shared node and the weight's products are
+    /// shared the way the hand kernel names them. The strongest hand
+    /// schedule of this row uses 17 multiplies; the lowering may not use
+    /// more.
+    #[test]
+    fn at_zero_lowering_shares_powers_and_does_not_exceed_the_hand_multiply_count() {
+        let input = syn::parse_str::<RowAtomInput>(
+            "fn generated_gaussian [order2_at_zero](
+                delta_mu, delta_eta;
+                obs_weight: f64, standardized_residual: f64, inv_sigma: f64, kappa: f64
+            ) {
+                obs_weight * ln((1.0 - kappa) + kappa * exp(delta_eta))
+                    + 0.5 * obs_weight * (standardized_residual - delta_mu * inv_sigma)
+                        * (standardized_residual - delta_mu * inv_sigma)
+                        / ((1.0 - kappa) + kappa * exp(delta_eta))
+                        / ((1.0 - kappa) + kappa * exp(delta_eta))
+            }",
+        )
+        .expect("gaussian joint row atom");
+        let expanded = super::expand(input).expect("expand row atom").to_string();
+        let start = expanded
+            .find("fn generated_gaussian_order2_at_zero")
+            .expect("the order-2 at-zero lowering");
+        let body = &expanded[start..];
+        let squares = body
+            .matches("standardized_residual * standardized_residual")
+            .count();
+        assert_eq!(squares, 1, "{body}");
+        let multiplies = body.matches(" * ").count();
+        assert!(multiplies <= 17, "{multiplies} multiplies:\n{body}");
+        assert!(!body.contains("* - 1.0"), "a coefficient of -1 is a sign:\n{body}");
     }
 
     #[test]
