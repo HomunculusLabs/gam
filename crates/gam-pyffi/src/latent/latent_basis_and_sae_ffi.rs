@@ -885,6 +885,7 @@ fn latent_multi_output_fit_to_pydict<'py>(
             gam::families::binomial_multi::BinomialMultiFitInputs {
                 design,
                 y,
+                link: gam::InverseLink::Standard(gam::StandardLink::Logit),
                 offset: None,
                 penalty,
                 lambdas: lambdas_vec.view(),

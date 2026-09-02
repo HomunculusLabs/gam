@@ -1,11 +1,11 @@
-//! Penalized multi-output binomial-logit fitter at fixed λ.
+//! Penalized multi-output Bernoulli/binomial fitter at fixed λ.
 //!
 //! This is the row-diagonal sibling of [`crate::multinomial`]: the
 //! same shared design `X ∈ ℝ^{N×P}` and shared penalty `S ∈ ℝ^{P×P}` are
-//! reused across `K` independent binomial-logit response columns. Per-column
+//! reused across `K` independent bounded-link response columns. Per-column
 //! smoothing parameters `λ_a` (length `K`) scale `S` independently for each
 //! response. Because the Fisher information has no cross-column coupling
-//! (`H_{n,a,b} = δ_{ab} · w_n · μ_{n,a} (1 − μ_{n,a})`), the joint penalized
+//! (`H_{n,a,b} = δ_{ab} · w_n · I_{n,a}`), the joint penalized
 //! Hessian is block-diagonal in the `K` `P × P` per-response systems; the
 //! shared [`crate::penalized_vector_glm`] engine factors that
 //! block-diagonal Hessian in a single coupled damped-Newton loop, which is
@@ -20,15 +20,18 @@
 //!           + ½ Σ_a λ_a · β_aᵀ S β_a
 //! ```
 //!
-//! with `μ_{n,a} = σ(η_{n,a})`, `η_{n,a} = (X β_a)_n`. The per-column Newton
+//! with `μ_{n,a} = g⁻¹(η_{n,a})`, `η_{n,a} = (X β_a)_n`. The per-column Fisher
 //! step solves
 //!
 //! ```text
-//!   (Xᵀ diag(1_C w_{n,a} μ_{n,a}(1 − μ_{n,a})) X + λ_a S) δ_a
-//!     = − [Xᵀ diag(1_C w_{n,a})(μ_{·,a} − y_{·,a}) + λ_a S β_a]
+//!   (Xᵀ diag(1_C w_{n,a} I_{n,a}) X + λ_a S) δ_a
+//!     = Xᵀ score_η − λ_a S β_a
 //! ```
 //!
-//! followed by a backtracking line search on `F` (full step first, halve up
+//! where `I = (dμ/dη)² / (μ(1−μ))`. Logit, probit, complementary-log-log,
+//! log-log, cauchit, and the parameterized bounded inverse links all use the
+//! same cancellation-free natural-coordinate Bernoulli kernel as scalar GAMs.
+//! The update is followed by a backtracking line search on `F` (full step first, halve up
 //! to 8 times) so monotone descent is enforced even when the quadratic
 //! model overshoots near saturation. This is precisely the shared
 //! [`crate::penalized_vector_glm`] scaffold; this module supplies
@@ -57,7 +60,9 @@ use crate::penalized_vector_glm::{
     PenalizedVectorGlmInputs, VectorGlmSolve, fit_penalized_vector_glm,
 };
 use crate::vector_response::{VectorLikelihood, validate_vector_likelihood_inputs};
+use gam_model_kernels::bernoulli_link::bernoulli_natural_jet;
 use gam_problem::{FixedLambdaSolverStage, SeparableCellMeasure};
+use gam_spec::InverseLink;
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3};
 
 /// Inputs for [`fit_penalized_binomial_multi`].
@@ -67,11 +72,15 @@ pub struct BinomialMultiFitInputs<'a> {
     /// all response columns).
     pub design: ArrayView2<'a, f64>,
     /// Multi-column binomial response `Y ∈ ℝ^{N×K}`. Each column is treated
-    /// as an independent binomial-logit response, so every entry must be a
+    /// as an independent binomial response, so every entry must be a
     /// binomial proportion in `[0, 1]` (hard `{0, 1}` Bernoulli labels and soft
     /// proportions / probabilities alike). Entries outside `[0, 1]` are
     /// rejected because the per-entry log-likelihood is then unbounded in `η`.
     pub y: ArrayView2<'a, f64>,
+    /// Bounded inverse link shared by all response columns. The likelihood is
+    /// separable over output cells, but its link is part of the family rather
+    /// than an implicit solver default.
+    pub link: InverseLink,
     /// Optional known additive predictor offset, shape `(N, K)`. The fitted
     /// predictor is `η = Xβ + offset`; `None` means an exact zero offset.
     pub offset: Option<ArrayView2<'a, f64>>,
@@ -84,8 +93,8 @@ pub struct BinomialMultiFitInputs<'a> {
     /// present cell may legitimately carry numerical weight zero.
     pub measure: SeparableCellMeasure<'a>,
     /// Optional per-row Fisher-block override, shape `(N, K, K)`. The `K`
-    /// binomial-logit columns are fit independently, so only the per-column
-    /// diagonal `[n, a, a]` is consumed as the curvature `w_n μ_a(1 − μ_a)`;
+    /// binomial columns are fit independently, so only the per-column diagonal
+    /// `[n, a, a]` is consumed as the curvature `w_n I_{n,a}`;
     /// off-diagonals must be zero (enforced at the FFI boundary) since a
     /// non-zero cross term cannot be represented by the separable per-column
     /// solve. The gradient/residual path stays analytic — this is a
@@ -103,7 +112,7 @@ pub struct BinomialMultiFitInputs<'a> {
 pub struct BinomialMultiFitOutputs {
     /// Coefficient matrix, shape `(P, K)` (column `a` is `β_a`).
     pub coefficients: Array2<f64>,
-    /// Fitted probabilities `μ_{n,a} = σ((X β_a)_n + offset_{n,a})`,
+    /// Fitted probabilities `μ_{n,a} = g⁻¹((X β_a)_n + offset_{n,a})`,
     /// shape `(N, K)`. Values are returned for every requested prediction cell;
     /// structural activity controls fitting, not whether a predictor is defined.
     pub fitted_probabilities: Array2<f64>,
@@ -120,30 +129,28 @@ pub struct BinomialMultiFitOutputs {
     pub deviance: f64,
 }
 
-/// Numerically stable logistic CDF used by the Newton driver. Mirrors the
-/// inline helper that previously lived in `crates/gam-pyffi/src/lib.rs`.
 #[inline]
-fn sigmoid_stable(eta: f64) -> f64 {
-    if eta >= 0.0 {
-        let e = (-eta).exp();
-        1.0 / (1.0 + e)
+fn response_mixture(y: f64, when_one: f64, when_zero: f64) -> f64 {
+    if y == 0.0 {
+        when_zero
+    } else if y == 1.0 {
+        when_one
     } else {
-        let e = eta.exp();
-        e / (1.0 + e)
+        y.mul_add(when_one, (1.0 - y) * when_zero)
     }
 }
 
-/// Row-diagonal multi-output binomial-logit likelihood adapter for the shared
+/// Row-diagonal multi-output binomial likelihood adapter for the shared
 /// [`crate::penalized_vector_glm`] engine.
 ///
-/// The `K` response columns are mutually independent binomial-logit marginals
+/// The `K` response columns are mutually independent binomial marginals
 /// sharing the design `X`, so the per-row Fisher block is **diagonal across
-/// outputs**: `H_{n,a,b} = δ_{ab} · w_n · μ_{n,a} (1 − μ_{n,a})`. The engine
-/// works in `η = X β` space with `μ_{n,a} = σ(η_{n,a})`; this adapter supplies
-/// the log-likelihood, the residual gradient `w_n (y_a − μ_a)`, and that
-/// row-diagonal block.
+/// outputs**: `H_{n,a,b} = δ_{ab} · w_n · I_{n,a}`. The engine works in
+/// `η = X β` space with `μ = g⁻¹(η)`; this adapter supplies the log-likelihood,
+/// natural-coordinate score, and row-diagonal Fisher block.
 struct BinomialMultiLikelihood<'a> {
     measure: SeparableCellMeasure<'a>,
+    link: &'a InverseLink,
 }
 
 impl BinomialMultiLikelihood<'_> {
@@ -155,16 +162,9 @@ impl BinomialMultiLikelihood<'_> {
 
 impl VectorLikelihood for BinomialMultiLikelihood<'_> {
     /// `Σ_(n,a)∈C w_{n,a} [ y_{n,a} log μ_{n,a} + (1 − y_{n,a}) log(1 − μ_{n,a}) ]`,
-    /// evaluated in log-space via `log μ = −softplus(−η)`,
-    /// `log(1 − μ) = −softplus(η)` — exact and finite for every η, with no
-    /// probability clamp. The former `μ.clamp(1e-12, 1−1e-12)` made this value
-    /// FLAT beyond |η| ≈ 27.6 while [`Self::grad_eta`]/[`Self::hess_diag`]
-    /// kept reporting the unclamped derivatives, so the line search scored a
-    /// surface the Newton direction was not the derivative of: on a
-    /// misclassified saturated row the gradient pushed full-strength while
-    /// the objective registered no improvement. The softplus form keeps the
-    /// true slope (≈ |η| per unit) at any saturation, so value, gradient, and
-    /// curvature are exact surfaces of ONE function.
+    /// evaluated through cancellation-free log-probability towers. No fitted
+    /// probability is clamped, so value, score, and Fisher curvature remain
+    /// derivatives of one likelihood even in representable link tails.
     fn log_lik(
         &self,
         eta: ArrayView2<'_, f64>,
@@ -178,17 +178,18 @@ impl VectorLikelihood for BinomialMultiLikelihood<'_> {
                 let Some(w) = self.active_weight(row, a) else {
                     continue;
                 };
-                let e = eta[[row, a]];
+                if w == 0.0 {
+                    continue;
+                }
+                let jet = bernoulli_natural_jet(row, eta[[row, a]], self.link)?;
                 let yv = y[[row, a]];
-                acc -= w
-                    * (yv * gam_linalg::utils::stable_softplus(-e)
-                        + (1.0 - yv) * gam_linalg::utils::stable_softplus(e));
+                acc += w * response_mixture(yv, jet.log_mu[0], jet.log_one_minus_mu[0]);
             }
         }
         Ok(acc)
     }
 
-    /// `∂ log L / ∂η_{n,a} = 1_C(n,a) w_{n,a} (y_{n,a} − μ_{n,a})`.
+    /// `∂ log L / ∂η`, evaluated from the link's log-probability derivatives.
     fn grad_eta(
         &self,
         eta: ArrayView2<'_, f64>,
@@ -202,17 +203,22 @@ impl VectorLikelihood for BinomialMultiLikelihood<'_> {
                 let Some(w) = self.active_weight(row, a) else {
                     continue;
                 };
-                let mu = sigmoid_stable(eta[[row, a]]);
-                out[[row, a]] = w * (y[[row, a]] - mu);
+                if w == 0.0 {
+                    continue;
+                }
+                let jet = bernoulli_natural_jet(row, eta[[row, a]], self.link)?;
+                out[[row, a]] = w
+                    * response_mixture(
+                        y[[row, a]],
+                        jet.log_mu[1],
+                        jet.log_one_minus_mu[1],
+                    );
             }
         }
         Ok(out)
     }
 
-    /// Per-output diagonal curvature `1_C(n,a) w_{n,a} μ_{n,a} (1 − μ_{n,a})`. The Fisher
-    /// information of independent Bernoulli outputs is `y`-independent; `y` is
-    /// read only to assert the target shape matches `eta`, as in the sibling
-    /// [`VectorLikelihood`] implementations.
+    /// Per-output Fisher curvature `1_C(n,a) w_{n,a} (dμ/dη)²/[μ(1−μ)]`.
     fn hess_diag(
         &self,
         eta: ArrayView2<'_, f64>,
@@ -226,14 +232,17 @@ impl VectorLikelihood for BinomialMultiLikelihood<'_> {
                 let Some(w) = self.active_weight(row, a) else {
                     continue;
                 };
-                let mu = sigmoid_stable(eta[[row, a]]);
-                out[[row, a]] = w * mu * (1.0 - mu);
+                if w == 0.0 {
+                    continue;
+                }
+                let jet = bernoulli_natural_jet(row, eta[[row, a]], self.link)?;
+                out[[row, a]] = (w.ln() + jet.log_fisher).exp();
             }
         }
         Ok(out)
     }
 
-    /// Row-diagonal Fisher block `H_{n,a,b} = δ_{ab} · w_n μ_{n,a}(1 − μ_{n,a})`.
+    /// Row-diagonal Fisher block `H_{n,a,b} = δ_{ab} · w_n I_{n,a}`.
     /// The independent columns have no cross-output coupling, so the off-diagonal
     /// entries are identically zero; lifting [`Self::hess_diag`] onto the per-row
     /// diagonal (the [`VectorLikelihood`] default) is exact here.
@@ -254,7 +263,7 @@ impl VectorLikelihood for BinomialMultiLikelihood<'_> {
     }
 }
 
-/// Fit `K` independent penalized binomial-logit GLMs sharing the design `X`
+/// Fit `K` independent penalized binomial GLMs sharing the design `X`
 /// and penalty `S`. See the module docs for the optimization problem.
 pub fn fit_penalized_binomial_multi(
     inputs: BinomialMultiFitInputs<'_>,
@@ -262,6 +271,7 @@ pub fn fit_penalized_binomial_multi(
     let BinomialMultiFitInputs {
         design,
         y,
+        link,
         offset,
         penalty,
         lambdas,
@@ -349,7 +359,14 @@ pub fn fit_penalized_binomial_multi(
     }
 
     // ─────────────────── shared penalized vector-GLM solve ─────────────────
-    let likelihood = BinomialMultiLikelihood { measure };
+    // Validate the family before entering the optimizer. The kernel repeats
+    // the same refusal at evaluation boundaries, so no caller can bypass the
+    // bounded-link contract with a direct likelihood invocation.
+    let _ = bernoulli_natural_jet(0, 0.0, &link)?;
+    let likelihood = BinomialMultiLikelihood {
+        measure,
+        link: &link,
+    };
     let solve = fit_penalized_vector_glm(
         PenalizedVectorGlmInputs {
             design,
@@ -383,8 +400,10 @@ pub fn fit_penalized_binomial_multi(
         }
     };
 
-    // η → μ = σ(η) is the binomial inverse link applied column-wise.
-    let fitted = fit.eta.mapv(sigmoid_stable);
+    let mut fitted = Array2::<f64>::zeros(fit.eta.dim());
+    for ((row, output), value) in fitted.indexed_iter_mut() {
+        *value = bernoulli_natural_jet(row, fit.eta[[row, output]], &link)?.mu;
+    }
 
     Ok(BinomialMultiFitOutputs {
         coefficients: fit.coefficients,
@@ -399,7 +418,18 @@ pub fn fit_penalized_binomial_multi(
 mod tests {
     use super::*;
     use gam_problem::{IndexedCellSet, LikelihoodWeights, StructuralCells};
+    use gam_spec::StandardLink;
     use ndarray::Array3;
+
+    fn logit_link() -> InverseLink {
+        InverseLink::Standard(StandardLink::Logit)
+    }
+
+    fn logit_mu(eta: f64) -> f64 {
+        bernoulli_natural_jet(0, eta, &logit_link())
+            .expect("finite logit mean")
+            .mu
+    }
 
     fn toy_inputs() -> (Array2<f64>, Array2<f64>, Array2<f64>, Array1<f64>) {
         let n = 12;
@@ -426,6 +456,7 @@ mod tests {
         let base = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            link: logit_link(),
             offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
@@ -439,6 +470,7 @@ mod tests {
         let again = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            link: logit_link(),
             offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
@@ -467,6 +499,7 @@ mod tests {
         let fit = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            link: logit_link(),
             offset: Some(offset.view()),
             penalty: penalty.view(),
             lambdas: lambdas.view(),
@@ -479,8 +512,69 @@ mod tests {
 
         assert_eq!(fit.coefficients, Array2::<f64>::zeros((1, 2)));
         for ((row, output), &value) in fit.fitted_probabilities.indexed_iter() {
-            assert_eq!(value, sigmoid_stable(offset[[row, output]]));
+            assert_eq!(value, logit_mu(offset[[row, output]]));
         }
+    }
+
+    #[test]
+    fn cloglog_offsets_return_exact_piecewise_hazard_probabilities() {
+        let design = Array2::<f64>::zeros((4, 1));
+        let y = ndarray::array![[0.0], [1.0], [0.0], [1.0]];
+        let offset = ndarray::array![[-3.0], [-1.0], [0.0], [1.0]];
+        let penalty = Array2::<f64>::eye(1);
+        let lambdas = ndarray::array![1.0];
+        let fit = fit_penalized_binomial_multi(BinomialMultiFitInputs {
+            design: design.view(),
+            y: y.view(),
+            link: InverseLink::Standard(StandardLink::CLogLog),
+            offset: Some(offset.view()),
+            penalty: penalty.view(),
+            lambdas: lambdas.view(),
+            measure: SeparableCellMeasure::uniform(),
+            fisher_w_override: None,
+            max_iter: 10,
+            tol: 1.0e-12,
+        })
+        .expect("cloglog known-offset fit");
+
+        assert_eq!(fit.coefficients, Array2::<f64>::zeros((1, 1)));
+        for row in 0..offset.nrows() {
+            let expected = -(-offset[[row, 0]].exp()).exp_m1();
+            assert!(
+                (fit.fitted_probabilities[[row, 0]] - expected).abs() <= 4.0 * f64::EPSILON,
+                "row {row}: cloglog mean must equal 1-exp(-exp(eta))"
+            );
+        }
+    }
+
+    #[test]
+    fn active_zero_weight_cell_never_evaluates_an_impossible_tail() {
+        let weights = ndarray::array![[0.0]];
+        let measure = SeparableCellMeasure::new(
+            StructuralCells::All,
+            LikelihoodWeights::ByCell(weights.view()),
+        );
+        let link = InverseLink::Standard(StandardLink::CLogLog);
+        let likelihood = BinomialMultiLikelihood {
+            measure,
+            link: &link,
+        };
+        let eta = ndarray::array![[1_000.0]];
+        let y = ndarray::array![[0.0]];
+        assert_eq!(
+            likelihood.log_lik(eta.view(), y.view()).expect("zero-weight value"),
+            0.0
+        );
+        assert_eq!(
+            likelihood.grad_eta(eta.view(), y.view()).expect("zero-weight score")[[0, 0]],
+            0.0
+        );
+        assert_eq!(
+            likelihood
+                .hess_diag(eta.view(), y.view())
+                .expect("zero-weight Fisher")[[0, 0]],
+            0.0
+        );
     }
 
     #[test]
@@ -490,6 +584,7 @@ mod tests {
         let error = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            link: logit_link(),
             offset: Some(wrong_columns.view()),
             penalty: penalty.view(),
             lambdas: lambdas.view(),
@@ -512,7 +607,11 @@ mod tests {
             LikelihoodWeights::ByCell(cell_weights.view()),
         );
         measure.validate(2, 2).expect("valid indexed measure");
-        let likelihood = BinomialMultiLikelihood { measure };
+        let link = logit_link();
+        let likelihood = BinomialMultiLikelihood {
+            measure,
+            link: &link,
+        };
         let eta = ndarray::array![[0.2, -0.8], [0.5, 1.1]];
         let y = ndarray::array![[1.0, 1.0], [0.0, 1.0]];
 
@@ -526,7 +625,7 @@ mod tests {
         assert_eq!(curvature[[0, 1]], 0.0);
 
         for &(row, output) in &[(0usize, 0usize), (1, 0), (1, 1)] {
-            let mu = sigmoid_stable(eta[[row, output]]);
+            let mu = logit_mu(eta[[row, output]]);
             let weight = cell_weights[[row, output]];
             assert_eq!(gradient[[row, output]], weight * (y[[row, output]] - mu));
             assert_eq!(curvature[[row, output]], weight * mu * (1.0 - mu));
@@ -552,6 +651,7 @@ mod tests {
         let error = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            link: logit_link(),
             offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
@@ -570,6 +670,7 @@ mod tests {
         let error = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            link: logit_link(),
             offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
@@ -602,6 +703,7 @@ mod tests {
         let err = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: bad.view(),
+            link: logit_link(),
             offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
@@ -618,6 +720,7 @@ mod tests {
         let err = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: neg.view(),
+            link: logit_link(),
             offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
@@ -639,6 +742,7 @@ mod tests {
         let err = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            link: logit_link(),
             offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
@@ -666,8 +770,10 @@ mod tests {
                 over[[row, a, a]] = 0.25 * 4.0; // 4× the analytic curvature
             }
         }
+        let link = logit_link();
         let likelihood = BinomialMultiLikelihood {
             measure: SeparableCellMeasure::uniform(),
+            link: &link,
         };
         let scaled = fit_penalized_vector_glm(
             PenalizedVectorGlmInputs {

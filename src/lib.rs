@@ -251,6 +251,7 @@ pub use gam_runtime::resource;
 // as `gam::warm_start`; keep that path stable by re-exporting the module from
 // the crate that now owns it (a normal, non-cyclic dependency).
 pub use gam_runtime::warm_start;
+pub use gam_spec::{InverseLink, StandardLink};
 pub use outer_subsample::{OuterScoreSubsample, RowSet, WeightedOuterRow};
 pub use solver::estimate::reml::per_atom_efs::{
     PerAtomEfsConfig, SharedBorderTopology, run_per_atom_efs,

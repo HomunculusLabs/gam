@@ -1267,8 +1267,13 @@ mod parity_tests {
     use super::{ClassPenaltyMetric, weighted_penalty_sum};
     use crate::binomial_multi::{BinomialMultiFitInputs, fit_penalized_binomial_multi};
     use crate::multinomial::{MultinomialFitInputs, fit_penalized_multinomial};
+    use gam_spec::{InverseLink, StandardLink};
     use gam_test_support::fd_checker::numerical_gradient_central_diff;
     use ndarray::{Array1, Array2};
+
+    fn logit_link() -> InverseLink {
+        InverseLink::Standard(StandardLink::Logit)
+    }
 
     /// #1587: the `Centered` class-penalty metric is invariant to the arbitrary
     /// reference-class choice. Penalizing the `K−1` ALR contrasts under ANY of
@@ -1548,6 +1553,7 @@ mod parity_tests {
         let fit = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            link: logit_link(),
             offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
@@ -1602,6 +1608,7 @@ mod parity_tests {
         let joint = fit_penalized_binomial_multi(BinomialMultiFitInputs {
             design: design.view(),
             y: y.view(),
+            link: logit_link(),
             offset: None,
             penalty: penalty.view(),
             lambdas: lambdas.view(),
@@ -1620,6 +1627,7 @@ mod parity_tests {
             let single = fit_penalized_binomial_multi(BinomialMultiFitInputs {
                 design: design.view(),
                 y: y_col.view(),
+                link: logit_link(),
                 offset: None,
                 penalty: penalty.view(),
                 lambdas: lam.view(),
