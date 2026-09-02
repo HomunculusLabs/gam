@@ -1062,7 +1062,7 @@ pub(crate) fn static_slope_feature_frame<T: Clone>(
 row_program! {
     pub(crate) fn rigid_feature_program(
         q0, q1, qd1, linear0, linear1, dlinear1, variance0, variance1, dvariance1;
-        wi, di, probit_scale
+        wi, di, probit_scale, follow_up_varying
     )
     emit [generic, runtime, order2, third, fourth, witnesses, cuda];
     leaves {
@@ -1084,20 +1084,29 @@ row_program! {
             1.0
         );
         let correction1 = compose(sqrt, correction_argument1);
-        // c′ = s²·V′ / (2c). Declared through the reciprocal-square-root leaf
-        // rather than a division because the `row_program!` SSA vocabulary is
-        // division-free; `1/c` is bounded in (0, 1] since `c ≥ 1`.
-        let inverse_correction1 = compose(inverse_sqrt, correction_argument1);
-        let correction_rate1 = scale(
-            mul(dvariance1, inverse_correction1),
-            0.5 * probit_scale * probit_scale
-        );
         let eta0 = add(mul(q0, correction0), linear0);
         let eta1 = add(mul(q1, correction1), linear1);
-        let adjusted_derivative = add(
-            add(mul(qd1, correction1), mul(q1, correction_rate1)),
-            dlinear1
-        );
+        // η′₁ = q′₁·c₁ on a time-constant slope. A follow-up-varying slope adds
+        // q₁·c′₁ + ṡ·ż (gam#2765), with c′ = s²·V′/(2c) declared through the
+        // reciprocal-square-root leaf rather than a division because the
+        // `row_program!` SSA vocabulary is division-free (`1/c ∈ (0, 1]` since
+        // `c ≥ 1`). Only the frame that varies the slope pays for that leaf and
+        // for the derivative channels it opens: the time-constant frame feeds
+        // `V′ = ṡ = 0` and, before this gate, still evaluated them (#932).
+        let mut slope_rate_term = zero();
+        if (follow_up_varying > 0.0) {
+            slope_rate_term = add(
+                mul(
+                    q1,
+                    scale(
+                        mul(dvariance1, compose(inverse_sqrt, correction_argument1)),
+                        0.5 * probit_scale * probit_scale
+                    )
+                ),
+                dlinear1
+            );
+        }
+        let adjusted_derivative = add(mul(qd1, correction1), slope_rate_term);
 
         let neg_eta0 = neg(eta0);
         let entry = scale(compose(neglog_phi, neg_eta0, wi), -1.0);
@@ -1139,6 +1148,7 @@ pub(crate) fn rigid_feature_frame_program<const K: usize, S: JetScalar<K>>(
     wi: f64,
     di: f64,
     probit_scale: f64,
+    follow_up_varying: f64,
 ) -> (S, [f64; 3]) {
     rigid_feature_program::<K, S>(
         &features[0],
@@ -1153,6 +1163,7 @@ pub(crate) fn rigid_feature_frame_program<const K: usize, S: JetScalar<K>>(
         wi,
         di,
         probit_scale,
+        follow_up_varying,
     )
 }
 
@@ -1162,6 +1173,7 @@ pub(crate) fn rigid_feature_frame_order2(
     wi: f64,
     di: f64,
     probit_scale: f64,
+    follow_up_varying: f64,
 ) -> (
     f64,
     [f64; RIGID_FEATURE_DIMENSION],
@@ -1181,6 +1193,7 @@ pub(crate) fn rigid_feature_frame_order2(
         wi,
         di,
         probit_scale,
+        follow_up_varying,
     )
 }
 
@@ -1190,6 +1203,7 @@ pub(crate) fn rigid_feature_frame_third_contracted(
     wi: f64,
     di: f64,
     probit_scale: f64,
+    follow_up_varying: f64,
     direction: &[f64; RIGID_FEATURE_DIMENSION],
 ) -> [[f64; RIGID_FEATURE_DIMENSION]; RIGID_FEATURE_DIMENSION] {
     rigid_feature_program_third_contracted(
@@ -1205,6 +1219,7 @@ pub(crate) fn rigid_feature_frame_third_contracted(
         wi,
         di,
         probit_scale,
+        follow_up_varying,
         direction,
     )
 }
@@ -1215,6 +1230,7 @@ pub(crate) fn rigid_feature_frame_fourth_contracted(
     wi: f64,
     di: f64,
     probit_scale: f64,
+    follow_up_varying: f64,
     first: &[f64; RIGID_FEATURE_DIMENSION],
     second: &[f64; RIGID_FEATURE_DIMENSION],
 ) -> [[f64; RIGID_FEATURE_DIMENSION]; RIGID_FEATURE_DIMENSION] {
@@ -1231,6 +1247,7 @@ pub(crate) fn rigid_feature_frame_fourth_contracted(
         wi,
         di,
         probit_scale,
+        follow_up_varying,
         first,
         second,
     )
@@ -1248,6 +1265,7 @@ pub(crate) fn rigid_feature_frame_fourth_contracted(
 pub(crate) fn rigid_feature_frame_witnesses(
     features: &[f64; RIGID_FEATURE_DIMENSION],
     probit_scale: f64,
+    follow_up_varying: f64,
 ) -> [f64; 3] {
     rigid_feature_program_witnesses(
         features[0],
@@ -1260,6 +1278,7 @@ pub(crate) fn rigid_feature_frame_witnesses(
         features[7],
         features[8],
         probit_scale,
+        follow_up_varying,
     )
 }
 
@@ -1898,7 +1917,13 @@ pub(crate) fn row_primary_closed_form_vector_into(
     };
     let features = static_slope_feature_frame(q0, q1, qd1, linear, raw_variance, 0.0);
     let (value, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
-        rigid_feature_frame_order2(&features, w, d, probit_scale);
+        rigid_feature_frame_order2(
+            &features,
+            w,
+            d,
+            probit_scale,
+            follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(),
+        );
     validate_rigid_row_admission::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
         qd1,
         &inputs,

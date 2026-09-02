@@ -1807,6 +1807,7 @@ fn rigid_feature_program_scalar_pullback_matches_generic_and_witnesses_932() {
             inputs.wi,
             inputs.di,
             inputs.probit_scale,
+            follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(),
         );
         let sliced_witnesses = rigid_row_admission_witnesses::<
             STATIC_SLOPE_PRIMARIES,

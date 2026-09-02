@@ -1259,38 +1259,15 @@ fn zz_attribute_deflated_route_classification_2515() {
     }
 }
 
-/// #2515 — THE ONE ORDERING DIFFERENCE LEFT BETWEEN THE TWO EXACT-`A` OPERATORS,
-/// and it is not a floor, a metric or a channel: it is whether `ΔC` is added
-/// before or after a `B`-deflated direction is unit-pinned.
+/// #2515 — both routes materialize the ONE raw objective Hessian
+/// `A = B_raw + ΔC` before applying any evidence classification.
 ///
-/// After #2673 put both classifications in the majorizer metric, the complete
-/// gradients agree to `1.62e-9` relative on #2712's certified deflated anchor
-/// ([`exact_a_route_parity_holds_on_a_deflated_cache_2515`]) — three decades
-/// inside the production bar, but six decades short of the `1.57e-14` the same
-/// comparison reaches on a NON-deflating state. That gap has one cause, and this
-/// gate is what stops it from being folklore:
-///
-/// * the DENSE route materializes `A` through `apply_cached_arrow_hessian`, which
-///   applies `L Lᵀ` of the row's UNDAMPED FACTOR — the majorizer already
-///   unit-pinned by its own factorization. So the dense exact-`A` row block is
-///   `B̃ + ΔC`, and a direction `B` declared null enters it as `1 + vᵀΔCv`;
-/// * the ARROW route assembles `B_raw + ΔC` (`exact_a_evidence_system` folds `ΔC`
-///   into the untouched majorizer blocks) and unit-pins the RESULT, so the same
-///   direction is exactly `1`.
-///
-/// Both honour "a unit-deflated direction contributes `log 1 = 0` with zero ρ/θ
-/// dependence". Only one of them honours it EXACTLY: `vᵀΔCv` is a function of ρ,
-/// so the dense route prices a ρ-dependent `log(1 + vᵀΔCv)` on a direction whose
-/// whole point is to be ρ-independent. It is `~1e-8` here, which is why the two
-/// routes agree to nine digits rather than to fifteen.
-///
-/// The assertion is an IDENTITY, not a tolerance on a difference of two large
-/// numbers: the two exact-`A` row blocks differ by the majorizer's own
-/// conditioning increment `B̃ − B_raw` and by NOTHING ELSE. If some other
-/// disagreement ever appears between the two assemblers, this goes red on it
-/// specifically, rather than being absorbed into the parity bar next door.
+/// The dense route used to add ΔC to the already-conditioned cache operator
+/// `B_tilde`, while the arrow route added it to `B_raw` and conditioned the
+/// result. This gate requires operator equality itself; it no longer blesses the
+/// old mismatch by merely attributing it to `B_tilde - B_raw`.
 #[test]
-fn dense_exact_a_prices_a_b_deflated_direction_as_one_plus_delta_c_2515() {
+fn dense_and_arrow_materialize_the_same_raw_exact_a_2515() {
     let (mut term, rho, target, b_cache) =
         super::tests_deflated_from_probes_2712::residual_excited_deflated_anchor(
             "#2515 the B-conditioning increment is the whole residual",
@@ -1305,25 +1282,18 @@ fn dense_exact_a_prices_a_b_deflated_direction_as_one_plus_delta_c_2515() {
         .exact_a_evidence_system(target.view(), &rho, &sys)
         .expect("#2515: the deflated anchor builds its exact-A evidence system");
 
-    let mut worst_identity = 0.0_f64;
+    let mut worst_operator_gap = 0.0_f64;
     let mut worst_block_scale = 0.0_f64;
     let mut deflated_directions = 0usize;
-    let mut worst_pinned_delta_c = 0.0_f64;
     for row in 0..b_cache.n_rows() {
         let q = b_cache.row_dims[row];
         let base = b_cache.row_offsets[row];
-        let factor = b_cache.undamped_factor(row);
-        // `B̃` — what the dense route's operator apply actually applies.
-        let b_conditioned = factor.dot(&factor.t());
-        // `B_raw` — what the arrow route's evidence system was folded into.
-        let b_raw = &sys.rows[row].htt;
         let a_dense_block = a_dense.slice(s![base..base + q, base..base + q]).to_owned();
         let a_arrow_block = &a_sys.rows[row].htt;
         for a in 0..q {
             for b in 0..q {
-                let residual = (a_dense_block[[a, b]] - a_arrow_block[[a, b]])
-                    - (b_conditioned[[a, b]] - b_raw[[a, b]]);
-                worst_identity = worst_identity.max(residual.abs());
+                worst_operator_gap = worst_operator_gap
+                    .max((a_dense_block[[a, b]] - a_arrow_block[[a, b]]).abs());
                 worst_block_scale = worst_block_scale.max(a_dense_block[[a, b]].abs());
             }
         }
@@ -1341,22 +1311,17 @@ fn dense_exact_a_prices_a_b_deflated_direction_as_one_plus_delta_c_2515() {
             deflated_directions += 1;
             let dense_curvature = direction.dot(&a_dense_block.dot(direction));
             let arrow_curvature = direction.dot(&a_arrow_block.dot(direction));
-            let b_raw_curvature = direction.dot(&b_raw.dot(direction));
-            // `vᵀΔCv` on this direction, from the arrow side where `B` is untouched.
-            let delta_c = arrow_curvature - b_raw_curvature;
-            worst_pinned_delta_c = worst_pinned_delta_c.max(delta_c.abs());
             println!(
-                "[#2515 ORDERING] row {row}: v'B_raw v={b_raw_curvature:.6e} \
-                 v'(B_raw+ΔC)v={arrow_curvature:.6e} v'ΔCv={delta_c:+.6e} \
-                 dense v'(B̃+ΔC)v={dense_curvature:.10e} (arrow pins this direction to 1)"
+                "[#2515 ORDERING] row {row}: dense v'Av={dense_curvature:.10e} \
+                 arrow v'Av={arrow_curvature:.10e} gap={:.3e}",
+                (dense_curvature - arrow_curvature).abs(),
             );
         }
     }
     println!(
-        "[#2515 ORDERING] |(A_dense − A_arrow) − (B̃ − B_raw)|∞ = {worst_identity:.6e} \
+        "[#2515 ORDERING] |A_dense − A_arrow|∞ = {worst_operator_gap:.6e} \
          over block scale {worst_block_scale:.6e}; deflated directions inspected = \
-         {deflated_directions}; worst |v'ΔCv| on a pinned direction = \
-         {worst_pinned_delta_c:.6e}"
+         {deflated_directions}"
     );
 
     assert!(
@@ -1370,14 +1335,11 @@ fn dense_exact_a_prices_a_b_deflated_direction_as_one_plus_delta_c_2515() {
          anything; block scale {worst_block_scale:.6e}"
     );
     assert!(
-        worst_identity <= 1.0e-12 * worst_block_scale,
-        "#2515: the dense and arrow exact-A row blocks differ by something OTHER than \
-         the majorizer's own conditioning increment (|(A_dense − A_arrow) − (B̃ − \
-         B_raw)|∞ = {worst_identity:.6e} over block scale {worst_block_scale:.6e}). \
-         The residual in `exact_a_route_parity_holds_on_a_deflated_cache_2515` is \
-         attributed to that increment and to nothing else; if this is red, that \
-         attribution is wrong and the parity bar next door is absorbing a second \
-         cause."
+        worst_operator_gap <= 1.0e-12 * worst_block_scale,
+        "#2515: the dense and arrow routes materialized different raw exact-A row \
+         blocks (|A_dense − A_arrow|∞={worst_operator_gap:.6e} over block scale \
+         {worst_block_scale:.6e}). Evidence conditioning must happen only after \
+         the one objective Hessian `B_raw + ΔC` exists."
     );
 }
 
@@ -1601,21 +1563,29 @@ fn exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515() {
                 if gam_solve::arrow_schur::ArrowSchurError::rendered_is_indefinite_evidence(
                     &rendered,
                 ) {
-                    let min_eig = dense_exact_a_min_eigenvalue_2515(&mut term, &rho, &target, &b_cache);
-                    println!(
-                        "[#2515 LADDER] {label}: exact-A arrow factorization REFUSED as \
-                         indefinite; dense min eig(A) = {min_eig:+.6e}"
-                    );
-                    assert!(
-                        min_eig < 0.0,
-                        "#2515: the arrow route refused [{label}] as indefinite while the \
-                         DENSE spectrum of the same exact A has min eigenvalue \
-                         {min_eig:+.6e} >= 0. The two routes must reach the same \
-                         mode-or-saddle verdict; a refusal the dense route does not \
-                         corroborate is an over-refusal, and it costs the streaming lane \
-                         states it can legitimately rank."
-                    );
-                    indefinite_states += 1;
+                    match term.exact_observed_information_log_dets(
+                        &rho,
+                        target.view(),
+                        &b_cache,
+                    ) {
+                        Err(SaeCriterionError::IndefiniteObservedInformation { .. }) => {
+                            println!(
+                                "[#2515 LADDER] {label}: both routes returned the typed \
+                                 IndefiniteObservedInformation verdict"
+                            );
+                            indefinite_states += 1;
+                        }
+                        Ok(log_dets) => panic!(
+                            "#2515: the arrow route refused [{label}] as indefinite while the \
+                             dense route priced the same raw A at log-determinants {log_dets:?}. \
+                             A negative eigenvalue is not itself a saddle: the shared classifier \
+                             must restore the ARD-clamp basin before refusing."
+                        ),
+                        Err(other) => panic!(
+                            "#2515: the arrow route returned the typed indefinite verdict at \
+                             [{label}], but the dense route returned a different error: {other}"
+                        ),
+                    }
                 } else {
                     println!("[#2515 LADDER] {label}: exact-A arrow factorization refused: {rendered}");
                 }
@@ -1704,25 +1674,6 @@ fn exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515() {
          is the regime the refusal now covers, and an assertion that never enters it is an \
          assertion about the easy half."
     );
-}
-
-/// The smallest eigenvalue of the DENSE exact observed information at one state —
-/// the dense route's own mode-or-saddle verdict, in one number, for the ladder to
-/// corroborate an arrow-route refusal against.
-fn dense_exact_a_min_eigenvalue_2515(
-    term: &mut SaeManifoldTerm,
-    rho: &SaeManifoldRho,
-    target: &Array2<f64>,
-    cache: &ArrowFactorCache,
-) -> f64 {
-    let Ok(a_dense) = term.materialize_exact_hessian_dense(rho, target.view(), cache) else {
-        return f64::NAN;
-    };
-    let Ok((evals, _)) = gam_linalg::faer_ndarray::FaerEigh::eigh(&a_dense, faer::Side::Lower)
-    else {
-        return f64::NAN;
-    };
-    evals.iter().copied().fold(f64::INFINITY, f64::min)
 }
 
 /// MEASUREMENT — the ρ rung where the ladder breaks, taken apart.

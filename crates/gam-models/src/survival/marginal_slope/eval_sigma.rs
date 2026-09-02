@@ -36,7 +36,7 @@ fn compiled_sigma_primary_terms(
     // taken with respect to `b` directly.
     let features = static_slope_feature_frame(q0, q1, qd1, linear, variance, 0.0);
     let (_, feature_gradient, feature_hessian, witnesses) =
-        rigid_feature_frame_order2(&features, inputs.wi, inputs.di, 1.0);
+        rigid_feature_frame_order2(&features, inputs.wi, inputs.di, 1.0, follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>());
     validate_rigid_row_admission::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
         qd1,
         inputs,
@@ -60,7 +60,14 @@ fn compiled_sigma_primary_terms(
     let curvature =
         static_slope_feature_frame(0.0, 0.0, 0.0, 0.0, 2.0 * inputs.covariance_ones, 0.0);
     let third_tangent =
-        rigid_feature_frame_third_contracted(&features, inputs.wi, inputs.di, 1.0, &tangent);
+        rigid_feature_frame_third_contracted(
+            &features,
+            inputs.wi,
+            inputs.di,
+            1.0,
+            follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(),
+            &tangent,
+        );
 
     let dot = |left: &[f64; RIGID_FEATURE_DIMENSION], right: &[f64; RIGID_FEATURE_DIMENSION]| {
         let mut total = 0.0;
@@ -118,9 +125,22 @@ fn compiled_sigma_primary_terms(
     }
 
     let third_curvature =
-        rigid_feature_frame_third_contracted(&features, inputs.wi, inputs.di, 1.0, &curvature);
+        rigid_feature_frame_third_contracted(
+            &features,
+            inputs.wi,
+            inputs.di,
+            1.0,
+            follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(),
+            &curvature,
+        );
     let fourth_tangent = rigid_feature_frame_fourth_contracted(
-        &features, inputs.wi, inputs.di, 1.0, &tangent, &tangent,
+        &features,
+        inputs.wi,
+        inputs.di,
+        1.0,
+        follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(),
+        &tangent,
+        &tangent,
     );
     let f_qqbb: [[f64; 3]; 3] = std::array::from_fn(|axis| {
         std::array::from_fn(|other| fourth_tangent[axis][other] + third_curvature[axis][other])

@@ -697,7 +697,7 @@ impl LaplaceHyperparameter {
             {
                 Err(invalid(format!("factor index {factor} is out of bounds")))
             }
-            Self::Loading { mark, factor } if mark >= model.mark_count() => {
+            Self::Loading { mark, factor: _ } if mark >= model.mark_count() => {
                 Err(invalid(format!("mark index {mark} is out of bounds")))
             }
             Self::Loading { factor, .. } if factor >= model.factors.len() => {

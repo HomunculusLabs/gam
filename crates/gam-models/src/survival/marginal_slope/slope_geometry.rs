@@ -129,6 +129,13 @@ pub(crate) struct ScoreSensitivity<const P: usize> {
     pub(crate) jacobian: [[f64; P]; RIGID_FEATURE_DIMENSION],
 }
 
+/// The frame's follow-up variation as the row program's activity constant:
+/// the program evaluates the slope-rate terms of `η′₁` only when it is `1.0`.
+#[inline(always)]
+pub(crate) fn follow_up_varying_flag<const P: usize, G: SlopeRowGeometry<P>>() -> f64 {
+    if G::FOLLOW_UP_VARYING { 1.0 } else { 0.0 }
+}
+
 // ── The time-constant slope frame ───────────────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -612,8 +619,13 @@ mod tests {
                 g(t) * g(t) * covariance_ones,
                 2.0 * g(t) * g_rate(t) * covariance_ones,
             ];
-            let (_, _, _, [_, _, adjusted_derivative]) =
-                rigid_feature_frame_order2(&features, row.wi, row.di, probit_scale);
+            let (_, _, _, [_, _, adjusted_derivative]) = rigid_feature_frame_order2(
+                &features,
+                row.wi,
+                row.di,
+                probit_scale,
+                follow_up_varying_flag::<DYNAMIC_SLOPE_PRIMARIES, DynamicSlopeGeometry>(),
+            );
 
             let error = (finite - adjusted_derivative).abs()
                 / (1.0 + finite.abs().max(adjusted_derivative.abs()));

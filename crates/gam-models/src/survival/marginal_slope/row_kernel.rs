@@ -783,7 +783,11 @@ pub(crate) fn rigid_row_admission_witnesses<const P: usize, G: SlopeRowGeometry<
     inputs: &RigidRowInputs,
 ) -> [f64; 3] {
     let features = G::feature_frame(primaries, inputs);
-    rigid_feature_frame_witnesses(&features, inputs.probit_scale)
+    rigid_feature_frame_witnesses(
+        &features,
+        inputs.probit_scale,
+        follow_up_varying_flag::<P, G>(),
+    )
 }
 
 /// The survival marginal-slope row negative log-likelihood, evaluated over a
@@ -808,7 +812,13 @@ pub(crate) fn rigid_row_nll<const P: usize, G: SlopeRowGeometry<P>, S: JetScalar
 ) -> Result<S, String> {
     let features = G::feature_frame(vars, inputs);
     let (nll, [neg_eta0, neg_eta1, adjusted_derivative]) =
-        rigid_feature_frame_program::<P, S>(&features, inputs.wi, inputs.di, inputs.probit_scale);
+        rigid_feature_frame_program::<P, S>(
+            &features,
+            inputs.wi,
+            inputs.di,
+            inputs.probit_scale,
+            follow_up_varying_flag::<P, G>(),
+        );
 
     validate_rigid_row_admission::<P, G>(
         vars[PRIMARY_QD1].value(),
@@ -849,7 +859,13 @@ pub(crate) fn rigid_row_primary_mixed_in_z<const P: usize, G: SlopeRowGeometry<P
 ) -> Result<[f64; P], String> {
     let features = G::feature_frame(primaries, inputs);
     let (_, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
-        rigid_feature_frame_order2(&features, inputs.wi, inputs.di, inputs.probit_scale);
+        rigid_feature_frame_order2(
+            &features,
+            inputs.wi,
+            inputs.di,
+            inputs.probit_scale,
+            follow_up_varying_flag::<P, G>(),
+        );
     validate_rigid_row_admission::<P, G>(
         primaries[PRIMARY_QD1],
         inputs,
@@ -891,7 +907,13 @@ pub(crate) fn rigid_row_order2<const P: usize, G: SlopeRowGeometry<P>>(
 ) -> Result<(f64, [f64; P], [[f64; P]; P]), String> {
     let features = G::feature_frame(primaries, inputs);
     let (value, feature_gradient, feature_hessian, [neg_eta0, neg_eta1, adjusted_derivative]) =
-        rigid_feature_frame_order2(&features, inputs.wi, inputs.di, inputs.probit_scale);
+        rigid_feature_frame_order2(
+            &features,
+            inputs.wi,
+            inputs.di,
+            inputs.probit_scale,
+            follow_up_varying_flag::<P, G>(),
+        );
     validate_rigid_row_admission::<P, G>(
         primaries[PRIMARY_QD1],
         inputs,

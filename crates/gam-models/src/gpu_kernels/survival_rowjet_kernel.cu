@@ -134,6 +134,9 @@ struct RowIn {
     double z_sum;
     double covariance_ones;
     double probit_scale;
+    // The row program's activity constant for the slope-rate terms of eta'_1;
+    // this kernel evaluates the time-constant slope frame only.
+    double follow_up_varying;
 };
 
 // __GAM_ROW_PROGRAM_CUDA_VGH__
@@ -160,6 +163,7 @@ extern "C" __global__ void __launch_bounds__(128, 1) survival_rowjet_vgh(
     in.z_sum = z_sum[row];
     in.covariance_ones = cov_ones[row];
     in.probit_scale = probit_scale;
+    in.follow_up_varying = 0.0;
     rigid_feature_program_pullback4(
         q0[row],
         q1[row],
