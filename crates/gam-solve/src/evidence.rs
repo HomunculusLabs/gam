@@ -3528,14 +3528,15 @@ pub fn union_per_point_log_density(
 pub struct RemlCandidate {
     pub index: usize,
     pub name: String,
-    /// Minimised REML/LAML cost. Lower is better. This is the model's reported
-    /// evidence headline (`Model.evidence`), kept verbatim in the score table.
+    /// Minimised REML/LAML cost, kept verbatim in the diagnostic score table.
+    /// This is not the conditional-AIC cost that ranks candidates.
     pub score: f64,
-    pub edf: Option<f64>,
-    /// Log-likelihood at the converged mode, on the engine's
-    /// constants-omitted scale (same as `gam_inference::model_comparison`).
-    /// Present when the fit carries it; `None` for legacy payloads.
-    pub log_lik: Option<f64>,
+    /// Effective degrees of freedom consumed by the fitted mean. Required
+    /// because conditional AIC has no definition without its complexity term.
+    pub edf: f64,
+    /// Ordinary log-likelihood at the converged mode. Required because a raw
+    /// REML/LAML objective is a different estimand, not a ranking fallback.
+    pub log_lik: f64,
     /// Response-family tag (e.g. "gaussian", "gamma", "binomial"). Carried so
     /// `compare_reml_fits` can REFUSE to rank fits whose REML/LAML scores are on
     /// incomparable base measures (a cross-family comparison is meaningless;
@@ -3566,18 +3567,38 @@ impl RemlCandidate {
     /// The conditional AIC `−2ℓ + 2·edf` prices exactly those spent degrees of
     /// freedom and discriminates correctly: it penalises the noise smooth
     /// (Δ ≈ +15 nats) yet rewards a genuinely relevant smooth (Δ ≈ −650),
-    /// preserving power. We therefore rank on the conditional AIC whenever both
-    /// the log-likelihood and the effective degrees of freedom are available,
-    /// and fall back to the raw evidence headline otherwise. The reported
-    /// `score_table` still carries the unaltered evidence (`reml_score`), so
-    /// `Model.evidence` / `bayes_factor_vs` stay consistent with the table.
-    pub fn ranking_score(&self) -> f64 {
-        match (self.log_lik, self.edf) {
-            (Some(log_lik), Some(edf)) if log_lik.is_finite() && edf.is_finite() => {
-                -2.0 * log_lik + 2.0 * edf
-            }
-            _ => self.score,
+    /// preserving power. Ranking therefore requires both quantities and refuses
+    /// an invalid candidate rather than switching to the incomparable raw
+    /// evidence headline. The reported `score_table` still carries that raw
+    /// diagnostic unchanged.
+    pub fn ranking_score(&self) -> Result<f64, String> {
+        if !self.score.is_finite() {
+            return Err(format!(
+                "compare_models: candidate '{}' has non-finite raw REML/LAML score {}",
+                self.name, self.score
+            ));
         }
+        if !(self.edf.is_finite() && self.edf >= 0.0) {
+            return Err(format!(
+                "compare_models: candidate '{}' requires finite non-negative edf_total, got {}",
+                self.name, self.edf
+            ));
+        }
+        if !self.log_lik.is_finite() {
+            return Err(format!(
+                "compare_models: candidate '{}' requires finite log_likelihood; \
+                 raw REML/LAML is not a substitute ranking estimand",
+                self.name
+            ));
+        }
+        let score = -2.0 * self.log_lik + 2.0 * self.edf;
+        if !score.is_finite() {
+            return Err(format!(
+                "compare_models: candidate '{}' conditional AIC is outside f64 range",
+                self.name
+            ));
+        }
+        Ok(score)
     }
 }
 
@@ -3594,18 +3615,18 @@ pub struct RankedRow {
     pub name: String,
     pub score: f64,
     /// Cost gap from the winning model on the SAME scale used to order the
-    /// ranking (`ranking_score`, the Occam-penalised conditional AIC where
-    /// available, issue #1362). The winner is `argmin ranking_score`, so this
+    /// ranking (`ranking_score`, the Occam-penalised conditional AIC,
+    /// issue #1362). The winner is `argmin ranking_score`, so this
     /// is `>= 0` for every row by construction — it never contradicts the
     /// declared winner (issue #1465). `score` still carries the raw REML/LAML
-    /// evidence so it stays consistent with `Model.evidence`.
+    /// diagnostic on its own explicitly labelled scale.
     pub delta: f64,
     /// Akaike evidence ratio of the winner over this row on the ranking scale.
     /// `delta` is a conditional-AIC gap (a −2·log / deviance-scale quantity), so
     /// the evidence ratio is `exp(½·delta) >= 1` (Burnham & Anderson), NOT
     /// `exp(delta)` — the latter squares the intended ratio (issues #1465, #2124).
     pub bayes_factor: f64,
-    pub edf: Option<f64>,
+    pub edf: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -3614,7 +3635,7 @@ pub struct ScoreRow {
     pub reml_score: f64,
     pub delta_reml: f64,
     pub bayes_factor_best_over_model: f64,
-    pub effective_dof: Option<f64>,
+    pub effective_dof: f64,
 }
 
 /// Log Bayes factor of model `a` over model `b` from minimised REML/LAML costs.
@@ -3682,36 +3703,32 @@ pub fn compare_reml_fits(mut candidates: Vec<RemlCandidate>) -> Result<RemlCompa
             }
         }
     }
-    candidates = rank_priority_candidates(
-        candidates
-            .into_iter()
-            .enumerate()
-            .map(|(idx, row)| {
-                // Rank/winner on the Occam-penalised conditional AIC where it is
-                // available (issue #1362); falls back to the raw evidence score.
-                let ranking = row.ranking_score();
-                PriorityCandidate::new(row, idx, ranking, 0)
-            })
-            .collect(),
-    )
-    .into_iter()
-    .map(|row| row.item)
-    .collect();
+    let priority_candidates = candidates
+        .into_iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            let ranking = row.ranking_score()?;
+            Ok(PriorityCandidate::new(row, idx, ranking, 0))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    candidates = rank_priority_candidates(priority_candidates)
+        .into_iter()
+        .map(|row| row.item)
+        .collect();
 
     let winner = candidates[0].name.clone();
     // The ranking `delta` / `bayes_factor` must be measured on the SAME scale
     // that orders the table — the `ranking_score` (Occam-penalised conditional
-    // AIC where available, issue #1362). `candidates[0]` is the winner =
+    // AIC, issue #1362). `candidates[0]` is the winner =
     // `argmin ranking_score`, so its ranking score IS the minimum; every row's
     // ranking-scale gap is then `>= 0` and its Bayes factor `>= 1`, never
     // contradicting the declared winner (issue #1465). Computing these against
     // the AIC winner's *raw REML* — which is not the minimum raw REML once AIC
     // and REML disagree — produced negative deltas and Bayes factors < 1 for
     // non-winner rows.
-    let best_ranking_score = candidates[0].ranking_score();
-    // The raw-REML `score_table` stays on the raw evidence scale (consistent
-    // with `Model.evidence` / `bayes_factor_vs`), but is referenced to the
-    // genuine minimum raw REML so its best-over-model Bayes factors are also
+    let best_ranking_score = candidates[0].ranking_score()?;
+    // The raw-REML `score_table` stays on its explicitly labelled diagnostic
+    // scale, but is referenced to the genuine minimum raw REML so its factors are
     // coherent (`>= 1`), rather than to whichever row happens to sit at index 0.
     let best_raw_score = candidates
         .iter()
@@ -3720,7 +3737,7 @@ pub fn compare_reml_fits(mut candidates: Vec<RemlCandidate>) -> Result<RemlCompa
     let mut ranking = Vec::with_capacity(candidates.len());
     let mut score_table = Vec::with_capacity(candidates.len());
     for row in &candidates {
-        let delta = log_bayes_factor(best_ranking_score, row.ranking_score());
+        let delta = log_bayes_factor(best_ranking_score, row.ranking_score()?);
         // `ranking_score` is the conditional AIC (`−2·loglik + 2·edf`), a −2·log /
         // deviance-scale cost, so `delta` is a full ΔAIC gap. The Akaike evidence
         // ratio for an AIC gap Δ is `exp(−½Δ)` (Burnham & Anderson evidence ratio),
@@ -3745,11 +3762,11 @@ pub fn compare_reml_fits(mut candidates: Vec<RemlCandidate>) -> Result<RemlCompa
         });
     }
     // The winner is decided by `ranking_score` (the Occam-penalised conditional
-    // AIC where available, issue #1362), which can disagree in sign with the raw
+    // AIC, issue #1362), which can disagree in sign with the raw
     // evidence Bayes factor for a noise-augmented model. Summarise the actual
     // decision margin so the headline never contradicts the chosen winner.
     let evidence_summary = if let Some(runner_up) = candidates.get(1) {
-        let margin = runner_up.ranking_score() - candidates[0].ranking_score();
+        let margin = runner_up.ranking_score()? - candidates[0].ranking_score()?;
         // `margin` is a conditional-AIC gap (−2·log scale), so the Akaike evidence
         // ratio is `exp(−½·margin)`; `format_bayes_factor` formats `exp()` of its
         // argument, so pass the halved margin to headline `exp(½·margin)` rather
@@ -5220,8 +5237,8 @@ mod tests {
             index: 0,
             name: name.to_string(),
             score,
-            edf: Some(edf),
-            log_lik: Some(0.0),
+            edf,
+            log_lik: 0.0,
             family: Some("gaussian".to_string()),
             n_obs: Some(100),
         };
@@ -6729,8 +6746,8 @@ mod tests {
             index: 0,
             name: name.to_string(),
             score,
-            edf: Some(edf),
-            log_lik: Some(log_lik),
+            edf,
+            log_lik,
             family: None,
             n_obs: None,
         }
@@ -6741,21 +6758,25 @@ mod tests {
         // AIC = -2ℓ + 2·edf.
         let c = cand("m", /*score (ignored)*/ 999.0, 6.748, -32.0866);
         let expected = -2.0 * -32.0866 + 2.0 * 6.748;
-        assert!((c.ranking_score() - expected).abs() < 1e-9);
+        assert!((c.ranking_score().expect("finite AIC") - expected).abs() < 1e-9);
     }
 
     #[test]
-    fn ranking_score_falls_back_to_evidence_without_loglik() {
+    fn ranking_score_refuses_non_finite_log_likelihood_instead_of_using_reml() {
         let c = RemlCandidate {
             index: 0,
             name: "m".to_string(),
             score: 151.28,
-            edf: Some(6.0),
-            log_lik: None,
+            edf: 6.0,
+            log_lik: f64::NAN,
             family: None,
             n_obs: None,
         };
-        assert_eq!(c.ranking_score(), 151.28);
+        let error = c
+            .ranking_score()
+            .expect_err("raw REML must not replace a missing likelihood");
+        assert!(error.contains("requires finite log_likelihood"));
+        assert!(error.contains("not a substitute ranking estimand"));
     }
 
     #[test]
@@ -6875,8 +6896,8 @@ mod tests {
             index: 0,
             name: name.to_string(),
             score: 100.0,
-            edf: Some(5.0),
-            log_lik: Some(-40.0),
+            edf: 5.0,
+            log_lik: -40.0,
             family: Some("gaussian".to_string()),
             n_obs: Some(n),
         };
@@ -6897,8 +6918,8 @@ mod tests {
             index: 0,
             name: "legacy".to_string(),
             score: 90.0,
-            edf: Some(4.0),
-            log_lik: Some(-35.0),
+            edf: 4.0,
+            log_lik: -35.0,
             family: Some("gaussian".to_string()),
             n_obs: None,
         };

@@ -198,7 +198,7 @@ fn firth_accepted_for_binomial_loglog_and_cauchit_2158() {
 }
 
 #[test]
-fn heuristic_lambdas_are_used_as_initial_rho_for_reml() {
+fn heuristic_rho_seed_produces_a_finite_optimized_reml_fit() {
     let (x, y, w, offset, s) = tiny_problem();
     let opts = base_opts();
     let family = LikelihoodSpec::new(
@@ -217,22 +217,25 @@ fn heuristic_lambdas_are_used_as_initial_rho_for_reml() {
     )
     .expect("fit should succeed");
 
-    // The message carried no number, so a failure could not distinguish the two
-    // things it can mean. `heuristic_lambdas` reaches the outer search as a SEED
-    // (`seeding.rs`, `smoothing_heuristic_lambdas`), and `base_opts()` runs REML
-    // with `max_iter: 40` and nothing pinning lambda -- so the optimizer is free
-    // to move rho away from 2.5, and a final value far from the seed is what a
-    // working optimizer would produce, not evidence that the seed was ignored.
-    // Print the measured value so the next run says which it is: near 2.5 means
-    // the seed is honoured and this is a tolerance question; far from it means
-    // the assertion is checking the seed against a quantity the seed does not
-    // determine.
-    let realized = fit.log_lambdas[0];
+    // This public API returns the REML optimum, not the candidate from which the
+    // search started. The exact seed-ordering contract is owned by
+    // `seeding::tests::uses_full_heuristicvector_as_primary_anchor`; at this
+    // boundary the observable contract is that the seeded search produces a
+    // valid optimized fit, while remaining free to move rho away from 2.5.
+    assert_eq!(
+        fit.log_lambdas.len(),
+        1,
+        "one penalty must produce one optimized log-lambda"
+    );
     assert!(
-        (realized - 2.5).abs() < 1e-8,
-        "expected heuristic lambdas to be used as initial rho when provided; \
-         realized log_lambda[0] = {realized:.9e} (seed 2.5, |delta| = {:.3e})",
-        (realized - 2.5).abs()
+        fit.log_lambdas[0].is_finite(),
+        "seeded REML must publish a finite optimized log-lambda, got {}",
+        fit.log_lambdas[0]
+    );
+    assert!(
+        fit.deviance.is_finite(),
+        "seeded REML must publish a finite deviance, got {}",
+        fit.deviance
     );
 }
 

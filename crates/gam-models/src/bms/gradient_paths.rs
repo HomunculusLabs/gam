@@ -1598,20 +1598,26 @@ pub(super) fn rigid_standard_normal_neglog_only(
     Ok(-w * logcdf)
 }
 
+/// The supplied marginal-link derivative stack `[q, q1, q2, q3, q4]` at the
+/// program's expansion point.
+///
+/// The point is not inspected. [`bernoulli_marginal_link_map`] computes this
+/// stack from the same `eta` it stores as the expansion point, so a NaN point
+/// arrives with a NaN `q` (the constructor refuses it before that), and a NaN
+/// `q` makes the signed margin NaN, which the probit leaf turns into NaN on
+/// every channel and the row kernel rejects on its witness. A NaN select here
+/// guarded a state that cannot be constructed, and it cost eleven
+/// instructions per row in the release lowering (`RIGID-BERNOULLI-VGH-932`).
 #[inline(always)]
 fn rigid_supplied_link_stack(
-    composition_point: f64,
+    _composition_point: f64,
     value: f64,
     first: f64,
     second: f64,
     third: f64,
     fourth: f64,
 ) -> [f64; 5] {
-    if composition_point.is_nan() {
-        [f64::NAN; 5]
-    } else {
-        [value, first, second, third, fourth]
-    }
+    [value, first, second, third, fourth]
 }
 
 #[inline(always)]

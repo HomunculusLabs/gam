@@ -1,8 +1,9 @@
-"""Bayesian model-evidence comparison across fits.
+"""Conditional-AIC comparison across fits.
 
-Rank candidate gamfit fits by their REML / LAML marginal-likelihood scores.
-The score extraction, Tierney-Kadane normalization, and evidence ranking live
-in Rust; this module is only the Python FFI wall.
+Rank candidate gamfit fits by ``-2*loglik + 2*edf``. The separately labelled
+score table retains raw REML / LAML diagnostics, but those values never replace
+missing ranking inputs. Extraction and ranking live in Rust; this module is only
+the Python FFI wall.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ def compare_models(
     *,
     cv_scores: list[float] | tuple[float, ...] | None = None,
 ) -> dict[str, Any]:
-    """Rank candidate fits by Bayesian marginal-likelihood (REML / LAML).
+    """Rank candidate fits by conditional AIC.
 
     Returns ``ranking``, ``winner``, ``evidence_summary``, and ``score_table``.
     When ``cv_scores`` is supplied, the Rust ranking also returns

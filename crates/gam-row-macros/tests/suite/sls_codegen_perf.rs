@@ -218,7 +218,6 @@ row_program! {
 
 type Channels = (f64, [f64; K], [[f64; K]; K]);
 
-#[inline(always)]
 /// The activity flag and stack of a plan slot the planner may leave absent.
 ///
 /// The hand arm reads the `Option` discriminant (`if let Some(u1) = plan.u1`);
@@ -226,6 +225,7 @@ type Channels = (f64, [f64; K], [[f64; K]; K]);
 /// and rediscover its absence with a five-way compare scan. Both arms then
 /// do the same scaffolding on the same plan, and the timing compares the
 /// kernels.
+#[inline(always)]
 fn presence(slot: Option<[f64; 5]>) -> (f64, [f64; 5]) {
     match slot {
         Some(stack) => (1.0, stack),
@@ -233,6 +233,7 @@ fn presence(slot: Option<[f64; 5]>) -> (f64, [f64; 5]) {
     }
 }
 
+#[inline(always)]
 fn stack_active(stack: &[f64; 5]) -> f64 {
     if stack.iter().all(|value| *value == 0.0) {
         0.0

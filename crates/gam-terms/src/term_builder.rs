@@ -2796,19 +2796,37 @@ pub fn build_smooth_basis(
                 ))
                 .to_string());
             }
+            let heuristic_knots = n_knots;
             if inferred && ds.values.nrows() <= 32 && smooth_coordinate_count >= 5 {
                 n_knots = n_knots.min(1);
             }
             if inferred {
                 let unique = unique_count_column(ds.values.column(c));
-                let ceiling = ((unique as f64).cbrt() as usize).max(20);
-                inference_notes.push(format!(
-                    "Automatically set {} internal knots for smooth '{}' from {} unique values (rule: clamp(unique/4, 4..max(20, cbrt(unique))) = clamp(unique/4, 4..{})). Override with knots=... or k=....",
+                // State the rule the engine actually applied
+                // (`heuristic_knots_for_column`: `clamp(unique/4, 4..8)`), and
+                // the small-data reduction when it fired. The note used to
+                // announce a `max(20, cbrt(unique))` ceiling that no code path
+                // computed, so for every column with 36 or more unique values
+                // it printed a rule whose own arithmetic disagreed with the
+                // count beside it.
+                let mut note = format!(
+                    "Automatically set {} internal knots for smooth '{}' from {} unique values (rule: clamp(unique/4, 4..{}) = {}; basis dimension = internal knots + degree + 1).",
                     n_knots,
                     vars.join(","),
                     unique,
-                    ceiling,
-                ));
+                    MAX_DEFAULT_INTERNAL_KNOTS,
+                    heuristic_knots,
+                );
+                if n_knots != heuristic_knots {
+                    note.push_str(&format!(
+                        " Reduced to {} because the fit has only {} rows and {} smooth coordinates.",
+                        n_knots,
+                        ds.values.nrows(),
+                        smooth_coordinate_count,
+                    ));
+                }
+                note.push_str(" Override with knots=... or k=....");
+                inference_notes.push(note);
             }
             let boundary_conditions =
                 if periodic_axes[0] && bspline_boundary_declares_periodic_axis(options) {
@@ -4008,17 +4026,17 @@ pub fn build_smooth_basis(
                         None,
                     )
                 } else {
-                    // `num_internal_knots = k - degree - 1` reproduces the
-                    // requested basis size exactly when degree was reduced for
-                    // a low-cardinality margin; keep the legacy `.max(1)`
-                    // floor on the un-reduced path so the existing knot
-                    // geometry is unchanged whenever the user already passed
-                    // k >= degree + 1.
-                    let num_internal_knots = if effective_degree < degree {
-                        k_axis.saturating_sub(effective_degree + 1)
-                    } else {
-                        k_axis.saturating_sub(degree + 1).max(1)
-                    };
+                    // `num_internal_knots = k - effective_degree - 1` is the
+                    // only count that realises the requested per-margin basis
+                    // size: a clamped degree-`d` B-spline with `m` internal
+                    // knots has exactly `m + d + 1` functions, and zero
+                    // internal knots (`k = degree + 1`, one polynomial piece)
+                    // is a valid margin. A legacy `.max(1)` floor on the
+                    // un-reduced path used to turn `k=4` into a five-function
+                    // cubic margin, so `k=4` and `k=5` built the same tensor.
+                    // `k_axis >= 2` and `effective_degree <= k_axis - 1`, so
+                    // this cannot underflow.
+                    let num_internal_knots = k_axis - effective_degree - 1;
                     let knotspec = match requested_knot_placement
                         .unwrap_or(crate::basis::BSplineKnotPlacement::Uniform)
                     {
@@ -4454,6 +4472,13 @@ fn min_per_group_unique_count(
         .max(1)
 }
 
+/// Cap on the automatically inferred internal-knot count of a 1-D smooth.
+/// Default cubic basis ≈ `MAX_DEFAULT_INTERNAL_KNOTS + degree + 1` = 12
+/// functions, matching mgcv's lean univariate default. Named at module level
+/// so the inference note reports the ceiling the engine applies rather than
+/// one of its own.
+pub(crate) const MAX_DEFAULT_INTERNAL_KNOTS: usize = 8;
+
 /// Default internal-knot count for an *additive* univariate smooth, derived
 /// from the column's unique-value count.
 ///
@@ -4482,9 +4507,6 @@ fn min_per_group_unique_count(
 /// `unique/4` growth below the cap keeps small/sparse columns (n ≤ 32, where
 /// `unique/4 ≤ 8`) on exactly their previous knot count.
 pub fn heuristic_knots_for_column(col: ArrayView1<'_, f64>) -> usize {
-    /// Default cubic basis ≈ `MAX_DEFAULT_INTERNAL_KNOTS + degree + 1` = 12
-    /// functions, matching mgcv's lean univariate default.
-    const MAX_DEFAULT_INTERNAL_KNOTS: usize = 8;
     let unique = unique_count_column(col);
     (unique / 4).clamp(4, MAX_DEFAULT_INTERNAL_KNOTS)
 }
@@ -4742,8 +4764,14 @@ const ANCHOR_VALUE_OPTION_KEYS: [&str; 8] = [
 /// `s(x, bs="ps", k=3)` with default `degree=3` is interpreted as the
 /// largest representable spline (`effective_degree = k - 1 = 2`, quadratic)
 /// rather than rejected. The `penalty_order` carried by the caller must be
-/// clamped to `<= effective_degree` so the marginal difference penalty
+/// clamped to `<= effective_degree` so the marginal roughness penalty
 /// stays well-defined; the returned `effective_degree` makes that explicit.
+///
+/// An explicit `k` is honoured EXACTLY: a clamped degree-`d` B-spline with
+/// `m` internal knots has `m + d + 1` functions, so the returned count is
+/// `k - effective_degree - 1`, zero included. `s(x, k=4)` therefore names the
+/// same four-function cubic as `s(x, knots=0)` — the documented identity
+/// `k = internal_knots + degree + 1` (docs/formulas.md) holds for every `k`.
 ///
 /// Mirrors the tensor margin treatment in the `te(...)` builder so a
 /// standalone smooth, a factor smooth, and a tensor margin all interpret
@@ -4753,7 +4781,6 @@ fn parse_ps_internal_knots(
     degree: usize,
     default_internal_knots: usize,
 ) -> Result<(usize, bool, usize), String> {
-    const MIN_EXPRESSIVE_INTERNAL_KNOTS: usize = 2;
     // Strict variants: reject `k=-1`, `k=1.5`, `knots=-2` etc. with a
     // focused error instead of silently dropping the value and using the
     // default. Lenient `option_usize` / `option_usize_any` silently swallow
@@ -4789,13 +4816,13 @@ fn parse_ps_internal_knots(
         // behaviour (e.g. `s(x, bs="ps", k=3)` becomes a quadratic basis)
         // and the per-axis reduction the tensor builder already does.
         let effective_degree = degree.min(k - 1).max(1);
-        let num_internal_knots = if effective_degree < degree {
-            // Reproduce the requested basis size exactly when degree was
-            // reduced for a low-cardinality axis: num_basis = k.
-            k.saturating_sub(effective_degree + 1)
-        } else {
-            (k - degree - 1).max(MIN_EXPRESSIVE_INTERNAL_KNOTS)
-        };
+        // `k >= 2` and `effective_degree <= k - 1`, so this cannot underflow.
+        // A floor of two internal knots used to sit on the un-reduced branch
+        // and silently turned `k=4` and `k=5` into the six-function cubic, so
+        // three requested dimensions collapsed onto one bit-identical fit
+        // while the `knots=` spelling of the same bases was honoured exactly.
+        // Zero internal knots is a valid basis (a single polynomial piece).
+        let num_internal_knots = k - effective_degree - 1;
         Ok((num_internal_knots, false, effective_degree))
     } else {
         Ok((

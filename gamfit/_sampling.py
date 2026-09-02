@@ -16,6 +16,30 @@ from ._paired import CumulativeIncidenceDraws, PairedPosteriorSamples
 from ._summary import Summary, _ColumnarCoefficientRecords
 
 
+def _validated_link_spec(value: Any, *, source: str) -> str:
+    """Require the serialized identity of the fitted inverse link."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            f"{source} requires a non-empty JSON string in 'link_spec'; "
+            "a family_kind tag cannot reconstruct a parameterized fitted link"
+        )
+    try:
+        json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{source} carries invalid link_spec JSON: {exc}") from exc
+    return value
+
+
+def _required_link_spec(payload: Mapping[str, Any], *, source: str) -> str:
+    try:
+        value = payload["link_spec"]
+    except KeyError as exc:
+        raise ValueError(
+            f"{source} is missing required 'link_spec' fitted-link identity"
+        ) from exc
+    return _validated_link_spec(value, source=source)
+
+
 @dataclass(frozen=True, eq=False, slots=True)
 class PosteriorPredictive:
     """Per-row posterior fitted-mean draws on the link and response scales."""
@@ -27,8 +51,12 @@ class PosteriorPredictive:
     # Serialized parameterized inverse-link spec (JSON). Carries the per-fit
     # state (skew/tail, mixture weights, latent SD) the bare ``family_kind`` tag
     # drops, so the parameterized links' response-scale bands are exact
-    # (issue #1133). None for plain links / older payloads.
-    link_spec: str | None = None
+    # (issue #1133). Required for standard and parameterized links alike so a
+    # payload always names its exact fitted response transform.
+    link_spec: str
+
+    def __post_init__(self) -> None:
+        _validated_link_spec(self.link_spec, source="PosteriorPredictive")
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -143,12 +171,13 @@ class PosteriorSamples:
     model_class: str
     family_kind: str
     config: SamplingConfig
-    # Serialized parameterized inverse-link spec (JSON); see PosteriorPredictive.
-    link_spec: str | None = None
+    # Serialized exact inverse-link identity (JSON); see PosteriorPredictive.
+    link_spec: str
     _model_bytes: bytes = field(repr=False, compare=False, default=_NO_MODEL)
     _name_index: Mapping[str, int] = field(repr=False, compare=False, default_factory=dict)
 
     def __post_init__(self) -> None:
+        _validated_link_spec(self.link_spec, source="PosteriorSamples")
         object.__setattr__(
             self,
             "_name_index",
@@ -176,7 +205,7 @@ class PosteriorSamples:
                    covariance_source=str(p["covariance_source"]),
                    model_class=str(p.get("model_class", "standard")),
                    family_kind=str(p.get("family_kind", "identity")),
-                   link_spec=(str(p["link_spec"]) if p.get("link_spec") is not None else None),
+                   link_spec=_required_link_spec(p, source="FFI sample payload"),
                    config=_config_from_payload(p.get("config", {})), _model_bytes=model_bytes)
 
     @property
@@ -301,7 +330,7 @@ class PosteriorSamples:
 
     def _posterior_predict_matrices(
         self, new_data: Any
-    ) -> tuple[Any, Any, str, str, str | None]:
+    ) -> tuple[Any, Any, str, str, str]:
         import numpy as np
         self._need_model()
         h, r = self._normalize(new_data)
@@ -315,8 +344,7 @@ class PosteriorSamples:
                 "posterior predict FFI payload must contain same-shaped 2-D eta "
                 f"and mean matrices; got eta={eta.shape}, mean={mean.shape}"
             )
-        link_spec = p.get("link_spec", self.link_spec)
-        link_spec = str(link_spec) if link_spec is not None else None
+        link_spec = _required_link_spec(p, source="FFI posterior-predict payload")
         return (eta, mean, str(p.get("family_kind", self.family_kind)),
                 str(p.get("model_class", self.model_class)), link_spec)
 
@@ -363,7 +391,7 @@ class PosteriorSamples:
                    covariance_source=str(md["covariance_source"]),
                    model_class=str(md.get("model_class", "standard")),
                    family_kind=str(md.get("family_kind", "identity")),
-                   link_spec=(str(md["link_spec"]) if md.get("link_spec") is not None else None),
+                   link_spec=_required_link_spec(md, source="saved posterior samples"),
                    config=_config_from_payload(md.get("config", {})),
                    _model_bytes=bytes(np.asarray(npz["model_bytes"], dtype=np.uint8).tobytes()))
 

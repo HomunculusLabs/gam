@@ -12,11 +12,9 @@
 //! ```
 //!
 //! The ordinary-least-squares slope of `sin(2π·x)` against `x` on `[0,1]` is
-//! negative, so the constraint `β_x ≥ 0` BINDS: the constrained optimum is
+//! negative, so the constraint `β_x ≥ 0` BINDS: the constrained MAP is
 //! `β_x = 0`, with `x2` and the intercept free to absorb the rest. That optimum
-//! is well defined and *is* reachable — the exact-interval `bounded(x, …)`
-//! path (a different solver) finds it: `β_x = 0`, `β_x2 ≈ 0.50`. But the
-//! generic active-set path aborts:
+//! is well defined, but the generic active-set path used to abort:
 //!
 //! ```text
 //!   y ~ nonnegative(x) + x2    -> error: Parameter constraint violation:
@@ -25,7 +23,6 @@
 //!                                  (tol=5.0e-6); active=1/1
 //!   y ~ nonnegative(x)         -> fits fine (no extra free term)
 //!   y ~ x + x2  (unconstrained)-> fits fine
-//!   y ~ bounded(x,min=0,max=5)+x2 -> fits fine, β_x = 0, β_x2 ≈ 0.50
 //! ```
 //!
 //! Primal feasibility, dual feasibility and complementarity are all exactly
@@ -33,8 +30,8 @@
 //! (5.8e-5 vs the 5e-6 gate; the residual grows with the data, ~2e-4 on other
 //! datasets), and the active face is full rank (`active=1/1`), so the
 //! rank-deficient-face relaxation does not apply. The free-coordinate gradient
-//! the diagnostic reports is non-zero even though `bounded()` demonstrates the
-//! same constrained optimum is achievable, which points at a scaling mismatch
+//! the diagnostic reports is non-zero even though the boundary MAP is feasible,
+//! which points at a scaling mismatch
 //! between the gradient/constraint coordinate systems the active-set QP solves
 //! in and the KKT diagnostic measures in — not genuine non-stationarity.
 //!
@@ -54,14 +51,15 @@
 //!    coordinate transform), here surfacing as a spurious KKT abort instead of a
 //!    silently-wrong coefficient.
 //!
-//! This test fits the constrained model and the `bounded()` anchor on identical
-//! data and asserts the active-set path (a) succeeds and (b) lands on the same
-//! constrained optimum the anchor reaches. While the bug is live the fit aborts,
-//! so assertion (a) fails; once the active-set solver certifies the converged
-//! constrained optimum, both pass unchanged.
+//! The fit persists the boundary MAP separately from its reported coefficient:
+//! `constrained_posterior.mode` is zero, while `fit.beta` and default prediction
+//! are the strictly-interior truncated posterior mean mandated by SPEC. This
+//! test checks both estimands rather than requiring the posterior mean to equal
+//! the MAP.
 //!
 //! Related: see the sibling build-break ticket filed in the same run.
 
+use gam::inference::model::FittedModel;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -101,15 +99,14 @@ fn write_probe_csv(path: &Path) {
     writer.flush().expect("flush probe csv");
 }
 
-/// Read the `mean` column from a `gam predict --out` CSV.
+/// Read the explicit posterior-mean column from a standard prediction CSV.
 fn read_means(path: &Path) -> Vec<f64> {
     let mut reader = csv::Reader::from_path(path).expect("open predictions csv");
     let headers = reader.headers().expect("predict csv headers").clone();
     let mean_idx = headers
         .iter()
-        .position(|h| h == "mean")
-        .or_else(|| headers.iter().position(|h| h == "eta"))
-        .expect("predict csv has a mean / eta column");
+        .position(|h| h == "posterior_mean")
+        .expect("standard predict csv has a posterior_mean column");
     reader
         .records()
         .map(|rec| {
@@ -118,6 +115,17 @@ fn read_means(path: &Path) -> Vec<f64> {
                 .expect("numeric prediction")
         })
         .collect()
+}
+
+fn constrained_x_estimands(model_path: &Path) -> (f64, f64) {
+    let model = FittedModel::load_from_path(model_path).expect("load constrained saved model");
+    let fit = model.unified().expect("saved model carries unified fit");
+    let posterior = fit
+        .geometry
+        .as_ref()
+        .and_then(|geometry| geometry.constrained_posterior.as_ref())
+        .expect("nonnegative coefficient persists its constrained posterior");
+    (posterior.mode[1], fit.beta[1])
 }
 
 /// Fit `y ~ <formula>` and return whether the fit succeeded plus its stderr.
@@ -180,47 +188,37 @@ fn nonnegative_constraint_with_free_term_fits_to_the_constrained_optimum() {
         "control failed: unconstrained `y ~ x + x2` should fit; stderr:\n{unc_err}"
     );
 
-    // Anchor: the exact-interval `bounded()` path reaches the constrained
-    // optimum on identical data — β_x clamped at the lower bound 0, β_x2 ≈ 0.50.
-    // (If this ever stops binding the data stopped exercising the bug.)
-    let (banchor_ok, bmodel, banchor_err) =
-        try_fit(dir, "bounded", "y ~ bounded(x, min=0, max=5) + x2");
-    assert!(
-        banchor_ok,
-        "anchor failed: `bounded(x,min=0,max=5) + x2` should fit; stderr:\n{banchor_err}"
-    );
-    let (b_xslope, b_x2slope) = probe_slopes(dir, "bounded", &bmodel);
-    assert!(
-        b_xslope.abs() < 1e-3,
-        "anchor sanity: bounded x-slope should bind at 0, got {b_xslope:.6}"
-    );
-    assert!(
-        (b_x2slope - 0.5).abs() < 0.05,
-        "anchor sanity: bounded x2-slope should be ≈0.5, got {b_x2slope:.6}"
-    );
-
-    // THE BUG: the active-set constraint path must also fit this model. Today it
-    // aborts with `KKT residuals exceed tolerance: ... stat=5.78e-5 (tol=5e-6)`
-    // even though `bounded()` just proved the constrained optimum is reachable.
+    // THE BUG: the active-set constraint path must fit this model. It used to
+    // abort with `KKT residuals exceed tolerance: ... stat=5.78e-5 (tol=5e-6)`.
     let (nn_ok, nnmodel, nn_err) = try_fit(dir, "nonneg", "y ~ nonnegative(x) + x2");
     assert!(
         nn_ok,
         "BUG: `y ~ nonnegative(x) + x2` aborted instead of fitting the constrained \
-         optimum that `bounded()` reaches (β_x=0, β_x2≈{b_x2slope:.3}). \
-         The binding constraint + one free term trips a spurious KKT stationarity \
+         optimum. The binding constraint + one free term trips a spurious KKT stationarity \
          violation. gam fit stderr:\n{nn_err}"
     );
 
-    // Once it fits, it must land on the SAME constrained optimum as the anchor:
-    // x clamped at 0, x2 effect recovered.
-    let (nn_xslope, nn_x2slope) = probe_slopes(dir, "nonneg", &nnmodel);
+    let (mode_xslope, reported_xslope) = constrained_x_estimands(&nnmodel);
     assert!(
-        nn_xslope.abs() < 1e-3,
-        "nonnegative x-slope should bind at 0 (constraint active), got {nn_xslope:.6}"
+        mode_xslope.abs() < 1e-8,
+        "nonnegative coefficient MAP must bind at 0, got {mode_xslope:.12}"
     );
     assert!(
-        (nn_x2slope - b_x2slope).abs() < 0.02,
-        "nonnegative x2-slope {nn_x2slope:.6} should match the bounded anchor {b_x2slope:.6} \
-         (the two documented ways to constrain a coefficient must agree)"
+        reported_xslope >= 0.0 && reported_xslope > mode_xslope,
+        "reported coefficient {reported_xslope:.12} must be the strictly-interior \
+         truncated posterior mean in [0, ∞), above its boundary MAP {mode_xslope:.12}"
+    );
+
+    // Default prediction must use that posterior mean, and the unconstrained
+    // companion term must retain the signal the fixture assigned to it.
+    let (nn_xslope, nn_x2slope) = probe_slopes(dir, "nonneg", &nnmodel);
+    assert!(
+        (nn_xslope - reported_xslope).abs() <= 1e-9 * reported_xslope.abs().max(1.0),
+        "default prediction slope {nn_xslope:.12} must equal the persisted posterior \
+         mean {reported_xslope:.12}"
+    );
+    assert!(
+        (nn_x2slope - 0.5).abs() < 0.05,
+        "the free x2 effect should remain near its generating slope 0.5, got {nn_x2slope:.6}"
     );
 }

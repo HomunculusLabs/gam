@@ -30,6 +30,7 @@ def _draws() -> PosteriorSamples:
         covariance_source="conditional",
         model_class="standard",
         family_kind="identity",
+        link_spec='{"Standard":"Identity"}',
         config=SamplingConfig(
             n_samples=3,
             n_warmup=2,
@@ -107,3 +108,48 @@ def test_posterior_summary_dataframe_is_built_from_typed_columns(
     np.testing.assert_array_equal(frame["index"].to_numpy(), np.arange(3))
     np.testing.assert_allclose(frame["estimate"].to_numpy(), [2.0, 12.0, 102.0])
     np.testing.assert_allclose(frame["ci_upper"].to_numpy(), intervals[:, 1])
+
+
+def test_posterior_payloads_require_exact_fitted_link_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "samples": np.zeros((2, 1), dtype=np.float64),
+        "coefficient_names": ["intercept"],
+        "posterior_mean": np.zeros(1, dtype=np.float64),
+        "posterior_std": np.ones(1, dtype=np.float64),
+        "rhat": 1.0,
+        "ess": 2.0,
+        "converged": True,
+        "method": "laplace",
+        "exact": False,
+        "covariance_source": "conditional",
+        "model_class": "standard",
+        "family_kind": "identity",
+        "config": {},
+    }
+    monkeypatch.setattr(
+        "gamfit._sampling._coefficient_names", lambda _raw, _count: ("intercept",)
+    )
+
+    with pytest.raises(ValueError, match="missing required 'link_spec'"):
+        PosteriorSamples.from_ffi_payload(payload)
+
+    draws = _draws()
+    object.__setattr__(draws, "_model_bytes", b"model")
+    monkeypatch.setattr(
+        PosteriorSamples,
+        "_normalize",
+        lambda _self, _data: (["x"], object()),
+    )
+    monkeypatch.setattr(
+        "gamfit._sampling._call",
+        lambda _name, *_args: {
+            "eta": np.zeros((draws.n_draws, 1), dtype=np.float64),
+            "mean": np.zeros((draws.n_draws, 1), dtype=np.float64),
+            "family_kind": "identity",
+            "model_class": "standard",
+        },
+    )
+    with pytest.raises(ValueError, match="missing required 'link_spec'"):
+        draws._posterior_predict_matrices(object())

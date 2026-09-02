@@ -3522,12 +3522,39 @@ fn duchon_psi_component_report(label: &str, n: usize) -> DuchonPsiComponentRepor
             .expect("materialize ∂X/∂ψ")
     };
     assert_eq!(x_psi_an.dim(), (n, p_total), "{label}: ∂X/∂ψ shape");
+    // The criterion never materializes ∂X/∂ψ: it drives the operator's
+    // streaming products. Pin them to the materialized block here so a defect
+    // in one streaming branch cannot hide behind a passing materialized gate.
+    if let Some(op) = deriv.implicit_operator.as_ref() {
+        let op = op.as_ref();
+        let axis = deriv.implicit_axis;
+        let u = Array1::from_shape_fn(p_total, |j| ((j as f64) * 0.731 + 0.2).sin());
+        let v = Array1::from_shape_fn(n, |i| ((i as f64) * 0.377 - 0.1).cos());
+        let fwd = op.forward_mul(axis, &u.view()).expect("operator forward_mul");
+        let fwd_dense = x_psi_an.dot(&u);
+        let fwd_gap = (&fwd - &fwd_dense).mapv(f64::abs).sum() / fwd_dense.mapv(f64::abs).sum().max(1e-300);
+        let tr = op.transpose_mul(axis, &v.view()).expect("operator transpose_mul");
+        let tr_dense = x_psi_an.t().dot(&v);
+        let tr_gap = (&tr - &tr_dense).mapv(f64::abs).sum() / tr_dense.mapv(f64::abs).sum().max(1e-300);
+        let chunk = op.row_chunk_first(axis, 0..n).expect("operator row_chunk_first");
+        let chunk_gap = frobenius(&(&chunk - &x_psi_an)) / frobenius(&x_psi_an).max(1e-300);
+        eprintln!(
+            "[{label} COMPONENT] streaming vs materialized ∂X/∂ψ: forward_mul rel={fwd_gap:.3e} \
+             transpose_mul rel={tr_gap:.3e} row_chunk rel={chunk_gap:.3e}"
+        );
+        assert!(fwd_gap < 1e-10, "{label}: forward_mul disagrees with materialized ∂X/∂ψ by {fwd_gap:.3e}");
+        assert!(tr_gap < 1e-10, "{label}: transpose_mul disagrees with materialized ∂X/∂ψ by {tr_gap:.3e}");
+        assert!(chunk_gap < 1e-10, "{label}: row_chunk_first disagrees with materialized ∂X/∂ψ by {chunk_gap:.3e}");
+    }
+    // The spatial bridge emits the penalty ψ-derivatives as dense per-penalty
+    // components (`s_psi_components`); the `PenaltyMatrix` form is only
+    // populated by the transformation-normal assembler.
     let penalty_components: Vec<(usize, Array2<f64>)> = deriv
-        .s_psi_penalty_components
+        .s_psi_components
         .as_ref()
-        .expect("penalty psi components")
+        .expect("dense penalty psi components from the spatial bridge")
         .iter()
-        .map(|(idx, component)| (*idx, component.to_dense()))
+        .map(|(idx, component)| (*idx, component.clone()))
         .collect();
     assert!(!penalty_components.is_empty(), "{label}: at least one penalty ψ block");
 

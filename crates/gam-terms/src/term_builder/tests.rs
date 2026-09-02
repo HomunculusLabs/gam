@@ -1706,11 +1706,21 @@ fn parse_matern_nu_rejects_unsupported_or_invalid_values() {
 }
 
 #[test]
-fn parse_ps_k_promotes_underexpressive_cubic_basis() {
+fn parse_ps_k_is_honoured_exactly_down_to_degree_plus_one() {
+    // `k = internal_knots + degree + 1` for EVERY explicit `k`: the
+    // four-function cubic `k=4` is zero internal knots, the same basis
+    // `knots=0` names. A floor of two internal knots used to turn `k=4` and
+    // `k=5` into the six-function basis silently.
     let mut opts = BTreeMap::new();
     opts.insert("k".to_string(), "4".to_string());
     let (internal, inferred, eff_degree) = parse_ps_internal_knots(&opts, 3, 20).expect("k=4");
-    assert_eq!(internal, 2);
+    assert_eq!(internal, 0);
+    assert_eq!(eff_degree, 3);
+    assert!(!inferred);
+
+    opts.insert("k".to_string(), "5".to_string());
+    let (internal, inferred, eff_degree) = parse_ps_internal_knots(&opts, 3, 20).expect("k=5");
+    assert_eq!(internal, 1);
     assert_eq!(eff_degree, 3);
     assert!(!inferred);
 
@@ -1756,12 +1766,12 @@ fn parse_ps_internal_knots_drops_degree_for_small_k() {
         .expect_err("k=1 is below the irreducible spline floor");
     assert!(err.contains("requires k >= 2"), "unexpected error: {err}");
 
-    // When the user already passed `k >= degree+1`, the helper must
-    // preserve the existing knot geometry exactly.
+    // `k = degree + 1` is the first un-reduced size: the full cubic degree
+    // with zero internal knots, `num_basis = k = 4` exactly.
     opts.insert("k".to_string(), "4".to_string());
     let (internal, inferred, eff_degree) = parse_ps_internal_knots(&opts, 3, 20).expect("k=4");
     assert_eq!(eff_degree, 3);
-    assert_eq!(internal, 2);
+    assert_eq!(internal, 0);
     assert!(!inferred);
 }
 

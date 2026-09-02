@@ -486,6 +486,21 @@ impl std::fmt::Debug for SaeArrowAssemblyWorkspace {
     }
 }
 
+/// Transient continuation state for one inner solver's globalization.
+///
+/// The evidence criterion reaches one mathematical optimum through bounded
+/// calls to the joint driver. Those calls are continuation windows, not new
+/// optimizations, so the Armijo trial length and both LM trust-region ridges
+/// must cross the boundary as one value. This hint never enters the fitted
+/// model, objective, derivative, or convergence certificate; cloning a term
+/// deliberately clears it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct InnerGlobalizationHint {
+    pub(crate) warm_step: f64,
+    pub(crate) lm_ridge_t: f64,
+    pub(crate) lm_ridge_b: f64,
+}
+
 /// Full SAE-manifold term.
 #[derive(Debug)]
 pub struct SaeManifoldTerm {
@@ -621,8 +636,8 @@ pub struct SaeManifoldTerm {
     /// ledger in [`Self::collapse_events`] because a co-collapse reseed is a
     /// whole-dictionary multi-start, not a per-atom second chance.
     pub(crate) dictionary_cocollapse_reseeds: usize,
-    /// #2267 — the inner line search's ACCEPTED trial length, carried across
-    /// re-entries of the joint fit.
+    /// #2267/#2762 — the inner solver's complete globalization state, carried
+    /// across re-entries of the joint fit.
     ///
     /// The backtracking search only ever contracts from its first trial, so the
     /// trial length is a hard ceiling on the accepted `α`. Starting every call
@@ -631,15 +646,19 @@ pub struct SaeManifoldTerm {
     /// the joint fit in short windows (`inner_max_iter = 8` on the production
     /// path), so a per-call ladder is re-climbed from scratch every window and
     /// most iterations never reach the unit step at all — measured: 5 of every 8.
-    /// The globalization scale the previous window ESTABLISHED is exactly the
+    /// The globalization state the previous window ESTABLISHED is exactly the
     /// warm-start information a re-entry should keep, so it lives here rather
-    /// than dying with the call frame. `None` on a cold term.
+    /// than dying with the call frame. That state is indivisible: carrying the
+    /// Armijo trial length while resetting the LM ridges to their caller floors
+    /// restarts half of the optimizer on every refinement window. `None` on a
+    /// cold term.
     ///
     /// Not part of the fitted state: it is a search hint, never read by the
-    /// value, gradient, or certificate, and a stale hint only costs backtracking
-    /// halvings on one iterate. Transient like `best_cocollapse_incumbent`, so a
+    /// value, gradient, or certificate. A stale hint can only change which
+    /// globalized step is proposed; the unchanged objective-decrease gate still
+    /// referees every commit. Transient like `best_cocollapse_incumbent`, so a
     /// clone starts cold.
-    pub(crate) inner_line_search_warm_step: Option<f64>,
+    pub(crate) inner_globalization_hint: Option<InnerGlobalizationHint>,
     /// #1026 co-collapse multi-start incumbent: the best (highest reconstruction
     /// EV) dictionary state seen across the full-dictionary co-collapse reseeds in
     /// the current optimization, with that EV. A blind reseed sequence can land in
@@ -914,8 +933,9 @@ impl Clone for SaeManifoldTerm {
             criterion_gauge_deflation_last_delta_sign: self
                 .criterion_gauge_deflation_last_delta_sign,
             dictionary_cocollapse_reseeds: self.dictionary_cocollapse_reseeds,
-            // Transient globalization hint — a fresh clone re-establishes it.
-            inner_line_search_warm_step: None,
+            // Transient globalization hint — a fresh clone re-establishes the
+            // whole line-search/trust-region state together.
+            inner_globalization_hint: None,
             // Transient in-fit multi-start incumbent — not part of the persisted
             // term identity (like `border_hbb_workspace`); a fresh clone starts
             // with no incumbent and rebuilds it if it re-enters co-collapse.

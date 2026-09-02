@@ -563,16 +563,32 @@ impl Drop for SpeedGate {
 /// few tens of nanoseconds lets a few nanoseconds of closure-inlining asymmetry
 /// decide a small margin, and a 43 ns arm changed sign under batching).
 ///
-/// The batch is a feedback chain: row `i + 1` sees a perturbation derived from
-/// the fold of rows `0..=i`, so no row can be hoisted out of the batch or
-/// vectorised across it, exactly as the harness chains its own iterations.
-/// The returned closure has the `FnMut(f64) -> f64` shape the harness times.
+/// The rows are independent of one another, as production's rows are: a data
+/// loop hands each row its own inputs and folds the results, and the processor
+/// overlaps consecutive rows, so what a batch measures is throughput. The
+/// first version of this adapter chained the rows instead -- row `i + 1` was
+/// perturbed by the fold of rows `0..=i` -- and that measured the latency of
+/// one input's path through the arm, not the arm's work: the tower-3 prune of
+/// the binomial coefficients, which does strictly less arithmetic than the
+/// full tower, went from a 1.56x win under one call per iteration to a 0.99
+/// loss under the chain, and two order-4 formulas within one instruction of
+/// each other in every class were ranked by where the nudged coefficient
+/// enters the expression.
+///
+/// Each row is perturbed by a distinct multiple of a negligible step, so no
+/// two rows of a batch share an input: a pure outlined arm's calls cannot be
+/// merged, and an inlined arm cannot be evaluated once for the batch. What
+/// this adapter cannot prevent is the hoisting of an inlined arm's
+/// fixture-invariant work out of the batch; an arm that is timed must be
+/// outlined (`#[inline(never)]`) or take its fixture through an opaque
+/// boundary, and that is the arm's responsibility, not the adapter's. The
+/// returned closure has the `FnMut(f64) -> f64` shape the harness times.
 pub fn batched<F: FnMut(f64) -> f64>(rows: usize, mut arm: F) -> impl FnMut(f64) -> f64 {
     assert!(rows > 0, "a batched arm needs at least one row");
     move |nudge| {
         let mut fold = 0.0_f64;
-        for _ in 0..rows {
-            fold += arm(nudge + fold * 1e-18);
+        for row in 0..rows {
+            fold += arm(nudge + row as f64 * 1e-18);
         }
         fold
     }
