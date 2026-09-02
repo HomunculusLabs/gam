@@ -3163,15 +3163,24 @@ where
                             crate::model_types::OuterStationarityCertificate::AsymptoteRail { .. }
                         ) || !certificate.lambdas_railed.is_empty()
                             });
-                    if !rail_certified {
+                    // The same typed absence applies when the outer Hessian has
+                    // no analytic form for this fit at all (a non-canonical
+                    // Firth link, routed to BFGS): nothing about the optimum is
+                    // suspect, the correction simply cannot be formed, and the
+                    // fit was accepted with that link on purpose (#2158).
+                    let structurally_not_analytic = matches!(
+                        reason,
+                        crate::estimate::smoothing_correction::SmoothingCorrectionUnavailable::OuterHessianNotAnalytic { .. }
+                    );
+                    if !rail_certified && !structurally_not_analytic {
                         return Err(EstimationError::InvalidInput(format!(
                             "exact smoothing-corrected covariance unavailable: {reason:?}"
                         )));
                     }
                     log::info!(
-                        "[SMOOTHING-CORRECTION] typed-unavailable on a rail-certified \
-                         fit ({reason:?}); shipping the plug-in covariance without a \
-                         smoothing correction"
+                        "[SMOOTHING-CORRECTION] typed-unavailable on a {} fit ({reason:?}); \
+                         shipping the plug-in covariance without a smoothing correction",
+                        if rail_certified { "rail-certified" } else { "non-analytic-outer-Hessian" }
                     );
                     rho_covariance = None;
                     smoothing_correction = None;

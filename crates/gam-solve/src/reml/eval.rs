@@ -1610,6 +1610,18 @@ impl<'a> RemlState<'a> {
                     }
                 }
             }
+            SmoothingCorrectionOutcome::Unavailable {
+                reason: SmoothingCorrectionUnavailable::OuterHessianNotAnalytic { error },
+                ..
+            } => {
+                // Structural, not numerical: no analytic outer Hessian exists
+                // for this fit, so the counter of numerical failures does not
+                // move.
+                log::info!(
+                    "[smoothing-correction] branch=unavailable reason=outer-hessian-not-analytic \
+                     ({error})"
+                );
+            }
             SmoothingCorrectionOutcome::Unavailable { reason, .. } => {
                 SMOOTHING_CORRECTION_NUMERICAL_FAILURE_COUNT.fetch_add(1, Ordering::Relaxed);
                 log::warn!(

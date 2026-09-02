@@ -323,6 +323,19 @@ pub(crate) enum SmoothingCorrectionStatus {
     Unavailable(SmoothingCorrectionUnavailable),
 }
 
+/// The one structural refusal of the analytic Firth outer Hessian. A
+/// non-canonical Firth link is routed to BFGS for the outer search (its
+/// observed-information carrier needs a sixth inverse-link derivative the jet
+/// tower does not expose), so at the fit's end no analytic ρ-Hessian exists
+/// for it. `hessian_cdef_arrays` refuses with exactly this text and the
+/// smoothing correction maps it to
+/// [`SmoothingCorrectionUnavailable::OuterHessianNotAnalytic`]: a typed,
+/// expected absence rather than a numerical failure, so a Firth-on `loglog` /
+/// `cauchit` fit ships with its conditional covariance instead of dying over
+/// an enhancement it was told is unavailable (#2158).
+pub(crate) const FIRTH_OUTER_HESSIAN_NOT_ANALYTIC: &str =
+    "Tierney-Kadane outer Hessian is implemented for canonical Binomial Logit Firth fits only";
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SmoothingCorrectionUnavailable {
     ObjectiveInnerHessian {
@@ -336,6 +349,14 @@ pub(crate) enum SmoothingCorrectionUnavailable {
     InnerHessianNotPositiveDefinite,
     SensitivitySolve,
     OuterHessian {
+        error: String,
+    },
+    /// The outer ρ-Hessian has no analytic form for this fit — a
+    /// non-canonical Firth link whose outer search ran on BFGS
+    /// (`FIRTH_OUTER_HESSIAN_NOT_ANALYTIC`). Structural and expected, not a
+    /// numerical failure: the caller ships the conditional covariance and
+    /// labels the correction absent.
+    OuterHessianNotAnalytic {
         error: String,
     },
     OuterHessianInverse { error: String },
@@ -1634,20 +1655,30 @@ pub(crate) fn compute_smoothing_correction(
     let mut hessian_rho = match reml_state.compute_lamlhessian_consistent(final_rho) {
         Ok(h) => h,
         Err(err) => {
-            log::warn!(
-                "LAML Hessian unavailable ({}); skipping smoothing correction.",
-                err
-            );
+            let reason = if err.to_string().contains(FIRTH_OUTER_HESSIAN_NOT_ANALYTIC) {
+                log::info!(
+                    "LAML Hessian is not analytic for this fit ({}); the smoothing correction \
+                     is typed-unavailable.",
+                    err
+                );
+                SmoothingCorrectionUnavailable::OuterHessianNotAnalytic {
+                    error: err.to_string(),
+                }
+            } else {
+                log::warn!(
+                    "LAML Hessian unavailable ({}); skipping smoothing correction.",
+                    err
+                );
+                SmoothingCorrectionUnavailable::OuterHessian {
+                    error: err.to_string(),
+                }
+            };
             return SmoothingCorrectionComputation {
                 correction: None,
                 rho_covariance: None,
                 active_rank: None,
                 spectrum: None,
-                status: SmoothingCorrectionStatus::Unavailable(
-                    SmoothingCorrectionUnavailable::OuterHessian {
-                        error: err.to_string(),
-                    },
-                ),
+                status: SmoothingCorrectionStatus::Unavailable(reason),
             };
         }
     };
