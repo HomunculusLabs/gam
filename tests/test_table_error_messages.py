@@ -1,7 +1,10 @@
-"""Test improved error messages in table normalization.
+"""Missing values are refused where a formula consumes them, with the column
+and the 1-based row named.
 
-This test verifies that NaN/None/empty cell errors include column and row context,
-making them actionable for users debugging their data.
+Table normalization preserves a missing cell (``NaN`` / ``None``) so that a
+column the formula never references cannot block a fit (#2775); the refusal
+lives one layer down, in the model-aware validator that knows which columns a
+term consumes, and it must be as actionable there as it ever was here.
 """
 
 from __future__ import annotations
@@ -9,57 +12,32 @@ from __future__ import annotations
 import pytest
 
 
-def test_nan_error_includes_column_and_row() -> None:
-    """NaN values should report which column and row they occur in."""
-    # Skip if pandas not available
-    np = pytest.importorskip("numpy")
-    pd = pytest.importorskip("pandas")
-
-    from gamfit._tables import normalize_table
-
-    # Create a DataFrame with NaN in the 'x' column, row 2 (0-indexed)
-    df = pd.DataFrame({
-        "x": [1.0, 2.0, float("nan"), 4.0],
-        "y": [10.0, 20.0, 30.0, 40.0],
-    })
-
-    with pytest.raises(ValueError) as exc_info:
-        normalize_table(df)
-
-    error_msg = str(exc_info.value)
-    assert "x" in error_msg, f"Expected column name 'x' in error: {error_msg}"
-    assert "row 3" in error_msg, f"Expected row 3 in error: {error_msg}"
-
-
-def test_none_error_includes_context() -> None:
-    """None values should report which column and row they occur in."""
-    pytest.importorskip("pandas")
-
-    from gamfit._tables import normalize_table
-
-    # Using a dict input that can have None
-    data = {
-        "x": [1.0, 2.0, None, 4.0],
-        "y": [10.0, 20.0, 30.0, 40.0],
+def _frame(bad: object) -> dict[str, list[object]]:
+    return {
+        "x": [0.1, 0.2, bad, 0.4, 0.5, 0.6, 0.7, 0.8],
+        "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
     }
 
+
+def test_normalize_table_preserves_a_missing_numeric_cell() -> None:
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("gamfit._rust")
+    from gamfit._tables import normalize_table
+
+    headers, table, _ = normalize_table(_frame(float("nan")))
+    assert headers == ["x", "y"]
+    assert table.shape == (8, 2)
+    assert np.isnan(float(table[2][0]))
+
+
+@pytest.mark.parametrize("bad", [float("nan"), None])
+def test_fit_names_the_column_and_the_one_based_row(bad: object) -> None:
+    pytest.importorskip("numpy")
+    pytest.importorskip("gamfit._rust")
+    import gamfit
+
     with pytest.raises(ValueError) as exc_info:
-        normalize_table(data)
-
-    error_msg = str(exc_info.value)
-    assert "x" in error_msg, f"Expected column name 'x' in error: {error_msg}"
-    assert "row 3" in error_msg, f"Expected row 3 in error: {error_msg}"
-
-
-def test_stringify_cell_direct_call_still_works() -> None:
-    """Direct calls to stringify_cell should work with or without context."""
-    from gamfit._tables import stringify_cell
-
-    # Without context (backward compatible)
-    assert stringify_cell(3.14) == "3.14"
-    assert stringify_cell(42) == "42"
-    assert stringify_cell(True) == "1"
-
-    # With context (optional improvement)
-    assert stringify_cell(3.14, column="test_col") == "3.14"
-    assert stringify_cell(42, column="age", row=5) == "42"
+        gamfit.fit(_frame(bad), "y ~ x", family="gaussian")
+    message = str(exc_info.value)
+    assert "x" in message, f"expected column name 'x' in error: {message}"
+    assert "row 3" in message, f"expected the 1-based row 3 in error: {message}"
