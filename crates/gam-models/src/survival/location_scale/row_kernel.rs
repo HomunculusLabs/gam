@@ -6000,40 +6000,51 @@ mod patterned_order2_perf_tests {
         );
         gate.faster("order=3", &order3, "reused_arena", "fresh_arena");
 
+        // Order 4: the claim is that a warm reused arena does no allocator
+        // work, and that claim is countable, so it is asserted as a count,
+        // not timed. Timed, it was a coin flip: across fourteen runs the
+        // reused arm ranged 0.978–1.047 against a fresh arena per row, with
+        // `wins` unanimous in both directions — a per-process effect (the
+        // reused arena's one chunk lands at one address per process, the
+        // fresh arm's chunks wherever malloc places them each row, and
+        // cache-set placement decides a 1–2% margin at a 45–60 µs row) that
+        // is larger than the ~0.5 µs the policy saves. Orders 2 and 3 above
+        // keep the timing, where the saving is resolved.
+        //
+        // The arena grows only by adding a chunk, which is the only allocator
+        // call it makes; after one warm row its reserved size must not change
+        // over any later row, and `reset` must keep it (the compaction in
+        // `DynamicJetArena::reset` fires once, on the first reset).
         let mut prod_arena4 = DynamicJetArena::new();
-        let order4 = paired_interleaved(
-            15,
-            iterations,
-            0x9320_D1_04,
-            |nudge| {
-                let mut pp = p;
-                pp[0] += nudge;
-                prod_arena4.reset();
-                let vars = prod_arena4.alloc_slice_fill_with(KW, |a| {
-                    DynamicTwoSeed::seed(pp[a], a, dir_u[a], dir_v[a], KW, &prod_arena4)
-                });
-                let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
-                out.value() + out.contracted_fourth()[0]
-            },
-            |nudge| {
-                let mut pp = p;
-                pp[0] += nudge;
-                let fresh = DynamicJetArena::new();
-                let vars = fresh.alloc_slice_fill_with(KW, |a| {
-                    DynamicTwoSeed::seed(pp[a], a, dir_u[a], dir_v[a], KW, &fresh)
-                });
-                let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
-                out.value() + out.contracted_fourth()[0]
-            },
-        );
-        // Order 4 is `not_slower`: the reused arena saves the fresh arena's
-        // allocations, which is real work, but at this order the row's
-        // arithmetic is tens of microseconds and the saving sits below the
-        // measurement's resolution on some cores (1.9% unanimous on EPYC
-        // Milan, 0.995 with `wins=0.07` on the GitHub runner). A strict
-        // `faster` on a margin the instrument cannot resolve is a coin flip
-        // per host; orders 2 and 3 keep it, where the saving is resolved.
-        gate.not_slower("order=4", &order4, "reused_arena", "fresh_arena");
+        let row4 = |arena: &DynamicJetArena, nudge: f64| {
+            let mut pp = p;
+            pp[0] += nudge;
+            let vars = arena.alloc_slice_fill_with(KW, |a| {
+                DynamicTwoSeed::seed(pp[a], a, dir_u[a], dir_v[a], KW, arena)
+            });
+            let out = sls_row_nll_wiggle(vars, &kernel, PW, &basis);
+            out.value() + out.contracted_fourth()[0]
+        };
+        let mut checksum = row4(&prod_arena4, 0.0);
+        prod_arena4.reset();
+        checksum += row4(&prod_arena4, 1e-18);
+        let warm = prod_arena4.allocated_bytes();
+        assert!(warm > 0, "the warm arena reserved nothing");
+        for row in 0..64usize {
+            prod_arena4.reset();
+            assert_eq!(
+                prod_arena4.allocated_bytes(),
+                warm,
+                "reset changed the warm arena's reserved size before row {row}"
+            );
+            checksum += row4(&prod_arena4, (row + 2) as f64 * 1e-18);
+            assert_eq!(
+                prod_arena4.allocated_bytes(),
+                warm,
+                "row {row} of a warm arena reached the allocator"
+            );
+        }
+        assert!(checksum.is_finite());
         gate.finish();
     }
 }
