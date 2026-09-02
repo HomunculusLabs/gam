@@ -301,20 +301,36 @@ fn validate_future(
     Ok(())
 }
 
-/// The killed-process integration of one forecast window from a latent
-/// state (`None` for the stationary prior) over a covariate path.
-#[allow(clippy::too_many_arguments)]
-fn run_window(
-    fit: &EventHistoryFit,
-    cohort: &EventHistoryCohort,
-    initial: Option<&LatentState>,
+/// One forecast window: where it opens, the covariate path over it, the
+/// latent state it continues from (`None` for the stationary prior), and
+/// which marks the subject is still at risk for.
+struct Window<'a> {
+    fit: &'a EventHistoryFit,
+    cohort: &'a EventHistoryCohort,
+    initial: Option<&'a LatentState>,
     start: f64,
-    horizons: &[f64],
+    horizons: &'a [f64],
     segments: Vec<CovariateSegment>,
-    table: &Array2<f64>,
-    at_risk: &[bool],
-    label: &str,
-) -> Result<Forecast, EventHistoryError> {
+    /// The cohort's covariate table extended by the window's own rows.
+    table: Array2<f64>,
+    at_risk: Vec<bool>,
+    label: String,
+}
+
+/// The killed-process integration of one forecast window.
+fn run_window(window: Window<'_>) -> Result<Forecast, EventHistoryError> {
+    let Window {
+        fit,
+        cohort,
+        initial,
+        start,
+        horizons,
+        segments,
+        table,
+        at_risk,
+        label,
+    } = window;
+    let at_risk = at_risk.as_slice();
     let marks = fit.marks();
     let atoms = fit.atoms();
     let kinds = &cohort.mark_kinds;
@@ -336,7 +352,7 @@ fn run_window(
     }
     segments.sort_by(|a, b| a.start.total_cmp(&b.start));
     let pseudo = SubjectHistory {
-        id: label.to_string(),
+        id: label,
         entry: start,
         exit: last_horizon,
         events: Vec::new(),
@@ -598,17 +614,17 @@ pub fn forecast(
             MarkKind::Once => !history.events.iter().any(|e| e.mark == d),
         })
         .collect();
-    run_window(
+    run_window(Window {
         fit,
         cohort,
-        Some(&state),
-        history.exit,
-        request.horizons,
+        initial: Some(&state),
+        start: history.exit,
+        horizons: request.horizons,
         segments,
-        &table,
-        &at_risk,
-        &format!("{}::forecast", history.id),
-    )
+        table,
+        at_risk,
+        label: format!("{}::forecast", history.id),
+    })
 }
 
 /// Forecast a subject with no observed history from covariate values alone.
@@ -633,17 +649,17 @@ pub fn population_forecast(
     validate_future(cohort, request.future, last_horizon)?;
     let (table, segments) = future_table(cohort, request.future, request.start, None)?;
     let at_risk = vec![true; marks];
-    run_window(
+    run_window(Window {
         fit,
         cohort,
-        None,
-        request.start,
-        request.horizons,
+        initial: None,
+        start: request.start,
+        horizons: request.horizons,
         segments,
-        &table,
-        &at_risk,
-        "population::forecast",
-    )
+        table,
+        at_risk,
+        label: "population::forecast".to_string(),
+    })
 }
 
 /// Predictive PIT of every event of a subject, in time order, with the

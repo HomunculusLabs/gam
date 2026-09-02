@@ -255,7 +255,6 @@ impl PyEventHistoryModel {
 /// Fit an event-history model from flat arrays.
 #[pyfunction]
 #[pyo3(signature = (mark_names, mark_kinds, covariate_names, covariate_levels, covariates, subject_ids, entry, exit, event_subject, event_time, event_mark, segment_subject, segment_start, segment_row, formula, atoms))]
-#[allow(clippy::too_many_arguments)]
 fn fit_event_history(
     py: Python<'_>,
     mark_names: Vec<String>,
