@@ -1570,7 +1570,7 @@ fn run_linear_reml_schedule_with_recycle(
 
 /// Production sink for the private test observation seam.
 fn ignore_inner_run_start(start: InnerRunStart) {
-    let _ignored_start = start;
+    drop(start);
 }
 
 /// The production schedule with a private, race-free observation seam for its
