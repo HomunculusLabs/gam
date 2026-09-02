@@ -156,3 +156,47 @@ def test_validate_formula_ignores_missing_values_in_unreferenced_columns() -> No
         _with_unreferenced_gap(np.nan), "y ~ s(x)", family="gaussian"
     )
     assert validation["response_column"] == "y"
+
+
+def test_arrow_nulls_in_unreferenced_columns_obey_the_same_projection_contract() -> None:
+    """Arrow nulls are absence, not a reason to validate an unused column."""
+    pa = pytest.importorskip("pyarrow")
+    clean = _clean_data()
+    rows = clean["x"].size
+    unused = pa.array(
+        [None if row == 7 else 1.0 for row in range(rows)],
+        type=pa.float64(),
+    )
+    training = pa.table({"x": clean["x"], "y": clean["y"], "unused": unused})
+
+    model = gamfit.fit(training, "y ~ s(x)", family="gaussian")
+    reference = gamfit.fit(_clean_data(), "y ~ s(x)", family="gaussian")
+    assert model.summary().n_obs == reference.summary().n_obs
+    assert model.summary().deviance == pytest.approx(
+        reference.summary().deviance, rel=1e-10
+    )
+
+    grid = np.linspace(0.05, 0.95, 11)
+    serving = pa.table(
+        {
+            "x": grid,
+            "unused": pa.array(
+                [None if row == 4 else "" for row in range(grid.size)],
+                type=pa.string(),
+            ),
+        }
+    )
+    assert model.check(serving).ok
+    got = np.asarray(
+        model.predict(serving, return_type="dict")["posterior_mean"], dtype=float
+    )
+    expected = np.asarray(
+        reference.predict({"x": grid}, return_type="dict")["posterior_mean"],
+        dtype=float,
+    )
+    np.testing.assert_allclose(got, expected, rtol=1e-10, atol=1e-10)
+
+    validation = gamfit.validate_formula(
+        training, "y ~ s(x)", family="gaussian"
+    )
+    assert validation["response_column"] == "y"

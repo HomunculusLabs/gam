@@ -1635,8 +1635,14 @@ fn decode_arrow_batch_column_into(
                 base_row + batch_row + 1,
                 header,
             )? {
+                // The ordinary-table boundary turns an empty categorical
+                // cell into `None` before encoding. Arrow carries the same
+                // absence as an empty Utf8 value, so preserve it as NaN too:
+                // generic ingestion still cannot know whether the model will
+                // consume this column. Treating `""` as a factor level here
+                // made otherwise-identical Arrow and mapping inputs disagree.
+                Some("") | None => f64::NAN,
                 Some(label) => encoder.encode(label) as f64,
-                None => f64::NAN,
             };
         }
         return Ok(());
@@ -3122,14 +3128,15 @@ mod tests {
         assert!(null_numeric.values[[1, 0]].is_nan());
 
         let null_dictionary = DictionaryArray::<Int8Type>::new(
-            Int8Array::from(vec![0, 1]),
-            Arc::new(StringArray::from(vec![Some("present"), None])),
+            Int8Array::from(vec![0, 1, 2]),
+            Arc::new(StringArray::from(vec![Some("present"), Some(""), None])),
         );
         let logical_null = encode_single_arrow_array(Arc::new(null_dictionary))
-            .expect("null dictionary value should remain representable");
+            .expect("empty and null dictionary values should remain representable");
         assert_eq!(logical_null.schema.columns[0].levels, vec!["present"]);
         assert_eq!(logical_null.values[[0, 0]], 0.0);
         assert!(logical_null.values[[1, 0]].is_nan());
+        assert!(logical_null.values[[2, 0]].is_nan());
 
         let nonfinite = encode_single_arrow_array(Arc::new(Float64Array::from(vec![
             f64::NAN,
