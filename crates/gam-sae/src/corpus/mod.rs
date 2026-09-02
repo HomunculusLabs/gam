@@ -27,7 +27,7 @@
 //!   subsample with each included row reweighted by `1/inclusion_probability`
 //!   (the subsample-honesty contract), and the trailing steps are honest full
 //!   passes.
-//! * [`kernels`] — fused mixed-precision kernels (`dot`, `gram`, `gemv`,
+//! * `kernels` — fused mixed-precision kernels (`dot`, `gram`, `gemv`,
 //!   `gemv_t`, `cross`) that **read `f32` rows and accumulate in `f64`**, the
 //!   numerical contract that keeps the streaming sums deterministic and
 //!   precise despite `f32` on-disk storage.
@@ -36,9 +36,8 @@
 //!   cloud SDK in-tree), with a bounded prefetch window and the identical
 //!   deterministic `(row_id, row)` sequence as the mmap reader. Also carries
 //!   the frontier predicate
-//!   [`object_store::designed_sampling_mandatory`]: above 10⁸ rows the fit
 //!   must see a designed, honesty-weighted subsample
-//!   ([`gam_solve::row_sampling_measure::RowSamplingMeasure::designed_subsample`]), not
+//!   (`gam_solve::row_sampling_measure::RowSamplingMeasure::designed_subsample`), not
 //!   a full exact pass.
 //! * [`designed_target`] (#991) — the consumer bridge: design a row sample
 //!   from a [`gam_solve::row_sampling_measure::RowSamplingMeasure`] (uniform cold start,
@@ -58,7 +57,7 @@
 //!   start".
 //!
 //! Together with [`rho_cascade::RhoCascadeSchedule`] (which step's subsample +
-//! importance weights to apply) and the [`kernels`] (how to accumulate a
+//! importance weights to apply) and the `kernels` (how to accumulate a
 //! batch's contribution), these let the term run a full streaming, warm-started,
 //! mixed-precision REML fit over an out-of-core corpus while keeping the
 //! determinism and crash-resume guarantees the rest of #973 established.

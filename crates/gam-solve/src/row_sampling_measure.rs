@@ -349,7 +349,7 @@ impl RowSamplingMeasure {
 
 /// A designed importance subsample with honest Horvitz–Thompson likelihood
 /// weights — what a frontier fit sums over instead of the full corpus
-/// (#987 / #973). Produced by [`RowSamplingMeasure::designed_subsample`].
+/// (#987 / #973). Produced by `RowSamplingMeasure::designed_subsample`.
 #[derive(Clone, Debug)]
 pub struct DesignedRowSample {
     /// Provenance of the measure that shaped the design (uniform fallback or
@@ -382,7 +382,7 @@ impl DesignedRowSample {
 /// evidence halves within the target `eps`, their deterministic BSS /
 /// sensitivity weights, and the [`CoresetCertificate`] a race consumer gates
 /// the verdict transfer against. Produced by
-/// [`RowSamplingMeasure::designed_subsample_certified`].
+/// `RowSamplingMeasure::designed_subsample_certified`.
 #[derive(Clone, Debug)]
 pub struct CertifiedRowSample {
     /// Provenance of the measure that shaped the design.

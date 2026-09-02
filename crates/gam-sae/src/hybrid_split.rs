@@ -4,7 +4,7 @@
 //! The selection machinery ([`gam_solve::evidence::select_hybrid_atom`],
 //! [`gam_solve::evidence::select_hybrid_split`]) and the per-atom
 //! integration helper
-//! ([`crate::assignment::select_hybrid_atom_parameterization`]) are
+//! (`crate::assignment::select_hybrid_atom_parameterization`) are
 //! correct and tested, but until now were called nowhere in the fitter: the
 //! post-fit pass only *logged* each `d = 1` atom's fitted turning `Θ`. This
 //! module makes the split LOAD-BEARING by building, per fitted `d = 1` atom, the

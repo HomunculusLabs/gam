@@ -2065,7 +2065,7 @@ struct LatentKernelPrimaryState {
 ///
 /// Keeping these coupled channels together prevents boundary reordering and
 /// cross-row mean/scale mismatches when selecting a derivative backend.
-/// Public because [`latent_survival_log_sigma_curvature_certified`] takes it: a
+/// Public because `latent_survival_log_sigma_curvature_certified` takes it: a
 /// certificate a caller cannot invoke is not an export. Widening this was the API
 /// decision that function deferred, and the compiler was right to force it —
 /// `pub(crate)` made the whole certificate dead code, which is the build saying

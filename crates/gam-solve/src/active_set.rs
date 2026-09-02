@@ -1711,7 +1711,7 @@ pub struct ConstraintRowDependence {
 /// INDEX SPACE: every id here is a [`ConstraintRowId`] in the reduced set's own
 /// constraint-row space (`0..nrows()`), addressing `values()` / `bound()` /
 /// `row_norm()`. It is NOT a coefficient index; to reach β coordinates go
-/// through [`gam_problem::ConstraintSet::row_column_support`].
+/// through `gam_problem::ConstraintSet::row_column_support`.
 #[derive(Clone, Debug)]
 pub struct ReducedFace {
     /// Kept independent rows — the lowest-flat-index representative per direction,

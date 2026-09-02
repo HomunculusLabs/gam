@@ -70,7 +70,7 @@ use gam_linalg::utils::{splitmix64, splitmix64_hash};
 /// EXACT for ANY orthonormal `Q`; the subspace iteration only steers `Q` toward
 /// the top space to reduce variance, it can never bias the estimate.
 ///
-/// The basis is FROZEN here (built once by [`RationalLogdetPlan::with_deflation`]
+/// The basis is FROZEN here (built once by `RationalLogdetPlan::with_deflation`
 /// from the operator at the plan's ρ), NOT rebuilt per evaluation. This is what
 /// keeps value and gradient the SAME functional: with the estimated `term2`, the
 /// sum `term1 + term2` is `Q`-dependent, so a `Q` that moved with ρ would put an
@@ -105,7 +105,7 @@ pub struct RationalLogdetPlan {
     pub center: f64,
     /// Optional top-subspace (Hutch++) deflation. `None` (the default from
     /// [`Self::build`]) reproduces the bare-Hutchinson path bit-for-bit; set via
-    /// [`Self::with_deflation`].
+    /// `Self::with_deflation`.
     pub deflation: Option<DeflationSpec>,
 }
 
@@ -307,7 +307,7 @@ impl RationalLogdetPlan {
         })
     }
 
-    /// [`Self::with_two_sided_deflation`] with the same diagonal preconditioner
+    /// `Self::with_two_sided_deflation` with the same diagonal preconditioner
     /// the evaluations use.
     ///
     /// The bottom-tail basis comes from INVERSE iteration — plain CG on the
@@ -376,7 +376,7 @@ impl RationalLogdetPlan {
     /// evaluating it. A preconditioner changes only the second, so the value
     /// this returns is the same function of the operator that
     /// [`Self::evaluate`] returns, converged to the same certified residual,
-    /// and its [`Self::directional_derivative`] is still that value's exact
+    /// and its `Self::directional_derivative` is still that value's exact
     /// gradient. What changes is how many iterations each shifted solve takes:
     /// on an operator whose diagonal spans orders of magnitude — the
     /// overcomplete arrow border's atom firing counts — that is the difference

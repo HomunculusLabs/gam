@@ -17,8 +17,8 @@
 //! materialization of this state: `S_i = [0, K)` for every row, so the
 //! per-`(row, atom)` coordinate storage is the transpose of the dense
 //! `Vec<LatentCoordValues>` per-atom blocks, and `gate_params[i]` is the dense
-//! `logits` row. [`SaeAssignmentState::materialize_dense`] reconstructs that dense
-//! layout bit-for-bit, and [`SaeAssignment::as_state`] is its inverse.
+//! `logits` row. `SaeAssignmentState::materialize_dense` reconstructs that dense
+//! layout bit-for-bit, and `SaeAssignment::as_state` is its inverse.
 //!
 //! # Layout contract vs. the `SaeTopKCurvedBudget` ledger
 //!
@@ -35,7 +35,7 @@
 //! 8-byte word (`SAE_BYTES_PER_F64`; the `u32` index cell is budgeted as a full
 //! 8-byte slot, matching the ledger's uniform-word accounting). For a uniform
 //! `k_active = s`, `d_k = d_max` shape this state therefore occupies
-//! [`SaeAssignmentState::active_state_bytes`]
+//! `SaeAssignmentState::active_state_bytes`
 //! `= N · s · (2 + d_max) · 8 = active_state_bytes`, verified by
 //! `sparse_topk_state_memory_shape_matches_budget_formula`.
 
@@ -337,7 +337,7 @@ impl SaeAssignmentState {
         Ok(())
     }
 
-    /// [`Self::apply_row_coord_step`] against a caller-held coordinate block —
+    /// `Self::apply_row_coord_step` against a caller-held coordinate block —
     /// the identical per-atom retraction.
     /// Project a compact row step onto each atom's tangent space at its current
     /// coordinates.

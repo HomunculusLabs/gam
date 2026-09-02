@@ -1,6 +1,6 @@
 //! SAE identifiability primitives and partial-supervision gauge fixing.
 //!
-//! # Object 4 — the Certificate ([`residual_gauge`])
+//! # Object 4 — the Certificate (`residual_gauge`)
 //!
 //! The partial-supervision solver above *removes* gauge freedom by aligning to
 //! auxiliary supervision. The certificate answers the dual question: after a fit
@@ -1081,11 +1081,11 @@ pub struct FittedAtom {
     /// Per-atom inner-decoder-smooth byproducts harvested at fit time, the
     /// single source the post-PIRLS atom inference reports
     /// ([`AtomFunctionalReport`] #1097, [`AtomSmoothSignificance`] #1103)
-    /// consume in [`dictionary_report`].
+    /// consume in `dictionary_report`.
     ///
     /// The certificate path that builds `FittedSaeManifold` does so *without* a
     /// fit harness in scope, so it leaves this `None`; callers that own the
-    /// fitted term attach it through [`FittedAtom::with_inner_fit`] (the term
+    /// fitted term attach it through `FittedAtom::with_inner_fit` (the term
     /// builder fills it from the live per-atom basis, decoder, assignment mass,
     /// and smoothness Gram). When `None`, both reports below are `None`: the
     /// genuine prerequisite — the post-fit inner-smooth design, penalized
@@ -1524,7 +1524,7 @@ impl PinningRankSupport {
     }
 }
 
-/// The certificate produced by [`residual_gauge`].
+/// The certificate produced by `residual_gauge`.
 #[derive(Debug, Clone)]
 pub struct ResidualGaugeReport {
     /// "computed in metric X" — read straight off
@@ -1560,8 +1560,8 @@ pub struct ResidualGaugeReport {
     /// The #972 decoder-frame inner-rotation gauge `∏_k O(r_k)` — enumerated,
     /// never curvature-tested (see [`FrameInnerRotationGauge`] for why).
     /// `None` when the caller declared no frame factorization (full-`B`
-    /// dictionaries, or a pre-#972 caller using [`residual_gauge`] directly);
-    /// attach via [`ResidualGaugeReport::with_frame_inner_rotation`].
+    /// dictionaries, or a pre-#972 caller using `residual_gauge` directly);
+    /// attach via `ResidualGaugeReport::with_frame_inner_rotation`.
     pub frame_inner_rotation: Option<FrameInnerRotationGauge>,
     /// Human-readable one-line summary.
     pub summary: String,
@@ -3577,7 +3577,7 @@ fn residual_gauge_inner(
 /// input, not as a tie to break by preferring one report over the other.
 #[derive(Debug, Clone)]
 pub struct DictionaryReport {
-    /// What cannot be distinguished in principle ([`residual_gauge`]).
+    /// What cannot be distinguished in principle (`residual_gauge`).
     pub gauge: ResidualGaugeReport,
     /// What the data established
     /// ([`gam_terms::inference::structure_evidence::StructureLedger::certify`]).
@@ -3587,7 +3587,7 @@ pub struct DictionaryReport {
     /// more layers. These reports are computed in the transport module's chart
     /// convention: circle coordinates are radians on `[0, 2π)`, while SAE
     /// canonical circle charts may use an arbitrary period and are rescaled by
-    /// [`dictionary_report_with_transport_ladders`] before fitting.
+    /// `dictionary_report_with_transport_ladders` before fitting.
     pub transport_ladders: Vec<AtomTransportLadderReport>,
     /// Per-atom post-PIRLS inference reports (#1097 penalty-debiased functional
     /// POINT summaries, #1103 split-LRT smooth-structure e-value), one entry
@@ -3610,7 +3610,7 @@ pub struct DictionaryReport {
 ///
 /// The caller owns extraction from the SAE fit: `layers[i]`, `coords[i]`, and
 /// `topologies[i]` describe the same atom at the same layer. This type keeps
-/// that extraction outside [`dictionary_report`] so the core certificate can be
+/// that extraction outside `dictionary_report` so the core certificate can be
 /// wired without reaching into `SaeManifoldTerm`.
 #[derive(Debug, Clone)]
 pub struct AtomTransportLadderInput {

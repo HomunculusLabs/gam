@@ -91,7 +91,7 @@ pub struct AffineDesign {
     /// silently substituted when one is unavailable.
     pub covariances: AffineCovariances,
     /// Relationship of `∂η/∂β` to `matrix`; read it through
-    /// [`AffineDesign::eta_gradient_matrix`].
+    /// `AffineDesign::eta_gradient_matrix`.
     pub eta_gradient: AffineEtaGradient,
 }
 
@@ -250,7 +250,7 @@ pub fn affine_design_unavailable_reason(model: &FittedModel) -> Result<Option<St
 /// The returned value operator satisfies `offset + matrix·β̂ == η̂` exactly, but
 /// for a link-wiggle fit it is NOT `∂η/∂β`: the warp index itself moves with
 /// the Mean coefficients. Variance and contrast math must use
-/// [`AffineDesign::eta_gradient_matrix`], which is built by the same authority
+/// `AffineDesign::eta_gradient_matrix`, which is built by the same authority
 /// the predict standard-error path uses.
 pub fn fitted_standard_affine_design(
     model: &FittedModel,

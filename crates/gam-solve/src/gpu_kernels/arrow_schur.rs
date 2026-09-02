@@ -817,7 +817,7 @@ impl ResidentBaseArrowFrameHandle {
     /// caller whose ridge does not move on the next iterate can re-solve without
     /// re-factoring (#2539).
     ///
-    /// [`Self::refactor_and_solve_with_gradient`] is exactly this followed by
+    /// `Self::refactor_and_solve_with_gradient` is exactly this followed by
     /// [`Self::solve_with_factors`]. An inner Newton needs them separately: its
     /// ridge changes only on an LM accept/reject, while its gradient changes
     /// every iterate, so factoring per iterate would pay a POTRF/TRSM/Schur

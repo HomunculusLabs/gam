@@ -133,7 +133,7 @@
 //!
 //! # Defect theorems (exact — not fits)
 //!
-//! See [`monotonicity_defect`] and [`energy_budget_defect`]. These are the
+//! See `monotonicity_defect` and `energy_budget_defect`. These are the
 //! *only* sources of [`LoopVerdict::KlInconsistent`]: they are proofs, valid
 //! independent of any rate model.
 
@@ -298,7 +298,7 @@ impl RateModel {
     }
 }
 
-/// The certificate/refusal returned by [`assess`].
+/// The certificate/refusal returned by `assess`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LoopVerdict {
     /// The winning rate model forecasts reaching `tol` within budget.

@@ -942,7 +942,7 @@ pub struct MultinomialFitOutputs {
     /// `θ[a·P + i] = β̂[i, a]`. This is the Laplace covariance from the factored
     /// penalized Hessian `XᵀWX + diag_a(λ_a)⊗S`; it drives the delta-method
     /// per-class probability standard errors
-    /// ([`Self::logistic_normal_softmax_moments`])
+    /// (`Self::logistic_normal_softmax_moments`)
     /// on the fixed-λ inner-solve path.
     pub coefficient_covariance: Array2<f64>,
 }
@@ -1985,7 +1985,7 @@ pub struct MultinomialSavedModel {
     ///
     /// `C` is stored rather than `V_c = V_cond + C` deliberately: the sum is
     /// recoverable exactly by addition (see
-    /// [`Self::coefficient_covariance_corrected`]) while the difference is not
+    /// `Self::coefficient_covariance_corrected`) while the difference is not
     /// — subtracting two nearly-equal covariances would lose every digit of a
     /// correction that is small relative to `V_cond`, which is the regime this
     /// matrix is most often in.
@@ -4626,7 +4626,7 @@ pub fn predict_multinomial_formula_with_intervals(
 }
 
 /// The same band under an EXPLICITLY named covariance definition; see
-/// [`predict_multinomial_formula_with_se_in_mode`].
+/// `predict_multinomial_formula_with_se_in_mode`.
 pub fn predict_multinomial_formula_with_intervals_in_mode(
     model: &MultinomialSavedModel,
     data: &EncodedDataset,

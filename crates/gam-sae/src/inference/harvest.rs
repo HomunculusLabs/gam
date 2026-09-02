@@ -15,8 +15,8 @@
 //!
 //! * **Tier 1 (all rows):** activations. Reconstruction runs unweighted over
 //!   them — which the amended #980 contract already guarantees
-//!   ([`RowMetric::whitens_likelihood`] is `false` for
-//!   [`MetricProvenance::OutputFisher`]), so withholding factors from a row
+//!   (`RowMetric::whitens_likelihood` is `false` for
+//!   `MetricProvenance::OutputFisher`), so withholding factors from a row
 //!   cannot change its loss term even in principle.
 //! * **Tier 2 (designed subsample):** activations **plus** Fisher factors.
 //!   Gauge and lens are computed on this tier; the enrichment measure is
@@ -28,17 +28,16 @@
 //! [`TieredHarvest`] makes that degradation a matter of *where the data lives*
 //! rather than runtime branching:
 //!
-//! * no Fisher tier at all ⇒ [`TieredHarvest::activations_only`]: the metric
 //!   accessor returns `None`, the lifted measure is exactly uniform, and every
 //!   downstream consumer takes its existing no-harvest path — bit-for-bit
 //!   today's behavior;
-//! * a Fisher tier ⇒ the tier's [`RowMetric`] (indexed by **tier row**, with
+//! * a Fisher tier ⇒ the tier's `RowMetric` (indexed by **tier row**, with
 //!   the corpus↔tier mapping owned here) serves the gauge/lens/measure roles,
 //!   and any corpus row outside the tier reports "no factors" (`None`), never
 //!   an error and never a fabricated identity block.
 //!
 //! The designed subsample itself comes from
-//! [`RowSamplingMeasure::designed_subsample`] (uniform on the first harvest; measure-
+//! `RowSamplingMeasure::designed_subsample` (uniform on the first harvest; measure-
 //! driven re-designs once a previous tier exists), so tier membership carries
 //! honest inclusion weights wherever an *estimate over the corpus* is lifted
 //! from the tier — the same #973 honesty discipline, applied to the metric's

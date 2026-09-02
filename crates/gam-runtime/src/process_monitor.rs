@@ -13,7 +13,7 @@
 //!      inside an instrumented `track_scope` (rayon workers are not) and so
 //!      reported a misleading `0`.
 //!   3. Progress — when a long scope registers a progress counter (via
-//!      [`track_scope_with_progress`]) the heartbeat surfaces `progress=a/b (X%)`.
+//!      `track_scope_with_progress`) the heartbeat surfaces `progress=a/b (X%)`.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -42,8 +42,8 @@ thread_local! {
 
 /// A shared progress counter a long-running scope can expose to the heartbeat.
 ///
-/// A compute loop creates one via [`track_scope_with_progress`], then bumps
-/// [`ScopeProgress::set`] / [`ScopeProgress::inc`] as it advances. The
+/// A compute loop creates one via `track_scope_with_progress`, then bumps
+/// [`ScopeProgress::set`] / `ScopeProgress::inc` as it advances. The
 /// heartbeat reads the current/total atomically and surfaces a percentage in
 /// the active-scope line — no log-spam coupling between the loop and the
 /// monitor cadence.

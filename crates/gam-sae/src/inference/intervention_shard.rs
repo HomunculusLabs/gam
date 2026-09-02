@@ -19,7 +19,7 @@
 //! ever, across refits. That only holds if the split is a *deterministic pure
 //! function of (group id, seed)* — independent of record order, of which other
 //! groups happen to be present, and of how many times the shard is reloaded.
-//! [`InterventionShard::eval_forever_split`] therefore hashes each group id
+//! `InterventionShard::eval_forever_split` therefore hashes each group id
 //! through SplitMix64 with the caller's seed and assigns by parity: adding new
 //! groups later can never move an existing group across the fence. The Python
 //! calibration driver consumes the plan produced here, so there is no second

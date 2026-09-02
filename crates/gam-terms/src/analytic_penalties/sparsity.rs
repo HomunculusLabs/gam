@@ -290,7 +290,7 @@ impl SoftmaxAssignmentSparsityPenalty {
     /// diagonal-first traversal order the envelope sum uses, so the value and its
     /// θ-adjoint differentiate one floating-point expression. The off-diagonal is
     /// grouped `scale·a_k·(a_j·bracket)` — matching
-    /// [`Self::row_dense_hessian`]'s `scale·a_k·(δ_kj·… + a_j·bracket)` — rather
+    /// `Self::row_dense_hessian`'s `scale·a_k·(δ_kj·… + a_j·bracket)` — rather
     /// than the flat left-to-right `scale·a_k·a_j·bracket`, which differs by an
     /// ulp and made the majorized radius here and the `H` its adjoint
     /// differentiates two operators that disagreed in the last bit. That was
@@ -339,13 +339,13 @@ impl SoftmaxAssignmentSparsityPenalty {
     }
 
     /// Per-row **Gershgorin diagonal majorizer** `D̃` of the exact softmax-entropy
-    /// Hessian [`Self::row_dense_hessian`], scaled by `scale = λ/τ²`. Returns the
+    /// Hessian `Self::row_dense_hessian`, scaled by `scale = λ/τ²`. Returns the
     /// `K×K` diagonal block `diag(D̃_0, …, D̃_{K−1})` with
     /// `D̃_kk = Σ_j σ_{ε_k}(H_kj) ≥ Σ_j |H_kj|` — the smooth soft-abs envelope of
     /// the Gershgorin radius (#1419 majorizer, #2339 smoothing; the derivation
     /// and its four guarantees are on [`Self::psd_majorizer_abs_row_sums`]).
     ///
-    /// Unlike the Fisher metric [`Self::row_fisher_metric`] — which is PSD but
+    /// Unlike the Fisher metric `Self::row_fisher_metric` — which is PSD but
     /// does NOT satisfy `G ⪰ H_entropy` (counterexample `a=(0.95,0.05)`,
     /// `λ=τ=1`: `G₁₁=0.0475 < H₁₁=0.0784`) — this `D̃` is a genuine Loewner
     /// majorizer. The hard radius `D_kk = Σ_j|H_kj|` is diagonally dominant over
@@ -356,7 +356,7 @@ impl SoftmaxAssignmentSparsityPenalty {
     /// assembled evidence block PD (the property the entropy block needs so the
     /// Faddeev–Popov deflation never fires) AND actually majorizes the entropy
     /// curvature, which the Fisher surrogate did not. The criterion's `log|H|`,
-    /// its θ-adjoint [`Self::row_psd_majorizer_logit_derivative`], and the
+    /// its θ-adjoint `Self::row_psd_majorizer_logit_derivative`, and the
     /// assembled Hessian all differentiate this SAME operator `D̃`, keeping value
     /// and adjoint on one exact branch.
     #[must_use]

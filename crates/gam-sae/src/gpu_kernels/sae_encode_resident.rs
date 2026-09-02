@@ -1,6 +1,6 @@
 //! Device-resident **exact per-row certified SAE encode** (#988).
 //!
-//! The production CPU encode is [`crate::encode::EncodeAtlas::certified_encode_row`]:
+//! The production CPU encode is `crate::encode::EncodeAtlas::certified_encode_row`:
 //! for one atom and one target row `x` at fixed amplitude `z` it
 //!
 //!   1. **routes** the row to the nearest certified charts by ambient
@@ -35,14 +35,14 @@
 //!
 //! Exactly the #1017 pattern of `arrow_schur_nvrtc`:
 //!
-//! * [`emulate_certified_encode_row`] is a device-free CPU emulator that mirrors
+//! * `emulate_certified_encode_row` is a device-free CPU emulator that mirrors
 //!   the kernel's arithmetic and control flow line-for-line — the SAME monomial
 //!   evaluation, the SAME cyclic-Jacobi symmetric eigensolver
 //!   ([`jacobi_eigh`], the device stand-in for the host LAPACK `eigh`), the SAME
 //!   basin-warmup / refine loop, the SAME routing + assignment. It is the CPU
 //!   fallback AND the exactness oracle the kernel is pinned to.
 //! * The parity tests assert the emulator reproduces the production
-//!   [`crate::encode::EncodeAtlas::certified_encode_row`] on planted + random
+//!   `crate::encode::EncodeAtlas::certified_encode_row` on planted + random
 //!   rows (support/coords/amplitude/certificate within a tight tol; the only
 //!   divergence is Jacobi-vs-LAPACK eigen round-off).
 //! * On Linux the CUDA source compiles to PTX through the shared
@@ -63,7 +63,7 @@ use gam_gpu::policy::EncodeDeploymentDecision;
 /// One `EuclideanPatch` atom's frozen encode data, flattened for a device
 /// launch. This is exactly what the online encode reads: the monomial exponent
 /// table, the decoder `B`, and the offline-certified charts. Built from a real
-/// atom + its [`AtomEncodeAtlas`] by [`EncodeAtomDevice::from_atom_atlas`] so
+/// atom + its `AtomEncodeAtlas` by `EncodeAtomDevice::from_atom_atlas` so
 /// the device path consumes the identical data the CPU path does.
 #[derive(Debug, Clone)]
 pub struct EncodeAtomDevice {
@@ -541,16 +541,16 @@ pub enum EncodePath {
 pub const DEVICE_ROW_THRESHOLD: usize = 4_096;
 
 /// Measured throughput of the device-resident **exact per-row certified encode**
-/// ([`sae_certified_encode_batch`]) — the literal "batched exact per-row GPU
+/// (`sae_certified_encode_batch`) — the literal "batched exact per-row GPU
 /// encode" of #988, timed end to end (routing + amortized warm start + basin
 /// Newton + Kantorovich certificate + lowest-error assignment/fallback), NOT a
-/// component solve like [`gam_gpu::encode_throughput::measure_resident_solve_throughput`]
+/// component solve like `gam_gpu::encode_throughput::measure_resident_solve_throughput`
 /// (which times only the resident normal-equations inner cell).
 ///
 /// The point of this struct is [`Self::decision`]: the #988 surrogate question
 /// ("is the exact encode fast enough at 10⁹ rows, or must we distill a certified
 /// amortized surrogate?") is answered by *this* measurement and only this one.
-/// The decision is keyed on [`EncodeDeploymentDecision::from_device_measurement`]
+/// The decision is keyed on `EncodeDeploymentDecision::from_device_measurement`
 /// with `engaged = (path == EncodePath::Device)`, so it inherits that type's
 /// anti-green-wash contract: a CPU-emulator run (`path == Cpu`) can NEVER declare
 /// the surrogate unneeded — it is honestly [`EncodeDeploymentDecision::Undetermined`]

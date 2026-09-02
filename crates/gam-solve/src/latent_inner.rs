@@ -136,7 +136,7 @@ pub struct LatentInnerOutcome {
 /// the Gauss–Newton block assembly
 /// (`H_tt^(i) ← (g_i β)(g_i β)^T`, `H_tβ^(i) ← (g_i β) ⊗ Φ_i`,
 /// `H_ββ ← Φ^T W Φ + Σ_k λ_k S_k`), and the analytic-penalty fold-in via
-/// [`crate::arrow_schur::ArrowSchurSystem::add_analytic_penalty_contributions`].
+/// `crate::arrow_schur::ArrowSchurSystem::add_analytic_penalty_contributions`.
 pub trait ArrowSystemAssembler {
     /// Build a freshly-populated arrow system at the current `(β, t)`.
     ///

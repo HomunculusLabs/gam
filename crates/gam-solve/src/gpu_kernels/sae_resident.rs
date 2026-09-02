@@ -1505,7 +1505,7 @@ pub struct DeviceResidentInnerOutcome {
     pub residency: ResidencyReport,
 }
 
-/// Result of an across-outer resident sweep ([`DeviceResidentArrowWorkspace::device_fit_outer_sequence`]).
+/// Result of an across-outer resident sweep (`DeviceResidentArrowWorkspace::device_fit_outer_sequence`).
 ///
 /// `outers` holds one inner-loop outcome per outer evaluation, in input order.
 /// `frame_builds` is the total number of resident-frame (re)builds performed

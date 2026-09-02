@@ -76,7 +76,7 @@ use ndarray::ArrayView2;
 /// ill-posed condition this module exists to remove.
 ///
 /// "Effective rows" is the participation number of the block's gate mass (see
-/// [`effective_occupancy`]), not a raw firing count, so a slot held alive by a
+/// `effective_occupancy`), not a raw firing count, so a slot held alive by a
 /// single large gate and a spray of numerically-zero ones is correctly dormant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OccupancyThreshold {

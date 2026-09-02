@@ -25,7 +25,7 @@
 //!      wiggliness prior, so a second one there is a duplicate. True for any
 //!      `λ > 0`, and false in MAGNITUDE when the selected `λ` rails at its floor
 //!      (gam#2612).
-//!   3. **The MEASURED span** ([`under_identified_subspace`]): the directions
+//!   3. **The MEASURED span** (`under_identified_subspace`): the directions
 //!      whose `H + S_λ` curvature is under one observation-equivalent, at the
 //!      smoothing actually selected. This is what (1) and (2) each approximate
 //!      from one side, and it is what a caller with a certified mode should use.

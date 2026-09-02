@@ -38,8 +38,8 @@
 //! [`gam_solve::psis::tail_count`]`(M) = ⌈√M⌉` excesses only, and the reported
 //! shape is that fit shrunk toward `0.5` by ten pseudo-observations. So the
 //! reported value has standard error
-//! [`gam_solve::psis::shape_resolution`]`(k, ⌈√M⌉) = √n(1+k)/(n+10)` around
-//! [`gam_solve::psis::expected_reported_shape`]`(k, ⌈√M⌉)`, NOT around `k`:
+//! `gam_solve::psis::shape_resolution``(k, ⌈√M⌉) = √n(1+k)/(n+10)` around
+//! `gam_solve::psis::expected_reported_shape``(k, ⌈√M⌉)`, NOT around `k`:
 //! at the default `M = 64` the tail sample is `8` and the standard error at the
 //! `0.7` boundary is `≈ 0.27`; at `M = 512` it is `23` and `≈ 0.25`. Reaching a
 //! standard error of `0.05` takes a tail of `≈ 10³`, i.e. `M ≈ 10⁶`. A single
@@ -121,7 +121,7 @@ pub struct RhoQuadratureMixture {
 
 /// Mixture-corrected coefficient posterior moments (law of total
 /// variance/expectation over the `ρ` mixture). See
-/// [`mixture_coefficient_covariance`].
+/// `mixture_coefficient_covariance`.
 #[derive(Debug, Clone)]
 pub struct MixtureCoefficientCovariance {
     /// Mixture posterior mean `β̄ = Σ_m w_m β̂(ρ_m)`.

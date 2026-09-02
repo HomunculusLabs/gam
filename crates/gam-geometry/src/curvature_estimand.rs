@@ -2,7 +2,7 @@
 //!
 //! #944 stage 3. The κ-jets (`distance_kappa_jet` / `log_map_kappa_jet` /
 //! `exp_map_kappa_jet`) and the analytic Jacobi-field `exp_map_vjp` for the
-//! [`ConstantCurvature`] chart are landed and
+//! `ConstantCurvature` chart are landed and
 //! FD-gated. This module turns the fitted curvature `κ̂` from "we chose
 //! hyperbolic space" into a reported estimate with a confidence interval and a
 //! likelihood-ratio test of flatness — and exposes the κ-derivative of the
@@ -37,7 +37,7 @@
 //! * In `terms/smooth.rs`, wherever the constant-curvature smooth builds its
 //!   design from `manifold.log_map(x̄, yᵢ)` (the per-row normal coordinates),
 //!   the ψ-channel variant must instead call
-//!   [`design_coord_kappa_derivative`] to obtain the *same* coordinates together
+//!   `design_coord_kappa_derivative` to obtain the *same* coordinates together
 //!   with their `∂/∂κ` and `∂²/∂κ²`. That triple feeds the outer assembly's
 //!   ext-coord channel exactly as the Matérn-κ basis hyper-derivatives do
 //!   (hyper.rs ext-coords → unified outer assembly, with `∂S/∂κ` handled by the

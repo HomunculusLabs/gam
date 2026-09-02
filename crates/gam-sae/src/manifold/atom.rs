@@ -124,12 +124,12 @@ pub enum SaeAtomBasisKind {
     /// model for cluster-like structure (weekdays as 7 points with cyclic
     /// adjacency, not an occupied circle). Its rank charge is `anchors − 1` (the
     /// categorical `t` has `anchors − 1` independent contrasts, one anchor being
-    /// the reference) — see [`finite_set_rank_charge`]. The anchor count is carried
+    /// the reference) — see `finite_set_rank_charge`. The anchor count is carried
     /// by the evaluator (as harmonics/degree are for the periodic/patch kinds), so
     /// this stays a unit variant.
     ///
     /// PLANNED COMPLETION / OPT-IN: the topology race does NOT enrol this candidate
-    /// by default (see [`crate::structure_harvest::finite_set_race_enrolled`]); the
+    /// by default (see `crate::structure_harvest::finite_set_race_enrolled`); the
     /// enum arm + evaluator land as inert scaffolding so unenrolled code cannot
     /// affect any birth, and the enrolment flag flips only after full-suite +
     /// real-data (weekday) verification. First-class integration into the
@@ -573,7 +573,7 @@ pub struct SaeManifoldAtom {
     /// extrinsic curvature (a first-harmonic `[sin, cos]` traces a circle, the
     /// sphere chart's `[x, y, z]` traces the sphere). Its decoder sub-problem is
     /// still convex, and a genuine low-rank (Eckart-Young / PCA) residual ceiling
-    /// is certified by [`linear_span_anchor`] — a rank bound on every `η`, not a
+    /// is certified by `linear_span_anchor` — a rank bound on every `η`, not a
     /// claim that `η = 0` is curvature-free. The certified tracker walks `η`
     /// from `0 → 1`; every other caller sees the default `1.0`, which makes
     /// [`Self::refresh_basis`] bit-for-bit identical to the un-dialed `evaluate`
@@ -1692,7 +1692,7 @@ impl SaeManifoldAtom {
     ///
     /// `B_k` is unchanged numerically: the installed frame spans exactly
     /// `range(B_kᵀ)` (the column space of the decoder) up to the truncation
-    /// floor, so [`Self::reconstruct_decoder_coefficients`] recovers `B_k` to
+    /// floor, so `Self::reconstruct_decoder_coefficients` recovers `B_k` to
     /// machine precision when `r` equals the true rank. Returns the activated
     /// frame rank, or `None` if the full-`B` path was kept.
     pub fn maybe_activate_decoder_frame(&mut self) -> Result<Option<usize>, String> {

@@ -369,7 +369,7 @@ impl ArrowEvidencePolicy {
 /// Complete BA Schur solve options.
 ///
 /// Use [`ArrowSolveOptions::automatic`] for normal latent-coordinate fits;
-/// use [`ArrowSolveOptions::sqrt_ba`] when the assembler has single-precision
+/// use `ArrowSolveOptions::sqrt_ba` when the assembler has single-precision
 /// row blocks or an ill-conditioned gauge; use [`ArrowSolveOptions::inexact_pcg`]
 /// for SAE-manifold scale `K`.
 #[derive(Clone)]

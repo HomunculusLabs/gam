@@ -568,7 +568,7 @@ pub fn dispatch_exp_map(
 /// analytic strong-convexity radius, certifying the stationary point as the
 /// unique global Fréchet mean; diffuse data return a typed error and require an
 /// explicit base instead of selecting a capped multistart basin. The SPD-specific
-/// version in [`crate::manifolds::spd::spd_frechet_mean`] remains for the affine
+/// version in `crate::manifolds::spd::spd_frechet_mean` remains for the affine
 /// inverse it caches per step; this generic form pays a metric-tensor solve but
 /// covers all four geometries uniformly.
 pub fn response_frechet_mean(

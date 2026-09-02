@@ -57,7 +57,7 @@ use ndarray::{Array2, Array3};
 
 use super::block_chart::{BlockChartComposeConfig, BlockChartComposeResult};
 
-/// Configuration for [`cofit_block_and_curved`].
+/// Configuration for `cofit_block_and_curved`.
 #[derive(Clone, Debug)]
 pub struct CofitConfig {
     /// Maximum number of complete deterministic A/B replays. Exhaustion is a

@@ -36,7 +36,7 @@ use std::sync::Arc;
 /// over the non-vacuous rows — the quantity [`ConstraintSet::max_scaled_violation`]
 /// returns. This is the ONE definition of "feasible" in the codebase; the solver
 /// certifies its returned iterate against it, every entry gate admits against it,
-/// and [`ConstraintSet::max_contract_feasible_step`] sizes steps against it.
+/// and `ConstraintSet::max_contract_feasible_step` sizes steps against it.
 ///
 /// It lives beside the metric rather than in the solver because the two are the
 /// same statement: the metric says what is measured, this says at what resolution.
@@ -170,7 +170,7 @@ where
 }
 
 /// Result of the contract-feasible ratio test
-/// ([`ConstraintSet::max_contract_feasible_step`]).
+/// (`ConstraintSet::max_contract_feasible_step`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContractFeasibleStep {
     /// Largest fraction in `[0, 1]` such that `β + fraction·δ` is feasible at
@@ -493,7 +493,7 @@ impl KhatriRaoConeConstraints {
 /// covariate columns) row id `r` of a later block names a β coordinate owned by
 /// an EARLIER block. The newtype exists so that mistake cannot be made silently;
 /// to go from a row to the coefficients it acts on, call
-/// [`ConstraintSet::row_column_support`].
+/// `ConstraintSet::row_column_support`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConstraintRowId(pub usize);
 
@@ -780,7 +780,7 @@ impl ConstraintSet {
     /// clipper) want exactly that. It is NOT the rule for sizing a Newton step
     /// — a globalization that demands exact feasibility rejects steps this
     /// carrier's own contract calls feasible. Use
-    /// [`ConstraintSet::max_contract_feasible_step`] for that.
+    /// `ConstraintSet::max_contract_feasible_step` for that.
     ///
     /// Like the contract rule, this one is TOTAL (gam#2721): a row that cannot
     /// be decided by comparison — a non-finite row norm, bound, `a·β` or `a·δ`

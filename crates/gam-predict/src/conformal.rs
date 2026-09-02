@@ -61,7 +61,7 @@
 //!   its own design and may be of ANY size, fully decoupled from the training
 //!   rows.
 //! * **In-sample (no held-out fold available).** When the only data are the
-//!   training set, [`ConformalCalibrator::from_fit`] uses the
+//!   training set, `ConformalCalibrator::from_fit` uses the
 //!   first-order approximate-leave-one-out diagnostics in
 //!   [`gam_solve::inference::alo`] to manufacture leave-one-out residuals from the
 //!   training rows. This is a calibrated heuristic: it inherits the split
@@ -72,7 +72,7 @@
 //! Either way the predict path consumes `q̂` through the opt-in
 //! `conformal_level` field on
 //! `gam_predict::PredictUncertaintyOptions`, which calls
-//! [`ConformalCalibrator::apply_to_uncertainty_result`] to overwrite the
+//! `ConformalCalibrator::apply_to_uncertainty_result` to overwrite the
 //! model-based response-scale bounds with the conformal ones.
 //!
 //! # Response scale vs. link scale
@@ -206,7 +206,7 @@ impl ConformalCalibrator {
     }
 
     /// Build a calibrator directly from held-out residuals and per-point
-    /// raw scales. This is the pure core both [`ConformalCalibrator::from_fit`]
+    /// raw scales. This is the pure core both `ConformalCalibrator::from_fit`
     /// and the e2e tests route through.
     pub fn from_residuals_and_scales(
         residuals: ArrayView1<'_, f64>,
@@ -235,7 +235,7 @@ impl ConformalCalibrator {
     /// derived from the model's own predict-time response-scale standard error
     /// `s_i = s(x_cal_i)` — the SAME scale source and transform applied at test
     /// time by
-    /// [`Self::apply_to_uncertainty_result`]. With those scores the exact
+    /// `Self::apply_to_uncertainty_result`. With those scores the exact
     /// order-statistic multiplier `q̂` gives finite-sample marginal coverage
     /// `P(Y ∈ μ̂(x) ± q̂·s_eff(x)) ≥ 1 − α` (Vovk et al.; Romano, Patterson &
     /// Candès 2019), provided the calibration and test points are exchangeable

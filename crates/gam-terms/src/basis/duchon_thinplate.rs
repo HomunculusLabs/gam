@@ -1743,7 +1743,7 @@ pub(crate) fn duchon_resolve_radial_chart(
 /// A `DuchonBasisSpec` with every ψ-invariant chart decision resolved against
 /// the data, plus the artifacts those decisions produced.
 ///
-/// See [`duchon_resolve_chart`].
+/// See `duchon_resolve_chart`.
 #[derive(Clone, Debug)]
 pub struct ResolvedDuchonChart {
     /// The input spec with `center_strategy` realized to `UserProvided`,

@@ -53,9 +53,9 @@ pub struct ArrowCofitReport {
     /// the shared `explained_variance_from_reconstruction` helper cofit uses).
     pub explained_variance: f64,
     /// Number of curved (periodic) atoms folded into the joint solve — the count
-    /// of blocks whose BIC-gated chart discovery ([`compose_block_coordinate_charts`])
+    /// of blocks whose BIC-gated chart discovery (`compose_block_coordinate_charts`)
     /// promoted them from a flat linear atom to a curved chart. `0` for the
-    /// linear-only path ([`cofit_linear_via_arrow`]). This is the curved-birth
+    /// linear-only path (`cofit_linear_via_arrow`). This is the curved-birth
     /// count the migration ledger banks.
     pub n_curved_atoms: usize,
     /// Total BIC complexity charge (`Σ ½·d_eff·ln n_eff`, nats) of the curved
@@ -78,12 +78,12 @@ pub struct ArrowCofitConfig {
     /// Number of periodic-harmonic basis columns `M = 2·h + 1` for a folded
     /// curved atom (must be odd, `>= 3`). `3` is one harmonic — an exact circle,
     /// the ring the chart-discovery lane certifies. Used only by
-    /// [`cofit_composed_via_arrow`].
+    /// `cofit_composed_via_arrow`.
     pub curved_num_basis: usize,
-    /// Chart-discovery configuration passed to [`compose_block_coordinate_charts`]
+    /// Chart-discovery configuration passed to `compose_block_coordinate_charts`
     /// to decide WHICH blocks fold in as curved atoms. Its `block_size` /
     /// `block_topk` / `gamma` are overwritten from the passed routing so the tiers
-    /// always agree on geometry. Used only by [`cofit_composed_via_arrow`].
+    /// always agree on geometry. Used only by `cofit_composed_via_arrow`.
     pub chart: BlockChartComposeConfig,
 }
 

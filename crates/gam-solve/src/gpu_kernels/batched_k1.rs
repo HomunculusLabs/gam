@@ -10,7 +10,7 @@
 //!
 //! This module is the seam A2's `stagewise.rs` backfitting sweep calls. It ships
 //! today with:
-//!   * the dispatch entry [`solve_batched_k1_border`],
+//!   * the dispatch entry `solve_batched_k1_border`,
 //!   * the CPU reference path, which is ALSO the bit-parity oracle the device
 //!     kernel will be validated against, and
 //!   * the per-atom numerical-failure contract: a genuine PD failure is returned

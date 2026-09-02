@@ -233,7 +233,7 @@ const NULL_SD_FLOOR: f64 = 1e-9;
 /// Sparse fixed-margin exceedance for a pre-indexed candidate pair set.
 ///
 /// Returns standardized excess values aligned with `pairs`. Unlike
-/// [`coactivation_exceedance`], this never allocates or scans a dense `K²` pair
+/// `coactivation_exceedance`, this never allocates or scans a dense `K²` pair
 /// table; every replicate accumulates only co-firing pairs that are present in
 /// `pairs`.
 pub fn coactivation_exceedance_for_pairs(

@@ -1,7 +1,7 @@
 //! Shared additive-plus-wiggle block-Jacobian dispatcher.
 //!
 //! Several multi-output custom families (survival location-scale, the Binomial
-//! location-scale-wiggle family, …) build the [`BlockEffectiveJacobian`] for one
+//! location-scale-wiggle family, …) build the `BlockEffectiveJacobian` for one
 //! parameter block with the identical structure:
 //!
 //! * a set of **additive blocks**, each of which drives exactly one family
@@ -15,7 +15,7 @@
 //! canonical implementation so the dispatch is not re-typed by hand.
 
 /// Static description of an additive-plus-wiggle family's block layout, used to
-/// build the per-block [`BlockEffectiveJacobian`] in one place.
+/// build the per-block `BlockEffectiveJacobian` in one place.
 ///
 /// `additive_blocks` lists the block ids that contribute a linear additive term
 /// to a single family output; each such block drives output `block_idx`

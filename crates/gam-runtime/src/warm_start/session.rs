@@ -100,7 +100,7 @@ impl Session {
     /// Read the best available warm-start entry and report whether it came
     /// from this session's exact key or from a preloaded near-match seed.
     ///
-    /// Callers that only need a seed can use [`Self::try_load`]. Callers that
+    /// Callers that only need a seed can use `Self::try_load`. Callers that
     /// may skip expensive validation on a finalized exact hit need this source
     /// bit so a near-match prefix seed is never mistaken for a completed fit.
     pub fn try_load_with_source(&self) -> Option<LoadedEntry> {

@@ -43,7 +43,7 @@ pub const SHAPE_PRIOR_MEAN: f64 = 0.5;
 /// This is the single source of truth for the rule — `pareto_smooth_weights`
 /// calls it, and any consumer that needs to know how much tail sample a given
 /// draw count buys (and hence how finely `k_hat` can be resolved; see
-/// [`shape_resolution`]) must ask here rather than re-deriving `⌈√n⌉`.
+/// `shape_resolution`) must ask here rather than re-deriving `⌈√n⌉`.
 ///
 /// Returns `0` for inputs too small to leave any non-tail observation.
 pub fn tail_count(n: usize) -> usize {

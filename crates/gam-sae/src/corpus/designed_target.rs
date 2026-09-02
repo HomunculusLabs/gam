@@ -1,5 +1,5 @@
 //! Designed corpus target collection — the #991 bridge from a streaming
-//! [`CorpusRowSource`] to the in-memory row set + honesty weights the SAE term
+//! `CorpusRowSource` to the in-memory row set + honesty weights the SAE term
 //! fits on.
 //!
 //! # The architecture this realizes
@@ -9,10 +9,10 @@
 //! stays unbiased (#987 / #973). That makes "fit the corpus" a two-step
 //! pipeline with a bounded memory footprint by construction:
 //!
-//! 1. **Design** — a [`RowSamplingMeasure`] over the corpus (uniform on a first
-//!    harvest; [`TieredHarvest::corpus_measure`]-driven once Fisher factors
+//! 1. **Design** — a `RowSamplingMeasure` over the corpus (uniform on a first
+//!    harvest; `TieredHarvest::corpus_measure`-driven once Fisher factors
 //!    exist) picks `budget` rows via
-//!    [`RowSamplingMeasure::designed_subsample`] (deterministic, seeded, honest `1/π`
+//!    `RowSamplingMeasure::designed_subsample` (deterministic, seeded, honest `1/π`
 //!    weights).
 //! 2. **Collect** — one deterministic streaming pass over the source
 //!    materializes exactly those rows (the only dense `f64` block the fit ever
@@ -25,18 +25,18 @@
 //! # Exactness degeneracy (the bit-identity contract)
 //!
 //! `budget ≥ corpus rows` (always the case below
-//! [`designed_sampling_mandatory`]'s threshold unless a caller narrows it)
+//! `designed_sampling_mandatory`'s threshold unless a caller narrows it)
 //! collects **every** row in stream order with weight exactly `1.0` — and the
 //! term stores all-equal weights as `None`, so a shard-backed full-budget fit
 //! is **bit-for-bit** the in-memory fit of the same rows. Selectivity is then
 //! purely a budget decision, not a code path: drivers call this
-//! unconditionally and let [`auto_designed_budget`] decide.
+//! unconditionally and let `auto_designed_budget` decide.
 
 use ndarray::Array2;
 
 use gam_solve::row_sampling_measure::MeasureProvenance;
 
-/// Default designed-sample budget once [`designed_sampling_mandatory`] fires.
+/// Default designed-sample budget once `designed_sampling_mandatory` fires.
 /// Auto-derived policy, not a knob: 2·10⁶ rows is comfortably in-memory at any
 /// realistic activation width (`2e6 × 4096 × 8B ≈ 64 GiB` is the extreme; at
 /// GPT-2-small widths it is ~6 GiB), large enough that designed-sample SEs on
@@ -53,7 +53,7 @@ pub struct DesignedCorpusTarget {
     pub target: Array2<f64>,
     /// Global corpus `row_id` of each target row (ascending). These are the
     /// keys for warm-state reuse ([`super::warm_state`]) and for aligning a
-    /// [`TieredHarvest`] Fisher tier with the fitted rows.
+    /// `TieredHarvest` Fisher tier with the fitted rows.
     pub row_ids: Vec<u64>,
     /// Per-selected-row Horvitz–Thompson likelihood weight `1/π`, aligned with
     /// `target` rows. Hand to `SaeManifoldTerm::set_row_loss_weights` (which

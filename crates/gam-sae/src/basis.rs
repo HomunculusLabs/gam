@@ -591,7 +591,7 @@ struct SphHarmonicColumn {
 /// five* quadrupoles — so it cannot represent `x²−y²`, `3z²−1`, or any `l ≥ 3`
 /// content; a genuinely sphere-class field with higher-degree structure is
 /// out of its span. This evaluator closes that resolution gap, with the working
-/// degree chosen by [`select_spherical_harmonic_degree`] under the same
+/// degree chosen by `select_spherical_harmonic_degree` under the same
 /// spectral-noise-floor bandwidth doctrine the torus/circle already use.
 ///
 /// **Smoothness / poles.** Every column is a polynomial in `sin(lat)`,
@@ -3726,7 +3726,7 @@ impl SaeBasisSecondJet for SubspaceReducedEvaluator {
 /// so its first, second, and third jets are identically zero (the derivative of a
 /// step is zero a.e.; the anchor assignment moves by re-labelling, not by a
 /// tangent step). The design width equals `anchors`; the rank charge the race
-/// prices is `anchors − 1` ([`crate::manifold::finite_set_rank_charge`]), one
+/// prices is `anchors − 1` (`crate::manifold::finite_set_rank_charge`), one
 /// anchor being the reference contrast.
 #[derive(Debug, Clone)]
 pub struct AnchorIndicatorEvaluator {

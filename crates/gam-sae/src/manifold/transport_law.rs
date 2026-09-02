@@ -79,7 +79,6 @@ pub enum CrosscoderLayer {
     Block(usize),
 }
 
-/// Outcome of [`measure_atom_transport`]: the empirical layer-to-layer transport
 /// map of one circle atom, the phase-shift law test, and the drift statistics.
 #[derive(Clone, Debug)]
 pub struct AtomTransportReport {
@@ -161,7 +160,7 @@ impl AtomTransportReport {
 
 /// Measure the empirical transport of one circle atom between two explicit
 /// crosscoder layers (source image projected onto the target image). The
-/// two-layer entry point [`measure_atom_transport`] is the anchor→`Block(0)` case.
+/// two-layer entry point `measure_atom_transport` is the anchor→`Block(0)` case.
 pub fn measure_atom_transport_between(
     term: &SaeManifoldTerm,
     layout: &CrosscoderLayout,

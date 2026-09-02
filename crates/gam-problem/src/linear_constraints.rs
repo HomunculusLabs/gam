@@ -97,7 +97,7 @@ impl LinearInequalityConstraints {
     }
 
     /// The contract-feasible ratio test on the dense system — the identical
-    /// rule [`crate::ConstraintSet::max_contract_feasible_step`] applies,
+    /// rule `crate::ConstraintSet::max_contract_feasible_step` applies,
     /// reached without wrapping (and therefore cloning) `A` into a
     /// [`crate::ConstraintSet`].
     ///

@@ -63,7 +63,7 @@ pub struct EvidenceHvpLogDet<'a> {
     pub apply: &'a dyn Fn(&[f64]) -> Vec<f64>,
 }
 
-/// Source for the Hessian log determinant in [`laplace_evidence`].
+/// Source for the Hessian log determinant in `laplace_evidence`.
 #[derive(Clone, Copy)]
 pub enum EvidenceLogDetSource<'a> {
     /// Use the exact arrow Cholesky factors, falling back to `fallback_hvp`
@@ -123,7 +123,7 @@ pub struct TopologyCandidate {
     pub exclusion_reason: Option<String>,
 }
 
-/// Outcome of [`select_topology`].
+/// Outcome of `select_topology`.
 #[derive(Debug, Clone)]
 pub struct SelectedTopology {
     pub winner: TopologyKind,
@@ -206,7 +206,7 @@ impl StackingCertificate {
 }
 
 /// Serializable work state carried by a stacking exhaustion error and accepted
-/// by [`resume_stacking_weights`]. Weights stay aligned to the original input
+/// by `resume_stacking_weights`. Weights stay aligned to the original input
 /// columns; no candidate is silently dropped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StackingCheckpoint {

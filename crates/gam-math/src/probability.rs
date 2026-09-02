@@ -347,7 +347,7 @@ pub fn chi_square_sf(statistic: f64, degrees_of_freedom: f64) -> f64 {
 /// carried explicitly.
 ///
 /// Two things separate this from the `&[f64]` weight list
-/// [`weighted_chi_square_sf`] takes, and each of them is a distribution the
+/// `weighted_chi_square_sf` takes, and each of them is a distribution the
 /// one-degree-of-freedom non-negative form cannot express:
 ///
 /// * **A negative weight makes a RATIO a tail.** `P(A/B > t)` for independent
@@ -369,13 +369,13 @@ pub struct WeightedChiSquareTerm {
     pub degrees_of_freedom: f64,
 }
 
-/// [`signed_weighted_chi_square_sf`] at a caller-chosen absolute accuracy,
+/// `signed_weighted_chi_square_sf` at a caller-chosen absolute accuracy,
 /// returning the bound actually achieved alongside the value.
 ///
 /// # Method
 ///
 /// Imhof's (1961) inversion in its general central form, of which the
-/// non-negative unit-`h` case documented on [`weighted_chi_square_sf`] is the
+/// non-negative unit-`h` case documented on `weighted_chi_square_sf` is the
 /// specialization:
 ///
 /// ```text
@@ -390,7 +390,7 @@ pub struct WeightedChiSquareTerm {
 /// # Two truncation bounds, because one of them stops working at `x = 0`
 ///
 /// The oscillatory bound `16/(x·U·ρ(U))` documented on
-/// [`weighted_chi_square_sf`] divides by `x`, and the ratio references this
+/// `weighted_chi_square_sf` divides by `x`, and the ratio references this
 /// signed form exists for are evaluated at exactly `x = 0`, where the phase
 /// stops turning at all: `θ(u) → (π/4)·Σ_j h_j·sgn(λ_j)`, a constant. There is
 /// no oscillation left to cancel, so the alternating-series argument yields
@@ -486,7 +486,7 @@ pub fn signed_weighted_chi_square_sf_to_tolerance(
     imhof_survival(&active, statistic, tolerance)
 }
 
-/// Default absolute accuracy [`weighted_chi_square_sf`] certifies on its Imhof
+/// Default absolute accuracy `weighted_chi_square_sf` certifies on its Imhof
 /// truncation. It is four orders below the smallest probability any consumer
 /// of a survival function resolves in practice and eleven below one, so the
 /// truncation is never the term that limits a reported tail.

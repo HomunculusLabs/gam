@@ -230,7 +230,7 @@ impl NullKind {
     }
 }
 
-/// Configuration for [`run_null_battery`].
+/// Configuration for `run_null_battery`.
 #[derive(Clone, Debug)]
 pub struct NullBatteryConfig {
     pub replicates: usize,
@@ -593,7 +593,7 @@ pub fn phase_randomized_surrogate(
 /// column, so all empirical marginal moments and tails are preserved exactly.
 /// The independently seeded permutations break cross-dimensional geometry; in
 /// particular, this is the matched shuffle control required for an unordered
-/// circle census, whereas [`token_shuffle_null`] leaves that point cloud intact.
+/// circle census, whereas `token_shuffle_null` leaves that point cloud intact.
 /// Column seeds depend only on `(seed, column)`, so cache-line column bands can
 /// execute in parallel with bit-identical output under every Rayon schedule.
 pub fn per_dimension_shuffle_null(
@@ -2587,7 +2587,7 @@ fn mix_seed(a: u64, b: u64, c: u64) -> u64 {
 }
 
 /// Summarize an explicit Monte Carlo null distribution with the same native
-/// plus-one tail calibration used by [`run_null_battery`].
+/// plus-one tail calibration used by `run_null_battery`.
 ///
 /// `samples` remains in draw order in the returned artifact. Quantiles are
 /// computed from a separate sorted copy so a seed and draw index can reproduce

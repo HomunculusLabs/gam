@@ -142,9 +142,9 @@ pub struct SaeManifoldRho {
     /// `√λ_ℓ` (never the design), so it enters the criterion only through the
     /// per-block residual sum of squares and the `√λ_ℓ` target-scaling Jacobian —
     /// its closed-form REML variance ratio is
-    /// [`crate::manifold::behavior::OutputBlock::reml_updated_log_lambda`] and its
+    /// `crate::manifold::behavior::OutputBlock::reml_updated_log_lambda` and its
     /// analytic outer gradient is
-    /// [`crate::manifold::behavior::profiled_penalized_quasi_laplace_block_log_lambda_gradient`].
+    /// `crate::manifold::behavior::profiled_penalized_quasi_laplace_block_log_lambda_gradient`.
     pub log_lambda_block: Vec<f64>,
     /// #2604 — per-atom sectional curvature `kappa` for constant-curvature
     /// atoms, in atom order. EMPTY for every dictionary without one, which is

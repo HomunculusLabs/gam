@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use gam_linalg::faer_ndarray::{fast_ab, fast_abt, fast_atb};
 
 /// Neutral view of a compiled identifiability reparametrisation that
-/// [`Gauge::from_compiled_map`] consumes. The concrete `CompiledMap`
+/// `Gauge::from_compiled_map` consumes. The concrete `CompiledMap`
 /// emitted by the identifiability compiler lives ABOVE this crate, so
 /// `Gauge` names only this trait (inverted dependency #1521); the
 /// compiler crate provides the `impl`.
@@ -610,7 +610,7 @@ impl Gauge {
     /// Grow an EXISTING block by one free coordinate, appended at the end of
     /// that block in both coordinate systems.
     ///
-    /// [`Self::extend_with_identity`] appends whole new blocks; this is the
+    /// `Self::extend_with_identity` appends whole new blocks; this is the
     /// other shape the deployment paths need — a block whose raw width grows
     /// while every other block, and the whole lift `T`, is untouched. It is
     /// what `extend_with_group`'s no-refit random-effect level is: one raw

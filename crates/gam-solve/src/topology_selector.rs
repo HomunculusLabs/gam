@@ -1822,7 +1822,7 @@ pub struct UnionRungResult {
 /// that lets the cross-class race build a stacking table without persisting any
 /// predictor: the closure refits on each fold's training rows.
 ///
-/// The mixture provider is constructed here ([`mixture_density_provider`]); a
+/// The mixture provider is constructed here (`mixture_density_provider`); a
 /// smooth-manifold provider is supplied by the caller (it owns the smooth
 /// fitting machinery). Both refit per fold so the table is genuinely held-out.
 pub type HeldOutDensityProvider<'a> =
@@ -1965,7 +1965,7 @@ pub enum Headline {
 /// * [`Exact`] — the evidence is a genuine point value (dense logdet, full
 ///   corpus); no margin floor.
 /// * [`Enclosure`] — the log-determinant half came from a
-///   [`block_preconditioned_logdet_enclosure`]; the race lead Δ must exceed the
+///   `block_preconditioned_logdet_enclosure`; the race lead Δ must exceed the
 ///   enclosure gap (#1011 contract) before the winner is trustworthy.
 /// * [`Coreset`] — the evidence was raced on a certified row coreset; the lead
 ///   must exceed the certificate's [`CoresetCertificate::race_transfer_margin`]
@@ -1974,7 +1974,6 @@ pub enum Headline {
 /// [`Exact`]: EvidenceCertification::Exact
 /// [`Enclosure`]: EvidenceCertification::Enclosure
 /// [`Coreset`]: EvidenceCertification::Coreset
-/// [`block_preconditioned_logdet_enclosure`]: crate::logdet_bounds::block_preconditioned_logdet_enclosure
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EvidenceCertification {
     Exact,

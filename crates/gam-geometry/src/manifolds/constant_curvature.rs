@@ -561,7 +561,7 @@ fn dirichlet_gram_assembly(
 
 /// Pullback Dirichlet Gram of a basis whose latent is the TANGENT COORDINATE at
 /// the origin of `M_κ` — the κ-generic form of
-/// [`crate::manifolds::poincare::conformal_dirichlet_penalty`].
+/// `crate::manifolds::poincare::conformal_dirichlet_penalty`.
 ///
 /// # Why this exists
 ///

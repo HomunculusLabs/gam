@@ -283,7 +283,7 @@ impl TileScorer {
     /// independent of `K`), and each tile is a single `(B × P)·(P × tile)`
     /// matrix multiply rather than `B × tile` scalar dot loops. The online
     /// top-`s` selector sees the atoms in the same global order as
-    /// [`Self::route_row`] (tile 0 first, ascending atom index). The GEMM
+    /// `Self::route_row` (tile 0 first, ascending atom index). The GEMM
     /// contracts the same `P` terms but `matrixmultiply` may accumulate them in
     /// a blocked order, so the per-atom scores agree with the row-at-a-time path
     /// only to f32 rounding; where two atoms tie within that rounding the two

@@ -355,7 +355,7 @@ pub struct CanonicalSpecs {
     pub used_channel_aware_audit: bool,
 }
 
-/// Like [`canonicalize_for_identifiability`], but linearizes every family-owned
+/// Like `canonicalize_for_identifiability`, but linearizes every family-owned
 /// (`jacobian_callback`) block's effective Jacobian at the supplied pilot
 /// operating point (`operating_scalars`, the family's `family_scalars` at the
 /// pilot β) instead of the zero/init point.

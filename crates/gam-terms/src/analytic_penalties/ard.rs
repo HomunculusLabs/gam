@@ -21,7 +21,7 @@ use super::*;
 /// dimension is effectively pruned.
 ///
 /// Because the penalty is quadratic and block-diagonal in latent axes, it
-/// reduces to a [`BlockwisePenalty`] per axis and slots into the existing
+/// reduces to a `BlockwisePenalty` per axis and slots into the existing
 /// canonical-penalty pipeline with zero extra wiring beyond appending `d`
 /// hyperparameter axes to `ρ`.
 ///
@@ -35,7 +35,7 @@ use super::*;
 ///   when rows have been aggregated or otherwise represent a different
 ///   effective observation count than `target.len() / latent_dim`.
 /// * The row-major `LatentCoordValues` layout means each per-axis ridge is
-///   strided in memory; [`Self::as_blockwise`] expands it into scalar
+///   strided in memory; `Self::as_blockwise` expands it into scalar
 ///   `BlockwisePenalty` entries rather than pretending each axis is contiguous.
 ///
 /// When to use: any [`crate::latent::LatentCoordValues`] block

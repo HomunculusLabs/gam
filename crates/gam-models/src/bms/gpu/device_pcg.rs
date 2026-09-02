@@ -18,7 +18,7 @@
 // same default stream so the sequence is implicitly ordered without sync.
 // ────────────────────────────────────────────────────────────────────────
 
-/// Inputs to [`run_pcg_against_row_hessian_device`]. The right-hand-side
+/// Inputs to `run_pcg_against_row_hessian_device`. The right-hand-side
 /// `b` is supplied as a host slice (it is the only host-resident vector
 /// that needs to enter the loop — the iterate, residual, search direction,
 /// and Hv output all live on the device).
@@ -39,7 +39,7 @@ pub struct DeviceResidentPcgInput<'a> {
     pub precond_diag_floor: f64,
 }
 
-/// Output of [`run_pcg_against_row_hessian_device`].
+/// Output of `run_pcg_against_row_hessian_device`.
 #[cfg(target_os = "linux")]
 pub struct DeviceResidentPcgOutput {
     /// Solution `x` such that `H · x ≈ b`, length `storage.block.p_total`.

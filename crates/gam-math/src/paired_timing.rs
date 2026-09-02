@@ -46,7 +46,7 @@
 //!   sides of that repetition's ratio and divides out.
 //! * **Randomise the order within each repetition.** If a first-versus-second
 //!   advantage exists at all, randomisation makes it cancel in expectation
-//!   instead of accruing to a fixed arm — and [`PairedTiming::first_position_bias`]
+//!   instead of accruing to a fixed arm — and `PairedTiming::first_position_bias`
 //!   reports the residual so it is measured rather than assumed away.
 //! * **Report the distribution of PAIRED ratios**, not a ratio of aggregate
 //!   extrema. The per-repetition ratio is the quantity the claim is about; a
@@ -124,7 +124,7 @@
 //! arm is the case that needs an explicit inner loop, sized so the per-call
 //! cost is under ~1% of the arm.
 //!
-//! [`PairedTiming::summary`] prints the per-arm `ns/iter` precisely so this is
+//! `PairedTiming::summary` prints the per-arm `ns/iter` precisely so this is
 //! checkable: if those numbers are of the same order as a function call, the
 //! ratio is not measuring what it claims to.
 //!
@@ -181,19 +181,19 @@
 //!
 //! # Using it as a gate
 //!
-//! Open a [`SpeedGate`] (release profile only — the test decides), record one
-//! paired cell per contract with [`SpeedGate::faster`] or
-//! [`SpeedGate::not_slower`], and [`SpeedGate::finish`]. The gate prints
-//! [`PairedTiming::summary`] for every cell whatever the outcome and asserts on
-//! [`PairedTiming::median_ratio`] alone; `wins_fraction` and
+//! Open a `SpeedGate` (release profile only — the test decides), record one
+//! paired cell per contract with `SpeedGate::faster` or
+//! `SpeedGate::not_slower`, and `SpeedGate::finish`. The gate prints
+//! `PairedTiming::summary` for every cell whatever the outcome and asserts on
+//! `PairedTiming::median_ratio` alone; `wins_fraction` and
 //! `ratio_resolution` travel on the same line as evidence (see above for why
 //! `wins` must not be a bar). Arms of a few tens of nanoseconds go through
-//! [`batched`], so the harness's own per-call cost is not what is measured.
+//! `batched`, so the harness's own per-call cost is not what is measured.
 //!
 //! **Lead a report with `wins_fraction`, not the ratio.** It is the statistic that
 //! survives someone disbelieving the rest of the output. `wins == 1.0` over `n`
 //! repetitions is a sign test at `2⁻ⁿ` — 15 repetitions is `≈3e-5` — and it is
-//! **distribution-free**: it does not depend on [`PairedTiming::ratio_resolution`]
+//! **distribution-free**: it does not depend on `PairedTiming::ratio_resolution`
 //! being correctly characterised, which is the one number a skeptic can
 //! reasonably question. The ratio says *how much*; `wins` says *whether*. When
 //! the first real migration onto this harness reported `median_ratio=0.938934`
@@ -202,7 +202,7 @@
 //!
 //! # The design lesson, for the next gate
 //!
-//! [`PairedTiming::first_position_bias`] is here because of a specific failure:
+//! `PairedTiming::first_position_bias` is here because of a specific failure:
 //! a fixed-order harness cannot separate a real 6% margin from a 6%
 //! first-versus-second offset, since **both** produce a stable ratio with noisy
 //! absolutes. The pre-existing answer was to run the whole gate a second time
@@ -436,7 +436,7 @@ where
 /// This is the ONE shape a wall-clock contract takes in this workspace, and
 /// its call site is the marker the release lane derives the gate population
 /// from: `scripts/speed_gates.py` walks the crates for every `#[test]` whose
-/// body calls [`SpeedGate::open`], resolves each to an exact test path in the
+/// body calls `SpeedGate::open`, resolves each to an exact test path in the
 /// compiled release binary, runs exactly that set, and refuses a run in which
 /// any derived gate did not execute. A gate therefore cannot be forgotten by
 /// a name-prefix filter, cannot print `ok` having asserted nothing, and
@@ -462,18 +462,18 @@ where
 ///
 /// # Two contracts, no third
 ///
-/// * [`SpeedGate::faster`] — the #932 contract: A (the compiled lowering) must
+/// * `SpeedGate::faster` — the #932 contract: A (the compiled lowering) must
 ///   be strictly faster than B (the strongest hand path or the generic tower
 ///   it specialises). Loss when `median_ratio() <= 1`.
-/// * [`SpeedGate::not_slower`] — for a cell whose two arms do the same work by
+/// * `SpeedGate::not_slower` — for a cell whose two arms do the same work by
 ///   construction and where no speed claim is made: A must not be measurably
 ///   slower than B, where "measurably" is the measurement's OWN resolution,
-///   [`PairedTiming::ratio_resolution`]. Loss when
+///   `PairedTiming::ratio_resolution`. Loss when
 ///   `median_ratio() + ratio_resolution() < 1`. There is no chosen tolerance
 ///   here: the instrument reports its noise floor, and that is the only
 ///   denominator a parity bar can honestly be stated in.
 ///
-/// A gate that is opened and dropped without [`SpeedGate::finish`] panics, and
+/// A gate that is opened and dropped without `SpeedGate::finish` panics, and
 /// a gate finished with no cells panics: both are gates that verified nothing.
 pub struct SpeedGate {
     token: &'static str,

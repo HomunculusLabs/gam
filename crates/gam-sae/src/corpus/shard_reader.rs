@@ -17,7 +17,7 @@
 //!
 //! The reader memory-maps the file read-only and reads rows directly out of the
 //! mapped payload, upcasting each `f32` lane to `f64` on demand (the
-//! mixed-precision-storage contract — see [`super::kernels`]). `f32` storage
+//! mixed-precision-storage contract — see `super::kernels`). `f32` storage
 //! halves on-disk and page-cache footprint versus `f64` so an
 //! out-of-core corpus streams without ever materializing as dense `f64`.
 //!

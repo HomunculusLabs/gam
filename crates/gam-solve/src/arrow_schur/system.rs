@@ -88,7 +88,7 @@ pub struct ExactAReducedRitzConditioning {
 ///   2. forms the working-weighted Gauss–Newton blocks
 ///      `H_tt^(i) += (g_i β)(g_i β)^T`, `H_tβ^(i) += (g_i β) ⊗ Φ_i`,
 ///      `H_ββ += Φ^T W Φ + Σ_k λ_k S_k`;
-///   3. calls [`ArrowSchurSystem::add_analytic_penalty_contributions`] to
+///   3. calls `ArrowSchurSystem::add_analytic_penalty_contributions` to
 ///      fold row-block Psi-tier analytic penalties (`ARDPenalty`,
 ///      `SparsityPenalty`) into `H_tt^(i)` and Beta-tier penalties into `H_ββ`;
 ///   4. calls [`ArrowSchurSystem::solve`] to obtain `(Δt, Δβ)`.
@@ -96,7 +96,7 @@ pub struct ArrowSchurSystem {
     /// Per-row latent block (length `N`, each row `d × d` / `d × K` / `d`).
     pub rows: Vec<ArrowRowBlock>,
     /// `H_ββ`, shape `(K, K)` for direct BA modes; empty when constructed
-    /// by [`ArrowSchurSystem::new_matrix_free_shared`] for PCG-only use.
+    /// by `ArrowSchurSystem::new_matrix_free_shared` for PCG-only use.
     pub hbb: Array2<f64>,
     /// Optional matrix-free `H_ββ x` operator for large BA Schur PCG.
     ///
@@ -195,7 +195,7 @@ pub struct ArrowSchurSystem {
     pub device_sae_pcg: Option<Arc<DeviceSaePcgData>>,
     /// Registered Psi-tier analytic penalties whose Hessian couples *distinct*
     /// latent rows (non-row-block-diagonal), captured by
-    /// [`Self::add_analytic_penalty_contributions`].
+    /// `Self::add_analytic_penalty_contributions`.
     ///
     /// These penalties (`TotalVariationPenalty`, `SheafConsistencyPenalty`,
     /// block-orthogonality, …) produce off-row Hessian blocks `∂²P/∂t_i∂t_j`
@@ -301,7 +301,7 @@ pub struct CrossRowLatentPenalty {
     pub rho_local: Array1<f64>,
     /// The flat latent vector (`N·d`, row-major) the penalty's curvature was
     /// linearized at — i.e. the `target_t` passed to
-    /// [`ArrowSchurSystem::add_analytic_penalty_contributions`]. The Hessian of
+    /// `ArrowSchurSystem::add_analytic_penalty_contributions`. The Hessian of
     /// a nonlinear penalty (the smoothed-TV curvature weights `φ''(D t)`,
     /// etc.) depends on this point, so `psd_majorizer_hvp` must be evaluated
     /// against it for the Newton operator to be the true Hessian at the
@@ -2891,7 +2891,7 @@ impl ArrowFactorCache {
 
     /// Precompute the deflated spectral pseudo-inverse ONCE and return a
     /// reusable applier — the many-RHS form of
-    /// [`Self::schur_inverse_apply_deflated`]. The EDF trace contracts
+    /// `Self::schur_inverse_apply_deflated`. The EDF trace contracts
     /// `(H⁻¹)_ββ` against one `λS⊗I` column per basis coefficient (`Σ_k M_k·r_k`
     /// columns total); recomputing the `O(K³)` eigendecomposition per column
     /// would multiply that cost by the border width for no reason. Each apply
@@ -2900,7 +2900,7 @@ impl ArrowFactorCache {
     /// [`Self::schur_inverse_apply`] back-substitution it replaces.
     ///
     /// Same deflation semantics, contract, and errors as
-    /// [`Self::schur_inverse_apply_deflated`]; the closure itself is
+    /// `Self::schur_inverse_apply_deflated`; the closure itself is
     /// infallible (rhs length is the caller's loop invariant — a wrong length
     /// panics in the underlying gemv shape check rather than dividing by a
     /// null pivot).

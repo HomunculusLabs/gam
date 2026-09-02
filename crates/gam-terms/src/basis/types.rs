@@ -631,7 +631,7 @@ pub enum CenterCountRequest {
 /// estimates for the value design and first/second derivative tiers, and a
 /// recommended [`SpatialStorageMode`] derived from `policy`. This is the
 /// resource-aware replacement for ad-hoc calls to [`default_num_centers`] /
-/// [`heuristic_centers`](crate::term_builder::heuristic_centers).
+/// `heuristic_centers`.
 pub fn plan_spatial_basis(
     n: usize,
     d: usize,

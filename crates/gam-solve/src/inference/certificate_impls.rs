@@ -156,7 +156,7 @@ impl Certificate for CoresetCertificate {
 }
 
 /// Map a coreset race outcome (the certificate's own
-/// [`CoresetCertificate::certify_margin`](crate::row_sampling_measure::CoresetCertificate::certify_margin)
+/// `CoresetCertificate::certify_margin`
 /// rule, evaluated against a consumer's
 /// `decision_margin`) onto the shared [`Verdict`] ladder. This is the
 /// margin-resolved entry point a race consumer uses to obtain a unified verdict

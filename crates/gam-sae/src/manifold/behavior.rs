@@ -71,7 +71,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 /// nats-unit tangent coordinates.
 ///
 /// Construction ([`Self::fit`]) is the only place the basepoint is chosen; the
-/// same chart then embeds arbitrary further rows ([`Self::embed`]) and decodes
+/// same chart then embeds arbitrary further rows (`Self::embed`) and decodes
 /// arbitrary tangent coordinates ([`Self::decode`]), so a train-time chart round
 /// trips out-of-sample behavior consistently.
 #[derive(Clone, Debug)]
@@ -841,7 +841,7 @@ pub fn stack_augmented_target(
 /// ```
 ///
 /// (`p̃ = p_x + Σ p_ℓ`, `n = n_obs`), the profiled Gaussian negative-log-marginal
-/// plus the `√λ_ℓ` target-scaling Jacobian ([`OutputBlock::reml_updated_log_lambda`]).
+/// plus the `√λ_ℓ` target-scaling Jacobian (`OutputBlock::reml_updated_log_lambda`).
 /// The `−(n p_ℓ/2)·log λ_ℓ` term diverges to `+∞` as `λ_ℓ → 0`, so the criterion
 /// PENALISES a vanishing weight — which is exactly what a plain fixed-point λ
 /// update (that treats the residual as frozen) fails to see, letting the shared
@@ -912,7 +912,7 @@ pub fn profiled_penalized_quasi_laplace_criterion(
 /// The Fellner–Schall / MacKay closed-form fixed-point STEP on each block weight
 /// `log λ_ℓ` (#2231 §2a): the ADDITIVE log-λ move to the variance-ratio root
 /// `log λ_ℓ* = ln((R_x/p_x)/(R_ℓ/p_ℓ))`, i.e. `step_ℓ = log λ_ℓ* − log λ_ℓ`. This
-/// is [`OutputBlock::reml_updated_log_lambda`] re-expressed as an outer-coordinate
+/// is `OutputBlock::reml_updated_log_lambda` re-expressed as an outer-coordinate
 /// step (multiplicative in λ, additive in log λ — the EFS convention the outer
 /// engine's `efs_step` uses for every ρ coordinate), so a block coordinate reduces
 /// M1's alternation to one more Fellner–Schall coordinate. A block with no

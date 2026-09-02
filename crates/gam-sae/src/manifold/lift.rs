@@ -20,14 +20,14 @@
 //! * **Sphere — the Veronese lift.** A mixture of `m` points `v_1..v_m ∈ S^{d-1}`
 //!   with amplitudes `a_j > 0` lifts to the PSD matrix `M = Σ_j a_j v_j v_jᵀ`
 //!   (the degree-2 Veronese / symmetric-outer-product feature block). The descent
-//!   is a symmetric eigendecomposition: [`recover_sphere_spikes`].
+//!   is a symmetric eigendecomposition: `recover_sphere_spikes`.
 //! * **Torus — the Kronecker pencil.** A spike at `(θ, φ) ∈ T²` with per-axis
 //!   harmonic degrees `(H₁, H₂)` lifts to the Kronecker product of the two
 //!   harmonic phasor vectors; `m` spikes give a sum of `m` Kronecker-rank-1 terms
 //!   sampled on the `H₁ × H₂` grid. The descent is 2-D harmonic retrieval by an
-//!   enhanced matrix pencil with *auto-paired* axes: [`recover_torus_spikes`].
+//!   enhanced matrix pencil with *auto-paired* axes: `recover_torus_spikes`.
 //!
-//! Both descents are exact only in the noiseless limit; [`polish_spikes`] runs a
+//! Both descents are exact only in the noiseless limit; `polish_spikes` runs a
 //! few damped Gauss–Newton steps on the *original* nonconvex objective
 //! `‖z − Σ_j a_j Φ(t_j)‖²` given a caller-supplied basis evaluation, and reports
 //! the final residual so a caller can gate acceptance.
@@ -46,7 +46,7 @@ pub struct SphereSpike {
     /// Canonical unit direction `v ∈ S^{d-1}` (length `d`). The lift `v vᵀ` is
     /// invariant under the antipodal flip `v ↦ −v`, so the reported vector is the
     /// canonical representative of the `{v, −v}` gauge orbit: its
-    /// largest-magnitude component is non-negative (see [`canonicalize_direction`]).
+    /// largest-magnitude component is non-negative (see `canonicalize_direction`).
     pub direction: Vec<f64>,
     /// Amplitude `a > 0` of the spike (the corresponding eigenvalue of the lift).
     pub amplitude: f64,
@@ -102,7 +102,7 @@ pub struct TorusRecovery {
 // Polish — damped Gauss–Newton on the original nonconvex objective
 // ============================================================================
 
-/// Tuning for [`polish_spikes`].
+/// Tuning for `polish_spikes`.
 #[derive(Clone, Debug)]
 pub struct PolishOptions {
     /// Maximum outer Gauss–Newton iterations.
@@ -135,7 +135,7 @@ pub struct PolishState {
     pub coords: Vec<Vec<f64>>,
 }
 
-/// Outcome of [`polish_spikes`].
+/// Outcome of `polish_spikes`.
 #[derive(Clone, Debug)]
 pub struct PolishResult {
     /// Polished parameters.

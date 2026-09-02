@@ -21,7 +21,7 @@
 //! expected per-observation log-growth of the deciding e-process under the
 //! alternative (the module docs' "the SAME quadratic form the steering dosimetry
 //! already computes, repurposed"). So each candidate latent move becomes a
-//! one-dimensional [`CandidateProbe`] whose hypothesis disagreement, read through
+//! one-dimensional `CandidateProbe` whose hypothesis disagreement, read through
 //! the identity Fisher, reproduces the realized dose:
 //! `½ (μ₁ − μ₀)ᵀ F (μ₁ − μ₀) = predicted_nats` with `μ₀ = 0`,
 //! `μ₁ = √(2·predicted_nats)`, `F = [[1]]`. No fabricated metric — the real

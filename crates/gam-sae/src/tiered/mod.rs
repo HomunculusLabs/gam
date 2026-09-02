@@ -35,7 +35,7 @@
 //!     fixed-support anchors and decoder rows, is charged as a finite set, and
 //!     only the residual after peeling it is handed to semantic charting.
 //!   * [`TieredConfig`] — the composed-fit knobs.
-//!   * [`interference_subspace`] — Tier-1's active subspace `Q` (what the linear
+//!   * `interference_subspace` — Tier-1's active subspace `Q` (what the linear
 //!     dictionary already explains) and its orthogonal complement `Q⊥`. Per the
 //!     #2021 coupling the linear dictionary *is* the interference model for the
 //!     curved fit: the Tier-2 GLS weight down-weights `Q` (penalizes `Q⊥`), so
@@ -319,8 +319,8 @@ impl Tier05SinkAtomConfig {
 /// Tier-0.5 finite-set attention-sink atom.
 ///
 /// This is the typed counterpart to a nuisance regress-out: the basis kind is
-/// [`SaeAtomBasisKind::FiniteSet`], the basis is a one-hot
-/// [`AnchorIndicatorEvaluator`], and the row support is fixed from known
+/// `SaeAtomBasisKind::FiniteSet`, the basis is a one-hot
+/// `AnchorIndicatorEvaluator`, and the row support is fixed from known
 /// positions/delimiter metadata before the decoder is fit. The atom is additive:
 /// downstream semantic charting sees `residual_after_sink`, while reconstruction
 /// adds the sink contribution back.
@@ -357,7 +357,7 @@ pub struct TieredConfig {
     /// active budget `s`, epochs, and the GPU score-routing mode).
     pub tier1: SparseDictConfig,
     /// Rank `r` of the interference subspace `Q` handed to Tier-2 (`None` ⇒ pick
-    /// by the 99% energy threshold in [`interference_subspace`]).
+    /// by the 99% energy threshold in `interference_subspace`).
     pub lambda_seed_rank: Option<usize>,
     /// Whether to run the Tier-2 curved tier at all (`false` ⇒ Tier-0 + Tier-1
     /// only, the linear-bulk baseline).

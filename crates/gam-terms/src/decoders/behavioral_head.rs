@@ -33,7 +33,7 @@
 //!
 //! 1. [`BehavioralHead`] — the head GLM itself: value + gradient of the head
 //!    log-likelihood w.r.t. the head coefficients `(a, w)` AND w.r.t. the
-//!    latent codes `t` (the cross-channel coupling), under a [`RowSubsampleMask`]
+//!    latent codes `t` (the cross-channel coupling), under a `RowSubsampleMask`
 //!    weighting so unlabeled rows carry zero head weight (semi-supervised).
 //!
 //! 2. [`LeakageAbsorber`] — the #461 Neyman-orthogonal device. Joint fitting
@@ -44,10 +44,10 @@
 //!    "orient what `p(x)` put there" vs. "hallucinate geometry from the label"
 //!    — the novel statistical content of the whole construction.
 //!
-//! 3. [`head_feature_significance`] — per-feature (per-atom) significance of
-//!    the behavioral loading via [`wood_smooth_test`], converted to an
+//! 3. `head_feature_significance` — per-feature (per-atom) significance of
+//!    the behavioral loading via `wood_smooth_test`, converted to an
 //!    FDR-controlled report through the e-BH multiplicity machinery
-//!    ([`e_benjamini_hochberg`]). Features whose behavioral signal survives
+//!    (`e_benjamini_hochberg`). Features whose behavioral signal survives
 //!    orthogonalization AND the multiplicity correction are the reportable
 //!    ones.
 

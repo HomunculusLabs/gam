@@ -1097,7 +1097,7 @@ impl SaeManifoldTerm {
     }
 
     /// Install the fitted reconstruction dispersion used by
-    /// [`dictionary_incoherence_report`]. This is a pure diagnostic scalar and
+    /// `dictionary_incoherence_report`. This is a pure diagnostic scalar and
     /// does not feed any loss, criterion, penalty, or optimizer state.
     pub fn set_certificate_dispersion(&mut self, dispersion: f64) -> Result<(), String> {
         if !dispersion.is_finite() || dispersion <= 0.0 {
@@ -1477,7 +1477,7 @@ impl SaeManifoldTerm {
     /// μ back to the assembled per-atom reconstruction, so the atoms only ever
     /// need to explain the DE-MEANED target `Z − μ`. Pass a length-`p` vector;
     /// mismatched length is rejected. Passing the column-mean of the fit target
-    /// (see [`Self::fit_tier0_mean`]) moves the global DC out of the K per-atom
+    /// (see `Self::fit_tier0_mean`) moves the global DC out of the K per-atom
     /// intercepts into ONE shared mean — structurally removing the
     /// co-collapse-to-mean incentive (a pure DC-constant decoder then reconstructs
     /// a constant that the de-meaned target no longer contains, so it earns zero
@@ -3803,7 +3803,7 @@ impl SaeManifoldTerm {
     /// ones; only the assignment masses come from `assignments`. Because this
     /// entry point has no target, it explicitly refuses a collapse-rescued image;
     /// callers with a target must use
-    /// [`Self::reconstruct_from_assignments_target_aware`].
+    /// `Self::reconstruct_from_assignments_target_aware`.
     pub fn reconstruct_from_assignments(
         &self,
         assignments: ArrayView2<'_, f64>,

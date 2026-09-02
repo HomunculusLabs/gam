@@ -966,7 +966,7 @@ pub struct SmoothTerm {
     /// cone geometry under a general orthogonal rotation.
     ///
     /// Prediction-side replay: callers building a new-data design `X_new_raw`
-    /// from the *raw* basis must call [`SmoothTerm::apply_rotation_to_predict`]
+    /// from the *raw* basis must call `SmoothTerm::apply_rotation_to_predict`
     /// (or equivalent) to obtain `X_new = X_new_raw · Q` matching this
     /// term's coefficient system.
     ///

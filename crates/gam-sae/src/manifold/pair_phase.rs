@@ -182,7 +182,7 @@ pub struct PhaseVerdict {
     /// (constant total energy) is the complementarity signature of a split chart.
     pub total_energy_cv: f64,
     /// True ⇒ a joint `d = 2` torus coordinate is proposed on positive phase
-    /// evidence (set by [`screen_all_pairs_phase`] after the e-BH ledger).
+    /// evidence (set by `screen_all_pairs_phase` after the e-BH ledger).
     pub torus_proposed: bool,
     /// True ⇒ the pair reads as a lower-tail SPLIT single circle: a fuse-race
     /// candidate is worth building for the terminal joint fit to adjudicate.
@@ -233,7 +233,7 @@ pub struct ResidualCoupling {
 /// The pairwise phase-coupling screen for a candidate circle factorization — the
 /// DUAL READING of the same e-BH ledger the phase-fusion screen uses.
 ///
-/// [`screen_all_pairs_phase`] proposes a torus BINDING on POSITIVE coupling
+/// `screen_all_pairs_phase` proposes a torus BINDING on POSITIVE coupling
 /// evidence: an e-BH discovery over the (pair × channel) surrogate-null ledger.
 /// The separation problem (#2111) reads the SAME ledger for whether ANY residual
 /// coupling survives. On a dense product-of-circles torus, ring-ness (a
@@ -287,7 +287,7 @@ pub struct FuseRaceCandidate {
     /// single split circle sits near `1.0` (the circle IS 2-dimensional); a true
     /// pair of independent circles leaks energy to the discarded directions.
     pub captured_energy_fraction: f64,
-    /// The two atoms this candidate would fuse (a [`StructureMove::Fusion`]).
+    /// The two atoms this candidate would fuse (a `StructureMove::Fusion`).
     pub atom_a: usize,
     pub atom_b: usize,
 }

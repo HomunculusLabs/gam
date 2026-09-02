@@ -2223,7 +2223,7 @@ std::thread_local! {
         = const { std::cell::RefCell::new(None) };
 }
 
-/// [`compute_block_penalty_logdet_derivs`] with per-penalty prior-factor
+/// `compute_block_penalty_logdet_derivs` with per-penalty prior-factor
 /// structure.
 ///
 /// `prior_factor_mask[b][k] == true` declares block `b`'s penalty `k` an

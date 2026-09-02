@@ -4723,7 +4723,7 @@ impl UnifiedFitResult {
     ///
     /// Boundary accessor: returns `&Array2<f64>` so out-of-scope consumers
     /// (CLI, GPU, families) keep their pre-newtype call shape. Use
-    /// [`Self::penalized_hessian_unscaled`] when the caller wants the
+    /// `Self::penalized_hessian_unscaled` when the caller wants the
     /// `UnscaledPrecision` newtype to enforce the dispersion-ownership
     /// invariant.
     pub fn penalized_hessian(&self) -> Option<&Array2<f64>> {

@@ -145,7 +145,7 @@ use super::reml_outer_engine::{PenaltyCoordinate, PenaltySubspaceTrace};
 /// The channels the LANDED first-order calculus reads live here: `index`
 /// (unit θ-coordinate), `beta_dot` (the shared β̇), and `h_dot_total` (the
 /// total drift Ḣ every atom traces). They are filled in exactly one place —
-/// [`Sensitivity::fill_direction`] (#935 now closed) — which runs the
+/// `Sensitivity::fill_direction` (#935 now closed) — which runs the
 /// `β̇ = −H⁺ F_{βθ}` solve through the shared [`FitSensitivity`] operator and
 /// assembles `h_dot_total = h_dot_frozen + D_βH[β̇]` against THAT β̇ (the cubic
 /// correction supplied as the caller's existing operator, not re-implemented).

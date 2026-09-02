@@ -147,7 +147,7 @@ pub enum SmoothLrReferenceSource {
 /// # The Monte-Carlo error is removed where it would matter
 ///
 /// The replay is a simulation, so its tail is an estimate. The conditional tail
-/// is NOT — [`gam_math::probability::weighted_chi_square_sf`] evaluates it by
+/// is NOT — `gam_math::probability::weighted_chi_square_sf` evaluates it by
 /// inversion. The two are strongly dependent (the same draws, differing only in
 /// whether `t` is selected or held at one), so the replay reports the
 /// DIFFERENCE and adds it to the exact conditional value:
@@ -1666,7 +1666,7 @@ fn split_mix64(state: u64) -> u64 {
 /// figures). It opens in the middle, at moderate shrinkage, which is exactly
 /// where a smooth term carrying real signal sits. Nothing about the statistic requires that
 /// trade: the weights are the parameters of an exactly invertible
-/// characteristic function, and [`gam_math::probability::weighted_chi_square_sf`]
+/// characteristic function, and `gam_math::probability::weighted_chi_square_sf`
 /// inverts it (Imhof) with a *returned* truncation bound of `1e-11` — eight
 /// orders below the smallest tail any of the numbers above resolves. So the
 /// reference is `P(Σ_j w_j χ²_1 > W)` itself, and the `(ν, g)` pair survives only
@@ -1717,7 +1717,7 @@ pub struct SmoothLrReferenceDf {
     /// The null spectrum itself, `w_j ∈ [0, 1]`, sorted descending — the whole
     /// reference on the [`SmoothLrReferenceSource::NullSpectrum`] lane. Empty on
     /// the two lanes that could not reach it, which is exactly the condition
-    /// under which [`Self::tail_probability`] falls back to the `(ν, g)` pair.
+    /// under which `Self::tail_probability` falls back to the `(ν, g)` pair.
     pub weights: Vec<f64>,
     /// First spectral moment `Σ_j w_j = 2·tr(F_jj) − tr(F_jj²)` — Wood's `edf1`,
     /// and exactly the statistic's first-order null mean `E[W|λ]`. This is the
@@ -1905,13 +1905,13 @@ const SMOOTH_LR_TAIL_COARSEST: f64 = 1e-3;
 impl SmoothLrReferenceDf {
 
     /// The CONDITIONAL tail — the fixed-`λ` law alone, with the λ̂-selection
-    /// replay held out. This is what [`Self::tail_probability`] returns when
+    /// replay held out. This is what `Self::tail_probability` returns when
     /// nothing was selected, and it is the reference the replay corrects.
     pub fn conditional_tail_probability(&self, statistic: f64) -> f64 {
         self.conditional_tail_with_bound(statistic).0
     }
 
-    /// [`Self::tail_probability`] with the certified absolute bound the
+    /// `Self::tail_probability` with the certified absolute bound the
     /// quadrature achieved on it.
     ///
     /// # How accurately the tail is resolved, and why that is derived

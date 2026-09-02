@@ -2097,7 +2097,7 @@ impl SurrogateLaneState {
 /// Split arrow-Schur evidence `log|H| = Σ log|H_tt| + log|S|` where the reduced
 /// Schur term is estimated by the #2080 rational surrogate rather than SLQ, on
 /// ONE shared factorization. The build-once companion to
-/// [`matrix_free_arrow_evidence_log_det`]:
+/// `matrix_free_arrow_evidence_log_det`:
 ///
 /// - `lane = None` runs the identical `slq_reduced_schur_log_det` path — a
 ///   bit-for-bit fallback so a caller that has not opted in is unchanged.
@@ -2105,7 +2105,7 @@ impl SurrogateLaneState {
 ///   unchanged, reuses) the frozen derived-rank [`RationalLogdetPlan`] and
 ///   evaluates it against the current operator. The plan's `Q`/probes/quadrature
 ///   are fixed at first build, so only the matrix-free `S·v` apply moves with ρ —
-///   the value and its [`RationalLogdetPlan::directional_derivative`] gradient
+///   the value and its `RationalLogdetPlan::directional_derivative` gradient
 ///   remain one functional.
 ///
 /// Returns `(log_det_tt, log_det_schur)`; the caller adds them for the evidence.
@@ -2562,7 +2562,7 @@ pub fn reduced_schur_lambda_max<B: BatchedBlockSolver + Sync>(
 /// `eval.estimate` = the surrogate value `L̃ ≈ log|S|` (with `eval.std_err` the
 /// honest Hutchinson error bar), and (b) later contract the SAME shifted-solve
 /// bundle against any per-ρ-coordinate Schur-derivative operator `∂S` via
-/// [`rational_reduced_schur_directional`]. Because both the value and that
+/// `rational_reduced_schur_directional`. Because both the value and that
 /// derivative are the exact value / gradient of the ONE deterministic function
 /// `L̃(ρ)` (fixed probes, fixed quadrature), the outer optimiser descends a
 /// function whose gradient is its own — the objective↔gradient desync class the
@@ -2651,7 +2651,7 @@ pub fn rational_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
 /// requests the bare-Hutchinson plan; a pilot already under target also returns
 /// it. Deterministic for fixed inputs (`Q` and probes are seed-derived). The
 /// returned plan's `Q` is FROZEN, so
-/// [`RationalLogdetPlan::directional_derivative`] on its evaluations is the exact
+/// `RationalLogdetPlan::directional_derivative` on its evaluations is the exact
 /// surrogate gradient.
 pub struct DerivedRationalLogdetPlan {
     /// Frozen statistical plan selected at the entry operator.
@@ -2792,7 +2792,7 @@ pub struct ReducedSchurLogdetPrecondRow {
 /// report what each cost.
 ///
 /// This is the evidence-side companion to
-/// [`arrow_precond_ladder_iteration_study`], which does the same for the Newton
+/// `arrow_precond_ladder_iteration_study`, which does the same for the Newton
 /// PCG ladder. It exists because the two questions are different: the Newton
 /// ladder asks which preconditioner solves a STEP fastest, while this asks what
 /// the log-determinant's shifted-solve ladder costs — and before #2576 that

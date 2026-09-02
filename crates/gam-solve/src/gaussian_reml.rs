@@ -1378,7 +1378,7 @@ pub struct GaussianRemlStationarySet {
 /// Enumerate the closed-form Gaussian REML stationary set at the given design,
 /// exposing the [`GaussianRemlStationarySet`] certificate. Thin wrapper over the
 /// shared enumeration used by the production optimizer — added beside
-/// [`gaussian_reml_point_eval_at_rho`] rather than changing any existing public
+/// `gaussian_reml_point_eval_at_rho` rather than changing any existing public
 /// signature.
 pub fn gaussian_reml_stationary_set(
     x: ArrayView2<'_, f64>,

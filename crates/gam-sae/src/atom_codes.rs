@@ -518,7 +518,7 @@ fn log2_binom(g: i64, k: i64) -> f64 {
 }
 
 /// Pairwise co-activation summary for two atoms (see
-/// [`SparseAtomCodes::coactivation`]). All probabilities are empirical
+/// `SparseAtomCodes::coactivation`). All probabilities are empirical
 /// popcount ratios over the active-support masks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoactivationStats {
@@ -538,7 +538,7 @@ pub struct CoactivationStats {
     /// marginal is empty.
     pub lift: f64,
     /// Pearson correlation of the two atoms' activation WEIGHTS over the
-    /// jointly-active rows (see [`SparseAtomCodes::weight_codependence`]) — the
+    /// jointly-active rows (see `SparseAtomCodes::weight_codependence`) — the
     /// amplitude/interaction half of the fusion criterion. `0` when the joint
     /// support is too small or a weight is constant there.
     pub weight_correlation: f64,

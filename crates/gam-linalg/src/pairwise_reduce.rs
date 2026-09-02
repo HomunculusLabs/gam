@@ -32,7 +32,7 @@
 //!    associated identically.
 //!
 //! 3. **Chunking/streaming invariance.** Feeding a sequence to the streaming
-//!    entry points ([`StreamingPairwise`], [`pairwise_reduce_chunked`]) in any
+//!    entry points ([`StreamingPairwise`], `pairwise_reduce_chunked`) in any
 //!    chunking — including one element at a time, or all at once — produces a
 //!    result bit-identical to reducing the whole concatenated sequence with
 //!    [`pairwise_reduce`]. The tree shape is determined by the total element

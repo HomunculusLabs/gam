@@ -78,7 +78,7 @@ pub struct PirlsGpuStep {
     pub logdet: f64,
 }
 
-/// Per-step inputs for [`solve_pirls_step_on_stream`].
+/// Per-step inputs for `solve_pirls_step_on_stream`.
 ///
 /// Mirrors [`PirlsGpuInput`] but elides the design matrix `x` because that
 /// lives device-resident in the shared batch state. Each PIRLS Newton step
@@ -153,7 +153,7 @@ pub struct PirlsGpuSharedData {
     pub(crate) offset_dev: cudarc::driver::CudaSlice<f64>,
 }
 
-/// Per-stream workspace for [`solve_pirls_step_on_stream`].
+/// Per-stream workspace for `solve_pirls_step_on_stream`.
 ///
 /// Owns a non-default CUDA stream plus cuBLAS / cuSOLVER handles bound to
 /// that stream, and the persistent device buffers that every PIRLS Newton

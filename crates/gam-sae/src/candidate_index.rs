@@ -27,7 +27,7 @@
 //! ## Recall contract
 //!
 //! Sublinear proposal is only safe if it *almost never* drops a truly-active
-//! atom. [`SaeCandidateIndex::recall_report`] takes a set of planted
+//! atom. `SaeCandidateIndex::recall_report` takes a set of planted
 //! truly-active atoms per row, runs the proposal at a stated candidate budget,
 //! and records the rate at which planted atoms appear in the proposed set —
 //! **logging every miss** rather than silently truncating. The returned
@@ -429,7 +429,7 @@ impl SaeCandidateIndex {
 /// Hard upper bound on the routing score (frame alignment) of ANY atom: the
 /// alignment `‖U_kᵀ d‖ / ‖d‖` is the fraction of a direction's energy inside the
 /// atom's column-space, so it lies in `[0, 1]` for every atom, gathered or not.
-/// This is the *true* upper bound that makes [`SaeCandidateIndex::route_exact`]'s
+/// This is the *true* upper bound that makes `SaeCandidateIndex::route_exact`'s
 /// LSH fast path sound: a gathered atom at the ceiling cannot be beaten.
 pub const ROUTING_ALIGNMENT_UPPER_BOUND: f64 = 1.0;
 
@@ -438,7 +438,6 @@ pub const ROUTING_ALIGNMENT_UPPER_BOUND: f64 = 1.0;
 /// maximizer (floating-point slack on the `‖·‖`/`‖·‖` ratio).
 pub const ROUTING_CERT_EPS: f64 = 1e-12;
 
-/// Result of [`SaeCandidateIndex::route_exact`]: the certified-or-exact global
 /// argmax of the routing score for one row, plus how it was obtained.
 #[derive(Clone, Copy, Debug)]
 pub struct ExactRoute {
@@ -491,7 +490,7 @@ pub struct RecallMiss {
     pub reason: MissReason,
 }
 
-/// Result of [`SaeCandidateIndex::recall_report`].
+/// Result of `SaeCandidateIndex::recall_report`.
 #[derive(Clone, Debug)]
 pub struct RecallReport {
     /// Candidate budget the recall was measured at.
@@ -513,7 +512,7 @@ pub struct RecallReport {
     pub misses: Vec<RecallMiss>,
 }
 
-/// Result of [`SaeCandidateIndex::proposal_recall_report`] — the two-stage
+/// Result of `SaeCandidateIndex::proposal_recall_report` — the two-stage
 /// routing license: how much of the EXACT top-`s` rescore the sublinear proposal
 /// recovered, plus every miss.
 #[derive(Clone, Debug)]
@@ -533,7 +532,7 @@ pub struct ProposalRecallReport {
     /// the exact rescore over this regime.
     pub recall: f64,
     /// Mean gathered-candidate count per row — the sublinearity witness; compare
-    /// against `num_atoms` (see [`ProposalRecallReport::sublinearity_ratio`]).
+    /// against `num_atoms` (see `ProposalRecallReport::sublinearity_ratio`).
     pub avg_candidates_gathered: f64,
     /// Total atoms in the index (for the sublinearity ratio).
     pub num_atoms: usize,

@@ -18,11 +18,11 @@
 //! This module is the permanent gam surface for that accounting, ported from the
 //! hand-verified `Manifold-SAE experiments/mdl_ladder/mdl.py` reference (incl. its
 //! selection-asymmetry fix): a rate-distortion [`score`] of a [`Featurizer`] at a
-//! stated distortion floor, and a [`crossover_firings`] comparison of two
+//! stated distortion floor, and a `crossover_firings` comparison of two
 //! featurizers → Δbits/token and the crossover firing count `f*` (with the
 //! selection-bits delta charged whenever the two configs differ in `(G, k)`, and
 //! `f* = ∞` flagged when the richer model never pays — the line/control case). The
-//! [`DescriptionLength::from_criterion_nats`] side converts a fit's OWN criterion
+//! `DescriptionLength::from_criterion_nats` side converts a fit's OWN criterion
 //! terms to bits so a test can assert the surface reconciles with the criterion
 //! exactly (no parallel accounting drift).
 
@@ -596,7 +596,7 @@ pub struct MatchedDl {
 /// Assemble the matched description length of a chart / atom from its column count,
 /// ambient dim, per-scalar precision, per-firing coordinate SEs, and achieved EV.
 ///
-/// `coded_columns` is `2H+1` for a circle chart ([`circle_chart_columns`]) or the
+/// `coded_columns` is `2H+1` for a circle chart (`circle_chart_columns`) or the
 /// column count of a flat block. `coords_per_firing` is how many coordinates each
 /// FIRING transmits — `d_atom` for a chart (1 for a circle's phase), `block_size`
 /// for a flat block coding every coefficient: at matched per-scalar distortion the

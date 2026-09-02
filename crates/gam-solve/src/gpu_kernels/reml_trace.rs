@@ -58,7 +58,7 @@
 //!
 //! # Gating
 //!
-//! The companion helper [`should_use_gpu_hutchinson`] mirrors the CPU
+//! The companion helper `should_use_gpu_hutchinson` mirrors the CPU
 //! gate (`prefers_stochastic_trace_estimation` + matching kernel +
 //! plain-SPD logdet path) and adds the GPU-specific minima from the math
 //! team's section 18:

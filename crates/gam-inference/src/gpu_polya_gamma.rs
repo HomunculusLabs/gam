@@ -38,7 +38,7 @@
 //!   augmentation identity is logit-only; doing so silently would change
 //!   numerical results for shipped fits.
 //! * It does **not** define a public production family. The
-//!   Gibbs harness in [`logistic_gibbs_step`] is a *validation oracle* for
+//!   Gibbs harness in `logistic_gibbs_step` is a *validation oracle* for
 //!   the sampler primitive, not a fit method. The CPU reference
 //!   `src/inference/polya_gamma.rs` and the NUTS/HMC infrastructure remain
 //!   the supported posterior-inference paths.

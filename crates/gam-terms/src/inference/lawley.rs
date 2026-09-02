@@ -824,7 +824,7 @@ pub fn lawley_lr_mean_shift_with_rho_variation(
 /// scale-free Poisson/Binomial). Returns `None` for pairs whose cumulant jets
 /// are not derived yet — the consumer then reports first-order inference only
 /// (#939). This is the dispersion-carrying sibling of
-/// [`known_scale_expected_jets`]; the per-term LR Bartlett path (#1063) needs it
+/// `known_scale_expected_jets`; the per-term LR Bartlett path (#1063) needs it
 /// for the estimated-scale Gaussian/Gamma families whose ε depends on φ.
 pub fn known_scale_expected_jets_with_dispersion(
     family: &gam_spec::LikelihoodSpec,

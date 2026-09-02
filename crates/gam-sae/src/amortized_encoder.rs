@@ -162,7 +162,7 @@ pub struct AmortizationGap {
     pub errors: AmortizationErrorStats,
     /// The joint multi-start-fallback fraction on the exact solution — the share
     /// of rows whose co-active atoms couple beyond the per-atom certificate, the
-    /// encode-tax cost multiplier ([`crate::encode::joint_encode_fallback_fraction`]).
+    /// encode-tax cost multiplier (`crate::encode::joint_encode_fallback_fraction`).
     pub joint_multistart_fraction: f64,
     /// Whether the encoder admitted the diagonal-quadratic head over the linear
     /// null (capacity justified by evidence).

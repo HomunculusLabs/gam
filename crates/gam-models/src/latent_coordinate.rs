@@ -176,7 +176,7 @@ pub struct LatentCoordinateEvaluation {
 /// A concrete likelihood supplies the value and analytic latent derivatives.
 ///
 /// Objective failures remain in the associated error type all the way through
-/// [`optimize_latent_coordinates`]. An implementation must not translate a
+/// `optimize_latent_coordinates`. An implementation must not translate a
 /// failed inner solve into an infinite value or a zero gradient.
 pub trait LatentCoordinateObjective {
     type Error: StdError + 'static;

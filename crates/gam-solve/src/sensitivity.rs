@@ -39,9 +39,9 @@
 //! - [`mode_response_coned`](FitSensitivity::mode_response_coned) — the same
 //!   response confined to its cone of influence (#779); the lazy/local form
 //!   the smoothing-correction IFT uses.
-//! - [`leverage_block`](FitSensitivity::leverage_block) — `H⁻¹Xᵀ`, whose
+//! - `leverage_block` — `H⁻¹Xᵀ`, whose
 //!   column `i` is at once ALO's per-row solve and the case/response channel.
-//! - [`case_deletion`](FitSensitivity::case_deletion) — dfbetas + Cook's
+//! - `case_deletion` — dfbetas + Cook's
 //!   distance, the leave-one-out channel, one scaled column of `H⁻¹Xᵀ` each.
 //!
 //! What is deliberately NOT folded in: the matrix-free `hop.solve_multi`
@@ -245,7 +245,7 @@ impl<'a> FitSensitivity<'a> {
 }
 
 /// Exact (Gaussian) / one-step (GLM) case-deletion influence produced by
-/// [`FitSensitivity::case_deletion`]. See that method for the identities.
+/// `FitSensitivity::case_deletion`. See that method for the identities.
 pub struct CaseDeletionInfluence {
     /// `dfbeta[[i, j]]` = change in coefficient `j` when observation `i` is
     /// left out, `β̂_j − β̂₍ᵢ₎_j`.

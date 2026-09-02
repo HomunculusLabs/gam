@@ -52,7 +52,7 @@
 //!    atom's coordinate grid (the SHAPE_BAND grid idiom), each with a certified
 //!    Newton radius `R_c` solved from the Kantorovich inequality at the
 //!    worst-case in-chart start.
-//! 2. **Online, per row** ([`EncodeAtlas::certified_encode_row`]): route to the
+//! 2. **Online, per row** (`EncodeAtlas::certified_encode_row`): route to the
 //!    nearest chart, start from its distilled IFT predictor, take one or two
 //!    Newton steps, then the `h ≤ ½` check AT the start point is the per-row
 //!    certificate.
@@ -784,7 +784,7 @@ impl FallbackTelemetry {
 
     /// Fold another atom's tallies into this one (n_rows is shared across atoms;
     /// n_atoms and the tier counts accumulate). Lets a caller aggregate the
-    /// per-atom telemetry of [`EncodeAtlas::encode_atom_with_fallback_telemetry`]
+    /// per-atom telemetry of `EncodeAtlas::encode_atom_with_fallback_telemetry`
     /// into one dictionary-wide breakdown.
     pub fn accumulate(&mut self, other: &FallbackTelemetry) {
         self.n_rows = other.n_rows;
@@ -2443,7 +2443,7 @@ impl EncodeAtlas {
         Ok((probe.coord, probe.final_cert))
     }
 
-    /// [`Self::certified_encode_row`] against the TRUE encode objective (F3): the
+    /// `Self::certified_encode_row` against the TRUE encode objective (F3): the
     /// Newton–Kantorovich certificate is computed under the fit's per-row output
     /// metric and latent coordinate prior ([`EncodeObjective`]), so the certified
     /// root is the minimizer of the SAME generalized-least-squares-plus-prior
@@ -2669,7 +2669,7 @@ impl EncodeAtlas {
         }
     }
 
-    /// [`Self::amortized_encode_row`] against the TRUE encode objective (F3): the
+    /// `Self::amortized_encode_row` against the TRUE encode objective (F3): the
     /// distilled predictor's warm start is Euclidean (its `A₁` is the Euclidean
     /// Gauss–Newton block), but BOTH Kantorovich probes certify under the supplied
     /// metric + prior objective, with the chart Lipschitz taken as the objective's

@@ -1849,7 +1849,7 @@ fn log_inverse_link_jet_exact(eta: f64) -> InverseLinkJet {
 
 /// EXACT public inverse-link jet for response-scale prediction outputs.
 ///
-/// Identical to [`inverse_link_jet_for_family`] for every link EXCEPT the
+/// Identical to `inverse_link_jet_for_family` for every link EXCEPT the
 /// standard `Log` link, where it accepts every IEEE input while the shared
 /// solver derivative seam accepts only its declared domain. For example,
 /// `eta = 705` remains a valid public prediction (`exp(705) ≈ 1.5e306`) but is

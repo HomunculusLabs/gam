@@ -163,7 +163,7 @@ impl LearnedGraphAtom {
 /// (`select_spectral_q`) never keeps more than this many non-trivial modes:
 /// a decode coordinate is meant to be a *small* intrinsic chart (a circle is
 /// `q = 2`, a torus `q = 4`), and the pricing charges every kept mode
-/// ([`spectral_decode_rank_charge`]), so an unbounded `q` would both defeat the
+/// (`spectral_decode_rank_charge`), so an unbounded `q` would both defeat the
 /// compression story and make the Nyström jet needlessly wide.
 pub const SPECTRAL_DECODE_MAX_Q: usize = 8;
 
@@ -211,9 +211,9 @@ impl GraphSpectralBasis {
     ///
     /// This is not a second computation of the roughness — it is exactly the
     /// atom's Dirichlet form `Φᵀ L_W Φ` read in the eigenbasis, where `L_W` is
-    /// the *same* survived weighted Laplacian [`LearnedGraphAtom::surviving_laplacian`]
+    /// the *same* survived weighted Laplacian `LearnedGraphAtom::surviving_laplacian`
     /// whose Kronecker lift `L_W ⊗ I_r` is the atom's smoothness penalty
-    /// [`LearnedGraphAtom::surviving_penalty_op`]. Diagonalising `L_W` on its
+    /// `LearnedGraphAtom::surviving_penalty_op`. Diagonalising `L_W` on its
     /// own eigenvectors returns `diag(λ)`, so the penalty a decode consumer
     /// reads here and the penalty the graph atom prices are one operator.
     pub fn penalty(&self) -> Array2<f64> {
@@ -404,7 +404,7 @@ impl SaeBasisEvaluator for NystromSpectralEvaluator {
 /// function builds the typed `TopologyCandidateSpec`s for the born atom's `d_k`,
 /// a spectral candidate is appended when the born atom already carries a
 /// [`LearnedGraphAtom`], by calling
-/// [`LearnedGraphAtom::spectral_race_candidate`] with the birth target and the
+/// `LearnedGraphAtom::spectral_race_candidate` with the birth target and the
 /// per-row ambient embeddings; its `{phi, jet, penalty, rank_charge_dof}` feed
 /// the SAME `TopologyAutoFitEvidence` inputs `fit_topology_candidate` produces —
 /// with `penalty` supplied directly instead of re-derived from a second jet —

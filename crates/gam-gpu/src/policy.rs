@@ -455,13 +455,13 @@ impl GpuDispatchPolicy {
 /// The original gate *claimed* this number without ever measuring it. The
 /// honest contract is the other way around: a benchmark
 /// (`examples/throughput_1412.rs`) measures the true rows/sec on a real device,
-/// and [`GpuThroughputVerdict::from_measurement`] reports whether the measured
+/// and `GpuThroughputVerdict::from_measurement` reports whether the measured
 /// value meets the target — the verdict is a *function of the measurement*, not
 /// a hardcoded assertion. See `tests/owed_1412.rs`.
 pub const GPU_THROUGHPUT_TARGET_ROWS_PER_SEC: f64 = 100_000.0;
 
 /// Outcome of comparing a *measured* GPU throughput against the target. The
-/// only way to construct one is [`Self::from_measurement`], so a verdict can
+/// only way to construct one is `Self::from_measurement`, so a verdict can
 /// never assert a target that was not actually established by a measurement.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuThroughputVerdict {
@@ -519,7 +519,7 @@ pub enum EncodeDecisionBlocked {
 /// out of [`Self::Undetermined`]. Projecting a CPU rate through an assumed
 /// CPU→GPU factor to declare the target met was the exact #1412 defect and is
 /// structurally impossible here — [`Self::Met`] / [`Self::Unmet`] come only from
-/// [`Self::from_device_measurement`] with `engaged == true`.
+/// `Self::from_device_measurement` with `engaged == true`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EncodeDeploymentDecision {
     /// A device measurement established the deployment target.

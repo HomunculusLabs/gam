@@ -99,7 +99,7 @@
 //! | input | class |
 //! |---|---|
 //! | `ε` (`f64::EPSILON`) | **machine** |
-//! | `2/√3`, `48`, `4`, `1/12` | **derived** — the Taylor remainder and the `A/h² + B·h²` optimum; no freedom, and gated numerically by this module's tests against [`finite_difference_error_bound`] itself |
+//! | `2/√3`, `48`, `4`, `1/12` | **derived** — the Taylor remainder and the `A/h² + B·h²` optimum; no freedom, and gated numerically by this module's tests against `finite_difference_error_bound` itself |
 //! | `ε_f` | **measured, per fixture** — never defaulted, never borrowed |
 //! | `M₄` | **measured, per fixture** — from the symmetric average of a probe ladder |
 //! | `‖δH‖₂` | **measured, per site** — the analytic law supplies no value for it |

@@ -91,7 +91,7 @@
 //! 1. This module: the algebra + the program seam + the oracle.
 //! 2. Universal oracle: every hand-written `RowKernel` gains a CI test
 //!    asserting channel-by-channel agreement with a [`RowProgram`] written
-//!    once — see [`verify_kernel_channels`]. This alone would have caught
+//!    once — see `verify_kernel_channels`. This alone would have caught
 //!    #736 at introduction.
 //! 3. Derive every channel through [`program_row_kernel`],
 //!    [`program_third_contracted`], [`program_fourth_contracted`], or
@@ -929,7 +929,7 @@ impl<const K: usize> Tower3<K> {
     /// Compose with a unary special-function whose `[f64; 4]` derivative stack is
     /// built from the base value through `stack_fn`. Evaluates `stack_fn(self.v)`
     /// once and forwards to [`Self::compose_unary`], so it is bit-identical to the
-    /// explicit form. The order-≤3 sibling of [`Tower4::compose_unary_with`].
+    /// explicit form. The order-≤3 sibling of `Tower4::compose_unary_with`.
     #[inline]
     pub fn compose_unary_with(&self, stack_fn: impl Fn(f64) -> [f64; 4]) -> Self {
         self.compose_unary(stack_fn(self.v))

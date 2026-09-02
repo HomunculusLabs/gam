@@ -402,7 +402,7 @@ pub fn watson_u2_uniform_weighted(
 pub const OCCUPANCY_ANCHOR_LADDER: &[usize] = &[2, 3, 4, 5, 6, 7, 9, 12];
 
 /// The occupancy law of a fitted `d = 1` coordinate ON its honest chart: which
-/// measure the data draws from. Adjudicated by evidence ([`classify_occupancy`]),
+/// measure the data draws from. Adjudicated by evidence (`classify_occupancy`),
 /// SEPARATELY from whether the chart itself is honest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OccupancyLaw {
@@ -467,12 +467,12 @@ impl OccupancyLaw {
 
 /// Weighted circular occupancy law. `weights` must be the same atom support
 /// masses used by coordinate fidelity and persistence; zero-mass rows are absent.
-/// Hard 0/1 support reproduces [`classify_occupancy`].
+/// Hard 0/1 support reproduces `classify_occupancy`.
 pub fn classify_occupancy_weighted(u: &[f64], weights: ArrayView1<'_, f64>) -> OccupancyLaw {
     classify_occupancy_weighted_impl(u, weights, true)
 }
 
-/// Weighted interval counterpart of [`classify_occupancy_interval`].
+/// Weighted interval counterpart of `classify_occupancy_interval`.
 pub fn classify_occupancy_interval_weighted(
     u: &[f64],
     weights: ArrayView1<'_, f64>,

@@ -1136,7 +1136,7 @@ impl PsiGramTensor {
     /// buys. The edge's LOCATION is a different claim: the tensor is BUILT from n
     /// rows, so its Gram is a row-sample of the underlying continuum Gram with a
     /// relative `O(1/n)` sampling error, which by Ostrowski moves every eigenvalue
-    /// by a relative `O(1/n)` and hence moves [`Self::rank_margin`] additively.
+    /// by a relative `O(1/n)` and hence moves `Self::rank_margin` additively.
     /// Where the edge is a root of that margin, the implicit-function bound
     /// `|δψ*| ≤ sup|δ margin| / inf|d margin/dψ|` is the whole truth: the edge is
     /// n-invariant only in the limit, at a rate set by the CROSSING SLOPE. A steep

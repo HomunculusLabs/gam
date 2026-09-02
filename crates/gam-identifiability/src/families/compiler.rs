@@ -65,7 +65,7 @@ pub trait RowJacobianOperator: Send + Sync {
     /// channel-major to `(n_rows·K × ncols)`.
     ///
     /// This is the representation the identifiability *compiler*
-    /// ([`compile_with_dual_metric`]) actually consumes — it residualises and
+    /// (`compile_with_dual_metric`) actually consumes — it residualises and
     /// eigendecomposes Grams of `W`, and never indexes the per-row `(n, p, K)`
     /// tensor element-wise. Requesting the scaled design directly lets an
     /// operator with a structured / streaming form supply it without
@@ -75,7 +75,6 @@ pub trait RowJacobianOperator: Send + Sync {
     /// the compiler asks for the scaled design it needs, not the dense tensor.)
     ///
     /// [`evaluate_full`]: RowJacobianOperator::evaluate_full
-    /// [`compile_with_dual_metric`]: crate::families::compiler::compile_with_dual_metric
     fn scaled_design_by_sqrt_h(&self, h_full: &Array3<f64>) -> Array2<f64> {
         scale_block_by_sqrt_h(&self.evaluate_full(), h_full)
     }
@@ -154,7 +153,7 @@ pub trait RowHessian: Send + Sync {
 }
 
 /// Identity row metric: `K^S_i = I_K` for every row. Default structural
-/// metric for [`compile_with_dual_metric`]. Decoupling the
+/// metric for `compile_with_dual_metric`. Decoupling the
 /// "which directions are real structural columns" decision from a
 /// possibly rank-deficient pilot curvature `H` prevents the compiler from
 /// wrongly dropping columns whose curvature happens to be zero at the
@@ -349,12 +348,12 @@ pub fn compile_protected(
     compile_with_dual_metric_protected(operators, row_hess, &id_struct, ordering, protected)
 }
 
-/// Variant of [`compile_with_dual_metric`] that keeps designated blocks at full
+/// Variant of `compile_with_dual_metric` that keeps designated blocks at full
 /// raw width (see [`compile_protected`] / [`compile_from_raw_grams_protected`]
 /// for the motivation). `protected[b] == true` replaces block `b`'s structural
 /// and curvature eigenspace drops with identity, so the block emerges at full
 /// raw width while still anchoring later blocks. `protected` may be shorter
-/// than `ordering`; an empty slice reproduces [`compile_with_dual_metric`].
+/// than `ordering`; an empty slice reproduces `compile_with_dual_metric`.
 pub fn compile_with_dual_metric_protected(
     operators: &[Arc<dyn RowJacobianOperator>],
     row_hess: &dyn RowHessian,

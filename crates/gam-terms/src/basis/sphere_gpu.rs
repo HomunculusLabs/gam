@@ -1058,7 +1058,7 @@ pub fn build_kernel_matrix_device(
 // device-resident. The host learns only (β, log|H|, residual ssq).
 // ────────────────────────────────────────────────────────────────────────
 
-/// Result returned by [`solve_penalised_ls_device`].
+/// Result returned by `solve_penalised_ls_device`.
 #[derive(Clone, Debug)]
 pub struct PenalisedLsSolution {
     /// Coefficient vector, length `p = m − 1` (after Householder drop).

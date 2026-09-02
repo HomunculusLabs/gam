@@ -16,12 +16,12 @@
 //! the composition-defect floor is reported, never folded in — see
 //! [`layer_transport`](crate::inference::layer_transport)):
 //!
-//! 1. **Contract composition** ([`compose_contracts`], [`compose_with_trace`]):
+//! 1. **Contract composition** ([`compose_contracts`], `compose_with_trace`):
 //!    the shadowing bound that turns a chain of per-component error/expansion
 //!    certificates into a single end-to-end error bound, plus a domain-feasibility
 //!    trace that reports where the accumulated error would leave a component's
 //!    certified domain instead of quietly shrinking the bound to fit.
-//! 2. **Loop holonomy** ([`loop_holonomy`], [`holonomy_from_transports`]): the
+//! 2. **Loop holonomy** ([`loop_holonomy`], `holonomy_from_transports`): the
 //!    net `O(2)` element obtained by composing the transports around a closed
 //!    loop of charts, with a trivial/nontrivial verdict whose tolerance is
 //!    DERIVED from the loop's own defects (never a magic constant).
@@ -73,7 +73,7 @@ pub struct ComposedContract {
     /// Whether the accumulated error stays inside every stage's certified
     /// domain along the chain. For [`compose_contracts`] this is the drift-only
     /// check (accumulated error alone must fit each `domain_radius`); for
-    /// [`compose_with_trace`] the feasible path always returns `true` and an
+    /// `compose_with_trace` the feasible path always returns `true` and an
     /// infeasible one returns `Err` naming the offending stages.
     pub domain_ok: bool,
 }
@@ -113,7 +113,7 @@ pub struct ComposedContract {
 /// check available without entry radii: the error accumulated *before* stage `j`
 /// (namely `E_{j-1}`) must not already exceed stage `j`'s `domain_radius`, else
 /// the realized trajectory has drifted outside where `f_j`'s certificate holds.
-/// Use [`compose_with_trace`] to fold in the nominal input spread as well.
+/// Use `compose_with_trace` to fold in the nominal input spread as well.
 ///
 /// An empty chain is the identity: zero defect, no contributions, feasible.
 pub fn compose_contracts(chain: &[Contract]) -> ComposedContract {
@@ -196,7 +196,7 @@ pub fn invert_o2_edge(edge: (i8, f64)) -> (i8, f64) {
 /// Each edge is an `O(2)` element `(sign, angle)` in the vocabulary of
 /// [`transport_class`](crate::inference::transport_class): `sign = +1` is the
 /// rotation `x ↦ x + angle`, `sign = −1` is the reflection `x ↦ −x + angle`
-/// (matching [`CircleTransportReport::winding`] and `phase`). The elements are
+/// (matching `CircleTransportReport::winding` and `phase`). The elements are
 /// composed exactly in `O(2)`: for `g = (s_g, φ_g)` applied after `f = (s_f,
 /// φ_f)`,
 ///

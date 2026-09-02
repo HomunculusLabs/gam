@@ -140,7 +140,6 @@ pub fn draw_bands_from_matrices(
     Ok((eta_mean, eta_lower, eta_upper, mean, mean_lower, mean_upper))
 }
 
-/// Spec-aware sibling of [`eta_bands_from_matrix`]: identical band/mean
 /// semantics, but the response-scale push-through goes through a
 /// [`LinkSelector`] so the parameterized links (`Sas`, `Mixture`,
 /// `LatentCLogLog`, `BetaLogistic`) can be evaluated from their fitted state.

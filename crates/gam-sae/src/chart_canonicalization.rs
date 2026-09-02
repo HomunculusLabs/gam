@@ -156,7 +156,7 @@
 //! recomposition floor inside a basis rich enough to absorb it, so a too-poor
 //! basis honestly refuses rather than silently altering the image. The
 //! round-sphere isometry DEFECT remains available as a standalone measurement
-//! ([`sphere_chart_isometry_defect`]).
+//! (`sphere_chart_isometry_defect`).
 
 use faer::Side as FaerSide;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
@@ -855,7 +855,7 @@ pub struct TorusIsometryFlowReparameterization {
     /// affine gauge canonicalization use to transport the smoothness Gram.
     pub decoder_transport: Array2<f64>,
     /// Optimal flow coefficients `θ` (layout per
-    /// [`TorusFlowBasis::mode_layout`]).
+    /// `TorusFlowBasis::mode_layout`).
     pub flow_theta: Vec<f64>,
     /// Isometry defect `E(0)` of the fitted chart (identity flow).
     pub defect_initial: f64,
@@ -2038,7 +2038,7 @@ pub struct PatchIsometryFlowReparameterization {
     /// grid — the congruence object that transports the smoothness Gram.
     pub decoder_transport: Array2<f64>,
     /// Optimal flow coefficients `θ` (layout per
-    /// [`FreePatchFlowBasis::mode_layout`]).
+    /// `FreePatchFlowBasis::mode_layout`).
     pub flow_theta: Vec<f64>,
     /// Isometry defect `E(0)` of the fitted chart (identity flow).
     pub defect_initial: f64,

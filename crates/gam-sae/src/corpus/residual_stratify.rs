@@ -197,7 +197,7 @@ fn sturges_stratum_cap(total_rows: u64) -> usize {
 
 /// One in-memory residual-energy stratum: the row indices that fall in a
 /// factor-of-two energy band, with the band's population moments. The energy
-/// bands and the Sturges cap are exactly [`design_stratified_subsample`]'s
+/// bands and the Sturges cap are exactly `design_stratified_subsample`'s
 /// (`⌊log₂ e_i⌋` bins, `K_max = ⌊log₂ N⌋ + 1`, adjacent low-energy bands merged),
 /// so an in-core caller (the stagewise birth loop) stratifies its residual by the
 /// SAME derived boundaries as the streaming corpus screen — no new cut points.
@@ -233,7 +233,6 @@ fn energy_exponent_bin(energy: f64) -> usize {
 /// concentrates) keeps its resolution. Empty / non-finite / negative energies fall
 /// in the low-energy floor bin. An empty input yields no strata.
 ///
-/// This is the in-core companion to [`design_stratified_subsample`]: where the
 /// streaming screen samples the tail for the corpus producer, this exposes the same
 /// tail-preserving partition to an already-materialized residual so a consumer can
 /// process each stratum's rows locally (the stagewise stratum-local birth screen).

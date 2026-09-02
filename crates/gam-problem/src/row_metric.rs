@@ -217,7 +217,7 @@ pub enum MetricProvenance {
     /// `vᵢ = J_nᵀ F_n^{1/2} uᵢ`, and `probes = s` the number of random probes
     /// (the factor rank).
     ///
-    /// This is the *only* [`RowMetric::is_output_fisher_like`]-adjacent
+    /// This is the *only* `RowMetric::is_output_fisher_like`-adjacent
     /// provenance for which [`RowMetric::whitens_likelihood`] is `true`: the
     /// data-fit sums `½ eᵀ G_n e = ½ ‖U_nᵀ e‖²` (nats) instead of `½‖e‖²`. It is
     /// distinct from [`Self::OutputFisher`] precisely because the choice to let
@@ -367,7 +367,7 @@ impl RowMetric {
     /// provenance tag (and hence the scientific reading) differs. Whitens
     /// nothing, drives the gauge / lens / enrichment exactly as the
     /// same-position metric does — the consuming machinery is provenance-generic
-    /// (see [`Self::is_output_fisher_like`]).
+    /// (see `Self::is_output_fisher_like`).
     pub fn output_fisher_downstream(
         u: Arc<Array2<f64>>,
         p: usize,

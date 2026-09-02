@@ -14,7 +14,7 @@
 //!
 //! This module makes the measurement real and *testable as a library function*
 //! (the prior real benchmark lived only in `examples/throughput_1412.rs`, which
-//! nothing in CI ran or asserted). [`measure_resident_solve_throughput`] runs
+//! nothing in CI ran or asserted). `measure_resident_solve_throughput` runs
 //! the production IRLS inner step — upload `X` once, then repeatedly solve the
 //! penalized normal equations `(XᵀWX + ridge·I)β = rhs` with the `p×p` Gram and
 //! its Cholesky factor kept DEVICE-RESIDENT, downloading only the `p`-vector
@@ -41,7 +41,7 @@
 //! The single recurring failure mode this guards against is *false GPU
 //! routing*: claiming a device measurement while the work silently ran on the
 //! CPU. [`ResidentSolveThroughput::engaged`] is `true` only when
-//! [`ResidentDesignGram::try_new`] actually staged `X` on the device AND every
+//! `ResidentDesignGram::try_new` actually staged `X` on the device AND every
 //! timed solve returned a device result. If the device path declines or fails
 //! mid-measurement, `engaged` is `false` and `measured_rows_per_sec` is left at
 //! `0.0` — a non-measurement that [`GpuThroughputVerdict`] can never report as

@@ -3942,7 +3942,7 @@ impl SaeManifoldTerm {
         Ok((v, loss, converged_cache, evidence_artifacts))
     }
 
-    /// [`Self::penalized_quasi_laplace_criterion_streaming_exact`] with the #2080 surrogate lane
+    /// `Self::penalized_quasi_laplace_criterion_streaming_exact` with the #2080 surrogate lane
     /// threaded to the streaming `log|S|` term (`None` = bit-identical SLQ).
     pub fn penalized_quasi_laplace_criterion_streaming_exact_with_lane(
         &mut self,

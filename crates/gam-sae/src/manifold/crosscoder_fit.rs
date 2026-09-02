@@ -51,7 +51,7 @@ pub fn pair_crosscoder_targets(
 /// (`anchor`, `blocks`) are kept unscaled/raw here; [`SaeManifoldOuterObjective::with_crosscoder_blocks`]
 /// owns the idempotent `sqrt(lambda_l)` materialization at every rho evaluation
 /// ON TOP of the per-column equilibration `column_scale` applies BEFORE the fit
-/// (#2015; see [`equilibrate_crosscoder_columns`]) — the two scalings compose
+/// (#2015; see `equilibrate_crosscoder_columns`) — the two scalings compose
 /// (`internal_target = [Z | Y] / column_scale`, then blocks are further
 /// multiplied by `√λ_ℓ` in place), and the fitted term's `tier0_scale`
 /// (installed by [`run_sae_crosscoder_fit`]) undoes `column_scale` on every
@@ -61,7 +61,7 @@ pub struct SaeCrosscoderFitRequest {
     pub anchor: Array2<f64>,
     pub blocks: Vec<NamedCrosscoderTarget>,
     /// Per-column equilibration scale (length `p_x + Σ p_ℓ`), computed by
-    /// [`equilibrate_crosscoder_columns`] over the SAME raw stacked
+    /// `equilibrate_crosscoder_columns` over the SAME raw stacked
     /// `[anchor | blocks...]` target `base_term`'s seed was built against, so
     /// the seed and the objective's internal target agree on units.
     pub column_scale: Array1<f64>,

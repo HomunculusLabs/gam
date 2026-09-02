@@ -221,7 +221,7 @@ pub struct RowOutput {
     pub deviance: f64,
 }
 
-/// Indexed form of [`row_reweight_cpu`], used to reproduce a device refusal
+/// Indexed form of `row_reweight_cpu`, used to reproduce a device refusal
 /// with the correct row in its typed error.
 pub fn row_reweight_cpu_at(
     row: usize,

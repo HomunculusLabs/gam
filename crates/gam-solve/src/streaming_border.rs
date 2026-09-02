@@ -131,7 +131,7 @@ fn add_into(acc: &mut [f64], rhs: &[f64]) {
 /// cross-node reduction, [`crate::cross_node`]) can compute exactly the
 /// partial this accumulator would have computed from the same rows, then ship
 /// the `k·k` partial instead of the rows. Bit-identical by construction to the
-/// in-process path: [`StreamingBorderGram::submit_chunk`] routes through this
+/// in-process path: `StreamingBorderGram::submit_chunk` routes through this
 /// same function.
 pub fn chunk_gram_flat(rows: ArrayView2<'_, f64>) -> Vec<f64> {
     let k = rows.ncols();

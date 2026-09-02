@@ -24,7 +24,7 @@
 //!     eigen-GAP, not the distance to the cutoff). Certifying the integer does
 //!     not certify the eigenspace, and a subspace comparison run below this bar
 //!     is deciding on roundoff (#2448).
-//!   * [`newton_decrement_enclosure`] — the Newton decrement λ_N² is the
+//!   * `newton_decrement_enclosure` — the Newton decrement λ_N² is the
 //!     affine-invariant stationarity currency; an inexact solve still yields a
 //!     rigorous two-sided enclosure of it.
 //!   * [`ShadowSum`] — a reduction carries its own rounding floor, so "is this
