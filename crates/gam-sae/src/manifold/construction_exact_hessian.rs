@@ -2148,6 +2148,35 @@ impl SaeManifoldTerm {
         Ok(deltas)
     }
 
+    /// The complete frozen-state derivative of the raw exact stationarity
+    /// Hessian, `A_raw = B_raw + ΔC`, keyed by flat outer coordinate.
+    ///
+    /// Keeping this sum behind one named owner makes it possible to compare the
+    /// operator derivative directly with finite differences of
+    /// [`Self::materialize_exact_hessian_dense`], instead of validating only a
+    /// downstream trace where spectral classification can obscure which operand
+    /// drifted (#2515).
+    pub(crate) fn exact_stationarity_penalty_derivatives_by_flat(
+        &self,
+        rho: &SaeManifoldRho,
+        cache: &ArrowFactorCache,
+    ) -> Result<std::collections::BTreeMap<usize, Array2<f64>>, String> {
+        let mut derivatives = self.raw_penalty_curvature_operators_by_flat(rho, cache)?;
+        for (flat, delta) in self
+            .exact_stationarity_penalty_derivative_delta_by_flat(rho, cache)?
+        {
+            match derivatives.entry(flat) {
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    *entry.get_mut() += &delta;
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(delta);
+                }
+            }
+        }
+        Ok(derivatives)
+    }
+
     /// PATH C (#2253) — the full joint arrow inverse `G = H⁻¹` (dim×dim),
     /// materialized column by column against each unit arrow basis vector and
     /// symmetrized. Shared by ch4 and ch5's small-dense (circle-mint scale)
@@ -5228,18 +5257,13 @@ impl SaeManifoldTerm {
         let a_tt_pinv = &geometry.priced_coordinate_inverse + &priced_k_tt;
         // This value diagonalizes `A_raw = B_raw + ΔC`; differentiate that raw
         // operator, not the row-conditioned operator carried by arrow factors.
-        let m = self.raw_penalty_curvature_operators_by_flat(rho, cache)?;
-        let d = self.exact_stationarity_penalty_derivative_delta_by_flat(rho, cache)?;
+        let da_by_flat = self.exact_stationarity_penalty_derivatives_by_flat(rho, cache)?;
         let frob = |x: &Array2<f64>, y: &Array2<f64>| -> f64 { (x * y).sum() };
         let mut logdet_trace = Array1::<f64>::zeros(n_params);
-        for (&i, m_i) in m.iter() {
-            let da = match d.get(&i) {
-                Some(d_i) => m_i + d_i,
-                None => m_i.clone(),
-            };
+        for (&i, da) in da_by_flat.iter() {
             // A_tt⁺ has a zero β border, so frobbing it against the full ∂A/∂ρ_i
             // restricts to the t–t block automatically.
-            logdet_trace[i] = 0.5 * frob(&a_pinv, &da) - 0.5 * frob(&a_tt_pinv, &da);
+            logdet_trace[i] = 0.5 * frob(&a_pinv, da) - 0.5 * frob(&a_tt_pinv, da);
         }
         // Ordered-Beta–Bernoulli sparse coordinate: its ∂A/∂ρ_sparse is the exact
         // integrated-marginal logit Hessian (cross-row), absent from the operator
