@@ -1,5 +1,20 @@
 ## Unreleased
 
+- **The frozen-index relaxation reads its multiplier through the damping it
+  applied (#2748).** `d_k = M d_{k−1}` holds for the UNDAMPED wiggle fixed
+  point only; under the relaxed advance `η_{k+1} = η_k + t_k d_k` the residual
+  recursion is `d_{k+1} = ((1−t_k)I + t_k M) d_k`, so the Rayleigh quotient of
+  consecutive residuals measures `(1−t_k) + t_k·mu`, not `mu`. Read as `mu`,
+  the relaxation update became the involution `t_k·t_{k+1} = 1/(1−mu)`, and the
+  `geo_disease_matern` flexible cell at n=1000 alternated `t = 0.186 ↔ 0.814`,
+  `delta = 1.97e-3 ↔ 4.51e-4`, `cos(step_k, step_{k−1}) = −1.000` for all sixty
+  passes while the map's actual dominant multiplier sat fixed at `−5.6`.
+  `fixed_point_dominant_multiplier` now takes the previous relaxation and
+  returns `1 + (ρ − 1)/t_prev` (the quotient itself, bit for bit, when
+  `t_prev = 1`), so the damping settles at `1/(1−mu)` and stays there. A
+  two-mode unit regression reproduces the involution with the old reading as
+  its diverging control.
+
 Spline basis dimensions are now honoured exactly, a descriptor means one
 thing on every path that reads it, and a model-comparison quantity is named
 for what it computes.

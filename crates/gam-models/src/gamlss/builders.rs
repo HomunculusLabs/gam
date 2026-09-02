@@ -1608,26 +1608,39 @@ pub(crate) fn dealias_warp_against_mean_block(
 }
 
 /// The dominant eigenvalue of the frozen-index map's Jacobian, measured from
-/// two consecutive residuals (#2748).
+/// two consecutive residuals and the relaxation that separated them (#2748).
 ///
-/// Let `Φ` be the frozen-index map, `η* ` its fixed point, `M = Φ'(η*)` and
-/// `e_k = η_k − η*`. The undamped iteration is `e_{k+1} = M e_k`, and the
-/// residual actually available at each pass is `d_k = Φ(η_k) − η_k = (M−I)e_k`.
-/// `M` commutes with `M − I`, so
+/// Let `Φ` be the frozen-index map, `η*` its fixed point, `M = Φ'(η*)` and
+/// `e_k = η_k − η*`. The residual available at each pass is
+/// `d_k = Φ(η_k) − η_k = (M−I)e_k`. The relaxed advance `η_{k+1} = η_k + t_k d_k`
+/// gives `e_{k+1} = ((1−t_k)I + t_k M) e_k`, and because `M` commutes with
+/// `M − I`,
 ///
 /// ```text
-///     d_k = M d_{k-1}
+///     d_{k+1} = ((1−t_k)I + t_k M) d_k
 /// ```
 ///
-/// exactly, and `⟨d_k, d_{k-1}⟩ / ‖d_{k-1}‖²` is `M`'s Rayleigh quotient on a
-/// vector the power iteration has already aligned with its dominant
-/// eigenvector. Nothing is chosen: the number is read off two vectors the loop
-/// computes anyway.
+/// exactly. So `⟨d_{k+1}, d_k⟩ / ‖d_k‖²` is the Rayleigh quotient of the
+/// RELAXED Jacobian on a vector the iteration has aligned with its dominant
+/// eigenvector: it measures `ρ = (1−t_k) + t_k·mu`, and the map's own multiplier
+/// is `mu = 1 + (ρ − 1)/t_k`. Reading `ρ` as `mu` is what locked the n=1000
+/// `geo_disease_matern` flexible cell into a period-2 orbit: after the first
+/// damped pass annihilated the dominant mode, the next quotient was the mixed
+/// sub-dominant ratio `−0.229`, read as `mu` it set `t` back to `0.814`, that
+/// re-excited the mode by `1 + 0.814·(mu−1) = −4.36`, which read as `mu` set
+/// `t = 0.186`, and so on: `t_k·t_{k+1} = 1/(1−mu)` is an involution, so every
+/// `t` other than its fixed point lies on a two-cycle. Sixty passes alternated
+/// `delta = 1.97e-3 ↔ 4.51e-4` with `cos(step_k, step_{k−1}) = −1.000`.
 ///
-/// Returns `NaN` when there is no previous residual, or when either has zero
-/// length — a Rayleigh quotient of nothing is not a measurement.
+/// At `previous_relaxation == 1` the quotient IS `mu` and is returned untouched,
+/// so every undamped pass is bit-for-bit what it was.
+///
+/// Returns `NaN` when there is no previous residual, when either has zero
+/// length, or when the previous relaxation is not a positive finite number — a
+/// Rayleigh quotient of nothing is not a measurement.
 pub(crate) fn fixed_point_dominant_multiplier(
     previous_residual: Option<&Array1<f64>>,
+    previous_relaxation: f64,
     residual: &Array1<f64>,
 ) -> f64 {
     let Some(previous) = previous_residual else {
@@ -1641,7 +1654,17 @@ pub(crate) fn fixed_point_dominant_multiplier(
         return f64::NAN;
     }
     let quotient = residual.dot(previous) / denominator;
-    if quotient.is_finite() { quotient } else { f64::NAN }
+    if !quotient.is_finite() {
+        return f64::NAN;
+    }
+    if previous_relaxation == 1.0 {
+        return quotient;
+    }
+    if !(previous_relaxation.is_finite() && previous_relaxation > 0.0) {
+        return f64::NAN;
+    }
+    let multiplier = 1.0 + (quotient - 1.0) / previous_relaxation;
+    if multiplier.is_finite() { multiplier } else { f64::NAN }
 }
 
 /// The relaxation `t` that removes the dominant mode of a frozen-index
@@ -1783,7 +1806,7 @@ mod frozen_index_relaxation_tests {
         // A diagonal map with a dominant alternating mode.
         let previous = array![1.0_f64, 0.0, 0.0];
         let residual = array![-3.5_f64, 0.0, 0.0];
-        let mu = fixed_point_dominant_multiplier(Some(&previous), &residual);
+        let mu = fixed_point_dominant_multiplier(Some(&previous), 1.0, &residual);
         assert!((mu + 3.5).abs() <= 1.0e-14, "mu={mu}");
         // And the relaxation it implies annihilates that mode: the relaxed
         // multiplier `(1-t) + t*mu` is zero.
@@ -1799,8 +1822,8 @@ mod frozen_index_relaxation_tests {
         let previous = array![1.0_f64, 0.0];
         let aligned = array![-2.0_f64, 0.0];
         let with_orthogonal = array![-2.0_f64, 9.0];
-        let bare = fixed_point_dominant_multiplier(Some(&previous), &aligned);
-        let mixed = fixed_point_dominant_multiplier(Some(&previous), &with_orthogonal);
+        let bare = fixed_point_dominant_multiplier(Some(&previous), 1.0, &aligned);
+        let mixed = fixed_point_dominant_multiplier(Some(&previous), 1.0, &with_orthogonal);
         assert!((bare - mixed).abs() <= 1.0e-14, "{bare} vs {mixed}");
     }
 
@@ -1816,9 +1839,9 @@ mod frozen_index_relaxation_tests {
             );
         }
         let residual = array![1.0_f64, -2.0];
-        assert!(fixed_point_dominant_multiplier(None, &residual).is_nan());
+        assert!(fixed_point_dominant_multiplier(None, 1.0, &residual).is_nan());
         assert_eq!(
-            frozen_index_relaxation(fixed_point_dominant_multiplier(None, &residual)).to_bits(),
+            frozen_index_relaxation(fixed_point_dominant_multiplier(None, 1.0, &residual)).to_bits(),
             1.0_f64.to_bits(),
         );
     }
@@ -1862,16 +1885,78 @@ mod frozen_index_relaxation_tests {
 
         let mut eta = 1.0_f64;
         let mut previous: Option<Array1<f64>> = None;
+        let mut previous_t = 1.0_f64;
         for _ in 0..40 {
             let residual = Array1::from_elem(1, map(eta) - eta);
-            let mu = fixed_point_dominant_multiplier(previous.as_ref(), &residual);
+            let mu = fixed_point_dominant_multiplier(previous.as_ref(), previous_t, &residual);
             let t = frozen_index_relaxation(mu);
             previous = Some(residual.clone());
+            previous_t = t;
             eta += t * residual[0];
         }
         assert!(
             (eta - fixed_point).abs() <= 1.0e-12,
             "the damped iteration must reach the fixed point, got {eta}"
+        );
+    }
+
+    /// Run the relaxed iteration on a two-mode diagonal map, reading the
+    /// multiplier either from the relaxed quotient (`corrected == true`) or from
+    /// the quotient taken as `mu` outright (the estimator before this test).
+    fn two_mode_relaxed_iteration(corrected: bool, passes: usize) -> (f64, Vec<f64>) {
+        let multipliers = [-5.5_f64, -0.5];
+        let fixed_point = [0.75_f64, -0.25];
+        let map = |eta: &Array1<f64>| {
+            Array1::from_shape_fn(2, |i| {
+                fixed_point[i] + multipliers[i] * (eta[i] - fixed_point[i])
+            })
+        };
+        let mut eta = array![1.0_f64, 1.0];
+        let mut previous: Option<Array1<f64>> = None;
+        let mut previous_t = 1.0_f64;
+        let mut relaxations = Vec::with_capacity(passes);
+        for _ in 0..passes {
+            let residual = map(&eta) - &eta;
+            let read_t = if corrected { previous_t } else { 1.0 };
+            let mu = fixed_point_dominant_multiplier(previous.as_ref(), read_t, &residual);
+            let t = frozen_index_relaxation(mu);
+            relaxations.push(t);
+            previous = Some(residual.clone());
+            previous_t = t;
+            eta = &eta + &residual.mapv(|value| value * t);
+        }
+        let error = (eta[0] - fixed_point[0])
+            .abs()
+            .max((eta[1] - fixed_point[1]).abs());
+        (error, relaxations)
+    }
+
+    /// gam#2748, `geo_disease_matern` flexible at n=1000: a single scalar mode
+    /// hides the defect, because the first damped step annihilates it exactly
+    /// and every later residual is zero. With a second, milder mode present the
+    /// quotient after that step is the sub-dominant mixture; read as `mu` it
+    /// undoes the damping, re-excites the dominant mode, and the passes lock
+    /// into `t_k·t_{k+1} = 1/(1−mu)`. Recovering `mu` from the relaxed quotient
+    /// makes the same iteration converge.
+    #[test]
+    fn the_multiplier_is_read_through_the_relaxation_that_produced_the_residual_2748() {
+        let (error, relaxations) = two_mode_relaxed_iteration(true, 60);
+        assert!(
+            error <= 1.0e-6,
+            "the corrected iteration must converge on two modes, error={error} t={relaxations:?}"
+        );
+        let (control_error, control_relaxations) = two_mode_relaxed_iteration(false, 60);
+        assert!(
+            !(control_error <= 1.0e-2),
+            "reading the relaxed quotient as mu must NOT converge here, or this test measures \
+             nothing: error={control_error} t={control_relaxations:?}"
+        );
+        // The control is the involution the n=1000 trace showed: consecutive
+        // relaxations multiply to 1/(1−mu) once the iteration is on the cycle.
+        let product = control_relaxations[10] * control_relaxations[11];
+        assert!(
+            (product - 1.0 / 6.5).abs() <= 1.0e-2,
+            "t_k·t_(k+1) must sit on the 1/(1−mu) involution, got {product}"
         );
     }
 }
@@ -2402,6 +2487,10 @@ pub(crate) fn fit_binomial_mean_wiggle(
     // alternating step whose ratio exceeds one IS the divergence, measured
     // rather than inferred from a terminal `delta`.
     let mut previous_step: Option<Array1<f64>> = None;
+    // The relaxation applied in the advance that produced the current residual:
+    // the quotient of consecutive residuals measures the RELAXED Jacobian, and
+    // this is what recovers the map's own multiplier from it (#2748).
+    let mut previous_relaxation = 1.0_f64;
     let mut dominant_multiplier = f64::NAN;
     // The operating point the de-aliasing metric is evaluated at: the composite
     // index `q = X·β + B⊥·β_w` of the previous pass. The pilot carries no warp,
@@ -2489,7 +2578,8 @@ pub(crate) fn fit_binomial_mean_wiggle(
             }
             None => (f64::NAN, f64::NAN),
         };
-        dominant_multiplier = fixed_point_dominant_multiplier(previous_step.as_ref(), &step);
+        dominant_multiplier =
+            fixed_point_dominant_multiplier(previous_step.as_ref(), previous_relaxation, &step);
         let relaxation = frozen_index_relaxation(dominant_multiplier);
         let warp_slope = family.wiggle_dq_dq0(frozen_eta.view(), new_wiggle_beta.view())?;
         let max_slope = warp_slope
@@ -2508,6 +2598,7 @@ pub(crate) fn fit_binomial_mean_wiggle(
             new_wiggle_beta.iter().map(|value| value.abs()).sum::<f64>(),
         );
         previous_step = Some(step.clone());
+        previous_relaxation = relaxation;
         if last_delta <= options.outer_tol * last_scale {
             converged = Some((fit, alias, frozen_source_beta, accepted_frozen_warp_design));
             break;
@@ -2546,8 +2637,10 @@ pub(crate) fn fit_binomial_mean_wiggle(
                 "fit_binomial_mean_wiggle frozen-index fixed point did not converge in {} outer \
                  iterations: delta={last_delta:.3e}, scale={last_scale:.3e}, \
                  tolerance={:.3e}; the fixed-point map's measured dominant multiplier is \
-                 mu={dominant_multiplier:.3e} (successive residuals satisfy d_k = M d_(k-1), so \
-                 this is M's Rayleigh quotient on them) and the relaxation derived from it was \
+                 mu={dominant_multiplier:.3e} (successive residuals satisfy \
+                 d_k = ((1-t)I + tM) d_(k-1) for the relaxation t of the previous advance, so \
+                 this is M's multiplier recovered from their Rayleigh quotient) and the \
+                 relaxation derived from it was \
                  {:.3e}. mu >= 1 means the frozen index is a REPELLING fixed point along a \
                  monotone direction, which no positive relaxation stabilises: the composite \
                  index the warp and the mean block are competing for is not pinned by this \
