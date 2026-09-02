@@ -2410,7 +2410,6 @@ impl std::error::Error for InvalidLikelihoodScale {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogLikelihoodNormalization {
     Full,
-    OmittingResponseConstants,
     UserProvided,
 }
 
