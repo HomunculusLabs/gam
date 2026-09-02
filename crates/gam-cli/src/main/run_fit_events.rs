@@ -4,7 +4,9 @@
 use crate::cli_args::FitEventsArgs;
 use gam::families::custom_family::BlockwiseFitOptions;
 use gam::families::event_history::{
-    CovariateSegment, Event, EventHistoryCohort, ForecastRequest, PopulationForecastRequest, SubjectHistory, fit_event_history_formula, forecast, kolmogorov_smirnov_uniform, population_forecast, predictive_pit,
+    CovariateSegment, Event, EventHistoryCohort, ForecastRequest, FutureSegment, MarkKind,
+    PopulationForecastRequest, SubjectHistory, fit_event_history_formula, forecast,
+    kolmogorov_smirnov_uniform, population_forecast, predictive_pit,
 };
 use ndarray::Array2;
 use serde_json::{Map, Value, json};
@@ -48,6 +50,34 @@ fn parse_f64(value: &str, what: &str) -> Result<f64, String> {
         .map_err(|_| format!("{what}: {value:?} is not a number"))
 }
 
+/// A covariate column: continuous when every value parses as a number,
+/// categorical (coded by its sorted distinct labels) otherwise.
+fn encode_column(values: &[&str], name: &str) -> (Vec<f64>, Vec<String>) {
+    if let Ok(numbers) = values
+        .iter()
+        .map(|v| parse_f64(v, name))
+        .collect::<Result<Vec<f64>, String>>()
+    {
+        return (numbers, Vec::new());
+    }
+    let mut levels: Vec<String> = values.iter().map(|v| (*v).to_string()).collect();
+    levels.sort();
+    levels.dedup();
+    let codes = values
+        .iter()
+        .map(|v| levels.iter().position(|l| l == v).expect("level present") as f64)
+        .collect();
+    (codes, levels)
+}
+
+fn forecast_json(f: &gam::families::event_history::Forecast) -> Value {
+    json!({
+        "horizons": f.horizons,
+        "survival": f.survival,
+        "expected_counts": f.expected_counts.rows().into_iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
+    })
+}
+
 pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
     let (subject_headers, subject_rows) = read_csv(&args.subjects)?;
     let ids = column(&subject_headers, &subject_rows, "id", &args.subjects)?;
@@ -71,17 +101,40 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
     let event_ids = column(&event_headers, &event_rows, "id", &args.events)?;
     let event_times = column(&event_headers, &event_rows, "time", &args.events)?;
     let event_marks = column(&event_headers, &event_rows, "mark", &args.events)?;
-    let mut mark_names: Vec<String> = event_marks.iter().map(|m| (*m).to_string()).collect();
-    mark_names.sort();
-    mark_names.dedup();
-    if mark_names.is_empty() {
-        return Err("the events table has no rows".to_string());
-    }
+    // The mark vocabulary: declared with kinds, or the observed marks, all
+    // recurrent.
+    let (mark_names, mark_kinds): (Vec<String>, Vec<MarkKind>) = if args.marks.is_empty() {
+        let mut names: Vec<String> = event_marks.iter().map(|m| (*m).to_string()).collect();
+        names.sort();
+        names.dedup();
+        if names.is_empty() {
+            return Err(
+                "the events table has no rows, so the marks must be declared with --marks name:kind,..."
+                    .to_string(),
+            );
+        }
+        let kinds = vec![MarkKind::Recurrent; names.len()];
+        (names, kinds)
+    } else {
+        let mut names = Vec::with_capacity(args.marks.len());
+        let mut kinds = Vec::with_capacity(args.marks.len());
+        for spec in &args.marks {
+            let (name, kind) = spec
+                .split_once(':')
+                .ok_or_else(|| format!("--marks entry {spec:?} is not name:kind"))?;
+            names.push(name.trim().to_string());
+            kinds.push(MarkKind::parse(kind).map_err(|e| e.to_string())?);
+        }
+        (names, kinds)
+    };
     for ((id, time), mark) in event_ids.iter().zip(event_times.iter()).zip(event_marks.iter()) {
         let subject = *index
             .get(*id)
             .ok_or_else(|| format!("event subject {id:?} is not in the subjects table"))?;
-        let mark_index = mark_names.iter().position(|m| m == mark).unwrap_or(0);
+        let mark_index = mark_names
+            .iter()
+            .position(|m| m == mark)
+            .ok_or_else(|| format!("event mark {mark:?} is not in the mark vocabulary {mark_names:?}"))?;
         subjects[subject].events.push(Event {
             time: parse_f64(time, "event time")?,
             mark: mark_index,
@@ -95,15 +148,15 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
         .filter(|h| h.as_str() != "id" && h.as_str() != "start")
         .cloned()
         .collect();
-    if covariate_names.is_empty() {
-        return Err("the covariates table needs at least one covariate column".to_string());
-    }
     let mut table = Array2::<f64>::zeros((cov_rows.len(), covariate_names.len()));
+    let mut covariate_levels = Vec::with_capacity(covariate_names.len());
     for (j, name) in covariate_names.iter().enumerate() {
         let values = column(&cov_headers, &cov_rows, name, &args.covariates)?;
-        for (i, value) in values.iter().enumerate() {
-            table[[i, j]] = parse_f64(value, name)?;
+        let (codes, levels) = encode_column(&values, name);
+        for (i, code) in codes.iter().enumerate() {
+            table[[i, j]] = *code;
         }
+        covariate_levels.push(levels);
     }
     for (row, (id, start)) in cov_ids.iter().zip(cov_starts.iter()).enumerate() {
         let subject = *index
@@ -116,7 +169,9 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
     }
     let mut cohort = EventHistoryCohort {
         mark_names: mark_names.clone(),
+        mark_kinds: mark_kinds.clone(),
         covariate_names: covariate_names.clone(),
+        covariate_levels: covariate_levels.clone(),
         covariates: table,
         subjects,
     };
@@ -130,7 +185,12 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
 
     let mut summary = Map::new();
     summary.insert("marks".to_string(), json!(mark_names));
+    summary.insert(
+        "mark_kinds".to_string(),
+        json!(mark_kinds.iter().map(|k| k.name()).collect::<Vec<_>>()),
+    );
     summary.insert("covariates".to_string(), json!(covariate_names));
+    summary.insert("covariate_levels".to_string(), json!(covariate_levels));
     summary.insert("formula".to_string(), json!(args.formula));
     summary.insert("atoms".to_string(), json!(args.atoms));
     summary.insert("log_likelihood".to_string(), json!(fit.fit.log_likelihood));
@@ -149,67 +209,76 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
             .map(|d| fit.mark_coefficients(d).to_vec())
             .collect::<Vec<_>>()),
     );
+    let q = &fit.quadrature;
     summary.insert(
         "quadrature".to_string(),
         json!({
-            "order": fit.quadrature.order,
-            "checked_order": fit.quadrature.checked_order,
-            "log_likelihood": fit.quadrature.log_likelihood,
-            "log_likelihood_at_checked_order": fit.quadrature.log_likelihood_at_checked_order,
+            "gauss_hermite_order": q.gauss_hermite_order,
+            "mesh_refinement": q.mesh_refinement,
+            "log_likelihood": q.log_likelihood,
+            "gauss_hermite_check": {
+                "order": q.gauss_hermite.candidate,
+                "coefficient_shift": q.gauss_hermite.coefficient_shift,
+                "log_likelihood": q.gauss_hermite.log_likelihood,
+            },
+            "mesh_check": {
+                "refinement": q.mesh.candidate,
+                "coefficient_shift": q.mesh.coefficient_shift,
+                "log_likelihood": q.mesh.log_likelihood,
+            },
         }),
     );
     let mut pits = Vec::new();
     for subject in &cohort.subjects {
-        pits.extend(predictive_pit(&fit, &cohort, subject).map_err(|e| e.to_string())?);
+        pits.extend(
+            predictive_pit(&fit, &cohort, subject)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|p| p.pit),
+        );
     }
     summary.insert("pit_events".to_string(), json!(pits.len()));
     summary.insert(
         "pit_ks".to_string(),
         json!(kolmogorov_smirnov_uniform(&pits)),
     );
-    if !args.horizons.is_empty() {
-        let absorbing: Vec<bool> = mark_names
-            .iter()
-            .map(|m| args.absorbing.iter().any(|a| a == m))
-            .collect();
+    if !args.horizons_after_exit.is_empty() {
         let mut forecasts = Vec::with_capacity(cohort.subjects.len());
         for subject in &cohort.subjects {
-            let horizons: Vec<f64> = args.horizons.iter().map(|h| subject.exit + h).collect();
-            let future_row = subject.segments.last().map(|s| s.row).unwrap_or(0);
+            let horizons: Vec<f64> = args.horizons_after_exit.iter().map(|h| subject.exit + h).collect();
             let f = forecast(
                 &fit,
                 &cohort,
                 &ForecastRequest {
                     history: subject,
                     horizons: &horizons,
-                    absorbing: &absorbing,
-                    future_row,
+                    future: &[],
                 },
             )
             .map_err(|e| e.to_string())?;
             // The same window from the stationary prior at the subject's
-            // covariates: what the model says without its history.
+            // covariates at exit: what the model says without its history.
+            let row = subject.covariate_row_at(subject.exit, false);
             let alone = population_forecast(
                 &fit,
                 &cohort,
                 &PopulationForecastRequest {
                     start: subject.exit,
                     horizons: &horizons,
-                    absorbing: &absorbing,
-                    covariates: &cohort.covariates.row(future_row).to_vec(),
+                    future: &[FutureSegment {
+                        start: subject.exit,
+                        covariates: cohort.covariates.row(row).to_vec(),
+                    }],
                 },
             )
             .map_err(|e| e.to_string())?;
-            forecasts.push(json!({
-                "id": subject.id,
-                "horizons": f.horizons,
-                "survival": f.survival,
-                "expected_counts": f.expected_counts.rows().into_iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
-                "without_history": {
-                    "survival": alone.survival,
-                    "expected_counts": alone.expected_counts.rows().into_iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
-                },
-            }));
+            let mut entry = forecast_json(&f);
+            entry["id"] = json!(subject.id);
+            entry["without_history"] = json!({
+                "survival": alone.survival,
+                "expected_counts": alone.expected_counts.rows().into_iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
+            });
+            forecasts.push(entry);
         }
         summary.insert("forecasts".to_string(), Value::Array(forecasts));
     }

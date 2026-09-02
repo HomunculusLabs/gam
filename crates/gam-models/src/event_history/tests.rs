@@ -3,15 +3,16 @@ use super::chain::{
     interpolate_at_inner_points,
 };
 use super::cohort::{
-    CovariateSegment, Event, EventHistoryCohort, SubjectHistory, SubjectNodes, expand_nodes,
+    CovariateSegment, Event, EventHistoryCohort, MarkKind, SubjectHistory, SubjectNodes,
+    design_rows, expand_nodes,
 };
 use super::family::{
     Directional, EventHistoryFamily, EventHistoryFit, EventHistorySpec, fit_event_history,
     fit_event_history_formula,
 };
 use super::forecast::{
-    ForecastRequest, PopulationForecastRequest, forecast, kolmogorov_smirnov_uniform,
-    population_forecast, predictive_pit,
+    ForecastRequest, FutureSegment, PopulationForecastRequest, forecast,
+    kolmogorov_smirnov_uniform, population_forecast, predictive_pit,
 };
 use super::marginal::{SubjectInputs, subject_marginal};
 use crate::custom_family::{BlockwiseFitOptions, ParameterBlockState};
@@ -35,11 +36,18 @@ fn subject(times: &[f64], exposures: &[f64], counts: &[Vec<f64>]) -> SubjectNode
             matrix[[n, d]] = c;
         }
     }
+    let mut exposure_matrix = Array2::<f64>::zeros((times.len(), marks));
+    for (n, &w) in exposures.iter().enumerate() {
+        for d in 0..marks {
+            exposure_matrix[[n, d]] = w;
+        }
+    }
     SubjectNodes {
         first_row: 0,
         times: times.to_vec(),
         gaps: times.windows(2).map(|w| w[1] - w[0]).collect(),
-        exposures: exposures.to_vec(),
+        weights: exposures.to_vec(),
+        exposures: exposure_matrix,
         counts: matrix,
         covariate_rows: vec![0; times.len()],
     }
@@ -170,6 +178,7 @@ fn single_node_marginal_matches_numerical_integration() {
         time_scale: 1.0,
         gh: &gh,
         continuation_gap: 0.0,
+    designs: None,
     };
     let out = subject_marginal(&inputs, false).expect("marginal");
     // ∫ exp(y η − w e^η) N(z) dz with η = η0 − ½a² + a z, on a fine grid.
@@ -206,6 +215,7 @@ fn two_node_marginal_matches_brute_force_double_integral() {
         time_scale: 1.0,
         gh: &gh,
         continuation_gap: 0.0,
+    designs: None,
     };
     let out = subject_marginal(&inputs, false).expect("marginal");
     let phi = (-(0.2f64.exp() * 0.7)).exp();
@@ -256,20 +266,21 @@ fn zero_loadings_reduce_to_the_poisson_likelihood() {
         time_scale: 1.0,
         gh: &gh,
         continuation_gap: 0.0,
+    designs: None,
     };
     let out = subject_marginal(&inputs, true).expect("marginal");
     let mut expected = 0.0;
     for n in 0..3 {
         for d in 0..2 {
             let eta = eta0[n * 2 + d];
-            expected += nodes.counts[[n, d]] * eta - nodes.exposures[n] * eta.exp();
+            expected += nodes.counts[[n, d]] * eta - nodes.exposures[[n, d]] * eta.exp();
         }
     }
     assert!((out.loglik - expected).abs() < 1e-12);
     for n in 0..3 {
         for d in 0..2 {
             let eta = eta0[n * 2 + d];
-            let score = nodes.counts[[n, d]] - nodes.exposures[n] * eta.exp();
+            let score = nodes.counts[[n, d]] - nodes.exposures[[n, d]] * eta.exp();
             // The smoothed marginal drops tail mass below the density noise
             // floor (1e-11 of the peak), which is the agreement limit here.
             assert!(
@@ -327,6 +338,7 @@ fn evaluate_at(
             time_scale: 1.0,
             gh,
             continuation_gap: 0.0,
+        designs: None,
         },
         derivatives,
     )
@@ -401,6 +413,7 @@ fn directional_duals_match_finite_differences_of_the_hessian() {
                 time_scale: 1.0,
                 gh: &gh,
                 continuation_gap: 0.0,
+            designs: None,
             },
             true,
         )
@@ -437,6 +450,7 @@ fn directional_duals_match_finite_differences_of_the_hessian() {
                 time_scale: 1.0,
                 gh: &gh,
                 continuation_gap: 0.0,
+            designs: None,
             },
             true,
         )
@@ -458,9 +472,11 @@ fn directional_duals_match_finite_differences_of_the_hessian() {
 #[test]
 fn node_expansion_integrates_exposure_and_places_events() {
     let mut cohort = EventHistoryCohort {
-        mark_names: vec!["a".to_string(), "b".to_string()],
+        mark_names: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        mark_kinds: vec![MarkKind::Recurrent, MarkKind::Once, MarkKind::Terminal],
         covariate_names: vec!["x".to_string()],
-        covariates: array![[1.0], [2.0]],
+        covariate_levels: vec![Vec::new()],
+        covariates: array![[1.0], [2.0], [3.0]],
         subjects: vec![SubjectHistory {
             id: "s".to_string(),
             entry: 1.0,
@@ -474,11 +490,21 @@ fn node_expansion_integrates_exposure_and_places_events() {
                     time: 2.5,
                     mark: 0,
                 },
+                Event {
+                    time: 4.0,
+                    mark: 2,
+                },
             ],
             segments: vec![
                 CovariateSegment {
                     start: 0.0,
                     row: 0,
+                },
+                // A covariate change at the instant of the event: the event
+                // node sees the left limit, the quadrature after it the new row.
+                CovariateSegment {
+                    start: 2.5,
+                    row: 2,
                 },
                 CovariateSegment {
                     start: 3.0,
@@ -488,21 +514,111 @@ fn node_expansion_integrates_exposure_and_places_events() {
         }],
     };
     cohort.validate().expect("valid");
-    let nodes = expand_nodes(&cohort, 5).expect("nodes");
+    let nodes = expand_nodes(&cohort, 5, 0).expect("nodes");
     let s = &nodes.subjects[0];
-    let exposure: f64 = s.exposures.iter().sum();
-    assert!((exposure - 3.0).abs() < 1e-12, "exposure {exposure}");
+    let total_weight: f64 = s.weights.iter().sum();
+    assert!((total_weight - 3.0).abs() < 1e-12, "weight {total_weight}");
+    // Recurrent and terminal marks are at risk throughout; the once-only
+    // mark leaves the risk set after 2.5.
+    let exposure = |d: usize| -> f64 { s.exposures.column(d).sum() };
+    assert!((exposure(0) - 3.0).abs() < 1e-12);
+    assert!((exposure(2) - 3.0).abs() < 1e-12);
+    assert!((exposure(1) - 1.5).abs() < 1e-12, "once-only exposure {}", exposure(1));
     let event_node = s.times.iter().position(|&t| t == 2.5).expect("event node");
     assert_eq!(s.counts[[event_node, 0]], 1.0);
     assert_eq!(s.counts[[event_node, 1]], 1.0);
-    assert_eq!(s.exposures[event_node], 0.0);
+    assert_eq!(s.weights[event_node], 0.0);
+    assert_eq!(s.covariate_rows[event_node], 0, "an event node takes the left limit");
+    let terminal_node = s.len() - 1;
+    assert_eq!(s.times[terminal_node], 4.0);
+    assert_eq!(s.counts[[terminal_node, 2]], 1.0);
     assert!(s.gaps.iter().all(|&g| g > 0.0));
     for (n, &t) in s.times.iter().enumerate() {
-        let expected_row = if t >= 3.0 { 1 } else { 0 };
-        assert_eq!(s.covariate_rows[n], expected_row);
+        if n == event_node {
+            continue;
+        }
+        let expected_row = if t >= 3.0 { 1 } else if t > 2.5 { 2 } else { 0 };
+        assert_eq!(s.covariate_rows[n], expected_row, "node at {t}");
         assert_eq!(nodes.node_data[[n, 0]], cohort.covariates[[expected_row, 0]]);
         assert_eq!(nodes.node_data[[n, 1]], t);
     }
+    // Every mesh cell is halved at refinement one: twice the quadrature
+    // nodes, the same total weight, the same events.
+    let refined = expand_nodes(&cohort, 5, 1).expect("refined nodes");
+    let r = &refined.subjects[0];
+    let quadrature_nodes = |s: &SubjectNodes| s.weights.iter().filter(|w| **w > 0.0).count();
+    assert_eq!(quadrature_nodes(r), 2 * quadrature_nodes(s));
+    assert!((r.weights.iter().sum::<f64>() - 3.0).abs() < 1e-12);
+    assert_eq!(r.counts.sum(), s.counts.sum());
+    // The design rows carry entry, exit, covariate changes and an
+    // event-free quadrature. They are a function of the design alone: the
+    // same subject with no events at all produces the identical rows, so no
+    // data-adaptive basis can be shaped by where the events fell.
+    let rows = design_rows(&cohort, 5).expect("design rows");
+    let times: Vec<f64> = rows.column(1).to_vec();
+    assert!(times.contains(&1.0) && times.contains(&4.0) && times.contains(&3.0));
+    let interior = times.iter().filter(|t| **t > 1.0 && **t < 4.0 && **t != 3.0 && **t != 2.5).count();
+    assert_eq!(interior, 15, "three event-free cells of five nodes");
+    let mut event_free = cohort.clone();
+    event_free.subjects[0].events.clear();
+    event_free.subjects[0].exit = 4.0;
+    event_free.validate().expect("valid without events");
+    let without = design_rows(&event_free, 5).expect("design rows");
+    assert_eq!(rows, without, "an event time must not enter a basis");
+}
+
+#[test]
+fn validation_rejects_ill_formed_cohorts() {
+    let base = || EventHistoryCohort {
+        mark_names: vec!["relapse".to_string(), "death".to_string()],
+        mark_kinds: vec![MarkKind::Recurrent, MarkKind::Terminal],
+        covariate_names: vec!["x".to_string(), "arm".to_string()],
+        covariate_levels: vec![Vec::new(), vec!["control".to_string(), "treated".to_string()]],
+        covariates: array![[0.3, 0.0], [-0.1, 1.0]],
+        subjects: vec![SubjectHistory {
+            id: "a".to_string(),
+            entry: 0.0,
+            exit: 5.0,
+            events: vec![Event { time: 2.0, mark: 0 }],
+            segments: vec![CovariateSegment { start: 0.0, row: 0 }],
+        }],
+    };
+    let mut ok = base();
+    ok.validate().expect("the base cohort is valid");
+    let expect_error = |mutate: &dyn Fn(&mut EventHistoryCohort), needle: &str| {
+        // Each mutation starts from the same valid cohort.
+        let mut cohort = base();
+        mutate(&mut cohort);
+        let error = cohort.validate().err().unwrap_or_else(|| panic!("expected an error containing {needle:?}"));
+        assert!(error.to_string().contains(needle), "{error} lacks {needle:?}");
+    };
+    expect_error(&|c: &mut EventHistoryCohort| { let first = c.subjects[0].clone(); c.subjects.push(first); }, "duplicate subject identifier");
+    expect_error(&|c: &mut EventHistoryCohort| c.subjects[0].segments.push(CovariateSegment { start: 0.0, row: 1 }), "two covariate segments starting at");
+    expect_error(&|c: &mut EventHistoryCohort| c.subjects[0].segments.push(CovariateSegment { start: 7.0, row: 1 }), "outside (entry, exit)");
+    expect_error(&|c: &mut EventHistoryCohort| c.subjects[0].events.push(Event { time: 3.0, mark: 1 }), "must end follow-up");
+    expect_error(
+        &|c: &mut EventHistoryCohort| {
+            c.subjects[0].events.push(Event { time: 3.0, mark: 1 });
+            c.subjects[0].events.push(Event { time: 5.0, mark: 1 });
+        },
+        "terminal events",
+    );
+    expect_error(
+        &|c: &mut EventHistoryCohort| {
+            c.mark_kinds[0] = MarkKind::Once;
+            c.subjects[0].events.push(Event { time: 3.0, mark: 0 });
+        },
+        "can fire at most once",
+    );
+    expect_error(&|c: &mut EventHistoryCohort| c.covariates[[0, 1]] = 2.0, "categorical covariate");
+    expect_error(&|c: &mut EventHistoryCohort| c.covariates[[0, 1]] = 0.5, "categorical covariate");
+    expect_error(&|c: &mut EventHistoryCohort| c.mark_names[1] = "relapse".to_string(), "duplicate mark name");
+    expect_error(&|c: &mut EventHistoryCohort| c.mark_kinds.truncate(1), "mark kinds");
+    // A terminal event at exit is valid.
+    let mut terminal = base();
+    terminal.subjects[0].events.push(Event { time: 5.0, mark: 1 });
+    terminal.validate().expect("a terminal event at exit ends follow-up");
+    assert!(terminal.subjects[0].terminal_event(&terminal.mark_kinds).is_some());
 }
 
 struct Rng(u64);
@@ -520,17 +636,26 @@ impl Rng {
     }
 }
 
-/// Simulate a cohort whose log-intensity is `β₀ + β₁ x + a z(t)` with `z` a
-/// unit-variance Ornstein–Uhlenbeck atom of the given rate, by thinning.
-fn simulate_cohort(
+/// Simulate a marked cohort whose log-intensity of mark `d` is
+/// `intercept_d + slope · x + loading_d · z(t)` with `z` a unit-variance
+/// Ornstein–Uhlenbeck atom of the given rate, sampled exactly at the steps
+/// of a fine grid and held constant between them. Conditional on the path,
+/// each step's events are Poisson with the step's exact integrated
+/// intensity, placed uniformly in the step: no thinning bound is needed, so
+/// nothing is approximate beyond the piecewise-constant path itself, whose
+/// error vanishes with the step. A terminal mark ends follow-up at its
+/// event; a once-only mark leaves the risk set after its event.
+fn simulate_marked_cohort(
     subjects: usize,
     follow_up: f64,
-    intercept: f64,
+    intercepts: &[f64],
     slope: f64,
-    loading: f64,
+    loadings: &[f64],
     rate: f64,
+    kinds: &[MarkKind],
     seed: u64,
 ) -> EventHistoryCohort {
+    let marks = intercepts.len();
     let mut rng = Rng(seed);
     let steps = 400;
     let dt = follow_up / steps as f64;
@@ -542,35 +667,61 @@ fn simulate_cohort(
         let x = rng.normal();
         covariates[[s, 0]] = x;
         let mut z = rng.normal();
-        let mut events = Vec::new();
-        let bound = (intercept + slope * x + loading.abs() * 4.0).exp();
-        let mut t = 0.0;
-        while t < follow_up {
-            let mut candidate = t - bound.recip() * rng.uniform().max(1e-300).ln();
-            // advance the state to the candidate in `dt` steps
-            while t + dt <= candidate && t + dt <= follow_up {
-                z = phi * z + innovation * rng.normal();
-                t += dt;
+        let mut events: Vec<Event> = Vec::new();
+        let mut exit = follow_up;
+        let mut at_risk = vec![true; marks];
+        'steps: for step in 0..steps {
+            let left = step as f64 * dt;
+            let mut step_events: Vec<Event> = Vec::new();
+            for d in 0..marks {
+                if !at_risk[d] {
+                    continue;
+                }
+                let mean = (intercepts[d] + slope * x + loadings[d] * z).exp() * dt;
+                // Poisson(mean) by inversion of its cumulative sum.
+                let threshold = rng.uniform();
+                let mut count = 0usize;
+                let mut term = (-mean).exp();
+                let mut cumulative = term;
+                while threshold > cumulative && count < 1000 {
+                    count += 1;
+                    term *= mean / count as f64;
+                    cumulative += term;
+                }
+                for _ in 0..count {
+                    step_events.push(Event {
+                        time: left + dt * rng.uniform(),
+                        mark: d,
+                    });
+                }
             }
-            if candidate > follow_up {
-                break;
+            step_events.sort_by(|a, b| a.time.total_cmp(&b.time));
+            for event in step_events {
+                if !at_risk[event.mark] {
+                    continue;
+                }
+                match kinds[event.mark] {
+                    MarkKind::Recurrent => events.push(event),
+                    MarkKind::Once => {
+                        at_risk[event.mark] = false;
+                        events.push(event);
+                    }
+                    MarkKind::Terminal => {
+                        exit = event.time;
+                        events.push(event);
+                        break 'steps;
+                    }
+                }
             }
-            let intensity = (intercept + slope * x + loading * z).exp();
-            if rng.uniform() * bound < intensity {
-                events.push(Event {
-                    time: candidate,
-                    mark: 0,
-                });
-            }
-            if candidate <= t {
-                candidate = t + 1e-9;
-            }
-            t = candidate;
+            z = phi * z + innovation * rng.normal();
         }
+        // Distinct event times: a tie at the step resolution is resolved by
+        // the sort, and an event at exactly zero is impossible.
+        events.retain(|e| e.time > 0.0 && e.time <= exit);
         histories.push(SubjectHistory {
             id: format!("s{s}"),
             entry: 0.0,
-            exit: follow_up,
+            exit,
             events,
             segments: vec![CovariateSegment {
                 start: 0.0,
@@ -579,11 +730,37 @@ fn simulate_cohort(
         });
     }
     EventHistoryCohort {
-        mark_names: vec!["event".to_string()],
+        mark_names: (0..marks).map(|d| format!("mark{d}")).collect(),
+        mark_kinds: kinds.to_vec(),
         covariate_names: vec!["x".to_string()],
+        covariate_levels: vec![Vec::new()],
         covariates,
         subjects: histories,
     }
+}
+
+/// The single recurrent mark case of [`simulate_marked_cohort`].
+fn simulate_cohort(
+    subjects: usize,
+    follow_up: f64,
+    intercept: f64,
+    slope: f64,
+    loading: f64,
+    rate: f64,
+    seed: u64,
+) -> EventHistoryCohort {
+    let mut cohort = simulate_marked_cohort(
+        subjects,
+        follow_up,
+        &[intercept],
+        slope,
+        &[loading],
+        rate,
+        &[MarkKind::Recurrent],
+        seed,
+    );
+    cohort.mark_names = vec!["event".to_string()];
+    cohort
 }
 
 fn linear_spec() -> TermCollectionSpec {
@@ -608,7 +785,7 @@ fn linear_spec() -> TermCollectionSpec {
 fn family_joint_hessian_matches_finite_differences_of_its_gradient() {
     let mut cohort = simulate_cohort(6, 3.0, -0.5, 0.4, 0.8, 0.5, 11);
     cohort.validate().expect("valid");
-    let nodes = Arc::new(expand_nodes(&cohort, 3).expect("nodes"));
+    let nodes = Arc::new(expand_nodes(&cohort, 3, 0).expect("nodes"));
     let total = nodes.total_nodes;
     let mut design = Array2::<f64>::zeros((total, 2));
     for row in 0..total {
@@ -717,7 +894,7 @@ fn fit_recovers_the_covariate_effect_and_a_positive_shared_risk_loading() {
         "[fit] {:.1}s outer_iterations={} gh_order={} beta={:?} loading={} rate={} log_lambda={:?}",
         started.elapsed().as_secs_f64(),
         fit.fit.outer_iterations,
-        fit.quadrature.order,
+        fit.quadrature.gauss_hermite_order,
         beta.to_vec(),
         fit.loadings[[0, 0]],
         fit.rates[0],
@@ -748,16 +925,18 @@ fn fit_recovers_the_covariate_effect_and_a_positive_shared_risk_loading() {
     // gradient, when reported, is finite.
     assert!(fit.fit.outer_gradient_norm.is_none_or(|g| g.is_finite()));
     assert!(fit.rates[0] > 0.0 && fit.rates[0].is_finite());
-    assert!(
-        (fit.quadrature.log_likelihood - fit.quadrature.log_likelihood_at_checked_order).abs()
-            <= spec.quadrature_tolerance * fit.quadrature.log_likelihood.abs().max(1.0)
-    );
+    // The certificate: the fitted coefficients are stationary under a
+    // doubling of the Gauss-Hermite order and a halving of the mesh, to the
+    // stated fraction of their posterior standard deviation.
+    assert!(fit.quadrature.gauss_hermite.coefficient_shift <= spec.quadrature_tolerance);
+    assert!(fit.quadrature.mesh.coefficient_shift <= spec.quadrature_tolerance);
+    assert_eq!(fit.quadrature.gauss_hermite.candidate, 2 * fit.quadrature.gauss_hermite_order - 1);
+    assert_eq!(fit.quadrature.mesh.candidate, fit.quadrature.mesh_refinement + 1);
     // Forecast: probabilities and expected counts are coherent.
     let request = ForecastRequest {
         history: &cohort.subjects[0],
         horizons: &[6.5, 7.0, 8.0],
-        absorbing: &[false],
-        future_row: 0,
+        future: &[],
     };
     let f = forecast(&fit, &cohort, &request).expect("forecast");
     assert!(
@@ -765,17 +944,24 @@ fn fit_recovers_the_covariate_effect_and_a_positive_shared_risk_loading() {
         "survival left [0, 1]: {:?}",
         f.survival
     );
-    assert!((f.survival[0] - 1.0).abs() < 1e-12, "no absorbing marks: survival stays one");
+    assert!((f.survival[0] - 1.0).abs() < 1e-12, "no terminal marks: survival stays one");
     assert!(f.expected_counts[[0, 0]] <= f.expected_counts[[1, 0]]);
     assert!(f.expected_counts[[1, 0]] <= f.expected_counts[[2, 0]]);
     assert!(f.expected_counts[[2, 0]] > 0.0);
     // Predictive PIT: uniform up to sampling error on the training cohort.
     let mut pits = Vec::new();
     for subject in &cohort.subjects {
-        pits.extend(predictive_pit(&fit, &cohort, subject).expect("pit"));
+        for event in predictive_pit(&fit, &cohort, subject).expect("pit") {
+            assert_eq!(event.mark, 0);
+            assert!((event.mark_probabilities[0] - 1.0).abs() < 1e-12);
+            pits.push(event.pit);
+        }
     }
     assert!(pits.iter().all(|&u| (0.0..=1.0).contains(&u)));
-    let ks = kolmogorov_smirnov_uniform(&pits);
+    // Under the model the PITs are independent uniforms (the Rosenblatt
+    // transform of the event times); the fitted parameters make this a
+    // sanity band around the Kolmogorov 95% quantile, not a formal test.
+    let ks = kolmogorov_smirnov_uniform(&pits).expect("events");
     let n = pits.len() as f64;
     assert!(
         ks < 1.63 / n.sqrt() + 0.05,
@@ -820,13 +1006,13 @@ fn install_test_logger() {
 fn formula_right_hand_side_resolves_against_the_node_columns() {
     let mut cohort = simulate_cohort(4, 3.0, -0.5, 0.4, 0.0, 0.5, 5);
     cohort.validate().expect("valid");
-    let nodes = expand_nodes(&cohort, 3).expect("nodes");
-    let spec = super::formula::covariate_spec_from_formula("x + s(time)", &nodes, &cohort.covariate_names)
+    let rows = design_rows(&cohort, 3).expect("rows");
+    let spec = super::formula::covariate_spec_from_formula("x + s(time)", rows.view(), &cohort)
         .expect("spec");
     assert_eq!(spec.linear_terms.len(), 1);
     assert_eq!(spec.linear_terms[0].feature_col, 0);
     assert_eq!(spec.smooth_terms.len(), 1);
-    let error = super::formula::covariate_spec_from_formula("nope", &nodes, &cohort.covariate_names)
+    let error = super::formula::covariate_spec_from_formula("nope", rows.view(), &cohort)
         .err()
         .expect("unknown column must fail");
     assert!(error.to_string().contains("nope"), "{error}");
@@ -896,7 +1082,7 @@ fn solve_small(a: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
 fn newton_direction_decreases_the_penalised_objective_at_the_start() {
     let mut cohort = simulate_cohort(80, 6.0, -0.8, 0.5, 0.0, 0.4, 3);
     cohort.validate().expect("valid");
-    let nodes = Arc::new(expand_nodes(&cohort, 9).expect("nodes"));
+    let nodes = Arc::new(expand_nodes(&cohort, 9, 0).expect("nodes"));
     let total = nodes.total_nodes;
     let mut design = Array2::<f64>::zeros((total, 2));
     for row in 0..total {
@@ -1076,7 +1262,7 @@ fn loaded_family(
     order: usize,
 ) -> (EventHistoryFamily, Arc<Array2<f64>>, Vec<ParameterBlockState>) {
     use gam_terms::smooth::build_term_collection_design;
-    let nodes = Arc::new(expand_nodes(cohort, 9).expect("nodes"));
+    let nodes = Arc::new(expand_nodes(cohort, 9, 0).expect("nodes"));
     let design = build_term_collection_design(nodes.node_data.view(), &linear_spec()).expect("design");
     let dense = design.design.try_to_dense_arc("test design").expect("dense");
     let family = EventHistoryFamily::new(
@@ -1107,7 +1293,7 @@ fn smallest_prefix_with_non_finite_louis_output_at_order_21() {
     let beta = array![-0.9485, 0.5452];
     let eta = design_dense.dot(&beta);
     let gh = GaussHermite::new(21).expect("rule");
-    let nodes = expand_nodes(&cohort, 9).expect("nodes");
+    let nodes = expand_nodes(&cohort, 9, 0).expect("nodes");
     let mut report = Vec::new();
     for (s, subj) in nodes.subjects.iter().enumerate() {
         let n = subj.len();
@@ -1116,7 +1302,8 @@ fn smallest_prefix_with_non_finite_louis_output_at_order_21() {
                 first_row: 0,
                 times: subj.times[..len].to_vec(),
                 gaps: subj.gaps[..len - 1].to_vec(),
-                exposures: subj.exposures[..len].to_vec(),
+                weights: subj.weights[..len].to_vec(),
+                exposures: subj.exposures.slice(ndarray::s![..len, ..]).to_owned(),
                 counts: subj.counts.slice(ndarray::s![..len, ..]).to_owned(),
                 covariate_rows: subj.covariate_rows[..len].to_vec(),
             };
@@ -1129,6 +1316,7 @@ fn smallest_prefix_with_non_finite_louis_output_at_order_21() {
                 time_scale: cohort.time_scale(),
                 gh: &gh,
                 continuation_gap: 0.0,
+            designs: None,
             };
             match subject_marginal(&inputs, true) {
                 Ok(out) => {
@@ -1165,7 +1353,8 @@ fn smallest_prefix_with_non_finite_louis_output_at_order_21() {
                     first_row: 0,
                     times: subj.times[..bad].to_vec(),
                     gaps: subj.gaps[..bad - 1].to_vec(),
-                    exposures: subj.exposures[..bad].to_vec(),
+                    weights: subj.weights[..bad].to_vec(),
+                    exposures: subj.exposures.slice(ndarray::s![..bad, ..]).to_owned(),
                     counts: subj.counts.slice(ndarray::s![..bad, ..]).to_owned(),
                     covariate_rows: subj.covariate_rows[..bad].to_vec(),
                 };
@@ -1178,6 +1367,7 @@ fn smallest_prefix_with_non_finite_louis_output_at_order_21() {
                     time_scale: cohort.time_scale(),
                     gh: &gh,
                     continuation_gap: 0.0,
+                designs: None,
                 };
                 subject_marginal(&inputs, true).map(|o| {
                     (
@@ -1271,7 +1461,7 @@ fn louis_hessian_against_finite_differences_at_the_loaded_cohort_optimum() {
 }
 
 #[test]
-fn spline_basis_reproduces_lines_and_cubics_and_never_overshoots() {
+fn spline_basis_reproduces_cubics_with_a_bounded_operator_norm() {
     let gh = GaussHermite::new(21).expect("rule");
     let g = gh.order;
     // Exact on linear data, inside and beyond the hull.
@@ -1298,21 +1488,56 @@ fn spline_basis_reproduces_lines_and_cubics_and_never_overshoots() {
         let value: f64 = basis.iter().zip(data.iter()).map(|(b, f)| b * f).sum();
         assert!((value - data[j]).abs() < 1e-12, "node {j}: {value} vs {}", data[j]);
     }
-    // A steep, smooth function with a wide range does not overshoot: the
-    // spline stays within a small margin of the data's range everywhere on
-    // the hull, where the degree-20 Lagrange interpolant would not.
+    // Neither interpolant preserves the nodal range, but their operator
+    // norms differ in kind: the cubic spline's `max_x Σ_j |S_j(x)|` is a
+    // small constant on these nodes, the Lagrange interpolant's is the
+    // Lebesgue constant, exponential in the order. The norm is a theorem
+    // about the overshoot: `|S f(x) − c| ≤ ‖S‖ max_j |f_j − c|` for any
+    // centre `c`, so centred data cannot overshoot by more than
+    // `(‖S‖ − 1)` times its half-range.
+    let mut spline_norm = 1.0_f64;
+    let mut lagrange_norm = 1.0_f64;
+    for step in 0..2000 {
+        let x = gh.nodes[0] + (gh.nodes[g - 1] - gh.nodes[0]) * step as f64 / 1999.0;
+        spline_norm = spline_norm.max(gh.spline_basis(&x).iter().map(|b| b.abs()).sum());
+        lagrange_norm = lagrange_norm.max(gh.lagrange_basis(&x).iter().map(|b| b.abs()).sum());
+    }
+    assert!(spline_norm < 3.0, "cubic spline operator norm {spline_norm}");
+    assert!(lagrange_norm > 100.0, "Lagrange operator norm {lagrange_norm}");
+    assert!((gh.lebesgue_constant - lagrange_norm).abs() < 0.05 * lagrange_norm);
     let steep: Vec<f64> = gh.nodes.iter().map(|x| -12.0 * (x + 1.0).abs().powf(1.5) + 3.0).collect();
     let (lo, hi) = steep.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| (l.min(*v), h.max(*v)));
-    let margin = 0.1 * (hi - lo);
+    let centre = 0.5 * (lo + hi);
+    let half_range = 0.5 * (hi - lo);
+    let mut spline_overshoot = 0.0_f64;
     let mut lagrange_overshoot = 0.0_f64;
     for step in 0..400 {
         let x = gh.nodes[0] + (gh.nodes[g - 1] - gh.nodes[0]) * step as f64 / 399.0;
         let spline: f64 = gh.spline_basis(&x).iter().zip(steep.iter()).map(|(b, f)| b * f).sum();
-        assert!(spline >= lo - margin && spline <= hi + margin, "spline overshoot at {x}: {spline} outside [{lo}, {hi}]");
+        spline_overshoot = spline_overshoot.max((spline - hi).max(lo - spline));
         let lagrange: f64 = gh.lagrange_basis(&x).iter().zip(steep.iter()).map(|(b, f)| b * f).sum();
         lagrange_overshoot = lagrange_overshoot.max((lagrange - hi).max(lo - lagrange));
     }
+    assert!(
+        spline_overshoot <= (spline_norm - 1.0) * half_range + 1e-9,
+        "spline overshoot {spline_overshoot} exceeds its operator bound {} (centre {centre})",
+        (spline_norm - 1.0) * half_range
+    );
+    assert!(spline_overshoot < 0.1 * (hi - lo), "spline overshoot {spline_overshoot} on a range of {}", hi - lo);
     assert!(lagrange_overshoot > hi - lo, "the control did not overshoot: {lagrange_overshoot}");
+}
+
+#[test]
+fn lebesgue_constant_grows_with_the_order_and_is_recorded() {
+    let mut previous = 0.0;
+    for order in [5usize, 9, 17, 33] {
+        let gh = GaussHermite::new(order).expect("rule");
+        assert!(gh.lebesgue_constant > previous, "order {order}: {}", gh.lebesgue_constant);
+        previous = gh.lebesgue_constant;
+    }
+    assert!(previous > 1e3, "the Lebesgue constant at order 33 is {previous}");
+    let g9 = GaussHermite::new(9).expect("rule");
+    assert!(g9.lebesgue_constant < 50.0, "order 9: {}", g9.lebesgue_constant);
 }
 
 #[test]
@@ -1337,6 +1562,7 @@ fn dual_loading_derivative_matches_finite_difference_at_zero_loading() {
                 time_scale: 1.0,
                 gh: &gh,
                 continuation_gap: 0.0,
+            designs: None,
             };
             subject_marginal(&inputs, false).expect("value").loglik
         };
@@ -1349,6 +1575,7 @@ fn dual_loading_derivative_matches_finite_difference_at_zero_loading() {
             time_scale: 1.0,
             gh: &gh,
             continuation_gap: 0.0,
+        designs: None,
         };
         let dual = subject_marginal(&inputs, false).expect("dual").loglik;
         let h = 1e-5;
@@ -1488,7 +1715,7 @@ fn traced_fixed_lambda_inner_solve_on_the_null_cohort() {
     use gam_terms::smooth::build_term_collection_design;
     let mut cohort = simulate_cohort(80, 6.0, -0.8, 0.5, 0.0, 0.4, 3);
     cohort.validate().expect("valid");
-    let nodes = Arc::new(expand_nodes(&cohort, 9).expect("nodes"));
+    let nodes = Arc::new(expand_nodes(&cohort, 9, 0).expect("nodes"));
     let design = build_term_collection_design(nodes.node_data.view(), &linear_spec()).expect("design");
     let dense = design
         .design
@@ -1579,7 +1806,7 @@ fn traced_fixed_lambda_inner_solve_on_the_loaded_cohort_reports_its_cost() {
     use gam_terms::smooth::build_term_collection_design;
     let mut cohort = simulate_cohort(80, 6.0, -0.8, 0.5, 1.0, 0.4, 7);
     cohort.validate().expect("valid");
-    let nodes = Arc::new(expand_nodes(&cohort, 9).expect("nodes"));
+    let nodes = Arc::new(expand_nodes(&cohort, 9, 0).expect("nodes"));
     let design = build_term_collection_design(nodes.node_data.view(), &linear_spec()).expect("design");
     let dense = design
         .design
@@ -1742,7 +1969,9 @@ fn simulate_score_cohort(
     }
     EventHistoryCohort {
         mark_names: vec!["event".to_string()],
+        mark_kinds: vec![MarkKind::Recurrent],
         covariate_names: vec!["g".to_string()],
+        covariate_levels: vec![Vec::new()],
         covariates,
         subjects: histories,
     }
@@ -1874,19 +2103,23 @@ fn forecast_tiers_population_score_and_history_are_one_model_conditioned_on_more
     ));
     assert!(beta[1] > 0.0, "the score effect was simulated positive; fitted {}", beta[1]);
     let horizons = [7.0, 8.0];
-    let absorbing = [false];
+    let at = |start: f64, score: f64| -> Vec<FutureSegment> {
+        vec![FutureSegment {
+            start,
+            covariates: vec![score],
+        }]
+    };
     let population = population_forecast(
         &fit,
         &cohort,
         &PopulationForecastRequest {
             start: 6.0,
             horizons: &horizons,
-            absorbing: &absorbing,
-            covariates: &[0.0],
+            future: &at(6.0, 0.0),
         },
     )
     .expect("population forecast");
-    assert!((population.survival[1] - 1.0).abs() < 1e-12, "no absorbing marks");
+    assert!((population.survival[1] - 1.0).abs() < 1e-12, "no terminal marks");
     let tiers: Vec<(f64, f64, f64, usize)> = cohort
         .subjects
         .iter()
@@ -1899,8 +2132,7 @@ fn forecast_tiers_population_score_and_history_are_one_model_conditioned_on_more
                 &PopulationForecastRequest {
                     start: subject.exit,
                     horizons: &horizons,
-                    absorbing: &absorbing,
-                    covariates: &[score],
+                    future: &at(subject.exit, score),
                 },
             )
             .expect("score-only forecast");
@@ -1910,8 +2142,7 @@ fn forecast_tiers_population_score_and_history_are_one_model_conditioned_on_more
                 &ForecastRequest {
                     history: subject,
                     horizons: &horizons,
-                    absorbing: &absorbing,
-                    future_row: i,
+                    future: &[],
                 },
             )
             .expect("history forecast");
@@ -1948,4 +2179,271 @@ fn forecast_tiers_population_score_and_history_are_one_model_conditioned_on_more
         poorest.2 < poorest.1,
         "a history poor in events must lower the forecast below its score-only tier"
     );
+}
+
+/// Intercept-only fit of a cohort: the maximum-likelihood rate of each mark
+/// is its event count over its exposure, so every forecast has a closed
+/// form to compare against.
+fn intercept_only_spec() -> TermCollectionSpec {
+    TermCollectionSpec {
+        linear_terms: Vec::new(),
+        random_effect_terms: Vec::new(),
+        smooth_terms: Vec::new(),
+    }
+}
+
+/// A competing-risks cohort: two terminal marks and one recurrent mark,
+/// constant hazards, no latent state in the simulation.
+fn competing_risks_cohort(seed: u64) -> EventHistoryCohort {
+    simulate_marked_cohort(
+        120,
+        4.0,
+        &[-1.4, -2.0, -0.6],
+        0.0,
+        &[0.0, 0.0, 0.0],
+        1.0,
+        &[MarkKind::Terminal, MarkKind::Terminal, MarkKind::Recurrent],
+        seed,
+    )
+}
+
+#[test]
+fn terminal_forecasts_match_the_constant_hazard_solution() {
+    install_test_logger();
+    let mut cohort = competing_risks_cohort(31);
+    let spec = EventHistorySpec::new(0, vec![intercept_only_spec()]);
+    let fit = fit_event_history(&mut cohort, &spec).expect("intercept-only fit");
+    // The maximum-likelihood rates: events over exposure, per mark.
+    let exposure: f64 = cohort.subjects.iter().map(|s| s.exit - s.entry).sum();
+    let counts: Vec<f64> = (0..3)
+        .map(|d| cohort.subjects.iter().flat_map(|s| s.events.iter()).filter(|e| e.mark == d).count() as f64)
+        .collect();
+    let rates: Vec<f64> = counts.iter().map(|c| c / exposure).collect();
+    for d in 0..3 {
+        let fitted = fit.mark_coefficients(d)[0].exp();
+        assert!(
+            (fitted - rates[d]).abs() < 1e-6 * rates[d],
+            "mark {d}: fitted rate {fitted} vs closed form {}",
+            rates[d]
+        );
+    }
+    let total_terminal = rates[0] + rates[1];
+    // A censored subject: the forecast is the exponential competing-risks
+    // solution, chronologically integrated.
+    let censored = cohort
+        .subjects
+        .iter()
+        .find(|s| s.terminal_event(&cohort.mark_kinds).is_none())
+        .expect("a censored subject");
+    let offsets = [0.5, 1.0, 2.0, 4.0];
+    let horizons: Vec<f64> = offsets.iter().map(|h| censored.exit + h).collect();
+    let f = forecast(
+        &fit,
+        &cohort,
+        &ForecastRequest {
+            history: censored,
+            horizons: &horizons,
+            future: &[],
+        },
+    )
+    .expect("forecast");
+    for (i, &h) in offsets.iter().enumerate() {
+        let survival = (-total_terminal * h).exp();
+        assert!(
+            (f.survival[i] - survival).abs() < 1e-9,
+            "survival at +{h}: {} vs {survival}",
+            f.survival[i]
+        );
+        for d in 0..2 {
+            let incidence = rates[d] / total_terminal * (1.0 - survival);
+            assert!(
+                (f.expected_counts[[i, d]] - incidence).abs() < 1e-9,
+                "cumulative incidence of mark {d} at +{h}: {} vs {incidence}",
+                f.expected_counts[[i, d]]
+            );
+        }
+        // Recurrent events before termination: λ₂ ∫₀ʰ S = λ₂ (1 − S)/Λ.
+        let recurrent = rates[2] / total_terminal * (1.0 - survival);
+        assert!(
+            (f.expected_counts[[i, 2]] - recurrent).abs() < 1e-9,
+            "expected recurrent count at +{h}: {} vs {recurrent}",
+            f.expected_counts[[i, 2]]
+        );
+    }
+    // A subject who died has no future.
+    let dead = cohort
+        .subjects
+        .iter()
+        .find(|s| s.terminal_event(&cohort.mark_kinds).is_some())
+        .expect("a subject with a terminal event");
+    let gone = forecast(
+        &fit,
+        &cohort,
+        &ForecastRequest {
+            history: dead,
+            horizons: &[dead.exit + 1.0],
+            future: &[],
+        },
+    )
+    .expect("forecast of an absorbed subject");
+    assert_eq!(gone.survival, vec![0.0]);
+    assert!(gone.expected_counts.iter().all(|c| *c == 0.0));
+    // The population tier at the same rates is the same solution.
+    let population = population_forecast(
+        &fit,
+        &cohort,
+        &PopulationForecastRequest {
+            start: 1.0,
+            horizons: &[2.0, 3.0],
+            future: &[FutureSegment {
+                start: 1.0,
+                covariates: vec![0.0],
+            }],
+        },
+    )
+    .expect("population forecast");
+    assert!((population.survival[1] - (-2.0 * total_terminal).exp()).abs() < 1e-9);
+    // Rosenblatt: with constant hazards the PIT of an event at `t` after the
+    // previous event at `s` is `1 − exp(−Λ_all (t − s))` with the total rate.
+    let total_rate: f64 = rates.iter().sum();
+    let subject = cohort
+        .subjects
+        .iter()
+        .max_by_key(|s| s.events.len())
+        .expect("subject");
+    let pits = predictive_pit(&fit, &cohort, subject).expect("pit");
+    assert_eq!(pits.len(), subject.events.len());
+    let mut previous = subject.entry;
+    for (event, pit) in subject.events.iter().zip(pits.iter()) {
+        let expected = 1.0 - (-total_rate * (event.time - previous)).exp();
+        assert!(
+            (pit.pit - expected).abs() < 1e-9,
+            "PIT at {}: {} vs {expected}",
+            event.time,
+            pit.pit
+        );
+        assert_eq!(pit.mark, event.mark);
+        let probability_sum: f64 = pit.mark_probabilities.iter().sum();
+        assert!((probability_sum - 1.0).abs() < 1e-12);
+        for d in 0..3 {
+            assert!((pit.mark_probabilities[d] - rates[d] / total_rate).abs() < 1e-9);
+        }
+        previous = event.time;
+    }
+    assert!(kolmogorov_smirnov_uniform(&[]).is_none());
+}
+
+#[test]
+fn forecast_probabilities_are_coherent_under_a_latent_state() {
+    install_test_logger();
+    let mut cohort = simulate_marked_cohort(
+        60,
+        4.0,
+        &[-1.2, -1.8, -0.5],
+        0.4,
+        &[0.9, 0.5, 0.7],
+        0.5,
+        &[MarkKind::Terminal, MarkKind::Once, MarkKind::Recurrent],
+        41,
+    );
+    let mut spec = EventHistorySpec::new(1, vec![linear_spec()]);
+    spec.gauss_hermite_order = 9;
+    let started = std::time::Instant::now();
+    let fit = fit_event_history(&mut cohort, &spec).expect("fit");
+    emit(&format!(
+        "[coherent] {:.1}s order={} refinement={} loadings={:?} rate={}",
+        started.elapsed().as_secs_f64(),
+        fit.quadrature.gauss_hermite_order,
+        fit.quadrature.mesh_refinement,
+        fit.loadings.iter().copied().collect::<Vec<_>>(),
+        fit.rates[0]
+    ));
+    let horizons_after = [0.5, 1.5, 3.0];
+    for subject in cohort.subjects.iter().take(12) {
+        if subject.terminal_event(&cohort.mark_kinds).is_some() {
+            continue;
+        }
+        let horizons: Vec<f64> = horizons_after.iter().map(|h| subject.exit + h).collect();
+        let f = forecast(
+            &fit,
+            &cohort,
+            &ForecastRequest {
+                history: subject,
+                horizons: &horizons,
+                future: &[],
+            },
+        )
+        .expect("forecast");
+        let had_once = subject.events.iter().any(|e| e.mark == 1);
+        let mut previous_survival = 1.0;
+        let mut previous_counts = vec![0.0; 3];
+        for i in 0..horizons.len() {
+            let s = f.survival[i];
+            assert!((0.0..=1.0).contains(&s) && s <= previous_survival + 1e-12, "survival {s}");
+            // One terminal mark: its cumulative incidence is 1 − S.
+            assert!(
+                (f.expected_counts[[i, 0]] - (1.0 - s)).abs() < 1e-6,
+                "subject {}: F_terminal {} vs 1 − S {}",
+                subject.id,
+                f.expected_counts[[i, 0]],
+                1.0 - s
+            );
+            // A once-only mark: a probability, zero if it already fired.
+            let once = f.expected_counts[[i, 1]];
+            if had_once {
+                assert_eq!(once, 0.0);
+            } else {
+                assert!((0.0..=1.0 + 1e-9).contains(&once), "first-occurrence probability {once}");
+                assert!(once + f.expected_counts[[i, 0]] <= 1.0 + 1e-6, "once + terminal exceeds one");
+            }
+            for d in 0..3 {
+                assert!(f.expected_counts[[i, d]] >= previous_counts[d] - 1e-12);
+                previous_counts[d] = f.expected_counts[[i, d]];
+            }
+            previous_survival = s;
+        }
+    }
+    // The PITs carry mark probabilities that sum to one over the marks the
+    // subject was at risk for.
+    for subject in cohort.subjects.iter().take(12) {
+        for pit in predictive_pit(&fit, &cohort, subject).expect("pit") {
+            assert!((0.0..=1.0).contains(&pit.pit));
+            let sum: f64 = pit.mark_probabilities.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-9, "mark probabilities sum to {sum}");
+        }
+    }
+}
+
+#[test]
+fn two_atoms_start_apart_and_the_fit_keeps_them_distinct() {
+    install_test_logger();
+    // Two atoms with different memories drive one mark; a fit offered two
+    // atoms must not collapse them onto each other.
+    let mut cohort = simulate_cohort(40, 4.0, -0.6, 0.3, 1.0, 0.3, 17);
+    let latent = super::family::latent_block_spec(400, 1, 2).expect("latent spec");
+    let initial = latent.initial_beta.expect("initial");
+    assert!(initial[2] < initial[3], "log-rates start apart: {:?}", initial);
+    assert!((initial[3] - initial[2] - std::f64::consts::LN_2).abs() < 1e-12);
+    let mut spec = EventHistorySpec::new(2, vec![linear_spec()]);
+    spec.gauss_hermite_order = 7;
+    let started = std::time::Instant::now();
+    let fit = fit_event_history(&mut cohort, &spec).expect("two-atom fit");
+    emit(&format!(
+        "[two-atoms] {:.1}s order={} refinement={} loadings={:?} rates={:?} log_lambdas={:?}",
+        started.elapsed().as_secs_f64(),
+        fit.quadrature.gauss_hermite_order,
+        fit.quadrature.mesh_refinement,
+        fit.loadings.iter().copied().collect::<Vec<_>>(),
+        fit.rates,
+        fit.atom_log_lambdas
+    ));
+    assert_eq!(fit.atoms(), 2);
+    assert!(fit.rates.iter().all(|r| r.is_finite() && *r > 0.0));
+    assert!(
+        (fit.log_rates[0] - fit.log_rates[1]).abs() > 1e-6,
+        "the two atoms collapsed onto one rate: {:?}",
+        fit.log_rates
+    );
+    assert!(fit.quadrature.gauss_hermite.coefficient_shift <= spec.quadrature_tolerance);
+    assert!(fit.quadrature.mesh.coefficient_shift <= spec.quadrature_tolerance);
 }

@@ -1,7 +1,7 @@
-//! Exact marginal likelihood of one subject's event history over its latent
-//! chain, with the exact gradient and Hessian in every parameter the subject
-//! sees: its node log-intensities `η⁰`, the loadings `a`, and the log-rates
-//! `ρ`.
+//! Marginal likelihood of one subject's event history over its latent chain,
+//! with its gradient and Hessian in the coefficient space the subject sees:
+//! the per-mark coefficients `β_d` (through the design rows of its nodes),
+//! the loadings `a`, and the log-rates `ρ`.
 //!
 //! The log-intensity of mark `d` at a node is
 //!
@@ -26,25 +26,43 @@
 //! ∂²ℓ/∂θ∂θᵀ = E[∂²L_c/∂θ∂θᵀ | y] + Cov(∂L_c/∂θ | y)             (Louis)
 //! ```
 //!
-//! Every expectation and covariance reduces to node marginals, consecutive
-//! pairwise marginals, and all-pairs covariances of node functions, which the
-//! backward operator propagates in one sweep per node. Gap functions are
-//! quadratic in the two endpoint states, so their conditional expectations
-//! are polynomial moments of the same operators.
+//! The covariance is of the complete-data score `g = Σ_n v_n(z_n) + Σ_g
+//! t_g(z_g, z_{g+1})`, a sum of node and gap functions. Its second moment is
+//! accumulated in one forward sweep: by the Markov property, the past of the
+//! chain given `z_m` is independent of the data after `m`, so the running
+//! conditional expectation `C_m(z) = E[Σ_{n≤m} v_n + Σ_{g<m} t_g | z_m = z,
+//! y_{≤m}]` is enough to form `E[(Σ_{n<m} v_n) v_mᵀ | y]` as an expectation
+//! under the smoothed marginal at `m`, and it propagates forward through
+//! the same separable transition operators the filter uses:
+//! `C_{m+1} = F[α_m C_m] / p̂_{m+1}`. Nothing of size `S × S` is ever stored
+//! per gap and no pair table over nodes is formed: the cost is linear in the
+//! node count and in the coefficient count, and the Hessian is assembled in
+//! coefficient space directly.
+//!
+//! Every function this pass carries is bounded: a score, a smoothed
+//! conditional expectation, or a polynomial moment of the transition. Only
+//! the smoother residual `log β` is interpolated, on cubic splines, and only
+//! its expectations under the smoothed marginal enter. The Hessian is
+//! therefore Louis' identity evaluated by the same quadrature as the value:
+//! it agrees with the second derivative of the computed value to the
+//! quadrature error the fit's certificate bounds, while the gradient the
+//! inner Newton uses is the exact derivative of the computed value (see
+//! [`super::family`]).
 
 use super::chain::{
-    AtomTransition, GaussHermite, Grid, OperatorFamily, apply_axis, backward_axis_bases,
-    forward_operators, interpolate_at_inner_points, log_sum_exp, normal_density,
+    AtomTransition, GaussHermite, Grid, OperatorFamily, backward_axis_bases, forward_operators,
+    interpolate_at_inner_points, log_sum_exp, normal_density,
 };
 use super::cohort::{EventHistoryError, SubjectNodes};
-use super::scalar::{add_real, div, exp, ln, recip, sqrt, square};
+use super::scalar::{add_real, exp, ln, recip, sqrt, square};
 use gam_math::nested_dual::JetField;
+use ndarray::ArrayView2;
 use std::collections::HashMap;
 
 /// Everything one subject's marginal needs, in the caller's scalar type.
 pub(crate) struct SubjectInputs<'a, S> {
     pub nodes: &'a SubjectNodes,
-    /// Node log-intensities without the latent part, index `n * marks + d`.
+    /// Population node log-intensities `η⁰`, index `n * marks + d`.
     pub eta0: &'a [S],
     /// Loadings, index `d * atoms + k`.
     pub loadings: &'a [S],
@@ -55,29 +73,34 @@ pub(crate) struct SubjectInputs<'a, S> {
     /// Elapsed time between a supplied filtered state and the first node;
     /// zero unless [`forward_filter`] continues from an earlier state.
     pub continuation_gap: f64,
+    /// Per mark, the design rows of this subject's nodes (`n × p_d`), so the
+    /// derivatives come out in coefficient space. `None` uses the identity:
+    /// the node log-intensities themselves are the parameters.
+    pub designs: Option<&'a [ArrayView2<'a, f64>]>,
 }
 
 /// Marginal log-likelihood and its derivatives in the subject-local parameter
-/// vector `[η⁰ (nodes × marks) | a (marks × atoms) | ρ (atoms)]`.
+/// vector `[β_0 | … | β_{D−1} | a (marks × atoms) | ρ (atoms)]`.
 pub(crate) struct SubjectOutput<S> {
     pub loglik: S,
+    /// The Fisher-identity gradient `E[∂L_c/∂θ | y]`; empty when derivatives
+    /// were not requested.
     pub gradient: Vec<S>,
-    /// Row-major `P × P`; empty when derivatives were not requested.
+    /// Row-major `P × P` log-likelihood Hessian; empty when derivatives were
+    /// not requested.
     pub hessian: Vec<S>,
 }
-
-/// Relative floor on a quadrature-estimated posterior variance, guarding the
-/// grid placement against a posterior that collapsed below the resolution of
-/// the current grid.
-const VARIANCE_FLOOR_RELATIVE: f64 = 1e-12;
 
 /// A filtered or predicted density value below this fraction of its grid's
 /// peak is interpolation noise (the Lagrange-based operator is a signed sum,
 /// accurate to about `ε · peak` in absolute terms), and the future-likelihood
 /// ratio that multiplies it in the smoothed marginal is exponentially large
-/// exactly there. Such points carry no smoothed mass. `1e-11` sits two
-/// orders above the noise of a product grid of a few hundred points and
-/// discards mass far below any discretisation error.
+/// exactly there. Such points carry no smoothed mass, and a smoothed
+/// conditional expectation is not formed there (its denominator is the
+/// predicted density). `1e-11` sits several orders above the noise of a
+/// product grid of a few hundred points; the mass it discards is far below
+/// the Gauss-Hermite certificate's tolerance, and the smoothed marginal is
+/// renormalised after the cut so every expectation is under a probability.
 const DENSITY_NOISE_RELATIVE: f64 = 1e-11;
 
 /// The noise floor of a density on a grid: `DENSITY_NOISE_RELATIVE` of its
@@ -92,11 +115,56 @@ fn numerical(reason: impl Into<String>) -> EventHistoryError {
     }
 }
 
+/// `−½ Σ_k a_{dk}²` for one mark's loadings: the shift that makes
+/// `exp(η⁰_d)` the population-average intensity (see the module docs).
+pub(crate) fn marginal_shift<S: JetField>(loadings_d: &[S], like: &S) -> S {
+    loadings_d
+        .iter()
+        .fold(like.constant_like(0.0), |acc, a| acc.sub(&square(a).scale(0.5)))
+}
+
+/// The log-intensity of mark `d` at latent state `z`, given the mark's
+/// `η⁰` and loadings: `η⁰ − ½|a_d|² + a_d · z`.
+pub(crate) fn log_intensity<S: JetField>(eta0: &S, loadings_d: &[S], z: &[S]) -> S {
+    let mut eta = eta0.add(&marginal_shift(loadings_d, eta0));
+    for (a, zk) in loadings_d.iter().zip(z.iter()) {
+        eta = eta.add(&a.mul(zk));
+    }
+    eta
+}
+
+/// The transitions of every atom across a gap of `gap` time units.
+///
+/// A rate whose `κ = rate · gap / T` underflows to exactly zero would make
+/// the innovation variance exactly zero and the transition a singular
+/// Gaussian; the log-rate ridge keeps the fit far from that boundary, so
+/// reaching it is a numerical failure to report, not a limit to take.
+pub(crate) fn transitions_across<S: JetField>(
+    log_rates: &[S],
+    gap: f64,
+    time_scale: f64,
+) -> Result<Vec<AtomTransition<S>>, EventHistoryError> {
+    log_rates
+        .iter()
+        .map(|rho| {
+            let kappa = exp(rho).scale(gap / time_scale);
+            if !(kappa.value() > 0.0) {
+                return Err(numerical(format!(
+                    "atom transition across a gap of {gap}: rate · gap = {} is not positive (log-rate {})",
+                    kappa.value(),
+                    rho.value()
+                )));
+            }
+            Ok(AtomTransition::new(&kappa))
+        })
+        .collect()
+}
+
 /// A bivariate polynomial in the start and end coordinates of one atom
 /// across one gap, degree at most four in each variable.
 #[derive(Clone)]
 struct GapPolynomial<S> {
-    /// `c[a * 5 + b]` multiplies `z^a z'^b`.
+    /// `c[a * 5 + b]` multiplies `z^a u^b`.
     c: Vec<S>,
     /// Structural support: which coefficients were ever set. A coefficient
     /// whose value happens to be zero may still carry derivative channels,
@@ -121,7 +189,7 @@ impl<S: JetField> GapPolynomial<S> {
         &self.c[a * 5 + b]
     }
 
-    /// Whether the coefficient of `z^a z'^b` is structurally absent.
+    /// Whether the coefficient of `z^a u^b` is structurally absent.
     fn absent(&self, a: usize, b: usize) -> bool {
         !self.present[a * 5 + b]
     }
@@ -185,9 +253,10 @@ impl<S: JetField> GapPolynomial<S> {
 /// standardised innovation `u = (z' − φz)/√(1 − φ²)`.
 ///
 /// In these coordinates every coefficient stays bounded as the gap shrinks
-/// (`κ → 0`, `φ → 1`, `q → 0`); the monomial expansion in `(z, z')` carries
-/// coefficients of order `1/q²` that cancel to `O(1)` and destroy the
-/// quadrature moments in floating point.
+/// (`κ → 0`, `φ → 1`, `q → 0`): each is a product of a `1/q` power with the
+/// matching power of `dφ/dρ = −κφ ∝ q`, and products lose no precision. The
+/// monomial expansion in `(z, z')` carries coefficients of order `1/q²` that
+/// cancel to `O(1)` and destroy the quadrature moments in floating point.
 fn gap_score_polynomials<S: JetField>(
     transition: &AtomTransition<S>,
     like: &S,
@@ -225,28 +294,6 @@ pub fn transition_score_polynomials(kappa: f64) -> (Vec<f64>, Vec<f64>) {
     (t.c, dt.c)
 }
 
-/// `−½ Σ_k a_{dk}²` for one mark's loadings: the shift that makes
-/// `exp(η⁰_d)` the population-average intensity (see the module docs).
-pub(crate) fn marginal_shift<S: JetField>(loadings_d: &[S], like: &S) -> S {
-    loadings_d
-        .iter()
-        .fold(like.constant_like(0.0), |acc, a| acc.sub(&square(a).scale(0.5)))
-}
-
-/// The log-intensity of mark `d` at latent state `z`, given the mark's
-/// `η⁰` and loadings: `η⁰ − ½|a_d|² + a_d · z`.
-pub(crate) fn log_intensity<S: JetField>(eta0: &S, loadings_d: &[S], z: &[S]) -> S {
-    let mut eta = eta0.add(&marginal_shift(loadings_d, eta0));
-    for (a, zk) in loadings_d.iter().zip(z.iter()) {
-        eta = eta.add(&a.mul(zk));
-    }
-    eta
-}
-
-fn pointwise<S: JetField>(a: &[S], b: &[S]) -> Vec<S> {
-    a.iter().zip(b.iter()).map(|(x, y)| x.mul(y)).collect()
-}
-
 fn weighted_sum<S: JetField>(weights: &[S], values: &[S]) -> S {
     weights
         .iter()
@@ -269,31 +316,22 @@ pub(crate) fn pairwise_sum<S: JetField>(terms: &[S], zero: &S) -> S {
     }
 }
 
-fn weighted_sum3<S: JetField>(weights: &[S], a: &[S], b: &[S]) -> S {
-    weights
-        .iter()
-        .zip(a.iter().zip(b.iter()))
-        .fold(weights[0].constant_like(0.0), |acc, (w, (x, y))| {
-            acc.add(&w.mul(x).mul(y))
-        })
-}
-
 /// Node log-likelihood pieces at one grid.
-struct NodeLikelihood<S> {
+pub(crate) struct NodeLikelihood<S> {
     /// `exp(η_{nd})` at every grid point, index `d * size + i`.
-    expeta: Vec<S>,
+    pub expeta: Vec<S>,
     /// `Σ_d y η − w e^η` at every grid point.
-    ell: Vec<S>,
+    pub ell: Vec<S>,
     /// `max_i ell[i].value()`.
-    shift: f64,
+    pub shift: f64,
 }
 
-fn node_likelihood<S: JetField>(
+pub(crate) fn node_likelihood<S: JetField>(
     grid: &Grid<S>,
     eta0: &[S],
     loadings: &[S],
     counts: &[f64],
-    exposure: f64,
+    exposures: &[f64],
     compensated: Option<&[bool]>,
     marks: usize,
     atoms: usize,
@@ -303,7 +341,7 @@ fn node_likelihood<S: JetField>(
     let mut ell = vec![eta0[0].constant_like(0.0); size];
     for d in 0..marks {
         let exposure = if compensated.is_none_or(|mask| mask[d]) {
-            exposure
+            exposures[d]
         } else {
             0.0
         };
@@ -332,27 +370,40 @@ fn node_likelihood<S: JetField>(
     NodeLikelihood { expeta, ell, shift }
 }
 
-/// Posterior mean and variance of every atom under `alpha` on `grid`, the
-/// variance floored relative to the grid's own scale.
-fn posterior_moments<S: JetField>(grid: &Grid<S>, alpha: &[S]) -> (Vec<S>, Vec<S>) {
+/// Posterior mean and variance of every atom under `alpha` on `grid`.
+///
+/// A non-positive variance means the grid representation of the density has
+/// lost positivity where its mass is (a signed interpolant whose negative
+/// lobes carry weight): that is a numerical failure of the representation,
+/// reported as such rather than floored into a plausible small number.
+fn posterior_moments<S: JetField>(
+    grid: &Grid<S>,
+    alpha: &[S],
+    label: &str,
+) -> Result<(Vec<S>, Vec<S>), EventHistoryError> {
     let atoms = grid.dimension();
     let mut means = Vec::with_capacity(atoms);
     let mut variances = Vec::with_capacity(atoms);
     for k in 0..atoms {
-        let zs: Vec<S> = (0..grid.size())
-            .map(|i| grid.coordinate(i, k).clone())
-            .collect();
-        let mean = weighted_sum3(&grid.weights, alpha, &zs);
-        let centred: Vec<S> = zs.iter().map(|z| square(&z.sub(&mean))).collect();
-        let mut variance = weighted_sum3(&grid.weights, alpha, &centred);
-        let floor = VARIANCE_FLOOR_RELATIVE * square(&grid.axes[k].sigma).value();
-        if !(variance.value() > floor) {
-            variance = variance.constant_like(floor);
+        let mut mean = alpha[0].constant_like(0.0);
+        for i in 0..grid.size() {
+            mean = mean.add(&grid.weights[i].mul(&alpha[i]).mul(grid.coordinate(i, k)));
+        }
+        let mut variance = alpha[0].constant_like(0.0);
+        for i in 0..grid.size() {
+            let centred = square(&grid.coordinate(i, k).sub(&mean));
+            variance = variance.add(&grid.weights[i].mul(&alpha[i]).mul(&centred));
+        }
+        if !(variance.value() > 0.0) || !variance.value().is_finite() {
+            return Err(numerical(format!(
+                "{label}: posterior variance of atom {k} is {} on the grid; the density representation lost positivity",
+                variance.value()
+            )));
         }
         means.push(mean);
         variances.push(variance);
     }
-    (means, variances)
+    Ok((means, variances))
 }
 
 /// Multiply a predicted density on `grid` by the node factor
@@ -384,30 +435,18 @@ fn condition<S: JetField>(
     Ok((raw, c))
 }
 
-/// `exp(ell − shift) / c` at every grid point.
-fn node_factors<S: JetField>(likelihood: &NodeLikelihood<S>, normaliser: &S) -> Vec<S> {
-    let inverse = recip(normaliser);
-    likelihood
-        .ell
-        .iter()
-        .map(|e| exp(&add_real(e, -likelihood.shift)).mul(&inverse))
-        .collect()
-}
-
 /// One filtered node: its grid, the operators that reached it, the predicted
 /// and filtered densities on it, and the node's likelihood pieces.
-struct FilteredNode<S> {
-    grid: Grid<S>,
+pub(crate) struct FilteredNode<S> {
+    pub grid: Grid<S>,
     /// Transitions across the gap that led here; empty at the first node.
-    transitions: Vec<AtomTransition<S>>,
+    pub transitions: Vec<AtomTransition<S>>,
     /// Forward operators from the previous grid; empty at the first node.
-    forward: OperatorFamily<S>,
-    predicted: Vec<S>,
-    alpha: Vec<S>,
-    normaliser: S,
-    /// `exp(ell − shift) / c` at every grid point.
-    factors: Vec<S>,
-    likelihood: NodeLikelihood<S>,
+    pub forward: OperatorFamily<S>,
+    pub predicted: Vec<S>,
+    pub alpha: Vec<S>,
+    pub normaliser: S,
+    pub likelihood: NodeLikelihood<S>,
 }
 
 /// Where a node's grid goes: at the posterior mean, with the predictive
@@ -431,10 +470,11 @@ struct FilteredNode<S> {
 /// posterior variance would leave the integrand's Gaussian tails outside it
 /// and break the quadrature instead (a survival forecast above one is the
 /// symptom). The variance still narrows across nodes, through the predictive
-/// recursion. The mean read off the predictive grid is accurate even when
-/// interpolation from it would not be: Gauss-Hermite integrates the tilted
-/// envelope itself to near machine precision.
-fn filter_start<S: JetField>(
+/// recursion. A node whose likelihood factor is much sharper than the
+/// predictive spread (a large integrated intensity at one node) makes the
+/// ratio a narrow bump that a polynomial resolves only at high order; the
+/// mesh refinement of the fit is what keeps every node mildly informative.
+pub(crate) fn filter_start<S: JetField>(
     gh: &GaussHermite,
     like: &S,
     atoms: usize,
@@ -463,12 +503,11 @@ fn filter_start<S: JetField>(
         rough.shift,
         label,
     )?;
-    let (means, _) = posterior_moments(&prior_grid, &rough_alpha);
+    let (means, _) = posterior_moments(&prior_grid, &rough_alpha, label)?;
     let grid = Grid::new(gh, &means, &unit, like);
     let predicted = prior_density(&grid);
     let likelihood = node_terms(&grid);
     let (alpha, normaliser) = condition(&grid, &predicted, &likelihood.ell, likelihood.shift, label)?;
-    let factors = node_factors(&likelihood, &normaliser);
     Ok(FilteredNode {
         grid,
         transitions: Vec::new(),
@@ -479,26 +518,22 @@ fn filter_start<S: JetField>(
         predicted,
         alpha,
         normaliser,
-        factors,
         likelihood,
     })
 }
 
-/// Predict the filtered state on `previous_grid` across one gap and condition
-/// on a node, on a grid placed at the posterior mean with the predictive
-/// spread (see [`filter_start`]).
-fn filter_step<S: JetField>(
+/// The predictive grid across one gap (centre `φ · mean`, spread
+/// `√(φ² var + q)`) and the predicted density on it.
+pub(crate) fn predict<S: JetField>(
     gh: &GaussHermite,
     like: &S,
     previous_grid: &Grid<S>,
     previous_alpha: &[S],
-    transitions: Vec<AtomTransition<S>>,
-    forward_power: u8,
-    node_terms: &dyn Fn(&Grid<S>) -> NodeLikelihood<S>,
+    transitions: &[AtomTransition<S>],
     label: &str,
-) -> Result<FilteredNode<S>, EventHistoryError> {
+) -> Result<(Grid<S>, Vec<S>), EventHistoryError> {
     let atoms = transitions.len();
-    let (means, variances) = posterior_moments(previous_grid, previous_alpha);
+    let (means, variances) = posterior_moments(previous_grid, previous_alpha, label)?;
     let centres: Vec<S> = (0..atoms)
         .map(|k| transitions[k].phi.mul(&means[k]))
         .collect();
@@ -512,22 +547,35 @@ fn filter_step<S: JetField>(
         })
         .collect();
     let predictive = Grid::new(gh, &centres, &scales, like);
-    let rough_forward = forward_operators(gh, previous_grid, &predictive, &transitions, 0);
+    let forward = forward_operators(gh, previous_grid, &predictive, transitions, 0);
+    let predicted = forward.plain(previous_alpha);
+    Ok((predictive, predicted))
+}
+
+/// Predict the filtered state on `previous_grid` across one gap and condition
+/// on a node, on a grid placed at the posterior mean with the predictive
+/// spread (see [`filter_start`]).
+pub(crate) fn filter_step<S: JetField>(
+    gh: &GaussHermite,
+    like: &S,
+    previous_grid: &Grid<S>,
+    previous_alpha: &[S],
+    transitions: Vec<AtomTransition<S>>,
+    forward_power: u8,
+    node_terms: &dyn Fn(&Grid<S>) -> NodeLikelihood<S>,
+    label: &str,
+) -> Result<FilteredNode<S>, EventHistoryError> {
+    let (predictive, rough_predicted) =
+        predict(gh, like, previous_grid, previous_alpha, &transitions, label)?;
     let rough = node_terms(&predictive);
-    let (rough_alpha, _) = condition(
-        &predictive,
-        &rough_forward.plain(previous_alpha),
-        &rough.ell,
-        rough.shift,
-        label,
-    )?;
-    let (means, _) = posterior_moments(&predictive, &rough_alpha);
+    let (rough_alpha, _) = condition(&predictive, &rough_predicted, &rough.ell, rough.shift, label)?;
+    let (means, _) = posterior_moments(&predictive, &rough_alpha, label)?;
+    let scales: Vec<S> = predictive.axes.iter().map(|axis| axis.sigma.clone()).collect();
     let grid = Grid::new(gh, &means, &scales, like);
     let forward = forward_operators(gh, previous_grid, &grid, &transitions, forward_power);
     let predicted = forward.plain(previous_alpha);
     let likelihood = node_terms(&grid);
     let (alpha, normaliser) = condition(&grid, &predicted, &likelihood.ell, likelihood.shift, label)?;
-    let factors = node_factors(&likelihood, &normaliser);
     Ok(FilteredNode {
         grid,
         transitions,
@@ -535,13 +583,33 @@ fn filter_step<S: JetField>(
         predicted,
         alpha,
         normaliser,
-        factors,
         likelihood,
     })
 }
 
-/// Evaluate one subject's exact marginal log-likelihood and, when requested,
-/// its exact gradient and Hessian.
+/// Coefficient layout of one subject's local parameter vector.
+struct Layout {
+    /// Offset of mark `d`'s coefficient block.
+    offsets: Vec<usize>,
+    atoms: usize,
+    /// Offset of the loading slots.
+    a0: usize,
+    /// Offset of the log-rate slots.
+    rho0: usize,
+    total: usize,
+}
+
+impl Layout {
+    fn a(&self, d: usize, k: usize) -> usize {
+        self.a0 + d * self.atoms + k
+    }
+    fn rho(&self, k: usize) -> usize {
+        self.rho0 + k
+    }
+}
+
+/// Evaluate one subject's marginal log-likelihood and, when requested, its
+/// Fisher gradient and Louis Hessian in coefficient space.
 pub(crate) fn subject_marginal<S: JetField>(
     inputs: &SubjectInputs<'_, S>,
     derivatives: bool,
@@ -557,20 +625,20 @@ pub(crate) fn subject_marginal<S: JetField>(
     if inputs.eta0.len() != n_nodes * marks || inputs.loadings.len() != marks * atoms {
         return Err(numerical("subject marginal received mismatched parameter slices"));
     }
+    if let Some(designs) = inputs.designs
+        && (designs.len() != marks || designs.iter().any(|d| d.nrows() != n_nodes))
+    {
+        return Err(numerical("subject marginal received design rows of the wrong shape"));
+    }
     let like = &inputs.eta0[0];
+    let zero = like.constant_like(0.0);
     let counts_rows: Vec<Vec<f64>> = (0..n_nodes)
         .map(|n| nodes.counts.row(n).to_vec())
         .collect();
+    let exposure_rows: Vec<Vec<f64>> = (0..n_nodes).map(|n| nodes.exposure_row(n)).collect();
 
     // ---- forward filter ------------------------------------------------
-    let mut grids: Vec<Grid<S>> = Vec::with_capacity(n_nodes);
-    let mut alpha: Vec<Vec<S>> = Vec::with_capacity(n_nodes);
-    let mut lik: Vec<Vec<S>> = Vec::with_capacity(n_nodes);
-    let mut likelihoods: Vec<NodeLikelihood<S>> = Vec::with_capacity(n_nodes);
-    let mut transitions: Vec<Vec<AtomTransition<S>>> = Vec::with_capacity(n_nodes);
-    let mut forward_ops: Vec<OperatorFamily<S>> = Vec::with_capacity(n_nodes);
-    let mut normalisers: Vec<S> = Vec::with_capacity(n_nodes);
-    let mut predicted: Vec<Vec<S>> = Vec::with_capacity(n_nodes);
+    let mut filtered: Vec<FilteredNode<S>> = Vec::with_capacity(n_nodes);
     let forward_power: u8 = if derivatives { 2 } else { 0 };
     let node_terms = |grid: &Grid<S>, n: usize| -> NodeLikelihood<S> {
         node_likelihood(
@@ -578,53 +646,35 @@ pub(crate) fn subject_marginal<S: JetField>(
             &inputs.eta0[n * marks..(n + 1) * marks],
             inputs.loadings,
             &counts_rows[n],
-            nodes.exposures[n],
+            &exposure_rows[n],
             None,
             marks,
             atoms,
         )
     };
-    let first = filter_start(gh, like, atoms, &|grid| node_terms(grid, 0), "first node")?;
-    let mut node_loglik: Vec<S> = Vec::with_capacity(n_nodes);
-    node_loglik.push(ln(&first.normaliser).add(&like.constant_like(first.likelihood.shift)));
-    normalisers.push(first.normaliser);
-    predicted.push(first.predicted);
-    lik.push(first.factors);
-    likelihoods.push(first.likelihood);
-    alpha.push(first.alpha);
-    grids.push(first.grid);
+    filtered.push(filter_start(gh, like, atoms, &|grid| node_terms(grid, 0), "first node")?);
     for n in 0..n_nodes - 1 {
-        let gap_transitions: Vec<AtomTransition<S>> = (0..atoms)
-            .map(|k| {
-                let kappa = exp(&inputs.log_rates[k]).scale(nodes.gaps[n] / inputs.time_scale);
-                AtomTransition::new(&kappa)
-            })
-            .collect();
+        let transitions = transitions_across(inputs.log_rates, nodes.gaps[n], inputs.time_scale)?;
         let step = filter_step(
             gh,
             like,
-            &grids[n],
-            &alpha[n],
-            gap_transitions,
+            &filtered[n].grid,
+            &filtered[n].alpha,
+            transitions,
             forward_power,
             &|grid| node_terms(grid, n + 1),
             &format!("node {}", n + 1),
         )?;
-        node_loglik.push(ln(&step.normaliser).add(&like.constant_like(step.likelihood.shift)));
-        normalisers.push(step.normaliser);
-        predicted.push(step.predicted);
-        lik.push(step.factors);
-        likelihoods.push(step.likelihood);
-        alpha.push(step.alpha);
-        grids.push(step.grid);
-        transitions.push(step.transitions);
-        forward_ops.push(step.forward);
+        filtered.push(step);
     }
-    let loglik = pairwise_sum(&node_loglik, &like.constant_like(0.0));
+    let node_loglik: Vec<S> = filtered
+        .iter()
+        .map(|node| ln(&node.normaliser).add(&like.constant_like(node.likelihood.shift)))
+        .collect();
+    let loglik = pairwise_sum(&node_loglik, &zero);
     if !loglik.value().is_finite() {
         return Err(numerical("subject marginal log-likelihood is not finite"));
     }
-    let p_total = n_nodes * marks + marks * atoms + atoms;
     if !derivatives {
         return Ok(SubjectOutput {
             loglik,
@@ -633,17 +683,56 @@ pub(crate) fn subject_marginal<S: JetField>(
         });
     }
 
-    // ---- backward pass: smoothed transition kernels ----------------------
+    // ---- layout ------------------------------------------------------------
+    // With designs, the coefficients are the per-mark blocks in mark order.
+    // Without, the parameters are the node log-intensities themselves, laid
+    // out exactly as `eta0` is: node-major, `n * marks + d`.
+    let mut offsets = Vec::with_capacity(marks);
+    let mut acc = 0usize;
+    match inputs.designs {
+        Some(designs) => {
+            for design in designs {
+                offsets.push(acc);
+                acc += design.ncols();
+            }
+        }
+        None => {
+            offsets.extend(0..marks);
+            acc = n_nodes * marks;
+        }
+    }
+    let layout = Layout {
+        offsets,
+        atoms,
+        a0: acc,
+        rho0: acc + marks * atoms,
+        total: acc + marks * atoms + atoms,
+    };
+    let p_total = layout.total;
+    // Design row `x_{n,d,·}` as (coefficient, value) pairs.
+    let design_row = |n: usize, d: usize| -> Vec<(usize, f64)> {
+        match inputs.designs {
+            Some(designs) => designs[d]
+                .row(n)
+                .iter()
+                .enumerate()
+                .filter(|(_, x)| **x != 0.0)
+                .map(|(j, x)| (layout.offsets[d] + j, *x))
+                .collect(),
+            None => vec![(n * marks + d, 1.0)],
+        }
+    };
+
+    // ---- backward pass: smoother residual and innovation moments ----------
     // The future likelihood `lik_{n+1} β_{n+1}` is an exponential in the state
     // after an event, so it is never interpolated as a value: its logarithm
-    // is interpolated (relative accuracy), and everything carried backward is
-    // a smoothed conditional expectation `E[f | z_n, data]` — bounded,
-    // smooth, and transported by the backward-smoothed transition kernel
-    // `P(z_{n+1} | z_n, data) ∝ N(z_{n+1}; φ z_n, q) lik_{n+1} β_{n+1}`, whose
-    // self-normalised Gauss-Hermite weights make every transfer a stochastic
-    // matrix. Nothing grows along the chain.
+    // is interpolated (relative accuracy), and what is carried backward is
+    // `log β_n = log E[lik_{n+1} β_{n+1} / c_{n+1} | z_n]`, a bounded smooth
+    // function, plus the smoothed innovation moments `E[Π_k u_k^{e_k} | z_n,
+    // data]` of every gap, which the gap scores need. The `S × S` kernel of
+    // a gap exists only while that gap is being reduced to those moments.
     let n_gaps = n_nodes.saturating_sub(1);
-    let inner_count = grids[0].size();
+    let inner_count = filtered[0].grid.size();
     let log_inner_weights: Vec<f64> = (0..inner_count)
         .map(|l| {
             let mut rest = l;
@@ -684,25 +773,22 @@ pub(crate) fn subject_marginal<S: JetField>(
         }
     }
     let mut log_beta: Vec<Vec<S>> = vec![Vec::new(); n_nodes];
-    log_beta[n_nodes - 1] = vec![like.constant_like(0.0); grids[n_nodes - 1].size()];
-    // Per gap `n`: the stochastic transfer `transfer[i * size_{n+1} + j]`
-    // taking values on grid n+1 to smoothed expectations on grid n, and the
-    // smoothed innovation moments `E[Π_k u_k^{e_k} | z_i, data]`.
-    let mut transfers: Vec<Vec<S>> = vec![Vec::new(); n_gaps];
+    log_beta[n_nodes - 1] = vec![zero.clone(); filtered[n_nodes - 1].grid.size()];
     let mut innovation_moments: Vec<HashMap<Vec<u8>, Vec<S>>> = vec![HashMap::new(); n_gaps];
     for n in (0..n_gaps).rev() {
-        let grid = &grids[n];
-        let next = &grids[n + 1];
+        let grid = &filtered[n].grid;
+        let next = &filtered[n + 1].grid;
         let size = grid.size();
-        let next_size = next.size();
+        let transitions = &filtered[n + 1].transitions;
         // The node's log-likelihood is an explicit formula, so it is
         // evaluated exactly at every inner point; only the smoother residual
         // `log β_{n+1}` is interpolated.
-        let bases = backward_axis_bases(gh, grid, next, &transitions[n]);
+        let bases = backward_axis_bases(gh, grid, next, transitions);
         let at_inner = interpolate_at_inner_points(gh.order, &bases, &log_beta[n + 1]);
-        let log_c = ln(&normalisers[n + 1]);
+        let log_c = ln(&filtered[n + 1].normaliser);
+        let shift = filtered[n + 1].likelihood.shift;
         let node_log_lik = |zeta: &[S]| -> S {
-            let mut ell = like.constant_like(0.0);
+            let mut ell = zero.clone();
             for d in 0..marks {
                 let eta = log_intensity(
                     &inputs.eta0[(n + 1) * marks + d],
@@ -713,18 +799,22 @@ pub(crate) fn subject_marginal<S: JetField>(
                 if y != 0.0 {
                     ell = ell.add(&eta.scale(y));
                 }
-                if nodes.exposures[n + 1] != 0.0 {
-                    ell = ell.sub(&exp(&eta).scale(nodes.exposures[n + 1]));
+                let exposure = exposure_rows[n + 1][d];
+                if exposure != 0.0 {
+                    ell = ell.sub(&exp(&eta).scale(exposure));
                 }
             }
-            add_real(&ell, -likelihoods[n + 1].shift).sub(&log_c)
+            add_real(&ell, -shift).sub(&log_c)
         };
-        let spreads: Vec<S> = transitions[n]
+        let spreads: Vec<S> = transitions
             .iter()
             .map(|t| sqrt(&t.innovation.scale(2.0)))
             .collect();
         let mut log_beta_n = Vec::with_capacity(size);
-        let mut weights: Vec<S> = Vec::with_capacity(size * inner_count);
+        let mut moments: HashMap<Vec<u8>, Vec<S>> = innovation_exponents
+            .iter()
+            .map(|e| (e.clone(), Vec::with_capacity(size)))
+            .collect();
         for i in 0..size {
             let terms: Vec<S> = (0..inner_count)
                 .map(|l| {
@@ -736,7 +826,7 @@ pub(crate) fn subject_marginal<S: JetField>(
                             let x = gh.nodes[rest_l % gh.order];
                             rest_i /= gh.order;
                             rest_l /= gh.order;
-                            transitions[n][k].phi.mul(&point).add(&spreads[k].scale(x))
+                            transitions[k].phi.mul(&point).add(&spreads[k].scale(x))
                         })
                         .collect();
                     add_real(
@@ -746,278 +836,344 @@ pub(crate) fn subject_marginal<S: JetField>(
                 })
                 .collect();
             let log_total = log_sum_exp(&terms);
-            for term in terms.iter() {
-                weights.push(exp(&term.sub(&log_total)));
+            let weights: Vec<S> = terms.iter().map(|term| exp(&term.sub(&log_total))).collect();
+            for e in innovation_exponents.iter() {
+                let moment = weights
+                    .iter()
+                    .enumerate()
+                    .fold(zero.clone(), |acc, (l, w)| acc.add(&w.scale(inner_innovation(l, e))));
+                moments.get_mut(e).expect("registered exponent").push(moment);
             }
             log_beta_n.push(log_total);
         }
-        let mut transfer = vec![like.constant_like(0.0); size * next_size];
-        for i in 0..size {
-            let mut current: Vec<S> = weights[i * inner_count..(i + 1) * inner_count].to_vec();
-            let mut rest = i;
-            for (axis, basis) in bases.iter().enumerate() {
-                let i_axis = rest % gh.order;
-                rest /= gh.order;
-                // matrix[j * G + l] = basis of target j at inner node l of source i_axis.
-                let mut matrix = vec![like.constant_like(0.0); gh.order * gh.order];
-                for l in 0..gh.order {
-                    for j in 0..gh.order {
-                        matrix[j * gh.order + l] = basis[(i_axis * gh.order + l) * gh.order + j].clone();
-                    }
-                }
-                current = apply_axis(&current, &matrix, gh.order, axis);
-            }
-            transfer[i * next_size..(i + 1) * next_size].clone_from_slice(&current);
-        }
-        let mut moments = HashMap::new();
-        for e in innovation_exponents.iter() {
-            let values: Vec<S> = (0..size)
-                .map(|i| {
-                    (0..inner_count).fold(like.constant_like(0.0), |acc, l| {
-                        acc.add(&weights[i * inner_count + l].scale(inner_innovation(l, e)))
-                    })
-                })
-                .collect();
-            moments.insert(e.clone(), values);
-        }
         log_beta[n] = log_beta_n;
-        transfers[n] = transfer;
         innovation_moments[n] = moments;
     }
     // `β` alone overflows on a wide hull (it is a future-likelihood ratio,
     // astronomically large where the filtered density is astronomically
     // small), so it is never exponentiated on its own: the smoothed marginal
-    // `α β` is formed in log space, and a point whose filtered density has
-    // underflowed carries no smoothed mass.
+    // `α β` is formed in log space, a point whose filtered density is below
+    // the noise floor carries no smoothed mass, and the result is
+    // renormalised so every expectation below is under a probability.
     let smoothed_all: Vec<Vec<S>> = (0..n_nodes)
         .map(|n| {
-            let floor = density_floor(&alpha[n]);
-            alpha[n]
+            let alpha = &filtered[n].alpha;
+            let floor = density_floor(alpha);
+            let mut smoothed: Vec<S> = alpha
                 .iter()
                 .zip(log_beta[n].iter())
                 .map(|(a, log_b)| {
                     if a.value() > floor {
                         exp(&ln(a).add(log_b))
                     } else {
-                        a.constant_like(0.0)
+                        zero.clone()
                     }
                 })
-                .collect()
+                .collect();
+            let mass = weighted_sum(&filtered[n].grid.weights, &smoothed);
+            if !(mass.value() > 0.0) || !mass.value().is_finite() {
+                return Err(numerical(format!(
+                    "node {n}: smoothed marginal has mass {} on the grid",
+                    mass.value()
+                )));
+            }
+            let inverse = recip(&mass);
+            for s in smoothed.iter_mut() {
+                *s = s.mul(&inverse);
+            }
+            Ok(smoothed)
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
-    // ---- node functions -------------------------------------------------
+    // ---- forward sweep: Fisher mean and Louis second moment ---------------
+    // `carried[q * size + i]` is `C_m(z_i)[q]`, the conditional expectation
+    // given `z_m = z_i` and the data up to `m` of the complete-data score
+    // accumulated over the nodes and gaps before `m`. `mean` is `E[g | y]`
+    // and `second` is `E[g gᵀ | y]`, both in coefficient space; `curvature`
+    // is `E[∂²L_c | y]`, accumulated as each term is met.
+    //
     // The complete-data node term is `y η − w e^η` with
     // `η = η⁰ − ½|a_d|² + a_d · z`, so with the centred coordinate
     // `ζ_{dk} = z_k − a_{dk}` (the derivative of `η` in `a_{dk}`):
     //   ∂L/∂η⁰ = s,  ∂L/∂a_{dk} = s ζ_{dk},
     //   ∂²L/∂η⁰² = −c,  ∂²L/∂η⁰∂a_{dk} = −c ζ_{dk},
-    //   ∂²L/∂a_{dk}∂a_{dj} = −c ζ_{dk} ζ_{dj} − s δ_{kj}.
-    // Slot layout per node: [s_d (marks)] [s_d ζ_{dk} (marks × atoms)] [gap slot (atoms)].
-    let f0 = marks + marks * atoms;
-    let f_total = f0 + atoms;
-    let mut left: Vec<Vec<Vec<S>>> = Vec::with_capacity(n_nodes);
-    let mut right: Vec<Vec<Vec<S>>> = Vec::with_capacity(n_nodes);
-    let mut mean_node: Vec<Vec<S>> = Vec::with_capacity(n_nodes);
-    // E[c_{nd}], E[c_{nd} ζ_{dk}], E[c_{nd} ζ_{dk} ζ_{dj}] + δ_{kj} E[s_{nd}]:
-    // the negatives of the expected complete-data curvatures in
-    // (η⁰, η⁰), (η⁰, a) and (a, a).
-    let mut expected_curvature: Vec<Vec<S>> = Vec::with_capacity(n_nodes);
-    let mut expected_curvature_z: Vec<Vec<S>> = Vec::with_capacity(n_nodes);
-    let mut expected_curvature_zz: Vec<Vec<S>> = Vec::with_capacity(n_nodes);
-    for n in 0..n_nodes {
-        let grid = &grids[n];
+    //   ∂²L/∂a_{dk}∂a_{dj} = −c ζ_{dk} ζ_{dj} − s δ_{kj},
+    // with `s = y − w e^η` the score and `c = w e^η` the curvature in `η`.
+    let mut mean = vec![zero.clone(); p_total];
+    let mut second = vec![zero.clone(); p_total * p_total];
+    let mut curvature = vec![zero.clone(); p_total * p_total];
+    let mut carried: Vec<S> = vec![zero.clone(); p_total * filtered[0].grid.size()];
+    for m in 0..n_nodes {
+        let grid = &filtered[m].grid;
         let size = grid.size();
-        let exposure = nodes.exposures[n];
-        let smoothed = &smoothed_all[n];
-        let centred = |d: usize, k: usize| -> Vec<S> {
-            let a = &inputs.loadings[d * atoms + k];
-            (0..size).map(|i| grid.coordinate(i, k).sub(a)).collect()
-        };
-        let mut left_n = Vec::with_capacity(f_total);
-        let mut right_n = Vec::with_capacity(f_total);
-        let mut means = Vec::with_capacity(f_total);
-        let mut ec = Vec::with_capacity(marks);
-        let mut ecz = Vec::with_capacity(marks * atoms);
-        let mut eczz = Vec::with_capacity(marks * atoms * atoms);
-        let mut node_functions: Vec<Vec<S>> = Vec::with_capacity(f0);
+        let smoothed = &smoothed_all[m];
+        let exposures = &exposure_rows[m];
+        // `W(i) = w_i s(i)`: the smoothed probability of grid point `i`.
+        let w: Vec<S> = (0..size).map(|i| grid.weights[i].mul(&smoothed[i])).collect();
+        let rows: Vec<Vec<(usize, f64)>> = (0..marks).map(|d| design_row(m, d)).collect();
+        // Centred coordinates `ζ_{dk}(i)` per mark and atom.
+        let centred: Vec<Vec<Vec<S>>> = (0..marks)
+            .map(|d| {
+                (0..atoms)
+                    .map(|k| {
+                        let a = &inputs.loadings[d * atoms + k];
+                        (0..size).map(|i| grid.coordinate(i, k).sub(a)).collect()
+                    })
+                    .collect()
+            })
+            .collect();
+        // Score `s_d(i) = y_d − w e^{η_d(z_i)}` and curvature `c_d(i) = w e^{η_d}`.
+        let scores: Vec<Vec<S>> = (0..marks)
+            .map(|d| {
+                (0..size)
+                    .map(|i| {
+                        add_real(
+                            &filtered[m].likelihood.expeta[d * size + i].scale(-exposures[d]),
+                            counts_rows[m][d],
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        // The three passes below must not overlap: the carried vector holds
+        // the functions of nodes strictly before `m` (plus the gaps before
+        // it) while every node function of `m` is contracted against it, and
+        // only then does it absorb them. Absorbing mark `d` before mark `d'`
+        // is contracted would count the same-node pair twice — once through
+        // the carry and once through the same-node block below.
+        let ws_all: Vec<Vec<S>> = (0..marks)
+            .map(|d| (0..size).map(|i| w[i].mul(&scores[d][i])).collect())
+            .collect();
+        // ---- pass 1: this node's functions against everything carried ------
         for d in 0..marks {
-            let y = counts_rows[n][d];
-            let score: Vec<S> = (0..size)
-                .map(|i| {
-                    let e = &likelihoods[n].expeta[d * size + i];
-                    add_real(&e.scale(-exposure), y)
-                })
-                .collect();
-            let curvature: Vec<S> = (0..size)
-                .map(|i| likelihoods[n].expeta[d * size + i].scale(exposure))
-                .collect();
-            let expected_score = weighted_sum3(&grid.weights, smoothed, &score);
-            ec.push(weighted_sum3(&grid.weights, smoothed, &curvature));
-            for k in 0..atoms {
-                let zk = centred(d, k);
-                let cz = pointwise(&curvature, &zk);
-                ecz.push(weighted_sum3(&grid.weights, smoothed, &cz));
-                for j in 0..atoms {
-                    let zj = centred(d, j);
-                    let czz = pointwise(&cz, &zj);
-                    let mut value = weighted_sum3(&grid.weights, smoothed, &czz);
-                    if j == k {
-                        value = value.add(&expected_score);
+            let ws = &ws_all[d];
+            // B[q] = Σ_i W s_d C[q];  A_k[q] = Σ_i W s_d ζ_{dk} C[q]
+            let mut b = vec![zero.clone(); p_total];
+            let mut a_k = vec![vec![zero.clone(); p_total]; atoms];
+            for q in 0..p_total {
+                let row = &carried[q * size..(q + 1) * size];
+                let mut acc = zero.clone();
+                for i in 0..size {
+                    acc = acc.add(&ws[i].mul(&row[i]));
+                }
+                b[q] = acc;
+                for k in 0..atoms {
+                    let mut acc = zero.clone();
+                    for i in 0..size {
+                        acc = acc.add(&ws[i].mul(&row[i]).mul(&centred[d][k][i]));
                     }
-                    eczz.push(value);
+                    a_k[k][q] = acc;
                 }
             }
-            node_functions.push(score);
-        }
-        for d in 0..marks {
+            // E[C v_dᵀ] and its transpose.
+            for q in 0..p_total {
+                for &(col, x) in &rows[d] {
+                    let value = b[q].scale(x);
+                    second[q * p_total + col] = second[q * p_total + col].add(&value);
+                    second[col * p_total + q] = second[col * p_total + q].add(&value);
+                }
+                for k in 0..atoms {
+                    let col = layout.a(d, k);
+                    second[q * p_total + col] = second[q * p_total + col].add(&a_k[k][q]);
+                    second[col * p_total + q] = second[col * p_total + q].add(&a_k[k][q]);
+                }
+            }
+            // Mean of the node function.
+            let s_mean = ws.iter().fold(zero.clone(), |acc, v| acc.add(v));
+            for &(col, x) in &rows[d] {
+                mean[col] = mean[col].add(&s_mean.scale(x));
+            }
             for k in 0..atoms {
-                let zk = centred(d, k);
-                node_functions.push(pointwise(&node_functions[d], &zk));
+                let mut acc = zero.clone();
+                for i in 0..size {
+                    acc = acc.add(&ws[i].mul(&centred[d][k][i]));
+                }
+                mean[layout.a(d, k)] = mean[layout.a(d, k)].add(&acc);
             }
-        }
-        for f in node_functions.iter() {
-            means.push(weighted_sum3(&grid.weights, smoothed, f));
-            left_n.push(f.clone());
-            right_n.push(f.clone());
-        }
-        let zeros = vec![like.constant_like(0.0); size];
-        for _ in 0..atoms {
-            means.push(like.constant_like(0.0));
-            left_n.push(zeros.clone());
-            right_n.push(zeros.clone());
-        }
-        left.push(left_n);
-        right.push(right_n);
-        mean_node.push(means);
-        expected_curvature.push(ec);
-        expected_curvature_z.push(ecz);
-        expected_curvature_zz.push(eczz);
-    }
-
-    // ---- gap functions --------------------------------------------------
-    let mut mean_gap: Vec<Vec<S>> = vec![vec![like.constant_like(0.0); atoms]; n_gaps];
-    let mut expected_dt: Vec<Vec<S>> = vec![vec![like.constant_like(0.0); atoms]; n_gaps];
-    // same-gap E[t_k t_j] including k == j
-    let mut same_gap_products: Vec<Vec<S>> =
-        vec![vec![like.constant_like(0.0); atoms * atoms]; n_gaps];
-    for g in 0..n_gaps {
-        let grid = &grids[g];
-        let next = &grids[g + 1];
-        let smoothed = &smoothed_all[g];
-        // `backward_moments[e]` is the smoothed innovation moment
-        // `E[Π_k u_k^{e_k} | z, data]` on grid g; `forward_moments[(k, a, b)]`
-        // is `∫ A(z'|z) u_k^b z_k^a α_g(z) dz` on grid g+1.
-        let backward_moments = &innovation_moments[g];
-        let mut forward_moments: HashMap<(usize, u8, u8), Vec<S>> = HashMap::new();
-        for k in 0..atoms {
-            for b in 0..=2u8 {
-                let mut e = vec![0u8; atoms];
-                e[k] = b;
-                for a in 0..=2u8 {
-                    let zk_power: Vec<S> = (0..grid.size())
-                        .map(|i| {
-                            let z = grid.coordinate(i, k);
-                            let mut value = alpha[g][i].clone();
-                            for _ in 0..a {
-                                value = value.mul(z);
-                            }
-                            value
-                        })
-                        .collect();
-                    forward_moments.insert((k, a, b), forward_ops[g].apply(&e, &zk_power));
+            // Expected curvature of the node term.
+            let mut ec = zero.clone();
+            let mut ecz = vec![zero.clone(); atoms];
+            let mut eczz = vec![zero.clone(); atoms * atoms];
+            let exposure = exposures[d];
+            if exposure != 0.0 {
+                for i in 0..size {
+                    let wc = w[i].mul(&filtered[m].likelihood.expeta[d * size + i]).scale(exposure);
+                    ec = ec.add(&wc);
+                    for k in 0..atoms {
+                        let wcz = wc.mul(&centred[d][k][i]);
+                        ecz[k] = ecz[k].add(&wcz);
+                        for j in 0..atoms {
+                            eczz[k * atoms + j] = eczz[k * atoms + j].add(&wcz.mul(&centred[d][j][i]));
+                        }
+                    }
+                }
+            }
+            for k in 0..atoms {
+                // −s δ_{kj}: the curvature of the marginal shift.
+                eczz[k * atoms + k] = eczz[k * atoms + k].add(&s_mean);
+            }
+            for &(c1, x1) in &rows[d] {
+                for &(c2, x2) in &rows[d] {
+                    curvature[c1 * p_total + c2] = curvature[c1 * p_total + c2].sub(&ec.scale(x1 * x2));
+                }
+                for k in 0..atoms {
+                    let c2 = layout.a(d, k);
+                    let value = ecz[k].scale(x1);
+                    curvature[c1 * p_total + c2] = curvature[c1 * p_total + c2].sub(&value);
+                    curvature[c2 * p_total + c1] = curvature[c2 * p_total + c1].sub(&value);
+                }
+            }
+            for k in 0..atoms {
+                for j in 0..atoms {
+                    let (c1, c2) = (layout.a(d, k), layout.a(d, j));
+                    curvature[c1 * p_total + c2] = curvature[c1 * p_total + c2].sub(&eczz[k * atoms + j]);
                 }
             }
         }
+        // ---- pass 2: the same-node block, every ordered pair of marks -------
+        for d in 0..marks {
+            let ws = &ws_all[d];
+            for d2 in 0..marks {
+                let mut m00 = zero.clone();
+                let mut m0k = vec![zero.clone(); atoms];
+                let mut mk0 = vec![zero.clone(); atoms];
+                let mut mkj = vec![zero.clone(); atoms * atoms];
+                for i in 0..size {
+                    let ss = ws[i].mul(&scores[d2][i]);
+                    m00 = m00.add(&ss);
+                    for k in 0..atoms {
+                        m0k[k] = m0k[k].add(&ss.mul(&centred[d2][k][i]));
+                        let ssz = ss.mul(&centred[d][k][i]);
+                        mk0[k] = mk0[k].add(&ssz);
+                        for j in 0..atoms {
+                            mkj[k * atoms + j] = mkj[k * atoms + j].add(&ssz.mul(&centred[d2][j][i]));
+                        }
+                    }
+                }
+                for &(c1, x1) in &rows[d] {
+                    for &(c2, x2) in &rows[d2] {
+                        second[c1 * p_total + c2] = second[c1 * p_total + c2].add(&m00.scale(x1 * x2));
+                    }
+                    for k in 0..atoms {
+                        let c2 = layout.a(d2, k);
+                        second[c1 * p_total + c2] = second[c1 * p_total + c2].add(&m0k[k].scale(x1));
+                    }
+                }
+                for k in 0..atoms {
+                    let c1 = layout.a(d, k);
+                    for &(c2, x2) in &rows[d2] {
+                        second[c1 * p_total + c2] = second[c1 * p_total + c2].add(&mk0[k].scale(x2));
+                    }
+                    for j in 0..atoms {
+                        let c2 = layout.a(d2, j);
+                        second[c1 * p_total + c2] = second[c1 * p_total + c2].add(&mkj[k * atoms + j]);
+                    }
+                }
+            }
+        }
+        // ---- pass 3: the node's functions join the carried vector ----------
+        for d in 0..marks {
+            for &(col, x) in &rows[d] {
+                let row = &mut carried[col * size..(col + 1) * size];
+                for i in 0..size {
+                    row[i] = row[i].add(&scores[d][i].scale(x));
+                }
+            }
+            for k in 0..atoms {
+                let col = layout.a(d, k);
+                let row = &mut carried[col * size..(col + 1) * size];
+                for i in 0..size {
+                    row[i] = row[i].add(&scores[d][i].mul(&centred[d][k][i]));
+                }
+            }
+        }
+        if m == n_gaps {
+            break;
+        }
+        // ---- gap m: (m, m+1) ------------------------------------------------
+        let next = &filtered[m + 1];
+        let next_size = next.grid.size();
+        let transitions = &next.transitions;
+        let backward_moments = &innovation_moments[m];
         let polys: Vec<(GapPolynomial<S>, GapPolynomial<S>)> = (0..atoms)
-            .map(|k| gap_score_polynomials(&transitions[g][k], like))
+            .map(|k| gap_score_polynomials(&transitions[k], like))
             .collect();
         let unit = |k: usize, b: u8| -> Vec<u8> {
             let mut e = vec![0u8; atoms];
             e[k] = b;
             e
         };
-        for k in 0..atoms {
-            let (t, dt) = &polys[k];
-            let zk: Vec<S> = (0..grid.size()).map(|i| grid.coordinate(i, k).clone()).collect();
-            let powers_start: Vec<Vec<S>> = (0..=4usize)
-                .map(|a| {
-                    zk.iter()
-                        .map(|z| {
-                            let mut v = z.constant_like(1.0);
-                            for _ in 0..a {
-                                v = v.mul(z);
-                            }
-                            v
-                        })
-                        .collect()
-                })
-                .collect();
-            // Σ_{a,b} c[a][b] z^a E[u^b lik β | z] on grid g.
-            let start_function = |poly: &GapPolynomial<S>, max_degree: usize| -> Vec<S> {
-                let mut out = vec![like.constant_like(0.0); grid.size()];
-                for a in 0..=max_degree {
-                    for b in 0..=max_degree {
-                        if poly.absent(a, b) {
-                            continue;
-                        }
-                        let coefficient = poly.get(a, b);
-                        let moment = &backward_moments[&unit(k, b as u8)];
-                        for i in 0..grid.size() {
-                            out[i] = out[i].add(
-                                &coefficient
-                                    .mul(&powers_start[a][i])
-                                    .mul(&moment[i]),
-                            );
-                        }
-                    }
-                }
-                out
-            };
-            let t_bar = start_function(t, 2);
-            let dt_bar = start_function(dt, 2);
-            let tt_bar = start_function(&t.mul(t), 4);
-            mean_gap[g][k] = weighted_sum3(&grid.weights, smoothed, &t_bar);
-            expected_dt[g][k] = weighted_sum3(&grid.weights, smoothed, &dt_bar);
-            same_gap_products[g][k * atoms + k] =
-                weighted_sum3(&grid.weights, smoothed, &tt_bar);
-            right[g][f0 + k] = t_bar;
-            // Ã on grid g+1: lik · Σ_{a,b} c[a][b] ∫ A(z'|z) u^b z^a α(z) dz.
-            let mut a_tilde = vec![like.constant_like(0.0); next.size()];
-            for a in 0..=2usize {
-                for b in 0..=2usize {
-                    if t.absent(a, b) {
+        // Powers of the start coordinate of each atom on grid m.
+        let powers: Vec<Vec<Vec<S>>> = (0..atoms)
+            .map(|k| {
+                (0..=4usize)
+                    .map(|a| {
+                        (0..size)
+                            .map(|i| {
+                                let z = grid.coordinate(i, k);
+                                let mut v = like.constant_like(1.0);
+                                for _ in 0..a {
+                                    v = v.mul(z);
+                                }
+                                v
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect();
+        // Σ_{a,b} c[a][b] z_k^a E[u_k^b | z, data] on grid m.
+        let start_function = |k: usize, poly: &GapPolynomial<S>, max_degree: usize| -> Vec<S> {
+            let mut out = vec![zero.clone(); size];
+            for a in 0..=max_degree {
+                for b in 0..=max_degree {
+                    if poly.absent(a, b) {
                         continue;
                     }
-                    let coefficient = t.get(a, b);
-                    let moment = &forward_moments[&(k, a as u8, b as u8)];
-                    for i in 0..next.size() {
-                        a_tilde[i] = a_tilde[i].add(&coefficient.mul(&moment[i]));
+                    let coefficient = poly.get(a, b);
+                    let moment = &backward_moments[&unit(k, b as u8)];
+                    for i in 0..size {
+                        out[i] = out[i].add(&coefficient.mul(&powers[k][a][i]).mul(&moment[i]));
                     }
                 }
             }
-            // As a ratio to the predicted density: `ã / p̂` is the
-            // forward-smoothed polynomial expectation, bounded where the
-            // predicted density has any mass.
-            let floor = density_floor(&predicted[g + 1]);
-            left[g + 1][f0 + k] = a_tilde
-                .iter()
-                .zip(predicted[g + 1].iter())
-                .map(|(numerator, density)| {
-                    if density.value() > floor {
-                        div(numerator, density)
-                    } else {
-                        numerator.constant_like(0.0)
-                    }
-                })
-                .collect();
+            out
+        };
+        for k in 0..atoms {
+            let (t, dt) = &polys[k];
+            let tk = start_function(k, t, 2);
+            let dtk = start_function(k, dt, 2);
+            let ttk = start_function(k, &t.mul(t), 4);
+            let rho = layout.rho(k);
+            let mut e_t = zero.clone();
+            let mut e_dt = zero.clone();
+            let mut e_tt = zero.clone();
+            for i in 0..size {
+                e_t = e_t.add(&w[i].mul(&tk[i]));
+                e_dt = e_dt.add(&w[i].mul(&dtk[i]));
+                e_tt = e_tt.add(&w[i].mul(&ttk[i]));
+            }
+            mean[rho] = mean[rho].add(&e_t);
+            curvature[rho * p_total + rho] = curvature[rho * p_total + rho].add(&e_dt);
+            second[rho * p_total + rho] = second[rho * p_total + rho].add(&e_tt);
+            // E[C_m t_k]: the gap score against everything carried so far
+            // (nodes ≤ m and gaps < m), by the Markov property through z_m.
+            for q in 0..p_total {
+                let row = &carried[q * size..(q + 1) * size];
+                let mut acc = zero.clone();
+                for i in 0..size {
+                    acc = acc.add(&w[i].mul(&tk[i]).mul(&row[i]));
+                }
+                second[q * p_total + rho] = second[q * p_total + rho].add(&acc);
+                second[rho * p_total + q] = second[rho * p_total + q].add(&acc);
+            }
         }
-        // cross-atom same-gap products
+        // Cross-atom same-gap products E[t_k t_j].
         for k in 0..atoms {
             for j in (k + 1)..atoms {
                 let (tk, _) = &polys[k];
                 let (tj, _) = &polys[j];
-                let mut out = vec![like.constant_like(0.0); grid.size()];
+                let mut value = zero.clone();
                 for a in 0..=2usize {
                     for b in 0..=2usize {
                         if tk.absent(a, b) {
@@ -1035,234 +1191,101 @@ pub(crate) fn subject_marginal<S: JetField>(
                                 e[j] = b2 as u8;
                                 let moment = &backward_moments[&e];
                                 let coefficient = ck.mul(cj);
-                                for i in 0..grid.size() {
-                                    let mut zpow = coefficient.clone();
-                                    let zk = grid.coordinate(i, k);
-                                    let zj = grid.coordinate(i, j);
-                                    for _ in 0..a {
-                                        zpow = zpow.mul(zk);
-                                    }
-                                    for _ in 0..a2 {
-                                        zpow = zpow.mul(zj);
-                                    }
-                                    out[i] = out[i].add(&zpow.mul(&moment[i]));
+                                for i in 0..size {
+                                    value = value.add(
+                                        &w[i]
+                                            .mul(&coefficient)
+                                            .mul(&powers[k][a][i])
+                                            .mul(&powers[j][a2][i])
+                                            .mul(&moment[i]),
+                                    );
                                 }
                             }
                         }
                     }
                 }
-                let value = weighted_sum3(&grid.weights, smoothed, &out);
-                same_gap_products[g][k * atoms + j] = value.clone();
-                same_gap_products[g][j * atoms + k] = value;
+                let (rk, rj) = (layout.rho(k), layout.rho(j));
+                second[rk * p_total + rj] = second[rk * p_total + rj].add(&value);
+                second[rj * p_total + rk] = second[rj * p_total + rk].add(&value);
             }
         }
-    }
-
-    // ---- all-pairs table -------------------------------------------------
-    let pair_index = |n: usize, m: usize| -> usize { m * (m + 1) / 2 + n };
-    let mut table: Vec<Vec<S>> = vec![Vec::new(); n_nodes * (n_nodes + 1) / 2];
-    // `left[n][a]` is a bounded function on grid n (`f` for a node function,
-    // `ã / p̂` for the gap into n) and the carried functions are smoothed
-    // conditional expectations `E[f_m | z_n, data]`, so the contraction is an
-    // expectation under the smoothed marginal.
-    let weighted_left: Vec<Vec<Vec<S>>> = (0..n_nodes)
-        .map(|n| {
-            left[n]
-                .iter()
-                .map(|f| pointwise(&grids[n].weights, &pointwise(f, &smoothed_all[n])))
-                .collect()
-        })
-        .collect();
-    let transfer_apply = |n: usize, values: &[S]| -> Vec<S> {
-        let rows = grids[n].size();
-        let cols = grids[n + 1].size();
-        (0..rows)
-            .map(|i| {
-                (0..cols).fold(like.constant_like(0.0), |acc, j| {
-                    acc.add(&transfers[n][i * cols + j].mul(&values[j]))
-                })
+        // ---- propagate the carried vector to grid m+1 -------------------------
+        // C_{m+1}(z') = F[α_m C_m](z') / p̂_{m+1}(z'), plus the gap score's own
+        // forward-smoothed expectation E[t_g | z', y_{≤ m+1}] = ã / p̂ in its
+        // log-rate slot. Where the predicted density is below its noise floor
+        // no ratio is formed; the smoothed marginal has no mass there.
+        let floor = density_floor(&next.predicted);
+        let inverse_predicted: Vec<Option<S>> = next
+            .predicted
+            .iter()
+            .map(|density| {
+                if density.value() > floor {
+                    Some(recip(density))
+                } else {
+                    None
+                }
             })
-            .collect()
-    };
-    for m in 0..n_nodes {
-        let mut carried: Vec<Vec<S>> = right[m].clone();
-        let contract = |n: usize, functions: &[Vec<S>]| -> Vec<S> {
-            let mut out = Vec::with_capacity(f_total * f_total);
-            for a in 0..f_total {
-                for b in 0..f_total {
-                    out.push(
-                        weighted_left[n][a]
-                            .iter()
-                            .zip(functions[b].iter())
-                            .fold(like.constant_like(0.0), |acc, (w, v)| acc.add(&w.mul(v))),
-                    );
+            .collect();
+        let alpha = &filtered[m].alpha;
+        let mut propagated = vec![zero.clone(); p_total * next_size];
+        for q in 0..p_total {
+            let row = &carried[q * size..(q + 1) * size];
+            let weighted: Vec<S> = (0..size).map(|i| alpha[i].mul(&row[i])).collect();
+            let moved = next.forward.plain(&weighted);
+            let out = &mut propagated[q * next_size..(q + 1) * next_size];
+            for i in 0..next_size {
+                if let Some(inverse) = &inverse_predicted[i] {
+                    out[i] = moved[i].mul(inverse);
                 }
             }
-            out
-        };
-        table[pair_index(m, m)] = contract(m, &carried);
-        for n in (0..m).rev() {
-            carried = carried.iter().map(|h| transfer_apply(n, h)).collect();
-            table[pair_index(n, m)] = contract(n, &carried);
         }
-    }
-
-    // ---- assemble --------------------------------------------------------
-    let eta_index = |n: usize, d: usize| n * marks + d;
-    let a_index = |d: usize, k: usize| n_nodes * marks + d * atoms + k;
-    let rho_index = |k: usize| n_nodes * marks + marks * atoms + k;
-    let slot_a = |d: usize, k: usize| marks + d * atoms + k;
-
-    let expectation = |n: usize, fa: usize, m: usize, fb: usize| -> S {
-        if n <= m {
-            table[pair_index(n, m)][fa * f_total + fb].clone()
-        } else {
-            table[pair_index(m, n)][fb * f_total + fa].clone()
-        }
-    };
-    let cov_nodes = |n: usize, fa: usize, m: usize, fb: usize| -> S {
-        expectation(n, fa, m, fb).sub(&mean_node[n][fa].mul(&mean_node[m][fb]))
-    };
-    let cov_node_gap = |n: usize, f: usize, g: usize, k: usize| -> S {
-        let e = if n <= g {
-            expectation(n, f, g, f0 + k)
-        } else {
-            expectation(g + 1, f0 + k, n, f)
-        };
-        e.sub(&mean_node[n][f].mul(&mean_gap[g][k]))
-    };
-    let cov_gap_gap = |g: usize, k: usize, g2: usize, j: usize| -> S {
-        let e = if g < g2 {
-            expectation(g + 1, f0 + k, g2, f0 + j)
-        } else if g > g2 {
-            expectation(g2 + 1, f0 + j, g, f0 + k)
-        } else {
-            same_gap_products[g][k * atoms + j].clone()
-        };
-        e.sub(&mean_gap[g][k].mul(&mean_gap[g2][j]))
-    };
-
-    let mut gradient = vec![like.constant_like(0.0); p_total];
-    for n in 0..n_nodes {
-        for d in 0..marks {
-            gradient[eta_index(n, d)] = mean_node[n][d].clone();
-            for k in 0..atoms {
-                let idx = a_index(d, k);
-                gradient[idx] = gradient[idx].add(&mean_node[n][slot_a(d, k)]);
-            }
-        }
-    }
-    for g in 0..n_gaps {
         for k in 0..atoms {
-            let idx = rho_index(k);
-            gradient[idx] = gradient[idx].add(&mean_gap[g][k]);
-        }
-    }
-
-    let mut hessian = vec![like.constant_like(0.0); p_total * p_total];
-    let mut set = |i: usize, j: usize, value: S| {
-        hessian[i * p_total + j] = value.clone();
-        hessian[j * p_total + i] = value;
-    };
-    // η-η
-    for n in 0..n_nodes {
-        for d in 0..marks {
-            for m in n..n_nodes {
-                for d2 in 0..marks {
-                    if m == n && d2 < d {
+            let (t, _) = &polys[k];
+            // Ã on grid m+1: Σ_{a,b} c[a][b] ∫ A(z'|z) u^b z^a α(z) dz.
+            let mut a_tilde = vec![zero.clone(); next_size];
+            for a in 0..=2usize {
+                for b in 0..=2usize {
+                    if t.absent(a, b) {
                         continue;
                     }
-                    let mut value = cov_nodes(n, d, m, d2);
-                    if m == n && d2 == d {
-                        value = value.sub(&expected_curvature[n][d]);
+                    let coefficient = t.get(a, b);
+                    let e = unit(k, b as u8);
+                    let zk_power: Vec<S> = (0..size).map(|i| alpha[i].mul(&powers[k][a][i])).collect();
+                    let moment = next.forward.apply(&e, &zk_power);
+                    for i in 0..next_size {
+                        a_tilde[i] = a_tilde[i].add(&coefficient.mul(&moment[i]));
                     }
-                    set(eta_index(n, d), eta_index(m, d2), value);
+                }
+            }
+            let rho = layout.rho(k);
+            let out = &mut propagated[rho * next_size..(rho + 1) * next_size];
+            for i in 0..next_size {
+                if let Some(inverse) = &inverse_predicted[i] {
+                    out[i] = out[i].add(&a_tilde[i].mul(inverse));
                 }
             }
         }
+        carried = propagated;
     }
-    // η-a
-    for n in 0..n_nodes {
-        for d in 0..marks {
-            for d2 in 0..marks {
-                for k in 0..atoms {
-                    let mut value = like.constant_like(0.0);
-                    for m in 0..n_nodes {
-                        value = value.add(&cov_nodes(n, d, m, slot_a(d2, k)));
-                    }
-                    if d2 == d {
-                        value = value.sub(&expected_curvature_z[n][d * atoms + k]);
-                    }
-                    set(eta_index(n, d), a_index(d2, k), value);
-                }
-            }
-        }
-    }
-    // a-a
-    for d in 0..marks {
-        for k in 0..atoms {
-            for d2 in 0..marks {
-                for j in 0..atoms {
-                    if a_index(d2, j) < a_index(d, k) {
-                        continue;
-                    }
-                    let mut value = like.constant_like(0.0);
-                    for n in 0..n_nodes {
-                        for m in 0..n_nodes {
-                            value = value.add(&cov_nodes(n, slot_a(d, k), m, slot_a(d2, j)));
-                        }
-                    }
-                    if d2 == d {
-                        for n in 0..n_nodes {
-                            value = value
-                                .sub(&expected_curvature_zz[n][(d * atoms + k) * atoms + j]);
-                        }
-                    }
-                    set(a_index(d, k), a_index(d2, j), value);
-                }
-            }
-        }
-    }
-    // η-ρ and a-ρ and ρ-ρ
-    for k in 0..atoms {
-        for n in 0..n_nodes {
-            for d in 0..marks {
-                let mut value = like.constant_like(0.0);
-                for g in 0..n_gaps {
-                    value = value.add(&cov_node_gap(n, d, g, k));
-                }
-                set(eta_index(n, d), rho_index(k), value);
-            }
-        }
-        for d in 0..marks {
-            for j in 0..atoms {
-                let mut value = like.constant_like(0.0);
-                for n in 0..n_nodes {
-                    for g in 0..n_gaps {
-                        value = value.add(&cov_node_gap(n, slot_a(d, j), g, k));
-                    }
-                }
-                set(a_index(d, j), rho_index(k), value);
-            }
-        }
-        for j in k..atoms {
-            let mut value = like.constant_like(0.0);
-            for g in 0..n_gaps {
-                for g2 in 0..n_gaps {
-                    value = value.add(&cov_gap_gap(g, k, g2, j));
-                }
-            }
-            if j == k {
-                for g in 0..n_gaps {
-                    value = value.add(&expected_dt[g][k]);
-                }
-            }
-            set(rho_index(k), rho_index(j), value);
+
+    // ---- assemble ----------------------------------------------------------
+    let mut hessian = vec![zero.clone(); p_total * p_total];
+    for q in 0..p_total {
+        for r in q..p_total {
+            let value = curvature[q * p_total + r]
+                .add(&second[q * p_total + r])
+                .sub(&mean[q].mul(&mean[r]));
+            let mirror = curvature[r * p_total + q]
+                .add(&second[r * p_total + q])
+                .sub(&mean[r].mul(&mean[q]));
+            let symmetric = value.add(&mirror).scale(0.5);
+            hessian[q * p_total + r] = symmetric.clone();
+            hessian[r * p_total + q] = symmetric;
         }
     }
     Ok(SubjectOutput {
         loglik,
-        gradient,
+        gradient: mean,
         hessian,
     })
 }
@@ -1305,16 +1328,11 @@ pub(crate) fn forward_filter<S: JetField>(
             &inputs.eta0[n * marks..(n + 1) * marks],
             inputs.loadings,
             &nodes.counts.row(n).to_vec(),
-            nodes.exposures[n],
+            &nodes.exposure_row(n),
             Some(compensated),
             marks,
             atoms,
         )
-    };
-    let transitions_across = |gap: f64| -> Vec<AtomTransition<S>> {
-        (0..atoms)
-            .map(|k| AtomTransition::new(&exp(&inputs.log_rates[k]).scale(gap / inputs.time_scale)))
-            .collect()
     };
     // Node 0: either the stationary prior or a continuation of a filtered state.
     let first = match initial {
@@ -1324,7 +1342,7 @@ pub(crate) fn forward_filter<S: JetField>(
             like,
             grid,
             filtered,
-            transitions_across(inputs.continuation_gap),
+            transitions_across(inputs.log_rates, inputs.continuation_gap, inputs.time_scale)?,
             0,
             &|grid| node_terms(grid, 0),
             "forecast first node",
@@ -1340,7 +1358,7 @@ pub(crate) fn forward_filter<S: JetField>(
             like,
             &grids[n],
             &alpha[n],
-            transitions_across(nodes.gaps[n]),
+            transitions_across(inputs.log_rates, nodes.gaps[n], inputs.time_scale)?,
             0,
             &|grid| node_terms(grid, n + 1),
             &format!("forecast node {}", n + 1),
@@ -1356,4 +1374,31 @@ pub(crate) fn forward_filter<S: JetField>(
         predicted,
         log_normalisers,
     })
+}
+
+/// `E[λ_d(z)]` for every mark under a density on a grid: the expected
+/// intensity of each mark at a node.
+pub(crate) fn expected_intensities<S: JetField>(
+    grid: &Grid<S>,
+    density: &[S],
+    eta0: &[S],
+    loadings: &[S],
+    marks: usize,
+    atoms: usize,
+) -> Vec<S> {
+    let mut z = vec![eta0[0].constant_like(0.0); atoms];
+    (0..marks)
+        .map(|d| {
+            let loadings_d = &loadings[d * atoms..(d + 1) * atoms];
+            let mut acc = eta0[0].constant_like(0.0);
+            for i in 0..grid.size() {
+                for (k, zk) in z.iter_mut().enumerate() {
+                    *zk = grid.coordinate(i, k).clone();
+                }
+                let eta = log_intensity(&eta0[d], loadings_d, &z);
+                acc = acc.add(&grid.weights[i].mul(&density[i]).mul(&exp(&eta)));
+            }
+            acc
+        })
+        .collect()
 }

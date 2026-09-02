@@ -15,13 +15,23 @@
 //!
 //! The two operators interpolate different classes. Forward, the operand is
 //! a density, Gaussian-enveloped, so the interpolant is of `density /
-//! envelope` and the convolution is exact for `envelope × polynomial`.
-//! Backward, the operand is a future likelihood, bounded and smooth but not
-//! enveloped, so the interpolant is of the function itself and the
-//! conditional expectation `∫ N(z'; φz, q) u(z') dz'` is Gauss-Hermite in
-//! `z'`, exact for polynomial `u`. Interpolation arguments are clamped to the
-//! node hull, so the negligible tail mass beyond it is carried by the nearest
-//! node instead of by a polynomial extrapolation.
+//! envelope` and the convolution is exact for `envelope × polynomial`; the
+//! Lagrange interpolant is used as the polynomial it is, inside and beyond
+//! the hull, because the envelope's Gaussian decay beats its growth there
+//! and a clamp would put a kink into the objective. Backward, the operand is
+//! the logarithm of a smoother residual, bounded and smooth but not
+//! enveloped, so it is carried by the not-a-knot cubic spline through the
+//! nodes, continued linearly beyond the hull with the end slope.
+//!
+//! Both interpolants are signed linear maps of the nodal values: neither is
+//! a positivity-preserving operator, and neither claims to be. A density's
+//! interpolant can dip below zero far in the tails, at the level of the
+//! interpolation error; the filter treats such values as the numerical noise
+//! they are (they carry no smoothed mass) and the Gauss-Hermite certificate
+//! of the fit is what bounds them. The Lebesgue constant of the Lagrange
+//! interpolant on Hermite nodes grows exponentially with the order, so the
+//! rule records it and the fit refuses an order whose roundoff amplification
+//! would exceed the certificate's tolerance.
 //!
 //! Everything is generic over a [`JetField`] scalar so the same code yields
 //! the value, one directional derivative, or a mixed second directional
@@ -50,6 +60,10 @@ pub(crate) struct GaussHermite {
     /// that is one at node `j` and zero at every other node (all zero below
     /// order four, where the spline is the broken line).
     pub spline_second: Vec<f64>,
+    /// The Lebesgue constant `max_x Σ_i |L_i(x)|` of Lagrange interpolation
+    /// on the nodes over their hull: the factor by which nodal roundoff is
+    /// amplified by the forward operator's interpolant.
+    pub lebesgue_constant: f64,
 }
 
 impl GaussHermite {
@@ -146,14 +160,35 @@ impl GaussHermite {
                 }
             }
         }
-        Ok(Self {
+        let mut rule = Self {
             order,
             nodes,
             normal_weights,
             plain_weights,
             lagrange_weights,
             spline_second,
-        })
+            lebesgue_constant: 1.0,
+        };
+        rule.lebesgue_constant = rule.lebesgue_function_maximum();
+        Ok(rule)
+    }
+
+    /// `max_x Σ_i |L_i(x)|` over the node hull, sampled densely between
+    /// consecutive nodes (the Lebesgue function of a Lagrange basis has one
+    /// local maximum per interior interval, so a fine sample per interval
+    /// resolves the maximum to the sampling resolution, which is all the
+    /// certificate needs: it reads the order of magnitude).
+    fn lebesgue_function_maximum(&self) -> f64 {
+        const SAMPLES_PER_INTERVAL: usize = 32;
+        let mut maximum = 1.0_f64;
+        for pair in self.nodes.windows(2) {
+            for s in 1..SAMPLES_PER_INTERVAL {
+                let x = pair[0] + (pair[1] - pair[0]) * s as f64 / SAMPLES_PER_INTERVAL as f64;
+                let total: f64 = self.lagrange_basis(&x).iter().map(|l| l.abs()).sum();
+                maximum = maximum.max(total);
+            }
+        }
+        maximum
     }
 
     /// Cardinal not-a-knot cubic spline basis at `xi`: `Σ_j basis[j] f_j` is
@@ -165,9 +200,15 @@ impl GaussHermite {
     /// interpolant on Hermite nodes overshoots by the Lebesgue constant
     /// (thousands, at the orders the certificate reaches) and whose
     /// immediate exponential factors are evaluated exactly elsewhere. A
-    /// spline cannot overshoot, converges like `h⁴`, and is a fixed linear
-    /// map of the nodal values, so every derivative channel of `xi` passes
-    /// through it as through any other polynomial.
+    /// cubic spline can overshoot the nodal range too, but only by a
+    /// bounded factor: the operator norm of cubic spline interpolation is a
+    /// small constant independent of the node count (the tests measure it
+    /// below three on these nodes), where the Lagrange operator's grows
+    /// exponentially. It converges like `h⁴` and is a fixed linear map of
+    /// the nodal values, piecewise cubic and `C²` in `xi`, so every
+    /// derivative channel of `xi` passes through it as through a polynomial
+    /// (the piece selection below reads the value only; the pieces agree in
+    /// value, slope and curvature at the nodes).
     pub fn spline_basis<S: JetField>(&self, xi: &S) -> Vec<S> {
         let g = self.order;
         let value = xi.value();
@@ -266,8 +307,21 @@ pub(crate) struct Axis<S> {
 pub(crate) struct Grid<S> {
     pub axes: Vec<Axis<S>>,
     pub order: usize,
+    /// `order^k` for axis `k`: the flat stride of each axis.
+    pub strides: Vec<usize>,
     /// Product integration weight of every flat point.
     pub weights: Vec<S>,
+}
+
+/// `order^axes` with overflow reported instead of wrapped.
+pub(crate) fn product_grid_size(order: usize, axes: usize) -> Result<usize, EventHistoryError> {
+    let mut size = 1usize;
+    for _ in 0..axes {
+        size = size.checked_mul(order).ok_or_else(|| EventHistoryError::InvalidInput {
+            reason: format!("a product grid of order {order} over {axes} atoms is not representable"),
+        })?;
+    }
+    Ok(size)
 }
 
 impl<S: JetField> Grid<S> {
@@ -295,7 +349,12 @@ impl<S: JetField> Grid<S> {
                 }
             })
             .collect();
-        let size = order.pow(axes.len() as u32);
+        let mut strides = Vec::with_capacity(axes.len());
+        let mut size = 1usize;
+        for _ in 0..axes.len() {
+            strides.push(size);
+            size *= order;
+        }
         let mut weights = Vec::with_capacity(size);
         for flat in 0..size {
             let mut w = like.constant_like(1.0);
@@ -310,6 +369,7 @@ impl<S: JetField> Grid<S> {
         Grid {
             axes,
             order,
+            strides,
             weights,
         }
     }
@@ -325,7 +385,7 @@ impl<S: JetField> Grid<S> {
     /// Coordinate index of flat point `flat` along `axis`.
     #[inline]
     pub fn index(&self, flat: usize, axis: usize) -> usize {
-        (flat / self.order.pow(axis as u32)) % self.order
+        (flat / self.strides[axis]) % self.order
     }
 
     /// The `axis` coordinate of flat point `flat`.
@@ -461,12 +521,24 @@ pub(crate) fn forward_operators<S: JetField>(
         let new = &to.axes[axis];
         let phi = &transition.phi;
         let q = &transition.innovation;
-        let inverse_root_q = recip(&sqrt(q));
+        let root_q = sqrt(q);
         let sigma2 = square(&old.sigma);
         let tau2 = square(phi).mul(&sigma2).add(q);
         let inv_tau2 = recip(&tau2);
         let ratio = sqrt(&q.mul(&inv_tau2));
         let phi_mu = phi.mul(&old.mu);
+        // The standardised innovation at inner node `x` of target point `z'`:
+        // with `z = μ + √2 σ (centre + ratio·x)` and `d = z' − φμ`,
+        //   z' − φz = d q/τ² − φ √2 σ √(q/τ²) x,
+        // so `u = (z' − φz)/√q = d √q/τ² − φ √2 σ x/τ`. Forming `z' − φz` as
+        // a difference would cancel to roundoff at small `q` (a short gap or
+        // a slow atom) and dividing by `√q` would amplify that roundoff
+        // without bound; the closed form is exact in the limit.
+        let u_slope = phi
+            .mul(&old.sigma)
+            .mul(&sqrt(&inv_tau2))
+            .scale(-std::f64::consts::SQRT_2);
+        let u_offset_factor = root_q.mul(&inv_tau2);
         // 1 / e(z_i) with e = N(z_i; mu, sigma²): √(2π) σ e^{x_i²}.
         let inverse_envelope: Vec<S> = gh
             .nodes
@@ -493,9 +565,7 @@ pub(crate) fn forward_operators<S: JetField>(
                 // a kink into an otherwise smooth objective.
                 let raw = centre.add(&ratio.scale(x));
                 let basis = gh.lagrange_basis(&raw);
-                // z at this inner node, then u = (z' − φ z) / √q.
-                let z = old.mu.add(&raw.mul(&old.sigma).scale(std::f64::consts::SQRT_2));
-                let u = new.points[j].sub(&phi.mul(&z)).mul(&inverse_root_q);
+                let u = d.mul(&u_offset_factor).add(&u_slope.scale(x));
                 let mut weight = old.mu.constant_like(gh.normal_weights[l]);
                 for power in 0..powers {
                     if power > 0 {

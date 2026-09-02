@@ -227,17 +227,18 @@ Event histories. `gam_models::event_history` fits marked counting
 processes: smooth covariate and time effects per mark, plus a per-subject
 latent state of unit-variance Ornstein–Uhlenbeck atoms whose loadings and
 rates are selected by the evidence (an unsupported atom is switched off by
-its own REML ridge). The latent term is the individual's deviation from a
-population rate — `exp(η⁰)` is the intensity averaged over the latent state
-— and an observed risk score enters as a penalised slope surface
+its own REML ridge). Marks are recurrent, once-only or terminal, so
+competing risks, first occurrences and recurrent events are one likelihood
+with per-mark risk sets. The latent term is the individual's deviation from
+a population rate — `exp(η⁰)` is the intensity averaged over the latent
+state — and an observed risk score enters as a penalised slope surface
 `s(time, by=score)` whose bend with time and whose very existence the
-evidence selects; a forecast can start from the stationary prior, so the
-population, score-only and history-conditioned tiers are one model
-conditioned on more. The latent chain is marginalised exactly by
-adaptive Gauss-Hermite–Lagrange filtering, so recurrent events, competing
-risks, dynamic frailty and history-conditioned forecasts are one family.
-Forecasts and the predictive PIT are exact expectations under the filtered
-state.
+evidence selects. The latent chain is marginalised by adaptive
+Gauss-Hermite–Lagrange filtering, and the fit refines the quadrature order
+and the time mesh until its coefficients are stationary under refinement.
+Forecasts integrate the killed process chronologically along the latent
+path, so every survival and cumulative incidence is a probability; the
+predictive PIT is the Rosenblatt transform of the event times.
 
 Posterior sampling. `model.sample(...)` draws from the coefficient
 posterior conditional on the fitted smoothing parameters. Predictive

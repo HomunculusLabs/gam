@@ -1,8 +1,9 @@
 # Event histories
 
 `gam_models::event_history` fits marked counting processes: each subject is
-observed over a follow-up window, events of several marks may recur, an
-absorbing mark ends follow-up, and covariates may change over time.
+observed over a follow-up window, events of several marks may recur, a
+terminal mark ends follow-up, a once-only mark removes the subject from that
+mark's risk set, and covariates may change over time.
 
 ## The model
 
@@ -14,9 +15,10 @@ log λ_{i,d}(t) = η⁰_{i,d}(t) − ½ Σ_k a_{d,k}² + Σ_k a_{d,k} z_{i,k}(t)
 
 `η⁰` is an ordinary gam linear predictor built from the covariate table plus
 the node time, so every term type in the formula language applies: smooths of
-age or calendar time, smooths of covariates, tensor terms, random effects.
-`z_{i,k}` are independent unit-variance Ornstein–Uhlenbeck atoms with rates
-`r_k`, shared by all marks through the loadings `a_{d,k}`.
+age or calendar time, smooths of covariates, tensor terms, factors, random
+effects, varying-coefficient terms. `z_{i,k}` are independent unit-variance
+Ornstein–Uhlenbeck atoms with rates `r_k`, shared by all marks through the
+loadings `a_{d,k}`.
 
 The latent term is the individual's deviation from a population rate, not an
 addition to it. The atoms are stationary and standard at every time, so
@@ -33,55 +35,102 @@ log-intensity surface — the coefficients, `mark_eta`, and the CLI's
 heterogeneity does not raise the population rate behind the baseline's back.
 (Marginal survival is not `exp(−∫ exp(η⁰))`: the expectation of the
 exponential of an integral is not the exponential of the integral of the
-expectation. Forecasts integrate the latent state exactly, so they need no
-such identity.)
+expectation. Forecasts integrate the latent state, so they need no such
+identity.)
 
-Nothing about the latent structure is chosen by hand beyond the maximum number
-of atoms:
+Nothing about the latent structure is chosen by hand beyond the number of
+atoms offered:
 
 - every atom carries one REML ridge over its loadings and its log-rate, so an
-  atom the evidence does not support is switched off;
+  atom the evidence does not support is switched off (its loadings shrink to
+  zero under a large ridge). The fit reports the atoms it was offered; which
+  ones the data use is read from `loadings` and `atom_log_lambdas`;
 - rates are parameterised as `ln(r_k · T̄)` with `T̄` the mean follow-up, so
-  their prior centre is the cohort's own time scale, whatever the unit;
-- the Gauss-Hermite order is raised until the fitted marginal log-likelihood
-  is stable, and the fit carries that certificate.
+  the ridge on a log-rate is an empirical-Bayes prior centred on the cohort's
+  own time scale, whose strength REML learns per atom;
+- the atoms start apart — every loading at one latent standard deviation per
+  unit of log-intensity, the log-rates spaced by `ln 2` around the ridge
+  centre — which fixes the sign, permutation and (at equal rates) rotation
+  gauge of the loading matrix at the initial point. A permutation-symmetric
+  start would keep every atom identical under a deterministic Newton.
 
-The latent chain is marginalised exactly (to quadrature tolerance) by adaptive
-product Gauss-Hermite filtering. The predict and condition steps are Gaussian
-convolutions of `envelope × polynomial`, evaluated through the Lagrange
-interpolant on the grid, so they are exact for any gap length. Every node's
-grid sits at the posterior mean with the predictive spread: the prediction
-is first made onto the predictive grid, the posterior mean is read off it,
-and the exact prediction and conditioning are redone on a grid centred
-there. A tilted Gaussian is a shifted Gaussian, so that keeps the ratio of
-density to envelope a bounded mild tilt, and both the interpolation and the
-quadrature stay benign at every order the certificate reaches. The gradient
-the inner Newton uses is the exact derivative of the computed log-likelihood:
-the forward filter replayed on forward-mode duals seeded with the design rows.
-Hessians come from Louis' identity, and the directional Hessian derivatives the
-outer LAML solve needs come from the same code run on a dual scalar.
+## Marks and risk sets
 
-Survival with a static frailty is one atom with rate zero; competing risks is
-absorbing marks; recurrent events and history-conditioned prediction are the
-same family with different rows.
+Every mark has a kind, declared with the cohort:
+
+| kind | when it fires |
+| --- | --- |
+| `recurrent` | any number of times; the subject stays at risk |
+| `once` | at most once; the subject leaves this mark's risk set, follow-up continues |
+| `terminal` | at most once; follow-up ends (the subject's `exit` is its time) |
+
+The compensator of mark `d` integrates `λ_{i,d}(t) R_{i,d}(t)` with `R` the
+mark's risk indicator, so competing risks (several terminal marks), a
+first-occurrence outcome beside recurrent ones, and a survival outcome are
+all the same likelihood with different kinds. Validation enforces the kinds:
+a terminal event must end follow-up, a once-only or terminal mark fires at
+most once per subject.
+
+Covariates are predictable: at an event node the row in force is the left
+limit `X(t⁻)`, so a covariate that changes at the instant of an event never
+explains the event that changed it. Categorical covariates carry their level
+labels, so factor terms, `by=` gates and random effects resolve against the
+labels the user supplied.
+
+## Marginalisation and its certificate
+
+The latent chain is marginalised by adaptive product Gauss-Hermite filtering.
+The predict step is a Gaussian convolution of `envelope × polynomial`,
+evaluated through the Lagrange interpolant on the grid, exact for any gap
+length. Every node's grid sits at the posterior mean with the predictive
+spread. The gradient the inner Newton uses is the exact derivative of the
+computed log-likelihood: the forward filter replayed on forward-mode duals
+seeded with the design rows. The Hessian is Louis' identity accumulated in
+coefficient space by one forward sweep of the smoothed complete-data scores
+(linear in the node count and in the coefficient count; no all-pairs table),
+evaluated by the same quadrature as the value, so it agrees with the second
+derivative of the value to the quadrature error. The directional Hessian
+derivatives the outer LAML solve needs come from the same code run on a dual
+scalar.
+
+Two discretisations enter: the Gauss-Hermite order per latent axis and the
+time mesh the latent path is sampled on (the mesh cuts every follow-up at
+entry, exit, covariate changes and events, and integrates each cell by
+Gauss-Legendre at the order that resolves the spline basis exactly). The fit
+refines both until the fitted coefficients are stationary under refinement:
+at the fitted smoothing parameters the coefficients are re-solved at the next
+order (`2G − 1`) and on the halved mesh, and if any coefficient moves by more
+than `quadrature_tolerance` posterior standard deviations (default `0.01`)
+the fit repeats at the refined setting. The certificate the fit carries
+records both checks. An order whose Lagrange interpolant would amplify
+roundoff above the tolerance (the Lebesgue constant of interpolation on
+Hermite nodes grows exponentially) is refused rather than tried. The
+transient memory of an evaluation (`G^{2K}` for one backward kernel, `P·G^K`
+for the carried expectations) is checked against the machine's budget before
+any grid is built.
 
 ## Fitting
 
 ```rust
 use gam_models::event_history::*;
 
-let mut cohort = EventHistoryCohort { mark_names, covariates, subjects };
+let mut cohort = EventHistoryCohort {
+    mark_names, mark_kinds, covariate_names, covariate_levels, covariates, subjects,
+};
 let spec = EventHistorySpec::new(2, vec![term_collection_spec]);
 let fit = fit_event_history(&mut cohort, &spec)?;
 fit.loadings;          // marks × atoms
 fit.rates;             // per atom, in the data's time unit
 fit.atom_log_lambdas;  // the ridge each atom ended on
-fit.quadrature;        // Gauss-Hermite certificate
+fit.quadrature;        // the refinement certificate
 ```
 
 `covariates` holds one term collection shared by every mark, or one per mark.
 Feature columns index the covariate table's columns followed by the node time,
-so a smooth of column `n_cov` is a smooth of time.
+so a smooth of column `n_cov` is a smooth of time. The bases are built on the
+outcome-free design rows (entry, exit, covariate changes and an event-free
+quadrature of every follow-up), so a data-adaptive basis never depends on
+where the events fell and the time basis spans every window to its ends.
 
 ## Observed risk scores
 
@@ -94,119 +143,94 @@ s(time, by=prs)
 ```
 
 This is `b_d(t) · g_i` added to mark `d`'s log-intensity. A continuous
-by-smooth keeps its constant (its constant direction is `g` itself, not the
-intercept, so there is nothing to centre away), which makes `b_d` one
-surface with two REML-selected ridges: the wiggliness ridge decides how much
-the score's effect bends with time, and the null-space ridge (on the constant
-and linear parts of `b_d`, the double penalty every smooth carries by default)
-decides whether the effect exists at all. A score that carries nothing
-collapses to `b_d ≡ 0`; a useful, age-invariant score becomes a constant; an
-effect that genuinely fades with age becomes a smooth decline — the
-smoothing parameters decide, not a hand-chosen interaction or age band. With
-several marks every mark gets its own `b_d(t)` under the same rule, so a
-cardiovascular score can carry a large effect on one mark, a moderate one on
-another, and be switched off on an unrelated one. Several scores are several
-such terms; `s(time, prs, ...)` tensor forms let the effect vary with other
-covariates as well.
-
-![Fitted score slope surfaces: a declining effect is recovered as a decline; an uninformative score collapses to zero](images/event_history_score_slope.png)
-
-*The fixture behind the figure: 300 subjects, six time units, a
-standard-normal score. Left, the truth `b(t) = 1 − 0.15 t` is recovered
-within 0.02 everywhere and the wiggliness ridge goes to its limit (the truth
-is a line). Right, a score that carries nothing collapses under both ridges.*
+by-smooth keeps its constant, so `b_d` is one surface with two REML-selected
+ridges: the wiggliness ridge decides how much the score's effect bends with
+time, and the null-space ridge decides whether the effect exists at all. A
+score that carries nothing collapses to `b_d ≡ 0`; a useful, age-invariant
+score becomes a constant; an effect that genuinely fades with age becomes a
+smooth decline. With several marks every mark gets its own `b_d(t)` under the
+same rule.
 
 The score sits *beside* the latent state, not inside it: `g` is observed, so
 the intensity is conditional on it, while the latent state carries what the
-event history reveals. Feeding a state inferred from the outcomes back in as
-an observed score would use the outcomes twice.
-
-### Calibrated scores
-
-A polygenic score is confounded by ancestry, so the same raw value means
-different things in different parts of the cohort. The conditional
-transformation-normal Stage 1 of the marginal-slope chain calibrates it once,
-in front of the fit:
-
-```python
-calib = gamfit.fit(scores, "prs ~ s(pc1) + s(pc2)", transformation_normal=True)
-covariates["prs_z"] = calib.transformation_score(scores)
-model = gamfit.fit_event_history(subjects, events, covariates, "s(time, by=prs_z)", atoms=2)
-```
-
-`prs_z = Φ⁻¹(F̂(prs | pc))` is standard normal given ancestry, so `b_d(t)` is
-the effect of one conditional standard deviation of the score everywhere in
-the cohort, and a population forecast at `prs_z = 0` is the population rate
-at every ancestry. Nothing else changes: the slope surface, its two ridges
-and the latent state are as above.
-
-## The information hierarchy
-
-Three conditionings of one model, none weighted by hand:
-
-```rust
-// population: the stationary prior, population covariate values
-let population = population_forecast(&fit, &cohort, &PopulationForecastRequest {
-    start: 60.0, horizons: &[65.0, 70.0], absorbing: &[true, false], covariates: &[0.0],
-})?;
-// score only: the same filter at the subject's own covariates, no history
-let alone = population_forecast(&fit, &cohort, &PopulationForecastRequest { covariates: &[1.8], ..request })?;
-// score and history: the filter continues from the subject's filtered state
-let updated = forecast(&fit, &cohort, &ForecastRequest { history: &subject, .. })?;
-```
-
-With no information the forecast is the population risk; a score moves it by
-what the fitted slope surface says the score is worth at that age; the
-history moves it again by what the events reveal about the latent state. A
-weak score leaves the history to do the work; a strong score moves the risk
-before any history exists.
+event history reveals.
 
 ## Python
 
 ```python
 import gamfit
-model = gamfit.fit_event_history(subjects, events, covariates, "x + s(time)", atoms=2)
+model = gamfit.fit_event_history(
+    subjects, events, covariates, "x + s(time)",
+    atoms=2, marks={"relapse": "recurrent", "death": "terminal"},
+)
 model.loadings, model.rates, model.atom_log_lambdas, model.quadrature
-f = model.forecast("subject-17", horizons=[6.0, 7.0], absorbing=["death"])
+f = model.forecast("subject-17", horizons=[6.0, 7.0])
 f["survival"], f["expected_counts"]
-p = model.population_forecast({"x": 0.0, "prs": 0.0}, start=5.0, horizons=[6.0, 7.0], absorbing=["death"])
+f = model.forecast("subject-17", horizons=[6.0, 7.0], future=[(5.5, {"x": 1.0}), (6.5, {"x": 0.0})])
+p = model.population_forecast({"x": 0.0}, start=5.0, horizons=[6.0, 7.0])
 model.pit("subject-17"); model.pit_ks()
 ```
 
-`population_forecast` takes the covariate values of a subject with no
-observed history: population values give the population tier, a subject's
-own score gives what the model says before its history is seen.
-
 `subjects` has columns `id, entry, exit`; `events` has `id, time, mark`;
 `covariates` has `id, start` and the covariate columns, one row per segment
-during which a subject's covariates are constant. Frames may be pandas,
-polars, or dicts of columns.
+during which a subject's covariates are constant. String, boolean or
+categorical columns are categorical covariates; numeric columns are
+continuous. Frames may be pandas, polars, or dicts of columns. `marks` is the
+mark vocabulary with kinds; without it the observed marks are all recurrent
+(and a cohort without events must declare its marks). A forecast's `future`
+is the covariate path over the window: absent, the row in force at exit
+holds; one record holds constant; `(start, record)` pairs change at the given
+times. `population_forecast` is the same window from the stationary prior,
+for a subject with no history.
 
 ## CLI
 
 ```bash
 gam fit-events --subjects s.csv --events e.csv --covariates c.csv \
-    --formula "x + s(time)" --atoms 2 --horizons 1,2,5 --absorbing death \
-    --out summary.json
+    --formula "x + s(time)" --atoms 2 \
+    --marks relapse:recurrent,death:terminal \
+    --horizons-after-exit 1,2,5 --out summary.json
 ```
 
-The summary carries the loadings, rates, per-atom ridges, coefficients, the
-quadrature certificate, the predictive-PIT Kolmogorov–Smirnov distance over
-every event, and per-subject forecasts at the given offsets after exit, each
-with its `without_history` counterpart: the same window run from the
-stationary prior at the subject's covariates, so the summary shows what the
-history added.
+Covariate columns that do not parse as numbers are categorical. The summary
+carries the mark kinds, categorical levels, loadings, rates, per-atom ridges,
+coefficients, the refinement certificate, the predictive-PIT
+Kolmogorov–Smirnov distance over every event, and per-subject forecasts at
+the given offsets after exit, each beside the same window run without the
+subject's history (`without_history`).
 
 ## Forecasting and calibration
 
 ```rust
-let request = ForecastRequest { history: &subject, horizons: &[6.0, 7.0], absorbing: &[true, false], future_row: 0 };
+let request = ForecastRequest { history: &subject, horizons: &[6.0, 7.0], future: &[] };
 let f = forecast(&fit, &cohort, &request)?;
-f.survival;         // P(no absorbing event by horizon | history)
-f.expected_counts;  // horizons × marks; the cumulative incidence for absorbing marks
+f.survival;         // P(no terminal event by horizon | history)
+f.expected_counts;  // horizons × marks
 ```
 
 The forecast filters the subject's own history into its latent state, then
-runs the same filter over the future with zero counts. The predictive PIT of
-every event, `predictive_pit`, is uniform when the model is right;
-`kolmogorov_smirnov_uniform` summarises it.
+integrates the killed process forward along the same latent path: the
+survival to a horizon is `E[exp(−∫ Λ_T)]` over the terminal marks' total
+intensity, and the expected count of a mark by a horizon is the chronological
+integral of `E[S(t) λ_d(t)]`. For a terminal mark that is its cumulative
+incidence, for a once-only mark the probability of a first occurrence before
+termination (its own hazard joins the killing), for a recurrent mark the
+expected number of events before termination. The chronology is real: the
+survival at every quadrature time is its own Gauss-Legendre integral of the
+elapsed hazard from the cell's start, so every reported probability lies in
+`[0, 1]` and the terminal incidences sum to `1 − survival` to quadrature
+accuracy. A subject whose follow-up ended with a terminal event has survival
+zero and no further counts.
+
+`population_forecast` runs the same window from the stationary prior at
+given covariate values: the population tier with population values, the
+score-only tier with a subject's own score. No weight between the tiers is
+chosen by hand — each is the same probability model conditioned on more.
+
+The predictive PIT of every event, `predictive_pit`, is the Rosenblatt
+transform of the event times under the model: independent uniforms across
+events and subjects when the model is right (the time-rescaling theorem).
+Each carries the predictive probability of every mark at that event, the
+diagnostic of the mark model. `kolmogorov_smirnov_uniform` summarises the
+PITs and is `None` for a cohort without events; with parameters estimated
+from the same data it is a summary, not a calibrated test.

@@ -82,21 +82,22 @@ pub(crate) struct FitEventsArgs {
     #[arg(
         long,
         default_value_t = 1,
-        help = "Maximum number of latent atoms; the evidence switches off unsupported ones"
+        help = "Number of latent atoms offered; each carries its own REML ridge and an unsupported one is switched off by it"
     )]
     pub(crate) atoms: usize,
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Forecast horizons as offsets after each subject's exit, comma separated"
+        value_name = "NAME:KIND",
+        help = "The mark vocabulary with each mark's kind (recurrent, once or terminal), e.g. relapse:recurrent,death:terminal; without it the observed marks, all recurrent"
     )]
-    pub(crate) horizons: Vec<f64>,
+    pub(crate) marks: Vec<String>,
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Marks that end follow-up when they fire, comma separated"
+        help = "Forecast horizons as offsets after each subject's exit, comma separated"
     )]
-    pub(crate) absorbing: Vec<String>,
+    pub(crate) horizons_after_exit: Vec<f64>,
     #[arg(long, value_name = "JSON", help = "Write the summary here instead of stdout")]
     pub(crate) out: Option<PathBuf>,
 }

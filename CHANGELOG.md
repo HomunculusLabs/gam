@@ -1,28 +1,72 @@
-## v0.3.154 — gam 0.3.154 / gamfit 0.1.264 (2026-09-02)
+## Unreleased
 
-The first release since `v0.3.153` (2026-08-30), three days later, and two
-pieces of work carry it. Event histories become a family of their own: marked
-counting processes with smooth covariate and time effects per mark and a
-per-subject latent chain marginalised exactly by adaptive Gauss-Hermite
-filtering, a baseline that is the population-average intensity whatever the
-loadings, observed risk scores entering as penalised varying-coefficient
-surfaces, and forecasts at three tiers — population, score-only,
-history-conditioned. And the cone-truncated posterior's moment cubature is
-integrated in the Gibson-Glasbey-Elston order, tilted at Botev's exact saddle
-point by Newton on the analytic stationarity system, and stopped on the
-replicate standard error of eight shifted lattices, so the #979 preprocessor no
-longer converges and then refuses at a face it could not integrate.
-
-Around them: every live family's row log-likelihood is written once and its
-whole derivative tower derived from it, with 27 wall-clock gates asserting the
-compiled rows beat the hand kernels on every push (#932); a continuous `by=`
-smooth keeps its constant; explicit `k`, `BSpline(knots=K)` and periodic bases
-build the dimensions they name; a NaN penalty trace is refused instead of read
-as saturation; and the AIC ratio is called an evidence ratio, not a Bayes
-factor.
-
-Every workspace crate carries content changes this cycle, so all 24 move to
-0.3.154 together and `gam-pyffi`/`gamfit` to 0.1.264.
+- **Event histories: every forecast probability is a chronological integral,
+  the Hessian is Louis' identity in coefficient space by one forward sweep,
+  marks have kinds, and the fit certifies its coefficients under refinement
+  of both the quadrature and the mesh.** A static review of
+  `gam_models::event_history` found the cumulative incidence of an absorbing
+  mark computed as if Gauss-Legendre weights were elapsed times (a
+  "probability" above one at moderate hazards), a Louis Hessian assembled
+  through an all-pairs node table and a dense `S × S` transfer per gap
+  (quadratic in the nodes, `G^{2K}` per gap held for the whole subject), a
+  Gauss-Hermite certificate that compared one likelihood value and built the
+  order-257 grid before checking its own cap, no control of the time
+  quadrature, a permutation-symmetric multi-atom start, absorbing marks
+  known only to the forecast, covariates read at the right limit of an
+  event, and a Python layer that lost categorical levels and merged
+  identifiers by stringification. All of it is replaced. Forecasts integrate
+  the killed process along the latent path: the survival at every quadrature
+  time is its own Gauss-Legendre integral of the elapsed hazard from the
+  cell's start, the sub-density `E[S(t) λ_d(t)]` is integrated in time, and
+  the terminal incidences sum to `1 − S` to quadrature accuracy (checked
+  against the exponential competing-risks solution to `1e-9`). Louis'
+  identity is accumulated in one forward sweep of the smoothed complete-data
+  scores contracted with the design rows node by node (`E[C_m v_mᵀ]` with
+  `C_m` the carried conditional expectation, propagated by the filter's own
+  separable operators), so nothing quadratic in the nodes exists and the
+  `S × S` backward kernel of a gap lives only while that gap is reduced to
+  its innovation moments; the family's coefficient-space assembly is the
+  marginal's own. Marks are `recurrent`, `once` or `terminal`
+  (`MarkKind`), declared with the cohort and enforced by validation (a
+  terminal event ends follow-up, a once-only mark leaves the risk set, a
+  once-only or terminal mark fires at most once); the compensator carries
+  per-mark exposures `w·R_d(t)`; a forecast of an absorbed subject is zero;
+  a once-only mark's forecast is its first-occurrence probability. The fit
+  certifies itself by refitting at fixed smoothing parameters under the next
+  Gauss-Hermite order and under the halved mesh and requiring every
+  coefficient to move by less than `quadrature_tolerance` posterior standard
+  deviations (default `0.01`), refines whichever fails, refuses an order
+  whose Lebesgue constant amplifies roundoff above the tolerance (the rule
+  now records it), and checks the transient `G^{2K}` footprint against the
+  machine's budget before any grid is built. The atoms start apart (log-rates
+  spaced by `ln 2`), which fixes the sign/permutation/rotation gauge of the
+  loading matrix at the initial point. Event nodes take the left-limit
+  covariate row; the bases are built on outcome-free design rows (entry,
+  exit, covariate changes and an event-free quadrature) so no event time
+  shapes a basis; the smoothed marginal is renormalised after its noise cut;
+  a lost-positivity posterior variance is a reported failure, not a floored
+  number; the standardised innovation of the forward operator is formed in
+  closed form (no `1/√q` of a cancelled difference); the joint-evaluation
+  cache keys on the exact state, not a hash; `1e-2` is the one tolerance and
+  a `(left + right)/2` midpoint is gone. The PIT is the Rosenblatt transform
+  (checked against `1 − exp(−Λ Δt)` with constant hazards), carries the
+  predictive mark probabilities at each event, refuses a survival outside
+  `[0, 1]`, and the Kolmogorov–Smirnov summary of no events is `None`.
+  Cohort validation refuses duplicate subject identifiers, duplicate mark or
+  covariate names, duplicate segment starts, segments outside follow-up and
+  invalid categorical codes; the cohort carries categorical levels, so
+  factor terms, `by=` gates and random effects resolve against the labels;
+  the test simulator samples each step's events as Poisson with the exact
+  integrated intensity (no thinning bound on an unbounded state). Forecasts
+  take a covariate path (`FutureSegment`s) instead of one row, in Rust,
+  Python (`future=`) and the CLI; Python infers categorical covariates from
+  non-numeric columns, declares marks with `marks={name: kind}`, fits an
+  event-free cohort with a declared vocabulary and an intercept-only or
+  time-only formula, and refuses identifiers that collide by
+  stringification; the CLI declares `--marks name:kind,...` and
+  `--horizons-after-exit`, and non-numeric CSV columns are categorical. The
+  docs describe the algorithm that exists: adaptive quadrature with a
+  refinement certificate, not "exact".
 
 - **A continuous `by=` smooth keeps its constant, and event-history forecasts
   have a population tier (#2805).** `s(x, by=z)` with a continuous `z` is the
@@ -154,6 +198,16 @@ Every workspace crate carries content changes this cycle, so all 24 move to
   (`gam_linalg::anderson`) with the scalar relaxed step as the first-pass and
   post-reset fallback and the map's own residual norm as the safeguard. The
   n=1000 cell mints in 44 s (was a 290 s refusal); n=500 in 42 s (was 48 s).
+- **The composed-warp degree floor is the measured `C¹` degree, 4 (#2695).**
+  The floor had been raised to 5 on the reading that `∇Φ` consumes a
+  piecewise-constant `I⁗` at degree 4. Its own non-vacuity arm refused on MSI:
+  driving the production Jeffreys gradient across an event-row knot crossing,
+  the gap shrinks 99.5× for a 100× smaller straddle at degree 4 (and ≈100× at
+  5 and 6) and only 1.02× at degree 3. The required continuous basis order is
+  therefore 3, the floor is degree 4 again, the negative control measures
+  degree 3, and the ladder that produced the table (`knot_ladder_2695`) ships
+  as a fixture that prints it on every run.
+
 - **The composed-warp degree floor is the measured `C¹` degree, 4 (#2695).**
   The floor had been raised to 5 on the reading that `∇Φ` consumes a
   piecewise-constant `I⁗` at degree 4. Its own non-vacuity arm refused on MSI:

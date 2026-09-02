@@ -1,16 +1,20 @@
-//! The event-history custom family: every subject's exact-marginal likelihood
+//! The event-history custom family: every subject's marginal likelihood
 //! assembled into the coefficient space of the per-mark smooth blocks and the
 //! latent block, with every derivative the outer LAML evaluator asks for
-//! produced by the same generic code under a directional dual scalar.
+//! produced by the same generic code under a directional dual scalar, and
+//! the fit driver that refines the Gauss-Hermite order and the time mesh
+//! until the fitted coefficients are stationary under refinement.
 
-use super::chain::GaussHermite;
-use super::cohort::{CohortNodes, EventHistoryCohort, EventHistoryError, expand_nodes};
+use super::chain::{GaussHermite, product_grid_size};
+use super::cohort::{
+    CohortNodes, EventHistoryCohort, EventHistoryError, MarkKind, design_rows, expand_nodes,
+};
 use super::marginal::{SubjectInputs, pairwise_sum, subject_marginal};
 use super::scalar::Tangent;
 use crate::custom_family::{
     BlockWorkingSet, BlockwiseFitOptions, CustomFamily, ExactNewtonJointGradientEvaluation,
-    FamilyEvaluation, ParameterBlockSpec, ParameterBlockState, PenaltyMatrix,
-    fit_custom_family,
+    FamilyEvaluation, ParameterBlockSpec, ParameterBlockState, PenaltyMatrix, fit_custom_family,
+    fit_custom_family_fixed_log_lambdas,
 };
 use gam_linalg::matrix::{DenseDesignMatrix, DesignMatrix, SymmetricMatrix};
 use gam_math::jet_scalar::{JetScalar, OneSeed, Order2, TwoSeed};
@@ -18,8 +22,11 @@ use gam_math::nested_dual::JetField;
 use gam_model_api::families::custom_family::joint_coupled_coefficient_hessian_cost;
 use gam_problem::CoefficientCoordinate;
 use gam_solve::model_types::UnifiedFitResult;
-use gam_terms::smooth::{TermCollectionDesign, TermCollectionSpec, build_term_collection_design};
-use ndarray::{Array1, Array2};
+use gam_terms::smooth::{
+    TermCollectionDesign, TermCollectionSpec, build_term_collection_design,
+    freeze_term_collection_from_design,
+};
+use ndarray::{Array1, Array2, ArrayView2, s};
 use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
 
@@ -98,10 +105,6 @@ pub fn seeded_two(value: f64, u: f64, v: f64) -> TwoSeed<0> {
     TwoSeed::seeded(value, u, v)
 }
 
-fn is_zero<S: Directional>(x: &S) -> bool {
-    x.value() == 0.0 && x.eps() == 0.0 && x.eps_del() == 0.0
-}
-
 /// A full joint evaluation in coefficient space. `hessian` is the negative
 /// log-likelihood Hessian, the convention the custom-family engine expects.
 #[derive(Clone, Debug)]
@@ -120,7 +123,8 @@ pub struct EventHistoryFamily {
     atoms: usize,
     gh: Arc<GaussHermite>,
     time_scale: f64,
-    cache: Arc<Mutex<Option<(u64, Arc<JointEvaluation>)>>>,
+    /// The last joint evaluation, keyed on the exact state it was made at.
+    cache: Arc<Mutex<Option<(Vec<f64>, Arc<JointEvaluation>)>>>,
 }
 
 impl EventHistoryFamily {
@@ -156,6 +160,7 @@ impl EventHistoryFamily {
                 reason: "time scale must be finite and positive".to_string(),
             });
         }
+        product_grid_size(gauss_hermite_order, atoms)?;
         Ok(Self {
             nodes,
             designs,
@@ -190,18 +195,6 @@ impl EventHistoryFamily {
         &self.gh
     }
 
-    /// The same family with a different Gauss-Hermite order.
-    pub fn with_gauss_hermite_order(&self, order: usize) -> Result<Self, EventHistoryError> {
-        Ok(Self {
-            nodes: Arc::clone(&self.nodes),
-            designs: self.designs.clone(),
-            atoms: self.atoms,
-            gh: Arc::new(GaussHermite::new(order)?),
-            time_scale: self.time_scale,
-            cache: Arc::new(Mutex::new(None)),
-        })
-    }
-
     /// Width of the latent block: loadings then log-rates.
     pub fn latent_width(&self) -> usize {
         self.marks() * self.atoms + self.atoms
@@ -232,7 +225,8 @@ impl EventHistoryFamily {
         offsets
     }
 
-    fn total_width(&self) -> usize {
+    /// Total coefficient count: every mark block then the latent block.
+    pub fn total_width(&self) -> usize {
         self.block_widths().iter().sum()
     }
 
@@ -276,15 +270,16 @@ impl EventHistoryFamily {
         Ok(())
     }
 
-    fn state_key(states: &[ParameterBlockState]) -> u64 {
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    /// The exact state a joint evaluation is keyed on: every coefficient and
+    /// every node predictor, bit for bit. A hash alone would turn a collision
+    /// into a silently wrong likelihood.
+    fn state_key(states: &[ParameterBlockState]) -> Vec<f64> {
+        let mut key = Vec::new();
         for state in states {
-            for v in state.beta.iter().chain(state.eta.iter()) {
-                hash ^= v.to_bits();
-                hash = hash.wrapping_mul(0x0100_0000_01b3);
-            }
+            key.extend(state.beta.iter().copied());
+            key.extend(state.eta.iter().copied());
         }
-        hash
+        key
     }
 
     /// Value, gradient and Hessian (of the log-likelihood) in coefficient
@@ -379,6 +374,10 @@ impl EventHistoryFamily {
                         ));
                     }
                 }
+                let views: Vec<ArrayView2<'_, f64>> = designs
+                    .iter()
+                    .map(|design| design.slice(s![first..first + n, ..]))
+                    .collect();
                 let inputs = SubjectInputs {
                     nodes: subject,
                     eta0: &eta0,
@@ -387,98 +386,17 @@ impl EventHistoryFamily {
                     time_scale,
                     gh,
                     continuation_gap: 0.0,
+                    designs: derivatives.then_some(views.as_slice()),
                 };
                 let local = subject_marginal(&inputs, derivatives).map_err(|e| e.to_string())?;
-                if !derivatives {
-                    return Ok((local.loglik, Vec::new(), Vec::new()));
+                if derivatives && (local.gradient.len() != total || local.hessian.len() != total * total) {
+                    return Err(format!(
+                        "subject {} produced {} gradient entries for {total} coefficients",
+                        first,
+                        local.gradient.len()
+                    ));
                 }
-                let zero = local.loglik.constant_like(0.0);
-                let latent_local = n * marks;
-                let p_local = latent_local + marks * atoms + atoms;
-                let local_index = |node: usize, d: usize| node * marks + d;
-                let mut gradient = vec![zero.clone(); total];
-                for d in 0..marks {
-                    let design = &designs[d];
-                    let width = design.ncols();
-                    for node in 0..n {
-                        let g = &local.gradient[local_index(node, d)];
-                        if is_zero(g) {
-                            continue;
-                        }
-                        let row = design.row(first + node);
-                        for j in 0..width {
-                            let x = row[j];
-                            if x != 0.0 {
-                                gradient[offsets[d] + j] = gradient[offsets[d] + j].add(&g.scale(x));
-                            }
-                        }
-                    }
-                }
-                for q in 0..marks * atoms + atoms {
-                    gradient[latent_offset + q] = local.gradient[latent_local + q].clone();
-                }
-                let mut hessian = vec![zero.clone(); total * total];
-                let h = |i: usize, j: usize| -> &S { &local.hessian[i * p_local + j] };
-                for d in 0..marks {
-                    let design_d = &designs[d];
-                    let width_d = design_d.ncols();
-                    for d2 in d..marks {
-                        let design_2 = &designs[d2];
-                        let width_2 = design_2.ncols();
-                        let mut w = vec![zero.clone(); n * width_2];
-                        for node in 0..n {
-                            for m in 0..n {
-                                let hv = h(local_index(node, d), local_index(m, d2));
-                                if is_zero(hv) {
-                                    continue;
-                                }
-                                let row = design_2.row(first + m);
-                                for j in 0..width_2 {
-                                    let x = row[j];
-                                    if x != 0.0 {
-                                        w[node * width_2 + j] = w[node * width_2 + j].add(&hv.scale(x));
-                                    }
-                                }
-                            }
-                        }
-                        for node in 0..n {
-                            let row = design_d.row(first + node);
-                            for i in 0..width_d {
-                                let x = row[i];
-                                if x == 0.0 {
-                                    continue;
-                                }
-                                for j in 0..width_2 {
-                                    let idx = (offsets[d] + i) * total + offsets[d2] + j;
-                                    hessian[idx] = hessian[idx].add(&w[node * width_2 + j].scale(x));
-                                }
-                            }
-                        }
-                    }
-                    for node in 0..n {
-                        let row = design_d.row(first + node);
-                        for q in 0..marks * atoms + atoms {
-                            let hv = h(local_index(node, d), latent_local + q);
-                            if is_zero(hv) {
-                                continue;
-                            }
-                            for i in 0..width_d {
-                                let x = row[i];
-                                if x != 0.0 {
-                                    let idx = (offsets[d] + i) * total + latent_offset + q;
-                                    hessian[idx] = hessian[idx].add(&hv.scale(x));
-                                }
-                            }
-                        }
-                    }
-                }
-                for q in 0..marks * atoms + atoms {
-                    for q2 in q..marks * atoms + atoms {
-                        let idx = (latent_offset + q) * total + latent_offset + q2;
-                        hessian[idx] = h(latent_local + q, latent_local + q2).clone();
-                    }
-                }
-                Ok((local.loglik, gradient, hessian))
+                Ok((local.loglik, local.gradient, local.hessian))
             })
             .collect();
         let per_subject = per_subject?;
@@ -490,20 +408,13 @@ impl EventHistoryFamily {
         let loglik = pairwise_sum(&subject_logliks, &zero);
         let mut gradient = vec![zero.clone(); if derivatives { total } else { 0 }];
         let mut hessian = vec![zero.clone(); if derivatives { total * total } else { 0 }];
-        for (_, g, hh) in &per_subject {
-            if derivatives {
+        if derivatives {
+            for (_, g, hh) in &per_subject {
                 for (acc, x) in gradient.iter_mut().zip(g.iter()) {
                     *acc = acc.add(x);
                 }
                 for (acc, x) in hessian.iter_mut().zip(hh.iter()) {
                     *acc = acc.add(x);
-                }
-            }
-        }
-        if derivatives {
-            for i in 0..total {
-                for j in (i + 1)..total {
-                    hessian[j * total + i] = hessian[i * total + j].clone();
                 }
             }
         }
@@ -596,6 +507,7 @@ impl EventHistoryFamily {
                         time_scale,
                         gh,
                         continuation_gap: 0.0,
+                        designs: None,
                     };
                     let local = subject_marginal(&inputs, false).map_err(|e| e.to_string())?;
                     Ok(local.loglik.grad)
@@ -612,6 +524,14 @@ impl EventHistoryFamily {
 
     /// Full `f64` joint evaluation, cached on the state: the value, its exact
     /// gradient, and the Louis-identity Hessian.
+    ///
+    /// The Hessian is Louis' identity evaluated by the same quadrature as the
+    /// value; it agrees with the second derivative of the computed value to
+    /// the quadrature error the fit's certificate bounds. The gradient is the
+    /// exact derivative of the computed value. A Newton iteration with an
+    /// exact gradient and a Hessian accurate to a small relative error
+    /// converges at that relative rate, and the outer LAML's log-determinant
+    /// term sees the same Hessian its directional derivatives are taken of.
     pub fn joint_evaluation(
         &self,
         states: &[ParameterBlockState],
@@ -693,10 +613,10 @@ impl CustomFamily for EventHistoryFamily {
         let mut blockworking_sets = Vec::with_capacity(offsets.len() - 1);
         for b in 0..offsets.len() - 1 {
             let range = offsets[b]..offsets[b + 1];
-            let gradient = joint.gradient.slice(ndarray::s![range.clone()]).to_owned();
+            let gradient = joint.gradient.slice(s![range.clone()]).to_owned();
             let hessian = joint
                 .hessian
-                .slice(ndarray::s![range.clone(), range])
+                .slice(s![range.clone(), range])
                 .to_owned();
             blockworking_sets.push(BlockWorkingSet::ExactNewton {
                 gradient,
@@ -825,20 +745,23 @@ impl CustomFamily for EventHistoryFamily {
 /// Fit specification for an event-history model.
 #[derive(Clone)]
 pub struct EventHistorySpec {
-    /// Number of latent Ornstein–Uhlenbeck atoms: the maximum. Each carries
-    /// its own REML ridge and is switched off by the evidence when unneeded.
+    /// Number of latent Ornstein–Uhlenbeck atoms offered. Each carries its
+    /// own REML ridge and is switched off by the evidence when unneeded.
     pub atoms: usize,
     /// One covariate/time term collection per mark, or a single one shared by
     /// every mark. Feature columns index the node data matrix: the covariate
     /// table's columns followed by the node time.
     pub covariates: Vec<TermCollectionSpec>,
-    /// Gauss-Legendre order per follow-up segment.
+    /// Gauss-Legendre order per mesh cell.
     pub quadrature_order: usize,
-    /// Starting Gauss-Hermite order per latent axis; doubled until the fitted
-    /// marginal log-likelihood is stable to `quadrature_tolerance`.
+    /// Starting Gauss-Hermite order per latent axis.
     pub gauss_hermite_order: usize,
-    /// Relative stability tolerance on the fitted marginal log-likelihood
-    /// between successive Gauss-Hermite orders.
+    /// The certificate's tolerance: the largest shift any fitted coefficient
+    /// may make under a refinement of the Gauss-Hermite order or of the time
+    /// mesh, in units of that coefficient's posterior standard deviation.
+    /// The order is doubled and the mesh halved until both shifts are below
+    /// it, so a fit is never an artefact of its discretisation at a level
+    /// the data could resolve.
     pub quadrature_tolerance: f64,
     pub options: BlockwiseFitOptions,
 }
@@ -850,19 +773,36 @@ impl EventHistorySpec {
             covariates,
             quadrature_order: super::cohort::quadrature_order_for_degree(3),
             gauss_hermite_order: 9,
-            quadrature_tolerance: 1e-6,
+            quadrature_tolerance: 1e-2,
             options: BlockwiseFitOptions::default(),
         }
     }
 }
 
-/// Certificate that the Gauss-Hermite order resolved the fitted marginal.
+/// One stationarity check of the fitted coefficients under a refinement.
+#[derive(Clone, Debug)]
+pub struct RefinementCheck {
+    /// The refined setting that was checked (a Gauss-Hermite order or a mesh
+    /// refinement level).
+    pub candidate: usize,
+    /// The largest coefficient shift under the refinement, in posterior
+    /// standard deviations.
+    pub coefficient_shift: f64,
+    /// The log-likelihood at the fitted coefficients under the refinement.
+    pub log_likelihood: f64,
+}
+
+/// Certificate that the fitted coefficients are stationary under a
+/// refinement of the latent quadrature and of the time mesh.
 #[derive(Clone, Debug)]
 pub struct QuadratureCertificate {
-    pub order: usize,
-    pub checked_order: usize,
+    pub gauss_hermite_order: usize,
+    pub mesh_refinement: usize,
     pub log_likelihood: f64,
-    pub log_likelihood_at_checked_order: f64,
+    /// The check against the next Gauss-Hermite order (`2·order − 1`).
+    pub gauss_hermite: RefinementCheck,
+    /// The check against the mesh with every cell halved.
+    pub mesh: RefinementCheck,
 }
 
 /// A fitted event-history model.
@@ -870,6 +810,7 @@ pub struct EventHistoryFit {
     pub nodes: Arc<CohortNodes>,
     pub family: EventHistoryFamily,
     pub fit: UnifiedFitResult,
+    pub mark_kinds: Vec<MarkKind>,
     /// Frozen per-mark term collections for prediction.
     pub frozen_specs: Vec<TermCollectionSpec>,
     pub designs: Vec<TermCollectionDesign>,
@@ -882,8 +823,10 @@ pub struct EventHistoryFit {
     /// REML log smoothing parameter of each atom's ridge.
     pub atom_log_lambdas: Vec<f64>,
     pub time_scale: f64,
-    /// Gauss-Legendre order per follow-up segment used for the training nodes.
+    /// Gauss-Legendre order per mesh cell used for the training nodes.
     pub quadrature_order: usize,
+    /// Mesh refinement level of the training nodes.
+    pub mesh_refinement: usize,
     pub quadrature: QuadratureCertificate,
 }
 
@@ -892,6 +835,8 @@ impl EventHistoryFit {
         self.nodes.marks
     }
 
+    /// The number of atoms the fit was offered (which of them the data use
+    /// is read from `loadings` and `atom_log_lambdas`).
     pub fn atoms(&self) -> usize {
         self.log_rates.len()
     }
@@ -904,8 +849,7 @@ impl EventHistoryFit {
 
     /// Population log-intensity `η⁰` of mark `d` on the training nodes:
     /// `exp(η⁰)` is the intensity averaged over the latent state, since the
-    /// latent term enters as `−½|a_d|² + a_d · z` (the marginal module's
-    /// documentation derives the shift).
+    /// latent term enters as `−½|a_d|² + a_d · z` (see [`super::marginal`]).
     pub fn mark_eta(&self, d: usize) -> &Array1<f64> {
         &self.fit.block_states[d].eta
     }
@@ -929,7 +873,19 @@ fn identity_pattern_design(n_obs: usize, width: usize) -> Result<Array2<f64>, Ev
 /// The latent block: loadings then log-rates, one ridge per atom covering
 /// that atom's loadings and its log-rate, so an atom the evidence does not
 /// support is pinned by its own penalty instead of leaving an unidentified
-/// coordinate in the Laplace integral.
+/// coordinate in the Laplace integral. The ridge on the log-rate is an
+/// empirical-Bayes prior centred on the cohort's own time scale whose
+/// strength REML learns per atom.
+///
+/// Gauge: the likelihood is invariant under flipping the sign of an atom's
+/// loadings (with its state) and under permuting atoms; with equal rates it
+/// is also invariant under rotating the atoms jointly. The initial point
+/// fixes the gauge: every loading starts at `+1` (one latent standard
+/// deviation per unit of log-intensity, the parameterisation's natural
+/// scale) and the log-rates start apart, each atom's memory half its
+/// predecessor's, centred on the ridge centre — a permutation-symmetric
+/// start would keep every atom identical under a deterministic Newton and
+/// leave the loading matrix on the rotationally degenerate manifold.
 pub fn latent_block_spec(
     n_obs: usize,
     marks: usize,
@@ -953,15 +909,13 @@ pub fn latent_block_spec(
         penalties.push(PenaltyMatrix::Dense(s));
         nullspace_dims.push(width - marks - 1);
     }
-    // Loadings start at the atom's own unit: zero loading is a critical point
-    // of the marginal likelihood (the score in a loading vanishes there by
-    // symmetry) and, when events cluster, a saddle whose escape collapses the
-    // joint Newton's trust region. One latent standard deviation per unit of
-    // log-intensity is the parameterisation's natural scale, not a tuning
-    // choice; the sign is a symmetry.
     let mut initial_beta = Array1::<f64>::zeros(width);
     for q in 0..marks * atoms {
         initial_beta[q] = 1.0;
+    }
+    for k in 0..atoms {
+        initial_beta[marks * atoms + k] =
+            std::f64::consts::LN_2 * (k as f64 - 0.5 * (atoms as f64 - 1.0));
     }
     Ok(ParameterBlockSpec {
         name: "latent".to_string(),
@@ -1006,11 +960,87 @@ pub fn fit_event_history_formula(
     cohort.validate()?;
     let mut spec = EventHistorySpec::new(atoms, Vec::new());
     spec.options = options;
-    let nodes = expand_nodes(cohort, spec.quadrature_order)?;
-    let covariates =
-        super::formula::covariate_spec_from_formula(formula, &nodes, &cohort.covariate_names)?;
+    let rows = design_rows(cohort, spec.quadrature_order)?;
+    let covariates = super::formula::covariate_spec_from_formula(formula, rows.view(), cohort)?;
     spec.covariates = vec![covariates];
     fit_event_history(cohort, &spec)
+}
+
+/// The family and its block specs at one (order, mesh refinement) setting.
+struct Built {
+    nodes: Arc<CohortNodes>,
+    family: EventHistoryFamily,
+    designs: Vec<TermCollectionDesign>,
+    dense: Vec<Arc<Array2<f64>>>,
+    specs: Vec<ParameterBlockSpec>,
+}
+
+impl Built {
+    /// Block states at the given per-block coefficients (the node predictors
+    /// recomputed from this setting's designs).
+    fn states(&self, betas: &[Array1<f64>]) -> Vec<ParameterBlockState> {
+        let marks = self.family.marks();
+        let mut states = Vec::with_capacity(betas.len());
+        for (b, beta) in betas.iter().enumerate() {
+            let eta = if b < marks {
+                self.dense[b].dot(beta) + &self.designs[b].affine_offset
+            } else {
+                Array1::zeros(self.nodes.total_nodes)
+            };
+            states.push(ParameterBlockState {
+                beta: beta.clone(),
+                eta,
+            });
+        }
+        states
+    }
+}
+
+/// Bytes the family's evaluation may hold at once: the transient `S × S`
+/// backward kernel of one gap, the carried `P × S` conditional expectations,
+/// the per-node densities and operators of every node, per parallel
+/// subject, in the widest scalar the outer solve uses (four channels).
+fn transient_footprint_bytes(
+    order: usize,
+    atoms: usize,
+    max_nodes: usize,
+    marks: usize,
+    total_width: usize,
+) -> Result<f64, EventHistoryError> {
+    let s = product_grid_size(order, atoms)? as f64;
+    let g = order as f64;
+    let n = max_nodes as f64;
+    let per_subject = s * s
+        + total_width as f64 * s
+        + n * s * (4.0 + marks as f64)
+        + n * atoms as f64 * 3.0 * g * g;
+    let channels = 4.0;
+    let bytes = 8.0 * channels * per_subject * rayon::current_num_threads() as f64;
+    Ok(bytes)
+}
+
+fn preflight(
+    order: usize,
+    atoms: usize,
+    max_nodes: usize,
+    marks: usize,
+    total_width: usize,
+) -> Result<(), EventHistoryError> {
+    let bytes = transient_footprint_bytes(order, atoms, max_nodes, marks, total_width)?;
+    let budget = gam_runtime::resource::ResourcePolicy::default_library()
+        .max_single_materialization_bytes as f64;
+    if bytes > budget {
+        return Err(EventHistoryError::InvalidInput {
+            reason: format!(
+                "an event-history evaluation at Gauss-Hermite order {order} over {atoms} atoms ({} grid points) with {max_nodes} nodes per subject needs about {:.1} GiB across {} threads, above this machine's {:.1} GiB materialisation budget; offer fewer atoms or a shorter follow-up per subject",
+                product_grid_size(order, atoms)?,
+                bytes / f64::from(1u32 << 30),
+                rayon::current_num_threads(),
+                budget / f64::from(1u32 << 30)
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Fit an event-history model to a cohort.
@@ -1033,136 +1063,281 @@ pub fn fit_event_history(
             reason: "quadrature tolerance must be finite and positive".to_string(),
         });
     }
-    let nodes = Arc::new(expand_nodes(cohort, spec.quadrature_order)?);
     let time_scale = cohort.time_scale();
-    let mut designs = Vec::with_capacity(marks);
-    let mut dense = Vec::with_capacity(marks);
+    let mut options = spec.options.clone();
+    options.compute_covariance = true;
+
+    // The bases are built on the outcome-free design rows and frozen; every
+    // mesh evaluates the frozen bases, so a refinement never changes what a
+    // coefficient means.
+    let rows = design_rows(cohort, spec.quadrature_order)?;
     let mut frozen_specs = Vec::with_capacity(marks);
-    let mut block_specs = Vec::with_capacity(marks + 1);
     for d in 0..marks {
         let term_spec = if spec.covariates.len() == 1 {
             &spec.covariates[0]
         } else {
             &spec.covariates[d]
         };
-        let design = build_term_collection_design(nodes.node_data.view(), term_spec).map_err(
-            |error| EventHistoryError::Fit {
-                reason: format!("design for mark {d}: {error}"),
-            },
-        )?;
-        let frozen =
-            crate::fit_orchestration::drivers::freeze_term_collection_from_design(term_spec, &design)
-                .map_err(|error| EventHistoryError::Fit {
-                    reason: format!("freezing mark {d} term collection: {error}"),
-                })?;
-        let dense_design = design
-            .design
-            .try_to_dense_arc("event-history mark design")
-            .map_err(|error| EventHistoryError::Fit {
-                reason: error.to_string(),
-            })?;
-        block_specs.push(mark_block_spec(&cohort.mark_names[d], &design));
-        designs.push(design);
-        dense.push(dense_design);
-        frozen_specs.push(frozen);
-    }
-    if spec.atoms > 0 {
-        block_specs.push(latent_block_spec(nodes.total_nodes, marks, spec.atoms)?);
-    }
-
-    let mut order = spec.gauss_hermite_order.max(3);
-    let mut family = EventHistoryFamily::new(
-        Arc::clone(&nodes),
-        dense.clone(),
-        spec.atoms,
-        order,
-        time_scale,
-    )?;
-    let mut specs = block_specs;
-    loop {
-        let fit = fit_custom_family(&family, &specs, &spec.options).map_err(|error| {
+        let design = build_term_collection_design(rows.view(), term_spec).map_err(|error| {
             EventHistoryError::Fit {
-                reason: format!("event-history LAML fit at Gauss-Hermite order {order}: {error}"),
+                reason: format!("design for mark {d}: {error}"),
             }
         })?;
-        let value = family
-            .log_likelihood(&fit.block_states)
-            .map_err(|reason| EventHistoryError::Fit { reason })?;
-        let checked_order = 2 * order - 1;
-        let checked_family = family.with_gauss_hermite_order(checked_order)?;
-        let checked = checked_family
-            .log_likelihood(&fit.block_states)
-            .map_err(|reason| EventHistoryError::Fit { reason })?;
-        let stable = (value - checked).abs() <= spec.quadrature_tolerance * value.abs().max(1.0);
-        if stable || spec.atoms == 0 {
-            let empty = Array1::<f64>::zeros(0);
-            let latent: &Array1<f64> = if spec.atoms > 0 {
-                &fit.block_states[marks].beta
-            } else {
-                &empty
-            };
-            let mut loadings = Array2::<f64>::zeros((marks, spec.atoms));
-            for d in 0..marks {
-                for k in 0..spec.atoms {
-                    loadings[[d, k]] = latent[d * spec.atoms + k];
-                }
+        let frozen = freeze_term_collection_from_design(term_spec, &design).map_err(|error| {
+            EventHistoryError::Fit {
+                reason: format!("freezing mark {d} term collection: {error}"),
             }
-            let log_rates: Vec<f64> = (0..spec.atoms)
-                .map(|k| latent[marks * spec.atoms + k])
-                .collect();
-            let rates: Vec<f64> = log_rates.iter().map(|r| r.exp() / time_scale).collect();
-            let n_lambda = fit.log_lambdas.len();
-            let atom_log_lambdas: Vec<f64> = fit
-                .log_lambdas
-                .iter()
-                .skip(n_lambda.saturating_sub(spec.atoms))
-                .copied()
-                .collect();
-            return Ok(EventHistoryFit {
-                nodes,
-                family,
-                fit,
-                frozen_specs,
-                designs,
-                loadings,
-                log_rates,
-                rates,
-                atom_log_lambdas,
-                time_scale,
-                quadrature_order: spec.quadrature_order,
-                quadrature: QuadratureCertificate {
-                    order,
-                    checked_order,
-                    log_likelihood: value,
-                    log_likelihood_at_checked_order: checked,
-                },
-            });
+        })?;
+        frozen_specs.push(frozen);
+    }
+    let build = |order: usize, refinement: usize| -> Result<Built, EventHistoryError> {
+        let nodes = Arc::new(expand_nodes(cohort, spec.quadrature_order, refinement)?);
+        let mut designs = Vec::with_capacity(marks);
+        let mut dense = Vec::with_capacity(marks);
+        let mut specs = Vec::with_capacity(marks + 1);
+        for d in 0..marks {
+            let design = build_term_collection_design(nodes.node_data.view(), &frozen_specs[d])
+                .map_err(|error| EventHistoryError::Fit {
+                    reason: format!("design for mark {d} on the mesh: {error}"),
+                })?;
+            let dense_design = design
+                .design
+                .try_to_dense_arc("event-history mark design")
+                .map_err(|error| EventHistoryError::Fit {
+                    reason: error.to_string(),
+                })?;
+            specs.push(mark_block_spec(&cohort.mark_names[d], &design));
+            designs.push(design);
+            dense.push(dense_design);
         }
-        if checked_order > 129 {
-            return Err(EventHistoryError::NumericalFailure {
-                reason: format!(
-                    "the marginal log-likelihood did not stabilise across Gauss-Hermite orders (order {order}: {value}, order {checked_order}: {checked})"
-                ),
-            });
+        if spec.atoms > 0 {
+            specs.push(latent_block_spec(nodes.total_nodes, marks, spec.atoms)?);
         }
-        log::info!(
-            "[event-history] Gauss-Hermite order {order} not stable ({value} vs {checked} at order {checked_order}); refitting"
-        );
-        order = checked_order;
-        family = checked_family;
-        // Warm-start the refit at the previous optimum: coefficients per block
-        // and the smoothing parameters in block order.
+        let family = EventHistoryFamily::new(
+            Arc::clone(&nodes),
+            dense.clone(),
+            spec.atoms,
+            order,
+            time_scale,
+        )?;
+        preflight(order, spec.atoms, nodes.max_subject_nodes(), marks, family.total_width())?;
+        Ok(Built {
+            nodes,
+            family,
+            designs,
+            dense,
+            specs,
+        })
+    };
+    let warm = |built: &mut Built, fit: &UnifiedFitResult| {
         let mut cursor = 0usize;
-        for (block, state) in specs.iter_mut().zip(fit.block_states.iter()) {
+        for (block, state) in built.specs.iter_mut().zip(fit.block_states.iter()) {
             block.initial_beta = Some(state.beta.clone());
             let count = block.initial_log_lambdas.len();
             if cursor + count <= fit.log_lambdas.len() {
-                block.initial_log_lambdas = fit
-                    .log_lambdas
-                    .slice(ndarray::s![cursor..cursor + count])
-                    .to_owned();
+                block.initial_log_lambdas = fit.log_lambdas.slice(s![cursor..cursor + count]).to_owned();
             }
             cursor += count;
         }
+    };
+    // The largest shift of any fitted coefficient, in posterior standard
+    // deviations, when the coefficients are re-solved at fixed smoothing
+    // parameters under a refined setting.
+    let check = |candidate: &mut Built,
+                 fit: &UnifiedFitResult,
+                 sd: &[f64]|
+     -> Result<RefinementCheck, EventHistoryError> {
+        warm(candidate, fit);
+        let refit = fit_custom_family_fixed_log_lambdas(&candidate.family, &candidate.specs, &options, None)
+            .map_err(|error| EventHistoryError::Fit {
+                reason: format!("certificate refit: {error}"),
+            })?;
+        let width: usize = fit.block_states.iter().map(|s| s.beta.len()).sum();
+        if width != sd.len() {
+            return Err(EventHistoryError::Fit {
+                reason: format!(
+                    "certificate refit: the fit carries {width} coefficients but {} scales",
+                    sd.len()
+                ),
+            });
+        }
+        let mut shift = 0.0_f64;
+        let mut q = 0usize;
+        for (a, b) in fit.block_states.iter().zip(refit.block_states.iter()) {
+            if a.beta.len() != b.beta.len() {
+                return Err(EventHistoryError::Fit {
+                    reason: "certificate refit: a block changed width under refinement".to_string(),
+                });
+            }
+            for (x, y) in a.beta.iter().zip(b.beta.iter()) {
+                shift = shift.max((x - y).abs() / sd[q]);
+                q += 1;
+            }
+        }
+        let betas: Vec<Array1<f64>> = fit.block_states.iter().map(|s| s.beta.clone()).collect();
+        let log_likelihood = candidate
+            .family
+            .log_likelihood(&candidate.states(&betas))
+            .map_err(|reason| EventHistoryError::Fit { reason })?;
+        Ok(RefinementCheck {
+            candidate: 0,
+            coefficient_shift: shift,
+            log_likelihood,
+        })
+    };
+
+    let mesh_ceiling = cohort.mesh_refinement_ceiling();
+    let mut order = spec.gauss_hermite_order.max(3);
+    let mut refinement = 0usize;
+    let mut built = build(order, refinement)?;
+    loop {
+        let fit = fit_custom_family(&built.family, &built.specs, &options).map_err(|error| {
+            EventHistoryError::Fit {
+                reason: format!(
+                    "event-history LAML fit at Gauss-Hermite order {order}, mesh refinement {refinement}: {error}"
+                ),
+            }
+        })?;
+        let total = built.family.total_width();
+        // The scale a coefficient shift is measured in: its posterior
+        // standard deviation. The published conditional covariance is that
+        // object; where the fit does not carry one, the observed
+        // information's own diagonal stands in, which is never smaller than
+        // the penalised curvature and so never weakens the test.
+        let sd: Vec<f64> = match fit.beta_covariance() {
+            Some(covariance) if covariance.nrows() == total && covariance.ncols() == total => {
+                (0..total).map(|q| covariance[[q, q]].max(0.0).sqrt()).collect()
+            }
+            _ => {
+                let hessian = built
+                    .family
+                    .joint_evaluation(&fit.block_states)
+                    .map_err(|reason| EventHistoryError::Fit { reason })?;
+                (0..total)
+                    .map(|q| {
+                        let curvature = hessian.hessian[[q, q]];
+                        if curvature > 0.0 { curvature.recip().sqrt() } else { f64::INFINITY }
+                    })
+                    .collect()
+            }
+        };
+        if let Some(q) = sd.iter().position(|s| !(s.is_finite() && *s > 0.0)) {
+            return Err(EventHistoryError::Fit {
+                reason: format!(
+                    "coefficient {q} has no finite positive scale to measure a refinement's shift in ({}); it is unidentified at the fitted mode",
+                    sd[q]
+                ),
+            });
+        }
+        let value = fit.log_likelihood;
+        // Gauss-Hermite refinement: admissible while the interpolant's
+        // roundoff amplification stays below the certificate's tolerance.
+        // Without a latent block there is no latent integral to certify.
+        let next_order = 2 * order - 1;
+        let max_nodes = built.nodes.max_subject_nodes();
+        let gauss_hermite = if spec.atoms == 0 {
+            RefinementCheck {
+                candidate: order,
+                coefficient_shift: 0.0,
+                log_likelihood: value,
+            }
+        } else {
+            let rule = GaussHermite::new(next_order)?;
+            if rule.lebesgue_constant * f64::EPSILON * max_nodes as f64 > spec.quadrature_tolerance {
+                return Err(EventHistoryError::NumericalFailure {
+                    reason: format!(
+                        "the Gauss-Hermite certificate cannot be checked at order {next_order}: the Lagrange interpolant's Lebesgue constant {:.3e} amplifies roundoff above the tolerance {} over {max_nodes} nodes; the latent integral at order {order} is uncertified",
+                        rule.lebesgue_constant,
+                        spec.quadrature_tolerance
+                    ),
+                });
+            }
+            let mut order_candidate = build(next_order, refinement)?;
+            let mut gauss_hermite = check(&mut order_candidate, &fit, &sd)?;
+            gauss_hermite.candidate = next_order;
+            if gauss_hermite.coefficient_shift > spec.quadrature_tolerance {
+                log::info!(
+                    "[event-history] Gauss-Hermite order {order} moves the coefficients by {:.3} posterior sd at order {next_order}; refitting",
+                    gauss_hermite.coefficient_shift
+                );
+                order = next_order;
+                built = order_candidate;
+                warm(&mut built, &fit);
+                continue;
+            }
+            gauss_hermite
+        };
+        if refinement + 1 > mesh_ceiling {
+            return Err(EventHistoryError::NumericalFailure {
+                reason: format!(
+                    "the fitted coefficients are still moving under mesh refinement at level {refinement}, where every cell is already narrower than the shortest interval this cohort's own breakpoints distinguish; the fit is not resolved by refining time further"
+                ),
+            });
+        }
+        let mut mesh_candidate = build(order, refinement + 1)?;
+        let mut mesh = check(&mut mesh_candidate, &fit, &sd)?;
+        mesh.candidate = refinement + 1;
+        if mesh.coefficient_shift > spec.quadrature_tolerance {
+            log::info!(
+                "[event-history] mesh refinement {refinement} moves the coefficients by {:.3} posterior sd at refinement {}; refitting",
+                mesh.coefficient_shift,
+                refinement + 1
+            );
+            refinement += 1;
+            built = mesh_candidate;
+            warm(&mut built, &fit);
+            continue;
+        }
+        let empty = Array1::<f64>::zeros(0);
+        let latent: &Array1<f64> = if spec.atoms > 0 {
+            &fit.block_states[marks].beta
+        } else {
+            &empty
+        };
+        let mut loadings = Array2::<f64>::zeros((marks, spec.atoms));
+        for d in 0..marks {
+            for k in 0..spec.atoms {
+                loadings[[d, k]] = latent[d * spec.atoms + k];
+            }
+        }
+        let log_rates: Vec<f64> = (0..spec.atoms)
+            .map(|k| latent[marks * spec.atoms + k])
+            .collect();
+        let rates: Vec<f64> = log_rates.iter().map(|r| r.exp() / time_scale).collect();
+        let n_lambda = fit.log_lambdas.len();
+        let atom_log_lambdas: Vec<f64> = fit
+            .log_lambdas
+            .iter()
+            .skip(n_lambda.saturating_sub(spec.atoms))
+            .copied()
+            .collect();
+        let Built {
+            nodes,
+            family,
+            designs,
+            ..
+        } = built;
+        return Ok(EventHistoryFit {
+            nodes,
+            family,
+            fit,
+            mark_kinds: cohort.mark_kinds.clone(),
+            frozen_specs,
+            designs,
+            loadings,
+            log_rates,
+            rates,
+            atom_log_lambdas,
+            time_scale,
+            quadrature_order: spec.quadrature_order,
+            mesh_refinement: refinement,
+            quadrature: QuadratureCertificate {
+                gauss_hermite_order: order,
+                mesh_refinement: refinement,
+                log_likelihood: value,
+                gauss_hermite,
+                mesh,
+            },
+        });
     }
 }
