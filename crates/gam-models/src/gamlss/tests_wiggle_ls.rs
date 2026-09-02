@@ -109,7 +109,9 @@ pub(crate) fn extract_wiggle_gradient(eval: &FamilyEvaluation, block_idx: usize)
             gradient,
             hessian: _,
         } => gradient.clone(),
-        BlockWorkingSet::Diagonal { .. } => panic!("expected exact newton"),
+        BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+            panic!("expected exact newton")
+        }
     }
 }
 
@@ -544,7 +546,9 @@ pub(crate) fn wiggle_family_joint_hessian_cross_blocks_match_finite_difference_o
                 gradient,
                 hessian: _,
             } => gradient.clone(),
-            BlockWorkingSet::Diagonal { .. } => panic!("expected exact newton"),
+            BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+                panic!("expected exact newton")
+            }
         }
     };
 
@@ -690,7 +694,9 @@ pub(crate) fn nonwiggle_family_evaluate_returns_exact_newton_blockswhen_designs_
     for (block_idx, (start, end)) in [(0usize, pt), (pt, pt + pls)].into_iter().enumerate() {
         let blockhessian = match &eval.blockworking_sets[block_idx] {
             BlockWorkingSet::ExactNewton { hessian, .. } => hessian.to_dense(),
-            BlockWorkingSet::Diagonal { .. } => panic!("expected exact newton block"),
+            BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+                panic!("expected exact newton block")
+            }
         };
         let joint_block = joint.slice(s![start..end, start..end]).to_owned();
         gam_test_support::assert_matrix_derivativefd(
@@ -3086,6 +3092,11 @@ pub(crate) fn gls_wiggle_joint_loglik_gradient_matches_finite_difference_and_leg
                 }
                 BlockWorkingSet::ExactNewton { gradient, .. } => {
                     legacy.slice_mut(s![offset..offset + width]).assign(gradient);
+                }
+                BlockWorkingSet::NaturalDiagonal { score, .. } => {
+                    legacy
+                        .slice_mut(s![offset..offset + width])
+                        .assign(&designs[block].t().dot(score));
                 }
             }
             offset += width;

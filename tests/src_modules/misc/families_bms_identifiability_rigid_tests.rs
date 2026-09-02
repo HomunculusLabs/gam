@@ -4177,13 +4177,13 @@ fn rigid_fast_path_matches_loglik_finite_differences() {
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "rigid family evaluation", e));
     let grad_q = match &eval.blockworking_sets[0] {
         BlockWorkingSet::ExactNewton { gradient, .. } => gradient[0],
-        BlockWorkingSet::Diagonal { .. } => {
+        BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
             panic!("expected exact-newton marginal block")
         }
     };
     let grad_g = match &eval.blockworking_sets[1] {
         BlockWorkingSet::ExactNewton { gradient, .. } => gradient[0],
-        BlockWorkingSet::Diagonal { .. } => {
+        BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
             panic!("expected exact-newton slope block")
         }
     };
@@ -4192,7 +4192,7 @@ fn rigid_fast_path_matches_loglik_finite_differences() {
             SymmetricMatrix::Dense(h) => h[[0, 0]],
             _ => panic!("expected dense marginal Hessian"),
         },
-        BlockWorkingSet::Diagonal { .. } => {
+        BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
             panic!("expected exact-newton marginal block")
         }
     };
@@ -4201,7 +4201,7 @@ fn rigid_fast_path_matches_loglik_finite_differences() {
             SymmetricMatrix::Dense(h) => h[[0, 0]],
             _ => panic!("expected dense slope Hessian"),
         },
-        BlockWorkingSet::Diagonal { .. } => {
+        BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
             panic!("expected exact-newton slope block")
         }
     };

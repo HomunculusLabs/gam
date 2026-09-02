@@ -4879,7 +4879,9 @@ fn exact_newton_block_directional_derivatives_matchfd_for_non_probit_links() {
     let extracthessian = |eval: FamilyEvaluation, block_idx: usize| -> Array2<f64> {
         match &eval.blockworking_sets[block_idx] {
             BlockWorkingSet::ExactNewton { hessian, .. } => hessian.to_dense(),
-            BlockWorkingSet::Diagonal { .. } => panic!("expected exact newton block"),
+            BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+                panic!("expected exact newton block")
+            }
         }
     };
 
@@ -4960,7 +4962,10 @@ fn joint_exact_newton_hessian_matches_negative_gradient_jacobian_for_non_probit_
             for (block_idx, slot) in out.iter_mut().enumerate() {
                 *slot = match &eval.blockworking_sets[block_idx] {
                     BlockWorkingSet::ExactNewton { gradient, .. } => gradient[0],
-                    BlockWorkingSet::Diagonal { .. } => panic!("expected exact newton block"),
+                    BlockWorkingSet::Diagonal { .. }
+                    | BlockWorkingSet::NaturalDiagonal { .. } => {
+                        panic!("expected exact newton block")
+                    }
                 };
             }
             out

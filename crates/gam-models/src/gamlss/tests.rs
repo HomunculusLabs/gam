@@ -3681,7 +3681,9 @@ pub(crate) fn zeroweightrows_stay_inactive_in_builtin_diagonal_families() {
             assert_eq!(working_response[0], 0.5);
             assert!(working_weights[1] > 0.0);
         }
-        BlockWorkingSet::ExactNewton { .. } => panic!("expected diagonal Gaussian mu block"),
+        BlockWorkingSet::ExactNewton { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+            panic!("expected diagonal Gaussian mu block")
+        }
     }
     match &gaussian_eval.blockworking_sets[GaussianLocationScaleFamily::BLOCK_LOG_SIGMA] {
         BlockWorkingSet::Diagonal {
@@ -3692,7 +3694,7 @@ pub(crate) fn zeroweightrows_stay_inactive_in_builtin_diagonal_families() {
             assert_eq!(working_response[0], 0.1);
             assert!(working_weights[1] > 0.0);
         }
-        BlockWorkingSet::ExactNewton { .. } => {
+        BlockWorkingSet::ExactNewton { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
             panic!("expected diagonal Gaussian log-sigma block")
         }
     }
@@ -3716,7 +3718,9 @@ pub(crate) fn zeroweightrows_stay_inactive_in_builtin_diagonal_families() {
             assert_eq!(working_response[0], 0.7);
             assert!(working_weights[1] > 0.0);
         }
-        BlockWorkingSet::ExactNewton { .. } => panic!("expected diagonal Poisson block"),
+        BlockWorkingSet::ExactNewton { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+            panic!("expected diagonal Poisson block")
+        }
     }
 
     let gamma = GammaLogFamily {
@@ -3739,7 +3743,9 @@ pub(crate) fn zeroweightrows_stay_inactive_in_builtin_diagonal_families() {
             assert_eq!(working_response[0], 0.2);
             assert!(working_weights[1] > 0.0);
         }
-        BlockWorkingSet::ExactNewton { .. } => panic!("expected diagonal Gamma block"),
+        BlockWorkingSet::ExactNewton { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+            panic!("expected diagonal Gamma block")
+        }
     }
 }
 
@@ -3767,7 +3773,9 @@ pub(crate) fn log_link_rows_remain_exact_beyond_former_clamp() {
             assert_eq!(working_weights[2], poisson_eta[2].exp());
             assert_ne!(working_response[2], poisson_eta[2]);
         }
-        BlockWorkingSet::ExactNewton { .. } => panic!("expected diagonal Poisson block"),
+        BlockWorkingSet::ExactNewton { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+            panic!("expected diagonal Poisson block")
+        }
     }
 
     let gamma = GammaLogFamily {
@@ -3793,7 +3801,9 @@ pub(crate) fn log_link_rows_remain_exact_beyond_former_clamp() {
             assert!(working_weights[2] > 0.0);
             assert_ne!(working_response[2], gamma_eta[2]);
         }
-        BlockWorkingSet::ExactNewton { .. } => panic!("expected diagonal Gamma block"),
+        BlockWorkingSet::ExactNewton { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+            panic!("expected diagonal Gamma block")
+        }
     }
 }
 
@@ -3826,7 +3836,9 @@ pub(crate) fn poisson_log_canonical_diagonal_weight_is_fisher_and_observed() {
                 );
             }
         }
-        BlockWorkingSet::ExactNewton { .. } => panic!("expected diagonal Poisson block"),
+        BlockWorkingSet::ExactNewton { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+            panic!("expected diagonal Poisson block")
+        }
     }
 }
 
@@ -3876,7 +3888,9 @@ pub(crate) fn gamma_log_noncanonical_diagonal_uses_observed_not_fisher_weight_an
                 );
             }
         }
-        BlockWorkingSet::ExactNewton { .. } => panic!("expected diagonal Gamma block"),
+        BlockWorkingSet::ExactNewton { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+            panic!("expected diagonal Gamma block")
+        }
     }
 
     let d_eta = array![0.5_f64, -2.0_f64];
@@ -3971,7 +3985,7 @@ pub(crate) fn gaussian_log_sigmaweight_directional_derivative_matches_finite_dif
             working_response: _,
             working_weights,
         } => working_weights[0],
-        BlockWorkingSet::ExactNewton { .. } => {
+        BlockWorkingSet::ExactNewton { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
             panic!("expected diagonal Gaussian log-sigma block")
         }
     };
@@ -3985,7 +3999,7 @@ pub(crate) fn gaussian_log_sigmaweight_directional_derivative_matches_finite_dif
             working_response: _,
             working_weights,
         } => working_weights[0],
-        BlockWorkingSet::ExactNewton { .. } => {
+        BlockWorkingSet::ExactNewton { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
             panic!("expected diagonal Gaussian log-sigma block")
         }
     };
@@ -4104,7 +4118,7 @@ pub(crate) fn gaussian_diagonal_log_sigma_block_uses_fisher_score_step_in_far_ta
                 expected_response
             );
         }
-        BlockWorkingSet::ExactNewton { .. } => {
+        BlockWorkingSet::ExactNewton { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
             panic!("expected diagonal Gaussian log-sigma block")
         }
     }
@@ -5634,7 +5648,9 @@ pub(crate) fn wiggle_family_evaluate_returns_exact_newton_blocks() {
             assert!(gradient[0].is_finite());
             assert!(hessian[[0, 0]].is_finite());
         }
-        BlockWorkingSet::Diagonal { .. } => panic!("threshold block should be exact newton"),
+        BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+            panic!("threshold block should be exact newton")
+        }
     }
     match &eval.blockworking_sets[1] {
         BlockWorkingSet::ExactNewton { gradient, hessian } => {
@@ -5644,7 +5660,9 @@ pub(crate) fn wiggle_family_evaluate_returns_exact_newton_blocks() {
             assert!(gradient[0].is_finite());
             assert!(hessian[[0, 0]].is_finite());
         }
-        BlockWorkingSet::Diagonal { .. } => panic!("log-sigma block should be exact newton"),
+        BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+            panic!("log-sigma block should be exact newton")
+        }
     }
     match &eval.blockworking_sets[2] {
         BlockWorkingSet::ExactNewton { gradient, hessian } => {
@@ -5655,7 +5673,9 @@ pub(crate) fn wiggle_family_evaluate_returns_exact_newton_blocks() {
             assert!(gradient.iter().all(|v| v.is_finite()));
             assert!(hessian.iter().all(|v| v.is_finite()));
         }
-        BlockWorkingSet::Diagonal { .. } => panic!("wiggle block should be exact newton"),
+        BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+            panic!("wiggle block should be exact newton")
+        }
     }
 }
 
@@ -5717,7 +5737,9 @@ pub(crate) fn wiggle_family_exact_newton_directional_derivative_matches_finite_d
                 gradient: _,
                 hessian,
             } => hessian.to_dense(),
-            BlockWorkingSet::Diagonal { .. } => panic!("expected exact newton"),
+            BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+                panic!("expected exact newton")
+            }
         }
     };
 
@@ -5820,7 +5842,9 @@ pub(crate) fn wiggle_threshold_block_exacthessian_matches_autodiffobjective() {
     let eval = family.evaluate(&states).expect("evaluate wiggle family");
     let blockhessian = match &eval.blockworking_sets[BinomialLocationScaleWiggleFamily::BLOCK_T] {
         BlockWorkingSet::ExactNewton { hessian, .. } => hessian.to_dense(),
-        BlockWorkingSet::Diagonal { .. } => panic!("expected exact newton threshold block"),
+        BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+            panic!("expected exact newton threshold block")
+        }
     };
     let (_, _, hess_ad) = second_derivative(
         |bt| wiggle_negloglik_threshold_numdual(bt, beta_ls0, &betaw, &y, &weights, &knots, 3),
@@ -6902,7 +6926,9 @@ pub(crate) fn wiggle_family_block_hessians_match_jointhessian_principal_blocks()
     for (block_idx, (start, end)) in ranges.into_iter().enumerate() {
         let blockhessian = match &eval.blockworking_sets[block_idx] {
             BlockWorkingSet::ExactNewton { hessian, .. } => hessian.to_dense(),
-            BlockWorkingSet::Diagonal { .. } => panic!("expected exact newton block"),
+            BlockWorkingSet::Diagonal { .. } | BlockWorkingSet::NaturalDiagonal { .. } => {
+                panic!("expected exact newton block")
+            }
         };
         let joint_block = joint.slice(s![start..end, start..end]).to_owned();
         gam_test_support::assert_matrix_derivativefd(
