@@ -1689,15 +1689,32 @@ fn exact_a_route_parity_holds_across_a_deflating_rho_ladder_2515() {
         let dense = dense.gradient();
         let bundled = bundled.gradient();
         let mut worst = 0.0_f64;
+        let mut worst_coordinate = 0usize;
         let mut scale = 0.0_f64;
         for coordinate in 0..dense.len() {
-            worst = worst.max((dense[coordinate] - bundled[coordinate]).abs());
+            let gap = (dense[coordinate] - bundled[coordinate]).abs();
+            if gap > worst {
+                worst = gap;
+                worst_coordinate = coordinate;
+            }
             scale = scale.max(dense[coordinate].abs());
         }
+        let role = if Some(worst_coordinate) == rho.sparse_flat_index() {
+            "assignment log-strength".to_string()
+        } else if worst_coordinate >= rho.smooth_flat_start()
+            && worst_coordinate < rho.smooth_flat_start() + rho.k_atoms()
+        {
+            format!("smooth atom {}", worst_coordinate - rho.smooth_flat_start())
+        } else {
+            format!("outer coordinate {worst_coordinate}")
+        };
         let relative = worst / scale.max(f64::MIN_POSITIVE);
         println!(
             "[#2515 LADDER] {label}: deflated rows={deflated_rows} max|Δ|={worst:.6e} \
-             ‖g‖∞={scale:.6e} relative={relative:.6e}"
+             at flat {worst_coordinate} ({role}), dense={:+.12e}, bundled={:+.12e}, \
+             ‖g‖∞={scale:.6e} relative={relative:.6e}",
+            dense[worst_coordinate],
+            bundled[worst_coordinate],
         );
         deflating_states += 1;
         if relative > worst_relative {
