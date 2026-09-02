@@ -422,6 +422,8 @@ fn validate_scalar(expression: &Expr, constants: &HashSet<String>) -> Result<()>
                 | BinOp::Le(_)
                 | BinOp::Gt(_)
                 | BinOp::Ge(_)
+                | BinOp::And(_)
+                | BinOp::Or(_)
         ) =>
         {
             validate_scalar(left, constants)?;
@@ -920,6 +922,8 @@ fn symbolic_scalar(
                 BinOp::Le(_) => "<=",
                 BinOp::Gt(_) => ">",
                 BinOp::Ge(_) => ">=",
+                BinOp::And(_) => "&&",
+                BinOp::Or(_) => "||",
                 _ => {
                     return Err(syn::Error::new_spanned(
                         op,
@@ -4599,6 +4603,30 @@ mod tests {
         let second = rust.find("exp_stack (z)").expect("the second leaf call");
         let between = rust.find("let b_v").expect("the value between them");
         assert!(first < second && second < between, "{rust}");
+    }
+
+    /// An activity gate may be stated on the supplied stack itself (`||` over
+    /// its entries), so a caller passes no flag and the program's leaf calls
+    /// are not held behind the caller's scans (#932, the location-scale row).
+    #[test]
+    fn activity_conditions_accept_logical_connectives() {
+        let program = quote! {
+            fn gated(x; a, b)
+            emit [order2, cuda];
+            leaves { log => log_stack => d_log }
+            witnesses [];
+            {
+                let mut out = zero();
+                if (a != 0.0 || b != 0.0) {
+                    out = compose(log, x);
+                }
+                return out;
+            }
+        };
+        let rust = emitted_function(program.clone(), "gated_order2");
+        assert!(rust.contains("if a != 0.0 || b != 0.0"), "{rust}");
+        let cuda = emitted_cuda(program);
+        assert!(cuda.contains("if (in.a != 0.0 || in.b != 0.0)"), "{cuda}");
     }
 
     #[test]

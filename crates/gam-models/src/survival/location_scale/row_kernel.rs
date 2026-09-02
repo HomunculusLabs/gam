@@ -672,19 +672,16 @@ row_program! {
         eta_ls_exit,
         eta_ls_entry,
         eta_ls_deriv;
-        u0_active,
         u0_value,
         u0_first,
         u0_second,
         u0_third,
         u0_fourth,
-        u1_active,
         u1_value,
         u1_first,
         u1_second,
         u1_third,
         u1_fourth,
-        g_active,
         g_value,
         g_first,
         g_second,
@@ -713,7 +710,7 @@ row_program! {
         let g = add(hdot, mul(inv_sigma_exit, event_inner));
 
         let mut nll = zero();
-        if (u0_active != 0.0) {
+        if (u0_value != 0.0 || u0_first != 0.0 || u0_second != 0.0 || u0_third != 0.0 || u0_fourth != 0.0) {
             nll = compose(
                 outer,
                 u0,
@@ -724,7 +721,7 @@ row_program! {
                 u0_fourth
             );
         }
-        if (u1_active != 0.0) {
+        if (u1_value != 0.0 || u1_first != 0.0 || u1_second != 0.0 || u1_third != 0.0 || u1_fourth != 0.0) {
             nll = add(
                 nll,
                 compose(
@@ -738,7 +735,7 @@ row_program! {
                 )
             );
         }
-        if (g_active != 0.0) {
+        if (g_value != 0.0 || g_first != 0.0 || g_second != 0.0 || g_third != 0.0 || g_fourth != 0.0) {
             nll = add(
                 nll,
                 compose(
@@ -756,33 +753,17 @@ row_program! {
     }
 }
 
-/// The activity flags and stacks the row program takes from a plan.
-///
-/// An all-zero stack is how the kernel spells "this term is not on this row"
-/// (an untruncated row's entry stack), so a present stack is active exactly
-/// when it is not all zero; an absent slot is inactive by its discriminant
-/// and is not flattened to zeros and rescanned.
+/// The stacks the row program takes from a plan: an absent slot is the
+/// all-zero stack, which the program's own activity condition reads as
+/// inactive (an all-zero stack is also how the kernel spells "this term is
+/// not on this row", an untruncated row's entry stack). The program takes no
+/// activity flag: a flag computed here ran before the inlined program could
+/// issue its first leaf call, and held both `exp` calls behind the scans.
 #[inline(always)]
-fn sls_program_activity_and_stacks<const ORDER: usize>(
+fn sls_program_stacks<const ORDER: usize>(
     plan: &SlsOuterPlan<ORDER>,
-) -> (f64, [f64; ORDER], f64, [f64; ORDER], f64) {
-    let u0_active = stack_activity(&plan.u0);
-    let (u1, u1_active) = slot_activity(plan.u1);
-    let (g, g_active) = slot_activity(plan.g);
-    (u0_active, u1, u1_active, g, g_active)
-}
-
-#[inline(always)]
-fn stack_activity<const ORDER: usize>(stack: &[f64; ORDER]) -> f64 {
-    if stack_is_exactly_zero(stack) { 0.0 } else { 1.0 }
-}
-
-#[inline(always)]
-fn slot_activity<const ORDER: usize>(slot: Option<[f64; ORDER]>) -> ([f64; ORDER], f64) {
-    match slot {
-        Some(stack) => (stack, stack_activity(&stack)),
-        None => ([0.0; ORDER], 0.0),
-    }
+) -> ([f64; ORDER], [f64; ORDER]) {
+    (plan.u1.unwrap_or([0.0; ORDER]), plan.g.unwrap_or([0.0; ORDER]))
 }
 
 #[inline(always)]
@@ -791,11 +772,11 @@ pub(crate) fn sls_row_nll<S: JetScalar<SLS_ROW_K>>(
     kernel: &SurvivalExactRowKernel,
 ) -> Result<S, String> {
     let plan = sls_outer_plan::<5>(kernel);
-    let (u0_active, u1, u1_active, g, g_active) = sls_program_activity_and_stacks(&plan);
+    let (u1, g) = sls_program_stacks(&plan);
     let (nll, []) = sls_row_program(
         &vars[0], &vars[1], &vars[2], &vars[3], &vars[4], &vars[5], &vars[6], &vars[7], &vars[8],
-        u0_active, plan.u0[0], plan.u0[1], plan.u0[2], plan.u0[3], plan.u0[4], u1_active, u1[0],
-        u1[1], u1[2], u1[3], u1[4], g_active, g[0], g[1], g[2], g[3], g[4],
+        plan.u0[0], plan.u0[1], plan.u0[2], plan.u0[3], plan.u0[4], u1[0],
+        u1[1], u1[2], u1[3], u1[4], g[0], g[1], g[2], g[3], g[4],
     );
     Ok(nll)
 }
@@ -806,11 +787,11 @@ fn sls_row_vgh_generated(
     kernel: &SurvivalExactRowKernel,
 ) -> (f64, [f64; SLS_ROW_K], [[f64; SLS_ROW_K]; SLS_ROW_K]) {
     let plan = sls_outer_plan::<3>(kernel);
-    let (u0_active, u1, u1_active, g, g_active) = sls_program_activity_and_stacks(&plan);
+    let (u1, g) = sls_program_stacks(&plan);
     let (value, gradient, hessian, []) = sls_row_program_order2(
         primary[0], primary[1], primary[2], primary[3], primary[4], primary[5], primary[6],
-        primary[7], primary[8], u0_active, plan.u0[0], plan.u0[1], plan.u0[2], 0.0, 0.0,
-        u1_active, u1[0], u1[1], u1[2], 0.0, 0.0, g_active, g[0], g[1], g[2], 0.0, 0.0,
+        primary[7], primary[8], plan.u0[0], plan.u0[1], plan.u0[2], 0.0, 0.0,
+        u1[0], u1[1], u1[2], 0.0, 0.0, g[0], g[1], g[2], 0.0, 0.0,
     );
     (value, gradient, hessian)
 }
@@ -822,11 +803,11 @@ fn sls_row_third_generated(
     direction: &[f64; SLS_ROW_K],
 ) -> [[f64; SLS_ROW_K]; SLS_ROW_K] {
     let plan = sls_outer_plan::<5>(kernel);
-    let (u0_active, u1, u1_active, g, g_active) = sls_program_activity_and_stacks(&plan);
+    let (u1, g) = sls_program_stacks(&plan);
     sls_row_program_third_contracted(
         primary[0], primary[1], primary[2], primary[3], primary[4], primary[5], primary[6],
-        primary[7], primary[8], u0_active, plan.u0[0], plan.u0[1], plan.u0[2], plan.u0[3],
-        plan.u0[4], u1_active, u1[0], u1[1], u1[2], u1[3], u1[4], g_active, g[0], g[1], g[2], g[3],
+        primary[7], primary[8], plan.u0[0], plan.u0[1], plan.u0[2], plan.u0[3],
+        plan.u0[4], u1[0], u1[1], u1[2], u1[3], u1[4], g[0], g[1], g[2], g[3],
         g[4], direction,
     )
 }
@@ -839,7 +820,7 @@ fn sls_row_fourth_generated(
     direction_v: &[f64; SLS_ROW_K],
 ) -> [[f64; SLS_ROW_K]; SLS_ROW_K] {
     let plan = sls_outer_plan::<5>(kernel);
-    let (u0_active, u1, u1_active, g, g_active) = sls_program_activity_and_stacks(&plan);
+    let (u1, g) = sls_program_stacks(&plan);
     sls_row_program_fourth_contracted(
         primary[0],
         primary[1],
@@ -850,19 +831,16 @@ fn sls_row_fourth_generated(
         primary[6],
         primary[7],
         primary[8],
-        u0_active,
         plan.u0[0],
         plan.u0[1],
         plan.u0[2],
         plan.u0[3],
         plan.u0[4],
-        u1_active,
         u1[0],
         u1[1],
         u1[2],
         u1[3],
         u1[4],
-        g_active,
         g[0],
         g[1],
         g[2],
