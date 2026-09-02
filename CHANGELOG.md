@@ -1,5 +1,33 @@
 ## Unreleased
 
+- **The event-history engine is the one that recovers its own simulation.**
+  On the shared 80-subject fixture (one mark, one atom; intercept −0.8, slope
+  0.5, loading 1.0, rate 0.4) exact marginalisation returns intercept −0.15,
+  loading 1.08, rate 0.27; the Laplace engine that briefly replaced it
+  returned +28.6, 8.26, 15264, and a forecast of 1.5×10¹² events. The
+  divergence is the one that engine's own documentation derives: above the
+  rate the mesh resolves, an event node carries a count and no exposure, its
+  latent coordinate is held only by the prior, and every event buys `a²/2` of
+  free evidence, unbounded in the loading. Bounding the fitted log-rate to
+  the mesh-resolvable range (measured: rate 15264 → 23) does not close it,
+  because the corner is in the discretised likelihood rather than in the rank
+  proposal. Exact marginalisation never meets it — with the population
+  centring, an event node's `−y a²/2` cancels the `exp(y² a²/2)` the
+  stationary state returns at `y = 1`. Restored with everything learned
+  since: the forecast window as a value, per-mark exposure rows, prior
+  history as a first-class part of the cohort (an event at or before entry
+  shapes the risk sets the window opens with and is not compensated), and the
+  refinement certificate measured as the exact first-order mode shift
+  `V (g' − g)` — one gradient per candidate rather than a second fit whose
+  own convergence would have to be certified first — reported in posterior
+  standard deviations. The limits are stated: the latent grid is a product
+  over the atoms, so several atoms are useful when they load on different
+  marks, and a posterior the grid cannot represent raises the order once and
+  then says so. 29 of 29 event-history tests pass, including the brute-force
+  single-node and two-node integrals to `1e-8`, the Louis-vs-computed
+  curvature convergence, and the constant-hazard competing-risks forecast
+  identities.
+
 - **Event histories: every forecast probability is a chronological integral,
   the Hessian is Louis' identity in coefficient space by one forward sweep,
   marks have kinds, and the fit certifies its coefficients under refinement
