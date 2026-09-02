@@ -141,7 +141,7 @@ fn strongest_hand(row: Row) -> Channels {
     )
 }
 
-#[inline(always)]
+#[inline(never)]
 fn generated_third(row: Row) -> [[f64; 2]; 2] {
     generated_rigid_bms_third_contracted(
         row.marginal_eta,
@@ -159,7 +159,7 @@ fn generated_third(row: Row) -> [[f64; 2]; 2] {
     )
 }
 
-#[inline(always)]
+#[inline(never)]
 fn generated_fourth(row: Row) -> [[f64; 2]; 2] {
     generated_rigid_bms_fourth_contracted(
         row.marginal_eta,
@@ -178,7 +178,7 @@ fn generated_fourth(row: Row) -> [[f64; 2]; 2] {
     )
 }
 
-#[inline(always)]
+#[inline(never)]
 fn generated_third_full(row: Row) -> [[[f64; 2]; 2]; 2] {
     generated_rigid_bms_third_full(
         row.marginal_eta,
@@ -195,7 +195,7 @@ fn generated_third_full(row: Row) -> [[[f64; 2]; 2]; 2] {
     )
 }
 
-#[inline(always)]
+#[inline(never)]
 fn generated_fourth_full(row: Row) -> [[[[f64; 2]; 2]; 2]; 2] {
     generated_rigid_bms_fourth_full(
         row.marginal_eta,
