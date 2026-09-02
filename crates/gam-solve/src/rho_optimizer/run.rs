@@ -9774,11 +9774,14 @@ pub(crate) fn run_fixed_point_outer_solver(
             Ok(result)
         }
         Err(FixedPointError::MaxIterationsReached { last_solution }) => {
+            let step_norm = last_solution.final_step_norm.expect(
+                "a fixed-point max-iteration solution must carry its final accepted step norm",
+            );
             log::warn!(
                 "[OUTER warning] {context}: {label} hit max_iter={} at final_value={:.6e} step_norm={:.3e}",
                 config.max_iter,
                 last_solution.final_value,
-                last_solution.final_gradient_norm.unwrap_or(f64::NAN),
+                step_norm,
             );
             Ok(solution_into_outer_result(*last_solution, false, the_plan))
         }
