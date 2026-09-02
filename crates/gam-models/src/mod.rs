@@ -95,6 +95,7 @@ pub mod multinomial_predictive;
 pub(crate) mod multinomial_reml;
 pub use multinomial_reml::{MultinomialFamily, MultinomialLogitRowProgram};
 pub mod outer_subsample;
+pub mod output_axis;
 pub mod parameter_block;
 pub mod penalized_vector_glm;
 pub(crate) mod row_kernel;

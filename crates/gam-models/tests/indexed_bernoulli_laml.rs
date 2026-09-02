@@ -1,11 +1,12 @@
 use gam_linalg::matrix::DesignMatrix;
-use gam_models::custom_family::{BlockwiseFitOptions, ParameterBlockSpec, PenaltyMatrix};
+use gam_models::custom_family::{BlockwiseFitOptions, PenaltyMatrix};
 use gam_models::indexed_bernoulli::{IndexedBernoulliFamily, fit_indexed_bernoulli_laml};
+use gam_models::output_axis::{OutputAxisPenalty, OutputBlockAxis};
 use gam_problem::{
     OwnedLikelihoodWeights, OwnedSeparableCellMeasure, OwnedStructuralCells,
 };
 use gam_spec::{InverseLink, StandardLink};
-use ndarray::{Array1, Array2, array};
+use ndarray::{Array2, array};
 
 #[test]
 fn indexed_outputs_share_one_selected_precision_without_losing_risk_geometry() {
@@ -48,20 +49,23 @@ fn indexed_outputs_share_one_selected_precision_without_losing_risk_geometry() {
     )
     .expect("valid indexed Bernoulli family");
 
-    let slope_penalty = array![[0.0, 0.0], [0.0, 1.0]];
-    let specs: Vec<_> = (0..K)
-        .map(|output| ParameterBlockSpec {
-            name: format!("endpoint_{output}"),
-            design: DesignMatrix::from(design.clone()),
-            offset: Array1::zeros(N),
-            penalties: vec![PenaltyMatrix::Dense(slope_penalty.clone())
-                .with_precision_label("shared_history_scale")],
-            nullspace_dims: vec![1],
-            initial_log_lambdas: array![0.0],
-            initial_beta: Some(Array1::zeros(2)),
-            ..ParameterBlockSpec::defaults()
-        })
-        .collect();
+    let slope_penalty = OutputAxisPenalty::shared(
+        PenaltyMatrix::Diagonal(array![0.0, 1.0]),
+        1,
+        0.0,
+        "shared_history_scale",
+    )
+    .expect("shared structured slope penalty");
+    let specs = OutputBlockAxis::new(
+        (0..K).map(|output| format!("endpoint_{output}")).collect(),
+        DesignMatrix::from(design.clone()),
+    )
+    .expect("replicated output block axis")
+    .with_initial_coefficients(Array2::zeros((2, K)))
+    .expect("coefficient seed geometry")
+    .with_penalty(slope_penalty)
+    .expect("replicated penalty geometry")
+    .parameter_blocks();
     let options = BlockwiseFitOptions {
         inner_tol: 1e-9,
         outer_tol: 1e-7,
