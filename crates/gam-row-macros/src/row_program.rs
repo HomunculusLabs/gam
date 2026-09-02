@@ -1201,12 +1201,33 @@ fn symbolic_compose_jet(input: SymbolicJet, stack: &str, offset: usize) -> Symbo
     }
 }
 
+/// A local that is exactly a scalar multiple (or the negation) of another
+/// binding: `let m = scale(x, s);` or `let m = neg(x);`.
+///
+/// A composition on such a local pulls the scalar into the outer derivative
+/// stack instead of scaling every channel of the point: for `f(s·x)`,
+/// `∂_a = (s·f')·x_a` and `∂_ab = (s²·f'')·x_a·x_b + (s·f')·x_ab`, so the
+/// two scaled stack entries are formed once and the chain rule reads `x`'s
+/// own channels. The rigid Bernoulli row composes its probit leaf on
+/// `scale(latent_index, outcome_sign)`: scaling the index's six channels by
+/// the sign cost six multiplies per row where the hand kernel pays two
+/// (`m = s·η`, `u1 = s·k1`), which was the whole margin by which the hand
+/// won (#932). The scaled local itself is still emitted; whatever of it
+/// nothing reads (its scaled derivative channels, when only the compose
+/// consumed them) is dropped by the scheduler.
+struct ScaledAlias {
+    inner: String,
+    /// `None` is a negation.
+    scalar: Option<Expr>,
+}
+
 fn symbolic_expression(
     expression: &ProgramExpr,
     owner: &str,
     leaves: &[Leaf],
     constants: &HashSet<String>,
     bindings: &HashMap<String, SymbolicJet>,
+    aliases: &HashMap<String, ScaledAlias>,
     target: SymbolicTarget,
     dimension: usize,
     stack_index: &mut usize,
@@ -1219,6 +1240,7 @@ fn symbolic_expression(
             leaves,
             constants,
             bindings,
+            aliases,
             target,
             dimension,
             stack_index,
@@ -1300,8 +1322,42 @@ fn symbolic_expression(
                 }
             }
 
-            let first = format!("{stack}[1]");
-            let second = format!("{stack}[2]");
+            // A scaled composition point: the scalar goes into the outer
+            // stack once, and the chain rule reads the unscaled binding.
+            let (input, first, second) = match aliases
+                .get(&value.to_string())
+                .and_then(|alias| bindings.get(&alias.inner).map(|inner| (alias, inner)))
+            {
+                Some((alias, inner)) => {
+                    let first = format!("{stack}_u1");
+                    let second = format!("{stack}_u2");
+                    let (first_value, second_value) = match &alias.scalar {
+                        Some(scalar) => {
+                            let scalar = symbolic_scalar(scalar, constants, target)?;
+                            (
+                                symbolic_multiply(&format!("{stack}[1]"), &scalar),
+                                symbolic_multiply(
+                                    &symbolic_multiply(&format!("{stack}[2]"), &scalar),
+                                    &scalar,
+                                ),
+                            )
+                        }
+                        None => (symbolic_negate(&format!("{stack}[1]")), format!("{stack}[2]")),
+                    };
+                    match target {
+                        SymbolicTarget::Rust => {
+                            preludes.push(format!("let {first}: f64 = {first_value};"));
+                            preludes.push(format!("let {second}: f64 = {second_value};"));
+                        }
+                        SymbolicTarget::Cuda => {
+                            preludes.push(format!("double {first} = {first_value};"));
+                            preludes.push(format!("double {second} = {second_value};"));
+                        }
+                    }
+                    (inner.clone(), first, second)
+                }
+                None => (input, format!("{stack}[1]"), format!("{stack}[2]")),
+            };
             // The curvature term of the chain rule, `f''·g_a·g_b`, is emitted as
             // `(f''·g_a)·g_b` with `f''·g_a` hoisted ONCE per present axis, so a
             // Hessian entry costs one multiply instead of two. LLVM cannot do
@@ -2720,6 +2776,16 @@ fn symbolic_schedule(
     let mut mutable_support = HashMap::<String, SymbolicSupport>::new();
     let mut assigned = HashSet::new();
     let mut symbolic_statements = Vec::new();
+    let mutable_names = statements
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Local {
+                name, mutable: true, ..
+            } => Some(name.to_string()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut aliases = HashMap::<String, ScaledAlias>::new();
     // One source-wide namespace makes temporary declarations collision-free,
     // including repeated assignments to the same mutable local in one scope.
     let mut stack_index = 0;
@@ -2731,12 +2797,39 @@ fn symbolic_schedule(
                 value,
             } => {
                 let mut preludes = Vec::new();
+                // An immutable scalar multiple or negation of another binding
+                // that no gate reassigns is an alias a later compose absorbs.
+                if !*mutable {
+                    let alias = match value {
+                        ProgramExpr::Scale(inner, scalar) => match inner.as_ref() {
+                            ProgramExpr::Path(inner) => Some(ScaledAlias {
+                                inner: inner.to_string(),
+                                scalar: Some(scalar.clone()),
+                            }),
+                            _ => None,
+                        },
+                        ProgramExpr::Neg(inner) => match inner.as_ref() {
+                            ProgramExpr::Path(inner) => Some(ScaledAlias {
+                                inner: inner.to_string(),
+                                scalar: None,
+                            }),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(alias) = alias
+                        && !mutable_names.contains(&alias.inner)
+                    {
+                        aliases.insert(name.to_string(), alias);
+                    }
+                }
                 let value = symbolic_expression(
                     value,
                     &name.to_string(),
                     leaves,
                     constants,
                     &bindings,
+                    &aliases,
                     target,
                     dimension,
                     &mut stack_index,
@@ -2771,6 +2864,7 @@ fn symbolic_schedule(
                         leaves,
                         constants,
                         &bindings,
+                        &aliases,
                         target,
                         dimension,
                         &mut stack_index,
@@ -2815,6 +2909,7 @@ fn symbolic_schedule(
         leaves,
         constants,
         &bindings,
+        &aliases,
         target,
         dimension,
         &mut stack_index,
@@ -4950,6 +5045,78 @@ mod tests {
         let cuda = emitted_cuda(program);
         assert!(!cuda.contains("double p_v"), "{cuda}");
         assert!(cuda.contains("double p_g0"), "{cuda}");
+    }
+
+    /// A composition on `scale(x, s)` forms `s·f'` and `s²·f''` once and
+    /// reads `x`'s own channels; the scaled local's derivative channels are
+    /// never emitted. The rigid Bernoulli row (`compose(probit,
+    /// scale(latent_index, outcome_sign))`) paid six sign multiplies per row
+    /// for the hand kernel's two before this rule existed (#932).
+    #[test]
+    fn a_scaled_composition_point_is_absorbed_into_the_outer_stack() {
+        let program = quote! {
+            fn signed(x, y; s, a)
+            emit [order2, cuda];
+            leaves { probit => probit_stack => d_probit }
+            witnesses [];
+            {
+                let p = mul(x, y);
+                let m = scale(p, s);
+                let out = compose(probit, m, a);
+                return out;
+            }
+        };
+        let rust = emitted_function(program.clone(), "signed_order2");
+        assert!(rust.contains("probit_stack (m_v"), "{rust}");
+        assert!(rust.contains("m_stack0_u1"), "{rust}");
+        assert!(rust.contains("m_stack0_u2"), "{rust}");
+        assert!(!rust.contains("let m_g0"), "{rust}");
+        assert!(!rust.contains("let m_h0_0"), "{rust}");
+        // The point, `s·f'`, and `s²·f''` (two factors): four sign multiplies
+        // in the whole row, independent of the point's support.
+        assert_eq!(rust.matches("* s)").count(), 4, "{rust}");
+        let cuda = emitted_cuda(program);
+        assert!(cuda.contains("m_stack0_u1"), "{cuda}");
+        assert!(!cuda.contains("double m_g0"), "{cuda}");
+
+        // A negated point is the same rule with `s = -1`: no multiply at all.
+        let program = quote! {
+            fn negated(x, y;)
+            emit [order2];
+            leaves { exponential => exp_stack => d_exp }
+            witnesses [];
+            {
+                let p = mul(x, y);
+                let n = neg(p);
+                let out = compose(exponential, n);
+                return out;
+            }
+        };
+        let rust = emitted_function(program, "negated_order2");
+        assert!(rust.contains("exp_stack (n_v"), "{rust}");
+        assert!(rust.contains("n_stack0_u1"), "{rust}");
+        assert!(!rust.contains("let n_g0"), "{rust}");
+
+        // A point scaled from a mutable local is not aliased: a gate may
+        // reassign the local, and the alias would read the wrong state.
+        let program = quote! {
+            fn guarded(x, y; s, a)
+            emit [order2];
+            leaves { probit => probit_stack => d_probit }
+            witnesses [];
+            {
+                let mut p = mul(x, y);
+                if (s != 0.0) {
+                    p = add(p, x);
+                }
+                let m = scale(p, s);
+                let out = compose(probit, m, a);
+                return out;
+            }
+        };
+        let rust = emitted_function(program, "guarded_order2");
+        assert!(!rust.contains("m_stack0_u1"), "{rust}");
+        assert!(rust.contains("let m_g0"), "{rust}");
     }
 
     /// An activity gate may be stated on the supplied stack itself (`||` over
