@@ -284,6 +284,10 @@ fn summarize_inner_runs(rows: &[EpochRow]) -> Vec<InnerRunSummary<'_>> {
     summaries
 }
 
+fn ratio(last: f64, warm: f64) -> f64 {
+    last / warm.max(f64::MIN_POSITIVE)
+}
+
 /// Deterministic xorshift64*, so the bench needs no RNG dependency and the same
 /// ladder is bit-reproducible on every host.
 struct Rng(u64);
@@ -561,19 +565,21 @@ fn main() {
         println!("[refresh-host] {name} GBs {:.1}", bytes_per_second / 1.0e9);
     }
     println!(
-        "[refresh-epoch] n,p,k,s,epoch,refresh_s,route_s,refresh_over_route,births,\
+        "[refresh-epoch] n,p,k,s,outer_run,inner_epoch,refresh_s,route_s,refresh_over_route,births,\
          cg_columns,cg_iterations,recycled_rank,tile_columns,max_component,max_component_nnz,\
          operator_build_s,accumulate_s,sigma_s,graph_build_s,precond_s,cg_solve_s,\
          block_sweeps,kappa_bound,ev,precond_cost_ratio,recycling_admitted"
     );
     println!(
-        "[refresh-config] n,p,k,s,epochs_run,fit_s,refresh_total_s,route_total_s,\
-         refresh_frac,first_refresh_s,last_refresh_s,growth,\
-         first_cg_iterations,last_cg_iterations,cg_growth,\
-         first_tile,last_tile,first_nnz,last_nnz,first_kappa,last_kappa,\
-         acc_total_s,graph_total_s,opbuild_total_s,precond_total_s,cgsolve_total_s,\
-         total_block_sweeps,last_iters_per_column,\
-         cg_bytes_moved_TB,cg_achieved_GBs"
+        "[refresh-inner] n,p,k,s,outer_run,epochs_run,warm_available,warm_epoch,last_epoch,\
+         warm_refresh_s,last_refresh_s,warm_refresh_growth,warm_block_sweeps,last_block_sweeps,\
+         warm_block_sweeps_growth,warm_cg_solve_s,last_cg_solve_s,warm_cg_solve_growth,\
+         warm_kappa,last_kappa,warm_kappa_growth"
+    );
+    println!(
+        "[refresh-config] n,p,k,s,inner_runs,refreshes,fit_s,refresh_total_s,route_total_s,\
+         refresh_frac,acc_total_s,graph_total_s,opbuild_total_s,precond_total_s,cgsolve_total_s,\
+         total_block_sweeps,cg_bytes_moved_TB,cg_achieved_GBs"
     );
 
     for shape in ladder {
@@ -607,9 +613,12 @@ fn main() {
             Err(e) => format!("err {e}"),
         };
         let rows = parse_epochs(&lines);
+        let inner_runs = summarize_inner_runs(&rows);
         eprintln!(
-            "[refresh-run] n={n} p={p} k={k} s={s} epochs_observed={} fit_s={fit_s:.2} {outcome}",
-            rows.len()
+            "[refresh-run] n={n} p={p} k={k} s={s} inner_runs={} refreshes={} \
+             fit_s={fit_s:.2} {outcome}",
+            inner_runs.len(),
+            rows.len(),
         );
         if rows.is_empty() {
             continue;
@@ -617,9 +626,10 @@ fn main() {
 
         for row in &rows {
             println!(
-                "[refresh-epoch] {n},{p},{k},{s},{},{:.4},{:.4},{:.3},{},{},{},{},{},{},{},{:.4},\
+                "[refresh-epoch] {n},{p},{k},{s},{},{},{:.4},{:.4},{:.3},{},{},{},{},{},{},{},{:.4},\
                  {:.4},{:.4},{:.4},{:.4},{:.4},{},{:.6e},{:.6},{:.4},{}",
-                row.epoch,
+                row.outer_run,
+                row.inner_epoch,
                 row.refresh_s,
                 row.route_s,
                 if row.route_s > 0.0 {
@@ -648,8 +658,36 @@ fn main() {
             );
         }
 
-        let first = rows.first().expect("non-empty");
-        let last = rows.last().expect("non-empty");
+        for inner in &inner_runs {
+            let warm_available = inner.warm.is_some();
+            let warm_epoch = inner.warm.map_or(0, |row| row.inner_epoch);
+            let warm_refresh_s = inner.warm.map_or(f64::NAN, |row| row.refresh_s);
+            let warm_block_sweeps = inner.warm.map_or(0, |row| row.block_sweeps);
+            let warm_cg_solve_s = inner.warm.map_or(f64::NAN, |row| row.cg_solve_s);
+            let warm_kappa = inner.warm.map_or(f64::NAN, |row| row.kappa_bound);
+            println!(
+                "[refresh-inner] {n},{p},{k},{s},{},{},{},{},{},{:.4},{:.4},{:.3},{},{},{:.3},\
+                 {:.4},{:.4},{:.3},{:.6e},{:.6e},{:.3}",
+                inner.outer_run,
+                inner.epochs_run,
+                warm_available,
+                warm_epoch,
+                inner.last.inner_epoch,
+                warm_refresh_s,
+                inner.last.refresh_s,
+                ratio(inner.last.refresh_s, warm_refresh_s),
+                warm_block_sweeps,
+                inner.last.block_sweeps,
+                ratio(inner.last.block_sweeps as f64, warm_block_sweeps as f64),
+                warm_cg_solve_s,
+                inner.last.cg_solve_s,
+                ratio(inner.last.cg_solve_s, warm_cg_solve_s),
+                warm_kappa,
+                inner.last.kappa_bound,
+                ratio(inner.last.kappa_bound, warm_kappa),
+            );
+        }
+
         // Traffic is per-epoch: `nnz`, the tile and the rank all move over a
         // fit, so the model has to be evaluated on each epoch's own numbers and
         // summed, never on the last epoch's numbers times the epoch count.
@@ -668,33 +706,17 @@ fn main() {
         let refresh_total: f64 = rows.iter().map(|r| r.refresh_s).sum();
         let route_total: f64 = rows.iter().map(|r| r.route_s).sum();
         println!(
-            "[refresh-config] {n},{p},{k},{s},{},{fit_s:.2},{refresh_total:.3},{route_total:.3},\
-             {:.4},{:.4},{:.4},{:.3},{},{},{:.3},{},{},{},{},{:.4e},{:.4e},\
-             {:.3},{:.3},{:.3},{:.3},{:.3},{},{:.2},{:.4},{:.1}",
+            "[refresh-config] {n},{p},{k},{s},{},{},{fit_s:.2},{refresh_total:.3},{route_total:.3},\
+             {:.4},{:.3},{:.3},{:.3},{:.3},{:.3},{},{:.4},{:.1}",
+            inner_runs.len(),
             rows.len(),
             refresh_total / (refresh_total + route_total).max(f64::MIN_POSITIVE),
-            first.refresh_s,
-            last.refresh_s,
-            last.refresh_s / first.refresh_s.max(f64::MIN_POSITIVE),
-            first.cg_iterations,
-            last.cg_iterations,
-            last.cg_iterations as f64 / (first.cg_iterations.max(1)) as f64,
-            first.tile_columns,
-            last.tile_columns,
-            first.max_component_nnz,
-            last.max_component_nnz,
-            first.kappa_bound,
-            last.kappa_bound,
             rows.iter().map(|r| r.accumulate_s).sum::<f64>(),
             rows.iter().map(|r| r.graph_build_s).sum::<f64>(),
             rows.iter().map(|r| r.operator_build_s).sum::<f64>(),
             rows.iter().map(|r| r.precond_s).sum::<f64>(),
             rows.iter().map(|r| r.cg_solve_s).sum::<f64>(),
             rows.iter().map(|r| r.block_sweeps).sum::<usize>(),
-            // The block recurrence advances all columns of a tile together, so
-            // per-column iterations is the honest convergence measure; the raw
-            // `cg_iterations` sum scales with the column count.
-            last.cg_iterations as f64 / (last.cg_columns.max(1)) as f64,
             // Bytes the block recurrence moved across the whole fit, and the
             // rate it moved them at. Compare `cg_achieved_GBs` to the
             // `[refresh-host] gather` line above: close to it means the solve is
