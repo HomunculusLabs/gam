@@ -6348,3 +6348,32 @@ fn outer_jeffreys_hphi_drift_matches_a_central_difference_of_hphi_2765() {
         }
     }
 }
+
+/// gam#2515 class: the shared dense-design cache is keyed on the source
+/// matrix's heap address. A stale clone planted under a live matrix's key
+/// (what address reuse produces) must not be handed back as that matrix.
+#[test]
+fn shared_dense_arc_refuses_a_stale_clone_at_a_reused_address() {
+    use crate::psi_design::{shared_dense_arc, shared_dense_design_cache};
+    let fresh = Array2::from_shape_fn((3, 2), |(i, j)| (i * 2 + j) as f64 + 0.5);
+    let stale = Array2::from_shape_fn((3, 2), |(i, j)| -((i * 2 + j) as f64));
+    let stale_arc = Arc::new(stale.clone());
+    let key = (fresh.as_ptr() as usize, fresh.nrows(), fresh.ncols());
+    shared_dense_design_cache()
+        .lock()
+        .expect("cache mutex")
+        .insert(key, Arc::downgrade(&stale_arc));
+
+    let shared = shared_dense_arc(&fresh);
+    assert!(
+        shared
+            .iter()
+            .zip(fresh.iter())
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "the cache handed back the stale clone: {shared:?} for {fresh:?}"
+    );
+    // The genuine clone is now the cached entry: a second request shares it.
+    let again = shared_dense_arc(&fresh);
+    assert!(Arc::ptr_eq(&shared, &again));
+    drop(stale_arc);
+}

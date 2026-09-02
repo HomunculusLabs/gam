@@ -28,9 +28,13 @@ pub(crate) const CONSTRAINT_NULLSPACE_CACHE_MAX_ENTRIES: usize = 32;
 pub(crate) struct OwnedDataCacheKey {
     pub(crate) rows: usize,
     pub(crate) cols: usize,
-    pub(crate) ptr: usize,
-    pub(crate) stride0: isize,
-    pub(crate) stride1: isize,
+    /// [`hash_arrayview2`] of the view's values: the identity of the MATRIX. A
+    /// data pointer plus strides named an allocation instead (gam#2515): the
+    /// cache outlives the views that feed it, a data matrix freed after one
+    /// basis build is routinely reallocated at the same address for the next
+    /// same-shaped one, and the hit then handed back the previous matrix's
+    /// owned copy as this one's data.
+    pub(crate) value_hash: u64,
 }
 
 #[derive(Debug)]
@@ -117,9 +121,7 @@ pub(crate) fn shared_owned_data_matrix(
     let key = OwnedDataCacheKey {
         rows: data.nrows(),
         cols: data.ncols(),
-        ptr: data.as_ptr() as usize,
-        stride0: data.strides()[0],
-        stride1: data.strides()[1],
+        value_hash: hash_arrayview2(data),
     };
     if let Some(hit) = cache.owned_data.get(&key) {
         return hit;

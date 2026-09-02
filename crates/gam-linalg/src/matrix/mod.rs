@@ -3848,6 +3848,74 @@ impl std::fmt::Debug for DesignMatrix {
 // Symmetric-matrix container + Gram assembly (#1145): see `symmetric.rs`.
 mod symmetric;
 pub use symmetric::*;
+
+/// A 64-bit FNV-1a fingerprint of a dense matrix's shape and every element's
+/// bit pattern, in row-major order.
+///
+/// This is an identity of the VALUES, which is what a cache keyed on a matrix
+/// needs. A heap address is not one: an allocation is freed and reused, and a
+/// same-shaped matrix that lands at the same address is a different matrix
+/// with the same key (gam#2515). The pass is `O(n·p)`, negligible beside the
+/// `O(n·p²)` products such caches exist to skip, and bit-exact: `-0.0` and
+/// `+0.0` differ, every NaN payload differs, exactly as the arithmetic that
+/// consumes the matrix would see them.
+pub fn array2_bits_fingerprint(matrix: &ndarray::Array2<f64>) -> u64 {
+    let mut hash = Fnv1a::new();
+    hash.absorb(matrix.nrows() as u64);
+    hash.absorb(matrix.ncols() as u64);
+    for value in matrix.iter() {
+        hash.absorb(value.to_bits());
+    }
+    hash.finish()
+}
+
+/// FNV-1a over little-endian `u64` words; the one hash every value identity in
+/// this module is built from, so two identities of the same bytes agree.
+struct Fnv1a(u64);
+
+impl Fnv1a {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn new() -> Self {
+        Self(Self::OFFSET)
+    }
+
+    fn absorb(&mut self, value: u64) {
+        for byte in value.to_le_bytes() {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    fn finish(self) -> u64 {
+        self.0
+    }
+}
+
+impl SparseDesignMatrix {
+    /// A 64-bit fingerprint of this sparse design's VALUES: shape, column
+    /// pointers, row indices and every stored value's bit pattern. The sparse
+    /// analogue of [`array2_bits_fingerprint`], for the same reason: a cache
+    /// token that was this struct's address named an allocation, not a matrix
+    /// (gam#2515).
+    pub fn value_fingerprint(&self) -> u64 {
+        let (symbolic, values) = self.matrix.parts();
+        let mut hash = Fnv1a::new();
+        hash.absorb(self.matrix.nrows() as u64);
+        hash.absorb(self.matrix.ncols() as u64);
+        for &offset in symbolic.col_ptr() {
+            hash.absorb(offset as u64);
+        }
+        for &row in symbolic.row_idx() {
+            hash.absorb(row as u64);
+        }
+        for value in values {
+            hash.absorb(value.to_bits());
+        }
+        hash.finish()
+    }
+}
 /// A generic abstraction over a factorized symmetric positive-definite (or regularized) system.
 pub trait FactorizedSystem: Send + Sync {
     /// Solve $H x = b$ for a single right-hand side.
@@ -6017,6 +6085,32 @@ impl From<&DesignMatrix> for DesignBlock {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn array2_bits_fingerprint_is_a_value_identity_not_an_address() {
+        use ndarray::array;
+        let a = array![[1.0, 2.0], [3.0, 4.0]];
+        let same_values_elsewhere = a.clone();
+        assert_eq!(
+            super::array2_bits_fingerprint(&a),
+            super::array2_bits_fingerprint(&same_values_elsewhere),
+            "equal values must fingerprint equal wherever they live"
+        );
+        let one_ulp = array![[1.0, 2.0], [3.0, f64::from_bits(4.0_f64.to_bits() + 1)]];
+        assert_ne!(super::array2_bits_fingerprint(&a), super::array2_bits_fingerprint(&one_ulp));
+        let signed_zero = array![[0.0, 2.0], [3.0, 4.0]];
+        let negative_zero = array![[-0.0, 2.0], [3.0, 4.0]];
+        assert_ne!(
+            super::array2_bits_fingerprint(&signed_zero),
+            super::array2_bits_fingerprint(&negative_zero)
+        );
+        let transposed_shape = array![[1.0, 2.0, 3.0, 4.0]];
+        assert_ne!(
+            super::array2_bits_fingerprint(&a),
+            super::array2_bits_fingerprint(&transposed_shape),
+            "shape is part of the identity"
+        );
+    }
+
     use super::{
         BlockDesignOperator, CoefficientTransformOperator, ConditionedDesign, DenseDesignMatrix,
         DenseDesignOperator, DesignBlock, DesignMatrix, EmbeddedColumnBlock,

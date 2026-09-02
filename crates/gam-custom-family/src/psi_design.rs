@@ -1800,11 +1800,34 @@ pub(crate) fn shared_dense_design_cache()
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Whether a cached clone still IS the caller's matrix: same shape, every
+/// element bit-identical. The cache key is the source's heap address, and an
+/// address is not an identity (gam#2515): a design freed at the end of one ψ
+/// trial and a same-shaped design allocated for the next routinely land at the
+/// same address, so a key hit only says "something of this shape once lived
+/// here". The clone the cache hands back is consumed as THIS design's values,
+/// so it has to be checked against them.
+fn shared_dense_arc_matches(shared: &Array2<f64>, x: &Array2<f64>) -> bool {
+    shared.dim() == x.dim()
+        && shared
+            .iter()
+            .zip(x.iter())
+            .all(|(cached, fresh)| cached.to_bits() == fresh.to_bits())
+}
+
 pub fn shared_dense_arc(x: &Array2<f64>) -> Arc<Array2<f64>> {
     let key = (x.as_ptr() as usize, x.nrows(), x.ncols());
     let cache = shared_dense_design_cache();
     if let Ok(mut guard) = cache.lock() {
-        if let Some(shared) = guard.get(&key).and_then(Weak::upgrade) {
+        // A hit is a candidate, never an answer. Measured before this check
+        // existed: whether a same-shaped later design reused a freed design's
+        // address depended on the binary's heap layout, so promoting a set of
+        // log lines that never fired changed which multinomial fits certified
+        // and which refused at the same commit and seed — the stale clone was
+        // being consumed as the new trial's design (gam#2515 class).
+        if let Some(shared) = guard.get(&key).and_then(Weak::upgrade)
+            && shared_dense_arc_matches(&shared, x)
+        {
             return shared;
         }
         guard.retain(|_, shared| shared.strong_count() > 0);

@@ -862,7 +862,17 @@ impl<'a> GamWorkingModel<'a> {
                     // `gemm` reduction order). If residency declines (CUDA
                     // unavailable / below the GPU Gram threshold / upload
                     // failure) keep the per-call path.
-                    let key = (x_dense.as_ptr() as usize, x_dense.nrows(), p);
+                    //
+                    // The key is a VALUE identity of `X` (gam#2515): the host
+                    // pointer alone would let a same-shaped design that reuses
+                    // a freed allocation read the previous design's resident
+                    // Gram. The fingerprint pass is `O(n·p)` against the
+                    // `O(n·p²)` product it gates.
+                    let key = (
+                        gam_linalg::matrix::array2_bits_fingerprint(&x_dense) as usize,
+                        x_dense.nrows(),
+                        p,
+                    );
                     let cache_hit = matches!(
                         &workspace.resident_design_gram,
                         Some((k0, k1, k2, _)) if (*k0, *k1, *k2) == key

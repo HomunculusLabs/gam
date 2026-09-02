@@ -928,9 +928,7 @@ fn owned_data_cache_respects_entry_cap() {
             .get(&OwnedDataCacheKey {
                 rows: first.nrows(),
                 cols: first.ncols(),
-                ptr: first.as_ptr() as usize,
-                stride0: first.strides()[0],
-                stride1: first.strides()[1],
+                value_hash: crate::basis::workspace_cache::hash_arrayview2(first.view()),
             })
             .is_none()
     );
@@ -943,6 +941,22 @@ fn owned_data_cache_respects_entry_cap() {
         &shared_owned_data_matrix(third.view(), &cache)
     ));
     assert_eq!(first_cached.dim(), (2, 2));
+
+    // The key is the VALUES (gam#2515): the same numbers at another address
+    // share the cached copy, and a different matrix never reads it. Checked
+    // last: the perturbed insert is a third distinct key and evicts under the
+    // entry cap the assertions above are about.
+    let second_elsewhere = second.clone();
+    assert!(Arc::ptr_eq(
+        &second_cached,
+        &shared_owned_data_matrix(second_elsewhere.view(), &cache)
+    ));
+    let mut second_perturbed = second.clone();
+    second_perturbed[[0, 0]] += 1.0;
+    assert!(!Arc::ptr_eq(
+        &second_cached,
+        &shared_owned_data_matrix(second_perturbed.view(), &cache)
+    ));
 }
 
 #[test]

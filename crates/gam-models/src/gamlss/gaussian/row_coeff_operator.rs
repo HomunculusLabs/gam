@@ -543,7 +543,9 @@ impl DesignTwoBlockRowCoeffOperator {
             // `cache_identity` is the canonical shared-Arc identity for both
             // materialized and lazy dense designs.
             DesignMatrix::Dense(dense) => dense.cache_identity(),
-            DesignMatrix::Sparse(sparse) => sparse as *const _ as usize,
+            // A sparse design has no shared-Arc identity; its address is an
+            // allocation, not a matrix (gam#2515), so the token is the values.
+            DesignMatrix::Sparse(sparse) => sparse.value_fingerprint() as usize,
         }
     }
 
