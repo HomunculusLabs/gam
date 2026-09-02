@@ -1,5 +1,37 @@
 ## Unreleased
 
+- **Event histories: the latent covariance is learned, its rank is grown by
+  the evidence, and the engine is polynomial in the number of atoms.**
+  `gam_models::event_history` no longer takes a number of atoms. The fit
+  starts at rank zero (the Poisson-process GAM) and grows the rank of the
+  latent covariance `C(Δ) = A diag(e^{−r|Δ|}) Aᵀ` from the covariance score
+  of the residuals: the top eigenpair of `M(r) = Σ e^{−r|Δ|} s̄ s̄ᵀ − Σ diag(c̄)`
+  at the rate maximising its top eigenvalue is the most evidence-improving
+  omitted direction, the new atom starts there at the one-step estimate of
+  its variance, and it is kept only if the outer LAML criterion decreases by
+  more than the solver's resolution (`rank_path`, `atom_evidence`). The fit
+  reports `disease_covariance`, `temporal_covariance(lag)` and `eigenmodes`;
+  loadings are factor coordinates. The latent path is integrated out by a
+  Laplace approximation on its block-tridiagonal Markov structure, `O(N K³)`
+  per subject in place of the product Gauss-Hermite grid's `Q^K`; the
+  evidence gradient is the exact implicit-function derivative, and the
+  Hessian and its directional derivatives are the tangent channels of that
+  gradient on a base-generic forward-mode dual (`Tangent<B, W>` over `f64`,
+  `OneSeed`, `TwoSeed`), contracted with the design rows node by node so
+  nothing of size `(nodes × marks)²` exists. Marks now have a kind
+  (`Recurrent`, `Once`, `Terminal`) and the node expansion carries per-mark
+  exposures `w · R_d(t)`: a first diagnosis leaves the subject at risk for
+  every other disease, events before entry are prior history, death ends
+  every risk set. Forecasts are per-mark first-occurrence probabilities
+  (`risk`, horizons × marks) with no `absorbing` argument; the smoothed
+  latent state and its follow-up average are exposed with posterior
+  covariances (`latent_state`, `latent_exposure`). The intensity is centred,
+  `η = η⁰ − ½|a_d|² + a_d·z`, so `exp(η⁰)` is the population-average rate
+  whatever the loadings. Python: `fit_event_history(..., once=[...],
+  terminal=[...])`, `model.predict`, `model.latent_state`; CLI: `--once`,
+  `--terminal` replace `--atoms` and `--absorbing`; `population_forecast`
+  and the CLI's `without_history` keep the population tier on the new engine.
+
 - **A continuous `by=` smooth keeps its constant, and event-history forecasts
   have a population tier (#2805).** `s(x, by=z)` with a continuous `z` is the
   varying coefficient `f(x)·z`, whose constant direction is `z` itself and

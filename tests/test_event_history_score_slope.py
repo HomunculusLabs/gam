@@ -49,8 +49,8 @@ def _slope_probe(model, times, width: float = 0.05):
 def test_a_score_enters_as_one_penalised_slope_surface() -> None:
     truth = lambda t: 1.0 - 0.15 * t  # noqa: E731
     subjects, events, covariates = _simulate(300, 6.0, -0.5, truth, 1.0, seed=19)
-    model = gamfit.fit_event_history(subjects, events, covariates, "s(time, by=g)", atoms=0)
-    assert model.atoms == 0
+    model = gamfit.fit_event_history(subjects, events, covariates, "s(time, by=g)")
+    assert model.rank == 0
     assert model.covariate_names == ["g"]
     times = np.array([0.5, 1.5, 2.5, 3.5, 4.5, 5.5])
     fitted = _slope_probe(model, times)
@@ -59,14 +59,14 @@ def test_a_score_enters_as_one_penalised_slope_surface() -> None:
 
     # The same surface on a score that carries nothing collapses.
     subjects, events, covariates = _simulate(300, 6.0, -0.5, lambda t: 0.0, 0.0, seed=23)
-    null = gamfit.fit_event_history(subjects, events, covariates, "s(time, by=g)", atoms=0)
+    null = gamfit.fit_event_history(subjects, events, covariates, "s(time, by=g)")
     amplitude = float(np.max(np.abs(_slope_probe(null, times))))
     assert amplitude < 0.15, f"an uninformative score must collapse; fitted amplitude {amplitude}"
 
 
 def test_forecast_tiers_are_one_model_conditioned_on_more() -> None:
     subjects, events, covariates = _simulate(300, 6.0, -0.5, lambda t: 0.6, 0.6, seed=5)
-    model = gamfit.fit_event_history(subjects, events, covariates, "s(time, by=g)", atoms=0)
+    model = gamfit.fit_event_history(subjects, events, covariates, "s(time, by=g)")
     horizons = [7.0, 8.0]
     population = model.population_forecast({"g": 0.0}, start=6.0, horizons=horizons)
     high = model.population_forecast([1.0], start=6.0, horizons=horizons)
@@ -100,7 +100,7 @@ def test_a_ctn_calibrated_score_composes_in_front_of_the_fit() -> None:
 
     subjects, events, covariates = _simulate(n, 6.0, -0.5, lambda t: 0.8, 0.8, seed=29, score=liability)
     covariates = covariates.assign(g=z)
-    model = gamfit.fit_event_history(subjects, events, covariates, "s(time, by=g)", atoms=0)
+    model = gamfit.fit_event_history(subjects, events, covariates, "s(time, by=g)")
     fitted = _slope_probe(model, np.array([1.0, 3.0, 5.0]))
     np.testing.assert_allclose(fitted, 0.8, atol=0.3)
     assert float(np.ptp(fitted)) < 0.4, f"a constant effect must not bend: {fitted}"

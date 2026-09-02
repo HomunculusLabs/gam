@@ -224,20 +224,22 @@ pred.write_survival_at_csv("surv.csv", times=[...])  # streamed
 ```
 
 Event histories. `gam_models::event_history` fits marked counting
-processes: smooth covariate and time effects per mark, plus a per-subject
-latent state of unit-variance Ornstein–Uhlenbeck atoms whose loadings and
-rates are selected by the evidence (an unsupported atom is switched off by
-its own REML ridge). The latent term is the individual's deviation from a
-population rate — `exp(η⁰)` is the intensity averaged over the latent state
-— and an observed risk score enters as a penalised slope surface
+processes: smooth covariate and time effects per mark (population-average
+rates), per-mark risk sets (marks that recur, happen once, or end
+follow-up), and a per-subject latent state of unit-variance
+Ornstein–Uhlenbeck atoms whose covariance across marks and time is the
+reported object and whose rank the evidence grows from zero: each new
+direction is proposed by the covariance score and kept only if the LAML
+criterion improves. The latent path is integrated out by a Laplace
+approximation on its Markov structure, polynomial in the number of atoms,
+with exact evidence gradients and dual-scalar Hessians contracted node by
+node. An observed risk score enters as a penalised slope surface
 `s(time, by=score)` whose bend with time and whose very existence the
-evidence selects; a forecast can start from the stationary prior, so the
+evidence selects. Forecasts are per-mark first-occurrence probabilities
+given the history, or from the stationary prior at given covariates, so the
 population, score-only and history-conditioned tiers are one model
-conditioned on more. The latent chain is marginalised exactly by
-adaptive Gauss-Hermite–Lagrange filtering, so recurrent events, competing
-risks, dynamic frailty and history-conditioned forecasts are one family.
-Forecasts and the predictive PIT are exact expectations under the filtered
-state.
+conditioned on more; the smoothed latent state is exposed with its
+posterior covariance.
 
 Posterior sampling. `model.sample(...)` draws from the coefficient
 posterior conditional on the fitted smoothing parameters. Predictive
