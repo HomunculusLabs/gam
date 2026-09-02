@@ -2559,10 +2559,19 @@ fn consuming_anchors(
 ///   its inputs allow -- right after the last gate whose assignment it reads,
 ///   or at the top -- with only its own input chain emitted before it, so
 ///   independent calls are adjacent.
-/// * **Derivative channels were live across the calls their value fed.** On
-///   the rigid Bernoulli row that was eight spills around the probit call and
-///   eight reloads behind it. Everything that is not a call sinks to just
-///   before the first anchor that mentions it.
+/// * **Work a call does not feed was scheduled behind the call.** A
+///   definition sinks to just before the first anchor that mentions it, but
+///   never past a run of adjacent calls it does not depend on: everything
+///   computable before the run is issued before it, in program order, as
+///   every hand kernel writes it. Sinking such work behind a call delays it
+///   by the call's whole instruction stream and hands LLVM's SLP vectoriser
+///   a block in which call-independent chains sit beside call results; on
+///   the rigid Bernoulli row it paired the observed-scale derivative chain
+///   (a divide and five multiplies) with the probit stack and serialised it
+///   behind the call, 0.98 → 0.81 against the hand kernel on one host and
+///   0.75 on another, with an instruction histogram identical to the fast
+///   version's. What depends on a call of the run still sinks behind the
+///   run, so independent calls stay adjacent.
 ///
 /// A definition or call nothing reaches an anchor through is not emitted (a
 /// supplied stack composes without inspecting its point, so the point's value
@@ -2633,6 +2642,7 @@ fn schedule_direct_lowering(body: &str) -> String {
     let mut pending: Vec<usize> = Vec::new();
     let mut deferred: Vec<Vec<usize>> = vec![Vec::new(); count];
     let mut last_call: Option<usize> = None;
+    let mut call_inputs = HashSet::<usize>::new();
     let position = |order: &[usize], index: usize| order.iter().position(|&i| i == index);
 
     for index in 0..count {
@@ -2677,7 +2687,51 @@ fn schedule_direct_lowering(body: &str) -> String {
                 {
                     at = at.max(after + 1);
                 }
-                pending.retain(|candidate| !inputs.contains(candidate));
+                // The run of adjacent calls this one joins: the calls and
+                // their own input chains immediately before `at`.
+                let mut run_start = at;
+                while run_start > 0
+                    && (items[order[run_start - 1]].kind == ItemKind::Call
+                        || call_inputs.contains(&order[run_start - 1]))
+                {
+                    run_start -= 1;
+                }
+                // Every pending definition computable before the run is
+                // issued before it, in program order; what depends on a call
+                // of the run keeps sinking to its first use behind the run.
+                let mut flush: Vec<usize> = Vec::new();
+                for &candidate in &pending {
+                    if inputs.contains(&candidate) {
+                        continue;
+                    }
+                    let item = &items[candidate];
+                    let available = item.references.iter().all(|name| match by_name.get(name) {
+                        Some(&defining) if defining != candidate => {
+                            flush.contains(&defining)
+                                || position(&order, defining).is_some_and(|p| p < run_start)
+                        }
+                        _ => true,
+                    });
+                    // A mutable it reads must be in the same state as at its
+                    // place in the program: every gate assigning that name is
+                    // on the same side of the run as in program order.
+                    let gates_agree = items.iter().enumerate().all(|(gate, other)| {
+                        other.kind != ItemKind::Gate
+                            || !other.assigns.iter().any(|assigned| item.references.contains(assigned))
+                            || if gate < candidate {
+                                position(&order, gate).is_some_and(|p| p < run_start)
+                            } else {
+                                position(&order, gate).is_none_or(|p| p >= run_start)
+                            }
+                    });
+                    if available && gates_agree {
+                        flush.push(candidate);
+                    }
+                }
+                pending.retain(|candidate| !inputs.contains(candidate) && !flush.contains(candidate));
+                at += flush.len();
+                order.splice(run_start..run_start, flush);
+                call_inputs.extend(inputs.iter().copied());
                 let mut block = inputs;
                 block.push(index);
                 order.splice(at..at, block);
@@ -2692,7 +2746,24 @@ fn schedule_direct_lowering(body: &str) -> String {
                     .copied()
                     .filter(|&i| items[i].kind == ItemKind::Definition)
                     .collect();
+                // What none of the block's calls feed is computable at its
+                // top and is issued there, before the calls, exactly as at the
+                // top level; the rest sinks behind the calls.
                 let mut inside_order = Vec::new();
+                for &candidate in &inside_pending {
+                    let independent = items[candidate].references.iter().all(|name| {
+                        match by_name.get(name) {
+                            Some(&defining) if defining != candidate && inside.contains(&defining) => {
+                                inside_order.contains(&defining)
+                            }
+                            _ => true,
+                        }
+                    });
+                    if independent {
+                        inside_order.push(candidate);
+                    }
+                }
+                inside_pending.retain(|candidate| !inside_order.contains(candidate));
                 for &i in &inside {
                     if items[i].kind != ItemKind::Call {
                         continue;
@@ -4918,7 +4989,7 @@ mod tests {
     /// it and held live across it (#932: eight spills around the rigid
     /// Bernoulli row's probit call).
     #[test]
-    fn definitions_sink_to_first_use_past_leaf_calls() {
+    fn definitions_ready_before_a_call_run_are_issued_before_it() {
         let program = quote! {
             fn sunk(x, y; w)
             emit [order2, cuda];
@@ -4930,20 +5001,22 @@ mod tests {
                 return m;
             }
         };
+        // `a`'s channels are computable before the call and read after it:
+        // they are issued before it, where the hand kernel would write them.
         let rust = emitted_function(program.clone(), "sunk_order2");
         let call = rust.find("probit_stack (a_v").expect("the leaf call");
         let gradient = rust.find("let a_g0").expect("the gradient of `a`");
         let hessian = rust.find("let a_h0_1").expect("the Hessian of `a`");
-        assert!(gradient > call && hessian > call, "{rust}");
+        assert!(gradient < call && hessian < call, "{rust}");
         let cuda = emitted_cuda(program);
         let call = cuda.find("d_probit(a_v").expect("the CUDA leaf call");
         let gradient = cuda.find("double a_g0").expect("the CUDA gradient of `a`");
-        assert!(gradient > call, "{cuda}");
+        assert!(gradient < call, "{cuda}");
 
         // Two leaf calls with independent inputs are issued back to back, in
-        // program order, before any pure arithmetic: the value that reads the
-        // first call's result follows the second call, as every derivative
-        // channel does.
+        // program order: the value that reads the first call's result depends
+        // on the run and follows the second call, as every channel of it
+        // does, so the calls stay adjacent.
         let program = quote! {
             fn adjacent(x, y, z;)
             emit [order2];
