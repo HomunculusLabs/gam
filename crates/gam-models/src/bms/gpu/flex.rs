@@ -3,7 +3,6 @@
 use std::sync::OnceLock;
 
 use gam_gpu::gpu_error::GpuError;
-#[cfg(target_os = "linux")]
 use gam_gpu::{GpuDecision, GpuKernel, decide};
 
 #[cfg(target_os = "linux")]
