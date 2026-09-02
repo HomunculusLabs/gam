@@ -116,10 +116,17 @@ def derive(root):
             continue
         if crate_dir not in packages:
             packages[crate_dir] = package_name(crate_dir)
+        names = list(test_fns_with_marker(source))
         target = target_for(crate_dir, file)
         if target is None:
-            raise SystemExit(f"{file}: a speed gate must live under src/ or tests/")
-        for name in test_fns_with_marker(source):
+            # A non-test file may USE the harness (the `paired_timing_report`
+            # example is the harness's reachability root and opens a gate to
+            # print one); only a `#[test]` there would be a gate this lane
+            # cannot run, and that is refused.
+            if names:
+                raise SystemExit(f"{file}: a speed gate must live under src/ or tests/")
+            continue
+        for name in names:
             gates.append(Gate(packages[crate_dir], target, name, str(file.relative_to(root))))
     return gates
 
