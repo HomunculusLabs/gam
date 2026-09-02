@@ -13,6 +13,16 @@
 //! matrices per axis, valid for gaps of any size, including gaps far shorter
 //! than the grid spacing where direct kernel quadrature fails.
 //!
+//! The two operators interpolate different classes. Forward, the operand is
+//! a density, Gaussian-enveloped, so the interpolant is of `density /
+//! envelope` and the convolution is exact for `envelope × polynomial`.
+//! Backward, the operand is a future likelihood, bounded and smooth but not
+//! enveloped, so the interpolant is of the function itself and the
+//! conditional expectation `∫ N(z'; φz, q) u(z') dz'` is Gauss-Hermite in
+//! `z'`, exact for polynomial `u`. Interpolation arguments are clamped to the
+//! node hull, so the negligible tail mass beyond it is carried by the nearest
+//! node instead of by a polynomial extrapolation.
+//!
 //! Everything is generic over a [`JetField`] scalar so the same code yields
 //! the value, one directional derivative, or a mixed second directional
 //! derivative of every quantity downstream.
@@ -83,6 +93,20 @@ impl GaussHermite {
             plain_weights,
             barycentric,
         })
+    }
+
+    /// `xi` clamped to the node hull `[x_0, x_{G-1}]`.
+    pub fn clamp_to_hull<S: JetField>(&self, xi: &S) -> S {
+        let lo = self.nodes[0];
+        let hi = self.nodes[self.order - 1];
+        let value = xi.value();
+        if value < lo {
+            xi.constant_like(lo)
+        } else if value > hi {
+            xi.constant_like(hi)
+        } else {
+            xi.clone()
+        }
     }
 
     /// Lagrange basis on the rule's nodes evaluated at `xi`.
@@ -313,7 +337,7 @@ pub(crate) fn forward_operator<S: JetField>(
                 .scale(1.0 / std::f64::consts::SQRT_2);
             let mut accumulated = vec![old.mu.constant_like(0.0); g];
             for (l, &x) in gh.nodes.iter().enumerate() {
-                let xi = centre.add(&ratio.scale(x));
+                let xi = gh.clamp_to_hull(&centre.add(&ratio.scale(x)));
                 let basis = gh.lagrange_basis(&xi);
                 for i in 0..g {
                     accumulated[i] = accumulated[i].add(&basis[i].scale(gh.normal_weights[l]));
@@ -329,7 +353,8 @@ pub(crate) fn forward_operator<S: JetField>(
 }
 
 /// Build the backward (conditioning) operator across one gap: input values
-/// on `to`, output values on `from`: `B[u](z) = ∫ N(z'; φ z, q) u(z') dz'`.
+/// on `to`, output values on `from`: `B[u](z) = ∫ N(z'; φ z, q) u(z') dz'`,
+/// as the Gauss-Hermite expectation of the Lagrange interpolant of `u`.
 pub(crate) fn backward_operator<S: JetField>(
     gh: &GaussHermite,
     from: &Grid<S>,
@@ -342,38 +367,22 @@ pub(crate) fn backward_operator<S: JetField>(
         let old = &from.axes[axis];
         let new = &to.axes[axis];
         let phi = &transition.phi;
-        let q = &transition.innovation;
-        let sigma2_new = square(&new.sigma);
-        let total = sigma2_new.add(q);
-        let inv_total = recip(&total);
-        let ratio = sqrt(&q.mul(&inv_total));
-        let inverse_envelope: Vec<S> = gh
-            .nodes
-            .iter()
-            .map(|&x| {
-                new.sigma
-                    .scale((2.0 * std::f64::consts::PI).sqrt() * (x * x).exp())
-            })
-            .collect();
+        let spread = sqrt(&transition.innovation.scale(2.0));
+        let inverse_scale = recip(&new.sigma.scale(std::f64::consts::SQRT_2));
         let mut matrix = vec![old.mu.constant_like(0.0); g * g];
         for i in 0..g {
             let phi_z = phi.mul(&old.points[i]);
-            let gauss = normal_density(&phi_z, &new.mu, &total);
-            let centre = new
-                .sigma
-                .mul(&phi_z.sub(&new.mu))
-                .mul(&inv_total)
-                .scale(1.0 / std::f64::consts::SQRT_2);
             let mut accumulated = vec![old.mu.constant_like(0.0); g];
             for (l, &x) in gh.nodes.iter().enumerate() {
-                let xi = centre.add(&ratio.scale(x));
+                let zeta = phi_z.add(&spread.scale(x));
+                let xi = gh.clamp_to_hull(&zeta.sub(&new.mu).mul(&inverse_scale));
                 let basis = gh.lagrange_basis(&xi);
                 for j in 0..g {
                     accumulated[j] = accumulated[j].add(&basis[j].scale(gh.normal_weights[l]));
                 }
             }
             for j in 0..g {
-                matrix[i * g + j] = gauss.mul(&accumulated[j]).mul(&inverse_envelope[j]);
+                matrix[i * g + j] = accumulated[j].clone();
             }
         }
         matrices.push(matrix);

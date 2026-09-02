@@ -208,7 +208,7 @@ pub fn forecast(
     let atoms = fit.atoms();
     let mut survival = vec![0.0; request.horizons.len()];
     let mut expected = Array2::<f64>::zeros((request.horizons.len(), marks));
-    let mut log_survival = 0.0;
+    let mut log_survival: f64 = 0.0;
     let mut counts = vec![0.0; marks];
     let mut horizon = 0;
     for n in 0..future_nodes.len() {
@@ -276,7 +276,7 @@ pub fn predictive_pit(
         &vec![true; marks],
     )?;
     let mut pits = Vec::new();
-    let mut log_survival = 0.0;
+    let mut log_survival: f64 = 0.0;
     for n in 0..subject.len() {
         let is_event = (0..marks).any(|d| subject.counts[[n, d]] > 0.0);
         if is_event {

@@ -165,11 +165,12 @@ fn gap_score_polynomials<S: JetField>(
     (t, dt)
 }
 
-/// The gap score polynomials as flat coefficient vectors, for tests.
-pub(crate) fn gap_score_polynomials_for_test(
-    transition: &AtomTransition<f64>,
-) -> (Vec<f64>, Vec<f64>) {
-    let (t, dt) = gap_score_polynomials(transition, &0.0);
+/// The score `∂ ln p(z'|z)/∂ρ` of one atom across a gap of dimensionless
+/// length `kappa`, and its derivative in `ρ`, as flat coefficient vectors
+/// `c[a * 5 + b]` multiplying `z^a z'^b`.
+pub fn transition_score_polynomials(kappa: f64) -> (Vec<f64>, Vec<f64>) {
+    let transition = AtomTransition::new(&kappa);
+    let (t, dt) = gap_score_polynomials(&transition, &0.0);
     (t.c, dt.c)
 }
 

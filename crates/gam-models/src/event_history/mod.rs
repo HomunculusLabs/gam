@@ -25,8 +25,10 @@ pub use cohort::{
 };
 pub use family::{
     EventHistoryFamily, EventHistoryFit, EventHistorySpec, JointEvaluation,
-    QuadratureCertificate, fit_event_history, latent_block_spec, mark_block_spec,
+    QuadratureCertificate, fit_event_history, latent_block_spec, mark_block_spec, seeded_one,
+    seeded_two,
 };
+pub use marginal::transition_score_polynomials;
 pub use forecast::{
     Forecast, ForecastRequest, forecast, kolmogorov_smirnov_uniform, predictive_pit, training_eta,
 };
