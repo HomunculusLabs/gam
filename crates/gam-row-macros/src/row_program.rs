@@ -4634,9 +4634,10 @@ mod tests {
             }
         };
         let rust = emitted_function(program.clone(), "gated_order2");
-        assert!(rust.contains("a != 0.0 || b != 0.0"), "{rust}");
+        // Each binary operand is parenthesised by the scalar renderer.
+        assert!(rust.contains("(a != 0.0) || (b != 0.0)"), "{rust}");
         let cuda = emitted_cuda(program);
-        assert!(cuda.contains("in.a != 0.0 || in.b != 0.0"), "{cuda}");
+        assert!(cuda.contains("(in.a != 0.0) || (in.b != 0.0)"), "{cuda}");
     }
 
     #[test]
