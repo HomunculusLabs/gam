@@ -91,6 +91,47 @@ fn unit_score_covariance() -> ScoreCovarianceField {
     ScoreCovarianceField::pooled(MarginalSlopeCovariance::diagonal(array![1.0]).unwrap())
 }
 
+fn no_spatial_joint_setup(rho_dim: usize) -> ExactJointHyperSetup {
+    let no_kappa = SpatialLogKappaCoords::new_with_dims(Array1::zeros(0), Vec::new());
+    ExactJointHyperSetup::new(
+        Array1::zeros(rho_dim),
+        Array1::from_elem(rho_dim, -10.0),
+        Array1::from_elem(rho_dim, 10.0),
+        no_kappa.clone(),
+        no_kappa.clone(),
+        no_kappa,
+    )
+}
+
+/// gam#2768: absence of a spatial outer certificate is the generic driver's
+/// documented fast path, not failure of the ordinary smoothing optimizer.
+/// The final rho must come from the certified inner fit that owned it.
+#[test]
+fn survival_no_spatial_outer_uses_certified_inner_rho_2768() {
+    let setup = no_spatial_joint_setup(2);
+    let fitted = array![-1.25, 0.75];
+    let terminal = terminal_survival_hyper_theta(&setup, true, &fitted, None)
+        .expect("the no-spatial fast path has a certified inner rho");
+    assert_eq!(terminal, fitted);
+}
+
+/// The no-certificate route is not a fallback: a family/auxiliary coordinate
+/// makes the spatial-joint outer solve mandatory and must still be refused.
+#[test]
+fn survival_missing_required_joint_outer_certificate_is_rejected_2768() {
+    let setup = no_spatial_joint_setup(1).with_auxiliary(
+        array![0.0],
+        array![-2.0],
+        array![2.0],
+    );
+    let error = terminal_survival_hyper_theta(&setup, true, &array![0.5], None)
+        .expect_err("an auxiliary coordinate requires a joint outer certificate");
+    assert!(
+        error.contains("required an outer certificate"),
+        "unexpected missing-certificate diagnostic: {error}",
+    );
+}
+
 fn base_time_block() -> TimeBlockInput {
     TimeBlockInput {
         design_entry: DesignMatrix::from(Array2::zeros((1, 1))),

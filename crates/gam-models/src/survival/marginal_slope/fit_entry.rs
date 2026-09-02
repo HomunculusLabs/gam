@@ -2,6 +2,57 @@
 
 use super::*;
 
+/// Recover the terminal hyperparameter vector from the optimizer that owned
+/// each coordinate.
+///
+/// The spatial-joint driver deliberately has no outer certificate on its fast
+/// path: ordinary smoothing selection is then owned by `fit_custom_family`,
+/// while any disabled spatial coordinates remain fixed at the setup value. A
+/// missing spatial certificate is therefore valid only under the driver's
+/// exact fast-path predicate; it is never permission to accept an uncertified
+/// joint solve.
+pub(crate) fn terminal_survival_hyper_theta(
+    setup: &ExactJointHyperSetup,
+    kappa_enabled: bool,
+    fitted_log_lambdas: &Array1<f64>,
+    certified_outer: Option<&gam_solve::rho_optimizer::CertifiedOuterResult>,
+) -> Result<Array1<f64>, String> {
+    let expected_theta_len = setup.theta0().len();
+    if let Some(outer) = certified_outer {
+        if outer.rho().len() != expected_theta_len {
+            return Err(format!(
+                "survival marginal-slope certified joint hyperparameter vector has {} coordinates, expected {expected_theta_len}",
+                outer.rho().len(),
+            ));
+        }
+        return Ok(outer.rho().clone());
+    }
+
+    let no_spatial_outer =
+        setup.auxiliary_dim() == 0 && (!kappa_enabled || setup.log_kappa_dim() == 0);
+    if !no_spatial_outer {
+        return Err(
+            "survival marginal-slope joint hyperparameter optimization required an outer certificate but returned none"
+                .to_string(),
+        );
+    }
+    if fitted_log_lambdas.len() != setup.rho_dim() {
+        return Err(format!(
+            "survival marginal-slope certified inner fit has {} smoothing coordinates, expected {}",
+            fitted_log_lambdas.len(),
+            setup.rho_dim(),
+        ));
+    }
+
+    // `fit_custom_family` owns and certifies rho on this path. Preserve the
+    // setup tail verbatim: it is either empty or a disabled, fixed kappa chart.
+    let mut theta = setup.theta0();
+    theta
+        .slice_mut(s![..setup.rho_dim()])
+        .assign(fitted_log_lambdas);
+    Ok(theta)
+}
+
 pub fn fit_survival_marginal_slope_terms(
     data: ArrayView2<'_, f64>,
     spec: SurvivalMarginalSlopeTermSpec,
@@ -1725,20 +1776,18 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         solved.fit.outer_iterations,
         solved.fit.inner_cycles,
     );
-    let certified_theta = solved
-        .certified_outer
-        .as_ref()
-        .ok_or_else(|| {
-            "survival marginal-slope fit completed without a certified joint hyperparameter vector"
-                .to_string()
-        })?
-        .rho();
-    let final_sigma = sigma_from_theta(certified_theta)?;
+    let certified_theta = terminal_survival_hyper_theta(
+        &setup,
+        kappa_options_ref.enabled,
+        &solved.fit.log_lambdas,
+        solved.certified_outer.as_ref(),
+    )?;
+    let final_sigma = sigma_from_theta(&certified_theta)?;
     let (baseline_offset_residuals, baseline_offset_curvatures, final_baseline_config) = {
         let final_family = make_family(
             &solved.designs[0],
             &solved.designs[1],
-            certified_theta,
+            &certified_theta,
             FlexActivation::On,
         )?;
         let selected_baseline = match (
@@ -1809,7 +1858,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         let correction_family = make_family(
             &designs[0],
             &designs[1],
-            certified_theta,
+            &certified_theta,
             FlexActivation::On,
         )?;
         apply_survival_generated_regressor_correction(
