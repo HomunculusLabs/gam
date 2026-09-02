@@ -80,7 +80,8 @@ default), the family is inferred from the response column. For a
 continuous `y` this is Gaussian with the identity link. Override with
 `family=` or `link=`.
 
-`s(x)` is a cubic P-spline (B-spline basis with a difference penalty).
+`s(x)` is a cubic penalized B-spline (B-spline basis with an exact
+integrated second-derivative roughness penalty).
 The basis dimension is chosen from the data unless `k=` is set. The
 smoothing parameter is selected by REML.
 

@@ -36,6 +36,14 @@ def _ensure_bspline_knots(spec: Any, t_np: Any) -> Any:
       * `bspline_basis_size` (and therefore the JAX static-shape path)
         works after one `.evaluate(x)` call, as the docstring promises.
 
+    The cache is an evaluation artifact, not a change of model: the original
+    ``(knots, degree)`` request is recorded on the spec first, and
+    ``BSpline.to_rust_descriptor`` serializes THAT, so a tabular fit builds
+    the same basis whether or not the descriptor was evaluated beforehand.
+    (It used to serialize the cached open vector, so ``evaluate()`` then
+    ``fit()`` fitted a different — and for ``periodic=True`` an unbuildable —
+    spline space from ``fit()`` alone.)
+
     Returns the resolved knot array.
     """
     import numpy as np
@@ -44,13 +52,24 @@ def _ensure_bspline_knots(spec: Any, t_np: Any) -> Any:
 
     knots = spec.knots
     if knots is None or isinstance(knots, int):
-        resolved = _api._resolve_knots(knots, t_np, label="knots", degree=int(spec.degree))
+        resolved = _api._resolve_knots(
+            knots,
+            t_np,
+            label="knots",
+            degree=int(spec.degree),
+            periodic=bool(spec.periodic),
+        )
+        # Record the request before overwriting it, so the fit bridge can
+        # serialize what the user asked for rather than this cache.
+        spec._gamfit_knot_request = (knots, int(spec.degree))
         # Cache the resolved knot vector AND the effective degree: auto-knot
         # derivation may downgrade the degree for small n (#340), and the
         # clamped vector's boundary multiplicity is `order + 1`, so the cached
         # spec must carry the matching degree for every later evaluate()/
         # basis_size call to stay consistent with the knots.
-        spec.knots = np.asarray(resolved.locations, dtype=np.float64)
+        resolved_knots = np.asarray(resolved.locations, dtype=np.float64)
+        spec._gamfit_resolved_knots = resolved_knots
+        spec.knots = resolved_knots
         spec.degree = int(resolved.order)
     return spec.knots
 

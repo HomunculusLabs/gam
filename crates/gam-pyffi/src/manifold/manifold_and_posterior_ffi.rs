@@ -4252,6 +4252,18 @@ fn validate_vector(name: &str, values: ArrayView1<'_, f64>) -> Result<(), String
     Ok::<(), _>(())
 }
 
+/// Read an explicit periodic knot vector as the uniform cyclic lattice the
+/// periodic evaluator builds: `len - 1` equal intervals of
+/// `[knots[0], knots[last]]`, one cyclic control per interval.
+///
+/// The cyclic B-spline core is uniform-only, so the interior grid points are
+/// not free parameters: they are REQUIRED to be that lattice, and a vector that
+/// is not — non-uniform spacing, or a clamped open vector with its repeated
+/// endpoints — is refused. It used to be reduced to its first point, last
+/// point and length, so any two arrays agreeing on those three numbers built
+/// the same basis whatever their interior said, and a clamped open vector's
+/// `2·(degree + 1)` boundary copies were counted as `2·degree + 1` extra
+/// cyclic controls.
 fn periodic_knot_domain(knots: ArrayView1<'_, f64>) -> Result<(f64, f64, usize), String> {
     if knots.len() < 2 {
         return Err("periodic knots must contain at least start and end".to_string());
@@ -4263,7 +4275,23 @@ fn periodic_knot_domain(knots: ArrayView1<'_, f64>) -> Result<(f64, f64, usize),
             "periodic knot domain must be increasing; got [{left}, {right}]"
         ));
     }
-    Ok((left, right, knots.len() - 1))
+    let num_basis = knots.len() - 1;
+    let span = right - left;
+    let spacing = span / num_basis as f64;
+    let tolerance = 1e-8 * span.max(left.abs()).max(right.abs());
+    for (j, &knot) in knots.iter().enumerate() {
+        let lattice = left + j as f64 * spacing;
+        if (knot - lattice).abs() > tolerance {
+            return Err(format!(
+                "periodic B-spline knots must be a strictly increasing, uniformly spaced grid \
+                 (the cyclic basis places one control per equal interval of [{left}, {right}]); \
+                 knots[{j}] = {knot} but the uniform lattice has {lattice} there. A clamped \
+                 open knot vector with repeated endpoints is not a periodic grid; pass \
+                 linspace(origin, origin + period, num_basis + 1) instead"
+            ));
+        }
+    }
+    Ok((left, right, num_basis))
 }
 
 /// Parse the ``nullspace_order`` keyword on the primitive Duchon bindings.

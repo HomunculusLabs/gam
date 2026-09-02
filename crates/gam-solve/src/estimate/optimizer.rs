@@ -2352,14 +2352,14 @@ where
             // unchanged, so non-degenerate fits and their recorded EDF accounting
             // are bit-identical (the `edf_by_block` channel already clamps the
             // complementary `rank − trace` to `[0, rank]`).
-            // f64::clamp does NOT fix NaN (only ±inf): a NaN product (e.g.
-            // inf*0 from an overflowed solve) would slip through and trip the
-            // penalty_block_trace finiteness validator. Map any non-finite
-            // product to the saturated `rank` bound, exactly as the inf case
-            // already resolves (gam#1379).
             // Raw product: the `[0, rank]` admission, the non-finite
             // resolution and the `[mp, p]` floor are all owned by
             // `penalized_edf_bundle`, which every fitting route shares (#2470).
+            // A `+inf` overflow of a ceiling-λ block saturates at `rank`
+            // (gam#1379); a NaN (e.g. inf*0 from a poisoned solve) is NOT
+            // saturation and is deliberately left to trip the
+            // penalty_block_trace finiteness validator rather than being
+            // resolved to a plausible number.
             traces[kk] = lambdas[kk] * frob;
         }
         let block_ranks: Vec<usize> = pirls_res

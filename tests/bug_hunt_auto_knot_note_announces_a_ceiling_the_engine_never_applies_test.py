@@ -65,6 +65,10 @@ unreachable for every dataset.
 Expected: the note and the engine agree -- either the note prints the ceiling the
 engine applies, or the engine applies the ceiling the note prints. This test
 asserts only their agreement, so either repair turns it green.
+
+Repaired by having the note print the ceiling the engine applies: it now reads
+``(rule: clamp(unique/4, 4..8) = <value>; ...)``, and the regex below parses
+that form. The agreement assertions are unchanged.
 """
 
 from __future__ import annotations
@@ -82,8 +86,7 @@ import gamfit
 _NOTE = re.compile(
     r"Automatically set (?P<applied>\d+) internal knots for smooth '[^']*' "
     r"from (?P<unique>\d+) unique values "
-    r"\(rule: clamp\(unique/4, 4\.\.max\(20, cbrt\(unique\)\)\) "
-    r"= clamp\(unique/4, 4\.\.(?P<ceiling>\d+)\)\)"
+    r"\(rule: clamp\(unique/4, 4\.\.(?P<ceiling>\d+)\) = (?P<stated>\d+);"
 )
 
 #: Unique counts where the note and the implementation still agree.
@@ -148,8 +151,9 @@ def test_the_note_reports_the_value_its_own_stated_rule_produces(unique: int) ->
 
 
 def test_the_announced_ceiling_is_reachable_by_some_dataset() -> None:
-    """``max(20, cbrt(unique))`` is at least 20 for every dataset while the
-    engine caps at 8, so the announced ceiling binds on nothing, ever."""
+    """The old ``max(20, cbrt(unique))`` ceiling was at least 20 for every
+    dataset while the engine capped at 8, so it bound on nothing, ever. The
+    announced ceiling must be one the engine can actually reach."""
     reached = False
     ceilings: list[tuple[int, int, int]] = []
     for unique in DIVERGENT:

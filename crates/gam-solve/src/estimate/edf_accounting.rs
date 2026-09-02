@@ -59,16 +59,24 @@ pub struct EdfBundle {
 /// confined to `[0, rank_k]`. When the outer optimizer drives a redundant
 /// block's `λ_k = exp(ρ_k)` to the ceiling, the raw product `λ_k·frob` can
 /// overflow to `+∞` on a ridge-stabilized Hessian even though the true value is
-/// exactly `rank_k` (gam#1379). `f64::clamp` does **not** rescue NaN — it
-/// propagates it — and a NaN would reach the fit-result finiteness validator, so
-/// any non-finite product resolves to the saturated bound, which is where the
-/// `+∞` case lands anyway.
+/// exactly `rank_k` (gam#1379): `+∞` is the one non-finite value with a known
+/// limit, and it resolves to the saturated bound.
+///
+/// `NaN` and `−∞` have no such limit. A NaN says the trace was never computed
+/// (a poisoned solve, or `∞·0` with no sign to read), and `−∞` is an overflow
+/// in the direction a nonnegative trace cannot go. Both are passed through as
+/// NaN for the fit-result finiteness validators to refuse. They used to
+/// resolve to `rank_k` as well — chosen only because `f64::clamp` propagates
+/// NaN — which turned a failed computation into a plausible EDF, and from there
+/// into a plausible `σ̂² = RSS/(n − edf)`, conditional AIC and interval width.
 fn admit_trace(raw: f64, rank: usize) -> f64 {
     let ceiling = rank as f64;
-    if raw.is_finite() {
+    if raw == f64::INFINITY {
+        ceiling
+    } else if raw.is_finite() {
         raw.clamp(0.0, ceiling)
     } else {
-        ceiling
+        f64::NAN
     }
 }
 
@@ -202,19 +210,29 @@ mod tests {
     }
 
     #[test]
-    fn a_non_finite_trace_resolves_to_the_saturated_rank_not_nan() {
+    fn a_positive_overflow_trace_resolves_to_the_saturated_rank() {
         // A ceiling-λ redundant block overflows to +inf on a ridge-stabilized
-        // Hessian; the true penalized trace is the block rank. NaN must resolve
-        // the same way — `f64::clamp` propagates NaN, so this cannot be left to
-        // the clamp alone.
-        for raw in [f64::INFINITY, f64::NAN] {
+        // Hessian; the true penalized trace is the block rank.
+        let bundle = penalized_edf_bundle(&[f64::INFINITY], &[3], 6, 3.0);
+        assert_eq!(bundle.penalty_block_trace, vec![3.0]);
+        assert_eq!(bundle.edf_by_block, vec![0.0]);
+        assert!(bundle.edf_total.is_finite());
+    }
+
+    #[test]
+    fn a_nan_or_negative_overflow_trace_is_not_admitted_as_saturation() {
+        // NaN carries no value and -inf points the way a nonnegative trace
+        // cannot go; neither has the +inf saturation limit. Resolving either to
+        // the rank fabricated a finite EDF from a failed computation, so both
+        // propagate as NaN for the fit-result finiteness validators to refuse.
+        for raw in [f64::NAN, f64::NEG_INFINITY] {
             let bundle = penalized_edf_bundle(&[raw], &[3], 6, 3.0);
-            assert_eq!(
-                bundle.penalty_block_trace,
-                vec![3.0],
-                "non-finite raw trace {raw} must saturate at the block rank"
+            assert!(
+                bundle.penalty_block_trace[0].is_nan(),
+                "raw trace {raw} must not be admitted at the block rank"
             );
-            assert!(bundle.edf_total.is_finite());
+            assert!(bundle.edf_by_block[0].is_nan());
+            assert!(bundle.edf_total.is_nan());
         }
     }
 

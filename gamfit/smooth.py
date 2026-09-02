@@ -297,6 +297,28 @@ class Duchon(Smooth):
 class BSpline(Smooth):
     """1D B-spline with exact integrated derivative roughness.
 
+    ``knots`` is ``None``, an ``int`` or an explicit knot array, and the
+    integer has ONE meaning everywhere the descriptor is consumed:
+    ``knots=K`` asks for ``K`` interior knots, so an open basis of degree
+    ``d`` spans ``K + d + 1`` functions and a periodic one has ``K + d + 1``
+    cyclic controls — the reading the formula DSL gives ``s(x, knots=K)`` /
+    ``cyclic(x, knots=K)`` and :func:`gamfit.bspline_basis` gives its
+    ``knots=K``. ``None`` auto-derives: direct evaluation places ``10``
+    quantile interior knots from the evaluated points, while the tabular fit
+    path lets the Rust engine choose the count from the fitted column
+    (``clamp(unique/4, 4..8)``). An explicit array is used verbatim — a
+    clamped open knot vector, or for ``periodic=True`` the uniform
+    ``K + 1``-point grid ``[origin, origin + period]`` whose intervals are the
+    ``K`` cyclic controls.
+
+    The first ``.evaluate(x)`` resolves ``None`` / ``int`` knots from ``x`` and
+    caches the resolved array (and the auto-shrunk effective degree) on the
+    spec so every backend evaluates the same chart and :attr:`basis_size` is
+    static. That cache is an evaluation artifact: :meth:`to_rust_descriptor`
+    still serializes the knot request the descriptor was built with, so
+    fitting a descriptor builds the same model whether or not it was
+    evaluated first.
+
     For multi-dimensional inputs with DIFFERENT axis units (space × time
     being the canonical example), use :class:`TensorBSpline` instead.
     For multi-dimensional inputs with the SAME axis units (a continuous
@@ -305,10 +327,19 @@ class BSpline(Smooth):
     would-be dense basis buffer exceeds ~1 GiB; no opt-in is required.
     """
 
-    knots: Any = None                    # (K,) — auto-derived if None
+    knots: Any = None                    # None | int (interior knots) | (K,) array
     degree: int = 3
     penalty_order: int = 2
     periodic: bool = False
+    # Evaluation cache bookkeeping (see ``_basis_eval._ensure_bspline_knots``):
+    # the ``(knots, degree)`` request that was resolved, and the resolved array
+    # that replaced it on ``knots``. ``None`` until the first evaluate().
+    _gamfit_knot_request: tuple[Any, int] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _gamfit_resolved_knots: Any = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     @property
     def intrinsic_dim(self) -> int:
@@ -327,14 +358,32 @@ class BSpline(Smooth):
         from ._basis_eval import bspline_evaluate_numpy
         return bspline_evaluate_numpy(self, coords)
 
+    def _fit_knot_request(self) -> tuple[Any, int]:
+        """The ``(knots, degree)`` a fit should build from.
+
+        ``.evaluate(x)`` caches the knot vector it resolved from ``x`` onto
+        ``knots`` (and the auto-shrunk degree onto ``degree``) so later
+        evaluations share one chart. A fit must not inherit that cache: the
+        knots were placed from whatever ``x`` happened to be evaluated first,
+        an open vector cannot promote to a periodic basis, and the shrunk
+        degree is a property of the evaluation sample. So while ``knots``
+        still IS the cached array, serialize the original request; once the
+        caller has replaced it with something of their own, honour that.
+        """
+        request = self._gamfit_knot_request
+        if request is not None and self.knots is self._gamfit_resolved_knots:
+            return request
+        return self.knots, int(self.degree)
+
     def to_rust_descriptor(self) -> dict[str, Any]:
         out = super(BSpline, self).to_rust_descriptor()
-        if self.knots is not None:
-            if isinstance(self.knots, int):
-                out["n_knots"] = int(self.knots)
+        knots, degree = self._fit_knot_request()
+        if knots is not None:
+            if isinstance(knots, int):
+                out["n_knots"] = int(knots)
             else:
-                out["knots"] = _array_to_list(self.knots)
-        out["degree"] = int(self.degree)
+                out["knots"] = _array_to_list(knots)
+        out["degree"] = int(degree)
         out["penalty_order"] = int(self.penalty_order)
         if self.periodic:
             out["periodic"] = True

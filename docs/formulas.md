@@ -124,7 +124,7 @@ factor's centering point (#2137).
 ## Univariate smooths {#univariate-smooths}
 
 ```
-y ~ s(x)                    # P-spline (B-spline + difference penalty)
+y ~ s(x)                    # penalized B-spline (exact derivative roughness penalty)
 y ~ smooth(x)               # alias of s()
 y ~ s(x, k=15)              # basis dimension 15
 y ~ s(x, knots=10)          # 10 interior knots
@@ -135,8 +135,16 @@ y ~ s(x, bc_left=anchored, anchor_left=0)  # known start value and zero start sl
 y ~ s(x, bc=clamped)        # zero slope at both endpoints
 ```
 
-For a single covariate, `s(x)` defaults to a cubic P-spline with a
-second-order difference penalty.
+For a single covariate, `s(x)` defaults to a cubic B-spline whose roughness
+penalty is the exact integrated squared second derivative,
+`∫ (f''(x))² dx = βᵀ S β` with `S_ij = ∫ B_i'' B_j'' dx`, assembled in closed
+form from the basis. This is a Sobolev penalty on the represented *function*,
+not the classical Eilers–Marx P-spline coefficient-difference penalty
+`‖Δ²β‖²`: the two share a null space (polynomials of degree below
+`penalty_order`) but are different matrices — most visibly on non-uniform
+knots and at the boundary — so `type=ps` names this basis family, not a
+difference-penalty model, and fits are not expected to coincide with a
+difference-penalized P-spline of the same dimension.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -145,7 +153,7 @@ second-order difference penalty.
 | `degree` | 3 | Polynomial degree of the B-spline. |
 | `penalty_order` | 2 | Derivative order penalised (1 = slope, 2 = curvature). |
 | `type` | `ps` (1-D), `tps` (2+D) | `ps`, `tps`, `matern`, `duchon`, `sphere`. |
-| `double_penalty` | `true` | Add a ridge penalty alongside the difference penalty. |
+| `double_penalty` | `true` | Add a null-space ridge penalty alongside the roughness penalty. |
 | `bc` | `none` | Boundary condition for both endpoints: `none`, `clamped` (zero first derivative), or `anchored` (fixed value and zero first derivative). Combine with `side=left`/`right` for half-open smooths. |
 | `bc_left`, `bc_right` | inherit from `bc` | Per-endpoint overrides, with aliases `start_bc`/`end_bc`. |
 | `anchor`, `anchor_left`, `anchor_right` | `0` for anchored endpoints | Fixed endpoint value(s) when an endpoint uses `anchored`. |
@@ -188,10 +196,15 @@ does, so `cyclic(x, period=2*pi)` and `cyclic(x, period_start=0,
 period_end=2*pi)` describe the same `[0, 2π)` smooth. An unparseable
 endpoint or an unknown option is rejected rather than silently dropped.
 
-Default interior knots:
-`clamp(unique_values / 4, 4, max(20, cbrt(unique_values)))`. The basis
-dimension is then `k = internal_knots + degree + 1`. Passing both `k`
-and `knots` is an error.
+Default interior knots: `clamp(unique_values / 4, 4, 8)` — a lean default
+of about twelve cubic basis functions, close to mgcv's `k = 10`; the cap is
+flat in `n`, so a wigglier fit is an explicit `k=` away rather than the
+default (#1680). With 32 or fewer rows and five or more smooth coordinates
+the inferred count is further reduced to at most 1. The basis dimension is
+then `k = internal_knots + degree + 1`, and an explicit `k` is honoured
+exactly down to `k = degree + 1` (zero interior knots). Passing both `k`
+and `knots` is an error. The fit's inference note prints the rule it
+applied.
 
 ### Boundary-conditioned 1-D smooths {#boundary-conditioned-1d-smooths}
 

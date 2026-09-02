@@ -4880,7 +4880,7 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(fit_table, module)?)?;
     module.add_function(wrap_pyfunction!(fit_array, module)?)?;
     module.add_function(wrap_pyfunction!(compile_model, module)?)?;
-    module.add_function(wrap_pyfunction!(bayes_factor_log_diff, module)?)?;
+    module.add_function(wrap_pyfunction!(log_evidence_ratio, module)?)?;
     module.add_function(wrap_pyfunction!(saved_model_payload_string, module)?)?;
     module.add_function(wrap_pyfunction!(inference_notes_from_model, module)?)?;
     module.add_function(wrap_pyfunction!(

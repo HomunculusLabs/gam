@@ -40,5 +40,5 @@ def test_bayes_factor_vs_and_evidence_agree_with_compare_models_winner():
     # If compare_models picks `small`, then the augmented model must NOT be
     # better supported than `small`, and `small` must have the lower (better)
     # evidence cost. Before the fix these contradicted the declared winner.
-    assert big.bayes_factor_vs(small) <= 1.0
+    assert big.evidence_ratio_vs(small) <= 1.0
     assert small.evidence <= big.evidence

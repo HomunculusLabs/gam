@@ -203,6 +203,7 @@ def _resolve_bspline_knots_for_fit(
             points_1d.detach().cpu().to(torch.float64).numpy(),
             label="knots",
             degree=smooth.degree,
+            periodic=bool(smooth.periodic),
         )
         return (
             torch.as_tensor(
@@ -241,6 +242,7 @@ def _marginal_bspline_design_penalty(
             marg_knots,
             x.detach().cpu().to(torch.float64).numpy(),
             label="knots", degree=int(marginal.degree),
+            periodic=bool(marginal.periodic),
         )
         knots_np = resolved.locations
         eff_degree = int(resolved.order)

@@ -2,7 +2,7 @@
 
 The bug: ``bayes_factor_vs`` returned the *reciprocal* of the correct Bayes
 factor, favouring the worse-fitting model. On data with obvious signal,
-``m_sx.bayes_factor_vs(m_null)`` returned a number like ``6.8e-220`` ("no
+``m_sx.evidence_ratio_vs(m_null)`` returned a number like ``6.8e-220`` ("no
 support for the good model") while ``gamfit.compare_models`` on the same two
 fits correctly declared the smooth model the winner by ``~1e+219``. The two
 entry points contradicted each other.
@@ -49,13 +49,13 @@ def test_bayes_factor_vs_favours_better_model_not_worse() -> None:
 
     # The core assertion: the Bayes factor of the better model over the worse
     # one must be > 1 (pre-fix it was ~6.8e-220).
-    bf_good_over_null = m_sx.bayes_factor_vs(m_null)
+    bf_good_over_null = m_sx.evidence_ratio_vs(m_null)
     assert bf_good_over_null > 1.0, (
         f"bayes_factor_vs favoured the worse model: {bf_good_over_null!r}"
     )
 
     # ... and the worse model's Bayes factor over the better one must be < 1.
-    bf_null_over_good = m_null.bayes_factor_vs(m_sx)
+    bf_null_over_good = m_null.evidence_ratio_vs(m_sx)
     assert bf_null_over_good < 1.0, (
         f"worse model's bayes_factor_vs favoured itself: {bf_null_over_good!r}"
     )
@@ -75,13 +75,27 @@ def test_bayes_factor_vs_agrees_with_compare_models_winner() -> None:
     loser_name = "null" if winner_name == "sx" else "sx"
 
     winner, loser = models[winner_name], models[loser_name]
-    assert winner.bayes_factor_vs(loser) > 1.0
-    assert loser.bayes_factor_vs(winner) < 1.0
+    assert winner.evidence_ratio_vs(loser) > 1.0
+    assert loser.evidence_ratio_vs(winner) < 1.0
 
 
-def test_bayes_factor_vs_of_model_against_itself_is_one() -> None:
+def test_bayes_factor_vs_is_a_deprecated_alias_of_evidence_ratio_vs() -> None:
+    # The quantity is the Akaike evidence ratio exp(-dAIC/2), not a Bayes
+    # factor (no prior is integrated over), so the old name misdescribed it.
+    # It survives as a deprecated alias that returns the identical value.
+    import warnings
+
+    m_sx, m_null = _fit_pair()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        legacy = m_sx.bayes_factor_vs(m_null)
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+    assert legacy == m_sx.evidence_ratio_vs(m_null)
+
+
+def test_evidence_ratio_vs_of_model_against_itself_is_one() -> None:
     # Edge case: identical fits are indistinguishable, so the Bayes factor is
     # exactly 1 (log BF = score - score = 0). Guards against an off-by-sign or
     # off-by-constant that would still pass the strictly-ordered cases above.
     m_sx, _ = _fit_pair()
-    assert m_sx.bayes_factor_vs(m_sx) == pytest.approx(1.0, abs=1e-12)
+    assert m_sx.evidence_ratio_vs(m_sx) == pytest.approx(1.0, abs=1e-12)

@@ -1721,28 +1721,33 @@ fn compile_model(py: Python<'_>, model_bytes: Vec<u8>) -> PyResult<PyFittedModel
     })
 }
 
+/// Log Akaike evidence ratio of model A over model B: `−(AIC_A − AIC_B)/2`.
+///
+/// This is the relative likelihood of Burnham & Anderson, NOT a log Bayes
+/// factor (no prior is integrated over), and the Python surface names it
+/// `Model.evidence_ratio_vs` accordingly.
 #[pyfunction]
-fn bayes_factor_log_diff(model_a_bytes: Vec<u8>, model_b_bytes: Vec<u8>) -> PyResult<f64> {
+fn log_evidence_ratio(model_a_bytes: Vec<u8>, model_b_bytes: Vec<u8>) -> PyResult<f64> {
     let payload_a = summary_payload_from_model_bytes(&model_a_bytes)?;
     let payload_b = summary_payload_from_model_bytes(&model_b_bytes)?;
     // Rank on the SAME Occam-penalised conditional AIC that `compare_models`
     // uses (`-2·loglik + 2·edf`, `ranking_score_from_summary_payload`), not the
     // raw REML/LAML evidence headline. The raw headline fails to penalise a
-    // pure-noise smooth, so `bayes_factor_vs` used to declare the augmented
+    // pure-noise smooth, so the pairwise ratio used to declare the augmented
     // model better supported even though `compare_models` correctly picked the
     // smaller one — the two contradicted each other (issue #2079).
     let score_a = ranking_score_from_summary_payload(&payload_a)?;
     let score_b = ranking_score_from_summary_payload(&payload_b)?;
-    // The ranking score is a minimised cost (lower = better), so the log Bayes
-    // factor of A over B is `score_b - score_a`, not `score_a - score_b`. Route
+    // The ranking score is a minimised cost (lower = better), so the log ratio
+    // of A over B is `score_b - score_a`, not `score_a - score_b`. Route
     // through the shared convention so this agrees with `compare_reml_fits`
     // (issue #575: the raw subtraction was inverted, reporting overwhelming
     // evidence for the worse-fitting model).
     //
     // The ranking score is the conditional AIC (`−2·loglik + 2·edf`), a −2·log /
     // deviance-scale cost, so its gap is a ΔAIC. The Akaike evidence ratio for an
-    // AIC gap Δ is `exp(−½Δ)` (Burnham & Anderson), so the LOG Bayes factor is
-    // HALF the raw score gap. `Model.bayes_factor_vs` exponentiates this value
+    // AIC gap Δ is `exp(−½Δ)` (Burnham & Anderson), so the LOG ratio is HALF
+    // the raw score gap. `Model.evidence_ratio_vs` exponentiates this value
     // directly; returning the un-halved gap made it report `exp(ΔAIC)`, the SQUARE
     // of the intended ratio (issue #2124). Halve here, at the AIC-scale site, so
     // no raw-REML consumer is affected.
@@ -4632,7 +4637,7 @@ fn compare_reml_fits(
             row.name.as_str(),
             row.score,
             row.delta,
-            row.bayes_factor,
+            row.evidence_ratio,
             row.edf,
         ))?;
     }
@@ -4736,7 +4741,7 @@ fn comparable_reml_score(
 
 /// Occam-penalised conditional-AIC ranking score for a saved-model summary
 /// payload, matching `gam::solver::evidence::RemlCandidate::ranking_score`
-/// exactly (`-2·loglik + 2·edf`) so `Model.evidence` and `Model.bayes_factor_vs`
+/// exactly (`-2·loglik + 2·edf`) so `Model.evidence` and `Model.evidence_ratio_vs`
 /// pick the SAME winner as `gamfit.compare_models` (issue #2079).
 ///
 /// Both inputs are required and finite. A raw REML/LAML criterion is a different

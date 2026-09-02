@@ -59,7 +59,7 @@ class CtnStage1:
     response_extra_penalty_orders, double_penalty:
         Optional overrides for the CTN response-direction basis / penalty.
         Leave as ``None`` to use the Rust ``TransformationNormalConfig``
-        defaults (degree 3, 10 interior knots, 2nd-difference penalty, extra
+        defaults (degree 3, 10 interior knots, 2nd-derivative penalty, extra
         order ``[1]``, double penalty on). Any subset may be set; unset fields
         fall back to the Rust default.
     weights:

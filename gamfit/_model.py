@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Literal, Sequence, cast
@@ -1450,29 +1451,55 @@ class Model:
         LAML is a different estimand and is never used as a fallback (#2079).
         It is a *cost*, so **lower is better** -- the model with the smaller
         ``evidence`` is the better-supported one, agreeing with the winner
-        reported by ``gamfit.compare_models``. Use :meth:`bayes_factor_vs` or
+        reported by ``gamfit.compare_models``. Use :meth:`evidence_ratio_vs` or
         ``gamfit.compare_models`` for a direct comparison. (The raw,
         un-penalised REML/LAML evidence headline remains available as
         ``Summary.reml_score`` / the ``score_table`` column.)
         """
         return float(rust_module().model_evidence(self._model_bytes))
 
-    def bayes_factor_vs(self, other: "Model") -> float:
-        """Bayes factor of this fit against ``other``.
+    def evidence_ratio_vs(self, other: "Model") -> float:
+        """Akaike evidence ratio of this fit over ``other``.
 
-        Returns ``> 1`` when this fit is better supported than ``other``
-        (i.e. has the lower :attr:`evidence` cost) and ``< 1`` otherwise,
-        agreeing with the winner reported by ``gamfit.compare_models``.
+        ``exp(-(self.evidence - other.evidence) / 2)``: the relative likelihood
+        of the two fits under the conditional-AIC criterion that
+        ``gamfit.compare_models`` ranks on (Burnham & Anderson). Returns ``> 1``
+        when this fit is better supported than ``other`` (i.e. has the lower
+        :attr:`evidence` cost) and ``< 1`` otherwise, agreeing with the winner
+        reported by ``gamfit.compare_models``.
+
+        This is **not** a Bayes factor. A Bayes factor is a ratio of
+        prior-integrated marginal likelihoods; this quantity integrates over no
+        prior and must not be read against Jeffreys / Kass-Raftery thresholds.
+        (The raw REML/LAML headline in the ``score_table`` of
+        ``gamfit.compare_models`` is the Laplace-approximate marginal-likelihood
+        diagnostic, kept on its own labelled scale.)
         """
         # allow-list (a): FFI input validation.
         if not isinstance(other, Model):
             raise TypeError(
-                f"bayes_factor_vs expects a gamfit.Model, got {type(other).__name__}"
+                f"evidence_ratio_vs expects a gamfit.Model, got {type(other).__name__}"
             )
-        log_diff = rust_module().bayes_factor_log_diff(
+        log_ratio = rust_module().log_evidence_ratio(
             self._model_bytes, other._model_bytes
         )
-        return math.exp(log_diff)
+        return math.exp(log_ratio)
+
+    def bayes_factor_vs(self, other: "Model") -> float:
+        """Deprecated spelling of :meth:`evidence_ratio_vs`.
+
+        The value was never a Bayes factor -- it is the Akaike evidence ratio
+        ``exp(-dAIC/2)`` -- so the name misdescribed it. Emits a
+        ``DeprecationWarning`` and returns exactly what
+        :meth:`evidence_ratio_vs` returns.
+        """
+        warnings.warn(
+            "Model.bayes_factor_vs is the Akaike evidence ratio exp(-dAIC/2), not a "
+            "Bayes factor; use Model.evidence_ratio_vs",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.evidence_ratio_vs(other)
 
     def _model_class_from_payload(self) -> str:
         return rust_module().saved_model_predict_class_name(self._model_bytes)

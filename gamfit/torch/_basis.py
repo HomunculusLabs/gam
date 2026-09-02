@@ -40,7 +40,7 @@ def _resolve_centers_tensor(t: torch.Tensor, centers: Any) -> torch.Tensor:
 
 
 def _resolve_knots_tensor(
-    t: torch.Tensor, knots: Any, *, degree: int
+    t: torch.Tensor, knots: Any, *, degree: int, periodic: bool = False
 ) -> tuple[torch.Tensor, int]:
     """Accept None / int / Tensor for B-spline knots; auto-derive when needed.
 
@@ -49,11 +49,16 @@ def _resolve_knots_tensor(
     then built for ``effective_degree`` and must be evaluated at that degree,
     so callers must use the returned degree rather than the requested one. An
     explicit knot tensor passes the requested degree straight through.
+    ``periodic`` selects the uniform cyclic grid (``K + degree + 1`` controls
+    over ``[min(t), max(t)]``) instead of the clamped open vector, matching
+    :func:`gamfit.bspline_basis`.
     """
     if isinstance(knots, torch.Tensor):
         return knots, degree
     # Auto quantile knot placement delegates to Rust core, do not reimplement.
-    resolved = _api._resolve_knots(knots, to_numpy_f64(t), label="knots", degree=degree)
+    resolved = _api._resolve_knots(
+        knots, to_numpy_f64(t), label="knots", degree=degree, periodic=periodic
+    )
     return from_numpy_like(resolved.locations, t), int(resolved.order)
 
 
@@ -542,7 +547,10 @@ def bspline_basis(
     knots : torch.Tensor | int | None, optional
         Knot vector. ``None`` (default) auto-derives a clamped knot
         vector with quantile-spaced interior knots from ``t``; an ``int``
-        ``K`` overrides the interior-knot count. Treated as structural
+        ``K`` overrides the interior-knot count. With ``periodic=True`` the
+        auto-derived vector is instead the uniform cyclic grid with
+        ``K + degree + 1`` controls over ``[min(t), max(t)]``, and an
+        explicit tensor must be such a uniform grid. Treated as structural
         either way — no gradient is propagated.
     degree : int, optional
         Spline degree. Default ``3``.
@@ -554,7 +562,9 @@ def bspline_basis(
     torch.Tensor
         Basis matrix of shape ``(n_t, n_basis)``.
     """
-    knots_t, eff_degree = _resolve_knots_tensor(t, knots, degree=int(degree))
+    knots_t, eff_degree = _resolve_knots_tensor(
+        t, knots, degree=int(degree), periodic=bool(periodic)
+    )
     apply = cast(Callable[..., torch.Tensor], _BsplineBasisFn.apply)
     return apply(t, knots_t, eff_degree, bool(periodic))
 
@@ -596,7 +606,9 @@ def bspline_basis_derivative(
     torch.Tensor
         Derivative basis matrix of shape ``(n_t, n_basis)``.
     """
-    knots_t, eff_degree = _resolve_knots_tensor(t, knots, degree=int(degree))
+    knots_t, eff_degree = _resolve_knots_tensor(
+        t, knots, degree=int(degree), periodic=bool(periodic)
+    )
     apply = cast(Callable[..., torch.Tensor], _BsplineDerivFn.apply)
     return apply(t, knots_t, eff_degree, int(order), bool(periodic))
 

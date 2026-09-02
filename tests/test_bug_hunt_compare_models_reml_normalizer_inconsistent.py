@@ -140,7 +140,7 @@ def test_bayes_factor_vs_agrees_with_compare_models_magnitude() -> None:
     # (issue #2124). The winner term cancels in the difference. bayes_factor_vs is
     # a minimized cost (lower = better), matching that direction.
     log_bf_poly_over_smooth_compare = 0.5 * (ranking["smooth"][2] - ranking["poly"][2])
-    log_bf_poly_over_smooth_pairwise = math.log(m_poly.bayes_factor_vs(m_smooth))
+    log_bf_poly_over_smooth_pairwise = math.log(m_poly.evidence_ratio_vs(m_smooth))
 
     assert log_bf_poly_over_smooth_pairwise == pytest.approx(
         log_bf_poly_over_smooth_compare, rel=1e-6, abs=1e-6

@@ -26,6 +26,13 @@ def compare_models(
     """Rank candidate fits by conditional AIC.
 
     Returns ``ranking``, ``winner``, ``evidence_summary``, and ``score_table``.
+    Each ``ranking`` row is ``(name, reml_score, delta, evidence_ratio, edf)``:
+    ``delta`` is the row's conditional-AIC gap to the winner and
+    ``evidence_ratio = exp(delta / 2)`` the Akaike evidence ratio of the
+    winner over the row (Burnham & Anderson's relative likelihood). It is
+    not a Bayes factor -- no prior is integrated over -- and must not be
+    read against Jeffreys / Kass-Raftery thresholds. The ``score_table``
+    keeps the raw REML / LAML diagnostic on its own labelled scale.
     When ``cv_scores`` is supplied, the Rust ranking also returns
     ``cv_optional`` aligned to the evidence order.
     """

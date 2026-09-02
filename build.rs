@@ -4183,9 +4183,23 @@ fn is_generated_lockfile(rel: &Path) -> bool {
     )
 }
 
+/// The one tracked file the line-count gate does not apply to.
+///
+/// `CHANGELOG.md` is an append-only, newest-first release log. Its only
+/// cohesive seam is the release boundary, nobody reviews it wholesale (a reader
+/// consults one heading; `publish.yml` reads only the top one), and its length
+/// is history rather than a module that can be split into named parts. The
+/// gate did fire on it once (#780) and the split it forced —
+/// `CHANGELOG-ARCHIVE.md` plus a second docs page — was the wrong shape and has
+/// been folded back in. Exempting it BY NAME keeps the gate universal for
+/// everything else, data shards included.
+fn is_append_only_release_log(rel: &Path) -> bool {
+    rel == Path::new("CHANGELOG.md")
+}
+
 fn scan_for_oversized_tracked_files(root: &Path, offenders: &mut Vec<(PathBuf, usize, String)>) {
     for rel in collect_repo_files(root) {
-        if is_generated_lockfile(&rel) {
+        if is_generated_lockfile(&rel) || is_append_only_release_log(&rel) {
             continue;
         }
         let path = root.join(rel);

@@ -590,8 +590,9 @@ pub fn fit_shared_tangent_reml(
     // Kept from the accounting this route used to own: a trace that is FINITE
     // and materially outside `[0, rank]` is not saturation and not roundoff — it
     // is broken linear algebra upstream, and admitting it at a bound would hide
-    // that. The shared accounting deliberately clamps (a non-finite product is
-    // the ceiling case above), so this input check stays here rather than
+    // that. The shared accounting deliberately clamps (a `+∞` product is the
+    // ceiling case above; a NaN or `−∞` product propagates for the finiteness
+    // check below to refuse), so this input check stays here rather than
     // becoming a second accounting policy.
     for (active_index, &rank) in block_ranks.iter().enumerate() {
         let raw = evaluation.penalty_traces[active_index];

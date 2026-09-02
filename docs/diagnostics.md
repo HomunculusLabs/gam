@@ -11,7 +11,7 @@ criterion, which is a different statement from "not recorded". A Gaussian
 fit whose fitted mean reproduces the response to floating-point resolution
 has `sigma_hat = 0`, so its restricted likelihood is unbounded and every
 score derived from it — the comparable REML/LAML headline, `Model.evidence`,
-`Model.bayes_factor_vs`, `gamfit.compare_models` — is undefined rather than
+`Model.evidence_ratio_vs`, `gamfit.compare_models` — is undefined rather than
 large. `Summary.reml_score_unavailable` then carries the explanation, and
 those ranking surfaces raise it instead of ranking a stand-in value. Compare
 such a model on predictive accuracy, or refit on data whose response is not

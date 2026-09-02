@@ -1788,9 +1788,18 @@ def bspline_basis(
     ``knots`` may be:
 
     * ``None`` — auto-derive a clamped knot vector with quantile-spaced
-      interior knots inferred from ``t``.
+      interior knots inferred from ``t`` (10 interior knots).
     * an ``int`` ``K`` — auto-derive with ``K`` interior knots.
     * an array-like — used verbatim (must be a valid clamped knot vector).
+
+    With ``periodic=True`` the basis is the uniform cyclic B-spline on
+    ``[knots[0], knots[-1]]`` with ``len(knots) - 1`` cyclic controls, one per
+    grid interval. An explicit array must therefore be a strictly increasing,
+    uniformly spaced grid (a clamped open vector is rejected rather than
+    silently reduced to its endpoints and length), and ``None`` / ``K`` build
+    that grid over ``[min(t), max(t)]`` with ``K + degree + 1`` controls — the
+    same dimension ``K`` names for an open basis, and the ``cyclic(x,
+    knots=K)`` formula convention.
     """
     import numpy as np
 
@@ -1798,7 +1807,9 @@ def bspline_basis(
     if degree_i < 0:
         raise ValueError(f"degree must be non-negative, got {degree}")
     t_np = _numeric_vector(t, "t")
-    knots_np, eff_degree, _shrunk = _resolve_knots(knots, t_np, label="knots", degree=degree_i)
+    knots_np, eff_degree, _shrunk = _resolve_knots(
+        knots, t_np, label="knots", degree=degree_i, periodic=bool(periodic)
+    )
     try:
         return np.asarray(
             rust_module().bspline_basis(
@@ -1834,7 +1845,9 @@ def bspline_basis_derivative(
     if order_i < 0:
         raise ValueError(f"order must be non-negative, got {order}")
     t_np = _numeric_vector(t, "t")
-    knots_np, eff_degree, _shrunk = _resolve_knots(knots, t_np, label="knots", degree=degree_i)
+    knots_np, eff_degree, _shrunk = _resolve_knots(
+        knots, t_np, label="knots", degree=degree_i, periodic=bool(periodic)
+    )
     try:
         return np.asarray(
             rust_module().bspline_basis_derivative(
@@ -4080,14 +4093,26 @@ def _resolve_knots(
     *,
     label: str = "knots",
     degree: int = 3,
+    periodic: bool = False,
 ) -> _ResolvedBasisLocations:
     """Coerce ``knots`` (None / int / array) into a resolved knot vector.
 
-    Auto-derivation delegates to the Rust ``auto_knots_1d`` FFI export, which
-    returns ``(knots, effective_degree, num_internal_knots, shrunk)`` (issue
-    #340). We surface the knot vector together with the **effective** degree so
-    the auto-shrink decision stays consistent with downstream evaluation; the
-    explicit-array path passes the requested degree straight through unshrunk.
+    Open (``periodic=False``) auto-derivation delegates to the Rust
+    ``auto_knots_1d`` FFI export, which returns ``(knots, effective_degree,
+    num_internal_knots, shrunk)`` (issue #340). We surface the knot vector
+    together with the **effective** degree so the auto-shrink decision stays
+    consistent with downstream evaluation; the explicit-array path passes the
+    requested degree straight through unshrunk.
+
+    Periodic auto-derivation builds the uniform cyclic grid the Rust periodic
+    evaluator consumes — ``num_basis + 1`` equally spaced points over
+    ``[min(t), max(t)]``, one cyclic control per interval — with ``num_basis =
+    K + degree + 1`` for an integer ``K`` (the ``cyclic(x, knots=K)`` formula
+    convention, so ``K`` names the same dimension it does for an open basis).
+    It used to hand the periodic evaluator the CLAMPED OPEN vector, whose
+    ``2 * (degree + 1)`` repeated endpoints were then counted as ``2 * degree
+    + 1`` extra cyclic controls: ``knots=8, degree=3`` silently became a
+    15-function basis.
     """
     degree_i = int(degree)
     if degree_i < 0:
@@ -4101,6 +4126,11 @@ def _resolve_knots(
                     f"{label}: integer interior-knot count must be >= 0, got {knots}"
                 )
             requested_internal = int(knots)
+        if periodic:
+            grid = _periodic_uniform_grid(
+                t_arr, requested_internal + degree_i + 1, label=label
+            )
+            return _ResolvedBasisLocations(grid, degree_i, False)
         knot_vec, eff_degree, _eff_internal, shrunk = rust_module().auto_knots_1d(
             t_arr, requested_internal, degree_i
         )
@@ -4110,6 +4140,29 @@ def _resolve_knots(
             bool(shrunk),
         )
     return _ResolvedBasisLocations(_numeric_vector(knots, label), degree_i, False)
+
+
+def _periodic_uniform_grid(t_arr: Any, num_basis: int, *, label: str) -> Any:
+    """``num_basis + 1`` equally spaced grid points spanning ``[min(t), max(t)]``.
+
+    The Rust periodic B-spline evaluator (``bspline_basis(..., periodic=True)``)
+    reads a knot vector as a cyclic lattice: ``len(knots) - 1`` uniform
+    intervals of the closed domain, one cyclic control per interval. The domain
+    is the evaluated range, as it always was for the auto-derived periodic
+    path; pass an explicit grid to fix a different period.
+    """
+    np = _numpy_module()
+    t_np = np.asarray(t_arr, dtype=float).reshape(-1)
+    if t_np.size == 0:
+        raise ValueError(f"{label}: cannot derive a periodic domain from empty t")
+    lo = float(np.min(t_np))
+    hi = float(np.max(t_np))
+    if not (np.isfinite(lo) and np.isfinite(hi)) or not hi > lo:
+        raise ValueError(
+            f"{label}: periodic auto-knots need a positive finite range of t, "
+            f"got [{lo}, {hi}]"
+        )
+    return np.linspace(lo, hi, int(num_basis) + 1, dtype=float)
 
 
 def _numpy_module() -> Any:
