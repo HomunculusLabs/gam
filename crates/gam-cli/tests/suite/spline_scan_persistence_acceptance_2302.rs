@@ -116,7 +116,17 @@ fn fresh_processes_replay_saved_scan_for_predict_and_report() {
             .expect("prediction header")
             .iter()
             .collect::<Vec<_>>(),
-        vec!["eta", "mean", "std_error", "mean_lower", "mean_upper"]
+        // The scan replays through the standard estimand-explicit writer
+        // (#2785): identity link, so the plug-in pair and the posterior mean
+        // are one value.
+        vec![
+            "linear_predictor_plugin",
+            "mean_plugin",
+            "posterior_mean",
+            "posterior_mean_standard_error",
+            "posterior_mean_lower",
+            "posterior_mean_upper",
+        ]
     );
     let rows = predictions
         .records()
@@ -128,6 +138,7 @@ fn fresh_processes_replay_saved_scan_for_predict_and_report() {
         let (mean, variance) = scan.predict(x).expect("direct saved-scan prediction");
         let se = variance.max(0.0).sqrt();
         let expected = [
+            format!("{mean:.12}"),
             format!("{mean:.12}"),
             format!("{mean:.12}"),
             format!("{se:.12}"),

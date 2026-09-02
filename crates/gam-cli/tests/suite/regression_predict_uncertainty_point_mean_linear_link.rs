@@ -133,8 +133,8 @@ fn predict_uncertainty_does_not_shift_point_mean_for_linear_link() {
     let uncertain_csv =
         std::fs::read_to_string(out_uncertainty.path()).expect("read uncertainty predictions");
 
-    let plain_mean = parse_named_column(&plain_csv, "mean");
-    let uncertain_mean = parse_named_column(&uncertain_csv, "mean");
+    let plain_mean = parse_named_column(&plain_csv, "posterior_mean");
+    let uncertain_mean = parse_named_column(&uncertain_csv, "posterior_mean");
 
     assert_eq!(
         plain_mean.len(),

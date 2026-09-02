@@ -105,7 +105,9 @@ fn fit_and_predict_mean(formula: &str) -> Vec<f64> {
     );
 
     let csv = std::fs::read_to_string(out.path()).expect("read predictions");
-    parse_named_column(&csv, "mean")
+    // Gaussian identity: the posterior mean IS the plug-in mean, and it is the
+    // default point column of the standard CSV (#2785).
+    parse_named_column(&csv, "posterior_mean")
 }
 
 #[test]
