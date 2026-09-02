@@ -40,7 +40,7 @@ Common options:
 | `--weights-column COLUMN` | Non-negative per-row likelihood weights. |
 | `--offset-column COLUMN` | Additive offset for the primary linear predictor. |
 | `--predict-noise RHS` | Secondary right-hand-side formula for scale / dispersion. |
-| `--noise-offset-column COLUMN` | Additive offset for the scale / dispersion predictor. |
+| `--noise-offset-column COLUMN` | Additive offset for the scale / dispersion predictor; under the marginal-slope families, for the slope predictor (`--offset-column` then offsets the marginal predictor). |
 | `--firth` | Firth bias reduction for supported binomial-logit fits. |
 | `--scale-dimensions` | Enable per-axis anisotropy for eligible spatial smooths. |
 | `--adaptive-regularization true|false` | Opt into spatial adaptive regularization for compatible standard GAMs. |

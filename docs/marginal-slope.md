@@ -345,6 +345,37 @@ Two limits are worth stating plainly:
   score covariance. Saving is refused at the point of loss with the reason
   attached, rather than failing later as a shape mismatch on load.
 
+## Fixed external baseline (slope-only fit)
+
+Both marginal-slope families route the two offset columns onto their two
+predictors: `offset=` is added to the marginal (baseline) predictor and
+`noise_offset=` to the slope predictor. Under `bernoulli-marginal-slope`
+the marginal predictor is the probit index of the marginal prevalence, so
+a baseline known from outside the data — a published prevalence
+`prev(x)` — enters as `Φ⁻¹(prev)` in an offset column against an
+intercept-only marginal formula, leaving the slope surface free:
+
+```python
+from scipy.stats import norm
+
+df["baseline"] = norm.ppf(df["prev"])
+model = gamfit.fit(
+    df,
+    "case ~ 1",
+    family="bernoulli-marginal-slope",
+    z_column="z",
+    slope_formula="s(x)",
+    offset="baseline",
+)
+```
+
+The intercept absorbs any constant miscalibration of the external
+baseline. `noise_offset=` plays the same role on the slope side: a known
+slope component held fixed while the rest of `slope_formula=` is
+estimated. Under `survival-marginal-slope` the same two columns offset the
+threshold predictor and the slope predictor respectively. CLI equivalents
+are `--offset-column` and `--noise-offset-column`.
+
 ## Frailty in marginal-slope survival
 
 Survival marginal-slope supports no frailty, or

@@ -996,8 +996,12 @@ def fit(
     noise_offset:
         Name of a column supplying a fixed additive offset on the log-scale
         (dispersion) predictor of the location-scale model, analogous to
-        ``offset`` for the mean. Corresponds to
-        ``FitConfig.noise_offset_column``.
+        ``offset`` for the mean. Under the marginal-slope families the two
+        offsets land on the two predictors the same way: ``offset`` on the
+        marginal (baseline) predictor and ``noise_offset`` on the slope
+        predictor, which is how an externally known baseline is held fixed
+        while ``slope_formula`` is estimated (see ``docs/marginal-slope.md``).
+        Corresponds to ``FitConfig.noise_offset_column``.
     flexible_link:
         Estimate a flexible (wiggly) link function rather than holding the
         link fixed at its canonical/parametric form, letting the data shape
