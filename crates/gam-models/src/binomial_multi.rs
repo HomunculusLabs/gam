@@ -65,7 +65,7 @@ use gam_model_kernels::bernoulli_link::{
 };
 use gam_problem::{FixedLambdaSolverStage, SeparableCellMeasure};
 use gam_spec::InverseLink;
-use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3};
+use ndarray::{Array2, Array3, ArrayView1, ArrayView2, ArrayView3};
 
 /// Inputs for [`fit_penalized_binomial_multi`].
 #[derive(Debug, Clone)]
@@ -141,7 +141,7 @@ pub struct BinomialMultiFitOutputs {
 /// natural-coordinate score, and row-diagonal Fisher block.
 struct BinomialMultiLikelihood<'a> {
     measure: SeparableCellMeasure<'a>,
-    link: &'a InverseLink,
+    link: InverseLink,
 }
 
 impl BinomialMultiLikelihood<'_> {
@@ -173,7 +173,7 @@ impl VectorLikelihood for BinomialMultiLikelihood<'_> {
                     continue;
                 }
                 let observation =
-                    bernoulli_natural_observation(row, y[[row, a]], eta[[row, a]], self.link)?;
+                    bernoulli_natural_observation(row, y[[row, a]], eta[[row, a]], &self.link)?;
                 acc += w * observation.log_likelihood;
             }
         }
@@ -198,7 +198,7 @@ impl VectorLikelihood for BinomialMultiLikelihood<'_> {
                     continue;
                 }
                 let observation =
-                    bernoulli_natural_observation(row, y[[row, a]], eta[[row, a]], self.link)?;
+                    bernoulli_natural_observation(row, y[[row, a]], eta[[row, a]], &self.link)?;
                 out[[row, a]] = w * observation.score;
             }
         }
@@ -223,7 +223,7 @@ impl VectorLikelihood for BinomialMultiLikelihood<'_> {
                     continue;
                 }
                 let observation =
-                    bernoulli_natural_observation(row, y[[row, a]], eta[[row, a]], self.link)?;
+                    bernoulli_natural_observation(row, y[[row, a]], eta[[row, a]], &self.link)?;
                 out[[row, a]] = (w.ln() + observation.log_fisher).exp();
             }
         }
@@ -353,7 +353,7 @@ pub fn fit_penalized_binomial_multi(
         bernoulli_natural_jet(0, 0.0, &link)?;
     let likelihood = BinomialMultiLikelihood {
         measure,
-        link: &link,
+        link: link.clone(),
     };
     let solve = fit_penalized_vector_glm(
         PenalizedVectorGlmInputs {
@@ -407,7 +407,7 @@ mod tests {
     use super::*;
     use gam_problem::{IndexedCellSet, LikelihoodWeights, StructuralCells};
     use gam_spec::StandardLink;
-    use ndarray::Array3;
+    use ndarray::{Array1, Array3};
 
     fn logit_link() -> InverseLink {
         InverseLink::Standard(StandardLink::Logit)
@@ -545,7 +545,7 @@ mod tests {
         let link = InverseLink::Standard(StandardLink::CLogLog);
         let likelihood = BinomialMultiLikelihood {
             measure,
-            link: &link,
+            link,
         };
         let eta = ndarray::array![[1_000.0]];
         let y = ndarray::array![[0.0]];
@@ -602,7 +602,7 @@ mod tests {
         let link = logit_link();
         let likelihood = BinomialMultiLikelihood {
             measure,
-            link: &link,
+            link,
         };
         let eta = ndarray::array![[0.2, -0.8], [0.5, 1.1]];
         let y = ndarray::array![[1.0, 1.0], [0.0, 1.0]];
@@ -765,7 +765,7 @@ mod tests {
         let link = logit_link();
         let likelihood = BinomialMultiLikelihood {
             measure: SeparableCellMeasure::uniform(),
-            link: &link,
+            link,
         };
         let scaled = fit_penalized_vector_glm(
             PenalizedVectorGlmInputs {
