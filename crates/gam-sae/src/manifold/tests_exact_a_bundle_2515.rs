@@ -1969,6 +1969,117 @@ fn zz_attribute_the_broken_ladder_rung_2515() {
     }
 }
 
+/// #2515 — the exact-`A` quotient VALUE and its sparse derivative must be
+/// independent of whether the identical arrow operator is priced through the
+/// dense spectral authority or its row/Schur factorization.
+///
+/// The wider ladder localizes a complete-gradient disagreement but cannot say
+/// whether the split is already in the value's spectral classification or only
+/// in a downstream trace contraction.  This gate names both scalars at the
+/// smallest known failing rung.  Full-basis probes make the arrow derivative
+/// exact, so neither comparison contains stochastic error.
+#[test]
+fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
+    let (mut term, mut rho, target, _anchor_cache) =
+        super::tests_deflated_from_probes_2712::residual_excited_deflated_anchor(
+            "#2515 exact-A quotient classification seam",
+        );
+    for value in rho.log_lambda_smooth.iter_mut() {
+        *value = -0.9;
+    }
+
+    let system = term
+        .assemble_arrow_schur(target.view(), &rho, None)
+        .expect("#2515: the failing rung assembles its majorizer");
+    let majorizer_options = ArrowSolveOptions::direct().with_positive_definite_evidence();
+    let (_, _, b_cache) =
+        solve_arrow_newton_step_with_options(&system, 0.0, 0.0, &majorizer_options)
+            .expect("#2515: the failing rung factors its majorizer");
+    let exact_system = term
+        .exact_a_evidence_system(target.view(), &rho, &system)
+        .expect("#2515: the failing rung assembles its exact-A arrow operator");
+    let exact_options = ArrowSolveOptions::direct()
+        .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
+        .with_indefinite_refusing_evidence_unit_deflation(
+            gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR,
+        );
+    let (_, _, a_cache) =
+        solve_arrow_newton_step_with_options(&exact_system, 0.0, 0.0, &exact_options)
+            .expect("#2515: the dense authority admits this rung, so the arrow route must too");
+
+    let (dense_joint, dense_coordinate) = term
+        .exact_observed_information_log_dets(&rho, target.view(), &b_cache)
+        .expect("#2515: the failing rung is a rankable exact-A mode");
+    let arrow_joint = a_cache
+        .compute_undamped_arrow_log_det()
+        .expect("#2515: the exact-A factor cache owns its joint log determinant");
+    let arrow_coordinate: f64 = a_cache
+        .undamped_factors_iter()
+        .map(|factor| {
+            (0..factor.nrows())
+                .map(|index| 2.0 * factor[[index, index]].ln())
+                .sum::<f64>()
+        })
+        .sum();
+    let dense_quotient = 0.5 * (dense_joint - dense_coordinate);
+    let arrow_quotient = 0.5 * (arrow_joint - arrow_coordinate);
+
+    let sparse = rho
+        .sparse_flat_index()
+        .expect("#2515: the two-atom softmax fixture has a sparse coordinate");
+    let loss = term
+        .loss(target.view(), &rho)
+        .expect("#2515: the frozen state evaluates its loss");
+    let dense_trace = term
+        .dense_exact_a_logdet_channels(target.view(), &rho, &loss, &b_cache)
+        .expect("#2515: the dense exact-A derivative exists")
+        .logdet_trace[sparse];
+    let (probes, sinv) = full_basis_probe_bundle(&a_cache);
+    let arrow_joint_trace = term
+        .assignment_log_strength_hessian_trace_from_probes(
+            &rho,
+            &a_cache,
+            &probes,
+            &sinv,
+            EvidenceOperator::ExactObservedInformation,
+        )
+        .expect("#2515: the full-basis joint sparse trace exists");
+    let arrow_coordinate_trace = term
+        .coordinate_block_assignment_log_strength_hessian_trace(
+            &rho,
+            &a_cache,
+            EvidenceOperator::ExactObservedInformation,
+        )
+        .expect("#2515: the coordinate sparse trace exists");
+    let arrow_trace = arrow_joint_trace - arrow_coordinate_trace;
+
+    println!(
+        "[#2515 QUOTIENT] value dense={dense_quotient:+.12e} arrow={arrow_quotient:+.12e} \
+         delta={:+.6e}",
+        dense_quotient - arrow_quotient,
+    );
+    println!(
+        "[#2515 QUOTIENT] sparse trace dense={dense_trace:+.12e} \
+         arrow_joint={arrow_joint_trace:+.12e} \
+         arrow_coordinate={arrow_coordinate_trace:+.12e} \
+         arrow_difference={arrow_trace:+.12e} delta={:+.6e}",
+        dense_trace - arrow_trace,
+    );
+
+    let value_scale = dense_quotient.abs().max(arrow_quotient.abs()).max(1.0);
+    assert!(
+        (dense_quotient - arrow_quotient).abs() <= 1.0e-8 * value_scale,
+        "#2515: dense and arrow routes classify the same raw exact-A operator into \
+         different quotient values"
+    );
+    let trace_scale = dense_trace.abs().max(arrow_trace.abs()).max(1.0);
+    assert!(
+        (dense_trace - arrow_trace).abs() <= 1.0e-8 * trace_scale,
+        "#2515: the sparse derivative does not differentiate the exact-A quotient \
+         value shared by both routes"
+    );
+}
+
 /// MEASUREMENT — the same ρ sweep, through PRODUCTION, both routes.
 ///
 /// [`zz_attribute_the_broken_ladder_rung_2515`] compares the two gradient
