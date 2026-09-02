@@ -15,12 +15,12 @@ use super::derivative_oracle::{
 use super::dual::{Dual, DualKinkBranch};
 use super::tests::{
     FdAnchorRegime, FdBranchRegime, FiniteDifferenceStratumCertificate,
-    FixedStateLogdetSample,
     certified_branch_stable_central_difference, certified_central_logdet_difference,
     certified_fd_anchor, decisive_logit_homotopy, decisive_logit_pattern,
     fixed_state_logdet_sample, gamma_fd_tiny_fixture, rho_ladder_family,
     rho_ladder_family_with_tolerance, smoothing_and_decisive_family, sparse_lift_ladder,
 };
+use super::tests_recovery_split_780::FixedStateLogdetSample;
 use super::*;
 use approx::assert_abs_diff_eq;
 
