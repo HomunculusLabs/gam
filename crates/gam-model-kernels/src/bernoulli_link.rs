@@ -1,6 +1,6 @@
 //! Cancellation-free natural-coordinate derivatives for Bernoulli links.
 //!
-//! A bounded inverse-link jet `(mu, mu', mu'', mu''')` is not enough for a
+//! A bounded inverse-link jet `(mu, mu', mu'', mu''', mu'''')` is not enough for a
 //! numerically honest Bernoulli likelihood: either `mu` or `1 - mu` rounds to
 //! an endpoint in the tails, precisely where the corresponding log probability
 //! and score can still be finite and informative. This module carries the two
@@ -8,20 +8,22 @@
 //! scalar and separable vector-response Bernoulli families.
 
 use gam_problem::EstimationError;
-use gam_solve::mixture_link::inverse_link_jet_for_inverse_link;
+use gam_solve::mixture_link::{
+    inverse_link_jet_for_inverse_link, inverse_link_pdfthird_derivative_for_inverse_link,
+};
 use gam_spec::{InverseLink, StandardLink};
 
 /// Natural-coordinate derivative tower for a Bernoulli inverse link.
 ///
 /// `log_mu[j]` and `log_one_minus_mu[j]` are the `j`th derivatives with
-/// respect to the linear predictor for `j = 0, 1, 2, 3`. `log_fisher` is
+/// respect to the linear predictor for `j = 0, 1, 2, 3, 4`. `log_fisher` is
 /// `log((d mu / d eta)^2 / (mu (1 - mu)))`, evaluated without reconstructing
 /// a rounded endpoint probability.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BernoulliNaturalJet {
     pub mu: f64,
-    pub log_mu: [f64; 4],
-    pub log_one_minus_mu: [f64; 4],
+    pub log_mu: [f64; 5],
+    pub log_one_minus_mu: [f64; 5],
     pub log_fisher: f64,
 }
 
@@ -39,6 +41,7 @@ pub struct BernoulliNaturalObservation {
     pub log_fisher: f64,
     pub negative_hessian: f64,
     pub negative_hessian_derivative: f64,
+    pub negative_hessian_second_derivative: f64,
 }
 
 #[inline]
@@ -74,6 +77,7 @@ fn logit_natural_jet(eta: f64) -> BernoulliNaturalJet {
     };
     let curvature = mu * one_minus_mu;
     let third = curvature * (mu - one_minus_mu);
+    let fourth = curvature * (2.0 * curvature - (mu - one_minus_mu).powi(2));
     BernoulliNaturalJet {
         mu,
         log_mu: [
@@ -81,12 +85,14 @@ fn logit_natural_jet(eta: f64) -> BernoulliNaturalJet {
             one_minus_mu,
             -curvature,
             third,
+            fourth,
         ],
         log_one_minus_mu: [
             -gam_linalg::utils::stable_softplus(eta),
             -mu,
             -curvature,
             third,
+            fourth,
         ],
         log_fisher: -gam_linalg::utils::stable_softplus(eta)
             - gam_linalg::utils::stable_softplus(-eta),
@@ -104,12 +110,13 @@ fn probit_natural_jet(eta: f64) -> BernoulliNaturalJet {
     };
     BernoulliNaturalJet {
         mu: left[0].exp(),
-        log_mu: [left[0], left[1], left[2], left[3]],
+        log_mu: [left[0], left[1], left[2], left[3], left[4]],
         log_one_minus_mu: [
             right_at_neg_eta[0],
             -right_at_neg_eta[1],
             right_at_neg_eta[2],
             -right_at_neg_eta[3],
+            right_at_neg_eta[4],
         ],
         log_fisher: 2.0 * log_pdf - left[0] - right_at_neg_eta[0],
     }
@@ -121,16 +128,16 @@ fn cloglog_natural_jet(eta: f64) -> BernoulliNaturalJet {
     if x == f64::INFINITY {
         return BernoulliNaturalJet {
             mu: 1.0,
-            log_mu: [0.0; 4],
-            log_one_minus_mu: [f64::NEG_INFINITY; 4],
+            log_mu: [0.0; 5],
+            log_one_minus_mu: [f64::NEG_INFINITY; 5],
             log_fisher: f64::NEG_INFINITY,
         };
     }
     if x == 0.0 {
         return BernoulliNaturalJet {
             mu: 0.0,
-            log_mu: [eta, 1.0, 0.0, 0.0],
-            log_one_minus_mu: [0.0; 4],
+            log_mu: [eta, 1.0, 0.0, 0.0, 0.0],
+            log_one_minus_mu: [0.0; 5],
             log_fisher: eta,
         };
     }
@@ -148,11 +155,14 @@ fn cloglog_natural_jet(eta: f64) -> BernoulliNaturalJet {
     };
     let a = 1.0 - x - h;
     let d2_log_mu = h * a;
-    let d3_log_mu = h * (a * a - x - h * a);
+    let b = a * a - x - h * a;
+    let d3_log_mu = h * b;
+    let b_derivative = -x * (2.0 * a + 1.0 - h) - 3.0 * h * a * a + h * h * a;
+    let d4_log_mu = h * (a * b + b_derivative);
     BernoulliNaturalJet {
         mu,
-        log_mu: [log_mu, h, d2_log_mu, d3_log_mu],
-        log_one_minus_mu: [-x, -x, -x, -x],
+        log_mu: [log_mu, h, d2_log_mu, d3_log_mu, d4_log_mu],
+        log_one_minus_mu: [-x, -x, -x, -x, -x],
         log_fisher: 2.0 * eta - x - log_mu,
     }
 }
@@ -167,12 +177,14 @@ fn loglog_natural_jet(eta: f64) -> BernoulliNaturalJet {
             -mirrored.log_one_minus_mu[1],
             mirrored.log_one_minus_mu[2],
             -mirrored.log_one_minus_mu[3],
+            mirrored.log_one_minus_mu[4],
         ],
         log_one_minus_mu: [
             mirrored.log_mu[0],
             -mirrored.log_mu[1],
             mirrored.log_mu[2],
             -mirrored.log_mu[3],
+            mirrored.log_mu[4],
         ],
         log_fisher: mirrored.log_fisher,
     }
@@ -209,23 +221,38 @@ fn cauchit_natural_jet(eta: f64) -> BernoulliNaturalJet {
         inv * inv / (1.0 + inv * inv)
     };
     let d3_over_d1 = inv_one_plus_sq * (6.0 * (eta * ratio) - 2.0 * inv_one_plus_sq);
+    let d4_over_d1 = 24.0 * ratio * (inv_one_plus_sq * inv_one_plus_sq - ratio * ratio);
     let d1_over_mu = (log_d1 - mu.ln()).exp();
     let d1_over_q = (log_d1 - one_minus_mu.ln()).exp();
     let left_d2_ratio = d2_over_d1 * d1_over_mu;
     let right_d2_ratio = d2_over_d1 * d1_over_q;
+    let left_d3_ratio = d3_over_d1 * d1_over_mu;
+    let right_d3_ratio = d3_over_d1 * d1_over_q;
+    let left_d4_ratio = d4_over_d1 * d1_over_mu;
+    let right_d4_ratio = d4_over_d1 * d1_over_q;
     BernoulliNaturalJet {
         mu,
         log_mu: [
             mu.ln(),
             d1_over_mu,
             left_d2_ratio - d1_over_mu * d1_over_mu,
-            d3_over_d1 * d1_over_mu - 3.0 * d1_over_mu * left_d2_ratio + 2.0 * d1_over_mu.powi(3),
+            left_d3_ratio - 3.0 * d1_over_mu * left_d2_ratio + 2.0 * d1_over_mu.powi(3),
+            left_d4_ratio
+                - 4.0 * d1_over_mu * left_d3_ratio
+                - 3.0 * left_d2_ratio * left_d2_ratio
+                + 12.0 * d1_over_mu * d1_over_mu * left_d2_ratio
+                - 6.0 * d1_over_mu.powi(4),
         ],
         log_one_minus_mu: [
             one_minus_mu.ln(),
             -d1_over_q,
             -right_d2_ratio - d1_over_q * d1_over_q,
-            -d3_over_d1 * d1_over_q - 3.0 * d1_over_q * right_d2_ratio - 2.0 * d1_over_q.powi(3),
+            -right_d3_ratio - 3.0 * d1_over_q * right_d2_ratio - 2.0 * d1_over_q.powi(3),
+            -right_d4_ratio
+                - 4.0 * d1_over_q * right_d3_ratio
+                - 3.0 * right_d2_ratio * right_d2_ratio
+                - 12.0 * d1_over_q * d1_over_q * right_d2_ratio
+                - 6.0 * d1_over_q.powi(4),
         ],
         log_fisher: 2.0 * log_d1 - mu.ln() - one_minus_mu.ln(),
     }
@@ -238,13 +265,15 @@ fn generic_natural_jet(
     link: &InverseLink,
 ) -> Result<BernoulliNaturalJet, EstimationError> {
     let jet = inverse_link_jet_for_inverse_link(link, eta)?;
+    let d4 = inverse_link_pdfthird_derivative_for_inverse_link(link, eta)?;
     if !(jet.mu.is_finite()
         && jet.mu > 0.0
         && jet.mu < 1.0
         && jet.d1.is_finite()
         && jet.d1 > 0.0
         && jet.d2.is_finite()
-        && jet.d3.is_finite())
+        && jet.d3.is_finite()
+        && d4.is_finite())
     {
         return Err(row_geometry_error(
             row,
@@ -258,9 +287,11 @@ fn generic_natural_jet(
     let r1 = jet.d1 / mu;
     let r2 = jet.d2 / mu;
     let r3 = jet.d3 / mu;
+    let r4 = d4 / mu;
     let s1 = jet.d1 / q;
     let s2 = jet.d2 / q;
     let s3 = jet.d3 / q;
+    let s4 = d4 / q;
     Ok(BernoulliNaturalJet {
         mu,
         log_mu: [
@@ -268,12 +299,16 @@ fn generic_natural_jet(
             r1,
             r2 - r1 * r1,
             r3 - 3.0 * r1 * r2 + 2.0 * r1.powi(3),
+            r4 - 4.0 * r1 * r3 - 3.0 * r2 * r2 + 12.0 * r1 * r1 * r2
+                - 6.0 * r1.powi(4),
         ],
         log_one_minus_mu: [
             (-mu).ln_1p(),
             -s1,
             -s2 - s1 * s1,
             -s3 - 3.0 * s1 * s2 - 2.0 * s1.powi(3),
+            -s4 - 4.0 * s1 * s3 - 3.0 * s2 * s2 - 12.0 * s1 * s1 * s2
+                - 6.0 * s1.powi(4),
         ],
         log_fisher: 2.0 * jet.d1.ln() - mu.ln() - q.ln(),
     })
@@ -336,6 +371,11 @@ pub fn bernoulli_natural_observation(
             y,
             jet.log_mu[3],
             jet.log_one_minus_mu[3],
+        ),
+        negative_hessian_second_derivative: -response_mixture(
+            y,
+            jet.log_mu[4],
+            jet.log_one_minus_mu[4],
         ),
     })
 }
@@ -401,6 +441,11 @@ mod tests {
                     .expect("minus observation");
                 let score_fd = (plus.log_likelihood - minus.log_likelihood) / (2.0 * h);
                 let negative_hessian_fd = -(plus.score - minus.score) / (2.0 * h);
+                let negative_hessian_derivative_fd =
+                    (plus.negative_hessian - minus.negative_hessian) / (2.0 * h);
+                let negative_hessian_second_derivative_fd =
+                    (plus.negative_hessian_derivative - minus.negative_hessian_derivative)
+                        / (2.0 * h);
                 assert!(
                     (center.score - score_fd).abs() <= 2.0e-8 * (1.0 + score_fd.abs()),
                     "{} score at eta={eta}: analytic={} FD={score_fd}",
@@ -413,6 +458,22 @@ mod tests {
                     "{} curvature at eta={eta}: analytic={} FD={negative_hessian_fd}",
                     link.link_function().name(),
                     center.negative_hessian,
+                );
+                assert!(
+                    (center.negative_hessian_derivative - negative_hessian_derivative_fd).abs()
+                        <= 2.0e-6 * (1.0 + negative_hessian_derivative_fd.abs()),
+                    "{} curvature derivative at eta={eta}: analytic={} FD={negative_hessian_derivative_fd}",
+                    link.link_function().name(),
+                    center.negative_hessian_derivative,
+                );
+                assert!(
+                    (center.negative_hessian_second_derivative
+                        - negative_hessian_second_derivative_fd)
+                        .abs()
+                        <= 2.0e-5 * (1.0 + negative_hessian_second_derivative_fd.abs()),
+                    "{} curvature second derivative at eta={eta}: analytic={} FD={negative_hessian_second_derivative_fd}",
+                    link.link_function().name(),
+                    center.negative_hessian_second_derivative,
                 );
             }
         }

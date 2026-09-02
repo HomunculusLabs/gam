@@ -258,6 +258,52 @@ impl CustomFamily for IndexedBernoulliFamily {
         }
         Ok(Some(derivative))
     }
+
+    fn diagonalworking_weights_second_directional_derivative(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_index: usize,
+        d_eta_u: &Array1<f64>,
+        d_eta_v: &Array1<f64>,
+    ) -> Result<Option<Array1<f64>>, String> {
+        self.validate_states(block_states)?;
+        let state = block_states.get(block_index).ok_or_else(|| {
+            format!(
+                "indexed Bernoulli second curvature derivative block {block_index} is outside 0..{}",
+                block_states.len()
+            )
+        })?;
+        for (name, direction) in [("u", d_eta_u), ("v", d_eta_v)] {
+            if direction.len() != self.n_rows() {
+                return Err(format!(
+                    "indexed Bernoulli second curvature direction {name} has length {}, expected {}",
+                    direction.len(),
+                    self.n_rows(),
+                ));
+            }
+        }
+        let mut derivative = Array1::<f64>::zeros(self.n_rows());
+        for row in 0..self.n_rows() {
+            let Some(weight) = self.measure.active_weight(row, block_index) else {
+                continue;
+            };
+            if weight == 0.0 {
+                continue;
+            }
+            let observation = bernoulli_natural_observation(
+                row,
+                self.y[[row, block_index]],
+                state.eta[row],
+                &self.link,
+            )
+            .map_err(|error| error.to_string())?;
+            derivative[row] = weight
+                * observation.negative_hessian_second_derivative
+                * d_eta_u[row]
+                * d_eta_v[row];
+        }
+        Ok(Some(derivative))
+    }
 }
 
 /// Fit an indexed multi-output Bernoulli GAM and select every unfixed,
