@@ -4,8 +4,7 @@
 use crate::cli_args::FitEventsArgs;
 use gam::families::custom_family::BlockwiseFitOptions;
 use gam::families::event_history::{
-    CovariateSegment, Event, EventHistoryCohort, ForecastRequest, SubjectHistory,
-    fit_event_history_formula, forecast, kolmogorov_smirnov_uniform, predictive_pit,
+    CovariateSegment, Event, EventHistoryCohort, ForecastRequest, PopulationForecastRequest, SubjectHistory, fit_event_history_formula, forecast, kolmogorov_smirnov_uniform, population_forecast, predictive_pit,
 };
 use ndarray::Array2;
 use serde_json::{Map, Value, json};
@@ -188,11 +187,28 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
                 },
             )
             .map_err(|e| e.to_string())?;
+            // The same window from the stationary prior at the subject's
+            // covariates: what the model says without its history.
+            let alone = population_forecast(
+                &fit,
+                &cohort,
+                &PopulationForecastRequest {
+                    start: subject.exit,
+                    horizons: &horizons,
+                    absorbing: &absorbing,
+                    covariates: &cohort.covariates.row(future_row).to_vec(),
+                },
+            )
+            .map_err(|e| e.to_string())?;
             forecasts.push(json!({
                 "id": subject.id,
                 "horizons": f.horizons,
                 "survival": f.survival,
                 "expected_counts": f.expected_counts.rows().into_iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
+                "without_history": {
+                    "survival": alone.survival,
+                    "expected_counts": alone.expected_counts.rows().into_iter().map(|r| r.to_vec()).collect::<Vec<_>>(),
+                },
             }));
         }
         summary.insert("forecasts".to_string(), Value::Array(forecasts));

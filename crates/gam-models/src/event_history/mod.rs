@@ -37,7 +37,8 @@ pub use family::{
 pub use formula::{TIME_COLUMN, covariate_spec_from_formula, node_dataset};
 pub use marginal::transition_score_polynomials;
 pub use forecast::{
-    Forecast, ForecastRequest, forecast, kolmogorov_smirnov_uniform, predictive_pit, training_eta,
+    Forecast, ForecastRequest, PopulationForecastRequest, forecast, kolmogorov_smirnov_uniform,
+    population_forecast, predictive_pit, training_eta,
 };
 
 #[cfg(test)]

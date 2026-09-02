@@ -9,7 +9,10 @@ use super::family::{
     Directional, EventHistoryFamily, EventHistoryFit, EventHistorySpec, fit_event_history,
     fit_event_history_formula,
 };
-use super::forecast::{ForecastRequest, forecast, kolmogorov_smirnov_uniform, predictive_pit};
+use super::forecast::{
+    ForecastRequest, PopulationForecastRequest, forecast, kolmogorov_smirnov_uniform,
+    population_forecast, predictive_pit,
+};
 use super::marginal::{SubjectInputs, subject_marginal};
 use crate::custom_family::{BlockwiseFitOptions, ParameterBlockState};
 use gam_math::jet_scalar::{OneSeed, TwoSeed};
@@ -1774,16 +1777,16 @@ fn fitted_score_slope(fit: &EventHistoryFit, times: &[f64]) -> Vec<f64> {
 }
 
 /// An observed subject-level score enters the intensity as one penalised
-/// slope surface `b(t) · g`: `s(time, by=g, identifiability=none)` keeps the
-/// constant of the by-smooth, so its wiggliness ridge decides how much the
-/// score's effect bends with time and its null-space ridge decides whether
-/// the effect exists at all, both selected by REML. A declining effect is
+/// slope surface `b(t) · g`: a continuous by-smooth keeps its constant, so
+/// its wiggliness ridge decides how much the score's effect bends with time
+/// and its null-space ridge decides whether the effect exists at all, both
+/// selected by REML. A declining effect is
 /// recovered as a decline; a score carrying nothing collapses to zero.
 #[test]
 fn an_observed_score_enters_as_a_penalised_slope_surface() {
     install_test_logger();
     let times = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5];
-    let formula = "s(time, by=g, identifiability=none)";
+    let formula = "s(time, by=g)";
     let truth = |t: f64| 1.0 - 0.15 * t;
     let mut cohort = simulate_score_cohort(300, 6.0, -0.5, &truth, 1.0, 19);
     let events: usize = cohort.subjects.iter().map(|s| s.events.len()).sum();
@@ -1842,5 +1845,107 @@ fn an_observed_score_enters_as_a_penalised_slope_surface() {
     assert!(
         amplitude < 0.15,
         "an uninformative score should collapse to zero; the fitted surface reaches {amplitude}"
+    );
+}
+
+/// The information hierarchy is three conditionings of one model. With a
+/// standard-normal subject-level score `x` and a latent atom, the population
+/// tier is the zero-count filter from the stationary prior at the population
+/// score; the score-only tier is the same filter at the subject's own score;
+/// the history tier continues from the subject's filtered state. A positive
+/// score effect orders the first two by the score's sign, and a history
+/// richer (poorer) in events than its score alone predicts raises (lowers)
+/// the third against the second. No weight between the tiers is chosen.
+#[test]
+fn forecast_tiers_population_score_and_history_are_one_model_conditioned_on_more() {
+    install_test_logger();
+    let mut cohort = simulate_cohort(60, 6.0, -0.8, 0.5, 1.0, 0.4, 5);
+    let mut spec = EventHistorySpec::new(1, vec![linear_spec()]);
+    spec.gauss_hermite_order = 11;
+    let started = std::time::Instant::now();
+    let fit = fit_event_history(&mut cohort, &spec).expect("fit");
+    let beta = fit.mark_coefficients(0);
+    emit(&format!(
+        "[tiers] {:.1}s beta={:?} loading={} rate={}",
+        started.elapsed().as_secs_f64(),
+        beta.to_vec(),
+        fit.loadings[[0, 0]],
+        fit.rates[0]
+    ));
+    assert!(beta[1] > 0.0, "the score effect was simulated positive; fitted {}", beta[1]);
+    let horizons = [7.0, 8.0];
+    let absorbing = [false];
+    let population = population_forecast(
+        &fit,
+        &cohort,
+        &PopulationForecastRequest {
+            start: 6.0,
+            horizons: &horizons,
+            absorbing: &absorbing,
+            covariates: &[0.0],
+        },
+    )
+    .expect("population forecast");
+    assert!((population.survival[1] - 1.0).abs() < 1e-12, "no absorbing marks");
+    let tiers: Vec<(f64, f64, f64, usize)> = cohort
+        .subjects
+        .iter()
+        .enumerate()
+        .map(|(i, subject)| {
+            let score = cohort.covariates[[i, 0]];
+            let alone = population_forecast(
+                &fit,
+                &cohort,
+                &PopulationForecastRequest {
+                    start: subject.exit,
+                    horizons: &horizons,
+                    absorbing: &absorbing,
+                    covariates: &[score],
+                },
+            )
+            .expect("score-only forecast");
+            let with_history = forecast(
+                &fit,
+                &cohort,
+                &ForecastRequest {
+                    history: subject,
+                    horizons: &horizons,
+                    absorbing: &absorbing,
+                    future_row: i,
+                },
+            )
+            .expect("history forecast");
+            (score, alone.expected_counts[[1, 0]], with_history.expected_counts[[1, 0]], subject.events.len())
+        })
+        .collect();
+    let population_count = population.expected_counts[[1, 0]];
+    emit(&format!("[tiers] population expected count by t=8: {population_count:.4}"));
+    for tier in tiers.iter() {
+        let (score, alone) = (tier.0, tier.1);
+        assert!(
+            (score > 0.0) == (alone > population_count) || score == 0.0,
+            "score {score}: score-only tier {alone} against population {population_count}"
+        );
+    }
+    // Within a band of near-population scores, the subject richest in events
+    // sits above its score-only tier and the poorest below it.
+    let band: Vec<&(f64, f64, f64, usize)> = tiers.iter().filter(|t| t.0.abs() < 0.5).collect();
+    assert!(band.len() >= 4, "too few near-population scores to compare histories");
+    let richest = band.iter().max_by_key(|t| t.3).expect("richest");
+    let poorest = band.iter().min_by_key(|t| t.3).expect("poorest");
+    for (label, t) in [("richest", richest), ("poorest", poorest)] {
+        emit(&format!(
+            "[tiers] {label}: score={:.3} events={} score-only={:.4} with-history={:.4}",
+            t.0, t.3, t.1, t.2
+        ));
+    }
+    assert!(richest.3 > poorest.3, "the band must contain unequal histories");
+    assert!(
+        richest.2 > richest.1,
+        "a history rich in events must raise the forecast above its score-only tier"
+    );
+    assert!(
+        poorest.2 < poorest.1,
+        "a history poor in events must lower the forecast below its score-only tier"
     );
 }

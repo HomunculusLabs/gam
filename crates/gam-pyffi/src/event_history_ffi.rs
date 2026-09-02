@@ -3,9 +3,7 @@
 
 use crate::ffi::ffi_errors::{detach_py_result, py_value_error};
 use gam::families::event_history::{
-    CovariateSegment, Event, EventHistoryCohort, EventHistoryFit, ForecastRequest,
-    SubjectHistory, fit_event_history_formula, forecast, kolmogorov_smirnov_uniform,
-    predictive_pit,
+    CovariateSegment, Event, EventHistoryCohort, EventHistoryFit, ForecastRequest, PopulationForecastRequest, SubjectHistory, fit_event_history_formula, forecast, kolmogorov_smirnov_uniform, population_forecast, predictive_pit,
 };
 use gam::families::custom_family::BlockwiseFitOptions;
 use ndarray::Array2;
@@ -127,6 +125,41 @@ impl PyEventHistoryModel {
                     horizons: &horizons,
                     absorbing: &absorbing,
                     future_row: row,
+                },
+            )
+            .map_err(|e| e.to_string())
+        })?;
+        let out = PyDict::new(py);
+        out.set_item("horizons", result.horizons)?;
+        out.set_item("survival", result.survival)?;
+        out.set_item(
+            "expected_counts",
+            PyArray2::from_owned_array(py, result.expected_counts),
+        )?;
+        Ok(out)
+    }
+
+    /// Forecast a subject with no observed history from covariate values
+    /// alone: the latent state starts at its stationary prior.
+    fn population_forecast<'py>(
+        &self,
+        py: Python<'py>,
+        covariates: Vec<f64>,
+        start: f64,
+        horizons: Vec<f64>,
+        absorbing: Vec<bool>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let fit = Arc::clone(&self.fit);
+        let cohort = Arc::clone(&self.cohort);
+        let result = detach_py_result(py, "event-history population forecast", move || {
+            population_forecast(
+                &fit,
+                &cohort,
+                &PopulationForecastRequest {
+                    start,
+                    horizons: &horizons,
+                    absorbing: &absorbing,
+                    covariates: &covariates,
                 },
             )
             .map_err(|e| e.to_string())

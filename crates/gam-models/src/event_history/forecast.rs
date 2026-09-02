@@ -13,7 +13,16 @@
 //! (t_prev, t_event] | history)`, which the same filter yields as the product
 //! of the normalisers of the zero-count nodes between consecutive events; it
 //! is uniform when the model is right.
+//!
+//! The same window run from the stationary prior instead of a filtered state
+//! ([`population_forecast`]) gives the lower tiers of the information
+//! hierarchy: with population covariate values it is the population risk;
+//! with a subject's own covariates (a risk score) it is what the model says
+//! before any history is observed; the history-conditioned forecast updates
+//! it. No weight between the tiers is chosen by hand — each is the same
+//! probability model conditioned on more.
 
+use super::chain::Grid;
 use super::cohort::{
     CohortNodes, CovariateSegment, EventHistoryCohort, EventHistoryError, SubjectHistory,
     expand_nodes,
@@ -110,90 +119,102 @@ fn latent_parameters(fit: &EventHistoryFit) -> (Vec<f64>, Vec<f64>) {
     (loadings, fit.log_rates.clone())
 }
 
-/// Forecast one subject beyond its observed exit.
-pub fn forecast(
+/// A forecast for a subject with no observed history: the forward filter
+/// starts from the stationary prior of the latent state at `start` and sees
+/// only the covariates, so this is the population tier when the covariates
+/// are population values, and the covariate-only tier (a new subject with a
+/// risk score but no history) otherwise. A subject's own forecast,
+/// [`forecast`], is the same window started from its filtered state.
+pub struct PopulationForecastRequest<'a> {
+    /// Time the forecast window opens.
+    pub start: f64,
+    /// Absolute horizon times, strictly increasing and after `start`.
+    pub horizons: &'a [f64],
+    /// Which marks end follow-up when they fire.
+    pub absorbing: &'a [bool],
+    /// Covariate values in force over the window, in the cohort's column
+    /// order.
+    pub covariates: &'a [f64],
+}
+
+/// The latent state a forecast window continues from: the filtered density
+/// on its grid at the time of the last observed node.
+struct FilteredState<'a> {
+    grid: &'a Grid<f64>,
+    density: &'a [f64],
+    time: f64,
+}
+
+/// One zero-count window: a covariate table with the row in force, the
+/// window's start, its horizons, the absorbing mask, and the state it
+/// continues from (a filtered state, or the stationary prior when `None`).
+struct Window<'a> {
+    covariates: Array2<f64>,
+    row: usize,
+    id: &'a str,
+    start: f64,
+    horizons: &'a [f64],
+    absorbing: &'a [bool],
+    initial: Option<FilteredState<'a>>,
+}
+
+/// Run the zero-count forward filter over a window and read off survival
+/// and expected counts at its horizons.
+fn forecast_window(
     fit: &EventHistoryFit,
     cohort: &EventHistoryCohort,
-    request: &ForecastRequest<'_>,
+    window: Window<'_>,
 ) -> Result<Forecast, EventHistoryError> {
+    let Window {
+        covariates,
+        row,
+        id,
+        start,
+        horizons,
+        absorbing,
+        initial,
+    } = window;
+    let (mark_names, covariate_names) = (&cohort.mark_names, &cohort.covariate_names);
     let marks = fit.marks();
-    if request.absorbing.len() != marks {
+    if absorbing.len() != marks {
         return Err(EventHistoryError::InvalidInput {
-            reason: format!(
-                "absorbing mask has {} entries for {marks} marks",
-                request.absorbing.len()
-            ),
+            reason: format!("absorbing mask has {} entries for {marks} marks", absorbing.len()),
         });
     }
-    if request.horizons.is_empty()
-        || request
-            .horizons
-            .windows(2)
-            .any(|w| !(w[1] > w[0]))
-        || !(request.horizons[0] > request.history.exit)
+    if horizons.is_empty() || horizons.windows(2).any(|w| !(w[1] > w[0])) || !(horizons[0] > start)
     {
         return Err(EventHistoryError::InvalidInput {
-            reason: "horizons must be strictly increasing and later than the exit time".to_string(),
-        });
-    }
-    if request.future_row >= cohort.covariates.nrows() {
-        return Err(EventHistoryError::InvalidInput {
             reason: format!(
-                "future covariate row {} is outside the {}-row table",
-                request.future_row,
-                cohort.covariates.nrows()
+                "horizons must be strictly increasing and later than the window start {start}"
             ),
         });
     }
     let (loadings, log_rates) = latent_parameters(fit);
     let gh = fit.family.gauss_hermite();
-    // Observed history.
-    let observed = single_subject_nodes(fit, cohort, request.history)?;
-    let eta_observed = node_eta0(fit, &observed)?;
-    let all_marks = vec![true; marks];
-    let observed_pass = forward_filter(
-        &SubjectInputs {
-            nodes: &observed.subjects[0],
-            eta0: &eta_observed,
-            loadings: &loadings,
-            log_rates: &log_rates,
-            time_scale: fit.time_scale,
-            gh,
-            continuation_gap: 0.0,
-        },
-        None,
-        &all_marks,
-    )?;
-    let last = observed.subjects[0].len() - 1;
-    let last_time = observed.subjects[0].times[last];
-    // Future nodes: one pseudo-subject over (exit, last horizon] with no events.
-    let future_history = SubjectHistory {
-        id: format!("{}::forecast", request.history.id),
-        entry: request.history.exit,
-        exit: request.horizons[request.horizons.len() - 1],
-        events: Vec::new(),
-        segments: vec![CovariateSegment {
-            start: request.history.exit,
-            row: request.future_row,
+    // Future nodes: one pseudo-subject over (start, last horizon] with no
+    // events; every horizon is a breakpoint so the cumulative sums land on
+    // horizons.
+    let mut segments = vec![CovariateSegment { start, row }];
+    segments.extend(horizons[..horizons.len() - 1].iter().map(|&t| CovariateSegment { start: t, row }));
+    let mut future_cohort = EventHistoryCohort {
+        mark_names: mark_names.to_vec(),
+        covariate_names: covariate_names.to_vec(),
+        covariates,
+        subjects: vec![SubjectHistory {
+            id: id.to_string(),
+            entry: start,
+            exit: horizons[horizons.len() - 1],
+            events: Vec::new(),
+            segments,
         }],
     };
-    let mut future_cohort = EventHistoryCohort {
-        mark_names: cohort.mark_names.clone(),
-        covariate_names: cohort.covariate_names.clone(),
-        covariates: cohort.covariates.clone(),
-        subjects: vec![future_history],
-    };
-    // Every horizon is a breakpoint so the cumulative sums land on horizons.
-    let mut breakpoints: Vec<f64> = request.horizons.to_vec();
-    breakpoints.pop();
-    future_cohort.subjects[0].segments.extend(breakpoints.iter().map(|&t| CovariateSegment {
-        start: t,
-        row: request.future_row,
-    }));
     future_cohort.validate()?;
     let future = expand_nodes(&future_cohort, fit.quadrature_order)?;
     let eta_future = node_eta0(fit, &future)?;
     let future_nodes = &future.subjects[0];
+    let continuation_gap = initial
+        .as_ref()
+        .map_or(0.0, |state| future_nodes.times[0] - state.time);
     let pass = forward_filter(
         &SubjectInputs {
             nodes: future_nodes,
@@ -202,20 +223,20 @@ pub fn forecast(
             log_rates: &log_rates,
             time_scale: fit.time_scale,
             gh,
-            continuation_gap: future_nodes.times[0] - last_time,
+            continuation_gap,
         },
-        Some((&observed_pass.grids[last], &observed_pass.alpha[last])),
-        request.absorbing,
+        initial.as_ref().map(|state| (state.grid, state.density)),
+        absorbing,
     )?;
     let atoms = fit.atoms();
-    let mut survival = vec![0.0; request.horizons.len()];
-    let mut expected = Array2::<f64>::zeros((request.horizons.len(), marks));
+    let mut survival = vec![0.0; horizons.len()];
+    let mut expected = Array2::<f64>::zeros((horizons.len(), marks));
     let mut log_survival: f64 = 0.0;
     let mut counts = vec![0.0; marks];
     let mut horizon = 0;
     for n in 0..future_nodes.len() {
         let t = future_nodes.times[n];
-        while horizon < request.horizons.len() && t > request.horizons[horizon] {
+        while horizon < horizons.len() && t > horizons[horizon] {
             survival[horizon] = log_survival.exp();
             for d in 0..marks {
                 expected[[horizon, d]] = counts[d];
@@ -241,7 +262,7 @@ pub fn forecast(
         }
         log_survival += pass.log_normalisers[n];
     }
-    while horizon < request.horizons.len() {
+    while horizon < horizons.len() {
         survival[horizon] = log_survival.exp();
         for d in 0..marks {
             expected[[horizon, d]] = counts[d];
@@ -249,10 +270,111 @@ pub fn forecast(
         horizon += 1;
     }
     Ok(Forecast {
-        horizons: request.horizons.to_vec(),
+        horizons: horizons.to_vec(),
         survival,
         expected_counts: expected,
     })
+}
+
+/// Forecast one subject beyond its observed exit: its history is filtered
+/// into its latent state, and the window continues from there.
+pub fn forecast(
+    fit: &EventHistoryFit,
+    cohort: &EventHistoryCohort,
+    request: &ForecastRequest<'_>,
+) -> Result<Forecast, EventHistoryError> {
+    let marks = fit.marks();
+    if request.absorbing.len() != marks {
+        return Err(EventHistoryError::InvalidInput {
+            reason: format!(
+                "absorbing mask has {} entries for {marks} marks",
+                request.absorbing.len()
+            ),
+        });
+    }
+    if request.future_row >= cohort.covariates.nrows() {
+        return Err(EventHistoryError::InvalidInput {
+            reason: format!(
+                "future covariate row {} is outside the {}-row table",
+                request.future_row,
+                cohort.covariates.nrows()
+            ),
+        });
+    }
+    let (loadings, log_rates) = latent_parameters(fit);
+    let observed = single_subject_nodes(fit, cohort, request.history)?;
+    let eta_observed = node_eta0(fit, &observed)?;
+    let all_marks = vec![true; marks];
+    let observed_pass = forward_filter(
+        &SubjectInputs {
+            nodes: &observed.subjects[0],
+            eta0: &eta_observed,
+            loadings: &loadings,
+            log_rates: &log_rates,
+            time_scale: fit.time_scale,
+            gh: fit.family.gauss_hermite(),
+            continuation_gap: 0.0,
+        },
+        None,
+        &all_marks,
+    )?;
+    let last = observed.subjects[0].len() - 1;
+    let id = format!("{}::forecast", request.history.id);
+    forecast_window(
+        fit,
+        cohort,
+        Window {
+            covariates: cohort.covariates.clone(),
+            row: request.future_row,
+            id: &id,
+            start: request.history.exit,
+            horizons: request.horizons,
+            absorbing: request.absorbing,
+            initial: Some(FilteredState {
+                grid: &observed_pass.grids[last],
+                density: &observed_pass.alpha[last],
+                time: observed.subjects[0].times[last],
+            }),
+        },
+    )
+}
+
+/// Forecast a subject with no observed history from its covariates alone:
+/// the latent state starts at its stationary prior. With population
+/// covariate values this is the population tier of the information
+/// hierarchy; with a subject's own covariates (a risk score, say) it is what
+/// the model says before any history has been observed.
+pub fn population_forecast(
+    fit: &EventHistoryFit,
+    cohort: &EventHistoryCohort,
+    request: &PopulationForecastRequest<'_>,
+) -> Result<Forecast, EventHistoryError> {
+    let width = cohort.covariate_names.len();
+    if request.covariates.len() != width {
+        return Err(EventHistoryError::InvalidInput {
+            reason: format!(
+                "{} covariate values for a cohort with {width} covariate columns",
+                request.covariates.len()
+            ),
+        });
+    }
+    let mut covariates = Array2::<f64>::zeros((1, width));
+    for (j, &v) in request.covariates.iter().enumerate() {
+        covariates[[0, j]] = v;
+    }
+    forecast_window(
+        fit,
+        cohort,
+        Window {
+            covariates,
+            row: 0,
+            id: "population::forecast",
+            start: request.start,
+            horizons: request.horizons,
+            absorbing: request.absorbing,
+            initial: None,
+        },
+    )
 }
 
 /// Predictive PIT of every event of a subject, in time order.

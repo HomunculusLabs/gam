@@ -4130,3 +4130,61 @@ fn by_level_thin_plate_sizes_default_centers_from_the_smallest_level() {
         "by-level default must equal the smallest level's own default"
     );
 }
+
+/// A continuous `by=` smooth is a varying coefficient `f(x)·z` whose constant
+/// direction is `z` itself, so the inner smooth keeps its constant instead of
+/// being sum-to-zero centred: `f` is one penalised surface whose null-space
+/// ridge decides whether it exists. An explicit `identifiability=` still
+/// wins, and a binary by-variable keeps the factor convention.
+#[test]
+fn a_continuous_by_smooth_keeps_its_constant_in_the_penalised_block() {
+    let rows = (0..40)
+        .map(|i| {
+            let t = i as f64 / 39.0;
+            vec![(6.0 * t).sin(), t, 0.3 * t - 0.1, f64::from(i % 2)]
+        })
+        .collect::<Vec<_>>();
+    let mut ds = continuous_dataset(&["y", "x", "z", "b"], rows);
+    ds.schema.columns[3].kind = ColumnKindTag::Binary;
+    ds.column_kinds[3] = ColumnKindTag::Binary;
+    let col_map = ds.column_map();
+    let inner_identifiability = |body: &str| -> crate::basis::BSplineIdentifiability {
+        let parsed = parse_formula(&format!("y ~ {body}")).expect("parse by-smooth formula");
+        let terms = build_termspec(
+            &parsed.terms,
+            &ds,
+            &col_map,
+            &mut Vec::new(),
+            &gam_runtime::resource::ResourcePolicy::default_library(),
+        )
+        .expect("build by-smooth");
+        let SmoothBasisSpec::ByVariable { inner, .. } = &terms.smooth_terms[0].basis else {
+            panic!("expected a numeric by-smooth for '{body}'");
+        };
+        let SmoothBasisSpec::BSpline1D { spec, .. } = inner.as_ref() else {
+            panic!("expected a 1-D B-spline inside the by-smooth for '{body}'");
+        };
+        spec.identifiability.clone()
+    };
+    assert!(
+        matches!(
+            inner_identifiability("s(x, by=z)"),
+            crate::basis::BSplineIdentifiability::None
+        ),
+        "a continuous by-smooth keeps its constant"
+    );
+    assert!(
+        matches!(
+            inner_identifiability("s(x, by=z, identifiability=sum_tozero)"),
+            crate::basis::BSplineIdentifiability::WeightedSumToZero { .. }
+        ),
+        "an explicit identifiability request wins"
+    );
+    assert!(
+        matches!(
+            inner_identifiability("s(x, by=b) + b"),
+            crate::basis::BSplineIdentifiability::WeightedSumToZero { .. }
+        ),
+        "a binary by-variable keeps the factor convention"
+    );
+}

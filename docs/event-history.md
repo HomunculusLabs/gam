@@ -90,11 +90,11 @@ biomarker — enters as a penalised slope surface, the varying-coefficient
 smooth of the formula language:
 
 ```text
-s(time, by=prs, identifiability=none)
+s(time, by=prs)
 ```
 
-This is `b_d(t) · g_i` added to mark `d`'s log-intensity. `identifiability=none`
-keeps the constant of the by-smooth (a by-smooth is not aliased with the
+This is `b_d(t) · g_i` added to mark `d`'s log-intensity. A continuous
+by-smooth keeps its constant (its constant direction is `g` itself, not the
 intercept, so there is nothing to centre away), which makes `b_d` one
 surface with two REML-selected ridges: the wiggliness ridge decides how much
 the score's effect bends with time, and the null-space ridge (on the constant
@@ -109,10 +109,57 @@ another, and be switched off on an unrelated one. Several scores are several
 such terms; `s(time, prs, ...)` tensor forms let the effect vary with other
 covariates as well.
 
+![Fitted score slope surfaces: a declining effect is recovered as a decline; an uninformative score collapses to zero](images/event_history_score_slope.png)
+
+*The fixture behind the figure: 300 subjects, six time units, a
+standard-normal score. Left, the truth `b(t) = 1 − 0.15 t` is recovered
+within 0.02 everywhere and the wiggliness ridge goes to its limit (the truth
+is a line). Right, a score that carries nothing collapses under both ridges.*
+
 The score sits *beside* the latent state, not inside it: `g` is observed, so
 the intensity is conditional on it, while the latent state carries what the
 event history reveals. Feeding a state inferred from the outcomes back in as
 an observed score would use the outcomes twice.
+
+### Calibrated scores
+
+A polygenic score is confounded by ancestry, so the same raw value means
+different things in different parts of the cohort. The conditional
+transformation-normal Stage 1 of the marginal-slope chain calibrates it once,
+in front of the fit:
+
+```python
+calib = gamfit.fit(scores, "prs ~ s(pc1) + s(pc2)", transformation_normal=True)
+covariates["prs_z"] = calib.transformation_score(scores)
+model = gamfit.fit_event_history(subjects, events, covariates, "s(time, by=prs_z)", atoms=2)
+```
+
+`prs_z = Φ⁻¹(F̂(prs | pc))` is standard normal given ancestry, so `b_d(t)` is
+the effect of one conditional standard deviation of the score everywhere in
+the cohort, and a population forecast at `prs_z = 0` is the population rate
+at every ancestry. Nothing else changes: the slope surface, its two ridges
+and the latent state are as above.
+
+## The information hierarchy
+
+Three conditionings of one model, none weighted by hand:
+
+```rust
+// population: the stationary prior, population covariate values
+let population = population_forecast(&fit, &cohort, &PopulationForecastRequest {
+    start: 60.0, horizons: &[65.0, 70.0], absorbing: &[true, false], covariates: &[0.0],
+})?;
+// score only: the same filter at the subject's own covariates, no history
+let alone = population_forecast(&fit, &cohort, &PopulationForecastRequest { covariates: &[1.8], ..request })?;
+// score and history: the filter continues from the subject's filtered state
+let updated = forecast(&fit, &cohort, &ForecastRequest { history: &subject, .. })?;
+```
+
+With no information the forecast is the population risk; a score moves it by
+what the fitted slope surface says the score is worth at that age; the
+history moves it again by what the events reveal about the latent state. A
+weak score leaves the history to do the work; a strong score moves the risk
+before any history exists.
 
 ## Python
 
@@ -122,8 +169,13 @@ model = gamfit.fit_event_history(subjects, events, covariates, "x + s(time)", at
 model.loadings, model.rates, model.atom_log_lambdas, model.quadrature
 f = model.forecast("subject-17", horizons=[6.0, 7.0], absorbing=["death"])
 f["survival"], f["expected_counts"]
+p = model.population_forecast({"x": 0.0, "prs": 0.0}, start=5.0, horizons=[6.0, 7.0], absorbing=["death"])
 model.pit("subject-17"); model.pit_ks()
 ```
+
+`population_forecast` takes the covariate values of a subject with no
+observed history: population values give the population tier, a subject's
+own score gives what the model says before its history is seen.
 
 `subjects` has columns `id, entry, exit`; `events` has `id, time, mark`;
 `covariates` has `id, start` and the covariate columns, one row per segment
@@ -140,7 +192,10 @@ gam fit-events --subjects s.csv --events e.csv --covariates c.csv \
 
 The summary carries the loadings, rates, per-atom ridges, coefficients, the
 quadrature certificate, the predictive-PIT Kolmogorov–Smirnov distance over
-every event, and per-subject forecasts at the given offsets after exit.
+every event, and per-subject forecasts at the given offsets after exit, each
+with its `without_history` counterpart: the same window run from the
+stationary prior at the subject's covariates, so the summary shows what the
+history added.
 
 ## Forecasting and calibration
 

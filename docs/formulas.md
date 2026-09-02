@@ -100,7 +100,7 @@ y ~ x + group(site)                      # random intercept per level
 y ~ x + re(site)                         # random-intercept alias of group()
 y ~ x + factor(site)                     # FIXED categorical factor (like bare `+ site`)
 y ~ s(time, by=treatment) + treatment    # separate smooth per factor level
-y ~ s(time, by=dose)                     # numeric varying-coefficient smooth
+y ~ s(time, by=dose)                     # numeric varying-coefficient smooth: f(time)·dose, f keeps its constant
 y ~ s(time, subject, bs="fs")           # partial-pooling random smooths
 y ~ fs(time, subject)                    # alias for bs="fs"
 y ~ s(time) + s(subject, time, bs="sz") # sum-to-zero factor deviations
@@ -168,7 +168,7 @@ The 1-D B-spline path accepts these options plus `periodic`, `period`,
 
 | Value | Meaning |
 | --- | --- |
-| `sum_tozero` (aliases `centered`, `sum-to-zero`) | Default. Center the smooth so it cannot compete with the global intercept. |
+| `sum_tozero` (aliases `centered`, `sum-to-zero`) | Default. Center the smooth so it cannot compete with the global intercept. Not applied to a smooth with a continuous `by=` variable: `s(x, by=z)` is the varying coefficient `f(x)·z`, whose constant direction is `z` itself, so `f` keeps its constant and the double penalty's null-space ridge decides whether it exists. Do not add a separate `z` main effect alongside it. |
 | `none` | Keep the unconstrained basis columns. The smooth then spans the constant, which is aliased with the intercept; the double penalty's null-function ridge is what keeps the fit identified, so `double_penalty` must stay on. |
 | `linear` (alias `remove_linear_trend`) | Remove the constant *and* linear directions, so the smooth carries only curvature and a separate parametric `x` term is free to take the slope. |
 

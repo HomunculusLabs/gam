@@ -1,5 +1,19 @@
 ## Unreleased
 
+- **A continuous `by=` smooth keeps its constant, and event-history forecasts
+  have a population tier (#2805).** `s(x, by=z)` with a continuous `z` is the
+  varying coefficient `f(x)·z`, whose constant direction is `z` itself and
+  not the intercept; the inner smooth is no longer sum-to-zero centred, so
+  `f` is one penalised surface whose null-space ridge decides whether it
+  exists (an explicit `identifiability=` still wins, and a binary or factor
+  by-variable keeps the factor convention). The event-history score recipe
+  is therefore plain `s(time, by=score)`. `population_forecast` (Rust,
+  `model.population_forecast` in Python, `without_history` beside every CLI
+  forecast) runs the zero-count filter from the stationary prior at given
+  covariate values, so the population, score-only and history-conditioned
+  forecasts are one model conditioned on more; a fixture checks the three
+  tiers order as the score's sign and the history's richness say.
+
 - **The cone-truncated posterior's moment cubature is ordered, tilted at the
   exact saddle point, and certified by replicate lattices (#979).** The
   large-scale transformation-normal preprocessor converged and then refused

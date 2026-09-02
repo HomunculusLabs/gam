@@ -8,7 +8,7 @@ filtered state. See ``docs/event-history.md``.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -92,6 +92,15 @@ class EventHistoryModel:
             mark = self.mark_names.index(mark)
         return np.asarray(self._native.coefficients(int(mark)))
 
+    def _absorbing_mask(self, absorbing: Sequence[str] | Sequence[bool] | None) -> list[bool]:
+        marks = self.mark_names
+        if absorbing is None:
+            return [False] * len(marks)
+        if all(isinstance(a, (bool, np.bool_)) for a in absorbing):
+            return [bool(a) for a in absorbing]
+        chosen = set(absorbing)
+        return [name in chosen for name in marks]
+
     def _subject(self, subject: int | str) -> int:
         if isinstance(subject, str):
             return self._subject_index[subject]
@@ -108,15 +117,45 @@ class EventHistoryModel:
         probability that no absorbing mark has fired by each horizon and
         ``expected_counts`` (horizons × marks) is the expected count of each
         mark, its cumulative incidence when absorbing."""
-        marks = self.mark_names
-        if absorbing is None:
-            mask = [False] * len(marks)
-        elif all(isinstance(a, (bool, np.bool_)) for a in absorbing):
-            mask = [bool(a) for a in absorbing]
-        else:
-            mask = [name in set(absorbing) for name in marks]
         out = self._native.forecast(
-            self._subject(subject), [float(h) for h in horizons], mask, future_row
+            self._subject(subject),
+            [float(h) for h in horizons],
+            self._absorbing_mask(absorbing),
+            future_row,
+        )
+        return {
+            "horizons": np.asarray(out["horizons"]),
+            "survival": np.asarray(out["survival"]),
+            "expected_counts": np.asarray(out["expected_counts"]),
+        }
+
+    def population_forecast(
+        self,
+        covariates: Mapping[str, float] | Sequence[float],
+        start: float,
+        horizons: Sequence[float],
+        absorbing: Sequence[str] | Sequence[bool] | None = None,
+    ) -> dict[str, Any]:
+        """Forecast a subject with no observed history from covariate values
+        alone: the latent state starts at its stationary prior. Population
+        covariate values give the population tier; a subject's own score gives
+        what the model says before its history is seen. ``covariates`` is a
+        mapping by covariate name or a sequence in ``covariate_names`` order;
+        ``start`` is the time the window opens."""
+        names = self.covariate_names
+        if isinstance(covariates, Mapping):
+            missing = [c for c in names if c not in covariates]
+            if missing:
+                raise KeyError(f"population_forecast is missing covariates {missing}")
+            values = [float(covariates[c]) for c in names]
+        else:
+            values = [float(v) for v in covariates]
+            if len(values) != len(names):
+                raise ValueError(
+                    f"population_forecast needs {len(names)} covariate values, got {len(values)}"
+                )
+        out = self._native.population_forecast(
+            values, float(start), [float(h) for h in horizons], self._absorbing_mask(absorbing)
         )
         return {
             "horizons": np.asarray(out["horizons"]),

@@ -7107,6 +7107,21 @@ pub fn defer_inner_model_centering_to_factor_level_wrapper(basis: &mut SmoothBas
     }
 }
 
+/// A continuous `by=` smooth is a varying coefficient `f(x)·z`. Its constant
+/// direction is `z` itself, not the intercept, so the model-space sum-to-zero
+/// centring the inner smooth would otherwise apply removes a genuine
+/// direction — the coefficient's average — and forces it into a separate,
+/// unpenalised `z` main effect. Keeping the constant in the penalised block
+/// makes `f` one surface under two REML ridges: the wiggliness ridge decides
+/// how much the coefficient bends with `x`, and the null-space ridge (on its
+/// constant and linear parts) decides whether it exists at all, so a
+/// by-variable that carries nothing collapses to `f ≡ 0`. Only the default
+/// model-space centring is released; explicit structural or frozen choices
+/// are kept, exactly as for the factor-level wrapper.
+pub fn keep_constant_in_numeric_by_smooth(basis: &mut SmoothBasisSpec) {
+    defer_inner_model_centering_to_factor_level_wrapper(basis);
+}
+
 pub fn apply_by_variable_to_local_build(
     mut built: LocalSmoothTermBuild,
     data: ArrayView2<'_, f64>,

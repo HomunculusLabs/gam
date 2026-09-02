@@ -230,8 +230,10 @@ rates are selected by the evidence (an unsupported atom is switched off by
 its own REML ridge). The latent term is the individual's deviation from a
 population rate — `exp(η⁰)` is the intensity averaged over the latent state
 — and an observed risk score enters as a penalised slope surface
-`s(time, by=score, identifiability=none)` whose bend with time and whose very
-existence the evidence selects. The latent chain is marginalised exactly by
+`s(time, by=score)` whose bend with time and whose very existence the
+evidence selects; a forecast can start from the stationary prior, so the
+population, score-only and history-conditioned tiers are one model
+conditioned on more. The latent chain is marginalised exactly by
 adaptive Gauss-Hermite–Lagrange filtering, so recurrent events, competing
 risks, dynamic frailty and history-conditioned forecasts are one family.
 Forecasts and the predictive PIT are exact expectations under the filtered

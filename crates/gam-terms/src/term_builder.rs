@@ -687,6 +687,22 @@ pub fn build_termspec(
                             }
                         }
                         ColumnKindTag::Binary | ColumnKindTag::Continuous => {
+                            let mut inner_basis = inner_basis;
+                            // A continuous by-variable makes a varying
+                            // coefficient `f(x)·z` whose constant direction is
+                            // `z` itself, not the intercept, so the inner
+                            // smooth's default centring would delete the
+                            // coefficient's average and force it into a
+                            // separate unpenalised `z` term. Keep the constant
+                            // in the penalised block; an explicit
+                            // `identifiability=` still wins. A binary
+                            // by-variable is a factor in disguise and keeps
+                            // the factor convention (`s(x, by=g) + g`).
+                            if matches!(ds.column_kinds.get(by_col), Some(ColumnKindTag::Continuous))
+                                && !options.contains_key("identifiability")
+                            {
+                                crate::smooth::keep_constant_in_numeric_by_smooth(&mut inner_basis);
+                            }
                             smooth_terms.push(SmoothTermSpec {
                                 frozen_parametric_residualization: None,
                                 name: label.clone(),
@@ -2382,7 +2398,7 @@ pub fn build_smooth_basis(
         // by-level's rows (see `DEFAULT_SIZING_ROWS_OPTION`); numeric-by
         // smooths keep pooled sizing.
         inject_by_level_sizing_rows(&mut inner_options, ds, by_col);
-        let inner = build_smooth_basis(
+        let mut inner = build_smooth_basis(
             kind,
             vars,
             cols,
@@ -2392,6 +2408,14 @@ pub fn build_smooth_basis(
             policy,
             smooth_coordinate_count,
         )?;
+        // Same rule as the formula path: a continuous by-variable's constant
+        // direction is the by-variable itself, so it stays in the penalised
+        // block unless an explicit `identifiability=` says otherwise.
+        if matches!(ds.column_kinds.get(by_col), Some(ColumnKindTag::Continuous))
+            && !options.contains_key("identifiability")
+        {
+            crate::smooth::keep_constant_in_numeric_by_smooth(&mut inner);
+        }
         let by_kind = match ds.column_kinds.get(by_col).copied() {
             Some(ColumnKindTag::Categorical) => ByVarKind::Factor {
                 feature_col: by_col,
