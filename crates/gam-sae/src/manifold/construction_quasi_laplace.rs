@@ -5386,6 +5386,51 @@ impl SaeManifoldTerm {
         acc
     }
 
+    /// Fold the row's Daleckii–Krein deflation differential into the single
+    /// t–t weight consumed by `SaeRowJetContraction::Trace` (#2333).
+    ///
+    /// For every symmetric derivative block `D`, the returned `E` satisfies
+    /// `sum(E⊙D) = tr(inv_vv·D) - deflation_block_correction(inv_vv,D)`. In
+    /// the spectral case this is `U ((Uᵀ inv_vv U) ⊙ F) Uᵀ`, using the
+    /// exact same `F` and gap convention as the correction. Gauge-only rows fold
+    /// the structural-null subtraction directly; undeflated or malformed
+    /// spectral rows preserve the raw selected inverse, matching the correction's
+    /// zero branch.
+    fn deflation_folded_trace_weight(
+        inv_vv: &Array2<f64>,
+        dirs: &[Array1<f64>],
+        spectrum: Option<&RowDeflationSpectrum>,
+    ) -> Array2<f64> {
+        let q = inv_vv.nrows();
+        let Some(spec) = spectrum else {
+            let mut e = inv_vv.clone();
+            for v in dirs {
+                for a in 0..q {
+                    let va = v.get(a).copied().unwrap_or(0.0);
+                    if va == 0.0 {
+                        continue;
+                    }
+                    for b in 0..q {
+                        e[[a, b]] -= va * v.get(b).copied().unwrap_or(0.0);
+                    }
+                }
+            }
+            return e;
+        };
+        let u = &spec.evecs;
+        if u.nrows() != q || u.ncols() != q {
+            return inv_vv.clone();
+        }
+        let mut folded = u.t().dot(inv_vv).dot(u);
+        let f = Self::row_deflation_frechet_coefficients(spec, q);
+        for a in 0..q {
+            for b in 0..q {
+                folded[[a, b]] *= f[[a, b]];
+            }
+        }
+        u.dot(&folded).dot(&u.t())
+    }
+
 
     /// The Daleckii–Krein coefficient matrix `F` of the per-row spectral
     /// deflation map `Φ`, in the row's RAW eigenbasis:
@@ -6346,6 +6391,16 @@ impl SaeManifoldTerm {
                     .to_string(),
             );
         }
+        if matches!(self.assignment.mode, AssignmentMode::Softmax { .. }) {
+            return self.contracted_softmax_trace_adjoint(
+                rho,
+                cache,
+                solver,
+                joint_block,
+                operator,
+                residual_target,
+            );
+        }
         let n = self.n_obs();
         let total_t = cache.delta_t_len();
         let mut gamma_t = Array1::<f64>::zeros(total_t);
@@ -6392,34 +6447,6 @@ impl SaeManifoldTerm {
                 rho,
                 self.row_loss_weights.as_deref(),
             )?;
-        let k_atoms = self.k_atoms();
-        // #1038 softmax entropy: the dense per-row entropy Hessian written into
-        // `block.htt` has off-diagonal logit terms whose θ-derivative the adjoint
-        // must contract too (not just the diagonal). Build the SAME penalty +
-        // `scale = λ/τ²` the assembly uses so value/logdet/adjoint differentiate
-        // one operator. `None` for non-softmax modes, whose diagonal channels
-        // are handled by the assignment-prior derivative entry and the ordered
-        // Beta--Bernoulli shared-mass column pass.
-        let softmax_dense_adjoint: Option<(
-            gam_terms::analytic_penalties::SoftmaxAssignmentSparsityPenalty,
-            f64,
-        )> = match self.assignment.mode {
-            AssignmentMode::Softmax {
-                temperature,
-                sparsity,
-            } if k_atoms > 1 => {
-                let inv_tau = 1.0 / temperature;
-                let scale = rho.lambda_sparse()? * sparsity * inv_tau * inv_tau;
-                Some((
-                    gam_terms::analytic_penalties::SoftmaxAssignmentSparsityPenalty::new(
-                        k_atoms,
-                        temperature,
-                    ),
-                    scale,
-                ))
-            }
-            _ => None,
-        };
         // Per active logit site: row, atom, global t-index, selected-inverse
         // diagonal, and the unit-diagonal Daleckii--Krein correction weight.
         #[derive(Clone, Copy)]
@@ -6434,9 +6461,8 @@ impl SaeManifoldTerm {
 
         // #1557 — reuse one K-sized scratch row across all N rows (alias-free).
         let mut assignments = Array1::<f64>::zeros(self.k_atoms());
-        // #932 complete schedule: softmax rows are built in memory-ledgered
-        // CPU/CUDA tiles through one bounded look-ahead window; non-softmax
-        // gates use their distinct dynamic row program.
+        // The resident softmax program returned through the Trace seam above;
+        // this hand window is exclusively the distinct non-softmax program.
         let mut jet_window: std::collections::VecDeque<SaeRowJets> =
             std::collections::VecDeque::new();
         let mut jet_window_next = 0usize;
@@ -6545,41 +6571,6 @@ impl SaeManifoldTerm {
                 }
             }
 
-            // #1419: when `w` is a logit and the assignment is softmax, the per-row
-            // Gershgorin majorizer `D = diag(Σ_j|H_kj|)` is what the assembly wrote
-            // into `htt` (the genuine Loewner majorizer that replaces the indefinite
-            // exact entropy Hessian). Its full θ-derivative `∂D_{k,k}/∂z_w` (diagonal;
-            // `∂D_kk/∂z_w = Σ_j sign(H_kj)·∂H_kj/∂z_w`) is the SAME operator the
-            // assembly and logdet now differentiate, so value and adjoint stay on ONE
-            // exact branch. Compute it once per logit `w` and add it at every logit
-            // pair `(a,b)` below. The diagonal softmax case is therefore handled here,
-            // NOT in `assignment_prior_hdiag_derivative_entry` (which returns 0 for
-            // softmax to avoid double-counting).
-            // #1410: the softmax majorizer θ-derivative `∂D_kk/∂z_w` is DIAGONAL
-            // (`D` is diagonal), and the compact adjoint reads it only for this
-            // row's `≤ top_k` active atoms. Compute the needed diagonal entry
-            // directly from the softmax row `a` (= `assignments`, in hand) via
-            // `active_softmax_majorizer_logit_derivative_entry`, instead of the old
-            // per-(row, logit) full `K×K` `row_psd_majorizer_logit_derivative`
-            // allocation. `m = Σ_j a_j l_j` is shared across all `(w, k)` pairs of
-            // the row, so compute it once. `inv_tau` carries the softmax `∂a/∂z`
-            // convention.
-            let softmax_adjoint_row: Option<(&[f64], f64, f64, f64)> =
-                match (softmax_dense_adjoint.as_ref(), self.assignment.mode) {
-                    (Some((_penalty, scale)), AssignmentMode::Softmax { temperature, .. }) => {
-                        let a = assignments
-                            .as_slice()
-                            .expect("softmax assignments row must be contiguous");
-                        let m = softmax_majorizer_log_mean(a);
-                        Some((a, m, *scale, 1.0 / temperature))
-                    }
-                    _ => None,
-                };
-            // #991 — the softmax majorizer written into `htt` carries this row's
-            // design weight `w_row`, so its θ-derivative below carries the SAME
-            // `w_row`; the data-curvature θ-derivative already carries `w` through
-            // the √w-scaled jets, and the ordered Beta--Bernoulli prior derivative
-            // (`assignment_prior_hdiag_derivative_entry`) is left unweighted.
             let w_row_prior = self.row_loss_weights.as_deref().map_or(1.0, |w| w[row]);
             // #2330 Patch D per-row residual context on the exact-A arm (#2515).
             let patchd_error_metric: Option<Vec<f64>> = patchd_residual.map(|tgt| {
@@ -6599,34 +6590,11 @@ impl SaeManifoldTerm {
                 });
             for w in 0..q {
                 let mut gamma = 0.0_f64;
-                // The active logit `w` differentiates against; `None` unless this
-                // slot is a softmax logit on the softmax path.
-                let softmax_d_dw: Option<(&[f64], f64, f64, f64, usize)> =
-                    match (softmax_adjoint_row, jets.vars[w]) {
-                        (Some((a, m, scale, inv_tau)), SaeLocalRowVar::Logit { atom: atom_w }) => {
-                            Some((a, m, scale, inv_tau, atom_w))
-                        }
-                        _ => None,
-                    };
                 let mut deflated_base_dh_mat = Array2::<f64>::zeros((q, q));
                 for a in 0..q {
                     for b in 0..q {
-                        let mut dh = match (softmax_d_dw, jets.vars[a], jets.vars[b]) {
-                            (
-                                Some((a_soft, _m, _scale, inv_tau, atom_w)),
-                                SaeLocalRowVar::Coord { atom: atom_a, .. },
-                                SaeLocalRowVar::Coord { atom: atom_b, .. },
-                            ) => {
-                                let h_ab = sae_dot(jets.first(a), jets.first(b));
-                                h_ab * Self::softmax_data_weight_product_logit_factor(
-                                    a_soft, atom_a, atom_b, atom_w, inv_tau,
-                                )
-                            }
-                            _ => {
-                                sae_dot(jets.second(a, w), jets.first(b))
-                                    + sae_dot(jets.first(a), jets.second(b, w))
-                            }
-                        };
+                        let mut dh = sae_dot(jets.second(a, w), jets.first(b))
+                            + sae_dot(jets.first(a), jets.second(b, w));
                         if exact_a {
                             // #2330 Patch D (1a) on the coordinate block — the same
                             // residual-curvature leg the joint routes carry.
@@ -6639,21 +6607,6 @@ impl SaeManifoldTerm {
                                 jets.vars[b],
                                 jets.vars[w],
                             );
-                        }
-                        // `∂D/∂z_w` is diagonal, so it contributes only when the two
-                        // logit slots are the SAME atom (`atom_a == atom_b`).
-                        if let (
-                            Some((a_soft, m, scale, inv_tau, _atom_w)),
-                            SaeLocalRowVar::Logit { atom: atom_a },
-                            SaeLocalRowVar::Logit { atom: atom_b },
-                        ) = (softmax_d_dw, jets.vars[a], jets.vars[b])
-                        {
-                            if atom_a == atom_b {
-                                dh += w_row_prior
-                                    * active_softmax_majorizer_logit_derivative_entry(
-                                        a_soft, atom_a, _atom_w, m, scale, inv_tau,
-                                    );
-                            }
                         }
                         if a == b {
                             dh += match jets.vars[a] {

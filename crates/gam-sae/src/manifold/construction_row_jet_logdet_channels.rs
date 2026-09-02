@@ -1052,4 +1052,331 @@ impl SaeManifoldTerm {
         }
         Ok(())
     }
+
+    /// Resident softmax `Γ = tr(H⁻¹ ∂H/∂θ)` reduction (#2333).
+    ///
+    /// This is the sole softmax Trace consumer. It constructs the same selected
+    /// inverse blocks as the former hand loop, folds the row deflation map into
+    /// `E_tt`, projects every semantic output base into the row metric chart,
+    /// and sends the complete data-curvature tower through the typed Trace seam.
+    /// Scalar majorizer/ARD channels and the residual third-jet term are host
+    /// post-folds because they are not row-jet channels; all use the same `E_tt`
+    /// so the conditioned operator is differentiated exactly once.
+    fn contracted_softmax_trace_adjoint(
+        &self,
+        rho: &SaeManifoldRho,
+        cache: &ArrowFactorCache,
+        solver: &DeflatedArrowSolver<'_>,
+        joint_block: bool,
+        operator: EvidenceOperator,
+        residual_target: Option<ArrayView2<'_, f64>>,
+    ) -> Result<SaeArrowVector, String> {
+        let AssignmentMode::Softmax {
+            temperature,
+            sparsity,
+        } = self.assignment.mode
+        else {
+            return Err("contracted softmax Trace called on a non-softmax gate".to_string());
+        };
+        let exact_a = operator.is_exact_a();
+        let n = self.n_obs();
+        let p = self.output_dim();
+        let total_t = cache.delta_t_len();
+        let mut gamma_t = Array1::<f64>::zeros(total_t);
+        let mut gamma_beta = Array1::<f64>::zeros(cache.k);
+        let second_jets = self.atom_second_jets()?;
+        let border = self.border_channels_for_cache(cache)?;
+        let n_beta = border.len();
+        let ard_precisions = self.validated_ard_precisions(rho)?;
+        let inv_tau = temperature.recip();
+        let entropy_scale = if self.k_atoms() > 1 {
+            rho.lambda_sparse()? * sparsity * inv_tau * inv_tau
+        } else {
+            0.0
+        };
+        let fast_selected = joint_block && solver.plain_selected_inverse_available();
+        let beta_inv = if joint_block {
+            Self::selected_inverse_beta_block(
+                solver,
+                cache,
+                fast_selected,
+                "contracted_softmax_trace_adjoint",
+            )?
+        } else {
+            Array2::<f64>::zeros((cache.k, cache.k))
+        };
+        let mut beta_inv_border = vec![0.0_f64; n_beta * n_beta];
+        for (i, channel_i) in border.iter().enumerate() {
+            for (j, channel_j) in border.iter().enumerate() {
+                beta_inv_border[i * n_beta + j] =
+                    beta_inv[[channel_i.index, channel_j.index]];
+            }
+        }
+        let rhs_beta_zero = Array1::<f64>::zeros(cache.k);
+        let selected_ctx = SelectedInverseRowSolve {
+            solver,
+            cache,
+            beta_inv: &beta_inv,
+            fast_selected,
+            rhs_beta_zero: rhs_beta_zero.view(),
+            context: "contracted_softmax_trace_adjoint",
+        };
+        let mut rhs_t_scratch = Array1::<f64>::zeros(total_t);
+        let whiten = self.whiten_logdet_row_jets();
+        let metric = if whiten {
+            Some(
+                self.row_metric
+                    .as_ref()
+                    .ok_or_else(|| "contracted softmax Trace whitening metric absent".to_string())?,
+            )
+        } else {
+            None
+        };
+        let projected_p = metric.map_or(p, |metric| metric.metric_rank());
+        let patchd_residual = exact_a.then_some(residual_target).flatten();
+        let patchd_third_jets = if patchd_residual.is_some() {
+            Some(self.atom_third_jets()?)
+        } else {
+            None
+        };
+        let host_budget = crate::manifold::sae_host_in_core_budget_bytes().0;
+        let mut assignments_scratch = Array1::<f64>::zeros(self.k_atoms());
+        let mut start = 0usize;
+        while start < n {
+            let q = cache.row_dims[start];
+            let same_shape_rows = cache.row_dims[start..]
+                .iter()
+                .take_while(|&&candidate| candidate == q)
+                .count();
+            let plan = crate::gpu_kernels::sae_rowjet::plan_softmax_row_jets_trace(
+                same_shape_rows,
+                self.k_atoms(),
+                q,
+                projected_p,
+                n_beta,
+                self.gpu_policy,
+                host_budget,
+            )?;
+            if plan.tile_rows == 0 {
+                return Err(format!(
+                    "contracted softmax Trace planner returned an empty tile at row {start}"
+                ));
+            }
+            let tile_rows = plan.tile_rows;
+            let mut inputs = Vec::with_capacity(tile_rows);
+            let mut layouts = Vec::with_capacity(tile_rows);
+            let mut e_tt = Vec::with_capacity(tile_rows * q * q);
+            let mut inv_vbeta = Vec::with_capacity(tile_rows * q * n_beta);
+            let mut shared_beta_layout = None;
+            for row in start..start + tile_rows {
+                let base = cache.row_offsets[row];
+                let vars = self.row_vars_for_cache_row(row, cache)?;
+                self.assignment.try_assignments_row_into(
+                    row,
+                    assignments_scratch
+                        .as_slice_mut()
+                        .expect("softmax assignment scratch is contiguous"),
+                )?;
+                let source = ProductionRowProgram {
+                    term: self,
+                    row,
+                    vars: &vars,
+                    assignments: assignments_scratch.view(),
+                    second_jets: &second_jets,
+                    border: &border,
+                };
+                let sqrt_row_weight = self
+                    .row_loss_weights
+                    .as_deref()
+                    .map_or(1.0, |weights| weights[row].sqrt());
+                let mut input =
+                    crate::gpu_kernels::sae_rowjet::SaeSoftmaxRowJetInput::from_source(
+                        &source,
+                        sqrt_row_weight,
+                        if metric.is_some() {
+                            None
+                        } else {
+                            shared_beta_layout.clone()
+                        },
+                    )?;
+                if let Some(metric) = metric {
+                    input.project_output_bases(projected_p, |source, projected| {
+                        for rank_col in 0..projected_p {
+                            let mut acc = 0.0_f64;
+                            for out_col in 0..p {
+                                acc += metric.factor_entry(row, out_col, rank_col)
+                                    * source[out_col];
+                            }
+                            projected[rank_col] = acc;
+                        }
+                    })?;
+                } else {
+                    shared_beta_layout =
+                        Some((input.beta_atoms.clone(), input.beta_outputs.clone()));
+                }
+                let (inv_vv_row, inv_vbeta_row) = if joint_block {
+                    Self::selected_inverse_row_blocks_or_solve(
+                        &selected_ctx,
+                        row,
+                        base,
+                        q,
+                        &mut rhs_t_scratch,
+                    )?
+                } else {
+                    let factor = cache.undamped_factor(row);
+                    let mut inverse = Array2::<f64>::zeros((q, q));
+                    let mut unit = Array1::<f64>::zeros(q);
+                    for col in 0..q {
+                        unit[col] = 1.0;
+                        let solved = cholesky_solve_vector(factor, unit.view());
+                        unit[col] = 0.0;
+                        for inverse_row in 0..q {
+                            inverse[[inverse_row, col]] = solved[inverse_row];
+                        }
+                    }
+                    (inverse, Array2::<f64>::zeros((q, cache.k)))
+                };
+                let defl_dirs = cache
+                    .deflated_row_directions
+                    .get(row)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let defl_spectrum = cache
+                    .deflation_row_spectra
+                    .get(row)
+                    .and_then(Option::as_ref);
+                let e_row = Self::deflation_folded_trace_weight(
+                    &inv_vv_row,
+                    defl_dirs,
+                    defl_spectrum,
+                );
+                e_tt.extend(e_row.iter().copied());
+                for a in 0..q {
+                    for channel in &border {
+                        inv_vbeta.push(inv_vbeta_row[[a, channel.index]]);
+                    }
+                }
+                inputs.push(input);
+                layouts.push(vars);
+            }
+            let trace = crate::gpu_kernels::sae_rowjet::execute_softmax_row_jet_tile_contracted(
+                &inputs,
+                inv_tau,
+                plan.path,
+                crate::gpu_kernels::sae_rowjet::SaeRowJetContraction::Trace {
+                    e_tt: &e_tt,
+                    inv_vbeta: &inv_vbeta,
+                    beta_inv: &beta_inv_border,
+                    exact_a,
+                },
+            )?;
+            if (trace.n_rows, trace.q, trace.n_beta) != (tile_rows, q, n_beta) {
+                return Err(format!(
+                    "contracted softmax Trace returned shape ({}, {}, {}); expected ({tile_rows}, {q}, {n_beta})",
+                    trace.n_rows, trace.q, trace.n_beta
+                ));
+            }
+            for local in 0..tile_rows {
+                let row = start + local;
+                let base = cache.row_offsets[row];
+                let vars = &layouts[local];
+                let assignments = Array1::from_vec(inputs[local].gate_values.clone());
+                let e_row = &e_tt[local * q * q..(local + 1) * q * q];
+                let vbeta_row =
+                    &inv_vbeta[local * q * n_beta..(local + 1) * q * n_beta];
+                let m = softmax_majorizer_log_mean(
+                    assignments
+                        .as_slice()
+                        .expect("softmax assignments are contiguous"),
+                );
+                let w_row = self.row_loss_weights.as_deref().map_or(1.0, |w| w[row]);
+                let patchd_error_metric = patchd_residual.map(|target| {
+                    self.patchd_row_error_metric(row, w_row, target, &assignments, whiten)
+                });
+                let patchd_ctx = patchd_error_metric.as_deref().map(|error_metric| {
+                    PatchDResidualCtx {
+                        row,
+                        error_metric,
+                        sqrt_w: w_row.sqrt(),
+                        assignments: &assignments,
+                        second_jets: &second_jets,
+                        third_jets: patchd_third_jets.as_deref(),
+                        is_obb: false,
+                        inv_tau: 0.0,
+                    }
+                });
+                for w in 0..q {
+                    let mut gamma = trace.t[local * q + w];
+                    if let SaeLocalRowVar::Logit { atom: atom_w } = vars[w] {
+                        let a_soft = assignments
+                            .as_slice()
+                            .expect("softmax assignments are contiguous");
+                        for a in 0..q {
+                            if let SaeLocalRowVar::Logit { atom: atom_a } = vars[a] {
+                                gamma += e_row[a * q + a]
+                                    * w_row
+                                    * active_softmax_majorizer_logit_derivative_entry(
+                                        a_soft,
+                                        atom_a,
+                                        atom_w,
+                                        m,
+                                        entropy_scale,
+                                        inv_tau,
+                                    );
+                            }
+                        }
+                    }
+                    if let SaeLocalRowVar::Coord { atom, axis } = vars[w] {
+                        if !ard_precisions[atom].is_empty() {
+                            let derivative = if exact_a {
+                                self.ard_exact_hessian_derivative(
+                                    ard_precisions[atom][axis],
+                                    row,
+                                    atom,
+                                    axis,
+                                )
+                            } else {
+                                self.ard_majorized_hessian_derivative(
+                                    ard_precisions[atom][axis],
+                                    row,
+                                    atom,
+                                    axis,
+                                )
+                            };
+                            gamma += e_row[w * q + w] * derivative;
+                        }
+                    }
+                    if let Some(ctx) = patchd_ctx.as_ref() {
+                        for a in 0..q {
+                            for b in 0..q {
+                                gamma += e_row[a * q + b]
+                                    * self.patchd_residual_third_leg(
+                                        ctx, vars[a], vars[b], vars[w],
+                                    );
+                            }
+                            for (border_pos, channel) in border.iter().enumerate() {
+                                gamma += 2.0
+                                    * vbeta_row[a * n_beta + border_pos]
+                                    * self.patchd_residual_third_leg_beta(
+                                        ctx,
+                                        vars[a],
+                                        vars[w],
+                                        channel,
+                                    );
+                            }
+                        }
+                    }
+                    gamma_t[base + w] = gamma;
+                }
+                for (border_pos, channel) in border.iter().enumerate() {
+                    gamma_beta[channel.index] += trace.beta[local * n_beta + border_pos];
+                }
+            }
+            start += tile_rows;
+        }
+        Ok(SaeArrowVector {
+            t: gamma_t,
+            beta: gamma_beta,
+        })
+    }
 }
