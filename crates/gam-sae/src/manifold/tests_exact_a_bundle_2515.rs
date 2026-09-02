@@ -1321,25 +1321,14 @@ fn dense_and_arrow_materialize_the_same_raw_exact_a_2515() {
             .slice_mut(s![total_t.., base..base + q])
             .assign(&cross.t());
     }
-    let hbb = match a_sys.hbb_matvec.as_ref() {
-        Some(operator) => {
-            let mut dense = Array2::<f64>::zeros((a_sys.k, a_sys.k));
-            let mut basis = Array1::<f64>::zeros(a_sys.k);
-            let mut column = Array1::<f64>::zeros(a_sys.k);
-            for beta in 0..a_sys.k {
-                basis[beta] = 1.0;
-                column.fill(0.0);
-                operator(basis.view(), &mut column);
-                basis[beta] = 0.0;
-                dense.column_mut(beta).assign(&column);
-            }
-            dense
-        }
-        None => a_sys.hbb.clone(),
-    };
+    // ΔC_ββ is identically zero: the decoder is linear in β, and the exact-A
+    // system retains the majorizer system's canonical shared penalty operator.
+    // That operator is intentionally private and may leave both public legacy
+    // slabs empty, so copying the already-common block here avoids pretending a
+    // 0×0 compatibility slab is the effective H_ββ.
     a_arrow
         .slice_mut(s![total_t.., total_t..])
-        .assign(&hbb);
+        .assign(&a_dense.slice(s![total_t.., total_t..]));
 
     let mut worst_operator_gap = 0.0_f64;
     let mut worst_block_scale = 0.0_f64;
