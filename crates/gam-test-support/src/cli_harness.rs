@@ -145,16 +145,21 @@ where
     writer.flush().expect("flush predict csv");
 }
 
+/// Read the response-scale point column of a `gam predict` CSV, whichever
+/// schema the model class wrote: `posterior_mean` (the standard
+/// estimand-explicit schema, #2785), else the class-specific `mean`, else the
+/// bare `eta` of a link-scale-only writer.
 pub fn read_prediction_means(path: &Path) -> Vec<f64> {
     let mut reader = csv::Reader::from_path(path).expect("open predictions csv");
     let headers = reader.headers().expect("predict csv headers").clone();
-    let mean_idx = headers
+    let mean_idx = ["posterior_mean", "mean", "eta"]
         .iter()
-        .position(|h| h == "mean")
-        .or_else(|| headers.iter().position(|h| h == "eta"))
+        .find_map(|name| headers.iter().position(|h| h == *name))
         .unwrap_or_else(|| {
             // SAFETY: test-support helper intentionally panics with header context
-            panic!("predict csv has neither `mean` nor `eta` column: {headers:?}")
+            panic!(
+                "predict csv has none of `posterior_mean`, `mean` or `eta` columns: {headers:?}"
+            )
         });
     reader
         .records()
