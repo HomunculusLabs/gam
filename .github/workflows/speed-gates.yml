@@ -65,7 +65,7 @@ on:
 # ones) while the in-progress run completes, so every completed run is a
 # verdict on a tree at most one build behind the tip.
 concurrency:
-  group: speed-gates-${{ github.ref }}
+  group: speed-gates-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: false
 
 permissions:
