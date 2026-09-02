@@ -5076,11 +5076,15 @@ impl SaeManifoldTerm {
                 .get(row)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            if !directions.is_empty() {
-                let spectrum = cache
-                    .deflation_row_spectra
-                    .get(row)
-                    .and_then(Option::as_ref);
+            let spectrum = cache
+                .deflation_row_spectra
+                .get(row)
+                .and_then(Option::as_ref);
+            // A clamp-basin classification changes the priced spectrum without
+            // unit-deflating a direction.  Its direction list is therefore empty,
+            // but the stored raw/conditioned spectrum still owns a non-identity
+            // Daleckii--Krein map and must differentiate it (#2515/#2336).
+            if spectrum.is_some() || !directions.is_empty() {
                 row_trace -=
                     Self::deflation_block_correction(&inverse, &derivative, directions, spectrum);
             }
@@ -5270,7 +5274,11 @@ impl SaeManifoldTerm {
                                         trace += inv_vv[[b, a]] * block[[a, b]];
                                     }
                                 }
-                                if !dirs.is_empty() {
+                                // Basin pricing changes `cond_evals` without
+                                // creating a unit-deflated direction.  The
+                                // spectrum, not the null-direction list, is the
+                                // certificate that this derivative map is live.
+                                if spectrum.is_some() || !dirs.is_empty() {
                                     trace -= Self::deflation_block_correction(
                                         &inv_vv, &d_mat, dirs, spectrum,
                                     );
@@ -5304,7 +5312,7 @@ impl SaeManifoldTerm {
                         }
                     }
                 }
-                if !dirs.is_empty() {
+                if spectrum.is_some() || !dirs.is_empty() {
                     // Same Daleckii–Krein correction the dense sibling subtracts,
                     // against the same deflated `inv_vv` (#2712).
                     let mut d_mat = Array2::<f64>::zeros((q, q));
