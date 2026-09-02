@@ -249,6 +249,8 @@ impl rand::TryRng for XorwowState {
 // the CUDA kernel remains an independent device implementation validated in
 // distribution against this host path.
 
+// Consumed only by the CUDA source assembly, which compiles on Linux alone.
+#[cfg(target_os = "linux")]
 use std::f64::consts::{FRAC_PI_2, PI};
 
 fn upstream_pg1() -> &'static PolyaGamma {
