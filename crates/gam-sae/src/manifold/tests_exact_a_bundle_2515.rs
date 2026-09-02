@@ -2092,7 +2092,7 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
     // while defining different functions in a neighbourhood of that point.
     // Differentiate each route's own quotient value before choosing either
     // analytic trace as the route-independent authority.
-    let mut quotient_values = |eval_rho: &SaeManifoldRho| -> (f64, f64) {
+    let mut quotient_values = |eval_rho: &SaeManifoldRho| -> (f64, f64, Array2<f64>) {
         let eval_system = term
             .assemble_arrow_schur(target.view(), eval_rho, None)
             .expect("#2515: perturbed majorizer assembles");
@@ -2119,9 +2119,13 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
                     .sum::<f64>()
             })
             .sum();
+        let eval_a = term
+            .materialize_exact_hessian_dense(eval_rho, target.view(), &eval_b_cache)
+            .expect("#2515: perturbed dense exact-A operator materializes");
         (
             0.5 * (eval_dense_joint - eval_dense_coordinate),
             0.5 * (eval_arrow_joint - eval_arrow_coordinate),
+            eval_a,
         )
     };
     println!(
@@ -2136,54 +2140,40 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
          arrow_difference={arrow_trace:+.12e} delta={:+.6e}",
         dense_trace - arrow_trace,
     );
-    // Before comparing log-determinant traces, isolate the lower seam: does the
-    // assembled ∂A_raw/∂ρ_sparse actually differentiate the materialized
-    // raw exact stationarity Hessian?  This separates an operator-assembly error
-    // from a spectral-classification derivative error.
-    let materialized_a = |eval_rho: &SaeManifoldRho| {
-        let eval_system = term
-            .assemble_arrow_schur(target.view(), eval_rho, None)
-            .expect("#2515: matrix-FD majorizer assembles");
-        let (_, _, eval_cache) =
-            solve_arrow_newton_step_with_options(&eval_system, 0.0, 0.0, &majorizer_options)
-                .expect("#2515: matrix-FD majorizer factors");
-        term.materialize_exact_hessian_dense(eval_rho, target.view(), &eval_cache)
-            .expect("#2515: matrix-FD exact-A operator materializes")
-    };
-    let matrix_fd_step = 1.0e-3_f64;
-    let mut matrix_rho_minus = rho.clone();
-    matrix_rho_minus.log_lambda_sparse -= matrix_fd_step;
-    let mut matrix_rho_plus = rho.clone();
-    matrix_rho_plus.log_lambda_sparse += matrix_fd_step;
-    let matrix_fd = (materialized_a(&matrix_rho_plus) - materialized_a(&matrix_rho_minus))
-        / (2.0 * matrix_fd_step);
-    let matrix_residual = &analytic_da - &matrix_fd;
-    let matrix_residual_max = matrix_residual
-        .iter()
-        .map(|value| value.abs())
-        .fold(0.0_f64, f64::max);
-    let analytic_da_max = analytic_da
-        .iter()
-        .map(|value| value.abs())
-        .fold(0.0_f64, f64::max);
-    let matrix_fd_max = matrix_fd
-        .iter()
-        .map(|value| value.abs())
-        .fold(0.0_f64, f64::max);
-    println!(
-        "[#2515 QUOTIENT] exact-A matrix derivative h={matrix_fd_step:.0e}: \
-         analytic_max={analytic_da_max:+.12e} fd_max={matrix_fd_max:+.12e} \
-         residual_max={matrix_residual_max:+.12e}"
-    );
     for fd_step in [1.0e-3_f64, 1.0e-4, 1.0e-5, 1.0e-6] {
         let mut rho_minus = rho.clone();
         rho_minus.log_lambda_sparse -= fd_step;
         let mut rho_plus = rho.clone();
         rho_plus.log_lambda_sparse += fd_step;
-        let (dense_minus, arrow_minus) = quotient_values(&rho_minus);
-        let (dense_plus, arrow_plus) = quotient_values(&rho_plus);
+        let (dense_minus, arrow_minus, a_minus) = quotient_values(&rho_minus);
+        let (dense_plus, arrow_plus, a_plus) = quotient_values(&rho_plus);
         let dense_fd = (dense_plus - dense_minus) / (2.0 * fd_step);
         let arrow_fd = (arrow_plus - arrow_minus) / (2.0 * fd_step);
+        if fd_step == 1.0e-3 {
+            // Before comparing log-determinant traces, isolate the lower seam:
+            // does the assembled ∂A_raw/∂ρ_sparse actually differentiate the
+            // materialized raw exact stationarity Hessian? This separates an
+            // operator-assembly error from a classification-derivative error.
+            let matrix_fd = (a_plus - a_minus) / (2.0 * fd_step);
+            let matrix_residual = &analytic_da - &matrix_fd;
+            let matrix_residual_max = matrix_residual
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            let analytic_da_max = analytic_da
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            let matrix_fd_max = matrix_fd
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            println!(
+                "[#2515 QUOTIENT] exact-A matrix derivative h={fd_step:.0e}: \
+                 analytic_max={analytic_da_max:+.12e} fd_max={matrix_fd_max:+.12e} \
+                 residual_max={matrix_residual_max:+.12e}"
+            );
+        }
         println!(
             "[#2515 QUOTIENT] sparse FD h={fd_step:.0e}: dense={dense_fd:+.12e} \
              (backward={:+.12e}, forward={:+.12e}) arrow={arrow_fd:+.12e} \
