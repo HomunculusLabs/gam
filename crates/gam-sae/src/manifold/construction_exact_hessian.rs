@@ -4883,31 +4883,9 @@ impl SaeManifoldTerm {
                 e_diag.len()
             ));
         }
-        let mut e_operator = Array2::<f64>::zeros(m.dim());
-        for row in 0..total_t {
-            e_operator[[row, row]] = e_diag[row];
-        }
-        Self::cluster_stable_eigh_operator(m, &e_operator)
-    }
-
-    /// Matrix-valued sibling of [`Self::cluster_stable_eigh`].  Cluster
-    /// stabilization must rotate against the exact `E` operator it is handed,
-    /// rather than pretending a diagonal survived every coordinate change a
-    /// caller may have applied.
-    fn cluster_stable_eigh_operator(
-        m: &Array2<f64>,
-        e_operator: &Array2<f64>,
-    ) -> Result<(Array1<f64>, Array2<f64>), String> {
-        if m.nrows() != m.ncols() || e_operator.dim() != m.dim() {
-            return Err(format!(
-                "cluster_stable_eigh_operator: Hessian {:?} and E operator {:?} must be equally-sized square matrices",
-                m.dim(),
-                e_operator.dim()
-            ));
-        }
         let (eigs, mut vecs) = m
             .eigh(Side::Lower)
-            .map_err(|e| format!("cluster_stable_eigh_operator: eigh failed: {e:?}"))?;
+            .map_err(|e| format!("cluster_stable_eigh: eigh failed: {e:?}"))?;
         let dim = eigs.len();
         // #2673 — this is a GAP threshold, not a classification floor, and it
         // used to borrow the retired absolute PD constant for the job. What
@@ -4927,29 +4905,43 @@ impl SaeManifoldTerm {
             }
             let width = j - i;
             if width > 1 {
+                // `E` is diagonal on the first `total_t` coordinate rows and
+                // identically zero on the beta border.  Its restriction to this
+                // cluster is therefore
+                //
+                //     E_c[a,b] = sum_r e_diag[r] V[r,i+a] V[r,i+b].
+                //
+                // Accumulate one weighted row outer product at a time.  Besides
+                // reading the actual representation rather than manufacturing a
+                // dense matrix of zeros, this changes the work from
+                // O(width^2 * dim^2) to O(width^2 * total_t).  Keeping `b` as the
+                // inner loop walks both the cluster row and `ec` contiguously.
                 let mut ec = Array2::<f64>::zeros((width, width));
-                for a in 0..width {
-                    for b in a..width {
-                        let mut acc = 0.0_f64;
-                        for r in 0..dim {
-                            for c in 0..dim {
-                                let e_rc = e_operator[[r, c]];
-                                if e_rc != 0.0 {
-                                    acc += vecs[[r, i + a]]
-                                        * e_rc
-                                        * vecs[[c, i + b]];
-                                }
-                            }
+                for row in 0..total_t {
+                    let weight = e_diag[row];
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let cluster_row = vecs.slice(s![row, i..j]);
+                    for a in 0..width {
+                        let weighted_a = weight * cluster_row[a];
+                        for b in a..width {
+                            ec[[a, b]] += weighted_a * cluster_row[b];
                         }
-                        ec[[a, b]] = acc;
-                        ec[[b, a]] = acc;
+                    }
+                }
+                // The upper triangle was accumulated once in the same order as
+                // the former scalar quadratic form.  Copy it exactly rather than
+                // averaging two independently-rounded contractions.
+                for a in 0..width {
+                    for b in (a + 1)..width {
+                        ec[[b, a]] = ec[[a, b]];
                     }
                 }
                 let (_ec_eigs, rot) = ec
                     .eigh(Side::Lower)
-                    .map_err(|e| {
-                        format!("cluster_stable_eigh_operator: cluster eigh failed: {e:?}")
-                    })?;
+                    .map_err(|e| format!("cluster_stable_eigh: cluster eigh failed: {e:?}"))?;
+                drop(ec);
                 let cluster = vecs.slice(s![.., i..j]).to_owned();
                 let rotated = cluster.dot(&rot);
                 vecs.slice_mut(s![.., i..j]).assign(&rotated);

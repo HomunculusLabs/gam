@@ -97,10 +97,8 @@ pub(crate) const fn sae_exact_stationarity_block_bytes(dim: usize) -> usize {
 ///   3. `priced_joint_inverse`      — the priced pseudo-inverse (dim × dim)
 ///   4. the `coordinate` block's own `operator` (`a_tt_block`, total_t × total_t)
 ///   5. the `coordinate` block's `eigenvectors` (total_t × total_t)
-///   6. `cluster_stable_eigh`'s `e_operator`, allocated at the FULL operator
-///      shape even though only the diagonal is written
-///   7. `eigh`'s own eigenvector output / LAPACK working copy of the operator
-///   8. `priced_coordinate_inverse` (dim × dim), plus its `_small` source
+///   6. `eigh`'s own eigenvector output / LAPACK working copy of the operator
+///   7. `priced_coordinate_inverse` (dim × dim), plus its `_small` source
 ///
 /// There is no longer a second branch to compare against. `a386c1e8b` (#2674)
 /// deleted the gauge-reduced path of `exact_hessian_spectral_block` entirely --
@@ -110,14 +108,18 @@ pub(crate) const fn sae_exact_stationarity_block_bytes(dim: usize) -> usize {
 /// comparable count (`reduced_operator`, `e_times_complement`, `reduced_e`,
 /// `reduced_eigenvectors`) no longer exist anywhere in that file.
 ///
-/// The enumeration above is therefore the whole population, and 8 stands on it
+/// `cluster_stable_eigh` also no longer materializes the diagonal attribution
+/// operator as a dense `dim x dim` matrix: its cluster restriction is accumulated
+/// directly from `e_diag`, so that former dense live block is genuinely absent.
+///
+/// The enumeration above is therefore the whole population, and 7 stands on it
 /// alone: it is still a LOWER bound on LAPACK's internal workspace, which
 /// `dsyevd` sizes at its own discretion.
 ///
 /// Kept as an enumeration rather than a measured peak deliberately (#2724): the
 /// count is auditable against the code, where a measured number would drift
 /// silently the next time an allocation is added.
-pub(crate) const SAE_EXACT_STATIONARITY_LIVE_DIM_BLOCKS: usize = 8;
+pub(crate) const SAE_EXACT_STATIONARITY_LIVE_DIM_BLOCKS: usize = 7;
 
 /// Resident bytes of the exact stationarity route at its peak.
 pub(crate) const fn sae_exact_stationarity_resident_bytes(dim: usize) -> usize {
