@@ -362,19 +362,19 @@ mod device {
 mod tests {
     use super::*;
 
-    /// The assembled source, written to the path in
-    /// `GAM_SURVIVAL_ROWJET_CUDA_DUMP` when that is set, so `nvcc -dc` can
-    /// compile exactly what NVRTC compiles on a device from a host that has
-    /// the toolkit and no GPU (the row-program CUDA emitter is exercised by
-    /// this program alone, and the CI runners have no device). Without the
-    /// variable the test only asserts the source assembles.
+    /// The assembled source, written to `gam_survival_rowjet.cu` under the
+    /// temp dir on every run, so `nvcc -dc` can compile exactly what NVRTC
+    /// compiles on a device from a host that has the toolkit and no GPU (the
+    /// row-program CUDA emitter is exercised by this program alone, and the
+    /// CI runners have no device). The export is unconditional: an
+    /// environment switch would be the one input the assembled source does
+    /// not depend on.
     #[test]
     fn cuda_source_is_exportable_for_an_external_compile() {
         let source = survival_rowjet_source();
         assert!(source.contains("void rigid_feature_program("));
-        if let Ok(path) = std::env::var("GAM_SURVIVAL_ROWJET_CUDA_DUMP") {
-            std::fs::write(&path, source).expect("write the assembled CUDA source");
-        }
+        let path = std::env::temp_dir().join("gam_survival_rowjet.cu");
+        std::fs::write(&path, source).expect("write the assembled CUDA source");
     }
 
     #[cfg(target_os = "linux")]
