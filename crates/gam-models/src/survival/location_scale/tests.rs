@@ -9592,6 +9592,61 @@ fn the_objective_jeffreys_term_closes_across_a_link_warp_knot_at_the_built_degre
     }
 }
 
+/// gam#2695 — the optimizer consumes `∇Φ`, not only `Φ`, so the realized
+/// composed-warp degree must make that analytic gradient continuous when an
+/// EVENT row's model-dependent index crosses an interior knot.
+///
+/// The value-only pin above closes at degree 4 because `H` reads `I‴`. This
+/// pin reads the production Jeffreys gradient, whose Hessian-directional
+/// derivative reads `I⁗`. A degree-4 I-spline makes `I⁗` piecewise constant;
+/// degree 5 is the first degree at which it is continuous.
+#[test]
+fn the_objective_jeffreys_gradient_closes_across_a_link_warp_knot_at_the_built_degree_2695() {
+    let degree = crate::wiggle::composed_warp_minimum_degree();
+    for amplitude in [1.0e-6_f64, 3.0e-2] {
+        let (coarse, fine) = link_warp_knot_crossing_gap_2695(
+            degree,
+            true,
+            amplitude,
+            LinkWarpKnotReading::ObjectiveJeffreysGradient,
+        );
+        assert!(
+            coarse > 0.0,
+            "∇Φ must respond to the event-row knot crossing for this measurement to \
+             mean anything (degree {degree}, βw={amplitude:.1e})"
+        );
+        assert!(
+            fine <= coarse / 50.0,
+            "the inner objective's Jeffreys gradient does not close across a link-warp \
+             knot at degree {degree}, βw={amplitude:.1e}: gap {coarse:.6e} at h=1e-3 \
+             and {fine:.6e} at h=1e-5, a ratio of {:.3e} against the 100x a continuous \
+             gradient must give",
+            coarse / fine.max(f64::MIN_POSITIVE),
+        );
+    }
+}
+
+/// Non-vacuity for the C¹ floor: one degree below the realized production
+/// degree, the objective value is continuous but its analytic gradient steps.
+#[test]
+fn a_degree_four_composed_warp_makes_the_objective_gradient_jump_2695() {
+    let degree = crate::wiggle::composed_warp_minimum_degree() - 1;
+    assert_eq!(degree, 4, "this arm must measure the C⁰-but-not-C¹ degree");
+    for amplitude in [1.0e-6_f64, 3.0e-2] {
+        let (coarse, fine) = link_warp_knot_crossing_gap_2695(
+            degree,
+            true,
+            amplitude,
+            LinkWarpKnotReading::ObjectiveJeffreysGradient,
+        );
+        assert!(
+            coarse > 0.0 && fine > coarse / 10.0,
+            "degree 4 must make ∇Φ jump across the event-row knot: gap \
+             {coarse:.6e} at h=1e-3 and {fine:.6e} at h=1e-5"
+        );
+    }
+}
+
 /// Non-vacuity, and the measurement the floor exists for: at degree 2 the SAME
 /// reading is a jump, and it is a jump of the size the shipped witness reported
 /// (`2.976461e-1` there, `O(1e-1)` here — same mechanism, different state).
@@ -9705,6 +9760,31 @@ fn link_warp_knot_crossing_gap_2695(
     let beta_w = Array1::from_shape_fn(pw, |j| warp_amplitude * (1.0 + 0.3 * (j as f64)));
 
     let hessian_at = |beta_thr: f64| -> Array2<f64> {
+        let states = states_at(beta_thr);
+        family
+            .exact_newton_joint_hessian(&states)
+            .expect("joint hessian across the knot")
+            .expect("the family exposes an exact joint hessian")
+    };
+    let jeffreys_gradient_at =
+        |beta_thr: f64, h_joint: &Array2<f64>| -> Array1<f64> {
+            let states = states_at(beta_thr);
+            let p = h_joint.nrows();
+            let z = Array2::<f64>::eye(p);
+            gam_solve::estimate::reml::jeffreys_subspace::joint_jeffreys_term(
+                h_joint.view(),
+                z.view(),
+                |direction: &Array1<f64>| {
+                    family.exact_newton_joint_hessian_directional_derivative_rescaled(
+                        &states, direction, 0.0,
+                    )
+                },
+            )
+            .expect("joint Jeffreys gradient across the knot")
+            .1
+        };
+
+    let states_at = |beta_thr: f64| -> Vec<ParameterBlockState> {
         let stacked = |first: usize, second: usize, deriv: usize, scale: f64| {
             let mut eta = Array1::<f64>::zeros(3 * n);
             for i in 0..n {
@@ -9714,16 +9794,12 @@ fn link_warp_knot_crossing_gap_2695(
             }
             eta
         };
-        let states = vec![
+        vec![
             ParameterBlockState { beta: array![1.0], eta: stacked(0, 1, 2, 1.0) },
             ParameterBlockState { beta: array![beta_thr], eta: stacked(3, 4, 5, beta_thr) },
             ParameterBlockState { beta: array![1.0], eta: stacked(6, 7, 8, 1.0) },
             ParameterBlockState { beta: beta_w.clone(), eta: xwiggle.dot(&beta_w) },
-        ];
-        family
-            .exact_newton_joint_hessian(&states)
-            .expect("joint hessian across the knot")
-            .expect("the family exposes an exact joint hessian")
+        ]
     };
 
     let straddles = |h: f64| {
@@ -9754,6 +9830,15 @@ fn link_warp_knot_crossing_gap_2695(
             LinkWarpKnotReading::ObjectiveJeffreysTerm => {
                 (jeffreys_value_2695(&plus) - jeffreys_value_2695(&minus)).abs()
             }
+            LinkWarpKnotReading::ObjectiveJeffreysGradient => {
+                let plus_gradient = jeffreys_gradient_at(B_STAR + h, &plus);
+                let minus_gradient = jeffreys_gradient_at(B_STAR - h, &minus);
+                plus_gradient
+                    .iter()
+                    .zip(minus_gradient.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max)
+            }
         }
     };
     (gap(1.0e-3), gap(1.0e-5))
@@ -9766,6 +9851,8 @@ enum LinkWarpKnotReading {
     ObservedInformation,
     /// `Φ = ½ Σ g(λ(Z_JᵀHZ_J))`, the term of the inner objective itself.
     ObjectiveJeffreysTerm,
+    /// `∇Φ`, the analytic gradient used by the Newton right-hand side and KKT gate.
+    ObjectiveJeffreysGradient,
 }
 
 /// `Φ` at a joint Hessian, on the full identifiable span, through the SAME entry

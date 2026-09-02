@@ -26,12 +26,7 @@ pub struct BernoulliNaturalJet {
 }
 
 #[inline]
-fn row_geometry_error(
-    row: usize,
-    quantity: &'static str,
-    eta: f64,
-    value: f64,
-) -> EstimationError {
+fn row_geometry_error(row: usize, quantity: &'static str, eta: f64, value: f64) -> EstimationError {
     EstimationError::PirlsRowGeometryUnrepresentable {
         row,
         quantity,
@@ -197,15 +192,13 @@ fn cauchit_natural_jet(eta: f64) -> BernoulliNaturalJet {
             mu.ln(),
             d1_over_mu,
             left_d2_ratio - d1_over_mu * d1_over_mu,
-            d3_over_d1 * d1_over_mu - 3.0 * d1_over_mu * left_d2_ratio
-                + 2.0 * d1_over_mu.powi(3),
+            d3_over_d1 * d1_over_mu - 3.0 * d1_over_mu * left_d2_ratio + 2.0 * d1_over_mu.powi(3),
         ],
         log_one_minus_mu: [
             one_minus_mu.ln(),
             -d1_over_q,
             -right_d2_ratio - d1_over_q * d1_over_q,
-            -d3_over_d1 * d1_over_q - 3.0 * d1_over_q * right_d2_ratio
-                - 2.0 * d1_over_q.powi(3),
+            -d3_over_d1 * d1_over_q - 3.0 * d1_over_q * right_d2_ratio - 2.0 * d1_over_q.powi(3),
         ],
         log_fisher: 2.0 * log_d1 - mu.ln() - one_minus_mu.ln(),
     }
@@ -278,6 +271,12 @@ pub fn bernoulli_natural_jet(
         InverseLink::Standard(StandardLink::CLogLog) => Ok(cloglog_natural_jet(eta)),
         InverseLink::Standard(StandardLink::LogLog) => Ok(loglog_natural_jet(eta)),
         InverseLink::Standard(StandardLink::Cauchit) => Ok(cauchit_natural_jet(eta)),
+        InverseLink::Standard(link @ (StandardLink::Identity | StandardLink::Log)) => {
+            Err(EstimationError::InvalidInput(format!(
+                "Bernoulli likelihood requires a bounded inverse link; `{}` is not bounded to [0,1]",
+                link.name()
+            )))
+        }
         _ => generic_natural_jet(row, eta, link),
     }
 }
@@ -288,22 +287,15 @@ mod tests {
 
     #[test]
     fn logit_and_cloglog_keep_informative_log_tails() {
-        let logit = bernoulli_natural_jet(
-            0,
-            1_000.0,
-            &InverseLink::Standard(StandardLink::Logit),
-        )
-        .expect("logit tail");
+        let logit = bernoulli_natural_jet(0, 1_000.0, &InverseLink::Standard(StandardLink::Logit))
+            .expect("logit tail");
         assert_eq!(logit.mu, 1.0);
         assert_eq!(logit.log_one_minus_mu[0], -1_000.0);
         assert_eq!(logit.log_one_minus_mu[1], -1.0);
 
-        let cloglog = bernoulli_natural_jet(
-            0,
-            -1_000.0,
-            &InverseLink::Standard(StandardLink::CLogLog),
-        )
-        .expect("cloglog tail");
+        let cloglog =
+            bernoulli_natural_jet(0, -1_000.0, &InverseLink::Standard(StandardLink::CLogLog))
+                .expect("cloglog tail");
         assert_eq!(cloglog.mu, 0.0);
         assert_eq!(cloglog.log_mu[0], -1_000.0);
         assert_eq!(cloglog.log_mu[1], 1.0);
@@ -312,18 +304,11 @@ mod tests {
     #[test]
     fn loglog_is_exact_cloglog_mirror() {
         for eta in [-12.0, -1.25, 0.0, 2.5, 12.0] {
-            let left = bernoulli_natural_jet(
-                0,
-                eta,
-                &InverseLink::Standard(StandardLink::LogLog),
-            )
-            .expect("loglog jet");
-            let right = bernoulli_natural_jet(
-                0,
-                -eta,
-                &InverseLink::Standard(StandardLink::CLogLog),
-            )
-            .expect("cloglog jet");
+            let left = bernoulli_natural_jet(0, eta, &InverseLink::Standard(StandardLink::LogLog))
+                .expect("loglog jet");
+            let right =
+                bernoulli_natural_jet(0, -eta, &InverseLink::Standard(StandardLink::CLogLog))
+                    .expect("cloglog jet");
             assert_eq!(left.log_mu[0], right.log_one_minus_mu[0]);
             assert_eq!(left.log_one_minus_mu[0], right.log_mu[0]);
             assert_eq!(left.log_fisher, right.log_fisher);
@@ -332,15 +317,8 @@ mod tests {
 
     #[test]
     fn identity_is_not_accepted_as_a_bernoulli_link() {
-        let error = bernoulli_natural_jet(
-            7,
-            0.5,
-            &InverseLink::Standard(StandardLink::Identity),
-        )
-        .expect_err("identity must not enter a Bernoulli likelihood");
-        assert!(matches!(
-            error,
-            EstimationError::PirlsRowGeometryUnrepresentable { row: 7, .. }
-        ));
+        let error = bernoulli_natural_jet(7, 0.5, &InverseLink::Standard(StandardLink::Identity))
+            .expect_err("identity must not enter a Bernoulli likelihood");
+        assert!(matches!(error, EstimationError::InvalidInput(_)));
     }
 }
