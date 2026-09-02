@@ -2130,12 +2130,16 @@ struct DenseTaylorExpressionEnvironment<'a> {
 /// absorbed composition point.
 ///
 /// The five entries are scalar `let`s, as every other value the emitter
-/// forms is. The first version built them as an `[f64; 5]` literal, which
-/// LLVM kept in memory: five scalar stores that the SLP vectoriser then read
-/// back as 128-bit pairs, and a load that spans two narrower stores forwards
-/// from neither — a ~15-cycle stall per pair on Intel cores, which made the
-/// dense surfaces up to 36% slower on a Xeon 8573C while their arithmetic
-/// was unchanged.
+/// forms is. The first version built them as an `[f64; 5]` literal: a store
+/// of consecutive elements is the seed LLVM's SLP vectoriser grows a tree
+/// from, and from that seed it vectorised the whole post-call composition
+/// into two-lane pairs — the fourth-order surface went from 135 scalar
+/// multiplies and no vector instruction to 14 vector spills, 24 vector
+/// reloads and `mulpd` chains threaded with `unpck`/`shufpd` — whose
+/// shuffle traffic cost more than the pairing saved: 0.90 against the hand
+/// on EPYC 9V74 and third-order surfaces at 0.64–0.73 on a Xeon 8573C, with
+/// the emitted arithmetic unchanged. Five scalars give the vectoriser no
+/// seed, and the surfaces compile as the scalar schedules they were.
 fn dense_taylor_rescaled_stack(
     stack: &str,
     alias: &ScaledAlias,
