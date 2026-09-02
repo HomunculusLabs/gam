@@ -219,6 +219,20 @@ fn duchon_chart_design_psi_derivatives_match_the_shipped_design_16d_linear_power
     assert!(second_gap < 1e-4, "charted ∂²X/∂ψ² gap {second_gap:.3e}");
 }
 
+/// The three-axis sibling of the benchmark chart (the shape the CTN 3-D gate
+/// runs). Whether it is amplified is a property of `(p, s, d, ℓ)` alone, so
+/// the printed `α` here is the same one every 3-D order-0 power-9 fixture
+/// sees; the gate does not assume either value, it only pins the derivative.
+#[test]
+fn duchon_chart_design_psi_derivatives_match_the_shipped_design_3d_order0_power9() {
+    let (data, spec) = frozen_hybrid_fixture(3, 160, 10, DuchonNullspaceOrder::Zero, 9.0);
+    let amplification = chart_amplification(data.view(), &spec);
+    eprintln!("[chart_3d_order0_power9] alpha={amplification:.6e}");
+    let (first_gap, second_gap) = chart_gaps(data.view(), &spec, "chart_3d_order0_power9");
+    assert!(first_gap < 1e-5, "charted ∂X/∂ψ gap {first_gap:.3e}");
+    assert!(second_gap < 1e-4, "charted ∂²X/∂ψ² gap {second_gap:.3e}");
+}
+
 /// The low-dimensional control: no underflow, identity chart, and the
 /// derivative surface must be exactly what it was before the chart existed.
 #[test]

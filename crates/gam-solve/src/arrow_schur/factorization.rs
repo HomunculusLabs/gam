@@ -515,7 +515,7 @@ pub(crate) fn factor_spectral_deflated_criterion_row(
     )
 }
 
-fn factor_spectral_deflated_criterion_row_with_geometry(
+pub(crate) fn factor_spectral_deflated_criterion_row_with_geometry(
     row: &ArrowRowBlock,
     d: usize,
     refuse_resolved_indefinite: bool,

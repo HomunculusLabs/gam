@@ -232,28 +232,28 @@ fn parse_epochs(lines: &[String]) -> Vec<EpochRow> {
             }
             previous_inner_epoch = Some(inner_epoch);
             EpochRow {
-            outer_run,
-            inner_epoch,
-            refresh_s: number(line, "refresh_s"),
-            route_s: number(line, "route_s"),
-            births: count(line, "births"),
-            cg_columns: count(line, "cg_columns"),
-            cg_iterations: count(line, "cg_iterations"),
-            recycled_rank: count(line, "recycled_rank"),
-            tile_columns: count(line, "tile_columns"),
-            accumulate_s: number(line, "accumulate_s"),
-            sigma_s: number(line, "sigma_s"),
-            graph_build_s: number(line, "graph_build_s"),
-            precond_s: number(line, "precond_s"),
-            cg_solve_s: number(line, "cg_solve_s"),
-            block_sweeps: count(line, "block_sweeps"),
-            max_component: count(line, "max_component"),
-            max_component_nnz: count(line, "max_component_nnz"),
-            operator_build_s: number(line, "operator_build_s"),
-            kappa_bound: number(line, "cg_kappa_bound"),
-            ev: number(line, "ev"),
-            precond_cost_ratio: number(line, "precond_cost_ratio"),
-            recycling_admitted: flag(line, "recycling_admitted"),
+                outer_run,
+                inner_epoch,
+                refresh_s: number(line, "refresh_s"),
+                route_s: number(line, "route_s"),
+                births: count(line, "births"),
+                cg_columns: count(line, "cg_columns"),
+                cg_iterations: count(line, "cg_iterations"),
+                recycled_rank: count(line, "recycled_rank"),
+                tile_columns: count(line, "tile_columns"),
+                accumulate_s: number(line, "accumulate_s"),
+                sigma_s: number(line, "sigma_s"),
+                graph_build_s: number(line, "graph_build_s"),
+                precond_s: number(line, "precond_s"),
+                cg_solve_s: number(line, "cg_solve_s"),
+                block_sweeps: count(line, "block_sweeps"),
+                max_component: count(line, "max_component"),
+                max_component_nnz: count(line, "max_component_nnz"),
+                operator_build_s: number(line, "operator_build_s"),
+                kappa_bound: number(line, "cg_kappa_bound"),
+                ev: number(line, "ev"),
+                precond_cost_ratio: number(line, "precond_cost_ratio"),
+                recycling_admitted: flag(line, "recycling_admitted"),
             }
         })
         .collect()
@@ -285,7 +285,11 @@ fn summarize_inner_runs(rows: &[EpochRow]) -> Vec<InnerRunSummary<'_>> {
 }
 
 fn ratio(last: f64, warm: f64) -> f64 {
-    last / warm.max(f64::MIN_POSITIVE)
+    if last.is_finite() && warm.is_finite() && warm > 0.0 {
+        last / warm
+    } else {
+        f64::NAN
+    }
 }
 
 /// Deterministic xorshift64*, so the bench needs no RNG dependency and the same

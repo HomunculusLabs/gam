@@ -409,6 +409,148 @@ impl MarkedPointProcessModel {
         ensure_finite_matrix(&covariance, "loading covariance")?;
         Ok(covariance)
     }
+
+    /// Eigenvalues of the identified loading covariance, divided by its largest.
+    ///
+    /// The non-zero eigenvalues of `A diag(sigma_j²) A'` equal those of the
+    /// much smaller weighted loading Gram matrix. Computing that Gram matrix
+    /// after logarithmic rescaling avoids overflow without changing the
+    /// relative spectrum. The result is sorted descending and is invariant to
+    /// every rotation or sign convention that preserves the mark covariance.
+    pub fn relative_loading_spectrum(&self) -> Result<Array1<f64>, MarkedPointProcessError> {
+        self.validate()?;
+        let factor_count = self.factors.len();
+        let mut maximum_log_weight = f64::NEG_INFINITY;
+        for mark in 0..self.mark_count() {
+            for factor in 0..factor_count {
+                let loading = self.loadings[[mark, factor]];
+                if loading != 0.0 {
+                    let log_weight = loading.abs().ln()
+                        + 0.5 * self.factors[factor].marginal_variance.ln();
+                    maximum_log_weight = maximum_log_weight.max(log_weight);
+                }
+            }
+        }
+        if maximum_log_weight == f64::NEG_INFINITY {
+            return Ok(Array1::zeros(factor_count));
+        }
+
+        let mut scaled_loadings = Array2::zeros((self.mark_count(), factor_count));
+        for mark in 0..self.mark_count() {
+            for factor in 0..factor_count {
+                let loading = self.loadings[[mark, factor]];
+                if loading != 0.0 {
+                    let log_weight = loading.abs().ln()
+                        + 0.5 * self.factors[factor].marginal_variance.ln();
+                    scaled_loadings[[mark, factor]] =
+                        loading.signum() * (log_weight - maximum_log_weight).exp();
+                }
+            }
+        }
+        let gram = scaled_loadings.t().dot(&scaled_loadings);
+        let mut eigenvalues = symmetric_jacobi_eigenvalues(gram)?;
+        eigenvalues.sort_by(|left, right| right.total_cmp(left));
+        let maximum = eigenvalues[0];
+        let negative_tolerance = 128.0 * f64::EPSILON * maximum.abs().max(1.0);
+        for eigenvalue in &mut eigenvalues {
+            if *eigenvalue < -negative_tolerance {
+                return Err(MarkedPointProcessError::NumericalFailure {
+                    context: "loading covariance spectrum",
+                });
+            }
+            *eigenvalue = eigenvalue.max(0.0);
+        }
+        if maximum <= 0.0 {
+            return Ok(Array1::zeros(factor_count));
+        }
+        for eigenvalue in &mut eigenvalues {
+            *eigenvalue /= maximum;
+        }
+        eigenvalues[0] = 1.0;
+        Ok(Array1::from_vec(eigenvalues))
+    }
+
+    /// Numerical rank of the identified mark covariance at a relative
+    /// eigenvalue threshold in `[0, 1)`.
+    pub fn effective_loading_rank(
+        &self,
+        relative_eigenvalue_tolerance: f64,
+    ) -> Result<usize, MarkedPointProcessError> {
+        if !relative_eigenvalue_tolerance.is_finite()
+            || !(0.0..1.0).contains(&relative_eigenvalue_tolerance)
+        {
+            return Err(invalid(
+                "relative loading-rank tolerance must lie in [0, 1)",
+            ));
+        }
+        Ok(self
+            .relative_loading_spectrum()?
+            .iter()
+            .filter(|eigenvalue| **eigenvalue > relative_eigenvalue_tolerance)
+            .count())
+    }
+}
+
+fn symmetric_jacobi_eigenvalues(
+    mut matrix: Array2<f64>,
+) -> Result<Vec<f64>, MarkedPointProcessError> {
+    let dimension = matrix.nrows();
+    if dimension == 0 || matrix.ncols() != dimension {
+        return Err(invalid("symmetric eigensolve requires a non-empty square matrix"));
+    }
+    ensure_finite_matrix(&matrix, "loading covariance Gram matrix")?;
+    let convergence_scale = matrix
+        .diag()
+        .iter()
+        .copied()
+        .map(f64::abs)
+        .fold(1.0_f64, f64::max);
+    let tolerance = 64.0 * f64::EPSILON * dimension as f64 * convergence_scale;
+    for _ in 0..64 * dimension {
+        let mut maximum_off_diagonal = 0.0_f64;
+        for left in 0..dimension {
+            for right in left + 1..dimension {
+                let cross = matrix[[left, right]];
+                maximum_off_diagonal = maximum_off_diagonal.max(cross.abs());
+                if cross == 0.0 {
+                    continue;
+                }
+                let left_diagonal = matrix[[left, left]];
+                let right_diagonal = matrix[[right, right]];
+                let ratio = (right_diagonal - left_diagonal) / (2.0 * cross);
+                let tangent = if ratio >= 0.0 {
+                    1.0 / (ratio + ratio.hypot(1.0))
+                } else {
+                    -1.0 / (-ratio + ratio.hypot(1.0))
+                };
+                let cosine = 1.0 / (1.0 + tangent * tangent).sqrt();
+                let sine = tangent * cosine;
+                for index in 0..dimension {
+                    if index == left || index == right {
+                        continue;
+                    }
+                    let index_left = matrix[[index, left]];
+                    let index_right = matrix[[index, right]];
+                    let rotated_left = cosine * index_left - sine * index_right;
+                    let rotated_right = sine * index_left + cosine * index_right;
+                    matrix[[index, left]] = rotated_left;
+                    matrix[[left, index]] = rotated_left;
+                    matrix[[index, right]] = rotated_right;
+                    matrix[[right, index]] = rotated_right;
+                }
+                matrix[[left, left]] = left_diagonal - tangent * cross;
+                matrix[[right, right]] = right_diagonal + tangent * cross;
+                matrix[[left, right]] = 0.0;
+                matrix[[right, left]] = 0.0;
+            }
+        }
+        if maximum_off_diagonal <= tolerance {
+            return Ok(matrix.diag().to_vec());
+        }
+    }
+    Err(MarkedPointProcessError::NumericalFailure {
+        context: "loading covariance eigensolve",
+    })
 }
 
 /// `1 - exp(-x) * (1 + x + x²/2)`, evaluated without cancellation near zero.

@@ -893,8 +893,8 @@ pub(crate) struct DenseReducedSchurFactorization {
 /// same scalar direction classifier as the dense joint route instead of
 /// substituting a local relative eigenvalue test (#2515).
 pub(crate) struct ExactAReducedClassification {
-    majorizer_metric: Array2<f64>,
-    clamp_metric: Array2<f64>,
+    pub(crate) majorizer_metric: Array2<f64>,
+    pub(crate) clamp_metric: Array2<f64>,
 }
 
 pub(crate) fn exact_a_reduced_classification(

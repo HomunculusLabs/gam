@@ -754,6 +754,55 @@ fn loading_covariance_includes_factor_variance() {
 }
 
 #[test]
+fn loading_rank_is_rotation_invariant_and_stable_at_extreme_scale() {
+    let model = mixed_order_model();
+    let covariance = model.loading_covariance().unwrap();
+    let spectrum = model.relative_loading_spectrum().unwrap();
+    assert_eq!(model.effective_loading_rank(1.0e-12).unwrap(), 2);
+    assert_eq!(spectrum[0], 1.0);
+
+    let cosine = 0.37_f64.cos();
+    let sine = 0.37_f64.sin();
+    let mut rotated = model.clone();
+    let first_scale = model.factors[0].marginal_variance.sqrt();
+    let second_scale = model.factors[1].marginal_variance.sqrt();
+    for mark in 0..model.mark_count() {
+        let first = model.loadings[[mark, 0]] * first_scale;
+        let second = model.loadings[[mark, 1]] * second_scale;
+        rotated.loadings[[mark, 0]] = (cosine * first + sine * second) / first_scale;
+        rotated.loadings[[mark, 1]] = (-sine * first + cosine * second) / second_scale;
+    }
+    let rotated_covariance = rotated.loading_covariance().unwrap();
+    let rotated_spectrum = rotated.relative_loading_spectrum().unwrap();
+    for (actual, expected) in rotated_covariance.iter().zip(covariance.iter()) {
+        assert_close(*actual, *expected, 2.0e-15, 2.0e-14);
+    }
+    for (actual, expected) in rotated_spectrum.iter().zip(spectrum.iter()) {
+        assert_close(*actual, *expected, 2.0e-15, 2.0e-14);
+    }
+
+    let mut rank_one = model.clone();
+    for mark in 0..rank_one.mark_count() {
+        rank_one.loadings[[mark, 1]] = 2.0 * rank_one.loadings[[mark, 0]];
+    }
+    let rank_one_spectrum = rank_one.relative_loading_spectrum().unwrap();
+    assert_eq!(rank_one.effective_loading_rank(1.0e-12).unwrap(), 1);
+    assert!(rank_one_spectrum[1] <= 1.0e-15);
+
+    let mut zero = model.clone();
+    zero.loadings.fill(0.0);
+    assert_eq!(zero.relative_loading_spectrum(), Ok(array![0.0, 0.0]));
+    assert_eq!(zero.effective_loading_rank(0.0).unwrap(), 0);
+    assert!(zero.effective_loading_rank(1.0).is_err());
+
+    let mut extreme = model(MaternMarkovOrder::Half);
+    extreme.loadings[[0, 0]] = f64::MAX;
+    extreme.loadings[[1, 0]] = -f64::MAX;
+    assert_eq!(extreme.relative_loading_spectrum(), Ok(array![1.0]));
+    assert_eq!(extreme.effective_loading_rank(1.0e-12).unwrap(), 1);
+}
+
+#[test]
 fn forecast_integrates_paths_and_preserves_probability_mass() {
     let model = model(MaternMarkovOrder::Half);
     let landmark = filter_laplace(&model, &history(), control())
