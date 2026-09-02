@@ -207,12 +207,8 @@ impl VectorLikelihood for BinomialMultiLikelihood<'_> {
                     continue;
                 }
                 let jet = bernoulli_natural_jet(row, eta[[row, a]], self.link)?;
-                out[[row, a]] = w
-                    * response_mixture(
-                        y[[row, a]],
-                        jet.log_mu[1],
-                        jet.log_one_minus_mu[1],
-                    );
+                out[[row, a]] =
+                    w * response_mixture(y[[row, a]], jet.log_mu[1], jet.log_one_minus_mu[1]);
             }
         }
         Ok(out)
@@ -562,11 +558,15 @@ mod tests {
         let eta = ndarray::array![[1_000.0]];
         let y = ndarray::array![[0.0]];
         assert_eq!(
-            likelihood.log_lik(eta.view(), y.view()).expect("zero-weight value"),
+            likelihood
+                .log_lik(eta.view(), y.view())
+                .expect("zero-weight value"),
             0.0
         );
         assert_eq!(
-            likelihood.grad_eta(eta.view(), y.view()).expect("zero-weight score")[[0, 0]],
+            likelihood
+                .grad_eta(eta.view(), y.view())
+                .expect("zero-weight score")[[0, 0]],
             0.0
         );
         assert_eq!(
