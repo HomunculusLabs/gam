@@ -854,24 +854,25 @@ impl BmsFlexRowProgram {
     ) -> S {
         let dimension = self.primary.total;
         let b = &vars[self.primary.slope];
-        let u = a.add(&b.scale(index.z));
+        // Every step below is one fused jet operation: the runtime jets
+        // allocate and stream a fresh `(1 + lanes)·(d + d²)` block per
+        // operation, so `u = a + z·b`, the score, the score product and each
+        // warp term are formed as single operations rather than as chains of
+        // scale/add/mul whose intermediates are written once and read once.
+        let u = S::linear_combination(&[a.clone(), b.clone()], &[1.0, index.z], dimension, workspace);
         let mut inside = u.clone();
 
         if let Some(range) = self.primary.h.as_ref() {
-            let mut score = S::constant(0.0, dimension, workspace);
-            for (local, idx) in range.clone().enumerate() {
-                score = score.add(&vars[idx].scale(index.score_values[local]));
-            }
-            inside = inside.add(&b.mul(&score));
+            let score =
+                S::linear_combination(&vars[range.clone()], &index.score_values, dimension, workspace);
+            inside = b.multiply_add(&score, &inside);
         }
 
         if let Some(range) = self.primary.w.as_ref() {
-            let mut warp = S::constant(0.0, dimension, workspace);
             for (local, idx) in range.clone().enumerate() {
                 let basis = u.compose_unary(index.link_stacks[local]);
-                warp = warp.add(&vars[idx].mul(&basis));
+                inside = vars[idx].multiply_add(&basis, &inside);
             }
-            inside = inside.add(&warp);
         }
         inside.scale(self.scale)
     }
@@ -896,13 +897,35 @@ impl BmsFlexRowProgram {
         }
 
         let neg_mu = vars[self.primary.q].compose_unary(self.mu_stack).neg();
+        // The calibration residual `Σ_k w_k F(η_k) − μ` over the whole grid is
+        // one composed sum with the node weights folded into the CDF stacks:
+        // one result block instead of a compose, a scale and an add per node.
+        let calibration_stacks: Vec<[f64; 5]> = self
+            .calibration
+            .iter()
+            .map(|node| {
+                let mut stack = node.cdf_stack;
+                for entry in stack.iter_mut() {
+                    *entry *= node.weight;
+                }
+                stack
+            })
+            .collect();
+        let calibration_scales = vec![1.0; self.calibration.len()];
         let constraint = |a: &S| -> S {
-            let mut residual = neg_mu.clone();
-            for node in &self.calibration {
-                let eta = self.evaluate_index(a, vars, &node.index, workspace);
-                residual = residual.add(&eta.compose_unary(node.cdf_stack).scale(node.weight));
-            }
-            residual
+            let etas: Vec<S> = self
+                .calibration
+                .iter()
+                .map(|node| self.evaluate_index(a, vars, &node.index, workspace))
+                .collect();
+            S::affine_composed_sum(
+                &etas,
+                &calibration_scales,
+                &calibration_stacks,
+                dimension,
+                workspace,
+            )
+            .add(&neg_mu)
         };
         let intercept = filtered_implicit_solve_runtime_scalar(
             self.intercept_root,

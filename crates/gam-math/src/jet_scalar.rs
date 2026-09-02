@@ -1575,6 +1575,127 @@ impl DynamicOrder2<'_> {
     }
 }
 
+/// Fill a fresh arena vector of `n` entries from a formula, writing every entry
+/// exactly once.
+///
+/// Every jet operation below builds its result this way rather than zeroing a
+/// buffer and overwriting it. On the flex row programs the zero pass was the
+/// single largest cost measured (54% of samples in `memset`): each operation
+/// writes a fresh `(1 + lanes)·(d + d²)` block of arena memory, and streaming
+/// it twice doubles the memory traffic of the whole evaluation.
+#[inline(always)]
+fn arena_vector<'arena>(
+    arena: &'arena DynamicJetArena,
+    n: usize,
+    entry: impl FnMut(usize) -> f64,
+) -> &'arena mut [f64] {
+    arena.alloc_slice_fill_with(n, entry)
+}
+
+/// Fill a fresh `n × n` row-major arena matrix from a formula in `(row, column,
+/// flat index)`, writing every entry exactly once. Every formula this file
+/// passes is symmetric in `(row, column)`, so the full matrix is produced
+/// directly instead of filling one triangle and mirroring it.
+#[inline(always)]
+fn arena_square<'arena>(
+    arena: &'arena DynamicJetArena,
+    n: usize,
+    mut entry: impl FnMut(usize, usize, usize) -> f64,
+) -> &'arena mut [f64] {
+    let mut row = 0usize;
+    let mut column = 0usize;
+    arena.alloc_slice_fill_with(n * n, |index| {
+        let value = entry(row, column, index);
+        column += 1;
+        if column == n {
+            column = 0;
+            row += 1;
+        }
+        value
+    })
+}
+
+impl<'arena> DynamicOrder2<'arena> {
+    /// `Σ_k scales[k] · lefts[k] · rights[k]` in one pass over the result.
+    ///
+    /// The one-seed batch's epsilon lanes are sums of products of order-two
+    /// jets; forming each product and each partial sum as its own jet would
+    /// allocate and stream `2k − 1` intermediate blocks for a result that is
+    /// one block.
+    #[inline(always)]
+    #[must_use]
+    pub fn scaled_product_sum(scales: &[f64], lefts: &[Self], rights: &[Self]) -> Self {
+        assert!(
+            !lefts.is_empty() && lefts.len() == rights.len() && lefts.len() == scales.len(),
+            "dynamic product sum needs matching non-empty term lists"
+        );
+        let arena = lefts[0].arena;
+        let n = lefts[0].dimension();
+        for (left, right) in lefts.iter().zip(rights) {
+            left.assert_compatible(right);
+            assert!(
+                left.dimension() == n && std::ptr::eq(left.arena, arena),
+                "dynamic product sum jets must share dimension and arena"
+            );
+        }
+        let mut v = 0.0;
+        for ((left, right), &scale) in lefts.iter().zip(rights).zip(scales) {
+            v += scale * left.v * right.v;
+        }
+        let g = arena_vector(arena, n, |i| {
+            let mut total = 0.0;
+            for ((left, right), &scale) in lefts.iter().zip(rights).zip(scales) {
+                total += scale * (left.v * right.g[i] + left.g[i] * right.v);
+            }
+            total
+        });
+        let h = arena_square(arena, n, |i, j, ij| {
+            let mut total = 0.0;
+            for ((left, right), &scale) in lefts.iter().zip(rights).zip(scales) {
+                total += scale
+                    * (left.v * right.h[ij]
+                        + left.g[i] * right.g[j]
+                        + left.g[j] * right.g[i]
+                        + left.h[ij] * right.v);
+            }
+            total
+        });
+        Self { arena, v, g, h }
+    }
+
+    /// `a·b + c·d + e` in one pass over the result.
+    #[inline(always)]
+    #[must_use]
+    pub fn product_pair_sum_plus(a: &Self, b: &Self, c: &Self, d: &Self, e: &Self) -> Self {
+        a.assert_compatible(b);
+        a.assert_compatible(c);
+        a.assert_compatible(d);
+        a.assert_compatible(e);
+        let arena = a.arena;
+        let n = a.dimension();
+        let g = arena_vector(arena, n, |i| {
+            a.v * b.g[i] + a.g[i] * b.v + c.v * d.g[i] + c.g[i] * d.v + e.g[i]
+        });
+        let h = arena_square(arena, n, |i, j, ij| {
+            a.v * b.h[ij]
+                + a.g[i] * b.g[j]
+                + a.g[j] * b.g[i]
+                + a.h[ij] * b.v
+                + c.v * d.h[ij]
+                + c.g[i] * d.g[j]
+                + c.g[j] * d.g[i]
+                + c.h[ij] * d.v
+                + e.h[ij]
+        });
+        Self {
+            arena,
+            v: a.v * b.v + c.v * d.v + e.v,
+            g,
+            h,
+        }
+    }
+}
+
 impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
     type Workspace = DynamicJetArena;
 
@@ -1689,28 +1810,7 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
 
     #[inline(always)]
     fn product(&self, right: &Self) -> Self {
-        self.assert_compatible(right);
-        let dimension = self.dimension();
-        let gradient = self.arena.zeros(dimension);
-        let hessian = self.arena.zeros(dimension * dimension);
-        for primary in 0..dimension {
-            gradient[primary] = self.v * right.g[primary] + self.g[primary] * right.v;
-            for other in primary..dimension {
-                let index = primary * dimension + other;
-                let channel = self.v * right.h[index]
-                    + self.g[primary] * right.g[other]
-                    + self.g[other] * right.g[primary]
-                    + self.h[index] * right.v;
-                hessian[index] = channel;
-                hessian[other * dimension + primary] = channel;
-            }
-        }
-        Self {
-            arena: self.arena,
-            v: self.v * right.v,
-            g: gradient,
-            h: hessian,
-        }
+        self.mul(right)
     }
 
     #[inline(always)]
@@ -1725,17 +1825,10 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
         let dimension = self.dimension();
         let first = derivative_stack[1] * input_scale;
         let second = derivative_stack[2] * input_scale * input_scale;
-        let gradient = arena.zeros(dimension);
-        let hessian = arena.zeros(dimension * dimension);
-        for primary in 0..dimension {
-            gradient[primary] = first * self.g[primary];
-            for other in primary..dimension {
-                let index = primary * dimension + other;
-                let channel = first * self.h[index] + second * self.g[primary] * self.g[other];
-                hessian[index] = channel;
-                hessian[other * dimension + primary] = channel;
-            }
-        }
+        let gradient = arena_vector(arena, dimension, |i| first * self.g[i]);
+        let hessian = arena_square(arena, dimension, |i, j, ij| {
+            first * self.h[ij] + second * self.g[i] * self.g[j]
+        });
         Self {
             arena,
             v: derivative_stack[0],
@@ -1760,28 +1853,30 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
             }),
             "dynamic affine-composed-sum jets must share dimension and arena"
         );
-        let gradient = arena.zeros(dimension);
-        let hessian = arena.zeros(dimension * dimension);
         let mut value = 0.0;
-        for ((input, &input_scale), stack) in inputs.iter().zip(input_scales).zip(derivative_stacks)
-        {
-            let first = stack[1] * input_scale;
-            let second = stack[2] * input_scale * input_scale;
+        for stack in derivative_stacks {
             value += stack[0];
-            for primary in 0..dimension {
-                gradient[primary] += first * input.g[primary];
-                for other in primary..dimension {
-                    let index = primary * dimension + other;
-                    hessian[index] +=
-                        first * input.h[index] + second * input.g[primary] * input.g[other];
-                }
-            }
         }
-        for primary in 0..dimension {
-            for other in primary + 1..dimension {
-                hessian[other * dimension + primary] = hessian[primary * dimension + other];
+        let gradient = arena_vector(arena, dimension, |i| {
+            let mut total = 0.0;
+            for ((input, &input_scale), stack) in
+                inputs.iter().zip(input_scales).zip(derivative_stacks)
+            {
+                total += stack[1] * input_scale * input.g[i];
             }
-        }
+            total
+        });
+        let hessian = arena_square(arena, dimension, |i, j, ij| {
+            let mut total = 0.0;
+            for ((input, &input_scale), stack) in
+                inputs.iter().zip(input_scales).zip(derivative_stacks)
+            {
+                let first = stack[1] * input_scale;
+                let second = stack[2] * input_scale * input_scale;
+                total += first * input.h[ij] + second * input.g[i] * input.g[j];
+            }
+            total
+        });
         Self {
             arena,
             v: value,
@@ -1891,22 +1986,16 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
         self.assert_compatible(right);
         self.assert_compatible(addend);
         let dimension = self.dimension();
-        let gradient = self.arena.zeros(dimension);
-        let hessian = self.arena.zeros(dimension * dimension);
-        for primary in 0..dimension {
-            gradient[primary] =
-                self.v * right.g[primary] + self.g[primary] * right.v + addend.g[primary];
-            for other in primary..dimension {
-                let index = primary * dimension + other;
-                let channel = self.v * right.h[index]
-                    + self.g[primary] * right.g[other]
-                    + self.g[other] * right.g[primary]
-                    + self.h[index] * right.v
-                    + addend.h[index];
-                hessian[index] = channel;
-                hessian[other * dimension + primary] = channel;
-            }
-        }
+        let gradient = arena_vector(self.arena, dimension, |i| {
+            self.v * right.g[i] + self.g[i] * right.v + addend.g[i]
+        });
+        let hessian = arena_square(self.arena, dimension, |i, j, ij| {
+            self.v * right.h[ij]
+                + self.g[i] * right.g[j]
+                + self.g[j] * right.g[i]
+                + self.h[ij] * right.v
+                + addend.h[ij]
+        });
         Self {
             arena: self.arena,
             v: self.v * right.v + addend.v,
@@ -1929,25 +2018,24 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
             }),
             "dynamic composed-sum jets must share dimension and arena"
         );
-        let gradient = arena.zeros(dimension);
-        let hessian = arena.zeros(dimension * dimension);
         let mut value = 0.0;
-        for (input, stack) in inputs.iter().zip(derivative_stacks) {
+        for stack in derivative_stacks {
             value += stack[0];
-            for primary in 0..dimension {
-                gradient[primary] += stack[1] * input.g[primary];
-                for other in primary..dimension {
-                    let index = primary * dimension + other;
-                    hessian[index] +=
-                        stack[1] * input.h[index] + stack[2] * input.g[primary] * input.g[other];
-                }
-            }
         }
-        for primary in 0..dimension {
-            for other in primary + 1..dimension {
-                hessian[other * dimension + primary] = hessian[primary * dimension + other];
+        let gradient = arena_vector(arena, dimension, |i| {
+            let mut total = 0.0;
+            for (input, stack) in inputs.iter().zip(derivative_stacks) {
+                total += stack[1] * input.g[i];
             }
-        }
+            total
+        });
+        let hessian = arena_square(arena, dimension, |i, j, ij| {
+            let mut total = 0.0;
+            for (input, stack) in inputs.iter().zip(derivative_stacks) {
+                total += stack[1] * input.h[ij] + stack[2] * input.g[i] * input.g[j];
+            }
+            total
+        });
         Self {
             arena,
             v: value,
@@ -1974,20 +2062,20 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
         for (input, &weight) in inputs.iter().zip(weights) {
             value += input.v * weight;
         }
-        let gradient = arena.zeros(dimension);
-        let hessian = arena.zeros(dimension * dimension);
-        for primary in 0..dimension {
+        let gradient = arena_vector(arena, dimension, |i| {
+            let mut total = 0.0;
             for (input, &weight) in inputs.iter().zip(weights) {
-                gradient[primary] += input.g[primary] * weight;
+                total += input.g[i] * weight;
             }
-            for other in primary..dimension {
-                let index = primary * dimension + other;
-                for (input, &weight) in inputs.iter().zip(weights) {
-                    hessian[index] += input.h[index] * weight;
-                }
-                hessian[other * dimension + primary] = hessian[index];
+            total
+        });
+        let hessian = arena_square(arena, dimension, |_, _, ij| {
+            let mut total = 0.0;
+            for (input, &weight) in inputs.iter().zip(weights) {
+                total += input.h[ij] * weight;
             }
-        }
+            total
+        });
         Self {
             arena,
             v: value,
@@ -2010,19 +2098,8 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
     fn add(&self, o: &Self) -> Self {
         self.assert_compatible(o);
         let dimension = self.dimension();
-        let g = self.arena.zeros(dimension);
-        let h = self.arena.zeros(self.h.len());
-        for i in 0..g.len() {
-            g[i] = self.g[i] + o.g[i];
-        }
-        for row in 0..dimension {
-            for column in row..dimension {
-                let index = row * dimension + column;
-                let channel = self.h[index] + o.h[index];
-                h[index] = channel;
-                h[column * dimension + row] = channel;
-            }
-        }
+        let g = arena_vector(self.arena, dimension, |i| self.g[i] + o.g[i]);
+        let h = arena_square(self.arena, dimension, |_, _, ij| self.h[ij] + o.h[ij]);
         Self {
             arena: self.arena,
             v: self.v + o.v,
@@ -2035,19 +2112,8 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
     fn sub(&self, o: &Self) -> Self {
         self.assert_compatible(o);
         let dimension = self.dimension();
-        let g = self.arena.zeros(dimension);
-        let h = self.arena.zeros(self.h.len());
-        for i in 0..g.len() {
-            g[i] = self.g[i] - o.g[i];
-        }
-        for row in 0..dimension {
-            for column in row..dimension {
-                let index = row * dimension + column;
-                let channel = self.h[index] - o.h[index];
-                h[index] = channel;
-                h[column * dimension + row] = channel;
-            }
-        }
+        let g = arena_vector(self.arena, dimension, |i| self.g[i] - o.g[i]);
+        let h = arena_square(self.arena, dimension, |_, _, ij| self.h[ij] - o.h[ij]);
         Self {
             arena: self.arena,
             v: self.v - o.v,
@@ -2060,20 +2126,10 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
     fn mul(&self, o: &Self) -> Self {
         self.assert_compatible(o);
         let n = self.dimension();
-        let g = self.arena.zeros(n);
-        let h = self.arena.zeros(n * n);
-        for i in 0..n {
-            g[i] = self.v * o.g[i] + self.g[i] * o.v;
-        }
-        for i in 0..n {
-            for j in i..n {
-                let ij = i * n + j;
-                let hij =
-                    self.v * o.h[ij] + self.g[i] * o.g[j] + self.g[j] * o.g[i] + self.h[ij] * o.v;
-                h[ij] = hij;
-                h[j * n + i] = hij;
-            }
-        }
+        let g = arena_vector(self.arena, n, |i| self.v * o.g[i] + self.g[i] * o.v);
+        let h = arena_square(self.arena, n, |i, j, ij| {
+            self.v * o.h[ij] + self.g[i] * o.g[j] + self.g[j] * o.g[i] + self.h[ij] * o.v
+        });
         Self {
             arena: self.arena,
             v: self.v * o.v,
@@ -2090,19 +2146,8 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
     #[inline(always)]
     fn scale(&self, s: f64) -> Self {
         let dimension = self.dimension();
-        let g = self.arena.zeros(dimension);
-        let h = self.arena.zeros(self.h.len());
-        for i in 0..g.len() {
-            g[i] = self.g[i] * s;
-        }
-        for row in 0..dimension {
-            for column in row..dimension {
-                let index = row * dimension + column;
-                let channel = self.h[index] * s;
-                h[index] = channel;
-                h[column * dimension + row] = channel;
-            }
-        }
+        let g = arena_vector(self.arena, dimension, |i| self.g[i] * s);
+        let h = arena_square(self.arena, dimension, |_, _, ij| self.h[ij] * s);
         Self {
             arena: self.arena,
             v: self.v * s,
@@ -2114,19 +2159,10 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
     #[inline(always)]
     fn compose_unary(&self, d: [f64; 5]) -> Self {
         let n = self.dimension();
-        let g = self.arena.zeros(n);
-        let h = self.arena.zeros(n * n);
-        for i in 0..n {
-            g[i] = d[1] * self.g[i];
-        }
-        for i in 0..n {
-            for j in i..n {
-                let ij = i * n + j;
-                let channel = d[1] * self.h[ij] + d[2] * self.g[i] * self.g[j];
-                h[ij] = channel;
-                h[j * n + i] = channel;
-            }
-        }
+        let g = arena_vector(self.arena, n, |i| d[1] * self.g[i]);
+        let h = arena_square(self.arena, n, |i, j, ij| {
+            d[1] * self.h[ij] + d[2] * self.g[i] * self.g[j]
+        });
         Self {
             arena: self.arena,
             v: d[0],
@@ -2492,16 +2528,133 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOneSeedBatch<'arena> {
     #[inline(always)]
     fn mul(&self, other: &Self) -> Self {
         self.assert_compatible(other);
+        // Lane `l` of a product is `base·ε_l' + ε_l·base'`: one block written
+        // once, instead of two products and a sum each streaming their own.
         let eps = self
             .base
             .arena
             .alloc_slice_fill_with(self.eps.len(), |lane| {
-                self.base
-                    .mul(&other.eps[lane])
-                    .add(&self.eps[lane].mul(&other.base))
+                DynamicOrder2::scaled_product_sum(
+                    &[1.0, 1.0],
+                    &[self.base, self.eps[lane]],
+                    &[other.eps[lane], other.base],
+                )
             });
         Self {
             base: self.base.mul(&other.base),
+            eps,
+        }
+    }
+
+    #[inline(always)]
+    fn multiply_add(&self, right: &Self, addend: &Self) -> Self {
+        self.assert_compatible(right);
+        self.assert_compatible(addend);
+        let eps = self
+            .base
+            .arena
+            .alloc_slice_fill_with(self.eps.len(), |lane| {
+                DynamicOrder2::product_pair_sum_plus(
+                    &self.base,
+                    &right.eps[lane],
+                    &self.eps[lane],
+                    &right.base,
+                    &addend.eps[lane],
+                )
+            });
+        Self {
+            base: self.base.multiply_add(&right.base, &addend.base),
+            eps,
+        }
+    }
+
+    #[inline(always)]
+    fn linear_combination(
+        inputs: &[Self],
+        weights: &[f64],
+        dimension: usize,
+        workspace: &'arena DynamicJetBatchWorkspace,
+    ) -> Self {
+        assert_eq!(inputs.len(), weights.len());
+        // An empty combination is the zero jet, which is what the generic
+        // default's fold over no terms returns; the fused body below needs a
+        // term to read its arena and lane count from.
+        if inputs.is_empty() {
+            return Self::constant(0.0, dimension, workspace);
+        }
+        let lanes = workspace.lanes;
+        assert!(
+            inputs
+                .iter()
+                .all(|input| input.eps.len() == lanes && input.dimension() == dimension),
+            "dynamic one-seed linear-combination jets must share lanes and dimension"
+        );
+        let arena = &workspace.arena;
+        let bases: &[DynamicOrder2<'arena>] =
+            arena.alloc_slice_fill_with(inputs.len(), |term| inputs[term].base);
+        let eps = arena.alloc_slice_fill_with(lanes, |lane| {
+            let lane_inputs: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(inputs.len(), |term| inputs[term].eps[lane]);
+            DynamicOrder2::linear_combination(lane_inputs, weights, dimension, arena)
+        });
+        Self {
+            base: DynamicOrder2::linear_combination(bases, weights, dimension, arena),
+            eps,
+        }
+    }
+
+    #[inline(always)]
+    fn affine_composed_sum(
+        inputs: &[Self],
+        input_scales: &[f64],
+        derivative_stacks: &[[f64; 5]],
+        dimension: usize,
+        workspace: &'arena DynamicJetBatchWorkspace,
+    ) -> Self {
+        assert_eq!(inputs.len(), input_scales.len());
+        assert_eq!(inputs.len(), derivative_stacks.len());
+        // Same as above: a sum over no terms is the zero jet.
+        if inputs.is_empty() {
+            return Self::constant(0.0, dimension, workspace);
+        }
+        let lanes = workspace.lanes;
+        assert!(
+            inputs
+                .iter()
+                .all(|input| input.eps.len() == lanes && input.dimension() == dimension),
+            "dynamic one-seed composed-sum jets must share lanes and dimension"
+        );
+        let arena = &workspace.arena;
+        let bases: &[DynamicOrder2<'arena>] =
+            arena.alloc_slice_fill_with(inputs.len(), |term| inputs[term].base);
+        // `f_k(s_k x + c_k)` moves lane `l` by `f_k'(·)·s_k·ε_l`: the derivative
+        // jets, with the input scale folded into their stacks, are shared by
+        // every lane and each lane is one scaled product sum.
+        let fprimes: &[DynamicOrder2<'arena>] = arena.alloc_slice_fill_with(inputs.len(), |term| {
+            let scale = input_scales[term];
+            let stack = derivative_stacks[term];
+            inputs[term].base.compose_unary([
+                stack[1] * scale,
+                stack[2] * scale * scale,
+                stack[3] * scale * scale * scale,
+                stack[4] * scale * scale * scale * scale,
+                stack[4] * scale * scale * scale * scale,
+            ])
+        });
+        let ones: &[f64] = arena.alloc_slice_fill_with(inputs.len(), |_| 1.0);
+        let eps = arena.alloc_slice_fill_with(lanes, |lane| {
+            let lane_inputs: &[DynamicOrder2<'arena>] =
+                arena.alloc_slice_fill_with(inputs.len(), |term| inputs[term].eps[lane]);
+            DynamicOrder2::scaled_product_sum(ones, fprimes, lane_inputs)
+        });
+        Self {
+            base: DynamicOrder2::affine_composed_sum(
+                bases,
+                input_scales,
+                derivative_stacks,
+                dimension,
+                arena,
+            ),
             eps,
         }
     }
@@ -7105,5 +7258,193 @@ mod unit_tests {
         );
         gate.faster(&format!("dimension={K}"), &timing, "direct", "composed");
         gate.finish();
+    }
+}
+
+#[cfg(test)]
+mod dynamic_batch_fused_979_tests {
+    //! The batched one-seed jet's FUSED operations against the generic ones
+    //! they replace.
+    //!
+    //! [`DynamicOneSeedBatch`] overrides `mul`, `multiply_add`,
+    //! `linear_combination` and `affine_composed_sum` so each writes its result
+    //! block once instead of building it from a chain of primitive operations
+    //! whose intermediates are allocated, written and read once each (#979: on
+    //! the large-scale flex arm the zero-and-refill traffic those chains
+    //! generate was 54% of the profile). [`DynamicOneSeed`] overrides none of
+    //! them — it carries only the primitives and inherits every fused operation
+    //! from the trait's generic default.
+    //!
+    //! So evaluating ONE generic expression at both types compares the fused
+    //! path against the generic one on every channel, and lane `l` of the batch
+    //! must reproduce the standalone seed for direction `u_l` exactly as the
+    //! type's contract claims. The expression below is shaped like the flex row
+    //! program's inner index: a weighted combination of primaries, a
+    //! multiply-add against it, a composed sum over several outer functions,
+    //! and a unary composition on top.
+
+    use super::{
+        DynamicJetArena, DynamicJetBatchWorkspace, DynamicOneSeed, DynamicOneSeedBatch,
+        RuntimeJetScalar,
+    };
+
+    const DIMENSION: usize = 5;
+    const LANES: usize = 3;
+
+    /// Point the jets are seeded at, and the direction of each lane.
+    fn point(axis: usize) -> f64 {
+        0.35 - 0.11 * (axis as f64)
+    }
+
+    fn direction(lane: usize, axis: usize) -> f64 {
+        // Dense and lane-dependent: a direction with zeros in it could hide a
+        // term that the fused and generic paths disagree about.
+        0.23 * ((lane + 1) as f64) - 0.07 * ((axis + 2) as f64) * ((lane + 1) as f64)
+    }
+
+    /// One generic expression over the runtime jet algebra, exercising every
+    /// operation the batch fuses.
+    fn expression<'arena, S: RuntimeJetScalar<'arena>>(
+        vars: &[S],
+        workspace: &'arena S::Workspace,
+    ) -> S {
+        let weights = [1.0, -0.4, 0.75, 0.2, -0.6];
+        let combined = S::linear_combination(vars, &weights, DIMENSION, workspace);
+        // A multiply-add against the combination, the shape the score block has.
+        let scored = vars[1].multiply_add(&combined, &vars[0]);
+        // A composed sum with distinct input scales and derivative stacks: the
+        // calibration grid's shape, where the scale is what the fused override
+        // folds into its multiplier jet.
+        let stacks = [
+            [0.31, 0.62, -0.24, 0.11, -0.05],
+            [-0.17, 0.45, 0.33, -0.28, 0.09],
+            [0.52, -0.38, 0.19, 0.07, -0.13],
+        ];
+        let scales = [0.8, -1.3, 0.45];
+        let inputs = [scored.clone(), combined.clone(), vars[2].clone()];
+        let summed = S::affine_composed_sum(&inputs, &scales, &stacks, DIMENSION, workspace);
+        // A product and a unary composition on top, as the observed index has.
+        let producted = summed.mul(&vars[3]);
+        producted.compose_unary([0.9, -0.5, 0.27, -0.14, 0.06])
+    }
+
+    fn assert_close(label: &str, fused: &[f64], generic: &[f64]) {
+        assert_eq!(
+            fused.len(),
+            generic.len(),
+            "{label}: fused length {} != generic length {}",
+            fused.len(),
+            generic.len()
+        );
+        for (index, (left, right)) in fused.iter().zip(generic).enumerate() {
+            let scale = left.abs().max(right.abs()).max(1.0);
+            assert!(
+                (left - right).abs() <= 1e-12 * scale,
+                "{label}[{index}]: fused {left:.17e} vs generic {right:.17e}"
+            );
+        }
+    }
+
+    /// Lane `l` of the fused batch reproduces the standalone one-seed jet
+    /// seeded by direction `u_l`, on the value, the gradient, the Hessian and
+    /// the contracted third derivative.
+    #[test]
+    fn the_fused_batch_reproduces_the_generic_one_seed_on_every_channel() {
+        let workspace = DynamicJetBatchWorkspace::new(LANES);
+        let batch_vars: Vec<DynamicOneSeedBatch<'_>> = (0..DIMENSION)
+            .map(|axis| {
+                DynamicOneSeedBatch::seed_directions(
+                    point(axis),
+                    axis,
+                    DIMENSION,
+                    &workspace,
+                    |lane| direction(lane, axis),
+                )
+            })
+            .collect();
+        let batch = expression(&batch_vars, &workspace);
+
+        for lane in 0..LANES {
+            let arena = DynamicJetArena::new();
+            let seed_vars: Vec<DynamicOneSeed<'_>> = (0..DIMENSION)
+                .map(|axis| {
+                    DynamicOneSeed::seed_direction(
+                        point(axis),
+                        axis,
+                        direction(lane, axis),
+                        DIMENSION,
+                        &arena,
+                    )
+                })
+                .collect();
+            let single = expression(&seed_vars, &arena);
+
+            assert!(
+                (batch.base.v - single.base.v).abs() <= 1e-12 * batch.base.v.abs().max(1.0),
+                "lane {lane} value: fused {:.17e} vs generic {:.17e}",
+                batch.base.v,
+                single.base.v
+            );
+            assert_close(&format!("lane {lane} gradient"), batch.base.g(), single.base.g());
+            assert_close(&format!("lane {lane} hessian"), batch.base.h(), single.base.h());
+            assert_close(
+                &format!("lane {lane} contracted third"),
+                batch.contracted_third(lane),
+                single.contracted_third(),
+            );
+        }
+    }
+
+    /// The expression must actually reach every fused operation with a
+    /// non-degenerate result: an expression whose contracted third derivative
+    /// vanished would compare zero against zero and pass whatever the fused
+    /// operations did.
+    #[test]
+    fn the_fused_batch_control_is_not_vacuous() {
+        let workspace = DynamicJetBatchWorkspace::new(LANES);
+        let batch_vars: Vec<DynamicOneSeedBatch<'_>> = (0..DIMENSION)
+            .map(|axis| {
+                DynamicOneSeedBatch::seed_directions(
+                    point(axis),
+                    axis,
+                    DIMENSION,
+                    &workspace,
+                    |lane| direction(lane, axis),
+                )
+            })
+            .collect();
+        let batch = expression(&batch_vars, &workspace);
+        assert!(batch.base.v.abs() > 1e-6, "value {:.3e}", batch.base.v);
+        let gradient_scale = batch
+            .base
+            .g()
+            .iter()
+            .fold(0.0f64, |worst, value| worst.max(value.abs()));
+        assert!(gradient_scale > 1e-6, "gradient scale {gradient_scale:.3e}");
+        let hessian_scale = batch
+            .base
+            .h()
+            .iter()
+            .fold(0.0f64, |worst, value| worst.max(value.abs()));
+        assert!(hessian_scale > 1e-6, "hessian scale {hessian_scale:.3e}");
+        for lane in 0..LANES {
+            let third_scale = batch
+                .contracted_third(lane)
+                .iter()
+                .fold(0.0f64, |worst, value| worst.max(value.abs()));
+            assert!(
+                third_scale > 1e-6,
+                "lane {lane} contracted-third scale {third_scale:.3e}"
+            );
+        }
+        // The lanes must differ, or one lane's agreement would stand in for all
+        // of them and a lane-indexing defect would be invisible.
+        let first = batch.contracted_third(0).to_vec();
+        let last = batch.contracted_third(LANES - 1).to_vec();
+        let separation = first
+            .iter()
+            .zip(&last)
+            .fold(0.0f64, |worst, (left, right)| worst.max((left - right).abs()));
+        assert!(separation > 1e-6, "lane separation {separation:.3e}");
     }
 }
