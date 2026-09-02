@@ -281,8 +281,8 @@ impl ImplicitRowProjection {
 /// Under a kernel chart (gam#979) — the forward basis shipping `α(ψ)·phi`
 /// rather than `phi` — the operator differentiates the CHARTED kernel: the
 /// share becomes `g_a = c + ∂ln α/∂ψ_a`, the second derivative gains
-/// `∂²ln α/∂ψ_a∂ψ_b · phi`, and every value is multiplied by `α`. See
-/// [`ImplicitDesignPsiDerivative::with_kernel_chart`].
+/// `∂²ln α/∂ψ_a∂ψ_b · phi`, and every value is multiplied by `α`. The
+/// crate-private `with_kernel_chart` builder installs those chart derivatives.
 #[derive(Debug, Clone)]
 pub struct ImplicitDesignPsiDerivative {
     /// Pre-computed kernel values (materialized mode).
