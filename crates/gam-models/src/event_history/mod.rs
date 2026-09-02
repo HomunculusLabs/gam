@@ -29,6 +29,7 @@
 
 mod chain;
 mod cohort;
+mod covariance;
 mod family;
 mod forecast;
 mod formula;
@@ -39,10 +40,11 @@ pub use cohort::{
     CohortNodes, CovariateSegment, Event, EventHistoryCohort, EventHistoryError, MarkKind,
     SubjectHistory, SubjectNodes, design_rows, expand_nodes, quadrature_order_for_degree,
 };
+pub use covariance::{disease_covariance, eigenmodes, temporal_covariance};
 pub use family::{
     EventHistoryFamily, EventHistoryFit, EventHistorySpec, JointEvaluation,
-    QuadratureCertificate, RefinementCheck, fit_event_history, fit_event_history_formula,
-    latent_block_spec, mark_block_spec, seeded_one, seeded_two,
+    QuadratureCertificate, RankStart, RankStep, RefinementCheck, fit_event_history,
+    fit_event_history_formula, latent_block_spec, mark_block_spec, seeded_one, seeded_two,
 };
 pub use formula::{TIME_COLUMN, covariate_spec_from_formula, node_dataset};
 pub use marginal::transition_score_polynomials;

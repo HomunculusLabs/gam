@@ -98,14 +98,30 @@ class EventHistoryModel:
         return list(self._native.subject_ids())
 
     @property
-    def atoms(self) -> int:
-        """The number of latent atoms the fit was offered; which of them the
-        data use is read from ``loadings`` and ``atom_log_lambdas``."""
-        return int(self._native.atoms())
+    def rank(self) -> int:
+        """Rank of the latent covariance the evidence supports. The fit grows
+        it from zero: each atom is proposed by the covariance score of the
+        residuals and kept only when the outer criterion improves."""
+        return int(self._native.rank())
+
+    @property
+    def atom_evidence(self) -> np.ndarray:
+        """Decrease of the outer LAML criterion each accepted atom brought."""
+        return np.asarray(self._native.atom_evidence())
+
+    @property
+    def rank_path(self) -> list[dict[str, Any]]:
+        """Every rank step the evidence judged: the covariance score's top
+        eigenvalue, the proposed log-rate, whether that rate sat at the
+        mesh's resolution limit, whether the candidate reached a certified
+        optimum, the evidence gain and whether it was accepted."""
+        return [dict(step) for step in self._native.rank_path()]
 
     @property
     def loadings(self) -> np.ndarray:
-        """Loadings, shape ``(marks, atoms)``."""
+        """Factor coordinates of the latent covariance, shape ``(marks, rank)``.
+        The covariance itself is the reported object: see
+        :meth:`disease_covariance`."""
         return np.asarray(self._native.loadings())
 
     @property
@@ -140,6 +156,22 @@ class EventHistoryModel:
         if isinstance(mark, str):
             mark = self.mark_names.index(mark)
         return np.asarray(self._native.coefficients(int(mark)))
+
+    def disease_covariance(self) -> np.ndarray:
+        """``C(0) = A Aᵀ``: the covariance across marks of the latent
+        log-intensity deviations at one time, shape ``(marks, marks)``. This
+        is the reported latent object; the loadings are its factor
+        coordinates, which two atoms of equal rate could rotate."""
+        return np.asarray(self._native.disease_covariance())
+
+    def temporal_covariance(self, lag: float) -> np.ndarray:
+        """``C(Δ) = A diag(exp(-r Δ)) Aᵀ`` across a lag of ``lag`` time units."""
+        return np.asarray(self._native.temporal_covariance(float(lag)))
+
+    def eigenmodes(self) -> tuple[np.ndarray, np.ndarray]:
+        """Eigenvalues (descending) and eigenvectors (columns) of ``C(0)``."""
+        values, vectors = self._native.eigenmodes()
+        return np.asarray(values), np.asarray(vectors)
 
     def _subject(self, subject: int | str) -> int:
         if isinstance(subject, str):
@@ -258,7 +290,6 @@ def fit_event_history(
     covariates: Any,
     formula: str,
     *,
-    atoms: int = 1,
     marks: Mapping[str, str] | Sequence[str] | None = None,
     id_column: str = "id",
 ) -> EventHistoryModel:
@@ -280,7 +311,7 @@ def fit_event_history(
     once-only mark removes the subject from that mark's risk set, a recurrent
     mark can fire any number of times.
 
-    ``atoms`` is the number of latent atoms offered; each carries its own
+    The rank of the latent covariance is grown from zero by the evidence.
     REML ridge, and one the data do not support is switched off by it.
     """
     rust = rust_module()
@@ -366,6 +397,5 @@ def fit_event_history(
         segment_start,
         segment_row,
         str(formula),
-        int(atoms),
     )
     return EventHistoryModel(native)

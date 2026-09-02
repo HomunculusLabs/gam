@@ -9,7 +9,11 @@ use super::chain::{GaussHermite, product_grid_size};
 use super::cohort::{
     CohortNodes, EventHistoryCohort, EventHistoryError, MarkKind, design_rows, expand_nodes,
 };
-use super::marginal::{LOST_POSITIVITY, SubjectInputs, pairwise_sum, subject_marginal};
+use super::covariance::{NewAtom, SubjectResiduals, best_new_atom};
+use super::marginal::{
+    LOST_POSITIVITY, SubjectInputs, expected_intensities, forward_filter, pairwise_sum,
+    subject_marginal,
+};
 use super::scalar::Tangent;
 use crate::custom_family::{
     BlockWorkingSet, BlockwiseFitOptions, CustomFamily, ExactNewtonJointGradientEvaluation,
@@ -521,6 +525,79 @@ impl EventHistoryFamily {
         Ok(())
     }
 
+    /// The martingale residuals of every subject at `states`: per node and
+    /// mark the compensated score `s = y − w E[λ | past]` and its curvature
+    /// `c = w E[λ | past]`, both under the FILTERED density, which is what
+    /// makes them the increments of a martingale — uncorrelated under the
+    /// null, with `Σ_n c_n` as the exact predictable variation the
+    /// covariance score subtracts.
+    pub(crate) fn residuals(
+        &self,
+        states: &[ParameterBlockState],
+    ) -> Result<Vec<SubjectResiduals>, String> {
+        self.validate_states(states)?;
+        let marks = self.marks();
+        let atoms = self.atoms;
+        let empty = Array1::<f64>::zeros(0);
+        let latent: &Array1<f64> = if self.has_latent_block() {
+            &states[marks].beta
+        } else {
+            &empty
+        };
+        let loadings: Vec<f64> = latent.iter().take(marks * atoms).copied().collect();
+        let log_rates: Vec<f64> = latent.iter().skip(marks * atoms).copied().collect();
+        let gh = &self.gh;
+        let time_scale = self.time_scale;
+        let all_marks = vec![true; marks];
+        self.nodes
+            .subjects
+            .par_iter()
+            .map(|subject| {
+                let n = subject.len();
+                let first = subject.first_row;
+                let mut eta0 = Vec::with_capacity(n * marks);
+                for node in 0..n {
+                    for d in 0..marks {
+                        eta0.push(states[d].eta[first + node]);
+                    }
+                }
+                let inputs = SubjectInputs {
+                    nodes: subject,
+                    eta0: &eta0,
+                    loadings: &loadings,
+                    log_rates: &log_rates,
+                    time_scale,
+                    gh,
+                    continuation_gap: 0.0,
+                    designs: None,
+                };
+                let pass = forward_filter(&inputs, None, &all_marks).map_err(|e| e.to_string())?;
+                let mut scores = Vec::with_capacity(n * marks);
+                let mut curvatures = Vec::with_capacity(n * marks);
+                for node in 0..n {
+                    let intensities = expected_intensities(
+                        &pass.grids[node],
+                        &pass.predicted[node],
+                        &eta0[node * marks..(node + 1) * marks],
+                        &loadings,
+                        marks,
+                        atoms,
+                    );
+                    for d in 0..marks {
+                        let c = subject.exposures[[node, d]] * intensities[d];
+                        scores.push(subject.counts[[node, d]] - c);
+                        curvatures.push(c);
+                    }
+                }
+                Ok(SubjectResiduals {
+                    times: subject.times.clone(),
+                    scores,
+                    curvatures,
+                })
+            })
+            .collect()
+    }
+
     /// Full `f64` joint evaluation, cached on the state: the value, its exact
     /// gradient, and the Louis-identity Hessian.
     ///
@@ -744,9 +821,6 @@ impl CustomFamily for EventHistoryFamily {
 /// Fit specification for an event-history model.
 #[derive(Clone)]
 pub struct EventHistorySpec {
-    /// Number of latent Ornstein–Uhlenbeck atoms offered. Each carries its
-    /// own REML ridge and is switched off by the evidence when unneeded.
-    pub atoms: usize,
     /// One covariate/time term collection per mark, or a single one shared by
     /// every mark. Feature columns index the node data matrix: the covariate
     /// table's columns followed by the node time.
@@ -769,9 +843,8 @@ pub struct EventHistorySpec {
 }
 
 impl EventHistorySpec {
-    pub fn new(atoms: usize, covariates: Vec<TermCollectionSpec>) -> Self {
+    pub fn new(covariates: Vec<TermCollectionSpec>) -> Self {
         Self {
-            atoms,
             covariates,
             quadrature_order: super::cohort::quadrature_order_for_degree(3),
             gauss_hermite_order: 9,
@@ -840,9 +913,36 @@ pub struct EventHistoryFit {
     /// Mesh refinement level of the training nodes.
     pub mesh_refinement: usize,
     pub quadrature: QuadratureCertificate,
+    /// Every rank step the evidence judged, in order.
+    pub rank_path: Vec<RankStep>,
+    /// The decrease of the outer LAML criterion each accepted atom brought.
+    pub atom_evidence: Vec<f64>,
 }
 
 impl EventHistoryFit {
+    /// The rank of the latent covariance the evidence supports.
+    pub fn rank(&self) -> usize {
+        self.log_rates.len()
+    }
+
+    /// `C(0) = A Aᵀ`: the covariance of the marks' latent log-intensity
+    /// deviations at one time. This is the reported latent object; the
+    /// loadings are its factor coordinates, which two atoms of equal rate
+    /// could rotate without changing the process.
+    pub fn disease_covariance(&self) -> Array2<f64> {
+        super::covariance::disease_covariance(&self.loadings)
+    }
+
+    /// `C(Δ)`: the same covariance across a lag of `lag` time units.
+    pub fn temporal_covariance(&self, lag: f64) -> Array2<f64> {
+        super::covariance::temporal_covariance(&self.loadings, &self.rates, lag)
+    }
+
+    /// Eigenvalues (descending) and eigenvectors (columns) of `C(0)`.
+    pub fn eigenmodes(&self) -> Result<(Array1<f64>, Array2<f64>), EventHistoryError> {
+        super::covariance::eigenmodes(&self.disease_covariance())
+    }
+
     pub fn marks(&self) -> usize {
         self.nodes.marks
     }
@@ -903,6 +1003,7 @@ pub fn latent_block_spec(
     n_obs: usize,
     marks: usize,
     atoms: usize,
+    start: Option<&RankStart>,
 ) -> Result<ParameterBlockSpec, EventHistoryError> {
     if atoms == 0 {
         return Err(EventHistoryError::InvalidInput {
@@ -922,13 +1023,65 @@ pub fn latent_block_spec(
         penalties.push(PenaltyMatrix::Dense(s));
         nullspace_dims.push(width - marks - 1);
     }
+    // With a start, every atom below the new one keeps the values the fit
+    // one rank down reached and the new one begins at the direction, scale
+    // and rate the covariance score named — a start the data chose, not a
+    // symmetric one every atom shares. Without a start (rank one from
+    // nothing) the loadings begin at one latent standard deviation per unit
+    // of log-intensity, the parameterisation's own scale, and the rates
+    // spread around the cohort's time scale.
     let mut initial_beta = Array1::<f64>::zeros(width);
-    for q in 0..marks * atoms {
-        initial_beta[q] = 1.0;
-    }
-    for k in 0..atoms {
-        initial_beta[marks * atoms + k] =
-            std::f64::consts::LN_2 * (k as f64 - 0.5 * (atoms as f64 - 1.0));
+    let mut initial_log_lambdas = Array1::<f64>::zeros(atoms);
+    match start {
+        Some(start) => {
+            let carried = match start.atom {
+                Some(_) => atoms - 1,
+                None => atoms,
+            };
+            if start.loadings.len() != marks * carried
+                || start.log_rates.len() != carried
+                || start.log_lambdas.len() != carried
+            {
+                return Err(EventHistoryError::InvalidInput {
+                    reason: format!(
+                        "a rank start for {atoms} atoms carries {} loadings, {} rates and {} ridges for {carried} atoms",
+                        start.loadings.len(),
+                        start.log_rates.len(),
+                        start.log_lambdas.len()
+                    ),
+                });
+            }
+            for d in 0..marks {
+                for k in 0..carried {
+                    initial_beta[d * atoms + k] = start.loadings[d * carried + k];
+                }
+            }
+            for k in 0..carried {
+                initial_beta[marks * atoms + k] = start.log_rates[k];
+                initial_log_lambdas[k] = start.log_lambdas[k];
+            }
+            if let Some(atom) = start.atom.as_ref() {
+                for d in 0..marks {
+                    initial_beta[d * atoms + carried] = atom.loading[d];
+                }
+                initial_beta[marks * atoms + carried] = atom.log_rate;
+                // Empirical Bayes at the proposal: the ridge whose prior
+                // variance is the start's own scale.
+                let scale: f64 = atom.loading.iter().map(|a| a * a).sum::<f64>()
+                    + atom.log_rate * atom.log_rate;
+                initial_log_lambdas[carried] =
+                    ((marks + 1) as f64 / scale.max(f64::MIN_POSITIVE)).ln();
+            }
+        }
+        None => {
+            for q in 0..marks * atoms {
+                initial_beta[q] = 1.0;
+            }
+            for k in 0..atoms {
+                initial_beta[marks * atoms + k] =
+                    std::f64::consts::LN_2 * (k as f64 - 0.5 * (atoms as f64 - 1.0));
+            }
+        }
     }
     Ok(ParameterBlockSpec {
         name: "latent".to_string(),
@@ -936,7 +1089,7 @@ pub fn latent_block_spec(
         offset: Array1::zeros(n_obs),
         penalties,
         nullspace_dims,
-        initial_log_lambdas: Array1::zeros(atoms),
+        initial_log_lambdas,
         initial_beta: Some(initial_beta),
         gauge_priority: 100,
         jacobian_callback: None,
@@ -967,11 +1120,10 @@ pub fn mark_block_spec(name: &str, design: &TermCollectionDesign) -> ParameterBl
 pub fn fit_event_history_formula(
     cohort: &mut EventHistoryCohort,
     formula: &str,
-    atoms: usize,
     options: BlockwiseFitOptions,
 ) -> Result<EventHistoryFit, EventHistoryError> {
     cohort.validate()?;
-    let mut spec = EventHistorySpec::new(atoms, Vec::new());
+    let mut spec = EventHistorySpec::new(Vec::new());
     spec.options = options;
     let rows = design_rows(cohort, spec.quadrature_order)?;
     let covariates = super::formula::covariate_spec_from_formula(formula, rows.view(), cohort)?;
@@ -1057,11 +1209,56 @@ fn preflight(
 }
 
 /// Fit an event-history model to a cohort.
-pub fn fit_event_history(
-    cohort: &mut EventHistoryCohort,
+/// What a rank-`K+1` fit starts from: the converged rank-`K` latent block
+/// and the atom the covariance score proposed.
+pub struct RankStart {
+    /// The rank-`K` loadings, `marks × K` row-major.
+    pub loadings: Vec<f64>,
+    /// `ln(rate · T̄)` of every atom the fit already has.
+    pub log_rates: Vec<f64>,
+    /// The ridge each of those atoms ended on.
+    pub log_lambdas: Vec<f64>,
+    /// The atom the covariance score proposed, when this start grows the
+    /// rank. `None` re-starts the same rank from its own converged values,
+    /// which is what certifying an accepted fit needs.
+    pub(crate) atom: Option<NewAtom>,
+}
+
+/// One step of the rank path: what the covariance score proposed and what
+/// the evidence made of it.
+#[derive(Clone, Debug)]
+pub struct RankStep {
+    /// Rank before the step.
+    pub rank: usize,
+    /// The score's top eigenvalue at the proposed rate: the second-order
+    /// evidence slope along the proposed direction.
+    pub score_eigenvalue: f64,
+    /// The log-rate the proposal named.
+    pub proposed_log_rate: f64,
+    /// The proposal was held at the rate the node mesh can still resolve.
+    pub at_resolution_limit: bool,
+    /// Whether the rank-`K+1` model reached a certified optimum at all. A
+    /// candidate that cannot be fitted is refused: a fit object may only
+    /// come from a converged optimisation, so an atom whose model has no
+    /// certified optimum is not one the evidence can be said to support.
+    pub converged: bool,
+    /// Decrease of the outer LAML criterion the refit achieved.
+    pub evidence_gain: f64,
+    pub accepted: bool,
+}
+
+/// The certified fit at ONE rank: the Gauss-Hermite order and the time mesh
+/// are refined until no fitted coefficient moves by more than the
+/// certificate's tolerance. `start` warm-starts every block from a fit one
+/// rank down, with the new atom's loadings at the covariance score's
+/// proposal.
+fn fit_at_rank(
+    cohort: &EventHistoryCohort,
     spec: &EventHistorySpec,
+    atoms: usize,
+    start: Option<&RankStart>,
+    pinned: Option<(usize, usize)>,
 ) -> Result<EventHistoryFit, EventHistoryError> {
-    cohort.validate()?;
     let marks = cohort.marks();
     if spec.covariates.len() != 1 && spec.covariates.len() != marks {
         return Err(EventHistoryError::InvalidInput {
@@ -1123,17 +1320,17 @@ pub fn fit_event_history(
             designs.push(design);
             dense.push(dense_design);
         }
-        if spec.atoms > 0 {
-            specs.push(latent_block_spec(nodes.total_nodes, marks, spec.atoms)?);
+        if atoms > 0 {
+            specs.push(latent_block_spec(nodes.total_nodes, marks, atoms, start)?);
         }
         let family = EventHistoryFamily::new(
             Arc::clone(&nodes),
             dense.clone(),
-            spec.atoms,
+            atoms,
             order,
             time_scale,
         )?;
-        preflight(order, spec.atoms, nodes.max_subject_nodes(), marks, family.total_width())?;
+        preflight(order, atoms, nodes.max_subject_nodes(), marks, family.total_width())?;
         Ok(Built {
             nodes,
             family,
@@ -1207,8 +1404,14 @@ pub fn fit_event_history(
     };
 
     let mesh_ceiling = cohort.mesh_refinement_ceiling();
-    let mut order = spec.gauss_hermite_order.max(3);
-    let mut refinement = 0usize;
+    // A candidate the rank path is judging is fitted at the SETTING the
+    // incumbent was certified at, not at its own: the two criteria are
+    // compared, so they must be the same functional. Only the fit that is
+    // returned runs the refinement ladder.
+    let (mut order, mut refinement) = match pinned {
+        Some((order, refinement)) => (order, refinement),
+        None => (spec.gauss_hermite_order.max(3), 0usize),
+    };
     // The grid is raised once for a posterior it cannot represent. A second
     // raise would climb into the orders where the Lagrange interpolant's own
     // roundoff is the larger error, so a posterior that survives one raise is
@@ -1226,7 +1429,7 @@ pub fn fit_event_history(
                 // carry. Anything else is the caller's to see.
                 let message = error.to_string();
                 let next_order = 2 * order - 1;
-                let admissible = spec.atoms > 0
+                let admissible = atoms > 0
                     && positivity_raises == 0
                     && GaussHermite::new(next_order).is_ok_and(|rule| {
                         rule.lebesgue_constant * f64::EPSILON * built.nodes.max_subject_nodes() as f64
@@ -1282,7 +1485,7 @@ pub fn fit_event_history(
         // Without a latent block there is no latent integral to certify.
         let next_order = 2 * order - 1;
         let max_nodes = built.nodes.max_subject_nodes();
-        let gauss_hermite = if spec.atoms == 0 {
+        let gauss_hermite = if atoms == 0 || pinned.is_some() {
             RefinementCheck {
                 candidate: order,
                 coefficient_shift: 0.0,
@@ -1314,6 +1517,20 @@ pub fn fit_event_history(
             }
             gauss_hermite
         };
+        if pinned.is_some() {
+            let mesh = RefinementCheck {
+                candidate: refinement,
+                coefficient_shift: 0.0,
+                log_likelihood: value,
+            };
+            return Ok(assemble(
+                cohort,
+                spec,
+                frozen_specs,
+                time_scale,
+                Assembled { built, fit, atoms, order, refinement, value, gauss_hermite, mesh },
+            ));
+        }
         if refinement + 1 > mesh_ceiling {
             return Err(EventHistoryError::NumericalFailure {
                 reason: format!(
@@ -1335,56 +1552,218 @@ pub fn fit_event_history(
             warm(&mut built, &fit);
             continue;
         }
-        let empty = Array1::<f64>::zeros(0);
-        let latent: &Array1<f64> = if spec.atoms > 0 {
-            &fit.block_states[marks].beta
-        } else {
-            &empty
-        };
-        let mut loadings = Array2::<f64>::zeros((marks, spec.atoms));
-        for d in 0..marks {
-            for k in 0..spec.atoms {
-                loadings[[d, k]] = latent[d * spec.atoms + k];
-            }
-        }
-        let log_rates: Vec<f64> = (0..spec.atoms)
-            .map(|k| latent[marks * spec.atoms + k])
-            .collect();
-        let rates: Vec<f64> = log_rates.iter().map(|r| r.exp() / time_scale).collect();
-        let n_lambda = fit.log_lambdas.len();
-        let atom_log_lambdas: Vec<f64> = fit
-            .log_lambdas
-            .iter()
-            .skip(n_lambda.saturating_sub(spec.atoms))
-            .copied()
-            .collect();
-        let Built {
-            nodes,
-            family,
-            designs,
-            ..
-        } = built;
-        return Ok(EventHistoryFit {
-            nodes,
-            family,
-            fit,
-            mark_kinds: cohort.mark_kinds.clone(),
+        return Ok(assemble(
+            cohort,
+            spec,
             frozen_specs,
-            designs,
-            loadings,
-            log_rates,
-            rates,
-            atom_log_lambdas,
             time_scale,
-            quadrature_order: spec.quadrature_order,
-            mesh_refinement: refinement,
-            quadrature: QuadratureCertificate {
-                gauss_hermite_order: order,
-                mesh_refinement: refinement,
-                log_likelihood: value,
-                gauss_hermite,
-                mesh,
-            },
-        });
+            Assembled { built, fit, atoms, order, refinement, value, gauss_hermite, mesh },
+        ));
     }
+}
+
+/// The fitted model at one rank and one certified discretisation.
+struct Assembled {
+    built: Built,
+    fit: UnifiedFitResult,
+    atoms: usize,
+    order: usize,
+    refinement: usize,
+    value: f64,
+    gauss_hermite: RefinementCheck,
+    mesh: RefinementCheck,
+}
+
+fn assemble(
+    cohort: &EventHistoryCohort,
+    spec: &EventHistorySpec,
+    frozen_specs: Vec<TermCollectionSpec>,
+    time_scale: f64,
+    assembled: Assembled,
+) -> EventHistoryFit {
+    let Assembled {
+        built,
+        fit,
+        atoms,
+        order,
+        refinement,
+        value,
+        gauss_hermite,
+        mesh,
+    } = assembled;
+    let marks = cohort.marks();
+    let empty = Array1::<f64>::zeros(0);
+    let latent: &Array1<f64> = if atoms > 0 {
+        &fit.block_states[marks].beta
+    } else {
+        &empty
+    };
+    let mut loadings = Array2::<f64>::zeros((marks, atoms));
+    for d in 0..marks {
+        for k in 0..atoms {
+            loadings[[d, k]] = latent[d * atoms + k];
+        }
+    }
+    let log_rates: Vec<f64> = (0..atoms).map(|k| latent[marks * atoms + k]).collect();
+    let rates: Vec<f64> = log_rates.iter().map(|r| r.exp() / time_scale).collect();
+    let n_lambda = fit.log_lambdas.len();
+    let atom_log_lambdas: Vec<f64> = fit
+        .log_lambdas
+        .iter()
+        .skip(n_lambda.saturating_sub(atoms))
+        .copied()
+        .collect();
+    let Built {
+        nodes,
+        family,
+        designs,
+        ..
+    } = built;
+    EventHistoryFit {
+        nodes,
+        family,
+        fit,
+        mark_kinds: cohort.mark_kinds.clone(),
+        frozen_specs,
+        designs,
+        loadings,
+        log_rates,
+        rates,
+        atom_log_lambdas,
+        time_scale,
+        quadrature_order: spec.quadrature_order,
+        mesh_refinement: refinement,
+        quadrature: QuadratureCertificate {
+            gauss_hermite_order: order,
+            mesh_refinement: refinement,
+            log_likelihood: value,
+            gauss_hermite,
+            mesh,
+        },
+        rank_path: Vec::new(),
+        atom_evidence: Vec::new(),
+    }
+}
+
+/// Fit an event-history model, growing the rank of the latent covariance
+/// from zero until the evidence refuses the next direction.
+///
+/// At each rank the fit is the certified one — the Gauss-Hermite order and
+/// the time mesh are refined until no fitted coefficient moves by more than
+/// the certificate's tolerance — and the next atom is proposed by the
+/// covariance score of that fit's martingale residuals: the direction and
+/// rate whose standardised evidence gain is largest, which is the most
+/// evidence-improving covariance direction the current rank omits. The
+/// candidate is refit and kept only when the outer LAML criterion decreases
+/// by more than the solver's own resolution. Nothing about the latent
+/// structure is chosen by hand: not the number of atoms, not their
+/// directions, not their rates.
+pub fn fit_event_history(
+    cohort: &mut EventHistoryCohort,
+    spec: &EventHistorySpec,
+) -> Result<EventHistoryFit, EventHistoryError> {
+    cohort.validate()?;
+    let marks = cohort.marks();
+    let time_scale = cohort.time_scale();
+    let resolution = |criterion: f64| spec.options.outer_tol.max(f64::EPSILON * criterion.abs());
+    // The rank path compares criteria, so every step of it runs at ONE
+    // setting — the spec's own starting order and mesh. Only the fit that is
+    // returned runs the refinement ladder, once, at the rank the evidence
+    // chose. Certifying every candidate would run a ladder per rank and
+    // certify models the caller never sees.
+    let pin = Some((spec.gauss_hermite_order.max(3), 0usize));
+    let mut fit = fit_at_rank(cohort, spec, 0, None, pin)?;
+    let mut rank_path: Vec<RankStep> = Vec::new();
+    let mut atom_evidence: Vec<f64> = Vec::new();
+    loop {
+        let rank = fit.atoms();
+        let criterion = match fit.fit.reml_score() {
+            Some(value) => value,
+            None => break,
+        };
+        let residuals = fit
+            .family
+            .residuals(&fit.fit.block_states)
+            .map_err(|reason| EventHistoryError::Fit { reason })?;
+        let Some(atom) = best_new_atom(&residuals, marks, time_scale)? else {
+            break;
+        };
+        let start = RankStart {
+            loadings: fit.loadings.iter().copied().collect(),
+            log_rates: fit.log_rates.clone(),
+            log_lambdas: fit.atom_log_lambdas.clone(),
+            atom: Some(atom.clone()),
+        };
+        let grown = fit_at_rank(cohort, spec, rank + 1, Some(&start), pin)
+            .and_then(|candidate| match candidate.fit.reml_score() {
+                Some(value) => Ok((candidate, value)),
+                None => Err(EventHistoryError::Fit {
+                    reason: format!("the rank-{} fit carries no outer LAML criterion", rank + 1),
+                }),
+            });
+        let (candidate, next_criterion) = match grown {
+            Ok(value) => value,
+            Err(error) => {
+                // No certified optimum at the next rank, so there is no
+                // evidence for it to report: the path stops with the reason
+                // recorded rather than failing the whole fit.
+                log::info!(
+                    "[event-history] rank {rank} → {}: no certified optimum, refused ({error})",
+                    rank + 1
+                );
+                rank_path.push(RankStep {
+                    rank,
+                    score_eigenvalue: atom.eigenvalue,
+                    proposed_log_rate: atom.log_rate,
+                    at_resolution_limit: atom.at_resolution_limit,
+                    converged: false,
+                    evidence_gain: 0.0,
+                    accepted: false,
+                });
+                break;
+            }
+        };
+        let gain = criterion - next_criterion;
+        let accepted = gain > resolution(criterion);
+        log::info!(
+            "[event-history] rank {rank} → {}: score eigenvalue {:.4e} at log-rate {:.3}{} (one-step variance {:.4e}), criterion {criterion:.6} → {next_criterion:.6} ({})",
+            rank + 1,
+            atom.eigenvalue,
+            atom.log_rate,
+            if atom.at_resolution_limit { " (the mesh's resolution limit)" } else { "" },
+            atom.variance,
+            if accepted { "accepted" } else { "refused" }
+        );
+        rank_path.push(RankStep {
+            rank,
+            score_eigenvalue: atom.eigenvalue,
+            proposed_log_rate: atom.log_rate,
+            at_resolution_limit: atom.at_resolution_limit,
+            converged: true,
+            evidence_gain: gain,
+            accepted,
+        });
+        if !accepted {
+            break;
+        }
+        atom_evidence.push(gain);
+        fit = candidate;
+    }
+    {
+        // The whole path ran pinned, so the winner has not been certified:
+        // it runs the ladder once, from where it already is, and the
+        // certificate the caller reads belongs to the model the caller gets.
+        let start = RankStart {
+            loadings: fit.loadings.iter().copied().collect(),
+            log_rates: fit.log_rates.clone(),
+            log_lambdas: fit.atom_log_lambdas.clone(),
+            atom: None,
+        };
+        let rank = fit.rank();
+        let start = (rank > 0).then_some(start);
+        fit = fit_at_rank(cohort, spec, rank, start.as_ref(), None)?;
+    }
+    fit.rank_path = rank_path;
+    fit.atom_evidence = atom_evidence;
+    Ok(fit)
 }

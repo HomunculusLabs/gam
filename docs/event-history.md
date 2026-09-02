@@ -147,7 +147,9 @@ let mut cohort = EventHistoryCohort {
 };
 let spec = EventHistorySpec::new(2, vec![term_collection_spec]);
 let fit = fit_event_history(&mut cohort, &spec)?;
-fit.loadings;          // marks × atoms
+fit.rank();            // atoms the evidence bought
+fit.disease_covariance();  // marks × marks
+fit.loadings;          // factor coordinates, marks × rank
 fit.rates;             // per atom, in the data's time unit
 fit.atom_log_lambdas;  // the ridge each atom ended on
 fit.quadrature;        // the refinement certificate
@@ -189,9 +191,10 @@ event history reveals.
 import gamfit
 model = gamfit.fit_event_history(
     subjects, events, covariates, "x + s(time)",
-    atoms=2, marks={"relapse": "recurrent", "death": "terminal"},
+    marks={"relapse": "recurrent", "death": "terminal"},
 )
-model.loadings, model.rates, model.atom_log_lambdas, model.quadrature
+model.rank, model.disease_covariance(), model.temporal_covariance(5.0), model.eigenmodes()
+model.loadings, model.rates, model.atom_evidence, model.rank_path
 f = model.forecast("subject-17", horizons=[6.0, 7.0])
 f["survival"], f["expected_counts"]
 f = model.forecast("subject-17", horizons=[6.0, 7.0], future=[(5.5, {"x": 1.0}), (6.5, {"x": 0.0})])
@@ -215,7 +218,7 @@ for a subject with no history.
 
 ```bash
 gam fit-events --subjects s.csv --events e.csv --covariates c.csv \
-    --formula "x + s(time)" --atoms 2 \
+    --formula "x + s(time)" \
     --marks relapse:recurrent,death:terminal \
     --horizons-after-exit 1,2,5 --out summary.json
 ```

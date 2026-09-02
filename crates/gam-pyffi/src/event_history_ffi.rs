@@ -12,9 +12,9 @@ use gam::families::event_history::{
     predictive_pit,
 };
 use ndarray::Array2;
-use numpy::{PyArray2, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyDict, PyList, PyModule};
 use std::sync::Arc;
 
 /// A fitted event-history model held in memory.
@@ -75,8 +75,47 @@ impl PyEventHistoryModel {
         self.cohort.subjects.iter().map(|s| s.exit).collect()
     }
 
-    fn atoms(&self) -> usize {
-        self.fit.atoms()
+    fn rank(&self) -> usize {
+        self.fit.rank()
+    }
+
+    fn atom_evidence(&self) -> Vec<f64> {
+        self.fit.atom_evidence.clone()
+    }
+
+    fn rank_path<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let out = PyList::empty(py);
+        for step in &self.fit.rank_path {
+            let item = PyDict::new(py);
+            item.set_item("rank", step.rank)?;
+            item.set_item("score_eigenvalue", step.score_eigenvalue)?;
+            item.set_item("proposed_log_rate", step.proposed_log_rate)?;
+            item.set_item("at_resolution_limit", step.at_resolution_limit)?;
+            item.set_item("converged", step.converged)?;
+            item.set_item("evidence_gain", step.evidence_gain)?;
+            item.set_item("accepted", step.accepted)?;
+            out.append(item)?;
+        }
+        Ok(out)
+    }
+
+    fn disease_covariance<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        PyArray2::from_owned_array(py, self.fit.disease_covariance())
+    }
+
+    fn temporal_covariance<'py>(&self, py: Python<'py>, lag: f64) -> Bound<'py, PyArray2<f64>> {
+        PyArray2::from_owned_array(py, self.fit.temporal_covariance(lag))
+    }
+
+    fn eigenmodes<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)> {
+        let (values, vectors) = self.fit.eigenmodes().map_err(|e| py_value_error(e.to_string()))?;
+        Ok((
+            PyArray1::from_owned_array(py, values),
+            PyArray2::from_owned_array(py, vectors),
+        ))
     }
 
     fn loadings<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
@@ -254,7 +293,7 @@ impl PyEventHistoryModel {
 
 /// Fit an event-history model from flat arrays.
 #[pyfunction]
-#[pyo3(signature = (mark_names, mark_kinds, covariate_names, covariate_levels, covariates, subject_ids, entry, exit, event_subject, event_time, event_mark, segment_subject, segment_start, segment_row, formula, atoms))]
+#[pyo3(signature = (mark_names, mark_kinds, covariate_names, covariate_levels, covariates, subject_ids, entry, exit, event_subject, event_time, event_mark, segment_subject, segment_start, segment_row, formula))]
 fn fit_event_history(
     py: Python<'_>,
     mark_names: Vec<String>,
@@ -272,7 +311,6 @@ fn fit_event_history(
     segment_start: Vec<f64>,
     segment_row: Vec<usize>,
     formula: String,
-    atoms: usize,
 ) -> PyResult<PyEventHistoryModel> {
     let n = subject_ids.len();
     if entry.len() != n || exit.len() != n {
@@ -331,7 +369,7 @@ fn fit_event_history(
         subjects,
     };
     let (fit, cohort) = detach_py_result(py, "event-history fit", move || {
-        let fit = fit_event_history_formula(&mut cohort, &formula, atoms, BlockwiseFitOptions::default())
+        let fit = fit_event_history_formula(&mut cohort, &formula, BlockwiseFitOptions::default())
             .map_err(|e| e.to_string())?;
         Ok((fit, cohort))
     })?;

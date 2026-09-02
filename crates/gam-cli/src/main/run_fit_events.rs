@@ -178,7 +178,6 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
     let fit = fit_event_history_formula(
         &mut cohort,
         &args.formula,
-        args.atoms,
         BlockwiseFitOptions::default(),
     )
     .map_err(|e| e.to_string())?;
@@ -192,7 +191,41 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
     summary.insert("covariates".to_string(), json!(covariate_names));
     summary.insert("covariate_levels".to_string(), json!(covariate_levels));
     summary.insert("formula".to_string(), json!(args.formula));
-    summary.insert("atoms".to_string(), json!(args.atoms));
+    summary.insert("rank".to_string(), json!(fit.rank()));
+    summary.insert("atom_evidence".to_string(), json!(fit.atom_evidence));
+    summary.insert(
+        "rank_path".to_string(),
+        json!(fit
+            .rank_path
+            .iter()
+            .map(|step| {
+                json!({
+                    "rank": step.rank,
+                    "score_eigenvalue": step.score_eigenvalue,
+                    "proposed_log_rate": step.proposed_log_rate,
+                    "at_resolution_limit": step.at_resolution_limit,
+                    "converged": step.converged,
+                    "evidence_gain": step.evidence_gain,
+                    "accepted": step.accepted,
+                })
+            })
+            .collect::<Vec<_>>()),
+    );
+    summary.insert(
+        "disease_covariance".to_string(),
+        json!(fit
+            .disease_covariance()
+            .rows()
+            .into_iter()
+            .map(|r| r.to_vec())
+            .collect::<Vec<_>>()),
+    );
+    let (eigenvalues, eigenvectors) = fit.eigenmodes().map_err(|e| e.to_string())?;
+    summary.insert("eigenvalues".to_string(), json!(eigenvalues.to_vec()));
+    summary.insert(
+        "eigenvectors".to_string(),
+        json!(eigenvectors.rows().into_iter().map(|r| r.to_vec()).collect::<Vec<_>>()),
+    );
     summary.insert("log_likelihood".to_string(), json!(fit.fit.log_likelihood));
     summary.insert("reml_score".to_string(), json!(fit.fit.reml_score()));
     summary.insert("outer_iterations".to_string(), json!(fit.fit.outer_iterations));
