@@ -79,21 +79,10 @@ fn write_training_csv(path: &Path) {
     writer.flush().expect("flush training csv");
 }
 
+/// The standard prediction CSV's point column is `posterior_mean` (#2785); the
+/// shared harness reader takes whichever point column the CSV declares.
 fn read_means(path: &Path) -> Vec<f64> {
-    let mut reader = csv::Reader::from_path(path).expect("open predictions csv");
-    let headers = reader.headers().expect("predict csv headers").clone();
-    let mean_idx = headers
-        .iter()
-        .position(|h| h == "mean")
-        .expect("predict csv has a mean column");
-    reader
-        .records()
-        .map(|rec| {
-            rec.expect("predict csv row")[mean_idx]
-                .parse::<f64>()
-                .expect("numeric prediction")
-        })
-        .collect()
+    gam::test_support::cli_harness::read_prediction_means(path)
 }
 
 #[test]
