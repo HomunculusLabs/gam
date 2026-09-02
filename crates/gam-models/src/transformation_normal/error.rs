@@ -29,23 +29,8 @@ pub enum TransformationNormalError {
     /// quantity) came out non-finite or non-positive where positive
     /// finite is required.
     NonFinite { reason: String },
-    /// The fitted monotone transform's derivative dropped to or below
-    /// zero, or the response endpoint ordering required by the latent
-    /// score (lower < h < upper) was not satisfied at evaluation time.
+    /// The fitted monotone transform's derivative dropped to or below zero.
     MonotonicityViolated { reason: String },
-    /// A numerical step that maps through the standard-normal CDF
-    /// (endpoint mass, log-difference, PIT probability, derivative
-    /// ratio) underflowed or became non-representable at the requested
-    /// arguments.
-    NumericalFailure { reason: String },
-    /// A prediction evaluated the transform at a response/covariate point
-    /// whose transformed value falls outside the certified positivity
-    /// domain `[lower, upper]` by more than the boundary-roundoff floor.
-    /// Under the direct-α cutover (gam#2306) monotonicity is certified only
-    /// on the fitted rows (via the factored Khatri-Rao cone) and the
-    /// persisted domain certificate; extrapolation past that support is a
-    /// typed refusal, never a clamped/fabricated tail quantile.
-    OutsideCertifiedDomain { reason: String },
 }
 
 impl_reason_error_boilerplate! {
@@ -54,8 +39,6 @@ impl_reason_error_boilerplate! {
         DesignDegenerate,
         NonFinite,
         MonotonicityViolated,
-        NumericalFailure,
-        OutsideCertifiedDomain,
     }
 }
 

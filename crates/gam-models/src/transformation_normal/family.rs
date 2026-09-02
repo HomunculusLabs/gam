@@ -901,7 +901,7 @@ impl TransformationNormalFamily {
         let beta_mat = beta
             .view()
             .into_shape_with_order((p_resp, p_cov))
-            .map_err(|e| format!("SCOP endpoint beta reshape failed: {e}"))?;
+            .map_err(|e| format!("SCOP coefficient reshape failed: {e}"))?;
         let cov = self.covariate_dense_arc()?;
 
         // Direct-α CTN (gam#2306): h(y, x) = α_0(x) + Σ_k α_k(x) · I_k(y),

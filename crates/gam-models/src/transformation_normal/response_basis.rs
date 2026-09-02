@@ -48,9 +48,9 @@ pub(crate) fn build_response_basis(
         }
         .into());
     }
-    // The knot vector, and with it the certified response support `[y_lo, y_hi]`
-    // every PIT is normalized against. A caller that has already resolved it
-    // supplies it verbatim; see `ctn_response_knots` for why the cross-fit must.
+    // The knot vector fixes both the response-basis chart and the anchors of
+    // its affine tails. A caller that has already resolved it supplies it
+    // verbatim; see `ctn_response_knots` for why the cross-fit must.
     let knots = ctn_resolved_response_knots(
         response.view(),
         response_degree,

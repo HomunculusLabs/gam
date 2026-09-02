@@ -168,9 +168,9 @@ impl ExactNewtonJointHessianWorkspace for TransformationNormalJointHessianWorksp
     ///   workspace's bounded dense cache is enabled. The operator diagonal and
     ///   first HVP both populate that exact same cache, so returning `Operator`
     ///   would hide an already-materialized Hessian behind an SPD-PCG contract.
-    ///   That loses the negative-curvature certificate and hard-case step needed
-    ///   by the exact MLT objective while saving no row work. Wider
-    ///   systems, for which the cache is disabled, remain streamed.
+    ///   That hides the exact spectral/KKT geometry the dense solver can read
+    ///   directly while saving no row work. Wider systems, for which the cache
+    ///   is disabled, remain streamed.
     /// - `LogdetFactorization` factorizes `H + S_λ` and therefore needs a dense
     ///   matrix regardless. Returning `Operator` here only makes the dispatch
     ///   wrap the HVP and forces the logdet consumer to immediately re-densify

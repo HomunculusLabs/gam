@@ -58,10 +58,9 @@ pub const CTN_LOCATION_COLUMNS: usize = 1;
 
 /// Fraction of the response span by which the certified support is widened past
 /// the observed extremes, so every observation the knots were built from sits
-/// STRICTLY inside `[y_lo, y_hi]` rather than on its boundary. A response
-/// exactly at an endpoint would make its PIT exactly `0` or `1` and clip, which
-/// is a real score for a genuinely extreme observation but a fabricated one for
-/// the sample maximum of any finite sample.
+/// strictly inside `[y_lo, y_hi]` rather than on its boundary. The training
+/// extremes therefore remain in the spline interior instead of defining the
+/// first points of the affine-tail continuation.
 pub const CTN_RESPONSE_SUPPORT_GUARD_FRACTION: f64 = 1.0e-3;
 
 /// Response-direction basis rows for one observation, in the chart's own order.
@@ -219,8 +218,8 @@ pub fn ctn_response_knot_count(
 }
 
 /// The clamped I-spline knot vector for a response column, and with it the
-/// **certified response support** `[knots.first, knots.last]` that every PIT
-/// normalizes against.
+/// spline interval `[knots.first, knots.last]` whose endpoints anchor the two
+/// affine tails.
 ///
 /// Interior knots come from the wiggle seed; the boundary repeats are pinned to
 /// `[min − guard, max + guard]` with a guard of `0.1 %` of the response span, so
@@ -230,13 +229,11 @@ pub fn ctn_response_knot_count(
 /// `super::build_response_basis` because the support it defines is a *shared*
 /// object whenever more than one CTN fit has to produce comparable scores. The
 /// cross-fit Stage-1 calibration is exactly that case: it refits the CTN on each
-/// fold complement and evaluates the score on the held-out rows, so a
-/// fold-local support both (a) fails outright on whichever fold holds out a
-/// response extreme — the held-out row is then outside its own fold's certified
-/// domain and the PIT refuses it — and (b) when it does not fail, assembles the
-/// out-of-fold score from `K` PITs taken against `K` *different* truncations,
-/// which is not one latent scale. Resolving it once on the full response and
-/// pinning it (`TransformationNormalConfig::response_knots_pinned`) removes both.
+/// fold complement and evaluates the score on the held-out rows, so resolving
+/// knots separately would express the `K` transforms in `K` different response
+/// charts with different affine-tail anchors. Resolving once on the full
+/// response and pinning it (`TransformationNormalConfig::response_knots_pinned`)
+/// keeps the chart shared.
 pub fn ctn_response_knots(
     response: ArrayView1<'_, f64>,
     response_degree: usize,

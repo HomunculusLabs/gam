@@ -593,12 +593,12 @@ impl TransformationNormalFamily {
     ///
     /// Computes the projected trace `tr(factor^T B_e factor)` for every axis
     /// `e` in `0..cov_psi_per_axis.len()` in ONE row-streaming parallel pass.
-    /// Per-row state that is independent of the ψ axis (γ, γ_dir, h_dir,
-    /// hp_dir, h_vv, hp_vv, endpoint_dir, endpoint_vv) is computed exactly
-    /// once per row and reused across every axis; only the ψ-row-driven
-    /// axis-DEP state (γ_psi, γ_psi_dir, h_psi, hp_psi, endpoint_psi, the
-    /// `*_psi_dir` / `*_psi_vv` buffers and the per-axis trace contribution)
-    /// is recomputed inside the per-row axis loop.
+    /// Per-row state that is independent of the ψ axis (`γ`, `γ_dir`,
+    /// `h_dir`, `hp_dir`, `h_vv`, `hp_vv`) is computed exactly once per row
+    /// and reused across every axis; only the ψ-row-driven axis-dependent
+    /// state (`γ_psi`, `γ_psi_dir`, `h_psi`, `hp_psi`, the `*_psi_dir` /
+    /// `*_psi_vv` buffers and the per-axis trace contribution) is recomputed
+    /// inside the per-row axis loop.
     ///
     /// The arithmetic is reorganised but bit-identical to running
     /// [`scop_psi_hessian_trace_factor_from_cov`] once per axis: the same
