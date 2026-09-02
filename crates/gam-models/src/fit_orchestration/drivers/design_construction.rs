@@ -7798,6 +7798,22 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
         // post-freeze), so per-trial rebuilds move only the dials; the
         // coordinate layout, zero design drift, and shared candidate
         // normalization are owned by `build_measure_jet_basis_psi_derivatives`.
+        //
+        // The chart the jets are built in is the FITTED one. The incremental
+        // realizer hands this builder a spec whose identifiability has been put
+        // back into the TERM-LOCAL chart `z_local` (see
+        // `restore_local_identifiability_chart`, gam#2760) so that a design
+        // REBUILD can apply the collection gauge's fixed `T0` itself. A ψ-jet
+        // must differentiate the design the criterion is built on, and that
+        // design lives in the composition `z_local · T0` the realized term's
+        // metadata records — the same frozen chart the Duchon arm below replays
+        // from its metadata. Built on `z_local` alone, every jet came out
+        // `local_columns` wide against a `coeff_range` one gauge rank narrower,
+        // the width check below declined the term, and the whole measure-jet ψ
+        // search aborted at revision 0 (`failed to build anisotropic hyper_dirs
+        // at current psi` on the 3-D/5-D helix and the 1-D formula fixtures).
+        // The collection's fixed row-space projection is applied afterwards,
+        // where every arm's jets receive it.
         SmoothBasisSpec::MeasureJet {
             feature_cols,
             spec,
@@ -7807,7 +7823,18 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
             if let Some(scale) = input_scale {
                 scale.standardize(&mut x);
             }
-            build_measure_jet_basis_psi_derivatives(x.view(), spec)
+            let mut spec_fitted_chart = spec.clone();
+            if let BasisMetadata::MeasureJet {
+                constraint_transform: Some(transform),
+                ..
+            } = &smooth_term.metadata
+            {
+                spec_fitted_chart.identifiability =
+                    gam_terms::basis::MeasureJetIdentifiability::FrozenTransform {
+                        transform: transform.clone(),
+                    };
+            }
+            build_measure_jet_basis_psi_derivatives(x.view(), &spec_fitted_chart)
                 .map_err(EstimationError::from)?
         }
         // gam#2735 — the hybrid Duchon's per-axis η, on the SAME frozen chart
