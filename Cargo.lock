@@ -3753,6 +3753,7 @@ dependencies = [
  "gam-math",
  "gam-problem",
  "gam-runtime",
+ "gam-spec",
  "gam-solve",
  "libm",
  "ndarray 0.17.2",
