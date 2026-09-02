@@ -2322,11 +2322,15 @@ pub(crate) fn schur_inverse_deflated_finite_at_boundary_matches_plain_interior()
         [0.0, 1.5, 0.0],
         [0.0, 0.0, 1.0]
     ]);
-    boundary.beta_schur_deflation = Some(BetaSchurDeflationSpectrum {
+    boundary.beta_schur_conditioning = Some(BetaSchurConditioningSpectrum {
         evecs: Array2::<f64>::eye(kb),
         raw_evals: array![4.0_f64, 2.25, 0.0],
         cond_evals: array![4.0_f64, 2.25, 1.0],
-        deflated: std::sync::Arc::from([false, false, true]),
+        conditioning: std::sync::Arc::from([
+            BetaSchurSpectralConditioning::Raw,
+            BetaSchurSpectralConditioning::Raw,
+            BetaSchurSpectralConditioning::UnitDeflated,
+        ]),
     });
     // The htbeta coupling is irrelevant to the β-Schur back-substitution under
     // test; drop it so the cloned d=2 row blocks (built for k=2) cannot be
@@ -6927,7 +6931,7 @@ fn factor_dense_reduced_schur_reconstructs_original_illconditioned_matrix_2015()
     let DenseReducedSchurFactorization {
         factor,
         conditioned_schur: floored,
-        beta_deflation: _,
+        beta_conditioning: _,
     } = factor_dense_reduced_schur(&schur, ReducedSchurPolicy::StrictNewton)
         .expect("planted matrix is PD");
     assert!(
@@ -7004,10 +7008,16 @@ fn evidence_beta_schur_boundary_has_unit_logdet_and_authoritative_mask_2308() {
         )
         .expect("evidence unit deflation");
         let spectrum = evidence
-            .beta_deflation
+            .beta_conditioning
             .as_ref()
             .expect("sub-floor β direction must carry metadata");
-        assert_eq!(&*spectrum.deflated, &[true, false]);
+        assert_eq!(
+            &*spectrum.conditioning,
+            &[
+                BetaSchurSpectralConditioning::UnitDeflated,
+                BetaSchurSpectralConditioning::Raw,
+            ]
+        );
         assert_eq!(
             spectrum.raw_evals[0].is_sign_negative(),
             collapsed.is_sign_negative(),
@@ -7085,7 +7095,7 @@ fn evidence_beta_schur_interior_is_raw_and_newton_boundary_is_tikhonov_2308() {
         },
     )
     .expect("interior evidence factor");
-    assert!(evidence.beta_deflation.is_none());
+    assert!(evidence.beta_conditioning.is_none());
     assert!(evidence.conditioned_schur.is_none());
     let evidence_log_det = (0..2)
         .map(|axis| 2.0 * evidence.factor[[axis, axis]].ln())
@@ -7100,7 +7110,7 @@ fn evidence_beta_schur_interior_is_raw_and_newton_boundary_is_tikhonov_2308() {
         },
     )
     .expect("Newton Tikhonov factor");
-    assert!(newton.beta_deflation.is_none());
+    assert!(newton.beta_conditioning.is_none());
     let newton_conditioned = newton
         .conditioned_schur
         .as_ref()
@@ -7140,10 +7150,16 @@ fn evidence_cache_boundary_is_invariant_to_newton_damping_history_2308() {
             epsilon = 2e-14
         );
         let spectrum = cache
-            .beta_schur_deflation
+            .beta_schur_conditioning
             .as_ref()
             .expect("β-null metadata reached cache");
-        assert_eq!(&*spectrum.deflated, &[true, false]);
+        assert_eq!(
+            &*spectrum.conditioning,
+            &[
+                BetaSchurSpectralConditioning::UnitDeflated,
+                BetaSchurSpectralConditioning::Raw,
+            ]
+        );
         let null_rhs = array![0.0_f64, 1.0];
         let solved = cache
             .schur_inverse_apply(null_rhs.view())
@@ -7822,11 +7838,11 @@ fn evidence_classification_prices_a_clamp_basin_before_refusing_a_saddle_2515() 
     let pinned = factor_dense_reduced_schur(&resolved_negative, majorizer)
         .expect("the majorizer policy conditions a negative direction rather than refusing");
     let spectrum = pinned
-        .beta_deflation
+        .beta_conditioning
         .as_ref()
         .expect("the majorizer policy records the direction it pinned");
-    let pinned_indices: Vec<usize> = (0..spectrum.deflated.len())
-        .filter(|&index| spectrum.deflated[index])
+    let pinned_indices: Vec<usize> = (0..spectrum.conditioning.len())
+        .filter(|&index| spectrum.conditioning[index].is_unit_deflated())
         .collect();
     assert_eq!(
         pinned_indices.len(),
@@ -7857,6 +7873,18 @@ fn evidence_classification_prices_a_clamp_basin_before_refusing_a_saddle_2515() 
          is a basin, not a saddle",
     );
     let reconstructed_basin = basin.factor.dot(&basin.factor.t());
+    let basin_spectrum = basin
+        .beta_conditioning
+        .as_ref()
+        .expect("#2515: clamp-basin conditioning must retain its derivative carrier");
+    assert_eq!(
+        basin_spectrum.conditioning[0],
+        BetaSchurSpectralConditioning::Raw
+    );
+    assert_eq!(
+        basin_spectrum.conditioning[1],
+        BetaSchurSpectralConditioning::ClampBasin
+    );
     assert_abs_diff_eq!(
         reconstructed_basin[[1, 1]],
         -7.997_610e-3 + 2.0e-2,
@@ -7907,11 +7935,11 @@ fn evidence_classification_prices_a_clamp_basin_before_refusing_a_saddle_2515() 
                     )
                 });
         let spectrum = conditioned
-            .beta_deflation
+            .beta_conditioning
             .as_ref()
             .unwrap_or_else(|| panic!("#2515: the {label} in-band direction must be recorded"));
-        let pinned: Vec<usize> = (0..spectrum.deflated.len())
-            .filter(|&index| spectrum.deflated[index])
+        let pinned: Vec<usize> = (0..spectrum.conditioning.len())
+            .filter(|&index| spectrum.conditioning[index].is_unit_deflated())
             .collect();
         assert_eq!(
             pinned.len(),

@@ -86,7 +86,7 @@ pub fn solve_arrow_newton_step_with_options(
     // nulls and must surface the corresponding gradient metadata.
     let htt_factors = step.htt_factors;
     let mut schur_factor = step.schur_factor;
-    let mut beta_schur_deflation = None;
+    let mut beta_schur_conditioning = None;
     let schur_log_det_override = step.schur_log_det_override;
     // The per-row deflated directions describe exactly the independently-built
     // evidence factors consumed by the selected inverse.
@@ -130,7 +130,7 @@ pub fn solve_arrow_newton_step_with_options(
         let DenseReducedSchurFactorization {
             factor: evidence_schur_factor,
             conditioned_schur: floored_evidence_schur,
-            beta_deflation: evidence_beta_deflation,
+            beta_conditioning: evidence_beta_conditioning,
         } = factor_dense_reduced_schur_with_exact_a(
             &evidence_schur,
             options.evidence_policy.reduced_schur_policy(),
@@ -138,7 +138,7 @@ pub fn solve_arrow_newton_step_with_options(
         )?;
         drop(floored_evidence_schur);
         schur_factor = Some(evidence_schur_factor);
-        beta_schur_deflation = evidence_beta_deflation;
+        beta_schur_conditioning = evidence_beta_conditioning;
         schur_factor_is_undamped = true;
         beta_gauge_factor_is_pinned = sys.beta_gauge_quotient.is_some();
     }
@@ -148,7 +148,7 @@ pub fn solve_arrow_newton_step_with_options(
         htt_factors_undamped,
         schur_factor,
         schur_factor_is_undamped,
-        beta_schur_deflation,
+        beta_schur_conditioning,
         joint_hessian_log_det: None,
         solver_mode: options.mode,
         ridge_t,
@@ -1443,7 +1443,7 @@ pub(crate) fn try_mixed_precision_arrow_solve(
     let DenseReducedSchurFactorization {
         factor: schur_factor,
         conditioned_schur: floored_schur,
-        beta_deflation: _,
+        beta_conditioning: _,
     } = factor_dense_reduced_schur(
         schur,
         ReducedSchurPolicy::newton(options.newton_schur_tikhonov_rel_floor),

@@ -646,7 +646,7 @@ fn factor_evidence_unit_deflated_schur(
         ));
     }
     let deflate_floor = relative_floor * max_abs * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
-    let mut deflated = vec![false; raw_evals.len()];
+    let mut conditioning = vec![BetaSchurSpectralConditioning::Raw; raw_evals.len()];
     let mut cond_evals = raw_evals.clone();
     let mut classification_changed = false;
     for eig_idx in 0..raw_evals.len() {
@@ -667,11 +667,12 @@ fn factor_evidence_unit_deflated_schur(
                     cond_evals[eig_idx] = curvature;
                 }
                 ExactADirectionClassification::NumericalNull => {
-                    deflated[eig_idx] = true;
+                    conditioning[eig_idx] = BetaSchurSpectralConditioning::UnitDeflated;
                     cond_evals[eig_idx] = 1.0;
                     classification_changed = true;
                 }
                 ExactADirectionClassification::ClampBasin { curvature } => {
+                    conditioning[eig_idx] = BetaSchurSpectralConditioning::ClampBasin;
                     cond_evals[eig_idx] = curvature;
                     classification_changed = true;
                 }
@@ -687,8 +688,9 @@ fn factor_evidence_unit_deflated_schur(
                 }
             }
         } else if !value.is_finite() || value < deflate_floor {
-            deflated[eig_idx] = true;
+            conditioning[eig_idx] = BetaSchurSpectralConditioning::UnitDeflated;
             cond_evals[eig_idx] = 1.0;
+            classification_changed = true;
         }
     }
 
@@ -696,7 +698,6 @@ fn factor_evidence_unit_deflated_schur(
     // If Cholesky alone is numerically unable to factor a spectrally healthy
     // operator, the spectral QR below still factors the identical raw spectrum.
     if !classification_changed
-        && !deflated.iter().any(|&is_deflated| is_deflated)
         && let Ok(interior) = factor_dense_reduced_schur(schur, ReducedSchurPolicy::StrictNewton)
     {
         return Ok(interior);
@@ -722,20 +723,16 @@ fn factor_evidence_unit_deflated_schur(
     }
     let factor = spectral_qr_cholesky_factor(&weighted_vt)
         .ok_or_else(|| declined("spectral QR Cholesky of the conditioned spectrum declined"))?;
-    let beta_deflation =
-        deflated
-            .iter()
-            .any(|&is_deflated| is_deflated)
-            .then(|| BetaSchurDeflationSpectrum {
-                evecs,
-                raw_evals,
-                cond_evals,
-                deflated: deflated.into(),
-            });
+    let beta_conditioning = classification_changed.then(|| BetaSchurConditioningSpectrum {
+        evecs,
+        raw_evals,
+        cond_evals,
+        conditioning: conditioning.into(),
+    });
     Ok(DenseReducedSchurFactorization {
         factor,
-        conditioned_schur: beta_deflation.as_ref().map(|_| conditioned),
-        beta_deflation,
+        conditioned_schur: beta_conditioning.as_ref().map(|_| conditioned),
+        beta_conditioning,
     })
 }
 
@@ -855,7 +852,7 @@ impl ReducedSchurPolicy {
 pub(crate) struct DenseReducedSchurFactorization {
     pub(crate) factor: Array2<f64>,
     pub(crate) conditioned_schur: Option<Array2<f64>>,
-    pub(crate) beta_deflation: Option<BetaSchurDeflationSpectrum>,
+    pub(crate) beta_conditioning: Option<BetaSchurConditioningSpectrum>,
 }
 
 /// Majorizer and clamp quadratic forms on the exact-A Schur graph
@@ -1149,7 +1146,7 @@ pub(crate) fn factor_dense_reduced_schur_with_exact_a(
     Ok(DenseReducedSchurFactorization {
         factor,
         conditioned_schur: floored_schur,
-        beta_deflation: None,
+        beta_conditioning: None,
     })
 }
 
@@ -1163,7 +1160,7 @@ pub(crate) fn solve_dense_reduced_system(
     let DenseReducedSchurFactorization {
         factor,
         conditioned_schur: floored_schur,
-        beta_deflation: _,
+        beta_conditioning: _,
     } = factor_dense_reduced_schur(schur, policy)?;
     if let Some(floored) = floored_schur {
         let direct = mixed_precision_reduced_beta(&floored, &factor, rhs_beta, options)
@@ -2348,7 +2345,7 @@ pub fn matrix_free_arrow_evidence_evaluation(
         htt_factors_undamped: ArrowUndampedFactors::SameAsDamped,
         schur_factor: None,
         schur_factor_is_undamped: true,
-        beta_schur_deflation: None,
+        beta_schur_conditioning: None,
         joint_hessian_log_det: Some(log_det_tt + log_det_schur),
         solver_mode: options.mode,
         ridge_t,

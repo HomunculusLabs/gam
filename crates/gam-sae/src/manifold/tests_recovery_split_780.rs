@@ -992,7 +992,7 @@ pub(crate) fn near_singular_outer_gradient_cache() -> ArrowFactorCache {
         htt_factors_undamped: ArrowUndampedFactors::SameAsDamped,
         schur_factor: Some(array![[1.0_f64]]),
         schur_factor_is_undamped: true,
-        beta_schur_deflation: None,
+        beta_schur_conditioning: None,
         joint_hessian_log_det: None,
         solver_mode: ArrowSolverMode::Direct,
         ridge_t: 0.0,
@@ -1023,7 +1023,7 @@ pub(crate) fn diagonal_latent_cache(diagonal: &[f64]) -> ArrowFactorCache {
         htt_factors_undamped: ArrowUndampedFactors::SameAsDamped,
         schur_factor: None,
         schur_factor_is_undamped: true,
-        beta_schur_deflation: None,
+        beta_schur_conditioning: None,
         joint_hessian_log_det: None,
         solver_mode: ArrowSolverMode::Direct,
         ridge_t: 0.0,
@@ -1183,7 +1183,7 @@ pub(crate) fn rank_deficient_beta_outer_gradient_cache() -> ArrowFactorCache {
         htt_factors_undamped: ArrowUndampedFactors::SameAsDamped,
         schur_factor: Some(schur),
         schur_factor_is_undamped: true,
-        beta_schur_deflation: None,
+        beta_schur_conditioning: None,
         joint_hessian_log_det: None,
         solver_mode: ArrowSolverMode::Direct,
         ridge_t: 0.0,
@@ -1584,9 +1584,15 @@ impl FiniteDifferenceStratumCertificate {
                 })
                 .collect(),
             beta_schur_deflated: cache
-                .beta_schur_deflation
+                .beta_schur_conditioning
                 .as_ref()
-                .map(|spectrum| spectrum.deflated.to_vec()),
+                .map(|spectrum| {
+                    spectrum
+                        .conditioning
+                        .iter()
+                        .map(|state| state.is_unit_deflated())
+                        .collect()
+                }),
             beta_gauge_rank: cache
                 .beta_gauge_quotient
                 .as_ref()

@@ -1245,13 +1245,15 @@ fn zz_attribute_deflated_route_classification_2515() {
         "[#2515 CLASSIFY] arrow rows: pinned={arrow_pinned} \
          sum_log_cond_row={arrow_row_log_det:.10e}"
     );
-    match a_cache.beta_schur_deflation.as_ref() {
+    match a_cache.beta_schur_conditioning.as_ref() {
         Some(spectrum) => {
             for idx in 0..spectrum.raw_evals.len() {
                 println!(
                     "[#2515 CLASSIFY] arrow schur dir {idx}: lambda={:+.6e} cond={:+.6e} \
                      deflated={}",
-                    spectrum.raw_evals[idx], spectrum.cond_evals[idx], spectrum.deflated[idx]
+                    spectrum.raw_evals[idx],
+                    spectrum.cond_evals[idx],
+                    spectrum.conditioning[idx].is_unit_deflated()
                 );
             }
         }
@@ -1826,13 +1828,25 @@ fn zz_attribute_the_broken_ladder_rung_2515() {
             .filter(|d| !d.is_empty())
             .count();
         let a_beta_deflated = a_cache
-            .beta_schur_deflation
+            .beta_schur_conditioning
             .as_ref()
-            .map(|spectrum| spectrum.deflated.iter().filter(|d| **d).count());
+            .map(|spectrum| {
+                spectrum
+                    .conditioning
+                    .iter()
+                    .filter(|state| state.is_unit_deflated())
+                    .count()
+            });
         let b_beta_deflated = b_cache
-            .beta_schur_deflation
+            .beta_schur_conditioning
             .as_ref()
-            .map(|spectrum| spectrum.deflated.iter().filter(|d| **d).count());
+            .map(|spectrum| {
+                spectrum
+                    .conditioning
+                    .iter()
+                    .filter(|state| state.is_unit_deflated())
+                    .count()
+            });
 
         // The dense classification on the same state.
         let a_dense = term
@@ -1926,13 +1940,13 @@ fn zz_attribute_the_broken_ladder_rung_2515() {
              a_rows_deflated={a_deflated} b_beta_deflated={b_beta_deflated:?} \
              a_beta_deflated={a_beta_deflated:?}{dense_report}"
         );
-        if let Some(spectrum) = a_cache.beta_schur_deflation.as_ref() {
+        if let Some(spectrum) = a_cache.beta_schur_conditioning.as_ref() {
             let norm = spectrum
                 .raw_evals
                 .iter()
                 .fold(0.0_f64, |acc, &v| acc.max(v.abs()));
             for idx in 0..spectrum.raw_evals.len() {
-                if spectrum.deflated[idx] {
+                if spectrum.conditioning[idx].is_unit_deflated() {
                     println!(
                         "[#2515 RUNG] smooth={smooth:.2} S_A dir {idx}: raw={:+.6e} \
                          cond={:+.6e} relative={:+.6e} (floor {:.6e})",

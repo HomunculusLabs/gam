@@ -2530,15 +2530,34 @@ pub struct RowDeflationSpectrum {
     pub conditioning: Arc<[RowSpectralConditioning]>,
 }
 
-/// Raw and conditioned eigenspectrum of an evidence β-Schur that underwent
-/// unit deflation. `deflated[m]` is authoritative: a conditioned eigenvalue of
-/// one is not itself evidence that the direction is a quotient null.
+/// The classification applied to one raw evidence β-Schur eigendirection.
+/// Numeric equality between raw and conditioned curvature cannot identify the
+/// branch: a raw eigenvalue may already equal one, and a clamp-basin price may
+/// happen to equal its raw curvature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BetaSchurSpectralConditioning {
+    Raw,
+    UnitDeflated,
+    ClampBasin,
+}
+
+impl BetaSchurSpectralConditioning {
+    #[must_use]
+    pub fn is_unit_deflated(self) -> bool {
+        matches!(self, Self::UnitDeflated)
+    }
+}
+
+/// Raw and conditioned eigenspectrum of an evidence β-Schur whose classifier
+/// changed at least one direction. This includes quotient-null unit pins and
+/// bounded-clamp basin prices: both branches must remain visible so the
+/// derivative can differentiate the same spectral map as the value (#2515).
 #[derive(Debug, Clone)]
-pub struct BetaSchurDeflationSpectrum {
+pub struct BetaSchurConditioningSpectrum {
     pub evecs: Array2<f64>,
     pub raw_evals: Array1<f64>,
     pub cond_evals: Array1<f64>,
-    pub deflated: Arc<[bool]>,
+    pub conditioning: Arc<[BetaSchurSpectralConditioning]>,
 }
 
 #[derive(Debug, Clone)]
@@ -2572,11 +2591,10 @@ pub struct ArrowFactorCache {
     /// consumers must not combine `schur_factor` with [`Self::undamped_factor`]:
     /// that would mix two different bordered-arrow operators.
     pub schur_factor_is_undamped: bool,
-    /// Authoritative original-coordinate spectrum and null mask used when the
-    /// undamped evidence β-Schur was unit-deflated. The mask, rather than a
-    /// threshold re-derived from `L Lᵀ`, defines which directions contribute
-    /// `log 1 = 0` to the value and zero to every inverse/trace contraction.
-    pub beta_schur_deflation: Option<BetaSchurDeflationSpectrum>,
+    /// Authoritative original-coordinate spectrum and typed classification used
+    /// when the undamped evidence β-Schur was conditioned. No consumer may
+    /// reconstruct the branch from numeric eigenvalue equality.
+    pub beta_schur_conditioning: Option<BetaSchurConditioningSpectrum>,
     /// Exact undamped joint-Hessian log-determinant produced by the dense
     /// factorization path. REML evidence consumes this directly so the Laplace
     /// normalizer cannot miss the log-det even when later cache consumers only
@@ -3228,7 +3246,7 @@ impl ArrowFactorCache {
                 ),
             });
         }
-        if self.beta_schur_deflation.is_some() {
+        if self.beta_schur_conditioning.is_some() {
             let deflated = self.deflated_schur_pseudo_inverse()?;
             return Ok(self.apply_deflated_pseudo_inverse(&deflated, rhs));
         }
@@ -3450,20 +3468,20 @@ impl ArrowFactorCache {
             });
         }
         let k = self.k;
-        if let Some(spectrum) = self.beta_schur_deflation.as_ref() {
+        if let Some(spectrum) = self.beta_schur_conditioning.as_ref() {
             if spectrum.evecs.dim() != (k, k)
                 || spectrum.raw_evals.len() != k
                 || spectrum.cond_evals.len() != k
-                || spectrum.deflated.len() != k
+                || spectrum.conditioning.len() != k
             {
                 return Err(ArrowSchurError::SchurFactorFailed {
-                    reason: "cached β-Schur deflation spectrum has incoherent dimensions"
+                    reason: "cached β-Schur conditioning spectrum has incoherent dimensions"
                         .to_string(),
                 });
             }
             let mut inv_evals = Array1::<f64>::zeros(k);
             for eig_idx in 0..k {
-                if spectrum.deflated[eig_idx] {
+                if spectrum.conditioning[eig_idx].is_unit_deflated() {
                     continue;
                 }
                 let lambda = spectrum.cond_evals[eig_idx];
@@ -3516,7 +3534,7 @@ impl ArrowFactorCache {
         // No evidence deflation was performed, so every factor eigenvalue is
         // part of the value and must remain part of the inverse. Boundary rank
         // decisions are made once during evidence factorization and carried in
-        // `beta_schur_deflation`; inferring a new mask from the conditioned
+        // `beta_schur_conditioning`; inferring a new mask from the conditioned
         // factor would desynchronize the value and its gradient.
         let inv_evals = evals.mapv(|lambda| 1.0 / lambda);
         Ok(DeflatedSchurPseudoInverse { evecs, inv_evals })
