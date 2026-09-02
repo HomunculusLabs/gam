@@ -4890,21 +4890,24 @@ impl SaeManifoldTerm {
     /// `∂B/∂θ + ∂ΔC_ard/∂θ` but NOT the residual-curvature / softmax-entropy legs
     /// of `∂ΔC/∂θ` (Patch D). Until D lands, Γ_eff — hence the IFT correction — is
     /// missing that term and the conservation bisection stays red by exactly it.
-    /// #2336 flag-1 — cluster-stable eigendecomposition for the E-attributability
-    /// pricing. Within any eigenvalue cluster whose consecutive gaps sit below the
-    /// eigenvector-resolution gap `√ε·‖A‖₂`, `eigh`'s eigenvectors are arbitrary
-    /// to leading order (an eigenvector's perturbation under a backward error
-    /// `‖E‖ ~ ε‖A‖₂` is `~ ‖E‖/gap`, so a gap at `√ε·‖A‖₂` already leaves the
-    /// direction determined only to `√ε`), so the per-vector price
-    /// `e_i = vᵀEv` and the Daleckii–Krein denominators `(λ_i−λ_j)` are both
-    /// ill-defined. This rotates the eigenbasis WITHIN each such cluster to
-    /// diagonalize `E` restricted to it: `vᵀEv` becomes basis-unambiguous (the
-    /// cluster's `E`-eigenvalues) and the intra-cluster `vᵢᵀEvⱼ` vanish exactly, so
-    /// the K terms that would divide by a sub-floor gap are removed at source. The
-    /// eigenvalues are untouched; a fixture with no clustered spectrum returns the
-    /// plain decomposition bit-for-bit. `e_diag` is the t-block diagonal of `E`
-    /// (zero on the β border), so the restriction reads only the first `total_t`
-    /// rows of each eigenvector.
+    /// #2336 flag-1 — eigendecomposition with an `E`-canonical basis inside
+    /// exactly repeated eigenspaces.
+    ///
+    /// A basis rotation preserves the eigenpair equation `A V = V diag(λ)` only
+    /// when every rotated eigenvalue is identical. The previous implementation
+    /// also rotated merely near-equal eigenvalues (gap at most `√ε·‖A‖₂`) while
+    /// leaving their distinct eigenvalues attached to the rotated columns. That
+    /// produced a matrix called a priced inverse which was not the inverse of the
+    /// operator whose eigenvalues the value summed; #2515 measured direct trace
+    /// derivatives of `5.340922` and `5.146446` for two scalar values whose
+    /// derivatives were both `4.974886`.
+    ///
+    /// Repeated eigenvalues genuinely have an arbitrary eigenspace basis, so
+    /// those and only those runs are resolved against the restriction of `E`.
+    /// Distinct eigenvalues retain the actual `eigh` columns, however small their
+    /// gap: numerical uncertainty cannot authorize returning false eigenpairs.
+    /// `e_diag` is the t-block diagonal of `E` (zero on the β border), so the
+    /// repeated-space restriction reads only the first `total_t` rows.
     pub(crate) fn cluster_stable_eigh(
         m: &Array2<f64>,
         e_diag: &Array1<f64>,
@@ -4921,20 +4924,10 @@ impl SaeManifoldTerm {
             .eigh(Side::Lower)
             .map_err(|e| format!("cluster_stable_eigh: eigh failed: {e:?}"))?;
         let dim = eigs.len();
-        // #2673 — this is a GAP threshold, not a classification floor, and it
-        // used to borrow the retired absolute PD constant for the job. What
-        // decides whether two computed eigenvectors are separable is the
-        // eigenvector perturbation `~ε‖A‖₂/gap`; a gap below `√ε·‖A‖₂` leaves
-        // the pair determined to no better than `√ε`, which is exactly when the
-        // cluster must be re-resolved against `E` instead of trusted. Both
-        // factors are derived: `‖A‖₂ = maxᵢ|λᵢ|` and the scalar type's own
-        // `√ε`.
-        let spectral_norm = eigs.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
-        let floor = sae_exact_a_identifiability_floor() * spectral_norm;
         let mut i = 0usize;
         while i < dim {
             let mut j = i + 1;
-            while j < dim && (eigs[j] - eigs[j - 1]).abs() <= floor {
+            while j < dim && eigs[j] == eigs[i] {
                 j += 1;
             }
             let width = j - i;

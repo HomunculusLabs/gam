@@ -111,6 +111,40 @@ fn fully_degenerate_cluster_diagonalizes_direct_e_diag_2267() {
     );
 }
 
+/// #2515 regression — a small but nonzero eigenvalue gap does not define a
+/// rotatable eigenspace. Even when the gap is below the old `sqrt(eps) * ||A||`
+/// clustering threshold, the returned columns must remain eigenvectors of the
+/// returned eigenvalues. Rotating them against `E` while leaving the distinct
+/// eigenvalues untouched constructs a false inverse and breaks the derivative
+/// of the log-determinant value.
+#[test]
+fn nearly_degenerate_distinct_spectrum_preserves_eigenpairs_2515() {
+    let root_half = 0.5_f64.sqrt();
+    let rotation = ndarray::array![[root_half, -root_half], [root_half, root_half]];
+    let gap = 1.0e-9_f64;
+    let diagonal = Array2::from_diag(&ndarray::array![3.0, 3.0 + gap]);
+    let operator = rotation.dot(&diagonal.dot(&rotation.t()));
+    // This diagonal is deliberately not diagonal in the eigenbasis of A, so the
+    // retired near-cluster rule performs a nontrivial, invalid rotation.
+    let e_diag = ndarray::array![1.0, 2.0];
+
+    let (eigenvalues, eigenvectors) =
+        SaeManifoldTerm::cluster_stable_eigh(&operator, &e_diag, 2)
+            .expect("the near-degenerate exact-A spectrum must decompose");
+    let residual = operator.dot(&eigenvectors)
+        - eigenvectors.dot(&Array2::from_diag(&eigenvalues));
+    let max_residual = residual
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    let backward_error = 32.0 * f64::EPSILON * 2.0 * (3.0 + gap);
+    assert!(
+        max_residual <= backward_error,
+        "cluster-stable eigensystem violates A V = V diag(lambda): \
+         max residual {max_residual:.6e}, backward-error allowance {backward_error:.6e}"
+    );
+}
+
 /// #2336 GATE — after the value-side E-attributability fix, a B-converged mode
 /// whose exact-A indefiniteness is FULLY attributable to the bounded ARD periodic
 /// concave-clamp wrinkle `E` prices a FINITE criterion (basin curvature `λ+e_v ≥ 0`
