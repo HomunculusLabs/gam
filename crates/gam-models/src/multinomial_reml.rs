@@ -450,6 +450,7 @@ struct FisherDirection {
 struct PerturbedMass<S> {
     probability: f64,
     direction_u: f64,
+    direction_v: f64,
     weight: f64,
     mass: S,
 }
@@ -563,11 +564,29 @@ impl FisherPerturbation for TwoSeed<0> {
         // Mixed second order keeps all three live channels of `mass * inverse`
         // and leaves the weight on the assembled Fisher entry
         // (`WEIGHT_IN_CHANNELS = false`), so it is not applied here.
-        let normalized = gam_math::nested_dual::JetField::mul(&perturbed.mass, inverse);
+        //
+        // `mass = p_a exp(u ε + v δ) = p_a (1 + u ε)(1 + v δ)`: the
+        // exponential's stack at zero is all ones, so its εδ coefficient is
+        // the product of its ε and δ coefficients. With `inverse.base = 1`
+        // and channels `(i, j, k)`, the product is
+        //   `p_a [1 + (u + i) ε + (v + j) δ + ((u + i)(v + j) + k − i j) εδ]`,
+        // the centred directions once and the shared `k − i j` once per
+        // class. The generic nilpotent product expands the εδ coefficient
+        // as `u v + u j + v i + k` before scaling by `p_a`, three multiplies
+        // per class more; on a 16 ns row that was the hand kernel's whole
+        // margin on two hosts (#932). Written as `del · (u + i) + p_a (k −
+        // i j)`, the mixed channel reuses the δ channel, as the hand's
+        // `derivative_v · (u − mean_u) − p · mixed_mean` does.
+        let value = <Order2<0> as gam_math::nested_dual::JetField>::value;
+        let (i, j, k) = (value(&inverse.eps), value(&inverse.del), value(&inverse.eps_del));
+        let centred_u = perturbed.direction_u + i;
+        let centred_v = perturbed.direction_v + j;
+        let eps = perturbed.probability * centred_u;
+        let del = perturbed.probability * centred_v;
         [
-            gam_math::nested_dual::JetField::value(&normalized.eps),
-            gam_math::nested_dual::JetField::value(&normalized.del),
-            gam_math::nested_dual::JetField::value(&normalized.eps_del),
+            eps,
+            del,
+            del * centred_u + perturbed.probability * (k - i * j),
         ]
     }
 
@@ -576,18 +595,27 @@ impl FisherPerturbation for TwoSeed<0> {
     where
         F: Fn(usize) -> PerturbedMass<Self>,
     {
-        let mut denominator = Self::constant(1.0);
+        // `1 + Σ_a (mass_a − p_a)`, coefficient by coefficient. The εδ
+        // coefficient `Σ_a p_a u_a v_a` reuses the ε coefficient's
+        // `p_a u_a` rather than `mass.eps_del = p_a (u_a v_a)`, which
+        // nothing else reads; the mass's own εδ product is then dead.
+        let value = <Order2<0> as gam_math::nested_dual::JetField>::value;
+        let mut eps_coefficient = 0.0;
+        let mut del_coefficient = 0.0;
+        let mut eps_del_coefficient = 0.0;
         for a in 0..m {
             let perturbed = perturbed_mass(a);
-            denominator = gam_math::nested_dual::JetField::add(
-                &denominator,
-                &gam_math::nested_dual::JetField::sub(
-                    &perturbed.mass,
-                    &Self::constant(perturbed.probability),
-                ),
-            );
+            let eps = value(&perturbed.mass.eps);
+            eps_coefficient += eps;
+            del_coefficient += value(&perturbed.mass.del);
+            eps_del_coefficient += eps * perturbed.direction_v;
         }
-        denominator
+        Self {
+            base: <Order2<0> as JetScalar<0>>::constant(1.0),
+            eps: <Order2<0> as JetScalar<0>>::constant(eps_coefficient),
+            del: <Order2<0> as JetScalar<0>>::constant(del_coefficient),
+            eps_del: <Order2<0> as JetScalar<0>>::constant(eps_del_coefficient),
+        }
     }
 }
 
@@ -693,9 +721,10 @@ fn softmax_fisher_perturbation<S: FisherPerturbation>(
     let perturbed_mass = |a| {
         let pa = probability(a);
         let direction_u = direction_u(a);
+        let direction_v = direction_v(a);
         let delta = S::seed(FisherDirection {
             u: direction_u,
-            v: direction_v(a),
+            v: direction_v,
         });
         let mass = gam_math::nested_dual::JetField::scale(
             &gam_math::nested_dual::JetField::compose_unary(&delta, [1.0; 5]),
@@ -704,6 +733,7 @@ fn softmax_fisher_perturbation<S: FisherPerturbation>(
         PerturbedMass {
             probability: pa,
             direction_u,
+            direction_v,
             weight: channel_weight,
             mass,
         }
