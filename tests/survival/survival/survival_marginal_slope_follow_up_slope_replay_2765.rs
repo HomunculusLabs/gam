@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use csv::StringRecord;
-use gam::families::survival::replay_slope_time_margin_design;
+use gam::families::survival::replay_slope_time_margin_value_tangent_design;
 use gam::inference::model::FittedModel;
 use gam::inference::model_payload_builders::fit_formula_to_payload;
 use gam::{FitConfig, encode_recordswith_inferred_schema, init_parallelism};
@@ -215,12 +215,13 @@ fn a_saved_follow_up_varying_slope_replays_the_design_it_was_fitted_against_2765
         gam_terms::smooth::build_term_collection_design(data.values.view(), &slopespec)
             .expect("rebuild the slope covariate factor");
     let exit_times = ndarray::Array1::from_vec(times.clone());
-    let replayed = replay_slope_time_margin_design(
+    let replayed = replay_slope_time_margin_value_tangent_design(
         exit_times.view(),
         basis,
         &covariate_design.design,
     )
-    .expect("replay the slope design from the saved margin");
+    .expect("replay the slope design from the saved margin")
+    .value;
 
     assert_eq!(
         replayed.ncols(),

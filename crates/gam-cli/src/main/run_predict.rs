@@ -2569,11 +2569,14 @@ pub(crate) fn run_predict_survival(
         // time-constant and does not ride the margin.
         let slope_design_matrix = match model.slope_time_basis.as_ref() {
             None => slope_design.design.clone(),
-            Some(time_basis) => gam::families::survival::replay_slope_time_margin_design(
-                age_exit.view(),
-                time_basis,
-                &slope_design.design,
-            )?,
+            Some(time_basis) => {
+                gam::families::survival::replay_slope_time_margin_value_tangent_design(
+                    age_exit.view(),
+                    time_basis,
+                    &slope_design.design,
+                )?
+                .value
+            }
         };
         let fit_saved = fit_result_from_saved_model_for_prediction(model)?;
         let (predictor, pred_input, predictor_fit) = build_saved_survival_marginal_slope_predictor(
