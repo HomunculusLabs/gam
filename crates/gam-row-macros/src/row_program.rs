@@ -3700,7 +3700,7 @@ fn rust_dense_taylor_body(
         // degree-four coefficients, which is fewer multiplies than the
         // directional form at that order.
         if let Some(root_stack) = &schedule.root_compose_stack {
-            debug_assert!(!fourth, "the root composition is specialised at order 3 only");
+            assert!(!fourth, "the root composition is specialised at order 3 only");
             push_dense_taylor_derivative_array(&mut source, "inner_first", &schedule.result, 1);
             push_dense_taylor_derivative_array(&mut source, "inner_second", &schedule.result, 2);
             push_dense_taylor_derivative_array(&mut source, "inner_third", &schedule.result, 3);
