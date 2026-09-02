@@ -449,12 +449,7 @@ mod tests {
         // exposures without being encoded as likelihood weights.
         let design = Array2::<f64>::zeros((4, 1));
         let y = ndarray::array![[0.0, 1.0], [1.0, 0.0], [0.0, 0.0], [1.0, 1.0]];
-        let offset = ndarray::array![
-            [-2.0, 1.0],
-            [-1.0, 0.5],
-            [0.0, -0.5],
-            [2.0, -1.0]
-        ];
+        let offset = ndarray::array![[-2.0, 1.0], [-1.0, 0.5], [0.0, -0.5], [2.0, -1.0]];
         let penalty = Array2::<f64>::eye(1);
         let lambdas = ndarray::array![1.0, 1.0];
         let fit = fit_penalized_binomial_multi(BinomialMultiFitInputs {

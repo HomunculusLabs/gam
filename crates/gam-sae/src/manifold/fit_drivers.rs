@@ -2984,9 +2984,9 @@ impl SaeManifoldTerm {
                 return Ok(outcome);
             }
             let snapshot = self.snapshot_mutable_state();
-            let evaluate = |term: &mut Self, alpha: f64| -> f64 {
+            let evaluate = |term: &mut Self, alpha: f64| -> Result<f64, String> {
                 if !(alpha.is_finite() && alpha > 0.0) {
-                    return f64::INFINITY;
+                    return Ok(f64::INFINITY);
                 }
                 let value = term
                     .apply_newton_step(
@@ -2996,10 +2996,17 @@ impl SaeManifoldTerm {
                     )
                     .and_then(|()| term.penalized_objective_total(target, rho, registry, 1.0))
                     .unwrap_or(f64::INFINITY);
-                if term.restore_mutable_state(&snapshot).is_err() {
-                    return f64::INFINITY;
-                }
-                if value.is_finite() { value } else { f64::INFINITY }
+                term.restore_mutable_state(&snapshot).map_err(|err| {
+                    format!(
+                        "SaeManifoldTerm::descend_gauge_orbit: restoring the pre-round state \
+                         after the speculative trial at alpha={alpha:.6e} failed: {err}"
+                    )
+                })?;
+                Ok(if value.is_finite() {
+                    value
+                } else {
+                    f64::INFINITY
+                })
             };
 
             let mut best_alpha = 0.0_f64;
@@ -3007,7 +3014,7 @@ impl SaeManifoldTerm {
             let mut alpha = far_alpha;
             while alpha >= near_alpha {
                 outcome.evaluations += 1;
-                let value = evaluate(self, alpha);
+                let value = evaluate(self, alpha)?;
                 if value < best_value {
                     best_value = value;
                     best_alpha = alpha;
@@ -3041,8 +3048,8 @@ impl SaeManifoldTerm {
                 let resolution = f64::EPSILON.sqrt() * best_alpha;
                 let mut inner_low = high - GOLDEN_RATIO_INVERSE * (high - low);
                 let mut inner_high = low + GOLDEN_RATIO_INVERSE * (high - low);
-                let mut value_low = evaluate(self, inner_low);
-                let mut value_high = evaluate(self, inner_high);
+                let mut value_low = evaluate(self, inner_low)?;
+                let mut value_high = evaluate(self, inner_high)?;
                 outcome.evaluations += 2;
                 while high - low > resolution {
                     if value_low <= value_high {
@@ -3050,13 +3057,13 @@ impl SaeManifoldTerm {
                         inner_high = inner_low;
                         value_high = value_low;
                         inner_low = high - GOLDEN_RATIO_INVERSE * (high - low);
-                        value_low = evaluate(self, inner_low);
+                        value_low = evaluate(self, inner_low)?;
                     } else {
                         low = inner_low;
                         inner_low = inner_high;
                         value_low = value_high;
                         inner_high = low + GOLDEN_RATIO_INVERSE * (high - low);
-                        value_high = evaluate(self, inner_high);
+                        value_high = evaluate(self, inner_high)?;
                     }
                     outcome.evaluations += 1;
                 }
@@ -3076,12 +3083,21 @@ impl SaeManifoldTerm {
                     .map_err(|err| format!("SaeManifoldTerm::descend_gauge_orbit: {err}"))?;
                 return Ok(outcome);
             }
-            self.apply_newton_step(
+            if let Err(err) = self.apply_newton_step(
                 direction.slice(s![..dense_len]),
                 direction.slice(s![dense_len..]),
                 best_alpha,
-            )
-            .map_err(|err| format!("SaeManifoldTerm::descend_gauge_orbit: {err}"))?;
+            ) {
+                self.restore_mutable_state(&snapshot).map_err(|restore_err| {
+                    format!(
+                        "SaeManifoldTerm::descend_gauge_orbit: committed step application failed \
+                         ({err}); restoring the pre-round state also failed ({restore_err})"
+                    )
+                })?;
+                return Err(format!(
+                    "SaeManifoldTerm::descend_gauge_orbit: committed step application: {err}"
+                ));
+            }
             // The speculative trial value is evidence for choosing `best_alpha`,
             // not the value authority for the state we actually retain. A trial
             // is evaluated and then restored through the canonical mutable-state

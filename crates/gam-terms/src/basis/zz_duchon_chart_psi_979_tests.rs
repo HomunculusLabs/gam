@@ -469,3 +469,136 @@ fn latent_jacobian_chart_is_inert_where_the_kernel_does_not_underflow() {
     assert_eq!(amplification, 1.0, "a 2-D power-1 hybrid must not be amplified");
     assert!(worst < 1e-5, "latent Jacobian differs from the rebuild by {worst:.3e} (relative)");
 }
+
+// ---------------------------------------------------------------------------
+// The operator penalties (mass, tension) under the same chart.
+//
+// `duchon_operator_penalty_candidates` is the forward; its collocation
+// quadratures now carry the chart amplitude `α` like the design does, and
+// `build_duchon_operator_penalty_psi_derivatives` mirrors it. The gate
+// differences the forward's NORMALIZED penalties along ψ against the analytic
+// normalized first jets, per penalty source, at the benchmark shape (α ≫ 1)
+// and at the 3-D sibling (α = 1).
+// ---------------------------------------------------------------------------
+
+fn fixture_collocation_points(data: ArrayView2<'_, f64>, spec: &DuchonBasisSpec) -> Array2<f64> {
+    match build_duchon_basis(data, spec).expect("frozen build").metadata {
+        BasisMetadata::Duchon {
+            operator_collocation_points: Some(points),
+            ..
+        } => points,
+        _ => panic!("hybrid Duchon with operator penalties must realize collocation points"),
+    }
+}
+
+fn forward_operator_penalties(
+    collocation: &Array2<f64>,
+    centers: &Array2<f64>,
+    spec: &DuchonBasisSpec,
+) -> Vec<(String, Array2<f64>)> {
+    duchon_operator_penalty_candidates(
+        collocation.view(),
+        centers.view(),
+        &spec.operator_penalties,
+        spec.length_scale,
+        spec.power,
+        spec.nullspace_order,
+        false,
+        None,
+        spec.radial_reparam.as_ref(),
+        &mut BasisWorkspace::default(),
+    )
+    .expect("forward operator penalties")
+    .into_iter()
+    .map(|candidate| (format!("{:?}", candidate.source), candidate.matrix.dense().clone()))
+    .collect()
+}
+
+/// Per source: `(source, |fd|, best relative gap over two steps)`.
+fn operator_penalty_gaps(
+    data: ArrayView2<'_, f64>,
+    spec: &DuchonBasisSpec,
+    label: &str,
+) -> Vec<(String, f64, f64)> {
+    let collocation = fixture_collocation_points(data, spec);
+    let centers = fixture_centers(spec);
+    let (sources, firsts, _) = build_duchon_operator_penalty_psi_derivatives(
+        collocation.view(),
+        centers.view(),
+        spec,
+        None,
+        &mut BasisWorkspace::default(),
+    )
+    .expect("operator penalty ψ-jets");
+    assert!(!sources.is_empty(), "{label}: the fixture must emit operator penalties");
+    let mut out = Vec::new();
+    for (source, analytic) in sources.iter().zip(firsts.iter()) {
+        let name = format!("{source:?}");
+        let mut best_gap = f64::INFINITY;
+        let mut fd_norm = 0.0;
+        for &h in &[2.0e-3_f64, 1.0e-3] {
+            let plus = forward_operator_penalties(&collocation, &centers, &spec_at_psi(spec, h));
+            let minus = forward_operator_penalties(&collocation, &centers, &spec_at_psi(spec, -h));
+            let find = |list: &[(String, Array2<f64>)]| {
+                list.iter()
+                    .find(|(candidate, _)| *candidate == name)
+                    .map(|(_, matrix)| matrix.clone())
+                    .unwrap_or_else(|| panic!("{label}: forward emits no {name} penalty"))
+            };
+            let fd = (find(&plus) - find(&minus)) / (2.0 * h);
+            let gap = frobenius(&(analytic - &fd)) / frobenius(&fd).max(1e-300);
+            eprintln!(
+                "[{label}] {name} h={h:.1e} |an|={:.6e} |fd|={:.6e} gap={gap:.3e}",
+                frobenius(analytic),
+                frobenius(&fd)
+            );
+            if gap < best_gap {
+                best_gap = gap;
+                fd_norm = frobenius(&fd);
+            }
+        }
+        out.push((name, fd_norm, best_gap));
+    }
+    out
+}
+
+fn assert_operator_penalty_gaps(gaps: &[(String, f64, f64)], label: &str) {
+    for (name, fd_norm, gap) in gaps {
+        assert!(
+            *fd_norm > 1e-6,
+            "{label}: {name} does not move with ψ in this fixture (|fd| = {fd_norm:.3e}), so the gate is vacuous"
+        );
+        assert!(
+            *gap < 1e-4,
+            "{label}: analytic ∂S̃/∂ψ of {name} differs from the forward's central difference by {gap:.3e}"
+        );
+    }
+}
+
+/// The benchmark's chart: mass and tension jets must be those of the shipped
+/// (amplified, normalized) penalties. Before this gate they were exactly zero.
+#[test]
+fn duchon_operator_penalty_psi_jets_match_the_forward_16d_order0_power9() {
+    let (data, spec) = frozen_hybrid_fixture(16, 120, 24, DuchonNullspaceOrder::Zero, 9.0);
+    assert!(chart_amplification(data.view(), &spec) != 1.0, "the fixture must be amplified");
+    let gaps = operator_penalty_gaps(data.view(), &spec, "opers_16d_order0_power9");
+    assert_operator_penalty_gaps(&gaps, "opers_16d_order0_power9");
+}
+
+#[test]
+fn duchon_operator_penalty_psi_jets_match_the_forward_16d_linear_power9() {
+    let (data, spec) = frozen_hybrid_fixture(16, 120, 24, DuchonNullspaceOrder::Linear, 9.0);
+    assert!(chart_amplification(data.view(), &spec) != 1.0, "the fixture must be amplified");
+    let gaps = operator_penalty_gaps(data.view(), &spec, "opers_16d_linear_power9");
+    assert_operator_penalty_gaps(&gaps, "opers_16d_linear_power9");
+}
+
+/// The un-amplified sibling: the same jets with `α = 1`, so a gap here is a
+/// formula gap and not a scale one.
+#[test]
+fn duchon_operator_penalty_psi_jets_match_the_forward_3d_order0_power9() {
+    let (data, spec) = frozen_hybrid_fixture(3, 160, 10, DuchonNullspaceOrder::Zero, 9.0);
+    assert_eq!(chart_amplification(data.view(), &spec), 1.0, "3-D order-0 power-9 is not amplified");
+    let gaps = operator_penalty_gaps(data.view(), &spec, "opers_3d_order0_power9");
+    assert_operator_penalty_gaps(&gaps, "opers_3d_order0_power9");
+}

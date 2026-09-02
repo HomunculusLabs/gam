@@ -1371,7 +1371,17 @@ pub(crate) fn normalize_penaltywith_psi_derivatives(
     // objective and matches the user-provided trace-only derivation.
     let fro2 = trace_of_product(s, s);
     let c = fro2.sqrt();
-    if !c.is_finite() || c <= 1e-12 {
+    // The rule is the term-collection chokepoint's
+    // (`normalize_penalty_in_constrained_space`): normalize whenever the norm
+    // is a finite positive number, and leave a genuinely zero penalty alone.
+    // This used to carry an ABSOLUTE floor (`c <= 1e-12`) that returned the
+    // un-normalized value with ZERO jets. The forward penalty passes through
+    // the floorless chokepoint and comes out unit-norm whatever its raw scale,
+    // so below the floor the value and its derivative disagreed by the whole
+    // derivative — which is exactly where the un-amplified operator Grams of a
+    // 16-D hybrid kernel sat (gam#979). A floor on a scale-carrying quantity
+    // cannot be a correctness gate; the scale is the amplitude's job.
+    if !(c.is_finite() && c > 0.0) {
         return (
             s.clone(),
             Array2::<f64>::zeros(s.raw_dim()),
@@ -1795,6 +1805,27 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     // assertion fires here rather than at the spec layer so the
     // scale-free path stays fractional-clean.
     let coeffs = duchon_partial_fraction_coeffs(p_order, s_order, 1.0 / length_scale);
+    // gam#979: the forward operator quadratures carry the kernel chart
+    // amplitude `α` (`build_duchon_collocation_operator_matriceswithworkspace`),
+    // computed with the same isotropic metric the operators use. A normalized
+    // penalty is invariant under any positive scalar function of ψ, so `α`
+    // enters these jets as a CONSTANT: it sets the scale the normalization
+    // sees, not the derivative. Without it the raw Grams of the benchmark's
+    // 16-D power-9 kernel sat near 1e-30, the normalization's absolute floor
+    // returned zero ψ-jets, and the analytic κ-gradient silently dropped the
+    // mass and tension penalties — measured as `|∂S̃/∂ψ| = 0` against central
+    // differences of 0.73 and 0.87 (`duchon_hybrid_psi_components_*_16d`).
+    let kernel_amplification = duchon_kernel_amplification(
+        centers,
+        Some(length_scale),
+        p_order,
+        s_order,
+        dim,
+        None,
+        Some(&coeffs),
+        None,
+    );
+    let amp2 = kernel_amplification * kernel_amplification;
     // #1355: assemble the operator-penalty ψ-derivatives in the SAME rotated
     // radial basis (`K·Z·V`) the forward build's operator collocation matrices
     // use (`duchon_operator_penalty_candidates` threads `radial_reparam` into
@@ -1997,6 +2028,19 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     for partial in &partial_blocks {
         raw.add_assign(partial);
     }
+    for block in [
+        &mut raw.d0,
+        &mut raw.d1,
+        &mut raw.d2,
+        &mut raw.d0_psi,
+        &mut raw.d1_psi,
+        &mut raw.d2_psi,
+        &mut raw.d0_psi_psi,
+        &mut raw.d1_psi_psi,
+        &mut raw.d2_psi_psi,
+    ] {
+        block.mapv_inplace(|value| value * kernel_amplification);
+    }
     let d0_raw = raw.d0;
     let d1_raw = raw.d1;
     let d2_raw = raw.d2;
@@ -2121,9 +2165,9 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
             poly_cols,
             identifiability_transform,
         );
-        s1 = cf_s;
-        s1_psi = cf_s_psi;
-        s1_psi_psi = cf_s_psi_psi;
+        s1 = amp2 * cf_s;
+        s1_psi = amp2 * cf_s_psi;
+        s1_psi_psi = amp2 * cf_s_psi_psi;
     }
     if duchon_closed_form_operator_penalty_converges(2, p_order, s_order as f64, d) {
         let (cf_s, cf_s_psi, cf_s_psi_psi) = closed_form_psi_derivatives_in_total_basis(
@@ -2137,9 +2181,9 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
             poly_cols,
             identifiability_transform,
         );
-        s2 = cf_s;
-        s2_psi = cf_s_psi;
-        s2_psi_psi = cf_s_psi_psi;
+        s2 = amp2 * cf_s;
+        s2_psi = amp2 * cf_s_psi;
+        s2_psi_psi = amp2 * cf_s_psi_psi;
     }
 
     let (s0_norm, s0_norm_psi, s0_norm_psi_psi, c0) =

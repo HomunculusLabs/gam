@@ -751,9 +751,8 @@ pub fn fit_penalized_vector_glm<L: VectorLikelihood>(
                 offset.dim()
             );
         }
-        if let Some(((row, output), value)) = offset
-            .indexed_iter()
-            .find(|(_, value)| !value.is_finite())
+        if let Some(((row, output), value)) =
+            offset.indexed_iter().find(|(_, value)| !value.is_finite())
         {
             crate::bail_invalid_estim!(
                 "{context}: offset[{row},{output}] must be finite (got {value})"

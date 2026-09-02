@@ -5026,6 +5026,8 @@ fn test_pure_duchon_candidate_factory_falls_back_to_collocation_in_divergent_reg
         &d0,
         &d1,
         &d2,
+        // Synthetic un-amplified blocks: identity chart (gam#979).
+        1.0,
         &DuchonOperatorPenaltySpec::all_active(),
         p_order,
         s_order as f64,
@@ -5106,6 +5108,8 @@ fn test_hybrid_duchon_candidate_factory_admits_log_riesz_closed_form() {
         &d0,
         &d1,
         &d2,
+        // Synthetic un-amplified blocks: identity chart (gam#979).
+        1.0,
         &spec,
         1,
         2,
