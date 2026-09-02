@@ -11,7 +11,7 @@ use super::{
     prepend_id_column_to_prediction_csv, required_columns_for_fit, required_columns_for_formula,
     route_marginal_slope_deviation_blocks, summarizewiggle_domain,
     validate_cli_firth_configuration, validate_fit_args_preflight,
-    write_gaussian_location_scale_prediction_csv, write_prediction_csv,
+    write_estimand_explicit_prediction_csv, write_prediction_csv,
     write_survival_binary_prediction_csv, write_survival_prediction_csv,
 };
 use super::{
@@ -5736,7 +5736,7 @@ fn prediction_csv_can_prepend_id_column() {
 }
 
 #[test]
-fn gaussian_location_scale_prediction_csv_includes_sigma_column() {
+fn location_scale_prediction_csv_uses_estimand_explicit_schema() {
     let mut path = std::env::temp_dir();
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5747,11 +5747,12 @@ fn gaussian_location_scale_prediction_csv_includes_sigma_column() {
     let eta = array![0.5, -0.25];
     let mean = eta.clone();
     let sigma = array![0.3, 0.7];
-    write_gaussian_location_scale_prediction_csv(
+    write_estimand_explicit_prediction_csv(
         &path,
         eta.view(),
         mean.view(),
-        sigma.view(),
+        Some(mean.view()),
+        Some(sigma.view()),
         None,
         None,
         None,
@@ -5759,7 +5760,7 @@ fn gaussian_location_scale_prediction_csv_includes_sigma_column() {
     .unwrap_or_else(|e| {
         panic!(
             "{} failed: {:?}",
-            "write gaussian location-scale prediction csv", e
+            "write location-scale prediction csv", e
         )
     });
 
@@ -5767,15 +5768,15 @@ fn gaussian_location_scale_prediction_csv_includes_sigma_column() {
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("{} failed: {:?}", "read csv", e));
     let header = text.lines().next().unwrap_or("");
     assert_eq!(
-        header, "eta,mean,sigma",
-        "gaussian location-scale output schema changed unexpectedly"
+        header, "linear_predictor_plugin,mean_plugin,posterior_mean,noise_scale",
+        "location-scale output must use the model-owned estimand-explicit schema"
     );
 
     remove_temp_file(&path);
 }
 
 #[test]
-fn gaussian_location_scale_prediction_csv_includes_boundswhen_present() {
+fn location_scale_map_prediction_omits_the_posterior_estimand() {
     let mut path = std::env::temp_dir();
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5786,21 +5787,20 @@ fn gaussian_location_scale_prediction_csv_includes_boundswhen_present() {
     let eta = array![1.0];
     let mean = array![1.0];
     let sigma = array![0.4];
-    let mean_lower = array![0.2];
-    let mean_upper = array![1.8];
-    write_gaussian_location_scale_prediction_csv(
+    write_estimand_explicit_prediction_csv(
         &path,
         eta.view(),
         mean.view(),
-        sigma.view(),
         None,
-        Some(mean_lower.view()),
-        Some(mean_upper.view()),
+        Some(sigma.view()),
+        None,
+        None,
+        None,
     )
     .unwrap_or_else(|e| {
         panic!(
             "{} failed: {:?}",
-            "write gaussian location-scale prediction csv with bounds", e
+            "write location-scale MAP prediction csv", e
         )
     });
 
@@ -5808,15 +5808,15 @@ fn gaussian_location_scale_prediction_csv_includes_boundswhen_present() {
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("{} failed: {:?}", "read csv", e));
     let header = text.lines().next().unwrap_or("");
     assert_eq!(
-        header, "eta,mean,sigma,mean_lower,mean_upper",
-        "gaussian location-scale output bounds schema changed unexpectedly"
+        header, "linear_predictor_plugin,mean_plugin,noise_scale",
+        "MAP output must not relabel the plug-in mean as a posterior estimand"
     );
 
     remove_temp_file(&path);
 }
 
 #[test]
-fn gaussian_location_scale_prediction_csv_includes_std_error_before_bounds_when_present() {
+fn location_scale_prediction_csv_names_posterior_uncertainty_explicitly() {
     let mut path = std::env::temp_dir();
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5830,11 +5830,12 @@ fn gaussian_location_scale_prediction_csv_includes_std_error_before_bounds_when_
     let std_error = array![0.3];
     let mean_lower = array![0.2];
     let mean_upper = array![1.8];
-    write_gaussian_location_scale_prediction_csv(
+    write_estimand_explicit_prediction_csv(
         &path,
         eta.view(),
         mean.view(),
-        sigma.view(),
+        Some(mean.view()),
+        Some(sigma.view()),
         Some(std_error.view()),
         Some(mean_lower.view()),
         Some(mean_upper.view()),
@@ -5842,7 +5843,7 @@ fn gaussian_location_scale_prediction_csv_includes_std_error_before_bounds_when_
     .unwrap_or_else(|e| {
         panic!(
             "{} failed: {:?}",
-            "write gaussian location-scale prediction csv with std_error", e
+            "write location-scale prediction csv with posterior uncertainty", e
         )
     });
 
@@ -5851,13 +5852,15 @@ fn gaussian_location_scale_prediction_csv_includes_std_error_before_bounds_when_
     let mut lines = text.lines();
     assert_eq!(
         lines.next(),
-        Some("eta,mean,sigma,std_error,mean_lower,mean_upper"),
-        "gaussian location-scale uncertainty output must preserve the computed mean SE"
+        Some(
+            "linear_predictor_plugin,mean_plugin,posterior_mean,noise_scale,posterior_mean_standard_error,posterior_mean_lower,posterior_mean_upper"
+        ),
+        "location-scale uncertainty output must name the posterior estimand"
     );
     assert_eq!(
         lines.next(),
         Some(
-            "1.000000000000,1.000000000000,0.400000000000,0.300000000000,0.200000000000,1.800000000000"
+            "1.000000000000,1.000000000000,1.000000000000,0.400000000000,0.300000000000,0.200000000000,1.800000000000"
         )
     );
 

@@ -9,8 +9,8 @@ pub(crate) const STANDARD_PREDICTION_INTERVAL_COLUMNS: [&str; 2] =
     ["posterior_mean_lower", "posterior_mean_upper"];
 pub(crate) const STANDARD_PREDICTION_STD_ERROR_COLUMN: &str =
     "posterior_mean_standard_error";
+pub(crate) const PREDICTION_NOISE_SCALE_COLUMN: &str = "noise_scale";
 pub(crate) const SPECIALIZED_PREDICTION_BASE_COLUMNS: [&str; 2] = ["eta", "mean"];
-pub(crate) const GAUSSIAN_LOCATION_SCALE_BASE_COLUMNS: [&str; 3] = ["eta", "mean", "sigma"];
 pub(crate) const SURVIVAL_PREDICTION_BASE_COLUMNS: [&str; 4] =
     ["eta", "survival_prob", "failure_prob", "risk_score"];
 pub(crate) const SURVIVAL_BINARY_PREDICTION_BASE_COLUMNS: [&str; 6] = [
@@ -276,16 +276,20 @@ pub(crate) fn write_prediction_csv(
     write_prediction_csv_unified(path, &cols)
 }
 
-/// Standard GAM/GLM prediction writer with an estimand-explicit schema
-/// (#2785). The plug-in pair is always present and coherent; the posterior
-/// response mean is present unless the caller explicitly forced a curved-link
-/// plug-in prediction. Posterior uncertainty columns are named for the
-/// posterior estimand they accompany.
-pub(crate) fn write_standard_prediction_csv(
+/// Prediction writer for every model class that publishes the
+/// estimand-explicit schema (#2785/#2803).
+///
+/// The plug-in pair is always present and coherent; the posterior response
+/// mean is present unless the caller explicitly forced a curved-link plug-in
+/// prediction. Location-scale classes add their fitted response-side scale as
+/// `noise_scale`. Posterior uncertainty columns are named for the posterior
+/// estimand they accompany.
+pub(crate) fn write_estimand_explicit_prediction_csv(
     path: &Path,
     linear_predictor_plugin: ArrayView1<'_, f64>,
     mean_plugin: ArrayView1<'_, f64>,
     posterior_mean: Option<ArrayView1<'_, f64>>,
+    noise_scale: Option<ArrayView1<'_, f64>>,
     posterior_mean_standard_error: Option<ArrayView1<'_, f64>>,
     posterior_mean_lower: Option<ArrayView1<'_, f64>>,
     posterior_mean_upper: Option<ArrayView1<'_, f64>>,
@@ -302,6 +306,10 @@ pub(crate) fn write_standard_prediction_csv(
     ];
     if let Some(values) = posterior_mean.as_ref() {
         columns.push((STANDARD_PREDICTION_BASE_COLUMNS[2], values));
+    }
+    let noise_scale = noise_scale.map(|values| values.to_vec());
+    if let Some(values) = noise_scale.as_ref() {
+        columns.push((PREDICTION_NOISE_SCALE_COLUMN, values));
     }
 
     let standard_error = posterior_mean_standard_error.map(|values| values.to_vec());
@@ -331,63 +339,6 @@ pub(crate) fn write_standard_prediction_csv(
         }
     }
     write_prediction_csv_unified(path, &columns)
-}
-
-/// Convenience wrapper for Gaussian location-scale predictions (always
-/// includes a `sigma` column).
-pub(crate) fn write_gaussian_location_scale_prediction_csv(
-    path: &Path,
-    eta: ArrayView1<'_, f64>,
-    mean: ArrayView1<'_, f64>,
-    sigma: ArrayView1<'_, f64>,
-    mean_standard_error: Option<ArrayView1<'_, f64>>,
-    mean_lower: Option<ArrayView1<'_, f64>>,
-    mean_upper: Option<ArrayView1<'_, f64>>,
-) -> CliResult<()> {
-    let eta_v: Vec<f64> = eta.to_vec();
-    let mean_v: Vec<f64> = mean.to_vec();
-    let sigma_v: Vec<f64> = sigma.to_vec();
-
-    let mut cols: Vec<(&str, &[f64])> = vec![
-        (GAUSSIAN_LOCATION_SCALE_BASE_COLUMNS[0], &eta_v),
-        (GAUSSIAN_LOCATION_SCALE_BASE_COLUMNS[1], &mean_v),
-        (GAUSSIAN_LOCATION_SCALE_BASE_COLUMNS[2], &sigma_v),
-    ];
-
-    let se_v: Vec<f64>;
-    let lo_v: Vec<f64>;
-    let hi_v: Vec<f64>;
-    if let Some(se) = mean_standard_error {
-        se_v = se.to_vec();
-        lo_v = mean_lower
-            .ok_or_else(|| CliError::Internal {
-                reason: "internal error: mean_lower missing while std_error is present".to_string(),
-            })?
-            .to_vec();
-        hi_v = mean_upper
-            .ok_or_else(|| CliError::Internal {
-                reason: "internal error: mean_upper missing while std_error is present".to_string(),
-            })?
-            .to_vec();
-        cols.push((PREDICTION_STD_ERROR_COLUMN, &se_v));
-        cols.push((PREDICTION_INTERVAL_COLUMNS[0], &lo_v));
-        cols.push((PREDICTION_INTERVAL_COLUMNS[1], &hi_v));
-    } else if let (Some(lo), Some(hi)) = (mean_lower, mean_upper) {
-        lo_v = lo.to_vec();
-        hi_v = hi.to_vec();
-        cols.push((PREDICTION_INTERVAL_COLUMNS[0], &lo_v));
-        cols.push((PREDICTION_INTERVAL_COLUMNS[1], &hi_v));
-    } else if mean_lower.is_some() {
-        return Err(CliError::Internal {
-            reason: "internal error: mean_upper missing while mean_lower is present".to_string(),
-        });
-    } else if mean_upper.is_some() {
-        return Err(CliError::Internal {
-            reason: "internal error: mean_lower missing while mean_upper is present".to_string(),
-        });
-    }
-
-    write_prediction_csv_unified(path, &cols)
 }
 
 /// Convenience wrapper for survival predictions. Survival output uses explicit

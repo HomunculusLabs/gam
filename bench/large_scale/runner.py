@@ -2976,11 +2976,10 @@ def run_rust_classification(spec: MethodSpec, train_csv: Path, test_csv: Path, o
     if rc != 0:
         raise RuntimeError(err.strip() or out.strip() or f"{spec.name} predict failed")
     pred_rows = read_csv_rows(pred_path)
-    # The CLI CSV header declares its schema: a standard fit publishes the
-    # estimand-explicit `posterior_mean` (#2785); the Gaussian location-scale
-    # CSV keeps its class-specific `eta` / `mean` / `sigma` columns.
-    point_column = "posterior_mean" if pred_rows and "posterior_mean" in pred_rows[0] else "mean"
-    pred = np.array([float(r[point_column]) for r in pred_rows], dtype=float)
+    # Standard and location-scale mean models share the model-owned,
+    # estimand-explicit CLI schema (#2785/#2803). A missing posterior_mean is a
+    # serialization-contract failure, not a reason to reinterpret `mean`.
+    pred = np.array([float(r["posterior_mean"]) for r in pred_rows], dtype=float)
     y_train = csv_numeric_column(train_csv, "phenotype")
     y_test = csv_numeric_column(test_csv, "phenotype")
     metrics = classification_metrics(y_test, pred, float(np.mean(y_train)))

@@ -99,6 +99,16 @@ gam predict model.gam new.csv --out predictions.csv --uncertainty --level 0.95
 | `--id-column COLUMN` | Carry an identifier column into the prediction CSV. |
 | `--offset-column COLUMN`, `--noise-offset-column COLUMN` | Prediction-time offsets matching the fitted model. |
 
+Standard and location-scale mean models write an estimand-explicit CSV. The
+default `--mode posterior-mean` columns are `linear_predictor_plugin`,
+`mean_plugin`, and `posterior_mean`; location-scale models that expose a fitted
+response-side scale add `noise_scale`. With `--uncertainty`, the posterior
+columns are `posterior_mean_standard_error`, `posterior_mean_lower`, and
+`posterior_mean_upper`. `--mode map` emits only the plug-in pair (plus
+`noise_scale` when present), so one column name never changes estimand with the
+mode. Transformation-normal, marginal-slope, and survival predictions retain
+their model-specific schemas.
+
 ## Sample and Generate
 
 ```bash

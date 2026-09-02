@@ -1,8 +1,9 @@
-"""Regression for #2148: CLI Gaussian location-scale uncertainty must emit std_error.
+"""Regression for #2148/#2803: CLI location-scale output has one explicit schema.
 
 The Rust prediction path computes the response-scale mean standard error and uses
-it to form the symmetric mean band. This test exercises the CLI serialization
-boundary so the location-scale CSV writer cannot silently drop that column.
+it to form the symmetric posterior-mean band. This test exercises the CLI
+serialization boundary so location-scale output cannot silently revert to the
+ambiguous pre-#2785 ``eta``/``mean``/``sigma`` vocabulary.
 """
 
 import csv
@@ -55,6 +56,7 @@ def test_cli_location_scale_uncertainty_preserves_std_error(tmp_path: Path) -> N
     data_path = tmp_path / "ls.csv"
     model_path = tmp_path / "ls.gam"
     pred_path = tmp_path / "ls_pred.csv"
+    map_path = tmp_path / "ls_map.csv"
 
     rng = random.Random(51)
     with data_path.open("w", newline="") as f:
@@ -97,20 +99,28 @@ def test_cli_location_scale_uncertainty_preserves_std_error(tmp_path: Path) -> N
     with pred_path.open(newline="") as f:
         reader = csv.DictReader(f)
         assert reader.fieldnames == [
-            "eta",
-            "mean",
-            "sigma",
-            "std_error",
-            "mean_lower",
-            "mean_upper",
+            "linear_predictor_plugin",
+            "mean_plugin",
+            "posterior_mean",
+            "noise_scale",
+            "posterior_mean_standard_error",
+            "posterior_mean_lower",
+            "posterior_mean_upper",
         ]
         rows = list(reader)
 
     assert rows
     for row in rows[:10]:
-        mean = float(row["mean"])
-        std_error = float(row["std_error"])
-        mean_upper = float(row["mean_upper"])
+        mean = float(row["posterior_mean"])
+        std_error = float(row["posterior_mean_standard_error"])
+        mean_upper = float(row["posterior_mean_upper"])
+        assert math.isclose(
+            float(row["linear_predictor_plugin"]),
+            float(row["mean_plugin"]),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        assert float(row["noise_scale"]) > 0.0
         assert std_error > 0.0
         assert math.isclose(
             mean_upper - mean,
@@ -118,3 +128,25 @@ def test_cli_location_scale_uncertainty_preserves_std_error(tmp_path: Path) -> N
             rel_tol=1e-8,
             abs_tol=1e-8,
         )
+
+    subprocess.run(
+        [
+            gam,
+            "predict",
+            "--mode",
+            "map",
+            "--out",
+            str(map_path),
+            str(model_path),
+            str(data_path),
+        ],
+        check=True,
+    )
+    with map_path.open(newline="") as f:
+        reader = csv.DictReader(f)
+        assert reader.fieldnames == [
+            "linear_predictor_plugin",
+            "mean_plugin",
+            "noise_scale",
+        ]
+        assert list(reader)

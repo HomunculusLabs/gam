@@ -1001,7 +1001,10 @@ pub(crate) fn run_predict_unified(
     // The predicate is owned by `FittedModel` so the CLI and the Python FFI
     // path share one definition (SPEC: posterior mean is always the default).
     let nonlinear = model.prediction_uses_posterior_mean();
-    let sigma_opt = if model_class == PredictModelClass::GaussianLocationScale {
+    // The model class owns whether this is an estimand-explicit mean model.
+    // Ask that model for its separate response-side scale once; classes without
+    // one return `None`, exactly as the Python prediction surface does.
+    let noise_scale = if model_class.publishes_estimand_explicit_schema() {
         predictor
             .predict_noise_scale(pred_input)
             .map_err(|e| format!("predict_noise_scale failed: {e}"))?
@@ -1076,16 +1079,13 @@ pub(crate) fn run_predict_unified(
     // --- Write CSV output ---
 
     match model_class {
-        PredictModelClass::GaussianLocationScale => {
-            // Gaussian location-scale always includes sigma.
-            let sigma = sigma_opt.ok_or_else(|| {
-                "internal error: sigma missing for Gaussian LS prediction".to_string()
-            })?;
-            write_gaussian_location_scale_prediction_csv(
+        class if class.publishes_estimand_explicit_schema() => {
+            write_estimand_explicit_prediction_csv(
                 &args.out,
                 linear_predictor_plugin.view(),
-                specialised_point.view(),
-                sigma.view(),
+                mean_plugin.view(),
+                posterior_mean.as_ref().map(|values| values.view()),
+                noise_scale.as_ref().map(|values| values.view()),
                 posterior_mean_standard_error.as_ref().map(|a| a.view()),
                 posterior_mean_lower.as_ref().map(|a| a.view()),
                 posterior_mean_upper.as_ref().map(|a| a.view()),
@@ -1116,17 +1116,6 @@ pub(crate) fn run_predict_unified(
                 &args.out,
                 linear_predictor_plugin.view(),
                 specialised_point.view(),
-                posterior_mean_standard_error.as_ref().map(|a| a.view()),
-                posterior_mean_lower.as_ref().map(|a| a.view()),
-                posterior_mean_upper.as_ref().map(|a| a.view()),
-            )?;
-        }
-        PredictModelClass::Standard => {
-            write_standard_prediction_csv(
-                &args.out,
-                linear_predictor_plugin.view(),
-                mean_plugin.view(),
-                posterior_mean.as_ref().map(|values| values.view()),
                 posterior_mean_standard_error.as_ref().map(|a| a.view()),
                 posterior_mean_lower.as_ref().map(|a| a.view()),
                 posterior_mean_upper.as_ref().map(|a| a.view()),
@@ -1252,11 +1241,12 @@ pub(crate) fn run_predict_spline_scan(
     } else {
         (None, None, None)
     };
-    write_standard_prediction_csv(
+    write_estimand_explicit_prediction_csv(
         &args.out,
         mean.view(),
         mean.view(),
         Some(mean.view()),
+        None,
         se_opt.as_ref().map(|a| a.view()),
         mean_lo.as_ref().map(|a| a.view()),
         mean_hi.as_ref().map(|a| a.view()),
@@ -1332,11 +1322,12 @@ pub(crate) fn run_predict_residual_cascade(
     } else {
         (None, None, None)
     };
-    write_standard_prediction_csv(
+    write_estimand_explicit_prediction_csv(
         &args.out,
         mean.view(),
         mean.view(),
         Some(mean.view()),
+        None,
         se_opt.as_ref().map(|a| a.view()),
         mean_lo.as_ref().map(|a| a.view()),
         mean_hi.as_ref().map(|a| a.view()),
