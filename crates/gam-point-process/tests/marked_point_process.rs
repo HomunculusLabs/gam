@@ -433,8 +433,7 @@ fn bounded_laml_search_estimates_recency_and_reaches_a_coordinate_optimum() {
     outer_laplace_control.max_iterations = 160;
     outer_laplace_control.absolute_stationarity_tolerance = 1.0e-9;
     outer_laplace_control.relative_stationarity_tolerance = 1.0e-9;
-    let initial_evidence =
-        smooth_laplace_cohort(&initial_model, &histories, outer_laplace_control)
+    let initial_evidence = smooth_laplace_cohort(&initial_model, &histories, outer_laplace_control)
         .unwrap()
         .laplace_log_marginal_likelihood;
     let specification = LaplaceHyperparameterSpec {

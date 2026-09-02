@@ -32,17 +32,21 @@
 //!     actually produced, epoch after epoch, so the co-firing graph and the
 //!     operator's spectrum evolve exactly as they do at scale.
 //!   * **The whole epoch curve is reported, never an aggregate.** A single mean
-//!     over epochs hides the growth this exists to detect. The `growth` column of
-//!     the summary is `last_refresh_s / first_refresh_s`, which is the quantity
-//!     `#2441` measured as `5.5x` at production scale.
+//!     over epochs hides the growth this exists to detect. Epoch 1 has no retained
+//!     decoder-refresh history and is therefore a structurally cold baseline;
+//!     every growth ratio is measured from warm epoch 2 instead. The outer REML
+//!     schedule can restart the inner alternation, so those ratios are also kept
+//!     separate by outer run rather than flattening distinct sweeps together.
 //!
 //! # Reading it
 //!
-//! Every configuration prints one `[refresh-epoch]` CSV row per epoch and one
-//! `[refresh-config]` summary row. `growth > 1` reproduces the `#2441` shape; a
-//! `growth` near 1 with `cg_iterations` flat says the fit's Krylov work is not
-//! inflating at that shape and the sweep must be pushed further before a fix is
-//! attributed to anything.
+//! Every configuration prints one `[refresh-epoch]` CSV row per epoch, one
+//! `[refresh-inner]` warm `epoch 2 -> last` summary per outer run, and one
+//! `[refresh-config]` aggregate-cost row. `warm_refresh_growth > 1` reproduces the
+//! live part of the `#2441` shape; `warm_block_sweeps_growth` distinguishes extra
+//! Krylov work from a changing cost per operator application. An inner run that
+//! stops before epoch 2 is reported with `warm_available=false` and `NaN` ratios,
+//! because it has no warm interval to measure.
 //!
 //! # Running
 //!
@@ -69,7 +73,8 @@ use ndarray::Array2;
 /// number here is comparable to a number from the real creditscope/Qwen job.
 #[derive(Clone, Debug, Default)]
 struct EpochRow {
-    epoch: usize,
+    outer_run: usize,
+    inner_epoch: usize,
     refresh_s: f64,
     route_s: f64,
     births: usize,
@@ -95,6 +100,18 @@ struct EpochRow {
     /// already; without them on the CSV the gate's input and its verdict were
     /// unreadable from the bench that exists to measure it.
     recycling_admitted: bool,
+}
+
+/// The warm interval of one inner alternation in the outer REML schedule.
+///
+/// `warm` is absent when the alternation stopped at epoch 1. Keeping absence
+/// typed prevents the cold first refresh from silently becoming the denominator
+/// again when a short run is encountered.
+struct InnerRunSummary<'a> {
+    outer_run: usize,
+    epochs_run: usize,
+    last: &'a EpochRow,
+    warm: Option<&'a EpochRow>,
 }
 
 /// Captured heartbeat lines. The fit logs on `log::warn!`, so a bench-local
@@ -174,16 +191,49 @@ fn flag(line: &str, key: &str) -> bool {
         .unwrap_or_else(|error| panic!("heartbeat field `{key}` was not a bool ({error}): {raw}"))
 }
 
+/// Parse the `i` from the production heartbeat prefix `[SAE epoch i/N]`.
+///
+/// This prefix is the authoritative inner-alternation clock. Replacing it with
+/// an enumerate counter used to flatten every outer REML restart into one false
+/// epoch curve, making a cold restart look like continued within-run growth.
+fn heartbeat_inner_epoch(line: &str) -> usize {
+    let clock = line
+        .strip_prefix("[SAE epoch ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|token| token.strip_suffix(']'))
+        .unwrap_or_else(|| panic!("malformed SAE epoch heartbeat prefix: {line}"));
+    let (inner, _limit) = clock
+        .split_once('/')
+        .unwrap_or_else(|| panic!("malformed SAE epoch clock `{clock}` in: {line}"));
+    inner
+        .parse::<usize>()
+        .unwrap_or_else(|error| panic!("SAE inner epoch `{inner}` is not an integer ({error})"))
+}
+
 fn parse_epochs(lines: &[String]) -> Vec<EpochRow> {
+    let mut outer_run = 0usize;
+    let mut previous_inner_epoch = None;
     lines
         .iter()
-        .enumerate()
-        .map(|(index, line)| EpochRow {
-            // The fit may run several inner epoch sweeps across the outer REML
-            // schedule, so the heartbeat's own `epoch i/N` restarts. The bench
-            // index is the monotone refresh counter, which is what a growth
-            // curve needs.
-            epoch: index + 1,
+        .map(|line| {
+            let inner_epoch = heartbeat_inner_epoch(line);
+            if inner_epoch == 1 {
+                outer_run += 1;
+            } else {
+                assert!(
+                    outer_run > 0,
+                    "first captured SAE heartbeat must start at inner epoch 1; got: {line}"
+                );
+                assert_eq!(
+                    previous_inner_epoch.map(|epoch| epoch + 1),
+                    Some(inner_epoch),
+                    "SAE heartbeat skipped or reordered an inner epoch: {line}"
+                );
+            }
+            previous_inner_epoch = Some(inner_epoch);
+            EpochRow {
+            outer_run,
+            inner_epoch,
             refresh_s: number(line, "refresh_s"),
             route_s: number(line, "route_s"),
             births: count(line, "births"),
@@ -204,8 +254,34 @@ fn parse_epochs(lines: &[String]) -> Vec<EpochRow> {
             ev: number(line, "ev"),
             precond_cost_ratio: number(line, "precond_cost_ratio"),
             recycling_admitted: flag(line, "recycling_admitted"),
+            }
         })
         .collect()
+}
+
+/// Partition the trace by the outer run that produced it and select epoch 2 as
+/// that run's first comparable (history-warm) refresh.
+fn summarize_inner_runs(rows: &[EpochRow]) -> Vec<InnerRunSummary<'_>> {
+    let mut summaries = Vec::new();
+    let mut start = 0usize;
+    while start < rows.len() {
+        let outer_run = rows[start].outer_run;
+        let end = rows[start..]
+            .iter()
+            .position(|row| row.outer_run != outer_run)
+            .map_or(rows.len(), |offset| start + offset);
+        let run = &rows[start..end];
+        let last = run.last().expect("an inner-run partition is non-empty");
+        let warm = run.iter().find(|row| row.inner_epoch == 2);
+        summaries.push(InnerRunSummary {
+            outer_run,
+            epochs_run: run.len(),
+            last,
+            warm,
+        });
+        start = end;
+    }
+    summaries
 }
 
 /// Deterministic xorshift64*, so the bench needs no RNG dependency and the same
