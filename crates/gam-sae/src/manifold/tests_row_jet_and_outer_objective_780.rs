@@ -9,6 +9,7 @@
 //! attribute so the compiler enforces it here, not just in `mod.rs`.
 #![cfg(test)]
 
+use gam_math::paired_timing::SpeedGate;
 use super::tests::gamma_fd_tiny_fixture;
 use super::*;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -315,9 +316,12 @@ fn row_jet_channel_error(actual: &SaeRowJets, expected: &LegacySaeRowJets) -> (f
 /// exact historical non-abstracted hand reference. `fixture` selects the gate
 /// graph; every reconstruction and beta-border channel is checked entry by
 /// entry before either path is timed.
+/// The speed cells of one schedule gate. The gate itself is opened by the
+/// `#[test]` that calls this, in its own body, because the release lane
+/// derives its population from `SpeedGate::open(` inside `#[test]` bodies.
 fn compiled_schedule_beats_hand_full_channels_932(
     gate_label: &str,
-    gate_token: &'static str,
+    gate: &mut Option<SpeedGate>,
     fixture: fn(
         usize,
         usize,
@@ -329,7 +333,7 @@ fn compiled_schedule_beats_hand_full_channels_932(
         Array1<f64>,
     ),
 ) {
-    use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+    use gam_math::paired_timing::paired_interleaved;
 
     fn compiled_checksum(jets: &SaeRowJets) -> f64 {
         let first = (!jets.vars.is_empty())
@@ -370,7 +374,6 @@ fn compiled_schedule_beats_hand_full_channels_932(
         first + second + beta
     }
 
-    let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open(gate_token));
     for &k_atoms in &[1usize, 2, 8, 16, 32, 64] {
         let p = 16usize;
         let (term, vars, second_jets, border, assignments) = fixture(k_atoms, p);
@@ -479,20 +482,19 @@ fn compiled_schedule_beats_hand_full_channels_932(
         );
         gate.faster(&format!("K={k_atoms} P={p}"), &timing, "compiled", "hand");
     }
-    if let Some(gate) = gate {
-        gate.finish();
-    }
 }
 
 /// The softmax hand path materializes and contracts `d2z[L,L,K]`; the compiled
 /// centered-moment schedule is output-optimal O(L²P).
 #[test]
 pub(crate) fn softmax_compiled_schedule_beats_hand_full_channels_932() {
-    compiled_schedule_beats_hand_full_channels_932(
-        "SOFTMAX",
-        "SAE-SOFTMAX-SCHEDULE-932",
-        softmax_schedule_perf_fixture,
-    );
+    // Parity and allocation pins run in every build; the speed contract opens
+    // only in the release profile (`SpeedGate::open` documents why).
+    let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("SAE-SOFTMAX-SCHEDULE-932"));
+    compiled_schedule_beats_hand_full_channels_932("SOFTMAX", &mut gate, softmax_schedule_perf_fixture);
+    if let Some(gate) = gate {
+        gate.finish();
+    }
 }
 
 /// Independent gates have diagonal logit Hessians. The compiled schedule must
@@ -500,11 +502,16 @@ pub(crate) fn softmax_compiled_schedule_beats_hand_full_channels_932() {
 /// every tested width; the generic runtime jet is correctness-only.
 #[test]
 pub(crate) fn independent_compiled_schedule_beats_hand_full_channels_932() {
+    let mut gate =
+        (!cfg!(debug_assertions)).then(|| SpeedGate::open("SAE-INDEPENDENT-SCHEDULE-932"));
     compiled_schedule_beats_hand_full_channels_932(
         "INDEPENDENT",
-        "SAE-INDEPENDENT-SCHEDULE-932",
+        &mut gate,
         independent_schedule_perf_fixture,
     );
+    if let Some(gate) = gate {
+        gate.finish();
+    }
 }
 
 #[test]
