@@ -425,8 +425,8 @@ impl MarkedPointProcessModel {
             for factor in 0..factor_count {
                 let loading = self.loadings[[mark, factor]];
                 if loading != 0.0 {
-                    let log_weight = loading.abs().ln()
-                        + 0.5 * self.factors[factor].marginal_variance.ln();
+                    let log_weight =
+                        loading.abs().ln() + 0.5 * self.factors[factor].marginal_variance.ln();
                     maximum_log_weight = maximum_log_weight.max(log_weight);
                 }
             }
@@ -440,8 +440,8 @@ impl MarkedPointProcessModel {
             for factor in 0..factor_count {
                 let loading = self.loadings[[mark, factor]];
                 if loading != 0.0 {
-                    let log_weight = loading.abs().ln()
-                        + 0.5 * self.factors[factor].marginal_variance.ln();
+                    let log_weight =
+                        loading.abs().ln() + 0.5 * self.factors[factor].marginal_variance.ln();
                     scaled_loadings[[mark, factor]] =
                         loading.signum() * (log_weight - maximum_log_weight).exp();
                 }
@@ -496,7 +496,9 @@ fn symmetric_jacobi_eigenvalues(
 ) -> Result<Vec<f64>, MarkedPointProcessError> {
     let dimension = matrix.nrows();
     if dimension == 0 || matrix.ncols() != dimension {
-        return Err(invalid("symmetric eigensolve requires a non-empty square matrix"));
+        return Err(invalid(
+            "symmetric eigensolve requires a non-empty square matrix",
+        ));
     }
     ensure_finite_matrix(&matrix, "loading covariance Gram matrix")?;
     let convergence_scale = matrix

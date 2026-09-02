@@ -7926,8 +7926,8 @@ fn evidence_classification_prices_a_clamp_basin_before_refusing_a_saddle_2515() 
     }
 }
 
-/// #2515 — the per-row twin of the reduced-Schur gate above, on the SAME two
-/// arms.
+/// #2515 — the per-row twin of the reduced-Schur gate above, on the SAME typed
+/// majorizer/clamp geometry.
 ///
 /// `factor_spectral_deflated_criterion_row`'s own comment says it deflates
 /// "every non-positive/non-finite one", which is the same one-sided predicate and
@@ -7937,7 +7937,7 @@ fn evidence_classification_prices_a_clamp_basin_before_refusing_a_saddle_2515() 
 /// closing only one of them would leave the verdict route-dependent inside the
 /// arrow route itself.
 #[test]
-fn per_row_evidence_conditioning_refuses_a_resolved_negative_direction_2515() {
+fn per_row_evidence_classification_prices_a_clamp_basin_before_a_saddle_2515() {
     let d = 2usize;
     let mut block = ArrowRowBlock::new(d, 1);
     block.htt = array![[4.0_f64, 0.0], [0.0, -7.997_610e-3]];
@@ -7952,9 +7952,43 @@ fn per_row_evidence_conditioning_refuses_a_resolved_negative_direction_2515() {
         "exactly the negative direction is unit-pinned under the majorizer policy"
     );
 
-    let refusal = factor_spectral_deflated_criterion_row(&block, d, true).expect_err(
-        "#2515: the exact-observed-information policy must REFUSE a resolved negative \
-         per-row direction rather than pricing it as the rho-independent null",
+    let basin_geometry = ExactAClassificationRow {
+        delta_tt: array![[0.0_f64, 0.0], [0.0, -4.007_997_610]],
+        delta_tbeta: Array2::<f64>::zeros((d, 0)),
+        clamp_diag: array![0.0_f64, 2.0e-2],
+    };
+    let basin = factor_spectral_deflated_criterion_row_with_geometry(
+        &block,
+        d,
+        true,
+        Some(&basin_geometry),
+    )
+    .expect("#2515: clamp-attributable negative row curvature is not a saddle")
+    .expect("#2515: the clamp basin produces a conditioned row factor");
+    let spectrum = basin
+        .deflation_spectrum
+        .as_ref()
+        .expect("#2515: exact-A row classification carries its raw and priced spectrum");
+    assert_abs_diff_eq!(
+        spectrum.cond_evals[0],
+        -7.997_610e-3 + 2.0e-2,
+        epsilon = 1.0e-12,
+    );
+    assert_eq!(basin.gauge_deflated_directions, 0);
+
+    let saddle_geometry = ExactAClassificationRow {
+        delta_tt: basin_geometry.delta_tt.clone(),
+        delta_tbeta: Array2::<f64>::zeros((d, 0)),
+        clamp_diag: Array1::<f64>::zeros(d),
+    };
+    let refusal = factor_spectral_deflated_criterion_row_with_geometry(
+        &block,
+        d,
+        true,
+        Some(&saddle_geometry),
+    )
+    .expect_err(
+        "#2515: exact-A evidence must refuse a row only after the clamp basin remains negative",
     );
     assert!(
         ArrowSchurError::rendered_is_indefinite_evidence(&refusal),
@@ -7966,7 +8000,17 @@ fn per_row_evidence_conditioning_refuses_a_resolved_negative_direction_2515() {
     for band_direction in [4.0e-12_f64, -4.0e-12, 0.0] {
         let mut in_band = block.clone();
         in_band.htt = array![[4.0_f64, 0.0], [0.0, band_direction]];
-        let conditioned = factor_spectral_deflated_criterion_row(&in_band, d, true)
+        let null_geometry = ExactAClassificationRow {
+            delta_tt: array![[0.0_f64, 0.0], [0.0, band_direction - 4.0]],
+            delta_tbeta: Array2::<f64>::zeros((d, 0)),
+            clamp_diag: Array1::<f64>::zeros(d),
+        };
+        let conditioned = factor_spectral_deflated_criterion_row_with_geometry(
+            &in_band,
+            d,
+            true,
+            Some(&null_geometry),
+        )
             .unwrap_or_else(|err| {
                 panic!(
                     "#2515: a direction inside the null band ({band_direction:e}) is a \
