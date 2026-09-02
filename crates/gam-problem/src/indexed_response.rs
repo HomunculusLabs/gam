@@ -6,7 +6,7 @@
 //! loses the response geometry and makes it impossible to validate event/risk
 //! sets or preserve them in a fitted model. This module keeps them distinct.
 
-use ndarray::{ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -215,6 +215,101 @@ pub enum LikelihoodWeights<'a> {
     ByCell(ArrayView2<'a, f64>),
 }
 
+/// Owned structural presence for a separable response grid.
+///
+/// This is the lifetime-free counterpart of [`StructuralCells`]. Sparse
+/// inclusion and exclusion sets remain sparse; converting a borrowed measure
+/// for storage never silently allocates an `N × M` mask.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OwnedStructuralCells {
+    All,
+    Dense(Array2<bool>),
+    Only(IndexedCellSet),
+    AllExcept(IndexedCellSet),
+}
+
+/// Owned numerical likelihood measure, independent of structural presence.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OwnedLikelihoodWeights {
+    Uniform,
+    ByRow(Array1<f64>),
+    ByCell(Array2<f64>),
+}
+
+/// Lifetime-free structural geometry and likelihood measure.
+///
+/// The realized `(n_rows, n_outputs)` shape is part of the value. This makes a
+/// stored measure self-validating and prevents reusing a sparse activity set or
+/// weight vector against a different response grid.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OwnedSeparableCellMeasure {
+    n_rows: usize,
+    n_outputs: usize,
+    structural: OwnedStructuralCells,
+    likelihood_weights: OwnedLikelihoodWeights,
+}
+
+impl OwnedSeparableCellMeasure {
+    /// Construct and validate an owned response measure.
+    pub fn new(
+        n_rows: usize,
+        n_outputs: usize,
+        structural: OwnedStructuralCells,
+        likelihood_weights: OwnedLikelihoodWeights,
+    ) -> Result<Self, IndexedResponseError> {
+        let measure = Self {
+            n_rows,
+            n_outputs,
+            structural,
+            likelihood_weights,
+        };
+        measure.as_borrowed().validate(n_rows, n_outputs)?;
+        Ok(measure)
+    }
+
+    /// All cells present with unit numerical weight.
+    pub fn uniform(n_rows: usize, n_outputs: usize) -> Self {
+        Self {
+            n_rows,
+            n_outputs,
+            structural: OwnedStructuralCells::All,
+            likelihood_weights: OwnedLikelihoodWeights::Uniform,
+        }
+    }
+
+    pub fn n_rows(&self) -> usize {
+        self.n_rows
+    }
+
+    pub fn n_outputs(&self) -> usize {
+        self.n_outputs
+    }
+
+    /// Borrow this owned value through the zero-copy evaluation API.
+    pub fn as_borrowed(&self) -> SeparableCellMeasure<'_> {
+        let structural = match &self.structural {
+            OwnedStructuralCells::All => StructuralCells::All,
+            OwnedStructuralCells::Dense(mask) => StructuralCells::Dense(mask.view()),
+            OwnedStructuralCells::Only(cells) => StructuralCells::Only(cells),
+            OwnedStructuralCells::AllExcept(cells) => StructuralCells::AllExcept(cells),
+        };
+        let likelihood_weights = match &self.likelihood_weights {
+            OwnedLikelihoodWeights::Uniform => LikelihoodWeights::Uniform,
+            OwnedLikelihoodWeights::ByRow(weights) => LikelihoodWeights::ByRow(weights.view()),
+            OwnedLikelihoodWeights::ByCell(weights) => LikelihoodWeights::ByCell(weights.view()),
+        };
+        SeparableCellMeasure::new(structural, likelihood_weights)
+    }
+
+    pub fn is_active(&self, row: usize, output: usize) -> bool {
+        self.as_borrowed().is_active(row, output)
+    }
+
+    pub fn active_weight(&self, row: usize, output: usize) -> Option<f64> {
+        self.as_borrowed().active_weight(row, output)
+    }
+}
+
 /// Structural activity plus numerical likelihood weights for a separable
 /// response. An inactive cell has no likelihood contribution; an active cell
 /// with weight zero remains an observed member of the response geometry.
@@ -321,6 +416,35 @@ impl<'a> SeparableCellMeasure<'a> {
             LikelihoodWeights::ByCell(weights) => weights[[row, output]],
         })
     }
+
+    /// Copy this borrowed view into a lifetime-free measure while preserving
+    /// sparse structural representations.
+    pub fn to_owned(
+        &self,
+        n_rows: usize,
+        n_outputs: usize,
+    ) -> Result<OwnedSeparableCellMeasure, IndexedResponseError> {
+        self.validate(n_rows, n_outputs)?;
+        let structural = match self.structural {
+            StructuralCells::All => OwnedStructuralCells::All,
+            StructuralCells::Dense(mask) => OwnedStructuralCells::Dense(mask.to_owned()),
+            StructuralCells::Only(cells) => OwnedStructuralCells::Only(cells.clone()),
+            StructuralCells::AllExcept(cells) => OwnedStructuralCells::AllExcept(cells.clone()),
+        };
+        let likelihood_weights = match self.likelihood_weights {
+            LikelihoodWeights::Uniform => OwnedLikelihoodWeights::Uniform,
+            LikelihoodWeights::ByRow(weights) => OwnedLikelihoodWeights::ByRow(weights.to_owned()),
+            LikelihoodWeights::ByCell(weights) => {
+                OwnedLikelihoodWeights::ByCell(weights.to_owned())
+            }
+        };
+        OwnedSeparableCellMeasure::new(
+            n_rows,
+            n_outputs,
+            structural,
+            likelihood_weights,
+        )
+    }
 }
 
 fn validate_weight(weight: f64, context: String) -> Result<(), IndexedResponseError> {
@@ -370,6 +494,29 @@ mod tests {
         measure.validate(1, 2).expect("valid measure");
         assert_eq!(measure.active_weight(0, 0), None);
         assert_eq!(measure.active_weight(0, 1), Some(0.0));
+    }
+
+    #[test]
+    fn owned_measure_round_trip_preserves_sparse_geometry_and_cell_weights() {
+        let active = IndexedCellSet::from_cells(2, 3, vec![(0, 2), (1, 0)])
+            .expect("valid sparse activity set");
+        let weights = ndarray::array![[7.0, 8.0, 0.0], [2.5, 9.0, 10.0]];
+        let borrowed = SeparableCellMeasure::new(
+            StructuralCells::Only(&active),
+            LikelihoodWeights::ByCell(weights.view()),
+        );
+        let owned = borrowed.to_owned(2, 3).expect("owned response measure");
+
+        assert_eq!((owned.n_rows(), owned.n_outputs()), (2, 3));
+        assert_eq!(owned.active_weight(0, 2), Some(0.0));
+        assert_eq!(owned.active_weight(1, 0), Some(2.5));
+        assert_eq!(owned.active_weight(0, 0), None);
+        assert_eq!(owned.active_weight(1, 2), None);
+
+        let wrong_shape = borrowed
+            .to_owned(3, 3)
+            .expect_err("sparse geometry cannot be relabeled with another shape");
+        assert!(wrong_shape.reason().contains("does not match response geometry"));
     }
 
     #[test]
