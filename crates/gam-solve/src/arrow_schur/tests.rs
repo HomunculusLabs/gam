@@ -7810,7 +7810,7 @@ fn coupled_carrier_penalty_op_equals_its_rank_one_expansion_2731() {
 /// clamp-attributable curvature and priced it at its basin — the two complete
 /// outer gradients then `1.009` RELATIVE apart.
 #[test]
-fn evidence_unit_deflation_refuses_a_resolved_negative_direction_2515() {
+fn evidence_classification_prices_a_clamp_basin_before_refusing_a_saddle_2515() {
     let majorizer = ReducedSchurPolicy::EvidenceUnitDeflation {
         relative_floor: SPECTRAL_DEFLATION_REL_FLOOR,
         refuse_resolved_indefinite: false,
@@ -7847,15 +7847,40 @@ fn evidence_unit_deflation_refuses_a_resolved_negative_direction_2515() {
         "the pinned direction is the NEGATIVE one, not the 4.0"
     );
 
-    let refusal = factor_dense_reduced_schur(&resolved_negative, exact_a)
-        .expect_err(
-            "#2515: the exact-observed-information policy must REFUSE a resolved negative \
-             direction. Pinning it to +1 prices a saddle as the rho-independent null \
-             `log 1 = 0`, which is neither the basin curvature the dense exact-A route \
-             prices an attributable negative direction at nor the typed refusal it \
-             returns for an unattributable one.",
-        )
-        .to_string();
+    let basin_geometry = ExactAReducedClassification {
+        majorizer_metric: array![[4.0_f64, 0.0], [0.0, 4.0]],
+        clamp_metric: array![[0.0_f64, 0.0], [0.0, 2.0e-2]],
+    };
+    let basin = factor_dense_reduced_schur_with_exact_a(
+        &resolved_negative,
+        exact_a,
+        Some(&basin_geometry),
+    )
+    .expect(
+        "#2515: raw negative exact-A curvature wholly explained by the bounded ARD clamp \
+         is a basin, not a saddle",
+    );
+    let reconstructed_basin = basin.factor.dot(&basin.factor.t());
+    assert_abs_diff_eq!(
+        reconstructed_basin[[1, 1]],
+        -7.997_610e-3 + 2.0e-2,
+        epsilon = 1.0e-12,
+    );
+
+    let saddle_geometry = ExactAReducedClassification {
+        majorizer_metric: basin_geometry.majorizer_metric.clone(),
+        clamp_metric: Array2::<f64>::zeros((2, 2)),
+    };
+    let refusal = factor_dense_reduced_schur_with_exact_a(
+        &resolved_negative,
+        exact_a,
+        Some(&saddle_geometry),
+    )
+    .expect_err(
+        "#2515: exact-A evidence must refuse only after the shared classifier shows \
+         that negative curvature remains beyond the clamp basin",
+    )
+    .to_string();
     assert!(
         ArrowSchurError::rendered_is_indefinite_evidence(&refusal),
         "#2515: the refusal must carry the marker its cross-crate reader matches on, or \
@@ -7873,13 +7898,18 @@ fn evidence_unit_deflation_refuses_a_resolved_negative_direction_2515() {
         ("zero", 0.0_f64),
     ] {
         let in_band = array![[4.0_f64, 0.0], [0.0, band_direction]];
-        let conditioned = factor_dense_reduced_schur(&in_band, exact_a).unwrap_or_else(|err| {
-            panic!(
-                "#2515: a {label} direction INSIDE the null band is a numerical null and must \
-                 still be unit-pinned, not refused; the refusal is about RESOLVED negative \
-                 curvature. Got: {err}"
-            )
-        });
+        let null_geometry = ExactAReducedClassification {
+            majorizer_metric: basin_geometry.majorizer_metric.clone(),
+            clamp_metric: Array2::<f64>::zeros((2, 2)),
+        };
+        let conditioned =
+            factor_dense_reduced_schur_with_exact_a(&in_band, exact_a, Some(&null_geometry))
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "#2515: a {label} direction INSIDE the majorizer-metric null band is a \
+                         numerical null and must still be unit-pinned, not refused. Got: {err}"
+                    )
+                });
         let spectrum = conditioned
             .beta_deflation
             .as_ref()
