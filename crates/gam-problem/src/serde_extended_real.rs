@@ -31,7 +31,7 @@
 //! Encoding them as `null` too would make the codec lossy in the one direction
 //! that matters — it would turn a bug into a legitimate-looking `+∞`.
 
-use serde::de::{Deserializer, Visitor};
+use serde::de::{Deserializer, Error as DeError, SeqAccess, Visitor};
 use serde::ser::{SerializeSeq, Serializer};
 use std::fmt;
 
@@ -73,6 +73,36 @@ pub mod vec_f64 {
                 formatter.write_str("a sequence of numbers, with null for +infinity")
             }
 
+            // These two methods are reached ONLY through serde's trait dispatch
+            // (`Deserializer::deserialize_seq` → `Visitor::visit_seq`), never by
+            // a direct call, so a call-graph sweep sees no production link to
+            // them. d484a091a deleted them on that reading, and every
+            // constrained fit — shape, box, nonnegative — became unsaveable:
+            // with only `expecting` left, serde's default `visit_seq` answers
+            // `invalid type: sequence, expected a sequence of numbers, with
+            // null for +infinity` to the codec's OWN output, and the CLI's
+            // persist-time round-trip check refuses the model. A trait method
+            // is linked by the trait's caller, not by a call site in this crate.
+            fn visit_seq<A>(self, mut seq: A) -> Result<Vec<f64>, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(entry) = seq.next_element::<Option<f64>>()? {
+                    out.push(entry.unwrap_or(f64::INFINITY));
+                }
+                Ok(out)
+            }
+
+            fn visit_unit<E>(self) -> Result<Vec<f64>, E>
+            where
+                E: DeError,
+            {
+                // A `null` in place of the whole sequence is the absent-field
+                // encoding; `#[serde(default)]` semantics apply.
+                Ok(Vec::new())
+            }
+
         }
 
         deserializer.deserialize_seq(ExtendedRealVecVisitor)
@@ -87,6 +117,18 @@ mod tests {
     struct Limits {
         #[serde(default, with = "super::vec_f64")]
         upper: Vec<f64>,
+    }
+
+    /// The persist-time self-check is `serde_json::from_value`, not `from_str`;
+    /// both deserializers must reach `visit_seq` on the codec's own output.
+    #[test]
+    fn positive_infinity_round_trips_through_a_json_value() {
+        let value = Limits {
+            upper: vec![f64::INFINITY, -1.0, f64::INFINITY],
+        };
+        let json = serde_json::to_value(&value).expect("to_value");
+        let back: Limits = serde_json::from_value(json).expect("from_value");
+        assert_eq!(back, value);
     }
 
     #[test]
