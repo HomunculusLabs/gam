@@ -1342,11 +1342,11 @@ fn smallest_prefix_with_non_finite_louis_output_at_order_21() {
         }
         let bad = lo;
         report.push(format!(
-            "subject {s}: {n} nodes, first non-finite prefix {bad}; node {}: time {} gap {} exposure {} counts {:?}; prefix log-lik at {bad}: {:?}",
+            "subject {s}: {n} nodes, first non-finite prefix {bad}; node {}: time {} gap {} exposures {:?} counts {:?}; prefix log-lik at {bad}: {:?}",
             bad - 1,
             subj.times[bad - 1],
             if bad >= 2 { subj.gaps[bad - 2] } else { 0.0 },
-            subj.exposures[bad - 1],
+            subj.exposures.row(bad - 1).to_vec(),
             subj.counts.row(bad - 1).to_vec(),
             {
                 let prefix = SubjectNodes {

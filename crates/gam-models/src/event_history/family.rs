@@ -849,7 +849,8 @@ impl EventHistoryFit {
 
     /// Population log-intensity `η⁰` of mark `d` on the training nodes:
     /// `exp(η⁰)` is the intensity averaged over the latent state, since the
-    /// latent term enters as `−½|a_d|² + a_d · z` (see [`super::marginal`]).
+    /// latent term enters as `−½|a_d|² + a_d · z`, whose Gaussian mixing the
+    /// shift cancels exactly (`docs/event-history.md` derives it).
     pub fn mark_eta(&self, d: usize) -> &Array1<f64> {
         &self.fit.block_states[d].eta
     }
