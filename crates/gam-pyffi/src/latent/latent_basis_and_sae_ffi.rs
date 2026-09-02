@@ -888,7 +888,7 @@ fn latent_multi_output_fit_to_pydict<'py>(
                 offset: None,
                 penalty,
                 lambdas: lambdas_vec.view(),
-                row_weights: Some(row_weights.view()),
+                measure: gam::SeparableCellMeasure::row_weighted(row_weights.view()),
                 fisher_w_override: fisher_w,
                 max_iter,
                 tol,

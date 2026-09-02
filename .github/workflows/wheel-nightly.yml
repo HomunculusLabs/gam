@@ -1,4 +1,5 @@
 name: Rolling wheel (warm-start artifact)
+run-name: Runtime ${{ github.event.inputs.build_sha || github.sha }}
 
 # Permanent warm-start: pushes to main keep the x86_64 manylinux wheel plus CLI
 # pinned to the rolling `wheel-latest` prerelease. Exact-SHA consumers can also
@@ -98,6 +99,20 @@ jobs:
           # build.rs consults git history (author guard / SPEC HEAD-diff check);
           # a shallow clone with depth 2 keeps a parent commit available.
           fetch-depth: 2
+
+      - name: Verify the commissioned tree and repository bans
+        shell: bash
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          checked_out_sha=$(git rev-parse HEAD)
+          if [[ "$checked_out_sha" != "$TARGET_SHA" ]]; then
+            echo "::error::Requested ${TARGET_SHA}, but actions/checkout produced ${checked_out_sha}."
+            exit 1
+          fi
+          echo "Preflighting immutable runtime ${checked_out_sha}."
+          scripts/ban_scanner.sh .
 
       - name: Build manylinux_2_28 x86_64 wheel
         uses: PyO3/maturin-action@v1

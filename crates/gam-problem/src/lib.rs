@@ -33,6 +33,7 @@ pub mod finite_validation;
 pub mod fisher_rao;
 pub mod gauge;
 pub mod identifiability_audit;
+pub mod indexed_response;
 pub mod joint_penalty;
 mod linear_constraints;
 pub mod log_strength;
@@ -121,6 +122,10 @@ pub use gauge::Gauge;
 pub use identifiability_audit::{
     AliasedPair, BlockIdentity, DroppedColumn, IdentifiabilityAudit, JointRankCertificate,
     MapUniquenessError,
+};
+pub use indexed_response::{
+    IndexedCellSet, IndexedResponseError, LikelihoodWeights, SeparableCellMeasure,
+    StructuralCells,
 };
 pub use joint_penalty::{JointPenaltyBundle, JointPenaltyError, JointPenaltySpec};
 pub use linear_constraints::LinearInequalityConstraints;
