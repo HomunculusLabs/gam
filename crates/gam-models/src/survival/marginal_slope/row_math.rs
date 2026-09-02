@@ -1605,45 +1605,47 @@ fn bound_covariance_matvec_and_quadratic_into(
 /// feature pair. The callback owns the feature map's intrinsic Hessians, keeping
 /// the chain rule independent of covariance representation.
 #[inline(always)]
-pub(crate) fn order2_feature_pullback_into<const FEATURES: usize>(
+pub(crate) fn order2_feature_pullback_into<const FEATURES: usize, const P: usize>(
     feature_gradient: &[f64; FEATURES],
     feature_hessian: &[[f64; FEATURES]; FEATURES],
-    jacobian: &[f64],
+    jacobian: &[[f64; P]; FEATURES],
     active_feature_count: impl Fn(usize) -> usize,
     active_feature: impl Fn(usize, usize) -> usize,
-    dimension: usize,
-    gradient: &mut [f64],
-    hessian: &mut [f64],
-    add_weighted_feature_hessians: impl FnOnce(&[f64; FEATURES], &mut [f64]),
+    gradient: &mut [f64; P],
+    hessian: &mut [[f64; P]; P],
+    add_weighted_feature_hessians: impl FnOnce(&[f64; FEATURES], &mut [[f64; P]; P]),
 ) {
-    // Both production callers provide exact slices: four primary channels for
-    // the scalar/shared feature-map pullback, and the checked workspace layout
-    // for the general vector pullback.
+    // Typed arrays with the frame's `P` as a constant: every index below is a
+    // constant once the active-feature loops unroll, so the Jacobian, the
+    // feature Hessian and the outputs live in registers. The previous
+    // flattened `&[f64]` with a runtime `dimension` kept the static frame's
+    // 9x4 Jacobian in memory -- a `memset`, 36 stores and dynamic loads per
+    // row (`RIGID-SCALAR-932`, the event branch at 0.89 against the hand).
 
-    for axis in 0..dimension {
+    for axis in 0..P {
         let mut channel = 0.0;
         for slot in 0..active_feature_count(axis) {
             let feature = active_feature(axis, slot);
-            channel += feature_gradient[feature] * jacobian[feature * dimension + axis];
+            channel += feature_gradient[feature] * jacobian[feature][axis];
         }
         gradient[axis] = channel;
     }
 
-    for left_axis in 0..dimension {
-        for right_axis in left_axis..dimension {
+    for left_axis in 0..P {
+        for right_axis in left_axis..P {
             let mut channel = 0.0;
             for left_slot in 0..active_feature_count(left_axis) {
                 let left_feature = active_feature(left_axis, left_slot);
-                let left = jacobian[left_feature * dimension + left_axis];
+                let left = jacobian[left_feature][left_axis];
                 for right_slot in 0..active_feature_count(right_axis) {
                     let right_feature = active_feature(right_axis, right_slot);
                     channel += left
                         * feature_hessian[left_feature][right_feature]
-                        * jacobian[right_feature * dimension + right_axis];
+                        * jacobian[right_feature][right_axis];
                 }
             }
-            hessian[left_axis * dimension + right_axis] = channel;
-            hessian[right_axis * dimension + left_axis] = channel;
+            hessian[left_axis][right_axis] = channel;
+            hessian[right_axis][left_axis] = channel;
         }
     }
     add_weighted_feature_hessians(feature_gradient, hessian);
