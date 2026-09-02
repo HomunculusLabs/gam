@@ -271,6 +271,47 @@ impl SaeSoftmaxRowJetInput {
         Ok(input)
     }
 
+    /// Apply one row-local linear output projection to every semantic base from
+    /// which the row program constructs its jets.
+    ///
+    /// The Trace contraction dots jets against jets and therefore cannot fold a
+    /// likelihood metric into a probe as the Linear/Bilinear contractions do.
+    /// Projecting these four bases first is exact because every scheduled jet is
+    /// a scalar linear combination of them. In particular, this is the single
+    /// typed seam for `Uᵀ decoded`, `Uᵀ decoded_first`,
+    /// `Uᵀ decoded_second`, and `Uᵀ beta_output` in the log-det consumer.
+    /// `beta_outputs` deliberately becomes row-local: row metrics differ by row,
+    /// so retaining the former cross-row `Arc` sharing would apply row zero's
+    /// metric to the whole tile.
+    pub(crate) fn project_output_bases(
+        &mut self,
+        projected_dim: usize,
+        project: impl Fn(&[f64], &mut [f64]),
+    ) -> Result<(), String> {
+        if projected_dim == 0 {
+            return Err("SAE row-jet output projection requires nonzero dimension".to_string());
+        }
+        let old_dim = self.out_dim;
+        let map_blocks = |values: &[f64], blocks: usize| -> Vec<f64> {
+            let mut projected = vec![0.0_f64; blocks * projected_dim];
+            for block in 0..blocks {
+                project(
+                    &values[block * old_dim..(block + 1) * old_dim],
+                    &mut projected[block * projected_dim..(block + 1) * projected_dim],
+                );
+            }
+            projected
+        };
+        let q = self.n_primaries();
+        let n_beta = self.n_beta_borders();
+        self.decoded = map_blocks(&self.decoded, self.n_atoms);
+        self.decoded_first = map_blocks(&self.decoded_first, q);
+        self.decoded_second = map_blocks(&self.decoded_second, q * q);
+        self.beta_outputs = map_blocks(self.beta_outputs.as_ref(), n_beta).into();
+        self.out_dim = projected_dim;
+        self.validate()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let k = self.n_atoms;
         let p = self.out_dim;
@@ -556,6 +597,11 @@ pub enum SaeRowJetContraction<'a> {
         /// Row-major `n_beta × n_beta` β–β selected inverse, shared across the
         /// same-shape tile (the border layout is identical for every row).
         beta_inv: &'a [f64],
+        /// Include the moving-residual first leg of the exact observed
+        /// information: `<first(w), second(a,b)>` in t–t and
+        /// `<first(w), beta_deriv(a,c)>` in t–β. The residual third-jet leg is
+        /// not a row-jet channel and remains an explicit host post-fold.
+        exact_a: bool,
     },
 }
 
@@ -598,6 +644,7 @@ impl<'a> SaeRowJetContraction<'a> {
                 e_tt,
                 inv_vbeta,
                 beta_inv,
+                exact_a: _,
             } => {
                 expect("e_tt", e_tt.len(), checked_product(&[n, q, q])?)?;
                 expect(
@@ -730,6 +777,7 @@ fn cpu_contracted_tile(
                 e_tt,
                 inv_vbeta,
                 beta_inv,
+                exact_a,
             } => {
                 let e_row = &e_tt[row * q * q..(row + 1) * q * q];
                 let vbeta_row = &inv_vbeta[row * q * n_beta..(row + 1) * q * n_beta];
@@ -744,7 +792,7 @@ fn cpu_contracted_tile(
                             // Under softmax a logit `w` differentiates the
                             // coordinate-pair data curvature `⟨J_a,J_b⟩` through
                             // the assignment weights, not through second jets.
-                            let dh = if w_is_logit && !a_is_logit && !b_is_logit {
+                            let mut dh = if w_is_logit && !a_is_logit && !b_is_logit {
                                 dot(scheduled.first(a), scheduled.first(b))
                                     * softmax_data_weight_product_logit_factor(
                                         &input.gate_values,
@@ -757,11 +805,17 @@ fn cpu_contracted_tile(
                                 dot(scheduled.second(a, w), scheduled.first(b))
                                     + dot(scheduled.first(a), scheduled.second(b, w))
                             };
+                            if exact_a {
+                                dh += dot(scheduled.first(w), scheduled.second(a, b));
+                            }
                             gamma += e_row[a * q + b] * dh;
                         }
                         for border in 0..n_beta {
-                            let dh = dot(scheduled.second(a, w), scheduled.beta(border))
+                            let mut dh = dot(scheduled.second(a, w), scheduled.beta(border))
                                 + dot(scheduled.first(a), scheduled.beta_deriv(w, border));
+                            if exact_a {
+                                dh += dot(scheduled.first(w), scheduled.beta_deriv(a, border));
+                            }
                             gamma += 2.0 * vbeta_row[a * n_beta + border] * dh;
                         }
                     }
@@ -1317,11 +1371,6 @@ fn validate_tile(rows: &[SaeSoftmaxRowJetInput]) -> Result<(usize, usize, usize,
                 "SAE row-jet tile row {row} shape {candidate:?} != first-row shape {shape:?}"
             ));
         }
-        if input.beta_outputs != first.beta_outputs {
-            return Err(format!(
-                "SAE row-jet tile row {row} has a different decoder-border output frame"
-            ));
-        }
         if input.beta_atoms != first.beta_atoms {
             return Err(format!(
                 "SAE row-jet tile row {row} has a different decoder-border atom layout"
@@ -1605,7 +1654,7 @@ extern "C" __global__ void sae_rowjet_beta(
   if(!active[row*k+a]) { beta[index]=0.0; return; }
   double base=z[row*k+a]*beta_phi[row*nb+border];
   base*=sqrt_w[row];
-  beta[index]=base*beta_output[border*p+c];
+  beta[index]=base*beta_output[(row*nb+border)*p+c];
 }
 
 extern "C" __global__ void sae_rowjet_beta_mixed(
@@ -1635,7 +1684,7 @@ extern "C" __global__ void sae_rowjet_beta_mixed(
     scalar=0.0;
   }
   scalar*=sqrt_w[row];
-  mixed[index]=scalar*beta_output[border*p+c];
+  mixed[index]=scalar*beta_output[(row*nb+border)*p+c];
 }
 
 // ---- resident contraction kernels (#2304) ----
@@ -1657,20 +1706,6 @@ extern "C" __global__ void sae_rowjet_dot_rowmat(
   int row=(int)(index/(unsigned long long)m);
   double acc=0.0;
   for(int c=0;c<p;++c) acc += mat[index*(unsigned long long)p+c]*x[row*p+c];
-  out[index]=acc;
-}
-
-// out[row*m + j] = sum_c mat[j*p + c] * x[row*p + c]   (row-shared matrix)
-extern "C" __global__ void sae_rowjet_dot_shared(
-    const double* mat, const double* x, int m, int p,
-    unsigned long long total, double* out)
-{
-  unsigned long long index=(unsigned long long)blockIdx.x*blockDim.x+threadIdx.x;
-  if(index>=total) return;
-  int j=(int)(index%(unsigned long long)m);
-  int row=(int)(index/(unsigned long long)m);
-  double acc=0.0;
-  for(int c=0;c<p;++c) acc += mat[j*p+c]*x[row*p+c];
   out[index]=acc;
 }
 
@@ -1838,7 +1873,7 @@ extern "C" __global__ void sae_rowjet_trace_t(
     const double* z, const int* kind, const int* atom,
     const double* first, const double* second, const double* beta, const double* mixed,
     const double* e_tt, const double* inv_vbeta, const double* beta_inv,
-    double inv_tau, int k, int q, int p, int nb,
+    double inv_tau, int exact_a, int k, int q, int p, int nb,
     unsigned long long total, double* t_out)
 {
   unsigned long long index=(unsigned long long)blockIdx.x*blockDim.x+threadIdx.x;
@@ -1873,12 +1908,22 @@ extern "C" __global__ void sae_rowjet_trace_t(
       }else{
         dh=sae_rj_dot(s_aw,fb,p)+sae_rj_dot(fa,s_bw,p);
       }
+      if(exact_a) {
+        const double* fw=first_row+(unsigned long long)w*p;
+        const double* s_ab=second_row+((unsigned long long)a*q+b)*p;
+        dh+=sae_rj_dot(fw,s_ab,p);
+      }
       gamma+=e_row[a*q+b]*dh;
     }
     for(int border=0;border<nb;++border){
       const double* bbeta=beta_row+(unsigned long long)border*p;
       const double* m_w=mixed_row+((unsigned long long)w*nb+border)*p;
       double dh=sae_rj_dot(s_aw,bbeta,p)+sae_rj_dot(fa,m_w,p);
+      if(exact_a) {
+        const double* fw=first_row+(unsigned long long)w*p;
+        const double* m_a=mixed_row+((unsigned long long)a*nb+border)*p;
+        dh+=sae_rj_dot(fw,m_a,p);
+      }
       gamma+=2.0*vbeta_row[a*nb+border]*dh;
     }
   }
