@@ -16,6 +16,8 @@
 - XFAIL pattern on tests is never allowed. A failing test should always indicate problematic behavior.
 - The goal of this project is never to copy existing reference implementations.
 - Grid search is never allowed.
+- Derivative-free hyperparameter search (coordinate/pattern search, Nelder-Mead, and the like) is never allowed outside of tests. Every continuous hyperparameter is estimated from the evidence (REML/LAML) with analytic gradients, in the same outer solve as the smoothing parameters.
+- Hand-supplied search boxes or bounds on hyperparameters are never allowed. A parameter's domain comes from its parameterization (e.g., log scale for a positive quantity); where it lands inside that domain is for the evidence to decide.
 - Wall-clock time budgets and deadlines are never allowed, except in tests. In general, do not paper over solver issues.
 - A fit object must only ever come from a converged optimization. Non-convergence is an error. Work survives walls via checkpoint/resume.
 - Hard-coded knobs and magic constants, especially if arbitrary, should be avoided when possible in production code.
