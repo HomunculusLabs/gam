@@ -9,9 +9,11 @@
 //! cross-output coefficient Hessian.
 
 use crate::custom_family::{
-    BlockwiseFitOptions, CustomFamilyError, ParameterBlockSpec, fit_custom_family,
+    BlockwiseFitOptions, CustomFamilyError, ParameterBlockSpec,
 };
-use crate::indexed_natural::{IndexedNaturalDiagonalFamily, IndexedNaturalDiagonalProgram};
+use crate::indexed_natural::{
+    IndexedNaturalDiagonalFamily, IndexedNaturalDiagonalProgram, fit_indexed_natural_laml,
+};
 use gam_model_kernels::bernoulli_link::{
     bernoulli_natural_jet, bernoulli_natural_observation,
 };
@@ -162,16 +164,7 @@ pub fn fit_indexed_bernoulli_laml(
     specs: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
 ) -> Result<UnifiedFitResult, CustomFamilyError> {
-    if specs.len() != family.n_outputs() {
-        return Err(CustomFamilyError::DimensionMismatch {
-            reason: format!(
-                "indexed Bernoulli fit requires one parameter block per output: got {}, expected {}",
-                specs.len(),
-                family.n_outputs(),
-            ),
-        });
-    }
-    fit_custom_family(family, specs, options)
+    fit_indexed_natural_laml(family, specs, options)
 }
 
 #[cfg(test)]

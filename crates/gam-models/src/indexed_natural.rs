@@ -6,10 +6,12 @@
 //! by the inner Newton and outer LAML calculations.
 
 use crate::custom_family::{
-    BlockWorkingSet, CustomFamily, FamilyEvaluation, ParameterBlockSpec, ParameterBlockState,
+    BlockWorkingSet, BlockwiseFitOptions, CustomFamily, CustomFamilyError, FamilyEvaluation,
+    ParameterBlockSpec, ParameterBlockState, fit_custom_family,
 };
 use gam_model_kernels::natural_observation::NaturalDiagonalObservation;
 use gam_problem::{EstimationError, OwnedSeparableCellMeasure};
+use gam_solve::model_types::UnifiedFitResult;
 use ndarray::Array1;
 
 /// Stable scalar row program over an indexed `(row, output)` response grid.
@@ -134,6 +136,26 @@ impl<P: IndexedNaturalDiagonalProgram> IndexedNaturalDiagonalFamily<P> {
         }
         Ok((log_likelihood, score.zip(curvature)))
     }
+}
+
+/// Fit any indexed natural-diagonal program and select its unfixed, possibly
+/// shared precisions with the canonical LAML outer optimizer.
+pub fn fit_indexed_natural_laml<P: IndexedNaturalDiagonalProgram>(
+    family: &IndexedNaturalDiagonalFamily<P>,
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+) -> Result<UnifiedFitResult, CustomFamilyError> {
+    if specs.len() != family.n_outputs() {
+        return Err(CustomFamilyError::DimensionMismatch {
+            reason: format!(
+                "{} fit requires one parameter block per output: got {}, expected {}",
+                family.program().family_name(),
+                specs.len(),
+                family.n_outputs(),
+            ),
+        });
+    }
+    fit_custom_family(family, specs, options)
 }
 
 impl<P: IndexedNaturalDiagonalProgram> CustomFamily for IndexedNaturalDiagonalFamily<P> {

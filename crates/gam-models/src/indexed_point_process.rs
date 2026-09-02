@@ -7,9 +7,11 @@
 //! weights are carried independently by the response measure.
 
 use crate::custom_family::{
-    BlockwiseFitOptions, CustomFamilyError, ParameterBlockSpec, fit_custom_family,
+    BlockwiseFitOptions, CustomFamilyError, ParameterBlockSpec,
 };
-use crate::indexed_natural::{IndexedNaturalDiagonalFamily, IndexedNaturalDiagonalProgram};
+use crate::indexed_natural::{
+    IndexedNaturalDiagonalFamily, IndexedNaturalDiagonalProgram, fit_indexed_natural_laml,
+};
 use gam_model_kernels::natural_observation::NaturalDiagonalObservation;
 use gam_model_kernels::point_process::point_process_natural_observation;
 use gam_problem::{EstimationError, OwnedCellValues, OwnedSeparableCellMeasure};
@@ -121,16 +123,7 @@ pub fn fit_indexed_point_process_laml(
     specs: &[ParameterBlockSpec],
     options: &BlockwiseFitOptions,
 ) -> Result<UnifiedFitResult, CustomFamilyError> {
-    if specs.len() != family.n_outputs() {
-        return Err(CustomFamilyError::DimensionMismatch {
-            reason: format!(
-                "indexed point-process fit requires one parameter block per output: got {}, expected {}",
-                specs.len(),
-                family.n_outputs(),
-            ),
-        });
-    }
-    fit_custom_family(family, specs, options)
+    fit_indexed_natural_laml(family, specs, options)
 }
 
 #[cfg(test)]
