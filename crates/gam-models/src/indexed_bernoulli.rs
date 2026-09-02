@@ -18,11 +18,6 @@ use gam_problem::{EstimationError, OwnedCellValues, OwnedSeparableCellMeasure};
 use gam_solve::model_types::UnifiedFitResult;
 use gam_spec::{InverseLink, StandardLink};
 
-#[cfg(test)]
-use crate::custom_family::{BlockWorkingSet, CustomFamily, ParameterBlockState};
-#[cfg(test)]
-use ndarray::Array1;
-
 /// Owned indexed Bernoulli response family.
 ///
 /// Structural activity is model geometry: inactive cells are never evaluated,
@@ -162,7 +157,9 @@ pub fn fit_indexed_bernoulli_laml(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::custom_family::{BlockWorkingSet, CustomFamily, ParameterBlockState};
     use gam_problem::{IndexedCellSet, LikelihoodWeights, SeparableCellMeasure, StructuralCells};
+    use ndarray::Array1;
 
     fn states(etas: &[Array1<f64>]) -> Vec<ParameterBlockState> {
         etas.iter()

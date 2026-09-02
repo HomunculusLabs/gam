@@ -1560,7 +1560,17 @@ fn run_linear_reml_schedule_with_recycle(
     config: &SparseDictConfig,
     decoder_recycle: &mut DecoderRecycleSpace,
 ) -> Result<SparseDictFit, SparseDictionaryError> {
-    run_linear_reml_schedule_observed(x, config, decoder_recycle, |_| {})
+    run_linear_reml_schedule_observed(
+        x,
+        config,
+        decoder_recycle,
+        ignore_inner_run_start,
+    )
+}
+
+/// Production sink for the private test observation seam.
+fn ignore_inner_run_start(start: InnerRunStart) {
+    let _ignored_start = start;
 }
 
 /// The production schedule with a private, race-free observation seam for its
