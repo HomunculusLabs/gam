@@ -24,8 +24,9 @@
 //! so the interval columns are added on top of the same posterior-mean point.
 //!
 //! This test fits a binomial/logit model through the CLI, predicts on the same
-//! new data with and without `--uncertainty`, and asserts the `mean` columns are
-//! identical (tol 1e-9). Before the fix the two differed by ~1.45e-2.
+//! new data with and without `--uncertainty`, and asserts the `posterior_mean`
+//! columns (the default point prediction, #2785) are identical (tol 1e-9).
+//! Before the fix the two differed by ~1.45e-2.
 
 use std::process::Command;
 
@@ -34,8 +35,8 @@ fn parse_mean_column(csv: &str) -> Vec<f64> {
     let header = lines.next().expect("prediction CSV has a header row");
     let mean_idx = header
         .split(',')
-        .position(|h| h.trim() == "mean")
-        .expect("prediction CSV has a `mean` column");
+        .position(|h| h.trim() == "posterior_mean")
+        .expect("prediction CSV has a `posterior_mean` column");
     lines
         .filter(|l| !l.trim().is_empty())
         .map(|l| {

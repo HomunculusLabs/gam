@@ -129,8 +129,8 @@ fn exact_separation_binomial_fit_saves_and_predicts_after_reload() {
     let header = rows.next().expect("header row");
     let mean_col = header
         .split(',')
-        .position(|c| c == "mean")
-        .expect("predictions csv must have a mean column");
+        .position(|c| c == "posterior_mean")
+        .expect("predictions csv must have a posterior_mean column");
     let means: Vec<f64> = rows
         .map(|line| {
             line.split(',')
