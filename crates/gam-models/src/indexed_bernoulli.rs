@@ -15,31 +15,31 @@ use crate::custom_family::{
 use gam_model_kernels::bernoulli_link::{
     bernoulli_natural_jet, bernoulli_natural_observation,
 };
-use gam_problem::{EstimationError, OwnedSeparableCellMeasure};
+use gam_problem::{EstimationError, OwnedCellValues, OwnedSeparableCellMeasure};
 use gam_solve::model_types::UnifiedFitResult;
 use gam_spec::{InverseLink, StandardLink};
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::Array1;
 
 /// Owned indexed Bernoulli response family.
 ///
 /// Structural activity is model geometry: inactive cells are never evaluated,
-/// so they may contain a non-finite placeholder in the dense response carrier.
+/// so the value field may contain a non-finite placeholder there.
 /// Active cells, including active cells with numerical weight zero, must contain
 /// a finite binomial proportion in `[0, 1]`.
 #[derive(Clone, Debug)]
 pub struct IndexedBernoulliFamily {
-    y: Array2<f64>,
+    y: OwnedCellValues,
     measure: OwnedSeparableCellMeasure,
     link: InverseLink,
 }
 
 impl IndexedBernoulliFamily {
     pub fn new(
-        y: ArrayView2<'_, f64>,
+        y: OwnedCellValues,
         measure: OwnedSeparableCellMeasure,
         link: InverseLink,
     ) -> Result<Self, EstimationError> {
-        let (n_rows, n_outputs) = y.dim();
+        let (n_rows, n_outputs) = (y.n_rows(), y.n_outputs());
         if n_rows == 0 || n_outputs == 0 {
             return Err(EstimationError::InvalidInput(format!(
                 "indexed Bernoulli response must be non-empty, got {n_rows}x{n_outputs}"
@@ -56,28 +56,30 @@ impl IndexedBernoulliFamily {
         // still validate every realized eta because parameterized links can
         // leave their representable domain away from zero.
         bernoulli_natural_jet(0, 0.0, &link)?;
-        for ((row, output), &response) in y.indexed_iter() {
-            if measure.is_active(row, output)
-                && !(response.is_finite() && (0.0..=1.0).contains(&response))
-            {
+        measure.try_for_each_active(|row, output, _weight| {
+            let response = y
+                .value(row, output)
+                .expect("response and measure shapes were matched above");
+            if !(response.is_finite() && (0.0..=1.0).contains(&response)) {
                 return Err(EstimationError::InvalidInput(format!(
                     "indexed Bernoulli response[{row},{output}] must be finite and in [0,1] because the cell is structurally active, got {response}"
                 )));
             }
-        }
+            Ok(())
+        })?;
         Ok(Self {
-            y: y.to_owned(),
+            y,
             measure,
             link,
         })
     }
 
     pub fn n_rows(&self) -> usize {
-        self.y.nrows()
+        self.y.n_rows()
     }
 
     pub fn n_outputs(&self) -> usize {
-        self.y.ncols()
+        self.y.n_outputs()
     }
 
     pub fn link(&self) -> &InverseLink {
@@ -122,7 +124,9 @@ impl IndexedBernoulliFamily {
             }
             let observation = bernoulli_natural_observation(
                 row,
-                self.y[[row, output]],
+                self.y
+                    .value(row, output)
+                    .expect("validated response geometry"),
                 eta[row],
                 &self.link,
             )
@@ -178,20 +182,22 @@ impl CustomFamily for IndexedBernoulliFamily {
     ) -> Result<Option<f64>, String> {
         let fitted = self.log_likelihood_only(block_states)?;
         let mut saturated = 0.0;
-        for ((row, output), &response) in self.y.indexed_iter() {
-            let Some(weight) = self.measure.active_weight(row, output) else {
-                continue;
-            };
+        self.measure.try_for_each_active(|row, output, weight| {
             if weight == 0.0 {
-                continue;
+                return Ok::<(), String>(());
             }
+            let response = self
+                .y
+                .value(row, output)
+                .expect("validated response geometry");
             let unit = if response == 0.0 || response == 1.0 {
                 0.0
             } else {
                 response * response.ln() + (1.0 - response) * (-response).ln_1p()
             };
             saturated += weight * unit;
-        }
+            Ok(())
+        })?;
         Ok(Some(2.0 * (saturated - fitted)))
     }
 
@@ -249,7 +255,9 @@ impl CustomFamily for IndexedBernoulliFamily {
             }
             let observation = bernoulli_natural_observation(
                 row,
-                self.y[[row, block_index]],
+                self.y
+                    .value(row, block_index)
+                    .expect("validated response geometry"),
                 state.eta[row],
                 &self.link,
             )
@@ -292,7 +300,9 @@ impl CustomFamily for IndexedBernoulliFamily {
             }
             let observation = bernoulli_natural_observation(
                 row,
-                self.y[[row, block_index]],
+                self.y
+                    .value(row, block_index)
+                    .expect("validated response geometry"),
                 state.eta[row],
                 &self.link,
             )
@@ -351,7 +361,7 @@ mod tests {
         let measure = borrowed.to_owned(2, 2).expect("owned measure");
         let y = ndarray::array![[1.0, 0.0], [f64::NAN, 0.0]];
         let family = IndexedBernoulliFamily::new(
-            y.view(),
+            OwnedCellValues::dense(y),
             measure,
             InverseLink::Standard(StandardLink::Logit),
         )
@@ -374,7 +384,7 @@ mod tests {
     #[test]
     fn cloglog_tail_preserves_nonzero_score_at_zero_observed_curvature() {
         let family = IndexedBernoulliFamily::new(
-            ndarray::array![[1.0]].view(),
+            OwnedCellValues::constant(1, 1, 1.0),
             OwnedSeparableCellMeasure::uniform(1, 1),
             InverseLink::Standard(StandardLink::CLogLog),
         )
@@ -392,5 +402,66 @@ mod tests {
         assert_eq!(score[0], 1.0);
         assert_eq!(observed_curvature[0], 0.0);
         assert_eq!(evaluation.log_likelihood, -1_000.0);
+    }
+
+    #[test]
+    fn sparse_event_overrides_equal_the_dense_response_likelihood() {
+        let events = IndexedCellSet::from_cells(3, 2, vec![(0, 1), (2, 0)])
+            .expect("event cells");
+        let sparse = OwnedCellValues::constant_with_overrides(
+            3,
+            2,
+            0.0,
+            events,
+            vec![1.0, 1.0],
+        )
+        .expect("sparse response");
+        let dense = OwnedCellValues::dense(ndarray::array![[0.0, 1.0], [0.0, 0.0], [1.0, 0.0]]);
+        let link = InverseLink::Standard(StandardLink::Logit);
+        let sparse_family = IndexedBernoulliFamily::new(
+            sparse,
+            OwnedSeparableCellMeasure::uniform(3, 2),
+            link.clone(),
+        )
+        .expect("sparse family");
+        let dense_family = IndexedBernoulliFamily::new(
+            dense,
+            OwnedSeparableCellMeasure::uniform(3, 2),
+            link,
+        )
+        .expect("dense family");
+        let point = states(&[
+            ndarray::array![-0.3, 0.2, 1.1],
+            ndarray::array![0.7, -0.5, 0.4],
+        ]);
+
+        let sparse_evaluation = sparse_family.evaluate(&point).expect("sparse evaluation");
+        let dense_evaluation = dense_family.evaluate(&point).expect("dense evaluation");
+        assert_eq!(
+            sparse_evaluation.log_likelihood,
+            dense_evaluation.log_likelihood,
+        );
+        for (sparse_working, dense_working) in sparse_evaluation
+            .blockworking_sets
+            .iter()
+            .zip(dense_evaluation.blockworking_sets.iter())
+        {
+            let BlockWorkingSet::NaturalDiagonal {
+                score: sparse_score,
+                observed_curvature: sparse_curvature,
+            } = sparse_working
+            else {
+                panic!("sparse indexed response must retain natural geometry");
+            };
+            let BlockWorkingSet::NaturalDiagonal {
+                score: dense_score,
+                observed_curvature: dense_curvature,
+            } = dense_working
+            else {
+                panic!("dense indexed response must retain natural geometry");
+            };
+            assert_eq!(sparse_score, dense_score);
+            assert_eq!(sparse_curvature, dense_curvature);
+        }
     }
 }

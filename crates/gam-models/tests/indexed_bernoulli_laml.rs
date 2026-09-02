@@ -3,7 +3,7 @@ use gam_models::custom_family::{BlockwiseFitOptions, PenaltyMatrix};
 use gam_models::indexed_bernoulli::{IndexedBernoulliFamily, fit_indexed_bernoulli_laml};
 use gam_models::output_axis::{OutputAxisPenalty, OutputBlockAxis};
 use gam_problem::{
-    OwnedLikelihoodWeights, OwnedSeparableCellMeasure, OwnedStructuralCells,
+    OwnedCellValues, OwnedLikelihoodWeights, OwnedSeparableCellMeasure, OwnedStructuralCells,
 };
 use gam_spec::{InverseLink, StandardLink};
 use ndarray::{Array2, array};
@@ -43,7 +43,7 @@ fn indexed_outputs_share_one_selected_precision_without_losing_risk_geometry() {
     )
     .expect("valid indexed response measure");
     let family = IndexedBernoulliFamily::new(
-        response.view(),
+        OwnedCellValues::dense(response),
         measure,
         InverseLink::Standard(StandardLink::Logit),
     )

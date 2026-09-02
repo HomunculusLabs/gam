@@ -124,8 +124,9 @@ pub use identifiability_audit::{
     MapUniquenessError,
 };
 pub use indexed_response::{
-    IndexedCellSet, IndexedResponseError, LikelihoodWeights, OwnedLikelihoodWeights,
-    OwnedSeparableCellMeasure, OwnedStructuralCells, SeparableCellMeasure, StructuralCells,
+    IndexedCellSet, IndexedResponseError, LikelihoodWeights, OwnedCellValues,
+    OwnedLikelihoodWeights, OwnedSeparableCellMeasure, OwnedStructuralCells,
+    SeparableCellMeasure, StructuralCells,
 };
 pub use joint_penalty::{JointPenaltyBundle, JointPenaltyError, JointPenaltySpec};
 pub use linear_constraints::LinearInequalityConstraints;

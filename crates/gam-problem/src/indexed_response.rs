@@ -176,8 +176,20 @@ impl IndexedCellSet {
 
     /// Whether `(row, output)` belongs to the set.
     pub fn contains(&self, row: usize, output: usize) -> bool {
-        self.row_outputs(row)
-            .is_some_and(|outputs| outputs.binary_search(&output).is_ok())
+        self.position(row, output).is_some()
+    }
+
+    /// Row-major storage position of `(row, output)`, when present.
+    pub fn position(&self, row: usize, output: usize) -> Option<usize> {
+        if row >= self.n_rows || output >= self.n_outputs {
+            return None;
+        }
+        let start = self.row_offsets[row];
+        let end = self.row_offsets[row + 1];
+        self.output_indices[start..end]
+            .binary_search(&output)
+            .ok()
+            .map(|within_row| start + within_row)
     }
 
     fn validate_shape(&self, n_rows: usize, n_outputs: usize) -> Result<(), IndexedResponseError> {
@@ -234,6 +246,101 @@ pub enum OwnedLikelihoodWeights {
     Uniform,
     ByRow(Array1<f64>),
     ByCell(Array2<f64>),
+}
+
+/// Owned values over a declared `(row, output)` grid.
+///
+/// `ConstantWithOverrides` is the canonical event-history representation:
+/// zero is implicit everywhere and only event cells are stored. It is also
+/// useful for sparse labels, exposures, and any coefficient field with a
+/// dominant background value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OwnedCellValues {
+    Dense(Array2<f64>),
+    Constant {
+        n_rows: usize,
+        n_outputs: usize,
+        value: f64,
+    },
+    ConstantWithOverrides {
+        n_rows: usize,
+        n_outputs: usize,
+        default: f64,
+        cells: IndexedCellSet,
+        values: Vec<f64>,
+    },
+}
+
+impl OwnedCellValues {
+    pub fn dense(values: Array2<f64>) -> Self {
+        Self::Dense(values)
+    }
+
+    pub fn constant(n_rows: usize, n_outputs: usize, value: f64) -> Self {
+        Self::Constant {
+            n_rows,
+            n_outputs,
+            value,
+        }
+    }
+
+    pub fn constant_with_overrides(
+        n_rows: usize,
+        n_outputs: usize,
+        default: f64,
+        cells: IndexedCellSet,
+        values: Vec<f64>,
+    ) -> Result<Self, IndexedResponseError> {
+        cells.validate_shape(n_rows, n_outputs)?;
+        if values.len() != cells.len() {
+            return Err(IndexedResponseError::new(format!(
+                "indexed value override count {} does not match override cell count {}",
+                values.len(),
+                cells.len(),
+            )));
+        }
+        Ok(Self::ConstantWithOverrides {
+            n_rows,
+            n_outputs,
+            default,
+            cells,
+            values,
+        })
+    }
+
+    pub fn n_rows(&self) -> usize {
+        match self {
+            Self::Dense(values) => values.nrows(),
+            Self::Constant { n_rows, .. } | Self::ConstantWithOverrides { n_rows, .. } => *n_rows,
+        }
+    }
+
+    pub fn n_outputs(&self) -> usize {
+        match self {
+            Self::Dense(values) => values.ncols(),
+            Self::Constant { n_outputs, .. }
+            | Self::ConstantWithOverrides { n_outputs, .. } => *n_outputs,
+        }
+    }
+
+    pub fn value(&self, row: usize, output: usize) -> Option<f64> {
+        if row >= self.n_rows() || output >= self.n_outputs() {
+            return None;
+        }
+        Some(match self {
+            Self::Dense(values) => values[[row, output]],
+            Self::Constant { value, .. } => *value,
+            Self::ConstantWithOverrides {
+                default,
+                cells,
+                values,
+                ..
+            } => cells
+                .position(row, output)
+                .map(|position| values[position])
+                .unwrap_or(*default),
+        })
+    }
 }
 
 /// Lifetime-free structural geometry and likelihood measure.
@@ -307,6 +414,57 @@ impl OwnedSeparableCellMeasure {
 
     pub fn active_weight(&self, row: usize, output: usize) -> Option<f64> {
         self.as_borrowed().active_weight(row, output)
+    }
+
+    /// Visit every structurally active cell in deterministic row-major order.
+    /// Sparse inclusion geometry runs in `O(active cells)`; zero numerical
+    /// weights remain visible to the visitor because they do not erase model
+    /// structure.
+    pub fn try_for_each_active<E>(
+        &self,
+        mut visitor: impl FnMut(usize, usize, f64) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let weight = |row: usize, output: usize| match &self.likelihood_weights {
+            OwnedLikelihoodWeights::Uniform => 1.0,
+            OwnedLikelihoodWeights::ByRow(weights) => weights[row],
+            OwnedLikelihoodWeights::ByCell(weights) => weights[[row, output]],
+        };
+        match &self.structural {
+            OwnedStructuralCells::All => {
+                for row in 0..self.n_rows {
+                    for output in 0..self.n_outputs {
+                        visitor(row, output, weight(row, output))?;
+                    }
+                }
+            }
+            OwnedStructuralCells::Dense(active) => {
+                for ((row, output), &is_active) in active.indexed_iter() {
+                    if is_active {
+                        visitor(row, output, weight(row, output))?;
+                    }
+                }
+            }
+            OwnedStructuralCells::Only(cells) => {
+                for row in 0..self.n_rows {
+                    for &output in cells
+                        .row_outputs(row)
+                        .expect("owned sparse cell geometry was validated at construction")
+                    {
+                        visitor(row, output, weight(row, output))?;
+                    }
+                }
+            }
+            OwnedStructuralCells::AllExcept(excluded) => {
+                for row in 0..self.n_rows {
+                    for output in 0..self.n_outputs {
+                        if !excluded.contains(row, output) {
+                            visitor(row, output, weight(row, output))?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -534,5 +692,54 @@ mod tests {
             .validate(1, 2)
             .expect_err("negative likelihood weight must fail");
         assert!(error.reason().contains("non-negative"));
+    }
+
+    #[test]
+    fn constant_values_with_sparse_overrides_preserve_row_major_identity() {
+        let overrides = IndexedCellSet::from_cells(3, 4, vec![(2, 3), (0, 1), (2, 0)])
+            .expect("valid override cells");
+        let values = OwnedCellValues::constant_with_overrides(
+            3,
+            4,
+            0.0,
+            overrides,
+            vec![5.0, 7.0, 9.0],
+        )
+        .expect("valid sparse value field");
+
+        // from_cells canonicalizes coordinates to (0,1), (2,0), (2,3), and
+        // the caller's values are defined in that same canonical storage order.
+        assert_eq!(values.value(0, 1), Some(5.0));
+        assert_eq!(values.value(2, 0), Some(7.0));
+        assert_eq!(values.value(2, 3), Some(9.0));
+        assert_eq!(values.value(1, 2), Some(0.0));
+        assert_eq!(values.value(3, 0), None);
+    }
+
+    #[test]
+    fn sparse_activity_visitor_keeps_zero_mass_cells_and_row_major_order() {
+        let active = IndexedCellSet::from_cells(3, 4, vec![(2, 3), (0, 1), (2, 0)])
+            .expect("valid active cells");
+        let weights = ndarray::array![
+            [1.0, 0.0, 3.0, 4.0],
+            [5.0, 6.0, 7.0, 8.0],
+            [9.0, 10.0, 11.0, 12.0]
+        ];
+        let measure = OwnedSeparableCellMeasure::new(
+            3,
+            4,
+            OwnedStructuralCells::Only(active),
+            OwnedLikelihoodWeights::ByCell(weights),
+        )
+        .expect("valid sparse measure");
+        let mut visited = Vec::new();
+        measure
+            .try_for_each_active::<std::convert::Infallible>(|row, output, weight| {
+                visited.push((row, output, weight));
+                Ok(())
+            })
+            .expect("infallible visit");
+
+        assert_eq!(visited, vec![(0, 1, 0.0), (2, 0, 9.0), (2, 3, 12.0)]);
     }
 }
