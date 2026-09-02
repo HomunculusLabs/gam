@@ -4043,6 +4043,11 @@ impl SaeManifoldTerm {
             .collect::<Vec<_>>()
             .into();
         let border = self.border_channels_for_border_dim(border_dim)?;
+        let classification_indices: std::sync::Arc<[usize]> = border
+            .iter()
+            .map(|channel| channel.index)
+            .collect::<Vec<_>>()
+            .into();
         let mut system = majorizer.clone();
         // The CUDA descriptor describes `B`'s cross-block sparsity, so it cannot
         // stand in for `A`; the generic closures are the authoritative path.
@@ -4097,12 +4102,10 @@ impl SaeManifoldTerm {
                 }
             }
             (Some(base_forward), Some(base_transpose)) => {
-                let indices: std::sync::Arc<Vec<usize>> =
-                    std::sync::Arc::new(border.iter().map(|channel| channel.index).collect());
                 let forward_blocks = std::sync::Arc::clone(&classification_rows);
-                let forward_indices = std::sync::Arc::clone(&indices);
+                let forward_indices = std::sync::Arc::clone(&classification_indices);
                 let transpose_blocks = std::sync::Arc::clone(&classification_rows);
-                let transpose_indices = std::sync::Arc::clone(&indices);
+                let transpose_indices = std::sync::Arc::clone(&classification_indices);
                 // #2515 — the COMPOSED operator's content identity: the base
                 // operator's own identity (which the majorizer published when it
                 // was assembled) combined with the exact-A correction blocks this
@@ -4123,8 +4126,8 @@ impl SaeManifoldTerm {
                     for block in classification_rows.iter() {
                         hasher.write_f64_array2(&block.delta_tbeta);
                     }
-                    hasher.write_usize(indices.len());
-                    for &index in indices.iter() {
+                    hasher.write_usize(classification_indices.len());
+                    for &index in classification_indices.iter() {
                         hasher.write_usize(index);
                     }
                     hasher.finish_u64()
@@ -4170,6 +4173,7 @@ impl SaeManifoldTerm {
         system.exact_a_classification = Some(
             gam_solve::arrow_schur::ExactAClassificationGeometry {
                 rows: classification_rows,
+                border_indices: classification_indices,
             },
         );
         system.refresh_row_hessian_fingerprint();

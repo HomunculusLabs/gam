@@ -57,6 +57,9 @@ pub struct ExactAClassificationRow {
 #[derive(Debug, Clone)]
 pub struct ExactAClassificationGeometry {
     pub rows: Arc<[ExactAClassificationRow]>,
+    /// Column indices mapping each `delta_tbeta` carrier column into the arrow
+    /// system's shared border.
+    pub border_indices: Arc<[usize]>,
 }
 
 /// Bordered (t, β) Newton system with arrow structure.

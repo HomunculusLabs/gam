@@ -507,6 +507,20 @@ pub(crate) fn factor_spectral_deflated_criterion_row(
     d: usize,
     refuse_resolved_indefinite: bool,
 ) -> Result<Option<ArrowRowFactorResult>, String> {
+    factor_spectral_deflated_criterion_row_with_geometry(
+        row,
+        d,
+        refuse_resolved_indefinite,
+        None,
+    )
+}
+
+fn factor_spectral_deflated_criterion_row_with_geometry(
+    row: &ArrowRowBlock,
+    d: usize,
+    refuse_resolved_indefinite: bool,
+    exact_a: Option<&ExactAClassificationRow>,
+) -> Result<Option<ArrowRowFactorResult>, String> {
     if d == 0 || row.htt.dim() != (d, d) {
         return Ok(None);
     }
@@ -533,6 +547,15 @@ pub(crate) fn factor_spectral_deflated_criterion_row(
     if !(max_abs.is_finite() && max_abs > 0.0) {
         return Ok(None);
     }
+    if let Some(geometry) = exact_a
+        && (geometry.delta_tt.dim() != (d, d) || geometry.clamp_diag.len() != d)
+    {
+        return Err(format!(
+            "exact-A row classifier: A row is {d}x{d}, but delta_tt is {:?} and clamp diagonal has length {}",
+            geometry.delta_tt.dim(),
+            geometry.clamp_diag.len(),
+        ));
+    }
     let floor = SPECTRAL_DEFLATION_REL_FLOOR * max_abs;
     // Hysteresis-banded deflation floor for *positive* near-cutoff eigenvalues.
     // The bare `floor` is a knife-edge: a small positive curvature direction
@@ -555,7 +578,7 @@ pub(crate) fn factor_spectral_deflated_criterion_row(
     // nothing downstream can tell, because the conditioned block is PD and its
     // log-determinant is finite. The sibling refusal on the reduced Schur
     // (`factor_evidence_unit_deflated_schur`) carries the measurement.
-    if refuse_resolved_indefinite {
+    if refuse_resolved_indefinite && exact_a.is_none() {
         let mut worst = 0.0_f64;
         let mut worst_index = 0usize;
         for (index, &lambda) in evals.iter().enumerate() {
@@ -612,13 +635,57 @@ pub(crate) fn factor_spectral_deflated_criterion_row(
     // certificate (for example, a raw eigenvalue can already equal one).
     let mut conditioning = vec![RowSpectralConditioning::Raw; d];
     let mut deflated_count = 0usize;
+    let mut classification_changed = false;
     // The unit-stiffness deflated eigenvectors `vᵢ` (columns of `evecs`), in
     // this row's `d`-dim block coordinates — surfaced so the outer ρ/θ-gradient
     // can subtract the spurious `½ vᵢᵀ ∂H_raw/∂ρ vᵢ` the deflated inverse adds.
     let mut deflated_directions: Vec<Array1<f64>> = Vec::new();
     for eig_idx in 0..evals.len() {
         let lambda = evals[eig_idx];
-        let lambda_tilde = if lambda.is_finite() && lambda > deflate_floor {
+        let exact_classification = exact_a.map(|geometry| {
+            let direction = evecs.column(eig_idx);
+            let majorizer = &sym - &geometry.delta_tt;
+            let majorizer_curvature = direction.dot(&majorizer.dot(&direction));
+            let clamp_curvature = direction
+                .iter()
+                .zip(geometry.clamp_diag.iter())
+                .map(|(&value, &clamp)| clamp * value * value)
+                .sum::<f64>();
+            classify_exact_a_direction(
+                lambda,
+                d,
+                max_abs,
+                majorizer_curvature,
+                clamp_curvature,
+            )
+        });
+        let lambda_tilde = if let Some(classification) = exact_classification {
+            match classification {
+                ExactADirectionClassification::ResolvedPositive { curvature } => curvature,
+                ExactADirectionClassification::NumericalNull => {
+                    conditioning[eig_idx] = RowSpectralConditioning::UnitDeflated;
+                    deflated_count += 1;
+                    classification_changed = true;
+                    deflated_directions.push(evecs.column(eig_idx).to_owned());
+                    1.0
+                }
+                ExactADirectionClassification::ClampBasin { curvature } => {
+                    // The raw exact-A direction remains the operator being
+                    // classified; `curvature` is only the coarse-grained basin
+                    // price used after the clamp has explained its negative sign.
+                    classification_changed = true;
+                    curvature
+                }
+                ExactADirectionClassification::Saddle { curvature, basin } => {
+                    return Err(format!(
+                        "per-row {}: direction {eig_idx} has raw exact-A curvature \
+                         {curvature:.6e} and clamp basin {basin:.6e}; the shared \
+                         majorizer-metric classifier declares a genuine saddle (#2515/#2336)",
+                        ArrowSchurError::indefinite_evidence_marker(),
+                    ));
+                }
+            }
+        } else if lambda.is_finite() && lambda > deflate_floor {
             // Genuine positive direction: keep it, but clamp UP to the positive
             // `floor` so a tiny-but-kept eigenvalue cannot make the reconstructed
             // block numerically non-PD (it never lowers a healthy `λ ≫ floor`).
@@ -642,7 +709,7 @@ pub(crate) fn factor_spectral_deflated_criterion_row(
             }
         }
     }
-    if deflated_count == 0 {
+    if deflated_count == 0 && !classification_changed {
         // The hysteresis band kept every direction (the offending eigenvalue
         // rounded just above `deflate_floor`), yet the genuine Cholesky still
         // refused the block — a barely-non-PD knife-edge. We are on the refused
@@ -866,6 +933,7 @@ pub(crate) fn factor_one_row(
         &[],
         false,
         false,
+        None,
     )
         .map(|result| result.factor)
 }
@@ -885,6 +953,7 @@ pub(crate) fn factor_one_row_result(
     // `ArrowEvidencePolicy::refuses_resolved_indefinite` and carried here, never
     // re-derived per site.
     refuse_resolved_indefinite: bool,
+    exact_a: Option<&ExactAClassificationRow>,
 ) -> Result<ArrowRowFactorResult, ArrowSchurError> {
     // `d` is an UPPER BOUND, not the row's dimension.
     //
@@ -1040,10 +1109,11 @@ pub(crate) fn factor_one_row_result(
                         let kappa_est = cholesky_factor_kappa_estimate(&factor);
                         if !cholesky_factor_passes_safe_inversion(&factor, d, diag_scale, kappa_est)
                         {
-                            let deflated = factor_spectral_deflated_criterion_row(
+                            let deflated = factor_spectral_deflated_criterion_row_with_geometry(
                                 row,
                                 d,
                                 refuse_resolved_indefinite,
+                                exact_a,
                             )
                             .map_err(|reason| ArrowSchurError::PerRowFactorFailed {
                                 row: row_idx,
@@ -1146,10 +1216,11 @@ pub(crate) fn factor_one_row_result(
                         // flat direction was intrinsic-dimension deficiency rather
                         // than a supplied gauge — exactly the #1273 abort.
                         if allow_spectral_deflation {
-                            let deflated = factor_spectral_deflated_criterion_row(
+                            let deflated = factor_spectral_deflated_criterion_row_with_geometry(
                                 row,
                                 d,
                                 refuse_resolved_indefinite,
+                                exact_a,
                             )
                             .map_err(|reason| ArrowSchurError::PerRowFactorFailed {
                                 row: row_idx,

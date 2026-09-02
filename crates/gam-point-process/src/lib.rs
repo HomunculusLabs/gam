@@ -54,6 +54,13 @@ pub enum MarkedPointProcessError {
         iterations: usize,
         stationarity: f64,
     },
+    #[error(
+        "Laplace hyperparameter search did not converge in {evaluations} evaluations (maximum transformed step={maximum_step})"
+    )]
+    HyperparameterNonConvergence {
+        evaluations: usize,
+        maximum_step: f64,
+    },
     #[error("Newton line search could not find an improving finite step")]
     LineSearchFailure,
     #[error("non-finite numerical result while computing {context}")]
@@ -655,6 +662,151 @@ pub struct CohortLaplaceResult {
     pub laplace_log_marginal_likelihood: f64,
 }
 
+/// One model parameter estimated by the outer Laplace marginal-likelihood solve.
+///
+/// Positive Matérn parameters are optimized on the log scale. Loadings are
+/// optimized on their signed natural scale. A factor variance and a loading in
+/// the same factor column cannot be estimated together because their reciprocal
+/// rescaling leaves the induced intensity distribution unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LaplaceHyperparameter {
+    FactorLengthScale { factor: usize },
+    FactorMarginalVariance { factor: usize },
+    Loading { mark: usize, factor: usize },
+}
+
+impl LaplaceHyperparameter {
+    /// Read this parameter from a validated model on its natural scale.
+    pub fn value(
+        self,
+        model: &MarkedPointProcessModel,
+    ) -> Result<f64, MarkedPointProcessError> {
+        model.validate()?;
+        self.validate_index(model)?;
+        Ok(match self {
+            Self::FactorLengthScale { factor } => model.factors[factor].length_scale,
+            Self::FactorMarginalVariance { factor } => {
+                model.factors[factor].marginal_variance
+            }
+            Self::Loading { mark, factor } => model.loadings[[mark, factor]],
+        })
+    }
+
+    fn validate_index(
+        self,
+        model: &MarkedPointProcessModel,
+    ) -> Result<(), MarkedPointProcessError> {
+        match self {
+            Self::FactorLengthScale { factor }
+            | Self::FactorMarginalVariance { factor }
+                if factor >= model.factors.len() =>
+            {
+                Err(invalid(format!("factor index {factor} is out of bounds")))
+            }
+            Self::Loading { mark, factor } if mark >= model.mark_count() => {
+                Err(invalid(format!("mark index {mark} is out of bounds")))
+            }
+            Self::Loading { factor, .. } if factor >= model.factors.len() => {
+                Err(invalid(format!("factor index {factor} is out of bounds")))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn is_positive(self) -> bool {
+        matches!(
+            self,
+            Self::FactorLengthScale { .. } | Self::FactorMarginalVariance { .. }
+        )
+    }
+
+    fn assign(
+        self,
+        model: &mut MarkedPointProcessModel,
+        value: f64,
+    ) -> Result<(), MarkedPointProcessError> {
+        self.validate_index(model)?;
+        if !value.is_finite() || (self.is_positive() && value <= 0.0) {
+            return Err(invalid("hyperparameter value is outside its natural domain"));
+        }
+        match self {
+            Self::FactorLengthScale { factor } => model.factors[factor].length_scale = value,
+            Self::FactorMarginalVariance { factor } => {
+                model.factors[factor].marginal_variance = value;
+            }
+            Self::Loading { mark, factor } => model.loadings[[mark, factor]] = value,
+        }
+        Ok(())
+    }
+}
+
+/// Natural-scale box constraint for one estimated hyperparameter.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LaplaceHyperparameterSpec {
+    pub parameter: LaplaceHyperparameter,
+    pub lower: f64,
+    pub upper: f64,
+}
+
+/// Deterministic bounded pattern-search controls for the outer LAML solve.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HyperparameterControl {
+    pub max_evaluations: usize,
+    /// Initial coordinate step as a fraction of each transformed box width.
+    pub initial_step_fraction: f64,
+    /// Multiplier applied to every coordinate step after an unsuccessful sweep.
+    pub step_shrink: f64,
+    /// Convergence threshold for the largest log-scale or loading-scale step.
+    pub transformed_step_tolerance: f64,
+    /// Smallest evidence gain accepted as a real improvement.
+    pub evidence_tolerance: f64,
+}
+
+impl HyperparameterControl {
+    fn validate(self) -> Result<(), MarkedPointProcessError> {
+        if self.max_evaluations == 0 {
+            return Err(invalid("max_evaluations must be positive"));
+        }
+        if !self.initial_step_fraction.is_finite()
+            || self.initial_step_fraction <= 0.0
+            || self.initial_step_fraction > 1.0
+        {
+            return Err(invalid(
+                "initial_step_fraction must lie in the interval (0, 1]",
+            ));
+        }
+        if !self.step_shrink.is_finite() || self.step_shrink <= 0.0 || self.step_shrink >= 1.0 {
+            return Err(invalid(
+                "hyperparameter step_shrink must lie strictly between zero and one",
+            ));
+        }
+        if !self.transformed_step_tolerance.is_finite()
+            || self.transformed_step_tolerance <= 0.0
+        {
+            return Err(invalid(
+                "transformed_step_tolerance must be finite and positive",
+            ));
+        }
+        if !self.evidence_tolerance.is_finite() || self.evidence_tolerance < 0.0 {
+            return Err(invalid(
+                "evidence_tolerance must be finite and non-negative",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Joint outer LAML estimate and the latent approximation at that estimate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HyperparameterFitResult {
+    pub model: MarkedPointProcessModel,
+    pub approximation: CohortLaplaceResult,
+    /// Values in the natural scales and order of the supplied specifications.
+    pub parameters: Vec<f64>,
+    pub evaluations: usize,
+    pub maximum_transformed_step: f64,
+}
+
 #[derive(Debug, Clone)]
 struct PriorTransition {
     transition: Array2<f64>,
@@ -929,6 +1081,224 @@ pub fn smooth_laplace_cohort(
         subjects,
         laplace_log_marginal_likelihood,
     })
+}
+
+/// Estimate selected dynamics and loading parameters by one cohort LAML objective.
+///
+/// The search is deterministic bounded coordinate pattern search. Positive
+/// Matérn parameters use log coordinates, so every evaluated model remains in
+/// its natural domain. The objective is generally not concave in these outer
+/// parameters; the returned estimate is the bounded local optimum reached from
+/// `initial_model`, while every inner latent-state solve retains its unique
+/// log-concave mode.
+pub fn fit_laplace_hyperparameters(
+    initial_model: &MarkedPointProcessModel,
+    histories: &[SubjectHistory],
+    specifications: &[LaplaceHyperparameterSpec],
+    laplace_control: LaplaceControl,
+    hyperparameter_control: HyperparameterControl,
+) -> Result<HyperparameterFitResult, MarkedPointProcessError> {
+    initial_model.validate()?;
+    laplace_control.validate()?;
+    hyperparameter_control.validate()?;
+    if specifications.is_empty() {
+        return Err(invalid(
+            "hyperparameter search requires at least one parameter",
+        ));
+    }
+
+    let mut transformed_lower = Vec::with_capacity(specifications.len());
+    let mut transformed_upper = Vec::with_capacity(specifications.len());
+    let mut coordinates = Vec::with_capacity(specifications.len());
+    for (index, specification) in specifications.iter().copied().enumerate() {
+        specification.parameter.validate_index(initial_model)?;
+        if specifications[..index]
+            .iter()
+            .any(|previous| previous.parameter == specification.parameter)
+        {
+            return Err(invalid(format!(
+                "hyperparameter {:?} is duplicated",
+                specification.parameter
+            )));
+        }
+        if !specification.lower.is_finite()
+            || !specification.upper.is_finite()
+            || specification.lower >= specification.upper
+            || (specification.parameter.is_positive() && specification.lower <= 0.0)
+        {
+            return Err(invalid(format!(
+                "hyperparameter {:?} requires finite ordered bounds in its natural domain",
+                specification.parameter
+            )));
+        }
+        let initial = specification.parameter.value(initial_model)?;
+        if initial < specification.lower || initial > specification.upper {
+            return Err(invalid(format!(
+                "initial value {initial} for hyperparameter {:?} lies outside [{}, {}]",
+                specification.parameter, specification.lower, specification.upper
+            )));
+        }
+        let transform = |value: f64| {
+            if specification.parameter.is_positive() {
+                value.ln()
+            } else {
+                value
+            }
+        };
+        let lower = transform(specification.lower);
+        let upper = transform(specification.upper);
+        let coordinate = transform(initial);
+        if !lower.is_finite() || !upper.is_finite() || !coordinate.is_finite() {
+            return Err(invalid(format!(
+                "transformed bounds for hyperparameter {:?} are not representable",
+                specification.parameter
+            )));
+        }
+        transformed_lower.push(lower);
+        transformed_upper.push(upper);
+        coordinates.push(coordinate);
+    }
+
+    for factor in 0..initial_model.factors.len() {
+        let variance_is_estimated = specifications.iter().any(|specification| {
+            specification.parameter == LaplaceHyperparameter::FactorMarginalVariance { factor }
+        });
+        let loading_is_estimated = specifications.iter().any(|specification| {
+            matches!(
+                specification.parameter,
+                LaplaceHyperparameter::Loading {
+                    factor: loading_factor,
+                    ..
+                } if loading_factor == factor
+            )
+        });
+        if variance_is_estimated && loading_is_estimated {
+            return Err(invalid(format!(
+                "factor {factor} marginal variance and loading column cannot be estimated together because their scale is not identified"
+            )));
+        }
+    }
+
+    let mut evaluations = 0;
+    let (mut best_model, mut best_approximation) = evaluate_hyperparameter_candidate(
+        initial_model,
+        histories,
+        specifications,
+        &coordinates,
+        laplace_control,
+    )?;
+    evaluations += 1;
+    let mut best_evidence = best_approximation.laplace_log_marginal_likelihood;
+    let mut steps: Vec<f64> = transformed_lower
+        .iter()
+        .zip(transformed_upper.iter())
+        .map(|(lower, upper)| {
+            hyperparameter_control.initial_step_fraction * (upper - lower)
+        })
+        .collect();
+
+    loop {
+        let maximum_step = steps.iter().copied().fold(0.0_f64, f64::max);
+        if maximum_step <= hyperparameter_control.transformed_step_tolerance {
+            let parameters = specifications
+                .iter()
+                .map(|specification| specification.parameter.value(&best_model))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(HyperparameterFitResult {
+                model: best_model,
+                approximation: best_approximation,
+                parameters,
+                evaluations,
+                maximum_transformed_step: maximum_step,
+            });
+        }
+
+        let mut sweep_improved = false;
+        for coordinate_index in 0..coordinates.len() {
+            let center = coordinates[coordinate_index];
+            let mut coordinate_best = None;
+            let mut coordinate_best_evidence = best_evidence;
+            for direction in [-1.0, 1.0] {
+                let candidate_value = (center + direction * steps[coordinate_index])
+                    .clamp(
+                        transformed_lower[coordinate_index],
+                        transformed_upper[coordinate_index],
+                    );
+                if candidate_value == center {
+                    continue;
+                }
+                if evaluations >= hyperparameter_control.max_evaluations {
+                    return Err(MarkedPointProcessError::HyperparameterNonConvergence {
+                        evaluations,
+                        maximum_step,
+                    });
+                }
+                let mut candidate_coordinates = coordinates.clone();
+                candidate_coordinates[coordinate_index] = candidate_value;
+                let (candidate_model, candidate_approximation) =
+                    evaluate_hyperparameter_candidate(
+                        initial_model,
+                        histories,
+                        specifications,
+                        &candidate_coordinates,
+                        laplace_control,
+                    )?;
+                evaluations += 1;
+                let candidate_evidence =
+                    candidate_approximation.laplace_log_marginal_likelihood;
+                if candidate_evidence
+                    > coordinate_best_evidence + hyperparameter_control.evidence_tolerance
+                {
+                    coordinate_best_evidence = candidate_evidence;
+                    coordinate_best = Some((
+                        candidate_coordinates,
+                        candidate_model,
+                        candidate_approximation,
+                    ));
+                }
+            }
+            if let Some((candidate_coordinates, candidate_model, candidate_approximation)) =
+                coordinate_best
+            {
+                coordinates = candidate_coordinates;
+                best_model = candidate_model;
+                best_approximation = candidate_approximation;
+                best_evidence = coordinate_best_evidence;
+                sweep_improved = true;
+            }
+        }
+        if !sweep_improved {
+            for step in &mut steps {
+                *step *= hyperparameter_control.step_shrink;
+            }
+        }
+    }
+}
+
+fn evaluate_hyperparameter_candidate(
+    initial_model: &MarkedPointProcessModel,
+    histories: &[SubjectHistory],
+    specifications: &[LaplaceHyperparameterSpec],
+    coordinates: &[f64],
+    laplace_control: LaplaceControl,
+) -> Result<(MarkedPointProcessModel, CohortLaplaceResult), MarkedPointProcessError> {
+    if specifications.len() != coordinates.len() {
+        return Err(invalid(
+            "hyperparameter specifications and coordinates have incompatible lengths",
+        ));
+    }
+    let mut model = initial_model.clone();
+    for (specification, &coordinate) in specifications.iter().zip(coordinates.iter()) {
+        let value = if specification.parameter.is_positive() {
+            coordinate.exp()
+        } else {
+            coordinate
+        };
+        specification.parameter.assign(&mut model, value)?;
+    }
+    model.validate()?;
+    let approximation = smooth_laplace_cohort(&model, histories, laplace_control)?;
+    Ok((model, approximation))
 }
 
 /// Gaussian state retained after one online point-process update.

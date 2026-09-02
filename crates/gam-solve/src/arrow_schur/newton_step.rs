@@ -1219,7 +1219,7 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
 ) -> Result<ArrowBlockFactorization, ArrowSchurError> {
     let evidence_factorization = evidence_policy.factors_undamped_evidence();
     let refuse_resolved_indefinite = evidence_policy.refuses_resolved_indefinite();
-    let Some(deflation) = sys.row_gauge_deflation.as_ref() else {
+    if sys.row_gauge_deflation.is_none() && sys.exact_a_classification.is_none() {
         return Ok(ArrowBlockFactorization {
             factors: backend.factor_blocks_with_policy(
                 &sys.rows,
@@ -1232,7 +1232,7 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
             deflated_row_directions: Vec::new(),
             deflation_row_spectra: Vec::new(),
         });
-    };
+    }
     let n = sys.rows.len();
     let mut blocks = Vec::with_capacity(n);
     let mut count = 0usize;
@@ -1262,9 +1262,14 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
                         sys.row_dims[row_idx],
                         row_idx,
                         evidence_factorization,
-                        deflation.row(row_idx),
+                        sys.row_gauge_deflation
+                            .as_ref()
+                            .map_or(&[], |deflation| deflation.row(row_idx)),
                         true,
                         refuse_resolved_indefinite,
+                        sys.exact_a_classification
+                            .as_ref()
+                            .and_then(|geometry| geometry.rows.get(row_idx)),
                     )
                 })
             })
@@ -1278,9 +1283,14 @@ pub(crate) fn factor_blocks_for_system<B: BatchedBlockSolver>(
                 sys.row_dims[row_idx],
                 row_idx,
                 evidence_factorization,
-                deflation.row(row_idx),
+                sys.row_gauge_deflation
+                    .as_ref()
+                    .map_or(&[], |deflation| deflation.row(row_idx)),
                 true,
                 refuse_resolved_indefinite,
+                sys.exact_a_classification
+                    .as_ref()
+                    .and_then(|geometry| geometry.rows.get(row_idx)),
             )?);
         }
         results

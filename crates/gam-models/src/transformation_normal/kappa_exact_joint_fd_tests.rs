@@ -278,7 +278,27 @@ struct CtnKappaFdReport {
     worst_psi_rel: f64,
 }
 
-fn ctn_kappa_fd_driver(label: &str, fixture: &CtnKappaFixture) -> CtnKappaFdReport {
+/// Which outer directions a fixture differences.
+///
+/// Every CTN evaluation is a joint inner solve, so the ladder cost is
+/// `probes × directions × rungs × 2` such solves. At the benchmark shape that
+/// is minutes per direction; the ρ chain is already gated in full at 3-D here
+/// and at 16-D by `iso_kappa_reml_gradient_fd_tests`, so the 16-D fixtures
+/// spend their budget on the ψ chain that gam#979 is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CtnFdScope {
+    /// ρ and ψ, the default Ridders ladder.
+    AllDirections,
+    /// ψ only, with a shorter ladder (8 rungs: 1e-2 … 7.8e-5, plenty for a
+    /// criterion whose FD noise floor sits near 1e-9).
+    PsiOnly,
+}
+
+fn ctn_kappa_fd_driver(
+    label: &str,
+    fixture: &CtnKappaFixture,
+    scope: CtnFdScope,
+) -> CtnKappaFdReport {
     let options = fixture.options();
     let theta_dim = fixture.rho_dim + 1;
     // Probe grid: the production seed (penalty-scale ρ, ψ = 0 for the
@@ -309,7 +329,13 @@ fn ctn_kappa_fd_driver(label: &str, fixture: &CtnKappaFixture) -> CtnKappaFdRepo
         ("smooth", &theta_smooth),
     ];
 
-    let ridders = RiddersConfig::default();
+    let ridders = match scope {
+        CtnFdScope::AllDirections => RiddersConfig::default(),
+        CtnFdScope::PsiOnly => RiddersConfig {
+            rungs: 8,
+            ..RiddersConfig::default()
+        },
+    };
     let rel_tol = 5e-3_f64;
     let abs_floor = 1e-3_f64;
     let mut violations = Vec::new();
@@ -332,7 +358,11 @@ fn ctn_kappa_fd_driver(label: &str, fixture: &CtnKappaFixture) -> CtnKappaFdRepo
             "[{label} {probe}] COST an={cost_an:+.10e} value_path={cost_value_path:+.10e} diff={:.3e}",
             (cost_an - cost_value_path).abs()
         );
-        for j in 0..theta_dim {
+        let first_direction = match scope {
+            CtnFdScope::AllDirections => 0,
+            CtnFdScope::PsiOnly => fixture.rho_dim,
+        };
+        for j in first_direction..theta_dim {
             let is_psi = j >= fixture.rho_dim;
             let measured = ridders_derivative(
                 |t| {
@@ -392,7 +422,7 @@ fn ctn_kappa_fd_driver(label: &str, fixture: &CtnKappaFixture) -> CtnKappaFdRepo
 fn ctn_exact_joint_gradient_matches_fd_duchon_order0_power9() {
     let fixture = build_fixture(DuchonNullspaceOrder::Zero, 9.0, 3, 240, 10);
     let CtnKappaFdReport { pass, violations, worst_psi_rel } =
-        ctn_kappa_fd_driver("ctn_duchon_order0_power9_3d", &fixture);
+        ctn_kappa_fd_driver("ctn_duchon_order0_power9_3d", &fixture, CtnFdScope::AllDirections);
     assert!(
         pass,
         "transformation-normal exact-joint gradient (order=0, power=9) disagrees with the \
@@ -407,7 +437,7 @@ fn ctn_exact_joint_gradient_matches_fd_duchon_order0_power9() {
 fn ctn_exact_joint_gradient_matches_fd_duchon_linear_power9() {
     let fixture = build_fixture(DuchonNullspaceOrder::Linear, 9.0, 3, 240, 10);
     let CtnKappaFdReport { pass, violations, worst_psi_rel } =
-        ctn_kappa_fd_driver("ctn_duchon_linear_power9_3d", &fixture);
+        ctn_kappa_fd_driver("ctn_duchon_linear_power9_3d", &fixture, CtnFdScope::AllDirections);
     assert!(
         pass,
         "transformation-normal exact-joint gradient (order=1, power=9) disagrees with the \
@@ -416,15 +446,21 @@ fn ctn_exact_joint_gradient_matches_fd_duchon_linear_power9() {
     );
 }
 
+/// Rows for the 16-D fixtures: the row-center sweeps take the certified
+/// radial-profile path once `n · k ≥ RADIAL_PROFILE_MIN_PAIRS` (16 384), so
+/// with 24 centers 700 rows (16 800 pairs) is the smallest fixture that runs
+/// the production path, and every extra row is a pure ladder cost.
+const CTN_16D_ROWS: usize = 700;
+
 /// The benchmark's own shape: sixteen PC axes, 24 farthest-point centers, and
 /// enough rows that the row-center sweeps take the certified radial-profile
 /// path. This is the chart `gam fit --transformation-normal` runs in
 /// `bench/large_scale`, where the shipped binary's line searches fail.
 #[test]
 fn ctn_exact_joint_gradient_matches_fd_duchon_order0_power9_16d() {
-    let fixture = build_fixture(DuchonNullspaceOrder::Zero, 9.0, 16, 1200, 24);
+    let fixture = build_fixture(DuchonNullspaceOrder::Zero, 9.0, 16, CTN_16D_ROWS, 24);
     let CtnKappaFdReport { pass, violations, worst_psi_rel } =
-        ctn_kappa_fd_driver("ctn_duchon_order0_power9_16d", &fixture);
+        ctn_kappa_fd_driver("ctn_duchon_order0_power9_16d", &fixture, CtnFdScope::PsiOnly);
     assert!(
         pass,
         "transformation-normal exact-joint gradient (order=0, power=9, 16-D) disagrees with \
@@ -436,9 +472,9 @@ fn ctn_exact_joint_gradient_matches_fd_duchon_order0_power9_16d() {
 /// The `Linear` null-space control at the benchmark shape.
 #[test]
 fn ctn_exact_joint_gradient_matches_fd_duchon_linear_power9_16d() {
-    let fixture = build_fixture(DuchonNullspaceOrder::Linear, 9.0, 16, 1200, 24);
+    let fixture = build_fixture(DuchonNullspaceOrder::Linear, 9.0, 16, CTN_16D_ROWS, 24);
     let CtnKappaFdReport { pass, violations, worst_psi_rel } =
-        ctn_kappa_fd_driver("ctn_duchon_linear_power9_16d", &fixture);
+        ctn_kappa_fd_driver("ctn_duchon_linear_power9_16d", &fixture, CtnFdScope::PsiOnly);
     assert!(
         pass,
         "transformation-normal exact-joint gradient (order=1, power=9, 16-D) disagrees with \

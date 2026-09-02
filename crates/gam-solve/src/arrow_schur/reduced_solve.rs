@@ -841,9 +841,96 @@ pub(crate) struct DenseReducedSchurFactorization {
     pub(crate) beta_deflation: Option<BetaSchurDeflationSpectrum>,
 }
 
+/// Majorizer and clamp quadratic forms on the exact-A Schur graph
+/// `t(beta) = -A_tt^{-1} A_tbeta beta`.  They let the reduced route feed the
+/// same scalar direction classifier as the dense joint route instead of
+/// substituting a local relative eigenvalue test (#2515).
+pub(crate) struct ExactAReducedClassification {
+    majorizer_metric: Array2<f64>,
+    clamp_metric: Array2<f64>,
+}
+
+pub(crate) fn exact_a_reduced_classification(
+    sys: &ArrowSchurSystem,
+    htt_factors: &ArrowFactorSlab,
+) -> Result<Option<ExactAReducedClassification>, ArrowSchurError> {
+    let Some(geometry) = sys.exact_a_classification.as_ref() else {
+        return Ok(None);
+    };
+    if geometry.rows.len() != sys.rows.len() {
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: format!(
+                "exact-A classification carries {} rows for an {}-row system",
+                geometry.rows.len(),
+                sys.rows.len(),
+            ),
+        });
+    }
+    let k = sys.k;
+    let mut majorizer_metric = sys.effective_penalty_op().to_dense();
+    let mut clamp_metric = Array2::<f64>::zeros((k, k));
+    for (row_idx, row) in sys.rows.iter().enumerate() {
+        let q = sys.row_dims[row_idx];
+        let operands = &geometry.rows[row_idx];
+        if operands.delta_tt.dim() != (q, q)
+            || operands.delta_tbeta.nrows() != q
+            || operands.delta_tbeta.ncols() != geometry.border_indices.len()
+            || operands.clamp_diag.len() != q
+        {
+            return Err(ArrowSchurError::SchurFactorFailed {
+                reason: format!(
+                    "exact-A classification row {row_idx} is incompatible with row width {q} and border width {k}",
+                ),
+            });
+        }
+        let a_tbeta = sys_htbeta_materialize_row(sys, row_idx, row)?;
+        let mut b_tbeta = a_tbeta.clone();
+        for (carrier_col, &system_col) in geometry.border_indices.iter().enumerate() {
+            if system_col >= k {
+                return Err(ArrowSchurError::SchurFactorFailed {
+                    reason: format!(
+                        "exact-A classification border index {system_col} exceeds width {k}",
+                    ),
+                });
+            }
+            for local in 0..q {
+                b_tbeta[[local, system_col]] -=
+                    operands.delta_tbeta[[local, carrier_col]];
+            }
+        }
+        let b_tt = &row.htt - &operands.delta_tt;
+        let mut graph = Array2::<f64>::zeros((q, k));
+        for col in 0..k {
+            let solved = cholesky_solve_vector(htt_factors.factor(row_idx), a_tbeta.column(col));
+            for local in 0..q {
+                graph[[local, col]] = -solved[local];
+            }
+        }
+        majorizer_metric += &graph.t().dot(&b_tt.dot(&graph));
+        majorizer_metric += &graph.t().dot(&b_tbeta);
+        majorizer_metric += &b_tbeta.t().dot(&graph);
+        let weighted_graph = Array2::from_shape_fn((q, k), |(local, col)| {
+            operands.clamp_diag[local] * graph[[local, col]]
+        });
+        clamp_metric += &graph.t().dot(&weighted_graph);
+    }
+    Ok(Some(ExactAReducedClassification {
+        majorizer_metric,
+        clamp_metric,
+    }))
+}
+
 pub(crate) fn factor_dense_reduced_schur(
     schur: &Array2<f64>,
     policy: ReducedSchurPolicy,
+) -> Result<DenseReducedSchurFactorization, ArrowSchurError> {
+    factor_dense_reduced_schur_with_exact_a(schur, policy, None)
+}
+
+pub(crate) fn factor_dense_reduced_schur_with_exact_a(
+    schur: &Array2<f64>,
+    policy: ReducedSchurPolicy,
+    exact_a: Option<&ExactAReducedClassification>,
 ) -> Result<DenseReducedSchurFactorization, ArrowSchurError> {
     let newton_relative_floor = match policy {
         ReducedSchurPolicy::StrictNewton => None,
@@ -856,6 +943,7 @@ pub(crate) fn factor_dense_reduced_schur(
                 schur,
                 relative_floor,
                 refuse_resolved_indefinite,
+                exact_a,
             );
         }
     };

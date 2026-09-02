@@ -13,6 +13,16 @@ fn control() -> LaplaceControl {
     }
 }
 
+fn hyperparameter_control() -> HyperparameterControl {
+    HyperparameterControl {
+        max_evaluations: 200,
+        initial_step_fraction: 0.25,
+        step_shrink: 0.5,
+        transformed_step_tolerance: 1.0e-4,
+        evidence_tolerance: 1.0e-11,
+    }
+}
+
 fn model(order: MaternMarkovOrder) -> MarkedPointProcessModel {
     let dimension = order.state_dimension();
     MarkedPointProcessModel {
@@ -412,6 +422,114 @@ fn cohort_evidence_is_the_sum_of_independent_subject_chains() {
         2.0 * individual.laplace_log_marginal_likelihood,
         epsilon = 2.0e-14
     );
+}
+
+#[test]
+fn bounded_laml_search_estimates_recency_and_reaches_a_coordinate_optimum() {
+    let mut initial_model = model(MaternMarkovOrder::Half);
+    initial_model.factors[0].length_scale = 0.15;
+    let histories = vec![history()];
+    let initial_evidence = smooth_laplace_cohort(&initial_model, &histories, control())
+        .unwrap()
+        .laplace_log_marginal_likelihood;
+    let specification = LaplaceHyperparameterSpec {
+        parameter: LaplaceHyperparameter::FactorLengthScale { factor: 0 },
+        lower: 0.1,
+        upper: 10.0,
+    };
+    let fit = fit_laplace_hyperparameters(
+        &initial_model,
+        &histories,
+        &[specification],
+        control(),
+        hyperparameter_control(),
+    )
+    .unwrap();
+    let fitted_length_scale = fit.model.factors[0].length_scale;
+    assert!(fitted_length_scale >= specification.lower);
+    assert!(fitted_length_scale <= specification.upper);
+    assert_close(
+        fit.parameters[0],
+        fitted_length_scale,
+        0.0,
+        f64::EPSILON,
+    );
+    assert!(fit.evaluations > 1);
+    assert!(
+        fit.approximation.laplace_log_marginal_likelihood
+            >= initial_evidence - hyperparameter_control().evidence_tolerance
+    );
+
+    let coordinate_delta = 2.0 * hyperparameter_control().transformed_step_tolerance;
+    for direction in [-1.0_f64, 1.0] {
+        let candidate_length_scale = (fitted_length_scale * (direction * coordinate_delta).exp())
+            .clamp(specification.lower, specification.upper);
+        if candidate_length_scale == fitted_length_scale {
+            continue;
+        }
+        let mut candidate_model = fit.model.clone();
+        candidate_model.factors[0].length_scale = candidate_length_scale;
+        let candidate_evidence = smooth_laplace_cohort(&candidate_model, &histories, control())
+            .unwrap()
+            .laplace_log_marginal_likelihood;
+        assert!(
+            candidate_evidence
+                <= fit.approximation.laplace_log_marginal_likelihood
+                    + 5.0 * hyperparameter_control().evidence_tolerance
+        );
+    }
+}
+
+#[test]
+fn hyperparameter_search_rejects_unidentified_scales_and_incomplete_searches() {
+    let model = model(MaternMarkovOrder::Half);
+    let histories = vec![history()];
+    let unidentified = [
+        LaplaceHyperparameterSpec {
+            parameter: LaplaceHyperparameter::FactorMarginalVariance { factor: 0 },
+            lower: 0.1,
+            upper: 10.0,
+        },
+        LaplaceHyperparameterSpec {
+            parameter: LaplaceHyperparameter::Loading { mark: 0, factor: 0 },
+            lower: -2.0,
+            upper: 2.0,
+        },
+    ];
+    let error = fit_laplace_hyperparameters(
+        &model,
+        &histories,
+        &unidentified,
+        control(),
+        hyperparameter_control(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        MarkedPointProcessError::InvalidInput { .. }
+    ));
+
+    let mut bounded_control = hyperparameter_control();
+    bounded_control.max_evaluations = 1;
+    let error = fit_laplace_hyperparameters(
+        &model,
+        &histories,
+        &[LaplaceHyperparameterSpec {
+            parameter: LaplaceHyperparameter::FactorLengthScale { factor: 0 },
+            lower: 0.1,
+            upper: 10.0,
+        }],
+        control(),
+        bounded_control,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        MarkedPointProcessError::HyperparameterNonConvergence {
+            evaluations: 1,
+            ..
+        }
+    ));
 }
 
 #[test]
