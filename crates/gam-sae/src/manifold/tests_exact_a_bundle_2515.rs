@@ -2069,11 +2069,14 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
         .expect("#2515: the exact-A operator derivative assembles")
         .remove(&sparse)
         .expect("#2515: the sparse exact-A operator derivative exists");
-    let (inverse_trace, eigenvector_trace, explicit_pricing_trace) = term
+    let (inverse_joint_trace, inverse_coordinate_trace, eigenvector_trace, explicit_pricing_trace) = term
         .exact_a_logdet_trace_pieces_for_test(target.view(), &rho, &b_cache, sparse)
         .expect("#2515: the clamp-pricing derivative pieces assemble");
+    let inverse_trace = inverse_joint_trace - inverse_coordinate_trace;
     println!(
-        "[#2515 QUOTIENT] dense sparse trace pieces: inverse={inverse_trace:+.12e} \
+        "[#2515 QUOTIENT] dense sparse trace pieces: inverse-joint={inverse_joint_trace:+.12e} \
+         inverse-coordinate={inverse_coordinate_trace:+.12e} \
+         inverse-difference={inverse_trace:+.12e} \
          clamp-eigenvector={eigenvector_trace:+.12e} \
          explicit-clamp={explicit_pricing_trace:+.12e} \
          sum={:+.12e}",
@@ -2102,7 +2105,8 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
     // while defining different functions in a neighbourhood of that point.
     // Differentiate each route's own quotient value before choosing either
     // analytic trace as the route-independent authority.
-    let mut quotient_values = |eval_rho: &SaeManifoldRho| -> (f64, f64, Array2<f64>) {
+    let mut quotient_values =
+        |eval_rho: &SaeManifoldRho| -> (f64, f64, f64, f64, Array2<f64>) {
         let eval_system = term
             .assemble_arrow_schur(target.view(), eval_rho, None)
             .expect("#2515: perturbed majorizer assembles");
@@ -2133,8 +2137,10 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
             .materialize_exact_hessian_dense(eval_rho, target.view(), &eval_b_cache)
             .expect("#2515: perturbed dense exact-A operator materializes");
         (
-            0.5 * (eval_dense_joint - eval_dense_coordinate),
-            0.5 * (eval_arrow_joint - eval_arrow_coordinate),
+            eval_dense_joint,
+            eval_dense_coordinate,
+            eval_arrow_joint,
+            eval_arrow_coordinate,
             eval_a,
         )
     };
@@ -2150,15 +2156,24 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
          arrow_difference={arrow_trace:+.12e} delta={:+.6e}",
         dense_trace - arrow_trace,
     );
-    for fd_step in [1.0e-3_f64, 1.0e-4, 1.0e-5, 1.0e-6] {
+    for fd_step in [1.0_f64, 5.0e-1, 1.0e-1, 1.0e-2, 1.0e-3] {
         let mut rho_minus = rho.clone();
         rho_minus.log_lambda_sparse -= fd_step;
         let mut rho_plus = rho.clone();
         rho_plus.log_lambda_sparse += fd_step;
-        let (dense_minus, arrow_minus, a_minus) = quotient_values(&rho_minus);
-        let (dense_plus, arrow_plus, a_plus) = quotient_values(&rho_plus);
+        let (dense_joint_minus, dense_coordinate_minus, arrow_joint_minus, arrow_coordinate_minus, a_minus) =
+            quotient_values(&rho_minus);
+        let (dense_joint_plus, dense_coordinate_plus, arrow_joint_plus, arrow_coordinate_plus, a_plus) =
+            quotient_values(&rho_plus);
+        let dense_minus = 0.5 * (dense_joint_minus - dense_coordinate_minus);
+        let dense_plus = 0.5 * (dense_joint_plus - dense_coordinate_plus);
+        let arrow_minus = 0.5 * (arrow_joint_minus - arrow_coordinate_minus);
+        let arrow_plus = 0.5 * (arrow_joint_plus - arrow_coordinate_plus);
         let dense_fd = (dense_plus - dense_minus) / (2.0 * fd_step);
         let arrow_fd = (arrow_plus - arrow_minus) / (2.0 * fd_step);
+        let dense_joint_fd = 0.5 * (dense_joint_plus - dense_joint_minus) / (2.0 * fd_step);
+        let dense_coordinate_fd =
+            0.5 * (dense_coordinate_plus - dense_coordinate_minus) / (2.0 * fd_step);
         if fd_step == 1.0e-3 {
             // Before comparing log-determinant traces, isolate the lower seam:
             // does the assembled ∂A_raw/∂ρ_sparse actually differentiate the
@@ -2185,7 +2200,9 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
             );
         }
         println!(
-            "[#2515 QUOTIENT] sparse FD h={fd_step:.0e}: dense={dense_fd:+.12e} \
+            "[#2515 QUOTIENT] sparse FD h={fd_step:.0e}: \
+             dense-joint={dense_joint_fd:+.12e} dense-coordinate={dense_coordinate_fd:+.12e} \
+             dense-difference={dense_fd:+.12e} \
              (backward={:+.12e}, forward={:+.12e}) arrow={arrow_fd:+.12e} \
              (backward={:+.12e}, forward={:+.12e}); analytic residuals dense={:+.6e} \
              arrow={:+.6e}; perturbed route gaps minus={:+.6e} plus={:+.6e}",

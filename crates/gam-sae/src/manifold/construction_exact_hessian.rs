@@ -5322,7 +5322,7 @@ impl SaeManifoldTerm {
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
         flat: usize,
-    ) -> Result<(f64, f64, f64), String> {
+    ) -> Result<(f64, f64, f64, f64), String> {
         let geometry = self.materialize_exact_hessian_quotient_geometry(rho, target, cache)?;
         let (priced_delta_trace, _, priced_k_joint, priced_k_tt) =
             self.priced_ard_adjoint_extras(rho, cache, &geometry)?;
@@ -5331,11 +5331,15 @@ impl SaeManifoldTerm {
             .remove(&flat)
             .ok_or_else(|| format!("no exact-A penalty derivative for flat coordinate {flat}"))?;
         let frob = |left: &Array2<f64>, right: &Array2<f64>| (left * right).sum();
-        let inverse = 0.5
-            * (frob(&geometry.priced_joint_inverse, &da)
-                - frob(&geometry.priced_coordinate_inverse, &da));
+        let inverse_joint = 0.5 * frob(&geometry.priced_joint_inverse, &da);
+        let inverse_coordinate = 0.5 * frob(&geometry.priced_coordinate_inverse, &da);
         let eigenvector = 0.5 * (frob(&priced_k_joint, &da) - frob(&priced_k_tt, &da));
-        Ok((inverse, eigenvector, priced_delta_trace[flat]))
+        Ok((
+            inverse_joint,
+            inverse_coordinate,
+            eigenvector,
+            priced_delta_trace[flat],
+        ))
     }
 
     /// #2330 — the ordered-Beta–Bernoulli (non-softmax) sparse-coordinate ½log|A|
