@@ -378,28 +378,29 @@ pub fn laplace_gaussian_fallback(
     // to 43% below the SEs printed for the same coefficients. So: when the
     // fit carries the corrected covariance, factor it directly (`Vp = L Lᵀ`,
     // draw `mode + L ε`; the coefficient-covariance scale is already inside
-    // `Vp`), and only otherwise fall back to the conditional precision route.
-    // Either way the provenance is stamped on the result.
-    let factor = match fit.beta_covariance_corrected() {
-        Some(covariance) => {
-            if covariance.nrows() != p || covariance.ncols() != p {
-                return Err(format!(
-                    "{rationale}: smoothing-corrected covariance is {}x{}, expected {}x{}",
-                    covariance.nrows(),
-                    covariance.ncols(),
-                    p,
-                    p
-                ));
-            }
-            let chol = covariance.cholesky(Side::Lower).map_err(|err| {
-                format!(
-                    "{rationale}: Cholesky factorisation of the smoothing-corrected \
-                     covariance failed: {err:?}"
-                )
-            })?;
-            LaplaceDrawFactor::Covariance(chol.lower_triangular())
-        }
-        None => {
+    // `Vp`). Otherwise factor the PUBLISHED conditional `Vb` the same way:
+    // it is the matrix `summary()` prices its conditional SEs from, it
+    // already carries the dispersion and the coefficient gauge, and it is
+    // what a custom-family fit (location-scale, marginal-slope) stores
+    // instead of an engine-level family — asking such a fit for a scalar
+    // covariance scale is asking the wrong question, and refusing on it
+    // made every `sample()` on those classes die. Only a fit that persists
+    // neither matrix falls back to rebuilding `Vb = cov_scale·H⁻¹` from the
+    // penalised Hessian. Either way the provenance is stamped on the result.
+    let factor = match (fit.beta_covariance_corrected(), fit.beta_covariance()) {
+        (Some(covariance), _) => LaplaceDrawFactor::from_covariance(
+            covariance,
+            p,
+            InferenceCovarianceMode::SmoothingCorrected,
+            rationale,
+        )?,
+        (None, Some(covariance)) => LaplaceDrawFactor::from_covariance(
+            covariance,
+            p,
+            InferenceCovarianceMode::Conditional,
+            rationale,
+        )?,
+        (None, None) => {
             let h = fit.penalized_hessian().ok_or_else(|| {
                 format!(
                     "{rationale}: posterior fallback requires the explicit penalised Hessian; \
@@ -489,10 +490,15 @@ pub fn laplace_gaussian_fallback(
 /// with the Laplace posterior's covariance, together with the provenance of
 /// that covariance.
 enum LaplaceDrawFactor {
-    /// `Vp = L Lᵀ` factored directly: `δ = L ε`.
-    Covariance(Array2<f64>),
+    /// A published covariance `V = L Lᵀ` (the smoothing-corrected `Vp` or the
+    /// conditional `Vb`) factored directly: `δ = L ε`.
+    Covariance {
+        lower: Array2<f64>,
+        source: InferenceCovarianceMode,
+    },
     /// `Vb = cov_scale·H⁻¹` through the precision's factor `H = L Lᵀ`:
-    /// `δ = √cov_scale · L⁻ᵀ ε`.
+    /// `δ = √cov_scale · L⁻ᵀ ε`. Last resort, for a fit that persists no
+    /// covariance matrix; it needs the engine family's scalar scale.
     Precision {
         lower: Array2<f64>,
         sqrt_cov_scale: f64,
@@ -500,9 +506,35 @@ enum LaplaceDrawFactor {
 }
 
 impl LaplaceDrawFactor {
+    /// Factor a published `p × p` covariance, naming which one it is.
+    fn from_covariance(
+        covariance: &Array2<f64>,
+        p: usize,
+        source: InferenceCovarianceMode,
+        rationale: &str,
+    ) -> Result<Self, String> {
+        let label = source.as_str();
+        if covariance.nrows() != p || covariance.ncols() != p {
+            return Err(format!(
+                "{rationale}: {label} covariance is {}x{}, expected {}x{}",
+                covariance.nrows(),
+                covariance.ncols(),
+                p,
+                p
+            ));
+        }
+        let chol = covariance.cholesky(Side::Lower).map_err(|err| {
+            format!("{rationale}: Cholesky factorisation of the {label} covariance failed: {err:?}")
+        })?;
+        Ok(Self::Covariance {
+            lower: chol.lower_triangular(),
+            source,
+        })
+    }
+
     fn apply(&self, eps: &Array1<f64>, delta: &mut Array1<f64>) {
         match self {
-            Self::Covariance(lower) => {
+            Self::Covariance { lower, .. } => {
                 let p = eps.len();
                 for i in 0..p {
                     let mut acc = 0.0;
@@ -524,7 +556,7 @@ impl LaplaceDrawFactor {
 
     fn covariance_source(&self) -> InferenceCovarianceMode {
         match self {
-            Self::Covariance(_) => InferenceCovarianceMode::SmoothingCorrected,
+            Self::Covariance { source, .. } => *source,
             Self::Precision { .. } => InferenceCovarianceMode::Conditional,
         }
     }
