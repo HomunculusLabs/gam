@@ -350,8 +350,9 @@ impl OwnedCellValues {
             Self::Dense(values) => values.ncols(),
             Self::ByRow { n_outputs, .. } => *n_outputs,
             Self::ByOutput { values, .. } => values.len(),
-            Self::Constant { n_outputs, .. }
-            | Self::ConstantWithOverrides { n_outputs, .. } => *n_outputs,
+            Self::Constant { n_outputs, .. } | Self::ConstantWithOverrides { n_outputs, .. } => {
+                *n_outputs
+            }
         }
     }
 

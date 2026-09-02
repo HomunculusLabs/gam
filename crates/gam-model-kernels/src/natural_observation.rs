@@ -14,4 +14,3 @@ pub struct NaturalDiagonalObservation {
     pub negative_hessian_derivative: f64,
     pub negative_hessian_second_derivative: f64,
 }
-

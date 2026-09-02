@@ -53,8 +53,7 @@ impl From<BernoulliNaturalObservation> for NaturalDiagonalObservation {
             score: observation.score,
             negative_hessian: observation.negative_hessian,
             negative_hessian_derivative: observation.negative_hessian_derivative,
-            negative_hessian_second_derivative: observation
-                .negative_hessian_second_derivative,
+            negative_hessian_second_derivative: observation.negative_hessian_second_derivative,
         }
     }
 }

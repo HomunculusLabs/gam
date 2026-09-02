@@ -6,9 +6,7 @@
 //! bin is required.  Structural risk-set activity and numerical subject/IPW
 //! weights are carried independently by the response measure.
 
-use crate::custom_family::{
-    BlockwiseFitOptions, CustomFamilyError, ParameterBlockSpec,
-};
+use crate::custom_family::{BlockwiseFitOptions, CustomFamilyError, ParameterBlockSpec};
 use crate::indexed_natural::{
     IndexedNaturalDiagonalFamily, IndexedNaturalDiagonalProgram, fit_indexed_natural_laml,
 };
@@ -130,9 +128,7 @@ pub fn fit_indexed_point_process_laml(
 mod tests {
     use super::*;
     use crate::custom_family::{BlockWorkingSet, CustomFamily, ParameterBlockState};
-    use gam_problem::{
-        IndexedCellSet, LikelihoodWeights, SeparableCellMeasure, StructuralCells,
-    };
+    use gam_problem::{IndexedCellSet, LikelihoodWeights, SeparableCellMeasure, StructuralCells};
     use ndarray::{Array1, array};
 
     fn states(etas: &[Array1<f64>]) -> Vec<ParameterBlockState> {
@@ -146,13 +142,8 @@ mod tests {
 
     #[test]
     fn sparse_events_and_row_broadcast_exposure_equal_exact_process_law() {
-        let counts = OwnedCellValues::constant_with_overrides(
-            2,
-            2,
-            0.0,
-            vec![(0, 1, 1.0)],
-        )
-        .expect("sparse event field");
+        let counts = OwnedCellValues::constant_with_overrides(2, 2, 0.0, vec![(0, 1, 1.0)])
+            .expect("sparse event field");
         let family = IndexedPointProcessFamily::new(
             counts,
             OwnedCellValues::by_row(array![0.0, 2.5], 2),
@@ -179,8 +170,8 @@ mod tests {
 
     #[test]
     fn inactive_placeholders_and_active_zero_weights_are_never_evaluated() {
-        let active = IndexedCellSet::from_cells(2, 2, vec![(0, 0), (0, 1), (1, 1)])
-            .expect("activity set");
+        let active =
+            IndexedCellSet::from_cells(2, 2, vec![(0, 0), (0, 1), (1, 1)]).expect("activity set");
         let weights = array![[1.0, 0.0], [7.0, 2.0]];
         let measure = SeparableCellMeasure::new(
             StructuralCells::Only(&active),
@@ -195,10 +186,7 @@ mod tests {
         )
         .expect("inactive placeholders are outside the likelihood");
         let evaluation = family
-            .evaluate(&states(&[
-                array![1_000.0, -8.0],
-                array![1_000.0, 0.0],
-            ]))
+            .evaluate(&states(&[array![1_000.0, -8.0], array![1_000.0, 0.0]]))
             .expect("finite active likelihood");
         assert_eq!(evaluation.log_likelihood, 1_000.0 - 3.0);
     }

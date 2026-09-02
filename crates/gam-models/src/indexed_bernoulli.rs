@@ -8,15 +8,11 @@
 //! maximizes one joint Laplace marginal likelihood without constructing a dense
 //! cross-output coefficient Hessian.
 
-use crate::custom_family::{
-    BlockwiseFitOptions, CustomFamilyError, ParameterBlockSpec,
-};
+use crate::custom_family::{BlockwiseFitOptions, CustomFamilyError, ParameterBlockSpec};
 use crate::indexed_natural::{
     IndexedNaturalDiagonalFamily, IndexedNaturalDiagonalProgram, fit_indexed_natural_laml,
 };
-use gam_model_kernels::bernoulli_link::{
-    bernoulli_natural_jet, bernoulli_natural_observation,
-};
+use gam_model_kernels::bernoulli_link::{bernoulli_natural_jet, bernoulli_natural_observation};
 use gam_model_kernels::natural_observation::NaturalDiagonalObservation;
 use gam_problem::{EstimationError, OwnedCellValues, OwnedSeparableCellMeasure};
 use gam_solve::model_types::UnifiedFitResult;
@@ -77,11 +73,7 @@ impl IndexedNaturalDiagonalFamily<IndexedBernoulliProgram> {
             }
             Ok(())
         })?;
-        Self::from_program(IndexedBernoulliProgram {
-            y,
-            measure,
-            link,
-        })
+        Self::from_program(IndexedBernoulliProgram { y, measure, link })
     }
 
     pub fn link(&self) -> &InverseLink {

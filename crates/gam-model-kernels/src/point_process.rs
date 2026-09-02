@@ -11,8 +11,8 @@
 //! do not depend on `eta` are intentionally absent: this is the point-process
 //! density, not an interval-count probability mass function.
 
-use gam_problem::EstimationError;
 pub use crate::natural_observation::NaturalDiagonalObservation as PointProcessNaturalObservation;
+use gam_problem::EstimationError;
 
 /// Evaluate a point-process row and the complete curvature tower required by
 /// exact second-order LAML differentiation.
@@ -108,25 +108,17 @@ mod tests {
         let exposure = 0.4;
         let eta = -0.2;
         let step = 1.0e-4;
-        let minus = point_process_natural_observation(0, count, exposure, eta - step)
-            .expect("minus");
-        let centre =
-            point_process_natural_observation(0, count, exposure, eta).expect("centre");
-        let plus = point_process_natural_observation(0, count, exposure, eta + step)
-            .expect("plus");
+        let minus =
+            point_process_natural_observation(0, count, exposure, eta - step).expect("minus");
+        let centre = point_process_natural_observation(0, count, exposure, eta).expect("centre");
+        let plus = point_process_natural_observation(0, count, exposure, eta + step).expect("plus");
 
-        let curvature_derivative =
-            (plus.negative_hessian - minus.negative_hessian) / (2.0 * step);
-        let curvature_second = (plus.negative_hessian
-            - 2.0 * centre.negative_hessian
+        let curvature_derivative = (plus.negative_hessian - minus.negative_hessian) / (2.0 * step);
+        let curvature_second = (plus.negative_hessian - 2.0 * centre.negative_hessian
             + minus.negative_hessian)
             / step.powi(2);
-        assert!(
-            (centre.negative_hessian_derivative - curvature_derivative).abs() < 1.0e-9,
-        );
-        assert!(
-            (centre.negative_hessian_second_derivative - curvature_second).abs() < 1.0e-8,
-        );
+        assert!((centre.negative_hessian_derivative - curvature_derivative).abs() < 1.0e-9,);
+        assert!((centre.negative_hessian_second_derivative - curvature_second).abs() < 1.0e-8,);
     }
 
     #[test]
