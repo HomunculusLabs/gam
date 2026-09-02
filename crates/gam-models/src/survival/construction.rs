@@ -4279,21 +4279,16 @@ pub fn slope_time_margin_rows(
 ) -> Result<SlopeTimeMarginRows, String> {
     let log_times = times.mapv(|t| t.max(1e-12).ln());
     let knots = Array1::from_vec(time_basis.knots.clone());
-    let build = build_bspline_basis_1d(
-        log_times.view(),
-        &BSplineBasisSpec {
-            degree: time_basis.degree,
-            penalty_order: 2,
-            knotspec: BSplineKnotSpec::Provided(knots),
-            double_penalty: false,
-            identifiability: BSplineIdentifiability::None,
-            boundary: OneDimensionalBoundary::Open,
-            boundary_conditions: BSplineBoundaryConditions::default(),
-        },
-    )
-    .map_err(|e| format!("failed to replay the slope time margin: {e}"))?;
-    let value = build.design.to_dense();
-    let p_time = value.ncols();
+    let p_time = knots
+        .len()
+        .checked_sub(time_basis.degree + 1)
+        .ok_or_else(|| {
+            format!(
+                "the saved slope time margin has {} knots, insufficient for degree {}",
+                knots.len(),
+                time_basis.degree,
+            )
+        })?;
     if p_time == 0 {
         return Err("the replayed slope time margin has zero columns".to_string());
     }
@@ -4318,6 +4313,26 @@ pub fn slope_time_margin_rows(
             }
             Ok(())
         })?;
+    let build = build_bspline_basis_1d(
+        log_times.view(),
+        &BSplineBasisSpec {
+            degree: time_basis.degree,
+            penalty_order: 2,
+            knotspec: BSplineKnotSpec::Provided(knots),
+            double_penalty: false,
+            identifiability: BSplineIdentifiability::None,
+            boundary: OneDimensionalBoundary::Open,
+            boundary_conditions: BSplineBoundaryConditions::default(),
+        },
+    )
+    .map_err(|e| format!("failed to replay the slope time margin: {e}"))?;
+    let value = build.design.to_dense();
+    if value.ncols() != p_time {
+        return Err(format!(
+            "the replayed slope time margin has {} columns but its knot geometry requires {p_time}",
+            value.ncols(),
+        ));
+    }
     Ok(SlopeTimeMarginRows { value, derivative })
 }
 
