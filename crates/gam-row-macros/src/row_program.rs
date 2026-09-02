@@ -2344,13 +2344,13 @@ fn sink_definitions_to_first_use(body: &str) -> String {
     let items = emitted_items(body);
     let mut pending: Vec<usize> = Vec::new();
     let mut emitted = vec![false; items.len()];
-    let mut out = String::with_capacity(body.len());
+    let mut order: Vec<usize> = Vec::with_capacity(items.len());
     fn flush(
         index: usize,
         items: &[EmittedItem],
         pending: &mut Vec<usize>,
         emitted: &mut [bool],
-        out: &mut String,
+        order: &mut Vec<usize>,
     ) {
         if emitted[index] {
             return;
@@ -2362,11 +2362,11 @@ fn sink_definitions_to_first_use(body: &str) -> String {
                 .copied()
                 .find(|candidate| items[*candidate].defines.as_deref() == Some(reference.as_str()));
             if let Some(dependency) = dependency {
-                flush(dependency, items, pending, emitted, out);
+                flush(dependency, items, pending, emitted, order);
             }
         }
         pending.retain(|candidate| *candidate != index);
-        out.push_str(&items[index].text);
+        order.push(index);
     }
     for (index, item) in items.iter().enumerate() {
         if item.defines.is_some() {
@@ -2379,16 +2379,18 @@ fn sink_definitions_to_first_use(body: &str) -> String {
                 .copied()
                 .find(|candidate| items[*candidate].defines.as_deref() == Some(reference.as_str()));
             if let Some(dependency) = dependency {
-                flush(dependency, &items, &mut pending, &mut emitted, &mut out);
+                flush(dependency, &items, &mut pending, &mut emitted, &mut order);
             }
         }
         emitted[index] = true;
-        out.push_str(&item.text);
+        order.push(index);
     }
-    for index in pending {
-        out.push_str(&items[index].text);
-    }
-    out
+    // A definition nothing mentions keeps its place before the body's last
+    // anchor (the result lines, or CUDA's closing brace), never after it.
+    let last = order.pop();
+    order.extend(pending);
+    order.extend(last);
+    order.iter().map(|index| items[*index].text.as_str()).collect()
 }
 
 fn push_preludes(source: &mut String, preludes: &[String], indentation: &str) {
@@ -3458,10 +3460,12 @@ fn rust_order2_body(
             ));
         }
     }
-    let (body, opening) = source.split_at(source.len());
-    let opening = &opening[..0];
-    let body = body.strip_prefix("{\n").expect("the order-2 body opens with a brace");
-    source = format!("{opening}{{\n{}", sink_definitions_to_first_use(body));
+    let sunk = sink_definitions_to_first_use(
+        source
+            .strip_prefix("{\n")
+            .expect("the order-2 body opens with a brace"),
+    );
+    source = format!("{{\n{sunk}");
     source.push_str("    (\n        __row_program_value,\n        [");
     for axis in 0..dimension {
         if axis != 0 {
@@ -3631,7 +3635,11 @@ fn cuda_source(
         }
     }
     source.push_str("}\n");
-    Ok(source)
+    let (header, body) = source
+        .split_once(") {\n")
+        .expect("the CUDA signature closes before the body");
+    let sunk = sink_definitions_to_first_use(body);
+    Ok(format!("{header}) {{\n{sunk}"))
 }
 
 pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
@@ -4512,6 +4520,34 @@ mod tests {
         .expect("parse row program");
         let error = expand(short).expect_err("a two-entry supplied stack is refused");
         assert!(error.to_string().contains("exactly five entries"), "{error}");
+    }
+
+    /// Every definition sinks to its first use, so a statement's derivative
+    /// channels are computed AFTER the leaf call its value feeds, not before
+    /// it and held live across it (#932: eight spills around the rigid
+    /// Bernoulli row's probit call).
+    #[test]
+    fn definitions_sink_to_first_use_past_leaf_calls() {
+        let program = quote! {
+            fn sunk(x, y; w)
+            emit [order2, cuda];
+            leaves { probit => probit_stack => d_probit }
+            witnesses [];
+            {
+                let a = mul(x, y);
+                let m = compose(probit, a, w);
+                return m;
+            }
+        };
+        let rust = emitted_function(program.clone(), "sunk_order2");
+        let call = rust.find("probit_stack (a_v").expect("the leaf call");
+        let gradient = rust.find("let a_g0").expect("the gradient of `a`");
+        let hessian = rust.find("let a_h0_1").expect("the Hessian of `a`");
+        assert!(gradient > call && hessian > call, "{rust}");
+        let cuda = emitted_cuda(program);
+        let call = cuda.find("d_probit(a_v").expect("the CUDA leaf call");
+        let gradient = cuda.find("double a_g0").expect("the CUDA gradient of `a`");
+        assert!(gradient > call, "{cuda}");
     }
 
     #[test]
