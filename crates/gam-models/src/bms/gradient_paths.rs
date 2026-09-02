@@ -1717,7 +1717,10 @@ pub(crate) fn rigid_standard_normal_row_nll_generic<S: gam_math::jet_scalar::Jet
         outcome_sign,
         w,
     );
-    if !(signed_margin.is_finite() || signed_margin == f64::INFINITY) {
+    // The domain is `signed_margin > -inf` (finite or `+inf`; `+inf` is the
+    // certain outcome, `-inf` and NaN are not a margin), one compare that is
+    // false for NaN because comparisons with NaN are.
+    if !(signed_margin > f64::NEG_INFINITY) {
         return Err(non_finite_signed_margin(signed_margin));
     }
     Ok(nll)
@@ -1758,7 +1761,10 @@ pub(super) fn rigid_standard_normal_row_kernel(
         outcome_sign,
         w,
     );
-    if !(signed_margin.is_finite() || signed_margin == f64::INFINITY) {
+    // The domain is `signed_margin > -inf` (finite or `+inf`; `+inf` is the
+    // certain outcome, `-inf` and NaN are not a margin), one compare that is
+    // false for NaN because comparisons with NaN are.
+    if !(signed_margin > f64::NEG_INFINITY) {
         return Err(non_finite_signed_margin(signed_margin));
     }
     Ok((value, gradient, hessian))
@@ -1980,7 +1986,10 @@ pub(super) fn rigid_standard_normal_third_full(
     let outcome_sign = 2.0 * y - 1.0;
     let signed_margin =
         outcome_sign * marginal_slope_standard_normal_scalar_eta(marginal.q, g, z, probit_scale);
-    if !(signed_margin.is_finite() || signed_margin == f64::INFINITY) {
+    // The domain is `signed_margin > -inf` (finite or `+inf`; `+inf` is the
+    // certain outcome, `-inf` and NaN are not a margin), one compare that is
+    // false for NaN because comparisons with NaN are.
+    if !(signed_margin > f64::NEG_INFINITY) {
         return Err(format!(
             "non-finite signed margin in rigid probit row NLL: {signed_margin}"
         ));
@@ -2013,7 +2022,10 @@ pub(super) fn rigid_standard_normal_third_contracted_generated(
     let outcome_sign = 2.0 * y - 1.0;
     let signed_margin =
         outcome_sign * marginal_slope_standard_normal_scalar_eta(marginal.q, g, z, probit_scale);
-    if !(signed_margin.is_finite() || signed_margin == f64::INFINITY) {
+    // The domain is `signed_margin > -inf` (finite or `+inf`; `+inf` is the
+    // certain outcome, `-inf` and NaN are not a margin), one compare that is
+    // false for NaN because comparisons with NaN are.
+    if !(signed_margin > f64::NEG_INFINITY) {
         return Err(format!(
             "non-finite signed margin in rigid probit row NLL: {signed_margin}"
         ));
@@ -2071,7 +2083,10 @@ pub(super) fn rigid_standard_normal_fourth_full(
     let outcome_sign = 2.0 * y - 1.0;
     let signed_margin =
         outcome_sign * marginal_slope_standard_normal_scalar_eta(marginal.q, g, z, probit_scale);
-    if !(signed_margin.is_finite() || signed_margin == f64::INFINITY) {
+    // The domain is `signed_margin > -inf` (finite or `+inf`; `+inf` is the
+    // certain outcome, `-inf` and NaN are not a margin), one compare that is
+    // false for NaN because comparisons with NaN are.
+    if !(signed_margin > f64::NEG_INFINITY) {
         return Err(format!(
             "non-finite signed margin in rigid probit row NLL: {signed_margin}"
         ));
@@ -2163,17 +2178,16 @@ pub(super) fn ensure_finite_fourth_full_cache_row(
 }
 
 pub(crate) fn unary_derivatives_sqrt(x: f64) -> [f64; 5] {
+    // One reciprocal: with `s = √x`, `1/x = r²` for `r = 1/s`, so every
+    // derivative is a power of `r` times a constant (the pre-#932 hand chain
+    // divided four times).
     let s = x.max(1e-300).sqrt();
-    let x1 = x.max(1e-300);
-    let x2 = x1 * x1;
-    let x3 = x2 * x1;
-    [
-        s,
-        0.5 / s,
-        -0.25 / (x1 * s),
-        3.0 / (8.0 * x2 * s),
-        -15.0 / (16.0 * x3 * s),
-    ]
+    let r = 1.0 / s;
+    let r2 = r * r;
+    let r3 = r2 * r;
+    let r5 = r3 * r2;
+    let r7 = r5 * r2;
+    [s, 0.5 * r, -0.25 * r3, 0.375 * r5, -0.9375 * r7]
 }
 /// Derivatives of `x^(-1/2)` through 4th order.
 ///
@@ -2191,19 +2205,16 @@ pub(crate) fn unary_derivatives_sqrt(x: f64) -> [f64; 5] {
 /// so a corrupted argument yields a finite value rather than an ∞/NaN cascade
 /// with no provenance.
 pub(crate) fn unary_derivatives_inverse_sqrt(x: f64) -> [f64; 5] {
-    let x1 = x.max(1e-300);
-    let s = x1.sqrt();
+    // One reciprocal: `1/x = r²` for `r = 1/√x`, so the stack is odd powers
+    // of `r` (the previous body divided five times).
+    let s = x.max(1e-300).sqrt();
     let r = 1.0 / s;
-    let x2 = x1 * x1;
-    let x3 = x2 * x1;
-    let x4 = x3 * x1;
-    [
-        r,
-        -0.5 * r / x1,
-        0.75 * r / x2,
-        -1.875 * r / x3,
-        6.5625 * r / x4,
-    ]
+    let r2 = r * r;
+    let r3 = r2 * r;
+    let r5 = r3 * r2;
+    let r7 = r5 * r2;
+    let r9 = r7 * r2;
+    [r, -0.5 * r3, 0.75 * r5, -1.875 * r7, 6.5625 * r9]
 }
 
 pub(crate) fn unary_derivatives_neglog_phi(x: f64, weight: f64) -> [f64; 5] {
@@ -2232,10 +2243,11 @@ pub(crate) fn unary_derivatives_neglog_phi(x: f64, weight: f64) -> [f64; 5] {
 /// function returns the honest IEEE result (`-inf`/`NaN`) — identical in debug
 /// and release — rather than a finite fabrication.
 pub(crate) fn unary_derivatives_log(x: f64) -> [f64; 5] {
-    let x2 = x * x;
-    let x3 = x2 * x;
-    let x4 = x3 * x;
-    [x.ln(), 1.0 / x, -1.0 / x2, 2.0 / x3, -6.0 / x4]
+    // One reciprocal, then powers: the form the hand time-derivative chain
+    // always used (four divisions before #932's release measurement).
+    let inv = 1.0 / x;
+    let inv2 = inv * inv;
+    [x.ln(), inv, -inv2, 2.0 * inv2 * inv, -6.0 * inv2 * inv2]
 }
 
 /// Derivatives of log φ(x) = -½x² - ½ln(2π) through 4th order.
