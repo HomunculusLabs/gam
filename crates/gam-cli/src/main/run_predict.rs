@@ -180,7 +180,13 @@ fn build_saved_cause_specific_survival_alo_input(
         time_build.keep_cols.as_ref(),
         time_build.smooth_lambda,
     )?;
-    if weibull_baseline_in_beta {
+    // The fit centers every non-empty survival time design at its persisted
+    // anchor, independent of likelihood mode. ALO must replay that same affine
+    // chart. Gating this on `weibull_baseline_in_beta` omitted Transformation
+    // (the Royston-Parmar default), shifting every local log-cumulative-hazard
+    // coordinate by the constant `X(anchor)^T gamma` on left-truncated fits or
+    // any explicit interior anchor (gam#2705).
+    if time_build.x_exit_time.ncols() > 0 {
         let anchor = model
             .survival_time_anchor
             .ok_or_else(|| "saved survival ALO model missing survival_time_anchor".to_string())?;
@@ -2203,14 +2209,12 @@ pub(crate) fn run_predict_survival(
         time_build.keep_cols.as_ref(),
         time_build.smooth_lambda,
     )?;
-    if matches!(
-        saved_likelihood_mode,
-        SurvivalLikelihoodMode::LocationScale
-            | SurvivalLikelihoodMode::MarginalSlope
-            | SurvivalLikelihoodMode::Latent
-            | SurvivalLikelihoodMode::LatentBinary
-    ) || weibull_baseline_in_beta
-    {
+    // The fit centers every non-empty time design, so prediction does too. The
+    // former likelihood-mode allow-list omitted Transformation and evaluated
+    // Royston-Parmar's centered coefficients against uncentered rows whenever
+    // the saved anchor was interior (gam#2705). The design itself is the
+    // authority; adding another likelihood can no longer reopen this defect.
+    if time_build.x_exit_time.ncols() > 0 {
         let time_anchor = model
             .survival_time_anchor
             .ok_or_else(|| "saved survival model missing survival_time_anchor".to_string())?;
