@@ -4045,7 +4045,9 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
             #visibility fn #scalar_witness_name(
                 #(#scalar_witness_primaries: f64,)*
                 #(#scalar_witness_constants: f64),*
-            ) -> [f64; #witness_count] #scalar_witness_body
+            ) -> [f64; #witness_count] {
+                #scalar_witness_body
+            }
         }
     } else {
         quote!()
