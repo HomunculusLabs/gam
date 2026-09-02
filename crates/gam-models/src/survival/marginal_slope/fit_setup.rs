@@ -499,9 +499,26 @@ pub(crate) fn joint_setup(
 
 pub(crate) fn install_time_nullspace_shrinkage_penalty(
     time_block: &mut TimeBlockInput,
+    // Trailing columns of the time value designs that are zero PLACEHOLDERS for
+    // a time-wiggle block (`prepare_survival_time_stack` appends them with
+    // `append_zero_tail_columns`; the wiggle's values enter the likelihood
+    // through its own rows). They carry no function-value channel, so they are
+    // not part of the space this metric is defined on (gam#979: the empirical
+    // Gram over all `p` columns was singular there — `NonPositivePivot` — and
+    // the whole survival fit refused before its first evaluation).
+    timewiggle_cols: usize,
 ) -> Result<bool, String> {
     let p = time_block.design_exit.ncols();
     if p == 0 || time_block.penalties.is_empty() {
+        return Ok(false);
+    }
+    if timewiggle_cols > p {
+        return Err(format!(
+            "survival-marginal-slope time_block declares {timewiggle_cols} time-wiggle placeholder columns but has only {p} columns"
+        ));
+    }
+    let p_value = p - timewiggle_cols;
+    if p_value == 0 {
         return Ok(false);
     }
     if time_block.nullspace_dims.len() != time_block.penalties.len() {
@@ -569,21 +586,31 @@ pub(crate) fn install_time_nullspace_shrinkage_penalty(
         .diag_xtw_x(&Array1::ones(exit_mass))
         .map_err(|err| format!("survival-marginal-slope time_block exit function Gram: {err}"))?;
     let function_gram = (entry_gram + exit_gram).mapv(|value| value / total_mass as f64);
-
-    let Some(shrinkage) =
-        gam_terms::basis::function_space_nullspace_shrinkage(&aggregate, &function_gram).map_err(
-            |err| format!("survival-marginal-slope time_block nullspace shrinkage: {err}"),
-        )?
+    // The metric and the aggregate live on the value block; the placeholder
+    // tail is excluded from both, and the ridge is embedded back at zero there.
+    let function_gram_value = function_gram
+        .slice(ndarray::s![..p_value, ..p_value])
+        .to_owned();
+    let aggregate_value = aggregate.slice(ndarray::s![..p_value, ..p_value]).to_owned();
+    let Some(shrinkage_value) = gam_terms::basis::function_space_nullspace_shrinkage(
+        &aggregate_value,
+        &function_gram_value,
+    )
+    .map_err(|err| format!("survival-marginal-slope time_block nullspace shrinkage: {err}"))?
     else {
         return Ok(false);
     };
-    if shrinkage.nrows() != p || shrinkage.ncols() != p {
+    if shrinkage_value.nrows() != p_value || shrinkage_value.ncols() != p_value {
         return Err(format!(
-            "survival-marginal-slope time_block nullspace shrinkage penalty must be {p}x{p}, got {}x{}",
-            shrinkage.nrows(),
-            shrinkage.ncols(),
+            "survival-marginal-slope time_block nullspace shrinkage penalty must be {p_value}x{p_value}, got {}x{}",
+            shrinkage_value.nrows(),
+            shrinkage_value.ncols(),
         ));
     }
+    let mut shrinkage = Array2::<f64>::zeros((p, p));
+    shrinkage
+        .slice_mut(ndarray::s![..p_value, ..p_value])
+        .assign(&shrinkage_value);
     time_block.penalties.push(shrinkage);
     time_block.nullspace_dims.push(0);
     log::info!(

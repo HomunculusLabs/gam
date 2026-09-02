@@ -142,7 +142,7 @@ fn time_nullspace_shrinkage_adds_precision_for_uncontrolled_time_direction() {
     };
 
     assert!(
-        install_time_nullspace_shrinkage_penalty(&mut block)
+        install_time_nullspace_shrinkage_penalty(&mut block, 0)
             .expect("time nullspace shrinkage should build"),
         "expected a shrinkage penalty to be appended",
     );
@@ -181,7 +181,7 @@ fn time_nullspace_shrinkage_is_noop_for_full_rank_time_penalty() {
     };
 
     assert!(
-        !install_time_nullspace_shrinkage_penalty(&mut block)
+        !install_time_nullspace_shrinkage_penalty(&mut block, 0)
             .expect("full-rank time penalty should be accepted"),
         "full-rank time penalties should not get another penalty",
     );
@@ -8969,4 +8969,50 @@ fn rigid_row_primary_mixed_in_z_matches_finite_difference() {
         checked, 360,
         "the grid must be exercised in full; a silently skipped cell is not a passing gate"
     );
+}
+
+/// gam#979: with a time-wiggle block the time value designs carry trailing
+/// zero placeholder columns; the shrinkage metric is the empirical Gram of the
+/// value block only, and the ridge is embedded at zero on the placeholders.
+#[test]
+fn time_shrinkage_metric_excludes_timewiggle_placeholder_columns() {
+    let (entry, exit) = full_span_time_endpoint_designs();
+    let pad = |design: &DesignMatrix| -> DesignMatrix {
+        let dense = design.to_dense();
+        let mut padded = Array2::<f64>::zeros((dense.nrows(), dense.ncols() + 2));
+        padded.slice_mut(s![.., ..dense.ncols()]).assign(&dense);
+        DesignMatrix::from(padded)
+    };
+    let mut penalty = Array2::<f64>::zeros((4, 4));
+    penalty[[0, 0]] = 1.0;
+    let mut block = TimeBlockInput {
+        design_entry: pad(&entry),
+        design_exit: pad(&exit),
+        design_derivative_exit: pad(&exit),
+        penalties: vec![penalty],
+        nullspace_dims: vec![1],
+        initial_beta: Some(Array1::zeros(4)),
+        ..base_time_block()
+    };
+    // The same block through the all-columns metric is exactly the production
+    // refusal: the placeholder columns have no value support.
+    let mut all_columns = block.clone();
+    let refused = install_time_nullspace_shrinkage_penalty(&mut all_columns, 0);
+    assert!(
+        refused.is_err(),
+        "the control must refuse: an all-columns metric over zero placeholders is singular"
+    );
+    assert!(
+        install_time_nullspace_shrinkage_penalty(&mut block, 2)
+            .expect("value-block metric with placeholders excluded"),
+        "expected a shrinkage penalty on the value block"
+    );
+    let ridge = block.penalties.last().expect("appended ridge");
+    assert_eq!(ridge.dim(), (4, 4));
+    assert!(
+        ridge.slice(s![2.., ..]).iter().all(|v| *v == 0.0)
+            && ridge.slice(s![.., 2..]).iter().all(|v| *v == 0.0),
+        "the ridge must be zero on the placeholder columns"
+    );
+    assert!(ridge[[1, 1]] > 0.0, "the null direction of the value block must be shrunk");
 }

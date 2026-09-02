@@ -33,7 +33,10 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         }
         .into());
     }
-    install_time_nullspace_shrinkage_penalty(&mut spec.time_block)?;
+    install_time_nullspace_shrinkage_penalty(
+        &mut spec.time_block,
+        spec.timewiggle_block.as_ref().map_or(0, |wiggle| wiggle.ncols),
+    )?;
     let (z_standardized, z_normalization) = standardize_latent_z_matrix_with_policy(
         &spec.z,
         &spec.weights,
