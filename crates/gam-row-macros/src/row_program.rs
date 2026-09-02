@@ -666,6 +666,29 @@ fn rust_scalar_expression(expression: &ProgramExpr, leaves: &[Leaf]) -> TokenStr
     }
 }
 
+/// The primaries as parameters of one direct lowering. A primary whose VALUE
+/// the body never reads -- it composes a supplied stack and enters only as a
+/// differentiation axis -- keeps its position under an underscore name, so
+/// every caller stays positional and the generated function is lint-clean
+/// under `deny(warnings)`.
+fn primary_parameters(primaries: &[Ident], body: &TokenStream2) -> Vec<Ident> {
+    let text = body.to_string();
+    primaries
+        .iter()
+        .map(|primary| {
+            let name = primary.to_string();
+            let used = text
+                .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .any(|token| token == name);
+            if used {
+                primary.clone()
+            } else {
+                format_ident!("_{name}")
+            }
+        })
+        .collect()
+}
+
 /// A supplied stack composes exactly its five entries; a builder leaf takes
 /// whatever scalar arguments its function declares.
 fn validate_supplied_stacks(expression: &ProgramExpr, leaves: &[Leaf]) -> Result<()> {
@@ -3684,10 +3707,11 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
             &result,
             &witnesses,
         )?;
+        let order2_primaries = primary_parameters(&primaries, &quote!(#order2_body));
         quote! {
             #[inline(always)]
             #visibility fn #order2_name(
-                #(#primaries: f64,)*
+                #(#order2_primaries: f64,)*
                 #(#constants: f64),*
             ) -> (
                 f64,
@@ -3721,10 +3745,11 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
                 false,
             )?
         };
+        let third_primaries = primary_parameters(&primaries, &quote!(#third_body));
         quote! {
             #[inline(never)]
             #visibility fn #third_name(
-                #(#primaries: f64,)*
+                #(#third_primaries: f64,)*
                 #(#constants: f64,)*
                 direction_u: &[f64; #dimension],
             ) -> [[f64; #dimension]; #dimension] #third_body
@@ -3754,10 +3779,11 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
                 true,
             )?
         };
+        let fourth_primaries = primary_parameters(&primaries, &quote!(#fourth_body));
         quote! {
             #[inline(never)]
             #visibility fn #fourth_name(
-                #(#primaries: f64,)*
+                #(#fourth_primaries: f64,)*
                 #(#constants: f64,)*
                 direction_u: &[f64; #dimension],
                 direction_v: &[f64; #dimension],
@@ -3786,16 +3812,18 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
             &result,
             4,
         )?;
+        let third_full_primaries = primary_parameters(&primaries, &quote!(#third_full_body));
+        let fourth_full_primaries = primary_parameters(&primaries, &quote!(#fourth_full_body));
         quote! {
             #[inline(never)]
             #visibility fn #third_full_name(
-                #(#primaries: f64,)*
+                #(#third_full_primaries: f64,)*
                 #(#constants: f64),*
             ) -> [[[f64; #dimension]; #dimension]; #dimension] #third_full_body
 
             #[inline(never)]
             #visibility fn #fourth_full_name(
-                #(#primaries: f64,)*
+                #(#fourth_full_primaries: f64,)*
                 #(#constants: f64),*
             ) -> [[[[f64; #dimension]; #dimension]; #dimension]; #dimension]
                 #fourth_full_body
@@ -3838,22 +3866,28 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
             Statement::Local { .. } => None,
         });
         let scalar_witness_name = format_ident!("{}_witnesses", name);
-        let scalar_witness_primaries = primaries
+        let scalar_witness_statements = scalar_witness_statements.collect::<Vec<_>>();
+        let scalar_witness_values = witnesses.iter();
+        let scalar_witness_body = quote! {
+            #(#scalar_witness_statements)*
+            [#(#scalar_witness_values),*]
+        };
+        let scalar_witness_dependent = primaries
             .iter()
-            .filter(|primary| scalar_witness_dependencies.contains(&primary.to_string()));
+            .filter(|primary| scalar_witness_dependencies.contains(&primary.to_string()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let scalar_witness_primaries =
+            primary_parameters(&scalar_witness_dependent, &scalar_witness_body);
         let scalar_witness_constants = constants
             .iter()
             .filter(|constant| scalar_witness_scalar_dependencies.contains(&constant.to_string()));
-        let scalar_witness_values = witnesses.iter();
         quote! {
             #[inline(always)]
             #visibility fn #scalar_witness_name(
                 #(#scalar_witness_primaries: f64,)*
                 #(#scalar_witness_constants: f64),*
-            ) -> [f64; #witness_count] {
-                #(#scalar_witness_statements)*
-                [#(#scalar_witness_values),*]
-            }
+            ) -> [f64; #witness_count] #scalar_witness_body
         }
     } else {
         quote!()
@@ -4307,6 +4341,10 @@ mod tests {
         let compact = rust.replace(' ', "");
         assert!(compact.contains("letout_stack0=[a,b,c,d,e];"), "{rust}");
         assert!(!rust.contains("supplied"), "{rust}");
+        // The point is only a differentiation axis here: its value is never
+        // read, and the parameter says so instead of tripping the unused
+        // lint under `deny(warnings)`. Callers stay positional.
+        assert!(compact.contains("fngiven_order2(_x:f64,"), "{rust}");
         let cuda = emitted_cuda(program);
         assert!(cuda.contains("double out_stack0[3] = {a, b, c};"), "{cuda}");
         assert!(!cuda.contains("supplied"), "{cuda}");
