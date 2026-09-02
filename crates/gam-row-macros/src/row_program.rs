@@ -2691,6 +2691,14 @@ fn schedule_direct_lowering(body: &str) -> String {
                 for &input in &inputs {
                     names.extend(items[input].references.iter().map(String::as_str));
                 }
+                // The calls this one reads, directly or through its input
+                // chain: it cannot join their run, and what their results
+                // feed is issued between them and it.
+                let dependency_calls: HashSet<usize> = names
+                    .iter()
+                    .filter_map(|name| by_name.get(*name).copied())
+                    .filter(|&defining| items[defining].kind == ItemKind::Call)
+                    .collect();
                 let mut barrier: Option<usize> = None;
                 for name in names {
                     if let Some(&defining) = by_name.get(name)
@@ -2716,13 +2724,18 @@ fn schedule_direct_lowering(body: &str) -> String {
                 {
                     at = at.max(after + 1);
                 }
-                // The run of adjacent calls this one joins: the calls and
-                // their own input chains immediately before `at`.
+                // The run of adjacent independent calls this one joins: the
+                // calls and their own input chains immediately before `at`,
+                // stopping at a call this one depends on.
                 let mut run_start = at;
-                while run_start > 0
-                    && (items[order[run_start - 1]].kind == ItemKind::Call
-                        || call_inputs.contains(&order[run_start - 1]))
-                {
+                while run_start > 0 {
+                    let previous = order[run_start - 1];
+                    let joins = (items[previous].kind == ItemKind::Call
+                        && !dependency_calls.contains(&previous))
+                        || call_inputs.contains(&previous);
+                    if !joins {
+                        break;
+                    }
                     run_start -= 1;
                 }
                 // Every pending definition computable before the run is
@@ -5084,6 +5097,28 @@ mod tests {
             compact.contains("leta_stack0=exp_stack(x);letc_stack1=exp_stack(z);"),
             "two independent calls are issued back to back:\n{rust}"
         );
+
+        // A call whose point reads an earlier call's result does not join
+        // that call's run: everything the first result feeds that the second
+        // call does not is issued between them, as the rigid Bernoulli row's
+        // index channels are between its observed-scale and probit leaves.
+        let program = quote! {
+            fn chained(x, y;)
+            emit [order2];
+            leaves { exponential => exp_stack => d_exp }
+            witnesses [];
+            {
+                let a = compose(exponential, x);
+                let b = mul(a, y);
+                let c = compose(exponential, b);
+                return mul(c, b);
+            }
+        };
+        let rust = emitted_function(program, "chained_order2");
+        let second = rust.find("exp_stack (b_v").expect("the dependent leaf call");
+        let gradient = rust.find("let b_g0").expect("the gradient of b");
+        let hessian = rust.find("let b_h0_1").expect("the Hessian of b");
+        assert!(gradient < second && hessian < second, "{rust}");
     }
 
     /// A leaf call and the definitions that only one gate reads are emitted
