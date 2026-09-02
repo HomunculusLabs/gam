@@ -1287,9 +1287,9 @@ fn summary_curvature_estimands(model: &FittedModel) -> Vec<SummaryCurvatureRow> 
 /// carries **no dense `fit_result`** — by design the smoother keeps only the
 /// per-knot posterior, never a dense design/Gram. So the FFI summary surface
 /// reconstructs exactly what the smoother retained: the selected smoothing
-/// parameter, the effective d.o.f. (tr S), the diffuse REML score, the profiled
-/// scale, and the recovered deviance. This mirrors the numbers the CLI fit log
-/// already prints from the same state.
+/// parameter, the effective d.o.f. (tr S), the diffuse REML score, the ordinary
+/// Gaussian log-likelihood, the profiled scale, and the recovered deviance.
+/// This mirrors the numbers the CLI fit log already prints from the same state.
 ///
 /// The dense per-coefficient β / covariance is deliberately NOT materialized:
 /// the smoother's natural parameters are the per-knot function values, of which
@@ -1316,6 +1316,9 @@ struct ScanIntrospection {
     /// as a within-fit quantity and prefer held-out predictive metrics for
     /// cross-model comparison.
     reml_cost: f64,
+    /// Fully normalized weighted Gaussian log-likelihood at the fitted mean and
+    /// profiled scale, on the conditional-AIC ranking scale.
+    log_likelihood: f64,
     /// Gaussian deviance — the weighted residual sum of squares.
     deviance: f64,
     /// Number of pooled knots (the smoother's natural coefficient count).
@@ -1335,6 +1338,7 @@ fn scan_introspection(model: &FittedModel) -> Result<Option<ScanIntrospection>, 
         edf: fit.edf(),
         lambda: fit.lambda(),
         reml_cost: -fit.restricted_loglik,
+        log_likelihood: fit.log_likelihood,
         deviance: fit.deviance(),
         n_knots: fit.knots.len(),
     }))
@@ -1375,9 +1379,7 @@ fn scan_summary_payload(model: &FittedModel, scan: &ScanIntrospection) -> Summar
         // row.
         basis_checks: summary_basis_checks(model),
         deviance: scan.deviance,
-        // Scan-routed models do not retain the λ-comparable log-likelihood, so
-        // leave `log_likelihood` unset.
-        log_likelihood: None,
+        log_likelihood: Some(scan.log_likelihood),
         n_obs: Some(scan.training_sample_size),
         // null_dim is left unset: the scan does not compute the penalized-Hessian
         // null-space logdet the TK normalizer needs, so `comparable_reml_score`

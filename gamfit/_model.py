@@ -1445,9 +1445,9 @@ class Model:
     def evidence(self) -> float:
         """Model-selection cost for this fit, on the same rank scale used by
         ``gamfit.compare_models`` to pick its winner: the Occam-penalised
-        conditional AIC (``-2*loglik + 2*edf``) when the log-likelihood and
-        effective degrees of freedom are available, falling back to the raw
-        (TK-normalized) REML / LAML marginal-likelihood cost otherwise (#2079).
+        conditional AIC (``-2*loglik + 2*edf``). Both the ordinary
+        log-likelihood and effective degrees of freedom are required; raw REML /
+        LAML is a different estimand and is never used as a fallback (#2079).
         It is a *cost*, so **lower is better** -- the model with the smaller
         ``evidence`` is the better-supported one, agreeing with the winner
         reported by ``gamfit.compare_models``. Use :meth:`bayes_factor_vs` or

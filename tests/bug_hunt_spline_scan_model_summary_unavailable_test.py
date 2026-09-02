@@ -80,16 +80,21 @@ def test_scan_model_predicts_and_summarizes(degree, penalty_order, order):
         assert np.isfinite(value)
         assert value > 0.0
 
-    # summary(): finite REML score and an EDF strictly between the polynomial
-    # null-space dimension (== order) and n.
+    # summary(): finite REML diagnostic, ordinary Gaussian log-likelihood, and
+    # an EDF strictly between the polynomial null-space dimension (== order)
+    # and n.
     summary = model.summary()
     reml = float(summary.reml_score)
     assert np.isfinite(reml)
+    log_likelihood = float(summary.log_likelihood)
+    assert np.isfinite(log_likelihood)
     edf = float(summary.edf_total)
     assert order < edf < n, f"edf {edf} must lie in ({order}, {n})"
 
-    # evidence(): a finite REML/LAML cost on the comparison scale.
-    assert np.isfinite(float(model.evidence))
+    # evidence(): always the conditional AIC. The scan's concentrated diffuse
+    # REML value is a different estimand and must never be substituted here.
+    expected_evidence = -2.0 * log_likelihood + 2.0 * edf
+    assert float(model.evidence) == pytest.approx(expected_evidence)
 
     # term_blocks: exactly one contiguous coefficient block for the smooth.
     blocks = model.term_blocks

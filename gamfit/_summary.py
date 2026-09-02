@@ -28,6 +28,7 @@ _SUMMARY_FIELDS: tuple[str, ...] = (
     "model_class",
     "n_obs",
     "deviance",
+    "log_likelihood",
     "reml_score",
     "raw_reml_score",
     "reml_score_unavailable",
@@ -163,6 +164,10 @@ class Summary:
     deviance : float or None
         Model deviance at the converged fit. ``None`` for models that do not
         report a deviance.
+    log_likelihood : float or None
+        Ordinary reported log-likelihood at the converged fit. Every rankable
+        model carries a finite value; ``None`` is reserved for the exact
+        zero-dispersion boundary where no normalized Gaussian density exists.
     reml_score : float or None
         Comparable REML / LAML cost at convergence, including the
         rank-aware Tierney-Kadane null-space normalizer when available.
@@ -276,6 +281,7 @@ class Summary:
     model_class: str = ""
     n_obs: int | None = None
     deviance: float | None = None
+    log_likelihood: float | None = None
     reml_score: float | None = None
     raw_reml_score: float | None = None
     reml_score_unavailable: str | None = None

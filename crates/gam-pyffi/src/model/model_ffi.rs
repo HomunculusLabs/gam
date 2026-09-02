@@ -255,9 +255,10 @@ struct SummaryPayload {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     deployment_extensions: Vec<SavedDeploymentExtension>,
     deviance: f64,
-    /// Log-likelihood at the converged mode (engine constants-omitted scale).
-    /// Carried so `compare_models` can form the Occam-penalised conditional AIC
-    /// it ranks on (issue #1362). Optional for forward/backward compatibility.
+    /// Reported log-likelihood at the converged mode. Carried so
+    /// `compare_models` can form the Occam-penalised conditional AIC it ranks on
+    /// (issue #1362). `None` means the fit has no normalized likelihood at the
+    /// exact zero-dispersion boundary; it never means "not recorded".
     #[serde(skip_serializing_if = "Option::is_none")]
     log_likelihood: Option<f64>,
     /// Number of original rows the fit was trained on. Carried so `compare_models`
@@ -4598,7 +4599,8 @@ fn compare_reml_fits(
         }
     }
 
-    // Python-specific work: extract scalar score + edf from each PyAny
+    // Python-specific work: extract raw diagnostic score plus the required
+    // conditional-AIC inputs (log-likelihood and EDF) from each PyAny
     // fit (which may be a saved-summary dict, a Model object, or any
     // object exposing .evidence). Then the ranking, delta, Bayes-factor,
     // and evidence-summary logic is delegated to the pure-Rust core in
@@ -4608,12 +4610,15 @@ fn compare_reml_fits(
     for (index, (name, fit)) in labels.into_iter().zip(fits.iter()).enumerate() {
         let fit = fit.bind(py);
         let view = reml_fit_view(fit)?;
+        let score = extract_reml_score_from_view(&view)?;
+        let edf = extract_required_ranking_edf_from_view(&view, &name)?;
+        let log_lik = extract_required_ranking_log_lik_from_view(&view, &name)?;
         candidates.push(RemlCandidate {
             index,
             name,
-            score: extract_reml_score_from_view(&view)?,
-            edf: extract_edf_from_view(&view)?,
-            log_lik: extract_log_lik_from_view(&view)?,
+            score,
+            edf,
+            log_lik,
             family: extract_family_from_view(&view)?,
             n_obs: extract_n_obs_from_view(&view)?,
         });
@@ -4734,42 +4739,39 @@ fn comparable_reml_score(
 /// exactly (`-2·loglik + 2·edf`) so `Model.evidence` and `Model.bayes_factor_vs`
 /// pick the SAME winner as `gamfit.compare_models` (issue #2079).
 ///
-/// `compare_models` ranks on this conditional AIC (which prices the effective
-/// degrees of freedom a pure-noise smooth spends, penalising it correctly),
-/// while `evidence` / `bayes_factor_vs` previously used the raw REML/LAML
-/// evidence headline (`comparable_reml_score_from_summary_payload`) — the two
-/// picked OPPOSITE winners when a model was augmented with a near-null smooth.
-/// Routing both through this helper removes that cross-method contradiction.
-///
-/// Falls back to the raw comparable REML/LAML score when the payload predates
-/// the log-likelihood / edf fields (both must be present and finite), matching
-/// the `ranking_score` fallback in `evidence.rs`.
+/// Both inputs are required and finite. A raw REML/LAML criterion is a different
+/// estimand, so an incomplete summary is refused rather than ranked on another
+/// scale.
 fn ranking_score_from_summary_payload(payload: &serde_json::Value) -> PyResult<f64> {
-    let log_lik = json_lookup_f64(payload, LOG_LIK_KEYS);
-    let edf = json_lookup_edf(payload, EDF_KEYS);
-    if let (Some(log_lik), Some(edf)) = (log_lik, edf) {
-        if log_lik.is_finite() && edf.is_finite() {
-            return Ok(-2.0 * log_lik + 2.0 * edf);
-        }
+    let log_lik = required_summary_ranking_value(payload, "log_likelihood")?;
+    let edf = required_summary_ranking_value(payload, "edf_total")?;
+    if edf < 0.0 {
+        return Err(py_value_error(format!(
+            "model evidence requires non-negative edf_total, got {edf}"
+        )));
     }
-    comparable_reml_score_from_summary_payload(payload)
-}
-
-fn comparable_reml_score_from_summary_payload(payload: &serde_json::Value) -> PyResult<f64> {
-    let raw = json_lookup_f64(payload, RAW_REML_SCORE_KEYS)
-        .or_else(|| json_lookup_f64(payload, REML_SCORE_KEYS))
-        .ok_or_else(|| no_criterion_error(payload, "model evidence"))?;
-    if !raw.is_finite() {
+    let score = -2.0 * log_lik + 2.0 * edf;
+    if !score.is_finite() {
         return Err(py_value_error(
-            "saved model payload reml_score must be finite".to_string(),
+            "model evidence conditional AIC is outside f64 range".to_string(),
         ));
     }
-    comparable_reml_score(
-        raw,
-        json_lookup_f64(payload, NULL_DIM_KEYS),
-        json_lookup_f64(payload, NULL_HESSIAN_LOGDET_KEYS),
-    )
-    .map_err(PyValueError::new_err)
+    Ok(score)
+}
+
+fn required_summary_ranking_value(payload: &serde_json::Value, key: &str) -> PyResult<f64> {
+    if let Some(value) = payload.get(key).and_then(serde_json::Value::as_f64) {
+        if value.is_finite() {
+            return Ok(value);
+        }
+    }
+    if key == "log_likelihood" && json_lookup_str(payload, REML_UNAVAILABLE_KEYS).is_some() {
+        return Err(no_criterion_error(payload, "model evidence"));
+    }
+    Err(py_value_error(format!(
+        "model evidence requires a finite '{key}' in the current model summary; \
+         raw REML/LAML is not a substitute ranking estimand"
+    )))
 }
 
 fn extract_null_dim_from_view(view: &RemlFitView<'_>) -> PyResult<Option<f64>> {
@@ -4819,12 +4821,33 @@ fn extract_edf_from_view(view: &RemlFitView<'_>) -> PyResult<Option<f64>> {
     }
 }
 
-/// Log-likelihood at the converged mode, used by `compare_models` to form the
-/// Occam-penalised conditional AIC that decides the winner (issue #1362).
-/// `None` when the fit payload predates the field — the comparison then falls
-/// back to the raw REML/LAML evidence headline.
-fn extract_log_lik_from_view(view: &RemlFitView<'_>) -> PyResult<Option<f64>> {
-    extract_float_metadata_from_view(view, LOG_LIK_KEYS)
+fn extract_required_ranking_edf_from_view(
+    view: &RemlFitView<'_>,
+    name: &str,
+) -> PyResult<f64> {
+    let value = extract_edf_from_view(view)?;
+    match value {
+        Some(edf) if edf.is_finite() && edf >= 0.0 => Ok(edf),
+        _ => Err(py_value_error(format!(
+            "compare_models: candidate '{name}' requires finite non-negative edf_total; \
+             raw REML/LAML is not a substitute ranking estimand"
+        ))),
+    }
+}
+
+/// Required ordinary log-likelihood at the converged mode, used by
+/// `compare_models` to form the conditional AIC that decides the winner.
+fn extract_required_ranking_log_lik_from_view(
+    view: &RemlFitView<'_>,
+    name: &str,
+) -> PyResult<f64> {
+    match extract_float_metadata_from_view(view, LOG_LIK_KEYS)? {
+        Some(log_lik) if log_lik.is_finite() => Ok(log_lik),
+        _ => Err(py_value_error(format!(
+            "compare_models: candidate '{name}' requires finite log_likelihood; \
+             raw REML/LAML is not a substitute ranking estimand"
+        ))),
+    }
 }
 
 /// Response-family tag of a candidate fit, for the compare_models comparability

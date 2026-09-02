@@ -3402,6 +3402,10 @@ pub struct SplineScanFit {
     /// λ- and data-independent additive constant. Differences across λ are
     /// exact REML criterion differences.
     pub restricted_loglik: f64,
+    /// Ordinary fully normalized Gaussian log-likelihood at the fitted mean
+    /// and profiled observation variance. Unlike `restricted_loglik`, this is
+    /// on the common data-likelihood scale consumed by conditional AIC.
+    pub log_likelihood: f64,
     /// Original training row count (pre-pooling; ties collapse to fewer
     /// knots), retained for every sample-size-based post-fit calculation.
     training_sample_size: std::num::NonZeroUsize,
@@ -4379,6 +4383,22 @@ pub fn fit_spline_scan_at(
                 node.w * r * r
             })
             .sum::<f64>();
+    // Evaluate the ordinary weighted Gaussian likelihood while the original
+    // row weights still exist. Pooled node weights preserve Σw but not Σln(w):
+    // for tied rows, ln(w₁ + w₂) != ln(w₁) + ln(w₂), so this normalizer cannot
+    // be reconstructed from the persisted state after pooling.
+    let sum_log_weights = w.iter().map(|weight| weight.ln()).sum::<f64>();
+    let log_likelihood = -0.5
+        * (data_sse / sigma2
+            + n_obs as f64 * (std::f64::consts::TAU.ln() + sigma2.ln())
+            - sum_log_weights);
+    if !log_likelihood.is_finite() {
+        return Err(format!(
+            "spline scan: weighted Gaussian log-likelihood is non-finite \
+             (data_sse={data_sse}, sigma2={sigma2}, n={n_obs}, \
+             sum_log_weights={sum_log_weights})"
+        ));
+    }
     Ok(SplineScanFit {
         order,
         knots,
@@ -4388,6 +4408,7 @@ pub fn fit_spline_scan_at(
         log_lambda,
         sigma2,
         restricted_loglik,
+        log_likelihood,
         training_sample_size: std::num::NonZeroUsize::new(n_obs)
             .expect("pool_nodes requires at least one training row"),
         data_sse,
@@ -4723,18 +4744,13 @@ pub fn fit_spline_scan(
 /// smoothed state covariances (unit-σ² scale, symmetric — stored as the
 /// upper triangle row-major, `m(m+1)/2` per knot), RTS backward gains (full
 /// `m×m` row-major — gains are NOT symmetric), pooled node weights, and the
-/// three fit scalars. `q = e^{−log λ}` and the public `mean`/`deriv`/`var`
+/// required fit scalars. `q = e^{−log λ}` and the public `mean`/`deriv`/`var`
 /// views are derived on restore rather than stored, so a snapshot cannot go
-/// internally inconsistent. The layouts are order-derived; at the historical
-/// cubic `m = 2` they are exactly the original `[f, f′]` / `[c00, c01, c11]` /
-/// `[g00, g01, g10, g11]` triples, so pre-order-generality snapshots restore
-/// unchanged.
+/// internally inconsistent. Every field is required: a snapshot that predates
+/// the current statistical contract must be regenerated rather than guessed.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SplineScanState {
-    /// Smoothing-spline order `m ∈ {1, 2, 3}` (`#[serde(default)]` → reads as
-    /// the historical cubic `m = 2` for snapshots written before order
-    /// generality).
-    #[serde(default = "default_spline_scan_order")]
+    /// Smoothing-spline order `m ∈ {1, 2, 3}`.
     pub order: usize,
     pub knots: Vec<f64>,
     /// Smoothed `(f, f′, …, f^{(m−1)})` per knot, row-major (`m` per knot).
@@ -4750,6 +4766,10 @@ pub struct SplineScanState {
     pub log_lambda: f64,
     pub sigma2: f64,
     pub restricted_loglik: f64,
+    /// Ordinary fully normalized weighted Gaussian log-likelihood. Required on
+    /// the wire because the raw per-row weights needed for its normalizer are
+    /// deliberately not retained after tied abscissae are pooled.
+    pub log_likelihood: f64,
     /// Original training row count. Required on the wire.
     pub training_sample_size: std::num::NonZeroU64,
     /// Weighted data residual sum of squares `Σ wᵢ (yᵢ − f̂(xᵢ))²` at the
@@ -4757,12 +4777,6 @@ pub struct SplineScanState {
     /// recovered from the profiled σ² (whose quadratic also carries
     /// process/roughness energy) and the raw rows are not retained.
     pub data_sse: f64,
-}
-
-/// Serde default for [`SplineScanState::order`]: historical snapshots predate
-/// order generality and are cubic (`m = 2`).
-fn default_spline_scan_order() -> usize {
-    2
 }
 
 impl SplineScanFit {
@@ -4801,6 +4815,7 @@ impl SplineScanFit {
             log_lambda: self.log_lambda,
             sigma2: self.sigma2,
             restricted_loglik: self.restricted_loglik,
+            log_likelihood: self.log_likelihood,
             training_sample_size: std::num::NonZeroU64::new(
                 u64::try_from(self.training_sample_size.get())
                     .expect("SplineScanFit row count exceeds the persistence format"),
@@ -4859,11 +4874,15 @@ impl SplineScanFit {
         }
         gam_problem::validate_log_strength(state.log_lambda)
             .map_err(|error| format!("spline scan state: {error}"))?;
-        if !(state.restricted_loglik.is_finite() && state.sigma2.is_finite() && state.sigma2 > 0.0)
+        if !(state.restricted_loglik.is_finite()
+            && state.log_likelihood.is_finite()
+            && state.sigma2.is_finite()
+            && state.sigma2 > 0.0)
         {
             return Err(format!(
-                "spline scan state: invalid scalars (log_lambda={}, sigma2={}, restricted_loglik={})",
-                state.log_lambda, state.sigma2, state.restricted_loglik
+                "spline scan state: invalid scalars (log_lambda={}, sigma2={}, \
+                 restricted_loglik={}, log_likelihood={})",
+                state.log_lambda, state.sigma2, state.restricted_loglik, state.log_likelihood
             ));
         }
         if !(state.data_sse.is_finite() && state.data_sse >= 0.0) {
@@ -4933,6 +4952,7 @@ impl SplineScanFit {
             log_lambda: state.log_lambda,
             sigma2,
             restricted_loglik: state.restricted_loglik,
+            log_likelihood: state.log_likelihood,
             training_sample_size: std::num::NonZeroUsize::new(training_sample_size)
                 .expect("nonzero wire count remains nonzero after conversion"),
             data_sse: state.data_sse,
@@ -6617,6 +6637,7 @@ mod tests {
             log_lambda: 0.35,
             sigma2: 1.75,
             restricted_loglik: -12.5,
+            log_likelihood: -8.25,
             training_sample_size: std::num::NonZeroU64::new(64).expect("64 is nonzero"),
             data_sse: 3.25,
         }
@@ -6652,6 +6673,10 @@ mod tests {
             assert_eq!(fit.knots, restored.knots, "knots drifted (m={order})");
             assert_eq!(fit.log_lambda.to_bits(), restored.log_lambda.to_bits());
             assert_eq!(fit.sigma2.to_bits(), restored.sigma2.to_bits());
+            assert_eq!(
+                fit.log_likelihood.to_bits(),
+                restored.log_likelihood.to_bits()
+            );
             assert_eq!(fit.edf().to_bits(), restored.edf().to_bits());
             assert_eq!(fit.deviance().to_bits(), restored.deviance().to_bits());
             assert_eq!(fit.training_sample_size(), restored.training_sample_size());
@@ -6824,5 +6849,55 @@ mod tests {
         // The old proxy is strictly larger: it includes penalty energy.
         let reml_quadratic = fit.sigma2 * (fit.training_sample_size() as f64 - fit.order as f64);
         assert!(fit.deviance() < reml_quadratic);
+    }
+
+    #[test]
+    fn full_gaussian_log_likelihood_keeps_raw_weight_normalizer_and_round_trips() {
+        // The first two rows share an abscissa. Their individual log-weight
+        // normalizers cannot be recovered from the pooled node weight.
+        let x = [0.0, 0.0, 1.0, 2.0];
+        let y = [0.2, -0.1, 0.8, 1.4];
+        let w = [0.5, 2.0, 1.5, 3.0];
+        let sigma2 = 1.7;
+        let fit = fit_spline_scan_at(&x, &y, &w, 0.2, Some(sigma2), 1)
+            .expect("weighted order-1 fit");
+
+        let sum_log_weights = w.iter().map(|weight| weight.ln()).sum::<f64>();
+        let expected = -0.5
+            * (fit.deviance() / sigma2
+                + x.len() as f64 * (std::f64::consts::TAU.ln() + sigma2.ln())
+                - sum_log_weights);
+        assert!(
+            (fit.log_likelihood - expected).abs() <= 1e-12 * expected.abs().max(1.0)
+        );
+
+        let pooled_log_weights = fit
+            .node_weight
+            .iter()
+            .map(|weight| weight.ln())
+            .sum::<f64>();
+        let pooled_wrong = -0.5
+            * (fit.deviance() / sigma2
+                + x.len() as f64 * (std::f64::consts::TAU.ln() + sigma2.ln())
+                - pooled_log_weights);
+        assert!(
+            (fit.log_likelihood - pooled_wrong).abs() > 1e-3,
+            "raw-row weight normalizer must not collapse to pooled weights"
+        );
+
+        let restored = SplineScanFit::from_state(&fit.to_state()).expect("restore fit");
+        assert_eq!(
+            fit.log_likelihood.to_bits(),
+            restored.log_likelihood.to_bits()
+        );
+
+        let mut incomplete = serde_json::to_value(fit.to_state()).expect("serialize state");
+        incomplete
+            .as_object_mut()
+            .expect("state serializes as an object")
+            .remove("log_likelihood");
+        let error = serde_json::from_value::<SplineScanState>(incomplete)
+            .expect_err("log_likelihood is a required wire field");
+        assert!(error.to_string().contains("missing field `log_likelihood`"));
     }
 }
