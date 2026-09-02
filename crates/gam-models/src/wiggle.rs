@@ -90,39 +90,19 @@ pub(crate) use gam_terms::basis::monotone_warp_knots_from_seed;
 /// own value reads `I‴`, and a step in `I‴` is a jump in the function the trust
 /// region compares two points on.
 ///
-/// # The order is measured on the FIT, because a unit fixture under-reported it
-///
-/// This constant was first landed as `2`, from
-/// `probe_2695_joint_hessian_across_an_interior_knot`: on that fixture `H` steps
-/// at degree 2 (ratio `1.00` at both `βw = 1e-6` and `βw = 3e-2`) and closes at
-/// degree 3 (ratio `100`). That fixture does not excite the `βw`-weighted `I‴`
-/// channel above its own resolution, so it cannot see the difference between
-/// degree 3 and degree 4, and reading the order off it alone was wrong.
-///
-/// The shipped witness does excite it. `Φ`'s response to the accepted step,
-/// swept down the trust ladder (`|Δφ| / |δ|∞` constant ⇒ smooth; `Δφ` constant
-/// ⇒ a jump):
-///
-/// ```text
-///   built at 3:  |δ|∞ 1.573e-10 → 3.379e-13   Δφ  −2.571e-7 … −2.599e-7   JUMP
-///   built at 4:  |δ|∞ 2.037e-08 → 9.820e-12   ratio 13.76 … 12.22        smooth
-///   built at 5:  |δ|∞ 1.032e-01 → 7.545e-02   ratio 6.01e-2 … 5.88e-2    smooth
-///   built at 6:  |δ|∞ 4.608e-06 → 1.150e-06   ratio 8.77 … 8.86          smooth
-/// ```
-///
-/// Three decades of step size with `Δφ` pinned at `−2.6e-7` is a jump; four
-/// decades with `|Δφ|/|δ|∞` constant to three digits is a derivative. So the
-/// objective reads `I‴`, the order is **3**, and a composed warp is built at 4.
-///
-/// End to end, before any of this: at degree 2 the accept-test objective jumped
-/// by `2.976461e-1`, identically, at step norms from `1.436e-10` to `7.094e-13`,
-/// and the jump was Φ to twelve digits while `ℓ` and `½βᵀSβ` did not move at all.
+/// Continuity of the objective value is necessary but not sufficient for the
+/// analytic-gradient optimizer. Its Newton right-hand side and convergence gate
+/// consume `∇Φ`; differentiating `H` reads the next `m₁` slot, the fourth
+/// basis derivative. That derivative must itself be continuous. This is the
+/// smallest requirement that makes the optimized objective `C¹`. The exact outer
+/// curvature evaluates the fifth derivative, but does not require it to be
+/// continuous.
 ///
 /// # The whole ladder, so the floor is read for what it buys
 ///
-/// This constant is the order the objective's VALUE reads. Each lowering of the
-/// row jet reads one order higher through `m₁`'s shifted stack, and each has a
-/// named consumer:
+/// This constant is the highest order that must remain continuous. Each lowering
+/// of the row jet reads one order higher through `m₁`'s shifted stack, and each
+/// has a named consumer:
 ///
 /// ```text
 ///   jet order  lowering                          basis order  consumer

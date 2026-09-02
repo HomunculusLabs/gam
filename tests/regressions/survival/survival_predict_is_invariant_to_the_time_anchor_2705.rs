@@ -30,10 +30,11 @@
 //! # What is asserted
 //!
 //! Two fits of the SAME data differing only in `--survival-time-anchor` must
-//! produce the same predicted survival surface. The non-vacuity check is the
-//! other half of the same contract: the two fits' time coefficients must
-//! DIFFER, because that is what makes the agreement of the surfaces a statement
-//! about the reparameterization rather than about two identical models.
+//! produce the same predicted survival surface through BOTH public prediction
+//! routes: the in-process library and `gam predict`. The non-vacuity check is
+//! the other half of the same contract: the two fits' coefficients must DIFFER,
+//! because that is what makes the agreement of the surfaces a statement about
+//! the reparameterization rather than about two identical models.
 
 use std::path::Path;
 use std::process::Command;
@@ -114,8 +115,53 @@ fn predict_rows() -> EncodedDataset {
     encode_recordswith_inferred_schema(headers, rows).expect("encode predict rows")
 }
 
-/// `(survival surface, fitted coefficient vector)` for one anchor.
-fn fit_at_anchor(train_path: &Path, dir: &Path, anchor: f64, tag: &str) -> (Array2<f64>, Vec<f64>) {
+fn write_cli_predict_rows(path: &Path) {
+    let mut writer = csv::Writer::from_path(path).expect("create CLI predict csv");
+    writer
+        .write_record(["entry", "exit", "event", "x"])
+        .expect("write CLI predict header");
+    for x in [-0.7_f64, 0.0, 0.7] {
+        for time in GRID {
+            writer
+                .write_record([
+                    "0.0".to_string(),
+                    format!("{time:.12}"),
+                    "1".to_string(),
+                    format!("{x:.12}"),
+                ])
+                .expect("write CLI predict row");
+        }
+    }
+    writer.flush().expect("flush CLI predict csv");
+}
+
+fn read_cli_survival(path: &Path) -> Array2<f64> {
+    let mut reader = csv::Reader::from_path(path).expect("open CLI prediction csv");
+    let headers = reader.headers().expect("CLI prediction headers").clone();
+    let survival_column = headers
+        .iter()
+        .position(|name| name == "survival_prob")
+        .unwrap_or_else(|| panic!("CLI prediction is missing survival_prob: {headers:?}"));
+    let values = reader
+        .records()
+        .map(|record| {
+            let record = record.expect("CLI prediction row");
+            record[survival_column]
+                .parse::<f64>()
+                .expect("numeric CLI survival probability")
+        })
+        .collect::<Vec<_>>();
+    Array2::from_shape_vec((3, GRID.len()), values)
+        .expect("CLI surface has one row per covariate/time pair")
+}
+
+/// `(library surface, CLI surface, fitted coefficient vector)` for one anchor.
+fn fit_at_anchor(
+    train_path: &Path,
+    dir: &Path,
+    anchor: f64,
+    tag: &str,
+) -> (Array2<f64>, Array2<f64>, Vec<f64>) {
     let model_path = dir.join(format!("model_{tag}.json"));
     let mut fit_cmd = Command::new(gam::gam_binary!());
     fit_cmd
@@ -169,7 +215,42 @@ fn fit_at_anchor(train_path: &Path, dir: &Path, anchor: f64, tag: &str) -> (Arra
     };
     let result = predict_survival(request, SurvivalPredictionCovarianceMode::Conditional)
         .expect("library survival predict");
-    (result.survival, beta)
+
+    // Exercise the independent CLI replay. Before the second #2705 repair the
+    // library path centered every non-empty time design, while this path used a
+    // likelihood-mode allow-list that omitted Transformation. The two surfaces
+    // then differed by the constant `X(anchor)^T gamma` on the interior arm.
+    let cli_data_path = dir.join(format!("predict_{tag}.csv"));
+    let cli_output_path = dir.join(format!("prediction_{tag}.csv"));
+    write_cli_predict_rows(&cli_data_path);
+    let mut predict_cmd = Command::new(gam::gam_binary!());
+    predict_cmd
+        .arg("predict")
+        .arg(&model_path)
+        .arg(&cli_data_path)
+        .args(["--mode", "map"])
+        .arg("--out")
+        .arg(&cli_output_path);
+    run_or_panic(predict_cmd, "gam predict Royston-Parmar anchor replay");
+    let cli_surface = read_cli_survival(&cli_output_path);
+
+    (result.survival, cli_surface, beta)
+}
+
+fn worst_surface_gap(left: &Array2<f64>, right: &Array2<f64>) -> (f64, (usize, usize)) {
+    assert_eq!(left.dim(), right.dim());
+    let mut worst = 0.0_f64;
+    let mut worst_at = (0usize, 0usize);
+    for row in 0..left.nrows() {
+        for column in 0..left.ncols() {
+            let gap = (left[[row, column]] - right[[row, column]]).abs();
+            if gap > worst {
+                worst = gap;
+                worst_at = (row, column);
+            }
+        }
+    }
+    (worst, worst_at)
 }
 
 #[test]
@@ -182,9 +263,9 @@ fn transformation_survival_prediction_does_not_depend_on_the_time_anchor_2705() 
     // `1e-7` is below the first knot, so its anchor row is the anchored zero
     // row and centering is a no-op — the regime every right-censored fit is in
     // by default, and the one the omission was invisible in. `1.0` is interior.
-    let (surface_origin, beta_origin) =
+    let (library_origin, cli_origin, beta_origin) =
         fit_at_anchor(train_path.as_path(), dir.path(), 1.0e-7, "origin");
-    let (surface_interior, beta_interior) =
+    let (library_interior, cli_interior, beta_interior) =
         fit_at_anchor(train_path.as_path(), dir.path(), 1.0, "interior");
 
     assert_eq!(
@@ -203,27 +284,44 @@ fn transformation_survival_prediction_does_not_depend_on_the_time_anchor_2705() 
          {coefficient_gap:.3e}"
     );
 
-    assert_eq!(surface_origin.dim(), surface_interior.dim());
-    let mut worst = 0.0_f64;
-    let mut worst_at = (0usize, 0usize);
-    for r in 0..surface_origin.nrows() {
-        for c in 0..surface_origin.ncols() {
-            let gap = (surface_origin[[r, c]] - surface_interior[[r, c]]).abs();
-            if gap > worst {
-                worst = gap;
-                worst_at = (r, c);
-            }
-        }
-    }
+    let (worst, worst_at) = worst_surface_gap(&library_origin, &library_interior);
     assert!(
         worst <= 1.0e-4,
-        "the predicted survival surface moved with the time ANCHOR, which is a \
+        "the LIBRARY survival surface moved with the time ANCHOR, which is a \
          reparameterization and not a model: max|ΔS| = {worst:.6e} at row {} time {} \
          (S = {:.9} vs {:.9}). Centered coefficients evaluated against an uncentered basis \
          shift every log Λ by the constant X(anchor)ᵀγ (gam#2705).",
         worst_at.0,
         GRID[worst_at.1],
-        surface_origin[[worst_at.0, worst_at.1]],
-        surface_interior[[worst_at.0, worst_at.1]]
+        library_origin[[worst_at.0, worst_at.1]],
+        library_interior[[worst_at.0, worst_at.1]]
     );
+
+    let (worst, worst_at) = worst_surface_gap(&cli_origin, &cli_interior);
+    assert!(
+        worst <= 1.0e-4,
+        "the CLI survival surface moved with the time ANCHOR: max|ΔS| = {worst:.6e} at \
+         row {} time {} (S = {:.9} vs {:.9}). `gam predict` must replay the same \
+         anchor-centered time design the fit used (gam#2705).",
+        worst_at.0,
+        GRID[worst_at.1],
+        cli_origin[[worst_at.0, worst_at.1]],
+        cli_interior[[worst_at.0, worst_at.1]]
+    );
+
+    for (label, library, cli) in [
+        ("origin", &library_origin, &cli_origin),
+        ("interior", &library_interior, &cli_interior),
+    ] {
+        let (worst, worst_at) = worst_surface_gap(library, cli);
+        assert!(
+            worst <= 1.0e-6,
+            "{label}-anchor CLI/library survival parity failed: max|ΔS| = {worst:.6e} at \
+             row {} time {} (library = {:.9}, CLI = {:.9})",
+            worst_at.0,
+            GRID[worst_at.1],
+            library[[worst_at.0, worst_at.1]],
+            cli[[worst_at.0, worst_at.1]]
+    }
+}
 }
