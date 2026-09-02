@@ -408,8 +408,8 @@ pub fn fit_transformation_normal(
         );
     }
 
-    // The finite-support normalized objective can have multiple coefficient
-    // modes. Value-only trials compare cold and carried modes;
+    // A rank-deficient transformation chart can have multiple equivalent
+    // coefficient modes. Value-only trials compare cold and carried modes;
     // the first derivative-bearing evaluation freezes the selected mode's
     // INPUT as the branch anchor. Every later trial restarts from that fixed
     // anchor, making the profile independent of rejected-trial cache history.

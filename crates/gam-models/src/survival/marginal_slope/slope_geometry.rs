@@ -86,9 +86,8 @@ pub(crate) trait SlopeRowGeometry<const P: usize>: Copy + Send + Sync + 'static 
         inputs: &RigidRowInputs,
     ) -> [T; RIGID_FEATURE_DIMENSION];
 
-    /// `∂feature/∂primary`, one row per feature. `as_flattened()` gives exactly
-    /// the `[feature * P + primary]` layout [`order2_feature_pullback_into`]
-    /// indexes.
+    /// `∂feature/∂primary`, one row per feature, exactly as
+    /// [`order2_feature_pullback_into`] indexes it.
     fn feature_jacobian(
         primaries: &[f64; P],
         inputs: &RigidRowInputs,
@@ -100,7 +99,7 @@ pub(crate) trait SlopeRowGeometry<const P: usize>: Copy + Send + Sync + 'static 
     /// The `slot`-th feature primary `axis` reaches.
     fn active_feature(axis: usize, slot: usize) -> usize;
 
-    /// Accumulate `Σ_f g_f · ∂²f/∂p_a∂p_b` into the flat `P×P` primary Hessian.
+    /// Accumulate `Σ_f g_f · ∂²f/∂p_a∂p_b` into the `P×P` primary Hessian.
     ///
     /// Every entry is a constant multiple of the score covariance because the
     /// location features are linear in the slope and the variance features are
@@ -108,7 +107,7 @@ pub(crate) trait SlopeRowGeometry<const P: usize>: Copy + Send + Sync + 'static 
     fn add_feature_curvature(
         feature_gradient: &[f64; RIGID_FEATURE_DIMENSION],
         inputs: &RigidRowInputs,
-        hessian: &mut [f64],
+        hessian: &mut [[f64; P]; P],
     );
 
     /// `∂feature/∂z_sum` at fixed primaries, and `∂/∂z_sum` of the Jacobian
@@ -206,10 +205,9 @@ impl SlopeRowGeometry<STATIC_SLOPE_PRIMARIES> for StaticSlopeGeometry {
     fn add_feature_curvature(
         feature_gradient: &[f64; RIGID_FEATURE_DIMENSION],
         inputs: &RigidRowInputs,
-        hessian: &mut [f64],
+        hessian: &mut [[f64; STATIC_SLOPE_PRIMARIES]; STATIC_SLOPE_PRIMARIES],
     ) {
-        const P: usize = STATIC_SLOPE_PRIMARIES;
-        hessian[PRIMARY_SLOPE * P + PRIMARY_SLOPE] += (feature_gradient[FEATURE_VARIANCE0]
+        hessian[PRIMARY_SLOPE][PRIMARY_SLOPE] += (feature_gradient[FEATURE_VARIANCE0]
             + feature_gradient[FEATURE_VARIANCE1])
             * 2.0
             * inputs.covariance_ones;
@@ -326,19 +324,18 @@ impl SlopeRowGeometry<DYNAMIC_SLOPE_PRIMARIES> for DynamicSlopeGeometry {
     fn add_feature_curvature(
         feature_gradient: &[f64; RIGID_FEATURE_DIMENSION],
         inputs: &RigidRowInputs,
-        hessian: &mut [f64],
+        hessian: &mut [[f64; DYNAMIC_SLOPE_PRIMARIES]; DYNAMIC_SLOPE_PRIMARIES],
     ) {
-        const P: usize = DYNAMIC_SLOPE_PRIMARIES;
         let curvature_scale = Self::variance_curvature_scale(inputs);
         // `∂²V₀/∂g₀² = ∂²V₁/∂g₁² = 2·cov`
-        hessian[PRIMARY_SLOPE * P + PRIMARY_SLOPE] +=
+        hessian[PRIMARY_SLOPE][PRIMARY_SLOPE] +=
             feature_gradient[FEATURE_VARIANCE0] * curvature_scale;
-        hessian[PRIMARY_SLOPE_EXIT * P + PRIMARY_SLOPE_EXIT] +=
+        hessian[PRIMARY_SLOPE_EXIT][PRIMARY_SLOPE_EXIT] +=
             feature_gradient[FEATURE_VARIANCE1] * curvature_scale;
         // `∂²(dV₁)/∂g₁∂ġ₁ = 2·cov`; the map has no other second derivative.
         let mixed = feature_gradient[FEATURE_DVARIANCE1] * curvature_scale;
-        hessian[PRIMARY_SLOPE_EXIT * P + PRIMARY_SLOPE_RATE] += mixed;
-        hessian[PRIMARY_SLOPE_RATE * P + PRIMARY_SLOPE_EXIT] += mixed;
+        hessian[PRIMARY_SLOPE_EXIT][PRIMARY_SLOPE_RATE] += mixed;
+        hessian[PRIMARY_SLOPE_RATE][PRIMARY_SLOPE_EXIT] += mixed;
     }
 
     #[inline(always)]

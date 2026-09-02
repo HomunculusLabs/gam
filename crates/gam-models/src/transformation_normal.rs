@@ -14,15 +14,15 @@
 //! away from the `log(0)` singularity, while the non-negative M-spline basis
 //! and the factored Khatri-Rao cone `α_k(x_i) >= 0` supply the learned shape.
 //!
-//! The log-likelihood per observation is the finite-support normalized
+//! The log-likelihood per observation is the most-likely-transformation
 //! change-of-variables density for a standard normal target:
 //!
-//!   ℓ_i = -½ h_i² + log(h'_i) - log(Φ(h_U(x_i)) - Φ(h_L(x_i)))
+//!   ℓ_i = -½ h_i² - ½ log(2π) + log(h'_i)
 //!
 //! where `h_i = b(x_i) + ε·(y_i−median_y) + Σ_k I_k(y_i) α_k(x_i)`
-//! and `h'_i = ε + Σ_k M_k(y_i) α_k(x_i)`. The endpoint normalizer is
-//! required because the I-spline response basis saturates at finite support
-//! values rather than mapping onto the full real line.
+//! and `h'_i = ε + Σ_k M_k(y_i) α_k(x_i)`. The I-spline response basis
+//! continues affinely past its boundary knots, so `h` remains strictly
+//! increasing on the real line and the model CDF is `F(y | x) = Φ(h(y, x))`.
 
 mod alo_replay;
 

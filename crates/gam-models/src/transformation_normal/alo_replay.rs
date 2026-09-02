@@ -68,13 +68,13 @@ fn validate_row(input: &TransformationNormalAloRowInput<'_>) -> Result<usize, St
     Ok(dimension)
 }
 
-/// Replay one row of the fitted finite-support SCOP likelihood.
+/// Replay one row of the fitted SCOP most-likely-transformation likelihood.
 ///
 /// This is the row factorization of the same score and negative Hessian used by
 /// `TransformationNormalFamily`: every component is affine in direct-alpha
-/// coordinates, the monotonicity derivative floor is exact, and both
-/// transformed support endpoints contribute through the normalized Gaussian
-/// mass. Feasibility of the shape coordinates is owned by the fitted model's
+/// coordinates and the monotonicity derivative floor is exact. The saved
+/// support still belongs to the row chart, but it is not a likelihood term.
+/// Feasibility of the shape coordinates is owned by the fitted model's
 /// Khatri-Rao cone before this row replay is called.
 pub fn transformation_normal_alo_row_geometry(
     input: TransformationNormalAloRowInput<'_>,
@@ -132,8 +132,6 @@ pub fn transformation_normal_alo_row_geometry(
 
     let mut dh = vec![0.0; dimension];
     let mut dh_prime = vec![0.0; dimension];
-    let mut dlower = vec![0.0; dimension];
-    let mut dupper = vec![0.0; dimension];
     for component in 0..dimension {
         dh[component] =
             ctn_component_sensitivity(chart, ArrayView1::from(input.response_value_basis), component);
@@ -142,10 +140,6 @@ pub fn transformation_normal_alo_row_geometry(
             ArrayView1::from(input.response_derivative_basis),
             component,
         );
-        dlower[component] =
-            ctn_component_sensitivity(chart, ArrayView1::from(input.response_lower_basis), component);
-        dupper[component] =
-            ctn_component_sensitivity(chart, ArrayView1::from(input.response_upper_basis), component);
     }
 
     let inverse_h_prime = 1.0 / h_prime;

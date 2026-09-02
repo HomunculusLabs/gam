@@ -2,31 +2,26 @@
 //!
 //! With the identity chart the transformation is exactly LINEAR in the
 //! coefficients: for one observation with covariate row `c`, response value
-//! row `r`, derivative row `m`, upper/lower endpoint value rows `U`, `L`,
-//! and coefficient `a = (k, p)`,
+//! row `r`, derivative row `m`, and coefficient `a = (k, p)`,
 //!
 //! ```text
-//! h_a  = r_k c_p        hp_a = m_k c_p        (∂U)_a = U_k c_p   (∂L)_a = L_k c_p
+//! h_a  = r_k c_p        hp_a = m_k c_p
 //! h_ab = hp_ab = 0      (no chart second derivatives — the γ² terms are gone)
 //! ```
 //!
-//! Writing `E_0 = U`, `E_1 = L` and `q` for the endpoint-normalizer
-//! derivative tower (`LogNormalCdfDiffDerivatives`), the per-row NEGATIVE
-//! log-likelihood Hessian and its β-directional derivatives reduce to
-//! separable (k, l) block factors:
+//! The per-row negative log-likelihood Hessian and its β-directional
+//! derivatives therefore reduce to separable `(k, l)` block factors:
 //!
 //! ```text
-//! H:      w [ r_k r_l + m_k m_l / hp² + Σ_{e1,e2} q.second[e1][e2] E_{e1,k} E_{e2,l} ]
-//! DH[u]:  w [ −2 m_k m_l · hp_u / hp³ + Σ_{e1,e2} (Σ_e3 q.third[e1][e2][e3] ep_u[e3]) E_{e1,k} E_{e2,l} ]
-//! D²H[u,v]: w [ 6 m_k m_l · hp_u hp_v / hp⁴
-//!             + Σ_{e1,e2} (Σ_{e3,e4} q.fourth[e1][e2][e3][e4] ep_u[e3] ep_v[e4]) E_{e1,k} E_{e2,l} ]
+//! H:          w [ r_k r_l + m_k m_l / hp² ]
+//! DH[u]:      w [ −2 m_k m_l · hp_u / hp³ ]
+//! D²H[u,v]:  w [ 6 m_k m_l · hp_u hp_v / hp⁴ ]
 //! ```
 //!
-//! because `hp_uv = 0` and every endpoint directional second derivative is
-//! zero for a linear map. All β-dependence flows through `h`, `hp`, and the
-//! endpoint arguments; the coefficient-side factors are constants of the
-//! basis. Every (k, l) block is therefore `covᵀ diag(block_weights) cov`,
-//! assembled by the same weighted-Gram kernel the value Hessian always used.
+//! because `hp_uv = 0`. All β-dependence flows through `h` and `hp`; the
+//! coefficient-side factors are constants of the basis. Every `(k, l)` block
+//! is therefore `covᵀ diag(block_weights) cov`, assembled by the same
+//! weighted-Gram kernel the value Hessian always used.
 
 use super::*;
 
@@ -160,8 +155,8 @@ impl TransformationNormalFamily {
         Ok(gradient)
     }
 
-    /// Directional derivative of the negative Hessian: the only β-dependence
-    /// is through `hp` and the endpoint arguments (see the module header).
+    /// Directional derivative of the negative Hessian: its only β-dependence
+    /// is through `hp` (see the module header).
     pub(crate) fn scop_hessian_directional_derivative(
         &self,
         beta: &Array1<f64>,
@@ -243,8 +238,7 @@ impl TransformationNormalFamily {
     }
 
     /// Second directional derivative of the negative Hessian (see header):
-    /// `hp_uv = 0` for a linear map, so only the `6/hp⁴` term and the
-    /// fourth-order endpoint tower survive.
+    /// `hp_uv = 0` for a linear map, so only the `6/hp⁴` term survives.
     pub(crate) fn scop_hessian_second_directional_derivative(
         &self,
         beta: &Array1<f64>,

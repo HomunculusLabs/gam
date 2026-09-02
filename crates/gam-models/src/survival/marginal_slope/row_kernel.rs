@@ -928,12 +928,11 @@ pub(crate) fn rigid_row_order2<const P: usize, G: SlopeRowGeometry<P>>(
     order2_feature_pullback_into(
         &feature_gradient,
         &feature_hessian,
-        jacobian.as_flattened(),
+        &jacobian,
         G::active_feature_count,
         G::active_feature,
-        P,
         &mut gradient,
-        hessian.as_flattened_mut(),
+        &mut hessian,
         |gradient, hessian| G::add_feature_curvature(gradient, inputs, hessian),
     );
     Ok((value, gradient, hessian))
@@ -943,6 +942,12 @@ pub(crate) fn rigid_row_order2<const P: usize, G: SlopeRowGeometry<P>>(
 /// the already-admitted GPU gather. The three witnesses come from the same
 /// `row_program!` declaration: directly from the generic program on CPU and
 /// from its dependency-sliced scalar witness schedule during GPU admission.
+///
+/// Inlined into every row: the check is three compares on the success path,
+/// and the error constructors below are cold and out of line, so the row
+/// loop never carries their formatting (the previous out-of-line call per
+/// row was part of `RIGID-SCALAR-932`'s deficit).
+#[inline(always)]
 pub(crate) fn validate_rigid_row_admission<const P: usize, G: SlopeRowGeometry<P>>(
     qd1: f64,
     inputs: &RigidRowInputs,
@@ -958,13 +963,7 @@ pub(crate) fn validate_rigid_row_admission<const P: usize, G: SlopeRowGeometry<P
         ..
     } = *inputs;
     if survival_derivative_guard_violated(qd1, qd1_lower) {
-        return Err(SurvivalMarginalSlopeError::MonotonicityViolation {
-            reason: format!(
-                "survival marginal-slope monotonicity violated at row {row}: raw time derivative={:.3e} must be at least derivative_guard={:.3e}; transformed time derivative={:.3e}",
-                qd1, qd1_lower, adjusted_derivative
-            ),
-        }
-        .into());
+        return Err(monotonicity_violation(row, qd1, qd1_lower, adjusted_derivative));
     }
 
     // `q′(t) ≥ derivative_guard` is the MARGINAL monotonicity constraint — the
@@ -979,16 +978,7 @@ pub(crate) fn validate_rigid_row_admission<const P: usize, G: SlopeRowGeometry<P
     // the solver. On the static frame this branch is unreachable given the
     // guard above, so it changes no existing fit.
     if inputs.di != 0.0 && !(adjusted_derivative > 0.0) {
-        return Err(SurvivalMarginalSlopeError::MonotonicityViolation {
-            reason: format!(
-                "survival marginal-slope transformed time derivative must be positive at row \
-                 {row} on the {} frame: got {:.3e} (raw time derivative={:.3e})",
-                G::NAME,
-                adjusted_derivative,
-                qd1,
-            ),
-        }
-        .into());
+        return Err(nonpositive_transformed_derivative(row, G::NAME, adjusted_derivative, qd1));
     }
 
     // Mirror the exact closed-form contract
@@ -997,22 +987,53 @@ pub(crate) fn validate_rigid_row_admission<const P: usize, G: SlopeRowGeometry<P
     // are domain failures that must surface as an error rather than being
     // masked into a NaN/∞-laden derivative stack by `unary_derivatives_neglog_phi`.
     // The guard respects zero weight (those terms drop out entirely).
-    let reject_nonfinite_margin = |margin: f64, weight: f64| -> Result<(), String> {
-        if weight != 0.0 && margin != f64::INFINITY && !margin.is_finite() {
-            Err(SurvivalMarginalSlopeError::NumericalFailure {
-                reason: format!(
-                    "non-finite signed margin in rigid survival marginal-slope row tower at row {row}: {margin}"
-                ),
-            }
-            .into())
-        } else {
-            Ok(())
-        }
-    };
-
-    reject_nonfinite_margin(neg_eta0, wi)?;
-    reject_nonfinite_margin(neg_eta1, wi * (1.0 - di))?;
+    // A weighted margin must be finite or `+inf`; that is `margin > -inf`,
+    // one compare, false for NaN as every comparison with NaN is.
+    if wi != 0.0 && !(neg_eta0 > f64::NEG_INFINITY) {
+        return Err(nonfinite_signed_margin(row, neg_eta0));
+    }
+    if wi * (1.0 - di) != 0.0 && !(neg_eta1 > f64::NEG_INFINITY) {
+        return Err(nonfinite_signed_margin(row, neg_eta1));
+    }
     Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn monotonicity_violation(row: usize, qd1: f64, qd1_lower: f64, adjusted_derivative: f64) -> String {
+    SurvivalMarginalSlopeError::MonotonicityViolation {
+        reason: format!(
+            "survival marginal-slope monotonicity violated at row {row}: raw time derivative={qd1:.3e} must be at least derivative_guard={qd1_lower:.3e}; transformed time derivative={adjusted_derivative:.3e}"
+        ),
+    }
+    .into()
+}
+
+#[cold]
+#[inline(never)]
+fn nonpositive_transformed_derivative(
+    row: usize,
+    frame: &str,
+    adjusted_derivative: f64,
+    qd1: f64,
+) -> String {
+    SurvivalMarginalSlopeError::MonotonicityViolation {
+        reason: format!(
+            "survival marginal-slope transformed time derivative must be positive at row {row} on the {frame} frame: got {adjusted_derivative:.3e} (raw time derivative={qd1:.3e})"
+        ),
+    }
+    .into()
+}
+
+#[cold]
+#[inline(never)]
+fn nonfinite_signed_margin(row: usize, margin: f64) -> String {
+    SurvivalMarginalSlopeError::NumericalFailure {
+        reason: format!(
+            "non-finite signed margin in rigid survival marginal-slope row tower at row {row}: {margin}"
+        ),
+    }
+    .into()
 }
 
 /// #932: the canonical single-source seam. The row NLL is written ONCE as

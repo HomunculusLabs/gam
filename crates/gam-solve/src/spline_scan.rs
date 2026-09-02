@@ -3489,6 +3489,34 @@ fn pool_nodes(
     Ok((nodes, ssr_within, n))
 }
 
+/// Move the response's constant null-space component out of the numerical
+/// recurrence and return it for restoration at the fitted-function boundary.
+///
+/// Every supported spline order leaves constants unpenalized, and the exact
+/// diffuse likelihood is invariant under `y -> y + c`. Feeding the absolute
+/// level through the innovation recurrence nevertheless makes its rounded
+/// residuals and directed balls depend on `c`: this is the origin leak behind
+/// #2790, where the order-3 search refused `y` but accepted `y + 1000` on the
+/// identical frame. The first pooled response is an exact admissible chart
+/// origin; subtracting it keeps the score, every score derivative, sigma2,
+/// covariance and residual energy unchanged. Only the published level of
+/// `f(x)` needs the origin added back.
+fn center_pooled_responses(nodes: &mut [PooledNode]) -> Result<f64, String> {
+    let origin = nodes
+        .first()
+        .ok_or_else(|| "spline scan: cannot center an empty pooled response".to_string())?
+        .y;
+    for (index, node) in nodes.iter_mut().enumerate() {
+        node.y -= origin;
+        if !node.y.is_finite() {
+            return Err(format!(
+                "spline scan: centered pooled response is non-finite at node {index}"
+            ));
+        }
+    }
+    Ok(origin)
+}
+
 /// Concentrated diffuse restricted log-likelihood and its exact first three
 /// derivatives with respect to `log λ` (σ² profiled). The derivatives are
 /// propagated through the same diffuse Kalman recursion as the value; no
@@ -4293,7 +4321,8 @@ pub fn fit_spline_scan_at(
             "spline scan: order must be in 1..={MAX_ORDER}, got {order}"
         ));
     }
-    let (nodes, ssr_within, n_obs) = pool_nodes(x, y, w, order)?;
+    let (mut nodes, ssr_within, n_obs) = pool_nodes(x, y, w, order)?;
+    let response_origin = center_pooled_responses(&mut nodes)?;
     let q = gam_problem::checked_exp_log_strength(-log_lambda)
         .map_err(|error| format!("spline scan inverse log strength: {error}"))?;
     let pass = run_filter::<true>(&nodes, q, order)?;
@@ -4365,11 +4394,7 @@ pub fn fit_spline_scan_at(
     }
 
     let knots: Vec<f64> = nodes.iter().map(|n| n.x).collect();
-    let mean: Vec<f64> = sm_state.iter().map(|s| s[0]).collect();
-    // f′ lives at state index 1 — present for order ≥ 2 only; the m = 1 latent
-    // process (Brownian motion) has no derivative state to expose.
-    let deriv: Option<Vec<f64>> = (order >= 2).then(|| sm_state.iter().map(|s| s[1]).collect());
-    let var: Vec<f64> = sm_cov.iter().map(|p| p[0][0] * sigma2).collect();
+    let centered_mean: Vec<f64> = sm_state.iter().map(|s| s[0]).collect();
     // Weighted DATA residual sum of squares at the smoothed mean. Tied rows
     // pool exactly: Σᵢ wᵢ(yᵢ − f̂ₖ)² = Σᵢ wᵢ(yᵢ − ȳₖ)² + Σₖ Wₖ(ȳₖ − f̂ₖ)²
     // (within-tie scatter plus pooled-node misfit), so the raw rows the scan
@@ -4377,7 +4402,7 @@ pub fn fit_spline_scan_at(
     let data_sse = ssr_within
         + nodes
             .iter()
-            .zip(mean.iter())
+            .zip(centered_mean.iter())
             .map(|(node, &fhat)| {
                 let r = node.y - fhat;
                 node.w * r * r
@@ -4399,6 +4424,23 @@ pub fn fit_spline_scan_at(
              sum_log_weights={sum_log_weights})"
         ));
     }
+    // Cross back from the centered numerical chart only after every
+    // translation-invariant quantity has been formed. Derivative states and
+    // covariances are unchanged by a constant shift.
+    for (index, state) in sm_state.iter_mut().enumerate() {
+        state[0] += response_origin;
+        if !state[0].is_finite() {
+            return Err(format!(
+                "spline scan: restored fitted response is non-finite at node {index}"
+            ));
+        }
+    }
+    let mean: Vec<f64> = sm_state.iter().map(|state| state[0]).collect();
+    // f′ lives at state index 1 — present for order ≥ 2 only; the m = 1 latent
+    // process (Brownian motion) has no derivative state to expose.
+    let deriv: Option<Vec<f64>> =
+        (order >= 2).then(|| sm_state.iter().map(|state| state[1]).collect());
+    let var: Vec<f64> = sm_cov.iter().map(|p| p[0][0] * sigma2).collect();
     Ok(SplineScanFit {
         order,
         knots,
@@ -4553,7 +4595,8 @@ pub fn fit_spline_scan(
             "spline scan: order must be in 1..={MAX_ORDER}, got {order}"
         )));
     }
-    let (nodes, ssr_within, n_obs) = pool_nodes(x, y, w, order)?;
+    let (mut nodes, ssr_within, n_obs) = pool_nodes(x, y, w, order)?;
+    center_pooled_responses(&mut nodes).map_err(SplineScoreProofError::InvalidInput)?;
     // Covariate-rescaling equivariance (#1214). The order-`m` IWP process noise
     // is `Q(δ) ∝ q · δ^{2m−1}`, so under an affine covariate rescale `x → a·x`
     // (all abscissa gaps `δ → a·δ`) the posterior `f(x)` is *exactly* invariant
@@ -6767,6 +6810,57 @@ mod tests {
             .collect();
         let var: Vec<f64> = (0..n).map(|i| inv[i][i]).collect();
         (mean, var)
+    }
+
+    /// A constant response shift is an exact null-space transformation for
+    /// every supported spline order. Pin that theorem at the fixed-lambda
+    /// evaluator seam: all invariant quantities must be bit-identical, and the
+    /// only moving state coordinate must be the published function level.
+    #[test]
+    fn fixed_scan_evaluator_uses_a_response_translation_free_chart_2790() {
+        let x = [0.0, 0.125, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0];
+        let y: [f64; 8] = [0.0, 0.25, -0.5, 0.75, 1.0, -0.25, 0.5, 0.125];
+        let shift = 1024.0_f64;
+        let shifted_y = y.map(|value| value + shift);
+        let w = [1.0; 8];
+
+        for order in 1..=MAX_ORDER {
+            let plain = fit_spline_scan_at(&x, &y, &w, -1.25, None, order)
+                .expect("plain fixed-lambda scan");
+            let shifted = fit_spline_scan_at(&x, &shifted_y, &w, -1.25, None, order)
+                .expect("shifted fixed-lambda scan");
+
+            for (label, left, right) in [
+                ("sigma2", plain.sigma2, shifted.sigma2),
+                (
+                    "restricted log likelihood",
+                    plain.restricted_loglik,
+                    shifted.restricted_loglik,
+                ),
+                ("Gaussian log likelihood", plain.log_likelihood, shifted.log_likelihood),
+                ("data SSE", plain.data_sse, shifted.data_sse),
+                ("EDF", plain.edf(), shifted.edf()),
+            ] {
+                assert_eq!(
+                    left.to_bits(),
+                    right.to_bits(),
+                    "order {order}: {label} moved under a constant response shift"
+                );
+            }
+            for node in 0..x.len() {
+                assert_eq!(
+                    shifted.mean[node].to_bits(),
+                    (plain.mean[node] + shift).to_bits(),
+                    "order {order}: fitted level at node {node} is not exactly equivariant"
+                );
+                assert_eq!(
+                    shifted.var[node].to_bits(),
+                    plain.var[node].to_bits(),
+                    "order {order}: posterior variance moved at node {node}"
+                );
+            }
+            assert_eq!(shifted.deriv, plain.deriv);
+        }
     }
 
     /// The order-1 scan must reproduce the dense random-walk posterior exactly

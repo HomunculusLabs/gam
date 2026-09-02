@@ -2302,9 +2302,15 @@ fn defined_name(line: &str) -> Option<String> {
         .chars()
         .take_while(|character| character.is_alphanumeric() || *character == '_')
         .collect();
+    // Value channels (`name_v`) stay in program order with the leaf calls:
+    // a leaf's result is consumed by the next value, and that consumption is
+    // what keeps LLVM from sinking a pure call past a later gate (the SLS
+    // row's second `exp` was sunk into the entry gate's branches when its
+    // consuming value had been sunk there first). Only derivative channels and
+    // the curvature coefficients sink to their first use.
     // A CUDA leaf declaration `double stack[3];` is filled by the call on the
     // next line, which is an anchor referencing it, so it is a definition too.
-    (!name.is_empty() && !name.starts_with("__row_program_")).then_some(name)
+    (!name.is_empty() && !name.starts_with("__row_program_") && !name.ends_with("_v")).then_some(name)
 }
 
 /// Parse a body into items: one per top-level line, one per `if` block.
@@ -2363,9 +2369,11 @@ fn emitted_items(body: &str) -> Vec<EmittedItem> {
 /// Sinking definitions to their first use leaves only the call's own inputs
 /// live across it.
 ///
-/// Leaf calls go the other way: they are anchors, issued in program order as
-/// early as their inputs allow, so independent calls sit next to each other
-/// and their latencies overlap. On the location-scale row the hand kernel
+/// Leaf calls and value channels go the other way: they are anchors, kept in
+/// program order, so independent calls sit next to each other with only the
+/// values between them, their latencies overlap, and each call's result is
+/// consumed before any gate (a pure call whose first consumer sits after a
+/// gate is sunk into that gate's branches by LLVM). On the location-scale row the hand kernel
 /// issues its two `exp` calls back to back at the top; the generated kernel
 /// issued them 46 instructions apart with the entry composition between,
 /// and lost 10% on EPYC Milan with fewer instructions in every other class
@@ -4584,8 +4592,9 @@ mod tests {
         let gradient = cuda.find("double a_g0").expect("the CUDA gradient of `a`");
         assert!(gradient > call, "{cuda}");
 
-        // Two leaf calls with independent inputs are issued back to back, and
-        // the work between them in program order follows both.
+        // Two leaf calls with independent inputs are issued in program order
+        // with only the value between them; every derivative channel follows
+        // both.
         let program = quote! {
             fn adjacent(x, y, z;)
             emit [order2];
@@ -4601,8 +4610,9 @@ mod tests {
         let rust = emitted_function(program, "adjacent_order2");
         let first = rust.find("exp_stack (x)").expect("the first leaf call");
         let second = rust.find("exp_stack (z)").expect("the second leaf call");
-        let between = rust.find("let b_v").expect("the value between them");
-        assert!(first < second && second < between, "{rust}");
+        let value = rust.find("let b_v").expect("the value between them");
+        let derivative = rust.find("let b_g0").expect("the derivative of b");
+        assert!(first < value && value < second && second < derivative, "{rust}");
     }
 
     /// An activity gate may be stated on the supplied stack itself (`||` over
