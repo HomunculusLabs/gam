@@ -4420,7 +4420,7 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         };
         let third_primaries = primary_parameters(&primaries, &quote!(#third_body));
         quote! {
-            #[inline(never)]
+            #[inline(always)]
             #visibility fn #third_name(
                 #(#third_primaries: f64,)*
                 #(#constants: f64,)*
@@ -4454,7 +4454,7 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         };
         let fourth_primaries = primary_parameters(&primaries, &quote!(#fourth_body));
         quote! {
-            #[inline(never)]
+            #[inline(always)]
             #visibility fn #fourth_name(
                 #(#fourth_primaries: f64,)*
                 #(#constants: f64,)*
@@ -4488,13 +4488,13 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         let third_full_primaries = primary_parameters(&primaries, &quote!(#third_full_body));
         let fourth_full_primaries = primary_parameters(&primaries, &quote!(#fourth_full_body));
         quote! {
-            #[inline(never)]
+            #[inline(always)]
             #visibility fn #third_full_name(
                 #(#third_full_primaries: f64,)*
                 #(#constants: f64),*
             ) -> [[[f64; #dimension]; #dimension]; #dimension] #third_full_body
 
-            #[inline(never)]
+            #[inline(always)]
             #visibility fn #fourth_full_name(
                 #(#fourth_full_primaries: f64,)*
                 #(#constants: f64),*
