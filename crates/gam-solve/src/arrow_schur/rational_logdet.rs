@@ -136,6 +136,19 @@ pub struct RationalLogdetEval {
     pub cg_iterations: usize,
 }
 
+/// Work and shape diagnostics for one evaluation of a frozen rational
+/// log-determinant plan. These describe the exact shifted-solve ladder whose
+/// value and derivative bundle were emitted together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RationalLogdetEvaluationMetrics {
+    /// Total certified shifted-CG iterations across probe and deflation solves.
+    pub cg_iterations: usize,
+    /// Number of rational quadrature nodes in the frozen plan.
+    pub node_count: usize,
+    /// Number of frozen deflation directions actually realised.
+    pub deflation_rank: usize,
+}
+
 /// Lossless low-rank representation of the derivative of one fixed rational
 /// log-determinant evaluation.
 ///
@@ -152,9 +165,18 @@ pub struct RationalLogdetEval {
 /// not an estimator of the derivative of the exact log determinant.
 pub struct RationalLogdetDerivativeBundle {
     pub vectors: Vec<Array1<f64>>,
+    metrics: RationalLogdetEvaluationMetrics,
 }
 
 impl RationalLogdetDerivativeBundle {
+    /// Diagnostics for the evaluation that produced this derivative bundle.
+    /// Keeping them on the bundle makes it impossible to report work from one
+    /// operator alongside the derivative of another.
+    #[must_use]
+    pub fn evaluation_metrics(&self) -> RationalLogdetEvaluationMetrics {
+        self.metrics
+    }
+
     /// Apply the represented derivative to a symmetric operator direction.
     pub fn directional_derivative(
         &self,
@@ -636,6 +658,11 @@ impl RationalLogdetPlan {
         &self,
         eval: RationalLogdetEval,
     ) -> Option<RationalLogdetDerivativeBundle> {
+        let metrics = RationalLogdetEvaluationMetrics {
+            cg_iterations: eval.cg_iterations,
+            node_count: self.nodes.len(),
+            deflation_rank: eval.deflation_basis.len(),
+        };
         let expected_deflation_nodes =
             usize::from(!eval.deflation_basis.is_empty()) * self.nodes.len();
         if eval.shifted_solves.len() != self.nodes.len()
@@ -698,7 +725,7 @@ impl RationalLogdetPlan {
                 vectors.push(solve);
             }
         }
-        Some(RationalLogdetDerivativeBundle { vectors })
+        Some(RationalLogdetDerivativeBundle { vectors, metrics })
     }
 }
 
@@ -1330,6 +1357,47 @@ mod tests {
             (raw_shift_zero - authority).abs() > 1.0e-4,
             "fixture must separate the rational derivative ({authority:.9e}) from the \
              raw shift-zero inverse trace ({raw_shift_zero:.9e})"
+        );
+    }
+
+    #[test]
+    fn derivative_bundle_preserves_evaluation_metrics() {
+        let diagonal = array![0.5, 2.0, 8.0];
+        let matvec = |v: ArrayView1<f64>| &diagonal * &v;
+        let plan = RationalLogdetPlan::build(3, 2, 2576, 0.5, 8.0, 0.25)
+            .expect("fixed rational plan")
+            .with_deflation(&matvec, 1, 1, 2576);
+        let eval = plan
+            .evaluate_with_shifted_solver(&|shift, rhs, _| {
+                Some((
+                    Array1::from_iter(
+                        rhs.iter()
+                            .enumerate()
+                            .map(|(index, value)| value / (diagonal[index] + shift)),
+                    ),
+                    3,
+                ))
+            })
+            .expect("exact shifted solves");
+        let expected = RationalLogdetEvaluationMetrics {
+            cg_iterations: eval.cg_iterations,
+            node_count: plan.nodes.len(),
+            deflation_rank: eval.deflation_basis.len(),
+        };
+        assert!(expected.cg_iterations > 0, "fixture must report solve work");
+        assert!(expected.node_count > 0, "fixture must have rational nodes");
+        assert_eq!(
+            expected.deflation_rank, 1,
+            "fixture must exercise achieved deflation-rank preservation"
+        );
+
+        let bundle = plan
+            .into_directional_derivative_bundle(eval)
+            .expect("lossless rational derivative bundle");
+        assert_eq!(
+            bundle.evaluation_metrics(),
+            expected,
+            "bundle conversion must preserve the producing evaluation's work and shape metrics"
         );
     }
 

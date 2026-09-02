@@ -143,7 +143,8 @@ fn support_laml_measured_quadrature_tolerance(
 ) -> Result<f64, EstimationError> {
     let shared = sae_surrogate_lane_config();
     let ceiling = support_laml_coarsest_quadrature_tolerance();
-    let (_plan, pilot) = rational_reduced_schur_log_det(
+    let timer = std::time::Instant::now();
+    let (plan, pilot) = rational_reduced_schur_log_det(
         system,
         htt_factors,
         0.0,
@@ -176,13 +177,18 @@ fn support_laml_measured_quadrature_tolerance(
     log::info!(
         "support LAML quadrature budget: pilot log|S| = {:.6e}, measured relative error bar \
          {:.3e} at {} probes -> quadrature tolerance {:.3e} (shared policy {:.3e}, ceiling \
-         {:.3e})",
+         {:.3e}); pilot {} total shifted-CG iterations, {} rational nodes, deflation rank {}, \
+         {:.1}s",
         pilot.estimate,
         measured_relative_std_err,
         shared.num_probes,
         budget,
         shared.rel_tol,
         ceiling,
+        pilot.cg_iterations,
+        plan.nodes.len(),
+        pilot.deflation_basis.len(),
+        timer.elapsed().as_secs_f64(),
     );
     Ok(budget)
 }
@@ -580,15 +586,20 @@ impl SaeSupportOuterObjective {
                  bundle, so no smoothing gradient can be minted from it",
             )
         })?;
+        let metrics = bundle.evaluation_metrics();
         // The expensive half of one outer evaluation lives in this call, and
         // before #2576 it emitted nothing at all — six minutes of fourteen busy
         // cores between two log lines is what kept the cost invisible.
         log::info!(
             "support LAML evidence: border {}, row log|H_tt| = {:.6e}, surrogate log|S| = \
-             {:.6e}, {:.1}s",
+             {:.6e}; {} total shifted-CG iterations, {} rational nodes, deflation rank {}, \
+             {:.1}s",
             system.k,
             row_log_det,
             schur_log_det,
+            metrics.cg_iterations,
+            metrics.node_count,
+            metrics.deflation_rank,
             timer.elapsed().as_secs_f64(),
         );
         // Coordinates are nuisance parameters profiled by the inner solve. As
