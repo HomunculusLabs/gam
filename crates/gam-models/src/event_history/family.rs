@@ -30,7 +30,8 @@ pub(crate) trait Directional: JetField + Send + Sync {
 }
 
 impl Directional for f64 {
-    fn seeded(value: f64, _u: f64, _v: f64) -> Self {
+    fn seeded(value: f64, u: f64, v: f64) -> Self {
+        let _ = (u, v);
         value
     }
     fn eps(&self) -> f64 {
@@ -46,7 +47,8 @@ fn scalar0(value: f64) -> Order2<0> {
 }
 
 impl Directional for OneSeed<0> {
-    fn seeded(value: f64, u: f64, _v: f64) -> Self {
+    fn seeded(value: f64, u: f64, v: f64) -> Self {
+        let _ = v;
         OneSeed {
             base: scalar0(value),
             eps: scalar0(u),
