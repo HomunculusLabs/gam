@@ -1253,7 +1253,7 @@ mod composed_warp_degree_2695_tests {
     /// The floor is derived from two stated facts, so it must equal their
     /// composition rather than a literal that happens to agree today.
     #[test]
-    fn the_minimum_degree_is_the_objective_order_plus_the_spline_loss() {
+    fn the_minimum_degree_is_the_required_continuity_order_plus_the_spline_loss() {
         assert_eq!(
             composed_warp_minimum_degree(),
             COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER + 1,

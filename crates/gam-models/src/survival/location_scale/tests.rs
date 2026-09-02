@@ -9659,7 +9659,7 @@ fn a_degree_four_composed_warp_makes_the_objective_gradient_jump_2695() {
 /// where the reader is: this fixture does not excite the `βw`-weighted `I‴`
 /// channel above its own resolution, so it reports degree 3 as closing when the
 /// shipped witness's `Φ` still jumps by `2.6e-7` there. The order is fixed on
-/// the FIT — see `COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER` — and this arm
+/// the FIT — see `COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER` — and this arm
 /// is the degree-2 lower bound only.
 #[test]
 fn a_degree_two_composed_warp_makes_the_objective_term_jump_2695() {
@@ -9759,6 +9759,23 @@ fn link_warp_knot_crossing_gap_2695(
     family.wiggle_degree = Some(degree);
     let beta_w = Array1::from_shape_fn(pw, |j| warp_amplitude * (1.0 + 0.3 * (j as f64)));
 
+    let states_at = |beta_thr: f64| -> Vec<ParameterBlockState> {
+        let stacked = |first: usize, second: usize, deriv: usize, scale: f64| {
+            let mut eta = Array1::<f64>::zeros(3 * n);
+            for i in 0..n {
+                eta[i] = primaries[i][first] * scale;
+                eta[n + i] = primaries[i][second] * scale;
+                eta[2 * n + i] = primaries[i][deriv] * scale;
+            }
+            eta
+        };
+        vec![
+            ParameterBlockState { beta: array![1.0], eta: stacked(0, 1, 2, 1.0) },
+            ParameterBlockState { beta: array![beta_thr], eta: stacked(3, 4, 5, beta_thr) },
+            ParameterBlockState { beta: array![1.0], eta: stacked(6, 7, 8, 1.0) },
+            ParameterBlockState { beta: beta_w.clone(), eta: xwiggle.dot(&beta_w) },
+        ]
+    };
     let hessian_at = |beta_thr: f64| -> Array2<f64> {
         let states = states_at(beta_thr);
         family
@@ -9783,24 +9800,6 @@ fn link_warp_knot_crossing_gap_2695(
             .expect("joint Jeffreys gradient across the knot")
             .1
         };
-
-    let states_at = |beta_thr: f64| -> Vec<ParameterBlockState> {
-        let stacked = |first: usize, second: usize, deriv: usize, scale: f64| {
-            let mut eta = Array1::<f64>::zeros(3 * n);
-            for i in 0..n {
-                eta[i] = primaries[i][first] * scale;
-                eta[n + i] = primaries[i][second] * scale;
-                eta[2 * n + i] = primaries[i][deriv] * scale;
-            }
-            eta
-        };
-        vec![
-            ParameterBlockState { beta: array![1.0], eta: stacked(0, 1, 2, 1.0) },
-            ParameterBlockState { beta: array![beta_thr], eta: stacked(3, 4, 5, beta_thr) },
-            ParameterBlockState { beta: array![1.0], eta: stacked(6, 7, 8, 1.0) },
-            ParameterBlockState { beta: beta_w.clone(), eta: xwiggle.dot(&beta_w) },
-        ]
-    };
 
     let straddles = |h: f64| {
         // Confirm the step really straddles the knot before reading the gap.
