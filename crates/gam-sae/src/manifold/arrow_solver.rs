@@ -648,6 +648,69 @@ pub(crate) fn apply_cached_arrow_hessian(
     })
 }
 
+/// Apply the RAW majorizer represented by an evidence cache.
+///
+/// [`apply_cached_arrow_hessian`] deliberately applies the operator installed in
+/// the cache.  On a spectrally-conditioned row that is `Phi(B_raw)`, because the
+/// undamped factor contains the unit pins / positive floor needed by the evidence
+/// solve.  The exact observed information, however, is the objective Hessian
+/// `A_raw = B_raw + delta_C`; adding `delta_C` to `Phi(B_raw)` changes the
+/// statistical operator and makes the result depend on whether the dense or arrow
+/// route was selected (#2515).
+///
+/// `RowDeflationSpectrum` retains the complete raw and conditioned eigenspectrum,
+/// so the raw row action is recovered exactly by adding
+/// `U diag(lambda_raw - lambda_conditioned) U^T v`.  Gauge-only pins have no raw
+/// spectrum and remain pinned: they are structural quotient directions, not a
+/// numerical conditioning of the objective.  The border block reconstructed by
+/// [`apply_cached_arrow_hessian`] is already the raw shared block: its Schur term
+/// and the `H_bt Phi(B_tt)^-1 H_tb` restoration use the same conditioned row
+/// factor and cancel algebraically.  Only the row-local `t` result therefore needs
+/// correction.
+pub(crate) fn apply_raw_cached_arrow_hessian(
+    cache: &ArrowFactorCache,
+    v_t: ArrayView1<'_, f64>,
+    v_beta: ArrayView1<'_, f64>,
+) -> Result<SaeArrowVector, String> {
+    let mut out = apply_cached_arrow_hessian(cache, v_t, v_beta)?;
+    for row in 0..cache.n_rows() {
+        let Some(spectrum) = cache
+            .deflation_row_spectra
+            .get(row)
+            .and_then(Option::as_ref)
+        else {
+            continue;
+        };
+        let q = cache.row_dims[row];
+        if spectrum.evecs.dim() != (q, q)
+            || spectrum.raw_evals.len() != q
+            || spectrum.cond_evals.len() != q
+        {
+            return Err(format!(
+                "apply_raw_cached_arrow_hessian: row {row} has dimension {q}, but its \
+                 spectral carrier is {:?} with {} raw and {} conditioned eigenvalues",
+                spectrum.evecs.dim(),
+                spectrum.raw_evals.len(),
+                spectrum.cond_evals.len(),
+            ));
+        }
+        let base = cache.row_offsets[row];
+        let row_v = v_t.slice(s![base..base + q]);
+        let coefficients = spectrum.evecs.t().dot(&row_v);
+        let correction_coefficients = Array1::from_iter(
+            (0..q).map(|axis| {
+                (spectrum.raw_evals[axis] - spectrum.cond_evals[axis])
+                    * coefficients[axis]
+            }),
+        );
+        let correction = spectrum.evecs.dot(&correction_coefficients);
+        out.t
+            .slice_mut(s![base..base + q])
+            .scaled_add(1.0, &correction);
+    }
+    Ok(out)
+}
+
 pub(crate) fn cholesky_factor_apply(
     factor: ArrayView2<'_, f64>,
     vector: ArrayView1<'_, f64>,

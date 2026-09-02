@@ -4,6 +4,82 @@
 
 use super::*;
 
+/// One route-independent classification of an eigendirection of the raw exact
+/// observed information `A = B_raw + delta_C` (#2515).
+///
+/// Both dense and arrow evidence lanes must ask this function before deciding
+/// whether a direction is identified, a bounded prior-clamp wrinkle, or a true
+/// saddle.  Keeping the decision as a typed result prevents the historical
+/// drift where dense used the majorizer pencil plus clamp basin while arrow used
+/// a local relative eigenvalue and rejected every negative direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExactADirectionClassification {
+    /// Curvature is positive and identifiable in the majorizer metric.
+    ResolvedPositive { curvature: f64 },
+    /// Curvature lies inside the common numerical-null band and contributes the
+    /// route-independent quotient constant `log(1) = 0`.
+    NumericalNull,
+    /// Raw `A` is negative, but all of the negativity is the exactly known,
+    /// bounded concave clamp omitted by the PSD majorizer.  Evidence is priced
+    /// at the positive coarse-grained basin curvature.
+    ClampBasin { curvature: f64 },
+    /// Negative curvature remains after the clamp is restored: this state is a
+    /// saddle, not a mode, and evidence must refuse it.
+    Saddle { curvature: f64, basin: f64 },
+}
+
+/// Common numerical-null half-width for one exact-`A` direction.
+#[must_use]
+pub fn exact_a_direction_floor(
+    spectral_dimension: usize,
+    spectral_norm: f64,
+    majorizer_curvature: f64,
+) -> f64 {
+    let arithmetic_floor =
+        (spectral_dimension as f64) * f64::EPSILON * spectral_norm.abs();
+    let identifiability_floor = f64::EPSILON.sqrt() * majorizer_curvature.max(0.0);
+    arithmetic_floor.max(identifiability_floor)
+}
+
+/// Classify one exact-`A` eigendirection using the single #2673/#2515 contract.
+///
+/// The numerical-null half-width is
+///
+/// `max(dimension * eps * ||A||_2, sqrt(eps) * v^T B v)`.
+///
+/// The first term is the symmetric eigensolver's backward-error floor; the
+/// second is the invariant majorizer-pencil identifiability floor.  A resolved
+/// negative direction is tested against the exactly known clamp curvature
+/// `v^T E v` before it may be called a saddle.
+#[must_use]
+pub fn classify_exact_a_direction(
+    curvature: f64,
+    spectral_dimension: usize,
+    spectral_norm: f64,
+    majorizer_curvature: f64,
+    clamp_curvature: f64,
+) -> ExactADirectionClassification {
+    let floor = exact_a_direction_floor(
+        spectral_dimension,
+        spectral_norm,
+        majorizer_curvature,
+    );
+    if curvature < -floor {
+        let basin = curvature + clamp_curvature.max(0.0);
+        if basin < -floor {
+            ExactADirectionClassification::Saddle { curvature, basin }
+        } else if basin > floor {
+            ExactADirectionClassification::ClampBasin { curvature: basin }
+        } else {
+            ExactADirectionClassification::NumericalNull
+        }
+    } else if curvature > floor {
+        ExactADirectionClassification::ResolvedPositive { curvature }
+    } else {
+        ExactADirectionClassification::NumericalNull
+    }
+}
+
 /// BA Schur solve variant for the reduced shared `β` system.
 ///
 /// * [`ArrowSolverMode::Direct`] is BA's dense reduced-camera-system solve:

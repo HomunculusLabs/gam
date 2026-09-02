@@ -40,6 +40,25 @@ impl ArrowRowBlock {
     }
 }
 
+/// Per-row operands needed to classify the raw exact observed information in
+/// the same majorizer metric and clamp basin on every storage route (#2515).
+///
+/// `delta_*` is `A_raw - B_raw`; retaining it beside the assembled exact-A
+/// system lets the factorization recover `B_raw` without cloning a second full
+/// arrow system. `clamp_diag` is the exactly known positive diagonal `E` whose
+/// restoration distinguishes a bounded prior wrinkle from a genuine saddle.
+#[derive(Debug, Clone)]
+pub struct ExactAClassificationRow {
+    pub delta_tt: Array2<f64>,
+    pub delta_tbeta: Array2<f64>,
+    pub clamp_diag: Array1<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExactAClassificationGeometry {
+    pub rows: Arc<[ExactAClassificationRow]>,
+}
+
 /// Bordered (t, β) Newton system with arrow structure.
 ///
 /// The β-block is held as a dense `K × K` Hessian `H_ββ` plus a `K`-length
@@ -212,6 +231,10 @@ pub struct ArrowSchurSystem {
     /// operator's defining data still changes it. `None` keeps the historical
     /// address behaviour for installers that cannot characterise their closure.
     pub htbeta_operator_fingerprint: Option<u64>,
+    /// Present only when this system is the raw exact observed information
+    /// `A_raw = B_raw + delta_C`.  Evidence factors consume it to make the same
+    /// majorizer-metric / clamp-basin classification as the dense route.
+    pub exact_a_classification: Option<ExactAClassificationGeometry>,
 }
 
 impl Clone for ArrowSchurSystem {
@@ -239,6 +262,7 @@ impl Clone for ArrowSchurSystem {
             row_gauge_deflation: self.row_gauge_deflation.clone(),
             beta_gauge_quotient: self.beta_gauge_quotient.clone(),
             htbeta_operator_fingerprint: self.htbeta_operator_fingerprint,
+            exact_a_classification: self.exact_a_classification.clone(),
         }
     }
 }
@@ -310,6 +334,7 @@ impl ArrowSchurSystem {
             row_gauge_deflation: None,
             beta_gauge_quotient: None,
             htbeta_operator_fingerprint: None,
+            exact_a_classification: None,
         }
     }
 
@@ -360,6 +385,7 @@ impl ArrowSchurSystem {
             row_gauge_deflation: None,
             beta_gauge_quotient: None,
             htbeta_operator_fingerprint: None,
+            exact_a_classification: None,
         }
     }
 
@@ -416,6 +442,7 @@ impl ArrowSchurSystem {
             row_gauge_deflation: None,
             beta_gauge_quotient: None,
             htbeta_operator_fingerprint: None,
+            exact_a_classification: None,
         }
     }
 
@@ -462,6 +489,7 @@ impl ArrowSchurSystem {
             row_gauge_deflation: None,
             beta_gauge_quotient: None,
             htbeta_operator_fingerprint: None,
+            exact_a_classification: None,
         }
     }
 
@@ -542,6 +570,7 @@ impl ArrowSchurSystem {
             row_gauge_deflation: None,
             beta_gauge_quotient: None,
             htbeta_operator_fingerprint: None,
+            exact_a_classification: None,
         }
     }
 

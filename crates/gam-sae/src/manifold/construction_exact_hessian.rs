@@ -96,9 +96,11 @@ pub(crate) fn sae_exact_a_direction_floor(
     spectral_norm: f64,
     b_quadratic_form: f64,
 ) -> f64 {
-    let arithmetic = (spectral_dim as f64) * f64::EPSILON * spectral_norm;
-    let identifiability = sae_exact_a_identifiability_floor() * b_quadratic_form;
-    arithmetic.max(identifiability)
+    gam_solve::arrow_schur::exact_a_direction_floor(
+        spectral_dim,
+        spectral_norm,
+        b_quadratic_form,
+    )
 }
 
 /// PATH C (#2253) CH5 — which subset of the joint θ-derivative operator
@@ -1598,8 +1600,27 @@ impl SaeManifoldTerm {
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
     ) -> Result<Array1<f64>, String> {
+        self.materialize_ard_concave_clamp_diagonal_for_rows(rho, &cache.row_dims)
+    }
+
+    /// Factorization-free sibling used while `exact_a_evidence_system` still
+    /// owns the raw arrow layout.  Classification is part of assembling the
+    /// exact-A evidence operator, so requiring a factor cache here would force
+    /// the wrong order (factor first, then decide what was factored).
+    pub(crate) fn materialize_ard_concave_clamp_diagonal_for_rows(
+        &self,
+        rho: &SaeManifoldRho,
+        row_dims: &[usize],
+    ) -> Result<Array1<f64>, String> {
         self.assignment.validate_rho_domain(rho)?;
-        let total_t = cache.delta_t_len();
+        if row_dims.len() != self.n_obs() {
+            return Err(format!(
+                "materialize_ard_concave_clamp_diagonal_for_rows: {} row dimensions for {} observations",
+                row_dims.len(),
+                self.n_obs(),
+            ));
+        }
+        let total_t = row_dims.iter().sum();
         let mut e_diag = Array1::<f64>::zeros(total_t);
         if self.k_atoms() == 0 {
             return Ok(e_diag);
@@ -1625,9 +1646,9 @@ impl SaeManifoldTerm {
                 row_loss_w,
             )?;
         let k_atoms = self.k_atoms();
+        let mut base = 0usize;
         for row in 0..self.n_obs() {
-            let base = cache.row_offsets[row];
-            let vars = self.row_vars_for_cache_row(row, cache)?;
+            let vars = self.row_vars_for_row_dim(row, row_dims[row])?;
             let w_row = row_loss_w.map_or(1.0, |w| w[row]);
             for (a, va) in vars.iter().enumerate() {
                 if let SaeLocalRowVar::Logit { atom } = *va {
@@ -1654,13 +1675,14 @@ impl SaeManifoldTerm {
                     e_diag[base + a] += -w_row * neg;
                 }
             }
+            base += row_dims[row];
         }
         Ok(e_diag)
     }
 
     /// #1418: matrix-free apply of the EXACT stationarity Jacobian `A = ∇²_θθ L`:
-    /// `A v = B v + ΔC v`, the assembled arrow Hessian apply
-    /// ([`apply_cached_arrow_hessian`]) plus the matrix-free dropped-curvature
+    /// `A v = B_raw v + ΔC v`, the raw objective-majorizer apply
+    /// ([`apply_raw_cached_arrow_hessian`]) plus the matrix-free dropped-curvature
     /// correction `ΔC = A − B` ([`Self::apply_exact_hessian_minus_b`]).
     fn apply_exact_hessian(
         &self,
@@ -1669,7 +1691,13 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
         v: &SaeArrowVector,
     ) -> Result<SaeArrowVector, String> {
-        let b_v = apply_cached_arrow_hessian(cache, v.t.view(), v.beta.view())?;
+        // #2515 — the cache factors the conditioned evidence majorizer
+        // `Phi(B_raw)`.  That conditioning is a solve/log-determinant policy, not
+        // part of the objective Hessian.  Adding ΔC to it would build
+        // `Phi(B_raw) + ΔC` on the dense route while the streaming arrow route
+        // builds `Phi(B_raw + ΔC)`.  Recover B_raw first so both routes classify
+        // the one statistical operator `A_raw = B_raw + ΔC`.
+        let b_v = apply_raw_cached_arrow_hessian(cache, v.t.view(), v.beta.view())?;
         let dc_v = self.apply_exact_hessian_minus_b(rho, target, cache, v)?;
         Ok(SaeArrowVector {
             t: &b_v.t + &dc_v.t,
@@ -4312,19 +4340,29 @@ impl SaeManifoldTerm {
                     // #2673 — the band is per-direction because the metric it is
                     // relative to is: `√ε·vᵀBv`, floored under by the
                     // eigendecomposition's own backward error.
-                    let floor = spectral.rank_floor(idx);
-                    let priced = if lambda < -floor {
-                        // Add back the dropped ARD-concave clamp curvature along
-                        // this eigendirection (E is zero on the β border, so only
-                        // the first `total_t` components contribute).
-                        let v = vecs.column(idx);
-                        let limit = total_t.min(v.len());
-                        let mut e_v = 0.0_f64;
-                        for j in 0..limit {
-                            e_v += e_diag[j] * v[j] * v[j];
-                        }
-                        let basin = lambda + e_v;
-                        if basin < -floor {
+                    // Add back the dropped clamp curvature along this direction
+                    // before classifying it.  The scalar decision is shared with
+                    // the arrow evidence factorization; only the operands are
+                    // route-local measurements of the same raw A, majorizer B and
+                    // clamp E.
+                    let v = vecs.column(idx);
+                    let limit = total_t.min(v.len());
+                    let e_v = (0..limit)
+                        .map(|j| e_diag[j] * v[j] * v[j])
+                        .sum::<f64>();
+                    let classification = gam_solve::arrow_schur::classify_exact_a_direction(
+                        lambda,
+                        spectral.eigenvalues.len(),
+                        spectral.spectral_norm,
+                        spectral.metric_scale[idx],
+                        e_v,
+                    );
+                    let priced = match classification {
+                        gam_solve::arrow_schur::ExactADirectionClassification::Saddle {
+                            basin,
+                            ..
+                        } => {
+                            let floor = spectral.rank_floor(idx);
                             // NOT a step toward a saddle escape. #2336's
                             // terminal saddle-ESCAPE was REFUTED three ways
                             // (closed `e972387215`; both re-convergence lanes,
@@ -4414,10 +4452,17 @@ impl SaeManifoldTerm {
                             );
                             return Err(SaeCriterionError::IndefiniteObservedInformation { block });
                         }
-                        basin
-                    } else {
-                        lambda
+                        gam_solve::arrow_schur::ExactADirectionClassification::ResolvedPositive {
+                            curvature,
+                        }
+                        | gam_solve::arrow_schur::ExactADirectionClassification::ClampBasin {
+                            curvature,
+                        } => curvature,
+                        gam_solve::arrow_schur::ExactADirectionClassification::NumericalNull => {
+                            0.0
+                        }
                     };
+                    let floor = spectral.rank_floor(idx);
                     if priced > floor {
                         log_det += priced.ln();
                     }
@@ -4529,26 +4574,38 @@ impl SaeManifoldTerm {
     ) -> Result<Array2<f64>, String> {
         let mut weights = Array1::<f64>::zeros(block.eigenvalues.len());
         for (index, &lambda) in block.eigenvalues.iter().enumerate() {
-            let rank_floor = block.rank_floor(index);
-            let priced = if lambda < -rank_floor {
-                let eigenvector = block.eigenvectors.column(index);
-                let limit = total_t.min(eigenvector.len());
-                let e_v = (0..limit)
-                    .map(|row| e_diag[row] * eigenvector[row] * eigenvector[row])
-                    .sum::<f64>();
-                let basin = lambda + e_v;
-                if basin < -rank_floor {
+            let eigenvector = block.eigenvectors.column(index);
+            let limit = total_t.min(eigenvector.len());
+            let e_v = (0..limit)
+                .map(|row| e_diag[row] * eigenvector[row] * eigenvector[row])
+                .sum::<f64>();
+            let classification = gam_solve::arrow_schur::classify_exact_a_direction(
+                lambda,
+                block.eigenvalues.len(),
+                block.spectral_norm,
+                block.metric_scale[index],
+                e_v,
+            );
+            let priced = match classification {
+                gam_solve::arrow_schur::ExactADirectionClassification::Saddle {
+                    basin,
+                    ..
+                } => {
                     return Err(format!(
                         "priced_exact_hessian_inverse: indefinite A \
                          (λ={lambda:.3e}, λ+e_v={basin:.3e}); genuine saddle, the outer \
                          gradient must not be assembled here"
                     ));
                 }
-                basin
-            } else {
-                lambda
+                gam_solve::arrow_schur::ExactADirectionClassification::ResolvedPositive {
+                    curvature,
+                }
+                | gam_solve::arrow_schur::ExactADirectionClassification::ClampBasin {
+                    curvature,
+                } => curvature,
+                gam_solve::arrow_schur::ExactADirectionClassification::NumericalNull => 0.0,
             };
-            weights[index] = if priced > rank_floor {
+            weights[index] = if priced > block.rank_floor(index) {
                 1.0 / priced
             } else {
                 0.0

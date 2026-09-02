@@ -4018,13 +4018,42 @@ impl SaeManifoldTerm {
                 majorizer.rows.len()
             ));
         }
+        // #2515 — retain the operands of the ONE raw exact-A classification.
+        // The factorization must measure every direction against B_raw and must
+        // restore the exactly-known clamp basin before calling it a saddle.  The
+        // delta rows recover B_raw from the A system without retaining a second
+        // full arrow system; the clamp diagonal is assembled before any
+        // conditioning, from the same row layout as ΔC.
+        let clamp = self.materialize_ard_concave_clamp_diagonal_for_rows(rho, &row_dims)?;
+        let mut clamp_base = 0usize;
+        let classification_rows: std::sync::Arc<[
+            gam_solve::arrow_schur::ExactAClassificationRow,
+        ]> = delta
+            .into_iter()
+            .zip(row_dims.iter().copied())
+            .map(|(block, q)| {
+                let clamp_diag = clamp.slice(s![clamp_base..clamp_base + q]).to_owned();
+                clamp_base += q;
+                gam_solve::arrow_schur::ExactAClassificationRow {
+                    delta_tt: block.tt,
+                    delta_tbeta: block.tbeta,
+                    clamp_diag,
+                }
+            })
+            .collect::<Vec<_>>()
+            .into();
         let border = self.border_channels_for_border_dim(border_dim)?;
         let mut system = majorizer.clone();
         // The CUDA descriptor describes `B`'s cross-block sparsity, so it cannot
         // stand in for `A`; the generic closures are the authoritative path.
         system.device_sae_pcg = None;
-        for (row_idx, (row, block)) in system.rows.iter_mut().zip(delta.iter()).enumerate() {
-            let q = block.tt.nrows();
+        for (row_idx, (row, block)) in system
+            .rows
+            .iter_mut()
+            .zip(classification_rows.iter())
+            .enumerate()
+        {
+            let q = block.delta_tt.nrows();
             if row.htt.dim() != (q, q) {
                 return Err(format!(
                     "SaeManifoldTerm::exact_a_evidence_system: row {row_idx} exact-A correction is \
@@ -4034,7 +4063,7 @@ impl SaeManifoldTerm {
             }
             for a in 0..q {
                 for b in 0..q {
-                    row.htt[[a, b]] += block.tt[[a, b]];
+                    row.htt[[a, b]] += block.delta_tt[[a, b]];
                 }
             }
         }
@@ -4044,9 +4073,13 @@ impl SaeManifoldTerm {
         ) {
             (None, _) => {
                 for (row_idx, (row, block)) in
-                    system.rows.iter_mut().zip(delta.iter()).enumerate()
+                    system
+                        .rows
+                        .iter_mut()
+                        .zip(classification_rows.iter())
+                        .enumerate()
                 {
-                    let q = block.tt.nrows();
+                    let q = block.delta_tt.nrows();
                     if row.htbeta.dim() != (q, border_dim) {
                         return Err(format!(
                             "SaeManifoldTerm::exact_a_evidence_system: row {row_idx} has no \
@@ -4057,20 +4090,18 @@ impl SaeManifoldTerm {
                     }
                     for a in 0..q {
                         for (beta_pos, channel) in border.iter().enumerate() {
-                            row.htbeta[[a, channel.index]] += block.tbeta[[a, beta_pos]];
+                            row.htbeta[[a, channel.index]] +=
+                                block.delta_tbeta[[a, beta_pos]];
                         }
                     }
                 }
             }
             (Some(base_forward), Some(base_transpose)) => {
-                let blocks: std::sync::Arc<Vec<Array2<f64>>> = std::sync::Arc::new(
-                    delta.iter().map(|block| block.tbeta.clone()).collect(),
-                );
                 let indices: std::sync::Arc<Vec<usize>> =
                     std::sync::Arc::new(border.iter().map(|channel| channel.index).collect());
-                let forward_blocks = std::sync::Arc::clone(&blocks);
+                let forward_blocks = std::sync::Arc::clone(&classification_rows);
                 let forward_indices = std::sync::Arc::clone(&indices);
-                let transpose_blocks = std::sync::Arc::clone(&blocks);
+                let transpose_blocks = std::sync::Arc::clone(&classification_rows);
                 let transpose_indices = std::sync::Arc::clone(&indices);
                 // #2515 — the COMPOSED operator's content identity: the base
                 // operator's own identity (which the majorizer published when it
@@ -4088,9 +4119,9 @@ impl SaeManifoldTerm {
                         }
                         None => hasher.write_bool(false),
                     }
-                    hasher.write_usize(blocks.len());
-                    for block in blocks.iter() {
-                        hasher.write_f64_array2(block);
+                    hasher.write_usize(classification_rows.len());
+                    for block in classification_rows.iter() {
+                        hasher.write_f64_array2(&block.delta_tbeta);
                     }
                     hasher.write_usize(indices.len());
                     for &index in indices.iter() {
@@ -4101,7 +4132,7 @@ impl SaeManifoldTerm {
                 system.set_row_htbeta_operator_with_fingerprint(
                     move |row, x, out| {
                         base_forward(row, x, out);
-                        let block = &forward_blocks[row];
+                        let block = &forward_blocks[row].delta_tbeta;
                         for a in 0..block.nrows() {
                             let mut acc = 0.0_f64;
                             for (beta_pos, &index) in forward_indices.iter().enumerate() {
@@ -4112,7 +4143,7 @@ impl SaeManifoldTerm {
                     },
                     move |row, v, out| {
                         base_transpose(row, v, out);
-                        let block = &transpose_blocks[row];
+                        let block = &transpose_blocks[row].delta_tbeta;
                         for a in 0..block.nrows() {
                             let va = v[a];
                             if va == 0.0 {
@@ -4136,6 +4167,11 @@ impl SaeManifoldTerm {
                 );
             }
         }
+        system.exact_a_classification = Some(
+            gam_solve::arrow_schur::ExactAClassificationGeometry {
+                rows: classification_rows,
+            },
+        );
         system.refresh_row_hessian_fingerprint();
         Ok(system)
     }
