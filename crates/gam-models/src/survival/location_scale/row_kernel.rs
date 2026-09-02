@@ -1022,8 +1022,9 @@ pub(crate) fn row_set_from_survival_mask(
 /// basis actually built — none is a literal. Slot 4 of the value stack was once
 /// the literal `0.0` (exact only for degree ≤ 3), and slot 4 of `m₁`'s stack
 /// was once the literal `0.0` (exact only for degree ≤ 4); the composed-warp
-/// floor is `5` and is a floor, not a cap, so both literals differentiated a
-/// different function than the value at a degree the path admits (gam#2695).
+/// floor is `4` and is a floor, not a cap, so both literals differentiated a
+/// different function than the value at a degree the path admits — the first
+/// at the floor itself, the second at any requested degree above it (gam#2695).
 /// The ramp evaluator returns exact zeros for orders above the degree, so the
 /// evaluated table is bit-identical to the literal wherever the literal was
 /// right. A slot that is short changes nothing in the order-2 Hessian and
@@ -1071,9 +1072,9 @@ pub(crate) fn sls_row_nll_wiggle<'arena, S: RuntimeJetScalar<'arena>>(
         // The composition stacks are the basis's OWN derivative tower at the
         // current index; `m₁` reads it shifted by one because it is built from
         // `I′` rather than `I`, so its top slot is the FIFTH derivative. That
-        // slot is evaluated, not stated: the composed-warp floor of 5 is a
-        // floor and not a cap, and at degree ≥ 5 the fifth derivative is not
-        // zero (gam#2695).
+        // slot is evaluated, not stated: the composed-warp floor of 4 is a
+        // floor and not a cap, and at a requested degree ≥ 5 the fifth
+        // derivative is not zero (gam#2695).
         q0w = q0w.add(&bw.mul(&q0.compose_unary([b0e[j], b1e[j], b2e[j], b3e[j], b4e[j]])));
         q1w = q1w.add(&bw.mul(&q1.compose_unary([b0x[j], b1x[j], b2x[j], b3x[j], b4x[j]])));
         m1 = m1.add(&bw.mul(&q1.compose_unary([b1x[j], b2x[j], b3x[j], b4x[j], b5x[j]])));

@@ -92,10 +92,14 @@ pub(crate) use gam_terms::basis::monotone_warp_knots_from_seed;
 ///
 /// Continuity of the objective value is necessary but not sufficient for the
 /// analytic-gradient optimizer. Its Newton right-hand side and convergence gate
-/// consume `∇Φ`; differentiating `H` reads the next `m₁` slot, the fourth
-/// basis derivative. That derivative must itself be continuous. This is the
-/// smallest requirement that makes the optimized objective `C¹`. The exact outer
-/// curvature evaluates the fifth derivative, but does not require it to be
+/// consume `∇Φ`, so the objective has to be `C¹` wherever an event row's moving
+/// index crosses a knot. Which basis order that pins is MEASURED, not derived:
+/// `knot_ladder_2695` drives the production `∇Φ` across such a crossing at
+/// every degree from 3 to 6 and reads the gap at two straddles 100× apart. The
+/// gap shrinks 99.5× at degree 4 and ≈100× at 5 and 6 (a continuous gradient)
+/// and 1.02× at degree 3 (a step). So the order that must stay continuous is
+/// the third: degree 4 is the first `C¹` degree. The exact outer curvature
+/// evaluates the fourth and fifth derivatives, but does not require them to be
 /// continuous.
 ///
 /// # The whole ladder, so the floor is read for what it buys
@@ -109,16 +113,21 @@ pub(crate) use gam_terms::basis::monotone_warp_knots_from_seed;
 ///   0          value                             I′  (m₁)     ℓ in the accept test
 ///   1          gradient                          I″  (m₁)     ∇ℓ, KKT residual
 ///   2          row_order2 → H                    I‴  (m₁)     Φ = ½Σ g(λ(Z_JᵀHZ_J))  <- objective VALUE
-///   3          row_third_contracted → ∂H/∂β      I⁗  (m₁)     ∇Φ (Newton rhs, KKT residual), Daleckii–Krein H_Φ <- must be continuous
+///   3          row_third_contracted → ∂H/∂β      I⁗  (m₁)     ∇Φ (Newton rhs, KKT residual), Daleckii–Krein H_Φ
 ///   4          row_fourth_contracted → ∂²H/∂β²   I⁗′ (m₁)     exact Jeffreys completion, outer second directional
 /// ```
 ///
-/// A degree-`d` I-spline is `C^{d−1}` at a simple knot. Degree `4` therefore
-/// makes the objective value continuous but leaves its gradient reading a
-/// piecewise-constant `I⁗`: the objective is only `C⁰`, with a kink wherever an
-/// event row's moving index crosses a knot. Requiring order `4` continuity,
-/// hence degree `5`, is exactly the `C¹` contract the optimizer needs.
-pub(crate) const COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER: usize = 4;
+/// A degree-`d` I-spline is `C^{d−1}` at a simple knot. The table would read
+/// as "∇Φ needs `I⁗` continuous, hence degree 5", and that reading was shipped
+/// once (`793b9d072`): its own non-vacuity arm then refused, because on the
+/// production gradient the degree-4 crossing gap scales linearly with the
+/// straddle (ratio 99.5 for a 100× shrink) while the degree-3 gap does not
+/// (ratio 1.02). Whatever the assembled `∂H/∂β` contracts against at a
+/// crossing, the piecewise-constant part of `I⁗` does not survive into `∇Φ`,
+/// and the piecewise-constant `I‴` of degree 3 does. The constant is the
+/// measured order, `3`, hence degree `4`; the ladder that fixes it prints its
+/// table on every run.
+pub(crate) const COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER: usize = 3;
 
 /// The smallest public degree at which a composed warp's basis is continuous to
 /// [`COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER`], hence the

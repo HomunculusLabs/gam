@@ -1,5 +1,15 @@
 ## Unreleased
 
+- **The composed-warp degree floor is the measured `C¹` degree, 4 (#2695).**
+  The floor had been raised to 5 on the reading that `∇Φ` consumes a
+  piecewise-constant `I⁗` at degree 4. Its own non-vacuity arm refused on MSI:
+  driving the production Jeffreys gradient across an event-row knot crossing,
+  the gap shrinks 99.5× for a 100× smaller straddle at degree 4 (and ≈100× at
+  5 and 6) and only 1.02× at degree 3. The required continuous basis order is
+  therefore 3, the floor is degree 4 again, the negative control measures
+  degree 3, and the ladder that produced the table (`knot_ladder_2695`) ships
+  as a fixture that prints it on every run.
+
 - **The frozen-index relaxation reads its multiplier through the damping it
   applied (#2748).** `d_k = M d_{k−1}` holds for the UNDAMPED wiggle fixed
   point only; under the relaxed advance `η_{k+1} = η_k + t_k d_k` the residual

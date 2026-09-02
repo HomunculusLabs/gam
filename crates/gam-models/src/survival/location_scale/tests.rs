@@ -9601,10 +9601,9 @@ fn the_objective_jeffreys_term_closes_across_a_link_warp_knot_at_the_built_degre
 /// composed-warp degree must make that analytic gradient continuous when an
 /// EVENT row's model-dependent index crosses an interior knot.
 ///
-/// The value-only pin above closes at degree 4 because `H` reads `I‴`. This
-/// pin reads the production Jeffreys gradient, whose Hessian-directional
-/// derivative reads `I⁗`. A degree-4 I-spline makes `I⁗` piecewise constant;
-/// degree 5 is the first degree at which it is continuous.
+/// This pin reads the production Jeffreys gradient across an event-row
+/// crossing. Measured on this fixture (`knot_ladder_2695`), that gradient steps
+/// at degree 3 and is continuous from degree 4 on, which is what sets the floor.
 #[test]
 fn the_objective_jeffreys_gradient_closes_across_a_link_warp_knot_at_the_built_degree_2695() {
     let degree = crate::wiggle::composed_warp_minimum_degree();
@@ -9634,9 +9633,9 @@ fn the_objective_jeffreys_gradient_closes_across_a_link_warp_knot_at_the_built_d
 /// Non-vacuity for the C¹ floor: one degree below the realized production
 /// degree, the objective value is continuous but its analytic gradient steps.
 #[test]
-fn a_degree_four_composed_warp_makes_the_objective_gradient_jump_2695() {
+fn a_degree_three_composed_warp_makes_the_objective_gradient_jump_2695() {
     let degree = crate::wiggle::composed_warp_minimum_degree() - 1;
-    assert_eq!(degree, 4, "this arm must measure the C⁰-but-not-C¹ degree");
+    assert_eq!(degree, 3, "this arm must measure the C⁰-but-not-C¹ degree");
     for amplitude in [1.0e-6_f64, 3.0e-2] {
         let (coarse, fine) = link_warp_knot_crossing_gap_2695(
             degree,
@@ -9646,7 +9645,7 @@ fn a_degree_four_composed_warp_makes_the_objective_gradient_jump_2695() {
         );
         assert!(
             coarse > 0.0 && fine > coarse / 10.0,
-            "degree 4 must make ∇Φ jump across the event-row knot: gap \
+            "degree 3 must make ∇Φ jump across the event-row knot: gap \
              {coarse:.6e} at h=1e-3 and {fine:.6e} at h=1e-5"
         );
     }
@@ -9993,3 +9992,6 @@ fn probe_2695_joint_hessian_across_an_interior_knot() {
         }
     }
 }
+
+/// gam#2695 degree ladder (child module so this file stays under the line gate).
+mod knot_ladder_2695;

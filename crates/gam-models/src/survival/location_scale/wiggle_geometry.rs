@@ -501,7 +501,7 @@ pub(crate) fn survival_wiggle_third_basis(
 /// slot used to be the literal `0.0`. That literal is the fourth derivative of
 /// a degree-`d` I-spline, which is identically zero only for `d ≤ 3` — and a
 /// composed warp is now built at [`crate::wiggle::composed_warp_minimum_degree`]
-/// `= 5`, where it is not. The two changes are inseparable: raising the degree
+/// `= 4`, where it is not. The two changes are inseparable: raising the degree
 /// so `H` is continuous while leaving the literal in place would make every
 /// order-3 and order-4 lowering (`∇Φ`, the all-axes directional derivatives, the
 /// second directional derivative) differentiate a DIFFERENT function than the
@@ -522,9 +522,10 @@ pub(crate) fn survival_wiggle_fourth_basis(
 /// derivative behind the exact Jeffreys completion and the outer curvature
 /// path) consumes the basis's fifth derivative. That slot used to be the
 /// literal `0.0`, exact only for `degree ≤ 4`; the composed-warp floor
-/// [`crate::wiggle::composed_warp_minimum_degree`] `= 5` is a FLOOR, not a cap,
-/// so every production warp reaches the order-4 lowering with the basis's real
-/// fifth derivative. Evaluated rather than stated: the ramp evaluator still
+/// [`crate::wiggle::composed_warp_minimum_degree`] `= 4` is a FLOOR, not a cap,
+/// so a requested `linkwiggle(degree=5)` or higher reaches the order-4 lowering
+/// with the basis's real fifth derivative, while at the built degree 4 that
+/// derivative is exactly zero. Evaluated rather than stated: the ramp evaluator
 /// returns exact zeros for every order above the degree and the genuine value
 /// at every degree that carries it.
 pub(crate) fn survival_wiggle_fifth_basis(
