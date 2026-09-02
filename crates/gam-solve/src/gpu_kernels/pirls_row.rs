@@ -1147,6 +1147,7 @@ pub struct JitFamilySpec {
     pub body: String,
 }
 
+#[cfg(target_os = "linux")]
 impl JitFamilySpec {
     /// Level A: build a spec from a built-in `(family, curvature)`
     /// pair. The generator reuses the same per-family body as the
