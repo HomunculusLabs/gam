@@ -2804,7 +2804,6 @@ pub fn infer_and_encode_column_major(
     }
     Ok((schema, values))
 }
-
 #[cfg(test)]
 mod missing_value_inference_tests {
     use super::*;

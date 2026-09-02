@@ -899,7 +899,6 @@ pub fn design_diagnostics(
         sigma_max,
     })
 }
-
 pub fn penalty_diagnostics(
     penalties: &[gam_terms::smooth::BlockwisePenalty],
     lambdas: &[f64],
