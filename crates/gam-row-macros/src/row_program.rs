@@ -5193,17 +5193,6 @@ mod tests {
             );
         }
     }
-        // The five entries are scalars, never an array literal.
-        assert!(!rust.contains(": [f64 ; 5] = ["), "{rust}");
-        // The observed-scale composition on `scale(slope, scale_of)` reads the
-        // same rule with shared powers of the scalar.
-        assert!(rust.contains("_scaled_power2 : f64 = (scale_of * scale_of)"), "{rust}");
-        assert!(rust.contains("_scaled_power3 : f64 = (") && rust.contains("_scaled_power2 * scale_of)"), "{rust}");
-        assert!(rust.contains("_scaled_1 * latent_c"), "{rust}");
-        assert!(!rust.contains("_scaled_1 * margin_c"), "{rust}");
-        let rust = emitted_function(input, "rigid_third_contracted");
-        assert!(rust.contains("_scaled_3 * inner_u"), "{rust}");
-    }
 
     #[test]
     fn rejects_primary_dependent_runtime_branch() {
