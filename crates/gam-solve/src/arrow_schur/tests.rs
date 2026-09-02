@@ -5888,14 +5888,17 @@ fn rational_reduced_schur_directional_matches_fd_of_surrogate() {
     );
 }
 
-/// `rational_reduced_schur_plan_derived` (the build-once companion): the derived
-/// Hutch++ deflation rank must (a) leave the log|S| estimate exact (deflation is
-/// an unbiased variance-reduction split, so the value cannot move outside the
-/// error bar) while (b) tightening the Hutchinson std_err below the bare-probe
-/// pilot when the target bar demands it. `deflation_max_rank == 0` must return
-/// the bare plan (bit-identical to `rational_reduced_schur_log_det`'s plan). The
-/// derived plan's frozen `Q` is what the gradient contracts against, so this pins
-/// the value the criterion swap will consume.
+/// `rational_reduced_schur_plan_derived` (the build-once companion): its typed
+/// handoff must retain the exact certified entry evaluation that selected the
+/// plan, so production does not rerun the same operator/preconditioner ladder.
+/// The derived Hutch++ deflation rank must (a) leave the log|S| estimate exact
+/// (deflation is an unbiased variance-reduction split, so the value cannot move
+/// outside the error bar) while (b) tightening the Hutchinson std_err below the
+/// bare-probe pilot when the target bar demands it. `deflation_max_rank == 0`
+/// must return the bare plan (bit-identical to
+/// `rational_reduced_schur_log_det`'s plan). The derived plan's frozen `Q` is
+/// what the gradient contracts against, so this pins the value the criterion
+/// swap will consume.
 #[test]
 fn rational_reduced_schur_plan_derived_deflates_to_target() {
     let (n, d, k) = (40usize, 3usize, 80usize);
@@ -5918,13 +5921,6 @@ fn rational_reduced_schur_plan_derived_deflates_to_target() {
     let l = cholesky_lower(&schur).expect("reduced Schur must be SPD");
     let exact_logdet: f64 = (0..k).map(|i| 2.0 * l[[i, i]].ln()).sum();
 
-    let matvec = |v: ArrayView1<f64>| -> Array1<f64> {
-        let x = v.to_owned();
-        let mut out = Array1::<f64>::zeros(k);
-        schur_matvec(&sys, &htt_factors, ridge_beta, &x, &mut out, &backend, None);
-        out
-    };
-
     // Bare pilot (rank-0): the variance the deflation must beat.
     let bare = rational_reduced_schur_plan_derived(
         &sys,
@@ -5944,7 +5940,7 @@ fn rational_reduced_schur_plan_derived_deflates_to_target() {
         0.0,
     )
     .expect("bare plan must build");
-    let bare_eval = bare.evaluate(&matvec, 1e-11, 20_000).expect("bare eval");
+    let bare_eval = bare.entry_evaluation;
     assert!(
         (bare_eval.estimate - exact_logdet).abs() / exact_logdet.abs() < 0.05,
         "bare surrogate estimate {} must match dense {exact_logdet}",
@@ -5989,9 +5985,7 @@ fn rational_reduced_schur_plan_derived_deflates_to_target() {
         target_rel,
     )
     .expect("derived plan must build");
-    let derived_eval = derived
-        .evaluate(&matvec, 1e-11, 20_000)
-        .expect("derived eval");
+    let derived_eval = derived.entry_evaluation;
     eprintln!(
         "derived-rank plan: est={:.6} exact={:.6} bare_std_err={:.3e} derived_std_err={:.3e}",
         derived_eval.estimate, exact_logdet, bare_eval.std_err, derived_eval.std_err

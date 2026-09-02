@@ -2488,9 +2488,10 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
             // (Re)build the frozen plan when absent or dimension-mismatched (a
             // basin mutation changed the border); otherwise reuse the frozen Q.
             let need_build = state.plan.as_ref().map_or(true, |p| p.dim != dim);
+            let mut entry_evaluation = None;
             if need_build {
                 let cfg = state.cfg.clone();
-                let plan = rational_reduced_schur_plan_derived(
+                let derived = rational_reduced_schur_plan_derived(
                     evidence_system,
                     &htt_factors,
                     ridge_beta,
@@ -2512,7 +2513,8 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
                         "rational log-det surrogate plan build failed for reduced Schur dim {dim}"
                     ),
                 })?;
-                state.plan = Some(plan);
+                state.plan = Some(derived.plan);
+                entry_evaluation = Some(derived.entry_evaluation);
                 // The old-dim S⁻¹·probes are meaningless against the new border.
                 state.warm_inverse_probes = None;
             }
@@ -2552,17 +2554,25 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
                 // `exact_schur_diagonal_is_a_near_uniform_rescaling_of_the_shared_block_2576`.
                 let precond =
                     reduced_schur_shifted_preconditioner(evidence_system, ridge_beta);
-                let eval = plan
-                    .evaluate_preconditioned(
-                        &matvec,
-                        &precond,
-                        state.cfg.cg_rel_tol,
-                        state.cfg.cg_max_iters,
-                    )
-                    .ok_or_else(|| ArrowSchurError::SchurFactorFailed {
-                        reason: "rational log-det surrogate evaluation returned non-finite"
-                            .to_string(),
-                    })?;
+                // The derived-plan builder already certified this exact plan on
+                // this exact entry operator with this exact preconditioner. Keep
+                // that evaluation as the first value/derivative payload instead
+                // of immediately walking the whole shifted-PCG ladder a second
+                // time. Subsequent ρ values evaluate the frozen plan normally.
+                let eval = match entry_evaluation.take() {
+                    Some(eval) => eval,
+                    None => plan
+                        .evaluate_preconditioned(
+                            &matvec,
+                            &precond,
+                            state.cfg.cg_rel_tol,
+                            state.cfg.cg_max_iters,
+                        )
+                        .ok_or_else(|| ArrowSchurError::SchurFactorFailed {
+                            reason: "rational log-det surrogate evaluation returned non-finite"
+                                .to_string(),
+                        })?,
+                };
                 let estimate = eval.estimate;
                 let derivative_bundle = if want_logdet_derivative {
                     Some(
@@ -2779,10 +2789,13 @@ pub fn rational_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
 
 /// Build the FROZEN #2080 surrogate plan for one outer solve, with the Hutch++
 /// deflation rank DERIVED from a pilot evaluation — the build-once companion to
-/// per-ρ [`RationalLogdetPlan::evaluate`]. Returns just the plan (probes +
-/// quadrature + frozen Hutch++ `Q`); the caller evaluates it at each ρ, so the
-/// expensive rank derivation (several re-solves) is paid ONCE per outer solve,
-/// not per criterion evaluation.
+/// per-ρ [`RationalLogdetPlan::evaluate`]. Returns the plan (probes +
+/// quadrature + frozen Hutch++ `Q`) together with the certified evaluation that
+/// selected its rank. The entry evaluation is the first criterion value and
+/// derivative payload: discarding it and immediately evaluating the same plan,
+/// operator, and preconditioner would repeat the whole shifted-PCG ladder. Later
+/// ρ values evaluate the frozen plan normally, so rank derivation remains a
+/// once-per-outer-solve cost.
 ///
 /// Derived rank (the #2080 lead ruling): a rank-0 pilot fixes the log-det scale,
 /// the target bar is `deflation_target_std_err_rel · (|log|S|_pilot| + 1)` — one
@@ -2799,6 +2812,14 @@ pub fn rational_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
 /// returned plan's `Q` is FROZEN, so
 /// [`RationalLogdetPlan::directional_derivative`] on its evaluations is the exact
 /// surrogate gradient.
+pub struct DerivedRationalLogdetPlan {
+    /// Frozen statistical plan selected at the entry operator.
+    pub plan: RationalLogdetPlan,
+    /// Certified value and shifted solves already computed while selecting the
+    /// plan, consumed as the entry value and derivative payload.
+    pub entry_evaluation: RationalLogdetEval,
+}
+
 pub fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
     sys: &ArrowSchurSystem,
     htt_factors: &ArrowFactorSlab,
@@ -2815,7 +2836,7 @@ pub fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
     deflation_max_rank: usize,
     deflation_subspace_iters: usize,
     deflation_target_std_err_rel: f64,
-) -> Option<RationalLogdetPlan> {
+) -> Option<DerivedRationalLogdetPlan> {
     let k = sys.k;
     if k == 0
         || !(cg_rel_tol.is_finite() && cg_rel_tol > 0.0 && cg_rel_tol < 1.0)
@@ -2852,11 +2873,17 @@ pub fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
     // deflation is requested or the bare bar already clears the target.
     let pilot = base_plan.evaluate_preconditioned(&matvec, &precond, cg_rel_tol, cg_max_iters)?;
     if deflation_max_rank == 0 {
-        return Some(base_plan);
+        return Some(DerivedRationalLogdetPlan {
+            plan: base_plan,
+            entry_evaluation: pilot,
+        });
     }
     let target = deflation_target_std_err_rel * (pilot.estimate.abs() + 1.0);
     if pilot.std_err <= target {
-        return Some(base_plan);
+        return Some(DerivedRationalLogdetPlan {
+            plan: base_plan,
+            entry_evaluation: pilot,
+        });
     }
     // Grow from the smallest nonzero peel rank (doubling ⇒ log-many re-solves)
     // until the bar clears. The caller's cap is a resource ceiling; reaching it
@@ -2894,7 +2921,10 @@ pub fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
         )?;
         let eval = plan.evaluate_preconditioned(&matvec, &precond, cg_rel_tol, cg_max_iters)?;
         if eval.std_err <= target {
-            return Some(plan);
+            return Some(DerivedRationalLogdetPlan {
+                plan,
+                entry_evaluation: eval,
+            });
         }
         if r >= cap {
             return None;
