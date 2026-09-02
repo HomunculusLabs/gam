@@ -1956,6 +1956,10 @@ mod exact_stationarity_solve_1418_tests {
         block
     }
 
+    fn ambient_residual_merit(residual: &SaeArrowVector) -> f64 {
+        0.5 * (residual.t.dot(&residual.t) + residual.beta.dot(&residual.beta))
+    }
+
     /// #2653: the dense owner is a signed Moore--Penrose solve, not an SPD
     /// inverse and not a projected-residual proxy. A resolved negative mode is
     /// retained, the MEASURED spectral null band is removed (#2674 — nothing is
@@ -2022,12 +2026,13 @@ mod exact_stationarity_solve_1418_tests {
         // The `1e-12` direction is inside the null band, so its whole
         // coefficient survives into the model residual and nothing else does:
         // `½·3² = 4.5`.
-        assert_abs_diff_eq!(damped.model_merit, 4.5, epsilon = 1.0e-14);
+        let ambient_model_merit = ambient_residual_merit(&damped.model_residual);
+        assert_abs_diff_eq!(ambient_model_merit, 4.5, epsilon = 1.0e-14);
         assert_eq!(damped.retained_rank, 2);
     }
 
-    /// #2762 — the model merit the damped path reports is the EXACT linear
-    /// residual `½‖g + AΔ(ν)‖²`, on a non-diagonal operator, at every damping.
+    /// #2762 — the modeled residual the damped path reports is the EXACT linear
+    /// residual `g + AΔ(ν)`, on a non-diagonal operator, at every damping.
     ///
     /// The polish's acceptance test measures an achieved reduction against this
     /// number. If it were an approximation, the trust ratio would be measuring
@@ -2035,7 +2040,7 @@ mod exact_stationarity_solve_1418_tests {
     /// independent dense `A·Δ` — the operator the block carries — rather than
     /// against the spectral algebra that produced it.
     #[test]
-    fn damped_residual_step_model_merit_is_the_exact_linear_residual_2762() {
+    fn damped_residual_step_model_residual_is_exact_2762() {
         // A symmetric operator with a genuinely rotated eigenbasis, so the test
         // cannot pass by coincidence of a diagonal layout.
         let dim = 4usize;
@@ -2074,15 +2079,16 @@ mod exact_stationarity_solve_1418_tests {
             flat_step[3] = damped.step.beta[0];
             let linear_residual = &flat_residual + &operator.dot(&flat_step);
             let independent = 0.5 * linear_residual.dot(&linear_residual);
+            let ambient_model_merit = ambient_residual_merit(&damped.model_residual);
             assert_abs_diff_eq!(
-                damped.model_merit,
+                ambient_model_merit,
                 independent,
                 epsilon = 1.0e-12 * independent.max(1.0)
             );
             // The ladder's termination proof: the model's predicted reduction is
             // monotonically decreasing in the damping, so a rung that fails the
             // round-off floor proves every later rung fails it too.
-            let reduction = 0.5 * flat_residual.dot(&flat_residual) - damped.model_merit;
+            let reduction = 0.5 * flat_residual.dot(&flat_residual) - ambient_model_merit;
             assert!(
                 reduction <= previous_reduction + 1.0e-15,
                 "predicted reduction rose from {previous_reduction:.6e} to {reduction:.6e} at \
@@ -2142,8 +2148,9 @@ mod exact_stationarity_solve_1418_tests {
         // in the direction that could move.
         let resolved_leftover = 1.0e-6 / (1.0 + 1.0e-6);
         let flat_leftover = 1.0e-6 / (1.0e-12 + 1.0e-6);
+        let ambient_model_merit = ambient_residual_merit(&damped.model_residual);
         assert_abs_diff_eq!(
-            damped.model_merit,
+            ambient_model_merit,
             0.5 * (resolved_leftover * resolved_leftover + flat_leftover * flat_leftover),
             epsilon = 1.0e-14
         );

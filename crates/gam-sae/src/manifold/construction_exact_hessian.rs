@@ -250,9 +250,10 @@ impl ArrowMetric<'_> {
 ///   g + A Δ(ν) = Σ_i u_i c_i ν/(λ_i² + ν),      c_i = u_iᵀ g
 /// ```
 ///
-/// so `model_merit = ½‖g + AΔ(ν)‖²` below is CLOSED FORM, not an estimate; the
-/// merit reduction it predicts is the reference an accepted step is measured
-/// against. This is why the polish can price a damping before paying for it.
+/// so `model_residual` below is CLOSED FORM, not an estimate. The caller prices
+/// that residual in the currency its convergence gate owns; this lower-level
+/// spectral object deliberately does not attach an ambient or quotient scalar
+/// merit to it.
 pub(crate) struct DampedResidualStep {
     /// `Δ(ν)`.
     pub(crate) step: SaeArrowVector,
@@ -261,9 +262,6 @@ pub(crate) struct DampedResidualStep {
     /// whatever currency its gate is denominated in; this type stays ignorant of
     /// which one that is.
     pub(crate) model_residual: SaeArrowVector,
-    /// `½‖g + AΔ(ν)‖²` — the AMBIENT model merit, reported for telemetry beside
-    /// whatever the caller's own currency says.
-    pub(crate) model_merit: f64,
     /// `‖Δ(ν)‖²`.
     pub(crate) step_norm_sq: f64,
     /// Directions whose damped denominator cleared the null band.
@@ -342,8 +340,9 @@ impl ExactHessianSpectralBlock {
     /// One point of the damped residual path — see [`DampedResidualStep`].
     ///
     /// `residual` is the stationarity residual `g`; the step returned solves the
-    /// damped system against `−g`, i.e. it is a descent step, and the model
-    /// merit is reported for `g` itself so the caller compares like with like.
+    /// damped system against `−g`, i.e. it is a descent step, and the modeled
+    /// residual is reported for `g` itself so the caller can price it in the
+    /// same merit as its convergence gate.
     /// A direction whose damped denominator `λ² + ν` is inside the null band
     /// (`≤ rank_floor²`) contributes nothing to the step and its whole
     /// coefficient to the model residual: at `ν = 0` that is exactly the
@@ -375,7 +374,6 @@ impl ExactHessianSpectralBlock {
         let coefficients = self.eigenvectors.t().dot(&flat);
         let mut step_coefficients = Array1::<f64>::zeros(spectral_dim);
         let mut model_coefficients = Array1::<f64>::zeros(spectral_dim);
-        let mut model_residual_norm_sq = 0.0_f64;
         let mut retained_rank = 0usize;
         for index in 0..spectral_dim {
             let lambda = self.eigenvalues[index];
@@ -392,7 +390,6 @@ impl ExactHessianSpectralBlock {
                 coefficient
             };
             model_coefficients[index] = surviving;
-            model_residual_norm_sq += surviving * surviving;
         }
         let solution = self.eigenvectors.dot(&step_coefficients);
         let model = self.eigenvectors.dot(&model_coefficients);
@@ -405,7 +402,6 @@ impl ExactHessianSpectralBlock {
                 t: model.slice(s![..total_t]).to_owned(),
                 beta: model.slice(s![total_t..]).to_owned(),
             },
-            model_merit: 0.5 * model_residual_norm_sq,
             step_norm_sq: solution.dot(&solution),
             retained_rank,
         })

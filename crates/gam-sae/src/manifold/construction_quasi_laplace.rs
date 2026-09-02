@@ -47,6 +47,28 @@ pub(crate) struct StreamingOuterEvaluation {
     pub(crate) efs_inverse_probe_bundle: Option<(Vec<Array1<f64>>, Vec<Array1<f64>>)>,
 }
 
+/// The two deliberately distinct scalar currencies of one stationarity
+/// residual. The terminal polish is accepted in the posterior-null quotient,
+/// while the ambient norm is a non-growth invariant; naming both prevents a
+/// baseline from one space being paired with a model endpoint from the other
+/// (#2762).
+#[derive(Clone, Copy, Debug)]
+struct ResidualMerits {
+    quotient: f64,
+    ambient: f64,
+}
+
+/// One accepted terminal-polish trial with the model prediction in the same
+/// quotient currency that admitted it. The spectral step owns a model residual,
+/// not a scalar merit; this caller owns the projection and therefore the price.
+struct AcceptedTerminalResidualStep {
+    damping: f64,
+    trial_merits: ResidualMerits,
+    predicted_quotient_decrease: f64,
+    step: DampedResidualStep,
+    system: Option<ArrowSchurSystem>,
+}
+
 impl SaeManifoldTerm {
     /// Custom penalized quasi-Laplace score for the SAE term at a fixed `ρ`.
     ///
@@ -2604,8 +2626,9 @@ impl SaeManifoldTerm {
     /// Damping does separate them. `A` is already materialized and
     /// diagonalized here, so the whole Levenberg–Marquardt path
     /// [`ExactHessianSpectralBlock::damped_residual_step`] is available in
-    /// closed form at one diagonal pass per point — including the model merit it
-    /// predicts. On the same witness `ν = 5.7e-7` gives `‖Δ‖ = 4.6e-4`, drives
+    /// closed form at one diagonal pass per point — including the modeled
+    /// residual this caller prices in its quotient merit. On the same witness
+    /// `ν = 5.7e-7` gives `‖Δ‖ = 4.6e-4`, drives
     /// the merit `7.5e-9 → 6.2e-11` (`‖g‖ 1.23e-4 → 1.11e-5`, past a `7.1e-5`
     /// tolerance in ONE step) at a measured/predicted ratio of `0.9992`.
     ///
@@ -2659,7 +2682,11 @@ impl SaeManifoldTerm {
     /// second as an invariant: a step may not buy quotient progress by pumping
     /// residual into the gauge orbit, which is the only way a projected norm can
     /// fall without the residual falling.
-    fn residual_merits(&self, residual: &SaeArrowVector, penalized_gram_scale: &[f64]) -> (f64, f64) {
+    fn residual_merits(
+        &self,
+        residual: &SaeArrowVector,
+        penalized_gram_scale: &[f64],
+    ) -> ResidualMerits {
         let ambient_norm_sq =
             residual.t.dot(&residual.t) + residual.beta.dot(&residual.beta);
         let quotient_norm_sq = self
@@ -2670,7 +2697,10 @@ impl SaeManifoldTerm {
                 penalized_gram_scale,
             )
             .unwrap_or(ambient_norm_sq);
-        (0.5 * quotient_norm_sq, 0.5 * ambient_norm_sq)
+        ResidualMerits {
+            quotient: 0.5 * quotient_norm_sq,
+            ambient: 0.5 * ambient_norm_sq,
+        }
     }
 
     fn terminal_exact_newton_polish(
@@ -2830,18 +2860,20 @@ impl SaeManifoldTerm {
             // bound and the quotient merit is the phase's currency. The ambient
             // merit is carried alongside as the invariant, not as a second
             // acceptance test (see `residual_merits`).
-            let pre_merit = 0.5 * quotient_grad_norm * quotient_grad_norm;
-            let pre_ambient_merit = 0.5 * grad_norm_sq;
+            let pre_merits = ResidualMerits {
+                quotient: 0.5 * quotient_grad_norm * quotient_grad_norm,
+                ambient: 0.5 * grad_norm_sq,
+            };
             // Round-off floor on the MODEL's predicted reduction, in the merit's
             // own units — the same relative floor the majorized Armijo lane
             // applies to its directional decrease. A prediction below it is
             // f64 noise in the quadratic model, not a step worth measuring.
-            let predicted_floor = SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR * pre_merit;
+            let predicted_floor =
+                SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR * pre_merits.quotient;
             let snapshot = self.snapshot_mutable_state();
             let backtrack_started = std::time::Instant::now();
             let mut trials = 0usize;
-            let mut accepted: Option<(f64, f64, DampedResidualStep, Option<ArrowSchurSystem>)> =
-                None;
+            let mut accepted: Option<AcceptedTerminalResidualStep> = None;
             let mut nu = damping;
             loop {
                 let damped = match geometry.damped_residual_step(&residual, nu) {
@@ -2853,23 +2885,27 @@ impl SaeManifoldTerm {
                         break;
                     }
                 };
-                let (model_merit, _model_ambient) =
-                    self.residual_merits(&damped.model_residual, lambda_smooth);
-                let predicted_decrease = pre_merit - model_merit;
-                if !(predicted_decrease.is_finite() && predicted_decrease > predicted_floor) {
+                let model_merits = self.residual_merits(&damped.model_residual, lambda_smooth);
+                let predicted_quotient_decrease =
+                    pre_merits.quotient - model_merits.quotient;
+                if !(predicted_quotient_decrease.is_finite()
+                    && predicted_quotient_decrease > predicted_floor)
+                {
                     // The model's predicted reduction decreases monotonically in
                     // ν, so no larger damping on this ladder can clear the floor
                     // either: the ladder is exhausted, and it is exhausted for a
                     // stated reason rather than at a trial count.
                     log::debug!(
                         "terminal Newton: damping ladder exhausted at ν={nu:.6e} — predicted \
-                         merit reduction {predicted_decrease:.6e} is under the round-off floor \
-                         {predicted_floor:.6e} (merit {pre_merit:.6e})"
+                         quotient-merit reduction {predicted_quotient_decrease:.6e} is under the \
+                         round-off floor {predicted_floor:.6e} (quotient merit \
+                         {:.6e})",
+                        pre_merits.quotient,
                     );
                     break;
                 }
                 trials += 1;
-                let (trial_merit, trial_ambient_merit, trial_system) = if self
+                let (trial_merits, trial_system) = if self
                     .apply_newton_step(damped.step.t.view(), damped.step.beta.view(), 1.0)
                     .is_ok()
                 {
@@ -2882,31 +2918,51 @@ impl SaeManifoldTerm {
                                 lambda_smooth,
                             );
                             (
-                                0.5 * quotient * quotient,
-                                0.5 * ambient_sq,
+                                ResidualMerits {
+                                    quotient: 0.5 * quotient * quotient,
+                                    ambient: 0.5 * ambient_sq,
+                                },
                                 Some(trial_sys),
                             )
                         }
-                        Err(_) => (f64::INFINITY, f64::INFINITY, None),
+                        Err(_) => (
+                            ResidualMerits {
+                                quotient: f64::INFINITY,
+                                ambient: f64::INFINITY,
+                            },
+                            None,
+                        ),
                     }
                 } else {
-                    (f64::INFINITY, f64::INFINITY, None)
+                    (
+                        ResidualMerits {
+                            quotient: f64::INFINITY,
+                            ambient: f64::INFINITY,
+                        },
+                        None,
+                    )
                 };
-                let sufficient = SAE_MANIFOLD_ARMIJO_C1 * predicted_decrease;
+                let sufficient = SAE_MANIFOLD_ARMIJO_C1 * predicted_quotient_decrease;
                 // Acceptance: a measured reduction of the GATE's currency worth
                 // at least the shared Armijo fraction of what this step's own
                 // model predicted. Invariant, not a second currency: the ambient
                 // residual may not GROW, so quotient progress can never be
                 // bought by pumping residual into the gauge orbit — which is the
                 // only way a projected norm falls while the residual does not.
-                if trial_merit.is_finite()
-                    && trial_ambient_merit.is_finite()
-                    && pre_merit - trial_merit
-                        >= sufficient - opt::armijo_roundoff_cushion(pre_merit)
-                    && trial_ambient_merit
-                        <= pre_ambient_merit + opt::armijo_roundoff_cushion(pre_ambient_merit)
+                if trial_merits.quotient.is_finite()
+                    && trial_merits.ambient.is_finite()
+                    && pre_merits.quotient - trial_merits.quotient
+                        >= sufficient - opt::armijo_roundoff_cushion(pre_merits.quotient)
+                    && trial_merits.ambient
+                        <= pre_merits.ambient + opt::armijo_roundoff_cushion(pre_merits.ambient)
                 {
-                    accepted = Some((nu, trial_merit, damped, trial_system));
+                    accepted = Some(AcceptedTerminalResidualStep {
+                        damping: nu,
+                        trial_merits,
+                        predicted_quotient_decrease,
+                        step: damped,
+                        system: trial_system,
+                    });
                     break;
                 }
                 self.restore_mutable_state(&snapshot)?;
@@ -2938,8 +2994,7 @@ impl SaeManifoldTerm {
                 }
                 nu = next;
             }
-            let Some((accepted_nu, accepted_merit, accepted_step, accepted_system)) = accepted
-            else {
+            let Some(accepted) = accepted else {
                 log::debug!(
                     "terminal Newton bail: no damping on [{smallest_damping:.6e}, \
                      {largest_damping:.6e}] bought a sufficient measured decrease of the \
@@ -2973,7 +3028,7 @@ impl SaeManifoldTerm {
             // monotone, so everything gained is kept; `made_progress` is already
             // true, so the refine loop takes another window and may re-arm this
             // phase, and the trajectory is re-measured from scratch when it does.
-            if let Some(system) = accepted_system.as_ref() {
+            if let Some(system) = accepted.system.as_ref() {
                 let after_sq = Self::system_grad_norm_sq(system);
                 let after_gate =
                     self.quotient_gradient_norm_from_system(system, after_sq, lambda_smooth);
@@ -3016,33 +3071,40 @@ impl SaeManifoldTerm {
             // Walk back toward the undamped Newton step: a damping under
             // `λ_min²` cannot move the flattest resolved direction, so it IS the
             // undamped step and is carried as exactly that.
-            damping = accepted_nu / opt::constants::RIDGE_GROWTH;
+            damping = accepted.damping / opt::constants::RIDGE_GROWTH;
             if damping < smallest_damping {
                 damping = 0.0;
             }
-            let predicted_decrease = pre_merit - accepted_step.model_merit;
             log::info!(
                 "[SAE-NEWTON] step {} phases: assemble={assemble_seconds:.2}s \
-                 trials={trials} in {:.2}s (ν={accepted_nu:.6e}, ‖Δ‖={:.6e}, damped rank {}/{}) \
+                 trials={trials} in {:.2}s (ν={:.6e}, ‖Δ‖={:.6e}, damped rank {}/{}) \
                  total={:.2}s",
                 step + 1,
                 backtrack_started.elapsed().as_secs_f64(),
-                accepted_step.step_norm_sq.sqrt(),
-                accepted_step.retained_rank,
+                accepted.damping,
+                accepted.step.step_norm_sq.sqrt(),
+                accepted.step.retained_rank,
                 geometry.eigenvalues.len(),
                 step_started.elapsed().as_secs_f64(),
             );
             log::debug!(
-                "SAE terminal Newton step committed: merit {pre_merit:.6e} → \
-                 {accepted_merit:.6e} (predicted reduction {predicted_decrease:.6e}, measured \
-                 {:.6e}, ratio {:.4e}); ‖g‖ {grad_norm:.6e} → {:.6e}, tol {grad_tolerance:.6e}",
-                pre_merit - accepted_merit,
-                if predicted_decrease > 0.0 {
-                    (pre_merit - accepted_merit) / predicted_decrease
+                "SAE terminal Newton step committed: quotient merit {:.6e} → {:.6e} \
+                 (predicted quotient reduction {:.6e}, measured {:.6e}, ratio {:.4e}); \
+                 ambient merit {:.6e} → {:.6e}; ‖g‖ {grad_norm:.6e} → {:.6e}, tol \
+                 {grad_tolerance:.6e}",
+                pre_merits.quotient,
+                accepted.trial_merits.quotient,
+                accepted.predicted_quotient_decrease,
+                pre_merits.quotient - accepted.trial_merits.quotient,
+                if accepted.predicted_quotient_decrease > 0.0 {
+                    (pre_merits.quotient - accepted.trial_merits.quotient)
+                        / accepted.predicted_quotient_decrease
                 } else {
                     f64::NAN
                 },
-                (2.0 * accepted_merit).max(0.0).sqrt(),
+                pre_merits.ambient,
+                accepted.trial_merits.ambient,
+                (2.0 * accepted.trial_merits.ambient).max(0.0).sqrt(),
             );
         }
         Ok(made_progress)
