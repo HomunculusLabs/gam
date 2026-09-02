@@ -543,21 +543,10 @@ pub(crate) fn cell_rule<'a>(
 ) -> impl Iterator<Item = (f64, f64)> + 'a {
     let half = 0.5 * (right - left);
     let mid = left + half;
-    nodes.iter().zip(weights.iter()).map(move |(&x, &w)| {
-        // The closed rule's endpoints are exactly ±1, and they must land
-        // exactly on the cell's ends: two cells share a breakpoint, and an
-        // event time IS a breakpoint, so a `mid + half * x` that lands one
-        // ulp away would split the shared node in two and hand the event
-        // node back the zero weight the closed rule exists to remove.
-        let t = if x <= -1.0 {
-            left
-        } else if x >= 1.0 {
-            right
-        } else {
-            mid + half * x
-        };
-        (t, half * w)
-    })
+    nodes
+        .iter()
+        .zip(weights.iter())
+        .map(move |(&x, &w)| (mid + half * x, half * w))
 }
 
 /// Expand every subject into quadrature and event nodes at mesh refinement
@@ -567,64 +556,49 @@ pub fn expand_nodes(
     quadrature_order: usize,
     refinement: usize,
 ) -> Result<CohortNodes, EventHistoryError> {
-    if quadrature_order < 2 {
-        return Err(invalid("a closed quadrature rule needs at least its two endpoints"));
+    if quadrature_order == 0 {
+        return Err(invalid("quadrature order must be positive"));
     }
     if refinement >= usize::BITS as usize - 1 {
         return Err(invalid(format!("mesh refinement level {refinement} is not representable")));
     }
     let marks = cohort.marks();
     let kinds = &cohort.mark_kinds;
-    let (rule_nodes, rule_weights) = gam_math::special::gauss_lobatto(quadrature_order);
+    let (gl_nodes, gl_weights) = gam_math::special::gauss_legendre(quadrature_order);
     let n_cov = cohort.covariates.ncols();
     let mut subjects = Vec::with_capacity(cohort.subjects.len());
     let mut data_rows: Vec<Vec<f64>> = Vec::new();
     let mut first_row = 0usize;
     for subject in &cohort.subjects {
-        // (time, weight, per-mark exposure, mark). The risk indicator is
-        // constant on the open cell — it can only change at a breakpoint,
-        // and cells lie between breakpoints — so each cell's nodes carry
-        // that cell's risk and a node shared by two cells adds the two.
-        // That is what puts the jump in the right place: the node at a
-        // once-only mark's own onset keeps the exposure of the cell that
-        // ended there and none of the cell that starts there.
-        let mut raw: Vec<(f64, f64, Vec<f64>, Option<usize>)> = Vec::new();
+        // (time, weight, mark)
+        let mut raw: Vec<(f64, f64, Option<usize>)> = Vec::new();
         for (left, right) in mesh_cells(subject, true, refinement) {
-            let at_risk: Vec<bool> = (0..marks)
-                .map(|d| subject.at_risk(d, right, kinds))
-                .collect();
-            for (t, w) in cell_rule(left, right, &rule_nodes, &rule_weights) {
-                let exposure = at_risk.iter().map(|r| if *r { w } else { 0.0 }).collect();
-                raw.push((t, w, exposure, None));
+            for (t, w) in cell_rule(left, right, &gl_nodes, &gl_weights) {
+                raw.push((t, w, None));
             }
         }
         // Prior events carry no count node: they are history, not
         // observations of this window, and `at_risk` has already read them
         // into the risk sets.
         for event in subject.events.iter().filter(|e| e.time > subject.entry) {
-            raw.push((event.time, 0.0, vec![0.0; marks], Some(event.mark)));
+            raw.push((event.time, 0.0, Some(event.mark)));
         }
         raw.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut times: Vec<f64> = Vec::new();
         let mut weights: Vec<f64> = Vec::new();
-        let mut exposure_rows: Vec<Vec<f64>> = Vec::new();
         let mut counts: Vec<Vec<f64>> = Vec::new();
-        for (time, weight, exposure, mark) in raw {
+        for (time, weight, mark) in raw {
             if let Some(&last) = times.last()
                 && time == last
             {
                 let index = times.len() - 1;
                 weights[index] += weight;
-                for (row, add) in exposure_rows[index].iter_mut().zip(exposure.iter()) {
-                    *row += add;
-                }
                 if let Some(mark) = mark {
                     counts[index][mark] += 1.0;
                 }
             } else {
                 times.push(time);
                 weights.push(weight);
-                exposure_rows.push(exposure);
                 let mut row = vec![0.0; marks];
                 if let Some(mark) = mark {
                     row[mark] += 1.0;
@@ -655,7 +629,9 @@ pub fn expand_nodes(
             data_rows.push(data);
             for d in 0..marks {
                 count_matrix[[i, d]] = counts[i][d];
-                exposures[[i, d]] = exposure_rows[i][d];
+                if weights[i] != 0.0 && subject.at_risk(d, t, kinds) {
+                    exposures[[i, d]] = weights[i];
+                }
             }
         }
         subjects.push(SubjectNodes {
@@ -687,15 +663,15 @@ pub fn expand_nodes(
 }
 
 /// The rows the covariate/time bases are built on: for every subject its
-/// entry, exit and covariate-change times plus the quadrature nodes of the
-/// event-free mesh. No event time enters, so a data-adaptive basis
+/// entry, exit and covariate-change times plus the Gauss-Legendre nodes of
+/// the event-free mesh. No event time enters, so a data-adaptive basis
 /// (quantile knots, a data-driven range) is a function of the design alone
 /// and the time basis spans every follow-up window to its ends.
 pub fn design_rows(cohort: &EventHistoryCohort, quadrature_order: usize) -> Result<Array2<f64>, EventHistoryError> {
-    if quadrature_order < 2 {
-        return Err(invalid("a closed quadrature rule needs at least its two endpoints"));
+    if quadrature_order == 0 {
+        return Err(invalid("quadrature order must be positive"));
     }
-    let (rule_nodes, rule_weights) = gam_math::special::gauss_lobatto(quadrature_order);
+    let (gl_nodes, gl_weights) = gam_math::special::gauss_legendre(quadrature_order);
     let n_cov = cohort.covariates.ncols();
     let mut rows: Vec<Vec<f64>> = Vec::new();
     let mut push = |row: usize, t: f64| {
@@ -711,7 +687,7 @@ pub fn design_rows(cohort: &EventHistoryCohort, quadrature_order: usize) -> Resu
             push(segment.row, segment.start);
         }
         for (left, right) in mesh_cells(subject, false, 0) {
-            for (t, _) in cell_rule(left, right, &rule_nodes, &rule_weights) {
+            for (t, _) in cell_rule(left, right, &gl_nodes, &gl_weights) {
                 push(subject.covariate_row_at(t, false), t);
             }
         }

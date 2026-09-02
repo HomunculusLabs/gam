@@ -98,30 +98,14 @@ class EventHistoryModel:
         return list(self._native.subject_ids())
 
     @property
-    def rank(self) -> int:
-        """Rank of the latent covariance the evidence supports: the fit grows
-        it from zero and keeps an atom only when the outer criterion
-        improves."""
-        return int(self._native.rank())
-
-    @property
-    def atom_evidence(self) -> np.ndarray:
-        """Decrease of the outer LAML criterion each accepted atom brought."""
-        return np.asarray(self._native.atom_evidence())
-
-    @property
-    def rank_path(self) -> list[dict[str, Any]]:
-        """Every rank step tried: the covariance score's top eigenvalue, the
-        proposed log-rate, whether that rate sat at the mesh's resolution
-        limit, whether the candidate reached a certified optimum, the
-        evidence gain and whether it was accepted."""
-        return [dict(step) for step in self._native.rank_path()]
+    def atoms(self) -> int:
+        """The number of latent atoms the fit was offered; which of them the
+        data use is read from ``loadings`` and ``atom_log_lambdas``."""
+        return int(self._native.atoms())
 
     @property
     def loadings(self) -> np.ndarray:
-        """Factor coordinates of the latent covariance, shape ``(marks, rank)``.
-        The covariance itself is the reported object: see
-        :meth:`disease_covariance`."""
+        """Loadings, shape ``(marks, atoms)``."""
         return np.asarray(self._native.loadings())
 
     @property
@@ -142,6 +126,13 @@ class EventHistoryModel:
     def reml_score(self) -> float | None:
         return self._native.reml_score()
 
+    @property
+    def quadrature(self) -> dict[str, Any]:
+        """The certificate: the Gauss-Hermite order and mesh refinement of the
+        fit, and the largest coefficient shift (in posterior standard
+        deviations) under the next order and the next mesh."""
+        return dict(self._native.quadrature())
+
     def coefficients(self, mark: int | str) -> np.ndarray:
         """Coefficients of one mark's population log-intensity surface: the
         latent term enters as the deviation from a population rate, so
@@ -149,35 +140,6 @@ class EventHistoryModel:
         if isinstance(mark, str):
             mark = self.mark_names.index(mark)
         return np.asarray(self._native.coefficients(int(mark)))
-
-    def disease_covariance(self) -> np.ndarray:
-        """``C(0) = A Aᵀ``: the covariance across marks of the latent
-        log-intensity deviations at one time, shape ``(marks, marks)``. This
-        is the reported latent object; the loadings are its factor
-        coordinates, which two atoms of equal rate could rotate."""
-        return np.asarray(self._native.disease_covariance())
-
-    def temporal_covariance(self, lag: float) -> np.ndarray:
-        """``C(Δ) = A diag(exp(-r Δ)) Aᵀ`` across a lag of ``lag`` time units."""
-        return np.asarray(self._native.temporal_covariance(float(lag)))
-
-    def eigenmodes(self) -> tuple[np.ndarray, np.ndarray]:
-        """Eigenvalues (descending) and eigenvectors (columns) of ``C(0)``."""
-        values, vectors = self._native.eigenmodes()
-        return np.asarray(values), np.asarray(vectors)
-
-    def latent_state(self, subject: int | str) -> dict[str, np.ndarray]:
-        """The smoothed latent state of one subject on its own nodes:
-        ``times``, ``means`` (nodes × rank) and ``covariances``
-        (nodes × rank × rank), the Laplace posterior given the whole history."""
-        out = self._native.latent_state(self._subject(subject))
-        return {key: np.asarray(out[key]) for key in ("times", "means", "covariances")}
-
-    def latent_exposure(self, subject: int | str) -> dict[str, np.ndarray]:
-        """The follow-up average of one subject's latent state as a posterior
-        Gaussian: ``mean`` (rank) and ``covariance`` (rank × rank)."""
-        out = self._native.latent_exposure(self._subject(subject))
-        return {"mean": np.asarray(out["mean"]), "covariance": np.asarray(out["covariance"])}
 
     def _subject(self, subject: int | str) -> int:
         if isinstance(subject, str):
@@ -296,6 +258,7 @@ def fit_event_history(
     covariates: Any,
     formula: str,
     *,
+    atoms: int = 1,
     marks: Mapping[str, str] | Sequence[str] | None = None,
     id_column: str = "id",
 ) -> EventHistoryModel:
@@ -317,7 +280,8 @@ def fit_event_history(
     once-only mark removes the subject from that mark's risk set, a recurrent
     mark can fire any number of times.
 
-    The rank of the latent covariance is grown from zero by the evidence.
+    ``atoms`` is the number of latent atoms offered; each carries its own
+    REML ridge, and one the data do not support is switched off by it.
     """
     rust = rust_module()
     subject_values = _column(subjects, id_column)
@@ -402,5 +366,6 @@ def fit_event_history(
         segment_start,
         segment_row,
         str(formula),
+        int(atoms),
     )
     return EventHistoryModel(native)

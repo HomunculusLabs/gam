@@ -1,9 +1,7 @@
-//! Elementary functions over any [`JetField`] scalar, so the Laplace evidence
-//! of an event history is written once and evaluated as a plain `f64`, as a
-//! one-direction dual (`OneSeed<0>`) for `D_θ H[u]`, or as a two-direction
-//! dual (`TwoSeed<0>`) for `D²_θ H[u, v]`, each optionally wrapped in a
-//! [`Tangent`] that carries the coefficient-direction derivatives the
-//! Hessian columns need.
+//! Elementary functions over any [`JetField`] scalar, so the exact-marginal
+//! event-history likelihood is written once and evaluated as a plain `f64`,
+//! as a one-direction dual (`OneSeed<0>`) for `D_θ H[u]`, or as a two-direction
+//! dual (`TwoSeed<0>`) for `D²_θ H[u, v]`.
 //!
 //! Every function composes through [`JetField::compose_unary`] with the exact
 //! derivative stack of the outer real function, so no derivative channel is
@@ -51,6 +49,12 @@ pub(crate) fn recip<S: JetField>(x: &S) -> S {
     x.compose_unary([i, -i2, 2.0 * i2 * i, -6.0 * i2 * i2, 24.0 * i2 * i2 * i])
 }
 
+/// `a / b`.
+#[inline]
+pub(crate) fn div<S: JetField>(a: &S, b: &S) -> S {
+    a.mul(&recip(b))
+}
+
 /// `x + c` for a real constant `c`.
 #[inline]
 pub(crate) fn add_real<S: JetField>(x: &S, c: f64) -> S {
@@ -63,45 +67,41 @@ pub(crate) fn square<S: JetField>(x: &S) -> S {
     x.mul(x)
 }
 
-/// A first-order forward-mode dual over a base scalar `B` with `W` inline
-/// tangent slots: the value plus its derivative along each seeded
-/// coefficient direction.
+
+/// A first-order forward-mode dual with `W` inline tangent slots: the value
+/// plus its derivative along each seeded coefficient direction.
 ///
-/// The base carries whatever derivative channels the caller needs on top
-/// (none for `f64`, one direction for `OneSeed<0>`, two for `TwoSeed<0>`),
-/// so the tangent slots of a quantity computed on `Tangent<OneSeed<0>, W>`
-/// hold that quantity's mixed second derivatives: coefficient direction
-/// times the base direction. That is how one generic evaluation of the exact
-/// evidence gradient yields the Hessian, its directional derivative, and its
-/// second directional derivative.
-///
-/// The slots live inline so the evaluation allocates nothing per scalar;
-/// wider coefficient vectors are swept in chunks.
+/// Every arithmetic step of the forward filter is replayed on this scalar, so
+/// the gradient it yields is the exact derivative of the computed
+/// log-likelihood, bit-consistent with the value the same code produces on
+/// `f64`. That consistency is what a trust-region Newton with a value-based
+/// acceptance test requires near an optimum. The slots live inline so the
+/// filter allocates nothing; wider coefficient vectors are swept in chunks.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Tangent<B, const W: usize> {
-    pub value: B,
-    pub grad: [B; W],
+pub(crate) struct Tangent<const W: usize> {
+    pub value: f64,
+    pub grad: [f64; W],
 }
 
-impl<B: JetField + Copy, const W: usize> Tangent<B, W> {
-    pub(crate) fn seeded(value: B, grad: [B; W]) -> Self {
+impl<const W: usize> Tangent<W> {
+    pub(crate) fn seeded(value: f64, grad: [f64; W]) -> Self {
         Self { value, grad }
     }
 }
 
-impl<B: JetField + Copy, const W: usize> JetField for Tangent<B, W> {
+impl<const W: usize> JetField for Tangent<W> {
     #[inline]
     fn value(&self) -> f64 {
-        self.value.value()
+        self.value
     }
     #[inline]
     fn add(&self, o: &Self) -> Self {
         let mut grad = self.grad;
         for (g, b) in grad.iter_mut().zip(o.grad.iter()) {
-            *g = g.add(b);
+            *g += b;
         }
         Self {
-            value: self.value.add(&o.value),
+            value: self.value + o.value,
             grad,
         }
     }
@@ -109,21 +109,21 @@ impl<B: JetField + Copy, const W: usize> JetField for Tangent<B, W> {
     fn sub(&self, o: &Self) -> Self {
         let mut grad = self.grad;
         for (g, b) in grad.iter_mut().zip(o.grad.iter()) {
-            *g = g.sub(b);
+            *g -= b;
         }
         Self {
-            value: self.value.sub(&o.value),
+            value: self.value - o.value,
             grad,
         }
     }
     #[inline]
     fn mul(&self, o: &Self) -> Self {
-        let mut grad = self.grad;
-        for (g, b) in grad.iter_mut().zip(o.grad.iter()) {
-            *g = g.mul(&o.value).add(&self.value.mul(b));
+        let mut grad = [0.0; W];
+        for ((g, a), b) in grad.iter_mut().zip(self.grad.iter()).zip(o.grad.iter()) {
+            *g = a * o.value + self.value * b;
         }
         Self {
-            value: self.value.mul(&o.value),
+            value: self.value * o.value,
             grad,
         }
     }
@@ -131,10 +131,10 @@ impl<B: JetField + Copy, const W: usize> JetField for Tangent<B, W> {
     fn neg(&self) -> Self {
         let mut grad = self.grad;
         for g in grad.iter_mut() {
-            *g = g.neg();
+            *g = -*g;
         }
         Self {
-            value: self.value.neg(),
+            value: -self.value,
             grad,
         }
     }
@@ -142,41 +142,32 @@ impl<B: JetField + Copy, const W: usize> JetField for Tangent<B, W> {
     fn scale(&self, s: f64) -> Self {
         let mut grad = self.grad;
         for g in grad.iter_mut() {
-            *g = g.scale(s);
+            *g *= s;
         }
         Self {
-            value: self.value.scale(s),
+            value: self.value * s,
             grad,
         }
     }
-    /// `f(value + Σ ε_w grad_w) = f(value) + Σ ε_w f'(value) grad_w`, with
-    /// `f'` itself evaluated on the base scalar through the shifted stack
-    /// `[f', f'', f''', f'''', ·]`. The bases used here carry at most two
-    /// derivative orders, so the fifth entry of the shifted stack is never
-    /// read.
     #[inline]
     fn compose_unary(&self, d: [f64; 5]) -> Self {
-        let derivative = self.value.compose_unary([d[1], d[2], d[3], d[4], 0.0]);
         let mut grad = self.grad;
         for g in grad.iter_mut() {
-            *g = g.mul(&derivative);
+            *g *= d[1];
         }
-        Self {
-            value: self.value.compose_unary(d),
-            grad,
-        }
+        Self { value: d[0], grad }
     }
     #[inline]
     fn constant_like(&self, v: f64) -> Self {
         Self {
-            value: self.value.constant_like(v),
-            grad: [self.value.constant_like(0.0); W],
+            value: v,
+            grad: [0.0; W],
         }
     }
     #[inline]
     fn with_value(&self, v: f64) -> Self {
         Self {
-            value: self.value.with_value(v),
+            value: v,
             grad: self.grad,
         }
     }

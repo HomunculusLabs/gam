@@ -8,13 +8,13 @@ use gam::families::custom_family::BlockwiseFitOptions;
 use gam::families::event_history::{
     CovariateSegment, Event, EventHistoryCohort, EventHistoryFit, ForecastRequest,
     FutureSegment, MarkKind, PopulationForecastRequest, SubjectHistory,
-    fit_event_history_formula, forecast, kolmogorov_smirnov_uniform, latent_exposure,
-    latent_state, population_forecast, predictive_pit,
+    fit_event_history_formula, forecast, kolmogorov_smirnov_uniform, population_forecast,
+    predictive_pit,
 };
-use ndarray::{Array1, Array2, Array3};
-use numpy::{PyArray1, PyArray2, PyArray3, PyReadonlyArray2};
+use ndarray::Array2;
+use numpy::{PyArray2, PyReadonlyArray2};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule};
+use pyo3::types::{PyDict, PyModule};
 use std::sync::Arc;
 
 /// A fitted event-history model held in memory.
@@ -75,83 +75,8 @@ impl PyEventHistoryModel {
         self.cohort.subjects.iter().map(|s| s.exit).collect()
     }
 
-    fn rank(&self) -> usize {
-        self.fit.rank()
-    }
-
-    fn atom_evidence(&self) -> Vec<f64> {
-        self.fit.atom_evidence.clone()
-    }
-
-    fn rank_path<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let out = PyList::empty(py);
-        for step in &self.fit.rank_path {
-            let item = PyDict::new(py);
-            item.set_item("rank", step.rank)?;
-            item.set_item("score_eigenvalue", step.score_eigenvalue)?;
-            item.set_item("proposed_log_rate", step.proposed_log_rate)?;
-            item.set_item("at_resolution_limit", step.at_resolution_limit)?;
-            item.set_item("evidence_gain", step.evidence_gain)?;
-            item.set_item("accepted", step.accepted)?;
-            item.set_item("converged", step.converged)?;
-            out.append(item)?;
-        }
-        Ok(out)
-    }
-
-    fn disease_covariance<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
-        PyArray2::from_owned_array(py, self.fit.disease_covariance())
-    }
-
-    fn temporal_covariance<'py>(&self, py: Python<'py>, lag: f64) -> Bound<'py, PyArray2<f64>> {
-        PyArray2::from_owned_array(py, self.fit.temporal_covariance(lag))
-    }
-
-    fn eigenmodes<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)> {
-        let (values, vectors) = self.fit.eigenmodes().map_err(|e| py_value_error(e.to_string()))?;
-        Ok((
-            PyArray1::from_owned_array(py, values),
-            PyArray2::from_owned_array(py, vectors),
-        ))
-    }
-
-    /// The smoothed latent state of one training subject on its own nodes.
-    fn latent_state<'py>(&self, py: Python<'py>, subject: usize) -> PyResult<Bound<'py, PyDict>> {
-        let history = self.subject(subject)?;
-        let fit = Arc::clone(&self.fit);
-        let cohort = Arc::clone(&self.cohort);
-        let path = detach_py_result(py, "event-history latent state", move || {
-            latent_state(&fit, &cohort, &history).map_err(|e| e.to_string())
-        })?;
-        let atoms = self.fit.rank();
-        let n = path.times.len();
-        let covariances = Array3::from_shape_vec((n, atoms, atoms), path.covariances)
-            .map_err(|e| py_value_error(e.to_string()))?;
-        let out = PyDict::new(py);
-        out.set_item("times", PyArray1::from_owned_array(py, Array1::from(path.times)))?;
-        out.set_item("means", PyArray2::from_owned_array(py, path.means))?;
-        out.set_item("covariances", PyArray3::from_owned_array(py, covariances))?;
-        Ok(out)
-    }
-
-    /// The follow-up average of one training subject's latent state.
-    fn latent_exposure<'py>(&self, py: Python<'py>, subject: usize) -> PyResult<Bound<'py, PyDict>> {
-        let history = self.subject(subject)?;
-        let fit = Arc::clone(&self.fit);
-        let cohort = Arc::clone(&self.cohort);
-        let (mean, cov) = detach_py_result(py, "event-history latent exposure", move || {
-            latent_exposure(&fit, &cohort, &history).map_err(|e| e.to_string())
-        })?;
-        let atoms = self.fit.rank();
-        let covariance = Array2::from_shape_vec((atoms, atoms), cov)
-            .map_err(|e| py_value_error(e.to_string()))?;
-        let out = PyDict::new(py);
-        out.set_item("mean", PyArray1::from_owned_array(py, Array1::from(mean)))?;
-        out.set_item("covariance", PyArray2::from_owned_array(py, covariance))?;
-        Ok(out)
+    fn atoms(&self) -> usize {
+        self.fit.atoms()
     }
 
     fn loadings<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
@@ -196,6 +121,24 @@ impl PyEventHistoryModel {
         Ok(self.fit.mark_coefficients(mark).to_vec())
     }
 
+    fn quadrature<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let q = &self.fit.quadrature;
+        let out = PyDict::new(py);
+        out.set_item("gauss_hermite_order", q.gauss_hermite_order)?;
+        out.set_item("mesh_refinement", q.mesh_refinement)?;
+        out.set_item("log_likelihood", q.log_likelihood)?;
+        let gh = PyDict::new(py);
+        gh.set_item("order", q.gauss_hermite.candidate)?;
+        gh.set_item("coefficient_shift", q.gauss_hermite.coefficient_shift)?;
+        gh.set_item("log_likelihood", q.gauss_hermite.log_likelihood)?;
+        out.set_item("gauss_hermite_check", gh)?;
+        let mesh = PyDict::new(py);
+        mesh.set_item("refinement", q.mesh.candidate)?;
+        mesh.set_item("coefficient_shift", q.mesh.coefficient_shift)?;
+        mesh.set_item("log_likelihood", q.mesh.log_likelihood)?;
+        out.set_item("mesh_check", mesh)?;
+        Ok(out)
+    }
 
     /// Forecast one training subject beyond its exit over a covariate path.
     #[pyo3(signature = (subject, horizons, future))]
@@ -311,7 +254,7 @@ impl PyEventHistoryModel {
 
 /// Fit an event-history model from flat arrays.
 #[pyfunction]
-#[pyo3(signature = (mark_names, mark_kinds, covariate_names, covariate_levels, covariates, subject_ids, entry, exit, event_subject, event_time, event_mark, segment_subject, segment_start, segment_row, formula))]
+#[pyo3(signature = (mark_names, mark_kinds, covariate_names, covariate_levels, covariates, subject_ids, entry, exit, event_subject, event_time, event_mark, segment_subject, segment_start, segment_row, formula, atoms))]
 fn fit_event_history(
     py: Python<'_>,
     mark_names: Vec<String>,
@@ -329,6 +272,7 @@ fn fit_event_history(
     segment_start: Vec<f64>,
     segment_row: Vec<usize>,
     formula: String,
+    atoms: usize,
 ) -> PyResult<PyEventHistoryModel> {
     let n = subject_ids.len();
     if entry.len() != n || exit.len() != n {
@@ -387,7 +331,7 @@ fn fit_event_history(
         subjects,
     };
     let (fit, cohort) = detach_py_result(py, "event-history fit", move || {
-        let fit = fit_event_history_formula(&mut cohort, &formula, BlockwiseFitOptions::default())
+        let fit = fit_event_history_formula(&mut cohort, &formula, atoms, BlockwiseFitOptions::default())
             .map_err(|e| e.to_string())?;
         Ok((fit, cohort))
     })?;

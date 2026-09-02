@@ -97,17 +97,45 @@ Two discretisations enter: the Gauss-Hermite order per latent axis and the
 time mesh the latent path is sampled on (the mesh cuts every follow-up at
 entry, exit, covariate changes and events, and integrates each cell by
 Gauss-Legendre at the order that resolves the spline basis exactly). The fit
-refines both until the fitted coefficients are stationary under refinement:
-at the fitted smoothing parameters the coefficients are re-solved at the next
-order (`2G − 1`) and on the halved mesh, and if any coefficient moves by more
-than `quadrature_tolerance` posterior standard deviations (default `0.01`)
-the fit repeats at the refined setting. The certificate the fit carries
-records both checks. An order whose Lagrange interpolant would amplify
-roundoff above the tolerance (the Lebesgue constant of interpolation on
-Hermite nodes grows exponentially) is refused rather than tried. The
-transient memory of an evaluation (`G^{2K}` for one backward kernel, `P·G^K`
-for the carried expectations) is checked against the machine's budget before
-any grid is built.
+refines both until the fitted coefficients are stationary under refinement.
+At the fitted coefficients the current setting is stationary, so the mode of
+a refined setting sits, to first order, at
+
+```text
+β + V (g' − g)
+```
+
+with `g'` and `g` the two settings' exact gradients at the same `β` and `V`
+the posterior covariance the fit publishes — the inverse penalised Hessian,
+which is the operator that turns a gradient discrepancy into a coefficient
+one. The fit measures that move at the next order (`2G − 1`) and on the
+halved mesh, in units of each coefficient's posterior standard deviation, and
+repeats at the refined setting if any coefficient moves by more than
+`quadrature_tolerance` (default `0.05`, a twentieth of the width the data
+itself leaves undetermined). It costs one gradient per candidate rather than
+a second fit whose own convergence would have to be certified first, and the
+certificate the fit carries records both checks.
+
+An order whose Lagrange interpolant would amplify roundoff above the
+tolerance (the Lebesgue constant of interpolation on Hermite nodes grows
+exponentially: about 20 at order 9, 2×10⁵ at 21, 8×10⁹ at 33) is refused
+rather than tried, and the mesh ladder stops where its cells are already
+finer than the shortest interval the cohort's own breakpoints distinguish.
+
+The latent grid is a product over the atoms, with a centre and a spread per
+axis. That represents a posterior whose axes are close to independent. Two
+atoms loading on the same mark give a posterior concentrated along a
+diagonal, which a product grid follows only by spending points in corners
+that carry no mass, and the interpolant rings there. The fit answers a
+posterior it cannot represent by raising the order once and then saying so;
+it does not climb into the orders where the interpolant's own roundoff is
+the larger error. Several atoms are therefore useful when they load on
+different marks, which is the case they exist for. A posterior the grid cannot represent — the signed
+interpolant going negative where the mass is, which shows up as a negative
+variance — raises the order rather than returning a number the
+representation could not carry. The transient memory of an evaluation
+(`G^{2K}` for one backward kernel, `P·G^K` for the carried expectations) is
+checked against the machine's budget before any grid is built.
 
 ## Fitting
 
@@ -122,7 +150,7 @@ let fit = fit_event_history(&mut cohort, &spec)?;
 fit.loadings;          // marks × atoms
 fit.rates;             // per atom, in the data's time unit
 fit.atom_log_lambdas;  // the ridge each atom ended on
-fit.rank_path;         // every rank step the evidence judged
+fit.quadrature;        // the refinement certificate
 ```
 
 `covariates` holds one term collection shared by every mark, or one per mark.
@@ -161,11 +189,9 @@ event history reveals.
 import gamfit
 model = gamfit.fit_event_history(
     subjects, events, covariates, "x + s(time)",
-    marks={"relapse": "recurrent", "death": "terminal"},
+    atoms=2, marks={"relapse": "recurrent", "death": "terminal"},
 )
-model.rank, model.disease_covariance(), model.temporal_covariance(5.0), model.eigenmodes()
-model.loadings, model.rates, model.atom_evidence, model.rank_path
-model.latent_state("subject-17"); model.latent_exposure("subject-17")
+model.loadings, model.rates, model.atom_log_lambdas, model.quadrature
 f = model.forecast("subject-17", horizons=[6.0, 7.0])
 f["survival"], f["expected_counts"]
 f = model.forecast("subject-17", horizons=[6.0, 7.0], future=[(5.5, {"x": 1.0}), (6.5, {"x": 0.0})])
@@ -189,7 +215,7 @@ for a subject with no history.
 
 ```bash
 gam fit-events --subjects s.csv --events e.csv --covariates c.csv \
-    --formula "x + s(time)" \
+    --formula "x + s(time)" --atoms 2 \
     --marks relapse:recurrent,death:terminal \
     --horizons-after-exit 1,2,5 --out summary.json
 ```
