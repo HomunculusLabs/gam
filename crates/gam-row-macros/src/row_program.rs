@@ -1664,20 +1664,28 @@ fn scaled_by(expression: &str, factor: Rational) -> String {
     }
 }
 
+/// The factor that occurs most often among `factors` (the earliest on a
+/// tie), or `None` when there are none.
+fn most_common_factor(factors: impl Iterator<Item = Rational>) -> Option<Rational> {
+    let factors: Vec<Rational> = factors.collect();
+    let mut common: Option<Rational> = None;
+    let mut best = 0;
+    for candidate in &factors {
+        let count = factors.iter().filter(|factor| *factor == candidate).count();
+        if count > best {
+            best = count;
+            common = Some(*candidate);
+        }
+    }
+    common
+}
+
 /// Sum terms `factor · expression` into one `factor · expression`: the most
 /// common factor among the terms is kept out of the arithmetic, and each
 /// term with another factor pays one multiply by the ratio. The terms keep
 /// their order.
 fn combine_dense_taylor_terms(terms: &[(Rational, String)]) -> Option<(Rational, String)> {
-    let mut common = terms.first()?.0;
-    let mut best = 0;
-    for (candidate, _) in terms {
-        let count = terms.iter().filter(|(factor, _)| factor == candidate).count();
-        if count > best {
-            best = count;
-            common = *candidate;
-        }
-    }
+    let common = most_common_factor(terms.iter().map(|(factor, _)| *factor))?;
     let mut sum: Option<String> = None;
     for (factor, expression) in terms {
         let term = scaled_by(expression, factor.over(common));
@@ -2021,11 +2029,8 @@ fn dense_taylor_compose(input: DenseTaylorJet, stack: &str) -> DenseTaylorJet {
     // entries multiply them, so a ratio between orders is applied to `B_d`
     // (input work) and never to the product with the leaf's result.
     for (index, terms) in terms.iter().enumerate().skip(1) {
-        let factors: Vec<(Rational, String)> = terms
-            .iter()
-            .map(|(_, (factor, _))| (*factor, String::new()))
-            .collect();
-        let Some((common, _)) = combine_dense_taylor_terms(&factors) else {
+        let Some(common) = most_common_factor(terms.iter().map(|(_, (factor, _))| *factor))
+        else {
             continue;
         };
         let mut sum: Option<String> = None;
