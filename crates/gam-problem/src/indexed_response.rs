@@ -250,13 +250,21 @@ pub enum OwnedLikelihoodWeights {
 
 /// Owned values over a declared `(row, output)` grid.
 ///
-/// `ConstantWithOverrides` is the canonical event-history representation:
-/// zero is implicit everywhere and only event cells are stored. It is also
-/// useful for sparse labels, exposures, and any coefficient field with a
-/// dominant background value.
+/// `ConstantWithOverrides` is the canonical sparse-event representation: zero
+/// is implicit everywhere and only event cells are stored. Row and output
+/// broadcasts retain separable fields such as quadrature exposure or an
+/// endpoint-specific threshold without allocating the Cartesian grid.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OwnedCellValues {
     Dense(Array2<f64>),
+    ByRow {
+        values: Array1<f64>,
+        n_outputs: usize,
+    },
+    ByOutput {
+        n_rows: usize,
+        values: Array1<f64>,
+    },
     Constant {
         n_rows: usize,
         n_outputs: usize,
@@ -274,6 +282,16 @@ pub enum OwnedCellValues {
 impl OwnedCellValues {
     pub fn dense(values: Array2<f64>) -> Self {
         Self::Dense(values)
+    }
+
+    /// Broadcast one value per row over every output.
+    pub fn by_row(values: Array1<f64>, n_outputs: usize) -> Self {
+        Self::ByRow { values, n_outputs }
+    }
+
+    /// Broadcast one value per output over every row.
+    pub fn by_output(n_rows: usize, values: Array1<f64>) -> Self {
+        Self::ByOutput { n_rows, values }
     }
 
     pub fn constant(n_rows: usize, n_outputs: usize, value: f64) -> Self {
@@ -321,6 +339,8 @@ impl OwnedCellValues {
     pub fn n_rows(&self) -> usize {
         match self {
             Self::Dense(values) => values.nrows(),
+            Self::ByRow { values, .. } => values.len(),
+            Self::ByOutput { n_rows, .. } => *n_rows,
             Self::Constant { n_rows, .. } | Self::ConstantWithOverrides { n_rows, .. } => *n_rows,
         }
     }
@@ -328,6 +348,8 @@ impl OwnedCellValues {
     pub fn n_outputs(&self) -> usize {
         match self {
             Self::Dense(values) => values.ncols(),
+            Self::ByRow { n_outputs, .. } => *n_outputs,
+            Self::ByOutput { values, .. } => values.len(),
             Self::Constant { n_outputs, .. }
             | Self::ConstantWithOverrides { n_outputs, .. } => *n_outputs,
         }
@@ -339,6 +361,8 @@ impl OwnedCellValues {
         }
         Some(match self {
             Self::Dense(values) => values[[row, output]],
+            Self::ByRow { values, .. } => values[row],
+            Self::ByOutput { values, .. } => values[output],
             Self::Constant { value, .. } => *value,
             Self::ConstantWithOverrides {
                 default,
@@ -720,6 +744,22 @@ mod tests {
         assert_eq!(values.value(2, 3), Some(9.0));
         assert_eq!(values.value(1, 2), Some(0.0));
         assert_eq!(values.value(3, 0), None);
+    }
+
+    #[test]
+    fn row_and_output_broadcasts_preserve_declared_grid_geometry() {
+        let by_row = OwnedCellValues::by_row(ndarray::array![0.25, 1.5], 3);
+        assert_eq!((by_row.n_rows(), by_row.n_outputs()), (2, 3));
+        assert_eq!(by_row.value(0, 0), Some(0.25));
+        assert_eq!(by_row.value(0, 2), Some(0.25));
+        assert_eq!(by_row.value(1, 1), Some(1.5));
+        assert_eq!(by_row.value(2, 0), None);
+
+        let by_output = OwnedCellValues::by_output(2, ndarray::array![3.0, 5.0, 7.0]);
+        assert_eq!((by_output.n_rows(), by_output.n_outputs()), (2, 3));
+        assert_eq!(by_output.value(0, 1), Some(5.0));
+        assert_eq!(by_output.value(1, 1), Some(5.0));
+        assert_eq!(by_output.value(0, 3), None);
     }
 
     #[test]
