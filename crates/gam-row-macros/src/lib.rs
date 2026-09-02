@@ -1855,6 +1855,7 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         }
         let mut roots = Vec::new();
         let mut assignments = Vec::new();
+        let mut entries = vec![vec![quote!(0.0); dimension]; dimension];
         for (row, columns) in channels.iter().enumerate() {
             for (column, derivatives) in columns.iter().enumerate().skip(row) {
                 roots.extend(derivatives.iter().copied());
@@ -1872,18 +1873,9 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                     Some((first, rest)) => quote!(#first #(+ #rest)*),
                 };
                 let temporary = format_ident!("__row_atom_third_{row}_{column}");
-                assignments.push(if row == column {
-                    quote! {
-                        let #temporary = #sum;
-                        out[#row][#column] = #temporary;
-                    }
-                } else {
-                    quote! {
-                        let #temporary = #sum;
-                        out[#row][#column] = #temporary;
-                        out[#column][#row] = #temporary;
-                    }
-                });
+                assignments.push(quote!(let #temporary = #sum;));
+                entries[row][column] = quote!(#temporary);
+                entries[column][row] = quote!(#temporary);
             }
         }
         let definitions = schedule_definitions(roots, &graph, &primaries, &constants)?;
@@ -1892,11 +1884,16 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         } else {
             quote!(#(#primaries: f64,)*)
         };
+        // The result is a literal, not a zero-filled array overwritten cell
+        // by cell: the literal's stores are disjoint, where a zero fill
+        // followed by the diagonal's stores overlaps two of them in flight.
+        // On the cause-specific fourth channel that overlap was the only
+        // difference from the hand kernel's assembly (#932).
+        let rows = entries.iter().map(|row| quote!([#(#row),*]));
         let body = quote! {
             #(#definitions)*
-            let mut out = [[0.0; #dimension]; #dimension];
             #(#assignments)*
-            out
+            [#(#rows),*]
         };
         output.push(quote! {
             #[inline(always)]
@@ -1963,6 +1960,7 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         }
         let mut roots = Vec::new();
         let mut assignments = Vec::new();
+        let mut entries = vec![vec![quote!(0.0); dimension]; dimension];
         for (row, columns) in channels.iter().enumerate() {
             for (column, derivatives) in columns.iter().enumerate().skip(row) {
                 roots.extend(derivatives.iter().flatten().copied());
@@ -1986,18 +1984,9 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
                     Some((first, rest)) => quote!(#first #(+ #rest)*),
                 };
                 let temporary = format_ident!("__row_atom_fourth_{row}_{column}");
-                assignments.push(if row == column {
-                    quote! {
-                        let #temporary = #sum;
-                        out[#row][#column] = #temporary;
-                    }
-                } else {
-                    quote! {
-                        let #temporary = #sum;
-                        out[#row][#column] = #temporary;
-                        out[#column][#row] = #temporary;
-                    }
-                });
+                assignments.push(quote!(let #temporary = #sum;));
+                entries[row][column] = quote!(#temporary);
+                entries[column][row] = quote!(#temporary);
             }
         }
         let definitions = schedule_definitions(roots, &graph, &primaries, &constants)?;
@@ -2006,11 +1995,16 @@ fn expand(input: RowAtomInput) -> Result<TokenStream2> {
         } else {
             quote!(#(#primaries: f64,)*)
         };
+        // The result is a literal, not a zero-filled array overwritten cell
+        // by cell: the literal's stores are disjoint, where a zero fill
+        // followed by the diagonal's stores overlaps two of them in flight.
+        // On the cause-specific fourth channel that overlap was the only
+        // difference from the hand kernel's assembly (#932).
+        let rows = entries.iter().map(|row| quote!([#(#row),*]));
         let body = quote! {
             #(#definitions)*
-            let mut out = [[0.0; #dimension]; #dimension];
             #(#assignments)*
-            out
+            [#(#rows),*]
         };
         output.push(quote! {
             #[inline(always)]
@@ -2144,6 +2138,44 @@ mod row_atom_tests {
         let multiplies = body.matches(" * ").count();
         assert!(multiplies <= 17, "{multiplies} multiplies:\n{body}");
         assert!(!body.contains("* - 1.0"), "a coefficient of -1 is a sign:\n{body}");
+    }
+
+    /// A contracted third or fourth derivative is returned as a literal with
+    /// the absent cells written `0.0`, never as a zero-filled array
+    /// overwritten cell by cell (whose diagonal stores overlap the fill's in
+    /// flight). The cause-specific atom is separable, so both matrices are
+    /// diagonal.
+    #[test]
+    fn contracted_matrices_are_emitted_as_literals() {
+        let input = syn::parse_str::<RowAtomInput>(
+            "fn cause_specific [third, fourth](
+                eta_exit, eta_entry, derivative;
+                weight: scale, entry_active: bool, event: bool
+            ) {
+                weight
+                    * (exp(eta_exit)
+                        - entry_active * exp(eta_entry)
+                        - event * (eta_exit + ln(derivative)))
+            }",
+        )
+        .expect("cause-specific row atom");
+        let expanded = super::expand(input).expect("expand row atom").to_string();
+        for (surface, literal) in [
+            (
+                "fn cause_specific_third_contracted",
+                "[[__row_atom_third_0_0 , 0.0 , 0.0] , [0.0 , __row_atom_third_1_1 , 0.0] , [0.0 , 0.0 , __row_atom_third_2_2]]",
+            ),
+            (
+                "fn cause_specific_fourth_contracted",
+                "[[__row_atom_fourth_0_0 , 0.0 , 0.0] , [0.0 , __row_atom_fourth_1_1 , 0.0] , [0.0 , 0.0 , __row_atom_fourth_2_2]]",
+            ),
+        ] {
+            let start = expanded.find(surface).expect(surface);
+            let body = &expanded[start..];
+            let body = &body[..body.find("# [inline").unwrap_or(body.len())];
+            assert!(!body.contains("let mut out"), "{body}");
+            assert!(body.contains(literal), "{body}");
+        }
     }
 
     #[test]
