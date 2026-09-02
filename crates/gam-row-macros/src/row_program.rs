@@ -2261,7 +2261,25 @@ fn identifier_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The name a top-level definition line binds, if the line is one.
+/// Whether a definition's right-hand side is a call (`= leaf(...)`, with or
+/// without a module path): a leaf call is an anchor, issued as early as its
+/// inputs allow, never sunk.
+fn is_call_definition(line: &str) -> bool {
+    let Some((_, rhs)) = line.split_once(" = ") else {
+        return false;
+    };
+    let rhs = rhs.trim_start();
+    let callee: String = rhs
+        .chars()
+        .take_while(|character| character.is_alphanumeric() || *character == '_' || *character == ':')
+        .collect();
+    !callee.is_empty()
+        && callee.chars().next().is_some_and(|first| first.is_alphabetic() || first == '_')
+        && rhs[callee.len()..].trim_start().starts_with('(')
+}
+
+/// The name a top-level definition line binds, if the line is a sinkable
+/// definition: a pure `let`/`double` whose right-hand side is not a call.
 fn defined_name(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
     let rest = if let Some(rest) = trimmed.strip_prefix("let mut ") {
@@ -2273,6 +2291,9 @@ fn defined_name(line: &str) -> Option<String> {
     } else {
         return None;
     };
+    if is_call_definition(trimmed) {
+        return None;
+    }
     let name: String = rest
         .chars()
         .take_while(|character| character.is_alphanumeric() || *character == '_')
@@ -2336,10 +2357,17 @@ fn emitted_items(body: &str) -> Vec<EmittedItem> {
 /// probit kernel's call and reloaded behind it, which the hand kernel, that
 /// derives those products after the call, never pays (`RIGID-BERNOULLI-VGH-932`).
 /// Sinking definitions to their first use leaves only the call's own inputs
-/// live across it. Everything here is a pure `let`; `if` blocks and the
-/// result lines are anchors that keep their order, and a definition is
-/// placed before the first anchor that mentions it, after the definitions it
-/// mentions itself.
+/// live across it.
+///
+/// Leaf calls go the other way: they are anchors, issued in program order as
+/// early as their inputs allow, so independent calls sit next to each other
+/// and their latencies overlap. On the location-scale row the hand kernel
+/// issues its two `exp` calls back to back at the top; the generated kernel
+/// issued them 46 instructions apart with the entry composition between,
+/// and lost 10% on EPYC Milan with fewer instructions in every other class
+/// (`SLS-MACRO-CODEGEN-932`). `if` blocks and the result lines are anchors
+/// too. A sinkable definition is placed before the first anchor that
+/// mentions it, after the definitions it mentions itself.
 fn sink_definitions_to_first_use(body: &str) -> String {
     let items = emitted_items(body);
     let mut pending: Vec<usize> = Vec::new();
@@ -4551,6 +4579,26 @@ mod tests {
         let call = cuda.find("d_probit(a_v").expect("the CUDA leaf call");
         let gradient = cuda.find("double a_g0").expect("the CUDA gradient of `a`");
         assert!(gradient > call, "{cuda}");
+
+        // Two leaf calls with independent inputs are issued back to back, and
+        // the work between them in program order follows both.
+        let program = quote! {
+            fn adjacent(x, y, z;)
+            emit [order2];
+            leaves { exponential => exp_stack => d_exp }
+            witnesses [];
+            {
+                let a = compose(exponential, x);
+                let b = mul(a, y);
+                let c = compose(exponential, z);
+                return add(b, c);
+            }
+        };
+        let rust = emitted_function(program, "adjacent_order2");
+        let first = rust.find("exp_stack (x)").expect("the first leaf call");
+        let second = rust.find("exp_stack (z)").expect("the second leaf call");
+        let between = rust.find("let b_v").expect("the value between them");
+        assert!(first < second && second < between, "{rust}");
     }
 
     #[test]

@@ -881,9 +881,7 @@ impl SaeRowJetMemoryLedger {
                 .ok_or_else(|| format!("SAE row-jet i32 byte count overflow for {shape:?}"))
         };
 
-        let mut fixed_device_bytes = f64_count(&[n_beta, p])?
-            .checked_add(i32_count(&[n_beta])?)
-            .ok_or_else(|| "SAE row-jet fixed device-byte sum overflow".to_string())?;
+        let mut fixed_device_bytes = i32_count(&[n_beta])?;
         let mut empty_handle_bytes = 0usize;
         let mut add_empty_handle = |bytes: usize| -> Result<(), String> {
             empty_handle_bytes = empty_handle_bytes
@@ -913,6 +911,7 @@ impl SaeRowJetMemoryLedger {
             f64_count(&[q, q, p])?,
             f64_count(&[n_beta])?,
             f64_count(&[q, n_beta])?,
+            f64_count(&[n_beta, p])?,
         ]
         .into_iter()
         .try_fold(0usize, |sum, value| sum.checked_add(value))
@@ -957,7 +956,6 @@ impl SaeRowJetMemoryLedger {
             .ok_or_else(|| "SAE row-jet beta-atom byte count overflow".to_string())?;
         let semantic_input = [
             input_f64,
-            f64_count(&[n_beta, p])?,
             active_bool_bytes,
             primary_bytes,
             coordinate_slot_bytes,
@@ -990,7 +988,6 @@ impl SaeRowJetMemoryLedger {
             .ok_or_else(|| "SAE row-jet host row-byte sum overflow".to_string())?;
         let fixed_host_bytes = [
             f64_count(&[k])?,
-            f64_count(&[n_beta, p])?,
             n_beta
                 .checked_mul(std::mem::size_of::<usize>())
                 .ok_or_else(|| "SAE row-jet shared beta-atom byte overflow".to_string())?,
@@ -1058,6 +1055,7 @@ impl SaeRowJetMemoryLedger {
                 f64_count(&[q, q, p])?,
                 f64_count(&[n_beta])?,
                 f64_count(&[q, n_beta])?,
+                f64_count(&[n_beta, p])?,
             ],
             "input-f64",
         )?;
@@ -1094,7 +1092,6 @@ impl SaeRowJetMemoryLedger {
         let semantic_input = sum(
             &[
                 input_f64,
-                f64_count(&[n_beta, p])?,
                 k.checked_mul(std::mem::size_of::<bool>())
                     .ok_or_else(|| "SAE row-jet contracted active-mask overflow".to_string())?,
                 q.checked_mul(std::mem::size_of::<SaeRowJetPrimary>())
