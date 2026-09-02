@@ -661,29 +661,6 @@ fn sls_program_exp_stack(value: f64) -> [f64; 5] {
     [exp; 5]
 }
 
-/// A residual-distribution derivative stack (`logS`, `logφ` or `log g`) at the
-/// program's composition point.
-///
-/// The point is not inspected. The kernel builder evaluates every stack at the
-/// point the program recomputes from the same parameters (`u0 = h0 + q0`, and
-/// likewise `u1`, `g`), and refuses or propagates a non-finite point there, so
-/// a NaN point cannot arrive with a finite stack; an inactive slot never
-/// reaches this leaf at all (the activity gate selects zero without touching
-/// the stack, which the poisoned-stack fuzz below pins). A NaN select here
-/// guarded a state that cannot be constructed, once per composition, three
-/// compositions per row, in the release lowering (`SLS-ROW-VGH-932`).
-#[inline(always)]
-fn sls_program_outer_stack(
-    _composition_point: f64,
-    value: f64,
-    first: f64,
-    second: f64,
-    third: f64,
-    fourth: f64,
-) -> [f64; 5] {
-    [value, first, second, third, fourth]
-}
-
 row_program! {
     fn sls_row_program(
         h0,
@@ -717,7 +694,11 @@ row_program! {
     emit [generic, order2, third, fourth];
     leaves {
         exponential => sls_program_exp_stack => sls_program_exp_stack_cuda,
-        outer => sls_program_outer_stack => sls_program_outer_stack_cuda,
+        // Each residual-distribution stack (`logS`, `logφ`, `log g`) is
+        // supplied: the kernel builder evaluated it at the point the program
+        // recomputes from the same parameters (`u0 = h0 + q0`, likewise `u1`,
+        // `g`), and an inactive slot never reaches the compose.
+        outer => supplied,
     }
     witnesses [];
     {

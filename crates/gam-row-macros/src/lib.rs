@@ -1913,7 +1913,10 @@ pub fn row_atom(input: TokenStream) -> TokenStream {
 /// evaluator plus symbolically sparse order-2 Rust and CUDA functions. The
 /// declaration owns the complete algebraic schedule; stable unary primitives
 /// are explicit leaves mapped to one Rust derivative-stack builder and one CUDA
-/// stack function. Both direct backends consume the same symbolic SSA lowering,
+/// stack function, or declared `supplied` when a kernel builder has already
+/// evaluated the stack at the composition point (the compose's five scalar
+/// entries are the stack; nothing is called and the point is not inspected).
+/// Both direct backends consume the same symbolic SSA lowering,
 /// compute each nonzero gradient and packed Hessian component once, and scatter
 /// Hessian symmetry only at the output seam.
 #[proc_macro]

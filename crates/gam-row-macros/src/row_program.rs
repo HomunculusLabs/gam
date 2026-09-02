@@ -9,8 +9,61 @@ use syn::{
 
 struct Leaf {
     alias: Ident,
-    rust: Path,
-    cuda: Ident,
+    kind: LeafKind,
+}
+
+/// How a leaf produces the derivative stack a `compose` consumes.
+enum LeafKind {
+    /// A stack builder: one Rust function and one CUDA function, each taking
+    /// the composition point followed by the compose's scalar arguments.
+    Function { rust: Path, cuda: Ident },
+    /// The stack is supplied: the compose's five scalar arguments ARE
+    /// `[value, first, second, third, fourth]` at the composition point, as
+    /// the kernel builder evaluated them there. Nothing is called and the
+    /// point is not inspected. Before this kind existed such a stack went
+    /// through a builder whose only use of the point was a NaN select, eleven
+    /// instructions per composition in release code, guarding a state the
+    /// kernel builders cannot construct (#932).
+    Supplied,
+}
+
+impl Leaf {
+    /// The Rust expression producing this leaf's stack at `point`.
+    fn rust_application(&self, point: TokenStream2, arguments: &[Expr]) -> TokenStream2 {
+        match &self.kind {
+            LeafKind::Function { rust, .. } => quote!(#rust(#point, #(#arguments),*)),
+            LeafKind::Supplied => quote!([#(#arguments),*]),
+        }
+    }
+
+    /// [`Self::rust_application`] as source text for the string lowerings.
+    fn rust_application_source(&self, point: &str, arguments: &[String]) -> String {
+        match &self.kind {
+            LeafKind::Function { rust, .. } => {
+                let rust = quote!(#rust).to_string();
+                let mut all = vec![point.to_string()];
+                all.extend(arguments.iter().cloned());
+                format!("{rust}({})", all.join(", "))
+            }
+            LeafKind::Supplied => format!("[{}]", arguments.join(", ")),
+        }
+    }
+
+    /// The CUDA prelude declaring `stack` (three entries: the order-2
+    /// lowering reads value, first and second) and filling it.
+    fn cuda_stack_prelude(&self, point: &str, arguments: &[String], stack: &str) -> String {
+        match &self.kind {
+            LeafKind::Function { cuda, .. } => {
+                let mut all = vec![point.to_string()];
+                all.extend(arguments.iter().cloned());
+                all.push(stack.to_string());
+                format!("double {stack}[3];\n{cuda}({});", all.join(", "))
+            }
+            LeafKind::Supplied => {
+                format!("double {stack}[3] = {{{}}};", arguments[..3].join(", "))
+            }
+        }
+    }
 }
 
 enum RawStatement {
@@ -169,10 +222,17 @@ impl Parse for Input {
         while !leaf_tokens.is_empty() {
             let alias = leaf_tokens.parse()?;
             leaf_tokens.parse::<Token![=>]>()?;
-            let rust = leaf_tokens.parse()?;
-            leaf_tokens.parse::<Token![=>]>()?;
-            let cuda = leaf_tokens.parse()?;
-            leaves.push(Leaf { alias, rust, cuda });
+            let rust: Path = leaf_tokens.parse()?;
+            let kind = if rust.is_ident("supplied") && !leaf_tokens.peek(Token![=>]) {
+                LeafKind::Supplied
+            } else {
+                leaf_tokens.parse::<Token![=>]>()?;
+                LeafKind::Function {
+                    rust,
+                    cuda: leaf_tokens.parse()?,
+                }
+            };
+            leaves.push(Leaf { alias, kind });
             if leaf_tokens.peek(Token![,]) {
                 leaf_tokens.parse::<Token![,]>()?;
             }
@@ -512,10 +572,10 @@ fn rust_expression(expression: &ProgramExpr, leaves: &[Leaf]) -> TokenStream2 {
             arguments,
         } => {
             let value_ident = value;
-            let rust_leaf = &leaves[*leaf].rust;
+            let stack = leaves[*leaf].rust_application(quote!(value.value()), arguments);
             quote!({
                 let value = #value_ident;
-                value.compose_unary(#rust_leaf(value.value(), #(#arguments),*))
+                value.compose_unary(#stack)
             })
         }
     }
@@ -560,10 +620,10 @@ fn rust_runtime_expression(expression: &ProgramExpr, leaves: &[Leaf]) -> TokenSt
             arguments,
         } => {
             let value_ident = value;
-            let rust_leaf = &leaves[*leaf].rust;
+            let stack = leaves[*leaf].rust_application(quote!(value.value()), arguments);
             quote!({
                 let value = #value_ident.clone();
-                value.compose_unary(#rust_leaf(value.value(), #(#arguments),*))
+                value.compose_unary(#stack)
             })
         }
     }
@@ -600,8 +660,39 @@ fn rust_scalar_expression(expression: &ProgramExpr, leaves: &[Leaf]) -> TokenStr
             value,
             arguments,
         } => {
-            let rust_leaf = &leaves[*leaf].rust;
-            quote!(#rust_leaf(#value, #(#arguments),*)[0])
+            let stack = leaves[*leaf].rust_application(quote!(#value), arguments);
+            quote!(#stack[0])
+        }
+    }
+}
+
+/// A supplied stack composes exactly its five entries; a builder leaf takes
+/// whatever scalar arguments its function declares.
+fn validate_supplied_stacks(expression: &ProgramExpr, leaves: &[Leaf]) -> Result<()> {
+    match expression {
+        ProgramExpr::Path(..) | ProgramExpr::Zero => Ok(()),
+        ProgramExpr::Neg(value)
+        | ProgramExpr::Scale(value, ..)
+        | ProgramExpr::AddConstant(value, ..) => validate_supplied_stacks(value, leaves),
+        ProgramExpr::Add(left, right) | ProgramExpr::Mul(left, right) => {
+            validate_supplied_stacks(left, leaves)?;
+            validate_supplied_stacks(right, leaves)
+        }
+        ProgramExpr::Compose {
+            leaf,
+            value,
+            arguments,
+        } => {
+            if matches!(leaves[*leaf].kind, LeafKind::Supplied) && arguments.len() != 5 {
+                return Err(syn::Error::new_spanned(
+                    value,
+                    format!(
+                        "a supplied stack composes exactly five entries `[value, first, second, third, fourth]`, got {}",
+                        arguments.len()
+                    ),
+                ));
+            }
+            Ok(())
         }
     }
 }
@@ -1163,25 +1254,21 @@ fn symbolic_expression(
             let suffix = *stack_index;
             *stack_index += 1;
             let stack = format!("{owner}_stack{suffix}");
-            let mut leaf_arguments = vec![input.value.clone()];
+            let mut leaf_arguments = Vec::new();
             for argument in arguments {
                 leaf_arguments.push(symbolic_scalar(argument, constants, target)?);
             }
             match target {
                 SymbolicTarget::Rust => {
-                    let rust_leaf = &leaves[*leaf].rust;
-                    let rust_leaf = quote!(#rust_leaf).to_string();
-                    preludes.push(format!(
-                        "let {stack} = {rust_leaf}({});",
-                        leaf_arguments.join(", ")
-                    ));
+                    let application =
+                        leaves[*leaf].rust_application_source(&input.value, &leaf_arguments);
+                    preludes.push(format!("let {stack} = {application};"));
                 }
                 SymbolicTarget::Cuda => {
-                    let cuda_leaf = &leaves[*leaf].cuda;
-                    leaf_arguments.push(stack.clone());
-                    preludes.push(format!(
-                        "double {stack}[3];\n{cuda_leaf}({});",
-                        leaf_arguments.join(", ")
+                    preludes.push(leaves[*leaf].cuda_stack_prelude(
+                        &input.value,
+                        &leaf_arguments,
+                        &stack,
                     ));
                 }
             }
@@ -1754,16 +1841,13 @@ fn dense_taylor_expression(
             let suffix = *temporary_index;
             *temporary_index += 1;
             let stack = format!("__row_program_{owner}_dense_stack{suffix}");
-            let mut leaf_arguments = vec![symbolic_component(&input.coefficients[0]).to_string()];
+            let point = symbolic_component(&input.coefficients[0]).to_string();
+            let mut leaf_arguments = Vec::new();
             for argument in arguments {
                 leaf_arguments.push(symbolic_scalar(argument, constants, SymbolicTarget::Rust)?);
             }
-            let rust_leaf = &leaves[*leaf].rust;
-            let rust_leaf = quote!(#rust_leaf).to_string();
-            preludes.push(format!(
-                "let {stack} = {rust_leaf}({});",
-                leaf_arguments.join(", ")
-            ));
+            let application = leaves[*leaf].rust_application_source(&point, &leaf_arguments);
+            preludes.push(format!("let {stack} = {application};"));
             dense_taylor_compose(input, &stack)
         }
     };
@@ -1873,16 +1957,13 @@ fn directional_expression(
             let suffix = *stack_index;
             *stack_index += 1;
             let stack = format!("{owner}_directional_stack{suffix}");
-            let mut leaf_arguments = vec![input.base.value.clone()];
+            let mut leaf_arguments = Vec::new();
             for argument in arguments {
                 leaf_arguments.push(symbolic_scalar(argument, constants, SymbolicTarget::Rust)?);
             }
-            let rust_leaf = &leaves[*leaf].rust;
-            let rust_leaf = quote!(#rust_leaf).to_string();
-            preludes.push(format!(
-                "let {stack} = {rust_leaf}({});",
-                leaf_arguments.join(", ")
-            ));
+            let application =
+                leaves[*leaf].rust_application_source(&input.base.value, &leaf_arguments);
+            preludes.push(format!("let {stack} = {application};"));
 
             let base = symbolic_compose_jet(input.base.clone(), &stack, 0);
             let first = symbolic_compose_jet(input.base.clone(), &stack, 1);
@@ -2102,16 +2183,13 @@ fn dense_taylor_schedule(
                 syn::Error::new_spanned(value, "dense root compose input is not defined")
             })?;
             let stack = "__row_program_result_dense_root_stack".to_string();
-            let mut leaf_arguments = vec![symbolic_component(&input.coefficients[0]).to_string()];
+            let point = symbolic_component(&input.coefficients[0]).to_string();
+            let mut leaf_arguments = Vec::new();
             for argument in arguments {
                 leaf_arguments.push(symbolic_scalar(argument, constants, SymbolicTarget::Rust)?);
             }
-            let rust_leaf = &leaves[*leaf].rust;
-            let rust_leaf = quote!(#rust_leaf).to_string();
-            result_preludes.push(format!(
-                "let {stack} = {rust_leaf}({});",
-                leaf_arguments.join(", ")
-            ));
+            let application = leaves[*leaf].rust_application_source(&point, &leaf_arguments);
+            result_preludes.push(format!("let {stack} = {application};"));
             (input, Some(stack))
         }
         _ => {
@@ -3474,6 +3552,17 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         }
     }
     let result = parse_program_expr(&body.result, &bindings, &constant_names, &leaf_indices)?;
+    for statement in &statements {
+        match statement {
+            Statement::Local { value, .. } => validate_supplied_stacks(value, &leaves)?,
+            Statement::If { assignments, .. } => {
+                for assignment in assignments {
+                    validate_supplied_stacks(&assignment.1, &leaves)?;
+                }
+            }
+        }
+    }
+    validate_supplied_stacks(&result, &leaves)?;
     for witness in &witnesses {
         if !bindings.contains(&witness.to_string()) {
             return Err(syn::Error::new_spanned(
@@ -4195,6 +4284,46 @@ mod tests {
         }
         assert!(!cuda.contains("* 0.0"));
         assert!(!cuda.contains("0.0 *"));
+    }
+
+    /// A supplied stack composes without a call: the five entries ARE the
+    /// stack (#932). The rigid marginal-link stack and the location-scale
+    /// residual stacks are evaluated by their kernel builders at the point the
+    /// program recomputes; before this leaf kind each went through a function
+    /// whose only use of the point was a NaN select.
+    #[test]
+    fn supplied_stack_composes_without_a_call() {
+        let program = quote! {
+            fn given(x; a, b, c, d, e)
+            emit [order2, cuda];
+            leaves { stack => supplied }
+            witnesses [];
+            {
+                let out = compose(stack, x, a, b, c, d, e);
+                return out;
+            }
+        };
+        let rust = emitted_function(program.clone(), "given_order2");
+        let compact = rust.replace(' ', "");
+        assert!(compact.contains("letout_stack0=[a,b,c,d,e];"), "{rust}");
+        assert!(!rust.contains("supplied"), "{rust}");
+        let cuda = emitted_cuda(program);
+        assert!(cuda.contains("double out_stack0[3] = {a, b, c};"), "{cuda}");
+        assert!(!cuda.contains("supplied"), "{cuda}");
+
+        let short = syn::parse2::<Input>(quote! {
+            fn given(x; a, b)
+            emit [order2];
+            leaves { stack => supplied }
+            witnesses [];
+            {
+                let out = compose(stack, x, a, b);
+                return out;
+            }
+        })
+        .expect("parse row program");
+        let error = expand(short).expect_err("a two-entry supplied stack is refused");
+        assert!(error.to_string().contains("exactly five entries"), "{error}");
     }
 
     #[test]

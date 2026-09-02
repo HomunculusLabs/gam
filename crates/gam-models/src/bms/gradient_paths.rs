@@ -1598,28 +1598,6 @@ pub(super) fn rigid_standard_normal_neglog_only(
     Ok(-w * logcdf)
 }
 
-/// The supplied marginal-link derivative stack `[q, q1, q2, q3, q4]` at the
-/// program's expansion point.
-///
-/// The point is not inspected. [`bernoulli_marginal_link_map`] computes this
-/// stack from the same `eta` it stores as the expansion point, so a NaN point
-/// arrives with a NaN `q` (the constructor refuses it before that), and a NaN
-/// `q` makes the signed margin NaN, which the probit leaf turns into NaN on
-/// every channel and the row kernel rejects on its witness. A NaN select here
-/// guarded a state that cannot be constructed, and it cost eleven
-/// instructions per row in the release lowering (`RIGID-BERNOULLI-VGH-932`).
-#[inline(always)]
-fn rigid_supplied_link_stack(
-    _composition_point: f64,
-    value: f64,
-    first: f64,
-    second: f64,
-    third: f64,
-    fourth: f64,
-) -> [f64; 5] {
-    [value, first, second, third, fourth]
-}
-
 #[inline(always)]
 fn rigid_observed_scale_stack(observed_slope: f64) -> [f64; 5] {
     let scale = (1.0 + observed_slope * observed_slope).sqrt();
@@ -1653,7 +1631,9 @@ row_program! {
     )
     emit [generic, order2, third, fourth, full];
     leaves {
-        supplied_link => rigid_supplied_link_stack => rigid_supplied_link_stack_cuda,
+        // The marginal-link stack `[q, q1, q2, q3, q4]` is supplied: the map's
+        // constructor evaluated it at the same `eta` the program composes at.
+        supplied_link => supplied,
         observed_scale => rigid_observed_scale_stack => rigid_observed_scale_stack_cuda,
         signed_probit => signed_probit_neglog_unary_stack => signed_probit_neglog_unary_stack_cuda,
     }
