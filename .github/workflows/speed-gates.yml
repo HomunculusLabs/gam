@@ -118,6 +118,9 @@ jobs:
           set -euo pipefail
           uname -a
           nproc
+          # Identical-work cells are ordered by the core's scheduling, so the
+          # CPU model belongs next to every verdict this job prints.
+          lscpu | grep -E "^Model name|^L2|^L3" | sed 's/ \+/ /g'
           rustc -vV
 
       - name: Build and run every derived gate in the release profile
