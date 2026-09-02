@@ -232,8 +232,8 @@ pub use solver::estimate::reml::reml_outer_engine::PenaltySubspaceTrace;
 pub use gam_problem::{
     DeclaredHessianForm, Derivative, EfsEval, HessianMaterialization, HessianOperator,
     HessianValue, IndexedCellSet, IndexedResponseError, LikelihoodWeights, ObjectiveEvalError,
-    OuterEval, OuterStrategyError, SeparableCellMeasure, StructuralCells,
-    checked_exp_log_strength, checked_log_strength,
+    OuterEval, OuterStrategyError, SeparableCellMeasure, StructuralCells, checked_exp_log_strength,
+    checked_log_strength,
 };
 pub use gam_runtime::resource::{
     ByteLruCache, DerivativeStorageMode, MaterializationPolicy, MatrixMaterializationError,

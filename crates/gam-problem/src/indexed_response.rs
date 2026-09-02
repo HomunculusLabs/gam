@@ -180,11 +180,7 @@ impl IndexedCellSet {
             .is_some_and(|outputs| outputs.binary_search(&output).is_ok())
     }
 
-    fn validate_shape(
-        &self,
-        n_rows: usize,
-        n_outputs: usize,
-    ) -> Result<(), IndexedResponseError> {
+    fn validate_shape(&self, n_rows: usize, n_outputs: usize) -> Result<(), IndexedResponseError> {
         if (self.n_rows, self.n_outputs) != (n_rows, n_outputs) {
             return Err(IndexedResponseError::new(format!(
                 "indexed cell set geometry ({}, {}) does not match response geometry ({n_rows}, {n_outputs})",
@@ -259,11 +255,7 @@ impl<'a> SeparableCellMeasure<'a> {
     }
 
     /// Validate every shape, weight, and sparse-set index against `(N, M)`.
-    pub fn validate(
-        &self,
-        n_rows: usize,
-        n_outputs: usize,
-    ) -> Result<(), IndexedResponseError> {
+    pub fn validate(&self, n_rows: usize, n_outputs: usize) -> Result<(), IndexedResponseError> {
         match self.structural {
             StructuralCells::All => {}
             StructuralCells::Dense(mask) => {
@@ -299,10 +291,7 @@ impl<'a> SeparableCellMeasure<'a> {
                     )));
                 }
                 for ((row, output), &weight) in weights.indexed_iter() {
-                    validate_weight(
-                        weight,
-                        format!("cell likelihood weight[{row},{output}]"),
-                    )?;
+                    validate_weight(weight, format!("cell likelihood weight[{row},{output}]"))?;
                 }
             }
         }
@@ -355,10 +344,8 @@ mod tests {
         assert_eq!(cells.row_outputs(1), Some(&[][..]));
         assert_eq!(cells.row_outputs(2), Some(&[0, 3][..]));
 
-        let only = SeparableCellMeasure::new(
-            StructuralCells::Only(&cells),
-            LikelihoodWeights::Uniform,
-        );
+        let only =
+            SeparableCellMeasure::new(StructuralCells::Only(&cells), LikelihoodWeights::Uniform);
         only.validate(3, 4).expect("matching inclusion geometry");
         assert_eq!(only.active_weight(2, 3), Some(1.0));
         assert_eq!(only.active_weight(2, 2), None);
@@ -374,8 +361,7 @@ mod tests {
 
     #[test]
     fn structural_absence_is_distinct_from_zero_likelihood_weight() {
-        let excluded = IndexedCellSet::from_cells(1, 2, vec![(0, 0)])
-            .expect("valid exclusion set");
+        let excluded = IndexedCellSet::from_cells(1, 2, vec![(0, 0)]).expect("valid exclusion set");
         let weights = ndarray::array![0.0];
         let measure = SeparableCellMeasure::new(
             StructuralCells::AllExcept(&excluded),

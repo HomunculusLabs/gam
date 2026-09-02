@@ -504,8 +504,8 @@ mod tests {
 
     #[test]
     fn structurally_inactive_cells_have_no_likelihood_score_or_curvature() {
-        let excluded = IndexedCellSet::from_cells(2, 2, vec![(0, 1)])
-            .expect("valid sparse exclusion set");
+        let excluded =
+            IndexedCellSet::from_cells(2, 2, vec![(0, 1)]).expect("valid sparse exclusion set");
         let cell_weights = ndarray::array![[2.0, 7.0], [3.0, 5.0]];
         let measure = SeparableCellMeasure::new(
             StructuralCells::AllExcept(&excluded),
@@ -528,10 +528,7 @@ mod tests {
         for &(row, output) in &[(0usize, 0usize), (1, 0), (1, 1)] {
             let mu = sigmoid_stable(eta[[row, output]]);
             let weight = cell_weights[[row, output]];
-            assert_eq!(
-                gradient[[row, output]],
-                weight * (y[[row, output]] - mu)
-            );
+            assert_eq!(gradient[[row, output]], weight * (y[[row, output]] - mu));
             assert_eq!(curvature[[row, output]], weight * mu * (1.0 - mu));
         }
     }
@@ -539,12 +536,9 @@ mod tests {
     #[test]
     fn curvature_override_cannot_reintroduce_an_inactive_cell() {
         let (design, y, penalty, lambdas) = toy_inputs();
-        let excluded = IndexedCellSet::from_cells(
-            design.nrows(),
-            y.ncols(),
-            vec![(0usize, 1usize)],
-        )
-        .expect("valid sparse exclusion set");
+        let excluded =
+            IndexedCellSet::from_cells(design.nrows(), y.ncols(), vec![(0usize, 1usize)])
+                .expect("valid sparse exclusion set");
         let measure = SeparableCellMeasure::new(
             StructuralCells::AllExcept(&excluded),
             LikelihoodWeights::Uniform,
