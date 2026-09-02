@@ -1416,3 +1416,364 @@ fn nb_location_scale_inner_solve_converges_on_heteroscedastic_counts() {
 // the graduated continuation is the correct canonical cold solve for this
 // family and becomes the production fix.
 // =====================================================================
+
+/// A binomial location-scale wiggle family with one converged-looking state
+/// per block (threshold, log-sigma, wiggle), for the row-lowering gates.
+///
+/// Built from the surviving constructors: the knots from the seed index, the
+/// wiggle block from those knots, the family from its fields.
+pub(crate) fn bls_wiggle_workspace_fixture() -> (
+    BinomialLocationScaleWiggleFamily,
+    Vec<ParameterBlockState>,
+) {
+    let link_kind = InverseLink::Standard(StandardLink::Probit);
+    let n = 10usize;
+    let pt = 3usize;
+    let pls = 2usize;
+    let xt = Array2::from_shape_fn((n, pt), |(i, j)| {
+        ((i as f64) * 0.17 + (j as f64) * 0.29).sin() * 0.4
+    });
+    let xls = Array2::from_shape_fn((n, pls), |(i, j)| {
+        ((i as f64) * 0.23 + (j as f64) * 0.41).cos() * 0.3
+    });
+    let beta_t = array![0.20, -0.10, 0.05];
+    let beta_ls = array![0.30, -0.15];
+    let eta_t = xt.dot(&beta_t);
+    let eta_ls = xls.dot(&beta_ls);
+    let q_seed = Array1::linspace(-1.0, 1.0, n);
+    let knots = initializewiggle_knots_from_seed(q_seed.view(), 2, 3).expect("wiggle knots");
+    let y = Array1::from_iter((0..n).map(|i| if i % 2 == 0 { 1.0 } else { 0.0 }));
+    let weights = Array1::from_elem(n, 1.0);
+    let threshold_design =
+        DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(xt.clone()));
+    let log_sigma_design =
+        DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(xls.clone()));
+    let family = BinomialLocationScaleWiggleFamily {
+        y,
+        weights,
+        link_kind,
+        threshold_design: Some(threshold_design.clone()),
+        log_sigma_design: Some(log_sigma_design.clone()),
+        wiggle_knots: knots,
+        wiggle_degree: 2,
+        policy: gam_runtime::resource::ResourcePolicy::default_library(),
+    };
+    let q0 = Array1::from_iter(
+        eta_t
+            .iter()
+            .zip(eta_ls.iter())
+            .map(|(&eta_t_i, &eta_ls_i)| {
+                binomial_location_scale_q0(eta_t_i, gam_model_kernels::sigma_link::exp_sigma_from_eta_scalar(eta_ls_i))
+            }),
+    );
+    let wiggle_design_current = family
+        .wiggle_design(q0.view())
+        .expect("current wiggle basis");
+    let pw = wiggle_design_current.ncols();
+    let beta_w = Array1::from_shape_fn(pw, |j| 0.05 * ((j + 1) as f64).cos());
+    let eta_w = wiggle_design_current.dot(&beta_w);
+    let states = vec![
+        ParameterBlockState {
+            beta: beta_t,
+            eta: eta_t,
+        },
+        ParameterBlockState {
+            beta: beta_ls,
+            eta: eta_ls,
+        },
+        ParameterBlockState {
+            beta: beta_w,
+            eta: eta_w,
+        },
+    ];
+    (family, states)
+}
+
+/// #932 exact-tower oracle for the canonical binomial location-scale WIGGLE
+/// order-two row program.
+///
+/// `BinomialLocationScaleWiggleFamily::wiggle_order2_rows` lowers the shared
+/// row expression into per-row joint-Hessian coefficients for the composed
+/// index
+/// `q = q0(η_t, η_ls) + Σ_j βw_j·B_j(q0)` via the chain factors `m = B'·βw + 1`,
+/// `g2 = B''·βw`. The cross-block coefficients (`coeff_tw_*`, `coeff_lw_*`,
+/// `coeff_ww`: threshold/log-sigma × wiggle and wiggle × wiggle) are exactly the
+/// #736 dropped/sign-flipped cross-term genus, and until now no exact oracle
+/// pinned them to an independent tower — only an operator-vs-dense check and
+/// an FD approximation covered them.
+///
+/// This is the #932 single-source guard. For each row `i` and basis column `j`
+/// we build an INDEPENDENT order-2 jet `Tower2<3>` over `(η_t, η_ls, βw_j)`
+/// (the other `βw_k` held at their fixed values), compose the wiggle basis onto
+/// the non-wiggle index tower
+/// (`q = q0_tower + Σ_k coef_k · q0_tower.compose_unary([B_k, B'_k, B''_k])`),
+/// then compose the binomial neglog objective onto `q`
+/// (`nll = q.compose_unary([·, m1, m2])`). The resulting `3×3` Hessian block IS
+/// every `coeff_*` mechanically:
+///   `h[0][0]=coeff_tt`, `h[0][1]=coeff_tl`, `h[1][1]=coeff_ll`,
+///   `h[0][2]=coeff_tw_b·B_j + coeff_tw_d·B'_j`,
+///   `h[1][2]=coeff_lw_b·B_j + coeff_lw_d·B'_j`,
+///   `h[2][2]=coeff_ww·B_j²`.
+/// A dropped or sign-flipped generated coefficient shifts a block well outside
+/// 1e-9
+/// and fails loudly, for probit / logit / cloglog. The value channel is
+/// irrelevant to the Hessian (`compose_unary`'s `h` reads only `f'`/`f''`), so a
+/// placeholder `0.0` is passed for the objective value.
+#[test]
+pub(crate) fn binomial_location_scale_wiggle_order2_rows_match_jet_tower_932() {
+    use super::super::binomial_q_derivs::binomial_neglog_q_derivatives_dispatch;
+    use gam_math::jet_tower::Tower2;
+
+    let (probit_family, states) = bls_wiggle_workspace_fixture();
+    let n = probit_family.y.len();
+
+    for link in [
+        InverseLink::Standard(StandardLink::Probit),
+        InverseLink::Standard(StandardLink::Logit),
+        InverseLink::Standard(StandardLink::CLogLog),
+    ] {
+        // Designs, knots and the block etas are link-independent (`q0` and the
+        // wiggle basis do not depend on the binomial link), so reuse them and
+        // swap only `link_kind` for each arm.
+        let family = BinomialLocationScaleWiggleFamily {
+            y: probit_family.y.clone(),
+            weights: probit_family.weights.clone(),
+            link_kind: link.clone(),
+            threshold_design: probit_family.threshold_design.clone(),
+            log_sigma_design: probit_family.log_sigma_design.clone(),
+            wiggle_knots: probit_family.wiggle_knots.clone(),
+            wiggle_degree: probit_family.wiggle_degree,
+            policy: probit_family.policy.clone(),
+        };
+
+        let pieces = family
+            .wiggle_order2_rows(&states)
+            .expect("canonical wiggle order-two rows");
+
+        let eta_t = &states[BinomialLocationScaleWiggleFamily::BLOCK_T].eta;
+        let eta_ls = &states[BinomialLocationScaleWiggleFamily::BLOCK_LOG_SIGMA].eta;
+        let etaw = &states[BinomialLocationScaleWiggleFamily::BLOCK_WIGGLE].eta;
+        let betaw = &states[BinomialLocationScaleWiggleFamily::BLOCK_WIGGLE].beta;
+
+        let core0 = binomial_location_scale_core(
+            &family.y,
+            &family.weights,
+            eta_t,
+            eta_ls,
+            Some(etaw),
+            &family.link_kind,
+        )
+        .expect("binomial location-scale core");
+
+        // Same basis tensors the canonical row program consumes:
+        // pieces.{b0,d0} are exactly B and B' it used; recompute B'' for the
+        // order-2 composition.
+        let b0 = &pieces.b0;
+        let d0 = &pieces.d0;
+        let dd0 = family
+            .wiggle_basiswith_options(core0.q0.view(), BasisOptions::second_derivative())
+            .expect("wiggle second-derivative basis");
+        let pw = b0.ncols();
+
+        for i in 0..n {
+            let qi = core0.q0[i] + etaw[i];
+            let (m1, m2, _m3) = binomial_neglog_q_derivatives_dispatch(
+                family.y[i],
+                family.weights[i],
+                qi,
+                core0.mu[i],
+                core0.dmu_dq[i],
+                core0.d2mu_dq2[i],
+                core0.d3mu_dq3[i],
+                &family.link_kind,
+            );
+
+            // Non-wiggle index q0 = -η_t · exp(-η_ls) over axes (η_t, η_ls);
+            // axis 2 is reserved for the per-column wiggle amplitude.
+            let eta_t_t = Tower2::<3>::variable(eta_t[i], 0);
+            let eta_ls_t = Tower2::<3>::variable(eta_ls[i], 1);
+
+            let q0_tower = (eta_t_t * -1.0) * (eta_ls_t * -1.0).exp();
+
+            for j in 0..pw {
+                let mut q = q0_tower;
+                for k in 0..pw {
+                    let coef = if k == j {
+                        Tower2::<3>::variable(betaw[j], 2)
+                    } else {
+                        Tower2::<3>::constant(betaw[k])
+                    };
+                    let basis_k = q0_tower.compose_unary([b0[[i, k]], d0[[i, k]], dd0[[i, k]]]);
+                    q = q + coef * basis_k;
+                }
+                let nll = q.compose_unary([0.0, m1, m2]);
+                let h = nll.h;
+
+                let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0);
+
+                assert!(
+                    close(h[0][0], pieces.coeff_tt[i]),
+                    "{link:?} coeff_tt[{i},{j}]: tower={:.9e} canonical={:.9e}",
+                    h[0][0],
+                    pieces.coeff_tt[i]
+                );
+                assert!(
+                    close(h[0][1], pieces.coeff_tl[i]),
+                    "{link:?} coeff_tl[{i},{j}]: tower={:.9e} canonical={:.9e}",
+                    h[0][1],
+                    pieces.coeff_tl[i]
+                );
+                assert!(
+                    close(h[1][1], pieces.coeff_ll[i]),
+                    "{link:?} coeff_ll[{i},{j}]: tower={:.9e} canonical={:.9e}",
+                    h[1][1],
+                    pieces.coeff_ll[i]
+                );
+
+                let tw = pieces.coeff_tw_b[i] * b0[[i, j]] + pieces.coeff_tw_d[i] * d0[[i, j]];
+                let lw = pieces.coeff_lw_b[i] * b0[[i, j]] + pieces.coeff_lw_d[i] * d0[[i, j]];
+                let ww = pieces.coeff_ww[i] * b0[[i, j]] * b0[[i, j]];
+                assert!(
+                    close(h[0][2], tw),
+                    "{link:?} (η_t,βw) cross[{i},{j}]: tower={:.9e} canonical={:.9e}",
+                    h[0][2],
+                    tw
+                );
+                assert!(
+                    close(h[1][2], lw),
+                    "{link:?} (η_ls,βw) cross[{i},{j}]: tower={:.9e} canonical={:.9e}",
+                    h[1][2],
+                    lw
+                );
+                assert!(
+                    close(h[2][2], ww),
+                    "{link:?} (βw,βw)[{i},{j}]: tower={:.9e} canonical={:.9e}",
+                    h[2][2],
+                    ww
+                );
+            }
+        }
+    }
+}
+
+/// #932 release speed gate for the binomial location-scale WIGGLE order-two
+/// row program: the production typed-probe lowering
+/// (`wiggle_order2_rows`, ONE `Order2<4>` evaluation per row with 8
+/// coefficient channels, cost linear in the basis width `pw`) must beat the
+/// naive per-(row, column) dense-tower assembly (`pw` independent `Tower2<3>`
+/// compositions per row — the generic shape the oracle below uses as its
+/// witness, and the only alternative representation since the pre-cutover
+/// hand ladder was deleted by the #932 single-source migration). Both sides
+/// consume the same block states and build their own bases, so this is a
+/// system-level race of everything the joint-Hessian consumer needs. Emits
+/// the accurately named `per_column_tower_over_production` diagnostic
+/// (`per_column_tower_ns / production_ns`); the MSI release harness fails
+/// closed on any cell `<= 1`.
+#[test]
+pub(crate) fn release_measure_bls_wiggle_order2_rows_vs_per_column_tower_932() {
+    use super::super::binomial_q_derivs::binomial_neglog_q_derivatives_dispatch;
+    use gam_math::jet_tower::Tower2;
+    use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+
+    let (family, states) = bls_wiggle_workspace_fixture();
+
+    let production_batch = |states: &[ParameterBlockState]| -> f64 {
+        let pieces = family
+            .wiggle_order2_rows(states)
+            .expect("production wiggle order-two rows");
+        let n = pieces.coeff_tt.len();
+        pieces.coeff_tt[0] + pieces.coeff_tl[0] + pieces.coeff_ww[n - 1] + pieces.coeff_tw_b[0]
+    };
+
+    // The naive generic assembly: per (row, column) an independent Tower2<3>
+    // over (eta_t, eta_ls, betaw_j), composed exactly as the oracle below.
+    let generic_batch = |states: &[ParameterBlockState]| -> f64 {
+        let eta_t = &states[BinomialLocationScaleWiggleFamily::BLOCK_T].eta;
+        let eta_ls = &states[BinomialLocationScaleWiggleFamily::BLOCK_LOG_SIGMA].eta;
+        let etaw = &states[BinomialLocationScaleWiggleFamily::BLOCK_WIGGLE].eta;
+        let betaw = &states[BinomialLocationScaleWiggleFamily::BLOCK_WIGGLE].beta;
+        let core0 = binomial_location_scale_core(
+            &family.y,
+            &family.weights,
+            eta_t,
+            eta_ls,
+            Some(etaw),
+            &family.link_kind,
+        )
+        .expect("binomial location-scale core");
+        let b0 = family
+            .wiggle_basiswith_options(core0.q0.view(), BasisOptions::value())
+            .expect("wiggle value basis");
+        let d0 = family
+            .wiggle_basiswith_options(core0.q0.view(), BasisOptions::first_derivative())
+            .expect("wiggle first-derivative basis");
+        let dd0 = family
+            .wiggle_basiswith_options(core0.q0.view(), BasisOptions::second_derivative())
+            .expect("wiggle second-derivative basis");
+        let n = family.y.len();
+        let pw = b0.ncols();
+        let mut folded = 0.0;
+        for i in 0..n {
+            let qi = core0.q0[i] + etaw[i];
+            let (m1, m2, _m3) = binomial_neglog_q_derivatives_dispatch(
+                family.y[i],
+                family.weights[i],
+                qi,
+                core0.mu[i],
+                core0.dmu_dq[i],
+                core0.d2mu_dq2[i],
+                core0.d3mu_dq3[i],
+                &family.link_kind,
+            );
+            let eta_t_t = Tower2::<3>::variable(eta_t[i], 0);
+            let eta_ls_t = Tower2::<3>::variable(eta_ls[i], 1);
+            let q0_tower = (eta_t_t * -1.0) * (eta_ls_t * -1.0).exp();
+            for j in 0..pw {
+                let mut q = q0_tower;
+                for k in 0..pw {
+                    let coef = if k == j {
+                        Tower2::<3>::variable(betaw[j], 2)
+                    } else {
+                        Tower2::<3>::constant(betaw[k])
+                    };
+                    let basis_k = q0_tower.compose_unary([b0[[i, k]], d0[[i, k]], dd0[[i, k]]]);
+                    q = q + coef * basis_k;
+                }
+                let nll = q.compose_unary([0.0, m1, m2]);
+                folded += nll.h[0][0] + nll.h[0][2] + nll.h[2][2];
+            }
+        }
+        folded
+    };
+
+    // Sanity: both batches produce finite folds on the fixture.
+    assert!(production_batch(&states).is_finite());
+    assert!(generic_batch(&states).is_finite());
+
+    // Speed contract, release profile only (`SpeedGate::open` documents why):
+    // the typed-probe lowering must beat the naive per-(row, column) tower
+    // assembly. One arm call is one whole-batch evaluation; the nudge perturbs
+    // the first threshold eta so no batch is loop-invariant across calls.
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let mut gate = SpeedGate::open("BLS-WIGGLE-ORDER2-932");
+    let base_eta = states[BinomialLocationScaleWiggleFamily::BLOCK_T].eta[0];
+    let mut production_work = states.clone();
+    let mut generic_work = states.clone();
+    let timing = paired_interleaved(
+        15,
+        10,
+        0x9320_B15B,
+        |nudge| {
+            production_work[BinomialLocationScaleWiggleFamily::BLOCK_T].eta[0] = base_eta + nudge;
+            production_batch(&production_work)
+        },
+        |nudge| {
+            generic_work[BinomialLocationScaleWiggleFamily::BLOCK_T].eta[0] = base_eta + nudge;
+            generic_batch(&generic_work)
+        },
+    );
+    gate.faster("order2", &timing, "production", "per_column_tower");
+    gate.finish();
+}
