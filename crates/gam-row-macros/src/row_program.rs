@@ -2250,12 +2250,42 @@ fn dense_taylor_schedule(
 }
 
 /// One emitted line or `if` block of a direct lowering's body.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ItemKind {
+    /// A pure `let`/`double` definition: placed at the innermost gate that
+    /// dominates every use of it and sunk to its first use there.
+    Definition,
+    /// A leaf call (`let stack = leaf(...)`, or CUDA's `double stack[3];`
+    /// filled by `leaf(..., stack);`): placed like a definition, and issued
+    /// as early as its inputs allow, so independent calls sit next to each
+    /// other with nothing live between them.
+    Call,
+    /// An `if` block: an anchor, kept in program order.
+    Gate,
+    /// Anything else (the result lines, the CUDA closing brace): an anchor,
+    /// kept in program order.
+    Anchor,
+}
+
 struct EmittedItem {
     text: String,
-    /// The name this item defines (`let name`, `let mut name`, `double name`),
-    /// when the item may be moved to its first use.
+    /// The name this item defines, for definitions and calls.
     defines: Option<String>,
+    /// The mutable locals a gate block assigns (`name = ...;`).
+    assigns: Vec<String>,
     references: Vec<String>,
+    kind: ItemKind,
+}
+
+/// Where one definition or call is emitted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Placement {
+    /// At the top level, before the first anchor that needs it.
+    Top,
+    /// At the top of the one gate block that consumes it.
+    Inside(usize),
+    /// Nothing reaches an anchor through it: not emitted at all.
+    Dead,
 }
 
 fn identifier_tokens(text: &str) -> Vec<String> {
@@ -2265,25 +2295,55 @@ fn identifier_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// The callee of a call expression `callee(...)` starting at `rhs`, when the
+/// expression is one; a bare path with or without a module qualifier.
+fn call_callee(rhs: &str) -> Option<&str> {
+    let rhs = rhs.trim_start();
+    let end = rhs
+        .find(|character: char| !(character.is_alphanumeric() || character == '_' || character == ':'))
+        .unwrap_or(rhs.len());
+    let callee = &rhs[..end];
+    let first = callee.chars().next()?;
+    ((first.is_alphabetic() || first == '_') && rhs[end..].trim_start().starts_with('('))
+        .then_some(callee)
+}
+
 /// Whether a definition's right-hand side is a call (`= leaf(...)`, with or
-/// without a module path): a leaf call is an anchor, issued as early as its
-/// inputs allow, never sunk.
+/// without a module path).
 fn is_call_definition(line: &str) -> bool {
     let Some((_, rhs)) = line.split_once(" = ") else {
         return false;
     };
-    let rhs = rhs.trim_start();
-    let callee: String = rhs
-        .chars()
-        .take_while(|character| character.is_alphanumeric() || *character == '_' || *character == ':')
-        .collect();
-    !callee.is_empty()
-        && callee.chars().next().is_some_and(|first| first.is_alphabetic() || first == '_')
-        && rhs[callee.len()..].trim_start().starts_with('(')
+    call_callee(rhs).is_some()
 }
 
-/// The name a top-level definition line binds, if the line is a sinkable
-/// definition: a pure `let`/`double` whose right-hand side is not a call.
+/// A CUDA leaf-call statement `leaf(point, args..., stack);`.
+fn is_cuda_call_statement(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    !trimmed.starts_with("let ")
+        && !trimmed.starts_with("double ")
+        && !trimmed.starts_with("if ")
+        && trimmed.ends_with(");")
+        && !trimmed.contains(" = ")
+        && call_callee(trimmed).is_some()
+}
+
+/// The stack a bare CUDA declaration `double stack[3];` declares, filled by
+/// the leaf call on the next line.
+fn cuda_stack_declaration(line: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix("double ")?;
+    if rest.contains('=') || !rest.ends_with("];") {
+        return None;
+    }
+    let name: String = rest
+        .chars()
+        .take_while(|character| character.is_alphanumeric() || *character == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The name a top-level `let`/`let mut`/`double` line binds. The result
+/// lines (`__row_program_*`) are anchors, never definitions.
 fn defined_name(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
     let rest = if let Some(rest) = trimmed.strip_prefix("let mut ") {
@@ -2295,135 +2355,328 @@ fn defined_name(line: &str) -> Option<String> {
     } else {
         return None;
     };
-    if is_call_definition(trimmed) {
-        return None;
-    }
     let name: String = rest
         .chars()
         .take_while(|character| character.is_alphanumeric() || *character == '_')
         .collect();
-    // Value channels (`name_v`) stay in program order with the leaf calls:
-    // a leaf's result is consumed by the next value, and that consumption is
-    // what keeps LLVM from sinking a pure call past a later gate (the SLS
-    // row's second `exp` was sunk into the entry gate's branches when its
-    // consuming value had been sunk there first). Only derivative channels and
-    // the curvature coefficients sink to their first use.
-    // A CUDA leaf declaration `double stack[3];` is filled by the call on the
-    // next line, which is an anchor referencing it, so it is a definition too.
-    (!name.is_empty() && !name.starts_with("__row_program_") && !name.ends_with("_v")).then_some(name)
+    (!name.is_empty() && !name.starts_with("__row_program_")).then_some(name)
 }
 
-/// Parse a body into items: one per top-level line, one per `if` block.
+/// The mutable local a gate-block line assigns (`name = ...;`), if any.
+fn assigned_name(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("let ") || trimmed.starts_with("double ") || trimmed.starts_with("if ") {
+        return None;
+    }
+    let (lhs, _) = trimmed.split_once(" = ")?;
+    let bare = lhs
+        .chars()
+        .all(|character| character.is_alphanumeric() || character == '_');
+    (bare && !lhs.is_empty()).then(|| lhs.to_string())
+}
+
+/// Parse a body into items: one per top-level line, one per `if` block, one
+/// per CUDA declaration-plus-call pair.
 fn emitted_items(body: &str) -> Vec<EmittedItem> {
+    let lines: Vec<&str> = body.lines().collect();
     let mut items = Vec::new();
-    let mut block: Option<String> = None;
-    for line in body.lines() {
-        if let Some(text) = block.as_mut() {
-            text.push_str(line);
-            text.push('\n');
-            if line == "    }" {
-                let text = block.take().expect("an open block");
-                let references = identifier_tokens(&text);
-                items.push(EmittedItem {
-                    text,
-                    defines: None,
-                    references,
-                });
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        if line.trim_start().starts_with("if ") {
+            let mut text = String::new();
+            let mut assigns = Vec::new();
+            loop {
+                text.push_str(lines[index]);
+                text.push('\n');
+                if let Some(name) = assigned_name(lines[index]) {
+                    assigns.push(name);
+                }
+                let closed = lines[index] == "    }";
+                index += 1;
+                if closed || index >= lines.len() {
+                    break;
+                }
             }
+            let references = identifier_tokens(&text);
+            items.push(EmittedItem {
+                text,
+                defines: None,
+                assigns,
+                references,
+                kind: ItemKind::Gate,
+            });
             continue;
         }
-        if line.trim_start().starts_with("if ") {
-            block = Some(format!("{line}\n"));
+        if let Some(name) = cuda_stack_declaration(line)
+            && index + 1 < lines.len()
+            && is_cuda_call_statement(lines[index + 1])
+            && identifier_tokens(lines[index + 1]).contains(&name)
+        {
+            let text = format!("{line}\n{}\n", lines[index + 1]);
+            let references = identifier_tokens(&text);
+            items.push(EmittedItem {
+                text,
+                defines: Some(name),
+                assigns: Vec::new(),
+                references,
+                kind: ItemKind::Call,
+            });
+            index += 2;
             continue;
         }
         let text = format!("{line}\n");
-        let defines = defined_name(line);
         let references = identifier_tokens(&text);
+        let (defines, kind) = match defined_name(line) {
+            Some(name) if is_call_definition(line.trim_start()) => (Some(name), ItemKind::Call),
+            Some(name) => (Some(name), ItemKind::Definition),
+            None => (None, ItemKind::Anchor),
+        };
         items.push(EmittedItem {
             text,
             defines,
+            assigns: Vec::new(),
             references,
+            kind,
         });
-    }
-    if let Some(text) = block {
-        let references = identifier_tokens(&text);
-        items.push(EmittedItem {
-            text,
-            defines: None,
-            references,
-        });
+        index += 1;
     }
     items
 }
 
-/// Re-emit a direct lowering's body with every definition sunk to just before
-/// its first use, in the order the uses need them.
+/// Every anchor (gate or result line) that reads item `index`, directly or
+/// through other definitions and calls. Definitions only reference earlier
+/// items, so the walk over users terminates.
+fn consuming_anchors(
+    index: usize,
+    items: &[EmittedItem],
+    users: &[Vec<usize>],
+    memo: &mut Vec<Option<Vec<usize>>>,
+) -> Vec<usize> {
+    if let Some(anchors) = &memo[index] {
+        return anchors.clone();
+    }
+    let mut anchors = Vec::new();
+    for &user in &users[index] {
+        match items[user].kind {
+            ItemKind::Gate | ItemKind::Anchor => {
+                if !anchors.contains(&user) {
+                    anchors.push(user);
+                }
+            }
+            ItemKind::Definition | ItemKind::Call => {
+                for anchor in consuming_anchors(user, items, users, memo) {
+                    if !anchors.contains(&anchor) {
+                        anchors.push(anchor);
+                    }
+                }
+            }
+        }
+    }
+    anchors.sort_unstable();
+    memo[index] = Some(anchors.clone());
+    anchors
+}
+
+/// Re-emit a direct lowering's body with every definition and leaf call placed
+/// where the row's control flow wants it.
 ///
 /// The symbolic schedule writes each statement's value, gradient and Hessian
-/// channels together, in statement order. A statement that feeds an
-/// out-of-line leaf call therefore has all of its derivative channels
-/// computed BEFORE the call and consumed only AFTER it, by the chain rule:
-/// on the rigid Bernoulli row that was eight live values spilled around the
-/// probit kernel's call and reloaded behind it, which the hand kernel, that
-/// derives those products after the call, never pays (`RIGID-BERNOULLI-VGH-932`).
-/// Sinking definitions to their first use leaves only the call's own inputs
-/// live across it.
+/// channels together, in statement order, before every gate. Three things are
+/// wrong with that as an instruction schedule, and each was found in the
+/// release disassembly of a row the hand kernel beat (#932):
 ///
-/// Leaf calls and value channels go the other way: they are anchors, kept in
-/// program order, so independent calls sit next to each other with only the
-/// values between them, their latencies overlap, and each call's result is
-/// consumed before any gate (a pure call whose first consumer sits after a
-/// gate is sunk into that gate's branches by LLVM). On the location-scale row the hand kernel
-/// issues its two `exp` calls back to back at the top; the generated kernel
-/// issued them 46 instructions apart with the entry composition between,
-/// and lost 10% on EPYC Milan with fewer instructions in every other class
-/// (`SLS-MACRO-CODEGEN-932`). `if` blocks and the result lines are anchors
-/// too. A sinkable definition is placed before the first anchor that
-/// mentions it, after the definitions it mentions itself.
-fn sink_definitions_to_first_use(body: &str) -> String {
-    let items = emitted_items(body);
-    let mut pending: Vec<usize> = Vec::new();
-    let mut emitted = vec![false; items.len()];
-    let mut order: Vec<usize> = Vec::with_capacity(items.len());
-    fn flush(
-        index: usize,
-        items: &[EmittedItem],
-        pending: &mut Vec<usize>,
-        emitted: &mut [bool],
-        order: &mut Vec<usize>,
-    ) {
-        if emitted[index] {
-            return;
+/// * **Work exclusive to one gate ran outside it.** The location-scale row's
+///   event term (its index jet, its curvature coefficients, its composition
+///   point) is read only under the event gate, yet was computed on every row;
+///   the entry term's `exp` likewise. Every definition and call is therefore
+///   placed at the innermost gate that dominates all of its uses: what only
+///   one gate reads is emitted at the top of that gate's block, and a row on
+///   which the gate is closed never pays for it. Nothing outside can name it,
+///   so the move is invisible except in the instruction stream.
+/// * **Leaf calls were separated by pure arithmetic and by each other's
+///   consumers.** A call to `exp` or a probit kernel spills every live value
+///   around it (the vector registers are all caller-saved), and two calls
+///   issued back to back overlap their latencies while two calls a gate apart
+///   do not. The hand kernels issue every transcendental first, when nothing
+///   is live. Within its placement, a call is therefore issued as early as
+///   its inputs allow -- right after the last gate whose assignment it reads,
+///   or at the top -- with only its own input chain emitted before it, so
+///   independent calls are adjacent.
+/// * **Derivative channels were live across the calls their value fed.** On
+///   the rigid Bernoulli row that was eight spills around the probit call and
+///   eight reloads behind it. Everything that is not a call sinks to just
+///   before the first anchor that mentions it.
+///
+/// A definition or call nothing reaches an anchor through is not emitted (a
+/// supplied stack composes without inspecting its point, so the point's value
+/// channel is dead); `primary_parameters` then names the primaries whose
+/// value the body never reads. Gates and the result lines keep program order.
+fn schedule_direct_lowering(body: &str) -> String {
+    let mut items = emitted_items(body);
+    let count = items.len();
+
+    // Who defines each name, and who reads each item.
+    let mut by_name = HashMap::<String, usize>::new();
+    for (index, item) in items.iter().enumerate() {
+        if let Some(name) = &item.defines {
+            by_name.insert(name.clone(), index);
         }
-        emitted[index] = true;
-        for reference in &items[index].references {
-            let dependency = pending
-                .iter()
-                .copied()
-                .find(|candidate| items[*candidate].defines.as_deref() == Some(reference.as_str()));
-            if let Some(dependency) = dependency {
-                flush(dependency, items, pending, emitted, order);
+    }
+    let mut users: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (index, item) in items.iter().enumerate() {
+        for reference in &item.references {
+            if let Some(&defining) = by_name.get(reference)
+                && defining != index
+                && !users[defining].contains(&index)
+            {
+                users[defining].push(index);
             }
         }
-        pending.retain(|candidate| *candidate != index);
-        order.push(index);
     }
-    for (index, item) in items.iter().enumerate() {
-        if item.defines.is_some() {
-            pending.push(index);
+    let mut memo = vec![None; count];
+    let mut placement = vec![Placement::Top; count];
+    for index in 0..count {
+        if !matches!(items[index].kind, ItemKind::Definition | ItemKind::Call) {
             continue;
         }
-        for reference in &item.references {
-            let dependency = pending
-                .iter()
-                .copied()
-                .find(|candidate| items[*candidate].defines.as_deref() == Some(reference.as_str()));
-            if let Some(dependency) = dependency {
-                flush(dependency, &items, &mut pending, &mut emitted, &mut order);
+        let anchors = consuming_anchors(index, &items, &users, &mut memo);
+        placement[index] = match anchors.as_slice() {
+            [] => Placement::Dead,
+            [gate] if items[*gate].kind == ItemKind::Gate && index < *gate => {
+                Placement::Inside(*gate)
+            }
+            _ => Placement::Top,
+        };
+    }
+
+    // The pending definitions an item reads, directly or through other pending
+    // definitions, in program order (a definition reads only earlier ones).
+    fn pending_inputs<'a>(
+        references: &'a [String],
+        items: &'a [EmittedItem],
+        pending: &[usize],
+        by_name: &HashMap<String, usize>,
+    ) -> Vec<usize> {
+        let mut found = Vec::new();
+        let mut stack: Vec<&'a str> = references.iter().map(String::as_str).collect();
+        while let Some(reference) = stack.pop() {
+            if let Some(&defining) = by_name.get(reference)
+                && pending.contains(&defining)
+                && !found.contains(&defining)
+            {
+                found.push(defining);
+                stack.extend(items[defining].references.iter().map(String::as_str));
             }
         }
-        emitted[index] = true;
-        order.push(index);
+        found.sort_unstable();
+        found
+    }
+
+    let mut order: Vec<usize> = Vec::with_capacity(count);
+    let mut pending: Vec<usize> = Vec::new();
+    let mut deferred: Vec<Vec<usize>> = vec![Vec::new(); count];
+    let mut last_call: Option<usize> = None;
+    let position = |order: &[usize], index: usize| order.iter().position(|&i| i == index);
+
+    for index in 0..count {
+        match (items[index].kind, placement[index]) {
+            (ItemKind::Definition | ItemKind::Call, Placement::Dead) => {}
+            (ItemKind::Definition | ItemKind::Call, Placement::Inside(gate)) => {
+                deferred[gate].push(index);
+            }
+            (ItemKind::Definition, Placement::Top) => pending.push(index),
+            (ItemKind::Call, Placement::Top) => {
+                // Issued right after the last emitted item it reads -- an
+                // earlier definition or call, or a gate assigning a mutable it
+                // reads -- and its own pending input chain goes with it.
+                let inputs = pending_inputs(&items[index].references, &items, &pending, &by_name);
+                let mut names: Vec<&str> =
+                    items[index].references.iter().map(String::as_str).collect();
+                for &input in &inputs {
+                    names.extend(items[input].references.iter().map(String::as_str));
+                }
+                let mut barrier: Option<usize> = None;
+                for name in names {
+                    if let Some(&defining) = by_name.get(name)
+                        && let Some(at) = position(&order, defining)
+                    {
+                        barrier = Some(barrier.map_or(at, |current| current.max(at)));
+                    }
+                    for (gate, item) in items.iter().enumerate() {
+                        if item.kind == ItemKind::Gate
+                            && item.assigns.iter().any(|assigned| assigned == name)
+                            && let Some(at) = position(&order, gate)
+                        {
+                            barrier = Some(barrier.map_or(at, |current| current.max(at)));
+                        }
+                    }
+                }
+                // Calls stay in program order among themselves: this one
+                // follows the last call issued, so independent calls form
+                // one adjacent run rather than leapfrogging each other.
+                let mut at = barrier.map_or(0, |barrier| barrier + 1);
+                if let Some(last) = last_call
+                    && let Some(after) = position(&order, last)
+                {
+                    at = at.max(after + 1);
+                }
+                pending.retain(|candidate| !inputs.contains(candidate));
+                let mut block = inputs;
+                block.push(index);
+                order.splice(at..at, block);
+                last_call = Some(index);
+            }
+            (ItemKind::Gate, _) => {
+                // The gate's exclusive items open its block: calls first,
+                // each behind its own inputs, then the rest in program order.
+                let inside = std::mem::take(&mut deferred[index]);
+                let mut inside_pending: Vec<usize> = inside
+                    .iter()
+                    .copied()
+                    .filter(|&i| items[i].kind == ItemKind::Definition)
+                    .collect();
+                let mut inside_order = Vec::new();
+                for &i in &inside {
+                    if items[i].kind != ItemKind::Call {
+                        continue;
+                    }
+                    let inputs = pending_inputs(&items[i].references, &items, &inside_pending, &by_name);
+                    inside_pending.retain(|candidate| !inputs.contains(candidate));
+                    inside_order.extend(inputs);
+                    inside_order.push(i);
+                }
+                inside_order.extend(inside_pending);
+                let mut references: Vec<String> = items[index].references.clone();
+                for &i in &inside {
+                    references.extend(items[i].references.iter().cloned());
+                }
+                if !inside_order.is_empty() {
+                    let text = std::mem::take(&mut items[index].text);
+                    let (head, tail) = text.split_once('\n').expect("a gate block has an `if` line");
+                    let mut rebuilt = format!("{head}\n");
+                    for &i in &inside_order {
+                        for line in items[i].text.lines() {
+                            rebuilt.push_str("    ");
+                            rebuilt.push_str(line);
+                            rebuilt.push('\n');
+                        }
+                    }
+                    rebuilt.push_str(tail);
+                    items[index].text = rebuilt;
+                }
+                let inputs = pending_inputs(&references, &items, &pending, &by_name);
+                pending.retain(|candidate| !inputs.contains(candidate));
+                order.extend(inputs);
+                order.push(index);
+            }
+            (ItemKind::Anchor, _) => {
+                let inputs = pending_inputs(&items[index].references, &items, &pending, &by_name);
+                pending.retain(|candidate| !inputs.contains(candidate));
+                order.extend(inputs);
+                order.push(index);
+            }
+        }
     }
     // A definition nothing mentions keeps its place before the body's last
     // anchor (the result lines, or CUDA's closing brace), never after it.
@@ -3500,12 +3753,6 @@ fn rust_order2_body(
             ));
         }
     }
-    let sunk = sink_definitions_to_first_use(
-        source
-            .strip_prefix("{\n")
-            .expect("the order-2 body opens with a brace"),
-    );
-    source = format!("{{\n{sunk}");
     source.push_str("    (\n        __row_program_value,\n        [");
     for axis in 0..dimension {
         if axis != 0 {
@@ -3537,6 +3784,12 @@ fn rust_order2_body(
         source.push_str(witness);
     }
     source.push_str("]\n    )\n}\n");
+    // The result tuple is scheduled with the body: its lines are the anchors
+    // that keep every channel and witness value live.
+    let (open, body) = source
+        .split_once('\n')
+        .expect("the order-2 body opens with a brace");
+    let source = format!("{open}\n{}", schedule_direct_lowering(body));
     syn::parse_str(&source).map_err(|error| {
         syn::Error::new(
             error.span(),
@@ -3678,8 +3931,8 @@ fn cuda_source(
     let (header, body) = source
         .split_once(") {\n")
         .expect("the CUDA signature closes before the body");
-    let sunk = sink_definitions_to_first_use(body);
-    Ok(format!("{header}) {{\n{sunk}"))
+    let scheduled = schedule_direct_lowering(body);
+    Ok(format!("{header}) {{\n{scheduled}"))
 }
 
 pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
@@ -4592,9 +4845,10 @@ mod tests {
         let gradient = cuda.find("double a_g0").expect("the CUDA gradient of `a`");
         assert!(gradient > call, "{cuda}");
 
-        // Two leaf calls with independent inputs are issued in program order
-        // with only the value between them; every derivative channel follows
-        // both.
+        // Two leaf calls with independent inputs are issued back to back, in
+        // program order, before any pure arithmetic: the value that reads the
+        // first call's result follows the second call, as every derivative
+        // channel does.
         let program = quote! {
             fn adjacent(x, y, z;)
             emit [order2];
@@ -4610,9 +4864,92 @@ mod tests {
         let rust = emitted_function(program, "adjacent_order2");
         let first = rust.find("exp_stack (x)").expect("the first leaf call");
         let second = rust.find("exp_stack (z)").expect("the second leaf call");
-        let value = rust.find("let b_v").expect("the value between them");
+        let value = rust.find("let b_v").expect("the value reading the first call");
         let derivative = rust.find("let b_g0").expect("the derivative of b");
-        assert!(first < value && value < second && second < derivative, "{rust}");
+        assert!(first < second && second < value && value < derivative, "{rust}");
+        let compact = rust.replace(' ', "");
+        assert!(
+            compact.contains("leta_stack0=exp_stack(x);letc_stack1=exp_stack(z);"),
+            "two independent calls are issued back to back:\n{rust}"
+        );
+    }
+
+    /// A leaf call and the definitions that only one gate reads are emitted
+    /// at the top of that gate's block, so a row on which the gate is closed
+    /// never evaluates them; a call two gates read stays before the first gate
+    /// (#932: the location-scale row's entry `exp` under the entry gate, its
+    /// event index jet under the event gate).
+    #[test]
+    fn gate_exclusive_work_is_emitted_inside_its_gate() {
+        let program = quote! {
+            fn gated(x, y; a, b)
+            emit [order2, cuda];
+            leaves { exponential => exp_stack => d_exp }
+            witnesses [];
+            {
+                let shared = compose(exponential, y);
+                let only = compose(exponential, x);
+                let inner = mul(only, shared);
+                let later = mul(shared, y);
+                let mut out = shared;
+                if (a != 0.0) { out = add(shared, inner); }
+                if (b != 0.0) { out = add(out, later); }
+                return out;
+            }
+        };
+        let rust = emitted_function(program.clone(), "gated_order2");
+        let shared_call = rust.find("exp_stack (y)").expect("the shared leaf call");
+        let only_call = rust.find("exp_stack (x)").expect("the exclusive leaf call");
+        let first_gate = rust.find("if (a != 0.0)").expect("the first gate");
+        let first_close = rust[first_gate..].find('}').expect("the first gate closes") + first_gate;
+        let second_gate = rust.find("if (b != 0.0)").expect("the second gate");
+        assert!(shared_call < first_gate, "{rust}");
+        assert!(first_gate < only_call && only_call < first_close, "{rust}");
+        let inner = rust.find("let inner_g0").expect("the exclusive index jet");
+        assert!(first_gate < inner && inner < first_close, "{rust}");
+        let later = rust.find("let later_g1").expect("the second gate's exclusive work");
+        let second_close = rust[second_gate..].find('}').expect("the second gate closes") + second_gate;
+        assert!(second_gate < later && later < second_close, "{rust}");
+        // The exclusive call is issued first inside its block, before the
+        // block's own arithmetic.
+        let assignment = rust[first_gate..].find("out_v =").expect("the gate's assignment") + first_gate;
+        assert!(only_call < assignment, "{rust}");
+
+        let cuda = emitted_cuda(program);
+        let shared_call = cuda.find("d_exp(y,").expect("the shared CUDA call");
+        let only_call = cuda.find("d_exp(x,").expect("the exclusive CUDA call");
+        let first_gate = cuda.find("if ((in.a != 0.0))").expect("the first CUDA gate");
+        let first_close = cuda[first_gate..].find("\n    }").expect("the first CUDA gate closes") + first_gate;
+        assert!(shared_call < first_gate, "{cuda}");
+        assert!(first_gate < only_call && only_call < first_close, "{cuda}");
+        let inner = cuda.find("double inner_g0").expect("the exclusive CUDA index jet");
+        assert!(first_gate < inner && inner < first_close, "{cuda}");
+    }
+
+    /// The composition point of a supplied stack is never read (the stack was
+    /// evaluated there by the kernel builder), so a local that only feeds such
+    /// a compose has a dead value channel: it is not emitted, while its
+    /// derivative channels, which the chain rule reads, are.
+    #[test]
+    fn a_dead_value_channel_is_not_emitted() {
+        let program = quote! {
+            fn point(x, y; a, b, c, d, e)
+            emit [order2, cuda];
+            leaves { stack => supplied }
+            witnesses [];
+            {
+                let p = mul(x, y);
+                let out = compose(stack, p, a, b, c, d, e);
+                return out;
+            }
+        };
+        let rust = emitted_function(program.clone(), "point_order2");
+        assert!(!rust.contains("let p_v"), "{rust}");
+        assert!(rust.contains("let p_g0"), "{rust}");
+        assert!(rust.contains("let p_h0_1"), "{rust}");
+        let cuda = emitted_cuda(program);
+        assert!(!cuda.contains("double p_v"), "{cuda}");
+        assert!(cuda.contains("double p_g0"), "{cuda}");
     }
 
     /// An activity gate may be stated on the supplied stack itself (`||` over

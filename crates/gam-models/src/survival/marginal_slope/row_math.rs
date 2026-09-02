@@ -587,6 +587,7 @@ pub fn survival_marginal_slope_vector_neglog(
 
 #[cfg(test)]
 mod vector_hand_oracle_tests {
+    use super::*;
 
     /// Derivatives of neglog(x) = -log(x): [-1/x, 1/x², -2/x³, 6/x⁴].
     #[inline]
@@ -595,6 +596,309 @@ mod vector_hand_oracle_tests {
         let inv = 1.0 / x1;
         let inv2 = inv * inv;
         (-inv, inv2, -2.0 * inv2 * inv, 6.0 * inv2 * inv2)
+    }
+
+    /// Test-oracle scratch and derivative output allocated once per measured
+    /// covariance. The `_into` oracle below performs no success-path allocation.
+    pub(super) struct ReusableHandVectorRowWorkspace {
+        score_dimension: usize,
+        sigma_g: Box<[f64]>,
+        c1: Box<[f64]>,
+        c2: Box<[f64]>,
+        low_rank_projection: Box<[f64]>,
+        derivative_cells: Box<[f64]>,
+    }
+
+    impl ReusableHandVectorRowWorkspace {
+        pub(super) fn new(covariance: &MarginalSlopeCovariance) -> Result<Self, String> {
+            let score_dimension = covariance.dim();
+            let dimension = score_dimension.checked_add(3).ok_or_else(|| {
+                SurvivalMarginalSlopeError::IncompatibleDimensions {
+                    reason: format!(
+                        "reusable hand row score width {score_dimension} overflows its primary dimension"
+                    ),
+                }
+                .to_string()
+            })?;
+            let score_hessian_cells = score_dimension
+                .checked_mul(score_dimension)
+                .ok_or_else(|| SurvivalMarginalSlopeError::IncompatibleDimensions {
+                    reason: format!(
+                        "reusable hand row score width {score_dimension} overflows its score Hessian storage"
+                    ),
+                }
+                .to_string())?;
+            let hessian_cells = dimension.checked_mul(dimension).ok_or_else(|| {
+                SurvivalMarginalSlopeError::IncompatibleDimensions {
+                    reason: format!(
+                        "reusable hand row primary width {dimension} overflows its Hessian storage"
+                    ),
+                }
+                .to_string()
+            })?;
+            let derivative_cells = dimension.checked_add(hessian_cells).ok_or_else(|| {
+                SurvivalMarginalSlopeError::IncompatibleDimensions {
+                    reason: format!(
+                        "reusable hand row primary width {dimension} overflows its derivative storage"
+                    ),
+                }
+                .to_string()
+            })?;
+            let projection_dimension = match covariance.representation() {
+                MarginalSlopeCovarianceRef::LowRank(factor) => factor.ncols(),
+                MarginalSlopeCovarianceRef::Diagonal(_) | MarginalSlopeCovarianceRef::Full(_) => 0,
+            };
+            Ok(Self {
+                score_dimension,
+                sigma_g: vec![0.0; score_dimension].into_boxed_slice(),
+                c1: vec![0.0; score_dimension].into_boxed_slice(),
+                c2: vec![0.0; score_hessian_cells].into_boxed_slice(),
+                low_rank_projection: vec![0.0; projection_dimension].into_boxed_slice(),
+                derivative_cells: vec![0.0; derivative_cells].into_boxed_slice(),
+            })
+        }
+
+        pub(super) fn derivatives(&self) -> (ArrayView1<'_, f64>, ArrayView2<'_, f64>) {
+            let dimension = 3 + self.score_dimension;
+            let (gradient, hessian) = self.derivative_cells.split_at(dimension);
+            (
+                ArrayView1::from(gradient),
+                ArrayView2::from_shape((dimension, dimension), hessian)
+                    .expect("reusable hand row derivative buffer shape is invariant"),
+            )
+        }
+    }
+
+    fn marginal_slope_covariance_matvec_into(
+        covariance: &MarginalSlopeCovariance,
+        vector: &[f64],
+        output: &mut [f64],
+        low_rank_projection: &mut [f64],
+    ) -> Result<(), String> {
+        if vector.len() != covariance.dim() || output.len() != covariance.dim() {
+            return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
+                reason: format!(
+                    "survival marginal-slope covariance matvec dimension mismatch: vector={}, output={}, covariance={}",
+                    vector.len(),
+                    output.len(),
+                    covariance.dim()
+                ),
+            }
+            .into());
+        }
+        output.fill(0.0);
+        match covariance.representation() {
+            MarginalSlopeCovarianceRef::Diagonal(diag) => {
+                for axis in 0..vector.len() {
+                    output[axis] = diag[axis] * vector[axis];
+                }
+            }
+            MarginalSlopeCovarianceRef::Full(cov) => {
+                for i in 0..cov.nrows() {
+                    for j in 0..cov.ncols() {
+                        output[i] += cov[[i, j]] * vector[j];
+                    }
+                }
+            }
+            MarginalSlopeCovarianceRef::LowRank(factor) => {
+                if low_rank_projection.len() != factor.ncols() {
+                    return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
+                        reason: format!(
+                            "reusable hand row low-rank projection mismatch: workspace={}, covariance={}",
+                            low_rank_projection.len(),
+                            factor.ncols()
+                        ),
+                    }
+                    .into());
+                }
+                low_rank_projection.fill(0.0);
+                for r in 0..factor.ncols() {
+                    for k in 0..factor.nrows() {
+                        low_rank_projection[r] += factor[[k, r]] * vector[k];
+                    }
+                }
+                for k in 0..factor.nrows() {
+                    for r in 0..factor.ncols() {
+                        output[k] += factor[[k, r]] * low_rank_projection[r];
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn row_primary_closed_form_vector_hand_reference_into(
+        q0: f64,
+        q1: f64,
+        qd1: f64,
+        slopes: &[f64],
+        z: &[f64],
+        covariance: &MarginalSlopeCovariance,
+        w: f64,
+        d: f64,
+        derivative_guard: f64,
+        probit_scale: f64,
+        workspace: &mut ReusableHandVectorRowWorkspace,
+    ) -> Result<f64, String> {
+        let k = slopes.len();
+        if z.len() != k || covariance.dim() != k {
+            return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
+                reason: format!(
+                    "survival marginal-slope vector row dimension mismatch: slopes={}, z={}, covariance={}",
+                    k,
+                    z.len(),
+                    covariance.dim()
+                ),
+            }
+            .into());
+        }
+        if workspace.score_dimension != k {
+            return Err(SurvivalMarginalSlopeError::IncompatibleDimensions {
+                reason: format!(
+                    "reusable hand row workspace width mismatch: configured={}, row={k}",
+                    workspace.score_dimension
+                ),
+            }
+            .into());
+        }
+        if !probit_scale.is_finite() {
+            return Err(format!(
+                "marginal-slope probit scale must be finite, got {probit_scale}"
+            ));
+        }
+        marginal_slope_covariance_matvec_into(
+            covariance,
+            slopes,
+            &mut workspace.sigma_g,
+            &mut workspace.low_rank_projection,
+        )?;
+        let s2 = probit_scale * probit_scale;
+        if slopes
+            .iter()
+            .any(|&slope| !(probit_scale * slope).is_finite())
+        {
+            return Err("marginal-slope covariance vector contains non-finite values".to_string());
+        }
+        let variance = s2 * covariance.quadratic_form_unchecked(slopes);
+        if !(variance.is_finite() && variance >= 0.0) {
+            return Err(format!(
+                "marginal-slope covariance quadratic form must be non-negative, got {variance}"
+            ));
+        }
+        let c = (1.0 + variance).sqrt();
+        for a in 0..k {
+            workspace.c1[a] = s2 * workspace.sigma_g[a] / c;
+        }
+        for a in 0..k {
+            for b in 0..k {
+                let sigma_ab = match covariance.representation() {
+                    MarginalSlopeCovarianceRef::Diagonal(diag) => {
+                        if a == b {
+                            diag[a]
+                        } else {
+                            0.0
+                        }
+                    }
+                    MarginalSlopeCovarianceRef::Full(cov) => cov[[a, b]],
+                    MarginalSlopeCovarianceRef::LowRank(factor) => {
+                        let mut value = 0.0;
+                        for r in 0..factor.ncols() {
+                            value += factor[[a, r]] * factor[[b, r]];
+                        }
+                        value
+                    }
+                };
+                workspace.c2[a * k + b] = s2 * sigma_ab / c
+                    - (s2 * workspace.sigma_g[a]) * (s2 * workspace.sigma_g[b]) / (c * c * c);
+            }
+        }
+
+        let linear = probit_scale
+            * slopes
+                .iter()
+                .zip(z.iter())
+                .map(|(&g, &zi)| g * zi)
+                .sum::<f64>();
+        let eta0 = q0 * c + linear;
+        let eta1 = q1 * c + linear;
+        let ad1 = qd1 * c;
+        if survival_derivative_guard_violated(qd1, derivative_guard) {
+            return Err(SurvivalMarginalSlopeError::MonotonicityViolation {
+            reason: format!(
+                "survival marginal-slope monotonicity violated: qd1={qd1:.3e} < guard={derivative_guard:.3e}"
+            ),
+        }
+        .into());
+        }
+        if !(ad1.is_finite() && ad1 > 0.0) {
+            return Err(SurvivalMarginalSlopeError::NumericalFailure {
+                reason: format!(
+                    "survival marginal-slope transformed derivative must be positive, got {ad1}"
+                ),
+            }
+            .into());
+        }
+
+        let (logcdf_neg_eta0, _) = signed_probit_logcdf_and_mills_ratio(-eta0);
+        let (logcdf_neg_eta1, _) = signed_probit_logcdf_and_mills_ratio(-eta1);
+        let log_phi_eta1 = -0.5 * (eta1 * eta1 + std::f64::consts::TAU.ln());
+        let nll = w
+            * ((1.0 - d) * (-logcdf_neg_eta1) + logcdf_neg_eta0 - d * log_phi_eta1 - d * ad1.ln());
+
+        let (e0_k1, e0_k2, _, _) = signed_probit_neglog_derivatives_up_to_fourth(-eta0, -w)?;
+        let (e1_k1, e1_k2, _, _) =
+            signed_probit_neglog_derivatives_up_to_fourth(-eta1, w * (1.0 - d))?;
+        let phi_u1 = w * d * eta1;
+        let phi_u2 = w * d;
+        let (nl_u1, nl_u2, _, _) = neglog_derivatives(ad1);
+        let td_u1 = w * d * nl_u1;
+        let td_u2 = w * d * nl_u2;
+        let u1_eta0 = -e0_k1;
+        let u1_eta1 = -e1_k1 + phi_u1;
+        let u1_ad1 = td_u1;
+        let u2_eta0 = e0_k2;
+        let u2_eta1 = e1_k2 + phi_u2;
+        let u2_ad1 = td_u2;
+
+        let dim = 3 + k;
+        let (gradient, hessian) = workspace.derivative_cells.split_at_mut(dim);
+        gradient.fill(0.0);
+        hessian.fill(0.0);
+        gradient[0] = u1_eta0 * c;
+        gradient[1] = u1_eta1 * c;
+        gradient[2] = u1_ad1 * c;
+        hessian[0] = u2_eta0 * c * c;
+        hessian[dim + 1] = u2_eta1 * c * c;
+        hessian[2 * dim + 2] = u2_ad1 * c * c;
+        for a in 0..k {
+            let idx = 3 + a;
+            let dlin = probit_scale * z[a];
+            let deta0 = q0 * workspace.c1[a] + dlin;
+            let deta1 = q1 * workspace.c1[a] + dlin;
+            let dad1 = qd1 * workspace.c1[a];
+            gradient[idx] = u1_eta0 * deta0 + u1_eta1 * deta1 + u1_ad1 * dad1;
+            hessian[idx] = u2_eta0 * c * deta0 + u1_eta0 * workspace.c1[a];
+            hessian[idx * dim] = hessian[idx];
+            hessian[dim + idx] = u2_eta1 * c * deta1 + u1_eta1 * workspace.c1[a];
+            hessian[idx * dim + 1] = hessian[dim + idx];
+            hessian[2 * dim + idx] = u2_ad1 * c * dad1 + u1_ad1 * workspace.c1[a];
+            hessian[idx * dim + 2] = hessian[2 * dim + idx];
+            for b in 0..k {
+                let jdx = 3 + b;
+                let dlin_b = probit_scale * z[b];
+                let deta0_b = q0 * workspace.c1[b] + dlin_b;
+                let deta1_b = q1 * workspace.c1[b] + dlin_b;
+                let dad1_b = qd1 * workspace.c1[b];
+                let c2 = workspace.c2[a * k + b];
+                hessian[idx * dim + jdx] = u2_eta0 * deta0 * deta0_b
+                    + u1_eta0 * q0 * c2
+                    + u2_eta1 * deta1 * deta1_b
+                    + u1_eta1 * q1 * c2
+                    + u2_ad1 * dad1 * dad1_b
+                    + u1_ad1 * qd1 * c2;
+            }
+        }
+        Ok(nll)
     }
 
 }
@@ -2091,6 +2395,229 @@ mod tests {
         )
         .expect_err("a row cannot reuse workspace configured for another score width");
         assert!(error.contains("workspace width mismatch"), "{error}");
+    }
+
+    /// #932 release sweep for the feature pullback against every canonical
+    /// correctness oracle. Production and strongest-hand both reuse derivative
+    /// output and covariance scratch so timing includes row arithmetic only.
+    #[test]
+    fn release_measure_packed_widths_k1_to_k14_vs_strongest_hand_932() {
+        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
+
+        // Every width's parity is pinned in every build by the oracles this
+        // module already carries; this gate is the speed contract, release
+        // profile only (`SpeedGate::open` documents why): at every width, on
+        // every covariance shape and event branch, the runtime-width feature
+        // pullback must beat the reusable strongest-hand schedule. Both arms
+        // reuse derivative output and covariance scratch so the timing is row
+        // arithmetic only; the nudge perturbs the marginal predictor.
+        let mut gate =
+            (!cfg!(debug_assertions)).then(|| SpeedGate::open("G932_PACKED_WIDTH_RELEASE"));
+
+        macro_rules! measure_width {
+            ($k:literal, $dim:literal) => {{
+                let slopes: Vec<f64> = (0..$k)
+                    .map(|axis| {
+                        let magnitude = 0.27 + 0.08 * axis as f64;
+                        if axis % 2 == 0 { magnitude } else { -magnitude }
+                    })
+                    .collect();
+                let scores: Vec<f64> = (0..$k)
+                    .map(|axis| -1.25 + 2.5 * (axis + 1) as f64 / ($k + 1) as f64)
+                    .collect();
+                let diagonal = MarginalSlopeCovariance::diagonal(Array1::from_shape_fn(
+                    $k,
+                    |axis| {
+                        0.8 + 0.07 * axis as f64
+                    },
+                ))
+                .unwrap();
+                let full = MarginalSlopeCovariance::full(Array2::from_shape_fn(
+                    ($k, $k),
+                    |(row, col)| {
+                        if row == col {
+                            1.0 + 0.05 * row as f64
+                        } else {
+                            0.02 / (1.0 + row.abs_diff(col) as f64)
+                        }
+                    },
+                ))
+                .unwrap();
+                let low_rank = MarginalSlopeCovariance::low_rank(Array2::from_shape_fn(
+                    ($k, $k.min(3)),
+                    |(row, column)| {
+                        let sign = if (row + column) % 2 == 0 { 1.0 } else { -1.0 };
+                        sign * (0.17 + 0.025 * row as f64 + 0.04 * column as f64)
+                    },
+                ))
+                .unwrap();
+                let cases = [
+                    ("diagonal", &diagonal),
+                    ("full", &full),
+                    ("low_rank", &low_rank),
+                ];
+
+                for &(label, covariance) in &cases {
+                    for event in [0.0, 1.0] {
+                        let field = ScoreCovarianceField::pooled((*covariance).clone());
+                        let mut workspace = RigidVectorRowWorkspace::new(&field)
+                            .expect("packed production workspace");
+                        let mut hand_workspace =
+                            vector_hand_oracle_tests::ReusableHandVectorRowWorkspace::new(
+                                covariance,
+                            )
+                            .expect("reusable strongest-hand workspace");
+                        let evaluate_production =
+                            |q0: f64, workspace: &mut RigidVectorRowWorkspace<'_>| -> f64 {
+                                let value = row_primary_closed_form_vector_into(
+                                    0, q0, 0.53, 1.18, &slopes, &scores, 1.21, event, 1.0e-8,
+                                    0.87, workspace,
+                                )
+                                .expect("packed production width");
+                                let (gradient, hessian) = workspace.derivatives();
+                                value + gradient[0] + hessian[[0, 0]]
+                            };
+                        let evaluate_hand =
+                            |q0: f64,
+                             workspace: &mut vector_hand_oracle_tests::ReusableHandVectorRowWorkspace|
+                             -> f64 {
+                                let value = vector_hand_oracle_tests::row_primary_closed_form_vector_hand_reference_into(
+                                    q0,
+                                    0.53,
+                                    1.18,
+                                    &slopes,
+                                    &scores,
+                                    covariance,
+                                    1.21,
+                                    event,
+                                    1.0e-8,
+                                    0.87,
+                                    workspace,
+                                )
+                                .expect("reusable strongest-hand width");
+                                let (gradient, hessian) = workspace.derivatives();
+                                value + gradient[0] + hessian[[0, 0]]
+                            };
+                        // Parity on the exact benchmarked inputs.
+                        let production_value = evaluate_production(-0.28, &mut workspace);
+                        let hand_value = evaluate_hand(-0.28, &mut hand_workspace);
+                        let band = 1e-9 * production_value.abs().max(hand_value.abs()).max(1.0);
+                        assert!(
+                            (production_value - hand_value).abs() <= band,
+                            "covariance={label} event={event:.0} k={}: production {production_value:+.15e} \
+                             vs hand {hand_value:+.15e}",
+                            $k,
+                        );
+                        if let Some(gate) = gate.as_mut() {
+                            let timing = paired_interleaved(
+                                15,
+                                500,
+                                0x9320_9AC4 ^ ($k as u64) ^ (event.to_bits() >> 60),
+                                batched(16, |nudge| evaluate_production(-0.28 + nudge, &mut workspace)),
+                                batched(16, |nudge| evaluate_hand(-0.28 + nudge, &mut hand_workspace)),
+                            );
+                            gate.faster(
+                                &format!("covariance={label} event={event:.0} k={} dim={}", $k, $dim),
+                                &timing,
+                                "production",
+                                "hand",
+                            );
+                        }
+                    }
+                }
+            }};
+        }
+
+        measure_width!(1, 4);
+        measure_width!(2, 5);
+        measure_width!(3, 6);
+        measure_width!(4, 7);
+        measure_width!(5, 8);
+        measure_width!(6, 9);
+        measure_width!(7, 10);
+        measure_width!(8, 11);
+        // Cross the graph oracle's exact u16-axis-mask boundary. This is the
+        // representative runtime-width cell: production has no width dispatch,
+        // and the same feature-pullback schedule serves every larger K.
+        measure_width!(14, 17);
+        if let Some(gate) = gate {
+            gate.finish();
+        }
+    }
+
+    /// #932 release speed gate for the hot K=1 SCALAR rigid row (the
+    /// inner-Newton `rigid_row_order2` lowering behind
+    /// [`row_primary_closed_form`]) against the retained strongest hand
+    /// schedule [`test_support::row_primary_closed_form_hand_reference`].
+    /// The packed-widths gate above times the VECTOR workspace path only, so
+    /// this is the dedicated scalar cell: one per event branch, release
+    /// profile only (`SpeedGate::open` documents why).
+    #[test]
+    fn release_measure_rigid_scalar_order2_vs_strongest_hand_932() {
+        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
+
+        // One ordinary interior row per event branch: censored (d=0) and
+        // event (d=1) evaluate different live derivative stacks, so each is
+        // its own measured cell. One arm call evaluates 64 rows, so the
+        // harness's per-call cost stays far below the arm.
+        let cases = [
+            (-0.7, 0.4, 0.8, -0.3, 0.6, 1.0, 0.0, 0.75),
+            (0.2, -0.5, 1.4, 0.9, -1.1, 0.8, 1.0, 1.0),
+        ];
+        let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("RIGID-SCALAR-932"));
+        for &(q0, q1, qd1, g, z, w, d, scale) in &cases {
+            // Parity pin on the exact benchmarked inputs (the richer sweep
+            // lives in `canonical_rigid_order2_matches_strongest_hand_schedule_932`).
+            let canonical = row_primary_closed_form(q0, q1, qd1, g, z, w, d, 1.0e-8, scale)
+                .expect("canonical rigid row");
+            let hand = test_support::row_primary_closed_form_hand_reference(
+                q0, q1, qd1, g, z, w, d, 1.0e-8, scale,
+            )
+            .expect("strongest hand rigid row");
+            let tolerance = 2.0e-11 * canonical.0.abs().max(hand.0.abs()).max(1.0);
+            assert!(
+                (canonical.0 - hand.0).abs() <= tolerance,
+                "event={d:.0} value: canonical={:+.16e} hand={:+.16e}",
+                canonical.0,
+                hand.0,
+            );
+            let Some(gate) = gate.as_mut() else {
+                continue;
+            };
+            // The nudge perturbs the observed-slope primary; each arm folds
+            // value, gradient and Hessian channels back into the checksum.
+            let timing = paired_interleaved(
+                15,
+                5_000,
+                0x9320_5CA1 ^ (d.to_bits() >> 60),
+                batched(64, |nudge| {
+                    let (value, gradient, hessian) =
+                        row_primary_closed_form(q0, q1, qd1, g + nudge, z, w, d, 1.0e-8, scale)
+                            .expect("canonical rigid row");
+                    value + gradient[0] + hessian[0][0]
+                }),
+                batched(64, |nudge| {
+                    let (value, gradient, hessian) =
+                        test_support::row_primary_closed_form_hand_reference(
+                            q0,
+                            q1,
+                            qd1,
+                            g + nudge,
+                            z,
+                            w,
+                            d,
+                            1.0e-8,
+                            scale,
+                        )
+                        .expect("strongest hand rigid row");
+                    value + gradient[0] + hessian[0][0]
+                }),
+            );
+            gate.faster(&format!("event={d:.0}"), &timing, "production", "hand");
+        }
+        if let Some(gate) = gate {
+            gate.finish();
+        }
     }
 
     /// #932 cutover gate: every live K=1 scalar caller now uses the packed

@@ -523,6 +523,7 @@ pub(crate) fn binomial_mean_wiggle_operator_fixture() -> (
     (family, states, specs, x_eta)
 }
 
+
 #[test]
 pub(crate) fn binomial_location_scale_expected_info_derivatives_match_finite_difference() {
     let base = binomial_location_scale_base_fixture();
@@ -1415,36 +1416,3 @@ fn nb_location_scale_inner_solve_converges_on_heteroscedastic_counts() {
 // the graduated continuation is the correct canonical cold solve for this
 // family and becomes the production fix.
 // =====================================================================
-
-// =====================================================================
-// #2621 — the Gaussian location-scale-WIGGLE joint log-likelihood gradient
-//
-// This family emits `BlockWorkingSet::Diagonal` working sets and supplies an
-// exact joint HESSIAN. Before this gate it supplied no joint GRADIENT, so
-// `load_joint_gradient_evaluation` fell through to the legacy assembly, which
-// recovers a per-block score from the IRLS working set as
-// `X_bᵀ(w ⊙ (z_b − η_b))`. For this family that is wrong twice over:
-//
-//   * `z_mu = response − η_w` and `z_wiggle = response − η_mu` are GAUSS–SEIDEL
-//     working responses — each of the two location-channel blocks absorbs the
-//     other's η as an offset. That is correct for a blockwise solve and is not
-//     the gradient of the joint likelihood;
-//   * the family's predictor is `q(q0, βw) = q0 + B(q0)·βw`, so the μ block
-//     reaches `q` through `dq_dq0 = 1 + B'(q0)·βw`, and the wiggle block's
-//     design is `B(q0)` at the CURRENT `q0`, not the spec's static seed grid.
-//     The legacy assembly has neither factor.
-//
-// A per-block directional audit of the legacy gradient on the failing fixtures
-// measured realized-`Δℓ`-over-predicted-`grad·δ` ratios of `+0.2585` on μ and
-// `−6.5539` (wrong SIGN) on the wiggle block, with the independently-channelled
-// scale block exact at `+1.000000`. So the two blocks that are two halves of
-// one linear predictor were the two that disagreed.
-//
-// The gate asserts BOTH directions, because a fix that is not gated on
-// re-detecting its own symptom silently passes once the symptom moves:
-//   (a) the hook's gradient matches a central finite difference of the family's
-//       OWN `log_likelihood_only`, per coordinate, with the wiggle basis
-//       refreshed at the perturbed `q0` exactly as `refresh_all_block_etas`
-//       does at fit time;
-//   (b) the legacy working-set assembly does NOT — otherwise this test would
-//       be green on a tree where nothing had been fixed.

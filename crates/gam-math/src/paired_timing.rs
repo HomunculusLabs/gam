@@ -1,5 +1,14 @@
 //! One way to measure "does A beat B", for every speed gate in this workspace.
 //!
+//! This module is test infrastructure that lives in the library because the
+//! integration tests of other crates measure with it, and a `#[cfg(test)]`
+//! item cannot cross a crate boundary (feature gating is banned in this
+//! workspace). No shipped artifact links it. The `paired_timing_report`
+//! example is its reachability root: a dead-code sweep keyed on the CLI and
+//! Python extension symbol tables once deleted `paired_interleaved`, every
+//! gate that called it and every hand opponent those gates raced, and a
+//! kept example is the root such a sweep honours.
+//!
 //! Fifteen separate timing harnesses across ten files were doing this in three
 //! different ways, and the differences decide whether a gate can tell a
 //! regression from a busy machine (issue #932, and #2470 for the duplication).
@@ -213,6 +222,9 @@
 //! That is the property to copy when building the next gate here, more than any
 //! particular statistic in this module.
 
+use std::hint::black_box;
+use std::time::Instant;
+
 /// Paired per-repetition timings for two implementations of one computation.
 ///
 /// `a_ns[i]` and `b_ns[i]` were measured adjacent in time within repetition `i`,
@@ -325,6 +337,71 @@ impl PairedTiming {
             self.first_position_bias(),
             self.ratios.len(),
         )
+    }
+}
+
+/// Time two implementations against each other, interleaved per repetition with
+/// a randomised order.
+///
+/// Each arm is a closure taking a perturbation seeded from the running checksum
+/// and returning a value folded back into it, so consecutive iterations carry a
+/// data dependence the optimizer cannot hoist across. Both closures must compute
+/// the SAME quantity — this measures speed and assumes agreement has already
+/// been established by a separate parity assertion.
+///
+/// `seed` fixes the order sequence, so a run is reproducible; vary it to check a
+/// verdict is not an artifact of one particular order sequence.
+///
+/// # Panics
+///
+/// If `reps` or `iterations` is zero, or if either arm's accumulated checksum is
+/// not finite — a non-finite checksum means the timed body degenerated (NaN
+/// short-circuits are often much faster) and the timing is meaningless.
+pub fn paired_interleaved<A, B>(
+    reps: usize,
+    iterations: usize,
+    seed: u64,
+    mut arm_a: A,
+    mut arm_b: B,
+) -> PairedTiming
+where
+    A: FnMut(f64) -> f64,
+    B: FnMut(f64) -> f64,
+{
+    assert!(reps > 0, "paired_interleaved needs at least one repetition");
+    assert!(
+        iterations > 0,
+        "paired_interleaved needs at least one iteration per repetition"
+    );
+
+    let mut a_ns = Vec::with_capacity(reps);
+    let mut b_ns = Vec::with_capacity(reps);
+    let mut ratios = Vec::with_capacity(reps);
+    let mut a_went_first = Vec::with_capacity(reps);
+    let mut rng = SplitMix64::new(seed);
+
+    for _ in 0..reps {
+        let a_first = rng.next_bool();
+        let (ta, tb) = if a_first {
+            let ta = time_arm(iterations, &mut arm_a);
+            let tb = time_arm(iterations, &mut arm_b);
+            (ta, tb)
+        } else {
+            let tb = time_arm(iterations, &mut arm_b);
+            let ta = time_arm(iterations, &mut arm_a);
+            (ta, tb)
+        };
+        ratios.push(tb / ta);
+        a_ns.push(ta);
+        b_ns.push(tb);
+        a_went_first.push(a_first);
+    }
+
+    PairedTiming {
+        a_ns,
+        b_ns,
+        ratios,
+        a_went_first,
     }
 }
 
@@ -444,6 +521,17 @@ impl SpeedGate {
         self.record(verdict, cell, timing, a, b);
     }
 
+    /// Record a cell whose contract is "A is not measurably slower than B",
+    /// measurable meaning beyond the paired measurement's own resolution.
+    pub fn not_slower(&mut self, cell: &str, timing: &PairedTiming, a: &str, b: &str) {
+        let verdict = if timing.median_ratio() + timing.ratio_resolution() >= 1.0 {
+            "pass"
+        } else {
+            "FAIL: A is slower than B beyond the measurement's resolution"
+        };
+        self.record(verdict, cell, timing, a, b);
+    }
+
     /// Assert that every recorded cell met its contract, naming all that did
     /// not. Consumes the gate.
     pub fn finish(mut self) {
@@ -515,6 +603,28 @@ pub fn batched<F: FnMut(f64) -> f64>(rows: usize, mut arm: F) -> impl FnMut(f64)
     }
 }
 
+/// Nanoseconds per iteration for one arm of one repetition.
+///
+/// The `checksum * 1e-18` perturbation is a feedback barrier, not a nudge: it
+/// makes iteration `n + 1` depend on the result of iteration `n`, which is what
+/// prevents the loop being hoisted or vectorised into something that is not the
+/// per-call cost being claimed. The scale is small enough that the arithmetic
+/// stays in the intended regime.
+fn time_arm<F: FnMut(f64) -> f64>(iterations: usize, arm: &mut F) -> f64 {
+    let mut checksum = 0.0_f64;
+    let started = Instant::now();
+    for _ in 0..iterations {
+        checksum += arm(black_box(checksum * 1e-18));
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    assert!(
+        black_box(checksum).is_finite(),
+        "timed arm accumulated a non-finite checksum, so the loop it timed is \
+         not the computation being compared"
+    );
+    elapsed * 1e9 / iterations as f64
+}
+
 fn median(values: &[f64]) -> f64 {
     if values.is_empty() {
         return f64::NAN;
@@ -544,3 +654,156 @@ fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
     sorted[lo] * (1.0 - frac) + sorted[hi] * frac
 }
 
+/// SplitMix64 — a deterministic order sequence, so the interleave is randomised
+/// but a run is reproducible. Deliberately not a dependency: the harness must
+/// not be able to perturb the timing through an allocation or a dynamic call.
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn next_bool(&mut self) -> bool {
+        self.next_u64() & 1 == 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two arms doing identical work must land near ratio 1, and the harness
+    /// must say so through `wins_fraction` too: identical arms should win about
+    /// half the time, which is the signature a gate uses to recognise "no
+    /// measurable difference" rather than reading a point estimate of 1.02 as a
+    /// 2% win.
+    #[test]
+    fn identical_arms_report_no_winner() {
+        let work = |x: f64| {
+            let mut acc = x;
+            for i in 0..64 {
+                acc = acc.mul_add(1.000_001, (i as f64) * 1e-9);
+            }
+            acc
+        };
+        let timing = paired_interleaved(21, 2_000, 0xA5A5_1234, work, work);
+        let median = timing.median_ratio();
+        assert!(
+            (median - 1.0).abs() < 0.35,
+            "identical arms should sit near ratio 1: {}",
+            timing.summary("a", "b")
+        );
+        let wins = timing.wins_fraction();
+        assert!(
+            (0.15..=0.85).contains(&wins),
+            "identical arms should win about half the repetitions: {}",
+            timing.summary("a", "b")
+        );
+    }
+
+    /// A genuinely faster arm must be detected with every repetition agreeing —
+    /// the property that separates a real margin from one inside the noise.
+    #[test]
+    fn a_large_real_difference_is_detected_unanimously() {
+        let fast = |x: f64| {
+            let mut acc = x;
+            for i in 0..16 {
+                acc = acc.mul_add(1.000_001, (i as f64) * 1e-9);
+            }
+            acc
+        };
+        let slow = |x: f64| {
+            let mut acc = x;
+            for i in 0..256 {
+                acc = acc.mul_add(1.000_001, (i as f64) * 1e-9);
+            }
+            acc
+        };
+        let timing = paired_interleaved(15, 2_000, 0x5EED, fast, slow);
+        assert!(
+            timing.median_ratio() > 2.0,
+            "a 16x work difference must show as a large ratio: {}",
+            timing.summary("fast", "slow")
+        );
+        assert_eq!(
+            timing.wins_fraction(),
+            1.0,
+            "a large real difference must win EVERY repetition: {}",
+            timing.summary("fast", "slow")
+        );
+    }
+
+    /// The order must actually vary. A harness that believes it randomises but
+    /// does not is indistinguishable from the ones being replaced, and the
+    /// position-bias diagnostic would silently become `NaN`.
+    #[test]
+    fn both_orders_occur_and_position_bias_is_reportable() {
+        let work = |x: f64| x.mul_add(1.000_001, 1e-9);
+        let timing = paired_interleaved(20, 500, 7, work, work);
+        let a_first = timing.a_went_first.iter().filter(|f| **f).count();
+        assert!(
+            a_first > 0 && a_first < timing.a_went_first.len(),
+            "both arm orders must occur across repetitions, got {a_first} of {}",
+            timing.a_went_first.len()
+        );
+        assert!(
+            timing.first_position_bias().is_finite(),
+            "position bias must be reportable once both orders occur"
+        );
+    }
+
+    /// `ratio_resolution` is what tells a caller whether its bar is assertable.
+    /// It must be finite and positive on a real measurement, or the gate has no
+    /// way to know it is asserting inside its own noise.
+    #[test]
+    fn resolution_is_reported_and_positive() {
+        let work = |x: f64| x.mul_add(1.000_001, 1e-9);
+        let timing = paired_interleaved(15, 500, 99, work, work);
+        let resolution = timing.ratio_resolution();
+        assert!(
+            resolution.is_finite() && resolution > 0.0,
+            "resolution must be a usable number: {}",
+            timing.summary("a", "b")
+        );
+    }
+
+    /// The summary must carry the numbers that could overturn the verdict, not
+    /// just the verdict. A gate that prints only the ratio is how a 3% claim
+    /// with 6% resolution gets read as established.
+    #[test]
+    fn summary_carries_the_overturning_numbers() {
+        let work = |x: f64| x.mul_add(1.000_001, 1e-9);
+        let timing = paired_interleaved(9, 500, 3, work, work);
+        let line = timing.summary("production", "hand");
+        for field in [
+            "production=",
+            "hand=",
+            "median_ratio=",
+            "wins=",
+            "resolution=",
+            "position_bias=",
+            "reps=",
+        ] {
+            assert!(line.contains(field), "summary is missing {field}: {line}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one repetition")]
+    fn zero_repetitions_is_refused_not_silently_empty() {
+        let work = |x: f64| x;
+        // Called as a bare statement. A discarding binding is banned in this
+        // workspace, and it would be the wrong shape regardless: this call is
+        // expected to panic, so there is no result to discard.
+        paired_interleaved(0, 10, 1, work, work);
+    }
+}

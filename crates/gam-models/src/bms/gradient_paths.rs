@@ -2292,7 +2292,7 @@ mod jet_tower_oracle_tests {
 
     use super::*;
 
-    use crate::bms::test_support::rigid_standard_normal_tower;
+    use crate::bms::test_support::{rigid_standard_normal_tower};
 
     #[test]
     fn signed_probit_stack_preserves_extreme_tail_derivatives_and_weight_sign() {
@@ -2457,6 +2457,31 @@ mod jet_tower_oracle_tests {
         (value, gradient, hessian)
     }
 
+    #[inline(never)]
+    fn measured_production_rigid_vgh(
+        marginal: BernoulliMarginalLinkMap,
+        g: f64,
+        z: f64,
+        y: f64,
+        w: f64,
+        probit_scale: f64,
+    ) -> (f64, [f64; 2], [[f64; 2]; 2]) {
+        rigid_standard_normal_row_kernel(marginal, g, z, y, w, probit_scale)
+            .expect("generated rigid row")
+    }
+
+    #[inline(never)]
+    fn measured_hand_rigid_vgh(
+        marginal: BernoulliMarginalLinkMap,
+        g: f64,
+        z: f64,
+        y: f64,
+        w: f64,
+        probit_scale: f64,
+    ) -> (f64, [f64; 2], [[f64; 2]; 2]) {
+        hand_rigid_vgh(marginal, g, z, y, w, probit_scale)
+    }
+
     /// The shipped jet value/grad/Hessian kernel must equal the original HAND
     /// path it replaced (≤1e-9 rel) on the standard fixture grid — a third,
     /// independent #932 single-source witness (the jet composes `q(η)` directly
@@ -2504,6 +2529,91 @@ mod jet_tower_oracle_tests {
         }
     }
 
+    /// #932 release speed gate for the rigid Bernoulli row: the shipped jet
+    /// value/grad/Hessian kernel must beat the original hand chain it replaced
+    /// (reconstructed verbatim above as [`hand_rigid_vgh`]). One measured cell
+    /// per outcome branch, each a `faster` contract on the shared
+    /// [`SpeedGate`], which is what the release lane derives and fails
+    /// closed on.
+    #[test]
+    fn release_measure_rigid_bernoulli_vgh_vs_hand_chain_932() {
+        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
+
+        // (eta, g, z, y, w): one ordinary interior row per outcome branch —
+        // y=1 and y=0 are distinct live sign branches of the Mills-ratio
+        // kernel, so each is its own measured cell.
+        let cases = [
+            (0.3_f64, 0.2_f64, 0.4_f64, 1.0_f64, 1.0_f64),
+            (-0.7, -0.5, -1.1, 0.0, 0.8),
+        ];
+        let probit_scale = 0.8;
+
+        // Repetitions x iterations, not rounds x iterations: the arms are timed
+        // adjacent within each repetition and in a randomised order, so drift
+        // slower than one repetition divides out of that repetition's ratio.
+        // The local `best_ns` this replaces timed each arm to completion in a
+        // fixed order and took a minimum, which is the shape that cannot
+        // separate a real margin from a systematic first-versus-second offset.
+        // One arm call evaluates ROWS rows: a single row is ~90 ns, of the same
+        // order as a closure call, and the harness must not be what is measured.
+        const ROWS: usize = 64;
+        let reps = 15usize;
+        let iterations = 5_000usize;
+        let mut gate =
+            (!cfg!(debug_assertions)).then(|| SpeedGate::open("RIGID-BERNOULLI-VGH-932"));
+
+        for (case_idx, &(eta, g, z, y, w)) in cases.iter().enumerate() {
+            let marginal = bernoulli_marginal_link_map(
+                &InverseLink::Standard(gam_problem::StandardLink::Probit),
+                eta,
+            )
+            .expect("link map");
+
+            // Parity pin on the exact benchmarked inputs (the full-grid check
+            // is `rigid_bernoulli_row_kernel_matches_hand_chain_witness`). The
+            // timing below assumes the two arms compute the same thing; this is
+            // where that assumption is discharged.
+            let (jet_value, ..) =
+                rigid_standard_normal_row_kernel(marginal, g, z, y, w, probit_scale)
+                    .expect("jet kernel");
+            let (hand_value, ..) = hand_rigid_vgh(marginal, g, z, y, w, probit_scale);
+            let band = 1e-12 + 1e-9 * jet_value.abs().max(hand_value.abs());
+            assert!(
+                (jet_value - hand_value).abs() <= band,
+                "y={y:.0} value: jet {jet_value:+.15e} vs hand {hand_value:+.15e}"
+            );
+
+            let Some(gate) = gate.as_mut() else {
+                continue;
+            };
+            // The harness perturbs by a negligible multiple of the running
+            // checksum; each arm folds value, gradient and Hessian channels back
+            // into it, so the row call can be neither hoisted nor dropped while
+            // the measured regime stays bit-adjacent to the fixture.
+            let timing = paired_interleaved(
+                reps,
+                iterations,
+                0x9320_0BAD ^ case_idx as u64,
+                batched(ROWS, |nudge| {
+                    let (value, gradient, hessian) =
+                        measured_production_rigid_vgh(marginal, g + nudge, z, y, w, probit_scale);
+                    value + gradient[0] + hessian[0][0]
+                }),
+                batched(ROWS, |nudge| {
+                    let (value, gradient, hessian) =
+                        measured_hand_rigid_vgh(marginal, g + nudge, z, y, w, probit_scale);
+                    value + gradient[0] + hessian[0][0]
+                }),
+            );
+
+            // `median_ratio` is `hand / production`: above 1 means the shipped
+            // jet kernel is the faster arm.
+            gate.faster(&format!("y={y:.0}"), &timing, "production", "hand");
+        }
+        if let Some(gate) = gate {
+            gate.finish();
+        }
+    }
 }
 
 #[cfg(test)]

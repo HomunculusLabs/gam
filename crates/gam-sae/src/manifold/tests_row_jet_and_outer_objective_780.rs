@@ -317,6 +317,7 @@ fn row_jet_channel_error(actual: &SaeRowJets, expected: &LegacySaeRowJets) -> (f
 /// entry before either path is timed.
 fn compiled_schedule_beats_hand_full_channels_932(
     gate_label: &str,
+    gate_token: &'static str,
     fixture: fn(
         usize,
         usize,
@@ -328,7 +329,7 @@ fn compiled_schedule_beats_hand_full_channels_932(
         Array1<f64>,
     ),
 ) {
-    use std::time::{Duration, Instant};
+    use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 
     fn compiled_checksum(jets: &SaeRowJets) -> f64 {
         let first = (!jets.vars.is_empty())
@@ -369,6 +370,7 @@ fn compiled_schedule_beats_hand_full_channels_932(
         first + second + beta
     }
 
+    let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open(gate_token));
     for &k_atoms in &[1usize, 2, 8, 16, 32, 64] {
         let p = 16usize;
         let (term, vars, second_jets, border, assignments) = fixture(k_atoms, p);
@@ -419,85 +421,66 @@ fn compiled_schedule_beats_hand_full_channels_932(
             "K={k_atoms} warmed full row must allocate only the owned vars and one packed channel buffer"
         );
 
-        #[cfg(debug_assertions)]
-        let (repetitions, trials) = (1usize, 1usize);
-        #[cfg(not(debug_assertions))]
-        let (repetitions, trials) = match k_atoms {
-            1 => (20_000usize, 5usize),
-            2 => (20_000usize, 5usize),
-            8 => (2_000usize, 5usize),
-            16 => (400usize, 5usize),
-            32 => (80usize, 5usize),
-            64 => (10usize, 5usize),
-            _ => (1usize, 1usize),
+        // Speed contract, release profile only (`SpeedGate::open` documents
+        // why): the compiled schedule must beat the retained hand assembly at
+        // every width, measured paired and interleaved with a randomised
+        // order per repetition. Each arm evaluates the full row jets once per
+        // iteration; the nudge enters the assignment weight so no iteration
+        // can be folded into the previous one. (This gate once kept a
+        // minimum per arm over five trials and asserted `<=` behind a
+        // `cfg(not(debug_assertions))`; it is now one of the derived
+        // population and measured by the one instrument.)
+        let Some(gate) = gate.as_mut() else {
+            continue;
         };
-
-        let mut best_compiled = Duration::MAX;
-        let mut best_hand = Duration::MAX;
-        let mut accumulated = 0.0_f64;
-        for trial in 0..trials {
-            let run_compiled = || {
-                let start = Instant::now();
-                let mut sum = 0.0_f64;
-                for _ in 0..repetitions {
-                    let jets = term
-                        .row_jets_for_logdet(
-                            0,
-                            vars.clone(),
-                            assignments.view(),
-                            &second_jets,
-                            &border,
-                        )
-                        .unwrap();
-                    sum += compiled_checksum(&jets);
-                }
-                (start.elapsed(), sum)
-            };
-            let run_hand = || {
-                let start = Instant::now();
-                let mut sum = 0.0_f64;
-                for _ in 0..repetitions {
-                    let jets = row_jets_for_logdet_hand_reference(
-                        &term,
+        let iterations = match k_atoms {
+            1 | 2 => 4_000usize,
+            8 => 400,
+            16 => 80,
+            32 => 16,
+            _ => 4,
+        };
+        let mut assignments_a = assignments.clone();
+        let mut assignments_b = assignments.clone();
+        let timing = paired_interleaved(
+            11,
+            iterations,
+            0x9320_5AE0 ^ k_atoms as u64,
+            |nudge| {
+                assignments_a[0] = assignments[0] + nudge;
+                let jets = term
+                    .row_jets_for_logdet(
                         0,
                         vars.clone(),
-                        assignments.view(),
+                        assignments_a.view(),
                         &second_jets,
                         &border,
-                    );
-                    sum += hand_checksum(&jets);
-                }
-                (start.elapsed(), sum)
-            };
-            let ((compiled_time, compiled_sum), (hand_time, hand_sum)) = if trial % 2 == 0 {
-                (run_compiled(), run_hand())
-            } else {
-                let hand_result = run_hand();
-                let compiled_result = run_compiled();
-                (compiled_result, hand_result)
-            };
-            best_compiled = best_compiled.min(compiled_time);
-            best_hand = best_hand.min(hand_time);
-            accumulated += compiled_sum + hand_sum;
-        }
-        assert!(
-            accumulated.is_finite(),
-            "timed channel checksum must be finite"
+                    )
+                    .unwrap();
+                compiled_checksum(&jets)
+            },
+            |nudge| {
+                assignments_b[0] = assignments[0] + nudge;
+                let jets = row_jets_for_logdet_hand_reference(
+                    &term,
+                    0,
+                    vars.clone(),
+                    assignments_b.view(),
+                    &second_jets,
+                    &border,
+                );
+                hand_checksum(&jets)
+            },
         );
-        let compiled_ns = best_compiled.as_nanos() as f64 / repetitions as f64;
-        let hand_ns = best_hand.as_nanos() as f64 / repetitions as f64;
         eprintln!(
-            "[SAE-{gate_label}-932] K={k_atoms} P={p} hand={hand_ns:.1} ns/row \
-             compiled={compiled_ns:.1} ns/row ratio={:.4}x max_abs={max_abs:.3e} \
+            "[SAE-{gate_label}-932] K={k_atoms} P={p} max_abs={max_abs:.3e} \
              allocs hand={hand_allocations}/{hand_bytes}B \
-             compiled={compiled_allocations}/{compiled_bytes}B",
-            compiled_ns / hand_ns
+             compiled={compiled_allocations}/{compiled_bytes}B"
         );
-        #[cfg(not(debug_assertions))]
-        assert!(
-            compiled_ns <= hand_ns,
-            "K={k_atoms} compiled schedule {compiled_ns:.1} ns/row must beat hand {hand_ns:.1} ns/row"
-        );
+        gate.faster(&format!("K={k_atoms} P={p}"), &timing, "compiled", "hand");
+    }
+    if let Some(gate) = gate {
+        gate.finish();
     }
 }
 
@@ -505,7 +488,11 @@ fn compiled_schedule_beats_hand_full_channels_932(
 /// centered-moment schedule is output-optimal O(L²P).
 #[test]
 pub(crate) fn softmax_compiled_schedule_beats_hand_full_channels_932() {
-    compiled_schedule_beats_hand_full_channels_932("SOFTMAX", softmax_schedule_perf_fixture);
+    compiled_schedule_beats_hand_full_channels_932(
+        "SOFTMAX",
+        "SAE-SOFTMAX-SCHEDULE-932",
+        softmax_schedule_perf_fixture,
+    );
 }
 
 /// Independent gates have diagonal logit Hessians. The compiled schedule must
@@ -515,6 +502,7 @@ pub(crate) fn softmax_compiled_schedule_beats_hand_full_channels_932() {
 pub(crate) fn independent_compiled_schedule_beats_hand_full_channels_932() {
     compiled_schedule_beats_hand_full_channels_932(
         "INDEPENDENT",
+        "SAE-INDEPENDENT-SCHEDULE-932",
         independent_schedule_perf_fixture,
     );
 }

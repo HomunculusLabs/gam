@@ -7033,4 +7033,64 @@ mod unit_tests {
             "d2a/dtheta2 = -1/(4*theta^1.5)"
         );
     }
+
+    /// #932 correctness and release racer for the runtime shaped-value
+    /// primitives. The comparison arm is the exact constant-synthesis idiom
+    /// removed from the SLS wiggle paths: a unary composition whose derivative
+    /// stack is identically zero. Both arms allocate the same runtime-width
+    /// output shape from a warm-reset arena; the only intended difference is
+    /// whether known-zero channels are written directly or computed by walking
+    /// the Faà di Bruno composition.
+    #[test]
+    fn runtime_shaped_value_primitives_are_exact_and_skip_constant_composition_932() {
+        use super::{DynamicJetArena, DynamicOrder2, RuntimeJetScalar};
+        use crate::paired_timing::{SpeedGate, batched, paired_interleaved};
+
+        const K: usize = 48;
+        let arena = DynamicJetArena::new();
+        let variable = DynamicOrder2::variable(0.75, 7, K, &arena);
+
+        let constant = variable.constant_like(1.25);
+        assert_eq!(constant.value().to_bits(), 1.25_f64.to_bits());
+        assert_eq!(constant.dimension(), K);
+        assert!(constant.g().iter().all(|&channel| channel == 0.0));
+        assert!(constant.h().iter().all(|&channel| channel == 0.0));
+
+        let replaced = variable.with_value(-2.5);
+        assert_eq!(replaced.value().to_bits(), (-2.5_f64).to_bits());
+        assert_eq!(replaced.g(), variable.g());
+        assert_eq!(replaced.h(), variable.h());
+
+        // The exactness pins above run in every build; the speed contract
+        // below opens only in the release profile. Both arms allocate the same
+        // runtime-width output shape from a warm-reset arena and return the same
+        // quantity; the only intended difference is whether known-zero channels
+        // are written directly or computed by walking the composition, so the
+        // direct primitive must be the faster arm.
+        if cfg!(debug_assertions) {
+            return;
+        }
+        let mut gate = SpeedGate::open("RUNTIME-CONSTANT-932");
+        let mut direct_arena = DynamicJetArena::new();
+        let mut composed_arena = DynamicJetArena::new();
+        let timing = paired_interleaved(
+            15,
+            1_000,
+            0x9320_C057,
+            batched(16, |nudge| {
+                direct_arena.reset();
+                let variable = DynamicOrder2::variable(0.75 + nudge, 7, K, &direct_arena);
+                let constant = variable.constant_like(1.25);
+                constant.value() + constant.g()[K - 1] + constant.h()[K * K - 1]
+            }),
+            batched(16, |nudge| {
+                composed_arena.reset();
+                let variable = DynamicOrder2::variable(0.75 + nudge, 7, K, &composed_arena);
+                let constant = variable.compose_unary([1.25, 0.0, 0.0, 0.0, 0.0]);
+                constant.value() + constant.g()[K - 1] + constant.h()[K * K - 1]
+            }),
+        );
+        gate.faster(&format!("dimension={K}"), &timing, "direct", "composed");
+        gate.finish();
+    }
 }

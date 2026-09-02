@@ -890,6 +890,101 @@ pub(crate) fn binomial_location_scalesecond_directional_coefficients(
 }
 
 #[cfg(test)]
+mod packed_scalar_oracle_tests {
+    //! #932 oracle: the packed `Order2`/`OneSeed`/`TwoSeed` evaluations of the
+    //! single-source [`binomial_location_scale_nll_generic`] must reproduce,
+    //! channel-for-channel, the dense `Tower4<2>` builder
+    //! ([`binomial_location_scale_nll_tower`]) the contracted/Hessian hot paths
+    //! replaced — value/grad/Hessian for `Order2`, the contracted third for
+    //! `OneSeed`, the contracted fourth for `TwoSeed`.
+    use super::*;
+    use crate::gamlss::test_support::binomial_location_scale_nll_tower;
+    use gam_problem::{InverseLink, StandardLink};
+
+    /// The order-1 gradient lowering must be bit-identical to the `Tower4`
+    /// gradient (every build) and faster than it (release profile, where the
+    /// codegen layout is the shipped one -- `SpeedGate::open` documents why).
+    #[test]
+    fn measure_gradient_order1_vs_tower4_932() {
+        use gam_math::paired_timing::{SpeedGate, batched, paired_interleaved};
+
+        let links = [
+            InverseLink::Standard(StandardLink::Logit),
+            InverseLink::Standard(StandardLink::Probit),
+            InverseLink::Standard(StandardLink::CLogLog),
+        ];
+        let y = 1.0;
+        let weight = 1.3;
+        let eta_t = -0.7;
+        let eta_ls = 0.5;
+        let SigmaJet1 { sigma, .. } = exp_sigma_jet1_scalar(eta_ls);
+        let q = binomial_location_scale_q0(eta_t, sigma);
+        let mut gate = (!cfg!(debug_assertions)).then(|| SpeedGate::open("BINOMIAL-LS-GRAD-932"));
+        for link in &links {
+            let jet = inverse_link_jet_for_inverse_link(link, q).expect("inverse-link jet");
+            let gradient = binomial_location_scale_nll_gradient(
+                y, weight, eta_t, eta_ls, q, jet.mu, jet.d1, jet.d2, jet.d3, link,
+            )
+            .expect("order1 gradient");
+            let tower = binomial_location_scale_nll_tower(
+                y, weight, eta_t, eta_ls, q, jet.mu, jet.d1, jet.d2, jet.d3, link, false,
+            )
+            .expect("tower gradient baseline");
+            assert_eq!(
+                gradient, tower.g,
+                "Order1 must be bit-identical to Tower4 gradient"
+            );
+            let Some(gate) = gate.as_mut() else {
+                continue;
+            };
+            // The nudge perturbs the threshold predictor, so consecutive
+            // iterations cannot be folded; both arms fold the same gradient
+            // channel back into the harness checksum.
+            let timing = paired_interleaved(
+                15,
+                5_000,
+                0x9320_B1A5,
+                batched(64, |nudge| {
+                    binomial_location_scale_nll_gradient(
+                        y,
+                        weight,
+                        eta_t + nudge,
+                        eta_ls,
+                        q,
+                        jet.mu,
+                        jet.d1,
+                        jet.d2,
+                        jet.d3,
+                        link,
+                    )
+                    .expect("order1 timing")[0]
+                }),
+                batched(64, |nudge| {
+                    binomial_location_scale_nll_tower(
+                        y,
+                        weight,
+                        eta_t + nudge,
+                        eta_ls,
+                        q,
+                        jet.mu,
+                        jet.d1,
+                        jet.d2,
+                        jet.d3,
+                        link,
+                        false,
+                    )
+                    .expect("tower timing")
+                    .g[0]
+                }),
+            );
+            gate.faster(&format!("link={link:?}"), &timing, "order1", "tower4");
+        }
+        if let Some(gate) = gate {
+            gate.finish();
+        }
+    }
+}
+#[cfg(test)]
 mod simd_directional_bit_identity_tests {
     //! The SIMD 4-rows-per-pass directional/bidirectional coefficient builders
     //! ([`binomial_location_scale_first_directional_coefficients`] /

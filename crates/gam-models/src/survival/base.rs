@@ -3345,6 +3345,292 @@ mod tests {
             }
         }
 
+        /// Diagnostic throughput comparison for the cause-specific
+        /// Royston-Parmar row. The
+        /// production structure-compiled order-2/third/fourth lowerings
+        /// ([`cause_specific_row_order2`] / [`cause_specific_row_third_contracted`]
+        /// / [`cause_specific_row_fourth_contracted`], all emitted from the one
+        /// [`cause_specific_row`] declaration) are timed against the generic
+        /// gam-math forward-mode jet tower ([`program_row_kernel`] /
+        /// [`program_third_contracted`] / [`program_fourth_contracted`]) — the
+        /// generic automatic-differentiation implementation. This is not the
+        /// #932 strongest-hand acceptance gate; that independent, semantically
+        /// identical comparison lives in `cause_specific_codegen_perf`.
+        /// The third/fourth contracted directional channels feed the live
+        /// exact-Newton HVP (`exact_newton_hessian_*directional_derivative`), so
+        /// timing only order-2 left the higher-order production jets unmeasured.
+        /// Emits the generic-tower time over production time per derivative
+        /// channel.
+        ///
+        /// The batch mixes all four (entry × event) activity corners with distinct
+        /// per-row predictors, so the optimizer cannot hoist the pure row call out
+        /// of the sweep, and the finite checksum over every returned channel keeps
+        /// the whole sweep live without `std::hint::black_box`.
+        #[test]
+        fn release_measure_cause_specific_vs_generic_tower_diagnostic() {
+            use gam_math::paired_timing::{SpeedGate, paired_interleaved};
+
+            const ROWS: usize = 512;
+            let mut rows: Vec<([f64; 3], f64, bool, bool)> = Vec::with_capacity(ROWS);
+            for idx in 0..ROWS {
+                let f = idx as f64;
+                let eta_exit = 1.6 * (f * 0.17 + 0.3).sin() - 0.4 * (f * 0.09).cos();
+                let eta_entry = 1.1 * (f * 0.13 + 0.7).cos() + 0.35 * (f * 0.05).sin();
+                // Strictly positive spline derivative for the event ln-derivative term.
+                let derivative = 0.5 + 0.45 * (f * 0.31 + 0.2).sin().abs();
+                let weight = 0.6 + 0.4 * (f * 0.07 + 1.0).sin().abs();
+                let entry_active = idx % 2 == 0;
+                let event = (idx / 2) % 2 == 0;
+                rows.push((
+                    [eta_exit, eta_entry, derivative],
+                    weight,
+                    entry_active,
+                    event,
+                ));
+            }
+            let programs: Vec<crate::survival::CauseSpecificRowProgram> = rows
+                .iter()
+                .map(|&(primary, weight, entry_active, event)| {
+                    crate::survival::CauseSpecificRowProgram::new(
+                        primary,
+                        weight,
+                        entry_active,
+                        event,
+                    )
+                })
+                .collect();
+            // Distinct per-row contraction directions for the third/fourth
+            // channels, kept off the primary axes so no direction degenerates.
+            let dir_u: Vec<[f64; 3]> = (0..ROWS)
+                .map(|idx| {
+                    let f = idx as f64;
+                    [
+                        0.7 * (f * 0.23 + 0.4).cos() - 0.2 * (f * 0.03).sin(),
+                        -0.6 * (f * 0.29 + 0.1).sin() + 0.25 * (f * 0.15).cos(),
+                        0.5 * (f * 0.19 + 0.6).cos() - 0.3 * (f * 0.08).sin(),
+                    ]
+                })
+                .collect();
+            let dir_v: Vec<[f64; 3]> = (0..ROWS)
+                .map(|idx| {
+                    let f = idx as f64;
+                    [
+                        -0.5 * (f * 0.21 + 0.9).sin() + 0.3 * (f * 0.06).cos(),
+                        0.8 * (f * 0.27 + 0.5).cos() - 0.15 * (f * 0.04).sin(),
+                        0.4 * (f * 0.13 + 0.3).sin() - 0.2 * (f * 0.11).cos(),
+                    ]
+                })
+                .collect();
+
+            // Warm both paths and pin equal V/G/H plus equal contracted
+            // third/fourth so each timed pair measures equal work.
+            for (idx, (row, program)) in rows.iter().zip(programs.iter()).enumerate() {
+                let (primary, weight, entry_active, event) = *row;
+                let atom = cause_specific_row_order2(
+                    primary[0],
+                    primary[1],
+                    primary[2],
+                    weight,
+                    entry_active,
+                    event,
+                );
+                let (tower_value, tower_gradient, tower_hessian) =
+                    program_row_kernel(program, 0).expect("tower warm kernel");
+                close(
+                    atom.value(),
+                    tower_value,
+                    JET_TOL,
+                    "release-measure value parity",
+                );
+                let production_gradient = atom.gradient();
+                for a in 0..3 {
+                    close(
+                        production_gradient[a],
+                        tower_gradient[a],
+                        JET_TOL,
+                        "release-measure gradient parity",
+                    );
+                    for b in 0..3 {
+                        close(
+                            atom.hessian_at(a, b),
+                            tower_hessian[a][b],
+                            JET_TOL,
+                            "release-measure hessian parity",
+                        );
+                    }
+                }
+                let production_third = cause_specific_row_third_contracted(
+                    primary[0],
+                    primary[1],
+                    primary[2],
+                    weight,
+                    entry_active,
+                    event,
+                    &dir_u[idx],
+                );
+                let tower_third =
+                    program_third_contracted(program, 0, &dir_u[idx]).expect("tower warm third");
+                let production_fourth = cause_specific_row_fourth_contracted(
+                    primary[0],
+                    primary[1],
+                    primary[2],
+                    weight,
+                    entry_active,
+                    event,
+                    &dir_u[idx],
+                    &dir_v[idx],
+                );
+                let tower_fourth = program_fourth_contracted(program, 0, &dir_u[idx], &dir_v[idx])
+                    .expect("tower warm fourth");
+                for a in 0..3 {
+                    for b in 0..3 {
+                        close(
+                            production_third[a][b],
+                            tower_third[a][b],
+                            JET_TOL,
+                            "release-measure third parity",
+                        );
+                        close(
+                            production_fourth[a][b],
+                            tower_fourth[a][b],
+                            JET_TOL,
+                            "release-measure fourth parity",
+                        );
+                    }
+                }
+            }
+
+            // Speed contract, release profile only (`SpeedGate::open` documents
+            // why): on every channel the structure-compiled lowering must beat
+            // the generic tower it specialises. One arm call is one sweep over
+            // the batch; the nudge perturbs each row's exit predictor, so no
+            // sweep is loop-invariant across calls. The generic tower reads
+            // its row from the program, which is why its exit predictor is
+            // nudged through the fold instead.
+            if cfg!(debug_assertions) {
+                return;
+            }
+            let mut gate = SpeedGate::open("CAUSE-SPECIFIC-RELEASE-932");
+            let reps = 15usize;
+            let sweeps = 20usize;
+            let order2 = paired_interleaved(
+                reps,
+                sweeps,
+                0x9320_CA05_0002,
+                |nudge| {
+                    let mut checksum = 0.0_f64;
+                    for &(primary, weight, entry_active, event) in &rows {
+                        let atom = cause_specific_row_order2(
+                            primary[0] + nudge,
+                            primary[1],
+                            primary[2],
+                            weight,
+                            entry_active,
+                            event,
+                        );
+                        checksum += atom.value() + atom.gradient()[0] + atom.hessian_at(0, 0);
+                    }
+                    checksum
+                },
+                |nudge| {
+                    let mut checksum = nudge;
+                    for program in &programs {
+                        let (value, gradient, hessian) =
+                            program_row_kernel(program, 0).expect("tower kernel");
+                        checksum += value + gradient[0] + hessian[0][0];
+                    }
+                    checksum
+                },
+            );
+            gate.faster(
+                &format!("channel=order2 rows={ROWS}"),
+                &order2,
+                "production",
+                "generic_tower",
+            );
+            let third = paired_interleaved(
+                reps,
+                sweeps,
+                0x9320_CA05_0003,
+                |nudge| {
+                    let mut checksum = 0.0_f64;
+                    for (idx, &(primary, weight, entry_active, event)) in rows.iter().enumerate() {
+                        let mut direction = dir_u[idx];
+                        direction[0] += nudge;
+                        let third = cause_specific_row_third_contracted(
+                            primary[0],
+                            primary[1],
+                            primary[2],
+                            weight,
+                            entry_active,
+                            event,
+                            &direction,
+                        );
+                        checksum += third[0][0] + third[0][1] + third[1][1];
+                    }
+                    checksum
+                },
+                |nudge| {
+                    let mut checksum = 0.0_f64;
+                    for (idx, program) in programs.iter().enumerate() {
+                        let mut direction = dir_u[idx];
+                        direction[0] += nudge;
+                        let third = program_third_contracted(program, 0, &direction)
+                            .expect("tower third kernel");
+                        checksum += third[0][0] + third[0][1] + third[1][1];
+                    }
+                    checksum
+                },
+            );
+            gate.faster(
+                &format!("channel=third rows={ROWS}"),
+                &third,
+                "production",
+                "generic_tower",
+            );
+            let fourth = paired_interleaved(
+                reps,
+                sweeps,
+                0x9320_CA05_0004,
+                |nudge| {
+                    let mut checksum = 0.0_f64;
+                    for (idx, &(primary, weight, entry_active, event)) in rows.iter().enumerate() {
+                        let mut direction = dir_u[idx];
+                        direction[0] += nudge;
+                        let fourth = cause_specific_row_fourth_contracted(
+                            primary[0],
+                            primary[1],
+                            primary[2],
+                            weight,
+                            entry_active,
+                            event,
+                            &direction,
+                            &dir_v[idx],
+                        );
+                        checksum += fourth[0][0] + fourth[0][1] + fourth[1][1];
+                    }
+                    checksum
+                },
+                |nudge| {
+                    let mut checksum = 0.0_f64;
+                    for (idx, program) in programs.iter().enumerate() {
+                        let mut direction = dir_u[idx];
+                        direction[0] += nudge;
+                        let fourth = program_fourth_contracted(program, 0, &direction, &dir_v[idx])
+                            .expect("tower fourth kernel");
+                        checksum += fourth[0][0] + fourth[0][1] + fourth[1][1];
+                    }
+                    checksum
+                },
+            );
+            gate.faster(
+                &format!("channel=fourth rows={ROWS}"),
+                &fourth,
+                "production",
+                "generic_tower",
+            );
+            gate.finish();
+        }
     }
 
     #[test]

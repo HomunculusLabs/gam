@@ -1,21 +1,6 @@
+use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 use gam_math::probability::normal_logcdf_derivatives;
 use gam_row_macros::row_program;
-use std::time::Instant;
-
-fn supplied_link_stack(
-    composition_point: f64,
-    value: f64,
-    first: f64,
-    second: f64,
-    third: f64,
-    fourth: f64,
-) -> [f64; 5] {
-    if composition_point.is_nan() {
-        [f64::NAN; 5]
-    } else {
-        [value, first, second, third, fourth]
-    }
-}
 
 fn observed_scale_stack(observed_slope: f64) -> [f64; 5] {
     let scale = (1.0 + observed_slope * observed_slope).sqrt();
@@ -60,7 +45,9 @@ row_program! {
     )
     emit [generic, order2, third, fourth, full];
     leaves {
-        supplied_link => supplied_link_stack => supplied_link_stack_cuda,
+        // The marginal-link stack is supplied, exactly as the production
+        // program (`rigid_standard_normal_program`) declares it.
+        supplied_link => supplied,
         observed_scale => observed_scale_stack => observed_scale_stack_cuda,
         signed_probit => signed_probit_stack => signed_probit_stack_cuda,
     }
@@ -453,84 +440,71 @@ fn assert_fourth_full(got: [[[[f64; 2]; 2]; 2]; 2], want: [[[[f64; 2]; 2]; 2]; 2
     }
 }
 
-fn sample(rows: &[Row], evaluate: impl Fn(Row) -> Channels) -> f64 {
-    let started = Instant::now();
-    let mut checksum = 0.0;
-    for iteration in 0..4096 {
-        for row in rows {
-            let mut perturbed = *row;
-            perturbed.slope += checksum * 1e-24;
-            let channels = std::hint::black_box(evaluate(perturbed));
-            checksum += channels.0
-                + channels.1.iter().sum::<f64>()
-                + channels.2.iter().flat_map(|line| line.iter()).sum::<f64>();
-        }
-        checksum *= 1e-3 + iteration as f64 * 1e-12;
+/// One pass over every row, folded to a scalar the paired harness accumulates:
+/// each row perturbs the observed slope by the nudge, so no row can be hoisted
+/// or merged across iterations, and the rows stay independent of one another
+/// as production's rows are.
+fn channels_pass(rows: &[Row], nudge: f64, evaluate: impl Fn(Row) -> Channels) -> f64 {
+    let mut fold = 0.0;
+    for row in rows {
+        let mut perturbed = *row;
+        perturbed.slope += nudge;
+        let (value, gradient, hessian) = evaluate(perturbed);
+        fold += value
+            + gradient.iter().sum::<f64>()
+            + hessian.iter().flat_map(|line| line.iter()).sum::<f64>();
     }
-    assert!(checksum.is_finite());
-    started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
+    fold
 }
 
-fn sample_matrix(rows: &[Row], evaluate: impl Fn(Row) -> [[f64; 2]; 2]) -> f64 {
-    let started = Instant::now();
-    let mut checksum = 0.0;
-    for iteration in 0..4096 {
-        for row in rows {
-            let mut perturbed = *row;
-            perturbed.slope += checksum * 1e-24;
-            let matrix = std::hint::black_box(evaluate(perturbed));
-            checksum += matrix.iter().flat_map(|line| line.iter()).sum::<f64>();
-        }
-        checksum *= 1e-3 + iteration as f64 * 1e-12;
+fn matrix_pass(rows: &[Row], nudge: f64, evaluate: impl Fn(Row) -> [[f64; 2]; 2]) -> f64 {
+    let mut fold = 0.0;
+    for row in rows {
+        let mut perturbed = *row;
+        perturbed.slope += nudge;
+        fold += evaluate(perturbed)
+            .iter()
+            .flat_map(|line| line.iter())
+            .sum::<f64>();
     }
-    assert!(checksum.is_finite());
-    started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
+    fold
 }
 
-fn sample_third_full(rows: &[Row], evaluate: impl Fn(Row) -> [[[f64; 2]; 2]; 2]) -> f64 {
-    let started = Instant::now();
-    let mut checksum = 0.0;
-    for iteration in 0..4096 {
-        for row in rows {
-            let mut perturbed = *row;
-            perturbed.slope += checksum * 1e-24;
-            let tensor = std::hint::black_box(evaluate(perturbed));
-            checksum += tensor
-                .iter()
-                .flat_map(|plane| plane.iter())
-                .flat_map(|line| line.iter())
-                .sum::<f64>();
-        }
-        checksum *= 1e-3 + iteration as f64 * 1e-12;
+fn third_full_pass(
+    rows: &[Row],
+    nudge: f64,
+    evaluate: impl Fn(Row) -> [[[f64; 2]; 2]; 2],
+) -> f64 {
+    let mut fold = 0.0;
+    for row in rows {
+        let mut perturbed = *row;
+        perturbed.slope += nudge;
+        fold += evaluate(perturbed)
+            .iter()
+            .flat_map(|plane| plane.iter())
+            .flat_map(|line| line.iter())
+            .sum::<f64>();
     }
-    assert!(checksum.is_finite());
-    started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
+    fold
 }
 
-fn sample_fourth_full(rows: &[Row], evaluate: impl Fn(Row) -> [[[[f64; 2]; 2]; 2]; 2]) -> f64 {
-    let started = Instant::now();
-    let mut checksum = 0.0;
-    for iteration in 0..4096 {
-        for row in rows {
-            let mut perturbed = *row;
-            perturbed.slope += checksum * 1e-24;
-            let tensor = std::hint::black_box(evaluate(perturbed));
-            checksum += tensor
-                .iter()
-                .flat_map(|cube| cube.iter())
-                .flat_map(|plane| plane.iter())
-                .flat_map(|line| line.iter())
-                .sum::<f64>();
-        }
-        checksum *= 1e-3 + iteration as f64 * 1e-12;
+fn fourth_full_pass(
+    rows: &[Row],
+    nudge: f64,
+    evaluate: impl Fn(Row) -> [[[[f64; 2]; 2]; 2]; 2],
+) -> f64 {
+    let mut fold = 0.0;
+    for row in rows {
+        let mut perturbed = *row;
+        perturbed.slope += nudge;
+        fold += evaluate(perturbed)
+            .iter()
+            .flat_map(|cube| cube.iter())
+            .flat_map(|plane| plane.iter())
+            .flat_map(|line| line.iter())
+            .sum::<f64>();
     }
-    assert!(checksum.is_finite());
-    started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
-}
-
-fn median(mut values: [f64; 7]) -> f64 {
-    values.sort_by(f64::total_cmp);
-    values[values.len() / 2]
+    fold
 }
 
 #[test]
@@ -547,66 +521,81 @@ fn generated_rigid_bms_matches_strongest_hand_932() {
         );
     }
 
-    let mut order2_samples = [(0.0, 0.0); 7];
-    let mut third_samples = [(0.0, 0.0); 7];
-    let mut fourth_samples = [(0.0, 0.0); 7];
-    let mut third_full_samples = [(0.0, 0.0); 7];
-    let mut fourth_full_samples = [(0.0, 0.0); 7];
-    for round in 0..7 {
-        if round % 2 == 0 {
-            order2_samples[round] = (sample(&rows, generated), sample(&rows, strongest_hand));
-            third_samples[round] = (
-                sample_matrix(&rows, generated_third),
-                sample_matrix(&rows, strongest_hand_third),
-            );
-            fourth_samples[round] = (
-                sample_matrix(&rows, generated_fourth),
-                sample_matrix(&rows, strongest_hand_fourth),
-            );
-            third_full_samples[round] = (
-                sample_third_full(&rows, generated_third_full),
-                sample_third_full(&rows, strongest_hand_third_full),
-            );
-            fourth_full_samples[round] = (
-                sample_fourth_full(&rows, generated_fourth_full),
-                sample_fourth_full(&rows, strongest_hand_fourth_full),
-            );
-        } else {
-            let hand_ns = sample(&rows, strongest_hand);
-            let generated_ns = sample(&rows, generated);
-            order2_samples[round] = (generated_ns, hand_ns);
-            let hand_ns = sample_matrix(&rows, strongest_hand_third);
-            let generated_ns = sample_matrix(&rows, generated_third);
-            third_samples[round] = (generated_ns, hand_ns);
-            let hand_ns = sample_matrix(&rows, strongest_hand_fourth);
-            let generated_ns = sample_matrix(&rows, generated_fourth);
-            fourth_samples[round] = (generated_ns, hand_ns);
-            let hand_ns = sample_third_full(&rows, strongest_hand_third_full);
-            let generated_ns = sample_third_full(&rows, generated_third_full);
-            third_full_samples[round] = (generated_ns, hand_ns);
-            let hand_ns = sample_fourth_full(&rows, strongest_hand_fourth_full);
-            let generated_ns = sample_fourth_full(&rows, generated_fourth_full);
-            fourth_full_samples[round] = (generated_ns, hand_ns);
-        }
+    // Parity above runs in every build; the speed contract opens only in the
+    // release profile (`SpeedGate::open` documents why) and takes one paired,
+    // interleaved, order-randomised measurement per channel. Every channel
+    // is `faster`: the generated lowering must beat the strongest direct
+    // analytic schedule of the same row. (This gate once carried its own
+    // seven-round harness and asserted in the dev lane as well, where the
+    // codegen it measured is not the shipped one; it is now one of the
+    // derived population and measured by the one instrument.)
+    if cfg!(debug_assertions) {
+        return;
     }
-    for (channel, samples) in [
-        ("order2", order2_samples),
-        ("third", third_samples),
-        ("fourth", fourth_samples),
-        ("third_full", third_full_samples),
-        ("fourth_full", fourth_full_samples),
+    let mut gate = SpeedGate::open("RIGID-BMS-HAND-932");
+    let reps = 15usize;
+    let passes = 128usize;
+    for (channel, timing) in [
+        (
+            "order2",
+            paired_interleaved(
+                reps,
+                passes,
+                0x932_0_B002,
+                |nudge| channels_pass(&rows, nudge, generated),
+                |nudge| channels_pass(&rows, nudge, strongest_hand),
+            ),
+        ),
+        (
+            "third",
+            paired_interleaved(
+                reps,
+                passes,
+                0x932_0_B003,
+                |nudge| matrix_pass(&rows, nudge, generated_third),
+                |nudge| matrix_pass(&rows, nudge, strongest_hand_third),
+            ),
+        ),
+        (
+            "fourth",
+            paired_interleaved(
+                reps,
+                passes,
+                0x932_0_B004,
+                |nudge| matrix_pass(&rows, nudge, generated_fourth),
+                |nudge| matrix_pass(&rows, nudge, strongest_hand_fourth),
+            ),
+        ),
+        (
+            "third_full",
+            paired_interleaved(
+                reps,
+                passes,
+                0x932_0_B013,
+                |nudge| third_full_pass(&rows, nudge, generated_third_full),
+                |nudge| third_full_pass(&rows, nudge, strongest_hand_third_full),
+            ),
+        ),
+        (
+            "fourth_full",
+            paired_interleaved(
+                reps,
+                passes,
+                0x932_0_B014,
+                |nudge| fourth_full_pass(&rows, nudge, generated_fourth_full),
+                |nudge| fourth_full_pass(&rows, nudge, strongest_hand_fourth_full),
+            ),
+        ),
     ] {
-        let generated_ns = median(samples.map(|sample| sample.0));
-        let hand_ns = median(samples.map(|sample| sample.1));
-        let paired_ratio = median(samples.map(|sample| sample.1 / sample.0));
-        eprintln!(
-            "RIGID-BMS-HAND-932 channel={channel} generated={generated_ns:.3} ns/row \
-             strongest_hand={hand_ns:.3} ns/row paired_hand_over_generated={paired_ratio:.6}",
-        );
-        assert!(
-            paired_ratio > 1.0,
-            "generated {channel} must beat the strongest direct analytic schedule by paired median: \
-             generated={generated_ns:.3} ns/row hand={hand_ns:.3} ns/row ratio={paired_ratio:.6}",
+        // `ns/iter` is nanoseconds per PASS over `rows.len()` rows; the ratio
+        // the verdict rests on is unit-free. `median_ratio` is hand /
+        // generated, so above 1 means the generated kernel is faster.
+        gate.faster(
+            &format!("channel={channel} rows={}", rows.len()),
+            &timing,
+            "generated",
+            "strongest_hand",
         );
     }
+    gate.finish();
 }

@@ -1,5 +1,5 @@
+use gam_math::paired_timing::{SpeedGate, paired_interleaved};
 use gam_row_macros::row_atom;
-use std::time::Instant;
 
 row_atom! {
     fn generated_gaussian [order2_at_zero, third_at_zero, fourth_at_zero](
@@ -32,7 +32,7 @@ struct Row {
     direction_v: [f64; 2],
 }
 
-#[inline(always)]
+#[inline(never)]
 fn generated_order2(row: Row) -> Channels {
     let atom =
         generated_gaussian_order2_at_zero(row.weight, row.residual, row.inv_sigma, row.kappa);
@@ -47,7 +47,7 @@ fn generated_order2(row: Row) -> Channels {
     )
 }
 
-#[inline(always)]
+#[inline(never)]
 fn generated_third(row: Row) -> [[f64; 2]; 2] {
     generated_gaussian_third_contracted_at_zero(
         row.weight,
@@ -58,7 +58,7 @@ fn generated_third(row: Row) -> [[f64; 2]; 2] {
     )
 }
 
-#[inline(always)]
+#[inline(never)]
 fn generated_fourth(row: Row) -> [[f64; 2]; 2] {
     generated_gaussian_fourth_contracted_at_zero(
         row.weight,
@@ -70,7 +70,7 @@ fn generated_fourth(row: Row) -> [[f64; 2]; 2] {
     )
 }
 
-#[inline(always)]
+#[inline(never)]
 fn hand_order2(row: Row) -> Channels {
     let w = row.weight;
     let r = row.residual;
@@ -89,7 +89,7 @@ fn hand_order2(row: Row) -> Channels {
     )
 }
 
-#[inline(always)]
+#[inline(never)]
 fn hand_third(row: Row) -> [[f64; 2]; 2] {
     let w = row.weight;
     let r = row.residual;
@@ -110,7 +110,7 @@ fn hand_third(row: Row) -> [[f64; 2]; 2] {
     ]
 }
 
-#[inline(always)]
+#[inline(never)]
 fn hand_fourth(row: Row) -> [[f64; 2]; 2] {
     let w = row.weight;
     let r = row.residual;
@@ -188,38 +188,34 @@ fn assert_matrix(got: [[f64; 2]; 2], want: [[f64; 2]; 2]) {
     }
 }
 
-fn sample_channels(rows: &[Row], evaluate: impl Fn(Row) -> Channels) -> f64 {
-    let started = Instant::now();
-    let mut checksum = 0.0;
-    for iteration in 0..4096 {
-        for row in rows {
-            let mut perturbed = *row;
-            perturbed.residual += checksum * 1e-24;
-            let channels = std::hint::black_box(evaluate(perturbed));
-            checksum += channels.0
-                + channels.1.iter().sum::<f64>()
-                + channels.2.iter().flat_map(|line| line.iter()).sum::<f64>();
-        }
-        checksum *= 1e-3 + iteration as f64 * 1e-12;
+/// One pass over every row, folded to a scalar the paired harness accumulates:
+/// each row perturbs the standardized residual by the nudge, so no row can be
+/// hoisted or merged across iterations, and the rows stay independent of one
+/// another as production's rows are.
+fn channels_pass(rows: &[Row], nudge: f64, evaluate: impl Fn(Row) -> Channels) -> f64 {
+    let mut fold = 0.0;
+    for row in rows {
+        let mut perturbed = *row;
+        perturbed.residual += nudge;
+        let (value, gradient, hessian) = evaluate(perturbed);
+        fold += value
+            + gradient.iter().sum::<f64>()
+            + hessian.iter().flat_map(|line| line.iter()).sum::<f64>();
     }
-    assert!(checksum.is_finite());
-    started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
+    fold
 }
 
-fn sample_matrix(rows: &[Row], evaluate: impl Fn(Row) -> [[f64; 2]; 2]) -> f64 {
-    let started = Instant::now();
-    let mut checksum = 0.0;
-    for iteration in 0..4096 {
-        for row in rows {
-            let mut perturbed = *row;
-            perturbed.residual += checksum * 1e-24;
-            let matrix = std::hint::black_box(evaluate(perturbed));
-            checksum += matrix.iter().flat_map(|line| line.iter()).sum::<f64>();
-        }
-        checksum *= 1e-3 + iteration as f64 * 1e-12;
+fn matrix_pass(rows: &[Row], nudge: f64, evaluate: impl Fn(Row) -> [[f64; 2]; 2]) -> f64 {
+    let mut fold = 0.0;
+    for row in rows {
+        let mut perturbed = *row;
+        perturbed.residual += nudge;
+        fold += evaluate(perturbed)
+            .iter()
+            .flat_map(|line| line.iter())
+            .sum::<f64>();
     }
-    assert!(checksum.is_finite());
-    started.elapsed().as_secs_f64() * 1e9 / (rows.len() * 4096) as f64
+    fold
 }
 
 #[test]
@@ -231,47 +227,60 @@ fn generated_gaussian_matches_and_beats_strongest_hand_932() {
         assert_matrix(generated_fourth(*row), hand_fourth(*row));
     }
 
-    let mut generated_order2_ns = f64::INFINITY;
-    let mut hand_order2_ns = f64::INFINITY;
-    let mut generated_third_ns = f64::INFINITY;
-    let mut hand_third_ns = f64::INFINITY;
-    let mut generated_fourth_ns = f64::INFINITY;
-    let mut hand_fourth_ns = f64::INFINITY;
-    for round in 0..7 {
-        if round % 2 == 0 {
-            generated_order2_ns = generated_order2_ns.min(sample_channels(&rows, generated_order2));
-            hand_order2_ns = hand_order2_ns.min(sample_channels(&rows, hand_order2));
-            generated_third_ns = generated_third_ns.min(sample_matrix(&rows, generated_third));
-            hand_third_ns = hand_third_ns.min(sample_matrix(&rows, hand_third));
-            generated_fourth_ns = generated_fourth_ns.min(sample_matrix(&rows, generated_fourth));
-            hand_fourth_ns = hand_fourth_ns.min(sample_matrix(&rows, hand_fourth));
-        } else {
-            hand_order2_ns = hand_order2_ns.min(sample_channels(&rows, hand_order2));
-            generated_order2_ns = generated_order2_ns.min(sample_channels(&rows, generated_order2));
-            hand_third_ns = hand_third_ns.min(sample_matrix(&rows, hand_third));
-            generated_third_ns = generated_third_ns.min(sample_matrix(&rows, generated_third));
-            hand_fourth_ns = hand_fourth_ns.min(sample_matrix(&rows, hand_fourth));
-            generated_fourth_ns = generated_fourth_ns.min(sample_matrix(&rows, generated_fourth));
-        }
+    // Parity above runs in every build; the speed contract opens only in the
+    // release profile (`SpeedGate::open` documents why) and takes one paired,
+    // interleaved, order-randomised measurement per channel. Every channel is
+    // `faster`: the generated lowering must beat the strongest hand schedule
+    // of the same row. (This gate once kept a running minimum per arm over
+    // seven alternating rounds and asserted in the dev lane as well; it is
+    // now one of the derived population and measured by the one instrument.)
+    if cfg!(debug_assertions) {
+        return;
     }
-
-    let results = [
-        ("order2", generated_order2_ns, hand_order2_ns),
-        ("third", generated_third_ns, hand_third_ns),
-        ("fourth", generated_fourth_ns, hand_fourth_ns),
-    ];
-    for (channel, generated_ns, hand_ns) in results {
-        eprintln!(
-            "GAUSSIAN-JOINT-HAND-932 channel={channel} generated={generated_ns:.3} ns/row \
-             strongest_hand={hand_ns:.3} ns/row hand_over_generated={:.6}",
-            hand_ns / generated_ns,
+    let mut gate = SpeedGate::open("GAUSSIAN-JOINT-HAND-932");
+    let reps = 15usize;
+    let passes = 256usize;
+    for (channel, timing) in [
+        (
+            "order2",
+            paired_interleaved(
+                reps,
+                passes,
+                0x932_0_6A02,
+                |nudge| channels_pass(&rows, nudge, generated_order2),
+                |nudge| channels_pass(&rows, nudge, hand_order2),
+            ),
+        ),
+        (
+            "third",
+            paired_interleaved(
+                reps,
+                passes,
+                0x932_0_6A03,
+                |nudge| matrix_pass(&rows, nudge, generated_third),
+                |nudge| matrix_pass(&rows, nudge, hand_third),
+            ),
+        ),
+        (
+            "fourth",
+            paired_interleaved(
+                reps,
+                passes,
+                0x932_0_6A04,
+                |nudge| matrix_pass(&rows, nudge, generated_fourth),
+                |nudge| matrix_pass(&rows, nudge, hand_fourth),
+            ),
+        ),
+    ] {
+        // `ns/iter` is nanoseconds per PASS over `rows.len()` rows; the ratio
+        // the verdict rests on is unit-free. `median_ratio` is hand /
+        // generated, so above 1 means the generated kernel is faster.
+        gate.faster(
+            &format!("channel={channel} rows={}", rows.len()),
+            &timing,
+            "generated",
+            "strongest_hand",
         );
     }
-    for (channel, generated_ns, hand_ns) in results {
-        assert!(
-            generated_ns < hand_ns,
-            "generated {channel} {generated_ns:.3} ns/row must beat strongest hand \
-             {hand_ns:.3} ns/row"
-        );
-    }
+    gate.finish();
 }
