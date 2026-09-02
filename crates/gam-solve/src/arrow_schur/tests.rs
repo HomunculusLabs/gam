@@ -7788,8 +7788,9 @@ fn coupled_carrier_penalty_op_equals_its_rank_one_expansion_2731() {
     }
 }
 
-/// #2515 — THE BAND IS TWO-SIDED UNDER THE EXACT-OBSERVED-INFORMATION POLICY,
-/// and one-sided under the majorizer one. Both arms are asserted here, because
+/// #2515 — THE EXACT-OBSERVED-INFORMATION POLICY USES THE SHARED TYPED
+/// B-METRIC/CLAMP VERDICT, while the majorizer policy unit-deflates its PSD
+/// numerical nulls. Both arms are asserted here, because
 /// either alone is satisfiable by a wrong implementation: a policy that refuses
 /// everything passes the refusal arm, and the historical one-sided predicate
 /// passes the pin arm.
