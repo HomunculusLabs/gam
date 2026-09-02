@@ -4026,9 +4026,9 @@ impl SaeManifoldTerm {
         // conditioning, from the same row layout as ΔC.
         let clamp = self.materialize_ard_concave_clamp_diagonal_for_rows(rho, &row_dims)?;
         let mut clamp_base = 0usize;
-        let classification_rows: std::sync::Arc<[
-            gam_solve::arrow_schur::ExactAClassificationRow,
-        ]> = delta
+        let classification_rows: std::sync::Arc<
+            [gam_solve::arrow_schur::ExactAClassificationRow],
+        > = delta
             .into_iter()
             .zip(row_dims.iter().copied())
             .map(|(block, q)| {
@@ -6460,7 +6460,8 @@ impl SaeManifoldTerm {
         let mut ordered_beta_bernoulli_logit_sites: Vec<OrderedBetaBernoulliLogitSite> = Vec::new();
 
         // #1557 — reuse one K-sized scratch row across all N rows (alias-free).
-        let mut assignments = Array1::<f64>::zeros(self.k_atoms());
+        let k_atoms = self.k_atoms();
+        let mut assignments = Array1::<f64>::zeros(k_atoms);
         // The resident softmax program returned through the Trace seam above;
         // this hand window is exclusively the distinct non-softmax program.
         let mut jet_window: std::collections::VecDeque<SaeRowJets> =
