@@ -2086,6 +2086,7 @@ mod device {
         let mut sqrt_w = Vec::with_capacity(n);
         let mut beta_phi = Vec::with_capacity(device_length(&[n, n_beta])?);
         let mut beta_first = Vec::with_capacity(device_length(&[n, q, n_beta])?);
+        let mut beta_output = Vec::with_capacity(device_length(&[n, n_beta, p])?);
         for input in rows {
             z.extend_from_slice(&input.gate_values);
             active.extend(input.active_atoms.iter().map(|&value| i32::from(value)));
@@ -2111,6 +2112,7 @@ mod device {
             sqrt_w.push(input.sqrt_row_weight);
             beta_phi.extend_from_slice(&input.beta_basis_values);
             beta_first.extend_from_slice(&input.beta_basis_first);
+            beta_output.extend_from_slice(input.beta_outputs.as_ref());
         }
         let beta_atom: Vec<i32> = rows[0]
             .beta_atoms
@@ -2156,7 +2158,7 @@ mod device {
             .clone_htod(nonempty_f64(&beta_first).as_ref())
             .gpu_ctx("SAE row-jet htod beta basis first")?;
         let beta_output_dev = stream
-            .clone_htod(nonempty_f64(rows[0].beta_outputs.as_ref()).as_ref())
+            .clone_htod(nonempty_f64(&beta_output).as_ref())
             .gpu_ctx("SAE row-jet htod beta outputs")?;
         let k_i32 =
             i32::try_from(k).map_err(|_| gam_gpu::gpu_err!("SAE row-jet K overflows i32"))?;
@@ -2411,6 +2413,7 @@ mod device {
         e_tt: &[f64],
         inv_vbeta: &[f64],
         beta_inv: &[f64],
+        exact_a: bool,
         n: usize,
         q: usize,
         p: usize,
@@ -2426,6 +2429,7 @@ mod device {
         let beta_inv_dev = stream
             .clone_htod(nonempty_f64(beta_inv).as_ref())
             .gpu_ctx("SAE row-jet htod trace beta_inv")?;
+        let exact_a_i32 = i32::from(exact_a);
 
         let t_len = device_length(&[n, q])?;
         let beta_len = device_length(&[n, n_beta])?;
@@ -2456,6 +2460,7 @@ mod device {
                 .arg(&inv_vbeta_dev)
                 .arg(&beta_inv_dev)
                 .arg(&inv_tau)
+                .arg(&exact_a_i32)
                 .arg(&staged.k_i32)
                 .arg(&staged.q_i32)
                 .arg(&staged.p_i32)
@@ -2553,9 +2558,21 @@ mod device {
                 e_tt,
                 inv_vbeta,
                 beta_inv,
+                exact_a,
             } => {
                 return device_trace_tile(
-                    &stream, b, &staged, inv_tau, e_tt, inv_vbeta, beta_inv, n, q, p, n_beta,
+                    &stream,
+                    b,
+                    &staged,
+                    inv_tau,
+                    e_tt,
+                    inv_vbeta,
+                    beta_inv,
+                    exact_a,
+                    n,
+                    q,
+                    p,
+                    n_beta,
                 );
             }
         };
@@ -2614,23 +2631,12 @@ mod device {
         )?;
         launch_rowmat(&staged.d1_dev, q, &mut d1dot_dev, "SAE row-jet d1 dots")?;
         if bodot_len != 0 {
-            let function = b
-                .module
-                .load_function("sae_rowjet_dot_shared")
-                .gpu_ctx("SAE row-jet dot shared load")?;
-            let total_u64 = u64::try_from(bodot_len)
-                .map_err(|_| gam_gpu::gpu_err!("SAE row-jet dot length overflows u64"))?;
-            let mut launch = stream.launch_builder(&function);
-            launch
-                .arg(&staged.beta_output_dev)
-                .arg(&probe_dev)
-                .arg(&staged.nb_i32)
-                .arg(&staged.p_i32)
-                .arg(&total_u64)
-                .arg(&mut bodot_dev);
-            // SAFETY: the loaded kernel's argument ABI matches this builder,
-            // and `grid(bodot_len)` covers only the allocated outputs.
-            unsafe { launch.launch(grid(bodot_len)?) }.gpu_ctx("SAE row-jet beta-output dots")?;
+            launch_rowmat(
+                &staged.beta_output_dev,
+                n_beta,
+                &mut bodot_dev,
+                "SAE row-jet beta-output dots",
+            )?;
         }
 
         // Phase two: assemble the reduced outputs.
