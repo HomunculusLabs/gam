@@ -115,6 +115,10 @@ class SparseDictionaryConvergence:
     outer_tolerance: float
     selected_rho: float
     outer_iterations: int
+    #: Inner fits that paid the farthest-point seed: exactly 1 for a schedule fit (#2441).
+    seeded_inner_runs: int
+    #: Inner fits continued from the previous iterate; with ``seeded_inner_runs`` sums to ``outer_iterations``.
+    continued_inner_runs: int
     accepted_births: int
     live_atom_high_water: int
     support_saturated: bool
@@ -1266,6 +1270,8 @@ def sparse_dictionary_fit(
             outer_tolerance=float(convergence["outer_tolerance"]),
             selected_rho=float(convergence["selected_rho"]),
             outer_iterations=int(convergence["outer_iterations"]),
+            seeded_inner_runs=int(convergence["seeded_inner_runs"]),
+            continued_inner_runs=int(convergence["continued_inner_runs"]),
             accepted_births=int(convergence["accepted_births"]),
             live_atom_high_water=int(convergence["live_atom_high_water"]),
             support_saturated=bool(convergence["support_saturated"]),

@@ -1515,16 +1515,6 @@ fn reml_schedule_rho_log_tol(inner_tolerance: f64) -> f64 {
 /// is genuinely noise-floored, at which point the best-effort iterate is returned.
 const REML_SCHEDULE_MAX_OUTER_ITERS: usize = 64;
 
-/// How one inner solve of the outer REML schedule obtained its decoder. Kept
-/// private because this is schedule-control evidence, not part of the fitted
-/// model; the observed schedule seam lets deterministic tests verify that only
-/// the first solve pays the farthest-point seed (#2441).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum InnerRunStart {
-    Seeded,
-    Continued,
-}
-
 /// The shared-ρ REML schedule (design gam#2232, Increment 2, plug 4): the outer
 /// evidence loop that SELECTS the ONE shared linear-block ridge instead of taking
 /// two magic constants. It seeds [`run_linear_fast_kernel`] once, then alternates
@@ -1555,35 +1545,15 @@ pub fn run_linear_reml_schedule(
 /// [`run_linear_reml_schedule`] with the fit-scoped recycle space supplied by
 /// the caller, so a test can observe that the outer loop never resets the
 /// break-even latch it was handed.
+/// How each inner solve obtained its decoder is not schedule-private control
+/// flow: it is published on the fit as `seeded_inner_runs` /
+/// `continued_inner_runs`, so the once-per-schedule farthest-point seed (#2441)
+/// is a checkable property of every returned fit rather than of a test-only
+/// observation seam with a production no-op sink (#2804).
 fn run_linear_reml_schedule_with_recycle(
     x: ArrayView2<'_, f32>,
     config: &SparseDictConfig,
     decoder_recycle: &mut DecoderRecycleSpace,
-) -> Result<SparseDictFit, SparseDictionaryError> {
-    run_linear_reml_schedule_observed(
-        x,
-        config,
-        decoder_recycle,
-        ignore_inner_run_start,
-    )
-}
-
-/// Production sink for the private test observation seam.
-fn ignore_inner_run_start(start: InnerRunStart) {
-    match start {
-        InnerRunStart::Seeded => {}
-        InnerRunStart::Continued => {}
-    }
-}
-
-/// The production schedule with a private, race-free observation seam for its
-/// inner-start decisions. The callback observes control flow only; both arms
-/// still invoke the same production kernels used by the unobserved entry.
-fn run_linear_reml_schedule_observed(
-    x: ArrayView2<'_, f32>,
-    config: &SparseDictConfig,
-    decoder_recycle: &mut DecoderRecycleSpace,
-    mut observe_start: impl FnMut(InnerRunStart),
 ) -> Result<SparseDictFit, SparseDictionaryError> {
     validate(x, config)?;
     if config.code_ridge != config.decoder_ridge {
@@ -1621,6 +1591,8 @@ fn run_linear_reml_schedule_observed(
                 outer_tolerance: tolerance,
                 selected_rho: f64::INFINITY,
                 outer_iterations: 0,
+                seeded_inner_runs: 0,
+                continued_inner_runs: 0,
                 accepted_births: 0,
                 live_atom_high_water: 0,
                 support_saturated: false,
@@ -1638,7 +1610,8 @@ fn run_linear_reml_schedule_observed(
     // AFTER Fellner–Schall has driven ρ STRICTLY below it is on the descent to the
     // identifiability edge, not an interior numerical failure.
     let initial_ridge = rho;
-    observe_start(InnerRunStart::Seeded);
+    let seeded_inner_runs = 1usize;
+    let mut continued_inner_runs = 0usize;
     let mut fit = run_linear_fast_kernel(x, config, rho, decoder_recycle)?;
     let tol = reml_schedule_rho_log_tol(config.tolerance);
     let mut outer_iterations = 0usize;
@@ -1695,6 +1668,7 @@ fn run_linear_reml_schedule_observed(
                     f64::INFINITY,
                     tol,
                     outer_iterations,
+                    (seeded_inner_runs, continued_inner_runs),
                 );
             }
             Err(err) => return Err(err),
@@ -1745,6 +1719,7 @@ fn run_linear_reml_schedule_observed(
                 log_change,
                 effective_tol,
                 outer_iterations,
+                (seeded_inner_runs, continued_inner_runs),
             );
         }
         if outer_iterations >= REML_SCHEDULE_MAX_OUTER_ITERS {
@@ -1764,10 +1739,11 @@ fn run_linear_reml_schedule_observed(
                 log_change,
                 effective_tol,
                 outer_iterations,
+                (seeded_inner_runs, continued_inner_runs),
             );
         }
         rho = rho_new;
-        observe_start(InnerRunStart::Continued);
+        continued_inner_runs += 1;
         fit = continue_linear_fast_kernel(x, config, rho, fit, decoder_recycle)?;
     }
 }
@@ -1799,7 +1775,9 @@ fn schedule_fit_from_iterate(
     outer_rho_residual: f64,
     outer_tolerance: f64,
     outer_iterations: usize,
+    inner_runs: (usize, usize),
 ) -> Result<SparseDictFit, SparseDictionaryError> {
+    let (seeded_inner_runs, continued_inner_runs) = inner_runs;
     let n = x.nrows();
     let s = fit.active;
     let scorer = TileScorer::new(s, config.score_tile);
@@ -1828,6 +1806,8 @@ fn schedule_fit_from_iterate(
             outer_tolerance,
             selected_rho,
             outer_iterations,
+            seeded_inner_runs,
+            continued_inner_runs,
             accepted_births: fit.accepted_births,
             live_atom_high_water: fit.live_atom_high_water.max(final_live_atoms),
             support_saturated: fit.support_saturated,
@@ -6041,8 +6021,7 @@ mod exact_solve_tests {
 #[cfg(test)]
 mod decoder_recycle_latch_scope_2742_tests {
     use super::{
-        DecoderRecycleSpace, InnerRunStart, REML_SCHEDULE_MAX_OUTER_ITERS,
-        run_linear_reml_schedule, run_linear_reml_schedule_observed,
+        DecoderRecycleSpace, REML_SCHEDULE_MAX_OUTER_ITERS, run_linear_reml_schedule,
         run_linear_reml_schedule_with_recycle, run_seeded,
     };
     use crate::sparse_dict::SparseDictConfig;
@@ -6202,39 +6181,27 @@ mod decoder_recycle_latch_scope_2742_tests {
     fn outer_reml_schedule_seeds_once_then_continues_2441() {
         let (x, config, k) = schedule_fixture();
         let mut recycle = DecoderRecycleSpace::new(k);
-        let mut starts = Vec::new();
 
-        let fit = run_linear_reml_schedule_observed(
-            x.view(),
-            &config,
-            &mut recycle,
-            |start| starts.push(start),
-        )
-        .expect("schedule fit");
+        let fit = run_linear_reml_schedule_with_recycle(x.view(), &config, &mut recycle)
+            .expect("schedule fit");
 
         assert!(
             fit.convergence.outer_iterations >= 2,
             "fixture is vacuous: continuation requires an outer boundary"
         );
         assert_eq!(
-            starts.len(),
-            fit.convergence.outer_iterations,
-            "every evaluated outer iterate must have exactly one inner-start decision"
-        );
-        assert_eq!(starts.first(), Some(&InnerRunStart::Seeded));
-        assert_eq!(
-            starts
-                .iter()
-                .filter(|&&start| start == InnerRunStart::Seeded)
-                .count(),
+            fit.convergence.seeded_inner_runs,
             1,
             "the O(K*N*P) farthest-point seed is a once-per-schedule operation"
         );
+        assert_eq!(
+            fit.convergence.seeded_inner_runs + fit.convergence.continued_inner_runs,
+            fit.convergence.outer_iterations,
+            "every evaluated outer iterate must have exactly one inner-start decision"
+        );
         assert!(
-            starts[1..]
-                .iter()
-                .all(|&start| start == InnerRunStart::Continued),
-            "every later rho must consume the prior iterate instead of cold-seeding: {starts:?}"
+            fit.convergence.continued_inner_runs >= 1,
+            "every later rho must consume the prior iterate instead of cold-seeding"
         );
     }
 

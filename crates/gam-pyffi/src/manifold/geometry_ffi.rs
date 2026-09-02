@@ -5945,6 +5945,8 @@ fn sparse_dictionary_fit<'py>(
     convergence.set_item("outer_tolerance", fit.convergence.outer_tolerance)?;
     convergence.set_item("selected_rho", fit.convergence.selected_rho)?;
     convergence.set_item("outer_iterations", fit.convergence.outer_iterations)?;
+    convergence.set_item("seeded_inner_runs", fit.convergence.seeded_inner_runs)?;
+    convergence.set_item("continued_inner_runs", fit.convergence.continued_inner_runs)?;
     convergence.set_item("accepted_births", fit.convergence.accepted_births)?;
     convergence.set_item(
         "live_atom_high_water",

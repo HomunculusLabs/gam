@@ -209,6 +209,14 @@ pub struct SparseDictConvergence {
     pub selected_rho: f64,
     /// Full inner fits evaluated by the outer REML schedule.
     pub outer_iterations: usize,
+    /// Inner fits that paid the `O(K·N·P)` farthest-point seed. The schedule
+    /// seeds exactly once and continues every later ρ from the prior iterate
+    /// (#2441), so a schedule fit reports `1`; a hand-minted fit reports `0`.
+    pub seeded_inner_runs: usize,
+    /// Inner fits that continued from the previous iterate instead of seeding.
+    /// Together with [`Self::seeded_inner_runs`] this sums to
+    /// [`Self::outer_iterations`] for a schedule fit.
+    pub continued_inner_runs: usize,
     /// Residual-row birth proposals that fired in the final inner transition.
     ///
     /// A positive count is compatible with an open certificate only when
@@ -251,6 +259,8 @@ impl SparseDictConvergence {
             outer_tolerance: 1e-6,
             selected_rho: f64::INFINITY,
             outer_iterations: 0,
+            seeded_inner_runs: 0,
+            continued_inner_runs: 0,
             accepted_births: 0,
             live_atom_high_water: 0,
             support_saturated: false,
