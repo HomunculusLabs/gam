@@ -15,7 +15,7 @@ use gam_solve::model_types::UnifiedFitResult;
 use ndarray::Array1;
 
 /// Stable scalar row program over an indexed `(row, output)` response grid.
-pub trait IndexedNaturalDiagonalProgram {
+pub trait IndexedNaturalDiagonalProgram: Clone + Send + Sync + 'static {
     fn family_name(&self) -> &'static str;
     fn n_rows(&self) -> usize;
     fn n_outputs(&self) -> usize;
