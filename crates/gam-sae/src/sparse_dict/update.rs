@@ -570,7 +570,8 @@ impl LiveSupportGrowth {
 /// be laundered as converged.
 const SPARSE_DICT_FIXED_POINT_ROUNDING: f64 = 32.0 * f64::EPSILON;
 
-/// One inner alternation to its fixed point at the ridges carried by `config`.
+/// Seed one inner alternation, then run it to its fixed point at the ridges
+/// carried by `config`.
 ///
 /// `decoder_recycle` is OWNED BY THE CALLER, not by this call (#2742). The
 /// recycle space carries the break-even latch, whose documented scope is the
@@ -580,7 +581,7 @@ const SPARSE_DICT_FIXED_POINT_ROUNDING: f64 = 32.0 * f64::EPSILON;
 /// still local to one inner run — [`DecoderRecycleSpace::begin_fit`] clears the
 /// directions while preserving the latch — so only the decision survives, not
 /// the stale coarse space it was measured on.
-pub(super) fn run(
+pub(super) fn run_seeded(
     x: ArrayView2<'_, f32>,
     config: &SparseDictConfig,
     decoder_recycle: &mut DecoderRecycleSpace,
@@ -604,6 +605,42 @@ pub(super) fn run(
         fit_start.elapsed().as_secs_f64(),
     );
 
+    run_from_decoder(x, config, decoder, decoder_recycle, fit_start)
+}
+
+/// Run one inner alternation from an already-normalized decoder.
+///
+/// Both legal callers establish the decoder's provenance explicitly: the seeded
+/// entry normalizes [`seed_decoder`], while the REML continuation consumes the
+/// [`SparseDictIterate`] returned at the preceding shared ridge. Codes are never
+/// carried across this boundary: the first operation below routes and solves them
+/// afresh at `config.code_ridge`, so every normal equation and fixed-point
+/// certificate belongs to the current ridge (#2441).
+fn run_from_decoder(
+    x: ArrayView2<'_, f32>,
+    config: &SparseDictConfig,
+    mut decoder: Array2<f32>,
+    decoder_recycle: &mut DecoderRecycleSpace,
+    fit_start: Instant,
+) -> Result<SparseDictIterate, SparseDictionaryError> {
+    let n = x.nrows();
+    let p = x.ncols();
+    let k = config.n_atoms;
+    let s = config.active.min(k).max(1);
+    if decoder.dim() != (k, p) {
+        return Err(SparseDictionaryError::NumericalFailure {
+            reason: format!(
+                "sparse-dictionary inner start has decoder shape {:?}, expected ({k}, {p})",
+                decoder.dim()
+            ),
+        });
+    }
+    if !decoder.iter().all(|value| value.is_finite()) {
+        return Err(SparseDictionaryError::NumericalFailure {
+            reason: "sparse-dictionary inner start has a non-finite decoder".to_string(),
+        });
+    }
+
     let scorer = TileScorer::new(s, config.score_tile);
     let mut score_route_stats = ScoreRouteStats::default();
     let mut epochs_run = 0usize;
@@ -617,7 +654,7 @@ pub(super) fn run(
     let mut routing_residual = f64::INFINITY;
     let mut accepted_births = 0usize;
 
-    // (a)+(b) route + sparse codes for every row against the seeded, unit-normed
+    // (a)+(b) route + sparse codes for every row against the current, unit-normed
     // decoder, in minibatches: each minibatch is routed by one batched score block
     // per column tile (peak score working set `minibatch × score_tile`, never
     // `N × K`) — on the GPU when the process admits a device and the block clears
@@ -996,9 +1033,10 @@ fn live_atom_count(codes: &[SparseCode], k: usize) -> usize {
 /// The unified **linear fast kernel** (design gam#2232, Increment 2, plug points
 /// 1–3): the fixed-support linear-atom (`d = 1`) inner solve of the ONE engine.
 ///
-/// This is the exact alternation of [`run`] — `route → s×s active-set code solve
-/// → MOD sparse decoder refresh → unit-norm` — but parameterized by a SINGLE
-/// shared ridge coordinate `shared_rho` that feeds BOTH
+/// This is the seeded entry to the exact alternation of [`run_from_decoder`] —
+/// `route → s×s active-set code solve → MOD sparse decoder refresh → unit-norm`
+/// — parameterized by a SINGLE shared ridge coordinate `shared_rho` that feeds
+/// BOTH
 ///
 ///   * the per-row active-set code/gate solve (plug point 1,
 ///     [`super::codes::solve_row_codes`]), and
@@ -1014,8 +1052,8 @@ fn live_atom_count(codes: &[SparseCode], k: usize) -> usize {
 /// selects instead of two magic constants.
 ///
 /// At `shared_rho = config.code_ridge = config.decoder_ridge` this kernel is
-/// [`run`] itself (the unified config sets both ridges to the one shared ρ and
-/// delegates); the TEMPORARY Increment-2 bit-parity gate that pinned this
+/// [`run_seeded`] itself (the unified config sets both ridges to the one shared ρ
+/// and delegates); the TEMPORARY Increment-2 bit-parity gate that pinned this
 /// identity during the migration was removed in Increment 6, the identity now
 /// being structural. It is invoked from the unified
 /// engine's inner-solve seam; [`super::fit_sparse_dictionary`] is the
@@ -1037,7 +1075,47 @@ pub(crate) fn run_linear_fast_kernel(
     // the `d = 1` specialization carries a single ρ, not two.
     unified.code_ridge = shared_rho as f32;
     unified.decoder_ridge = shared_rho as f32;
-    run(x, &unified, decoder_recycle)
+    run_seeded(x, &unified, decoder_recycle)
+}
+
+/// Continue the unified linear fast kernel from the preceding REML iterate.
+///
+/// The prior iterate is consumed, so its `K×P` decoder moves into the next inner
+/// solve without a clone and its old-ridge packed codes are dropped. The shared
+/// ridge is installed before [`run_from_decoder`] performs its mandatory fresh
+/// route, making the continuation a warm start of model parameters only — never
+/// a stale-code or stale-certificate shortcut (#2441).
+fn continue_linear_fast_kernel(
+    x: ArrayView2<'_, f32>,
+    config: &SparseDictConfig,
+    shared_rho: f64,
+    prior: SparseDictIterate,
+    decoder_recycle: &mut DecoderRecycleSpace,
+) -> Result<SparseDictIterate, SparseDictionaryError> {
+    let mut unified = *config;
+    unified.code_ridge = shared_rho as f32;
+    unified.decoder_ridge = shared_rho as f32;
+    validate(x, &unified)?;
+
+    let fit_start = Instant::now();
+    let SparseDictIterate {
+        decoder,
+        indices,
+        codes,
+        ..
+    } = prior;
+    // The next inner run reroutes at its new ridge. Release the old packed state
+    // before that corpus pass instead of retaining two N×s code sets at once.
+    drop((indices, codes));
+    let n = x.nrows();
+    let p = x.ncols();
+    let k = unified.n_atoms;
+    let s = unified.active.min(k).max(1);
+    log::warn!(
+        "[SAE sparse_dict] continued prior decoder N={n} P={p} K={k} s={s} \
+         (fresh route at rho={shared_rho:.6e} follows)"
+    );
+    run_from_decoder(x, &unified, decoder, decoder_recycle, fit_start)
 }
 
 /// Sufficient statistics for the linear block's ONE shared REML variance
@@ -1437,12 +1515,22 @@ fn reml_schedule_rho_log_tol(inner_tolerance: f64) -> f64 {
 /// is genuinely noise-floored, at which point the best-effort iterate is returned.
 const REML_SCHEDULE_MAX_OUTER_ITERS: usize = 64;
 
+/// How one inner solve of the outer REML schedule obtained its decoder. Kept
+/// private because this is schedule-control evidence, not part of the fitted
+/// model; the observed schedule seam lets deterministic tests verify that only
+/// the first solve pays the farthest-point seed (#2441).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InnerRunStart {
+    Seeded,
+    Continued,
+}
+
 /// The shared-ρ REML schedule (design gam#2232, Increment 2, plug 4): the outer
 /// evidence loop that SELECTS the ONE shared linear-block ridge instead of taking
-/// two magic constants. It alternates a full [`run_linear_fast_kernel`] at the
-/// current ρ with one [`linear_shared_rho_fs_step`] Fellner–Schall update built
-/// from the matrix-free aggregates [`linear_block_reml_stats`], to the fixed
-/// point.
+/// two magic constants. It seeds [`run_linear_fast_kernel`] once, then alternates
+/// a consuming decoder continuation at the current ρ with one
+/// [`linear_shared_rho_fs_step`] Fellner–Schall update built from the matrix-free
+/// aggregates [`linear_block_reml_stats`], to the fixed point.
 ///
 /// The initial ρ is the shared default ridge (`config.decoder_ridge`, equal to
 /// `config.code_ridge` on the shared-default entry) — the historical magic
@@ -1455,7 +1543,7 @@ const REML_SCHEDULE_MAX_OUTER_ITERS: usize = 64;
 /// The ONE [`DecoderRecycleSpace`] of the fit is constructed here and threaded
 /// through every outer iteration (#2742): its break-even latch is documented as
 /// one-way for the FIT, which is only true if the space outlives the inner
-/// [`run_linear_fast_kernel`] calls this loop issues.
+/// kernels this loop issues.
 pub fn run_linear_reml_schedule(
     x: ArrayView2<'_, f32>,
     config: &SparseDictConfig,
@@ -1471,6 +1559,18 @@ fn run_linear_reml_schedule_with_recycle(
     x: ArrayView2<'_, f32>,
     config: &SparseDictConfig,
     decoder_recycle: &mut DecoderRecycleSpace,
+) -> Result<SparseDictFit, SparseDictionaryError> {
+    run_linear_reml_schedule_observed(x, config, decoder_recycle, |_| {})
+}
+
+/// The production schedule with a private, race-free observation seam for its
+/// inner-start decisions. The callback observes control flow only; both arms
+/// still invoke the same production kernels used by the unobserved entry.
+fn run_linear_reml_schedule_observed(
+    x: ArrayView2<'_, f32>,
+    config: &SparseDictConfig,
+    decoder_recycle: &mut DecoderRecycleSpace,
+    mut observe_start: impl FnMut(InnerRunStart),
 ) -> Result<SparseDictFit, SparseDictionaryError> {
     validate(x, config)?;
     if config.code_ridge != config.decoder_ridge {
@@ -1525,6 +1625,7 @@ fn run_linear_reml_schedule_with_recycle(
     // AFTER Fellner–Schall has driven ρ STRICTLY below it is on the descent to the
     // identifiability edge, not an interior numerical failure.
     let initial_ridge = rho;
+    observe_start(InnerRunStart::Seeded);
     let mut fit = run_linear_fast_kernel(x, config, rho, decoder_recycle)?;
     let tol = reml_schedule_rho_log_tol(config.tolerance);
     let mut outer_iterations = 0usize;
@@ -1653,7 +1754,8 @@ fn run_linear_reml_schedule_with_recycle(
             );
         }
         rho = rho_new;
-        fit = run_linear_fast_kernel(x, config, rho, decoder_recycle)?;
+        observe_start(InnerRunStart::Continued);
+        fit = continue_linear_fast_kernel(x, config, rho, fit, decoder_recycle)?;
     }
 }
 
@@ -2063,13 +2165,13 @@ impl DecoderRecycleSpace {
     /// for itself on THIS fit's operator, this is `false` for the rest of the
     /// fit and every remaining refresh runs plain Jacobi block CG. "The fit"
     /// means the whole fit, across outer REML iterations, which holds only
-    /// because the space is owned above [`run`] (#2742) and
-    /// [`Self::begin_fit`] preserves the latch.
+    /// because the schedule owns the space above [`run_from_decoder`] (#2742)
+    /// and [`Self::begin_fit`] preserves the latch.
     fn admitted(&self) -> bool {
         self.admitted
     }
 
-    /// Start one inner alternation ([`run`]) on a caller-owned space.
+    /// Start one inner alternation ([`run_from_decoder`]) on a caller-owned space.
     ///
     /// The coarse-space HISTORY is per inner run: the directions were measured
     /// on the operator at the previous ρ, and the break-even scoring requires
@@ -2124,14 +2226,14 @@ impl DecoderRecycleSpace {
     ///
     /// One-way means one-way for the FIT, and that is a statement about who
     /// OWNS this struct, not about this method (#2742). While the space was
-    /// constructed inside [`run`], the latch reset at every outer REML
-    /// iteration boundary — [`run_linear_reml_schedule`] calls [`run`] up to
-    /// [`REML_SCHEDULE_MAX_OUTER_ITERS`] times, and a correction already proved
-    /// a loss was rebuilt and re-rejected on each one (measured: readmitted at
-    /// refreshes 8, 13 and 20 of one fit; 4.504 s of 31.920 s of refresh time
-    /// spent on corrections, 14 of 14 rejected). The space is now created once
-    /// per fit by the schedule and threaded through every inner run, so the
-    /// scope of this decision is the scope this comment claims.
+    /// constructed inside the seeded runner, the latch reset at every outer REML
+    /// iteration boundary — [`run_linear_reml_schedule`] can evaluate up to
+    /// [`REML_SCHEDULE_MAX_OUTER_ITERS`] inner runs, and a correction already
+    /// proved a loss was rebuilt and re-rejected on each one (measured:
+    /// readmitted at refreshes 8, 13 and 20 of one fit; 4.504 s of 31.920 s of
+    /// refresh time spent on corrections, 14 of 14 rejected). The space is now
+    /// created once per fit by the schedule and threaded through every inner
+    /// run, so the scope of this decision is the scope this comment claims.
     fn score_refresh(&mut self, sweeps: usize, columns: usize, rank: usize, cost_ratio: f64) {
         if columns == 0 || sweeps == 0 {
             return;
@@ -3753,7 +3855,8 @@ mod exact_solve_tests {
         CgStop, DecoderNormalEq, DecoderRecycleSpace, EvPlateau, LINEAR_EV_PLATEAU_FRACTION,
         LINEAR_SUPPORT_SATURATION_ROUNDS, LiveSupportGrowth, SparseDictionaryError, cg_solve,
         explained_variance, kappa_from_cg_tridiagonal, open_round_is_stationary, pcg_multi_core,
-        recycled_component_preconditioner, route_and_code_all, run, solve_decoder_recycled,
+        recycled_component_preconditioner, route_and_code_all, run_seeded,
+        solve_decoder_recycled,
         solve_decoder_with_routability_gate_recycled,
     };
     use crate::sparse_dict::codes::SparseCode;
@@ -3805,9 +3908,9 @@ mod exact_solve_tests {
     /// objective stopped improving" from "the objective is still moving".
     ///
     /// The detector is only half the contract: because it certifies the running
-    /// MAXIMUM, `run` must hand back the iterate attaining that maximum. That
-    /// coupling is what makes the limit-cycle case below sound rather than a
-    /// licence to return an arbitrary cycle point.
+    /// MAXIMUM, `run_from_decoder` must hand back the iterate attaining that
+    /// maximum. That coupling is what makes the limit-cycle case below sound
+    /// rather than a licence to return an arbitrary cycle point.
     #[test]
     fn ev_plateau_certifies_the_achievable_objective_not_a_round_2396() {
         // No climb at all and a trajectory that falls hard every round. This is
@@ -3906,7 +4009,7 @@ mod exact_solve_tests {
                 tolerance: 1.0e-9,
                 score_mode: gam_gpu::GpuPolicy::Off,
             };
-            match run(
+            match run_seeded(
                 x.view(),
                 &config,
                 &mut DecoderRecycleSpace::new(config.n_atoms),
@@ -3985,7 +4088,7 @@ mod exact_solve_tests {
                 tolerance: 1.0e-9,
                 score_mode: gam_gpu::GpuPolicy::Off,
             };
-            match run(
+            match run_seeded(
                 x.view(),
                 &config,
                 &mut DecoderRecycleSpace::new(config.n_atoms),
@@ -5917,15 +6020,17 @@ mod exact_solve_tests {
 
 /// #2742: the decoder-recycle break-even latch is documented as one-way for the
 /// FIT. That is a claim about the OWNER of [`DecoderRecycleSpace`], and it was
-/// false while the space was constructed inside [`run`]: the outer REML schedule
-/// calls `run` once per outer iteration (up to
+/// false while the space was constructed inside [`run_seeded`]: the outer REML
+/// schedule starts one seeded inner run and continues it once per outer iteration
+/// (up to
 /// [`REML_SCHEDULE_MAX_OUTER_ITERS`]), so every boundary readmitted a correction
 /// already measured as a loss.
 #[cfg(test)]
 mod decoder_recycle_latch_scope_2742_tests {
     use super::{
-        DecoderRecycleSpace, REML_SCHEDULE_MAX_OUTER_ITERS, run, run_linear_reml_schedule,
-        run_linear_reml_schedule_with_recycle,
+        DecoderRecycleSpace, InnerRunStart, REML_SCHEDULE_MAX_OUTER_ITERS,
+        run_linear_reml_schedule, run_linear_reml_schedule_observed,
+        run_linear_reml_schedule_with_recycle, run_seeded,
     };
     use crate::sparse_dict::SparseDictConfig;
     use ndarray::Array2;
@@ -6030,11 +6135,11 @@ mod decoder_recycle_latch_scope_2742_tests {
         let config = config(k, 3);
         let mut recycle = latched_off(k);
 
-        // Each `run` is one outer REML iteration's inner solve. The latch must
-        // not be readmitted by any of them; `run` may legitimately report typed
+        // Each seeded run is an independent inner solve. The latch must not be
+        // readmitted by any of them; `run_seeded` may legitimately report typed
         // non-convergence at this budget, which is irrelevant to the latch.
         for iteration in 0..3usize {
-            drop(run(x.view(), &config, &mut recycle));
+            drop(run_seeded(x.view(), &config, &mut recycle));
             assert!(
                 !recycle.admitted(),
                 "inner run {iteration} readmitted a correction already measured as a loss"
@@ -6051,7 +6156,7 @@ mod decoder_recycle_latch_scope_2742_tests {
         let config = config(k, 1);
         let mut recycle = DecoderRecycleSpace::new(k);
         assert!(recycle.admitted(), "a fresh recycle space must be admitted");
-        drop(run(x.view(), &config, &mut recycle));
+        drop(run_seeded(x.view(), &config, &mut recycle));
     }
 
     #[test]
@@ -6077,6 +6182,46 @@ mod decoder_recycle_latch_scope_2742_tests {
             !recycle.admitted(),
             "the outer schedule reset the break-even latch across {} outer iterations",
             fit.convergence.outer_iterations
+        );
+    }
+
+    #[test]
+    fn outer_reml_schedule_seeds_once_then_continues_2441() {
+        let (x, config, k) = schedule_fixture();
+        let mut recycle = DecoderRecycleSpace::new(k);
+        let mut starts = Vec::new();
+
+        let fit = run_linear_reml_schedule_observed(
+            x.view(),
+            &config,
+            &mut recycle,
+            |start| starts.push(start),
+        )
+        .expect("schedule fit");
+
+        assert!(
+            fit.convergence.outer_iterations >= 2,
+            "fixture is vacuous: continuation requires an outer boundary"
+        );
+        assert_eq!(
+            starts.len(),
+            fit.convergence.outer_iterations,
+            "every evaluated outer iterate must have exactly one inner-start decision"
+        );
+        assert_eq!(starts.first(), Some(&InnerRunStart::Seeded));
+        assert_eq!(
+            starts
+                .iter()
+                .filter(|&&start| start == InnerRunStart::Seeded)
+                .count(),
+            1,
+            "the O(K*N*P) farthest-point seed is a once-per-schedule operation"
+        );
+        assert!(
+            starts[1..]
+                .iter()
+                .all(|&start| start == InnerRunStart::Continued),
+            "every later rho must consume the prior iterate instead of cold-seeding: {starts:?}"
         );
     }
 
