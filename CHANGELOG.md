@@ -1,5 +1,17 @@
 ## Unreleased
 
+- **The gauge-orbit descent publishes the value authority its decrease is
+  measured against (#2762).** `penalized_objective_total` is a function of
+  the state AND of the barrier/repulsion gates that only `assemble_arrow_schur`
+  refreshes, so one state evaluates differently before and after an assembly
+  (498 ulps at an objective of `2.3e7`). The descent's per-round accounting is
+  consistent under the gate it froze at entry; a caller's pre-call value is
+  under an older gate, which is the `4.5e-7` the exit-state fixture refused
+  on. `GaugeOrbitDescent` now carries `entry_objective` and `exit_objective`,
+  the fixtures telescope the reported decrease against them, and a new fixture
+  pins the invariant the rounds rely on: refreshing the gates at an unchanged
+  state is idempotent.
+
 - **The wiggle frozen-index fixed point is single-valued and mixes its
   residual history (#2748).** After the multiplier repair the
   `geo_disease_matern` flexible cell at n=1000 still failed at 60 passes, and

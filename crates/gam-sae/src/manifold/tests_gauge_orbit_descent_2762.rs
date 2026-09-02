@@ -662,12 +662,24 @@ fn the_inner_fit_never_exits_with_material_decrease_left_in_the_removed_span_276
         "the exit-state descent must not raise the objective by a resolvable amount: \
          {settled} → {after}"
     );
+    // The decrease telescopes against the entry value the descent measured
+    // under ITS gate: `settled` above was evaluated under the gate the inner
+    // fit's last assembly left, and the two differ at the gate-shift scale
+    // (`penalized_objective_is_a_pure_function_of_the_mutable_state_2762`).
+    let entry = outcome
+        .entry_objective
+        .expect("a descent that moved evaluated its entry objective");
     assert!(
-        (settled - after - outcome.objective_decrease).abs()
+        (entry - settled).abs() <= resolution + 1.0e-5 * (1.0 + settled.abs()),
+        "the descent's entry value must be the caller's value up to the gate shift: \
+         entry {entry:.12e}, settled {settled:.12e}"
+    );
+    assert!(
+        (entry - after - outcome.objective_decrease).abs()
             <= resolution + 1.0e-6 * outcome.objective_decrease.abs(),
         "the exit-state descent must report the decrease it made: reported {}, measured {}",
         outcome.objective_decrease,
-        settled - after,
+        entry - after,
     );
 
     if matches!(
@@ -688,4 +700,77 @@ fn the_inner_fit_never_exits_with_material_decrease_left_in_the_removed_span_276
             outcome.dimension,
         );
     }
+}
+
+/// gam#2762 — the decrease `descend_gauge_orbit` reports is a SUM of per-round
+/// `base − committed` re-evaluations, and the fixtures above grade it against
+/// one before/after pair. That only telescopes if evaluating the objective is a
+/// pure function of the mutable state: the same state must give the same value
+/// whether it is reached fresh, evaluated twice in a row, or restored from a
+/// snapshot after a speculative trial (the descent's own round structure). At
+/// `07513ef38` the exit-state fixture missed by `4.5e-7` on a decrease of
+/// `4.46e-2`; this pins which of those three paths, if any, moves the value.
+#[test]
+fn penalized_objective_is_a_pure_function_of_the_mutable_state_2762() {
+    let (mut term, z, rho) = seeded_two_circle_term(48, 16, 2);
+    let first = term
+        .penalized_objective_total(z.view(), &rho, None, 1.0)
+        .expect("finite objective at the seed");
+    let second = term
+        .penalized_objective_total(z.view(), &rho, None, 1.0)
+        .expect("finite objective at the seed, second evaluation");
+    assert_eq!(
+        first.to_bits(),
+        second.to_bits(),
+        "two consecutive evaluations of one state differ: {first:.17e} vs {second:.17e}"
+    );
+    let snapshot = term.snapshot_mutable_state();
+    term.restore_mutable_state(&snapshot)
+        .expect("restoring the state just snapshotted");
+    let restored = term
+        .penalized_objective_total(z.view(), &rho, None, 1.0)
+        .expect("finite objective after a snapshot/restore round trip");
+    assert_eq!(
+        first.to_bits(),
+        restored.to_bits(),
+        "a snapshot/restore round trip moves the objective of an unchanged state: \
+         {first:.17e} vs {restored:.17e} (difference {:.3e})",
+        restored - first
+    );
+    // The descent assembles the arrow-Schur system before it evaluates its
+    // per-round base objective, and assembly refreshes the barrier/repulsion
+    // gates the objective reads (`refresh_*_gate` in penalties.rs). So the
+    // value is a function of (state, frozen gate), not of the state alone:
+    // measured `2.34832479732345045e7 -> 2.34832479732363597e7` (498 ulps)
+    // across one assembly at the seed. What the descent's round accounting
+    // relies on is the weaker, true invariant pinned here: refreshing the
+    // gates at an unchanged state is idempotent, so two assemblies in a row
+    // give one value.
+    let system = term
+        .assemble_arrow_schur(z.view(), &rho, None)
+        .expect("the arrow-Schur system assembles at the seed");
+    assert_eq!(system.rows.len(), 48, "one arrow row per observation");
+    drop(system);
+    let after_assembly = term
+        .penalized_objective_total(z.view(), &rho, None, 1.0)
+        .expect("finite objective after assembling the arrow-Schur system");
+    println!(
+        "2762-gate-shift: seed objective {first:.17e} -> {after_assembly:.17e} across one assembly \
+         (difference {:.3e})",
+        after_assembly - first
+    );
+    let system = term
+        .assemble_arrow_schur(z.view(), &rho, None)
+        .expect("the arrow-Schur system assembles again at the seed");
+    assert_eq!(system.rows.len(), 48, "one arrow row per observation");
+    drop(system);
+    let after_second_assembly = term
+        .penalized_objective_total(z.view(), &rho, None, 1.0)
+        .expect("finite objective after a second assembly");
+    assert_eq!(
+        after_assembly.to_bits(),
+        after_second_assembly.to_bits(),
+        "refreshing the gates at an unchanged state must be idempotent: \
+         {after_assembly:.17e} vs {after_second_assembly:.17e}"
+    );
 }

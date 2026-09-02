@@ -183,6 +183,17 @@ pub(crate) struct GaugeOrbitDescent {
     pub(crate) max_directional_derivative: f64,
     /// Objective evaluations spent. Each is one `penalized_objective_total`.
     pub(crate) evaluations: usize,
+    /// The objective at entry, evaluated under the barrier/repulsion gates the
+    /// descent itself froze (its first `assemble_arrow_schur`). The value the
+    /// caller measured BEFORE calling is under whatever gate its last assembly
+    /// left behind, and the two differ at the gate-shift scale (measured
+    /// `1.9e-6` at an objective of `2.3e7`, `4.5e-7` on the exit-state fixture),
+    /// so `objective_decrease` telescopes against THIS number, not the caller's.
+    /// `None` when no round reached an evaluation.
+    pub(crate) entry_objective: Option<f64>,
+    /// The committed objective after the last accepted round, under the same
+    /// gate as `entry_objective` for that round. `None` when nothing committed.
+    pub(crate) exit_objective: Option<f64>,
 }
 
 impl GaugeOrbitDescent {
@@ -2970,6 +2981,9 @@ impl SaeManifoldTerm {
             }
 
             let base_objective = self.penalized_objective_total(target, rho, registry, 1.0)?;
+            if outcome.entry_objective.is_none() {
+                outcome.entry_objective = Some(base_objective);
+            }
             if !base_objective.is_finite() {
                 return Ok(outcome);
             }
@@ -3134,6 +3148,7 @@ impl SaeManifoldTerm {
             }
             outcome.rounds += 1;
             outcome.objective_decrease += decrease;
+            outcome.exit_objective = Some(committed_objective);
             log::debug!(
                 "SAE gauge-orbit descent: round {} committed {decrease:.6e} at α={best_alpha:.6e} \
                  (objective {base_objective:.9e} → {committed_objective:.9e}, span dim {}, \
