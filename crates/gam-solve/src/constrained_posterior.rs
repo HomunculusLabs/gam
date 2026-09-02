@@ -3191,71 +3191,8 @@ impl OrthantRule {
         }
     }
 
-    /// The rule in the caller's coordinate order and without a tilt: the
-    /// estimator the module ran before the ordering and the saddle point
-    /// existed. Kept so the tests can measure both against it.
-    #[cfg(test)]
-    fn in_given_order_untilted(
-        mean: &Array1<f64>,
-        upper: &[f64],
-        covariance: &Array2<f64>,
-    ) -> Result<Self, String> {
-        let q = mean.len();
-        let factor = gam_linalg::triangular::cholesky_factor_in_place(
-            covariance.view(),
-            gam_linalg::triangular::CholeskyGuard::FiniteStrict,
-        )
-        .ok_or_else(|| {
-            "the constraint-normal covariance is not numerically positive definite".to_string()
-        })?;
-        let face = OrderedFace {
-            order: (0..q).collect(),
-            mean: mean.clone(),
-            upper: upper.to_vec(),
-            factor,
-        };
-        Ok(Self::from_face(
-            face,
-            None,
-            TiltStatus::Untilted {
-                reason: "test rule".to_string(),
-            },
-            0,
-        ))
-    }
-
-    /// Intersect the region with the affine wall `normal · u ≤ bound`, given in
-    /// the caller's coordinates.
-    #[cfg(test)]
-    fn with_affine_ceiling(mut self, normal: &Array1<f64>, bound: f64) -> Result<Self, String> {
-        let q = self.dimension();
-        if normal.len() != q {
-            return Err(format!(
-                "affine ceiling: the normal has length {} but the face has {q} coordinates",
-                normal.len()
-            ));
-        }
-        let mut permuted = Array1::<f64>::zeros(q);
-        for (position, &original) in self.face.order.iter().enumerate() {
-            permuted[position] = normal[original];
-        }
-        self.ceiling = Some(StandardizedCeiling::new(
-            &permuted,
-            bound,
-            &self.face.mean,
-            self.face.factor.view(),
-        )?);
-        Ok(self)
-    }
-
     fn dimension(&self) -> usize {
         self.face.mean.len()
-    }
-
-    /// The caller's index of the coordinate integrated at `position`.
-    #[cfg(test)]
-    fn original_index(&self, position: usize) -> usize {
-        self.face.order[position]
     }
 
     fn replicate_shift(&self, replicate: usize) -> Result<&[f64], String> {
@@ -3819,28 +3756,6 @@ fn scalar_truncated_moments(
     ))
 }
 
-/// Largest gap between two moment sets, measured in the pre-truncation scale
-/// `sd_i = sqrt(W_ii)` so the comparison does not depend on how the constraint
-/// rows happen to be scaled. The tests score one rule against another with it.
-#[cfg(test)]
-fn moment_relative_change(
-    previous: &(Array1<f64>, Array2<f64>),
-    current: &(Array1<f64>, Array2<f64>),
-    w: &Array2<f64>,
-) -> f64 {
-    let q = current.0.len();
-    let mut worst = 0.0f64;
-    for i in 0..q {
-        let sd_i = w[[i, i]].sqrt();
-        worst = worst.max((current.0[i] - previous.0[i]).abs() / sd_i);
-        for j in 0..q {
-            let sd_j = w[[j, j]].sqrt();
-            worst =
-                worst.max((current.1[[i, j]] - previous.1[[i, j]]).abs() / (sd_i * sd_j));
-        }
-    }
-    worst
-}
 
 /// Kronecker (Richtmyer) lattice generator `α_i = frac(√p_i)` over the primes.
 /// Deterministic and table-free: the sequence is reproduced from the primes
@@ -3871,6 +3786,98 @@ fn is_prime(value: u64) -> bool {
         divisor += 1;
     }
     true
+}
+
+/// Test-only views of the rule: the estimator the module ran before the ordering
+/// and the saddle point existed, an affine ceiling in the caller's frame, the
+/// integration order, and a gap metric between two moment sets.
+#[cfg(test)]
+mod tests_orthant_rule_support {
+    use super::*;
+
+    impl OrthantRule {
+        /// The rule in the caller's coordinate order and without a tilt: the
+        /// estimator the module ran before the ordering and the saddle point
+        /// existed. Kept so the tests can measure both against it.
+        pub(super) fn in_given_order_untilted(
+            mean: &Array1<f64>,
+            upper: &[f64],
+            covariance: &Array2<f64>,
+        ) -> Result<Self, String> {
+            let q = mean.len();
+            let factor = gam_linalg::triangular::cholesky_factor_in_place(
+                covariance.view(),
+                gam_linalg::triangular::CholeskyGuard::FiniteStrict,
+            )
+            .ok_or_else(|| {
+                "the constraint-normal covariance is not numerically positive definite".to_string()
+            })?;
+            let face = OrderedFace {
+                order: (0..q).collect(),
+                mean: mean.clone(),
+                upper: upper.to_vec(),
+                factor,
+            };
+            Ok(Self::from_face(
+                face,
+                None,
+                TiltStatus::Untilted {
+                    reason: "test rule".to_string(),
+                },
+                0,
+            ))
+        }
+
+        /// Intersect the region with the affine wall `normal · u ≤ bound`, given in
+        /// the caller's coordinates.
+        pub(super) fn with_affine_ceiling(mut self, normal: &Array1<f64>, bound: f64) -> Result<Self, String> {
+            let q = self.dimension();
+            if normal.len() != q {
+                return Err(format!(
+                    "affine ceiling: the normal has length {} but the face has {q} coordinates",
+                    normal.len()
+                ));
+            }
+            let mut permuted = Array1::<f64>::zeros(q);
+            for (position, &original) in self.face.order.iter().enumerate() {
+                permuted[position] = normal[original];
+            }
+            self.ceiling = Some(StandardizedCeiling::new(
+                &permuted,
+                bound,
+                &self.face.mean,
+                self.face.factor.view(),
+            )?);
+            Ok(self)
+        }
+
+        /// The caller's index of the coordinate integrated at `position`.
+        pub(super) fn original_index(&self, position: usize) -> usize {
+            self.face.order[position]
+        }
+    }
+
+    /// Largest gap between two moment sets, measured in the pre-truncation scale
+    /// `sd_i = sqrt(W_ii)` so the comparison does not depend on how the constraint
+    /// rows happen to be scaled. The tests score one rule against another with it.
+    pub(super) fn moment_relative_change(
+        previous: &(Array1<f64>, Array2<f64>),
+        current: &(Array1<f64>, Array2<f64>),
+        w: &Array2<f64>,
+    ) -> f64 {
+        let q = current.0.len();
+        let mut worst = 0.0f64;
+        for i in 0..q {
+            let sd_i = w[[i, i]].sqrt();
+            worst = worst.max((current.0[i] - previous.0[i]).abs() / sd_i);
+            for j in 0..q {
+                let sd_j = w[[j, j]].sqrt();
+                worst =
+                    worst.max((current.1[[i, j]] - previous.1[[i, j]]).abs() / (sd_i * sd_j));
+            }
+        }
+        worst
+    }
 }
 
 #[cfg(test)]
@@ -5496,6 +5503,7 @@ mod tests {
 /// the tie-break.
 #[cfg(test)]
 mod orthant_tilt_2601_tests {
+    use super::tests_orthant_rule_support::moment_relative_change;
     use super::*;
 
     /// The face that #2601's `monotone_decreasing` fit actually produces,
@@ -6684,6 +6692,7 @@ mod projection_law_2446_tests {
 #[cfg(test)]
 mod orthant_rule_979_tests {
     use super::orthant_tilt_2601_tests::weight_efficiency;
+    use super::tests_orthant_rule_support::moment_relative_change;
     use super::*;
     use gam_math::probability::{normal_cdf, normal_pdf};
     use ndarray::array;
