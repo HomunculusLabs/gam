@@ -297,6 +297,9 @@ impl BlockEffectiveJacobian for RowScaledJacobian {
         Ok(scaled)
     }
 
+    fn eta_row_scaling_for_skewness(&self) -> Option<Arc<[f64]>> {
+        Some(Arc::clone(&self.eta_scaling))
+    }
 }
 
 pub(crate) fn clamp_jacobian_rows(rows: Range<usize>, n: usize) -> Range<usize> {

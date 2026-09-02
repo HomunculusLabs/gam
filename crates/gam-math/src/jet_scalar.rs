@@ -3715,6 +3715,11 @@ impl<const K: usize> crate::nested_dual::JetField for Order2<K> {
         // multiply-adds and construct the constant. (#932)
         <Self as JetScalar<K>>::constant(v)
     }
+    fn with_value(&self, v: f64) -> Self {
+        let mut out = *self;
+        out.0.v = v;
+        out
+    }
 }
 
 /// Static lowering target for a sum of composed, low-dimensional row atoms.
@@ -4704,6 +4709,14 @@ impl<const K: usize> crate::nested_dual::JetField for OneSeed<K> {
         OneSeed {
             base: self.base.constant_like(v),
             eps: self.eps.constant_like(0.0),
+        }
+    }
+    fn with_value(&self, v: f64) -> Self {
+        // The real value channel is the base part's; the ε part carries no
+        // value of its own.
+        OneSeed {
+            base: self.base.with_value(v),
+            eps: self.eps,
         }
     }
 }

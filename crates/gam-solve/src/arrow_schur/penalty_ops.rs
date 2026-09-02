@@ -871,6 +871,37 @@ impl BetaPenaltyOp for KroneckerPenaltyOp {
         }
     }
 
+    fn output_range(&self) -> Option<Range<usize>> {
+        let off = self.global_offset;
+        Some(off..off + self.factor_a.nrows() * self.factor_b.nrows())
+    }
+
+    fn matvec_local(&self, x: &[f64], y_local: &mut [f64]) {
+        // Byte-for-byte the `matvec` arithmetic with the output written at the
+        // LOCAL index `i_a·p_b + i_b` (== global `gi - off`), so the composite
+        // can apply this block into its own `y[off..off+p_a·p_b]` sub-slice in
+        // parallel. Per-index accumulation order is unchanged ⇒ bit-identical.
+        let p_a = self.factor_a.nrows();
+        let p_b = self.factor_b.nrows();
+        let off = self.global_offset;
+        for i_a in 0..p_a {
+            for i_b in 0..p_b {
+                let li = i_a * p_b + i_b;
+                let mut acc = 0.0_f64;
+                for j_a in 0..p_a {
+                    let a_ij = self.factor_a[[i_a, j_a]];
+                    if a_ij == 0.0 {
+                        continue;
+                    }
+                    for j_b in 0..p_b {
+                        acc += a_ij * self.factor_b[[i_b, j_b]] * x[off + j_a * p_b + j_b];
+                    }
+                }
+                y_local[li] += acc;
+            }
+        }
+    }
+
     fn gradient(&self, beta: &[f64], out: &mut [f64]) {
         let p_a = self.factor_a.nrows();
         let p_b = self.factor_b.nrows();

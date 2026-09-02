@@ -2409,6 +2409,57 @@ impl LinearOperator for RandomEffectOperator {
         Ok(diag)
     }
 
+
+    // Restored: the dead-code sweep (d484a091a) deleted this override; it is
+    // reached only through the trait, so the sweep fell back to the default.
+    /// Fused X'WXβ + Sβ + ridge·β.  O(n + q).
+    fn apply_weighted_normal(
+        &self,
+        weights: FiniteSignedWeightsView<'_>,
+        vector: &Array1<f64>,
+        penalty: Option<&Array2<f64>>,
+        ridge: f64,
+    ) -> Array1<f64> {
+        assert_eq!(
+            weights.len(),
+            self.n,
+            "RandomEffectOperator::apply_weighted_normal weight length mismatch"
+        );
+        assert_eq!(
+            vector.len(),
+            self.num_groups,
+            "RandomEffectOperator::apply_weighted_normal vector length mismatch"
+        );
+        // Step 1: accumulate per-group weighted β[g] contributions.
+        //   group_acc[g] = Σ_{i in group g} w[i]
+        //   result[g] = group_acc[g] * vector[g]
+        let weights = weights.view();
+        let mut group_wacc = Array1::<f64>::zeros(self.num_groups);
+        for i in 0..self.n {
+            if let Some(g) = self.group_ids[i] {
+                group_wacc[g] += weights[i];
+            }
+        }
+        let mut out = Array1::<f64>::zeros(self.num_groups);
+        for g in 0..self.num_groups {
+            out[g] = group_wacc[g] * vector[g];
+        }
+        if let Some(pen) = penalty {
+            out += &pen.dot(vector);
+        }
+        if ridge > 0.0 {
+            for g in 0..self.num_groups {
+                out[g] += ridge * vector[g];
+            }
+        }
+        out
+    }
+
+    // Restored: the dead-code sweep (d484a091a) deleted this override; it is
+    // reached only through the trait, so the sweep fell back to the default.
+    fn uses_matrix_free_pcg(&self) -> bool {
+        true
+    }
 }
 
 impl DenseDesignOperator for RandomEffectOperator {
@@ -2441,6 +2492,41 @@ impl DenseDesignOperator for RandomEffectOperator {
             }
         });
         out
+    }
+
+    // Restored: the dead-code sweep (d484a091a) deleted this override; it is
+    // reached only through the trait, so the sweep fell back to the default.
+    fn compute_xtwy(&self, weights: &Array1<f64>, y: &Array1<f64>) -> Result<Array1<f64>, String> {
+        if weights.len() != self.n || y.len() != self.n {
+            return Err(format!(
+                "RandomEffectOperator::compute_xtwy dimension mismatch: weights={}, y={}, nrows={}",
+                weights.len(),
+                y.len(),
+                self.n
+            ));
+        }
+        certify_signed_weights("RandomEffectOperator::compute_xtwy", weights, self.n)?;
+        let mut out = Array1::<f64>::zeros(self.num_groups);
+        for i in 0..self.n {
+            if let Some(g) = self.group_ids[i] {
+                let wi = weights[i];
+                out[g] += wi * y[i];
+            }
+        }
+        Ok(out)
+    }
+
+    // Restored: the dead-code sweep (d484a091a) deleted this override; it is
+    // reached only through the trait, so the sweep fell back to the default.
+    /// diag(X M X') for one-hot X: out\[i\] = M[group\[i\], group\[i\]].
+    fn quadratic_form_diag(&self, middle: &Array2<f64>) -> Result<Array1<f64>, String> {
+        use rayon::prelude::*;
+        let out: Vec<f64> = self
+            .group_ids
+            .par_iter()
+            .map(|g| g.map(|g| middle[[g, g]].max(0.0)).unwrap_or(0.0))
+            .collect();
+        Ok(Array1::from(out))
     }
 }
 
@@ -4517,6 +4603,12 @@ impl LinearOperator for DenseRightProductView<'_> {
         Ok(gram)
     }
 
+
+    // Restored: the dead-code sweep (d484a091a) deleted this override; it is
+    // reached only through the trait, so the sweep fell back to the default.
+    fn diag_gram(&self, weights: &Array1<f64>) -> Result<Array1<f64>, String> {
+        Ok(self.diag_xtw_x(weights)?.diag().to_owned())
+    }
 }
 
 impl DenseRightProductView<'_> {
@@ -4565,6 +4657,17 @@ impl LinearOperator for EmbeddedColumnBlock<'_> {
         Ok(out)
     }
 
+
+    // Restored: the dead-code sweep (d484a091a) deleted this override; it is
+    // reached only through the trait, so the sweep fell back to the default.
+    fn diag_gram(&self, weights: &Array1<f64>) -> Result<Array1<f64>, String> {
+        let mut out = Array1::<f64>::zeros(self.total_cols);
+        let local =
+            DesignMatrix::Dense(DenseDesignMatrix::from(self.local.clone())).diag_gram(weights)?;
+        out.slice_mut(ndarray::s![self.global_range.clone()])
+            .assign(&local);
+        Ok(out)
+    }
 }
 
 impl EmbeddedColumnBlock<'_> {

@@ -996,6 +996,9 @@ impl FamilyChannelHessian for SurvivalLocationScaleChannelHessian {
         }
     }
 
+    fn evaluate_full(&self) -> ndarray::Array3<f64> {
+        self.h.clone()
+    }
 }
 
 /// Observed vs expected information: The survival location-scale family uses

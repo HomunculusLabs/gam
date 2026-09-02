@@ -504,6 +504,18 @@ impl RawPeriodicCircleEvaluator {
 }
 
 impl SaeBasisEvaluator for RawPeriodicCircleEvaluator {
+    fn phi_eta_split(&self, n_basis: usize) -> Result<PhiEtaSplit, String> {
+        if n_basis != 2 {
+            return Err(format!(
+                "RawPeriodicCircleEvaluator::phi_eta_split: n_basis {n_basis} != 2"
+            ));
+        }
+        // Both raw circle columns `[cos, sin]` are base (η-invariant) columns:
+        // the homotopy has nothing to dial because the base topology IS the full
+        // basis. These columns embed a curved unit circle, so this is a
+        // base-topology relaxation, not a linear one.
+        Ok(PhiEtaSplit::all_base(n_basis))
+    }
 
     fn second_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array4<f64>, String>> {
         if coords.ncols() != self.latent_dim {
@@ -2326,6 +2338,18 @@ impl AffineCoordinateEvaluator {
 }
 
 impl SaeBasisEvaluator for AffineCoordinateEvaluator {
+    fn phi_eta_split(&self, n_basis: usize) -> Result<PhiEtaSplit, String> {
+        let expected = self.latent_dim + 1;
+        if n_basis != expected {
+            return Err(format!(
+                "AffineCoordinateEvaluator::phi_eta_split: n_basis {n_basis} != {expected}"
+            ));
+        }
+        // The affine `[1, x, y, z]` basis is genuinely linear, so every column is
+        // a base column and the base-topology relaxation coincides with a true
+        // linear model here (the one basis where the two notions agree).
+        Ok(PhiEtaSplit::all_base(n_basis))
+    }
 
     fn second_jet_dyn(&self, coords: ArrayView2<'_, f64>) -> Option<Result<Array4<f64>, String>> {
         Some(<Self as SaeBasisSecondJet>::second_jet(self, coords))
