@@ -1368,6 +1368,7 @@ pub(crate) fn evidence_row_spectral_deflates_indefinite_non_gauge_block_at_unit_
         std::slice::from_ref(&gauge_e1),
         true,
         false,
+        None,
     )
     .expect("undamped evidence factor must condition the indefinite block by deflation");
     for a in 0..d {
@@ -1391,7 +1392,7 @@ pub(crate) fn evidence_row_spectral_deflates_indefinite_non_gauge_block_at_unit_
     pd.gt = array![0.0_f64, 0.0, 0.0];
 
     let result =
-        factor_one_row_result(&pd, 0.0, d, 0, true, std::slice::from_ref(&gauge_e1), true, false)
+        factor_one_row_result(&pd, 0.0, d, 0, true, std::slice::from_ref(&gauge_e1), true, false, None)
         .expect("undamped evidence factor must succeed on the genuinely-PD stationary block");
     // Exactly one gauge direction deflated; the non-gauge spectrum is
     // factored as-is (no ridge), so L Lᵀ reproduces H_tt on the two genuine
@@ -1470,7 +1471,7 @@ pub(crate) fn evidence_row_recovers_intrinsic_dimension_flat_block_without_gauge
     // fix would not be exercised. With NO supplied gauge AND spectral
     // deflation withheld (the pre-#1273 behaviour the empty-gauge gate forced
     // on this row), the block is rejected as non-PD.
-    let refused = factor_one_row_result(&flat, 0.0, d, 0, true, &[], false, false);
+    let refused = factor_one_row_result(&flat, 0.0, d, 0, true, &[], false, false, None);
     assert!(
         refused.is_err(),
         "fixture precondition: the rank-deficient flat H_tt must be refused by \
@@ -1483,7 +1484,7 @@ pub(crate) fn evidence_row_recovers_intrinsic_dimension_flat_block_without_gauge
     // eigendecomposition and stiffens it to unit curvature, producing an SPD
     // factor — so the factorization SUCCEEDS with no gauge supplied and the
     // #1273 fit no longer aborts on this legitimately-flat geometry.
-    let recovered = factor_one_row_result(&flat, 0.0, d, 0, true, &[], true, false).expect(
+    let recovered = factor_one_row_result(&flat, 0.0, d, 0, true, &[], true, false, None).expect(
         "spectral deflation must recover the intrinsic-dimension flat H_tt block on \
          the SAE evidence path even with no supplied gauge (#1273)",
     );
