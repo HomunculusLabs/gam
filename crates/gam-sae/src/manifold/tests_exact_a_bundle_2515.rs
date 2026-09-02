@@ -2119,16 +2119,6 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
             0.5 * (eval_arrow_joint - eval_arrow_coordinate),
         )
     };
-    let fd_step = 1.0e-5;
-    let mut rho_minus = rho.clone();
-    rho_minus.log_lambda_sparse -= fd_step;
-    let mut rho_plus = rho.clone();
-    rho_plus.log_lambda_sparse += fd_step;
-    let (dense_minus, arrow_minus) = quotient_values(&rho_minus);
-    let (dense_plus, arrow_plus) = quotient_values(&rho_plus);
-    let dense_fd = (dense_plus - dense_minus) / (2.0 * fd_step);
-    let arrow_fd = (arrow_plus - arrow_minus) / (2.0 * fd_step);
-
     println!(
         "[#2515 QUOTIENT] value dense={dense_quotient:+.12e} arrow={arrow_quotient:+.12e} \
          delta={:+.6e}",
@@ -2141,15 +2131,30 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
          arrow_difference={arrow_trace:+.12e} delta={:+.6e}",
         dense_trace - arrow_trace,
     );
-    println!(
-        "[#2515 QUOTIENT] sparse finite difference dense={dense_fd:+.12e} \
-         arrow={arrow_fd:+.12e}; analytic residuals dense={:+.6e} arrow={:+.6e}; \
-         perturbed route gaps minus={:+.6e} plus={:+.6e}",
-        dense_trace - dense_fd,
-        arrow_trace - arrow_fd,
-        dense_minus - arrow_minus,
-        dense_plus - arrow_plus,
-    );
+    for fd_step in [1.0e-3_f64, 1.0e-4, 1.0e-5, 1.0e-6] {
+        let mut rho_minus = rho.clone();
+        rho_minus.log_lambda_sparse -= fd_step;
+        let mut rho_plus = rho.clone();
+        rho_plus.log_lambda_sparse += fd_step;
+        let (dense_minus, arrow_minus) = quotient_values(&rho_minus);
+        let (dense_plus, arrow_plus) = quotient_values(&rho_plus);
+        let dense_fd = (dense_plus - dense_minus) / (2.0 * fd_step);
+        let arrow_fd = (arrow_plus - arrow_minus) / (2.0 * fd_step);
+        println!(
+            "[#2515 QUOTIENT] sparse FD h={fd_step:.0e}: dense={dense_fd:+.12e} \
+             (backward={:+.12e}, forward={:+.12e}) arrow={arrow_fd:+.12e} \
+             (backward={:+.12e}, forward={:+.12e}); analytic residuals dense={:+.6e} \
+             arrow={:+.6e}; perturbed route gaps minus={:+.6e} plus={:+.6e}",
+            (dense_quotient - dense_minus) / fd_step,
+            (dense_plus - dense_quotient) / fd_step,
+            (arrow_quotient - arrow_minus) / fd_step,
+            (arrow_plus - arrow_quotient) / fd_step,
+            dense_trace - dense_fd,
+            arrow_trace - arrow_fd,
+            dense_minus - arrow_minus,
+            dense_plus - arrow_plus,
+        );
+    }
 
     let value_scale = dense_quotient.abs().max(arrow_quotient.abs()).max(1.0);
     assert!(
