@@ -38,6 +38,17 @@ fn try_build_spatial_term_log_kappa_derivative(
                     .to_standardized_units(gam_terms::OriginalUnits::new(spec.length_scale))
                     .standardized_value();
             }
+            // Same fitted-chart replay as the Matérn arm below: the realizer's
+            // spec is in `z_local`; the metadata carries the composed chart.
+            if let BasisMetadata::ThinPlate {
+                identifiability_transform: Some(transform),
+                ..
+            } = &smooth_term.metadata
+            {
+                spec_local.identifiability = SpatialIdentifiability::FrozenTransform {
+                    transform: transform.clone(),
+                };
+            }
             build_thin_plate_basis_log_kappa_derivatives(x.view(), &spec_local)
                 .map_err(EstimationError::from)?
         }
@@ -96,6 +107,30 @@ fn try_build_spatial_term_log_kappa_derivative(
             // stalled the κ-optimizer at its iteration cap with a large residual
             // gradient (#1122). `double_penalty: false` reproduces the operator
             // triplet exactly (verified: the 2-D iso-κ FD matches to ~1e-9).
+            // The jet is built in the FITTED coefficient chart. The incremental
+            // realizer hands this builder a spec whose identifiability has been
+            // put back into the TERM-LOCAL chart `z_local`
+            // (`restore_local_identifiability_chart`, gam#2760) so that a design
+            // REBUILD can apply the collection gauge's fixed `T0` itself; the
+            // design the criterion is built on lives in the composition
+            // `z_local · T0` the realized term's metadata records. Built on
+            // `z_local`, the jet has the fitted WIDTH whenever `T0` is square
+            // (the Residualize arm), so nothing declines and the ψ-gradient is
+            // silently wrong: measured on the #1379 seed-3 fixture, the same θ
+            // and the same cost (−138.0325036) gave ∂V/∂ψ = −2.949e4 here
+            // against +0.2253 from the composed chart (central differences
+            // +0.2249), and the line search walked uphill for 50 attempts. The
+            // Duchon arm below already replays its chart from metadata; the
+            // measure-jet per-axis arm was fixed the same way (597003f2e).
+            if let BasisMetadata::Matern {
+                identifiability_transform: Some(transform),
+                ..
+            } = &smooth_term.metadata
+            {
+                spec_local.identifiability = MaternIdentifiability::FrozenTransform {
+                    transform: transform.clone(),
+                };
+            }
             spec_local.double_penalty = false;
             build_matern_basis_log_kappa_derivatives(x.view(), &spec_local)
                 .map_err(EstimationError::from)?

@@ -7749,6 +7749,30 @@ fn try_build_spatial_term_log_kappa_aniso_derivativeinfos(
             // double-penalty blocks, or the analytic `tr(S⁺ Ṡ)` desyncs from the
             // FD of the criterion's operator-triplet `log|Sλ|₊` (the iso-axis
             // analogue is handled in `try_build_spatial_term_log_kappa_derivative`).
+            // The jet is built in the FITTED coefficient chart. The incremental
+            // realizer hands this builder a spec whose identifiability has been
+            // put back into the TERM-LOCAL chart `z_local`
+            // (`restore_local_identifiability_chart`, gam#2760) so that a design
+            // REBUILD can apply the collection gauge's fixed `T0` itself; the
+            // design the criterion is built on lives in the composition
+            // `z_local · T0` the realized term's metadata records. Built on
+            // `z_local`, the jet has the fitted WIDTH whenever `T0` is square
+            // (the Residualize arm), so nothing declines and the ψ-gradient is
+            // silently wrong: measured on the #1379 seed-3 fixture, the same θ
+            // and the same cost (−138.0325036) gave ∂V/∂ψ = −2.949e4 here
+            // against +0.2253 from the composed chart (central differences
+            // +0.2249), and the line search walked uphill for 50 attempts. The
+            // Duchon arm below already replays its chart from metadata; the
+            // measure-jet per-axis arm was fixed the same way (597003f2e).
+            if let BasisMetadata::Matern {
+                identifiability_transform: Some(transform),
+                ..
+            } = &smooth_term.metadata
+            {
+                spec_operator.identifiability = MaternIdentifiability::FrozenTransform {
+                    transform: transform.clone(),
+                };
+            }
             spec_operator.double_penalty = false;
             build_matern_basis_log_kappa_aniso_derivatives(x.view(), &spec_operator)
                 .map_err(EstimationError::from)?
