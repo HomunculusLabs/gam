@@ -681,11 +681,37 @@ fn apply_bspline_1d(
     descriptor: &serde_json::Map<String, JsonValue>,
     symbol: &str,
 ) -> Result<(), String> {
+    // Degree first. Every count-to-dimension conversion below reads
+    // `spec.degree`, so an overridden degree must be in place before a knot
+    // count is interpreted; converting against the formula's default degree
+    // and swapping the degree afterwards built a basis whose width matched
+    // neither reading of the request.
+    if let Some(d) = descriptor.get("degree").and_then(JsonValue::as_u64) {
+        spec.degree = d as usize;
+    }
+    if let Some(po) = descriptor.get("penalty_order").and_then(JsonValue::as_u64) {
+        spec.penalty_order = po as usize;
+    }
+    if let Some(dp) = descriptor
+        .get("double_penalty")
+        .and_then(JsonValue::as_bool)
+    {
+        spec.double_penalty = dp;
+    }
     if let Some(knots_val) = descriptor.get("knots") {
         let knots = parse_f64_vec(knots_val, "knots", symbol)?;
         spec.knotspec = BSplineKnotSpec::Provided(Array1::from(knots));
     } else if let Some(n) = descriptor.get("n_knots").and_then(JsonValue::as_u64) {
-        let n_internal = (n as usize).saturating_sub(spec.degree + 1).max(1);
+        // `BSpline(knots=K)` means K INTERIOR knots — the one meaning the
+        // integer has everywhere else it is read: the public evaluator
+        // (`gamfit.bspline_basis`, `BSpline.evaluate`) and the formula DSL's
+        // `knots=K`. An open basis therefore spans `K + degree + 1` functions
+        // and a cyclic one, by the `cyclic(x, knots=K)` convention, has
+        // `K + degree + 1` cyclic controls. This bridge used to read the same
+        // integer as a TOTAL basis dimension (`K - degree - 1` interior knots,
+        // floored at one), so `BSpline(knots=6)` evaluated to a 10-function
+        // space and fitted a 6-function one.
+        let n_internal = n as usize;
         spec.knotspec = match &spec.knotspec {
             BSplineKnotSpec::Generate { data_range, .. } => BSplineKnotSpec::Generate {
                 data_range: *data_range,
@@ -698,31 +724,28 @@ fn apply_bspline_1d(
             BSplineKnotSpec::PeriodicUniform { data_range, .. } => {
                 BSplineKnotSpec::PeriodicUniform {
                     data_range: *data_range,
-                    num_basis: n as usize,
+                    num_basis: n_internal + spec.degree + 1,
                 }
             }
-            BSplineKnotSpec::Provided(existing) => BSplineKnotSpec::Provided(existing.clone()),
-            // cr/cs knots index the basis directly; an `n_knots` override does
-            // not map onto a B-spline internal-knot count, so the frozen cr knot
-            // set is respected verbatim.
-            BSplineKnotSpec::NaturalCubicRegression { knots } => {
-                BSplineKnotSpec::NaturalCubicRegression {
-                    knots: knots.clone(),
-                }
+            // The formula already fixed this smooth's knots — an explicit
+            // `knots=[...]` vector, or the cr/cs value-knot set that indexes
+            // the basis directly. A count cannot be applied to either without
+            // replacing what the formula said, and it used to be dropped on
+            // the floor instead, leaving the caller's `knots=` inert.
+            BSplineKnotSpec::Provided(_) => {
+                return Err(format!(
+                    "smooths[{symbol:?}]: knots={n} conflicts with the explicit knot vector the \
+                     formula supplies for this smooth; drop one of the two"
+                ));
+            }
+            BSplineKnotSpec::NaturalCubicRegression { .. } => {
+                return Err(format!(
+                    "smooths[{symbol:?}]: knots={n} cannot resize a natural cubic regression \
+                     spline (bs=\"cr\"/\"cs\"), whose basis is indexed by its value knots; set \
+                     k= in the formula instead"
+                ));
             }
         };
-    }
-    if let Some(d) = descriptor.get("degree").and_then(JsonValue::as_u64) {
-        spec.degree = d as usize;
-    }
-    if let Some(po) = descriptor.get("penalty_order").and_then(JsonValue::as_u64) {
-        spec.penalty_order = po as usize;
-    }
-    if let Some(dp) = descriptor
-        .get("double_penalty")
-        .and_then(JsonValue::as_bool)
-    {
-        spec.double_penalty = dp;
     }
     // `BSpline(periodic=True)` — promote the spec to a cyclic basis, producing
     // a knot/boundary pair bit-identical to the formula DSL `cyclic()`/`cc()`
