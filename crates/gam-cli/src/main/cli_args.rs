@@ -12,10 +12,15 @@ pub(crate) struct Cli {
     /// Solver log verbosity: `off|error|warn|info|debug|trace`. Defaults to the
     /// quiet `warn` level (#1688) — pass `--log-level info` or `-v` to opt back
     /// into the full per-iteration solver trace (`[OUTER …]`, `[KAPPA-PHASE …]`,
-    /// etc.). An unrecognized `--log-level` value falls back to verbose `info`.
+    /// etc.). Unrecognized levels are rejected by the argument parser.
     /// `--log-level` wins over `-v`/`-q` when both are present.
-    #[arg(long, global = true, value_name = "LEVEL")]
-    pub(crate) log_level: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        value_name = "LEVEL",
+        value_parser = parse_log_level_cli
+    )]
+    pub(crate) log_level: Option<log::LevelFilter>,
 
     /// Increase solver log verbosity. Repeat for more detail: `-v` = info,
     /// `-vv` = debug, `-vvv` = trace.
@@ -752,6 +757,20 @@ pub(crate) fn parse_finite_f64_cli(raw: &str) -> Result<f64, String> {
         return Err(format!("expected a finite number, got {value}"));
     }
     Ok(value)
+}
+
+pub(crate) fn parse_log_level_cli(raw: &str) -> Result<log::LevelFilter, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" => Ok(log::LevelFilter::Off),
+        "error" => Ok(log::LevelFilter::Error),
+        "warn" => Ok(log::LevelFilter::Warn),
+        "info" => Ok(log::LevelFilter::Info),
+        "debug" => Ok(log::LevelFilter::Debug),
+        "trace" => Ok(log::LevelFilter::Trace),
+        other => Err(format!(
+            "unsupported --log-level '{other}'; accepted values: off, error, warn, info, debug, trace"
+        )),
+    }
 }
 
 pub(crate) fn parse_positive_f64_cli(raw: &str) -> Result<f64, String> {

@@ -6088,6 +6088,33 @@ impl gam_problem::laplace_sampler_contract::LaplaceMarginalCorrector
 /// rule-difference estimate for the realized non-polynomial integrand; the
 /// caller admits the correction only when that difference resolves both `Δ_b`
 /// and the `O(1/n_eff)` Laplace floor.
+/// Streaming log-sum-exp of `log_terms` in the order given, accumulated
+/// against a running maximum exactly as the block-quadrature loop below
+/// accumulates its scalar weight (`sum_w *= exp(max_old − max_new)` on a new
+/// maximum, then `sum_w += exp(lw − max)`). Returns `−∞` for an empty
+/// sequence.
+///
+/// The operation order is the contract, not an implementation detail: the
+/// correction is the self-normalised `log Σ wᵢe^{−ΔFᵢ} − log Σ wᵢ`, and when
+/// `ΔF ≡ 0` the two reductions run over bit-identical terms in the same
+/// order, so they cancel exactly and a Gaussian block reports a correction of
+/// exactly `0` with a paired-rule error of exactly `0`. Normalising with the
+/// literal `1` the rule's weights sum to in exact arithmetic would instead
+/// report the rule's own weight-normalisation roundoff (≈1e-16, and different
+/// for the five-node and three-node rules) as a quadrature error.
+fn streaming_log_sum_exp(log_terms: impl IntoIterator<Item = f64>) -> f64 {
+    let mut max_lw = f64::NEG_INFINITY;
+    let mut sum_w = 0.0_f64;
+    for lw in log_terms {
+        if lw > max_lw {
+            sum_w *= (max_lw - lw).exp();
+            max_lw = lw;
+        }
+        sum_w += (lw - max_lw).exp();
+    }
+    max_lw + sum_w.ln()
+}
+
 pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
     target: &T,
 ) -> Result<BlockQuadratureMarginal, String> {
@@ -6226,7 +6253,12 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
                 .to_string(),
         );
     }
-    let value = max_lw + sum_w.ln();
+    // Self-normalised value `log Σ wᵢe^{−ΔFᵢ} − log Σ wᵢ`: the normaliser is
+    // the same streaming reduction over the same product log-weights, so the
+    // rule's weight-normalisation roundoff cancels rather than being reported
+    // as part of the correction (see `streaming_log_sum_exp`).
+    let fine_log_norm = streaming_log_sum_exp(fine_nodes.iter().map(|(_, log_w)| *log_w));
+    let value = (max_lw + sum_w.ln()) - fine_log_norm;
     // Self-normalized importance-weighted gradient E_p[−∂ΔF/∂ρ] and moments.
     let (rho_gradient, moments) = if sum_w > 0.0 {
         (
@@ -6262,29 +6294,24 @@ pub fn block_quadrature_marginal_correction<T: BlockExcessTarget + ?Sized>(
         }
     }
     let coarse_values = target.excess_batch(&coarse_draws);
-    let coarse_max = coarse_values
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, excess)| {
-            excess.is_finite().then_some(coarse_nodes[idx].1 - excess)
-        })
-        .fold(f64::NEG_INFINITY, f64::max);
-    if !coarse_max.is_finite() {
+    // The coarse estimate is the same self-normalised reduction as the fine
+    // one (infeasible nodes contribute zero weight to the numerator and keep
+    // their weight in the normaliser, exactly as in the fine loop).
+    let coarse_log_numerator = streaming_log_sum_exp(
+        coarse_values
+            .iter()
+            .zip(&coarse_nodes)
+            .filter(|(excess, _)| excess.is_finite())
+            .map(|(excess, (_, log_w))| log_w - excess),
+    );
+    if !coarse_log_numerator.is_finite() {
         return Err(
             "block_quadrature_marginal_correction: every coarse quadrature node was infeasible"
                 .to_string(),
         );
     }
-    let coarse_sum = coarse_values
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, excess)| {
-            excess
-                .is_finite()
-                .then_some((coarse_nodes[idx].1 - excess - coarse_max).exp())
-        })
-        .sum::<f64>();
-    let coarse_value = coarse_max + coarse_sum.ln();
+    let coarse_log_norm = streaming_log_sum_exp(coarse_nodes.iter().map(|(_, log_w)| *log_w));
+    let coarse_value = coarse_log_numerator - coarse_log_norm;
     let quadrature_error = (value - coarse_value).abs();
 
     if !value.is_finite() || rho_gradient.iter().any(|v| !v.is_finite()) {
