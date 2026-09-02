@@ -47,6 +47,15 @@ on:
     # family kernel is measured daily whichever file moved.
     - cron: "17 6 * * *"
   workflow_dispatch:
+    inputs:
+      disassemble:
+        description: >-
+          Regex over symbol names; the matching functions of every built test
+          binary are disassembled into the job log after the gates run (a
+          host-side diagnostic: verdicts differ by core, and the release
+          assembly on THIS runner is what explains them).
+        required: false
+        default: ""
 
 # Let a running build FINISH. `main` receives a push every minute or two, and
 # a release build of the gam-models test target takes tens of minutes; with
@@ -131,6 +140,21 @@ jobs:
           python3 scripts/speed_gates.py --run --package "${{ matrix.package }}" \
             --summary "$GITHUB_STEP_SUMMARY" 2>&1 | tee "speed-gate-logs/${{ matrix.package }}.log"
           exit "${PIPESTATUS[0]}"
+
+      - name: Disassemble the requested symbols on this runner
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.disassemble != '' }}
+        shell: bash
+        env:
+          PATTERN: ${{ inputs.disassemble }}
+        run: |
+          set -euo pipefail
+          for binary in $(find target/release/deps -maxdepth 1 -type f -perm -u+x ! -name '*.so' ! -name '*.d'); do
+            for symbol in $(nm "$binary" 2>/dev/null | awk '$2 ~ /^[tT]$/ {print $3}' | grep -E "$PATTERN" | head -20); do
+              echo "##### $(basename "$binary") :: $symbol"
+              objdump -d -M intel --no-show-raw-insn --disassemble="$symbol" "$binary" \
+                | grep -v 'int3' | sed 's/^ *[0-9a-f]*:\s*//' | head -3000
+            done
+          done
 
       - name: Report compiler-cache evidence
         if: ${{ always() }}
