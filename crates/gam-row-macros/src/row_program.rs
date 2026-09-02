@@ -2097,9 +2097,68 @@ fn materialize_dense_taylor(
 struct DenseTaylorExpressionEnvironment<'a> {
     leaves: &'a [Leaf],
     constants: &'a HashSet<String>,
+    signs: &'a HashSet<String>,
     bindings: &'a HashMap<String, DenseTaylorJet>,
+    aliases: &'a HashMap<String, ScaledAlias>,
     dimension: usize,
     order: usize,
+}
+
+/// The derivative stack of `f` at `s·x`, read as the stack of `x ↦ f(s·x)`:
+/// entry `d` scaled by `s^d`. A sign squares to one, so only the odd entries
+/// change; a negation is the sign −1. Formed once per composition, where
+/// scaling the point's every coefficient by `s` cost one multiply per
+/// coefficient — fifteen on the rigid Bernoulli fourth-order surface, for
+/// the two this costs (#932). The dense analogue of the order-2 emitter's
+/// absorbed composition point.
+fn dense_taylor_rescaled_stack(
+    stack: &str,
+    alias: &ScaledAlias,
+    constants: &HashSet<String>,
+    signs: &HashSet<String>,
+    preludes: &mut Vec<String>,
+) -> Result<String> {
+    let name = format!("{stack}_scaled");
+    let mut entries = Vec::with_capacity(5);
+    match &alias.scalar {
+        None => {
+            for degree in 0..5 {
+                let entry = format!("{stack}[{degree}]");
+                entries.push(if degree % 2 == 1 {
+                    symbolic_negate(&entry)
+                } else {
+                    entry
+                });
+            }
+        }
+        Some(scalar) => {
+            let is_sign = match scalar {
+                Expr::Path(path) => {
+                    path_ident(path).is_ok_and(|ident| signs.contains(&ident.to_string()))
+                }
+                _ => false,
+            };
+            let scalar = symbolic_scalar(scalar, constants, SymbolicTarget::Rust)?;
+            let mut power = "1.0".to_string();
+            for degree in 0..5 {
+                let factor = if is_sign {
+                    if degree % 2 == 1 {
+                        scalar.clone()
+                    } else {
+                        "1.0".to_string()
+                    }
+                } else {
+                    power.clone()
+                };
+                entries.push(symbolic_multiply(&format!("{stack}[{degree}]"), &factor));
+                if !is_sign {
+                    power = symbolic_multiply(&power, &scalar);
+                }
+            }
+        }
+    }
+    preludes.push(format!("let {name}: [f64; 5] = [{}];", entries.join(", ")));
+    Ok(name)
 }
 
 fn dense_taylor_expression(
@@ -2159,7 +2218,26 @@ fn dense_taylor_expression(
             }
             let application = leaves[*leaf].rust_application_source(&point, &leaf_arguments);
             preludes.push(format!("let {stack} = {application};"));
-            dense_taylor_compose(input, &stack)
+            // A scaled or negated point: the leaf is applied at the scaled
+            // value, and the composition reads the unscaled binding through
+            // a rescaled stack.
+            let aliased = environment
+                .aliases
+                .get(&value.to_string())
+                .and_then(|alias| bindings.get(&alias.inner).cloned().map(|inner| (alias, inner)));
+            match aliased {
+                Some((alias, inner)) => {
+                    let stack = dense_taylor_rescaled_stack(
+                        &stack,
+                        alias,
+                        constants,
+                        environment.signs,
+                        preludes,
+                    )?;
+                    dense_taylor_compose(inner, &stack)
+                }
+                None => dense_taylor_compose(input, &stack),
+            }
         }
     };
     Ok(materialize_dense_taylor(
@@ -2380,6 +2458,7 @@ fn include_dense_taylor_support(support: &mut [bool], value: &DenseTaylorJet) {
 fn dense_taylor_schedule(
     primaries: &[Ident],
     constants: &HashSet<String>,
+    signs: &HashSet<String>,
     leaves: &[Leaf],
     statements: &[Statement],
     result: &ProgramExpr,
@@ -2387,6 +2466,16 @@ fn dense_taylor_schedule(
     specialize_root_compose: bool,
 ) -> Result<DenseTaylorSchedule> {
     let dimension = primaries.len();
+    let mutable_names = statements
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::Local {
+                name, mutable: true, ..
+            } => Some(name.to_string()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut aliases = HashMap::<String, ScaledAlias>::new();
     let mut bindings = HashMap::<String, DenseTaylorJet>::new();
     for (axis, primary) in primaries.iter().enumerate() {
         bindings.insert(
@@ -2406,10 +2495,36 @@ fn dense_taylor_schedule(
                 value,
             } => {
                 let mut preludes = Vec::new();
+                if !*mutable {
+                    let alias = match value {
+                        ProgramExpr::Scale(inner, scalar) => match inner.as_ref() {
+                            ProgramExpr::Path(inner) => Some(ScaledAlias {
+                                inner: inner.to_string(),
+                                scalar: Some(scalar.clone()),
+                            }),
+                            _ => None,
+                        },
+                        ProgramExpr::Neg(inner) => match inner.as_ref() {
+                            ProgramExpr::Path(inner) => Some(ScaledAlias {
+                                inner: inner.to_string(),
+                                scalar: None,
+                            }),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(alias) = alias
+                        && !mutable_names.contains(&alias.inner)
+                    {
+                        aliases.insert(name.to_string(), alias);
+                    }
+                }
                 let environment = DenseTaylorExpressionEnvironment {
                     leaves,
                     constants,
+                    signs,
                     bindings: &bindings,
+                    aliases: &aliases,
                     dimension,
                     order,
                 };
@@ -2455,7 +2570,9 @@ fn dense_taylor_schedule(
                     let environment = DenseTaylorExpressionEnvironment {
                         leaves,
                         constants,
+                        signs,
                         bindings: &bindings,
+                        aliases: &aliases,
                         dimension,
                         order,
                     };
@@ -2512,13 +2629,30 @@ fn dense_taylor_schedule(
             }
             let application = leaves[*leaf].rust_application_source(&point, &leaf_arguments);
             result_preludes.push(format!("let {stack} = {application};"));
-            (input, Some(stack))
+            let aliased = aliases
+                .get(&value.to_string())
+                .and_then(|alias| bindings.get(&alias.inner).cloned().map(|inner| (alias, inner)));
+            match aliased {
+                Some((alias, inner)) => {
+                    let stack = dense_taylor_rescaled_stack(
+                        &stack,
+                        alias,
+                        constants,
+                        signs,
+                        &mut result_preludes,
+                    )?;
+                    (inner, Some(stack))
+                }
+                None => (input, Some(stack)),
+            }
         }
         _ => {
             let environment = DenseTaylorExpressionEnvironment {
                 leaves,
                 constants,
+                signs,
                 bindings: &bindings,
+                aliases: &aliases,
                 dimension,
                 order,
             };
@@ -3727,6 +3861,7 @@ fn push_dense_taylor_schedule_body(source: &mut String, schedule: &DenseTaylorSc
 fn rust_dense_taylor_body(
     primaries: &[Ident],
     constants: &HashSet<String>,
+    signs: &HashSet<String>,
     leaves: &[Leaf],
     statements: &[Statement],
     result: &ProgramExpr,
@@ -3735,7 +3870,7 @@ fn rust_dense_taylor_body(
     let dimension = primaries.len();
     let order = if fourth { 4 } else { 3 };
     let schedule = dense_taylor_schedule(
-        primaries, constants, leaves, statements, result, order, true,
+        primaries, constants, signs, leaves, statements, result, order, true,
     )?;
     let mut source = "{\n".to_string();
     push_dense_taylor_schedule_body(&mut source, &schedule);
@@ -3851,6 +3986,7 @@ fn rust_dense_taylor_body(
 fn rust_dense_taylor_uncontracted_body(
     primaries: &[Ident],
     constants: &HashSet<String>,
+    signs: &HashSet<String>,
     leaves: &[Leaf],
     statements: &[Statement],
     result: &ProgramExpr,
@@ -3865,6 +4001,7 @@ fn rust_dense_taylor_uncontracted_body(
     let schedule = dense_taylor_schedule(
         primaries,
         constants,
+        signs,
         leaves,
         statements,
         result,
@@ -4594,6 +4731,7 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
             rust_dense_taylor_body(
                 &primaries,
                 &constant_names,
+                &sign_names,
                 &leaves,
                 &statements,
                 &result,
@@ -4628,6 +4766,7 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
             rust_dense_taylor_body(
                 &primaries,
                 &constant_names,
+                &sign_names,
                 &leaves,
                 &statements,
                 &result,
@@ -4663,6 +4802,7 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         let third_full_body = rust_dense_taylor_uncontracted_body(
             &primaries,
             &constant_names,
+            &sign_names,
             &leaves,
             &statements,
             &result,
@@ -4671,6 +4811,7 @@ pub(crate) fn expand(input: Input) -> Result<TokenStream2> {
         let fourth_full_body = rust_dense_taylor_uncontracted_body(
             &primaries,
             &constant_names,
+            &sign_names,
             &leaves,
             &statements,
             &result,
@@ -5181,6 +5322,17 @@ mod tests {
                 "{surface} scales a post-call product:\n{rust}"
             );
         }
+        // The root composition on `scale(latent, sign)` reads `latent`'s own
+        // coefficients through a stack whose odd entries carry the sign: the
+        // fifteen sign multiplies of the scaled point are two.
+        let rust = emitted_function(input.clone(), "rigid_fourth_contracted");
+        let scaled = rust.find("_scaled : [f64 ; 5] = [").expect("the rescaled stack");
+        let literal = &rust[scaled..rust[scaled..].find("] ;").expect("the literal closes") + scaled];
+        assert_eq!(literal.matches("* sign").count(), 2, "{literal}\n{rust}");
+        assert!(rust.contains("_scaled [1] * latent_c"), "{rust}");
+        assert!(!rust.contains("_scaled [1] * margin_c"), "{rust}");
+        let rust = emitted_function(input, "rigid_third_contracted");
+        assert!(rust.contains("_scaled [3] * inner_u"), "{rust}");
     }
 
     #[test]
