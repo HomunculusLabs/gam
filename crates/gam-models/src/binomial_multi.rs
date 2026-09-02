@@ -350,7 +350,7 @@ pub fn fit_penalized_binomial_multi(
     // Validate the family before entering the optimizer. The kernel repeats
     // the same refusal at evaluation boundaries, so no caller can bypass the
     // bounded-link contract with a direct likelihood invocation.
-    let _ = bernoulli_natural_jet(0, 0.0, &link)?;
+        bernoulli_natural_jet(0, 0.0, &link)?;
     let likelihood = BinomialMultiLikelihood {
         measure,
         link: &link,
