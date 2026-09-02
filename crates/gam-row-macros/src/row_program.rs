@@ -5066,17 +5066,19 @@ mod tests {
                 return out;
             }
         };
+        // The stack is named after the compose's owner, `out`.
         let rust = emitted_function(program.clone(), "signed_order2");
         assert!(rust.contains("probit_stack (m_v"), "{rust}");
-        assert!(rust.contains("m_stack0_u1"), "{rust}");
-        assert!(rust.contains("m_stack0_u2"), "{rust}");
+        assert!(rust.contains("let out_stack0_u1 : f64 = (out_stack0 [1] * s)"), "{rust}");
+        assert!(rust.contains("let out_stack0_u2 : f64 = ((out_stack0 [2] * s) * s)"), "{rust}");
+        assert!(rust.contains("(p_g0 * out_stack0_u1)"), "{rust}");
         assert!(!rust.contains("let m_g0"), "{rust}");
         assert!(!rust.contains("let m_h0_0"), "{rust}");
         // The point, `s·f'`, and `s²·f''` (two factors): four sign multiplies
         // in the whole row, independent of the point's support.
         assert_eq!(rust.matches("* s)").count(), 4, "{rust}");
         let cuda = emitted_cuda(program);
-        assert!(cuda.contains("m_stack0_u1"), "{cuda}");
+        assert!(cuda.contains("double out_stack0_u1 = (out_stack0[1] * in.s);"), "{cuda}");
         assert!(!cuda.contains("double m_g0"), "{cuda}");
 
         // A negated point is the same rule with `s = -1`: no multiply at all.
@@ -5094,7 +5096,8 @@ mod tests {
         };
         let rust = emitted_function(program, "negated_order2");
         assert!(rust.contains("exp_stack (n_v"), "{rust}");
-        assert!(rust.contains("n_stack0_u1"), "{rust}");
+        assert!(rust.contains("let out_stack0_u1 : f64 = - (out_stack0 [1])"), "{rust}");
+        assert!(rust.contains("let out_stack0_u2 : f64 = out_stack0 [2]"), "{rust}");
         assert!(!rust.contains("let n_g0"), "{rust}");
 
         // A point scaled from a mutable local is not aliased: a gate may
@@ -5115,7 +5118,7 @@ mod tests {
             }
         };
         let rust = emitted_function(program, "guarded_order2");
-        assert!(!rust.contains("m_stack0_u1"), "{rust}");
+        assert!(!rust.contains("out_stack0_u1"), "{rust}");
         assert!(rust.contains("let m_g0"), "{rust}");
     }
 
