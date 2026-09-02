@@ -1080,11 +1080,25 @@ pub(crate) fn run_predict_unified(
 
     match model_class {
         class if class.publishes_estimand_explicit_schema() => {
+            // `resolve_prediction_request` keeps `posterior_mean=Some(mean_plugin)`
+            // for an effectively linear response because those two estimands are
+            // numerically equal. The CLI mode still owns which estimands the CSV
+            // publishes: a point-only `--mode map` request promises the plug-in
+            // pair only, so equality is not permission to add a posterior column.
+            // An uncertainty request is different: the accompanying
+            // `posterior_mean_*` columns require their named posterior point and
+            // the shared interval policy deliberately produces that estimand.
+            let published_posterior_mean =
+                if args.mode == PredictModeArg::Map && !args.uncertainty {
+                    None
+                } else {
+                    posterior_mean.as_ref().map(|values| values.view())
+                };
             write_estimand_explicit_prediction_csv(
                 &args.out,
                 linear_predictor_plugin.view(),
                 mean_plugin.view(),
-                posterior_mean.as_ref().map(|values| values.view()),
+                published_posterior_mean,
                 noise_scale.as_ref().map(|values| values.view()),
                 posterior_mean_standard_error.as_ref().map(|a| a.view()),
                 posterior_mean_lower.as_ref().map(|a| a.view()),

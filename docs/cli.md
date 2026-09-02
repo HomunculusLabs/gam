@@ -104,10 +104,13 @@ default `--mode posterior-mean` columns are `linear_predictor_plugin`,
 `mean_plugin`, and `posterior_mean`; location-scale models that expose a fitted
 response-side scale add `noise_scale`. With `--uncertainty`, the posterior
 columns are `posterior_mean_standard_error`, `posterior_mean_lower`, and
-`posterior_mean_upper`. `--mode map` emits only the plug-in pair (plus
-`noise_scale` when present), so one column name never changes estimand with the
-mode. Transformation-normal, marginal-slope, and survival predictions retain
-their model-specific schemas.
+`posterior_mean_upper`. A point-only `--mode map` emits only the plug-in pair
+(plus `noise_scale` when present), so one column name never changes estimand
+with the mode. Combining `--mode map` with `--uncertainty` retains
+`posterior_mean` because the named posterior uncertainty columns require their
+posterior point; the plug-in pair remains explicit alongside it.
+Transformation-normal, marginal-slope, and survival predictions retain their
+model-specific schemas.
 
 ## Sample and Generate
 
