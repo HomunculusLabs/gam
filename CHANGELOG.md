@@ -1,5 +1,47 @@
 ## Unreleased
 
+- **The cone-truncated posterior's moment cubature is ordered, tilted at the
+  exact saddle point, and certified by replicate lattices (#979).** The
+  large-scale transformation-normal preprocessor converged and then refused
+  at its posterior: its 120-row Khatri-Rao monotonicity face (walls to 3.6 sd
+  on the infeasible side, constraint-normal correlations to 0.96, 65 of 120
+  correlation eigenvalues below 0.1) could not be integrated at 2^20 nodes.
+  Measured on that face, the shipped separation-of-variables rule was a
+  Monte Carlo draw at 0.02% effective sample size: its minimax tilt was
+  solved by an alternating Gauss-Seidel sweep that diverged to NaN in five
+  passes, so production silently ran untilted, and it integrated the
+  coordinates in the retention walk's slack order. `gam_solve::
+  constrained_posterior` now integrates in the Gibson-Glasbey-Elston order
+  (the most constraining coordinate first, chosen by a greedy pivoted
+  Cholesky that also factorizes the face), solves Botev's minimax saddle
+  point by Newton on its convex-concave stationarity system with the
+  analytic symmetric Jacobian (two-sided coordinates included; the old
+  solver refused to tilt any box), and stops on the replicate standard
+  error of every moment entry over eight deterministically shifted
+  Kronecker lattices instead of on the change between consecutive
+  doublings of one lattice, which cannot see bias. On the captured face the
+  rule runs at 25% efficiency and its moments agree with an exact
+  Hamiltonian Monte Carlo reference to within both estimators' errors; the
+  face is carried as a fixture and gated. A refusal now names the error
+  reached, the proposal's measured efficiency and which tilt ran.
+
+- **Event histories carry a population baseline and take observed risk
+  scores as penalised slope surfaces.** The latent term of
+  `gam_models::event_history` now enters as `−½ Σ_k a_{d,k}² + Σ_k a_{d,k}
+  z_{i,k}(t)`: the atoms are stationary and standard, so the shift cancels
+  their Gaussian mixing exactly and `exp(η⁰)` is the population-average
+  intensity whatever the loadings. The mark coefficients, `mark_eta` and the
+  CLI `coefficients` describe population rates, and raising the latent
+  heterogeneity no longer raises the population rate unless the baseline
+  moves; the Fisher/Louis derivatives carry the shift through the centred
+  coordinate `z_k − a_{d,k}`, and the recovery fixture now asserts the
+  intercept is the population log-rate. An observed subject-level score
+  enters as `s(time, by=score, identifiability=none)`: one varying-coefficient
+  surface `b_d(t) · g` per mark whose wiggliness ridge decides how the
+  score's effect bends with time and whose null-space ridge decides whether
+  it exists at all, both REML-selected — verified by a fixture that recovers
+  a declining effect and collapses an uninformative score to zero.
+
 - **Compiled row derivatives are faster than the hand kernels, and the gate
   is enforced on every push (#932).** Every live family's row
   log-likelihood is written once (`row_program!`, `row_atom!`, or the jet
