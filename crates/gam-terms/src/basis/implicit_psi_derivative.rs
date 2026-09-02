@@ -3690,6 +3690,15 @@ pub(crate) fn build_scalar_design_psi_derivatives_shared(
         let ap = SendPtr(axis_components.as_mut_ptr());
         let ferr = &first_err;
         let profile_ref = profile.as_ref();
+        let exact_scalar_carrier = matches!(
+            radial_kind,
+            RadialScalarKind::Duchon {
+                p_order,
+                s_order,
+                dim,
+                ..
+            } if !duchon_hybrid_stable_integral_applies(p_order, s_order, dim)
+        );
         (0..nc).into_par_iter().for_each(move |ci| {
             let start = ci * cs;
             let end = start.saturating_add(cs).min(n);
@@ -3712,9 +3721,13 @@ pub(crate) fn build_scalar_design_psi_derivatives_shared(
                             stable_euclidean_norm((0..dim).map(|a| data[[i, a]] - centers[[j, a]]));
                         (r, r * r)
                     };
-                    let triplet = match profile_ref {
-                        Some(profile) => profile.eval_or_exact(&radial_kind, r),
-                        None => radial_kind.eval_design_triplet(r),
+                    let triplet = if exact_scalar_carrier {
+                        radial_kind.eval_scalar_total_psi_triplet(r)
+                    } else {
+                        match profile_ref {
+                            Some(profile) => profile.eval_or_exact(&radial_kind, r),
+                            None => radial_kind.eval_design_triplet(r),
+                        }
                     };
                     let (phi, q, t) = match triplet {
                         Ok(p) => p,
