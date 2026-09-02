@@ -2069,19 +2069,6 @@ fn exact_a_quotient_value_and_sparse_trace_share_one_classification_2515() {
         .expect("#2515: the exact-A operator derivative assembles")
         .remove(&sparse)
         .expect("#2515: the sparse exact-A operator derivative exists");
-    let (inverse_joint_trace, inverse_coordinate_trace, eigenvector_trace, explicit_pricing_trace) = term
-        .exact_a_logdet_trace_pieces_for_test(target.view(), &rho, &b_cache, sparse)
-        .expect("#2515: the clamp-pricing derivative pieces assemble");
-    let inverse_trace = inverse_joint_trace - inverse_coordinate_trace;
-    println!(
-        "[#2515 QUOTIENT] dense sparse trace pieces: inverse-joint={inverse_joint_trace:+.12e} \
-         inverse-coordinate={inverse_coordinate_trace:+.12e} \
-         inverse-difference={inverse_trace:+.12e} \
-         clamp-eigenvector={eigenvector_trace:+.12e} \
-         explicit-clamp={explicit_pricing_trace:+.12e} \
-         sum={:+.12e}",
-        inverse_trace + eigenvector_trace + explicit_pricing_trace,
-    );
     let (probes, sinv) = full_basis_probe_bundle(&a_cache);
     let arrow_joint_trace = term
         .assignment_log_strength_hessian_trace_from_probes(

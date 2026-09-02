@@ -5312,36 +5312,6 @@ impl SaeManifoldTerm {
         })
     }
 
-    /// Test-only decomposition of one priced exact-`A` log-determinant trace.
-    /// Returns the direct priced-inverse contraction, the clamp-eigenvector
-    /// response, and the explicit clamp-strength response, respectively.
-    #[cfg(test)]
-    pub(crate) fn exact_a_logdet_trace_pieces_for_test(
-        &self,
-        target: ArrayView2<'_, f64>,
-        rho: &SaeManifoldRho,
-        cache: &ArrowFactorCache,
-        flat: usize,
-    ) -> Result<(f64, f64, f64, f64), String> {
-        let geometry = self.materialize_exact_hessian_quotient_geometry(rho, target, cache)?;
-        let (priced_delta_trace, _, priced_k_joint, priced_k_tt) =
-            self.priced_ard_adjoint_extras(rho, cache, &geometry)?;
-        let da = self
-            .exact_stationarity_penalty_derivatives_by_flat(rho, cache)?
-            .remove(&flat)
-            .ok_or_else(|| format!("no exact-A penalty derivative for flat coordinate {flat}"))?;
-        let frob = |left: &Array2<f64>, right: &Array2<f64>| (left * right).sum();
-        let inverse_joint = 0.5 * frob(&geometry.priced_joint_inverse, &da);
-        let inverse_coordinate = 0.5 * frob(&geometry.priced_coordinate_inverse, &da);
-        let eigenvector = 0.5 * (frob(&priced_k_joint, &da) - frob(&priced_k_tt, &da));
-        Ok((
-            inverse_joint,
-            inverse_coordinate,
-            eigenvector,
-            priced_delta_trace[flat],
-        ))
-    }
-
     /// #2330 — the ordered-Beta–Bernoulli (non-softmax) sparse-coordinate ½log|A|
     /// trace `½[tr(A⁺ ∂A/∂ρ_sparse) − tr(A_tt⁺ ∂A/∂ρ_sparse)]`. For the
     /// non-learnable prior `∂A/∂ρ_sparse` is the EXACT integrated-marginal logit
