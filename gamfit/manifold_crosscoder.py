@@ -23,7 +23,6 @@ def sae_crosscoder_fit(
     ridge_ext_coord: float | None = None,
     ridge_beta: float | None = None,
     random_state: int | None = None,
-    run_outer_rho_search: bool | None = None,
     transport_grid_resolution: int | None = None,
     law_gap_tolerance: float | None = None,
 ) -> Any:
@@ -66,7 +65,6 @@ def sae_crosscoder_fit(
         ridge_ext_coord,
         ridge_beta,
         random_state,
-        run_outer_rho_search,
         transport_grid_resolution,
         law_gap_tolerance,
     )

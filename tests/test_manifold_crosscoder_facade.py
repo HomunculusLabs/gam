@@ -33,7 +33,6 @@ def test_crosscoder_facade_marshals_named_targets_without_math(monkeypatch):
         anchor_label="early",
         n_atoms=2,
         n_harmonics=1,
-        run_outer_rho_search=False,
     )
     assert report["layout"]["labels"] == ["late"]
     assert rust.args is not None
@@ -43,3 +42,5 @@ def test_crosscoder_facade_marshals_named_targets_without_math(monkeypatch):
     assert rust.args[2] == ["late"]
     assert rust.args[4:6] == (2, 1)
     assert rust.args[6:13] == (None,) * 7
+    assert rust.args[13:15] == (None, None)
+    assert len(rust.args) == 15

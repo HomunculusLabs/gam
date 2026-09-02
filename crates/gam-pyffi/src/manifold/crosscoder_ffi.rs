@@ -110,7 +110,6 @@ impl ManifoldCrosscoderCore {
     ridge_ext_coord = None,
     ridge_beta = None,
     random_state = None,
-    run_outer_rho_search = None,
     transport_grid_resolution = None,
     law_gap_tolerance = None,
 ))]
@@ -129,7 +128,6 @@ fn sae_crosscoder_fit<'py>(
     ridge_ext_coord: Option<f64>,
     ridge_beta: Option<f64>,
     random_state: Option<u64>,
-    run_outer_rho_search: Option<bool>,
     transport_grid_resolution: Option<usize>,
     law_gap_tolerance: Option<f64>,
 ) -> PyResult<Py<ManifoldCrosscoderCore>> {
@@ -156,7 +154,6 @@ fn sae_crosscoder_fit<'py>(
         ridge_ext_coord,
         ridge_beta,
         random_state,
-        run_outer_rho_search,
     }
     .resolve(n_atoms, n_harmonics);
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -223,7 +220,6 @@ impl ManifoldBehaviorCore {
     ridge_ext_coord = None,
     ridge_beta = None,
     random_state = None,
-    run_outer_rho_search = None,
 ))]
 fn sae_behavior_fit<'py>(
     py: Python<'py>,
@@ -238,7 +234,6 @@ fn sae_behavior_fit<'py>(
     ridge_ext_coord: Option<f64>,
     ridge_beta: Option<f64>,
     random_state: Option<u64>,
-    run_outer_rho_search: Option<bool>,
 ) -> PyResult<Py<ManifoldBehaviorCore>> {
     use gam::terms::sae::manifold::{
         SaeBehaviorAutoFitRequest, SaeCrosscoderAutoFitOverrides, run_auto_sae_behavior_fit,
@@ -252,7 +247,6 @@ fn sae_behavior_fit<'py>(
         ridge_ext_coord,
         ridge_beta,
         random_state,
-        run_outer_rho_search,
     }
     .resolve(n_atoms, n_harmonics);
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

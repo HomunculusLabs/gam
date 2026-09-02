@@ -153,7 +153,10 @@ pub struct SaeCrosscoderAutoFitConfig {
     pub ridge_ext_coord: f64,
     pub ridge_beta: f64,
     pub random_state: u64,
-    pub run_outer_rho_search: bool,
+    /// Automatic fits always optimize the REML hyperparameters. This remains
+    /// crate-visible only so focused numerical tests can exercise the explicit
+    /// fixed-rho engine without exposing that shortcut as auto-fit policy.
+    pub(crate) run_outer_rho_search: bool,
 }
 
 impl SaeCrosscoderAutoFitConfig {
@@ -220,7 +223,6 @@ pub struct SaeCrosscoderAutoFitOverrides {
     pub ridge_ext_coord: Option<f64>,
     pub ridge_beta: Option<f64>,
     pub random_state: Option<u64>,
-    pub run_outer_rho_search: Option<bool>,
 }
 
 impl SaeCrosscoderAutoFitOverrides {
@@ -246,9 +248,6 @@ impl SaeCrosscoderAutoFitOverrides {
         }
         if let Some(value) = self.random_state {
             config.random_state = value;
-        }
-        if let Some(value) = self.run_outer_rho_search {
-            config.run_outer_rho_search = value;
         }
         config
     }

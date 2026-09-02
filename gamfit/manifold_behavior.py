@@ -22,7 +22,6 @@ def sae_behavior_fit(
     ridge_ext_coord: float | None = None,
     ridge_beta: float | None = None,
     random_state: int | None = None,
-    run_outer_rho_search: bool | None = None,
 ) -> Any:
     """Fit joint activation/behavior atoms through one converged REML objective.
 
@@ -57,7 +56,6 @@ def sae_behavior_fit(
         ridge_ext_coord,
         ridge_beta,
         random_state,
-        run_outer_rho_search,
     )
 
 

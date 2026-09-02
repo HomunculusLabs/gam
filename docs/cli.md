@@ -152,7 +152,6 @@ gam crosscoder \
 | `--atoms N` | Number of shared manifold atoms. |
 | `--harmonics N` | Harmonic order of each periodic manifold atom. |
 | `--sparsity-strength`, `--smoothness`, `--max-iter`, `--learning-rate`, `--ridge-ext-coord`, `--ridge-beta`, `--random-state` | Overrides for the underlying Rust library defaults. |
-| `--outer-rho-search true|false` | Whether the unified REML outer-rho search runs. |
 | `--transport-grid-resolution N`, `--law-gap-tolerance VALUE` | Grid resolution and tolerance for classifying consecutive-layer transport. |
 
 ## Formula Notes

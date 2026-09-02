@@ -117,7 +117,6 @@ pub(crate) fn run_crosscoder(args: CrosscoderArgs) -> CliResult<()> {
         ridge_ext_coord: args.ridge_ext_coord,
         ridge_beta: args.ridge_beta,
         random_state: args.random_state,
-        run_outer_rho_search: args.outer_rho_search,
     }
     .resolve(args.atoms, args.harmonics);
     let fit = run_auto_sae_crosscoder_fit(SaeCrosscoderAutoFitRequest {
@@ -184,7 +183,6 @@ mod tests {
         assert!(args.ridge_ext_coord.is_none());
         assert!(args.ridge_beta.is_none());
         assert!(args.random_state.is_none());
-        assert!(args.outer_rho_search.is_none());
         assert!(args.transport_grid_resolution.is_none());
         assert!(args.law_gap_tolerance.is_none());
     }
@@ -225,6 +223,10 @@ mod tests {
         ] {
             assert!(help.contains(required), "missing {required:?} in:\n{help}");
         }
+        assert!(
+            !help.contains("--outer-rho-search"),
+            "automatic fits must not expose a fixed-rho shortcut:\n{help}"
+        );
     }
 
     #[test]

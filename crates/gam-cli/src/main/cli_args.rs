@@ -131,10 +131,6 @@ pub(crate) struct CrosscoderArgs {
     #[arg(long)]
     pub(crate) random_state: Option<u64>,
 
-    /// Override whether the unified REML outer-rho search runs.
-    #[arg(long, value_name = "BOOL", action = ArgAction::Set)]
-    pub(crate) outer_rho_search: Option<bool>,
-
     /// Evaluate fitted consecutive-layer transport on this caller-chosen grid.
     #[arg(long, value_parser = parse_positive_usize_cli)]
     pub(crate) transport_grid_resolution: Option<usize>,
