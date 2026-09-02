@@ -2760,12 +2760,13 @@ fn fit_term_collectionwith_exact_spatial_adaptive_regularization(
 /// such cap to the selection coordinates.
 ///
 /// #2450 made `RhoPrior::default()` `Flat`, which inverted the polarity: the
-/// base now carries no cap to lift, and what is left is to ADD the two
-/// stabilisers this function derives — the #1089/#1392 under-determined widening
-/// and the #1476 null-space degeneracy breaker — to an otherwise pure-REML
-/// criterion. The result is an `Independent` prior; a design with no relaxable
-/// term, or one whose ρ vector cannot be aligned 1:1 with `penaltyinfo`, is
-/// returned untouched.
+/// base now carries no cap to lift, and what is left is to ADD the
+/// #1089/#1392 under-determined stabiliser to an otherwise pure-REML criterion.
+/// The result is an `Independent` prior; a design with no relaxable term, or one
+/// whose ρ vector cannot be aligned 1:1 with `penaltyinfo`, is returned
+/// untouched. The apparent #1476 null-space-prior requirement was later traced
+/// to a keep-best control-flow bypass: exact optimizer topology, not a prior,
+/// owns degeneracy in a well-determined fit.
 ///
 /// The relaxed per-coordinate prior is FAMILY-AGNOSTIC: the cap-lifting of the
 /// bending coordinate and the determinacy-gated null-space treatment apply
@@ -2997,20 +2998,6 @@ fn relax_smoothing_rho_prior(
     } else {
         gam_spec::RhoPrior::Flat
     };
-    // A null-space coordinate always gets the same wide, symmetric degeneracy
-    // prior.  It supplies the strictly-positive curvature needed to certify an
-    // interior solution under concurvity or p > n, while its gradient is too
-    // small to decide whether a polynomial component is retained or selected
-    // out.  That decision belongs to REML.  In particular, the default
-    // criterion must not inspect y and then install an aggressive, directional
-    // prior: the former PC policy had mode λ≈8,483 and therefore forced every
-    // null-space λ in wine_gamair to ≈8,470, erasing supported linear signal.
-    // Using a response-dependent pre-fit regression to decide which prior to
-    // apply was also not a coherent marginal-likelihood objective.
-    let nullspace_degeneracy_prior = gam_spec::RhoPrior::Normal {
-        mean: 0.0,
-        sd: NULLSPACE_DEGENERACY_RHO_SD,
-    };
     let per_coord = coords
         .iter()
         .map(|info| {
@@ -3021,12 +3008,12 @@ fn relax_smoothing_rho_prior(
             if !relax {
                 return base.clone();
             }
-            let is_nullspace = matches!(info.penalty.source, PenaltySource::DoublePenaltyNullspace);
-            if is_nullspace {
-                nullspace_degeneracy_prior.clone()
-            } else {
-                relaxed_prior.clone()
-            }
+            // Bending and double-penalty null-space coordinates obey the same
+            // data regime. In a well-determined fit they are both pure REML;
+            // otherwise they both retain the wide curvature needed for
+            // termination. A null-space-only cap would price model selection
+            // and disable the exact lambda=infinity face for the entire fit.
+            relaxed_prior.clone()
         })
         .collect::<Vec<_>>();
     gam_spec::RhoPrior::Independent(per_coord)

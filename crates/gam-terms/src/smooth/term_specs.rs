@@ -3868,12 +3868,6 @@ pub fn spatial_identifiability_policy(
     }
 }
 
-/// Standard deviation of the wide, weakly-informative symmetric `Normal` prior
-/// placed on a relaxable double-penalty smooth's `DoublePenaltyNullspace`
-/// selection coordinate in every design regime.
-pub const NULLSPACE_DEGENERACY_RHO_SD: f64 = 15.0;
-
-
 /// Per-term data-derived ψ = log κ bounds.
 ///
 /// Uses the same safe operating range documented in
