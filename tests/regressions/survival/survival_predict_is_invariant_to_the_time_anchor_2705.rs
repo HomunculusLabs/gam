@@ -322,6 +322,6 @@ fn transformation_survival_prediction_does_not_depend_on_the_time_anchor_2705() 
             GRID[worst_at.1],
             library[[worst_at.0, worst_at.1]],
             cli[[worst_at.0, worst_at.1]]
+        );
     }
-}
 }

@@ -109,21 +109,15 @@ pub(crate) use gam_terms::basis::monotone_warp_knots_from_seed;
 ///   0          value                             I′  (m₁)     ℓ in the accept test
 ///   1          gradient                          I″  (m₁)     ∇ℓ, KKT residual
 ///   2          row_order2 → H                    I‴  (m₁)     Φ = ½Σ g(λ(Z_JᵀHZ_J))  <- objective VALUE
-///   3          row_third_contracted → ∂H/∂β      I⁗  (m₁)     ∇Φ (Newton rhs, KKT residual), Daleckii–Krein H_Φ
+///   3          row_third_contracted → ∂H/∂β      I⁗  (m₁)     ∇Φ (Newton rhs, KKT residual), Daleckii–Krein H_Φ <- must be continuous
 ///   4          row_fourth_contracted → ∂²H/∂β²   I⁗′ (m₁)     exact Jeffreys completion, outer second directional
 /// ```
 ///
-/// A degree-`d` I-spline is `C^{d−1}` at a simple knot, so degree `4` makes the
-/// objective's VALUE continuous (this floor) and leaves its GRADIENT reading a
-/// piecewise-constant `I⁗`: the objective is `C⁰` with a kink wherever an event
-/// row's index crosses a knot, and `∇Φ` — hence the KKT residual and the Newton
-/// right-hand side — steps there. A `C¹` objective needs order `4` continuous,
-/// i.e. degree `5`. That raise is NOT made here: the fit-level ladder above
-/// shows the witness fitting at 4, and a floor moves every survival link-warp
-/// basis (knot count, column count, penalties, saved metadata), so it lands
-/// with the measurement that decides it — `∇Φ` read across an EVENT row's knot
-/// crossing at `composed_warp_minimum_degree()`, the arm the existing `H`- and
-/// `Φ`-reading pins do not have.
+/// A degree-`d` I-spline is `C^{d−1}` at a simple knot. Degree `4` therefore
+/// makes the objective value continuous but leaves its gradient reading a
+/// piecewise-constant `I⁗`: the objective is only `C⁰`, with a kink wherever an
+/// event row's moving index crosses a knot. Requiring order `4` continuity,
+/// hence degree `5`, is exactly the `C¹` contract the optimizer needs.
 pub(crate) const COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER: usize = 4;
 
 /// The smallest public degree at which a composed warp's basis is continuous to
@@ -652,11 +646,11 @@ pub(crate) fn select_wiggle_basis_from_seed_with_knots(
                     "[warp-degree] composed monotone warp requested degree {} and is built at \
                      {minimum}: the inner objective reads the basis's derivative of order {} \
                      (H is the order-2 coefficient of the row jet and reaches the basis through \
-                     m1 = 1 + sum betaw_j B'_j, i.e. the tower SHIFTED BY ONE, so it consumes \
-                     the basis's THIRD derivative; and Phi = 1/2 sum g(lambda(Z_J^T H Z_J)) is a \
-                     term of the objective, not a diagnostic about it), while a degree-d \
-                     I-spline is only C^(d-1) at a simple knot — so degree {} leaves the \
-                     objective discontinuous across every knot the index crosses (gam#2695)",
+                     m1 = 1 + sum betaw_j B'_j, i.e. the tower SHIFTED BY ONE; Phi = 1/2 sum \
+                     g(lambda(Z_J^T H Z_J)) is a term of the objective, and its gradient reads \
+                     the basis's FOURTH derivative), while a degree-d I-spline is only C^(d-1) \
+                     at a simple knot — so degree {} leaves the analytic gradient discontinuous \
+                     across every knot the index crosses (gam#2695)",
                     cfg.degree,
                     COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER,
                     cfg.degree,
