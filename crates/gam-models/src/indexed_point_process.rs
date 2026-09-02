@@ -196,13 +196,16 @@ mod tests {
         .to_owned(2, 2)
         .expect("owned measure");
         let family = IndexedPointProcessFamily::new(
-            OwnedCellValues::dense(array![[1.0, f64::NAN], [f64::NAN, 0.0]]),
-            OwnedCellValues::dense(array![[0.0, f64::NAN], [f64::NAN, 1.5]]),
+            OwnedCellValues::dense(array![[1.0, 0.0], [f64::NAN, 0.0]]),
+            OwnedCellValues::dense(array![[0.0, 1.0], [f64::NAN, 1.5]]),
             measure,
         )
         .expect("inactive placeholders are outside the likelihood");
         let evaluation = family
-            .evaluate(&states(&[array![1_000.0, -8.0], array![9.0, 0.0]]))
+            .evaluate(&states(&[
+                array![1_000.0, -8.0],
+                array![1_000.0, 0.0],
+            ]))
             .expect("finite active likelihood");
         assert_eq!(evaluation.log_likelihood, 1_000.0 - 3.0);
     }
