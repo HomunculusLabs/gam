@@ -5330,7 +5330,7 @@ impl SaeManifoldTerm {
             .exact_stationarity_penalty_derivatives_by_flat(rho, cache)?
             .remove(&flat)
             .ok_or_else(|| format!("no exact-A penalty derivative for flat coordinate {flat}"))?;
-        let frob = |left: &Array2<f64>, right: &Array2<f64>| (left * right).sum::<f64>();
+        let frob = |left: &Array2<f64>, right: &Array2<f64>| (left * right).sum();
         let inverse = 0.5
             * (frob(&geometry.priced_joint_inverse, &da)
                 - frob(&geometry.priced_coordinate_inverse, &da));
