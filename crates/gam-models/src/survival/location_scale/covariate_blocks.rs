@@ -359,6 +359,9 @@ pub(crate) fn drop_leading_penalty_columns(
                         .to_owned(),
                 ))
             }
+            PenaltyMatrix::Diagonal(diagonal) => Some(PenaltyMatrix::Diagonal(
+                diagonal.slice(s![fixed_cols..full_dim]).to_owned(),
+            )),
             PenaltyMatrix::KroneckerFactored { .. } => {
                 structural_nullspace_exact = false;
                 let dense = penalty.to_dense();

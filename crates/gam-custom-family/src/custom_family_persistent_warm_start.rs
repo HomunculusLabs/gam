@@ -357,6 +357,10 @@ pub(crate) fn hash_cf_penalty(hasher: &mut Fingerprinter, penalty: &PenaltyMatri
             hasher.write_str("dense");
             hash_cf_array2(hasher, matrix);
         }
+        PenaltyMatrix::Diagonal(diagonal) => {
+            hasher.write_str("diagonal");
+            hash_cf_array_view(hasher, diagonal.view());
+        }
         PenaltyMatrix::KroneckerFactored { left, right } => {
             hasher.write_str("kron");
             hash_cf_array2(hasher, left);

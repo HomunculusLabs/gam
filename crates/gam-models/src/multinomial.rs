@@ -3071,6 +3071,9 @@ fn build_formula_design_for_multinomial(
 fn scale_multinomial_formula_penalty(penalty: PenaltyMatrix, scale: f64) -> PenaltyMatrix {
     match penalty {
         PenaltyMatrix::Dense(matrix) => PenaltyMatrix::Dense(matrix.mapv(|v| v * scale)),
+        PenaltyMatrix::Diagonal(diagonal) => {
+            PenaltyMatrix::Diagonal(diagonal.mapv(|value| value * scale))
+        }
         PenaltyMatrix::KroneckerFactored { left, right } => PenaltyMatrix::KroneckerFactored {
             left: left.mapv(|v| v * scale),
             right,

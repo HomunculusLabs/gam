@@ -1486,7 +1486,7 @@ pub(crate) fn extract_covariate_penalty_factor(
 ) -> Result<Array2<f64>, String> {
     match penalty {
         PenaltyMatrix::Dense(matrix) => Ok(matrix.clone()),
-        PenaltyMatrix::Blockwise { .. } => Ok(penalty.to_dense()),
+        PenaltyMatrix::Diagonal(_) | PenaltyMatrix::Blockwise { .. } => Ok(penalty.to_dense()),
         PenaltyMatrix::Labeled { inner, .. } => extract_covariate_penalty_factor(inner),
         PenaltyMatrix::Fixed { inner, .. } => extract_covariate_penalty_factor(inner),
         PenaltyMatrix::KroneckerFactored { .. } => Err(

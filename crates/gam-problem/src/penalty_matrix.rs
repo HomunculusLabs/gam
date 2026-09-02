@@ -16,6 +16,10 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 #[derive(Clone, Debug)]
 pub enum PenaltyMatrix {
     Dense(Array2<f64>),
+    /// Diagonal quadratic penalty stored in `O(p)` rather than `O(p²)` space.
+    /// This is the canonical carrier for ridge/random-effect coefficient
+    /// fields and other axis-replicated diagonal precisions.
+    Diagonal(Array1<f64>),
     KroneckerFactored {
         left: Array2<f64>,
         right: Array2<f64>,
@@ -48,6 +52,7 @@ impl PenaltyMatrix {
     pub fn dim(&self) -> usize {
         match self {
             Self::Dense(m) => m.nrows(),
+            Self::Diagonal(diagonal) => diagonal.len(),
             Self::KroneckerFactored { left, right } => left.nrows() * right.nrows(),
             Self::Blockwise { total_dim, .. } => *total_dim,
             Self::Labeled { inner, .. } | Self::Fixed { inner, .. } => inner.dim(),
@@ -62,6 +67,7 @@ impl PenaltyMatrix {
     pub fn shape(&self) -> (usize, usize) {
         match self {
             Self::Dense(m) => m.dim(),
+            Self::Diagonal(diagonal) => (diagonal.len(), diagonal.len()),
             Self::KroneckerFactored { left, right } => {
                 (left.nrows() * right.nrows(), left.ncols() * right.ncols())
             }
@@ -91,6 +97,31 @@ impl PenaltyMatrix {
         }
         match self {
             Self::Dense(m) => validate_symmetric_psd_core(m, "dense penalty"),
+            Self::Diagonal(diagonal) => {
+                let max_abs = diagonal
+                    .iter()
+                    .try_fold(0.0_f64, |scale, &value| {
+                        value
+                            .is_finite()
+                            .then_some(scale.max(value.abs()))
+                            .ok_or_else(|| {
+                                format!("diagonal penalty has non-finite entry: {value}")
+                            })
+                    })?;
+                let tolerance =
+                    100.0 * diagonal.len() as f64 * f64::EPSILON * max_abs;
+                if let Some((index, value)) = diagonal
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .find(|(_, value)| *value < -tolerance)
+                {
+                    return Err(format!(
+                        "diagonal penalty is not positive semidefinite: entry {index} is {value:.6e}"
+                    ));
+                }
+                Ok(())
+            }
             Self::KroneckerFactored { left, right } => {
                 // A ⊗ B is symmetric PSD when both factors are (the canonical
                 // tensor-product construction). Validating the factors avoids
@@ -130,6 +161,7 @@ impl PenaltyMatrix {
     pub fn to_dense(&self) -> Array2<f64> {
         match self {
             Self::Dense(m) => m.clone(),
+            Self::Diagonal(diagonal) => Array2::from_diag(diagonal),
             Self::KroneckerFactored { left, right } => kronecker_product(left, right),
             Self::Blockwise {
                 local,
@@ -152,7 +184,8 @@ impl PenaltyMatrix {
     pub fn as_dense_cow(&self) -> std::borrow::Cow<'_, Array2<f64>> {
         match self {
             Self::Dense(m) => std::borrow::Cow::Borrowed(m),
-            Self::KroneckerFactored { .. }
+            Self::Diagonal(_)
+            | Self::KroneckerFactored { .. }
             | Self::Blockwise { .. }
             | Self::Labeled { .. }
             | Self::Fixed { .. } => std::borrow::Cow::Owned(self.to_dense()),
@@ -164,7 +197,10 @@ impl PenaltyMatrix {
         match self {
             Self::Dense(m) => Some(m),
             Self::Fixed { inner, .. } => inner.as_dense_ref(),
-            Self::KroneckerFactored { .. } | Self::Blockwise { .. } | Self::Labeled { .. } => None,
+            Self::Diagonal(_)
+            | Self::KroneckerFactored { .. }
+            | Self::Blockwise { .. }
+            | Self::Labeled { .. } => None,
         }
     }
 
@@ -204,6 +240,7 @@ impl PenaltyMatrix {
     pub fn dot(&self, v: &Array1<f64>) -> Array1<f64> {
         match self {
             Self::Dense(m) => m.dot(v),
+            Self::Diagonal(diagonal) => diagonal * v,
             Self::KroneckerFactored { left, right } => {
                 let p_left = left.nrows();
                 let p_right = right.nrows();
@@ -239,6 +276,12 @@ impl PenaltyMatrix {
         match self {
             Self::Dense(m) => {
                 target.scaled_add(lambda, m);
+            }
+            Self::Diagonal(diagonal) => {
+                assert_eq!(target.dim(), (diagonal.len(), diagonal.len()));
+                for (index, &value) in diagonal.iter().enumerate() {
+                    target[[index, index]] += lambda * value;
+                }
             }
             Self::KroneckerFactored { left, right } => {
                 let p_left = left.nrows();
@@ -282,6 +325,10 @@ impl PenaltyMatrix {
                     target[j] += lambda * m[[j, j]];
                 }
             }
+            Self::Diagonal(diagonal) => {
+                assert_eq!(target.len(), diagonal.len());
+                target.scaled_add(lambda, diagonal);
+            }
             Self::KroneckerFactored { left, right } => {
                 let p_left = left.nrows();
                 let p_right = right.nrows();
@@ -316,6 +363,11 @@ impl PenaltyMatrix {
     pub fn quadratic_form(&self, beta: &Array1<f64>) -> f64 {
         match self {
             Self::Dense(m) => beta.dot(&m.dot(beta)),
+            Self::Diagonal(diagonal) => diagonal
+                .iter()
+                .zip(beta.iter())
+                .map(|(&weight, &coefficient)| weight * coefficient * coefficient)
+                .sum(),
             Self::KroneckerFactored { .. } => {
                 let sv = self.dot(beta);
                 beta.dot(&sv)
@@ -344,6 +396,12 @@ impl PenaltyMatrix {
 impl From<Array2<f64>> for PenaltyMatrix {
     fn from(m: Array2<f64>) -> Self {
         Self::Dense(m)
+    }
+}
+
+impl From<Array1<f64>> for PenaltyMatrix {
+    fn from(diagonal: Array1<f64>) -> Self {
+        Self::Diagonal(diagonal)
     }
 }
 
@@ -500,6 +558,43 @@ mod tests {
         p.add_scaled_diag_to(1.0, &mut diag);
         // diagonal entries are 2.0 and 7.0
         assert_eq!(diag.as_slice().unwrap(), &[2.0, 7.0]);
+    }
+
+    #[test]
+    fn diagonal_carrier_matches_dense_algebra_without_dense_storage() {
+        let diagonal = array![0.0, 2.0, 5.0];
+        let penalty = PenaltyMatrix::Diagonal(diagonal.clone());
+        penalty.validate(3).expect("valid diagonal precision");
+        assert_eq!(penalty.shape(), (3, 3));
+        assert_eq!(penalty.to_dense(), Array2::from_diag(&diagonal));
+
+        let beta = array![7.0, 3.0, -2.0];
+        assert_eq!(penalty.dot(&beta), array![0.0, 6.0, -10.0]);
+        assert_eq!(penalty.quadratic_form(&beta), 38.0);
+
+        let mut dense = Array2::<f64>::zeros((3, 3));
+        penalty.add_scaled_to(4.0, &mut dense);
+        assert_eq!(dense, Array2::from_diag(&array![0.0, 8.0, 20.0]));
+
+        let mut accumulated_diagonal = array![1.0, 1.0, 1.0];
+        penalty.add_scaled_diag_to(0.5, &mut accumulated_diagonal);
+        assert_eq!(accumulated_diagonal, array![1.0, 2.0, 3.5]);
+    }
+
+    #[test]
+    fn diagonal_carrier_rejects_nonfinite_and_negative_precision() {
+        assert!(
+            PenaltyMatrix::Diagonal(array![1.0, f64::NAN])
+                .validate(2)
+                .unwrap_err()
+                .contains("non-finite")
+        );
+        assert!(
+            PenaltyMatrix::Diagonal(array![1.0, -0.25])
+                .validate(2)
+                .unwrap_err()
+                .contains("not positive semidefinite")
+        );
     }
 
     // ── KroneckerFactored variant ─────────────────────────────────────────────

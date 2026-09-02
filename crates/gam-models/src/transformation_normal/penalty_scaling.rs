@@ -32,6 +32,18 @@ pub(crate) fn penalty_diag_scale(penalty: &PenaltyMatrix) -> f64 {
         PenaltyMatrix::Dense(matrix) => {
             matrix_diag_mean_abs(matrix).max(matrix_frobenius_rms(matrix))
         }
+        PenaltyMatrix::Diagonal(diagonal) => {
+            if diagonal.is_empty() {
+                0.0
+            } else {
+                let mean_abs = diagonal.iter().map(|value| value.abs()).sum::<f64>()
+                    / diagonal.len() as f64;
+                let root_mean_square = (diagonal.iter().map(|value| value * value).sum::<f64>()
+                    / diagonal.len() as f64)
+                    .sqrt();
+                mean_abs.max(root_mean_square)
+            }
+        }
         PenaltyMatrix::KroneckerFactored { left, right } => {
             let diag_scale = matrix_diag_mean_abs(left) * matrix_diag_mean_abs(right);
             let frob_scale = matrix_frobenius_rms(left) * matrix_frobenius_rms(right);

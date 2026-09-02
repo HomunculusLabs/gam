@@ -464,7 +464,9 @@ pub(crate) fn build_tensor_penalties_kronecker(
         let fixed_log_lambda = s_cov.fixed_log_lambda();
         let right = match s_cov {
             PenaltyMatrix::Dense(right) => right,
-            penalty @ PenaltyMatrix::Blockwise { .. } => penalty.to_dense(),
+            penalty @ (PenaltyMatrix::Diagonal(_) | PenaltyMatrix::Blockwise { .. }) => {
+                penalty.to_dense()
+            }
             PenaltyMatrix::Labeled { inner, .. } => inner.to_dense(),
             PenaltyMatrix::Fixed { inner, .. } => inner.to_dense(),
             PenaltyMatrix::KroneckerFactored { .. } => {
