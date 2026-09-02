@@ -20,10 +20,10 @@
 //! the repaired value and three below the broken one, so it cannot be cleared by
 //! a partial fix.
 //!
-//! This grades the mode response, NOT the total outer gradient: that total still
-//! carries the `logdet_h` disagreement the `#979`/`#1040` lane owns, which
-//! reproduces identically with `slope_time_k` unset and is therefore not this
-//! issue's to assert on.
+//! This grades the mode response, not the total outer gradient. They are
+//! separate contracts: this fixture isolates the coefficient response that the
+//! follow-up margin changes, while the complete profiled-gradient calculus is
+//! covered by its own outer-gradient gates.
 
 use csv::StringRecord;
 use gam::utils::splitmix64;
