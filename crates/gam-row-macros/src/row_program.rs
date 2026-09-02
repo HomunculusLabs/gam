@@ -1985,7 +1985,24 @@ fn dense_taylor_composition_partitions(
 /// costs one multiply per order and a short sum. (Multiplying every
 /// partition product by its stack entry and summing the terms of all orders
 /// in one chain put the whole sum behind the call.)
-fn dense_taylor_compose(input: DenseTaylorJet, stack: &str) -> DenseTaylorJet {
+/// How a composition reads the derivative stack it composes with: a leaf's
+/// returned array by index, or five scalars by name.
+#[derive(Clone)]
+enum DenseTaylorStack {
+    Array(String),
+    Scalars(String),
+}
+
+impl DenseTaylorStack {
+    fn entry(&self, degree: usize) -> String {
+        match self {
+            DenseTaylorStack::Array(name) => format!("{name}[{degree}]"),
+            DenseTaylorStack::Scalars(name) => format!("{name}_{degree}"),
+        }
+    }
+}
+
+fn dense_taylor_compose(input: DenseTaylorJet, stack: &DenseTaylorStack) -> DenseTaylorJet {
     let dimension = input.dimension;
     let order = input.order;
     let slots = dense_taylor_slot_count(dimension);
@@ -2005,7 +2022,7 @@ fn dense_taylor_compose(input: DenseTaylorJet, stack: &str) -> DenseTaylorJet {
             })
         })
         .collect::<Vec<_>>();
-    let mut out = DenseTaylorJet::constant(format!("{stack}[0]"), dimension, order);
+    let mut out = DenseTaylorJet::constant(stack.entry(0), dimension, order);
     let mut terms: Vec<Vec<(usize, (Rational, String))>> = vec![Vec::new(); slots];
     for derivative_order in 1..=order {
         let mut counts = vec![0usize; dimension];
@@ -2036,7 +2053,7 @@ fn dense_taylor_compose(input: DenseTaylorJet, stack: &str) -> DenseTaylorJet {
         let mut sum: Option<String> = None;
         for (derivative_order, (factor, expression)) in terms {
             let scaled = scaled_by(expression, factor.over(common));
-            let term = symbolic_multiply(&format!("{stack}[{derivative_order}]"), &scaled);
+            let term = symbolic_multiply(&stack.entry(*derivative_order), &scaled);
             sum = symbolic_add_component(&sum, &Some(term));
         }
         out.set(index, sum.map(|sum| (common, sum)));
@@ -2111,13 +2128,21 @@ struct DenseTaylorExpressionEnvironment<'a> {
 /// coefficient — fifteen on the rigid Bernoulli fourth-order surface, for
 /// the two this costs (#932). The dense analogue of the order-2 emitter's
 /// absorbed composition point.
+///
+/// The five entries are scalar `let`s, as every other value the emitter
+/// forms is. The first version built them as an `[f64; 5]` literal, which
+/// LLVM kept in memory: five scalar stores that the SLP vectoriser then read
+/// back as 128-bit pairs, and a load that spans two narrower stores forwards
+/// from neither — a ~15-cycle stall per pair on Intel cores, which made the
+/// dense surfaces up to 36% slower on a Xeon 8573C while their arithmetic
+/// was unchanged.
 fn dense_taylor_rescaled_stack(
     stack: &str,
     alias: &ScaledAlias,
     constants: &HashSet<String>,
     signs: &HashSet<String>,
     preludes: &mut Vec<String>,
-) -> Result<String> {
+) -> Result<DenseTaylorStack> {
     let name = format!("{stack}_scaled");
     let mut entries = Vec::with_capacity(5);
     match &alias.scalar {
@@ -2139,6 +2164,7 @@ fn dense_taylor_rescaled_stack(
                 _ => false,
             };
             let scalar = symbolic_scalar(scalar, constants, SymbolicTarget::Rust)?;
+            // The powers `s^d` are shared scalars, each one multiply.
             let mut power = "1.0".to_string();
             for degree in 0..5 {
                 let factor = if is_sign {
@@ -2148,17 +2174,26 @@ fn dense_taylor_rescaled_stack(
                         "1.0".to_string()
                     }
                 } else {
+                    if degree >= 2 {
+                        let previous = power.clone();
+                        power = format!("{name}_power{degree}");
+                        preludes.push(format!(
+                            "let {power}: f64 = {};",
+                            symbolic_multiply(&previous, &scalar)
+                        ));
+                    } else if degree == 1 {
+                        power = scalar.clone();
+                    }
                     power.clone()
                 };
                 entries.push(symbolic_multiply(&format!("{stack}[{degree}]"), &factor));
-                if !is_sign {
-                    power = symbolic_multiply(&power, &scalar);
-                }
             }
         }
     }
-    preludes.push(format!("let {name}: [f64; 5] = [{}];", entries.join(", ")));
-    Ok(name)
+    for (degree, entry) in entries.iter().enumerate() {
+        preludes.push(format!("let {name}_{degree}: f64 = {entry};"));
+    }
+    Ok(DenseTaylorStack::Scalars(name))
 }
 
 fn dense_taylor_expression(
@@ -2236,7 +2271,7 @@ fn dense_taylor_expression(
                     )?;
                     dense_taylor_compose(inner, &stack)
                 }
-                None => dense_taylor_compose(input, &stack),
+                None => dense_taylor_compose(input, &DenseTaylorStack::Array(stack)),
             }
         }
     };
@@ -2443,7 +2478,7 @@ enum DenseTaylorStatement {
 struct DenseTaylorSchedule {
     statements: Vec<DenseTaylorStatement>,
     result: DenseTaylorJet,
-    root_compose_stack: Option<String>,
+    root_compose_stack: Option<DenseTaylorStack>,
     result_preludes: Vec<String>,
     mutable_support: HashMap<String, Vec<bool>>,
     assigned: HashSet<String>,
@@ -2643,7 +2678,7 @@ fn dense_taylor_schedule(
                     )?;
                     (inner, Some(stack))
                 }
-                None => (input, Some(stack)),
+                None => (input, Some(DenseTaylorStack::Array(stack))),
             }
         }
         _ => {
@@ -3882,6 +3917,7 @@ fn rust_dense_taylor_body(
         // directional form at that order.
         if let Some(root_stack) = &schedule.root_compose_stack {
             assert!(!fourth, "the root composition is specialised at order 3 only");
+            let (root1, root2, root3) = (root_stack.entry(1), root_stack.entry(2), root_stack.entry(3));
             push_dense_taylor_derivative_array(&mut source, "inner_first", &schedule.result, 1);
             push_dense_taylor_derivative_array(&mut source, "inner_second", &schedule.result, 2);
             push_dense_taylor_derivative_array(&mut source, "inner_third", &schedule.result, 3);
@@ -3899,10 +3935,10 @@ fn rust_dense_taylor_body(
                  \x20           + inner_second[other + 1] * direction_u[1];\n\
                  \x20       let inner_abu = inner_third[offset] * direction_u[0]\n\
                  \x20           + inner_third[offset + 1] * direction_u[1];\n\
-                 \x20       {root_stack}[3] * inner_u * inner_a * inner_b\n\
-                 \x20           + {root_stack}[2] * (inner_au * inner_b + inner_a * inner_bu\n\
+                 \x20       {root3} * inner_u * inner_a * inner_b\n\
+                 \x20           + {root2} * (inner_au * inner_b + inner_a * inner_bu\n\
                  \x20               + inner_u * inner_ab)\n\
-                 \x20           + {root_stack}[1] * inner_abu\n\
+                 \x20           + {root1} * inner_abu\n\
                  \x20   }}))\n"
             ));
             source.push_str("}\n");
@@ -4013,6 +4049,7 @@ fn rust_dense_taylor_uncontracted_body(
     if order == 3
         && let Some(root_stack) = &schedule.root_compose_stack
     {
+        let (root1, root2, root3) = (root_stack.entry(1), root_stack.entry(2), root_stack.entry(3));
         push_dense_taylor_derivative_array(&mut source, "inner_first", &schedule.result, 1);
         push_dense_taylor_derivative_array(&mut source, "inner_second", &schedule.result, 2);
         push_dense_taylor_derivative_array(&mut source, "inner_third", &schedule.result, 3);
@@ -4026,10 +4063,10 @@ fn rust_dense_taylor_uncontracted_body(
              \x20           let inner_ac = inner_second[axis_a + axis_c];\n\
              \x20           let inner_bc = inner_second[axis_b + axis_c];\n\
              \x20           let inner_abc = inner_third[axis_a + axis_b + axis_c];\n\
-             \x20           {root_stack}[3] * inner_a * inner_b * inner_c\n\
-             \x20               + {root_stack}[2] * (inner_ab * inner_c\n\
+             \x20           {root3} * inner_a * inner_b * inner_c\n\
+             \x20               + {root2} * (inner_ab * inner_c\n\
              \x20                   + inner_ac * inner_b + inner_bc * inner_a)\n\
-             \x20               + {root_stack}[1] * inner_abc\n\
+             \x20               + {root1} * inner_abc\n\
              \x20       }})\n\
              \x20   }}))\n\
              }}\n"
@@ -5327,16 +5364,26 @@ mod tests {
         // fifteen sign multiplies of the scaled point are two.
         let rust = emitted_function(input.clone(), "rigid_fourth_contracted");
         let root = rust.find("__row_program_result_dense_stack").expect("the root stack");
-        let scaled = rust[root..].find("_scaled : [f64 ; 5] = [").expect("the rescaled root stack") + root;
-        let literal = &rust[scaled..rust[scaled..].find("] ;").expect("the literal closes") + scaled];
-        assert_eq!(literal.matches("* sign").count(), 2, "{literal}\n{rust}");
+        let scaled = &rust[root..];
+        for line in [
+            "_scaled_0 : f64 = __row_program_result_dense_stack8 [0] ;",
+            "_scaled_1 : f64 = (__row_program_result_dense_stack8 [1] * sign) ;",
+            "_scaled_2 : f64 = __row_program_result_dense_stack8 [2] ;",
+            "_scaled_3 : f64 = (__row_program_result_dense_stack8 [3] * sign) ;",
+            "_scaled_4 : f64 = __row_program_result_dense_stack8 [4] ;",
+        ] {
+            assert!(scaled.contains(line), "{line}\n{rust}");
+        }
+        // The five entries are scalars, never an array literal.
+        assert!(!rust.contains(": [f64 ; 5] = ["), "{rust}");
         // The observed-scale composition on `scale(slope, scale_of)` reads the
-        // same rule with the scalar's powers.
-        assert!(rust.contains("* (scale_of * scale_of))"), "{rust}");
-        assert!(rust.contains("_scaled [1] * latent_c"), "{rust}");
-        assert!(!rust.contains("_scaled [1] * margin_c"), "{rust}");
+        // same rule with shared powers of the scalar.
+        assert!(rust.contains("_scaled_power2 : f64 = (scale_of * scale_of)"), "{rust}");
+        assert!(rust.contains("_scaled_power3 : f64 = (") && rust.contains("_scaled_power2 * scale_of)"), "{rust}");
+        assert!(rust.contains("_scaled_1 * latent_c"), "{rust}");
+        assert!(!rust.contains("_scaled_1 * margin_c"), "{rust}");
         let rust = emitted_function(input, "rigid_third_contracted");
-        assert!(rust.contains("_scaled [3] * inner_u"), "{rust}");
+        assert!(rust.contains("_scaled_3 * inner_u"), "{rust}");
     }
 
     #[test]
