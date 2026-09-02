@@ -97,6 +97,7 @@ fn default_double_penalty_shrinks_irrelevant_covariate_edf_below_one() {
 
     let mut z_edf: Vec<f64> = Vec::new();
     let mut x_edf: Vec<f64> = Vec::new();
+    let mut fitted_rhos: Vec<Vec<f64>> = Vec::new();
     for seed in 200u64..205 {
         let data = irrelevant_covariate_dataset(seed, 800);
         // DEFAULT smooths: `s(x)` with no `bs=`/`double_penalty=` => mgcv
@@ -104,6 +105,10 @@ fn default_double_penalty_shrinks_irrelevant_covariate_edf_below_one() {
         let fit = fit_from_formula("y ~ s(x) + s(z)", &data, &cfg).expect("fit ok");
         z_edf.push(smooth_term_edf(&fit, "z"));
         x_edf.push(smooth_term_edf(&fit, "x"));
+        let FitResult::Standard(std_fit) = &fit else {
+            panic!("expected a standard Gaussian fit for a two-smooth dense model");
+        };
+        fitted_rhos.push(std_fit.fit.log_lambdas.to_vec());
     }
 
     let mean_z = z_edf.iter().sum::<f64>() / z_edf.len() as f64;
@@ -123,7 +128,8 @@ fn default_double_penalty_shrinks_irrelevant_covariate_edf_below_one() {
         mean_z < 1.0,
         "default double penalty failed to shrink the irrelevant covariate s(z) \
          (mgcv select=TRUE): mean z edf={mean_z:.6} (must be < 1.0), \
-         values={z_edf:?}; supported mean x edf={mean_x:.6}, x values={x_edf:?}"
+         values={z_edf:?}; supported mean x edf={mean_x:.6}, x values={x_edf:?}; \
+         fitted rho=[x bend, x null, z bend, z null] by seed={fitted_rhos:?}"
     );
 }
 
