@@ -117,6 +117,14 @@ def _row(summary: Any, name: str) -> dict[str, Any] | None:
     return next((t for t in (summary.smooth_terms or []) if t.get("name") == name), None)
 
 
+def _assert_same_inference_row(actual: dict[str, Any], expected: dict[str, Any]) -> None:
+    """Require the full per-term inference contract, including absent fields."""
+    assert actual.keys() == expected.keys()
+    assert actual["name"] == expected["name"]
+    for field in actual.keys() - {"name"}:
+        assert actual[field] == pytest.approx(expected[field], rel=1e-8, abs=0.0)
+
+
 def test_reference_group_spelling_reports_the_smooth_row() -> None:
     """Green today: the same model, spelled with group(), has the table."""
     row = _row(_summary("y ~ s(x) + group(g)"), "s(x)")
@@ -131,6 +139,11 @@ def test_the_two_spellings_are_the_same_fit() -> None:
     assert b.edf_total == pytest.approx(a.edf_total, rel=1e-12)
     assert b.deviance == pytest.approx(a.deviance, rel=1e-12)
     np.testing.assert_allclose(np.asarray(b.lambdas), np.asarray(a.lambdas), rtol=1e-10)
+    for name in ("g", "s(x)"):
+        expected = _row(a, name)
+        actual = _row(b, name)
+        assert expected is not None and actual is not None
+        _assert_same_inference_row(actual, expected)
 
 
 @pytest.mark.parametrize(
@@ -152,8 +165,7 @@ def test_smooth_row_survives_a_categorical_main_effect(formula: str) -> None:
         f"{formula}: summary().smooth_terms has no row for s(x); it is "
         f"{summary.smooth_terms!r} while edf_total is {summary.edf_total!r}"
     )
-    assert row["edf"] == pytest.approx(reference["edf"], rel=1e-8)
-    assert row["chi_sq"] == pytest.approx(reference["chi_sq"], rel=1e-6)
+    _assert_same_inference_row(row, reference)
 
 
 def test_tensor_smooth_row_survives_a_categorical_main_effect() -> None:

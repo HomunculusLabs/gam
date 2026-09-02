@@ -502,19 +502,6 @@ pub(crate) const SPECTRAL_DEFLATION_HYSTERESIS_FRACTION: f64 = 1.0e-2;
 /// such bias because the deflated direction's contribution is the ρ-independent
 /// constant `0`. Returns `None` only if the block is non-finite or the
 /// eigendecomposition fails (the caller then surfaces the hard refusal).
-pub(crate) fn factor_spectral_deflated_criterion_row(
-    row: &ArrowRowBlock,
-    d: usize,
-    refuse_resolved_indefinite: bool,
-) -> Result<Option<ArrowRowFactorResult>, String> {
-    factor_spectral_deflated_criterion_row_with_geometry(
-        row,
-        d,
-        refuse_resolved_indefinite,
-        None,
-    )
-}
-
 pub(crate) fn factor_spectral_deflated_criterion_row_with_geometry(
     row: &ArrowRowBlock,
     d: usize,
@@ -731,7 +718,7 @@ pub(crate) fn factor_spectral_deflated_criterion_row_with_geometry(
 
 /// The per-row `H_tt` eigen-directions a STEP-side solve must GAUGE-FIX — take
 /// exactly zero Newton step along — using the SAME spectral floor and hysteresis
-/// convention `factor_spectral_deflated_criterion_row` uses to unit-stiffness
+/// convention `factor_spectral_deflated_criterion_row_with_geometry` uses to unit-stiffness
 /// deflate them in the EVIDENCE log-det. This is the step twin of that evidence
 /// routine (#1095/#2228 second root).
 ///
@@ -798,7 +785,7 @@ pub fn row_sub_floor_null_directions(htt: ArrayView2<'_, f64>) -> Vec<Array1<f64
     let mut dirs = Vec::new();
     for eig_idx in 0..evals.len() {
         let lambda = evals[eig_idx];
-        // Identical deflation predicate to `factor_spectral_deflated_criterion_row`:
+        // Identical deflation predicate to `factor_spectral_deflated_criterion_row_with_geometry`:
         // every non-positive / non-finite eigenvalue (a genuine null / indefinite
         // quotient direction) plus any positive one that has dropped below the
         // hysteresis band edge is a sub-floor null direction to gauge-fix. So the
@@ -808,7 +795,7 @@ pub fn row_sub_floor_null_directions(htt: ArrayView2<'_, f64>) -> Vec<Array1<f64
             dirs.push(evecs.column(eig_idx).to_owned());
         }
     }
-    // Knife-edge fallback — mirror `factor_spectral_deflated_criterion_row`'s
+    // Knife-edge fallback — mirror `factor_spectral_deflated_criterion_row_with_geometry`'s
     // `deflated_count == 0` branch so the STEP freezes EXACTLY the direction the
     // EVIDENCE log-det deflates in the barely-non-PD case, by construction. When
     // the hysteresis band kept every eigenvalue (nothing strictly sub-floor) YET
@@ -1056,7 +1043,7 @@ pub(crate) fn factor_one_row_result(
                     // arm) and to `≤ 0` on the other (Cholesky fails → the `Err`
                     // arm below). The `Err` arm already deflates that flat
                     // direction to UNIT stiffness via
-                    // `factor_spectral_deflated_criterion_row` (`log 1 = 0`
+                    // `factor_spectral_deflated_criterion_row_with_geometry` (`log 1 = 0`
                     // contribution), but this `Ok` arm previously returned the RAW
                     // barely-PD factor whose tiny pivot contributes a large
                     // `2·ln(√ε)` instead. The two memory-budget routes (dense

@@ -1335,6 +1335,7 @@ where
         inputs.wi,
         inputs.di,
         inputs.probit_scale,
+        follow_up_varying_flag::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(),
         dimension,
         workspace,
     );

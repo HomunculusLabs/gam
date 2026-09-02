@@ -291,23 +291,30 @@ impl SaeSoftmaxRowJetInput {
         if projected_dim == 0 {
             return Err("SAE row-jet output projection requires nonzero dimension".to_string());
         }
+        self.validate()?;
         let old_dim = self.out_dim;
-        let map_blocks = |values: &[f64], blocks: usize| -> Vec<f64> {
-            let mut projected = vec![0.0_f64; blocks * projected_dim];
+        let map_blocks = |values: &[f64], blocks: usize| -> Result<Vec<f64>, String> {
+            let projected_len = checked_product(&[blocks, projected_dim])?;
+            let mut projected = vec![0.0_f64; projected_len];
             for block in 0..blocks {
                 project(
                     &values[block * old_dim..(block + 1) * old_dim],
                     &mut projected[block * projected_dim..(block + 1) * projected_dim],
                 );
             }
-            projected
+            Ok(projected)
         };
         let q = self.n_primaries();
         let n_beta = self.n_beta_borders();
-        self.decoded = map_blocks(&self.decoded, self.n_atoms);
-        self.decoded_first = map_blocks(&self.decoded_first, q);
-        self.decoded_second = map_blocks(&self.decoded_second, q * q);
-        self.beta_outputs = map_blocks(self.beta_outputs.as_ref(), n_beta).into();
+        let q_squared = checked_product(&[q, q])?;
+        let decoded = map_blocks(&self.decoded, self.n_atoms)?;
+        let decoded_first = map_blocks(&self.decoded_first, q)?;
+        let decoded_second = map_blocks(&self.decoded_second, q_squared)?;
+        let beta_outputs = map_blocks(self.beta_outputs.as_ref(), n_beta)?;
+        self.decoded = decoded;
+        self.decoded_first = decoded_first;
+        self.decoded_second = decoded_second;
+        self.beta_outputs = beta_outputs.into();
         self.out_dim = projected_dim;
         self.validate()
     }
@@ -1154,6 +1161,64 @@ impl SaeRowJetMemoryLedger {
         })
     }
 
+    /// Memory ledger for the resident Trace contraction. Unlike the probe
+    /// contractions, Trace materializes its tower on device before reducing it,
+    /// so it starts from the complete-tower ledger and adds the selected-inverse
+    /// operands and reduced outputs. The host side intentionally inherits the
+    /// complete ledger's stronger bound; device accounting, which gates CUDA
+    /// admission, is exact for the additional Trace residency.
+    fn for_trace_shape(k: usize, q: usize, p: usize, n_beta: usize) -> Result<Self, String> {
+        let mut ledger = Self::for_shape(k, q, p, n_beta)?;
+        let f64_bytes = std::mem::size_of::<f64>();
+        let bytes = |count: usize| -> Result<usize, String> {
+            count
+                .checked_mul(f64_bytes)
+                .ok_or_else(|| "SAE row-jet Trace byte count overflow".to_string())
+        };
+        let beta_inv_count = n_beta
+            .checked_mul(n_beta)
+            .ok_or_else(|| "SAE row-jet Trace beta-inverse shape overflow".to_string())?;
+        let beta_inv = bytes(beta_inv_count)?;
+        // cudarc requires non-empty handles for zero-sized operands/outputs.
+        // These are distinct allocations from the complete tower's own dummies.
+        let trace_device_dummies = usize::from(beta_inv_count == 0)
+            + usize::from(q == 0) // e_tt
+            + usize::from(q == 0 || n_beta == 0) // inv_vbeta
+            + usize::from(q == 0) // reduced t
+            + usize::from(n_beta == 0); // reduced beta
+        let trace_fixed_device = beta_inv
+            .checked_add(bytes(trace_device_dummies)?)
+            .ok_or_else(|| "SAE row-jet Trace dummy bytes overflow".to_string())?;
+        let per_row_count = q
+            .checked_mul(q)
+            .and_then(|count| count.checked_add(q.checked_mul(n_beta)?))
+            .and_then(|count| count.checked_add(q))
+            .and_then(|count| count.checked_add(n_beta))
+            .ok_or_else(|| "SAE row-jet Trace row shape overflow".to_string())?;
+        let per_row = bytes(per_row_count)?;
+        ledger.fixed_device_bytes = ledger
+            .fixed_device_bytes
+            .checked_add(trace_fixed_device)
+            .ok_or_else(|| "SAE row-jet Trace fixed device bytes overflow".to_string())?;
+        ledger.device_bytes_per_row = ledger
+            .device_bytes_per_row
+            .checked_add(per_row)
+            .ok_or_else(|| "SAE row-jet Trace device row bytes overflow".to_string())?;
+        ledger.fixed_host_bytes = ledger
+            .fixed_host_bytes
+            .checked_add(beta_inv)
+            .ok_or_else(|| "SAE row-jet Trace fixed host bytes overflow".to_string())?;
+        ledger.cpu_host_bytes_per_row = ledger
+            .cpu_host_bytes_per_row
+            .checked_add(per_row)
+            .ok_or_else(|| "SAE row-jet Trace CPU host row bytes overflow".to_string())?;
+        ledger.host_bytes_per_row = ledger
+            .host_bytes_per_row
+            .checked_add(per_row)
+            .ok_or_else(|| "SAE row-jet Trace host row bytes overflow".to_string())?;
+        Ok(ledger)
+    }
+
     /// The only production caller is the CUDA tile planner, which compiles
     /// under `cfg(target_os = "linux")`; off-Linux the lib target therefore has
     /// no caller and `-D dead-code` rejects the method (this class of break has
@@ -1226,6 +1291,26 @@ pub fn plan_softmax_row_jets_contracted(
         ));
     }
     let ledger = SaeRowJetMemoryLedger::for_contracted_shape(k, q, p, n_beta)?;
+    plan_dispatch(total_rows, k, q, p, n_beta, mode, ledger, host_budget)
+}
+
+/// Decide the bounded resident-Trace tile width with its tower and
+/// selected-inverse operands charged explicitly (#2333).
+pub fn plan_softmax_row_jets_trace(
+    total_rows: usize,
+    k: usize,
+    q: usize,
+    p: usize,
+    n_beta: usize,
+    mode: gam_gpu::GpuPolicy,
+    host_budget: usize,
+) -> Result<SaeRowJetExecutionPlan, String> {
+    if k == 0 || p == 0 {
+        return Err(format!(
+            "Trace SAE row-jet plan requires nonzero K and p; got K={k}, p={p}"
+        ));
+    }
+    let ledger = SaeRowJetMemoryLedger::for_trace_shape(k, q, p, n_beta)?;
     plan_dispatch(total_rows, k, q, p, n_beta, mode, ledger, host_budget)
 }
 
@@ -1730,7 +1815,7 @@ extern "C" __global__ void sae_rowjet_contract_linear_t(
   }
 }
 
-// beta[row*nb + border] = <beta(row,border,.), probe_row> via the shared dot.
+// beta[row*nb + border] = <beta(row,border,.), probe_row> via its row-local base dot.
 extern "C" __global__ void sae_rowjet_contract_linear_beta(
     const double* z, const int* active, const int* beta_atom,
     const double* beta_phi, const double* bodot, const double* sqrt_w,
@@ -3004,18 +3089,19 @@ mod tests {
             let decoded_second_bytes = q * q * p * f64_bytes;
             let beta_basis_bytes = n_beta * f64_bytes;
             let beta_basis_first_bytes = q * n_beta * f64_bytes;
+            let beta_output_bytes = n_beta * p * f64_bytes;
             let input_f64_bytes = gate_bytes
                 + sqrt_weight_bytes
                 + decoded_bytes
                 + decoded_first_bytes
                 + decoded_second_bytes
                 + beta_basis_bytes
-                + beta_basis_first_bytes;
+                + beta_basis_first_bytes
+                + beta_output_bytes;
             let input_i32_bytes = (k + q + q) * i32_bytes;
 
             let first_output_bytes = q * p * f64_bytes;
             let second_output_bytes = q * q * p * f64_bytes;
-            let beta_output_bytes = n_beta * p * f64_bytes;
             let beta_mixed_wire_bytes = q * n_beta * p * f64_bytes;
             let flat_output_bytes = first_output_bytes
                 + second_output_bytes
@@ -3025,10 +3111,9 @@ mod tests {
             assert_eq!(decoded_second_bytes, second_output_bytes);
             let expected_device_bytes_per_row =
                 input_f64_bytes + input_i32_bytes + flat_output_bytes;
-            let expected_fixed_device_bytes = beta_output_bytes + n_beta * i32_bytes;
+            let expected_fixed_device_bytes = n_beta * i32_bytes;
 
             let semantic_input_bytes = input_f64_bytes
-                + beta_output_bytes
                 + k * std::mem::size_of::<bool>()
                 + q * std::mem::size_of::<SaeRowJetPrimary>()
                 + q * std::mem::size_of::<SaeCoordinateSlot>()
@@ -3054,7 +3139,6 @@ mod tests {
             let expected_host_bytes_per_row =
                 shared_host_bytes + staging_input_bytes.max(scheduled_output_bytes);
             let expected_fixed_host_bytes = gate_bytes
-                + beta_output_bytes
                 + n_beta * std::mem::size_of::<usize>()
                 + n_beta * i32_bytes
                 + std::mem::size_of::<SaeRowJetChannels>()
@@ -3405,6 +3489,98 @@ mod tests {
         (e_tt, inv_vbeta, beta_inv)
     }
 
+    /// The log-det metric must be folded into the semantic BASES before the
+    /// Trace tower is built. This pins the algebraic invariant behind that
+    /// routing: applying a row-local linear map to all four bases commutes with
+    /// the complete softmax row program, including the decoder-border channels.
+    /// Distinct maps on the two rows also prove the tile no longer aliases row
+    /// zero's formerly shared `beta_outputs` frame.
+    #[test]
+    fn projected_output_bases_commute_with_softmax_row_program_2333() {
+        let rows = complete_fixture(2);
+        let original = execute_softmax_row_jet_tile(&rows, 1.0, SaeRowJetPath::Cpu)
+            .expect("unprojected CPU row jets")
+            .into_scheduled_rows();
+        let mut projected_rows = rows.clone();
+        let rank = 2usize;
+        let matrices = [
+            [[0.7_f64, -0.2, 0.4], [0.1, 0.8, -0.3]],
+            [[-0.5_f64, 0.6, 0.2], [0.9, -0.1, 0.3]],
+        ];
+        for (row, input) in projected_rows.iter_mut().enumerate() {
+            input
+                .project_output_bases(rank, |source, output| {
+                    for r in 0..rank {
+                        output[r] = matrices[row][r]
+                            .iter()
+                            .zip(source)
+                            .map(|(&left, &right)| left * right)
+                            .sum();
+                    }
+                })
+                .expect("row-local output-base projection");
+        }
+        assert_ne!(
+            projected_rows[0].beta_outputs,
+            projected_rows[1].beta_outputs,
+            "fixture must exercise row-local decoder-border frames"
+        );
+        let projected = execute_softmax_row_jet_tile(&projected_rows, 1.0, SaeRowJetPath::Cpu)
+            .expect("projected CPU row jets")
+            .into_scheduled_rows();
+        let assert_projected = |row: usize, source: &[f64], actual: &[f64], label: &str| {
+            for r in 0..rank {
+                let expected: f64 = matrices[row][r]
+                    .iter()
+                    .zip(source)
+                    .map(|(&left, &right)| left * right)
+                    .sum();
+                assert!(
+                    (actual[r] - expected).abs() <= 1.0e-12 * (1.0 + expected.abs()),
+                    "{label} row={row} rank={r}: actual={} expected={expected}",
+                    actual[r]
+                );
+            }
+        };
+        for row in 0..rows.len() {
+            let q = original[row].q();
+            let n_beta = original[row].n_beta();
+            for a in 0..q {
+                assert_projected(row, original[row].first(a), projected[row].first(a), "first");
+                for b in 0..q {
+                    assert_projected(
+                        row,
+                        original[row].second(a, b),
+                        projected[row].second(a, b),
+                        "second",
+                    );
+                }
+                for border in 0..n_beta {
+                    assert_projected(
+                        row,
+                        original[row].beta_deriv(a, border),
+                        projected[row].beta_deriv(a, border),
+                        "beta_deriv",
+                    );
+                    assert_projected(
+                        row,
+                        original[row].beta_l_deriv(a, border),
+                        projected[row].beta_l_deriv(a, border),
+                        "beta_l_deriv",
+                    );
+                }
+            }
+            for border in 0..n_beta {
+                assert_projected(
+                    row,
+                    original[row].beta(border),
+                    projected[row].beta(border),
+                    "beta",
+                );
+            }
+        }
+    }
+
     /// Device parity for the θ-adjoint Trace reduction at the same 131072-row
     /// scale as the elementwise/linear/bilinear gate. The materialize-then-reduce
     /// device path must reproduce the authoritative CPU Trace oracle to ≤1e-12,
@@ -3427,6 +3603,7 @@ mod tests {
             e_tt: &e_tt,
             inv_vbeta: &inv_vbeta,
             beta_inv: &beta_inv,
+            exact_a: true,
         };
         let cpu = execute_softmax_row_jet_tile_contracted(
             &rows,
@@ -3496,6 +3673,7 @@ mod tests {
                 e_tt: &e_tt,
                 inv_vbeta: &inv_vbeta,
                 beta_inv: &beta_inv,
+                exact_a: true,
             },
         )
         .expect("CPU trace contraction");
@@ -3514,7 +3692,7 @@ mod tests {
                     let (a_is_logit, atom_a) = primary_kind_atom(rows[row].primaries[a]);
                     for b in 0..q {
                         let (b_is_logit, atom_b) = primary_kind_atom(rows[row].primaries[b]);
-                        let dh = if w_is_logit && !a_is_logit && !b_is_logit {
+                        let mut dh = if w_is_logit && !a_is_logit && !b_is_logit {
                             dot(jets.first(a), jets.first(b))
                                 * softmax_data_weight_product_logit_factor(
                                     &rows[row].gate_values,
@@ -3527,11 +3705,13 @@ mod tests {
                             dot(jets.second(a, w), jets.first(b))
                                 + dot(jets.first(a), jets.second(b, w))
                         };
+                        dh += dot(jets.first(w), jets.second(a, b));
                         expected += e_row[a * q + b] * dh;
                     }
                     for border in 0..n_beta {
                         let dh = dot(jets.second(a, w), jets.beta(border))
                             + dot(jets.first(a), jets.beta_deriv(w, border));
+                        let dh = dh + dot(jets.first(w), jets.beta_deriv(a, border));
                         expected += 2.0 * vbeta_row[a * n_beta + border] * dh;
                     }
                 }
@@ -3670,6 +3850,7 @@ mod tests {
                     e_tt: &e_tt,
                     inv_vbeta: &inv_vbeta,
                     beta_inv: &beta_inv,
+                    exact_a: false,
                 },
             )
             .expect("CPU trace contraction");
@@ -3758,7 +3939,8 @@ mod tests {
         let contracted = SaeRowJetMemoryLedger::for_contracted_shape(k, q, p, n_beta)
             .expect("contracted ledger");
 
-        let input_f64 = (k + 1 + k * p + q * p + q * q * p + n_beta + q * n_beta) * f;
+        let input_f64 =
+            (k + 1 + k * p + q * p + q * q * p + n_beta + q * n_beta + n_beta * p) * f;
         let input_i32 = (k + q + q) * i;
         // Reduced device state: phase-one dots (k + q + n_beta + q²), reduced
         // outputs (q + n_beta), probe (p), and v_t/v_beta (q + n_beta).
@@ -3770,7 +3952,6 @@ mod tests {
         );
 
         let semantic_input = input_f64
-            + n_beta * p * f
             + k * std::mem::size_of::<bool>()
             + q * std::mem::size_of::<SaeRowJetPrimary>()
             + q * std::mem::size_of::<SaeCoordinateSlot>()
