@@ -627,6 +627,35 @@ fn operator_penalty_gaps(
         ) {
             let (s_mine, s_mine_psi) = mass_reconstruction(&collocation, &centers, spec);
             let value_gap = frobenius(&(s_fwd - &s_mine)) / frobenius(s_fwd).max(1e-300);
+            // Split the value gap: the builder's own D0 through the same centered
+            // Gram + normalization, against the candidate and against the rebuild.
+            let ops = build_duchon_collocation_operator_matriceswithworkspace(
+                centers.view(),
+                collocation.view(),
+                None,
+                spec.length_scale,
+                spec.power,
+                spec.nullspace_order,
+                None,
+                None,
+                1,
+                spec.radial_reparam.as_ref().map(|v| v.view()),
+                &mut BasisWorkspace::default(),
+            )
+            .expect("forward collocation blocks");
+            let (s_builder, _) = normalize_penalty(&symmetrize(&centered_design_gram(&ops.d0)));
+            eprintln!(
+                "[{label}] MASS-RECON builder D0 {}x{} amp={:.3e}; gap(candidate vs builder-gram)={:.3e} \
+                 gap(rebuilt vs builder-gram)={:.3e} |cand|={:.6e} |builder|={:.6e} |rebuilt|={:.6e}",
+                ops.d0.nrows(),
+                ops.d0.ncols(),
+                ops.kernel_amplification,
+                frobenius(&(s_fwd - &s_builder)) / frobenius(s_fwd).max(1e-300),
+                frobenius(&(&s_mine - &s_builder)) / frobenius(&s_builder).max(1e-300),
+                frobenius(s_fwd),
+                frobenius(&s_builder),
+                frobenius(&s_mine)
+            );
             let jet_gap = frobenius(&(&firsts[worker_idx] - &s_mine_psi))
                 / frobenius(&s_mine_psi).max(1e-300);
             eprintln!(
