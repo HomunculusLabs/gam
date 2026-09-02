@@ -3123,8 +3123,13 @@ impl<'a> RemlState<'a> {
             InverseLink::Standard(StandardLink::Logit)
         );
         if !canonical_logit {
+            // Not a defect of this fit: a non-canonical Firth link is routed
+            // to BFGS for the outer search, so no analytic ρ-Hessian exists at
+            // its end. The smoothing correction recognises this exact text as
+            // a typed structural absence (`FIRTH_OUTER_HESSIAN_NOT_ANALYTIC`).
             crate::bail_invalid_estim!(
-                "Tierney-Kadane outer Hessian is implemented for canonical Binomial Logit Firth fits only"
+                "{}",
+                crate::estimate::smoothing_correction::FIRTH_OUTER_HESSIAN_NOT_ANALYTIC
             );
         }
         let mut f_array = Array1::<f64>::zeros(e_array.len());
