@@ -2099,7 +2099,7 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
     /// requested ρ* bitwise, because everything downstream binds the mode and
     /// its ρ as one identity.
     fn sweep(&self, steps: usize) -> Result<SweptEndpoint, AnchoredContinuationRefusal> {
-        let mut carried: Option<SweptEndpoint> = None;
+        let mut carried: Option<ConstrainedWarmStart> = None;
         for step in 0..=steps {
             let waypoint = if step == steps {
                 self.rho_target.clone()
@@ -2111,15 +2111,33 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
                     self.rho_anchor[j] + t * (self.rho_target[j] - self.rho_anchor[j])
                 })
             };
-            let eval = outerobjectivegradienthessian_labeled(
+            let (inner, warm_start) = correct_labeled_coefficient_mode(
                 self.family,
                 self.specs,
                 self.options,
                 self.layout,
                 &waypoint,
-                carried.as_ref().map(|endpoint| &endpoint.warm_start),
+                carried.as_ref(),
+            )
+            .map_err(|error| {
+                AnchoredContinuationRefusal::WaypointEvaluationFailed {
+                    steps,
+                    waypoint_index: step,
+                    reason: error.to_string(),
+                }
+            })?;
+            if step < steps {
+                carried = Some(warm_start);
+                continue;
+            }
+            let eval = outerobjective_from_coefficient_mode_labeled(
+                self.family,
+                self.specs,
+                self.options,
+                self.layout,
+                &waypoint,
                 self.rho_prior,
-                EvalMode::ValueOnly,
+                inner,
             )
             .map_err(|error| {
                 AnchoredContinuationRefusal::WaypointEvaluationFailed {
@@ -2136,12 +2154,12 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
                     objective: eval.objective,
                 });
             }
-            carried = Some(SweptEndpoint {
+            return Ok(SweptEndpoint {
                 warm_start: eval.warm_start,
                 criterion_value: eval.objective,
             });
         }
-        carried.ok_or(AnchoredContinuationRefusal::EmptySweep { steps })
+        Err(AnchoredContinuationRefusal::EmptySweep { steps })
     }
 
     fn resolves_steps(&self, refined_steps: usize) -> bool {
@@ -2217,7 +2235,7 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
     for CoefficientObjectiveHomotopyPath<'_, F>
 {
     fn sweep(&self, steps: usize) -> Result<SweptEndpoint, AnchoredContinuationRefusal> {
-        let mut carried: Option<SweptEndpoint> = None;
+        let mut carried: Option<ConstrainedWarmStart> = None;
         for step in 0..=steps {
             let progress = step as f64 / steps as f64;
             let member = if step == steps {
@@ -2239,15 +2257,49 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
                         progress,
                     })?
             };
-            let eval = outerobjectivegradienthessian_labeled(
+            let (inner, warm_start) = correct_labeled_coefficient_mode(
                 &member,
                 self.specs,
                 self.options,
                 self.layout,
                 self.rho,
-                carried.as_ref().map(|endpoint| &endpoint.warm_start),
+                carried.as_ref(),
+            )
+            .map_err(|error| {
+                AnchoredContinuationRefusal::WaypointEvaluationFailed {
+                    steps,
+                    waypoint_index: step,
+                    reason: error.to_string(),
+                }
+            })?;
+            // The per-waypoint trail. The endpoint discrepancy compares two
+            // sweeps at their LAST waypoint only, so a path that changed branch
+            // partway is indistinguishable from one that landed differently by
+            // accumulation. `|eta|inf` is the coordinate the discrepancy is
+            // taken in, so the two readings are the same instrument.
+            log::info!(
+                "[OUTER] coefficient-objective homotopy: steps={steps} waypoint={step} \
+                 progress={progress:.6} inner_merit={:.9e} |eta|inf={:.6e} \
+                 inner(loglik={} penalty={} cycles={} converged={})",
+                -inner.log_likelihood + inner.penalty_value,
+                waypoint_eta_sup_norm(self.specs, &warm_start),
+                inner.log_likelihood,
+                inner.penalty_value,
+                inner.cycles,
+                inner.converged,
+            );
+            if step < steps {
+                carried = Some(warm_start);
+                continue;
+            }
+            let eval = outerobjective_from_coefficient_mode_labeled(
+                &member,
+                self.specs,
+                self.options,
+                self.layout,
+                self.rho,
                 self.rho_prior,
-                EvalMode::ValueOnly,
+                inner,
             )
             .map_err(|error| {
                 AnchoredContinuationRefusal::WaypointEvaluationFailed {
@@ -2264,44 +2316,12 @@ impl<F: CustomFamily + Clone + Send + Sync + 'static> RefinedContinuationPath
                     objective: eval.objective,
                 });
             }
-            // The per-waypoint trail. The endpoint discrepancy compares two
-            // sweeps at their LAST waypoint only, so a path that changed branch
-            // partway is indistinguishable from one that landed differently by
-            // accumulation. `|eta|inf` is the coordinate the discrepancy is
-            // taken in, so the two readings are the same instrument.
-            log::info!(
-                "[OUTER] coefficient-objective homotopy: steps={steps} waypoint={step} \
-                 progress={progress:.6} objective={:.9e} |eta|inf={:.6e} \
-                 inner(loglik={} penalty={} cycles={} converged={})",
-                eval.objective,
-                waypoint_eta_sup_norm(self.specs, &eval.warm_start),
-                eval.warm_start
-                    .cached_inner
-                    .as_ref()
-                    .map(|inner| format!("{:.9e}", inner.log_likelihood))
-                    .unwrap_or_else(|| "?".to_string()),
-                eval.warm_start
-                    .cached_inner
-                    .as_ref()
-                    .map(|inner| format!("{:.9e}", inner.penalty_value))
-                    .unwrap_or_else(|| "?".to_string()),
-                eval.warm_start
-                    .cached_inner
-                    .as_ref()
-                    .map(|inner| inner.cycles.to_string())
-                    .unwrap_or_else(|| "?".to_string()),
-                eval.warm_start
-                    .cached_inner
-                    .as_ref()
-                    .map(|inner| inner.converged.to_string())
-                    .unwrap_or_else(|| "?".to_string()),
-            );
-            carried = Some(SweptEndpoint {
+            return Ok(SweptEndpoint {
                 warm_start: eval.warm_start,
                 criterion_value: eval.objective,
             });
         }
-        carried.ok_or(AnchoredContinuationRefusal::EmptySweep { steps })
+        Err(AnchoredContinuationRefusal::EmptySweep { steps })
     }
 
     fn resolves_steps(&self, refined_steps: usize) -> bool {

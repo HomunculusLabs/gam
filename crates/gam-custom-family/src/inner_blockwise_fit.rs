@@ -11,6 +11,26 @@ mod exact_joint_fit;
 
 use exact_joint_fit::fit_exact_joint;
 
+/// The certified product requested from one coefficient solve.
+///
+/// A continuation waypoint needs the exact constrained coefficient mode (and
+/// its KKT/returned-curvature certificate) to warm-start the next waypoint. It
+/// does not need a Laplace scalar. Keeping that distinction typed prevents an
+/// interior corrector from paying for determinant artifacts that no caller can
+/// consume, without weakening any fact that makes the returned coefficient
+/// state a mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InnerFitProduct {
+    LaplaceReady,
+    CoefficientMode,
+}
+
+impl InnerFitProduct {
+    fn requires_laplace_artifacts(self) -> bool {
+        self == Self::LaplaceReady
+    }
+}
+
 /// Ownership boundary for the authoritative coupled exact-joint engine.
 ///
 /// The outer driver owns route selection and common setup. Once it selects the
@@ -45,6 +65,7 @@ struct ExactJointFitContext<'a, F> {
     prelude_log: bool,
     inner_started: &'a std::time::Instant,
     last_residual_tol: f64,
+    product: InnerFitProduct,
 }
 
 pub(crate) fn beta_cache_keys_match_bitwise(lhs: &Array1<f64>, rhs: &Array1<f64>) -> bool {
@@ -2748,6 +2769,50 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
     options: &BlockwiseFitOptions,
     warm_start: Option<&ConstrainedWarmStart>,
 ) -> Result<BlockwiseInnerResult, CustomFamilyError> {
+    inner_blockwise_fit_for_product(
+        family,
+        specs,
+        block_log_lambdas,
+        options,
+        warm_start,
+        InnerFitProduct::LaplaceReady,
+    )
+}
+
+/// Correct a coefficient mode without constructing a Laplace product.
+///
+/// This is deliberately a distinct operation rather than an option bit: the
+/// returned state is still required to pass the identical convergence, KKT,
+/// active-face, and fresh returned-mode curvature certificates. Only the two
+/// determinant artifacts are absent, because a continuation interior consumes
+/// only the coefficient state as the next corrector's predictor.
+pub(crate) fn inner_blockwise_coefficient_mode<
+    F: CustomFamily + Clone + Send + Sync + 'static,
+>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    block_log_lambdas: &[Array1<f64>],
+    options: &BlockwiseFitOptions,
+    warm_start: Option<&ConstrainedWarmStart>,
+) -> Result<BlockwiseInnerResult, CustomFamilyError> {
+    inner_blockwise_fit_for_product(
+        family,
+        specs,
+        block_log_lambdas,
+        options,
+        warm_start,
+        InnerFitProduct::CoefficientMode,
+    )
+}
+
+fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'static>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    block_log_lambdas: &[Array1<f64>],
+    options: &BlockwiseFitOptions,
+    warm_start: Option<&ConstrainedWarmStart>,
+    product: InnerFitProduct,
+) -> Result<BlockwiseInnerResult, CustomFamilyError> {
     // Inner-blockwise prelude waypoints. At large-scale n the cold-start
     // path between function entry and the first PIRLS/JN cycle-summary
     // log can run for many minutes (sometimes hours) silently while
@@ -3027,8 +3092,9 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         if let Some(cached) = seed.cached_inner.as_ref()
             && cached.objective_state == objective_state
             && cached.converged
-            && cached.block_logdet_h.is_some_and(f64::is_finite)
-            && cached.block_logdet_s.is_some_and(f64::is_finite)
+            && (!product.requires_laplace_artifacts()
+                || (cached.block_logdet_h.is_some_and(f64::is_finite)
+                    && cached.block_logdet_s.is_some_and(f64::is_finite)))
             && seed
                 .block_beta
                 .iter()
@@ -3106,17 +3172,11 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                 }
             }
             if cached_mode_acceptable {
-                let block_logdet_h = cached.block_logdet_h.ok_or_else(|| {
-                    "certified cached inner mode is missing its Hessian logdet".to_string()
-                })?;
-                let block_logdet_s = cached.block_logdet_s.ok_or_else(|| {
-                    "certified cached inner mode is missing its penalty logdet".to_string()
-                })?;
                 log::info!(
-                    "[PIRLS/joint-Newton warm-start] reused cached same-rho inner mode | cycles={} logdet_h={:.6e} logdet_s={:.6e}",
+                    "[PIRLS/joint-Newton warm-start] reused cached same-rho inner mode | cycles={} product={product:?} logdet_h={:?} logdet_s={:?}",
                     cached.cycles,
-                    block_logdet_h,
-                    block_logdet_s,
+                    cached.block_logdet_h,
+                    cached.block_logdet_s,
                 );
                 return Ok(BlockwiseInnerResult {
                     block_states: states,
@@ -3128,8 +3188,16 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
                     cycles: cached.cycles,
                     converged: cached.converged,
                     terminal_convergence_state: None,
-                    block_logdet_h: cached.block_logdet_h,
-                    block_logdet_s: cached.block_logdet_s,
+                    block_logdet_h: if product.requires_laplace_artifacts() {
+                        cached.block_logdet_h
+                    } else {
+                        None
+                    },
+                    block_logdet_s: if product.requires_laplace_artifacts() {
+                        cached.block_logdet_s
+                    } else {
+                        None
+                    },
                     s_lambdas,
                     joint_workspace: certified_workspace,
                     kkt_residual: cached.kkt_residual.clone(),
@@ -3312,6 +3380,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
             prelude_log,
             inner_started: &inner_started,
             last_residual_tol,
+            product,
         });
     }
 
@@ -4018,6 +4087,7 @@ pub(crate) fn inner_blockwise_fit<F: CustomFamily + Clone + Send + Sync + 'stati
         last_residual_tol,
         terminal_convergence_state,
         has_joint_exacthessian,
+        product,
     )
 }
 
@@ -4292,14 +4362,15 @@ pub(crate) fn polish_joint_newton_step<F: CustomFamily + Clone + Send + Sync + '
 }
 
 /// Final result assembly for the blockwise / polish fall-through path of
-/// [`inner_blockwise_fit`]. Computes the penalty value, the block log-dets, the
-/// (converged-only) projected KKT residual for the IFT, and the active-constraint
-/// block, then moves `states`, `s_lambdas`, and `cached_active_sets` into the
-/// returned [`BlockwiseInnerResult`]. Before log-determinant assembly, every
-/// unconstrained converged result with exact joint curvature is re-certified at
-/// the coefficient vector being returned; this includes modes minted by the
-/// blockwise fall-through and joint-polish paths.
-pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + Sync + 'static>(
+/// [`inner_blockwise_fit`]. Computes the penalty value, the (converged-only)
+/// projected KKT residual for the IFT, the active-constraint block, and — only
+/// for a Laplace-ready product — the block log-dets, then moves `states`,
+/// `s_lambdas`, and `cached_active_sets` into the returned
+/// [`BlockwiseInnerResult`]. Every unconstrained converged result with exact
+/// joint curvature is re-certified at the coefficient vector being returned,
+/// independently of which product was requested; this includes modes minted by
+/// the blockwise fall-through and joint-polish paths.
+fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
     mut states: Vec<ParameterBlockState>,
@@ -4315,6 +4386,7 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
     last_residual_tol: f64,
     terminal_convergence_state: Option<gam_problem::InnerConvergenceTerminalState>,
     exact_joint_curvature_available: bool,
+    product: InnerFitProduct,
 ) -> Result<BlockwiseInnerResult, CustomFamilyError> {
     let local_ranges = block_param_ranges(specs);
     let local_total_p = local_ranges.last().map(|(_, end)| *end).unwrap_or(0);
@@ -4386,7 +4458,7 @@ pub(crate) fn assemble_inner_blockwise_result<F: CustomFamily + Clone + Send + S
         Some(specs),
     );
 
-    let (block_logdet_h, block_logdet_s) = if converged {
+    let (block_logdet_h, block_logdet_s) = if converged && product.requires_laplace_artifacts() {
         let (h, s) = blockwise_logdet_terms_with_workspace(
             family,
             specs,

@@ -404,6 +404,87 @@ fn double_well_options() -> BlockwiseFitOptions {
     }
 }
 
+/// The continuation corrector and the ordinary inner solve must return the
+/// identical coefficient mode, while the corrector constructs zero of the two
+/// determinant artifacts. Feeding that owned mode to the endpoint evaluator
+/// must then recover the bit-identical complete criterion. This pins both sides
+/// of the typed product boundary: the omitted work is genuinely absent, and no
+/// scalar or certificate fact is lost at the endpoint that consumes it.
+#[test]
+fn continuation_corrector_builds_only_the_coefficient_product_2714() {
+    let family = TiltedDoubleWellFamily { tilt: TILT };
+    let specs = vec![double_well_spec(-2.0)];
+    let options = double_well_options();
+    let rho = array![-2.0];
+    let penalty_counts = vec![1];
+    let per_block = split_log_lambdas(&rho, &penalty_counts).expect("one penalty block");
+
+    let laplace_ready = inner_blockwise_fit(&family, &specs, &per_block, &options, None)
+        .expect("ordinary coefficient solve");
+    let coefficient_mode =
+        inner_blockwise_coefficient_mode(&family, &specs, &per_block, &options, None)
+            .expect("continuation coefficient corrector");
+    assert!(laplace_ready.converged && coefficient_mode.converged);
+    assert!(laplace_ready.block_logdet_h.is_some());
+    assert!(laplace_ready.block_logdet_s.is_some());
+    assert_eq!(coefficient_mode.block_logdet_h, None);
+    assert_eq!(coefficient_mode.block_logdet_s, None);
+    assert_eq!(
+        laplace_ready.block_states[0].beta[0].to_bits(),
+        coefficient_mode.block_states[0].beta[0].to_bits(),
+        "changing the requested product must not change the corrected mode"
+    );
+    assert_eq!(
+        laplace_ready.log_likelihood.to_bits(),
+        coefficient_mode.log_likelihood.to_bits()
+    );
+    assert_eq!(
+        laplace_ready.penalty_value.to_bits(),
+        coefficient_mode.penalty_value.to_bits()
+    );
+    assert_eq!(
+        laplace_ready
+            .kkt_residual
+            .as_ref()
+            .map(ProjectedKktResidual::inf_norm),
+        coefficient_mode
+            .kkt_residual
+            .as_ref()
+            .map(ProjectedKktResidual::inf_norm),
+        "the coefficient product must retain the same KKT certificate"
+    );
+
+    let expected = evaluate_custom_family_hyper_from_coefficient_mode(
+        &family,
+        &specs,
+        &options,
+        &penalty_counts,
+        &rho,
+        gam_problem::RhoPrior::Flat,
+        laplace_ready,
+    )
+    .expect("endpoint criterion from ordinary mode");
+    let actual = evaluate_custom_family_hyper_from_coefficient_mode(
+        &family,
+        &specs,
+        &options,
+        &penalty_counts,
+        &rho,
+        gam_problem::RhoPrior::Flat,
+        coefficient_mode,
+    )
+    .expect("endpoint criterion from continuation-owned mode");
+    assert_eq!(
+        expected.objective.to_bits(),
+        actual.objective.to_bits(),
+        "endpoint evaluation must restore the complete criterion without re-solving beta"
+    );
+    assert_eq!(
+        expected.warm_start.block_beta[0][0].to_bits(),
+        actual.warm_start.block_beta[0][0].to_bits()
+    );
+}
+
 /// Solve the inner problem at `rho` exactly the way the outer search does, from
 /// the seed carried in `specs` — i.e. the pre-#2366 "whatever the caller handed
 /// us" mode.

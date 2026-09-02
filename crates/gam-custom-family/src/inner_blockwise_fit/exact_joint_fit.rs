@@ -67,6 +67,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         prelude_log,
         inner_started,
         mut last_residual_tol,
+        product,
     } = context;
     let mut current_penalty: f64;
 
@@ -6197,16 +6198,21 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             assemble_active_constraint_block(&block_constraints, &tight_sets, &ranges, total_p)
                 .map(std::sync::Arc::new)
         };
-        let (block_logdet_h, block_logdet_s) = blockwise_logdet_terms_with_workspace(
-            family,
-            specs,
-            &mut states,
-            block_log_lambdas,
-            options,
-            cached_joint_workspace.clone(),
-            final_jeffreys_cache.map(|(_, _, hphi)| hphi),
-            active_constraints.as_deref(),
-        )?;
+        let (block_logdet_h, block_logdet_s) = if product.requires_laplace_artifacts() {
+            let (h, s) = blockwise_logdet_terms_with_workspace(
+                family,
+                specs,
+                &mut states,
+                block_log_lambdas,
+                options,
+                cached_joint_workspace.clone(),
+                final_jeffreys_cache.map(|(_, _, hphi)| hphi),
+                active_constraints.as_deref(),
+            )?;
+            (Some(h), Some(s))
+        } else {
+            (None, None)
+        };
         // The IFT/outer KKT residual must be the AUGMENTED stationarity
         // `∇L − Sβ + ∇Φ` the inner Newton actually drove to zero — NOT the bare
         // `∇L − Sβ`. With the Firth term armed, `∇L − Sβ = −∇Φ` at the
@@ -6296,8 +6302,8 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             cycles: cycles_done,
             converged,
             terminal_convergence_state,
-            block_logdet_h: Some(block_logdet_h),
-            block_logdet_s: Some(block_logdet_s),
+            block_logdet_h,
+            block_logdet_s,
             s_lambdas,
             joint_workspace: cached_joint_workspace.clone(),
             kkt_residual: Some(kkt_residual),
@@ -6477,21 +6483,22 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             )
             .map(std::sync::Arc::new)
         };
-        let (block_logdet_h, block_logdet_s) = if converged {
-            let (h, s) = blockwise_logdet_terms_with_workspace(
-                family,
-                specs,
-                &mut states,
-                block_log_lambdas,
-                options,
-                cached_joint_workspace.clone(),
-                None,
-                active_constraints.as_deref(),
-            )?;
-            (Some(h), Some(s))
-        } else {
-            (None, None)
-        };
+        let (block_logdet_h, block_logdet_s) =
+            if converged && product.requires_laplace_artifacts() {
+                let (h, s) = blockwise_logdet_terms_with_workspace(
+                    family,
+                    specs,
+                    &mut states,
+                    block_log_lambdas,
+                    options,
+                    cached_joint_workspace.clone(),
+                    None,
+                    active_constraints.as_deref(),
+                )?;
+                (Some(h), Some(s))
+            } else {
+                (None, None)
+            };
         // The joint score is reloaded immediately after every accepted
         // step and beta is restored before every rejected one, so the
         // vector held here belongs to the states being returned. Bind

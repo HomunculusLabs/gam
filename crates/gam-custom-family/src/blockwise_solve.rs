@@ -193,6 +193,32 @@ pub(crate) fn pullback_labeled_outer_eval(
     add_labeled_rho_prior_to_outer_eval(result, rho, rho_prior, eval_mode)
 }
 
+/// Attach the joint penalties selected by one labeled rho vector to an inner
+/// problem. Per-block penalties already travel through `physical_rho`; joint
+/// penalties need this full-width bundle so coefficient correction and endpoint
+/// criterion assembly see exactly the same objective.
+fn labeled_options_for_rho<'a>(
+    options: &'a BlockwiseFitOptions,
+    specs: &[ParameterBlockSpec],
+    layout: &PenaltyLabelLayout,
+    rho: &Array1<f64>,
+) -> Result<std::borrow::Cow<'a, BlockwiseFitOptions>, CustomFamilyError> {
+    if layout.joint_specs.is_empty() {
+        return Ok(std::borrow::Cow::Borrowed(options));
+    }
+    let total_compiled: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
+    let joint_log_lambdas = layout.joint_log_lambdas(rho);
+    let bundle = gam_problem::JointPenaltyBundle::from_validated_geometry(
+        std::sync::Arc::clone(&layout.joint_specs),
+        std::sync::Arc::clone(&layout.joint_roots),
+        joint_log_lambdas,
+        total_compiled,
+    )?;
+    let mut owned = options.clone();
+    owned.joint_penalties = Some(std::sync::Arc::new(bundle));
+    Ok(std::borrow::Cow::Owned(owned))
+}
+
 pub(crate) fn outerobjectivegradienthessian_labeled<
     F: CustomFamily + Clone + Send + Sync + 'static,
 >(
@@ -212,23 +238,8 @@ pub(crate) fn outerobjectivegradienthessian_labeled<
     // to the inner-solve options so BOTH the inner β̂ AND the outer evaluator
     // (penalty coords / logdet / operator) see the full-width centered penalty.
     // No joint specs ⇒ `options` is passed through untouched (byte-identical).
-    let options_with_joint;
-    let options: &BlockwiseFitOptions = if layout.joint_specs.is_empty() {
-        options
-    } else {
-        let total_compiled: usize = specs.iter().map(|s| s.design.ncols()).sum();
-        let joint_log_lambdas = layout.joint_log_lambdas(rho);
-        let bundle = gam_problem::JointPenaltyBundle::from_validated_geometry(
-            std::sync::Arc::clone(&layout.joint_specs),
-            std::sync::Arc::clone(&layout.joint_roots),
-            joint_log_lambdas,
-            total_compiled,
-        )?;
-        let mut cloned = options.clone();
-        cloned.joint_penalties = Some(std::sync::Arc::new(bundle));
-        options_with_joint = cloned;
-        &options_with_joint
-    };
+    let labeled_options = labeled_options_for_rho(options, specs, layout, rho)?;
+    let options = labeled_options.as_ref();
     let base = outerobjectivegradienthessian_internal(
         family,
         specs,
@@ -240,6 +251,77 @@ pub(crate) fn outerobjectivegradienthessian_labeled<
         eval_mode,
     )?;
     pullback_labeled_outer_eval(base, rho, layout, rho_prior, eval_mode)
+        .map_err(CustomFamilyError::from)
+}
+
+/// Correct one labeled-rho continuation waypoint to its certified coefficient
+/// mode, without constructing a Laplace scalar that an interior waypoint would
+/// discard.
+pub(crate) fn correct_labeled_coefficient_mode<
+    F: CustomFamily + Clone + Send + Sync + 'static,
+>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+    layout: &PenaltyLabelLayout,
+    rho: &Array1<f64>,
+    warm_start: Option<&ConstrainedWarmStart>,
+) -> Result<(BlockwiseInnerResult, ConstrainedWarmStart), CustomFamilyError> {
+    let physical_rho = expand_labeled_log_lambdas(rho, layout)?;
+    let per_block = split_log_lambdas(&physical_rho, &layout.penalty_counts)?;
+    let physical_warm_start = physical_warm_start_for_labeled(warm_start, &physical_rho, layout);
+    let labeled_options = labeled_options_for_rho(options, specs, layout, rho)?;
+    let inner = inner_blockwise_coefficient_mode(
+        family,
+        specs,
+        &per_block,
+        labeled_options.as_ref(),
+        physical_warm_start.as_ref().or(warm_start),
+    )?;
+    if !inner.converged {
+        return Err(inner_solve_not_converged_error(
+            &inner,
+            physical_rho.len(),
+            0,
+        ));
+    }
+    checked_penalizedobjective(
+        inner.log_likelihood,
+        inner.penalty_value,
+        0.0,
+        "continuation coefficient corrector",
+    )?;
+    let mut warm_start = constrained_warm_start_from_inner(&physical_rho, &inner);
+    warm_start.rho = rho.clone();
+    Ok((inner, warm_start))
+}
+
+/// Complete the value-only endpoint criterion from a continuation-owned mode.
+/// The mode is consumed, so it cannot accidentally be paired with a different
+/// endpoint after the call.
+pub(crate) fn outerobjective_from_coefficient_mode_labeled<
+    F: CustomFamily + Clone + Send + Sync + 'static,
+>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+    layout: &PenaltyLabelLayout,
+    rho: &Array1<f64>,
+    rho_prior: &gam_problem::RhoPrior,
+    inner: BlockwiseInnerResult,
+) -> Result<OuterObjectiveEvalResult, CustomFamilyError> {
+    let physical_rho = expand_labeled_log_lambdas(rho, layout)?;
+    let labeled_options = labeled_options_for_rho(options, specs, layout, rho)?;
+    let base = evaluate_custom_family_hyper_from_coefficient_mode(
+        family,
+        specs,
+        labeled_options.as_ref(),
+        &layout.penalty_counts,
+        &physical_rho,
+        gam_problem::RhoPrior::Flat,
+        inner,
+    )?;
+    pullback_labeled_outer_eval(base, rho, layout, rho_prior, EvalMode::ValueOnly)
         .map_err(CustomFamilyError::from)
 }
 

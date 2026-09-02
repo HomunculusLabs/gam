@@ -1594,6 +1594,45 @@ pub(crate) fn evaluate_custom_family_hyper_internal<
     )
 }
 
+/// Evaluate the rho-only Laplace criterion from a coefficient mode this caller
+/// already owns.
+///
+/// Continuation correctors deliberately produce no determinant artifacts. The
+/// endpoint, however, is judged by the same complete criterion as every normal
+/// value-only outer evaluation. Consuming the owned mode here avoids a second
+/// coefficient solve while leaving the authoritative joint outer evaluator in
+/// sole ownership of the endpoint logdet and prior scalar.
+pub(crate) fn evaluate_custom_family_hyper_from_coefficient_mode<
+    F: CustomFamily + Clone + Send + Sync + 'static,
+>(
+    family: &F,
+    specs: &[ParameterBlockSpec],
+    options: &BlockwiseFitOptions,
+    penalty_counts: &[usize],
+    rho_current: &Array1<f64>,
+    rho_prior: gam_problem::RhoPrior,
+    inner: BlockwiseInnerResult,
+) -> Result<OuterObjectiveEvalResult, CustomFamilyError> {
+    let hyper_layout = CustomFamilyHyperLayout::new(
+        vec![Vec::<CustomFamilyBlockPsiDerivative>::new(); specs.len()],
+        Vec::new(),
+        Array1::zeros(0),
+    )?;
+    evaluate_custom_family_hyper_internal_shared(
+        family,
+        specs,
+        options,
+        penalty_counts,
+        rho_current,
+        Arc::new(hyper_layout),
+        None,
+        rho_prior,
+        EvalMode::ValueOnly,
+        EvalMode::ValueOnly,
+        Some(inner),
+    )
+}
+
 fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     specs: &[ParameterBlockSpec],
