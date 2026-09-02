@@ -161,6 +161,30 @@ fn invalid_gpu_request(operation: &'static str, reason: &'static str) -> ! {
     panic!("GPU operation '{operation}' received invalid input: {reason}");
 }
 
+/// Non-Linux decline that still honours `GpuPolicy::Required`. Compiled only
+/// where the CUDA backend is not, so a Linux-only call-graph sweep sees no
+/// caller: d484a091a deleted it on that reading and the `x86_64-pc-windows-gnu`
+/// cross-check of the compile gate failed at its two call sites. A
+/// `#[cfg(not(target_os = "linux"))]` item is linked by the platforms the sweep
+/// does not build.
+#[cfg(not(target_os = "linux"))]
+#[inline]
+#[track_caller]
+fn decline_gpu_with_policy<T>(
+    operation: &'static str,
+    reason: &'static str,
+    gpu_policy: GpuPolicy,
+) -> Option<T> {
+    if gpu_policy == GpuPolicy::Required {
+        // SAFETY: this legacy `Option` hook has no typed error channel and
+        // `None` explicitly authorizes CPU execution, which Required forbids.
+        panic!("gpu=required operation '{operation}' cannot execute on the GPU: {reason}");
+    }
+    None
+}
+
+ /// A malformed device result is an execution fault, never an Auto decline.
+
 /// A malformed device result is an execution fault, never an Auto decline.
 #[cfg(target_os = "linux")]
 #[inline]
