@@ -1582,15 +1582,6 @@ struct DirectionalExpressionEnvironment<'a> {
     fourth: bool,
 }
 
-/// Exact normalized multivariate Taylor coefficients through degree four.
-///
-/// The directional lowering is asymptotically right for wide rows because it
-/// never materializes a dense high-order tensor. For one- and two-primary row
-/// programs, however, propagating four second-order directional jets performs
-/// more arithmetic than propagating the complete tiny Taylor polynomial once.
-/// This representation is a compile-time algebra only: emitted production code
-/// contains direct scalar formulas, not an automatic-differentiation runtime.
-#[derive(Clone)]
 /// An exact rational carried beside a dense Taylor coefficient's emitted
 /// expression: the coefficient's value is `factor · expression`, and the
 /// factor never reaches the row until a consumer needs the value.
@@ -1695,9 +1686,17 @@ fn combine_dense_taylor_terms(terms: &[(Rational, String)]) -> Option<(Rational,
     sum.map(|sum| (common, sum))
 }
 
-/// One dense truncated Taylor jet: every coefficient of total degree at most
-/// `order` in `dimension` primaries, each as `factor · expression` (see
-/// [`Rational`]).
+/// Exact normalized multivariate Taylor coefficients through degree four.
+///
+/// The directional lowering is asymptotically right for wide rows because it
+/// never materializes a dense high-order tensor. For one- and two-primary row
+/// programs, however, propagating four second-order directional jets performs
+/// more arithmetic than propagating the complete tiny Taylor polynomial once.
+/// This representation is a compile-time algebra only: emitted production code
+/// contains direct scalar formulas, not an automatic-differentiation runtime.
+///
+/// Each coefficient is `factor · expression` (see [`Rational`]).
+#[derive(Clone)]
 struct DenseTaylorJet {
     dimension: usize,
     order: usize,
