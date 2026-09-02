@@ -9,15 +9,20 @@
 //! cross-output coefficient Hessian.
 
 use crate::custom_family::{
-    BlockWorkingSet, BlockwiseFitOptions, CustomFamily, CustomFamilyError, FamilyEvaluation,
-    ParameterBlockSpec, ParameterBlockState, fit_custom_family,
+    BlockwiseFitOptions, CustomFamilyError, ParameterBlockSpec, fit_custom_family,
 };
+use crate::indexed_natural::{IndexedNaturalDiagonalFamily, IndexedNaturalDiagonalProgram};
 use gam_model_kernels::bernoulli_link::{
     bernoulli_natural_jet, bernoulli_natural_observation,
 };
+use gam_model_kernels::natural_observation::NaturalDiagonalObservation;
 use gam_problem::{EstimationError, OwnedCellValues, OwnedSeparableCellMeasure};
 use gam_solve::model_types::UnifiedFitResult;
 use gam_spec::{InverseLink, StandardLink};
+
+#[cfg(test)]
+use crate::custom_family::{BlockWorkingSet, CustomFamily, ParameterBlockState};
+#[cfg(test)]
 use ndarray::Array1;
 
 /// Owned indexed Bernoulli response family.
@@ -27,13 +32,16 @@ use ndarray::Array1;
 /// Active cells, including active cells with numerical weight zero, must contain
 /// a finite binomial proportion in `[0, 1]`.
 #[derive(Clone, Debug)]
-pub struct IndexedBernoulliFamily {
+pub struct IndexedBernoulliProgram {
     y: OwnedCellValues,
     measure: OwnedSeparableCellMeasure,
     link: InverseLink,
 }
 
-impl IndexedBernoulliFamily {
+/// Indexed Bernoulli response driven by the shared natural-diagonal engine.
+pub type IndexedBernoulliFamily = IndexedNaturalDiagonalFamily<IndexedBernoulliProgram>;
+
+impl IndexedNaturalDiagonalFamily<IndexedBernoulliProgram> {
     pub fn new(
         y: OwnedCellValues,
         measure: OwnedSeparableCellMeasure,
@@ -67,120 +75,53 @@ impl IndexedBernoulliFamily {
             }
             Ok(())
         })?;
-        Ok(Self {
+        Self::from_program(IndexedBernoulliProgram {
             y,
             measure,
             link,
         })
     }
 
-    pub fn n_rows(&self) -> usize {
-        self.y.n_rows()
-    }
-
-    pub fn n_outputs(&self) -> usize {
-        self.y.n_outputs()
-    }
-
     pub fn link(&self) -> &InverseLink {
-        &self.link
-    }
-
-    fn validate_states(&self, block_states: &[ParameterBlockState]) -> Result<(), String> {
-        if block_states.len() != self.n_outputs() {
-            return Err(format!(
-                "indexed Bernoulli family requires one parameter block per output: got {}, expected {}",
-                block_states.len(),
-                self.n_outputs(),
-            ));
-        }
-        for (output, state) in block_states.iter().enumerate() {
-            if state.eta.len() != self.n_rows() {
-                return Err(format!(
-                    "indexed Bernoulli output {output} predictor has length {}, expected {}",
-                    state.eta.len(),
-                    self.n_rows(),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn evaluate_output(
-        &self,
-        output: usize,
-        eta: &Array1<f64>,
-        derivatives: bool,
-    ) -> Result<(f64, Option<(Array1<f64>, Array1<f64>)>), String> {
-        let mut log_likelihood = 0.0;
-        let mut score = derivatives.then(|| Array1::<f64>::zeros(self.n_rows()));
-        let mut curvature = derivatives.then(|| Array1::<f64>::zeros(self.n_rows()));
-        for row in 0..self.n_rows() {
-            let Some(weight) = self.measure.active_weight(row, output) else {
-                continue;
-            };
-            if weight == 0.0 {
-                continue;
-            }
-            let observation = bernoulli_natural_observation(
-                row,
-                self.y
-                    .value(row, output)
-                    .expect("validated response geometry"),
-                eta[row],
-                &self.link,
-            )
-            .map_err(|error| error.to_string())?;
-            log_likelihood += weight * observation.log_likelihood;
-            if let (Some(score), Some(curvature)) = (&mut score, &mut curvature) {
-                score[row] = weight * observation.score;
-                curvature[row] = weight * observation.negative_hessian;
-            }
-        }
-        if !log_likelihood.is_finite() {
-            return Err(format!(
-                "indexed Bernoulli output {output} produced non-finite log likelihood {log_likelihood}"
-            ));
-        }
-        Ok((log_likelihood, score.zip(curvature)))
+        &self.program().link
     }
 }
 
-impl CustomFamily for IndexedBernoulliFamily {
-    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
-        self.validate_states(block_states)?;
-        let mut log_likelihood = 0.0;
-        let mut blockworking_sets = Vec::with_capacity(self.n_outputs());
-        for (output, state) in block_states.iter().enumerate() {
-            let (value, derivatives) = self.evaluate_output(output, &state.eta, true)?;
-            log_likelihood += value;
-            let (score, curvature) = derivatives.ok_or_else(|| {
-                format!("indexed Bernoulli output {output} omitted requested derivatives")
-            })?;
-            blockworking_sets.push(BlockWorkingSet::natural_diagonal_checked(score, curvature)?);
-        }
-        Ok(FamilyEvaluation {
-            log_likelihood,
-            blockworking_sets,
-        })
+impl IndexedNaturalDiagonalProgram for IndexedBernoulliProgram {
+    fn family_name(&self) -> &'static str {
+        "indexed Bernoulli"
     }
 
-    fn log_likelihood_only(&self, block_states: &[ParameterBlockState]) -> Result<f64, String> {
-        self.validate_states(block_states)?;
-        block_states
-            .iter()
-            .enumerate()
-            .try_fold(0.0, |total, (output, state)| {
-                self.evaluate_output(output, &state.eta, false)
-                    .map(|(value, _)| total + value)
-            })
+    fn n_rows(&self) -> usize {
+        self.y.n_rows()
     }
 
-    fn classical_deviance(
+    fn n_outputs(&self) -> usize {
+        self.y.n_outputs()
+    }
+
+    fn measure(&self) -> &OwnedSeparableCellMeasure {
+        &self.measure
+    }
+
+    fn observation(
         &self,
-        block_states: &[ParameterBlockState],
-    ) -> Result<Option<f64>, String> {
-        let fitted = self.log_likelihood_only(block_states)?;
+        row: usize,
+        output: usize,
+        eta: f64,
+    ) -> Result<NaturalDiagonalObservation, EstimationError> {
+        bernoulli_natural_observation(
+            row,
+            self.y
+                .value(row, output)
+                .expect("validated response geometry"),
+            eta,
+            &self.link,
+        )
+        .map(Into::into)
+    }
+
+    fn classical_deviance(&self, fitted_log_likelihood: f64) -> Result<Option<f64>, String> {
         let mut saturated = 0.0;
         self.measure.try_for_each_active(|row, output, weight| {
             if weight == 0.0 {
@@ -198,18 +139,10 @@ impl CustomFamily for IndexedBernoulliFamily {
             saturated += weight * unit;
             Ok(())
         })?;
-        Ok(Some(2.0 * (saturated - fitted)))
+        Ok(Some(2.0 * (saturated - fitted_log_likelihood)))
     }
 
-    fn likelihood_blocks_uncoupled(&self) -> bool {
-        true
-    }
-
-    fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {
-        true
-    }
-
-    fn inner_coefficient_objective_is_globally_convex(&self) -> bool {
+    fn coefficient_objective_is_globally_convex(&self) -> bool {
         matches!(
             self.link,
             InverseLink::Standard(
@@ -219,100 +152,6 @@ impl CustomFamily for IndexedBernoulliFamily {
                     | StandardLink::LogLog
             )
         )
-    }
-
-    fn output_channel_assignment(&self, specs: &[ParameterBlockSpec]) -> Option<Vec<usize>> {
-        Some((0..specs.len()).collect())
-    }
-
-    fn diagonalworking_weights_directional_derivative(
-        &self,
-        block_states: &[ParameterBlockState],
-        block_index: usize,
-        d_eta: &Array1<f64>,
-    ) -> Result<Option<Array1<f64>>, String> {
-        self.validate_states(block_states)?;
-        let state = block_states.get(block_index).ok_or_else(|| {
-            format!(
-                "indexed Bernoulli curvature derivative block {block_index} is outside 0..{}",
-                block_states.len()
-            )
-        })?;
-        if d_eta.len() != self.n_rows() {
-            return Err(format!(
-                "indexed Bernoulli curvature direction has length {}, expected {}",
-                d_eta.len(),
-                self.n_rows(),
-            ));
-        }
-        let mut derivative = Array1::<f64>::zeros(self.n_rows());
-        for row in 0..self.n_rows() {
-            let Some(weight) = self.measure.active_weight(row, block_index) else {
-                continue;
-            };
-            if weight == 0.0 {
-                continue;
-            }
-            let observation = bernoulli_natural_observation(
-                row,
-                self.y
-                    .value(row, block_index)
-                    .expect("validated response geometry"),
-                state.eta[row],
-                &self.link,
-            )
-            .map_err(|error| error.to_string())?;
-            derivative[row] = weight * observation.negative_hessian_derivative * d_eta[row];
-        }
-        Ok(Some(derivative))
-    }
-
-    fn diagonalworking_weights_second_directional_derivative(
-        &self,
-        block_states: &[ParameterBlockState],
-        block_index: usize,
-        d_eta_u: &Array1<f64>,
-        d_eta_v: &Array1<f64>,
-    ) -> Result<Option<Array1<f64>>, String> {
-        self.validate_states(block_states)?;
-        let state = block_states.get(block_index).ok_or_else(|| {
-            format!(
-                "indexed Bernoulli second curvature derivative block {block_index} is outside 0..{}",
-                block_states.len()
-            )
-        })?;
-        for (name, direction) in [("u", d_eta_u), ("v", d_eta_v)] {
-            if direction.len() != self.n_rows() {
-                return Err(format!(
-                    "indexed Bernoulli second curvature direction {name} has length {}, expected {}",
-                    direction.len(),
-                    self.n_rows(),
-                ));
-            }
-        }
-        let mut derivative = Array1::<f64>::zeros(self.n_rows());
-        for row in 0..self.n_rows() {
-            let Some(weight) = self.measure.active_weight(row, block_index) else {
-                continue;
-            };
-            if weight == 0.0 {
-                continue;
-            }
-            let observation = bernoulli_natural_observation(
-                row,
-                self.y
-                    .value(row, block_index)
-                    .expect("validated response geometry"),
-                state.eta[row],
-                &self.link,
-            )
-            .map_err(|error| error.to_string())?;
-            derivative[row] = weight
-                * observation.negative_hessian_second_derivative
-                * d_eta_u[row]
-                * d_eta_v[row];
-        }
-        Ok(Some(derivative))
     }
 }
 
