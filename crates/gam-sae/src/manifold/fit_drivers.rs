@@ -9,6 +9,71 @@ use opt::{BacktrackConfig, RidgeSchedule, backtracking_line_search, escalate_rid
 /// Hessian unfactorable.
 const SAE_MANIFOLD_ROW_RIDGE_MAX_ATTEMPTS: usize = 12;
 
+const SAE_MANIFOLD_LM_RATIO_LOW: f64 = 0.25;
+const SAE_MANIFOLD_LM_RATIO_HIGH: f64 = 0.75;
+const SAE_MANIFOLD_LM_RIDGE_FACTOR: f64 = 4.0;
+
+impl InnerGlobalizationHint {
+    pub(crate) fn cold(step_size: f64, ridge_ext_coord: f64, ridge_beta: f64) -> Self {
+        Self {
+            warm_step: step_size,
+            lm_ridge_t: ridge_ext_coord,
+            lm_ridge_b: ridge_beta,
+        }
+    }
+
+    pub(crate) fn resume(
+        carried: Option<Self>,
+        step_size: f64,
+        ridge_ext_coord: f64,
+        ridge_beta: f64,
+    ) -> Self {
+        carried.map_or_else(
+            || Self::cold(step_size, ridge_ext_coord, ridge_beta),
+            |hint| Self {
+                warm_step: hint.warm_step.max(step_size),
+                lm_ridge_t: hint.lm_ridge_t.max(ridge_ext_coord),
+                lm_ridge_b: hint.lm_ridge_b.max(ridge_beta),
+            },
+        )
+    }
+
+    pub(crate) fn record_accepted_step(
+        &mut self,
+        accepted_step: f64,
+        warm_growth: f64,
+        unit_step_ceiling: f64,
+        gain_ratio: f64,
+        ridge_ext_coord: f64,
+        ridge_beta: f64,
+    ) {
+        let clean_acceptance = accepted_step >= self.warm_step;
+        self.warm_step = if clean_acceptance {
+            (self.warm_step * warm_growth).min(unit_step_ceiling)
+        } else {
+            (accepted_step * warm_growth).min(unit_step_ceiling)
+        };
+        if gain_ratio < SAE_MANIFOLD_LM_RATIO_LOW {
+            self.lm_ridge_t *= SAE_MANIFOLD_LM_RIDGE_FACTOR;
+            self.lm_ridge_b *= SAE_MANIFOLD_LM_RIDGE_FACTOR;
+        } else if gain_ratio > SAE_MANIFOLD_LM_RATIO_HIGH {
+            self.lm_ridge_t =
+                (self.lm_ridge_t / SAE_MANIFOLD_LM_RIDGE_FACTOR).max(ridge_ext_coord);
+            self.lm_ridge_b =
+                (self.lm_ridge_b / SAE_MANIFOLD_LM_RIDGE_FACTOR).max(ridge_beta);
+        }
+    }
+
+    pub(crate) fn reset(
+        &mut self,
+        step_size: f64,
+        ridge_ext_coord: f64,
+        ridge_beta: f64,
+    ) {
+        *self = Self::cold(step_size, ridge_ext_coord, ridge_beta);
+    }
+}
+
 /// Floor on the per-axis coordinate spread used to guard the ARD moment-match
 /// (`α' = α · spread_pre / spread_post`, F3). Below this the spread is
 /// numerically degenerate (a near-constant coordinate) and the ratio is
@@ -7083,12 +7148,19 @@ impl SaeManifoldTerm {
         // globalization — KKT convergence and typed exhaustion (#2235/#2241)
         // unchanged.
         let warm_growth = 1.0 / BacktrackConfig::default().contraction;
-        // #2267 — resume the globalization ladder the previous re-entry
-        // established (see `inner_line_search_warm_step`), floored at the
-        // caller's conservative `step_size` so a cold term still starts damped.
-        let mut warm_step = self
-            .inner_line_search_warm_step
-            .map_or(step_size, |carried| carried.max(step_size));
+        // #2267/#2762 — resume the WHOLE globalization state the previous
+        // re-entry established. The Armijo step length and the two LM ridges
+        // describe one optimizer trajectory; resuming only the step length
+        // while restoring the ridges to their caller floors made every evidence
+        // refinement window spend its first iterations rediscovering the same
+        // trust region. The caller values remain hard floors, so a continuation
+        // never resumes less damping or a shorter first trial than a cold solve.
+        let mut globalization = InnerGlobalizationHint::resume(
+            self.inner_globalization_hint,
+            step_size,
+            ridge_ext_coord,
+            ridge_beta,
+        );
         // #2015 Levenberg–Marquardt ridge, adapted across iterates. The primary
         // solve (`solve_with_lm_escalation_inner`) escalates the ridge only when
         // the factorization FAILS, so on a well-conditioned-but-nonlinear system
@@ -7109,8 +7181,6 @@ impl SaeManifoldTerm {
         // Armijo still refereed the true objective, so descent — and the
         // #2235/#2241 certified-termination / typed-exhaustion contract — is
         // unchanged; only the trajectory to the same certified optimum is.
-        let mut lm_ridge_t = ridge_ext_coord;
-        let mut lm_ridge_b = ridge_beta;
         let mut termination = JointFitTermination::IterationGrantExhausted;
         // #2762 — whether the gauge-orbit block descent is armed for the NEXT
         // objective-stall plateau in the ORDINARY lane. Same arm/disarm doctrine
@@ -7276,8 +7346,13 @@ impl SaeManifoldTerm {
             // errors (PCG divergence with no factor failure, adaptive-step
             // exhaustion, …) still surface immediately.
             let (mut delta_ext_coord, mut delta_beta, _diag) =
-                solve_with_lm_escalation_inner(&sys, lm_ridge_t, lm_ridge_b, &solve_options)
-                    .map_err(|err| format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}"))?;
+                solve_with_lm_escalation_inner(
+                    &sys,
+                    globalization.lm_ridge_t,
+                    globalization.lm_ridge_b,
+                    &solve_options,
+                )
+                .map_err(|err| format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}"))?;
             // #1095/#2228 (second root) — per-row STEP gauge fixing. On a chart
             // over-parametrized for its intrinsic data dimension (d=2 chart on an
             // intrinsically 1-D circle) every per-row `H_tt` carries a rank-1
@@ -7659,7 +7734,7 @@ impl SaeManifoldTerm {
             let accepted_step = if descent_direction_ok {
                 backtracking_line_search::<_, String>(
                     BacktrackConfig {
-                        initial_step: warm_step,
+                        initial_step: globalization.warm_step,
                         max_steps: SAE_MANIFOLD_MAX_LINESEARCH_HALVINGS + 1,
                         ..BacktrackConfig::default()
                     },
@@ -7720,13 +7795,16 @@ impl SaeManifoldTerm {
             log::debug!(
                 "[SAE/inner] it={outer_iteration} ‖g‖={grad_norm:.6e} \
                  ‖Π⊥g‖={quotient_grad_norm:.6e} ‖Δ‖={:.6e} gᵀΔ={directional_decrease:.6e} \
-                 alpha={} warm={warm_step:.4e} ridge_t={lm_ridge_t:.3e} ridge_b={lm_ridge_b:.3e} \
+                 alpha={} warm={:.4e} ridge_t={:.3e} ridge_b={:.3e} \
                  obj={pre_step_total:.9e}",
                 step_norm_sq.sqrt(),
                 match accepted_step.as_ref() {
                     Some(step) => format!("{:.4e}", step.step),
                     None => "rejected".to_string(),
                 },
+                globalization.warm_step,
+                globalization.lm_ridge_t,
+                globalization.lm_ridge_b,
             );
             if let Some(step) = accepted_step {
                 state_moved = true;
@@ -7764,14 +7842,6 @@ impl SaeManifoldTerm {
                 // installed above: getting the curvature right is what makes the
                 // unit step SAFE to try, and lifting the ceiling is what lets the
                 // solve actually take it.
-                let unit_step_ceiling = step_size.max(1.0);
-                let clean_acceptance = step.step >= warm_step;
-                warm_step = if clean_acceptance {
-                    (warm_step * warm_growth).min(unit_step_ceiling)
-                } else {
-                    (step.step * warm_growth).min(unit_step_ceiling)
-                };
-                self.inner_line_search_warm_step = Some(warm_step);
                 // True Levenberg–Marquardt gain-ratio ridge adaptation (a
                 // trust-region on the RIDGE, not the step length). The gain ratio
                 //   ρ = actual decrease / model-predicted decrease
@@ -7788,12 +7858,11 @@ impl SaeManifoldTerm {
                 // 0.25/0.75 trust-region thresholds; factor 4 the standard
                 // aggressive LM step (Marquardt / Nocedal–Wright Alg. 4.1, inverted
                 // for the ridge↔radius reciprocal). Floored at the caller's ridges.
-                const LM_RATIO_LOW: f64 = 0.25;
-                const LM_RATIO_HIGH: f64 = 0.75;
-                const LM_RIDGE_FACTOR: f64 = 4.0;
                 let alpha = step.step;
                 let actual = pre_step_total - step.value;
-                let d_th_d = (directional_decrease - lm_ridge_b * step_norm_sq).max(0.0);
+                let d_th_d = (directional_decrease
+                    - globalization.lm_ridge_b * step_norm_sq)
+                    .max(0.0);
                 let predicted =
                     (alpha * directional_decrease - 0.5 * alpha * alpha * d_th_d).max(0.0);
                 let gain_ratio = if predicted > 0.0 {
@@ -7801,26 +7870,25 @@ impl SaeManifoldTerm {
                 } else {
                     1.0
                 };
-                if gain_ratio < LM_RATIO_LOW {
-                    lm_ridge_t *= LM_RIDGE_FACTOR;
-                    lm_ridge_b *= LM_RIDGE_FACTOR;
-                } else if gain_ratio > LM_RATIO_HIGH {
-                    lm_ridge_t = (lm_ridge_t / LM_RIDGE_FACTOR).max(ridge_ext_coord);
-                    lm_ridge_b = (lm_ridge_b / LM_RIDGE_FACTOR).max(ridge_beta);
-                }
+                globalization.record_accepted_step(
+                    step.step,
+                    warm_growth,
+                    step_size.max(1.0),
+                    gain_ratio,
+                    ridge_ext_coord,
+                    ridge_beta,
+                );
+                self.inner_globalization_hint = Some(globalization);
             }
             if !accepted {
-                // The proximal correction below runs its own ridge escalation from
-                // the caller's base, so reset the adaptive LM ridge to base too.
-                lm_ridge_t = ridge_ext_coord;
-                lm_ridge_b = ridge_beta;
                 // The proximal LM correction below re-solves with its own ridge
                 // escalation; the next line-search regime is unrelated to this
-                // iterate's accepted length, so reset the warm start — and carry
-                // the reset, so a struggling fit does not resume a re-entry at a
-                // trial length its own line search just refused (#2267).
-                warm_step = step_size;
-                self.inner_line_search_warm_step = Some(warm_step);
+                // iterate's accepted length or ridge, so reset and carry the
+                // complete globalization state atomically. A struggling fit
+                // cannot resume a re-entry with any control from the regime its
+                // own line search just refused (#2267/#2762).
+                globalization.reset(step_size, ridge_ext_coord, ridge_beta);
+                self.inner_globalization_hint = Some(globalization);
                 self.restore_mutable_state(&snapshot)?;
                 let correction = ArrowProximalCorrectionOptions {
                     initial_ridge: ridge_ext_coord

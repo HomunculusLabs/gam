@@ -1598,14 +1598,18 @@ impl SaeManifoldTerm {
             *criterion_fixed_point = refine.fixed_point;
             total_inner_iter += refine_iter;
             refine_rounds += 1;
-            // #2472 — one line per refine round: the round budget is
-            // `inner_max_iter x 64` (>= 256), and each round is a full
+            // #2472/#2762 — one line per refine round: the nominal progress
+            // budget is `inner_max_iter x 64` (>= 256) TOTAL inner iterations,
+            // and each round is a full
             // assembly + factorization + damped Newton sweep, so this loop is
             // where a criterion evaluation spends its wall clock. Without it a
-            // running evaluation is indistinguishable from a hang.
+            // running evaluation is indistinguishable from a hang. Report the
+            // round ordinal and the current total-iteration limit separately:
+            // printing the iteration limit as a round denominator made a
+            // 1,920-iteration ceiling read as 1,920 thirty-iteration rounds.
             log::info!(
-                "[SAE-REFINE] round {refine_rounds}/{progress_refine_iter} \
-                 refine_iter={refine_iter} inner_total={total_inner_iter} \
+                "[SAE-REFINE] round={refine_rounds} refine_iter={refine_iter} \
+                 inner_total={total_inner_iter} inner_limit={refine_limit} \
                  elapsed={:.1}s",
                 refine_started.elapsed().as_secs_f64(),
             );

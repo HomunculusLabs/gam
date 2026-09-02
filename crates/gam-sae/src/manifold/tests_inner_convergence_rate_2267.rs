@@ -309,3 +309,71 @@ fn zz_measure_seed_curvature_fidelity_2267() {
         "seed curvature quadratic forms must be finite (vᵀBv={vbv}, vᵀAv={vav})"
     );
 }
+
+/// #2762 — an evidence-refinement re-entry is a continuation window of one
+/// optimizer trajectory. All three globalization controls therefore cross the
+/// window boundary together: carrying the Armijo step while silently restoring
+/// the LM ridges to their caller floors recreates the high-residual overshoot
+/// that the preceding window had already priced.
+#[test]
+fn inner_globalization_resumes_and_resets_as_one_typed_state_2762() {
+    let step_floor = 0.05;
+    let ridge_t_floor = 1.0e-6;
+    let ridge_b_floor = 1.0e-6;
+
+    // Window one starts cold, accepts a clean step, and diagnoses a poor model
+    // ratio. The next trust region is therefore a longer Armijo trial with both
+    // LM ridges raised together.
+    let mut first_window = InnerGlobalizationHint::resume(
+        None,
+        step_floor,
+        ridge_t_floor,
+        ridge_b_floor,
+    );
+    first_window.record_accepted_step(
+        step_floor,
+        2.0,
+        1.0,
+        0.1,
+        ridge_t_floor,
+        ridge_b_floor,
+    );
+    assert_eq!(
+        first_window,
+        InnerGlobalizationHint {
+            warm_step: 0.1,
+            lm_ridge_t: 4.0e-6,
+            lm_ridge_b: 4.0e-6,
+        }
+    );
+
+    // Window two raises its caller floors, but they remain floors rather than
+    // resets: every established control survives when it is already larger.
+    let mut second_window = InnerGlobalizationHint::resume(
+        Some(first_window),
+        0.08,
+        2.0e-6,
+        3.0e-6,
+    );
+    assert_eq!(second_window, first_window);
+    second_window.record_accepted_step(0.1, 2.0, 1.0, 0.5, 2.0e-6, 3.0e-6);
+    assert_eq!(
+        second_window,
+        InnerGlobalizationHint {
+            warm_step: 0.2,
+            lm_ridge_t: 4.0e-6,
+            lm_ridge_b: 4.0e-6,
+        }
+    );
+
+    // A rejected regime resets the SAME typed value atomically; a cloned model
+    // is a distinct optimization and starts without any transient hint.
+    second_window.reset(step_floor, ridge_t_floor, ridge_b_floor);
+    assert_eq!(
+        second_window,
+        InnerGlobalizationHint::cold(step_floor, ridge_t_floor, ridge_b_floor)
+    );
+    let (mut term, _, _) = p16_circle_rung();
+    term.inner_globalization_hint = Some(first_window);
+    assert_eq!(term.clone().inner_globalization_hint, None);
+}
