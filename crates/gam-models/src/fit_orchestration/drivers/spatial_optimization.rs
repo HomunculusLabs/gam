@@ -375,6 +375,7 @@ pub(crate) fn try_build_latent_coord_hyper_dirs(
                 nullspace_order,
                 identifiability_transform,
                 input_scale,
+                radial_reparam,
                 ..
             },
         ) => gam_terms::basis::LatentCoordDesignDerivative::new_duchon(
@@ -385,6 +386,9 @@ pub(crate) fn try_build_latent_coord_hyper_dirs(
             *length_scale,
             *power,
             *nullspace_order,
+            // The frozen data-metric radial chart the shipped kernel block is
+            // expressed in (gam#979).
+            radial_reparam.as_ref(),
             identifiability_transform.clone(),
         )
         .map_err(EstimationError::from)?,

@@ -967,6 +967,121 @@ pub(crate) fn exact_a_reduced_classification(
     }))
 }
 
+/// Matrix-free scalar sibling of [`exact_a_reduced_classification`].
+///
+/// For a reduced-border direction `beta`, lift the Schur graph direction
+/// `t = -A_tt^-1 A_tbeta beta` through the already classified row factors and
+/// evaluate the two quadratic forms the shared exact-A classifier needs:
+/// `v'B_raw v` and `v'E v`, `v = (t, beta)`.  No dense `K × K` metric is formed.
+pub(crate) fn exact_a_reduced_direction_metrics(
+    sys: &ArrowSchurSystem,
+    htt_factors: &ArrowFactorSlab,
+    ridge_beta: f64,
+    direction: ArrayView1<'_, f64>,
+) -> Result<(f64, f64), ArrowSchurError> {
+    let geometry = sys.exact_a_classification.as_ref().ok_or_else(|| {
+        ArrowSchurError::SchurFactorFailed {
+            reason: "exact-A reduced direction classification requires its raw B/delta/clamp carrier"
+                .to_string(),
+        }
+    })?;
+    if direction.len() != sys.k || geometry.rows.len() != sys.rows.len() {
+        return Err(ArrowSchurError::SchurFactorFailed {
+            reason: format!(
+                "exact-A reduced direction classification has direction width {}, border {}, \
+                 and {} carrier rows for {} system rows",
+                direction.len(),
+                sys.k,
+                geometry.rows.len(),
+                sys.rows.len(),
+            ),
+        });
+    }
+
+    // The reduced evidence operator is `P S P + Q Q'` when a beta gauge is
+    // installed.  Classify `P beta` in the physical B/E metrics and count the
+    // structural gauge pin in B at its exact unit stiffness.
+    let physical_direction = match sys.beta_gauge_quotient.as_ref() {
+        Some(quotient) => quotient.project_complement(direction),
+        None => direction.to_owned(),
+    };
+    let gauge_stiffness = sys.beta_gauge_quotient.as_ref().map_or(0.0, |quotient| {
+        quotient
+            .directions
+            .iter()
+            .map(|gauge| {
+                let coefficient = gauge.dot(&direction);
+                coefficient * coefficient
+            })
+            .sum()
+    });
+    let beta_slice = physical_direction
+        .as_slice()
+        .expect("owned exact-A classification direction is contiguous");
+    let mut penalty_action = vec![0.0_f64; sys.k];
+    sys.penalty_matvec_add(beta_slice, &mut penalty_action);
+    let mut majorizer_curvature = physical_direction
+        .iter()
+        .zip(penalty_action.iter())
+        .map(|(&left, &right)| left * right)
+        .sum::<f64>()
+        + ridge_beta * physical_direction.dot(&physical_direction)
+        + gauge_stiffness;
+    let mut clamp_curvature = 0.0_f64;
+
+    for (row_index, row) in sys.rows.iter().enumerate() {
+        let q = sys.row_dims[row_index];
+        let operands = &geometry.rows[row_index];
+        if operands.delta_tt.dim() != (q, q)
+            || operands.delta_tbeta.nrows() != q
+            || operands.delta_tbeta.ncols() != geometry.border_indices.len()
+            || operands.clamp_diag.len() != q
+        {
+            return Err(ArrowSchurError::SchurFactorFailed {
+                reason: format!(
+                    "exact-A reduced direction classification row {row_index} is incompatible \
+                     with latent width {q} and border carrier width {}",
+                    geometry.border_indices.len(),
+                ),
+            });
+        }
+        let mut a_cross = Array1::<f64>::zeros(q);
+        sys_htbeta_apply_row(
+            sys,
+            row_index,
+            row,
+            physical_direction.view(),
+            &mut a_cross,
+        );
+        let mut graph = cholesky_solve_vector(htt_factors.factor(row_index), a_cross.view());
+        graph.mapv_inplace(|value| -value);
+        let mut b_cross = a_cross;
+        for (carrier_column, &system_column) in geometry.border_indices.iter().enumerate() {
+            if system_column >= sys.k {
+                return Err(ArrowSchurError::SchurFactorFailed {
+                    reason: format!(
+                        "exact-A reduced direction classification border index {system_column} \
+                         exceeds width {}",
+                        sys.k,
+                    ),
+                });
+            }
+            for local in 0..q {
+                b_cross[local] -= operands.delta_tbeta[[local, carrier_column]]
+                    * physical_direction[system_column];
+            }
+        }
+        let b_tt = &row.htt - &operands.delta_tt;
+        majorizer_curvature += graph.dot(&b_tt.dot(&graph)) + 2.0 * graph.dot(&b_cross);
+        clamp_curvature += graph
+            .iter()
+            .zip(operands.clamp_diag.iter())
+            .map(|(&value, &clamp)| clamp * value * value)
+            .sum::<f64>();
+    }
+    Ok((majorizer_curvature, clamp_curvature))
+}
+
 pub(crate) fn factor_dense_reduced_schur(
     schur: &Array2<f64>,
     policy: ReducedSchurPolicy,
@@ -1720,7 +1835,32 @@ impl<'a, B: BatchedBlockSolver + Sync> ReducedSchurOperator<'a, B> {
     /// buffer per apply is correct (and the shift-ladder CG contract is upheld).
     #[inline]
     pub(crate) fn apply_into(&self, x: &Array1<f64>, out: &mut Array1<f64>) {
-        let Some(quotient) = self.sys.beta_gauge_quotient.as_ref() else {
+        if let Some(quotient) = self.sys.beta_gauge_quotient.as_ref() {
+            // Evidence operator on the quotient: `P S P + Q Q^T`.  Apply the
+            // original reduced Schur only to `P x`, project its result once more,
+            // then add the unit Faddeev--Popov pin. The same arithmetic is used by
+            // dense `pin_reduced_schur`, so SLQ/rational-logdet values and dense
+            // Cholesky values represent the identical operator.
+            let projected_x = quotient.project_complement(x.view());
+            if let Some(gpu) = self.gpu_matvec {
+                gpu(&projected_x, out);
+            } else {
+                schur_matvec(
+                    self.sys,
+                    self.htt_factors,
+                    self.ridge_beta,
+                    &projected_x,
+                    out,
+                    self.backend,
+                    self.resident,
+                );
+            }
+            let mut projected_out = quotient.project_complement(out.view());
+            for direction in quotient.directions.iter() {
+                projected_out.scaled_add(direction.dot(x), direction);
+            }
+            out.assign(&projected_out);
+        } else {
             if let Some(gpu) = self.gpu_matvec {
                 gpu(x, out);
             } else {
@@ -1734,33 +1874,19 @@ impl<'a, B: BatchedBlockSolver + Sync> ReducedSchurOperator<'a, B> {
                     self.resident,
                 );
             }
-            return;
-        };
+        }
 
-        // Evidence operator on the quotient: `P S P + Q Q^T`.  Apply the
-        // original reduced Schur only to `P x`, project its result once more,
-        // then add the unit Faddeev--Popov pin. The same arithmetic is used by
-        // dense `pin_reduced_schur`, so SLQ/rational-logdet values and dense
-        // Cholesky values represent the identical operator.
-        let projected_x = quotient.project_complement(x.view());
-        if let Some(gpu) = self.gpu_matvec {
-            gpu(&projected_x, out);
-        } else {
-            schur_matvec(
-                self.sys,
-                self.htt_factors,
-                self.ridge_beta,
-                &projected_x,
-                out,
-                self.backend,
-                self.resident,
-            );
+        if let Some(conditioning) = self.sys.exact_a_reduced_conditioning.as_ref() {
+            assert_eq!(conditioning.directions.len(), conditioning.shifts.len());
+            for (direction, &shift) in conditioning
+                .directions
+                .iter()
+                .zip(conditioning.shifts.iter())
+            {
+                assert_eq!(direction.len(), self.sys.k);
+                out.scaled_add(shift * direction.dot(x), direction);
+            }
         }
-        let mut projected_out = quotient.project_complement(out.view());
-        for direction in quotient.directions.iter() {
-            projected_out.scaled_add(direction.dot(x), direction);
-        }
-        out.assign(&projected_out);
     }
 
     /// `S·v` into a fresh length-`k` vector — the shift-ladder matvec-closure form
@@ -1850,41 +1976,36 @@ pub(crate) fn slq_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
             relative_floor,
         )
         .as_logdet()),
-        // #2515 — this lane has no eigenvalues, only Ritz values, so it cannot
-        // make the full resolved-negative verdict the dense reduced Schur makes.
-        // What it CAN do is certify one direction of it. Every Ritz value of a
-        // symmetric operator is a Rayleigh quotient of a Krylov vector and so lies
-        // in `[λ_min, λ_max]`; a Ritz value below `−band` therefore PROVES
-        // `λ_min < −band`. The converse fails — an unconverged Krylov space can
-        // miss a negative eigenvalue entirely — so this refuses only states that
-        // really are indefinite and silently admits some that are. One-sided is
-        // the usable direction: a false refusal would decline a state the dense
-        // route legitimately ranks, and there are none.
-        ArrowEvidencePolicy::UnitDeflationRefusingIndefinite { relative_floor } => {
-            let deflated = slq_logdet_unit_deflated(
+        // #2515 — a negative Ritz value is a Rayleigh quotient of raw A, not a
+        // saddle verdict. Lift each Ritz direction and ask the same typed
+        // B-metric/clamp-basin classifier as the dense and direct-arrow routes.
+        ArrowEvidencePolicy::UnitDeflationRefusingIndefinite {
+            relative_floor: _,
+        } => {
+            if sys.exact_a_classification.is_none() {
+                return Err(ArrowSchurError::SchurFactorFailed {
+                    reason: "matrix-free exact-A evidence policy requires the raw B/delta/clamp \
+                             classification carrier"
+                        .to_string(),
+                });
+            }
+            slq_logdet_exact_a_classified(
                 k,
                 |v| op.apply(v),
+                |direction| {
+                    exact_a_reduced_direction_metrics(
+                        sys,
+                        htt_factors,
+                        ridge_beta,
+                        direction,
+                    )
+                    .map_err(|error| error.to_string())
+                },
                 num_probes,
                 lanczos_steps,
                 seed,
-                relative_floor,
-            );
-            if deflated.min_ritz < -deflated.deflate_floor {
-                return Err(ArrowSchurError::SchurFactorFailed {
-                    reason: format!(
-                        "matrix-free reduced-Schur {}: a Ritz value of {:.6e} certifies an \
-                         eigenvalue below the null band of {:.6e} (spectral radius \
-                         {:.6e}). Every Ritz value lies in [lambda_min, lambda_max], so \
-                         this is a proof of indefiniteness and not an estimate of one \
-                         (#2515/#2336)",
-                        ArrowSchurError::indefinite_evidence_marker(),
-                        deflated.min_ritz,
-                        deflated.deflate_floor,
-                        deflated.lambda_max_abs
-                    ),
-                });
-            }
-            Ok(deflated.as_logdet())
+            )
+            .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason })
         }
         ArrowEvidencePolicy::Strict | ArrowEvidencePolicy::PositiveDefinite => {
             Ok(slq_logdet(k, |v| op.apply(v), num_probes, lanczos_steps, seed))
@@ -2330,6 +2451,52 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
         None
     };
 
+    // The rational ladder solves shifted SPD systems, so its operator must
+    // already carry the SAME exact-A spectral classification that SLQ applies
+    // inside its quadrature.  Build the low-rank Ritz correction once per
+    // evaluation on the raw reduced operator, then install it on an
+    // evaluation-local system clone consumed by every power/CG/value/derivative
+    // apply.  Majorizer and plain-SPD lanes retain the original system exactly.
+    let rational_exact_a = lane.is_some()
+        && matches!(
+            options.evidence_policy,
+            ArrowEvidencePolicy::UnitDeflationRefusingIndefinite { .. }
+        );
+    let classified_system = if rational_exact_a {
+        if sys.exact_a_classification.is_none() {
+            return Err(ArrowSchurError::SchurFactorFailed {
+                reason: "rational exact-A evidence policy requires the raw B/delta/clamp \
+                         classification carrier"
+                    .to_string(),
+            });
+        }
+        let raw_op = ReducedSchurOperator::new(
+            sys,
+            &htt_factors,
+            ridge_beta,
+            &backend,
+            resident.as_ref(),
+        )
+        .with_gpu_matvec(gpu_matvec);
+        let conditioning = exact_a_ritz_conditioning(
+            sys.k,
+            |direction| raw_op.apply(direction),
+            |direction| {
+                exact_a_reduced_direction_metrics(sys, &htt_factors, ridge_beta, direction)
+                    .map_err(|error| error.to_string())
+            },
+            slq_lanczos_steps,
+            slq_seed,
+        )
+        .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason })?;
+        let mut classified = sys.clone();
+        classified.exact_a_reduced_conditioning = Some(conditioning);
+        Some(classified)
+    } else {
+        None
+    };
+    let evidence_system = classified_system.as_ref().unwrap_or(sys);
+
     let log_det_schur = match lane {
         None => {
             let slq = slq_reduced_schur_log_det(
@@ -2347,14 +2514,14 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
             slq?.estimate
         }
         Some(state) => {
-            let dim = sys.k;
+            let dim = evidence_system.k;
             // (Re)build the frozen plan when absent or dimension-mismatched (a
             // basin mutation changed the border); otherwise reuse the frozen Q.
             let need_build = state.plan.as_ref().map_or(true, |p| p.dim != dim);
             if need_build {
                 let cfg = state.cfg.clone();
                 let plan = rational_reduced_schur_plan_derived(
-                    sys,
+                    evidence_system,
                     &htt_factors,
                     ridge_beta,
                     &backend,
@@ -2398,7 +2565,7 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
                 // seam, built once above) every shifted apply runs on device; when
                 // `None` the byte-identical CPU `schur_matvec` lane is taken.
                 let op = ReducedSchurOperator::new(
-                    sys,
+                    evidence_system,
                     &htt_factors,
                     ridge_beta,
                     &backend,
@@ -2413,7 +2580,8 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
                 // firing-count structure as `H_ββ` and the two very nearly
                 // cancel to a uniform rescaling, which CG is invariant to. See
                 // `exact_schur_diagonal_is_a_near_uniform_rescaling_of_the_shared_block_2576`.
-                let precond = reduced_schur_shifted_preconditioner(sys, ridge_beta);
+                let precond =
+                    reduced_schur_shifted_preconditioner(evidence_system, ridge_beta);
                 let eval = plan
                     .evaluate_preconditioned(
                         &matvec,
@@ -2439,7 +2607,7 @@ fn matrix_free_arrow_evidence_log_det_surrogate_core(
                 };
                 let bundle = if want_bundle {
                     let (sinv, cg_report) = reduced_schur_inverse_probe_solves(
-                        sys,
+                        evidence_system,
                         &htt_factors,
                         ridge_beta,
                         &backend,

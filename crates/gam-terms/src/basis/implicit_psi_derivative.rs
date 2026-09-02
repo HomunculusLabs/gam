@@ -623,6 +623,7 @@ impl LatentCoordDesignDerivative {
         length_scale: Option<crate::OriginalUnits>,
         power: f64,
         nullspace_order: DuchonNullspaceOrder,
+        radial_reparam: Option<&Array2<f64>>,
         full_ident_transform: Option<Array2<f64>>,
     ) -> Result<Self, BasisError> {
         if latent.latent_dim() != centers.ncols() {
@@ -697,8 +698,26 @@ impl LatentCoordDesignDerivative {
             )
         };
         let mut workspace = BasisWorkspace::default();
-        let ident_transform =
+        let mut ident_transform =
             kernel_constraint_nullspace(centers.view(), effective_order, &mut workspace.cache)?;
+        // The shipped kernel block is `K · Z · V`: after the side-condition
+        // null space `Z` the forward folds the data-metric radial chart `V`
+        // (`BasisMetadata::Duchon::radial_reparam`, frozen at the fit's
+        // reference build) into the kernel transform. A Jacobian projected by
+        // `Z` alone is expressed in a coefficient chart the design does not
+        // use, and the two disagree by the whole rotation (gam#979: measured
+        // as a 38% relative gap on a 2-D control and 170% at the benchmark
+        // shape against the production rebuild).
+        if let Some(v) = radial_reparam {
+            if v.nrows() != ident_transform.ncols() {
+                crate::bail_dim_basis!(
+                    "LatentCoordDesignDerivative Duchon radial chart mismatch: Z has {} columns, V has {} rows",
+                    ident_transform.ncols(),
+                    v.nrows()
+                );
+            }
+            ident_transform = ident_transform.dot(v);
+        }
         let n_poly = polynomial_block_from_order(centers.view(), effective_order).ncols();
         Ok(Self::from_local_design_jacobian_provider(Arc::new(
             RadialLatentCoordLocalDesignJacobian {

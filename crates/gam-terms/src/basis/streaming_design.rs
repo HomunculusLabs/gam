@@ -174,6 +174,71 @@ impl RadialScalarKind {
         }
     }
 
+    /// Return radial carriers `(phi, q_psi, t_psi)` for a scalar-total
+    /// `psi = log(kappa)` design derivative.
+    ///
+    /// The generic implicit operator realizes
+    ///
+    /// ```text
+    /// K_psi     = q_psi r^2 + delta K
+    /// K_psi_psi = t_psi r^4 + 2(1 + delta) q_psi r^2 + delta^2 K.
+    /// ```
+    ///
+    /// For kernels whose chosen representative is homogeneous, the ordinary
+    /// radial `(q, t)` are already those carriers.  Low-dimensional hybrid
+    /// Duchon uses a partial-fraction representative with logarithmic Riesz
+    /// blocks; it is homogeneous only modulo polynomials, so its carriers must
+    /// be derived from the exact psi jet of the value actually shipped.  This
+    /// single conversion lets every forward/transpose/materialization consumer
+    /// keep using the same implicit-operator algebra.
+    pub(crate) fn eval_scalar_total_psi_triplet(
+        &self,
+        r: f64,
+    ) -> Result<(f64, f64, f64), BasisError> {
+        let ordinary = self.eval_design_triplet(r)?;
+        let RadialScalarKind::Duchon {
+            length_scale,
+            p_order,
+            s_order,
+            dim,
+            coeffs,
+        } = self
+        else {
+            return Ok(ordinary);
+        };
+        if duchon_hybrid_stable_integral_applies(*p_order, *s_order, *dim) || r == 0.0 {
+            return Ok(ordinary);
+        }
+        let (value, first, second) = duchon_partial_fraction_kernel_psi_triplet(
+            r,
+            *length_scale,
+            *p_order,
+            *s_order,
+            *dim,
+            coeffs,
+        )?;
+        let scale = ordinary.0.abs().max(value.abs()).max(1.0);
+        if (ordinary.0 - value).abs() > 256.0 * f64::EPSILON * scale {
+            crate::bail_invalid_basis!(
+                "Duchon scalar psi authority disagrees with its value path at r={r}: radial value={}, exact value={value}",
+                ordinary.0
+            );
+        }
+        let delta = duchon_scaling_exponent(*p_order, *s_order, *dim);
+        let r2 = r * r;
+        let q_psi = (first - delta * value) / r2;
+        let t_psi = (second
+            - 2.0 * (1.0 + delta) * q_psi * r2
+            - delta * delta * value)
+            / (r2 * r2);
+        if !(q_psi.is_finite() && t_psi.is_finite()) {
+            crate::bail_invalid_basis!(
+                "non-finite Duchon scalar psi carriers at r={r}: q_psi={q_psi}, t_psi={t_psi}"
+            );
+        }
+        Ok((value, q_psi, t_psi))
+    }
+
     #[inline]
     pub(crate) fn raw_psi_isotropic_share(&self) -> f64 {
         match self {
@@ -840,9 +905,23 @@ impl StreamingRadialState {
             let row_off = i * n_knots;
             for j in 0..n_knots {
                 let r = pair_radius(i, j);
-                let triplet = match profile.as_ref() {
-                    Some(profile) => profile.eval_or_exact(&self.radial_kind, r),
-                    None => self.radial_kind.eval_design_triplet(r),
+                let exact_scalar_carrier = matches!(self.axis_mode, StreamingAxisMode::ScalarTotal { .. })
+                    && matches!(
+                        self.radial_kind,
+                        RadialScalarKind::Duchon {
+                            p_order,
+                            s_order,
+                            dim,
+                            ..
+                        } if !duchon_hybrid_stable_integral_applies(p_order, s_order, dim)
+                    );
+                let triplet = if exact_scalar_carrier {
+                    self.radial_kind.eval_scalar_total_psi_triplet(r)
+                } else {
+                    match profile.as_ref() {
+                        Some(profile) => profile.eval_or_exact(&self.radial_kind, r),
+                        None => self.radial_kind.eval_design_triplet(r),
+                    }
                 };
                 match triplet {
                     Ok((pv, qv, tv)) => {
@@ -906,7 +985,7 @@ impl StreamingRadialState {
             }
             StreamingAxisMode::ScalarTotal { .. } => {
                 let r2 = s_buf[0];
-                self.radial_kind.eval_design_triplet(r2.sqrt())
+                self.radial_kind.eval_scalar_total_psi_triplet(r2.sqrt())
             }
         }
     }

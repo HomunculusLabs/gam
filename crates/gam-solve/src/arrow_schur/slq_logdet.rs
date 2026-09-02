@@ -52,6 +52,7 @@
 use super::*;
 use gam_linalg::lanczos::{
     SymmetricLanczosEigenpairs, SymmetricLanczosOptions, symmetric_lanczos_eigenpairs,
+    symmetric_lanczos_eigenpairs_with_original_vectors,
 };
 use gam_linalg::utils::splitmix64;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -119,6 +120,7 @@ fn probe_lanczos_eigenpairs(
     probe_seed: u64,
     options: SymmetricLanczosOptions,
     matvec: &(impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync),
+    lift_original_vectors: bool,
 ) -> Option<SymmetricLanczosEigenpairs> {
     let mut z = Array1::<f64>::zeros(dim);
     rademacher_into(&mut z, probe_seed);
@@ -142,7 +144,11 @@ fn probe_lanczos_eigenpairs(
         Ok(())
     };
     let start = z.as_slice().expect("contiguous probe vector");
-    symmetric_lanczos_eigenpairs(dim, start, options, &mut apply).ok()
+    if lift_original_vectors {
+        symmetric_lanczos_eigenpairs_with_original_vectors(dim, start, options, &mut apply).ok()
+    } else {
+        symmetric_lanczos_eigenpairs(dim, start, options, &mut apply).ok()
+    }
 }
 
 /// Serial mean and standard error of the per-probe SLQ contributions. Runs over
@@ -216,7 +222,13 @@ pub fn slq_logdet(
         .into_par_iter()
         .map(|probe| {
             let probe_seed = seed.wrapping_add(probe as u64);
-            match probe_lanczos_eigenpairs(dim, probe_seed, lanczos_options, matvec) {
+            match probe_lanczos_eigenpairs(
+                dim,
+                probe_seed,
+                lanczos_options,
+                matvec,
+                false,
+            ) {
                 Some(pairs) => {
                     norm_sq * clamped_log_quadrature(&pairs.eigenvalues, &pairs.eigenvectors)
                 }
@@ -255,19 +267,6 @@ pub struct SlqUnitDeflatedLogDet {
     /// The absolute deflation floor actually applied:
     /// `relative_floor · lambda_max_abs · (1 − hysteresis)`.
     pub deflate_floor: f64,
-    /// #2515 — the smallest Ritz value seen across every probe, and a ONE-SIDED
-    /// CERTIFICATE of indefiniteness.
-    ///
-    /// Every Ritz value of a symmetric operator lies in `[λ_min, λ_max]` (it is a
-    /// Rayleigh quotient of a Krylov vector), so `min_ritz < −band` PROVES
-    /// `λ_min < −band`. The converse does not hold — an unconverged Krylov space
-    /// can miss a negative eigenvalue entirely — so this can only fail to detect
-    /// indefiniteness, never invent it. That asymmetry is what makes it usable as
-    /// a refusal predicate: a false refusal would decline a state the dense route
-    /// legitimately ranks, and there are none.
-    ///
-    /// `f64::INFINITY` when no probe produced a usable Ritz value.
-    pub min_ritz: f64,
 }
 
 impl SlqUnitDeflatedLogDet {
@@ -328,7 +327,6 @@ pub fn slq_logdet_unit_deflated(
             std_err: 0.0,
             lambda_max_abs: 0.0,
             deflate_floor: 0.0,
-            min_ritz: f64::INFINITY,
         };
     }
     let num_probes = num_probes.max(1);
@@ -343,7 +341,7 @@ pub fn slq_logdet_unit_deflated(
         .into_par_iter()
         .map(|probe| {
             let probe_seed = seed.wrapping_add(probe as u64);
-            probe_lanczos_eigenpairs(dim, probe_seed, lanczos_options, matvec)
+            probe_lanczos_eigenpairs(dim, probe_seed, lanczos_options, matvec, false)
         })
         .collect();
 
@@ -363,15 +361,8 @@ pub fn slq_logdet_unit_deflated(
             std_err: 0.0,
             lambda_max_abs: 0.0,
             deflate_floor: 0.0,
-            min_ritz: f64::INFINITY,
         };
     }
-    let min_ritz = per_probe
-        .iter()
-        .flatten()
-        .flat_map(|pairs| pairs.eigenvalues.iter())
-        .filter(|value| value.is_finite())
-        .fold(f64::INFINITY, |acc, &value| acc.min(value));
     let deflate_floor =
         relative_floor * lambda_max_abs * (1.0 - SPECTRAL_DEFLATION_HYSTERESIS_FRACTION);
 
@@ -397,8 +388,214 @@ pub fn slq_logdet_unit_deflated(
         std_err,
         lambda_max_abs,
         deflate_floor,
-        min_ritz,
     }
+}
+
+struct ExactAProbeRitzGeometry {
+    pairs: SymmetricLanczosEigenpairs,
+    majorizer_curvatures: Array1<f64>,
+    clamp_curvatures: Array1<f64>,
+}
+
+/// Matrix-free exact-`A` SLQ with the same typed direction classifier as the
+/// dense and direct-arrow routes (#2515).
+///
+/// A negative Ritz value is only a Rayleigh quotient of the raw observed
+/// information.  It is not itself a saddle verdict.  This routine lifts every
+/// Ritz direction back through the Lanczos basis, reduces it immediately to
+/// `(v'Bv, v'Ev)`, and then applies [`classify_exact_a_direction`] against the
+/// shared spectral scale.  Numerical nulls contribute `log(1) = 0`, bounded
+/// clamp wrinkles contribute `log(v'(A+E)v)`, and only a typed `Saddle` is
+/// refused.  The lifted `dimension × steps` block is dropped before the probe
+/// leaves its worker; the retained carrier is two scalar arrays per probe.
+pub(crate) fn slq_logdet_exact_a_classified(
+    dim: usize,
+    matvec: impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync,
+    direction_metrics: impl Fn(ArrayView1<f64>) -> Result<(f64, f64), String> + Sync,
+    num_probes: usize,
+    lanczos_steps: usize,
+    seed: u64,
+) -> Result<SlqLogDet, String> {
+    if dim == 0 {
+        return Ok(SlqLogDet {
+            estimate: 0.0,
+            std_err: 0.0,
+        });
+    }
+    let num_probes = num_probes.max(1);
+    let steps = lanczos_steps.max(1).min(dim);
+    let norm_sq = dim as f64;
+    let lanczos_options = slq_lanczos_options(steps);
+    let matvec = &matvec;
+    let direction_metrics = &direction_metrics;
+    let per_probe = (0..num_probes)
+        .into_par_iter()
+        .map(|probe| {
+            let probe_seed = seed.wrapping_add(probe as u64);
+            let Some(mut pairs) = probe_lanczos_eigenpairs(
+                dim,
+                probe_seed,
+                lanczos_options,
+                matvec,
+                true,
+            ) else {
+                return Ok(None);
+            };
+            let original = pairs.original_eigenvectors.take().ok_or_else(|| {
+                "exact-A SLQ requested lifted Ritz vectors, but Lanczos returned none"
+                    .to_string()
+            })?;
+            if original.dim() != (dim, pairs.eigenvalues.len()) {
+                return Err(format!(
+                    "exact-A SLQ lifted Ritz block is {:?}, expected ({dim}, {})",
+                    original.dim(),
+                    pairs.eigenvalues.len(),
+                ));
+            }
+            let mut majorizer_curvatures = Array1::<f64>::zeros(pairs.eigenvalues.len());
+            let mut clamp_curvatures = Array1::<f64>::zeros(pairs.eigenvalues.len());
+            for ritz in 0..pairs.eigenvalues.len() {
+                let (majorizer, clamp) = direction_metrics(original.column(ritz))?;
+                if !(majorizer.is_finite() && clamp.is_finite()) {
+                    return Err(format!(
+                        "exact-A SLQ Ritz direction {ritz} has non-finite classification metrics \
+                         (majorizer={majorizer:e}, clamp={clamp:e})"
+                    ));
+                }
+                majorizer_curvatures[ritz] = majorizer;
+                clamp_curvatures[ritz] = clamp;
+            }
+            Ok(Some(ExactAProbeRitzGeometry {
+                pairs,
+                majorizer_curvatures,
+                clamp_curvatures,
+            }))
+        })
+        .collect::<Vec<Result<Option<ExactAProbeRitzGeometry>, String>>>()
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let spectral_norm = per_probe
+        .iter()
+        .flatten()
+        .flat_map(|probe| probe.pairs.eigenvalues.iter())
+        .filter(|value| value.is_finite())
+        .fold(0.0_f64, |scale, &value| scale.max(value.abs()));
+    if !(spectral_norm.is_finite() && spectral_norm > 0.0) {
+        return Err("exact-A SLQ produced no finite nonzero Ritz spectrum".to_string());
+    }
+
+    let mut contributions = Vec::with_capacity(num_probes);
+    for (probe_index, maybe_probe) in per_probe.iter().enumerate() {
+        let Some(probe) = maybe_probe else {
+            contributions.push(0.0);
+            continue;
+        };
+        let mut quadrature = 0.0_f64;
+        for ritz in 0..probe.pairs.eigenvalues.len() {
+            let raw = probe.pairs.eigenvalues[ritz];
+            let priced = match classify_exact_a_direction(
+                raw,
+                dim,
+                spectral_norm,
+                probe.majorizer_curvatures[ritz],
+                probe.clamp_curvatures[ritz],
+            ) {
+                ExactADirectionClassification::ResolvedPositive { curvature }
+                | ExactADirectionClassification::ClampBasin { curvature } => Some(curvature),
+                ExactADirectionClassification::NumericalNull => None,
+                ExactADirectionClassification::Saddle { curvature, basin } => {
+                    return Err(format!(
+                        "matrix-free reduced-Schur {}: probe {probe_index} Ritz direction \
+                         {ritz} has raw exact-A curvature {curvature:.6e} and clamp basin \
+                         {basin:.6e}; the shared majorizer-metric classifier declares a \
+                         genuine saddle (#2515/#2336)",
+                        ArrowSchurError::indefinite_evidence_marker(),
+                    ));
+                }
+            };
+            if let Some(curvature) = priced {
+                let first_component = probe.pairs.eigenvectors[[0, ritz]];
+                quadrature += first_component * first_component * curvature.ln();
+            }
+        }
+        contributions.push(norm_sq * quadrature);
+    }
+    let (estimate, std_err) = slq_mean_std_err(&contributions);
+    Ok(SlqLogDet { estimate, std_err })
+}
+
+/// Build the low-rank operator correction consumed by the rational exact-A
+/// lane from one deterministic Lanczos eigensystem.
+///
+/// The returned Ritz directions are orthonormal because the source Lanczos run
+/// uses full reorthogonalization.  Each shift is exactly `priced - raw` under
+/// the same classifier as [`slq_logdet_exact_a_classified`], so applying the
+/// carrier transforms numerical nulls to unit stiffness and bounded clamp
+/// wrinkles to their basin curvature before any positive-shift solve is built.
+pub(crate) fn exact_a_ritz_conditioning(
+    dim: usize,
+    matvec: impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync,
+    direction_metrics: impl Fn(ArrayView1<f64>) -> Result<(f64, f64), String> + Sync,
+    lanczos_steps: usize,
+    seed: u64,
+) -> Result<ExactAReducedRitzConditioning, String> {
+    if dim == 0 {
+        return Ok(ExactAReducedRitzConditioning {
+            directions: Arc::from([] as [Array1<f64>; 0]),
+            shifts: Arc::from([] as [f64; 0]),
+        });
+    }
+    let options = slq_lanczos_options(lanczos_steps.max(1).min(dim));
+    let mut pairs = probe_lanczos_eigenpairs(dim, seed, options, &matvec, true)
+        .ok_or_else(|| "exact-A rational conditioning Lanczos run declined".to_string())?;
+    let original = pairs.original_eigenvectors.take().ok_or_else(|| {
+        "exact-A rational conditioning requested lifted Ritz vectors, but Lanczos returned none"
+            .to_string()
+    })?;
+    let spectral_norm = pairs
+        .eigenvalues
+        .iter()
+        .filter(|value| value.is_finite())
+        .fold(0.0_f64, |scale, &value| scale.max(value.abs()));
+    if !(spectral_norm.is_finite() && spectral_norm > 0.0) {
+        return Err("exact-A rational conditioning produced no usable Ritz spectrum".to_string());
+    }
+    let mut directions = Vec::new();
+    let mut shifts = Vec::new();
+    for ritz in 0..pairs.eigenvalues.len() {
+        let direction = original.column(ritz);
+        let raw = pairs.eigenvalues[ritz];
+        let (majorizer, clamp) = direction_metrics(direction)?;
+        let priced = match classify_exact_a_direction(
+            raw,
+            dim,
+            spectral_norm,
+            majorizer,
+            clamp,
+        ) {
+            ExactADirectionClassification::ResolvedPositive { .. } => None,
+            ExactADirectionClassification::NumericalNull => Some(1.0),
+            ExactADirectionClassification::ClampBasin { curvature } => Some(curvature),
+            ExactADirectionClassification::Saddle { curvature, basin } => {
+                return Err(format!(
+                    "matrix-free reduced-Schur {}: rational-ladder Ritz direction {ritz} \
+                     has raw exact-A curvature {curvature:.6e} and clamp basin {basin:.6e}; \
+                     the shared majorizer-metric classifier declares a genuine saddle \
+                     (#2515/#2336)",
+                    ArrowSchurError::indefinite_evidence_marker(),
+                ));
+            }
+        };
+        if let Some(priced) = priced {
+            directions.push(direction.to_owned());
+            shifts.push(priced - raw);
+        }
+    }
+    Ok(ExactAReducedRitzConditioning {
+        directions: directions.into(),
+        shifts: shifts.into(),
+    })
 }
 
 /// Gauss quadrature `e₁ᵀ ln(T) e₁ = Σ_i (τ_{i,0})² ln(θ_i)` over the Lanczos

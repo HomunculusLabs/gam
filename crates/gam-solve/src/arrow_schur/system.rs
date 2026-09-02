@@ -62,6 +62,16 @@ pub struct ExactAClassificationGeometry {
     pub border_indices: Arc<[usize]>,
 }
 
+/// Low-rank spectral conditioning discovered from the matrix-free exact-A
+/// Krylov geometry.  Directions are orthonormal Ritz vectors; `shifts[m]`
+/// changes that direction from its raw Ritz curvature to the shared classifier's
+/// unit-null or clamp-basin price.
+#[derive(Debug, Clone)]
+pub struct ExactAReducedRitzConditioning {
+    pub directions: Arc<[Array1<f64>]>,
+    pub shifts: Arc<[f64]>,
+}
+
 /// Bordered (t, β) Newton system with arrow structure.
 ///
 /// The β-block is held as a dense `K × K` Hessian `H_ββ` plus a `K`-length
@@ -238,6 +248,10 @@ pub struct ArrowSchurSystem {
     /// `A_raw = B_raw + delta_C`.  Evidence factors consume it to make the same
     /// majorizer-metric / clamp-basin classification as the dense route.
     pub exact_a_classification: Option<ExactAClassificationGeometry>,
+    /// Transient matrix-free image of the exact-A classification.  Raw systems
+    /// leave this absent; the rational evidence evaluation installs it only on
+    /// its evaluation-local system clone after lifting the Krylov directions.
+    pub exact_a_reduced_conditioning: Option<ExactAReducedRitzConditioning>,
 }
 
 impl Clone for ArrowSchurSystem {
@@ -266,6 +280,7 @@ impl Clone for ArrowSchurSystem {
             beta_gauge_quotient: self.beta_gauge_quotient.clone(),
             htbeta_operator_fingerprint: self.htbeta_operator_fingerprint,
             exact_a_classification: self.exact_a_classification.clone(),
+            exact_a_reduced_conditioning: self.exact_a_reduced_conditioning.clone(),
         }
     }
 }
@@ -338,6 +353,7 @@ impl ArrowSchurSystem {
             beta_gauge_quotient: None,
             htbeta_operator_fingerprint: None,
             exact_a_classification: None,
+            exact_a_reduced_conditioning: None,
         }
     }
 
@@ -389,6 +405,7 @@ impl ArrowSchurSystem {
             beta_gauge_quotient: None,
             htbeta_operator_fingerprint: None,
             exact_a_classification: None,
+            exact_a_reduced_conditioning: None,
         }
     }
 
@@ -446,6 +463,7 @@ impl ArrowSchurSystem {
             beta_gauge_quotient: None,
             htbeta_operator_fingerprint: None,
             exact_a_classification: None,
+            exact_a_reduced_conditioning: None,
         }
     }
 
@@ -493,6 +511,7 @@ impl ArrowSchurSystem {
             beta_gauge_quotient: None,
             htbeta_operator_fingerprint: None,
             exact_a_classification: None,
+            exact_a_reduced_conditioning: None,
         }
     }
 
@@ -574,6 +593,7 @@ impl ArrowSchurSystem {
             beta_gauge_quotient: None,
             htbeta_operator_fingerprint: None,
             exact_a_classification: None,
+            exact_a_reduced_conditioning: None,
         }
     }
 
@@ -1564,9 +1584,10 @@ impl StreamingArrowSchur {
                 // `allow_spectral_deflation = true` the dense path passes.
                 true,
                 self.refuse_resolved_indefinite,
-                self.exact_a_classification
-                    .as_ref()
-                    .and_then(|geometry| geometry.rows.get(row_idx)),
+                // The streaming system carries no exact-A classification
+                // geometry; the row is factored as it was before that
+                // classification existed.
+                None,
             )
             .map(|result| result.factor),
             None => factor_one_row(row, ridge_t, di, row_idx, self.evidence_factorization),

@@ -2245,6 +2245,152 @@ fn dense_taylor_schedule(
     })
 }
 
+/// One emitted line or `if` block of a direct lowering's body.
+struct EmittedItem {
+    text: String,
+    /// The name this item defines (`let name`, `let mut name`, `double name`),
+    /// when the item may be moved to its first use.
+    defines: Option<String>,
+    references: Vec<String>,
+}
+
+fn identifier_tokens(text: &str) -> Vec<String> {
+    text.split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The name a top-level definition line binds, if the line is one.
+fn defined_name(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let rest = if let Some(rest) = trimmed.strip_prefix("let mut ") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("let ") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("double ") {
+        rest
+    } else {
+        return None;
+    };
+    let name: String = rest
+        .chars()
+        .take_while(|character| character.is_alphanumeric() || *character == '_')
+        .collect();
+    // A CUDA leaf declaration `double stack[3];` is filled by the call on the
+    // next line, which is an anchor referencing it, so it is a definition too.
+    (!name.is_empty() && !name.starts_with("__row_program_")).then_some(name)
+}
+
+/// Parse a body into items: one per top-level line, one per `if` block.
+fn emitted_items(body: &str) -> Vec<EmittedItem> {
+    let mut items = Vec::new();
+    let mut block: Option<String> = None;
+    for line in body.lines() {
+        if let Some(text) = block.as_mut() {
+            text.push_str(line);
+            text.push('\n');
+            if line == "    }" {
+                let text = block.take().expect("an open block");
+                let references = identifier_tokens(&text);
+                items.push(EmittedItem {
+                    text,
+                    defines: None,
+                    references,
+                });
+            }
+            continue;
+        }
+        if line.trim_start().starts_with("if ") {
+            block = Some(format!("{line}\n"));
+            continue;
+        }
+        let text = format!("{line}\n");
+        let defines = defined_name(line);
+        let references = identifier_tokens(&text);
+        items.push(EmittedItem {
+            text,
+            defines,
+            references,
+        });
+    }
+    if let Some(text) = block {
+        let references = identifier_tokens(&text);
+        items.push(EmittedItem {
+            text,
+            defines: None,
+            references,
+        });
+    }
+    items
+}
+
+/// Re-emit a direct lowering's body with every definition sunk to just before
+/// its first use, in the order the uses need them.
+///
+/// The symbolic schedule writes each statement's value, gradient and Hessian
+/// channels together, in statement order. A statement that feeds an
+/// out-of-line leaf call therefore has all of its derivative channels
+/// computed BEFORE the call and consumed only AFTER it, by the chain rule:
+/// on the rigid Bernoulli row that was eight live values spilled around the
+/// probit kernel's call and reloaded behind it, which the hand kernel, that
+/// derives those products after the call, never pays (`RIGID-BERNOULLI-VGH-932`).
+/// Sinking definitions to their first use leaves only the call's own inputs
+/// live across it. Everything here is a pure `let`; `if` blocks and the
+/// result lines are anchors that keep their order, and a definition is
+/// placed before the first anchor that mentions it, after the definitions it
+/// mentions itself.
+fn sink_definitions_to_first_use(body: &str) -> String {
+    let items = emitted_items(body);
+    let mut pending: Vec<usize> = Vec::new();
+    let mut emitted = vec![false; items.len()];
+    let mut out = String::with_capacity(body.len());
+    fn flush(
+        index: usize,
+        items: &[EmittedItem],
+        pending: &mut Vec<usize>,
+        emitted: &mut [bool],
+        out: &mut String,
+    ) {
+        if emitted[index] {
+            return;
+        }
+        emitted[index] = true;
+        for reference in &items[index].references {
+            let dependency = pending
+                .iter()
+                .copied()
+                .find(|candidate| items[*candidate].defines.as_deref() == Some(reference.as_str()));
+            if let Some(dependency) = dependency {
+                flush(dependency, items, pending, emitted, out);
+            }
+        }
+        pending.retain(|candidate| *candidate != index);
+        out.push_str(&items[index].text);
+    }
+    for (index, item) in items.iter().enumerate() {
+        if item.defines.is_some() {
+            pending.push(index);
+            continue;
+        }
+        for reference in &item.references {
+            let dependency = pending
+                .iter()
+                .copied()
+                .find(|candidate| items[*candidate].defines.as_deref() == Some(reference.as_str()));
+            if let Some(dependency) = dependency {
+                flush(dependency, &items, &mut pending, &mut emitted, &mut out);
+            }
+        }
+        emitted[index] = true;
+        out.push_str(&item.text);
+    }
+    for index in pending {
+        out.push_str(&items[index].text);
+    }
+    out
+}
+
 fn push_preludes(source: &mut String, preludes: &[String], indentation: &str) {
     for prelude in preludes {
         for line in prelude.lines() {
@@ -3312,6 +3458,10 @@ fn rust_order2_body(
             ));
         }
     }
+    let (body, opening) = source.split_at(source.len());
+    let opening = &opening[..0];
+    let body = body.strip_prefix("{\n").expect("the order-2 body opens with a brace");
+    source = format!("{opening}{{\n{}", sink_definitions_to_first_use(body));
     source.push_str("    (\n        __row_program_value,\n        [");
     for axis in 0..dimension {
         if axis != 0 {

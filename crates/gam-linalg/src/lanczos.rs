@@ -69,6 +69,12 @@ pub struct SymmetricLanczosOptions {
 pub struct SymmetricLanczosEigenpairs {
     pub eigenvalues: Array1<f64>,
     pub eigenvectors: Array2<f64>,
+    /// Ritz vectors lifted from the tridiagonal Krylov coordinates back into
+    /// the original operator coordinates.  Populated only by
+    /// [`symmetric_lanczos_eigenpairs_with_original_vectors`]; the ordinary
+    /// eigenpair routine leaves it absent so callers that need only quadrature
+    /// nodes do not retain an extra `dimension × steps` block.
+    pub original_eigenvectors: Option<Array2<f64>>,
     /// `β_k`: the Euclidean norm of the (unnormalized) next Lanczos vector after
     /// the final accepted step — i.e. the off-diagonal that WOULD extend `T_k`.
     /// This is the residual norm in `H Q_k = Q_k T_k + β_k q_{k+1} e_kᵀ`; with
@@ -136,6 +142,32 @@ pub fn symmetric_lanczos_eigenpairs(
     dim: usize,
     start: &[f64],
     options: SymmetricLanczosOptions,
+    apply: impl FnMut(&[f64], &mut [f64]) -> Result<(), String>,
+) -> Result<SymmetricLanczosEigenpairs, String> {
+    symmetric_lanczos_eigenpairs_impl(dim, start, options, false, apply)
+}
+
+/// [`symmetric_lanczos_eigenpairs`] with the tridiagonal Ritz vectors lifted
+/// back through the retained Krylov basis.
+///
+/// This is opt-in because the lifted block is `dimension × steps`.  Exact-A
+/// matrix-free evidence uses it only while classifying Ritz directions in the
+/// majorizer metric and drops it immediately after reducing those directions to
+/// scalar quadratic forms (#2515).
+pub fn symmetric_lanczos_eigenpairs_with_original_vectors(
+    dim: usize,
+    start: &[f64],
+    options: SymmetricLanczosOptions,
+    apply: impl FnMut(&[f64], &mut [f64]) -> Result<(), String>,
+) -> Result<SymmetricLanczosEigenpairs, String> {
+    symmetric_lanczos_eigenpairs_impl(dim, start, options, true, apply)
+}
+
+fn symmetric_lanczos_eigenpairs_impl(
+    dim: usize,
+    start: &[f64],
+    options: SymmetricLanczosOptions,
+    lift_original_vectors: bool,
     mut apply: impl FnMut(&[f64], &mut [f64]) -> Result<(), String>,
 ) -> Result<SymmetricLanczosEigenpairs, String> {
     if dim == 0 {
@@ -178,7 +210,8 @@ pub fn symmetric_lanczos_eigenpairs(
     // Full-reorthogonalization basis (only retained when requested; classical
     // Gram–Schmidt below sweeps it twice). Kept as `q_j` BEFORE the matvec so it
     // mirrors the three-term recurrence order.
-    let mut basis: Vec<Vec<f64>> = if options.full_reorthogonalize {
+    let retain_basis = options.full_reorthogonalize || lift_original_vectors;
+    let mut basis: Vec<Vec<f64>> = if retain_basis {
         Vec::with_capacity(steps)
     } else {
         Vec::new()
@@ -188,7 +221,7 @@ pub fn symmetric_lanczos_eigenpairs(
     let mut residual_norm = 0.0_f64;
 
     for step in 0..steps {
-        if options.full_reorthogonalize {
+        if retain_basis {
             basis.push(q.clone());
         }
         w.fill(0.0);
@@ -262,9 +295,19 @@ pub fn symmetric_lanczos_eigenpairs(
     let (eigenvalues, eigenvectors) = tri.eigh(Side::Lower).map_err(|err| {
         format!("symmetric Lanczos tridiagonal eigendecomposition failed: {err:?}")
     })?;
+    let original_eigenvectors = lift_original_vectors.then(|| {
+        Array2::from_shape_fn((dim, eigenvectors.ncols()), |(row, ritz)| {
+            basis
+                .iter()
+                .enumerate()
+                .map(|(krylov, direction)| direction[row] * eigenvectors[[krylov, ritz]])
+                .sum()
+        })
+    });
     Ok(SymmetricLanczosEigenpairs {
         eigenvalues,
         eigenvectors,
+        original_eigenvectors,
         residual_norm,
     })
 }
@@ -503,6 +546,7 @@ mod tests {
         let ep = SymmetricLanczosEigenpairs {
             eigenvalues: array![1.0],
             eigenvectors: ndarray::Array2::zeros((0, 1)),
+            original_eigenvectors: None,
             residual_norm: 0.0,
         };
         assert!(symmetric_lanczos_log_quadrature(&ep, "ctx").is_err());
@@ -513,6 +557,7 @@ mod tests {
         let ep = SymmetricLanczosEigenpairs {
             eigenvalues: array![0.0],
             eigenvectors: array![[1.0]],
+            original_eigenvectors: None,
             residual_norm: 0.0,
         };
         let err = symmetric_lanczos_log_quadrature(&ep, "myctx").unwrap_err();
@@ -524,6 +569,7 @@ mod tests {
         let ep = SymmetricLanczosEigenpairs {
             eigenvalues: array![std::f64::consts::E],
             eigenvectors: array![[1.0]],
+            original_eigenvectors: None,
             residual_norm: 0.0,
         };
         let result = symmetric_lanczos_log_quadrature(&ep, "ctx").unwrap();
@@ -536,6 +582,7 @@ mod tests {
         let ep = SymmetricLanczosEigenpairs {
             eigenvalues: array![2.0, 8.0],
             eigenvectors: array![[0.5, 0.5]],
+            original_eigenvectors: None,
             residual_norm: 0.0,
         };
         let result = symmetric_lanczos_log_quadrature(&ep, "ctx").unwrap();

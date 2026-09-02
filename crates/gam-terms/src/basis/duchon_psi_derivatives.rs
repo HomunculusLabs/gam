@@ -166,6 +166,118 @@ pub(crate) fn scaled_log_kappa_derivatives(
     (first, second)
 }
 
+/// Exact `psi = log(kappa)` value jet of the low-dimensional hybrid Duchon
+/// representative that [`duchon_matern_kernel_general_from_distance`] ships.
+///
+/// The usual scaling identity
+///
+/// `K_psi = delta K + r K_r`, `delta = d - 2(p+s)`,
+///
+/// is exact for the cancellation-free integral representation (`2p < d`).
+/// On the complementary partial-fraction route, however, the Riesz blocks in
+/// even dimension contain `r^(2m-d) log(r)`.  Rescaling such a block adds a
+/// polynomial in `r`; the conditionally-positive-definite kernel is equivalent
+/// as a function space, but its *shipped coefficient representative* is not
+/// strictly homogeneous.  Differentiating the scaling identity there therefore
+/// differentiates a different design (gam#979's 2-D identity-chart control).
+///
+/// This routine differentiates the actual partial-fraction sum instead.  Riesz
+/// blocks move only through their coefficient powers.  For a Matérn block
+/// `M_n = F^-1[(kappa^2 + |omega|^2)^-n]`, differentiation under the spectrum
+/// gives the exact recurrence
+///
+/// `M_n,psi = -2 n kappa^2 M_(n+1)`.
+///
+/// The second derivative follows by applying the same identity again.  At the
+/// collision we use the same analytic Taylor coefficients as the forward value,
+/// so divergent partial-fraction terms are never evaluated separately.
+pub(crate) fn duchon_partial_fraction_kernel_psi_triplet(
+    r: f64,
+    length_scale: f64,
+    p_order: usize,
+    s_order: usize,
+    k_dim: usize,
+    coeffs: &DuchonPartialFractionCoeffs,
+) -> Result<(f64, f64, f64), BasisError> {
+    assert!(
+        !duchon_hybrid_stable_integral_applies(p_order, s_order, k_dim),
+        "partial-fraction psi jet called for the stable-integral Duchon route"
+    );
+    let smoothness_order = 2 * (p_order + s_order);
+    let collision_taylor_radius = DUCHON_COLLISION_TAYLOR_REL * length_scale.max(1e-8);
+    if r <= collision_taylor_radius && smoothness_order > k_dim {
+        let r2 = r * r;
+        let mut value = 0.0_f64;
+        let mut first = 0.0_f64;
+        let mut second = 0.0_f64;
+        let mut r_power = 1.0_f64;
+        for j in 0..=3 {
+            if smoothness_order <= k_dim + 2 * j {
+                break;
+            }
+            let (derivative, derivative_first, derivative_second) =
+                duchon_phi_even_derivative_collision_psi_triplet(
+                    length_scale,
+                    p_order,
+                    s_order,
+                    k_dim,
+                    coeffs,
+                    j,
+                )?;
+            let factorial = gamma_lanczos((2 * j + 1) as f64);
+            let weight = r_power / factorial;
+            value += weight * derivative;
+            first += weight * derivative_first;
+            second += weight * derivative_second;
+            r_power *= r2;
+        }
+        return Ok((value, first, second));
+    }
+
+    let kappa = 1.0 / length_scale.max(1e-300);
+    let kappa2 = kappa * kappa;
+    let mut value = KahanSum::default();
+    let mut first = KahanSum::default();
+    let mut second = KahanSum::default();
+    for (m, &coefficient) in coeffs.a.iter().enumerate().skip(1) {
+        if coefficient == 0.0 {
+            continue;
+        }
+        let block = polyharmonic_kernel(r, m as f64, k_dim);
+        let exponent = duchon_coeff_exponents(p_order, s_order, m);
+        value.add(coefficient * block);
+        first.add(exponent * coefficient * block);
+        second.add(exponent * exponent * coefficient * block);
+    }
+    for (n, &coefficient) in coeffs.b.iter().enumerate().skip(1) {
+        if coefficient == 0.0 {
+            continue;
+        }
+        let block = duchon_matern_block(r, kappa, n, k_dim)?;
+        let next = duchon_matern_block(r, kappa, n + 1, k_dim)?;
+        let next_next = duchon_matern_block(r, kappa, n + 2, k_dim)?;
+        let block_first = -2.0 * n as f64 * kappa2 * next;
+        let block_second = -4.0 * n as f64 * kappa2 * next
+            + 4.0 * n as f64 * (n + 1) as f64 * kappa2 * kappa2 * next_next;
+        let exponent = duchon_coeff_exponents(p_order, s_order, n);
+        value.add(coefficient * block);
+        first.add(coefficient * (exponent * block + block_first));
+        second.add(
+            coefficient
+                * (exponent * exponent * block
+                    + 2.0 * exponent * block_first
+                    + block_second),
+        );
+    }
+    let triplet = (value.sum(), first.sum(), second.sum());
+    if !(triplet.0.is_finite() && triplet.1.is_finite() && triplet.2.is_finite()) {
+        crate::bail_invalid_basis!(
+            "non-finite Duchon partial-fraction psi jet at r={r}, length_scale={length_scale}, p={p_order}, s={s_order}, dim={k_dim}"
+        );
+    }
+    Ok(triplet)
+}
+
 /// The outer coordinate a Duchon ψ-derivative differentiates (gam#2735).
 ///
 /// The anisotropic Duchon metric is `u² = Σ_a exp(2 ψ_a) h_a²`, and the ψ

@@ -8030,3 +8030,66 @@ fn per_row_evidence_classification_prices_a_clamp_basin_before_a_saddle_2515() {
         );
     }
 }
+
+/// #2515 — the genuinely matrix-free lane must lift a negative Ritz direction
+/// before deciding what its sign means.
+///
+/// The raw direction below is the measured broken-ladder magnitude.  In the
+/// majorizer metric it is resolved, but the bounded clamp restores a positive
+/// `1.200239e-2` basin.  Both the SLQ spectral function and the rational
+/// ladder's low-rank operator carrier must price that basin; removing the clamp
+/// must produce the shared typed saddle refusal.
+#[test]
+fn matrix_free_exact_a_prices_a_clamp_basin_before_refusing_a_saddle_2515() {
+    let exact_a = array![[4.0_f64, 0.0], [0.0, -7.997_610e-3]];
+    let majorizer = array![[4.0_f64, 0.0], [0.0, 4.0]];
+    let clamp = array![[0.0_f64, 0.0], [0.0, 2.0e-2]];
+    let apply_a = |direction: ArrayView1<'_, f64>| exact_a.dot(&direction);
+    let metrics = |direction: ArrayView1<'_, f64>| {
+        Ok((
+            direction.dot(&majorizer.dot(&direction)),
+            direction.dot(&clamp.dot(&direction)),
+        ))
+    };
+
+    let slq = slq_logdet_exact_a_classified(2, apply_a, metrics, 4, 2, 0x2515)
+        .expect("#2515: a clamp-attributable negative Ritz direction is a priced basin");
+    let expected = 4.0_f64.ln() + (-7.997_610e-3_f64 + 2.0e-2).ln();
+    assert_abs_diff_eq!(slq.estimate, expected, epsilon = 1.0e-12);
+
+    let conditioning = exact_a_ritz_conditioning(2, apply_a, metrics, 2, 0x2515)
+        .expect("#2515: the rational ladder must receive the same priced Ritz geometry");
+    let mut conditioned = exact_a.clone();
+    for (direction, &shift) in conditioning
+        .directions
+        .iter()
+        .zip(conditioning.shifts.iter())
+    {
+        for row in 0..2 {
+            for column in 0..2 {
+                conditioned[[row, column]] += shift * direction[row] * direction[column];
+            }
+        }
+    }
+    assert_abs_diff_eq!(conditioned[[0, 0]], 4.0, epsilon = 1.0e-12);
+    assert_abs_diff_eq!(conditioned[[0, 1]], 0.0, epsilon = 1.0e-12);
+    assert_abs_diff_eq!(
+        conditioned[[1, 1]],
+        -7.997_610e-3 + 2.0e-2,
+        epsilon = 1.0e-12,
+    );
+
+    let no_clamp = Array2::<f64>::zeros((2, 2));
+    let saddle_metrics = |direction: ArrayView1<'_, f64>| {
+        Ok((
+            direction.dot(&majorizer.dot(&direction)),
+            direction.dot(&no_clamp.dot(&direction)),
+        ))
+    };
+    let refusal = slq_logdet_exact_a_classified(2, apply_a, saddle_metrics, 4, 2, 0x2515)
+        .expect_err("#2515: negative curvature beyond the clamp basin is a saddle");
+    assert!(
+        ArrowSchurError::rendered_is_indefinite_evidence(&refusal),
+        "#2515: matrix-free and dense saddle refusals must carry one typed marker: {refusal}"
+    );
+}
