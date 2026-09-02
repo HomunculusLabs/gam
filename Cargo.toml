@@ -46,7 +46,6 @@ members = [
     "crates/gam-solve",
     "crates/gam-model-kernels",
     "crates/gam-custom-family",
-    "crates/gam-point-process",
     "crates/gam-models",
     "crates/gam-row-macros",
     "crates/gam-inference",

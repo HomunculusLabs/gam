@@ -23,7 +23,6 @@ gam-row-macros = { path = "../gam-row-macros", version = "=0.3.152" }
 opt.workspace = true
 gam-model-api = { path = "../gam-model-api", version = "=0.3.152" }
 gam-model-kernels = { path = "../gam-model-kernels", version = "=0.3.153" }
-gam-point-process = { path = "../gam-point-process", version = "=0.3.153" }
 gam-problem = { path = "../gam-problem", version = "=0.3.152" }
 gam-runtime = { path = "../gam-runtime", version = "=0.3.152" }
 gam-solve = { path = "../gam-solve", version = "=0.3.153" }
