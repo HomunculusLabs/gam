@@ -13,9 +13,9 @@ run-name: Runtime ${{ github.event.inputs.build_sha || github.sha }}
 # The wheel is built in a manylinux_2_28 container so it runs on MSI's Rocky 8
 # (glibc 2.28) as well as modern cloud images — a plain ubuntu-runner build
 # would tag manylinux_2_35 and refuse to install on the cluster. sccache keeps
-# rebuilds warm across runs. `concurrency` cancels superseded rolling builds so
-# only the newest push spends minutes; commissioned exact-SHA builds are never
-# cancelled by another lane.
+# rebuilds warm across runs. `concurrency` coalesces pending rolling builds to
+# the newest push without cancelling the running one; commissioned exact-SHA
+# builds are never cancelled by another lane.
 #
 # This channel NEVER publishes to PyPI — pypi-wheels.yml stays the version-gated
 # release path; this is the fleet's iteration artifact. It builds under the
@@ -58,15 +58,19 @@ on:
         default: ""
         required: false
 
-# Push builds are cancelled when superseded. NOTE the premise this rests on --
-# that main has one newest-writer lane -- is FALSE under the current fleet, which
-# is why the schedule above exists: it is the lane that actually produces
-# artifacts, and pushes cannot cancel it because it keys a different group.
-# A commissioned build is keyed by the exact commit it promises and is never
-# cancelled. An ordinary empty-input dispatch keeps the existing ref-keyed lane.
+# Push builds are NEVER cancelled. Under `cancel-in-progress: false` GitHub
+# keeps the running build and coalesces every pending push in the group down to
+# the newest one, so at most one build runs and one waits regardless of push
+# rate: the cost is bounded by one build per build-duration, not one per push,
+# and the artifact rolls every build-duration instead of once per cancelled
+# night. Measured 2026-09-01 22:46-23:12 CDT under the old newest-wins policy:
+# six consecutive pushes to main, six cancelled Runtime builds, zero artifacts.
+# The daily schedule above stays as the floor for a quiet main. A commissioned
+# build is keyed by the exact commit it promises and is never cancelled either;
+# an ordinary empty-input dispatch keeps newest-wins on its own ref.
 concurrency:
   group: runtime-${{ github.event_name == 'push' && 'main' || github.event.inputs.build_sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' || github.event.inputs.build_sha == '' }}
+  cancel-in-progress: ${{ github.event_name != 'push' && github.event.inputs.build_sha == '' }}
 
 permissions:
   contents: write
