@@ -653,8 +653,79 @@ fn beta_log_normalizer_from_log_shapes(log_a: f64, log_b: f64, log_phi: f64) -> 
     }
 }
 
+/// Half the Beta unit deviance `ℓ(y; η_sat) − ℓ(y; η)` formed from the
+/// DIFFERENCES of the two shape pairs, never from the two log-likelihoods.
+///
+/// With `a = μφ`, `b = (1−μ)φ` and the saturated pair `a_s`, `b_s` at the same
+/// `φ`, the two log-normalizers are each `O(φ·H(μ))` — 1.7e5 at φ = 2.8e5 —
+/// while their difference is the O(1) unit deviance. Subtracting them costs
+/// `φ·ε` per row (≈2e-11 here), and summed over the rows the penalized
+/// objective carried ≈4e-11 RELATIVE noise: the undamped Newton refinement
+/// then measured its 1e-12 non-increase guard against that noise, refused
+/// steps that cut the gradient 500-fold, and every beta fit whose precision
+/// refresh reached a large φ was refused at assembly as
+/// `StalledAtValidMinimum` (measured on both `beta_regression_reml_nonfinite`
+/// fixtures at φ ≈ 2.8e5 and 1.5e5).
+///
+/// Writing `δ = a − a_s` (so `b − b_s = −δ`), `lnΓ(a) − lnΓ(a_s)` in Stirling
+/// form is `δ·ln a_s + (a − ½)·ln1p(δ/a_s) − δ + C(a) − C(a_s)`; the same for
+/// `b`; and the `y` terms contribute `−δ·ln y + δ·ln(1−y)`. The `δ·ln φ`,
+/// `∓δ` and `a_s·(δ/a_s)` pieces cancel EXACTLY between the two shapes, so
+/// they are removed algebraically rather than numerically:
+///
+/// ```text
+///   ½d = δ·[ln(μ_s/y) − ln((1−μ_s)/(1−y))]
+///      + a_s·ln1pmx(δ/a_s) + b_s·ln1pmx(−δ/b_s)
+///      + (δ − ½)·ln1p(δ/a_s) + (−δ − ½)·ln1p(−δ/b_s)
+///      + C(a) − C(a_s) + C(b) − C(b_s)
+/// ```
+///
+/// with `ln1pmx(u) = ln(1+u) − u` and `C` the Stirling tail. Every term is
+/// `O(δ²/a)` or `O(δ·(μ_s − y))`, the size of the answer. The Stirling form
+/// needs every shape at or above the `log_gamma_large_ratio` threshold; below
+/// it the two log-likelihoods carry no large magnitude to cancel and the
+/// caller's direct difference is exact enough.
+///
+/// Returns `None` outside the Stirling regime or on a non-finite input.
+pub(crate) fn beta_half_unit_deviance_from_shape_differences(
+    y: f64,
+    eta: f64,
+    saturated_eta: f64,
+    phi: f64,
+) -> Option<f64> {
+    const STIRLING_FLOOR: f64 = 8.0;
+    let (mu, one_minus_mu) = logit_probability_pair(eta);
+    let (mu_s, one_minus_mu_s) = logit_probability_pair(saturated_eta);
+    let a = mu * phi;
+    let b = one_minus_mu * phi;
+    let a_s = mu_s * phi;
+    let b_s = one_minus_mu_s * phi;
+    if !(a >= STIRLING_FLOOR && b >= STIRLING_FLOOR && a_s >= STIRLING_FLOOR && b_s >= STIRLING_FLOOR)
+    {
+        return None;
+    }
+    let delta = a - a_s;
+    let u = delta / a_s;
+    let v = -delta / b_s;
+    if !(u > -1.0 && v > -1.0) {
+        return None;
+    }
+    // ln(μ_s / y) and ln((1−μ_s) / (1−y)) from log-space values: both are
+    // small, and each is the difference of two O(1) logarithms.
+    let log_mu_s = -softplus(-saturated_eta);
+    let log_one_minus_mu_s = -softplus(saturated_eta);
+    let ratio_terms = delta * ((log_mu_s - y.ln()) - (log_one_minus_mu_s - (-y).ln_1p()));
+    let quadratic_terms = a_s * log1p_minus_x(u) + b_s * log1p_minus_x(v);
+    let half_terms = (delta - 0.5) * u.ln_1p() + (-delta - 0.5) * v.ln_1p();
+    let stirling_tail = log_gamma_stirling_correction(a) - log_gamma_stirling_correction(a_s)
+        + log_gamma_stirling_correction(b)
+        - log_gamma_stirling_correction(b_s);
+    let half_unit = ratio_terms + quadratic_terms + half_terms + stirling_tail;
+    half_unit.is_finite().then_some(half_unit)
+}
+
 #[inline]
-fn beta_fitted_loglikelihood_unit_from_eta(
+pub(crate) fn beta_fitted_loglikelihood_unit_from_eta(
     y: f64,
     eta: f64,
     phi: f64,
@@ -1174,6 +1245,10 @@ pub fn deviance_eta_row_with_log_measure_scale(
                         "Beta likelihood deviance difference",
                     )?
                 }
+            } else if let Some(stable) =
+                beta_half_unit_deviance_from_shape_differences(y, eta, saturated_eta, *phi)
+            {
+                stable
             } else {
                 stable_finite_signed_sum(
                     &[saturated, -fitted],
@@ -1509,7 +1584,7 @@ fn beta_null_score(eta: f64, phi: f64, weighted_logit_response: f64) -> f64 {
         - c * weighted_logit_response
 }
 
-fn beta_eta_for_logit_target(target: f64, phi: f64) -> Result<f64, EstimationError> {
+pub(crate) fn beta_eta_for_logit_target(target: f64, phi: f64) -> Result<f64, EstimationError> {
     let mut lower = -1.0_f64;
     let mut upper = 1.0_f64;
     let mut lower_score = beta_null_score(lower, phi, target);

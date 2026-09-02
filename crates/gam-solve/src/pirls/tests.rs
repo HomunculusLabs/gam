@@ -5168,3 +5168,84 @@ fn binding_constraint_rows_drop_a_primal_active_row_with_a_zero_multiplier() {
     // Width mismatch is a refusal.
     assert!(binding_constraint_rows(&array![0.0, 0.0], &gradient, &constraints).is_none());
 }
+
+/// The Beta half-unit deviance formed from shape differences agrees with the
+/// two-log-likelihood difference where that difference is exact, and stays
+/// smooth where it is not: at φ = 1e6 each log-likelihood is O(6e5), so their
+/// difference resolves only to ~1e-10, while the second η-difference of the
+/// unit deviance over h = 1e-6 is ≈ h²·φμ(1−μ) ≈ 2.5e-7 — the direct form is
+/// noise at that scale, the difference form reproduces the analytic curvature.
+#[test]
+fn beta_half_unit_deviance_from_shape_differences_is_exact_and_resolved() {
+    use super::deviance::{
+        beta_eta_for_logit_target, beta_fitted_loglikelihood_unit_from_eta,
+        beta_half_unit_deviance_from_shape_differences,
+    };
+    let logit = |p: f64| (p / (1.0 - p)).ln();
+    // Moderate φ: both forms are accurate; they must agree.
+    for &(y, phi, eta_offset) in &[(0.2_f64, 40.0_f64, 0.3_f64), (0.5, 120.0, -0.2), (0.9, 400.0, 0.05)] {
+        let eta_s = beta_eta_for_logit_target(logit(y), phi).expect("saturated eta");
+        let eta = eta_s + eta_offset;
+        let direct = beta_fitted_loglikelihood_unit_from_eta(y, eta_s, phi).expect("sat")
+            - beta_fitted_loglikelihood_unit_from_eta(y, eta, phi).expect("fit");
+        let stable = beta_half_unit_deviance_from_shape_differences(y, eta, eta_s, phi)
+            .expect("Stirling regime");
+        assert!(
+            (stable - direct).abs() <= 1e-11 * direct.abs().max(1e-3),
+            "y={y} phi={phi}: stable={stable:.15e} direct={direct:.15e}"
+        );
+        assert!(stable > 0.0);
+    }
+    // Exact zero at the saturated point, exact y ↔ 1−y symmetry.
+    let phi = 1.0e6;
+    let y = 0.3;
+    let eta_s = beta_eta_for_logit_target(logit(y), phi).expect("saturated eta");
+    let eta_s_flip = beta_eta_for_logit_target(logit(1.0 - y), phi).expect("saturated eta");
+    let eta = eta_s + 2.0e-3;
+    let stable = beta_half_unit_deviance_from_shape_differences(y, eta, eta_s, phi).expect("regime");
+    let flipped = beta_half_unit_deviance_from_shape_differences(1.0 - y, -eta, eta_s_flip, phi)
+        .expect("regime");
+    // The saturated η of `1−y` comes from the root finder, not from negating
+    // η_s(y); its ulp-level asymmetry moves δ by φμ(1−μ)·ε ≈ 2e-11 and the
+    // half-deviance by ≈1e-13 relative, so the bar is set above the root
+    // finder's own noise, two orders below the direct form's 4e-11.
+    assert!((stable - flipped).abs() <= 1e-11 * stable, "symmetry: {stable:.15e} vs {flipped:.15e}");
+    assert_eq!(
+        beta_half_unit_deviance_from_shape_differences(y, eta_s, eta_s, phi).expect("regime"),
+        0.0
+    );
+    // Resolution at φ = 1e6: the second difference over h reproduces the
+    // analytic curvature φ·μ(1−μ)·[ψ'(a)+ψ'(b)]·(μ(1−μ)φ) ≈ φμ(1−μ) to 1e-6,
+    // while the direct difference of log-likelihoods is dominated by its own
+    // cancellation noise there.
+    let h = 1.0e-6;
+    let curvature_of = |f: &dyn Fn(f64) -> f64| (f(eta + h) - 2.0 * f(eta) + f(eta - h)) / (h * h);
+    let stable_fn = |e: f64| beta_half_unit_deviance_from_shape_differences(y, e, eta_s, phi).expect("regime");
+    let direct_fn = |e: f64| {
+        beta_fitted_loglikelihood_unit_from_eta(y, eta_s, phi).expect("sat")
+            - beta_fitted_loglikelihood_unit_from_eta(y, e, phi).expect("fit")
+    };
+    let (mu, one_minus_mu) = {
+        let m = 1.0 / (1.0 + (-eta).exp());
+        (m, 1.0 - m)
+    };
+    // d²(½d)/dη² = c(1−2μ)·[ψ(a) − ψ(b) − logit y] + c²·[ψ'(a) + ψ'(b)], c = φμ(1−μ):
+    // the same two terms the near-saturation branch of the deviance carries.
+    let c = phi * mu * one_minus_mu;
+    let bracket = gam_math::special::digamma(mu * phi) - gam_math::special::digamma(one_minus_mu * phi)
+        - logit(y);
+    let analytic = c * (1.0 - 2.0 * mu) * bracket
+        + c * c
+            * (gam_math::jet_tower::trigamma(mu * phi)
+                + gam_math::jet_tower::trigamma(one_minus_mu * phi));
+    let stable_curv = curvature_of(&stable_fn);
+    let direct_curv = curvature_of(&direct_fn);
+    assert!(
+        ((stable_curv - analytic) / analytic).abs() <= 1e-6,
+        "difference form: second difference {stable_curv:.9e} vs analytic {analytic:.9e}"
+    );
+    assert!(
+        ((direct_curv - analytic) / analytic).abs() > 1e-5,
+        "positive control: the direct form should be noise-dominated at this φ, got {direct_curv:.9e} vs {analytic:.9e}"
+    );
+}
