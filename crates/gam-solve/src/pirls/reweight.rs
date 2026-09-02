@@ -278,6 +278,111 @@ pub(crate) fn inequalities_are_all_inactive(
     }
 }
 
+/// The inequality system the fit carries, in one representation: explicit
+/// linear rows, or the rows an equivalent per-coordinate lower-bound box
+/// induces. `None` when the fit is unconstrained. This is the same resolution
+/// [`inequalities_are_all_inactive`] and [`iterate_is_primal_feasible`] make,
+/// owned once so the polish's active face, its feasibility check and its
+/// residual all read one system.
+pub(crate) fn polish_inequality_system(
+    options: &WorkingModelPirlsOptions,
+) -> Option<std::borrow::Cow<'_, gam_problem::LinearInequalityConstraints>> {
+    match options.linear_constraints.as_ref() {
+        Some(lin) => Some(std::borrow::Cow::Borrowed(lin)),
+        None => options
+            .coefficient_lower_bounds
+            .as_ref()
+            .and_then(|lb| linear_constraints_from_lower_bounds(lb))
+            .map(std::borrow::Cow::Owned),
+    }
+}
+
+/// Exact Newton direction `d = −H⁻¹ g` of the objective curvature `H`, or
+/// `None` when `H` does not factorize as positive definite.
+pub(crate) fn unconstrained_newton_direction(
+    curvature: &Array2<f64>,
+    gradient: &Array1<f64>,
+) -> Option<Array1<f64>> {
+    let factor = StableSolver::new().factorize(curvature).ok()?;
+    let mut direction = Array1::<f64>::zeros(gradient.len());
+    solve_direction_with_dense_factor(&factor, gradient, &mut direction);
+    Some(direction)
+}
+
+/// Exact Newton direction of the objective RESTRICTED to the active face
+/// `A_active d = 0`: with `Z` an orthonormal basis of `null(A_active)`, solve
+/// `(Zᵀ H Z) u = −Zᵀ g` and return `d = Z u`.
+///
+/// A constrained KKT point carries multipliers on its active rows, so the
+/// residual an unconstrained Newton step would zero is not the one the
+/// certificate measures: `∇L − Aᵀλ` vanishes along the active normals by
+/// construction, and what is left to remove lives in the face's null space. The
+/// reduced step is the Newton step of exactly that residual, it cannot leave
+/// the face (`A_active Z = 0`), and the caller still checks the inactive rows
+/// and the constrained residual on the re-evaluated state before committing.
+///
+/// `None` when the widths disagree or the reduced curvature is not positive
+/// definite; a face with no free direction (`null(A_active) = {0}`) returns the
+/// zero step, which the strict-improvement guard then rejects.
+pub(crate) fn active_face_newton_direction(
+    curvature: &Array2<f64>,
+    gradient: &Array1<f64>,
+    a_active: &Array2<f64>,
+) -> Option<Array1<f64>> {
+    let p = gradient.len();
+    if a_active.ncols() != p || curvature.nrows() != p || curvature.ncols() != p {
+        return None;
+    }
+    // `rrqr_nullspace_basis(B)` returns an orthonormal basis of `null(Bᵀ)`;
+    // with `B = A_activeᵀ` that is `null(A_active)`.
+    let (null_basis, _rank) = gam_linalg::faer_ndarray::rrqr_nullspace_basis(
+        &a_active.t().to_owned(),
+        gam_linalg::faer_ndarray::default_rrqr_rank_alpha(),
+    )
+    .ok()?;
+    if null_basis.ncols() == 0 {
+        return Some(Array1::<f64>::zeros(p));
+    }
+    let reduced_curvature = gam_linalg::faer_ndarray::fast_atb(
+        &null_basis,
+        &gam_linalg::faer_ndarray::fast_ab(curvature, &null_basis),
+    );
+    let reduced_gradient = null_basis.t().dot(gradient);
+    let reduced_direction = unconstrained_newton_direction(&reduced_curvature, &reduced_gradient)?;
+    Some(null_basis.dot(&reduced_direction))
+}
+
+/// Exact Newton decrement `gᵀ H⁻¹ g` of the objective on the face that binds at
+/// `beta` — the constrained analogue of [`exact_newton_decrement_sq`]. With no
+/// binding row it is the unconstrained decrement on the objective curvature;
+/// with binding rows it is `gᵀ Z (ZᵀHZ)⁻¹ Zᵀ g` for `Z` a basis of the face's
+/// null space, i.e. the decrement of the residual the constrained certificate
+/// measures. `None` when the fit carries no inequality system, when the
+/// Hessian is not dense and finite, or when the reduced curvature does not
+/// factorize.
+pub(crate) fn exact_face_newton_decrement_sq(
+    state: &WorkingState,
+    correction: Option<&Array2<f64>>,
+    beta: &Array1<f64>,
+    options: &WorkingModelPirlsOptions,
+) -> Option<f64> {
+    let inequalities = polish_inequality_system(options)?;
+    let hessian = state.hessian.as_dense()?;
+    if !state.gradient.iter().all(|v| v.is_finite()) || !hessian.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let rows = crate::active_set::binding_constraint_rows(beta, &state.gradient, &inequalities)?;
+    let curvature = objective_curvature_for_direction(hessian, correction).ok()?;
+    let direction = if rows.nrows() > 0 {
+        active_face_newton_direction(&curvature, &state.gradient, &rows)?
+    } else {
+        unconstrained_newton_direction(&curvature, &state.gradient)?
+    };
+    // `direction` is `−H⁻¹g` (on the face), so `gᵀH⁻¹g = −gᵀd`.
+    let decrement_sq = -state.gradient.dot(&direction);
+    (decrement_sq.is_finite() && decrement_sq >= 0.0).then_some(decrement_sq)
+}
+
 /// Whether `beta` is primal-feasible for every inequality the fit carries, to
 /// the tolerance the active-set solver guarantees.
 ///
@@ -1621,7 +1726,27 @@ where
                         let should_check_exact_nd =
                             numerical_plateau && !exact_decrement_checked_at_plateau;
                         exact_decrement_checked_at_plateau = numerical_plateau;
+                        // A constrained state gets the decrement of the SAME
+                        // residual its certificate measures — the objective on
+                        // the binding face (`exact_face_newton_decrement_sq`).
+                        // Without it every constrained plateau was `None` here,
+                        // the exact-decrement acceptance and the refinement
+                        // handoff below could never fire, and the convex-shape
+                        // fixture burned its whole 300-iteration budget at
+                        // `lm_lambda = 1e-9` with `Δdev ∈ {0, −8.9e-16}`.
                         let exact_decrement_sq = if should_check_exact_nd
+                            && has_explicit_constraints
+                            && options.arrow_schur.is_none()
+                        {
+                            let curvature_correction =
+                                model.objective_hessian_matrix_correction().cloned();
+                            exact_face_newton_decrement_sq(
+                                final_state_ref,
+                                curvature_correction.as_ref(),
+                                beta.as_ref(),
+                                options,
+                            )
+                        } else if should_check_exact_nd
                             && !has_explicit_constraints
                             && options.arrow_schur.is_none()
                         {
@@ -1655,7 +1780,7 @@ where
                         if should_check_exact_nd {
                             log::info!(
                                 "[PIRLS exact-decrement] applicable={} decrement_sq={:.6e} threshold={:.6e} pass={} gradient_norm={:.6e} relative_gradient={:.6e} dimension_scale={:.6e} natural_scale={:.6e} objective={:.6e} actual_reduction={:.6e} predicted_reduction={:.6e} linear_model_term={:.6e} direction_norm={:.6e} data_reduction={:.6e} penalty_reduction={:.6e}",
-                                !has_explicit_constraints && options.arrow_schur.is_none(),
+                                options.arrow_schur.is_none(),
                                 exact_decrement_sq.unwrap_or(f64::NAN),
                                 exact_nd_threshold,
                                 exact_nd_pass,
@@ -1718,14 +1843,20 @@ where
                         // strictly smaller stationarity. If refinement cannot
                         // certify the mode, this non-converged status survives;
                         // the handoff itself never mints convergence.
+                        //
+                        // The handoff used to be refused whenever an inequality
+                        // was active, and a constrained plateau then had no exit
+                        // at all: the convex-shape fixture
+                        // (`convex_shape_smooth_parks_in_linear_corner_1654`)
+                        // sat at `lm_lambda = 1e-9` with `Δdev ∈ {0, −8.9e-16}`
+                        // for every one of its 300 iterations, 4 of 18 rows
+                        // active, and left with a stationarity residual of
+                        // 7.9e-8 against a 4.6e-9 certificate. The refinement
+                        // now steps on the active face, so the plateau hands
+                        // over regardless of the active set.
                         if numerical_plateau
                             && exact_decrement_sq.is_some()
                             && undamped_polish_allowed
-                            && inequalities_are_all_inactive(
-                                options,
-                                beta.as_ref(),
-                                &final_state_ref.gradient,
-                            )
                         {
                             log::debug!(
                                 "[PIRLS] objective resolution exhausted at iter {iter}; \
@@ -2293,16 +2424,19 @@ where
     // contracting step after its value differences fall below floating-point
     // resolution. It is gated on three safety conditions so it can NEVER
     // worsen a fit:
-    //   (1) unconstrained only — a constrained KKT point carries multipliers,
-    //       so its residual is not a plain gradient to be zeroed;
+    //   (1) the step is the Newton step of the residual the certificate
+    //       measures: the plain gradient while no inequality is active, and
+    //       the objective restricted to the active face otherwise — a
+    //       constrained KKT point carries multipliers on its active rows, so
+    //       the residual left to zero lives in `null(A_active)`
+    //       (`active_face_newton_direction`);
     //   (2) the bare Hessian factorizes (PD) and the step is finite;
     //   (3) the re-evaluated state STRICTLY reduces the stationarity residual.
     // Condition (3) makes the polish Pareto-safe: a fit that is already
     // machine-stationary (residual at round-off) sees no accepted step, so
     // existing golden values are untouched; only LM-ridge-biased iterates move.
-    if undamped_polish_allowed
-        && inequalities_are_all_inactive(options, beta.as_ref(), &state.gradient)
-    {
+    let polish_inequalities = polish_inequality_system(options);
+    if undamped_polish_allowed {
         // #2273 state locality. The polish inverts the OBJECTIVE's curvature,
         // and the omitted part of it (`HΦ`) is read off the model, which holds
         // whatever point it evaluated LAST — after an LM rejection that is a
@@ -2330,8 +2464,12 @@ where
             let Some(bare_h) = state.hessian.as_dense() else {
                 break;
             };
-            let g_norm_before =
-                constrained_stationarity_norm(&state.gradient, beta.as_ref(), None, None);
+            let g_norm_before = constrained_stationarity_norm(
+                &state.gradient,
+                beta.as_ref(),
+                options.coefficient_lower_bounds.as_ref(),
+                options.linear_constraints.as_ref(),
+            );
             if state.certifies_kkt(g_norm_before, kkt_tolerance) {
                 break;
             }
@@ -2357,15 +2495,22 @@ where
                 model.objective_hessian_matrix_correction(),
             )?
             .into_owned();
-            let Some(direction) = StableSolver::new()
-                .factorize(&curvature)
-                .ok()
-                .map(|factor| {
-                    let mut d = Array1::<f64>::zeros(state.gradient.len());
-                    solve_direction_with_dense_factor(&factor, &state.gradient, &mut d);
-                    d
+            // The active set is a property of THIS iterate — a committed
+            // polish step can change it — so it is re-read on every pass.
+            let active_rows = polish_inequalities
+                .as_deref()
+                .and_then(|lin| {
+                    crate::active_set::binding_constraint_rows(
+                        beta.as_ref(),
+                        &state.gradient,
+                        lin,
+                    )
                 })
-            else {
+                .filter(|rows| rows.nrows() > 0);
+            let Some(direction) = (match active_rows.as_ref() {
+                Some(rows) => active_face_newton_direction(&curvature, &state.gradient, rows),
+                None => unconstrained_newton_direction(&curvature, &state.gradient),
+            }) else {
                 break;
             };
             let step_finite = direction.iter().all(|v| v.is_finite());
@@ -2388,13 +2533,15 @@ where
             else {
                 break;
             };
-            // The step is an UNCONSTRAINED Newton step, exact while the active
-            // set is empty (every multiplier is zero, so `∇L − Aᵀλ = ∇L`), but
-            // it says nothing about where it LANDS. A polished iterate outside
-            // the cone would be an infeasible model, so the step is refused
-            // rather than projected: a projection is not a Newton step and the
-            // strict-improvement guard below would be certifying a different
-            // point than the one it measured (#2705 group B).
+            // The step is exact on the face it was built for — the whole space
+            // while the active set is empty (every multiplier is zero, so
+            // `∇L − Aᵀλ = ∇L`), the active face otherwise — but it says nothing
+            // about where it LANDS relative to the rows that were inactive. A
+            // polished iterate outside the cone would be an infeasible model,
+            // so the step is refused rather than projected: a projection is not
+            // a Newton step and the strict-improvement guard below would be
+            // certifying a different point than the one it measured (#2705
+            // group B).
             if !iterate_is_primal_feasible(
                 options,
                 polished_beta.as_ref(),
@@ -2410,8 +2557,8 @@ where
             let g_norm_after = constrained_stationarity_norm(
                 &polished_state.gradient,
                 polished_beta.as_ref(),
-                None,
-                None,
+                options.coefficient_lower_bounds.as_ref(),
+                options.linear_constraints.as_ref(),
             );
             // Commit ONLY on a strict improvement, and only when the polished
             // objective did not increase (a quadratic Newton step cannot

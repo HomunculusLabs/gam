@@ -406,6 +406,44 @@ struct ActiveFace {
     a_active: Array2<f64>,
 }
 
+/// The unit-scaled rows of the constraints that BIND at `(beta, gradient)`:
+/// primal-active rows whose multiplier in the Moreau cone projection of the
+/// gradient is strictly positive. `k × p`, `k` possibly zero; `None` on a width
+/// mismatch or when the projection refuses.
+///
+/// This is the face an exact Newton refinement of a constrained KKT point has
+/// to stay on: with the binding multipliers carried by `∇L − Aᵀλ`, the residual
+/// that is left to zero lives in `null(A_binding)`, so the refinement step is
+/// the Newton step of the objective restricted to that null space.
+///
+/// A primal-active row with a zero multiplier is not part of the KKT face: the
+/// stationarity residual it leaves is the full gradient component along its
+/// normal, and a Newton step confined to that row's face cannot remove it.
+/// Treating the row as free lets the refinement move along its normal — inward
+/// when the objective wants to leave the boundary — while the caller's primal
+/// feasibility check still refuses any step that would cross it.
+pub(crate) fn binding_constraint_rows(
+    beta: &Array1<f64>,
+    gradient: &Array1<f64>,
+    constraints: &LinearInequalityConstraints,
+) -> Option<Array2<f64>> {
+    let face = active_face(beta, constraints)?;
+    let p = constraints.a.ncols();
+    if face.active_idx.is_empty() || gradient.len() != p {
+        return Some(Array2::<f64>::zeros((0, p)));
+    }
+    let (_, lambda_active) =
+        project_stationarity_residual_on_constraint_cone(gradient, &face.a_active)?;
+    let keep: Vec<usize> = (0..face.active_idx.len())
+        .filter(|&row| lambda_active.get(row).is_some_and(|value| *value > 0.0))
+        .collect();
+    let mut rows = Array2::<f64>::zeros((keep.len(), p));
+    for (position, &row) in keep.iter().enumerate() {
+        rows.row_mut(position).assign(&face.a_active.row(row));
+    }
+    Some(rows)
+}
+
 fn active_face(
     beta: &Array1<f64>,
     constraints: &LinearInequalityConstraints,

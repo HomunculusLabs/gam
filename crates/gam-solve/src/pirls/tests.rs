@@ -5409,3 +5409,64 @@ mod tweedie_exact_series_tests {
         );
     }
 }
+
+#[test]
+fn active_face_newton_direction_stays_on_the_face_and_zeroes_the_reduced_gradient() {
+    use super::reweight::{active_face_newton_direction, unconstrained_newton_direction};
+    use ndarray::array;
+    // Strictly convex quadratic ½βᵀHβ + gᵀβ with one active row a = (1, 1, 1)/√3.
+    let curvature = array![[2.0, 0.3, 0.0], [0.3, 3.0, 0.1], [0.0, 0.1, 4.0]];
+    let gradient = array![0.7, -1.1, 0.4];
+    let s3 = 3.0_f64.sqrt();
+    let a_active = array![[1.0 / s3, 1.0 / s3, 1.0 / s3]];
+
+    let d = active_face_newton_direction(&curvature, &gradient, &a_active)
+        .expect("a PD curvature on a one-row face has a reduced Newton step");
+    // Stays on the face.
+    let along_normal = a_active.row(0).dot(&d).abs();
+    assert!(along_normal <= 1e-12, "step leaves the face: aᵀd = {along_normal:.3e}");
+    // Zeroes the gradient of the quadratic model in every face direction.
+    let residual = &gradient + &curvature.dot(&d);
+    for tangent in [array![1.0, -1.0, 0.0], array![1.0, 1.0, -2.0]] {
+        let component = tangent.dot(&residual).abs() / tangent.dot(&tangent).sqrt();
+        assert!(
+            component <= 1e-12,
+            "reduced gradient not zeroed along {tangent:?}: {component:.3e}"
+        );
+    }
+    // Differs from the unconstrained step, which would leave the face.
+    let free = unconstrained_newton_direction(&curvature, &gradient).expect("PD curvature");
+    assert!(a_active.row(0).dot(&free).abs() > 1e-3);
+
+    // A fully determined face (three independent rows in 3-D) has no free
+    // direction: the step is exactly zero, never a fabricated one.
+    let full = array![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let pinned = active_face_newton_direction(&curvature, &gradient, &full).expect("widths agree");
+    assert!(pinned.iter().all(|v| *v == 0.0));
+
+    // Width mismatch is a refusal, not a guess.
+    assert!(active_face_newton_direction(&curvature, &gradient, &array![[1.0, 0.0]]).is_none());
+}
+
+#[test]
+fn binding_constraint_rows_drop_a_primal_active_row_with_a_zero_multiplier() {
+    use crate::active_set::binding_constraint_rows;
+    use gam_problem::LinearInequalityConstraints;
+    use ndarray::array;
+    // Two bound rows β₁ ≥ 0 and β₂ ≥ 0, both primal-active at the origin.
+    let constraints = LinearInequalityConstraints::new(
+        array![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        array![0.0, 0.0],
+    )
+    .expect("well-formed constraint system");
+    let beta = array![0.0, 0.0, 0.3];
+    // The objective gradient points OUT of the feasible set along row 1 (a
+    // positive multiplier holds it) and INTO it along row 2 (the minimum wants
+    // to leave that boundary: multiplier zero).
+    let gradient = array![1.0, -1.0, 0.0];
+    let binding = binding_constraint_rows(&beta, &gradient, &constraints).expect("width agrees");
+    assert_eq!(binding.nrows(), 1, "only the row with a positive multiplier binds");
+    assert!((binding[[0, 0]] - 1.0).abs() < 1e-15 && binding[[0, 1]].abs() < 1e-15);
+    // Width mismatch is a refusal.
+    assert!(binding_constraint_rows(&array![0.0, 0.0], &gradient, &constraints).is_none());
+}
