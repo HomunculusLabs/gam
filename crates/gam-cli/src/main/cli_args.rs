@@ -81,22 +81,22 @@ pub(crate) struct FitEventsArgs {
     pub(crate) formula: String,
     #[arg(
         long,
-        default_value_t = 1,
-        help = "Maximum number of latent atoms; the evidence switches off unsupported ones"
+        value_delimiter = ',',
+        help = "Marks that happen at most once per subject (a first diagnosis), comma separated"
     )]
-    pub(crate) atoms: usize,
+    pub(crate) once: Vec<String>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Marks that end follow-up when they fire (death), comma separated"
+    )]
+    pub(crate) terminal: Vec<String>,
     #[arg(
         long,
         value_delimiter = ',',
         help = "Forecast horizons as offsets after each subject's exit, comma separated"
     )]
     pub(crate) horizons: Vec<f64>,
-    #[arg(
-        long,
-        value_delimiter = ',',
-        help = "Marks that end follow-up when they fire, comma separated"
-    )]
-    pub(crate) absorbing: Vec<String>,
     #[arg(long, value_name = "JSON", help = "Write the summary here instead of stdout")]
     pub(crate) out: Option<PathBuf>,
 }

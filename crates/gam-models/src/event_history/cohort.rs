@@ -1,13 +1,27 @@
 //! Event-history data: subjects, their marked events, their covariate
-//! segments, and the node expansion that turns continuous follow-up into the
-//! quadrature/event nodes the exact-marginal likelihood is evaluated on.
+//! segments, the kind of every mark, and the node expansion that turns
+//! continuous follow-up into the quadrature/event nodes the likelihood is
+//! evaluated on.
 //!
-//! The compensator `∫ λ_d(t) dt` of every mark is integrated by Gauss-Legendre
-//! quadrature on every segment between consecutive breakpoints (entry, exit,
-//! covariate changes, events). Every quadrature node carries an exposure
-//! weight; every event carries a unit count and no exposure. The latent state
-//! of the subject is represented at every node, so within-segment latent
-//! variation is resolved at the same resolution as the compensator.
+//! The compensator `∫ R_d(t) λ_d(t) dt` of every mark is integrated by
+//! Gauss-Lobatto quadrature on every segment between consecutive breakpoints
+//! (entry, exit, covariate changes, events). `R_d` is the risk-set indicator
+//! of the mark: one for a recurrent mark, one until the first occurrence for
+//! a mark that can happen once, zero for a mark the subject had before
+//! entry. It is constant on the open segment, so each segment's nodes carry
+//! that segment's risk, and a node shared by two segments adds the two.
+//!
+//! The rule is closed — its endpoints are nodes — and that is the point. An
+//! event time is a breakpoint, so with an open rule the instant at which the
+//! intensity is read carries no exposure at all, and the latent state there
+//! is held only by its neighbours. The subject's latent path is represented
+//! at the nodes, so once the process decorrelates across a mesh cell that
+//! event node's state is free, `y a z − ½z²` is maximised at `z = a`, and
+//! the likelihood gains `a²/2` per event without bound — a divergence the
+//! continuous-time model does not have (the exponential of white noise is
+//! not a random measure) and the mesh invents. A closed rule gives the event
+//! node its own exposure, so its own compensator holds its state down, and
+//! the discretisation error is `O(rate · gap)` in every term.
 
 use ndarray::Array2;
 use thiserror::Error;
@@ -35,7 +49,32 @@ fn invalid(reason: impl Into<String>) -> EventHistoryError {
     }
 }
 
-/// One observed event: its time and its mark index.
+/// What an occurrence of a mark does to the subject's risk sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkKind {
+    /// May recur; the subject stays at risk for it after every occurrence.
+    Recurrent,
+    /// Happens at most once: the subject leaves this mark's risk set at its
+    /// first occurrence and stays at risk for every other mark (a first
+    /// diagnosis).
+    Once,
+    /// Ends follow-up for every mark (death).
+    Terminal,
+}
+
+impl MarkKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MarkKind::Recurrent => "recurrent",
+            MarkKind::Once => "once",
+            MarkKind::Terminal => "terminal",
+        }
+    }
+}
+
+/// One observed event: its time and its mark index. An event at or before
+/// the subject's entry is history: it is not a likelihood contribution, but
+/// it removes the subject from the risk set of a mark that happens once.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
     pub time: f64,
@@ -57,18 +96,36 @@ pub struct SubjectHistory {
     pub id: String,
     /// Start of observation (delayed entry allowed).
     pub entry: f64,
-    /// End of observation; an absorbing event at `exit` ends follow-up.
+    /// End of observation; a terminal event happens at `exit`.
     pub exit: f64,
-    /// Events in `(entry, exit]`, any order (sorted during validation).
+    /// Events, any order (sorted during validation). Events at or before
+    /// `entry` are prior history.
     pub events: Vec<Event>,
     /// Covariate segments; the first must start at or before `entry`.
     pub segments: Vec<CovariateSegment>,
+}
+
+impl SubjectHistory {
+    /// Marks the subject had at or before entry.
+    pub fn prior_marks(&self) -> impl Iterator<Item = usize> + '_ {
+        self.events
+            .iter()
+            .filter(move |e| e.time <= self.entry)
+            .map(|e| e.mark)
+    }
+
+    /// Events inside the observation window `(entry, exit]`.
+    pub fn observed_events(&self) -> impl Iterator<Item = &Event> + '_ {
+        self.events.iter().filter(move |e| e.time > self.entry)
+    }
 }
 
 /// A cohort of subjects with a shared covariate table and mark vocabulary.
 #[derive(Clone, Debug)]
 pub struct EventHistoryCohort {
     pub mark_names: Vec<String>,
+    /// The kind of every mark, parallel to `mark_names`.
+    pub mark_kinds: Vec<MarkKind>,
     /// Names of the covariate table's columns, visible to the formula.
     pub covariate_names: Vec<String>,
     /// Covariate table; rows are referenced by [`CovariateSegment::row`].
@@ -85,6 +142,13 @@ impl EventHistoryCohort {
     pub fn validate(&mut self) -> Result<(), EventHistoryError> {
         if self.mark_names.is_empty() {
             return Err(invalid("an event-history cohort needs at least one mark"));
+        }
+        if self.mark_kinds.len() != self.mark_names.len() {
+            return Err(invalid(format!(
+                "{} mark kinds for {} marks",
+                self.mark_kinds.len(),
+                self.mark_names.len()
+            )));
         }
         if self.subjects.is_empty() {
             return Err(invalid("an event-history cohort needs at least one subject"));
@@ -142,11 +206,12 @@ impl EventHistoryCohort {
                 }
             }
             subject.events.sort_by(|a, b| a.time.total_cmp(&b.time));
+            let mut once_seen = vec![false; marks];
             for event in &subject.events {
-                if !event.time.is_finite() || event.time <= subject.entry || event.time > subject.exit {
+                if !event.time.is_finite() || event.time > subject.exit {
                     return Err(invalid(format!(
-                        "subject {:?} has an event at {} outside (entry, exit] = ({}, {}]",
-                        subject.id, event.time, subject.entry, subject.exit
+                        "subject {:?} has an event at {} after its exit {}",
+                        subject.id, event.time, subject.exit
                     )));
                 }
                 if event.mark >= marks {
@@ -155,6 +220,37 @@ impl EventHistoryCohort {
                         subject.id, event.mark, marks
                     )));
                 }
+                match self.mark_kinds[event.mark] {
+                    MarkKind::Recurrent => {}
+                    MarkKind::Once => {
+                        if once_seen[event.mark] && event.time > subject.entry {
+                            return Err(invalid(format!(
+                                "subject {:?} has mark {:?} (which happens once) more than once",
+                                subject.id, self.mark_names[event.mark]
+                            )));
+                        }
+                        once_seen[event.mark] = true;
+                    }
+                    MarkKind::Terminal => {
+                        if event.time != subject.exit {
+                            return Err(invalid(format!(
+                                "subject {:?} has terminal mark {:?} at {} but exits at {}",
+                                subject.id, self.mark_names[event.mark], event.time, subject.exit
+                            )));
+                        }
+                    }
+                }
+            }
+            let terminal_events = subject
+                .events
+                .iter()
+                .filter(|e| self.mark_kinds[e.mark] == MarkKind::Terminal)
+                .count();
+            if terminal_events > 1 {
+                return Err(invalid(format!(
+                    "subject {:?} has {terminal_events} terminal events",
+                    subject.id
+                )));
             }
         }
         Ok(())
@@ -168,6 +264,18 @@ impl EventHistoryCohort {
         let total: f64 = self.subjects.iter().map(|s| s.exit - s.entry).sum();
         total / self.subjects.len() as f64
     }
+
+    /// Whether `subject` is at risk for `mark` at `time` given its history:
+    /// a once-only mark is off after (or at) its first occurrence.
+    pub fn at_risk(&self, subject: &SubjectHistory, mark: usize, time: f64) -> bool {
+        match self.mark_kinds[mark] {
+            MarkKind::Recurrent | MarkKind::Terminal => true,
+            MarkKind::Once => !subject
+                .events
+                .iter()
+                .any(|e| e.mark == mark && e.time <= time),
+        }
+    }
 }
 
 /// The node expansion of one subject.
@@ -179,8 +287,13 @@ pub struct SubjectNodes {
     pub times: Vec<f64>,
     /// `times[n+1] - times[n]`, length `times.len() - 1`.
     pub gaps: Vec<f64>,
-    /// Exposure (quadrature) weight of each node; zero on pure event nodes.
-    pub exposures: Vec<f64>,
+    /// Quadrature weight of each node: the length of follow-up it stands
+    /// for. An event time is a node of the closed rule, so it carries the
+    /// weight of the segment that ended there.
+    pub weights: Vec<f64>,
+    /// Exposure of each node to each mark, `weights[n] · R_d(t_n)`, shape
+    /// `(nodes, marks)`.
+    pub exposures: Array2<f64>,
     /// Event counts per node and mark, shape `(nodes, marks)`.
     pub counts: Array2<f64>,
     /// Covariate row in force at each node.
@@ -194,6 +307,12 @@ impl SubjectNodes {
 
     pub fn is_empty(&self) -> bool {
         self.times.is_empty()
+    }
+
+    /// Whether node `n` carries any likelihood: a count or an exposure.
+    pub fn informative(&self, n: usize) -> bool {
+        self.counts.row(n).iter().any(|&y| y != 0.0)
+            || self.exposures.row(n).iter().any(|&w| w != 0.0)
     }
 }
 
@@ -209,16 +328,20 @@ pub struct CohortNodes {
     pub total_nodes: usize,
 }
 
-/// Gauss-Legendre order per segment for a time smooth of this B-spline
-/// degree: the order that integrates the basis products exactly, matching
-/// the convention the smooth penalties use.
+/// Gauss-Lobatto order per segment for a time smooth of this B-spline
+/// degree: enough nodes that the closed rule (exact to degree `2n − 3`)
+/// integrates the basis products exactly, matching the convention the
+/// smooth penalties use.
 pub fn quadrature_order_for_degree(degree: usize) -> usize {
     2 * degree + 3
 }
 
 struct RawNode {
     time: f64,
-    exposure: f64,
+    /// Quadrature weight this node carries from the segment it came from.
+    weight: f64,
+    /// Whether the subject is at risk for each mark on that segment.
+    at_risk: Vec<bool>,
     mark: Option<usize>,
 }
 
@@ -227,11 +350,11 @@ pub fn expand_nodes(
     cohort: &EventHistoryCohort,
     quadrature_order: usize,
 ) -> Result<CohortNodes, EventHistoryError> {
-    if quadrature_order == 0 {
-        return Err(invalid("quadrature order must be positive"));
+    if quadrature_order < 2 {
+        return Err(invalid("a closed quadrature rule needs at least two nodes"));
     }
     let marks = cohort.marks();
-    let (gl_nodes, gl_weights) = gam_math::special::gauss_legendre(quadrature_order);
+    let (rule_nodes, rule_weights) = gam_math::special::gauss_lobatto(quadrature_order);
     let n_cov = cohort.covariates.ncols();
     let mut subjects = Vec::with_capacity(cohort.subjects.len());
     let mut data_rows: Vec<Vec<f64>> = Vec::new();
@@ -245,45 +368,73 @@ pub fn expand_nodes(
                 .map(|s| s.start)
                 .filter(|&t| t > subject.entry && t < subject.exit),
         );
-        breakpoints.extend(subject.events.iter().map(|e| e.time));
+        breakpoints.extend(subject.observed_events().map(|e| e.time));
         breakpoints.sort_by(|a, b| a.total_cmp(b));
         breakpoints.dedup();
         let mut raw: Vec<RawNode> = Vec::new();
         for pair in breakpoints.windows(2) {
             let (left, right) = (pair[0], pair[1]);
+            // The risk indicator is constant on the open segment: a mark
+            // that happens once is off from its own occurrence onward, so a
+            // segment whose left end is that occurrence carries no exposure
+            // for it, and the occurrence's own node keeps only the exposure
+            // of the segment that ended there.
+            let at_risk: Vec<bool> = (0..marks)
+                .map(|d| match cohort.mark_kinds[d] {
+                    MarkKind::Recurrent | MarkKind::Terminal => true,
+                    MarkKind::Once => !subject.events.iter().any(|e| e.mark == d && e.time <= left),
+                })
+                .collect();
             let half = 0.5 * (right - left);
             let mid = 0.5 * (right + left);
-            for (x, w) in gl_nodes.iter().zip(gl_weights.iter()) {
+            for (x, w) in rule_nodes.iter().zip(rule_weights.iter()) {
                 raw.push(RawNode {
                     time: mid + half * x,
-                    exposure: half * w,
+                    weight: half * w,
+                    at_risk: at_risk.clone(),
                     mark: None,
                 });
             }
         }
-        for event in &subject.events {
+        let no_risk = vec![false; marks];
+        for event in subject.observed_events() {
             raw.push(RawNode {
                 time: event.time,
-                exposure: 0.0,
+                weight: 0.0,
+                at_risk: no_risk.clone(),
                 mark: Some(event.mark),
             });
         }
         raw.sort_by(|a, b| a.time.total_cmp(&b.time));
+        // Two nodes closer than the resolution of `f64` on this follow-up
+        // are one node: their weights add, their counts add.
+        let resolution = 8.0 * f64::EPSILON * (subject.exit.abs().max(subject.entry.abs()) + (subject.exit - subject.entry));
         let mut times: Vec<f64> = Vec::new();
-        let mut exposures: Vec<f64> = Vec::new();
+        let mut weights: Vec<f64> = Vec::new();
+        let mut exposure_rows: Vec<Vec<f64>> = Vec::new();
         let mut counts: Vec<Vec<f64>> = Vec::new();
         for node in raw {
             if let Some(&last) = times.last()
-                && node.time == last
+                && node.time - last <= resolution
             {
                 let index = times.len() - 1;
-                exposures[index] += node.exposure;
+                weights[index] += node.weight;
+                for d in 0..marks {
+                    if node.at_risk[d] {
+                        exposure_rows[index][d] += node.weight;
+                    }
+                }
                 if let Some(mark) = node.mark {
                     counts[index][mark] += 1.0;
                 }
             } else {
                 times.push(node.time);
-                exposures.push(node.exposure);
+                weights.push(node.weight);
+                exposure_rows.push(
+                    (0..marks)
+                        .map(|d| if node.at_risk[d] { node.weight } else { 0.0 })
+                        .collect(),
+                );
                 let mut row = vec![0.0; marks];
                 if let Some(mark) = node.mark {
                     row[mark] += 1.0;
@@ -300,8 +451,11 @@ pub fn expand_nodes(
                 ),
             });
         }
-        let mut covariate_rows = Vec::with_capacity(times.len());
-        for &t in &times {
+        let n = times.len();
+        let mut covariate_rows = Vec::with_capacity(n);
+        let mut exposures = Array2::<f64>::zeros((n, marks));
+        let mut count_matrix = Array2::<f64>::zeros((n, marks));
+        for (i, &t) in times.iter().enumerate() {
             let row = subject
                 .segments
                 .iter()
@@ -314,18 +468,16 @@ pub fn expand_nodes(
             data.extend(cohort.covariates.row(row).iter().copied());
             data.push(t);
             data_rows.push(data);
-        }
-        let n = times.len();
-        let mut count_matrix = Array2::<f64>::zeros((n, marks));
-        for (i, row) in counts.iter().enumerate() {
-            for (d, &c) in row.iter().enumerate() {
-                count_matrix[[i, d]] = c;
+            for d in 0..marks {
+                count_matrix[[i, d]] = counts[i][d];
+                exposures[[i, d]] = exposure_rows[i][d];
             }
         }
         subjects.push(SubjectNodes {
             first_row,
             times,
             gaps,
+            weights,
             exposures,
             counts: count_matrix,
             covariate_rows,

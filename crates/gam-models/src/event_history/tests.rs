@@ -1,21 +1,19 @@
-use super::chain::{
-    AtomTransition, GaussHermite, Grid, backward_axis_bases, forward_operators,
-    interpolate_at_inner_points,
-};
 use super::cohort::{
-    CovariateSegment, Event, EventHistoryCohort, SubjectHistory, SubjectNodes, expand_nodes,
+    CovariateSegment, Event, EventHistoryCohort, MarkKind, SubjectHistory, SubjectNodes,
+    expand_nodes,
 };
+use super::covariance::{SubjectResiduals, best_new_atom, covariance_score};
 use super::family::{
-    Directional, EventHistoryFamily, EventHistoryFit, EventHistorySpec, fit_event_history,
-    fit_event_history_formula,
+    EventHistoryFamily, EventHistoryFit, EventHistorySpec, fit_event_history,
+    fit_event_history_formula, seeded_one, seeded_two,
 };
 use super::forecast::{
-    ForecastRequest, PopulationForecastRequest, forecast, kolmogorov_smirnov_uniform,
-    population_forecast, predictive_pit,
+    forecast, kolmogorov_smirnov_uniform, latent_exposure, latent_state, population_forecast,
+    predictive_pit,
 };
-use super::marginal::{SubjectInputs, subject_marginal};
+use super::laplace::{self, SubjectInputs, evidence, filter_pass, find_mode};
+use super::scalar::Tangent;
 use crate::custom_family::{BlockwiseFitOptions, ParameterBlockState};
-use gam_math::jet_scalar::{OneSeed, TwoSeed};
 use gam_math::nested_dual::JetField;
 use gam_terms::smooth::{
     LinearCoefficientGeometry, LinearTermSpec, TermCollectionSpec, build_term_collection_design,
@@ -27,187 +25,164 @@ fn gaussian(x: f64, mean: f64, variance: f64) -> f64 {
     (-(x - mean).powi(2) / (2.0 * variance)).exp() / (2.0 * std::f64::consts::PI * variance).sqrt()
 }
 
-fn subject(times: &[f64], exposures: &[f64], counts: &[Vec<f64>]) -> SubjectNodes {
+/// A subject whose every mark is recurrent: exposure equals the node weight.
+fn subject(times: &[f64], weights: &[f64], counts: &[Vec<f64>]) -> SubjectNodes {
     let marks = counts[0].len();
-    let mut matrix = Array2::<f64>::zeros((times.len(), marks));
-    for (n, row) in counts.iter().enumerate() {
+    let n = times.len();
+    let mut count_matrix = Array2::<f64>::zeros((n, marks));
+    let mut exposures = Array2::<f64>::zeros((n, marks));
+    for (node, row) in counts.iter().enumerate() {
         for (d, &c) in row.iter().enumerate() {
-            matrix[[n, d]] = c;
+            count_matrix[[node, d]] = c;
+            exposures[[node, d]] = weights[node];
         }
     }
     SubjectNodes {
         first_row: 0,
         times: times.to_vec(),
         gaps: times.windows(2).map(|w| w[1] - w[0]).collect(),
-        exposures: exposures.to_vec(),
-        counts: matrix,
-        covariate_rows: vec![0; times.len()],
+        weights: weights.to_vec(),
+        exposures,
+        counts: count_matrix,
+        covariate_rows: vec![0; n],
+    }
+}
+
+fn inputs<'a, S: JetField>(
+    nodes: &'a SubjectNodes,
+    eta0: &'a [S],
+    loadings: &'a [S],
+    log_rates: &'a [S],
+) -> SubjectInputs<'a, S> {
+    SubjectInputs {
+        nodes,
+        eta0,
+        loadings,
+        log_rates,
+        time_scale: 1.0,
+    }
+}
+
+/// Value and gradient at `theta = [η⁰ | a | ρ]` on `f64`.
+fn evaluate(nodes: &SubjectNodes, marks: usize, atoms: usize, theta: &[f64], derivatives: bool) -> (f64, Vec<f64>) {
+    let n = nodes.len();
+    let eta0 = &theta[..n * marks];
+    let loadings = &theta[n * marks..n * marks + marks * atoms];
+    let log_rates = &theta[n * marks + marks * atoms..];
+    let inputs = inputs(nodes, eta0, loadings, log_rates);
+    let mode = find_mode(&inputs, None).expect("mode");
+    let out = evidence(&inputs, &mode, derivatives).expect("evidence");
+    (out.loglik, out.gradient)
+}
+
+fn probe_subject() -> (SubjectNodes, Vec<f64>) {
+    let nodes = subject(
+        &[0.0, 0.4, 1.1, 1.6],
+        &[0.3, 0.0, 0.5, 0.2],
+        &[
+            vec![0.0, 0.0],
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+            vec![1.0, 0.0],
+        ],
+    );
+    let mut theta = vec![0.2, -0.1, 0.4, 0.0, -0.3, 0.5, 0.1, 0.2];
+    theta.extend([0.8, -0.4, 0.3, 0.6]);
+    theta.extend([-0.2, 0.5]);
+    (nodes, theta)
+}
+
+#[test]
+fn zero_loadings_reduce_to_the_poisson_likelihood_exactly() {
+    let nodes = subject(
+        &[0.0, 0.5, 1.5],
+        &[0.4, 0.0, 0.7],
+        &[vec![0.0, 0.0], vec![1.0, 0.0], vec![0.0, 2.0]],
+    );
+    let eta0 = [0.1, -0.3, 0.5, 0.2, -0.1, 0.4];
+    let loadings = [0.0, 0.0, 0.0, 0.0];
+    let log_rates = [0.0, 0.3];
+    let inputs = inputs(&nodes, &eta0, &loadings, &log_rates);
+    let mode = find_mode(&inputs, None).expect("mode");
+    assert!(mode.iter().all(|z| z.abs() < 1e-12), "mode {mode:?}");
+    let out = evidence(&inputs, &mode, true).expect("evidence");
+    let mut expected = 0.0;
+    for n in 0..3 {
+        for d in 0..2 {
+            let eta = eta0[n * 2 + d];
+            expected += nodes.counts[[n, d]] * eta - nodes.exposures[[n, d]] * eta.exp();
+        }
+    }
+    assert!((out.loglik - expected).abs() < 1e-12, "{} vs {expected}", out.loglik);
+    for n in 0..3 {
+        for d in 0..2 {
+            let eta = eta0[n * 2 + d];
+            let score = nodes.counts[[n, d]] - nodes.exposures[[n, d]] * eta.exp();
+            assert!((out.gradient[n * 2 + d] - score).abs() < 1e-12);
+        }
+    }
+    // At zero loading the evidence is even in every loading and the rates
+    // are unidentified: both gradients vanish.
+    for q in 6..12 {
+        assert!(out.gradient[q].abs() < 1e-12, "gradient[{q}] = {}", out.gradient[q]);
     }
 }
 
 #[test]
-fn forward_operator_is_exact_on_envelope_times_polynomial() {
-    let gh = GaussHermite::new(15).expect("rule");
-    let (mu, sigma) = (0.1, 0.9);
-    let from = Grid::new(&gh, &[mu], &[sigma], &0.0);
-    let to = Grid::new(&gh, &[0.4], &[0.5], &0.0);
-    let kappa = 0.35;
-    let transition = AtomTransition::new(&kappa);
-    let phi = (-kappa).exp();
-    let q = 1.0 - phi * phi;
-    // f(z) = N(z; mu, sigma²) (1 + 0.3 z + 0.2 z²)
-    let values: Vec<f64> = (0..from.size())
-        .map(|i| {
-            let z = *from.coordinate(i, 0);
-            gaussian(z, mu, sigma * sigma) * (1.0 + 0.3 * z + 0.2 * z * z)
+fn single_node_evidence_approaches_the_exact_marginal_with_information() {
+    // One node, one atom, one mark: the exact marginal is a one-dimensional
+    // integral. The Laplace error is O(1 / expected count); scaling the
+    // counts and exposure by 100 must shrink it by more than an order.
+    let errors: Vec<f64> = [1.0, 100.0]
+        .iter()
+        .map(|&scale| {
+            let nodes = subject(&[1.0], &[0.8 * scale], &[vec![2.0 * scale]]);
+            let eta0 = [0.3];
+            let loadings = [0.9];
+            let log_rates = [0.0];
+            let inputs = inputs(&nodes, &eta0, &loadings, &log_rates);
+            let mode = find_mode(&inputs, None).expect("mode");
+            let laplace = evidence(&inputs, &mode, false).expect("evidence").loglik;
+            let shift = -0.5 * loadings[0] * loadings[0];
+            let mut integral = 0.0;
+            let steps = 400_000;
+            let (lo, hi) = (-10.0, 10.0);
+            let dz = (hi - lo) / steps as f64;
+            let mut log_terms = Vec::with_capacity(steps + 1);
+            for i in 0..=steps {
+                let z = lo + i as f64 * dz;
+                let eta = eta0[0] + shift + loadings[0] * z;
+                let weight = if i == 0 || i == steps { 0.5 } else { 1.0 };
+                log_terms.push((2.0 * scale * eta - 0.8 * scale * eta.exp()) + gaussian(z, 0.0, 1.0).ln() + (weight * dz).ln());
+            }
+            let top = log_terms.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            for t in &log_terms {
+                integral += (t - top).exp();
+            }
+            let exact = top + integral.ln();
+            let error = (laplace - exact).abs();
+            println!("scale {scale}: laplace {laplace} exact {exact} error {error}");
+            error
         })
         .collect();
-    let forward = forward_operators(&gh, &from, &to, &[transition.clone()], 0);
-    let predicted = forward.plain(&values);
-    let tau2 = phi * phi * sigma * sigma + q;
-    let s2 = sigma * sigma * q / tau2;
-    for j in 0..to.size() {
-        let z = *to.coordinate(j, 0);
-        let m = mu + phi * sigma * sigma * (z - phi * mu) / tau2;
-        let exact = gaussian(z, phi * mu, tau2) * (1.0 + 0.3 * m + 0.2 * (m * m + s2));
-        assert!(
-            (predicted[j] - exact).abs() < 1e-8 * exact.abs().max(1e-8),
-            "node {j}: predicted {} exact {exact}",
-            predicted[j]
-        );
-    }
-    // A Gaussian of a different centre and width is not envelope × polynomial;
-    // the interpolant is then an approximation, accurate to the interpolation
-    // error of a degree-14 polynomial.
-    let (mu0, sigma0) = (0.3, 0.7);
-    let other: Vec<f64> = (0..from.size())
-        .map(|i| gaussian(*from.coordinate(i, 0), mu0, sigma0 * sigma0))
-        .collect();
-    let predicted = forward.plain(&other);
-    for j in 0..to.size() {
-        let z = *to.coordinate(j, 0);
-        let exact = gaussian(z, phi * mu0, phi * phi * sigma0 * sigma0 + q);
-        assert!(
-            (predicted[j] - exact).abs() < 1e-4 * exact.abs().max(1e-3),
-            "node {j}: predicted {} exact {exact}",
-            predicted[j]
-        );
-    }
-    // The backward interpolation reproduces a constant at every inner point
-    // and a linear function wherever the inner point lies inside the hull.
-    let bases = backward_axis_bases(&gh, &from, &to, &[transition]);
-    let ones = vec![1.0; to.size()];
-    let at_inner = interpolate_at_inner_points(gh.order, &bases, &ones);
-    assert_eq!(at_inner.len(), from.size() * to.size());
-    for (i, v) in at_inner.iter().enumerate() {
-        assert!((v - 1.0).abs() < 1e-9, "constant at inner point {i}: {v}");
-    }
-    let linear: Vec<f64> = (0..to.size()).map(|j| 0.5 + 0.3 * to.coordinate(j, 0)).collect();
-    let at_inner = interpolate_at_inner_points(gh.order, &bases, &linear);
-    let spread = (2.0 * q).sqrt();
-    let hull = gh.nodes[gh.order - 1] * std::f64::consts::SQRT_2 * to.axes[0].sigma;
-    for i in 0..from.size() {
-        for (l, &x) in gh.nodes.iter().enumerate() {
-            let zeta = phi * from.coordinate(i, 0) + spread * x;
-            if (zeta - to.axes[0].mu).abs() < hull {
-                let exact = 0.5 + 0.3 * zeta;
-                let got = at_inner[i * to.size() + l];
-                assert!((got - exact).abs() < 1e-9, "linear at ({i}, {l}): {got} vs {exact}");
-            }
-        }
-    }
+    assert!(errors[0] < 0.1, "Laplace error at unit scale {}", errors[0]);
+    assert!(errors[1] < errors[0] / 5.0, "errors {errors:?}");
+    assert!(errors[1] < 1e-3, "Laplace error at scale 100 is {}", errors[1]);
 }
 
 #[test]
-fn transition_polynomials_are_exact_scores_of_the_log_density() {
-    // Finite differences are permitted in tests: the gap polynomial must
-    // equal the derivative of the log transition density in log-rate.
-    let z = 0.4;
-    let zp = -0.2;
-    let gap = 0.6;
-    let log_density = |rho: f64| {
-        let phi = (-(rho.exp() * gap)).exp();
-        let v = 1.0 - phi * phi;
-        -0.5 * (2.0 * std::f64::consts::PI * v).ln() - (zp - phi * z).powi(2) / (2.0 * v)
-    };
-    let rho = -0.3;
-    let h = 1e-5;
-    let fd1 = (log_density(rho + h) - log_density(rho - h)) / (2.0 * h);
-    let fd2 = (log_density(rho + h) - 2.0 * log_density(rho) + log_density(rho - h)) / (h * h);
-    let kappa = rho.exp() * gap;
-    let (t, dt) = super::marginal::transition_score_polynomials(kappa);
-    let phi = (-kappa).exp();
-    let u = (zp - phi * z) / (1.0 - phi * phi).sqrt();
-    let evaluate = |c: &[f64]| -> f64 {
-        let mut total = 0.0;
-        for a in 0..5 {
-            for b in 0..5 {
-                total += c[a * 5 + b] * z.powi(a as i32) * u.powi(b as i32);
-            }
-        }
-        total
-    };
-    assert!((evaluate(&t) - fd1).abs() < 1e-7, "score {} vs fd {fd1}", evaluate(&t));
-    assert!(
-        (evaluate(&dt) - fd2).abs() < 1e-5,
-        "score derivative {} vs fd {fd2}",
-        evaluate(&dt)
-    );
-}
-
-#[test]
-fn single_node_marginal_matches_numerical_integration() {
-    let gh = GaussHermite::new(41).expect("rule");
-    let nodes = subject(&[1.0], &[0.8], &[vec![2.0]]);
-    let eta0 = [0.3];
-    let loadings = [0.9];
-    let log_rates = [0.0];
-    let inputs = SubjectInputs {
-        nodes: &nodes,
-        eta0: &eta0,
-        loadings: &loadings,
-        log_rates: &log_rates,
-        time_scale: 1.0,
-        gh: &gh,
-        continuation_gap: 0.0,
-    };
-    let out = subject_marginal(&inputs, false).expect("marginal");
-    // ∫ exp(y η − w e^η) N(z) dz with η = η0 − ½a² + a z, on a fine grid.
-    let mut integral = 0.0;
-    let steps = 200_000;
-    let (lo, hi) = (-9.0, 9.0);
-    let dz = (hi - lo) / steps as f64;
-    for i in 0..=steps {
-        let z = lo + i as f64 * dz;
-        let eta = eta0[0] - 0.5 * loadings[0] * loadings[0] + loadings[0] * z;
-        let weight = if i == 0 || i == steps { 0.5 } else { 1.0 };
-        integral += weight * dz * (2.0 * eta - 0.8 * eta.exp()).exp() * gaussian(z, 0.0, 1.0);
-    }
-    assert!(
-        (out.loglik - integral.ln()).abs() < 1e-8,
-        "filter {} vs quadrature {}",
-        out.loglik,
-        integral.ln()
-    );
-}
-
-#[test]
-fn two_node_marginal_matches_brute_force_double_integral() {
-    let gh = GaussHermite::new(25).expect("rule");
+fn two_node_evidence_against_the_brute_force_double_integral_on_a_sparse_history() {
+    // One event and one exposure node: the sparsest history there is, where
+    // the Laplace approximation of a log-Gaussian Cox path is least
+    // accurate. The error is printed and bounded, not hidden.
     let nodes = subject(&[0.0, 0.7], &[0.5, 0.6], &[vec![1.0], vec![0.0]]);
     let eta0 = [-0.2, 0.4];
     let loadings = [1.1];
     let log_rates = [0.2];
-    let inputs = SubjectInputs {
-        nodes: &nodes,
-        eta0: &eta0,
-        loadings: &loadings,
-        log_rates: &log_rates,
-        time_scale: 1.0,
-        gh: &gh,
-        continuation_gap: 0.0,
-    };
-    let out = subject_marginal(&inputs, false).expect("marginal");
+    let inputs = inputs(&nodes, &eta0, &loadings, &log_rates);
+    let mode = find_mode(&inputs, None).expect("mode");
+    let laplace = evidence(&inputs, &mode, false).expect("evidence").loglik;
+    let shift = -0.5 * loadings[0] * loadings[0];
     let phi = (-(0.2f64.exp() * 0.7)).exp();
     let q = 1.0 - phi * phi;
     let steps = 1200;
@@ -217,7 +192,6 @@ fn two_node_marginal_matches_brute_force_double_integral() {
     for i in 0..=steps {
         let z1 = lo + i as f64 * dz;
         let w1 = if i == 0 || i == steps { 0.5 } else { 1.0 };
-        let shift = -0.5 * loadings[0] * loadings[0];
         let eta1 = eta0[0] + shift + loadings[0] * z1;
         let l1 = (eta1 - 0.5 * eta1.exp()).exp() * gaussian(z1, 0.0, 1.0);
         let mut inner = 0.0;
@@ -229,283 +203,334 @@ fn two_node_marginal_matches_brute_force_double_integral() {
         }
         integral += w1 * dz * l1 * inner;
     }
-    assert!(
-        (out.loglik - integral.ln()).abs() < 1e-6,
-        "filter {} vs brute force {}",
-        out.loglik,
-        integral.ln()
-    );
+    let exact = integral.ln();
+    let error = laplace - exact;
+    println!("sparse two-node history: laplace {laplace} exact {exact} error {error}");
+    assert!(error.abs() < 0.05, "Laplace error {error} nats on a one-event history");
 }
 
 #[test]
-fn zero_loadings_reduce_to_the_poisson_likelihood() {
-    let gh = GaussHermite::new(21).expect("rule");
-    let nodes = subject(
-        &[0.0, 0.5, 1.5],
-        &[0.4, 0.0, 0.7],
-        &[vec![0.0, 0.0], vec![1.0, 0.0], vec![0.0, 2.0]],
-    );
-    let eta0 = [0.1, -0.3, 0.5, 0.2, -0.1, 0.4];
-    let loadings = [0.0, 0.0, 0.0, 0.0];
-    let log_rates = [0.0, 0.3];
-    let inputs = SubjectInputs {
-        nodes: &nodes,
-        eta0: &eta0,
-        loadings: &loadings,
-        log_rates: &log_rates,
-        time_scale: 1.0,
-        gh: &gh,
-        continuation_gap: 0.0,
-    };
-    let out = subject_marginal(&inputs, true).expect("marginal");
-    let mut expected = 0.0;
-    for n in 0..3 {
-        for d in 0..2 {
-            let eta = eta0[n * 2 + d];
-            expected += nodes.counts[[n, d]] * eta - nodes.exposures[n] * eta.exp();
-        }
-    }
-    assert!((out.loglik - expected).abs() < 1e-12);
-    for n in 0..3 {
-        for d in 0..2 {
-            let eta = eta0[n * 2 + d];
-            let score = nodes.counts[[n, d]] - nodes.exposures[n] * eta.exp();
-            // The smoothed marginal drops tail mass below the density noise
-            // floor (1e-11 of the peak), which is the agreement limit here.
-            assert!(
-                (out.gradient[n * 2 + d] - score).abs() < 1e-9,
-                "gradient {} vs score {score}",
-                out.gradient[n * 2 + d]
-            );
-        }
-    }
-    // With zero loadings the rates are unidentified: their gradient is zero
-    // up to the hull clamping of the backward quadrature.
-    for k in 0..2 {
-        assert!(
-            out.gradient[6 + 4 + k].abs() < 1e-8,
-            "rate gradient {}",
-            out.gradient[6 + 4 + k]
-        );
-    }
-}
-
-fn finite_difference_subject() -> (SubjectNodes, Vec<f64>, Vec<f64>, Vec<f64>) {
-    let nodes = subject(
-        &[0.0, 0.4, 1.1, 1.6],
-        &[0.3, 0.0, 0.5, 0.2],
-        &[
-            vec![0.0, 0.0],
-            vec![1.0, 0.0],
-            vec![0.0, 1.0],
-            vec![1.0, 0.0],
-        ],
-    );
-    let eta0 = vec![0.2, -0.1, 0.4, 0.0, -0.3, 0.5, 0.1, 0.2];
-    let loadings = vec![0.8, -0.4, 0.3, 0.6];
-    let log_rates = vec![-0.2, 0.5];
-    (nodes, eta0, loadings, log_rates)
-}
-
-fn evaluate_at(
-    nodes: &SubjectNodes,
-    gh: &GaussHermite,
-    theta: &[f64],
-    derivatives: bool,
-) -> super::marginal::SubjectOutput<f64> {
+fn the_mode_is_the_maximiser_of_the_complete_data_objective() {
+    let (nodes, theta) = probe_subject();
     let n = nodes.len();
     let (marks, atoms) = (2, 2);
-    let eta0 = &theta[0..n * marks];
+    let eta0 = &theta[..n * marks];
     let loadings = &theta[n * marks..n * marks + marks * atoms];
     let log_rates = &theta[n * marks + marks * atoms..];
-    subject_marginal(
-        &SubjectInputs {
-            nodes,
-            eta0,
-            loadings,
-            log_rates,
-            time_scale: 1.0,
-            gh,
-            continuation_gap: 0.0,
-        },
-        derivatives,
-    )
-    .expect("marginal")
+    let inputs = inputs(&nodes, eta0, loadings, log_rates);
+    let mode = find_mode(&inputs, None).expect("mode");
+    let warm = find_mode(&inputs, Some(&vec![0.7; mode.len()])).expect("warm mode");
+    for (a, b) in mode.iter().zip(warm.iter()) {
+        assert!((a - b).abs() < 1e-9, "mode depends on its start: {a} vs {b}");
+    }
+    let smoother = laplace::smoother(&inputs, &mode).expect("smoother");
+    for node in 0..n {
+        let cov = &smoother.covariances[node * atoms * atoms..(node + 1) * atoms * atoms];
+        assert!(cov[0] > 0.0 && cov[3] > 0.0 && (cov[1] - cov[2]).abs() < 1e-12, "{cov:?}");
+        assert!(cov[0] <= 1.0 + 1e-9 && cov[3] <= 1.0 + 1e-9, "posterior variance exceeds the prior: {cov:?}");
+    }
 }
 
 #[test]
-fn gradient_and_hessian_match_central_differences() {
-    let gh = GaussHermite::new(31).expect("rule");
-    let (nodes, eta0, loadings, log_rates) = finite_difference_subject();
-    let mut theta = eta0.clone();
-    theta.extend(loadings.iter());
-    theta.extend(log_rates.iter());
-    let p = theta.len();
-    let base = evaluate_at(&nodes, &gh, &theta, true);
-    let h = 1e-4;
-    for i in 0..p {
+fn evidence_gradient_is_the_derivative_of_the_computed_value() {
+    let (nodes, theta) = probe_subject();
+    let (marks, atoms) = (2, 2);
+    let (_, gradient) = evaluate(&nodes, marks, atoms, &theta, true);
+    let h = 1e-5;
+    for i in 0..theta.len() {
         let mut plus = theta.clone();
         plus[i] += h;
         let mut minus = theta.clone();
         minus[i] -= h;
-        let fp = evaluate_at(&nodes, &gh, &plus, true);
-        let fm = evaluate_at(&nodes, &gh, &minus, true);
-        let fd = (fp.loglik - fm.loglik) / (2.0 * h);
+        let fd = (evaluate(&nodes, marks, atoms, &plus, false).0 - evaluate(&nodes, marks, atoms, &minus, false).0) / (2.0 * h);
         assert!(
-            (base.gradient[i] - fd).abs() < 1e-6 * (1.0 + fd.abs()),
+            (gradient[i] - fd).abs() < 1e-7 * (1.0 + fd.abs()),
             "gradient[{i}] = {} vs finite difference {fd}",
-            base.gradient[i]
+            gradient[i]
         );
-        for j in 0..p {
-            let fd_h = (fp.gradient[j] - fm.gradient[j]) / (2.0 * h);
-            // Louis' Hessian interpolates the smoother residual with a cubic
-            // spline; it agrees with the finite difference of the gradient to
-            // that interpolation error.
+    }
+}
+
+#[test]
+fn tangent_channels_of_the_gradient_are_hessian_columns() {
+    let (nodes, theta) = probe_subject();
+    let n = nodes.len();
+    let (marks, atoms) = (2, 2);
+    let p = theta.len();
+    const W: usize = 16;
+    assert!(p <= W);
+    let jets: Vec<Tangent<f64, W>> = (0..p)
+        .map(|i| {
+            let mut grad = [0.0; W];
+            grad[i] = 1.0;
+            Tangent::seeded(theta[i], grad)
+        })
+        .collect();
+    let inputs_jet = inputs(&nodes, &jets[..n * marks], &jets[n * marks..n * marks + marks * atoms], &jets[n * marks + marks * atoms..]);
+    let plain = inputs(&nodes, &theta[..n * marks], &theta[n * marks..n * marks + marks * atoms], &theta[n * marks + marks * atoms..]);
+    let mode = find_mode(&plain, None).expect("mode");
+    let jet = evidence(&inputs_jet, &mode, true).expect("jet evidence");
+    let value = evidence(&plain, &mode, true).expect("evidence");
+    assert!((jet.loglik.value - value.loglik).abs() < 1e-12);
+    let h = 1e-5;
+    for j in 0..p {
+        let mut plus = theta.clone();
+        plus[j] += h;
+        let mut minus = theta.clone();
+        minus[j] -= h;
+        let gp = evaluate(&nodes, marks, atoms, &plus, true).1;
+        let gm = evaluate(&nodes, marks, atoms, &minus, true).1;
+        for i in 0..p {
+            let fd = (gp[i] - gm[i]) / (2.0 * h);
+            let dual = jet.gradient[i].grad[j];
             assert!(
-                (base.hessian[i * p + j] - fd_h).abs() < 1e-3 * (1.0 + fd_h.abs()),
-                "hessian[{i},{j}] = {} vs finite difference {fd_h}",
-                base.hessian[i * p + j]
+                (dual - fd).abs() < 1e-6 * (1.0 + fd.abs()),
+                "H[{i},{j}] dual {dual} vs finite difference {fd}"
             );
-            assert!((base.hessian[i * p + j] - base.hessian[j * p + i]).abs() < 1e-9);
+            let sym = jet.gradient[j].grad[i];
+            assert!((dual - sym).abs() < 1e-8 * (1.0 + dual.abs()), "asymmetric H[{i},{j}]: {dual} vs {sym}");
         }
     }
 }
 
 #[test]
 fn directional_duals_match_finite_differences_of_the_hessian() {
-    let gh = GaussHermite::new(21).expect("rule");
-    let (nodes, eta0, loadings, log_rates) = finite_difference_subject();
-    let mut theta = eta0.clone();
-    theta.extend(loadings.iter());
-    theta.extend(log_rates.iter());
-    let p = theta.len();
-    let u: Vec<f64> = (0..p).map(|i| 0.3 * ((i as f64) * 0.7).sin() + 0.1).collect();
-    let v: Vec<f64> = (0..p).map(|i| 0.2 * ((i as f64) * 1.3).cos() - 0.05).collect();
-    let seed = |theta: &[f64], u: &[f64], v: &[f64]| -> Vec<TwoSeed<0>> {
-        theta
-            .iter()
-            .zip(u.iter().zip(v.iter()))
-            .map(|(&x, (&du, &dv))| super::family::seeded_two(x, du, dv))
-            .collect()
-    };
+    let (nodes, theta) = probe_subject();
     let n = nodes.len();
     let (marks, atoms) = (2, 2);
-    let evaluate_two = |theta: &[f64]| {
-        let jets = seed(theta, &u, &v);
-        subject_marginal(
-            &SubjectInputs {
-                nodes: &nodes,
-                eta0: &jets[0..n * marks],
-                loadings: &jets[n * marks..n * marks + marks * atoms],
-                log_rates: &jets[n * marks + marks * atoms..],
-                time_scale: 1.0,
-                gh: &gh,
-                continuation_gap: 0.0,
-            },
-            true,
-        )
-        .expect("marginal")
-    };
-    let two = evaluate_two(&theta);
-    let h = 1e-4;
-    let shifted = |s: f64, dir: &[f64]| -> Vec<f64> {
-        theta.iter().zip(dir.iter()).map(|(x, d)| x + s * d).collect()
-    };
-    let plus_u = evaluate_at(&nodes, &gh, &shifted(h, &u), true);
-    let minus_u = evaluate_at(&nodes, &gh, &shifted(-h, &u), true);
-    for idx in 0..p * p {
-        let fd = (plus_u.hessian[idx] - minus_u.hessian[idx]) / (2.0 * h);
-        let dual = two.hessian[idx].eps.value();
-        assert!(
-            (dual - fd).abs() < 2e-5 * (1.0 + fd.abs()),
-            "D H[u] at {idx}: dual {dual} vs finite difference {fd}"
-        );
-    }
-    // Mixed second derivative: difference of the u-directional derivative along v.
-    let one_at = |theta: &[f64]| -> Vec<OneSeed<0>> {
-        let jets: Vec<OneSeed<0>> = theta
-            .iter()
-            .zip(u.iter())
-            .map(|(&x, &du)| super::family::seeded_one(x, du))
+    let p = theta.len();
+    const W: usize = 16;
+    let u: Vec<f64> = (0..p).map(|i| 0.3 * ((i as f64) * 0.7).sin() + 0.1).collect();
+    let v: Vec<f64> = (0..p).map(|i| 0.2 * ((i as f64) * 1.3).cos() - 0.05).collect();
+    let plain = inputs(&nodes, &theta[..n * marks], &theta[n * marks..n * marks + marks * atoms], &theta[n * marks + marks * atoms..]);
+    let mode = find_mode(&plain, None).expect("mode");
+    let hessian_at = |theta: &[f64]| -> Vec<Vec<f64>> {
+        let jets: Vec<Tangent<f64, W>> = (0..p)
+            .map(|i| {
+                let mut grad = [0.0; W];
+                grad[i] = 1.0;
+                Tangent::seeded(theta[i], grad)
+            })
             .collect();
-        let out = subject_marginal(
-            &SubjectInputs {
-                nodes: &nodes,
-                eta0: &jets[0..n * marks],
-                loadings: &jets[n * marks..n * marks + marks * atoms],
-                log_rates: &jets[n * marks + marks * atoms..],
-                time_scale: 1.0,
-                gh: &gh,
-                continuation_gap: 0.0,
-            },
+        let inp = inputs(&nodes, &jets[..n * marks], &jets[n * marks..n * marks + marks * atoms], &jets[n * marks + marks * atoms..]);
+        let plain = inputs(&nodes, &theta[..n * marks], &theta[n * marks..n * marks + marks * atoms], &theta[n * marks + marks * atoms..]);
+        let mode = find_mode(&plain, None).expect("mode");
+        let out = evidence(&inp, &mode, true).expect("evidence");
+        out.gradient.iter().map(|g| g.grad[..p].to_vec()).collect()
+    };
+    let one_jets: Vec<Tangent<gam_math::jet_scalar::OneSeed<0>, W>> = (0..p)
+        .map(|i| {
+            let zero = seeded_one(0.0, 0.0);
+            let mut grad = [zero; W];
+            grad[i] = seeded_one(1.0, 0.0);
+            Tangent::seeded(seeded_one(theta[i], u[i]), grad)
+        })
+        .collect();
+    let one = evidence(
+        &inputs(&nodes, &one_jets[..n * marks], &one_jets[n * marks..n * marks + marks * atoms], &one_jets[n * marks + marks * atoms..]),
+        &mode,
+        true,
+    )
+    .expect("one-seed evidence");
+    let h = 1e-4;
+    let shifted = |s: f64, dir: &[f64]| -> Vec<f64> { theta.iter().zip(dir.iter()).map(|(x, d)| x + s * d).collect() };
+    let plus = hessian_at(&shifted(h, &u));
+    let minus = hessian_at(&shifted(-h, &u));
+    for i in 0..p {
+        for j in 0..p {
+            let fd = (plus[i][j] - minus[i][j]) / (2.0 * h);
+            let dual = one.gradient[i].grad[j].eps.value();
+            assert!(
+                (dual - fd).abs() < 2e-5 * (1.0 + fd.abs()),
+                "D H[u] at ({i},{j}): dual {dual} vs finite difference {fd}"
+            );
+            let base = one.gradient[i].grad[j].base.value();
+            assert!((base - hessian_at(&theta)[i][j]).abs() < 1e-10 * (1.0 + base.abs()));
+        }
+    }
+    let two_jets: Vec<Tangent<gam_math::jet_scalar::TwoSeed<0>, W>> = (0..p)
+        .map(|i| {
+            let zero = seeded_two(0.0, 0.0, 0.0);
+            let mut grad = [zero; W];
+            grad[i] = seeded_two(1.0, 0.0, 0.0);
+            Tangent::seeded(seeded_two(theta[i], u[i], v[i]), grad)
+        })
+        .collect();
+    let two = evidence(
+        &inputs(&nodes, &two_jets[..n * marks], &two_jets[n * marks..n * marks + marks * atoms], &two_jets[n * marks + marks * atoms..]),
+        &mode,
+        true,
+    )
+    .expect("two-seed evidence");
+    let one_at = |theta: &[f64]| -> Vec<Vec<f64>> {
+        let jets: Vec<Tangent<gam_math::jet_scalar::OneSeed<0>, W>> = (0..p)
+            .map(|i| {
+                let zero = seeded_one(0.0, 0.0);
+                let mut grad = [zero; W];
+                grad[i] = seeded_one(1.0, 0.0);
+                Tangent::seeded(seeded_one(theta[i], u[i]), grad)
+            })
+            .collect();
+        let plain = inputs(&nodes, &theta[..n * marks], &theta[n * marks..n * marks + marks * atoms], &theta[n * marks + marks * atoms..]);
+        let mode = find_mode(&plain, None).expect("mode");
+        let out = evidence(
+            &inputs(&nodes, &jets[..n * marks], &jets[n * marks..n * marks + marks * atoms], &jets[n * marks + marks * atoms..]),
+            &mode,
             true,
         )
-        .expect("marginal");
-        out.hessian
+        .expect("evidence");
+        out.gradient.iter().map(|g| g.grad[..p].iter().map(|t| t.eps.value()).collect()).collect()
     };
     let plus_v = one_at(&shifted(h, &v));
     let minus_v = one_at(&shifted(-h, &v));
-    for idx in 0..p * p {
-        let fd = (plus_v[idx].eps.value() - minus_v[idx].eps.value()) / (2.0 * h);
-        let dual = two.hessian[idx].eps_del.value();
-        assert!(
-            (dual - fd).abs() < 5e-5 * (1.0 + fd.abs()),
-            "D²H[u,v] at {idx}: dual {dual} vs finite difference {fd}"
-        );
+    for i in 0..p {
+        for j in 0..p {
+            let fd = (plus_v[i][j] - minus_v[i][j]) / (2.0 * h);
+            let dual = two.gradient[i].grad[j].eps_del.value();
+            assert!(
+                (dual - fd).abs() < 5e-5 * (1.0 + fd.abs()),
+                "D²H[u,v] at ({i},{j}): dual {dual} vs finite difference {fd}"
+            );
+        }
     }
 }
 
 #[test]
-fn node_expansion_integrates_exposure_and_places_events() {
+fn the_filter_on_one_node_is_the_evidence_of_one_node() {
+    let nodes = subject(&[1.0], &[0.8], &[vec![2.0, 0.0]]);
+    let eta0 = [0.3, -0.2];
+    let loadings = [0.9, -0.4, 0.2, 0.5];
+    let log_rates = [0.0, 0.4];
+    let inputs = inputs(&nodes, &eta0, &loadings, &log_rates);
+    let mode = find_mode(&inputs, None).expect("mode");
+    let joint = evidence(&inputs, &mode, false).expect("evidence").loglik;
+    let pass = filter_pass(&inputs, None, &[true, true]).expect("filter");
+    assert!((pass.log_normalisers[0] - joint).abs() < 1e-10, "{} vs {joint}", pass.log_normalisers[0]);
+    // Restricting the compensator to the first mark changes the normaliser
+    // to that of a node without the second mark's exposure.
+    let restricted = filter_pass(&inputs, None, &[true, false]).expect("filter");
+    let mut without = subject(&[1.0], &[0.8], &[vec![2.0, 0.0]]);
+    without.exposures[[0, 1]] = 0.0;
+    let inputs_without = SubjectInputs {
+        nodes: &without,
+        eta0: &eta0,
+        loadings: &loadings,
+        log_rates: &log_rates,
+        time_scale: 1.0,
+    };
+    let mode_without = find_mode(&inputs_without, None).expect("mode");
+    let joint_without = evidence(&inputs_without, &mode_without, false).expect("evidence").loglik;
+    assert!((restricted.log_normalisers[0] - joint_without).abs() < 1e-10);
+}
+
+#[test]
+fn transition_at_an_overflowed_rate_is_finite_with_zero_sensitivity() {
+    let t = laplace::transition(&seeded_one(800.0, 1.0), 0.7, 1.0);
+    assert_eq!(t.phi.value(), 0.0);
+    assert_eq!(t.q.value(), 1.0);
+    for value in [&t.phi, &t.q, &t.inv_q, &t.kappa] {
+        assert!(value.value().is_finite() && value.eps.value().is_finite());
+        assert_eq!(value.eps.value(), 0.0);
+    }
+}
+
+#[test]
+fn node_expansion_integrates_exposure_places_events_and_applies_risk_sets() {
     let mut cohort = EventHistoryCohort {
-        mark_names: vec!["a".to_string(), "b".to_string()],
+        mark_names: vec!["flu".to_string(), "diabetes".to_string(), "death".to_string()],
+        mark_kinds: vec![MarkKind::Recurrent, MarkKind::Once, MarkKind::Terminal],
         covariate_names: vec!["x".to_string()],
         covariates: array![[1.0], [2.0]],
-        subjects: vec![SubjectHistory {
-            id: "s".to_string(),
-            entry: 1.0,
-            exit: 4.0,
-            events: vec![
-                Event {
-                    time: 2.5,
-                    mark: 1,
-                },
-                Event {
-                    time: 2.5,
-                    mark: 0,
-                },
-            ],
-            segments: vec![
-                CovariateSegment {
-                    start: 0.0,
-                    row: 0,
-                },
-                CovariateSegment {
-                    start: 3.0,
-                    row: 1,
-                },
-            ],
-        }],
+        subjects: vec![
+            SubjectHistory {
+                id: "s".to_string(),
+                entry: 1.0,
+                exit: 4.0,
+                events: vec![
+                    Event { time: 2.5, mark: 1 },
+                    Event { time: 2.5, mark: 0 },
+                    Event { time: 4.0, mark: 2 },
+                ],
+                segments: vec![
+                    CovariateSegment { start: 0.0, row: 0 },
+                    CovariateSegment { start: 3.0, row: 1 },
+                ],
+            },
+            SubjectHistory {
+                id: "prior".to_string(),
+                entry: 1.0,
+                exit: 3.0,
+                events: vec![Event { time: 0.5, mark: 1 }],
+                segments: vec![CovariateSegment { start: 0.0, row: 0 }],
+            },
+        ],
     };
     cohort.validate().expect("valid");
     let nodes = expand_nodes(&cohort, 5).expect("nodes");
     let s = &nodes.subjects[0];
-    let exposure: f64 = s.exposures.iter().sum();
-    assert!((exposure - 3.0).abs() < 1e-12, "exposure {exposure}");
+    let weight: f64 = s.weights.iter().sum();
+    assert!((weight - 3.0).abs() < 1e-12, "weight {weight}");
     let event_node = s.times.iter().position(|&t| t == 2.5).expect("event node");
     assert_eq!(s.counts[[event_node, 0]], 1.0);
     assert_eq!(s.counts[[event_node, 1]], 1.0);
-    assert_eq!(s.exposures[event_node], 0.0);
+    // The closed rule makes the event time a node of the compensator too, so
+    // the instant the intensity is read carries its own exposure.
+    assert!(s.weights[event_node] > 0.0, "the event node carries no weight");
+    assert!(s.exposures[[event_node, 0]] > 0.0, "a recurrent mark is exposed at the event");
+    assert!(
+        s.exposures[[event_node, 1]] > 0.0 && s.exposures[[event_node, 1]] < s.weights[event_node],
+        "a once-only mark keeps only the exposure of the segment that ended at its onset: {} of {}",
+        s.exposures[[event_node, 1]],
+        s.weights[event_node]
+    );
+    let death_node = s.times.iter().position(|&t| t == 4.0).expect("death node");
+    assert_eq!(s.counts[[death_node, 2]], 1.0);
     assert!(s.gaps.iter().all(|&g| g > 0.0));
+    let flu: f64 = (0..s.len()).map(|n| s.exposures[[n, 0]]).sum();
+    let diabetes: f64 = (0..s.len()).map(|n| s.exposures[[n, 1]]).sum();
+    let death: f64 = (0..s.len()).map(|n| s.exposures[[n, 2]]).sum();
+    assert!((flu - 3.0).abs() < 1e-12 && (death - 3.0).abs() < 1e-12);
+    assert!((diabetes - 1.5).abs() < 1e-12, "diabetes exposure stops at its onset: {diabetes}");
     for (n, &t) in s.times.iter().enumerate() {
         let expected_row = if t >= 3.0 { 1 } else { 0 };
         assert_eq!(s.covariate_rows[n], expected_row);
         assert_eq!(nodes.node_data[[n, 0]], cohort.covariates[[expected_row, 0]]);
         assert_eq!(nodes.node_data[[n, 1]], t);
+        if t > 2.5 {
+            assert_eq!(s.exposures[[n, 1]], 0.0);
+        }
     }
+    // Every node that carries a count also carries exposure for that mark:
+    // the discretisation never reads an intensity at an instant its own
+    // compensator steps over.
+    for subject_nodes in &nodes.subjects {
+        for n in 0..subject_nodes.len() {
+            for d in 0..3 {
+                if subject_nodes.counts[[n, d]] > 0.0 {
+                    assert!(
+                        subject_nodes.exposures[[n, d]] > 0.0,
+                        "node {n} counts mark {d} with no exposure"
+                    );
+                }
+            }
+        }
+    }
+    let prior = &nodes.subjects[1];
+    assert!((0..prior.len()).all(|n| prior.exposures[[n, 1]] == 0.0), "a prior diagnosis removes the risk");
+    assert!(cohort.subjects[1].prior_marks().any(|m| m == 1));
+    // Invalid histories are refused.
+    let mut twice = cohort.clone();
+    twice.subjects[0].events.push(Event { time: 3.5, mark: 1 });
+    assert!(twice.validate().is_err(), "a once-only mark twice must fail");
+    let mut early_death = cohort.clone();
+    early_death.subjects[0].events.retain(|e| e.mark != 2);
+    early_death.subjects[0].events.push(Event { time: 3.0, mark: 2 });
+    assert!(early_death.validate().is_err(), "a terminal event before exit must fail");
 }
 
+/// A xorshift generator for the simulations.
 struct Rng(u64);
+
 impl Rng {
     fn uniform(&mut self) -> f64 {
         self.0 ^= self.0 << 13;
@@ -547,7 +572,6 @@ fn simulate_cohort(
         let mut t = 0.0;
         while t < follow_up {
             let mut candidate = t - bound.recip() * rng.uniform().max(1e-300).ln();
-            // advance the state to the candidate in `dt` steps
             while t + dt <= candidate && t + dt <= follow_up {
                 z = phi * z + innovation * rng.normal();
                 t += dt;
@@ -572,14 +596,12 @@ fn simulate_cohort(
             entry: 0.0,
             exit: follow_up,
             events,
-            segments: vec![CovariateSegment {
-                start: 0.0,
-                row: s,
-            }],
+            segments: vec![CovariateSegment { start: 0.0, row: s }],
         });
     }
     EventHistoryCohort {
         mark_names: vec!["event".to_string()],
+        mark_kinds: vec![MarkKind::Recurrent],
         covariate_names: vec!["x".to_string()],
         covariates,
         subjects: histories,
@@ -618,13 +640,12 @@ fn family_joint_hessian_matches_finite_differences_of_its_gradient() {
     let family = EventHistoryFamily::new(
         Arc::clone(&nodes),
         vec![Arc::new(design.clone())],
-        1,
-        31,
+        2,
         cohort.time_scale(),
     )
     .expect("family");
     let beta = array![-0.4, 0.3];
-    let latent = array![0.5, -0.2];
+    let latent = array![0.5, -0.3, -0.2, 0.4];
     let states = |beta: &Array1<f64>, latent: &Array1<f64>| {
         vec![
             ParameterBlockState {
@@ -638,153 +659,173 @@ fn family_joint_hessian_matches_finite_differences_of_its_gradient() {
         ]
     };
     let base = family.joint_evaluation(&states(&beta, &latent)).expect("joint");
+    let value_only = family.log_likelihood(&states(&beta, &latent)).expect("value");
+    assert!((base.log_likelihood - value_only).abs() < 1e-10 * (1.0 + value_only.abs()));
     let p = beta.len() + latent.len();
-    let h = 1e-4;
+    let h = 1e-5;
+    let split = |v: &Array1<f64>| -> (Array1<f64>, Array1<f64>) {
+        (v.slice(ndarray::s![0..2]).to_owned(), v.slice(ndarray::s![2..]).to_owned())
+    };
+    let mut full = Array1::<f64>::zeros(p);
+    full.slice_mut(ndarray::s![0..2]).assign(&beta);
+    full.slice_mut(ndarray::s![2..]).assign(&latent);
     for i in 0..p {
-        let mut plus_beta = beta.clone();
-        let mut plus_latent = latent.clone();
-        let mut minus_beta = beta.clone();
-        let mut minus_latent = latent.clone();
-        if i < beta.len() {
-            plus_beta[i] += h;
-            minus_beta[i] -= h;
-        } else {
-            plus_latent[i - beta.len()] += h;
-            minus_latent[i - beta.len()] -= h;
-        }
-        let plus = family
-            .joint_evaluation(&states(&plus_beta, &plus_latent))
-            .expect("joint");
-        let minus = family
-            .joint_evaluation(&states(&minus_beta, &minus_latent))
-            .expect("joint");
-        let fd = (plus.log_likelihood - minus.log_likelihood) / (2.0 * h);
+        let mut plus = full.clone();
+        plus[i] += h;
+        let mut minus = full.clone();
+        minus[i] -= h;
+        let (bp, lp) = split(&plus);
+        let (bm, lm) = split(&minus);
+        let jp = family.joint_evaluation(&states(&bp, &lp)).expect("joint");
+        let jm = family.joint_evaluation(&states(&bm, &lm)).expect("joint");
+        let fd = (jp.log_likelihood - jm.log_likelihood) / (2.0 * h);
         assert!(
             (base.gradient[i] - fd).abs() < 1e-6 * (1.0 + fd.abs()),
             "gradient[{i}] {} vs {fd}",
             base.gradient[i]
         );
         for j in 0..p {
-            let fd_h = -(plus.gradient[j] - minus.gradient[j]) / (2.0 * h);
-            // Spline-interpolated smoother residual: agreement to its
-            // interpolation error, not to roundoff.
+            let fd_h = -(jp.gradient[j] - jm.gradient[j]) / (2.0 * h);
             assert!(
-                (base.hessian[[i, j]] - fd_h).abs() < 1e-3 * (1.0 + fd_h.abs()),
+                (base.hessian[[i, j]] - fd_h).abs() < 1e-5 * (1.0 + fd_h.abs()),
                 "hessian[{i},{j}] {} vs {fd_h}",
                 base.hessian[[i, j]]
             );
         }
     }
-    // Directional derivative of the negative Hessian against finite differences.
-    let u = array![0.2, -0.1, 0.3, 0.15];
-    let du = family
-        .directional_hessian(&states(&beta, &latent), &u)
-        .expect("directional");
-    let plus = family
-        .joint_evaluation(&states(
-            &(beta.clone() + &u.slice(ndarray::s![0..2]).to_owned().mapv(|x| x * h)),
-            &(latent.clone() + &u.slice(ndarray::s![2..4]).to_owned().mapv(|x| x * h)),
-        ))
-        .expect("joint");
-    let minus = family
-        .joint_evaluation(&states(
-            &(beta.clone() - &u.slice(ndarray::s![0..2]).to_owned().mapv(|x| x * h)),
-            &(latent.clone() - &u.slice(ndarray::s![2..4]).to_owned().mapv(|x| x * h)),
-        ))
-        .expect("joint");
+    let u = array![0.2, -0.1, 0.3, 0.15, -0.2, 0.1];
+    let du = family.directional_hessian(&states(&beta, &latent), &u).expect("directional");
+    let (up, lp) = split(&(&full + &u.mapv(|x| x * h)));
+    let (um, lm) = split(&(&full - &u.mapv(|x| x * h)));
+    let plus = family.joint_evaluation(&states(&up, &lp)).expect("joint");
+    let minus = family.joint_evaluation(&states(&um, &lm)).expect("joint");
     for i in 0..p {
         for j in 0..p {
             let fd = (plus.hessian[[i, j]] - minus.hessian[[i, j]]) / (2.0 * h);
             assert!(
-                (du[[i, j]] - fd).abs() < 2e-5 * (1.0 + fd.abs()),
+                (du[[i, j]] - fd).abs() < 1e-5 * (1.0 + fd.abs()),
                 "D H[u][{i},{j}] {} vs {fd}",
                 du[[i, j]]
+            );
+        }
+    }
+    let v = array![-0.1, 0.25, 0.05, -0.3, 0.2, 0.1];
+    let d2 = family.second_directional_hessian(&states(&beta, &latent), &u, &v).expect("second");
+    let (vp, lvp) = split(&(&full + &v.mapv(|x| x * h)));
+    let (vm, lvm) = split(&(&full - &v.mapv(|x| x * h)));
+    let plus = family.directional_hessian(&states(&vp, &lvp), &u).expect("directional");
+    let minus = family.directional_hessian(&states(&vm, &lvm), &u).expect("directional");
+    for i in 0..p {
+        for j in 0..p {
+            let fd = (plus[[i, j]] - minus[[i, j]]) / (2.0 * h);
+            assert!(
+                (d2[[i, j]] - fd).abs() < 5e-5 * (1.0 + fd.abs()),
+                "D²H[u,v][{i},{j}] {} vs {fd}",
+                d2[[i, j]]
             );
         }
     }
 }
 
 #[test]
-fn fit_recovers_the_covariate_effect_and_a_positive_shared_risk_loading() {
-    install_test_logger();
-    let started = std::time::Instant::now();
-    let mut cohort = simulate_cohort(80, 6.0, -0.8, 0.5, 1.0, 0.4, 7);
-    let mut spec = EventHistorySpec::new(1, vec![linear_spec()]);
-    spec.gauss_hermite_order = 11;
-    let fit = fit_event_history(&mut cohort, &spec).expect("fit");
-    let beta = fit.mark_coefficients(0);
-    println!(
-        "[fit] {:.1}s outer_iterations={} gh_order={} beta={:?} loading={} rate={} log_lambda={:?}",
-        started.elapsed().as_secs_f64(),
-        fit.fit.outer_iterations,
-        fit.quadrature.order,
-        beta.to_vec(),
-        fit.loadings[[0, 0]],
-        fit.rates[0],
-        fit.atom_log_lambdas
-    );
-    assert_eq!(beta.len(), 2, "intercept and slope");
-    assert!(
-        (beta[1] - 0.5).abs() < 0.25,
-        "slope {} should recover 0.5 within its sampling error",
-        beta[1]
-    );
-    // The simulated intensity `exp(β₀ + β₁x + a z)` averages over the
-    // stationary `z` to `exp(β₀ + ½a² + β₁x)`, and the fitted `η⁰` is
-    // parameterised as that average, so the intercept estimates the
-    // population log-rate `−0.8 + ½·1² = −0.3`, not the conditional `−0.8`.
-    let population_log_rate = -0.8 + 0.5;
-    assert!(
-        (beta[0] - population_log_rate).abs() < 0.25,
-        "intercept {} should be the population log-rate {population_log_rate}",
-        beta[0]
-    );
-    let loading = fit.loadings[[0, 0]].abs();
-    assert!(
-        loading > 0.4,
-        "a shared dynamic risk was simulated but the fitted loading is {loading}"
-    );
-    // A fit object only exists from a converged optimisation; its certificate
-    // gradient, when reported, is finite.
-    assert!(fit.fit.outer_gradient_norm.is_none_or(|g| g.is_finite()));
-    assert!(fit.rates[0] > 0.0 && fit.rates[0].is_finite());
-    assert!(
-        (fit.quadrature.log_likelihood - fit.quadrature.log_likelihood_at_checked_order).abs()
-            <= spec.quadrature_tolerance * fit.quadrature.log_likelihood.abs().max(1.0)
-    );
-    // Forecast: probabilities and expected counts are coherent.
-    let request = ForecastRequest {
-        history: &cohort.subjects[0],
-        horizons: &[6.5, 7.0, 8.0],
-        absorbing: &[false],
-        future_row: 0,
+fn covariance_score_matches_its_definition_and_its_rate_derivatives() {
+    let residuals = vec![
+        SubjectResiduals {
+            times: vec![0.0, 0.7, 1.9, 2.4],
+            scores: vec![0.3, -0.2, -0.5, 0.4, 1.0, -0.1, 0.2, 0.6],
+            curvatures: vec![0.2, 0.3, 0.5, 0.1, 0.4, 0.4, 0.2, 0.3],
+        },
+        SubjectResiduals {
+            times: vec![0.2, 1.1],
+            scores: vec![-0.4, 0.1, 0.8, -0.3],
+            curvatures: vec![0.3, 0.2, 0.6, 0.5],
+        },
+    ];
+    let marks = 2;
+    let (rho, time_scale) = (0.3, 2.0);
+    let brute = |rho: f64| -> Array2<f64> {
+        let rate = rho.exp() / time_scale;
+        let mut m = Array2::<f64>::zeros((marks, marks));
+        for subject in &residuals {
+            let n = subject.times.len();
+            for a in 0..n {
+                for b in 0..n {
+                    let kernel = (-rate * (subject.times[a] - subject.times[b]).abs()).exp();
+                    for d in 0..marks {
+                        for e in 0..marks {
+                            m[[d, e]] += kernel * subject.scores[a * marks + d] * subject.scores[b * marks + e];
+                        }
+                    }
+                }
+                for d in 0..marks {
+                    m[[d, d]] -= subject.curvatures[a * marks + d];
+                }
+            }
+        }
+        m
     };
-    let f = forecast(&fit, &cohort, &request).expect("forecast");
-    assert!(
-        f.survival.iter().all(|&s| (0.0..=1.0).contains(&s)),
-        "survival left [0, 1]: {:?}",
-        f.survival
-    );
-    assert!((f.survival[0] - 1.0).abs() < 1e-12, "no absorbing marks: survival stays one");
-    assert!(f.expected_counts[[0, 0]] <= f.expected_counts[[1, 0]]);
-    assert!(f.expected_counts[[1, 0]] <= f.expected_counts[[2, 0]]);
-    assert!(f.expected_counts[[2, 0]] > 0.0);
-    // Predictive PIT: uniform up to sampling error on the training cohort.
-    let mut pits = Vec::new();
-    for subject in &cohort.subjects {
-        pits.extend(predictive_pit(&fit, &cohort, subject).expect("pit"));
+    let [m0, m1, m2] = covariance_score(&residuals, marks, rho, time_scale);
+    let expected = brute(rho);
+    for d in 0..marks {
+        for e in 0..marks {
+            assert!((m0[[d, e]] - expected[[d, e]]).abs() < 1e-12, "M[{d},{e}] {} vs {}", m0[[d, e]], expected[[d, e]]);
+        }
     }
-    assert!(pits.iter().all(|&u| (0.0..=1.0).contains(&u)));
-    let ks = kolmogorov_smirnov_uniform(&pits);
-    let n = pits.len() as f64;
-    assert!(
-        ks < 1.63 / n.sqrt() + 0.05,
-        "PIT KS distance {ks} over {n} events exceeds the uniform band"
-    );
+    let h = 1e-5;
+    let fd1 = (brute(rho + h) - brute(rho - h)) / (2.0 * h);
+    let fd2 = (brute(rho + h) - 2.0 * brute(rho) + brute(rho - h)) / (h * h);
+    for d in 0..marks {
+        for e in 0..marks {
+            assert!((m1[[d, e]] - fd1[[d, e]]).abs() < 1e-8 * (1.0 + fd1[[d, e]].abs()));
+            assert!((m2[[d, e]] - fd2[[d, e]]).abs() < 1e-5 * (1.0 + fd2[[d, e]].abs()));
+        }
+    }
+    // A clearly correlated residual sequence proposes an atom; white
+    // residuals whose curvature exceeds their square do not.
+    let correlated = vec![SubjectResiduals {
+        times: (0..40).map(|i| i as f64 * 0.1).collect(),
+        scores: (0..40).flat_map(|i| [if i < 20 { 0.5 } else { -0.5 }, 0.0]).collect(),
+        curvatures: vec![0.01; 80],
+    }];
+    let atom = best_new_atom(&correlated, marks, 1.0).expect("score").expect("an atom");
+    assert!(atom.eigenvalue > 0.0 && atom.loading[0].abs() > 0.0 && atom.loading[1].abs() < 1e-9, "{atom:?}");
+    assert!(atom.variance > 0.0 && atom.log_rate.is_finite());
+    let white = vec![SubjectResiduals {
+        times: (0..40).map(|i| i as f64 * 0.1).collect(),
+        scores: (0..40).flat_map(|i| [if i % 2 == 0 { 0.1 } else { -0.1 }, 0.0]).collect(),
+        curvatures: vec![1.0; 80],
+    }];
+    assert!(best_new_atom(&white, marks, 1.0).expect("score").is_none());
 }
 
-/// Write one line to stdout from test support code that is not itself a
-/// `#[test]` function.
+#[test]
+fn reported_covariance_objects_are_consistent() {
+    let loadings = array![[0.8, 0.1], [-0.3, 0.5], [0.2, -0.4]];
+    let rates = [0.5, 2.0];
+    let c0 = super::covariance::disease_covariance(&loadings);
+    let at_zero = super::covariance::temporal_covariance(&loadings, &rates, 0.0);
+    let at_lag = super::covariance::temporal_covariance(&loadings, &rates, 1.5);
+    for d in 0..3 {
+        for e in 0..3 {
+            assert!((c0[[d, e]] - at_zero[[d, e]]).abs() < 1e-14);
+            let expected: f64 = (0..2)
+                .map(|k| loadings[[d, k]] * loadings[[e, k]] * (-rates[k] * 1.5).exp())
+                .sum();
+            assert!((at_lag[[d, e]] - expected).abs() < 1e-14);
+        }
+    }
+    let (values, vectors) = super::covariance::eigenmodes(&c0).expect("eigen");
+    assert!(values[0] >= values[1] && values[1] >= values[2]);
+    assert!(values[2].abs() < 1e-12, "rank two: {values:?}");
+    let rebuilt = vectors.dot(&Array2::from_diag(&values)).dot(&vectors.t());
+    for d in 0..3 {
+        for e in 0..3 {
+            assert!((rebuilt[[d, e]] - c0[[d, e]]).abs() < 1e-12);
+        }
+    }
+}
+
+/// Write one line to stdout from test support code.
 fn emit(line: &str) {
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();
@@ -793,7 +834,6 @@ fn emit(line: &str) {
     }
 }
 
-/// A stdout logger for tests that watch the outer solve, installed once.
 struct StdoutLogger;
 
 impl log::Log for StdoutLogger {
@@ -833,869 +873,177 @@ fn formula_right_hand_side_resolves_against_the_node_columns() {
 }
 
 #[test]
-fn a_cohort_without_shared_risk_switches_the_atom_off() {
+fn fit_recovers_the_covariate_effect_and_grows_one_shared_risk_direction() {
     install_test_logger();
-    let mut cohort = simulate_cohort(80, 6.0, -0.8, 0.5, 0.0, 0.4, 3);
-    let mut spec = EventHistorySpec::new(1, vec![linear_spec()]);
-    spec.gauss_hermite_order = 11;
+    let started = std::time::Instant::now();
+    let mut cohort = simulate_cohort(80, 6.0, -0.8, 0.5, 1.0, 0.4, 7);
+    let spec = EventHistorySpec::new(vec![linear_spec()]);
     let fit = fit_event_history(&mut cohort, &spec).expect("fit");
-    assert!(fit.fit.outer_gradient_norm.is_none_or(|g| g.is_finite()));
-    let loading = fit.loadings[[0, 0]].abs();
-    assert!(
-        loading < 0.35,
-        "no shared risk was simulated but the fitted loading is {loading}"
-    );
-    let with_atom = fit.fit.log_likelihood;
-    let null_spec = EventHistorySpec::new(0, vec![linear_spec()]);
-    let null = fit_event_history(&mut cohort, &null_spec).expect("null fit");
-    assert!(
-        with_atom >= null.fit.log_likelihood - 1e-6,
-        "the atom model must not lose likelihood against its own null"
-    );
-}
-
-/// Solve `A x = b` for a small dense system by Gaussian elimination.
-fn solve_small(a: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
-    let n = b.len();
-    let mut m = a.clone();
-    let mut r = b.clone();
-    for col in 0..n {
-        let pivot = (col..n)
-            .max_by(|&i, &j| m[[i, col]].abs().total_cmp(&m[[j, col]].abs()))
-            .expect("row");
-        if pivot != col {
-            for k in 0..n {
-                let t = m[[col, k]];
-                m[[col, k]] = m[[pivot, k]];
-                m[[pivot, k]] = t;
-            }
-            let t = r[col];
-            r[col] = r[pivot];
-            r[pivot] = t;
-        }
-        for i in (col + 1)..n {
-            let f = m[[i, col]] / m[[col, col]];
-            for k in col..n {
-                m[[i, k]] -= f * m[[col, k]];
-            }
-            r[i] -= f * r[col];
-        }
-    }
-    let mut x = Array1::<f64>::zeros(n);
-    for i in (0..n).rev() {
-        let mut acc = r[i];
-        for k in (i + 1)..n {
-            acc -= m[[i, k]] * x[k];
-        }
-        x[i] = acc / m[[i, i]];
-    }
-    x
-}
-
-#[test]
-fn newton_direction_decreases_the_penalised_objective_at_the_start() {
-    let mut cohort = simulate_cohort(80, 6.0, -0.8, 0.5, 0.0, 0.4, 3);
-    cohort.validate().expect("valid");
-    let nodes = Arc::new(expand_nodes(&cohort, 9).expect("nodes"));
-    let total = nodes.total_nodes;
-    let mut design = Array2::<f64>::zeros((total, 2));
-    for row in 0..total {
-        design[[row, 0]] = 1.0;
-        design[[row, 1]] = nodes.node_data[[row, 0]];
-    }
-    let family = EventHistoryFamily::new(
-        Arc::clone(&nodes),
-        vec![Arc::new(design.clone())],
-        1,
-        11,
-        cohort.time_scale(),
-    )
-    .expect("family");
-    let states = |beta: &Array1<f64>, latent: &Array1<f64>| {
-        vec![
-            ParameterBlockState {
-                beta: beta.clone(),
-                eta: design.dot(beta),
-            },
-            ParameterBlockState {
-                beta: latent.clone(),
-                eta: Array1::zeros(total),
-            },
-        ]
-    };
-    // Ridge on the atom (loading and log-rate) at λ = 1.
-    let penalty = |latent: &Array1<f64>| 0.5 * latent.dot(latent);
-    let objective = |beta: &Array1<f64>, latent: &Array1<f64>| -> f64 {
-        -family.log_likelihood(&states(beta, latent)).expect("value") + penalty(latent)
-    };
-    let beta0 = array![0.0, 0.0];
-    let latent0 = array![0.0, 0.0];
-    let joint = family
-        .joint_evaluation(&states(&beta0, &latent0))
-        .expect("joint");
-    let value_only = family
-        .log_likelihood(&states(&beta0, &latent0))
-        .expect("value");
-    assert_eq!(
-        joint.log_likelihood, value_only,
-        "value-only and derivative paths must agree bitwise"
-    );
-    let p = 4;
-    for i in 0..p {
-        let h_fd = 1e-6;
-        let mut plus = Array1::<f64>::zeros(p);
-        plus[i] = h_fd;
-        let (bp, lp) = (
-            &beta0 + &plus.slice(ndarray::s![0..2]),
-            &latent0 + &plus.slice(ndarray::s![2..4]),
-        );
-        let (bm, lm) = (
-            &beta0 - &plus.slice(ndarray::s![0..2]),
-            &latent0 - &plus.slice(ndarray::s![2..4]),
-        );
-        let fd = (objective(&bp, &lp) - objective(&bm, &lm)) / (2.0 * h_fd);
-        let analytic = -joint.gradient[i] + if i >= 2 { latent0[i - 2] } else { 0.0 };
-        emit(&format!("coefficient {i}: analytic {analytic} vs finite difference {fd}"));
-    }
-    let mut h = joint.hessian.clone();
-    let mut g = -joint.gradient.clone();
-    for i in 2..p {
-        h[[i, i]] += 1.0;
-        g[i] += latent0[i - 2];
-    }
-    let direction = solve_small(&h, &g.mapv(|v| -v));
-    let base = objective(&beta0, &latent0);
-    let mut decreased = false;
-    for &t in &[1.0, 0.5, 0.25, 0.125, 0.0625] {
-        let beta = &beta0 + &direction.slice(ndarray::s![0..2]).to_owned().mapv(|v| v * t);
-        let latent = &latent0 + &direction.slice(ndarray::s![2..4]).to_owned().mapv(|v| v * t);
-        let trial = objective(&beta, &latent);
-        let predicted = t * g.dot(&direction) + 0.5 * t * t * direction.dot(&h.dot(&direction));
-        println!(
-            "t={t}: objective {base} -> {trial} (actual {:+e}, model {predicted:+e})",
-            trial - base
-        );
-        if trial < base {
-            decreased = true;
-        }
-    }
-    assert!(decreased, "no step along the Newton direction decreases the objective");
-    // The gradient must be the derivative of the value along the direction.
-    let h_fd = 1e-5;
-    let beta = &beta0 + &direction.slice(ndarray::s![0..2]).to_owned().mapv(|v| v * h_fd);
-    let latent = &latent0 + &direction.slice(ndarray::s![2..4]).to_owned().mapv(|v| v * h_fd);
-    let beta_m = &beta0 - &direction.slice(ndarray::s![0..2]).to_owned().mapv(|v| v * h_fd);
-    let latent_m = &latent0 - &direction.slice(ndarray::s![2..4]).to_owned().mapv(|v| v * h_fd);
-    let fd = (objective(&beta, &latent) - objective(&beta_m, &latent_m)) / (2.0 * h_fd);
-    let analytic = g.dot(&direction);
-    println!("directional derivative: analytic {analytic} vs finite difference {fd}");
-    assert!(
-        (fd - analytic).abs() < 1e-4 * (1.0 + analytic.abs()),
-        "directional derivative {analytic} vs finite difference {fd}"
-    );
-}
-
-#[test]
-fn lagrange_basis_keeps_its_derivative_within_roundoff_of_a_node() {
-    // A point on, or within roundoff of, a node must carry the same dL_i/dx
-    // as a point a hair away, where nothing is singular.
-    let gh = GaussHermite::new(9).expect("rule");
-    for hit in 0..gh.order {
-        let x = gh.nodes[hit];
-        let step = 1e-6;
-        let plus = gh.lagrange_basis(&super::family::seeded_one(x + step, 1.0));
-        let minus = gh.lagrange_basis(&super::family::seeded_one(x - step, 1.0));
-        for offset in [0.0, 1e-17, -1e-17, 1e-13] {
-            let on = gh.lagrange_basis(&super::family::seeded_one(x + offset, 1.0));
-            for i in 0..gh.order {
-                let fd_first = (plus[i].value() - minus[i].value()) / (2.0 * step);
-                let expected_value = if i == hit { 1.0 } else { 0.0 } + fd_first * offset;
-                assert!(
-                    (on[i].value() - expected_value).abs() < 1e-12 + 1e-6 * offset.abs(),
-                    "node {hit} basis {i} at offset {offset}: value {} vs {expected_value}",
-                    on[i].value()
-                );
-                assert!(
-                    (on[i].eps() - fd_first).abs() < 1e-6 * (1.0 + fd_first.abs()),
-                    "node {hit} basis {i} at offset {offset}: derivative {} vs finite difference {fd_first}",
-                    on[i].eps()
-                );
-            }
-        }
-    }
-    // Partition of unity and exact reproduction of x^m for m below the order.
-    let x = 0.371;
-    let basis = gh.lagrange_basis(&x);
-    for m in 0..gh.order {
-        let reproduced: f64 = basis
-            .iter()
-            .zip(gh.nodes.iter())
-            .map(|(l, node)| l * node.powi(m as i32))
-            .sum();
-        let exact = x.powi(m as i32);
-        assert!(
-            (reproduced - exact).abs() < 1e-11 * (1.0 + exact.abs()),
-            "x^{m}: {reproduced} vs {exact}"
-        );
-    }
-}
-
-#[test]
-fn transition_at_an_overflowed_rate_is_finite_with_zero_sensitivity() {
-    // log-rate 800: exp overflows to infinity, φ is exactly zero, and every
-    // derivative channel must be finite (zero), not ∞ · 0.
-    let kappa = super::scalar::exp(&super::family::seeded_one(800.0, 1.0)).scale(0.7);
-    let transition = AtomTransition::new(&kappa);
-    assert_eq!(transition.phi.value(), 0.0);
-    assert_eq!(transition.innovation.value(), 1.0);
-    for value in [
-        &transition.phi,
-        &transition.innovation,
-        &transition.dphi,
-        &transition.d2phi,
-    ] {
-        assert!(value.value().is_finite() && value.eps().is_finite());
-        assert_eq!(value.eps(), 0.0);
-    }
-    let plain = AtomTransition::new(&f64::INFINITY);
-    assert_eq!(plain.dphi, 0.0);
-    assert_eq!(plain.d2phi, 0.0);
-}
-
-/// The 80-subject loaded cohort the cost and diagnostic tests share.
-fn loaded_cohort() -> EventHistoryCohort {
-    let mut cohort = simulate_cohort(80, 6.0, -0.8, 0.5, 1.0, 0.4, 7);
-    cohort.validate().expect("valid");
-    cohort
-}
-
-/// Family on the loaded cohort at a Gauss-Hermite order, with the dense
-/// linear design and zeroed block states.
-fn loaded_family(
-    cohort: &EventHistoryCohort,
-    order: usize,
-) -> (EventHistoryFamily, Arc<Array2<f64>>, Vec<ParameterBlockState>) {
-    use gam_terms::smooth::build_term_collection_design;
-    let nodes = Arc::new(expand_nodes(cohort, 9).expect("nodes"));
-    let design = build_term_collection_design(nodes.node_data.view(), &linear_spec()).expect("design");
-    let dense = design.design.try_to_dense_arc("test design").expect("dense");
-    let family = EventHistoryFamily::new(
-        Arc::clone(&nodes),
-        vec![Arc::clone(&dense)],
-        1,
-        order,
-        cohort.time_scale(),
-    )
-    .expect("family");
-    let states = vec![
-        ParameterBlockState {
-            beta: Array1::zeros(2),
-            eta: Array1::zeros(nodes.total_nodes),
-        },
-        ParameterBlockState {
-            beta: Array1::zeros(2),
-            eta: Array1::zeros(nodes.total_nodes),
-        },
-    ];
-    (family, dense, states)
-}
-
-#[test]
-fn smallest_prefix_with_non_finite_louis_output_at_order_21() {
-    let cohort = loaded_cohort();
-    let (_, design_dense, _) = loaded_family(&cohort, 21);
-    let beta = array![-0.9485, 0.5452];
-    let eta = design_dense.dot(&beta);
-    let gh = GaussHermite::new(21).expect("rule");
-    let nodes = expand_nodes(&cohort, 9).expect("nodes");
-    let mut report = Vec::new();
-    for (s, subj) in nodes.subjects.iter().enumerate() {
-        let n = subj.len();
-        let run = |len: usize| -> bool {
-            let prefix = SubjectNodes {
-                first_row: 0,
-                times: subj.times[..len].to_vec(),
-                gaps: subj.gaps[..len - 1].to_vec(),
-                exposures: subj.exposures[..len].to_vec(),
-                counts: subj.counts.slice(ndarray::s![..len, ..]).to_owned(),
-                covariate_rows: subj.covariate_rows[..len].to_vec(),
-            };
-            let eta0: Vec<f64> = (0..len).map(|i| eta[subj.first_row + i]).collect();
-            let inputs = SubjectInputs {
-                nodes: &prefix,
-                eta0: &eta0,
-                loadings: &[1.2054],
-                log_rates: &[1.0587],
-                time_scale: cohort.time_scale(),
-                gh: &gh,
-                continuation_gap: 0.0,
-            };
-            match subject_marginal(&inputs, true) {
-                Ok(out) => {
-                    out.loglik.is_finite()
-                        && out.gradient.iter().all(|v| v.is_finite())
-                        && out.hessian.iter().all(|v| v.is_finite())
-                }
-                Err(_) => false,
-            }
-        };
-        if run(n) {
-            continue;
-        }
-        let mut lo = 1;
-        let mut hi = n;
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if run(mid) {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        let bad = lo;
-        report.push(format!(
-            "subject {s}: {n} nodes, first non-finite prefix {bad}; node {}: time {} gap {} exposure {} counts {:?}; prefix log-lik at {bad}: {:?}",
-            bad - 1,
-            subj.times[bad - 1],
-            if bad >= 2 { subj.gaps[bad - 2] } else { 0.0 },
-            subj.exposures[bad - 1],
-            subj.counts.row(bad - 1).to_vec(),
-            {
-                let prefix = SubjectNodes {
-                    first_row: 0,
-                    times: subj.times[..bad].to_vec(),
-                    gaps: subj.gaps[..bad - 1].to_vec(),
-                    exposures: subj.exposures[..bad].to_vec(),
-                    counts: subj.counts.slice(ndarray::s![..bad, ..]).to_owned(),
-                    covariate_rows: subj.covariate_rows[..bad].to_vec(),
-                };
-                let eta0: Vec<f64> = (0..bad).map(|i| eta[subj.first_row + i]).collect();
-                let inputs = SubjectInputs {
-                    nodes: &prefix,
-                    eta0: &eta0,
-                    loadings: &[1.2054],
-                    log_rates: &[1.0587],
-                    time_scale: cohort.time_scale(),
-                    gh: &gh,
-                    continuation_gap: 0.0,
-                };
-                subject_marginal(&inputs, true).map(|o| {
-                    (
-                        o.loglik,
-                        o.gradient.iter().filter(|v| !v.is_finite()).count(),
-                        o.hessian.iter().filter(|v| !v.is_finite()).count(),
-                        o.gradient.iter().take(4).copied().collect::<Vec<_>>(),
-                    )
-                })
-            }
-        ));
-        if report.len() >= 3 {
-            break;
-        }
-    }
-    for line in &report {
-        emit(line);
-    }
-    assert!(report.is_empty(), "{} subjects with non-finite Louis output", report.len());
-}
-
-#[test]
-fn louis_hessian_against_finite_differences_at_the_loaded_cohort_optimum() {
-    // The state the fixed-λ inner solve reaches on the loaded cohort. Louis'
-    // Hessian is compared with finite differences of the exact gradient at
-    // two step sizes (a ripple in the objective shows up as step-size
-    // dependence) and at two quadrature orders. The solve reached the
-    // conditional intercept −0.9485 with loading 1.2054; the latent term now
-    // enters as `−½a² + a z`, so the same model has the population intercept
-    // `−0.9485 + ½·1.2054²`.
-    let cohort = loaded_cohort();
-    let loading = 1.2054_f64;
-    let beta = array![-0.9485 + 0.5 * loading * loading, 0.5452];
-    let latent = array![loading, 1.0587];
-    for order in [11usize, 21] {
-        let (family, design_dense, base_states) = loaded_family(&cohort, order);
-        let at = |beta: &Array1<f64>, latent: &Array1<f64>| -> Vec<ParameterBlockState> {
-            let mut states = base_states.clone();
-            states[0].beta = beta.clone();
-            states[0].eta = design_dense.dot(beta);
-            states[1].beta = latent.clone();
-            states
-        };
-        let base = family.joint_evaluation(&at(&beta, &latent)).expect("joint");
-        let p = 4;
-        let mut full = Array1::<f64>::zeros(p);
-        full.slice_mut(ndarray::s![0..2]).assign(&beta);
-        full.slice_mut(ndarray::s![2..4]).assign(&latent);
-        let split = |v: &Array1<f64>| -> (Array1<f64>, Array1<f64>) {
-            (v.slice(ndarray::s![0..2]).to_owned(), v.slice(ndarray::s![2..4]).to_owned())
-        };
-        for h in [1e-3, 1e-5] {
-            for i in 0..p {
-                let mut plus = full.clone();
-                plus[i] += h;
-                let mut minus = full.clone();
-                minus[i] -= h;
-                let (bp, lp) = split(&plus);
-                let (bm, lm) = split(&minus);
-                let gp = family.joint_evaluation(&at(&bp, &lp)).expect("joint").gradient.clone();
-                let gm = family.joint_evaluation(&at(&bm, &lm)).expect("joint").gradient.clone();
-                let vp = family.log_likelihood(&at(&bp, &lp)).expect("value");
-                let vm = family.log_likelihood(&at(&bm, &lm)).expect("value");
-                let fd_gradient = (vp - vm) / (2.0 * h);
-                let fd_row: Vec<String> = (0..p).map(|j| format!("{:.5e}", -(gp[j] - gm[j]) / (2.0 * h))).collect();
-                let louis_row: Vec<String> = (0..p).map(|j| format!("{:.5e}", base.hessian[[i, j]])).collect();
-                emit(&format!(
-                    "[final G={order} h={h:.0e}] coefficient {i}: gradient exact {:.6e} fd {:.6e}; -hessian louis [{}] fd [{}]",
-                    base.gradient[i], fd_gradient, louis_row.join(", "), fd_row.join(", ")
-                ));
-                if h == 1e-5 {
-                    assert!(
-                        (base.gradient[i] - fd_gradient).abs() < 1e-6 * (1.0 + fd_gradient.abs()),
-                        "G={order}: gradient {i} exact {} vs finite difference {fd_gradient}",
-                        base.gradient[i]
-                    );
-                }
-                if order == 21 && h == 1e-5 {
-                    for j in 0..p {
-                        let fd_h = -(gp[j] - gm[j]) / (2.0 * h);
-                        assert!(
-                            (base.hessian[[i, j]] - fd_h).abs() < 1e-2 * (1.0 + fd_h.abs()),
-                            "G=21: hessian[{i},{j}] louis {} vs finite difference {fd_h}",
-                            base.hessian[[i, j]]
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn spline_basis_reproduces_lines_and_cubics_and_never_overshoots() {
-    let gh = GaussHermite::new(21).expect("rule");
-    let g = gh.order;
-    // Exact on linear data, inside and beyond the hull.
-    let linear: Vec<f64> = gh.nodes.iter().map(|x| 0.4 - 0.7 * x).collect();
-    for &x in &[-9.0, -5.0, -1.3, 0.0, 0.27, 2.9, 5.6, 8.0] {
-        let basis = gh.spline_basis(&x);
-        let value: f64 = basis.iter().zip(linear.iter()).map(|(b, f)| b * f).sum();
-        assert!((value - (0.4 - 0.7 * x)).abs() < 1e-12, "linear at {x}: {value}");
-        let unity: f64 = basis.iter().sum();
-        assert!((unity - 1.0).abs() < 1e-12, "partition of unity at {x}: {unity}");
-    }
-    // Exact on cubic data everywhere on the hull (not-a-knot).
-    let cubic: Vec<f64> = gh.nodes.iter().map(|x| 0.2 * x * x * x - x * x + 0.5 * x - 1.0).collect();
-    for step in 0..200 {
-        let x = gh.nodes[0] + (gh.nodes[g - 1] - gh.nodes[0]) * step as f64 / 199.0;
-        let value: f64 = gh.spline_basis(&x).iter().zip(cubic.iter()).map(|(b, f)| b * f).sum();
-        let exact = 0.2 * x * x * x - x * x + 0.5 * x - 1.0;
-        assert!((value - exact).abs() < 1e-9 * (1.0 + exact.abs()), "cubic at {x}: {value} vs {exact}");
-    }
-    // Interpolates the nodal values exactly.
-    let data: Vec<f64> = gh.nodes.iter().map(|x| (-(x * x) / 3.0).exp() * (1.0 + x)).collect();
-    for j in 0..g {
-        let basis = gh.spline_basis(&gh.nodes[j]);
-        let value: f64 = basis.iter().zip(data.iter()).map(|(b, f)| b * f).sum();
-        assert!((value - data[j]).abs() < 1e-12, "node {j}: {value} vs {}", data[j]);
-    }
-    // A steep, smooth function with a wide range does not overshoot: the
-    // spline stays within a small margin of the data's range everywhere on
-    // the hull, where the degree-20 Lagrange interpolant would not.
-    let steep: Vec<f64> = gh.nodes.iter().map(|x| -12.0 * (x + 1.0).abs().powf(1.5) + 3.0).collect();
-    let (lo, hi) = steep.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| (l.min(*v), h.max(*v)));
-    let margin = 0.1 * (hi - lo);
-    let mut lagrange_overshoot = 0.0_f64;
-    for step in 0..400 {
-        let x = gh.nodes[0] + (gh.nodes[g - 1] - gh.nodes[0]) * step as f64 / 399.0;
-        let spline: f64 = gh.spline_basis(&x).iter().zip(steep.iter()).map(|(b, f)| b * f).sum();
-        assert!(spline >= lo - margin && spline <= hi + margin, "spline overshoot at {x}: {spline} outside [{lo}, {hi}]");
-        let lagrange: f64 = gh.lagrange_basis(&x).iter().zip(steep.iter()).map(|(b, f)| b * f).sum();
-        lagrange_overshoot = lagrange_overshoot.max((lagrange - hi).max(lo - lagrange));
-    }
-    assert!(lagrange_overshoot > hi - lo, "the control did not overshoot: {lagrange_overshoot}");
-}
-
-#[test]
-fn dual_loading_derivative_matches_finite_difference_at_zero_loading() {
-    // At loading zero the computed marginal is exactly symmetric in the
-    // loading, so its derivative is zero; the dual must reproduce that as
-    // the node count grows and the grid starts moving with the loading.
-    use super::scalar::Tangent;
-    let gh = GaussHermite::new(9).expect("rule");
-    for nodes in 1..=4 {
-        let times: Vec<f64> = (0..nodes).map(|n| n as f64 * 0.7).collect();
-        let exposures: Vec<f64> = (0..nodes).map(|n| if n == 0 { 0.0 } else { 0.7 }).collect();
-        let counts: Vec<Vec<f64>> = (0..nodes).map(|n| vec![if n % 2 == 1 { 1.0 } else { 0.0 }]).collect();
-        let subj = subject(&times, &exposures, &counts);
-        let value = |a: f64| -> f64 {
-            let eta0 = vec![0.3; nodes];
-            let inputs = SubjectInputs {
-                nodes: &subj,
-                eta0: &eta0,
-                loadings: &[a],
-                log_rates: &[0.2],
-                time_scale: 1.0,
-                gh: &gh,
-                continuation_gap: 0.0,
-            };
-            subject_marginal(&inputs, false).expect("value").loglik
-        };
-        let eta0: Vec<Tangent<1>> = (0..nodes).map(|_| Tangent::seeded(0.3, [0.0])).collect();
-        let inputs = SubjectInputs {
-            nodes: &subj,
-            eta0: &eta0,
-            loadings: &[Tangent::seeded(0.0, [1.0])],
-            log_rates: &[Tangent::seeded(0.2, [0.0])],
-            time_scale: 1.0,
-            gh: &gh,
-            continuation_gap: 0.0,
-        };
-        let dual = subject_marginal(&inputs, false).expect("dual").loglik;
-        let h = 1e-5;
-        let fd = (value(h) - value(-h)) / (2.0 * h);
-        emit(&format!(
-            "nodes={nodes}: value {} dual {} d/da {} vs finite difference {fd}",
-            value(0.0),
-            dual.value,
-            dual.grad[0]
-        ));
-        assert_eq!(dual.value, value(0.0), "dual value channel must match the plain value");
-        assert!(
-            (dual.grad[0] - fd).abs() < 1e-6 * (1.0 + fd.abs()),
-            "nodes={nodes}: d/da {} vs finite difference {fd}",
-            dual.grad[0]
-        );
-    }
-}
-
-/// A tracing shell around the family that prints every engine call, so a
-/// stalled inner solve can be read as the sequence of points it evaluated.
-#[derive(Clone)]
-struct Traced(EventHistoryFamily);
-
-impl crate::custom_family::CustomFamily for Traced {
-    fn evaluate(
-        &self,
-        block_states: &[ParameterBlockState],
-    ) -> Result<crate::custom_family::FamilyEvaluation, String> {
-        let out = self.0.evaluate(block_states)?;
-        emit(&format!(
-            "[trace] evaluate latent={:?} beta={:?} ll={}",
-            block_states[1].beta.as_slice().expect("slice"),
-            block_states[0].beta.as_slice().expect("slice"),
-            out.log_likelihood
-        ));
-        Ok(out)
-    }
-    fn log_likelihood_only(&self, block_states: &[ParameterBlockState]) -> Result<f64, String> {
-        let out = self.0.log_likelihood_only(block_states);
-        emit(&format!(
-            "[trace] value latent={:?} beta={:?} -> {:?}",
-            block_states[1].beta.as_slice().expect("slice"),
-            block_states[0].beta.as_slice().expect("slice"),
-            out
-        ));
-        out
-    }
-    fn classical_deviance(
-        &self,
-        block_states: &[ParameterBlockState],
-    ) -> Result<Option<f64>, String> {
-        self.0.classical_deviance(block_states)
-    }
-    fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {
-        true
-    }
-    fn has_explicit_joint_hessian(&self) -> bool {
-        true
-    }
-    fn requires_joint_outer_hyper_path(&self) -> bool {
-        true
-    }
-    fn levenberg_on_ill_conditioning(&self) -> bool {
-        true
-    }
-    fn coefficient_hessian_cost(&self, specs: &[crate::custom_family::ParameterBlockSpec]) -> u64 {
-        self.0.coefficient_hessian_cost(specs)
-    }
-    fn output_channel_assignment(
-        &self,
-        specs: &[crate::custom_family::ParameterBlockSpec],
-    ) -> Option<Vec<usize>> {
-        self.0.output_channel_assignment(specs)
-    }
-    fn block_coefficient_coordinate(
-        &self,
-        block_states: &[ParameterBlockState],
-        block_index: usize,
-        block_spec: &crate::custom_family::ParameterBlockSpec,
-    ) -> gam_problem::CoefficientCoordinate {
-        self.0
-            .block_coefficient_coordinate(block_states, block_index, block_spec)
-    }
-    fn exact_newton_joint_hessian(
-        &self,
-        block_states: &[ParameterBlockState],
-    ) -> Result<Option<Array2<f64>>, String> {
-        let out = self.0.exact_newton_joint_hessian(block_states)?;
-        emit(&format!(
-            "[trace] joint hessian at latent={:?}: {:?}",
-            block_states[1].beta.as_slice().expect("slice"),
-            out.as_ref().map(|h| h.diag().to_vec())
-        ));
-        Ok(out)
-    }
-    fn exact_newton_joint_loglik_gradient(
-        &self,
-        block_states: &[ParameterBlockState],
-    ) -> Result<Option<Array1<f64>>, String> {
-        let out = self.0.exact_newton_joint_loglik_gradient(block_states)?;
-        emit(&format!(
-            "[trace] joint gradient {:?}",
-            out.as_ref().map(|g| g.to_vec())
-        ));
-        Ok(out)
-    }
-    fn exact_newton_joint_gradient_evaluation(
-        &self,
-        block_states: &[ParameterBlockState],
-        specs: &[crate::custom_family::ParameterBlockSpec],
-    ) -> Result<Option<crate::custom_family::ExactNewtonJointGradientEvaluation>, String> {
-        self.0.exact_newton_joint_gradient_evaluation(block_states, specs)
-    }
-    fn exact_newton_joint_hessian_directional_derivative(
-        &self,
-        block_states: &[ParameterBlockState],
-        d_beta_flat: &Array1<f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        self.0
-            .exact_newton_joint_hessian_directional_derivative(block_states, d_beta_flat)
-    }
-    fn exact_newton_joint_hessiansecond_directional_derivative(
-        &self,
-        block_states: &[ParameterBlockState],
-        u: &Array1<f64>,
-        v: &Array1<f64>,
-    ) -> Result<Option<Array2<f64>>, String> {
-        self.0
-            .exact_newton_joint_hessiansecond_directional_derivative(block_states, u, v)
-    }
-}
-
-#[test]
-fn traced_fixed_lambda_inner_solve_on_the_null_cohort() {
-    use super::family::{latent_block_spec, mark_block_spec};
-    use gam_terms::smooth::build_term_collection_design;
-    let mut cohort = simulate_cohort(80, 6.0, -0.8, 0.5, 0.0, 0.4, 3);
-    cohort.validate().expect("valid");
-    let nodes = Arc::new(expand_nodes(&cohort, 9).expect("nodes"));
-    let design = build_term_collection_design(nodes.node_data.view(), &linear_spec()).expect("design");
-    let dense = design
-        .design
-        .try_to_dense_arc("test design")
-        .expect("dense");
-    let family = EventHistoryFamily::new(
-        Arc::clone(&nodes),
-        vec![dense],
-        1,
-        11,
-        cohort.time_scale(),
-    )
-    .expect("family");
-    let specs = vec![
-        mark_block_spec("event", &design),
-        latent_block_spec(nodes.total_nodes, 1, 1).expect("latent spec"),
-    ];
-    let options = crate::custom_family::BlockwiseFitOptions::default();
-    let result = crate::custom_family::fit_custom_family_fixed_log_lambdas(
-        &Traced(family),
-        &specs,
-        &options,
-        None,
-    );
-    match result {
-        Ok(fit) => println!("[trace] converged: latent={:?}", fit.block_states[1].beta),
-        Err(error) => println!("[trace] error: {error}"),
-    }
-}
-
-#[test]
-fn gradient_and_hessian_match_central_differences_at_tiny_gaps() {
-    // Gaps of a few thousandths of the time scale drive `1 − φ²` to 1e-3;
-    // the innovation-coordinate gap algebra must stay bounded there. At such
-    // gaps the backward step is pure interpolation with no kernel smoothing,
-    // so the agreement is limited by the Lagrange interpolation error of the
-    // exponential likelihood factors on a 31-node grid, about 1e-4 relative.
-    let gh = GaussHermite::new(31).expect("rule");
-    let nodes = subject(
-        &[0.0, 0.004, 0.011, 0.016],
-        &[0.3, 0.0, 0.5, 0.2],
-        &[
-            vec![0.0, 0.0],
-            vec![1.0, 0.0],
-            vec![0.0, 1.0],
-            vec![1.0, 0.0],
-        ],
-    );
-    let mut theta = vec![0.2, -0.1, 0.4, 0.0, -0.3, 0.5, 0.1, 0.2];
-    theta.extend([0.8, -0.4, 0.3, 0.6]);
-    theta.extend([-0.2, 0.5]);
-    let p = theta.len();
-    let base = evaluate_at(&nodes, &gh, &theta, true);
-    let h = 1e-4;
-    let mut mismatches = Vec::new();
-    for i in 0..p {
-        let mut plus = theta.clone();
-        plus[i] += h;
-        let mut minus = theta.clone();
-        minus[i] -= h;
-        let fp = evaluate_at(&nodes, &gh, &plus, true);
-        let fm = evaluate_at(&nodes, &gh, &minus, true);
-        let fd = (fp.loglik - fm.loglik) / (2.0 * h);
-        if (base.gradient[i] - fd).abs() >= 1e-4 * (1.0 + fd.abs()) {
-            mismatches.push(format!("gradient[{i}] = {} vs {fd}", base.gradient[i]));
-        }
-        for j in 0..p {
-            let fd_h = (fp.gradient[j] - fm.gradient[j]) / (2.0 * h);
-            let value = base.hessian[i * p + j];
-            if (value - fd_h).abs() >= 1e-3 * (1.0 + fd_h.abs()) {
-                mismatches.push(format!(
-                    "hessian[{i},{j}] = {value} vs {fd_h} (rel {:e})",
-                    (value - fd_h).abs() / (1.0 + fd_h.abs())
-                ));
-            }
-        }
-    }
-    for line in &mismatches {
-        println!("{line}");
-    }
-    assert!(mismatches.is_empty(), "{} derivative entries disagree", mismatches.len());
-}
-
-#[test]
-fn traced_fixed_lambda_inner_solve_on_the_loaded_cohort_reports_its_cost() {
-    install_test_logger();
-    use super::family::{latent_block_spec, mark_block_spec};
-    use gam_terms::smooth::build_term_collection_design;
-    let mut cohort = simulate_cohort(80, 6.0, -0.8, 0.5, 1.0, 0.4, 7);
-    cohort.validate().expect("valid");
-    let nodes = Arc::new(expand_nodes(&cohort, 9).expect("nodes"));
-    let design = build_term_collection_design(nodes.node_data.view(), &linear_spec()).expect("design");
-    let dense = design
-        .design
-        .try_to_dense_arc("test design")
-        .expect("dense");
-    let family = EventHistoryFamily::new(
-        Arc::clone(&nodes),
-        vec![dense],
-        1,
-        11,
-        cohort.time_scale(),
-    )
-    .expect("family");
-    let total_nodes: usize = nodes.subjects.iter().map(|s| s.len()).sum();
     emit(&format!(
-        "[cost] subjects={} nodes={} mean_nodes={:.1}",
-        nodes.subjects.len(),
-        total_nodes,
-        total_nodes as f64 / nodes.subjects.len() as f64
+        "[fit] {:.1}s rank={} loadings={:?} rates={:?} evidence={:?} path={:?}",
+        started.elapsed().as_secs_f64(),
+        fit.rank(),
+        fit.loadings,
+        fit.rates,
+        fit.atom_evidence,
+        fit.rank_path
     ));
-    let states = vec![
-        ParameterBlockState {
-            beta: array![-0.8, 0.5],
-            eta: Array1::zeros(nodes.total_nodes),
-        },
-        ParameterBlockState {
-            beta: array![0.7, 0.0],
-            eta: Array1::zeros(nodes.total_nodes),
-        },
-    ];
-    let mut states = states;
-    let design_dense = design.design.try_to_dense_arc("d").expect("dense");
-    states[0].eta = design_dense.dot(&states[0].beta);
-    let clock = std::time::Instant::now();
-    family.log_likelihood(&states).expect("value");
-    emit(&format!("[cost] value-only {:.3}s", clock.elapsed().as_secs_f64()));
-    let clock = std::time::Instant::now();
-    family.joint_evaluation(&states).expect("joint");
-    emit(&format!("[cost] joint (value+gradient+hessian) {:.3}s", clock.elapsed().as_secs_f64()));
-    let u = array![0.1, 0.2, 0.3, 0.4];
-    let clock = std::time::Instant::now();
-    family.directional_hessian(&states, &u).expect("directional");
-    emit(&format!("[cost] directional hessian {:.3}s", clock.elapsed().as_secs_f64()));
-    let clock = std::time::Instant::now();
-    family
-        .second_directional_hessian(&states, &u, &u)
-        .expect("second directional");
-    emit(&format!("[cost] second directional hessian {:.3}s", clock.elapsed().as_secs_f64()));
-    let specs = vec![
-        mark_block_spec("event", &design),
-        latent_block_spec(nodes.total_nodes, 1, 1).expect("latent spec"),
-    ];
-    let options = crate::custom_family::BlockwiseFitOptions::default();
-    let clock = std::time::Instant::now();
-    let traced = Traced(family);
-    let result = crate::custom_family::fit_custom_family_fixed_log_lambdas(
-        &traced,
-        &specs,
-        &options,
-        None,
+    let beta = fit.mark_coefficients(0);
+    assert_eq!(beta.len(), 2, "intercept and slope");
+    assert!(
+        (beta[1] - 0.5).abs() < 0.25,
+        "slope {} should recover 0.5 within its sampling error",
+        beta[1]
     );
-    match result {
-        Ok(fit) => {
-            emit(&format!(
-                "[cost] fixed-lambda inner solve {:.1}s cycles={} latent={:?}",
-                clock.elapsed().as_secs_f64(),
-                fit.inner_cycles,
-                fit.block_states[1].beta
-            ));
-            // Louis Hessian against a finite difference of the exact gradient
-            // at the final state, and the exact gradient against a finite
-            // difference of the value.
-            let family = &traced.0;
-            let at = |beta: &Array1<f64>, latent: &Array1<f64>| -> Vec<ParameterBlockState> {
-                let mut states = fit.block_states.clone();
-                states[0].beta = beta.clone();
-                states[0].eta = design_dense.dot(beta);
-                states[1].beta = latent.clone();
-                states
-            };
-            let beta = fit.block_states[0].beta.clone();
-            let latent = fit.block_states[1].beta.clone();
-            let base = family.joint_evaluation(&at(&beta, &latent)).expect("joint");
-            let p = beta.len() + latent.len();
-            let h = 1e-5;
-            let split = |v: &Array1<f64>| -> (Array1<f64>, Array1<f64>) {
-                (
-                    v.slice(ndarray::s![0..beta.len()]).to_owned(),
-                    v.slice(ndarray::s![beta.len()..]).to_owned(),
-                )
-            };
-            let mut full = Array1::<f64>::zeros(p);
-            full.slice_mut(ndarray::s![0..beta.len()]).assign(&beta);
-            full.slice_mut(ndarray::s![beta.len()..]).assign(&latent);
-            for i in 0..p {
-                let mut plus = full.clone();
-                plus[i] += h;
-                let mut minus = full.clone();
-                minus[i] -= h;
-                let (bp, lp) = split(&plus);
-                let (bm, lm) = split(&minus);
-                let gp = family.joint_evaluation(&at(&bp, &lp)).expect("joint").gradient.clone();
-                let gm = family.joint_evaluation(&at(&bm, &lm)).expect("joint").gradient.clone();
-                let vp = family.log_likelihood(&at(&bp, &lp)).expect("value");
-                let vm = family.log_likelihood(&at(&bm, &lm)).expect("value");
-                let fd_gradient = (vp - vm) / (2.0 * h);
-                let fd_row: Vec<f64> = (0..p).map(|j| -(gp[j] - gm[j]) / (2.0 * h)).collect();
-                let louis_row: Vec<f64> = (0..p).map(|j| base.hessian[[i, j]]).collect();
-                emit(&format!(
-                    "[final] coefficient {i}: gradient exact {:.9e} fd {:.9e}; -hessian row louis {:?} fd {:?}",
-                    base.gradient[i], fd_gradient, louis_row, fd_row
-                ));
+    // The simulated intensity `exp(β₀ + β₁x + a z)` averages over the
+    // stationary `z` to `exp(β₀ + ½a² + β₁x)`, and the fitted `η⁰` is
+    // parameterised as that average, so the intercept estimates the
+    // population log-rate `−0.8 + ½·1² = −0.3`, not the conditional `−0.8`.
+    let population_log_rate = -0.8 + 0.5;
+    assert!(
+        (beta[0] - population_log_rate).abs() < 0.25,
+        "intercept {} should be the population log-rate {population_log_rate}",
+        beta[0]
+    );
+    assert!(fit.rank() >= 1, "a shared dynamic risk was simulated but the evidence grew no atom");
+    let loading = fit.loadings[[0, 0]].abs();
+    assert!(loading > 0.4, "fitted loading {loading}");
+    assert!(fit.rates[0] > 0.0 && fit.rates[0].is_finite());
+    assert!(fit.atom_evidence[0] > 0.0);
+    assert!(fit.fit.outer_gradient_norm.is_none_or(|g| g.is_finite()));
+    let covariance = fit.disease_covariance();
+    assert!((covariance[[0, 0]] - fit.loadings.row(0).dot(&fit.loadings.row(0))).abs() < 1e-12);
+    // Forecast: probabilities and expected counts are coherent.
+    let horizons = [6.5, 7.0, 8.0];
+    let f = forecast(&fit, &cohort, &cohort.subjects[0], &horizons, 0).expect("forecast");
+    assert!(f.survival.iter().all(|&s| (s - 1.0).abs() < 1e-12), "no terminal marks: survival stays one");
+    for h in 0..3 {
+        assert!((0.0..=1.0).contains(&f.risk[[h, 0]]), "risk {}", f.risk[[h, 0]]);
+        assert!(f.expected_counts[[h, 0]] >= f.risk[[h, 0]] - 1e-12);
+    }
+    assert!(f.risk[[0, 0]] <= f.risk[[1, 0]] && f.risk[[1, 0]] <= f.risk[[2, 0]]);
+    assert!(f.expected_counts[[2, 0]] > 0.0);
+    // The smoothed latent state and its follow-up average are coherent.
+    let path = latent_state(&fit, &cohort, &cohort.subjects[0]).expect("latent state");
+    let (mean, cov) = latent_exposure(&fit, &cohort, &cohort.subjects[0]).expect("exposure");
+    assert_eq!(path.means.ncols(), fit.rank());
+    assert_eq!(mean.len(), fit.rank());
+    let atoms = fit.rank();
+    let max_variance = (0..path.times.len())
+        .map(|n| path.covariances[n * atoms * atoms])
+        .fold(0.0, f64::max);
+    assert!(cov[0] > 0.0 && cov[0] <= max_variance + 1e-9, "exposure variance {} vs max node variance {max_variance}", cov[0]);
+    // Predictive PIT: uniform up to sampling error on the training cohort.
+    let mut pits = Vec::new();
+    for subject in &cohort.subjects {
+        pits.extend(predictive_pit(&fit, &cohort, subject).expect("pit"));
+    }
+    assert!(pits.iter().all(|&u| (0.0..=1.0).contains(&u)));
+    let ks = kolmogorov_smirnov_uniform(&pits);
+    let n = pits.len() as f64;
+    emit(&format!("[fit] pit events={} ks={ks}", pits.len()));
+    assert!(
+        ks < 1.63 / n.sqrt() + 0.05,
+        "PIT KS distance {ks} over {n} events exceeds the uniform band"
+    );
+}
+
+#[test]
+fn a_cohort_without_shared_risk_carries_no_meaningful_atom() {
+    install_test_logger();
+    let mut cohort = simulate_cohort(80, 6.0, -0.8, 0.5, 0.0, 0.4, 3);
+    let spec = EventHistorySpec::new(vec![linear_spec()]);
+    let fit = fit_event_history(&mut cohort, &spec).expect("fit");
+    emit(&format!(
+        "[null] rank={} loadings={:?} evidence={:?} path={:?}",
+        fit.rank(),
+        fit.loadings,
+        fit.atom_evidence,
+        fit.rank_path
+    ));
+    assert!(fit.fit.outer_gradient_norm.is_none_or(|g| g.is_finite()));
+    for a in fit.loadings.iter() {
+        assert!(a.abs() < 0.35, "no shared risk was simulated but a fitted loading is {a}");
+    }
+    assert!(fit.rank_path.iter().all(|step| step.evidence_gain.is_finite()));
+}
+
+#[test]
+fn first_onset_and_terminal_marks_forecast_per_mark_risks() {
+    install_test_logger();
+    // Two once-only diseases and death, 60 subjects, no covariate effect.
+    let mut rng = Rng(17);
+    let rates = [0.15, 0.25, 0.08];
+    let mut subjects = Vec::new();
+    let mut covariates = Array2::<f64>::zeros((60, 1));
+    for s in 0..60 {
+        covariates[[s, 0]] = rng.uniform() - 0.5;
+        let mut events = Vec::new();
+        let mut exit = 8.0;
+        for (mark, &rate) in rates.iter().enumerate() {
+            let t = -rng.uniform().max(1e-12).ln() / rate;
+            if t < 8.0 {
+                events.push(Event { time: t, mark });
             }
         }
-        Err(error) => emit(&format!("[cost] error after {:.1}s: {error}", clock.elapsed().as_secs_f64())),
+        if let Some(death) = events.iter().find(|e| e.mark == 2).map(|e| e.time) {
+            exit = death;
+            events.retain(|e| e.time <= death);
+        }
+        if s % 10 == 0 {
+            events.push(Event { time: -1.0, mark: 0 });
+            events.retain(|e| e.mark != 0 || e.time <= 0.0);
+        }
+        subjects.push(SubjectHistory {
+            id: format!("p{s}"),
+            entry: 0.0,
+            exit,
+            events,
+            segments: vec![CovariateSegment { start: 0.0, row: s }],
+        });
     }
+    let mut cohort = EventHistoryCohort {
+        mark_names: vec!["a".to_string(), "b".to_string(), "death".to_string()],
+        mark_kinds: vec![MarkKind::Once, MarkKind::Once, MarkKind::Terminal],
+        covariate_names: vec!["x".to_string()],
+        covariates,
+        subjects,
+    };
+    let spec = EventHistorySpec::new(vec![linear_spec()]);
+    let fit = fit_event_history(&mut cohort, &spec).expect("fit");
+    emit(&format!("[risk] rank={} path={:?}", fit.rank(), fit.rank_path));
+    let alive = cohort
+        .subjects
+        .iter()
+        .find(|s| s.exit == 8.0 && s.events.iter().all(|e| e.time > 0.0) && !s.events.iter().any(|e| e.mark == 0))
+        .expect("an alive subject without disease a");
+    let f = forecast(&fit, &cohort, alive, &[9.0, 10.0, 12.0], 0).expect("forecast");
+    for h in 0..3 {
+        assert!((0.0..=1.0).contains(&f.survival[h]));
+        assert!(f.risk[[h, 0]].is_finite() && (0.0..=1.0).contains(&f.risk[[h, 0]]));
+        assert!(f.risk[[h, 2]].is_finite() && (f.risk[[h, 2]] - (1.0 - f.survival[h])).abs() < 1e-9, "death risk is one minus survival");
+        assert!((f.expected_counts[[h, 0]] - f.risk[[h, 0]]).abs() < 1e-12, "a once-only mark's expected count is its risk");
+        if h > 0 {
+            assert!(f.survival[h] <= f.survival[h - 1] + 1e-12);
+            assert!(f.risk[[h, 0]] >= f.risk[[h - 1, 0]] - 1e-12);
+        }
+    }
+    let had_b = alive.events.iter().any(|e| e.mark == 1);
+    assert_eq!(f.risk[[0, 1]].is_nan(), had_b, "a disease already present carries no risk");
+    let prior = cohort.subjects.iter().find(|s| s.events.iter().any(|e| e.time <= 0.0) && s.exit == 8.0).expect("prior");
+    let g = forecast(&fit, &cohort, prior, &[9.0], 0).expect("forecast");
+    assert!(g.risk[[0, 0]].is_nan());
+    let dead = cohort.subjects.iter().find(|s| s.exit < 8.0).expect("a dead subject");
+    assert!(forecast(&fit, &cohort, dead, &[9.0], 0).is_err(), "nothing to forecast after death");
+    let pits: Vec<f64> = cohort
+        .subjects
+        .iter()
+        .flat_map(|s| predictive_pit(&fit, &cohort, s).expect("pit"))
+        .collect();
+    assert!(pits.iter().all(|&u| (0.0..=1.0).contains(&u)));
+    let ks = kolmogorov_smirnov_uniform(&pits);
+    emit(&format!("[risk] pit events={} ks={ks}", pits.len()));
+    assert!(ks < 1.63 / (pits.len() as f64).sqrt() + 0.05, "PIT KS {ks}");
 }
 
 /// Simulate a single-mark cohort whose log-intensity is `β₀ + b(t) g` for a
@@ -1742,6 +1090,7 @@ fn simulate_score_cohort(
     }
     EventHistoryCohort {
         mark_names: vec!["event".to_string()],
+        mark_kinds: vec![MarkKind::Recurrent],
         covariate_names: vec!["g".to_string()],
         covariates,
         subjects: histories,
@@ -1780,8 +1129,8 @@ fn fitted_score_slope(fit: &EventHistoryFit, times: &[f64]) -> Vec<f64> {
 /// slope surface `b(t) · g`: a continuous by-smooth keeps its constant, so
 /// its wiggliness ridge decides how much the score's effect bends with time
 /// and its null-space ridge decides whether the effect exists at all, both
-/// selected by REML. A declining effect is
-/// recovered as a decline; a score carrying nothing collapses to zero.
+/// selected by REML. A declining effect is recovered as a decline; a score
+/// carrying nothing collapses to zero.
 #[test]
 fn an_observed_score_enters_as_a_penalised_slope_surface() {
     install_test_logger();
@@ -1791,7 +1140,7 @@ fn an_observed_score_enters_as_a_penalised_slope_surface() {
     let mut cohort = simulate_score_cohort(300, 6.0, -0.5, &truth, 1.0, 19);
     let events: usize = cohort.subjects.iter().map(|s| s.events.len()).sum();
     let started = std::time::Instant::now();
-    let fit = fit_event_history_formula(&mut cohort, formula, 0, BlockwiseFitOptions::default())
+    let fit = fit_event_history_formula(&mut cohort, formula, BlockwiseFitOptions::default())
         .expect("fit with a declining score effect");
     let slope = fitted_score_slope(&fit, &times);
     emit(&format!(
@@ -1826,7 +1175,7 @@ fn an_observed_score_enters_as_a_penalised_slope_surface() {
     let mut null = simulate_score_cohort(300, 6.0, -0.5, &|_| 0.0, 0.0, 23);
     let null_events: usize = null.subjects.iter().map(|s| s.events.len()).sum();
     let started = std::time::Instant::now();
-    let null_fit = fit_event_history_formula(&mut null, formula, 0, BlockwiseFitOptions::default())
+    let null_fit = fit_event_history_formula(&mut null, formula, BlockwiseFitOptions::default())
         .expect("fit with an uninformative score");
     let null_slope = fitted_score_slope(&null_fit, &times);
     emit(&format!(
@@ -1852,7 +1201,7 @@ fn an_observed_score_enters_as_a_penalised_slope_surface() {
 /// standard-normal subject-level score `x` and a latent atom, the population
 /// tier is the zero-count filter from the stationary prior at the population
 /// score; the score-only tier is the same filter at the subject's own score;
-/// the history tier continues from the subject's filtered state. A positive
+/// the history tier continues from the subject's smoothed state. A positive
 /// score effect orders the first two by the score's sign, and a history
 /// richer (poorer) in events than its score alone predicts raises (lowers)
 /// the third against the second. No weight between the tiers is chosen.
@@ -1860,61 +1209,32 @@ fn an_observed_score_enters_as_a_penalised_slope_surface() {
 fn forecast_tiers_population_score_and_history_are_one_model_conditioned_on_more() {
     install_test_logger();
     let mut cohort = simulate_cohort(60, 6.0, -0.8, 0.5, 1.0, 0.4, 5);
-    let mut spec = EventHistorySpec::new(1, vec![linear_spec()]);
-    spec.gauss_hermite_order = 11;
+    let spec = EventHistorySpec::new(vec![linear_spec()]);
     let started = std::time::Instant::now();
     let fit = fit_event_history(&mut cohort, &spec).expect("fit");
     let beta = fit.mark_coefficients(0);
     emit(&format!(
-        "[tiers] {:.1}s beta={:?} loading={} rate={}",
+        "[tiers] {:.1}s rank={} beta={:?} loadings={:?} rates={:?}",
         started.elapsed().as_secs_f64(),
+        fit.rank(),
         beta.to_vec(),
-        fit.loadings[[0, 0]],
-        fit.rates[0]
+        fit.loadings,
+        fit.rates
     ));
     assert!(beta[1] > 0.0, "the score effect was simulated positive; fitted {}", beta[1]);
+    assert!(fit.rank() >= 1, "a latent atom was simulated");
     let horizons = [7.0, 8.0];
-    let absorbing = [false];
-    let population = population_forecast(
-        &fit,
-        &cohort,
-        &PopulationForecastRequest {
-            start: 6.0,
-            horizons: &horizons,
-            absorbing: &absorbing,
-            covariates: &[0.0],
-        },
-    )
-    .expect("population forecast");
-    assert!((population.survival[1] - 1.0).abs() < 1e-12, "no absorbing marks");
+    let population = population_forecast(&fit, &cohort, &[0.0], 6.0, &horizons).expect("population forecast");
+    assert!((population.survival[1] - 1.0).abs() < 1e-12, "no terminal marks");
     let tiers: Vec<(f64, f64, f64, usize)> = cohort
         .subjects
         .iter()
         .enumerate()
         .map(|(i, subject)| {
             let score = cohort.covariates[[i, 0]];
-            let alone = population_forecast(
-                &fit,
-                &cohort,
-                &PopulationForecastRequest {
-                    start: subject.exit,
-                    horizons: &horizons,
-                    absorbing: &absorbing,
-                    covariates: &[score],
-                },
-            )
-            .expect("score-only forecast");
-            let with_history = forecast(
-                &fit,
-                &cohort,
-                &ForecastRequest {
-                    history: subject,
-                    horizons: &horizons,
-                    absorbing: &absorbing,
-                    future_row: i,
-                },
-            )
-            .expect("history forecast");
+            let alone = population_forecast(&fit, &cohort, &[score], subject.exit, &horizons)
+                .expect("score-only forecast");
+            let with_history = forecast(&fit, &cohort, subject, &horizons, i).expect("history forecast");
             (score, alone.expected_counts[[1, 0]], with_history.expected_counts[[1, 0]], subject.events.len())
         })
         .collect();
@@ -1948,4 +1268,225 @@ fn forecast_tiers_population_score_and_history_are_one_model_conditioned_on_more
         poorest.2 < poorest.1,
         "a history poor in events must lower the forecast below its score-only tier"
     );
+}
+
+/// Simulate first diagnoses of three diseases plus death driven by a
+/// rank-two latent covariance (the figure cohort), by thinning on a fine
+/// Euler path.
+fn simulate_four_marks(subjects: usize, seed: u64) -> EventHistoryCohort {
+    let mut rng = Rng(seed);
+    let follow_up: f64 = 10.0;
+    let dt: f64 = 0.01;
+    let base: [f64; 4] = [-2.6, -2.9, -2.4, -3.6];
+    let slope: f64 = 0.3;
+    let rates: [f64; 2] = [0.3, 1.5];
+    let loadings: [[f64; 2]; 4] = [[0.9, 0.0], [0.7, 0.5], [0.0, 0.8], [0.3, 0.0]];
+    let mut covariates = Array2::<f64>::zeros((subjects, 1));
+    let mut histories = Vec::with_capacity(subjects);
+    for s in 0..subjects {
+        let x = rng.normal();
+        covariates[[s, 0]] = x;
+        let mut z = [rng.normal(), rng.normal()];
+        let mut events = Vec::new();
+        let mut had = [false; 4];
+        if s % 10 == 0 {
+            events.push(Event { time: -1.0, mark: 0 });
+            had[0] = true;
+        }
+        let mut t = 0.0;
+        let mut exit = follow_up;
+        'time: while t < follow_up {
+            for k in 0..2 {
+                let phi = (-rates[k] * dt).exp();
+                z[k] = phi * z[k] + (1.0 - phi * phi).sqrt() * rng.normal();
+            }
+            t += dt;
+            for d in 0..4 {
+                if had[d] {
+                    continue;
+                }
+                let shift = -0.5 * (loadings[d][0] * loadings[d][0] + loadings[d][1] * loadings[d][1]);
+                let eta = base[d] + slope * x + shift + loadings[d][0] * z[0] + loadings[d][1] * z[1];
+                if rng.uniform() < eta.exp() * dt {
+                    events.push(Event { time: t, mark: d });
+                    had[d] = true;
+                    if d == 3 {
+                        exit = t;
+                        break 'time;
+                    }
+                }
+            }
+        }
+        histories.push(SubjectHistory {
+            id: format!("p{s}"),
+            entry: 0.0,
+            exit,
+            events,
+            segments: vec![CovariateSegment { start: 0.0, row: s }],
+        });
+    }
+    EventHistoryCohort {
+        mark_names: ["a", "b", "c", "death"].iter().map(|s| s.to_string()).collect(),
+        mark_kinds: vec![MarkKind::Once, MarkKind::Once, MarkKind::Once, MarkKind::Terminal],
+        covariate_names: vec!["x".to_string()],
+        covariates,
+        subjects: histories,
+    }
+}
+
+/// A cohort of three first diagnoses and death, driven by a rank-two latent
+/// covariance: the fit must recover a covariance whose leading structure is
+/// the simulated one, at a rate the node mesh resolves. This is the shape
+/// the design is for — several marks, per-mark risk sets, a shared latent
+/// state — and it is where a rate proposal that ran past the mesh's
+/// resolution used to send the loadings to infinity. The rate scan is
+/// printed before the fit, so a refusal is readable as the shape of the
+/// covariance score rather than as a bare error.
+#[test]
+fn four_marks_recover_a_shared_latent_covariance() {
+    install_test_logger();
+    use super::family::mark_block_spec;
+    let started = std::time::Instant::now();
+    let mut cohort = simulate_four_marks(150, 11);
+    cohort.validate().expect("valid");
+    let marks = 4;
+    let events: Vec<usize> = (0..marks)
+        .map(|d| cohort.subjects.iter().flat_map(|s| s.events.iter()).filter(|e| e.mark == d && e.time > 0.0).count())
+        .collect();
+    emit(&format!("[four] subjects={} events={events:?}", cohort.subjects.len()));
+    // The covariance score across the rates the mesh can represent, at the
+    // rank-zero fit.
+    let nodes = Arc::new(expand_nodes(&cohort, 9).expect("nodes"));
+    let design = build_term_collection_design(nodes.node_data.view(), &linear_spec()).expect("design");
+    let dense = design.design.try_to_dense_arc("d").expect("dense");
+    let specs: Vec<_> = (0..marks).map(|d| mark_block_spec(&cohort.mark_names[d], &design)).collect();
+    let family0 = EventHistoryFamily::new(Arc::clone(&nodes), vec![Arc::clone(&dense); marks], 0, cohort.time_scale())
+        .expect("family");
+    let fit0 = crate::custom_family::fit_custom_family(&family0, &specs, &BlockwiseFitOptions::default())
+        .expect("rank-0 fit");
+    let residuals = family0.residuals(&fit0.block_states).expect("residuals");
+    let (lower, upper) = super::covariance::resolvable_log_rates(&residuals, cohort.time_scale())
+        .expect("limits")
+        .expect("a mesh with gaps");
+    emit(&format!("[four] rank 0 criterion {:?}; resolvable log-rates [{lower:.3}, {upper:.3}]", fit0.reml_score()));
+    for step in 0..=8 {
+        let rho = lower + (upper - lower) * step as f64 / 8.0;
+        let [m0, _, _] = super::covariance::covariance_score(&residuals, marks, rho, cohort.time_scale());
+        let (values, vectors) = super::covariance::eigenmodes(&m0).expect("eigen");
+        emit(&format!(
+            "[four] scan ρ={rho:+.2} rate={:.3e} top={:+.4e} eigenvalues={:?} mode={:?}",
+            rho.exp() / cohort.time_scale(),
+            values[0],
+            values.iter().map(|v| format!("{v:+.3e}")).collect::<Vec<_>>(),
+            vectors.column(0).iter().map(|v| format!("{v:+.3}")).collect::<Vec<_>>()
+        ));
+    }
+    match best_new_atom(&residuals, marks, cohort.time_scale()).expect("score") {
+        Some(atom) => emit(&format!(
+            "[four] proposal ρ={:.3} (limit {upper:.3}, at_limit={}) loading={:?} eigenvalue={:.4e} variance={:.4e}",
+            atom.log_rate,
+            atom.at_resolution_limit,
+            atom.loading.iter().map(|v| format!("{v:+.3}")).collect::<Vec<_>>(),
+            atom.eigenvalue,
+            atom.variance
+        )),
+        None => emit("[four] proposal: none"),
+    }
+    let spec = EventHistorySpec::new(vec![linear_spec()]);
+    let fit = fit_event_history(&mut cohort, &spec).expect("fit");
+    let covariance = fit.disease_covariance();
+    let (values, vectors) = fit.eigenmodes().expect("eigenmodes");
+    emit(&format!(
+        "[four] {:.1}s rank={} rates={:?} evidence={:?}",
+        started.elapsed().as_secs_f64(),
+        fit.rank(),
+        fit.rates,
+        fit.atom_evidence
+    ));
+    for step in &fit.rank_path {
+        emit(&format!("[four] step {step:?}"));
+    }
+    emit(&format!("[four] C(0) diagonal {:?}", (0..marks).map(|d| covariance[[d, d]]).collect::<Vec<_>>()));
+    emit(&format!("[four] C(0) full {:?}", covariance.rows().into_iter().map(|r| r.to_vec()).collect::<Vec<_>>()));
+    emit(&format!("[four] eigenvalues {:?}", values.to_vec()));
+    emit(&format!("[four] leading mode {:?}", vectors.column(0).to_vec()));
+    emit(&format!("[four] betas {:?}", (0..marks).map(|d| fit.mark_coefficients(d).to_vec()).collect::<Vec<_>>()));
+    assert!(fit.rank() >= 1, "a rank-two latent covariance was simulated but the evidence grew no atom");
+    // The simulated marginal variances are 0.81, 0.74, 0.64, 0.09: no
+    // mark's fitted variance may be the runaway the standardised gain and
+    // the mesh's resolution limit exist to prevent.
+    let diagonal: Vec<f64> = (0..marks).map(|d| covariance[[d, d]]).collect();
+    for (d, v) in diagonal.iter().enumerate() {
+        assert!(*v < 4.0, "mark {d} latent variance {v} is far beyond anything simulated");
+    }
+    assert!(
+        diagonal[3] < diagonal[0].max(diagonal[2]),
+        "death carries the smallest simulated loading; fitted diagonal {diagonal:?}"
+    );
+    for step in fit.rank_path.iter().filter(|s| s.accepted) {
+        assert!(!step.at_resolution_limit, "an accepted atom sat on the mesh's resolution limit: {step:?}");
+    }
+    // The forecast surface is coherent for a subject still alive and free
+    // of every disease.
+    let alive = cohort
+        .subjects
+        .iter()
+        .find(|s| s.exit >= 9.99 && s.events.is_empty())
+        .expect("a subject with no events");
+    let f = forecast(&fit, &cohort, alive, &[11.0, 12.0], 0).expect("forecast");
+    for h in 0..2 {
+        for d in 0..marks {
+            assert!((0.0..=1.0).contains(&f.risk[[h, d]]), "risk {:?}", f.risk);
+        }
+        assert!((0.0..=1.0).contains(&f.survival[h]));
+    }
+    assert!(f.risk[[0, 0]] <= f.risk[[1, 0]] + 1e-12);
+}
+
+/// The rate a proposal may name is bounded by what the node mesh
+/// resolves, because beyond it an event node's latent coordinate is held
+/// only by the prior and the evidence grows without bound in the loading.
+#[test]
+fn the_rate_proposal_stays_inside_what_the_mesh_resolves() {
+    // Residuals whose only structure is at lag zero (the same node, across
+    // marks) drive the matched filter to the fastest rate there is.
+    let times: Vec<f64> = (0..60).map(|i| i as f64 * 0.1).collect();
+    let mut scores = Vec::with_capacity(120);
+    let mut curvatures = Vec::with_capacity(120);
+    for i in 0..60 {
+        let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+        scores.push(0.6 * sign);
+        scores.push(0.6 * sign);
+        curvatures.push(0.05);
+        curvatures.push(0.05);
+    }
+    let residuals = vec![SubjectResiduals { times: times.clone(), scores, curvatures }];
+    let (lower, upper) = super::covariance::resolvable_log_rates(&residuals, 6.0)
+        .expect("limits")
+        .expect("a mesh with gaps");
+    // κ = 1 at the median gap of 0.1 with T̄ = 6.
+    assert!((upper - (6.0f64 / 0.1).ln()).abs() < 1e-12, "upper {upper}");
+    assert!(lower < 0.0 && lower < upper);
+    for step in 0..=6 {
+        let rho = lower + (upper - lower) * step as f64 / 6.0;
+        let [m0, _, _] = super::covariance::covariance_score(&residuals, 2, rho, 6.0);
+        let (values, _) = super::covariance::eigenmodes(&m0).expect("eigen");
+        emit(&format!("[mesh] alternating ρ={rho:+.2} top={:+.4e}", values[0]));
+    }
+    let atom = best_new_atom(&residuals, 2, 6.0).expect("score");
+    emit(&format!("[mesh] alternating proposal {atom:?}"));
+    if let Some(atom) = atom {
+        assert!(atom.log_rate <= upper + 1e-12, "proposal {} ran past the mesh limit {upper}", atom.log_rate);
+    }
+    // A cohort whose residuals are correlated over a real time scale
+    // proposes a rate well inside the limit and does not flag it.
+    let smooth: Vec<f64> = (0..60).flat_map(|i| {
+        let block = if i < 30 { 0.6 } else { -0.6 };
+        [block, block]
+    }).collect();
+    let slow = vec![SubjectResiduals { times, scores: smooth, curvatures: vec![0.05; 120] }];
+    let atom = best_new_atom(&slow, 2, 6.0).expect("score").expect("an atom");
+    emit(&format!("[mesh] slow proposal {atom:?}"));
+    assert!(!atom.at_resolution_limit, "a slowly varying residual must not need the limit: {atom:?}");
+    assert!(atom.log_rate < upper - 1.0, "proposal {} against limit {upper}", atom.log_rate);
 }

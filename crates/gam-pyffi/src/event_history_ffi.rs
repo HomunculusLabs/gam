@@ -1,15 +1,18 @@
 //! Python bindings for the event-history family: fit from arrays, then
-//! forecast and score subjects from the in-memory fit.
+//! predict, score and read the latent state of subjects from the in-memory
+//! fit.
 
 use crate::ffi::ffi_errors::{detach_py_result, py_value_error};
-use gam::families::event_history::{
-    CovariateSegment, Event, EventHistoryCohort, EventHistoryFit, ForecastRequest, PopulationForecastRequest, SubjectHistory, fit_event_history_formula, forecast, kolmogorov_smirnov_uniform, population_forecast, predictive_pit,
-};
 use gam::families::custom_family::BlockwiseFitOptions;
-use ndarray::Array2;
-use numpy::{PyArray2, PyReadonlyArray2};
+use gam::families::event_history::{
+    CovariateSegment, Event, EventHistoryCohort, EventHistoryFit, MarkKind, SubjectHistory,
+    fit_event_history_formula, forecast, kolmogorov_smirnov_uniform, latent_exposure,
+    latent_state, population_forecast, predictive_pit,
+};
+use ndarray::{Array1, Array2, Array3};
+use numpy::{PyArray1, PyArray2, PyArray3, PyReadonlyArray2};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyDict, PyList, PyModule};
 use std::sync::Arc;
 
 /// A fitted event-history model held in memory.
@@ -19,10 +22,45 @@ pub(crate) struct PyEventHistoryModel {
     cohort: Arc<EventHistoryCohort>,
 }
 
+impl PyEventHistoryModel {
+    fn risk_dict<'py>(
+        &self,
+        py: Python<'py>,
+        result: gam::families::event_history::RiskForecast,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(py);
+        out.set_item("horizons", result.horizons)?;
+        out.set_item("marks", self.cohort.mark_names.clone())?;
+        out.set_item("risk", PyArray2::from_owned_array(py, result.risk))?;
+        out.set_item("survival", result.survival)?;
+        out.set_item(
+            "expected_counts",
+            PyArray2::from_owned_array(py, result.expected_counts),
+        )?;
+        Ok(out)
+    }
+
+    fn subject(&self, index: usize) -> PyResult<SubjectHistory> {
+        self.cohort
+            .subjects
+            .get(index)
+            .cloned()
+            .ok_or_else(|| py_value_error(format!("subject index {index} is out of range")))
+    }
+}
+
 #[pymethods]
 impl PyEventHistoryModel {
     fn mark_names(&self) -> Vec<String> {
         self.cohort.mark_names.clone()
+    }
+
+    fn mark_kinds(&self) -> Vec<String> {
+        self.cohort
+            .mark_kinds
+            .iter()
+            .map(|k| k.as_str().to_string())
+            .collect()
     }
 
     fn covariate_names(&self) -> Vec<String> {
@@ -33,8 +71,8 @@ impl PyEventHistoryModel {
         self.cohort.subjects.iter().map(|s| s.id.clone()).collect()
     }
 
-    fn atoms(&self) -> usize {
-        self.fit.atoms()
+    fn rank(&self) -> usize {
+        self.fit.rank()
     }
 
     fn loadings<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
@@ -51,6 +89,25 @@ impl PyEventHistoryModel {
 
     fn atom_log_lambdas(&self) -> Vec<f64> {
         self.fit.atom_log_lambdas.clone()
+    }
+
+    fn atom_evidence(&self) -> Vec<f64> {
+        self.fit.atom_evidence.clone()
+    }
+
+    fn rank_path<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let out = PyList::empty(py);
+        for step in &self.fit.rank_path {
+            let item = PyDict::new(py);
+            item.set_item("rank", step.rank)?;
+            item.set_item("score_eigenvalue", step.score_eigenvalue)?;
+            item.set_item("proposed_log_rate", step.proposed_log_rate)?;
+            item.set_item("at_resolution_limit", step.at_resolution_limit)?;
+            item.set_item("evidence_gain", step.evidence_gain)?;
+            item.set_item("accepted", step.accepted)?;
+            out.append(item)?;
+        }
+        Ok(out)
     }
 
     fn time_scale(&self) -> f64 {
@@ -79,109 +136,101 @@ impl PyEventHistoryModel {
         Ok(self.fit.mark_coefficients(mark).to_vec())
     }
 
-    fn quadrature<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let out = PyDict::new(py);
-        out.set_item("order", self.fit.quadrature.order)?;
-        out.set_item("checked_order", self.fit.quadrature.checked_order)?;
-        out.set_item("log_likelihood", self.fit.quadrature.log_likelihood)?;
-        out.set_item(
-            "log_likelihood_at_checked_order",
-            self.fit.quadrature.log_likelihood_at_checked_order,
-        )?;
-        Ok(out)
+    fn disease_covariance<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        PyArray2::from_owned_array(py, self.fit.disease_covariance())
     }
 
-    /// Forecast one training subject beyond its exit.
-    #[pyo3(signature = (subject, horizons, absorbing, future_row=None))]
+    fn temporal_covariance<'py>(&self, py: Python<'py>, lag: f64) -> Bound<'py, PyArray2<f64>> {
+        PyArray2::from_owned_array(py, self.fit.temporal_covariance(lag))
+    }
+
+    fn eigenmodes<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)> {
+        let (values, vectors) = self.fit.eigenmodes().map_err(|e| py_value_error(e.to_string()))?;
+        Ok((
+            PyArray1::from_owned_array(py, values),
+            PyArray2::from_owned_array(py, vectors),
+        ))
+    }
+
+    /// Per-mark first-occurrence risks of one training subject beyond its exit.
+    #[pyo3(signature = (subject, horizons, future_row=None))]
     fn forecast<'py>(
         &self,
         py: Python<'py>,
         subject: usize,
         horizons: Vec<f64>,
-        absorbing: Vec<bool>,
         future_row: Option<usize>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        let history = self
-            .cohort
-            .subjects
-            .get(subject)
-            .ok_or_else(|| py_value_error(format!("subject index {subject} is out of range")))?;
-        let row = future_row.unwrap_or_else(|| {
-            history
-                .segments
-                .last()
-                .map(|s| s.row)
-                .unwrap_or(0)
-        });
+        let history = self.subject(subject)?;
+        let row = future_row.unwrap_or_else(|| history.segments.last().map(|s| s.row).unwrap_or(0));
         let fit = Arc::clone(&self.fit);
         let cohort = Arc::clone(&self.cohort);
-        let history = history.clone();
         let result = detach_py_result(py, "event-history forecast", move || {
-            forecast(
-                &fit,
-                &cohort,
-                &ForecastRequest {
-                    history: &history,
-                    horizons: &horizons,
-                    absorbing: &absorbing,
-                    future_row: row,
-                },
-            )
-            .map_err(|e| e.to_string())
+            forecast(&fit, &cohort, &history, &horizons, row).map_err(|e| e.to_string())
         })?;
-        let out = PyDict::new(py);
-        out.set_item("horizons", result.horizons)?;
-        out.set_item("survival", result.survival)?;
-        out.set_item(
-            "expected_counts",
-            PyArray2::from_owned_array(py, result.expected_counts),
-        )?;
-        Ok(out)
+        self.risk_dict(py, result)
     }
 
-    /// Forecast a subject with no observed history from covariate values
-    /// alone: the latent state starts at its stationary prior.
+    /// Per-mark risks of a subject with no observed history from covariate
+    /// values alone: the latent state starts at its stationary prior.
     fn population_forecast<'py>(
         &self,
         py: Python<'py>,
         covariates: Vec<f64>,
         start: f64,
         horizons: Vec<f64>,
-        absorbing: Vec<bool>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let fit = Arc::clone(&self.fit);
         let cohort = Arc::clone(&self.cohort);
         let result = detach_py_result(py, "event-history population forecast", move || {
-            population_forecast(
-                &fit,
-                &cohort,
-                &PopulationForecastRequest {
-                    start,
-                    horizons: &horizons,
-                    absorbing: &absorbing,
-                    covariates: &covariates,
-                },
-            )
-            .map_err(|e| e.to_string())
+            population_forecast(&fit, &cohort, &covariates, start, &horizons).map_err(|e| e.to_string())
         })?;
+        self.risk_dict(py, result)
+    }
+
+    /// The smoothed latent state of one training subject on its own nodes.
+    fn latent_state<'py>(&self, py: Python<'py>, subject: usize) -> PyResult<Bound<'py, PyDict>> {
+        let history = self.subject(subject)?;
+        let fit = Arc::clone(&self.fit);
+        let cohort = Arc::clone(&self.cohort);
+        let path = detach_py_result(py, "event-history latent state", move || {
+            latent_state(&fit, &cohort, &history).map_err(|e| e.to_string())
+        })?;
+        let atoms = self.fit.rank();
+        let n = path.times.len();
+        let covariances = Array3::from_shape_vec((n, atoms, atoms), path.covariances)
+            .map_err(|e| py_value_error(e.to_string()))?;
         let out = PyDict::new(py);
-        out.set_item("horizons", result.horizons)?;
-        out.set_item("survival", result.survival)?;
-        out.set_item(
-            "expected_counts",
-            PyArray2::from_owned_array(py, result.expected_counts),
-        )?;
+        out.set_item("times", PyArray1::from_owned_array(py, Array1::from(path.times)))?;
+        out.set_item("means", PyArray2::from_owned_array(py, path.means))?;
+        out.set_item("covariances", PyArray3::from_owned_array(py, covariances))?;
         Ok(out)
     }
 
-    /// Predictive PIT of every event of one training subject.
+    /// The follow-up average of one training subject's latent state as a
+    /// posterior Gaussian.
+    fn latent_exposure<'py>(&self, py: Python<'py>, subject: usize) -> PyResult<Bound<'py, PyDict>> {
+        let history = self.subject(subject)?;
+        let fit = Arc::clone(&self.fit);
+        let cohort = Arc::clone(&self.cohort);
+        let (mean, cov) = detach_py_result(py, "event-history latent exposure", move || {
+            latent_exposure(&fit, &cohort, &history).map_err(|e| e.to_string())
+        })?;
+        let atoms = self.fit.rank();
+        let covariance = Array2::from_shape_vec((atoms, atoms), cov)
+            .map_err(|e| py_value_error(e.to_string()))?;
+        let out = PyDict::new(py);
+        out.set_item("mean", PyArray1::from_owned_array(py, Array1::from(mean)))?;
+        out.set_item("covariance", PyArray2::from_owned_array(py, covariance))?;
+        Ok(out)
+    }
+
+    /// Predictive PIT of every observed event of one training subject.
     fn pit(&self, py: Python<'_>, subject: usize) -> PyResult<Vec<f64>> {
-        let history = self
-            .cohort
-            .subjects
-            .get(subject)
-            .ok_or_else(|| py_value_error(format!("subject index {subject} is out of range")))?
-            .clone();
+        let history = self.subject(subject)?;
         let fit = Arc::clone(&self.fit);
         let cohort = Arc::clone(&self.cohort);
         detach_py_result(py, "event-history pit", move || {
@@ -203,12 +252,24 @@ impl PyEventHistoryModel {
     }
 }
 
+fn parse_kind(kind: &str) -> PyResult<MarkKind> {
+    match kind {
+        "recurrent" => Ok(MarkKind::Recurrent),
+        "once" => Ok(MarkKind::Once),
+        "terminal" => Ok(MarkKind::Terminal),
+        other => Err(py_value_error(format!(
+            "mark kind must be \"recurrent\", \"once\" or \"terminal\", got {other:?}"
+        ))),
+    }
+}
+
 /// Fit an event-history model from flat arrays.
 #[pyfunction]
-#[pyo3(signature = (mark_names, covariate_names, covariates, subject_ids, entry, exit, event_subject, event_time, event_mark, segment_subject, segment_start, segment_row, formula, atoms))]
+#[pyo3(signature = (mark_names, mark_kinds, covariate_names, covariates, subject_ids, entry, exit, event_subject, event_time, event_mark, segment_subject, segment_start, segment_row, formula))]
 fn fit_event_history(
     py: Python<'_>,
     mark_names: Vec<String>,
+    mark_kinds: Vec<String>,
     covariate_names: Vec<String>,
     covariates: PyReadonlyArray2<'_, f64>,
     subject_ids: Vec<String>,
@@ -221,12 +282,18 @@ fn fit_event_history(
     segment_start: Vec<f64>,
     segment_row: Vec<usize>,
     formula: String,
-    atoms: usize,
 ) -> PyResult<PyEventHistoryModel> {
     let n = subject_ids.len();
     if entry.len() != n || exit.len() != n {
         return Err(py_value_error(format!(
             "subject_ids, entry and exit must have one entry per subject ({n})"
+        )));
+    }
+    if mark_kinds.len() != mark_names.len() {
+        return Err(py_value_error(format!(
+            "{} mark kinds for {} marks",
+            mark_kinds.len(),
+            mark_names.len()
         )));
     }
     if event_subject.len() != event_time.len() || event_subject.len() != event_mark.len() {
@@ -239,6 +306,10 @@ fn fit_event_history(
             "segment_subject, segment_start and segment_row must have equal length".to_string(),
         ));
     }
+    let mark_kinds = mark_kinds
+        .iter()
+        .map(|k| parse_kind(k))
+        .collect::<PyResult<Vec<MarkKind>>>()?;
     let covariates: Array2<f64> = covariates.as_array().to_owned();
     let mut subjects: Vec<SubjectHistory> = subject_ids
         .iter()
@@ -269,12 +340,13 @@ fn fit_event_history(
     }
     let mut cohort = EventHistoryCohort {
         mark_names,
+        mark_kinds,
         covariate_names,
         covariates,
         subjects,
     };
     let fit = detach_py_result(py, "event-history fit", move || {
-        let fit = fit_event_history_formula(&mut cohort, &formula, atoms, BlockwiseFitOptions::default())
+        let fit = fit_event_history_formula(&mut cohort, &formula, BlockwiseFitOptions::default())
             .map_err(|e| e.to_string())?;
         Ok((fit, cohort))
     })?;
