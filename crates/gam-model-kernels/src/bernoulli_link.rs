@@ -13,6 +13,8 @@ use gam_solve::mixture_link::{
 };
 use gam_spec::{InverseLink, StandardLink};
 
+use crate::natural_observation::NaturalDiagonalObservation;
+
 /// Natural-coordinate derivative tower for a Bernoulli inverse link.
 ///
 /// `log_mu[j]` and `log_one_minus_mu[j]` are the `j`th derivatives with
@@ -42,6 +44,19 @@ pub struct BernoulliNaturalObservation {
     pub negative_hessian: f64,
     pub negative_hessian_derivative: f64,
     pub negative_hessian_second_derivative: f64,
+}
+
+impl From<BernoulliNaturalObservation> for NaturalDiagonalObservation {
+    fn from(observation: BernoulliNaturalObservation) -> Self {
+        Self {
+            log_likelihood: observation.log_likelihood,
+            score: observation.score,
+            negative_hessian: observation.negative_hessian,
+            negative_hessian_derivative: observation.negative_hessian_derivative,
+            negative_hessian_second_derivative: observation
+                .negative_hessian_second_derivative,
+        }
+    }
 }
 
 #[inline]

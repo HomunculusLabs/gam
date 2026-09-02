@@ -12,16 +12,7 @@
 //! density, not an interval-count probability mass function.
 
 use gam_problem::EstimationError;
-
-/// One unweighted point-process row in the natural log-intensity coordinate.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PointProcessNaturalObservation {
-    pub log_likelihood: f64,
-    pub score: f64,
-    pub negative_hessian: f64,
-    pub negative_hessian_derivative: f64,
-    pub negative_hessian_second_derivative: f64,
-}
+pub use crate::natural_observation::NaturalDiagonalObservation as PointProcessNaturalObservation;
 
 /// Evaluate a point-process row and the complete curvature tower required by
 /// exact second-order LAML differentiation.
