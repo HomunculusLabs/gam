@@ -67,3 +67,108 @@ pub(crate) fn square<S: JetField>(x: &S) -> S {
     x.mul(x)
 }
 
+
+/// A first-order forward-mode dual with `W` inline tangent slots: the value
+/// plus its derivative along each seeded coefficient direction.
+///
+/// Every arithmetic step of the forward filter is replayed on this scalar, so
+/// the gradient it yields is the exact derivative of the computed
+/// log-likelihood, bit-consistent with the value the same code produces on
+/// `f64`. That consistency is what a trust-region Newton with a value-based
+/// acceptance test requires near an optimum. The slots live inline so the
+/// filter allocates nothing; wider coefficient vectors are swept in chunks.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Tangent<const W: usize> {
+    pub value: f64,
+    pub grad: [f64; W],
+}
+
+impl<const W: usize> Tangent<W> {
+    pub(crate) fn seeded(value: f64, grad: [f64; W]) -> Self {
+        Self { value, grad }
+    }
+}
+
+impl<const W: usize> JetField for Tangent<W> {
+    #[inline]
+    fn value(&self) -> f64 {
+        self.value
+    }
+    #[inline]
+    fn add(&self, o: &Self) -> Self {
+        let mut grad = self.grad;
+        for (g, b) in grad.iter_mut().zip(o.grad.iter()) {
+            *g += b;
+        }
+        Self {
+            value: self.value + o.value,
+            grad,
+        }
+    }
+    #[inline]
+    fn sub(&self, o: &Self) -> Self {
+        let mut grad = self.grad;
+        for (g, b) in grad.iter_mut().zip(o.grad.iter()) {
+            *g -= b;
+        }
+        Self {
+            value: self.value - o.value,
+            grad,
+        }
+    }
+    #[inline]
+    fn mul(&self, o: &Self) -> Self {
+        let mut grad = [0.0; W];
+        for ((g, a), b) in grad.iter_mut().zip(self.grad.iter()).zip(o.grad.iter()) {
+            *g = a * o.value + self.value * b;
+        }
+        Self {
+            value: self.value * o.value,
+            grad,
+        }
+    }
+    #[inline]
+    fn neg(&self) -> Self {
+        let mut grad = self.grad;
+        for g in grad.iter_mut() {
+            *g = -*g;
+        }
+        Self {
+            value: -self.value,
+            grad,
+        }
+    }
+    #[inline]
+    fn scale(&self, s: f64) -> Self {
+        let mut grad = self.grad;
+        for g in grad.iter_mut() {
+            *g *= s;
+        }
+        Self {
+            value: self.value * s,
+            grad,
+        }
+    }
+    #[inline]
+    fn compose_unary(&self, d: [f64; 5]) -> Self {
+        let mut grad = self.grad;
+        for g in grad.iter_mut() {
+            *g *= d[1];
+        }
+        Self { value: d[0], grad }
+    }
+    #[inline]
+    fn constant_like(&self, v: f64) -> Self {
+        Self {
+            value: v,
+            grad: [0.0; W],
+        }
+    }
+    #[inline]
+    fn with_value(&self, v: f64) -> Self {
+        Self {
+            value: v,
+            grad: self.grad,
+        }
+    }
+}

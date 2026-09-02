@@ -42,8 +42,14 @@ pub(crate) struct GaussHermite {
     pub normal_weights: Vec<f64>,
     /// `w_l e^{x_l²}`: weights of plain integration `∫ g(x) dx ≈ Σ (w_l e^{x_l²}) g(x_l)`.
     pub plain_weights: Vec<f64>,
-    /// Barycentric weights of the nodes, scaled to unit maximum.
-    pub barycentric: Vec<f64>,
+    /// Lagrange weights `1 / Π_{m≠i} (x_i − x_m)`, so that
+    /// `L_i(x) = lagrange_weights[i] · Π_{m≠i} (x − x_m)`.
+    pub lagrange_weights: Vec<f64>,
+    /// Second derivatives at the nodes of the cardinal not-a-knot cubic
+    /// splines: `spline_second[j * order + m]` is `S_j''(x_m)` for the spline
+    /// that is one at node `j` and zero at every other node (all zero below
+    /// order four, where the spline is the broken line).
+    pub spline_second: Vec<f64>,
 }
 
 impl GaussHermite {
@@ -67,65 +73,180 @@ impl GaussHermite {
             .zip(nodes.iter())
             .map(|(w, x)| (w.ln() + x * x).exp())
             .collect();
-        let mut log_bary = vec![0.0; order];
-        let mut sign = vec![1.0; order];
+        let mut lagrange_weights = vec![0.0; order];
         for i in 0..order {
+            let mut log_weight = 0.0;
+            let mut sign = 1.0;
             for m in 0..order {
                 if m != i {
                     let d = nodes[i] - nodes[m];
-                    log_bary[i] -= d.abs().ln();
+                    log_weight -= d.abs().ln();
                     if d < 0.0 {
-                        sign[i] = -sign[i];
+                        sign = -sign;
                     }
                 }
             }
+            lagrange_weights[i] = sign * log_weight.exp();
         }
-        let max_log = log_bary.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let barycentric: Vec<f64> = log_bary
-            .iter()
-            .zip(sign.iter())
-            .map(|(l, s)| s * (l - max_log).exp())
-            .collect();
+        if lagrange_weights.iter().any(|w| !w.is_finite() || *w == 0.0) {
+            return Err(EventHistoryError::NumericalFailure {
+                reason: format!(
+                    "Gauss-Hermite order {order} is too large for the Lagrange product form"
+                ),
+            });
+        }
+        // Cardinal not-a-knot cubic splines: one tridiagonal solve per node.
+        // The third derivative is continuous at the second and second-to-last
+        // nodes, which keeps fourth-order accuracy up to the boundary (a
+        // natural spline's zero end curvature is only second-order there).
+        let mut spline_second = vec![0.0; order * order];
+        if order >= 4 {
+            let h: Vec<f64> = nodes.windows(2).map(|w| w[1] - w[0]).collect();
+            let last = order - 1;
+            for j in 0..order {
+                let unit = |m: usize| if m == j { 1.0 } else { 0.0 };
+                // Unknowns M_1 ..= M_{order-2}; M_0 and M_last are eliminated
+                // through the not-a-knot conditions
+                //   M_0 = M_1 (1 + h_0/h_1) − M_2 h_0/h_1,
+                //   M_last = M_{last-1} (1 + h_{last-1}/h_{last-2}) − M_{last-2} h_{last-1}/h_{last-2}.
+                let interior = order - 2;
+                let mut lower = vec![0.0; interior];
+                let mut diagonal = vec![0.0; interior];
+                let mut upper = vec![0.0; interior];
+                let mut rhs = vec![0.0; interior];
+                for r in 0..interior {
+                    let m = r + 1;
+                    rhs[r] = 6.0 * ((unit(m + 1) - unit(m)) / h[m] - (unit(m) - unit(m - 1)) / h[m - 1]);
+                    lower[r] = h[m - 1];
+                    diagonal[r] = 2.0 * (h[m - 1] + h[m]);
+                    upper[r] = h[m];
+                }
+                let ratio0 = h[0] / h[1];
+                diagonal[0] += h[0] * (1.0 + ratio0);
+                upper[0] -= h[0] * ratio0;
+                let ratio_last = h[last - 1] / h[last - 2];
+                diagonal[interior - 1] += h[last - 1] * (1.0 + ratio_last);
+                lower[interior - 1] -= h[last - 1] * ratio_last;
+                for r in 1..interior {
+                    let factor = lower[r] / diagonal[r - 1];
+                    diagonal[r] -= factor * upper[r - 1];
+                    rhs[r] -= factor * rhs[r - 1];
+                }
+                let mut second = vec![0.0; interior];
+                second[interior - 1] = rhs[interior - 1] / diagonal[interior - 1];
+                for r in (0..interior - 1).rev() {
+                    second[r] = (rhs[r] - upper[r] * second[r + 1]) / diagonal[r];
+                }
+                let first = second[0] * (1.0 + ratio0) - second[1] * ratio0;
+                let end = second[interior - 1] * (1.0 + ratio_last) - second[interior - 2] * ratio_last;
+                spline_second[j * order] = first;
+                spline_second[j * order + last] = end;
+                for (r, value) in second.into_iter().enumerate() {
+                    spline_second[j * order + r + 1] = value;
+                }
+            }
+        }
         Ok(Self {
             order,
             nodes,
             normal_weights,
             plain_weights,
-            barycentric,
+            lagrange_weights,
+            spline_second,
         })
     }
 
-    /// `xi` clamped to the node hull `[x_0, x_{G-1}]`.
-    pub fn clamp_to_hull<S: JetField>(&self, xi: &S) -> S {
-        let lo = self.nodes[0];
-        let hi = self.nodes[self.order - 1];
+    /// Cardinal not-a-knot cubic spline basis at `xi`: `Σ_j basis[j] f_j` is
+    /// the not-a-knot cubic spline through `(x_j, f_j)`, continued linearly
+    /// beyond the hull with the spline's end slope.
+    ///
+    /// This serves the interpolation of a smoother residual (`log β`), a
+    /// smooth but non-polynomial function whose degree-`G−1` Lagrange
+    /// interpolant on Hermite nodes overshoots by the Lebesgue constant
+    /// (thousands, at the orders the certificate reaches) and whose
+    /// immediate exponential factors are evaluated exactly elsewhere. A
+    /// spline cannot overshoot, converges like `h⁴`, and is a fixed linear
+    /// map of the nodal values, so every derivative channel of `xi` passes
+    /// through it as through any other polynomial.
+    pub fn spline_basis<S: JetField>(&self, xi: &S) -> Vec<S> {
+        let g = self.order;
         let value = xi.value();
-        if value < lo {
-            xi.constant_like(lo)
-        } else if value > hi {
-            xi.constant_like(hi)
-        } else {
-            xi.clone()
+        let zero = xi.constant_like(0.0);
+        if g == 1 {
+            return vec![xi.constant_like(1.0)];
         }
+        let second = |j: usize, m: usize| self.spline_second[j * g + m];
+        // Linear continuation beyond the hull with the spline's end slope:
+        // S'(x_0) = (f_1 − f_0)/h − h (2 M_0 + M_1) / 6, and the mirror image
+        // at the top.
+        if value <= self.nodes[0] || value >= self.nodes[g - 1] {
+            let (edge, inner, sign) = if value <= self.nodes[0] {
+                (0, 1, 1.0)
+            } else {
+                (g - 1, g - 2, -1.0)
+            };
+            let h = (self.nodes[inner] - self.nodes[edge]).abs();
+            let offset = add_real(xi, -self.nodes[edge]);
+            return (0..g)
+                .map(|j| {
+                    let at_edge = if j == edge { 1.0 } else { 0.0 };
+                    let at_inner = if j == inner { 1.0 } else { 0.0 };
+                    let slope = sign
+                        * ((at_inner - at_edge) / h
+                            - h * (2.0 * second(j, edge) + second(j, inner)) / 6.0);
+                    offset.scale(slope).add(&xi.constant_like(at_edge))
+                })
+                .collect();
+        }
+        let m = self
+            .nodes
+            .windows(2)
+            .position(|w| value >= w[0] && value <= w[1])
+            .unwrap_or(g - 2);
+        let h = self.nodes[m + 1] - self.nodes[m];
+        let a = add_real(&xi.neg(), self.nodes[m + 1]).scale(1.0 / h);
+        let b = add_real(xi, -self.nodes[m]).scale(1.0 / h);
+        let c = a.mul(&a).mul(&a).sub(&a).scale(h * h / 6.0);
+        let d = b.mul(&b).mul(&b).sub(&b).scale(h * h / 6.0);
+        (0..g)
+            .map(|j| {
+                let mut basis = zero.clone();
+                if j == m {
+                    basis = basis.add(&a);
+                }
+                if j == m + 1 {
+                    basis = basis.add(&b);
+                }
+                basis
+                    .add(&c.scale(second(j, m)))
+                    .add(&d.scale(second(j, m + 1)))
+            })
+            .collect()
     }
 
     /// Lagrange basis on the rule's nodes evaluated at `xi`.
+    ///
+    /// Product form `L_i(x) = w_i Π_{m≠i} (x − x_m)` through prefix and
+    /// suffix products. Every channel of the result is a sum of products of
+    /// the factors `x − x_m`, so nothing cancels catastrophically when `x`
+    /// lies within roundoff of a node — the barycentric quotient is stable in
+    /// value there but its derivative channels are differences of terms of
+    /// size `1/(x − x_m)²`, and adaptive grids put points exactly on nodes.
     pub fn lagrange_basis<S: JetField>(&self, xi: &S) -> Vec<S> {
         let g = self.order;
-        let value = xi.value();
-        if let Some(hit) = self.nodes.iter().position(|&x| x == value) {
-            return (0..g)
-                .map(|i| xi.constant_like(if i == hit { 1.0 } else { 0.0 }))
-                .collect();
+        let factors: Vec<S> = self.nodes.iter().map(|&x| add_real(xi, -x)).collect();
+        let one = xi.constant_like(1.0);
+        let mut prefix = vec![one.clone(); g + 1];
+        for i in 0..g {
+            prefix[i + 1] = prefix[i].mul(&factors[i]);
         }
-        let terms: Vec<S> = (0..g)
-            .map(|i| recip(&add_real(xi, -self.nodes[i])).scale(self.barycentric[i]))
-            .collect();
-        let denominator = terms
-            .iter()
-            .fold(xi.constant_like(0.0), |acc, t| acc.add(t));
-        let inverse = recip(&denominator);
-        terms.iter().map(|t| t.mul(&inverse)).collect()
+        let mut suffix = vec![one; g + 1];
+        for i in (0..g).rev() {
+            suffix[i] = suffix[i + 1].mul(&factors[i]);
+        }
+        (0..g)
+            .map(|i| prefix[i].mul(&suffix[i + 1]).scale(self.lagrange_weights[i]))
+            .collect()
     }
 }
 
@@ -216,7 +337,7 @@ impl<S: JetField> Grid<S> {
 
 /// Apply a per-axis `G × G` matrix (row-major `[j * G + i]`, output index
 /// `j`, input index `i`) along `axis` of a flat tensor.
-fn apply_axis<S: JetField>(values: &[S], matrix: &[S], order: usize, axis: usize) -> Vec<S> {
+pub(crate) fn apply_axis<S: JetField>(values: &[S], matrix: &[S], order: usize, axis: usize) -> Vec<S> {
     let stride = order.pow(axis as u32);
     let block = stride * order;
     let total = values.len();
@@ -238,23 +359,6 @@ fn apply_axis<S: JetField>(values: &[S], matrix: &[S], order: usize, axis: usize
     out
 }
 
-/// A separable linear operator: one `G × G` matrix per axis.
-#[derive(Clone, Debug)]
-pub(crate) struct SeparableOperator<S> {
-    pub matrices: Vec<Vec<S>>,
-    pub order: usize,
-}
-
-impl<S: JetField> SeparableOperator<S> {
-    pub fn apply(&self, values: &[S]) -> Vec<S> {
-        let mut current = values.to_vec();
-        for (axis, matrix) in self.matrices.iter().enumerate() {
-            current = apply_axis(&current, matrix, self.order, axis);
-        }
-        current
-    }
-}
-
 /// Transition of one unit-variance Ornstein–Uhlenbeck atom across a gap of
 /// dimensionless length `kappa = rate · gap`: `z' | z ~ N(φ z, 1 − φ²)`.
 #[derive(Clone, Debug)]
@@ -269,8 +373,20 @@ pub(crate) struct AtomTransition<S> {
     pub d2phi: S,
 }
 
+/// Beyond this `κ`, `e^{-κ}` is below the smallest subnormal `f64`, so `φ`
+/// is exactly zero and every quantity derived from the transition is exactly
+/// constant; holding `κ` there keeps `κ φ` from becoming `∞ · 0`.
+const KAPPA_SATURATION: f64 = 745.0;
+
 impl<S: JetField> AtomTransition<S> {
     pub fn new(kappa: &S) -> Self {
+        let saturated;
+        let kappa = if kappa.value() >= KAPPA_SATURATION {
+            saturated = kappa.constant_like(KAPPA_SATURATION);
+            &saturated
+        } else {
+            kappa
+        };
         let k = kappa.value();
         let e = (-k).exp();
         let one_minus_phi = kappa.compose_unary([-(-k).exp_m1(), e, -e, e, -e]);
@@ -297,21 +413,55 @@ pub(crate) fn normal_density<S: JetField>(x: &S, mean: &S, variance: &S) -> S {
     exp(&quad.add(&log_norm).add(&x.constant_like(-LOG_SQRT_TWO_PI)))
 }
 
-/// Build the forward (predict) operator across one gap: input values on
-/// `from`, output values on `to`.
-pub(crate) fn forward_operator<S: JetField>(
+/// The innovation-weighted operators of one gap, every axis and every
+/// innovation power at once: `per_axis[k][b]` is the `G × G` matrix of axis
+/// `k` with weight `u_k^b`. One Lagrange-basis pass per axis serves all
+/// powers, and the plain operator is power zero.
+#[derive(Clone, Debug)]
+pub(crate) struct OperatorFamily<S> {
+    pub per_axis: Vec<Vec<Vec<S>>>,
+    pub order: usize,
+}
+
+impl<S: JetField> OperatorFamily<S> {
+    /// Apply the separable operator whose axis-`k` factor carries power
+    /// `powers[k]`.
+    pub fn apply(&self, powers: &[u8], values: &[S]) -> Vec<S> {
+        let mut current = values.to_vec();
+        for (axis, family) in self.per_axis.iter().enumerate() {
+            let power = usize::from(powers.get(axis).copied().unwrap_or(0));
+            current = apply_axis(&current, &family[power], self.order, axis);
+        }
+        current
+    }
+
+    /// The plain (power-zero) operator.
+    pub fn plain(&self, values: &[S]) -> Vec<S> {
+        let zeros = vec![0u8; self.per_axis.len()];
+        self.apply(&zeros, values)
+    }
+}
+
+/// Build the forward (predict) operators across one gap for innovation
+/// powers `0..=max_power`: input values on `from`, output values on `to`,
+/// `F_b[f](z') = ∫ N(z'; φz, q) u^b f(z) dz` with `u = (z' − φz)/√q` the
+/// standardised innovation.
+pub(crate) fn forward_operators<S: JetField>(
     gh: &GaussHermite,
     from: &Grid<S>,
     to: &Grid<S>,
     transitions: &[AtomTransition<S>],
-) -> SeparableOperator<S> {
+    max_power: u8,
+) -> OperatorFamily<S> {
     let g = gh.order;
-    let mut matrices = Vec::with_capacity(from.dimension());
+    let powers = usize::from(max_power) + 1;
+    let mut per_axis = Vec::with_capacity(from.dimension());
     for (axis, transition) in transitions.iter().enumerate() {
         let old = &from.axes[axis];
         let new = &to.axes[axis];
         let phi = &transition.phi;
         let q = &transition.innovation;
+        let inverse_root_q = recip(&sqrt(q));
         let sigma2 = square(&old.sigma);
         let tau2 = square(phi).mul(&sigma2).add(q);
         let inv_tau2 = recip(&tau2);
@@ -326,7 +476,7 @@ pub(crate) fn forward_operator<S: JetField>(
                     .scale((2.0 * std::f64::consts::PI).sqrt() * (x * x).exp())
             })
             .collect();
-        let mut matrix = vec![old.mu.constant_like(0.0); g * g];
+        let mut matrices = vec![vec![old.mu.constant_like(0.0); g * g]; powers];
         for j in 0..g {
             let d = new.points[j].sub(&phi_mu);
             let gauss = normal_density(&new.points[j], &phi_mu, &tau2);
@@ -335,57 +485,137 @@ pub(crate) fn forward_operator<S: JetField>(
                 .mul(&d)
                 .mul(&inv_tau2)
                 .scale(1.0 / std::f64::consts::SQRT_2);
-            let mut accumulated = vec![old.mu.constant_like(0.0); g];
+            let mut accumulated = vec![vec![old.mu.constant_like(0.0); g]; powers];
             for (l, &x) in gh.nodes.iter().enumerate() {
-                let xi = gh.clamp_to_hull(&centre.add(&ratio.scale(x)));
-                let basis = gh.lagrange_basis(&xi);
-                for i in 0..g {
-                    accumulated[i] = accumulated[i].add(&basis[i].scale(gh.normal_weights[l]));
+                // The interpolant is used as the polynomial it is, inside
+                // and beyond the hull: the source envelope's Gaussian decay
+                // beats the polynomial's growth there, and a clamp would put
+                // a kink into an otherwise smooth objective.
+                let raw = centre.add(&ratio.scale(x));
+                let basis = gh.lagrange_basis(&raw);
+                // z at this inner node, then u = (z' − φ z) / √q.
+                let z = old.mu.add(&raw.mul(&old.sigma).scale(std::f64::consts::SQRT_2));
+                let u = new.points[j].sub(&phi.mul(&z)).mul(&inverse_root_q);
+                let mut weight = old.mu.constant_like(gh.normal_weights[l]);
+                for power in 0..powers {
+                    if power > 0 {
+                        weight = weight.mul(&u);
+                    }
+                    for i in 0..g {
+                        accumulated[power][i] = accumulated[power][i].add(&basis[i].mul(&weight));
+                    }
                 }
             }
-            for i in 0..g {
-                matrix[j * g + i] = gauss.mul(&accumulated[i]).mul(&inverse_envelope[i]);
+            for power in 0..powers {
+                for i in 0..g {
+                    matrices[power][j * g + i] = gauss
+                        .mul(&accumulated[power][i])
+                        .mul(&inverse_envelope[i]);
+                }
             }
         }
-        matrices.push(matrix);
+        per_axis.push(matrices);
     }
-    SeparableOperator { matrices, order: g }
+    OperatorFamily { per_axis, order: g }
 }
 
-/// Build the backward (conditioning) operator across one gap: input values
-/// on `to`, output values on `from`: `B[u](z) = ∫ N(z'; φ z, q) u(z') dz'`,
-/// as the Gauss-Hermite expectation of the Lagrange interpolant of `u`.
-pub(crate) fn backward_operator<S: JetField>(
+/// Per-axis spline basis of `to` at the backward inner points
+/// `ζ = φ_k z_{i_k} + √(2 q_k) x_l` of every source point of `from`, as the
+/// cardinal natural cubic spline basis of `to` (linear beyond its hull):
+/// `bases[k][(i * G + l) * G + j]`
+/// for source index `i`, inner node `l` and target basis `j` along axis `k`.
+pub(crate) fn backward_axis_bases<S: JetField>(
     gh: &GaussHermite,
     from: &Grid<S>,
     to: &Grid<S>,
     transitions: &[AtomTransition<S>],
-) -> SeparableOperator<S> {
+) -> Vec<Vec<S>> {
     let g = gh.order;
-    let mut matrices = Vec::with_capacity(from.dimension());
-    for (axis, transition) in transitions.iter().enumerate() {
-        let old = &from.axes[axis];
-        let new = &to.axes[axis];
-        let phi = &transition.phi;
-        let spread = sqrt(&transition.innovation.scale(2.0));
-        let inverse_scale = recip(&new.sigma.scale(std::f64::consts::SQRT_2));
-        let mut matrix = vec![old.mu.constant_like(0.0); g * g];
-        for i in 0..g {
-            let phi_z = phi.mul(&old.points[i]);
-            let mut accumulated = vec![old.mu.constant_like(0.0); g];
-            for (l, &x) in gh.nodes.iter().enumerate() {
-                let zeta = phi_z.add(&spread.scale(x));
-                let xi = gh.clamp_to_hull(&zeta.sub(&new.mu).mul(&inverse_scale));
-                let basis = gh.lagrange_basis(&xi);
-                for j in 0..g {
-                    accumulated[j] = accumulated[j].add(&basis[j].scale(gh.normal_weights[l]));
+    transitions
+        .iter()
+        .enumerate()
+        .map(|(axis, transition)| {
+            let old = &from.axes[axis];
+            let new = &to.axes[axis];
+            let spread = sqrt(&transition.innovation.scale(2.0));
+            let inverse_scale = recip(&new.sigma.scale(std::f64::consts::SQRT_2));
+            let mut bases = vec![old.mu.constant_like(0.0); g * g * g];
+            for i in 0..g {
+                let phi_z = transition.phi.mul(&old.points[i]);
+                for (l, &x) in gh.nodes.iter().enumerate() {
+                    let zeta = phi_z.add(&spread.scale(x));
+                    let basis = gh.spline_basis(&zeta.sub(&new.mu).mul(&inverse_scale));
+                    for (j, value) in basis.into_iter().enumerate() {
+                        bases[(i * g + l) * g + j] = value;
+                    }
                 }
             }
-            for j in 0..g {
-                matrix[i * g + j] = accumulated[j].clone();
+            bases
+        })
+        .collect()
+}
+
+/// The tensor-product Lagrange interpolant of `values` (on the target grid,
+/// axis 0 fastest) at every backward inner point of every source point:
+/// `out[i * inner + l]` with `i` the source flat index and `l` the inner
+/// flat index, both axis 0 fastest. One axis is contracted at a time, so the
+/// cost is `O(K · G^{2K+1})` rather than `O(G^{3K})`.
+pub(crate) fn interpolate_at_inner_points<S: JetField>(
+    order: usize,
+    bases: &[Vec<S>],
+    values: &[S],
+) -> Vec<S> {
+    let g = order;
+    let axes = bases.len();
+    let zero = values[0].constant_like(0.0);
+    // Layout of `cur`: processed axes first as pairs `i_k · G + l_k` (each of
+    // size G², axis 0 fastest), then the unprocessed target indices `j_k`.
+    let mut cur: Vec<S> = values.to_vec();
+    for a in 0..axes {
+        let processed = (g * g).pow(a as u32);
+        let rest = g.pow((axes - a - 1) as u32);
+        let mut next = vec![zero.clone(); processed * g * g * rest];
+        for r in 0..rest {
+            for pair in 0..g * g {
+                for p in 0..processed {
+                    let mut acc = zero.clone();
+                    for j in 0..g {
+                        acc = acc.add(&bases[a][pair * g + j].mul(&cur[p + processed * (j + g * r)]));
+                    }
+                    next[p + processed * (pair + g * g * r)] = acc;
+                }
             }
         }
-        matrices.push(matrix);
+        cur = next;
     }
-    SeparableOperator { matrices, order: g }
+    let size = g.pow(axes as u32);
+    let mut out = vec![zero; size * size];
+    for (flat, value) in cur.into_iter().enumerate() {
+        let mut rest = flat;
+        let mut i = 0;
+        let mut l = 0;
+        let mut stride = 1;
+        for _ in 0..axes {
+            // `pair = i_k * G + l_k`, the source-major layout of `bases`.
+            let pair = rest % (g * g);
+            rest /= g * g;
+            i += (pair / g) * stride;
+            l += (pair % g) * stride;
+            stride *= g;
+        }
+        out[i * size + l] = value;
+    }
+    out
+}
+
+/// `ln Σ exp(terms)`, stabilised by the largest value.
+pub(crate) fn log_sum_exp<S: JetField>(terms: &[S]) -> S {
+    let shift = terms
+        .iter()
+        .map(|t| t.value())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let sum = terms
+        .iter()
+        .fold(terms[0].constant_like(0.0), |acc, t| acc.add(&exp(&add_real(t, -shift))));
+    add_real(&super::scalar::ln(&sum), shift)
 }

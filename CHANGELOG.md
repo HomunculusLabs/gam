@@ -1,5 +1,30 @@
 ## Unreleased
 
+- **Event histories are one family.** `gam_models::event_history` fits marked
+  counting processes with smooth covariate and time effects per mark and a
+  per-subject latent state of unit-variance Ornstein–Uhlenbeck atoms whose
+  loadings and rates the evidence selects (each atom carries its own REML
+  ridge over its loadings and log-rate, so an unsupported atom is switched
+  off). The latent chain is marginalised exactly by adaptive product
+  Gauss-Hermite filtering: predict and condition steps are Gaussian
+  convolutions evaluated through the Lagrange interpolant on grids centred at
+  each node's posterior mean with the predictive spread, exact for any gap
+  length and benign at any order. The inner Newton uses the exact gradient of
+  the computed likelihood (forward-mode duals through the same filter); the
+  Hessian and its directional derivatives come from Louis' identity with the
+  smoother residual carried on cubic splines and every immediate exponential
+  factor evaluated exactly, so nothing grows along a chain. The Gauss-Hermite
+  order is raised until the fitted marginal is stable and the fit carries
+  that certificate. Forecasts (survival of the absorbing marks and expected
+  counts per mark) and the predictive PIT are exact expectations under the
+  filtered state. Surfaces: `fit_event_history` and
+  `fit_event_history_formula` in Rust, `gamfit.fit_event_history` in Python,
+  `gam fit-events` on the CLI. The `gam-point-process` crate, which fixed the
+  Matérn order and factor count, marginalised by Laplace only and searched
+  its hyperparameters derivative-free within hand-typed boxes, is removed;
+  `SPEC.md` now bans derivative-free hyperparameter search and hand-supplied
+  bounds.
+
 - **The gauge-orbit descent publishes the value authority its decrease is
   measured against (#2762).** `penalized_objective_total` is a function of
   the state AND of the barrier/repulsion gates that only `assemble_arrow_schur`

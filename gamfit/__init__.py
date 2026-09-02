@@ -99,6 +99,7 @@ from ._shape_census import (
     run_shape_controlled_census,
 )
 from ._compare import compare_models
+from ._event_history import EventHistoryModel, fit_event_history
 from ._linear_dictionary import LinearDictionaryFit, linear_dictionary_fit
 from ._sparse_dictionary import (
     BlockSparseDictStream,

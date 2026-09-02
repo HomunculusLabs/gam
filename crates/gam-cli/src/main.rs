@@ -213,6 +213,8 @@ mod run_fit;
 mod run_predict;
 #[path = "main/run_sample_generate_report.rs"]
 mod run_sample_generate_report;
+#[path = "main/run_fit_events.rs"]
+mod run_fit_events;
 #[path = "main/run_survival.rs"]
 mod run_survival;
 #[path = "main/smooth_warnings.rs"]
@@ -231,6 +233,7 @@ pub(crate) use run_diagnose::*;
 pub(crate) use run_fit::*;
 pub(crate) use run_predict::*;
 pub(crate) use run_sample_generate_report::*;
+pub(crate) use run_fit_events::*;
 pub(crate) use run_survival::*;
 pub(crate) use smooth_warnings::*;
 
@@ -350,6 +353,7 @@ fn run() -> CliResult<()> {
         Command::Diagnose(args) => run_diagnose(args).map_err(CliError::from),
         Command::Sample(args) => run_sample(args).map_err(CliError::from),
         Command::Generate(args) => run_generate(args).map_err(CliError::from),
+        Command::FitEvents(args) => run_fit_events(args).map_err(CliError::from),
     }
 }
 

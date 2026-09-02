@@ -127,6 +127,7 @@ nav:
     - Manifold smooths gallery: manifold-smooths.md
     - Manifold SAE dictionary: manifold-sae.md
     - Survival models: survival.md
+    - Event histories: event-history.md
     - Marginal-slope models: marginal-slope.md
     - Location-scale models: location-scale.md
     - Response geometry: response-geometry.md

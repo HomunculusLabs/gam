@@ -2,9 +2,11 @@
 //! effects, a per-subject latent state made of unit-variance
 //! Ornstein–Uhlenbeck atoms with evidence-selected loadings and rates, exact
 //! marginalisation of the latent chain by adaptive Gauss-Hermite–Lagrange
-//! filtering, and every derivative the LAML outer solve needs from the Fisher
-//! and Louis identities. Forecasts and the predictive PIT are exact
-//! expectations under the filtered state.
+//! filtering on grids centred at each node's posterior mean, the exact
+//! gradient of that computed likelihood from forward-mode
+//! duals through the same filter, and the Hessian and its directional
+//! derivatives from Louis' identity. Forecasts and the predictive PIT are
+//! exact expectations under the filtered state.
 //!
 //! Survival with a static frailty, competing risks, recurrent events and
 //! history-conditioned prediction are all one family here: they differ only
@@ -16,6 +18,7 @@ mod chain;
 mod cohort;
 mod family;
 mod forecast;
+mod formula;
 mod marginal;
 mod scalar;
 
@@ -25,9 +28,10 @@ pub use cohort::{
 };
 pub use family::{
     EventHistoryFamily, EventHistoryFit, EventHistorySpec, JointEvaluation,
-    QuadratureCertificate, fit_event_history, latent_block_spec, mark_block_spec, seeded_one,
-    seeded_two,
+    QuadratureCertificate, fit_event_history, fit_event_history_formula, latent_block_spec,
+    mark_block_spec, seeded_one, seeded_two,
 };
+pub use formula::{TIME_COLUMN, covariate_spec_from_formula, node_dataset};
 pub use marginal::transition_score_polynomials;
 pub use forecast::{
     Forecast, ForecastRequest, forecast, kolmogorov_smirnov_uniform, predictive_pit, training_eta,

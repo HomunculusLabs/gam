@@ -52,6 +52,7 @@ fn single_subject_nodes(
 ) -> Result<CohortNodes, EventHistoryError> {
     let mut one = EventHistoryCohort {
         mark_names: cohort.mark_names.clone(),
+        covariate_names: cohort.covariate_names.clone(),
         covariates: cohort.covariates.clone(),
         subjects: vec![history.clone()],
     };
@@ -178,6 +179,7 @@ pub fn forecast(
     };
     let mut future_cohort = EventHistoryCohort {
         mark_names: cohort.mark_names.clone(),
+        covariate_names: cohort.covariate_names.clone(),
         covariates: cohort.covariates.clone(),
         subjects: vec![future_history],
     };

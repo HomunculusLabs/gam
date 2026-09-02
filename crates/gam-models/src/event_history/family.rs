@@ -5,7 +5,8 @@
 
 use super::chain::GaussHermite;
 use super::cohort::{CohortNodes, EventHistoryCohort, EventHistoryError, expand_nodes};
-use super::marginal::{SubjectInputs, subject_marginal};
+use super::marginal::{SubjectInputs, pairwise_sum, subject_marginal};
+use super::scalar::Tangent;
 use crate::custom_family::{
     BlockWorkingSet, BlockwiseFitOptions, CustomFamily, ExactNewtonJointGradientEvaluation,
     FamilyEvaluation, ParameterBlockSpec, ParameterBlockState, PenaltyMatrix,
@@ -206,9 +207,17 @@ impl EventHistoryFamily {
         self.marks() * self.atoms + self.atoms
     }
 
+    /// Whether the fit carries a latent block (no atoms means a plain
+    /// Poisson-process GAM with the same node expansion).
+    pub fn has_latent_block(&self) -> bool {
+        self.atoms > 0
+    }
+
     fn block_widths(&self) -> Vec<usize> {
         let mut widths: Vec<usize> = self.designs.iter().map(|d| d.ncols()).collect();
-        widths.push(self.latent_width());
+        if self.has_latent_block() {
+            widths.push(self.latent_width());
+        }
         widths
     }
 
@@ -229,10 +238,15 @@ impl EventHistoryFamily {
 
     fn validate_states(&self, states: &[ParameterBlockState]) -> Result<(), String> {
         let marks = self.marks();
-        if states.len() != marks + 1 {
+        let expected = marks + usize::from(self.has_latent_block());
+        if states.len() != expected {
             return Err(format!(
-                "event-history family expects {} blocks (one per mark plus the latent block), got {}",
-                marks + 1,
+                "event-history family expects {expected} blocks (one per mark{}), got {}",
+                if self.has_latent_block() {
+                    " plus the latent block"
+                } else {
+                    ""
+                },
                 states.len()
             ));
         }
@@ -252,7 +266,7 @@ impl EventHistoryFamily {
                 ));
             }
         }
-        if states[marks].beta.len() != self.latent_width() {
+        if self.has_latent_block() && states[marks].beta.len() != self.latent_width() {
             return Err(format!(
                 "latent block has {} coefficients, expected {}",
                 states[marks].beta.len(),
@@ -289,6 +303,12 @@ impl EventHistoryFamily {
         let offsets = self.block_offsets();
         let total = self.total_width();
         let latent_offset = offsets[marks];
+        let empty = Array1::<f64>::zeros(0);
+        let latent_beta: &Array1<f64> = if self.has_latent_block() {
+            &states[marks].beta
+        } else {
+            &empty
+        };
         for direction in [u, v].into_iter().flatten() {
             if direction.len() != total {
                 return Err(format!(
@@ -296,11 +316,20 @@ impl EventHistoryFamily {
                     direction.len()
                 ));
             }
+            if let Some((index, value)) = direction
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|(_, value)| !value.is_finite())
+            {
+                return Err(format!(
+                    "event-history direction contains non-finite value {value} at coefficient {index}",
+                ));
+            }
         }
         let component = |dir: Option<&Array1<f64>>, index: usize| -> f64 {
             dir.map_or(0.0, |d| d[index])
         };
-        let latent_beta = &states[marks].beta;
         let loadings: Vec<S> = (0..marks * atoms)
             .map(|q| {
                 S::seeded(
@@ -457,11 +486,11 @@ impl EventHistoryFamily {
             .first()
             .map(|(l, _, _)| l.constant_like(0.0))
             .ok_or_else(|| "event-history family has no subjects".to_string())?;
-        let mut loglik = zero.clone();
+        let subject_logliks: Vec<S> = per_subject.iter().map(|(l, _, _)| l.clone()).collect();
+        let loglik = pairwise_sum(&subject_logliks, &zero);
         let mut gradient = vec![zero.clone(); if derivatives { total } else { 0 }];
         let mut hessian = vec![zero.clone(); if derivatives { total * total } else { 0 }];
-        for (l, g, hh) in &per_subject {
-            loglik = loglik.add(l);
+        for (_, g, hh) in &per_subject {
             if derivatives {
                 for (acc, x) in gradient.iter_mut().zip(g.iter()) {
                     *acc = acc.add(x);
@@ -481,7 +510,108 @@ impl EventHistoryFamily {
         Ok((loglik, gradient, hessian))
     }
 
-    /// Full `f64` joint evaluation, cached on the state.
+    /// Exact gradient of the computed log-likelihood in coefficient space.
+    ///
+    /// The forward filter is replayed on forward-mode duals seeded with the
+    /// design rows, so every tangent slot is the derivative of the very
+    /// arithmetic that produced the value. The Fisher-identity gradient of the
+    /// exact marginal differs from this by the quadrature error, and a
+    /// trust-region Newton with a value-based acceptance test cannot converge
+    /// on a gradient that is not the derivative of the value it tests.
+    fn exact_gradient(&self, states: &[ParameterBlockState]) -> Result<Vec<f64>, String> {
+        let total = self.total_width();
+        let mut gradient = vec![0.0; total];
+        if total <= 4 {
+            self.exact_gradient_chunks::<4>(states, &mut gradient)?;
+        } else if total <= 8 {
+            self.exact_gradient_chunks::<8>(states, &mut gradient)?;
+        } else if total <= 16 {
+            self.exact_gradient_chunks::<16>(states, &mut gradient)?;
+        } else if total <= 32 {
+            self.exact_gradient_chunks::<32>(states, &mut gradient)?;
+        } else {
+            self.exact_gradient_chunks::<64>(states, &mut gradient)?;
+        }
+        Ok(gradient)
+    }
+
+    /// One `W`-wide sweep of tangent slots at a time over the coefficient
+    /// vector, each sweep a full forward filter per subject.
+    fn exact_gradient_chunks<const W: usize>(
+        &self,
+        states: &[ParameterBlockState],
+        gradient: &mut [f64],
+    ) -> Result<(), String> {
+        let marks = self.marks();
+        let atoms = self.atoms;
+        let offsets = self.block_offsets();
+        let total = self.total_width();
+        let latent_offset = offsets[marks];
+        let empty = Array1::<f64>::zeros(0);
+        let latent_beta: &Array1<f64> = if self.has_latent_block() {
+            &states[marks].beta
+        } else {
+            &empty
+        };
+        let designs = &self.designs;
+        let gh = &self.gh;
+        let time_scale = self.time_scale;
+        for start in (0..total).step_by(W) {
+            let end = (start + W).min(total);
+            let seed = |slot: usize, grad: &mut [f64; W], x: f64| {
+                if (start..end).contains(&slot) {
+                    grad[slot - start] = x;
+                }
+            };
+            let unit = |q: usize| -> Tangent<W> {
+                let mut grad = [0.0; W];
+                seed(latent_offset + q, &mut grad, 1.0);
+                Tangent::seeded(latent_beta[q], grad)
+            };
+            let loadings: Vec<Tangent<W>> = (0..marks * atoms).map(unit).collect();
+            let log_rates: Vec<Tangent<W>> = (0..atoms).map(|k| unit(marks * atoms + k)).collect();
+            let per_subject: Result<Vec<[f64; W]>, String> = self
+                .nodes
+                .subjects
+                .par_iter()
+                .map(|subject| {
+                    let n = subject.len();
+                    let first = subject.first_row;
+                    let mut eta0 = Vec::with_capacity(n * marks);
+                    for node in 0..n {
+                        let row = first + node;
+                        for d in 0..marks {
+                            let mut grad = [0.0; W];
+                            for (j, x) in designs[d].row(row).iter().enumerate() {
+                                seed(offsets[d] + j, &mut grad, *x);
+                            }
+                            eta0.push(Tangent::seeded(states[d].eta[row], grad));
+                        }
+                    }
+                    let inputs = SubjectInputs {
+                        nodes: subject,
+                        eta0: &eta0,
+                        loadings: &loadings,
+                        log_rates: &log_rates,
+                        time_scale,
+                        gh,
+                        continuation_gap: 0.0,
+                    };
+                    let local = subject_marginal(&inputs, false).map_err(|e| e.to_string())?;
+                    Ok(local.loglik.grad)
+                })
+                .collect();
+            for g in per_subject? {
+                for (slot, x) in g.iter().enumerate().take(end - start) {
+                    gradient[start + slot] += x;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Full `f64` joint evaluation, cached on the state: the value, its exact
+    /// gradient, and the Louis-identity Hessian.
     pub fn joint_evaluation(
         &self,
         states: &[ParameterBlockState],
@@ -493,7 +623,8 @@ impl EventHistoryFamily {
         {
             return Ok(Arc::clone(value));
         }
-        let (loglik, gradient, hessian) = self.evaluate_generic::<f64>(states, None, None, true)?;
+        let (loglik, _, hessian) = self.evaluate_generic::<f64>(states, None, None, true)?;
+        let gradient = self.exact_gradient(states)?;
         let total = self.total_width();
         let mut negative_hessian = Array2::<f64>::zeros((total, total));
         for i in 0..total {
@@ -604,6 +735,14 @@ impl CustomFamily for EventHistoryFamily {
 
     fn inner_coefficient_objective_is_globally_convex(&self) -> bool {
         false
+    }
+
+    /// The marginal likelihood is not log-concave in the loadings: at zero
+    /// loading the profile can be locally convex (a saddle of the negative
+    /// log-likelihood), so the joint Newton needs the self-vanishing
+    /// Levenberg–Marquardt damping the sibling latent families use.
+    fn levenberg_on_ill_conditioning(&self) -> bool {
+        true
     }
 
     fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
@@ -792,8 +931,13 @@ pub fn latent_block_spec(
     marks: usize,
     atoms: usize,
 ) -> Result<ParameterBlockSpec, EventHistoryError> {
+    if atoms == 0 {
+        return Err(EventHistoryError::InvalidInput {
+            reason: "a latent block needs at least one atom".to_string(),
+        });
+    }
     let width = marks * atoms + atoms;
-    let design = identity_pattern_design(n_obs, width.max(1))?;
+    let design = identity_pattern_design(n_obs, width)?;
     let mut penalties = Vec::with_capacity(atoms);
     let mut nullspace_dims = Vec::with_capacity(atoms);
     for k in 0..atoms {
@@ -805,6 +949,16 @@ pub fn latent_block_spec(
         penalties.push(PenaltyMatrix::Dense(s));
         nullspace_dims.push(width - marks - 1);
     }
+    // Loadings start at the atom's own unit: zero loading is a critical point
+    // of the marginal likelihood (the score in a loading vanishes there by
+    // symmetry) and, when events cluster, a saddle whose escape collapses the
+    // joint Newton's trust region. One latent standard deviation per unit of
+    // log-intensity is the parameterisation's natural scale, not a tuning
+    // choice; the sign is a symmetry.
+    let mut initial_beta = Array1::<f64>::zeros(width);
+    for q in 0..marks * atoms {
+        initial_beta[q] = 1.0;
+    }
     Ok(ParameterBlockSpec {
         name: "latent".to_string(),
         design: DesignMatrix::Dense(DenseDesignMatrix::from(Arc::new(design))),
@@ -812,7 +966,7 @@ pub fn latent_block_spec(
         penalties,
         nullspace_dims,
         initial_log_lambdas: Array1::zeros(atoms),
-        initial_beta: Some(Array1::zeros(width)),
+        initial_beta: Some(initial_beta),
         gauge_priority: 100,
         jacobian_callback: None,
         stacked_design: None,
@@ -835,6 +989,24 @@ pub fn mark_block_spec(name: &str, design: &TermCollectionDesign) -> ParameterBl
         stacked_design: None,
         stacked_offset: None,
     }
+}
+
+/// Fit an event-history model from a formula right-hand side shared by every
+/// mark, such as `x + s(time)`.
+pub fn fit_event_history_formula(
+    cohort: &mut EventHistoryCohort,
+    formula: &str,
+    atoms: usize,
+    options: BlockwiseFitOptions,
+) -> Result<EventHistoryFit, EventHistoryError> {
+    cohort.validate()?;
+    let mut spec = EventHistorySpec::new(atoms, Vec::new());
+    spec.options = options;
+    let nodes = expand_nodes(cohort, spec.quadrature_order)?;
+    let covariates =
+        super::formula::covariate_spec_from_formula(formula, &nodes, &cohort.covariate_names)?;
+    spec.covariates = vec![covariates];
+    fit_event_history(cohort, &spec)
 }
 
 /// Fit an event-history model to a cohort.
@@ -890,7 +1062,9 @@ pub fn fit_event_history(
         dense.push(dense_design);
         frozen_specs.push(frozen);
     }
-    block_specs.push(latent_block_spec(nodes.total_nodes, marks, spec.atoms)?);
+    if spec.atoms > 0 {
+        block_specs.push(latent_block_spec(nodes.total_nodes, marks, spec.atoms)?);
+    }
 
     let mut order = spec.gauss_hermite_order.max(3);
     let mut family = EventHistoryFamily::new(
@@ -917,7 +1091,12 @@ pub fn fit_event_history(
             .map_err(|reason| EventHistoryError::Fit { reason })?;
         let stable = (value - checked).abs() <= spec.quadrature_tolerance * value.abs().max(1.0);
         if stable || spec.atoms == 0 {
-            let latent = &fit.block_states[marks].beta;
+            let empty = Array1::<f64>::zeros(0);
+            let latent: &Array1<f64> = if spec.atoms > 0 {
+                &fit.block_states[marks].beta
+            } else {
+                &empty
+            };
             let mut loadings = Array2::<f64>::zeros((marks, spec.atoms));
             for d in 0..marks {
                 for k in 0..spec.atoms {
@@ -967,8 +1146,19 @@ pub fn fit_event_history(
         );
         order = checked_order;
         family = checked_family;
+        // Warm-start the refit at the previous optimum: coefficients per block
+        // and the smoothing parameters in block order.
+        let mut cursor = 0usize;
         for (block, state) in specs.iter_mut().zip(fit.block_states.iter()) {
             block.initial_beta = Some(state.beta.clone());
+            let count = block.initial_log_lambdas.len();
+            if cursor + count <= fit.log_lambdas.len() {
+                block.initial_log_lambdas = fit
+                    .log_lambdas
+                    .slice(ndarray::s![cursor..cursor + count])
+                    .to_owned();
+            }
+            cursor += count;
         }
     }
 }

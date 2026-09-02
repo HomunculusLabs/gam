@@ -69,6 +69,8 @@ pub struct SubjectHistory {
 #[derive(Clone, Debug)]
 pub struct EventHistoryCohort {
     pub mark_names: Vec<String>,
+    /// Names of the covariate table's columns, visible to the formula.
+    pub covariate_names: Vec<String>,
     /// Covariate table; rows are referenced by [`CovariateSegment::row`].
     pub covariates: Array2<f64>,
     pub subjects: Vec<SubjectHistory>,
@@ -89,6 +91,13 @@ impl EventHistoryCohort {
         }
         if self.covariates.iter().any(|v| !v.is_finite()) {
             return Err(invalid("covariate table contains a non-finite value"));
+        }
+        if self.covariate_names.len() != self.covariates.ncols() {
+            return Err(invalid(format!(
+                "{} covariate names for a table with {} columns",
+                self.covariate_names.len(),
+                self.covariates.ncols()
+            )));
         }
         let marks = self.marks();
         let rows = self.covariates.nrows();

@@ -223,12 +223,14 @@ H = pred.cumulative_hazard_at([10])
 pred.write_survival_at_csv("surv.csv", times=[...])  # streamed
 ```
 
-Longitudinal event histories are available in the Rust
-`gam-point-process` crate: exact OU/Matérn-3/2 state transitions,
-piecewise-Poisson marked likelihoods, linear-time Laplace smoothing,
-recursive filtering, encounter-process loadings, impulse feedback, and
-posterior-integrated competing-risk forecasts. `gam-models` re-exports the
-crate as `gam_models::marked_point_process`.
+Event histories. `gam_models::event_history` fits marked counting
+processes: smooth covariate and time effects per mark, plus a per-subject
+latent state of unit-variance Ornstein–Uhlenbeck atoms whose loadings and
+rates are selected by the evidence (an unsupported atom is switched off by
+its own REML ridge). The latent chain is marginalised exactly by adaptive
+Gauss-Hermite–Lagrange filtering, so recurrent events, competing risks,
+dynamic frailty and history-conditioned forecasts are one family. Forecasts
+and the predictive PIT are exact expectations under the filtered state.
 
 Posterior sampling. `model.sample(...)` draws from the coefficient
 posterior conditional on the fitted smoothing parameters. Predictive
@@ -355,7 +357,7 @@ instead of mixing context or handle ownership across implementations.
 
 | Path | Contents |
 | --- | --- |
-| `crates/gam-*/` | Rust engine, split across focused workspace crates: fitting/solve (`gam-solve`), inference (`gam-inference`), families/models (`gam-models`, `gam-model-api`), marked histories (`gam-point-process`), smooth construction (`gam-terms`, `gam-geometry`), manifold SAE (`gam-sae`), prediction (`gam-predict`), GPU (`gam-gpu`), reports (`gam-report`), CLI (`gam-cli`), and more. |
+| `crates/gam-*/` | Rust engine, split across focused workspace crates: fitting/solve (`gam-solve`), inference (`gam-inference`), families/models (`gam-models`, `gam-model-api`), smooth construction (`gam-terms`, `gam-geometry`), manifold SAE (`gam-sae`), prediction (`gam-predict`), GPU (`gam-gpu`), reports (`gam-report`), CLI (`gam-cli`), and more. |
 | `crates/gam-pyffi/` | PyO3 bindings (`gamfit._rust`). |
 | `src/` | Thin workspace-root shell (`lib.rs`, shared types, macros) over the crates. |
 | `gamfit/` | Python public API on top of the bindings. |

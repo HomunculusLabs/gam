@@ -56,6 +56,49 @@ pub(crate) enum Command {
     Sample(SampleArgs),
     /// Draw synthetic responses from the fitted model for given covariates.
     Generate(GenerateArgs),
+    /// Fit an event-history model (marked counting process with a latent
+    /// per-subject state) from subjects, events and covariate-segment tables.
+    FitEvents(FitEventsArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct FitEventsArgs {
+    #[arg(long, value_name = "CSV", help = "Subjects table: columns id, entry, exit")]
+    pub(crate) subjects: PathBuf,
+    #[arg(long, value_name = "CSV", help = "Events table: columns id, time, mark")]
+    pub(crate) events: PathBuf,
+    #[arg(
+        long,
+        value_name = "CSV",
+        help = "Covariate segments: columns id, start, then the covariate columns; a subject's covariates hold from start until its next segment"
+    )]
+    pub(crate) covariates: PathBuf,
+    #[arg(
+        long,
+        value_name = "RHS",
+        help = "Right-hand side of the log-intensity formula over the covariate columns and `time`, e.g. \"x + s(time)\""
+    )]
+    pub(crate) formula: String,
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Maximum number of latent atoms; the evidence switches off unsupported ones"
+    )]
+    pub(crate) atoms: usize,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Forecast horizons as offsets after each subject's exit, comma separated"
+    )]
+    pub(crate) horizons: Vec<f64>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Marks that end follow-up when they fire, comma separated"
+    )]
+    pub(crate) absorbing: Vec<String>,
+    #[arg(long, value_name = "JSON", help = "Write the summary here instead of stdout")]
+    pub(crate) out: Option<PathBuf>,
 }
 
 /// One named NPY matrix at the CLI transport boundary.
