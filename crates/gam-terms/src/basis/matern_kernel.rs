@@ -2705,6 +2705,10 @@ pub fn operator_penalty_candidates_closed_form(
     d0: &Array2<f64>,
     d1: &Array2<f64>,
     d2: &Array2<f64>,
+    // The chart amplitude the collocation blocks already carry (gam#979);
+    // a closed-form Gram that replaces a quadrature is scaled by its square
+    // so both branches agree.
+    kernel_amplification: f64,
     spec: &DuchonOperatorPenaltySpec,
     p_order: usize,
     s_order: usize,
@@ -2715,6 +2719,7 @@ pub fn operator_penalty_candidates_closed_form(
     outer_identifiability: Option<&Array2<f64>>,
 ) -> Result<Vec<PenaltyCandidate>, BasisError> {
     let kappa = 1.0 / length_scale.max(1e-300);
+    let amp2 = kernel_amplification * kernel_amplification;
 
     // Per-q Duchon convergence regime: closed-form Lebesgue kernel matrix is
     // PSD only when both UV `4(m+s) > d + 2q` and IR `d + 2q > 4m` hold,
@@ -2759,7 +2764,9 @@ pub fn operator_penalty_candidates_closed_form(
         // The candidate's `matrix` is the closed-form Gram divided by its
         // Frobenius norm `c`. Wrap in `ScaledPenaltyOp` with factor `1/c`
         // so `op.as_dense()` matches the candidate's dense matrix.
-        let scale = if c > 1e-12 { 1.0 / c } else { 1.0 };
+        // The raw operator is the un-amplified closed form; the dense matrix
+        // it stands in for is `amp2 · raw / c`.
+        let scale = if c > 1e-12 { amp2 / c } else { amp2 };
         let scaled: std::sync::Arc<dyn PenaltyOp> =
             std::sync::Arc::new(ScaledPenaltyOp::new(raw_op, scale));
         Some(scaled)
@@ -2787,7 +2794,7 @@ pub fn operator_penalty_candidates_closed_form(
     if matches!(spec.tension, OperatorPenaltySpec::Active { .. }) {
         let s1_raw = if duchon_closed_form_operator_penalty_converges(1, p_order, s_order as f64, d)
         {
-            closed_form_operator_penalty_in_total_basis(
+            amp2 * closed_form_operator_penalty_in_total_basis(
                 centers,
                 1,
                 p_order,
@@ -2817,7 +2824,7 @@ pub fn operator_penalty_candidates_closed_form(
     if matches!(spec.stiffness, OperatorPenaltySpec::Active { .. }) {
         let s2_raw = if duchon_closed_form_operator_penalty_converges(2, p_order, s_order as f64, d)
         {
-            closed_form_operator_penalty_in_total_basis(
+            amp2 * closed_form_operator_penalty_in_total_basis(
                 centers,
                 2,
                 p_order,
@@ -2933,6 +2940,8 @@ pub fn operator_penalty_candidates_closed_form_pure(
     d0: &Array2<f64>,
     d1: &Array2<f64>,
     d2: &Array2<f64>,
+    // See `operator_penalty_candidates_closed_form` (gam#979).
+    kernel_amplification: f64,
     spec: &DuchonOperatorPenaltySpec,
     p_order: usize,
     s_order: f64,
@@ -2954,6 +2963,7 @@ pub fn operator_penalty_candidates_closed_form_pure(
     // is free and only deviations get the spring force — while staying inside
     // the standard quadratic-penalty machinery.
     let d = centers.ncols();
+    let amp2 = kernel_amplification * kernel_amplification;
     // Convergence predicate also requires `isotropic_duchon_penalty`'s
     // partial-fraction precondition `2m ≥ q + 1`; without it, closed-form
     // panics on configs like m=1, q=2. Even-dimensional log-Riesz branches are
@@ -2993,7 +3003,7 @@ pub fn operator_penalty_candidates_closed_form_pure(
     }
     if matches!(spec.tension, OperatorPenaltySpec::Active { .. }) {
         let s1_raw = if closed_form_ok(1) {
-            closed_form_operator_penalty_in_total_basis_pure(
+            amp2 * closed_form_operator_penalty_in_total_basis_pure(
                 centers,
                 1,
                 p_order,
@@ -3020,7 +3030,7 @@ pub fn operator_penalty_candidates_closed_form_pure(
     }
     if matches!(spec.stiffness, OperatorPenaltySpec::Active { .. }) {
         let s2_raw = if closed_form_ok(2) {
-            closed_form_operator_penalty_in_total_basis_pure(
+            amp2 * closed_form_operator_penalty_in_total_basis_pure(
                 centers,
                 2,
                 p_order,
@@ -3842,6 +3852,7 @@ pub fn build_matern_collocation_operator_matrices(
         collocation_points: centers.to_owned(),
         kernel_nullspace_transform: None,
         polynomial_block_cols: usize::from(include_intercept),
+        kernel_amplification: 1.0,
     })
 }
 
