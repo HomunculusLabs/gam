@@ -434,10 +434,14 @@ struct ExactGaussianBoundary {
     penalty_faces: Vec<DeterministicPenaltyFace>,
 }
 
+/// `Ok(None)` means the shortcut does not apply and the iterative REML solver
+/// owns the fit; it is returned when the exact boundary face's free directions
+/// are not identified by the data (see the tangent-precision factorization
+/// below). Every `Err` is a malformed request, not a declined shortcut.
 fn deterministic_gaussian_standard_fit(
     request: &StandardFitRequest<'_>,
     exact_boundary: Option<ExactGaussianBoundary>,
-) -> Result<StandardFitResult, WorkflowError> {
+) -> Result<Option<StandardFitResult>, WorkflowError> {
     if !request.family.is_gaussian_identity() || request.y.is_empty() {
         return Err(WorkflowError::InvalidConfig {
             reason:
@@ -754,27 +758,26 @@ fn deterministic_gaussian_standard_fit(
         } else {
             let (equilibrated, scale) =
                 gam_linalg::decision::equilibrate_gram(&free_information);
-            let chol = equilibrated.cholesky(faer::Side::Lower).map_err(|error| {
-                // `A = Z. X.WX Z` is PSD by construction and positive DEFINITE only
-                // when the data identify every free direction, i.e.
-                // `rank(X Z) = dim(Z)`. Since `rank(X Z) <= n`, a `free_dim > n`
-                // makes `A` singular BY CONSTRUCTION and no conditioning or
-                // equilibration can rescue it -- so report the two numbers that
-                // decide it. That case is reachable on purpose: a double-penalized
-                // smooth deliberately admits `p > n` (`bspline_basis_min_rows`),
-                // on the stated grounds that the n-vs-rank decision is "owned
-                // downstream by the inner pivoted factorization" -- and this
-                // Cholesky is not pivoted and owns no such decision.
-                let rows = x_dense.nrows();
-                WorkflowError::IntegrationFailed {
-                    reason: format!(
-                        "deterministic Gaussian boundary tangent precision is not positive \
-                         definite: {error} (free_dim={free_dim}, n={rows}, p={p}; \
-                         free_dim > n means Z. X.WX Z is rank-deficient by construction, \
-                         since rank(X Z) <= n)"
-                    ),
-                }
-            })?;
+            // `A = Z. X.WX Z` is PSD by construction and positive DEFINITE only
+            // when the data identify every free direction, i.e.
+            // `rank(X Z) = dim(Z)`. That factorization IS the shortcut's
+            // applicability test: the exact face is a REML optimum only where
+            // the data pin every direction the face leaves free. When they do
+            // not -- `free_dim > n` makes `A` singular by construction, since
+            // `rank(X Z) <= n`, and a double-penalized smooth deliberately
+            // admits `p > n` (`bspline_basis_min_rows`) -- the unpenalized
+            // interpolant the boundary was built from is not the optimum at
+            // all: with a penalty on those directions the criterion's
+            // `log|X'WX + S_λ| - log|S_λ|₊` terms move the optimum off the
+            // zero face, and the shrinkage penalty, not the data, sets the
+            // effective rank. So an indefinite tangent precision is the
+            // shortcut declining, not the fit failing: return `None` and let
+            // the iterative solver, whose inner pivoted factorization owns the
+            // n-vs-rank decision, fit the model (the n=30 wine-shaped fold of
+            // #1089 is exactly this shape).
+            let Ok(chol) = equilibrated.cholesky(faer::Side::Lower) else {
+                return Ok(None);
+            };
             let solve_free = |rhs: &Array2<f64>| {
                 let mut scaled_rhs = rhs.clone();
                 for row in 0..scaled_rhs.nrows() {
@@ -985,7 +988,7 @@ fn deterministic_gaussian_standard_fit(
                 reason: format!("deterministic Gaussian shortcut could not freeze design: {err}"),
             }
         })?;
-    Ok(StandardFitResult {
+    Ok(Some(StandardFitResult {
         fit,
         design,
         resolvedspec,
@@ -1000,7 +1003,7 @@ fn deterministic_gaussian_standard_fit(
         wiggle_penalty_metadata: None,
         wiggle_saved_warp_beta: None,
         wiggle_saved_index_shift: None,
-    })
+    }))
 }
 
 fn gaussian_response_is_constant(request: &StandardFitRequest<'_>) -> bool {
@@ -1299,12 +1302,12 @@ fn try_deterministic_gaussian_standard_fit(
     request: &StandardFitRequest<'_>,
 ) -> Result<Option<StandardFitResult>, WorkflowError> {
     if gaussian_response_is_constant(request) {
-        return deterministic_gaussian_standard_fit(request, None).map(Some);
+        return deterministic_gaussian_standard_fit(request, None);
     }
     let Some(boundary) = exact_gaussian_boundary(request)? else {
         return Ok(None);
     };
-    deterministic_gaussian_standard_fit(request, Some(boundary)).map(Some)
+    deterministic_gaussian_standard_fit(request, Some(boundary))
 }
 
 pub fn fit_from_formula(
