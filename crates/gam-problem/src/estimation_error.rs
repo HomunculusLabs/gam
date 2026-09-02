@@ -530,6 +530,28 @@ pub enum EstimationError {
     },
 
     #[error(
+        "Beta precision refinement did not converge: after {passes} alternation pass(es) at the \
+         selected smoothing the moment estimate moved from phi={prior_phi:.6e} to \
+         phi={refreshed_phi:.6e} and the mean re-solve at the refreshed precision ended \
+         '{inner_status}' (deviance {deviance:.6e}). The (beta, phi) alternation is only minted at \
+         a fixed point where both the mean and the precision are stationary; a precision that \
+         keeps growing means the response carries no dispersion around the fitted mean at this \
+         smoothing, so no finite beta precision exists to certify."
+    )]
+    BetaPrecisionRefinementDidNotConverge {
+        /// Alternation passes executed, counting the one whose re-solve failed.
+        passes: usize,
+        /// Precision the failed re-solve was warm-started from.
+        prior_phi: f64,
+        /// Precision the failed re-solve was asked to fit at.
+        refreshed_phi: f64,
+        /// Deviance of the last certified mean, at `prior_phi`.
+        deviance: f64,
+        /// Terminal status (or error) of the re-solve at `refreshed_phi`.
+        inner_status: String,
+    },
+
+    #[error(
         "Perfect or quasi-perfect separation detected during model fitting at iteration {iteration}. \
         The model cannot converge because a predictor perfectly separates the binary outcomes. \
         (Diagnostic: max|eta| = {max_abs_eta:.2e})."
@@ -843,6 +865,7 @@ impl EstimationError {
             | Self::ParameterConstraintViolation { .. }
             | Self::BlockOrthogonalRemlDidNotConverge { .. }
             | Self::NegativeBinomialAlternationDidNotConverge { .. }
+            | Self::BetaPrecisionRefinementDidNotConverge { .. }
             | Self::PrefitPerfectSeparationDetected { .. }
             | Self::PrefitLinearSeparationDetected { .. }
             | Self::PrefitRankDeficientDesignDetected { .. }

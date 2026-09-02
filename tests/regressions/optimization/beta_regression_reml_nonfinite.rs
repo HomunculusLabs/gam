@@ -28,10 +28,16 @@
 //!     coefficients and recover a positive slope.
 //!   * `beta_regression_fits_clean_monotone_separation_prone` — a different
 //!     angle that targets the false-positive mechanism head-on: a *clean*,
-//!     noise-free, steep monotone mean where every `y > 0.5` row sits strictly
-//!     above every `y ≤ 0.5` row in both `x` and `η` (the maximal
-//!     `order_separated` trigger). A logit-only detector flags this as
-//!     separated; the family-gated detector must let it fit.
+//!     steep monotone mean where every `y > 0.5` row sits strictly above every
+//!     `y ≤ 0.5` row in both `x` and `η` (the maximal `order_separated`
+//!     trigger). A logit-only detector flags this as separated; the
+//!     family-gated detector must let it fit. The response carries a bounded
+//!     logit-scale wobble the mean does not absorb: a Beta precision is only
+//!     finite when the response has dispersion around the fitted mean, and an
+//!     exactly noise-free response has φ = ∞ (the post-REML (β, φ) alternation
+//!     then diverges and the fit refuses with
+//!     `BetaPrecisionRefinementDidNotConverge`, measured φ 1.1 → 1.0e12 →
+//!     5.1e23 before the refusal existed).
 
 use gam::{
     FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula, init_parallelism,
@@ -131,20 +137,37 @@ fn beta_regression_fits_with_positive_slope() {
     );
 }
 
-/// Clean, noise-free, steep monotone mean `mu = logistic(2.4 x)` over
-/// `x ∈ [-1.5, 1.5]`. Because `y = mu` exactly, every row with `x > 0` has both
-/// `y > 0.5` and a strictly larger logit than every row with `x < 0`: this is
-/// the *maximal* `order_separated` trigger. A binomial-style separation guard
-/// flags it as perfectly separated; a correctly family-gated guard recognizes
-/// that a continuous Beta response is not a binary outcome and lets it fit.
+/// Clean, steep monotone mean `mu = logistic(2.4 x)` over `x ∈ [-1.5, 1.5]`,
+/// observed with a bounded deterministic logit-scale wobble
+/// `y = logistic(2.4 x + 0.01·sin(7 x))`.
+///
+/// The wobble is the response's dispersion around the smooth mean. A Beta
+/// precision is only finite when such dispersion exists: with `y = mu` exactly
+/// the precision has no finite fixed point (φ = ∞), the post-REML (β, φ)
+/// alternation diverges and the fit refuses. The wobble is far too small and
+/// too fast for the smooth to absorb it, so the moment estimate settles at a
+/// large but finite φ.
+///
+/// Order separation is preserved by construction: the grid never visits
+/// `x = 0`, its smallest `|x|` is `3/199/2 ≈ 0.0075`, so `|2.4 x| ≥ 0.018 >
+/// 0.01 ≥ |wobble|` and `y > 0.5 ⇔ x > 0 ⇔ η > 0` for every row. Every row
+/// with `x > 0` has both `y > 0.5` and a strictly larger logit than every row
+/// with `x < 0`: this is still the *maximal* `order_separated` trigger. A
+/// binomial-style separation guard flags it as perfectly separated; a
+/// correctly family-gated guard recognizes that a continuous Beta response is
+/// not a binary outcome and lets it fit.
 fn make_monotone_dataset() -> (Vec<f64>, Vec<f64>) {
     const N: usize = 200;
     let mut x = Vec::with_capacity(N);
     let mut y = Vec::with_capacity(N);
     for i in 0..N {
         let xi = -1.5 + 3.0 * (i as f64) / ((N - 1) as f64);
-        let mu = logistic(2.4 * xi);
-        let yi = mu.clamp(1.0e-4, 1.0 - 1.0e-4);
+        let wobble = 0.01 * (7.0 * xi).sin();
+        let yi = logistic(2.4 * xi + wobble).clamp(1.0e-4, 1.0 - 1.0e-4);
+        assert!(
+            (yi > 0.5) == (xi > 0.0),
+            "fixture invariant: order separation must hold at x={xi}"
+        );
         x.push(xi);
         y.push(yi);
     }

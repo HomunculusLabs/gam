@@ -2158,12 +2158,56 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             // φ moved materially: re-solve β at the corrected φ, warm-started at
             // the converged β, so the mean is refit under the better precision
             // and the final working state is rebuilt consistently.
-            working_summary = runworking_model_pirls(
+            //
+            // Every pass of the alternation must land AT A MINIMUM of the mean
+            // objective. The moment estimate reads the Pearson residuals of
+            // whatever η the re-solve returned; continuing from a mean that
+            // exhausted its step search or its iteration budget feeds the next
+            // pass a precision that no minimum produced. Measured on a
+            // noise-free logistic response (`beta_regression_fits_clean_
+            // monotone_separation_prone` before its fixture carried
+            // dispersion): φ ran 1.1 → 6.4 → 50 → 1.6e3 → 1.4e6 → 1.0e12, the
+            // re-solve at 1.0e12 ended `LM step search exhausted`, the loop still
+            // refreshed φ from that η to 5.1e23, and the fit died inside the next
+            // P-IRLS with `did not converge within 300 iterations, gradient
+            // 9.5e12` — a message about the wrong object. A fixed λ rescales
+            // nothing when φ grows, so the effective penalty λ/φ vanishes, the
+            // mean interpolates, the residuals collapse and φ has no finite
+            // fixed point: that is the fact to report, at the pass where it
+            // became measurable.
+            //
+            // `StalledAtValidMinimum` continues the alternation: it is the
+            // objective-resolution exit of a mean that IS at its minimum (the
+            // deviance is ∝ φ, so at a large finite φ the strict certificate is
+            // routinely out of the objective's floating-point reach), and the
+            // same fixture with dispersion reached φ ≈ 1.5e5 through exactly
+            // such passes before its next pass converged. Whether the FINAL
+            // mean is certified is fit assembly's own gate, unchanged here.
+            let deviance_at_prior = working_summary.state.deviance;
+            let refused = |inner_status: String| {
+                EstimationError::BetaPrecisionRefinementDidNotConverge {
+                    passes: refresh_iter + 1,
+                    prior_phi,
+                    refreshed_phi,
+                    deviance: deviance_at_prior,
+                    inner_status,
+                }
+            };
+            working_summary = match runworking_model_pirls(
                 &mut working_model,
                 working_summary.beta.clone(),
                 &options,
                 Some(&mut iteration_logger),
-            )?;
+            ) {
+                Ok(summary) => summary,
+                Err(inner) => return Err(refused(inner.to_string())),
+            };
+            if !matches!(
+                working_summary.status,
+                PirlsStatus::Converged | PirlsStatus::StalledAtValidMinimum
+            ) {
+                return Err(refused(working_summary.status.label().to_string()));
+            }
         }
     }
 

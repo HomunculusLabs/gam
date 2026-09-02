@@ -570,6 +570,11 @@ fn estimation_error_to_pyerr_with_message(err: &EstimationError, message: String
         EstimationError::NegativeBinomialAlternationDidNotConverge { .. } => {
             RemlConvergenceError::new_err(message)
         }
+        // The post-REML (beta, phi) alternation is an inner mean re-solve at a
+        // refreshed precision; its failure is a P-IRLS certification failure.
+        EstimationError::BetaPrecisionRefinementDidNotConverge { .. } => {
+            PirlsConvergenceError::new_err(message)
+        }
         EstimationError::FitDidNotConverge { .. } => RemlConvergenceError::new_err(message),
         EstimationError::PerfectSeparationDetected { .. } => {
             PerfectSeparationError::new_err(message)
