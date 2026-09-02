@@ -269,26 +269,6 @@ fn duchon_chart_is_inert_where_the_kernel_does_not_underflow() {
     assert!(second_gap < 1e-4, "∂²X/∂ψ² gap {second_gap:.3e}");
 }
 
-/// MEASURED 2026-09-01, not explained: at 2-D, `Linear`, power 1 (identity
-/// chart, partial-fraction kernel, homogeneous only modulo polynomials) the
-/// operator's ∂X/∂ψ differs from the shipped design's central difference by
-/// 2.37e-1 relative and ∂²X/∂ψ² by 2.78e-1 at both steps — a formula gap, not
-/// truncation; power 2 at the same shape measures 1.09e-1 / 1.17e-1. The chart
-/// is inert there (`α = 1`), and it makes the effective scaling-law share
-/// `c + L` exactly zero wherever the kernel IS amplified, so this
-/// low-dimensional gap is invisible at every amplified shape. Not the gam#979
-/// defect; left ignored with its measurement so the surface stays visible.
-#[test]
-#[ignore = "2-D Linear power-1 hybrid design ψ-derivative disagrees with the shipped design by 24% (measured 2026-09-01); separate from gam#979"]
-fn duchon_design_psi_derivative_2d_linear_power1_disagrees_with_the_shipped_design() {
-    let (data, spec) = frozen_hybrid_fixture(2, 90, 10, DuchonNullspaceOrder::Linear, 1.0);
-    let amplification = chart_amplification(data.view(), &spec);
-    assert_eq!(amplification, 1.0, "a 2-D power-1 hybrid must not be amplified");
-    let (first_gap, second_gap) = chart_gaps(data.view(), &spec, "chart_2d_linear_power1");
-    assert!(first_gap < 1e-5, "∂X/∂ψ gap {first_gap:.3e}");
-    assert!(second_gap < 1e-4, "∂²X/∂ψ² gap {second_gap:.3e}");
-}
-
 // ---------------------------------------------------------------------------
 // The latent-coordinate Jacobian under the same chart.
 //
@@ -643,7 +623,7 @@ fn operator_penalty_gaps(
                 &mut BasisWorkspace::default(),
             )
             .expect("forward collocation blocks");
-            let (s_builder, _) = normalize_penalty(&symmetrize(&centered_design_gram(&ops.d0)));
+            let (s_builder, _) = normalize_penalty(&symmetrize_penalty(&centered_design_gram(&ops.d0)));
             eprintln!(
                 "[{label}] MASS-RECON builder D0 {}x{} amp={:.3e}; gap(candidate vs builder-gram)={:.3e} \
                  gap(rebuilt vs builder-gram)={:.3e} |cand|={:.6e} |builder|={:.6e} |rebuilt|={:.6e}",

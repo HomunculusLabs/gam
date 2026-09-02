@@ -64,8 +64,8 @@ pub(crate) struct SelectedWiggleBasis {
 // evaluation point never moves across that boundary.
 pub(crate) use gam_terms::basis::monotone_warp_knots_from_seed;
 
-/// The highest derivative of a composed warp's basis that the inner objective's
-/// own VALUE reads (gam#2695).
+/// The highest derivative of a composed warp's basis that must be continuous
+/// for the optimized objective to be continuously differentiable (gam#2695).
 ///
 /// A composed warp is not evaluated on fixed data. It sits on the model's index,
 /// `q = q₀ + Σ_j βw_j·I_j(q₀)` with `q₀ = −η_t·e^{−η_ls}`, so `q₀` moves with β
@@ -144,11 +144,11 @@ pub(crate) use gam_terms::basis::monotone_warp_knots_from_seed;
 /// with the measurement that decides it — `∇Φ` read across an EVENT row's knot
 /// crossing at `composed_warp_minimum_degree()`, the arm the existing `H`- and
 /// `Φ`-reading pins do not have.
-pub(crate) const COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER: usize = 3;
+pub(crate) const COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER: usize = 4;
 
 /// The smallest public degree at which a composed warp's basis is continuous to
-/// [`COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER`], hence the smallest degree
-/// at which the inner objective is a function at all.
+/// [`COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER`], hence the
+/// smallest degree at which the inner objective is continuously differentiable.
 ///
 /// A degree-`d` I-spline is `C^{d−1}` at a knot of multiplicity one, so the
 /// requirement `d − 1 ≥ order` is what this returns. Nothing is chosen: the
@@ -166,7 +166,7 @@ pub(crate) const COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER: usize = 3;
 /// metadata all carry, and the raise is logged rather than silent.
 #[inline]
 pub(crate) fn composed_warp_minimum_degree() -> usize {
-    COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER + 1
+    COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER + 1
 }
 
 #[inline]
@@ -658,8 +658,8 @@ pub(crate) fn select_wiggle_basis_from_seed_with_knots(
     derivative_orders.extend(extra_orders);
     // REALISED DEGREE (gam#2695). A simple-ended warp is one the inner objective
     // COMPOSES rather than evaluates, so its basis has to be continuous to
-    // `COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER` for that objective to be a
-    // function of β at all. The floor is tied to `Simple` ends and not applied to
+    // `COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER` for that
+    // objective to be C¹ in β. The floor is tied to `Simple` ends and not applied to
     // `Clamped` ones deliberately: at a boundary knot of multiplicity `degree + 1`
     // the ramp is `C^{-1}` at EVERY degree, so raising the degree there buys
     // nothing — a clamped composed warp becomes admissible by moving its ends
@@ -678,7 +678,7 @@ pub(crate) fn select_wiggle_basis_from_seed_with_knots(
                      I-spline is only C^(d-1) at a simple knot — so degree {} leaves the \
                      objective discontinuous across every knot the index crosses (gam#2695)",
                     cfg.degree,
-                    COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER,
+                    COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER,
                     cfg.degree,
                 );
                 minimum
@@ -1282,7 +1282,7 @@ mod composed_warp_degree_2695_tests {
     fn the_minimum_degree_is_the_objective_order_plus_the_spline_loss() {
         assert_eq!(
             composed_warp_minimum_degree(),
-            COMPOSED_WARP_OBJECTIVE_BASIS_DERIVATIVE_ORDER + 1,
+            COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER + 1,
             "a degree-d I-spline is C^(d-1) at a simple knot, so continuity to order k \
              needs d >= k + 1"
         );

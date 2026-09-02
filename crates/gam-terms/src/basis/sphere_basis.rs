@@ -1815,7 +1815,7 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     // returned zero ψ-jets, and the analytic κ-gradient silently dropped the
     // mass and tension penalties — measured as `|∂S̃/∂ψ| = 0` against central
     // differences of 0.73 and 0.87 (`duchon_hybrid_psi_components_*_16d`).
-    let kernel_amplification = duchon_kernel_amplification(
+    let kernel_chart = duchon_kernel_chart(
         centers,
         Some(length_scale),
         p_order,
@@ -1825,7 +1825,36 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
         Some(&coeffs),
         None,
     );
+    let kernel_amplification = kernel_chart.amplification;
     let amp2 = kernel_amplification * kernel_amplification;
+    // The amplitude multiplies the KERNEL block only. With a polynomial block
+    // whose centered columns are non-zero (`Linear` and above) the quadrature
+    // Gram `[α·K·Z | P]ᵀ[α·K·Z | P]` is not a uniform multiple of a
+    // ψ-independent matrix, so normalization does not remove `α(ψ)`'s own
+    // motion and the kernel block's jets must carry the chart's log-jets
+    // `L = ∂ln α/∂ψ`, `Λ = ∂²ln α/∂ψ²` exactly as the design operator does:
+    // `(αK)_ψ = α(K_ψ + L K)`, `(αK)_ψψ = α(K_ψψ + 2L K_ψ + (Λ + L²) K)`.
+    // (Constant-only null space: the centered constant column is zero, the
+    // Gram IS a uniform multiple, and `L`, `Λ` drop out — measured at 16-D
+    // order 0 as a 1e-6 match with and without them; at 16-D `Linear` the
+    // mass jet was 7× off without them.)
+    let (chart_first, chart_second) = match design_chart_jets(
+        kernel_chart.design_chart(),
+        centers,
+        None,
+        &RadialScalarKind::Duchon {
+            length_scale,
+            p_order,
+            s_order,
+            dim,
+            coeffs: coeffs.clone(),
+        },
+        false,
+        duchon_scaling_exponent(p_order, s_order, dim),
+    )? {
+        Some(jets) => (jets.first[0], jets.second[[0, 0]]),
+        None => (0.0, 0.0),
+    };
     // #1355: assemble the operator-penalty ψ-derivatives in the SAME rotated
     // radial basis (`K·Z·V`) the forward build's operator collocation matrices
     // use (`duchon_operator_penalty_candidates` threads `radial_reparam` into
@@ -2028,18 +2057,24 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     for partial in &partial_blocks {
         raw.add_assign(partial);
     }
-    for block in [
-        &mut raw.d0,
-        &mut raw.d1,
-        &mut raw.d2,
-        &mut raw.d0_psi,
-        &mut raw.d1_psi,
-        &mut raw.d2_psi,
-        &mut raw.d0_psi_psi,
-        &mut raw.d1_psi_psi,
-        &mut raw.d2_psi_psi,
+    // Chart the kernel-only raw blocks (second jet first: it reads the
+    // un-charted first jet and value; then the first jet reads the value).
+    for (value, first, second) in [
+        (&mut raw.d0, &mut raw.d0_psi, &mut raw.d0_psi_psi),
+        (&mut raw.d1, &mut raw.d1_psi, &mut raw.d1_psi_psi),
+        (&mut raw.d2, &mut raw.d2_psi, &mut raw.d2_psi_psi),
     ] {
-        block.mapv_inplace(|value| value * kernel_amplification);
+        let curvature = chart_second + chart_first * chart_first;
+        ndarray::Zip::from(second.view_mut())
+            .and(first.view())
+            .and(value.view())
+            .for_each(|s2, &s1, &s0| {
+                *s2 = kernel_amplification * (*s2 + 2.0 * chart_first * s1 + curvature * s0);
+            });
+        ndarray::Zip::from(first.view_mut())
+            .and(value.view())
+            .for_each(|s1, &s0| *s1 = kernel_amplification * (*s1 + chart_first * s0));
+        value.mapv_inplace(|v| v * kernel_amplification);
     }
     let d0_raw = raw.d0;
     let d1_raw = raw.d1;

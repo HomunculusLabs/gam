@@ -2876,7 +2876,7 @@ impl ImplicitDesignPsiDerivative {
                     let base = i * self.n_knots;
                     for j in 0..self.n_knots {
                         let idx = base + j;
-                        let _ = st.fill_s_buf(i, j, &mut sb);
+                        st.fill_s_buf(i, j, &mut sb);
                         raw[[local, j]] =
                             deriv_fn(cache.phi[idx], cache.q[idx], cache.t[idx], &sb, idx);
                     }
@@ -3244,7 +3244,7 @@ pub(crate) struct DesignChartJets {
 /// direct scalar ψ carrier instead, because the finite-part representative can
 /// have non-scaling ψ derivatives even at a center collision. Thus the chart
 /// and every data/center pair consume the same derivative authority.
-fn design_chart_jets(
+pub(crate) fn design_chart_jets(
     chart: DesignKernelChart,
     centers: ArrayView2<'_, f64>,
     eta: Option<&[f64]>,
