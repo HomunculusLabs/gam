@@ -2876,7 +2876,7 @@ impl ImplicitDesignPsiDerivative {
                     let base = i * self.n_knots;
                     for j in 0..self.n_knots {
                         let idx = base + j;
-                        st.fill_s_buf(i, j, &mut sb);
+                        let _ = st.fill_s_buf(i, j, &mut sb);
                         raw[[local, j]] =
                             deriv_fn(cache.phi[idx], cache.q[idx], cache.t[idx], &sb, idx);
                     }
@@ -3239,11 +3239,11 @@ pub(crate) struct DesignChartJets {
 /// ```
 ///
 /// where `K_a`, `K_ab` are the operator's own first/second kernel values at
-/// the reference pair under the raw share `c`. At a center collision
-/// (`r* = 0`, the reference of every positive-definite hybrid) every axis
-/// component vanishes, so the jets reduce to `−c` and `0`: the chart exactly
-/// cancels the `κ^δ` scaling-law prefactor, and the charted kernel is the
-/// pure shape function.
+/// the reference pair under the raw share `c`. Homogeneous kernels use the
+/// geometric component `r²`; low-dimensional partial-fraction Duchon uses its
+/// direct scalar ψ carrier instead, because the finite-part representative can
+/// have non-scaling ψ derivatives even at a center collision. Thus the chart
+/// and every data/center pair consume the same derivative authority.
 fn design_chart_jets(
     chart: DesignKernelChart,
     centers: ArrayView2<'_, f64>,
@@ -3270,14 +3270,23 @@ fn design_chart_jets(
     }
     let r2: f64 = components.iter().sum();
     let r = r2.sqrt();
-    let (phi, q, t) = radial_kind.eval_design_triplet(r)?;
+    let (phi, q, t, scalar_component) = if per_axis {
+        let (phi, q, t) = radial_kind.eval_design_triplet(r)?;
+        (phi, q, t, r2)
+    } else {
+        radial_kind.eval_scalar_total_psi_carriers(r)?
+    };
     if !(phi.is_finite() && phi != 0.0) {
         return Err(BasisError::InvalidInput(format!(
             "design kernel chart reference pair ({i}, {j}) at r={r:.6e} has kernel value {phi:e}; \
              the chart's log-derivative is undefined there"
         )));
     }
-    let s_axes: Vec<f64> = if per_axis { components } else { vec![r2] };
+    let s_axes: Vec<f64> = if per_axis {
+        components
+    } else {
+        vec![scalar_component]
+    };
     let n_axes = s_axes.len();
     let mut first = vec![0.0_f64; n_axes];
     for (a, &s_a) in s_axes.iter().enumerate() {
@@ -3721,15 +3730,16 @@ pub(crate) fn build_scalar_design_psi_derivatives_shared(
                             stable_euclidean_norm((0..dim).map(|a| data[[i, a]] - centers[[j, a]]));
                         (r, r * r)
                     };
-                    let triplet = if exact_scalar_carrier {
-                        radial_kind.eval_scalar_total_psi_triplet(r)
+                    let carrier_triplet = if exact_scalar_carrier {
+                        radial_kind.eval_scalar_total_psi_carriers(r)
                     } else {
-                        match profile_ref {
+                        let triplet = match profile_ref {
                             Some(profile) => profile.eval_or_exact(&radial_kind, r),
                             None => radial_kind.eval_design_triplet(r),
-                        }
+                        };
+                        triplet.map(|(phi, q, t)| (phi, q, t, scalar_component))
                     };
-                    let (phi, q, t) = match triplet {
+                    let (phi, q, t, carrier_component) = match carrier_triplet {
                         Ok(p) => p,
                         Err(e) => {
                             let mut slot = ferr.lock().unwrap_or_else(|p| p.into_inner());
@@ -3747,7 +3757,7 @@ pub(crate) fn build_scalar_design_psi_derivatives_shared(
                         *pp.add(flat) = phi;
                         *qp.add(flat) = q;
                         *tp.add(flat) = t;
-                        *ap.add(flat) = scalar_component;
+                        *ap.add(flat) = carrier_component;
                     }
                 }
             }

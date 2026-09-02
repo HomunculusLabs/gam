@@ -174,27 +174,36 @@ impl RadialScalarKind {
         }
     }
 
-    /// Return radial carriers `(phi, q_psi, t_psi)` for a scalar-total
+    /// Return radial carriers `(phi, q_psi, t_psi, s_psi)` for a scalar-total
     /// `psi = log(kappa)` design derivative.
     ///
     /// The generic implicit operator realizes
     ///
     /// ```text
-    /// K_psi     = q_psi r^2 + delta K
-    /// K_psi_psi = t_psi r^4 + 2(1 + delta) q_psi r^2 + delta^2 K.
+    /// K_psi     = q_psi s_psi + delta K
+    /// K_psi_psi = t_psi s_psi^2 + 2(1 + delta) q_psi s_psi + delta^2 K.
     /// ```
     ///
     /// For kernels whose chosen representative is homogeneous, the ordinary
-    /// radial `(q, t)` are already those carriers.  Low-dimensional hybrid
-    /// Duchon uses a partial-fraction representative with logarithmic Riesz
-    /// blocks; it is homogeneous only modulo polynomials, so its carriers must
-    /// be derived from the exact psi jet of the value actually shipped.  This
-    /// single conversion lets every forward/transpose/materialization consumer
-    /// keep using the same implicit-operator algebra.
-    pub(crate) fn eval_scalar_total_psi_triplet(
+    /// radial `(q, t)` and geometric component `s_psi = r^2` are already those
+    /// carriers. Low-dimensional hybrid Duchon uses a partial-fraction
+    /// representative with logarithmic Riesz blocks; it is homogeneous only
+    /// modulo polynomials, so its carriers must be derived from the exact psi
+    /// value jet actually shipped.
+    ///
+    /// That distinction is essential at a data/center collision. There the
+    /// finite-part representative can have `K_psi(0) != delta K(0)`, so no
+    /// finite `q_psi` multiplied by the geometric `r^2 = 0` can represent the
+    /// derivative. Scalar-total derivatives have no per-axis geometry to
+    /// preserve, so the partial-fraction route uses the exact algebraic carrier
+    /// `s_psi = 1` and solves for `(q_psi, t_psi)` from `(K, K_psi,
+    /// K_psipsi)`. This represents the direct jet without a singular division,
+    /// at collisions and away from them, while leaving every per-axis route on
+    /// its genuine geometric components.
+    pub(crate) fn eval_scalar_total_psi_carriers(
         &self,
         r: f64,
-    ) -> Result<(f64, f64, f64), BasisError> {
+    ) -> Result<(f64, f64, f64, f64), BasisError> {
         let ordinary = self.eval_design_triplet(r)?;
         let RadialScalarKind::Duchon {
             length_scale,
@@ -204,10 +213,10 @@ impl RadialScalarKind {
             coeffs,
         } = self
         else {
-            return Ok(ordinary);
+            return Ok((ordinary.0, ordinary.1, ordinary.2, r * r));
         };
-        if duchon_hybrid_stable_integral_applies(*p_order, *s_order, *dim) || r == 0.0 {
-            return Ok(ordinary);
+        if duchon_hybrid_stable_integral_applies(*p_order, *s_order, *dim) {
+            return Ok((ordinary.0, ordinary.1, ordinary.2, r * r));
         }
         let (value, first, second) = duchon_partial_fraction_kernel_psi_triplet(
             r,
@@ -225,18 +234,31 @@ impl RadialScalarKind {
             );
         }
         let delta = duchon_scaling_exponent(*p_order, *s_order, *dim);
-        let r2 = r * r;
-        let q_psi = (first - delta * value) / r2;
+        let carrier = 1.0;
+        let q_psi = first - delta * value;
         let t_psi = (second
-            - 2.0 * (1.0 + delta) * q_psi * r2
+            - 2.0 * (1.0 + delta) * q_psi * carrier
             - delta * delta * value)
-            / (r2 * r2);
+            / (carrier * carrier);
         if !(q_psi.is_finite() && t_psi.is_finite()) {
             crate::bail_invalid_basis!(
                 "non-finite Duchon scalar psi carriers at r={r}: q_psi={q_psi}, t_psi={t_psi}"
             );
         }
-        Ok((value, q_psi, t_psi))
+        Ok((value, q_psi, t_psi, carrier))
+    }
+
+    #[inline]
+    pub(crate) fn scalar_total_psi_component(&self, r_squared: f64) -> f64 {
+        match self {
+            RadialScalarKind::Duchon {
+                p_order,
+                s_order,
+                dim,
+                ..
+            } if !duchon_hybrid_stable_integral_applies(*p_order, *s_order, *dim) => 1.0,
+            _ => r_squared,
+        }
     }
 
     #[inline]
@@ -914,9 +936,11 @@ impl StreamingRadialState {
                             dim,
                             ..
                         } if !duchon_hybrid_stable_integral_applies(p_order, s_order, dim)
-                    );
+                );
                 let triplet = if exact_scalar_carrier {
-                    self.radial_kind.eval_scalar_total_psi_triplet(r)
+                    self.radial_kind
+                        .eval_scalar_total_psi_carriers(r)
+                        .map(|(phi, q, t, _)| (phi, q, t))
                 } else {
                     match profile.as_ref() {
                         Some(profile) => profile.eval_or_exact(&self.radial_kind, r),
@@ -937,7 +961,7 @@ impl StreamingRadialState {
     }
 
     #[inline]
-    pub(crate) fn fill_s_buf(&self, i: usize, j: usize, s_buf: &mut [f64]) {
+    pub(crate) fn fill_s_buf(&self, i: usize, j: usize, s_buf: &mut [f64]) -> f64 {
         match &self.axis_mode {
             StreamingAxisMode::PerAxis { metric_weights } => {
                 let dim = metric_weights.len();
@@ -949,6 +973,7 @@ impl StreamingRadialState {
                     let h = unsafe { self.data.uget((i, a)) - self.centers.uget((j, a)) };
                     s_buf[a] = metric_weights[a] * h * h;
                 }
+                s_buf.iter().sum()
             }
             StreamingAxisMode::ScalarTotal { metric_weights } => {
                 assert_eq!(s_buf.len(), 1);
@@ -961,7 +986,8 @@ impl StreamingRadialState {
                     let h = unsafe { self.data.uget((i, a)) - self.centers.uget((j, a)) };
                     r2 += metric_weights[a] * h * h;
                 }
-                s_buf[0] = r2;
+                s_buf[0] = self.radial_kind.scalar_total_psi_component(r2);
+                r2
             }
         }
     }
@@ -977,15 +1003,16 @@ impl StreamingRadialState {
         s_buf: &mut [f64],
     ) -> Result<(f64, f64, f64), BasisError> {
         assert!(i < self.data.nrows() && j < self.centers.nrows());
-        self.fill_s_buf(i, j, s_buf);
+        let r2 = self.fill_s_buf(i, j, s_buf);
         match &self.axis_mode {
-            StreamingAxisMode::PerAxis { metric_weights } => {
-                let r2: f64 = (0..metric_weights.len()).map(|a| s_buf[a]).sum();
-                self.radial_kind.eval_design_triplet(r2.sqrt())
-            }
+            StreamingAxisMode::PerAxis { .. } => self.radial_kind.eval_design_triplet(r2.sqrt()),
             StreamingAxisMode::ScalarTotal { .. } => {
-                let r2 = s_buf[0];
-                self.radial_kind.eval_scalar_total_psi_triplet(r2.sqrt())
+                self.radial_kind
+                    .eval_scalar_total_psi_carriers(r2.sqrt())
+                    .map(|(phi, q, t, carrier)| {
+                        s_buf[0] = carrier;
+                        (phi, q, t)
+                    })
             }
         }
     }
