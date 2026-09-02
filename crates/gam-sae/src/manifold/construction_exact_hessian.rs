@@ -1620,7 +1620,7 @@ impl SaeManifoldTerm {
                 self.n_obs(),
             ));
         }
-        let total_t = row_dims.iter().sum();
+        let total_t: usize = row_dims.iter().sum();
         let mut e_diag = Array1::<f64>::zeros(total_t);
         if self.k_atoms() == 0 {
             return Ok(e_diag);
