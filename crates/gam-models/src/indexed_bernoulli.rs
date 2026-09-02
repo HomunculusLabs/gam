@@ -406,14 +406,11 @@ mod tests {
 
     #[test]
     fn sparse_event_overrides_equal_the_dense_response_likelihood() {
-        let events = IndexedCellSet::from_cells(3, 2, vec![(0, 1), (2, 0)])
-            .expect("event cells");
         let sparse = OwnedCellValues::constant_with_overrides(
             3,
             2,
             0.0,
-            events,
-            vec![1.0, 1.0],
+            vec![(0, 1, 1.0), (2, 0, 1.0)],
         )
         .expect("sparse response");
         let dense = OwnedCellValues::dense(ndarray::array![[0.0, 1.0], [0.0, 0.0], [1.0, 0.0]]);

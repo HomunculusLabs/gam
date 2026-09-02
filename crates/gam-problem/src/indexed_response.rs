@@ -288,17 +288,27 @@ impl OwnedCellValues {
         n_rows: usize,
         n_outputs: usize,
         default: f64,
-        cells: IndexedCellSet,
-        values: Vec<f64>,
+        mut overrides: Vec<(usize, usize, f64)>,
     ) -> Result<Self, IndexedResponseError> {
-        cells.validate_shape(n_rows, n_outputs)?;
-        if values.len() != cells.len() {
+        overrides.sort_unstable_by_key(|&(row, output, _)| (row, output));
+        if let Some(pair) = overrides
+            .windows(2)
+            .find(|pair| (pair[0].0, pair[0].1) == (pair[1].0, pair[1].1))
+        {
             return Err(IndexedResponseError::new(format!(
-                "indexed value override count {} does not match override cell count {}",
-                values.len(),
-                cells.len(),
+                "indexed value cell ({}, {}) was overridden more than once",
+                pair[0].0, pair[0].1,
             )));
         }
+        let cells = IndexedCellSet::from_cells(
+            n_rows,
+            n_outputs,
+            overrides
+                .iter()
+                .map(|&(row, output, _)| (row, output))
+                .collect(),
+        )?;
+        let values = overrides.into_iter().map(|(_, _, value)| value).collect();
         Ok(Self::ConstantWithOverrides {
             n_rows,
             n_outputs,
@@ -696,24 +706,32 @@ mod tests {
 
     #[test]
     fn constant_values_with_sparse_overrides_preserve_row_major_identity() {
-        let overrides = IndexedCellSet::from_cells(3, 4, vec![(2, 3), (0, 1), (2, 0)])
-            .expect("valid override cells");
         let values = OwnedCellValues::constant_with_overrides(
             3,
             4,
             0.0,
-            overrides,
-            vec![5.0, 7.0, 9.0],
+            vec![(2, 3, 9.0), (0, 1, 5.0), (2, 0, 7.0)],
         )
         .expect("valid sparse value field");
 
-        // from_cells canonicalizes coordinates to (0,1), (2,0), (2,3), and
-        // the caller's values are defined in that same canonical storage order.
+        // Coordinates and values are canonicalized together.
         assert_eq!(values.value(0, 1), Some(5.0));
         assert_eq!(values.value(2, 0), Some(7.0));
         assert_eq!(values.value(2, 3), Some(9.0));
         assert_eq!(values.value(1, 2), Some(0.0));
         assert_eq!(values.value(3, 0), None);
+    }
+
+    #[test]
+    fn sparse_value_overrides_reject_duplicate_coordinates() {
+        let error = OwnedCellValues::constant_with_overrides(
+            2,
+            3,
+            0.0,
+            vec![(1, 2, 4.0), (1, 2, 9.0)],
+        )
+        .expect_err("duplicate override coordinates must fail");
+        assert!(error.reason().contains("overridden more than once"));
     }
 
     #[test]
