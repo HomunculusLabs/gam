@@ -304,7 +304,7 @@ fn direction_information(
 /// far below roundoff, and it extends to where the integrand has fallen
 /// sixty nats below its peak, which is `e⁻⁶⁰` of it. The sums are formed in
 /// log space.
-pub(crate) fn quartic_moments(mu: f64, information: f64, lambda: f64) -> (f64, f64, f64) {
+pub fn quartic_moments(mu: f64, information: f64, lambda: f64) -> (f64, f64, f64) {
     let a = mu - lambda;
     let j = information;
     let g = |t: f64| 0.5 * a * t * t - 0.25 * j * t * t * t * t;
@@ -344,7 +344,7 @@ pub(crate) fn quartic_moments(mu: f64, information: f64, lambda: f64) -> (f64, f
 /// The empirical-Bayes prior of a new atom's loadings and the decision it
 /// carries.
 #[derive(Clone, Debug)]
-pub(crate) struct RidgeProfile {
+pub struct RidgeProfile {
     /// `ln λ̂`: the precision of the isotropic Gaussian prior that maximises
     /// the marginal likelihood under the quartic model; `+∞` when no finite
     /// prior raises it.
@@ -371,7 +371,7 @@ pub(crate) struct RidgeProfile {
 /// `d²c/dλ² = Σ_i [1/(2λ²) − ¼ Var_i(t²)]`, from the Laplace-scale start
 /// `λ = J_max / μ_max`. A profile with no direction of positive score has no
 /// finite minimiser and is refused without a search.
-pub(crate) fn empirical_bayes_ridge(directions: &[(f64, f64)]) -> RidgeProfile {
+pub fn empirical_bayes_ridge(directions: &[(f64, f64)]) -> RidgeProfile {
     let refused = RidgeProfile {
         log_lambda: f64::INFINITY,
         gain: 0.0,
