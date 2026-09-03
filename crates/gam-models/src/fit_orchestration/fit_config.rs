@@ -124,9 +124,6 @@ impl FitConfig {
             return Err("persistent_warm_start_root must not be empty".to_string());
         }
 
-        if !self.ridge_lambda.is_finite() || self.ridge_lambda < 0.0 {
-            return Err("ridge_lambda must be finite and >= 0".to_string());
-        }
         // Normalize the survival time-anchor override through its one validator,
         // so the CLI flag, a `--request` document, a `gamfit.fit` kwarg and a
         // direct Rust caller are all held to the same contract and report the
@@ -195,14 +192,6 @@ mod tests {
 
     #[test]
     fn resolve_rejects_invalid_shared_fields() {
-        assert!(
-            FitConfig {
-                ridge_lambda: f64::NAN,
-                ..FitConfig::default()
-            }
-            .resolve()
-            .is_err()
-        );
         assert!(
             FitConfig {
                 outer_max_iter: Some(0),

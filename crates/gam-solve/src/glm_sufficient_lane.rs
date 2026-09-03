@@ -330,12 +330,13 @@ impl FrozenWeightGramTensor {
         if w_trial.len() != self.frozen_w.len() || !(rtol.is_finite() && rtol > 0.0) {
             return false;
         }
-        // Relative max-norm drift ‖w_trial − w‖_∞ / (‖w‖_∞ + tiny).
+        // Relative max-norm drift ‖w_trial − w‖_∞ ≤ rtol·‖w‖_∞. An all-zero
+        // frozen weight vector has no scale, so only an exactly equal trial
+        // vector is "within" it — which is what the unfloored comparison says.
         let w_scale = self
             .frozen_w
             .iter()
-            .fold(0.0_f64, |acc, &w| acc.max(w.abs()))
-            .max(1e-300);
+            .fold(0.0_f64, |acc, &w| acc.max(w.abs()));
         for (&wt, &w0) in w_trial.iter().zip(self.frozen_w.iter()) {
             if !wt.is_finite() {
                 return false;

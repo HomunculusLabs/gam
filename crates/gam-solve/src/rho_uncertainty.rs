@@ -285,7 +285,9 @@ impl DeterministicNormal {
             return value;
         }
         mix_u64(&mut self.state, coord as u64);
-        let u1 = self.uniform().max(1e-300);
+        // `uniform` returns `(k + ½)/2⁵³` for a 53-bit `k`, so `u1 ∈ [2⁻⁵⁴, 1 − 2⁻⁵⁴]`
+        // and `ln(u1)` is finite by construction; no floor is needed.
+        let u1 = self.uniform();
         let u2 = self.uniform();
         let radius = (-2.0 * u1.ln()).sqrt();
         let angle = 2.0 * std::f64::consts::PI * u2;

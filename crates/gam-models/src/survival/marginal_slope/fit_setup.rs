@@ -52,12 +52,14 @@ pub(crate) fn build_time_blockspec(
             col.mapv(|v| v - mean)
         };
         let r = centered(ref_col);
-        let rn = r.dot(&r).sqrt().max(1e-300);
+        let rn = r.dot(&r).sqrt();
         let cosines: Vec<String> = (0..p_cols)
             .map(|j| {
                 let c = centered(j);
                 let cn = c.dot(&c).sqrt();
-                if cn <= 1e-300 {
+                // A centered column with no mass is constant; a cosine against
+                // it (or against a constant reference) is not a number.
+                if cn == 0.0 || rn == 0.0 {
                     "const".to_string()
                 } else {
                     format!("{:.4}", (c.dot(&r) / (cn * rn)).abs())

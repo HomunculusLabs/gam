@@ -697,8 +697,15 @@ impl BernoulliMarginalSlopePredictor {
         let k = top_k.min(distances.len());
         let mut mixture = Vec::with_capacity(k);
         let mut total = 0.0;
+        // Kernel weights relative to the nearest center (`distances` is sorted
+        // ascending): the nearest weight is exactly 1, so the mixture never
+        // underflows as a whole, and a center far enough to underflow relative
+        // to it honestly contributes nothing — the log-sum-exp shift, not a
+        // `1e-300` floor that would turn an all-underflow mixture into a
+        // uniform one.
+        let d2_nearest = distances.first().map_or(0.0, |&(_, d2)| d2);
         for &(idx, d2) in distances.iter().take(k) {
-            let weight = (-0.5 * d2 / bw2).exp().max(1e-300);
+            let weight = (-0.5 * (d2 - d2_nearest) / bw2).exp();
             mixture.push((idx, weight));
             total += weight;
         }

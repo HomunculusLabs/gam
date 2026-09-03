@@ -1732,12 +1732,7 @@ pub(crate) fn duchon_kernel_radial_triplet(
             polyharmonic_kernel_triplet(r, m, k_dim)?
         }
         Some(length_scale) => {
-            if !length_scale.is_finite() || length_scale <= 0.0 {
-                crate::bail_invalid_basis!(
-                    "Duchon hybrid length_scale must be finite and positive"
-                );
-            }
-            let kappa = 1.0 / length_scale.max(1e-300);
+            let kappa = duchon_inverse_length_scale(length_scale, "Duchon kernel radial triplet")?;
             let coeffs_local;
             let coeffs_ref = match coeffs {
                 Some(c) => c,
@@ -2718,7 +2713,7 @@ pub fn operator_penalty_candidates_closed_form(
     polynomial_block_cols: usize,
     outer_identifiability: Option<&Array2<f64>>,
 ) -> Result<Vec<PenaltyCandidate>, BasisError> {
-    let kappa = 1.0 / length_scale.max(1e-300);
+    let kappa = duchon_inverse_length_scale(length_scale, "Duchon operator penalty candidates")?;
     let amp2 = kernel_amplification * kernel_amplification;
 
     // Per-q Duchon convergence regime: closed-form Lebesgue kernel matrix is

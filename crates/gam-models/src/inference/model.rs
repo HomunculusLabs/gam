@@ -586,8 +586,6 @@ pub struct FittedModelPayload {
     #[serde(default)]
     pub survival_time_anchor: Option<f64>,
     #[serde(default)]
-    pub survivalridge_lambda: Option<f64>,
-    #[serde(default)]
     pub survival_likelihood: Option<String>,
     /// Exact location-scale topology. This field intentionally has no serde
     /// default: every v11 artifact must state `null` for non-location-scale
@@ -929,7 +927,6 @@ impl FittedModelPayload {
             survival_time_keep_cols: None,
             survival_time_smooth_lambda: None,
             survival_time_anchor: None,
-            survivalridge_lambda: None,
             survival_likelihood: None,
             survival_location_scale_structure: None,
             survival_beta_time: None,
@@ -5154,7 +5151,6 @@ impl FittedModel {
                 self.survival_time_smooth_lambda,
             ),
             ("survival_time_anchor", self.survival_time_anchor),
-            ("survivalridge_lambda", self.survivalridge_lambda),
         ] {
             if let Some(v) = opt {
                 ensure_finite_scalar(name, v).map_err(corrupt)?;

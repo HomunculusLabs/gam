@@ -153,7 +153,6 @@ pub struct SurvivalTransformationTermSpec {
     pub time_build: crate::survival::SurvivalTimeBuildOutput,
     pub timewiggle: Option<LinkWiggleFormulaSpec>,
     pub weibull_seed: Option<(f64, f64)>,
-    pub ridge_lambda: f64,
     pub penalty_block_gamma_priors: Vec<(String, f64, f64)>,
 }
 pub struct BernoulliMarginalSlopeFitRequest<'a> {
@@ -619,7 +618,6 @@ pub struct FitConfig {
     /// optimizer's REML-selected local weights can over-regularize small
     /// high-yield spatial signals.
     pub adaptive_regularization: Option<bool>,
-    pub ridge_lambda: f64,
 
     /// Route the fit through the transformation-normal family.  When set, the
     /// formula terms are treated as the covariate side of the transformation
@@ -784,7 +782,6 @@ impl Default for FitConfig {
             scale_dimensions: false,
             spatial_optimization: SpatialLengthScaleOptimizationOptions::default(),
             adaptive_regularization: None,
-            ridge_lambda: 1e-6,
             transformation_normal: false,
             firth: false,
             outer_max_iter: None,

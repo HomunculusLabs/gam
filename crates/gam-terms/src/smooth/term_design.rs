@@ -1371,7 +1371,12 @@ fn design_cross_relative_residual(
         rhs_sumsq += rhs_chunk.iter().map(|v| v * v).sum::<f64>();
     }
     let num = cross.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let denom = (lhs_sumsq.sqrt() * rhs_sumsq.sqrt()).max(1e-300);
+    let denom = lhs_sumsq.sqrt() * rhs_sumsq.sqrt();
+    // A block with no mass overlaps nothing; say so instead of dividing by a
+    // floored zero.
+    if denom == 0.0 {
+        return Ok(0.0);
+    }
     Ok(num / denom)
 }
 
@@ -2850,7 +2855,11 @@ pub fn orthogonality_relative_residual_for_design(
     let num = cross.iter().map(|v| v * v).sum::<f64>().sqrt();
     let b_norm = design_frobenius_norm(design)?;
     let c_norm = constraint_matrix.iter().map(|v| v * v).sum::<f64>().sqrt();
-    let denom = (b_norm * c_norm).max(1e-300);
+    let denom = b_norm * c_norm;
+    // An empty design or an empty constraint has no overlap to measure.
+    if denom == 0.0 {
+        return Ok(0.0);
+    }
     Ok(num / denom)
 }
 

@@ -801,7 +801,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                     survivalspec: effectivespec.clone(),
                     baseline_cfg: baseline_cfg.clone(),
                     time_basis: SavedSurvivalTimeBasis::from_build(&time_build, time_anchor),
-                    ridge_lambda: effective_config.ridge_lambda,
                     survival_likelihood_label: survival_likelihood_modename(likelihood_mode)
                         .to_string(),
                     time_parameterization: fit.fit.time_parameterization,
@@ -1131,7 +1130,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                     survivalspec: effectivespec.clone(),
                     baseline_cfg: saved_offset_baseline,
                     time_basis: SavedSurvivalTimeBasis::from_build(&time_build, time_anchor),
-                    ridge_lambda: effective_config.ridge_lambda,
                     survival_likelihood_label: survival_likelihood_modename(likelihood_mode)
                         .to_string(),
                     resolved_marginalspec,
@@ -1480,7 +1478,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                     survival_event: args.event,
                     baseline_cfg: baseline_cfg.clone(),
                     time_basis: SavedSurvivalTimeBasis::from_build(&time_build, time_anchor),
-                    ridge_lambda: effective_config.ridge_lambda,
                     beta_time: fit.beta_time().to_vec(),
                     resolved_termspec,
                 },
@@ -1592,7 +1589,6 @@ fn run_canonical_survival_transformation(
                 cause_count: (cause_count > 1).then_some(cause_count),
                 baseline_cfg: result.baseline_cfg,
                 time_basis: result.time_basis,
-                ridge_lambda: fit_config.ridge_lambda,
                 survival_likelihood_label: survival_likelihood_modename(result.likelihood_mode)
                     .to_string(),
                 resolved_termspec: result.resolvedspec,

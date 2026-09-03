@@ -260,8 +260,15 @@ fn thomas_solve_multi(
     // Forward sweep.
     let mut c_prime = vec![0.0f64; m]; // modified super-diagonal
     let mut d_prime = Array2::<f64>::zeros((m, cols));
+    // A pivot is singular when it is not distinguishable from zero by the
+    // arithmetic that produced it: row 0's pivot is the stored diagonal itself
+    // (no arithmetic, so only an exact zero is singular), and row i's is
+    // `diag − off·c'` (a product and a subtraction, band `γ₂·(|diag| + |off·c'|)`). An absolute
+    // `1e-300` threshold passed pivots that were pure roundoff of an O(1) row
+    // and would have refused an honest O(1e-301) one (#2469).
+    let pivot_band = gam_linalg::roundoff::accumulation_growth(2);
     let denom0 = diag[0];
-    if denom0.abs() < 1e-300 {
+    if denom0 == 0.0 {
         crate::bail_invalid_basis!("singular tridiagonal pivot at row 0 in cr penalty solve");
     }
     if m > 1 {
@@ -271,8 +278,9 @@ fn thomas_solve_multi(
         d_prime[[0, col]] = rhs[[0, col]] / denom0;
     }
     for i in 1..m {
-        let denom = diag[i] - off[i - 1] * c_prime[i - 1];
-        if denom.abs() < 1e-300 {
+        let cancelled = off[i - 1] * c_prime[i - 1];
+        let denom = diag[i] - cancelled;
+        if denom.abs() <= pivot_band * (diag[i].abs() + cancelled.abs()) {
             crate::bail_invalid_basis!("singular tridiagonal pivot at row {i} in cr penalty solve");
         }
         if i < m - 1 {

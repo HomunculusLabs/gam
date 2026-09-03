@@ -650,8 +650,11 @@ impl LatentCoordDesignDerivative {
         // must carry the same amplitude; it is computed from the same
         // standardized centers, range and kernel coefficients the forward uses.
         let (radial_kind, chart_scale) = if let Some(length_scale) = length_scale {
-            let coeffs =
-                duchon_partial_fraction_coeffs(p_order, s_order, 1.0 / length_scale.max(1e-300));
+            let coeffs = duchon_partial_fraction_coeffs(
+                p_order,
+                s_order,
+                duchon_inverse_length_scale(length_scale, "implicit ψ-derivative Duchon kernel")?,
+            );
             let chart_scale = duchon_kernel_chart(
                 centers.view(),
                 Some(length_scale),

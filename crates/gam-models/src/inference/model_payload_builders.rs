@@ -1191,7 +1191,6 @@ pub struct SurvivalMarginalSlopeInputs<'a> {
     pub survivalspec: String,
     pub baseline_cfg: SurvivalBaselineConfig,
     pub time_basis: SavedSurvivalTimeBasis,
-    pub ridge_lambda: f64,
     pub survival_likelihood_label: String,
     pub resolved_marginalspec: TermCollectionSpec,
     pub resolved_slopespec: TermCollectionSpec,
@@ -1286,7 +1285,6 @@ pub fn assemble_survival_marginal_slope_payload(
     payload.survival_baseline_rate = inputs.baseline_cfg.rate;
     payload.survival_baseline_makeham = inputs.baseline_cfg.makeham;
     payload.apply_survival_time_basis(&inputs.time_basis);
-    payload.survivalridge_lambda = Some(inputs.ridge_lambda);
     payload.survival_likelihood = Some(inputs.survival_likelihood_label);
     payload.survival_distribution = Some(ResidualDistribution::Gaussian);
     payload.link = Some(InverseLink::Standard(StandardLink::Probit));
@@ -1387,7 +1385,6 @@ pub struct SurvivalTransformationInputs {
     pub cause_count: Option<usize>,
     pub baseline_cfg: SurvivalBaselineConfig,
     pub time_basis: SavedSurvivalTimeBasis,
-    pub ridge_lambda: f64,
     pub survival_likelihood_label: String,
     pub resolved_termspec: TermCollectionSpec,
     /// Rigid time-block beta, persisted only by the cause-specific CLI path.
@@ -1435,7 +1432,6 @@ pub fn assemble_survival_transformation_payload(
         payload.baseline_timewiggle_double_penalty = timewiggle.double_penalty;
         apply_timewiggle_beta(&mut payload, timewiggle.beta);
     }
-    payload.survivalridge_lambda = Some(inputs.ridge_lambda);
     payload.survival_likelihood = Some(inputs.survival_likelihood_label);
     payload.survival_beta_time = inputs.survival_beta_time;
     payload.resolved_termspec = Some(inputs.resolved_termspec);
@@ -1466,7 +1462,6 @@ pub struct SurvivalLocationScaleInputs {
     pub survivalspec: String,
     pub baseline_cfg: SurvivalBaselineConfig,
     pub time_basis: SavedSurvivalTimeBasis,
-    pub ridge_lambda: f64,
     pub survival_likelihood_label: String,
     pub time_parameterization: SurvivalLocationScaleTimeParameterization,
     pub threshold_time_basis: Option<SurvivalCovariateTimeBasis>,
@@ -1517,7 +1512,6 @@ pub fn assemble_survival_location_scale_payload(
     payload.survival_baseline_rate = inputs.baseline_cfg.rate;
     payload.survival_baseline_makeham = inputs.baseline_cfg.makeham;
     payload.apply_survival_time_basis(&inputs.time_basis);
-    payload.survivalridge_lambda = Some(inputs.ridge_lambda);
     payload.survival_likelihood = Some(inputs.survival_likelihood_label);
     payload.survival_location_scale_structure = Some(SavedSurvivalLocationScaleStructure {
         time_parameterization: inputs.time_parameterization,
@@ -1550,7 +1544,6 @@ pub struct LatentWindowInputs {
     pub survival_event: String,
     pub baseline_cfg: SurvivalBaselineConfig,
     pub time_basis: SavedSurvivalTimeBasis,
-    pub ridge_lambda: f64,
     pub beta_time: Vec<f64>,
     pub resolved_termspec: TermCollectionSpec,
 }
@@ -1583,7 +1576,6 @@ pub fn assemble_latent_window_payload(
     payload.apply_survival_time_basis(&inputs.time_basis);
     payload.survival_likelihood = Some(inputs.likelihood_label);
     payload.survival_beta_time = Some(inputs.beta_time);
-    payload.survivalridge_lambda = Some(inputs.ridge_lambda);
     payload.resolved_termspec = Some(inputs.resolved_termspec);
     source.apply_to(&mut payload);
     payload
@@ -2255,7 +2247,6 @@ fn payload_for_survival_marginal_slope(
             survivalspec: "net".to_string(),
             baseline_cfg: saved_offset_baseline,
             time_basis: SavedSurvivalTimeBasis::from_build(&time_build, time_anchor),
-            ridge_lambda: fit_config.ridge_lambda,
             survival_likelihood_label: survival_likelihood_modename(likelihood_mode).to_string(),
             resolved_marginalspec: frozen_marginal,
             resolved_slopespec: frozen_slope,
@@ -2362,7 +2353,6 @@ fn payload_for_survival_transformation(
             cause_count: is_joint_cause_specific.then_some(cause_count),
             baseline_cfg: rp_result.baseline_cfg.clone(),
             time_basis: rp_result.time_basis.clone(),
-            ridge_lambda: fit_config.ridge_lambda,
             survival_likelihood_label: likelihood_label,
             resolved_termspec: rp_result.resolvedspec,
             survival_beta_time: None,
@@ -2679,7 +2669,6 @@ fn payload_for_survival_location_scale(
             survivalspec: "net".to_string(),
             baseline_cfg,
             time_basis,
-            ridge_lambda: fit_config.ridge_lambda,
             survival_likelihood_label: survival_likelihood_modename(likelihood_mode).to_string(),
             time_parameterization: ls_result.fit.time_parameterization,
             threshold_time_basis: ls_result.fit.threshold_time_basis.clone(),
@@ -2827,7 +2816,6 @@ fn payload_for_latent_window(
             survival_event: eventname,
             baseline_cfg,
             time_basis,
-            ridge_lambda: fit_config.ridge_lambda,
             beta_time,
             resolved_termspec,
         },

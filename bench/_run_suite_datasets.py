@@ -697,20 +697,17 @@ def _rust_survival_fit_options_for_scenario(scenario_name: typing.Any) -> typing
             "time_basis": "ispline",
             "time_degree": 3,
             "time_num_internal_knots": 10,
-            "ridge_lambda": 1e-6,
         }
     if scenario_name in {"heart_failure_survival", "cirrhosis_survival"}:
         return {
             "time_basis": "ispline",
             "time_degree": 3,
             "time_num_internal_knots": 8,
-            "ridge_lambda": 1e-6,
         }
     return {
         "time_basis": "ispline",
         "time_degree": 3,
         "time_num_internal_knots": 8,
-        "ridge_lambda": 1e-6,
     }
 
 
@@ -721,7 +718,6 @@ def _rust_survival_fit_cli_args(scenario_name: str) -> list[str]:
         "time_basis",
         "time_degree",
         "time_num_internal_knots",
-        "ridge_lambda",
     ):
         if key not in cfg:
             continue

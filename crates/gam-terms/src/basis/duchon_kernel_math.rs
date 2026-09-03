@@ -129,10 +129,13 @@ pub fn build_duchon_collocation_operator_matriceswithworkspace(
     // Partial-fraction expansion only runs in the hybrid Matérn branch
     // (`length_scale = Some`). The scale-free path (`length_scale = None`)
     // skips it entirely and is fractional-clean down to the Riesz kernel.
-    let coeffs = length_scale.map(|scale| {
-        let s_int = duchon_power_to_usize(s_order);
-        duchon_partial_fraction_coeffs(p_order, s_int, 1.0 / scale.max(1e-300))
-    });
+    let coeffs = length_scale
+        .map(|scale| {
+            let s_int = duchon_power_to_usize(s_order);
+            duchon_inverse_length_scale(scale, "Duchon collocation operator")
+                .map(|kappa| duchon_partial_fraction_coeffs(p_order, s_int, kappa))
+        })
+        .transpose()?;
     let metric_weights: Option<Vec<f64>> = aniso_log_scales.map(centered_aniso_metric_weights);
     // gam#979: the shipped kernel block is `α·K` (`duchon_kernel_chart`), so
     // the operator quadratures of that basis carry the same amplitude. Without
@@ -1666,6 +1669,32 @@ pub(crate) fn validate_duchon_collocation_orders(
     Ok(())
 }
 
+/// The inverse length scale `κ = 1/ℓ` of a Matérn / hybrid-Duchon kernel.
+///
+/// One owner for a conversion every kernel site used to spell as
+/// `1.0 / length_scale.max(1e-300)`. That floor was not a bound of the
+/// arithmetic: a length scale of `0` is not a kernel with `κ = 1e300`, it is a
+/// construction defect — the spectral density `1/(ρ^{2p}(κ²+ρ²)^s)` has no
+/// hybrid limit there (the scale-free family is `length_scale = None`, a
+/// different spectrum) — and the floor kept `κ·r` finite out to `r ≈ 1.8e8`
+/// while evaluating a kernel no caller asked for. A length scale that is not
+/// finite and positive, or whose inverse is not representable, is refused with
+/// the calling context named (#2469).
+#[inline]
+pub(crate) fn duchon_inverse_length_scale(
+    length_scale: f64,
+    context: &str,
+) -> Result<f64, BasisError> {
+    let kappa = 1.0 / length_scale;
+    if !(length_scale.is_finite() && length_scale > 0.0 && kappa.is_finite()) {
+        crate::bail_invalid_basis!(
+            "{context}: kernel length_scale must be finite and positive with a finite \
+             inverse; got {length_scale}"
+        );
+    }
+    Ok(kappa)
+}
+
 #[derive(Debug, Clone)]
 pub struct DuchonPartialFractionCoeffs {
     pub(crate) a: Vec<f64>,
@@ -2020,10 +2049,7 @@ pub(crate) fn duchon_matern_kernel_general_from_distance(
             k_dim,
         ));
     };
-    if !length_scale.is_finite() || length_scale <= 0.0 {
-        crate::bail_invalid_basis!("Duchon hybrid length_scale must be finite and positive");
-    }
-    let kappa = 1.0 / length_scale;
+    let kappa = duchon_inverse_length_scale(length_scale, "Duchon hybrid kernel")?;
 
     // gam#1424: for genuine high-dimensional Matérn blends the partial-fraction
     // sum below cancels catastrophically (the largest block dwarfs the true
@@ -2096,7 +2122,7 @@ pub(crate) fn duchon_hybrid_kernel_collision_value(
         ));
     }
 
-    let kappa = 1.0 / length_scale.max(1e-300);
+    let kappa = duchon_inverse_length_scale(length_scale, "Duchon hybrid collision value")?;
     let mut pure = KahanSum::default();
     let mut log_part = KahanSum::default();
     for (m, &a_m) in coeffs.a.iter().enumerate().skip(1) {
@@ -3425,5 +3451,31 @@ mod duchon_hybrid_psd_tests {
                 "auto-raised operator penalty matrices must be finite"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod inverse_length_scale_tests {
+    use super::*;
+
+    /// The owner refuses every length scale the old `1.0 / ls.max(1e-300)`
+    /// floors silently mapped to a huge finite κ, and returns the exact
+    /// inverse for a legitimate one (#2469).
+    #[test]
+    fn inverse_length_scale_refuses_what_the_floor_used_to_swallow() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e-310] {
+            let refused = duchon_inverse_length_scale(bad, "test").is_err();
+            assert!(refused, "length_scale {bad:e} must be refused, not floored");
+        }
+        let kappa = duchon_inverse_length_scale(0.25, "test").expect("positive length scale");
+        assert_eq!(kappa.to_bits(), 4.0_f64.to_bits());
+        let err = duchon_inverse_length_scale(0.0, "Duchon N-D radial jets")
+            .err()
+            .expect("refusal");
+        let text = err.to_string();
+        assert!(
+            text.contains("Duchon N-D radial jets") && text.contains("got 0"),
+            "refusal names its context and the value: {text}"
+        );
     }
 }

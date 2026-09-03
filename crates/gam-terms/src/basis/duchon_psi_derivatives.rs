@@ -229,7 +229,7 @@ pub(crate) fn duchon_partial_fraction_kernel_psi_triplet(
         return Ok((value, first, second));
     }
 
-    let kappa = 1.0 / length_scale.max(1e-300);
+    let kappa = duchon_inverse_length_scale(length_scale, "Duchon partial-fraction ψ-triplet")?;
     let kappa2 = kappa * kappa;
     let mut value = KahanSum::default();
     let mut first = KahanSum::default();
@@ -532,7 +532,7 @@ pub(crate) fn duchon_radial_jets(
     k_dim: usize,
     coeffs: &DuchonPartialFractionCoeffs,
 ) -> Result<DuchonRadialJets, BasisError> {
-    let kappa = 1.0 / length_scale.max(1e-300);
+    let kappa = duchon_inverse_length_scale(length_scale, "Duchon radial jets")?;
     let r_floor = DUCHON_DERIVATIVE_R_FLOOR_REL * length_scale.max(1e-8);
     let collision_taylor_radius = DUCHON_COLLISION_TAYLOR_REL * length_scale.max(1e-8);
     let r_eval = r.max(r_floor);
@@ -1148,7 +1148,7 @@ pub(crate) fn duchon_phi_even_derivative_collision(
     }
 
     // Analytic path: extract per-block Taylor r^{2j} coefficients and sum.
-    let kappa = 1.0 / length_scale.max(1e-300);
+    let kappa = duchon_inverse_length_scale(length_scale, "Duchon even-derivative collision")?;
     let mut total_pure = KahanSum::default();
     let mut total_log = KahanSum::default();
     let mut total_log_abs_scale = KahanSum::default();
@@ -1218,7 +1218,7 @@ pub(crate) fn duchon_phi_even_derivative_collision_psi_triplet(
         ));
     }
 
-    let kappa = 1.0 / length_scale.max(1e-300);
+    let kappa = duchon_inverse_length_scale(length_scale, "Duchon even-derivative collision ψ-triplet")?;
     let mut value = KahanSum::default();
     let mut psi = KahanSum::default();
     let mut psi_psi = KahanSum::default();
@@ -1992,13 +1992,13 @@ pub(crate) fn build_duchon_basis_designwithworkspace(
         z_raw
     };
 
-    let coeffs = length_scale.map(|ls| {
-        duchon_partial_fraction_coeffs(
-            p_order,
-            duchon_power_to_usize(s_order),
-            1.0 / ls.max(1e-300),
-        )
-    });
+    let coeffs = length_scale
+        .map(|ls| {
+            duchon_inverse_length_scale(ls, "Duchon basis design").map(|kappa| {
+                duchon_partial_fraction_coeffs(p_order, duchon_power_to_usize(s_order), kappa)
+            })
+        })
+        .transpose()?;
 
     // Practical safe operating range (document Eq. D.2):
     //   κ in [1e-2 / r_max, 1e2 / r_min]
@@ -2015,7 +2015,7 @@ pub(crate) fn build_duchon_basis_designwithworkspace(
         (None, _) => None,
     };
     if let (Some(length_scale), Some((r_min, r_max))) = (length_scale, warn_bounds) {
-        let kappa = 1.0 / length_scale.max(1e-300);
+        let kappa = duchon_inverse_length_scale(length_scale, "Duchon basis operating range")?;
         let kappa_lo = 1e-2 / r_max;
         let kappa_hi = 1e2 / r_min;
         if kappa < kappa_lo || kappa > kappa_hi {

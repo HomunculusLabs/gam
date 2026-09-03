@@ -225,7 +225,6 @@ pub(crate) struct FitArgs {
             "time_basis",
             "time_degree",
             "time_num_internal_knots",
-            "ridge_lambda",
             "threshold_time_k",
             "threshold_time_degree",
             "sigma_time_k",
@@ -367,9 +366,6 @@ pub(crate) struct FitArgs {
     /// Number of internal knots for non-linear survival time bases.
     #[arg(long = "time-num-internal-knots", default_value_t = 8, value_parser = parse_positive_usize_cli)]
     pub(crate) time_num_internal_knots: usize,
-    /// Ridge regularization for survival solver.
-    #[arg(long = "ridge-lambda", default_value_t = 1e-6, value_parser = parse_nonnegative_f64_cli)]
-    pub(crate) ridge_lambda: f64,
     /// Number of B-spline basis functions for the time margin of the threshold
     /// tensor product (enables time-varying threshold). When omitted, threshold
     /// depends on covariates only.
@@ -532,7 +528,6 @@ pub(crate) struct SurvivalArgs {
     pub(crate) time_basis: String,
     pub(crate) time_degree: usize,
     pub(crate) time_num_internal_knots: usize,
-    pub(crate) ridge_lambda: f64,
     pub(crate) threshold_time_k: Option<usize>,
     pub(crate) threshold_time_degree: usize,
     pub(crate) sigma_time_k: Option<usize>,

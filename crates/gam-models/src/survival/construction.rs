@@ -1726,9 +1726,9 @@ pub fn build_survival_time_basis(
             // declared via `nullspace_dims` so the REML generalized-logdet picks it
             // up. The penalized inner PIRLS is well-conditioned because the
             // likelihood Hessian H_lik has O(n_events) curvature along the affine
-            // direction (the overall baseline level is identified by the data), and
-            // the global stabilization ridge (ridge_lambda) provides an absolute
-            // positive-definite floor.
+            // direction (the overall baseline level is identified by the data);
+            // there is no coefficient ridge in the objective (#2670), so a null
+            // direction the data does not identify is refused, not floored.
             let mut penalties = Vec::<Array2<f64>>::new();
             for active_penalty in &penalty_basis.active_penalties {
                 let s_mat = &active_penalty.matrix;

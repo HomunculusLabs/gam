@@ -3058,8 +3058,6 @@ def run_rust_survival(spec: MethodSpec, train_csv: Path, test_csv: Path, out_dir
             "8",
             "--time-smooth-lambda",
             "0.01",
-            "--ridge-lambda",
-            "1e-6",
             "--out",
             str(model_path),
         ]

@@ -1754,7 +1754,7 @@ pub(crate) fn fit_binomial_location_scale_model(
 /// Penalized effective degrees of freedom for a survival transformation fit.
 ///
 /// Uses exactly the mgcv definition `edf_total = p − Σ_k λ_k·tr(H⁻¹ S_k)`, where
-/// `H` is the converged penalized Hessian `X'W_HX + S(λ) + ridge·I` (held in
+/// `H` is the converged penalized Hessian `X'W_HX + S(λ)` (held in
 /// `state.hessian`) and `S_k` is the penalty matrix of block `k` (without its
 /// `λ_k` factor, which is applied here). The per-block edf is
 /// `edf_k = block_cols_k − λ_k·tr(H⁻¹ S_k)`, clamped to `[0, block_cols_k]`.
@@ -1914,23 +1914,28 @@ fn survival_edf_from_dense_hessian(
 /// a fixed time-penalty `λ`, which oversmooths: with `λ` pinned at its seed the
 /// monotone baseline collapses toward an affine log-cumulative-hazard and cannot
 /// recover real curvature (e.g. Gompertz convexity). This routine wraps that
-/// inner solve in a proper outer LAML optimization over `ρ = log λ` for the
-/// `num_smoothing` time-penalty blocks (the trailing stabilization ridge is held
-/// fixed), exactly as the standard GAM path and mgcv/scam do. The inner solve
-/// still honors the structural box at every candidate `λ`, so the constrained
-/// optimum stays valid; only the outer `λ` becomes data-adaptive.
+/// inner solve in a proper outer LAML optimization over `ρ = log λ` for every
+/// penalty block, exactly as the standard GAM path and mgcv/scam do. The inner
+/// solve still honors the structural box at every candidate `λ`, so the
+/// constrained optimum stays valid; only the outer `λ` becomes data-adaptive.
+/// Every block the working model carries is a REML-selected smoothing block:
+/// there is no fixed-λ term in the survival objective (a coefficient ridge at a
+/// hand-supplied λ was a penalty on the coefficients rather than on the
+/// function, and its value was chosen by no criterion — #2670; conditioning of
+/// the inner Newton path is the solver's Levenberg–Marquardt damping, see
+/// `WorkingModelSurvival::update_state`).
 ///
 /// `model` is the working model at the seed `λ`; it is cloned per candidate so
 /// the proposal never corrupts the warm model. The returned vector has one
-/// `λ_k` per penalty block (smoothing blocks at REML-selected values, the ridge
-/// at its fixed seed). Returns `None` when there are no smoothing blocks to
-/// select (e.g. the Weibull linear-time path), so the caller keeps the seed.
+/// REML-selected `λ_k` per penalty block. Returns `None` when there are no
+/// penalty blocks to select (e.g. the Weibull linear-time path), so the caller
+/// keeps the seed.
 ///
 /// # Left-truncation guard on the time baseline (issue #1790/#1791)
 ///
 /// The transformation-survival LAML `−½·log|H|` term uses the **observed**
 /// information `H = X_exitᵀW_exit X_exit − X_entryᵀW_entry X_entry + (event/deriv)
-/// + S(λ) + ridge` (`WorkingState::hessian_curvature = Observed`), not the
+/// + S(λ)` (`WorkingState::hessian_curvature = Observed`), not the
 /// positive-definite **Fisher** curvature the standard GAM/location-scale REML
 /// path uses (`HessianCurvatureKind::Fisher`). Under right censoring
 /// (`entry == 0`) the `−X_entryᵀW_entry X_entry` term vanishes and `H` is PD, so
@@ -1970,7 +1975,6 @@ struct SurvivalSmoothingSelection {
 fn optimize_survival_transformation_smoothing(
     model: &crate::survival::WorkingModelSurvival,
     penalty_blocks: &[PenaltyBlock],
-    num_smoothing: usize,
     beta0: &Array1<f64>,
     structural_lower_bounds: Option<&Array1<f64>>,
     time_block_cols: usize,
@@ -1978,17 +1982,11 @@ fn optimize_survival_transformation_smoothing(
 ) -> Result<Option<SurvivalSmoothingSelection>, String> {
     use gam_problem::{Derivative, HessianValue, OuterEval};
     use gam_solve::rho_optimizer::OuterProblem;
+    // One outer coordinate per penalty block: every block is REML-selected.
+    let num_smoothing = penalty_blocks.len();
     if num_smoothing == 0 {
         return Ok(None);
     }
-    if num_smoothing > penalty_blocks.len() {
-        return Err(format!(
-            "survival transformation smoothing count {num_smoothing} exceeds penalty count {}",
-            penalty_blocks.len()
-        ));
-    }
-    // Full λ vector (smoothing blocks + fixed ridge), used to rebuild each
-    // candidate model. The ridge entries (indices >= num_smoothing) are frozen.
     let seed_lambdas: Vec<f64> = penalty_blocks.iter().map(|b| b.lambda).collect();
     let seed_log_lambdas = seed_lambdas
         .iter()
@@ -2000,7 +1998,7 @@ fn optimize_survival_transformation_smoothing(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let seed_rho = Array1::from_vec(seed_log_lambdas[..num_smoothing].to_vec());
+    let seed_rho = Array1::from_vec(seed_log_lambdas);
 
     // Memoize the most recent (ρ, cost, gradient) triple. The outer BFGS bridge
     // queries this objective through TWO separate closures — a value-only probe
@@ -2032,11 +2030,9 @@ fn optimize_survival_transformation_smoothing(
     // ρ is restored. A non-converged probe never advances the seed (see below), so
     // a bad probe cannot corrupt the warm start for the next attempt.
     let warm_beta: std::cell::RefCell<Array1<f64>> = std::cell::RefCell::new(beta0.clone());
-    // Evaluate the LAML objective and ρ-gradient at a smoothing-ρ proposal:
-    // set the smoothing λ, re-run the constrained inner PIRLS, evaluate the
-    // unified survival LAML, and project the gradient onto the smoothing
-    // coordinates (the trailing ridge gradient component is discarded since the
-    // ridge is fixed).
+    // Evaluate the LAML objective and ρ-gradient at a ρ proposal: set the
+    // λ, re-run the constrained inner PIRLS, and evaluate the unified survival
+    // LAML and its ρ-gradient.
     let eval_at = |rho_smooth: &Array1<f64>| -> Result<
         (f64, Array1<f64>),
         gam_solve::estimate::EstimationError,
@@ -2049,12 +2045,8 @@ fn optimize_survival_transformation_smoothing(
             return Ok((*cached_cost, cached_grad.clone()));
         }
         let mut candidate = model.clone();
-        let mut lambdas = seed_lambdas.clone();
-        for k in 0..num_smoothing {
-            lambdas[k] = physical_smoothing[k];
-        }
         candidate
-            .set_penalty_lambdas(&lambdas)
+            .set_penalty_lambdas(&physical_smoothing)
             // A lambda THIS TRIAL RHO produced was refused by the model. The
             // outer search's only lever is rho, and moving it is the right
             // response, so the verdict must be per-trial-point, not per-problem
@@ -2063,10 +2055,10 @@ fn optimize_survival_transformation_smoothing(
             // whole seed cascade instead of retreating from one rho.
             //
             // `set_penalty_lambdas`'s length-mismatch arm is structurally
-            // unreachable from this call site: `lambdas` is `seed_lambdas.clone()`
-            // with only the leading `num_smoothing` entries overwritten, so its
-            // length is fixed by construction. The only reachable arm is the
-            // lambda-VALUE arm, which is rho-local.
+            // unreachable from this call site: the proposal has one coordinate
+            // per penalty block by construction (`OuterProblem::new(num_smoothing)`
+            // below). The only reachable arm is the lambda-VALUE arm, which is
+            // rho-local.
             //
             // `wrap_preserving_trial_point` is deliberately NOT used here: the
             // source only ever produces `InvalidInput`, for which that helper is
@@ -2126,37 +2118,12 @@ fn optimize_survival_transformation_smoothing(
             // classification, add only context (#2531).
             error.wrap_preserving_trial_point("survival smoothing inner state evaluation failed")
         })?;
-        // Active-penalty ρ over ALL active blocks (smoothing + fixed ridge), in
-        // block order, as the unified survival LAML evaluator requires. The
-        // candidate's λ are exactly `lambdas` (smoothing entries from the
-        // proposal, ridge entries frozen), so build ρ from that vector directly.
-        let full_rho = Array1::from_vec(
-            lambdas
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(coordinate, value)| {
-                    // The candidate lambda vector is a function of THIS trial
-                    // rho, so a domain refusal on one of its entries is
-                    // rho-local: the outer search can retreat from this point.
-                    // `InvalidInput` graded it Fatal and aborted the cascade
-                    // (#2531/#2590). Message text is preserved verbatim.
-                    //
-                    // (`wrap_preserving_trial_point` is not applicable here: the
-                    // upstream error is a `PhysicalStrengthDomainError`, not an
-                    // `EstimationError`, so the method does not exist on it.)
-                    gam_problem::checked_log_strength(value).map_err(|error| {
-                        gam_solve::estimate::EstimationError::TrialPointRefused {
-                            reason: format!(
-                                "survival smoothing candidate lambda {coordinate}: {error}"
-                            ),
-                        }
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        // The proposal IS the active-penalty ρ, in block order, as the unified
+        // survival LAML evaluator requires: every block is an outer coordinate,
+        // so the evaluator sees the optimizer's ρ itself rather than an
+        // `exp`/`ln` round trip of it.
         let (cost, grad_full) = candidate
-            .unified_lamlobjective_and_rhogradient(&beta, &state, &full_rho)
+            .unified_lamlobjective_and_rhogradient(&beta, &state, rho_smooth)
             // Adding context must not change the verdict. Re-rendering the
             // source into `InvalidInput` overwrote the producer's "this trial
             // point, not this problem" with "this configuration is wrong", and
@@ -2164,17 +2131,14 @@ fn optimize_survival_transformation_smoothing(
             .map_err(|error| {
                 error.wrap_preserving_trial_point("survival smoothing LAML evaluation failed")
             })?;
-        // Project onto the smoothing coordinates. The active-block enumeration
-        // lists the smoothing blocks first (they are constructed first and the
-        // ridge is appended last), so the leading `num_smoothing` gradient
-        // entries are exactly ∂LAML/∂ρ_smooth with the ridge held fixed.
-        // These two conditions were fused into one `InvalidInput`, which forced
-        // a layout defect and a trial-point defect to share a verdict. They are
-        // split, layout check FIRST, so each gets the grading it earns.
+        // The gradient is ∂LAML/∂ρ over the active blocks, which are exactly the
+        // outer coordinates. A layout defect and a trial-point defect must not
+        // share a verdict, so the layout check comes FIRST and each gets the
+        // grading it earns.
         //
-        // A gradient shorter than the smoothing block count is a LAYOUT defect
-        // of the evaluator, not a property of this rho: no choice of rho makes a
-        // gradient longer. It stays Fatal `InvalidInput`.
+        // A gradient whose length is not the block count is a LAYOUT defect of
+        // the evaluator, not a property of this rho: no choice of rho changes a
+        // gradient's length. It stays Fatal `InvalidInput`.
         //
         // Recorded honestly, because it cuts the other way: the framework's own
         // `OuterThetaLayout::validate_gradient_len`
@@ -2184,9 +2148,9 @@ fn optimize_survival_transformation_smoothing(
         // direction here. This keeps the pre-existing Fatal grading for the
         // layout half and changes only the halves where the framework agrees;
         // resolving which of the two sites is miscategorized is separate work.
-        if grad_full.len() < num_smoothing {
+        if grad_full.len() != num_smoothing {
             return Err(gam_solve::estimate::EstimationError::InvalidInput(format!(
-                "survival smoothing LAML gradient was too short: {} entries for \
+                "survival smoothing LAML gradient has {} entries for \
                  {num_smoothing} smoothing coordinates",
                 grad_full.len()
             )));
@@ -2201,7 +2165,7 @@ fn optimize_survival_transformation_smoothing(
                 reason: "survival smoothing LAML cost was non-finite".to_string(),
             });
         }
-        let grad = grad_full.slice(s![..num_smoothing]).to_owned();
+        let grad = grad_full;
         // Also rho-local, and again the layer below agrees:
         // `rho_optimizer/objective.rs` `validate_outer_first_order` returns
         // `ObjectiveEvalError::recoverable` for a non-finite outer gradient.
@@ -2342,12 +2306,8 @@ fn optimize_survival_transformation_smoothing(
             selected_rho.to_vec(),
         ));
     }
-    let selected_lambdas = gam_problem::checked_exp_log_strengths(selected_rho.iter().copied())
+    let lambdas = gam_problem::checked_exp_log_strengths(selected_rho.iter().copied())
         .map_err(|error| format!("survival transformation selected rho: {error}"))?;
-    let mut lambdas = seed_lambdas;
-    for (slot, lambda) in lambdas.iter_mut().zip(selected_lambdas) {
-        *slot = lambda;
-    }
     Ok(Some(SurvivalSmoothingSelection {
         lambdas,
         outer_iterations,
@@ -3050,7 +3010,6 @@ fn persistent_survival_transformation_key(
     hasher.write_str(&gam_solve::persistent_warm_start::cache_schema_tag());
     hasher.write_str(&format!("{:?}", spec.likelihood_mode));
     hasher.write_f64(spec.time_anchor);
-    hasher.write_f64(spec.ridge_lambda);
     hasher.write_str(&format!("{:?}", baseline_cfg.target));
     for value in [
         baseline_cfg.scale,
@@ -3246,11 +3205,20 @@ pub(crate) fn fit_survival_transformation_model(
             let p_time_total = prepared.time_design_exit.ncols();
             let p = p_time_total + p_cov;
             let mut penalty_blocks = Vec::<PenaltyBlock>::new();
+            // One REML seed for every block on this path: the time basis carries
+            // the configured `time_smooth_lambda` (the library default when the
+            // basis was built without one), and the covariate blocks start from
+            // the same value. It is a starting point for the outer search, never
+            // an estimate, so a single owner is all it needs.
+            let seed_lambda = spec
+                .time_build
+                .smooth_lambda
+                .unwrap_or_else(|| FitConfig::default().time_smooth_lambda);
             for (idx, penalty) in prepared.time_penalties.iter().enumerate() {
                 if penalty.nrows() == p_time_total && penalty.ncols() == p_time_total {
                     penalty_blocks.push(PenaltyBlock {
                         matrix: penalty.clone(),
-                        lambda: spec.time_build.smooth_lambda.unwrap_or(1e-2),
+                        lambda: seed_lambda,
                         range: 0..p_time_total,
                         nullspace_dim: prepared.time_nullspace_dims.get(idx).copied().unwrap_or(0),
                     });
@@ -3260,14 +3228,13 @@ pub(crate) fn fit_survival_transformation_model(
             // frailty) live in the covariate term-collection design; the survival
             // transformation fit stacks the covariate columns at
             // `p_time_total..p`, so each covariate penalty's local block maps to
-            // the joint range `p_time_total + col_range`. Penalizing them here
-            // (rather than leaving them to the tiny stabilization ridge) is what
-            // lets the frailty / covariate smooths shrink — and they are added
-            // BEFORE the ridge so they too become REML-selected smoothing blocks
-            // (issues #563/#565). Only zero-prior-mean blocks are admissible as a
-            // plain quadratic `λ βᵀSβ`; a non-zero centering would need an offset
-            // the survival PenaltyBlock does not model, so such blocks are left to
-            // the ridge rather than mis-applied.
+            // the joint range `p_time_total + col_range`. Penalizing them here is
+            // what lets the frailty / covariate smooths shrink; like the time
+            // blocks they are REML-selected smoothing blocks (issues #563/#565).
+            // Only zero-prior-mean blocks are admissible as a plain quadratic
+            // `λ βᵀSβ`; a non-zero centering would need an offset the survival
+            // PenaltyBlock does not model, so such a block is not mis-applied
+            // and its columns stay unpenalized.
             for (penalty_idx, cov_penalty) in covariate_design.penalties.iter().enumerate() {
                 let cr = &cov_penalty.col_range;
                 let block_dim = cr.end - cr.start;
@@ -3280,7 +3247,7 @@ pub(crate) fn fit_survival_transformation_model(
                 if block_dim > 0 && matches_dims && zero_prior && cr.end <= p_cov {
                     penalty_blocks.push(PenaltyBlock {
                         matrix: cov_penalty.local.clone(),
-                        lambda: 1e-2,
+                        lambda: seed_lambda,
                         range: (p_time_total + cr.start)..(p_time_total + cr.end),
                         nullspace_dim: covariate_design
                             .nullspace_dims
@@ -3290,32 +3257,20 @@ pub(crate) fn fit_survival_transformation_model(
                     });
                 }
             }
-            // The smoothing blocks are exactly those pushed above (time +
-            // covariate penalties); any ridge appended below is a FIXED
-            // stabilization, not a REML-selected smoothing parameter, so the
-            // count of smoothing blocks is recorded before the ridge is added
-            // (issue #563).
-            let num_smoothing_blocks = penalty_blocks.len();
-            // #2301: the Weibull built-in linear basis no longer carries the dead,
-            // intercept-confounded constant column (it was dropped at design build
-            // — see `build_survival_time_basis`'s Linear arm), so there is no
-            // gradient-free β0 to exclude from (or pin with) the ridge. Every column
-            // is now a live direction, so the stabilization ridge spans the full
-            // coefficient vector exactly as it does for the other likelihood modes.
-            let ridge_range_start = 0usize;
-            if spec.ridge_lambda > 0.0 && p > ridge_range_start {
-                let dim = p - ridge_range_start;
-                let mut ridge = Array2::<f64>::zeros((dim, dim));
-                for d in 0..dim {
-                    ridge[[d, d]] = 1.0;
-                }
-                penalty_blocks.push(PenaltyBlock {
-                    matrix: ridge,
-                    lambda: spec.ridge_lambda,
-                    range: ridge_range_start..p,
-                    nullspace_dim: 0,
-                });
-            }
+            // The penalty set is exactly the time + covariate smoothing blocks
+            // above, every one of them REML-selected. No fixed-λ identity ridge is
+            // appended (#2670): such a ridge was a penalty on the coefficients, not
+            // on the fitted function, at a strength no criterion chose, and it
+            // entered the fit's objective, its LAML normalizer, its edf and its
+            // posterior covariance. `WorkingModelSurvival::update_state` states the
+            // invariant this relies on: indefinite or rank-deficient curvature
+            // along the Newton path is the solver's Levenberg–Marquardt damping's
+            // problem, so the converged estimator is a stationary point of the
+            // exact penalized likelihood. A design whose likelihood does not
+            // identify a coefficient direction is then refused (the LAML Hessian
+            // is not positive definite) instead of being silently pinned by a
+            // `1e-6` prior — a construction defect belongs to the identifiability
+            // audit, not to the objective.
             let dense_time_entry = prepared.time_design_entry.to_dense();
             let dense_time_exit = prepared.time_design_exit.to_dense();
             let dense_time_derivative = prepared.time_design_derivative_exit.to_dense();
@@ -3400,14 +3355,7 @@ pub(crate) fn fit_survival_transformation_model(
                 } else {
                     None
                 };
-            Ok::<_, String>((
-                prepared,
-                penalty_blocks,
-                beta0,
-                structural_lower_bounds,
-                model,
-                num_smoothing_blocks,
-            ))
+            Ok::<_, String>((prepared, penalty_blocks, beta0, structural_lower_bounds, model))
         };
 
     if baseline_cfg.target != SurvivalBaselineTarget::Linear {
@@ -3435,7 +3383,7 @@ pub(crate) fn fit_survival_transformation_model(
             &baseline_cfg,
             "workflow survival transformation baseline",
             |candidate| {
-                let (_, _, beta0, structural_lower_bounds, mut model, _) =
+                let (_, _, beta0, structural_lower_bounds, mut model) =
                     build_working_model(candidate)?;
                 let opts = gam_solve::pirls::WorkingModelPirlsOptions {
                     max_iterations: SURVIVAL_TRANSFORMATION_PIRLS_MAX_ITERATIONS,
@@ -3506,14 +3454,8 @@ pub(crate) fn fit_survival_transformation_model(
         )?;
     }
 
-    let (
-        prepared,
-        mut penalty_blocks,
-        beta0,
-        structural_lower_bounds,
-        mut model,
-        num_smoothing_blocks,
-    ) = build_working_model(&baseline_cfg)?;
+    let (prepared, mut penalty_blocks, beta0, structural_lower_bounds, mut model) =
+        build_working_model(&baseline_cfg)?;
     if cause_count > 1 || !spec.penalty_block_gamma_priors.is_empty() {
         let beta0_flat = replicate_pooled_baseline_seed_per_cause(beta0.view(), cause_count);
         return fit_cause_specific_survival_transformation_custom(
@@ -3533,10 +3475,9 @@ pub(crate) fn fit_survival_transformation_model(
     // seed the monotone I-spline baseline oversmooths toward an affine
     // log-cumulative-hazard; selecting λ from the survival LAML lets it recover
     // real curvature. The inner solve keeps the structural γ ≥ 0 box at every
-    // candidate, so the constrained optimum stays valid; the fixed stabilization
-    // ridge is held at its seed. The selected λ is written back into both the
-    // working model and `penalty_blocks` so the final fit, edf, and warm-start
-    // cache all use the data-adaptive value.
+    // candidate, so the constrained optimum stays valid. The selected λ is written
+    // back into both the working model and `penalty_blocks` so the final fit,
+    // edf, and warm-start cache all use the data-adaptive value.
     // Left-truncation status drives the observed-information LAML guard on the
     // baseline time smoothing block (#1790/#1791): genuine delayed entry
     // (`entry > ENTRY_AT_ORIGIN_THRESHOLD`) makes the observed-information `H`
@@ -3551,7 +3492,6 @@ pub(crate) fn fit_survival_transformation_model(
         optimize_survival_transformation_smoothing(
             &model,
             &penalty_blocks,
-            num_smoothing_blocks,
             &beta0,
             structural_lower_bounds.as_ref(),
             p_time_total,

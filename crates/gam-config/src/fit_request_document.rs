@@ -151,8 +151,6 @@ pub struct FitRequestConfigDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persistent_warm_start_root: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ridge_lambda: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub scale_dimensions: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slope_time_degree: Option<usize>,

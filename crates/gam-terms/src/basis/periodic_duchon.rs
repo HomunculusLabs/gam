@@ -695,6 +695,22 @@ fn scaled_bernoulli_value_and_derivative(nu: usize, t: f64) -> Result<(f64, f64)
 /// per-axis ``(lo, hi)`` from the centers; both are affine-mapped to ``[0, 1]``
 /// so ``Bᵥ`` is evaluated on its canonical domain and the same map is replayed
 /// identically at prediction time.
+/// Width of the per-axis domain `[lo, hi]` the non-periodic Sobolev kernel is
+/// evaluated on. The affine map to `[0, 1]` divides by this width, and a
+/// domain with no width has no map: every coordinate would land on the same
+/// canonical point and the kernel would be constant. That is a construction
+/// defect of the axis (a single distinct center), refused here rather than
+/// floored to `1e-300` and evaluated (#2469).
+fn nonperiodic_sobolev_domain_span(lo: f64, hi: f64) -> Result<f64, BasisError> {
+    let span = hi - lo;
+    if !(span.is_finite() && span > 0.0) {
+        crate::bail_invalid_basis!(
+            "non-periodic Sobolev kernel axis domain [{lo}, {hi}] must have finite positive width"
+        );
+    }
+    Ok(span)
+}
+
 fn nonperiodic_sobolev_kernel_1d(
     x: f64,
     y: f64,
@@ -705,7 +721,7 @@ fn nonperiodic_sobolev_kernel_1d(
     if m == 0 {
         crate::bail_invalid_basis!("non-periodic Sobolev kernel order m must be at least 1");
     }
-    let span = (hi - lo).max(1e-300);
+    let span = nonperiodic_sobolev_domain_span(lo, hi)?;
     let xs = ((x - lo) / span).clamp(0.0, 1.0);
     let ys = ((y - lo) / span).clamp(0.0, 1.0);
     let (kx, _) = scaled_bernoulli_value_and_derivative(m, xs)?;
@@ -732,7 +748,7 @@ pub(crate) fn nonperiodic_sobolev_kernel_1d_triplet(
     if m == 0 {
         crate::bail_invalid_basis!("non-periodic Sobolev kernel order m must be at least 1");
     }
-    let span = (hi - lo).max(1e-300);
+    let span = nonperiodic_sobolev_domain_span(lo, hi)?;
     let xs = ((x - lo) / span).clamp(0.0, 1.0);
     let ys = ((y - lo) / span).clamp(0.0, 1.0);
     let (kx, dkx) = scaled_bernoulli_value_and_derivative(m, xs)?;
@@ -1012,7 +1028,11 @@ pub(crate) fn build_periodic_duchon_basis_1d(
     let mut basis = Array2::<f64>::zeros((data.nrows(), kernel_cols + 1));
     let coeffs = spec
         .length_scale
-        .map(|ls| duchon_partial_fraction_coeffs(p_order, s_order, 1.0 / ls.max(1e-300)));
+        .map(|ls| {
+            duchon_inverse_length_scale(ls, "periodic Duchon basis")
+                .map(|kappa| duchon_partial_fraction_coeffs(p_order, s_order, kappa))
+        })
+        .transpose()?;
     let pure_poly_coeff = if spec.length_scale.is_none() {
         Some(PolyharmonicBlockCoeff::new(
             (pure_duchon_block_order(p_order, s_order as f64)) as f64,
@@ -1590,8 +1610,12 @@ pub(crate) fn duchon_center_kernel_value_matrix(
     } else {
         None
     };
-    let coeffs =
-        length_scale.map(|ls| duchon_partial_fraction_coeffs(p_order, s_int, 1.0 / ls.max(1e-300)));
+    let coeffs = length_scale
+        .map(|ls| {
+            duchon_inverse_length_scale(ls, "periodic Duchon center kernel")
+                .map(|kappa| duchon_partial_fraction_coeffs(p_order, s_int, kappa))
+        })
+        .transpose()?;
     let kernel_amp = duchon_kernel_amplification(
         centers,
         length_scale,
@@ -2637,5 +2661,25 @@ mod hybrid_high_dim_psd_tests {
                  λ_min/λ_max = {lambda_min_rel:.6e} (tol = −{tol:.6e}) (gam#1424)"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod nonperiodic_domain_span_tests {
+    use super::*;
+
+    /// A zero-width or inverted axis domain is refused, not floored to
+    /// `1e-300` and evaluated as a constant kernel (#2469).
+    #[test]
+    fn zero_width_axis_domain_is_refused() {
+        assert!(nonperiodic_sobolev_domain_span(0.0, 1.5).is_ok_and(|s| s == 1.5));
+        for (lo, hi) in [(1.0, 1.0), (2.0, 1.0), (0.0, f64::INFINITY), (f64::NAN, 1.0)] {
+            let refused = nonperiodic_sobolev_domain_span(lo, hi).is_err();
+            assert!(refused, "domain [{lo}, {hi}] must be refused");
+        }
+        let err = nonperiodic_sobolev_kernel_1d_triplet(0.3, 0.7, 2, 1.0, 1.0)
+            .err()
+            .expect("kernel on a zero-width domain refuses");
+        assert!(err.to_string().contains("positive width"), "{err}");
     }
 }

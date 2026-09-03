@@ -116,7 +116,6 @@ fn fit_request_document_from_fit_args(
         precision_hyperpriors,
         precompute_conformal: Some(args.precompute_conformal),
         persistent_warm_start_root: args.persistent_warm_start_root.clone(),
-        ridge_lambda: Some(args.ridge_lambda),
         scale_dimensions: args.scale_dimensions.then_some(true),
         sigma_time_degree: Some(args.sigma_time_degree),
         sigma_time_k: args.sigma_time_k,
@@ -195,7 +194,6 @@ pub(crate) fn fit_config_from_survival_args(args: &SurvivalArgs) -> Result<FitCo
         z_column: args.z_column.clone(),
         scale_dimensions: args.scale_dimensions,
         spatial_optimization: SpatialLengthScaleOptimizationOptions::default(),
-        ridge_lambda: args.ridge_lambda,
         frailty,
         persistent_warm_start_store: args.persistent_warm_start_store.clone(),
         ..FitConfig::default()
@@ -321,7 +319,6 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
             time_basis: fit_config.time_basis.clone(),
             time_degree: fit_config.time_degree,
             time_num_internal_knots: fit_config.time_num_internal_knots,
-            ridge_lambda: fit_config.ridge_lambda,
             threshold_time_k: fit_config.threshold_time_k,
             threshold_time_degree: fit_config.threshold_time_degree,
             sigma_time_k: fit_config.sigma_time_k,

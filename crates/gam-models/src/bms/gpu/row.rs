@@ -78,11 +78,12 @@
 //! `[n, r]` buffer holds `F_au`. Only the fixed 32-thread scalar reduction is
 //! shared, so primary width has no shared-memory or thread-stack ceiling.
 
-#[cfg(target_os = "linux")]
-use gam_gpu::gpu_error::checked_shape_len;
 use std::sync::OnceLock;
 
-use gam_gpu::gpu_error::GpuError;
+// `validate` runs on every target (its `GpuError` is likewise unconditional),
+// so the shape-arithmetic owner it calls is imported unconditionally too; a
+// Linux-only import here broke the Windows cross-check (#2470 follow-up).
+use gam_gpu::gpu_error::{GpuError, checked_shape_len};
 
 #[cfg(target_os = "linux")]
 use std::sync::Arc;

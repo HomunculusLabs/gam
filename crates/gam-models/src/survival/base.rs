@@ -2697,9 +2697,8 @@ impl WorkingModelSurvival {
         // Feeds the joint pseudo-logdet `log|Σ_k λ_k S_k|₊` (frame-invariant,
         // computed INSIDE the reparam helper from these raw blocks — #2331 R7:
         // value/det1/det2 from a single W-factor eigendecomposition, not a
-        // per-block sum; the survival stabilization ridge is a full-span block
-        // that overlaps the smoothing blocks, so the joint normalizer is the
-        // real objective, #2331 Finding 3a).
+        // per-block sum; blocks may overlap in coefficient range, so the joint
+        // normalizer is the real objective, #2331 Finding 3a).
         let s_k_embedded: Vec<Array2<f64>> = active_penalty_blocks
             .iter()
             .map(|b| {
@@ -2792,10 +2791,9 @@ impl WorkingModelSurvival {
         // Hessian operator on the transformed H′. Orthogonal similarity
         // preserves strict positive definiteness and the exact spectrum.
         // An indefinite inner Hessian here is a property of THIS rho, not of the
-        // problem: `H_pen = H + S(lambda)` and the active penalty set includes a
-        // full-span stabilization ridge block, so a neighbouring lambda adds PSD
-        // curvature on the offending direction and the same design evaluates
-        // fine. `InvalidInput` is classified FATAL by `is_trial_point_infeasible`,
+        // problem: `H_pen = H + S(lambda)`, so a neighbouring lambda adds PSD
+        // curvature on a penalized offending direction and the same design
+        // evaluates fine. `InvalidInput` is classified FATAL by `is_trial_point_infeasible`,
         // so raising it aborted the entire fit at the first indefinite trial
         // instead of letting the outer lambda-search mark the point infeasible
         // and step away -- on a 6-row delayed-entry design that is the whole

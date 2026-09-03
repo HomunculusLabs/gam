@@ -1553,38 +1553,26 @@ fn sample_survival(
     // Wiggle columns and their penalty blocks have been copied into their final
     // owners; the three source matrices must not overlap the sampler copies.
     drop(saved_timewiggle);
-    let ridge_lambda = model.survivalridge_lambda.ok_or_else(|| {
-        "saved survival model is missing survivalridge_lambda; refusing to \
-         pick a load-time default (the historical 1e-4 fallback silently \
-         disagreed with the 1e-6 fit-time default). Refit."
-            .to_string()
-    })?;
-    let ridge_range_start = if time_build.basisname == "linear" && !model.has_baseline_time_wiggle()
-    {
-        1
-    } else {
-        0
-    };
     // All time columns and penalty metadata are now represented in the final
     // assembly. Drop the three source designs before constructing the model.
     drop(time_build);
-    if ridge_lambda > 0.0 && p > ridge_range_start {
-        let dim = p - ridge_range_start;
-        let mut ridge = Array2::<f64>::zeros((dim, dim));
-        for d in 0..dim {
-            ridge[[d, d]] = 1.0;
-        }
-        penalty_blocks.push(PenaltyBlock {
-            matrix: ridge,
-            lambda: ridge_lambda,
-            range: ridge_range_start..p,
-            nullspace_dim: 0,
-        });
+    // The saved λ vector is one entry per penalty block the fit optimized, in
+    // block order, and the reconstruction above rebuilds exactly those blocks.
+    // A length mismatch means the saved model was fitted under a different
+    // penalty set — e.g. a model saved before #2670 carries a trailing
+    // fixed-λ coefficient ridge that no longer exists — and silently assigning
+    // by index would sample from a penalty the fit never used. Refuse; refit.
+    if fit_saved.lambdas.len() != penalty_blocks.len() {
+        return Err(format!(
+            "saved survival model carries {} smoothing parameter(s) for {} reconstructed \
+             penalty block(s); the saved penalty set does not match the current survival \
+             objective (a fixed-λ coefficient ridge is no longer part of it, #2670). Refit.",
+            fit_saved.lambdas.len(),
+            penalty_blocks.len()
+        ));
     }
-    for (idx, block) in penalty_blocks.iter_mut().enumerate() {
-        if let Some(&lam) = fit_saved.lambdas.get(idx) {
-            block.lambda = lam;
-        }
+    for (block, &lam) in penalty_blocks.iter_mut().zip(fit_saved.lambdas.iter()) {
+        block.lambda = lam;
     }
     let penalties = PenaltyBlocks::new(penalty_blocks);
     let survivalspec = match model

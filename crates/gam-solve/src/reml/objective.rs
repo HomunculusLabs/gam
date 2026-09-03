@@ -101,10 +101,10 @@ impl<'a> RemlState<'a> {
         // Quantize the data signature to a coarse relative grid so floating
         // round-off cannot split two coordinates that are genuinely identical.
         let quant = |v: f64| -> i64 {
-            if !v.is_finite() || v.abs() <= 1e-300 {
-                0
-            } else {
+            if v.is_finite() {
                 (v * 1.0e6).round() as i64
+            } else {
+                0
             }
         };
         Some(

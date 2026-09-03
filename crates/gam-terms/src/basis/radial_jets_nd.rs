@@ -103,7 +103,10 @@ pub(crate) fn duchon_radial_jets_nd(
         Some(_) => (p_order, power),
         None => (p_order + power, 0usize),
     };
-    let kappa = length_scale.map(|l| 1.0 / l.max(1e-300)).unwrap_or(0.0);
+    let kappa = match length_scale {
+        Some(l) => duchon_inverse_length_scale(l, "Duchon N-D radial jets")?,
+        None => 0.0,
+    };
     let coeffs = duchon_partial_fraction_coeffs(jet_p_order, s_order, kappa);
     let effective_length_scale = duchon_effective_length_scale(length_scale, centers);
 
@@ -1048,7 +1051,11 @@ pub fn build_duchon_basis_design_and_jets(
 
     // Hybrid partial-fraction coefficients (None ⇒ pure polyharmonic).
     let coeffs = length_scale
-        .map(|ls| duchon_partial_fraction_coeffs(p_order, s_order_int, 1.0 / ls.max(1e-300)));
+        .map(|ls| {
+            duchon_inverse_length_scale(ls, "Duchon N-D basis design")
+                .map(|kappa| duchon_partial_fraction_coeffs(p_order, s_order_int, kappa))
+        })
+        .transpose()?;
     let pure_poly_coeff = if length_scale.is_none() {
         Some(PolyharmonicBlockCoeff::new(
             pure_duchon_block_order(kernel_m, s_order_f),

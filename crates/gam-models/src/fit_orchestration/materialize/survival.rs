@@ -1485,7 +1485,6 @@ pub(crate) fn materialize_survival<'a>(
                     time_build: time_build.clone(),
                     timewiggle: effective_timewiggle.clone(),
                     weibull_seed,
-                    ridge_lambda: config.ridge_lambda,
                     penalty_block_gamma_priors: config.penalty_block_gamma_priors.clone(),
                 },
                 persistent_warm_start_store: config.persistent_warm_start_store.clone(),

@@ -362,8 +362,11 @@ impl HyperGradientBudget {
             let residual = dg_i - &predicted;
             let e0 = energy(&self.history[*left_idx]);
             let e1 = energy(&self.history[*left_idx + 1]);
-            let denom_energy = e0.max(e1).max(1e-300);
-            if !denom_energy.is_finite() || denom_energy < 0.0 {
+            // A pair whose energies are both zero has no scale to normalize the
+            // residual against; skip it instead of dividing by a floored zero and
+            // recording an astronomically large "estimate".
+            let denom_energy = e0.max(e1);
+            if !(denom_energy.is_finite() && denom_energy > 0.0) {
                 continue;
             }
             let estimate = l2_norm(&residual) / (2.0 * denom_energy).sqrt();

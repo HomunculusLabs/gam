@@ -158,9 +158,6 @@ pub fn resolve_fit_request_config(
     fit_config.expectile_tau = json_config.expectile_tau;
     fit_config.offset_column = json_config.offset;
     fit_config.weight_column = json_config.weights;
-    if let Some(ridge_lambda) = json_config.ridge_lambda {
-        fit_config.ridge_lambda = ridge_lambda;
-    }
     if let Some(flag) = json_config.transformation_normal {
         fit_config.transformation_normal = flag;
     }
@@ -813,20 +810,18 @@ mod tests {
                 }),
             },
             ParityCase {
-                name: "offset weights ridge and noise offset columns",
+                name: "offset weights and noise offset columns",
                 cli: {
                     let mut input = base_cli();
                     input.offset_column = Some("eta_offset".to_string());
                     input.weight_column = Some("case_weight".to_string());
                     input.noise_offset_column = Some("sigma_offset".to_string());
-                    input.ridge_lambda = 0.125;
                     input
                 },
                 json: json!({
                     "offset": "eta_offset",
                     "weights": "case_weight",
-                    "noise_offset": "sigma_offset",
-                    "ridge_lambda": 0.125
+                    "noise_offset": "sigma_offset"
                 }),
             },
             ParityCase {
@@ -970,17 +965,6 @@ mod tests {
     #[test]
     fn cli_shaped_and_json_wire_config_resolution_rejections_match() {
         let cases = vec![
-            ParityCase {
-                name: "negative ridge lambda",
-                cli: {
-                    let mut input = base_cli();
-                    input.ridge_lambda = -1.0;
-                    input
-                },
-                json: json!({
-                    "ridge_lambda": -1.0
-                }),
-            },
             ParityCase {
                 name: "linear baseline rejects shape",
                 cli: {

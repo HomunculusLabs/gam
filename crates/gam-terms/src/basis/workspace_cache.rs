@@ -564,7 +564,7 @@ pub fn create_matern_spline_basiswithworkspace(
         pairwise_distance_bounds(centers)
     };
     if let Some((r_min, r_max)) = warn_bounds {
-        let kappa = 1.0 / length_scale.max(1e-300);
+        let kappa = duchon_inverse_length_scale(length_scale, "Matérn spline basis operating range")?;
         let kappa_lo = 1e-2 / r_max;
         let kappa_hi = 1e2 / r_min;
         if kappa < kappa_lo || kappa > kappa_hi {

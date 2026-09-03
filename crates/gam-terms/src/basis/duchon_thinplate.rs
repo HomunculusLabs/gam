@@ -655,16 +655,20 @@ fn build_duchon_basis_uncached(
         let s_order: f64 = spec.power;
         let length_scale = spec.length_scale;
         let s_order_int = length_scale.map(|_| duchon_power_to_usize(s_order));
-        let coeffs = length_scale.map(|ls| {
-            // Hybrid Matérn (length_scale = Some) uses the integer
-            // partial-fraction chain; assert at this boundary so the
-            // scale-free path stays fractional-clean.
-            duchon_partial_fraction_coeffs(
-                p_order,
-                s_order_int.expect("hybrid Duchon requires integer power"),
-                1.0 / ls.max(1e-300),
-            )
-        });
+        let coeffs = length_scale
+            .map(|ls| {
+                // Hybrid Matérn (length_scale = Some) uses the integer
+                // partial-fraction chain; assert at this boundary so the
+                // scale-free path stays fractional-clean.
+                duchon_inverse_length_scale(ls, "Duchon thin-plate basis").map(|kappa| {
+                    duchon_partial_fraction_coeffs(
+                        p_order,
+                        s_order_int.expect("hybrid Duchon requires integer power"),
+                        kappa,
+                    )
+                })
+            })
+            .transpose()?;
         let pure_poly_coeff = if length_scale.is_none() {
             Some(PolyharmonicBlockCoeff::new(
                 pure_duchon_block_order(p_order, s_order),

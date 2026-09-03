@@ -2186,7 +2186,7 @@ pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     // penalty whenever the UV+IR+precondition predicate holds, independent of
     // the polynomial nullspace order. Polynomial columns are zero-padded in
     // the closed-form block because they are the unpenalized Duchon nullspace.
-    let kappa = 1.0 / length_scale.max(1e-300);
+    let kappa = duchon_inverse_length_scale(length_scale, "sphere Duchon operator penalty")?;
     let aniso = spec.aniso_log_scales.as_deref();
     if duchon_closed_form_operator_penalty_converges(1, p_order, s_order as f64, d) {
         let (cf_s, cf_s_psi, cf_s_psi_psi) = closed_form_psi_derivatives_in_total_basis(
@@ -2447,7 +2447,11 @@ pub fn build_duchon_native_penalty_psi_derivatives_in_directions(
     let kernel_cols = z.ncols();
     let poly_cols = polynomial_block_from_order(centers, effective_nullspace_order).ncols();
     let total_cols = kernel_cols + poly_cols;
-    let coeffs = duchon_partial_fraction_coeffs(p_order, s_order, 1.0 / length_scale.max(1e-300));
+    let coeffs = duchon_partial_fraction_coeffs(
+        p_order,
+        s_order,
+        duchon_inverse_length_scale(length_scale, "sphere Duchon native penalty")?,
+    );
     let kernel_amp = duchon_kernel_amplification(
         centers,
         Some(length_scale),
