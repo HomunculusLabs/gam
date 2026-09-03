@@ -13,46 +13,70 @@
 //! loadings are its factor coordinates.
 //!
 //! The rank is grown from zero by the evidence. At rank `K`, adding an atom
-//! with loading vector `v` and rate `r` changes the evidence to second order
-//! in `v` by `½ vᵀ M(r) v` (the first order vanishes: an atom is symmetric
-//! under `v → −v`), with the covariance score
+//! with loading vector `a` and rate `r` changes the log-evidence to second
+//! order in `a` by `½ aᵀ M(r) a` (the first order vanishes: an atom is
+//! symmetric under `a → −a`), with the covariance score
 //!
 //! ```text
 //! M(r) = Σ_i [ Σ_{n,m} e^{−r |t_n − t_m|} s̄_{in} s̄_{im}ᵀ − Σ_n diag(c̄_{in}) ],
 //! ```
 //!
-//! `s̄_{nd} = y_{nd} − w_{nd} μ̄_{nd}` the residual scores at the current
-//! fit's posterior-mean intensities and `c̄_{nd} = w_{nd} μ̄_{nd}` their
-//! curvatures. This is the score of the evidence with respect to the
-//! covariance operator in the direction `v vᵀ e^{−r|Δ|}`; its top eigenpair
-//! at the rate that maximises the top eigenvalue is the most
-//! evidence-improving covariance direction the current rank omits, and it
-//! initialises the next atom without any arbitrary symmetry breaking. The
-//! double sum is evaluated by the forward–backward recursion of the
-//! exponential kernel in `O(N D)` per subject, and so are its first two
-//! derivatives in the log-rate, so the rate is found by Newton's method.
+//! `s̄_{nd} = y_{nd} − w_{nd} μ̄_{nd}` the martingale residuals at the current
+//! fit's filtered intensities and `c̄_{nd} = w_{nd} μ̄_{nd}` their predictable
+//! variation. Along a unit direction `v` the evidence is, to the next order,
+//! `½ μ t² − ¼ J t⁴` in the loading magnitude `t`, with `μ = vᵀ M v` and `J`
+//! the Fisher information of the variance component along `v` (the variance
+//! of the score under the fitted null, from the Poisson cumulants of the
+//! residuals). That quartic is the model of the evidence this module reads.
+//!
+//! The atom's loadings carry an isotropic Gaussian prior `a ~ N(0, λ⁻¹ I)`,
+//! the penalty toward no latent effect, and `λ` is chosen by empirical
+//! Bayes: it maximises the marginal likelihood `∫ L(a) N(a; 0, λ⁻¹I) da`.
+//! Under the quartic model that marginal factorises over the eigenvectors of
+//! `M`, and each factor is a one-dimensional integral
+//!
+//! ```text
+//! Z_i(λ) = √(λ/2π) ∫ exp(½ (μ_i − λ) t² − ¼ J_i t⁴) dt,
+//! ```
+//!
+//! evaluated exactly. A Laplace approximation of the same integral is not
+//! usable here: the integrand is even in `t`, so at `λ = μ_i` its curvature
+//! at the mode vanishes and the Laplace log-determinant diverges — a
+//! criterion that is unbounded below at the very boundary the rank decision
+//! is about. The exact integral is smooth through it. The prior the evidence
+//! chooses places the posterior mode of the loading away from zero exactly
+//! when `λ̂ < μ_max`; that, and nothing else, is what accepts an atom. The
+//! decision is derived from the model and carries no chosen level.
+//!
+//! The rate is found first, by maximising the standardised gain
+//! `μ² / (4 J)` of the top direction over the log-rate (the raw score is
+//! always largest at rate zero, since a slower kernel dominates every faster
+//! one entrywise; the standardised gain is the matched filter), by a secant
+//! Newton on its exact derivative. The double sums are evaluated by the
+//! forward–backward recursion of the exponential kernel in `O(N D)` per
+//! subject, and so are their first two derivatives in the log-rate.
 
 use super::cohort::EventHistoryError;
 use faer::Side;
 use gam_linalg::faer_ndarray::strict_symmetric_eigh;
 use ndarray::{Array1, Array2};
 
-/// `C(0) = A Aᵀ`.
-pub fn disease_covariance(loadings: &Array2<f64>) -> Array2<f64> {
+/// `A Aᵀ`.
+pub fn factor_covariance(loadings: &Array2<f64>) -> Array2<f64> {
     loadings.dot(&loadings.t())
 }
 
-/// `C(Δ) = A diag(e^{−r_k |Δ|}) Aᵀ` for rates in the data's time unit.
-pub fn temporal_covariance(loadings: &Array2<f64>, rates: &[f64], lag: f64) -> Array2<f64> {
-    let (marks, atoms) = loadings.dim();
+/// `C(Δ) = Σ_k C_k e^{−r_k |Δ|}` for one covariance share `C_k = E[a_k a_kᵀ]`
+/// per atom and rates in the data's time unit.
+pub fn temporal_covariance(
+    marks: usize,
+    atom_covariances: &[Array2<f64>],
+    rates: &[f64],
+    lag: f64,
+) -> Array2<f64> {
     let mut out = Array2::<f64>::zeros((marks, marks));
-    for k in 0..atoms {
-        let decay = (-rates[k] * lag.abs()).exp();
-        for d in 0..marks {
-            for e in 0..marks {
-                out[[d, e]] += loadings[[d, k]] * loadings[[e, k]] * decay;
-            }
-        }
+    for (share, rate) in atom_covariances.iter().zip(rates.iter()) {
+        out += &(share * (-rate * lag.abs()).exp());
     }
     out
 }
@@ -77,6 +101,21 @@ pub fn eigenmodes(matrix: &Array2<f64>) -> Result<(Array1<f64>, Array2<f64>), Ev
         sorted_vectors.column_mut(j).assign(&vectors.column(i));
     }
     Ok((sorted_values, sorted_vectors))
+}
+
+/// The participation ratio `(tr C)² / tr(C²)`: the number of equal
+/// eigenvalues that would spread the same total variance as `C` does, a
+/// continuous count of the directions the covariance actually uses. One for
+/// a rank-one covariance, the dimension for an isotropic one, zero for the
+/// zero matrix.
+pub fn effective_rank(covariance: &Array2<f64>) -> f64 {
+    let trace: f64 = covariance.diag().sum();
+    let frobenius: f64 = covariance.iter().map(|c| c * c).sum();
+    if frobenius > 0.0 {
+        trace * trace / frobenius
+    } else {
+        0.0
+    }
 }
 
 /// One subject's residual scores at the current fit.
@@ -184,21 +223,261 @@ pub(crate) fn covariance_score(
     [m0, d1, d2]
 }
 
-/// The atom the covariance score proposes: its loading vector (the top
-/// eigenvector of `M` scaled to the one-step estimate of its variance), its
-/// log-rate, and the score's top eigenvalue there.
+/// The Fisher information `J` of the variance component along the unit
+/// direction `v` at `rate`, and its derivative in the log-rate when the
+/// direction's own derivative `v_slope` is supplied.
+///
+/// The score of the variance component `τ` along `v` at `τ = 0` is
+/// `U = ½ vᵀ M v`, and `J` is twice its variance under the fitted null so
+/// that the second-order evidence is `½ μ τ − ¼ J τ²`. For a marked counting
+/// process the compensated score `s = y − wμ` has, at each node and mark,
+/// the Poisson cumulants `Var s = c`, `Var s² = c + 2c²`, so
+///
+/// ```text
+/// J = Σ_{n,m} e^{−2r|t_n−t_m|} κ_n κ_m + ½ Σ_n Σ_d v_d⁴ c_{nd},
+/// κ_n = Σ_d v_d² c_{nd}.
+/// ```
+///
+/// The second term is the process's own diagonal — the variance a count
+/// carries at a single instant — and it is what stops the standardised gain
+/// from running away as the kernel narrows: the smooth part collapses to
+/// `Σ_n κ_n²` there while the diagonal stays, so a kernel narrower than the
+/// data's own structure buys nothing. Dropping it (the Gaussian-response
+/// form of the same statistic) sends the proposal to white noise on any
+/// cohort whose residuals are event spikes, which is every point process.
+fn direction_information(
+    subjects: &[SubjectResiduals],
+    marks: usize,
+    rate: f64,
+    v: &[f64],
+    v_slope: Option<&[f64]>,
+) -> (f64, f64) {
+    let mut information = 0.0;
+    let mut information_slope = 0.0;
+    for subject in subjects {
+        let n = subject.times.len();
+        let kappa: Vec<f64> = (0..n)
+            .map(|node| (0..marks).map(|d| v[d] * v[d] * subject.curvatures[node * marks + d]).sum())
+            .collect();
+        let sums = kernel_sums(&subject.times, &kappa, 1, 2.0 * rate);
+        for node in 0..n {
+            information += kappa[node] * sums[0][node];
+            for d in 0..marks {
+                let c = subject.curvatures[node * marks + d];
+                let v2 = v[d] * v[d];
+                information += 0.5 * v2 * v2 * c;
+            }
+        }
+        if let Some(v_slope) = v_slope {
+            let kappa_slope: Vec<f64> = (0..n)
+                .map(|node| {
+                    (0..marks)
+                        .map(|d| 2.0 * v[d] * v_slope[d] * subject.curvatures[node * marks + d])
+                        .sum()
+                })
+                .collect();
+            for node in 0..n {
+                // d/dρ of e^{−2r|Δ|} is −2 r |Δ| e^{−2r|Δ|}; the quadratic
+                // form is symmetric, so the κ derivative enters twice. The
+                // diagonal is independent of the rate, so it enters the slope
+                // only through `v`.
+                information_slope += -2.0 * rate * kappa[node] * sums[1][node]
+                    + 2.0 * kappa_slope[node] * sums[0][node];
+                for d in 0..marks {
+                    let c = subject.curvatures[node * marks + d];
+                    information_slope += 2.0 * v[d] * v[d] * v[d] * v_slope[d] * c;
+                }
+            }
+        }
+    }
+    (information, information_slope)
+}
+
+/// The exact one-dimensional marginal of the quartic evidence model along
+/// one direction: `ln ∫ exp(½ a t² − ¼ J t⁴) dt` with `a = μ − λ`, and the
+/// moments `E[t²]`, `E[t⁴]` of `t` under that density.
+///
+/// The integrand is entire and even, so the trapezoidal rule converges
+/// faster than any power of its spacing. The grid resolves the narrowest
+/// feature — the peak's width `1/√max(|a|, √J)` — at eight points, where
+/// the rule's aliasing error on a feature of that width is `exp(−2π²·64)`,
+/// far below roundoff, and it extends to where the integrand has fallen
+/// sixty nats below its peak, which is `e⁻⁶⁰` of it. The sums are formed in
+/// log space.
+pub(crate) fn quartic_moments(mu: f64, information: f64, lambda: f64) -> (f64, f64, f64) {
+    let a = mu - lambda;
+    let j = information;
+    let g = |t: f64| 0.5 * a * t * t - 0.25 * j * t * t * t * t;
+    let (peak, g_peak) = if a > 0.0 {
+        ((a / j).sqrt(), a * a / (4.0 * j))
+    } else {
+        (0.0, 0.0)
+    };
+    let width = 1.0 / a.abs().max(j.sqrt()).sqrt();
+    let mut half_range = peak + 8.0 * width;
+    while g(half_range) > g_peak - 60.0 {
+        half_range *= 2.0;
+    }
+    let spacing = width / 8.0;
+    let steps = (half_range / spacing).ceil() as usize;
+    let mut shift = f64::NEG_INFINITY;
+    let mut values: Vec<(f64, f64)> = Vec::with_capacity(2 * steps + 1);
+    for i in -(steps as i64)..=(steps as i64) {
+        let t = i as f64 * spacing;
+        let value = g(t);
+        shift = shift.max(value);
+        values.push((t, value));
+    }
+    let mut mass = 0.0;
+    let mut second = 0.0;
+    let mut fourth = 0.0;
+    for &(t, value) in &values {
+        let weight = (value - shift).exp();
+        mass += weight;
+        second += weight * t * t;
+        fourth += weight * t * t * t * t;
+    }
+    let log_integral = shift + (mass * spacing).ln();
+    (log_integral, second / mass, fourth / mass)
+}
+
+/// The empirical-Bayes prior of a new atom's loadings and the decision it
+/// carries.
+#[derive(Clone, Debug)]
+pub(crate) struct RidgeProfile {
+    /// `ln λ̂`: the precision of the isotropic Gaussian prior that maximises
+    /// the marginal likelihood under the quartic model; `+∞` when no finite
+    /// prior raises it.
+    pub log_lambda: f64,
+    /// `ln p(y | λ̂) − ln p(y | λ = ∞)` in nats: the evidence the prior buys
+    /// against the current rank (zero when nothing is bought).
+    pub gain: f64,
+    /// The loading magnitude at the posterior mode along the top direction,
+    /// `√((μ_max − λ̂) / J_max)`; zero when the mode is at zero.
+    pub mode_scale: f64,
+    /// `λ̂ < μ_max`: the prior places the posterior mode of the loading away
+    /// from zero. This is the acceptance of the atom.
+    pub accepted: bool,
+}
+
+/// The empirical-Bayes prior for a loading vector whose evidence, along the
+/// eigen-directions of the covariance score, is `½ μ_i t² − ¼ J_i t⁴`.
+///
+/// The negative log marginal likelihood
+/// `c(λ) = −Σ_i ln Z_i(λ)` is `+∞` at `λ → 0` (a prior too loose to
+/// normalise) and tends to zero as `λ → ∞` (the atom pinned to zero, the
+/// current rank). It is minimised over `ρ = ln λ` by a safeguarded Newton
+/// on its exact derivatives, `dc/dλ = Σ_i [½ E_i[t²] − 1/(2λ)]` and
+/// `d²c/dλ² = Σ_i [1/(2λ²) − ¼ Var_i(t²)]`, from the Laplace-scale start
+/// `λ = J_max / μ_max`. A profile with no direction of positive score has no
+/// finite minimiser and is refused without a search.
+pub(crate) fn empirical_bayes_ridge(directions: &[(f64, f64)]) -> RidgeProfile {
+    let refused = RidgeProfile {
+        log_lambda: f64::INFINITY,
+        gain: 0.0,
+        mode_scale: 0.0,
+        accepted: false,
+    };
+    let Some(&(mu_max, j_max)) = directions
+        .iter()
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+    else {
+        return refused;
+    };
+    if !(mu_max > 0.0) || !(j_max > 0.0) {
+        return refused;
+    }
+    let profile = |rho: f64| -> (f64, f64, f64) {
+        let lambda = rho.exp();
+        let mut value = 0.0;
+        let mut d_lambda = 0.0;
+        let mut d2_lambda = 0.0;
+        for &(mu, j) in directions {
+            let (log_integral, second, fourth) = quartic_moments(mu, j, lambda);
+            value += -0.5 * (lambda / (2.0 * std::f64::consts::PI)).ln() - log_integral;
+            d_lambda += 0.5 * second - 0.5 / lambda;
+            d2_lambda += 0.5 / (lambda * lambda) - 0.25 * (fourth - second * second);
+        }
+        let d_rho = lambda * d_lambda;
+        let d2_rho = lambda * d_lambda + lambda * lambda * d2_lambda;
+        (value, d_rho, d2_rho)
+    };
+    let mut rho = (j_max / mu_max).ln();
+    let (mut value, mut slope, mut curvature) = profile(rho);
+    for _ in 0..200 {
+        let tolerance = f64::EPSILON.sqrt() * (1.0 + value.abs());
+        if !(slope.abs() > tolerance) {
+            break;
+        }
+        let direction = if curvature > 0.0 {
+            (-slope / curvature).clamp(-2.0, 2.0)
+        } else {
+            -slope.signum()
+        };
+        let mut t = 1.0;
+        let mut moved = false;
+        for _ in 0..60 {
+            let trial = rho + t * direction;
+            let (trial_value, trial_slope, trial_curvature) = profile(trial);
+            if trial_value < value {
+                rho = trial;
+                value = trial_value;
+                slope = trial_slope;
+                curvature = trial_curvature;
+                moved = true;
+                break;
+            }
+            t *= 0.5;
+        }
+        if !moved {
+            break;
+        }
+    }
+    let lambda = rho.exp();
+    let accepted = value < 0.0 && lambda < mu_max;
+    RidgeProfile {
+        log_lambda: rho,
+        gain: -value,
+        mode_scale: if accepted { ((mu_max - lambda) / j_max).sqrt() } else { 0.0 },
+        accepted,
+    }
+}
+
+/// The atom the covariance score proposes and the evidence's verdict on it.
 #[derive(Clone, Debug)]
 pub(crate) struct NewAtom {
     pub log_rate: f64,
+    /// The loading vector at the posterior mode under the empirical-Bayes
+    /// prior: `mode_scale · v_max`.
     pub loading: Vec<f64>,
+    /// The score's top eigenvalue at the proposed rate.
     pub eigenvalue: f64,
-    /// The one-step estimate of the variance component along the direction.
-    pub variance: f64,
-    /// The proposal wanted a rate the node mesh cannot resolve and was held
-    /// at [`resolvable_log_rates`]'s upper limit: the residuals carry
+    /// `μ_max² / (4 J_max)`: the second-order evidence gain of the top
+    /// direction, the matched-filter statistic the rate maximises.
+    pub standardised_gain: f64,
+    /// The empirical-Bayes prior and its decision.
+    pub ridge: RidgeProfile,
+    /// The residuals cannot tell the proposed rate from one twice as slow
+    /// (the gain is flat to double precision across that doubling), or the
+    /// proposal sits at [`resolvable_log_rates`]'s lower limit: the atom is
+    /// a static frailty as far as the data resolve, and every slower rate is
+    /// the same model.
+    pub at_lower_limit: bool,
+    /// The residuals cannot tell the proposed rate from one twice as fast,
+    /// or the proposal wanted a rate the node mesh cannot resolve and was
+    /// held at [`resolvable_log_rates`]'s upper limit: the residuals carry
     /// structure faster than the quadrature mesh, and a finer mesh would
     /// see more of it.
-    pub at_resolution_limit: bool,
+    pub at_upper_limit: bool,
+}
+
+impl NewAtom {
+    /// On either plateau the likelihood is flat in the log-rate to double
+    /// precision, so the rate is held there as data rather than fitted as a
+    /// coordinate whose mode no certificate could resolve.
+    pub fn rate_held(&self) -> bool {
+        self.at_lower_limit || self.at_upper_limit
+    }
 }
 
 /// The log-rates the cohort's own node mesh can represent, as
@@ -211,14 +490,7 @@ pub(crate) struct NewAtom {
 ///
 /// Above `upper` the atom decorrelates inside one cell of the quadrature
 /// mesh, and there the discretisation stops representing the process it
-/// stands for. The limit matters because the likelihood diverges beyond it:
-/// an event node carries a count but no exposure, so once its neighbours
-/// decorrelate, its latent coordinate is held only by the prior and
-/// `y a z − ½z²` is maximised at `z = a` with value `a²/2` — free evidence
-/// per event, growing without bound in the loading. The continuous-time
-/// model has no such corner (the exponential of white noise is not a random
-/// measure, so those rates are not in the parameter space at all); the mesh
-/// invents it. `κ = rate · gap ≤ 1` at the median gap is the statement that
+/// stands for: `κ = rate · gap ≤ 1` at the median gap is the statement that
 /// consecutive nodes still share information, so the fit is measuring the
 /// data rather than its own mesh. A proposal that wants to sit on this
 /// limit is telling the caller the mesh is too coarse for the process the
@@ -248,48 +520,26 @@ pub(crate) fn resolvable_log_rates(
     Ok(Some((lower, upper)))
 }
 
-/// The standardised evidence gain of the proposed direction at log-rate
-/// `ρ`, with its exact derivative in `ρ`.
-///
-/// The score of the variance component `τ` along `v` at `τ = 0` is
-/// `U = ½ vᵀM(r)v`, and its information is the variance of that score under
-/// the fitted null. For a marked counting process the compensated score
-/// `s = y − wμ` has, at each node and mark, the Poisson cumulants
-/// `Var s = c`, `Var s² = c + 2c²`, so
-///
-/// ```text
-/// Var U = ½ Σ_{n,m} e^{−2r|t_n−t_m|} κ_n κ_m + ¼ Σ_n Σ_d v_d⁴ c_{nd},
-/// κ_n = Σ_d v_d² c_{nd}.
-/// ```
-///
-/// The second term is the process's own diagonal — the variance a count
-/// carries at a single instant — and it is what stops the standardised gain
-/// from running away as the kernel narrows: the smooth part collapses to
-/// `Σ_n κ_n²` there while the diagonal stays, so a kernel narrower than the
-/// data's own structure buys nothing. Dropping it (the Gaussian-response
-/// form of the same statistic) sends the proposal to white noise on any
-/// cohort whose residuals are event spikes, which is every point process.
+/// The standardised evidence gain of the top direction at log-rate `ρ`,
+/// with its exact derivative in `ρ`, and the score's spectrum there.
 struct GainPoint {
     rho: f64,
     gain: f64,
     slope: f64,
     top: f64,
-    vector: Vec<f64>,
     information: f64,
+    values: Array1<f64>,
+    vectors: Array2<f64>,
 }
 
-/// Propose the next atom: at every log-rate the top eigenpair `(λ, v)` of
-/// `M(ρ)` is the direction with the largest second-order evidence slope
-/// `½ λ` in its variance `τ`; the Fisher information of that slope is
-/// `½ J` with `J = Σ_i Σ_{n,m} e^{−2r|t_n − t_m|} κ_n κ_m`,
-/// `κ_n = Σ_d v_d² c̄_{nd}`, so the second-order model's best gain is
-/// `λ² / (4 J)` at `τ̂ = λ / J`. The raw slope is always largest at rate
-/// zero (a slower kernel dominates every faster one entrywise); the
-/// standardised gain is the matched filter, largest at the rate that
-/// generated the residual correlation. It is maximised over `ρ` by a secant
-/// Newton on its exact derivative (Hellmann–Feynman for `λ`, first-order
-/// eigenvector perturbation for `v`, the kernel recursion for `J`).
-/// `None` when no direction raises the evidence.
+/// Propose the next atom: at every log-rate the top eigenpair `(μ, v)` of
+/// `M(ρ)` is the direction with the largest second-order evidence slope in
+/// its variance, and the standardised gain `μ² / (4 J)` is maximised over
+/// `ρ` by a secant Newton on its exact derivative (Hellmann–Feynman for
+/// `μ`, first-order eigenvector perturbation for `v`, the kernel recursion
+/// for `J`). At the rate found, the empirical-Bayes prior of the loadings is
+/// computed from the score's whole spectrum and decides the atom. `None`
+/// only when the cohort's mesh admits no rate at all.
 pub(crate) fn best_new_atom(
     subjects: &[SubjectResiduals],
     marks: usize,
@@ -314,50 +564,20 @@ pub(crate) fn best_new_atom(
             }
         }
         let rate = rho.exp() / time_scale;
-        // `information` is twice the score's variance, so that the one-step
-        // variance is `λ / information` and the gain `λ² / (4 information)`.
-        let mut information = 0.0;
-        let mut information_slope = 0.0;
-        for subject in subjects {
-            let n = subject.times.len();
-            let kappa: Vec<f64> = (0..n)
-                .map(|node| (0..marks).map(|d| v[d] * v[d] * subject.curvatures[node * marks + d]).sum())
-                .collect();
-            let kappa_slope: Vec<f64> = (0..n)
-                .map(|node| {
-                    (0..marks)
-                        .map(|d| 2.0 * v[d] * v_slope[d] * subject.curvatures[node * marks + d])
-                        .sum()
-                })
-                .collect();
-            let sums = kernel_sums(&subject.times, &kappa, 1, 2.0 * rate);
-            for node in 0..n {
-                information += kappa[node] * sums[0][node];
-                // d/dρ of e^{−2r|Δ|} is −2 r |Δ| e^{−2r|Δ|}; the quadratic
-                // form is symmetric, so the κ derivative enters twice.
-                information_slope += -2.0 * rate * kappa[node] * sums[1][node]
-                    + 2.0 * kappa_slope[node] * sums[0][node];
-                // The process's own diagonal, ½ Σ_d v_d⁴ c: independent of
-                // the rate, so it enters the slope only through `v`.
-                for d in 0..marks {
-                    let c = subject.curvatures[node * marks + d];
-                    let v2 = v[d] * v[d];
-                    information += 0.5 * v2 * v2 * c;
-                    information_slope += 2.0 * v2 * v[d] * v_slope[d] * c;
-                }
-            }
-        }
+        let (information, information_slope) =
+            direction_information(subjects, marks, rate, &v, Some(&v_slope));
         if !(information > 0.0) {
             return Ok(GainPoint {
                 rho,
                 gain: 0.0,
                 slope: 0.0,
                 top,
-                vector: v,
                 information,
+                values,
+                vectors,
             });
         }
-        // Signed gain λ|λ| / (4J): odd in λ, so the ascent also moves a
+        // Signed gain μ|μ| / (4J): odd in μ, so the ascent also moves a
         // negative top eigenvalue toward where it turns positive.
         let gain = top * top.abs() / (4.0 * information);
         let slope = (2.0 * top.abs() * top_slope * information - top * top.abs() * information_slope)
@@ -367,8 +587,9 @@ pub(crate) fn best_new_atom(
             gain,
             slope,
             top,
-            vector: v,
             information,
+            values,
+            vectors,
         })
     };
     let Some((lower, upper)) = resolvable_log_rates(subjects, time_scale)? else {
@@ -408,16 +629,63 @@ pub(crate) fn best_new_atom(
             break;
         }
     }
-    if !(point.top > 0.0) || !(point.information > 0.0) {
-        return Ok(None);
-    }
-    let variance = point.top / point.information;
-    let scale = variance.sqrt();
+    let rate = point.rho.exp() / time_scale;
+    // The information along every eigen-direction of the score at the rate
+    // found: the quartic model of the evidence is read on the whole spectrum,
+    // because the prior is isotropic and its Occam factor charges every
+    // direction the loading could take.
+    let directions: Vec<(f64, f64)> = (0..marks)
+        .map(|i| {
+            let v: Vec<f64> = point.vectors.column(i).to_vec();
+            let (information, _) = if i == 0 {
+                (point.information, 0.0)
+            } else {
+                direction_information(subjects, marks, rate, &v, None)
+            };
+            (point.values[i], information)
+        })
+        .collect();
+    let ridge = empirical_bayes_ridge(&directions);
+    let standardised_gain = if point.information > 0.0 {
+        point.top * point.top.abs() / (4.0 * point.information)
+    } else {
+        0.0
+    };
+    let loading: Vec<f64> = point
+        .vectors
+        .column(0)
+        .iter()
+        .map(|x| ridge.mode_scale * x)
+        .collect();
+    // A plateau: the gain does not change, to the resolution the search
+    // itself converged at, when the rate is halved or doubled. The kernel is
+    // monotone in the rate, so a gain flat across one doubling is flat all
+    // the way to the limit on that side.
+    let margin = |limit: f64| f64::EPSILON.sqrt() * (1.0 + limit.abs());
+    let resolution = f64::EPSILON.sqrt() * (1.0 + point.gain.abs());
+    let flat_toward = |delta: f64| -> Result<bool, EventHistoryError> {
+        let target = (point.rho + delta).clamp(lower, upper);
+        if target == point.rho {
+            return Ok(true);
+        }
+        let trial = evaluate(target)?;
+        Ok((trial.gain - point.gain).abs() <= resolution)
+    };
+    let flat_slower = flat_toward(-std::f64::consts::LN_2)?;
+    let flat_faster = flat_toward(std::f64::consts::LN_2)?;
+    // Flat on both sides is the static plateau: the rate is already too slow
+    // for the follow-up to see, and doubling it changes nothing either. The
+    // fast plateau is the one that is flat only toward faster rates, or the
+    // wall the search was clamped at.
+    let at_lower_limit = point.rho <= lower + margin(lower) || flat_slower;
+    let at_upper_limit = point.rho >= upper - margin(upper) || (flat_faster && !flat_slower);
     Ok(Some(NewAtom {
         log_rate: point.rho,
-        loading: point.vector.iter().map(|x| scale * x).collect(),
+        loading,
         eigenvalue: point.top,
-        variance,
-        at_resolution_limit: point.rho >= upper - f64::EPSILON.sqrt() * (1.0 + upper.abs()),
+        standardised_gain,
+        ridge,
+        at_lower_limit,
+        at_upper_limit,
     }))
 }

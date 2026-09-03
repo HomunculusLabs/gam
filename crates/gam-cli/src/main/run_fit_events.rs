@@ -6,7 +6,7 @@ use gam::families::custom_family::BlockwiseFitOptions;
 use gam::families::event_history::{
     CovariateSegment, Event, EventHistoryCohort, ForecastRequest, FutureSegment, MarkKind,
     PopulationForecastRequest, SubjectHistory, fit_event_history_formula, forecast,
-    kolmogorov_smirnov_uniform, population_forecast, predictive_pit,
+    kolmogorov_smirnov_uniform, latent_state, population_forecast, predictive_pit,
 };
 use ndarray::Array2;
 use serde_json::{Map, Value, json};
@@ -202,39 +202,47 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
                 json!({
                     "rank": step.rank,
                     "score_eigenvalue": step.score_eigenvalue,
+                    "standardised_gain": step.standardised_gain,
                     "proposed_log_rate": step.proposed_log_rate,
                     "at_resolution_limit": step.at_resolution_limit,
-                    "converged": step.converged,
+                    "rate_held": step.rate_held,
+                    "ridge_log_lambda": step.ridge_log_lambda,
                     "evidence_gain": step.evidence_gain,
+                    "log_likelihood_gain": step.log_likelihood_gain,
                     "accepted": step.accepted,
+                    "converged": step.converged,
                 })
             })
             .collect::<Vec<_>>()),
     );
-    summary.insert(
-        "disease_covariance".to_string(),
-        json!(fit
-            .disease_covariance()
-            .rows()
-            .into_iter()
-            .map(|r| r.to_vec())
-            .collect::<Vec<_>>()),
-    );
-    let (eigenvalues, eigenvectors) = fit.eigenmodes().map_err(|e| e.to_string())?;
-    summary.insert("eigenvalues".to_string(), json!(eigenvalues.to_vec()));
-    summary.insert(
-        "eigenvectors".to_string(),
-        json!(eigenvectors.rows().into_iter().map(|r| r.to_vec()).collect::<Vec<_>>()),
-    );
+    let rows = |matrix: &ndarray::Array2<f64>| -> Vec<Vec<f64>> {
+        matrix.rows().into_iter().map(|r| r.to_vec()).collect()
+    };
+    summary.insert("covariance".to_string(), json!(rows(&fit.covariance)));
+    summary.insert("eigenvalues".to_string(), json!(fit.eigenvalues.to_vec()));
+    summary.insert("eigenvalue_sd".to_string(), json!(fit.eigenvalue_sd.to_vec()));
+    summary.insert("eigenvectors".to_string(), json!(rows(&fit.eigenvectors)));
+    summary.insert("effective_rank".to_string(), json!(fit.effective_rank));
+    if fit.rank() > 0 {
+        let mut states = Vec::with_capacity(cohort.subjects.len());
+        for subject in &cohort.subjects {
+            let state = latent_state(&fit, &cohort, subject).map_err(|e| e.to_string())?;
+            states.push(json!({
+                "id": subject.id,
+                "time": state.times,
+                "mean": rows(&state.mean),
+                "covariance": state.covariance.iter().map(rows).collect::<Vec<_>>(),
+            }));
+        }
+        summary.insert("latent_states".to_string(), Value::Array(states));
+    }
     summary.insert("log_likelihood".to_string(), json!(fit.fit.log_likelihood));
     summary.insert("reml_score".to_string(), json!(fit.fit.reml_score()));
     summary.insert("outer_iterations".to_string(), json!(fit.fit.outer_iterations));
     summary.insert("time_scale".to_string(), json!(fit.time_scale));
-    summary.insert(
-        "loadings".to_string(),
-        json!(fit.loadings.rows().into_iter().map(|r| r.to_vec()).collect::<Vec<_>>()),
-    );
+    summary.insert("loadings".to_string(), json!(rows(&fit.loadings)));
     summary.insert("rates".to_string(), json!(fit.rates));
+    summary.insert("rate_held".to_string(), json!(fit.rate_held));
     summary.insert("atom_log_lambdas".to_string(), json!(fit.atom_log_lambdas));
     summary.insert(
         "coefficients".to_string(),

@@ -1,5 +1,51 @@
 ## Unreleased
 
+- **Event histories: the rank of the latent covariance is decided by the
+  evidence's own prior, the reported latent object is the posterior-mean
+  covariance with its eigenmodes' uncertainty, and every subject's smoothed
+  latent state is exposed** (#2806, #2807, #2808, #2809, #2810). The rank
+  path landed in `5c61500ee` never compared two optimised models. Its atom's
+  ridge was an outer REML coordinate, and the custom-family engine holds
+  every such coordinate below the point where its term keeps one effective
+  degree of freedom, so the ridge could not switch the atom off: on the null
+  cohort the candidate sat railed at its own starting precision (a criterion
+  1.5 nats above the rank-zero fit, reported as a refusal), and on the
+  eighteen-subject competing-risks cohort the accepted frailty was fitted at
+  a precision below three, unshrunk. Beneath that, Laplace-integrating a
+  coefficient whose likelihood is even (`a → −a`) under a ridge has a
+  criterion that is unbounded below at `λ = μ_max(M)`, the very boundary the
+  rank decision is about: the penalised Hessian's curvature along the
+  loading vanishes there and `½ log|H + λS|` diverges. Both defects are
+  gone by construction. The atom's loadings keep their isotropic Gaussian
+  prior, but its precision is chosen from the covariance score by
+  empirical Bayes under the quartic model of the evidence along every
+  eigen-direction, `½ μ_i t² − ¼ J_i t⁴`, with each direction's marginal a
+  one-dimensional integral evaluated exactly (trapezoidal rule at roundoff),
+  and the atom is accepted exactly when that prior places the loading's
+  posterior mode off zero, `λ̂ < μ_max` — for one direction, the statement
+  that the standardised score exceeds `Γ(¼)/(2Γ(¾)) ≈ 1.48`, a property of
+  the quartic integral rather than a chosen level. A refused atom costs no
+  fit; an accepted one is fitted with its prior held fixed, so the latent
+  block adds no outer smoothing coordinate and a fit with parametric marks
+  is a single inner Newton solve. The log-rate is an unpenalised structural
+  coordinate (the old ridge on it was a prior centred on the cohort's mean
+  follow-up, which pulled every fitted rate toward `1/T̄`), and a rate the
+  residuals cannot tell from one twice as slow or twice as fast is held
+  there as data (`rate_held`), because the likelihood is flat in it and a
+  coordinate for it has no certifiable mode. `EventHistoryFit`
+  now carries `covariance` (`E[A Aᵀ | data]`, the mode plus each atom's
+  posterior loading spread), `atom_covariances`, `eigenvalues` with
+  `eigenvalue_sd` (first-order eigenvalue perturbation through the fit's
+  posterior covariance), `eigenvectors`, `effective_rank` (the
+  participation ratio), and `loadings` in the canonical gauge (atoms by
+  rate, columns signed positive); `disease_covariance` and `eigenmodes` are
+  gone. `latent_state` returns `E[z_i(t) | history]` with its posterior
+  covariance at every node, through a backward smoother factored out of the
+  Louis pass; Python (`model.latent_state`) and the CLI (`latent_states`)
+  expose it. The Laplace engine's four-mark runaway (#2808) is answered by
+  a test on the same cohort under this engine: the fitted eigenvalues stay
+  within their own posterior uncertainty of the simulated ones.
+
 - **The event-history engine is the one that recovers its own simulation.**
   On the shared 80-subject fixture (one mark, one atom; intercept −0.8, slope
   0.5, loading 1.0, rate 0.4) exact marginalisation returns intercept −0.15,

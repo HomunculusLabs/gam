@@ -42,7 +42,9 @@ use super::cohort::{
     SubjectHistory, SubjectNodes, cell_rule, expand_nodes, mesh_cells,
 };
 use super::family::EventHistoryFit;
-use super::marginal::{ForwardPass, SubjectInputs, expected_intensities, forward_filter};
+use super::marginal::{
+    ForwardPass, SubjectInputs, expected_intensities, forward_filter, latent_state_moments,
+};
 use gam_terms::smooth::build_term_collection_design;
 use ndarray::{Array1, Array2, ArrayView2};
 
@@ -159,9 +161,66 @@ fn node_eta0(fit: &EventHistoryFit, rows: ArrayView2<'_, f64>) -> Result<Vec<f64
     Ok(eta0)
 }
 
+/// The smoothed latent state of one subject: at every node of its history,
+/// the posterior mean of the atoms and their posterior covariance given the
+/// whole history. This is the quantity a discovery analysis wants — with its
+/// covariance, so that a fitted path is propagated as the uncertain object
+/// it is rather than read as observed.
+#[derive(Clone, Debug)]
+pub struct SmoothedLatentState {
+    /// The node times, entry to exit.
+    pub times: Vec<f64>,
+    /// `E[z(t) | history]`, `nodes × atoms`.
+    pub mean: Array2<f64>,
+    /// `Cov[z(t) | history]`, one `atoms × atoms` matrix per node.
+    pub covariance: Vec<Array2<f64>>,
+}
+
+/// The smoothed latent state of a subject over its observed history.
+pub fn latent_state(
+    fit: &EventHistoryFit,
+    cohort: &EventHistoryCohort,
+    history: &SubjectHistory,
+) -> Result<SmoothedLatentState, EventHistoryError> {
+    let atoms = fit.rank();
+    let (loadings, log_rates) = latent_parameters(fit);
+    let nodes = single_subject_nodes(fit, cohort, history)?;
+    let eta0 = node_eta0(fit, nodes.node_data.view())?;
+    let subject = &nodes.subjects[0];
+    let moments = latent_state_moments(&SubjectInputs {
+        nodes: subject,
+        eta0: &eta0,
+        loadings: &loadings,
+        log_rates: &log_rates,
+        time_scale: fit.time_scale,
+        gh: fit.family.gauss_hermite(),
+        continuation_gap: 0.0,
+        designs: None,
+    })?;
+    let mut mean = Array2::<f64>::zeros((subject.len(), atoms));
+    let mut covariance = Vec::with_capacity(subject.len());
+    for (n, (node_mean, node_covariance)) in moments.iter().enumerate() {
+        for k in 0..atoms {
+            mean[[n, k]] = node_mean[k];
+        }
+        let mut matrix = Array2::<f64>::zeros((atoms, atoms));
+        for k in 0..atoms {
+            for j in 0..atoms {
+                matrix[[k, j]] = node_covariance[k * atoms + j];
+            }
+        }
+        covariance.push(matrix);
+    }
+    Ok(SmoothedLatentState {
+        times: subject.times.clone(),
+        mean,
+        covariance,
+    })
+}
+
 fn latent_parameters(fit: &EventHistoryFit) -> (Vec<f64>, Vec<f64>) {
     let marks = fit.marks();
-    let atoms = fit.atoms();
+    let atoms = fit.rank();
     let mut loadings = Vec::with_capacity(marks * atoms);
     for d in 0..marks {
         for k in 0..atoms {
@@ -332,7 +391,7 @@ fn run_window(window: Window<'_>) -> Result<Forecast, EventHistoryError> {
     } = window;
     let at_risk = at_risk.as_slice();
     let marks = fit.marks();
-    let atoms = fit.atoms();
+    let atoms = fit.rank();
     let kinds = &cohort.mark_kinds;
     let n_cov = cohort.covariates.ncols();
     let (loadings, log_rates) = latent_parameters(fit);
@@ -670,7 +729,7 @@ pub fn predictive_pit(
     history: &SubjectHistory,
 ) -> Result<Vec<EventPit>, EventHistoryError> {
     let marks = fit.marks();
-    let atoms = fit.atoms();
+    let atoms = fit.rank();
     let kinds = &cohort.mark_kinds;
     let (loadings, log_rates) = latent_parameters(fit);
     let nodes = single_subject_nodes(fit, cohort, history)?;

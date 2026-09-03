@@ -6,13 +6,14 @@ use super::cohort::{
     CovariateSegment, Event, EventHistoryCohort, MarkKind, SubjectHistory, SubjectNodes,
     design_rows, expand_nodes,
 };
+use super::covariance::{empirical_bayes_ridge, quartic_moments};
 use super::family::{
-    Directional, EventHistoryFamily, EventHistoryFit, EventHistorySpec, fit_event_history,
-    fit_event_history_formula,
+    Directional, EventHistoryFamily, EventHistoryFit, EventHistorySpec, RankStart,
+    fit_event_history, fit_event_history_formula,
 };
 use super::forecast::{
     ForecastRequest, FutureSegment, PopulationForecastRequest, forecast,
-    kolmogorov_smirnov_uniform, population_forecast, predictive_pit,
+    kolmogorov_smirnov_uniform, latent_state, population_forecast, predictive_pit,
 };
 use super::marginal::{SubjectInputs, subject_marginal};
 use crate::custom_family::{BlockwiseFitOptions, ParameterBlockState};
@@ -646,47 +647,58 @@ impl Rng {
 }
 
 /// Simulate a marked cohort whose log-intensity of mark `d` is
-/// `intercept_d + slope · x + loading_d · z(t)` with `z` a unit-variance
-/// Ornstein–Uhlenbeck atom of the given rate, sampled exactly at the steps
-/// of a fine grid and held constant between them. Conditional on the path,
-/// each step's events are Poisson with the step's exact integrated
-/// intensity, placed uniformly in the step: no thinning bound is needed, so
-/// nothing is approximate beyond the piecewise-constant path itself, whose
-/// error vanishes with the step. A terminal mark ends follow-up at its
-/// event; a once-only mark leaves the risk set after its event.
-fn simulate_marked_cohort(
+/// `intercept_d + slope · x + Σ_k loading_{dk} · z_k(t)` with `z_k`
+/// independent unit-variance Ornstein–Uhlenbeck atoms of the given rates,
+/// sampled exactly at the steps of a fine grid and held constant between
+/// them. Conditional on the path, each step's events are Poisson with the
+/// step's exact integrated intensity, placed uniformly in the step: no
+/// thinning bound is needed, so nothing is approximate beyond the
+/// piecewise-constant path itself, whose error vanishes with the step. A
+/// terminal mark ends follow-up at its event; a once-only mark leaves the
+/// risk set after its event. The simulated paths are returned beside the
+/// cohort, one `steps × atoms` matrix per subject, so a fit's latent state
+/// can be judged against what generated the events.
+fn simulate_latent_cohort(
     subjects: usize,
     follow_up: f64,
     intercepts: &[f64],
     slope: f64,
-    loadings: &[f64],
-    rate: f64,
+    loadings: &Array2<f64>,
+    rates: &[f64],
     kinds: &[MarkKind],
     seed: u64,
-) -> EventHistoryCohort {
+) -> (EventHistoryCohort, Vec<Array2<f64>>) {
     let marks = intercepts.len();
+    let atoms = rates.len();
+    assert_eq!(loadings.dim(), (marks, atoms));
     let mut rng = Rng(seed);
     let steps = 400;
     let dt = follow_up / steps as f64;
-    let phi = (-rate * dt).exp();
-    let innovation = (1.0 - phi * phi).sqrt();
+    let phis: Vec<f64> = rates.iter().map(|rate| (-rate * dt).exp()).collect();
+    let innovations: Vec<f64> = phis.iter().map(|phi| (1.0 - phi * phi).sqrt()).collect();
     let mut covariates = Array2::<f64>::zeros((subjects, 1));
     let mut histories = Vec::with_capacity(subjects);
+    let mut paths = Vec::with_capacity(subjects);
     for s in 0..subjects {
         let x = rng.normal();
         covariates[[s, 0]] = x;
-        let mut z = rng.normal();
+        let mut z: Vec<f64> = (0..atoms).map(|_| rng.normal()).collect();
+        let mut path = Array2::<f64>::zeros((steps, atoms));
         let mut events: Vec<Event> = Vec::new();
         let mut exit = follow_up;
         let mut at_risk = vec![true; marks];
         'steps: for step in 0..steps {
             let left = step as f64 * dt;
+            for k in 0..atoms {
+                path[[step, k]] = z[k];
+            }
             let mut step_events: Vec<Event> = Vec::new();
             for d in 0..marks {
                 if !at_risk[d] {
                     continue;
                 }
-                let mean = (intercepts[d] + slope * x + loadings[d] * z).exp() * dt;
+                let latent: f64 = (0..atoms).map(|k| loadings[[d, k]] * z[k]).sum();
+                let mean = (intercepts[d] + slope * x + latent).exp() * dt;
                 // Poisson(mean) by inversion of its cumulative sum.
                 let threshold = rng.uniform();
                 let mut count = 0usize;
@@ -722,7 +734,9 @@ fn simulate_marked_cohort(
                     }
                 }
             }
-            z = phi * z + innovation * rng.normal();
+            for k in 0..atoms {
+                z[k] = phis[k] * z[k] + innovations[k] * rng.normal();
+            }
         }
         // Distinct event times: a tie at the step resolution is resolved by
         // the sort, and an event at exactly zero is impossible.
@@ -737,15 +751,32 @@ fn simulate_marked_cohort(
                 row: s,
             }],
         });
+        paths.push(path);
     }
-    EventHistoryCohort {
+    let cohort = EventHistoryCohort {
         mark_names: (0..marks).map(|d| format!("mark{d}")).collect(),
         mark_kinds: kinds.to_vec(),
         covariate_names: vec!["x".to_string()],
         covariate_levels: vec![Vec::new()],
         covariates,
         subjects: histories,
-    }
+    };
+    (cohort, paths)
+}
+
+/// The single-atom case of [`simulate_latent_cohort`].
+fn simulate_marked_cohort(
+    subjects: usize,
+    follow_up: f64,
+    intercepts: &[f64],
+    slope: f64,
+    loadings: &[f64],
+    rate: f64,
+    kinds: &[MarkKind],
+    seed: u64,
+) -> EventHistoryCohort {
+    let column = Array2::from_shape_vec((loadings.len(), 1), loadings.to_vec()).expect("column");
+    simulate_latent_cohort(subjects, follow_up, intercepts, slope, &column, &[rate], kinds, seed).0
 }
 
 /// The single recurrent mark case of [`simulate_marked_cohort`].
@@ -807,6 +838,7 @@ fn family_joint_hessian_matches_finite_differences_of_its_gradient() {
         1,
         31,
         cohort.time_scale(),
+        vec![None],
     )
     .expect("family");
     let beta = array![-0.4, 0.3];
@@ -927,12 +959,26 @@ fn fit_recovers_the_covariate_effect_and_a_positive_shared_risk_loading() {
     );
     emit(&format!("[fit] rank={} evidence={:?} path={:?}", fit.rank(), fit.atom_evidence, fit.rank_path));
     assert!(fit.rank() >= 1, "a shared dynamic risk was simulated but the evidence grew no atom");
-    assert!(fit.atom_evidence[0] > 0.0, "an accepted atom must have improved the criterion");
-    let loading = fit.loadings[[0, 0]].abs();
+    assert!(fit.atom_evidence[0] > 0.0, "an accepted atom carries positive evidence");
+    // The canonical gauge signs the loading positive; the reported covariance
+    // is the posterior mean, the mode squared plus the loading's posterior
+    // spread, and its eigenvalue carries a finite uncertainty.
+    let loading = fit.loadings[[0, 0]];
     assert!(
         loading > 0.4,
         "a shared dynamic risk was simulated but the fitted loading is {loading}"
     );
+    assert!(fit.covariance[[0, 0]] >= loading * loading);
+    assert!((fit.eigenvalues[0] - fit.covariance[[0, 0]]).abs() < 1e-12);
+    assert!(fit.eigenvalue_sd[0].is_finite() && fit.eigenvalue_sd[0] > 0.0);
+    assert!((fit.effective_rank - 1.0).abs() < 1e-12);
+    assert!(fit.atom_log_lambdas[0].is_finite());
+    emit(&format!(
+        "[fit] covariance={} eigenvalue_sd={} prior log-precision={}",
+        fit.covariance[[0, 0]],
+        fit.eigenvalue_sd[0],
+        fit.atom_log_lambdas[0]
+    ));
     // A fit object only exists from a converged optimisation; its certificate
     // gradient, when reported, is finite.
     assert!(fit.fit.outer_gradient_norm.is_none_or(|g| g.is_finite()));
@@ -1041,15 +1087,149 @@ fn a_cohort_without_shared_risk_grows_no_atom() {
     spec.gauss_hermite_order = 11;
     let fit = fit_event_history(&mut cohort, &spec).expect("fit");
     assert!(fit.fit.outer_gradient_norm.is_none_or(|g| g.is_finite()));
-    // Nothing was shared, so the evidence should not buy a covariance
-    // direction at all; every step it judged reached a certified optimum.
+    // Nothing was shared, so the evidence keeps the loading at zero: the
+    // refusal is the prior's decision, made from the score without a fit.
     emit(&format!("[null] rank={} path={:?}", fit.rank(), fit.rank_path));
     assert_eq!(fit.rank(), 0, "no shared risk was simulated but the evidence grew {} atoms", fit.rank());
     assert!(fit.atom_evidence.is_empty());
-    assert!(
-        fit.rank_path.iter().all(|step| step.converged),
-        "a rank step reported no certified optimum: {:?}",
+    assert_eq!(fit.rank_path.len(), 1, "one proposal was judged: {:?}", fit.rank_path);
+    let step = &fit.rank_path[0];
+    assert!(!step.accepted && step.converged, "{step:?}");
+    assert!(fit.covariance.iter().all(|c| *c == 0.0));
+    assert_eq!(fit.effective_rank, 0.0);
+    assert!(fit.loadings.is_empty() && fit.rates.is_empty());
+}
+
+/// The exact engine on the cohort that ran away under the Laplace engine
+/// (#2808): four marks, three once-only diseases and death, a rank-two
+/// latent covariance with loadings at most 0.9. The measured failure there
+/// was a fitted `C(0)` diagonal of `[0.0013, 398, 0.0033, 0.15]` against a
+/// simulated `[0.81, 0.61, 0.64, 0.09]`: one loading of about 20 carrying an
+/// eigenvalue of 398. The exactly marginalised engine has no such corner —
+/// with the population centring an event node's `−y a²/2` cancels the
+/// `exp(y² a²/2)` the stationary state returns — so its `C(0)` sits within
+/// its own posterior uncertainty of the truth.
+#[test]
+fn a_multi_mark_rank_two_cohort_does_not_run_away() {
+    install_test_logger();
+    let truth = array![[0.9, 0.0], [0.6, 0.5], [0.0, 0.8], [0.3, 0.0]];
+    let (mut cohort, _) = simulate_latent_cohort(
+        150,
+        4.0,
+        &[-1.2, -1.5, -1.3, -2.2],
+        0.3,
+        &truth,
+        &[0.3, 1.5],
+        &[MarkKind::Once, MarkKind::Once, MarkKind::Once, MarkKind::Terminal],
+        61,
+    );
+    let mut spec = EventHistorySpec::new(vec![linear_spec()]);
+    spec.gauss_hermite_order = 9;
+    let started = std::time::Instant::now();
+    let fit = fit_event_history(&mut cohort, &spec).expect("fit");
+    let truth_covariance = truth.dot(&truth.t());
+    let (truth_eigenvalues, _) = super::covariance::eigenmodes(&truth_covariance).expect("eigen");
+    emit(&format!(
+        "[four] {:.1}s rank={} path={:?}",
+        started.elapsed().as_secs_f64(),
+        fit.rank(),
         fit.rank_path
+    ));
+    emit(&format!(
+        "[four] covariance diagonal fitted={:?} truth={:?}; eigenvalues fitted={:?} sd={:?} truth={:?}; effective rank {:.3}",
+        fit.covariance.diag().to_vec(),
+        truth_covariance.diag().to_vec(),
+        fit.eigenvalues.to_vec(),
+        fit.eigenvalue_sd.to_vec(),
+        truth_eigenvalues.to_vec(),
+        fit.effective_rank
+    ));
+    assert!(fit.rank() >= 1, "a rank-two latent covariance was simulated but no atom was grown");
+    // No runaway: every fitted eigenvalue lies within three posterior
+    // standard deviations of a truth eigenvalue's magnitude, and the top one
+    // resolves the simulated leading direction within that band.
+    for j in 0..4 {
+        let band = 3.0 * fit.eigenvalue_sd[j];
+        assert!(
+            fit.eigenvalues[j] <= truth_eigenvalues[0] + band,
+            "eigenvalue {j} = {} exceeds the largest simulated one {} by more than {band}",
+            fit.eigenvalues[j],
+            truth_eigenvalues[0]
+        );
+    }
+    assert!(
+        (fit.eigenvalues[0] - truth_eigenvalues[0]).abs() <= 3.0 * fit.eigenvalue_sd[0],
+        "top eigenvalue {} vs simulated {} with sd {}",
+        fit.eigenvalues[0],
+        truth_eigenvalues[0],
+        fit.eigenvalue_sd[0]
+    );
+    for (d, (fitted, simulated)) in fit
+        .covariance
+        .diag()
+        .iter()
+        .zip(truth_covariance.diag().iter())
+        .enumerate()
+    {
+        assert!(
+            *fitted < 4.0 * simulated.max(0.25),
+            "mark {d}: fitted latent variance {fitted} ran away from the simulated {simulated}"
+        );
+    }
+}
+
+/// The smoothed latent state is the posterior of the simulated path: its
+/// mean tracks the path the events were generated from, and its variance
+/// is the prior's narrowed by the history.
+#[test]
+fn the_smoothed_latent_state_tracks_the_simulated_path() {
+    install_test_logger();
+    let (mut cohort, paths) = simulate_latent_cohort(
+        80,
+        6.0,
+        &[-0.8],
+        0.5,
+        &array![[1.0]],
+        &[0.4],
+        &[MarkKind::Recurrent],
+        7,
+    );
+    let mut spec = EventHistorySpec::new(vec![linear_spec()]);
+    spec.gauss_hermite_order = 11;
+    let fit = fit_event_history(&mut cohort, &spec).expect("fit");
+    assert!(fit.rank() >= 1, "the shared risk was not grown: {:?}", fit.rank_path);
+    let dt = 6.0 / 400.0;
+    let (mut sum_xy, mut sum_xx, mut sum_yy, mut sum_x, mut sum_y, mut count) =
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (subject, path) in cohort.subjects.iter().zip(paths.iter()) {
+        let state = latent_state(&fit, &cohort, subject).expect("latent state");
+        assert_eq!(state.mean.nrows(), state.times.len());
+        assert_eq!(state.covariance.len(), state.times.len());
+        for (n, &t) in state.times.iter().enumerate() {
+            let step = ((t / dt).floor() as usize).min(path.nrows() - 1);
+            let truth = path[[step, 0]];
+            let mean = state.mean[[n, 0]];
+            let variance = state.covariance[n][[0, 0]];
+            assert!(
+                variance > 0.0 && variance <= 1.0 + 1e-9,
+                "the smoothed variance {variance} must lie in (0, 1]: the prior narrowed by the history"
+            );
+            sum_xy += mean * truth;
+            sum_xx += mean * mean;
+            sum_yy += truth * truth;
+            sum_x += mean;
+            sum_y += truth;
+            count += 1.0;
+        }
+    }
+    let covariance = sum_xy / count - (sum_x / count) * (sum_y / count);
+    let correlation = covariance
+        / ((sum_xx / count - (sum_x / count).powi(2)) * (sum_yy / count - (sum_y / count).powi(2)))
+            .sqrt();
+    emit(&format!("[state] correlation of the smoothed mean with the simulated path over {count} nodes: {correlation:.3}"));
+    assert!(
+        correlation > 0.5,
+        "the smoothed latent mean should track the simulated path; correlation {correlation}"
     );
 }
 
@@ -1108,6 +1288,7 @@ fn newton_direction_decreases_the_penalised_objective_at_the_start() {
         1,
         11,
         cohort.time_scale(),
+        vec![None],
     )
     .expect("family");
     let states = |beta: &Array1<f64>, latent: &Array1<f64>| {
@@ -1284,6 +1465,7 @@ fn loaded_family(
         1,
         order,
         cohort.time_scale(),
+        vec![None],
     )
     .expect("family");
     let states = vec![
@@ -1764,11 +1946,18 @@ fn traced_fixed_lambda_inner_solve_on_the_null_cohort() {
         1,
         11,
         cohort.time_scale(),
+        vec![None],
     )
     .expect("family");
     let specs = vec![
         mark_block_spec("event", &design),
-        latent_block_spec(nodes.total_nodes, 1, 1, None).expect("latent spec"),
+        latent_block_spec(
+            nodes.total_nodes,
+            1,
+            1,
+            &RankStart::carried(vec![1.0], vec![0.0], vec![0.0], vec![false]),
+        )
+        .expect("latent spec"),
     ];
     let options = crate::custom_family::BlockwiseFitOptions::default();
     let result = crate::custom_family::fit_custom_family_fixed_log_lambdas(
@@ -1855,6 +2044,7 @@ fn traced_fixed_lambda_inner_solve_on_the_loaded_cohort_reports_its_cost() {
         1,
         11,
         cohort.time_scale(),
+        vec![None],
     )
     .expect("family");
     let total_nodes: usize = nodes.subjects.iter().map(|s| s.len()).sum();
@@ -1894,7 +2084,13 @@ fn traced_fixed_lambda_inner_solve_on_the_loaded_cohort_reports_its_cost() {
     emit(&format!("[cost] second directional hessian {:.3}s", clock.elapsed().as_secs_f64()));
     let specs = vec![
         mark_block_spec("event", &design),
-        latent_block_spec(nodes.total_nodes, 1, 1, None).expect("latent spec"),
+        latent_block_spec(
+            nodes.total_nodes,
+            1,
+            1,
+            &RankStart::carried(vec![1.0], vec![0.0], vec![0.0], vec![false]),
+        )
+        .expect("latent spec"),
     ];
     let options = crate::custom_family::BlockwiseFitOptions::default();
     let clock = std::time::Instant::now();
@@ -2268,11 +2464,9 @@ fn terminal_forecasts_match_the_constant_hazard_solution() {
     install_test_logger();
     // The identity this asserts is the closed-form maximiser of the
     // rank-zero model, so the cohort has to be one the evidence does not buy
-    // a latent direction on. At eighteen subjects it did: a static frailty
-    // bought 0.19 nats of criterion and moved the fitted rate 18% off the
-    // closed form. That is a small-sample verdict, not a defect — the rank
-    // is no longer a setting a test can pin — so the fixture carries enough
-    // subjects for the evidence to refuse the atom.
+    // a latent direction on: the rank is the evidence's verdict, not a
+    // setting a test can pin, and this fixture carries enough subjects for
+    // the verdict to be the null.
     let mut cohort = competing_risks_cohort(64);
     let spec = EventHistorySpec::new(vec![intercept_only_spec()]);
     let fit = fit_event_history(&mut cohort, &spec).expect("intercept-only fit");
@@ -2498,29 +2692,89 @@ fn forecast_probabilities_are_coherent_under_a_latent_state() {
 }
 
 #[test]
-fn the_latent_block_starts_its_atoms_apart() {
-    // The likelihood is invariant under flipping an atom's sign with its
-    // state, under permuting atoms, and — at equal rates — under rotating
-    // them. The initial point is where that gauge is fixed: every loading at
-    // one latent standard deviation per unit of log-intensity, and the
-    // log-rates spaced by `ln 2` around the ridge centre, so a deterministic
-    // Newton cannot keep two atoms identical to each other.
-    for atoms in [1usize, 2, 3] {
-        let latent = super::family::latent_block_spec(400, 2, atoms, None).expect("latent spec");
-        let initial = latent.initial_beta.expect("initial");
-        assert_eq!(initial.len(), 2 * atoms + atoms);
-        for q in 0..2 * atoms {
-            assert_eq!(initial[q], 1.0, "loading {q} of {atoms} atoms");
-        }
-        let log_rates: Vec<f64> = (0..atoms).map(|k| initial[2 * atoms + k]).collect();
-        for pair in log_rates.windows(2) {
-            assert!(
-                (pair[1] - pair[0] - std::f64::consts::LN_2).abs() < 1e-12,
-                "the log-rates must be spaced by ln 2: {log_rates:?}"
-            );
-        }
-        let mean: f64 = log_rates.iter().sum::<f64>() / atoms as f64;
-        assert!(mean.abs() < 1e-12, "the spacing is centred on the ridge: {log_rates:?}");
-        assert_eq!(latent.penalties.len(), atoms, "one ridge per atom");
+fn the_latent_block_carries_fixed_loading_priors_and_free_rates() {
+    // Each atom's loadings carry the prior the evidence chose, held fixed,
+    // and its log-rate is an unpenalised structural coordinate.
+    let start = RankStart::carried(
+        vec![0.8, -0.3, 0.1, 0.5],
+        vec![-0.2, 0.9],
+        vec![1.5, -0.4],
+        vec![false, false],
+    );
+    let latent = super::family::latent_block_spec(400, 2, 2, &start).expect("latent spec");
+    let initial = latent.initial_beta.expect("initial");
+    assert_eq!(initial.to_vec(), vec![0.8, -0.3, 0.1, 0.5, -0.2, 0.9]);
+    assert_eq!(latent.penalties.len(), 2, "one loading prior per atom");
+    for (k, penalty) in latent.penalties.iter().enumerate() {
+        assert_eq!(penalty.fixed_log_lambda(), Some(start.log_lambdas[k]));
+        assert_eq!(latent.nullspace_dims[k], 6 - 2, "the rates lie in every prior's null space");
     }
+    // A rate held at a limit of the mesh's resolution has no coefficient:
+    // the block narrows by one and the free rate keeps its slot.
+    let held = RankStart::carried(
+        vec![0.8, -0.3, 0.1, 0.5],
+        vec![-0.2, 0.9],
+        vec![1.5, -0.4],
+        vec![true, false],
+    );
+    let latent = super::family::latent_block_spec(400, 2, 2, &held).expect("latent spec");
+    assert_eq!(latent.initial_beta.expect("initial").to_vec(), vec![0.8, -0.3, 0.1, 0.5, 0.9]);
+    assert_eq!(latent.nullspace_dims, vec![3, 3]);
+}
+
+#[test]
+fn the_quartic_marginal_is_exact_and_the_empirical_bayes_prior_decides_by_the_mode() {
+    // A negligible quartic reduces the marginal to the Gaussian one.
+    let (log_integral, second, fourth) = quartic_moments(-3.0, 1e-9, 1.0);
+    let sigma2 = 1.0 / 4.0;
+    assert!((log_integral - 0.5 * (2.0 * std::f64::consts::PI * sigma2).ln()).abs() < 1e-8);
+    assert!((second - sigma2).abs() < 1e-8, "E[t²] {second}");
+    assert!((fourth - 3.0 * sigma2 * sigma2).abs() < 1e-8, "E[t⁴] {fourth}");
+    // At the boundary `λ = μ` the integral is the pure quartic one,
+    // `∫ exp(−t⁴/4) dt = Γ(1/4) / √2`, with `E[t²] = 2 Γ(3/4) / Γ(1/4)`.
+    let gamma_quarter = 3.625_609_908_221_908_3_f64;
+    let gamma_three_quarters = 1.225_416_702_465_177_6_f64;
+    let (log_integral, second, _) = quartic_moments(2.0, 1.0, 2.0);
+    assert!((log_integral - (gamma_quarter / 2.0_f64.sqrt()).ln()).abs() < 1e-8);
+    assert!((second - 2.0 * gamma_three_quarters / gamma_quarter).abs() < 1e-8);
+
+    // One direction: the prior's precision leaves the mode off zero exactly
+    // when the standardised score `μ / √J` exceeds `Γ(1/4) / (2 Γ(3/4))`,
+    // the value at which the marginal likelihood's slope in `λ` changes sign
+    // at `λ = μ`. That threshold is a property of the quartic integral, not a
+    // chosen level.
+    let information: f64 = 100.0;
+    let threshold = gamma_quarter / (2.0 * gamma_three_quarters);
+    let below = empirical_bayes_ridge(&[(0.9 * threshold * information.sqrt(), information)]);
+    let above = empirical_bayes_ridge(&[(1.1 * threshold * information.sqrt(), information)]);
+    emit(&format!("[ridge] below {below:?} above {above:?}"));
+    assert!(!below.accepted, "a score below the quartic threshold keeps the mode at zero");
+    assert!(above.accepted, "a score above the quartic threshold moves the mode off zero");
+    assert!(above.log_lambda.exp() < 1.1 * threshold * information.sqrt());
+    assert!(above.gain > 0.0 && above.mode_scale > 0.0);
+    // A strong direction lands near the Laplace-scale prior `λ = J / μ`.
+    let strong = empirical_bayes_ridge(&[(400.0, information)]);
+    assert!(strong.accepted);
+    assert!((strong.log_lambda - (information / 400.0).ln()).abs() < 0.2, "{strong:?}");
+    assert!(strong.gain > 300.0, "the evidence of a 400-nat direction: {}", strong.gain);
+    // No positive direction: no finite prior raises the evidence.
+    let none = empirical_bayes_ridge(&[(-5.0, information), (-40.0, information)]);
+    assert!(!none.accepted && none.log_lambda.is_infinite() && none.gain == 0.0);
+    // Other directions charge their Occam factor: the same strong direction
+    // beside three strongly negative ones is still accepted, and a marginal
+    // one beside them is not.
+    let beside = empirical_bayes_ridge(&[
+        (400.0, information),
+        (-300.0, information),
+        (-300.0, information),
+        (-300.0, information),
+    ]);
+    assert!(beside.accepted);
+    let marginal = empirical_bayes_ridge(&[
+        (1.1 * threshold * information.sqrt(), information),
+        (-300.0, information),
+        (-300.0, information),
+    ]);
+    emit(&format!("[ridge] marginal beside negatives {marginal:?}"));
+    assert!(!marginal.accepted);
 }

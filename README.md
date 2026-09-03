@@ -225,9 +225,12 @@ pred.write_survival_at_csv("surv.csv", times=[...])  # streamed
 
 Event histories. `gam_models::event_history` fits marked counting
 processes: smooth covariate and time effects per mark, plus a per-subject
-latent state of unit-variance Ornstein–Uhlenbeck atoms whose loadings and
-rates are selected by the evidence (an unsupported atom is switched off by
-its own REML ridge). Marks are recurrent, once-only or terminal, so
+latent state of unit-variance Ornstein–Uhlenbeck atoms whose number,
+directions, rates and loading priors are all chosen by the evidence — an
+atom enters when the empirical-Bayes prior of its loadings places their
+posterior mode off zero — and whose covariance across marks is the reported
+object, with its eigenmodes' uncertainty and every subject's smoothed
+latent state. Marks are recurrent, once-only or terminal, so
 competing risks, first occurrences and recurrent events are one likelihood
 with per-mark risk sets. The latent term is the individual's deviation from
 a population rate — `exp(η⁰)` is the intensity averaged over the latent

@@ -38,21 +38,74 @@ exponential of an integral is not the exponential of the integral of the
 expectation. Forecasts integrate the latent state, so they need no such
 identity.)
 
-Nothing about the latent structure is chosen by hand beyond the number of
-atoms offered:
+## The latent covariance and its rank
 
-- every atom carries one REML ridge over its loadings and its log-rate, so an
-  atom the evidence does not support is switched off (its loadings shrink to
-  zero under a large ridge). The fit reports the atoms it was offered; which
-  ones the data use is read from `loadings` and `atom_log_lambdas`;
-- rates are parameterised as `ln(r_k · T̄)` with `T̄` the mean follow-up, so
-  the ridge on a log-rate is an empirical-Bayes prior centred on the cohort's
-  own time scale, whose strength REML learns per atom;
-- the atoms start apart — every loading at one latent standard deviation per
-  unit of log-intensity, the log-rates spaced by `ln 2` around the ridge
-  centre — which fixes the sign, permutation and (at equal rates) rotation
-  gauge of the loading matrix at the initial point. A permutation-symmetric
-  start would keep every atom identical under a deterministic Newton.
+The latent object the model identifies is the covariance across marks of
+the latent log-intensity deviations,
+
+```text
+C(Δ) = Σ_k E[a_k a_kᵀ] e^{−r_k |Δ|},        C(0) = E[A Aᵀ].
+```
+
+`C` is what the fit reports (`covariance`, `temporal_covariance(lag)`, the
+eigenvalues with their posterior standard deviations, and the participation
+ratio `(tr C)² / tr(C²)` as a continuous count of the directions it uses).
+It is the posterior mean: each atom contributes its mode `â_k â_kᵀ` plus the
+posterior spread of its loadings, so an atom whose evidence lives in that
+spread still carries variance. The loadings are factor coordinates of the
+mode, reported in a canonical gauge (atoms ordered by rate, slowest first,
+each column signed so its largest entry is positive); with distinct rates
+the temporal covariance identifies each atom up to that gauge, at equal
+rates only `C` is identified.
+
+Nothing about the latent structure is chosen by hand — not the number of
+atoms, not their directions, not their rates, not the strength of their
+priors, and no level or tolerance decides the rank:
+
+- the rank is grown from zero. At rank `K` the covariance score of the
+  fit's martingale residuals, `M(r) = Σ_i [Σ_{n,m} e^{−r|t_n−t_m|} s̄_n s̄_mᵀ
+  − Σ_n diag(c̄_n)]`, is the second derivative of the evidence in a new
+  atom's loading vector at zero; its top eigenpair at the rate that
+  maximises the standardised gain `μ²/(4J)` (the matched filter; the raw
+  score is always largest at rate zero) names the direction and rate of the
+  next atom;
+- the atom's loadings carry an isotropic Gaussian prior `a ~ N(0, λ⁻¹I)`,
+  the penalty toward no latent effect, and `λ` is chosen by empirical Bayes
+  under the quartic model of the evidence the score gives along every
+  direction, `½ μ_i t² − ¼ J_i t⁴`. Each direction's marginal is a
+  one-dimensional integral evaluated exactly — a Laplace approximation of it
+  is unusable, because the integrand is even in `t` and its curvature at
+  the mode vanishes at `λ = μ_i`, where the Laplace log-determinant
+  diverges. The atom is accepted exactly when the prior the evidence chooses
+  places the posterior mode of its loading away from zero, `λ̂ < μ_max`.
+  For a single direction that is the statement that the standardised score
+  `μ/√J` exceeds `Γ(¼)/(2Γ(¾)) ≈ 1.48`, a property of the quartic integral,
+  not a chosen level. It is the empirical-Bayes decision at the boundary,
+  and it has that decision's character: on a cohort with no latent
+  structure it can admit a weak atom, whose variance then lies within its
+  own posterior uncertainty (`eigenvalue_sd` is what says so), and it does
+  not charge the rate search — the rate is profiled, not integrated. A
+  refused atom costs no fit;
+- an accepted atom is fitted with its prior held fixed (the latent block
+  adds no outer smoothing coordinate), warm-started at the posterior mode
+  along the proposed direction and at the proposed rate; its log-rate
+  `ln(r_k · T̄)` (`T̄` the mean follow-up) is an unpenalised structural
+  coordinate, identified by the likelihood once the loadings are off zero.
+  When the residuals cannot tell the proposed rate from one twice as slow
+  or twice as fast — a static frailty at the slow end, the mesh's own
+  spacing at the fast end — the likelihood is flat in it, and the rate is
+  held there as data rather than fitted as a coordinate no certificate
+  could resolve (`rate_held`). A candidate that reaches no certified optimum
+  is refused with its reason. Every step is recorded in `rank_path` — with
+  the evidence under the score's model and the realised log-likelihood gain
+  of the fitted candidate — and `atom_evidence` carries the evidence each
+  accepted prior bought in nats.
+
+The smoothed latent state of every subject, `E[z_i(t) | history]` with its
+posterior covariance at every node of the subject's mesh, is exposed
+(`latent_state`): it is the quantity a discovery analysis wants, and
+carrying its covariance is what makes a fitted path an uncertain object
+rather than an observed one.
 
 ## Marks and risk sets
 
@@ -145,14 +198,18 @@ use gam_models::event_history::*;
 let mut cohort = EventHistoryCohort {
     mark_names, mark_kinds, covariate_names, covariate_levels, covariates, subjects,
 };
-let spec = EventHistorySpec::new(2, vec![term_collection_spec]);
+let spec = EventHistorySpec::new(vec![term_collection_spec]);
 let fit = fit_event_history(&mut cohort, &spec)?;
-fit.rank();            // atoms the evidence bought
-fit.disease_covariance();  // marks × marks
-fit.loadings;          // factor coordinates, marks × rank
-fit.rates;             // per atom, in the data's time unit
-fit.atom_log_lambdas;  // the ridge each atom ended on
-fit.quadrature;        // the refinement certificate
+fit.rank();                    // atoms the evidence bought
+fit.covariance;                // C(0), marks × marks, the posterior mean
+fit.eigenvalues; fit.eigenvalue_sd; fit.effective_rank;
+fit.temporal_covariance(5.0);  // C(Δ)
+fit.loadings;                  // factor coordinates of the mode, marks × rank
+fit.rates;                     // per atom, in the data's time unit
+fit.atom_log_lambdas;          // the log-precision of each atom's loading prior
+fit.rank_path; fit.atom_evidence;
+fit.quadrature;                // the refinement certificate
+latent_state(&fit, &cohort, &subject)?;  // E[z(t) | history] with its covariance
 ```
 
 `covariates` holds one term collection shared by every mark, or one per mark.
@@ -193,8 +250,10 @@ model = gamfit.fit_event_history(
     subjects, events, covariates, "x + s(time)",
     marks={"relapse": "recurrent", "death": "terminal"},
 )
-model.rank, model.disease_covariance(), model.temporal_covariance(5.0), model.eigenmodes()
-model.loadings, model.rates, model.atom_evidence, model.rank_path
+model.rank, model.covariance, model.temporal_covariance(5.0)
+model.eigenvalues, model.eigenvalue_sd, model.eigenvectors, model.effective_rank
+model.loadings, model.rates, model.atom_log_lambdas, model.atom_evidence, model.rank_path
+model.latent_state("subject-17")  # time, mean (nodes × atoms), covariance (nodes × atoms × atoms)
 f = model.forecast("subject-17", horizons=[6.0, 7.0])
 f["survival"], f["expected_counts"]
 f = model.forecast("subject-17", horizons=[6.0, 7.0], future=[(5.5, {"x": 1.0}), (6.5, {"x": 0.0})])
@@ -224,11 +283,14 @@ gam fit-events --subjects s.csv --events e.csv --covariates c.csv \
 ```
 
 Covariate columns that do not parse as numbers are categorical. The summary
-carries the mark kinds, categorical levels, loadings, rates, per-atom ridges,
-coefficients, the refinement certificate, the predictive-PIT
-Kolmogorov–Smirnov distance over every event, and per-subject forecasts at
-the given offsets after exit, each beside the same window run without the
-subject's history (`without_history`).
+carries the mark kinds, categorical levels, the rank path and the evidence
+of every accepted atom, the latent covariance with its eigenvalues, their
+posterior standard deviations and the effective rank, the loadings, rates
+and loading priors, the coefficients, the refinement certificate, the
+smoothed latent state of every subject when the rank is positive, the
+predictive-PIT Kolmogorov–Smirnov distance over every event, and
+per-subject forecasts at the given offsets after exit, each beside the same
+window run without the subject's history (`without_history`).
 
 ## Forecasting and calibration
 

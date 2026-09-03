@@ -21,11 +21,15 @@
 //!
 //! Survival with a slow frailty, competing risks (terminal marks), once-only
 //! marks, recurrent events and history-conditioned prediction are all one
-//! family here: they differ only in the rows and the mark kinds. The latent
-//! block's ridges are ordinary REML smoothing parameters, so an atom the
-//! data do not support is switched off by its ridge; the count of atoms a
-//! fit carries is the maximum offered, and which ones the data use is read
-//! from the fitted loadings and ridges.
+//! family here: they differ only in the rows and the mark kinds. The rank of
+//! the latent covariance is grown from zero by the evidence: each atom is
+//! proposed by the covariance score of the residuals, its loadings get the
+//! Gaussian prior whose precision maximises the marginal likelihood under
+//! the exact one-dimensional marginal of the score's quartic evidence model,
+//! and it enters exactly when that prior places the loading's posterior
+//! mode away from zero. The reported latent object is the posterior-mean
+//! covariance `C(Δ)` with its eigenmodes and their uncertainty; the smoothed
+//! latent state of every subject is exposed with its covariance.
 
 mod chain;
 mod cohort;
@@ -40,7 +44,7 @@ pub use cohort::{
     CohortNodes, CovariateSegment, Event, EventHistoryCohort, EventHistoryError, MarkKind,
     SubjectHistory, SubjectNodes, design_rows, expand_nodes, quadrature_order_for_degree,
 };
-pub use covariance::{disease_covariance, eigenmodes, temporal_covariance};
+pub use covariance::{effective_rank, eigenmodes, factor_covariance, temporal_covariance};
 pub use family::{
     EventHistoryFamily, EventHistoryFit, EventHistorySpec, JointEvaluation,
     QuadratureCertificate, RankStart, RankStep, RefinementCheck, fit_event_history,
@@ -49,8 +53,9 @@ pub use family::{
 pub use formula::{TIME_COLUMN, covariate_spec_from_formula, node_dataset};
 pub use marginal::transition_score_polynomials;
 pub use forecast::{
-    EventPit, Forecast, ForecastRequest, FutureSegment, PopulationForecastRequest, forecast,
-    kolmogorov_smirnov_uniform, population_forecast, predictive_pit, training_eta,
+    EventPit, Forecast, ForecastRequest, FutureSegment, PopulationForecastRequest,
+    SmoothedLatentState, forecast, kolmogorov_smirnov_uniform, latent_state,
+    population_forecast, predictive_pit, training_eta,
 };
 
 #[cfg(test)]

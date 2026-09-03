@@ -8,11 +8,11 @@ use gam::families::custom_family::BlockwiseFitOptions;
 use gam::families::event_history::{
     CovariateSegment, Event, EventHistoryCohort, EventHistoryFit, ForecastRequest,
     FutureSegment, MarkKind, PopulationForecastRequest, SubjectHistory,
-    fit_event_history_formula, forecast, kolmogorov_smirnov_uniform, population_forecast,
-    predictive_pit,
+    fit_event_history_formula, forecast, kolmogorov_smirnov_uniform, latent_state,
+    population_forecast, predictive_pit,
 };
-use ndarray::Array2;
-use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
+use ndarray::{Array2, Array3};
+use numpy::{PyArray1, PyArray2, PyArray3, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyModule};
 use std::sync::Arc;
@@ -89,41 +89,81 @@ impl PyEventHistoryModel {
             let item = PyDict::new(py);
             item.set_item("rank", step.rank)?;
             item.set_item("score_eigenvalue", step.score_eigenvalue)?;
+            item.set_item("standardised_gain", step.standardised_gain)?;
             item.set_item("proposed_log_rate", step.proposed_log_rate)?;
             item.set_item("at_resolution_limit", step.at_resolution_limit)?;
-            item.set_item("converged", step.converged)?;
+            item.set_item("rate_held", step.rate_held)?;
+            item.set_item("ridge_log_lambda", step.ridge_log_lambda)?;
             item.set_item("evidence_gain", step.evidence_gain)?;
+            item.set_item("log_likelihood_gain", step.log_likelihood_gain)?;
             item.set_item("accepted", step.accepted)?;
+            item.set_item("converged", step.converged)?;
             out.append(item)?;
         }
         Ok(out)
     }
 
-    fn disease_covariance<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
-        PyArray2::from_owned_array(py, self.fit.disease_covariance())
+    fn covariance<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        PyArray2::from_owned_array(py, self.fit.covariance.clone())
     }
 
     fn temporal_covariance<'py>(&self, py: Python<'py>, lag: f64) -> Bound<'py, PyArray2<f64>> {
         PyArray2::from_owned_array(py, self.fit.temporal_covariance(lag))
     }
 
-    fn eigenmodes<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)> {
-        let (values, vectors) = self.fit.eigenmodes().map_err(|e| py_value_error(e.to_string()))?;
-        Ok((
-            PyArray1::from_owned_array(py, values),
-            PyArray2::from_owned_array(py, vectors),
-        ))
+    fn eigenvalues<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_owned_array(py, self.fit.eigenvalues.clone())
+    }
+
+    fn eigenvalue_sd<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_owned_array(py, self.fit.eigenvalue_sd.clone())
+    }
+
+    fn eigenvectors<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
+        PyArray2::from_owned_array(py, self.fit.eigenvectors.clone())
+    }
+
+    fn effective_rank(&self) -> f64 {
+        self.fit.effective_rank
     }
 
     fn loadings<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f64>> {
         PyArray2::from_owned_array(py, self.fit.loadings.clone())
     }
 
+    /// The smoothed latent state of one training subject: node times, the
+    /// posterior mean (`nodes × atoms`) and the posterior covariance
+    /// (`nodes × atoms × atoms`) of the atoms given the whole history.
+    fn latent_state<'py>(&self, py: Python<'py>, subject: usize) -> PyResult<Bound<'py, PyDict>> {
+        let history = self
+            .cohort
+            .subjects
+            .get(subject)
+            .ok_or_else(|| py_value_error(format!("subject index {subject} is out of range")))?
+            .clone();
+        let fit = Arc::clone(&self.fit);
+        let cohort = Arc::clone(&self.cohort);
+        let state = detach_py_result(py, "event-history latent state", move || {
+            latent_state(&fit, &cohort, &history).map_err(|e| e.to_string())
+        })?;
+        let atoms = self.fit.rank();
+        let mut covariance = Array3::<f64>::zeros((state.times.len(), atoms, atoms));
+        for (n, matrix) in state.covariance.iter().enumerate() {
+            covariance.index_axis_mut(ndarray::Axis(0), n).assign(matrix);
+        }
+        let out = PyDict::new(py);
+        out.set_item("time", state.times)?;
+        out.set_item("mean", PyArray2::from_owned_array(py, state.mean))?;
+        out.set_item("covariance", PyArray3::from_owned_array(py, covariance))?;
+        Ok(out)
+    }
+
     fn rates(&self) -> Vec<f64> {
         self.fit.rates.clone()
+    }
+
+    fn rate_held(&self) -> Vec<bool> {
+        self.fit.rate_held.clone()
     }
 
     fn log_rates(&self) -> Vec<f64> {
