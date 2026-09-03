@@ -479,6 +479,12 @@ pub struct CohortNodes {
     pub total_nodes: usize,
     /// Mesh refinement level the nodes were expanded at.
     pub refinement: usize,
+    /// The band `(r_min, r_max)` of latent rates per unit time the cohort's
+    /// own breakpoints resolve, `√ε / longest follow-up` and `1 / median
+    /// level-0 cell width`: a property of the data, the same at every
+    /// quadrature order and mesh refinement. `None` when no subject has two
+    /// distinct breakpoints.
+    pub rate_band: Option<(f64, f64)>,
 }
 
 impl CohortNodes {
@@ -652,6 +658,21 @@ pub fn expand_nodes(
             node_data[[i, j]] = v;
         }
     }
+    // The rate band is read from the level-0 cells — the breakpoints the
+    // data themselves distinguish — never from the quadrature nodes, whose
+    // spacing is the mesh's, not the data's, and changes under refinement.
+    let breakpoints: Vec<Vec<f64>> = cohort
+        .subjects
+        .iter()
+        .map(|subject| {
+            let cells = mesh_cells(subject, true, 0);
+            let mut times: Vec<f64> = cells.first().map(|cell| vec![cell.0]).unwrap_or_default();
+            times.extend(cells.iter().map(|cell| cell.1));
+            times
+        })
+        .collect();
+    let rate_band =
+        super::covariance::resolvable_rate_band(breakpoints.iter().map(Vec::as_slice), 1.0);
     Ok(CohortNodes {
         marks,
         subjects,
@@ -659,6 +680,7 @@ pub fn expand_nodes(
         time_column: n_cov,
         total_nodes,
         refinement,
+        rate_band,
     })
 }
 

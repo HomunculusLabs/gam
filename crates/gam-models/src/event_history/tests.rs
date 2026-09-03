@@ -6,7 +6,7 @@ use super::cohort::{
     CovariateSegment, Event, EventHistoryCohort, MarkKind, SubjectHistory, SubjectNodes,
     design_rows, expand_nodes,
 };
-use super::covariance::{empirical_bayes_ridge, quartic_moments};
+use super::covariance::{DirectionEvidence, DirectionProfile, empirical_bayes_ridge, quartic_moments};
 use super::family::{
     Directional, EventHistoryFamily, EventHistoryFit, EventHistorySpec, RankStart,
     fit_event_history, fit_event_history_formula,
@@ -170,12 +170,12 @@ fn single_node_marginal_matches_numerical_integration() {
     let nodes = subject(&[1.0], &[0.8], &[vec![2.0]]);
     let eta0 = [0.3];
     let loadings = [0.9];
-    let log_rates = [0.0];
+    let rates = [1.0];
     let inputs = SubjectInputs {
         nodes: &nodes,
         eta0: &eta0,
         loadings: &loadings,
-        log_rates: &log_rates,
+        rates: &rates,
         time_scale: 1.0,
         gh: &gh,
         continuation_gap: 0.0,
@@ -207,19 +207,19 @@ fn two_node_marginal_matches_brute_force_double_integral() {
     let nodes = subject(&[0.0, 0.7], &[0.5, 0.6], &[vec![1.0], vec![0.0]]);
     let eta0 = [-0.2, 0.4];
     let loadings = [1.1];
-    let log_rates = [0.2];
+    let rates = [1.2];
     let inputs = SubjectInputs {
         nodes: &nodes,
         eta0: &eta0,
         loadings: &loadings,
-        log_rates: &log_rates,
+        rates: &rates,
         time_scale: 1.0,
         gh: &gh,
         continuation_gap: 0.0,
     designs: None,
     };
     let out = subject_marginal(&inputs, false).expect("marginal");
-    let phi = (-(0.2f64.exp() * 0.7)).exp();
+    let phi = (-(1.2_f64 * 0.7)).exp();
     let q = 1.0 - phi * phi;
     let steps = 1200;
     let (lo, hi) = (-7.0, 7.0);
@@ -258,12 +258,12 @@ fn zero_loadings_reduce_to_the_poisson_likelihood() {
     );
     let eta0 = [0.1, -0.3, 0.5, 0.2, -0.1, 0.4];
     let loadings = [0.0, 0.0, 0.0, 0.0];
-    let log_rates = [0.0, 0.3];
+    let rates = [1.0, 1.35];
     let inputs = SubjectInputs {
         nodes: &nodes,
         eta0: &eta0,
         loadings: &loadings,
-        log_rates: &log_rates,
+        rates: &rates,
         time_scale: 1.0,
         gh: &gh,
         continuation_gap: 0.0,
@@ -315,8 +315,8 @@ fn finite_difference_subject() -> (SubjectNodes, Vec<f64>, Vec<f64>, Vec<f64>) {
     );
     let eta0 = vec![0.2, -0.1, 0.4, 0.0, -0.3, 0.5, 0.1, 0.2];
     let loadings = vec![0.8, -0.4, 0.3, 0.6];
-    let log_rates = vec![-0.2, 0.5];
-    (nodes, eta0, loadings, log_rates)
+    let rates = vec![0.82, 1.65];
+    (nodes, eta0, loadings, rates)
 }
 
 fn evaluate_at(
@@ -329,13 +329,13 @@ fn evaluate_at(
     let (marks, atoms) = (2, 2);
     let eta0 = &theta[0..n * marks];
     let loadings = &theta[n * marks..n * marks + marks * atoms];
-    let log_rates = &theta[n * marks + marks * atoms..];
+    let rates = &theta[n * marks + marks * atoms..];
     subject_marginal(
         &SubjectInputs {
             nodes,
             eta0,
             loadings,
-            log_rates,
+            rates,
             time_scale: 1.0,
             gh,
             continuation_gap: 0.0,
@@ -349,10 +349,10 @@ fn evaluate_at(
 #[test]
 fn gradient_and_hessian_match_central_differences() {
     let gh = GaussHermite::new(31).expect("rule");
-    let (nodes, eta0, loadings, log_rates) = finite_difference_subject();
+    let (nodes, eta0, loadings, rates) = finite_difference_subject();
     let mut theta = eta0.clone();
     theta.extend(loadings.iter());
-    theta.extend(log_rates.iter());
+    theta.extend(rates.iter());
     let p = theta.len();
     let base = evaluate_at(&nodes, &gh, &theta, true);
     let h = 1e-4;
@@ -387,10 +387,10 @@ fn gradient_and_hessian_match_central_differences() {
 #[test]
 fn directional_duals_match_finite_differences_of_the_hessian() {
     let gh = GaussHermite::new(21).expect("rule");
-    let (nodes, eta0, loadings, log_rates) = finite_difference_subject();
+    let (nodes, eta0, loadings, rates) = finite_difference_subject();
     let mut theta = eta0.clone();
     theta.extend(loadings.iter());
-    theta.extend(log_rates.iter());
+    theta.extend(rates.iter());
     let p = theta.len();
     let u: Vec<f64> = (0..p).map(|i| 0.3 * ((i as f64) * 0.7).sin() + 0.1).collect();
     let v: Vec<f64> = (0..p).map(|i| 0.2 * ((i as f64) * 1.3).cos() - 0.05).collect();
@@ -410,7 +410,7 @@ fn directional_duals_match_finite_differences_of_the_hessian() {
                 nodes: &nodes,
                 eta0: &jets[0..n * marks],
                 loadings: &jets[n * marks..n * marks + marks * atoms],
-                log_rates: &jets[n * marks + marks * atoms..],
+                rates: &jets[n * marks + marks * atoms..],
                 time_scale: 1.0,
                 gh: &gh,
                 continuation_gap: 0.0,
@@ -447,7 +447,7 @@ fn directional_duals_match_finite_differences_of_the_hessian() {
                 nodes: &nodes,
                 eta0: &jets[0..n * marks],
                 loadings: &jets[n * marks..n * marks + marks * atoms],
-                log_rates: &jets[n * marks + marks * atoms..],
+                rates: &jets[n * marks + marks * atoms..],
                 time_scale: 1.0,
                 gh: &gh,
                 continuation_gap: 0.0,
@@ -842,7 +842,7 @@ fn family_joint_hessian_matches_finite_differences_of_its_gradient() {
     )
     .expect("family");
     let beta = array![-0.4, 0.3];
-    let latent = array![0.5, -0.2];
+    let latent = array![0.5, 0.8];
     let states = |beta: &Array1<f64>, latent: &Array1<f64>| {
         vec![
             ParameterBlockState {
@@ -960,6 +960,25 @@ fn fit_recovers_the_covariate_effect_and_a_positive_shared_risk_loading() {
     emit(&format!("[fit] rank={} evidence={:?} path={:?}", fit.rank(), fit.atom_evidence, fit.rank_path));
     assert!(fit.rank() >= 1, "a shared dynamic risk was simulated but the evidence grew no atom");
     assert!(fit.atom_evidence[0] > 0.0, "an accepted atom carries positive evidence");
+    // The reported evidence is read from the exact profile along the
+    // direction, so it cannot exceed the realised log-likelihood gain of the
+    // fitted candidate (which re-optimises everything the profile held), and
+    // it is closer to that gain than the score's second-order statistic.
+    let step = &fit.rank_path[0];
+    assert!(
+        step.evidence_gain <= step.log_likelihood_gain + 1e-9,
+        "evidence {} exceeds the realised gain {}",
+        step.evidence_gain,
+        step.log_likelihood_gain
+    );
+    assert!(
+        (step.evidence_gain - step.log_likelihood_gain).abs()
+            < (step.standardised_gain - step.log_likelihood_gain).abs(),
+        "evidence {} is further from the realised gain {} than the standardised gain {}",
+        step.evidence_gain,
+        step.log_likelihood_gain,
+        step.standardised_gain
+    );
     // The canonical gauge signs the loading positive; the reported covariance
     // is the posterior mean, the mode squared plus the loading's posterior
     // spread, and its eigenvalue carries a finite uncertainty.
@@ -1303,13 +1322,14 @@ fn newton_direction_decreases_the_penalised_objective_at_the_start() {
             },
         ]
     };
-    // Ridge on the atom (loading and log-rate) at λ = 1.
-    let penalty = |latent: &Array1<f64>| 0.5 * latent.dot(latent);
+    // Ridge on the atom's loading at λ = 1; the rate is a structural
+    // coordinate with no penalty, and its domain is `ν > 0`.
+    let penalty = |latent: &Array1<f64>| 0.5 * latent[0] * latent[0];
     let objective = |beta: &Array1<f64>, latent: &Array1<f64>| -> f64 {
         -family.log_likelihood(&states(beta, latent)).expect("value") + penalty(latent)
     };
     let beta0 = array![0.0, 0.0];
-    let latent0 = array![0.0, 0.0];
+    let latent0 = array![0.0, 1.0];
     let joint = family
         .joint_evaluation(&states(&beta0, &latent0))
         .expect("joint");
@@ -1334,15 +1354,13 @@ fn newton_direction_decreases_the_penalised_objective_at_the_start() {
             &latent0 - &plus.slice(ndarray::s![2..4]),
         );
         let fd = (objective(&bp, &lp) - objective(&bm, &lm)) / (2.0 * h_fd);
-        let analytic = -joint.gradient[i] + if i >= 2 { latent0[i - 2] } else { 0.0 };
+        let analytic = -joint.gradient[i] + if i == 2 { latent0[0] } else { 0.0 };
         emit(&format!("coefficient {i}: analytic {analytic} vs finite difference {fd}"));
     }
     let mut h = joint.hessian.clone();
     let mut g = -joint.gradient.clone();
-    for i in 2..p {
-        h[[i, i]] += 1.0;
-        g[i] += latent0[i - 2];
-    }
+    h[[2, 2]] += 1.0;
+    g[2] += latent0[0];
     let direction = solve_small(&h, &g.mapv(|v| -v));
     let base = objective(&beta0, &latent0);
     let mut decreased = false;
@@ -1507,7 +1525,7 @@ fn smallest_prefix_with_non_finite_louis_output_at_order_21() {
                 nodes: &prefix,
                 eta0: &eta0,
                 loadings: &[1.2054],
-                log_rates: &[1.0587],
+                rates: &[1.0587_f64.exp()],
                 time_scale: cohort.time_scale(),
                 gh: &gh,
                 continuation_gap: 0.0,
@@ -1558,7 +1576,7 @@ fn smallest_prefix_with_non_finite_louis_output_at_order_21() {
                     nodes: &prefix,
                     eta0: &eta0,
                     loadings: &[1.2054],
-                    log_rates: &[1.0587],
+                    rates: &[1.0587_f64.exp()],
                     time_scale: cohort.time_scale(),
                     gh: &gh,
                     continuation_gap: 0.0,
@@ -1603,7 +1621,7 @@ fn louis_hessian_converges_to_the_computed_curvature_as_the_quadrature_resolves(
     let cohort = loaded_cohort();
     let loading = 1.2054_f64;
     let beta = array![-0.9485 + 0.5 * loading * loading, 0.5452];
-    let latent = array![loading, 1.0587];
+    let latent = array![loading, 1.0587_f64.exp()];
     let p = 4;
     let mut discrepancy_by_order = Vec::new();
     for order in [11usize, 21] {
@@ -1777,7 +1795,7 @@ fn dual_loading_derivative_matches_finite_difference_at_zero_loading() {
                 nodes: &subj,
                 eta0: &eta0,
                 loadings: &[a],
-                log_rates: &[0.2],
+                rates: &[1.2],
                 time_scale: 1.0,
                 gh: &gh,
                 continuation_gap: 0.0,
@@ -1790,7 +1808,7 @@ fn dual_loading_derivative_matches_finite_difference_at_zero_loading() {
             nodes: &subj,
             eta0: &eta0,
             loadings: &[Tangent::seeded(0.0, [1.0])],
-            log_rates: &[Tangent::seeded(0.2, [0.0])],
+            rates: &[Tangent::seeded(1.2, [0.0])],
             time_scale: 1.0,
             gh: &gh,
             continuation_gap: 0.0,
@@ -1955,7 +1973,8 @@ fn traced_fixed_lambda_inner_solve_on_the_null_cohort() {
             nodes.total_nodes,
             1,
             1,
-            &RankStart::carried(vec![1.0], vec![0.0], vec![0.0], vec![false]),
+            &RankStart::carried(Vec::new(), vec![1.0], vec![0.0], vec![0.0], vec![false]),
+            family.rate_band(),
         )
         .expect("latent spec"),
     ];
@@ -1992,7 +2011,7 @@ fn gradient_and_hessian_match_central_differences_at_tiny_gaps() {
     );
     let mut theta = vec![0.2, -0.1, 0.4, 0.0, -0.3, 0.5, 0.1, 0.2];
     theta.extend([0.8, -0.4, 0.3, 0.6]);
-    theta.extend([-0.2, 0.5]);
+    theta.extend([0.82, 1.65]);
     let p = theta.len();
     let base = evaluate_at(&nodes, &gh, &theta, true);
     let h = 1e-4;
@@ -2060,7 +2079,7 @@ fn traced_fixed_lambda_inner_solve_on_the_loaded_cohort_reports_its_cost() {
             eta: Array1::zeros(nodes.total_nodes),
         },
         ParameterBlockState {
-            beta: array![0.7, 0.0],
+            beta: array![0.7, 1.0],
             eta: Array1::zeros(nodes.total_nodes),
         },
     ];
@@ -2088,7 +2107,8 @@ fn traced_fixed_lambda_inner_solve_on_the_loaded_cohort_reports_its_cost() {
             nodes.total_nodes,
             1,
             1,
-            &RankStart::carried(vec![1.0], vec![0.0], vec![0.0], vec![false]),
+            &RankStart::carried(Vec::new(), vec![1.0], vec![0.0], vec![0.0], vec![false]),
+            family.rate_band(),
         )
         .expect("latent spec"),
     ];
@@ -2696,14 +2716,22 @@ fn the_latent_block_carries_fixed_loading_priors_and_free_rates() {
     // Each atom's loadings carry the prior the evidence chose, held fixed,
     // and its log-rate is an unpenalised structural coordinate.
     let start = RankStart::carried(
+        Vec::new(),
         vec![0.8, -0.3, 0.1, 0.5],
         vec![-0.2, 0.9],
         vec![1.5, -0.4],
         vec![false, false],
     );
-    let latent = super::family::latent_block_spec(400, 2, 2, &start).expect("latent spec");
+    let band = (1e-6, 100.0);
+    let latent = super::family::latent_block_spec(400, 2, 2, &start, band).expect("latent spec");
     let initial = latent.initial_beta.expect("initial");
-    assert_eq!(initial.to_vec(), vec![0.8, -0.3, 0.1, 0.5, -0.2, 0.9]);
+    assert_eq!(initial.slice(ndarray::s![..4]).to_vec(), vec![0.8, -0.3, 0.1, 0.5]);
+    // The rate coefficients are the chart coordinates of the dimensionless
+    // rates: the chart round-trips them.
+    for (k, log_rate) in [-0.2_f64, 0.9].iter().enumerate() {
+        let rate = super::family::rate_from_chart(band, &initial[4 + k]);
+        assert!((rate - log_rate.exp()).abs() < 1e-12 * log_rate.exp(), "atom {k}: {rate} vs {}", log_rate.exp());
+    }
     assert_eq!(latent.penalties.len(), 2, "one loading prior per atom");
     for (k, penalty) in latent.penalties.iter().enumerate() {
         assert_eq!(penalty.fixed_log_lambda(), Some(start.log_lambdas[k]));
@@ -2712,13 +2740,17 @@ fn the_latent_block_carries_fixed_loading_priors_and_free_rates() {
     // A rate held at a limit of the mesh's resolution has no coefficient:
     // the block narrows by one and the free rate keeps its slot.
     let held = RankStart::carried(
+        Vec::new(),
         vec![0.8, -0.3, 0.1, 0.5],
         vec![-0.2, 0.9],
         vec![1.5, -0.4],
         vec![true, false],
     );
-    let latent = super::family::latent_block_spec(400, 2, 2, &held).expect("latent spec");
-    assert_eq!(latent.initial_beta.expect("initial").to_vec(), vec![0.8, -0.3, 0.1, 0.5, 0.9]);
+    let latent = super::family::latent_block_spec(400, 2, 2, &held, band).expect("latent spec");
+    let initial = latent.initial_beta.expect("initial");
+    assert_eq!(initial.len(), 5);
+    let rate = super::family::rate_from_chart(band, &initial[4]);
+    assert!((rate - 0.9_f64.exp()).abs() < 1e-12 * 0.9_f64.exp());
     assert_eq!(latent.nullspace_dims, vec![3, 3]);
 }
 
@@ -2745,36 +2777,70 @@ fn the_quartic_marginal_is_exact_and_the_empirical_bayes_prior_decides_by_the_mo
     // chosen level.
     let information: f64 = 100.0;
     let threshold = gamma_quarter / (2.0 * gamma_three_quarters);
-    let below = empirical_bayes_ridge(&[(0.9 * threshold * information.sqrt(), information)]);
-    let above = empirical_bayes_ridge(&[(1.1 * threshold * information.sqrt(), information)]);
+    let quartic = |eigenvalue: f64| DirectionEvidence::Quartic {
+        eigenvalue,
+        information,
+    };
+    let below = empirical_bayes_ridge(&[quartic(0.9 * threshold * information.sqrt())]);
+    let above = empirical_bayes_ridge(&[quartic(1.1 * threshold * information.sqrt())]);
     emit(&format!("[ridge] below {below:?} above {above:?}"));
     assert!(!below.accepted, "a score below the quartic threshold keeps the mode at zero");
     assert!(above.accepted, "a score above the quartic threshold moves the mode off zero");
     assert!(above.log_lambda.exp() < 1.1 * threshold * information.sqrt());
     assert!(above.gain > 0.0 && above.mode_scale > 0.0);
     // A strong direction lands near the Laplace-scale prior `λ = J / μ`.
-    let strong = empirical_bayes_ridge(&[(400.0, information)]);
+    let strong = empirical_bayes_ridge(&[quartic(400.0)]);
     assert!(strong.accepted);
     assert!((strong.log_lambda - (information / 400.0).ln()).abs() < 0.2, "{strong:?}");
     assert!(strong.gain > 300.0, "the evidence of a 400-nat direction: {}", strong.gain);
     // No positive direction: no finite prior raises the evidence.
-    let none = empirical_bayes_ridge(&[(-5.0, information), (-40.0, information)]);
+    let none = empirical_bayes_ridge(&[quartic(-5.0), quartic(-40.0)]);
     assert!(!none.accepted && none.log_lambda.is_infinite() && none.gain == 0.0);
     // Other directions charge their Occam factor: the same strong direction
     // beside three strongly negative ones is still accepted, and a marginal
     // one beside them is not.
     let beside = empirical_bayes_ridge(&[
-        (400.0, information),
-        (-300.0, information),
-        (-300.0, information),
-        (-300.0, information),
+        quartic(400.0),
+        quartic(-300.0),
+        quartic(-300.0),
+        quartic(-300.0),
     ]);
     assert!(beside.accepted);
     let marginal = empirical_bayes_ridge(&[
-        (1.1 * threshold * information.sqrt(), information),
-        (-300.0, information),
-        (-300.0, information),
+        quartic(1.1 * threshold * information.sqrt()),
+        quartic(-300.0),
+        quartic(-300.0),
     ]);
     emit(&format!("[ridge] marginal beside negatives {marginal:?}"));
     assert!(!marginal.accepted);
+
+    // An exact profile sampled from the quartic itself, with its slopes, is
+    // integrated by the interpolant to the same marginal, moments and
+    // prior as the closed-form quartic route.
+    let (mu, j) = (400.0, information);
+    let mode = (mu / j).sqrt();
+    let step = mode / 8.0;
+    let (mut points, mut values, mut slopes) = (vec![0.0], vec![0.0], vec![0.0]);
+    let mut t = 0.0;
+    loop {
+        t += step;
+        let value = 0.5 * mu * t * t - 0.25 * j * t * t * t * t;
+        points.push(t);
+        values.push(value);
+        slopes.push(mu * t - j * t * t * t);
+        if t > mode && value < mu * mu / (4.0 * j) - 40.0 {
+            break;
+        }
+    }
+    let exact = DirectionEvidence::Exact(DirectionProfile {
+        points,
+        values,
+        slopes,
+    });
+    let from_profile = empirical_bayes_ridge(&[exact]);
+    emit(&format!("[ridge] quartic {strong:?} profile {from_profile:?}"));
+    assert!(from_profile.accepted);
+    assert!((from_profile.log_lambda - strong.log_lambda).abs() < 1e-3, "{from_profile:?} vs {strong:?}");
+    assert!((from_profile.gain - strong.gain).abs() < 1e-2 * strong.gain);
+    assert!((from_profile.mode_scale - strong.mode_scale).abs() < 1e-3);
 }

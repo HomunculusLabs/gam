@@ -66,8 +66,12 @@ pub(crate) struct SubjectInputs<'a, S> {
     pub eta0: &'a [S],
     /// Loadings, index `d * atoms + k`.
     pub loadings: &'a [S],
-    /// `ln(rate · time_scale)` per atom.
-    pub log_rates: &'a [S],
+    /// The dimensionless rate `ν = rate · time_scale` per atom. This is the
+    /// coefficient the fit carries: near zero the likelihood is smooth in it
+    /// with finite curvature, where its logarithm would be flat, so a static
+    /// frailty is a wall the coefficient can sit on rather than a plateau it
+    /// runs along.
+    pub rates: &'a [S],
     pub time_scale: f64,
     pub gh: &'a GaussHermite,
     /// Elapsed time between a supplied filtered state and the first node;
@@ -80,7 +84,7 @@ pub(crate) struct SubjectInputs<'a, S> {
 }
 
 /// Marginal log-likelihood and its derivatives in the subject-local parameter
-/// vector `[β_0 | … | β_{D−1} | a (marks × atoms) | ρ (atoms)]`.
+/// vector `[β_0 | … | β_{D−1} | a (marks × atoms) | ν (atoms)]`.
 pub(crate) struct SubjectOutput<S> {
     pub loglik: S,
     /// The Fisher-identity gradient `E[∂L_c/∂θ | y]`; empty when derivatives
@@ -142,24 +146,26 @@ pub(crate) fn log_intensity<S: JetField>(eta0: &S, loadings_d: &[S], z: &[S]) ->
 
 /// The transitions of every atom across a gap of `gap` time units.
 ///
-/// A rate whose `κ = rate · gap / T` underflows to exactly zero would make
-/// the innovation variance exactly zero and the transition a singular
-/// Gaussian; the log-rate ridge keeps the fit far from that boundary, so
-/// reaching it is a numerical failure to report, not a limit to take.
+/// A rate whose `κ = ν · gap / T` is not positive would make the innovation
+/// variance zero and the transition a singular Gaussian; the fit keeps `ν`
+/// inside the band its breakpoints resolve, so reaching it is a numerical failure
+/// to report, not a limit to take. The transition's own derivative fields
+/// are in the log-rate, the coordinate in which the gap scores stay bounded
+/// as a gap shrinks; the marginal converts them to `ν` at the end.
 pub(crate) fn transitions_across<S: JetField>(
-    log_rates: &[S],
+    rates: &[S],
     gap: f64,
     time_scale: f64,
 ) -> Result<Vec<AtomTransition<S>>, EventHistoryError> {
-    log_rates
+    rates
         .iter()
-        .map(|rho| {
-            let kappa = exp(rho).scale(gap / time_scale);
+        .map(|nu| {
+            let kappa = nu.scale(gap / time_scale);
             if !(kappa.value() > 0.0) {
                 return Err(numerical(format!(
-                    "atom transition across a gap of {gap}: rate · gap = {} is not positive (log-rate {})",
+                    "atom transition across a gap of {gap}: rate · gap = {} is not positive (rate {})",
                     kappa.value(),
-                    rho.value()
+                    nu.value()
                 )));
             }
             Ok(AtomTransition::new(&kappa))
@@ -624,7 +630,7 @@ pub(crate) fn subject_marginal<S: JetField>(
     let nodes = inputs.nodes;
     let n_nodes = nodes.len();
     let marks = nodes.counts.ncols();
-    let atoms = inputs.log_rates.len();
+    let atoms = inputs.rates.len();
     if n_nodes == 0 || marks == 0 {
         return Err(numerical("subject marginal needs at least one node and one mark"));
     }
@@ -1106,6 +1112,37 @@ pub(crate) fn subject_marginal<S: JetField>(
             hessian[r * p_total + q] = symmetric;
         }
     }
+    // ---- the rate slots, from the log-rate to the rate ---------------------
+    // The gap scores are derivatives in `ρ = ln ν`, the coordinate in which
+    // they stay bounded across a short gap. The coefficient is `ν`, so with
+    // `dρ/dν = 1/ν` and `d²ρ/dν² = −1/ν²`:
+    //   ∂ℓ/∂ν = ∂ℓ/∂ρ / ν,
+    //   ∂²ℓ/∂ν² = (∂²ℓ/∂ρ² − ∂ℓ/∂ρ) / ν²,   ∂²ℓ/∂ν∂x = ∂²ℓ/∂ρ∂x / ν.
+    // The factors are jets, so every derivative channel of the conversion
+    // is carried along with the value.
+    let inverse_rates: Vec<S> = inputs.rates.iter().map(recip).collect();
+    let rate_gradients: Vec<S> = (0..atoms).map(|k| mean[layout.rho(k)].clone()).collect();
+    for k in 0..atoms {
+        let rho_k = layout.rho(k);
+        let inv_k = &inverse_rates[k];
+        for j in 0..atoms {
+            let rho_j = layout.rho(j);
+            let inv_j = &inverse_rates[j];
+            let raw = hessian[rho_k * p_total + rho_j].clone();
+            let converted = if k == j {
+                raw.sub(&rate_gradients[k]).mul(inv_k).mul(inv_k)
+            } else {
+                raw.mul(inv_k).mul(inv_j)
+            };
+            hessian[rho_k * p_total + rho_j] = converted;
+        }
+        for q in 0..layout.rho0 {
+            let value = hessian[rho_k * p_total + q].mul(inv_k);
+            hessian[rho_k * p_total + q] = value.clone();
+            hessian[q * p_total + rho_k] = value;
+        }
+        mean[rho_k] = rate_gradients[k].mul(inv_k);
+    }
     Ok(SubjectOutput {
         loglik,
         gradient: mean,
@@ -1126,7 +1163,7 @@ fn filter_nodes<S: JetField>(
     let nodes = inputs.nodes;
     let n_nodes = nodes.len();
     let marks = nodes.counts.ncols();
-    let atoms = inputs.log_rates.len();
+    let atoms = inputs.rates.len();
     let gh = inputs.gh;
     let like = &inputs.eta0[0];
     let mut filtered: Vec<FilteredNode<S>> = Vec::with_capacity(n_nodes);
@@ -1145,7 +1182,7 @@ fn filter_nodes<S: JetField>(
     };
     filtered.push(filter_start(gh, like, atoms, &|grid| node_terms(grid, 0), "first node")?);
     for n in 0..n_nodes - 1 {
-        let transitions = transitions_across(inputs.log_rates, nodes.gaps[n], inputs.time_scale)?;
+        let transitions = transitions_across(inputs.rates, nodes.gaps[n], inputs.time_scale)?;
         let step = filter_step(
             gh,
             like,
@@ -1195,7 +1232,7 @@ fn backward_smoother<S: JetField>(
 ) -> Result<Smoothed<S>, EventHistoryError> {
     let n_nodes = filtered.len();
     let marks = inputs.nodes.counts.ncols();
-    let atoms = inputs.log_rates.len();
+    let atoms = inputs.rates.len();
     let gh = inputs.gh;
     let zero = inputs.eta0[0].constant_like(0.0);
     let n_gaps = n_nodes.saturating_sub(1);
@@ -1365,7 +1402,7 @@ pub(crate) fn latent_state_moments(
     let nodes = inputs.nodes;
     let n_nodes = nodes.len();
     let marks = nodes.counts.ncols();
-    let atoms = inputs.log_rates.len();
+    let atoms = inputs.rates.len();
     if n_nodes == 0 || marks == 0 {
         return Err(numerical("latent state moments need at least one node and one mark"));
     }
@@ -1427,7 +1464,7 @@ pub(crate) fn forward_filter<S: JetField>(
     let nodes = inputs.nodes;
     let n_nodes = nodes.len();
     let marks = nodes.counts.ncols();
-    let atoms = inputs.log_rates.len();
+    let atoms = inputs.rates.len();
     let gh = inputs.gh;
     if n_nodes == 0 || marks == 0 || compensated.len() != marks {
         return Err(numerical("forward filter needs nodes, marks and a compensator mask"));
@@ -1457,7 +1494,7 @@ pub(crate) fn forward_filter<S: JetField>(
             like,
             grid,
             filtered,
-            transitions_across(inputs.log_rates, inputs.continuation_gap, inputs.time_scale)?,
+            transitions_across(inputs.rates, inputs.continuation_gap, inputs.time_scale)?,
             0,
             &|grid| node_terms(grid, 0),
             "forecast first node",
@@ -1473,7 +1510,7 @@ pub(crate) fn forward_filter<S: JetField>(
             like,
             &grids[n],
             &alpha[n],
-            transitions_across(inputs.log_rates, nodes.gaps[n], inputs.time_scale)?,
+            transitions_across(inputs.rates, nodes.gaps[n], inputs.time_scale)?,
             0,
             &|grid| node_terms(grid, n + 1),
             &format!("forecast node {}", n + 1),

@@ -9,12 +9,15 @@ use super::chain::{GaussHermite, product_grid_size};
 use super::cohort::{
     CohortNodes, EventHistoryCohort, EventHistoryError, MarkKind, design_rows, expand_nodes,
 };
-use super::covariance::{NewAtom, SubjectResiduals, best_new_atom};
+use super::covariance::{
+    DirectionEvidence, DirectionProfile, NewAtom, SubjectResiduals, best_new_atom,
+    empirical_bayes_ridge,
+};
 use super::marginal::{
     LOST_POSITIVITY, SubjectInputs, expected_intensities, forward_filter, pairwise_sum,
     subject_marginal,
 };
-use super::scalar::Tangent;
+use super::scalar::{Tangent, add_real, recip};
 use crate::custom_family::{
     BlockWorkingSet, BlockwiseFitOptions, CustomFamily, ExactNewtonJointGradientEvaluation,
     FamilyEvaluation, ParameterBlockSpec, ParameterBlockState, PenaltyMatrix, fit_custom_family,
@@ -124,12 +127,19 @@ pub struct EventHistoryFamily {
     /// Dense per-mark designs on the nodes, `n_obs × p_d`.
     designs: Vec<Arc<Array2<f64>>>,
     atoms: usize,
-    /// Per atom, the log-rate the atom is held at, or `None` when the rate
-    /// is a coefficient of the latent block. A rate at a limit of what the
-    /// node mesh resolves is held: there the likelihood is flat in the rate
-    /// to double precision, so a coordinate for it would be unidentified,
-    /// and the rate is data — the limit the mesh defines.
-    held_log_rates: Vec<Option<f64>>,
+    /// Per atom, the dimensionless rate `ν = rate · T̄` the atom is held at,
+    /// or `None` when the rate is a coefficient of the latent block. A rate on
+    /// a plateau of what the residuals resolve is held: there the likelihood
+    /// is flat in the rate to double precision, so a coordinate for it would
+    /// be unidentified, and the rate is data — the plateau's own value.
+    held_rates: Vec<Option<f64>>,
+    /// The band `[ν_min, ν_max]` of dimensionless rates the node mesh
+    /// resolves. A free rate coefficient `u` is a chart of this band,
+    /// `ν(u) = ν_min + (ν_max − ν_min) · u² / (1 + u²)`: the static wall
+    /// `ν_min` is the fold `u = 0`, where a fit the data push against it
+    /// reaches a stationary point of positive curvature instead of a plateau
+    /// with a vanishing gradient, and the fast wall is the asymptote.
+    rate_band: (f64, f64),
     gh: Arc<GaussHermite>,
     time_scale: f64,
     /// The last joint evaluation, keyed on the exact state it was made at.
@@ -143,13 +153,18 @@ impl EventHistoryFamily {
         atoms: usize,
         gauss_hermite_order: usize,
         time_scale: f64,
-        held_log_rates: Vec<Option<f64>>,
+        held_rates: Vec<Option<f64>>,
     ) -> Result<Self, EventHistoryError> {
-        if held_log_rates.len() != atoms || held_log_rates.iter().flatten().any(|r| !r.is_finite()) {
+        if held_rates.len() != atoms
+            || held_rates
+                .iter()
+                .flatten()
+                .any(|r| !(r.is_finite() && *r > 0.0))
+        {
             return Err(EventHistoryError::InvalidInput {
                 reason: format!(
-                    "event-history family needs one finite or free log-rate per atom: got {:?} for {atoms} atoms",
-                    held_log_rates
+                    "event-history family needs one positive finite or free rate per atom: got {:?} for {atoms} atoms",
+                    held_rates
                 ),
             });
         }
@@ -179,23 +194,25 @@ impl EventHistoryFamily {
             });
         }
         product_grid_size(gauss_hermite_order, atoms)?;
+        let rate_band = rate_band(&nodes, time_scale)?;
         Ok(Self {
             nodes,
             designs,
             atoms,
-            held_log_rates,
+            held_rates,
+            rate_band,
             gh: Arc::new(GaussHermite::new(gauss_hermite_order)?),
             time_scale,
             cache: Arc::new(Mutex::new(None)),
         })
     }
 
-    /// Per atom, the offset within the latent block of its log-rate
-    /// coefficient, or `None` for a held rate. The loadings come first,
-    /// then the free rates in atom order.
+    /// Per atom, the offset within the latent block of its rate coefficient,
+    /// or `None` for a held rate. The loadings come first, then the free
+    /// rates in atom order.
     fn free_rate_slots(&self) -> Vec<Option<usize>> {
         let mut next = self.marks() * self.atoms;
-        self.held_log_rates
+        self.held_rates
             .iter()
             .map(|held| {
                 held.is_none().then(|| {
@@ -207,22 +224,27 @@ impl EventHistoryFamily {
             .collect()
     }
 
-    /// Every atom's log-rate at a latent block state: the coefficient for a
-    /// free rate, the held value otherwise.
-    pub fn atom_log_rates(&self, latent_beta: &Array1<f64>) -> Vec<f64> {
+    /// Every atom's dimensionless rate `ν` at a latent block state: the
+    /// chart of the coefficient for a free rate, the held value otherwise.
+    pub fn atom_rates(&self, latent_beta: &Array1<f64>) -> Vec<f64> {
         self.free_rate_slots()
             .iter()
-            .zip(self.held_log_rates.iter())
+            .zip(self.held_rates.iter())
             .map(|(slot, held)| match slot {
-                Some(slot) => latent_beta[*slot],
+                Some(slot) => rate_from_chart(self.rate_band, &latent_beta[*slot]),
                 None => held.expect("a rate without a coefficient is held"),
             })
             .collect()
     }
 
-    /// Whether each atom's rate is held at a limit of the mesh's resolution.
+    /// The band of dimensionless rates the cohort's breakpoints resolve, `(ν_min, ν_max)`.
+    pub fn rate_band(&self) -> (f64, f64) {
+        self.rate_band
+    }
+
+    /// Whether each atom's rate is held on a plateau of the residuals' resolution.
     pub fn rate_held(&self) -> Vec<bool> {
-        self.held_log_rates.iter().map(Option::is_some).collect()
+        self.held_rates.iter().map(Option::is_some).collect()
     }
 
     pub fn marks(&self) -> usize {
@@ -252,7 +274,7 @@ impl EventHistoryFamily {
     /// Width of the latent block: the loadings, then the log-rates of the
     /// atoms whose rates are coefficients.
     pub fn latent_width(&self) -> usize {
-        self.marks() * self.atoms + self.held_log_rates.iter().filter(|h| h.is_none()).count()
+        self.marks() * self.atoms + self.held_rates.iter().filter(|h| h.is_none()).count()
     }
 
     /// Whether the fit carries a latent block (no atoms means a plain
@@ -390,15 +412,23 @@ impl EventHistoryFamily {
             })
             .collect();
         let slots = self.free_rate_slots();
-        let log_rates: Vec<S> = (0..atoms)
-            .map(|k| match slots[k] {
-                Some(q) => S::seeded(
-                    latent_beta[q],
-                    component(u, latent_offset + q),
-                    component(v, latent_offset + q),
-                ),
+        let band = self.rate_band;
+        let charts: Vec<Option<S>> = (0..atoms)
+            .map(|k| {
+                slots[k].map(|q| {
+                    S::seeded(
+                        latent_beta[q],
+                        component(u, latent_offset + q),
+                        component(v, latent_offset + q),
+                    )
+                })
+            })
+            .collect();
+        let rates: Vec<S> = (0..atoms)
+            .map(|k| match charts[k].as_ref() {
+                Some(chart) => rate_from_chart(band, chart),
                 None => S::seeded(
-                    self.held_log_rates[k].expect("a rate without a coefficient is held"),
+                    self.held_rates[k].expect("a rate without a coefficient is held"),
                     0.0,
                     0.0,
                 ),
@@ -454,7 +484,7 @@ impl EventHistoryFamily {
                     nodes: subject,
                     eta0: &eta0,
                     loadings: &loadings,
-                    log_rates: &log_rates,
+                    rates: &rates,
                     time_scale,
                     gh,
                     continuation_gap: 0.0,
@@ -498,6 +528,44 @@ impl EventHistoryFamily {
                         *acc = acc.add(&hh[q * local_total + r]);
                     }
                 }
+            }
+            // The rate slots, from the rate to its chart coordinate: with
+            // `ν = ν(u)`, `∂ℓ/∂u = ∂ℓ/∂ν · ν'`, `∂²ℓ/∂u² = ∂²ℓ/∂ν² · ν'² +
+            // ∂ℓ/∂ν · ν''`, `∂²ℓ/∂u∂x = ∂²ℓ/∂ν∂x · ν'`. The factors are
+            // jets of the seeded coordinate, so every directional channel of
+            // the conversion rides along.
+            let chart_slots: Vec<(usize, S, S)> = charts
+                .iter()
+                .zip(slots.iter())
+                .filter_map(|(chart, slot)| {
+                    chart.as_ref().zip(*slot).map(|(chart, slot)| {
+                        let (first, second) = rate_chart_derivatives(band, chart);
+                        (latent_offset + slot, first, second)
+                    })
+                })
+                .collect();
+            let rate_gradients: Vec<S> = chart_slots
+                .iter()
+                .map(|(slot, _, _)| gradient[*slot].clone())
+                .collect();
+            for (a, (slot_a, first_a, second_a)) in chart_slots.iter().enumerate() {
+                for (b, (slot_b, first_b, _)) in chart_slots.iter().enumerate() {
+                    let raw = hessian[slot_a * total + slot_b].clone();
+                    hessian[slot_a * total + slot_b] = if a == b {
+                        raw.mul(first_a).mul(first_a).add(&rate_gradients[a].mul(second_a))
+                    } else {
+                        raw.mul(first_a).mul(first_b)
+                    };
+                }
+                for q in 0..total {
+                    if chart_slots.iter().any(|(slot, _, _)| *slot == q) {
+                        continue;
+                    }
+                    let value = hessian[slot_a * total + q].mul(first_a);
+                    hessian[slot_a * total + q] = value.clone();
+                    hessian[q * total + slot_a] = value;
+                }
+                gradient[*slot_a] = rate_gradients[a].mul(first_a);
             }
         }
         Ok((loglik, gradient, hessian))
@@ -563,11 +631,12 @@ impl EventHistoryFamily {
             };
             let loadings: Vec<Tangent<W>> = (0..marks * atoms).map(unit).collect();
             let slots = self.free_rate_slots();
-            let log_rates: Vec<Tangent<W>> = (0..atoms)
+            let band = self.rate_band;
+            let rates: Vec<Tangent<W>> = (0..atoms)
                 .map(|k| match slots[k] {
-                    Some(slot) => unit(slot),
+                    Some(slot) => rate_from_chart(band, &unit(slot)),
                     None => Tangent::seeded(
-                        self.held_log_rates[k].expect("a rate without a coefficient is held"),
+                        self.held_rates[k].expect("a rate without a coefficient is held"),
                         [0.0; W],
                     ),
                 })
@@ -594,7 +663,7 @@ impl EventHistoryFamily {
                         nodes: subject,
                         eta0: &eta0,
                         loadings: &loadings,
-                        log_rates: &log_rates,
+                        rates: &rates,
                         time_scale,
                         gh,
                         continuation_gap: 0.0,
@@ -611,6 +680,88 @@ impl EventHistoryFamily {
             }
         }
         Ok(())
+    }
+
+    /// The log-likelihood and its derivative along one direction of the
+    /// joint coefficient vector, by one forward filter on a one-slot tangent
+    /// seeded with the direction.
+    pub(crate) fn directional_log_likelihood(
+        &self,
+        states: &[ParameterBlockState],
+        direction: &Array1<f64>,
+    ) -> Result<(f64, f64), String> {
+        self.validate_states(states)?;
+        let marks = self.marks();
+        let atoms = self.atoms;
+        let offsets = self.block_offsets();
+        let total = self.total_width();
+        if direction.len() != total {
+            return Err(format!(
+                "event-history direction has length {}, expected {total}",
+                direction.len()
+            ));
+        }
+        let latent_offset = offsets[marks];
+        let empty = Array1::<f64>::zeros(0);
+        let latent_beta: &Array1<f64> = if self.has_latent_block() {
+            &states[marks].beta
+        } else {
+            &empty
+        };
+        let designs = &self.designs;
+        let gh = &self.gh;
+        let time_scale = self.time_scale;
+        let slots = self.free_rate_slots();
+        let seeded = |q: usize| Tangent::<1>::seeded(latent_beta[q], [direction[latent_offset + q]]);
+        let loadings: Vec<Tangent<1>> = (0..marks * atoms).map(seeded).collect();
+        let band = self.rate_band;
+        let rates: Vec<Tangent<1>> = (0..atoms)
+            .map(|k| match slots[k] {
+                Some(slot) => rate_from_chart(band, &seeded(slot)),
+                None => Tangent::seeded(
+                    self.held_rates[k].expect("a rate without a coefficient is held"),
+                    [0.0],
+                ),
+            })
+            .collect();
+        let per_subject: Result<Vec<(f64, f64)>, String> = self
+            .nodes
+            .subjects
+            .par_iter()
+            .map(|subject| {
+                let n = subject.len();
+                let first = subject.first_row;
+                let mut eta0 = Vec::with_capacity(n * marks);
+                for node in 0..n {
+                    let row = first + node;
+                    for d in 0..marks {
+                        let slope: f64 = designs[d]
+                            .row(row)
+                            .iter()
+                            .enumerate()
+                            .map(|(j, x)| x * direction[offsets[d] + j])
+                            .sum();
+                        eta0.push(Tangent::seeded(states[d].eta[row], [slope]));
+                    }
+                }
+                let inputs = SubjectInputs {
+                    nodes: subject,
+                    eta0: &eta0,
+                    loadings: &loadings,
+                    rates: &rates,
+                    time_scale,
+                    gh,
+                    continuation_gap: 0.0,
+                    designs: None,
+                };
+                let local = subject_marginal(&inputs, false).map_err(|e| e.to_string())?;
+                Ok((local.loglik.value, local.loglik.grad[0]))
+            })
+            .collect();
+        let per_subject = per_subject?;
+        let values: Vec<f64> = per_subject.iter().map(|(v, _)| *v).collect();
+        let slopes: Vec<f64> = per_subject.iter().map(|(_, s)| *s).collect();
+        Ok((pairwise_sum(&values, &0.0), pairwise_sum(&slopes, &0.0)))
     }
 
     /// The martingale residuals of every subject at `states`: per node and
@@ -633,7 +784,7 @@ impl EventHistoryFamily {
             &empty
         };
         let loadings: Vec<f64> = latent.iter().take(marks * atoms).copied().collect();
-        let log_rates: Vec<f64> = self.atom_log_rates(latent);
+        let rates: Vec<f64> = self.atom_rates(latent);
         let gh = &self.gh;
         let time_scale = self.time_scale;
         let all_marks = vec![true; marks];
@@ -653,7 +804,7 @@ impl EventHistoryFamily {
                     nodes: subject,
                     eta0: &eta0,
                     loadings: &loadings,
-                    log_rates: &log_rates,
+                    rates: &rates,
                     time_scale,
                     gh,
                     continuation_gap: 0.0,
@@ -768,6 +919,50 @@ impl EventHistoryFamily {
         }
         Ok(out)
     }
+}
+
+/// The band `(ν_min, ν_max)` of dimensionless rates the cohort's own
+/// breakpoints resolve: [`CohortNodes::rate_band`] in units of `T̄`, the
+/// same at every mesh refinement, so a refinement never moves the chart
+/// under the coefficient that lives in it.
+fn rate_band(nodes: &CohortNodes, time_scale: f64) -> Result<(f64, f64), EventHistoryError> {
+    nodes
+        .rate_band
+        .map(|(lower, upper)| (lower * time_scale, upper * time_scale))
+        .ok_or_else(|| EventHistoryError::InvalidInput {
+            reason: "the cohort admits no band of latent rates: no subject has two distinct breakpoints".to_string(),
+        })
+}
+
+/// The chart of the rate band: `ν(u) = ν_min + (ν_max − ν_min) · u² / (1 + u²)`.
+pub(crate) fn rate_from_chart<S: JetField>(band: (f64, f64), u: &S) -> S {
+    let (lower, upper) = band;
+    let square = u.mul(u);
+    let fraction = square.mul(&recip(&add_real(&square, 1.0)));
+    add_real(&fraction.scale(upper - lower), lower)
+}
+
+/// `ν'(u)` and `ν''(u)` of [`rate_from_chart`]:
+/// `ν' = 2Δ u / (1 + u²)²`, `ν'' = 2Δ (1 − 3u²) / (1 + u²)³`.
+fn rate_chart_derivatives<S: JetField>(band: (f64, f64), u: &S) -> (S, S) {
+    let delta = band.1 - band.0;
+    let square = u.mul(u);
+    let inverse = recip(&add_real(&square, 1.0));
+    let inverse2 = inverse.mul(&inverse);
+    let first = u.mul(&inverse2).scale(2.0 * delta);
+    let second = add_real(&square.scale(-3.0), 1.0)
+        .mul(&inverse2)
+        .mul(&inverse)
+        .scale(2.0 * delta);
+    (first, second)
+}
+
+/// The inverse chart: the coordinate `u ≥ 0` at which [`rate_from_chart`]
+/// returns `ν`, with `ν` clamped into the band.
+pub(crate) fn rate_chart(band: (f64, f64), rate: f64) -> f64 {
+    let (lower, upper) = band;
+    let fraction = ((rate - lower) / (upper - lower)).clamp(0.0, 1.0 - f64::EPSILON);
+    (fraction / (1.0 - fraction)).sqrt()
 }
 
 impl CustomFamily for EventHistoryFamily {
@@ -1107,6 +1302,7 @@ pub fn latent_block_spec(
     marks: usize,
     atoms: usize,
     start: &RankStart,
+    band: (f64, f64),
 ) -> Result<ParameterBlockSpec, EventHistoryError> {
     if atoms == 0 {
         return Err(EventHistoryError::InvalidInput {
@@ -1132,7 +1328,7 @@ pub fn latent_block_spec(
             ),
         });
     }
-    let held = start.held_log_rates();
+    let held = start.held_rates();
     let free_rates = held.iter().filter(|h| h.is_none()).count();
     let width = marks * atoms + free_rates;
     let design = identity_pattern_design(n_obs, width)?;
@@ -1163,7 +1359,7 @@ pub fn latent_block_spec(
     let mut slot = marks * atoms;
     for (k, held) in held.iter().enumerate() {
         if held.is_none() {
-            initial_beta[slot] = log_rates[k];
+            initial_beta[slot] = rate_chart(band, log_rates[k].exp());
             slot += 1;
         }
     }
@@ -1305,6 +1501,10 @@ fn preflight(
 /// What a rank-`K+1` fit starts from: the converged rank-`K` latent block
 /// and the atom the covariance score proposed.
 pub struct RankStart {
+    /// The incumbent fit's coefficients of every mark block, in mark order,
+    /// so a candidate starts its population surfaces where the fit one rank
+    /// down left them rather than from zero; empty when nothing is carried.
+    pub mark_betas: Vec<Array1<f64>>,
     /// The rank-`K` loadings, `marks × K` row-major.
     pub loadings: Vec<f64>,
     /// `ln(rate · T̄)` of every atom the fit already has.
@@ -1323,12 +1523,14 @@ pub struct RankStart {
 impl RankStart {
     /// A start that carries the given atoms and grows by none.
     pub fn carried(
+        mark_betas: Vec<Array1<f64>>,
         loadings: Vec<f64>,
         log_rates: Vec<f64>,
         log_lambdas: Vec<f64>,
         rate_held: Vec<bool>,
     ) -> Self {
         Self {
+            mark_betas,
             loadings,
             log_rates,
             log_lambdas,
@@ -1337,17 +1539,17 @@ impl RankStart {
         }
     }
 
-    /// Per atom of the block this start describes, the log-rate it is held
-    /// at, or `None` when the rate is fitted.
-    fn held_log_rates(&self) -> Vec<Option<f64>> {
+    /// Per atom of the block this start describes, the dimensionless rate
+    /// `ν` it is held at, or `None` when the rate is fitted.
+    fn held_rates(&self) -> Vec<Option<f64>> {
         let mut held: Vec<Option<f64>> = self
             .rate_held
             .iter()
             .zip(self.log_rates.iter())
-            .map(|(&held, &rate)| held.then_some(rate))
+            .map(|(&held, &rate)| held.then_some(rate.exp()))
             .collect();
         if let Some(atom) = self.atom.as_ref() {
-            held.push(atom.rate_held().then_some(atom.log_rate));
+            held.push(atom.rate_held().then_some(atom.log_rate.exp()));
         }
         held
     }
@@ -1367,8 +1569,9 @@ pub struct RankStep {
     pub standardised_gain: f64,
     /// The log-rate the proposal named.
     pub proposed_log_rate: f64,
-    /// The proposal wanted a rate faster than the node mesh resolves and was
-    /// held at the fastest it does: a finer mesh would see more.
+    /// The proposal wanted a rate faster than the cohort's breakpoints
+    /// resolve and was held at the fastest they do: the residuals carry
+    /// structure the design cannot time.
     pub at_resolution_limit: bool,
     /// The rate sits at a limit of the mesh's resolution (a static frailty
     /// at the slow end, the mesh's own spacing at the fast end), where the
@@ -1466,7 +1669,15 @@ fn fit_at_rank(
                 .map_err(|error| EventHistoryError::Fit {
                     reason: error.to_string(),
                 })?;
-            specs.push(mark_block_spec(&cohort.mark_names[d], &design));
+            let mut spec = mark_block_spec(&cohort.mark_names[d], &design);
+            // The bases are frozen, so the incumbent's coefficients mean the
+            // same thing here: start from them.
+            if let Some(beta) = start.and_then(|s| s.mark_betas.get(d))
+                && beta.len() == design.design.ncols()
+            {
+                spec.initial_beta = Some(beta.clone());
+            }
+            specs.push(spec);
             designs.push(design);
             dense.push(dense_design);
         }
@@ -1474,7 +1685,13 @@ fn fit_at_rank(
             let start = start.ok_or_else(|| EventHistoryError::InvalidInput {
                 reason: "a latent block needs the start the evidence chose for it".to_string(),
             })?;
-            specs.push(latent_block_spec(nodes.total_nodes, marks, atoms, start)?);
+            specs.push(latent_block_spec(
+                nodes.total_nodes,
+                marks,
+                atoms,
+                start,
+                rate_band(&nodes, time_scale)?,
+            )?);
         }
         let family = EventHistoryFamily::new(
             Arc::clone(&nodes),
@@ -1482,7 +1699,7 @@ fn fit_at_rank(
             atoms,
             order,
             time_scale,
-            start.map_or_else(Vec::new, RankStart::held_log_rates),
+            start.map_or_else(Vec::new, RankStart::held_rates),
         )?;
         preflight(order, atoms, nodes.max_subject_nodes(), marks, family.total_width())?;
         Ok(Built {
@@ -1781,7 +1998,7 @@ fn latent_report(
             loadings[[d, k]] = latent[d * atoms + k];
         }
     }
-    let log_rates: Vec<f64> = family.atom_log_rates(latent);
+    let log_rates: Vec<f64> = family.atom_rates(latent).iter().map(|nu| nu.ln()).collect();
     let rate_held = family.rate_held();
     // E[a_k a_kᵀ | data] = â_k â_kᵀ + Cov(a_k): the mode plus the posterior
     // spread of the loadings, which is what the posterior mean of a quadratic
@@ -1942,6 +2159,144 @@ fn assemble(
     })
 }
 
+/// The exact profile of the marginal log-likelihood along a proposed atom's
+/// direction: `g(t) = ℓ(t·v) − ℓ(0)`, with every other coefficient at the
+/// rank-`K` fit and the new atom's rate at the proposal, sampled with its
+/// slope by one tangent forward filter per point from `t = 0` outward until
+/// the profile has fallen far below its peak. The score's quartic model is
+/// exact at the boundary, where the atom is judged, and only a model
+/// further out; the prior an accepted atom enters with, and the evidence it
+/// reports, are read from this profile instead.
+fn direction_profile(
+    fit: &EventHistoryFit,
+    atom: &NewAtom,
+    time_scale: f64,
+) -> Result<DirectionProfile, EventHistoryError> {
+    let marks = fit.marks();
+    let carried = fit.rank();
+    let atoms = carried + 1;
+    let mut held: Vec<Option<f64>> = fit
+        .rate_held
+        .iter()
+        .zip(fit.log_rates.iter())
+        .map(|(&held, &rate)| held.then_some(rate.exp()))
+        .collect();
+    held.push(Some(atom.log_rate.exp()));
+    let build = |order: usize| -> Result<EventHistoryFamily, EventHistoryError> {
+        EventHistoryFamily::new(
+            Arc::clone(&fit.nodes),
+            fit.family.designs.clone(),
+            atoms,
+            order,
+            time_scale,
+            held.clone(),
+        )
+    };
+    let mut order = fit.family.gh.order;
+    let mut probe = build(order)?;
+    let width = probe.latent_width();
+    let total = probe.total_width();
+    let latent_offset = probe.block_offsets()[marks];
+    let band = probe.rate_band();
+    let latent_at = |t: f64| -> Array1<f64> {
+        let mut beta = Array1::<f64>::zeros(width);
+        for d in 0..marks {
+            for k in 0..carried {
+                beta[d * atoms + k] = fit.loadings[[d, k]];
+            }
+            beta[d * atoms + carried] = t * atom.direction[d];
+        }
+        let mut slot = marks * atoms;
+        for k in 0..carried {
+            if !fit.rate_held[k] {
+                beta[slot] = rate_chart(band, fit.log_rates[k].exp());
+                slot += 1;
+            }
+        }
+        beta
+    };
+    let states_at = |t: f64| -> Vec<ParameterBlockState> {
+        let mut states: Vec<ParameterBlockState> = fit.fit.block_states[..marks].to_vec();
+        states.push(ParameterBlockState {
+            beta: latent_at(t),
+            eta: Array1::zeros(fit.nodes.total_nodes),
+        });
+        states
+    };
+    let mut direction = Array1::<f64>::zeros(total);
+    for d in 0..marks {
+        direction[latent_offset + d * atoms + carried] = atom.direction[d];
+    }
+    let fit_error = |reason: String| EventHistoryError::Fit { reason };
+    let base = probe.log_likelihood(&states_at(0.0)).map_err(fit_error)?;
+    // Sampled at an eighth of the quartic model's own mode scale, out to where
+    // the profile under the Laplace-scale prior of that mode has fallen
+    // twenty nats (`e⁻²⁰` of the peak's mass) below its peak past that peak;
+    // the step doubles once the sample count grows long. A loading far past
+    // the mode can tilt a node's posterior more sharply than the grid
+    // represents (its interpolant loses positivity); the order is raised once
+    // for that, as the fit does, and if the representation still fails the
+    // profile ends at its last sample and the interpolant's continuation
+    // carries what little tail is left.
+    let prior = 1.0 / (atom.ridge.mode_scale * atom.ridge.mode_scale);
+    let mut step = atom.ridge.mode_scale / 8.0;
+    let mut points = vec![0.0];
+    let mut values = vec![0.0];
+    let mut slopes = vec![0.0];
+    let mut peak = 0.0_f64;
+    let mut t = 0.0;
+    loop {
+        t += step;
+        let sample = probe.directional_log_likelihood(&states_at(t), &direction);
+        let (value, slope) = match sample {
+            Ok(sample) => sample,
+            Err(message) => {
+                let next_order = 2 * order - 1;
+                if message.contains(LOST_POSITIVITY) && order == fit.family.gh.order {
+                    log::info!(
+                        "[event-history] the profile along the proposed direction at loading scale {t:.3} needs Gauss-Hermite order {next_order} ({message})"
+                    );
+                    order = next_order;
+                    probe = build(order)?;
+                    t -= step;
+                    continue;
+                }
+                if points.len() >= 2 {
+                    log::info!(
+                        "[event-history] the profile along the proposed direction ends at loading scale {:.3}, {:.2} nats below its peak: the grid cannot represent the posterior beyond it ({message})",
+                        points[points.len() - 1],
+                        peak - values[values.len() - 1]
+                    );
+                    break;
+                }
+                return Err(fit_error(message));
+            }
+        };
+        let value = value - base;
+        peak = peak.max(value - 0.5 * prior * t * t);
+        points.push(t);
+        values.push(value);
+        slopes.push(slope);
+        if slope < 0.0 && value - 0.5 * prior * t * t < peak - 20.0 {
+            break;
+        }
+        if points.len() % 128 == 0 {
+            step *= 2.0;
+        }
+        if points.len() > 1024 {
+            return Err(fit_error(format!(
+                "the log-likelihood along the proposed direction has not fallen below its peak after {} samples out to t = {t:.3e}",
+                points.len()
+            )));
+        }
+    }
+    Ok(DirectionProfile {
+        points,
+        values,
+        slopes,
+    })
+}
+
 /// Fit an event-history model, growing the rank of the latent covariance
 /// from zero until the evidence refuses the next direction.
 ///
@@ -1980,9 +2335,41 @@ pub fn fit_event_history(
             .family
             .residuals(&fit.fit.block_states)
             .map_err(|reason| EventHistoryError::Fit { reason })?;
-        let Some(atom) = best_new_atom(&residuals, marks, time_scale)? else {
+        let Some(mut atom) =
+            best_new_atom(&residuals, marks, time_scale, fit.family.rate_band())?
+        else {
             break;
         };
+        let boundary = atom.clone();
+        if atom.ridge.accepted {
+            // The quartic decision stands; the prior the atom enters with and
+            // the evidence it reports come from the exact profile along its
+            // direction, which the same empirical-Bayes calculation reads in
+            // place of the quartic model of that one direction.
+            let profile = direction_profile(&fit, &atom, time_scale)?;
+            let directions: Vec<DirectionEvidence> =
+                std::iter::once(DirectionEvidence::Exact(profile))
+                    .chain(atom.other_directions.iter().map(|&(eigenvalue, information)| {
+                        DirectionEvidence::Quartic {
+                            eigenvalue,
+                            information,
+                        }
+                    }))
+                    .collect();
+            let refined = empirical_bayes_ridge(&directions);
+            log::info!(
+                "[event-history] rank {rank} → {}: exact profile along the proposed direction: prior log-precision {:.3} → {:.3}, evidence {:.3} → {:.3} nats, mode scale {:.4} → {:.4}",
+                rank + 1,
+                atom.ridge.log_lambda,
+                refined.log_lambda,
+                atom.ridge.gain,
+                refined.gain,
+                atom.ridge.mode_scale,
+                refined.mode_scale
+            );
+            atom.loading = atom.direction.iter().map(|x| refined.mode_scale * x).collect();
+            atom.ridge = refined;
+        }
         let mut step = RankStep {
             rank,
             score_eigenvalue: atom.eigenvalue,
@@ -1999,7 +2386,7 @@ pub fn fit_event_history(
         let limit = if atom.at_lower_limit {
             " (held: a static frailty)"
         } else if atom.at_upper_limit {
-            " (held: the fastest rate the mesh resolves)"
+            " (held: the fastest rate the breakpoints resolve)"
         } else {
             ""
         };
@@ -2018,13 +2405,43 @@ pub fn fit_event_history(
             break;
         }
         let start = RankStart {
+            mark_betas: fit.fit.block_states[..marks].iter().map(|s| s.beta.clone()).collect(),
             loadings: fit.loadings.iter().copied().collect(),
             log_rates: fit.log_rates.clone(),
             log_lambdas: fit.atom_log_lambdas.clone(),
             rate_held: fit.rate_held.clone(),
             atom: Some(atom.clone()),
         };
-        match fit_at_rank(cohort, spec, rank + 1, Some(&start), pin) {
+        let mut grown = fit_at_rank(cohort, spec, rank + 1, Some(&start), pin);
+        let refused = grown.as_ref().err().map(|error| error.to_string());
+        if let Some(error) = refused
+            && boundary.ridge.accepted
+            && boundary.ridge.log_lambda != atom.ridge.log_lambda
+        {
+            // The exact profile is a one-dimensional reading of a joint
+            // surface: its prior is right along the direction and can be too
+            // weak for the joint solve to certify a mode (measured: a
+            // four-mark candidate stalled at a saddle with its rate at the
+            // fast wall). The boundary model's prior is the more conservative
+            // of the two empirical-Bayes priors; a candidate that reaches no
+            // certified optimum under the first is fitted once under it.
+            log::info!(
+                "[event-history] rank {rank} → {}: no certified optimum under the exact profile's prior ({error}); refitting under the boundary model's prior log-precision {:.3} from its mode scale {:.4}",
+                rank + 1,
+                boundary.ridge.log_lambda,
+                boundary.ridge.mode_scale
+            );
+            step.ridge_log_lambda = boundary.ridge.log_lambda;
+            step.evidence_gain = boundary.ridge.gain;
+            atom.ridge = boundary.ridge.clone();
+            atom.loading = boundary.loading.clone();
+            let fallback = RankStart {
+                atom: Some(boundary),
+                ..start
+            };
+            grown = fit_at_rank(cohort, spec, rank + 1, Some(&fallback), pin);
+        }
+        match grown {
             Ok(candidate) => {
                 log::info!(
                     "[event-history] rank {rank} → {}: score eigenvalue {:.4e} at log-rate {:.3}{}, standardised gain {:.3} nats, prior log-precision {:.3}, evidence {:.3} nats, mode scale {:.4}: accepted; log-likelihood {:.3} → {:.3}, fitted log-rate {:.3}",
@@ -2064,15 +2481,14 @@ pub fn fit_event_history(
         // it runs the ladder once, from where it already is, and the
         // certificate the caller reads belongs to the model the caller gets.
         let rank = fit.rank();
-        let start = (rank > 0).then(|| {
-            RankStart::carried(
-                fit.loadings.iter().copied().collect(),
-                fit.log_rates.clone(),
-                fit.atom_log_lambdas.clone(),
-                fit.rate_held.clone(),
-            )
-        });
-        fit = fit_at_rank(cohort, spec, rank, start.as_ref(), None)?;
+        let start = RankStart::carried(
+            fit.fit.block_states[..marks].iter().map(|s| s.beta.clone()).collect(),
+            fit.loadings.iter().copied().collect(),
+            fit.log_rates.clone(),
+            fit.atom_log_lambdas.clone(),
+            fit.rate_held.clone(),
+        );
+        fit = fit_at_rank(cohort, spec, rank, Some(&start), None)?;
     }
     fit.rank_path = rank_path;
     fit.atom_evidence = atom_evidence;

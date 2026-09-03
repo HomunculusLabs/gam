@@ -183,7 +183,7 @@ pub fn latent_state(
     history: &SubjectHistory,
 ) -> Result<SmoothedLatentState, EventHistoryError> {
     let atoms = fit.rank();
-    let (loadings, log_rates) = latent_parameters(fit);
+    let (loadings, rates) = latent_parameters(fit);
     let nodes = single_subject_nodes(fit, cohort, history)?;
     let eta0 = node_eta0(fit, nodes.node_data.view())?;
     let subject = &nodes.subjects[0];
@@ -191,7 +191,7 @@ pub fn latent_state(
         nodes: subject,
         eta0: &eta0,
         loadings: &loadings,
-        log_rates: &log_rates,
+        rates: &rates,
         time_scale: fit.time_scale,
         gh: fit.family.gauss_hermite(),
         continuation_gap: 0.0,
@@ -218,6 +218,8 @@ pub fn latent_state(
     })
 }
 
+/// The loadings (index `d * atoms + k`) and the dimensionless rates `ν` of a
+/// fit, as the filter takes them.
 fn latent_parameters(fit: &EventHistoryFit) -> (Vec<f64>, Vec<f64>) {
     let marks = fit.marks();
     let atoms = fit.rank();
@@ -227,7 +229,7 @@ fn latent_parameters(fit: &EventHistoryFit) -> (Vec<f64>, Vec<f64>) {
             loadings.push(fit.loadings[[d, k]]);
         }
     }
-    (loadings, fit.log_rates.clone())
+    (loadings, fit.log_rates.iter().map(|r| r.exp()).collect())
 }
 
 /// A filtered latent state: the grid and density at a time.
@@ -244,7 +246,7 @@ fn observed_state(
     cohort: &EventHistoryCohort,
     history: &SubjectHistory,
     loadings: &[f64],
-    log_rates: &[f64],
+    rates: &[f64],
 ) -> Result<LatentState, EventHistoryError> {
     let marks = fit.marks();
     let observed = single_subject_nodes(fit, cohort, history)?;
@@ -255,7 +257,7 @@ fn observed_state(
             nodes: &observed.subjects[0],
             eta0: &eta0,
             loadings,
-            log_rates,
+            rates,
             time_scale: fit.time_scale,
             gh: fit.family.gauss_hermite(),
             continuation_gap: 0.0,
@@ -394,7 +396,7 @@ fn run_window(window: Window<'_>) -> Result<Forecast, EventHistoryError> {
     let atoms = fit.rank();
     let kinds = &cohort.mark_kinds;
     let n_cov = cohort.covariates.ncols();
-    let (loadings, log_rates) = latent_parameters(fit);
+    let (loadings, rates) = latent_parameters(fit);
     let last_horizon = horizons[horizons.len() - 1];
     // Every horizon is a mesh breakpoint, so cell ends land on horizons.
     let mut segments = segments;
@@ -479,7 +481,7 @@ fn run_window(window: Window<'_>) -> Result<Forecast, EventHistoryError> {
                     nodes: &nodes,
                     eta0: eta,
                     loadings: &loadings,
-                    log_rates: &log_rates,
+                    rates: &rates,
                     time_scale: fit.time_scale,
                     gh,
                     continuation_gap: state.as_ref().map_or(0.0, |s| times[0] - s.time),
@@ -659,8 +661,8 @@ pub fn forecast(
             expected_counts: Array2::zeros((request.horizons.len(), marks)),
         });
     }
-    let (loadings, log_rates) = latent_parameters(fit);
-    let state = observed_state(fit, cohort, history, &loadings, &log_rates)?;
+    let (loadings, rates) = latent_parameters(fit);
+    let state = observed_state(fit, cohort, history, &loadings, &rates)?;
     let (table, segments) = future_table(
         cohort,
         request.future,
@@ -731,7 +733,7 @@ pub fn predictive_pit(
     let marks = fit.marks();
     let atoms = fit.rank();
     let kinds = &cohort.mark_kinds;
-    let (loadings, log_rates) = latent_parameters(fit);
+    let (loadings, rates) = latent_parameters(fit);
     let nodes = single_subject_nodes(fit, cohort, history)?;
     let eta0 = node_eta0(fit, nodes.node_data.view())?;
     let subject = &nodes.subjects[0];
@@ -740,7 +742,7 @@ pub fn predictive_pit(
             nodes: subject,
             eta0: &eta0,
             loadings: &loadings,
-            log_rates: &log_rates,
+            rates: &rates,
             time_scale: fit.time_scale,
             gh: fit.family.gauss_hermite(),
             continuation_gap: 0.0,

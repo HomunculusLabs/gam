@@ -25,14 +25,40 @@
   posterior mode off zero, `λ̂ < μ_max` — for one direction, the statement
   that the standardised score exceeds `Γ(¼)/(2Γ(¾)) ≈ 1.48`, a property of
   the quartic integral rather than a chosen level. A refused atom costs no
-  fit; an accepted one is fitted with its prior held fixed, so the latent
+  fit; an accepted one is judged once more on the exact profile of the
+  log-likelihood along its direction, which replaces the quartic model of
+  that direction in the same calculation, so the prior a strong atom
+  enters with and the evidence it reports are read from the likelihood
+  itself (the quartic model is exact at the boundary and a model further
+  out: it put the recovery cohort's atom at 380 nats against a realised 98);
+  an accepted one is fitted with its prior held fixed, so the latent
   block adds no outer smoothing coordinate and a fit with parametric marks
-  is a single inner Newton solve. The log-rate is an unpenalised structural
-  coordinate (the old ridge on it was a prior centred on the cohort's mean
-  follow-up, which pulled every fitted rate toward `1/T̄`), and a rate the
-  residuals cannot tell from one twice as slow or twice as fast is held
-  there as data (`rate_held`), because the likelihood is flat in it and a
-  coordinate for it has no certifiable mode. `EventHistoryFit`
+  is a single inner Newton solve. The rate is an unpenalised structural
+  coordinate (the old ridge on its logarithm was a prior centred on the
+  cohort's mean follow-up, which pulled every fitted rate toward `1/T̄`),
+  carried as a chart of the dimensionless rate `ν = r·T̄` over the band of
+  rates the cohort's own breakpoints resolve (a property of the data, the
+  same at every mesh refinement; measured: a band read from the quadrature
+  nodes moved the chart under the coefficient at every refinement, and the
+  refinement certificate saw the coordinate move by 0.36–0.42 posterior sd
+  without end), `ν(u) = ν_min + (ν_max − ν_min)·u²/(1 + u²)`,
+  rather than as `ln ν` — the likelihood has finite curvature in `ν` at the
+  static end where it is flat in the logarithm, and the chart's fold at
+  `u = 0` makes that wall a stationary point of positive curvature when the
+  data push against it, instead of a plateau with a vanishing gradient and
+  an uncertifiable Hessian (measured: a four-mark candidate walked its
+  log-rate to −19 and stalled at residual 62 for twenty cycles); the
+  marginal's gap scores stay in the log-rate, where they are bounded across
+  a short gap, and are converted at the end with the chain rule in the jet
+  algebra. (A box on `ν` through the engine's constraint hook was tried
+  first and rejected: under its constrained-QP branch a fixed-λ solve sat
+  at one coefficient vector for 1200 cycles with the log-likelihood
+  alternating between two values.) A candidate now starts its mark blocks
+  from the incumbent fit's coefficients instead of from zero, which is what
+  had dragged the four-mark candidate's loadings along with intercepts two
+  units off. A rate the residuals cannot tell from one twice as slow
+  or twice as fast is held at the proposal as data (`rate_held`).
+  `EventHistoryFit`
   now carries `covariance` (`E[A Aᵀ | data]`, the mode plus each atom's
   posterior loading spread), `atom_covariances`, `eigenvalues` with
   `eigenvalue_sd` (first-order eigenvalue perturbation through the fit's

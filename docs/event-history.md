@@ -85,18 +85,36 @@ priors, and no level or tolerance decides the rank:
   structure it can admit a weak atom, whose variance then lies within its
   own posterior uncertainty (`eigenvalue_sd` is what says so), and it does
   not charge the rate search — the rate is profiled, not integrated. A
-  refused atom costs no fit;
+  refused atom costs no fit. An accepted one is judged once more on the
+  exact profile of the log-likelihood along its direction (one tangent
+  forward filter per sample), which replaces the quartic model of that
+  direction in the same calculation: the quartic is exact at the boundary
+  and only a model further out, so the prior a strong atom enters with and
+  the evidence it reports (`evidence_gain`, never above the realised
+  `log_likelihood_gain`) come from the profile;
 - an accepted atom is fitted with its prior held fixed (the latent block
   adds no outer smoothing coordinate), warm-started at the posterior mode
-  along the proposed direction and at the proposed rate; its log-rate
-  `ln(r_k · T̄)` (`T̄` the mean follow-up) is an unpenalised structural
-  coordinate, identified by the likelihood once the loadings are off zero.
-  When the residuals cannot tell the proposed rate from one twice as slow
-  or twice as fast — a static frailty at the slow end, the mesh's own
-  spacing at the fast end — the likelihood is flat in it, and the rate is
-  held there as data rather than fitted as a coordinate no certificate
-  could resolve (`rate_held`). A candidate that reaches no certified optimum
-  is refused with its reason. Every step is recorded in `rank_path` — with
+  along the proposed direction and at the proposed rate. Its rate is an
+  unpenalised structural coordinate, identified by the likelihood once the
+  loadings are off zero, carried as a chart of the dimensionless rate
+  `ν = r_k · T̄` (`T̄` the mean follow-up) over the band of rates the
+  cohort's own breakpoints resolve, `ν(u) = ν_min + (ν_max − ν_min)·u²/(1 + u²)`,
+  rather than as `ln ν`: the likelihood has finite curvature in `ν` at the
+  static end where it is flat in the logarithm, and the chart's fold makes
+  each end of the band a stationary point of positive curvature the
+  coefficient can rest on when the data push against it, instead of a
+  plateau it runs along with a vanishing gradient. Below the band the
+  kernel is one to double precision over the longest follow-up; above it an
+  atom decorrelates between consecutive breakpoints of the data, where only
+  the integrated exposure is observed. The band is a property of the data,
+  the same at every mesh refinement, so refining the mesh never moves the
+  chart under the coefficient. When the residuals cannot tell the proposed
+  rate from one twice as slow or twice as fast, the rate is held at the
+  proposal as data rather than fitted (`rate_held`). A candidate that
+  reaches no certified optimum under the profile's prior is fitted once
+  under the boundary model's (the more conservative of the two
+  empirical-Bayes priors) before it is refused with its reason. Every step
+  is recorded in `rank_path` — with
   the evidence under the score's model and the realised log-likelihood gain
   of the fitted candidate — and `atom_evidence` carries the evidence each
   accepted prior bought in nats.

@@ -341,6 +341,138 @@ pub fn quartic_moments(mu: f64, information: f64, lambda: f64) -> (f64, f64, f64
     (log_integral, second / mass, fourth / mass)
 }
 
+/// The exact profile of the marginal log-likelihood along one direction of
+/// the loading space, `g(t) = ℓ(t·v) − ℓ(0)` for `t ≥ 0`, sampled with its
+/// slope and carried by the cubic Hermite interpolant through the samples.
+/// The likelihood is even in `t` (an atom's sign is a gauge), so the
+/// profile is stored on `t ≥ 0` and reflected.
+#[derive(Clone, Debug)]
+pub struct DirectionProfile {
+    /// Sample points, `0 = t_0 < t_1 < …`.
+    pub points: Vec<f64>,
+    /// `g(t_i)`.
+    pub values: Vec<f64>,
+    /// `g'(t_i)`.
+    pub slopes: Vec<f64>,
+}
+
+/// Subpoints per sample interval for the trapezoidal rule on the profile:
+/// the interpolant is a cubic, so this resolves the integrand far below the
+/// interpolant's own error.
+const PROFILE_SUBPOINTS: usize = 64;
+
+impl DirectionProfile {
+    /// Hermite cubic through the samples; beyond the last sample, the last
+    /// cubic continued (the profile is sampled until it has fallen far below
+    /// its peak, so nothing there carries mass).
+    fn evaluate(&self, t: f64) -> f64 {
+        let n = self.points.len();
+        if n < 2 {
+            return self.values.first().copied().unwrap_or(0.0);
+        }
+        let i = match self.points.iter().position(|&p| t < p) {
+            Some(0) => 0,
+            Some(i) => i - 1,
+            None => n - 2,
+        };
+        let (t0, t1) = (self.points[i], self.points[i + 1]);
+        let h = t1 - t0;
+        let s = (t - t0) / h;
+        let (s2, s3) = (s * s, s * s * s);
+        let (h00, h10, h01, h11) = (
+            2.0 * s3 - 3.0 * s2 + 1.0,
+            s3 - 2.0 * s2 + s,
+            -2.0 * s3 + 3.0 * s2,
+            s3 - s2,
+        );
+        h00 * self.values[i]
+            + h10 * h * self.slopes[i]
+            + h01 * self.values[i + 1]
+            + h11 * h * self.slopes[i + 1]
+    }
+
+    /// `ln ∫ exp(g(t) − ½λt²) dt` over the whole line and the moments
+    /// `E[t²]`, `E[t⁴]` of `t` under that density, by the trapezoidal rule on
+    /// the interpolant, plus the maximiser of `g(t) − ½λt²`.
+    fn moments(&self, lambda: f64) -> (f64, f64, f64, f64) {
+        let last = self.points[self.points.len() - 1];
+        let steps = (self.points.len() - 1) * PROFILE_SUBPOINTS;
+        let spacing = last / steps as f64;
+        let mut shift = f64::NEG_INFINITY;
+        let mut mode = 0.0;
+        let mut samples: Vec<(f64, f64)> = Vec::with_capacity(steps + 1);
+        for k in 0..=steps {
+            let t = k as f64 * spacing;
+            let value = self.evaluate(t) - 0.5 * lambda * t * t;
+            if value > shift {
+                shift = value;
+                mode = t;
+            }
+            samples.push((t, value));
+        }
+        let mut mass = 0.0;
+        let mut second = 0.0;
+        let mut fourth = 0.0;
+        for (k, &(t, value)) in samples.iter().enumerate() {
+            // The interior weight is doubled by the reflection; the point at
+            // zero is the axis and counts once.
+            let weight = (value - shift).exp() * if k == 0 { 1.0 } else { 2.0 };
+            mass += weight;
+            second += weight * t * t;
+            fourth += weight * t * t * t * t;
+        }
+        (shift + (mass * spacing).ln(), second / mass, fourth / mass, mode)
+    }
+}
+
+/// The evidence one direction of the loading space carries, in the form the
+/// marginal likelihood integral needs.
+#[derive(Clone, Debug)]
+pub enum DirectionEvidence {
+    /// The score's quartic model `g(t) = ½μt² − ¼Jt⁴`.
+    Quartic { eigenvalue: f64, information: f64 },
+    /// The exact profile of the log-likelihood along the direction.
+    Exact(DirectionProfile),
+}
+
+impl DirectionEvidence {
+    /// `ln ∫ exp(g(t) − ½λt²) dt`, `E[t²]`, `E[t⁴]`, and the mode of
+    /// `g(t) − ½λt²` on `t ≥ 0`.
+    fn moments(&self, lambda: f64) -> (f64, f64, f64, f64) {
+        match self {
+            Self::Quartic {
+                eigenvalue,
+                information,
+            } => {
+                let (log_integral, second, fourth) =
+                    quartic_moments(*eigenvalue, *information, lambda);
+                let mode = if *eigenvalue > lambda {
+                    ((eigenvalue - lambda) / information).sqrt()
+                } else {
+                    0.0
+                };
+                (log_integral, second, fourth, mode)
+            }
+            Self::Exact(profile) => profile.moments(lambda),
+        }
+    }
+
+    /// The Laplace-scale prior `λ = 1/t*²` at the direction's own maximiser
+    /// `t*`, the search's start; `None` when the maximiser is at zero.
+    fn scale_start(&self) -> Option<f64> {
+        match self {
+            Self::Quartic {
+                eigenvalue,
+                information,
+            } => (*eigenvalue > 0.0 && *information > 0.0).then(|| information / eigenvalue),
+            Self::Exact(profile) => {
+                let (_, _, _, mode) = profile.moments(0.0);
+                (mode > 0.0).then(|| 1.0 / (mode * mode))
+            }
+        }
+    }
+}
+
 /// The empirical-Bayes prior of a new atom's loadings and the decision it
 /// carries.
 #[derive(Clone, Debug)]
@@ -360,50 +492,51 @@ pub struct RidgeProfile {
     pub accepted: bool,
 }
 
-/// The empirical-Bayes prior for a loading vector whose evidence, along the
-/// eigen-directions of the covariance score, is `½ μ_i t² − ¼ J_i t⁴`.
+/// The empirical-Bayes prior for a loading vector from the evidence along
+/// the eigen-directions of the covariance score: the first direction's
+/// evidence is whatever [`DirectionEvidence`] it carries (the quartic model
+/// when the atom is being judged, the exact profile once it has been), the
+/// others' the quartic model.
 ///
 /// The negative log marginal likelihood
 /// `c(λ) = −Σ_i ln Z_i(λ)` is `+∞` at `λ → 0` (a prior too loose to
 /// normalise) and tends to zero as `λ → ∞` (the atom pinned to zero, the
 /// current rank). It is minimised over `ρ = ln λ` by a safeguarded Newton
 /// on its exact derivatives, `dc/dλ = Σ_i [½ E_i[t²] − 1/(2λ)]` and
-/// `d²c/dλ² = Σ_i [1/(2λ²) − ¼ Var_i(t²)]`, from the Laplace-scale start
-/// `λ = J_max / μ_max`. A profile with no direction of positive score has no
-/// finite minimiser and is refused without a search.
-pub fn empirical_bayes_ridge(directions: &[(f64, f64)]) -> RidgeProfile {
+/// `d²c/dλ² = Σ_i [1/(2λ²) − ¼ Var_i(t²)]`, from the Laplace-scale start of
+/// the first direction. A profile whose first direction has its maximiser
+/// at zero has no finite minimiser and is refused without a search.
+pub fn empirical_bayes_ridge(directions: &[DirectionEvidence]) -> RidgeProfile {
     let refused = RidgeProfile {
         log_lambda: f64::INFINITY,
         gain: 0.0,
         mode_scale: 0.0,
         accepted: false,
     };
-    let Some(&(mu_max, j_max)) = directions
-        .iter()
-        .max_by(|a, b| a.0.total_cmp(&b.0))
-    else {
+    let Some(start) = directions.first().and_then(DirectionEvidence::scale_start) else {
         return refused;
     };
-    if !(mu_max > 0.0) || !(j_max > 0.0) {
-        return refused;
-    }
-    let profile = |rho: f64| -> (f64, f64, f64) {
+    let profile = |rho: f64| -> (f64, f64, f64, f64) {
         let lambda = rho.exp();
         let mut value = 0.0;
         let mut d_lambda = 0.0;
         let mut d2_lambda = 0.0;
-        for &(mu, j) in directions {
-            let (log_integral, second, fourth) = quartic_moments(mu, j, lambda);
+        let mut top_mode = 0.0;
+        for (i, direction) in directions.iter().enumerate() {
+            let (log_integral, second, fourth, mode) = direction.moments(lambda);
+            if i == 0 {
+                top_mode = mode;
+            }
             value += -0.5 * (lambda / (2.0 * std::f64::consts::PI)).ln() - log_integral;
             d_lambda += 0.5 * second - 0.5 / lambda;
             d2_lambda += 0.5 / (lambda * lambda) - 0.25 * (fourth - second * second);
         }
         let d_rho = lambda * d_lambda;
         let d2_rho = lambda * d_lambda + lambda * lambda * d2_lambda;
-        (value, d_rho, d2_rho)
+        (value, d_rho, d2_rho, top_mode)
     };
-    let mut rho = (j_max / mu_max).ln();
-    let (mut value, mut slope, mut curvature) = profile(rho);
+    let mut rho = start.ln();
+    let (mut value, mut slope, mut curvature, mut mode_scale) = profile(rho);
     for _ in 0..200 {
         let tolerance = f64::EPSILON.sqrt() * (1.0 + value.abs());
         if !(slope.abs() > tolerance) {
@@ -418,12 +551,13 @@ pub fn empirical_bayes_ridge(directions: &[(f64, f64)]) -> RidgeProfile {
         let mut moved = false;
         for _ in 0..60 {
             let trial = rho + t * direction;
-            let (trial_value, trial_slope, trial_curvature) = profile(trial);
+            let (trial_value, trial_slope, trial_curvature, trial_mode) = profile(trial);
             if trial_value < value {
                 rho = trial;
                 value = trial_value;
                 slope = trial_slope;
                 curvature = trial_curvature;
+                mode_scale = trial_mode;
                 moved = true;
                 break;
             }
@@ -433,12 +567,11 @@ pub fn empirical_bayes_ridge(directions: &[(f64, f64)]) -> RidgeProfile {
             break;
         }
     }
-    let lambda = rho.exp();
-    let accepted = value < 0.0 && lambda < mu_max;
+    let accepted = value < 0.0 && mode_scale > 0.0;
     RidgeProfile {
         log_lambda: rho,
         gain: -value,
-        mode_scale: if accepted { ((mu_max - lambda) / j_max).sqrt() } else { 0.0 },
+        mode_scale: if accepted { mode_scale } else { 0.0 },
         accepted,
     }
 }
@@ -447,11 +580,16 @@ pub fn empirical_bayes_ridge(directions: &[(f64, f64)]) -> RidgeProfile {
 #[derive(Clone, Debug)]
 pub(crate) struct NewAtom {
     pub log_rate: f64,
+    /// The unit direction the score proposes: the top eigenvector of `M`.
+    pub direction: Vec<f64>,
     /// The loading vector at the posterior mode under the empirical-Bayes
-    /// prior: `mode_scale · v_max`.
+    /// prior: `mode_scale · direction`.
     pub loading: Vec<f64>,
     /// The score's top eigenvalue at the proposed rate.
     pub eigenvalue: f64,
+    /// `(μ_i, J_i)` of every other eigen-direction of the score, whose
+    /// Occam factors the isotropic prior charges.
+    pub other_directions: Vec<(f64, f64)>,
     /// `μ_max² / (4 J_max)`: the second-order evidence gain of the top
     /// direction, the matched-filter statistic the rate maximises.
     pub standardised_gain: f64,
@@ -459,13 +597,13 @@ pub(crate) struct NewAtom {
     pub ridge: RidgeProfile,
     /// The residuals cannot tell the proposed rate from one twice as slow
     /// (the gain is flat to double precision across that doubling), or the
-    /// proposal sits at [`resolvable_log_rates`]'s lower limit: the atom is
+    /// proposal sits at [`resolvable_rate_band`]'s lower limit: the atom is
     /// a static frailty as far as the data resolve, and every slower rate is
     /// the same model.
     pub at_lower_limit: bool,
     /// The residuals cannot tell the proposed rate from one twice as fast,
     /// or the proposal wanted a rate the node mesh cannot resolve and was
-    /// held at [`resolvable_log_rates`]'s upper limit: the residuals carry
+    /// held at [`resolvable_rate_band`]'s upper limit: the residuals carry
     /// structure faster than the quadrature mesh, and a finer mesh would
     /// see more of it.
     pub at_upper_limit: bool,
@@ -480,44 +618,48 @@ impl NewAtom {
     }
 }
 
-/// The log-rates the cohort's own node mesh can represent, as
-/// `(lower, upper)` on `ρ = ln(rate · T̄)`.
+
+/// The band `(ν_min, ν_max)` of dimensionless rates `ν = rate · T̄` a set of
+/// breakpoints resolves — the fit passes the cohort's own level-0 cell
+/// boundaries, never quadrature nodes, so the band is a property of the
+/// data and the same at every mesh refinement. `None` when no subject has
+/// two distinct times.
 ///
-/// Below `lower` the kernel is one to double precision across the longest
-/// follow-up: the atom is a static frailty, and every slower rate is the
-/// same model. That is a floating-point statement, and the fit is free to
-/// sit on it — a static frailty is a perfectly good latent state.
+/// Below `lower` the Ornstein–Uhlenbeck kernel `exp(−ν · gap / T̄)` is one
+/// to double precision across the longest follow-up: the atom is a static
+/// frailty, and every slower rate is the same model. That is a
+/// floating-point statement, and the fit is free to sit on it — a static
+/// frailty is a perfectly good latent state.
 ///
-/// Above `upper` the atom decorrelates inside one cell of the quadrature
-/// mesh, and there the discretisation stops representing the process it
-/// stands for: `κ = rate · gap ≤ 1` at the median gap is the statement that
-/// consecutive nodes still share information, so the fit is measuring the
-/// data rather than its own mesh. A proposal that wants to sit on this
-/// limit is telling the caller the mesh is too coarse for the process the
-/// residuals show, not that the process is infinitely fast.
-pub(crate) fn resolvable_log_rates(
-    subjects: &[SubjectResiduals],
+/// Above `upper` the atom decorrelates between consecutive breakpoints of
+/// the data (`κ = rate · width ≤ 1` at the median level-0 cell): between
+/// two breakpoints the data observe only the integrated exposure, so a
+/// faster atom is a static offset of the intensity, not a process the data
+/// can time, and a proposal that wants to sit on this limit is telling the
+/// caller the residuals carry structure the design cannot resolve.
+pub fn resolvable_rate_band<'a>(
+    times: impl IntoIterator<Item = &'a [f64]>,
     time_scale: f64,
-) -> Result<Option<(f64, f64)>, EventHistoryError> {
+) -> Option<(f64, f64)> {
     let mut longest = 0.0_f64;
     let mut gaps: Vec<f64> = Vec::new();
-    for subject in subjects {
-        if let (Some(first), Some(last)) = (subject.times.first(), subject.times.last()) {
+    for times in times {
+        if let (Some(first), Some(last)) = (times.first(), times.last()) {
             longest = longest.max(last - first);
         }
-        gaps.extend(subject.times.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.0));
+        gaps.extend(times.windows(2).map(|w| w[1] - w[0]).filter(|g| *g > 0.0));
     }
     if !(longest > 0.0) || gaps.is_empty() || !(time_scale.is_finite() && time_scale > 0.0) {
-        return Ok(None);
+        return None;
     }
     gaps.sort_by(f64::total_cmp);
     let median = gaps[gaps.len() / 2];
-    let lower = (f64::EPSILON.sqrt() * time_scale / longest).ln();
-    let upper = (time_scale / median).ln();
-    if !(lower.is_finite() && upper.is_finite()) || upper <= lower {
-        return Ok(None);
+    let lower = f64::EPSILON.sqrt() * time_scale / longest;
+    let upper = time_scale / median;
+    if !(lower.is_finite() && upper.is_finite() && lower > 0.0) || upper <= lower {
+        return None;
     }
-    Ok(Some((lower, upper)))
+    Some((lower, upper))
 }
 
 /// The standardised evidence gain of the top direction at log-rate `ρ`,
@@ -544,6 +686,7 @@ pub(crate) fn best_new_atom(
     subjects: &[SubjectResiduals],
     marks: usize,
     time_scale: f64,
+    band: (f64, f64),
 ) -> Result<Option<NewAtom>, EventHistoryError> {
     let evaluate = |rho: f64| -> Result<GainPoint, EventHistoryError> {
         let [m0, m1, _] = covariance_score(subjects, marks, rho, time_scale);
@@ -592,9 +735,10 @@ pub(crate) fn best_new_atom(
             vectors,
         })
     };
-    let Some((lower, upper)) = resolvable_log_rates(subjects, time_scale)? else {
+    let (lower, upper) = (band.0.ln(), band.1.ln());
+    if !(lower.is_finite() && upper.is_finite() && upper > lower) {
         return Ok(None);
-    };
+    }
     // Start at the cohort's own time scale (rate = 1 / T̄).
     let mut point = evaluate(0.0_f64.clamp(lower, upper))?;
     let mut curvature: Option<f64> = None;
@@ -634,29 +778,34 @@ pub(crate) fn best_new_atom(
     // found: the quartic model of the evidence is read on the whole spectrum,
     // because the prior is isotropic and its Occam factor charges every
     // direction the loading could take.
-    let directions: Vec<(f64, f64)> = (0..marks)
+    let other_directions: Vec<(f64, f64)> = (1..marks)
         .map(|i| {
             let v: Vec<f64> = point.vectors.column(i).to_vec();
-            let (information, _) = if i == 0 {
-                (point.information, 0.0)
-            } else {
-                direction_information(subjects, marks, rate, &v, None)
-            };
+            let (information, _) = direction_information(subjects, marks, rate, &v, None);
             (point.values[i], information)
         })
         .collect();
+    let directions: Vec<DirectionEvidence> = std::iter::once(DirectionEvidence::Quartic {
+        eigenvalue: point.top,
+        information: point.information,
+    })
+    .chain(
+        other_directions
+            .iter()
+            .map(|&(eigenvalue, information)| DirectionEvidence::Quartic {
+                eigenvalue,
+                information,
+            }),
+    )
+    .collect();
     let ridge = empirical_bayes_ridge(&directions);
     let standardised_gain = if point.information > 0.0 {
         point.top * point.top.abs() / (4.0 * point.information)
     } else {
         0.0
     };
-    let loading: Vec<f64> = point
-        .vectors
-        .column(0)
-        .iter()
-        .map(|x| ridge.mode_scale * x)
-        .collect();
+    let direction: Vec<f64> = point.vectors.column(0).to_vec();
+    let loading: Vec<f64> = direction.iter().map(|x| ridge.mode_scale * x).collect();
     // A plateau: the gain does not change, to the resolution the search
     // itself converged at, when the rate is halved or doubled. The kernel is
     // monotone in the rate, so a gain flat across one doubling is flat all
@@ -681,8 +830,10 @@ pub(crate) fn best_new_atom(
     let at_upper_limit = point.rho >= upper - margin(upper) || (flat_faster && !flat_slower);
     Ok(Some(NewAtom {
         log_rate: point.rho,
+        direction,
         loading,
         eigenvalue: point.top,
+        other_directions,
         standardised_gain,
         ridge,
         at_lower_limit,

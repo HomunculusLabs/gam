@@ -45,8 +45,8 @@ pub use cohort::{
     SubjectHistory, SubjectNodes, design_rows, expand_nodes, quadrature_order_for_degree,
 };
 pub use covariance::{
-    RidgeProfile, effective_rank, eigenmodes, empirical_bayes_ridge, factor_covariance,
-    quartic_moments, temporal_covariance,
+    DirectionEvidence, DirectionProfile, RidgeProfile, effective_rank, eigenmodes,
+    empirical_bayes_ridge, factor_covariance, quartic_moments, temporal_covariance,
 };
 pub use family::{
     EventHistoryFamily, EventHistoryFit, EventHistorySpec, JointEvaluation,
