@@ -7,7 +7,7 @@
 //! ```text
 //! python: open("chart.bin","wb").write(np.ascontiguousarray(X, dtype="<f8").tobytes())
 //! cargo run -p gam-sae --release --example support_real_chart -- \
-//!     chart.bin <rows> <cols> <k_atoms> <top_k> <max_iter>
+//!     chart.bin <rows> <cols> <k_atoms> <top_k> <max_outer_iter> <max_inner_iter>
 //! ```
 //!
 //! `RUST_LOG=info` streams the per-cycle fixed-point telemetry.
@@ -24,9 +24,9 @@ use std::time::Instant;
 fn main() -> Result<(), String> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 7 {
+    if args.len() != 8 {
         return Err(
-            "usage: support_real_chart <f64-le.bin> <rows> <cols> <k_atoms> <top_k> <max_iter>"
+            "usage: support_real_chart <f64-le.bin> <rows> <cols> <k_atoms> <top_k> <max_outer_iter> <max_inner_iter>"
                 .to_string(),
         );
     }
@@ -34,7 +34,15 @@ fn main() -> Result<(), String> {
     let cols: usize = args[3].parse().map_err(|error| format!("cols: {error}"))?;
     let k_atoms: usize = args[4].parse().map_err(|error| format!("k_atoms: {error}"))?;
     let top_k: usize = args[5].parse().map_err(|error| format!("top_k: {error}"))?;
-    let max_iter: usize = args[6].parse().map_err(|error| format!("max_iter: {error}"))?;
+    // One positional budget used to configure BOTH the outer evaluation budget
+    // and the inner fixed-point budget, so `outer=2` could not be measured with
+    // an inner solve allowed to converge (gam#2576): the two are typed apart.
+    let max_outer_iter: usize = args[6]
+        .parse()
+        .map_err(|error| format!("max_outer_iter: {error}"))?;
+    let max_inner_iter: usize = args[7]
+        .parse()
+        .map_err(|error| format!("max_inner_iter: {error}"))?;
     let bytes = std::fs::read(&args[1]).map_err(|error| format!("{}: {error}", args[1]))?;
     if bytes.len() != rows * cols * 8 {
         return Err(format!(
@@ -96,8 +104,8 @@ fn main() -> Result<(), String> {
         target: centered.clone(),
         initial_smoothness: 1.0,
         ard_precisions,
-        max_outer_iter: max_iter,
-        max_inner_iter: max_iter,
+        max_outer_iter,
+        max_inner_iter,
         inner_tolerance: 1.0e-4,
         trust_radius: 1.0,
         random_state: 0,

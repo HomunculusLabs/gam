@@ -1,5 +1,7 @@
 ## Unreleased
 
+- The `support_real_chart` example takes `<max_outer_iter> <max_inner_iter>` instead of one shared `<max_iter>`, so an outer budget can be measured with a converged inner solve (#2576).
+
 - **The criterion's `log|S(λ)|₊` ranges over the same structural rank the
   reparameterization's penalized subspace carries** (#2454). Two
   λ-free rank rules decided how many directions one penalty set penalizes:
