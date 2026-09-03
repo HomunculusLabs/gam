@@ -1795,9 +1795,9 @@ fn gauss_legendre_01_64() -> &'static [(f64, f64)] {
             let w = 2.0 / ((1.0 - x * x) * dp * dp);
             // x is the i-th root counting inward from +1; mirror to −x.
             nodes.push((x, w));
-            if x.abs() > 1e-300 {
-                nodes.push((-x, w));
-            }
+            // `N` is even, so no root sits at the origin and every root has a
+            // distinct mirror image.
+            nodes.push((-x, w));
         }
         // Sort by node, then map [-1, 1] -> [0, 1] with the 1/2 Jacobian.
         nodes.sort_by(|a, b| a.0.total_cmp(&b.0));

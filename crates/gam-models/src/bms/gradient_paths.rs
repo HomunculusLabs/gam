@@ -398,8 +398,11 @@ pub(super) fn pilot_irls_hessian_row_metric_at_eta(
     for i in 0..n {
         let eta = eta_pilot[i];
         let mu = clamp_bernoulli_link_probability(normal_cdf(eta));
-        let phi = normal_pdf(eta).max(1e-300);
-        let var = (mu * (1.0 - mu)).max(1e-300);
+        // `var > 0` by the link clamp; `phi` underflows to 0 for |η| > 38.6, and
+        // a row whose density has underflowed carries no curvature — `w = 0` is
+        // the honest weight, not `1e-600/var`.
+        let phi = normal_pdf(eta);
+        let var = mu * (1.0 - mu);
         w[i] = sample_weights[i] * (phi * phi) / var;
     }
     w
@@ -467,7 +470,11 @@ pub(super) fn pilot_eta_for_link_dev_orthogonalisation(
     }
     let mut working_eta = Array1::<f64>::zeros(n);
     let mut w_irls = Array1::<f64>::zeros(n);
-    let mut residual = Array1::<f64>::zeros(n);
+    // The IRLS right-hand side `Xᵀ W r` with `W = w·φ²/V` and `r = (y − μ)/φ`
+    // is `Xᵀ w·φ(y − μ)/V`: it is assembled from that product directly, so a
+    // density that has underflowed contributes exactly zero instead of a
+    // `(y − μ)/1e-300` residual multiplied by a zero weight.
+    let mut score_residual = Array1::<f64>::zeros(n);
     for i in 0..n {
         let a_pre = baseline_marginal + marginal_offset[i];
         let b_pre = baseline_slope + slope_offset[i];
@@ -479,16 +486,16 @@ pub(super) fn pilot_eta_for_link_dev_orthogonalisation(
         let eta = rigid_observed_eta(q_marg, b_pre, z[i], probit_scale);
         working_eta[i] = eta;
         let mu = clamp_bernoulli_link_probability(normal_cdf(eta));
-        let phi = normal_pdf(eta).max(1e-300);
-        let var = (mu * (1.0 - mu)).max(1e-300);
+        let phi = normal_pdf(eta);
+        let var = mu * (1.0 - mu);
         w_irls[i] = weights[i] * (phi * phi) / var;
-        residual[i] = (y[i] - mu) / phi;
+        score_residual[i] = phi * (y[i] - mu) / var;
     }
     let p_marg = marginal_design.ncols();
     if p_marg == 0 {
         return Ok(working_eta);
     }
-    let xtwr = marginal_design.compute_xtwy(&w_irls, &residual)?;
+    let xtwr = marginal_design.compute_xtwy(weights, &score_residual)?;
     let mut xtwx =
         marginal_design.xt_diag_x_signed_op(FiniteSignedWeightsView::try_from_array(&w_irls)?)?;
     let trace_diag: f64 = (0..p_marg).map(|i| xtwx[[i, i]]).sum();

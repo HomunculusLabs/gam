@@ -2685,7 +2685,10 @@ fn complexmul(a: Complex, b: Complex) -> Complex {
 
 #[inline]
 fn complex_div(a: Complex, b: Complex) -> Complex {
-    let den = (b.re * b.re + b.im * b.im).max(1e-300);
+    // Division by a zero complex is the pole of the function being evaluated
+    // (the Lanczos sum's `z + i` vanishes only at a pole of Γ); the quotient is
+    // returned as the arithmetic gives it, not floored to a finite value.
+    let den = b.re * b.re + b.im * b.im;
     Complex {
         re: (a.re * b.re + a.im * b.im) / den,
         im: (a.im * b.re - a.re * b.im) / den,
