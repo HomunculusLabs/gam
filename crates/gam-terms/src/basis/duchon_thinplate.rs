@@ -2371,7 +2371,8 @@ pub(crate) fn thin_plate_kernel_triplet_from_scaled_distance(
             Ok((value, first, second))
         }
         2 => {
-            let log_r = scaled_distance.max(1e-300).ln();
+            // `scaled_distance == 0` returned the exact limit above.
+            let log_r = scaled_distance.ln();
             let value = scaled_distance.powi(2) * log_r;
             let first = 2.0 * scaled_distance * log_r + scaled_distance;
             let second = 2.0 * log_r + 3.0;

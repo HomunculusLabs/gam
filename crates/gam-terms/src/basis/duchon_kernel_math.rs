@@ -570,22 +570,29 @@ fn scaled_bessel_k_large(x: f64, coefficients: &[f64; 24]) -> f64 {
     (-x).exp() / x.sqrt() * series
 }
 
+// The modified Bessel functions of the second kind have a pole at the origin:
+// `K_ν(x) → +∞` as `x → 0⁺`. These primitives return that pole honestly (the
+// small-`x` series produces `+∞` at `x = 0`) instead of evaluating at a floored
+// `max(x, 1e-300)`, which returned a large finite value that is the kernel of
+// no argument the caller passed. Every production caller evaluates at `r = 0`
+// through its own exact-limit branch (`origin_limit`, the `r <= 0` returns in
+// the Matérn block and the stable integrals, the positive collision radius of
+// the radial jets), so a `+∞` reaching a Gram assembly is a leaked collision
+// that the finiteness validators refuse — not a value to be hidden (#2469).
 #[inline(always)]
 pub(crate) fn bessel_k0_stable(x: f64) -> f64 {
-    let x_pos = x.max(1e-300);
-    if x_pos <= 2.0 {
-        return bessel_k0_small_series(x_pos);
+    if x <= 2.0 {
+        return bessel_k0_small_series(x);
     }
-    scaled_bessel_k_large(x_pos, &SCALED_BESSEL_K0_CHEBYSHEV)
+    scaled_bessel_k_large(x, &SCALED_BESSEL_K0_CHEBYSHEV)
 }
 
 #[inline(always)]
 pub(crate) fn bessel_k1_stable(x: f64) -> f64 {
-    let x_pos = x.max(1e-300);
-    if x_pos <= 2.0 {
-        return bessel_k1_small_series(x_pos);
+    if x <= 2.0 {
+        return bessel_k1_small_series(x);
     }
-    scaled_bessel_k_large(x_pos, &SCALED_BESSEL_K1_CHEBYSHEV)
+    scaled_bessel_k_large(x, &SCALED_BESSEL_K1_CHEBYSHEV)
 }
 
 #[inline(always)]
@@ -877,17 +884,16 @@ pub(crate) fn gamma_lanczos(x: f64) -> f64 {
 
 #[inline(always)]
 pub(crate) fn bessel_k_integer_order(n: usize, z: f64) -> f64 {
-    let zz = z.max(1e-300);
     if n == 0 {
-        return bessel_k0_stable(zz);
+        return bessel_k0_stable(z);
     }
     if n == 1 {
-        return bessel_k1_stable(zz);
+        return bessel_k1_stable(z);
     }
-    let mut km1 = bessel_k0_stable(zz);
-    let mut k = bessel_k1_stable(zz);
+    let mut km1 = bessel_k0_stable(z);
+    let mut k = bessel_k1_stable(z);
     for m in 1..n {
-        let kp1 = km1 + 2.0 * (m as f64) * k / zz;
+        let kp1 = km1 + 2.0 * (m as f64) * k / z;
         km1 = k;
         k = kp1;
     }
@@ -907,16 +913,15 @@ pub(crate) fn bessel_k_half_integer_order(l: usize, z: f64) -> f64 {
     // through catastrophic cancellation in derivative lattices of the
     // r^μ·K_μ(κr) family. Matching the [`BesselKLadder`] arithmetic byte-
     // for-byte also ensures the ladder/per-call paths agree exactly.
-    let zz = z.max(1e-300);
-    let k_half = (std::f64::consts::PI / (2.0 * zz)).sqrt() * (-zz).exp();
+    let k_half = (std::f64::consts::PI / (2.0 * z)).sqrt() * (-z).exp();
     if l == 0 {
         return k_half;
     }
     let mut km1 = k_half;
-    let mut k = k_half * (1.0 + 1.0 / zz);
+    let mut k = k_half * (1.0 + 1.0 / z);
     for m in 1..l {
         let nu = m as f64 + 0.5;
-        let kp1 = km1 + 2.0 * nu * k / zz;
+        let kp1 = km1 + 2.0 * nu * k / z;
         km1 = k;
         k = kp1;
     }
@@ -1050,7 +1055,7 @@ impl PolyharmonicBlockCoeff {
             .power_i32
             .map_or_else(|| r.powf(self.power), |power| r.powi(power));
         if self.is_log_case {
-            self.c * radial_power * r.max(1e-300).ln()
+            self.c * radial_power * r.ln()
         } else {
             self.c * radial_power
         }
@@ -1142,7 +1147,7 @@ pub(crate) fn duchon_matern_block(
              evaluate the hybrid kernel diagonal via the collision routine"
         );
     }
-    let z = (kappa * r).max(1e-300);
+    let z = kappa * r;
     let k_nu = bessel_k_real_half_integer_or_integer(nu_abs, z)?;
     Ok(c * r.powf(nu) * k_nu)
 }
@@ -1375,21 +1380,20 @@ pub(crate) struct BesselKLadder {
 
 impl BesselKLadder {
     pub(crate) fn build(z: f64, half_integer: bool, max_order_steps: usize) -> Self {
-        let zz = z.max(1e-300);
         let mut values: SmallVec<[f64; 16]> = SmallVec::with_capacity(max_order_steps + 2);
         if half_integer {
             // K_{1/2}(z) = √(π/(2z))·e^{−z};  K_{3/2}(z) = K_{1/2}(z)·(1 + 1/z).
-            let k_half = (std::f64::consts::PI / (2.0 * zz)).sqrt() * (-zz).exp();
+            let k_half = (std::f64::consts::PI / (2.0 * z)).sqrt() * (-z).exp();
             values.push(k_half);
-            values.push(k_half * (1.0 + 1.0 / zz));
+            values.push(k_half * (1.0 + 1.0 / z));
         } else {
-            values.push(bessel_k0_stable(zz));
-            values.push(bessel_k1_stable(zz));
+            values.push(bessel_k0_stable(z));
+            values.push(bessel_k1_stable(z));
         }
         let base = if half_integer { 0.5 } else { 0.0 };
         for i in 1..max_order_steps {
             let nu = base + i as f64;
-            let next = values[i - 1] + 2.0 * nu * values[i] / zz;
+            let next = values[i - 1] + 2.0 * nu * values[i] / z;
             values.push(next);
         }
         Self {
@@ -1864,7 +1868,7 @@ pub(crate) fn duchon_hybrid_kernel_stable_integral(
     for &(w, weight) in gauss_legendre_01_64() {
         // Smooth term  2(B/A)^{b/2} K_b(2√(AB)) = 2 (r/(2κ√w))^b K_b(κ r √w).
         let sqrt_w = w.sqrt();
-        let z = (kappa * r * sqrt_w).max(1e-300);
+        let z = kappa * r * sqrt_w;
         let k_b = bessel_k_real_half_integer_or_integer(b.abs(), z)?;
         let smooth = 2.0 * (r / (2.0 * kappa * sqrt_w)).powf(b) * k_b;
         let factor = (1.0 - w).powf(p - 1.0) * w.powf(s - 1.0) * smooth;
@@ -1935,8 +1939,8 @@ pub(crate) fn duchon_hybrid_operator_stable_integral(
 
     for &(w, weight) in gauss_legendre_01_64() {
         let sqrt_w = w.sqrt();
-        let c = (kappa * sqrt_w).max(1e-300);
-        let z = (c * r).max(1e-300);
+        let c = kappa * sqrt_w;
+        let z = c * r;
 
         // Smooth integrand g(r) = A · r^b · K_b(c r),  A = 2 (2c)^{-b}.
         // Differentiate the symbolic term list (coef, a, ν-offset) in r:
