@@ -1664,29 +1664,20 @@ pub fn create_balanced_penalty_root_from_canonical(
                 p, p
             )));
         }
-        // Fallback: accumulate into p × p and eigendecompose globally.
-        let mut s_balanced = Array2::zeros((p, p));
-        for cp in penalties {
-            if cp.rank() == 0 {
-                continue;
-            }
-            let local = cp.local_ref();
-            let frob_norm = local.iter().map(|&x| x * x).sum::<f64>().sqrt();
-            if frob_norm > 1e-12 {
-                let r = &cp.col_range;
-                s_balanced
-                    .slice_mut(s![r.start..r.end, r.start..r.end])
-                    .scaled_add(1.0 / frob_norm, local);
-            }
-        }
+        // Fallback: accumulate into p × p and eigendecompose globally, under
+        // the ONE balanced rule the reparameterization split and the
+        // criterion's rank hint share (gam#2454).
+        let s_balanced = balanced_penalty_sum(
+            penalties
+                .iter()
+                .filter(|cp| cp.rank() != 0)
+                .map(|cp| (cp.local_ref().view(), cp.col_range.clone())),
+            p,
+        );
         let (eigenvalues, eigenvectors) =
             robust_eigh(&s_balanced, Side::Lower, "balanced penalty matrix")?;
         let max_eig = eigenvalues.iter().fold(0.0f64, |max, &val| max.max(val));
-        let tolerance = if max_eig > 0.0 {
-            max_eig * 1e-12
-        } else {
-            1e-12
-        };
+        let tolerance = balanced_penalty_rank_tolerance(max_eig);
         let penalty_rank = eigenvalues.iter().filter(|&&ev| ev > tolerance).count();
         if penalty_rank == 0 {
             return Ok(Array2::zeros((0, p)));
@@ -1720,24 +1711,18 @@ pub fn create_balanced_penalty_root_from_canonical(
         .map(
             |((start, end), cps)| -> Result<Option<BlockRoot>, EstimationError> {
                 let block_dim = end - start;
-                let mut s_balanced_local = Array2::zeros((block_dim, block_dim));
-
-                for cp in cps {
-                    let local = cp.local_ref();
-                    let frob_norm = local.iter().map(|&x| x * x).sum::<f64>().sqrt();
-                    if frob_norm > 1e-12 {
-                        s_balanced_local.scaled_add(1.0 / frob_norm, local);
-                    }
-                }
+                // The block's balanced sum under the same shared rule as the
+                // dense fallback above and the reparameterization split.
+                let s_balanced_local = balanced_penalty_sum(
+                    cps.iter()
+                        .map(|cp| (cp.local_ref().view(), 0..block_dim)),
+                    block_dim,
+                );
 
                 let (eigenvalues, eigenvectors) =
                     robust_eigh(&s_balanced_local, Side::Lower, "balanced penalty block")?;
                 let max_eig = eigenvalues.iter().fold(0.0f64, |max, &val| max.max(val));
-                let tolerance = if max_eig > 0.0 {
-                    max_eig * 1e-12
-                } else {
-                    1e-12
-                };
+                let tolerance = balanced_penalty_rank_tolerance(max_eig);
                 let block_rank = eigenvalues.iter().filter(|&&ev| ev > tolerance).count();
 
                 if block_rank == 0 {
@@ -2111,18 +2096,19 @@ pub fn precompute_reparam_invariant_from_canonical(
             |(&(start, end), refs)| -> Result<BlockResult, EstimationError> {
                 let block_dim = end - start;
 
-                // Build local balanced sum.
-                let mut s_balanced_local = Array2::zeros((block_dim, block_dim));
-                let mut block_has_nonzero = false;
-                for pref in refs {
-                    let cp = &penalties[pref.penalty_index];
-                    let local = cp.local_ref();
-                    let frob_norm = local.iter().map(|&x| x * x).sum::<f64>().sqrt();
-                    if frob_norm > 1e-12 {
-                        s_balanced_local.scaled_add(1.0 / frob_norm, local);
-                        block_has_nonzero = true;
-                    }
-                }
+                // Build the local balanced sum under the ONE shared rule
+                // (gam#2454); a component the rule keeps has unit Frobenius
+                // norm, so the block is non-zero iff any entry is.
+                let s_balanced_local = balanced_penalty_sum(
+                    refs.iter().map(|pref| {
+                        (
+                            penalties[pref.penalty_index].local_ref().view(),
+                            0..block_dim,
+                        )
+                    }),
+                    block_dim,
+                );
+                let block_has_nonzero = s_balanced_local.iter().any(|&value| value != 0.0);
 
                 if !block_has_nonzero {
                     return Ok(BlockResult {
@@ -2151,11 +2137,7 @@ pub fn precompute_reparam_invariant_from_canonical(
                     .iter()
                     .map(|&idx| bal_eigenvalues[idx].abs())
                     .fold(0.0_f64, f64::max);
-                let rank_tol = if max_bal > 0.0 {
-                    max_bal * 1e-12
-                } else {
-                    1e-12
-                };
+                let rank_tol = balanced_penalty_rank_tolerance(max_bal);
                 let penalized_rank = order
                     .iter()
                     .take_while(|&&idx| bal_eigenvalues[idx] > rank_tol)
