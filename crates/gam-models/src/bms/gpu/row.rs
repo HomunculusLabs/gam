@@ -78,12 +78,14 @@
 //! `[n, r]` buffer holds `F_au`. Only the fixed 32-thread scalar reduction is
 //! shared, so primary width has no shared-memory or thread-stack ceiling.
 
-use std::sync::OnceLock;
-
 // `validate` runs on every target (its `GpuError` is likewise unconditional),
 // so the shape-arithmetic owner it calls is imported unconditionally too; a
-// Linux-only import here broke the Windows cross-check (#2470 follow-up).
+// Linux-only import here broke the Windows cross-check (#2470 follow-up). The
+// kernel-source and backend caches that use `OnceLock` are Linux-only, so that
+// import is gated like them — unconditional, it is an unused import on Windows.
 use gam_gpu::gpu_error::{GpuError, checked_shape_len};
+#[cfg(target_os = "linux")]
+use std::sync::OnceLock;
 
 #[cfg(target_os = "linux")]
 use std::sync::Arc;

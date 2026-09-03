@@ -2180,8 +2180,16 @@ fn optimize_survival_transformation_smoothing(
         Ok((cost, grad))
     };
 
-    let mut lower = seed_rho.mapv(|v| v - 12.0);
-    let upper = seed_rho.mapv(|v| v + 12.0);
+    // The ρ domain is the outer engine's own (`RHO_BOUND`, the one owner every
+    // REML route shares), not a private `seed ± 12` box. The private box was
+    // measured binding on every survival fit (#2670): the time block's λ sat at
+    // exactly `seed·e¹²` with the search reporting convergence at the wall,
+    // because on a log-linear baseline the second-difference penalty's honest
+    // optimum is `λ → ∞` (the block collapsing to its null space), which the
+    // LAML gradient reaches on its own tolerance long before `e³⁰`.
+    let bound = gam_solve::estimate::RHO_BOUND;
+    let mut lower = Array1::<f64>::from_elem(num_smoothing, -bound);
+    let upper = Array1::<f64>::from_elem(num_smoothing, bound);
     // Under left truncation the observed-information LAML `log|H|` is unreliable
     // BELOW the seed for the baseline time block (see the doc header): the
     // delayed-entry `−X_entryᵀW_entry X_entry` term can drive `H` indefinite so

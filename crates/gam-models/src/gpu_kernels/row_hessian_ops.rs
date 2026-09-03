@@ -27,6 +27,8 @@
 
 #[cfg(target_os = "linux")]
 use gam_gpu::gpu_error::checked_shape_len;
+// `Arc` only wraps the CUDA stream and module, which exist on Linux alone.
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::sync::OnceLock;
