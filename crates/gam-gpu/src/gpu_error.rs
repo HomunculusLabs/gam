@@ -10,6 +10,24 @@
 //!
 //! Only the variants actually constructed by the GPU layer are kept.
 
+/// The element count of a row-major buffer with the given `dimensions`, or a
+/// [`GpuError::DriverCallFailed`] naming `context` when the product overflows
+/// `usize` — the one place a device buffer's shape is multiplied out (#2470).
+pub fn checked_shape_len(context: &str, dimensions: &[usize]) -> Result<usize, GpuError> {
+    dimensions
+        .iter()
+        .copied()
+        .try_fold(1_usize, |product, dimension| {
+            product
+                .checked_mul(dimension)
+                .ok_or_else(|| GpuError::DriverCallFailed {
+                    reason: format!(
+                        "{context}: shape product overflow for dimensions {dimensions:?}"
+                    ),
+                })
+        })
+}
+
 /// Typed error for `src/gpu/*.rs` operations.
 #[derive(Debug, Clone)]
 pub enum GpuError {

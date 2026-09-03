@@ -805,6 +805,69 @@ impl core::fmt::Debug for EstimationError {
 }
 
 impl EstimationError {
+    /// A per-row exponential-family quantity that could not be represented in
+    /// `f64` at linear predictor `eta` (a mean that rounded to the boundary, a
+    /// weight that overflowed, a deviance cell that went non-finite).
+    ///
+    /// The one constructor for [`Self::PirlsRowGeometryUnrepresentable`]:
+    /// seven PIRLS and design-construction modules used to carry a private
+    /// four-argument shim building this variant (#2470), so the variant's
+    /// field set was restated in each of them.
+    #[must_use]
+    pub fn pirls_row_geometry_unrepresentable(
+        row: usize,
+        quantity: &'static str,
+        eta: f64,
+        value: f64,
+    ) -> Self {
+        Self::PirlsRowGeometryUnrepresentable {
+            row,
+            quantity,
+            eta,
+            value,
+        }
+    }
+
+    /// The remediation a user can act on, when the failure has one: the
+    /// single source of the `help:` line the CLI prints and the Python
+    /// exception carries. Keyed on the variant, never on the rendered text —
+    /// the CLI used to re-derive this by grepping its own error strings, and
+    /// the two front ends disagreed (#2470).
+    #[must_use]
+    pub fn advice(&self) -> Option<String> {
+        const SEPARATION: &str = "Enable Firth/Jeffreys bias reduction, remove or regularize \
+             the separating predictor, or switch link via link(type=...).";
+        const CONDITIONING: &str = "Check for collinear or constant predictors and overly \
+             complex smooth bases.";
+        match self {
+            Self::BasisError(inner) => inner.advice(),
+            Self::OuterObjectiveEvaluationFailed { source, .. } => {
+                source.estimation_error().and_then(Self::advice)
+            }
+            Self::PerfectSeparationDetected { .. }
+            | Self::MultinomialSeparationDetected { .. } => {
+                Some(format!("Detected (quasi-)separation. {SEPARATION}"))
+            }
+            Self::PrefitPerfectSeparationDetected { column_index, .. } => Some(format!(
+                "Detected separation driven by unpenalized column {column_index}. {SEPARATION}"
+            )),
+            Self::PrefitLinearSeparationDetected { column_indices, .. } => Some(format!(
+                "Detected separation driven by unpenalized columns {column_indices:?}. {SEPARATION}"
+            )),
+            Self::PrefitRankDeficientDesignDetected { column_indices, .. }
+            | Self::PrefitNearDegenerateDesignDetected { column_indices, .. } => Some(format!(
+                "Matrix conditioning issue in unpenalized columns {column_indices:?}. {CONDITIONING}"
+            )),
+            Self::ModelIsIllConditioned { .. }
+            | Self::HessianNotPositiveDefinite { .. }
+            | Self::LinearSystemSolveFailed(_)
+            | Self::EigendecompositionFailed(_) => {
+                Some(format!("Matrix conditioning issue detected. {CONDITIONING}"))
+            }
+            _ => None,
+        }
+    }
+
     /// Whether this failure invalidates the whole outer run or only the
     /// trial point it was produced at.
     ///
@@ -969,6 +1032,41 @@ impl EstimationError {
         // retreat is an infeasibility; not every infeasibility arrives as one
         // of the five inner-solve shapes.
         self.is_trial_point_infeasible()
+    }
+}
+
+#[cfg(test)]
+mod advice_policy_tests {
+    use super::*;
+
+    #[test]
+    fn advice_is_keyed_on_the_variant_and_flows_through_the_basis_wrapper() {
+        let separation = EstimationError::PrefitPerfectSeparationDetected {
+            column_index: 3,
+            threshold: 0.5,
+            positive_above_threshold: true,
+        };
+        let advice = separation.advice().expect("separation advice");
+        assert!(advice.contains("column 3"), "{advice}");
+        assert!(advice.contains("Firth"), "{advice}");
+
+        let conditioning = EstimationError::ModelIsIllConditioned {
+            condition_number: 1e18,
+        };
+        let advice = conditioning.advice().expect("conditioning advice");
+        assert!(advice.contains("collinear"), "{advice}");
+
+        let basis = EstimationError::BasisError(BasisError::duchon_smoothness_insufficient(
+            "hybrid diagonal",
+            0,
+            3,
+            1,
+            0.5,
+        ));
+        let advice = basis.advice().expect("basis advice");
+        assert!(advice.contains("power"), "{advice}");
+
+        assert!(EstimationError::InvalidInput("dimension=16".into()).advice().is_none());
     }
 }
 

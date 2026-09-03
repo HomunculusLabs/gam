@@ -2064,33 +2064,31 @@ mod device {
         SaeRowJetContraction, SaeRowJetPrimary, SaeSoftmaxRowJetInput, checked_product,
     };
     use cudarc::driver::{CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+    use gam_gpu::backend_probe::CachedBackend;
     use gam_gpu::gpu_error::{GpuError, GpuResultExt};
     use std::borrow::Cow;
-    use std::sync::{Arc, OnceLock};
+    use std::sync::Arc;
 
     struct Backend {
         stream: Arc<CudaStream>,
         module: Arc<CudaModule>,
     }
 
+    static BACKEND: CachedBackend<Backend> = CachedBackend::new();
+
     fn backend() -> Result<&'static Backend, GpuError> {
-        static BACKEND: OnceLock<Result<Backend, GpuError>> = OnceLock::new();
-        BACKEND
-            .get_or_init(|| {
-                let parts = gam_gpu::backend_probe::probe_cuda_backend("sae_rowjet_complete")?;
-                let ptx = gam_gpu::device_cache::compile_ptx_arch(COMPLETE_SOFTMAX_KERNEL_SOURCE)
-                    .gpu_ctx("complete SAE row-jet NVRTC compile")?;
-                let module = parts
-                    .ctx
-                    .load_module(ptx)
-                    .gpu_ctx("complete SAE row-jet module load")?;
-                Ok(Backend {
-                    stream: parts.stream,
-                    module,
-                })
+        BACKEND.get_or_probe("sae_rowjet_complete", |parts| {
+            let ptx = gam_gpu::device_cache::compile_ptx_arch(COMPLETE_SOFTMAX_KERNEL_SOURCE)
+                .gpu_ctx("complete SAE row-jet NVRTC compile")?;
+            let module = parts
+                .ctx
+                .load_module(ptx)
+                .gpu_ctx("complete SAE row-jet module load")?;
+            Ok(Backend {
+                stream: parts.stream,
+                module,
             })
-            .as_ref()
-            .map_err(GpuError::clone)
+        })
     }
 
     fn grid(total: usize) -> Result<LaunchConfig, GpuError> {

@@ -861,19 +861,6 @@ where
     Ok(out)
 }
 
-/// Extract a readable message from a caught `std::thread` panic payload,
-/// mirroring `gam_pyffi::ffi::ffi_errors::panic_payload_message`'s handling of
-/// the two payload shapes `std::panic!`/`unwrap`/`expect` actually produce.
-fn topology_race_panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&'static str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "non-string panic payload".to_string()
-    }
-}
-
 fn run_one_topology_race_candidate<Candidate, FitResult, FitOne>(
     candidate_index: usize,
     candidate: Candidate,
@@ -948,7 +935,7 @@ fn run_one_topology_race_candidate<Candidate, FitResult, FitOne>(
         Err(payload) => {
             *pool_error.lock().expect("pool_error mutex poisoned") = Some(format!(
                 "topology race candidate {candidate_index} panicked: {}",
-                topology_race_panic_message(payload)
+                gam_runtime::panic_payload_message(payload)
             ));
         }
     }

@@ -1136,20 +1136,15 @@ pub(crate) fn duchon_phi_even_derivative_collision(
     let required = k_dim + 2 * j;
 
     if smoothness_order <= required {
-        // Smallest integer power admitting phi^{(2j)}(0): 2(p+s) > k_dim+2j.
-        let min_power = (required / 2 + 1).saturating_sub(p_order);
-        crate::bail_invalid_basis!(
-            "Duchon collision derivative phi^({}) requires 2*(p+s) > dimension+{}; got 2*(p+s)={}, dimension={}, p={}, s={}. \
-             This path needs the {}-order radial-kernel derivative at the origin, which is finite only for a smoother spline: raise power to >= {} (or reduce the joint smooth's dimension).",
+        // This path needs the (2j)-order radial-kernel derivative at the
+        // origin, finite only when 2(p+s) > k_dim + 2j.
+        return Err(BasisError::duchon_smoothness_insufficient(
+            format!("collision derivative phi^({})", 2 * j),
             2 * j,
-            2 * j,
-            smoothness_order,
             k_dim,
             p_order,
-            s_order,
-            2 * j,
-            min_power
-        );
+            s_order as f64,
+        ));
     }
 
     // Analytic path: extract per-block Taylor r^{2j} coefficients and sum.
@@ -1211,19 +1206,16 @@ pub(crate) fn duchon_phi_even_derivative_collision_psi_triplet(
     let required = k_dim + 2 * j;
 
     if smoothness_order <= required {
-        // Smallest integer power admitting the phi^{(2j)} psi triplet: 2(p+s) > k_dim+2j.
-        let min_power = (required / 2 + 1).saturating_sub(p_order);
-        crate::bail_invalid_basis!(
-            "Duchon collision derivative phi^({}) psi triplet requires 2*(p+s) > dimension+{}; got 2*(p+s)={}, dimension={}, p={}, s={}. \
-             The exact two-block / transformation-normal path needs analytic length-scale derivatives of the kernel, which are finite only for a smoother spline: raise power to >= {} (or reduce the joint smooth's dimension).",
+        // The exact two-block / transformation-normal path needs analytic
+        // length-scale derivatives of the kernel, finite only when
+        // 2(p+s) > k_dim + 2j.
+        return Err(BasisError::duchon_smoothness_insufficient(
+            format!("collision derivative phi^({}) psi triplet", 2 * j),
             2 * j,
-            2 * j,
-            smoothness_order,
             k_dim,
             p_order,
-            s_order,
-            min_power
-        );
+            s_order as f64,
+        ));
     }
 
     let kappa = 1.0 / length_scale.max(1e-300);

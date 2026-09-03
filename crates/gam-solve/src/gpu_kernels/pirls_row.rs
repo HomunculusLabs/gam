@@ -47,6 +47,7 @@ use std::sync::OnceLock;
 use gam_gpu::gpu_error::GpuError;
 #[cfg(target_os = "linux")]
 use gam_gpu::gpu_error::GpuResultExt;
+use gam_math::special::{bd0, bernoulli_kl_from_logits, softplus};
 use gam_problem::EstimationError;
 
 #[cfg(target_os = "linux")]
@@ -276,7 +277,7 @@ pub fn replay_first_refusal(
     };
     match row_reweight_cpu_at(row, family, mode, input, gamma_shape) {
         Err(error) => Err(error),
-        Ok(_) => Err(row_error(
+        Ok(_) => Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             status_codes::quantity(code),
             input.eta,
@@ -298,15 +299,6 @@ fn select_w_hessian(mode: CurvatureMode, w_fisher: f64, observed_correction: f64
     }
 }
 
-#[inline]
-fn row_error(row: usize, quantity: &'static str, eta: f64, value: f64) -> EstimationError {
-    EstimationError::PirlsRowGeometryUnrepresentable {
-        row,
-        quantity,
-        eta,
-        value,
-    }
-}
 
 #[inline]
 fn finite_eta(link: &'static str, eta: f64) -> Result<(), EstimationError> {
@@ -327,7 +319,7 @@ fn prior_weight(row: usize, input: RowInput) -> Result<f64, EstimationError> {
     if input.prior_weight.is_finite() && input.prior_weight >= 0.0 {
         Ok(input.prior_weight)
     } else {
-        Err(row_error(
+        Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "prior weight",
             input.eta,
@@ -347,7 +339,7 @@ fn certify_output(row: usize, eta: f64, output: RowOutput) -> Result<RowOutput, 
         ("deviance contribution", output.deviance),
     ] {
         if !value.is_finite() {
-            return Err(row_error(row, quantity, eta, value));
+            return Err(EstimationError::pirls_row_geometry_unrepresentable(row, quantity, eta, value));
         }
     }
     Ok(output)
@@ -438,7 +430,7 @@ fn row_gaussian_identity(
     let w = prior_weight(row, input)?;
     let mu = input.eta;
     if w > 0.0 && !input.y.is_finite() {
-        return Err(row_error(row, "Gaussian response", input.eta, input.y));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "Gaussian response", input.eta, input.y));
     }
     let resid = input.y - mu;
     let (grad_eta, dev) = if w == 0.0 {
@@ -470,7 +462,7 @@ fn row_poisson_log(
     let mu = crate::mixture_link::log_link_solver_exp(input.eta)?;
     let w_prior = prior_weight(row, input)?;
     if w_prior > 0.0 && !(input.y.is_finite() && input.y >= 0.0) {
-        return Err(row_error(row, "Poisson response", input.eta, input.y));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "Poisson response", input.eta, input.y));
     }
     if w_prior == 0.0 {
         return certify_output(
@@ -484,7 +476,7 @@ fn row_poisson_log(
     }
     let w_fisher = w_prior * mu;
     if !(w_fisher.is_finite() && w_fisher > 0.0) {
-        return Err(row_error(row, "Poisson Fisher weight", input.eta, w_fisher));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "Poisson Fisher weight", input.eta, w_fisher));
     }
     let grad_eta = w_prior * (input.y - mu);
     let u = (input.y - mu) / mu;
@@ -528,11 +520,11 @@ fn row_gamma_log(
 ) -> Result<RowOutput, EstimationError> {
     let mu = crate::mixture_link::log_link_solver_exp(input.eta)?;
     if !(shape.is_finite() && shape > 0.0) {
-        return Err(row_error(row, "Gamma shape", input.eta, shape));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "Gamma shape", input.eta, shape));
     }
     let w_prior = prior_weight(row, input)?;
     if w_prior > 0.0 && !(input.y.is_finite() && input.y > 0.0) {
-        return Err(row_error(row, "Gamma response", input.eta, input.y));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "Gamma response", input.eta, input.y));
     }
     if w_prior == 0.0 {
         return certify_output(
@@ -546,7 +538,7 @@ fn row_gamma_log(
     }
     let w_fisher = w_prior * shape;
     if !(w_fisher.is_finite() && w_fisher > 0.0) {
-        return Err(row_error(row, "Gamma Fisher weight", input.eta, w_fisher));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "Gamma Fisher weight", input.eta, w_fisher));
     }
     let observed_ratio = match mode {
         CurvatureMode::Fisher => None,
@@ -563,7 +555,7 @@ fn row_gamma_log(
                 positive_mul_div(w_fisher, input.y, mu)
             };
             if !(weighted_ratio.is_finite() && weighted_ratio > 0.0) {
-                return Err(row_error(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     row,
                     "Gamma observed Hessian weight",
                     input.eta,
@@ -575,7 +567,7 @@ fn row_gamma_log(
     };
     let w_hessian = observed_ratio.unwrap_or(w_fisher);
     if !w_hessian.is_finite() {
-        return Err(row_error(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "Gamma observed Hessian weight",
             input.eta,
@@ -624,7 +616,7 @@ fn bernoulli_response(row: usize, input: RowInput, w: f64) -> Result<(), Estimat
     if w == 0.0 || (input.y.is_finite() && (0.0..=1.0).contains(&input.y)) {
         Ok(())
     } else {
-        Err(row_error(row, "binomial response", input.eta, input.y))
+        Err(EstimationError::pirls_row_geometry_unrepresentable(row, "binomial response", input.eta, input.y))
     }
 }
 
@@ -653,7 +645,7 @@ fn row_bernoulli_logit(
     };
     let dmu_deta = tail / (denom * denom);
     if !(dmu_deta.is_finite() && dmu_deta > 0.0) {
-        return Err(row_error(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "canonical-logit inverse-link jet",
             input.eta,
@@ -672,7 +664,7 @@ fn row_bernoulli_logit(
     }
     let w_fisher = w_prior * dmu_deta;
     if !(w_fisher.is_finite() && w_fisher > 0.0) {
-        return Err(row_error(row, "logit Fisher weight", input.eta, w_fisher));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "logit Fisher weight", input.eta, w_fisher));
     }
     let grad_eta = w_prior * residual;
     let dev = bernoulli_logit_deviance(input.y, input.eta, w_prior);
@@ -735,7 +727,7 @@ fn row_bernoulli_noncanonical(
     let w_prior = prior_weight(row, input)?;
     bernoulli_response(row, input, w_prior)?;
     if !(mu.is_finite() && mu > 0.0 && mu < 1.0 && d1.is_finite() && d1 > 0.0 && d2.is_finite()) {
-        return Err(row_error(row, "inverse-link jet", input.eta, mu));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "inverse-link jet", input.eta, mu));
     }
     if w_prior == 0.0 {
         return certify_output(
@@ -757,7 +749,7 @@ fn row_bernoulli_noncanonical(
         && w_fisher.is_finite()
         && w_fisher > 0.0)
     {
-        return Err(row_error(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "Bernoulli Fisher weight",
             input.eta,
@@ -771,7 +763,7 @@ fn row_bernoulli_noncanonical(
     let observed_correction = -w_prior * resid * bracket;
     let w_hessian = select_w_hessian(mode, w_fisher, observed_correction);
     if !w_hessian.is_finite() {
-        return Err(row_error(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "Bernoulli observed Hessian weight",
             input.eta,
@@ -791,120 +783,6 @@ fn row_bernoulli_noncanonical(
             deviance: dev,
         },
     )
-}
-
-#[inline]
-fn softplus(x: f64) -> f64 {
-    x.max(0.0) + (-x.abs()).exp().ln_1p()
-}
-
-#[inline]
-fn expm1_minus_x(x: f64) -> f64 {
-    if x.abs() > 0.5 {
-        return x.exp_m1() - x;
-    }
-    let mut term = 0.5 * x * x;
-    let mut sum = term;
-    let mut degree = 2.0;
-    loop {
-        degree += 1.0;
-        term *= x / degree;
-        let next = sum + term;
-        if next == sum {
-            return next;
-        }
-        sum = next;
-    }
-}
-
-#[inline]
-fn log1p_minus_x(x: f64) -> f64 {
-    if x.abs() > 0.5 {
-        return x.ln_1p() - x;
-    }
-    let mut power = x * x;
-    let mut sign = -1.0;
-    let mut degree = 2.0;
-    let mut sum = sign * power / degree;
-    loop {
-        power *= x;
-        sign = -sign;
-        degree += 1.0;
-        let next = sum + sign * power / degree;
-        if next == sum {
-            return next;
-        }
-        sum = next;
-    }
-}
-
-#[inline]
-fn logistic(x: f64) -> f64 {
-    if x >= 0.0 {
-        1.0 / (1.0 + (-x).exp())
-    } else {
-        let e = x.exp();
-        e / (1.0 + e)
-    }
-}
-
-/// `KL(sigmoid(a) || sigmoid(b))` without subtracting entropy from cross
-/// entropy. The local branch evaluates only second-order remainders.
-#[inline]
-fn bernoulli_kl_from_logits(a: f64, b: f64) -> f64 {
-    if a == b {
-        return 0.0;
-    }
-    let h = b - a;
-    if h.abs() <= 0.5 {
-        let (p, local_h) = if a <= 0.0 {
-            (logistic(a), h)
-        } else {
-            (logistic(-a), -h)
-        };
-        let em1 = local_h.exp_m1();
-        let x = p * em1;
-        return log1p_minus_x(x) + p * expm1_minus_x(local_h);
-    }
-    if a <= 0.0 {
-        let p = logistic(a);
-        p * (a - b) + softplus(b) - softplus(a)
-    } else {
-        let q = logistic(-a);
-        q * (b - a) + softplus(-b) - softplus(-a)
-    }
-}
-
-/// Accurate Poisson deviance cell `x log(x/m) + m - x`. The local series is
-/// used only when its contraction factor is small, so the loop is short and
-/// deterministic on both CPU and GPU.
-#[inline]
-fn bd0(x: f64, m: f64) -> f64 {
-    if x == 0.0 {
-        return m;
-    }
-    if x == m {
-        return 0.0;
-    }
-    let hi = x.max(m);
-    let lo = x.min(m);
-    if (x - m).abs() / hi < 0.2 {
-        let v = ((x - m) / hi) / (1.0 + lo / hi);
-        let mut sum = (x - m) * v;
-        let mut term = 2.0 * x * v;
-        let v2 = v * v;
-        let mut denominator = 3.0;
-        loop {
-            term *= v2;
-            let next = sum + term / denominator;
-            if next == sum {
-                return next;
-            }
-            sum = next;
-            denominator += 2.0;
-        }
-    }
-    x * (x.ln() - m.ln()) + (m - x)
 }
 
 #[inline]

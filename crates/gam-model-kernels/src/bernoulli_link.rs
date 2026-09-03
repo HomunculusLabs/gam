@@ -69,15 +69,6 @@ fn response_mixture(y: f64, when_one: f64, when_zero: f64) -> f64 {
     }
 }
 
-#[inline]
-fn row_geometry_error(row: usize, quantity: &'static str, eta: f64, value: f64) -> EstimationError {
-    EstimationError::PirlsRowGeometryUnrepresentable {
-        row,
-        quantity,
-        eta,
-        value,
-    }
-}
 
 #[inline]
 fn logit_natural_jet(eta: f64) -> BernoulliNaturalJet {
@@ -289,7 +280,7 @@ fn generic_natural_jet(
         && jet.d3.is_finite()
         && d4.is_finite())
     {
-        return Err(row_geometry_error(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "bounded-family inverse-link jet",
             eta,

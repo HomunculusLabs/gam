@@ -367,24 +367,6 @@ impl AnalyticPenalty for ScadMcpPenalty {
         Some(self.diag_target(target, rho))
     }
 
-    fn hvp(
-        &self,
-        target: ArrayView1<'_, f64>,
-        rho: ArrayView1<'_, f64>,
-        v: ArrayView1<'_, f64>,
-    ) -> Array1<f64> {
-        assert_eq!(target.len(), v.len(), "hvp dimension mismatch");
-        if target.len() != v.len() {
-            return Array1::<f64>::zeros(target.len());
-        }
-        let diag = self.diag_target(target, rho);
-        let mut out = Array1::<f64>::zeros(v.len());
-        for i in 0..v.len() {
-            out[i] = diag[i] * v[i];
-        }
-        out
-    }
-
     /// PSD majorizer diagonal (see `Self::psd_majorizer_one`). SCAD/MCP are
     /// nonconvex, so this overrides the convex-only trait default — which would
     /// otherwise return the exact, negative [`Self::hessian_diag`] — with the

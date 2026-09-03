@@ -79,6 +79,7 @@
 //! shared, so primary width has no shared-memory or thread-stack ceiling.
 
 #[cfg(target_os = "linux")]
+use gam_gpu::gpu_error::checked_shape_len;
 use std::sync::OnceLock;
 
 use gam_gpu::gpu_error::GpuError;
@@ -256,21 +257,6 @@ pub(crate) struct BmsFlexRowKernelOutputs {
     pub hess: Vec<f64>,
 }
 
-fn checked_shape_len(context: &str, dimensions: &[usize]) -> Result<usize, GpuError> {
-    dimensions
-        .iter()
-        .copied()
-        .try_fold(1_usize, |product, dimension| {
-            product
-                .checked_mul(dimension)
-                .ok_or_else(|| GpuError::DriverCallFailed {
-                    reason: format!(
-                        "bms_flex_row {context}: shape product overflow for dimensions {dimensions:?}"
-                    ),
-                })
-        })
-}
-
 impl<'a> BmsFlexRowKernelInputs<'a> {
     /// Sanity-check every shape the kernel relies on. This is the only place
     /// length errors are surfaced — the device kernel assumes valid layout.
@@ -321,8 +307,8 @@ impl<'a> BmsFlexRowKernelInputs<'a> {
         check_len("e_obs", self.e_obs.len(), n)?;
         check_len("chi_obs", self.chi_obs.len(), n)?;
         check_len("xi_obs", self.xi_obs.len(), n)?;
-        let nr = checked_shape_len("validate [n,r]", &[n, self.r])?;
-        let nrr = checked_shape_len("validate [n,r,r]", &[n, self.r, self.r])?;
+        let nr = checked_shape_len("bms_flex_row validate [n,r]", &[n, self.r])?;
+        let nrr = checked_shape_len("bms_flex_row validate [n,r,r]", &[n, self.r, self.r])?;
         check_len("rho_u", self.rho_u.len(), nr)?;
         check_len("tau_u", self.tau_u.len(), nr)?;
         check_len("r_uv", self.r_uv.len(), nrr)?;
@@ -336,22 +322,20 @@ impl<'a> BmsFlexRowKernelInputs<'a> {
         check_len("cell_c1", self.cell_c1.len(), total_cells)?;
         check_len("cell_c2", self.cell_c2.len(), total_cells)?;
         check_len("cell_c3", self.cell_c3.len(), total_cells)?;
-        let cells_coeff4 = checked_shape_len("validate cell coeff4", &[total_cells, COEFF4])?;
+        let cells_coeff4 = checked_shape_len("bms_flex_row validate cell coeff4", &[total_cells, COEFF4])?;
         check_len("cell_a", self.cell_a.len(), cells_coeff4)?;
         check_len("cell_aa", self.cell_aa.len(), cells_coeff4)?;
         check_len(
             "cell_r",
             self.cell_r.len(),
-            checked_shape_len(
-                "validate cell_r",
+            checked_shape_len("bms_flex_row validate cell_r",
                 &[total_cells, self.r.saturating_sub(1), COEFF4],
             )?,
         )?;
         check_len(
             "cell_ar",
             self.cell_ar.len(),
-            checked_shape_len(
-                "validate cell_ar",
+            checked_shape_len("bms_flex_row validate cell_ar",
                 &[total_cells, self.r.saturating_sub(1), COEFF4],
             )?,
         )?;
@@ -359,17 +343,17 @@ impl<'a> BmsFlexRowKernelInputs<'a> {
         check_len(
             "cell_sbh",
             self.cell_sbh.len(),
-            checked_shape_len("validate cell_sbh", &[total_cells, self.p_h, COEFF4])?,
+            checked_shape_len("bms_flex_row validate cell_sbh", &[total_cells, self.p_h, COEFF4])?,
         )?;
         check_len(
             "cell_sbw",
             self.cell_sbw.len(),
-            checked_shape_len("validate cell_sbw", &[total_cells, self.p_w, COEFF4])?,
+            checked_shape_len("bms_flex_row validate cell_sbw", &[total_cells, self.p_w, COEFF4])?,
         )?;
         check_len(
             "cell_moments",
             self.cell_moments.len(),
-            checked_shape_len("validate cell_moments", &[total_cells, MOMENT_STRIDE])?,
+            checked_shape_len("bms_flex_row validate cell_moments", &[total_cells, MOMENT_STRIDE])?,
         )?;
         // Bonus: when the moments came from `CellMomentsSource::Device`, the
         // launcher needs to know the source is from a device buffer; nothing
@@ -981,8 +965,8 @@ pub(crate) fn launch_linux(
 
     let n = inputs.n_rows;
     let r = inputs.r;
-    let nr = checked_shape_len("launch [n,r]", &[n, r])?;
-    let nrr = checked_shape_len("launch [n,r,r]", &[n, r, r])?;
+    let nr = checked_shape_len("bms_flex_row launch [n,r]", &[n, r])?;
+    let nrr = checked_shape_len("bms_flex_row launch [n,r,r]", &[n, r, r])?;
     let mut d_neglog = stream
         .alloc_zeros::<f64>(n)
         .map_err(|err| GpuError::DriverCallFailed {
@@ -1936,10 +1920,10 @@ pub(crate) fn launch_bms_flex_row_kernel_device_resident(
     }
     let n = inputs.n_rows;
     let r = inputs.r;
-    let nr = checked_shape_len("device-resident [n,r]", &[n, r])?;
-    let nrr = checked_shape_len("device-resident [n,r,r]", &[n, r, r])?;
-    let marginal_len = checked_shape_len("device-resident marginal design", &[n, block.p_m])?;
-    let slope_len = checked_shape_len("device-resident slope design", &[n, block.p_g])?;
+    let nr = checked_shape_len("bms_flex_row device-resident [n,r]", &[n, r])?;
+    let nrr = checked_shape_len("bms_flex_row device-resident [n,r,r]", &[n, r, r])?;
+    let marginal_len = checked_shape_len("bms_flex_row device-resident marginal design", &[n, block.p_m])?;
+    let slope_len = checked_shape_len("bms_flex_row device-resident slope design", &[n, block.p_g])?;
     if marginal_design_row_major.len() != marginal_len {
         return Err(GpuError::DriverCallFailed {
             reason: format!(
@@ -2540,15 +2524,13 @@ impl PreparedBmsFlexRowLaunchArgs {
                 ),
             });
         }
-        let expected_nr = checked_shape_len("launch storage [n,r]", &[storage.n, storage.r])?;
+        let expected_nr = checked_shape_len("bms_flex_row launch storage [n,r]", &[storage.n, storage.r])?;
         let expected_nrr =
-            checked_shape_len("launch storage [n,r,r]", &[storage.n, storage.r, storage.r])?;
-        let expected_marginal = checked_shape_len(
-            "launch storage marginal design",
+            checked_shape_len("bms_flex_row launch storage [n,r,r]", &[storage.n, storage.r, storage.r])?;
+        let expected_marginal = checked_shape_len("bms_flex_row launch storage marginal design",
             &[storage.n, storage.block.p_m],
         )?;
-        let expected_slope = checked_shape_len(
-            "launch storage slope design",
+        let expected_slope = checked_shape_len("bms_flex_row launch storage slope design",
             &[storage.n, storage.block.p_g],
         )?;
         for (name, have, want) in [
@@ -3062,8 +3044,7 @@ fn materialize_dense_from_hvp_batches(
     let mut dense = vec![0.0_f64; dense_len];
     for column_start in (0..p_total).step_by(BMS_FLEX_ROW_HVP_MAX_RHS) {
         let rhs_count = (p_total - column_start).min(BMS_FLEX_ROW_HVP_MAX_RHS);
-        let batch_len = checked_shape_len(
-            "dense HVP materialization [rhs_count,p_total]",
+        let batch_len = checked_shape_len("bms_flex_row dense HVP materialization [rhs_count,p_total]",
             &[rhs_count, p_total],
         )?;
         let mut basis = vec![0.0_f64; batch_len];
@@ -3184,8 +3165,8 @@ pub fn launch_bms_flex_row_dense_block(
     let n = storage.n;
     let rows_per_cta = DENSE_BLOCK_ROWS_PER_CTA as usize;
     let num_chunks = n.div_ceil(rows_per_cta);
-    let pp = checked_shape_len("dense_block [p_total,p_total]", &[p_total, p_total])?;
-    let partial_len = checked_shape_len("dense_block partial", &[num_chunks, pp])?;
+    let pp = checked_shape_len("bms_flex_row dense_block [p_total,p_total]", &[p_total, p_total])?;
+    let partial_len = checked_shape_len("bms_flex_row dense_block partial", &[num_chunks, pp])?;
 
     let mut d_partial =
         stream
@@ -3492,7 +3473,7 @@ mod tests {
 
     #[test]
     pub(crate) fn checked_shape_len_rejects_arithmetic_overflow() {
-        let err = checked_shape_len("overflow test", &[usize::MAX, 2])
+        let err = checked_shape_len("bms_flex_row overflow test", &[usize::MAX, 2])
             .expect_err("shape multiplication must fail closed");
         assert!(err.to_string().contains("shape product overflow"));
     }

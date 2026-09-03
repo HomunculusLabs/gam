@@ -61,6 +61,16 @@ pub struct BinomialMeanWiggleFamily {
     pub continuation: bool,
 }
 
+impl MonotoneWiggleFamily for BinomialMeanWiggleFamily {
+    fn wiggle_knots(&self) -> &Array1<f64> {
+        &self.wiggle_knots
+    }
+
+    fn wiggle_degree(&self) -> usize {
+        self.wiggle_degree
+    }
+}
+
 pub(crate) struct BinomialMeanWiggleGeometry {
     pub(crate) basis: Array2<f64>,
     pub(crate) basis_d1: Array2<f64>,
@@ -99,99 +109,6 @@ impl BinomialMeanWiggleFamily {
 
     pub const BLOCK_ETA: usize = 0;
     pub const BLOCK_WIGGLE: usize = 1;
-
-    pub(crate) fn wiggle_basiswith_options(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        options: BasisOptions,
-    ) -> Result<Array2<f64>, String> {
-        monotone_wiggle_basis_with_derivative_order(
-            q0,
-            &self.wiggle_knots,
-            self.wiggle_degree,
-            options.derivative_order,
-        )
-    }
-
-    pub(crate) fn wiggle_design(&self, q0: ArrayView1<'_, f64>) -> Result<Array2<f64>, String> {
-        self.wiggle_basiswith_options(q0, BasisOptions::value())
-    }
-
-    pub(crate) fn wiggle_dq_dq0(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d_constrained = self.wiggle_basiswith_options(q0, BasisOptions::first_derivative())?;
-        if d_constrained.ncols() != beta_link_wiggle.len() {
-            return Err(GamlssError::DimensionMismatch { reason: format!(
-                "wiggle derivative/beta mismatch: basis has {} columns but beta_link_wiggle has {} coefficients",
-                d_constrained.ncols(),
-                beta_link_wiggle.len()
-            ) }.into());
-        }
-        Ok(d_constrained.dot(&beta_link_wiggle) + 1.0)
-    }
-
-    pub(crate) fn wiggle_d2q_dq02(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d2 = self.wiggle_basiswith_options(q0, BasisOptions::second_derivative())?;
-        if d2.ncols() != beta_link_wiggle.len() {
-            return Err(GamlssError::DimensionMismatch { reason: format!(
-                "wiggle second-derivative/beta mismatch: basis has {} columns but beta_link_wiggle has {} coefficients",
-                d2.ncols(),
-                beta_link_wiggle.len()
-            ) }.into());
-        }
-        Ok(d2.dot(&beta_link_wiggle))
-    }
-
-    pub(crate) fn wiggle_d3basis_constrained(
-        &self,
-        q0: ArrayView1<'_, f64>,
-    ) -> Result<Array2<f64>, String> {
-        monotone_wiggle_basis_with_derivative_order(q0, &self.wiggle_knots, self.wiggle_degree, 3)
-    }
-
-    pub(crate) fn wiggle_d3q_dq03(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d3 = self.wiggle_d3basis_constrained(q0)?;
-        if d3.ncols() != beta_link_wiggle.len() {
-            return Err(GamlssError::DimensionMismatch { reason: format!(
-                "wiggle third-derivative/beta mismatch: basis has {} columns but beta_link_wiggle has {} coefficients",
-                d3.ncols(),
-                beta_link_wiggle.len()
-            ) }.into());
-        }
-        Ok(d3.dot(&beta_link_wiggle))
-    }
-
-    pub(crate) fn wiggle_d4q_dq04(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d4 = monotone_wiggle_basis_with_derivative_order(
-            q0,
-            &self.wiggle_knots,
-            self.wiggle_degree,
-            4,
-        )?;
-        if d4.ncols() != beta_link_wiggle.len() {
-            return Err(GamlssError::DimensionMismatch { reason: format!(
-                "wiggle fourth-derivative/beta mismatch: basis has {} columns but beta_link_wiggle has {} coefficients",
-                d4.ncols(),
-                beta_link_wiggle.len()
-            ) }.into());
-        }
-        Ok(d4.dot(&beta_link_wiggle))
-    }
 
     pub(crate) fn wiggle_geometry(
         &self,
@@ -801,13 +718,7 @@ impl CustomFamily for BinomialMeanWiggleFamily {
         for i in 0..n {
             let q = eta[i] + etaw[i];
             if !eta[i].is_finite() || !etaw[i].is_finite() || !q.is_finite() {
-                return Err(GamlssError::RowGeometryUnrepresentable {
-                    row: i,
-                    quantity: "binomial mean-wiggle predictor q",
-                    eta: eta[i],
-                    value: q,
-                }
-                .into());
+                return Err(GamlssError::row_geometry_unrepresentable(i, "binomial mean-wiggle predictor q", eta[i], q));
             }
             let yi = self.y[i];
             let wi = self.weights[i];
@@ -829,13 +740,7 @@ impl CustomFamily for BinomialMeanWiggleFamily {
             }
             let slope = dq_dq0[i];
             if !slope.is_finite() {
-                return Err(GamlssError::RowGeometryUnrepresentable {
-                    row: i,
-                    quantity: "binomial mean-wiggle warp slope",
-                    eta: eta[i],
-                    value: slope,
-                }
-                .into());
+                return Err(GamlssError::row_geometry_unrepresentable(i, "binomial mean-wiggle warp slope", eta[i], slope));
             }
             if wi == 0.0 {
                 rows.push((0.0, eta[i], 0.0, etaw[i], 0.0));
@@ -883,13 +788,7 @@ impl CustomFamily for BinomialMeanWiggleFamily {
                 ("binomial mean-wiggle expected q information", fisher, true),
             ] {
                 if !value.is_finite() || (nonnegative && value < 0.0) {
-                    return Err(GamlssError::RowGeometryUnrepresentable {
-                        row: i,
-                        quantity,
-                        eta: q,
-                        value,
-                    }
-                    .into());
+                    return Err(GamlssError::row_geometry_unrepresentable(i, quantity, q, value));
                 }
             }
             // η block working geometry — dead when the warp slope vanishes or the
@@ -899,23 +798,11 @@ impl CustomFamily for BinomialMeanWiggleFamily {
             } else {
                 let weight = fisher * slope * slope;
                 if !weight.is_finite() || weight <= 0.0 {
-                    return Err(GamlssError::RowGeometryUnrepresentable {
-                        row: i,
-                        quantity: "binomial mean-wiggle eta working weight",
-                        eta: eta[i],
-                        value: weight,
-                    }
-                    .into());
+                    return Err(GamlssError::row_geometry_unrepresentable(i, "binomial mean-wiggle eta working weight", eta[i], weight));
                 }
                 let response = eta[i] - m1 / (fisher * slope);
                 if !response.is_finite() {
-                    return Err(GamlssError::RowGeometryUnrepresentable {
-                        row: i,
-                        quantity: "binomial mean-wiggle eta working response",
-                        eta: eta[i],
-                        value: response,
-                    }
-                    .into());
+                    return Err(GamlssError::row_geometry_unrepresentable(i, "binomial mean-wiggle eta working response", eta[i], response));
                 }
                 (response, weight)
             };
@@ -926,13 +813,7 @@ impl CustomFamily for BinomialMeanWiggleFamily {
             } else {
                 let z_wiggle_i = etaw[i] - m1 / fisher;
                 if !z_wiggle_i.is_finite() {
-                    return Err(GamlssError::RowGeometryUnrepresentable {
-                        row: i,
-                        quantity: "binomial mean-wiggle wiggle working response",
-                        eta: etaw[i],
-                        value: z_wiggle_i,
-                    }
-                    .into());
+                    return Err(GamlssError::row_geometry_unrepresentable(i, "binomial mean-wiggle wiggle working response", etaw[i], z_wiggle_i));
                 }
                 (z_wiggle_i, fisher)
             };
@@ -943,13 +824,7 @@ impl CustomFamily for BinomialMeanWiggleFamily {
         for (i, row) in rows.iter().enumerate() {
             ll += row.0;
             if !ll.is_finite() {
-                return Err(GamlssError::RowGeometryUnrepresentable {
-                    row: i,
-                    quantity: "binomial mean-wiggle cumulative log likelihood",
-                    eta: eta[i],
-                    value: ll,
-                }
-                .into());
+                return Err(GamlssError::row_geometry_unrepresentable(i, "binomial mean-wiggle cumulative log likelihood", eta[i], ll));
             }
         }
         let z_eta = Array1::from_iter(rows.iter().map(|row| row.1));

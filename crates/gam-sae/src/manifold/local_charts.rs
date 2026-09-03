@@ -892,7 +892,7 @@ fn sq_distance(z: ArrayView2<'_, f64>, a: usize, b: usize) -> f64 {
 }
 
 /// Intersection of two ascending-sorted row lists, ascending.
-fn sorted_intersection(a: &[usize], b: &[usize]) -> Vec<usize> {
+pub(super) fn sorted_intersection(a: &[usize], b: &[usize]) -> Vec<usize> {
     let mut out = Vec::new();
     let (mut i, mut j) = (0usize, 0usize);
     while i < a.len() && j < b.len() {

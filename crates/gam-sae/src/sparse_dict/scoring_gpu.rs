@@ -424,55 +424,6 @@ pub enum ScoreBlockPath {
 /// so a `K ≈ 32_000` fit does not balloon a `device alloc` linearly in `K`.
 const GPU_ROUTE_TILE_ELEMS: usize = gam_gpu::DEFAULT_DICTIONARY_SCORE_TILE_ELEMS;
 
-/// Route a whole minibatch of rows against the full decoder, returning each
-/// row's top-`s` `(atom, score)` selection — BIT-IDENTICAL to calling
-/// [`super::scoring::top_s_online`] per row, but with score blocks and the
-/// online top-`s` fold computed on the device when admitted.
-///
-/// The device fold uses the same strict order as
-/// [`super::scoring::TopSSelector`]: `(|score| desc, atom asc)`. Combined with
-/// bit-identical score arithmetic (the score kernel forbids FMA contraction),
-/// the routed support matches the CPU oracle **exactly**, while the host only
-/// downloads the final `rows × active` shortlists.
-///
-/// Memory: the `m × K` block is never formed whole — `K` is walked in tiles of
-/// at most `GPU_ROUTE_TILE_ELEMS / m` atom-columns. Each tile's score block is
-/// folded into resident device top-`s` buffers and discarded, so peak score
-/// memory is `m × tile_cols`, independent of `K`.
-///
-/// Uses the per-row CPU `top_s_online` under [`gam_gpu::GpuPolicy::Off`], below
-/// the device break-even, or when Auto admission reports no device. CUDA
-/// admission and execution failures are propagated for both Auto and Required.
-/// The returned [`ScoreBlockPath`] reports which path ran.
-///
-/// # Errors
-/// Returns [`gam_gpu::GpuError`] when CUDA admission or execution fails.
-/// One-shot engagement report for the T1 score router (#1551 class: "GPU 0%"
-/// runs where the decline reason was swallowed by the Auto fallback). Routed
-/// through `log::warn!` — the repo's sanctioned diagnostics path (same class as
-/// the arrow_schur #1551 cleanup) — so a `log` backend, when initialised, lands
-/// it in the job logs. Each category warns once per process: the route is
-/// per-minibatch and a faulting device would otherwise spam thousands of
-/// identical lines.
-fn note_route_engagement(engaged: bool, detail: &str) {
-    use std::sync::Once;
-    static ENGAGED_ONCE: Once = Once::new();
-    static DECLINED_ONCE: Once = Once::new();
-    let once = if engaged {
-        &ENGAGED_ONCE
-    } else {
-        &DECLINED_ONCE
-    };
-    once.call_once(|| {
-        let verdict = if engaged {
-            "device ENGAGED"
-        } else {
-            "device DECLINED - falling back to CPU"
-        };
-        log::warn!("[gam-sae sparse_dict score router] {verdict}: {detail}");
-    });
-}
-
 pub fn route_minibatch_required(
     rows: ArrayView2<'_, f32>,
     decoder: ArrayView2<'_, f32>,
@@ -517,7 +468,9 @@ pub fn route_minibatch_required(
                 m.saturating_mul(k)
             ));
         }
-        note_route_engagement(
+        gam_gpu::engagement::note_route_engagement(
+        "gam-sae sparse_dict score router",
+        "falling back to CPU",
             false,
             &format!(
                 "block {m}x{k} = {} elems below the device launch break-even \
@@ -537,7 +490,10 @@ pub fn route_minibatch_required(
         gam_gpu::GpuRuntime::resolve(mode)?
     };
     if runtime.is_none() {
-        note_route_engagement(false, "Auto admission found no CUDA device");
+        gam_gpu::engagement::note_route_engagement(
+        "gam-sae sparse_dict score router",
+        "falling back to CPU",
+        false, "Auto admission found no CUDA device");
         return Ok((cpu_route(), ScoreBlockPath::Cpu, 0));
     }
 
@@ -546,7 +502,9 @@ pub fn route_minibatch_required(
     let tile_cols = plan.tile_items;
 
     let out = device::route_decoder_tiled_device(rows, decoder, active, tile_cols)?;
-    note_route_engagement(
+    gam_gpu::engagement::note_route_engagement(
+        "gam-sae sparse_dict score router",
+        "falling back to CPU",
         true,
         &format!("block {m}x{k}, tile_cols={tile_cols}, active={active}"),
     );
@@ -559,54 +517,24 @@ pub fn route_minibatch_required(
 
 mod device {
     use super::score_block_kernel_source;
+    use gam_gpu::backend_probe::CachedBackend;
     use gam_gpu::gpu_error::{GpuError, GpuResultExt};
     use ndarray::ArrayView2;
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
 
-    use cudarc::driver::{CudaContext, CudaModule, CudaStream, LaunchConfig, PushKernelArg};
+    use cudarc::driver::{CudaModule, LaunchConfig, PushKernelArg};
 
-    struct Backend {
-        ctx: Arc<CudaContext>,
-        stream: Arc<CudaStream>,
-        modules: Mutex<HashMap<usize, Arc<CudaModule>>>,
-        max_shared_mem_per_block: usize,
-    }
+    use super::super::score_router_backend::ScoreRouterBackend as Backend;
+
+    static BACKEND: CachedBackend<Backend> = CachedBackend::new();
 
     fn backend() -> Result<&'static Backend, GpuError> {
-        static BACKEND: OnceLock<Result<Backend, GpuError>> = OnceLock::new();
-        BACKEND
-            .get_or_init(|| {
-                let parts = gam_gpu::backend_probe::probe_cuda_backend("sparse_dict_score_block")?;
-                Ok(Backend {
-                    ctx: parts.ctx,
-                    stream: parts.stream,
-                    modules: Mutex::new(HashMap::new()),
-                    max_shared_mem_per_block: gam_gpu::GpuRuntime::require()?
-                        .selected_device()
-                        .max_shared_mem_per_block,
-                })
-            })
-            .as_ref()
-            .map_err(GpuError::clone)
+        BACKEND.get_or_probe("sparse_dict_score_block", Backend::from_parts)
     }
 
     fn module_for(b: &Backend, p: usize) -> Result<Arc<CudaModule>, GpuError> {
-        if let Ok(guard) = b.modules.lock() {
-            if let Some(m) = guard.get(&p) {
-                return Ok(m.clone());
-            }
-        }
-        let ptx = gam_gpu::device_cache::compile_ptx_arch(score_block_kernel_source(p))
-            .gpu_ctx_with(|err| format!("sparse_dict score-block NVRTC (P={p}): {err}"))?;
-        let module = b
-            .ctx
-            .load_module(ptx)
-            .gpu_ctx("sparse_dict score-block module load")?;
-        if let Ok(mut guard) = b.modules.lock() {
-            guard.entry(p).or_insert_with(|| module.clone());
-        }
-        Ok(module)
+        b.modules
+            .get_or_compile(&b.ctx, p, "sparse_dict score-block", score_block_kernel_source)
     }
 
     const TOP_S_FOLD_THREADS: u32 = 32;

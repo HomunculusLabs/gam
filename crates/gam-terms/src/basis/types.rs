@@ -1821,7 +1821,7 @@ impl KroneckerFactoredBasis {
     /// immutable for the fit's lifetime, no invalidation is needed.
     pub fn invariant_structure(
         &self,
-    ) -> Result<std::sync::Arc<crate::kronecker::KroneckerInvariantStructure>, BasisError> {
+    ) -> Result<std::sync::Arc<crate::kronecker::KroneckerInvariantStructure>, gam_problem::EstimationError> {
         // Fast path: already memoized.
         if let Some(s) = self.invariant.get() {
             return Ok(std::sync::Arc::clone(s));

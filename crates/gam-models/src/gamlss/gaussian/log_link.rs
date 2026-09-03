@@ -3,6 +3,7 @@
 // so `use super::*;` makes the sibling-concern symbols this module references
 // resolve through the parent namespace.
 use super::*;
+use gam_math::special::scaled_positive_product_quotient;
 
 pub struct PoissonLogFamily {
     pub y: Array1<f64>,
@@ -123,13 +124,7 @@ fn evaluate_log_link_diagonal_irls<F: LogLinkDiagonalIrlsFamily + ?Sized>(
     for (i, row) in rows.iter().enumerate() {
         ll += row.log_lik_increment;
         if !ll.is_finite() {
-            return Err(GamlssError::RowGeometryUnrepresentable {
-                row: i,
-                quantity: "cumulative log likelihood",
-                eta: eta[i],
-                value: ll,
-            }
-            .into());
+            return Err(GamlssError::row_geometry_unrepresentable(i, "cumulative log likelihood", eta[i], ll));
         }
     }
     let z = Array1::from_iter(rows.iter().map(|row| row.working_response));
@@ -179,11 +174,11 @@ impl LogLinkDiagonalIrlsFamily for PoissonLogFamily {
         }
         let m = eta.exp();
         if !m.is_finite() || m <= 0.0 {
-            return Err(row_geometry_error(row, "Poisson mean exp(eta)", eta, m));
+            return Err(GamlssError::row_geometry_unrepresentable(row, "Poisson mean exp(eta)", eta, m));
         }
         let observed_weight = scaled_positive_product_quotient(prior_w, 1.0, m, 1.0);
         if !observed_weight.is_finite() || observed_weight <= 0.0 {
-            return Err(row_geometry_error(
+            return Err(GamlssError::row_geometry_unrepresentable(
                 row,
                 "Poisson observed information",
                 eta,
@@ -200,7 +195,7 @@ impl LogLinkDiagonalIrlsFamily for PoissonLogFamily {
         };
         let log_lik_increment = weighted_y_eta - observed_weight;
         if !log_lik_increment.is_finite() {
-            return Err(row_geometry_error(
+            return Err(GamlssError::row_geometry_unrepresentable(
                 row,
                 "Poisson log-likelihood contribution",
                 eta,
@@ -209,7 +204,7 @@ impl LogLinkDiagonalIrlsFamily for PoissonLogFamily {
         }
         let working_response = eta + (yi / m - 1.0);
         if !working_response.is_finite() {
-            return Err(row_geometry_error(
+            return Err(GamlssError::row_geometry_unrepresentable(
                 row,
                 "Poisson working response",
                 eta,
@@ -341,7 +336,7 @@ impl LogLinkDiagonalIrlsFamily for GammaLogFamily {
         }
         let m = eta.exp();
         if !m.is_finite() || m <= 0.0 {
-            return Err(row_geometry_error(row, "Gamma mean exp(eta)", eta, m));
+            return Err(GamlssError::row_geometry_unrepresentable(row, "Gamma mean exp(eta)", eta, m));
         }
         // Gamma(shape=k, scale=mu/k), dropping eta-independent constants.
         // Form the two terms independently with exponent-balanced algebra:
@@ -350,7 +345,7 @@ impl LogLinkDiagonalIrlsFamily for GammaLogFamily {
         // `prior*k` underflows before multiplication by a large |eta|.
         let observed_weight = scaled_positive_product_quotient(prior_w, self.shape, yi, m);
         if !observed_weight.is_finite() || observed_weight <= 0.0 {
-            return Err(row_geometry_error(
+            return Err(GamlssError::row_geometry_unrepresentable(
                 row,
                 "Gamma observed information",
                 eta,
@@ -364,7 +359,7 @@ impl LogLinkDiagonalIrlsFamily for GammaLogFamily {
         };
         let log_lik_increment = -observed_weight - eta_term;
         if !log_lik_increment.is_finite() {
-            return Err(row_geometry_error(
+            return Err(GamlssError::row_geometry_unrepresentable(
                 row,
                 "Gamma log-likelihood contribution",
                 eta,
@@ -386,7 +381,7 @@ impl LogLinkDiagonalIrlsFamily for GammaLogFamily {
         };
         let working_response = eta + working_step;
         if !working_response.is_finite() {
-            return Err(row_geometry_error(
+            return Err(GamlssError::row_geometry_unrepresentable(
                 row,
                 "Gamma working response",
                 eta,
@@ -486,7 +481,7 @@ impl CustomFamily for GammaLogFamily {
             // d/dη [prior_weight * shape * y / exp(η)] = -W_obs.
             let derivative = -observed_weight * d_eta[i];
             if !derivative.is_finite() {
-                return Err(row_geometry_error(
+                return Err(GamlssError::row_geometry_unrepresentable(
                     i,
                     "Gamma observed-information directional derivative",
                     e,
@@ -512,80 +507,6 @@ impl CustomFamilyGenerative for GammaLogFamily {
             noise: NoiseModel::Gamma { shape },
         })
     }
-}
-
-#[inline]
-fn row_geometry_error(row: usize, quantity: &'static str, eta: f64, value: f64) -> String {
-    GamlssError::RowGeometryUnrepresentable {
-        row,
-        quantity,
-        eta,
-        value,
-    }
-    .into()
-}
-
-/// Exact power-of-two decomposition `x = mantissa * 2^exponent` for a positive
-/// finite `f64`, including subnormals. The mantissa lies in `[1, 2)`.
-#[inline]
-fn positive_frexp(x: f64) -> (f64, i32) {
-    assert!(x.is_finite() && x > 0.0);
-    let bits = x.to_bits();
-    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
-    let fraction = bits & ((1_u64 << 52) - 1);
-    if raw_exp != 0 {
-        let mantissa = f64::from_bits((1023_u64 << 52) | fraction);
-        (mantissa, raw_exp - 1023)
-    } else {
-        let leading = 63_i32 - fraction.leading_zeros() as i32;
-        let shift = 52_i32 - leading;
-        let normalized = fraction << shift;
-        let mantissa = f64::from_bits((1023_u64 << 52) | (normalized & ((1_u64 << 52) - 1)));
-        (mantissa, -1022 - shift)
-    }
-}
-
-#[inline]
-fn scale_normalized_power_of_two(mut mantissa: f64, mut exponent: i32) -> f64 {
-    while mantissa >= 2.0 {
-        mantissa *= 0.5;
-        exponent += 1;
-    }
-    while mantissa < 1.0 {
-        mantissa *= 2.0;
-        exponent -= 1;
-    }
-    if exponent > 1023 {
-        return f64::INFINITY;
-    }
-    if exponent >= -1022 {
-        let power = f64::from_bits(((exponent + 1023) as u64) << 52);
-        return mantissa * power;
-    }
-    if exponent < -1075 {
-        return 0.0;
-    }
-    // Scale in units of the least positive subnormal.  Keeping the small
-    // power-of-two multiplier normal until the final operation lets IEEE
-    // round the final subnormal once instead of underflowing an intermediate.
-    let units = mantissa * 2.0_f64.powi(exponent + 1074);
-    units * f64::from_bits(1)
-}
-
-/// Compute `a*b*c/d` for positive finite inputs while carrying the binary
-/// exponent separately. Overflow/underflow therefore occurs only when the
-/// final `f64` result itself is unrepresentable.
-#[inline]
-fn scaled_positive_product_quotient(a: f64, b: f64, c: f64, d: f64) -> f64 {
-    assert!(a.is_finite() && a > 0.0);
-    assert!(b.is_finite() && b > 0.0);
-    assert!(c.is_finite() && c > 0.0);
-    assert!(d.is_finite() && d > 0.0);
-    let (ma, ea) = positive_frexp(a);
-    let (mb, eb) = positive_frexp(b);
-    let (mc, ec) = positive_frexp(c);
-    let (md, ed) = positive_frexp(d);
-    scale_normalized_power_of_two((ma * mb) * (mc / md), ea + eb + ec - ed)
 }
 
 #[cfg(test)]

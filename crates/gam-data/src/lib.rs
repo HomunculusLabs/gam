@@ -214,6 +214,24 @@ pub enum DataError {
 }
 
 impl DataError {
+    /// The remediation a user can act on, when the failure has one; the single
+    /// source of the advice every front end prints beside the error.
+    #[must_use]
+    pub fn advice(&self) -> Option<String> {
+        match self {
+            Self::SchemaMismatch { .. } => Some(
+                "Verify the new data has the same columns and types as the training data \
+                 and that the formula terms match."
+                    .to_string(),
+            ),
+            Self::ParseError { .. }
+            | Self::EncodingFailure { .. }
+            | Self::EmptyInput { .. }
+            | Self::InvalidValue { .. }
+            | Self::ColumnNotFound { .. } => None,
+        }
+    }
+
     /// Build a typed `ColumnNotFound` from the column map of the resolved
     /// dataset. Centralises the similarity / TSV-hint heuristics that the
     /// legacy `missing_column_message` helper used to perform inline so all

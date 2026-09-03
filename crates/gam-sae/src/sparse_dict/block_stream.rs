@@ -46,15 +46,11 @@ use super::block::{
     block_birth_evidence_margin, gram_schmidt_rows, reconstruct_stored_code_row,
     route_and_code_all, seed_frames, stable_rank_symmetric,
 };
-use super::update::DecoderSolveStats;
+use super::residual_reservoir::ResidualReservoir;
+use super::update::{DEAD_DENOM, DecoderSolveStats};
 use crate::frames::GrassmannFrame;
 use ndarray::{Array2, ArrayView2};
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 
-/// A block that never fired this epoch has self-energy at or below this floor and
-/// keeps its current frame (mirrors the one-shot proposal's dead threshold).
-const DEAD_DENOM: f64 = 1.0e-12;
 
 /// Per-shard summary returned by [`BlockSparseStreamState::partial_fit`].
 #[derive(Clone, Copy, Debug)]
@@ -97,46 +93,6 @@ pub struct BlockEpochStats {
     pub decoder_solve_stats: DecoderSolveStats,
 }
 
-/// One candidate row for a dead-block birth: its residual vector (under the
-/// pre-refresh frames) and the energy used to rank it. Ordered so the
-/// [`BinaryHeap`]'s max is the MOST-evictable entry (smallest energy, ties toward
-/// the larger global index), keeping the reservoir at the worst-reconstructed rows
-/// with the one-shot deterministic tie-break (descending energy, ascending index).
-struct ResidRow {
-    norm2: f64,
-    global_index: u64,
-    residual: Vec<f32>,
-}
-
-impl PartialEq for ResidRow {
-    fn eq(&self, other: &Self) -> bool {
-        self.norm2 == other.norm2 && self.global_index == other.global_index
-    }
-}
-impl Eq for ResidRow {}
-impl Ord for ResidRow {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match other.norm2.total_cmp(&self.norm2) {
-            Ordering::Equal => self.global_index.cmp(&other.global_index),
-            ord => ord,
-        }
-    }
-}
-impl PartialOrd for ResidRow {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// Bounded reservoir of the worst-reconstructed rows seen this epoch. Capacity is
-/// `k_aux · b`: birth proposals use `b` orthonormal rows for at most `k_aux`
-/// candidates, so the top-`k_aux·b` residual rows are all that can ever be needed.
-/// Peak memory is `k_aux·b·P` f32 — never `N×K`.
-struct ResidualReservoir {
-    cap: usize,
-    heap: BinaryHeap<ResidRow>,
-}
-
 /// A streaming birth is a two-pass transaction. The candidate frame is active
 /// for the next streamed pass while this object retains the complete pre-birth
 /// decoder/gamma and accumulates the exact baseline RSS on the same rows. At
@@ -150,52 +106,6 @@ struct PendingBlockBirth {
     baseline_rows: usize,
     baseline_usage: Vec<usize>,
     baseline_second: Vec<Array2<f64>>,
-}
-
-impl ResidualReservoir {
-    fn new(cap: usize) -> Self {
-        Self {
-            cap: cap.max(1),
-            heap: BinaryHeap::new(),
-        }
-    }
-
-    fn offer(&mut self, norm2: f64, global_index: u64, residual: Vec<f32>) {
-        if norm2 <= DEAD_DENOM {
-            return;
-        }
-        let row = ResidRow {
-            norm2,
-            global_index,
-            residual,
-        };
-        if self.heap.len() < self.cap {
-            self.heap.push(row);
-            return;
-        }
-        if let Some(worst_kept) = self.heap.peek() {
-            if row.cmp(worst_kept) == Ordering::Less {
-                self.heap.pop();
-                self.heap.push(row);
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        self.heap.clear();
-    }
-
-    /// Rows ranked for birth proposals: descending residual energy, ties by ascending
-    /// global index — the one-shot `dead_block_birth_proposals` order.
-    fn ranked(&self) -> Vec<&ResidRow> {
-        let mut rows: Vec<&ResidRow> = self.heap.iter().collect();
-        rows.sort_by(|a, b| {
-            b.norm2
-                .total_cmp(&a.norm2)
-                .then_with(|| a.global_index.cmp(&b.global_index))
-        });
-        rows
-    }
 }
 
 /// Resumable state for a streaming block-sparse fit. Construct with [`Self::new`]

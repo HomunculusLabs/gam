@@ -58,22 +58,13 @@ struct ExactLogLinkWorkingRow {
     z: f64,
 }
 
-#[inline]
-fn unrepresentable(row: usize, quantity: &'static str, eta: f64, value: f64) -> EstimationError {
-    EstimationError::PirlsRowGeometryUnrepresentable {
-        row,
-        quantity,
-        eta,
-        value,
-    }
-}
 
 #[inline]
 fn exact_prior_weight(row: usize, eta: f64, prior_weight: f64) -> Result<f64, EstimationError> {
     if prior_weight.is_finite() && prior_weight >= 0.0 {
         Ok(prior_weight)
     } else {
-        Err(unrepresentable(row, "prior weight", eta, prior_weight))
+        Err(EstimationError::pirls_row_geometry_unrepresentable(row, "prior weight", eta, prior_weight))
     }
 }
 
@@ -137,18 +128,18 @@ fn exact_log_link_row(
 
     let unit_weight = unit_weight(&rule.weight, mu);
     if !(unit_weight.is_finite() && unit_weight > 0.0) {
-        return Err(unrepresentable(row, "unit Fisher weight", eta, unit_weight));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "unit Fisher weight", eta, unit_weight));
     }
     let weight = prior_weight * unit_weight;
     if !(weight.is_finite() && weight > 0.0) {
-        return Err(unrepresentable(row, "Fisher weight", eta, weight));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "Fisher weight", eta, weight));
     }
     let (c, d) = curvature_terms(&rule.curvature, mu, weight);
     if !c.is_finite() {
-        return Err(unrepresentable(row, "dW/deta", eta, c));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "dW/deta", eta, c));
     }
     if !d.is_finite() {
-        return Err(unrepresentable(row, "d2W/deta2", eta, d));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "d2W/deta2", eta, d));
     }
     Ok(ExactLogLinkRow { mu, weight, c, d })
 }
@@ -161,7 +152,7 @@ fn exact_working_response(row: usize, eta: f64, y: f64, mu: f64) -> Result<f64, 
     if z.is_finite() {
         Ok(z)
     } else {
-        Err(unrepresentable(row, "working response", eta, z))
+        Err(EstimationError::pirls_row_geometry_unrepresentable(row, "working response", eta, z))
     }
 }
 

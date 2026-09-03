@@ -171,17 +171,6 @@ pub(super) struct DispersionRowKernel {
     pub(super) disp_response: f64,
 }
 
-#[inline]
-fn dispersion_geometry_error(row: usize, quantity: &'static str, eta: f64, value: f64) -> String {
-    GamlssError::RowGeometryUnrepresentable {
-        row,
-        quantity,
-        eta,
-        value,
-    }
-    .into()
-}
-
 /// Certify the exact open parameter domain used by the row towers.  The domain
 /// is defined by representability of the linked distribution parameters, not
 /// by an arbitrary predictor box.
@@ -243,7 +232,7 @@ fn validate_dispersion_row_geometry_inputs(
         if value.is_finite() && value > 0.0 {
             Ok(())
         } else {
-            Err(dispersion_geometry_error(row, quantity, eta, value))
+            Err(GamlssError::row_geometry_unrepresentable(row, quantity, eta, value))
         }
     };
     match kind {
@@ -260,7 +249,7 @@ fn validate_dispersion_row_geometry_inputs(
         DispersionFamilyKind::Beta => {
             let mu = gam_linalg::utils::stable_logistic(eta_mu);
             if !mu.is_finite() || mu <= 0.0 || mu >= 1.0 {
-                return Err(dispersion_geometry_error(
+                return Err(GamlssError::row_geometry_unrepresentable(
                     row,
                     "Beta mean logistic(eta_mu) in the open unit interval",
                     eta_mu,
@@ -322,7 +311,7 @@ fn validate_dispersion_row_kernel_output(
         ),
     ] {
         if !value.is_finite() || (strictly_positive && value <= 0.0) {
-            return Err(dispersion_geometry_error(row, quantity, eta, value));
+            return Err(GamlssError::row_geometry_unrepresentable(row, quantity, eta, value));
         }
     }
     Ok(())
@@ -1069,13 +1058,7 @@ pub fn dispersion_alo_row_geometry(
         .chain(geometry.observed_hessian.iter().flatten())
         .any(|value| !value.is_finite())
     {
-        return Err(GamlssError::RowGeometryUnrepresentable {
-            row,
-            quantity: "dispersion-family ALO row geometry",
-            eta: eta_mu,
-            value: f64::NAN,
-        }
-        .into());
+        return Err(GamlssError::row_geometry_unrepresentable(row, "dispersion-family ALO row geometry", eta_mu, f64::NAN));
     }
     Ok(geometry)
 }
@@ -1442,7 +1425,7 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
             validate_dispersion_row_kernel_output(i, eta_mu[i], eta_d[i], self.weights[i], row)?;
             log_likelihood += row.loglik;
             if !log_likelihood.is_finite() {
-                return Err(dispersion_geometry_error(
+                return Err(GamlssError::row_geometry_unrepresentable(
                     i,
                     "dispersion-family cumulative log likelihood",
                     eta_mu[i],
@@ -1531,7 +1514,7 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
         let mut ll = 0.0;
         for (i, loglik) in per_row.into_iter().enumerate() {
             if !loglik.is_finite() {
-                return Err(dispersion_geometry_error(
+                return Err(GamlssError::row_geometry_unrepresentable(
                     i,
                     "dispersion-family row log likelihood",
                     eta_mu[i],
@@ -1540,7 +1523,7 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
             }
             ll += loglik;
             if !ll.is_finite() {
-                return Err(dispersion_geometry_error(
+                return Err(GamlssError::row_geometry_unrepresentable(
                     i,
                     "dispersion-family cumulative log likelihood",
                     eta_mu[i],
@@ -1667,7 +1650,7 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
                 ),
             ] {
                 if !value.is_finite() {
-                    return Err(dispersion_geometry_error(i, quantity, eta, value));
+                    return Err(GamlssError::row_geometry_unrepresentable(i, quantity, eta, value));
                 }
             }
         }
@@ -1842,7 +1825,7 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
                 ),
             ] {
                 if !value.is_finite() {
-                    return Err(dispersion_geometry_error(i, quantity, eta, value));
+                    return Err(GamlssError::row_geometry_unrepresentable(i, quantity, eta, value));
                 }
             }
         }

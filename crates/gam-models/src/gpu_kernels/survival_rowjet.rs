@@ -199,50 +199,43 @@ pub fn compile_survival_rowjet_ptx() -> Result<Ptx, GpuError> {
 #[cfg(target_os = "linux")]
 mod device {
     use super::{SurvivalRowInputs, SurvivalRowVghChannels, compile_survival_rowjet_ptx};
+    use gam_gpu::backend_probe::CachedBackend;
+    use gam_gpu::device_cache::PtxModuleCache;
     use gam_gpu::gpu_error::{GpuError, GpuResultExt};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
 
     use cudarc::driver::{CudaContext, CudaModule, CudaStream, LaunchConfig, PushKernelArg};
 
     struct Backend {
         ctx: Arc<CudaContext>,
         stream: Arc<CudaStream>,
-        module: Mutex<Option<Arc<CudaModule>>>,
+        module: PtxModuleCache,
     }
 
+    static BACKEND: CachedBackend<Backend> = CachedBackend::new();
+
     fn backend() -> Result<&'static Backend, GpuError> {
-        static BACKEND: OnceLock<Result<Backend, GpuError>> = OnceLock::new();
-        BACKEND
-            .get_or_init(|| {
-                let parts = gam_gpu::backend_probe::probe_cuda_backend("survival_rowjet")?;
-                Ok(Backend {
-                    ctx: parts.ctx,
-                    stream: parts.stream,
-                    module: Mutex::new(None),
-                })
+        BACKEND.get_or_probe("survival_rowjet", |parts| {
+            Ok(Backend {
+                ctx: parts.ctx,
+                stream: parts.stream,
+                module: PtxModuleCache::new(),
             })
-            .as_ref()
-            .map_err(GpuError::clone)
+        })
     }
 
     fn module(backend: &Backend) -> Result<Arc<CudaModule>, GpuError> {
-        if let Ok(guard) = backend.module.lock() {
-            if let Some(module) = guard.as_ref() {
-                return Ok(module.clone());
-            }
-        }
-        // The shared compiler pins the real device architecture and disables
-        // FMA contraction for close parity with separately rounded host ops.
-        let ptx = compile_survival_rowjet_ptx()
-            .gpu_ctx_with(|error| format!("survival_rowjet NVRTC compile: {error}"))?;
-        let module = backend
-            .ctx
-            .load_module(ptx)
-            .gpu_ctx("survival_rowjet module load")?;
-        if let Ok(mut guard) = backend.module.lock() {
-            guard.get_or_insert_with(|| module.clone());
-        }
-        Ok(module)
+        // The family's own compiler pins the real device architecture and
+        // disables FMA contraction for close parity with separately rounded
+        // host ops, so the module is loaded from that PTX rather than the
+        // shared-options compile.
+        backend
+            .module
+            .get_or_load(&backend.ctx, "survival_rowjet", || {
+                compile_survival_rowjet_ptx()
+                    .gpu_ctx_with(|error| format!("survival_rowjet NVRTC compile: {error}"))
+            })
+            .map(Arc::clone)
     }
 
     type FlatInputs = (

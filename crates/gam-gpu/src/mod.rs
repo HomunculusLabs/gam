@@ -26,6 +26,7 @@ pub mod device_runtime;
 pub mod dictionary_score;
 pub mod driver;
 pub mod encode_throughput;
+pub mod engagement;
 pub mod linalg_dispatch;
 pub mod memory;
 pub mod numerics_device;

@@ -16,7 +16,7 @@
 //! type, no per-backend ad-hoc OnceLock, no transitional shim.
 
 #[cfg(target_os = "linux")]
-pub use linux::{DeviceArena, PtxModuleCache, compile_ptx_arch};
+pub use linux::{DeviceArena, KeyedPtxModuleCache, PtxModuleCache, compile_ptx_arch};
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -26,7 +26,7 @@ mod linux {
     use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
     use std::collections::HashMap;
     use std::path::Path;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     /// Power-of-two bucketed free list of f64 device slices.
     ///
@@ -110,20 +110,40 @@ mod linux {
             label: &'static str,
             source: &str,
         ) -> Result<&Arc<CudaModule>, GpuError> {
+            self.get_or_load(ctx, label, || {
+                compile_ptx_with_opts(source, nvrtc_compile_options()?)
+                    .map_err(|err| {
+                        // The historical silent-CPU class: an NVRTC failure here
+                        // is swallowed by callers' `.ok()?`; count it so telemetry
+                        // can distinguish "device engaged" from "silently
+                        // declined".
+                        crate::profile::telemetry_record_cpu_fallback(format!(
+                            "{label} NVRTC compile failed: {err}"
+                        ));
+                        err
+                    })
+                    .gpu_ctx_with(|err| format!("{label} NVRTC compile failed: {err}"))
+            })
+        }
+
+        /// Load the PTX that `compile` produces on `ctx` the first time; return
+        /// the cached `Arc<CudaModule>` on every subsequent call. This is the
+        /// entry for a kernel whose NVRTC options differ from the shared ones
+        /// (a family that must disable FMA contraction, say); everything else
+        /// goes through [`Self::get_or_compile`].
+        pub fn get_or_load<F>(
+            &self,
+            ctx: &Arc<CudaContext>,
+            label: &'static str,
+            compile: F,
+        ) -> Result<&Arc<CudaModule>, GpuError>
+        where
+            F: FnOnce() -> Result<cudarc::nvrtc::Ptx, GpuError>,
+        {
             if let Some(existing) = self.module.get() {
                 return Ok(existing);
             }
-            let ptx = compile_ptx_with_opts(source, nvrtc_compile_options()?)
-                .map_err(|err| {
-                    // The historical silent-CPU class: an NVRTC failure here is
-                    // swallowed by callers' `.ok()?`; count it so telemetry can
-                    // distinguish "device engaged" from "silently declined".
-                    crate::profile::telemetry_record_cpu_fallback(format!(
-                        "{label} NVRTC compile failed: {err}"
-                    ));
-                    err
-                })
-                .gpu_ctx_with(|err| format!("{label} NVRTC compile failed: {err}"))?;
+            let ptx = compile()?;
             let module = ctx
                 .load_module(ptx)
                 .gpu_ctx_with(|err| format!("{label} module load failed: {err}"))?;
@@ -136,6 +156,58 @@ mod linux {
                 .module
                 .get()
                 .expect("module slot populated immediately after set"))
+        }
+    }
+
+    /// A per-key family of compiled modules: one [`CudaModule`] per value of a
+    /// kernel-shape parameter that is baked into the source (a row width `P`,
+    /// say), each compiled with the shared device-keyed NVRTC options on first
+    /// use and shared thereafter. The keyed twin of [`PtxModuleCache`].
+    pub struct KeyedPtxModuleCache<K> {
+        modules: Mutex<HashMap<K, Arc<CudaModule>>>,
+    }
+
+    impl<K: Eq + std::hash::Hash + Copy + std::fmt::Display> KeyedPtxModuleCache<K> {
+        pub fn new() -> Self {
+            Self {
+                modules: Mutex::new(HashMap::new()),
+            }
+        }
+
+        /// The module for `key`, compiling `source(key)` and loading it on
+        /// `ctx` the first time that key is seen.
+        pub fn get_or_compile<S>(
+            &self,
+            ctx: &Arc<CudaContext>,
+            key: K,
+            label: &'static str,
+            source: S,
+        ) -> Result<Arc<CudaModule>, GpuError>
+        where
+            S: FnOnce(K) -> String,
+        {
+            if let Ok(guard) = self.modules.lock() {
+                if let Some(module) = guard.get(&key) {
+                    return Ok(Arc::clone(module));
+                }
+            }
+            let ptx = compile_ptx_arch(source(key))
+                .gpu_ctx_with(|err| format!("{label} NVRTC compile failed (key={key}): {err}"))?;
+            let module = ctx
+                .load_module(ptx)
+                .gpu_ctx_with(|err| format!("{label} module load failed (key={key}): {err}"))?;
+            if let Ok(mut guard) = self.modules.lock() {
+                // A concurrent compile of the same key may have won the race;
+                // its module is the one every later caller sees.
+                return Ok(Arc::clone(guard.entry(key).or_insert(module)));
+            }
+            Ok(module)
+        }
+    }
+
+    impl<K: Eq + std::hash::Hash + Copy + std::fmt::Display> Default for KeyedPtxModuleCache<K> {
+        fn default() -> Self {
+            Self::new()
         }
     }
 

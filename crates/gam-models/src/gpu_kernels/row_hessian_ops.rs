@@ -26,6 +26,7 @@
 //! is read once.
 
 #[cfg(target_os = "linux")]
+use gam_gpu::gpu_error::checked_shape_len;
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::sync::OnceLock;
@@ -46,22 +47,6 @@ use gam_gpu::gpu_error::GpuResultExt;
 /// consumes it is Linux-only.
 #[cfg(target_os = "linux")]
 const ROW_HV_THREADS: u32 = 32;
-
-#[cfg(target_os = "linux")]
-fn checked_row_shape_len(context: &str, dimensions: &[usize]) -> Result<usize, GpuError> {
-    dimensions
-        .iter()
-        .copied()
-        .try_fold(1_usize, |product, dimension| {
-            product
-                .checked_mul(dimension)
-                .ok_or_else(|| GpuError::DriverCallFailed {
-                    reason: format!(
-                        "row_hessian_ops {context}: shape product overflow for dimensions {dimensions:?}"
-                    ),
-                })
-        })
-}
 
 /// Per-call input bundle for [`launch_row_hessian_matvec`].
 ///
@@ -125,8 +110,8 @@ impl<'a> RowHessianMatvecInputs<'a> {
                 reason: "row_hessian_matvec inputs: r must be > 0".to_string(),
             });
         }
-        let nr = checked_row_shape_len("matvec [n,r]", &[self.n_rows, self.r])?;
-        let nrr = checked_row_shape_len("matvec [n,r,r]", &[self.n_rows, self.r, self.r])?;
+        let nr = checked_shape_len("row_hessian_ops matvec [n,r]", &[self.n_rows, self.r])?;
+        let nrr = checked_shape_len("row_hessian_ops matvec [n,r,r]", &[self.n_rows, self.r, self.r])?;
         if self.h_rows.len() != nrr {
             gam_gpu::gpu_bail!(
                 "row_hessian_matvec inputs: h_rows.len()={} != n_rows({})*r({})*r = {}",
@@ -163,7 +148,7 @@ impl<'a> RowHessianDiagInputs<'a> {
                 reason: "row_hessian_diag inputs: r must be > 0".to_string(),
             });
         }
-        let nrr = checked_row_shape_len("diagonal [n,r,r]", &[self.n_rows, self.r, self.r])?;
+        let nrr = checked_shape_len("row_hessian_ops diagonal [n,r,r]", &[self.n_rows, self.r, self.r])?;
         if self.h_rows.len() != nrr {
             gam_gpu::gpu_bail!(
                 "row_hessian_diag inputs: h_rows.len()={} != n_rows({})*r({})*r = {}",
@@ -337,7 +322,7 @@ fn launch_matvec_linux(
     let stream = &backend.stream;
     let n = inputs.n_rows;
     let r = inputs.r;
-    let nr = checked_row_shape_len("matvec output [n,r]", &[n, r])?;
+    let nr = checked_shape_len("row_hessian_ops matvec output [n,r]", &[n, r])?;
 
     let d_h = stream
         .clone_htod(inputs.h_rows)
@@ -400,7 +385,7 @@ fn launch_diag_linux(inputs: RowHessianDiagInputs<'_>) -> Result<RowHessianDiagO
     let stream = &backend.stream;
     let n = inputs.n_rows;
     let r = inputs.r;
-    let nr = checked_row_shape_len("diagonal output [n,r]", &[n, r])?;
+    let nr = checked_shape_len("row_hessian_ops diagonal output [n,r]", &[n, r])?;
 
     let d_h = stream
         .clone_htod(inputs.h_rows)

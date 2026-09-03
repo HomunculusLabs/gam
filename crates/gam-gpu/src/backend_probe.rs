@@ -32,7 +32,8 @@
 // (`private_interfaces`). It carries no fields a caller can misuse out of context.
 #[cfg(target_os = "linux")]
 pub use linux::{
-    CudaBackendContext, CudaBackendParts, probe_backend_with_compile, probe_cuda_backend,
+    CachedBackend, CudaBackendContext, CudaBackendParts, probe_backend_with_compile,
+    probe_cuda_backend,
 };
 
 #[cfg(target_os = "linux")]
@@ -96,6 +97,49 @@ mod linux {
     /// messages — live in the shared probe; `build` receives the resolved
     /// [`CudaBackendParts`] (so it can clone the `Arc<CudaContext>` /
     /// `Arc<CudaStream>` it needs) and returns the backend's own state `T`.
+    /// A process-wide backend for one kernel family: the context and stream
+    /// from [`probe_cuda_backend`] plus whatever the family builds on top of
+    /// them (compiled modules, device limits), probed and built once and then
+    /// shared by every caller for the life of the process. A failed probe is
+    /// cached too, so a host without a usable device answers every later call
+    /// with the same refusal instead of re-probing.
+    ///
+    /// Declare one per family as a `static` and read it through
+    /// [`CachedBackend::get_or_probe`]; five kernel families used to spell this
+    /// `OnceLock<Result<_, GpuError>>` protocol out by hand (#2470).
+    pub struct CachedBackend<T: 'static> {
+        slot: std::sync::OnceLock<Result<T, GpuError>>,
+    }
+
+    impl<T: 'static> CachedBackend<T> {
+        pub const fn new() -> Self {
+            Self {
+                slot: std::sync::OnceLock::new(),
+            }
+        }
+
+        /// The shared backend, probing and building it on first use.
+        pub fn get_or_probe<F>(
+            &'static self,
+            label: &'static str,
+            build: F,
+        ) -> Result<&'static T, GpuError>
+        where
+            F: FnOnce(CudaBackendParts) -> Result<T, GpuError>,
+        {
+            self.slot
+                .get_or_init(|| build(probe_cuda_backend(label)?))
+                .as_ref()
+                .map_err(GpuError::clone)
+        }
+    }
+
+    impl<T: 'static> Default for CachedBackend<T> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     pub fn probe_backend_with_compile<F, T>(label: &'static str, build: F) -> Result<T, GpuError>
     where
         F: FnOnce(&CudaBackendParts) -> Result<T, GpuError>,

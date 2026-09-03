@@ -645,6 +645,16 @@ pub struct BinomialLocationScaleWiggleFamily {
     pub policy: gam_runtime::resource::ResourcePolicy,
 }
 
+impl MonotoneWiggleFamily for BinomialLocationScaleWiggleFamily {
+    fn wiggle_knots(&self) -> &Array1<f64> {
+        &self.wiggle_knots
+    }
+
+    fn wiggle_degree(&self) -> usize {
+        self.wiggle_degree
+    }
+}
+
 impl BinomialLocationScaleWiggleFamily {
     pub const BLOCK_T: usize = 0;
     pub const BLOCK_LOG_SIGMA: usize = 1;
@@ -702,112 +712,6 @@ impl BinomialLocationScaleWiggleFamily {
             .into());
         }
         Ok((n, eta_t, eta_ls, etaw))
-    }
-
-    pub(crate) fn wiggle_basiswith_options(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        basis_options: BasisOptions,
-    ) -> Result<Array2<f64>, String> {
-        monotone_wiggle_basis_with_derivative_order(
-            q0,
-            &self.wiggle_knots,
-            self.wiggle_degree,
-            basis_options.derivative_order,
-        )
-    }
-
-    pub(crate) fn wiggle_design(&self, q0: ArrayView1<'_, f64>) -> Result<Array2<f64>, String> {
-        self.wiggle_basiswith_options(q0, BasisOptions::value())
-    }
-
-    pub(crate) fn wiggle_dq_dq0(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d_constrained = self.wiggle_basiswith_options(q0, BasisOptions::first_derivative())?;
-        if d_constrained.ncols() != beta_link_wiggle.len() {
-            return Err(GamlssError::DimensionMismatch {
-                reason: format!(
-                    "wiggle derivative col mismatch: got {}, expected {}",
-                    d_constrained.ncols(),
-                    beta_link_wiggle.len()
-                ),
-            }
-            .into());
-        }
-        Ok(d_constrained.dot(&beta_link_wiggle) + 1.0)
-    }
-
-    pub(crate) fn wiggle_d2q_dq02(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d2_constrained =
-            self.wiggle_basiswith_options(q0, BasisOptions::second_derivative())?;
-        if d2_constrained.ncols() != beta_link_wiggle.len() {
-            return Err(GamlssError::DimensionMismatch {
-                reason: format!(
-                    "wiggle second-derivative col mismatch: got {}, expected {}",
-                    d2_constrained.ncols(),
-                    beta_link_wiggle.len()
-                ),
-            }
-            .into());
-        }
-        Ok(d2_constrained.dot(&beta_link_wiggle))
-    }
-
-    pub(crate) fn wiggle_d3q_dq03(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d3_constrained = self.wiggle_d3basis_constrained(q0)?;
-        if d3_constrained.ncols() != beta_link_wiggle.len() {
-            return Err(GamlssError::DimensionMismatch {
-                reason: format!(
-                    "wiggle third-derivative col mismatch: got {}, expected {}",
-                    d3_constrained.ncols(),
-                    beta_link_wiggle.len()
-                ),
-            }
-            .into());
-        }
-        Ok(d3_constrained.dot(&beta_link_wiggle))
-    }
-
-    pub(crate) fn wiggle_d3basis_constrained(
-        &self,
-        q0: ArrayView1<'_, f64>,
-    ) -> Result<Array2<f64>, String> {
-        monotone_wiggle_basis_with_derivative_order(q0, &self.wiggle_knots, self.wiggle_degree, 3)
-    }
-
-    pub(crate) fn wiggle_d4q_dq04(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d4 = monotone_wiggle_basis_with_derivative_order(
-            q0,
-            &self.wiggle_knots,
-            self.wiggle_degree,
-            4,
-        )?;
-        if d4.ncols() != beta_link_wiggle.len() {
-            return Err(GamlssError::DimensionMismatch {
-                reason: format!(
-                    "wiggle fourth-derivative col mismatch: got {}, expected {}",
-                    d4.ncols(),
-                    beta_link_wiggle.len()
-                ),
-            }
-            .into());
-        }
-        Ok(d4.dot(&beta_link_wiggle))
     }
 
     pub(crate) fn dense_block_designs(

@@ -34,7 +34,7 @@ use gam_solve::inference::alo::{
 use gam_solve::model_types::UnifiedFitResult;
 use gam_spec::{GlmLikelihoodSpec, LinkFunction};
 use gam_terms::basis::BasisOptions;
-use gam_terms::smooth::{LinearCoefficientGeometry, TermCollectionSpec};
+use gam_terms::smooth::TermCollectionSpec;
 use ndarray::{Array1, Array2, s};
 
 use crate::{FittedModelPredictExt, PredictInput};
@@ -612,15 +612,6 @@ fn invalid(reason: impl Into<String>) -> EstimationError {
     EstimationError::InvalidInput(reason.into())
 }
 
-fn termspec_has_bounded_terms(spec: &TermCollectionSpec) -> bool {
-    spec.linear_terms.iter().any(|term| {
-        matches!(
-            term.coefficient_geometry,
-            LinearCoefficientGeometry::Bounded { .. }
-        )
-    })
-}
-
 fn require_location_scale_inputs<'a>(
     class: PredictModelClass,
     input: &'a PredictInput,
@@ -943,7 +934,7 @@ fn compute_saved_standard_alo(
     if model
         .resolved_termspec
         .as_ref()
-        .is_some_and(termspec_has_bounded_terms)
+        .is_some_and(TermCollectionSpec::has_bounded_linear_terms)
     {
         return Err(invalid(
             "saved standard ALO does not yet support bounded() coefficients: leave-one-out \

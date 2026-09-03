@@ -613,7 +613,6 @@ class RunSuiteMappingTests(unittest.TestCase):
                 self.assertEqual(cfg["time_basis"], "ispline")
                 self.assertEqual(cfg["time_degree"], 3)
                 self.assertEqual(cfg["time_num_internal_knots"], expected_knots)
-                self.assertGreaterEqual(cfg["time_smooth_lambda"], 0.0)
 
     def test_survival_benchmark_cli_args_emit_ispline(self) -> None:
         args = _RUN_SUITE._rust_survival_fit_cli_args("icu_survival_death")

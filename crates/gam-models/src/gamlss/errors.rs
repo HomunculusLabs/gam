@@ -3,6 +3,7 @@
 // so `use super::*;` makes the sibling-concern symbols this module references
 // resolve through the parent namespace.
 use super::*;
+use gam_math::special::scaled_positive_product_quotient;
 
 /// Typed errors surfaced from this module's helpers and family
 /// implementations. The `Display` impl writes the carried `reason` verbatim,
@@ -42,6 +43,28 @@ pub enum GamlssError {
         eta: f64,
         value: f64,
     },
+}
+
+impl GamlssError {
+    /// A per-row quantity that could not be represented in `f64` at linear
+    /// predictor `eta`, rendered into the `String` error channel the GAMLSS
+    /// families report through. The one constructor for
+    /// [`Self::RowGeometryUnrepresentable`] (#2470).
+    #[must_use]
+    pub(crate) fn row_geometry_unrepresentable(
+        row: usize,
+        quantity: &'static str,
+        eta: f64,
+        value: f64,
+    ) -> String {
+        Self::RowGeometryUnrepresentable {
+            row,
+            quantity,
+            eta,
+            value,
+        }
+        .into()
+    }
 }
 
 impl std::fmt::Display for GamlssError {
@@ -720,66 +743,6 @@ pub(crate) fn logb_dlog_sigma_deta(sigma: f64, d_sigma_deta: f64) -> f64 {
     d_sigma_deta / sigma
 }
 
-/// Exact power-of-two decomposition `x = mantissa * 2^exponent` for a positive
-/// finite `f64`, including subnormals. The mantissa lies in `[1, 2)`.
-#[inline]
-pub(crate) fn positive_frexp(x: f64) -> (f64, i32) {
-    assert!(x.is_finite() && x > 0.0);
-    let bits = x.to_bits();
-    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
-    let fraction = bits & ((1_u64 << 52) - 1);
-    if raw_exp != 0 {
-        let mantissa = f64::from_bits((1023_u64 << 52) | fraction);
-        (mantissa, raw_exp - 1023)
-    } else {
-        let leading = 63_i32 - fraction.leading_zeros() as i32;
-        let shift = 52_i32 - leading;
-        let normalized = fraction << shift;
-        let mantissa = f64::from_bits((1023_u64 << 52) | (normalized & ((1_u64 << 52) - 1)));
-        (mantissa, -1022 - shift)
-    }
-}
-
-#[inline]
-pub(crate) fn scale_normalized_power_of_two(mut mantissa: f64, mut exponent: i32) -> f64 {
-    while mantissa >= 2.0 {
-        mantissa *= 0.5;
-        exponent += 1;
-    }
-    while mantissa < 1.0 {
-        mantissa *= 2.0;
-        exponent -= 1;
-    }
-    if exponent > 1023 {
-        return f64::INFINITY;
-    }
-    if exponent >= -1022 {
-        let power = f64::from_bits(((exponent + 1023) as u64) << 52);
-        return mantissa * power;
-    }
-    if exponent < -1075 {
-        return 0.0;
-    }
-    let units = mantissa * 2.0_f64.powi(exponent + 1074);
-    units * f64::from_bits(1)
-}
-
-/// Compute `a*b*c/d` for positive finite inputs while carrying the binary
-/// exponent separately. Intermediate overflow/underflow therefore cannot
-/// change a representable final result.
-#[inline]
-pub(crate) fn scaled_positive_product_quotient(a: f64, b: f64, c: f64, d: f64) -> f64 {
-    assert!(a.is_finite() && a > 0.0);
-    assert!(b.is_finite() && b > 0.0);
-    assert!(c.is_finite() && c > 0.0);
-    assert!(d.is_finite() && d > 0.0);
-    let (ma, ea) = positive_frexp(a);
-    let (mb, eb) = positive_frexp(b);
-    let (mc, ec) = positive_frexp(c);
-    let (md, ed) = positive_frexp(d);
-    scale_normalized_power_of_two((ma * mb) * (mc / md), ea + eb + ec - ed)
-}
-
 #[inline]
 pub(crate) fn scaled_signed_product3(a: f64, b: f64, c: f64) -> f64 {
     if a == 0.0 || b == 0.0 || c == 0.0 {
@@ -803,33 +766,15 @@ pub(crate) fn gaussian_log_sigma_irlsinfo_directional_derivative(
     }
     let g = logb_dlog_sigma_deta(sigma, d_sigma_deta);
     if !g.is_finite() || g <= 0.0 || g > 1.0 {
-        return Err(GamlssError::RowGeometryUnrepresentable {
-            row,
-            quantity: "Gaussian log-scale link derivative",
-            eta,
-            value: g,
-        }
-        .into());
+        return Err(GamlssError::row_geometry_unrepresentable(row, "Gaussian log-scale link derivative", eta, g));
     }
     let info = scaled_positive_product_quotient(weight, g, g, 0.5);
     if !info.is_finite() || info <= 0.0 {
-        return Err(GamlssError::RowGeometryUnrepresentable {
-            row,
-            quantity: "Gaussian log-scale Fisher information",
-            eta,
-            value: info,
-        }
-        .into());
+        return Err(GamlssError::row_geometry_unrepresentable(row, "Gaussian log-scale Fisher information", eta, info));
     }
     let dw = scaled_signed_product3(info, 2.0 * (1.0 - g), d_eta);
     if !dw.is_finite() {
-        return Err(GamlssError::RowGeometryUnrepresentable {
-            row,
-            quantity: "Gaussian log-scale Fisher-information directional derivative",
-            eta,
-            value: dw,
-        }
-        .into());
+        return Err(GamlssError::row_geometry_unrepresentable(row, "Gaussian log-scale Fisher-information directional derivative", eta, dw));
     }
     Ok(dw)
 }
@@ -907,35 +852,17 @@ pub(crate) fn gaussian_diagonal_row_kernel(
     // ApproxKind: Exact — working weight analytically bounded in (0, 1/b²].
     let SigmaJet1 { sigma, d1 } = logb_sigma_jet1_scalar(eta_log_sigma);
     if !sigma.is_finite() || sigma <= 0.0 {
-        return Err(GamlssError::RowGeometryUnrepresentable {
-            row,
-            quantity: "Gaussian scale link",
-            eta: eta_log_sigma,
-            value: sigma,
-        }
-        .into());
+        return Err(GamlssError::row_geometry_unrepresentable(row, "Gaussian scale link", eta_log_sigma, sigma));
     }
     let kappa = logb_dlog_sigma_deta(sigma, d1);
     if !kappa.is_finite() || kappa <= 0.0 || kappa > 1.0 {
-        return Err(GamlssError::RowGeometryUnrepresentable {
-            row,
-            quantity: "Gaussian log-scale link derivative",
-            eta: eta_log_sigma,
-            value: kappa,
-        }
-        .into());
+        return Err(GamlssError::row_geometry_unrepresentable(row, "Gaussian log-scale link derivative", eta_log_sigma, kappa));
     }
     let inv_sigma = sigma.recip();
     let location_working_weight =
         scaled_positive_product_quotient(obs_weight, inv_sigma, inv_sigma, 1.0);
     if !location_working_weight.is_finite() || location_working_weight <= 0.0 {
-        return Err(GamlssError::RowGeometryUnrepresentable {
-            row,
-            quantity: "Gaussian location Fisher information",
-            eta: location_eta,
-            value: location_working_weight,
-        }
-        .into());
+        return Err(GamlssError::row_geometry_unrepresentable(row, "Gaussian location Fisher information", location_eta, location_working_weight));
     }
 
     // Form (y-mu)/sigma without overflowing the subtraction. Same-sign finite
@@ -950,13 +877,7 @@ pub(crate) fn gaussian_diagonal_row_kernel(
     };
     let standardized_residual_sq = standardized_residual * standardized_residual;
     if !standardized_residual.is_finite() || !standardized_residual_sq.is_finite() {
-        return Err(GamlssError::RowGeometryUnrepresentable {
-            row,
-            quantity: "Gaussian standardized residual squared",
-            eta: location_eta,
-            value: standardized_residual_sq,
-        }
-        .into());
+        return Err(GamlssError::row_geometry_unrepresentable(row, "Gaussian standardized residual squared", location_eta, standardized_residual_sq));
     }
     let joint_n = if standardized_residual == 0.0 {
         0.0
@@ -975,24 +896,12 @@ pub(crate) fn gaussian_diagonal_row_kernel(
     };
     let log_sigma_working_weight = scaled_positive_product_quotient(obs_weight, kappa, kappa, 0.5);
     if !log_sigma_working_weight.is_finite() || log_sigma_working_weight <= 0.0 {
-        return Err(GamlssError::RowGeometryUnrepresentable {
-            row,
-            quantity: "Gaussian log-scale Fisher information",
-            eta: eta_log_sigma,
-            value: log_sigma_working_weight,
-        }
-        .into());
+        return Err(GamlssError::row_geometry_unrepresentable(row, "Gaussian log-scale Fisher information", eta_log_sigma, log_sigma_working_weight));
     }
     let log_sigma_step = (standardized_residual_sq - 1.0) / (2.0 * kappa);
     let log_sigma_working_response = eta_log_sigma + log_sigma_step;
     if !log_sigma_working_response.is_finite() {
-        return Err(GamlssError::RowGeometryUnrepresentable {
-            row,
-            quantity: "Gaussian log-scale working response",
-            eta: eta_log_sigma,
-            value: log_sigma_working_response,
-        }
-        .into());
+        return Err(GamlssError::row_geometry_unrepresentable(row, "Gaussian log-scale working response", eta_log_sigma, log_sigma_working_response));
     }
     let likelihood_core = standardized_residual_sq + ln2pi + 2.0 * sigma.ln();
     let log_likelihood = if likelihood_core == 0.0 {
@@ -1008,13 +917,7 @@ pub(crate) fn gaussian_diagonal_row_kernel(
         } else {
             ("Gaussian squared standardized residual weight", joint_n)
         };
-        return Err(GamlssError::RowGeometryUnrepresentable {
-            row,
-            quantity,
-            eta: eta_log_sigma,
-            value,
-        }
-        .into());
+        return Err(GamlssError::row_geometry_unrepresentable(row, quantity, eta_log_sigma, value));
     }
     let kappa_prime = kappa * (1.0 - kappa);
 

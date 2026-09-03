@@ -201,9 +201,6 @@ pub fn resolve_fit_request_config(
     if let Some(value) = json_config.time_num_internal_knots {
         fit_config.time_num_internal_knots = value;
     }
-    if let Some(value) = json_config.time_smooth_lambda {
-        fit_config.time_smooth_lambda = value;
-    }
     fit_config.threshold_time_k = json_config.threshold_time_k;
     if let Some(value) = json_config.threshold_time_degree {
         fit_config.threshold_time_degree = value;
@@ -232,9 +229,6 @@ pub fn resolve_fit_request_config(
     }
     if let Some(flag) = json_config.scale_dimensions {
         fit_config.scale_dimensions = flag;
-    }
-    if let Some(value) = json_config.pilot_subsample_threshold {
-        fit_config.spatial_optimization.pilot_subsample_threshold = value;
     }
     if let Some(flag) = json_config.adaptive_regularization {
         fit_config.adaptive_regularization = Some(flag);

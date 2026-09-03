@@ -638,18 +638,24 @@ fn pair_null_sigma(s2_a: f64, s2_b: f64, n: usize) -> f64 {
     let excess = s2 - inv_n;
     // The null cosine variance is σ² = S2 − 1/n, an EXACT identity: a perfectly
     // uniform column has S2 = 1/n, so its null distribution has zero width. The
-    // identity is computed from S2 = Σ φ⁴/(Σ φ²)², whose sequential f64
-    // accumulation carries a rounding error bounded by ~n·ε relative to S2
-    // (the standard summation bound). For a uniform column that residual is on
-    // the order of 1.5e-17 at n=1000, S2=1e-3 — and because √ has unbounded
-    // relative sensitivity at the origin, √(residual) inflates to ~3.9e-9, a
-    // spurious σ that pulls the report/halt thresholds off their exact-uniform
-    // values (gam#1397). The σ² identity is only meaningful above its own
-    // accumulation noise, so we treat any excess at or below the summation
-    // rounding scale as the exact zero it represents before taking the root.
-    let n_terms = (n as f64).max(1.0);
-    let rounding_floor = 16.0 * f64::EPSILON * n_terms * s2.abs().max(inv_n);
-    if excess <= rounding_floor {
+    // identity is only meaningful above the accumulation noise of the arithmetic
+    // that produced S2: because √ has unbounded relative sensitivity at the
+    // origin, a residual of 1.5e-17 (n=1000, S2=1e-3, uniform column) inflates
+    // to a spurious σ ≈ 3.9e-9 that pulls the report/halt thresholds off their
+    // exact-uniform values (gam#1397). Any excess at or below that noise is the
+    // exact zero it represents.
+    //
+    // The noise is the forward-error band of `compute_leverage_s2` (Higham
+    // Lemma 3.1, via `gam_linalg::roundoff`): `‖φ‖²` is an n-term inner
+    // product (`γ_n`), each of the n summands `(φ²/‖φ‖²)²` then costs three
+    // more roundings on top of the two `γ_n` it inherits through the square,
+    // and the sequential sum commits n − 1 additions — `γ_{3n+2}` relative to
+    // `Σ|terms|`, which is S2 itself because every summand is non-negative.
+    // `1/n` is one rounding of an exact value.
+    let n_terms = n.max(1);
+    let s2_band = gam_linalg::roundoff::accumulation_growth(3 * n_terms + 2) * s2.abs();
+    let inv_n_band = gam_linalg::roundoff::UNIT_ROUNDOFF * inv_n;
+    if excess <= s2_band + inv_n_band {
         return 0.0;
     }
     excess.sqrt()

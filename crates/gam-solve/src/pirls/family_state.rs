@@ -96,7 +96,7 @@ fn canonical_logit_working_response(
     dmu_deta: f64,
 ) -> Result<f64, EstimationError> {
     if !(y.is_finite() && (0.0..=1.0).contains(&y)) {
-        return Err(unrepresentable_bernoulli(row, "binomial response", eta, y));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "binomial response", eta, y));
     }
     let tail = (-eta.abs()).exp();
     let residual = if eta >= 0.0 {
@@ -114,7 +114,7 @@ fn canonical_logit_working_response(
     if z.is_finite() {
         Ok(z)
     } else {
-        Err(unrepresentable_bernoulli(
+        Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "canonical-logit working response",
             eta,
@@ -123,20 +123,6 @@ fn canonical_logit_working_response(
     }
 }
 
-#[inline]
-fn unrepresentable_bernoulli(
-    row: usize,
-    quantity: &'static str,
-    eta: f64,
-    value: f64,
-) -> EstimationError {
-    EstimationError::PirlsRowGeometryUnrepresentable {
-        row,
-        quantity,
-        eta,
-        value,
-    }
-}
 
 /// Compute working IRLS geometry for a single Bernoulli observation.
 ///
@@ -165,7 +151,7 @@ pub(crate) fn bernoulli_geometry_from_jet(
     omm: f64,
 ) -> Result<WorkingBernoulliGeometry, EstimationError> {
     if !(priorweight.is_finite() && priorweight >= 0.0) {
-        return Err(unrepresentable_bernoulli(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "prior weight",
             eta,
@@ -184,7 +170,7 @@ pub(crate) fn bernoulli_geometry_from_jet(
         && omm.is_finite()
         && (0.0..=1.0).contains(&omm))
     {
-        return Err(unrepresentable_bernoulli(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "inverse-link jet",
             eta,
@@ -221,7 +207,7 @@ pub(crate) fn bernoulli_geometry_from_jet(
                 d: 0.0,
             });
         }
-        return Err(unrepresentable_bernoulli(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "saturated Bernoulli row inconsistent with response",
             eta,
@@ -246,7 +232,7 @@ pub(crate) fn bernoulli_geometry_from_jet(
     let fisher = a * b;
     let weight = priorweight * fisher;
     if !(fisher.is_finite() && fisher > 0.0 && weight.is_finite() && weight > 0.0) {
-        return Err(unrepresentable_bernoulli(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "Bernoulli Fisher weight",
             eta,
@@ -260,10 +246,10 @@ pub(crate) fn bernoulli_geometry_from_jet(
     let c = priorweight * (a1 * b + a * b1);
     let d = priorweight * (a2 * b + 2.0 * a1 * b1 + a * b2);
     if !c.is_finite() {
-        return Err(unrepresentable_bernoulli(row, "dW/deta", eta, c));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "dW/deta", eta, c));
     }
     if !d.is_finite() {
-        return Err(unrepresentable_bernoulli(row, "d2W/deta2", eta, d));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "d2W/deta2", eta, d));
     }
     Ok(WorkingBernoulliGeometry {
         mu,
@@ -293,7 +279,7 @@ pub(crate) fn bernoulli_exact_working_response(
     if z.is_finite() {
         Ok(z)
     } else {
-        Err(unrepresentable_bernoulli(
+        Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "Bernoulli working response",
             eta,
@@ -322,7 +308,7 @@ pub(crate) fn write_identityworking_state(
             });
         }
         if !(priorweights[i].is_finite() && priorweights[i] >= 0.0) {
-            return Err(unrepresentable_bernoulli(
+            return Err(EstimationError::pirls_row_geometry_unrepresentable(
                 i,
                 "prior weight",
                 eta[i],
@@ -330,7 +316,7 @@ pub(crate) fn write_identityworking_state(
             ));
         }
         if priorweights[i] > 0.0 && !y[i].is_finite() {
-            return Err(unrepresentable_bernoulli(
+            return Err(EstimationError::pirls_row_geometry_unrepresentable(
                 i,
                 "identity-link response",
                 eta[i],
@@ -586,7 +572,7 @@ pub(crate) fn exact_beta_logit_row(
     phi: f64,
 ) -> Result<ExactBetaLogitRow, EstimationError> {
     if !(prior_weight.is_finite() && prior_weight >= 0.0) {
-        return Err(unrepresentable_bernoulli(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "prior weight",
             eta,
@@ -610,7 +596,7 @@ pub(crate) fn exact_beta_logit_row(
         && jet.d2.is_finite()
         && jet.d3.is_finite())
     {
-        return Err(unrepresentable_bernoulli(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "beta-logit inverse-link jet",
             eta,
@@ -635,15 +621,15 @@ pub(crate) fn exact_beta_logit_row(
     let a = mu * phi;
     let b = (1.0 - mu) * phi;
     if !(a.is_finite() && a > 0.0) {
-        return Err(unrepresentable_bernoulli(row, "beta shape a", eta, a));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "beta shape a", eta, a));
     }
     if !(b.is_finite() && b > 0.0) {
-        return Err(unrepresentable_bernoulli(row, "beta shape b", eta, b));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "beta shape b", eta, b));
     }
     let trigamma_sum = trigamma(a) + trigamma(b);
     let info_mu = phi * phi * trigamma_sum;
     if !(info_mu.is_finite() && info_mu > 0.0) {
-        return Err(unrepresentable_bernoulli(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "beta mean information",
             eta,
@@ -652,7 +638,7 @@ pub(crate) fn exact_beta_logit_row(
     }
     let weight = prior_weight * q * q * info_mu;
     if !(weight.is_finite() && weight > 0.0) {
-        return Err(unrepresentable_bernoulli(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "beta Fisher weight",
             eta,
@@ -664,7 +650,7 @@ pub(crate) fn exact_beta_logit_row(
         let score_eta_denominator = q * info_mu;
         let z = eta + score_mu / score_eta_denominator;
         if !z.is_finite() {
-            return Err(unrepresentable_bernoulli(
+            return Err(EstimationError::pirls_row_geometry_unrepresentable(
                 row,
                 "beta working response",
                 eta,
@@ -686,10 +672,10 @@ pub(crate) fn exact_beta_logit_row(
         trigamma_sum,
     );
     if !c.is_finite() {
-        return Err(unrepresentable_bernoulli(row, "beta dW/deta", eta, c));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "beta dW/deta", eta, c));
     }
     if !d.is_finite() {
-        return Err(unrepresentable_bernoulli(row, "beta d2W/deta2", eta, d));
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(row, "beta d2W/deta2", eta, d));
     }
     Ok(ExactBetaLogitRow {
         mu,

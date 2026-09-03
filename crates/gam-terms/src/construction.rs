@@ -2992,7 +2992,7 @@ fn kronecker_cell_sigma(
 /// Advance a row-major multi-index over the `dims` grid in place.
 /// Returns `true` when the grid is exhausted (the index wrapped back to all-zero).
 #[inline]
-fn kronecker_multi_index_advance(multi_idx: &mut [usize], dims: &[usize]) -> bool {
+pub(crate) fn kronecker_multi_index_advance(multi_idx: &mut [usize], dims: &[usize]) -> bool {
     let mut carry = true;
     for dim in (0..dims.len()).rev() {
         if carry {

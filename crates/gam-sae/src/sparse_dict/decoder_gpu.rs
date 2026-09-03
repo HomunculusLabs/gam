@@ -52,9 +52,11 @@
 
 use gam_linalg::pcg::{PcgBlockBackend, SymmetricLowRankPreconditioner};
 use ndarray::Array2;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaModule, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use gam_gpu::backend_probe::CachedBackend;
+use gam_gpu::device_cache::PtxModuleCache;
 use gam_gpu::gpu_error::{GpuError, GpuResultExt};
 
 /// Threads per block over the column (fast) dimension for every kernel here.
@@ -238,40 +240,25 @@ extern "C" __global__ void sae_decoder_cg_update_p(
 struct Backend {
     ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
-    module: Mutex<Option<Arc<CudaModule>>>,
+    module: PtxModuleCache,
 }
 
+static BACKEND: CachedBackend<Backend> = CachedBackend::new();
+
 fn backend() -> Result<&'static Backend, GpuError> {
-    static BACKEND: OnceLock<Result<Backend, GpuError>> = OnceLock::new();
-    BACKEND
-        .get_or_init(|| {
-            let parts = gam_gpu::backend_probe::probe_cuda_backend("sparse_dict_decoder_cg")?;
-            Ok(Backend {
-                ctx: parts.ctx,
-                stream: parts.stream,
-                module: Mutex::new(None),
-            })
+    BACKEND.get_or_probe("sparse_dict_decoder_cg", |parts| {
+        Ok(Backend {
+            ctx: parts.ctx,
+            stream: parts.stream,
+            module: PtxModuleCache::new(),
         })
-        .as_ref()
-        .map_err(GpuError::clone)
+    })
 }
 
 fn module_for(b: &Backend) -> Result<Arc<CudaModule>, GpuError> {
-    if let Ok(guard) = b.module.lock() {
-        if let Some(m) = guard.as_ref() {
-            return Ok(m.clone());
-        }
-    }
-    let ptx = gam_gpu::device_cache::compile_ptx_arch(BLOCK_CG_KERNELS.to_string())
-        .gpu_ctx_with(|err| format!("sparse_dict decoder block-CG NVRTC: {err}"))?;
-    let module = b
-        .ctx
-        .load_module(ptx)
-        .gpu_ctx("sparse_dict decoder block-CG module load")?;
-    if let Ok(mut guard) = b.module.lock() {
-        guard.get_or_insert_with(|| module.clone());
-    }
-    Ok(module)
+    b.module
+        .get_or_compile(&b.ctx, "sparse_dict decoder block-CG", BLOCK_CG_KERNELS)
+        .map(Arc::clone)
 }
 
 /// A post-admission device fault is a fault, never an Auto decline: the

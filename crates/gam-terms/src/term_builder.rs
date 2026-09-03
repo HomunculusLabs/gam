@@ -946,11 +946,23 @@ pub fn build_termspec(
         }
     }
 
-    Ok(TermCollectionSpec {
+    let spec = TermCollectionSpec {
         linear_terms,
         random_effect_terms: random_terms,
         smooth_terms,
-    })
+    };
+    // Structural advisories — several 1-D spatial smooths where one surface was
+    // meant, a feature carried by both a smooth and a linear term, nested
+    // smooths under hierarchical ownership — change what a term MEANS, so they
+    // are inference notes: recorded here, once, for every front end and every
+    // model class that lowers a formula (the CLI prints them, Python raises
+    // them as `GamInferenceWarning`s, and the saved model carries them).
+    inference_notes.extend(crate::smooth::collect_smooth_structure_warnings(
+        &spec,
+        &ds.headers,
+        "model",
+    ));
+    Ok(spec)
 }
 
 fn split_list_option(raw: &str) -> Vec<String> {

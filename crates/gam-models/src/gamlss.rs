@@ -116,6 +116,9 @@ use std::sync::{Arc, Mutex};
 // unqualified, exactly as it did under the prior `include!` layout).
 // ---------------------------------------------------------------------------
 
+mod wiggle_basis;
+use wiggle_basis::MonotoneWiggleFamily;
+
 mod dispersion_family;
 pub use dispersion_family::{
     DispersionAloRowGeometry, DispersionFamilyKind, DispersionGlmLocationScaleTermSpec,

@@ -108,6 +108,16 @@ pub struct GaussianLocationScaleWiggleFamily {
         std::sync::RwLock<Option<(f64, f64, f64, f64, f64, f64, Arc<GaussianJointRowScalars>)>>,
 }
 
+impl MonotoneWiggleFamily for GaussianLocationScaleWiggleFamily {
+    fn wiggle_knots(&self) -> &Array1<f64> {
+        &self.wiggle_knots
+    }
+
+    fn wiggle_degree(&self) -> usize {
+        self.wiggle_degree
+    }
+}
+
 impl Clone for GaussianLocationScaleWiggleFamily {
     fn clone(&self) -> Self {
         Self {
@@ -155,99 +165,6 @@ impl GaussianLocationScaleWiggleFamily {
 
     pub(crate) fn exact_joint_supported(&self) -> bool {
         self.mu_design.is_some() && self.log_sigma_design.is_some()
-    }
-
-    pub(crate) fn wiggle_basiswith_options(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        options: BasisOptions,
-    ) -> Result<Array2<f64>, String> {
-        monotone_wiggle_basis_with_derivative_order(
-            q0,
-            &self.wiggle_knots,
-            self.wiggle_degree,
-            options.derivative_order,
-        )
-    }
-
-    pub(crate) fn wiggle_design(&self, q0: ArrayView1<'_, f64>) -> Result<Array2<f64>, String> {
-        self.wiggle_basiswith_options(q0, BasisOptions::value())
-    }
-
-    pub(crate) fn wiggle_dq_dq0(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d1 = self.wiggle_basiswith_options(q0, BasisOptions::first_derivative())?;
-        if d1.ncols() != beta_link_wiggle.len() {
-            return Err(GamlssError::DimensionMismatch { reason: format!(
-                "wiggle derivative/beta mismatch: basis has {} columns but beta_link_wiggle has {} coefficients",
-                d1.ncols(),
-                beta_link_wiggle.len()
-            ) }.into());
-        }
-        Ok(d1.dot(&beta_link_wiggle) + 1.0)
-    }
-
-    pub(crate) fn wiggle_d2q_dq02(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d2 = self.wiggle_basiswith_options(q0, BasisOptions::second_derivative())?;
-        if d2.ncols() != beta_link_wiggle.len() {
-            return Err(GamlssError::DimensionMismatch { reason: format!(
-                "wiggle second-derivative/beta mismatch: basis has {} columns but beta_link_wiggle has {} coefficients",
-                d2.ncols(),
-                beta_link_wiggle.len()
-            ) }.into());
-        }
-        Ok(d2.dot(&beta_link_wiggle))
-    }
-
-    pub(crate) fn wiggle_d3basis_constrained(
-        &self,
-        q0: ArrayView1<'_, f64>,
-    ) -> Result<Array2<f64>, String> {
-        monotone_wiggle_basis_with_derivative_order(q0, &self.wiggle_knots, self.wiggle_degree, 3)
-    }
-
-    pub(crate) fn wiggle_d3q_dq03(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d3 = self.wiggle_d3basis_constrained(q0)?;
-        if d3.ncols() != beta_link_wiggle.len() {
-            return Err(GamlssError::DimensionMismatch { reason: format!(
-                "wiggle third-derivative/beta mismatch: basis has {} columns but beta_link_wiggle has {} coefficients",
-                d3.ncols(),
-                beta_link_wiggle.len()
-            ) }.into());
-        }
-        Ok(d3.dot(&beta_link_wiggle))
-    }
-
-    pub(crate) fn wiggle_d4q_dq04(
-        &self,
-        q0: ArrayView1<'_, f64>,
-        beta_link_wiggle: ArrayView1<'_, f64>,
-    ) -> Result<Array1<f64>, String> {
-        let d4 = monotone_wiggle_basis_with_derivative_order(
-            q0,
-            &self.wiggle_knots,
-            self.wiggle_degree,
-            4,
-        )?;
-        if d4.ncols() != beta_link_wiggle.len() {
-            return Err(GamlssError::DimensionMismatch { reason: format!(
-                "wiggle fourth-derivative/beta mismatch: basis has {} columns but beta_link_wiggle has {} coefficients",
-                d4.ncols(),
-                beta_link_wiggle.len()
-            ) }.into());
-        }
-        Ok(d4.dot(&beta_link_wiggle))
     }
 
     pub(crate) fn wiggle_geometry(
@@ -2107,13 +2024,7 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
             .map(|i| {
                 let q = eta_mu[i] + etaw[i];
                 if !q.is_finite() {
-                    return Err(GamlssError::RowGeometryUnrepresentable {
-                        row: i,
-                        quantity: "Gaussian mean-plus-wiggle predictor",
-                        eta: eta_mu[i],
-                        value: q,
-                    }
-                    .into());
+                    return Err(GamlssError::row_geometry_unrepresentable(i, "Gaussian mean-plus-wiggle predictor", eta_mu[i], q));
                 }
                 // A zero-weight row must be inert in the response channel too,
                 // not only in its weight. Substituting the row's own predictor
@@ -2127,13 +2038,7 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
                 let z_mu = response - etaw[i];
                 let z_wiggle = response - eta_mu[i];
                 if !z_mu.is_finite() || !z_wiggle.is_finite() {
-                    return Err(GamlssError::RowGeometryUnrepresentable {
-                        row: i,
-                        quantity: "Gaussian wiggle working response",
-                        eta: q,
-                        value: if z_mu.is_finite() { z_wiggle } else { z_mu },
-                    }
-                    .into());
+                    return Err(GamlssError::row_geometry_unrepresentable(i, "Gaussian wiggle working response", q, if z_mu.is_finite() { z_wiggle } else { z_mu }));
                 }
                 Ok((
                     gaussian_diagonal_row_kernel(
@@ -2157,13 +2062,7 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
         for (i, row) in rows.iter().enumerate() {
             ll += row.0.log_likelihood;
             if !ll.is_finite() {
-                return Err(GamlssError::RowGeometryUnrepresentable {
-                    row: i,
-                    quantity: "Gaussian wiggle cumulative log likelihood",
-                    eta: eta_ls[i],
-                    value: ll,
-                }
-                .into());
+                return Err(GamlssError::row_geometry_unrepresentable(i, "Gaussian wiggle cumulative log likelihood", eta_ls[i], ll));
             }
         }
         let zmu = Array1::from_iter(rows.iter().map(|row| row.1));
@@ -2209,13 +2108,7 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
             ll += gaussian_diagonal_row_kernel(i, self.y[i], q, eta_ls[i], self.weights[i], ln2pi)?
                 .log_likelihood;
             if !ll.is_finite() {
-                return Err(GamlssError::RowGeometryUnrepresentable {
-                    row: i,
-                    quantity: "Gaussian wiggle cumulative log likelihood",
-                    eta: eta_ls[i],
-                    value: ll,
-                }
-                .into());
+                return Err(GamlssError::row_geometry_unrepresentable(i, "Gaussian wiggle cumulative log likelihood", eta_ls[i], ll));
             }
         }
         Ok(ll)
@@ -2265,17 +2158,11 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
             let contribution = scaled_signed_product3(sampled.weight, row_ll, 1.0);
             ll += contribution;
             if !contribution.is_finite() || !ll.is_finite() {
-                return Err(GamlssError::RowGeometryUnrepresentable {
-                    row: i,
-                    quantity: "Gaussian wiggle subsampled log likelihood",
-                    eta: eta_ls[i],
-                    value: if contribution.is_finite() {
+                return Err(GamlssError::row_geometry_unrepresentable(i, "Gaussian wiggle subsampled log likelihood", eta_ls[i], if contribution.is_finite() {
                         ll
                     } else {
                         contribution
-                    },
-                }
-                .into());
+                    }));
             }
         }
         Ok(ll)

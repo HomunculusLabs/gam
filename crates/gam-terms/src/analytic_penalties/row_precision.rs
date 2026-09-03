@@ -1109,24 +1109,6 @@ impl AnalyticPenalty for ParametricRowPrecisionPriorPenalty {
         Some(self.diag_target(target, rho))
     }
 
-    fn hvp(
-        &self,
-        target: ArrayView1<'_, f64>,
-        rho: ArrayView1<'_, f64>,
-        v: ArrayView1<'_, f64>,
-    ) -> Array1<f64> {
-        assert_eq!(target.len(), v.len(), "hvp dimension mismatch");
-        if target.len() != v.len() {
-            return Array1::<f64>::zeros(target.len());
-        }
-        let diag = self.diag_target(target, rho);
-        let mut out = Array1::<f64>::zeros(v.len());
-        for i in 0..v.len() {
-            out[i] = diag[i] * v[i];
-        }
-        out
-    }
-
     fn grad_rho(&self, target: ArrayView1<'_, f64>, rho: ArrayView1<'_, f64>) -> Array1<f64> {
         let Some(t) = self.target_matrix(target) else {
             return Array1::<f64>::zeros(self.rho_count());

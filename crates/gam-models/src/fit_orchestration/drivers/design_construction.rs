@@ -251,15 +251,6 @@ fn ensure_matern_adaptive_center_resolution(
     out
 }
 
-fn has_bounded_linear_terms(spec: &TermCollectionSpec) -> bool {
-    spec.linear_terms.iter().any(|term| {
-        matches!(
-            term.coefficient_geometry,
-            LinearCoefficientGeometry::Bounded { .. }
-        )
-    })
-}
-
 fn fit_term_collection_on_realized_design(
     y: ArrayView1<'_, f64>,
     weights: ArrayView1<'_, f64>,
@@ -274,7 +265,7 @@ fn fit_term_collection_on_realized_design(
         .compose_offset(offset, "term-collection fit")
         .map_err(EstimationError::BasisError)?;
     let offset = effective_offset.view();
-    if has_bounded_linear_terms(spec) {
+    if spec.has_bounded_linear_terms() {
         return fit_bounded_term_collection_with_design(
             y,
             weights,
@@ -3477,15 +3468,6 @@ impl ExactStandardObservationRow {
     }
 }
 
-#[inline]
-fn bounded_row_error(row: usize, quantity: &'static str, eta: f64, value: f64) -> EstimationError {
-    EstimationError::PirlsRowGeometryUnrepresentable {
-        row,
-        quantity,
-        eta,
-        value,
-    }
-}
 
 #[inline]
 fn certify_bounded_row(
@@ -3505,11 +3487,11 @@ fn certify_bounded_row(
         ("bounded-family log likelihood", state.log_likelihood),
     ] {
         if !value.is_finite() {
-            return Err(bounded_row_error(row, quantity, eta, value));
+            return Err(EstimationError::pirls_row_geometry_unrepresentable(row, quantity, eta, value));
         }
     }
     if state.fisherweight < 0.0 {
-        return Err(bounded_row_error(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "bounded-family Fisher weight",
             eta,
@@ -3580,7 +3562,7 @@ fn exact_logit_observation_row(
         -gam_linalg::utils::stable_softplus(eta) - gam_linalg::utils::stable_softplus(-eta);
     let fisherweight = weighted_positive_from_log(weight, log_fisher);
     if !(fisherweight.is_finite() && fisherweight > 0.0) {
-        return Err(bounded_row_error(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "bounded logit Fisher weight",
             eta,
@@ -3628,7 +3610,7 @@ fn exact_noncanonical_binomial_observation_row(
     }
     let fisherweight = weighted_positive_from_log(weight, observation.log_fisher);
     if !(fisherweight.is_finite() && fisherweight > 0.0) {
-        return Err(bounded_row_error(
+        return Err(EstimationError::pirls_row_geometry_unrepresentable(
             row,
             "bounded binomial Fisher weight",
             eta,
@@ -3695,7 +3677,7 @@ fn validate_bounded_observation_inputs(
     }
     // Atomic whole-vector preflight: an invalid later weight wins before any
     // response or predictor row is inspected.
-    // The row index is 0-based, matching `bounded_row_error` below — which
+    // The row index is 0-based, matching the row-geometry refusals below — which
     // reports the same rows of the same vectors through the typed
     // `PirlsRowGeometryUnrepresentable { row }` field a caller can use to index
     // straight back into `y`/`weights`/`eta`. This message used to emit `i + 1`,
@@ -3714,10 +3696,10 @@ fn validate_bounded_observation_inputs(
             continue;
         }
         if !eta[i].is_finite() {
-            return Err(bounded_row_error(i, "linear predictor", eta[i], eta[i]));
+            return Err(EstimationError::pirls_row_geometry_unrepresentable(i, "linear predictor", eta[i], eta[i]));
         }
         if !y[i].is_finite() {
-            return Err(bounded_row_error(
+            return Err(EstimationError::pirls_row_geometry_unrepresentable(
                 i,
                 "bounded-family response",
                 eta[i],
@@ -3736,7 +3718,7 @@ fn validate_bounded_observation_inputs(
             ResponseFamily::Beta { .. } | ResponseFamily::RoystonParmar => false,
         };
         if !valid {
-            return Err(bounded_row_error(i, "bounded-family response", eta[i], yi));
+            return Err(EstimationError::pirls_row_geometry_unrepresentable(i, "bounded-family response", eta[i], yi));
         }
     }
     Ok(resolved_scale)
@@ -3760,7 +3742,7 @@ fn exact_standard_observation_row(
             let scaled_weight = match resolved_scale {
                 gam_spec::ResolvedLikelihoodScale::ProfiledGaussian => weight,
                 gam_spec::ResolvedLikelihoodScale::FixedGaussian { phi } => {
-                    crate::gamlss::scaled_positive_product_quotient(weight, 1.0, 1.0, phi.value())
+                    gam_math::special::scaled_positive_product_quotient(weight, 1.0, 1.0, phi.value())
                 }
                 _ => {
                     crate::bail_invalid_estim!(
@@ -3769,7 +3751,7 @@ fn exact_standard_observation_row(
                 }
             };
             if !(scaled_weight.is_finite() && scaled_weight > 0.0) {
-                return Err(bounded_row_error(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     row,
                     "bounded Gaussian dispersion-scaled weight",
                     eta,
@@ -3780,7 +3762,7 @@ fn exact_standard_observation_row(
             let loss = if residual == 0.0 {
                 0.0
             } else {
-                crate::gamlss::scaled_positive_product_quotient(
+                gam_math::special::scaled_positive_product_quotient(
                     scaled_weight,
                     residual.abs(),
                     residual.abs(),
@@ -3819,7 +3801,7 @@ fn exact_standard_observation_row(
                 weighted_product3(weight, y, eta) - weight * mu
             };
             if !(fisherweight.is_finite() && fisherweight > 0.0) {
-                return Err(bounded_row_error(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     row,
                     "bounded Poisson Fisher weight",
                     eta,
@@ -3846,7 +3828,7 @@ fn exact_standard_observation_row(
                 .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
             let weighted_shape = weight * shape;
             if !(weighted_shape.is_finite() && weighted_shape > 0.0) {
-                return Err(bounded_row_error(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     row,
                     "bounded Gamma shape-scaled weight",
                     eta,
@@ -3854,9 +3836,9 @@ fn exact_standard_observation_row(
                 ));
             }
             let weighted_ratio =
-                crate::gamlss::scaled_positive_product_quotient(weight, y, shape, mu);
+                gam_math::special::scaled_positive_product_quotient(weight, y, shape, mu);
             if !(weighted_ratio.is_finite() && weighted_ratio > 0.0) {
-                return Err(bounded_row_error(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     row,
                     "bounded Gamma observed Hessian",
                     eta,
@@ -3882,9 +3864,9 @@ fn exact_standard_observation_row(
             let phi = resolved_scale
                 .tweedie_phi()
                 .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
-            let weight = crate::gamlss::scaled_positive_product_quotient(weight, 1.0, 1.0, phi);
+            let weight = gam_math::special::scaled_positive_product_quotient(weight, 1.0, 1.0, phi);
             if !(weight.is_finite() && weight > 0.0) {
-                return Err(bounded_row_error(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     row,
                     "bounded Tweedie dispersion-scaled weight",
                     eta,
@@ -3924,7 +3906,7 @@ fn exact_standard_observation_row(
                 weighted_product3(weight, y, q_left) - weight * q_right
             };
             if !(fisherweight.is_finite() && fisherweight > 0.0) {
-                return Err(bounded_row_error(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     row,
                     "bounded Tweedie Fisher weight",
                     eta,
@@ -3987,7 +3969,7 @@ fn exact_standard_observation_row(
                     - weighted_product3(weight, theta, softplus_tail)
             };
             if !(fisherweight.is_finite() && fisherweight > 0.0) {
-                return Err(bounded_row_error(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     row,
                     "bounded negative-binomial Fisher weight",
                     eta,
@@ -4063,7 +4045,7 @@ fn evaluate_resolved_standard_family_observations(
         log_likelihood_compensation = (updated - log_likelihood) - adjusted;
         log_likelihood = updated;
         if !log_likelihood.is_finite() {
-            return Err(bounded_row_error(
+            return Err(EstimationError::pirls_row_geometry_unrepresentable(
                 i,
                 "bounded-family cumulative log likelihood",
                 eta[i],
@@ -4116,7 +4098,7 @@ fn exact_standard_working_response(
         let score = state.score[i];
         if weight == 0.0 {
             if score != 0.0 {
-                return Err(bounded_row_error(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     i,
                     "zero-Fisher row with nonzero score",
                     state.eta[i],
@@ -4128,7 +4110,7 @@ fn exact_standard_working_response(
         let increment = score / weight;
         let value = out[i] + increment;
         if !increment.is_finite() || !value.is_finite() {
-            return Err(bounded_row_error(
+            return Err(EstimationError::pirls_row_geometry_unrepresentable(
                 i,
                 "bounded-family working response",
                 state.eta[i],
@@ -6043,15 +6025,6 @@ impl CustomFamily for BoundedLinearFamily {
     }
 }
 
-#[inline]
-fn dense_diag_gram_chunkrows(p: usize) -> usize {
-    const MIN_ROWS: usize = 512;
-    const MAX_ROWS: usize = 2048;
-    const TARGET_BYTES: usize = 2 * 1024 * 1024;
-    let bytes_per_row = p.max(1) * std::mem::size_of::<f64>();
-    (TARGET_BYTES / bytes_per_row).clamp(MIN_ROWS, MAX_ROWS)
-}
-
 fn xt_diag_x_dense(x: ArrayView2<'_, f64>, w: ArrayView1<'_, f64>) -> Result<Array2<f64>, String> {
     if x.nrows() != w.len() {
         return Err(SmoothError::dimension_mismatch("xt_diag_x_dense row mismatch").into());
@@ -6074,7 +6047,7 @@ fn xt_diag_x_dense(x: ArrayView2<'_, f64>, w: ArrayView1<'_, f64>) -> Result<Arr
         return Ok(fast_atb(&x, &weighted));
     }
 
-    let chunkrows = dense_diag_gram_chunkrows(p).min(n);
+    let chunkrows = gam_runtime::resource::byte_balanced_row_chunk(p, n);
     let mut weighted_chunk = Array2::<f64>::zeros((chunkrows, p));
     let mut out = Array2::<f64>::zeros((p, p));
     for row_start in (0..n).step_by(chunkrows) {

@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::{
-    BinOp, Expr, ExprBinary, ExprCall, ExprGroup, ExprLit, ExprParen, ExprPath, ExprUnary, Lit,
+    BinOp, Expr, ExprBinary, ExprGroup, ExprLit, ExprParen, ExprPath, ExprUnary, Lit,
     Result, Token, UnOp, Visibility, braced, bracketed, parenthesized, parse_macro_input,
 };
 
@@ -1125,21 +1125,6 @@ fn literal_value(literal: &ExprLit) -> Result<f64> {
     }
 }
 
-fn call_name(call: &ExprCall) -> Result<&Ident> {
-    let Expr::Path(path) = call.func.as_ref() else {
-        return Err(syn::Error::new_spanned(
-            &call.func,
-            "row_atom unary calls must use a bare function name",
-        ));
-    };
-    path.path.get_ident().ok_or_else(|| {
-        syn::Error::new_spanned(
-            &call.func,
-            "row_atom unary calls must use a bare function name",
-        )
-    })
-}
-
 fn graph_expression(
     expression: &Expr,
     primaries: &[Ident],
@@ -1190,7 +1175,7 @@ fn graph_expression(
                 ));
             }
             let argument = graph_expression(&call.args[0], primaries, constants, graph)?;
-            let node = match call_name(call)?.to_string().as_str() {
+            let node = match row_program::bare_call_name(call, "row_atom unary calls")?.to_string().as_str() {
                 "exp" => graph.exp(argument),
                 "ln" => graph.ln(argument),
                 "sqrt" => graph.sqrt(argument),
@@ -1273,7 +1258,7 @@ fn jet_expression(
                 ));
             }
             let argument = jet_expression(&call.args[0], primaries, constants)?;
-            let method = call_name(call)?;
+            let method = row_program::bare_call_name(call, "row_atom unary calls")?;
             match method.to_string().as_str() {
                 "exp" | "ln" | "sqrt" | "recip" => Ok(quote!({
                     let value = #argument;

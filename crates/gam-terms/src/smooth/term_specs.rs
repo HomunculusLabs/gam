@@ -1457,6 +1457,19 @@ pub fn validate_smooth_basis_frozen(
 }
 
 impl TermCollectionSpec {
+    /// Whether any linear term carries the bounded coefficient geometry (an
+    /// exact interval transform), which routes the fit through the latent
+    /// bounded-coefficient path and disables the closed forms that assume an
+    /// unconstrained coefficient.
+    pub fn has_bounded_linear_terms(&self) -> bool {
+        self.linear_terms.iter().any(|term| {
+            matches!(
+                term.coefficient_geometry,
+                LinearCoefficientGeometry::Bounded { .. }
+            )
+        })
+    }
+
     /// Return every feature column that is interpreted as a categorical factor
     /// anywhere in this frozen term collection, together with its known levels.
     ///
@@ -3343,15 +3356,25 @@ impl SpatialLogKappaCoords {
     }
 }
 
+/// Centre per-axis log length-scales to zero mean, so an isotropic vector is
+/// EXACTLY all-zero (the sentinel the Matérn/Duchon design builders read).
+///
+/// A centred value inside the centering's own roundoff band is that exact
+/// zero: the mean is an `n`-term sum and a division, and each residual one
+/// subtraction, so the band is `γ_{n+2}·max|η|` (Higham Lemma 3.1) — not a
+/// fixed absolute threshold, which would misread a large-magnitude isotropic
+/// vector as anisotropic and a tiny genuine contrast as isotropic (#2469).
 pub fn center_aniso_log_scales(eta: &[f64]) -> Vec<f64> {
     if eta.len() <= 1 {
         return eta.to_vec();
     }
     let mean = eta.iter().sum::<f64>() / eta.len() as f64;
+    let max_abs = eta.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    let band = gam_linalg::roundoff::accumulation_growth(eta.len() + 2) * max_abs;
     eta.iter()
         .map(|&v| {
             let centered = v - mean;
-            if centered.abs() <= 1e-15 {
+            if centered.abs() <= band {
                 0.0
             } else {
                 centered

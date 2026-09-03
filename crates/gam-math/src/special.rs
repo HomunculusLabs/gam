@@ -748,6 +748,363 @@ pub fn gauss_lobatto(n: usize) -> (Vec<f64>, Vec<f64>) {
     (sorted_nodes, sorted_weights)
 }
 
+// ---------------------------------------------------------------------------
+// Exponential-family scalar kernels.
+//
+// The stable forms of the handful of scalar maps every deviance / KL / working-
+// weight evaluation is built from. Each is written so that its result is
+// accurate in the regime where the naive formula cancels (small arguments,
+// probabilities near the boundary) and so that no branch forms an intermediate
+// that overflows before the final, representable value. They are consumed by
+// the CPU PIRLS deviance path and by the host reference of the device PIRLS
+// row kernels; the two used to carry byte-identical private copies (#2470).
+// ---------------------------------------------------------------------------
+
+/// `softplus(x) = ln(1 + e^x)`, evaluated as `max(x, 0) + ln(1 + e^{-|x|})`
+/// so that neither tail overflows and the small-`x` result keeps full
+/// relative accuracy.
+#[inline]
+pub fn softplus(x: f64) -> f64 {
+    x.max(0.0) + (-x.abs()).exp().ln_1p()
+}
+
+/// The logistic function `σ(x) = 1 / (1 + e^{-x})`, oriented so the
+/// exponential is always of a non-positive argument.
+#[inline]
+pub fn logistic(x: f64) -> f64 {
+    if x >= 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
+}
+
+/// `x·ln(y)` with the convention `0·ln(0) = 0` used by every deviance kernel.
+#[inline]
+pub fn xlogy(x: f64, y: f64) -> f64 {
+    if x == 0.0 { 0.0 } else { x * y.ln() }
+}
+
+/// `ln(e^a + e^b)` without forming either exponential at full scale; returns
+/// `-∞` when both arguments are `-∞`.
+#[inline]
+pub fn logaddexp(a: f64, b: f64) -> f64 {
+    let hi = a.max(b);
+    let lo = a.min(b);
+    if hi == f64::NEG_INFINITY {
+        f64::NEG_INFINITY
+    } else {
+        hi + (lo - hi).exp().ln_1p()
+    }
+}
+
+/// `e^x − 1 − x`, the second-order remainder of the exponential. For
+/// `|x| ≤ 1/2` the Taylor tail is summed directly so the result does not
+/// cancel against `x`; beyond that `exp_m1` is accurate on its own.
+#[inline]
+pub fn expm1_minus_x(x: f64) -> f64 {
+    if x.abs() > 0.5 {
+        return x.exp_m1() - x;
+    }
+    let mut term = 0.5 * x * x;
+    let mut sum = term;
+    let mut k = 2.0;
+    loop {
+        k += 1.0;
+        term *= x / k;
+        let next = sum + term;
+        if next == sum {
+            return next;
+        }
+        sum = next;
+    }
+}
+
+/// `ln(1 + x) − x`, the second-order remainder of the logarithm, with the
+/// same small-argument series treatment as [`expm1_minus_x`].
+#[inline]
+pub fn log1p_minus_x(x: f64) -> f64 {
+    if x.abs() > 0.5 {
+        return x.ln_1p() - x;
+    }
+    let mut power = x * x;
+    let mut sign = -1.0;
+    let mut k = 2.0;
+    let mut sum = sign * power / k;
+    loop {
+        power *= x;
+        sign = -sign;
+        k += 1.0;
+        let next = sum + sign * power / k;
+        if next == sum {
+            return next;
+        }
+        sum = next;
+    }
+}
+
+/// The relative exponential `exprel(x) = (e^x − 1) / x`, equal to `1` at
+/// `x = 0` and summed as a series for `|x| ≤ 1/2`.
+#[inline]
+pub fn exprel(x: f64) -> f64 {
+    if x == 0.0 {
+        return 1.0;
+    }
+    if x.abs() > 0.5 {
+        return x.exp_m1() / x;
+    }
+    let mut term = 1.0;
+    let mut sum = term;
+    let mut k = 1.0;
+    loop {
+        k += 1.0;
+        term *= x / k;
+        let next = sum + term;
+        if next == sum {
+            return next;
+        }
+        sum = next;
+    }
+}
+
+/// `ln(exprel(x))`, with the large-`|x|` branches written so that no
+/// exponential of a positive argument is ever formed.
+#[inline]
+pub fn log_exprel(x: f64) -> f64 {
+    if x == 0.0 {
+        0.0
+    } else if x.abs() <= 0.5 {
+        exprel(x).ln()
+    } else if x > 0.0 {
+        x + (-(-x).exp()).ln_1p() - x.ln()
+    } else {
+        (-x.exp()).ln_1p() - (-x).ln()
+    }
+}
+
+/// `ln|1 − e^x|` for `x ≠ 0`, routed through
+/// [`crate::probability::log1mexp_positive`] on both sides of the origin.
+#[inline]
+pub fn log_abs_one_minus_exp(x: f64) -> f64 {
+    if x > 0.0 {
+        x + crate::probability::log1mexp_positive(x)
+    } else {
+        crate::probability::log1mexp_positive(-x)
+    }
+}
+
+/// The Bregman divergence `bd0(x, m) = x·ln(x/m) + m − x` of the Poisson
+/// deviance (Loader's `bd0`), summed as a series in `(x − m)/(x + m)` when the
+/// two arguments are within 20% of each other so the two ~equal logarithms
+/// never cancel. `bd0(0, m) = m` exactly.
+#[inline]
+pub fn bd0(x: f64, m: f64) -> f64 {
+    if x == 0.0 {
+        return m;
+    }
+    if x == m {
+        return 0.0;
+    }
+    let hi = x.max(m);
+    let lo = x.min(m);
+    let relative_gap = (x - m).abs() / hi;
+    if relative_gap < 0.2 {
+        let v = ((x - m) / hi) / (1.0 + lo / hi);
+        let mut sum = (x - m) * v;
+        let mut ej = 2.0 * (x * v);
+        let v2 = v * v;
+        let mut denominator = 3.0;
+        loop {
+            ej *= v2;
+            let next = sum + ej / denominator;
+            if next == sum {
+                return next;
+            }
+            sum = next;
+            denominator += 2.0;
+        }
+    }
+    x * (x.ln() - m.ln()) + (m - x)
+}
+
+/// Bernoulli KL divergence in natural coordinates, `KL(σ(a) ‖ σ(b))`,
+/// without subtracting an entropy from a cross entropy. For `|b − a| ≤ 1/2`
+/// only second-order remainders are evaluated; the tail branches orient the
+/// event so the reference probability never rounds to one.
+#[inline]
+pub fn bernoulli_kl_from_logits(a: f64, b: f64) -> f64 {
+    if a == b {
+        return 0.0;
+    }
+    let h = b - a;
+    if h.abs() <= 0.5 {
+        // Orient toward the rarer reference event.  Without this swap a large
+        // positive `a` rounds `σ(a)` to one and erases a representable
+        // right-tail KL channel.
+        let (p, local_h) = if a <= 0.0 {
+            (logistic(a), h)
+        } else {
+            (logistic(-a), -h)
+        };
+        let em1 = local_h.exp_m1();
+        let x = p * em1;
+        return log1p_minus_x(x) + p * expm1_minus_x(local_h);
+    }
+    if a <= 0.0 {
+        let p = logistic(a);
+        p * (a - b) + softplus(b) - softplus(a)
+    } else {
+        let q = logistic(-a);
+        q * (b - a) + softplus(-b) - softplus(-a)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Binary-exponent arithmetic.
+// ---------------------------------------------------------------------------
+
+/// Exact power-of-two decomposition `x = mantissa · 2^exponent` for a positive
+/// finite `f64`, including subnormals. The mantissa lies in `[1, 2)`.
+#[inline]
+pub fn positive_frexp(x: f64) -> (f64, i32) {
+    assert!(x.is_finite() && x > 0.0);
+    let bits = x.to_bits();
+    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1_u64 << 52) - 1);
+    if raw_exp != 0 {
+        let mantissa = f64::from_bits((1023_u64 << 52) | fraction);
+        (mantissa, raw_exp - 1023)
+    } else {
+        let leading = 63_i32 - fraction.leading_zeros() as i32;
+        let shift = 52_i32 - leading;
+        let normalized = fraction << shift;
+        let mantissa = f64::from_bits((1023_u64 << 52) | (normalized & ((1_u64 << 52) - 1)));
+        (mantissa, -1022 - shift)
+    }
+}
+
+/// `mantissa · 2^exponent` for a positive mantissa, renormalising the mantissa
+/// into `[1, 2)` first so the result overflows or underflows only when the
+/// final `f64` itself is unrepresentable. Subnormal results are formed by
+/// scaling in units of the least positive subnormal, so IEEE rounds the final
+/// value once instead of underflowing an intermediate.
+#[inline]
+pub fn scale_normalized_power_of_two(mut mantissa: f64, mut exponent: i32) -> f64 {
+    while mantissa >= 2.0 {
+        mantissa *= 0.5;
+        exponent += 1;
+    }
+    while mantissa < 1.0 {
+        mantissa *= 2.0;
+        exponent -= 1;
+    }
+    if exponent > 1023 {
+        return f64::INFINITY;
+    }
+    if exponent >= -1022 {
+        let power = f64::from_bits(((exponent + 1023) as u64) << 52);
+        return mantissa * power;
+    }
+    if exponent < -1075 {
+        return 0.0;
+    }
+    let units = mantissa * 2.0_f64.powi(exponent + 1074);
+    units * f64::from_bits(1)
+}
+
+/// `a·b·c/d` for positive finite inputs, carrying the binary exponent
+/// separately so an intermediate overflow or underflow cannot change a
+/// representable final result.
+#[inline]
+pub fn scaled_positive_product_quotient(a: f64, b: f64, c: f64, d: f64) -> f64 {
+    assert!(a.is_finite() && a > 0.0);
+    assert!(b.is_finite() && b > 0.0);
+    assert!(c.is_finite() && c > 0.0);
+    assert!(d.is_finite() && d > 0.0);
+    let (ma, ea) = positive_frexp(a);
+    let (mb, eb) = positive_frexp(b);
+    let (mc, ec) = positive_frexp(c);
+    let (md, ed) = positive_frexp(d);
+    scale_normalized_power_of_two((ma * mb) * (mc / md), ea + eb + ec - ed)
+}
+
+#[cfg(test)]
+mod exponential_family_kernel_tests {
+    use super::*;
+
+    #[test]
+    fn softplus_and_logistic_agree_with_their_definitions_away_from_the_tails() {
+        for &x in &[-3.0_f64, -0.7, 0.0, 0.4, 2.5] {
+            assert!((softplus(x) - (1.0 + x.exp()).ln()).abs() <= 4.0 * f64::EPSILON);
+            assert!((logistic(x) - 1.0 / (1.0 + (-x).exp())).abs() <= 4.0 * f64::EPSILON);
+        }
+        assert_eq!(softplus(800.0), 800.0);
+        assert_eq!(softplus(-800.0), 0.0);
+    }
+
+    #[test]
+    fn remainders_match_the_direct_formula_where_it_does_not_cancel() {
+        for &x in &[-0.75_f64, 0.6, 1.5] {
+            assert!((expm1_minus_x(x) - (x.exp_m1() - x)).abs() <= 8.0 * f64::EPSILON);
+            assert!((log1p_minus_x(x) - (x.ln_1p() - x)).abs() <= 8.0 * f64::EPSILON);
+            assert!((exprel(x) - x.exp_m1() / x).abs() <= 8.0 * f64::EPSILON);
+            assert!((log_exprel(x) - (x.exp_m1() / x).ln()).abs() <= 8.0 * f64::EPSILON);
+        }
+        // The series branch keeps relative accuracy where the naive form
+        // would return pure cancellation noise.
+        let x = 1.0e-6;
+        let series = expm1_minus_x(x);
+        assert!((series - 0.5 * x * x).abs() <= 1.0e-6 * 0.5 * x * x);
+        assert!((log1p_minus_x(x) + 0.5 * x * x).abs() <= 1.0e-6 * 0.5 * x * x);
+    }
+
+    #[test]
+    fn bd0_is_the_poisson_bregman_divergence() {
+        assert_eq!(bd0(0.0, 2.5), 2.5);
+        assert_eq!(bd0(3.0, 3.0), 0.0);
+        for &(x, m) in &[(3.0_f64, 2.0_f64), (10.0, 10.5), (0.2, 7.0)] {
+            let direct = x * (x / m).ln() + m - x;
+            assert!((bd0(x, m) - direct).abs() <= 16.0 * f64::EPSILON * direct.abs().max(1.0));
+        }
+    }
+
+    #[test]
+    fn bernoulli_kl_from_logits_is_the_kl_divergence_between_the_two_bernoullis() {
+        for &(a, b) in &[(0.3_f64, -0.2_f64), (-2.0, -1.8), (4.0, 1.0), (0.0, 0.0)] {
+            let p = logistic(a);
+            let q = logistic(b);
+            let direct = xlogy(p, p / q) + xlogy(1.0 - p, (1.0 - p) / (1.0 - q));
+            assert!((bernoulli_kl_from_logits(a, b) - direct).abs() <= 1.0e-13);
+        }
+    }
+
+    #[test]
+    fn logaddexp_and_log_abs_one_minus_exp_handle_their_edge_cases() {
+        assert_eq!(logaddexp(f64::NEG_INFINITY, f64::NEG_INFINITY), f64::NEG_INFINITY);
+        assert!((logaddexp(1.0, 2.0) - (1.0_f64.exp() + 2.0_f64.exp()).ln()).abs() <= 4.0 * f64::EPSILON);
+        assert!((log_abs_one_minus_exp(-1.0) - (1.0 - (-1.0_f64).exp()).ln()).abs() <= 4.0 * f64::EPSILON);
+        assert!((log_abs_one_minus_exp(1.0) - (1.0_f64.exp() - 1.0).ln()).abs() <= 4.0 * f64::EPSILON);
+    }
+
+    #[test]
+    fn binary_exponent_arithmetic_round_trips_and_survives_intermediate_overflow() {
+        for &x in &[1.0_f64, 0.3, 1.0e300, 5.0e-320, f64::MIN_POSITIVE] {
+            let (mantissa, exponent) = positive_frexp(x);
+            assert!((1.0..2.0).contains(&mantissa));
+            assert_eq!(scale_normalized_power_of_two(mantissa, exponent), x);
+        }
+        // The inputs are decimal literals, so the exact product is a few ulps
+        // off the decimal result; the point is that no intermediate overflowed
+        // or underflowed on the way there.
+        let got = scaled_positive_product_quotient(1.0e-300, 1.0, 1.0e308, 1.0);
+        assert!((got - 1.0e8).abs() <= 4.0 * f64::EPSILON * 1.0e8);
+        let got = scaled_positive_product_quotient(1.0e-300, 1.0e-200, 1.0, 1.0e-300);
+        assert!((got - 1.0e-200).abs() <= 4.0 * f64::EPSILON * 1.0e-200);
+        assert_eq!(scaled_positive_product_quotient(2.0, 3.0, 5.0, 4.0), 7.5);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

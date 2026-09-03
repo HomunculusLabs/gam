@@ -82,6 +82,7 @@
 //! evidence race, which then adjudicates it on the same REML scale as every other
 //! candidate.
 
+use super::local_charts::sorted_intersection;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -1473,22 +1474,4 @@ mod tests_zz_measure_2280 {
             failures.join("\n")
         );
     }
-}
-
-/// Intersection of two ascending row-index lists.
-fn sorted_intersection(a: &[usize], b: &[usize]) -> Vec<usize> {
-    let mut out = Vec::new();
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
-            std::cmp::Ordering::Equal => {
-                out.push(a[i]);
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    out
 }

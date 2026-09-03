@@ -1,3 +1,4 @@
+use crate::smooth::center_aniso_log_scales;
 use super::*;
 
 pub fn build_duchon_collocation_operator_matrices(
@@ -1610,9 +1611,13 @@ pub(crate) fn validate_duchon_kernel_orders(
     }
     let spectral_order = 2.0 * (p_order as f64 + s_order);
     if spectral_order <= k_dim as f64 {
-        crate::bail_invalid_basis!(
-            "Duchon pointwise kernel values require 2*(p+s) > dimension; got 2*(p+s)={spectral_order}, dimension={k_dim}, p={p_order}, s={s_order}"
-        );
+        return Err(BasisError::duchon_smoothness_insufficient(
+            "pointwise kernel values",
+            0,
+            k_dim,
+            p_order,
+            s_order,
+        ));
     }
     Ok(())
 }
@@ -1641,14 +1646,22 @@ pub(crate) fn validate_duchon_collocation_orders(
     // here is purely about *existence* of D_k itself.
     let spectral_order = 2.0 * (p_order as f64 + s_order);
     if max_operator_derivative_order >= 1 && spectral_order <= k_dim as f64 + 1.0 {
-        crate::bail_invalid_basis!(
-            "Duchon D1 collocation requires 2*(p+s) > dimension+1; got 2*(p+s)={spectral_order}, dimension={k_dim}, p={p_order}, s={s_order}"
-        );
+        return Err(BasisError::duchon_smoothness_insufficient(
+            "D1 collocation",
+            1,
+            k_dim,
+            p_order,
+            s_order,
+        ));
     }
     if max_operator_derivative_order >= 2 && spectral_order <= k_dim as f64 + 2.0 {
-        crate::bail_invalid_basis!(
-            "Duchon D2 collocation requires 2*(p+s) > dimension+2; got 2*(p+s)={spectral_order}, dimension={k_dim}, p={p_order}, s={s_order}"
-        );
+        return Err(BasisError::duchon_smoothness_insufficient(
+            "D2 collocation",
+            2,
+            k_dim,
+            p_order,
+            s_order,
+        ));
     }
     Ok(())
 }
@@ -2074,9 +2087,13 @@ pub(crate) fn duchon_hybrid_kernel_collision_value(
 ) -> Result<f64, BasisError> {
     let spectral_order = 2 * (p_order + s_order);
     if spectral_order <= k_dim {
-        crate::bail_invalid_basis!(
-            "Duchon hybrid diagonal is not finite when 2*(p+s) <= dimension; got 2*(p+s)={spectral_order}, dimension={k_dim}, p={p_order}, s={s_order}"
-        );
+        return Err(BasisError::duchon_smoothness_insufficient(
+            "hybrid diagonal",
+            0,
+            k_dim,
+            p_order,
+            s_order as f64,
+        ));
     }
 
     let kappa = 1.0 / length_scale.max(1e-300);
@@ -2509,23 +2526,6 @@ pub(crate) fn auto_seed_aniso_contrasts(
     } else {
         Some(center_aniso_log_scales(&contrasts))
     }
-}
-
-fn center_aniso_log_scales(eta: &[f64]) -> Vec<f64> {
-    if eta.len() <= 1 {
-        return eta.to_vec();
-    }
-    let mean = eta.iter().sum::<f64>() / eta.len() as f64;
-    eta.iter()
-        .map(|&v| {
-            let centered = v - mean;
-            if centered.abs() <= 1e-15 {
-                0.0
-            } else {
-                centered
-            }
-        })
-        .collect()
 }
 
 /// How the Matérn forward design build interprets an *exactly all-zero*

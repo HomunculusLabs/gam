@@ -153,6 +153,24 @@ impl From<WorkflowError> for String {
     }
 }
 
+impl WorkflowError {
+    /// The remediation a user can act on, when the failure has one; the single
+    /// source of the advice every front end prints beside the error. The
+    /// schema variant is the typed form of what `gam_data::DataError::advice`
+    /// says for the same condition.
+    #[must_use]
+    pub fn advice(&self) -> Option<String> {
+        match self {
+            Self::SchemaMismatch { .. } => Some(
+                "Verify the new data has the same columns and types as the training data \
+                 and that the formula terms match."
+                    .to_string(),
+            ),
+            _ => None,
+        }
+    }
+}
+
 /// Catchall lift for legacy `Result<_, String>` chains that flow into a
 /// `WorkflowError`-returning function via `?`. Maps to `InvalidConfig` since
 /// the upstream call sites that still hand out bare strings are

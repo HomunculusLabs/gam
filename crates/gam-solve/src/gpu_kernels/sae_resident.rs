@@ -843,7 +843,9 @@ impl DeviceResidentArrowWorkspace {
                             },
                         );
                     }
-                    None => note_resident_engagement(
+                    None => gam_gpu::engagement::note_route_engagement(
+        "gam-solve sae_resident inner step",
+        "CPU reference",
                         false,
                         "resident operator apply faulted on device; host contraction fallback",
                     ),
@@ -859,7 +861,9 @@ impl DeviceResidentArrowWorkspace {
         // This also consumes `on_device` on every target, which is why the
         // parameter does not need — and must not have — an underscore.
         if on_device {
-            note_resident_engagement(
+            gam_gpu::engagement::note_route_engagement(
+        "gam-solve sae_resident inner step",
+        "CPU reference",
                 false,
                 "resident operator apply requested the device arm but the workspace is not \
                  device-resident; host contraction",
@@ -1224,7 +1228,9 @@ impl DeviceResidentArrowWorkspace {
                 }
                 Err(err) => {
                     frames.base_declined = true;
-                    note_resident_engagement(
+                    gam_gpu::engagement::note_route_engagement(
+        "gam-solve sae_resident inner step",
+        "CPU reference",
                         false,
                         &format!(
                             "SAE base-resident frame declined; ridge changes fall back to the \
@@ -1581,31 +1587,6 @@ struct SharedFrameState {
     base_builds: usize,
     base_refactors: usize,
     base_gradient_solves: usize,
-}
-
-/// One-shot engagement report for the #1017 production resident inner-step seam,
-/// mirroring the sparse_dict routers' `note_route_engagement` (#1551 "GPU 0%"
-/// class): a production run that silently declines the resident device path and
-/// falls back to the CPU reference otherwise leaves no trace of why. Warns once
-/// per category (engaged / declined) per process — the step is per-iterate, so an
-/// unconditional line would flood the fit log.
-fn note_resident_engagement(engaged: bool, detail: &str) {
-    use std::sync::Once;
-    static ENGAGED_ONCE: Once = Once::new();
-    static DECLINED_ONCE: Once = Once::new();
-    let once = if engaged {
-        &ENGAGED_ONCE
-    } else {
-        &DECLINED_ONCE
-    };
-    once.call_once(|| {
-        let verdict = if engaged {
-            "device ENGAGED"
-        } else {
-            "device DECLINED - CPU reference"
-        };
-        log::warn!("[gam-solve sae_resident inner step] {verdict}: {detail}");
-    });
 }
 
 /// One production-structured Arrow-Schur Newton step on the HOST.

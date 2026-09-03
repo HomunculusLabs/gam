@@ -378,19 +378,17 @@ enum Statement {
     },
 }
 
-fn bare_call_name(call: &ExprCall) -> Result<&Ident> {
+/// The bare identifier a call expression invokes, or a spanned error naming
+/// `what` (the construct that requires a bare name) when the callee is a path
+/// or anything else.
+pub(crate) fn bare_call_name<'a>(call: &'a ExprCall, what: &str) -> Result<&'a Ident> {
+    let message = format!("{what} must use a bare function name");
     let Expr::Path(path) = call.func.as_ref() else {
-        return Err(syn::Error::new_spanned(
-            &call.func,
-            "row_program operations must use bare function names",
-        ));
+        return Err(syn::Error::new_spanned(&call.func, message));
     };
-    path.path.get_ident().ok_or_else(|| {
-        syn::Error::new_spanned(
-            &call.func,
-            "row_program operations must use bare function names",
-        )
-    })
+    path.path
+        .get_ident()
+        .ok_or_else(|| syn::Error::new_spanned(&call.func, message))
 }
 
 fn path_ident(path: &ExprPath) -> Result<&Ident> {
@@ -475,7 +473,7 @@ fn parse_program_expr(
             parse_program_expr(expr, bindings, constants, leaves)
         }
         Expr::Call(call) => {
-            let operation = bare_call_name(call)?.to_string();
+            let operation = bare_call_name(call, "row_program operations")?.to_string();
             let arguments = call.args.iter().collect::<Vec<_>>();
             match operation.as_str() {
                 "zero" if arguments.is_empty() => Ok(ProgramExpr::Zero),

@@ -30,16 +30,14 @@
 //! * An **inner product** of length `n` forms `n` products and then sums them
 //!   with `n − 1` additions, so `k = n` — this is [`accumulation_band`].
 //! * A **sum of terms that are already formed** commits only the `n − 1`
-//!   additions, so `k = n − 1`. That is the form carried by
-//!   [`crate::decision::ShadowSum`], which accumulates `Σ|xᵢ|` and the term
-//!   count as it goes and reports the floor from them; a caller that already
-//!   holds both quantities and is summing pre-formed terms should pass
-//!   `n - 1` to [`accumulation_growth`] directly rather than using
+//!   additions, so `k = n − 1`: a caller holding `Σ|xᵢ|` and the term count
+//!   passes `n - 1` to [`accumulation_growth`] directly rather than using
 //!   [`accumulation_band`].
-//!
-//! `ShadowSum` additionally supports a **tree** reduction, whose depth is
-//! `⌈log₂ n⌉` rather than `n − 1`; that is a genuinely tighter bound and the
-//! right one whenever the reduction is pairwise.
+//! * A **pairwise (tree) reduction** has depth `⌈log₂ n⌉` rather than `n − 1`;
+//!   that is a genuinely tighter bound and the right `k` whenever the
+//!   reduction is pairwise.
+//! * A **compensated (Kahan/Neumaier) sum** has a bound with no `n` in it at
+//!   all — [`compensated_band`].
 
 /// Unit roundoff `u = EPSILON/2`.
 ///

@@ -35,6 +35,9 @@ mod cofit;
 mod coordinate;
 #[cfg(target_os = "linux")]
 mod decoder_gpu;
+mod residual_reservoir;
+#[cfg(target_os = "linux")]
+mod score_router_backend;
 mod scoring;
 #[cfg(target_os = "linux")]
 mod scoring_gpu;

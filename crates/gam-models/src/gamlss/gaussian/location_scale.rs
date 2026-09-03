@@ -908,13 +908,7 @@ pub(crate) fn gaussian_weighted_rss(
         let residual = y[i] - mean(i);
         total += w * residual * residual;
         if !total.is_finite() {
-            return Err(GamlssError::RowGeometryUnrepresentable {
-                row: i,
-                quantity: "Gaussian classical deviance",
-                eta: mean(i),
-                value: total,
-            }
-            .into());
+            return Err(GamlssError::row_geometry_unrepresentable(i, "Gaussian classical deviance", mean(i), total));
         }
     }
     Ok(total)
@@ -1061,13 +1055,7 @@ impl CustomFamily for GaussianLocationScaleFamily {
         for (i, row) in rows.iter().enumerate() {
             ll += row.log_likelihood;
             if !ll.is_finite() {
-                return Err(GamlssError::RowGeometryUnrepresentable {
-                    row: i,
-                    quantity: "Gaussian cumulative log likelihood",
-                    eta: eta_log_sigma[i],
-                    value: ll,
-                }
-                .into());
+                return Err(GamlssError::row_geometry_unrepresentable(i, "Gaussian cumulative log likelihood", eta_log_sigma[i], ll));
             }
         }
         // Take the location working response from the row kernel rather than
@@ -1113,13 +1101,7 @@ impl CustomFamily for GaussianLocationScaleFamily {
             )?
             .log_likelihood;
             if !ll.is_finite() {
-                return Err(GamlssError::RowGeometryUnrepresentable {
-                    row: i,
-                    quantity: "Gaussian cumulative log likelihood",
-                    eta: eta_log_sigma[i],
-                    value: ll,
-                }
-                .into());
+                return Err(GamlssError::row_geometry_unrepresentable(i, "Gaussian cumulative log likelihood", eta_log_sigma[i], ll));
             }
         }
         Ok(ll)
@@ -1169,17 +1151,11 @@ impl CustomFamily for GaussianLocationScaleFamily {
             let contribution = scaled_signed_product3(sampled.weight, row_ll, 1.0);
             ll += contribution;
             if !contribution.is_finite() || !ll.is_finite() {
-                return Err(GamlssError::RowGeometryUnrepresentable {
-                    row: i,
-                    quantity: "Gaussian subsampled log likelihood",
-                    eta: eta_log_sigma[i],
-                    value: if contribution.is_finite() {
+                return Err(GamlssError::row_geometry_unrepresentable(i, "Gaussian subsampled log likelihood", eta_log_sigma[i], if contribution.is_finite() {
                         ll
                     } else {
                         contribution
-                    },
-                }
-                .into());
+                    }));
             }
         }
         Ok(ll)

@@ -126,8 +126,6 @@ pub struct FitRequestConfigDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analytic_penalties: Option<AnalyticPenaltiesDocument>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pilot_subsample_threshold: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub precision_hyperpriors: Option<BTreeMap<String, PrecisionHyperpriorDocument>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     /// Whether to precompute the distribution-free conformal substrates (#942
@@ -195,8 +193,6 @@ pub struct FitRequestConfigDocument {
     pub time_degree: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_num_internal_knots: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub time_smooth_lambda: Option<f64>,
     /// Container type of the caller's training table (`"pandas"`, `"polars"`,
     /// `"pyarrow"`, `"numpy"`, ...), passed through opaquely into the saved
     /// model payload for the predict-time output-container fallback (#394).

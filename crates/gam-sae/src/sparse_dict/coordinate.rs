@@ -665,17 +665,33 @@ fn stationary_eliminant(rho: &[f64]) -> Vec<f64> {
             coefficients[h.abs_diff(k)] += 0.5 * (bb - aa);
         }
     }
-    coefficients
+    // Forward-error band of the assembly above (Higham Lemma 3.1): every
+    // coefficient receives at most `2·h_count` product pairs, each costing a
+    // product, a signed combination and an accumulation — `6·h_count`
+    // roundings — over summands whose magnitudes total at most
+    // `½((Σ|α|)² + (Σ|β|)²)`. A trailing coefficient inside that band is the
+    // zero the arithmetic could not distinguish from one.
+    let sum_abs_alpha: f64 = alpha.iter().map(|value| value.abs()).sum();
+    let sum_abs_beta: f64 = beta.iter().map(|value| value.abs()).sum();
+    let rounding_floor = gam_linalg::roundoff::accumulation_growth(6 * h_count)
+        * 0.5
+        * (sum_abs_alpha * sum_abs_alpha + sum_abs_beta * sum_abs_beta);
+    normalize_chebyshev(coefficients, rounding_floor)
 }
 
-fn normalize_chebyshev(mut coefficients: Vec<f64>) -> Vec<f64> {
+/// Drop trailing Chebyshev coefficients that lie inside `rounding_floor`, the
+/// forward-error band of whatever arithmetic produced them, and rescale the
+/// rest to unit max-abs. The floor is the caller's because it belongs to the
+/// caller's algorithm: the eliminant's product assembly and the derivative
+/// recurrence accumulate different numbers of roundings over different
+/// magnitudes (#2469).
+fn normalize_chebyshev(mut coefficients: Vec<f64>, rounding_floor: f64) -> Vec<f64> {
     let scale = coefficients
         .iter()
         .fold(0.0_f64, |largest, value| largest.max(value.abs()));
     if scale == 0.0 || !scale.is_finite() {
         return vec![0.0];
     }
-    let rounding_floor = f64::EPSILON * (coefficients.len() * coefficients.len()) as f64 * scale;
     while coefficients.len() > 1
         && coefficients
             .last()
@@ -714,11 +730,28 @@ fn differentiate_chebyshev(coefficients: &[f64]) -> Vec<f64> {
         }
     }
     derivative[0] *= 0.5;
-    normalize_chebyshev(derivative)
+    // Forward-error band of the recurrence above: coefficient `k` is reached
+    // through at most `⌈degree/2⌉` steps of `d_{k+2} + 2(k+1)·c_{k+1}` — two
+    // roundings for the scaled term and one for the addition — over summands
+    // whose magnitudes total at most `Σ_k 2(k+1)|c_{k+1}|`.
+    let summand_magnitude: f64 = coefficients
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(k, value)| 2.0 * k as f64 * value.abs())
+        .sum();
+    let rounding_floor =
+        gam_linalg::roundoff::accumulation_growth(3 * degree.div_ceil(2)) * summand_magnitude;
+    normalize_chebyshev(derivative, rounding_floor)
 }
 
+/// The largest magnitude a Clenshaw evaluation of `coefficients` on `[-1, 1]`
+/// can return for an exact zero: the recurrence performs two multiplications
+/// and two additions per coefficient, so its forward error is bounded by
+/// `γ_{4n}·Σ|c_k|` (Higham Lemma 3.1 applied to the recurrence).
 fn chebyshev_zero_tolerance(coefficients: &[f64]) -> f64 {
-    f64::EPSILON.sqrt() * coefficients.iter().map(|value| value.abs()).sum::<f64>()
+    gam_linalg::roundoff::accumulation_growth(4 * coefficients.len())
+        * coefficients.iter().map(|value| value.abs()).sum::<f64>()
 }
 
 fn push_distinct_root(roots: &mut Vec<f64>, root: f64) {
@@ -764,7 +797,9 @@ fn bisect_chebyshev_root(coefficients: &[f64], mut left: f64, mut right: f64) ->
 /// safeguarded. Testing the derivative roots themselves retains even-multiplicity
 /// (tangential) roots that a sign-change scan would miss.
 fn chebyshev_roots_unit_interval(coefficients: Vec<f64>) -> Vec<f64> {
-    let coefficients = normalize_chebyshev(coefficients);
+    // The caller has already trimmed its coefficients against its own
+    // assembly band; only an exact-zero leading tail is dropped here.
+    let coefficients = normalize_chebyshev(coefficients, 0.0);
     let degree = coefficients.len() - 1;
     if degree == 0 {
         return Vec::new();

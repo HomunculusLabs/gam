@@ -27,8 +27,6 @@
 //!   * `newton_decrement_enclosure` — the Newton decrement λ_N² is the
 //!     affine-invariant stationarity currency; an inexact solve still yields a
 //!     rigorous two-sided enclosure of it.
-//!   * [`ShadowSum`] — a reduction carries its own rounding floor, so "is this
-//!     decrement real?" is decided against a certified error bar.
 
 use ndarray::{Array1, Array2};
 
@@ -513,39 +511,6 @@ pub struct DecrementEnclosure {
     pub upper: f64,
 }
 
-/// A running sum that also carries the data needed to certify its own rounding
-/// floor: the accumulated value, the sum of magnitudes, and the term count.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct ShadowSum {
-    /// Accumulated (finite-precision) sum.
-    pub sum: f64,
-    /// Sum of magnitudes `Σ|x_i|`, the scale of the rounding floor.
-    pub abs_sum: f64,
-    /// Number of terms pushed.
-    pub count: usize,
-}
-
-impl ShadowSum {
-    /// An empty accumulator.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Fold one term into the running sum.
-    pub fn push(&mut self, x: f64) {
-        self.sum += x;
-        self.abs_sum += x.abs();
-        self.count += 1;
-    }
-
-    /// Combine two independently accumulated sums (associative, for reductions).
-    pub fn merge(&mut self, other: &ShadowSum) {
-        self.sum += other.sum;
-        self.abs_sum += other.abs_sum;
-        self.count += other.count;
-    }
-
-}
 
 #[cfg(test)]
 mod tests {
@@ -1067,18 +1032,4 @@ mod tests {
             other => panic!("expected Ambiguous, got {other:?}"),
         }
     }
-
-    #[test]
-    fn shadow_sum_merge_is_additive() {
-        let mut a = ShadowSum::new();
-        let mut b = ShadowSum::new();
-        a.push(1.0);
-        a.push(-2.0);
-        b.push(3.0);
-        a.merge(&b);
-        assert_eq!(a.count, 3);
-        assert_eq!(a.sum, 2.0);
-        assert_eq!(a.abs_sum, 6.0);
-    }
-
 }

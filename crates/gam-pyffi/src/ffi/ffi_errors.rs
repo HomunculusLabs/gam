@@ -534,8 +534,17 @@ create_exception!(
 /// `EstimationError`'s typing is preserved across the FFI boundary —
 /// no `err.to_string()` flattening, no Python-side regex reclassification.
 pub(crate) fn estimation_error_to_pyerr(err: EstimationError) -> PyErr {
-    let message = err.to_string();
-    estimation_error_to_pyerr_with_message(&err, message)
+    estimation_error_to_pyerr_with_message(&err, message_with_advice(&err, err.advice()))
+}
+
+/// The exception message: the rendered error plus, when the typed error
+/// declares one, the same `help:` remediation the CLI prints. Both front ends
+/// read it from the error's own `advice()`, so they cannot disagree (#2470).
+fn message_with_advice(err: &dyn std::fmt::Display, advice: Option<String>) -> String {
+    match advice {
+        Some(advice) => format!("{err}\nhelp: {advice}"),
+        None => err.to_string(),
+    }
 }
 
 /// Select the Python exception from the innermost typed cause while retaining
@@ -648,20 +657,10 @@ pub(crate) fn py_value_error(message: String) -> PyErr {
     GamError::new_err(message)
 }
 
-fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&'static str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "non-string panic payload".to_string()
-    }
-}
-
 fn py_panic_error(context: &'static str, payload: Box<dyn std::any::Any + Send>) -> PyErr {
     py_value_error(format!(
         "{context} panicked inside Rust boundary: {}",
-        panic_payload_message(payload)
+        gam_runtime::panic_payload_message(payload)
     ))
 }
 
@@ -864,7 +863,10 @@ pub(crate) fn workflow_error_to_pyerr(py: Python<'_>, err: WorkflowError) -> PyE
         // therefore `ValueError`), so legacy `except ValueError` /
         // `except GamError` handlers keep catching them.
         WorkflowError::InvalidConfig { reason } => InvalidConfigurationError::new_err(reason),
-        WorkflowError::SchemaMismatch { reason } => SchemaMismatchError::new_err(reason),
+        WorkflowError::SchemaMismatch { .. } => {
+            let advice = err.advice();
+            SchemaMismatchError::new_err(message_with_advice(&err, advice))
+        }
         WorkflowError::MissingDependency { reason } => MissingDependencyError::new_err(reason),
         WorkflowError::IntegrationFailed { reason } => IntegrationError::new_err(reason),
         WorkflowError::SpatialUnderresolved { .. } => IntegrationError::new_err(err.to_string()),

@@ -133,8 +133,145 @@ pub enum BasisError {
         message: &'static str,
     },
 
+    /// A Duchon spline is not smooth enough for an operator a fit path applies
+    /// to its radial kernel: the kernel's spectral order `2(p+s)` must exceed
+    /// the covariate dimension by `margin` for that operator to be finite at
+    /// the origin.
+    #[error(
+        "{}",
+        duchon_smoothness_message(operator, *margin, *spectral_order, *dimension, *nullspace_order, *power, *minimum_power)
+    )]
+    DuchonSmoothnessInsufficient {
+        /// The operator that needs the smoothness ("pointwise kernel values",
+        /// "D2 collocation", "collision derivative phi^(4)", ...).
+        operator: String,
+        /// The required excess of `2(p+s)` over the dimension.
+        margin: usize,
+        /// The realised spectral order `2(p+s)`.
+        spectral_order: f64,
+        dimension: usize,
+        /// The Duchon nullspace order `p`.
+        nullspace_order: usize,
+        /// The Duchon power `s`.
+        power: f64,
+        /// The smallest integer power that would admit the operator.
+        minimum_power: usize,
+    },
+
     #[error("{0}")]
     Other(String),
+}
+
+fn duchon_smoothness_message(
+    operator: &str,
+    margin: usize,
+    spectral_order: f64,
+    dimension: usize,
+    nullspace_order: usize,
+    power: f64,
+    minimum_power: usize,
+) -> String {
+    let bound = if margin == 0 {
+        "dimension".to_string()
+    } else {
+        format!("dimension+{margin}")
+    };
+    format!(
+        "Duchon {operator} requires 2*(p+s) > {bound}; got 2*(p+s)={spectral_order}, \
+         dimension={dimension}, p={nullspace_order}, s={power}. The operator is finite only \
+         for a smoother spline: raise power to >= {minimum_power} (or reduce the joint \
+         smooth's dimension)."
+    )
+}
+
+impl BasisError {
+    /// The typed Duchon smoothness refusal for `operator`, computing the
+    /// smallest admitting power from the same inequality that refused.
+    #[must_use]
+    pub fn duchon_smoothness_insufficient(
+        operator: impl Into<String>,
+        margin: usize,
+        dimension: usize,
+        nullspace_order: usize,
+        power: f64,
+    ) -> Self {
+        // `2(p+s) > dimension + margin` ⇔ `s > (dimension + margin)/2 − p`; the
+        // smallest integer power satisfying it is `⌊(dimension + margin)/2⌋ + 1 − p`.
+        let minimum_power = ((dimension + margin) / 2 + 1).saturating_sub(nullspace_order);
+        Self::DuchonSmoothnessInsufficient {
+            operator: operator.into(),
+            margin,
+            spectral_order: 2.0 * (nullspace_order as f64 + power),
+            dimension,
+            nullspace_order,
+            power,
+            minimum_power,
+        }
+    }
+
+    /// The remediation a user can act on, when the failure has one. This is
+    /// the single source of the advice every front end prints beside the
+    /// error; it is keyed on the variant, never on the rendered text (#2470).
+    #[must_use]
+    pub fn advice(&self) -> Option<String> {
+        match self {
+            Self::DuchonSmoothnessInsufficient { minimum_power, .. } => Some(format!(
+                "Raise the Duchon smooth's `power=...` to at least {minimum_power}, or reduce \
+                 the joint smooth's dimension."
+            )),
+            Self::InvalidDegree(_)
+            | Self::InsufficientDegreeForDerivative { .. }
+            | Self::InvalidRange(..)
+            | Self::DegenerateRange(_)
+            | Self::InvalidPenaltyOrder { .. }
+            | Self::InsufficientKnotsForDegree { .. }
+            | Self::InsufficientColumnsForConstraint { .. }
+            | Self::ConstraintMatrixRowMismatch { .. }
+            | Self::WeightsDimensionMismatch { .. }
+            | Self::LinalgError(_)
+            | Self::ConstraintNullspaceCollapsed { .. }
+            | Self::DegenerateKnots
+            | Self::InvalidKnotVector(_)
+            | Self::SparseCreation(_)
+            | Self::DimensionMismatch(_)
+            | Self::IndefinitePenalty { .. }
+            | Self::InvalidInput(_)
+            | Self::DegenerateAtCollision { .. }
+            | Self::Other(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod advice_tests {
+    use super::*;
+
+    #[test]
+    fn duchon_smoothness_refusal_names_the_smallest_admitting_power() {
+        // 2(p+s) > dim + margin with p = 1, dim = 16, margin = 2 needs s ≥ 9.
+        let err = BasisError::duchon_smoothness_insufficient("D2 collocation", 2, 16, 1, 8.0);
+        let BasisError::DuchonSmoothnessInsufficient { minimum_power, spectral_order, .. } = &err
+        else {
+            panic!("expected the typed Duchon refusal, got {err:?}");
+        };
+        assert_eq!(*minimum_power, 9);
+        assert_eq!(*spectral_order, 18.0);
+        let text = err.to_string();
+        assert!(text.contains("2*(p+s) > dimension+2"), "{text}");
+        assert!(text.contains("raise power to >= 9"), "{text}");
+        let advice = err.advice().expect("advice");
+        assert!(advice.contains("at least 9"), "{advice}");
+        // A refusal with no remediation carries none.
+        assert!(BasisError::DegenerateKnots.advice().is_none());
+    }
+
+    #[test]
+    fn a_zero_margin_refusal_states_the_bare_dimension_bound() {
+        let err = BasisError::duchon_smoothness_insufficient("pointwise kernel values", 0, 4, 2, 0.5);
+        let text = err.to_string();
+        assert!(text.contains("2*(p+s) > dimension;"), "{text}");
+        assert!(text.contains("2*(p+s)=5"), "{text}");
+    }
 }
 
 #[cfg(test)]

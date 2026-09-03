@@ -147,48 +147,6 @@ pub const DEVICE_BLOCK_GATE_MIN_ELEMS: usize = gam_gpu::DEFAULT_DICTIONARY_SCORE
 #[cfg(target_os = "linux")]
 const GPU_BLOCK_ROUTE_TILE_ELEMS: usize = gam_gpu::DEFAULT_DICTIONARY_SCORE_TILE_ELEMS;
 
-/// Fail-loud, residency-aware block-route entry point for the block-sparse lane.
-///
-/// Honours the process-wide [`gam_gpu::GpuPolicy`] contract: under
-/// [`gam_gpu::GpuPolicy::Required`] a missing CUDA runtime, a compile/launch fault,
-/// or an `n_rows × K` block below the device break-even all return `Err` instead
-/// of silently degrading to the CPU. [`gam_gpu::GpuPolicy::Auto`] uses the device
-/// when admitted and above break-even, else the CPU oracle; [`gam_gpu::GpuPolicy::Off`]
-/// always the CPU oracle. The returned [`BlockRoutePath`] reports which ran, and
-/// the `usize` is the device→host transfer in bytes (0 on the CPU path).
-///
-/// Both paths select the identical top-`k` block support (the device gate is
-/// bit-identical to [`route_blocks_cpu`]'s), while the device downloads only the
-/// `m × k` `(block, gate)` shortlists.
-///
-/// # Errors
-/// Returns [`gam_gpu::GpuError`] when CUDA admission or execution fails.
-/// One-shot engagement report for the block-gate router, mirroring the atom
-/// lane's [`super::scoring_gpu`] `note_route_engagement` (#1551 "GPU 0%" class:
-/// an `Auto` run that silently declines the device and falls back to the CPU
-/// otherwise leaves no trace of WHY). Warns once per category per process — the
-/// route is per-minibatch, so an unconditional line would spam thousands of
-/// identical entries.
-#[cfg(target_os = "linux")]
-fn note_block_route_engagement(engaged: bool, detail: &str) {
-    use std::sync::Once;
-    static ENGAGED_ONCE: Once = Once::new();
-    static DECLINED_ONCE: Once = Once::new();
-    let once = if engaged {
-        &ENGAGED_ONCE
-    } else {
-        &DECLINED_ONCE
-    };
-    once.call_once(|| {
-        let verdict = if engaged {
-            "device ENGAGED"
-        } else {
-            "device DECLINED - falling back to CPU"
-        };
-        log::warn!("[gam-sae sparse_dict block-gate router] {verdict}: {detail}");
-    });
-}
-
 #[cfg(target_os = "linux")]
 pub fn route_blocks_required(
     rows: ArrayView2<'_, f32>,
@@ -242,7 +200,9 @@ pub fn route_blocks_required(
                 m.saturating_mul(krows)
             ));
         }
-        note_block_route_engagement(
+        gam_gpu::engagement::note_route_engagement(
+        "gam-sae sparse_dict block-gate router",
+        "falling back to CPU",
             false,
             &format!(
                 "block {m}x{krows} = {} elems below the device launch break-even \
@@ -262,7 +222,10 @@ pub fn route_blocks_required(
         gam_gpu::GpuRuntime::resolve(mode)?
     };
     if runtime.is_none() {
-        note_block_route_engagement(false, "Auto admission found no CUDA device");
+        gam_gpu::engagement::note_route_engagement(
+        "gam-sae sparse_dict block-gate router",
+        "falling back to CPU",
+        false, "Auto admission found no CUDA device");
         return Ok((cpu_route(), BlockRoutePath::Cpu, 0));
     }
 
@@ -271,7 +234,9 @@ pub fn route_blocks_required(
     let tile_blocks = (plan.tile_items / b.max(1)).clamp(1, g);
 
     let out = device::route_blocks_device(rows, decoder, b, g, active, tile_blocks)?;
-    note_block_route_engagement(
+    gam_gpu::engagement::note_route_engagement(
+        "gam-sae sparse_dict block-gate router",
+        "falling back to CPU",
         true,
         &format!("block {m}x{krows}, tile_blocks={tile_blocks}, active={active}"),
     );
@@ -284,36 +249,19 @@ pub fn route_blocks_required(
 
 #[cfg(target_os = "linux")]
 mod device {
+    use gam_gpu::backend_probe::CachedBackend;
     use gam_gpu::gpu_error::{GpuError, GpuResultExt};
     use ndarray::ArrayView2;
-    use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
 
-    use cudarc::driver::{CudaContext, CudaModule, CudaStream, LaunchConfig, PushKernelArg};
+    use cudarc::driver::{CudaModule, LaunchConfig, PushKernelArg};
 
-    struct Backend {
-        ctx: Arc<CudaContext>,
-        stream: Arc<CudaStream>,
-        modules: Mutex<HashMap<usize, Arc<CudaModule>>>,
-        max_shared_mem_per_block: usize,
-    }
+    use super::super::score_router_backend::ScoreRouterBackend as Backend;
+
+    static BACKEND: CachedBackend<Backend> = CachedBackend::new();
 
     fn backend() -> Result<&'static Backend, GpuError> {
-        static BACKEND: OnceLock<Result<Backend, GpuError>> = OnceLock::new();
-        BACKEND
-            .get_or_init(|| {
-                let parts = gam_gpu::backend_probe::probe_cuda_backend("sparse_dict_block_gate")?;
-                Ok(Backend {
-                    ctx: parts.ctx,
-                    stream: parts.stream,
-                    modules: Mutex::new(HashMap::new()),
-                    max_shared_mem_per_block: gam_gpu::GpuRuntime::require()?
-                        .selected_device()
-                        .max_shared_mem_per_block,
-                })
-            })
-            .as_ref()
-            .map_err(GpuError::clone)
+        BACKEND.get_or_probe("sparse_dict_block_gate", Backend::from_parts)
     }
 
     /// Combined NVRTC source: the atom lane's bit-exact score GEMM + top-`s` fold
@@ -328,21 +276,8 @@ mod device {
     }
 
     fn module_for(b: &Backend, p: usize) -> Result<Arc<CudaModule>, GpuError> {
-        if let Ok(guard) = b.modules.lock() {
-            if let Some(m) = guard.get(&p) {
-                return Ok(m.clone());
-            }
-        }
-        let ptx = gam_gpu::device_cache::compile_ptx_arch(combined_kernel_source(p))
-            .gpu_ctx_with(|err| format!("sparse_dict block-gate NVRTC (P={p}): {err}"))?;
-        let module = b
-            .ctx
-            .load_module(ptx)
-            .gpu_ctx("sparse_dict block-gate module load")?;
-        if let Ok(mut guard) = b.modules.lock() {
-            guard.entry(p).or_insert_with(|| module.clone());
-        }
-        Ok(module)
+        b.modules
+            .get_or_compile(&b.ctx, p, "sparse_dict block-gate", combined_kernel_source)
     }
 
     const TOP_S_FOLD_THREADS: u32 = 32;

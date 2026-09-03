@@ -20,20 +20,6 @@ pub(super) const PIRLS_ETA_ABS_CAP: f64 = 40.0;
 pub(crate) const NEGBIN_THETA_MIN: f64 = 1e-3;
 pub(crate) const NEGBIN_THETA_MAX: f64 = 1e6;
 
-#[inline]
-fn row_unrepresentable(
-    row: usize,
-    quantity: &'static str,
-    eta: f64,
-    value: f64,
-) -> EstimationError {
-    EstimationError::PirlsRowGeometryUnrepresentable {
-        row,
-        quantity,
-        eta,
-        value,
-    }
-}
 
 fn certified_log_means(eta: &Array1<f64>) -> Result<Vec<f64>, EstimationError> {
     let rows: Vec<Result<f64, EstimationError>> = eta
@@ -48,7 +34,7 @@ fn certified_prior_weight(row: usize, eta: f64, weight: f64) -> Result<f64, Esti
     if weight.is_finite() && weight >= 0.0 {
         Ok(weight)
     } else {
-        Err(row_unrepresentable(row, "prior weight", eta, weight))
+        Err(EstimationError::pirls_row_geometry_unrepresentable(row, "prior weight", eta, weight))
     }
 }
 
@@ -90,13 +76,13 @@ pub(crate) fn estimate_gamma_shape_from_eta(
                 return Ok((0.0, 0.0));
             }
             if !(y[i].is_finite() && y[i] > 0.0) {
-                return Err(row_unrepresentable(i, "Gamma response", eta[i], y[i]));
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(i, "Gamma response", eta[i], y[i]));
             }
             let ratio = y[i] / means[i];
             let target = ratio - ratio.ln() - 1.0;
             let contribution = wi * target;
             if !(target.is_finite() && target >= 0.0 && contribution.is_finite()) {
-                return Err(row_unrepresentable(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     i,
                     "Gamma shape statistic",
                     eta[i],
@@ -167,7 +153,7 @@ pub(crate) fn estimate_beta_phi_from_eta(
                 return Ok((0.0, 0.0));
             }
             if !(y[i].is_finite() && y[i] > 0.0 && y[i] < 1.0) {
-                return Err(row_unrepresentable(i, "Beta response", eta[i], y[i]));
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(i, "Beta response", eta[i], y[i]));
             }
             if !eta[i].is_finite() {
                 return Err(EstimationError::InverseLinkDomainViolation {
@@ -179,12 +165,12 @@ pub(crate) fn estimate_beta_phi_from_eta(
             }
             let jet = logit_inverse_link_jet5(eta[i]);
             if !(jet.mu > 0.0 && jet.mu < 1.0 && jet.d1.is_finite() && jet.d1 > 0.0) {
-                return Err(row_unrepresentable(i, "Beta mean/variance", eta[i], jet.d1));
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(i, "Beta mean/variance", eta[i], jet.d1));
             }
             let resid = y[i] - jet.mu;
             let statistic = wi * resid * resid / jet.d1;
             if !(statistic.is_finite() && statistic >= 0.0) {
-                return Err(row_unrepresentable(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     i,
                     "Beta precision statistic",
                     eta[i],
@@ -227,7 +213,7 @@ pub(crate) fn estimate_tweedie_phi_from_eta(
                 return Ok((0.0, 0.0));
             }
             if !(y[i].is_finite() && y[i] >= 0.0) {
-                return Err(row_unrepresentable(i, "Tweedie response", eta[i], y[i]));
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(i, "Tweedie response", eta[i], y[i]));
             }
             let variance = means[i].powf(p);
             let resid = y[i] - means[i];
@@ -237,7 +223,7 @@ pub(crate) fn estimate_tweedie_phi_from_eta(
                 && statistic.is_finite()
                 && statistic >= 0.0)
             {
-                return Err(row_unrepresentable(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     i,
                     "Tweedie dispersion statistic",
                     eta[i],
@@ -284,7 +270,7 @@ fn negbin_theta_score_and_info_from_means(
             }
             let yi = y[i];
             if !valid_count_response(yi) {
-                return Err(row_unrepresentable(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     i,
                     "negative-binomial response",
                     eta[i],
@@ -303,7 +289,7 @@ fn negbin_theta_score_and_info_from_means(
             let score = wi * s;
             let info = wi * info_row;
             if !(score.is_finite() && info.is_finite()) {
-                return Err(row_unrepresentable(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     i,
                     "negative-binomial theta score/information",
                     eta[i],
@@ -341,7 +327,7 @@ pub(crate) fn estimate_negbin_theta_from_eta(
                 return Ok((0.0, 0.0));
             }
             if !valid_count_response(y[i]) {
-                return Err(row_unrepresentable(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     i,
                     "negative-binomial response",
                     eta[i],
@@ -352,7 +338,7 @@ pub(crate) fn estimate_negbin_theta_from_eta(
             let pearson = wi * resid * resid / means[i];
             let weighted_mu = wi * means[i];
             if !(pearson.is_finite() && pearson >= 0.0 && weighted_mu.is_finite()) {
-                return Err(row_unrepresentable(
+                return Err(EstimationError::pirls_row_geometry_unrepresentable(
                     i,
                     "negative-binomial seed statistic",
                     eta[i],

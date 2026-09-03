@@ -473,7 +473,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
         time_basis_cfg,
         Some((
             effective_config.time_num_internal_knots,
-            effective_config.ridge_lambda,
+            effective_config.time_smooth_lambda,
         )),
     )?;
     let resolved_time_cfg = resolved_survival_time_basis_config_from_build(
@@ -541,11 +541,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             SurvivalCovariateTermBlockTemplate::Static
         };
 
-        let kappa_options = {
-            let mut opts = SpatialLengthScaleOptimizationOptions::default();
-            opts.pilot_subsample_threshold = args.pilot_subsample_threshold;
-            opts
-        };
+        let kappa_options = SpatialLengthScaleOptimizationOptions::default();
         let optimize_inverse_link = match &survival_inverse_link {
             InverseLink::Sas(_) | InverseLink::BetaLogistic(_) => true,
             InverseLink::Mixture(state) => !state.rho.is_empty(),
@@ -932,11 +928,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
 
         let frailty = fit_frailty_spec_from_survival_args(&args, "survival marginal-slope")?;
         frailty.validate_for_marginal_slope()?;
-        let kappa_options = {
-            let mut opts = SpatialLengthScaleOptimizationOptions::default();
-            opts.pilot_subsample_threshold = args.pilot_subsample_threshold;
-            opts
-        };
+        let kappa_options = SpatialLengthScaleOptimizationOptions::default();
         let mut options = gam::families::custom_family::BlockwiseFitOptions::default();
         options.compute_covariance = true;
         // Freeze the complete time stack once. Nonlinear baseline coordinates

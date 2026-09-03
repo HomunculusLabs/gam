@@ -136,6 +136,19 @@ use gam_math::probability::{
     standard_normal_quantile_from_log_cdf,
 };
 use gam_problem::LinearInequalityConstraints;
+
+/// `ln(1 − e^d)` for `d`, the log of the fraction of a half-line's mass that an
+/// upper limit removes. `d = −∞` is the unbounded coordinate and returns exactly
+/// `0`, which is what lets an infinite upper limit reproduce the half-line
+/// arithmetic bit for bit; a fraction that rounded to one or above leaves no
+/// mass, `−∞`.
+#[inline]
+fn log1mexp_of_log_removed_mass(d: f64) -> f64 {
+    if d >= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    gam_math::probability::log1mexp_positive(-d)
+}
 use ndarray::{Array1, Array2, ArrayView2};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -2641,7 +2654,7 @@ fn truncated_standard_normal(low: f64, high: f64) -> Option<TruncatedStandardNor
     if !log_tail_a.is_finite() {
         return None;
     }
-    let log_mass = log_tail_a + log1mexp(log_tail_b - log_tail_a);
+    let log_mass = log_tail_a + log1mexp_of_log_removed_mass(log_tail_b - log_tail_a);
     if !log_mass.is_finite() {
         return None;
     }
@@ -3337,7 +3350,7 @@ impl OrthantRule {
                 // `removed ≤ 0` is the log of the fraction of the half-line's
                 // mass that the far wall takes away.
                 let removed = log_tail_high - log_tail_low;
-                let log_mass = log_tail_low + log1mexp(removed);
+                let log_mass = log_tail_low + log1mexp_of_log_removed_mass(removed);
                 if !log_mass.is_finite() {
                     // The slab is narrower than double precision can resolve at
                     // this conditional position; it carries no representable
@@ -3649,27 +3662,6 @@ fn projection_quantile(
     }
 }
 
-/// `log(1 − exp(d))` for `d ≤ 0`, evaluated on whichever of the two branches
-/// keeps the cancellation out of the result.
-///
-/// `d` is always the log of the fraction of a half-line's mass that an upper
-/// limit removes, so `d = −∞` is the unbounded coordinate and returns exactly
-/// `0`. That exactness is what makes an infinite upper limit reproduce the
-/// half-line arithmetic bit for bit rather than merely closely.
-fn log1mexp(d: f64) -> f64 {
-    if d == f64::NEG_INFINITY {
-        return 0.0;
-    }
-    if d >= 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if d > -std::f64::consts::LN_2 {
-        (-d.exp_m1()).ln()
-    } else {
-        (-d.exp()).ln_1p()
-    }
-}
-
 /// Closed-form moments of `N(mean, variance)` restricted to `[0, upper]`.
 ///
 /// `upper = f64::INFINITY` is the half-line, and takes the inverse-Mills branch
@@ -3727,7 +3719,7 @@ fn scalar_truncated_moments(
     };
     let log_tail_low = normal_logsf(low);
     let log_tail_high = normal_logsf(high);
-    let log_mass = log_tail_low + log1mexp(log_tail_high - log_tail_low);
+    let log_mass = log_tail_low + log1mexp_of_log_removed_mass(log_tail_high - log_tail_low);
     if !log_mass.is_finite() {
         return Err(format!(
             "scalar truncated moments: the interval [0, {upper:.6e}] around mean {mean:.6e} \

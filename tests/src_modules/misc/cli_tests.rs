@@ -1,8 +1,8 @@
 use super::{
-    BlockRole, BoundedCoefficientPriorSpec, CliFirthValidation, DataSchema,
+    BlockRole, BoundedCoefficientPriorSpec, CliError, CliFirthValidation, DataSchema,
     FAMILY_GAUSSIAN_LOCATION_SCALE, FamilyArg, FittedFamily, LikelihoodSpec, LinkChoice, LinkMode,
     ResponseFamily, SavedFitSummary, SavedModel, SurvivalArgs, SurvivalBaselineTarget,
-    SurvivalLikelihoodMode, SurvivalTimeBasisConfig, build_survival_time_basis, classify_cli_error,
+    SurvivalLikelihoodMode, SurvivalTimeBasisConfig, build_survival_time_basis,
     collect_smooth_structure_warnings, compact_fit_result_for_batch,
     compact_saved_multiblock_fit_result, compute_probit_q0_from_eta, core_saved_fit_result,
     covariance_from_model, effectivelinkwiggle_formulaspec, family_arg_canonical_name,
@@ -645,7 +645,6 @@ fn location_scale_fit_args(
         time_basis: "ispline".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -657,7 +656,6 @@ fn location_scale_fit_args(
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        pilot_subsample_threshold: 0,
         out: Some(out),
     }
 }
@@ -1059,7 +1057,6 @@ fn issue_2116_cli_standard_fit_gates_duchon_operator_penalties_for_poisson() {
         time_basis: "ispline".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -1071,7 +1068,6 @@ fn issue_2116_cli_standard_fit_gates_duchon_operator_penalties_for_poisson() {
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
     .unwrap_or_else(|e| {
@@ -1204,7 +1200,6 @@ fn cli_and_engine_agree_on_the_left_truncated_survival_anchor_2631() {
         time_basis: "ispline".to_string(),
         time_degree: 2,
         time_num_internal_knots: 4,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -1216,7 +1211,6 @@ fn cli_and_engine_agree_on_the_left_truncated_survival_anchor_2631() {
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
     .unwrap_or_else(|e| {
@@ -1322,7 +1316,6 @@ fn cli_survival_time_anchor_is_honored_on_the_default_transformation_route_2631(
         time_basis: "ispline".to_string(),
         time_degree: 2,
         time_num_internal_knots: 4,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -1334,7 +1327,6 @@ fn cli_survival_time_anchor_is_honored_on_the_default_transformation_route_2631(
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
     .unwrap_or_else(|e| {
@@ -1425,7 +1417,6 @@ fn cli_weibull_route_anchors_left_truncated_data_and_honors_the_override_2631() 
             time_basis: "ispline".to_string(),
             time_degree: 3,
             time_num_internal_knots: 8,
-            time_smooth_lambda: 1e-2,
             ridge_lambda: 1e-6,
             threshold_time_k: None,
             threshold_time_degree: 3,
@@ -1437,7 +1428,6 @@ fn cli_weibull_route_anchors_left_truncated_data_and_honors_the_override_2631() 
             scale_dimensions: false,
             precompute_conformal: true,
             persistent_warm_start_root: None,
-            pilot_subsample_threshold: 0,
             out: Some(model_path.clone()),
         })
         .unwrap_or_else(|e| {
@@ -1583,7 +1573,6 @@ fn cli_surv_predict_noise_routes_to_survival_location_scale() {
         time_basis: "ispline".to_string(),
         time_degree: 2,
         time_num_internal_knots: 4,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -1595,7 +1584,6 @@ fn cli_surv_predict_noise_routes_to_survival_location_scale() {
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
     .unwrap_or_else(|e| {
@@ -1836,7 +1824,6 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
         time_basis: "ispline".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -1848,7 +1835,6 @@ fn cli_bernoulli_marginal_slope_fit_saves_covariance_so_default_predict_succeeds
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     })
     .unwrap_or_else(|e| {
@@ -1953,7 +1939,6 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_main_formula() {
         time_basis: "ispline".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -1965,7 +1950,6 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_main_formula() {
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        pilot_subsample_threshold: 0,
         out: None,
     })
     .expect_err("main formula should reject z-column reuse");
@@ -2014,7 +1998,6 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_slope_formula() {
         time_basis: "ispline".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -2026,7 +2009,6 @@ fn cli_bernoulli_marginal_slope_rejects_z_column_in_slope_formula() {
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        pilot_subsample_threshold: 0,
         out: None,
     })
     .expect_err("slope formula should reject z-column reuse");
@@ -2505,7 +2487,6 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         time_basis: "ispline".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -2517,7 +2498,6 @@ fn cli_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     };
     run_fit(fit_args).unwrap_or_else(|e| panic!("{} failed: {:?}", "fit should succeed", e));
@@ -2657,7 +2637,6 @@ fn binomial_link_fit_args(data: PathBuf, out: PathBuf, formula: &str) -> FitArgs
         time_basis: "ispline".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -2669,7 +2648,6 @@ fn binomial_link_fit_args(data: PathBuf, out: PathBuf, formula: &str) -> FitArgs
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        pilot_subsample_threshold: 0,
         out: Some(out),
     }
 }
@@ -2820,7 +2798,6 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         time_basis: "ispline".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -2832,7 +2809,6 @@ fn cli_firth_fit_saves_covariance_so_default_binomial_predict_succeeds() {
         scale_dimensions: false,
         precompute_conformal: true,
         persistent_warm_start_root: None,
-        pilot_subsample_threshold: 0,
         out: Some(model_path.clone()),
     };
     run_fit(fit_args).unwrap_or_else(|e| panic!("{} failed: {:?}", "Firth fit should succeed", e));
@@ -3144,51 +3120,46 @@ fn mcwiggle_posterior_mean(
     acc / draws.max(1) as f64
 }
 
+
+
+
 #[test]
-fn classify_cli_errorspecializes_thin_plate_knot_count_error() {
-    let err = classify_cli_error(
-            "failed to build term collection design: Invalid input: thin-plate spline requires at least d+1 knots (7), got 3"
-                .to_string(),
-        );
-    let advice = err
-        .advice()
-        .unwrap_or_else(|| panic!("{} failed", "thin-plate advice"));
-    assert!(advice.contains("Increase the number of centers/knots"));
-    assert!(!advice.contains("Shape mismatch detected"));
+fn cli_error_carries_the_typed_advice_of_a_duchon_smoothness_refusal() {
+    // The Duchon admissibility message mentions "dimension=N" literally; the
+    // advice comes from the variant, so no text lookalike can misroute it.
+    let err = CliError::from(gam::estimate::EstimationError::BasisError(
+        gam::basis::BasisError::duchon_smoothness_insufficient(
+            "collision derivative phi^(2) psi triplet",
+            2,
+            16,
+            1,
+            8.0,
+        ),
+    ));
+    let advice = err.advice().expect("a Duchon smoothness refusal carries advice");
+    assert!(advice.contains("power"), "{advice}");
+    assert!(advice.contains("at least 9"), "{advice}");
+    assert!(err.to_string().contains("2*(p+s)=18"), "{err}");
 }
 
 #[test]
-fn classify_cli_errorspecializes_duchon_power_too_low() {
-    // A Duchon admissibility error mentions "dimension=N" literally; ensure
-    // it is NOT misclassified as a data-shape mismatch and that the advice
-    // points at raising the power.
-    let err = classify_cli_error(
-        "transformation-normal fit failed: Underlying basis function generation failed: \
-             Invalid input: Duchon collision derivative phi^(2) psi triplet requires \
-             2*(p+s) > dimension+2; got 2*(p+s)=18, dimension=16, p=1, s=8. \
-             The exact two-block / transformation-normal path needs analytic length-scale \
-             derivatives of the kernel, which are finite only for a smoother spline: \
-             raise power to >= 9 (or reduce the joint smooth's dimension)."
-            .to_string(),
+fn cli_error_carries_the_typed_advice_of_a_conditioning_refusal_and_none_for_bare_text() {
+    let err = CliError::from(
+        gam::estimate::EstimationError::PrefitRankDeficientDesignDetected {
+            rank: 2,
+            num_unpenalized_columns: 3,
+            min_eigenvalue: 0.0,
+            tolerance: 1e-12,
+            column_indices: vec![2],
+        },
     );
-    let advice = err
-        .advice()
-        .unwrap_or_else(|| panic!("{} failed", "duchon advice"));
-    assert!(advice.contains("power"));
-    assert!(!advice.contains("Shape mismatch detected"));
-}
-
-#[test]
-fn classify_cli_errorspecializes_thin_plate_knot_error() {
-    let err = classify_cli_error(
-            "failed to build term collection design: Invalid input: thin-plate spline requires at least d+1 knots (13), got 12"
-                .to_string(),
-        );
-    let advice = err
-        .advice()
-        .unwrap_or_else(|| panic!("{} failed", "thin-plate advice"));
-    assert!(advice.contains("Increase the number of centers/knots"));
-    assert!(!advice.contains("Shape mismatch detected"));
+    let advice = err.advice().expect("a rank-deficiency refusal carries advice");
+    assert!(advice.contains("conditioning"), "{advice}");
+    assert!(advice.contains("[2]"), "{advice}");
+    // A message with no typed identity is printed as it is, with no guessed
+    // remediation — even when it happens to contain "dimension".
+    let bare = CliError::from("design dimension=16 could not be assembled".to_string());
+    assert!(bare.advice().is_none());
 }
 
 #[test]
@@ -5256,7 +5227,6 @@ fn parse_survival_time_basis_accepts_ispline() {
         time_basis: "ispline".to_string(),
         time_degree: 2,
         time_num_internal_knots: 6,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -5265,7 +5235,6 @@ fn parse_survival_time_basis_accepts_ispline() {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: None,
         slope_formula: None,
         z_column: None,
@@ -5281,7 +5250,7 @@ fn parse_survival_time_basis_accepts_ispline() {
         &args.time_basis,
         args.time_degree,
         args.time_num_internal_knots,
-        args.time_smooth_lambda,
+        gam::families::fit_orchestration::FitConfig::default().time_smooth_lambda,
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "parse ispline time basis", e));
     assert!(matches!(cfg, SurvivalTimeBasisConfig::ISpline { .. }));
@@ -5311,7 +5280,6 @@ fn parse_survival_time_basis_rejects_nonstructural_bases() {
         time_basis: "linear".to_string(),
         time_degree: 2,
         time_num_internal_knots: 6,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -5320,7 +5288,6 @@ fn parse_survival_time_basis_rejects_nonstructural_bases() {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: None,
         slope_formula: None,
         z_column: None,
@@ -5336,7 +5303,7 @@ fn parse_survival_time_basis_rejects_nonstructural_bases() {
         &args.time_basis,
         args.time_degree,
         args.time_num_internal_knots,
-        args.time_smooth_lambda,
+        gam::families::fit_orchestration::FitConfig::default().time_smooth_lambda,
     )
     .expect_err("linear survival time basis should be rejected");
     assert!(err.contains("structural"));
@@ -5348,7 +5315,7 @@ fn parse_survival_time_basis_rejects_nonstructural_bases() {
         &args.time_basis,
         args.time_degree,
         args.time_num_internal_knots,
-        args.time_smooth_lambda,
+        gam::families::fit_orchestration::FitConfig::default().time_smooth_lambda,
     )
     .expect_err("bspline survival time basis should be rejected");
     assert!(err.contains("structural"));
@@ -6713,7 +6680,6 @@ fn parse_survival_inverse_link_accepts_sas_init() {
         time_basis: "linear".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -6722,7 +6688,6 @@ fn parse_survival_inverse_link_accepts_sas_init() {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: None,
         slope_formula: None,
         z_column: None,
@@ -6776,7 +6741,6 @@ fn survival_args_for_inverse_link_test() -> SurvivalArgs {
         time_basis: "linear".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -6785,7 +6749,6 @@ fn survival_args_for_inverse_link_test() -> SurvivalArgs {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: None,
         slope_formula: None,
         z_column: None,
@@ -6900,7 +6863,6 @@ fn parse_survival_inverse_link_supports_loglog_and_cauchit() {
         time_basis: "linear".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -6909,7 +6871,6 @@ fn parse_survival_inverse_link_supports_loglog_and_cauchit() {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: None,
         slope_formula: None,
         z_column: None,
@@ -6985,7 +6946,6 @@ fn parse_survival_inverse_link_accepts_flexible_standard_links() {
         time_basis: "linear".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -6994,7 +6954,6 @@ fn parse_survival_inverse_link_accepts_flexible_standard_links() {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: None,
         slope_formula: None,
         z_column: None,
@@ -7036,7 +6995,6 @@ fn parse_survival_inverse_link_rejects_flexible_blended_links() {
         time_basis: "linear".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -7045,7 +7003,6 @@ fn parse_survival_inverse_link_rejects_flexible_blended_links() {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: None,
         slope_formula: None,
         z_column: None,
@@ -7088,7 +7045,6 @@ fn parse_survival_inverse_link_reports_survival_specific_supported_links() {
         time_basis: "linear".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -7097,7 +7053,6 @@ fn parse_survival_inverse_link_reports_survival_specific_supported_links() {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: None,
         slope_formula: None,
         z_column: None,
@@ -7142,7 +7097,6 @@ fn parse_survival_inverse_link_accepts_loglog_and_cauchit() {
         time_basis: "linear".to_string(),
         time_degree: 3,
         time_num_internal_knots: 8,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -7151,7 +7105,6 @@ fn parse_survival_inverse_link_accepts_loglog_and_cauchit() {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: None,
         slope_formula: None,
         z_column: None,
@@ -7410,7 +7363,6 @@ fn survival_integration_small_dataset_converges() {
         time_basis: "ispline".to_string(),
         time_degree: 2,
         time_num_internal_knots: 4,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -7419,7 +7371,6 @@ fn survival_integration_small_dataset_converges() {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: Some(out_path.clone()),
         slope_formula: None,
         z_column: None,
@@ -7478,7 +7429,6 @@ fn survival_timewiggle_with_parametric_baseline_skips_base_basis_requirement() {
         time_basis: "ispline".to_string(),
         time_degree: 2,
         time_num_internal_knots: 4,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -7487,7 +7437,6 @@ fn survival_timewiggle_with_parametric_baseline_skips_base_basis_requirement() {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: Some(out_path.clone()),
         slope_formula: None,
         z_column: None,
@@ -7550,7 +7499,6 @@ fn survival_location_scale_rejects_linkwiggle_for_mixture_inverse_link() {
         time_basis: "ispline".to_string(),
         time_degree: 2,
         time_num_internal_knots: 4,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -7559,7 +7507,6 @@ fn survival_location_scale_rejects_linkwiggle_for_mixture_inverse_link() {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: None,
         slope_formula: None,
         z_column: None,
@@ -7618,7 +7565,6 @@ fn survival_location_scale_saved_fit_preserves_linkwiggle_metadata() {
         time_basis: "ispline".to_string(),
         time_degree: 2,
         time_num_internal_knots: 4,
-        time_smooth_lambda: 1e-2,
         ridge_lambda: 1e-6,
         threshold_time_k: None,
         threshold_time_degree: 3,
@@ -7627,7 +7573,6 @@ fn survival_location_scale_saved_fit_preserves_linkwiggle_metadata() {
         slope_time_k: None,
         slope_time_degree: 3,
         scale_dimensions: false,
-        pilot_subsample_threshold: 0,
         out: Some(out_path.clone()),
         slope_formula: None,
         z_column: None,
@@ -8278,7 +8223,6 @@ fn probe_2695_live_warp() {
             time_basis: "ispline".to_string(),
             time_degree: 3,
             time_num_internal_knots: 6,
-            time_smooth_lambda: 1e-2,
             ridge_lambda: 1e-6,
             threshold_time_k: None,
             threshold_time_degree: 3,
@@ -8287,7 +8231,6 @@ fn probe_2695_live_warp() {
             slope_time_k: None,
             slope_time_degree: 3,
             scale_dimensions: false,
-            pilot_subsample_threshold: 0,
             out: Some(out_path.clone()),
             slope_formula: None,
             z_column: None,

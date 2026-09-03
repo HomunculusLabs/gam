@@ -113,7 +113,6 @@ fn fit_request_document_from_fit_args(
         noise_offset: args.noise_offset_column.clone(),
         offset: args.offset_column.clone(),
         analytic_penalties,
-        pilot_subsample_threshold: Some(args.pilot_subsample_threshold),
         precision_hyperpriors,
         precompute_conformal: Some(args.precompute_conformal),
         persistent_warm_start_root: args.persistent_warm_start_root.clone(),
@@ -136,7 +135,6 @@ fn fit_request_document_from_fit_args(
         time_basis: Some(args.time_basis.clone()),
         time_degree: Some(args.time_degree),
         time_num_internal_knots: Some(args.time_num_internal_knots),
-        time_smooth_lambda: Some(args.time_smooth_lambda),
         transformation_normal: args.transformation_normal.then_some(true),
         weights: args.weights_column.clone(),
         z_column: args.z_column.clone(),
@@ -178,7 +176,6 @@ pub(crate) fn fit_config_from_survival_args(args: &SurvivalArgs) -> Result<FitCo
         time_basis: args.time_basis.clone(),
         time_degree: args.time_degree,
         time_num_internal_knots: args.time_num_internal_knots,
-        time_smooth_lambda: args.time_smooth_lambda,
         // `SurvivalArgs` already carries a resolved concrete mode; this is a
         // survival fit, so the explicit `Some` is correct.
         survival_likelihood: Some(args.survival_likelihood.clone()),
@@ -197,10 +194,7 @@ pub(crate) fn fit_config_from_survival_args(args: &SurvivalArgs) -> Result<FitCo
         slope_formula: args.slope_formula.clone(),
         z_column: args.z_column.clone(),
         scale_dimensions: args.scale_dimensions,
-        spatial_optimization: SpatialLengthScaleOptimizationOptions {
-            pilot_subsample_threshold: args.pilot_subsample_threshold,
-            ..SpatialLengthScaleOptimizationOptions::default()
-        },
+        spatial_optimization: SpatialLengthScaleOptimizationOptions::default(),
         ridge_lambda: args.ridge_lambda,
         frailty,
         persistent_warm_start_store: args.persistent_warm_start_store.clone(),
@@ -327,7 +321,6 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
             time_basis: fit_config.time_basis.clone(),
             time_degree: fit_config.time_degree,
             time_num_internal_knots: fit_config.time_num_internal_knots,
-            time_smooth_lambda: fit_config.time_smooth_lambda,
             ridge_lambda: fit_config.ridge_lambda,
             threshold_time_k: fit_config.threshold_time_k,
             threshold_time_degree: fit_config.threshold_time_degree,
@@ -336,7 +329,6 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
             slope_time_k: fit_config.slope_time_k,
             slope_time_degree: fit_config.slope_time_degree,
             scale_dimensions: fit_config.scale_dimensions,
-            pilot_subsample_threshold: args.pilot_subsample_threshold,
             out: args.out.clone(),
             slope_formula: fit_config.slope_formula.clone(),
             z_column: fit_config.z_column.clone(),
@@ -680,8 +672,6 @@ fn run_canonical_standard_fit(
             } else {
                 "standard"
             };
-            let spatial_warnings =
-                collect_smooth_structure_warnings(&result.resolvedspec, &dataset.headers, "model");
             print_spatial_aniso_scales(&result.resolvedspec);
             cli_out!(
                 "{} fit | family={} | status={} | iterations={} | terms={} | edf={:.3} | loglik={:.6e} | objective={}",
@@ -707,7 +697,6 @@ fn run_canonical_standard_fit(
                 apply_request_metadata(&mut payload, fit_config, outcome.inference_notes);
                 write_payload_json(out, payload)?;
             }
-            emit_smooth_structure_warnings("fit-end", &spatial_warnings);
             Ok(())
         }
         FitResult::SplineScan(scan) => {
@@ -918,11 +907,7 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
     // own "fit without inference if only point estimates are needed" advice
     // impossible to follow.
     options.compute_covariance = args.inference;
-    let kappa_options = {
-        let mut opts = SpatialLengthScaleOptimizationOptions::default();
-        opts.pilot_subsample_threshold = args.pilot_subsample_threshold;
-        opts
-    };
+    let kappa_options = SpatialLengthScaleOptimizationOptions::default();
     let phase_start = std::time::Instant::now();
     log::info!(
         "[PHASE] bernoulli-margslope fit start n={}",
@@ -1091,11 +1076,7 @@ pub(crate) fn run_fit_transformation_normal(
     let config = TransformationNormalConfig::default();
     let weights = resolve_weight_column(ds, col_map, args.weights_column.as_deref())?;
     let offset = resolve_offset_column(ds, col_map, args.offset_column.as_deref())?;
-    let kappa_options = {
-        let mut opts = SpatialLengthScaleOptimizationOptions::default();
-        opts.pilot_subsample_threshold = args.pilot_subsample_threshold;
-        opts
-    };
+    let kappa_options = SpatialLengthScaleOptimizationOptions::default();
 
     let phase_start = std::time::Instant::now();
     log::info!(
@@ -1209,11 +1190,7 @@ pub(crate) fn run_fitwith_predict_noise(
     ));
     emit_smooth_structure_warnings("fit-start", &spatial_usagewarnings);
     print_inference_summary(inference_notes);
-    let kappa_options = {
-        let mut opts = SpatialLengthScaleOptimizationOptions::default();
-        opts.pilot_subsample_threshold = args.pilot_subsample_threshold;
-        opts
-    };
+    let kappa_options = SpatialLengthScaleOptimizationOptions::default();
     let weights = resolve_weight_column(ds, col_map, args.weights_column.as_deref())?;
     let mean_offset = resolve_offset_column(ds, col_map, args.offset_column.as_deref())?;
     let noise_offset = resolve_offset_column(ds, col_map, args.noise_offset_column.as_deref())?;

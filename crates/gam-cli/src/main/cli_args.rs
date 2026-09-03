@@ -225,7 +225,6 @@ pub(crate) struct FitArgs {
             "time_basis",
             "time_degree",
             "time_num_internal_knots",
-            "time_smooth_lambda",
             "ridge_lambda",
             "threshold_time_k",
             "threshold_time_degree",
@@ -238,7 +237,6 @@ pub(crate) struct FitArgs {
             "precompute_conformal",
             "inference",
             "persistent_warm_start_root",
-            "pilot_subsample_threshold",
             "ctn_stage1",
             "precision_hyperpriors",
             "latent_coordinates",
@@ -369,9 +367,6 @@ pub(crate) struct FitArgs {
     /// Number of internal knots for non-linear survival time bases.
     #[arg(long = "time-num-internal-knots", default_value_t = 8, value_parser = parse_positive_usize_cli)]
     pub(crate) time_num_internal_knots: usize,
-    /// Initial smoothing lambda for survival time basis penalty.
-    #[arg(long = "time-smooth-lambda", default_value_t = 1e-2, value_parser = parse_nonnegative_f64_cli)]
-    pub(crate) time_smooth_lambda: f64,
     /// Ridge regularization for survival solver.
     #[arg(long = "ridge-lambda", default_value_t = 1e-6, value_parser = parse_nonnegative_f64_cli)]
     pub(crate) ridge_lambda: f64,
@@ -450,12 +445,6 @@ pub(crate) struct FitArgs {
     /// fit disk-silent; no ambient temp/cache path is used.
     #[arg(long = "persistent-warm-start-root", value_name = "DIR")]
     pub(crate) persistent_warm_start_root: Option<PathBuf>,
-    /// Subsample threshold for automatic pilot-fit spatial length-scale optimization.
-    /// When n exceeds 2x this value, κ/anisotropy optimization runs on a
-    /// spatially stratified subsample to initialize the geometry, then the
-    /// full dataset re-optimizes κ/anisotropy jointly. Set to 0 to disable.
-    #[arg(long, value_name = "N", default_value_t = 10_000)]
-    pub(crate) pilot_subsample_threshold: usize,
     #[arg(long = "out", required = true)]
     pub(crate) out: Option<PathBuf>,
 }
@@ -543,7 +532,6 @@ pub(crate) struct SurvivalArgs {
     pub(crate) time_basis: String,
     pub(crate) time_degree: usize,
     pub(crate) time_num_internal_knots: usize,
-    pub(crate) time_smooth_lambda: f64,
     pub(crate) ridge_lambda: f64,
     pub(crate) threshold_time_k: Option<usize>,
     pub(crate) threshold_time_degree: usize,
@@ -552,7 +540,6 @@ pub(crate) struct SurvivalArgs {
     pub(crate) slope_time_k: Option<usize>,
     pub(crate) slope_time_degree: usize,
     pub(crate) scale_dimensions: bool,
-    pub(crate) pilot_subsample_threshold: usize,
     pub(crate) out: Option<PathBuf>,
     pub(crate) slope_formula: Option<String>,
     pub(crate) z_column: Option<String>,

@@ -802,6 +802,11 @@ pub fn erfcx_nonnegative(x: f64) -> f64 {
 #[inline]
 pub fn log1mexp_positive(a: f64) -> f64 {
     assert!(a >= 0.0, "log1mexp_positive requires a >= 0: a={a}");
+    if a == f64::INFINITY {
+        // `e^{-∞}` is an exact zero, so the result is an exact (positive) zero
+        // rather than the `-0.0` that `ln_1p(-0.0)` would return.
+        return 0.0;
+    }
     if a > core::f64::consts::LN_2 {
         (-(-a).exp()).ln_1p()
     } else if a > 0.0 {

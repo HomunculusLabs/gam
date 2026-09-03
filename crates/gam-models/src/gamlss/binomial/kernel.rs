@@ -95,18 +95,6 @@ pub(crate) fn nonwiggle_q_directional(
     }
 }
 
-#[inline]
-pub(crate) fn log1mexp_neg_positive(z: f64) -> f64 {
-    assert!(z >= 0.0);
-    if z == 0.0 {
-        f64::NEG_INFINITY
-    } else if z <= std::f64::consts::LN_2 {
-        (-(-z).exp_m1()).ln()
-    } else {
-        (1.0 - (-z).exp()).ln()
-    }
-}
-
 /// Classical binomial deviance `2·Σ wᵢ [y ln(y/μ) + (1−y) ln((1−y)/(1−μ))]` at
 /// the fitted probabilities `mu` — the number every standard binomial fit
 /// reports, shared by the location-scale family, its link-wiggle form, and
@@ -118,9 +106,7 @@ pub(crate) fn binomial_classical_deviance(
     weights: &Array1<f64>,
     mu: &Array1<f64>,
 ) -> Result<f64, String> {
-    fn xlogy(x: f64, y: f64) -> f64 {
-        if x == 0.0 { 0.0 } else { x * y.ln() }
-    }
+    use gam_math::special::xlogy;
     if y.len() != weights.len() || y.len() != mu.len() {
         return Err(format!(
             "binomial classical deviance size mismatch: y={}, weights={}, mu={}",
@@ -217,7 +203,7 @@ pub(crate) fn binomial_location_scale_log_likelihood(
             } else if z.is_infinite() {
                 0.0
             } else {
-                log1mexp_neg_positive(z)
+                gam_math::probability::log1mexp_positive(z)
             };
             let log_survival = -z;
             let ll = weight * (y * log_p + (1.0_f64 - y) * log_survival);
