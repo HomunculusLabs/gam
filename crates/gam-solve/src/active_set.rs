@@ -2837,7 +2837,7 @@ pub fn project_point_strictly_into_feasible_constraint_set(
 ///
 /// This is the projection an active-set step loop needs, and it is not
 /// [`project_point_strictly_into_feasible_constraint_set`]. That one retreats
-/// [`ACTIVE_SET_INTERIOR_SEED_MARGIN`] into the interior and exists to SEED a
+/// `ACTIVE_SET_INTERIOR_SEED_MARGIN` into the interior and exists to SEED a
 /// solve away from every face. Applied to a trial step it moves the iterate
 /// off the very row that clipped it, so the row is never tight at the accepted
 /// point, the accepted face stays empty, the reduced-face Newton never runs, and
