@@ -17,33 +17,16 @@
 use crate::survival::predict::KaplanMeier;
 use ndarray::Array2;
 
-/// Newton iterations for the one-parameter partial-likelihood score equation.
-/// A scalar Newton step on a strictly concave log partial likelihood converges
-/// quadratically; the cap only bounds pathological data (complete separation),
-/// where `NEWTON_STEP_CLAMP` already keeps the iterate finite.
+/// Newton iterations the one-parameter partial-likelihood score equation is
+/// allowed before the calibration is refused. On a strictly concave log
+/// partial likelihood the monotone-safeguarded Newton step converges
+/// quadratically, so this budget is reached only when no finite maximiser
+/// exists — the risk score separates the outcomes — and that is reported as a
+/// refusal, never returned as a slope (#2469: this loop used to fall through
+/// to its last iterate, with a `1e-8` ridge on the score, a `±50` clamp on the
+/// linear predictor, a `±2` step clamp and a `1e-10` absolute step tolerance
+/// standing in for the arithmetic that now does the work exactly).
 const NEWTON_MAX_ITERATIONS: usize = 50;
-
-/// Ridge added to the score and information. Guarantees a finite step under
-/// complete separation, where the unpenalized information tends to zero.
-const SCORE_RIDGE: f64 = 1.0e-8;
-
-/// Clamp on the linear predictor before `exp`. `exp(50)` is ~5e21, already far
-/// beyond any risk ratio a calibration is meaningful at, and keeps the risk-set
-/// sums finite instead of saturating to `inf` and poisoning every ratio.
-const LINEAR_PREDICTOR_CLAMP: f64 = 50.0;
-
-/// Trust region on a single Newton step, in units of `β`.
-const NEWTON_STEP_CLAMP: f64 = 2.0;
-
-/// Convergence tolerance on the Newton step.
-const NEWTON_STEP_TOLERANCE: f64 = 1.0e-10;
-
-/// Floor on a reported survival probability, so a downstream `ln` is finite.
-const SURVIVAL_FLOOR: f64 = 1.0e-12;
-
-/// Risk scores whose spread is below this are treated as constant, and the
-/// calibration degenerates to the covariate-free Kaplan-Meier curve.
-const RISK_SPREAD_FLOOR: f64 = 1.0e-12;
 
 /// The marginal (covariate-free) Kaplan-Meier survival curve evaluated on
 /// `grid`. Equivalent to `KaplanMeier::fit(times, events).on_grid(grid)`; kept
@@ -102,7 +85,12 @@ pub fn cox_calibrated_survival_matrix(
         .sum::<f64>()
         / rows.len() as f64)
         .sqrt();
-    if rows.len() < 2 || risk_sd < RISK_SPREAD_FLOOR {
+    // A spread inside the rounding band of the centering that produced it is
+    // no spread: the risk score is constant to the arithmetic, and the
+    // calibration is the covariate-free Kaplan–Meier curve.
+    let max_abs_risk = rows.iter().fold(0.0_f64, |acc, row| acc.max(row.2.abs()));
+    let spread_band = gam_linalg::roundoff::accumulation_growth(rows.len() + 2) * max_abs_risk;
+    if rows.len() < 2 || risk_sd <= spread_band {
         let times: Vec<f64> = rows.iter().map(|row| row.0).collect();
         let events: Vec<f64> = rows.iter().map(|row| row.1).collect();
         let curve = km_curve_on_grid(&times, &events, grid);
@@ -143,56 +131,175 @@ pub fn cox_calibrated_survival_matrix(
 
     // Newton on the Breslow partial-likelihood score. `s0/s1/s2` are the
     // risk-set weighted moments of the covariate at each event time.
-    let mut beta = 0.0;
-    for _ in 0..NEWTON_MAX_ITERATIONS {
-        let mut score = -SCORE_RIDGE * beta;
-        let mut info = SCORE_RIDGE;
+    // Risk-set sums are evaluated with the log-sum-exp shift, so no clamp on
+    // the linear predictor is needed for them to stay finite: the shift cancels
+    // exactly in the mean and variance, and enters the Breslow increment only as
+    // `exp(−m − ln Σ)`, which underflows honestly rather than saturating.
+    struct RiskSetSums {
+        log_s0: f64,
+        mean: f64,
+        var: f64,
+    }
+    let risk_set_sums = |beta: f64, time: f64| -> RiskSetSums {
+        let mut shift = f64::NEG_INFINITY;
+        for &(row_time, _, x) in &rows {
+            if row_time >= time {
+                shift = shift.max(beta * x);
+            }
+        }
+        let (mut s0, mut s1) = (0.0_f64, 0.0_f64);
+        for &(row_time, _, x) in &rows {
+            if row_time >= time {
+                let w = (beta * x - shift).exp();
+                s0 += w;
+                s1 += w * x;
+            }
+        }
+        let mean = s1 / s0;
+        // The variance is the centered second moment, summed as such: the
+        // textbook `E[x²] − E[x]²` cancels catastrophically exactly where it
+        // matters, at a slope large enough that the risk-set weights have
+        // concentrated and the true variance is `e^{−βΔ}` below the roundoff of
+        // the two O(x²) terms — which is where separation has to be told apart
+        // from convergence.
+        let mut centered = 0.0_f64;
+        for &(row_time, _, x) in &rows {
+            if row_time >= time {
+                let w = (beta * x - shift).exp();
+                let d = x - mean;
+                centered += w * d * d;
+            }
+        }
+        RiskSetSums {
+            log_s0: shift + s0.ln(),
+            mean,
+            var: centered / s0,
+        }
+    };
+    // Log partial likelihood, score, observed information, and the rounding
+    // bands of the likelihood and of the score at `beta`. A band is what
+    // "zero" means for this arithmetic: each is the accumulation over
+    // `events × (rows + 2)` roundings of terms whose magnitudes are summed
+    // alongside the value.
+    struct PartialLikelihood {
+        ell: f64,
+        ell_band: f64,
+        score: f64,
+        score_band: f64,
+        info: f64,
+    }
+    let partial_likelihood = |beta: f64| -> PartialLikelihood {
+        let (mut ell, mut ell_abs, mut score, mut score_abs, mut info) =
+            (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
         for &(time, d, event_x) in &event_times {
-            let mut s0 = 0.0;
-            let mut s1 = 0.0;
-            let mut s2 = 0.0;
-            for &(row_time, _, x) in &rows {
-                if row_time >= time {
-                    let w = (beta * x)
-                        .clamp(-LINEAR_PREDICTOR_CLAMP, LINEAR_PREDICTOR_CLAMP)
-                        .exp();
-                    s0 += w;
-                    s1 += w * x;
-                    s2 += w * x * x;
-                }
-            }
-            if s0 > 0.0 {
-                let mean = s1 / s0;
-                score += event_x - d as f64 * mean;
-                info += d as f64 * (s2 / s0 - mean * mean).max(0.0);
-            }
+            let sums = risk_set_sums(beta, time);
+            ell += beta * event_x - d as f64 * sums.log_s0;
+            ell_abs += (beta * event_x).abs() + d as f64 * sums.log_s0.abs();
+            score += event_x - d as f64 * sums.mean;
+            score_abs += event_x.abs() + d as f64 * sums.mean.abs();
+            info += d as f64 * sums.var;
         }
-        if !info.is_finite() || info <= 0.0 {
+        let growth =
+            gam_linalg::roundoff::accumulation_growth(event_times.len() * (rows.len() + 2));
+        PartialLikelihood {
+            ell,
+            ell_band: growth * ell_abs,
+            score,
+            score_band: growth * score_abs,
+            info,
+        }
+    };
+
+    let mut beta = 0.0_f64;
+    let mut at = partial_likelihood(beta);
+    let mut converged = false;
+    for _ in 0..NEWTON_MAX_ITERATIONS {
+        if !(at.ell.is_finite() && at.score.is_finite() && at.info.is_finite()) {
+            return Err(format!(
+                "survival calibration: the partial likelihood is not finite at slope {beta} \
+                 (score {}, information {}); the risk score separates the outcomes, so no \
+                 finite calibration slope exists",
+                at.score, at.info
+            ));
+        }
+        // The log partial likelihood is a sum of log conditional event
+        // probabilities, so it is at most 0 and equals 0 only when every event
+        // is certain given its risk set — separation, where the maximiser is at
+        // infinity. In floating point that supremum is reached at a finite
+        // slope (the risk-set mean rounds onto the event's own risk and the
+        // score becomes an exact zero), so a likelihood inside its own rounding
+        // band of 0 is the certificate that no finite slope exists, and it is
+        // what a stationarity test alone cannot see.
+        if at.ell >= -at.ell_band {
+            return Err(format!(
+                "survival calibration: every event is certain given its risk set at slope \
+                 {beta} (log partial likelihood {} within its rounding band {} of 0); the \
+                 risk score separates the outcomes, so no finite calibration slope exists",
+                at.ell, at.ell_band
+            ));
+        }
+        if at.info <= 0.0 {
+            return Err(format!(
+                "survival calibration: the partial likelihood has no curvature at slope \
+                 {beta} (score {}, information {}); the risk score separates the outcomes, \
+                 so no finite calibration slope exists",
+                at.score, at.info
+            ));
+        }
+        // Stationary within the arithmetic: the score equation is solved to
+        // its own rounding band.
+        if at.score.abs() <= at.score_band {
+            converged = true;
             break;
         }
-        let step = (score / info).clamp(-NEWTON_STEP_CLAMP, NEWTON_STEP_CLAMP);
-        beta += step;
-        if step.abs() < NEWTON_STEP_TOLERANCE {
-            break;
+        let step = at.score / at.info;
+        // Monotone safeguard within the likelihood's own rounding: the Newton
+        // direction ascends a concave log partial likelihood, and near the
+        // maximum a step the score still needs can improve the likelihood by
+        // less than its rounding band, so a candidate is accepted when it does
+        // not measurably decrease it. No representable candidate at all while
+        // the score is still outside its band is a stall, reported as one.
+        let mut scale = 1.0_f64;
+        let mut progressed = false;
+        loop {
+            let candidate = beta + scale * step;
+            if candidate == beta {
+                break;
+            }
+            let at_candidate = partial_likelihood(candidate);
+            if at_candidate.ell.is_finite() && at_candidate.ell >= at.ell - at.ell_band {
+                beta = candidate;
+                at = at_candidate;
+                progressed = true;
+                break;
+            }
+            scale *= 0.5;
+        }
+        if !progressed {
+            return Err(format!(
+                "survival calibration: the partial-likelihood Newton search stalled at slope \
+                 {beta} with score {} above its rounding band {}; no representable slope \
+                 improves the likelihood, so no finite calibration slope exists",
+                at.score, at.score_band
+            ));
         }
     }
+    if !converged {
+        return Err(format!(
+            "survival calibration: the partial-likelihood Newton search did not converge \
+             within {NEWTON_MAX_ITERATIONS} iterations (slope {beta}, score {}, information \
+             {}); the risk score separates the outcomes, so no finite calibration slope \
+             exists",
+            at.score, at.info
+        ));
+    }
 
-    // Breslow baseline cumulative hazard at the converged beta.
     let mut baseline = Vec::<(f64, f64)>::new();
     let mut cumulative = 0.0;
     for &(time, d, _) in &event_times {
-        let mut s0 = 0.0;
-        for &(row_time, _, x) in &rows {
-            if row_time >= time {
-                s0 += (beta * x)
-                    .clamp(-LINEAR_PREDICTOR_CLAMP, LINEAR_PREDICTOR_CLAMP)
-                    .exp();
-            }
-        }
-        if s0 > 0.0 {
-            cumulative += d as f64 / s0;
-            baseline.push((time, cumulative));
-        }
+        let sums = risk_set_sums(beta, time);
+        cumulative += d as f64 * (-sums.log_s0).exp();
+        baseline.push((time, cumulative));
     }
 
     let mut out = Array2::<f64>::zeros((test_risk.len(), grid.len()));
@@ -202,9 +309,7 @@ pub fn cox_calibrated_survival_matrix(
         } else {
             0.0
         };
-        let mult = (beta * x)
-            .clamp(-LINEAR_PREDICTOR_CLAMP, LINEAR_PREDICTOR_CLAMP)
-            .exp();
+        let log_mult = beta * x;
         let mut step_idx = 0usize;
         let mut h0 = 0.0;
         let mut prev = 1.0;
@@ -213,10 +318,13 @@ pub fn cox_calibrated_survival_matrix(
                 h0 = baseline[step_idx].1;
                 step_idx += 1;
             }
-            let value = if col_idx == 0 {
+            // `S = exp(−H₀·exp(βx))`, formed in log space so an extreme risk gives
+            // the honest 0 or 1 instead of a clamped value; monotone in `t` by
+            // construction of `H₀`, pinned by `min(prev)` against roundoff.
+            let value = if col_idx == 0 || h0 <= 0.0 {
                 1.0
             } else {
-                (-(h0 * mult)).exp().clamp(SURVIVAL_FLOOR, 1.0).min(prev)
+                (-(h0.ln() + log_mult).exp()).exp().min(prev)
             };
             out[[row_idx, col_idx]] = value;
             prev = value;
@@ -228,6 +336,25 @@ pub fn cox_calibrated_survival_matrix(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A risk score that separates the outcomes has no finite calibration
+    /// slope; the search refuses instead of returning its last iterate (#2469).
+    #[test]
+    fn a_separating_risk_score_is_refused_not_calibrated() {
+        // Every subject dies, and the risk score decreases with survival time,
+        // so at each event time the event carries the smallest risk in its
+        // risk set: the partial likelihood increases without bound as β → −∞.
+        let times = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let events = [1.0; 6];
+        let risk = [6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+        let grid = [0.0, 2.5, 5.0];
+        let err = cox_calibrated_survival_matrix(&times, &events, &risk, &[1.5, 4.5], &grid)
+            .unwrap_err();
+        assert!(
+            err.contains("no finite calibration slope"),
+            "unexpected message: {err}"
+        );
+    }
 
     #[test]
     fn length_mismatch_is_an_error() {
@@ -268,11 +395,16 @@ mod tests {
 
     #[test]
     fn higher_risk_survives_less_and_rows_are_monotone() {
-        // Risk score is perfectly rank-aligned with early failure, so beta > 0
-        // and the high-risk test subject must sit below the low-risk one.
+        // The risk score is mostly aligned with early failure, so beta > 0 and
+        // the high-risk test subject must sit below the low-risk one — but it
+        // must NOT be perfectly rank-aligned: with risks strictly decreasing in
+        // time (the fixture this replaced) every event carries the largest risk
+        // in its risk set, the log partial likelihood's supremum is 0, and the
+        // calibration is refused (see the separation test above). The ordering
+        // is broken at times 2 and 4, so a finite slope (≈ 0.74) exists.
         let times = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let events = [1.0, 1.0, 1.0, 1.0, 1.0, 0.0];
-        let risk = [3.0, 2.5, 2.0, 1.0, 0.5, 0.0];
+        let risk = [3.0, 1.0, 2.5, 0.5, 2.0, 0.0];
         let grid = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
         let out = cox_calibrated_survival_matrix(&times, &events, &risk, &[0.0, 3.0], &grid)
             .expect("calibration must succeed");
