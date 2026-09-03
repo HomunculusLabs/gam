@@ -1,5 +1,22 @@
 ## Unreleased
 
+- **The constrained joint Newton can form its active face** (#2695, #2714,
+  #2765). Measured on the survival location-scale 1569 pair: every seed was
+  refused with the QP listing one time-block row as active on every cycle
+  while the accepted face stayed empty, because a clipped step was retreated
+  one primal-feasibility tolerance (`1e-8`) off its blocking row, the face is
+  classified at `1e-10`, and an infeasible trial step was projected `1e-6`
+  into the interior — so the reduced-face Newton never ran and the ambient
+  trust step was clipped to `1e-22` of the proposal. A clipped step now lands
+  on its face; an infeasible trial is projected onto the cone in the trust
+  metric (`project_point_onto_constraint_set_in_metric`, returning the binding
+  rows); the cause-specific survival family clips against the same rows its QP
+  solves against. The Jeffreys/Firth term was measured not to be the
+  cause (the seeds stall with it disarmed); what remains on that pair — a
+  collapsed block trust radius that cannot grow, then an absolute stationarity
+  bar on a block whose curvature is nine orders above its neighbours' — is
+  recorded on #2695.
+
 - **Event histories: the rank of the latent covariance is decided by the
   evidence's own prior, the reported latent object is the posterior-mean
   covariance with its eigenmodes' uncertainty, and every subject's smoothed

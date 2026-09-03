@@ -1384,10 +1384,9 @@ pub fn outer_row_weights_by_index(
 /// the single fraction-to-boundary rule denominated in the unit-normalized row
 /// metric and at the `PRIMAL_FEASIBILITY_TOL` the solver certifies its own
 /// iterates against. What lives here is the globalization policy layered on
-/// top: the boundary backoff, which keeps a clipped iterate off the face by
-/// enough that the next cycle's feasibility gate cannot reject a point round-off
-/// left balanced on it — see `apply_feasible_step_boundary_backoff` for why
-/// that retreat is ABSOLUTE and not a fraction of the step.
+/// top: a clipped step lands ON its blocking face, so the row can enter the
+/// active-set solver's working face on the next cycle — see
+/// `apply_feasible_step_boundary_backoff` for why no retreat is applied.
 ///
 /// Before gam#2719 this function carried a rule of its own, and the two halves
 /// of that rule disagreed: the ITERATE got a `1e-8` band (a slack of `-1e-9`
@@ -1412,69 +1411,46 @@ pub fn feasible_step_fraction(
 }
 
 
-/// Backoff applied when a binding constraint clipped the step, keeping the new
-/// iterate off the face by enough that round-off cannot leave it balanced on
-/// one. A step that was not clipped at all is taken whole — backing off an
-/// unconstrained step would shorten every Newton step in the fit for nothing.
+/// The clipped step lands ON the blocking face: a binding constraint returns
+/// the exact ratio-test fraction `α = slack/−drift`, and a step that was not
+/// clipped at all is taken whole.
 ///
-/// # Why the retreat is ABSOLUTE and not a fraction of the step (gam#2695)
+/// # Why there is no retreat off the face (gam#2695, gam#2714)
 ///
-/// The concern the backoff answers is round-off in an exact ratio test: the
-/// endpoint `β + α·δ` at `α = slack/−drift` is the face up to the arithmetic
-/// that computed it. That is a statement about resolution, in the scaled-slack
-/// metric the contract is denominated in. It says nothing about how far the step
-/// travelled — so the retreat must not be proportional to that distance.
+/// These hooks feed an ACTIVE-SET solver. Its whole mechanism is that a row a
+/// step runs into becomes part of the working face — the reduced-face Newton
+/// then solves on that face, the projected KKT residual drops the component
+/// the face absorbs, and the certificate can fire. A row only enters the face
+/// when it is tight at the accepted point (`ACTIVE_SET_WORKING_FACE_TOL`), so
+/// any rule that stops the iterate short of the face — the old `0.995·α`
+/// (which kept `1/200` of the slack per clipped cycle and walked one warp
+/// coefficient from `1e-3` to `1e-163` over 400 cycles), and the one-tolerance
+/// retreat that replaced it (which parked the iterate at scaled slack exactly
+/// `1e-8`, a hundred times outside the face tolerance) — leaves the row
+/// permanently inactive. Measured on the survival location-scale 1569 witness:
+/// the QP listed time-block row 10 as active on every cycle, the accepted face
+/// never contained it, the ambient trust step drove into it at scaled drift
+/// `−0.08` against slack `1e-8`, and the accepted steps were `9.9e-7`, `1e-22`
+/// for sixty cycles.
 ///
-/// The rule here used to be `α ← 0.995·α`, and multiplying by a constant is
-/// exactly that proportionality. Its effect on a coefficient walking to its own
-/// bound is closed-form: the surviving slack after a clipped step is
-/// `s + α·d = s − 0.995·s = 0.005·s`, so every clipped cycle keeps `1/200` of
-/// the slack and **no finite number of cycles reaches the face**. Measured on
-/// the #2695 witness, at the degree the composed warp is now built at:
-///
-/// ```text
-///   cycle=390  accepted  ρ=+1.000e0  Δobj=+0.000e0  |δ|∞=9.154e-165  |prop|∞=1.554e-2
-///   cycle=391  accepted  ρ=+1.000e0  Δobj=+0.000e0  |δ|∞=4.577e-167  |prop|∞=1.554e-2
-///   cycle=392  accepted  ρ=+1.000e0  Δobj=+0.000e0  |δ|∞=2.289e-169  |prop|∞=1.554e-2
-/// ```
-///
-/// — exactly `200×` per cycle, for 400 cycles, with the QP's proposal constant,
-/// the joint trust radius held and the objective change exactly zero. The
-/// solve spends its entire budget walking one warp coefficient from `1e-3` to
-/// `1e-163` while the row it is approaching never becomes active, so the
-/// projected-KKT certificate that would end the solve never applies.
-///
-/// A backoff denominated in [`gam_problem::PRIMAL_FEASIBILITY_TOL`] instead has
-/// both halves right, and needs no constant of its own:
-///
-/// * a step with room to spare stops one feasibility tolerance short of the
-///   face — the round-off margin the backoff exists for, at the resolution the
-///   solver certifies its own iterates at; and
-/// * a step whose remaining slack is already within that tolerance yields
-///   `α ≤ 0`, which the contract reports as `BlockedByActiveFace` and the caller
-///   answers with a projection onto that face. The row becomes ACTIVE, in ONE
-///   cycle, instead of being approached geometrically forever.
-///
-/// Landing on the face is not a hazard for these constraints. The row programs
-/// that evaluate a logarithm at a bounded quantity carry their own guard —
-/// `log g` below the event-Jacobian floor is a continued logarithm (gam#2695),
+/// Round-off cannot make the face unsafe. The contract every gate certifies
+/// against is `slack ≥ −PRIMAL_FEASIBILITY_TOL`, and a point that the exact
+/// ratio test lands on the face sits within a few ulps of it, eight orders
+/// inside that band. Nor is the face singular for these objectives: the row
+/// programs that evaluate a logarithm at a bounded quantity carry their own
+/// guard — `log g` below the event-Jacobian floor is a continued logarithm,
 /// finite and differentiable at the guard — so the interior-point rationale
-/// that would justify stopping strictly short does not apply here, and the
-/// active-set solver these hooks feed needs the face to be reachable.
+/// for stopping strictly short does not apply, and the face must be reachable.
+///
+/// A direction that points INTO a row the iterate already sits on gets
+/// `α = 0` (the zero-numerator ratio), which the caller answers with a
+/// projection onto the cone — the blocking-row exchange — not with a shorter
+/// step, because `0/−drift` is invariant under shrinking the direction.
 fn apply_feasible_step_boundary_backoff(limit: &gam_problem::ContractFeasibleStep) -> f64 {
     if limit.fraction >= 1.0 {
         return 1.0;
     }
-    let drift = -limit.blocking_scaled_drift;
-    if !(drift > 0.0) || !drift.is_finite() {
-        // No row is recorded as blocking, or its drift is not usable as a
-        // denominator. There is nothing to retreat ALONG, so retreating by a
-        // fraction of the step would be inventing a distance; take the
-        // contract's own answer.
-        return limit.fraction.clamp(0.0, 1.0);
-    }
-    let retreat = gam_problem::PRIMAL_FEASIBILITY_TOL / drift;
-    (limit.fraction - retreat).clamp(0.0, 1.0)
+    limit.fraction.clamp(0.0, 1.0)
 }
 
 /// Family-specific ψ-calculus hooks for the shared exact-Newton joint-ψ
@@ -1932,9 +1908,10 @@ mod tests {
         // The bound is not decoration. Under the old multiplicative rule this
         // needed 80 steps to fall from 1e-3 to 1e-8 and never blocked at all;
         // an absolute retreat gets there in one.
-        assert!(
-            clipped_steps <= 2,
-            "an absolute retreat reaches the face immediately; took {clipped_steps}              clipped steps"
+        assert_eq!(
+            clipped_steps, 1,
+            "a clipped step lands on the face, so the very next step is blocked; took \
+             {clipped_steps} clipped steps"
         );
     }
 
@@ -1943,39 +1920,26 @@ mod tests {
     /// primal-feasibility tolerance short of it — an absolute margin in the
     /// scaled-slack metric, so it does not depend on how far the step travelled.
     #[test]
-    fn a_clipped_step_stops_one_tolerance_short_of_the_face_2695() {
+    fn a_clipped_step_lands_on_the_face_2695() {
         let constraints = unit_box();
         let beta = ndarray::array![1.0, 1.0];
-        // Two directions with the SAME slack to cover and very different
-        // lengths. A multiplicative backoff leaves `0.005·slack` behind in both,
-        // i.e. margins that differ by the length ratio; an absolute one leaves
-        // the same margin.
-        let mut margins = Vec::new();
         for scale in [1.0_f64, 1.0e3] {
             let direction = ndarray::array![-2.0 * scale, 0.0];
             let alpha = feasible_step_fraction(&constraints, &beta, &direction)
                 .expect("a binding direction is clipped, not refused");
             let landed = &beta + &(&direction * alpha);
             assert!(
-                landed[0] >= 0.0,
-                "the clipped endpoint must stay inside the cone, got {:.3e}",
+                landed[0].abs() <= 1.0e-12,
+                "the clipped endpoint must sit ON the face (row tight at the working-face \
+                 tolerance) whatever the direction's length, got {:.3e} at scale {scale}",
                 landed[0]
             );
-            margins.push(landed[0]);
-        }
-        for margin in &margins {
             assert!(
-                (margin - gam_problem::PRIMAL_FEASIBILITY_TOL).abs()
-                    <= 1.0e-3 * gam_problem::PRIMAL_FEASIBILITY_TOL,
-                "the surviving margin must be one primal-feasibility tolerance, got {margin:.6e}"
+                landed[0] >= -gam_problem::PRIMAL_FEASIBILITY_TOL,
+                "and inside the contract band, got {:.3e}",
+                landed[0]
             );
         }
-        assert!(
-            (margins[0] - margins[1]).abs() <= 1.0e-3 * gam_problem::PRIMAL_FEASIBILITY_TOL,
-            "the margin must not depend on the direction's length: {:.6e} vs {:.6e}",
-            margins[0],
-            margins[1],
-        );
     }
 
     #[test]

@@ -2932,18 +2932,34 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             if let Some(constraints) = joint_constraints.as_ref() {
                 let trial_beta = &beta_joint + &trial_delta;
                 if check_linear_feasibility(&trial_beta, constraints).is_err() {
-                    match gam_solve::active_set::project_point_strictly_into_feasible_constraint_set(
+                    // Project ONTO the cone in the trust metric, landing on the
+                    // rows that bind, not strictly inside it. The seed-style
+                    // projection retreated `ACTIVE_SET_INTERIOR_SEED_MARGIN` off
+                    // every face, so the row that clipped this step was never
+                    // tight at the accepted point, the accepted face stayed
+                    // empty, `certified_reduced_face_candidate` never ran, and
+                    // the next ambient trust step was clipped on the same row —
+                    // the survival location-scale 1569 deadlock (gam#2695,
+                    // gam#2714): scaled slack shuttling between 1e-8 and 1e-6 on
+                    // one time-block row for sixty cycles with accepted steps of
+                    // 1e-22 while the QP already listed that row as active. The
+                    // face the projection lands on is exactly the working face
+                    // the next cycle's reduced-face Newton solves on.
+                    let warm_face =
+                        flatten_joint_active_set(&cached_active_sets, &block_constraints);
+                    match gam_solve::active_set::project_point_onto_constraint_set_in_metric(
                         &trial_beta,
+                        Some(&joint_trust_metric_diag),
                         constraints,
+                        warm_face.as_deref(),
                     ) {
-                        Ok(projected) => {
+                        Ok((projected, _binding_rows)) => {
                             trial_delta = &projected - &beta_joint;
                             projection_moved_the_trial = true;
                         }
                         Err(_) => {
-                            // Projection failed to find a strictly-interior
-                            // point (degenerate / empty-interior cone at this
-                            // trial). Since the global α-crush is gated off on
+                            // Projection found no feasible point (degenerate /
+                            // empty cone at this trial). Since the global α-crush is gated off on
                             // the constrained path, preserve the old safety
                             // net here: shrink the active block trust radii and
                             // retry, exactly as the α-crush `Err` branch did
@@ -2951,7 +2967,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                             // reach the next cycle's `check_linear_feasibility`
                             // QP gate and hard-error.
                             log::info!(
-                                "[PIRLS/joint-Newton feasibility] cycle {} attempt {} rejected at radius {:.6e}: cone projection found no strictly-interior point",
+                                "[PIRLS/joint-Newton feasibility] cycle {} attempt {} rejected at radius {:.6e}: cone projection found no feasible point",
                                 cycle,
                                 trust_attempt,
                                 joint_trust_radius

@@ -1429,17 +1429,15 @@ fn time_block_feasible_step_stays_inside_derivative_guard() {
     // in that metric — an ABSOLUTE retreat, `tol/|scaled drift|`, not a fraction
     // of the step (gam#2695).
     assert!(
-        (alpha - (0.05 - gam_problem::PRIMAL_FEASIBILITY_TOL / 2.0)).abs() <= 1e-12,
-        "alpha={alpha:.12e}"
+        (alpha - 0.05).abs() <= 1e-12,
+        "a clipped step lands on the blocking face: alpha={alpha:.12e}"
     );
     let feasible = states[0].beta[0] + alpha * -2.0;
-    assert!(feasible >= 0.0);
-    // And the surviving margin is that tolerance, not a percentage of however
-    // far the step happened to travel.
+    // The clipped step lands ON the blocking face, so the row is tight there and
+    // can enter the active-set solver's working face (gam#2695, gam#2714).
     assert!(
-        (feasible - gam_problem::PRIMAL_FEASIBILITY_TOL).abs()
-            <= 1.0e-3 * gam_problem::PRIMAL_FEASIBILITY_TOL,
-        "surviving margin {feasible:.6e} must be one primal-feasibility tolerance"
+        feasible.abs() <= 1.0e-12,
+        "the clipped endpoint must sit on the face, got {feasible:.6e}"
     );
 }
 

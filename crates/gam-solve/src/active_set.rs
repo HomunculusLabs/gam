@@ -2831,6 +2831,60 @@ pub fn project_point_strictly_into_feasible_constraint_set(
 /// that the eventual certificate would accept. Materially negative rows leave
 /// one at a time in Bland order (lowest constraint id), so the conditioned
 /// phase has a deterministic anti-cycling pivot rule.
+/// Project `point` onto the feasible polyhedron of `set` in the diagonal metric
+/// `metric_diag` (the Euclidean metric when `None`), landing ON the face that
+/// binds, and return the rows that bind there.
+///
+/// This is the projection an active-set step loop needs, and it is not
+/// [`project_point_strictly_into_feasible_constraint_set`]. That one retreats
+/// [`ACTIVE_SET_INTERIOR_SEED_MARGIN`] into the interior and exists to SEED a
+/// solve away from every face. Applied to a trial step it moves the iterate
+/// off the very row that clipped it, so the row is never tight at the accepted
+/// point, the accepted face stays empty, the reduced-face Newton never runs, and
+/// the next ambient trust step is clipped on the same row again. Measured on
+/// the survival location-scale 1569 witness (gam#2695, gam#2714): one time-block
+/// row held the walk for sixty cycles, the iterate shuttling between scaled
+/// slack `1e-8` and `1e-6` with accepted steps of `1e-22` while the QP already
+/// listed that row as active.
+///
+/// The metric projection is the same strictly convex QP the constrained Newton
+/// step itself solves (`½‖β − point‖²_D` subject to the rows), so its answer
+/// carries the binding rows exactly and at the solver's own face tolerance —
+/// there is no margin to choose. `warm_active_set` seeds the dual active set;
+/// rows in it that are not tight at `point` are ignored.
+pub fn project_point_onto_constraint_set_in_metric(
+    point: &Array1<f64>,
+    metric_diag: Option<&Array1<f64>>,
+    set: &ConstraintSet,
+    warm_active_set: Option<&[usize]>,
+) -> Result<(Array1<f64>, Vec<usize>), EstimationError> {
+    let p = point.len();
+    if set.ncols() != p {
+        crate::bail_invalid_estim!(
+            "metric projection dimension mismatch: point length {p} != constraint columns {}",
+            set.ncols()
+        );
+    }
+    if !array_is_finite(point) {
+        crate::bail_invalid_estim!("metric projection received a non-finite point");
+    }
+    if let Some(diag) = metric_diag
+        && (diag.len() != p || diag.iter().any(|value| !value.is_finite() || *value <= 0.0))
+    {
+        crate::bail_invalid_estim!(
+            "metric projection needs a finite positive diagonal metric of length {p}"
+        );
+    }
+    let mut hessian = Array2::<f64>::zeros((p, p));
+    let mut rhs = Array1::<f64>::zeros(p);
+    for index in 0..p {
+        let weight = metric_diag.map_or(1.0, |diag| diag[index]);
+        hessian[[index, index]] = weight;
+        rhs[index] = weight * point[index];
+    }
+    solve_quadratic_with_constraint_set(&hessian, &rhs, point, set, warm_active_set)
+}
+
 fn refine_operator_metric_face(
     hessian: &Array2<f64>,
     rhs: &Array1<f64>,
@@ -3823,6 +3877,61 @@ mod tests {
         let (dual, complementarity) = super::kkt_dual_channel_violations(3.0e-8, 0.0, 1.0e9);
         assert!(!dual && !complementarity, "the same multiplier under a 1e9 gradient is roundoff");
     }
+    #[test]
+    fn a_metric_projection_lands_on_the_binding_face_and_names_it_2695() {
+        use ndarray::array;
+        // x >= 0, y >= 0, x + y >= 1, written as A·β >= b.
+        let set = ConstraintSet::Dense(
+            LinearInequalityConstraints::new(
+                array![[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+                array![0.0, 0.0, 1.0],
+            )
+            .expect("constraint construction"),
+        );
+        // Euclidean projection of the origin onto x + y >= 1 is (½, ½); only the
+        // diagonal row binds there, and it binds exactly — no interior margin.
+        let (euclid, face) =
+            super::project_point_onto_constraint_set_in_metric(&array![0.0, 0.0], None, &set, None)
+                .expect("euclidean projection");
+        assert!((euclid[0] - 0.5).abs() <= 1e-12 && (euclid[1] - 0.5).abs() <= 1e-12, "{euclid:?}");
+        assert_eq!(face, vec![2], "the binding row is reported exactly");
+        assert!((euclid[0] + euclid[1] - 1.0).abs() <= 1e-12, "the point sits ON the face");
+        // In the metric diag(1, 4) the same projection minimises x² + 4y² on the
+        // face, which is (4/5, 1/5): the metric is honoured, not merely accepted.
+        let (metric, face) = super::project_point_onto_constraint_set_in_metric(
+            &array![0.0, 0.0],
+            Some(&array![1.0, 4.0]),
+            &set,
+            None,
+        )
+        .expect("metric projection");
+        assert!((metric[0] - 0.8).abs() <= 1e-12 && (metric[1] - 0.2).abs() <= 1e-12, "{metric:?}");
+        assert_eq!(face, vec![2]);
+        // A feasible interior point is returned unchanged with an empty face.
+        let (same, face) = super::project_point_onto_constraint_set_in_metric(
+            &array![0.7, 0.9],
+            Some(&array![3.0, 0.5]),
+            &set,
+            None,
+        )
+        .expect("interior projection");
+        assert!((same[0] - 0.7).abs() <= 1e-12 && (same[1] - 0.9).abs() <= 1e-12);
+        assert!(face.is_empty(), "no row binds at an interior point: {face:?}");
+        // (-1, 0.2) projects onto the line x + y = 1 at x = -0.1, outside the
+        // quadrant, so the true projection is the vertex (0, 1) where x >= 0 and
+        // x + y >= 1 bind together — both are named.
+        let (vertex, mut face) = super::project_point_onto_constraint_set_in_metric(
+            &array![-1.0, 0.2],
+            None,
+            &set,
+            None,
+        )
+        .expect("vertex projection");
+        face.sort_unstable();
+        assert!(vertex[0].abs() <= 1e-12 && (vertex[1] - 1.0).abs() <= 1e-12, "{vertex:?}");
+        assert_eq!(face, vec![0, 2], "both rows bind at the vertex");
+    }
+
     use super::{
         ACTIVE_SET_INTERIOR_SEED_MARGIN, ACTIVE_SET_KKT_DUAL_FEASIBILITY_TOL,
         ACTIVE_SET_PRIMAL_FEASIBILITY_TOL, ConstraintRowId, ConstraintSet, ConstraintSetOps,

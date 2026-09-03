@@ -202,15 +202,6 @@ impl PenaltyBlocks {
 /// accordingly (issue #1790).
 pub const ENTRY_AT_ORIGIN_THRESHOLD: f64 = 1e-8;
 
-/// Fraction-to-the-boundary factor for the cause-specific feasible-step search.
-/// When a Newton direction would drive a row's derivative down to the
-/// monotonicity floor, the step is capped at this fraction of the distance to
-/// the boundary rather than landing exactly on it. Staying strictly inside the
-/// feasible region (the standard interior-point fraction-to-boundary rule)
-/// keeps the next `1/deriv` / `deriv.ln()` evaluation away from the singular
-/// boundary where curvature blows up.
-const DERIVATIVE_FRACTION_TO_BOUNDARY: f64 = 0.995;
-
 /// Relative projected-KKT accuracy required before evaluating survival LAML.
 ///
 /// LAML is an envelope at the fitted inner mode. A looser or decrement-only
@@ -659,6 +650,54 @@ fn evaluate_cause_specific_block(
     Ok((log_likelihood, gradient, hessian))
 }
 
+
+/// The linear inequality system `A·β ≥ b` a cause-specific time block imposes:
+/// the per-row derivative guard `q'(t_i) ≥ floor` at every training row, plus
+/// the coefficient cone `β_j ≥ 0` on the structural monotone-I-spline columns.
+///
+/// ONE producer for two consumers. The constrained joint Newton solves its
+/// QP against these rows (`block_linear_constraints`), and the feasible-step
+/// ratio test clips a trial step against them (`max_feasible_step_size`). The
+/// two used to be assembled separately — the ratio test skipped zero-weight
+/// rows and the structural cone, and stopped `0.5%` short of the face — so a
+/// row the QP held could be one the clamp never landed on, and the active-set
+/// solver's working face could not converge to the QP's (gam#2695, gam#2714).
+fn time_block_linear_constraint_system(
+    block: &CauseSpecificRoystonParmarBlock,
+) -> LinearInequalityConstraints {
+    let rhs = block
+        .offset_derivative_exit
+        .mapv(|offset| block.derivative_floor - offset);
+    let p = block.x_derivative.ncols();
+    let n_rows = block.x_derivative.nrows();
+    // Structural monotone-I-spline time columns get the coefficient cone
+    // `β_j ≥ 0` appended to the per-row derivative guard. The per-row guard
+    // only pins `q'(t_i) ≥ floor` at training rows; a tail I-spline column
+    // whose M-spline support sits beyond the largest training exit time is
+    // ≈0 at every training row and so escapes it, letting the penalized fit
+    // drive its coefficient negative and make `q'(t)` negative at a
+    // prediction horizon in that column's support (the Royston-Parmar
+    // predictor then refuses the invalid log-cumulative-hazard derivative).
+    // Because each such column is monotone non-decreasing over the whole
+    // axis, `β_j ≥ 0` is the exact domain-wide monotonicity certificate.
+    let structural_cols = block.structural_time_columns.min(p);
+    if structural_cols == 0 {
+        return LinearInequalityConstraints {
+            a: block.x_derivative.clone(),
+            b: rhs,
+        };
+    }
+    let mut a = Array2::<f64>::zeros((n_rows + structural_cols, p));
+    a.slice_mut(ndarray::s![..n_rows, ..])
+        .assign(&block.x_derivative);
+    for j in 0..structural_cols {
+        a[[n_rows + j, j]] = 1.0;
+    }
+    let mut b = Array1::<f64>::zeros(n_rows + structural_cols);
+    b.slice_mut(ndarray::s![..n_rows]).assign(&rhs);
+    LinearInequalityConstraints { a, b }
+}
+
 impl CustomFamily for CauseSpecificRoystonParmarFamily {
     // Preserve the pre-gam#1395 behavior: the trait default flipped to OFF (the
     // flat-prior exact-Newton objective carries no Jeffreys term), so families
@@ -775,40 +814,9 @@ impl CustomFamily for CauseSpecificRoystonParmarFamily {
             }
             .into());
         }
-        let rhs = block
-            .offset_derivative_exit
-            .mapv(|offset| block.derivative_floor - offset);
-        let p = block.x_derivative.ncols();
-        let n_rows = block.x_derivative.nrows();
-        // Structural monotone-I-spline time columns get the coefficient cone
-        // `β_j ≥ 0` appended to the per-row derivative guard. The per-row guard
-        // only pins `q'(t_i) ≥ floor` at training rows; a tail I-spline column
-        // whose M-spline support sits beyond the largest training exit time is
-        // ≈0 at every training row and so escapes it, letting the penalized fit
-        // drive its coefficient negative and make `q'(t)` negative at a
-        // prediction horizon in that column's support (the Royston-Parmar
-        // predictor then refuses the invalid log-cumulative-hazard derivative).
-        // Because each such column is monotone non-decreasing over the whole
-        // axis, `β_j ≥ 0` is the exact domain-wide monotonicity certificate.
-        let structural_cols = block.structural_time_columns.min(p);
-        if structural_cols == 0 {
-            return Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
-                a: block.x_derivative.clone(),
-                b: rhs,
-            })));
-        }
-        let mut a = Array2::<f64>::zeros((n_rows + structural_cols, p));
-        a.slice_mut(ndarray::s![..n_rows, ..])
-            .assign(&block.x_derivative);
-        for j in 0..structural_cols {
-            a[[n_rows + j, j]] = 1.0;
-        }
-        let mut b = Array1::<f64>::zeros(n_rows + structural_cols);
-        b.slice_mut(ndarray::s![..n_rows]).assign(&rhs);
-        Ok(Some(ConstraintSet::Dense(LinearInequalityConstraints {
-            a,
-            b,
-        })))
+        Ok(Some(ConstraintSet::Dense(
+            time_block_linear_constraint_system(block),
+        )))
     }
 
     fn max_feasible_step_size(
@@ -842,23 +850,19 @@ impl CustomFamily for CauseSpecificRoystonParmarFamily {
             }
             .into());
         }
-        let derivative = fast_av(&block.x_derivative, &state.beta) + &block.offset_derivative_exit;
-        let derivative_delta = fast_av(&block.x_derivative, delta);
-        let mut alpha_max = 1.0_f64;
-        for i in 0..derivative.len() {
-            if block.sampleweight[i] <= 0.0 {
-                continue;
-            }
-            let current = derivative[i] - block.derivative_floor;
-            let slope = derivative_delta[i];
-            if slope < 0.0 {
-                if current <= 0.0 {
-                    return Ok(Some(0.0));
+        // The same rows the constrained joint Newton solves against, judged by
+        // the same contract (unit-row-scaled ratio test at the primal-feasibility
+        // tolerance) and landing ON the blocking face so the row can enter the
+        // working face — see `time_block_linear_constraint_system`.
+        let system = time_block_linear_constraint_system(block);
+        crate::marginal_slope_shared::feasible_step_fraction(&system, &state.beta, delta)
+            .map(Some)
+            .map_err(|error| {
+                SurvivalError::InvalidInput {
+                    reason: format!("cause-specific survival feasible step: {error}"),
                 }
-                alpha_max = alpha_max.min(DERIVATIVE_FRACTION_TO_BOUNDARY * current / -slope);
-            }
-        }
-        Ok(Some(alpha_max.clamp(0.0, 1.0)))
+                .to_string()
+            })
     }
 
     fn exact_newton_hessian_directional_derivative(

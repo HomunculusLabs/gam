@@ -4603,11 +4603,7 @@ fn time_block_max_feasible_step_uses_synthesized_qd1_rows() {
     // Synthesized guard row `[1, 0]` with offset and guard both `1e-6`, a unit
     // row: scaled slack `0.4`, scaled drift `-1`, exact fraction `0.4`, and the
     // clipped step stops one primal-feasibility tolerance short (gam#2695).
-    assert_relative_eq!(
-        alpha,
-        0.4 - gam_problem::PRIMAL_FEASIBILITY_TOL,
-        epsilon = 1e-12
-    );
+    assert_relative_eq!(alpha, 0.4, epsilon = 1e-12);
 }
 
 #[test]
@@ -4671,17 +4667,9 @@ fn coupled_qd1_guard_limits_time_step_before_post_update_projection() {
 
     // Row `[1, 1]` against guard `1.0`, so in the unit-normalized metric the
     // slack is `(1.2 - 1.0)/√2` and the drift of `[-1, 0]` is `-1/√2`: the exact
-    // fraction to the boundary is `0.2`. The clipped step stops one
-    // primal-feasibility tolerance short of the face IN THAT METRIC, so the
-    // retreat is `tol/|scaled drift|` and NOT a fraction of `0.2` (gam#2695 — a
-    // multiplicative backoff leaves `0.005·slack` behind every time, which no
-    // number of steps ever exhausts).
-    let scaled_drift = 1.0_f64 / 2.0_f64.sqrt();
-    assert_relative_eq!(
-        alpha,
-        0.2 - gam_problem::PRIMAL_FEASIBILITY_TOL / scaled_drift,
-        epsilon = 1e-12
-    );
+    // fraction to the boundary is `0.2`, and the clipped step lands ON the face
+    // so the row can enter the working face (gam#2695, gam#2714).
+    assert_relative_eq!(alpha, 0.2, epsilon = 1e-12);
 }
 
 #[test]
@@ -4756,13 +4744,8 @@ fn timewiggle_tail_step_is_clipped_before_it_can_flip_derivative() {
         .expect("negative tail step should be bounded");
     // The binding row is the timewiggle tail's own `β₁ ≥ 0`, a unit row, so the
     // scaled slack is `0.5` and the scaled drift of `[0, -1]` is `-1`: the exact
-    // fraction is `0.5` and the clipped step stops one primal-feasibility
-    // tolerance short of the face (gam#2695).
-    assert_relative_eq!(
-        alpha,
-        0.5 - gam_problem::PRIMAL_FEASIBILITY_TOL,
-        epsilon = 1e-12
-    );
+    // fraction is `0.5`, and the clipped step lands ON the face (gam#2695).
+    assert_relative_eq!(alpha, 0.5, epsilon = 1e-12);
 }
 
 #[test]
@@ -5082,11 +5065,16 @@ fn time_block_feasible_step_stays_inside_derivative_guard() {
     // Starting at beta=[0,0] with derivative q' = design·beta + offset = 0.2,
     // far above the 1e-4 guard. Stepping along [-1, 0] drives q' toward the
     // guard; the largest feasible α satisfies -α + 0.2 = 1e-4, i.e. α ≈ 0.1999,
-    // and the shared `feasible_step_fraction` applies a 0.995 boundary backoff
-    // so the post-step iterate stays *strictly* interior (slack > 0).
+    // and the shared `feasible_step_fraction` lands the clipped step ON that
+    // face (no retreat), so the row can enter the active-set solver's working
+    // face on the next cycle (gam#2695, gam#2714).
     assert!(
         alpha > 0.0 && alpha < 1.0,
-        "expected an interior step, got {alpha}"
+        "expected a clipped step, got {alpha}"
+    );
+    assert!(
+        (alpha - 0.1999).abs() <= 1e-12,
+        "the clipped fraction is the exact ratio to the face, got {alpha}"
     );
     let feasible = &states[0].beta + &(array![-1.0, 0.0] * alpha);
     let slack = family
@@ -5102,8 +5090,9 @@ fn time_block_feasible_step_stays_inside_derivative_guard() {
             .expect("constraints")
             .b[0];
     assert!(
-        slack > 0.0,
-        "boundary-backed-off step must stay strictly interior; slack={slack}"
+        slack.abs() <= 1e-12 && slack >= -gam_problem::PRIMAL_FEASIBILITY_TOL,
+        "the clipped step lands on the face within round-off and inside the contract band; \
+         slack={slack:e}"
     );
 }
 
