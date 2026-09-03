@@ -528,6 +528,7 @@ pub(crate) fn duchon_small_chi_riesz_series_radial_derivatives(
 
     let mut prev_term_norm = f64::INFINITY;
     let mut saw_nonzero_term = false;
+    let mut reached_band = false;
     for n in 0..DUCHON_SMALL_CHI_SERIES_MAX_TERMS {
         // Closed-form k-th derivative w.r.t. kappa of the term
         // (kappa^2)^n in the Riesz small-chi series. We only ever invoke
@@ -622,10 +623,20 @@ pub(crate) fn duchon_small_chi_riesz_series_radial_derivatives(
         // admits this chart only for `κR ≤ 1/8` and consecutive terms there
         // shrink by `O((κR)²) ≈ 1.6e-2` — many decades above the band.
         if n >= kappa_derivative_order + 2 && term_norm <= accumulated_band {
+            reached_band = true;
             break;
         }
 
         coeff *= -((b + n) as f64) * kappa_sq / ((n + 1) as f64);
+    }
+    // The series is admitted only in the small-χ regime where its terms fall
+    // under the accumulated rounding band within a few dozen terms. If the
+    // term budget runs out before that, the partial sum is not the value of
+    // the series and is not returned as one: the derivatives come back
+    // non-finite, which every Gram and penalty assembly downstream refuses
+    // (#2469 — this used to return the partial sum silently).
+    if !reached_band {
+        return vec![f64::NAN; total.len()];
     }
 
     total.iter().map(|acc| acc.sum()).collect()
