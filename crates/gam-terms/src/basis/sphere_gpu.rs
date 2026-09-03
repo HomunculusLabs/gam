@@ -1817,7 +1817,9 @@ mod sphere_gpu_tests {
                     hi = hi.max(v);
                 }
             }
-            hi / lo.max(1e-300)
+            // A non-positive smallest eigenvalue is an unbounded condition
+            // number, reported as such rather than as `hi / 1e-300`.
+            if lo > 0.0 { hi / lo } else { f64::INFINITY }
         };
         // GPU kernel output must be bit-tight to the CPU oracle: measured on a
         // V100 the raw design parity is ~1e-16 (one ULP, rel ~1.2e-15). Gate at

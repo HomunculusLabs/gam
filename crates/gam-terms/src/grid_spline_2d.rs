@@ -61,7 +61,6 @@
 const PENALTY_NULLITY: usize = 3;
 
 /// Cholesky pivot floor below which the penalized system is declared singular.
-const PIVOT_FLOOR: f64 = 1e-300;
 /// Dense-Cholesky sizing contract documented in the module header.
 const MAX_CELLS_PER_AXIS: usize = 32;
 
@@ -170,11 +169,21 @@ fn basis_row(axes: &[Axis; 2], m_axis: usize, x1: f64, x2: f64) -> ([usize; 16],
 pub fn cholesky_logdet(a: &mut [f64], p: usize) -> Result<f64, String> {
     let mut logdet = 0.0;
     for j in 0..p {
-        let mut s = a[j * p + j];
+        let diag = a[j * p + j];
+        let mut s = diag;
+        let mut subtracted = 0.0_f64;
         for t in 0..j {
-            s -= a[j * p + t] * a[j * p + t];
+            let sq = a[j * p + t] * a[j * p + t];
+            s -= sq;
+            subtracted += sq;
         }
-        if !(s.is_finite() && s > PIVOT_FLOOR) {
+        // The pivot is `a_jj − Σ_t l_jt²`: one product and one subtraction per
+        // term, so a pivot inside the rounding band of that accumulation is
+        // not distinguishable from zero and the system is not positive definite
+        // as computed (#2469). An absolute `1e-300` passed pure roundoff of an
+        // O(1) row and refused an honest tiny pivot.
+        let band = gam_linalg::roundoff::accumulation_growth(2 * j + 1) * (diag.abs() + subtracted);
+        if !(s.is_finite() && s > band) {
             return Err(format!(
                 "grid spline 2d: penalized system not positive definite at pivot {j} (value {s})"
             ));

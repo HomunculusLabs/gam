@@ -421,8 +421,6 @@ const RESIDUAL_QUADRATURE_BASIS_BYTES: usize = 512 << 20;
 /// Deterministic seed for the SLQ probes and posterior samples.
 const RNG_SEED: u64 = 0x1032_CA5C_ADE0_5EED;
 
-/// Floor for eigenvalues/pivots before the system is declared singular.
-const EIG_FLOOR: f64 = 1e-300;
 
 // ───────────────────────────── deterministic RNG ────────────────────────────
 
@@ -2909,7 +2907,9 @@ impl Core {
         let mut fine_logdet = 0.0;
         for j in nc..m {
             let p = self.gram_diag[j] + lambda * self.pen_diag[j];
-            if !(p.is_finite() && p > EIG_FLOOR) {
+            // A positive preconditioner diagonal is the whole requirement; no
+            // floor stands between "positive" and "usable".
+            if !(p.is_finite() && p > 0.0) {
                 return Err(format!(
                     "residual cascade: non-positive preconditioner diagonal {p} at column {j}"
                 ));
@@ -3251,7 +3251,9 @@ impl Core {
             let (theta, tau) = symmetric_tridiagonal_eigen(&alpha, &beta)?;
             let mut quad = 0.0;
             for (&t, &w0) in theta.iter().zip(tau.iter()) {
-                if !(t.is_finite() && t > EIG_FLOOR) {
+                // A Ritz value of an SPD operator is positive; a non-positive one
+                // says the system is not PD, and that is the whole test.
+                if !(t.is_finite() && t > 0.0) {
                     return Err(format!(
                         "residual cascade: non-positive Ritz value {t} in SLQ (system not PD)"
                     ));

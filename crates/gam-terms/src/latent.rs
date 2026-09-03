@@ -1257,8 +1257,10 @@ fn normalize_or_axis(v: ArrayView1<'_, f64>, dim: usize) -> Array1<f64> {
     for a in 0..dim {
         norm_sq += v[a] * v[a];
     }
-    const EPS: f64 = 1e-300; // protect against underflow/denorm that would give Inf
-    if norm_sq > EPS && norm_sq.is_finite() {
+    // Any positive finite `‖v‖²` normalizes without overflow: `1/√x` for the
+    // smallest positive double is ~1e162, well inside range. Only an exactly
+    // zero (or non-finite) norm has no direction and falls back to the axis.
+    if norm_sq > 0.0 && norm_sq.is_finite() {
         let inv = 1.0 / norm_sq.sqrt();
         let mut out = Array1::<f64>::zeros(dim);
         for a in 0..dim {
