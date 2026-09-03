@@ -1,5 +1,18 @@
 ## Unreleased
 
+- **The criterion's `log|S(λ)|₊` ranges over the same structural rank the
+  reparameterization's penalized subspace carries** (#2454). Two
+  λ-free rank rules decided how many directions one penalty set penalizes:
+  the reparameterization ranks the Frobenius-balanced sum `Σ S_k/‖S_k‖_F` at
+  `1e-12·max`, the pseudo-logdet's hint ranked the unweighted sum at
+  `100·p·ε·max`. A component whose norm is small against its neighbour's (a
+  double-penalty null-space term beside a Matérn range penalty) sat above one
+  cut and below the other, so the LAML pair kept an asymptotic slope of `½`
+  per unit ρ that no λ could cancel. `balanced_penalty_structural_rank` in
+  `gam_terms::construction` is now the one owner, used by the split and by
+  every criterion site. The iso-κ ladder of #2760 is measured unchanged by
+  this; its rails have another cause.
+
 - **The constrained joint Newton can form its active face** (#2695, #2714,
   #2765). Measured on the survival location-scale 1569 pair: every seed was
   refused with the QP listing one time-block row as active on every cycle

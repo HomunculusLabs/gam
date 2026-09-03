@@ -1066,6 +1066,7 @@ impl<'a> RemlState<'a> {
         hessian_op: std::sync::Arc<dyn super::reml_outer_engine::HessianFactorization>,
         beta: Array1<f64>,
         penalty_logdet: super::reml_outer_engine::PenaltyLogdetDerivs,
+        penalty_rank: usize,
         nullspace_dim: f64,
         hessian_logdet_correction: f64,
         penalty_subspace_trace: Option<
@@ -1232,7 +1233,13 @@ impl<'a> RemlState<'a> {
                         })
                         .collect(),
                     qs_deviation_from_identity: qs_deviation,
-                    penalty_logdet_rank: beta.len().saturating_sub(nullspace_dim as usize),
+                    // The rank the criterion's `log|S(λ)|₊` actually ranges over —
+                    // the pseudo-logdet's own count — not `beta.len() − nullspace_dim`,
+                    // which subtracted a null dimension measured on `H`'s frame from a
+                    // coefficient length in another frame and reported a rank the
+                    // criterion never charged (gam#2454: `logdet_rank = 10` beside a
+                    // `log|S|₊` growing at exactly 9 per unit ρ).
+                    penalty_logdet_rank: penalty_rank,
                     penalty_logdet_value: penalty_logdet.value,
                 },
             );
@@ -1577,6 +1584,7 @@ impl<'a> RemlState<'a> {
             hessian_op,
             beta,
             penalty_logdet,
+            penalty_rank,
             nullspace_dim,
             hessian_logdet_correction,
             penalty_subspace_trace,
@@ -1670,6 +1678,7 @@ impl<'a> RemlState<'a> {
             hessian_op,
             beta,
             penalty_logdet,
+            sparse.penalty_rank,
             nullspace_dim,
             0.0,
             None,
@@ -2053,6 +2062,7 @@ impl<'a> RemlState<'a> {
             hessian_op,
             beta,
             penalty_logdet,
+            penalty_rank,
             nullspace_dim,
             hessian_logdet_correction,
             penalty_subspace_trace,

@@ -6,7 +6,7 @@ use faer::{Accum, Mat, MatRef, Par, Side};
 use gam_linalg::faer_ndarray::{FaerLinalgError, FaerQr, FaerSvd};
 use gam_linalg::matrix::symmetrize_in_place;
 use gam_linalg::utils::KahanSum;
-use ndarray::{Array1, Array2, ArrayView1, ArrayViewMut2, s};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut2, s};
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator, ParallelIterator,
 };
@@ -1788,6 +1788,82 @@ pub fn create_balanced_penalty_root_from_canonical(
 }
 
 /// Lambda-independent reparameterization invariants derived from penalty structure.
+/// Relative cut of the balanced penalty spectrum below which a direction is
+/// structurally unpenalized: `eigenvalue ≤ BALANCED_PENALTY_RANK_RELATIVE_TOL ·
+/// max|eigenvalue|` of [`balanced_penalty_sum`].
+pub const BALANCED_PENALTY_RANK_RELATIVE_TOL: f64 = 1.0e-12;
+
+/// The λ-invariant penalty operator the structural rank is read from:
+/// `Σ_k S_k / ‖S_k‖_F`, each component embedded on its own column range.
+///
+/// # One rule, two readers
+///
+/// The reparameterization splits the coefficient space into the penalized
+/// subspace `H + S̃` carries and the λ-invariant null space from THIS operator's
+/// spectrum. The outer criterion's `−½ log|S(λ)|₊` must range over exactly that
+/// penalized subspace — its asymptotic slope in `ρ_k` is `½(rank(S̃) −
+/// rank|S|₊)` per unit `ρ_k`, so any disagreement in rank is a criterion with no
+/// interior optimum along that coordinate. The criterion used to take its
+/// structural rank from the UNWEIGHTED sum `Σ_k S_k` at a `100·p·ε·max` cut,
+/// which is a different function of the same penalties: a component whose
+/// Frobenius norm is small against its neighbours (a double-penalty null-space
+/// term beside a Matérn range penalty) can sit above one cut and below the
+/// other. Measured on the iso-κ Matérn double-penalty ladder (gam#2454):
+/// `logdet_rank = 10` against `penalized_rank = 9`, and the gate
+/// `penalty_logdet_ranks_the_same_subspace_the_hessian_carries_2454` red on
+/// main. Normalizing every component first makes the rank a property of the
+/// penalties' supports, not of their scales, which is what "structural" means.
+pub fn balanced_penalty_sum<'a, I>(components: I, p_total: usize) -> Array2<f64>
+where
+    I: IntoIterator<Item = (ArrayView2<'a, f64>, std::ops::Range<usize>)>,
+{
+    let mut balanced = Array2::<f64>::zeros((p_total, p_total));
+    for (local, range) in components {
+        let frob_norm = local.iter().map(|&x| x * x).sum::<f64>().sqrt();
+        if !(frob_norm > 1e-12) {
+            continue;
+        }
+        let scale = 1.0 / frob_norm;
+        for i in 0..local.nrows() {
+            for j in 0..local.ncols() {
+                balanced[[range.start + i, range.start + j]] += scale * local[[i, j]];
+            }
+        }
+    }
+    balanced
+}
+
+/// The rank cut for a balanced penalty spectrum whose largest magnitude is
+/// `max_balanced_eigenvalue`.
+pub fn balanced_penalty_rank_tolerance(max_balanced_eigenvalue: f64) -> f64 {
+    if max_balanced_eigenvalue > 0.0 {
+        max_balanced_eigenvalue * BALANCED_PENALTY_RANK_RELATIVE_TOL
+    } else {
+        BALANCED_PENALTY_RANK_RELATIVE_TOL
+    }
+}
+
+/// Structural rank of a set of penalty components: the number of eigenvalues of
+/// [`balanced_penalty_sum`] above [`balanced_penalty_rank_tolerance`]. This is
+/// the rank the reparameterization's penalized subspace has, and the rank the
+/// criterion's `log|S(λ)|₊` must range over.
+pub fn balanced_penalty_structural_rank<'a, I>(
+    components: I,
+    p_total: usize,
+) -> Result<usize, EstimationError>
+where
+    I: IntoIterator<Item = (ArrayView2<'a, f64>, std::ops::Range<usize>)>,
+{
+    if p_total == 0 {
+        return Ok(0);
+    }
+    let balanced = array_to_faer(&balanced_penalty_sum(components, p_total));
+    let (eigenvalues, _) = robust_eigh_faer(&balanced, Side::Lower, "balanced penalty matrix")?;
+    let max_bal = eigenvalues.iter().fold(0.0_f64, |acc, &value| acc.max(value.abs()));
+    let tol = balanced_penalty_rank_tolerance(max_bal);
+    Ok(eigenvalues.iter().filter(|&&value| value > tol).count())
+}
+
 #[derive(Clone)]
 struct SubspaceSplit {
     q_pen: Array2<f64>,
@@ -1953,24 +2029,14 @@ pub fn precompute_reparam_invariant_from_canonical(
             )));
         }
         // Fallback: global p×p eigendecomposition.
-        let mut s_balanced = Mat::<f64>::zeros(p_total, p_total);
-        for cp in penalties {
-            if cp.rank() == 0 {
-                continue;
-            }
-            let local = cp.local_ref();
-            let frob_norm = local.iter().map(|&x| x * x).sum::<f64>().sqrt();
-            if frob_norm > 1e-12 {
-                let scale = 1.0 / frob_norm;
-                let r = &cp.col_range;
-                for i in 0..local.nrows() {
-                    for j in 0..local.ncols() {
-                        s_balanced[(r.start + i, r.start + j)] += scale * local[[i, j]];
-                    }
-                }
-            }
-        }
-
+        let balanced = balanced_penalty_sum(
+            penalties
+                .iter()
+                .filter(|cp| cp.rank() > 0)
+                .map(|cp| (cp.local_ref().view(), cp.col_range.clone())),
+            p_total,
+        );
+        let s_balanced = array_to_faer(&balanced);
         let (bal_eigenvalues, bal_eigenvectors) =
             robust_eigh_faer(&s_balanced, Side::Lower, "balanced penalty matrix")?;
 
@@ -1993,11 +2059,7 @@ pub fn precompute_reparam_invariant_from_canonical(
             .iter()
             .map(|&idx| bal_eigenvalues[idx].abs())
             .fold(0.0_f64, f64::max);
-        let rank_tol = if max_bal > 0.0 {
-            max_bal * 1e-12
-        } else {
-            1e-12
-        };
+        let rank_tol = balanced_penalty_rank_tolerance(max_bal);
         let penalized_rank = order
             .iter()
             .take_while(|&&idx| bal_eigenvalues[idx] > rank_tol)
@@ -3137,6 +3199,43 @@ pub fn kronecker_reparameterization_engine_with_invariant(
 
 #[cfg(test)]
 mod tests {
+    /// gam#2454: the reparameterization's penalized rank and the shared
+    /// balanced structural rank are one number. Three unit directions penalized
+    /// at Frobenius norms `1e6`, `1e-9` and `1` (overlapping full-width
+    /// components, the dense fallback path): the unweighted sum would drop the
+    /// `1e-9` direction at a `100·p·ε·max` cut; the balanced rule keeps all three
+    /// and the split's `q_pen` spans all three.
+    #[test]
+    fn reparam_split_rank_is_the_balanced_structural_rank_2454() {
+        use ndarray::array;
+        let p = 3usize;
+        let roots = [
+            array![[1.0e3, 0.0, 0.0]],
+            array![[0.0, 1.0e-9_f64.sqrt(), 0.0]],
+            array![[0.0, 0.0, 1.0]],
+        ];
+        let penalties: Vec<super::CanonicalPenalty> = roots
+            .iter()
+            .map(|root| super::CanonicalPenalty::from_dense_root(root.clone(), p))
+            .collect();
+        let balanced = super::balanced_penalty_structural_rank(
+            penalties
+                .iter()
+                .map(|cp| (cp.local_ref().view(), cp.col_range.clone())),
+            p,
+        )
+        .expect("balanced rank");
+        assert_eq!(balanced, 3);
+        let invariant = super::precompute_reparam_invariant_from_canonical(&penalties, p)
+            .expect("reparam invariant");
+        assert_eq!(
+            invariant.split.q_pen.ncols(),
+            balanced,
+            "the split's penalized subspace has the balanced structural rank"
+        );
+        assert_eq!(invariant.split.q_null.ncols(), 0);
+    }
+
     use super::{
         CanonicalPenalty, REL_PSD_FLOOR, SubspaceLeakageMetrics, assess_subspace_leakage,
         classify_eigenvalues_strict, precompute_reparam_invariant_from_canonical,

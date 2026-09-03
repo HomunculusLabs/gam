@@ -215,36 +215,40 @@ fn disjoint_diagonal_blocks(s_k_matrices: &[Array2<f64>]) -> Option<Vec<(usize, 
     if blocks.len() > 1 { Some(blocks) } else { None }
 }
 
-fn structural_rank_from_assembled(s_total: &Array2<f64>) -> Result<usize, String> {
-    let p_dim = s_total.nrows();
-    if p_dim == 0 {
-        return Ok(0);
-    }
-    let (evals, _) = s_total.eigh(Side::Lower).map_err(|e| {
-        format!("PenaltyPseudologdet structural-rank eigendecomposition failed: {e}")
-    })?;
-    let threshold = super::reml_outer_engine::positive_eigenvalue_threshold(
-        evals
-            .as_slice()
-            .expect("eigh returns a freshly allocated contiguous eigenvalue array"),
-    );
-    Ok(evals.iter().filter(|&&eval| eval > threshold).count())
+/// Structural rank of a set of penalty components — ONE rule, shared with the
+/// reparameterization's penalized/null split
+/// (`gam_terms::construction::balanced_penalty_structural_rank`): the rank of
+/// the Frobenius-balanced sum `Σ_k S_k/‖S_k‖_F` at its relative cut. Components
+/// whose `λ` is zero are excluded, exactly as before; what changed is that the
+/// rank is no longer read from the UNWEIGHTED sum at `100·p·ε·max`, which
+/// disagreed with the split whenever one component's norm was small against
+/// another's (gam#2454: `logdet_rank = 10` against `penalized_rank = 9` on the
+/// Matérn double-penalty ladder, a criterion with no interior optimum in ρ).
+fn structural_rank_from_components<'a, I>(components: I, p_dim: usize) -> Result<usize, String>
+where
+    I: IntoIterator<Item = ndarray::ArrayView2<'a, f64>>,
+{
+    gam_terms::construction::balanced_penalty_structural_rank(
+        components.into_iter().map(|view| (view, 0..p_dim)),
+        p_dim,
+    )
+    .map_err(|error| format!("PenaltyPseudologdet structural rank: {error}"))
 }
-
 fn structural_rank_from_canonical_penalties(
     penalties: &[gam_terms::construction::CanonicalPenalty],
     lambdas: &[f64],
     p_total: usize,
 ) -> Result<usize, String> {
-    let mut structural = Array2::<f64>::zeros((p_total, p_total));
-    for (k, penalty) in penalties.iter().enumerate() {
-        if k < lambdas.len() && lambdas[k] > 0.0 {
-            penalty.accumulate_weighted(&mut structural, 1.0);
-        }
-    }
-    structural_rank_from_assembled(&structural)
+    gam_terms::construction::balanced_penalty_structural_rank(
+        penalties
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| *k < lambdas.len() && lambdas[*k] > 0.0)
+            .map(|(_, penalty)| (penalty.local_ref().view(), penalty.col_range.clone())),
+        p_total,
+    )
+    .map_err(|error| format!("PenaltyPseudologdet structural rank: {error}"))
 }
-
 /// Result of a penalty pseudo-logdet computation.
 ///
 /// Holds the eigendecomposition and precomputed W-factor so that derivative
@@ -391,7 +395,6 @@ impl PenaltyPseudologdet {
             pub(crate) start: usize,
             pub(crate) end: usize,
             pub(crate) local: Array2<f64>,
-            pub(crate) structural_local: Array2<f64>,
             /// `(penalty index, λ)` of every component summed into `local`,
             /// so the hinted split can be computed at root scale.
             pub(crate) parts: Vec<(usize, f64)>,
@@ -408,23 +411,15 @@ impl PenaltyPseudologdet {
                 .find(|bd| bd.start == r.start && bd.end == r.end)
             {
                 bd.local.scaled_add(lambda, &cp.local);
-                if lambda > 0.0 {
-                    bd.structural_local.scaled_add(1.0, &cp.local);
-                }
                 bd.parts.push((k, lambda));
             } else {
                 let bd = cp.block_dim();
                 let mut local = Array2::<f64>::zeros((bd, bd));
                 local.scaled_add(lambda, &cp.local);
-                let mut structural_local = Array2::<f64>::zeros((bd, bd));
-                if lambda > 0.0 {
-                    structural_local.scaled_add(1.0, &cp.local);
-                }
                 blocks.push(BlockData {
                     start: r.start,
                     end: r.end,
                     local,
-                    structural_local,
                     parts: vec![(k, lambda)],
                 });
             }
@@ -467,7 +462,13 @@ impl PenaltyPseudologdet {
 
         let ridge_hint = if ridge > 0.0 { Some(ridge) } else { None };
         let process_block = |bd: &BlockData| -> Result<BlockResult, String> {
-            let structural_rank = structural_rank_from_assembled(&bd.structural_local)?;
+            let structural_rank = structural_rank_from_components(
+                bd.parts
+                    .iter()
+                    .filter(|&&(_, lambda)| lambda > 0.0)
+                    .map(|&(k, _)| penalties[k].local.view()),
+                bd.end - bd.start,
+            )?;
             // Root-scale spectrum for the hinted split (see
             // `eigensystem_from_scaled_roots`): the assembled block's eigh
             // cannot resolve a structurally-positive mode once the block's λ
@@ -691,13 +692,14 @@ impl PenaltyPseudologdet {
             }
         }
 
-        let mut structural_total = Array2::<f64>::zeros((p_dim, p_dim));
-        for (k, s_k) in s_k_matrices.iter().enumerate() {
-            if k < lambdas.len() && lambdas[k] > 0.0 {
-                structural_total.scaled_add(1.0, s_k);
-            }
-        }
-        let structural_rank = structural_rank_from_assembled(&structural_total)?;
+        let structural_rank = structural_rank_from_components(
+            s_k_matrices
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| *k < lambdas.len() && lambdas[*k] > 0.0)
+                .map(|(_, s_k)| s_k.view()),
+            p_dim,
+        )?;
         // Root-scale spectrum for the hinted split (see
         // `eigensystem_from_scaled_roots`).
         let components: Vec<(f64, ndarray::ArrayView2<'_, f64>, std::ops::Range<usize>)> =
@@ -1163,11 +1165,10 @@ impl PenaltyPseudologdet {
                 .collect();
             // Structural (λ-free) rank of this block's union support, the same
             // hint `from_penalties_block_factored` forms from its own parts.
-            let mut structural_local = Array2::<f64>::zeros((width, width));
-            for (_, view) in &component_views {
-                structural_local.scaled_add(1.0, view);
-            }
-            let structural_rank = structural_rank_from_assembled(&structural_local)?;
+            let structural_rank = structural_rank_from_components(
+                component_views.iter().map(|(_, view)| *view),
+                width,
+            )?;
             let components: Vec<(f64, ndarray::ArrayView2<'_, f64>, std::ops::Range<usize>)> =
                 component_views
                     .into_iter()
@@ -1730,6 +1731,43 @@ impl PenaltyPseudologdet {
 
 #[cfg(test)]
 mod tests {
+    /// gam#2454: the criterion's structural rank is the reparameterization's
+    /// rank — the Frobenius-balanced rule — not the unweighted sum's. Three
+    /// disjoint unit directions penalized at Frobenius norms `1e6`, `1e-9` and
+    /// `1`: the unweighted sum `diag(1e6, 1e-9, 1)` at the `100·p·ε·max` cut
+    /// loses the `1e-9` direction (rank 2), while every direction is
+    /// structurally penalized (rank 3), and the rank must not move with λ.
+    #[test]
+    fn structural_rank_is_the_balanced_rank_not_the_unweighted_sums_2454() {
+        use ndarray::array;
+        let s1 = array![[1.0e6, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]];
+        let s2 = array![[0.0, 0.0, 0.0], [0.0, 1.0e-9, 0.0], [0.0, 0.0, 0.0]];
+        let s3 = array![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let components = [s1, s2, s3];
+        let balanced = gam_terms::construction::balanced_penalty_structural_rank(
+            components.iter().map(|s| (s.view(), 0..3)),
+            3,
+        )
+        .expect("balanced rank");
+        assert_eq!(balanced, 3, "every direction carries a penalty");
+        for lambdas in [[1.0, 1.0, 1.0], [1.0e8, 1.0e-6, 1.0], [1.0e-6, 1.0e8, 1.0e-3]] {
+            let pld = PenaltyPseudologdet::from_components(&components, &lambdas, 0.0)
+                .expect("pseudo-logdet");
+            assert_eq!(
+                pld.rank(),
+                balanced,
+                "the criterion ranges over the balanced structural rank at lambdas {lambdas:?}"
+            );
+            let expected =
+                (lambdas[0] * 1.0e6).ln() + (lambdas[1] * 1.0e-9).ln() + lambdas[2].ln();
+            assert!(
+                (pld.value() - expected).abs() <= 1e-9 * expected.abs().max(1.0),
+                "log|S|_+ over all three directions: {} vs {expected}",
+                pld.value()
+            );
+        }
+    }
+
     use super::*;
     use ndarray::array;
 
