@@ -664,7 +664,9 @@ fn cloglog_cc_required_nodes(mu: f64, sigma: f64, tol: f64) -> Result<usize, Est
     // exposes it as a cheap routing estimate so we can decide whether the
     // bounded real-line cosine grid is likely to beat the fixed-work complex
     // Gamma backend before paying to evaluate either one.
-    let p_tail = (tol / 8.0).clamp(1e-300, 0.25);
+    // `tol > 0` was validated at entry; the tail probability only needs its
+    // upper cap so the quantile stays in the tail.
+    let p_tail = (tol / 8.0).min(0.25);
     let a = gam_math::probability::standard_normal_quantile(p_tail)
         .map(|z| -z)
         .unwrap_or(8.0)
@@ -678,7 +680,7 @@ fn cloglog_cc_required_nodes(mu: f64, sigma: f64, tol: f64) -> Result<usize, Est
     };
     let rho = y + (1.0 + y * y).sqrt();
     let m_s = (0.5 * (a * y) * (a * y)).exp() / (2.0 * std::f64::consts::PI).sqrt();
-    let eps_quad = (tol / 4.0).max(1e-300);
+    let eps_quad = tol / 4.0;
     let numer = ((8.0 * a * m_s) / ((rho - 1.0).max(1e-12) * eps_quad)).max(1.0);
     let denom = rho.ln();
     if !denom.is_finite() || denom <= 0.0 {
@@ -2623,7 +2625,9 @@ fn cloglog_survival_cc(
     // So this backend is still computing the exact same scalar object as the
     // Gamma/Mellin-Barnes path below; it just works on the real integral rather
     // than the Bromwich contour representation.
-    let p_tail = (tol / 8.0).clamp(1e-300, 0.25);
+    // `tol > 0` was validated at entry; the tail probability only needs its
+    // upper cap so the quantile stays in the tail.
+    let p_tail = (tol / 8.0).min(0.25);
     let a = gam_math::probability::standard_normal_quantile(p_tail)
         .map(|z| -z)
         .unwrap_or(8.0)

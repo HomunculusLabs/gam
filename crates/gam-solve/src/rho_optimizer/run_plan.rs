@@ -1042,7 +1042,17 @@ fn capture_outer_gradient_fd_at_seed(
                 }
             }
             drift_max_abs_error[j] = worst;
-            drift_relative_error[j] = worst / scale.max(analytic_drift_max_abs[j]).max(1e-300);
+            // Relative to the larger of the measured and analytic scales; with no
+            // scale at all the error is either exactly zero or unbounded, never a
+            // number manufactured by a floored denominator.
+            let drift_scale = scale.max(analytic_drift_max_abs[j]);
+            drift_relative_error[j] = if drift_scale > 0.0 {
+                worst / drift_scale
+            } else if worst == 0.0 {
+                0.0
+            } else {
+                f64::INFINITY
+            };
             drift_worst_entry[j] = worst_entry;
             measured_face_drift[j] = (&measured_plus - &measured_minus).mapv(|v| v / (2.0 * step));
         }

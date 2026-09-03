@@ -533,8 +533,11 @@ pub(crate) fn duchon_radial_jets(
     coeffs: &DuchonPartialFractionCoeffs,
 ) -> Result<DuchonRadialJets, BasisError> {
     let kappa = duchon_inverse_length_scale(length_scale, "Duchon radial jets")?;
-    let r_floor = DUCHON_DERIVATIVE_R_FLOOR_REL * length_scale.max(1e-8);
-    let collision_taylor_radius = DUCHON_COLLISION_TAYLOR_REL * length_scale.max(1e-8);
+    // `length_scale` is finite and positive (the owner above refused otherwise),
+    // so the collision radii are fractions of the real scale, not of a floored
+    // one that would have substituted `1e-8` for a genuinely small length scale.
+    let r_floor = DUCHON_DERIVATIVE_R_FLOOR_REL * length_scale;
+    let collision_taylor_radius = DUCHON_COLLISION_TAYLOR_REL * length_scale;
     let r_eval = r.max(r_floor);
     let d = k_dim as f64;
 

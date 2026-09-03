@@ -694,8 +694,10 @@ impl PsiGramTensor {
             acc.max(slab.iter().fold(0.0_f64, |a, &v| a.max(v.abs())))
         });
         let tail_start = m - (m / 4).max(1);
-        let gram_bound = PSI_GRAM_CERT_RTOL * gram_scale.max(1e-300);
-        let rhs_bound = PSI_GRAM_CERT_RTOL * rhs_scale.max(1e-300);
+        // A zero-scale Gram or RHS has a zero bound: only an exactly zero tail
+        // passes, which is what a relative certificate on nothing should say.
+        let gram_bound = PSI_GRAM_CERT_RTOL * gram_scale;
+        let rhs_bound = PSI_GRAM_CERT_RTOL * rhs_scale;
         for d in tail_start..m {
             if gram[d].iter().any(|&v| v.abs() > gram_bound)
                 || rhs[d].iter().any(|&v| v.abs() > rhs_bound)
@@ -737,10 +739,7 @@ impl PsiGramTensor {
             let zero_rhs = Array1::<f64>::zeros(design.nrows());
             let (exact, _) = weighted_gram_and_rhs(&design, weights, &zero_rhs);
             let assembled = self.gram_at(psi);
-            let scale = exact
-                .iter()
-                .fold(0.0_f64, |acc, &v| acc.max(v.abs()))
-                .max(1e-300);
+            let scale = exact.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
             for (a, b) in assembled.iter().zip(exact.iter()) {
                 if (a - b).abs() > PSI_GRAM_SPOT_RTOL * scale {
                     return false;
