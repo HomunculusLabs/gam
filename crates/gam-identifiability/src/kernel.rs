@@ -6,21 +6,6 @@
 
 use ndarray::{Array2, ArrayView2, Axis};
 
-/// Maximum sweeps for the cyclic-by-largest-pivot Jacobi eigensolver.
-///
-/// Jacobi converges quadratically once off-diagonals are small, and the
-/// matrices here are tiny (< 64×64 identifiability normal-equation blocks),
-/// so a converged solve needs only a handful of sweeps. 200 is a generous
-/// safety cap that the `JACOBI_OFFDIAG_TOL` break almost always reaches
-/// first; it only bounds pathological non-converging inputs.
-const JACOBI_MAX_SWEEPS: usize = 200;
-
-/// Off-diagonal magnitude below which the Jacobi sweep is considered
-/// converged. `1e-14` is two orders above f64 unit roundoff, tight enough
-/// that residual off-diagonal mass cannot perturb the rank/pseudo-inverse
-/// decisions these diagnostics make.
-const JACOBI_OFFDIAG_TOL: f64 = 1.0e-14;
-
 /// Maximum distinct values per aux column for it to count as "discrete".
 ///
 /// An integer-valued column with at most this many levels is treated as a
@@ -164,9 +149,15 @@ pub fn aux_richness_metrics(aux: ArrayView2<f64>, latents: ArrayView2<f64>) -> A
         // Solve B = (Aᵀ A)^{+} Aᵀ Z via SVD on (Aᵀ A) — small (aux_dim x aux_dim).
         let ata = a_c.t().dot(&a_c);
         let atz = a_c.t().dot(&z_c);
-        let b_hat = pinv_solve(ata.view(), atz.view());
-        jacobian_rank = matrix_rank(b_hat.view(), 1.0e-8);
-        jacobian_rank_estimated = true;
+        // A rank the eigendecomposition cannot deliver (a non-finite Gram) is
+        // reported as "not estimated" — the state this struct already models —
+        // rather than as a number read off an unconverged sweep.
+        if let Ok(b_hat) = pinv_solve(ata.view(), atz.view())
+            && let Ok(rank) = matrix_rank(b_hat.view(), 1.0e-8)
+        {
+            jacobian_rank = rank;
+            jacobian_rank_estimated = true;
+        }
     }
 
     AuxRichnessMetrics {
@@ -186,13 +177,13 @@ pub fn aux_richness_metrics(aux: ArrayView2<f64>, latents: ArrayView2<f64>) -> A
 /// Moore-Penrose pseudo-inverse times rhs via SVD. Stable for the small
 /// `(aux_dim x aux_dim)` normal-equation matrices encountered here. Tolerance
 /// is `1e-12 * max_singular_value`.
-fn pinv_solve(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Array2<f64> {
+fn pinv_solve(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Result<Array2<f64>, String> {
     let (m, n) = a.dim();
     assert_eq!(m, n, "pinv_solve expects a square normal-equation matrix");
     // Symmetric eigen-decomposition via Jacobi (matrices are small, < 64x64
     // in any realistic identifiability check — Jacobi is robust and avoids
     // pulling in a heavier dependency for this code path).
-    let (eigvals, eigvecs) = jacobi_symmetric_eigen(a);
+    let (eigvals, eigvecs) = symmetric_eigen_lower(a)?;
     let max_abs = eigvals.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
     let tol = 1.0e-12 * max_abs.max(1.0);
     // Build A^+ = V diag(1/λ_i if |λ_i|>tol else 0) Vᵀ.
@@ -212,87 +203,34 @@ fn pinv_solve(a: ArrayView2<f64>, b: ArrayView2<f64>) -> Array2<f64> {
             dvtb[[i, j]] *= scale;
         }
     }
-    eigvecs.dot(&dvtb)
+    Ok(eigvecs.dot(&dvtb))
 }
 
 /// Jacobi rotation eigen-decomposition for small symmetric matrices.
 /// Returns `(eigenvalues, eigenvectors)` with `A = V diag(λ) Vᵀ`.
-fn jacobi_symmetric_eigen(a: ArrayView2<f64>) -> (Vec<f64>, Array2<f64>) {
-    let n = a.nrows();
-    assert_eq!(n, a.ncols());
-    let mut m = a.to_owned();
-    let mut v = Array2::<f64>::eye(n);
-    for _ in 0..JACOBI_MAX_SWEEPS {
-        // Find largest off-diagonal.
-        let mut p = 0usize;
-        let mut q = 1usize;
-        let mut max_off = 0.0_f64;
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let av = m[[i, j]].abs();
-                if av > max_off {
-                    max_off = av;
-                    p = i;
-                    q = j;
-                }
-            }
-        }
-        if max_off < JACOBI_OFFDIAG_TOL {
-            break;
-        }
-        let app = m[[p, p]];
-        let aqq = m[[q, q]];
-        let apq = m[[p, q]];
-        let theta = 0.5 * (aqq - app) / apq;
-        let t = if theta >= 0.0 {
-            1.0 / (theta + (1.0 + theta * theta).sqrt())
-        } else {
-            1.0 / (theta - (1.0 + theta * theta).sqrt())
-        };
-        let c = 1.0 / (1.0 + t * t).sqrt();
-        let s = t * c;
-        // Update M.
-        let new_pp = app - t * apq;
-        let new_qq = aqq + t * apq;
-        m[[p, p]] = new_pp;
-        m[[q, q]] = new_qq;
-        m[[p, q]] = 0.0;
-        m[[q, p]] = 0.0;
-        for i in 0..n {
-            if i != p && i != q {
-                let aip = m[[i, p]];
-                let aiq = m[[i, q]];
-                m[[i, p]] = c * aip - s * aiq;
-                m[[p, i]] = m[[i, p]];
-                m[[i, q]] = s * aip + c * aiq;
-                m[[q, i]] = m[[i, q]];
-            }
-        }
-        // Update V.
-        for i in 0..n {
-            let vip = v[[i, p]];
-            let viq = v[[i, q]];
-            v[[i, p]] = c * vip - s * viq;
-            v[[i, q]] = s * vip + c * viq;
-        }
-    }
-    let eigvals: Vec<f64> = (0..n).map(|i| m[[i, i]]).collect();
-    (eigvals, v)
+/// Self-adjoint eigendecomposition through the workspace's one owner
+/// (`gam_linalg::faer_ndarray::FaerEigh`), reading the lower triangle. It
+/// replaced a private Jacobi sweep whose `JACOBI_MAX_SWEEPS = 200`
+/// exhaustion returned an unconverged spectrum silently (#2470, #2469).
+fn symmetric_eigen_lower(a: ArrayView2<f64>) -> Result<(Vec<f64>, Array2<f64>), String> {
+    let (values, vectors) = gam_linalg::faer_ndarray::FaerEigh::eigh(&a, faer::Side::Lower)
+        .map_err(|error| format!("identifiability eigendecomposition: {error}"))?;
+    Ok((values.to_vec(), vectors))
 }
 
 /// Numeric rank of `m` via its singular values (computed as
 /// `sqrt(eig(MᵀM))`). `tol` is absolute; entries with singular value
 /// `<= tol` are considered zero.
-fn matrix_rank(m: ArrayView2<f64>, tol: f64) -> usize {
+fn matrix_rank(m: ArrayView2<f64>, tol: f64) -> Result<usize, String> {
     let gram = m.t().dot(&m);
-    let (eigvals, _) = jacobi_symmetric_eigen(gram.view());
+    let (eigvals, _) = symmetric_eigen_lower(gram.view())?;
     let mut rank = 0usize;
     for &lam in eigvals.iter() {
         if lam.max(0.0).sqrt() > tol {
             rank += 1;
         }
     }
-    rank
+    Ok(rank)
 }
 
 /// Scalar facts about decoder Jacobian sparsity.
@@ -319,7 +257,7 @@ pub fn jacobian_sparsity_metrics(
     jacobians_flat: ArrayView2<f64>,
     n_samples: usize,
     zero_threshold: f64,
-) -> JacobianSparsityMetrics {
+) -> Result<JacobianSparsityMetrics, String> {
     let (np_rows, latent_dim) = jacobians_flat.dim();
     assert!(np_rows % n_samples == 0, "rows not divisible by n_samples");
     let p_features = np_rows / n_samples;
@@ -360,17 +298,17 @@ pub fn jacobian_sparsity_metrics(
         let view = jacobians_flat.slice(ndarray::s![start..end, ..]);
         // Use `cutoff` (absolute) as the rank tolerance: an entry below it is
         // considered zero, which matches the sparsity decision.
-        ranks.push(matrix_rank(view, cutoff.max(1.0e-300)));
+        ranks.push(matrix_rank(view, cutoff)?);
     }
 
-    JacobianSparsityMetrics {
+    Ok(JacobianSparsityMetrics {
         n_samples,
         p_features,
         latent_dim,
         mean_sparsity,
         max_abs,
         ranks,
-    }
+    })
 }
 
 /// Scalar facts about the per-atom anchor structure of an assignment matrix.
@@ -685,7 +623,7 @@ mod tests {
             [0.0, 0.0, 1.0],
             [0.0, 0.0, 0.0]
         ];
-        let m = jacobian_sparsity_metrics(j.view(), 1, 1.0e-3);
+        let m = jacobian_sparsity_metrics(j.view(), 1, 1.0e-3).expect("sparsity metrics");
         assert_eq!(m.p_features, 4);
         assert_eq!(m.latent_dim, 3);
         assert!(m.mean_sparsity > 0.5);
@@ -700,7 +638,7 @@ mod tests {
                 j[[i, k]] = 1.0 + 0.1 * (i + k) as f64;
             }
         }
-        let m = jacobian_sparsity_metrics(j.view(), 1, 1.0e-3);
+        let m = jacobian_sparsity_metrics(j.view(), 1, 1.0e-3).expect("sparsity metrics");
         assert!(m.mean_sparsity < 0.1);
     }
 

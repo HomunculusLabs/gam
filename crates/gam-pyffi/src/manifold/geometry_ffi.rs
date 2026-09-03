@@ -5491,7 +5491,8 @@ fn diagnostics_jacobian_sparsity<'py>(
         jacobians_flat.as_array(),
         n_samples,
         zero_threshold,
-    );
+    )
+    .map_err(PyValueError::new_err)?;
     let dict = PyDict::new(py);
     dict.set_item("n_samples", m.n_samples)?;
     dict.set_item("p_features", m.p_features)?;

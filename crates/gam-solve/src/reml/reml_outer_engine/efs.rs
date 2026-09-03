@@ -574,7 +574,7 @@ pub fn compute_hybrid_efs_update(
         // the pseudoinverse, avoiding noise amplification in near-singular
         // directions. This is the standard approach for constrained
         // optimization on submanifolds (see response.md Section 4).
-        let delta_psi = pseudoinverse_times_vec(&gram, &psi_gradient, PSI_GRAM_PINV_TOL);
+        let delta_psi = pseudoinverse_times_vec(&gram, &psi_gradient, PSI_GRAM_PINV_TOL)?;
 
         // Step 3: Apply damping and capping.
         //
@@ -603,20 +603,20 @@ pub(crate) fn pseudoinverse_times_vec(
     gram: &ndarray::Array2<f64>,
     v: &[f64],
     tol: f64,
-) -> ndarray::Array1<f64> {
+) -> Result<ndarray::Array1<f64>, String> {
     let n = gram.nrows();
     assert_eq!(n, v.len(), "pseudoinverse_times_vec dimension mismatch");
     if n == 0 {
-        return ndarray::Array1::zeros(0);
+        return Ok(ndarray::Array1::zeros(0));
     }
 
     // Special case: scalar (1x1).
     if n == 1 {
         let g = gram[[0, 0]];
         if g.abs() < tol.max(1e-30) {
-            return ndarray::Array1::zeros(1);
+            return Ok(ndarray::Array1::zeros(1));
         }
-        return ndarray::Array1::from_vec(vec![v[0] / g]);
+        return Ok(ndarray::Array1::from_vec(vec![v[0] / g]));
     }
 
     // Eigendecomposition of symmetric G via the faer crate would be ideal,
@@ -632,7 +632,7 @@ pub(crate) fn pseudoinverse_times_vec(
     //
     // Robust implementation: compute G = Q Λ Q^T via iterative Jacobi.
     // For n ≤ 10 this converges in a handful of sweeps.
-    let (eigenvalues, eigenvectors) = symmetric_eigen(gram);
+    let (eigenvalues, eigenvectors) = symmetric_eigen(gram)?;
 
     let max_eval = eigenvalues.iter().cloned().fold(0.0_f64, f64::max);
     let cutoff = tol * max_eval;
@@ -651,7 +651,7 @@ pub(crate) fn pseudoinverse_times_vec(
             }
         }
     }
-    result
+    Ok(result)
 }
 
 /// Symmetric eigendecomposition via classical Jacobi iteration.
@@ -662,91 +662,18 @@ pub(crate) fn pseudoinverse_times_vec(
 ///
 /// This is a self-contained implementation to avoid external dependencies.
 /// For larger matrices, use faer's `SelfAdjointEigendecomposition`.
-pub(crate) fn symmetric_eigen(a: &ndarray::Array2<f64>) -> (Vec<f64>, ndarray::Array2<f64>) {
-    let n = a.nrows();
-    assert_eq!(n, a.ncols(), "symmetric_eigen requires square matrix");
-
-    let mut work = a.clone();
-    let mut v = ndarray::Array2::<f64>::eye(n);
-
-    // Jacobi iteration: sweep through all off-diagonal pairs, zeroing them.
-    // The off-diagonal Frobenius norm converges quadratically, so a near-machine
-    // `tol` is reached in a handful of sweeps for the small matrices this serves;
-    // `MAX_SWEEPS` is a generous safety cap that the convergence test hits first.
-    const MAX_SWEEPS: usize = 100;
-    const TOL: f64 = 1e-15;
-    // Skip a pair whose off-diagonal magnitude is already two orders below `TOL`
-    // (rotating it would only add round-off), and skip a rotation whose `τ`
-    // magnitude is so large the pair is numerically diagonal already.
-    const PAIR_SKIP_TOL: f64 = TOL * 0.01;
-    const TAU_DIAGONAL_THRESHOLD: f64 = 1e15;
-
-    let mut sweep = 0;
-    while sweep < MAX_SWEEPS {
-        // Check convergence: sum of squares of off-diagonal elements.
-        let mut off_diag_sq = 0.0;
-        for i in 0..n {
-            for j in (i + 1)..n {
-                off_diag_sq += work[[i, j]] * work[[i, j]];
-            }
-        }
-        if off_diag_sq < TOL * TOL {
-            break;
-        }
-
-        for p in 0..n {
-            for q in (p + 1)..n {
-                let apq = work[[p, q]];
-                if apq.abs() < PAIR_SKIP_TOL {
-                    continue;
-                }
-
-                let app = work[[p, p]];
-                let aqq = work[[q, q]];
-                let tau = (aqq - app) / (2.0 * apq);
-
-                // Stable computation of t = sign(τ) / (|τ| + sqrt(1 + τ²))
-                let t = if tau.abs() > TAU_DIAGONAL_THRESHOLD {
-                    // Nearly diagonal: skip.
-                    continue;
-                } else {
-                    let sign_tau = if tau >= 0.0 { 1.0 } else { -1.0 };
-                    sign_tau / (tau.abs() + (1.0 + tau * tau).sqrt())
-                };
-
-                let c = 1.0 / (1.0 + t * t).sqrt();
-                let s = t * c;
-
-                // Apply Jacobi rotation to work matrix.
-                work[[p, p]] = app - t * apq;
-                work[[q, q]] = aqq + t * apq;
-                work[[p, q]] = 0.0;
-                work[[q, p]] = 0.0;
-
-                for r in 0..n {
-                    if r == p || r == q {
-                        continue;
-                    }
-                    let wrp = work[[r, p]];
-                    let wrq = work[[r, q]];
-                    work[[r, p]] = c * wrp - s * wrq;
-                    work[[p, r]] = work[[r, p]];
-                    work[[r, q]] = s * wrp + c * wrq;
-                    work[[q, r]] = work[[r, q]];
-                }
-
-                // Accumulate eigenvectors.
-                for r in 0..n {
-                    let vrp = v[[r, p]];
-                    let vrq = v[[r, q]];
-                    v[[r, p]] = c * vrp - s * vrq;
-                    v[[r, q]] = s * vrp + c * vrq;
-                }
-            }
-        }
-        sweep += 1;
-    }
-
-    let eigenvalues: Vec<f64> = (0..n).map(|i| work[[i, i]]).collect();
-    (eigenvalues, v)
+/// Self-adjoint eigendecomposition of `a` through the workspace's one owner
+/// (`gam_linalg::faer_ndarray::FaerEigh`), reading the lower triangle.
+///
+/// This replaced a private Jacobi sweep with its own `MAX_SWEEPS = 100` and
+/// `TOL = 1e-15` that returned an unconverged spectrum silently when its
+/// sweeps ran out (#2470, #2469): one owner, and a refusal instead of a
+/// fall-through.
+pub(crate) fn symmetric_eigen(
+    a: &ndarray::Array2<f64>,
+) -> Result<(Vec<f64>, ndarray::Array2<f64>), String> {
+    let (values, vectors) =
+        <ndarray::Array2<f64> as gam_linalg::faer_ndarray::FaerEigh>::eigh(a, faer::Side::Lower)
+            .map_err(|error| format!("EFS symmetric eigendecomposition: {error}"))?;
+    Ok((values.to_vec(), vectors))
 }
