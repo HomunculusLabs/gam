@@ -4970,26 +4970,20 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         }
         let grad_inf = block_gradient_norms.iter().copied().fold(0.0_f64, f64::max);
         let pen_inf = block_penalty_norms.iter().copied().fold(0.0_f64, f64::max);
-        // Firth/Jeffreys score magnitude. The convergence residual is the
-        // AUGMENTED stationarity `∇L − Sβ + ∇Φ`, so `∇Φ` is a first-class term
-        // whose own numerical scale sets the achievable KKT floor: `∇Φ` is a
-        // trace `½ tr(H_id⁻¹ Z_Jᵀ Ḣ Z_J)` formed from a FLOORED reduced-info
-        // pseudo-inverse, so its components carry O(‖∇Φ‖·ε_floor) round-off
-        // that the augmented residual cannot polish below. Scaling the KKT
-        // tolerance by `max(grad, pen, ‖∇Φ‖)` (not just grad/pen) makes the
-        // certificate reachable for coupled K-block Firth fits whose data
-        // gradient is small but whose Firth score is O(1): otherwise the
-        // augmented residual plateaus a few × above an unattainably tight
-        // `inner_tol·(1+grad)` tol and the solve refuses just short of
-        // convergence (gam#729/#715 — the residual stalled at ~8.8e-6 against a
-        // ~1e-6 tol). No-op when the term is condition-gated (∇Φ=0).
-        let firth_score_inf = head_jeffreys_term
-            .as_ref()
-            .map(|(grad_phi, _hphi)| grad_phi.iter().map(|v| v.abs()).fold(0.0_f64, f64::max))
-            .unwrap_or(0.0);
+        // The same scale as the head-of-cycle site: the data and penalty terms'
+        // magnitudes. The Jeffreys score `‖∇Φ‖∞` is not a tolerance scale.
+        // 48670fd0e folded it in for coupled K-block Firth fits whose score is
+        // O(1) (gam#729/#715), where it moved the tolerance about 2×. Beside a
+        // monotone time floor the score reaches `7.256e9` (#2695, pool job
+        // 531795), and `inner_tol·(1+‖∇Φ‖∞)` then passed a residual of
+        // `4.675e-2` while the solve was still taking `0.215` steps with the
+        // objective falling `2.5e-3` per cycle. That minted point sat `2.87`
+        // below the cost every nearby probe reached, so the outer line search
+        // could not descend from it. What `∇Φ` contributes is round-off, which
+        // is a resolution, not a convergence choice (#2812).
         // See the head-of-cycle site for why the denominator is named rather
         // than folded straight into the tolerance (gam#2713).
-        let stationarity_scale = grad_inf.max(pen_inf).max(firth_score_inf);
+        let stationarity_scale = grad_inf.max(pen_inf);
         // Same rule as the head-of-cycle site: the target is never below the
         // residual's own rounding band (#2812).
         let stationarity_band = {
