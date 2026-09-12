@@ -4239,7 +4239,7 @@ impl SaeManifoldTerm {
     /// union-output-subspace arm fires. Training EV is payload telemetry, never
     /// the decision. Reconstruction, assignments, Grams, and decoder frames are
     /// derived internally from the same `self + target + rho` state.
-    pub fn record_fit_data_collapse_if_needed(
+    pub(crate) fn record_fit_data_collapse_if_needed(
         &mut self,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
@@ -4301,7 +4301,7 @@ impl SaeManifoldTerm {
     /// The most recent curvature-homotopy entry walk outcome (#1007), or `None`
     /// when no walk has run on this term. Read off the fitted term so the
     /// arrival / bifurcation / collapse outcome is observable.
-    pub fn curvature_walk_report(&self) -> Option<&CurvatureWalkReport> {
+    pub(crate) fn curvature_walk_report(&self) -> Option<&CurvatureWalkReport> {
         self.curvature_walk_report.as_ref()
     }
 

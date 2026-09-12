@@ -53,7 +53,7 @@ pub(crate) fn terminal_survival_hyper_theta(
     Ok(theta)
 }
 
-pub fn fit_survival_marginal_slope_terms(
+pub(crate) fn fit_survival_marginal_slope_terms(
     data: ArrayView2<'_, f64>,
     spec: SurvivalMarginalSlopeTermSpec,
     options: &BlockwiseFitOptions,
