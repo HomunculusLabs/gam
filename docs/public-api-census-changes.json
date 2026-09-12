@@ -2136,5 +2136,22 @@
     },
     "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. chart_canonicalization.rs::mode_layout is one restored-in-place identity declared three times, on TorusFlowBasis, FreePatchFlowBasis and SphereBoostFlowBasis. No code calls any of the three.",
     "evidence": "restored_consumers_2829.py at 3693c2c2c (MSI job 539356) scores mode_layout as consumed_unexplained, and narrow_scan_2829.py at 0bf5b572b (MSI job 541705, /scratch.global/sauer354/pool/api2829/narrow.0bf5b572b5a4d6fb95b30aefcf5da3387fa92bee.rows.tsv) scores it as no_production_user. At the base, git grep -w mode_layout finds the three declarations and two doc comments only. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 542607, /scratch.global/sauer354/pool/api2829/validate.542607.log)."
+  },
+  {
+    "base": "a0ae9fe3cb52daf3e47728165a043616b1aeae95",
+    "removed": {
+      "crates/gam-problem/src/types.rs::backward_error_bound": 1,
+      "crates/gam-problem/src/types.rs::chosen_by": 1,
+      "crates/gam-problem/src/types.rs::delta": 1,
+      "crates/gam-problem/src/types.rs::inertia_after": 1,
+      "crates/gam-problem/src/types.rs::inertia_before": 1,
+      "crates/gam-problem/src/types.rs::kind": 1,
+      "crates/gam-problem/src/types.rs::matrix_form": 1,
+      "crates/gam-problem/src/types.rs::none": 1,
+      "crates/gam-problem/src/types.rs::objective_policy": 1,
+      "crates/gam-problem/src/types.rs::with_inertia": 1
+    },
+    "reason": "prune-api-b product-use sweep (#2899). The public accessors and constructors of StabilizationLedger (none, delta, kind, matrix_form, chosen_by, objective_policy, backward_error_bound, inertia_before, inertia_after, with_inertia) are removed with the type, which no production path constructs.",
+    "evidence": "scripts/public_api_census.py over probe commit fb1e11bc7 on base 7ae0ee589 (MSI acn112, python3.12; sliceG.census.out) reports exactly these ten crates/gam-problem/src/types.rs identities, one declaration each; re-keyed to the push parent after an upstream doc-unrelated change to smoothing_correction.rs, which removes no public function. Compile receipt that production never constructs the ledger: /scratch.global/sauer354/pool/prune-api-b/t1chk.541697.log."
   }
 ]

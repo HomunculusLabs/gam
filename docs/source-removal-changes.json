@@ -5330,5 +5330,32 @@
     ],
     "reason": "SPEC rule 2 (#2901): opt dc6a62eda removes its finite-difference derivatives, the Hessian fallback and FiniteDiffGradient, together with the FirstOrderObjective::set_finite_difference_bounds hook that fed the wrapper its box. gam pins that revision, so RetainingObjective's delegation of the hook in crates/gam-solve/src/rho_optimizer/run.rs no longer implements a trait method and is deleted.",
     "evidence": "At the base, git grep -n -w set_finite_difference_bounds in crates, src, tests, examples and benches finds only the delegation in run.rs (declaration and the inner call) and the FD scanner's allowlist comment, which this change also removes. opt at dc6a62eda has no set_finite_difference_bounds (checked by grep of opt/src/lib.rs at that revision). The item list applies source_removal_guard.py's ITEM regex to the base and changed blobs by hand; the method is private but its name occurs more than once tree-wide at the base, so it is guarded. HessianFallbackPolicy leaves only an import and two builder calls in run_plan.rs and rho_optimizer.rs, which declare nothing. Compile is covered by the lead's shared tip check and MSI job 542989, which builds and tests opt at dc6a62eda."
+  },
+  {
+    "base": "a0ae9fe3cb52daf3e47728165a043616b1aeae95",
+    "items": [
+      "crates/gam-problem/src/types.rs:enum:StabilizationKind",
+      "crates/gam-problem/src/types.rs:enum:StabilizationRule",
+      "crates/gam-problem/src/types.rs:fn:backward_error_bound",
+      "crates/gam-problem/src/types.rs:fn:chosen_by",
+      "crates/gam-problem/src/types.rs:fn:delta",
+      "crates/gam-problem/src/types.rs:fn:from",
+      "crates/gam-problem/src/types.rs:fn:inertia_after",
+      "crates/gam-problem/src/types.rs:fn:inertia_before",
+      "crates/gam-problem/src/types.rs:fn:kind",
+      "crates/gam-problem/src/types.rs:fn:matrix_form",
+      "crates/gam-problem/src/types.rs:fn:none",
+      "crates/gam-problem/src/types.rs:fn:objective_policy",
+      "crates/gam-problem/src/types.rs:fn:serde_cannot_bypass_ledger_semantics",
+      "crates/gam-problem/src/types.rs:fn:try_from",
+      "crates/gam-problem/src/types.rs:fn:try_new",
+      "crates/gam-problem/src/types.rs:fn:validate_rule",
+      "crates/gam-problem/src/types.rs:fn:with_inertia",
+      "crates/gam-problem/src/types.rs:struct:StabilizationLedger",
+      "crates/gam-problem/src/types.rs:struct:StabilizationLedgerWire",
+      "crates/gam-problem/src/types.rs:type:Error"
+    ],
+    "reason": "prune-api-b product-use sweep (#2899). No production path constructs a StabilizationLedger: a compile check of a probe narrowing it to pub(crate) (job 541697, probe fcc4b63b2) failed with \"struct StabilizationLedgerWire is never constructed\", \"struct StabilizationLedger is never constructed\" and \"multiple associated items are never used\" at crates/gam-problem/src/types.rs:276, :290 and :303. The family was kept alive only by pub visibility and its own serde validation test, so StabilizationLedger, StabilizationLedgerWire, StabilizationRule and StabilizationKind are deleted with the ledger constructors, validation, accessors and TryFrom/From serde impls, the serde_cannot_bypass_ledger_semantics test, the ledger taxonomy comment block, and the doc-only root tests/basis_smooth/misc/ridge_ledger_invariants.rs with its mod line. RidgePassport, Inertia and InvalidStabilization stay (used by gam-solve and EstimationError); two gam-solve smoothing_correction.rs doc links to StabilizationKind become plain text.",
+    "evidence": "Compile receipt: /scratch.global/sauer354/pool/prune-api-b/t1chk.541697.log (HEAD=fcc4b63b2). At the base git grep -w finds StabilizationLedger, StabilizationLedgerWire and StabilizationRule only in crates/gam-problem/src/types.rs and the doc-only root test, and StabilizationKind additionally only in two doc links in crates/gam-solve/src/estimate/smoothing_correction.rs. The item list is the refusal of scripts/source_removal_guard.py over probe commit fb1e11bc7 on base 7ae0ee589 (MSI acn112, python3.12; sliceG.guard.out in the pool directory), re-keyed to the push parent after an upstream commit changed smoothing_correction.rs outside the doc block this commit edits; fn:from, fn:try_from and type:Error are the deleted serde conversion impls."
   }
 ]
