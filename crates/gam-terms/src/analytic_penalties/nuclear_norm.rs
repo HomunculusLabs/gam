@@ -307,8 +307,7 @@ impl NuclearNormPenalty {
         })?;
         let trace_scale = evals
             .iter()
-            .fold(0.0_f64, |acc, &lambda| acc.max(lambda.abs()))
-            .max(1.0);
+            .fold(0.0_f64, |acc, &lambda| acc.max(lambda.abs()));
         let psd_tol = 1.0e-10 * trace_scale;
         let mut raw_evals = Array1::<f64>::zeros(s_dim);
         for i in 0..s_dim {
@@ -354,7 +353,7 @@ impl NuclearNormPenalty {
             } else {
                 (0.0, evals[0])
             };
-            let scale = (left.abs() + right.abs()).max(1.0);
+            let scale = left.abs() + right.abs();
             if (right - left).abs() <= 1.0e-12 * scale {
                 return Err(format!(
                     "NuclearNormPenalty HVP is undefined: max_rank splits a tied \
@@ -462,8 +461,7 @@ impl NuclearNormPenalty {
         })?;
         let trace_scale = evals
             .iter()
-            .fold(0.0_f64, |acc, &lambda| acc.max(lambda.abs()))
-            .max(1.0);
+            .fold(0.0_f64, |acc, &lambda| acc.max(lambda.abs()));
         let psd_tol = 1.0e-10 * trace_scale;
         let mut raw_evals = Array1::<f64>::zeros(d);
         for i in 0..d {
@@ -484,7 +482,7 @@ impl NuclearNormPenalty {
         if self.max_rank.is_some() && active_count < d && active_start > 0 {
             let left = evals[active_start - 1];
             let right = evals[active_start];
-            let scale = (left.abs() + right.abs()).max(1.0);
+            let scale = left.abs() + right.abs();
             if (right - left).abs() <= 1.0e-12 * scale {
                 return Err(format!(
                     "NuclearNormPenalty HVP is undefined: max_rank splits a tied \
