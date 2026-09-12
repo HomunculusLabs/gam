@@ -13,7 +13,7 @@
 
 use ndarray::Array1;
 use opt::{
-    Bfgs, BfgsError, Bounds, FirstOrderSample, FusedObjective, GradientTolerance, InitialMetric,
+    Bfgs, BfgsError, FirstOrderSample, FusedObjective, GradientTolerance, InitialMetric,
     MaxIterations, ObjectiveEvalError, Profile,
 };
 
@@ -169,9 +169,7 @@ where
     let max_iterations = MaxIterations::new(input.max_iterations).map_err(|err| {
         EstimationError::InvalidInput(format!("outer max_iter is invalid: {err}"))
     })?;
-    let bounds = Bounds::new(input.bounds.0, input.bounds.1, 1.0e-6).map_err(|err| {
-        EstimationError::InvalidInput(format!("outer rho bounds are invalid: {err}"))
-    })?;
+    let bounds = crate::rho_optimizer::outer_bounds(&input.bounds.0, &input.bounds.1)?;
     let seed_sample = FirstOrderSample {
         value: input.seed_objective,
         gradient: input.seed_gradient,

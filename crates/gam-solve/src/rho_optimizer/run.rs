@@ -8747,8 +8747,14 @@ pub(crate) fn run_per_atom_efs_if_frontier(
 #[path = "inverted_rho_box_tests.rs"]
 mod inverted_rho_box_tests;
 
+/// The outer ρ box. Opt's box tolerance decides when a coordinate sits AT a
+/// bound: its projected-gradient component is masked and outward direction
+/// components are dropped. That asks whether an iterate is resolvably distinct
+/// from the bound, and a smooth objective's minimizer is resolvable in ρ only to
+/// `√ε`, the band the affine-face REML box (`constrained_gaussian_reml`) already
+/// passes. It replaces a picked `1e-6` (#2469).
 pub(crate) fn outer_bounds(lo: &Array1<f64>, hi: &Array1<f64>) -> Result<Bounds, EstimationError> {
-    Bounds::new(lo.clone(), hi.clone(), 1e-6).map_err(|err| {
+    Bounds::new(lo.clone(), hi.clone(), f64::EPSILON.sqrt()).map_err(|err| {
         EstimationError::InvalidInput(format!("outer rho bounds are invalid: {err}"))
     })
 }
