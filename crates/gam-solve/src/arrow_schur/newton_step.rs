@@ -1027,7 +1027,7 @@ where
 /// (e.g. checking whether a candidate step satisfies a trust-region condition
 /// against the augmented quadratic). For gain-ratio computations against the
 /// bare penalized objective, use [`arrow_bare_quadratic_model_reduction`].
-pub fn arrow_damped_quadratic_model_reduction(
+pub(crate) fn arrow_damped_quadratic_model_reduction(
     sys: &ArrowSchurSystem,
     delta_t: ArrayView1<'_, f64>,
     delta_beta: ArrayView1<'_, f64>,

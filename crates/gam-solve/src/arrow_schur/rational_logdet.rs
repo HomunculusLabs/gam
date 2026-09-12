@@ -451,7 +451,7 @@ impl RationalLogdetPlan {
     /// the family solve exists to exploit. A shift whose multi-shift iterate
     /// misses its certificate is finished by a single-shift `shifted_pcg`,
     /// where one fixed `t` makes the diagonal a legitimate preconditioner again.
-    pub fn evaluate_family_preconditioned(
+    pub(crate) fn evaluate_family_preconditioned(
         &self,
         matvec: &(impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync),
         repair_preconditioner: &ShiftedDiagonalPreconditioner,
@@ -479,7 +479,7 @@ impl RationalLogdetPlan {
     /// `self.nodes` order, and the number of operator applies it spent. This is
     /// the seam a structured or device-resident family evaluator plugs into
     /// without touching the criterion.
-    pub fn evaluate_with_family_solver(
+    pub(crate) fn evaluate_with_family_solver(
         &self,
         solve: &(impl Fn(&Array1<f64>) -> Option<(Vec<Array1<f64>>, usize)> + Sync),
     ) -> Option<RationalLogdetEval> {
@@ -693,7 +693,7 @@ impl RationalLogdetPlan {
     /// `tr(S^-1 D)`, which is generally NOT the derivative of this fixed-node
     /// rational surrogate and would reopen the objective/gradient desynchrony
     /// the surrogate exists to prevent.
-    pub fn into_directional_derivative_bundle(
+    pub(crate) fn into_directional_derivative_bundle(
         &self,
         eval: RationalLogdetEval,
     ) -> Option<RationalLogdetDerivativeBundle> {
@@ -818,7 +818,7 @@ impl ShiftedDiagonalPreconditioner {
     /// non-positive entry means there is no usable scale, and the identity is
     /// returned rather than a fabricated one: the iteration is then exactly the
     /// unpreconditioned one, which is still correct for SPD `A`.
-    pub fn from_operator_diagonal(diagonal: &Array1<f64>) -> Self {
+    pub(crate) fn from_operator_diagonal(diagonal: &Array1<f64>) -> Self {
         if diagonal
             .iter()
             .any(|value| !(value.is_finite() && *value > 0.0))

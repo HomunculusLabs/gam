@@ -268,7 +268,7 @@ impl SlqUnitDeflatedLogDet {
     /// deflation metadata — for the evidence plumbing that only consumes the
     /// scalar log-determinant and its uncertainty band.
     #[inline]
-    pub fn as_logdet(&self) -> SlqLogDet {
+    pub(crate) fn as_logdet(&self) -> SlqLogDet {
         SlqLogDet {
             estimate: self.estimate,
             std_err: self.std_err,

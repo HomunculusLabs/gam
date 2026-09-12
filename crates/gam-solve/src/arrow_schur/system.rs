@@ -31,7 +31,7 @@ impl ArrowRowBlock {
     /// columns. This is used by matrix-free assemblers that keep the shared
     /// beta tier at one width while dense row supplements live in another
     /// coordinate system.
-    pub fn new_with_htbeta_cols(d: usize, htbeta_cols: usize) -> Self {
+    pub(crate) fn new_with_htbeta_cols(d: usize, htbeta_cols: usize) -> Self {
         Self {
             htt: Array2::<f64>::zeros((d, d)),
             htbeta: Array2::<f64>::zeros((d, htbeta_cols)),
@@ -281,7 +281,7 @@ impl ArrowSchurSystem {
 
     /// Allocate an arrow system with a caller-owned dense shared-block buffer and
     /// per-row dense `H_tβ` slabs allocated at `htbeta_cols` columns.
-    pub fn new_with_hbb_and_htbeta_cols(
+    pub(crate) fn new_with_hbb_and_htbeta_cols(
         n: usize,
         d: usize,
         k: usize,
@@ -477,7 +477,7 @@ impl ArrowSchurSystem {
 
     /// Recompute the row-system fingerprint from the currently materialized
     /// row blocks, cross-blocks, and shared-block diagonal.
-    pub fn compute_row_hessian_fingerprint(&self) -> u64 {
+    pub(crate) fn compute_row_hessian_fingerprint(&self) -> u64 {
         row_hessian_fingerprint_for_system(self)
     }
 
@@ -1263,7 +1263,7 @@ impl StreamingArrowSchur {
     }
 
     /// Reset the dense shared accumulator to `H_ββ + ridge_beta I`.
-    pub fn reset_accumulator(&mut self, ridge_beta: f64) -> Result<(), ArrowSchurError> {
+    pub(crate) fn reset_accumulator(&mut self, ridge_beta: f64) -> Result<(), ArrowSchurError> {
         if self.hbb.dim() != (self.k, self.k) {
             return Err(ArrowSchurError::SchurFactorFailed {
                 reason: "streaming Arrow-Schur requires a dense beta block accumulator".to_string(),
@@ -1278,7 +1278,7 @@ impl StreamingArrowSchur {
     }
 
     /// Accumulate rows `[start, end)` into the reduced RHS and Schur block.
-    pub fn accumulate_chunk(
+    pub(crate) fn accumulate_chunk(
         &mut self,
         start: usize,
         end: usize,
@@ -2089,7 +2089,7 @@ pub enum BetaSchurSpectralConditioning {
 
 impl BetaSchurSpectralConditioning {
     #[must_use]
-    pub fn is_unit_deflated(self) -> bool {
+    pub(crate) fn is_unit_deflated(self) -> bool {
         matches!(self, Self::UnitDeflated)
     }
 }
@@ -2358,7 +2358,7 @@ impl ArrowFactorCache {
         self.htt_factors.len()
     }
 
-    pub fn htbeta_available(&self) -> bool {
+    pub(crate) fn htbeta_available(&self) -> bool {
         self.htbeta.is_available()
     }
 
@@ -2391,7 +2391,7 @@ impl ArrowFactorCache {
         }
     }
 
-    pub fn undamped_factors_iter(&self) -> impl Iterator<Item = ArrayView2<'_, f64>> + '_ {
+    pub(crate) fn undamped_factors_iter(&self) -> impl Iterator<Item = ArrayView2<'_, f64>> + '_ {
         (0..self.undamped_factor_count()).map(|row| self.undamped_factor(row))
     }
 

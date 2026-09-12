@@ -2888,7 +2888,7 @@ pub struct ReducedSchurNegativeCurvature {
 /// is negative curvature of the fit's own objective at this point, and a fit
 /// reporting convergence there has converged to something that is not a local
 /// minimum.
-pub fn reduced_schur_negative_curvature<B: BatchedBlockSolver + Sync>(
+pub(crate) fn reduced_schur_negative_curvature<B: BatchedBlockSolver + Sync>(
     sys: &ArrowSchurSystem,
     htt_factors: &ArrowFactorSlab,
     ridge_beta: f64,

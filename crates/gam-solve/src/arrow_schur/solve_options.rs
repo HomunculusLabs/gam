@@ -283,7 +283,7 @@ impl Default for ArrowSolvePrecisionPolicy {
 }
 
 impl ArrowSolvePrecisionPolicy {
-    pub fn certified_mixed() -> Self {
+    pub(crate) fn certified_mixed() -> Self {
         Self::CertifiedMixed {
             max_refinement_steps: DEFAULT_MIXED_PRECISION_MAX_REFINEMENTS,
             residual_relative_tolerance: DEFAULT_MIXED_PRECISION_CERTIFICATE_TOLERANCE,
@@ -624,7 +624,7 @@ impl ArrowSolveOptions {
     /// factor and every evidence log-determinant are unaffected — see
     /// `mixed_precision_reduced_beta`.
     #[must_use]
-    pub fn with_streaming_solve_precision_default(&self) -> Self {
+    pub(crate) fn with_streaming_solve_precision_default(&self) -> Self {
         let mut out = self.clone();
         if matches!(out.solve_precision, ArrowSolvePrecisionPolicy::F64Only) {
             out.solve_precision = ArrowSolvePrecisionPolicy::certified_mixed();
