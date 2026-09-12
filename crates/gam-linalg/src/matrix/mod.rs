@@ -4018,6 +4018,15 @@ pub trait LinearOperator {
             info.relative_residual_norm,
             attempt_started.elapsed().as_secs_f64(),
         );
+        // An iteration-capped PCG iterate is not a solution of the system the
+        // policy selected this algorithm for; surface it (#2900).
+        if !info.converged {
+            return Err(format!(
+                "matrix-free PCG did not converge for p={p}: {} iterations reached relative \
+                 residual {:.3e}, above the {MATRIX_FREE_PCG_REL_TOL:e} tolerance",
+                info.iterations, info.relative_residual_norm,
+            ));
+        }
         Ok((solution, info))
     }
     fn factorize_system(
