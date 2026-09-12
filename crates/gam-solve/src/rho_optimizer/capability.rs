@@ -591,7 +591,10 @@ pub(crate) fn automatic_fallback_attempts(cap: &OuterCapability) -> Vec<OuterCap
     //      ARC retries are handled by the per-attempt budget-bump retry
     //      ladder in `run_outer_with_strategy`; once that is exhausted, the
     //      caller surfaces the underlying ARC failure verbatim.
-    //   3. Otherwise (e.g. (Analytic, Unavailable) without EFS eligibility,
+    //   3. If the primary plan is BFGS only because the capability prefers
+    //      gradient-only search over a declared analytic Hessian (#2359), retry
+    //      with that preference cleared, i.e. ARC on the declared curvature.
+    //   4. Otherwise (e.g. (Analytic, Unavailable) without EFS eligibility,
     //      which is the BFGS primary), there is nothing to degrade further
     //      — the caller surfaces the RemlOptimizationFailed error so the
     //      non-convergence is visible.
@@ -602,6 +605,22 @@ pub(crate) fn automatic_fallback_attempts(cap: &OuterCapability) -> Vec<OuterCap
         && let Some(no_fp_cap) = disable_fixed_point(cap)
     {
         attempts.push(no_fp_cap.clone());
+        return attempts;
+    }
+
+    // Gradient-only primary over a declared analytic Hessian: the search keeps
+    // order four out of every fit it certifies, and a search that exhausts
+    // without claiming convergence gets the declared curvature once before the
+    // refusal surfaces (#2898). A positive-definite secant model cannot follow
+    // negative curvature, which a nonconvex criterion such as the Firth-armed
+    // multinomial refit presents along its search path (#2627).
+    if cap.prefer_gradient_only
+        && cap.gradient == Derivative::Analytic
+        && cap.declared_hessian_for_planning() == Derivative::Analytic
+    {
+        let mut exact_curvature = cap.clone();
+        exact_curvature.prefer_gradient_only = false;
+        attempts.push(exact_curvature);
         return attempts;
     }
 

@@ -4461,6 +4461,45 @@ fn automatic_fallbacks_preserve_analytic_hessian_for_arc_primary() {
 }
 
 #[test]
+fn automatic_fallbacks_escalate_a_gradient_only_primary_to_the_declared_curvature_2898() {
+    // A capability that declares the exact outer Hessian but prefers
+    // gradient-only search plans BFGS (#2359). A search that exhausts without
+    // claiming convergence must get the declared exact-curvature plan once
+    // before the refusal surfaces: BFGS's positive-definite secant model cannot
+    // follow negative curvature, and the Firth-armed multinomial refit stalled
+    // there once custom families searched gradient-only (#2627).
+    let cap = OuterCapability {
+        gradient: Derivative::Analytic,
+        hessian: DeclaredHessianForm::Either,
+        n_params: 12,
+        psi_dim: 0,
+        fixed_point_available: false,
+        barrier_config: None,
+        prefer_gradient_only: true,
+        disable_fixed_point: false,
+    };
+    assert_eq!(plan(&cap).solver, Solver::Bfgs);
+    let attempts = automatic_fallback_attempts(&cap);
+    assert_eq!(
+        attempts.len(),
+        1,
+        "a gradient-only primary over a declared Hessian gets exactly one exact-curvature attempt"
+    );
+    assert!(!attempts[0].prefer_gradient_only);
+    assert_eq!(attempts[0].gradient, Derivative::Analytic);
+    assert_eq!(attempts[0].hessian, DeclaredHessianForm::Either);
+    assert_eq!(plan(&attempts[0]).solver, Solver::Arc);
+
+    // Without a declared analytic Hessian there is no curvature to escalate to.
+    let undeclared = OuterCapability {
+        hessian: DeclaredHessianForm::Unavailable,
+        ..cap.clone()
+    };
+    assert_eq!(plan(&undeclared).solver, Solver::Bfgs);
+    assert!(automatic_fallback_attempts(&undeclared).is_empty());
+}
+
+#[test]
 fn automatic_fallbacks_from_efs_prefer_analytic_bfgs_over_fd() {
     // When the primary plan is EFS, the first fallback must keep the
     // analytic gradient and just disable the fixed-point path so the
