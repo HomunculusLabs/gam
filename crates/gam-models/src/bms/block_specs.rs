@@ -2537,14 +2537,22 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         &extra_rho0,
     )
     .map_err(|error| error.to_string())?;
-    let setup = if sigma_learnable {
-        setup.with_auxiliary(
-            Array1::from_vec(vec![initial_sigma.expect("learnable sigma seed").ln()]),
-            Array1::from_vec(vec![0.01_f64.ln()]),
-            Array1::from_vec(vec![5.0_f64.ln()]),
-        )
-    } else {
-        setup
+    // A learned frailty scale owns one outer coordinate, ln σ. Its domain is the
+    // one the scale derives for itself, `ln(1/√ε)` e-folds either side of the
+    // seed (the gradient resolution every derived ρ edge sits at). This is the
+    // same coordinate the survival marginal-slope family searches, and it
+    // replaces a hand-supplied `[ln 0.01, ln 5]` box (#2902, SPEC rule 20).
+    let learned_log_sigma = match &spec.frailty {
+        FrailtySpec::GaussianShift { scale } => scale.learned_log_sigma_coordinate(),
+        FrailtySpec::None | FrailtySpec::HazardMultiplier { .. } => None,
+    };
+    let setup = match learned_log_sigma {
+        Some((log_sigma, lower, upper)) => setup.with_auxiliary(
+            Array1::from_vec(vec![log_sigma]),
+            Array1::from_vec(vec![lower]),
+            Array1::from_vec(vec![upper]),
+        ),
+        None => setup,
     };
     let final_sigma_cell = std::cell::Cell::new(initial_sigma);
     let exact_mode_branch = RefCell::new(ExactCoefficientModeBranch::default());
