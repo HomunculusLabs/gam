@@ -274,10 +274,6 @@ pub fn build_bspline_basis_1d(
                 });
             }
         }
-        let penalties_raw_mats = penalties_raw
-            .iter()
-            .map(|candidate| candidate.matrix.dense().clone())
-            .collect();
         let auto_chunk = auto_streaming_chunk_size_for_dense(data.len(), num_basis);
         let (design, transformed_candidates, identifiability_transform) =
             if let Some(chunk) = auto_chunk {
@@ -294,25 +290,20 @@ pub fn build_bspline_basis_1d(
                     Some((start, end - start, num_basis)),
                     &spec.identifiability,
                     penalties_raw,
-                    penalties_raw_mats,
                     Some(chunk),
                     None,
                 )?
             } else {
                 let (basis, _) =
                     create_cyclic_bspline_basis_dense(data, start, end, spec.degree, num_basis)?;
-                let (design_c, penalty_mats, identifiability_transform) =
-                    apply_bspline_identifiability_policy(
-                        basis,
-                        penalties_raw_mats,
-                        &knots,
-                        spec.degree,
-                        &spec.identifiability,
-                    )?;
-                // `penalty_mats` is retained only for the public dense policy
-                // API. The fit candidates follow the same transform through
-                // their energy factors, preserving PSD/null provenance.
-                drop(penalty_mats);
+                let (design_c, identifiability_transform) = apply_bspline_identifiability_policy(
+                    basis,
+                    &knots,
+                    spec.degree,
+                    &spec.identifiability,
+                )?;
+                // The fit candidates follow the same transform through their
+                // energy factors, preserving PSD/null provenance.
                 let transformed_candidates = restrict_penalty_candidates(
                     penalties_raw,
                     identifiability_transform.as_ref(),
@@ -411,10 +402,6 @@ pub fn build_bspline_basis_1d(
             "streaming B-spline roughness",
         )?;
         let penalties_raw = bspline_penalty_candidates(&s_bend_raw, spec, &knots)?;
-        let penalties_raw_mats = penalties_raw
-            .iter()
-            .map(|candidate| candidate.matrix.dense().clone())
-            .collect();
         log::info!(
             "B-spline basis auto-streaming evaluator: n={} p={} chunk_size={}",
             data.len(),
@@ -434,7 +421,6 @@ pub fn build_bspline_basis_1d(
                 None,
                 &spec.identifiability,
                 penalties_raw,
-                penalties_raw_mats,
                 Some(chunk),
                 natural_tail_end_slope.as_ref(),
             )?;
@@ -630,10 +616,6 @@ pub fn build_bspline_basis_1d(
         "B-spline roughness",
     )?;
     let penalties_raw = bspline_penalty_candidates(&s_bend_raw, spec, &knots)?;
-    let penalties_raw_mats: Vec<Array2<f64>> = penalties_raw
-        .iter()
-        .map(|candidate| candidate.matrix.dense().clone())
-        .collect();
     let natural_tail_end_slope = if uses_natural_tail_null_chart(spec) {
         Some(bspline_mean_end_slope_row(&knots, spec.degree)?)
     } else {
@@ -722,30 +704,19 @@ pub fn build_bspline_basis_1d(
             } else {
                 bspline_boundary_nullspace_transform(&knots, spec.degree, spec.boundary_conditions)?
             };
-            let (boundary_design, boundary_penalties) =
-                if let Some(z_bc) = boundary_transform.as_ref() {
-                    (
-                        fast_ab(&raw_design, z_bc),
-                        penalties_raw_mats
-                            .into_iter()
-                            .map(|s| project_penalty_matrix(&s, Some(z_bc)))
-                            .collect(),
-                    )
-                } else {
-                    (raw_design, penalties_raw_mats)
-                };
-            let (design, penalties, identifiability_local) =
-                apply_bspline_identifiability_policy_in_chart(
-                    boundary_design,
-                    boundary_penalties,
-                    &knots,
-                    spec.degree,
-                    &spec.identifiability,
-                    boundary_transform.as_ref(),
-                )?;
+            let boundary_design = match boundary_transform.as_ref() {
+                Some(z_bc) => fast_ab(&raw_design, z_bc),
+                None => raw_design,
+            };
+            let (design, identifiability_local) = apply_bspline_identifiability_policy_in_chart(
+                boundary_design,
+                &knots,
+                spec.degree,
+                &spec.identifiability,
+                boundary_transform.as_ref(),
+            )?;
             let identifiability_transform =
                 compose_optional_bspline_transform(boundary_transform, identifiability_local)?;
-            drop(penalties);
             let transformed_candidates = restrict_penalty_candidates(
                 penalties_raw,
                 identifiability_transform.as_ref(),
@@ -878,26 +849,14 @@ pub(crate) fn build_cubic_regression_basis_1d(
         });
     }
 
-    // Apply the identifiability congruence to the dense (design, penalty) pair.
+    // Apply the identifiability constraint to the dense design.
     // `apply_bspline_identifiability_policy` is design-generic for every variant
     // except RemoveLinearTrend (rejected above); the `knots`/`degree` arguments
     // it takes are only consumed by that rejected branch, so passing the cr
     // knots and `spec.degree` here is inert. The returned transform is the raw→
     // constrained map stored in metadata for predict-time replay.
-    let raw_penalty_mats: Vec<Array2<f64>> = penalties_raw
-        .iter()
-        .map(|candidate| candidate.matrix.dense().clone())
-        .collect();
-    let (design_c, penalty_mats_c, identifiability_transform) =
-        apply_bspline_identifiability_policy(
-            raw_design,
-            raw_penalty_mats,
-            knots,
-            spec.degree,
-            &spec.identifiability,
-        )?;
-
-    drop(penalty_mats_c);
+    let (design_c, identifiability_transform) =
+        apply_bspline_identifiability_policy(raw_design, knots, spec.degree, &spec.identifiability)?;
     let transformed_candidates = restrict_penalty_candidates(
         penalties_raw,
         identifiability_transform.as_ref(),
@@ -1493,7 +1452,6 @@ pub(crate) fn build_streaming_bspline_design_and_candidates(
     periodic: Option<(f64, f64, usize)>,
     identifiability: &BSplineIdentifiability,
     penalties_raw: Vec<PenaltyCandidate>,
-    mut penalty_mats: Vec<Array2<f64>>,
     chunk_size: Option<usize>,
     natural_tail_end_slope: Option<&Array1<f64>>,
 ) -> Result<(DesignMatrix, Vec<PenaltyCandidate>, Option<Array2<f64>>), BasisError> {
@@ -1515,20 +1473,11 @@ pub(crate) fn build_streaming_bspline_design_and_candidates(
                 chunk,
             )?;
             let z = bspline_sum_to_zero_transform_from_cross(&cross)?;
-            let gauge = gam_problem::Gauge::sum_to_zero(z);
-            let z = gauge.block_transform(0);
-            penalty_mats = penalty_mats
-                .into_iter()
-                .map(|s| gauge.restrict_penalty(&s))
-                .collect();
+            let z = gam_problem::Gauge::sum_to_zero(z).block_transform(0);
             transform_opt = Some(compose_bspline_transform(transform_opt, z)?);
         }
         BSplineIdentifiability::RemoveLinearTrend => {
             let (z, _) = compute_geometric_constraint_transform(knots, degree, 2)?;
-            penalty_mats = penalty_mats
-                .into_iter()
-                .map(|s| project_penalty_matrix(&s, Some(&z)))
-                .collect();
             transform_opt = Some(compose_bspline_transform(transform_opt, z)?);
         }
         BSplineIdentifiability::OrthogonalToDesignColumns { columns, weights } => {
@@ -1542,10 +1491,6 @@ pub(crate) fn build_streaming_bspline_design_and_candidates(
                 weights.as_ref().map(|w| w.view()),
                 chunk,
             )?;
-            penalty_mats = penalty_mats
-                .into_iter()
-                .map(|s| project_penalty_matrix(&s, Some(&z)))
-                .collect();
             transform_opt = Some(compose_bspline_transform(transform_opt, z)?);
         }
         BSplineIdentifiability::FrozenTransform { transform } => {
@@ -1560,19 +1505,12 @@ pub(crate) fn build_streaming_bspline_design_and_candidates(
                     transform.nrows()
                 );
             }
-            let z = transform.clone();
-            penalty_mats = penalty_mats
-                .into_iter()
-                .map(|s| project_penalty_matrix(&s, Some(&z)))
-                .collect();
-            transform_opt = Some(compose_bspline_transform(transform_opt, z)?);
+            transform_opt = Some(compose_bspline_transform(transform_opt, transform.clone())?);
         }
     }
 
-    // The dense matrices above serve the legacy design-policy return shape;
-    // candidates themselves are restricted through their factors exactly once
-    // by the composed raw-to-final transform.
-    drop(penalty_mats);
+    // Candidates are restricted through their energy factors exactly once by the
+    // composed raw-to-final transform.
     let transformed_candidates = restrict_penalty_candidates(
         penalties_raw,
         transform_opt.as_ref(),
@@ -1611,29 +1549,24 @@ pub(crate) fn build_streaming_bspline_design_and_candidates(
 
 pub(crate) fn apply_bspline_identifiability_policy(
     design: Array2<f64>,
-    penalties: Vec<Array2<f64>>,
     knots: &Array1<f64>,
     degree: usize,
     identifiability: &BSplineIdentifiability,
-) -> Result<(Array2<f64>, Vec<Array2<f64>>, Option<Array2<f64>>), BasisError> {
-    apply_bspline_identifiability_policy_in_chart(
-        design,
-        penalties,
-        knots,
-        degree,
-        identifiability,
-        None,
-    )
+) -> Result<(Array2<f64>, Option<Array2<f64>>), BasisError> {
+    apply_bspline_identifiability_policy_in_chart(design, knots, degree, identifiability, None)
 }
 
+/// Constrain a raw dense design by the identifiability policy and return the
+/// constrained design with the raw-to-constrained transform. Penalty candidates
+/// are restricted through their energy factors by `restrict_penalty_candidates`,
+/// never as dense matrices here.
 fn apply_bspline_identifiability_policy_in_chart(
     design: Array2<f64>,
-    penalties: Vec<Array2<f64>>,
     knots: &Array1<f64>,
     degree: usize,
     identifiability: &BSplineIdentifiability,
     raw_to_current: Option<&Array2<f64>>,
-) -> Result<(Array2<f64>, Vec<Array2<f64>>, Option<Array2<f64>>), BasisError> {
+) -> Result<(Array2<f64>, Option<Array2<f64>>), BasisError> {
     let (design_c, z_opt): (Array2<f64>, Option<Array2<f64>>) = match identifiability {
         BSplineIdentifiability::None => (design, None),
         BSplineIdentifiability::WeightedSumToZero { weights } => {
@@ -1676,17 +1609,7 @@ fn apply_bspline_identifiability_policy_in_chart(
         }
     };
 
-    let penalties_c = if let Some(ref z) = z_opt {
-        let gauge = gam_problem::Gauge::from_block_transforms(&[z.clone()]);
-        penalties
-            .into_iter()
-            .map(|s| gauge.restrict_penalty(&s))
-            .collect()
-    } else {
-        penalties
-    };
-
-    Ok((design_c, penalties_c, z_opt))
+    Ok((design_c, z_opt))
 }
 
 pub fn estimate_penalty_nullity(penalty: &Array2<f64>) -> Result<usize, BasisError> {
