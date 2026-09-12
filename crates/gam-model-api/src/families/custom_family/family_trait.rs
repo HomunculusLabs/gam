@@ -1914,6 +1914,24 @@ pub trait CustomFamily {
         )
     }
 
+    /// [`Self::joint_jeffreys_information_second_directional_all_axes_each_with_specs`]
+    /// contracted against the Jeffreys drift base's ambient kernels: `consume(index,
+    /// contractions)` receives `contractions[[a, b]] = ⟨H²[δ_index, e_a], K_b⟩` for the
+    /// symmetric `K_b` returned by `kernels`, which only a pass that runs calls. The drift
+    /// closes from these `p × p` contractions exactly as it does from the rotated axis rows,
+    /// and no `p × p` axis matrix is formed. `Ok(false)` means the family has no such pass
+    /// and the caller forms the rotated rows instead; the default declines.
+    fn joint_jeffreys_information_second_directional_axis_contractions_each_with_specs(
+        &self,
+        _block_states: &[ParameterBlockState],
+        _specs: &[ParameterBlockSpec],
+        _directions: &[Array1<f64>],
+        _kernels: &dyn Fn() -> Vec<Array2<f64>>,
+        _consume: &mut dyn FnMut(usize, Array2<f64>) -> Result<(), String>,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
+
     /// Whether this family implements
     /// [`Self::joint_jeffreys_information_third_directional_all_axes_with_specs`]
     /// exactly, i.e. returns `Some` from it.
