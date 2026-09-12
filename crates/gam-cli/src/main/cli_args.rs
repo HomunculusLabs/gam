@@ -216,12 +216,7 @@ pub(crate) struct FitArgs {
             "scale_dimensions",
             "precompute_conformal",
             "inference",
-            "persistent_warm_start_root",
-            "ctn_stage1",
-            "precision_hyperpriors",
-            "latent_coordinates",
-            "analytic_penalties",
-            "smooth_descriptors"
+            "persistent_warm_start_root"
         ]
     )]
     pub(crate) request: Option<PathBuf>,
@@ -233,24 +228,6 @@ pub(crate) struct FitArgs {
         long_help = "Model formula using linear columns and term wrappers.\n\nSupported wrappers:\n- x or linear(x): parametric effect with a zero-centered REML shrinkage ridge that can remove it\n- linear(x, double_penalty=false): opt out of the ridge (unpenalized/MLE parametric effect)\n- linear(x, min=..., max=...): shrunk parametric effect with coefficient box constraints via the active-set solver\n- constrain(x, min=..., max=...) / nonnegative(x) / nonpositive(x): sugar for generic coefficient constraints, shrunk like linear(x)\n- bounded(x, min=..., max=...): bounded linear coefficient with exact interval transform and no shrinkage ridge or extra coefficient prior\n- bounded(x, ..., prior=\"uniform\"): flat prior on the bounded user-scale coefficient (implemented via the latent log-Jacobian correction)\n- bounded(x, ..., prior=\"log-jacobian\"): alias for prior=\"uniform\"\n- bounded(x, ..., prior=\"center\"): symmetric interior Beta prior\n- smooth(x), cyclic(x), thinplate(x1, x2), matern(pc1, pc2, ...), tensor(x, z), group(id), duchon(...)\n\nNumerics:\n- linear columns are centered/scaled internally during fitting for conditioning and then mapped back to the original coefficient scale in summaries, prediction, and saved models\n- linear shrinkage uses each realized effect's function mass and is invariant to coefficient-basis rescaling\n- `type=cyclic` / `cyclic(x)` uses periodic cubic P-spline boundaries; `duchon(x, cyclic=true)` uses periodic 1D Duchon distances; `type=duchon` is pure scale-free Duchon by default; add `length_scale=...` only to opt into the hybrid Duchon-Matern variant\n\nExamples:\n- 'y ~ age + smooth(bmi) + group(site)'\n- 'y ~ linear(age, double_penalty=false) + smooth(bmi)'\n- 'y ~ nonnegative(mu_hat) + matern(pc1, pc2, pc3)'\n- 'y ~ s(pc1, pc2, type=duchon, centers=12)'\n- 'y ~ s(pc1, pc2, type=duchon, centers=12, length_scale=0.7)'\n- 'y ~ linear(effect, min=0, max=1) + z'\n- 'y ~ bounded(logv_hat, min=0, max=2, target=1, strength=5) + x'"
     )]
     pub(crate) formula_positional: Option<String>,
-    /// CTN Stage-1 object (`ctn_stage1`) as a JSON file. This is the ergonomic
-    /// fragment form for direct-flag fits; `--request` carries the same typed
-    /// object inside a complete request document.
-    #[arg(long = "ctn-stage1", value_name = "JSON_FILE")]
-    pub(crate) ctn_stage1: Option<PathBuf>,
-    /// Precision-hyperprior map as a JSON file. Values are typed objects
-    /// `{ "shape": ..., "rate": ... }`.
-    #[arg(long = "precision-hyperpriors", value_name = "JSON_FILE")]
-    pub(crate) precision_hyperpriors: Option<PathBuf>,
-    /// Named latent-coordinate map as a JSON file.
-    #[arg(long = "latent-coordinates", value_name = "JSON_FILE")]
-    pub(crate) latent_coordinates: Option<PathBuf>,
-    /// Analytic-penalty descriptor list as a JSON file.
-    #[arg(long = "analytic-penalties", value_name = "JSON_FILE")]
-    pub(crate) analytic_penalties: Option<PathBuf>,
-    /// Explicit smooth-descriptor map as a JSON file.
-    #[arg(long = "smooth-descriptors", value_name = "JSON_FILE")]
-    pub(crate) smooth_descriptors: Option<PathBuf>,
     /// Fit a second RHS-only formula for the scale/noise block in
     /// location-scale mode. Pass terms like `smooth(x)` or `1`, not `y ~ ...`.
     /// This does not change the base mean link; use `link(type=...)` when you

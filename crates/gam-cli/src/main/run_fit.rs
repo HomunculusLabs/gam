@@ -38,52 +38,6 @@ fn fit_request_document_from_fit_args(
         .as_deref()
         .ok_or_else(|| "fit requires FORMULA when --request is not provided".to_string())?;
 
-    let ctn_stage1 = args
-        .ctn_stage1
-        .as_ref()
-        .map(|path| {
-            let raw = read_fit_request_json_file(path, "--ctn-stage1 JSON")?;
-            serde_json::from_str::<crate::config_resolve::CtnStage1Document>(&raw)
-                .map_err(|error| format!("invalid --ctn-stage1 JSON: {error}"))
-        })
-        .transpose()?;
-    let precision_hyperpriors = args
-        .precision_hyperpriors
-        .as_ref()
-        .map(|path| {
-            let raw = read_fit_request_json_file(path, "--precision-hyperpriors JSON")?;
-            serde_json::from_str(&raw)
-                .map_err(|error| format!("invalid --precision-hyperpriors JSON: {error}"))
-        })
-        .transpose()?;
-    let latent_coordinates = args
-        .latent_coordinates
-        .as_ref()
-        .map(|path| {
-            let raw = read_fit_request_json_file(path, "--latent-coordinates JSON")?;
-            serde_json::from_str(&raw)
-                .map_err(|error| format!("invalid --latent-coordinates JSON: {error}"))
-        })
-        .transpose()?;
-    let analytic_penalties = args
-        .analytic_penalties
-        .as_ref()
-        .map(|path| {
-            let raw = read_fit_request_json_file(path, "--analytic-penalties JSON")?;
-            serde_json::from_str(&raw)
-                .map_err(|error| format!("invalid --analytic-penalties JSON: {error}"))
-        })
-        .transpose()?;
-    let smooth_descriptors = args
-        .smooth_descriptors
-        .as_ref()
-        .map(|path| {
-            let raw = read_fit_request_json_file(path, "--smooth-descriptors JSON")?;
-            serde_json::from_str(&raw)
-                .map_err(|error| format!("invalid --smooth-descriptors JSON: {error}"))
-        })
-        .transpose()?;
-
     let frailty_kind = args.frailty_kind.map(|kind| match kind {
         FrailtyKindArg::GaussianShift => "gaussian-shift".to_string(),
         FrailtyKindArg::HazardMultiplier => "hazard-multiplier".to_string(),
@@ -98,27 +52,22 @@ fn fit_request_document_from_fit_args(
         baseline_scale: args.baseline_scale,
         baseline_shape: args.baseline_shape,
         baseline_target: Some(args.baseline_target.clone()),
-        ctn_stage1,
         expectile_tau: args.expectile_tau,
         family: family_arg_canonical_name(args.family).map(str::to_string),
         firth: args.firth.then_some(true),
         frailty_kind,
         frailty_sd: args.frailty_sd,
         hazard_loading,
-        latent_coordinates,
         slope_formula: args.slope_formula.clone(),
         negative_binomial_theta: args.negative_binomial_theta,
         noise_formula: args.predict_noise.clone(),
         noise_offset: args.noise_offset_column.clone(),
         offset: args.offset_column.clone(),
-        analytic_penalties,
-        precision_hyperpriors,
         precompute_conformal: Some(args.precompute_conformal),
         persistent_warm_start_root: args.persistent_warm_start_root.clone(),
         scale_dimensions: args.scale_dimensions.then_some(true),
         sigma_time_k: args.sigma_time_k,
         slope_time_k: args.slope_time_k,
-        smooth_descriptors,
         // `None` (flag unset) flows through so the Surv() seam resolves the one
         // canonical default; `Some(mode)` is the explicit request (#2301).
         survival_likelihood: args.survival_likelihood.clone(),
