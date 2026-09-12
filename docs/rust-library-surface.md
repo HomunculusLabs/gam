@@ -197,13 +197,13 @@ dropped, and restored items the table above retires were removed again.
 
 | Disposition | Identities |
 | --- | --- |
-| Restored in place | 286 |
+| Restored in place | 280 |
 | Defined elsewhere in the same crate | 13 |
 | Retired by the decisions above | 19 |
 | Retired: nothing that survived depends on it | 290 |
 | Retired by the owning work's own decision | 29 |
 | Retired by a later deletion commit named in the row | 511 |
-| Retired: no product uses it | 71 |
+| Retired: no product uses it | 77 |
 
 Retired identities carry no compatibility obligation. Restoration is closed
 under calls: after the merges, no restored body calls a function the sweep
@@ -283,9 +283,10 @@ census multiplicity at `d484a091a^`, `d484a091a`, the restoration commit
 Three restorations were adapted rather than taken verbatim:
 
 - The restored allocation-free Gaussian REML selection (`optimize_rho_no_alloc`)
-  reads `GaussianRemlEigenCache::resolvability_rho_domain()`, the derived domain
-  `optimize_rho` uses. It does not read the removed `RHO_LOWER`/`RHO_UPPER`
-  box, which SPEC forbids.
+  was adapted to read `GaussianRemlEigenCache::resolvability_rho_domain()`, the
+  derived domain `optimize_rho` uses, rather than the removed
+  `RHO_LOWER`/`RHO_UPPER` box, which SPEC forbids. No product used it, so the
+  public-surface rule later deleted it with the rest of the allocation-free path.
 - `manifold/fit_drivers.rs` is not restored: its 16 removed functions would take
   the file past build.rs's 10,000-line tracked-file limit. Those names stay
   retired, and the prose that cited them is reworded.

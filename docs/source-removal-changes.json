@@ -4425,5 +4425,28 @@
     ],
     "reason": "SPEC rule 16 (#2901). probe_2695_warp_basis_smoothness_ladder was the last print-only #[test] recorded in scripts/assertionless_ledger.txt. It printed basis-derivative gaps at a knot and asserted nothing, so it passed whatever the warp basis did, and its header calls it a temporary #2695 probe. The premise it measured (a degree-d I-spline is C^{d-1} at a simple knot, so the composed-warp floor is order 3, degree 4) is pinned on the production gradient by a_degree_three_composed_warp_makes_the_objective_gradient_jump_2695 and the_objective_jeffreys_gradient_closes_across_a_link_warp_knot_at_the_built_degree_2695 in crates/gam-models/src/survival/location_scale/tests.rs, so it is deleted rather than converted. clamped_knots, row_at and gap were private helpers used only by the probe. With its ledger line gone the ledger is empty, and check_ledger refuses an empty ledger, so the ledger file is deleted and both the census workflow step and the detector's repository test demand zero instead.",
     "evidence": "At the base, git grep over crates/gam-models/tests, scripts and docs finds probe_2695_warp_smoothness only as the mod declaration in crates/gam-models/tests/suite/main.rs and the ledger line in scripts/assertionless_ledger.txt. The removed identities are every declaration under the guard's ITEM pattern in the deleted file, all in test scope under crates/*/tests. scripts/assertionless_tests.py check_ledger returns 2 for an empty ledger (:771-777) and main() demands zero without --ledger (:828-840). The crates/gam-models/src/wiggle.rs doc that said the ladder prints its table on every run now names the pinning arms. Not compiled or run locally (user directive)."
+  },
+  {
+    "base": "1cd2e2f6d5f803eaf769eac9f9090e1f20cb785c",
+    "items": [
+      "crates/gam-solve/src/gaussian_reml.rs:fn:build_gaussian_reml_eigen_cache",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:fill_coefficients_no_alloc",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:fill_fitted_no_alloc",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:fill_sigma2_no_alloc",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:fill_weighted_rhs_no_alloc",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:from_multi_result",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:gaussian_reml_multi_closed_form_batch",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:gaussian_reml_multi_closed_form_warm_started",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:gaussian_reml_multi_closed_form_with_cache_no_alloc",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:gaussian_reml_point_eval_at_rho",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:optimize_rho_no_alloc",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:project_rhs_no_alloc",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:validate",
+      "crates/gam-solve/src/gaussian_reml.rs:struct:GaussianRemlMultiBatchProblem",
+      "crates/gam-solve/src/gaussian_reml.rs:struct:GaussianRemlNoAllocFit",
+      "crates/gam-solve/src/gaussian_reml.rs:struct:GaussianRemlPointEval"
+    ],
+    "reason": "#2829 public-surface rule: no product uses the allocation-free Gaussian REML batch path. Its private helpers (optimize_rho_no_alloc, project_rhs_no_alloc, fill_weighted_rhs_no_alloc, fill_coefficients_no_alloc, fill_fitted_no_alloc, fill_sigma2_no_alloc, validate) and carriers (GaussianRemlNoAllocFit, GaussianRemlMultiBatchProblem, GaussianRemlPointEval) lose their only callers and go with it.",
+    "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 535467, /scratch.global/sauer354/pool/api2829/validate.535467.log). The same orphan scan on the derived gaussian_reml.rs and on the base finds identical pre-existing hits (trait imports used through methods), so no new orphan. resolvability_rho_domain keeps 26 uses in the file and users in gam-custom-family, gam-models and gam-pyffi. The ArrayViewMut1/ArrayViewMut2 imports only the deleted path used are dropped. docs/rust-library-surface.md's adapted-restoration bullet for optimize_rho_no_alloc now records its deletion. Compile is covered by the lead's shared tip check."
   }
 ]
