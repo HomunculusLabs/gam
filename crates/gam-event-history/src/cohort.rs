@@ -138,7 +138,7 @@ pub struct SubjectHistory {
 
 impl SubjectHistory {
     /// The terminal event that ended this subject's follow-up, if any.
-    pub fn terminal_event(&self, kinds: &[MarkKind]) -> Option<&Event> {
+    pub(crate) fn terminal_event(&self, kinds: &[MarkKind]) -> Option<&Event> {
         self.events
             .iter()
             .find(|event| kinds.get(event.mark) == Some(&MarkKind::Terminal))
@@ -466,7 +466,7 @@ impl EventHistoryCohort {
     /// subject's breakpoints already distinguish. A fit whose coefficients
     /// still move under refinement there is a numerical failure, not a
     /// coarse mesh, so the refinement ladder stops and says so.
-    pub fn mesh_refinement_ceiling(&self) -> usize {
+    pub(crate) fn mesh_refinement_ceiling(&self) -> usize {
         let mut widest = 0.0_f64;
         let mut narrowest = f64::INFINITY;
         for subject in &self.subjects {
@@ -516,12 +516,12 @@ impl SubjectNodes {
     }
 
     /// Whether node `n` carries an event of any mark.
-    pub fn is_event(&self, n: usize) -> bool {
+    pub(crate) fn is_event(&self, n: usize) -> bool {
         self.counts.row(n).iter().any(|&c| c > 0.0)
     }
 
     /// The exposures of node `n` to every mark.
-    pub fn exposure_row(&self, n: usize) -> Vec<f64> {
+    pub(crate) fn exposure_row(&self, n: usize) -> Vec<f64> {
         self.exposures.row(n).to_vec()
     }
 }
@@ -548,7 +548,7 @@ pub struct CohortNodes {
 
 impl CohortNodes {
     /// The largest node count of any subject.
-    pub fn max_subject_nodes(&self) -> usize {
+    pub(crate) fn max_subject_nodes(&self) -> usize {
         self.subjects.iter().map(|s| s.len()).max().unwrap_or(0)
     }
 }

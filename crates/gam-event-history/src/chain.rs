@@ -209,7 +209,7 @@ impl GaussHermite {
     /// derivative channel of `xi` passes through it as through a polynomial
     /// (the piece selection below reads the value only; the pieces agree in
     /// value, slope and curvature at the nodes).
-    pub fn spline_basis<S: JetField>(&self, xi: &S) -> Vec<S> {
+    pub(crate) fn spline_basis<S: JetField>(&self, xi: &S) -> Vec<S> {
         let g = self.order;
         let value = xi.value();
         let zero = xi.constant_like(0.0);
@@ -273,7 +273,7 @@ impl GaussHermite {
     /// lies within roundoff of a node — the barycentric quotient is stable in
     /// value there but its derivative channels are differences of terms of
     /// size `1/(x − x_m)²`, and adaptive grids put points exactly on nodes.
-    pub fn lagrange_basis<S: JetField>(&self, xi: &S) -> Vec<S> {
+    pub(crate) fn lagrange_basis<S: JetField>(&self, xi: &S) -> Vec<S> {
         let g = self.order;
         let factors: Vec<S> = self.nodes.iter().map(|&x| add_real(xi, -x)).collect();
         let one = xi.constant_like(1.0);

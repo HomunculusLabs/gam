@@ -322,14 +322,14 @@ impl EventHistoryFamily {
 
     /// Attach the reference law. Its normaliser is evaluated and
     /// differentiated at every coefficient state, never held as an offset.
-    pub fn with_reference(mut self, reference: Option<Arc<ReferenceTables>>) -> Self {
+    pub(crate) fn with_reference(mut self, reference: Option<Arc<ReferenceTables>>) -> Self {
         self.reference = reference;
         self.cache = Arc::new(Mutex::new(None));
         self
     }
 
     /// The reference law at exactly the supplied coefficient state.
-    pub fn refresh_normaliser(&self, states: &[ParameterBlockState]) -> Result<RiskSetCentring, String> {
+    pub(crate) fn refresh_normaliser(&self, states: &[ParameterBlockState]) -> Result<RiskSetCentring, String> {
         self.computed_reference(states)
     }
 
@@ -352,7 +352,7 @@ impl EventHistoryFamily {
 
     /// Every atom's dimensionless rate `ν` at a latent block state: the
     /// chart of the coefficient for a free rate, the held value otherwise.
-    pub fn atom_rates(&self, latent_beta: &Array1<f64>) -> Vec<f64> {
+    pub(crate) fn atom_rates(&self, latent_beta: &Array1<f64>) -> Vec<f64> {
         self.free_rate_slots()
             .iter()
             .zip(self.held_rates.iter())
@@ -399,13 +399,13 @@ impl EventHistoryFamily {
 
     /// Width of the latent block: the loadings, then the log-rates of the
     /// atoms whose rates are coefficients.
-    pub fn latent_width(&self) -> usize {
+    pub(crate) fn latent_width(&self) -> usize {
         self.marks() * self.atoms + self.held_rates.iter().filter(|h| h.is_none()).count()
     }
 
     /// Whether the fit carries a latent block (no atoms means a plain
     /// Poisson-process GAM with the same node expansion).
-    pub fn has_latent_block(&self) -> bool {
+    pub(crate) fn has_latent_block(&self) -> bool {
         self.atoms > 0
     }
 
@@ -852,7 +852,7 @@ impl EventHistoryFamily {
     /// exact gradient and a Hessian accurate to a small relative error
     /// converges at that relative rate, and the outer LAML's log-determinant
     /// term sees the same Hessian its directional derivatives are taken of.
-    pub fn joint_evaluation(
+    pub(crate) fn joint_evaluation(
         &self,
         states: &[ParameterBlockState],
     ) -> Result<Arc<JointEvaluation>, String> {
@@ -890,7 +890,7 @@ impl EventHistoryFamily {
     }
 
     /// `D_β H[u]` for the negative log-likelihood Hessian `H`.
-    pub fn directional_hessian(
+    pub(crate) fn directional_hessian(
         &self,
         states: &[ParameterBlockState],
         u: &Array1<f64>,
@@ -907,7 +907,7 @@ impl EventHistoryFamily {
     }
 
     /// `D²_β H[u, v]` for the negative log-likelihood Hessian `H`.
-    pub fn second_directional_hessian(
+    pub(crate) fn second_directional_hessian(
         &self,
         states: &[ParameterBlockState],
         u: &Array1<f64>,
