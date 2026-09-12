@@ -868,17 +868,16 @@ impl SaeManifoldTerm {
         }
     }
 
-    /// Legs (1)–(4) of `Self::apply_exact_hessian_minus_b` against a β-tier
-    /// decoder-prior plan prepared once for this state. Leg (5) is
+    /// Legs (1)–(4) of `Self::apply_exact_hessian_minus_b`. Leg (5) is
     /// `Self::decoder_prior_gap_border_leg`, which
     /// [`Self::apply_exact_hessian_minus_b_prepared`] folds in after these four.
     ///
     /// #2828 — the β leg's plan is a property of the DECODER STATE, not of the
     /// direction, so a caller that applies `ΔC` many times at one state (a dense
     /// materialization's `slots + k` probes, a Krylov solve's iterations) builds
-    /// it once here instead of once per apply. Measured on a 10-atom, `p = 16`,
-    /// `n = 60` fixture with every pair near-collinear: 2.79 ms of a 15.19 ms
-    /// apply.
+    /// it once and hands it to leg (5) instead of rebuilding it per apply.
+    /// Measured on a 10-atom, `p = 16`, `n = 60` fixture with every pair
+    /// near-collinear: 2.79 ms of a 15.19 ms apply. None of legs (1)–(4) reads it.
     ///
     /// #2731 — the residual-curvature legs are the same kind of object and take
     /// the same treatment: `residual` is
@@ -889,7 +888,6 @@ impl SaeManifoldTerm {
         target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
         v: &SaeArrowVector,
-        prepared: &PreparedDecoderPriorBetaCurvature,
         residual: &PreparedResidualCurvatureRows,
     ) -> Result<SaeArrowVector, String> {
         self.assignment.validate_rho_domain(rho)?;
@@ -1260,7 +1258,7 @@ impl SaeManifoldTerm {
         residual: &PreparedResidualCurvatureRows,
     ) -> Result<SaeArrowVector, String> {
         let mut out = self.apply_exact_hessian_minus_b_prepared_before_beta_prior_leg(
-            rho, target, cache, v, prepared, residual,
+            rho, target, cache, v, residual,
         )?;
         if cache.k > 0 {
             let projection = crate::frames::FrameProjection::new(self);
@@ -3921,7 +3919,7 @@ impl SaeManifoldTerm {
                             apply_raw_cached_arrow_hessian(cache, unit.t.view(), unit.beta.view())?;
                         let mut dc_v = self
                             .apply_exact_hessian_minus_b_prepared_before_beta_prior_leg(
-                                rho, target, cache, &unit, &prepared, &residual,
+                                rho, target, cache, &unit, &residual,
                             )?;
                         let leg = self.decoder_prior_gap_border_leg(
                             cache,
