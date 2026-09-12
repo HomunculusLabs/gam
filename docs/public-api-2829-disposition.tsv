@@ -971,8 +971,8 @@ crates/gam-solve/src/progress_log.rs	default_log_level	retired-no-surviving-depe
 crates/gam-solve/src/psi_gram_tensor.rs	d2gram_dpsi2	retired-no-product-user
 crates/gam-solve/src/psi_gram_tensor.rs	d2rhs_dpsi2	retired-no-product-user
 crates/gam-solve/src/psi_gram_tensor.rs	rank_margin	retired-no-product-user
-crates/gam-solve/src/psis.rs	expected_reported_shape	restored-in-place
-crates/gam-solve/src/psis.rs	shape_resolution	restored-in-place
+crates/gam-solve/src/psis.rs	expected_reported_shape	retired-no-product-user
+crates/gam-solve/src/psis.rs	shape_resolution	retired-no-product-user
 crates/gam-solve/src/quadrature.rs	cloglog_ghq_derivatives	retired-no-product-user
 crates/gam-solve/src/quadrature.rs	cloglog_ghq_derivatives_adaptive	retired-no-product-user
 crates/gam-solve/src/quadrature.rs	cloglog_ghq_value	retired-no-product-user
@@ -1028,7 +1028,7 @@ crates/gam-solve/src/sensitivity.rs	leverage_block	restored-in-place
 crates/gam-solve/src/sensitivity.rs	response_jacobian	retired-no-product-user
 crates/gam-solve/src/spline_scan.rs	deriv_at_knot	retired-no-surviving-dependent
 crates/gam-solve/src/streaming_border.rs	is_complete	restored-in-place
-crates/gam-solve/src/streaming_border.rs	push_rows	restored-in-place
+crates/gam-solve/src/streaming_border.rs	push_rows	retired-no-product-user
 crates/gam-solve/src/streaming_border.rs	submit_chunk	restored-in-place
 crates/gam-solve/src/streaming_border.rs	submit_chunk_gram	restored-in-place
 crates/gam-solve/src/topology_selector.rs	deterministic_cv_folds	retired-no-product-user

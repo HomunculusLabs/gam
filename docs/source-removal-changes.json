@@ -5053,5 +5053,21 @@
     ],
     "reason": "#2829 public-surface rule: no product uses these evidence and topology entry points. The union-density fitting machinery, the HVP log-determinant path, the closure-profile carriers (ClosureProfileFit, ClosureSelection, ClosureProfilePoint, ClosureOptimalityCertificate, ClosureOptimumKind), SelectedTopology, EvidenceIftGradientTerms and their private helpers and constants lose their only callers and go with them.",
     "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 539304, /scratch.global/sauer354/pool/api2829/validate.539304.log). The cascade was closed to a joint fixed point over both files. It covered private items, imports that became unused, and pub items with no remaining non-declaration use and no user elsewhere. gam-solve mod.rs drops 24 re-exported names. Prose and rustdoc links naming deleted items are reworded in evidence.rs, topology_selector.rs, arrow_schur/penalty_ops.rs, sensitivity.rs, gam-sae hybrid_split.rs and tests/quality/misc/quality_llm_weekday_circle.rs. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "47208c28058fe3e16f5e0584976ba6c7f9c7e415",
+    "items": [
+      "crates/gam-solve/src/psis.rs:fn:expected_reported_shape",
+      "crates/gam-solve/src/psis.rs:fn:shape_resolution",
+      "crates/gam-solve/src/streaming_border.rs:fn:buffered_rows",
+      "crates/gam-solve/src/streaming_border.rs:fn:checkpoint",
+      "crates/gam-solve/src/streaming_border.rs:fn:finish",
+      "crates/gam-solve/src/streaming_border.rs:fn:new",
+      "crates/gam-solve/src/streaming_border.rs:fn:push_rows",
+      "crates/gam-solve/src/streaming_border.rs:fn:resume",
+      "crates/gam-solve/src/streaming_border.rs:struct:ChunkAssembler"
+    ],
+    "reason": "#2829 public-surface rule: no product uses the two PSIS resolution helpers or the ChunkAssembler row bridge. ChunkAssembler goes whole: struct, impl, buffer helpers and checkpoint.",
+    "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 540016, /scratch.global/sauer354/pool/api2829/validate.540016.log). Neither deletion leaves an orphan behind. gam-inference rho_posterior.rs and gam-problem rho_posterior.rs now state the standard error `√n(1+k)/(n+10)` and the shrunk shape inline instead of naming the deleted helpers, and psis::tail_count's doc no longer points at shape_resolution. Compile is covered by the lead's shared tip check."
   }
 ]

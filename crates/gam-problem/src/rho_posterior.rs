@@ -35,8 +35,8 @@ pub enum RhoCertificate {
 /// importance sampling*, JMLR 25(72), 2024, §3): for `k > 0.7` the practical
 /// pre-asymptotic convergence rate of PSIS collapses and the estimate is
 /// declared unreliable. How finely a given draw count can resolve this
-/// boundary is NOT a property of the cutoff: `gam_solve::psis::shape_resolution`
-/// reports the standard error of the fitted shape, and a verdict against this
+/// boundary is NOT a property of the cutoff: the fitted shape's standard error at
+/// tail sample `n` is `√n(1+k)/(n+10)`, and a verdict against this
 /// cutoff only means something when the truth sits several such standard errors
 /// away from it.
 pub const ESCALATE_K_HAT: f64 = 0.7;

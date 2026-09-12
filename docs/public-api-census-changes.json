@@ -2019,5 +2019,19 @@
     },
     "reason": "SPEC rule 20 (#2902): the constant-curvature κ window's hand-supplied retreat F = 0.5 is replaced by the derived constant_curvature_kappa_chart_fraction() = 1 - eps^(1/6). That is where the worst evaluated pair's Möbius denominator D = (1 - F)^2 reaches eps^(1/3), the point at which the exact κ-Hessian keeps half its mantissa (the ε/D^{3/2} law measured in gam-geometry's antipodal resolution tests).",
     "evidence": "At the base, git grep -n CONSTANT_CURVATURE_KAPPA_CHART_FRACTION finds the declaration and its one production use in constant_curvature_kappa_bounds (crates/gam-terms/src/smooth/term_specs.rs), plus test uses in constant_curvature_kappa_box_tests.rs and gam-solve rail_projection_tests.rs, and doc mentions in gam-geometry tests and gam-solve bridges.rs. All of these now read the function or restate its derivation. The #1464 mirror datasets (disk radius 0.68, planted κ = ±2) had a ±1.081 window that excluded the truth; the derived window is ±2.157. The census difference was applied by hand and public_api_census.py was not run locally (user directive: no local runs)."
+  },
+  {
+    "base": "47208c28058fe3e16f5e0584976ba6c7f9c7e415",
+    "removed": {
+      "crates/gam-solve/src/psis.rs::expected_reported_shape": 1,
+      "crates/gam-solve/src/psis.rs::shape_resolution": 1,
+      "crates/gam-solve/src/streaming_border.rs::checkpoint": 1,
+      "crates/gam-solve/src/streaming_border.rs::finish": 1,
+      "crates/gam-solve/src/streaming_border.rs::new": 1,
+      "crates/gam-solve/src/streaming_border.rs::push_rows": 1,
+      "crates/gam-solve/src/streaming_border.rs::resume": 1
+    },
+    "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. No product uses these restored-in-place gam-solve identities. psis::expected_reported_shape and psis::shape_resolution appear in gam-inference and gam-problem prose as sizing formulas, but no code calls either. streaming_border's ChunkAssembler::push_rows is the only way rows enter ChunkAssembler, which nothing outside its own file references.",
+    "evidence": "restored_consumers_2829.py at 3693c2c2c (MSI job 539356, /scratch.global/sauer354/pool/api2829/consumers.3693c2c2c769830ff8f2769e77061d353ff01697.rows.tsv) scores all three as unreferenced. At the base, git grep -w finds expected_reported_shape and shape_resolution only at their declarations and in doc prose. It finds ChunkAssembler only in streaming_border.rs, while StreamingBorderGram, chunk_gram_flat and BorderGramCheckpoint keep their gam-solve cross_node.rs users. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 540016, /scratch.global/sauer354/pool/api2829/validate.540016.log)."
   }
 ]

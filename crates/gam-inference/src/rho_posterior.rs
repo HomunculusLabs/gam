@@ -38,8 +38,8 @@
 //! [`gam_solve::psis::tail_count`]`(M) = ⌈√M⌉` excesses only, and the reported
 //! shape is that fit shrunk toward `0.5` by ten pseudo-observations. So the
 //! reported value has standard error
-//! `gam_solve::psis::shape_resolution``(k, ⌈√M⌉) = √n(1+k)/(n+10)` around
-//! `gam_solve::psis::expected_reported_shape``(k, ⌈√M⌉)`, NOT around `k`:
+//! `√n(1+k)/(n+10)` (with `n = ⌈√M⌉`) around the shrunk shape
+//! `(n·k + 10·0.5)/(n + 10)`, NOT around `k`:
 //! at the default `M = 64` the tail sample is `8` and the standard error at the
 //! `0.7` boundary is `≈ 0.27`; at `M = 512` it is `23` and `≈ 0.25`. Reaching a
 //! standard error of `0.05` takes a tail of `≈ 10³`, i.e. `M ≈ 10⁶`. A single
@@ -47,7 +47,7 @@
 //! the truth lies on: separating a true shape from the `0.7` boundary needs
 //! `⌈√M⌉` large enough that several standard errors fit in the gap. Anything
 //! asserting a verdict (rather than reading a diagnostic) must size `M` from
-//! those two helpers.
+//! those two formulas.
 
 use faer::Side;
 use gam_linalg::faer_ndarray::FaerCholesky;
