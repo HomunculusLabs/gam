@@ -1780,110 +1780,16 @@ class MultinomialModel:
     def summary(self) -> str:
         """Human-readable summary covering convergence, classes, per-class λ and edf.
 
-        REML-driven path: the Rust core selects per-active-class λ via the
-        outer Laplace/REML loop, so this method reports both the selected
-        λ_a and the per-class hat-matrix trace (effective degrees of
-        freedom) when the inference block is available.
+        Rendered by the Rust ``MultinomialSavedModel::summary_text``: the
+        selected per-class REML λ, the per-class hat-matrix trace (effective
+        degrees of freedom) when the inference block is available, the
+        separation decision that fixed the published estimand, and the Wood
+        smooth-significance table.
         """
-        meta = self._metadata
-        p = int(meta["p_per_class"])
-        m = int(meta["n_active_classes"])
-        levels = list(meta["class_levels"])
-        ref = int(meta["reference_class_index"])
-        lambdas = list(meta["lambdas"])
-        lambdas_per_block = list(meta["lambdas_per_block"])
-        # Per-penalty-component λ labels, parallel to a single class block's λ
-        # slice (#1544). The Marra–Wood double penalty (and tensor/operator
-        # smooths) emit more than one penalty component — hence more than one λ —
-        # per smooth term, so these are NOT 1:1 with `term_labels`: a single
-        # `s(x)` term yields a primary wiggliness λ and a null-space shrinkage λ,
-        # each carrying its own label here. Pairing λ with these component labels
-        # (rather than assuming one λ per term) is what keeps every λ in the
-        # summary instead of silently truncating the null-space penalties.
-        lambda_labels = list(meta["lambda_labels"])
-        edf_per_class = meta.get("edf_per_class")
-
-        lines = [
-            f"MultinomialModel formula: {meta['formula']}",
-            f"  classes: {levels}  (reference = {levels[ref]!r})",
-            f"  active classes (K-1): {m}",
-            f"  coefficients per class (P): {p}",
-            f"  total coefficients: {p * m}",
-            f"  iterations: {int(meta['iterations'])}",
-            f"  deviance: {float(meta['deviance']):.6g}",
-            f"  penalized -log L: {float(meta['penalized_neg_log_likelihood']):.6g}",
-        ]
-        # Which estimand this model publishes (#2612). The Jeffreys/Firth proper
-        # prior is engaged automatically on separation evidence — `firth=` is
-        # rejected on this family for exactly that reason — and armed, the
-        # coefficients carry an O(1/n) pull toward the uniform simplex 1/K. A
-        # reader comparing two fits, or scoring calibration, needs to know which
-        # objective produced the numbers.
-        #
-        # Three states, not two. The FFI exports the key unconditionally
-        # INCLUDING the `None` case precisely so that "the prior was disarmed"
-        # and "this payload predates the field" stay distinguishable here; a
-        # renderer that collapsed a missing key into "disarmed" would assert an
-        # estimand the model never claimed.
-        if "separation_evidence" not in meta:
-            lines.append(
-                "  separation: not recorded (model saved before the fit published "
-                "its arming decision)"
-            )
-        elif meta["separation_evidence"] is None:
-            lines.append(
-                "  separation: none detected; Jeffreys/Firth prior disarmed "
-                "(unbiased penalized-REML mode)"
-            )
-        else:
-            lines.append(
-                "  separation: Jeffreys/Firth proper prior ARMED (coefficients carry "
-                f"the Firth bias correction) — {meta['separation_evidence']}"
-            )
-        # Per-class slope-norm + REML λ + hat-matrix trace rollup. Coefficients
-        # are stored in row-major `(P, K-1)` order; column `a` is class
-        # `levels[a]`.
-        coefs = list(meta["coefficients_flat"])
-        lambda_offset = 0
-        for a in range(m):
-            class_block = coefs[a::m]
-            norm = math.sqrt(sum(c * c for c in class_block))
-            row_bits = [f"‖β_a‖₂ = {norm:.4g}"]
-            if lambdas_per_block[a] > 0:
-                n_lam = lambdas_per_block[a]
-                lam_chunk = lambdas[lambda_offset : lambda_offset + n_lam]
-                lambda_offset += n_lam
-                lam_strs = [
-                    f"{label}: {float(value):.4g}"
-                    for label, value in zip(lambda_labels, lam_chunk, strict=True)
-                ]
-                row_bits.append(f"λ = [{', '.join(lam_strs)}]")
-            if edf_per_class is not None and a < len(edf_per_class):
-                row_bits.append(f"edf = {float(edf_per_class[a]):.4g}")
-            lines.append(
-                f"    class {levels[a]!r} vs ref: " + ", ".join(row_bits)
-            )
-        # Wood rank-truncated Wald smooth-term significance table (#1101): the
-        # same kernel the scalar `Model.summary` uses. Present only for
-        # REML-fitted models carrying covariance + smooth terms.
-        sig = self.smooth_significance()
-        if sig:
-            lines.append("  smooth terms (Wood rank-truncated Wald):")
-            lines.append(
-                "    class                 term            edf   ref.df    chi.sq   p-value"
-            )
-            for r in sig:
-                lines.append(
-                    "    {cls:<20} {term:<14} {edf:6.3g} {ref:7.3g} {stat:9.4g} {p:9.3g}".format(
-                        cls=str(r["class"])[:20],
-                        term=str(r["term"])[:14],
-                        edf=float(r["edf"]),
-                        ref=float(r["ref_df"]),
-                        stat=float(r["statistic"]),
-                        p=float(r["p_value"]),
-                    )
-                )
-        return "\n".join(lines)
+        try:
+            return str(rust_module().multinomial_summary_text_pyfunc(self._model_bytes))
+        except Exception as exc:
+            raise map_exception(exc) from exc
 
     # ------------------------------------------------------------------ identity / repr
     def __repr__(self) -> str:

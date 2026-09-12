@@ -1229,6 +1229,18 @@ fn multinomial_smooth_significance_pyfunc<'py>(
     Ok(list.unbind())
 }
 
+/// Render the summary of a saved multinomial model through
+/// `MultinomialSavedModel::summary_text`.
+#[pyfunction(signature = (model_bytes))]
+fn multinomial_summary_text_pyfunc(model_bytes: Vec<u8>) -> PyResult<String> {
+    let envelope = MultinomialModelEnvelope::from_json_bytes(&model_bytes)
+        .map_err(estimation_error_to_pyerr)?;
+    envelope
+        .saved
+        .summary_text()
+        .map_err(estimation_error_to_pyerr)
+}
+
 /// Inspect a multinomial saved-model byte blob and return the class-level
 /// metadata needed by `MultinomialModel.summary()` and `.classes_`. Keeping
 /// this on the FFI side avoids re-encoding the serde envelope in Python.

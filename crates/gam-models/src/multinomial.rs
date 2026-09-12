@@ -2659,6 +2659,127 @@ impl MultinomialSavedModel {
         }
         Ok(out)
     }
+
+    /// The human-readable multinomial summary: convergence, classes, which
+    /// estimand the separation decision published (#2612), the per-class slope
+    /// norm with its REML λ and edf, and the Wood smooth-significance table.
+    pub fn summary_text(&self) -> Result<String, EstimationError> {
+        self.validate()?;
+        let p = self.p_per_class;
+        let m = self.n_active_classes;
+        let mut lines = vec![
+            format!("MultinomialModel formula: {}", self.formula),
+            format!(
+                "  classes: {:?}  (reference = {:?})",
+                self.class_levels, self.class_levels[self.reference_class_index]
+            ),
+            format!("  active classes (K-1): {m}"),
+            format!("  coefficients per class (P): {p}"),
+            format!("  total coefficients: {}", p * m),
+            format!("  iterations: {}", self.iterations),
+            format!("  deviance: {}", format_g(self.deviance, 6)),
+            format!(
+                "  penalized -log L: {}",
+                format_g(self.penalized_neg_log_likelihood, 6)
+            ),
+            match &self.separation_evidence {
+                None => "  separation: none detected; Jeffreys/Firth prior disarmed \
+                         (unbiased penalized-REML mode)"
+                    .to_string(),
+                Some(evidence) => format!(
+                    "  separation: Jeffreys/Firth proper prior ARMED (coefficients carry \
+                     the Firth bias correction) — {evidence}"
+                ),
+            },
+        ];
+        // Coefficients are row-major `(P, K-1)`, so column `a` is every `m`-th
+        // entry starting at `a`.
+        let mut lambda_offset = 0;
+        for a in 0..m {
+            let norm = self
+                .coefficients_flat
+                .iter()
+                .skip(a)
+                .step_by(m)
+                .map(|coefficient| coefficient * coefficient)
+                .sum::<f64>()
+                .sqrt();
+            let mut bits = vec![format!("‖β_a‖₂ = {}", format_g(norm, 4))];
+            let n_lambda = self.lambdas_per_block[a];
+            if n_lambda > 0 {
+                let lambdas = self
+                    .lambda_labels
+                    .iter()
+                    .zip(&self.lambdas[lambda_offset..lambda_offset + n_lambda])
+                    .map(|(label, value)| format!("{label}: {}", format_g(*value, 4)))
+                    .collect::<Vec<_>>();
+                lambda_offset += n_lambda;
+                bits.push(format!("λ = [{}]", lambdas.join(", ")));
+            }
+            if let Some(edf) = self.edf_per_class.as_ref().and_then(|edf| edf.get(a)) {
+                bits.push(format!("edf = {}", format_g(*edf, 4)));
+            }
+            lines.push(format!(
+                "    class {:?} vs ref: {}",
+                self.class_levels[a],
+                bits.join(", ")
+            ));
+        }
+        let significance = self.smooth_significance();
+        if !significance.is_empty() {
+            lines.push("  smooth terms (Wood rank-truncated Wald):".to_string());
+            lines.push(
+                "    class                 term            edf   ref.df    chi.sq   p-value"
+                    .to_string(),
+            );
+            for row in significance {
+                let class: String = row.class_label.chars().take(20).collect();
+                let term: String = row.term_label.chars().take(14).collect();
+                lines.push(format!(
+                    "    {class:<20} {term:<14} {:>6} {:>7} {:>9} {:>9}",
+                    format_g(row.edf, 3),
+                    format_g(row.ref_df, 3),
+                    format_g(row.statistic, 4),
+                    format_g(row.p_value, 3),
+                ));
+            }
+        }
+        Ok(lines.join("\n"))
+    }
+}
+
+/// `value` rendered like Python's `format(value, f".{significant}g")`. The
+/// exponent is read after rounding to `significant` digits; notation is fixed
+/// when `-4 <= exponent < significant` and scientific otherwise, with trailing
+/// zeros stripped.
+fn format_g(value: f64, significant: usize) -> String {
+    if value.is_nan() {
+        return "nan".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "inf" } else { "-inf" }.to_string();
+    }
+    let scientific = format!("{value:.prec$e}", prec = significant - 1);
+    let Some((mantissa, exponent)) = scientific.split_once('e') else {
+        return scientific;
+    };
+    let Ok(exponent) = exponent.parse::<i32>() else {
+        return scientific;
+    };
+    let strip = |text: &str| {
+        if text.contains('.') {
+            text.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            text.to_string()
+        }
+    };
+    if exponent < -4 || exponent >= significant as i32 {
+        let sign = if exponent < 0 { '-' } else { '+' };
+        format!("{}e{sign}{:02}", strip(mantissa), exponent.unsigned_abs())
+    } else {
+        let precision = (significant as i32 - 1 - exponent) as usize;
+        strip(&format!("{value:.precision$}"))
+    }
 }
 
 /// On-disk `model_class` discriminator for a persisted multinomial model. Kept
@@ -2758,6 +2879,20 @@ impl MultinomialModelEnvelope {
 #[cfg(test)]
 mod multinomial_persistence_contract_tests {
     use super::*;
+
+    #[test]
+    fn format_g_matches_python_general_format() {
+        assert_eq!(format_g(1234.5678, 4), "1235");
+        assert_eq!(format_g(9.9996, 4), "10");
+        assert_eq!(format_g(0.5, 4), "0.5");
+        assert_eq!(format_g(100.0, 3), "100");
+        assert_eq!(format_g(1000.0, 3), "1e+03");
+        assert_eq!(format_g(123456789.0, 6), "1.23457e+08");
+        assert_eq!(format_g(0.0001, 4), "0.0001");
+        assert_eq!(format_g(0.00001, 4), "1e-05");
+        assert_eq!(format_g(0.0, 6), "0");
+        assert_eq!(format_g(f64::NAN, 4), "nan");
+    }
 
     #[test]
     fn unversioned_payload_is_rejected() {
