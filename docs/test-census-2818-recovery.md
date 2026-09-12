@@ -833,3 +833,18 @@ defining file.
 | --- | --- | --- |
 | `LatentZPolicy::exploratory_fit_weighted` and `DeviationBlockConfig::triple_penalty_default`, the constructors the BMS audit fixture built its request from | `f2156a78e` and `7c185e2c5` | `bms_rigid_nonzero_slope_offset_audit_fits_in_time_370`. Its sibling `bms_callbacks_self_compute_nonzero_slope_baseline_at_beta_zero_370` survives in the same file. |
 | `amortized_encode_batch_fast`, `amortized_reconstruct_batch_fast` and `build_data_driven`, the fast encode/decode path that `oos_train_curved` trained through | `728caa9b1` | `curved_warm_start_matches_or_beats_linear_baseline_out_of_sample_2261` |
+
+### Two pins already disposed of by other records
+
+- `latent_log_sigma_curvature_tracks_gradient_fd_scale_ladder_2566`: two
+  existing records cover it. `docs/source-removal-changes.json` records the
+  #2901 SPEC rule 16 deletion of the print-only #2566 log-sigma curvature ladder,
+  together with its only helpers, `richardson_central_difference` and
+  `latent_survival_value_fd_authority`. `docs/public-api-2829-disposition.tsv`
+  marks its producer, `latent_survival_log_sigma_curvature_certified`, as
+  `retired-by-owner:survival`. The survival owner judged the producer superseded
+  rather than restoring it.
+- `zz_measure_bernoulli_wide_basis_size_versus_n_2672`: its size-count helper
+  `ingest` calls `tail_probability`, which `418c732d2` deleted with
+  `selection_mean` from `smooth_term_lr.rs`. The measurement cannot return
+  without that production API.
