@@ -1481,12 +1481,11 @@ impl SaeManifoldTerm {
                 if let Ok(limit_factor) =
                     self.factor_deflated_evidence_with_grad_norms(&mut sys, &lambda_smooth, options)
                 {
-                    let decrement_sq = sae_manifold_newton_directional_decrease(
+                    let decrement_sq = Self::inner_certificate_decrement_sq(
                         &sys,
                         limit_factor.delta_t.view(),
                         limit_factor.delta_beta.view(),
-                    )
-                    .max(0.0);
+                    );
                     let limit_scale = self
                         .penalized_objective_total(target, rho_fixed, registry, 1.0)
                         .map(|obj| obj.abs() + 1.0)
@@ -1629,12 +1628,11 @@ impl SaeManifoldTerm {
                             .penalized_objective_total(target, rho_fixed, registry, 1.0)
                             .map(|obj| obj.abs() + 1.0)
                             .unwrap_or(f64::INFINITY);
-                        let newton_decrement_sq = sae_manifold_newton_directional_decrease(
+                        let newton_decrement_sq = Self::inner_certificate_decrement_sq(
                             &sys,
                             final_dt.view(),
                             final_db.view(),
-                        )
-                        .max(0.0);
+                        );
                         let excursion_cert = 0.5 * newton_decrement_sq / final_objective_scale;
                         // #2228 — the acceptance verdict keys on the BEST-SEEN
                         // certificate, not the excursion the polish left. The
@@ -1947,12 +1945,11 @@ impl SaeManifoldTerm {
                     // predicts no further meaningful descent, never a still-descending
                     // iterate (a large λ² leaves this below and falls through to the
                     // deterministic refine budget exactly as before).
-                    let newton_decrement_sq = sae_manifold_newton_directional_decrease(
+                    let newton_decrement_sq = Self::inner_certificate_decrement_sq(
                         &stationary_sys,
                         stationary_dt.view(),
                         stationary_db.view(),
-                    )
-                    .max(0.0);
+                    );
                     let predicted_relative_decrease = 0.5 * newton_decrement_sq / objective_scale;
                     log::debug!(
                         "SAE inner stall certificate: ‖g‖={stationary_grad_norm:.6e} \
@@ -2702,6 +2699,37 @@ impl SaeManifoldTerm {
             && relative_decrease <= SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL
     }
 
+    /// `λ² = −gᵀΔ` of an inner acceptance factor's step, as the decrement
+    /// certificate reads it (#2228, SPEC rule 22). `f64::max` returns its non-NaN
+    /// operand, so the former `.max(0.0)` priced a NaN decrement as 0, and a
+    /// materially negative one as 0 too, and 0 certifies. A negative decrement
+    /// means the factor's step is not a descent direction, where no quadratic-model
+    /// certificate exists. A negative value inside the rounding floor the Armijo
+    /// lane uses, `SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR·‖g‖·‖Δ‖`, reads as 0;
+    /// any other value that is not a finite non-negative number reads as NaN, which
+    /// [`Self::inner_decrement_certifies`] refuses.
+    pub(crate) fn inner_certificate_decrement_sq(
+        sys: &ArrowSchurSystem,
+        delta_t: ndarray::ArrayView1<'_, f64>,
+        delta_beta: ndarray::ArrayView1<'_, f64>,
+    ) -> f64 {
+        let raw = sae_manifold_newton_directional_decrease(sys, delta_t, delta_beta);
+        if !raw.is_finite() {
+            return f64::NAN;
+        }
+        if raw >= 0.0 {
+            return raw;
+        }
+        let grad_norm = Self::system_grad_norm_sq(sys).sqrt();
+        let step_norm = (delta_t.dot(&delta_t) + delta_beta.dot(&delta_beta)).sqrt();
+        let rounding = SAE_MANIFOLD_DIRECTIONAL_DECREASE_REL_FLOOR * grad_norm * step_norm;
+        if rounding.is_finite() && -raw <= rounding {
+            0.0
+        } else {
+            f64::NAN
+        }
+    }
+
     /// `½λ²/(|f| + 1)` at the installed state, priced exactly as the budget-limit
     /// and final-gate acceptances price it: assemble at `(term, rho)`, take the
     /// deflated evidence factor with [`Self::evidence_factor_options`], and read
@@ -2725,20 +2753,18 @@ impl SaeManifoldTerm {
             .map_err(|err| err.to_string())?;
         let factor =
             self.factor_deflated_evidence_with_grad_norms(&mut sys, &lambda_smooth, &options)?;
-        let decrement_sq = sae_manifold_newton_directional_decrease(
+        let decrement_sq = Self::inner_certificate_decrement_sq(
             &sys,
             factor.delta_t.view(),
             factor.delta_beta.view(),
         );
-        // `f64::max` returns the non-NaN operand, so a NaN decrement clamped
-        // first would price as 0 and certify. Refuse it before clamping the
-        // roundoff-negative side.
+        // The audit refuses exactly the decrements the native lanes refuse.
         if !decrement_sq.is_finite() {
             return Err(format!(
-                "installed-state Newton decrement is non-finite: λ²={decrement_sq:e}"
+                "installed-state Newton decrement is not a certificate: λ²={decrement_sq:e}"
             ));
         }
-        Ok(0.5 * decrement_sq.max(0.0) / scale)
+        Ok(0.5 * decrement_sq / scale)
     }
 
     /// Install the per-row spectral deflation on an ACCEPTANCE system, take its
@@ -2915,12 +2941,11 @@ impl SaeManifoldTerm {
                     break;
                 }
             };
-            let decrement_sq = sae_manifold_newton_directional_decrease(
+            let decrement_sq = Self::inner_certificate_decrement_sq(
                 &sys,
                 factor.delta_t.view(),
                 factor.delta_beta.view(),
-            )
-            .max(0.0);
+            );
             let cert = if objective_scale.is_finite() && objective_scale > 0.0 {
                 0.5 * decrement_sq / objective_scale
             } else {
