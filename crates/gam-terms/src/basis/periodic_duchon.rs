@@ -703,7 +703,7 @@ fn periodic_bernoulli_block(r: f64, m: usize, period: f64) -> Result<f64, BasisE
 /// so the derivative path reuses the SAME closed-form periodization at spectral
 /// orders `s`, `s+1`, `s+2` — no separate differentiation of the cosh/sinh
 /// chains.
-pub(crate) fn periodic_hybrid_duchon_kernel_psi_triplet(
+pub fn periodic_hybrid_duchon_kernel_psi_triplet(
     r: f64,
     kappa: f64,
     p_order: usize,

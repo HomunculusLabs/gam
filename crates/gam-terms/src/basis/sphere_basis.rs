@@ -2919,7 +2919,7 @@ pub(crate) fn build_duchon_native_penalty_psi_derivatives_in_directions(
 ///
 /// Thin wrapper over [`duchon_resolve_chart`]; kept as its own name because the
 /// derivative path is the caller that has to be *unable* to skip it (#2638).
-pub(crate) fn prepare_duchon_derivative_contextwithworkspace(
+pub fn prepare_duchon_derivative_contextwithworkspace(
     data: ArrayView2<'_, f64>,
     spec: &DuchonBasisSpec,
     workspace: &mut BasisWorkspace,
@@ -2939,7 +2939,7 @@ pub(crate) fn prepare_duchon_derivative_contextwithworkspace(
 /// regression test against the analytic derivative). Centralising the
 /// collapse in one helper makes it impossible to add a new periodic path
 /// that forgets the dedup.
-pub(crate) fn prepare_periodic_duchon_centers_1d(
+pub fn prepare_periodic_duchon_centers_1d(
     centers: Array2<f64>,
 ) -> Result<(Array2<f64>, f64, f64), BasisError> {
     prepare_periodic_duchon_centers_1d_with_period(centers, None)
@@ -3004,7 +3004,7 @@ pub(crate) fn prepare_periodic_duchon_centers_1d_with_period(
     Ok((centers, left, period))
 }
 
-pub(crate) fn fill_periodic_duchon_kernel_psi_matrices(
+pub fn fill_periodic_duchon_kernel_psi_matrices(
     rows: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
     left: f64,
@@ -3037,7 +3037,7 @@ pub(crate) fn fill_periodic_duchon_kernel_psi_matrices(
     Ok((kernel, kernel_psi, kernel_psi_psi))
 }
 
-pub(crate) fn periodic_duchon_identifiability_transformwithworkspace(
+pub fn periodic_duchon_identifiability_transformwithworkspace(
     data: ArrayView2<'_, f64>,
     spec: &DuchonBasisSpec,
     centers: Array2<f64>,
@@ -3056,7 +3056,7 @@ pub(crate) fn periodic_duchon_identifiability_transformwithworkspace(
     }
 }
 
-pub(crate) fn build_periodic_duchon_basis_log_kappa_derivativeswithworkspace(
+pub fn build_periodic_duchon_basis_log_kappa_derivativeswithworkspace(
     data: ArrayView2<'_, f64>,
     spec: &DuchonBasisSpec,
     workspace: &mut BasisWorkspace,
