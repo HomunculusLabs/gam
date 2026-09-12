@@ -6311,17 +6311,13 @@ impl SaeSupportSparseTerm {
             .collect();
         let output_dim = self.output_dim;
         // Backtracking on the SAME objective the certificate reads, from the
-        // exact model's scale. The floor is the coordinate sweep's own halving
-        // budget measured in ABSOLUTE scale, `2⁻²⁴` of the full majorizer step, so
-        // a long exact first trial cannot shorten how far the ladder may walk and
-        // neither block can be walked further than the other.
-        let scale_floor = 2.0_f64.powi(-24);
+        // model's first scale. It walks down until a rung's whole first-order change
+        // `scale·|model_linear|` is within the objective's arithmetic resolution, the
+        // coordinate sweep's own stopping rule, so neither block is walked past the
+        // point where a decrease could still be measured.
         let mut halving = 0usize;
         loop {
             let scale = first_scale * 2.0_f64.powi(-(halving as i32));
-            if scale < scale_floor {
-                break;
-            }
             self.install_coordinates(coordinate_snapshot)?;
             scaled_step.clear();
             scaled_step.extend(step_t.iter().map(|value| scale * value));
@@ -6392,6 +6388,12 @@ impl SaeSupportSparseTerm {
                     support: self.support_fingerprint(),
                 });
                 return Ok(Some(trial));
+            }
+            // Past this rung the step's first-order change is within the objective's
+            // resolution, so no smaller rung could measure a decrease. The negated
+            // comparison also stops on NaN.
+            if !(scale * -model_linear > objective_resolution) {
+                break;
             }
             halving += 1;
         }
