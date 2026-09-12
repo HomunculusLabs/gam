@@ -35,10 +35,6 @@ mod trace;
 
 pub(crate) use sparse_exact_penalty::sparse_penalty_block_count_from_canonical;
 
-pub(crate) const FIRTH_MAX_OBSERVATIONS: usize = 20_000;
-pub(crate) const FIRTH_MAX_COEFFICIENTS: usize = 256;
-pub(crate) const FIRTH_MAX_LINEAR_WORK: usize = 2_000_000;
-pub(crate) const FIRTH_MAX_QUADRATIC_WORK: usize = 100_000_000;
 pub(crate) const PERSISTENT_LATENT_VALUES_CACHE_CAPACITY: usize = 8;
 
 #[derive(Debug)]
@@ -142,15 +138,6 @@ pub(crate) struct IftWarmStartCache {
     pub lambda_s_beta_blocks: Option<Vec<ndarray::Array1<f64>>>,
 }
 
-pub(crate) fn firth_problem_scale_allows(n_obs: usize, p_coeff: usize) -> bool {
-    let linear_work = n_obs.saturating_mul(p_coeff);
-    let quadratic_work = linear_work.saturating_mul(p_coeff);
-    n_obs <= FIRTH_MAX_OBSERVATIONS
-        && p_coeff <= FIRTH_MAX_COEFFICIENTS
-        && linear_work <= FIRTH_MAX_LINEAR_WORK
-        && quadratic_work <= FIRTH_MAX_QUADRATIC_WORK
-}
-
 #[cfg(test)]
 mod tests {
     use super::atoms::CriterionAtom;
@@ -244,13 +231,6 @@ mod tests {
                 penaltysecond_components,
             )
         }
-    }
-
-    #[test]
-    pub(crate) fn firth_problem_scale_gate_blocks_large_quadratic_work() {
-        assert!(super::firth_problem_scale_allows(2_000, 200));
-        assert!(!super::firth_problem_scale_allows(4_800, 241));
-        assert!(!super::firth_problem_scale_allows(4_800, 433));
     }
 
     /// Common shape for the design-motion + penalty-motion REML test fixtures

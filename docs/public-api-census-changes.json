@@ -1817,5 +1817,14 @@
     },
     "reason": "#2899 group-A sweep: gam_linalg::governed_capture::record_governed_decision wrote into a thread-local capture that nothing could enable or read, after #2829 retired begin_governed_decision_capture and take_governed_decision_capture. It is deleted with the module and its eight call sites.",
     "evidence": "public_api_census.py --base 5e4a9a39b --head 2f67adcc3 reports exactly this identity (/scratch.global/sauer354/pool/prune-api-a/slice8.census.json). At the base, git grep -n -w record_governed_decision finds only its declaration and the eight matrix/mod.rs call sites."
+  },
+  {
+    "base": "de5cfc7a36f623b56b55c519ed33e64a919fd027",
+    "removed": {
+      "crates/gam-solve/src/reml/mod.rs::firth_problem_scale_allows": 1,
+      "crates/gam-solve/src/reml/mod.rs::firth_problem_scale_gate_blocks_large_quadratic_work": 1
+    },
+    "reason": "#2900 SPEC rule 6: the pub(crate) Firth problem-scale gate firth_problem_scale_allows is deleted, together with the unit test that pinned its cutoffs. A Firth fit's Tierney-Kadane refinement now runs at every problem scale through the exact design-tensor route chosen by predicted work (a1cfce3a3, 5e4a9a39b). The Jeffreys operator already has been built at every scale since 002830f8c.",
+    "evidence": "At base, git grep -n -w firth_problem_scale_allows over crates, src and tests finds its declaration, one production call in gradient_hessian.rs tierney_kadane_terms (removed in this commit), comments rewritten in this commit, and the deleted unit test firth_problem_scale_gate_blocks_large_quadratic_work (declared pub(crate) fn inside reml/mod.rs mod tests, which the census counts). The removed map lists exactly the two pub(crate) fn declarations this commit deletes. Not compiled locally (user directive); compile rests on the shared tip check."
   }
 ]

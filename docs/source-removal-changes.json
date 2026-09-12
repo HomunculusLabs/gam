@@ -4628,5 +4628,18 @@
     ],
     "reason": "#2469: MDS_EIGENVALUE_FLOOR_FRAC (1e-9 of the leading eigenvalue) was a picked cutoff for the intrinsic seed's classical-MDS axes. An axis now counts only when it clears the eigensolver backward error l*eps*lambda_max and the magnitude of the most negative MDS eigenvalue. The latter measures, on the same spectrum, the non-embeddability of the geodesic metric, which spreads spurious eigenvalues of both signs.",
     "evidence": "git grep -n MDS_EIGENVALUE_FLOOR_FRAC at the base finds only its declaration and one use, at crates/gam-sae/src/manifold/intrinsic_seed.rs:409 (the MDS axis selection), and no test names it. Nothing here was compiled or run locally (user directive); compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "de5cfc7a36f623b56b55c519ed33e64a919fd027",
+    "items": [
+      "crates/gam-solve/src/reml/mod.rs:const:FIRTH_MAX_COEFFICIENTS",
+      "crates/gam-solve/src/reml/mod.rs:const:FIRTH_MAX_LINEAR_WORK",
+      "crates/gam-solve/src/reml/mod.rs:const:FIRTH_MAX_OBSERVATIONS",
+      "crates/gam-solve/src/reml/mod.rs:const:FIRTH_MAX_QUADRATIC_WORK",
+      "crates/gam-solve/src/reml/mod.rs:fn:firth_problem_scale_allows",
+      "crates/gam-solve/src/reml/mod.rs:fn:firth_problem_scale_gate_blocks_large_quadratic_work"
+    ],
+    "reason": "#2900 SPEC rule 6: firth_problem_scale_allows returned a zero Tierney-Kadane correction above n = 20,000, p = 256, n*p = 2e6 or n*p^2 = 1e8, so a Firth fit's REML objective changed at a data-size window. The TK value, gradient and rho-Hessian now have an exact design-tensor route chosen by predicted work (a1cfce3a3, 5e4a9a39b), and 002830f8c already built the Jeffreys operator at every scale. The gate, its four cutoff constants and the unit test that pinned those cutoffs are deleted.",
+    "evidence": "At base, git grep -n -w over crates, src and tests finds firth_problem_scale_allows only at its declaration in crates/gam-solve/src/reml/mod.rs, its one remaining production call in tierney_kadane_terms (crates/gam-solve/src/reml/gradient_hessian.rs, removed here), three comments in gradient_hessian.rs (rewritten here) and the unit test (deleted here). The four FIRTH_MAX_* constants are named only inside firth_problem_scale_allows and in comments in gradient_hessian.rs that this change rewrites. Not compiled locally (user directive); compile rests on the shared tip check."
   }
 ]

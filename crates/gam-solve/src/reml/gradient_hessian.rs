@@ -226,10 +226,10 @@ impl<'a> RemlState<'a> {
     }
 
     pub(crate) fn firth_tk_exact_hessian_scale_allows(n_obs: usize, p_coeff: usize) -> bool {
-        // Separate from `firth_problem_scale_allows`, which gates the whole
-        // Tierney-Kadane refinement (its gradient's O(n²·p) row-pair term). The
-        // exact TK Hessian-only path is O(n²·p) after the #1575 matvec hoist and
-        // needs its own budget.
+        // The exact TK Hessian's row-pair jets cost O(n²·(1 + k + k²)·p). The
+        // design-tensor route (`TkRowPairRoute::predicted_rho_hessian`) is cheaper
+        // at large n, but this budget still sends optimizer curvature to BFGS by
+        // row-pair work alone (#2900 row 6.7).
         const FIRTH_TK_EXACT_HESSIAN_MAX_ROW_PAIR_WORK: usize = 10_000_000;
         n_obs.saturating_mul(n_obs).saturating_mul(p_coeff)
             <= FIRTH_TK_EXACT_HESSIAN_MAX_ROW_PAIR_WORK
@@ -1998,9 +1998,8 @@ impl<'a> RemlState<'a> {
         // K xⱼ, Kᵢ xⱼ and Kᵢⱼ xⱼ depend only on the row j, yet the O(n²)
         // skewness double loop below recomputed each of them afresh for every
         // outer row i (and the per-row `hdiag` jet computes the very same
-        // matvecs). For the default-ON binomial/logit Firth path this exact TK
-        // Hessian runs at n up to FIRTH_MAX_OBSERVATIONS (20_000), so that inner
-        // O(p²) matvec, repeated n² times, dominates the whole evaluation.
+        // matvecs). On the row-pair route that inner O(p²) matvec, repeated n²
+        // times, dominates the whole evaluation.
         //
         // Hoist the row-local matvecs once here (n gemvs each), so the diagonal
         // jet and every (i,j) inner iteration reduce to an O(p) `xᵢ · (K xⱼ)`
@@ -2015,9 +2014,9 @@ impl<'a> RemlState<'a> {
         let ki_x: Vec<Vec<Array1<f64>>> = (0..k)
             .map(|a| rows.iter().map(|xr| k_i[a].dot(xr)).collect())
             .collect();
-        // `kmat_x` (n·p) and `ki_x` (k·n·p, with n·p ≤ FIRTH_MAX_LINEAR_WORK)
-        // are always cheap to hold, but the mixed cache `kij_x` is k²·n·p and
-        // the Firth gate does NOT bound k (the smooth count), so a many-smooth
+        // `kmat_x` (n·p) and `ki_x` (k·n·p) are the size of the design itself,
+        // but the mixed cache `kij_x` is k²·n·p and nothing bounds k (the smooth
+        // count), so a many-smooth
         // model could blow memory the original inline loop never allocated.
         // Materialize it only when it fits a fixed budget; otherwise fall back
         // to recomputing `k_ij[a][b]·xⱼ` inline (the original arithmetic, so
@@ -2344,26 +2343,11 @@ impl<'a> RemlState<'a> {
             })
         };
 
-        // The Jeffreys operator itself is built at every problem scale (the inner
-        // P-IRLS and the outer eval bundles both carry Φ whenever Firth is
-        // requested). Only this Tierney-Kadane refinement is still omitted above
-        // `firth_problem_scale_allows`, because its gradient carries an O(n²·p)
-        // row-pair term (`tk_gradient_from_shared`), and that size switch is
-        // still open under #2900. The omission is consistent within one
-        // evaluation: value, gradient and Hessian all drop the refinement
-        // together.
-        //
-        // The gate is strictly tighter than the TK dense-work caps used by the
-        // non-Gaussianity audit (`TK_MAX_*`): `firth_problem_scale_allows` bounds
-        // `n ≤ FIRTH_MAX_OBSERVATIONS (20_000)`, `p ≤ FIRTH_MAX_COEFFICIENTS (256)`
-        // and `n·p ≤ FIRTH_MAX_LINEAR_WORK (2e6)`, each below the corresponding TK
-        // cap, so passing it guarantees the dense calculus below is affordable.
-        let n_x = self.x().nrows();
-        let p_x = self.x().ncols();
-        if !super::firth_problem_scale_allows(n_x, p_x) {
-            return Ok(zero_correction());
-        }
-
+        // The refinement is part of the Firth objective at every problem scale,
+        // like the Jeffreys operator it refines (#2900). Its row-pair sums run by
+        // blocked row pairs or through the design tensor, whichever predicted work
+        // is smaller (`TkRowPairRoute`), so neither the value, the gradient nor the
+        // ρ-Hessian changes at a size window.
         let pirls_result = bundle.pirls_result.as_ref();
         let (c_array, d_array, e_array) = self.hessian_cde_arrays(pirls_result)?;
         // `f = d⁴W_obs/dη⁴` enters only the analytic outer Hessian. The exact
