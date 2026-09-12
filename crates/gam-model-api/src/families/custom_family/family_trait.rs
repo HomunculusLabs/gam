@@ -1727,10 +1727,21 @@ pub trait CustomFamily {
     /// keeps its arithmetic; the default declines.
     fn joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
         &self,
-        _block_states: &[ParameterBlockState],
-        _specs: &[ParameterBlockSpec],
-        _basis: ndarray::ArrayView2<'_, f64>,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        basis: ndarray::ArrayView2<'_, f64>,
     ) -> Result<Option<Array2<f64>>, String> {
+        assert_blockstates_are_a_point(
+            block_states,
+            "rotated all-axes Jeffreys information derivative",
+        );
+        let width = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
+        assert_eq!(
+            basis.nrows(),
+            width,
+            "rotated all-axes Jeffreys information derivative: the Jeffreys basis has {} rows for {width} joint coefficients",
+            basis.nrows()
+        );
         Ok(None)
     }
 
