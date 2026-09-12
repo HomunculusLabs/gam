@@ -18,13 +18,15 @@
 //!
 //!  1. LOSSLESS CHART — `decode(embed(p)) = p` to machine precision (the
 //!     coordinate throws away no behavioral information).
-//!  2. EXACT UNIT — `predicted_nats(Δy) = ‖Δy‖²` holds identically (the dose
-//!     the decoder is fit to reproduce is literally the squared coordinate step).
+//!  2. EXACT UNIT — at the basepoint `predicted_nats(0, Δy) = ‖Δy‖²` holds
+//!     identically (the dose the decoder is fit to reproduce is literally the
+//!     squared coordinate step there).
 //!  3. NATS CALIBRATION — for a controlled small displacement of each real row's
-//!     coordinate, the PREDICTED dose `‖Δy‖²` matches the EXACT realized
-//!     `KL(p ‖ p')` to second order, with the honestly-measured isometry defect
-//!     (median + tail relative error) reported and bounded. This is the "2 nats
-//!     per unit²" calibration read off real behavior, not a synthetic circle.
+//!     coordinate, the PREDICTED dose `Δyᵀ G Δy` of the chart's Fisher metric
+//!     matches the chart's exact dose `2‖q − q'‖²` on every row and the EXACT
+//!     realized `KL(p ‖ p')` on the bulk of rows, with the honestly-measured
+//!     defects (median + tail relative error) reported and bounded. This is the
+//!     "2 nats per unit²" calibration read off real behavior, not a synthetic circle.
 //!
 //! These bars exercise only the closed-form sphere-tangent geometry, so they are
 //! NOT gated on the two-block convergence keystone (lane-2015); a failure here is
@@ -106,16 +108,32 @@ fn qwen_behavior_chart_is_lossless_and_nats_unit_is_exact_2015() {
     );
 }
 
+/// Pearson correlation of two equal-length samples.
+fn pearson(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len() as f64;
+    let mean_a = a.iter().sum::<f64>() / n;
+    let mean_b = b.iter().sum::<f64>() / n;
+    let mut cov = 0.0;
+    let mut var_a = 0.0;
+    let mut var_b = 0.0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        cov += (x - mean_a) * (y - mean_b);
+        var_a += (x - mean_a) * (x - mean_a);
+        var_b += (y - mean_b) * (y - mean_b);
+    }
+    cov / (var_a.sqrt() * var_b.sqrt())
+}
+
 /// (3) NATS CALIBRATION on real behavior — the "2 nats per unit²" law verified
-/// against EXACT KL. For each real row we take a controlled small displacement of
-/// its fitted coordinate (`y' = (1−ε)·y`, ε = 1e-3) and compare the PREDICTED dose
-/// `Δyᵀ G(y) Δy` of the chart's Fisher metric at `y` against the EXACT
-/// `KL(decode(y) ‖ decode(y'))`. By (★) the two must agree to second order; the
-/// ratio → 1 as ε → 0. The flat `‖Δy‖²` alone is exact only at the basepoint: on
-/// these real rows it under-prices this radial step by `cos²θ` (median defect 0.575
-/// in census job 505903), which is what this bar exists to catch. We measure the
-/// isometry defect HONESTLY (median and tail relative error) and bound it, and
-/// require the predicted dose to track the exact KL near-perfectly across rows.
+/// against the chart's exact dose and against EXACT KL. For each real row we take a
+/// controlled small displacement of its fitted coordinate (`y' = (1−ε)·y`, ε = 1e-3)
+/// and price it with the chart's Fisher metric at the step's midpoint,
+/// `Δyᵀ G(y_m) Δy` with `y_m = (1 − ε/2)·y`. The flat `‖Δy‖²` alone is exact only at
+/// the basepoint: on these real rows it under-prices this radial step by `cos²θ`
+/// (median defect 0.575 in census job 505903), which is what these bars exist to
+/// catch. We measure the defects HONESTLY (median and tail relative error) and bound
+/// them, and require the predicted dose to track the chart's dose near-perfectly
+/// across rows.
 #[test]
 fn qwen_behavior_nats_calibration_matches_exact_kl_2015() {
     const GATE_ROWS: usize = 600;
@@ -132,6 +150,7 @@ fn qwen_behavior_nats_calibration_matches_exact_kl_2015() {
     let mut rel_errors: Vec<f64> = Vec::new();
     let mut chart_errors: Vec<f64> = Vec::new();
     let mut predicted_all: Vec<f64> = Vec::new();
+    let mut chart_all: Vec<f64> = Vec::new();
     let mut exact_all: Vec<f64> = Vec::new();
     for i in 0..GATE_ROWS {
         let y = target.row(i).to_owned();
@@ -141,7 +160,13 @@ fn qwen_behavior_nats_calibration_matches_exact_kl_2015() {
         }
         let y_near: Array1<f64> = &y * (1.0 - eps);
         let delta: Array1<f64> = &y - &y_near;
-        let predicted = SphereTangentEmbedding::predicted_nats(y.view(), delta.view())
+        // Price the step at its midpoint. With `s = ‖y‖²/2` and radial overlap
+        // `r² = 1 − s`, the endpoint price differs from the chart's dose by about
+        // `ε·s/r²`, a finite-step curvature that grows without bound as a row's
+        // overlap with the basepoint vanishes. The symmetric price leaves about
+        // `(ε·s/r²)²/4`.
+        let y_mid: Array1<f64> = &y * (1.0 - 0.5 * eps);
+        let predicted = SphereTangentEmbedding::predicted_nats(y_mid.view(), delta.view())
             .expect("every embedded row lies inside the chart's hemisphere");
         // decode(y) round-trips to the real distribution; decode(y_near) is a
         // controlled nearby distribution. Their EXACT KL is the realized dose.
@@ -154,7 +179,7 @@ fn qwen_behavior_nats_calibration_matches_exact_kl_2015() {
             "row {i}: a genuine small displacement must have a positive finite KL, got {exact}"
         );
         // The chart's own dose: its Fisher metric is the pulled-back Euclidean metric
-        // of the half-density `q`, so `Δyᵀ G(y) Δy` must equal `2‖q − q'‖²` to second
+        // of the half-density `q`, so `Δyᵀ G(y_m) Δy` must equal `2‖q − q'‖²` to second
         // order for EVERY row.
         let q_full = embedding.decode_sphere(y.view()).expect("decode_sphere y");
         let q_near = embedding.decode_sphere(y_near.view()).expect("decode_sphere y_near");
@@ -162,6 +187,7 @@ fn qwen_behavior_nats_calibration_matches_exact_kl_2015() {
         rel_errors.push((predicted / exact - 1.0).abs());
         chart_errors.push((predicted / chart_dose - 1.0).abs());
         predicted_all.push(predicted);
+        chart_all.push(chart_dose);
         exact_all.push(exact);
     }
 
@@ -182,23 +208,27 @@ fn qwen_behavior_nats_calibration_matches_exact_kl_2015() {
     };
     let (median, kl_p95, kl_max) = quantiles(&rel_errors);
     let (chart_median, chart_p95, chart_max) = quantiles(&chart_errors);
+    let corr_chart = pearson(&predicted_all, &chart_all);
+    let corr_kl = pearson(&predicted_all, &exact_all);
     eprintln!(
         "[#2015 nats-calibration] rows={}, ε={eps:.0e}, vs exact KL: median={median:.3e} \
-         p95={kl_p95:.3e} max={kl_max:.3e}; vs chart dose 2‖Δq‖²: median={chart_median:.3e} \
-         p95={chart_p95:.3e} max={chart_max:.3e}",
+         p95={kl_p95:.3e} max={kl_max:.3e} corr={corr_kl:.6}; vs chart dose 2‖Δq‖²: \
+         median={chart_median:.3e} p95={chart_p95:.3e} max={chart_max:.3e} corr={corr_chart:.6}",
         rel_errors.len()
     );
 
-    // Two different claims, two different references. KL(p‖p') = 2‖Δq‖² + R, and
-    // the remainder R is not controlled by the step alone: a token whose half-density
-    // q_j is near zero while the step moves q_j by more than q_j contributes about
-    // Δq_j² to KL against 2Δq_j² in the quadratic form, at any finite step. Real
-    // next-token rows are peaky, so the TAIL of the KL defect measures that
-    // divergence geometry, not the chart. At 96b42e9e8 (guarded sw0k job 543027) the
-    // Fisher-metric dose left the KL median inside its bar while the KL p95 read
-    // 2.855e-1. The bulk claim stays denominated in exact KL. The every-row claims
-    // are denominated in the chart's exact dose, where the flat-metric defect
-    // (median 0.575 at 7ad913f69) still fails them.
+    // Two different claims, two different references. Write δ = q − q'. On the
+    // tokens a row covers, KL(p‖p') collects 2δ_j² to second order; on a token whose
+    // half-density q_j is smaller than the step moves it, KL collects about δ_j²
+    // against 2δ_j² in the quadratic form. For a radial step δ_j ≈ ε·b_j/r there, so a
+    // row carrying basepoint mass M on such tokens reads a KL defect near M/(2s) at
+    // any small ε, whatever the chart does. Real next-token rows are peaky, so the
+    // TAIL of the KL defect measures that divergence geometry, not the chart. At
+    // 96b42e9e8 (guarded sw0k job 543027) the endpoint Fisher-metric dose left the KL
+    // median inside its bar while the KL p95 read 2.855e-1. The bulk claim stays
+    // denominated in exact KL. The every-row claims, and the tracking claim, are
+    // denominated in the chart's exact dose, where the flat-metric defect (about s,
+    // median 0.575 at 7ad913f69) still fails every one of them.
     assert!(
         median < 0.02,
         "median nats-calibration defect {median:.3e} too large — the behavior chart \
@@ -214,25 +244,12 @@ fn qwen_behavior_nats_calibration_matches_exact_kl_2015() {
          mis-price its chart dose by more than a small factor at ε=1e-3)"
     );
 
-    // Predicted dose must TRACK the exact KL across rows: the calibration is a
+    // Predicted dose must TRACK the chart's dose across rows: the calibration is a
     // near-perfect line through the origin with unit slope, so the Pearson
     // correlation is ~1. A low correlation would mean the coordinate is not
     // measuring behavioral information at all.
-    let n = predicted_all.len() as f64;
-    let mean_p = predicted_all.iter().sum::<f64>() / n;
-    let mean_e = exact_all.iter().sum::<f64>() / n;
-    let mut cov = 0.0;
-    let mut var_p = 0.0;
-    let mut var_e = 0.0;
-    for (p, e) in predicted_all.iter().zip(exact_all.iter()) {
-        cov += (p - mean_p) * (e - mean_e);
-        var_p += (p - mean_p) * (p - mean_p);
-        var_e += (e - mean_e) * (e - mean_e);
-    }
-    let corr = cov / (var_p.sqrt() * var_e.sqrt());
-    eprintln!("[#2015 nats-calibration] predicted↔exact-KL correlation = {corr:.6}");
     assert!(
-        corr > 0.9999,
-        "predicted nats must track exact KL across real rows (corr {corr:.6})"
+        corr_chart > 0.9999,
+        "predicted nats must track the chart's dose across real rows (corr {corr_chart:.6})"
     );
 }
