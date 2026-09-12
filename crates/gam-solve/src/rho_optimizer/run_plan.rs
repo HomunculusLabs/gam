@@ -1441,19 +1441,6 @@ pub(crate) fn run_outer_with_plan(
                         .with_gradient_tolerance(grad_tol)
                         .with_max_iterations(max_iter)
                         .with_initial_sample(seed.clone(), initial_op_sample)
-                        // Looser Eisenstat–Walker forcing factor on the
-                        // inner Steihaug–Toint CG (default 0.1 → 0.5). The
-                        // matrix-free route is reached only after
-                        // `prefer_outer_hessian_operator` says Hv is
-                        // expensive (large k, n·p crossover, or wide
-                        // basis), which is exactly the regime where the
-                        // standard inexact-Newton-Krylov 0.5 forcing
-                        // factor wins: one extra outer-TR iter is cheap
-                        // versus halving the number of inner Hv applies
-                        // per outer iter. At large-scale shape (n=300 K,
-                        // ~64 outer-TR iters × ~30 trace_logdet calls per
-                        // Hv) this halves the dominant per-fit work.
-                        .with_cg_tolerance(0.5)
                         // Stop the search on the test that will judge it.
                         //
                         // The certificate accepts a point when the Newton
