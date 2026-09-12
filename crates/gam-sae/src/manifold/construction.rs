@@ -3239,42 +3239,19 @@ impl SaeManifoldTerm {
         let parallel = n >= SAE_LOSS_PARALLEL_ROW_MIN && rayon::current_thread_index().is_none();
         // Gate map: order-preserving parallel collect == serial push.
         let assignments = self.assignments_all_parallel(n)?;
-        let mut decoded = Array3::<f64>::zeros((n, k_atoms, p));
-        {
-            let atoms = &self.atoms;
-            if parallel {
-                use rayon::prelude::*;
-                decoded
-                    .axis_iter_mut(ndarray::Axis(0))
-                    .into_par_iter()
-                    .enumerate()
-                    .for_each(|(row, mut drow)| {
-                        // #1557 — pin any faer GEMM reachable via `fill_decoded_row`.
-                        with_nested_parallel(|| {
-                            for atom_idx in 0..k_atoms {
-                                let mut arow = drow.row_mut(atom_idx);
-                                let arow = arow.as_slice_mut().expect("contiguous decoded row");
-                                atoms[atom_idx].fill_decoded_row(row, arow);
-                            }
-                        });
-                    });
-            } else {
-                let mut dbuf = vec![0.0_f64; p];
-                for row in 0..n {
-                    for atom_idx in 0..k_atoms {
-                        atoms[atom_idx].fill_decoded_row(row, &mut dbuf);
-                        for c in 0..p {
-                            decoded[[row, atom_idx, c]] = dbuf[c];
-                        }
-                    }
-                }
-            }
-        }
         // Full fitted reconstruction `Σ_k a_k decoded_k`, so the per-atom partial
         // residual is `e_k = (z − fitted) + a_k decoded_k` (add atom k back in).
+        //
+        // #2283 — each row decodes its gated atoms into one `p`-length scratch and
+        // folds them in atom order, and the moment below decodes atom `k`'s row again
+        // where it reads it. The `n × K × p` decoded table this used to fill first is
+        // 49 GiB at the #2283 cell (96 000 rows, 32 charts, p = 2048), allocated on
+        // every accepted inner iteration. `fill_decoded_row` is a pure function of
+        // `(atom, row)` and the fold order is unchanged, so every product is the one
+        // the table held.
         let mut fitted = Array2::<f64>::zeros((n, p));
         {
-            let decoded_ref = &decoded;
+            let atoms = &self.atoms;
             let assignments_ref = &assignments;
             if parallel {
                 use rayon::prelude::*;
@@ -3282,26 +3259,35 @@ impl SaeManifoldTerm {
                     .axis_iter_mut(ndarray::Axis(0))
                     .into_par_iter()
                     .enumerate()
-                    .for_each(|(row, mut frow)| {
-                        for atom_idx in 0..k_atoms {
-                            let a = assignments_ref[row][atom_idx];
-                            if a == 0.0 {
-                                continue;
-                            }
-                            for c in 0..p {
-                                frow[c] += a * decoded_ref[[row, atom_idx, c]];
-                            }
-                        }
-                    });
+                    .for_each_init(
+                        || vec![0.0_f64; p],
+                        |dbuf, (row, mut frow)| {
+                            // #1557 — pin any faer GEMM reachable via `fill_decoded_row`.
+                            with_nested_parallel(|| {
+                                for atom_idx in 0..k_atoms {
+                                    let a = assignments_ref[row][atom_idx];
+                                    if a == 0.0 {
+                                        continue;
+                                    }
+                                    atoms[atom_idx].fill_decoded_row(row, dbuf);
+                                    for c in 0..p {
+                                        frow[c] += a * dbuf[c];
+                                    }
+                                }
+                            });
+                        },
+                    );
             } else {
+                let mut dbuf = vec![0.0_f64; p];
                 for row in 0..n {
                     for atom_idx in 0..k_atoms {
                         let a = assignments[row][atom_idx];
                         if a == 0.0 {
                             continue;
                         }
+                        atoms[atom_idx].fill_decoded_row(row, &mut dbuf);
                         for c in 0..p {
-                            fitted[[row, c]] += a * decoded[[row, atom_idx, c]];
+                            fitted[[row, c]] += a * dbuf[c];
                         }
                     }
                 }
@@ -3332,11 +3318,12 @@ impl SaeManifoldTerm {
             // the blocks are summed; the chunks fan across the pool under the
             // same gate every other row pass uses.
             let atom = &self.atoms[atom_idx];
-            let build_row = |row: usize, trow: &mut [f64], rrow: &mut [f64]| {
+            let build_row = |row: usize, trow: &mut [f64], rrow: &mut [f64], dbuf: &mut [f64]| {
                 let a = assignments[row][atom_idx];
+                atom.fill_decoded_row(row, dbuf);
                 // Partial residual e_{n,k} = z_n − (fitted − a_k decoded_k).
                 for c in 0..p {
-                    let e = target[[row, c]] - fitted[[row, c]] + a * decoded[[row, atom_idx, c]];
+                    let e = target[[row, c]] - fitted[[row, c]] + a * dbuf[c];
                     trow[c] = a * e;
                 }
                 // In-span coordinate ĉ_{n,k} = Φ_k(t_n)·C_k ∈ ℝ^r.
@@ -3352,13 +3339,17 @@ impl SaeManifoldTerm {
                 let width = rows.len();
                 let mut targets = Array2::<f64>::zeros((width, p));
                 let mut rcoords = Array2::<f64>::zeros((width, r));
-                for (local, row) in rows.enumerate() {
-                    let mut trow = targets.row_mut(local);
-                    let trow = trow.as_slice_mut().expect("contiguous targets row");
-                    let mut rrow = rcoords.row_mut(local);
-                    let rrow = rrow.as_slice_mut().expect("contiguous rcoords row");
-                    build_row(row, trow, rrow);
-                }
+                let mut dbuf = vec![0.0_f64; p];
+                // #1557 — pin any faer GEMM reachable via `fill_decoded_row`.
+                with_nested_parallel(|| {
+                    for (local, row) in rows.enumerate() {
+                        let mut trow = targets.row_mut(local);
+                        let trow = trow.as_slice_mut().expect("contiguous targets row");
+                        let mut rrow = rcoords.row_mut(local);
+                        let rrow = rrow.as_slice_mut().expect("contiguous rcoords row");
+                        build_row(row, trow, rrow, dbuf.as_mut_slice());
+                    }
+                });
                 gam_linalg::faer_ndarray::fast_atb(&targets, &rcoords)
             };
             let chunk_rows = SAE_LOSS_PARALLEL_ROW_MIN.max(1);
