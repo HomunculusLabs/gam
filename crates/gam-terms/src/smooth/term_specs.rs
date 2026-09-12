@@ -2859,7 +2859,7 @@ pub struct SpatialLogKappaCoords {
 /// computing. The lower end consumes the `.0` element of
 /// `spatial_term_psi_bounds`; the upper end consumes `.1`.
 #[derive(Clone, Copy)]
-pub enum AnisoBoundEnd {
+pub(crate) enum AnisoBoundEnd {
     Lower,
     Upper,
 }
@@ -4585,7 +4585,7 @@ pub fn validate_term_collection_finite_inputs(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct JointSpatialCenterGroupKey {
+pub(crate) struct JointSpatialCenterGroupKey {
     feature_cols: Vec<usize>,
     strategy_kind: CenterStrategyKind,
     strategy_aux: usize,
@@ -6798,7 +6798,7 @@ pub struct LocalSmoothTermBuild {
 }
 
 #[derive(Clone)]
-pub struct PcaScoresMemmapDesignOperator {
+pub(crate) struct PcaScoresMemmapDesignOperator {
     mmap: Arc<memmap2::Mmap>,
     data_offset: usize,
     nrows: usize,
