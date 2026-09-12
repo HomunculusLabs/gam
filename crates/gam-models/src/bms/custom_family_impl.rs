@@ -3888,45 +3888,6 @@ impl crate::marginal_slope_shared::MarginalSlopePsiFamily
         Ok(Some(results))
     }
 
-    fn psi_hessian_all_beta_axes_contractions(
-        &self,
-        kernels: &dyn Fn() -> Vec<Array2<f64>>,
-        mixed_weights: &[Array2<f64>],
-    ) -> Result<Option<Vec<(Array2<f64>, Array1<f64>)>>, String> {
-        // The same domain as the rigid all-beta-axes sweep: every axis a design
-        // derivative, on a rigid link.
-        let total = self.hyper_layout.len();
-        if total == 0
-            || self.hyper_layout.family_axis_count() != 0
-            || self.family.effective_flex_active(&self.block_states)?
-        {
-            return Ok(None);
-        }
-        let mut axes: Vec<PsiAxisSpec> = Vec::with_capacity(total);
-        for psi_index in 0..total {
-            let Some((block_idx, local_idx)) =
-                psi_derivative_location(self.hyper_layout.design_derivative_blocks(), psi_index)
-            else {
-                return Ok(None);
-            };
-            axes.push(self.family.resolve_psi_axis_spec(
-                self.hyper_layout.design_derivative_blocks(),
-                block_idx,
-                local_idx,
-            )?);
-        }
-        self.family
-            .rigid_psi_hessian_all_beta_axes_contractions(
-                &self.block_states,
-                &axes,
-                &self.cache,
-                &self.options,
-                &kernels(),
-                mixed_weights,
-            )
-            .map(Some)
-    }
-
     fn both_sigma_aux_second_order(&self, psi_i: usize, psi_j: usize) -> bool {
         self.hyper_layout.family_axis(psi_i) == Some(0)
             && self.hyper_layout.family_axis(psi_j) == Some(0)
