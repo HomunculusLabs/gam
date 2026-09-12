@@ -2267,5 +2267,27 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): corpus::ledger_store and corpus::object_store have no consumer outside their own files; rustc reported their items never used once narrowed, so the modules and their public functions are deleted.",
     "evidence": "At d2968d715, git grep -n -w finds every public function of ledger_store.rs and object_store.rs called only inside those files, and pool check 545684 reported them never used after narrowing. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "2a8cdc76235bcf0818658e44626c90992e29c728",
+    "removed": {
+      "crates/gam-terms/src/grid_spline_2d.rs::axis_basis_at": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::build": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::build_multi": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::cell_widths": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::fit_at": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::fit_reml": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::from_state": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::lower_corner": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::num_coeffs": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::num_responses": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::num_rows": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::penalty_value": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::posterior": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::predict": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::to_state": 1
+    },
+    "reason": "prune-api-b product-use sweep (#2899) and #2829 retirement, per api2829. The public methods of the unused 2-D grid spline engine (build, build_multi, num_coeffs, lower_corner, cell_widths, num_rows, num_responses, penalty_value, fit_at, fit_reml, posterior, to_state, from_state, predict) and axis_basis_at are removed with the engine; cholesky_logdet and chol_solve, which gam-solve residual_cascade.rs imports, stay.",
+    "evidence": "scripts/public_api_census.py over probe commit 385f0b1f2 on base d2968d715 (MSI acn112, python3.12; sliceI.census.out) reports exactly these fifteen crates/gam-terms/src/grid_spline_2d.rs identities, one declaration each. Seven are #2829 restored-in-place rows relabeled retired-no-product-user in docs/public-api-2829-disposition.tsv in the same commit."
   }
 ]

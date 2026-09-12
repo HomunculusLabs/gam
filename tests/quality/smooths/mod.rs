@@ -11,7 +11,6 @@ mod quality_vs_mgcv_duchon_regimes;
 mod quality_vs_mgcv_duchon_smooth;
 mod quality_vs_mgcv_factor_smooth_fs;
 mod quality_vs_mgcv_factor_smooth_sz;
-mod quality_vs_mgcv_grid_spline_2d_truth_recovery;
 mod quality_vs_mgcv_matern_smooth;
 mod quality_vs_mgcv_matern_varying_nu;
 mod quality_vs_mgcv_negbin_estimated_theta_smooth;
