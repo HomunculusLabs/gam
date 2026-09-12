@@ -3594,6 +3594,176 @@ fn atom_functional_report(fit: &AtomInnerFit) -> AtomFunctionalReport {
     }
 }
 
+/// #1103 Any-n-valid structure evidence that one atom's inner smooth is
+/// non-constant, via the split-likelihood-ratio e-value.
+///
+/// The inner decoder smooth is the Gaussian-identity penalized WLS fit
+/// `a_ik · Φ_k(t)ᵀ β_{k,j}` with dispersion `φ = `[`AtomInnerFit::dispersion`],
+/// working response `z_i` reconstructed from the captured per-row scores. H0 is
+/// "the smooth is constant": only the intercept column 0 is free.
+///
+/// We compute the universal-inference e-value the atom-birth gate
+/// ([`gam_terms::inference::structure_evidence::split_likelihood_log_e_value`]) uses:
+///
+/// * Split the active rows deterministically into an ESTIMATION fold (even
+///   index) and an EVALUATION fold (odd index).
+/// * On the estimation fold, fit the penalized smooth (the alternative) by
+///   `β̂ = (ΦᵀWΦ + S)⁻¹ ΦᵀW z` — any fitter is admissible; zero conditions.
+/// * On the evaluation fold, score the Gaussian log-likelihood under that
+///   prefit alternative, and the SUPREMUM of the evaluation-fold log-likelihood
+///   over the null class (the constant fit = weighted-mean response refit on the
+///   eval fold — the honest constrained sup on D₀).
+/// * `log E = ℓ_alt(D₀) − sup_{H0} ℓ(D₀)`, with `E_{H0}[E] ≤ 1` exactly.
+///
+/// The dispersion `φ` is held fixed at the fitted reconstruction dispersion in
+/// both log-likelihoods so it cancels structurally and the e-value isolates the
+/// mean-curvature evidence. Returns `None` when the design has no curvature
+/// column (`M_k ≤ 1`), either fold is empty, or the inner Gram is not SPD.
+fn atom_smooth_significance(fit: &AtomInnerFit) -> Option<AtomSmoothSignificance> {
+    let m = fit.design.ncols();
+    if m <= 1 || fit.beta.len() != m {
+        // No curvature column: the constant null IS the full model — there is no
+        // non-constant alternative to earn an e-value.
+        return None;
+    }
+    let n = fit.design.nrows();
+    if n == 0 || fit.weights.len() != n || fit.row_scores.nrows() != n {
+        return None;
+    }
+    let phi = if fit.dispersion.is_finite() && fit.dispersion > 0.0 {
+        fit.dispersion
+    } else {
+        return None;
+    };
+
+    // Per-row working response z_i = μ̂_i + r_i, reconstructing the scalar
+    // residual r_i from the captured score projected onto the design row
+    // (s_iᵀ Φ_i = −w_i r_i ‖Φ_i‖² / φ ⇒ r_i). Same reconstruction the previous
+    // deviance path used; here it feeds the two folds' likelihoods.
+    let mut z = Array1::<f64>::zeros(n);
+    for i in 0..n {
+        let mu_hat = fit.design.row(i).dot(&fit.beta);
+        let w_i = fit.weights[i];
+        let phi_row = fit.design.row(i);
+        let phi_norm_sq = phi_row.dot(&phi_row);
+        let r_i = if w_i > 0.0 && phi_norm_sq > 0.0 {
+            let s_dot_phi = fit.row_scores.row(i).dot(&phi_row);
+            -phi * s_dot_phi / (w_i * phi_norm_sq)
+        } else {
+            0.0
+        };
+        z[i] = mu_hat + r_i;
+    }
+
+    // Deterministic estimation/evaluation split by row parity.
+    let est: Vec<usize> = (0..n).filter(|i| i % 2 == 0).collect();
+    let eval: Vec<usize> = (0..n).filter(|i| i % 2 == 1).collect();
+    if est.is_empty() || eval.is_empty() {
+        return None;
+    }
+
+    // Penalized smooth fit on the estimation fold: β̂ = (ΦᵀWΦ + S)⁻¹ ΦᵀW z.
+    let mut a_gram = fit.penalty.clone();
+    let mut b = Array1::<f64>::zeros(m);
+    for &i in &est {
+        let w_i = fit.weights[i];
+        if !(w_i > 0.0) {
+            continue;
+        }
+        let row = fit.design.row(i);
+        for r in 0..m {
+            let xr = row[r];
+            if xr == 0.0 {
+                continue;
+            }
+            b[r] += w_i * xr * z[i];
+            for c in 0..m {
+                a_gram[[r, c]] += w_i * xr * row[c];
+            }
+        }
+    }
+    let beta_alt = a_gram.cholesky(Side::Lower).ok()?.solvevec(&b);
+
+    // Null sup on the EVALUATION fold: the weighted-mean response (the constant
+    // fit's MLE on D₀, the honest constrained sup over the null class).
+    let mut eval_mass = 0.0_f64;
+    let mut eval_wz = 0.0_f64;
+    for &i in &eval {
+        let w_i = fit.weights[i];
+        eval_mass += w_i;
+        eval_wz += w_i * z[i];
+    }
+    if !(eval_mass > 0.0) {
+        return None;
+    }
+    let null_mean = eval_wz / eval_mass;
+
+    // Gaussian log-likelihoods on the evaluation fold at fixed dispersion φ;
+    // the −½ log(2πφ) and weight-log terms are identical under both models, so
+    // log E = −(½/φ) [ Σ w(z − μ_alt)² − Σ w(z − μ_null)² ].
+    let mut sse_alt = 0.0_f64;
+    let mut sse_null = 0.0_f64;
+    for &i in &eval {
+        let w_i = fit.weights[i];
+        let mu_alt = fit.design.row(i).dot(&beta_alt);
+        let r_alt = z[i] - mu_alt;
+        let r_null = z[i] - null_mean;
+        sse_alt += w_i * r_alt * r_alt;
+        sse_null += w_i * r_null * r_null;
+    }
+    let log_lik_alt = -0.5 * sse_alt / phi;
+    let log_lik_null_sup = -0.5 * sse_null / phi;
+    let log_e = gam_terms::inference::structure_evidence::split_likelihood_log_e_value(
+        log_lik_alt,
+        log_lik_null_sup,
+    )
+    .ok()?;
+    if !log_e.is_finite() {
+        return None;
+    }
+
+    Some(AtomSmoothSignificance {
+        log_e_nonconstant: Some(log_e),
+    })
+}
+
+/// Assemble the post-PIRLS inference reports for every atom, reusing the
+/// per-atom [`AtomInnerFit`] harvested at fit time.
+///
+/// * #1097 penalty-debiased functional POINT summaries and the #1103 split-LRT
+///   smooth-structure e-value are computed from the captured inner-decoder
+///   smooth (design, penalized Hessian, row scores, roughness Gram) — they need
+///   only the fixed fitted snapshot.
+/// * The #1099 per-atom curvature *confidence interval* was removed under #1115:
+///   a sup-norm curvature BOUND is not an estimand with a profiled criterion,
+///   and its delta-method SE conditioned on generated latent coordinates as if
+///   known. The plug-in curvature point estimate survives on
+///   [`crate::manifold::CertificateInputs::per_atom_kappa_hat`] (the
+///   #1008 empirical curved-dictionary report), not on this report.
+pub(crate) fn atom_inference_reports(model: &FittedSaeManifold) -> Vec<AtomInferenceReport> {
+    model
+        .atoms
+        .iter()
+        .enumerate()
+        .map(|(atom_index, atom)| {
+            let (functionals, smooth_significance) = match &atom.inner_fit {
+                Some(fit) => (
+                    Some(atom_functional_report(fit)),
+                    atom_smooth_significance(fit),
+                ),
+                None => (None, None),
+            };
+            AtomInferenceReport {
+                atom_index,
+                atom_name: atom.name.clone(),
+                functionals,
+                smooth_significance,
+            }
+        })
+        .collect()
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
