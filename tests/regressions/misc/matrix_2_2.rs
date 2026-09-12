@@ -1,6 +1,5 @@
 use faer::{Mat, Side};
 use gam::linalg::faer_ndarray::factorize_symmetricwith_fallback;
-use gam::linalg::low_rank_weight::LowRankWeight;
 use gam::linalg::matrix::{ConditionedDesign, DenseDesignMatrix, DesignMatrix, LinearOperator};
 use ndarray::array;
 
@@ -40,23 +39,5 @@ fn conditioned_design_operator_matches_explicit_column_conditioning_for_matvec()
     assert!(
         err <= 1e-12,
         "ConditionedDesignOperator matvec should match explicit lazy column rescaling"
-    );
-}
-
-#[test]
-fn low_rank_weight_assembly_satisfies_d_plus_uu_t_identity() {
-    let d = array![1.0, 2.0, 0.5, 3.0];
-    let u = array![[1.0, 0.0], [0.5, 1.0], [-1.0, 2.0], [0.0, -0.5]];
-    let v = array![0.2, -1.5, 2.0, 0.3];
-    let w = LowRankWeight::symmetric(d.view(), u.view())
-        .expect("valid low-rank symmetric weight should construct");
-    let got = w.apply(v.view());
-    let expected = &(&d * &v) + &u.dot(&u.t().dot(&v));
-    let err = (&got - &expected)
-        .iter()
-        .fold(0.0_f64, |m, z| m.max(z.abs()));
-    assert!(
-        err <= 1e-12,
-        "low-rank weight assembly should satisfy (D + U U^T)v = Dv + U(U^T v)"
     );
 }

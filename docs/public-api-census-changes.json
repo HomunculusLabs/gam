@@ -2085,5 +2085,18 @@
     },
     "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. No product uses these restored-in-place gam-solve, gam-sae and gam-terms identities; several lost their last caller to earlier #2829 deletions. The gam-solve identities are cross_node owner_rank, pirls state solve_weights_psd, the row_sampling_measure coreset and designed-subsample family, sensitivity case_deletion, streaming_border submit_chunk_gram and reml atoms fill_direction. The gam-sae identities are designed_sampling_mandatory, corpus_measure, finite_set_rank_charge, reconstruct_measure_valued_rows, score_block_cpu and score_block_device. In gam-terms, the periodic Duchon workspace builders go.",
     "evidence": "restored_consumers_2829.py at 3693c2c2c (MSI job 539356, /scratch.global/sauer354/pool/api2829/consumers.3693c2c2c769830ff8f2769e77061d353ff01697.rows.tsv) scores each deleted TSV identity as unreferenced. At the base, git grep -w over crates, src, tests, examples, python and gamfit finds no call to any of them, only doc prose. The two production ThetaDirection constructions in reml/jeffreys_subspace.rs set beta_dot and h_dot_total to None and call frozen_d1, so fill_direction had no production caller. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 541389, /scratch.global/sauer354/pool/api2829/validate.541389.log)."
+  },
+  {
+    "base": "0bf5b572b5a4d6fb95b30aefcf5da3387fa92bee",
+    "removed": {
+      "crates/gam-linalg/src/low_rank_weight.rs::apply": 1,
+      "crates/gam-linalg/src/low_rank_weight.rs::is_rank_zero": 1,
+      "crates/gam-linalg/src/low_rank_weight.rs::new": 1,
+      "crates/gam-linalg/src/low_rank_weight.rs::nrows": 1,
+      "crates/gam-linalg/src/low_rank_weight.rs::rank": 1,
+      "crates/gam-linalg/src/low_rank_weight.rs::symmetric": 1
+    },
+    "reason": "#2899 group-A sweep: the LowRankWeight methods new, symmetric, nrows, rank, is_rank_zero and apply are deleted with the gam_linalg::low_rank_weight module. No production code in any crate uses the type, and #2829 retired its assembly consumers.",
+    "evidence": "public_api_census.py --base 54a8ffdc8 --head b6a5f630b reports exactly these six identities (/scratch.global/sauer354/pool/prune-api-a/slice18.census.json)."
   }
 ]
