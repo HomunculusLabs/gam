@@ -1122,6 +1122,75 @@ impl SaeSupportSparseTerm {
         }
     }
 
+    /// #2576 — the share of a cycle's coordinate motion on one-dimensional
+    /// Euclidean atoms that is an affine reparameterization `Δt = a + b·t` of each
+    /// atom's own coordinates. For a polynomial decoder that is the translation
+    /// and scale orbit: the counter-transformed decoder leaves the data fit
+    /// unchanged, so only the ARD prior and the coefficient ridge carry curvature
+    /// along it. `start` and `residual` are the cycle's compact coordinate snapshot
+    /// and its wrapped displacement. Returns the displacement-weighted share over
+    /// those atoms and, for the atom with the largest displacement energy, its
+    /// index, its own share and that energy.
+    fn euclidean_affine_motion_share(
+        &self,
+        start: &[f64],
+        residual: &[f64],
+    ) -> (f64, Option<(usize, f64, f64)>) {
+        // Per atom: rows, Σt, Σt², Σd, Σt·d, Σd².
+        let mut moments = vec![[0.0_f64; 6]; self.k_atoms()];
+        let mut cursor = 0usize;
+        for row in 0..self.n_obs() {
+            for &atom in self.assignment.support_indices(row) {
+                let periods = self.atom_axis_periods(atom as usize);
+                let line = matches!(periods, [None]);
+                for _ in periods {
+                    if line {
+                        let (t, d) = (start[cursor], residual[cursor]);
+                        let entry = &mut moments[atom as usize];
+                        entry[0] += 1.0;
+                        entry[1] += t;
+                        entry[2] += t * t;
+                        entry[3] += d;
+                        entry[4] += t * d;
+                        entry[5] += d * d;
+                    }
+                    cursor += 1;
+                }
+            }
+        }
+        let mut explained_total = 0.0_f64;
+        let mut energy_total = 0.0_f64;
+        let mut binding: Option<(usize, f64, f64)> = None;
+        for (atom, [count, sum_t, sum_tt, sum_d, sum_td, sum_dd]) in
+            moments.into_iter().enumerate()
+        {
+            // A line through two rows fits them exactly, so only atoms with at
+            // least three rows say anything about the motion's shape.
+            if count < 3.0 || !(sum_dd > 0.0) {
+                continue;
+            }
+            let spread = sum_tt - sum_t * sum_t / count;
+            let covariance = sum_td - sum_t * sum_d / count;
+            // Least squares of d on [1, t]: the mean term plus the centred slope term.
+            let mut explained = sum_d * sum_d / count;
+            if spread > 0.0 {
+                explained += covariance * covariance / spread;
+            }
+            let explained = explained.min(sum_dd);
+            explained_total += explained;
+            energy_total += sum_dd;
+            if binding.is_none_or(|(_, _, energy)| sum_dd > energy) {
+                binding = Some((atom, explained / sum_dd, sum_dd));
+            }
+        }
+        let share = if energy_total > 0.0 {
+            explained_total / energy_total
+        } else {
+            0.0
+        };
+        (share, binding)
+    }
+
     pub fn n_obs(&self) -> usize {
         self.assignment.n_obs()
     }
@@ -6633,6 +6702,20 @@ impl SaeSupportSparseTerm {
                 accelerator.history_len(),
                 joint_accepted
             );
+            // #2576: whether the coupled phase's terminal motion lies along the
+            // Euclidean atoms' affine gauge orbits.
+            if joint_armed && log::log_enabled!(log::Level::Info) {
+                match self.euclidean_affine_motion_share(&cycle_start, &cycle_residual) {
+                    (share, Some((atom, atom_share, energy))) => log::info!(
+                        "support fixed-point cycle {iteration}: Euclidean line coordinate motion \
+                         affine share={share:.3}; largest-motion atom {atom} share={atom_share:.3} \
+                         energy={energy:.3e}"
+                    ),
+                    (_, None) => log::info!(
+                        "support fixed-point cycle {iteration}: no Euclidean line atom moved"
+                    ),
+                }
+            }
         }
         let stationarity = self.raw_stationarity(target, lambda_smooth, ard_precisions)?;
         let objective = self.penalized_objective(target, lambda_smooth, ard_precisions)?;
