@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """App C causal half — synthetic patched-reconstruction demo for the spike-level
-edit op (``gamfit.torch.interventions``), validating the *mechanism* end to end
-without a model.
+edit op (defined below), validating the *mechanism* end to end without a model.
 
 The claim under test: removing ONE point mass from a superposed circle code edits
 exactly that instance and leaves the other instance(s) untouched — a per-instance
@@ -14,8 +13,8 @@ Construction
    circle and synthesize its ``2H`` block code ``z``.
 2. Lift it into a ``p``-space with a random orthonormal-ish decoder ``D`` (2H×p):
    ``x = z · D`` — the "activation" a token carrying both instances would show.
-3. Build ``Δx`` for ``remove(spike 0)`` via
-   :func:`gamfit.torch.interventions.spike_edit_delta_x` and patch ``x' = x + Δx``.
+3. Build ``Δx`` for ``remove(spike 0)`` via :func:`spike_edit_delta_x` and patch
+   ``x' = x + Δx``.
 4. Re-encode ``x'`` to its harmonic code and check: it equals the single-instance
    code ``a2·u(t2)`` (the surviving instance) to machine precision, while the
    removed instance's content is gone.
@@ -31,15 +30,118 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
-from gamfit.torch.interventions import (
-    MeasureSpikeEdit,
-    harmonic_code_features,
-    spike_edit_delta_x,
-    synthesize_measure_code,
-)
+
+# The spike-level edit op. It is analysis math for this demo, so it lives here
+# rather than in the production gamfit package.
+
+
+@dataclass(frozen=True)
+class MeasureSpikeEdit:
+    """A single-spike edit of a recovered circle measure.
+
+    Attributes
+    ----------
+    kind
+        ``"remove"`` (delete the spike), ``"move"`` (retune its position to
+        ``new_t``), or ``"scale"`` (multiply its amplitude by ``factor``).
+    spike_index
+        Index into the row's spike list (positions sorted ascending, matching
+        the Rust readout's ordering).
+    new_t
+        Target circle position for ``"move"`` (in ``[0, 1)``); ignored otherwise.
+    factor
+        Amplitude multiplier for ``"scale"`` (``0`` reproduces ``"remove"``);
+        ignored otherwise.
+    """
+
+    kind: str
+    spike_index: int
+    new_t: float | None = None
+    factor: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("remove", "move", "scale"):
+            raise ValueError(f"kind must be remove|move|scale; got {self.kind!r}")
+        if self.spike_index < 0:
+            raise ValueError("spike_index must be non-negative")
+        if self.kind == "move" and self.new_t is None:
+            raise ValueError("move edit requires new_t")
+        if self.kind == "scale" and self.factor is None:
+            raise ValueError("scale edit requires factor")
+
+
+def harmonic_code_features(t: Any, n_harmonics: int) -> np.ndarray:
+    """Harmonic frame row(s) ``u(t) = [cos 2πt, sin 2πt, ..., cos 2πHt,
+    sin 2πHt]`` for harmonics ``1..H``. Scalar ``t`` returns ``(2H,)``; a ``(k,)``
+    array returns ``(k, 2H)``. This is the exact convention
+    ``gam_sae::sparse_dict::coordinate`` uses for the ``(c_h, s_h)`` code."""
+    t_arr = np.asarray(t, dtype=np.float64)
+    scalar = t_arr.ndim == 0
+    t_col = np.atleast_1d(t_arr)
+    cols = []
+    for h in range(1, n_harmonics + 1):
+        cols.append(np.cos(2.0 * np.pi * h * t_col))
+        cols.append(np.sin(2.0 * np.pi * h * t_col))
+    feats = np.stack(cols, axis=1)  # (k, 2H)
+    return feats[0] if scalar else feats
+
+
+def synthesize_measure_code(spikes: Any, n_harmonics: int) -> np.ndarray:
+    """Re-synthesize the ``2H`` within-block code ``z = Σ_j a_j u(t_j)`` from a
+    list of ``(amplitude, t)`` point masses. The exact forward map super-
+    resolution inverts; an empty measure yields the zero code."""
+    z = np.zeros(2 * n_harmonics, dtype=np.float64)
+    for amplitude, t in spikes:
+        z += float(amplitude) * harmonic_code_features(float(t), n_harmonics)
+    return z
+
+
+def apply_spike_edit(spikes: Any, edit: MeasureSpikeEdit) -> list[tuple[float, float]]:
+    """Return a new ``(amplitude, t)`` measure with ``edit`` applied to one spike.
+    The input is left unmodified; ``"remove"`` drops the spike, ``"move"`` retunes
+    its position, ``"scale"`` multiplies its amplitude."""
+    out = [(float(a), float(t)) for a, t in spikes]
+    if edit.spike_index >= len(out):
+        raise IndexError(
+            f"spike_index {edit.spike_index} out of range for {len(out)} spikes"
+        )
+    a, t = out[edit.spike_index]
+    if edit.kind == "remove":
+        del out[edit.spike_index]
+    elif edit.kind == "move":
+        out[edit.spike_index] = (a, float(edit.new_t) % 1.0)
+    else:  # scale
+        out[edit.spike_index] = (a * float(edit.factor), t)
+    return out
+
+
+def spike_edit_code_delta(spikes: Any, edit: MeasureSpikeEdit, n_harmonics: int) -> np.ndarray:
+    """The ``2H`` change ``Δz = synth(edited) − synth(original)`` for a single-
+    spike edit. For ``"remove"`` this is exactly ``−a_j u(t_j)`` — the isolated
+    contribution of the removed instance, nothing else."""
+    before = synthesize_measure_code(spikes, n_harmonics)
+    after = synthesize_measure_code(apply_spike_edit(spikes, edit), n_harmonics)
+    return after - before
+
+
+def spike_edit_delta_x(decoder: Any, spikes: Any, edit: MeasureSpikeEdit) -> np.ndarray:
+    """Lift a single-spike code edit into the atom's ambient p-space:
+    ``Δx = Δz · D`` where ``decoder`` is the ``2H × p`` block decoder (code →
+    activation). The returned ``(p,)`` vector is the p-space move that removes /
+    moves / rescales exactly one instance of the circle feature."""
+    D = np.asarray(decoder, dtype=np.float64)
+    if D.ndim != 2:
+        raise ValueError(f"decoder must be 2-D (2H x p); got shape {D.shape}")
+    n_harmonics = D.shape[0] // 2
+    if 2 * n_harmonics != D.shape[0]:
+        raise ValueError(f"decoder rows {D.shape[0]} must be even (2H)")
+    delta_z = spike_edit_code_delta(spikes, edit, n_harmonics)
+    return delta_z @ D
 
 
 def random_decoder(n_harmonics: int, p: int, seed: int) -> np.ndarray:
