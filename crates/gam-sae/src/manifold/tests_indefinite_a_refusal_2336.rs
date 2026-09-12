@@ -340,63 +340,125 @@ fn priced_ard_direct_gradient_matches_fixed_state_value_2434() {
     );
 }
 
-/// The saddle specimen both halves of the gate must use: `(residual_scale,
-/// log λ_sparse)` for `obb_patchd_fixture`. Named once because the gate
-/// builds the fixture twice -- refusal, then outer-eval pricing -- and two
-/// literals silently drifted apart, leaving the pricing half asserting
-/// against a state that was no longer indefinite.
+/// The specimen of `refused_exact_a_saddle_is_descended_to_a_priced_root_2080`:
+/// `(residual_scale, log λ_sparse)` for `obb_patchd_fixture`. Named once because the
+/// gate builds the fixture three times (the refused root, the criterion, the outer
+/// eval), and two literals once drifted apart silently.
+///
+/// SPECIMEN, AND WHY THIS ONE. Before 1c456287c the criterion refused wherever the
+/// converged root did. A scan of `obb_patchd_fixture` over
+/// `scale ∈ {0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0}` ×
+/// `log λ_sparse ∈ {−8, −6, −4, −2, 0}` found exactly four refusing cells:
+/// `(0.01, −6)`, `(0.2, −2)`, `(1.0, −6)` and `(1.0, −4)`. `scale = 1.0` is the only
+/// place where two adjacent lifts both refuse, so the specimen sits there, with margin.
 const GENUINE_SADDLE_SPECIMEN: (f64, f64) = (1.0, -6.0);
 
-/// #2336 refusal companion — a GENUINE saddle (indefiniteness NOT attributable to
-/// the bounded ARD concave-clamp: `λ+e_v < −floor`) must STILL return the typed
-/// `IndefiniteObservedInformation` refusal, and the outer eval must price it as
-/// `+inf` infeasible (not a fatal abort). Guards the
-/// "refuse ⟺ genuinely-indefinite" half of the value-side contract; the price
-/// half is `e_attributable_ard_saddle_prices_finite_2336`.
+/// #2080 — a refused exact-A saddle is descended, not handed to the outer search
+/// as `+inf`.
 ///
-/// SPECIMEN, AND WHY THIS ONE. The scale is a MEASURED property of the fixture,
-/// not a free parameter, and the previous one stopped holding: at
-/// `(scale 0.02, log λ_sparse −6.0)` the criterion now returns `Ok(38.509663)`,
-/// so the gate was asserting a refusal against a state that is no longer a
-/// saddle. Re-scanning `obb_patchd_fixture` over
-/// `scale ∈ {0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0}` ×
-/// `log λ_sparse ∈ {−8, −6, −4, −2, 0}` — 50 cells — exactly four still refuse:
+/// The specimen's converged inner root is an exact-A saddle that the ARD concave
+/// clamp does not explain (`λ + vᵀEv < −floor`), so
+/// `exact_observed_information_log_dets` refuses it. Since 1c456287c the criterion
+/// does not stop there. It minimizes the penalized objective along each refused basin
+/// direction inside the same gate-frozen evaluation, commits only a decrease above the
+/// material floor, and converges again. This gate pins three things:
 ///
-/// ```text
-/// (0.01, −6)   (0.2, −2)   (1.0, −6)   (1.0, −4)
-/// ```
+/// * the converged root is refused, so the gate is not vacuous;
+/// * the criterion returns a finite value at a state whose exact `A` prices and whose
+///   penalized objective is strictly below the refused root's;
+/// * the outer evaluation at the same ρ is finite.
 ///
-/// They are isolated points, not a region, so the choice matters: `scale = 1.0`
-/// is the ONLY place two adjacent lifts both refuse, which is why the specimen
-/// moved there rather than to the nearer `(0.01, −6)`. A neighbour gives the
-/// gate margin against the next drift instead of parking it on a knife edge.
-///
-/// The refusal itself is what certifies genuineness — the raising site adds the
-/// clamp curvature back (`basin = λ + e_v`) and only refuses when `basin <
-/// −floor`, so an `IndefiniteObservedInformation` IS the E-non-attributable
-/// case by construction.
+/// The price half of the value-side contract is
+/// `e_attributable_ard_saddle_prices_finite_2336`.
 #[test]
-fn genuine_saddle_is_infeasible_probe_not_fatal_2336() {
+fn refused_exact_a_saddle_is_descended_to_a_priced_root_2080() {
+    let inner_max_iter = 40usize;
+    let (learning_rate, ridge_ext_coord, ridge_beta) = (0.4, 1.0e-6, 1.0e-6);
+
+    // The refused root: the criterion's own initial fit and converge, without its
+    // descent.
+    let (mut root, target, rho) = super::tests_logdet_adjoint_780::obb_patchd_fixture(
+        GENUINE_SADDLE_SPECIMEN.0,
+        GENUINE_SADDLE_SPECIMEN.1,
+    );
+    let mut rho_fixed = rho.clone();
+    let initial = root
+        .run_joint_fit_arrow_schur_for_quasi_laplace(
+            target.view(),
+            &mut rho_fixed,
+            None,
+            inner_max_iter,
+            learning_rate,
+            ridge_ext_coord,
+            ridge_beta,
+        )
+        .expect("initial joint fit of the specimen");
+    let mut loss = initial.loss;
+    let mut criterion_fixed_point = initial.fixed_point;
+    let options = ArrowSolveOptions::direct()
+        .with_gpu_policy(root.gpu_policy)
+        .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
+        .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+    let root_cache = root
+        .converge_inner_for_undamped_logdet(
+            target.view(),
+            &rho,
+            &mut rho_fixed,
+            None,
+            inner_max_iter,
+            learning_rate,
+            ridge_ext_coord,
+            ridge_beta,
+            &mut loss,
+            &mut criterion_fixed_point,
+            &options,
+            true,
+        )
+        .expect("converge the specimen to its inner root");
+    let root_verdict = root.exact_observed_information_log_dets(&rho, target.view(), &root_cache);
+    assert!(
+        matches!(
+            root_verdict,
+            Err(SaeCriterionError::IndefiniteObservedInformation { block }) if block == "joint"
+        ),
+        "the specimen's converged root must be a refused exact-A saddle, or this gate proves \
+         nothing; got: {root_verdict:?}"
+    );
+    let root_objective = root
+        .penalized_objective_total(target.view(), &rho, None, 1.0)
+        .expect("penalized objective at the refused root");
+
     let (mut term, target, rho) = super::tests_logdet_adjoint_780::obb_patchd_fixture(
         GENUINE_SADDLE_SPECIMEN.0,
         GENUINE_SADDLE_SPECIMEN.1,
     );
-    let refusal = term.penalized_quasi_laplace_criterion_with_cache(
-        target.view(),
-        &rho,
-        None,
-        40,
-        0.4,
-        1.0e-6,
-        1.0e-6,
-    );
+    let (value, _loss, cache) = term
+        .penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            &rho,
+            None,
+            inner_max_iter,
+            learning_rate,
+            ridge_ext_coord,
+            ridge_beta,
+        )
+        .expect("the criterion must descend the refused saddle to a priced root");
     assert!(
-        matches!(
-            refusal,
-            Err(SaeCriterionError::IndefiniteObservedInformation { block }) if block == "joint"
-        ),
-        "the genuine (non-E-attributable) saddle specimen must refuse on the joint block; got: {:?}",
-        refusal.map(|(value, _, _)| value)
+        value.is_finite(),
+        "the descended criterion must be finite, got {value}"
+    );
+    let priced = term.exact_observed_information_log_dets(&rho, target.view(), &cache);
+    assert!(
+        priced.is_ok(),
+        "the returned root's exact A must price; got: {priced:?}"
+    );
+    let descended_objective = term
+        .penalized_objective_total(target.view(), &rho, None, 1.0)
+        .expect("penalized objective at the descended root");
+    assert!(
+        descended_objective < root_objective,
+        "the descended root must lie strictly below the refused one: descended \
+         {descended_objective:.12e}, refused {root_objective:.12e}"
     );
 
     let (term, target, rho) = super::tests_logdet_adjoint_780::obb_patchd_fixture(
@@ -404,18 +466,23 @@ fn genuine_saddle_is_infeasible_probe_not_fatal_2336() {
         GENUINE_SADDLE_SPECIMEN.1,
     );
     let rho_flat = rho.to_flat();
-    let mut objective =
-        SaeManifoldOuterObjective::new(term, target, None, rho, 40, 0.4, 1.0e-6, 1.0e-6);
+    let mut objective = SaeManifoldOuterObjective::new(
+        term,
+        target,
+        None,
+        rho,
+        inner_max_iter,
+        learning_rate,
+        ridge_ext_coord,
+        ridge_beta,
+    );
     match objective.eval(&rho_flat) {
         Ok(evaluation) => assert!(
-            evaluation.cost.is_infinite() && evaluation.cost.is_sign_positive(),
-            "a genuine saddle-ρ must price as +inf infeasible, got cost={}",
+            evaluation.cost.is_finite(),
+            "the outer eval must price the descended root finitely, got cost={}",
             evaluation.cost
         ),
-        Err(err) => panic!(
-            "#2336: a genuine indefinite exact A must be an INFEASIBLE probe the outer solver \
-             can backtrack from, not a fatal abort; got: {err}"
-        ),
+        Err(err) => panic!("#2080: the outer eval at the descended specimen failed: {err}"),
     }
 }
 
