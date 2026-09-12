@@ -178,6 +178,23 @@ pub(crate) enum TauTauDesignTerm {
     Implicit(HyperDesignDerivative),
 }
 
+impl TauTauDesignTerm {
+    /// This term as a dense matrix in `basis`, the frame
+    /// `build_tau_design_data_in_basis` builds its dense terms in.
+    pub(crate) fn dense_in_basis(
+        &self,
+        basis: &TauPairBasis,
+    ) -> Result<Array2<f64>, EstimationError> {
+        match (self, basis) {
+            (Self::Dense(dense), _) => Ok(dense.clone()),
+            (Self::Implicit(deriv), TauPairBasis::Original) => Ok(deriv.materialize()),
+            (Self::Implicit(deriv), TauPairBasis::Transformed { qs, free_basis_opt }) => {
+                deriv.transformed(qs.as_ref(), free_basis_opt.as_ref().as_ref())
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) enum TauDesignTerm {
     Dense(Array2<f64>),
@@ -2585,11 +2602,10 @@ impl<'a> RemlState<'a> {
             let mut dense_tau_tau: Vec<Vec<Option<Array2<f64>>>> = vec![vec![None; n_dirs]; n_dirs];
             for ii in 0..n_dirs {
                 for jj in 0..n_dirs {
-                    if let Some(t) = x_tau_tau[ii][jj].as_ref()
-                        && let TauTauDesignTerm::Dense(d) = t
-                    {
-                        dense_tau_tau[ii][jj] = Some(d.clone());
-                    }
+                    dense_tau_tau[ii][jj] = x_tau_tau[ii][jj]
+                        .as_ref()
+                        .map(|term| term.dense_in_basis(&basis))
+                        .transpose()?;
                 }
             }
             (op_opt, dense_list, dense_tau_tau)
@@ -2839,11 +2855,10 @@ impl<'a> RemlState<'a> {
             let mut dense_tau_tau: Vec<Vec<Option<Array2<f64>>>> = vec![vec![None; n_dirs]; n_dirs];
             for ii in 0..n_dirs {
                 for jj in 0..n_dirs {
-                    if let Some(t) = x_tau_tau[ii][jj].as_ref()
-                        && let TauTauDesignTerm::Dense(d) = t
-                    {
-                        dense_tau_tau[ii][jj] = Some(d.clone());
-                    }
+                    dense_tau_tau[ii][jj] = x_tau_tau[ii][jj]
+                        .as_ref()
+                        .map(|term| term.dense_in_basis(&basis))
+                        .transpose()?;
                 }
             }
             (op_opt, dense_list, dense_tau_tau)

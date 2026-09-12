@@ -1056,20 +1056,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
                 // The slab gradient lane is live for this trial (off the certified
                 // gradient sub-window, non-Gaussian, multi-ψ, …) — condition the
                 // n×k `∂X/∂ψ` slab into the inner solver's frame as before.
-                for dir in &mut hyper_dirs {
-                    let mut x_tau = dir.x_tau_dense();
-                    self.conditioning
-                        .transform_matrix_columnswith_a_inplace(&mut x_tau);
-                    dir.x_tau_original = crate::estimate::reml::HyperDesignDerivative::from(x_tau);
-                    if let Some(rows) = dir.x_tau_tau_original.as_mut() {
-                        for mat in rows.iter_mut().flatten() {
-                            let mut dense = mat.materialize();
-                            self.conditioning
-                                .transform_matrix_columnswith_a_inplace(&mut dense);
-                            *mat = crate::estimate::reml::HyperDesignDerivative::from(dense);
-                        }
-                    }
-                }
+                self.condition_hyper_dirs(&mut hyper_dirs);
             }
             return Ok(hyper_dirs);
         }
@@ -1121,20 +1108,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
             .conditioning
             .transform_linear_constraints_to_internal(linear_constraints);
 
-        for dir in &mut hyper_dirs {
-            let mut x_tau = dir.x_tau_dense();
-            self.conditioning
-                .transform_matrix_columnswith_a_inplace(&mut x_tau);
-            dir.x_tau_original = crate::estimate::reml::HyperDesignDerivative::from(x_tau);
-            if let Some(rows) = dir.x_tau_tau_original.as_mut() {
-                for mat in rows.iter_mut().flatten() {
-                    let mut dense = mat.materialize();
-                    self.conditioning
-                        .transform_matrix_columnswith_a_inplace(&mut dense);
-                    *mat = crate::estimate::reml::HyperDesignDerivative::from(dense);
-                }
-            }
-        }
+        self.condition_hyper_dirs(&mut hyper_dirs);
 
         crate::estimate::reml::RemlState::reset_surface(
             &mut self.reml_state,
@@ -1180,6 +1154,40 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
         // revision never consumes this trial's stale `S`.
         self.pending_psi_penalty = None;
         Ok(hyper_dirs)
+    }
+
+    /// Carry each direction's design derivatives into the conditioned frame the
+    /// inner solve works in.
+    ///
+    /// A second derivative whose support excludes every column the
+    /// conditioning rewrites is already in that frame, so it keeps its storage.
+    /// The ψ-ψ entries are read only by the outer-Hessian pair builders, which
+    /// multiply implicit storage in place; densifying them cost one `n × p`
+    /// materialization per ψ pair on every evaluation, gradient-only ones
+    /// included (#2735). First derivatives stay dense:
+    /// `ImplicitHyperOperator` applies the term's own operator to the active
+    /// basis without the reparametrization, so an implicit first derivative
+    /// must not reach it.
+    fn condition_hyper_dirs(&self, hyper_dirs: &mut [DirectionalHyperParam]) {
+        for dir in hyper_dirs.iter_mut() {
+            let mut x_tau = dir.x_tau_dense();
+            self.conditioning
+                .transform_matrix_columnswith_a_inplace(&mut x_tau);
+            dir.x_tau_original = crate::estimate::reml::HyperDesignDerivative::from(x_tau);
+            if let Some(rows) = dir.x_tau_tau_original.as_mut() {
+                for mat in rows.iter_mut().flatten() {
+                    if mat.column_support().is_some_and(|support| {
+                        self.conditioning.leaves_matrix_supported_on(&support)
+                    }) {
+                        continue;
+                    }
+                    let mut dense = mat.materialize();
+                    self.conditioning
+                        .transform_matrix_columnswith_a_inplace(&mut dense);
+                    *mat = crate::estimate::reml::HyperDesignDerivative::from(dense);
+                }
+            }
+        }
     }
 
     /// Install the staged frozen-W GLM first-step Gram onto the inner REML

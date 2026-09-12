@@ -4208,6 +4208,18 @@ impl HyperDesignDerivative {
         storage_dispatch!(&self.storage, b => b.uses_implicit_storage())
     }
 
+    /// The global columns this derivative can be nonzero in, or `None` for a
+    /// dense matrix, which records no support.
+    pub(crate) fn column_support(&self) -> Option<Range<usize>> {
+        match &self.storage {
+            DerivativeMatrixStorage::Dense(_) => None,
+            DerivativeMatrixStorage::Zero(_) => Some(0..0),
+            DerivativeMatrixStorage::Embedded(backend) => Some(backend.global_range.clone()),
+            DerivativeMatrixStorage::Implicit(backend) => Some(backend.global_range.clone()),
+            DerivativeMatrixStorage::LatentCoord(backend) => Some(backend.global_range.clone()),
+        }
+    }
+
     pub(crate) fn materialize(&self) -> Array2<f64> {
         storage_dispatch!(&self.storage, b => b.materialize())
     }

@@ -127,6 +127,19 @@ impl ParametricColumnConditioning {
         !self.columns.is_empty()
     }
 
+    /// Whether [`Self::transform_matrix_columnswith_a_inplace`] leaves unchanged
+    /// every matrix whose nonzero columns lie in `support`. The transform
+    /// rewrites a conditioned column `j` from column `j` and, when `mean_j` is
+    /// nonzero, the intercept column; both are zero outside `support`.
+    pub(crate) fn leaves_matrix_supported_on(&self, support: &std::ops::Range<usize>) -> bool {
+        let intercept_in_support = self
+            .intercept_idx
+            .is_some_and(|idx| support.contains(&idx));
+        self.columns
+            .iter()
+            .all(|&(j, mean, _)| !support.contains(&j) && (mean == 0.0 || !intercept_in_support))
+    }
+
     /// Return a lazily-conditioned design matrix (no materialization).
     ///
     /// Wraps `x` in a `ConditionedDesign` operator that applies per-column
