@@ -46,7 +46,6 @@ __all__ = [
     "block_orthogonality_descriptor",
     "mechanism_sparsity_descriptor",
     "GumbelTemperatureSchedule",
-    "validate_gumbel_schedule_fields",
 ]
 
 
@@ -293,38 +292,6 @@ def mechanism_sparsity_descriptor(
 # ---------------------------------------------------------------------------
 
 
-def validate_gumbel_schedule_fields(
-    *,
-    tau_start: float,
-    tau_min: float,
-    decay: str,
-    rate: float | None,
-    steps: int | None,
-    iter_count: int,
-) -> None:
-    """Validate Gumbel schedule fields; raises ``ValueError`` on bad input."""
-    if not (np.isfinite(tau_start) and tau_start > 0.0):
-        raise ValueError(
-            f"GumbelTemperatureSchedule: tau_start must be finite and positive; got {tau_start}"
-        )
-    if not (np.isfinite(tau_min) and tau_min > 0.0):
-        raise ValueError(
-            f"GumbelTemperatureSchedule: tau_min must be finite and positive; got {tau_min}"
-        )
-    if tau_min > tau_start:
-        raise ValueError(
-            f"GumbelTemperatureSchedule: tau_min ({tau_min}) cannot exceed tau_start ({tau_start})"
-        )
-    if decay not in {"geometric", "linear", "reciprocal_iter"}:
-        raise ValueError(f"GumbelTemperatureSchedule: unknown decay {decay!r}")
-    if rate is not None and (not np.isfinite(rate) or rate <= 0.0 or rate >= 1.0):
-        raise ValueError(f"GumbelTemperatureSchedule: rate must be in (0, 1); got {rate}")
-    if steps is not None and int(steps) < 1:
-        raise ValueError(f"GumbelTemperatureSchedule: steps must be >= 1; got {steps}")
-    if int(iter_count) < 0:
-        raise ValueError(f"GumbelTemperatureSchedule: iter_count must be >= 0; got {iter_count}")
-
-
 class GumbelTemperatureSchedule:
     """Deterministic Gumbel temperature schedule descriptor.
 
@@ -354,28 +321,17 @@ class GumbelTemperatureSchedule:
         steps: int | None = None,
         iter_count: int = 0,
     ) -> None:
-        name = str(decay).lower().replace("-", "_")
-        validate_gumbel_schedule_fields(
-            tau_start=float(tau_start),
-            tau_min=float(tau_min),
-            decay=name,
-            rate=rate,
-            steps=steps,
-            iter_count=int(iter_count),
-        )
         self.tau_start = float(tau_start)
         self.tau_min = float(tau_min)
-        self.decay = name  # type: ignore[assignment]
-        # A geometric schedule may be specified either by an explicit `rate` or
-        # by the (tau_start, tau_min, steps) endpoints spec (Rust derives the
-        # rate). Only fall back to the 0.9 default when neither is given.
-        self.rate = (
-            0.9
-            if (rate is None and steps is None and name == "geometric")
-            else rate
-        )
+        self.decay = str(decay).lower().replace("-", "_")  # type: ignore[assignment]
+        # A geometric schedule takes an explicit `rate` or the (tau_start,
+        # tau_min, steps) endpoints. The Rust descriptor derives or defaults the
+        # rate and validates every field; parsing it once here refuses a bad
+        # schedule at construction.
+        self.rate = rate
         self.steps = steps
         self.iter_count = int(iter_count)
+        self.current_tau()
 
     def to_rust_descriptor(self) -> dict[str, Any]:
         out: dict[str, Any] = {
