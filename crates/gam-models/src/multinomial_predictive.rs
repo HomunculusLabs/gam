@@ -58,9 +58,14 @@
 //!
 //! # Cost
 //!
-//! One warm-started Newton solve per (row, class) — the augmented objective is
-//! strictly convex, so Newton with backtracking is unconditionally safe — plus
-//! `K(K+1)/2` more per row when second moments are requested.  Each Newton
+//! One warm-started Newton solve per (row, class), plus `K(K+1)/2` more per row
+//! when second moments are requested. Without a fitted extra term the augmented
+//! objective is strictly convex, so Newton with backtracking is unconditionally
+//! safe. With one it also carries the curvature `A = −∇²Φ(β̂)`, whose
+//! second-order completion `−½ tr(K H''[e_a, e_b])` is indefinite in general, so
+//! the objective is convex only where `XᵀWX + S_λ + A` stays positive definite,
+//! and the Cholesky refusal in `augmented_mode` is the exit where it does not.
+//! Each Newton
 //! iteration is `O(n·M²·P²)` for the curvature (as `M(M+1)/2` GEMMs) and
 //! `O(d³)` for the factorisation, so the whole predictive is
 //! `O(R·K·iters·(n M² P² + d³))`.
@@ -517,8 +522,11 @@ impl<'a> MultinomialPredictiveModel<'a> {
         gradient
     }
 
-    /// Newton with backtracking on the strictly convex negative penalized
-    /// log-posterior, warm-started at `start`.
+    /// Newton with backtracking on the negative log-posterior, warm-started at
+    /// `start`. It is strictly convex without a prior quadratic. With one it is
+    /// convex only where its precision stays positive definite, and a precision
+    /// that is not is refused rather than stepped on (see the module doc's Cost
+    /// section).
     ///
     /// Returns the mode, the objective value there, and the log-determinant of
     /// the precision at that point — the three quantities a Laplace ratio needs
