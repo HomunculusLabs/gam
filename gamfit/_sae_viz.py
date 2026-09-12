@@ -32,10 +32,8 @@ def plot_atom(fit: Any, k: int, ax: Any = None) -> Any:
     basis = _basis_for(fit, k)
     topology = _topology_for(fit, k)
 
-    shape = _shape_points(fit, atom, k, basis, topology)
-    if shape.size == 0:
-        shape = _token_points(fit, atom, k, basis)
-    token_points = _token_points(fit, atom, k, basis)
+    shape = _shape_points(fit, atom, k, topology)
+    token_points = _token_points(fit, atom, k)
 
     projector, plot_dim, rank = _decoder_projector(decoder)
     shape_proj = _project(shape, projector)
@@ -179,34 +177,19 @@ def _topology_for(fit: Any, k: int) -> str:
     return str(topologies[int(k)])
 
 
-def _shape_points(fit: Any, atom: Any, k: int, basis: str, topology: str) -> np.ndarray:
+def _shape_points(fit: Any, atom: Any, k: int, topology: str) -> np.ndarray:
     mean = getattr(atom, "shape_band_mean", None)
     if mean is not None:
         arr = _as_optional_2d(mean)
         if arr is not None and arr.shape[0] > 0:
             return arr
-
-    decoder = _as_2d(atom.decoder_coefficients, "decoder_coefficients")
-    coords = _grid_for(atom, topology)
-    phi = _basis_matrix(fit, k, basis, topology, coords, decoder.shape[0])
-    if phi is None:
-        return np.empty((0, decoder.shape[1]), dtype=float)
-    return phi @ decoder
+    grid = np.ascontiguousarray(_grid_for(atom, topology))
+    return np.asarray(fit.atom_curve(int(k), grid), dtype=float)
 
 
-def _token_points(fit: Any, atom: Any, k: int, basis: str) -> np.ndarray:
-    decoder = _as_2d(atom.decoder_coefficients, "decoder_coefficients")
-    coords = _as_2d(atom.coords, "coords")
-    topology = _topology_for(fit, k)
-    phi = _basis_matrix(fit, k, basis, topology, coords, decoder.shape[0])
-    if phi is None:
-        fitted = getattr(fit, "fitted", None)
-        if fitted is not None:
-            arr = _as_optional_2d(fitted)
-            if arr is not None and arr.shape[0] == coords.shape[0]:
-                return arr
-        return np.zeros((coords.shape[0], decoder.shape[1]), dtype=float)
-    return phi @ decoder
+def _token_points(fit: Any, atom: Any, k: int) -> np.ndarray:
+    coords = np.ascontiguousarray(_as_2d(atom.coords, "coords"))
+    return np.asarray(fit.atom_curve(int(k), coords), dtype=float)
 
 
 def _grid_for(atom: Any, topology: str) -> np.ndarray:
@@ -249,114 +232,6 @@ def _coordinate_bounds(coords: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     hi = coords.max(axis=0)
     width = np.maximum(hi - lo, 1.0e-6)
     return lo - 0.08 * width, hi + 0.08 * width
-
-
-def _basis_matrix(
-    fit: Any,
-    k: int,
-    basis: str,
-    topology: str,
-    coords: np.ndarray,
-    n_cols: int,
-) -> np.ndarray | None:
-    basis_key = str(basis).lower()
-    topology_key = str(topology).lower()
-    if basis_key in {"periodic", "circle"} or topology_key == "circle":
-        harmonics = _harmonic_count(fit, k)
-        return _periodic_basis(coords[:, 0], harmonics, n_cols)
-    if basis_key == "sphere" or topology_key == "sphere":
-        if coords.shape[1] < 2:
-            return None
-        return _pad_or_trim(_sphere_basis(coords[:, :2]), n_cols)
-    if basis_key == "torus" or topology_key == "torus":
-        resolution = _geometry_plan_for(fit, k)["resolution"]
-        if not isinstance(resolution, Mapping) or resolution.get("kind") != "torus_harmonics":
-            raise ValueError(f"geometry_plans[{int(k)}] has invalid torus resolution")
-        return _torus_basis(coords, int(resolution["per_axis_order"]), n_cols)
-    if basis_key in {"linear", "euclidean", "euclidean_patch"}:
-        return _euclidean_patch_basis(coords, n_cols)
-    return None
-
-
-def _harmonic_count(fit: Any, k: int) -> int:
-    resolution = _geometry_plan_for(fit, k)["resolution"]
-    if not isinstance(resolution, Mapping) or resolution.get("kind") != "periodic_harmonics":
-        raise ValueError(f"geometry_plans[{int(k)}] has invalid periodic resolution")
-    return int(resolution["order"])
-
-
-def _periodic_basis(t: np.ndarray, n_harmonics: int, n_cols: int) -> np.ndarray:
-    t = np.asarray(t, dtype=float).reshape(-1)
-    phi = np.ones((t.size, 1 + 2 * int(n_harmonics)), dtype=float)
-    phase = np.mod(t, 1.0)
-    for h in range(1, int(n_harmonics) + 1):
-        angle = 2.0 * np.pi * h * phase
-        phi[:, 1 + 2 * (h - 1)] = np.sin(angle)
-        phi[:, 2 + 2 * (h - 1)] = np.cos(angle)
-    return _pad_or_trim(phi, n_cols)
-
-
-def _sphere_basis(coords: np.ndarray) -> np.ndarray:
-    lat = coords[:, 0]
-    lon = coords[:, 1]
-    clat = np.cos(lat)
-    x = clat * np.cos(lon)
-    y = clat * np.sin(lon)
-    z = np.sin(lat)
-    return np.column_stack([np.ones(coords.shape[0]), x, y, z, x * y, y * z, x * z])
-
-
-def _torus_basis(coords: np.ndarray, per_axis_order: int, n_cols: int) -> np.ndarray:
-    d = coords.shape[1]
-    axis_m = 2 * int(per_axis_order) + 1
-    if axis_m**d != n_cols:
-        raise ValueError(
-            f"torus geometry derives {axis_m**d} columns, decoder has {n_cols}"
-        )
-    per_axis: list[np.ndarray] = []
-    for axis in range(d):
-        col = coords[:, axis]
-        phi_axis = np.ones((coords.shape[0], axis_m), dtype=float)
-        for h in range(1, int(per_axis_order) + 1):
-            angle = 2.0 * np.pi * h * col
-            phi_axis[:, 2 * h - 1] = np.sin(angle)
-            phi_axis[:, 2 * h] = np.cos(angle)
-        per_axis.append(phi_axis)
-
-    out = np.ones((coords.shape[0], n_cols), dtype=float)
-    idx = [0] * d
-    for flat in range(n_cols):
-        value = np.ones(coords.shape[0], dtype=float)
-        for axis in range(d):
-            value *= per_axis[axis][:, idx[axis]]
-        out[:, flat] = value
-        for axis in range(d - 1, -1, -1):
-            idx[axis] += 1
-            if idx[axis] < axis_m:
-                break
-            idx[axis] = 0
-    return out
-
-
-def _euclidean_patch_basis(coords: np.ndarray, n_cols: int) -> np.ndarray:
-    d = coords.shape[1]
-    columns = [np.ones(coords.shape[0], dtype=float)]
-    columns.extend(coords[:, j] for j in range(d))
-    for i in range(d):
-        for j in range(i, d):
-            columns.append(coords[:, i] * coords[:, j])
-    phi = np.column_stack(columns)
-    return _pad_or_trim(phi, n_cols)
-
-
-def _pad_or_trim(phi: np.ndarray, n_cols: int) -> np.ndarray:
-    if phi.shape[1] == n_cols:
-        return phi
-    if phi.shape[1] > n_cols:
-        return phi[:, :n_cols]
-    out = np.zeros((phi.shape[0], n_cols), dtype=float)
-    out[:, : phi.shape[1]] = phi
-    return out
 
 
 def _decoder_projector(decoder: np.ndarray) -> tuple[np.ndarray, int, int]:

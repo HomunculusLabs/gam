@@ -6046,6 +6046,40 @@ impl ManifoldSaeCore {
         Ok(dictionary.into_pyarray(py))
     }
 
+    /// Sample one atom's decoded curve `Φ_k(coords)·B_k` at coordinates
+    /// `(n, d)` → `(n, P)`: atom `k` alone at unit assignment, through the same
+    /// persisted-atom-set assembler as [`frozen_dictionary`](Self::frozen_dictionary).
+    fn atom_curve<'py>(
+        &self,
+        py: Python<'py>,
+        atom_k: usize,
+        coords: PyReadonlyArray2<'py, f64>,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let inner = &self.inner;
+        let (Some(plan), Some(decoder_block)) = (
+            inner.geometry_plans.get(atom_k),
+            inner.decoder_blocks.get(atom_k),
+        ) else {
+            return Err(py_value_error(format!(
+                "ManifoldSAE.atom_curve: atom {atom_k} out of range for K={}",
+                inner.decoder_blocks.len()
+            )));
+        };
+        let decoder = manifold_sae_owned2(decoder_block)?;
+        let coords = coords.as_array();
+        let assignments = Array2::<f64>::ones((coords.nrows(), 1));
+        let decoder_view = decoder.view();
+        let curve = gam::terms::sae::manifold::reconstruct_persisted_atom_set(
+            std::slice::from_ref(plan),
+            std::slice::from_ref(&decoder_view),
+            std::slice::from_ref(&coords),
+            assignments.view(),
+            decoder.ncols(),
+        )
+        .map_err(py_value_error)?;
+        Ok(curve.into_pyarray(py))
+    }
+
     /// Steering plan with output dosimetry for one atom — the Rust-owned
     /// counterpart of `ManifoldSAE.steer` (#980/#2091). Reads the model geometry
     /// (decoder blocks, coords, logits, and the attached output-Fisher shard)
