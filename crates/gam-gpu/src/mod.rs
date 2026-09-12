@@ -23,7 +23,7 @@ pub mod calibration;
 pub mod device;
 pub mod device_cache;
 pub mod device_runtime;
-pub mod dictionary_score;
+mod dictionary_score;
 pub mod driver;
 pub mod engagement;
 pub mod linalg_dispatch;

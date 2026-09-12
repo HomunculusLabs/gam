@@ -1,6 +1,6 @@
 pub mod closure_family;
 pub mod curvature_estimand;
-pub mod latent_seed;
+mod latent_seed;
 pub mod manifold;
 pub mod manifolds;
 pub mod optimizer;
