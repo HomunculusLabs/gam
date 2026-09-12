@@ -2585,8 +2585,13 @@ impl CircularGaussianFit2d {
 
         // A noiseless observed circle is an unbounded-likelihood boundary.
         // Keep the numerical optimizer in a scale-relative interior whose
-        // width is roundoff, rather than imposing a floor in data units.
-        let variance_floor = (64.0 * f64::EPSILON * mean_squared_radius).max(f64::MIN_POSITIVE);
+        // width is roundoff, rather than imposing a floor in data units. That
+        // width is the rounding band of the squared-radius moments: each term
+        // costs five rounded operations before the `n − 1` additions and the
+        // division (#2469).
+        let variance_floor = (gam_linalg::roundoff::accumulation_growth(6 * points.len())
+            * mean_squared_radius)
+            .max(f64::MIN_POSITIVE);
         let radius_squared = (mean_squared_radius * mean_squared_radius - squared_radius_variance)
             .max(0.0)
             .sqrt();
