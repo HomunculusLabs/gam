@@ -1308,16 +1308,15 @@ impl DuchonOperatorPenaltySpec {
     /// kernel with only mass+tension, inflates EDF, and changes the REML model
     /// class relative to its stated RKHS.
     pub fn matern_for_smoothness(nu: MaternNu, d: usize) -> Self {
+        // `m` and every gated order are small half-integers, which f64 represents
+        // exactly, so the inclusive `j ≤ m` boundary is an exact comparison.
         let m = nu.half_integer_value() + 0.5 * d as f64;
-        // Tolerance keeps the mathematically inclusive `j ≤ m` boundary stable
-        // under floating-point representation of half-integer orders.
-        const ORDER_EPS: f64 = 1e-9;
         let active = || OperatorPenaltySpec::Active {
             initial_log_lambda: 0.0,
             prior: None,
         };
         let gate = |order: f64| {
-            if !matches!(nu, MaternNu::Half) && m + ORDER_EPS >= order {
+            if !matches!(nu, MaternNu::Half) && m >= order {
                 active()
             } else {
                 OperatorPenaltySpec::Disabled
