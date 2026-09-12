@@ -514,6 +514,34 @@ pub(crate) fn independent_compiled_schedule_beats_hand_full_channels_932() {
     }
 }
 
+/// #932. `ThresholdGate` shares `execute_independent_logistic_row_program` with
+/// `OrderedBetaBernoulli`, but the release gate above builds only the ordered
+/// Beta--Bernoulli fixture. The threshold-centered gate's row jets were therefore never
+/// compared with the hand assembly. This test runs the same full-channel parity and
+/// allocation checks at every width, with no speed cell. The schedule is already timed
+/// through the independent gate, and only the gate map differs here.
+#[test]
+pub(crate) fn threshold_gate_compiled_schedule_matches_hand_full_channels_932() {
+    fn threshold_gate_schedule_perf_fixture(
+        k_atoms: usize,
+        p: usize,
+    ) -> (
+        SaeManifoldTerm,
+        Vec<SaeLocalRowVar>,
+        Vec<Array4<f64>>,
+        Vec<SaeBorderChannel>,
+        Array1<f64>,
+    ) {
+        schedule_perf_fixture(k_atoms, p, AssignmentMode::threshold_gate(0.9, 0.3))
+    }
+    let mut gate: Option<SpeedGate> = None;
+    compiled_schedule_beats_hand_full_channels_932(
+        "THRESHOLD",
+        &mut gate,
+        threshold_gate_schedule_perf_fixture,
+    );
+}
+
 #[test]
 pub(crate) fn ordered_beta_bernoulli_outer_objective_advertises_analytic_gradient() {
     // The ordered Beta--Bernoulli shared-mass third channel is assembled from
