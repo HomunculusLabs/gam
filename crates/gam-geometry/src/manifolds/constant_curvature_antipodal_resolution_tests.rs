@@ -1,10 +1,10 @@
-//! gam#2687: what does the κ box's half-margin to the antipodal fold BUY?
+//! gam#2687 / gam#2902: how close to the antipodal fold may the κ box go?
 //!
-//! `CONSTANT_CURVATURE_KAPPA_CHART_FRACTION = 0.5` is documented as a
-//! half-margin to the fold at `κ‖x‖‖c‖ = 1`, and until #2687 nothing in the tree
-//! stated what the margin protects — so it could be re-asserted but not argued
-//! with. This module measures it, and the measurement is what
-//! `constant_curvature_kappa_bounds`' doc now cites.
+//! The constant-curvature κ window retreats a fraction `F` of the way from κ = 0
+//! to the fold at `κ‖x‖‖c‖ = 1`. #2687 measured what the retreat protects, and
+//! #2902 derived `F` from that measurement:
+//! `gam_terms::smooth::constant_curvature_kappa_chart_fraction()` is `1 − ε^{1/6}`.
+//! This module is the measurement that function's doc cites.
 //!
 //! The instrument is an exact oracle. For the anti-aligned equal-radius pair
 //! `(±R, 0)` the two colatitudes `θ = 2·arctan(√κ R)` simply add, so
@@ -50,11 +50,11 @@ fn antipodal_pair_reference(r: f64, kappa: f64) -> (f64, f64, f64) {
 }
 
 /// The κ-Hessian's relative error obeys `ε/D^{3/2}` across four decades of `D`,
-/// and the shipped `0.5` fraction sits SIX ORDERS inside the bar that law
-/// implies. Both halves matter: the first makes the resolution claim in
-/// `CONSTANT_CURVATURE_KAPPA_CHART_FRACTION`'s doc checkable, the second is the
-/// evidence that the fraction is a MODELLING retreat and not a numerical one —
-/// so anyone proposing to move it has to argue about the estimator.
+/// and the shipped fraction `F = 1 − ε^{1/6}` stops the box exactly at the bar
+/// that law implies. Both halves matter: the first makes the derivation in
+/// `constant_curvature_kappa_chart_fraction`'s doc checkable, and the second pins
+/// the box's own upper end to half the mantissa on the κ-Hessian, which is what
+/// a Newton step needs.
 #[test]
 fn the_kappa_hessian_resolution_law_is_epsilon_over_d_to_the_three_halves_2687() {
     const R: f64 = 0.6;
@@ -93,17 +93,17 @@ fn the_kappa_hessian_resolution_law_is_epsilon_over_d_to_the_three_halves_2687()
          absorb a wrong exponent: {constants:?}"
     );
 
-    // What the shipped fraction buys. Half the mantissa on the Hessian — the bar
-    // a Newton step needs — is `ε/D^{3/2} ≤ √ε`, i.e. `D ≥ ε^{1/3}`. The box
-    // stops at `D = (1 − F)² = 0.25`, which is enormously inside it.
-    let fraction = 0.5_f64;
+    // Where the shipped fraction stops. Half the mantissa on the Hessian — the
+    // bar a Newton step needs — is `ε/D^{3/2} ≤ √ε`, i.e. `D ≥ ε^{1/3}`, and
+    // `F = 1 − ε^{1/6}` puts the box's worst pair exactly there. It is restated
+    // here rather than imported, because gam-geometry cannot read gam-terms.
+    let fraction = 1.0 - eps.powf(1.0 / 6.0);
     let shipped_d = (1.0 - fraction) * (1.0 - fraction);
     let resolution_limited_d = eps.powf(1.0 / 3.0);
     assert!(
-        shipped_d > 1.0e4 * resolution_limited_d,
-        "the shipped margin D = {shipped_d} must sit orders inside the arithmetic's \
-         own limit D = ε^(1/3) = {resolution_limited_d:.3e}; if it ever does not, \
-         the fraction has become a numerical constraint and its doc is wrong"
+        (shipped_d / resolution_limited_d - 1.0).abs() <= 1.0e-9,
+        "the shipped margin D = {shipped_d} must be the arithmetic's own limit \
+         D = ε^(1/3) = {resolution_limited_d:.3e}"
     );
     let kappa_at_margin = fraction / (R * R);
     let manifold = ConstantCurvature::new(2, kappa_at_margin);
@@ -111,10 +111,13 @@ fn the_kappa_hessian_resolution_law_is_epsilon_over_d_to_the_three_halves_2687()
     let (_, _, got_kk) =
         distance_kappa_jet(&manifold, x.view(), y.view()).expect("inside the fold");
     let rel_at_margin = ((got_kk - ref_kk) / ref_kk).abs();
+    let largest_constant = constants.iter().copied().fold(0.0_f64, f64::max);
     assert!(
-        rel_at_margin <= 1.0e-12,
-        "at the box's own upper end the κ-Hessian must carry at least 12 digits; \
-         measured relative error {rel_at_margin:.3e}"
+        rel_at_margin <= largest_constant * eps.sqrt(),
+        "at the box's own upper end the κ-Hessian must keep half the mantissa: \
+         measured relative error {rel_at_margin:.3e} against the law's \
+         c·√ε = {:.3e} with the sweep's largest constant c = {largest_constant:.3}",
+        largest_constant * eps.sqrt()
     );
 }
 

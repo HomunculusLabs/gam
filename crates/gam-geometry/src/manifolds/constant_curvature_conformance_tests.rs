@@ -338,8 +338,8 @@ fn spherical_branch_folds_at_kappa_r2_one_so_the_kappa_window_is_symmetric_2687(
     let x = ndarray::array![R, 0.0];
     let y = ndarray::array![-R, 0.0];
 
-    // (a) The shipped window's cap, κ = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION/R²
-    // with the fraction 0.5. Interior, and 78.4% of the way to the antipode.
+    // (a) κ = 0.5/R², the window's cap before #2902 derived its fraction.
+    // Interior, and 78.4% of the way to the antipode.
     let cap = 0.5 / r2;
     let manifold = ConstantCurvature::new(2, cap);
     let d_cap = manifold
@@ -356,7 +356,8 @@ fn spherical_branch_folds_at_kappa_r2_one_so_the_kappa_window_is_symmetric_2687(
     );
 
     // (b) κ = 1/R² is the fold itself: D = (1 − κR²)² collapses and the shipped
-    // guard refuses. This is the number the ±0.5 fraction is half of.
+    // guard refuses. The window retreats from it by the fraction
+    // `1 − ε^{1/6}` (gam-terms' `constant_curvature_kappa_chart_fraction`).
     let fold = 1.0 / r2;
     let refused = ConstantCurvature::new(2, fold).distance(x.view(), y.view());
     assert!(

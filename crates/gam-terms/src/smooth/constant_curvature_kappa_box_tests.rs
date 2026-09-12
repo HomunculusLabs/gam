@@ -18,8 +18,8 @@ use crate::basis::{
     constant_curvature_kernel_matrix,
 };
 use crate::smooth::{
-    CONSTANT_CURVATURE_KAPPA_CHART_FRACTION, CONSTANT_CURVATURE_MIN_CHART_RADIUS2, ShapeConstraint,
-    SmoothBasisSpec, SmoothTermSpec, TermCollectionSpec, constant_curvature_kappa_bounds,
+    CONSTANT_CURVATURE_MIN_CHART_RADIUS2, ShapeConstraint, SmoothBasisSpec, SmoothTermSpec,
+    TermCollectionSpec, constant_curvature_kappa_bounds, constant_curvature_kappa_chart_fraction,
 };
 use gam_geometry::manifolds::constant_curvature::ConstantCurvature;
 use ndarray::{Array2, array};
@@ -73,7 +73,7 @@ fn data_driven_center_strategies_keep_the_pre_2716_box_bit_for_bit() {
         .outer_iter()
         .map(|row| row.dot(&row))
         .fold(CONSTANT_CURVATURE_MIN_CHART_RADIUS2, f64::max);
-    let expected = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / max_r2;
+    let expected = constant_curvature_kappa_chart_fraction() / max_r2;
     for strategy in [
         CenterStrategy::FarthestPoint { num_centers: 8 },
         CenterStrategy::KMeans {
@@ -108,7 +108,7 @@ fn user_provided_centers_beyond_twice_the_data_radius_no_longer_put_the_box_past
     let (lo, hi) = constant_curvature_kappa_bounds(data.view(), &spec, 0);
 
     let fold = 1.0 / (0.3 * 0.8);
-    let old_hi = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / (0.3 * 0.3);
+    let old_hi = constant_curvature_kappa_chart_fraction() / (0.3 * 0.3);
     assert!(
         old_hi > fold,
         "the configuration this test is about: the pre-#2716 upper end {old_hi} \
@@ -118,9 +118,9 @@ fn user_provided_centers_beyond_twice_the_data_radius_no_longer_put_the_box_past
     // inside the data × center fold (1/0.24) and is exactly the half-margin to
     // the center × center fold (1/0.64) the penalty Gram also evaluates.
     assert!(
-        (hi - CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / 0.64).abs() <= 1e-12,
+        (hi - constant_curvature_kappa_chart_fraction() / 0.64).abs() <= 1e-12,
         "the upper end must be F/max(R_x, R_c)²: got {hi}, expected {}",
-        CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / 0.64
+        constant_curvature_kappa_chart_fraction() / 0.64
     );
     assert!(
         hi < fold,
@@ -138,7 +138,7 @@ fn user_provided_centers_beyond_twice_the_data_radius_no_longer_put_the_box_past
     let c = array![-0.8, 0.0];
     let rho2 = x.dot(&x) * c.dot(&c);
     let denom = |k: f64| 1.0 + 2.0 * k * x.dot(&c) + k * k * rho2;
-    let floor = (1.0_f64 - CONSTANT_CURVATURE_KAPPA_CHART_FRACTION).powi(2);
+    let floor = (1.0_f64 - constant_curvature_kappa_chart_fraction()).powi(2);
     assert!(
         denom(hi) >= floor - 1e-12,
         "at the box's upper end {hi} the pair gauge D = {} must stay at or above \
@@ -180,7 +180,7 @@ fn user_provided_centers_beyond_twice_the_data_radius_no_longer_put_the_box_past
     // inside the chart; at the pre-#2716 lower end the farthest center is not,
     // and `validate_chart_points` turns that into a hard basis-build error
     // rather than a rail.
-    let old_lo = -CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / (0.3 * 0.3);
+    let old_lo = -constant_curvature_kappa_chart_fraction() / (0.3 * 0.3);
     assert!(
         1.0 + lo * 0.64 > 0.0,
         "at the box's lower end {lo} the farthest center (‖c‖² = 0.64) must stay \
@@ -241,13 +241,13 @@ fn uniform_grid_corner_centers_leave_the_hull_and_move_the_box_2716() {
     // center against the opposite corner (1/d, the binding one).
     let data_center_fold = 1.0 / corner_r2.sqrt();
     let center_center_fold = 1.0 / corner_r2;
-    let old_hi = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / 1.0;
+    let old_hi = constant_curvature_kappa_chart_fraction() / 1.0;
     assert!(
         old_hi > data_center_fold && old_hi > center_center_fold,
         "d = {dim}: the pre-#2716 upper end {old_hi} must be past BOTH corner \
          folds ({data_center_fold}, {center_center_fold})"
     );
-    let expected = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / corner_r2;
+    let expected = constant_curvature_kappa_chart_fraction() / corner_r2;
     assert!(
         (hi - expected).abs() <= 1e-12 && (lo + expected).abs() <= 1e-12,
         "the box must be denominated in the CORNER radius, the largest evaluated \
@@ -266,7 +266,7 @@ fn uniform_grid_corner_centers_leave_the_hull_and_move_the_box_2716() {
 fn degenerate_radii_still_yield_a_finite_bracket() {
     let data = Array2::<f64>::zeros((8, 2));
     let floor_bound =
-        CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / CONSTANT_CURVATURE_MIN_CHART_RADIUS2;
+        constant_curvature_kappa_chart_fraction() / CONSTANT_CURVATURE_MIN_CHART_RADIUS2;
     for strategy in [
         CenterStrategy::FarthestPoint { num_centers: 4 },
         CenterStrategy::UserProvided(Array2::<f64>::zeros((3, 2))),
@@ -296,13 +296,13 @@ fn centers_inside_the_data_hull_never_widen_the_box() {
     let centers = array![[0.5, 0.0], [-0.5, 0.0], [0.0, 0.0]];
     let spec = spec_with(CenterStrategy::UserProvided(centers), 2);
     let (lo, hi) = constant_curvature_kappa_bounds(data.view(), &spec, 0);
-    let data_only = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / 4.0;
+    let data_only = constant_curvature_kappa_chart_fraction() / 4.0;
     assert!(
         (hi - data_only).abs() <= 1e-12 && (lo + data_only).abs() <= 1e-12,
         "centers inside the hull must leave the box at the data radius, got [{lo}, {hi}]"
     );
     assert!(
-        hi < CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / (2.0 * 0.5),
+        hi < constant_curvature_kappa_chart_fraction() / (2.0 * 0.5),
         "and it must stay strictly inside the wider data × center fold, which a \
          pair-wise bound would have handed the optimizer"
     );
@@ -332,7 +332,7 @@ fn centers_inside_the_data_hull_never_widen_the_box() {
 #[test]
 fn each_wall_retreats_by_f_from_its_own_branchs_gauge_never_the_others_2687() {
     let data = ring(48, 0.7, 2);
-    let f = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION;
+    let f = constant_curvature_kappa_chart_fraction();
     for strategy in [
         CenterStrategy::FarthestPoint { num_centers: 6 },
         CenterStrategy::KMeans {

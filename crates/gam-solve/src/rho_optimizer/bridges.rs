@@ -3782,9 +3782,9 @@ pub(crate) fn rail_relaxed_bounds(
 ///
 /// Narrow boxes are the normal case for the non-ρ blocks a joint search carries
 /// in the same θ vector. A constant-curvature term's raw-κ window is
-/// `±CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / R²` (width `1/R²`), so any data
-/// whose farthest point sits at squared chart radius `R² ≥ 1` — every
-/// standardised feature set — has a κ window at most `2 ×
+/// `±F / R²` with `F = 1 − ε^{1/6}` (`constant_curvature_kappa_chart_fraction`), width
+/// `2F/R²`, so any data whose farthest point sits at squared chart radius `R² ≥ 2`
+/// — every standardised feature set — has a κ window at most `2 ×
 /// CERTIFICATE_RAIL_MARGIN` wide, and an absolute margin would flag flat κ = 0
 /// railed. κ = 0 is the *centre* of that window and the interior point the raw-κ
 /// coordinate exists to keep reachable (#2462).

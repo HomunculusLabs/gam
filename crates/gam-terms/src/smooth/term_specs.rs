@@ -3622,10 +3622,9 @@ pub fn constant_curvature_term_spec(
 /// `spherical_branch_folds_at_kappa_r2_one_so_the_kappa_window_is_symmetric_2687`
 /// in `gam-geometry`, which pins the fold, the refusal, and the involution.
 ///
-/// ## What `0.5` buys, measured (#2687)
+/// ## Where the retreat is derived (#2687, #2902)
 ///
-/// This is a MODELLING retreat, not a numerical one, and the measurement that
-/// separates the two is in
+/// The measurement is in
 /// `gam_geometry::manifolds::constant_curvature_antipodal_resolution_tests`.
 /// Differencing the shipped Möbius route against the cancellation-free closed
 /// form `d = (4/√κ)·arctan(√κ R)` gives
@@ -3635,22 +3634,28 @@ pub fn constant_curvature_term_spec(
 ///   rel_err(∂²d/∂κ²) ≈ ε / D^{3/2}
 /// ```
 ///
-/// At `F = 0.5` the worst evaluated pair has `D ≥ (1 − F)² = 0.25`, where the
-/// κ-Hessian the outer route consumes (`Derivative::Analytic`, exact `d²V/dκ²`)
-/// carries ~14 of 16 digits. Half the mantissa — the bar a Newton Hessian
-/// actually needs — is reached only at `D = ε^{1/3} ≈ 6.1e-6`, i.e. `κR² ≈
-/// 0.9975`. **The arithmetic permits a box 203× closer to the fold in `1 − κR²`
-/// than this fraction goes.** So moving `F` needs an argument about the
-/// ESTIMATOR, not about the arithmetic, and #2687 carries the measurement that
-/// argues against widening it: on the fixture whose κ̂ is railed here, the
-/// profiled criterion is monotone across the entire interval, so a wider box
-/// only moves the rail — to κ̂ = 2.78 against a planted 1.5, further from the
-/// truth than the shipped box gives.
+/// The outer route consumes the exact κ-Hessian (`Derivative::Analytic`,
+/// `d²V/dκ²`), and a Newton step needs half its mantissa: `ε/D^{3/2} ≤ √ε`,
+/// i.e. `D ≥ ε^{1/3}`. The worst evaluated pair has `D = (1 − F)²`, so the
+/// retreat that keeps every evaluated pair's Hessian at half the mantissa is
+/// `F = 1 − ε^{1/6}`, i.e. `κR² ≈ 0.99754`. Nothing about the window is left to
+/// choose.
+///
+/// It used to be `F = 0.5`, a hand-supplied retreat (SPEC rule 20) argued from
+/// one #2687 fixture whose profiled criterion is monotone, where a wider box
+/// moves the rail. A rail at the model's own wall is an honest outcome, not a
+/// reason to cage the estimator. The price of the old fraction was measured on
+/// the #1464 mirror datasets: disk radius 0.68 and planted κ = ±2, so
+/// `κR² = 0.925` sits inside the chart. The `0.5` window was ±1.081 and could not
+/// represent the truth, so both fits railed at +1.081. The derived window is
+/// ±2.157.
 ///
 /// κ = 0 (flat) is the centre of the window, an interior point of the
 /// `S^d ← ℝ^d → H^d` family — exactly the reachability the raw-κ (not log-κ)
 /// coordinate exists to preserve.
-pub const CONSTANT_CURVATURE_KAPPA_CHART_FRACTION: f64 = 0.5;
+pub fn constant_curvature_kappa_chart_fraction() -> f64 {
+    1.0 - f64::EPSILON.powf(1.0 / 6.0)
+}
 
 /// Floor on the data's squared chart radius used to scale the κ window, so a
 /// degenerate (near-origin) point cloud still yields a finite, usable bracket
@@ -3712,8 +3717,8 @@ pub(crate) const CONSTANT_CURVATURE_MIN_CHART_RADIUS2: f64 = 1e-8;
 ///   BOUNDING BOX, so a corner center sits at up to `√d·R_x`, crossing the same
 ///   threshold at `d ≥ 4` with no user input at all.
 ///
-/// See [`CONSTANT_CURVATURE_KAPPA_CHART_FRACTION`] for the two gauges and for
-/// what its `0.5` buys, measured.
+/// See [`constant_curvature_kappa_chart_fraction`] for the two gauges and for
+/// where the retreat from them is derived.
 pub fn constant_curvature_kappa_bounds(
     data: ArrayView2<'_, f64>,
     spec: &TermCollectionSpec,
@@ -3734,7 +3739,7 @@ pub fn constant_curvature_kappa_bounds(
     let max_r2 = data_r2
         .max(center_r2)
         .max(CONSTANT_CURVATURE_MIN_CHART_RADIUS2);
-    let half = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / max_r2;
+    let half = constant_curvature_kappa_chart_fraction() / max_r2;
     (-half, half)
 }
 

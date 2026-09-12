@@ -21,7 +21,7 @@ use super::{
     newton_predicted_decrease,
 };
 use crate::model_types::CERTIFICATE_RAIL_MARGIN;
-use gam_terms::smooth::CONSTANT_CURVATURE_KAPPA_CHART_FRACTION;
+use gam_terms::smooth::constant_curvature_kappa_chart_fraction;
 use ndarray::{Array1, array};
 
 /// The default outer search box, wide enough that the margin is not width-capped.
@@ -246,12 +246,12 @@ fn a_fixed_coordinate_gets_no_relaxation() {
 // that narrow.
 
 /// The raw-κ window a constant-curvature term installs on the outer box:
-/// `±CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / R²`, as built by
+/// `±constant_curvature_kappa_chart_fraction() / R²`, as built by
 /// `gam_terms::smooth::term_specs::constant_curvature_kappa_bounds`. Its
 /// documented contract is that flat κ = 0 is the window's INTERIOR centre — the
 /// reachability the raw-κ (not log-κ) coordinate exists to preserve.
 fn constant_curvature_kappa_window(max_chart_radius2: f64) -> (Array1<f64>, Array1<f64>) {
-    let half = CONSTANT_CURVATURE_KAPPA_CHART_FRACTION / max_chart_radius2;
+    let half = constant_curvature_kappa_chart_fraction() / max_chart_radius2;
     (array![-half], array![half])
 }
 
@@ -265,7 +265,7 @@ fn boxed_config(lower: Array1<f64>, upper: Array1<f64>) -> OuterConfig {
 #[test]
 fn flat_curvature_at_the_centre_of_its_own_window_is_not_railed() {
     // R² = 18 is what standardised 2-D features (|z| ≲ 3) produce, so the κ
-    // window is ±0.028 — two orders narrower than the rail margin.
+    // window is ±0.055 — an order narrower than the rail margin.
     let (lower, upper) = constant_curvature_kappa_window(18.0);
     let width = upper[0] - lower[0];
     assert!(
