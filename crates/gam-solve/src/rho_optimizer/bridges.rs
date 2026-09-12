@@ -2550,11 +2550,6 @@ pub(crate) struct OuterSecondOrderBridge<'a> {
     pub(crate) obj: &'a mut dyn OuterObjective,
     pub(crate) layout: OuterThetaLayout,
     pub(crate) hessian_source: HessianSource,
-    /// When the evaluator returns `HessianValue::Operator(op)` and the
-    /// operator advertises an exact dense route, the bridge may materialize the
-    /// operator into a dense K×K matrix so the dense ARC path can run an exact
-    /// factorization instead of operator-CG.
-    pub(crate) materialize_operator_max_dim: usize,
     /// Counts gradient/Hessian evaluations so that progress is visible even
     /// when the upstream `opt` solver does not emit per-iteration logs of its
     /// own. Emitted at INFO from `eval_grad` and `eval_hessian` (the calls
@@ -3192,7 +3187,6 @@ impl SecondOrderObjective for OuterSecondOrderBridge<'_> {
         let hessian = build_bridge_hessian_for_source(
             self.hessian_source,
             eval.hessian,
-            self.materialize_operator_max_dim,
         )?;
         // Rail-relaxed box here too (#2412). The strict-activity test inside
         // `reduced_hessian_psd_at_point` uses a 1e-10 proximity, which a bound
@@ -4062,10 +4056,9 @@ pub(crate) fn project_to_bounds(
 /// behavior on a planner/runtime mismatch is to surface it loudly so
 /// the seed loop can either retry, demote the plan, or fail the seed.
 ///
-/// Operator Hessians whose `materialization` is available (`Explicit`,
-/// `BatchedHvp` or `RepeatedHvp`) and whose dimension is at most
-/// `materialize_operator_max_dim` are converted to dense in place so dense
-/// ARC can run an exact factorization. The seed loop sends every other
+/// Operator Hessians that `operator_hessian_densifies` admits are converted to
+/// dense in place so dense ARC can run an exact factorization. The seed loop
+/// applies the same predicate and sends every other
 /// operator Hessian to `opt::MatrixFreeTrustRegion` before a bridge
 /// exists, so reaching this branch with one on the analytic route means
 /// the runtime contradicted the seed-time decision, which is the same
@@ -4081,15 +4074,11 @@ pub(crate) fn project_to_bounds(
 pub(crate) fn build_bridge_hessian_for_source(
     source: HessianSource,
     hessian: HessianValue,
-    materialize_operator_max_dim: usize,
 ) -> Result<Option<Array2<f64>>, ObjectiveEvalError> {
     match source {
         HessianSource::Analytic => match hessian {
             HessianValue::Dense(h) => Ok(Some(h)),
-            HessianValue::Operator(op)
-                if op.materialization().is_available()
-                    && op.dim() <= materialize_operator_max_dim =>
-            {
+            HessianValue::Operator(op) if operator_hessian_densifies(op.as_ref()) => {
                 op.materialize_dense()
                     .map(Some)
                     .map_err(|error| ObjectiveEvalError::fatal(format!("outer Hessian operator materialization failed: {error}")))

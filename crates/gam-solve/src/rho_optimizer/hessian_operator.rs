@@ -75,8 +75,17 @@ impl HessianOperator for RhoBlockAdditiveHessian {
     }
 }
 
-/// Upper safety bound for operator materialization after the operator has
-/// explicitly declared that dense probing is cheap. Dimension alone is never
-/// sufficient: a 50-column operator can still mean 50 full row-streaming CTN,
-/// Duchon, or survival passes.
-pub(crate) const OUTER_HVP_MATERIALIZE_MAX_DIM: usize = 64;
+/// Whether a solver that factors the outer Hessian should densify this
+/// operator. The operator's own work model decides: only an operator that
+/// already holds its dense Hessian (`Explicit`) is densified, and only when the
+/// `k × k` matrix fits the process's single-materialization cap. `BatchedHvp`
+/// and `RepeatedHvp` pay Hessian-vector products per column, the work a
+/// matrix-free solver exists to avoid, so they stay matrix-free at any `k`.
+pub(crate) fn operator_hessian_densifies(op: &dyn HessianOperator) -> bool {
+    let dense_bytes =
+        crate::estimate::reml::reml_outer_engine::saturating_f64_matrix_bytes(op.dim(), op.dim());
+    op.materialization() == HessianMaterialization::Explicit
+        && dense_bytes
+            <= gam_runtime::resource::ResourcePolicy::default_library()
+                .max_single_materialization_bytes
+}

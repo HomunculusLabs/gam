@@ -1368,13 +1368,11 @@ pub(crate) fn run_outer_with_plan(
 
                 let cheap_materializable_operator = matches!(
                     seed_eval.hessian,
-                    HessianValue::Operator(ref op)
-                        if op.materialization().is_available()
-                            && op.dim() <= OUTER_HVP_MATERIALIZE_MAX_DIM
+                    HessianValue::Operator(ref op) if operator_hessian_densifies(op.as_ref())
                 );
                 if cheap_materializable_operator {
-                    // The operator's own work model says probing every column
-                    // is cheap; convert the seed Hessian to dense in-place.
+                    // The operator already holds its dense Hessian and it fits the
+                    // materialization cap; convert the seed Hessian to dense in-place.
                     // Subsequent bridge evaluations apply the same predicate.
                     if let HessianValue::Operator(op) = &seed_eval.hessian {
                         match op.materialize_dense() {
@@ -1657,7 +1655,6 @@ pub(crate) fn run_outer_with_plan(
                     let seed_hessian = build_bridge_hessian_for_source(
                         hessian_source,
                         seed_eval.hessian,
-                        OUTER_HVP_MATERIALIZE_MAX_DIM,
                     )
                     .map_err(|err| {
                         EstimationError::fatal_objective_evaluation(
@@ -1714,7 +1711,6 @@ pub(crate) fn run_outer_with_plan(
                         obj,
                         layout,
                         hessian_source,
-                        materialize_operator_max_dim: OUTER_HVP_MATERIALIZE_MAX_DIM,
                         eval_count: 0,
                         outer_inner_cap: config.outer_inner_cap.clone(),
                         g_norm_initial: None,

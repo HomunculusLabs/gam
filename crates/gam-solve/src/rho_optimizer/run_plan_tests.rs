@@ -1313,7 +1313,7 @@ impl HessianOperator for FailingSeedMaterializationOperator {
     }
 
     fn materialization(&self) -> HessianMaterialization {
-        HessianMaterialization::RepeatedHvp
+        HessianMaterialization::Explicit
     }
 
     fn materialize_dense(&self) -> Result<Array2<f64>, ObjectiveEvalError> {
@@ -2698,7 +2698,6 @@ fn outer_second_order_bridge_separates_first_and_second_order_requests() {
         obj: &mut obj,
         layout: OuterThetaLayout::new(1, 0),
         hessian_source: HessianSource::Analytic,
-        materialize_operator_max_dim: OUTER_HVP_MATERIALIZE_MAX_DIM,
         eval_count: 0,
         outer_inner_cap: None,
         g_norm_initial: None,
@@ -2762,7 +2761,6 @@ fn outer_second_order_bridge_rejects_a_candidate_whose_row_geometry_refuses_2627
         obj: &mut obj,
         layout: OuterThetaLayout::new(1, 0),
         hessian_source: HessianSource::Analytic,
-        materialize_operator_max_dim: OUTER_HVP_MATERIALIZE_MAX_DIM,
         eval_count: 0,
         outer_inner_cap: None,
         g_norm_initial: None,
@@ -2835,7 +2833,6 @@ fn outer_second_order_bridge_keeps_structural_refusals_fatal_2627() {
         obj: &mut obj,
         layout: OuterThetaLayout::new(1, 0),
         hessian_source: HessianSource::Analytic,
-        materialize_operator_max_dim: OUTER_HVP_MATERIALIZE_MAX_DIM,
         eval_count: 0,
         outer_inner_cap: None,
         g_norm_initial: None,
@@ -2894,7 +2891,6 @@ fn analytic_route_unavailable_hessian_is_fatal() {
         obj: &mut obj,
         layout: OuterThetaLayout::new(1, 0),
         hessian_source: HessianSource::Analytic,
-        materialize_operator_max_dim: OUTER_HVP_MATERIALIZE_MAX_DIM,
         eval_count: 0,
         outer_inner_cap: None,
         g_norm_initial: None,
@@ -3056,7 +3052,6 @@ fn arc_bridge_finite_cost_stall_defers_at_bound_separation() {
         obj: &mut obj,
         layout: OuterThetaLayout::new(1, 0),
         hessian_source: HessianSource::Analytic,
-        materialize_operator_max_dim: OUTER_HVP_MATERIALIZE_MAX_DIM,
         eval_count: 0,
         outer_inner_cap: None,
         g_norm_initial: None,
@@ -3122,7 +3117,6 @@ fn arc_bridge_finite_stall_delivers_interior_negative_curvature() {
         obj: &mut obj,
         layout: OuterThetaLayout::new(1, 0),
         hessian_source: HessianSource::Analytic,
-        materialize_operator_max_dim: OUTER_HVP_MATERIALIZE_MAX_DIM,
         eval_count: 0,
         outer_inner_cap: None,
         g_norm_initial: None,
@@ -3200,7 +3194,6 @@ fn arc_bridge_finite_stall_defers_kkt_stationary_bound_descent() {
         obj: &mut obj,
         layout: OuterThetaLayout::new(1, 0),
         hessian_source: HessianSource::Analytic,
-        materialize_operator_max_dim: OUTER_HVP_MATERIALIZE_MAX_DIM,
         eval_count: 0,
         outer_inner_cap: None,
         g_norm_initial: None,
@@ -3281,7 +3274,6 @@ fn arc_bridge_cost_stall_halts_on_infeasible_separation_run() {
         obj: &mut obj,
         layout: OuterThetaLayout::new(1, 0),
         hessian_source: HessianSource::Analytic,
-        materialize_operator_max_dim: OUTER_HVP_MATERIALIZE_MAX_DIM,
         eval_count: 0,
         outer_inner_cap: None,
         g_norm_initial: None,

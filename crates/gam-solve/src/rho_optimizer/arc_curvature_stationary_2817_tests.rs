@@ -124,7 +124,6 @@ fn drive_arc_oracle_valued_2817(
         obj: &mut obj,
         layout: OuterThetaLayout::new(point.len(), 0),
         hessian_source: HessianSource::Analytic,
-        materialize_operator_max_dim: OUTER_HVP_MATERIALIZE_MAX_DIM,
         eval_count: 0,
         outer_inner_cap: None,
         g_norm_initial: None,
