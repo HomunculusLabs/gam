@@ -1620,7 +1620,7 @@ pub fn build_matern_operator_penalty_psi_derivatives(
             // (r = 0) `t` and its ψ-derivatives are multiplied by displacement
             // factors that vanish identically, so we use the same 0 convention
             // as the value-side `t`.
-            let (t_psi, t_psi_psi) = if r < 1e-14 {
+            let (t_psi, t_psi_psi) = if r == 0.0 {
                 (0.0, 0.0)
             } else {
                 let r2 = r * r;

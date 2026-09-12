@@ -863,7 +863,7 @@ pub(crate) fn matern_aniso_extended_radial_scalars(
             let a = s * r;
             let e = (-a).exp();
             let phi = e;
-            if r < 1e-14 {
+            if r == 0.0 {
                 // Center collision. φ(r) = exp(−s r) has a cusp at r = 0, so
                 // the radial scalars q = φ'/r and t = (φ'' − q)/r² diverge.
                 // But every consumer multiplies them by displacement factors
@@ -910,7 +910,7 @@ pub(crate) fn matern_aniso_extended_radial_scalars(
             let e = (-a).exp();
             let phi = (1.0 + a) * e;
             let q = -s * s * e;
-            if r < 1e-14 {
+            if r == 0.0 {
                 return Ok((phi, q, 0.0, 0.0, 0.0));
             }
             let t = s * s * s * e / r;
@@ -1055,7 +1055,7 @@ pub(crate) fn hessian_operator_eta_entry(
     let a_is_b = usize::from(axis_a == axis_b) as f64;
     let a_is_c = usize::from(axis_a == axis_c) as f64;
     let q_a = t * s_a;
-    let t_a = if r > 1e-14 { t_r * s_a / r } else { 0.0 };
+    let t_a = if r > 0.0 { t_r * s_a / r } else { 0.0 };
     let diagonal = if axis_b == axis_c {
         w_b * (2.0 * a_is_b * q + q_a)
     } else {
@@ -1084,13 +1084,13 @@ pub(crate) fn hessian_operator_eta2_entry(
     let a_is_b = usize::from(axis_a == axis_b) as f64;
     let a_is_c = usize::from(axis_a == axis_c) as f64;
     let q_a = t * s_a;
-    let q_aa = if r > 1e-14 {
+    let q_aa = if r > 0.0 {
         t_r * s_a * s_a / r + 2.0 * t * s_a
     } else {
         0.0
     };
-    let t_a = if r > 1e-14 { t_r * s_a / r } else { 0.0 };
-    let t_aa = if r > 1e-14 {
+    let t_a = if r > 0.0 { t_r * s_a / r } else { 0.0 };
+    let t_aa = if r > 0.0 {
         ((t_rr * r - t_r) / (r * r * r)) * s_a * s_a + 2.0 * t_r * s_a / r
     } else {
         0.0
@@ -1131,10 +1131,10 @@ pub(crate) fn hessian_operator_eta_cross_entry(
     let j_is_c = usize::from(axis_j == axis_c) as f64;
     let q_i = t * s_i;
     let q_j = t * s_j;
-    let q_ij = if r > 1e-14 { t_r * s_i * s_j / r } else { 0.0 };
-    let t_i = if r > 1e-14 { t_r * s_i / r } else { 0.0 };
-    let t_j = if r > 1e-14 { t_r * s_j / r } else { 0.0 };
-    let t_ij = if r > 1e-14 {
+    let q_ij = if r > 0.0 { t_r * s_i * s_j / r } else { 0.0 };
+    let t_i = if r > 0.0 { t_r * s_i / r } else { 0.0 };
+    let t_j = if r > 0.0 { t_r * s_j / r } else { 0.0 };
+    let t_ij = if r > 0.0 {
         ((t_rr * r - t_r) / (r * r * r)) * s_i * s_j
     } else {
         0.0
@@ -1238,7 +1238,7 @@ impl MaternCrossPenaltyContext {
                     let h_axis = ci[axis] - cj[axis];
                     let w_axis = metric_weights[axis];
                     let row = k * d + axis;
-                    d1_cross_raw[[row, j]] = if r > 1e-14 {
+                    d1_cross_raw[[row, j]] = if r > 0.0 {
                         dt_dr * sa_sb / r * h_axis
                             + if axis == axis_a {
                                 2.0 * t * s_b * h_axis
@@ -1437,11 +1437,11 @@ pub(crate) fn build_matern_operator_penalty_aniso_derivatives(
                         } else {
                             w_b * h_b * t * s_a
                         };
-                        d1_eta2[a][[b, j]] = if a == b && r > 1e-14 {
+                        d1_eta2[a][[b, j]] = if a == b && r > 0.0 {
                             w_b * h_b * (dt_dr * s_a * s_a / r + 6.0 * t * s_a + 4.0 * q)
                         } else if a == b {
                             0.0
-                        } else if r > 1e-14 {
+                        } else if r > 0.0 {
                             w_b * h_b * (dt_dr * s_a * s_a / r + 2.0 * t * s_a)
                         } else {
                             0.0
