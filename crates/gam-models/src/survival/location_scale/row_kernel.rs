@@ -2707,6 +2707,114 @@ impl crate::row_kernel::RowKernel<SLS_ROW_K> for SurvivalLsRowKernel<'_> {
                 .collect::<Result<Vec<_>, String>>()
         })())
     }
+
+    /// Batched all-axes SECOND directional derivative `{H²dot[u, e_a]}_{a=0..p}`: the
+    /// outer-REML Jeffreys `H_Φ` drift's all-axes object, and the second-order sibling of
+    /// the override above.
+    ///
+    /// The generic per-axis fall-back runs `p` full-data sweeps, and each `(row, axis)`
+    /// pair rebuilds the row's exact kernel (`row_nll_inputs_opt`: exp / log / log-Φ
+    /// ladders) and its outer derivative plan, re-materializes the nine channel rows, and
+    /// projects the fixed direction `u`. Only the axis direction depends on the axis. Each
+    /// row's primary values and plan, its channel rows and `J·u` are therefore built once,
+    /// and every axis closes with the generated fourth contraction and the cached pullback.
+    ///
+    /// **Correctness contract.** Output `a` equals, bit-for-bit, the generic per-axis
+    /// `row_kernel_second_directional_derivative(self, rows, u, e_a)`. Both use the same
+    /// `jacobian_action` for `u`, the unit-axis direction read from the channel cache
+    /// (`axis_direction_from_channel_cache`, as the override above does), the
+    /// `sls_row_fourth_generated_with_plan` contraction the per-row hook reaches through
+    /// `sls_row_fourth_generated`, the same pullback order, and the chunk-ordered reduction
+    /// of `RowSet::All::par_try_reduce_fold`. A row without an exact kernel (non-positive
+    /// weight) is the per-row hook's all-zero matrix, whose pullback adds nothing. Only the
+    /// full-data unit-weight `RowSet::All` case is accelerated; a subsample declines
+    /// (`None`) so the generic Horvitz–Thompson per-axis path runs.
+    fn second_directional_derivative_all_axes_dense_override(
+        &self,
+        rows: &crate::row_kernel::RowSet,
+        d_beta_u: &[f64],
+    ) -> Option<Result<Vec<Array2<f64>>, String>> {
+        let p = self.n_coefficients();
+        if d_beta_u.len() != p {
+            return Some(Err(format!(
+                "second_directional_derivative_all_axes_dense_override: fixed direction has \
+                 {} entries, expected {p}",
+                d_beta_u.len(),
+            )));
+        }
+        let crate::row_kernel::RowSet::All = rows else {
+            return None;
+        };
+        Some((|| {
+            crate::row_kernel::RowKernel::<SLS_ROW_K>::warm_up_directional_caches(
+                self,
+                gam_problem::EvalMode::ValueGradientHessian,
+            )?;
+            let n = gam_math::jet_tower::RowProgram::n_rows(self);
+            // Per row, shared by every axis: the primary values and outer derivative plan,
+            // and the fixed direction's primary projection `J·u`.
+            let fixed: Vec<Option<([f64; SLS_ROW_K], SlsOuterPlan<5>, [f64; SLS_ROW_K])>> = (0..n)
+                .into_par_iter()
+                .map(|row| {
+                    Ok(self.row_nll_inputs_opt(row)?.map(|(primary, kernel)| {
+                        (
+                            primary,
+                            sls_outer_plan::<5>(&kernel),
+                            crate::row_kernel::RowKernel::<SLS_ROW_K>::jacobian_action(
+                                self, row, d_beta_u,
+                            ),
+                        )
+                    }))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let chans: Vec<Vec<Option<(usize, Array1<f64>)>>> = (0..n)
+                .into_par_iter()
+                .map(|row| self.cached_channel_rows(row))
+                .collect();
+            let n_chunks = arrow_row_chunk_count(n);
+            (0..p)
+                .into_par_iter()
+                .map(|a| {
+                    gam_problem::with_nested_parallel(|| -> Result<Array2<f64>, String> {
+                        let chunk_accs: Vec<Array2<f64>> = (0..n_chunks)
+                            .into_par_iter()
+                            .map(|chunk_idx| {
+                                let start = chunk_idx * ARROW_ROW_CHUNK;
+                                let end = (start + ARROW_ROW_CHUNK).min(n);
+                                let mut acc = Array2::<f64>::zeros((p, p));
+                                for row in start..end {
+                                    let Some((primary, plan, direction_u)) = fixed[row].as_ref()
+                                    else {
+                                        continue;
+                                    };
+                                    let direction_a =
+                                        axis_direction_from_channel_cache(&chans[row], a);
+                                    let fourth = sls_row_fourth_generated_with_plan(
+                                        primary,
+                                        plan,
+                                        direction_u,
+                                        &direction_a,
+                                    );
+                                    pullback_from_channel_cache(
+                                        &chans[row],
+                                        &fourth,
+                                        1.0,
+                                        &mut acc,
+                                    );
+                                }
+                                acc
+                            })
+                            .collect();
+                        let mut total = Array2::<f64>::zeros((p, p));
+                        for acc in chunk_accs {
+                            total = total + acc;
+                        }
+                        Ok(total)
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })())
+    }
 }
 
 impl crate::row_kernel::RowKernelFifth<SLS_ROW_K> for SurvivalLsRowKernel<'_> {
