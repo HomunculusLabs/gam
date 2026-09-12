@@ -848,3 +848,12 @@ defining file.
   `ingest` calls `tail_probability`, which `418c732d2` deleted with
   `selection_mean` from `smooth_term_lr.rs`. The measurement cannot return
   without that production API.
+
+### A restored pin whose subject was deleted after landing
+
+- `projection_law_beats_the_moment_matched_normal_on_a_two_row_cone_2446`:
+  `4b89ebc12` restored it from d484a091a^. `574449c98` (#2829) deleted its
+  subject, `constrained_projection_law`, because no product used it, and that
+  landed minutes before the restoration. `94fc37dd1` then deleted the pin and its
+  two private helpers, `exact_orthant_expectation` and `normal_infeasible_mass`,
+  so gam-solve's lib tests compile. It is retired: its subject is gone.
