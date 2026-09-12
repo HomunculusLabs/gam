@@ -96,28 +96,14 @@ pub(crate) fn sae_exact_a_direction_floor(
     gam_solve::arrow_schur::exact_a_direction_floor(spectral_dim, spectral_norm, b_quadratic_form)
 }
 
-/// PATH C (#2253) CH5 — which subset of the joint θ-derivative operator
-/// `K_w = ∂H/∂θ_w` a dense θ-adjoint contraction assembles. The FULL set
-/// reconstructs `Γ_w = tr(inv·K_w)` (self-checked against the production
-/// `logdet_theta_adjoint`); the two MIXED subsets isolate the single ρ-scaled
-/// term of `K_w` whose `∂/∂ρ_i` is nonzero (both are degree-one in `e^{ρ_i}`,
-/// so `∂K_w/∂ρ_i` equals the term itself). Keeping them as distinct channels
-/// makes a failing finite-difference gate localize to ONE formula.
+/// Which subset of the joint θ-derivative operator `K_w = ∂H/∂θ_w` a dense
+/// θ-adjoint contraction assembles. Only the full set is assembled.
 #[derive(Clone, Copy)]
 pub(crate) enum ThetaAdjointDhChannel {
     /// Every `∂H/∂θ_w` contribution: data residual curvature, the softmax
     /// data-weight logit factor, the softmax entropy Gershgorin majorizer, and
     /// the periodic ARD majorizer diagonal.
     All,
-    /// ONLY the softmax entropy Gershgorin majorizer θ-derivative (logit–logit,
-    /// same atom). This is the `∝ λ_sparse` term, so its `∂/∂ρ_sparse` equals
-    /// itself — the part-(b) mixed channel for the sparse coordinate.
-    SoftmaxSparseMixed,
-    /// ONLY the periodic ARD majorizer diagonal `w_row·(−ακ sin κt)` for the
-    /// coordinate slots whose `ard_flat_index` matches `target_flat`. This is
-    /// `∝ α = e^{ρ_ard}`, so its `∂/∂ρ_ard` equals itself — the part-(b) mixed
-    /// channel for one ARD coordinate.
-    ArdMixed { target_flat: usize },
 }
 
 /// One row's assembled `ΔC = A − B` blocks, in the arrow layout the streaming
@@ -2167,55 +2153,6 @@ impl SaeManifoldTerm {
         Ok(derivatives)
     }
 
-    /// PATH C (#2253) — the full joint arrow inverse `G = H⁻¹` (dim×dim),
-    /// materialized column by column against each unit arrow basis vector and
-    /// symmetrized. Shared by ch4 and ch5's small-dense (circle-mint scale)
-    /// route; `solver` must be [`DeflatedArrowSolver::plain`].
-    pub(crate) fn materialize_joint_inverse(
-        &self,
-        cache: &ArrowFactorCache,
-        solver: &DeflatedArrowSolver<'_>,
-    ) -> Result<Array2<f64>, String> {
-        let total_t = cache.delta_t_len();
-        let k = cache.k;
-        let dim = total_t + k;
-        let mut g = Array2::<f64>::zeros((dim, dim));
-        let mut rhs_t = Array1::<f64>::zeros(total_t);
-        let rhs_beta_zero = Array1::<f64>::zeros(k);
-        for col in 0..total_t {
-            rhs_t[col] = 1.0;
-            let sol = solver.solve(rhs_t.view(), rhs_beta_zero.view())?;
-            rhs_t[col] = 0.0;
-            for r in 0..total_t {
-                g[[r, col]] = sol.t[r];
-            }
-            for r in 0..k {
-                g[[total_t + r, col]] = sol.beta[r];
-            }
-        }
-        let rhs_t_zero = Array1::<f64>::zeros(total_t);
-        let mut rhs_beta = Array1::<f64>::zeros(k);
-        for col in 0..k {
-            rhs_beta[col] = 1.0;
-            let sol = solver.solve(rhs_t_zero.view(), rhs_beta.view())?;
-            rhs_beta[col] = 0.0;
-            for r in 0..total_t {
-                g[[r, total_t + col]] = sol.t[r];
-            }
-            for r in 0..k {
-                g[[total_t + r, total_t + col]] = sol.beta[r];
-            }
-        }
-        for a in 0..dim {
-            for b in (a + 1)..dim {
-                let avg = 0.5 * (g[[a, b]] + g[[b, a]]);
-                g[[a, b]] = avg;
-                g[[b, a]] = avg;
-            }
-        }
-        Ok(g)
-    }
-
     /// PATH C (#2253) CH5 — dense reconstruction of the θ-adjoint contraction
     /// `Γ_w = tr(inv · K_w)`, `K_w = ∂H/∂θ_w`, for an ARBITRARY dense joint
     /// inverse `inv` (dim×dim over the `(t, β)` blocks) and a chosen subset of
@@ -2527,11 +2464,11 @@ impl SaeManifoldTerm {
         let want_data = matches!(channel, ThetaAdjointDhChannel::All);
         let want_entropy = matches!(
             channel,
-            ThetaAdjointDhChannel::All | ThetaAdjointDhChannel::SoftmaxSparseMixed
+            ThetaAdjointDhChannel::All
         );
         let want_ard = matches!(
             channel,
-            ThetaAdjointDhChannel::All | ThetaAdjointDhChannel::ArdMixed { .. }
+            ThetaAdjointDhChannel::All
         );
         // `1/τ` (always, for the softmax data-weight logit factor) and the
         // entropy Gershgorin majorizer scale `λ_sparse·s/τ²` (only a live free
@@ -2751,9 +2688,6 @@ impl SaeManifoldTerm {
                             if let SaeLocalRowVar::Coord { atom, axis } = jets.vars[a] {
                                 if !ard_precisions[atom].is_empty() {
                                     let include = match channel {
-                                        ThetaAdjointDhChannel::ArdMixed { target_flat } => {
-                                            rho.ard_flat_index(atom, axis) == target_flat
-                                        }
                                         _ => true,
                                     };
                                     if include {
@@ -2887,376 +2821,6 @@ impl SaeManifoldTerm {
             t: gamma_t,
             beta: gamma_beta,
         })
-    }
-
-    /// PATH C (#2253) CH5 — the fixed-stratum ρ-derivative of the rank-charge
-    /// θ-adjoint `∇R = production_rank_charge_derivative().theta`, for ONE smooth
-    /// coordinate `smooth_flat`. `∇R` depends on ρ only through the per-atom
-    /// penalized Gram `A = G + λ S` (`λ = e^{ρ_smooth}`), and the θ-assembly is
-    /// LINEAR in each atom's differential blocks (`gram`, `occupancy`), so the
-    /// derivative reruns the SAME assembly with those blocks replaced by their
-    /// λ-derivatives (and zeroed for every other atom). With `A⁻¹ = inv`,
-    /// `S = smooth_penalty`, `dλ/dρ = λ`, `dA⁻¹/dλ = −A⁻¹SA⁻¹`:
-    /// `d(inv − inv G inv)/dρ = λ(−inv S inv + inv S inv G inv + inv G inv S inv)`
-    /// and `d tr(inv G)/dρ = −λ tr(inv S inv G)`. Non-interior-EDF atoms are on a
-    /// locally constant branch (zero derivative), matching the gradient.
-    fn rank_charge_theta_rho_derivative(
-        &self,
-        target: ArrayView2<'_, f64>,
-        rho: &SaeManifoldRho,
-        loss: &SaeManifoldLoss,
-        cache: &ArrowFactorCache,
-        smooth_flat: usize,
-    ) -> Result<SaeArrowVector, String> {
-        let target_atom = smooth_flat - rho.smooth_flat_start();
-        let residual = self.reconstruction_residual(target, rho)?;
-        let dispersion = self.reconstruction_dispersion(loss, cache, rho, Some(residual.view()))?;
-        let mut grams = self.empty_decoder_gram_accumulator();
-        self.accumulate_decoder_gram(&mut grams)?;
-        let n_eff = self.per_atom_effective_sample_size();
-        let lambda_vec = rho.lambda_smooth_vec()?;
-        let p = self.output_dim() as f64;
-
-        // Per-atom differential BLOCKS (gram, occupancy), zero except the target
-        // atom, whose blocks are the ρ_smooth-derivatives of the gradient's.
-        let mut atom_differentials: Vec<ProductionRankChargeAtomDifferential> =
-            Vec::with_capacity(self.k_atoms());
-        for atom_idx in 0..self.k_atoms() {
-            let atom = &self.atoms[atom_idx];
-            let m = atom.basis_size();
-            if atom_idx != target_atom || m == 0 {
-                atom_differentials.push(ProductionRankChargeAtomDifferential {
-                    gram: Array2::<f64>::zeros((m, m)),
-                    occupancy: 0.0,
-                });
-                continue;
-            }
-            let gram = &grams[atom_idx];
-            let n_atom = n_eff[atom_idx];
-            let lambda = lambda_vec[atom_idx];
-            let spectrum = super::wbic_audit::recon_spectrum(
-                gram,
-                atom.decoder_coefficients(),
-                n_atom,
-                p,
-                dispersion,
-                lambda,
-                Some(atom.smooth_penalty()),
-            )?;
-            let rank = spectrum.production_chargeable_rank() as f64;
-            if !(rank > 0.0) {
-                return Err(format!(
-                    "rank_charge_theta_rho_derivative: atom {atom_idx} is on the rank-zero \
-                     Laplace-invalid branch (vanished decoder)"
-                ));
-            }
-            let log_n = n_atom.max(1.0).ln();
-            if log_n == 0.0 {
-                atom_differentials.push(ProductionRankChargeAtomDifferential {
-                    gram: Array2::<f64>::zeros((m, m)),
-                    occupancy: 0.0,
-                });
-                continue;
-            }
-            let s = atom.smooth_penalty();
-            let mut penalized_gram = gram.clone();
-            for r in 0..m {
-                for c in 0..m {
-                    penalized_gram[[r, c]] += lambda * s[[r, c]];
-                }
-            }
-            let factor = penalized_gram.cholesky(Side::Lower).map_err(|error| {
-                format!(
-                    "rank_charge_theta_rho_derivative: atom {atom_idx} penalized Gram \
-                     factorization failed: {error}"
-                )
-            })?;
-            let inverse = factor.solve_mat(&Array2::<f64>::eye(m));
-            let edf_matrix = factor.solve_mat(gram);
-            let raw_edf = (0..m).map(|i| edf_matrix[[i, i]]).sum::<f64>();
-            let edf = super::construction::certified_basis_edf(
-                raw_edf,
-                m,
-                "rank_charge_theta_rho_derivative",
-            )?;
-            let edf_is_interior = edf > 0.0 && edf < m as f64;
-            // Reused products (all m×m): inv S inv, inv G inv, inv S inv G inv,
-            // inv G inv S inv, and inv S inv G (for the EDF trace).
-            let inv_s_inv = inverse.dot(s).dot(&inverse);
-            let inv_g_inv = inverse.dot(gram).dot(&inverse);
-            let inv_s_inv_g_inv = inv_s_inv.dot(gram).dot(&inverse);
-            let inv_g_inv_s_inv = inv_g_inv.dot(s).dot(&inverse);
-            let mut gram_prime = Array2::<f64>::zeros((m, m));
-            if edf_is_interior {
-                let coeff = lambda * 0.5 * rank * log_n;
-                for r in 0..m {
-                    for c in 0..m {
-                        gram_prime[[r, c]] = coeff
-                            * (-inv_s_inv[[r, c]]
-                                + inv_s_inv_g_inv[[r, c]]
-                                + inv_g_inv_s_inv[[r, c]]);
-                    }
-                }
-            }
-            let occupancy_prime = if n_atom > 1.0 {
-                let edf_prime = if edf_is_interior {
-                    let inv_s_inv_g = inv_s_inv.dot(gram);
-                    -lambda * (0..m).map(|i| inv_s_inv_g[[i, i]]).sum::<f64>()
-                } else {
-                    0.0
-                };
-                0.5 * rank * edf_prime / n_atom
-            } else {
-                0.0
-            };
-            atom_differentials.push(ProductionRankChargeAtomDifferential {
-                gram: gram_prime,
-                occupancy: occupancy_prime,
-            });
-        }
-
-        // The SAME linear θ-assembly as `production_rank_charge_derivative`, now
-        // driven by the differential-of-the-differential blocks.
-        let mut theta_t = Array1::<f64>::zeros(cache.delta_t_len());
-        let theta_beta = Array1::<f64>::zeros(cache.k);
-        let mut assignments = Array1::<f64>::zeros(self.k_atoms());
-        for row in 0..self.n_obs() {
-            self.assignment.try_assignments_row_into(
-                row,
-                assignments
-                    .as_slice_mut()
-                    .expect("rank-charge assignment scratch is contiguous"),
-            )?;
-            let vars = self.row_vars_for_cache_row(row, cache)?;
-            let base = cache.row_offsets[row];
-            for (slot, var) in vars.into_iter().enumerate() {
-                theta_t[base + slot] = match var {
-                    SaeLocalRowVar::Coord { atom, axis } => {
-                        let a = assignments[atom];
-                        if a == 0.0 {
-                            0.0
-                        } else {
-                            let phi = self.atoms[atom].basis_values.row(row);
-                            let dphi = self.atoms[atom].basis_jacobian.slice(s![row, .., axis]);
-                            2.0 * a * a * dphi.dot(&atom_differentials[atom].gram.dot(&phi))
-                        }
-                    }
-                    SaeLocalRowVar::Logit { atom: wrt_atom } => {
-                        let mut derivative = 0.0_f64;
-                        for atom in 0..self.k_atoms() {
-                            let da = self.rank_charge_assignment_derivative(
-                                wrt_atom,
-                                atom,
-                                assignments
-                                    .as_slice()
-                                    .expect("rank-charge assignment scratch is contiguous"),
-                            );
-                            if da == 0.0 {
-                                continue;
-                            }
-                            let a = assignments[atom];
-                            let phi = self.atoms[atom].basis_values.row(row);
-                            let gram_quadratic = phi.dot(&atom_differentials[atom].gram.dot(&phi));
-                            derivative += 2.0
-                                * a
-                                * da
-                                * (gram_quadratic + atom_differentials[atom].occupancy);
-                        }
-                        derivative
-                    }
-                };
-            }
-        }
-        Ok(SaeArrowVector {
-            t: theta_t,
-            beta: theta_beta,
-        })
-    }
-
-    /// PATH C (#2253) CH5 — the exact fixed-stratum second derivative of the
-    /// outer gradient's third-order forward-sensitivity channel
-    /// `g3[j] = −½⟨a, g_ρ,j⟩`, `a = A⁺Γ_eff`.
-    ///
-    /// `H3[i,j] = ∂g3[j]/∂ρ_i = −½( ⟨dΓ_eff/dρ_i − M_i·a, b_j⟩ + δ_ij⟨a, g_ρ,j⟩ )`
-    /// with `b_j = A⁺ g_ρ,j` (self-adjointness of `A⁺`). `Γ_eff = Γ_joint − Γ_tt
-    /// + 2∇R` — the SAME effective adjoint the gradient assembles. Each
-    /// `dΓ_·/dρ_i` splits into part-(a) `−tr(inv M_i inv K_w)` (twisted inverse)
-    /// and part-(b) `tr(inv ∂K_w/∂ρ_i)` (the ARD / softmax-sparse mixed
-    /// channels), and `d∇R/dρ` is nonzero only on the smooth coordinates. The
-    /// returned block is `∂g3[j]/∂ρ_i` verbatim (validated by the FD gate);
-    /// the caller may symmetrize.
-    fn third_order_forward_sensitivity_hessian(
-        &self,
-        target: ArrayView2<'_, f64>,
-        rho: &SaeManifoldRho,
-        loss: &SaeManifoldLoss,
-        cache: &ArrowFactorCache,
-    ) -> Result<Array2<f64>, String> {
-        // Covered config: the small-dense softmax route with no deflation,
-        // frames, compact layout, or ordered Beta--Bernoulli. Outside it the
-        // dense `dh` reconstruction and the twist are not the exact operator, so
-        // refuse rather than advertise wrong curvature.
-        if !matches!(self.assignment.mode, AssignmentMode::Softmax { .. }) {
-            return Err(
-                "third_order_forward_sensitivity_hessian: only the softmax assignment route is \
-                 modelled by the dense θ-adjoint reconstruction"
-                    .to_string(),
-            );
-        }
-        if self.last_row_layout.is_some() {
-            return Err(
-                "third_order_forward_sensitivity_hessian: the compact top-k softmax row layout is \
-                 not covered by the dense θ-adjoint reconstruction"
-                    .to_string(),
-            );
-        }
-        if self.frames_active() {
-            return Err(
-                "third_order_forward_sensitivity_hessian: border-frame smoothness offsets are not \
-                 covered by this channel"
-                    .to_string(),
-            );
-        }
-        let solver = DeflatedArrowSolver::plain(cache);
-        // Per-row spectral/gauge deflation IS modelled — the dense θ-adjoint
-        // subtracts the same frozen Daleckii–Krein correction the production
-        // builder does (#2308), and the plain deflated inverse is what `a`/`b_j`
-        // and the twist all ride. What the plain solver CANNOT reconstruct is the
-        // rank-R β-Schur Woodbury GAUGE correction: there the materialized inverse
-        // would omit it, so refuse rather than assemble a wrong twist.
-        if !solver.plain_selected_inverse_available() {
-            return Err(
-                "third_order_forward_sensitivity_hessian: a β-Schur Woodbury gauge deflation is \
-                 active; the plain selected inverse omits its rank-R correction, so the \
-                 twisted-inverse reconstruction is not the exact operator"
-                    .to_string(),
-            );
-        }
-
-        let n_params = rho.to_flat().len();
-        let total_t = cache.delta_t_len();
-        let k = cache.k;
-        let dim = total_t + k;
-        let flatten = |v: &SaeArrowVector| -> Array1<f64> {
-            let mut out = Array1::<f64>::zeros(dim);
-            out.slice_mut(s![..total_t]).assign(&v.t);
-            out.slice_mut(s![total_t..]).assign(&v.beta);
-            out
-        };
-
-        let g = self.materialize_joint_inverse(cache, &solver)?;
-        let operators = self.penalty_curvature_operators_by_flat(rho, cache)?;
-        // `∂A/∂ρᵢ = ∂H/∂ρᵢ (operators) + ∂(ΔC)/∂ρᵢ (this delta)`. BOTH the twist
-        // inverse ∂G/∂ρ = −G(∂A/∂ρ)G and the IFT `Mᵢ·a` term differentiate the
-        // EXACT stationarity Hessian A, so both add this delta (#2330).
-        let exact_deltas = self.exact_stationarity_penalty_derivative_delta_by_flat(rho, cache)?;
-
-        // Effective adjoint Γ_eff = Γ_joint + 2∇R, assembled EXACTLY as the
-        // gradient does (construction_exact_hessian.rs analytic assembler).
-        let rank_charge = self.production_rank_charge_derivative(target, rho, loss, cache)?;
-        let mut gamma_eff = self.logdet_theta_adjoint(rho, cache, &solver)?;
-        gamma_eff.t.scaled_add(2.0, &rank_charge.theta.t);
-        gamma_eff.beta.scaled_add(2.0, &rank_charge.theta.beta);
-
-        // Adjoints: factor the materialized exact A once, then apply its
-        // rank-revealing pseudoinverse to Γ_eff and every g_ρ,j RHS.
-        let stationarity_geometry =
-            self.materialize_exact_stationarity_geometry(rho, target, cache)?;
-        let a_vec = stationarity_geometry.solve_stationarity(&gamma_eff)?;
-        let a_flat = flatten(&a_vec);
-        let flats: Vec<usize> = operators.keys().copied().collect();
-        let mut b_flat: std::collections::BTreeMap<usize, Array1<f64>> =
-            std::collections::BTreeMap::new();
-        let mut g_rho_flat: std::collections::BTreeMap<usize, Array1<f64>> =
-            std::collections::BTreeMap::new();
-        for &j in &flats {
-            let g_rho = self.outer_rho_gradient_ift_rhs(rho, j, cache)?;
-            let b_j = stationarity_geometry.solve_stationarity(&g_rho)?;
-            g_rho_flat.insert(j, flatten(&g_rho));
-            b_flat.insert(j, flatten(&b_j));
-        }
-
-        let smooth_range =
-            rho.smooth_flat_start()..rho.smooth_flat_start() + rho.log_lambda_smooth.len();
-        let sparse_index = rho.sparse_flat_index();
-
-        let mut hessian = Array2::<f64>::zeros((n_params, n_params));
-        for &i in &flats {
-            let m_i = &operators[&i];
-            // Twisted inverse G_i = −G (∂A/∂ρ_i) G.
-            // The Laplace logdet is logdet(A_exact), so ∂G/∂ρ_i differentiates the
-            // EXACT stationarity Hessian ∂A/∂ρ_i = M_i + ΔC-delta_i — NOT the
-            // majorized M_i alone, which is one-sided on ARD (delta ≠ 0 only for
-            // ARD/softmax) and breaks g3 smooth↔ARD cross-conservation (#2330).
-            let twist_op = match exact_deltas.get(&i) {
-                Some(delta_i) => m_i + delta_i,
-                None => m_i.clone(),
-            };
-            let g_i = -g.dot(&twist_op).dot(&g);
-
-            // dΓ_joint/dρ_i = part(a) twist + part(b) mixed.
-            let mut d_gamma_joint = self.logdet_theta_adjoint_dense(
-                rho,
-                cache,
-                &g_i,
-                ThetaAdjointDhChannel::All,
-                false,
-                false,
-                None,
-            )?;
-            if smooth_range.contains(&i) {
-                // Smooth part(b) = 0; the only smooth ρ-derivative of Γ_eff is
-                // through the rank-charge adjoint.
-                let d_rank = self.rank_charge_theta_rho_derivative(target, rho, loss, cache, i)?;
-                d_gamma_joint.t.scaled_add(2.0, &d_rank.t);
-                d_gamma_joint.beta.scaled_add(2.0, &d_rank.beta);
-            } else if sparse_index == Some(i) {
-                let mixed_joint = self.logdet_theta_adjoint_dense(
-                    rho,
-                    cache,
-                    &g,
-                    ThetaAdjointDhChannel::SoftmaxSparseMixed,
-                    false,
-                    false,
-                    None,
-                )?;
-                d_gamma_joint.t += &mixed_joint.t;
-                d_gamma_joint.beta += &mixed_joint.beta;
-            } else {
-                // ARD coordinate: part(b) mixed channel for this flat index.
-                let mixed_joint = self.logdet_theta_adjoint_dense(
-                    rho,
-                    cache,
-                    &g,
-                    ThetaAdjointDhChannel::ArdMixed { target_flat: i },
-                    false,
-                    false,
-                    None,
-                )?;
-                d_gamma_joint.t += &mixed_joint.t;
-                d_gamma_joint.beta += &mixed_joint.beta;
-            }
-
-            // dΓ_eff/dρ_i = dΓ_joint (+2∇R' folded in above).
-            let d_gamma = flatten(&d_gamma_joint);
-            // resid_i = dΓ_eff/dρ_i − (∂A/∂ρ_i)·a, with ∂A/∂ρ_i = M_i + ΔC-delta_i
-            // (the IFT term differentiates the EXACT A, not the majorized H).
-            let mut a_op_i_a = m_i.dot(&a_flat);
-            if let Some(delta_i) = exact_deltas.get(&i) {
-                a_op_i_a += &delta_i.dot(&a_flat);
-            }
-            let resid_i = &d_gamma - &a_op_i_a;
-
-            for &j in &flats {
-                let b_j = &b_flat[&j];
-                let mut term = resid_i.dot(b_j);
-                if i == j {
-                    term += a_flat.dot(&g_rho_flat[&j]);
-                }
-                hessian[[i, j]] = -0.5 * term;
-            }
-        }
-        Ok(hessian)
     }
 
     /// #2080 forward plumbing — the analytic outer-ρ gradient with an OPTIONAL
@@ -3773,384 +3337,6 @@ impl SaeManifoldTerm {
             occam,
             third_order_correction,
         })
-    }
-
-    /// PATH C channel — exact fixed-stratum second derivative of the SOLVER-FREE
-    /// explicit outer-gradient channels: the decoder-smoothness penalty energy
-    /// (with its Occam renormalization to `loss.smoothness`) and the ARD
-    /// log-precision prior. The rank-charge `direct_rho`, assignment
-    /// log-strength, log-determinant traces, and third-order IFT channels are
-    /// each assembled by their own methods; this one covers only the two
-    /// channels that are closed forms of ρ at a frozen inner state (`atoms`,
-    /// `assignment`) and touch no `H⁻¹`/`A⁺` solve, so it needs no cache.
-    ///
-    /// Math (all at fixed stratum, `s = log α`, `f_k = ⟨B_k, S_k B_k⟩` frozen):
-    /// * Smoothness. The gradient renormalizes the per-atom penalty energy
-    ///   `se_k = ½ λ_k f_k` to `C = loss.smoothness`, i.e. `g_k = C · se_k / Σse`.
-    ///   But `C = penalty_scale · Σse` (construction.rs:4995), so the renormalizer
-    ///   `renorm = C/Σse = penalty_scale` is ρ-INVARIANT — the `Σse` cancels — and
-    ///   `g_k = renorm · se_k`. With `∂se_k/∂ρ_j = δ_{jk} se_k` the block is the
-    ///   plain DIAGONAL `∂²/∂ρ_i∂ρ_j = renorm · δ_{ij} se_i`. (Holding `C` frozen
-    ///   while `Σse` moves manufactures a spurious Occam cross term the
-    ///   full-gradient FD reports as zero — the frozen-cache false-green genus.)
-    /// * ARD. Per `(atom, axis)` the gradient is `energy_deriv + normalizer_deriv`
-    ///   with `energy_deriv = Σ_i w_i · V(α, t_i)` (degree-one in `α`, so its own
-    ///   `∂/∂s` is itself) and a normalizer that is `−½ n_eff` (constant → zero)
-    ///   on a Euclidean axis and `n_eff · d1(log η)` on a periodic axis,
-    ///   `log η = log α + 2(log p − log τ)`. The periodic second derivative is
-    ///   `energy_deriv + n_eff · c''(log η)` with `c''` the stable
-    ///   [`gam_math::special::bessel_i0_centered_second_log_derivative_from_log_abs`].
-    ///   ARD axes are independent (diagonal); a shared-ARD coordinate owned by
-    ///   several atoms accumulates their diagonals, matching the gradient's `+=`.
-    /// * Occam. `reml_occam_log_lambda_smooth_derivative` is ρ-independent → zero.
-    ///
-    /// `frozen_smoothness_energy` is the criterion's reported `loss.smoothness`
-    /// at the fixed stratum (`Σ_m se_m` on the full-batch path; a minibatch
-    /// `penalty_scale` folded into it is preserved by the `C/Σ` renormalization).
-    pub(crate) fn outer_explicit_smoothness_ard_hessian(
-        &self,
-        rho: &SaeManifoldRho,
-        frozen_smoothness_energy: f64,
-    ) -> Result<Array2<f64>, String> {
-        self.assignment.validate_rho_domain(rho)?;
-        let n_params = rho.to_flat().len();
-        let mut hessian = Array2::<f64>::zeros((n_params, n_params));
-
-        // Decoder-smoothness penalty energy with its Occam renormalization.
-        let lambda_smooth = rho.lambda_smooth_vec()?;
-        let smooth_energy = self.decoder_smoothness_value_per_atom(&lambda_smooth)?;
-        let energy_sum: f64 = smooth_energy.iter().sum();
-        let k_smooth = rho.log_lambda_smooth.len();
-        // The gradient's explicit smooth term is `g_k = C·se_k/Σse` with
-        // `C = loss.smoothness = penalty_scale·Σse` (construction.rs:4995 — the
-        // criterion energy IS the λ-scaled per-atom penalty times the minibatch
-        // `penalty_scale`). So the renormalizer `renorm = C/Σse = penalty_scale`
-        // is ρ-INVARIANT — the `Σse` in `C` cancels the denominator — and
-        // `g_k = renorm·se_k`. Hence `∂g_k/∂ρ_j = renorm·δ_jk·se_k`: the block is
-        // DIAGONAL. Holding `C` frozen while `Σse` moves (the old code) manufac-
-        // tured a spurious Occam cross term `−renorm·se_a·se_b/Σse` that the
-        // full-gradient FD (which recomputes `C` at each ρ) correctly reports as
-        // zero. This is the frozen-cache false-green genus — the renormalizer must
-        // be differentiated, not held constant.
-        if energy_sum.abs() > 0.0 {
-            let renorm = frozen_smoothness_energy / energy_sum;
-            for a in 0..k_smooth {
-                let ia = rho.smooth_flat_index(a);
-                hessian[[ia, ia]] += renorm * smooth_energy[a];
-            }
-        } else {
-            for a in 0..k_smooth {
-                let ia = rho.smooth_flat_index(a);
-                hessian[[ia, ia]] += smooth_energy[a];
-            }
-        }
-
-        // ARD log-precision prior (diagonal per coordinate; shared axes sum).
-        let ard_precisions = self.validated_ard_precisions(rho)?;
-        let row_w = self.row_loss_weights.as_deref();
-        let n = self.n_obs() as f64;
-        let n_eff = row_w.map_or(n, |w| w.iter().sum::<f64>());
-        for (atom_idx, coord) in self.assignment.coords.iter().enumerate() {
-            if rho.log_ard[atom_idx].is_empty() {
-                continue;
-            }
-            let periods = coord.effective_axis_periods();
-            for axis in 0..coord.latent_dim() {
-                let alpha = ard_precisions[atom_idx][axis];
-                let log_alpha = rho.log_ard[atom_idx][axis];
-                let period = periods[axis];
-                let mut energy_deriv = 0.0_f64;
-                for row in 0..coord.n_obs() {
-                    let w_row = row_w.map_or(1.0, |w| w[row]);
-                    let t = coord.row(row)[axis];
-                    energy_deriv += w_row * ArdAxisPrior::eval(alpha, t, period).value;
-                }
-                let normalizer_second = match period {
-                    None => 0.0,
-                    Some(p) => {
-                        let log_eta = log_alpha + 2.0 * (p.ln() - std::f64::consts::TAU.ln());
-                        n_eff
-                            * gam_math::special::bessel_i0_centered_second_log_derivative_from_log_abs(
-                                log_eta,
-                            )
-                    }
-                };
-                let idx = rho.ard_flat_index(atom_idx, axis);
-                hessian[[idx, idx]] += energy_deriv + normalizer_second;
-            }
-        }
-
-        // Sparse (assignment log-strength). The gradient's `explicit[sparse]` is
-        // `assignment_prior_log_strength_derivative_weighted`, which for BOTH
-        // penalty-weight families whose concentration multiplies the logit penalty
-        // linearly returns the prior VALUE:
-        //
-        //   softmax          λ_sparse·s · E_entropy(logits)          (assignment.rs, `penalty.value`)
-        //   threshold gate   λ_sparse · Σ_i w_i·σ((ℓ_i−θ)/τ)         (assignment.rs, `sparsity_strength * acc`)
-        //
-        // Both are degree-one in `λ_sparse = e^ρ_sparse`, so
-        // `∂²/∂ρ_sparse² = ∂/∂ρ_sparse(λ_sparse·E) = λ_sparse·E` — the SAME scalar
-        // the gradient reports — and there is no cross term (it depends only on
-        // `λ_sparse` and the frozen logits, not on smooth/ARD). K=1 softmax and
-        // frozen routing return 0, so the diagonal is correctly zero there. TopK
-        // mints no sparse coordinate at all.
-        //
-        // Ordered Beta--Bernoulli is the one family this identity does NOT cover:
-        // under a learnable concentration the sparse slot holds `log α`, not
-        // `log λ`, and `assignment_prior_log_strength_derivative_weighted` switches
-        // to `grad_rho` — a genuinely nonlinear concentration derivative whose
-        // second derivative is not the first. Refuse there, naming the reason.
-        if let Some(sparse_index) = rho.sparse_flat_index() {
-            match self.assignment.mode {
-                AssignmentMode::Softmax { .. } | AssignmentMode::ThresholdGate { .. } => {
-                    hessian[[sparse_index, sparse_index]] +=
-                        crate::assignment::assignment_prior_log_strength_derivative_weighted(
-                            &self.assignment,
-                            rho,
-                            self.row_loss_weights.as_deref(),
-                        )?;
-                }
-                AssignmentMode::TopK { .. } => {}
-                AssignmentMode::OrderedBetaBernoulli { .. } => {
-                    return Err(format!(
-                        "outer_explicit_smoothness_ard_hessian: the {} sparse log-strength \
-                         explicit term is not degree-one in its coordinate (the concentration \
-                         derivative is nonlinear), so its second derivative is not the \
-                         gradient's own value; refusing to assemble a Hessian with a \
-                         silently-zero sparse explicit term",
-                        self.assignment.mode.family_label()
-                    ));
-                }
-            }
-        }
-
-        Ok(hessian)
-    }
-
-    /// PATH C channel 4 — exact fixed-stratum second derivative of the outer
-    /// gradient's log-determinant Daleckii–Krein trace channel (`logdet_trace`).
-    ///
-    /// The gradient's `logdet_trace` component is, per outer coordinate `i`,
-    /// `logdet_trace_i = ½·[tr(G Cᵢ) − tr(H_bd⁻¹ Cᵢ)]`, where `Cᵢ = ∂H/∂ρ_i` is
-    /// the penalty curvature the coordinate scales, `G = H⁻¹` is the FULL joint
-    /// arrow inverse (the `ard_joint` / smoothness-EDF selected inverse), and
-    /// `H_bd⁻¹` is the block-diagonal per-row `H_tt` inverse the rank-charge
-    /// coordinate block subtracts (`ard_coordinate` trace). The smoothing channel
-    /// touches only `H_ββ`, so its `H_bd⁻¹` leg is identically zero; the periodic
-    /// ARD channel touches only the row-local `t`-slots, so both legs contribute.
-    ///
-    /// Every operator `Cᵢ` is degree-one in `exp(ρ_i)` at a frozen inner state —
-    /// `λ_k·S_k ⊗ I` on the β-block for smoothing; `w_row·max(α cos κt, 0)` on the
-    /// active `t`-rows for periodic ARD (`w_row·α` for a Euclidean axis). The
-    /// `max(·,0)` majorizer active set is invariant under a ρ perturbation because
-    /// ρ scales only `α`, never the frozen coordinate `t`. Hence
-    /// `∂Cᵢ/∂ρ_j = δ_{ij} Cᵢ` and, with the Daleckii–Krein differential
-    /// `∂G/∂ρ_j = −G C_j G` for each inverse `G`,
-    /// `block[i,j] = ½·δ_{ij}·(tr(G Cᵢ) − tr(H_bd⁻¹ Cᵢ))
-    ///              − ½·(tr(G C_j G Cᵢ) − tr(H_bd⁻¹ C_j H_bd⁻¹ Cᵢ))`.
-    /// The diagonal `δ` term is exactly the coordinate's own `logdet_trace_i`
-    /// value (the "self-term equals the operator" identity). A smoothing `C_j`
-    /// vanishes on `H_bd⁻¹` (t-only) and an ARD `C_i` couples to a smoothing `C_j`
-    /// only through the FULL inverse's `t`–β block, matching the gradient's
-    /// construction.
-    ///
-    /// Small-dense materialization: build `G` dense by solving the arrow system
-    /// against each unit arrow basis vector (`DeflatedArrowSolver::plain`), and
-    /// `H_bd⁻¹` from the per-row undamped Cholesky factors — the same two inverses
-    /// the gradient's `ard_joint` / `ard_coordinate` legs use, so value, gradient,
-    /// and this Hessian share one (deflation-free interior) selected inverse.
-    /// Shared-ARD axes accumulate their per-atom operators into one flat
-    /// coordinate, matching the gradient's chain-rule `+=`.
-    pub(crate) fn logdet_daleckii_krein_hessian(
-        &self,
-        rho: &SaeManifoldRho,
-        cache: &ArrowFactorCache,
-    ) -> Result<Array2<f64>, String> {
-        self.assignment.validate_rho_domain(rho)?;
-        let n_params = rho.to_flat().len();
-        // #2724 - the shared exact-stationarity size expression (streaming_plan.rs).
-        let dim = sae_exact_stationarity_dim(cache.delta_t_len(), cache.k);
-        let solver = DeflatedArrowSolver::plain(cache);
-        // The full joint inverse `G = H⁻¹` is the shared helper ch4 and ch5 both
-        // read (#2500).
-        let g = self.materialize_joint_inverse(cache, &solver)?;
-
-
-        // #2500 — ch4 and ch5 read ONE operator map. The doc on
-        // `penalty_curvature_operators_by_flat` has always claimed it was
-        // "Extracted from `logdet_daleckii_krein_hessian` (ch4) so ch4's
-        // Daleckii–Krein trace and ch5's forward-sensitivity twist read ONE
-        // operator map", but the extraction was never finished: ch4 kept a
-        // 103-line verbatim copy, which is how the two channels came to hold two
-        // independent per-family enumerations of the sparse operator and two
-        // separately-worded refusals for the same unmodelled case.
-        //
-        // The one place the channels legitimately differ is the ordered
-        // Beta--Bernoulli sparse coordinate. Its `∂A/∂ρ_sparse` is the cross-row
-        // integrated-marginal logit Hessian, which the shared map deliberately
-        // does not emit because ch5's caller adds it directly through
-        // `dense_exact_a_ordered_bb_sparse_trace`. This Hessian channel has no
-        // such sibling, so a silently-zero sparse ROW would reach a curvature
-        // block ARC then inverts. Refuse before assembling, naming the operator
-        // rather than the family.
-        if rho.sparse_flat_index().is_some()
-            && matches!(
-                self.assignment.mode,
-                AssignmentMode::OrderedBetaBernoulli { .. }
-            )
-        {
-            return Err(format!(
-                "logdet_daleckii_krein_hessian: the {} sparse log-strength operator is the \
-                 cross-row integrated-marginal logit Hessian, which this channel has no \
-                 sibling for; refusing to assemble a Hessian with a silently-zero sparse row",
-                self.assignment.mode.family_label()
-            ));
-        }
-        let c_by_flat = self.penalty_curvature_operators_by_flat(rho, cache)?;
-
-        // Precompute G·Cᵢ and its trace for each flat coordinate.
-        let flats: Vec<usize> = c_by_flat.keys().copied().collect();
-        let mut gc: Vec<Array2<f64>> = Vec::with_capacity(flats.len());
-        let mut tr_g: Vec<f64> = Vec::with_capacity(flats.len());
-        for &flat in &flats {
-            let c = &c_by_flat[&flat];
-            let gci = g.dot(c);
-            tr_g.push((0..dim).map(|d| gci[[d, d]]).sum());
-            gc.push(gci);
-        }
-
-        // block[i,j] = ½·δ_{ij}·tr(G Cᵢ) − ½·tr(G Cᵢ G C_j): the Daleckii–Krein
-        // Hessian of ½log|H|, coordinate block included (#2668).
-        let mut hessian = Array2::<f64>::zeros((n_params, n_params));
-        for (ii, &fi) in flats.iter().enumerate() {
-            for (jj, &fj) in flats.iter().enumerate() {
-                let (gi, gj) = (&gc[ii], &gc[jj]);
-                let mut cross_g = 0.0_f64;
-                for a in 0..dim {
-                    for b in 0..dim {
-                        cross_g += gi[[a, b]] * gj[[b, a]];
-                    }
-                }
-                let diag = if ii == jj { 0.5 * tr_g[ii] } else { 0.0 };
-                hessian[[fi, fj]] += diag - 0.5 * cross_g;
-            }
-        }
-        Ok(hessian)
-    }
-
-    /// PATH C (#2253) — assemble the COMPLETE exact fixed-stratum dense outer
-    /// Hessian for the small-dense ARC route from all four analytic channels
-    /// (ch1 explicit smoothness/ARD, ch2 rank-charge direct, ch4 log-determinant
-    /// Daleckii–Krein, ch5 third-order forward-sensitivity), enforce the
-    /// coordinate-coverage invariant, and return `Ok(block)`.
-    ///
-    /// ch5 refuses for any config outside the covered small-dense softmax route
-    /// (compact top-k layout, per-row deflation, border frames, non-softmax
-    /// priors), and the crosscoder-block guard / coverage invariant refuse an
-    /// unmodelled coordinate — those refusals propagate as `Err`, so this only
-    /// returns `Ok` when the full block is assembled AND validated. The public
-    /// [`Self::exact_fixed_stratum_outer_hessian`] currently wraps this in a
-    /// staged `Err` (see its doc); the finite-difference gates call THIS assembler
-    /// directly to validate the block.
-    pub(crate) fn assemble_exact_fixed_stratum_outer_hessian(
-        &self,
-        target: ArrayView2<'_, f64>,
-        rho: &SaeManifoldRho,
-        loss: &SaeManifoldLoss,
-        cache: &ArrowFactorCache,
-    ) -> Result<Array2<f64>, String> {
-        // #2231 crosscoder block relevances (`log_lambda_block`, the trailing flat
-        // coordinates): the gradient prices them (`crosscoder_block_ift_rhs`), but no
-        // Hessian channel writes their rows/columns yet. Emitting a Dense Hessian with
-        // those rows identically zero while their gradient is live would hand ARC a
-        // singular system — strictly worse than declaring the curvature unavailable.
-        // Refuse until a block channel lands. (Empty on the circle-mint route.)
-        if !rho.log_lambda_block.is_empty() {
-            return Err(format!(
-                "exact_fixed_stratum_outer_hessian: rho carries {} crosscoder block \
-                 relevance coordinate(s) that no Hessian channel models; refusing to \
-                 advertise a curvature block with unmodelled (zero) rows",
-                rho.log_lambda_block.len()
-            ));
-        }
-        let n_params = rho.to_flat().len();
-        let mut hessian = self.outer_explicit_smoothness_ard_hessian(rho, loss.smoothness)?;
-        hessian += &self.rank_charge_direct_rho_hessian(target, rho, loss, cache)?;
-        hessian += &self.logdet_daleckii_krein_hessian(rho, cache)?;
-        // CH5 — the third-order forward-sensitivity channel completes the exact
-        // fixed-stratum curvature. It refuses (propagated here) for any config
-        // outside the covered small-dense softmax route, so a Dense Hessian is
-        // never advertised where a sub-channel is unmodelled.
-        hessian += &self.third_order_forward_sensitivity_hessian(target, rho, loss, cache)?;
-
-        // Coordinate-coverage invariant (#2253), checked at assembly time on
-        // EVERY call: every flat coordinate the outer gradient prices must own a
-        // non-zero Hessian row. The priced set is assembled from the SAME
-        // channels the gradient uses (per-atom smoothness, ARD axes, and the
-        // softmax sparse log-strength coordinate when it is structurally live).
-        // A live-gradient coordinate with an identically-zero Hessian row would
-        // hand ARC a singular system, so refuse (naming the gap) rather than
-        // advertise partial curvature. For the covered route ch1+ch4 already
-        // fill every such row, so this passes; it is a guard against an
-        // unhandled coordinate slipping through, not an expected refusal.
-        let mut priced: Vec<usize> = Vec::new();
-        for a in 0..rho.log_lambda_smooth.len() {
-            priced.push(rho.smooth_flat_index(a));
-        }
-        for k in 0..rho.log_ard.len() {
-            for axis in 0..rho.log_ard[k].len() {
-                let idx = rho.ard_flat_index(k, axis);
-                if !priced.contains(&idx) {
-                    priced.push(idx);
-                }
-            }
-        }
-        if let Some(sparse) = rho.sparse_flat_index() {
-            if matches!(self.assignment.mode, AssignmentMode::Softmax { .. }) && self.k_atoms() > 1
-            {
-                priced.push(sparse);
-            }
-        }
-        for &c in &priced {
-            let row_is_live = (0..n_params).any(|j| hessian[[c, j]] != 0.0);
-            if !row_is_live {
-                return Err(format!(
-                    "exact_fixed_stratum_outer_hessian: flat coordinate {c} carries a live \
-                     outer-gradient component but an identically-zero Hessian row; refusing \
-                     to advertise a curvature block with an unmodelled coordinate"
-                ));
-            }
-        }
-        Ok(hessian)
-    }
-
-    /// PATH C (#2253) — production entry for the exact fixed-stratum outer
-    /// Hessian. COMMIT 1 (this): assemble AND validate the full block
-    /// ([`Self::assemble_exact_fixed_stratum_outer_hessian`]) — exercising the
-    /// config guards, all four channels, and the coordinate-coverage invariant —
-    /// then keep returning `Err` so `eval` yields `HessianValue::Unavailable` and
-    /// production stays on the analytic-gradient BFGS route during the blind
-    /// window. The finite-difference gates validate the assembly by calling the
-    /// assembler directly. COMMIT 2 (once the FD gate is green on MSI) replaces
-    /// this body with the assembler's `Ok` result and flips `capability()` to
-    /// `Dense` for the covered softmax config — a tiny separately-validated
-    /// change that carries the wrong-curvature-steering risk out of this window.
-    pub(crate) fn exact_fixed_stratum_outer_hessian(
-        &self,
-        target: ArrayView2<'_, f64>,
-        rho: &SaeManifoldRho,
-        loss: &SaeManifoldLoss,
-        cache: &ArrowFactorCache,
-    ) -> Result<Array2<f64>, String> {
-        let hessian = self.assemble_exact_fixed_stratum_outer_hessian(target, rho, loss, cache)?;
-        Err(format!(
-            "PATH C exact fixed-stratum outer Hessian is assembled and validated \
-             ({}×{}) but intentionally not advertised in commit 1: the Err→Ok + \
-             capability→Dense flip lands as a separately-validated commit once the \
-             finite-difference gate is green",
-            hessian.nrows(),
-            hessian.ncols()
-        ))
     }
 
     /// Classification of the exact observed information `A = B + ΔC` for the
@@ -4782,11 +3968,10 @@ impl SaeManifoldTerm {
         ))
     }
 
-    /// PATH C / #2330 — dense symmetric materialization of the EXACT stationarity
+    /// #2330 — dense symmetric materialization of the EXACT stationarity
     /// Hessian `A = ∇²_θθ L = B + ΔC` (`dim×dim`, `dim = total_t + k`), built
-    /// column by column via [`Self::apply_exact_hessian`] and symmetrized. The
-    /// small-dense (circle-mint) scale this route already pays for
-    /// [`Self::materialize_joint_inverse`]; shared by the observed-information
+    /// column by column via [`Self::apply_exact_hessian`] and symmetrized, at the
+    /// small-dense (circle-mint) scale; shared by the observed-information
     /// log-determinant (VALUE) and its `A⁻¹` selected inverse (GRADIENT) so both
     /// factor one identical operator. `test_support`-scoped until Phase 2 wiring
     /// (see [`Self::exact_observed_information_log_dets`]).
@@ -5237,10 +4422,8 @@ impl SaeManifoldTerm {
     /// The dense reconstruction carries three prior legs: the softmax entropy
     /// Gershgorin majorizer (`want_entropy`), the ordered-Beta–Bernoulli Patch-D
     /// cross-row adjoint, and the periodic-ARD majorizer diagonal. It carries no
-    /// per-atom-logistic GATE legs, which is what a `ThresholdGate` row needs —
-    /// the same limitation `third_order_forward_sensitivity_hessian` already
-    /// refuses on ("only the softmax assignment route is modelled by the dense
-    /// θ-adjoint reconstruction"). `TopK` mints no free logit at all, so there is
+    /// per-atom-logistic GATE legs, which is what a `ThresholdGate` row needs.
+    /// `TopK` mints no free logit at all, so there is
     /// nothing for a gate leg to model and the reconstruction is complete there by
     /// construction.
     ///
@@ -5750,7 +4933,7 @@ mod test_support {
         ThetaAdjointDhChannel,
     };
     use gam_linalg::faer_ndarray::FaerEigh;
-    use ndarray::{Array1, s};
+    use ndarray::{Array1, Array2};
 
     fn spectral_fixture(a: &ndarray::Array2<f64>) -> super::ExactHessianSpectralBlock {
         let (eigenvalues, eigenvectors) = a.eigh(Side::Lower).expect("symmetric fixture");
@@ -6275,6 +5458,55 @@ mod test_support {
     }
 
     impl super::SaeManifoldTerm {
+        /// The dense joint arrow inverse `G = H⁻¹` (`dim×dim`), materialized
+        /// column by column against each unit arrow basis vector and symmetrized:
+        /// the dense reference the θ-adjoint parity tests contract against.
+        /// `solver` must be `DeflatedArrowSolver::plain`.
+        pub(crate) fn materialize_joint_inverse(
+            &self,
+            cache: &ArrowFactorCache,
+            solver: &DeflatedArrowSolver<'_>,
+        ) -> Result<Array2<f64>, String> {
+            let total_t = cache.delta_t_len();
+            let k = cache.k;
+            let dim = total_t + k;
+            let mut g = Array2::<f64>::zeros((dim, dim));
+            let mut rhs_t = Array1::<f64>::zeros(total_t);
+            let rhs_beta_zero = Array1::<f64>::zeros(k);
+            for col in 0..total_t {
+                rhs_t[col] = 1.0;
+                let sol = solver.solve(rhs_t.view(), rhs_beta_zero.view())?;
+                rhs_t[col] = 0.0;
+                for r in 0..total_t {
+                    g[[r, col]] = sol.t[r];
+                }
+                for r in 0..k {
+                    g[[total_t + r, col]] = sol.beta[r];
+                }
+            }
+            let rhs_t_zero = Array1::<f64>::zeros(total_t);
+            let mut rhs_beta = Array1::<f64>::zeros(k);
+            for col in 0..k {
+                rhs_beta[col] = 1.0;
+                let sol = solver.solve(rhs_t_zero.view(), rhs_beta.view())?;
+                rhs_beta[col] = 0.0;
+                for r in 0..total_t {
+                    g[[r, total_t + col]] = sol.t[r];
+                }
+                for r in 0..k {
+                    g[[total_t + r, total_t + col]] = sol.beta[r];
+                }
+            }
+            for a in 0..dim {
+                for b in (a + 1)..dim {
+                    let avg = 0.5 * (g[[a, b]] + g[[b, a]]);
+                    g[[a, b]] = avg;
+                    g[[b, a]] = avg;
+                }
+            }
+            Ok(g)
+        }
+
         /// #2330 Patch D arbiter support — spectrum summary of the EXACT `A` at a
         /// built cache: `(min_eig, max_eig, n_below_neg_floor, ‖ΔC‖_F, ‖A‖_F)`.
         /// The PD-window scan uses it to pick an arbiter fixture whose exact `A`
@@ -6365,101 +5597,6 @@ mod test_support {
                 cache, geometry.joint_pricing.clamp_border_derivative.view(),
             )?;
             Ok(gamma)
-        }
-
-        /// #2330 split probe — the g3 cross non-conservation attributed to the
-        /// trace vs the frozen-DK piece of `dΓ_joint/dρ_i`, per leg. Returns
-        /// `⟨leg_i, b_j⟩` and `⟨leg_j, b_i⟩` for the (i,j) cross pair so the caller
-        /// can assert cross-symmetry of each leg: part-a (twist `−G Mᵢ G`) trace,
-        /// part-a DK, part-b (`∂Kw/∂ρ`) trace, part-b DK. The asymmetric leg is the
-        /// leak. `with_dk` legs include `deflation_block_correction`; `_tr` legs
-        /// pass `skip_deflation_dk = true`.
-        pub(crate) fn ch5_twist_leg_cross(
-            &self,
-            rho: &SaeManifoldRho,
-            target: ndarray::ArrayView2<'_, f64>,
-            cache: &ArrowFactorCache,
-            i: usize,
-            j: usize,
-        ) -> Result<[(f64, f64); 4], String> {
-            let solver = DeflatedArrowSolver::plain(cache);
-            let g = self.materialize_joint_inverse(cache, &solver)?;
-            let operators = self.penalty_curvature_operators_by_flat(rho, cache)?;
-            // Mirror production: the twist inverse rides the EXACT ∂A/∂ρ = M_c + Δ.
-            let exact_deltas =
-                self.exact_stationarity_penalty_derivative_delta_by_flat(rho, cache)?;
-            let stationarity_geometry =
-                self.materialize_exact_stationarity_geometry(rho, target, cache)?;
-            let total_t = cache.delta_t_len();
-            let dim = total_t + cache.k;
-            let flatten = |v: &SaeArrowVector| -> Array1<f64> {
-                let mut out = Array1::<f64>::zeros(dim);
-                out.slice_mut(s![..total_t]).assign(&v.t);
-                out.slice_mut(s![total_t..]).assign(&v.beta);
-                out
-            };
-            let smooth_range =
-                rho.smooth_flat_start()..rho.smooth_flat_start() + rho.log_lambda_smooth.len();
-            let sparse_index = rho.sparse_flat_index();
-            // part-a (twist) and part-b (Kw ρ-deriv) legs of dΓ_joint/dρ_c, each in
-            // trace-only and full (trace − DK) form, contracted against b_other.
-            let leg = |c: usize, skip_dk: bool, part_a: bool| -> Result<Array1<f64>, String> {
-                if part_a {
-                    let twist_op = match exact_deltas.get(&c) {
-                        Some(delta_c) => &operators[&c] + delta_c,
-                        None => operators[&c].clone(),
-                    };
-                    let g_c = -g.dot(&twist_op).dot(&g);
-                    Ok(flatten(&self.logdet_theta_adjoint_dense(
-                        rho,
-                        cache,
-                        &g_c,
-                        ThetaAdjointDhChannel::All,
-                        skip_dk,
-                        false,
-                        None,
-                    )?))
-                } else if smooth_range.contains(&c) {
-                    Ok(Array1::<f64>::zeros(dim)) // smooth part-b is 0
-                } else {
-                    let channel = if sparse_index == Some(c) {
-                        ThetaAdjointDhChannel::SoftmaxSparseMixed
-                    } else {
-                        ThetaAdjointDhChannel::ArdMixed { target_flat: c }
-                    };
-                    Ok(flatten(&self.logdet_theta_adjoint_dense(
-                        rho, cache, &g, channel, skip_dk, false, None,
-                    )?))
-                }
-            };
-            let b = |c: usize| -> Result<Array1<f64>, String> {
-                let g_rho = self.outer_rho_gradient_ift_rhs(rho, c, cache)?;
-                Ok(flatten(&stationarity_geometry.solve_stationarity(&g_rho)?))
-            };
-            let bi = b(i)?;
-            let bj = b(j)?;
-            // part_a_tr, part_a_dk, part_b_tr, part_b_dk cross pairs.
-            let pa_full_i = leg(i, false, true)?;
-            let pa_tr_i = leg(i, true, true)?;
-            let pa_full_j = leg(j, false, true)?;
-            let pa_tr_j = leg(j, true, true)?;
-            let pb_full_i = leg(i, false, false)?;
-            let pb_tr_i = leg(i, true, false)?;
-            let pb_full_j = leg(j, false, false)?;
-            let pb_tr_j = leg(j, true, false)?;
-            let dot = |x: &Array1<f64>, y: &Array1<f64>| x.dot(y);
-            Ok([
-                (dot(&pa_tr_i, &bj), dot(&pa_tr_j, &bi)),
-                (
-                    dot(&(&pa_full_i - &pa_tr_i), &bj),
-                    dot(&(&pa_full_j - &pa_tr_j), &bi),
-                ),
-                (dot(&pb_tr_i, &bj), dot(&pb_tr_j, &bi)),
-                (
-                    dot(&(&pb_full_i - &pb_tr_i), &bj),
-                    dot(&(&pb_full_j - &pb_tr_j), &bi),
-                ),
-            ])
         }
     }
 

@@ -718,8 +718,7 @@ fn threshold_gate_outer_solve_is_not_aborted_by_an_unmodelled_sparse_operator_25
 /// the ordered-Beta–Bernoulli Patch-D cross-row adjoint and the periodic-ARD
 /// majorizer diagonal, and is documented as self-checked against the production
 /// `logdet_theta_adjoint` for softmax. It carries no per-atom-logistic GATE leg,
-/// which is what a threshold-gate row needs — the same limitation
-/// `third_order_forward_sensitivity_hessian` already refuses on. Against a
+/// which is what a threshold-gate row needs. Against a
 /// central finite difference of `½(log|A| − log|A_tt|)` (the criterion's
 /// complexity when this was measured) in a logit the dense Γ
 /// read `1.373e-1` where the FD read `3.521e-1`, with a sign flip on the next

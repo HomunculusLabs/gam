@@ -4478,5 +4478,24 @@
     ],
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). seeded_one, seeded_two and kolmogorov_smirnov_uniform have no caller in gam-cli, gam-pyffi, gamfit, examples or another crate's production code; only gam-event-history's own tests used them. seeded_one and seeded_two wrapped Directional::seeded for OneSeed<0> and TwoSeed<0>, and the seven test call sites now call it directly with the same arguments. kolmogorov_smirnov_uniform was only the classical comparator in test assertions, so it moves into tests.rs as a private test helper. The assertion that exercised the helper on an empty sample is dropped, and pit_uniform_distance's doc no longer links it.",
     "evidence": "The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes all three DELETE with gam-event-history unit-test references only. At db0e784da, git grep -w finds seeded_one only in family.rs, lib.rs and tests.rs lines 472, 1586, 1587, 1589, 1626 and 1656; seeded_two only in family.rs, lib.rs and tests.rs:425; and kolmogorov_smirnov_uniform only in forecast.rs (definition and a doc link), lib.rs and tests.rs lines 18, 3024, 3361 and 3390. The item list follows source_removal_guard.py's ITEM rule over the removed hunks: three pub fn declarations. The test helper added to tests.rs is an addition, not a removal."
+  },
+  {
+    "base": "303c5ec520c3c321fab79877a08039fa399ec516",
+    "items": [
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs:fn:assemble_exact_fixed_stratum_outer_hessian",
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs:fn:ch5_twist_leg_cross",
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs:fn:exact_fixed_stratum_outer_hessian",
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs:fn:logdet_daleckii_krein_hessian",
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs:fn:outer_explicit_smoothness_ard_hessian",
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs:fn:rank_charge_theta_rho_derivative",
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs:fn:third_order_forward_sensitivity_hessian",
+      "crates/gam-sae/src/manifold/construction_rank_charge_derivative.rs:fn:rank_charge_direct_rho_hessian",
+      "crates/gam-sae/src/manifold/construction_tests.rs:fn:logdet_daleckii_krein_hessian_matches_finite_difference_2253",
+      "crates/gam-sae/src/manifold/construction_tests.rs:fn:outer_explicit_smoothness_ard_hessian_matches_finite_difference_2253",
+      "crates/gam-sae/src/manifold/construction_tests.rs:fn:rank_charge_direct_rho_hessian_matches_finite_difference_2253",
+      "crates/gam-sae/src/manifold/construction_tests.rs:fn:twist_leg_cross_split_2330"
+    ],
+    "reason": "#2253 PATH C, handed to #2333. SaeManifoldOuterObjective::eval called exact_fixed_stratum_outer_hessian on every dense analytic evaluation. That wrapper assembled the complete exact fixed-stratum outer Hessian: ch1 explicit smoothness/ARD, ch2 rank-charge direct, ch4 Daleckii-Krein with a dense joint inverse, and ch5 third-order forward sensitivity with a dense joint inverse, the logdet theta-adjoint and the exact stationarity geometry. It then returned Err (intentionally not advertised in commit 1), so eval always reported HessianValue::Unavailable, and capability() declares DeclaredHessianForm::Unavailable. The assembly and its four channels are deleted, along with the ch5 rank-charge rho derivative, the ch5_twist_leg_cross test support, and the four tests that only drove them. eval returns HessianValue::Unavailable directly. Values and gradients are unchanged.",
+    "evidence": "At the base, git grep -w finds exact_fixed_stratum_outer_hessian only at its declaration, a doc mention inside assemble_exact_fixed_stratum_outer_hessian, and its single call in outer_objective.rs eval. assemble_exact_fixed_stratum_outer_hessian occurs only in that wrapper and its doc. outer_explicit_smoothness_ard_hessian, logdet_daleckii_krein_hessian and rank_charge_direct_rho_hessian occur only in the assembler and in the finite-difference test that drives each. third_order_forward_sensitivity_hessian occurs only in the assembler and in two doc comments this change rewrites. rank_charge_theta_rho_derivative occurs only inside third_order_forward_sensitivity_hessian, and ch5_twist_leg_cross only in twist_leg_cross_split_2330. The ThetaAdjointDhChannel variants SoftmaxSparseMixed and ArdMixed were constructed only in those two functions. The amortized_encoder_tests import of EvidenceOperator was used only by the deleted Daleckii-Krein test. Not compiled locally (user directive); compile rests on the shared tip check."
   }
 ]
