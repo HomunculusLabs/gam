@@ -5948,7 +5948,24 @@ fn select_duchon_sheet_resolution(
                 .to_string(),
         );
     }
-    let noise_floor = spectral_noise_floor(&values, peak);
+    // A mode's energy is `Σ_out (qᵀy_out)²` for a unit column `q` and the √w-scaled
+    // target `y_out`. Each projection rounds by at most `γ_{m+2}·‖y_out‖` (two
+    // products per row over `m` rows), and the twice-orthogonalized `q` departs from
+    // its exact direction by at most another `γ_m`, so an exactly-zero mode reads at
+    // most `γ_{2m+2}²·Σ_out ‖y_out‖²`.
+    let weighted_target_energy: f64 = active
+        .iter()
+        .map(|&(row, sqrt_w)| {
+            (0..p_out)
+                .map(|out| {
+                    let y = sqrt_w * target[[row, out]];
+                    y * y
+                })
+                .sum::<f64>()
+        })
+        .sum();
+    let gamma = gam_linalg::roundoff::accumulation_growth(2 * m + 2);
+    let noise_floor = spectral_noise_floor(&values, gamma * gamma * weighted_target_energy);
     let bandwidth = energies
         .iter()
         .filter(|&&(_, energy)| energy > noise_floor)
@@ -5966,9 +5983,10 @@ fn select_duchon_sheet_resolution(
 /// zero), while under-provisioning structurally caps reconstruction. The floor
 /// is measured from the periodogram itself, with no tuned smoothing constant:
 ///
-/// * a numerical-zero guard `peak · 1e-12` — a harmonic that small is
-///   indistinguishable from roundoff, never real signal. It dominates on clean
-///   (near-noiseless) data, where the median energy collapses to ~0;
+/// * a numerical-zero guard: the caller's rounding band for an energy whose exact
+///   value is zero, counted from the arithmetic that formed the energies. A harmonic
+///   inside it is indistinguishable from roundoff, never real signal. It dominates
+///   on clean (near-noiseless) data, where the median energy collapses to ~0;
 /// * a noise-level guard `median · log2(K)` — under band-limited signal the
 ///   per-harmonic energies are dominated by the noise floor, whose robust
 ///   center is the median (real harmonics are sparse outliers that do not move
@@ -5989,8 +6007,8 @@ fn select_duchon_sheet_resolution(
 /// cluster sizes the complexity term wins and the argmin stops below the real
 /// bandwidth. Bandwidth selection prices resolution on the spectrum, where it
 /// belongs, and leaves smoothing to the fit's own REML λ.
-fn spectral_noise_floor(energies: &[f64], peak_energy: f64) -> f64 {
-    let numerical = peak_energy * 1e-12;
+fn spectral_noise_floor(energies: &[f64], numerical_band: f64) -> f64 {
+    let numerical = numerical_band;
     let k = energies.len();
     if k == 0 {
         return numerical;
@@ -6055,7 +6073,19 @@ fn select_periodic_resolution(
             "select_periodic_resolution: the circle winner carries no angular energy".to_string(),
         );
     }
-    let floor = spectral_noise_floor(&energies, peak_energy);
+    // Each coefficient sums `w·x·cos(2πh·t)` over the rows at five roundings per term,
+    // so it rounds by at most `γ_{n+5}·Σ_row |w·x|`, and an exactly-zero harmonic
+    // reads at most `2·γ_{n+5}²·Σ_col (Σ_row |w·x|)²`.
+    let absolute_sums: f64 = (0..p_out)
+        .map(|col| {
+            let sum: f64 = (0..n_obs)
+                .map(|row| (weights[row] * target[[row, col]]).abs())
+                .sum();
+            sum * sum
+        })
+        .sum();
+    let gamma = gam_linalg::roundoff::accumulation_growth(n_obs + 5);
+    let floor = spectral_noise_floor(&energies, 2.0 * gamma * gamma * absolute_sums);
     let bandwidth = energies
         .iter()
         .rposition(|&energy| energy > floor)
@@ -6143,7 +6173,19 @@ fn select_torus_resolution(
     // over-provisioning is smoothed away by the fit's own REML λ, so this prices
     // resolution on the spectrum rather than under-resolving via a REML argmin.
     let cell_energies: Vec<f64> = cells.iter().map(|(_, energy)| *energy).collect();
-    let floor = spectral_noise_floor(&cell_energies, peak_energy);
+    // As for the circle, with seven roundings per term (the two orders' products,
+    // their sum, 2π, the cosine, `w·x` and the product): an exactly-zero cell reads at
+    // most `2·γ_{n+7}²·Σ_col (Σ_row |w·x|)²`.
+    let absolute_sums: f64 = (0..p_out)
+        .map(|col| {
+            let sum: f64 = (0..n_obs)
+                .map(|row| (weights[row] * target[[row, col]]).abs())
+                .sum();
+            sum * sum
+        })
+        .sum();
+    let gamma = gam_linalg::roundoff::accumulation_growth(n_obs + 7);
+    let floor = spectral_noise_floor(&cell_energies, 2.0 * gamma * gamma * absolute_sums);
     let bandwidth = cells
         .iter()
         .filter(|(_, energy)| *energy > floor)
