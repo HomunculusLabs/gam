@@ -485,7 +485,13 @@ pub(crate) fn mobius_double_cover_coords_from_projection(
         .sum::<f64>()
         * inv)
         .sqrt();
-    if !width_sd.is_finite() || width_sd <= scale_floor {
+    // Each signed width is a unit rotation of the already-validated radial and
+    // transverse components (a cosine, a sine, two products and a sum) before `N`
+    // squares are summed and scaled, so its spread rounds by at most `γ_{N+4}` of
+    // `radial_sd + transverse_sd`: a width spread inside that band is rounding.
+    let width_band = gam_linalg::roundoff::accumulation_growth(cluster_rows.len() + 4)
+        * (radial_sd + transverse_sd);
+    if !width_sd.is_finite() || width_sd <= width_band {
         return Err(format!(
             "mobius_double_cover_coords_from_projection: signed width is degenerate ({width_sd})"
         ));
