@@ -639,19 +639,20 @@ def fit_hybrid_curved_resume(
         assignment="topk", top_k=curved_k, n_iter=max_epochs,
         random_state=seed)
     print(f"[hybrid_rust] curved tier fit {time.perf_counter()-t1:.0f}s", flush=True)
-    # `reconstruct` is an f64 native entry, and the residual here is f32 (an f32
-    # activation block minus an f32 flat reconstruction). Handing it the f32 array
-    # raises a bare `TypeError: 'ndarray' object is not an instance of 'ndarray'`
-    # — on the far side of the curved fit, i.e. at the end of a multi-hour stage.
-    curved_recon_te = np.asarray(
-        curved.reconstruct(np.ascontiguousarray(r_te, dtype=np.float64)),
-        dtype=np.float32,
-    )
+    # `converged_latents` is an f64 native entry, and the residual here is f32 (an
+    # f32 activation block minus an f32 flat reconstruction). Handing it the f32
+    # array raises a bare `TypeError: 'ndarray' object is not an instance of
+    # 'ndarray'` — on the far side of the curved fit, at the end of a multi-hour
+    # stage. Its `fitted` is the `reconstruct` result (both read one OOS payload),
+    # and the payload is kept so the bits scorer need not repeat the solve (#2283).
+    curved_latents_te = curved.converged_latents(np.ascontiguousarray(r_te, dtype=np.float64))
+    curved_recon_te = np.asarray(curved_latents_te["fitted"], dtype=np.float32)
     combined = flat_recon_te + curved_recon_te
     collect["flat_decoder"] = arrays["decoder"]
     collect["flat_held_out_indices"] = arrays["held_out_indices"]
     collect["flat_held_out_codes"] = arrays["held_out_codes"]
     collect["curved_model"] = curved
+    collect["curved_latents_te"] = curved_latents_te
     collect["r_te"] = r_te
     collect["recon_full"] = combined
     collect["sparse_route_stats"] = metadata["route_stats"]
@@ -696,10 +697,20 @@ def score_bits_for_arm(
         fitted = af.build_gam_flat(
             x_bits, fit=collect["flat_fit"], score_mode=sparse_score_mode)
     elif arm == "hybrid_rust":
-        r_bits = np.ascontiguousarray(collect["r_te"][bits_idx])
         recon_bits = np.ascontiguousarray(collect["recon_full"][bits_idx])
+        # The frozen-decoder OOS solve is whole-batch, so a payload for a row
+        # subsample is not the full split's payload restricted to those rows. When
+        # the bits rows ARE the held-out split in order (the acceptance cell:
+        # --bits-max-rows covers every test row), reuse the solve
+        # fit_hybrid_curved_resume already ran on identical input (#2283).
+        if np.array_equal(bits_idx, np.arange(x_te.shape[0])):
+            curved_latents = collect["curved_latents_te"]
+        else:
+            curved_latents = collect["curved_model"].converged_latents(
+                np.ascontiguousarray(collect["r_te"][bits_idx], dtype=np.float64)
+            )
         fitted = af.build_hybrid_rust(
-            r_bits,
+            curved_latents,
             flat_decoder=collect["flat_decoder"],
             flat_indices=collect["flat_held_out_indices"][bits_idx],
             flat_codes=collect["flat_held_out_codes"][bits_idx],

@@ -176,19 +176,17 @@ def _atom_basis_plan(model, atom: int) -> tuple[str, int, int]:
     return kind, (width - 1) // 2, width
 
 
-def _curved_block_rust(r_bits, *, model):
-    """Curved tier from a fitted gamfit.sae_manifold model on residual r_bits."""
+def _curved_block_rust(payload, *, model):
+    """Curved tier from a fitted gamfit.sae_manifold model and its
+    ``converged_latents`` payload for exactly the scored rows.
+
+    The caller owns the frozen-decoder solve, so the one that produced the
+    held-out reconstruction can be reused when the scored rows are that same
+    split (#2283).
+    """
     _ensure_bench_on_path()
     from synth_sae_bench_manifold import _basis_values
 
-    # The native latent solve takes f64; the residual reaching here is f32,
-    # because it is a difference of f32 activations and an f32 flat
-    # reconstruction. Passing it straight through raises a bare
-    # `TypeError: 'ndarray' object is not an instance of 'ndarray'` from the FFI
-    # — after the curved fit, which is the most expensive place to find out.
-    payload = model.converged_latents(
-        np.ascontiguousarray(np.asarray(r_bits, dtype=np.float64))
-    )
     assignments = np.asarray(payload["assignments"], dtype=float)  # (N, K)
     recon = np.asarray(payload["fitted"], dtype=float)             # (N, P)
     coords = [np.asarray(c, dtype=float) for c in payload["coords"]]
@@ -248,7 +246,7 @@ def _stack_blocks(flat, curved, recon_full) -> FittedFeaturizer:
 
 
 def build_hybrid_rust(
-    r_bits,
+    curved_latents,
     *,
     flat_decoder,
     flat_indices,
@@ -256,10 +254,14 @@ def build_hybrid_rust(
     curved_model,
     recon_full,
 ) -> FittedFeaturizer:
-    """FittedFeaturizer from the persisted flat routing plus Rust curved tier."""
+    """FittedFeaturizer from the persisted flat routing plus Rust curved tier.
+
+    ``curved_latents`` is ``curved_model.converged_latents(...)`` for exactly the
+    scored rows.
+    """
     flat = _flat_block_from_sparse(
         np.asarray(flat_decoder), flat_indices, flat_codes)[:4]
-    curved = _curved_block_rust(r_bits, model=curved_model)
+    curved = _curved_block_rust(curved_latents, model=curved_model)
     fit = _stack_blocks(flat, curved, recon_full)
     fit.name = "hybrid_rust"
     return fit
