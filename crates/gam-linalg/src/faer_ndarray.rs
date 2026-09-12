@@ -2486,8 +2486,13 @@ impl<S: Data<Elem = f64>> FaerEigh for ArrayBase<S, Ix2> {
 
         let scale = repaired
             .iter()
-            .fold(0.0_f64, |acc, &value| acc.max(value.abs()))
-            .max(1.0);
+            .fold(0.0_f64, |acc, &value| acc.max(value.abs()));
+        if scale == 0.0 {
+            // The zero matrix has nothing to scale by; its eigenpairs are exactly
+            // (0, I).
+            let n = repaired.nrows();
+            return Ok((Array1::zeros(n), Array2::eye(n)));
+        }
         let scaled = repaired.mapv(|value| value / scale);
         // Relative diagonal-jitter ladder for the eigendecomposition repair: the
         // matrix is pre-scaled to unit max-abs, so these are fractions of its
