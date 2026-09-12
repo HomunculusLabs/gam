@@ -3155,6 +3155,9 @@ impl SaeManifoldTerm {
                 return Ok(outcome);
             }
             let mut gradient = Array1::<f64>::zeros(dense_len + border_dim);
+            // #2228 trace: the logit slots lead every dense row block.
+            let logit_dim = self.assignment.assignment_coord_dim();
+            let mut logit_norm_sq = 0.0_f64;
             for (row_index, row) in system.rows.iter().enumerate() {
                 let base = system.row_offsets[row_index];
                 let dim = system.row_dims[row_index];
@@ -3163,6 +3166,11 @@ impl SaeManifoldTerm {
                 }
                 for axis in 0..dim {
                     gradient[base + axis] = row.gt[axis];
+                }
+                if dim == q {
+                    for axis in 0..logit_dim.min(dim) {
+                        logit_norm_sq += row.gt[axis] * row.gt[axis];
+                    }
                 }
             }
             for (index, &value) in system.gb.iter().enumerate() {
@@ -3194,13 +3202,14 @@ impl SaeManifoldTerm {
             // assembly before the post-step hooks, so it separates what the step
             // did to ‖g‖ from what the re-gauge hooks do.
             log::debug!(
-                "SAE gauge-orbit descent: round {} entry ‖g_row‖={:.6e} ‖g_β‖={:.6e} \
-                 ‖Π_V g‖={slope:.6e} (span dim {})",
+                "SAE gauge-orbit descent: round {} entry ‖g_row‖={:.6e} ‖g_logit‖={:.6e} \
+                 ‖g_β‖={:.6e} ‖Π_V g‖={slope:.6e} (span dim {})",
                 outcome.rounds + 1,
                 gradient
                     .slice(s![..dense_len])
                     .dot(&gradient.slice(s![..dense_len]))
                     .sqrt(),
+                logit_norm_sq.sqrt(),
                 gradient
                     .slice(s![dense_len..])
                     .dot(&gradient.slice(s![dense_len..]))
@@ -7473,6 +7482,19 @@ impl SaeManifoldTerm {
             // lives in one block, and the joint norm cannot say which. The joint
             // accumulator keeps its historical summation order.
             let row_grad_norm = grad_norm_sq.sqrt();
+            // The logit slots lead every dense row block; a compact (TopK) row
+            // carries none.
+            let logit_dim = self.assignment.assignment_coord_dim();
+            let dense_row_dim = self.assignment.row_block_dim();
+            let mut logit_grad_norm_sq = 0.0;
+            for (row_idx, row) in sys.rows.iter().enumerate() {
+                if sys.row_dims[row_idx] == dense_row_dim {
+                    for axis in 0..logit_dim {
+                        logit_grad_norm_sq += row.gt[axis] * row.gt[axis];
+                    }
+                }
+            }
+            let logit_grad_norm = logit_grad_norm_sq.sqrt();
             let mut beta_grad_norm_sq = 0.0;
             for idx in 0..sys.k {
                 grad_norm_sq += sys.gb[idx] * sys.gb[idx];
@@ -7786,10 +7808,26 @@ impl SaeManifoldTerm {
             // step toward steepest descent; and a rejected step routes to the
             // proximal correction. Together with `‖g‖`/`‖Δ‖`/`gᵀΔ` this is the
             // whole per-iterate state of the globalization.
+            // #2228 — where the step's length lives, split the same way as ‖g‖.
+            let mut logit_step_norm_sq = 0.0;
+            if delta_ext_coord.len() == sys.row_offsets[sys.rows.len()] {
+                for (row_idx, &base) in sys.row_offsets[..sys.rows.len()].iter().enumerate() {
+                    if sys.row_dims[row_idx] == dense_row_dim {
+                        for axis in 0..logit_dim {
+                            logit_step_norm_sq +=
+                                delta_ext_coord[base + axis] * delta_ext_coord[base + axis];
+                        }
+                    }
+                }
+            }
+            let logit_step_norm = logit_step_norm_sq.sqrt();
+            let beta_step_norm = delta_beta.dot(&delta_beta).sqrt();
             log::info!(
                 "[SAE/inner] it={outer_iteration} ‖g‖={grad_norm:.6e} \
                  ‖Π⊥g‖={quotient_grad_norm:.6e} ‖g_row‖={row_grad_norm:.6e} \
-                 ‖g_β‖={beta_grad_norm:.6e} ‖Δ‖={:.6e} gᵀΔ={directional_decrease:.6e} \
+                 ‖g_logit‖={logit_grad_norm:.6e} ‖g_β‖={beta_grad_norm:.6e} \
+                 ‖Δ‖={:.6e} ‖Δ_logit‖={logit_step_norm:.6e} ‖Δβ‖={beta_step_norm:.6e} \
+                 gᵀΔ={directional_decrease:.6e} \
                  alpha={} warm={:.4e} ridge_t={:.3e} ridge_b={:.3e} \
                  obj={pre_step_total:.9e} phases: assemble={assemble_seconds:.2}s \
                  solve={:.2}s trials={:.2}s previous_tail={previous_tail_seconds:.2}s",
