@@ -1336,7 +1336,7 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
     // convergence at each perturbed ε. With the ε-derivative channel of the
     // SAS-reweighted IRLS system fully captured (the original report's missing
     // channel), the two agree to ~1e-9 here — the well-conditioned n=20 fit
-    // takes NO stabilization ridge (`ridge_used == 0`), so the earlier
+    // takes NO stabilization ridge (`ridge_passport.delta() == 0`), so the earlier
     // "adaptive-ridge contaminates the FD" rationale does not hold and a slack
     // relative bound would silently re-admit the dropped-channel regression
     // (its original signature was abs_diff ≈ 3.7e-3). An absolute 1e-5 bar is a
@@ -1350,12 +1350,12 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
     // FD re-solves had been rescued differently, so they would linearize
     // different systems and the comparison below would be meaningless.
     //
-    // δ is now applied unconditionally (#1575/#2519: a δ chosen by a
+    // δ was later applied unconditionally (#1575/#2519: a δ chosen by a
     // Cholesky-success predicate is a function of ρ, and made the outer
-    // criterion jump by 0.5·ln(1e8) = 9.21 between neighbouring ρ). A CONSTANT
-    // δ satisfies the precondition rather than violating it: the analytic
-    // Jacobian and both FD re-solves all linearize `XᵀWX + S_λ + δI` with the
-    // same δ.
+    // criterion jump by 0.5·ln(1e8) = 9.21 between neighbouring ρ), and is now
+    // zero on every path (#2901 V22). Either way a CONSTANT δ satisfies the
+    // precondition: the analytic Jacobian and both FD re-solves linearize the
+    // same penalized Hessian.
     //
     // So the assertion now checks the property directly — the three points
     // agree — instead of checking a value that only implied it. This is

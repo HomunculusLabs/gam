@@ -1360,23 +1360,18 @@ mod tests {
             .expect("diagonal sparse matrix should build");
         let weights = array![2.0, 3.0, 5.0];
         let s_lambda = array![[4.0, 0.0, 0.0], [0.0, 6.0, 0.0], [0.0, 0.0, 8.0]];
-        let ridge = 1e-8;
         let mut workspace = PirlsWorkspace::new(3, 3);
         let assembled = super::sparse_reml_penalized_hessian(
             &mut workspace,
             &x,
             &weights,
             &s_lambda,
-            ridge,
             None,
         )
         .expect("sparse penalized assembly should succeed");
         let dense = DesignMatrix::from(x.clone()).to_dense();
         let mut expected = dense.t().dot(&Array2::from_diag(&weights)).dot(&dense);
         expected += &s_lambda;
-        for i in 0..3 {
-            expected[[i, i]] += ridge;
-        }
         let actual = DesignMatrix::from(assembled).to_dense();
         for i in 0..3 {
             for j in 0..3 {
@@ -3018,7 +3013,6 @@ mod root_cause_tests {
             deviance,
             penalty_term: 0.0,
             firth: FirthDiagnostics::Inactive,
-            ridge_used: 0.0,
             hessian_curvature: curvature,
             gradient_natural_scale: 0.0,
         }
@@ -3102,7 +3096,6 @@ mod root_cause_tests {
             deviance: 428.0,
             penalty_term: 0.0,
             firth: FirthDiagnostics::Inactive,
-            ridge_used: 0.0,
             hessian_curvature: HessianCurvatureKind::Observed,
             gradient_natural_scale: 0.0,
         };
@@ -3599,7 +3592,6 @@ mod root_cause_tests {
             deviance: 1.0,
             penalty_term: 0.0,
             firth: FirthDiagnostics::Inactive,
-            ridge_used: 0.0,
             hessian_curvature: HessianCurvatureKind::Fisher,
             // At convergence the score and penalty gradient nearly cancel;
             // both are O(√n) for standardized columns. Use a representative
@@ -3642,7 +3634,6 @@ mod root_cause_tests {
             deviance: 0.0,
             penalty_term: 0.0,
             firth: FirthDiagnostics::Inactive,
-            ridge_used: 0.0,
             hessian_curvature: HessianCurvatureKind::Fisher,
             gradient_natural_scale: ns,
         };
@@ -3678,7 +3669,6 @@ mod root_cause_tests {
             deviance: 0.0,
             penalty_term: 0.0,
             firth: FirthDiagnostics::Inactive,
-            ridge_used: 0.0,
             hessian_curvature: HessianCurvatureKind::Fisher,
             gradient_natural_scale: 1.0e6,
         };
@@ -3695,7 +3685,6 @@ mod root_cause_tests {
             deviance: 0.0,
             penalty_term: 0.0,
             firth: FirthDiagnostics::Inactive,
-            ridge_used: 0.0,
             hessian_curvature: HessianCurvatureKind::Fisher,
             gradient_natural_scale: 0.0,
         };
@@ -3722,7 +3711,6 @@ mod root_cause_tests {
             deviance: 0.0,
             penalty_term: 0.0,
             firth: FirthDiagnostics::Inactive,
-            ridge_used: 0.0,
             hessian_curvature: HessianCurvatureKind::Fisher,
             gradient_natural_scale: 99.0,
         };

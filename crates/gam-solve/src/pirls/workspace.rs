@@ -156,14 +156,13 @@ impl PirlsWorkspace {
         x: &SparseColMat<usize, f64>,
         weights: &Array1<f64>,
         s_lambda: &Array2<f64>,
-        ridge: f64,
         precomputed_xtwx: Option<&SparseXtwxPrecomputed>,
     ) -> Result<SparseColMat<usize, f64>, EstimationError> {
         self.ensure_sparse_penalty_cache(x, s_lambda)?;
         self.sparse_penalized_system_cache
             .as_mut()
             .expect("ensure_sparse_penalty_cache installs the cache or returns Err")
-            .assemble_upper(x, weights, ridge, precomputed_xtwx)
+            .assemble_upper(x, weights, precomputed_xtwx)
     }
 }
 

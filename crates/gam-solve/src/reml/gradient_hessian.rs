@@ -6656,7 +6656,6 @@ impl<'a> RemlState<'a> {
             x_sparse,
             &hessian_weights,
             &s_lambda,
-            ridge_passport.delta(),
             precomputed_xtwx,
         )?;
         let lambdas_slice = lambdas.as_slice().ok_or_else(|| {

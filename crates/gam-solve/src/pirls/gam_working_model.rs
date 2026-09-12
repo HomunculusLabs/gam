@@ -578,7 +578,7 @@ impl<'a> GamWorkingModel<'a> {
                 qr.push_row(penalty_root.row(i), penalty_residual[i])?;
             }
             for j in 0..p {
-                let energy = state.ridge_used + loop_lambda * lm_d2[j];
+                let energy = loop_lambda * lm_d2[j];
                 if !(energy.is_finite() && energy >= 0.0) {
                     crate::bail_invalid_estim!(
                         "PIRLS square-root LM diagonal must be finite and nonnegative, got {energy} at coefficient {j}"
@@ -587,10 +587,7 @@ impl<'a> GamWorkingModel<'a> {
                 if energy > 0.0 {
                     let root_energy = energy.sqrt();
                     row[j] = root_energy;
-                    qr.push_row(
-                        row.view(),
-                        state.ridge_used * beta.as_ref()[j] / root_energy,
-                    )?;
+                    qr.push_row(row.view(), 0.0)?;
                     row[j] = 0.0;
                 } else {
                     qr.push_row(row.view(), 0.0)?;
@@ -625,24 +622,22 @@ impl<'a> GamWorkingModel<'a> {
         self.penalty.write_root_residual(beta.as_ref(), &mut residual, n);
         let diagonal_start = n + penalty_rows;
         for j in 0..p {
-            let energy = state.ridge_used + loop_lambda * lm_d2[j];
+            let energy = loop_lambda * lm_d2[j];
             if !(energy.is_finite() && energy >= 0.0) {
                 crate::bail_invalid_estim!(
                     "PIRLS square-root LM diagonal must be finite and nonnegative, got {energy} at coefficient {j}"
                 );
             }
             // The exact bare-Hessian stationarity certificate calls this path
-            // with both structural ridge and transient LM damping equal to
-            // zero.  Its augmented diagonal row is then mathematically absent;
-            // leave the preallocated row and residual at zero rather than
-            // manufacturing a ridge merely to make the storage rectangular.
+            // with transient LM damping equal to zero.  Its augmented diagonal
+            // row is then mathematically absent; leave the preallocated row and
+            // residual at zero rather than manufacturing a ridge merely to make
+            // the storage rectangular.
             if energy == 0.0 {
                 continue;
             }
             let root_energy = energy.sqrt();
             root[[diagonal_start + j, j]] = root_energy;
-            residual[diagonal_start + j] =
-                state.ridge_used * beta.as_ref()[j] / root_energy;
         }
         let result = solve_newton_direction_from_root_with_firth_hessian(
             &root,
@@ -1002,7 +997,6 @@ impl<'a> GamWorkingModel<'a> {
     pub(crate) fn sparse_penalized_hessian(
         &mut self,
         weights: &Array1<f64>,
-        ridge: f64,
     ) -> Result<SparseColMat<usize, f64>, EstimationError> {
         let x_sparse = self.x_original.as_sparse().ok_or_else(|| {
             EstimationError::InvalidInput(
@@ -1014,13 +1008,8 @@ impl<'a> GamWorkingModel<'a> {
                 "sparse-native PIRLS requires a dense transformed penalty matrix"
             );
         };
-        self.workspace.assemble_sparse_penalized_hessian(
-            x_sparse,
-            weights,
-            s_transformed,
-            ridge,
-            None,
-        )
+        self.workspace
+            .assemble_sparse_penalized_hessian(x_sparse, weights, s_transformed, None)
     }
 
     /// LM-screen helper: evaluates a candidate β by reusing the previous
@@ -1486,7 +1475,7 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
         // dense `p²`, and Firth has already paid it — its design factor is a
         // dense `n×p` and its Hessian a dense `p×p`, rebuilt every iteration —
         // so this costs nothing sparsity was still buying.
-        let (penalized_hessian, sparsehessian, ridge_used) = if matches!(
+        let (penalized_hessian, sparsehessian) = if matches!(
             self.coordinate_design,
             WorkingCoordinateDesign::OriginalSparseNative
         ) && !self.firth_bias_reduction
@@ -1495,19 +1484,14 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
             // is the LM Newton step, which always factorizes
             // (H + loop_lambda · I) with a non-zero loop_lambda (initial value
             // 1e-6), so it sees a different matrix.
-            let (h_sparse, _factor, ridge_used) =
-                ensure_sparse_positive_definite_with_fixed_ridge(|ridge| {
-                    self.sparse_penalized_hessian(&solver_weights, ridge)
-                })?;
-            (Array2::zeros((0, 0)), Some(h_sparse), ridge_used)
+            let (h_sparse, _factor) =
+                certify_sparse_penalized_hessian(self.sparse_penalized_hessian(&solver_weights)?)?;
+            (Array2::zeros((0, 0)), Some(h_sparse))
         } else {
-            let mut penalized_hessian = self.penalized_hessian(&solver_weights)?;
+            let penalized_hessian = self.penalized_hessian(&solver_weights)?;
             assert_symmetric_tol(&penalized_hessian, "PIRLS penalized Hessian", 1e-8);
-            let ridge_used = ensure_positive_definitewithridge(
-                &mut penalized_hessian,
-                "PIRLS penalized Hessian",
-            )?;
-            (penalized_hessian, None, ridge_used)
+            certify_positive_semidefinite_hessian(&penalized_hessian, "PIRLS penalized Hessian")?;
+            (penalized_hessian, None)
         };
         self.workspace.matvec_buf = solver_weights;
 
@@ -1542,7 +1526,6 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
             deviance,
             penalty_term,
             firth,
-            ridge_used,
             hessian_curvature,
             gradient_natural_scale,
         })
@@ -1615,7 +1598,7 @@ impl<'a> WorkingModel for GamWorkingModel<'a> {
         self.refresh_working_arrays_for_state(beta, state, "square-root operand")?;
         let stabilizing_floor = lm_d2
             .iter()
-            .map(|&scale| state.ridge_used + loop_lambda * scale)
+            .map(|&scale| loop_lambda * scale)
             .fold(f64::INFINITY, f64::min);
         // Firth scoring is itself defined by the adjusted working residual.
         // Forming X'W(eta-z*) before solving discards digits whenever the

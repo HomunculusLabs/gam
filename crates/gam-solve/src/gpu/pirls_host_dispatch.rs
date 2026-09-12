@@ -106,7 +106,6 @@ where
                 s_transformed,
                 linear_shift,
                 constant_shift,
-                prior_mean_target,
                 ..
             } = penalty_active
             {
@@ -126,10 +125,8 @@ where
                     xtwy_orig: cache.xtwy_orig.view(),
                     s_transformed: s_transformed.view(),
                     linear_shift: linear_shift.view(),
-                    prior_mean_target: prior_mean_target.view(),
                     constant_shift: *constant_shift,
                     qs: qs_view,
-                    ridge: 0.0,
                     likelihood: &config.likelihood,
                     inverse_link: &config.link_kind,
                     x_original,

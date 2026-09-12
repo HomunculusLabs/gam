@@ -3590,8 +3590,6 @@ extern "C" __global__ void status_first_ladder(
         b_orig: ArrayView1<'_, f64>,
         s_transformed: ArrayView2<'_, f64>,
         linear_shift: ArrayView1<'_, f64>,
-        prior_mean_target: ArrayView1<'_, f64>,
-        ridge: f64,
         qs: Option<ArrayView2<'_, f64>>,
     ) -> Result<GaussianPlsResult, String> {
         let p = b_orig.len();
@@ -3603,12 +3601,6 @@ extern "C" __global__ void status_first_ladder(
         }
         if linear_shift.len() != p {
             return Err(format!("linear_shift len {} != p={p}", linear_shift.len()));
-        }
-        if prior_mean_target.len() != p {
-            return Err(format!(
-                "prior_mean_target len {} != p={p}",
-                prior_mean_target.len()
-            ));
         }
         if let Some(qs_v) = qs {
             if qs_v.dim() != (p, p) {
@@ -3625,17 +3617,8 @@ extern "C" __global__ void status_first_ladder(
             (a_orig.to_owned(), b_orig.to_owned())
         };
         let penalized_hessian: Array2<f64> = &h_rotated + &s_transformed;
-        let mut regularized = penalized_hessian.clone();
-        if ridge > 0.0 {
-            for i in 0..p {
-                regularized[[i, i]] += ridge;
-            }
-        }
         let mut rhs_host = rhs_base;
         rhs_host += &linear_shift;
-        if ridge > 0.0 {
-            rhs_host.scaled_add(ridge, &prior_mean_target);
-        }
         let (ctx, stream) = context_and_stream()?;
         let solver = DnHandle::new(stream.clone())
             .map_err(|e| format!("cusolver init (gaussian pls): {e}"))?;
@@ -3658,7 +3641,7 @@ extern "C" __global__ void status_first_ladder(
         let mut potrs_info_dev = stream
             .alloc_zeros::<i32>(1)
             .map_err(|e| format!("alloc potrs info (gaussian pls): {e}"))?;
-        let reg_col = to_col_major(&regularized);
+        let reg_col = to_col_major(&penalized_hessian);
         stream
             .memcpy_htod(reg_col.as_ref(), &mut h_dev)
             .map_err(|e| format!("upload H (gaussian pls): {e}"))?;
@@ -3888,19 +3871,9 @@ pub(crate) fn solve_gaussian_pls_gpu(
     b_orig: ndarray::ArrayView1<'_, f64>,
     s_transformed: ndarray::ArrayView2<'_, f64>,
     linear_shift: ndarray::ArrayView1<'_, f64>,
-    prior_mean_target: ndarray::ArrayView1<'_, f64>,
-    ridge: f64,
     qs: Option<ndarray::ArrayView2<'_, f64>>,
 ) -> Result<cuda::GaussianPlsResult, String> {
-    cuda::solve_gaussian_pls_on_stream(
-        a_orig,
-        b_orig,
-        s_transformed,
-        linear_shift,
-        prior_mean_target,
-        ridge,
-        qs,
-    )
+    cuda::solve_gaussian_pls_on_stream(a_orig, b_orig, s_transformed, linear_shift, qs)
 }
 
 /// CPU fallback for the PIRLS-step GPU primitives.  When this build has no

@@ -96,7 +96,6 @@ fn sparse_xtwx_cache_matches_per_call_recompute_bitwise() {
     let p = x.ncols();
     let weights = random_weights(N, SEED ^ 0xA5A5);
     let s_lambda = ridge_penalty(p, 1.5);
-    let ridge: f64 = 1e-8;
 
     // Baseline: per-call SpGEMM recompute (precomputed_xtwx = None).
     let mut workspace_no_cache = PirlsWorkspace::new(N, p);
@@ -105,7 +104,6 @@ fn sparse_xtwx_cache_matches_per_call_recompute_bitwise() {
         &x,
         &weights,
         &s_lambda,
-        ridge,
         None,
     )
     .expect("per-call sparse assembly");
@@ -118,14 +116,13 @@ fn sparse_xtwx_cache_matches_per_call_recompute_bitwise() {
         &x,
         &weights,
         &s_lambda,
-        ridge,
         Some(&precomp),
     )
     .expect("cached sparse assembly");
 
     // Symbolic equality: the upper-triangular fill pattern must match
-    // exactly, because the inner penalty/ridge scatter relies on positional
-    // index alignment with the X'X pattern.
+    // exactly, because the inner penalty scatter relies on positional index
+    // alignment with the X'X pattern.
     let (sym_no, _) = h_no_cache.h_sparse.parts();
     let (sym_yes, _) = h_cached.h_sparse.parts();
     assert_eq!(

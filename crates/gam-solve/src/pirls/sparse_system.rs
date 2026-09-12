@@ -212,7 +212,6 @@ impl SparsePenalizedSystemCache {
         &mut self,
         x: &SparseColMat<usize, f64>,
         weights: &Array1<f64>,
-        ridge: f64,
         precomputed_xtwx: Option<&SparseXtwxPrecomputed>,
     ) -> Result<SparseColMat<usize, f64>, EstimationError> {
         if weights.len() != self.xtwx_cache.nrows {
@@ -295,24 +294,6 @@ impl SparsePenalizedSystemCache {
             self.h_uppervalues[*cursor_idx] += value;
         }
 
-        if ridge > 0.0 {
-            cursor.copy_from_slice(&self.h_upper_col_ptr[..self.p]);
-            for col in 0..self.p {
-                let cursor_idx = &mut cursor[col];
-                while *cursor_idx < self.h_upper_col_ptr[col + 1]
-                    && self.h_upperrow_idx[*cursor_idx] < col
-                {
-                    *cursor_idx += 1;
-                }
-                if *cursor_idx >= self.h_upper_col_ptr[col + 1]
-                    || self.h_upperrow_idx[*cursor_idx] != col
-                {
-                    crate::bail_invalid_estim!("penalized symbolic pattern missing diagonal entry");
-                }
-                self.h_uppervalues[*cursor_idx] += ridge;
-            }
-        }
-
         Ok(SparseColMat::new(
             self.h_upper_symbolic.clone(),
             self.h_uppervalues.clone(),
@@ -377,10 +358,9 @@ pub(crate) fn sparse_reml_penalized_hessian(
     x: &SparseColMat<usize, f64>,
     weights: &Array1<f64>,
     s_lambda: &Array2<f64>,
-    ridge: f64,
     precomputed_xtwx: Option<&SparseXtwxPrecomputed>,
 ) -> Result<SparseColMat<usize, f64>, EstimationError> {
-    workspace.assemble_sparse_penalized_hessian(x, weights, s_lambda, ridge, precomputed_xtwx)
+    workspace.assemble_sparse_penalized_hessian(x, weights, s_lambda, precomputed_xtwx)
 }
 
 pub fn assemble_and_factor_sparse_penalized_system(
@@ -388,14 +368,13 @@ pub fn assemble_and_factor_sparse_penalized_system(
     x: &SparseColMat<usize, f64>,
     weights: &Array1<f64>,
     s_lambda: &Array2<f64>,
-    ridge: f64,
     precomputed_xtwx: Option<&SparseXtwxPrecomputed>,
 ) -> Result<SparsePenalizedSystem, EstimationError> {
     use gam_linalg::sparse_exact::{factorize_sparse_spd, logdet_from_factor};
 
     let logdet_h_start = std::time::Instant::now();
     let h_sparse =
-        sparse_reml_penalized_hessian(workspace, x, weights, s_lambda, ridge, precomputed_xtwx)?;
+        sparse_reml_penalized_hessian(workspace, x, weights, s_lambda, precomputed_xtwx)?;
     let factor = factorize_sparse_spd(&h_sparse)?;
     let logdet_h = logdet_from_factor(&factor)?;
     log::info!(

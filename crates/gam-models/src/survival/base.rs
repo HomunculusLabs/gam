@@ -2449,7 +2449,6 @@ impl WorkingModelSurvival {
             deviance,
             penalty_term: penalty_quadratic_form,
             firth: gam_solve::pirls::FirthDiagnostics::Inactive,
-            ridge_used: 0.0,
             hessian_curvature: gam_solve::pirls::HessianCurvatureKind::Observed,
             gradient_natural_scale: score_norm + penaltygrad_norm,
         })

@@ -1,8 +1,8 @@
 //! #2519 / #2901 V22: no PIRLS fit carries a stabilization ridge, at any ρ.
 //!
-//! The ridge selectors (`ensure_positive_definitewithridge`, the sparse
-//! `ensure_sparse_positive_definite_with_fixed_ridge`, and `pls_solver`'s
-//! Gaussian-identity branches) once added δ to H only when a bare factorization
+//! The ridge selectors (the dense and sparse penalized-Hessian certificates in
+//! `newton_solve`, and `pls_solver`'s Gaussian-identity branches) once added δ
+//! to H only when a bare factorization
 //! failed. That made δ a function of ρ through a Cholesky-success predicate and
 //! moved the #1575 cost by `0.5·ln(1e8) = 9.2103` between neighbouring ρ
 //! (#2519). They then added a fixed δ = 1e-8 at every ρ. That was continuous,

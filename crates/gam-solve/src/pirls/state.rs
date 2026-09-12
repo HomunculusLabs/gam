@@ -92,16 +92,10 @@ pub struct WorkingState {
     pub deviance: f64,
     pub penalty_term: f64,
     pub firth: FirthDiagnostics,
-    // Ridge added to ensure positive definiteness of the penalized Hessian.
-    // `penalty_term` stores the full quadratic form contribution
-    // ridge * ||beta||^2. The optimization objective uses
-    // 0.5 * (deviance + penalty_term), so this corresponds to
-    // 0.5 * ridge * ||beta||^2 on the log-likelihood scale.
-    pub ridge_used: f64,
     pub hessian_curvature: HessianCurvatureKind,
     // Natural scale of the penalized gradient, used to form a scale-invariant
-    // KKT certificate.  Equal to ||X'(weighted_residual)||_2 + ||S*beta||_2
-    // (+ ridge*||beta||_2 when a stabilizing ridge is active).  Under
+    // KKT certificate.  Equal to ||X'(weighted_residual)||_2 + ||S*beta||_2.
+    // Under
     // stochastic noise the score component scales as O(sqrt(n)), so an
     // absolute ||g||_2 < tol test rejects fits whose normalized stationarity
     // residual is already negligible. Convergence uses ||g||_2 / (1 + this).
@@ -383,9 +377,8 @@ pub struct PirlsResult {
     pub edf: f64,
 
     // The penalty term, calculated stably within P-IRLS.
-    // This is beta_transformed' * S_transformed * beta_transformed, plus
-    // ridge_used * ||beta||^2 when stabilization is active so that the
-    // penalized deviance matches the stabilized Hessian.
+    // This is beta_transformed' * S_transformed * beta_transformed; no
+    // stabilization ridge is added (#2901 V22).
     pub stable_penalty_term: f64,
 
     /// Firth diagnostics in the converged PIRLS state.

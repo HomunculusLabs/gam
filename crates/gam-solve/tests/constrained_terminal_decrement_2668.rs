@@ -32,7 +32,6 @@ impl WorkingModel for RoundedQuadratic {
             deviance: 2.0 * objective,
             penalty_term: 0.0,
             firth: FirthDiagnostics::Inactive,
-            ridge_used: 0.0,
             hessian_curvature: HessianCurvatureKind::Fisher,
             gradient_natural_scale: 1.0,
         })

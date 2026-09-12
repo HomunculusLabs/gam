@@ -455,10 +455,10 @@ pub(super) fn jeffreys_pirls_diagnostics_and_hessian_from_factor(
     Ok((hat_diag, op.jeffreys_logdet(), score_shift, hphi))
 }
 
-pub(crate) fn ensure_positive_definitewithridge(
-    hess: &mut Array2<f64>,
+pub(crate) fn certify_positive_semidefinite_hessian(
+    hess: &Array2<f64>,
     label: &str,
-) -> Result<f64, EstimationError> {
+) -> Result<(), EstimationError> {
     // A non-finite assembly is a different defect class from indefiniteness
     // (and eigh of a NaN-carrying triangle can report arbitrary "positive"
     // spectra); name it precisely instead of letting it masquerade as a
@@ -475,9 +475,9 @@ pub(crate) fn ensure_positive_definitewithridge(
     // `0.5·ln(1e8)` between neighbouring ρ (#2519). Then it added a fixed δ = 1e-8
     // at every ρ and charged `δ‖β‖²` in the objective. That was continuous in ρ,
     // but it put a coefficient-space ridge and a magic constant into the REML
-    // criterion. δ is now zero on every path: H stays exactly `XᵀWX + S_λ`, the
-    // returned ridge is always 0, and nothing here can alter H, so the criterion
-    // is continuous in ρ because nothing is added to it.
+    // criterion. δ is now zero on every path: H stays exactly `XᵀWX + S_λ` and
+    // nothing here alters it, so the criterion is continuous in ρ because nothing
+    // is added to it.
     //
     // A positive-definite H is accepted as it is. A positive-semidefinite H whose
     // smallest eigenvalue lies inside its own rounding band `p·ε·‖H‖₂` is also
@@ -486,7 +486,7 @@ pub(crate) fn ensure_positive_definitewithridge(
     // modification under LM damping. Only a materially indefinite H is refused
     // (#2657).
     if hess.cholesky(Side::Lower).is_ok() {
-        return Ok(0.0);
+        return Ok(());
     }
     let Ok((evals, _)) = hess.eigh(Side::Lower) else {
         return Err(EstimationError::HessianNotPositiveDefinite {
@@ -499,7 +499,7 @@ pub(crate) fn ensure_positive_definitewithridge(
     let rounding_band = f64::EPSILON * hess.nrows() as f64 * spectral_radius;
     let min_eig = evals.iter().fold(f64::INFINITY, |acc, &value| acc.min(value));
     if min_eig >= -rounding_band {
-        return Ok(0.0);
+        return Ok(());
     }
     Err(EstimationError::HessianNotPositiveDefinite {
         min_eigenvalue: min_eig,
@@ -1754,10 +1754,9 @@ pub(super) fn should_use_sparse_native_pirls(
     )
 }
 
-/// Assemble and factorize the sparse penalized Hessian `H = XᵀWX + S_λ`.
+/// Factorize the assembled sparse penalized Hessian `H = XᵀWX + S_λ`.
 ///
-/// No stabilization ridge is added (#2901 V22): `assemble` is asked for exactly
-/// `0.0`, and the returned ridge is always `0.0`. If H cannot be factorized, the
+/// No stabilization ridge is added (#2901 V22). If H cannot be factorized, the
 /// helper refuses rather than selecting a shift from the Hessian. A shift chosen
 /// from `H(ρ)` would make the outer criterion's `0.5·log|H|` a discontinuous
 /// function of ρ (#2519, #2657). This path has no rank-revealing sparse
@@ -1766,22 +1765,17 @@ pub(super) fn should_use_sparse_native_pirls(
 /// Returning the factor avoids the previous double-factorization where the SPD
 /// check would factor the matrix and discard the factor, then the caller would
 /// immediately call `factorize_sparse_spd` again on the same matrix to solve.
-pub(super) fn ensure_sparse_positive_definite_with_fixed_ridge<F>(
-    mut assemble: F,
+pub(super) fn certify_sparse_penalized_hessian(
+    h: SparseColMat<usize, f64>,
 ) -> Result<
     (
         SparseColMat<usize, f64>,
         gam_linalg::sparse_exact::SparseExactFactor,
-        f64,
     ),
     EstimationError,
->
-where
-    F: FnMut(f64) -> Result<SparseColMat<usize, f64>, EstimationError>,
-{
-    let h = assemble(0.0)?;
+> {
     if let Ok(factor) = factorize_sparse_spd(&h) {
-        return Ok((h, factor, 0.0));
+        return Ok((h, factor));
     }
 
     // The bound is diagnostic only. It may depend on H(ρ), but it never changes

@@ -598,7 +598,6 @@ mod linux_impl {
             deviance,
             penalty_term,
             firth: firth.clone(),
-            ridge_used: delta,
             hessian_curvature: match curvature {
                 CurvatureMode::Fisher => HessianCurvatureKind::Fisher,
                 CurvatureMode::Observed => HessianCurvatureKind::Observed,
@@ -715,14 +714,10 @@ mod linux_impl {
         pub s_transformed: ArrayView2<'a, f64>,
         /// Additive RHS correction in transformed coordinates, length p.
         pub linear_shift: ArrayView1<'a, f64>,
-        /// Prior-mean vector for Tikhonov RHS, length p.
-        pub prior_mean_target: ArrayView1<'a, f64>,
         /// Constant term of the shifted penalty quadratic (for penalty_term).
         pub constant_shift: f64,
         /// Reparameterisation matrix Qs (p×p).  `None` = identity transform.
         pub qs: Option<ArrayView2<'a, f64>>,
-        /// Stabilisation ridge δ.
-        pub ridge: f64,
         /// GLM likelihood spec.
         pub likelihood: &'a gam_problem::GlmLikelihoodSpec,
         /// Inverse link.
@@ -805,8 +800,6 @@ mod linux_impl {
             input.xtwy_orig,
             input.s_transformed,
             input.linear_shift,
-            input.prior_mean_target,
-            input.ridge,
             input.qs,
         )?;
 
@@ -910,16 +903,6 @@ mod linux_impl {
             penalty_term -= 2.0 * beta[i] * input.linear_shift[i];
         }
 
-        let ridge_used = input.ridge;
-        let mut ridge_grad_norm = 0.0_f64;
-        if ridge_used > 0.0 {
-            let beta_sq: f64 = beta.dot(&beta);
-            penalty_term += ridge_used * beta_sq;
-            let ridge_contrib = beta.mapv(|v| ridge_used * v);
-            gradient += &ridge_contrib;
-            ridge_grad_norm = ridge_used * array1_l2_norm(&beta);
-        }
-
         let gradient_norm = array1_l2_norm(&gradient);
 
         let (deviance, log_likelihood, max_abs_eta) = if let Some(bundle) = frozen.as_ref() {
@@ -956,15 +939,10 @@ mod linux_impl {
             (deviance, log_likelihood, max_abs_eta)
         };
 
-        // Stabilised Hessian = penalized_hessian + ridge_used·I.
-        let mut stab = penalized_hessian.clone();
-        if ridge_used > 0.0 {
-            for i in 0..p {
-                stab[[i, i]] += ridge_used;
-            }
-        }
+        // No stabilization ridge (#2901 V22): the stabilized Hessian is the
+        // penalized Hessian itself.
         let penalized_hessian_sym = SymmetricMatrix::Dense(penalized_hessian.clone());
-        let stabilizedhessian_sym = SymmetricMatrix::Dense(stab);
+        let stabilizedhessian_sym = penalized_hessian_sym.clone();
 
         let beta_coef = Coefficients::new(beta.clone());
 
@@ -986,9 +964,8 @@ mod linux_impl {
             deviance,
             penalty_term,
             firth: FirthDiagnostics::Inactive,
-            ridge_used,
             hessian_curvature: HessianCurvatureKind::Fisher,
-            gradient_natural_scale: score_norm + s_beta_norm + ridge_grad_norm,
+            gradient_natural_scale: score_norm + s_beta_norm,
         };
 
         let constraint_kkt_val = if let Some(lin) = input.linear_constraints.as_ref() {
@@ -1054,7 +1031,7 @@ mod linux_impl {
             penalized_hessian_transformed: penalized_hessian_sym,
             stabilizedhessian_transformed: stabilizedhessian_sym,
             ridge_passport: RidgePassport::scaled_identity(
-                ridge_used,
+                0.0,
                 RidgePolicy::exact_full_objective(),
             )
             .map_err(|error| format!("invalid GPU PIRLS ridge metadata: {error}"))?,
@@ -1087,7 +1064,7 @@ mod linux_impl {
             iteration: 1,
             max_abs_eta,
             lastgradient_norm: gradient_norm,
-            gradient_natural_scale: score_norm + s_beta_norm + ridge_grad_norm,
+            gradient_natural_scale: score_norm + s_beta_norm,
             penalized_gradient_transformed: working_summary.state.gradient.clone(),
             last_deviance_change: 0.0,
             last_step_halving: 0,

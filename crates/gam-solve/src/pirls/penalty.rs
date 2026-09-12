@@ -63,24 +63,12 @@ pub(crate) enum PirlsPenalty {
         e_transformed: Array2<f64>,
         linear_shift: Array1<f64>,
         constant_shift: f64,
-        /// Aggregated prior-mean target `μ` in *transformed* coordinates,
-        /// summed over the canonical penalties' `full_width_prior_mean()`.
-        /// Used to keep the fixed stabilization ridge `δI` (and other PSD
-        /// rescue ridges) from biasing the recovered β away from the prior
-        /// mean: any site that adds `δI` to the penalized Hessian must also
-        /// add `δ · prior_mean_target` to the RHS so the augmented system
-        /// `(H + δI) β = r + δμ` keeps `β = μ` exact when the data has no
-        /// pull (X'WX = 0, X'Wz = 0). When all blocks have zero prior, this
-        /// vector is all zero and the RHS shift is a no-op.
-        prior_mean_target: Array1<f64>,
     },
     Diagonal {
         diag: Array1<f64>,
         positive_indices: Vec<usize>,
         linear_shift: Array1<f64>,
         constant_shift: f64,
-        /// See `Dense::prior_mean_target`.
-        prior_mean_target: Array1<f64>,
     },
 }
 
@@ -243,20 +231,6 @@ impl PirlsPenalty {
         }
     }
 
-    /// Prior-mean target `μ` in transformed coordinates (see field docs on
-    /// the [`PirlsPenalty::Dense::prior_mean_target`] variant). The returned
-    /// slice has length `dim()`.
-    pub(super) fn prior_mean_target(&self) -> &Array1<f64> {
-        match self {
-            Self::Dense {
-                prior_mean_target, ..
-            }
-            | Self::Diagonal {
-                prior_mean_target, ..
-            } => prior_mean_target,
-        }
-    }
-
     pub(super) fn constant_shift(&self) -> f64 {
         match self {
             Self::Dense { constant_shift, .. } | Self::Diagonal { constant_shift, .. } => {
@@ -306,7 +280,6 @@ mod tests {
             e_transformed,
             linear_shift: Array1::zeros(2),
             constant_shift: 0.0,
-            prior_mean_target: Array1::zeros(2),
         };
         let beta = array![1.0, -1.0];
 
@@ -321,14 +294,12 @@ mod tests {
             e_transformed: array![[1.0e5, 0.0], [0.0, 1.0]],
             linear_shift: Array1::zeros(2),
             constant_shift: 0.0,
-            prior_mean_target: Array1::zeros(2),
         };
         let ordinary = PirlsPenalty::Dense {
             s_transformed: array![[1.0e6, 0.0], [0.0, 1.0]],
             e_transformed: array![[1.0e3, 0.0], [0.0, 1.0]],
             linear_shift: Array1::zeros(2),
             constant_shift: 0.0,
-            prior_mean_target: Array1::zeros(2),
         };
 
         assert!(stiff.requires_root_solve(0.0));
@@ -339,7 +310,6 @@ mod tests {
             e_transformed: array![[1.0e5, 1.0e5]],
             linear_shift: Array1::zeros(2),
             constant_shift: 0.0,
-            prior_mean_target: Array1::zeros(2),
         };
         assert!(rank_one.requires_root_solve(1.0));
         assert!(!rank_one.requires_root_solve(1.0e4));
@@ -354,7 +324,6 @@ mod tests {
             e_transformed: root.clone(),
             linear_shift,
             constant_shift: 0.0,
-            prior_mean_target: Array1::zeros(2),
         };
         let beta = array![0.25, -0.75];
         let mut residual = Array1::<f64>::zeros(4);
@@ -485,24 +454,20 @@ pub(super) fn attach_penalty_shift(
     penalty: &mut PirlsPenalty,
     linear_shift: Array1<f64>,
     constant_shift: f64,
-    prior_mean_target: Array1<f64>,
 ) {
     match penalty {
         PirlsPenalty::Dense {
             linear_shift: target,
             constant_shift: constant,
-            prior_mean_target: mean_target,
             ..
         }
         | PirlsPenalty::Diagonal {
             linear_shift: target,
             constant_shift: constant,
-            prior_mean_target: mean_target,
             ..
         } => {
             *target = linear_shift;
             *constant = constant_shift;
-            *mean_target = prior_mean_target;
         }
     }
 }

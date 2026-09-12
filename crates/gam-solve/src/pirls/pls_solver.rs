@@ -13,7 +13,7 @@ use super::loop_driver::max_symmetric_asymmetry;
 use super::{
     PirlsPenalty, PirlsWorkspace, SparseXtWxCache, StablePLSResult, WorkingReparamTransform,
     calculate_edf_from_sparse_factor, calculate_edfwithworkspace_from_factor,
-    ensure_sparse_positive_definite_with_fixed_ridge, solve_sparse_spd,
+    certify_sparse_penalized_hessian, solve_sparse_spd,
 };
 use super::{
     calculate_deviance_from_eta, computeworkingweight_derivatives_from_eta,
@@ -263,36 +263,22 @@ pub(super) fn solve_penalized_least_squares_implicit(
             gaussian_fixed_cache.and_then(|c| c.xtwx_sparse_orig.as_ref().map(|arc| arc.as_ref()));
 
         // 1. Sparse penalized Hessian: H = X'diag(w)X + S_λ, with no
-        //    stabilization ridge (#2901 V22). The closure assembles exactly the
-        //    ridge it is handed, which is 0. The Cholesky factor is reused from
+        //    stabilization ridge (#2901 V22). The Cholesky factor is reused from
         //    the SPD check so we avoid factorizing the same matrix twice.
-        let (h_sparse, factor, ridge_used) =
-            ensure_sparse_positive_definite_with_fixed_ridge(|ridge| {
-                workspace.assemble_sparse_penalized_hessian(
-                    x_sparse,
-                    &weights_owned,
-                    s_transformed,
-                    ridge,
-                    precomputed_xtwx,
-                )
-            })?;
+        let (h_sparse, factor) =
+            certify_sparse_penalized_hessian(workspace.assemble_sparse_penalized_hessian(
+                x_sparse,
+                &weights_owned,
+                s_transformed,
+                precomputed_xtwx,
+            )?)?;
 
-        // 2. RHS = X'W(z - offset) + S_λ μ + ridge_used · μ.
-        // The `ridge_used · μ` term matches the diagonal ridge added to
-        // the Hessian in step 1, keeping the augmented system a
-        // Tikhonov regularization centered at the prior mean target
-        // rather than at zero (see `prior_mean_target` field docs).
+        // 2. RHS = X'W(z - offset) + S_λ μ.
         let mut wz = z.to_owned();
         wz -= &offset;
         wz *= &weights_owned;
         let mut rhs = x_original.transpose_vector_multiply(&wz);
         rhs += penalty.linear_shift();
-        if ridge_used > 0.0 {
-            let prior_mean_target = penalty.prior_mean_target();
-            if prior_mean_target.len() == rhs.len() {
-                rhs.scaled_add(ridge_used, prior_mean_target);
-            }
-        }
 
         // 3. Sparse Cholesky solve (factor reused from step 1)
         let betavec = solve_sparse_spd(&factor, &rhs)?;
@@ -307,7 +293,6 @@ pub(super) fn solve_penalized_least_squares_implicit(
                 beta: Coefficients::new(betavec),
                 penalized_hessian: h_sym,
                 edf,
-                ridge_used,
             },
             p_dim,
         ));
@@ -471,7 +456,6 @@ pub(super) fn solve_penalized_least_squares_implicit(
             beta: Coefficients::new(betavec),
             penalized_hessian: SymmetricMatrix::Dense(penalized_hessian),
             edf,
-            ridge_used: 0.0,
         },
         p_dim,
     ))

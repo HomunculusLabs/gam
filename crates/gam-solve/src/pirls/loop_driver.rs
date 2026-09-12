@@ -447,7 +447,7 @@ pub(super) fn assemble_pirls_result(
         penalized_hessian_transformed,
         stabilizedhessian_transformed,
         ridge_passport: RidgePassport::scaled_identity(
-            working_summary.state.ridge_used,
+            0.0,
             RidgePolicy::exact_full_objective(),
         )?,
         deviance: working_summary.state.deviance,
@@ -773,7 +773,6 @@ pub(super) fn build_diagonal_penalty_from_kronecker(
         positive_indices,
         linear_shift: Array1::zeros(p),
         constant_shift: 0.0,
-        prior_mean_target: Array1::zeros(p),
     }
 }
 
@@ -795,25 +794,6 @@ pub(super) fn canonical_prior_shift(
         constant += cp.prior_constant_shift(lambda);
     }
     (linear, constant)
-}
-
-/// Aggregate prior-mean target across canonical penalty blocks: the sum of
-/// each block's `full_width_prior_mean()`. Used by the PIRLS solve sites
-/// that add a fixed stabilization ridge `δI` to the penalized Hessian — they
-/// must also add `δ · prior_mean_target` to the RHS to keep `β = μ` recovery
-/// exact when the data carries no information (X'WX = 0). Equivalent to
-/// `canonical_prior_shift` with all λ = 1 and dropping `S_k` from the linear
-/// piece (i.e., raw μ rather than `S_k μ`). Returned in the *original*
-/// coordinates; callers transform if needed.
-pub(super) fn canonical_prior_mean_aggregate(
-    penalties: &[gam_terms::construction::CanonicalPenalty],
-    p: usize,
-) -> Array1<f64> {
-    let mut mean = Array1::<f64>::zeros(p);
-    for cp in penalties {
-        mean += &cp.full_width_prior_mean();
-    }
-    mean
 }
 
 pub struct PirlsProblem<'a, X> {
@@ -1143,7 +1123,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             e_transformed: sparse_reparam.e_transformed.clone(),
             linear_shift: Array1::zeros(penalty.p),
             constant_shift: 0.0,
-            prior_mean_target: Array1::zeros(penalty.p),
         }
     } else {
         let dense = dense_reparam_result
@@ -1154,7 +1133,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             e_transformed: dense.e_transformed.clone(),
             linear_shift: Array1::zeros(penalty.p),
             constant_shift: 0.0,
-            prior_mean_target: Array1::zeros(penalty.p),
         }
     };
     let (shift_original, shift_constant) =
@@ -1163,18 +1141,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         .as_ref()
         .map(|transform| transform.apply_transpose(&shift_original))
         .unwrap_or(shift_original);
-    let prior_mean_original =
-        canonical_prior_mean_aggregate(penalty.canonical_penalties, penalty.p);
-    let prior_mean_active = transform_active
-        .as_ref()
-        .map(|transform| transform.apply_transpose(&prior_mean_original))
-        .unwrap_or(prior_mean_original);
-    attach_penalty_shift(
-        &mut penalty_active,
-        shift_active,
-        shift_constant,
-        prior_mean_active,
-    );
+    attach_penalty_shift(&mut penalty_active, shift_active, shift_constant);
     // Build transformed constraints now that dense_reparam_result is available.
     let linear_constraints = if let Some(kc) = kronecker_constraints {
         kc
@@ -1307,7 +1274,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         let beta_transformed = pls_result.beta;
         let penalized_hessian = pls_result.penalized_hessian;
         let edf = pls_result.edf;
-        let baseridge = pls_result.ridge_used;
 
         // eta = offset + X Qs beta (composed, no materialization) unless a
         // design-moving ψ tensor cache explicitly says the surface rows are a
@@ -1540,7 +1506,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         let mut gradient = gradient_data;
         gradient += &s_beta;
         let penalty_term = penalty_active.shifted_quadratic(beta_transformed.as_ref());
-        let ridge_used = baseridge;
         // `solve_penalized_least_squares_implicit` assembles `H = XᵀWX + S_λ`
         // with no stabilization ridge on both of its branches (#2901 V22), so
         // `penalized_hessian` is the exact matrix the outer criterion reads, and
@@ -1557,7 +1522,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             deviance,
             penalty_term,
             firth: FirthDiagnostics::Inactive,
-            ridge_used,
             hessian_curvature: HessianCurvatureKind::Fisher,
             gradient_natural_scale: score_norm + s_beta_norm,
         };
@@ -1609,7 +1573,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             penalized_hessian_transformed: penalized_hessian,
             stabilizedhessian_transformed: stabilizedhessian,
             ridge_passport: RidgePassport::scaled_identity(
-                ridge_used,
+                0.0,
                 RidgePolicy::exact_full_objective(),
             )?,
             deviance,
@@ -2326,9 +2290,8 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
     } = final_state;
 
     // Preserve the Hessian as-is (sparse or dense) — no densification.
-    // P-IRLS already folded any stabilization ridge directly into the Hessian.
-    // Keep that exact matrix so outer LAML derivatives stay consistent:
-    // H_eff = X'W_H X + S_λ + ridge I (if ridge_used > 0).
+    // Keep P-IRLS's exact Hessian so outer LAML derivatives stay consistent:
+    // H_eff = X'W_H X + S_λ, with no stabilization ridge (#2901 V22).
     let penalized_hessian_transformed = working_summary.state.hessian.clone();
     let stabilizedhessian_transformed = penalized_hessian_transformed.clone();
     // Use the workspace-backed variant for the dense path to reuse the

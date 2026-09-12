@@ -294,7 +294,7 @@ mod linux_impl {
         // exact Gaussian PLS solver with the per-point (Qs, S_transformed,
         // linear_shift) — no row-kernel PIRLS loop, no iterative solver.
         if family == PirlsRowFamily::GaussianIdentity {
-            return gaussian_sigma_pool_eval(x_original, y, prior_w, offset, per_sigma, p)
+            return gaussian_sigma_pool_eval(x_original, y, prior_w, offset, per_sigma)
                 .map_err(SigmaCubatureGpuError::Runtime);
         }
 
@@ -398,7 +398,6 @@ mod linux_impl {
         prior_w: ArrayView1<'_, f64>,
         offset: ArrayView1<'_, f64>,
         per_sigma: &[SigmaPointGpuInput],
-        p: usize,
     ) -> Result<Option<Vec<SigmaPointResult>>, GpuError> {
         use ndarray::Array1;
         // XᵀWX = Xᵀ·diag(prior_w)·X (constant across all sigma points).
@@ -414,8 +413,6 @@ mod linux_impl {
         // Xᵀ·(prior_w · (y − offset)).
         let xtwy: Array1<f64> = x_original.t().dot(&yw);
 
-        let prior_mean_zero: Array1<f64> = Array1::zeros(p);
-
         let mut outcomes: Vec<SigmaPointResult> = Vec::with_capacity(per_sigma.len());
         for (idx, pt) in per_sigma.iter().enumerate() {
             let pls = crate::gpu::pirls_gpu::solve_gaussian_pls_gpu(
@@ -423,8 +420,6 @@ mod linux_impl {
                 xtwy.view(),
                 pt.s_transformed.view(),
                 pt.linear_shift.view(),
-                prior_mean_zero.view(),
-                0.0,
                 Some(pt.qs.view()),
             )
             .map_err(|e| gam_gpu::gpu_err!("gaussian sigma pool: point[{idx}] pls failed: {e}"))?;

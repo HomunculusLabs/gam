@@ -105,7 +105,7 @@ pub use state::{
 // loop_driver owns: default_beta_guess_external, solve_intercept_for_prevalence,
 // assemble_pirls_result, detect_logit_instability, stack_lambdaweighted_penalty_root_canonical,
 // build_sparse_native_reparam_result, build_diagonal_penalty_from_kronecker, canonical_prior_shift,
-// canonical_prior_mean_aggregate, PirlsProblem, PenaltyConfig, fit_model_for_fixed_rho,
+// PirlsProblem, PenaltyConfig, fit_model_for_fixed_rho,
 // fit_model_for_fixed_rho_with_adaptive_kkt, PirlsConfig, make_reparam_operator,
 // build_transformed_lower_bound_constraints*, build_transformed_linear_constraints*,
 // merge_linear_constraints, sparse_from_denseview.
