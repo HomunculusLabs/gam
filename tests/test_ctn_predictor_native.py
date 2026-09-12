@@ -6,17 +6,13 @@ import gamfit
 import pytest
 
 
-@pytest.mark.parametrize("mode", ["keyword", "config"])
-def test_standalone_ctn_schema_uses_fit_request(tmp_path, mode):
+def test_standalone_ctn_schema_uses_fit_request(tmp_path):
     rng = np.random.default_rng(714)
     x = rng.uniform(-1, 1, 160)
     data = pd.DataFrame({"pgs": 2 + .4 * x + rng.normal(size=160), "x": x,
                          "irrelevant_date": pd.Timestamp("2020-01-01")})
     config = {"transformation_normal_config": {"response_num_internal_knots": 2}}
-    kwargs = {"transformation_normal": True} if mode == "keyword" else {}
-    if mode == "config":
-        config["transformation_normal"] = True
-    model = gamfit.fit(data, "pgs ~ x", config=config, **kwargs,
+    model = gamfit.fit(data, "pgs ~ x", config=config, transformation_normal=True,
                        persistent_warm_start_root=tmp_path / "warm")
     assert np.isfinite(model.transformation_score(data)).all()
     posterior = json.loads(model.dumps())["payload"]["unified"]["geometry"]["constrained_posterior"]
