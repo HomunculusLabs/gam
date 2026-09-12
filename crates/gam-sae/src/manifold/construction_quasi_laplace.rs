@@ -394,6 +394,12 @@ impl SaeManifoldTerm {
         // ONE gate-frozen scope, so every objective value compared below belongs to
         // the same objective (#2228 Zeno ratchet).
         let gates_were_frozen = self.freeze_collapse_prevention_gates();
+        // The gauge-deflation count is recorded ONCE per evaluation, for the cache
+        // the evaluation ends on. The re-anchor guard compares quotient dimensions
+        // ACROSS ρ; the intermediate caches a descent pass converges through are
+        // never compared, and charging their flicker to the per-optimization
+        // reversal budget exhausts it on evaluations that merely descended.
+        let mut final_gauge_deflated_directions: Option<usize> = None;
         let evidence_root = loop {
             let cache = match self.converge_inner_for_undamped_logdet_gate_frozen(
                 target,
@@ -412,12 +418,7 @@ impl SaeManifoldTerm {
                 Ok(cache) => cache,
                 Err(err) => break Err(SaeCriterionError::from(err)),
             };
-            if let Err(err) = self.record_criterion_gauge_deflation_count(
-                cache.gauge_deflated_directions,
-                refine_progress_extension,
-            ) {
-                break Err(SaeCriterionError::from(err));
-            }
+            final_gauge_deflated_directions = Some(cache.gauge_deflated_directions);
             loss.criterion_gauge_deflated_directions = cache.gauge_deflated_directions;
             // #2330 Phase-2: rank the EXACT observed-information Laplace term ½log|A|
             // (A = B + ΔC = ∇²_θθ L), not the majorizer surrogate ½log|B|. One
@@ -465,6 +466,9 @@ impl SaeManifoldTerm {
             }
         };
         self.streaming_gates_frozen = gates_were_frozen;
+        if let Some(count) = final_gauge_deflated_directions {
+            self.record_criterion_gauge_deflation_count(count, refine_progress_extension)?;
+        }
         let (cache, log_det) = evidence_root?;
 
         // 3. Smoothing-penalty Occam term `−½·Σ_k r_k·rank(S_k)·log λ_smooth`
