@@ -59,31 +59,10 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-# Numerical thresholds. Each one is tied to a paper citation; the rationale
-# is documented inline so reviewers can re-derive the choice. None of these
-# are exposed as CLI flags — they are constructor-overridable defaults only.
-_IVAE_MIN_ENCODER_LAYERS = 2
-# Khemakhem 2107.10098 §3: encoder must be "non-trivially nonlinear" — a
-# bare Linear (1 affine layer) does not satisfy the universal-approximation
-# argument used to push identifiability through the encoder.
-
-_MECH_SPARSITY_FRACTION = 0.50
-# Lachapelle 2401.04890 §2.4: mechanism sparsity identifies a latent up to
-# permutation+sign **only after the L1 prox has reached equilibrium**. The
-# paper's empirical analyses define "sparse enough" as >50% near-zero
-# entries in the dependency matrix; we adopt that threshold.
-_MECH_SPARSITY_ZERO_TOL = 1.0e-3
-# A decoder column is "zero" when its magnitude is below this fraction of
-# the column-max — relative thresholding mirrors the original paper.
-
-_RANDPROJ_ACTIVATION_VAR_CEILING = 1.0e6
-# Random projection identifiability (Hyvärinen & Pajunen 1999, restated for
-# nonlinear ICA in Khemakhem §A.3): the encoder must not "explode" — its
-# activation variance has to stay bounded so the change-of-variables term
-# in the log-density is finite. We treat per-column variances above this
-# ceiling as a hard fail and variances above 1e3 as a warn.
-_RANDPROJ_ACTIVATION_VAR_WARN = 1.0e3
-
+# The theorem-check thresholds (encoder depth, mechanism-sparsity fraction and
+# zero tolerance, random-projection variance bounds) live with their paper
+# citations in ``gam_identifiability::precondition``. The constants below
+# belong to the torch fitting recipe.
 _IVAE_AUX_SCALE_LOG_AMPLITUDE = 0.4
 # Khemakhem 2107.10098 Thm. 1 identifies the latent up to a component-wise
 # transform iff the conditional prior `p(t | u)` spans a 2k-dimensional set
@@ -203,7 +182,6 @@ def _gather_fit_summary(
     *,
     aux: Any,
     ground_truth_dim: int | None,
-    thresholds: dict[str, float | int],
 ) -> dict[str, Any]:
     """Collect every numerical artefact the Rust checks need, with zero math.
 
@@ -281,19 +259,6 @@ def _gather_fit_summary(
         "ground_truth_dim": (
             int(ground_truth_dim) if ground_truth_dim is not None else None
         ),
-        "thresholds": {
-            "ivae_min_encoder_layers": int(
-                thresholds["ivae_min_encoder_layers"]
-            ),
-            "mech_sparsity_fraction": float(
-                thresholds["mech_sparsity_fraction"]
-            ),
-            "mech_sparsity_zero_tol": float(
-                thresholds["mech_sparsity_zero_tol"]
-            ),
-            "randproj_var_warn": float(thresholds["randproj_var_warn"]),
-            "randproj_var_ceiling": float(thresholds["randproj_var_ceiling"]),
-        },
     }
     return summary
 
@@ -303,11 +268,6 @@ def check(
     *,
     aux: Any = None,
     ground_truth_dim: int | None = None,
-    min_encoder_layers: int = _IVAE_MIN_ENCODER_LAYERS,
-    mech_sparsity_zero_tol: float = _MECH_SPARSITY_ZERO_TOL,
-    mech_sparsity_fraction: float = _MECH_SPARSITY_FRACTION,
-    activation_var_warn: float = _RANDPROJ_ACTIVATION_VAR_WARN,
-    activation_var_ceiling: float = _RANDPROJ_ACTIVATION_VAR_CEILING,
 ) -> "IdentifiabilityReport":
     """Run every applicable identifiability theorem check on ``fit``.
 
@@ -334,25 +294,17 @@ def check(
     ground_truth_dim : int, optional
         Ground-truth latent dim from a simulator. Enables the
         ``state_dim >= ground_truth_dim`` precondition.
-    min_encoder_layers, mech_sparsity_zero_tol, mech_sparsity_fraction,
-    activation_var_warn, activation_var_ceiling : float / int
-        Thresholds overriding the paper-cited defaults. Whether an aux column
-        is constant, and the aux column rank, are decided by the resolution of
-        the arithmetic that measures them and take no threshold.
+
+    The theorem thresholds are the paper-cited defaults owned by
+    ``gam_identifiability::precondition::Thresholds``. Whether an aux column is
+    constant, and the aux column rank, are decided by the resolution of the
+    arithmetic that measures them and take no threshold.
     """
 
-    thresholds: dict[str, float | int] = {
-        "ivae_min_encoder_layers": int(min_encoder_layers),
-        "mech_sparsity_fraction": float(mech_sparsity_fraction),
-        "mech_sparsity_zero_tol": float(mech_sparsity_zero_tol),
-        "randproj_var_warn": float(activation_var_warn),
-        "randproj_var_ceiling": float(activation_var_ceiling),
-    }
     summary = _gather_fit_summary(
         fit,
         aux=aux,
         ground_truth_dim=ground_truth_dim,
-        thresholds=thresholds,
     )
     payload = json.dumps(summary)
     raw = rust_module().identifiability_check_json(payload)
