@@ -123,7 +123,7 @@ pub struct ResidualGateActivities {
 
 /// Evaluate partition-free conditionality on explicit selected rows and per-row
 /// honesty weights.
-pub fn estimate_on_rows(
+pub(crate) fn estimate_on_rows(
     gate_i: &[f64],
     gate_j: &[f64],
     continuous_context: &[f64],
@@ -398,7 +398,7 @@ pub fn conditional_coactivation_influence_values(
 /// Build residual gate indicators by regressing each gate on the shared chart
 /// basis plus an intercept, then thresholding the positive residual. Passing an
 /// empty chart leaves the gates unchanged.
-pub fn residual_gate_activities(
+pub(crate) fn residual_gate_activities(
     gate_i: &[f64],
     gate_j: &[f64],
     shared_chart: Option<ArrayView2<'_, f64>>,

@@ -573,7 +573,7 @@ impl SaeAssignmentState {
 
     /// Whether every row's support is the full `[0, K)` in ascending order (the
     /// dense-materialization precondition).
-    pub fn is_full_support(&self) -> bool {
+    pub(crate) fn is_full_support(&self) -> bool {
         if self.n_obs == 0 {
             return true;
         }
@@ -585,22 +585,22 @@ impl SaeAssignmentState {
     // -- Layout-contract cell accounting (see module docs) -------------------
 
     /// Total `indices` cells `Σ_i |S_i|`.
-    pub fn index_cells(&self) -> usize {
+    pub(crate) fn index_cells(&self) -> usize {
         self.indices.iter().map(Vec::len).sum()
     }
 
     /// Total `gate_params` cells `Σ_i |S_i|`.
-    pub fn gate_cells(&self) -> usize {
+    pub(crate) fn gate_cells(&self) -> usize {
         self.gate_params.iter().map(Vec::len).sum()
     }
 
     /// Total coordinate cells `Σ_i Σ_{k∈S_i} d_k`.
-    pub fn coord_cells(&self) -> usize {
+    pub(crate) fn coord_cells(&self) -> usize {
         self.coords.iter().map(Vec::len).sum()
     }
 
     /// Total support-sparse state cells `indices + gate_params + coords`.
-    pub fn active_state_cells(&self) -> usize {
+    pub(crate) fn active_state_cells(&self) -> usize {
         self.index_cells() + self.gate_cells() + self.coord_cells()
     }
 

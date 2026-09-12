@@ -178,7 +178,7 @@ pub fn screen_pair(
 /// Screen one atom pair, additionally conditioning the residual-gate
 /// coactivation on caller-provided context labels and an optional shared-chart
 /// design matrix to regress out before forming denominators.
-pub fn screen_pair_with_contexts(
+pub(crate) fn screen_pair_with_contexts(
     data: ArrayView2<'_, f64>,
     mean: &Array1<f64>,
     atom_a: usize,

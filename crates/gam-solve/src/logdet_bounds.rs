@@ -126,7 +126,7 @@ pub enum MarginVerdict {
 }
 
 impl MarginVerdict {
-    pub fn is_decided(&self) -> bool {
+    pub(crate) fn is_decided(&self) -> bool {
         matches!(self, MarginVerdict::Decided { .. })
     }
 }
@@ -146,7 +146,7 @@ impl MarginVerdict {
 /// `max_absorptions` budget is spent without closing the margin, the result is
 /// [`MarginVerdict::InsufficientMargin`] — the consumer then takes the exact
 /// dense path. `decision_margin` is the consumer's declared margin.
-pub fn refine_logdet_enclosure_to_margin(
+pub(crate) fn refine_logdet_enclosure_to_margin(
     diag: &[Array2<f64>],
     off: &[(usize, usize, Array2<f64>)],
     decision_margin: f64,
@@ -327,7 +327,7 @@ fn frobenius_sq(a: &Array2<f64>) -> f64 {
 /// certificate fails (`ρ ≥ 1`): the caller must refine the partition
 /// (absorb the offending pair into one joint diagonal block) — the bound
 /// machinery never silently degrades.
-pub fn block_preconditioned_logdet_enclosure(
+pub(crate) fn block_preconditioned_logdet_enclosure(
     diag: &[Array2<f64>],
     off: &[(usize, usize, Array2<f64>)],
     use_third_moment: bool,

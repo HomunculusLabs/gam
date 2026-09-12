@@ -425,7 +425,7 @@ fn least_squares_line(xs: &[f64], ys: &[f64]) -> Option<LineFit> {
 /// — the fastest rate consistent with Łojasiewicz — so breaking ties toward
 /// it is the conservative (least-optimistic-θ, but fastest-forecast) choice
 /// and is fully determined by the strict `<` comparison below.
-pub fn fit_rate(window: &DecreaseWindow) -> Option<RateModel> {
+pub(crate) fn fit_rate(window: &DecreaseWindow) -> Option<RateModel> {
     let mut ks: Vec<f64> = Vec::new();
     let mut ln_k: Vec<f64> = Vec::new();
     let mut ln_d: Vec<f64> = Vec::new();
@@ -581,7 +581,7 @@ pub fn assess(
 /// Returns `Some(reason)` naming the *earliest* (lowest `iter_index`, then
 /// lowest ring position) offending step for determinism; `None` if every
 /// retained step decreases within the band.
-pub fn monotonicity_defect(window: &DecreaseWindow, rounding_band: f64) -> Option<String> {
+pub(crate) fn monotonicity_defect(window: &DecreaseWindow, rounding_band: f64) -> Option<String> {
     let band = rounding_band.abs();
     let mut worst: Option<&DecreaseEntry> = None;
     for e in window.entries() {

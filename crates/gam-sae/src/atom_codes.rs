@@ -357,7 +357,7 @@ impl SparseAtomCodes {
     /// Returns `0.0` when fewer than two rows are jointly active or when either
     /// atom's weight is constant on the joint support (an undefined correlation
     /// is, for the trigger, "no amplitude dependence detected").
-    pub fn weight_codependence(&self, a: usize, b: usize) -> f64 {
+    pub(crate) fn weight_codependence(&self, a: usize, b: usize) -> f64 {
         assert!(
             a < self.k_atoms && b < self.k_atoms,
             "SparseAtomCodes::weight_codependence: atoms ({a}, {b}) out of range K={}",

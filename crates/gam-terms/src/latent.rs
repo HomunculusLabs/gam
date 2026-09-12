@@ -931,7 +931,7 @@ impl LatentCoordValues {
     }
 
     /// Construct directly from a flat array and explicit latent manifold.
-    pub fn from_flat_with_manifold(
+    pub(crate) fn from_flat_with_manifold(
         values: Array1<f64>,
         n_obs: usize,
         latent_dim: usize,
