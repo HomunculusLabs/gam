@@ -5945,5 +5945,13 @@
     ],
     "reason": "SPEC rule 23 (#2234). fit_transport_map refused every pairing under a hand-set 16 observations, and three examples restated the same 16 before calling it. Identifiability is already the Gaussian REML fit's own typed refusal: gaussian_reml_multi_closed_form refuses when n_effective <= nullity, the penalty null space (constants on a circle, affine maps on an interval). The entry now owns only the structural precondition of a non-empty pairing, which the empirical isometry-defect average divides by. The examples keep only the guards their own arithmetic needs.",
     "evidence": "At the base, git grep -w MIN_TRANSPORT_OBS finds its declaration and the fit_transport_map refusal in crates/gam-sae/src/inference/layer_transport.rs; after 2bfcc6e33 removed the composition-grid floor, that refusal is its only reader, and this change replaces it. The REML refusals are gaussian_reml.rs `if n_effective <= nullity` at the closed-form sites (lines 695, 2330, 2827, 4445 at 8084b9698), reached through fit_penalized_1d. In fit_transport_map's body the only division by n is the isometry-defect mean, and n >= 1 is enforced. The example floors in behavioral_curvature_map.rs, cross_model_real_chart.rs and cross_model_transport_real.rs are literals, not items. The item list applies source_removal_guard.py's ITEM regex and occurrence rule to the removed hunks by hand. Not compiled locally; compile rests on the lead's shared tip check."
+  },
+  {
+    "base": "69f01add9860c1b632796439b9ea824e36facf12",
+    "items": [
+      "crates/gam-sae/src/encode.rs:const:SAE_CYLINDER_LINE_DEGREE"
+    ],
+    "reason": "#2469: encode.rs held a private copy of the cylinder flat-axis degree (SAE_CYLINDER_LINE_DEGREE = 2) beside manifold::SAE_CYLINDER_LINE_DEGREE in evaluator_rebuild.rs, and its doc said the two must agree. The birth menu wrote a third copy as a bare 2. One convention is now one constant: encode.rs and the birth menu read manifold::SAE_CYLINDER_LINE_DEGREE; the value stays 2.",
+    "evidence": "At base 69f01add9860c1b632796439b9ea824e36facf12, the encode.rs declaration is private and its only readers were the Cylinder arm of the encode atlas family builder (ml = D + 1 and CylinderHarmonicEvaluator::new), both now reading crate::manifold::SAE_CYLINDER_LINE_DEGREE in this commit. git grep -F encode::SAE_CYLINDER_LINE_DEGREE over crates finds no path import. The remaining word matches are manifold::SAE_CYLINDER_LINE_DEGREE itself and its readers."
   }
 ]

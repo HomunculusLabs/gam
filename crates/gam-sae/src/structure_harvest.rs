@@ -3536,7 +3536,7 @@ fn topology_candidates_for_dim(
                     2,
                     SaeBasisResolution::CylinderHarmonics {
                         circle_order: 2,
-                        line_degree: 2,
+                        line_degree: crate::manifold::SAE_CYLINDER_LINE_DEGREE,
                     },
                     SaeReferenceMetricPlan::CylinderProduct,
                 )?,
@@ -3547,9 +3547,10 @@ fn topology_candidates_for_dim(
                 // (`SaeAtomBasisKind::Cylinder` → Product[Circle(1.0), Euclidean]
                 // in `sae::manifold::atom`); a flat `Euclidean` manifold would leave
                 // the born atom's phase axis un-wrapped, and a torus stand-in would
-                // wrap the linear axis spuriously. The harmonic / degree budget
-                // mirrors the torus (2 circle harmonics) and the patch (degree 2)
-                // so the cross-topology design widths stay commensurable.
+                // wrap the linear axis spuriously. The line degree is the named
+                // cylinder convention. A birth race realizes the circle order from the
+                // birth image before racing (`realize_birth_harmonic_orders`); the
+                // order written here is only what a menu read without one carries.
                 LatentManifold::Product(vec![
                     LatentManifold::Circle { period: 1.0 },
                     LatentManifold::Euclidean,
@@ -4657,6 +4658,33 @@ fn realize_birth_harmonic_orders(
                         SaeAtomGeometryPlan::klein_bottle(per_axis_order.max(
                             crate::basis::QuotientSpectralEvaluator::KLEIN_BOTTLE_MIN_HARMONICS,
                         ))?,
+                        spec.manifold,
+                        spec.coords,
+                    )?);
+                }
+            }
+            AutoTopologyKind::Cylinder => {
+                // The cylinder design has `(2H + 1)·(D + 1)` columns, so its circle order
+                // is identifiable only while `2H + 1 < n_active / (D + 1)`; the selector's
+                // ceiling takes that quotient in place of the row count.
+                let line_degree = crate::manifold::SAE_CYLINDER_LINE_DEGREE;
+                if let Some(circle_order) = select_periodic_resolution(
+                    spec.coords.slice(ndarray::s![.., 0..1]),
+                    target,
+                    weights,
+                    n_active / (line_degree + 1),
+                ) {
+                    realized.push(TopologyCandidateSpec::new(
+                        AutoTopologyKind::Cylinder,
+                        SaeAtomGeometryPlan::new(
+                            SaeAtomBasisKind::Cylinder,
+                            2,
+                            SaeBasisResolution::CylinderHarmonics {
+                                circle_order,
+                                line_degree,
+                            },
+                            SaeReferenceMetricPlan::CylinderProduct,
+                        )?,
                         spec.manifold,
                         spec.coords,
                     )?);

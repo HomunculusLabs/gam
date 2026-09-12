@@ -645,13 +645,6 @@ struct CertifiedEncodeProbe {
     final_cert: RowCertificate,
 }
 
-/// Canonical flat-axis polynomial degree of a cylinder `S¹ × ℝ` atom — the
-/// degree the topology-race builder ([`gam_solve::structure_harvest`]) uses
-/// for the line axis (`CylinderHarmonicEvaluator::new(_, 2)`). The encode atlas
-/// recovers the circle harmonic count from the basis width using this degree, so
-/// the two must agree.
-pub(crate) const SAE_CYLINDER_LINE_DEGREE: usize = 2;
-
 /// Build a basis-family handle for one atom from its [`SaeManifoldAtom`]. The
 /// atlas needs to evaluate the jet sups, which live on the concrete evaluator
 /// types; the atom carries the evaluator as `Arc<dyn SaeBasisEvaluator>`, so we
@@ -711,7 +704,7 @@ pub(crate) fn family_jet_sups(
             // degree `D = SAE_CYLINDER_LINE_DEGREE` (the harvest convention).
             // Recover the per-axis circle harmonic count `H` from
             // `2H+1 = m/(D+1)`.
-            let ml = SAE_CYLINDER_LINE_DEGREE + 1;
+            let ml = crate::manifold::SAE_CYLINDER_LINE_DEGREE + 1;
             if d != 2 || ml == 0 || m % ml != 0 {
                 return Err(format!(
                     "EncodeAtlas: Cylinder atom requires latent_dim == 2 and width divisible by {ml}; got dim={d}, m={m}"
@@ -719,7 +712,7 @@ pub(crate) fn family_jet_sups(
             }
             let axis_mc = m / ml;
             let h = axis_mc.saturating_sub(1) / 2;
-            let ev = CylinderHarmonicEvaluator::new(h.max(1), SAE_CYLINDER_LINE_DEGREE)?;
+            let ev = CylinderHarmonicEvaluator::new(h.max(1), crate::manifold::SAE_CYLINDER_LINE_DEGREE)?;
             JetSups::from_family(&ev, chart)
         }
         Linear | EuclideanPatch | Poincare => {
