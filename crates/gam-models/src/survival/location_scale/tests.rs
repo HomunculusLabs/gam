@@ -204,6 +204,75 @@ fn survival_static_spatial_psi_blocks_match_shared_engine() {
     }
 }
 
+fn test_link_wiggle_metadata(beta_link_wiggle: &Array1<f64>) -> (Array1<f64>, usize) {
+    let seed = array![-2.0, -1.0, 0.0, 1.0, 2.0];
+    for degree in [2usize, 3, 1] {
+        for num_internal_knots in 0..=8 {
+            let cfg = WiggleBlockConfig {
+                degree,
+                num_internal_knots,
+                penalty_order: 2,
+                double_penalty: false,
+            };
+            if let Ok((block, knots)) =
+                crate::wiggle::buildwiggle_block_input_from_seed(seed.view(), &cfg)
+                && block.design.ncols() == beta_link_wiggle.len()
+            {
+                return (knots, degree);
+            }
+        }
+    }
+    panic!(
+        "could not synthesize valid link wiggle metadata for {} coefficients",
+        beta_link_wiggle.len()
+    );
+}
+
+fn test_survival_fit(
+    beta_time: Array1<f64>,
+    beta_threshold: Array1<f64>,
+    beta_log_sigma: Array1<f64>,
+    beta_link_wiggle: Option<Array1<f64>>,
+) -> UnifiedFitResult {
+    let lambdas_linkwiggle = beta_link_wiggle.as_ref().map(|_| Array1::zeros(0));
+    let (link_wiggle_knots, link_wiggle_degree) = beta_link_wiggle
+        .as_ref()
+        .map(|beta| {
+            let (knots, degree) = test_link_wiggle_metadata(beta);
+            (Some(knots), Some(degree))
+        })
+        .unwrap_or((None, None));
+    survival_fit_from_parts(SurvivalLocationScaleFitResultParts {
+        training_sample_size: 32,
+        beta_time,
+        beta_threshold,
+        beta_log_sigma,
+        beta_link_wiggle,
+        link_wiggle_knots,
+        link_wiggle_degree,
+        lambdas_time: Array1::zeros(0),
+        lambdas_threshold: Array1::zeros(0),
+        lambdas_log_sigma: Array1::zeros(0),
+        lambdas_linkwiggle,
+        log_likelihood: 0.0,
+        reml_score: Some(0.0),
+        stable_penalty_term: 0.0,
+        penalized_objective: Some(0.0),
+        used_device: false,
+        outer_iterations: 0,
+        outer_gradient_norm: None,
+        criterion_certificate: None,
+        outer_converged: true,
+        covariance_conditional: None,
+        covariance_corrected: None,
+        smoothing_correction: None,
+        geometry: None,
+        penalty_block_trace: Vec::new(),
+        edf_by_block: Vec::new(),
+    })
+    .expect("valid survival test fit")
+}
+
 fn survival_fit_parts_with_outer_evidence(
     outer_iterations: usize,
     criterion_certificate: Option<gam_solve::rho_optimizer::OuterCriterionCertificate>,
@@ -8484,6 +8553,151 @@ fn survival_ls_packed_directional_matches_dense_tower_high_curvature_932() {
         join_result.is_ok(),
         "survival LS high-curvature #932 oracle thread must complete"
     );
+}
+
+/// #2390 (#2385 instance 1), production path: one NEAR-wall link-wiggle
+/// coordinate must not erase the block's cross-covariance with
+/// `(h, threshold, log σ)` from the exact response moments.
+///
+/// The terminal covariance is already computed on the ACTIVE FACE, so a
+/// genuinely PINNED coordinate arrives with an exactly-zero covariance row and
+/// contributes no displacement at all. The coordinates that actually bind the
+/// feasibility clip are the near-wall but still-SLACK ones just outside the
+/// `1e-10` tightness band — routinely occupied, since the inner constrained
+/// solve's own KKT band is `1e-6·scale + 1e-10`. A single global
+/// fraction-to-boundary factor multiplies EVERY coordinate's displacement by
+/// that coordinate's ~`1e-8` ratio, freezing the conditional mean at `β̂_w` for
+/// every latent node.
+///
+/// Observable signature, with no reference to any hand-computed moment: negate
+/// the whole link-wiggle ↔ `(h, threshold, log σ)` cross block. That is the
+/// congruence `Σ' = D Σ D` with `D = diag(I, −I)`, so `Σ'` is PSD, its
+/// `(h, threshold, log σ)` projection is unchanged, and the conditional
+/// covariance `cov_ww − R Rᵀ` is unchanged (`R → −R`). The ONLY thing that
+/// changes is the SIGN of the conditional-mean displacement — i.e. the sign of
+/// the correlation between the realized warp and the realized predictor. If the
+/// displacement has been frozen, both covariances give the same moments.
+#[test]
+pub(crate) fn near_wall_wiggle_coordinate_keeps_cross_covariance_in_moments_2390() {
+    // Coordinate 1 sits just OUTSIDE the 1e-10 active-face tightness band:
+    // slack, so it keeps a full-width covariance row, but max(β̂,0)/|d| ~ 1e-8.
+    let fit = test_survival_fit(
+        array![0.4, -0.1],
+        array![0.2, 0.3],
+        array![-0.5, 0.1],
+        Some(array![0.30, 1.0e-9]),
+    );
+    let x_threshold_dense = array![[1.0, -0.2]];
+    let x_log_sigma_dense = array![[1.0, 0.3]];
+    let eta_threshold_offset = array![0.7];
+    let eta_log_sigma_offset = array![0.4];
+    let eta_t = x_threshold_dense.dot(&fit.beta_threshold()) + &eta_threshold_offset;
+    let eta_ls = x_log_sigma_dense.dot(&fit.beta_log_sigma()) + &eta_log_sigma_offset;
+    let q0 = Array1::from_iter(
+        eta_t
+            .iter()
+            .zip(eta_ls.iter())
+            .map(|(&t, &ls)| -t * exp_sigma_inverse_from_eta_scalar(ls)),
+    );
+    let degree = fit
+        .artifacts
+        .survival_link_wiggle_degree
+        .expect("fit wiggle degree");
+    let base_knots = fit
+        .artifacts
+        .survival_link_wiggle_knots
+        .clone()
+        .expect("fit wiggle knots");
+    // Re-center the wiggle knots on the realized q0 so both I-spline columns
+    // carry weight there. A basis row of zeros would make the whole comparison
+    // vacuous, so the centering is asserted below rather than assumed.
+    let lo = base_knots.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = base_knots.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let shift = q0[0] - 0.5 * (lo + hi);
+    let knots = base_knots.mapv(|k| k + shift);
+    let basis = survival_wiggle_basis_with_options(q0.view(), &knots, degree, BasisOptions::value())
+        .expect("link wiggle basis");
+    assert!(
+        basis[[0, 0]] > 1.0e-3,
+        "the interior wiggle coordinate must carry basis weight at q0, got {}",
+        basis[[0, 0]]
+    );
+
+    let input = SurvivalLocationScalePredictInput {
+        x_time_exit: array![[1.0, 0.5]],
+        eta_time_offset_exit: array![0.2],
+        time_wiggle_knots: None,
+        time_wiggle_degree: None,
+        time_wiggle_ncols: 0,
+        x_threshold: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            x_threshold_dense.clone(),
+        )),
+        eta_threshold_offset,
+        x_log_sigma: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            x_log_sigma_dense.clone(),
+        )),
+        eta_log_sigma_offset,
+        x_link_wiggle: Some(DesignMatrix::Dense(
+            gam_linalg::matrix::DenseDesignMatrix::from(basis.clone()),
+        )),
+        link_wiggle_knots: Some(knots.clone()),
+        link_wiggle_degree: Some(degree),
+        inverse_link: residual_distribution_inverse_link(ResidualDistribution::Gaussian),
+    };
+
+    // Σ = G Gᵀ is PSD by construction, and both link-wiggle rows load on the
+    // same latent factors as the time / threshold / log-sigma rows, so the
+    // wiggle block carries a substantial cross-covariance with them.
+    let g = array![
+        [0.18, 0.00, 0.00, 0.00],
+        [0.05, 0.16, 0.00, 0.00],
+        [0.00, 0.07, 0.15, 0.00],
+        [0.04, 0.00, 0.13, 0.00],
+        [0.00, 0.06, 0.00, 0.14],
+        [0.03, 0.00, 0.05, 0.12],
+        [0.12, 0.10, 0.09, 0.08],
+        [0.09, 0.11, 0.07, 0.10],
+    ];
+    let covariance = g.dot(&g.t());
+    let mut flipped = covariance.clone();
+    for j in 0..6 {
+        for w in 6..8 {
+            flipped[[j, w]] = -covariance[[j, w]];
+            flipped[[w, j]] = -covariance[[w, j]];
+        }
+    }
+
+    let (mean, second) =
+        exact_survival_response_moments(&input, &fit, &covariance).expect("response moments");
+    let (mean_flipped, second_flipped) =
+        exact_survival_response_moments(&input, &fit, &flipped).expect("flipped response moments");
+
+    let mean_gap = (mean[0] - mean_flipped[0]).abs();
+    let second_gap = (second[0] - second_flipped[0]).abs();
+    assert!(
+        mean_gap > 1.0e-8,
+        "the near-wall wiggle coordinate erased the cross-covariance from E[S]: \
+         {} vs {} (gap {mean_gap:.3e})",
+        mean[0],
+        mean_flipped[0]
+    );
+    assert!(
+        second_gap > 1.0e-8,
+        "the near-wall wiggle coordinate erased the cross-covariance from E[S^2]: \
+         {} vs {} (gap {second_gap:.3e})",
+        second[0],
+        second_flipped[0]
+    );
+    // The moments are still probabilities, and the second moment still respects
+    // Jensen against the first.
+    for (m1, m2) in [(mean[0], second[0]), (mean_flipped[0], second_flipped[0])] {
+        assert!((0.0..=1.0).contains(&m1) && (0.0..=1.0).contains(&m2));
+        assert!(
+            m2 + 1.0e-9 >= m1 * m1,
+            "E[S^2]={m2} must dominate E[S]^2={}",
+            m1 * m1
+        );
+    }
 }
 
 /// gam#2695 degree ladder (child module so this file stays under the line gate).
