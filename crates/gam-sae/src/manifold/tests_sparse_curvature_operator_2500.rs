@@ -923,6 +923,141 @@ fn dense_exact_a_matches_finite_difference_of_the_kkt_gradient_2330() {
     }
 }
 
+/// #2681 — the two-atom softmax fixture's inner solve crawls at fixed `rho` with a
+/// gradient that neither mover reduces. In census job 532879
+/// (`fixed_point_certificate_covers_non_ordered_beta_bernoulli_exact_gradient`)
+/// the majorized walk read `‖g_row‖ ≈ 1e-6` and `‖g_β‖ ≈ 0.15` for 1280
+/// iterations, each lowering the objective by `gᵀΔ` to print precision. The two
+/// 64-step exact-Newton polishes it ran committed every step at `ν = 0` while the
+/// gate norm went 0.2396 → 0.2306 and 0.1730 → 0.1678. A Newton step along a mode
+/// whose curvature `A` states correctly removes that mode's gradient, so either
+/// the assembled `g` is not the gradient of `penalized_objective_total` or `A`
+/// over-states the curvature along it.
+///
+/// This gate separates the two at the state the #2681 witnesses pin. First
+/// `g == ∇P` coordinate by coordinate, as in the #2330 gate above. Then, along
+/// `d = g/‖g‖`, the directional curvature `dᵀAd` against a central difference
+/// of `dᵀg`. The second difference of `P` along `d` is printed next to both,
+/// because along a direction where the objective is nearly linear it is the
+/// number that says so. Every measurement is printed before any assertion.
+#[test]
+fn stalled_two_atom_softmax_state_curvature_along_the_kkt_gradient_2681() {
+    use super::tests::small_two_atom_periodic_term_at_shared_inner_state;
+    let (term, target, rho) = small_two_atom_periodic_term_at_shared_inner_state();
+    let (anchor, _loss, cache) = anchored_frozen_cache(&term, &target, &rho);
+    let deflated = deflated_direction_count(&anchor, &cache);
+    let a = anchor
+        .materialize_exact_hessian_dense(&rho, target.view(), &cache)
+        .expect("dense exact A at the stalled two-atom state");
+    let total_t = cache.delta_t_len();
+    let k = cache.k;
+    let dim = total_t + k;
+    assert_eq!(
+        a.nrows(),
+        dim,
+        "#2681: dense A must be (total_t + k) square before it can be compared against \
+         the (gt, gb) gradient layout"
+    );
+
+    let gradient = |t: &mut SaeManifoldTerm| -> Array1<f64> {
+        let sys = t
+            .assemble_arrow_schur(target.view(), &rho, None)
+            .expect("arrow-Schur assembly at the stalled two-atom state");
+        let mut g = Array1::<f64>::zeros(dim);
+        let mut offset = 0usize;
+        for row in &sys.rows {
+            for (axis, &value) in row.gt.iter().enumerate() {
+                g[offset + axis] = value;
+            }
+            offset += row.gt.len();
+        }
+        assert_eq!(
+            offset, total_t,
+            "#2681: concatenated per-row gt width must equal cache.delta_t_len()"
+        );
+        assert_eq!(sys.gb.len(), k, "#2681: border gradient width must equal cache.k");
+        for (axis, &value) in sys.gb.iter().enumerate() {
+            g[total_t + axis] = value;
+        }
+        g
+    };
+    let objective = |t: &SaeManifoldTerm| -> f64 {
+        t.penalized_objective_total(target.view(), &rho, None, 1.0)
+            .expect("penalized objective at a finite-difference endpoint")
+    };
+    // `apply_newton_step` refuses a non-positive step size, so the minus endpoint
+    // negates the direction and keeps the step positive.
+    let endpoint = |direction: &Array1<f64>, sign: f64, h: f64| -> SaeManifoldTerm {
+        let mut moved = frozen_gate_endpoint(&anchor);
+        let signed = direction.mapv(|value| sign * value);
+        moved
+            .apply_newton_step(signed.slice(s![0..total_t]), signed.slice(s![total_t..dim]), h)
+            .expect("finite-difference endpoint step");
+        moved
+    };
+
+    let h = 1.0e-5_f64;
+    let g0 = gradient(&mut frozen_gate_endpoint(&anchor));
+    let grad_norm = g0.dot(&g0).sqrt();
+    let beta_grad_norm = g0
+        .slice(s![total_t..dim])
+        .dot(&g0.slice(s![total_t..dim]))
+        .sqrt();
+
+    let mut premise_worst = 0.0_f64;
+    let mut premise_worst_idx = 0usize;
+    for idx in 0..dim {
+        let mut e = Array1::<f64>::zeros(dim);
+        e[idx] = 1.0;
+        let fd = (objective(&endpoint(&e, 1.0, h)) - objective(&endpoint(&e, -1.0, h))) / (2.0 * h);
+        let error = (g0[idx] - fd).abs();
+        if error > premise_worst {
+            premise_worst = error;
+            premise_worst_idx = idx;
+        }
+    }
+
+    assert!(
+        grad_norm.is_finite() && grad_norm > 0.0,
+        "#2681: the pinned state must carry a finite nonzero KKT gradient; got ‖g‖={grad_norm}"
+    );
+    let d = g0.mapv(|value| value / grad_norm);
+    let curvature_a = d.dot(&a.dot(&d));
+    let curvature_gradient = (gradient(&mut endpoint(&d, 1.0, h)).dot(&d)
+        - gradient(&mut endpoint(&d, -1.0, h)).dot(&d))
+        / (2.0 * h);
+    let base_objective = objective(&frozen_gate_endpoint(&anchor));
+    let curvature_value = (objective(&endpoint(&d, 1.0, h)) - 2.0 * base_objective
+        + objective(&endpoint(&d, -1.0, h)))
+        / (h * h);
+    eprintln!(
+        "[#2681] ‖g‖={grad_norm:.6e} ‖g_β‖={beta_grad_norm:.6e} total_t={total_t} k={k} \
+         deflated_row_directions={deflated} premise_worst={premise_worst:.6e} at index \
+         {premise_worst_idx} dᵀAd={curvature_a:.9e} d(dᵀg)/dh={curvature_gradient:.9e} \
+         d²P/dh²={curvature_value:.6e} P={base_objective:.10e} h={h:.1e}"
+    );
+
+    assert!(
+        premise_worst <= 1.0e-6,
+        "#2681 premise: the assembled (gt, gb) is NOT the gradient of \
+         `penalized_objective_total` at the stalled two-atom state; worst coordinate error \
+         {premise_worst:.6e} at index {premise_worst_idx} (of {total_t} coordinate + {k} \
+         border). Both movers descend `P` along `g`, so a gradient of something else is a \
+         crawl no curvature model can fix."
+    );
+    let scale = curvature_a.abs().max(curvature_gradient.abs()).max(1.0e-8);
+    assert!(
+        (curvature_a - curvature_gradient).abs() <= 1.0e-4 * scale,
+        "#2681: along the KKT gradient direction the dense exact A states curvature \
+         dᵀAd={curvature_a:.9e}, while the central difference of dᵀg reads \
+         {curvature_gradient:.9e} (ratio {:.6e}; d²P/dh²={curvature_value:.6e}; \
+         {deflated} deflated row directions in the cache). A Newton step computed from \
+         this A along g is too short by that ratio, which is the polish that commits at \
+         ν = 0 and leaves ‖g‖ where it was.",
+        curvature_a / curvature_gradient,
+    );
+}
+
 #[test]
 fn threshold_gate_priced_clamp_theta_diagonal_matches_finite_difference_2820() {
     let (term, target, rho) = threshold_gate_tiny_fixture(true);
