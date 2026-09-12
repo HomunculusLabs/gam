@@ -4536,27 +4536,16 @@ const NULL_DIM_KEYS: &[&str] = &["null_dim"];
 const NULL_HESSIAN_LOGDET_KEYS: &[&str] = &["null_space_logdet"];
 
 enum RemlFitView<'py> {
+    /// The `SummaryPayload` of a gamfit Model or its saved bytes.
     SavedSummary(serde_json::Value),
-    PythonObject(Bound<'py, PyAny>),
-}
-
-#[pyfunction]
-fn extract_reml_score(py: Python<'_>, fit: Py<PyAny>) -> PyResult<f64> {
-    let fit = fit.bind(py);
-    extract_reml_score_impl(fit)
+    /// A summary mapping (a dict or `gamfit.Summary`) read through `.get`.
+    Mapping(Bound<'py, PyAny>),
 }
 
 #[pyfunction]
 fn extract_reml_score_raw(py: Python<'_>, fit: Py<PyAny>) -> PyResult<f64> {
     let fit = fit.bind(py);
     extract_reml_score_raw_impl(fit)
-}
-
-#[pyfunction]
-fn extract_reml_edf(py: Python<'_>, fit: Py<PyAny>) -> PyResult<Option<f64>> {
-    let fit = fit.bind(py);
-    let view = reml_fit_view(fit)?;
-    extract_edf_from_view(&view)
 }
 
 #[pyfunction(signature = (fits, names = None, cv_scores = None))]
@@ -4667,11 +4656,6 @@ fn compare_reml_fits(
     Ok(out.unbind())
 }
 
-fn extract_reml_score_impl(fit: &Bound<'_, PyAny>) -> PyResult<f64> {
-    let view = reml_fit_view(fit)?;
-    extract_reml_score_from_view(&view)
-}
-
 fn extract_reml_score_from_view(view: &RemlFitView<'_>) -> PyResult<f64> {
     let raw = extract_reml_score_raw_from_view(view)?;
     with_tierney_kadane_normalizer_from_view(view, raw)
@@ -4691,7 +4675,7 @@ fn extract_reml_score_raw_from_view(view: &RemlFitView<'_>) -> PyResult<f64> {
     }
     match view {
         RemlFitView::SavedSummary(payload) => Err(no_criterion_error(payload, "compare_models")),
-        RemlFitView::PythonObject(fit) => Err(PyTypeError::new_err(format!(
+        RemlFitView::Mapping(fit) => Err(PyTypeError::new_err(format!(
             "compare_models: cannot extract reml_score from {}; pass a gamfit.Model \
              or a summary mapping with 'reml_score'",
             fit.get_type().name()?
@@ -4823,15 +4807,15 @@ fn extract_n_obs_from_view(view: &RemlFitView<'_>) -> PyResult<Option<usize>> {
         .map(|value| value as usize))
 }
 
-/// String-valued metadata lookup over the same SavedSummary-JSON / PythonObject
-/// fallback chain as [`extract_float_metadata_from_view`].
+/// String-valued metadata lookup over the same saved-summary JSON or summary
+/// mapping as [`extract_float_metadata_from_view`].
 fn extract_string_metadata_from_view(
     view: &RemlFitView<'_>,
     keys: &[&str],
 ) -> PyResult<Option<String>> {
     match view {
         RemlFitView::SavedSummary(payload) => Ok(json_lookup_str(payload, keys)),
-        RemlFitView::PythonObject(_) => {
+        RemlFitView::Mapping(_) => {
             let Some(value) = extract_py_metadata_value(view, keys)? else {
                 return Ok(None);
             };
@@ -4859,7 +4843,7 @@ fn extract_float_metadata_from_view(
 ) -> PyResult<Option<f64>> {
     match view {
         RemlFitView::SavedSummary(payload) => Ok(json_lookup_f64(payload, keys)),
-        RemlFitView::PythonObject(_) => {
+        RemlFitView::Mapping(_) => {
             let Some(value) = extract_py_metadata_value(view, keys)? else {
                 return Ok(None);
             };
@@ -4880,65 +4864,28 @@ fn reml_fit_view<'py>(fit: &Bound<'py, PyAny>) -> PyResult<RemlFitView<'py>> {
             &model_bytes,
         )?));
     }
-    if let Some(payload) = py_summary_payload(fit)? {
-        return Ok(RemlFitView::PythonObject(payload));
+    if fit.hasattr("get")? && fit.getattr("get")?.is_callable() {
+        return Ok(RemlFitView::Mapping(fit.clone()));
     }
-    Ok(RemlFitView::PythonObject(fit.clone()))
+    Err(PyTypeError::new_err(format!(
+        "compare_models: expected a gamfit.Model, its saved bytes, or a summary mapping; got {}",
+        fit.get_type().name()?
+    )))
 }
 
 fn summary_payload_from_model_bytes(model_bytes: &[u8]) -> PyResult<serde_json::Value> {
     summary_payload_value_from_model_bytes(model_bytes).map_err(PyValueError::new_err)
 }
 
-fn py_summary_payload<'py>(fit: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
-    if !fit.hasattr("summary")? {
-        return Ok(None);
-    }
-    let summary_method = fit.getattr("summary")?;
-    if !summary_method.is_callable() {
-        return Ok(None);
-    }
-    let summary = fit.call_method0("summary")?;
-    if summary.hasattr("payload")? {
-        return summary.getattr("payload").map(Some);
-    }
-    Ok(Some(summary))
-}
-
 fn extract_py_metadata_value<'py>(
     view: &RemlFitView<'py>,
     keys: &[&str],
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
-    let RemlFitView::PythonObject(fit) = view else {
+    let RemlFitView::Mapping(mapping) = view else {
         return Ok(None);
     };
-    if let Some(value) = extract_py_get_value(fit, keys)? {
-        return Ok(Some(value));
-    }
     for key in keys {
-        if fit.hasattr(*key)? {
-            let value = fit.getattr(*key)?;
-            if !value.is_none() {
-                return Ok(Some(value));
-            }
-        }
-    }
-    Ok(None)
-}
-
-fn extract_py_get_value<'py>(
-    target: &Bound<'py, PyAny>,
-    keys: &[&str],
-) -> PyResult<Option<Bound<'py, PyAny>>> {
-    if !target.hasattr("get")? {
-        return Ok(None);
-    }
-    let get_method = target.getattr("get")?;
-    if !get_method.is_callable() {
-        return Ok(None);
-    }
-    for key in keys {
-        let value = target.call_method1("get", (*key,))?;
+        let value = mapping.call_method1("get", (*key,))?;
         if !value.is_none() {
             return Ok(Some(value));
         }

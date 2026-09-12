@@ -5062,9 +5062,7 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(stacking_weights_from_log_density, module)?)?;
     module.add_function(wrap_pyfunction!(stack_topologies_gaussian, module)?)?;
     module.add_function(wrap_pyfunction!(stacked_predictive_mean, module)?)?;
-    module.add_function(wrap_pyfunction!(extract_reml_score, module)?)?;
     module.add_function(wrap_pyfunction!(extract_reml_score_raw, module)?)?;
-    module.add_function(wrap_pyfunction!(extract_reml_edf, module)?)?;
     module.add_function(wrap_pyfunction!(compare_reml_fits, module)?)?;
     module.add_function(wrap_pyfunction!(gaussian_reml_fit, module)?)?;
     module.add_function(wrap_pyfunction!(gaussian_reml_fit_backward, module)?)?;
