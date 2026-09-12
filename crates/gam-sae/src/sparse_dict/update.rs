@@ -4964,6 +4964,73 @@ mod exact_solve_tests {
         );
     }
 
+    /// #2822 — a dense-Cholesky decline is a routing decision, never a silent
+    /// no-op. Two atoms that always co-fire with equal codes give the singular
+    /// block `A = [[1, 1], [1, 1]]`. A ridge inside the diagonal's own rounding
+    /// band (`1 + ρ` rounds to `1`) leaves the second pivot at exactly zero, so
+    /// the small-component Cholesky declines, as it did at the selected shared
+    /// ρ = 4.6e-16 on job 531890's fixture sweep. The same component must then be
+    /// solved by block CG and certified by its own residual. The right-hand side
+    /// lies in the range of `A`, and the seed is zero, which is what a no-op would
+    /// leave behind.
+    #[test]
+    fn a_declined_dense_cholesky_routes_through_certified_block_cg_2822() {
+        let (k, p) = (2usize, 2usize);
+        let ridge = f64::EPSILON / 4.0;
+        assert_eq!(
+            1.0 + ridge,
+            1.0,
+            "the ridge must sit inside the unit diagonal's rounding band"
+        );
+        let mut off = HashMap::new();
+        off.insert((0u32, 1u32), 1.0);
+        let eq = DecoderNormalEq {
+            diag: vec![1.0; k],
+            b: ndarray::array![[2.0_f64, 1.0], [2.0, 1.0]],
+            off,
+            firings: vec![1; k],
+            amplitude_sum: vec![1.0; k],
+        };
+        assert!(
+            k <= super::direct_solve_size_threshold(k),
+            "the pair must be small enough for the dense path"
+        );
+        let mut decoder = Array2::<f32>::zeros((k, p));
+        let stats = solve_decoder(&mut decoder, &eq, ridge, gam_gpu::GpuPolicy::Off)
+            .expect("decoder refresh");
+
+        assert_eq!(
+            stats.max_component_size, k,
+            "the co-firing pair is one component"
+        );
+        assert_eq!(
+            stats.dense_cholesky_declines, 1,
+            "the singular block must decline the dense path; stats: {stats:?}"
+        );
+        assert_eq!(
+            stats.cg_columns, p,
+            "a declined component must route every live column through block CG"
+        );
+        assert_eq!(
+            stats.cg_nonconverged_columns, 0,
+            "fallback block CG must converge for every routed column; stats: {stats:?}"
+        );
+        assert!(
+            stats.cg_relative_residual <= stats.cg_residual_stop,
+            "fallback block CG residual {:.3e} exceeds its {:.3e} stop",
+            stats.cg_relative_residual,
+            stats.cg_residual_stop
+        );
+        // The decoder is f32, so the measurable residual floors at f32 precision:
+        // the same bound `exact_solver_drives_normal_eq_residual_below_tolerance`
+        // reads. A no-op would leave the zero seed at relative residual 1.
+        let rel = normal_eq_residual(&eq, &decoder, ridge);
+        assert!(
+            rel < 1.0e-6,
+            "the declined component must still solve its normal equations, got {rel}"
+        );
+    }
+
     #[test]
     fn cg_cap_reached_is_typed_nonconvergence_never_a_substitute() {
         // #2396: the TYPED non-convergence path (a genuinely under-resolved column)

@@ -206,9 +206,13 @@ fn large_k_sparse_fit_stays_fixed_width_and_never_materializes_dense_n_by_k() {
         }
     }
 
+    // #2822: the default epoch budget. A hand-set `max_epochs: 5` sits below every
+    // returning budget of this fixture: job 531890's lane sweep over perturbation
+    // amplitudes 0.02 down to 1e-5 first returned a fit at 12–19 epochs, and at 0.02
+    // (this fixture) at epoch 15, certified. Five epochs refuse with
+    // `InnerNonConvergence`, which is production's correct answer to that cap.
     let config = SparseDictConfig {
         active,
-        max_epochs: 5,
         ..SparseDictConfig::new(k_atoms)
     };
     let fit = fit_sparse_dictionary(x.view(), &config).expect("sparse dictionary fit");
@@ -227,26 +231,9 @@ fn large_k_sparse_fit_stays_fixed_width_and_never_materializes_dense_n_by_k() {
     // is P-wide, not N-wide, so no `N×K` object exists anywhere in the fit.
     assert_eq!(fit.decoder.dim(), (k_atoms, p_out));
 
-    // This fixture deliberately reaches the small-component Cholesky-decline
-    // route. Success must therefore prove that the declined shortcut did not
-    // become a silent no-op: block CG actually ran and certified its answer.
-    let solve = fit.decoder_solve_stats;
-    assert!(
-        solve.dense_cholesky_declines > 0,
-        "fixture must exercise at least one dense Cholesky decline; decoder solve stats: {solve:?}"
-    );
-    assert!(
-        solve.cg_columns > 0,
-        "a declined dense Cholesky must route decoder columns through block CG"
-    );
-    assert_eq!(
-        solve.cg_nonconverged_columns, 0,
-        "fallback block CG must converge for every routed decoder column"
-    );
-    assert!(
-        solve.cg_relative_residual <= solve.cg_residual_stop,
-        "fallback block CG residual {:.3e} exceeds its {:.3e} stop",
-        solve.cg_relative_residual,
-        solve.cg_residual_stop
-    );
+    // The dense-Cholesky decline → certified block CG contract is pinned by
+    // `sparse_dict::update::exact_solve_tests::a_declined_dense_cholesky_routes_through_certified_block_cg_2822`
+    // on a constructed singular component. This fit only reaches a decline by
+    // routing accident: across job 531890's eight perturbation amplitudes, one
+    // (1e-3) produced a single decline and seven produced none.
 }
