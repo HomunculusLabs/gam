@@ -283,7 +283,7 @@ pub fn steer_delta(
         }
     }
     let tangents = decode_tangents_at(atom, &t_mid, tier0_scale)?;
-    let off_manifold_norm = off_manifold_residual_norm(&tangents, delta.view());
+    let off_manifold_norm = off_manifold_residual_norm(&tangents, delta.view())?;
 
     // --- dosimetry: exact applied-delta Fisher endpoint KL ------------------
     let predicted_nats =
@@ -1173,15 +1173,21 @@ fn decode_tangents_at(
     Ok(tang)
 }
 
-/// Least-squares projection of `δ` onto the span of the local tangents
-/// (columns of `tangents`, shape `p × d`): `δ̂ = T (TᵀT)⁻¹ Tᵀ δ` via a small
-/// `d × d` Gram solve (with a tiny diagonal jitter to absorb a rank-deficient
-/// tangent frame; the jitter only shrinks the projection, never inflates it).
-fn project_onto_tangent_span(tangents: &Array2<f64>, delta: ArrayView1<'_, f64>) -> Array1<f64> {
+/// Orthogonal projection of `δ` onto the span of the local tangents (columns of
+/// `tangents`, shape `p × d`): `δ̂ = T V_r Λ_r⁻¹ V_rᵀ Tᵀ δ`, with `(Λ, V)` the
+/// eigensystem of the `d × d` Gram `TᵀT`. The retained directions are those
+/// whose eigenvalue exceeds the eigendecomposition's own backward-error floor
+/// `d·ε·λ_max`; below it an eigenvalue carries no significant digits. The
+/// projector is unique even for a rank-deficient frame, so no jitter biases the
+/// projection, and a zero frame projects to zero.
+fn project_onto_tangent_span(
+    tangents: &Array2<f64>,
+    delta: ArrayView1<'_, f64>,
+) -> Result<Array1<f64>, String> {
     let p = tangents.nrows();
     let d = tangents.ncols();
     if d == 0 {
-        return Array1::<f64>::zeros(p);
+        return Ok(Array1::<f64>::zeros(p));
     }
     // Gram = TᵀT (d × d) and rhs = Tᵀδ (d).
     let mut gram = Array2::<f64>::zeros((d, d));
@@ -1201,76 +1207,47 @@ fn project_onto_tangent_span(tangents: &Array2<f64>, delta: ArrayView1<'_, f64>)
             gram[[b, a]] = acc;
         }
     }
-    let trace: f64 = (0..d).map(|a| gram[[a, a]]).sum();
-    let jitter = if trace > 0.0 { 1e-12 * trace } else { 1e-12 };
-    for a in 0..d {
-        gram[[a, a]] += jitter;
+    let (eigenvalues, eigenvectors) = gram.eigh(Side::Lower).map_err(|error| {
+        format!("project_onto_tangent_span: tangent Gram eigendecomposition failed: {error:?}")
+    })?;
+    let lambda_max = eigenvalues.iter().copied().fold(0.0_f64, f64::max);
+    let floor = (d as f64) * f64::EPSILON * lambda_max;
+    let mut coeffs = Array1::<f64>::zeros(d);
+    for mode in 0..d {
+        let lambda = eigenvalues[mode];
+        if lambda > floor {
+            let mut dot = 0.0_f64;
+            for a in 0..d {
+                dot += eigenvectors[[a, mode]] * rhs[a];
+            }
+            let scale = dot / lambda;
+            for a in 0..d {
+                coeffs[a] += eigenvectors[[a, mode]] * scale;
+            }
+        }
     }
-    let coeffs = solve_spd_small(&gram, &rhs);
     let mut proj = Array1::<f64>::zeros(p);
     for i in 0..p {
         for a in 0..d {
             proj[i] += tangents[[i, a]] * coeffs[a];
         }
     }
-    proj
+    Ok(proj)
 }
 
 /// Norm of `δ`'s component orthogonal to the span of the local tangents:
 /// `‖δ − δ̂‖` with `δ̂` the [`project_onto_tangent_span`] projection.
-fn off_manifold_residual_norm(tangents: &Array2<f64>, delta: ArrayView1<'_, f64>) -> f64 {
-    let proj = project_onto_tangent_span(tangents, delta);
+fn off_manifold_residual_norm(
+    tangents: &Array2<f64>,
+    delta: ArrayView1<'_, f64>,
+) -> Result<f64, String> {
+    let proj = project_onto_tangent_span(tangents, delta)?;
     let mut res_sq = 0.0_f64;
     for i in 0..delta.len() {
         let r = delta[i] - proj[i];
         res_sq += r * r;
     }
-    res_sq.max(0.0).sqrt()
-}
-
-/// Tiny symmetric-positive-definite solve via Cholesky for the `d × d` tangent
-/// Gram (`d` is the atom's latent dim, typically 1–3). Falls back to the bare rhs
-/// if the factorization fails (a fully degenerate frame), which only inflates the
-/// reported off-manifold residual — never deflates it.
-fn solve_spd_small(gram: &Array2<f64>, rhs: &Array1<f64>) -> Array1<f64> {
-    let d = gram.nrows();
-    // Cholesky L LᵀT = gram.
-    let mut l = Array2::<f64>::zeros((d, d));
-    for i in 0..d {
-        for j in 0..=i {
-            let mut sum = gram[[i, j]];
-            for k in 0..j {
-                sum -= l[[i, k]] * l[[j, k]];
-            }
-            if i == j {
-                if sum <= 0.0 {
-                    return Array1::<f64>::zeros(d);
-                }
-                l[[i, j]] = sum.sqrt();
-            } else {
-                l[[i, j]] = sum / l[[j, j]];
-            }
-        }
-    }
-    // Forward solve L y = rhs.
-    let mut y = Array1::<f64>::zeros(d);
-    for i in 0..d {
-        let mut sum = rhs[i];
-        for k in 0..i {
-            sum -= l[[i, k]] * y[k];
-        }
-        y[i] = sum / l[[i, i]];
-    }
-    // Back solve Lᵀ x = y.
-    let mut x = Array1::<f64>::zeros(d);
-    for i in (0..d).rev() {
-        let mut sum = y[i];
-        for k in (i + 1)..d {
-            sum -= l[[k, i]] * x[k];
-        }
-        x[i] = sum / l[[i, i]];
-    }
-    x
+    Ok(res_sq.max(0.0).sqrt())
 }
 
 /// One dose sample on a collateral-damage curve (gam#2234 E2, the intrinsic
@@ -1347,9 +1324,9 @@ pub struct CollateralCurve {
 /// Norm of `δ`'s component that lands inside the span of a local decode-tangent
 /// frame — the energy the ambient move deposits into that atom's feature
 /// direction at its current operating point.
-fn frame_landed_norm(frame: &Array2<f64>, delta: ArrayView1<'_, f64>) -> f64 {
-    let proj = project_onto_tangent_span(frame, delta);
-    proj.iter().map(|&x| x * x).sum::<f64>().sqrt()
+fn frame_landed_norm(frame: &Array2<f64>, delta: ArrayView1<'_, f64>) -> Result<f64, String> {
+    let proj = project_onto_tangent_span(frame, delta)?;
+    Ok(proj.iter().map(|&x| x * x).sum::<f64>().sqrt())
 }
 
 /// Sweep the intrinsic collateral-damage curve for steering atom `atom_k` along
@@ -1475,13 +1452,13 @@ pub fn collateral_curve(
 
     // Decompose one per-row move field into (effect, off-target collateral,
     // cross-feature leakage) RMS over rows.
-    let decompose = |field: &Array2<f64>| -> CollateralPoint {
+    let decompose = |field: &Array2<f64>| -> Result<CollateralPoint, String> {
         let mut eff_sq = 0.0_f64;
         let mut col_sq = 0.0_f64;
         let mut cross_sq = 0.0_f64;
         for row in 0..n {
             let delta = field.row(row);
-            let on_target = project_onto_tangent_span(&target_frames[row], delta);
+            let on_target = project_onto_tangent_span(&target_frames[row], delta)?;
             let mut e = 0.0_f64;
             let mut c = 0.0_f64;
             for i in 0..p {
@@ -1493,18 +1470,18 @@ pub fn collateral_curve(
             col_sq += c;
             let mut cross = 0.0_f64;
             for frames in &other_frames {
-                let l = frame_landed_norm(&frames[row], delta);
+                let l = frame_landed_norm(&frames[row], delta)?;
                 cross += l * l;
             }
             cross_sq += cross;
         }
         let denom = n.max(1) as f64;
-        CollateralPoint {
+        Ok(CollateralPoint {
             dose: 0.0,
             on_target_effect: (eff_sq / denom).sqrt(),
             collateral: (col_sq / denom).sqrt(),
             cross_feature: (cross_sq / denom).sqrt(),
-        }
+        })
     };
 
     let mut manifold_pts = Vec::with_capacity(doses.len());
@@ -1521,10 +1498,10 @@ pub fn collateral_curve(
             }
         }
 
-        let mut m = decompose(&on_field);
+        let mut m = decompose(&on_field)?;
         m.dose = dose;
         manifold_pts.push(m);
-        let mut f = decompose(&flat_field);
+        let mut f = decompose(&flat_field)?;
         f.dose = dose;
         flat_pts.push(f);
     }
