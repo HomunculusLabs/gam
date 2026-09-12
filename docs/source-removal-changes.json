@@ -4064,5 +4064,14 @@
     ],
     "reason": "#2897, SPEC rule 25. The BMS and survival marginal-slope families each declared a Phase-1 auto-subsample budget with the same value, 12, and each passed its budget twice: to OuterDerivativePilotSchedule::new and to maybe_install_auto_outer_subsample. So the pilot schedule and the installer could disagree, and the per-family choice was never exercised. One shared constant, crate::marginal_slope_shared::AUTO_OUTER_PHASE1_BUDGET (12), replaces BMS_AUTO_SUBSAMPLE_PHASE1_BUDGET and SURVIVAL_MGS_AUTO_SUBSAMPLE_PHASE1_BUDGET, and the installer no longer takes a phase1_budget argument.",
     "evidence": "At main 5e2ef7d66, git grep -n -E AUTO_SUBSAMPLE_PHASE1_BUDGET over the whole tree finds each constant's declaration, where both equal 12. BMS_AUTO_SUBSAMPLE_PHASE1_BUDGET is declared in bms/mod.rs and is used in bms/custom_family_impl.rs (the pilot schedule, the installer call and one comment) and in one bms/family.rs doc comment. SURVIVAL_MGS_AUTO_SUBSAMPLE_PHASE1_BUDGET is declared in survival/marginal_slope/family.rs and is used in survival/marginal_slope/custom_family_impl.rs (the pilot schedule), in eval_rigid.rs (the installer call) and in one family.rs doc comment. Every use now reads AUTO_OUTER_PHASE1_BUDGET. The in-crate schedule test and root test h1c had passed the literal 12; they now use the shared budget. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "af7a5541cf9c451d3280a617719b26e853dfe35c",
+    "items": [
+      "crates/gam-math/src/jet_partitions.rs:static:COMPOSE_UNARY_CALLS",
+      "crates/gam-math/src/jet_partitions.rs:static:MUL_CALLS"
+    ],
+    "reason": "#2899 group-A public-surface sweep, under the #2829 rule in docs/rust-library-surface.md. COMPOSE_UNARY_CALLS and MUL_CALLS were pub AtomicU64 call counters that MultiDirJet::compose_unary and mul incremented on every call, and nothing anywhere ever loaded them: no product, no test, no bench. Each call paid for an atomic write that nobody observed, so the statics, both fetch_add lines and the now-unused atomic import are deleted. The same commit narrows eleven gam-math helpers that only gam-math production code calls to pub(crate) and rewrites eight rustdoc links to newly private items as plain code spans. No pub fn is removed.",
+    "evidence": "At 1da5a9cd4, git grep -n -w COMPOSE_UNARY_CALLS and -w MUL_CALLS over crates, src, examples, tests, gamfit and docs find only each declaration and its fetch_add (jet_partitions.rs:112/:242 and :113/:175). The item list is source_removal_guard.py --base 1da5a9cd4 --head 473cfbc39 (/scratch.global/sauer354/pool/prune-api-a/slice3.srg.out). public_api_census.py over the same range reports no removed identity. The compile check is the lead shared tip check."
   }
 ]

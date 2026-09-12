@@ -411,7 +411,7 @@ pub struct ScoreSearchResult {
     pub resolution_flat_regions: Vec<ResolutionFlatRegion>,
     /// Pairwise-disjoint terminal cells. A binary tree with at most `B`
     /// subdivisions has at most `B + 1` leaves, so this audit is bounded by
-    /// the same [`subdivision_budget`] as the traversal.
+    /// the same `subdivision_budget` as the traversal.
     pub dominated_regions: Vec<DominatedRegion>,
     pub value_certificate: GlobalScoreCertificate,
 }
@@ -479,7 +479,7 @@ pub enum ScoreSearchError<E> {
         enclosure: DerivativeEnclosure,
     },
     /// The traversal asked for more cell subdivisions than
-    /// [`subdivision_budget`] allows for this domain and resolution. Reported
+    /// `subdivision_budget` allows for this domain and resolution. Reported
     /// with the cell that was being split when the budget ran out, so the
     /// caller can see WHERE the criterion stopped being decomposable, and with
     /// that cell's enclosure, so the caller can see WHETHER a larger budget
@@ -613,7 +613,7 @@ pub enum ScoreSearchError<E> {
 /// problem-dependent tolerance — but the failures it was written to explain are
 /// gone, and it should not be cited as the cause of a fresh one without a
 /// discriminator like the ladder above.
-pub fn subdivision_budget(lo: f64, hi: f64, resolution: f64) -> (usize, u32) {
+pub(crate) fn subdivision_budget(lo: f64, hi: f64, resolution: f64) -> (usize, u32) {
     let width = hi - lo;
     if !(width.is_finite() && width > 0.0 && resolution.is_finite() && resolution > 0.0) {
         return (1, 0);
@@ -1581,7 +1581,7 @@ fn certified_domain_boundary(
 /// Any cell that satisfies none of those conditions produces
 /// [`ScoreSearchError::Unresolved`].
 ///
-/// The traversal is bounded by [`subdivision_budget`]. The per-cell resolution
+/// The traversal is bounded by `subdivision_budget`. The per-cell resolution
 /// floor bounds the DEPTH of the subdivision and never its BREADTH, and those
 /// are different failures. A criterion that certifies NOTHING bottoms out on the
 /// floor after `D` subdivisions and is already typed
@@ -1999,7 +1999,7 @@ where
 /// There is no retry cap or acceptance fallback. Each retry contracts the
 /// target by at least one binary subdivision. If the next target is no longer
 /// representable, or the oracle cannot resolve stationary structure at that
-/// finer target, or the finer traversal exceeds its [`subdivision_budget`], the
+/// finer target, or the finer traversal exceeds its `subdivision_budget`, the
 /// last complete certificate is returned unchanged so the caller can issue its
 /// domain-specific typed refusal.
 pub fn maximize_score_1d_value_ordered<E, Eval, Enclose>(
@@ -2479,12 +2479,12 @@ impl<'a> AffineRemlProfile<'a> {
     }
 
     #[inline]
-    pub fn num_modes(&self) -> usize {
+    pub(crate) fn num_modes(&self) -> usize {
         self.gram_modes.len()
     }
 
     #[inline]
-    pub fn num_responses(&self) -> usize {
+    pub(crate) fn num_responses(&self) -> usize {
         self.response_energy.len()
     }
 
@@ -3670,7 +3670,7 @@ pub fn certified_ln_positive(value: f64) -> Option<ClosedInterval> {
 /// exact identity `ln(1+x) = ln(x) + ln(1+1/x)` keeps the atanh argument below
 /// `1/3` and avoids overflow in `1+x`. Negative valid inputs route through the
 /// certified positive logarithm of an outward `1+value` interval.
-pub fn certified_ln_1p(value: f64) -> Option<ClosedInterval> {
+pub(crate) fn certified_ln_1p(value: f64) -> Option<ClosedInterval> {
     if !(value.is_finite() && value > -1.0) {
         return None;
     }

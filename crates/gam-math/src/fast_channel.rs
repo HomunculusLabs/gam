@@ -3,7 +3,7 @@
 //! A dense [`super::jet_tower::Tower4<K>`] reading ONE mixed channel materializes
 //! the entire `K⁴` derivative tensor — measured at ~19× the x86 instruction count
 //! of the hand factorization for an order-4 channel. The runtime partition walker
-//! in [`super::jet_algebra::faa_di_bruno`] is exact but its recursive
+//! in `super::jet_algebra::faa_di_bruno` is exact but its recursive
 //! `&mut dyn FnMut` enumeration does not inline to straight-line arithmetic.
 //!
 //! This module owns the *compiled* form: for a composition `f ∘ q` whose inner
@@ -22,7 +22,7 @@
 //! They are the SINGLE SOURCE every family feeds — there is no hand-maintained
 //! per-family chain rule — and the `oracle_tests` below pin each one BIT-FOR-BIT
 //! against the general runtime partition walker
-//! ([`super::jet_algebra::faa_di_bruno`]), so the compiled form can never drift
+//! (`super::jet_algebra::faa_di_bruno`), so the compiled form can never drift
 //! from the universal rule.
 //!
 //! # Nested, not flat
@@ -89,7 +89,7 @@ pub fn faa_top4(m: [f64; 4], q: &[f64; 16]) -> f64 {
 
 /// Compile several order-three top channels as one output schedule.
 #[inline(always)]
-pub fn faa_bundle3<const OUTPUTS: usize>(m: [f64; 3], q: &[[f64; 8]; OUTPUTS]) -> [f64; OUTPUTS] {
+pub(crate) fn faa_bundle3<const OUTPUTS: usize>(m: [f64; 3], q: &[[f64; 8]; OUTPUTS]) -> [f64; OUTPUTS] {
     std::array::from_fn(|output| faa_top3(m, &q[output]))
 }
 

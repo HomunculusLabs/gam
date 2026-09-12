@@ -293,7 +293,7 @@ impl<const K: usize> Tower4<K> {
     ///
     /// Evaluated as a compact closed form (the Bell(4)=15 set-partitions of
     /// `t4`, Bell(3)=5 of `t3`, …) instead of routing through the recursive
-    /// [`jet_algebra::faa_di_bruno`] walker (per-output `for_each_partition`
+    /// `jet_algebra::faa_di_bruno` walker (per-output `for_each_partition`
     /// recursion + per-block `SlotBuf` + closure dispatch). The loop nest is
     /// identical to the walker's (`for i,j,k,l`); only the per-entry partition
     /// sum is straight-line, so this does NOT unroll over `K` and does NOT
@@ -592,7 +592,7 @@ impl<const K: usize> Tower2<K> {
     ///
     /// Order-≤2 Faà di Bruno is a tiny closed form, so this evaluates it
     /// directly instead of routing through the generic
-    /// [`jet_algebra::faa_di_bruno`] set-partition walker (recursion + per-block
+    /// `jet_algebra::faa_di_bruno` set-partition walker (recursion + per-block
     /// closure dispatch). That matters because this is the kernel under EVERY
     /// packed scalar — [`crate::jet_scalar::Order2`] / `OneSeed` / `TwoSeed`
     /// composition all bottom out here — so the straight-line form (whose inner
@@ -869,7 +869,7 @@ impl<const K: usize> Tower3<K> {
     /// # Codegen
     ///
     /// Order-≤3 Faà di Bruno written as a compact closed form instead of the
-    /// recursive [`jet_algebra::faa_di_bruno`] walker — the order-≤2 sibling of
+    /// recursive `jet_algebra::faa_di_bruno` walker — the order-≤2 sibling of
     /// [`Tower4::compose_unary`], one tensor order shallower. The loop nest is
     /// unchanged (no unroll over `K`, no code bloat: measured on a `Tower3<9>`
     /// compose-and-read consumer the new form is faster and SMALLER — asm: 71

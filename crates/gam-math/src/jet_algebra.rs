@@ -142,7 +142,7 @@ where
 /// per-call cost (the `inner` gather) drops by the distinct/incidence ratio,
 /// which grows with `m`.
 #[inline]
-pub fn faa_di_bruno<F>(positions: &[usize], derivs: &[f64], mut inner: F) -> f64
+pub(crate) fn faa_di_bruno<F>(positions: &[usize], derivs: &[f64], mut inner: F) -> f64
 where
     F: FnMut(&[usize]) -> f64,
 {

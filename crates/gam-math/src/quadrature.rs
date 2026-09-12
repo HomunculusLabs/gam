@@ -92,7 +92,7 @@ impl From<QuadratureError> for String {
 /// For `T = Q diag(lambda) Q'`, the returned vectors contain `lambda_i` and
 /// `Q[0, i]` in matching (not necessarily sorted) order.  This is precisely the
 /// spectral information used by Golub-Welsch and Lanczos quadrature.
-pub fn symmetric_tridiagonal_eigen_first_components(
+pub(crate) fn symmetric_tridiagonal_eigen_first_components(
     diagonal: &[f64],
     off_diagonal: &[f64],
 ) -> Result<(Vec<f64>, Vec<f64>), QuadratureError> {

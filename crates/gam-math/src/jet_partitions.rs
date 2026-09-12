@@ -106,11 +106,7 @@
 //!   prefer this schedule; it is not free, and a reader sizing a new call site
 //!   should plan for it.
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, Ordering};
 use wide::f64x4;
-
-pub static COMPOSE_UNARY_CALLS: AtomicU64 = AtomicU64::new(0);
-pub static MUL_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Length of the unary derivative stack `[f, f', f'', f''', f'''']`: composition
 /// is exact through order 4, partitions into `>= 5` blocks are truncated.
@@ -172,7 +168,6 @@ impl MultiDirJet {
     /// dropping its per-subset `SlotBuf`/closure/`mask_of` overhead. The scalar
     /// `n_dirs == 0` case keeps the shared walker live as its reference.
     pub fn mul(&self, other: &Self) -> Self {
-        MUL_CALLS.fetch_add(1, Ordering::Relaxed);
         let count = self.coeffs.len();
         if count <= 1 {
             return self.mul_reference(other);
@@ -239,7 +234,6 @@ impl MultiDirJet {
     /// a double-double oracle in `tests`). The scalar `n_dirs == 0` case keeps
     /// the shared Faà di Bruno walker live as its reference.
     pub fn compose_unary(&self, derivs: [f64; DERIVS]) -> Self {
-        COMPOSE_UNARY_CALLS.fetch_add(1, Ordering::Relaxed);
         let count = self.coeffs.len();
         if count <= 1 {
             return <Self as crate::jet_algebra::JetAlgebra<DERIVS>>::compose_unary(self, derivs);

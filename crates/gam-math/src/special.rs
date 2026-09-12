@@ -964,7 +964,7 @@ pub fn bernoulli_kl_from_logits(a: f64, b: f64) -> f64 {
 /// Exact power-of-two decomposition `x = mantissa · 2^exponent` for a positive
 /// finite `f64`, including subnormals. The mantissa lies in `[1, 2)`.
 #[inline]
-pub fn positive_frexp(x: f64) -> (f64, i32) {
+pub(crate) fn positive_frexp(x: f64) -> (f64, i32) {
     assert!(x.is_finite() && x > 0.0);
     let bits = x.to_bits();
     let raw_exp = ((bits >> 52) & 0x7ff) as i32;
@@ -987,7 +987,7 @@ pub fn positive_frexp(x: f64) -> (f64, i32) {
 /// scaling in units of the least positive subnormal, so IEEE rounds the final
 /// value once instead of underflowing an intermediate.
 #[inline]
-pub fn scale_normalized_power_of_two(mut mantissa: f64, mut exponent: i32) -> f64 {
+pub(crate) fn scale_normalized_power_of_two(mut mantissa: f64, mut exponent: i32) -> f64 {
     while mantissa >= 2.0 {
         mantissa *= 0.5;
         exponent += 1;

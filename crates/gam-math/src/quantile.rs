@@ -36,7 +36,7 @@ pub fn quantile_from_sorted(sorted: &[f64], q: f64) -> f64 {
 /// the number of observations. This is intentionally not an interpolating
 /// quantile: split-conformal calibration needs the observed `k`-th value to
 /// preserve the finite-sample coverage proof.
-pub fn order_statistic_from_sorted(sorted: &[f64], rank: usize) -> f64 {
+pub(crate) fn order_statistic_from_sorted(sorted: &[f64], rank: usize) -> f64 {
     if sorted.is_empty() || rank == 0 || rank > sorted.len() {
         return f64::NAN;
     }

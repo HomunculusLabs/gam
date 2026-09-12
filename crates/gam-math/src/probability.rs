@@ -660,7 +660,7 @@ fn imhof_amplitude_bound(terms: &[WeightedChiSquareTerm], u: f64) -> Option<f64>
 /// corner it is: the amplitude panel is `2/(|λ|_max·s(tol))`, independent of
 /// the statistic, so it binds where the phase rate is small — and a small phase
 /// rate is a small truncation point, which is the cheap end.
-pub const IMHOF_MAX_PANELS: usize = 1 << 21;
+pub(crate) const IMHOF_MAX_PANELS: usize = 1 << 21;
 
 fn imhof_survival(terms: &[WeightedChiSquareTerm], statistic: f64, tolerance: f64) -> (f64, f64) {
     // A panel has to resolve the WHOLE phase, not just the `−xu/2` half. The
