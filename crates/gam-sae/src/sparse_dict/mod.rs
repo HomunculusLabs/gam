@@ -222,27 +222,13 @@ pub struct SparseDictConvergence {
     /// [`Self::outer_iterations`] for a schedule fit.
     pub continued_inner_runs: usize,
     /// Residual-row birth proposals that fired in the final inner transition.
-    ///
-    /// A positive count is compatible with an open certificate only when
-    /// [`Self::support_saturated`] is true: those births replace live atoms on a
-    /// fixed-cardinality support manifold instead of expanding model structure.
+    /// Zero on every returned fit: a transition that still admits births has not
+    /// settled its structure.
     pub accepted_births: usize,
-    /// Largest live-atom cardinality reached during the final inner fit.
-    pub live_atom_high_water: usize,
-    /// Whether live-support cardinality set no new high for the full saturation
-    /// confirmation window. This is reported independently of the EV plateau;
-    /// both are required to return an open fit while births keep swapping (#2400).
-    pub support_saturated: bool,
-    /// Whether the inner fit reached the ABSOLUTE fixed point (EV, decoder AND
-    /// routing residuals all within tolerance). `false` marks a **best-effort**
-    /// fit returned at `K` above the intrinsic rank, where the `>rank` spurious
-    /// support directions rotate freely in the equivalent-optima manifold and the
-    /// routing residual legitimately cannot close (#2275) — the objective (EV) has
-    /// plateaued but the discrete routing keeps churning. Convergence is decided by
-    /// the gauge-invariant EV plateau, so both certified and open fits are returned;
-    /// only a still-climbing objective (or a failed linear subsolve) is a genuine
-    /// non-convergence error. Mirrors
-    /// `super::block::BlockSparseConvergence::certified`.
+    /// Always `true`: a fit is returned only from the ABSOLUTE fixed point (EV,
+    /// decoder and routing residuals all within tolerance, no births). An EV
+    /// plateau whose routing keeps churning, the `K` above intrinsic rank limit
+    /// cycle (#2275), is typed non-convergence, never a fit (SPEC rule 22, #2902).
     pub certified: bool,
 }
 

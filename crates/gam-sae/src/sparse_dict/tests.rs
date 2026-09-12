@@ -239,224 +239,57 @@ fn sparse_trainer_recovers_planted_dictionary_beats_pca_baseline() {
     );
 }
 
-/// #2275 trichotomy on the `fit_sparse_dictionary` trainer path: at `K` far above
-/// the intrinsic rank the objective (EV) plateaus at ~1 while the discrete top-s
-/// routing keeps churning (spurious support directions rotate freely in the
-/// equivalent-optima manifold), so the routing fixed-point residual legitimately
-/// cannot close. The trainer must return that objective-converged iterate as a
-/// **best-effort OPEN certificate** (`certified = false`, routing residual honestly
-/// above tolerance) rather than collapsing it to a hard `InnerNonConvergence` — the
-/// same contract inc1 restored on `fit_block_sparse_dictionary`. NO tolerance is
-/// softened: the open residual is reported as-is.
+/// SPEC rule 22 (#2902): at `K` far above the intrinsic rank the discrete top-s
+/// routing can keep churning after the objective stops improving, so the routing
+/// fixed-point residual stays open. That state is not a converged optimization, and
+/// `fit_sparse_dictionary` refuses it as typed non-convergence instead of returning
+/// it. The 60-epoch budget is the regime whose EV plateau the removed best-effort
+/// arm returned as an open certificate: it now yields typed non-convergence or a
+/// certified fixed point with no births. The 3-epoch budget is too short to reach
+/// any fixed point and must refuse.
 #[test]
-fn over_complete_trainer_returns_best_effort_open_certificate_2275() {
-    // K=64 atoms in p=16 dims (K >> rank), 2-sparse rows — the over-complete regime
-    // whose routing oscillates while EV saturates.
+fn an_unconverged_over_complete_fit_is_refused_not_returned_2902() {
     let (k, p, n) = (64usize, 16usize, 1600usize);
     let (x, _atoms) = planted(k, p, n, 0.35);
-    let config = SparseDictConfig {
-        n_atoms: k,
-        active: 2,
-        minibatch: 256,
-        max_epochs: 60,
-        score_tile: 16,
-        code_ridge: 1.0e-6,
-        decoder_ridge: 1.0e-6,
-        tolerance: 1.0e-9,
-        score_mode: gam_gpu::GpuPolicy::Off,
-    };
-    let fit = fit_sparse_dictionary(x.view(), &config)
-        .expect("#2275: over-complete trainer fit must RETURN best-effort, not error");
-
-    // Objective converged: EV at its achievable plateau.
-    assert!(
-        fit.explained_variance > 0.9,
-        "over-complete EV should saturate the planted structure; got {}",
-        fit.explained_variance
-    );
-    // Best-effort OPEN, not certified: the absolute routing fixed point did not close.
-    assert!(
-        !fit.convergence.certified,
-        "K >> rank fit must carry an OPEN (best-effort) certificate; got certified=true \
-         (routing_residual={}, tol={})",
-        fit.convergence.routing_residual, fit.convergence.routing_tolerance
-    );
-    // No tolerance softening: the openness is reported honestly, above the SAME tol.
-    assert!(
-        fit.convergence.routing_residual > fit.convergence.routing_tolerance,
-        "an open certificate must record routing_residual above tolerance; got {} <= {}",
-        fit.convergence.routing_residual,
-        fit.convergence.routing_tolerance
-    );
-    assert!(
-        fit.convergence.inner_ev_residual.is_finite(),
-        "the plateaued objective residual must be recorded (finite); got {}",
-        fit.convergence.inner_ev_residual
-    );
-}
-
-/// `N` distinct unit directions spread over the sphere in `P` dimensions, from a
-/// deterministic integer hash (no RNG, no float seeds). Unlike [`planted`] — whose
-/// rows collapse onto `rank` distinct directions, so any `K ≥ rank` dictionary
-/// interpolates them exactly — every row here needs its own direction, so a
-/// dictionary with `K < N` leaves residual on every row no matter how it routes.
-fn spread_directions(n: usize, p: usize) -> Array2<f32> {
-    let mut x = Array2::<f32>::zeros((n, p));
-    for row in 0..n {
-        let mut norm2 = 0.0f32;
-        for col in 0..p {
-            // The `row·col` cross term keeps the per-row pattern from being a
-            // pure arithmetic progression, so directions stay distinct well past
-            // the modulus rather than repeating every 1009 rows.
-            let hash = (row * 131 + col * 71 + row * col * 17) % 1009;
-            let value = (hash as f32) / 504.0 - 1.0;
-            x[[row, col]] = value;
-            norm2 += value * value;
-        }
-        let norm = norm2.sqrt();
-        if norm > 0.0 {
-            for col in 0..p {
-                x[[row, col]] /= norm;
+    for max_epochs in [60usize, 3] {
+        let config = SparseDictConfig {
+            n_atoms: k,
+            active: 2,
+            minibatch: 256,
+            max_epochs,
+            score_tile: 16,
+            code_ridge: 1.0e-6,
+            decoder_ridge: 1.0e-6,
+            tolerance: 1.0e-9,
+            score_mode: gam_gpu::GpuPolicy::Off,
+        };
+        match fit_sparse_dictionary(x.view(), &config) {
+            Ok(fit) => {
+                assert!(
+                    max_epochs > 3,
+                    "a 3-epoch over-complete fit has not reached its fixed point and must \
+                     not become a model; got EV {}",
+                    fit.explained_variance
+                );
+                assert!(
+                    fit.convergence.certified && fit.convergence.accepted_births == 0,
+                    "a returned fit must be a certified fixed point with no births; got \
+                     certified={} births={} routing_residual={}",
+                    fit.convergence.certified,
+                    fit.convergence.accepted_births,
+                    fit.convergence.routing_residual
+                );
+            }
+            Err(err) => {
+                let message = err.to_string();
+                assert!(
+                    message.contains("did not converge")
+                        || (max_epochs > 3 && message.contains("did not settle")),
+                    "expected typed non-convergence at max_epochs={max_epochs}, got: {err}"
+                );
             }
         }
     }
-    x
-}
-
-/// #2400 — the saturated-support birth-swap arm, at the production entry.
-///
-/// The open arm admits a fit whose final transition still accepted residual-row
-/// births, but ONLY when live-support cardinality has stopped setting new highs:
-/// those births are replacements on a fixed-cardinality support manifold, not
-/// structure the fit is still recruiting. `LiveSupportGrowth`'s own unit test
-/// pins the state machine in isolation; this pins that `run` actually reaches
-/// that branch and that nothing else can mint a model while births are live.
-///
-/// The invariant is asserted for every shape and is premise-free: a certified fit
-/// or a still-growing support with live births would be a model minted from
-/// churning structure, whatever the data. The sweep also requires that at least
-/// one shape genuinely reach the OPEN arm, so it cannot degenerate into a set of
-/// trivially-certified fits that assert nothing.
-///
-/// The POSITIVE birth-swap arm is proven separately and deterministically by
-/// `churning_births_are_admitted_only_after_the_support_saturates_2400`, which
-/// drives `open_round_is_stationary` against a live `LiveSupportGrowth`. That is
-/// deliberate: across the regimes below — `K` above and below `N`, `s` from 1 to
-/// 8, low-rank and continuum data — the trainer's births always stop before the
-/// plateau confirms, because the two conditions fight each other. Births need a
-/// substantially unexplained row AND a dead atom, and spare capacity (`K > N`,
-/// which produces the dead atoms) is exactly what lets the fit explain every row.
-/// The production arm therefore stays exercised by the real-activation lane; the
-/// sweep here records the regimes so that stays visible rather than assumed.
-#[test]
-fn open_fit_with_positive_births_is_certified_only_by_saturated_support_2400() {
-    // (K, s, N, P). Rows are `N` distinct directions spread over the sphere (see
-    // `spread_directions`) rather than a `planted` mixture, whose `rank` distinct
-    // directions every one of these shapes interpolates to EV = 1 in four epochs.
-    // The list spans both sides of the capacity frontier: `K < N` (no spare
-    // capacity, every atom stays live) and `K > N` with a wide active set (spare
-    // capacity, so dead atoms exist and a revived atom can win one of `s` slots).
-    let shapes = [
-        (96usize, 1usize, 600usize, 12usize),
-        (64, 2, 600, 12),
-        (200, 1, 900, 16),
-        (512, 4, 256, 16),
-        (768, 8, 384, 32),
-    ];
-
-    let mut observed = String::new();
-    let mut open_arms = 0usize;
-    for (k, s, n, p) in shapes {
-        let x = spread_directions(n, p);
-        let config = SparseDictConfig {
-            n_atoms: k,
-            active: s,
-            minibatch: 256,
-            max_epochs: 12,
-            score_tile: 256,
-            tolerance: 1.0e-9,
-            score_mode: gam_gpu::GpuPolicy::Off,
-            ..SparseDictConfig::new(k)
-        };
-        let Ok(fit) = fit_sparse_dictionary(x.view(), &config) else {
-            // A shape that never confirms a plateau inside its budget is a typed
-            // non-convergence, which is the honest outcome and not this test's
-            // subject. Record it and move on.
-            observed.push_str(&format!("K={k} s={s}: typed non-convergence\n"));
-            continue;
-        };
-        let convergence = fit.convergence;
-        observed.push_str(&format!(
-            "K={k} s={s}: births={} live_high_water={} saturated={} certified={} \
-             epochs={} ev={:.6}\n",
-            convergence.accepted_births,
-            convergence.live_atom_high_water,
-            convergence.support_saturated,
-            convergence.certified,
-            fit.epochs,
-            fit.explained_variance,
-        ));
-
-        assert!(
-            convergence.live_atom_high_water <= k,
-            "live support cannot exceed the dictionary width: {} > {k}",
-            convergence.live_atom_high_water
-        );
-        if !convergence.certified {
-            open_arms += 1;
-        }
-        if convergence.accepted_births > 0 {
-            assert!(
-                convergence.support_saturated,
-                "a fit returned with {} live births must have saturated its support \
-                 (K={k}, s={s}); returning one whose support is still growing mints a \
-                 model from structure the fit has not finished recruiting",
-                convergence.accepted_births
-            );
-            assert!(
-                !convergence.certified,
-                "births in the final transition are incompatible with an ABSOLUTE \
-                 fixed-point certificate (K={k}, s={s}); only the open arm admits them"
-            );
-        }
-    }
-
-    assert!(
-        open_arms > 0,
-        "every shape certified an absolute fixed point, so the sweep never reached \
-         the open arm whose invariant it is asserting; observed:\n{observed}"
-    );
-}
-
-/// #2275 no-weakening guard: best-effort is NOT handed out on a whim. Genuine
-/// non-convergence — the objective plateau never CONFIRMED within the epoch budget
-/// — must still surface the typed `InnerNonConvergence` error. With a budget below
-/// the sustained-plateau horizon the same over-complete fit (which can never certify
-/// its routing) has no confirmed plateau to return, so it must error, exactly as
-/// before this change.
-#[test]
-fn over_complete_trainer_still_errors_without_confirmed_plateau_2275() {
-    let (k, p, n) = (64usize, 16usize, 1600usize);
-    let (x, _atoms) = planted(k, p, n, 0.35);
-    let config = SparseDictConfig {
-        n_atoms: k,
-        active: 2,
-        minibatch: 256,
-        // Below the sustained-plateau confirmation horizon: too short to certify OR
-        // to confirm a best-effort plateau, so this is genuine non-convergence.
-        max_epochs: 3,
-        score_tile: 16,
-        code_ridge: 1.0e-6,
-        decoder_ridge: 1.0e-6,
-        tolerance: 1.0e-9,
-        score_mode: gam_gpu::GpuPolicy::Off,
-    };
-    let err = fit_sparse_dictionary(x.view(), &config)
-        .expect_err("an unconfirmed plateau must remain a typed non-convergence error");
-    assert!(
-        err.to_string().contains("did not converge"),
-        "expected the typed InnerNonConvergence, got: {err}"
-    );
 }
 
 #[test]

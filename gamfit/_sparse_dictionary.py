@@ -117,19 +117,15 @@ class SparseDictionaryConvergence:
     #: Inner fits continued from the previous iterate; with ``seeded_inner_runs`` sums to ``outer_iterations``.
     continued_inner_runs: int
     accepted_births: int
-    live_atom_high_water: int
-    support_saturated: bool
     certified: bool
 
 
 @dataclass(frozen=True, slots=True)
 class SparseDictionaryFit:
-    """An objective-converged collapsed-linear-lane model.
+    """A certified-converged collapsed-linear-lane model.
 
-    The Rust solver raises while the objective is still moving. Exact fixed
-    points carry ``convergence.certified=True``; over-complete fits may instead
-    carry an open certificate after independent objective and live-support
-    saturation windows both settle.
+    The Rust solver raises unless the fit reaches its absolute fixed point, so
+    every instance carries ``convergence.certified=True`` (#2902).
 
     Attributes
     ----------
@@ -1263,8 +1259,6 @@ def sparse_dictionary_fit(
             seeded_inner_runs=int(convergence["seeded_inner_runs"]),
             continued_inner_runs=int(convergence["continued_inner_runs"]),
             accepted_births=int(convergence["accepted_births"]),
-            live_atom_high_water=int(convergence["live_atom_high_water"]),
-            support_saturated=bool(convergence["support_saturated"]),
             certified=bool(convergence["certified"]),
         ),
         active=int(data["active"]),

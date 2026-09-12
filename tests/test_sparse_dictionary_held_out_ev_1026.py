@@ -61,9 +61,7 @@ def test_sparse_trainer_held_out_ev_beats_pca_baseline_modest_k():
     assert fit.indices.shape == (train.shape[0], 2)
     assert fit.codes.shape == (train.shape[0], 2)
     assert fit.decoder.shape == (k, p)
-    assert 0 <= fit.convergence.live_atom_high_water <= k
     assert fit.convergence.accepted_births >= 0
-    assert isinstance(fit.convergence.support_saturated, bool)
     assert isinstance(fit.convergence.certified, bool)
 
     # Held-out: route the test rows through the frozen decoder, reconstruct.
@@ -102,8 +100,7 @@ def test_sparse_transform_uses_the_fitted_variance_ratio(monkeypatch):
         outer_rho_residual=0.0, outer_tolerance=1e-6,
         selected_rho=7.5, outer_iterations=1,
         seeded_inner_runs=1, continued_inner_runs=0,
-        accepted_births=0, live_atom_high_water=1,
-        support_saturated=True, certified=True,
+        accepted_births=0, certified=True,
     )
     fit = sparse.SparseDictionaryFit(
         decoder=np.array([[1.0, 0.0]], dtype=np.float32),

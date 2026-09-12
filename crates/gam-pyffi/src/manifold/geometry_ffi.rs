@@ -6024,11 +6024,6 @@ fn sparse_dictionary_fit<'py>(
     convergence.set_item("seeded_inner_runs", fit.convergence.seeded_inner_runs)?;
     convergence.set_item("continued_inner_runs", fit.convergence.continued_inner_runs)?;
     convergence.set_item("accepted_births", fit.convergence.accepted_births)?;
-    convergence.set_item(
-        "live_atom_high_water",
-        fit.convergence.live_atom_high_water,
-    )?;
-    convergence.set_item("support_saturated", fit.convergence.support_saturated)?;
     convergence.set_item("certified", fit.convergence.certified)?;
     out.set_item("convergence", convergence)?;
     out.set_item("active", fit.active)?;

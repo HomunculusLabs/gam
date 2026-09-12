@@ -5687,5 +5687,33 @@
     ],
     "reason": "#2822 / SPEC rule 16: zz_1095_2228_measure_seed_vs_settled_r2 re-ran the sibling test's entire production outer fit (same build_cold_circle_d2_term fixture, initial rho, inner budget and ridges, OuterProblem::run plus certify_outer_result) only to print the cold-seed and returned reconstruction R2 as a #1095/#2228 loop discriminator. Its one assertion is that both R2 values are finite, which no defect in the fit can fail, while sae_manifold_circle_d2_ridge0_fits keeps the real bar on the same fit (feasible criterion at the converged optimum, R2 > 0.9). #1095 is closed; #2228 is the p=4096 inner-solve stall, which this measurement does not reach.",
     "evidence": "Census pool job 505909 at 7ad913f69 (/scratch.global/sauer354/pool/sae2822b/int6_red.txt) timed it out at the repo's 600 s cap. At the base, git grep -w finds the name only in its own file, a historical triage summary under bench/measurements and the codebase-city bundle. Every helper and constant it used (planted_circle, build_cold_circle_d2_term, reconstruction_r2, INNER_MAX_ITER, LEARNING_RATE, RIDGE_EXT_COORD, RIDGE_BETA, D) is also used by the sibling test, so nothing else is removed. The identity is the guard's own: a test-scoped fn under tests/. Not run through the guard locally (user directive); compile is covered by the tip check."
+  },
+  {
+    "base": "170bf96fa69639f9d4d3536690824004c868cfe9",
+    "items": [
+      "crates/gam-sae/src/sparse_dict/tests.rs:fn:open_fit_with_positive_births_is_certified_only_by_saturated_support_2400",
+      "crates/gam-sae/src/sparse_dict/tests.rs:fn:over_complete_trainer_returns_best_effort_open_certificate_2275",
+      "crates/gam-sae/src/sparse_dict/tests.rs:fn:over_complete_trainer_still_errors_without_confirmed_plateau_2275",
+      "crates/gam-sae/src/sparse_dict/tests.rs:fn:spread_directions",
+      "crates/gam-sae/src/sparse_dict/update.rs:const:LINEAR_EV_PLATEAU_FRACTION",
+      "crates/gam-sae/src/sparse_dict/update.rs:const:LINEAR_EV_PLATEAU_MIN_ROUNDS",
+      "crates/gam-sae/src/sparse_dict/update.rs:const:LINEAR_EV_PLATEAU_WINDOW",
+      "crates/gam-sae/src/sparse_dict/update.rs:const:LINEAR_SUPPORT_SATURATION_ROUNDS",
+      "crates/gam-sae/src/sparse_dict/update.rs:fn:churning_births_are_admitted_only_after_the_support_saturates_2400",
+      "crates/gam-sae/src/sparse_dict/update.rs:fn:ev_plateau_certifies_the_achievable_objective_not_a_round_2396",
+      "crates/gam-sae/src/sparse_dict/update.rs:fn:live_atom_count",
+      "crates/gam-sae/src/sparse_dict/update.rs:fn:live_support_growth_distinguishes_recruitment_from_fixed_cardinality_swaps_2400",
+      "crates/gam-sae/src/sparse_dict/update.rs:fn:new",
+      "crates/gam-sae/src/sparse_dict/update.rs:fn:observe",
+      "crates/gam-sae/src/sparse_dict/update.rs:fn:open_arm_returns_the_best_iterate_its_trajectory_reached_2396",
+      "crates/gam-sae/src/sparse_dict/update.rs:fn:open_round_is_stationary",
+      "crates/gam-sae/src/sparse_dict/update.rs:fn:over_complete_rows",
+      "crates/gam-sae/src/sparse_dict/update.rs:fn:zz_measure_2396_open_arm_budget_ev_trace",
+      "crates/gam-sae/src/sparse_dict/update.rs:struct:BestOpenIterate",
+      "crates/gam-sae/src/sparse_dict/update.rs:struct:EvPlateau",
+      "crates/gam-sae/src/sparse_dict/update.rs:struct:LiveSupportGrowth"
+    ],
+    "reason": "#2902 row 31, SPEC rule 22: fit_sparse_dictionary returned an EV-plateau iterate whose routing residual was still open as a best-effort fit (certified = false), which is not a converged optimization. run_from_decoder now returns only the absolute fixed point and refuses every other state at max_epochs as InnerNonConvergence. The shared-rho REML schedule refuses at its outer cap with the new OuterNonConvergence instead of returning the unsettled iterate. The best-effort arm's plateau detector EvPlateau (new, observe), BestOpenIterate, open_round_is_stationary, the live-support saturation tracker LiveSupportGrowth (new, observe), live_atom_count and the LINEAR_EV_PLATEAU_FRACTION, LINEAR_EV_PLATEAU_MIN_ROUNDS, LINEAR_EV_PLATEAU_WINDOW and LINEAR_SUPPORT_SATURATION_ROUNDS constants have no caller left. The tests that pinned the open arm go with it, with their spread_directions and over_complete_rows fixtures. over_complete_trainer_still_errors_without_confirmed_plateau_2275 is replaced by an_unconverged_over_complete_fit_is_refused_not_returned_2902. SparseDictConvergence loses live_atom_high_water and support_saturated through the pyffi payload and the gamfit dataclass.",
+    "evidence": "At the base, git grep over the repository outside this ledger finds EvPlateau, BestOpenIterate, LiveSupportGrowth, open_round_is_stationary and the four constants only in crates/gam-sae/src/sparse_dict/update.rs, plus doc mentions inside the deleted #2400 sweep in crates/gam-sae/src/sparse_dict/tests.rs. live_atom_high_water and support_saturated occur only in update.rs, sparse_dict/mod.rs, sparse_dict/tests.rs, crates/gam-pyffi/src/manifold/geometry_ffi.rs, gamfit/_sparse_dictionary.py, tests/test_sparse_dictionary_held_out_ev_1026.py and the generated tools/codebase-city bundle. Each deleted test name occurs only at its declaration. fn:new and fn:observe are the EvPlateau and LiveSupportGrowth methods. No SparseDictionaryError match exists outside update.rs, so the new variant breaks no exhaustive match. The shared-rho schedule test and the decoder-recycle latch fixture move to active = 1 over the mixture's own atom count, and the returned-EV test to K = active = 2, so their schedules do not rely on the removed arm. No pub item is removed. Not compiled or run locally (user directive)."
   }
 ]
