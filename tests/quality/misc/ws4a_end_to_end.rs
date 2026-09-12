@@ -39,7 +39,7 @@
 
 use csv::StringRecord;
 use gam::custom_family::BlockwiseFitOptions;
-use gam::outer_subsample::OuterScoreSubsample;
+use gam_problem::outer_subsample::OuterScoreSubsample;
 use gam::{
     FitConfig, FitRequest, FitResult, encode_recordswith_inferred_schema, fit_model,
     init_parallelism, materialize,

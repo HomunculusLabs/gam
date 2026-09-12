@@ -154,10 +154,6 @@ pub use gam_models as families;
 /// as a namespace instead of flattening its large API into the `gam` crate root.
 pub use gam_predict as predict;
 pub mod model_types;
-/// Lower-layer outer-iteration row-subsampling/chunking primitives (RowSet,
-/// ARROW_ROW_CHUNK). Hosted at the crate root so `families` can name them
-/// without importing up into `solver`.
-pub mod outer_subsample;
 pub use gam_report as report;
 /// Lower-layer Pareto-smoothed importance-sampling primitive. Self-contained
 /// (no solver/inference deps); descended into `gam-solve` (#1521) and
