@@ -2443,5 +2443,14 @@
     },
     "reason": "#2897, SPEC rules 23 and 25. These two functions built the predicted work fields of OuterDerivativePolicy. After 7fbdcd955 no decision read those fields, only a log line, so the fields and their cost model are removed.",
     "evidence": "At base 45e58748, git grep -n -w default_outer_derivative_policy_costs over crates, src, tests, examples and python finds its declaration, the family_trait.rs import and doc, the trait default, bms and survival marginal slope; this change removes all of them. outer_coord_dim_for_policy is called only by default_outer_derivative_policy_costs. No gam-cli, gam-pyffi, python or examples code names either."
+  },
+  {
+    "base": "748c493fea8a0035f06b19d2e5a980e226bea538",
+    "removed": {
+      "crates/gam-sae/src/inference/harvest.rs::coverage": 1,
+      "crates/gam-sae/src/inference/harvest.rs::n_rows": 1
+    },
+    "reason": "be604ec10 deleted gam-sae inference/harvest.rs whole after cb9376b4f (#2829) removed the designed corpus modules, the only producers of TieredHarvest and FisherTier. TieredHarvest::n_rows and coverage had no caller left.",
+    "evidence": "prune-api-d's pool check 549434 at bf15edbe7 failed the gam-sae lib build on FisherTier's unread fields, and `git grep \"FisherTier {\"` found only the definition. MSI job 554731 ran public_api_census.py on 748c493fe..be604ec10 and it demanded exactly these two identities."
   }
 ]

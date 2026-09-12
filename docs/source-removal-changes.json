@@ -6055,5 +6055,16 @@
     ],
     "reason": "#2469 (SPEC rules 22 and 25): SURVIVAL_TIME_SMOOTH_LAMBDA_SEED (1e-2) filled a missing smooth_lambda when a survival time-basis config was resolved from a build. After 790e62703 every survival time block seeds its REML search from its own design and penalty scale, so nothing reads smooth_lambda. This commit deletes the whole carrier chain (FitConfig::time_smooth_lambda, the config, build and saved-snapshot fields, FittedModelPayload::survival_time_smooth_lambda, and the parser and resolver parameters) and the constant with it.",
     "evidence": "At the base, git grep -n -w SURVIVAL_TIME_SMOOTH_LAMBDA_SEED finds three lines, all in crates/gam-models/src/survival/construction.rs: the private declaration and its two uses in resolved_survival_time_basis_config_from_build (bspline and ispline arms). Both uses are removed with the smooth_lambda field they filled. After the edit, every call of build_survival_time_basis (36), parse_survival_time_basis_config (8) and resolved_survival_time_basis_config_from_build (27) across crates and tests was re-checked for arity. Not compiled or run locally (user directive)."
+  },
+  {
+    "base": "748c493fea8a0035f06b19d2e5a980e226bea538",
+    "items": [
+      "crates/gam-sae/src/inference/harvest.rs:fn:coverage",
+      "crates/gam-sae/src/inference/harvest.rs:fn:n_rows",
+      "crates/gam-sae/src/inference/harvest.rs:struct:FisherTier",
+      "crates/gam-sae/src/inference/harvest.rs:struct:TieredHarvest"
+    ],
+    "reason": "The two-tier Fisher harvest module, which nothing constructed after cb9376b4f: pub struct TieredHarvest with n_rows and coverage, and the private FisherTier, whose fields no code read.",
+    "evidence": "MSI job 554731 ran source_removal_guard.py on 748c493fe..be604ec10 and produced exactly these guarded identities. The gam-inference pub use re-export and the gam-sae mod declaration went in the same commit."
   }
 ]
