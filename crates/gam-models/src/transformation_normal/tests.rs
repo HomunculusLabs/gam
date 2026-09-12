@@ -3280,6 +3280,193 @@ pub(crate) fn ctn_hessian_beta_derivatives_are_derivatives_of_the_value_hessian_
     );
 }
 
+/// #932. The SCOP curvature producers in `scop_curvature` are hand-derived row
+/// algebra, and the tests above check one producer against a central difference
+/// of another. This test checks every producer against exact derivatives of the
+/// one value expression they all differentiate: the most-likely-transformation
+/// negative log-likelihood `f(β) = Σ_i w_i (½ h_i² − log h'_i)` on the chart
+/// `h_i = Σ_k val_ik α_ik + offset_i + floor_i`,
+/// `h'_i = Σ_k deriv_ik α_ik + TRANSFORMATION_MONOTONICITY_EPS`,
+/// `α_ik = Σ_j cov_ij β_{k·p_cov + j}`. num-dual supplies the derivatives, so no
+/// producer is compared with a lowering of itself, and the bar is rounding.
+#[test]
+pub(crate) fn ctn_scop_curvature_producers_match_exact_derivatives_of_the_likelihood_932() {
+    use num_dual::{Dual2, DualNum, HyperDual, second_derivative, second_partial_derivative};
+
+    fn scop_negative_log_likelihood<D: DualNum<f64> + Copy>(
+        family: &TransformationNormalFamily,
+        cov: &Array2<f64>,
+        coefficients: &[D],
+    ) -> D {
+        let p_resp = family.response_val_basis.ncols();
+        let p_cov = cov.ncols();
+        let weights = family.effective_weights();
+        let half = D::from(0.5);
+        let mut total = D::zero();
+        for i in 0..cov.nrows() {
+            let mut h = D::from(family.offset[i] + family.response_floor_offset[i]);
+            let mut h_prime = D::from(TRANSFORMATION_MONOTONICITY_EPS);
+            for k in 0..p_resp {
+                let mut alpha = D::zero();
+                for j in 0..p_cov {
+                    alpha += D::from(cov[[i, j]]) * coefficients[k * p_cov + j];
+                }
+                h += D::from(family.response_val_basis[[i, k]]) * alpha;
+                h_prime += D::from(family.response_deriv_basis[[i, k]]) * alpha;
+            }
+            total += D::from(weights[i]) * (half * h * h - h_prime.ln());
+        }
+        total
+    }
+
+    let psi = array![0.15, -0.10];
+    let (family, _, state, _) = toy_family_and_derivatives(&psi);
+    let beta = state.beta.clone();
+    let p_total = beta.len();
+    let cov_arc = family
+        .covariate_dense_arc()
+        .expect("dense toy covariate design");
+    let cov: &Array2<f64> = &cov_arc;
+    assert_eq!(p_total, family.response_val_basis.ncols() * cov.ncols());
+    let u = toy_probe_vector(p_total, 9_321);
+    let v = toy_probe_vector(p_total, 9_322);
+
+    // The exact score, Hessian, and the Hessian's first and second directional
+    // derivatives. The outer mixed partial in `(s, t)` evaluates each Hessian
+    // entry at `β + s·u + t·v`, so one nested evaluation returns
+    // `(H_ab, D H[u]_ab, D H[v]_ab, D² H[u, v]_ab)` at `s = t = 0`.
+    let lift = |value: f64| HyperDual::<f64, f64>::from(value);
+    let mut score = Array1::<f64>::zeros(p_total);
+    let mut hessian = Array2::<f64>::zeros((p_total, p_total));
+    let mut hessian_u = Array2::<f64>::zeros((p_total, p_total));
+    let mut hessian_uv = Array2::<f64>::zeros((p_total, p_total));
+    for a in 0..p_total {
+        score[a] = second_derivative(
+            |x: Dual2<f64, f64>| {
+                let mut coefficients: Vec<Dual2<f64, f64>> =
+                    beta.iter().map(|&value| Dual2::from_re(value)).collect();
+                coefficients[a] = x;
+                scop_negative_log_likelihood(&family, cov, &coefficients)
+            },
+            beta[a],
+        )
+        .1;
+        for b in a..p_total {
+            let (entry, entry_u, _, entry_uv) = second_partial_derivative(
+                |(s, t): (HyperDual<f64, f64>, HyperDual<f64, f64>)| {
+                    let point: Vec<HyperDual<f64, f64>> = (0..p_total)
+                        .map(|k| lift(beta[k]) + s * lift(u[k]) + t * lift(v[k]))
+                        .collect();
+                    if a == b {
+                        second_derivative(
+                            |x: Dual2<HyperDual<f64, f64>, f64>| {
+                                let mut coefficients: Vec<Dual2<HyperDual<f64, f64>, f64>> =
+                                    point.iter().map(|&value| Dual2::from_re(value)).collect();
+                                coefficients[a] = x;
+                                scop_negative_log_likelihood(&family, cov, &coefficients)
+                            },
+                            point[a],
+                        )
+                        .2
+                    } else {
+                        second_partial_derivative(
+                            |(x, y): (
+                                HyperDual<HyperDual<f64, f64>, f64>,
+                                HyperDual<HyperDual<f64, f64>, f64>,
+                            )| {
+                                let mut coefficients: Vec<HyperDual<HyperDual<f64, f64>, f64>> =
+                                    point.iter().map(|&value| HyperDual::from_re(value)).collect();
+                                coefficients[a] = x;
+                                coefficients[b] = y;
+                                scop_negative_log_likelihood(&family, cov, &coefficients)
+                            },
+                            (point[a], point[b]),
+                        )
+                        .3
+                    }
+                },
+                (0.0, 0.0),
+            );
+            for (matrix, value) in [
+                (&mut hessian, entry),
+                (&mut hessian_u, entry_u),
+                (&mut hessian_uv, entry_uv),
+            ] {
+                matrix[[a, b]] = value;
+                matrix[[b, a]] = value;
+            }
+        }
+    }
+
+    let quantities = family.row_quantities(&beta).expect("toy row quantities");
+    let (produced_score, produced_information) = family
+        .scop_gradient_and_negative_hessian(&beta, &quantities)
+        .expect("SCOP score and information");
+    let produced_gradient = family
+        .scop_gradient(&beta, &quantities)
+        .expect("SCOP score");
+    let produced_diagonal = family
+        .scop_hessian_diagonal(&beta, &quantities)
+        .expect("SCOP information diagonal");
+    let produced_u = family
+        .scop_hessian_directional_derivative(&beta, &u, &quantities)
+        .expect("SCOP dH[u]");
+    let produced_uv = family
+        .scop_hessian_second_directional_derivative(&beta, &u, &v, &quantities)
+        .expect("SCOP d2H[u, v]");
+    let mut produced_matvec = Array1::<f64>::zeros(p_total);
+    family
+        .scop_hessian_matvec_into(&beta, &quantities, &v, &mut produced_matvec)
+        .expect("SCOP information matvec");
+    let exact_matvec = hessian.dot(&v);
+
+    let assert_close = |label: &str, got: f64, want: f64| {
+        let tolerance = 1.0e-11 * got.abs().max(want.abs()).max(1.0);
+        assert!(
+            (got - want).abs() <= tolerance,
+            "{label}: producer {got:+.17e} against the exact derivative {want:+.17e}"
+        );
+    };
+    // The producers return the log-likelihood score, `−∇f`, and the information
+    // `∇²f` with its directional derivatives.
+    for a in 0..p_total {
+        assert_close(&format!("score[{a}]"), produced_score[a], -score[a]);
+        assert_close(&format!("scop_gradient[{a}]"), produced_gradient[a], -score[a]);
+        assert_close(&format!("diagonal[{a}]"), produced_diagonal[a], hessian[[a, a]]);
+        assert_close(&format!("matvec[{a}]"), produced_matvec[a], exact_matvec[a]);
+        for b in 0..p_total {
+            assert_close(
+                &format!("information[{a},{b}]"),
+                produced_information[[a, b]],
+                hessian[[a, b]],
+            );
+            assert_close(&format!("dH[u][{a},{b}]"), produced_u[[a, b]], hessian_u[[a, b]]);
+            assert_close(
+                &format!("d2H[u,v][{a},{b}]"),
+                produced_uv[[a, b]],
+                hessian_uv[[a, b]],
+            );
+        }
+    }
+    // Every compared channel has to carry curvature, or the comparison is vacuous.
+    let peak = |matrix: &Array2<f64>| matrix.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    for (label, matrix) in [
+        ("information", &hessian),
+        ("dH[u]", &hessian_u),
+        ("d2H[u,v]", &hessian_uv),
+    ] {
+        assert!(
+            peak(matrix) > 1.0e-4,
+            "the exact {label} carries no curvature ({:.3e})",
+            peak(matrix)
+        );
+    }
+    assert!(
+        score.iter().any(|value| value.abs() > 1.0e-4),
+        "the exact score is flat: {score:?}"
+    );
+}
+
 /// gam#2600, the defect this issue turned out to be: the CTN inner objective
 /// must be COERCIVE — it must go to `+∞` in every direction of `β`, so that a
 /// minimizer exists at all.
