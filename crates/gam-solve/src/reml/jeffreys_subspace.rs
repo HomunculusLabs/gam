@@ -4670,6 +4670,10 @@ mod tests {
             |b, x, y, t| raw(b, &[x, y, t]).mapv(|value| scale * value),
             |b, x, y, t, s| raw(b, &[x, y, t, s]).mapv(|value| scale * value),
         );
+        eprintln!(
+            "[#2905 gate-band] motion_active={active} max|D2 completion|={magnitude:e} \
+             rel_error_vs_central_differences={error:e}"
+        );
         assert!(active, "the fixture must sit inside the gate's transition band");
         assert!(magnitude > 1e-8, "the fixture must exercise a nonzero second drift");
         assert!(
@@ -4713,6 +4717,10 @@ mod tests {
             |b, x, y| raw(b, &[x, y]),
             |b, x, y, t| raw(b, &[x, y, t]),
             |b, x, y, t, s| raw(b, &[x, y, t, s]),
+        );
+        eprintln!(
+            "[#2905 moving-floor] motion_active={active} max|D2 completion|={magnitude:e} \
+             rel_error_vs_central_differences={error:e}"
         );
         assert!(active, "a below-floor eigenvalue must activate the floor motion");
         assert!(magnitude > 1e-8, "the fixture must exercise a nonzero second drift");
