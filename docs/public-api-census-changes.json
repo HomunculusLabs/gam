@@ -2042,5 +2042,13 @@
     },
     "reason": "prune-api-b product-use sweep (#2899). compute_skewness_mu3 and bias_shift_for_pair are removed with the skewness-aware bias correction of the identifiability audit, which only RowScaledJacobian could enable and no production family constructs; the cosine null band is now centred at zero, the value production always used.",
     "evidence": "scripts/public_api_census.py over probe commit 8b1421e8f on base 39db8c791 (MSI acn112, python3.12; sliceD.census.out) reports exactly crates/gam-identifiability/src/audit.rs::bias_shift_for_pair 1 and ::compute_skewness_mu3 1. At the base both are named only in audit.rs and in the deleted tests/identifiability/misc/identifiability_audit_skewness_aware.rs."
+  },
+  {
+    "base": "29be4e78b790a1c0f84c2a9c302bfcd81f4f949d",
+    "removed": {
+      "crates/gam-event-history/src/marginal.rs::transition_score_polynomials": 1
+    },
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). transition_score_polynomials was a test-only pub wrapper over the private gap_score_polynomials. Its one test now lives in marginal.rs's test module and calls gap_score_polynomials directly.",
+    "evidence": "At the base, git grep -w finds transition_score_polynomials only at its definition, the gam-event-history lib.rs re-export and one unit test, all changed in this commit. The prune-api-c census v2 over cc3ae0022 (/scratch.global/sauer354/pool/prune-api-c/census2.tsv) lists no product or other-crate reference."
   }
 ]

@@ -5161,5 +5161,14 @@
     ],
     "reason": "#2469: LOGIT_SIGMA_DEGENERATE (1e-10) was the picked sigma below which the integrated logistic expectation returns the point-mass limit sigmoid(mu) and its derivative. The limit differs from E[sigmoid(mu + sigma Z)] by (1/2) sigma^2 sigmoid''(mu) + O(sigma^4), and the logistic satisfies |sigmoid''/sigmoid| <= 1, and |sigmoid'''/sigmoid'| <= 1 for the derivative. So below sigma = sqrt(2u) = sqrt(eps), about 1.49e-8, the limit is exact to the rounding of sigmoid(mu) itself, uniformly in mu. The switch now sits at f64::EPSILON.sqrt(). Between the old 1e-10 and sqrt(eps), the closed form replaces a quadrature whose answer agreed with it to rounding. The cloglog twin CLOGLOG_SIGMA_DEGENERATE is unchanged: for S = exp(-e^mu), |S''/S| grows like e^(2mu), so no mu-uniform switch exists there.",
     "evidence": "git grep -n -w LOGIT_SIGMA_DEGENERATE over the base finds two lines, both in crates/gam-solve/src/quadrature.rs production code (the first #[cfg(test)] is at :4541): the declaration at :299 and its single use in the logit integrated mean-and-derivative entry at :1000. No other file or test names it. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "29be4e78b790a1c0f84c2a9c302bfcd81f4f949d",
+    "items": [
+      "crates/gam-event-history/src/marginal.rs:fn:transition_score_polynomials",
+      "crates/gam-event-history/src/tests.rs:fn:transition_polynomials_are_exact_scores_of_the_log_density"
+    ],
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). gam-event-history's transition_score_polynomials was a pub wrapper over the private gap_score_polynomials, re-exported at the crate root, and only one unit test called it. The test moves unchanged in substance into a new #[cfg(test)] mod tests in marginal.rs, where it calls gap_score_polynomials directly. The wrapper and its re-export are deleted. The tests.rs identity is the test's old location; the same test fn now lives in marginal.rs's test module.",
+    "evidence": "The prune-api-c census v2 over cc3ae0022 (/scratch.global/sauer354/pool/prune-api-c/census2.tsv) classes transition_score_polynomials DELETE, with one gam-event-history unit-test reference. At the base, git grep -w finds it only at its definition, the lib.rs re-export and tests.rs:159. The item list follows source_removal_guard.py's ITEM rule over the removed hunks: the pub fn and the test-scoped test fn removed from tests.rs."
   }
 ]

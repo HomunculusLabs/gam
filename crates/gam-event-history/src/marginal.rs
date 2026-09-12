@@ -322,15 +322,6 @@ fn gap_score_polynomials<S: JetField>(
     (t, dt)
 }
 
-/// The score `∂ ln p(z'|z)/∂ρ` of one atom across a gap of dimensionless
-/// length `kappa`, and its derivative in `ρ`, as flat coefficient vectors
-/// `c[a * 5 + b]` multiplying `z^a u^b` with `u = (z' − φz)/√(1 − φ²)`.
-pub fn transition_score_polynomials(kappa: f64) -> (Vec<f64>, Vec<f64>) {
-    let transition = AtomTransition::new(&kappa);
-    let (t, dt) = gap_score_polynomials(&transition, &0.0);
-    (t.c, dt.c)
-}
-
 pub(crate) fn weighted_sum<S: JetField>(weights: &[S], values: &[S]) -> S {
     weights
         .iter()
@@ -1792,4 +1783,52 @@ pub(crate) fn expected_intensities<S: JetField>(
             acc
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transition_polynomials_are_exact_scores_of_the_log_density() {
+        // Finite differences are permitted in tests: the gap polynomial must
+        // equal the derivative of the log transition density in log-rate.
+        let z = 0.4;
+        let zp = -0.2;
+        let gap = 0.6;
+        let log_density = |rho: f64| {
+            let phi = (-(rho.exp() * gap)).exp();
+            let v = 1.0 - phi * phi;
+            -0.5 * (2.0 * std::f64::consts::PI * v).ln() - (zp - phi * z).powi(2) / (2.0 * v)
+        };
+        let rho = -0.3;
+        let h = 1e-5;
+        let fd1 = (log_density(rho + h) - log_density(rho - h)) / (2.0 * h);
+        let fd2 =
+            (log_density(rho + h) - 2.0 * log_density(rho) + log_density(rho - h)) / (h * h);
+        let kappa = rho.exp() * gap;
+        let transition = AtomTransition::new(&kappa);
+        let (t, dt) = gap_score_polynomials(&transition, &0.0);
+        let phi = (-kappa).exp();
+        let u = (zp - phi * z) / (1.0 - phi * phi).sqrt();
+        let evaluate = |c: &[f64]| -> f64 {
+            let mut total = 0.0;
+            for a in 0..5 {
+                for b in 0..5 {
+                    total += c[a * 5 + b] * z.powi(a as i32) * u.powi(b as i32);
+                }
+            }
+            total
+        };
+        assert!(
+            (evaluate(&t.c) - fd1).abs() < 1e-7,
+            "score {} vs fd {fd1}",
+            evaluate(&t.c)
+        );
+        assert!(
+            (evaluate(&dt.c) - fd2).abs() < 1e-5,
+            "score derivative {} vs fd {fd2}",
+            evaluate(&dt.c)
+        );
+    }
 }

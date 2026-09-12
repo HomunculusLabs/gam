@@ -140,47 +140,6 @@ fn forward_operator_is_exact_on_envelope_times_polynomial() {
 }
 
 #[test]
-fn transition_polynomials_are_exact_scores_of_the_log_density() {
-    // Finite differences are permitted in tests: the gap polynomial must
-    // equal the derivative of the log transition density in log-rate.
-    let z = 0.4;
-    let zp = -0.2;
-    let gap = 0.6;
-    let log_density = |rho: f64| {
-        let phi = (-(rho.exp() * gap)).exp();
-        let v = 1.0 - phi * phi;
-        -0.5 * (2.0 * std::f64::consts::PI * v).ln() - (zp - phi * z).powi(2) / (2.0 * v)
-    };
-    let rho = -0.3;
-    let h = 1e-5;
-    let fd1 = (log_density(rho + h) - log_density(rho - h)) / (2.0 * h);
-    let fd2 = (log_density(rho + h) - 2.0 * log_density(rho) + log_density(rho - h)) / (h * h);
-    let kappa = rho.exp() * gap;
-    let (t, dt) = super::marginal::transition_score_polynomials(kappa);
-    let phi = (-kappa).exp();
-    let u = (zp - phi * z) / (1.0 - phi * phi).sqrt();
-    let evaluate = |c: &[f64]| -> f64 {
-        let mut total = 0.0;
-        for a in 0..5 {
-            for b in 0..5 {
-                total += c[a * 5 + b] * z.powi(a as i32) * u.powi(b as i32);
-            }
-        }
-        total
-    };
-    assert!(
-        (evaluate(&t) - fd1).abs() < 1e-7,
-        "score {} vs fd {fd1}",
-        evaluate(&t)
-    );
-    assert!(
-        (evaluate(&dt) - fd2).abs() < 1e-5,
-        "score derivative {} vs fd {fd2}",
-        evaluate(&dt)
-    );
-}
-
-#[test]
 fn single_node_marginal_matches_numerical_integration() {
     let gh = GaussHermite::new(41).expect("rule");
     let nodes = subject(&[1.0], &[0.8], &[vec![2.0]]);

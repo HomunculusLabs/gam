@@ -40,7 +40,6 @@ pub use forecast::{
     SmoothedLatentState, SpellPit, forecast, forecast_history, latent_state, pit_uniform_distance,
     population_forecast, predictive_pit, baseline_log_rates,
 };
-pub use marginal::transition_score_polynomials;
 pub use preserve::{ReferenceGrid, ReferenceStrata};
 
 #[cfg(test)]
