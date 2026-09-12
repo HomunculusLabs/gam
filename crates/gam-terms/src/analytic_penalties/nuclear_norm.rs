@@ -102,6 +102,15 @@ impl NuclearNormPenalty {
                 "NuclearNormPenalty::new requires finite smoothing_eps > 0, got {smoothing_eps}"
             ));
         }
+        // The HVP filter's curvature `−½(σ²+ε²)^{-3/2}` is largest at `σ = 0`, where
+        // it is `−½ε^{-3}`: an ε whose `ε^{-3}` is not representable has no finite
+        // curvature to report.
+        if !(smoothing_eps * smoothing_eps).powf(-1.5).is_finite() {
+            return Err(format!(
+                "NuclearNormPenalty::new requires smoothing_eps with a representable ε^-3, \
+                 the HVP filter's curvature at σ = 0; got {smoothing_eps}"
+            ));
+        }
         if matches!(max_rank, Some(0)) {
             return Err("NuclearNormPenalty::new requires max_rank > 0".to_string());
         }
@@ -148,30 +157,21 @@ impl NuclearNormPenalty {
         self.max_rank.unwrap_or(thin_rank).min(thin_rank)
     }
 
-    /// Shift-regularized squared smoothed singular value `σ² + max(ε², 1e-15)`.
+    /// Shift-regularized squared smoothed singular value `σ² + ε²`.
     ///
     /// This is the single regularized spectrum shared by `value`, `grad_target`
     /// and the HVP's right-Gram filter, so that the smoothed nuclear norm
     /// `Σ(√(σ²+ε²) − ε)`, its gradient `σ/√(σ²+ε²)`, and the Fréchet
     /// inverse-square-root filter `(σ²+ε²)^{-1/2}` are all evaluated on the
-    /// *same* eigenvalue. Without the shared floor the value/gradient (which
-    /// previously used the unfloored `σ²+ε²`) desync from the HVP (which floors
-    /// the right-Gram eigenvalues) when `ε² < 1e-15`, breaking the
-    /// value↔gradient↔Hessian consistency that REML evidence and the Newton
-    /// curvature block rely on (#737). The floor itself was introduced for
-    /// PSD-roundoff robustness (651d827e6); applying it everywhere preserves
-    /// that protection without reintroducing the desync.
+    /// *same* eigenvalue, keeping the value↔gradient↔Hessian consistency that
+    /// REML evidence and the Newton curvature block rely on (#737). Every `σ²`
+    /// that reaches it is non-negative — a squared singular value, or a
+    /// right-Gram eigenvalue after the PSD refusal and zero clamp — and `new`
+    /// refuses an `ε` whose filter curvature `ε^{-3}` is not representable, so
+    /// the shifted spectrum is positive with finite filters and needs no floor.
+    /// The shift is affine in `σ²`, so every consumer differentiates it exactly.
     fn regularized_sigma_sq(&self, sigma_sq: f64) -> f64 {
-        // Pure SHIFT, never a clamp: `σ² + max(ε², 1e-15)`. A clamp
-        // (`max(σ²+ε², floor)`) makes the value constant in σ on the clamped
-        // branch while the σ/√(·) gradient and the spectral HVP filters keep
-        // their smooth-branch slopes — a value/gradient/HVP desync whenever
-        // ε² < 1e-15. The shift is affine in σ², so every consumer (value,
-        // gradient, divided-difference filters) differentiates it exactly, and
-        // for ε² ≥ 1e-15 it is bit-identical to the old clamp (which never
-        // bound there).
-        let eps2 = self.smoothing_eps * self.smoothing_eps;
-        sigma_sq + eps2.max(1.0e-15)
+        sigma_sq + self.smoothing_eps * self.smoothing_eps
     }
 
     /// Number of leading right-Gram eigen-directions (top singular values) the
@@ -488,14 +488,13 @@ impl NuclearNormPenalty {
         for i in 0..d {
             // Same shared shift used by `value`/`grad_target` (#737): the
             // right-Gram eigenvalue `raw_evals[i]` is the squared singular value
-            // `σ²`, so `regularized_sigma_sq(σ²) = σ² + max(ε², 1e-15)` keeps
-            // the filter on the identical regularized spectrum.
+            // `σ²`, so `regularized_sigma_sq(σ²) = σ² + ε²` keeps the filter on
+            // the identical regularized spectrum.
             regularized_evals[i] = self.regularized_sigma_sq(raw_evals[i]);
             if i >= active_start {
                 // Keep the value filter and Fréchet derivative on the same
-                // regularized spectrum. This preserves the PSD-roundoff floor
-                // without letting divided differences observe stale raw
-                // eigenvalues near zero.
+                // regularized spectrum, so divided differences never observe
+                // stale raw eigenvalues near zero.
                 let lambda = regularized_evals[i];
                 f[i] = lambda.powf(-0.5);
                 df[i] = -0.5 * lambda.powf(-1.5);
