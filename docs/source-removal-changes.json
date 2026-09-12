@@ -4920,5 +4920,18 @@
     ],
     "reason": "#2905: JeffreysHphiDriftBase::completion_second_drift_matrix prices the complete D² completion (frozen policy plus gate and floor motion) through the same four contractions, and the production completion_second closure in gam-custom-family calls it. frozen_completion_second_drift_matrix, the frozen-policy half alone, has no remaining product user, so it is deleted with its matrix-vs-action harness and test. The complete matrix is pinned against central differences of completion_drift_matrix along w on the gate-band and moving-floor fixtures.",
     "evidence": "At base, git grep -n frozen_completion_second_drift_matrix over crates finds its declaration in mixed.rs, doc links in mixed.rs, one production call in crates/gam-custom-family/src/jeffreys.rs (replaced here by completion_second_drift_matrix) and one test call in jeffreys_subspace.rs (the deleted harness). jeffreys_frozen_second_drift_matrix_errors_2894 is called only by jeffreys_frozen_second_drift_matrix_matches_the_action_2894. The frozen action completion_second_drift_frozen and its central-difference tests are retained. Not compiled locally (user directive); compile rests on the shared tip check and the lane job at this landing."
+  },
+  {
+    "base": "c1bd59ec07c014784da44cb05b0d0aa2894c5243",
+    "items": [
+      "crates/gam-linalg/src/pcg.rs:const:LANES",
+      "crates/gam-linalg/src/pcg.rs:enum:DotReduction",
+      "crates/gam-linalg/src/pcg.rs:fn:dot",
+      "crates/gam-linalg/src/pcg.rs:fn:dot_reordered_handles_tail_and_short_lengths",
+      "crates/gam-linalg/src/pcg.rs:fn:dot_reordered_matches_serial_to_loose_tol",
+      "crates/gam-linalg/src/pcg.rs:fn:reordered_dot"
+    ],
+    "reason": "#2899 group-A public-surface sweep: delete gam-linalg DotReduction, a pub knob no product sets. Every production pcg_core call passed DotReduction::Serial (the one production caller is solve_spd_pcg_with_info_into in utils.rs). The Reordered arm and its eight-lane reordered_dot were reachable only from two pcg.rs tests, and the Hutchinson trace-probe caller its docs name no longer exists. The enum, reordered_dot (with its LANES constant), the dot dispatcher, pcg_core reduction parameter and the two reordered-fold tests are deleted. pcg_core now calls serial_dot directly, which is bit-identical to the Serial arm it always took. dot_serial_is_bit_identical_to_plain_left_fold survives and now pins serial_dot.",
+    "evidence": "At c537464ea, git grep -n -w DotReduction over crates, src, examples, tests, gamfit and docs finds it only in pcg.rs and utils.rs. The only production constructions are DotReduction::Serial at utils.rs:1173 and the five pcg_core inner products forwarding it. DotReduction::Reordered and reordered_dot occur only in the dot dispatcher and tests at pcg.rs:1219 and :1237. public_api_census.py over the range reports no removed identity. The item list is source_removal_guard.py --base c537464ea --head ba395b7bc (/scratch.global/sauer354/pool/prune-api-a/slice13.srg.out). The compile check is the lead shared tip check."
   }
 ]

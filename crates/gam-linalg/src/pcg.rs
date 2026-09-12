@@ -96,32 +96,6 @@ pub struct PcgCoreResult {
     pub diagnostics: Option<PcgDiagnostics>,
 }
 
-/// How the PCG inner products `rᵀz` and `pᵀAp` are accumulated.
-///
-/// This is the single knob that distinguishes the bit-reproducible main solve
-/// from the stochastic trace probe. It is NOT a performance hint the optimizer
-/// may ignore: it selects between two numerically distinct reductions, and the
-/// caller is responsible for picking the one its contract allows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DotReduction {
-    /// Strict left-to-right sequential fold. Bit-identical regardless of host
-    /// thread count or SIMD width — this is what lets the GPU wrapper reproduce
-    /// the byte-for-byte iterates of the old serial `cg_solve`, and what the
-    /// inexact-Newton CPU solver relies on for run-to-run determinism. Latency
-    /// bound: every add chains on the previous one (a single FP accumulator),
-    /// so there is no add-side ILP. REQUIRED for the main solve.
-    Serial,
-    /// Associativity-reordered reduction (independent ILP accumulators, SIMD).
-    /// The result differs from [`DotReduction::Serial`] in the low bits because
-    /// floating-point addition is not associative. ONLY valid for callers that
-    /// are already stochastic and loose-tolerance — the Hutchinson REML trace
-    /// probes, whose per-probe CG residual (≈1e-6) sits orders of magnitude
-    /// below the estimator's own sampling SE, so the reorder is dominated by
-    /// Monte-Carlo noise the adaptive-K stopping rule already absorbs. MUST NOT
-    /// be used where cross-thread / run-to-run bit-identity is contractual.
-    Reordered,
-}
-
 /// Strict sequential inner product. A plain left-to-right fold so the result is
 /// independent of thread count and SIMD width — see the module-level numerics
 /// note. This is the bit-reproducible reduction used by the main solve.
@@ -132,52 +106,6 @@ fn serial_dot(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> f64 {
         acc += x * y;
     }
     acc
-}
-
-/// Associativity-reordered inner product with eight independent accumulators.
-///
-/// Each lane carries its own running sum so the eight partial chains pipeline
-/// instead of serializing on one FP register; the optimizer is then free to
-/// fold the per-lane multiply-accumulates into SIMD FMAs. The eight lanes are
-/// combined pairwise at the end. The result differs from [`serial_dot`] in the
-/// low mantissa bits (FP add is non-associative) — that is the whole point, and
-/// it is ONLY acceptable on the stochastic trace path, never the main solve.
-#[inline]
-fn reordered_dot(a: &ArrayView1<f64>, b: &ArrayView1<f64>) -> f64 {
-    // Contiguous fast path (the trace probe always hands contiguous vectors);
-    // fall back to the iterator form for any strided view.
-    match (a.as_slice(), b.as_slice()) {
-        (Some(av), Some(bv)) => {
-            const LANES: usize = 8;
-            let n = av.len().min(bv.len());
-            let mut acc = [0.0_f64; LANES];
-            let chunks = n / LANES;
-            for c in 0..chunks {
-                let base = c * LANES;
-                // Each lane is an independent dependency chain.
-                for l in 0..LANES {
-                    acc[l] += av[base + l] * bv[base + l];
-                }
-            }
-            // Pairwise lane combine (balanced tree, not a serial sweep).
-            let mut s =
-                ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-            for i in (chunks * LANES)..n {
-                s += av[i] * bv[i];
-            }
-            s
-        }
-        _ => serial_dot(a, b),
-    }
-}
-
-/// Dispatch the configured inner-product reduction.
-#[inline]
-fn dot(a: &ArrayView1<f64>, b: &ArrayView1<f64>, reduction: DotReduction) -> f64 {
-    match reduction {
-        DotReduction::Serial => serial_dot(a, b),
-        DotReduction::Reordered => reordered_dot(a, b),
-    }
 }
 
 /// The shared preconditioned conjugate-gradient recurrence.
@@ -217,14 +145,13 @@ pub(crate) fn pcg_core<F>(
     max_iters: usize,
     refresh_period: usize,
     record_diagnostics: bool,
-    reduction: DotReduction,
     solution: &mut ArrayViewMut1<f64>,
 ) -> PcgCoreResult
 where
     F: FnMut(&Array1<f64>, &mut Array1<f64>),
 {
     let p = rhs.len();
-    let rhs_norm = dot(rhs, rhs, reduction).sqrt();
+    let rhs_norm = serial_dot(rhs, rhs).sqrt();
 
     solution.fill(0.0);
     let mut diagnostics = record_diagnostics.then(|| PcgDiagnostics::new(rhs_norm));
@@ -299,7 +226,7 @@ where
             *zi = ri * im;
         });
     let mut p_dir = z.clone();
-    let mut rz_old = dot(&r.view(), &z.view(), reduction);
+    let mut rz_old = serial_dot(&r.view(), &z.view());
     if !rz_old.is_finite() || rz_old <= 0.0 {
         return PcgCoreResult {
             stop: PcgStop::Breakdown,
@@ -324,7 +251,7 @@ where
                 diagnostics,
             };
         }
-        let denom = dot(&p_dir.view(), &ap.view(), reduction);
+        let denom = serial_dot(&p_dir.view(), &ap.view());
         if !denom.is_finite() || denom <= 0.0 {
             return PcgCoreResult {
                 stop: PcgStop::Breakdown,
@@ -363,7 +290,7 @@ where
             r.assign(rhs);
             r.scaled_add(-1.0, &ap);
         }
-        let r_norm = dot(&r.view(), &r.view(), reduction).sqrt();
+        let r_norm = serial_dot(&r.view(), &r.view()).sqrt();
         last_r_norm = r_norm;
         if r_norm.is_finite() && r_norm <= tol {
             if let Some(d) = diagnostics.as_mut() {
@@ -383,7 +310,7 @@ where
             .par_for_each(|zi, &ri, &im| {
                 *zi = ri * im;
             });
-        let rz_new = dot(&r.view(), &z.view(), reduction);
+        let rz_new = serial_dot(&r.view(), &z.view());
         if !rz_new.is_finite() || rz_new <= 0.0 {
             return PcgCoreResult {
                 stop: PcgStop::Breakdown,
@@ -464,7 +391,7 @@ const BLOCK_DOT_COLUMN_TILE: usize = 8;
 ///   scalar operator the backend claims to represent. Frozen columns may be
 ///   recomputed (their values are never read back into the recurrence).
 /// * every dot primitive writes, per column, a STRICT ascending-row fold
-///   `acc = fold(acc + a[i]·b[i])` — the [`DotReduction::Serial`] contract;
+///   `acc = fold(acc + a[i]·b[i])` — the same serial fold `pcg_core` uses;
 /// * `update_x_r` performs, for each active column `c`,
 ///   `X[·][c] += alpha[c]·P[·][c]` then `R[·][c] += (-alpha[c])·AP[·][c]`
 ///   as separate multiply-then-add per element (no FMA contraction).
@@ -903,7 +830,7 @@ pub fn pcg_multi_core<B: PcgBlockBackend>(
 /// for the elementwise updates, `BLOCK_DOT_COLUMN_TILE`-column tiles for the
 /// inner products), and every per-column fold is strict ascending-row, so the
 /// results are independent of thread count — the same bit-reproducibility the
-/// Serial reduction gives `pcg_core`.
+/// strict serial fold gives `pcg_core`.
 pub struct CpuPcgBlockBackend<F>
 where
     F: Fn(&ndarray::Array2<f64>, &mut ndarray::Array2<f64>) + Sync,
@@ -1177,9 +1104,8 @@ mod tests {
     use super::*;
     use ndarray::array;
 
-    /// The `Serial` reduction is byte-for-byte the historical `serial_dot`
-    /// (a strict left-to-right fold). This pins the main-solve contract: the
-    /// dispatch must not perturb a single bit on the serial path.
+    /// `serial_dot` is byte-for-byte a strict left-to-right fold. This pins the
+    /// main-solve contract: the inner products must not perturb a single bit.
     #[test]
     fn dot_serial_is_bit_identical_to_plain_left_fold() {
         // Use values whose exact fold order is observable: a Kahan-sensitive mix
@@ -1197,48 +1123,12 @@ mod tests {
         for (x, y) in a.iter().zip(b.iter()) {
             reference += x * y;
         }
-        let got = dot(&a.view(), &b.view(), DotReduction::Serial);
+        let got = serial_dot(&a.view(), &b.view());
         assert_eq!(
             got.to_bits(),
             reference.to_bits(),
-            "Serial reduction must be bit-identical to the plain left fold"
+            "serial_dot must be bit-identical to the plain left fold"
         );
-    }
-
-    /// The `Reordered` reduction agrees with the serial fold to a relative
-    /// tolerance far tighter than the trace estimator's ~1% sampling SE (and
-    /// tighter than the 1e-6 per-probe CG tolerance), so the associativity
-    /// reorder is dominated by Monte-Carlo noise on the only caller that uses
-    /// it. It is deliberately NOT bit-identical.
-    #[test]
-    fn dot_reordered_matches_serial_to_loose_tol() {
-        for &n in &[7usize, 8, 9, 16, 100, 513, 1024, 4096] {
-            let a: Array1<f64> = Array1::from_shape_fn(n, |i| ((i * 7 + 1) as f64).sin() * 3.0);
-            let b: Array1<f64> = Array1::from_shape_fn(n, |i| ((i * 13 + 3) as f64).cos() * 2.0);
-            let s = dot(&a.view(), &b.view(), DotReduction::Serial);
-            let r = dot(&a.view(), &b.view(), DotReduction::Reordered);
-            let rel = (s - r).abs() / s.abs().max(1e-300);
-            assert!(
-                rel < 1e-12,
-                "n={n}: reordered rel diff {rel:.3e} should be far below trace SE"
-            );
-        }
-    }
-
-    /// The reordered dot must handle non-multiple-of-8 lengths (the tail loop)
-    /// and produce the same value the serial path would for small inputs where
-    /// the lane count exceeds the length.
-    #[test]
-    fn dot_reordered_handles_tail_and_short_lengths() {
-        for &n in &[0usize, 1, 3, 5, 7] {
-            let a: Array1<f64> = Array1::from_shape_fn(n, |i| (i as f64) + 0.25);
-            let b: Array1<f64> = Array1::from_shape_fn(n, |i| (i as f64) * 0.5 + 1.0);
-            let s = dot(&a.view(), &b.view(), DotReduction::Serial);
-            let r = dot(&a.view(), &b.view(), DotReduction::Reordered);
-            // Below LANES the reordered tail is itself a left fold over the same
-            // order, so for these short lengths it is bit-identical.
-            assert_eq!(s.to_bits(), r.to_bits(), "n={n}");
-        }
     }
 
     #[test]
@@ -1260,7 +1150,6 @@ mod tests {
             20,
             32,
             true,
-            DotReduction::Serial,
             &mut x.view_mut(),
         );
         assert_eq!(result.stop, PcgStop::Converged);
@@ -1293,7 +1182,6 @@ mod tests {
             p,
             0,
             false,
-            DotReduction::Serial,
             &mut w.view_mut(),
         );
         assert_eq!(result.stop, PcgStop::Converged);
@@ -1320,7 +1208,6 @@ mod tests {
             20,
             32,
             false,
-            DotReduction::Serial,
             &mut x.view_mut(),
         );
         assert_eq!(result.stop, PcgStop::BadPreconditioner);
@@ -1343,7 +1230,6 @@ mod tests {
             20,
             32,
             false,
-            DotReduction::Serial,
             &mut x.view_mut(),
         );
         assert_eq!(result.stop, PcgStop::BadPreconditioner);
@@ -1414,7 +1300,7 @@ mod tests {
         }
     }
 
-    /// Run `pcg_core` per column (ones preconditioner, refresh 0, Serial) and
+    /// Run `pcg_core` per column (ones preconditioner, refresh 0) and
     /// `pcg_multi_core` on the same block; every column must agree BIT-FOR-BIT
     /// in stop reason, iteration count, norms, iterate, and diagnostics trace.
     fn assert_multi_matches_core(
@@ -1449,7 +1335,6 @@ mod tests {
                 max_iters,
                 0,
                 true,
-                DotReduction::Serial,
                 &mut x.view_mut(),
             );
             let blocked = &multi[c];
@@ -1749,7 +1634,6 @@ mod tests {
             64,
             32,
             false,
-            DotReduction::Serial,
             &mut x.view_mut(),
         );
         assert_eq!(result.stop, PcgStop::Converged);

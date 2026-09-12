@@ -5,7 +5,7 @@ use crate::faer_ndarray::{
 };
 use crate::faer_ndarray::{FaerCholesky, FaerEigh};
 use crate::matrix::symmetrize_in_place;
-use crate::pcg::{DotReduction, PcgCoreResult, PcgDiagnostics, PcgStop, pcg_core};
+use crate::pcg::{PcgCoreResult, PcgDiagnostics, PcgStop, pcg_core};
 use faer::Side;
 use ndarray::{
     Array1, Array2, Array3, ArrayBase, ArrayView1, ArrayView2, ArrayView3, Data, Dimension, s,
@@ -1167,10 +1167,6 @@ where
         max_iter,
         32,
         true,
-        // Main SPD solve: strict serial reduction. This is the bit-identical-
-        // across-threads / run-to-run contract the inexact-Newton callers and
-        // the GPU-parity oracle depend on; it must never be relaxed here.
-        DotReduction::Serial,
         &mut x.view_mut(),
     );
     if result.stop == PcgStop::Converged && x.iter().all(|v| v.is_finite()) {
