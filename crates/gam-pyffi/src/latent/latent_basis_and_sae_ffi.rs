@@ -2356,6 +2356,14 @@ fn sae_fit_report_into_dict<'py>(
     // whenever the structure search genuinely ran; the value is the
     // certificate of which dictionary moves the held-out data does and does not
     // support — an all-contested ledger is the common, conservative outcome.
+    // #2023 acceptance: every co-collapse event the fit recorded, on the default
+    // fit and not only inside a structure-search ledger. A `Terminal` event is a
+    // death; a `Reseeded` event re-seeds an existing atom, and the reseed names its
+    // source (graph harmonics or worst-reconstructed rows) in the log.
+    let collapse_events = serde_json::to_value(term.collapse_events()).map_err(|error| {
+        py_value_error(format!("failed to serialize collapse events: {error}"))
+    })?;
+    out.set_item("collapse_events", json_value_to_py(py, collapse_events)?)?;
     match structure_search_json {
         Some(json) => out.set_item("structure_search", json)?,
         None => out.set_item("structure_search", py.None())?,
