@@ -3269,13 +3269,6 @@ impl SaeManifoldTerm {
                     return Ok(true);
                 }
             }
-            // Walk back toward the undamped Newton step: a damping under
-            // `λ_min²` cannot move the flattest resolved direction, so it IS the
-            // undamped step and is carried as exactly that.
-            damping = accepted.damping / opt::constants::RIDGE_GROWTH;
-            if damping < smallest_damping {
-                damping = 0.0;
-            }
             // The penalized objective at the committed state, next to the gate
             // norm it left behind. Both the phase and the refine window descend
             // the objective (#2861), so a step that lowers the objective while
@@ -3284,10 +3277,39 @@ impl SaeManifoldTerm {
             let committed_objective = self
                 .penalized_objective_total(target, rho_fixed, registry, 1.0)
                 .unwrap_or(f64::NAN);
+            // #2731 — carry the damping by how well the step's own model predicted
+            // what the step bought. The step minimizes `gᵀΔ + ½Δᵀ(|A| + √ν)Δ` over
+            // the retained modes, so that model decreases by exactly half of
+            // `predicted_objective_decrease`. Were the objective the quadratic with
+            // Hessian `A`, the measured decrease would be at least that on every
+            // retained mode: `c²/M − ½λc²/M² ≥ ½c²/M` for `M = |λ| + √ν ≥ |λ|`, for
+            // either sign of `λ`. A measured decrease below the model's says the
+            // step outran the second-order model, so the next step starts one rung
+            // more damped; at or above it the damping walks back toward the
+            // undamped Newton step. The Armijo test above admits any decrease of at
+            // least `ARMIJO_C1 = 1e-4` of the linear prediction, so acceptance alone
+            // says nothing about agreement. Job 539190 (`p = 2048, charts = 32`) read
+            // the gate norm contract 3.21× and 4.08× on the two steps taken at
+            // ν = 4.4e-5, and go from 2.964212e0 to 1.187672e1 across the eleven
+            // taken at ν ≤ 4.4e-6, the rungs the unconditional walk-back returned to.
+            let model_agreement = (pre_objective - committed_objective)
+                / (0.5 * accepted.predicted_objective_decrease);
+            damping = if model_agreement >= 1.0 {
+                // A damping under `λ_min²` cannot move the flattest resolved
+                // direction, so it IS the undamped step and is carried as exactly
+                // that.
+                let walked_back = accepted.damping / opt::constants::RIDGE_GROWTH;
+                if walked_back < smallest_damping { 0.0 } else { walked_back }
+            } else if accepted.damping > 0.0 {
+                accepted.damping * opt::constants::RIDGE_GROWTH
+            } else {
+                smallest_damping
+            };
             log::info!(
                 "[SAE-NEWTON] step {} phases: assemble={assemble_seconds:.2}s \
-                 trials={trials} in {:.2}s (ν={:.6e}, ‖Δ‖={:.6e}, damped rank {}/{}) \
-                 total={:.2}s penalized_objective={committed_objective:.10e}",
+                 trials={trials} in {:.2}s (ν={:.6e}, ‖Δ‖={:.6e}, damped rank {}/{}, \
+                 model agreement {model_agreement:.3e}) total={:.2}s \
+                 penalized_objective={committed_objective:.10e}",
                 step + 1,
                 backtrack_started.elapsed().as_secs_f64(),
                 accepted.damping,
