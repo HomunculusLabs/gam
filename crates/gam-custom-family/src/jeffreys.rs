@@ -1258,15 +1258,9 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
             let completion_second: CompletionSecondDriftFn =
                 Arc::new(move |pairs: &[(Array1<f64>, Array1<f64>)]| {
                     let base = prepare()?;
-                    if base.hessian_motion_active() {
-                        return Err(CustomFamilyError::trial_point(
-                            "the outer Hessian of a criterion priced on the complete Jeffreys \
-                             curvature needs the gate and floor motion half of D² completion, \
-                             and this snapshot's conditioning gate or relative floor moves with \
-                             β (gam#2894)"
-                                .to_string(),
-                        ));
-                    }
+                    // Where the gate or the floor moves, the complete second drift also reads
+                    // `H²[u,·]`, `H²[w,·]` and `H³[u,w,·]` (gam#2905).
+                    let motion = base.hessian_motion_active();
                     pairs
                         .iter()
                         .map(|(u, w)| -> Result<Array2<f64>, CustomFamilyError> {
@@ -1323,10 +1317,42 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
                                             .to_string()
                                     })
                             };
-                            let mut drift = base.frozen_completion_second_drift_matrix(
+                            let rotated_second = |direction: &Array1<f64>| -> Result<
+                                gam_solve::estimate::reml::jeffreys_subspace::JeffreysRotatedAxes,
+                                CustomFamilyError,
+                            > {
+                                let axes = family
+                                    .joint_jeffreys_information_second_directional_all_axes_with_specs(
+                                        &states, &specs, direction,
+                                    )?
+                                    .ok_or_else(|| missing("second information derivatives"))?;
+                                Ok(base.rotate_axes(&axes)?)
+                            };
+                            let (second_u, second_w, third_uw) = if motion {
+                                let rows = family
+                                    .joint_jeffreys_information_third_directional_rotated_all_axes_with_specs(
+                                        &states,
+                                        &specs,
+                                        u,
+                                        w,
+                                        base.ambient_eigenbasis(),
+                                    )?
+                                    .ok_or_else(|| missing("third information derivatives"))?;
+                                (
+                                    Some(rotated_second(u)?),
+                                    Some(rotated_second(w)?),
+                                    Some(base.rotated_axes_from_rows(rows)?),
+                                )
+                            } else {
+                                (None, None, None)
+                            };
+                            let mut drift = base.completion_second_drift_matrix(
                                 &pert_u,
                                 &pert_w,
                                 &pert_uw,
+                                second_u.as_ref(),
+                                second_w.as_ref(),
+                                third_uw.as_ref(),
                                 &contracted,
                                 &along_u,
                                 &along_w,

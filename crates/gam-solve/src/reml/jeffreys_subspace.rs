@@ -368,6 +368,43 @@ pub(crate) fn jeffreys_antiderivative_floor_third_sensitivity(lam: f64, floor: f
     }
 }
 
+/// `∂⁴g/∂floor⁴` on the branch of [`jeffreys_antiderivative_floor_third_sensitivity`]:
+/// `−6/floor⁴` on a floor-bound top saturation (`0` on a gate-bound one), `0` in the log
+/// window, `−6/floor⁴ + 24λ/floor⁵` inside the band, and `−6/floor⁴ + 24λ/(floor − λ)⁵` on
+/// the bottom saturation (gam#2894).
+#[inline]
+pub(crate) fn jeffreys_antiderivative_floor_fourth_sensitivity(lam: f64, floor: f64) -> f64 {
+    let cap = jeffreys_cap(floor);
+    let floor_fourth = floor.powi(4);
+    if lam >= cap {
+        if cap > CONDITIONING_GATE_ABSOLUTE_CLEAR {
+            -6.0 / floor_fourth
+        } else {
+            0.0
+        }
+    } else if lam >= floor {
+        0.0
+    } else if lam >= 0.0 {
+        -6.0 / floor_fourth + 24.0 * lam / (floor_fourth * floor)
+    } else {
+        -6.0 / floor_fourth + 24.0 * lam / (floor - lam).powi(5)
+    }
+}
+
+/// `∂³d/∂floor³` of the floored inverse (gam#2894): `0` above the floor, `−6/floor⁴` on the
+/// floor plateau, and `−(6·floor + 18λ)/(floor − λ)⁵` on the saturating negative branch.
+#[inline]
+pub(crate) fn floored_inverse_floor_third_sensitivity(lam: f64, floor: f64) -> f64 {
+    let cap = jeffreys_cap(floor);
+    if lam >= cap || lam >= floor {
+        0.0
+    } else if lam >= 0.0 {
+        -6.0 / floor.powi(4)
+    } else {
+        -(6.0 * floor + 18.0 * lam) / (floor - lam).powi(5)
+    }
+}
+
 /// Daleckii–Krein divided-difference matrix of the floored signed inverse on
 /// the reduced spectrum: `Ψ_ij = (d(λ_i) − d(λ_j)) / (λ_i − λ_j)` for
 /// well-separated pairs, with the confluent limit `Ψ_ii = d'(λ_i)` on the
@@ -697,6 +734,60 @@ pub(crate) fn conditioning_gate_weight_third(
             d3w * r_min * r_min * r_max + d2w * r_min_min * r_max,
             d3w * r_min * r_max * r_max + d2w * r_min * r_max_max,
             d3w * r_max * r_max * r_max + 3.0 * d2w * r_max * r_max_max + d1w * r_max_max_max,
+        )
+    }
+}
+
+/// Fourth partials `(G₁₁₁₁, G₁₁₁₂, G₁₁₂₂, G₁₂₂₂, G₂₂₂₂)` of the conditioning gate
+/// weight in `(λ_min, λ_max)`: the companion of [`conditioning_gate_weight_third`]
+/// that the second β-drift of the gate motion needs (gam#2894). Same active-branch
+/// selection. The cubic ramp has no fourth derivative, so the absolute branch and
+/// the saturated and degenerate branches are zero; the relative branch composes the
+/// ramp with `r = log₁₀(λ_min/λ_max)`.
+pub(crate) fn conditioning_gate_weight_fourth(
+    lambda_min: f64,
+    lambda_max: f64,
+) -> (f64, f64, f64, f64, f64) {
+    if lambda_max <= 0.0 || !lambda_min.is_finite() {
+        return (0.0, 0.0, 0.0, 0.0, 0.0);
+    }
+    let (w_abs, _, _, _) = conditioning_ramp_down_derivatives(
+        lambda_min,
+        CONDITIONING_GATE_ABSOLUTE,
+        CONDITIONING_GATE_ABSOLUTE_CLEAR,
+    );
+    let ratio = (lambda_min / lambda_max).max(f64::MIN_POSITIVE);
+    let (w_rel, d1w, d2w, d3w) = conditioning_ramp_down_derivatives(
+        ratio.log10(),
+        CONDITIONING_GATE_RELATIVE.log10(),
+        CONDITIONING_GATE_RELATIVE_CLEAR.log10(),
+    );
+    if w_abs >= w_rel {
+        (0.0, 0.0, 0.0, 0.0, 0.0)
+    } else {
+        // Faà di Bruno over the set partitions of four indices. `r` has no mixed
+        // partials and the ramp has `w'''' = 0`, so only the `{2,1,1}`, `{2,2}`,
+        // `{3,1}` and `{4}` blocks whose indices agree survive.
+        let ln10 = std::f64::consts::LN_10;
+        let r_min = 1.0 / (lambda_min * ln10);
+        let r_max = -1.0 / (lambda_max * ln10);
+        let r_min_min = -1.0 / (lambda_min * lambda_min * ln10);
+        let r_max_max = 1.0 / (lambda_max * lambda_max * ln10);
+        let r_min_min_min = 2.0 / (lambda_min * lambda_min * lambda_min * ln10);
+        let r_max_max_max = -2.0 / (lambda_max * lambda_max * lambda_max * ln10);
+        let r_min_min_min_min = -6.0 / (lambda_min.powi(4) * ln10);
+        let r_max_max_max_max = 6.0 / (lambda_max.powi(4) * ln10);
+        (
+            6.0 * d3w * r_min_min * r_min * r_min
+                + d2w * (3.0 * r_min_min * r_min_min + 4.0 * r_min_min_min * r_min)
+                + d1w * r_min_min_min_min,
+            3.0 * d3w * r_min_min * r_min * r_max + d2w * r_min_min_min * r_max,
+            d3w * (r_min_min * r_max * r_max + r_max_max * r_min * r_min)
+                + d2w * r_min_min * r_max_max,
+            3.0 * d3w * r_max_max * r_max * r_min + d2w * r_max_max_max * r_min,
+            6.0 * d3w * r_max_max * r_max * r_max
+                + d2w * (3.0 * r_max_max * r_max_max + 4.0 * r_max_max_max * r_max)
+                + d1w * r_max_max_max_max,
         )
     }
 }
@@ -3423,6 +3514,94 @@ fn simple_eigenvalue_third_form(
     sum
 }
 
+/// Every ordering of four factors.
+const S4_PERMUTATIONS: [[usize; 4]; 24] = [
+    [0, 1, 2, 3], [0, 1, 3, 2], [0, 2, 1, 3], [0, 2, 3, 1], [0, 3, 1, 2], [0, 3, 2, 1],
+    [1, 0, 2, 3], [1, 0, 3, 2], [1, 2, 0, 3], [1, 2, 3, 0], [1, 3, 0, 2], [1, 3, 2, 0],
+    [2, 0, 1, 3], [2, 0, 3, 1], [2, 1, 0, 3], [2, 1, 3, 0], [2, 3, 0, 1], [2, 3, 1, 0],
+    [3, 0, 1, 2], [3, 0, 2, 1], [3, 1, 0, 2], [3, 1, 2, 0], [3, 2, 0, 1], [3, 2, 1, 0],
+];
+
+/// Fourth symmetric form of a simple eigenvalue (gam#2894): the symmetrization over
+/// `S₄` of the fourth-order Rayleigh–Schrödinger term
+///
+/// ```text
+/// τ(A,B,C,D) = â·B·R·C·d̂ − (Σ_j A[e,j] b̂_j)(Σ_j C[e,j] ď_j)
+///              − A[e,e]·(b̌·C·d̂ + b̂·C·ď) + A[e,e]·B[e,e]·Σ_j C[e,j] d̃_j,
+/// ```
+///
+/// `R = diag(1/(λ_e − λ_j))` on `j ≠ e`, `x̂[j] = X[e,j]·R_j`, `x̌[j] = X[e,j]·R_j²`,
+/// `x̃[j] = X[e,j]·R_j³`. For four equal factors it is `24·E⁽⁴⁾`, the standard
+/// fourth-order energy.
+fn simple_eigenvalue_fourth_form(
+    evals: &Array1<f64>,
+    tie_tolerance: f64,
+    e: usize,
+    factors: [&Array2<f64>; 4],
+) -> f64 {
+    let m = evals.len();
+    let resolvent =
+        Array1::from_shape_fn(m, |j| simple_eigenvalue_gap_inverse(evals, tie_tolerance, e, j));
+    let row = |x: &Array2<f64>, power: i32| {
+        Array1::from_shape_fn(m, |j| x[[e, j]] * resolvent[j].powi(power))
+    };
+    let hat: Vec<Array1<f64>> = factors.iter().map(|x| row(x, 1)).collect();
+    let check: Vec<Array1<f64>> = factors.iter().map(|x| row(x, 2)).collect();
+    let tilde: Vec<Array1<f64>> = factors.iter().map(|x| row(x, 3)).collect();
+    let mut sum = 0.0_f64;
+    for [a, b, c, d] in S4_PERMUTATIONS {
+        let c_d_hat = factors[c].dot(&hat[d]);
+        let resolvent_chain = hat[a].dot(&factors[b].dot(&(&resolvent * &c_d_hat)));
+        let second_pair = factors[a].row(e).dot(&hat[b]) * factors[c].row(e).dot(&check[d]);
+        let diagonal_chain = factors[a][[e, e]]
+            * (check[b].dot(&c_d_hat) + hat[b].dot(&factors[c].dot(&check[d])));
+        let double_diagonal =
+            factors[a][[e, e]] * factors[b][[e, e]] * factors[c].row(e).dot(&tilde[d]);
+        sum += resolvent_chain - second_pair - diagonal_chain + double_diagonal;
+    }
+    sum
+}
+
+/// Mixed second derivative `∂²v_e/∂u∂w` of a simple unit eigenvector, in the base eigenbasis
+/// (gam#2894). With `E_u`, `E_w`, `E_uw` the first and mixed second information derivatives
+/// written in that basis, `ẑ_x[k] = E_x[k,e]/(λ_e − λ_k)` for `k ≠ e`, and
+///
+/// ```text
+/// v̈[j] = ( E_uw[j,e] + Σ_{k≠e} (E_u[j,k]·ẑ_w[k] + E_w[j,k]·ẑ_u[k])
+///          − E_u[e,e]·ẑ_w[j] − E_w[e,e]·ẑ_u[j] ) / (λ_e − λ_j),   j ≠ e,
+/// v̈[e] = −Σ_{k≠e} ẑ_u[k]·ẑ_w[k],
+/// ```
+///
+/// the `e` component keeping the unit norm. Ties within `tie_tolerance` contribute nothing.
+fn simple_eigenvector_second_drift(
+    evals: &Array1<f64>,
+    tie_tolerance: f64,
+    e: usize,
+    e_u: &Array2<f64>,
+    e_w: &Array2<f64>,
+    e_uw: &Array2<f64>,
+) -> Array1<f64> {
+    let m = evals.len();
+    let resolvent =
+        Array1::from_shape_fn(m, |j| simple_eigenvalue_gap_inverse(evals, tie_tolerance, e, j));
+    let first = |x: &Array2<f64>| Array1::from_shape_fn(m, |k| x[[k, e]] * resolvent[k]);
+    let z_u = first(e_u);
+    let z_w = first(e_w);
+    let mut out = Array1::<f64>::zeros(m);
+    for j in 0..m {
+        if resolvent[j] == 0.0 {
+            continue;
+        }
+        let mut numerator = e_uw[[j, e]] - e_u[[e, e]] * z_w[j] - e_w[[e, e]] * z_u[j];
+        for k in 0..m {
+            numerator += e_u[[j, k]] * z_w[k] + e_w[[j, k]] * z_u[k];
+        }
+        out[j] = numerator * resolvent[j];
+    }
+    out[e] = -z_u.dot(&z_w);
+    out
+}
+
 /// Symmetric congruence `sym(Uᵀ A U)`.
 ///
 /// Jeffreys information derivatives are mathematically symmetric, but their
@@ -3760,45 +3939,7 @@ mod tests {
     use super::*;
     use ndarray::array;
 
-    // gam#2894: fourth-order spectral pieces of the motion half of `D² completion`. They are
-    // validated here and move back into the module with the production assembly that calls them.
-
-    /// `∂⁴g/∂floor⁴` on the branch of [`jeffreys_antiderivative_floor_third_sensitivity`]:
-    /// `−6/floor⁴` on a floor-bound top saturation (`0` on a gate-bound one), `0` in the log
-    /// window, `−6/floor⁴ + 24λ/floor⁵` inside the band, and `−6/floor⁴ + 24λ/(floor − λ)⁵` on
-    /// the bottom saturation (gam#2894).
-    #[inline]
-    pub(crate) fn jeffreys_antiderivative_floor_fourth_sensitivity(lam: f64, floor: f64) -> f64 {
-        let cap = jeffreys_cap(floor);
-        let floor_fourth = floor.powi(4);
-        if lam >= cap {
-            if cap > CONDITIONING_GATE_ABSOLUTE_CLEAR {
-                -6.0 / floor_fourth
-            } else {
-                0.0
-            }
-        } else if lam >= floor {
-            0.0
-        } else if lam >= 0.0 {
-            -6.0 / floor_fourth + 24.0 * lam / (floor_fourth * floor)
-        } else {
-            -6.0 / floor_fourth + 24.0 * lam / (floor - lam).powi(5)
-        }
-    }
-
-    /// `∂³d/∂floor³` of the floored inverse (gam#2894): `0` above the floor, `−6/floor⁴` on the
-    /// floor plateau, and `−(6·floor + 18λ)/(floor − λ)⁵` on the saturating negative branch.
-    #[inline]
-    pub(crate) fn floored_inverse_floor_third_sensitivity(lam: f64, floor: f64) -> f64 {
-        let cap = jeffreys_cap(floor);
-        if lam >= cap || lam >= floor {
-            0.0
-        } else if lam >= 0.0 {
-            -6.0 / floor.powi(4)
-        } else {
-            -(6.0 * floor + 18.0 * lam) / (floor - lam).powi(5)
-        }
-    }
+    // gam#2894: the λ–floor partials of the capped inverse, read only by their finite-difference pin.
 
     /// `∂³d/∂λ∂floor²` of the floored inverse (gam#2894): nonzero only on the saturating negative
     /// branch, `(12·floor + 12λ)/(floor − λ)⁵`.
@@ -3829,149 +3970,6 @@ mod tests {
             -(18.0 * floor + 6.0 * lam) / (floor - lam).powi(5)
         }
     }
-
-    /// Fourth partials `(G₁₁₁₁, G₁₁₁₂, G₁₁₂₂, G₁₂₂₂, G₂₂₂₂)` of the conditioning gate
-    /// weight in `(λ_min, λ_max)`: the companion of [`conditioning_gate_weight_third`]
-    /// that the second β-drift of the gate motion needs (gam#2894). Same active-branch
-    /// selection. The cubic ramp has no fourth derivative, so the absolute branch and
-    /// the saturated and degenerate branches are zero; the relative branch composes the
-    /// ramp with `r = log₁₀(λ_min/λ_max)`.
-    pub(crate) fn conditioning_gate_weight_fourth(
-        lambda_min: f64,
-        lambda_max: f64,
-    ) -> (f64, f64, f64, f64, f64) {
-        if lambda_max <= 0.0 || !lambda_min.is_finite() {
-            return (0.0, 0.0, 0.0, 0.0, 0.0);
-        }
-        let (w_abs, _, _, _) = conditioning_ramp_down_derivatives(
-            lambda_min,
-            CONDITIONING_GATE_ABSOLUTE,
-            CONDITIONING_GATE_ABSOLUTE_CLEAR,
-        );
-        let ratio = (lambda_min / lambda_max).max(f64::MIN_POSITIVE);
-        let (w_rel, d1w, d2w, d3w) = conditioning_ramp_down_derivatives(
-            ratio.log10(),
-            CONDITIONING_GATE_RELATIVE.log10(),
-            CONDITIONING_GATE_RELATIVE_CLEAR.log10(),
-        );
-        if w_abs >= w_rel {
-            (0.0, 0.0, 0.0, 0.0, 0.0)
-        } else {
-            // Faà di Bruno over the set partitions of four indices. `r` has no mixed
-            // partials and the ramp has `w'''' = 0`, so only the `{2,1,1}`, `{2,2}`,
-            // `{3,1}` and `{4}` blocks whose indices agree survive.
-            let ln10 = std::f64::consts::LN_10;
-            let r_min = 1.0 / (lambda_min * ln10);
-            let r_max = -1.0 / (lambda_max * ln10);
-            let r_min_min = -1.0 / (lambda_min * lambda_min * ln10);
-            let r_max_max = 1.0 / (lambda_max * lambda_max * ln10);
-            let r_min_min_min = 2.0 / (lambda_min * lambda_min * lambda_min * ln10);
-            let r_max_max_max = -2.0 / (lambda_max * lambda_max * lambda_max * ln10);
-            let r_min_min_min_min = -6.0 / (lambda_min.powi(4) * ln10);
-            let r_max_max_max_max = 6.0 / (lambda_max.powi(4) * ln10);
-            (
-                6.0 * d3w * r_min_min * r_min * r_min
-                    + d2w * (3.0 * r_min_min * r_min_min + 4.0 * r_min_min_min * r_min)
-                    + d1w * r_min_min_min_min,
-                3.0 * d3w * r_min_min * r_min * r_max + d2w * r_min_min_min * r_max,
-                d3w * (r_min_min * r_max * r_max + r_max_max * r_min * r_min)
-                    + d2w * r_min_min * r_max_max,
-                3.0 * d3w * r_max_max * r_max * r_min + d2w * r_max_max_max * r_min,
-                6.0 * d3w * r_max_max * r_max * r_max
-                    + d2w * (3.0 * r_max_max * r_max_max + 4.0 * r_max_max_max * r_max)
-                    + d1w * r_max_max_max_max,
-            )
-        }
-    }
-
-    /// Every ordering of four factors.
-    const S4_PERMUTATIONS: [[usize; 4]; 24] = [
-        [0, 1, 2, 3], [0, 1, 3, 2], [0, 2, 1, 3], [0, 2, 3, 1], [0, 3, 1, 2], [0, 3, 2, 1],
-        [1, 0, 2, 3], [1, 0, 3, 2], [1, 2, 0, 3], [1, 2, 3, 0], [1, 3, 0, 2], [1, 3, 2, 0],
-        [2, 0, 1, 3], [2, 0, 3, 1], [2, 1, 0, 3], [2, 1, 3, 0], [2, 3, 0, 1], [2, 3, 1, 0],
-        [3, 0, 1, 2], [3, 0, 2, 1], [3, 1, 0, 2], [3, 1, 2, 0], [3, 2, 0, 1], [3, 2, 1, 0],
-    ];
-
-    /// Fourth symmetric form of a simple eigenvalue (gam#2894): the symmetrization over
-    /// `S₄` of the fourth-order Rayleigh–Schrödinger term
-    ///
-    /// ```text
-    /// τ(A,B,C,D) = â·B·R·C·d̂ − (Σ_j A[e,j] b̂_j)(Σ_j C[e,j] ď_j)
-    ///              − A[e,e]·(b̌·C·d̂ + b̂·C·ď) + A[e,e]·B[e,e]·Σ_j C[e,j] d̃_j,
-    /// ```
-    ///
-    /// `R = diag(1/(λ_e − λ_j))` on `j ≠ e`, `x̂[j] = X[e,j]·R_j`, `x̌[j] = X[e,j]·R_j²`,
-    /// `x̃[j] = X[e,j]·R_j³`. For four equal factors it is `24·E⁽⁴⁾`, the standard
-    /// fourth-order energy.
-    fn simple_eigenvalue_fourth_form(
-        evals: &Array1<f64>,
-        tie_tolerance: f64,
-        e: usize,
-        factors: [&Array2<f64>; 4],
-    ) -> f64 {
-        let m = evals.len();
-        let resolvent =
-            Array1::from_shape_fn(m, |j| simple_eigenvalue_gap_inverse(evals, tie_tolerance, e, j));
-        let row = |x: &Array2<f64>, power: i32| {
-            Array1::from_shape_fn(m, |j| x[[e, j]] * resolvent[j].powi(power))
-        };
-        let hat: Vec<Array1<f64>> = factors.iter().map(|x| row(x, 1)).collect();
-        let check: Vec<Array1<f64>> = factors.iter().map(|x| row(x, 2)).collect();
-        let tilde: Vec<Array1<f64>> = factors.iter().map(|x| row(x, 3)).collect();
-        let mut sum = 0.0_f64;
-        for [a, b, c, d] in S4_PERMUTATIONS {
-            let c_d_hat = factors[c].dot(&hat[d]);
-            let resolvent_chain = hat[a].dot(&factors[b].dot(&(&resolvent * &c_d_hat)));
-            let second_pair = factors[a].row(e).dot(&hat[b]) * factors[c].row(e).dot(&check[d]);
-            let diagonal_chain = factors[a][[e, e]]
-                * (check[b].dot(&c_d_hat) + hat[b].dot(&factors[c].dot(&check[d])));
-            let double_diagonal =
-                factors[a][[e, e]] * factors[b][[e, e]] * factors[c].row(e).dot(&tilde[d]);
-            sum += resolvent_chain - second_pair - diagonal_chain + double_diagonal;
-        }
-        sum
-    }
-
-    /// Mixed second derivative `∂²v_e/∂u∂w` of a simple unit eigenvector, in the base eigenbasis
-    /// (gam#2894). With `E_u`, `E_w`, `E_uw` the first and mixed second information derivatives
-    /// written in that basis, `ẑ_x[k] = E_x[k,e]/(λ_e − λ_k)` for `k ≠ e`, and
-    ///
-    /// ```text
-    /// v̈[j] = ( E_uw[j,e] + Σ_{k≠e} (E_u[j,k]·ẑ_w[k] + E_w[j,k]·ẑ_u[k])
-    ///          − E_u[e,e]·ẑ_w[j] − E_w[e,e]·ẑ_u[j] ) / (λ_e − λ_j),   j ≠ e,
-    /// v̈[e] = −Σ_{k≠e} ẑ_u[k]·ẑ_w[k],
-    /// ```
-    ///
-    /// the `e` component keeping the unit norm. Ties within `tie_tolerance` contribute nothing.
-    fn simple_eigenvector_second_drift(
-        evals: &Array1<f64>,
-        tie_tolerance: f64,
-        e: usize,
-        e_u: &Array2<f64>,
-        e_w: &Array2<f64>,
-        e_uw: &Array2<f64>,
-    ) -> Array1<f64> {
-        let m = evals.len();
-        let resolvent =
-            Array1::from_shape_fn(m, |j| simple_eigenvalue_gap_inverse(evals, tie_tolerance, e, j));
-        let first = |x: &Array2<f64>| Array1::from_shape_fn(m, |k| x[[k, e]] * resolvent[k]);
-        let z_u = first(e_u);
-        let z_w = first(e_w);
-        let mut out = Array1::<f64>::zeros(m);
-        for j in 0..m {
-            if resolvent[j] == 0.0 {
-                continue;
-            }
-            let mut numerator = e_uw[[j, e]] - e_u[[e, e]] * z_w[j] - e_w[[e, e]] * z_u[j];
-            for k in 0..m {
-                numerator += e_u[[j, k]] * z_w[k] + e_w[[j, k]] * z_u[k];
-            }
-            out[j] = numerator * resolvent[j];
-        }
-        out[e] = -z_u.dot(&z_w);
-        out
-    }
-
 
     /// Relative disagreement of the frozen-policy Jeffreys Hessian
     /// (`H_Φ + completion`) and of the motion-completed one with central
@@ -4539,16 +4537,18 @@ mod tests {
         assert!(error < 1e-8, "completion drift matrix vs drift action: rel {error:e}");
     }
 
-    /// gam#2894: every column of the frozen second completion drift matrix equals the frozen
-    /// second drift action along that axis. Returns `(max |matrix|, relative error)`.
-    fn jeffreys_frozen_second_drift_matrix_errors_2894<I, F, S, T, Q>(
+    /// gam#2905: the complete second completion drift matrix, frozen policy and gate/floor
+    /// motion, against central differences of the first completion drift matrix along `w`, with
+    /// the drift base re-prepared at every perturbed β. Returns `(motion active, max |matrix|,
+    /// relative error)`.
+    fn jeffreys_complete_second_drift_matrix_errors_2905<I, F, S, T, Q>(
         beta: &Array1<f64>,
         information: I,
         first: F,
         second: S,
         third: T,
         fourth: Q,
-    ) -> (f64, f64)
+    ) -> (bool, f64, f64)
     where
         I: Fn(&Array1<f64>) -> Array2<f64>,
         F: Fn(&Array1<f64>, &Array1<f64>) -> Array2<f64>,
@@ -4565,68 +4565,77 @@ mod tests {
         };
         let u = Array1::from_shape_fn(p, |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
         let w = Array1::from_shape_fn(p, |i| ((i * 3 + 2) % 7) as f64 / 7.0 - 0.4);
-        let hdots: Vec<Array2<f64>> = (0..p).map(|a| first(beta, &axis(a))).collect();
-        let base = JeffreysHphiDriftBase::prepare_with_axes(information(beta).view(), z.view(), hdots)
-            .expect("drift base")
-            .expect("active drift base");
+        let base_at = |b: &Array1<f64>| {
+            let hdots: Vec<Array2<f64>> = (0..p).map(|a| first(b, &axis(a))).collect();
+            JeffreysHphiDriftBase::prepare_with_axes(information(b).view(), z.view(), hdots)
+                .expect("drift base")
+                .expect("active drift base")
+        };
         let contract = |weight: &Array2<f64>, derivative: &dyn Fn(usize, usize) -> Array2<f64>| {
             let mut out = Array2::<f64>::zeros((p, p));
             for a in 0..p {
-                for b in 0..p {
-                    out[[a, b]] = (weight * &derivative(a, b)).sum();
+                for c in 0..p {
+                    out[[a, c]] = (weight * &derivative(a, c)).sum();
                 }
             }
             Ok::<Array2<f64>, String>(out)
         };
-        let contracted = |weight: &Array2<f64>| contract(weight, &|a, b| second(beta, &axis(a), &axis(b)));
-        let along_u = |weight: &Array2<f64>| contract(weight, &|a, b| third(beta, &u, &axis(a), &axis(b)));
-        let along_w = |weight: &Array2<f64>| contract(weight, &|a, b| third(beta, &w, &axis(a), &axis(b)));
-        let along_uw =
-            |weight: &Array2<f64>| contract(weight, &|a, b| fourth(beta, &u, &w, &axis(a), &axis(b)));
+        let drift_matrix_at = |b: &Array1<f64>| {
+            let base = base_at(b);
+            let second_u = base
+                .rotate_axes(&(0..p).map(|a| second(b, &u, &axis(a))).collect::<Vec<_>>())
+                .expect("rotated H²[u,·]");
+            base.completion_drift_matrix(
+                &first(b, &u),
+                &second_u,
+                &|weight: &Array2<f64>| contract(weight, &|a, c| second(b, &axis(a), &axis(c))),
+                &|weight: &Array2<f64>| contract(weight, &|a, c| third(b, &u, &axis(a), &axis(c))),
+            )
+            .expect("completion drift matrix")
+        };
+        let base = base_at(beta);
+        let rotated = |derivative: &dyn Fn(usize) -> Array2<f64>| {
+            base.rotate_axes(&(0..p).map(|a| derivative(a)).collect::<Vec<_>>())
+                .expect("rotated axis derivatives")
+        };
+        let second_u = rotated(&|a| second(beta, &u, &axis(a)));
+        let second_w = rotated(&|a| second(beta, &w, &axis(a)));
+        let third_uw = rotated(&|a| third(beta, &u, &w, &axis(a)));
         let matrix = base
-            .frozen_completion_second_drift_matrix(
+            .completion_second_drift_matrix(
                 &first(beta, &u),
                 &first(beta, &w),
                 &second(beta, &u, &w),
-                &contracted,
-                &along_u,
-                &along_w,
-                &along_uw,
+                Some(&second_u),
+                Some(&second_w),
+                Some(&third_uw),
+                &|weight: &Array2<f64>| contract(weight, &|a, c| second(beta, &axis(a), &axis(c))),
+                &|weight: &Array2<f64>| contract(weight, &|a, c| third(beta, &u, &axis(a), &axis(c))),
+                &|weight: &Array2<f64>| contract(weight, &|a, c| third(beta, &w, &axis(a), &axis(c))),
+                &|weight: &Array2<f64>| {
+                    contract(weight, &|a, c| fourth(beta, &u, &w, &axis(a), &axis(c)))
+                },
             )
-            .expect("frozen second drift matrix");
-        let mut largest = 0.0_f64;
-        let mut worst = 0.0_f64;
-        for b in 0..p {
-            let v = axis(b);
-            let axes_v: Vec<Array2<f64>> = (0..p).map(|a| second(beta, &v, &axis(a))).collect();
-            let moving_uv: Vec<Array2<f64>> = (0..p).map(|a| third(beta, &u, &v, &axis(a))).collect();
-            let moving_vw: Vec<Array2<f64>> = (0..p).map(|a| third(beta, &v, &w, &axis(a))).collect();
-            let fourth_uvw: Vec<Array2<f64>> =
-                (0..p).map(|a| fourth(beta, &u, &v, &w, &axis(a))).collect();
-            let column = base
-                .completion_second_drift_frozen(
-                    &first(beta, &u),
-                    &first(beta, &w),
-                    &second(beta, &u, &w),
-                    &axes_v,
-                    &moving_uv,
-                    &moving_vw,
-                    &fourth_uvw,
-                )
-                .expect("frozen second drift action");
-            for a in 0..p {
-                largest = largest.max(column[a].abs());
-                worst = worst.max((matrix[[a, b]] - column[a]).abs());
-            }
-        }
-        (largest, worst / largest.max(1e-300))
+            .expect("complete second completion drift matrix");
+        let step = 1e-5;
+        let finite_difference = (drift_matrix_at(&(beta + &(&w * step)))
+            - drift_matrix_at(&(beta - &(&w * step))))
+            / (2.0 * step);
+        let max_abs = |x: &Array2<f64>| x.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let scale = max_abs(&finite_difference).max(1e-12);
+        (
+            base.hessian_motion_active(),
+            max_abs(&matrix),
+            max_abs(&(&matrix - &finite_difference)) / scale,
+        )
     }
 
-    /// gam#2894: the frozen second completion drift matrix against its action, in the gate
-    /// band and under a moving floor.
+    /// gam#2905: inside the gate's transition band the complete second completion drift carries
+    /// the gate's fourth partials, the extreme eigenvectors' second drift and the remainder's
+    /// second drift, and matches central differences of the first drift matrix.
     #[test]
-    fn jeffreys_frozen_second_drift_matrix_matches_the_action_2894() {
-        let gate_rows = array![
+    fn jeffreys_complete_second_drift_matrix_matches_fd_in_the_gate_band_2905() {
+        let rows = array![
             [1.0, 0.2, -0.3],
             [1.0, -0.5, 0.4],
             [1.0, 0.9, 0.1],
@@ -4634,10 +4643,10 @@ mod tests {
             [1.0, 0.6, 0.7],
             [1.0, -0.7, -0.2],
         ];
-        let gate_beta = array![0.1, -0.2, 0.3];
-        let gate_raw = |b: &Array1<f64>, directions: &[&Array1<f64>]| {
+        let beta = array![0.1, -0.2, 0.3];
+        let raw = |b: &Array1<f64>, directions: &[&Array1<f64>]| {
             let mut h = Array2::<f64>::zeros((3, 3));
-            for x in gate_rows.rows() {
+            for x in rows.rows() {
                 let mut weight = x.dot(b).exp();
                 for direction in directions {
                     weight *= x.dot(*direction);
@@ -4650,25 +4659,36 @@ mod tests {
             }
             h
         };
-        let (evals, _) = gate_raw(&gate_beta, &[]).eigh(Side::Lower).expect("fixture spectrum");
-        let scale = 4.0 / evals.iter().copied().fold(f64::INFINITY, f64::min);
-        let (magnitude, error) = jeffreys_frozen_second_drift_matrix_errors_2894(
-            &gate_beta,
-            |b| gate_raw(b, &[]).mapv(|value| scale * value),
-            |b, d| gate_raw(b, &[d]).mapv(|value| scale * value),
-            |b, x, y| gate_raw(b, &[x, y]).mapv(|value| scale * value),
-            |b, x, y, t| gate_raw(b, &[x, y, t]).mapv(|value| scale * value),
-            |b, x, y, t, s| gate_raw(b, &[x, y, t, s]).mapv(|value| scale * value),
+        let (evals, _) = raw(&beta, &[]).eigh(Side::Lower).expect("fixture spectrum");
+        let lambda_min = evals.iter().copied().fold(f64::INFINITY, f64::min);
+        let scale = 4.0 / lambda_min;
+        let (active, magnitude, error) = jeffreys_complete_second_drift_matrix_errors_2905(
+            &beta,
+            |b| raw(b, &[]).mapv(|value| scale * value),
+            |b, d| raw(b, &[d]).mapv(|value| scale * value),
+            |b, x, y| raw(b, &[x, y]).mapv(|value| scale * value),
+            |b, x, y, t| raw(b, &[x, y, t]).mapv(|value| scale * value),
+            |b, x, y, t, s| raw(b, &[x, y, t, s]).mapv(|value| scale * value),
         );
-        assert!(magnitude > 1e-8, "gate band: the fixture must exercise a nonzero second drift");
-        assert!(error < 1e-8, "gate band: frozen second drift matrix vs action: rel {error:e}");
+        assert!(active, "the fixture must sit inside the gate's transition band");
+        assert!(magnitude > 1e-8, "the fixture must exercise a nonzero second drift");
+        assert!(
+            error < 1e-5,
+            "complete second completion drift vs central differences: rel {error:e}"
+        );
+    }
 
-        let floor_rows = array![[1.0, 0.3], [1.0, -0.6], [1.0, 0.8], [1.0, -0.2], [1.0, 0.5]];
-        let floor_beta = array![0.2, -0.1, 0.4];
+    /// gam#2905: under a moving relative floor the complete second completion drift carries the
+    /// floor's channels to fourth order and matches central differences of the first drift
+    /// matrix.
+    #[test]
+    fn jeffreys_complete_second_drift_matrix_matches_fd_under_a_moving_floor_2905() {
+        let rows = array![[1.0, 0.3], [1.0, -0.6], [1.0, 0.8], [1.0, -0.2], [1.0, 0.5]];
+        let beta = array![0.2, -0.1, 0.4];
         let ghost = 1e-13;
-        let floor_raw = |b: &Array1<f64>, directions: &[&Array1<f64>]| {
+        let raw = |b: &Array1<f64>, directions: &[&Array1<f64>]| {
             let mut h = Array2::<f64>::zeros((3, 3));
-            for x in floor_rows.rows() {
+            for x in rows.rows() {
                 let mut weight = (x[0] * b[0] + x[1] * b[1]).exp();
                 for direction in directions {
                     weight *= x[0] * direction[0] + x[1] * direction[1];
@@ -4686,16 +4706,20 @@ mod tests {
             h[[2, 2]] += tail;
             h
         };
-        let (magnitude, error) = jeffreys_frozen_second_drift_matrix_errors_2894(
-            &floor_beta,
-            |b| floor_raw(b, &[]),
-            |b, d| floor_raw(b, &[d]),
-            |b, x, y| floor_raw(b, &[x, y]),
-            |b, x, y, t| floor_raw(b, &[x, y, t]),
-            |b, x, y, t, s| floor_raw(b, &[x, y, t, s]),
+        let (active, magnitude, error) = jeffreys_complete_second_drift_matrix_errors_2905(
+            &beta,
+            |b| raw(b, &[]),
+            |b, d| raw(b, &[d]),
+            |b, x, y| raw(b, &[x, y]),
+            |b, x, y, t| raw(b, &[x, y, t]),
+            |b, x, y, t, s| raw(b, &[x, y, t, s]),
         );
-        assert!(magnitude > 1e-8, "moving floor: the fixture must exercise a nonzero second drift");
-        assert!(error < 1e-8, "moving floor: frozen second drift matrix vs action: rel {error:e}");
+        assert!(active, "a below-floor eigenvalue must activate the floor motion");
+        assert!(magnitude > 1e-8, "the fixture must exercise a nonzero second drift");
+        assert!(
+            error < 1e-4,
+            "complete second completion drift vs central differences: rel {error:e}"
+        );
     }
 
     /// gam#1082 negative control: a saturated gate (`λ_min` below the absolute knot,

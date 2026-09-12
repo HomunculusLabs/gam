@@ -439,64 +439,6 @@ impl JeffreysHphiDriftBase {
         }
     }
 
-    /// The frozen-policy half of `D² completion[u, w]` as a matrix (gam#2894):
-    ///
-    /// ```text
-    /// CTH(W₀₀) + CTH_w(W₀ᵤ) + CTH_u(W₁w) + CTH_uw(W₁₁),
-    /// W₀₀ = −½(G_uw K + G_u K_w + G_w K_u + G K_uw),   W₀ᵤ = −½(G_u K + G K_u),
-    /// W₁w = −½(G_w K + G K_w),                          W₁₁ = −½ G K,
-    /// ```
-    ///
-    /// `CTH_x(W)_ab = ⟨W, D_x H''[e_a, e_b]⟩`, contractions supplied by the caller. Every
-    /// column is [`Self::completion_second_drift_frozen`] along that axis.
-    pub fn frozen_completion_second_drift_matrix(
-        &self,
-        pert_u: &Array2<f64>,
-        pert_w: &Array2<f64>,
-        pert_uw: &Array2<f64>,
-        contracted: &dyn Fn(&Array2<f64>) -> Result<Array2<f64>, String>,
-        contracted_along_u: &dyn Fn(&Array2<f64>) -> Result<Array2<f64>, String>,
-        contracted_along_w: &dyn Fn(&Array2<f64>) -> Result<Array2<f64>, String>,
-        contracted_along_uw: &dyn Fn(&Array2<f64>) -> Result<Array2<f64>, String>,
-    ) -> Result<Array2<f64>, String> {
-        if [pert_u, pert_w, pert_uw].iter().any(|h| h.dim() != (self.p, self.p)) {
-            return Err("Jeffreys frozen completion second drift matrix dimension mismatch".into());
-        }
-        self.refuse_inverse_kernel_branch_boundary()?;
-        let basis = &self.ambient_eigenbasis;
-        let e_u = symmetric_basis_contraction(pert_u.view(), basis.view());
-        let e_w = symmetric_basis_contraction(pert_w.view(), basis.view());
-        let e_uw = symmetric_basis_contraction(pert_uw.view(), basis.view());
-        let FrozenSecondDriftWeights {
-            gate_u,
-            gate_w,
-            gate_uw,
-            kernel,
-            weight_u,
-            weight_w,
-            weight_uw,
-        } = self.frozen_second_drift_weights(&e_u, &e_w, &e_uw);
-        let g = self.gate_weight;
-        let ambient = |reduced: &Array2<f64>| basis.dot(reduced).dot(&basis.t());
-        let kernel = ambient(&Array2::from_diag(&Array1::from_vec(kernel)));
-        let kernel_u = ambient(&weight_u);
-        let kernel_w = ambient(&weight_w);
-        let kernel_uw = ambient(&weight_uw);
-        let now = (&kernel * gate_uw + &kernel_w * gate_u + &kernel_u * gate_w + &kernel_uw * g) * -0.5;
-        let along_w = (&kernel * gate_u + &kernel_u * g) * -0.5;
-        let along_u = (&kernel * gate_w + &kernel_w * g) * -0.5;
-        let along_uw = &kernel * (-0.5 * g);
-        let mut result = contracted(&now)?
-            + contracted_along_w(&along_w)?
-            + contracted_along_u(&along_u)?
-            + contracted_along_uw(&along_uw)?;
-        symmetrize_contiguous(&mut result);
-        if result.iter().any(|value| !value.is_finite()) {
-            return Err("Jeffreys frozen completion second drift matrix produced nonfinite curvature".into());
-        }
-        Ok(result)
-    }
-
     /// The first β-drift of the complete second-order completion as a matrix,
     /// `D_u completion` (gam#2894). With `completion = −½·G·CTH(K) − CTH(E) − R`, where
     /// `CTH(W)_ab = ⟨W, H''[e_a, e_b]⟩`, `K` the capped inverse on the Jeffreys span and
@@ -729,6 +671,525 @@ impl JeffreysHphiDriftBase {
             return Err("Jeffreys completion drift matrix produced nonfinite curvature".into());
         }
         Ok(result)
+    }
+
+    /// The complete second β-drift of the second-order completion as a matrix,
+    /// `D² completion[u, w]` (gam#2905): the frozen policy together with the gate and floor
+    /// motion. With `completion = −½·G·CTH(K) − CTH(E) − R` ([`JointJeffreysHessianMotion`]),
+    ///
+    /// ```text
+    /// D² completion[u, w] = CTH(W₀₀ − D²E) + CTH_w(W₀ᵤ − D_uE) + CTH_u(W₁w − D_wE)
+    ///                       + CTH_uw(W₁₁ − E) − D²R[u, w],
+    /// ```
+    ///
+    /// with the frozen weights `W₀₀ = −½(G_uw·K + G_u·K_w + G_w·K_u + G·K_uw)`,
+    /// `W₀ᵤ = −½(G_u·K + G·K_u)`, `W₁w = −½(G_w·K + G·K_w)` and `W₁₁ = −½·G·K`, where `K`,
+    /// `K_u`, `K_uw` are the capped inverse and its first and second Fréchet derivatives,
+    /// floor motion included. `E` reads
+    /// the extreme eigenvectors to second order. `R = ∇G⊗∇U + ∇U⊗∇G + U·Q₂ + G·F + Σ_e ω_e·E_e`
+    /// reads the gate to its fourth partials, the ungated value and its floor channels to third
+    /// order, and `E_e[a,b] = D²λ_e[P̃_a, P̃_b]` through the fourth simple-eigenvalue form. The
+    /// motion inputs are the rotated `{H²[u, e_a]}`, `{H²[w, e_a]}` and `{H³[u, w, e_a]}`; they
+    /// are read only where [`Self::hessian_motion_active`] holds, and are required there.
+    pub fn completion_second_drift_matrix(
+        &self,
+        pert_u: &Array2<f64>,
+        pert_w: &Array2<f64>,
+        pert_uw: &Array2<f64>,
+        second_u: Option<&JeffreysRotatedAxes>,
+        second_w: Option<&JeffreysRotatedAxes>,
+        third_uw: Option<&JeffreysRotatedAxes>,
+        contracted: &dyn Fn(&Array2<f64>) -> Result<Array2<f64>, String>,
+        contracted_along_u: &dyn Fn(&Array2<f64>) -> Result<Array2<f64>, String>,
+        contracted_along_w: &dyn Fn(&Array2<f64>) -> Result<Array2<f64>, String>,
+        contracted_along_uw: &dyn Fn(&Array2<f64>) -> Result<Array2<f64>, String>,
+    ) -> Result<Array2<f64>, String> {
+        let (p, m) = (self.p, self.m);
+        if [pert_u, pert_w, pert_uw].iter().any(|h| h.dim() != (p, p)) {
+            return Err("Jeffreys complete second completion drift dimension mismatch".into());
+        }
+        self.refuse_inverse_kernel_branch_boundary()?;
+        let basis = &self.ambient_eigenbasis;
+        let e_u = symmetric_basis_contraction(pert_u.view(), basis.view());
+        let e_w = symmetric_basis_contraction(pert_w.view(), basis.view());
+        let e_uw = symmetric_basis_contraction(pert_uw.view(), basis.view());
+        let FrozenSecondDriftWeights {
+            gate_u,
+            gate_w,
+            gate_uw,
+            kernel,
+            weight_u,
+            weight_w,
+            weight_uw,
+        } = self.frozen_second_drift_weights(&e_u, &e_w, &e_uw);
+        let g = self.gate_weight;
+        let ambient = |reduced: &Array2<f64>| basis.dot(reduced).dot(&basis.t());
+        let kernel = ambient(&Array2::from_diag(&Array1::from_vec(kernel)));
+        let kernel_u = ambient(&weight_u);
+        let kernel_w = ambient(&weight_w);
+        let kernel_uw = ambient(&weight_uw);
+        let mut now = (&kernel * gate_uw + &kernel_w * gate_u + &kernel_u * gate_w + &kernel_uw * g) * -0.5;
+        let mut along_w = (&kernel * gate_u + &kernel_u * g) * -0.5;
+        let mut along_u = (&kernel * gate_w + &kernel_w * g) * -0.5;
+        let mut along_uw = &kernel * (-0.5 * g);
+        let motion = if self.hessian_motion_active() {
+            let missing = || {
+                "Jeffreys complete second completion drift requires H²[u,·], H²[w,·] and \
+                 H³[u,w,·] where the gate or the floor moves"
+                    .to_string()
+            };
+            let b_u = &second_u.ok_or_else(missing)?.rows;
+            let b_w = &second_w.ok_or_else(missing)?.rows;
+            let t_uw = &third_uw.ok_or_else(missing)?.rows;
+            if [b_u, b_w, t_uw].iter().any(|rows| rows.dim() != (p, m * m)) {
+                return Err("Jeffreys complete second completion drift axis dimension mismatch".into());
+            }
+            let parts = self.second_drift_motion(&e_u, &e_w, &e_uw, b_u, b_w, t_uw);
+            now -= &parts.extreme_weight_uw;
+            along_w -= &parts.extreme_weight_u;
+            along_u -= &parts.extreme_weight_w;
+            along_uw -= &parts.extreme_weight;
+            Some(parts.remainder_uw)
+        } else {
+            None
+        };
+        let mut result = contracted(&now)?
+            + contracted_along_w(&along_w)?
+            + contracted_along_u(&along_u)?
+            + contracted_along_uw(&along_uw)?;
+        if let Some(remainder) = motion.as_ref() {
+            result -= remainder;
+        }
+        let mut result = result.as_standard_layout().to_owned();
+        symmetrize_contiguous(&mut result);
+        if result.iter().any(|value| !value.is_finite()) {
+            return Err("Jeffreys complete second completion drift produced nonfinite curvature".into());
+        }
+        Ok(result)
+    }
+
+    /// The gate and floor motion of [`Self::completion_second_drift_matrix`] (gam#2905): the
+    /// ambient extreme-eigenvector weight `E`, its drifts `D_uE`, `D_wE`, `D²E`, and `D²R[u, w]`.
+    /// Inputs are `e_x = Uᵀ H[x] U` and the rotated axis rows `b_u = {Uᵀ H²[u, e_a] U}`, `b_w`
+    /// and `t_uw = {Uᵀ H³[u, w, e_a] U}`. The ungated value `U = ½ Σ_i ψ(λ_i; floor)` is
+    /// differentiated as `Φ(β, t)` at `t = floor(β)`: spectral channels at a fixed floor use the
+    /// divided differences of `f = ψ'` and of its floor partials, and the floor's own motion
+    /// `floor = REL·λ_max` enters through Faà di Bruno.
+    fn second_drift_motion(
+        &self,
+        e_u: &Array2<f64>,
+        e_w: &Array2<f64>,
+        e_uw: &Array2<f64>,
+        b_u: &Array2<f64>,
+        b_w: &Array2<f64>,
+        t_uw: &Array2<f64>,
+    ) -> SecondDriftMotion {
+        let (p, m) = (self.p, self.m);
+        let basis = &self.ambient_eigenbasis;
+        let a_rows = &self.a_rows;
+        let (imin, imax) = (self.idx_min, self.idx_max);
+        let evals = &self.evals;
+        let floor = self.floor;
+        let gate = self.gate_weight;
+        let spectral_scale = evals.iter().fold(1.0_f64, |acc, value| acc.max(value.abs()));
+        let tie_tolerance = 64.0 * f64::EPSILON * spectral_scale;
+        let rate = if self.floor_in_relative_regime {
+            REDUCED_INFO_RELATIVE_FLOOR
+        } else {
+            0.0
+        };
+        let (lambda_min, lambda_max) = (evals[imin], evals[imax]);
+        // Gate partials in `(λ_min, λ_max)`, stored by how many slots read `λ_max`.
+        let (g1, g2) = conditioning_gate_weight_grad(lambda_min, lambda_max);
+        let (g11, g12, g22) = conditioning_gate_weight_hess(lambda_min, lambda_max);
+        let (g111, g112, g122, g222) = conditioning_gate_weight_third(lambda_min, lambda_max);
+        let (g1111, g1112, g1122, g1222, g2222) = conditioning_gate_weight_fourth(lambda_min, lambda_max);
+        let gate1 = [g1, g2];
+        let gate2 = [g11, g12, g22];
+        let gate3 = [g111, g112, g122, g222];
+        let gate4 = [g1111, g1112, g1122, g1222, g2222];
+        let tensor2 = |i: usize, j: usize| gate2[i + j];
+        let tensor3 = |i: usize, j: usize, k: usize| gate3[i + j + k];
+        let tensor4 = |i: usize, j: usize, k: usize, l: usize| gate4[i + j + k + l];
+        let divided = self.divided_differences();
+        let mut ungated = 0.0_f64;
+        let (mut s_f, mut s_ff, mut s_fff, mut s_ffff) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+        let (mut f, mut ft, mut ftt, mut fttt) = (vec![0.0_f64; m], vec![0.0_f64; m], vec![0.0_f64; m], vec![0.0_f64; m]);
+        for i in 0..m {
+            let lambda = evals[i];
+            ungated += jeffreys_antiderivative(lambda, floor);
+            s_f += jeffreys_antiderivative_floor_sensitivity(lambda, floor);
+            s_ff += jeffreys_antiderivative_floor_second_sensitivity(lambda, floor);
+            s_fff += jeffreys_antiderivative_floor_third_sensitivity(lambda, floor);
+            s_ffff += jeffreys_antiderivative_floor_fourth_sensitivity(lambda, floor);
+            f[i] = floored_inverse(lambda, floor);
+            ft[i] = floored_inverse_floor_sensitivity(lambda, floor);
+            ftt[i] = floored_inverse_floor_second_sensitivity(lambda, floor);
+            fttt[i] = floored_inverse_floor_third_sensitivity(lambda, floor);
+        }
+        ungated *= 0.5;
+        let row_entry = |rows: &Array2<f64>, a: usize, i: usize, j: usize| rows[[a, i * m + j]];
+        let square = |rows: &Array2<f64>, a: usize| Array2::from_shape_fn((m, m), |(i, j)| rows[[a, i * m + j]]);
+        let flat = |x: &Array2<f64>| Array1::from_shape_fn(m * m, |k| x[[k / m, k % m]]);
+        let diag = |x: &Array2<f64>, weights: &[f64]| (0..m).map(|i| weights[i] * x[[i, i]]).sum::<f64>();
+        let axis_diag = |rows: &Array2<f64>, weights: &[f64]| {
+            Array1::from_shape_fn(p, |a| (0..m).map(|i| weights[i] * row_entry(rows, a, i, i)).sum::<f64>())
+        };
+        // `Σ_ij f^{(order)}[λ_i, λ_j]·X_ij·Y_ij`, the second spectral channel at a fixed floor.
+        let paired = |order: usize, x: &Array2<f64>, y: &Array2<f64>| {
+            let table = &divided.pairs[order];
+            let mut sum = 0.0_f64;
+            for i in 0..m {
+                for j in 0..m {
+                    sum += table[i * m + j] * x[[i, j]] * y[[i, j]];
+                }
+            }
+            sum
+        };
+        let gap = |e: usize, j: usize| simple_eigenvalue_gap_inverse(evals, tie_tolerance, e, j);
+        let second_form = |e: usize, x: &Array2<f64>, y: &Array2<f64>| {
+            simple_eigenvalue_second_form(evals, tie_tolerance, e, x, y)
+        };
+        let second_form_axis = |e: usize, rows: &Array2<f64>, y: &Array2<f64>| {
+            Array1::from_shape_fn(p, |a| {
+                (0..m).map(|j| 2.0 * row_entry(rows, a, e, j) * y[[e, j]] * gap(e, j)).sum::<f64>()
+            })
+        };
+        let outer = |x: &Array1<f64>, y: &Array1<f64>| {
+            Array2::from_shape_fn((x.len(), y.len()), |(i, j)| x[i] * y[j])
+        };
+        let sym_outer = |x: &Array1<f64>, y: &Array1<f64>| outer(x, y) + outer(y, x);
+
+        // Extreme-eigenvalue channels along the directions and along every coefficient axis.
+        let extremes = [imin, imax];
+        let x_u = extremes.map(|e| e_u[[e, e]]);
+        let x_w = extremes.map(|e| e_w[[e, e]]);
+        let x_uw = extremes.map(|e| e_uw[[e, e]] + second_form(e, e_u, e_w));
+        let x_a = extremes.map(|e| Array1::from_shape_fn(p, |a| row_entry(a_rows, a, e, e)));
+        let x_au = extremes.map(|e| {
+            Array1::from_shape_fn(p, |a| row_entry(b_u, a, e, e)) + second_form_axis(e, a_rows, e_u)
+        });
+        let x_aw = extremes.map(|e| {
+            Array1::from_shape_fn(p, |a| row_entry(b_w, a, e, e)) + second_form_axis(e, a_rows, e_w)
+        });
+        let x_auw = extremes.map(|e| {
+            Array1::from_shape_fn(p, |a| {
+                let p_a = square(a_rows, a);
+                row_entry(t_uw, a, e, e)
+                    + second_form(e, &square(b_u, a), e_w)
+                    + second_form(e, &square(b_w, a), e_u)
+                    + second_form(e, &p_a, e_uw)
+                    + simple_eigenvalue_third_form(evals, tie_tolerance, e, [&p_a, e_u, e_w])
+            })
+        });
+
+        // Gate derivatives by Faà di Bruno over `(λ_min, λ_max)`.
+        let slots = [(0usize, 0usize), (0, 1), (1, 0), (1, 1)];
+        let gate_u: f64 = (0..2).map(|i| gate1[i] * x_u[i]).sum();
+        let gate_w: f64 = (0..2).map(|i| gate1[i] * x_w[i]).sum();
+        let gate_uw: f64 = slots.iter().map(|&(i, j)| tensor2(i, j) * x_u[i] * x_w[j]).sum::<f64>()
+            + (0..2).map(|i| gate1[i] * x_uw[i]).sum::<f64>();
+        let gate_a = &x_a[0] * g1 + &x_a[1] * g2;
+        let gate_ax = |x_ax: &[Array1<f64>; 2], x_x: [f64; 2]| {
+            let mut out = &x_ax[0] * g1 + &x_ax[1] * g2;
+            for &(i, j) in &slots {
+                out.scaled_add(tensor2(i, j) * x_x[j], &x_a[i]);
+            }
+            out
+        };
+        let gate_au = gate_ax(&x_au, x_u);
+        let gate_aw = gate_ax(&x_aw, x_w);
+        let mut gate_auw = &x_auw[0] * g1 + &x_auw[1] * g2;
+        for &(i, j) in &slots {
+            let coefficient = tensor2(i, j);
+            gate_auw.scaled_add(coefficient * x_w[j], &x_au[i]);
+            gate_auw.scaled_add(coefficient * x_u[j], &x_aw[i]);
+            gate_auw.scaled_add(coefficient * x_uw[j], &x_a[i]);
+            for k in 0..2 {
+                gate_auw.scaled_add(tensor3(i, j, k) * x_u[j] * x_w[k], &x_a[i]);
+            }
+        }
+        // `∂_x G_i` and `∂²_uw G_i` of the gate's first partials.
+        let gate_partial_x = |i: usize, x_x: [f64; 2]| (0..2).map(|j| tensor2(i, j) * x_x[j]).sum::<f64>();
+        let gate_partial_uw = |i: usize| {
+            let mut sum = 0.0_f64;
+            for j in 0..2 {
+                sum += tensor2(i, j) * x_uw[j];
+                for k in 0..2 {
+                    sum += tensor3(i, j, k) * x_u[j] * x_w[k];
+                }
+            }
+            sum
+        };
+
+        // Ungated value channels: `Φ_*` at a fixed floor, then the floor's motion.
+        let (phi_t, phi_tt, phi_ttt) = (0.5 * s_f, 0.5 * s_ff, 0.5 * s_fff);
+        let (fl_u, fl_w, fl_uw) = (rate * x_u[1], rate * x_w[1], rate * x_uw[1]);
+        let fl_a = &x_a[1] * rate;
+        let fl_au = &x_au[1] * rate;
+        let fl_aw = &x_aw[1] * rate;
+        let fl_auw = &x_auw[1] * rate;
+        let (flat_u, flat_w, flat_uw) = (flat(e_u), flat(e_w), flat(e_uw));
+        let phi_u = 0.5 * diag(e_u, &f);
+        let phi_w = 0.5 * diag(e_w, &f);
+        let phi_uw = 0.5 * (paired(0, e_u, e_w) + diag(e_uw, &f));
+        let phi_ut = 0.5 * diag(e_u, &ft);
+        let phi_wt = 0.5 * diag(e_w, &ft);
+        let phi_uwt = 0.5 * (paired(1, e_u, e_w) + diag(e_uw, &ft));
+        let phi_utt = 0.5 * diag(e_u, &ftt);
+        let phi_wtt = 0.5 * diag(e_w, &ftt);
+        let psi0_a = self.inverse_frechet_rows(a_rows, &[], 0);
+        let psi1_a = self.inverse_frechet_rows(a_rows, &[], 1);
+        let phi_a = axis_diag(a_rows, &f) * 0.5;
+        let phi_at = axis_diag(a_rows, &ft) * 0.5;
+        let phi_att = axis_diag(a_rows, &ftt) * 0.5;
+        let phi_au = (psi0_a.dot(&flat_u) + axis_diag(b_u, &f)) * 0.5;
+        let phi_aw = (psi0_a.dot(&flat_w) + axis_diag(b_w, &f)) * 0.5;
+        let phi_aut = (psi1_a.dot(&flat_u) + axis_diag(b_u, &ft)) * 0.5;
+        let phi_awt = (psi1_a.dot(&flat_w) + axis_diag(b_w, &ft)) * 0.5;
+        let phi_auw = (self.inverse_frechet_rows(a_rows, &[e_u], 0).dot(&flat_w)
+            + self.inverse_frechet_rows(b_u, &[], 0).dot(&flat_w)
+            + self.inverse_frechet_rows(b_w, &[], 0).dot(&flat_u)
+            + psi0_a.dot(&flat_uw)
+            + axis_diag(t_uw, &f))
+            * 0.5;
+        let value_u = phi_u + phi_t * fl_u;
+        let value_w = phi_w + phi_t * fl_w;
+        let value_uw = phi_uw + phi_ut * fl_w + phi_wt * fl_u + phi_tt * fl_u * fl_w + phi_t * fl_uw;
+        let value_a = &phi_a + &(&fl_a * phi_t);
+        let axis_value_first = |phi_ax: &Array1<f64>, fl_ax: &Array1<f64>, phi_xt: f64, fl_x: f64| {
+            let mut out = phi_ax.clone();
+            out.scaled_add(fl_x, &phi_at);
+            out.scaled_add(phi_xt + phi_tt * fl_x, &fl_a);
+            out.scaled_add(phi_t, fl_ax);
+            out
+        };
+        let value_au = axis_value_first(&phi_au, &fl_au, phi_ut, fl_u);
+        let value_aw = axis_value_first(&phi_aw, &fl_aw, phi_wt, fl_w);
+        let mut value_auw = phi_auw.clone();
+        value_auw.scaled_add(fl_w, &phi_aut);
+        value_auw.scaled_add(fl_u, &phi_awt);
+        value_auw.scaled_add(fl_u * fl_w, &phi_att);
+        value_auw.scaled_add(fl_uw, &phi_at);
+        value_auw.scaled_add(
+            phi_uwt + phi_utt * fl_w + phi_wtt * fl_u + phi_ttt * fl_u * fl_w + phi_tt * fl_uw,
+            &fl_a,
+        );
+        value_auw.scaled_add(phi_ut + phi_tt * fl_u, &fl_aw);
+        value_auw.scaled_add(phi_wt + phi_tt * fl_w, &fl_au);
+        value_auw.scaled_add(phi_t, &fl_auw);
+        let s_f_u = 2.0 * (phi_ut + phi_tt * fl_u);
+        let s_f_w = 2.0 * (phi_wt + phi_tt * fl_w);
+        let s_f_uw = 2.0 * (phi_uwt + phi_utt * fl_w + phi_wtt * fl_u + phi_ttt * fl_u * fl_w + phi_tt * fl_uw);
+
+        // `E = Σ_e ω_e z_e z_eᵀ` and its drifts.
+        let omega = [ungated * g1, ungated * g2 + 0.5 * gate * s_f * rate];
+        let omega_x = |x_x: [f64; 2], value_x: f64, gate_x: f64, s_f_x: f64| {
+            [
+                value_x * g1 + ungated * gate_partial_x(0, x_x),
+                value_x * g2
+                    + ungated * gate_partial_x(1, x_x)
+                    + 0.5 * rate * (gate_x * s_f + gate * s_f_x),
+            ]
+        };
+        let omega_u = omega_x(x_u, value_u, gate_u, s_f_u);
+        let omega_w = omega_x(x_w, value_w, gate_w, s_f_w);
+        let omega_uw = [
+            value_uw * g1
+                + value_u * gate_partial_x(0, x_w)
+                + value_w * gate_partial_x(0, x_u)
+                + ungated * gate_partial_uw(0),
+            value_uw * g2
+                + value_u * gate_partial_x(1, x_w)
+                + value_w * gate_partial_x(1, x_u)
+                + ungated * gate_partial_uw(1)
+                + 0.5 * rate * (gate_uw * s_f + gate_u * s_f_w + gate_w * s_f_u + gate * s_f_uw),
+        ];
+        let mut extreme_weight = Array2::<f64>::zeros((p, p));
+        let mut extreme_weight_u = Array2::<f64>::zeros((p, p));
+        let mut extreme_weight_w = Array2::<f64>::zeros((p, p));
+        let mut extreme_weight_uw = Array2::<f64>::zeros((p, p));
+        for (slot, &e) in extremes.iter().enumerate() {
+            let z = basis.column(e).to_owned();
+            let first_drift = |x: &Array2<f64>| basis.dot(&Array1::from_shape_fn(m, |j| x[[j, e]] * gap(e, j)));
+            let z_u = first_drift(e_u);
+            let z_w = first_drift(e_w);
+            let z_uw = basis.dot(&simple_eigenvector_second_drift(evals, tie_tolerance, e, e_u, e_w, e_uw));
+            let zz = outer(&z, &z);
+            extreme_weight.scaled_add(omega[slot], &zz);
+            extreme_weight_u.scaled_add(omega_u[slot], &zz);
+            extreme_weight_u.scaled_add(omega[slot], &sym_outer(&z_u, &z));
+            extreme_weight_w.scaled_add(omega_w[slot], &zz);
+            extreme_weight_w.scaled_add(omega[slot], &sym_outer(&z_w, &z));
+            extreme_weight_uw.scaled_add(omega_uw[slot], &zz);
+            extreme_weight_uw.scaled_add(omega_u[slot], &sym_outer(&z_w, &z));
+            extreme_weight_uw.scaled_add(omega_w[slot], &sym_outer(&z_u, &z));
+            extreme_weight_uw.scaled_add(omega[slot], &(sym_outer(&z_uw, &z) + sym_outer(&z_u, &z_w)));
+        }
+
+        // `D²R[u, w]`. First `∇G⊗∇U + ∇U⊗∇G`.
+        let gate_value = outer(&gate_auw, &value_a)
+            + outer(&gate_au, &value_aw)
+            + outer(&gate_aw, &value_au)
+            + outer(&gate_a, &value_auw);
+        let mut remainder = &gate_value + &gate_value.t();
+        // `U·Q₂`, `Q₂[a,b] = Σ_ij G_ij λ_i,a λ_j,b`.
+        let bilinear = |coefficient: &dyn Fn(usize, usize) -> f64, x: &[Array1<f64>; 2], y: &[Array1<f64>; 2]| {
+            let mut out = Array2::<f64>::zeros((p, p));
+            for &(i, j) in &slots {
+                let value = coefficient(i, j);
+                if value != 0.0 {
+                    out.scaled_add(value, &outer(&x[i], &y[j]));
+                }
+            }
+            out
+        };
+        let third_along = |x_x: [f64; 2]| move |i: usize, j: usize| (0..2).map(|k| tensor3(i, j, k) * x_x[k]).sum::<f64>();
+        let q2 = bilinear(&tensor2, &x_a, &x_a);
+        let q2_x = |x_ax: &[Array1<f64>; 2], x_x: [f64; 2]| {
+            bilinear(&third_along(x_x), &x_a, &x_a) + bilinear(&tensor2, x_ax, &x_a) + bilinear(&tensor2, &x_a, x_ax)
+        };
+        let q2_u = q2_x(&x_au, x_u);
+        let q2_w = q2_x(&x_aw, x_w);
+        let fourth_along = |i: usize, j: usize| {
+            let mut sum = 0.0_f64;
+            for k in 0..2 {
+                sum += tensor3(i, j, k) * x_uw[k];
+                for l in 0..2 {
+                    sum += tensor4(i, j, k, l) * x_u[k] * x_w[l];
+                }
+            }
+            sum
+        };
+        let q2_uw = bilinear(&fourth_along, &x_a, &x_a)
+            + bilinear(&third_along(x_u), &x_aw, &x_a)
+            + bilinear(&third_along(x_u), &x_a, &x_aw)
+            + bilinear(&third_along(x_w), &x_au, &x_a)
+            + bilinear(&third_along(x_w), &x_a, &x_au)
+            + bilinear(&tensor2, &x_auw, &x_a)
+            + bilinear(&tensor2, &x_au, &x_aw)
+            + bilinear(&tensor2, &x_aw, &x_au)
+            + bilinear(&tensor2, &x_a, &x_auw);
+        remainder.scaled_add(value_uw, &q2);
+        remainder.scaled_add(value_u, &q2_w);
+        remainder.scaled_add(value_w, &q2_u);
+        remainder.scaled_add(ungated, &q2_uw);
+        // `G·F`, `F[a,b] = X_a·floor_b + X_b·floor_a + Y·floor_a·floor_b`, with `X_a = ∂_floor U_a`
+        // and `Y = ∂²_floor U` at the moving floor.
+        if rate != 0.0 {
+            let (phi_uwtt, phi_uttt, phi_wttt, phi_tttt) = (
+                0.5 * (paired(2, e_u, e_w) + diag(e_uw, &ftt)),
+                0.5 * diag(e_u, &fttt),
+                0.5 * diag(e_w, &fttt),
+                0.5 * s_ffff,
+            );
+            let psi2_a = self.inverse_frechet_rows(a_rows, &[], 2);
+            let phi_attt = axis_diag(a_rows, &fttt) * 0.5;
+            let phi_autt = (psi2_a.dot(&flat_u) + axis_diag(b_u, &ftt)) * 0.5;
+            let phi_awtt = (psi2_a.dot(&flat_w) + axis_diag(b_w, &ftt)) * 0.5;
+            let phi_auwt = (self.inverse_frechet_rows(a_rows, &[e_u], 1).dot(&flat_w)
+                + self.inverse_frechet_rows(b_u, &[], 1).dot(&flat_w)
+                + self.inverse_frechet_rows(b_w, &[], 1).dot(&flat_u)
+                + psi1_a.dot(&flat_uw)
+                + axis_diag(t_uw, &ft))
+                * 0.5;
+            let x_axis = &phi_at;
+            let x_axis_u = &phi_aut + &(&phi_att * fl_u);
+            let x_axis_w = &phi_awt + &(&phi_att * fl_w);
+            let mut x_axis_uw = &phi_auwt + &(&phi_autt * fl_w);
+            x_axis_uw.scaled_add(fl_u, &phi_awtt);
+            x_axis_uw.scaled_add(fl_u * fl_w, &phi_attt);
+            x_axis_uw.scaled_add(fl_uw, &phi_att);
+            let y = phi_tt;
+            let y_u = phi_utt + phi_ttt * fl_u;
+            let y_w = phi_wtt + phi_ttt * fl_w;
+            let y_uw = phi_uwtt + phi_uttt * fl_w + phi_wttt * fl_u + phi_tttt * fl_u * fl_w + phi_ttt * fl_uw;
+            let floor_floor = outer(&fl_a, &fl_a);
+            let floor_part = sym_outer(x_axis, &fl_a) + &floor_floor * y;
+            let floor_part_x = |x_ax: &Array1<f64>, fl_ax: &Array1<f64>, y_x: f64| {
+                sym_outer(x_ax, &fl_a) + sym_outer(x_axis, fl_ax) + &floor_floor * y_x + sym_outer(fl_ax, &fl_a) * y
+            };
+            let floor_part_u = floor_part_x(&x_axis_u, &fl_au, y_u);
+            let floor_part_w = floor_part_x(&x_axis_w, &fl_aw, y_w);
+            let floor_part_uw = sym_outer(&x_axis_uw, &fl_a)
+                + sym_outer(&x_axis_u, &fl_aw)
+                + sym_outer(&x_axis_w, &fl_au)
+                + sym_outer(x_axis, &fl_auw)
+                + &floor_floor * y_uw
+                + sym_outer(&fl_aw, &fl_a) * y_u
+                + sym_outer(&fl_au, &fl_a) * y_w
+                + (sym_outer(&fl_auw, &fl_a) + sym_outer(&fl_au, &fl_aw)) * y;
+            remainder.scaled_add(gate_uw, &floor_part);
+            remainder.scaled_add(gate_u, &floor_part_w);
+            remainder.scaled_add(gate_w, &floor_part_u);
+            remainder.scaled_add(gate, &floor_part_uw);
+        }
+        // `Σ_e ω_e·E_e`, `E_e[a,b] = D²λ_e[P̃_a, P̃_b]`, differentiated twice: the partitions of
+        // `{a, b, u, w}` that keep `a` and `b` in different blocks.
+        let axis_squares: Vec<Array2<f64>> = (0..p).map(|a| square(a_rows, a)).collect();
+        for (slot, &e) in extremes.iter().enumerate() {
+            let gi = Array1::from_shape_fn(m, |j| gap(e, j));
+            let doubled = Array2::from_diag(&gi.mapv(|value| 2.0 * value));
+            let row_of = |rows: &Array2<f64>| Array2::from_shape_fn((p, m), |(a, j)| row_entry(rows, a, e, j));
+            let (r_a, r_bu, r_bw, r_t) = (row_of(a_rows), row_of(b_u), row_of(b_w), row_of(t_uw));
+            // `D²λ_e[X_a, Y_b]` for every axis pair.
+            let form2 = |x: &Array2<f64>, y: &Array2<f64>| x.dot(&doubled).dot(&y.t());
+            // `D³λ_e[X_a, Y_b, Z]` for every axis pair and one direction `Z`:
+            // `2(x̂ᵀYẑ + x̂ᵀZŷ + ŷᵀXẑ) − 2(X_ee·ŷ·ẑ + Y_ee·x̂·ẑ + Z_ee·x̂·ŷ)`.
+            let form3 = |x_rows: &Array2<f64>, y_rows: &Array2<f64>, z: &Array2<f64>| {
+                let hat = |rows: &Array2<f64>| Array2::from_shape_fn((p, m), |(a, j)| row_entry(rows, a, e, j) * gi[j]);
+                let z_hat = Array1::from_shape_fn(m, |j| z[[e, j]] * gi[j]);
+                let apply = |rows: &Array2<f64>| {
+                    Array2::from_shape_fn((p, m), |(a, i)| (0..m).map(|k| row_entry(rows, a, i, k) * z_hat[k]).sum::<f64>())
+                };
+                let (x_hat, y_hat) = (hat(x_rows), hat(y_rows));
+                let (x_z, y_z) = (apply(x_rows), apply(y_rows));
+                let x_diag = Array1::from_shape_fn(p, |a| row_entry(x_rows, a, e, e));
+                let y_diag = Array1::from_shape_fn(p, |a| row_entry(y_rows, a, e, e));
+                (x_hat.dot(&y_z.t()) + x_hat.dot(z).dot(&y_hat.t()) + x_z.dot(&y_hat.t())) * 2.0
+                    - (outer(&x_diag, &y_hat.dot(&z_hat)) + outer(&x_hat.dot(&z_hat), &y_diag)) * 2.0
+                    - x_hat.dot(&y_hat.t()) * (2.0 * z[[e, e]])
+            };
+            let e_base = form2(&r_a, &r_a);
+            let e_along_u = form2(&r_bu, &r_a) + form2(&r_a, &r_bu) + form3(a_rows, a_rows, e_u);
+            let e_along_w = form2(&r_bw, &r_a) + form2(&r_a, &r_bw) + form3(a_rows, a_rows, e_w);
+            let third_bu_w = form3(b_u, a_rows, e_w);
+            let third_bw_u = form3(b_w, a_rows, e_u);
+            let mut e_along_uw = form2(&r_t, &r_a)
+                + form2(&r_a, &r_t)
+                + form2(&r_bu, &r_bw)
+                + form2(&r_bw, &r_bu)
+                + &third_bu_w
+                + &third_bu_w.t()
+                + &third_bw_u
+                + &third_bw_u.t()
+                + form3(a_rows, a_rows, e_uw);
+            for a in 0..p {
+                for b in a..p {
+                    let value = simple_eigenvalue_fourth_form(
+                        evals,
+                        tie_tolerance,
+                        e,
+                        [&axis_squares[a], &axis_squares[b], e_u, e_w],
+                    );
+                    e_along_uw[[a, b]] += value;
+                    if a != b {
+                        e_along_uw[[b, a]] += value;
+                    }
+                }
+            }
+            remainder.scaled_add(omega_uw[slot], &e_base);
+            remainder.scaled_add(omega_u[slot], &e_along_w);
+            remainder.scaled_add(omega_w[slot], &e_along_u);
+            remainder.scaled_add(omega[slot], &e_along_uw);
+        }
+        SecondDriftMotion {
+            extreme_weight,
+            extreme_weight_u,
+            extreme_weight_w,
+            extreme_weight_uw,
+            remainder_uw: remainder,
+        }
     }
 
     /// Differentiate the spectral matrix function in the fixed base frame.
@@ -1171,6 +1632,17 @@ impl JeffreysHphiDriftBase {
         }
         Ok(())
     }
+}
+
+/// The gate and floor motion the complete second completion drift reads: the ambient
+/// extreme-eigenvector weight `E`, its first and second drifts, and `D²R[u, w]`; see
+/// [`JeffreysHphiDriftBase::second_drift_motion`].
+struct SecondDriftMotion {
+    extreme_weight: Array2<f64>,
+    extreme_weight_u: Array2<f64>,
+    extreme_weight_w: Array2<f64>,
+    extreme_weight_uw: Array2<f64>,
+    remainder_uw: Array2<f64>,
 }
 
 /// Gate and floor channels along two directions and the capped inverse's first and second

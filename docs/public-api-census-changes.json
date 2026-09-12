@@ -1958,5 +1958,13 @@
     },
     "reason": "SPEC rule 1 (#2901 V1): dispersion_eta_nll_order2 and dispersion_eta_nll_order3 are no longer production derivative sources; the dispersion family derives its eta-space row derivatives by hand. Both towers move into crate::gamlss::test_support as oracles.",
     "evidence": "public_api_census.py's public_functions predicate over crates/gam-models/src/gamlss/dispersion_family.rs yields dispersion_eta_nll_order2 and dispersion_eta_nll_order3 as the removed pub(crate) fns. Both are re-declared pub(crate) in crates/gam-models/src/gamlss/test_support.rs, a cfg(test) module. crates/gam-math/src/jet_tower.rs gains tetragamma and loses nothing, and no other changed file loses a pub fn."
+  },
+  {
+    "base": "d3beb435966759c2d6c3f24dfc018788a4919eee",
+    "removed": {
+      "crates/gam-solve/src/reml/jeffreys_subspace/mixed.rs::frozen_completion_second_drift_matrix": 1
+    },
+    "reason": "#2905: the complete D² completion matrix completion_second_drift_matrix replaces the frozen-policy-only frozen_completion_second_drift_matrix in the gam-custom-family outer Hessian, which left the frozen matrix with no product user.",
+    "evidence": "At base, the only product call of frozen_completion_second_drift_matrix is custom_family_outer_jeffreys_hphi_drift_batched in crates/gam-custom-family/src/jeffreys.rs, switched here to completion_second_drift_matrix. The other callers were a test harness in jeffreys_subspace.rs, deleted here. The census falls by exactly that one pub method in mixed.rs; the fourth-order helpers moved out of the jeffreys_subspace.rs test module stay in the same file, so their counts are unchanged. Not compiled locally; compile rests on the shared tip check."
   }
 ]
