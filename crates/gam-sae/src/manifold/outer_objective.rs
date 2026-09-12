@@ -4496,6 +4496,77 @@ mod linear_parity_anchor_1026_tests {
 
     use super::*;
 
+    /// The profiled SAE outer objective must never advertise a Hessian assembled
+    /// by perturbing rho and re-solving the inner fit. Until the exact
+    /// fixed-stratum adjoint HVP exists, both the capability and the highest eval
+    /// order report curvature unavailable while preserving the analytic gradient.
+    #[test]
+    fn sae_outer_objective_never_advertises_finite_difference_curvature_2253() {
+        let n = 40usize;
+        let p = 6usize;
+        let zf: Vec<f64> = (0..n)
+            .map(|i| ((i as f64 + 1.0) * 0.23).sin() + 0.3 * ((i * 3) as f64).cos())
+            .collect();
+        let c0 = Array1::from_shape_fn(p, |c| 1.0 + 0.5 * (c as f64) - 0.2 * ((c % 3) as f64));
+        let c1 = Array1::from_shape_fn(p, |c| (((c * 2 + 1) % 5) as f64 - 2.0) * 0.7);
+        let target = Array2::from_shape_fn((n, p), |(i, c)| c0[c] + zf[i] * c1[c]);
+        let coords = Array2::from_shape_fn((n, 1), |(i, _)| zf[i]);
+        let logits =
+            Array2::from_shape_fn((n, 1), |(i, _)| -3.0 + 6.0 * (i as f64) / (n as f64 - 1.0));
+
+        // One linear atom of latent dim 1 (basis `{1, t}`) under ordered
+        // Beta--Bernoulli routing. The capability contract below does not depend
+        // on how the atom is routed.
+        let evaluator = std::sync::Arc::new(EuclideanPatchEvaluator::new(1, 1).unwrap());
+        let (phi, jet) = evaluator.evaluate(coords.view()).unwrap();
+        let m = phi.ncols();
+        let atom = SaeManifoldAtom::new_with_provided_function_gram(
+            "lin_bg",
+            SaeAtomBasisKind::Linear,
+            1,
+            phi,
+            jet,
+            Array2::<f64>::zeros((m, p)),
+            Array2::<f64>::eye(m),
+        )
+        .unwrap()
+        .with_basis_evaluator(evaluator);
+        let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
+            logits,
+            vec![coords],
+            vec![LatentManifold::Euclidean],
+            AssignmentMode::ordered_beta_bernoulli(0.5, 1.0, false),
+        )
+        .unwrap();
+        let term = SaeManifoldTerm::new(vec![atom], assignment).unwrap();
+        let init_rho = SaeManifoldRho::new(
+            (1.0e-4_f64).ln(),
+            (1.0e-2_f64).ln(),
+            vec![Array1::<f64>::zeros(1)],
+        );
+        let mut obj =
+            SaeManifoldOuterObjective::new(term, target, None, init_rho, 60, 0.5, 1e-4, 1e-4);
+        let rho_flat = obj.baseline_rho.to_flat();
+        let cap = obj.capability();
+        assert_eq!(
+            cap.gradient,
+            Derivative::Analytic,
+            "the dense-admitted SAE outer gradient must be analytic"
+        );
+        assert_eq!(
+            cap.hessian,
+            DeclaredHessianForm::Unavailable,
+            "synthetic finite-difference curvature must never be declared analytic"
+        );
+        let eval = obj
+            .eval_with_order(&rho_flat, OuterEvalOrder::ValueGradientHessian)
+            .expect("value+gradient+Hessian eval at the seed");
+        assert!(
+            matches!(eval.hessian, HessianValue::Unavailable),
+            "requesting a Hessian must not trigger off-point rho probes"
+        );
+    }
+
     /// Explained variance of the least-squares projection of `target` (n×p) onto
     /// the column span of a design matrix `phi` (n×m). The design's first column is
     /// an intercept in every caller below, so the projection is mean-aware and the
