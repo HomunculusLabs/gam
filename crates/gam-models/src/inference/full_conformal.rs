@@ -885,7 +885,9 @@ pub struct CertifiedFullConformal {
 
 impl<'a> GaussianRemlRhoResponse<'a> {
     /// Build the response object. Computes `rank(S)` once by symmetric
-    /// eigendecomposition (relative tolerance on the largest eigenvalue).
+    /// eigendecomposition, counting the eigenvalues above the REML engine's
+    /// `positive_eigenvalue_threshold`: the positive-eigenspace decision the
+    /// fit's own penalty pseudo-logdet makes.
     pub fn new(
         x: &'a Array2<f64>,
         y: &'a Array1<f64>,
@@ -903,9 +905,12 @@ impl<'a> GaussianRemlRhoResponse<'a> {
         let (evals, _) = s.eigh(Side::Lower).map_err(|e| {
             format!("gaussian reml response: penalty eigendecomposition failed: {e:?}")
         })?;
-        let max_ev = evals.iter().cloned().fold(0.0_f64, |a, b| a.max(b.abs()));
-        let tol = max_ev * 1e-10 * (p.max(1) as f64);
-        let rank_s = evals.iter().filter(|&&e| e > tol).count();
+        let threshold = gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold(
+            evals.as_slice().ok_or_else(|| {
+                "gaussian reml response: penalty eigenvalues are not contiguous".to_string()
+            })?,
+        );
+        let rank_s = evals.iter().filter(|&&e| e > threshold).count();
         let xtx = x.t().dot(x);
         let xty = x.t().dot(y);
         let yty = y.dot(y);
