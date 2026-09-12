@@ -1739,5 +1739,15 @@
     },
     "reason": "prune-api-b product-use sweep (#2899). RadialInputKernel::dim is removed with RadialInputKernel, which no product or test outside its own file uses; its two in-file tests now construct the production RadialScalarKind directly.",
     "evidence": "scripts/public_api_census.py over probe commit 5b681a41d on base 86c542772 (MSI acn112, python3.12; sliceC.census.out) reports exactly crates/gam-terms/src/basis/input_loc_derivatives.rs::dim 1. At the base git grep -w finds RadialInputKernel only in its own file."
+  },
+  {
+    "base": "03768998323a6662138f52a11c1a1b569099ee29",
+    "removed": {
+      "crates/gam-event-history/src/family.rs::seeded_one": 1,
+      "crates/gam-event-history/src/family.rs::seeded_two": 1,
+      "crates/gam-event-history/src/forecast.rs::kolmogorov_smirnov_uniform": 1
+    },
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). seeded_one and seeded_two were test-only wrappers over Directional::seeded, which the tests now call directly. kolmogorov_smirnov_uniform was only a test comparator and moves into tests.rs as a private helper.",
+    "evidence": "The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes all three DELETE with gam-event-history unit-test references only. At db0e784da, git grep -w finds no product or other-crate reference to any of them."
   }
 ]

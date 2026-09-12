@@ -15,8 +15,8 @@ use super::family::{
 };
 use super::forecast::{
     ForecastRequest, FutureSegment, HistoryForecastRequest, PopulationForecastRequest, SpellPit,
-    forecast, forecast_history, kolmogorov_smirnov_uniform, latent_state, pit_uniform_distance,
-    population_forecast, predictive_pit,
+    forecast, forecast_history, latent_state, pit_uniform_distance, population_forecast,
+    predictive_pit,
 };
 use super::marginal::{SubjectInputs, subject_marginal};
 use super::preserve::{ReferenceGrid, ReferenceStrata, killing_masks, stratum_normalisers};
@@ -422,7 +422,7 @@ fn directional_duals_match_finite_differences_of_the_hessian() {
         theta
             .iter()
             .zip(u.iter().zip(v.iter()))
-            .map(|(&x, (&du, &dv))| super::family::seeded_two(x, du, dv))
+            .map(|(&x, (&du, &dv))| TwoSeed::<0>::seeded(x, du, dv))
             .collect()
     };
     let n = nodes.len();
@@ -469,7 +469,7 @@ fn directional_duals_match_finite_differences_of_the_hessian() {
         let jets: Vec<OneSeed<0>> = theta
             .iter()
             .zip(u.iter())
-            .map(|(&x, &du)| super::family::seeded_one(x, du))
+            .map(|(&x, &du)| OneSeed::<0>::seeded(x, du, 0.0))
             .collect();
         let out = subject_marginal(
             &SubjectInputs {
@@ -1583,10 +1583,10 @@ fn lagrange_basis_keeps_its_derivative_within_roundoff_of_a_node() {
     for hit in 0..gh.order {
         let x = gh.nodes[hit];
         let step = 1e-6;
-        let plus = gh.lagrange_basis(&super::family::seeded_one(x + step, 1.0));
-        let minus = gh.lagrange_basis(&super::family::seeded_one(x - step, 1.0));
+        let plus = gh.lagrange_basis(&OneSeed::<0>::seeded(x + step, 1.0, 0.0));
+        let minus = gh.lagrange_basis(&OneSeed::<0>::seeded(x - step, 1.0, 0.0));
         for offset in [0.0, 1e-17, -1e-17, 1e-13] {
-            let on = gh.lagrange_basis(&super::family::seeded_one(x + offset, 1.0));
+            let on = gh.lagrange_basis(&OneSeed::<0>::seeded(x + offset, 1.0, 0.0));
             for i in 0..gh.order {
                 let fd_first = (plus[i].value() - minus[i].value()) / (2.0 * step);
                 let expected_value = if i == hit { 1.0 } else { 0.0 } + fd_first * offset;
@@ -1623,7 +1623,7 @@ fn lagrange_basis_keeps_its_derivative_within_roundoff_of_a_node() {
 #[test]
 fn transition_preserves_small_correlation_and_log_rate_derivatives() {
     for k in [40.0_f64, 100.0, 700.0] {
-        let transition = AtomTransition::new(&super::family::seeded_one(k, 1.0));
+        let transition = AtomTransition::new(&OneSeed::<0>::seeded(k, 1.0, 0.0));
         let expected_phi = (-k).exp();
         assert_eq!(transition.phi.value(), expected_phi);
         assert_eq!(transition.phi.eps(), -expected_phi);
@@ -1653,7 +1653,7 @@ fn effective_rank_is_invariant_to_extreme_covariance_units() {
 fn transition_at_an_overflowed_rate_is_finite_with_zero_sensitivity() {
     // log-rate 800: exp overflows to infinity, φ is exactly zero, and every
     // derivative channel must be finite (zero), not ∞ · 0.
-    let kappa = super::scalar::exp(&super::family::seeded_one(800.0, 1.0)).scale(0.7);
+    let kappa = super::scalar::exp(&OneSeed::<0>::seeded(800.0, 1.0, 0.0)).scale(0.7);
     let transition = AtomTransition::new(&kappa);
     assert_eq!(transition.phi.value(), 0.0);
     assert_eq!(transition.innovation.value(), 1.0);
@@ -3021,7 +3021,6 @@ fn terminal_forecasts_match_the_constant_hazard_solution() {
         }
         previous = event.time;
     }
-    assert!(kolmogorov_smirnov_uniform(&[]).is_none());
 }
 
 #[test]
@@ -3373,6 +3372,25 @@ fn a_censored_tail_is_a_spell_and_the_distance_is_read_off_the_kaplan_meier_curv
         overall < 0.1,
         "the Kaplan–Meier distance {overall} of a correctly specified model must be at sampling size"
     );
+}
+
+/// Kolmogorov–Smirnov distance of an uncensored PIT sample from the uniform
+/// law, or `None` for an empty sample: the classical comparator that
+/// `pit_uniform_distance` must reduce to when nothing is censored.
+fn kolmogorov_smirnov_uniform(pits: &[f64]) -> Option<f64> {
+    if pits.is_empty() {
+        return None;
+    }
+    let mut sorted = pits.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let n = sorted.len() as f64;
+    let mut distance = 0.0_f64;
+    for (i, &u) in sorted.iter().enumerate() {
+        let lower = i as f64 / n;
+        let upper = (i + 1) as f64 / n;
+        distance = distance.max((u - lower).abs()).max((upper - u).abs());
+    }
+    Some(distance)
 }
 
 #[test]

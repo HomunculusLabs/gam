@@ -107,16 +107,6 @@ impl Directional for TwoSeed<0> {
     }
 }
 
-/// A one-direction dual at `value` with `ε`-component `u`.
-pub fn seeded_one(value: f64, u: f64) -> OneSeed<0> {
-    OneSeed::seeded(value, u, 0.0)
-}
-
-/// A two-direction dual at `value` with `ε`-component `u` and `δ`-component `v`.
-pub fn seeded_two(value: f64, u: f64, v: f64) -> TwoSeed<0> {
-    TwoSeed::seeded(value, u, v)
-}
-
 /// A full joint evaluation in coefficient space. `hessian` is the negative
 /// log-likelihood Hessian, the convention the custom-family engine expects.
 #[derive(Clone, Debug)]

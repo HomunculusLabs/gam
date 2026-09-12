@@ -35,12 +35,11 @@ pub use family::{
     EventHistoryFamily, EventHistoryFit, EventHistorySpec, JointEvaluation, QuadratureCertificate,
     RankStart, RankStep, ReferenceTables, RefinementCheck, RiskSetCentring, fit_event_history,
     fit_event_history_formula, fit_event_history_formulas, latent_block_spec, mark_block_spec,
-    seeded_one, seeded_two,
 };
 pub use forecast::{
     Forecast, ForecastRequest, FutureSegment, HistoryForecastRequest, PopulationForecastRequest,
-    SmoothedLatentState, SpellPit, forecast, forecast_history, kolmogorov_smirnov_uniform,
-    latent_state, pit_uniform_distance, population_forecast, predictive_pit, baseline_log_rates,
+    SmoothedLatentState, SpellPit, forecast, forecast_history, latent_state, pit_uniform_distance,
+    population_forecast, predictive_pit, baseline_log_rates,
 };
 pub use formula::{TIME_COLUMN, covariate_spec_from_formula, node_dataset};
 pub use marginal::transition_score_polynomials;

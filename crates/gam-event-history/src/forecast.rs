@@ -1041,7 +1041,7 @@ pub fn predictive_pit(
 /// independently of the uniform itself given the history (the censoring on
 /// the PIT scale is a function of the history and the exit alone), which is
 /// what makes the estimate consistent. Without censoring it is the ordinary
-/// Kolmogorov–Smirnov distance ([`kolmogorov_smirnov_uniform`]). `None` for
+/// Kolmogorov–Smirnov distance. `None` for
 /// no spells. With parameters estimated from the same data it is a summary,
 /// not a calibrated test.
 pub fn pit_uniform_distance(pits: &[SpellPit]) -> Option<f64> {
@@ -1079,25 +1079,5 @@ pub fn pit_uniform_distance(pits: &[SpellPit]) -> Option<f64> {
     // Between the last jump and the largest value the estimate is flat while
     // the uniform keeps rising: the gap at the end of the covered range.
     distance = distance.max((1.0 - survival - last_value).abs());
-    Some(distance)
-}
-
-/// Kolmogorov–Smirnov distance of an uncensored PIT sample from the uniform
-/// law, or `None` for an empty sample. This is the right summary only when
-/// every spell ended with an event; see [`pit_uniform_distance`] for the
-/// general case, which this equals when nothing is censored.
-pub fn kolmogorov_smirnov_uniform(pits: &[f64]) -> Option<f64> {
-    if pits.is_empty() {
-        return None;
-    }
-    let mut sorted = pits.to_vec();
-    sorted.sort_by(|a, b| a.total_cmp(b));
-    let n = sorted.len() as f64;
-    let mut distance = 0.0_f64;
-    for (i, &u) in sorted.iter().enumerate() {
-        let lower = i as f64 / n;
-        let upper = (i + 1) as f64 / n;
-        distance = distance.max((u - lower).abs()).max((upper - u).abs());
-    }
     Some(distance)
 }

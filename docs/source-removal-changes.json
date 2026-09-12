@@ -4468,5 +4468,15 @@
     ],
     "reason": "#2469: PER_ATOM_NEGLIGIBLE_STEP (1e-12) was a picked threshold with two uses, neither of which is a step test. (1) solve_shared_border_block skipped the border Newton correction whenever the border gradient's infinity norm was at most 1e-12, a gradient compared against a step constant. Only an exactly zero gradient has an exactly zero correction; a small nonzero gradient yields a proportionally small solved step, so the shortcut now fires only at g_border_inf == 0. (2) The per-atom EFS convergence margin was cfg.tolerance.max(1e-12), a floor that silently loosened a caller's sub-1e-12 tolerance (the defect pirls/state.rs:168 records for its own band). The margin is now cfg.tolerance itself. A non-positive tolerance never certifies, and gap_resolves_margin already refuses a non-positive margin, so the loop reports converged: false.",
     "evidence": "git grep -n -w PER_ATOM_NEGLIGIBLE_STEP over the base finds three lines, all in crates/gam-solve/src/reml/per_atom_efs.rs production code: the declaration at :98, the border-gradient shortcut at :338 and the convergence-margin floor at :598. No other file or test names it. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "03768998323a6662138f52a11c1a1b569099ee29",
+    "items": [
+      "crates/gam-event-history/src/family.rs:fn:seeded_one",
+      "crates/gam-event-history/src/family.rs:fn:seeded_two",
+      "crates/gam-event-history/src/forecast.rs:fn:kolmogorov_smirnov_uniform"
+    ],
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). seeded_one, seeded_two and kolmogorov_smirnov_uniform have no caller in gam-cli, gam-pyffi, gamfit, examples or another crate's production code; only gam-event-history's own tests used them. seeded_one and seeded_two wrapped Directional::seeded for OneSeed<0> and TwoSeed<0>, and the seven test call sites now call it directly with the same arguments. kolmogorov_smirnov_uniform was only the classical comparator in test assertions, so it moves into tests.rs as a private test helper. The assertion that exercised the helper on an empty sample is dropped, and pit_uniform_distance's doc no longer links it.",
+    "evidence": "The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes all three DELETE with gam-event-history unit-test references only. At db0e784da, git grep -w finds seeded_one only in family.rs, lib.rs and tests.rs lines 472, 1586, 1587, 1589, 1626 and 1656; seeded_two only in family.rs, lib.rs and tests.rs:425; and kolmogorov_smirnov_uniform only in forecast.rs (definition and a doc link), lib.rs and tests.rs lines 18, 3024, 3361 and 3390. The item list follows source_removal_guard.py's ITEM rule over the removed hunks: three pub fn declarations. The test helper added to tests.rs is an addition, not a removal."
   }
 ]
