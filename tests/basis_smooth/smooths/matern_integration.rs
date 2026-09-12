@@ -209,8 +209,6 @@ fn matern_3d_aniso_fits_successfully() {
         max_outer_iter: 3,
         rel_tol: 1e-5,
         log_step: std::f64::consts::LN_2,
-        min_length_scale: 1e-2,
-        max_length_scale: 1e2,
         pilot_subsample_threshold: 0,
     };
 

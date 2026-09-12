@@ -117,23 +117,13 @@ fn psi_gram_tensor_fast_path_skips_n_row_lane_and_matches_streamed() {
     let spatial_terms = spatial_length_scale_term_indices(&frozen);
     let dims_per_term = spatial_dims_per_term(&frozen, &spatial_terms);
     let rho_dim = frozen_design.penalties.len();
-    let kappa_options = SpatialLengthScaleOptimizationOptions::default();
-    let log_kappa0 =
-        SpatialLogKappaCoords::from_length_scales(&frozen, &spatial_terms, &kappa_options);
-    let log_kappa_lower = SpatialLogKappaCoords::lower_bounds_from_data(
-        data.view(),
-        &frozen,
-        &spatial_terms,
-        &kappa_options,
-    )
-    .expect("lower isotropic-scale bounds");
-    let log_kappa_upper = SpatialLogKappaCoords::upper_bounds_from_data(
-        data.view(),
-        &frozen,
-        &spatial_terms,
-        &kappa_options,
-    )
-    .expect("upper isotropic-scale bounds");
+    let log_kappa0 = SpatialLogKappaCoords::from_length_scales(&frozen, &spatial_terms);
+    let log_kappa_lower =
+        SpatialLogKappaCoords::lower_bounds_from_data(data.view(), &frozen, &spatial_terms)
+            .expect("lower isotropic-scale bounds");
+    let log_kappa_upper =
+        SpatialLogKappaCoords::upper_bounds_from_data(data.view(), &frozen, &spatial_terms)
+            .expect("upper isotropic-scale bounds");
     let log_kappa0 = log_kappa0.clamp_to_bounds(&log_kappa_lower, &log_kappa_upper);
     let setup = ExactJointHyperSetup::new(
         Array1::<f64>::zeros(rho_dim),

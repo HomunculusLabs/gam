@@ -169,16 +169,14 @@ mod spatial_length_scale_monotone_tests {
             freeze_term_collection_from_design(&spec, &baseline.design).expect("freeze profile");
         let spatial_terms = spatial_length_scale_term_indices(&resolved);
         assert_eq!(spatial_terms, vec![0]);
-        let kappa_options = SpatialLengthScaleOptimizationOptions::default();
         let companion_length_scale = matern_low_rank_center_resolution_length_scale(
             data.view(),
             &[0],
             num_centers,
         )
         .expect("center-resolution endpoint");
-        let (psi_long_bound, psi_short_bound) =
-            spatial_term_psi_bounds(data.view(), &resolved, 0, &kappa_options)
-                .expect("finite isotropic-scale bounds");
+        let (psi_long_bound, psi_short_bound) = spatial_term_psi_bounds(data.view(), &resolved, 0)
+            .expect("finite isotropic-scale bounds");
         let psi_long = (-companion_length_scale.ln()).clamp(psi_long_bound, psi_short_bound);
         let long_endpoint = (-psi_long).exp();
         let (selected_spec, selected_fit) = select_isotropic_matern_range_basin(
@@ -190,7 +188,6 @@ mod spatial_length_scale_monotone_tests {
             baseline,
             &family,
             &options,
-            &kappa_options,
             &spatial_terms,
         )
         .expect("certified endpoint profile comparison");
@@ -529,9 +526,8 @@ mod spatial_length_scale_monotone_tests {
             .unwrap_or_else(|e| panic!("design failed: {e:?}"));
         let resolved = freeze_term_collection_from_design(&spec, &design)
             .unwrap_or_else(|e| panic!("freeze failed: {e:?}"));
-        let kappa_options = SpatialLengthScaleOptimizationOptions::default();
         let (psi_lower, psi_upper) =
-            gam_terms::smooth::spatial_term_psi_bounds(data.view(), &resolved, 0, &kappa_options)
+            gam_terms::smooth::spatial_term_psi_bounds(data.view(), &resolved, 0)
                 .unwrap_or_else(|e| panic!("psi bounds: {e:?}"));
         let seed_length_scale =
             get_spatial_length_scale(&resolved, 0).expect("resolved length scale");

@@ -2890,11 +2890,7 @@ impl SpatialLogKappaCoords {
     }
 
     /// Isotropic initialization.
-    pub fn from_length_scales(
-        spec: &TermCollectionSpec,
-        term_indices: &[usize],
-        options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Self {
+    pub fn from_length_scales(spec: &TermCollectionSpec, term_indices: &[usize]) -> Self {
         let mut out = Array1::<f64>::zeros(term_indices.len());
         for (slot, &term_idx) in term_indices.iter().enumerate() {
             // Constant-curvature: the single ψ slot is the raw signed κ, seeded
@@ -2907,9 +2903,8 @@ impl SpatialLogKappaCoords {
                 continue;
             }
             // ψ = −ln(length_scale) through the SAME expression the aniso
-            // constructor and the upstream spec projection use (#2726) — see
-            // `spatial_length_scale_window::spatial_term_seed_psi`.
-            out[slot] = spatial_term_seed_psi(spec, term_idx, options);
+            // constructor uses (#2726).
+            out[slot] = spatial_term_incumbent_psi(spec, term_idx);
         }
         Self {
             values: out,
@@ -2930,11 +2925,7 @@ impl SpatialLogKappaCoords {
     ///   aniso_log_scales (which sum to zero). Multi-dimensional terms without
     ///   explicit anisotropy stay scalar here so the seed dimensionality matches
     ///   `spatial_dims_per_term`.
-    pub fn from_length_scales_aniso(
-        spec: &TermCollectionSpec,
-        term_indices: &[usize],
-        options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Self {
+    pub fn from_length_scales_aniso(spec: &TermCollectionSpec, term_indices: &[usize]) -> Self {
         let mut vals = Vec::new();
         let mut dims = Vec::new();
         for &term_idx in term_indices {
@@ -2958,9 +2949,8 @@ impl SpatialLogKappaCoords {
                 continue;
             }
             // Global scale ψ̄ = −ln(length_scale), through the SAME expression
-            // the isotropic constructor and the upstream spec projection use
-            // (#2726).
-            let psi_bar = spatial_term_seed_psi(spec, term_idx, options);
+            // the isotropic constructor uses (#2726).
+            let psi_bar = spatial_term_incumbent_psi(spec, term_idx);
 
             if spatial_term_uses_per_axis_psi(spec, term_idx) {
                 // Per-axis anisotropy is enrolled in the joint outer vector:
@@ -3002,11 +2992,10 @@ impl SpatialLogKappaCoords {
         data: ArrayView2<'_, f64>,
         spec: &TermCollectionSpec,
         term_indices: &[usize],
-        options: &SpatialLengthScaleOptimizationOptions,
     ) -> Result<Self, BasisError> {
         let mut values = Array1::<f64>::zeros(term_indices.len());
         for (slot, &term_idx) in term_indices.iter().enumerate() {
-            values[slot] = spatial_term_psi_search_box(data, spec, term_idx, options)?.0;
+            values[slot] = spatial_term_psi_search_box(data, spec, term_idx)?.0;
         }
         Ok(Self {
             values,
@@ -3020,11 +3009,10 @@ impl SpatialLogKappaCoords {
         data: ArrayView2<'_, f64>,
         spec: &TermCollectionSpec,
         term_indices: &[usize],
-        options: &SpatialLengthScaleOptimizationOptions,
     ) -> Result<Self, BasisError> {
         let mut values = Array1::<f64>::zeros(term_indices.len());
         for (slot, &term_idx) in term_indices.iter().enumerate() {
-            values[slot] = spatial_term_psi_search_box(data, spec, term_idx, options)?.1;
+            values[slot] = spatial_term_psi_search_box(data, spec, term_idx)?.1;
         }
         Ok(Self {
             values,
@@ -3045,16 +3033,8 @@ impl SpatialLogKappaCoords {
         spec: &TermCollectionSpec,
         term_indices: &[usize],
         dims_per_term: &[usize],
-        options: &SpatialLengthScaleOptimizationOptions,
     ) -> Result<Self, BasisError> {
-        Self::aniso_bounds_from_data(
-            data,
-            spec,
-            term_indices,
-            dims_per_term,
-            options,
-            AnisoBoundEnd::Lower,
-        )
+        Self::aniso_bounds_from_data(data, spec, term_indices, dims_per_term, AnisoBoundEnd::Lower)
     }
 
     /// Anisotropic-aware upper bounds derived from per-term data geometry.
@@ -3065,16 +3045,8 @@ impl SpatialLogKappaCoords {
         spec: &TermCollectionSpec,
         term_indices: &[usize],
         dims_per_term: &[usize],
-        options: &SpatialLengthScaleOptimizationOptions,
     ) -> Result<Self, BasisError> {
-        Self::aniso_bounds_from_data(
-            data,
-            spec,
-            term_indices,
-            dims_per_term,
-            options,
-            AnisoBoundEnd::Upper,
-        )
+        Self::aniso_bounds_from_data(data, spec, term_indices, dims_per_term, AnisoBoundEnd::Upper)
     }
 
     /// Shared implementation for the lower/upper anisotropic bounds. The bound
@@ -3085,7 +3057,6 @@ impl SpatialLogKappaCoords {
         spec: &TermCollectionSpec,
         term_indices: &[usize],
         dims_per_term: &[usize],
-        options: &SpatialLengthScaleOptimizationOptions,
         end: AnisoBoundEnd,
     ) -> Result<Self, BasisError> {
         assert_eq!(term_indices.len(), dims_per_term.len());
@@ -3136,7 +3107,7 @@ impl SpatialLogKappaCoords {
                 // incumbent-containment argument applies per axis, because the
                 // axis offsets `η_a` are added to a common scalar ψ̄ bound
                 // (#2454).
-                let (lo, hi) = spatial_term_psi_search_box(data, spec, term_idx, options)?;
+                let (lo, hi) = spatial_term_psi_search_box(data, spec, term_idx)?;
                 match end {
                     AnisoBoundEnd::Lower => lo,
                     AnisoBoundEnd::Upper => hi,
@@ -3164,17 +3135,15 @@ impl SpatialLogKappaCoords {
     /// Rewrite any ψ entries whose originating term lacks an explicit
     /// `length_scale` so they sit at the midpoint of the per-term data-derived
     /// ψ window. Used so the outer optimizer starts inside the physically
-    /// meaningful region instead of at an arbitrary `options.max_length_scale`
-    /// derived seed. For terms with an explicit length_scale, the user's
-    /// choice is respected. Anisotropy offsets η_a (those stored by
-    /// `from_length_scales_aniso`) are preserved: we re-center around the new
-    /// ψ̄, keeping Ση_a = 0.
+    /// meaningful region instead of at the constructors' placeholder ψ̄ = 0.
+    /// For terms with an explicit length_scale, the user's choice is respected.
+    /// Anisotropy offsets η_a (those stored by `from_length_scales_aniso`) are
+    /// preserved: we re-center around the new ψ̄, keeping Ση_a = 0.
     pub fn reseed_from_data(
         mut self,
         data: ArrayView2<'_, f64>,
         spec: &TermCollectionSpec,
         term_indices: &[usize],
-        options: &SpatialLengthScaleOptimizationOptions,
     ) -> Result<Self, BasisError> {
         assert_eq!(term_indices.len(), self.dims_per_term.len());
         let mut cursor = 0;
@@ -3193,7 +3162,7 @@ impl SpatialLogKappaCoords {
                 cursor += d;
                 continue;
             }
-            let Some(psi_bar_new) = spatial_term_psi_seed(data, spec, term_idx, options)? else {
+            let Some(psi_bar_new) = spatial_term_psi_seed(data, spec, term_idx)? else {
                 cursor += d;
                 continue;
             };
@@ -3250,7 +3219,7 @@ impl SpatialLogKappaCoords {
             log::info!(
                 "[spatial-kappa] projected {n_projected}/{} ψ seed coords into data-derived bounds \
                  (worst excess={worst_delta:.3} log units); user length_scale falls outside \
-                 [{KERNEL_RANGE_MIN_DIAMETER_FRACTION}/r_max, {KERNEL_RANGE_MAX_SPACING_MULTIPLE}/r_min] geometry window",
+                 the resolvable [sqrt(eps)/r_max, 1/(sqrt(eps)*r_min)] kernel-range window",
                 self.values.len()
             );
         }
@@ -3843,24 +3812,15 @@ pub(crate) fn spatial_identifiability_policy(
     }
 }
 
-/// Per-term data-derived ψ = log κ bounds.
-///
-/// Uses the same safe operating range documented in
-/// [`crate::basis::build_matern_basis`] / [`crate::basis::build_duchon_basis`]:
-///   κ ∈ [2 / r_max, 1e2 / r_min]
-/// where (r_min, r_max) are pairwise-distance extrema of the term's resolved
-/// centers (post-fit) or the standardized feature data columns (pre-fit).
-/// Lower edge of the data-derived kernel-range window, as a fraction of the
-/// maximum pairwise distance `r_max`: length scales below `2/r_max` resolve
-/// structure finer than the closest center pair, so the kernel range floor is
-/// set at twice the maximum spacing.
-pub(crate) const KERNEL_RANGE_MIN_DIAMETER_FRACTION: f64 = 2.0;
-
-/// Upper edge of the data-derived kernel-range window, as a multiple of the
-/// minimum pairwise distance `r_min`: beyond `100/r_min` the radial columns go
-/// nearly collinear with the polynomial nullspace, so the kernel range is
-/// capped here to keep the basis geometry well-conditioned.
-pub(crate) const KERNEL_RANGE_MAX_SPACING_MULTIPLE: f64 = 1e2;
+/// ψ̄ = −ln(length_scale) at the spec's own length scale: the point the scalar-ρ
+/// incumbent was realized at, so the joint route's θ₀ and that incumbent are one
+/// point (#2726). A term with no length scale gets ψ̄ = 0, a placeholder that
+/// [`SpatialLogKappaCoords::reseed_from_data`] replaces with the geometry
+/// midpoint. The re-centre there subtracts the old ψ̄ exactly, so the placeholder
+/// never reaches the optimizer.
+fn spatial_term_incumbent_psi(spec: &TermCollectionSpec, term_idx: usize) -> f64 {
+    get_spatial_length_scale(spec, term_idx).map_or(0.0, |length_scale| -length_scale.ln())
+}
 
 fn spatial_term_stored_input_scale(term: &SmoothTermSpec) -> Option<crate::IsotropicScale> {
     match &term.basis {
@@ -3905,22 +3865,40 @@ fn spatial_term_realized_input_scale(
     estimate_isotropic_scale(x.view())
 }
 
-/// Returns ψ-space bounds (ψ_lo = ln(κ_lo), ψ_hi = ln(κ_hi)).
+/// The kernel ranges a term's point cloud can resolve, as ψ = ln κ bounds
+/// `(ψ_lo, ψ_hi)` (#2902, SPEC rule 20).
 ///
-/// The returned window is intersected with the options window so user-set
-/// `min_length_scale` / `max_length_scale` remain hard limits. Degenerate
-/// geometry or an empty intersection is a typed error: changing to a generic
-/// options window would silently optimize in a different coordinate chart.
+/// ## Where the edges come from
+///
+/// An enrolled radial kernel (Matérn, hybrid Duchon) enters the design only
+/// through the products `κ·r` over the cloud's pairwise distances
+/// `r ∈ [r_min, r_max]`. At each end of the κ axis it tends to a limit kernel:
+///
+/// * **κ → 0.** At a pair, the kernel's departure from its κ = 0 limit is
+///   `O((κr)^q)` with `q ≥ 1`. For Matérn ν = 1/2, `q = 1`. For smoother Matérn,
+///   and for a hybrid Duchon approaching its polyharmonic limit, `q = 2`. Once
+///   `κ·r_max ≤ √ε`, every pair's departure is below half-mantissa, and the
+///   design equals its limit design in the arithmetic it is assembled in.
+/// * **κ → ∞.** The departure from the κ → ∞ limit is `O((κr)^{−q})` or smaller
+///   (the Matérn blocks decay exponentially). Once `κ·r_min ≥ 1/√ε`, every pair
+///   is past it.
+///
+/// So the window is `κ ∈ [√ε/r_max, 1/(√ε·r_min)]`. `√ε` is the bar the #2812 ρ
+/// domain uses for a penalty eigenvalue, for the same reason: a direction below
+/// it does not survive being squared into a Gram and inverted back out. Outside
+/// the window the criterion is flat to working precision, so a search that ends
+/// on an edge has hit a resolution limit of the data. The data window has not
+/// cut it short. Both edges move with the cloud (`r → c·r` shifts both by
+/// `−ln c`), and neither is a chosen number.
+///
+/// `(r_min, r_max)` are the pairwise-distance extrema of the term's resolved
+/// centers (post-fit) or of the standardized feature columns (pre-fit).
+/// Degenerate geometry is a typed error.
 pub fn spatial_term_psi_bounds(
     data: ArrayView2<'_, f64>,
     spec: &TermCollectionSpec,
     term_idx: usize,
-    options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<(f64, f64), BasisError> {
-    let options_window = (
-        -options.max_length_scale.ln(),
-        -options.min_length_scale.ln(),
-    );
     // Constant-curvature: the ψ coordinate is the raw signed κ, so its window is
     // the chart-feasible κ bracket, NOT a log-ℓ window. Mirrors the aniso bounds
     // path's `constant_curvature_kappa_bounds` branch so the isotropic
@@ -3981,11 +3959,6 @@ pub fn spatial_term_psi_bounds(
             term.name
         ))
     })?;
-    // Length scales substantially larger than the data diameter make radial
-    // TPS/Matern columns nearly collinear with their polynomial nullspace.
-    // The nullspace already carries constant/linear low-frequency structure,
-    // so cap the kernel range at the diameter scale instead of letting the
-    // optimizer enter a numerically degenerate basis geometry.
     // `r_min`/`r_max` are measured in the standardized kernel frame, where
     // ℓ_eff = ℓ_original / σ_geom. The optimizer/spec ψ coordinate is
     // ψ_original = log(1/ℓ_original), hence
@@ -3993,31 +3966,15 @@ pub fn spatial_term_psi_bounds(
     //   κ_original = κ_eff / σ_geom
     //              = κ_eff * compensate_length_scale(1, scales).
     //
-    // Convert exactly once here before intersecting the data window with the
-    // original-coordinate user options. Previously these standardized κ bounds
-    // were written directly into the spec; the basis builder then divided ℓ by
+    // Convert exactly once here. Previously these standardized κ bounds were
+    // written directly into the spec; the basis builder then divided ℓ by
     // σ_geom again, making the realized endpoint too long by 1/σ_geom.
-    let inverse_sigma = input_scale.reciprocal();
-    let psi_chart_offset = inverse_sigma.ln();
-    let psi_lo_data = (KERNEL_RANGE_MIN_DIAMETER_FRACTION / r_max).ln() + psi_chart_offset;
-    let psi_hi_data = (KERNEL_RANGE_MAX_SPACING_MULTIPLE / r_min).ln() + psi_chart_offset;
-    // #1074: the Matérn-specific length-scale ceiling that used to live here was
-    // deleted. It was masking, not fixing, the real defect: a hard upper bound on
-    // the kernel range that pinned the κ-optimizer short rather than letting the
-    // optimizer find the REML optimum. Matérn now shares the same generic geometry
-    // window as Duchon / TPS (`KERNEL_RANGE_MIN_DIAMETER_FRACTION / r_max` floor,
-    // `KERNEL_RANGE_MAX_SPACING_MULTIPLE / r_min` ceiling); the #1357 fully-flat
-    // collapse corner is guarded by the EDF-collapse guard in
-    // `spatial_optimization.rs`, which acts on the realized fit, not on a clamp.
-    // Intersect with the options window so min/max_length_scale remain hard caps.
-    let psi_lo = psi_lo_data.max(options_window.0);
-    let psi_hi = psi_hi_data.min(options_window.1);
-    if psi_lo >= psi_hi {
-        return Err(BasisError::InvalidInput(format!(
-            "term '{}' has an empty spatial ψ window after intersecting data bounds [{psi_lo_data}, {psi_hi_data}] with configured bounds [{}, {}]",
-            term.name, options_window.0, options_window.1
-        )));
-    }
+    let psi_chart_offset = input_scale.reciprocal().ln();
+    // The edges in log space, so a sub-normal `r_min` cannot overflow `1/r_min`.
+    // `r_min ≤ r_max`, so the window is at least `ln(1/ε)` wide and never empty.
+    let ln_half_mantissa = 0.5 * f64::EPSILON.ln();
+    let psi_lo = ln_half_mantissa - r_max.ln() + psi_chart_offset;
+    let psi_hi = -ln_half_mantissa - r_min.ln() + psi_chart_offset;
     Ok((psi_lo, psi_hi))
 }
 
@@ -4054,34 +4011,27 @@ pub fn spatial_term_psi_bounds(
 /// no obligation to beat the incumbent.
 ///
 /// So the box is the geometry window WIDENED — never narrowed — to contain the
-/// incumbent. `min_length_scale` / `max_length_scale` stay hard caps: those are
-/// the caller's own explicit constraint, and an incumbent outside them is a
-/// contradiction the caller stated, not one this function invented.
+/// incumbent.
 pub fn spatial_term_psi_search_box(
     data: ArrayView2<'_, f64>,
     spec: &TermCollectionSpec,
     term_idx: usize,
-    options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<(f64, f64), BasisError> {
-    let (mut psi_lo, mut psi_hi) = spatial_term_psi_bounds(data, spec, term_idx, options)?;
+    let (mut psi_lo, mut psi_hi) = spatial_term_psi_bounds(data, spec, term_idx)?;
     // Constant-curvature terms carry a signed-κ chart, not a log-ℓ chart, so
     // `-ln(length_scale)` is not their coordinate and the geometry bracket is
     // already the feasible set. Leave that box exactly as it was.
     if constant_curvature_term_spec(spec, term_idx).is_some() {
         return Ok((psi_lo, psi_hi));
     }
-    let options_window = (
-        -options.max_length_scale.ln(),
-        -options.min_length_scale.ln(),
-    );
     if let Some(length_scale) = get_spatial_length_scale(spec, term_idx)
         && length_scale.is_finite()
         && length_scale > 0.0
     {
         let psi_incumbent = -length_scale.ln();
         if psi_incumbent.is_finite() {
-            psi_lo = psi_lo.min(psi_incumbent.max(options_window.0));
-            psi_hi = psi_hi.max(psi_incumbent.min(options_window.1));
+            psi_lo = psi_lo.min(psi_incumbent);
+            psi_hi = psi_hi.max(psi_incumbent);
         }
     }
     Ok((psi_lo, psi_hi))
@@ -4089,18 +4039,18 @@ pub fn spatial_term_psi_search_box(
 
 
 /// Data-derived ψ seed for a spatial term when the user has not set an
-/// explicit length_scale on its basis spec. Uses the geometric mean of the
-/// data-informed kappa range (i.e., the midpoint of the ψ window).
+/// explicit length_scale on its basis spec: the midpoint of the ψ window, i.e.
+/// `ℓ = √(r_min·r_max)` in the standardized frame, the geometric mean of the
+/// cloud's extreme pair distances.
 pub(crate) fn spatial_term_psi_seed(
     data: ArrayView2<'_, f64>,
     spec: &TermCollectionSpec,
     term_idx: usize,
-    options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<Option<f64>, BasisError> {
     if get_spatial_length_scale(spec, term_idx).is_some() {
         return Ok(None); // user/spec-provided length_scale wins
     }
-    let (psi_lo, psi_hi) = spatial_term_psi_bounds(data, spec, term_idx, options)?;
+    let (psi_lo, psi_hi) = spatial_term_psi_bounds(data, spec, term_idx)?;
     Ok(Some(0.5 * (psi_lo + psi_hi)))
 }
 
@@ -4383,10 +4333,6 @@ pub struct SpatialLengthScaleOptimizationOptions {
     pub rel_tol: f64,
     /// Initial log(length_scale) perturbation used for seed construction.
     pub log_step: f64,
-    /// Minimum allowed length_scale during κ search.
-    pub min_length_scale: f64,
-    /// Maximum allowed length_scale during κ search.
-    pub max_length_scale: f64,
     /// Automatic geometry-initializer threshold for large-scale spatial fits.
     ///
     /// When n exceeds twice this value, the fitter uses a spatially stratified
@@ -4409,8 +4355,6 @@ impl Default for SpatialLengthScaleOptimizationOptions {
             max_outer_iter: 80,
             rel_tol: 1e-4,
             log_step: std::f64::consts::LN_2,
-            min_length_scale: 1e-3,
-            max_length_scale: 1e3,
             pilot_subsample_threshold: 10_000,
         }
     }
@@ -4424,38 +4368,14 @@ impl SpatialLengthScaleOptimizationOptions {
     /// returns `EstimationError` at its own boundary.
     ///
     /// Invariants:
-    ///   * `min_length_scale > 0`, finite
-    ///   * `max_length_scale > 0`, finite
-    ///   * `min_length_scale < max_length_scale`
     ///   * `rel_tol > 0`, finite
     ///   * `log_step > 0`, finite
     ///
-    /// These invariants are what the downstream κ-bound and ψ-window code
-    /// assumes (`-log(max_ls)` must be finite, `(min,max)` must not be
-    /// inverted, etc.). Without validation, invalid options produce silent
-    /// NaN-propagation inside the outer optimizer.
+    /// These invariants are what the outer optimizer assumes. Without
+    /// validation, invalid options produce silent NaN-propagation inside it.
+    /// There is no length-scale window to validate: the κ search box is
+    /// derived from each term's own point cloud (`spatial_term_psi_bounds`).
     pub fn validate(&self) -> Result<(), String> {
-        if !self.min_length_scale.is_finite() || self.min_length_scale <= 0.0 {
-            return Err(SmoothError::invalid_config(format!(
-                "SpatialLengthScaleOptimizationOptions::min_length_scale must be > 0 and finite, got {}",
-                self.min_length_scale
-            ))
-            .into());
-        }
-        if !self.max_length_scale.is_finite() || self.max_length_scale <= 0.0 {
-            return Err(SmoothError::invalid_config(format!(
-                "SpatialLengthScaleOptimizationOptions::max_length_scale must be > 0 and finite, got {}",
-                self.max_length_scale
-            ))
-            .into());
-        }
-        if self.min_length_scale >= self.max_length_scale {
-            return Err(SmoothError::invalid_config(format!(
-                "SpatialLengthScaleOptimizationOptions requires min_length_scale < max_length_scale, got min={} max={}",
-                self.min_length_scale, self.max_length_scale
-            ))
-            .into());
-        }
         if !self.rel_tol.is_finite() || self.rel_tol <= 0.0 {
             return Err(SmoothError::invalid_config(format!(
                 "SpatialLengthScaleOptimizationOptions::rel_tol must be > 0 and finite, got {}",

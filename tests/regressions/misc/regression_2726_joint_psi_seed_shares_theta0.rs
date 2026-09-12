@@ -25,21 +25,17 @@
 //!
 //! ## What the repair is
 //!
-//! Project each spatial term's `length_scale` onto the caller's window ONCE, in
-//! the spec, before the baseline fit — so the incumbent and the joint seed are
-//! the same point by construction and the caller's `min_length_scale` stays
-//! authoritative. (The alternative — widening the ψ box to contain the raw
-//! incumbent — would admit a length scale BELOW the caller's own bound.)
+//! The repair first projected each term's `length_scale` onto the caller's
+//! window once, in the spec, before the baseline fit. #2902 then deleted the
+//! caller window itself (SPEC rule 20): the κ search box is derived from the
+//! term's point cloud, so there is no projection left, and the joint seed is −ln
+//! of the incumbent's own scale by construction.
 //!
-//! ## What this file asserts, and what it deliberately does not
+//! ## What this file asserts
 //!
-//! It asserts the fixture really is the out-of-window arm (the projection moves
-//! it, so the test cannot pass vacuously) and that the fit no longer refuses on
-//! either θ₀-identity ground. It does NOT assert the fit succeeds: the in-window
-//! arm (`length_scale = 1e-2`, which is where this one now lands) has a
-//! SEPARATE, pre-existing outer non-stationarity failure — `|Pg| = 5.346`
-//! against `bound = 3.889e-2` after the outer budget — that #2726 never touched
-//! and that this repair must not be credited with fixing.
+//! That the raw-`length_scale` fixture never refuses on either θ₀-identity
+//! ground, and that it fits. The names still say "out of window": this is the
+//! fixture that sat below the old `[1e-2, 1e2]` caller window.
 
 use gam::{
     FitRequest, FitResult, StandardFitRequest,
@@ -50,16 +46,14 @@ use gam::{
     estimate::FitOptions,
     smooth::{
         ShapeConstraint, SmoothBasisSpec, SmoothTermSpec, SpatialLengthScaleOptimizationOptions,
-        TermCollectionSpec, get_spatial_length_scale, project_spatial_length_scales_in_spec,
+        TermCollectionSpec,
     },
     types::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink},
 };
 use ndarray::{Array1, Array2};
 
-/// The spec's `length_scale`, below the caller's window on purpose.
+/// The spec's `length_scale`, the value that sat below the old caller window.
 const RAW_LENGTH_SCALE: f64 = 1.0e-3;
-const MIN_LENGTH_SCALE: f64 = 1.0e-2;
-const MAX_LENGTH_SCALE: f64 = 1.0e2;
 const N_ROWS: usize = 600;
 
 /// Fragments of the refusals that can only fire when θ₀ is not shared between
@@ -140,8 +134,6 @@ fn kappa_options(max_outer_iter: usize) -> SpatialLengthScaleOptimizationOptions
         max_outer_iter,
         rel_tol: 1e-5,
         log_step: std::f64::consts::LN_2,
-        min_length_scale: MIN_LENGTH_SCALE,
-        max_length_scale: MAX_LENGTH_SCALE,
         pilot_subsample_threshold: 0,
     }
 }
@@ -202,35 +194,6 @@ fn run_fit(max_outer_iter: usize) -> Result<(), String> {
     }
 }
 
-/// Non-vacuity control, run first: the fixture MUST be the out-of-window arm.
-/// If the spec's `length_scale` were already inside the caller's window, the
-/// projection would be inert and the gate below would pass without exercising
-/// anything.
-#[test]
-fn regression_2726_fixture_is_the_out_of_window_arm() {
-    let opts = kappa_options(15);
-    let mut spec = spec_1d(RAW_LENGTH_SCALE);
-    let moved = project_spatial_length_scales_in_spec(&mut spec, &[0], &opts)
-        .expect("duchon term accepts a projected length scale");
-    assert_eq!(
-        moved,
-        vec![(0usize, RAW_LENGTH_SCALE, MIN_LENGTH_SCALE)],
-        "the #2726 fixture must be the arm the caller's window excludes"
-    );
-    assert_eq!(
-        get_spatial_length_scale(&spec, 0),
-        Some(MIN_LENGTH_SCALE),
-        "the projection is written back into the spec, so the baseline fit and \
-         the joint seed read the same value"
-    );
-    // The step the two routes used to be apart by, printed rather than
-    // re-asserted: `crates/gam-terms/.../term_specs.rs` pins it bit-exactly.
-    println!(
-        "[2726] projection step in psi = {:.17e}",
-        MIN_LENGTH_SCALE.ln() - RAW_LENGTH_SCALE.ln()
-    );
-}
-
 /// The gate. The refusal was budget-independent (bit-identical `gap` at 15 and
 /// 60 outer iterations), so both budgets are exercised: a repair that merely
 /// moved the failure past a budget would still trip the smaller one.
@@ -260,9 +223,10 @@ fn regression_2726_joint_and_scalar_rho_routes_share_theta0() {
 ///
 /// "The two routes do not disagree about the criterion at θ₀" is a statement
 /// about two floating-point assemblies; what it was standing in for is that
-/// this out-of-window fixture PRODUCES A FIT. That is strictly stronger — it
+/// this raw-scale fixture PRODUCES A FIT. That is strictly stronger — it
 /// survives any subsequent change to how the cross-route comparison is
-/// denominated — and it is the thing a user of `min_length_scale` cares about.
+/// denominated — and it is the thing a user of an explicit `length_scale` cares
+/// about.
 ///
 /// It is also the arm the #2760 repairs are about: at `n = 600` the scalar-ρ
 /// incumbent already puts 4 of 5 coordinates below `−JOINT_RHO_BOUND`, so the

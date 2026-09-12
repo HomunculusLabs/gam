@@ -558,33 +558,6 @@ pub(crate) fn create_matern_spline_basiswithworkspace(
         }
     }
 
-    // Practical safe operating range for κ from center geometry (document Eq. D.2):
-    //   κ in [1e-2 / r_max, 1e2 / r_min], with κ = 1/length_scale.
-    // Warn rather than silently clamp so callers keep explicit control.
-    // Under anisotropy the kernel metric is y-space (y_a = exp(η_a) x_a), so
-    // the relevant r_min/r_max are y-space pairwise distances, not raw.
-    let warn_bounds = if let Some(eta) = aniso_log_scales {
-        let y_centers = points_in_aniso_y_space(centers, eta);
-        pairwise_distance_bounds(y_centers.view())
-    } else {
-        pairwise_distance_bounds(centers)
-    };
-    if let Some((r_min, r_max)) = warn_bounds {
-        let kappa = duchon_inverse_length_scale(length_scale, "Matérn spline basis operating range")?;
-        let kappa_lo = 1e-2 / r_max;
-        let kappa_hi = 1e2 / r_min;
-        if kappa < kappa_lo || kappa > kappa_hi {
-            log::debug!(
-                "Matérn κ={} is outside recommended range [{}, {}] derived from centers (r_min={}, r_max={}); kernel conditioning may degrade",
-                kappa,
-                kappa_lo,
-                kappa_hi,
-                r_min,
-                r_max
-            );
-        }
-    }
-
     // Distance computation: anisotropic when eta is present, isotropic otherwise.
     // Under anisotropy we work in y-space (y = Ax), so r = |Ah| replaces |h|.
     let mut kernel_block = Array2::<f64>::zeros((n, k));

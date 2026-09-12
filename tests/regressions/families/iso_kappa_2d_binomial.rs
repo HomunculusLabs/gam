@@ -43,7 +43,7 @@ fn simulate_2d_binomial(n: usize) -> (Array2<f64>, Array1<f64>) {
         // Clustered geo coordinates: a couple of Gaussian blobs so the minimum
         // pairwise center spacing r_min is small relative to the diameter r_max
         // — exactly the geometry that pushes the ψ window's upper edge
-        // ln(100/r_min) far out (the #1066 bad-seed-basin regime).
+        // ln(1/(√ε·r_min)) far out (the #1066 bad-seed-basin regime).
         let blob = rng.random_range(0.0..1.0);
         let (cx, cy) = if blob < 0.5 { (-1.0, -0.7) } else { (1.0, 0.8) };
         let p1 = cx + rng.random_range(-0.9..0.9);

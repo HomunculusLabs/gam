@@ -739,18 +739,12 @@ pub(crate) fn build_survival_two_block_exact_joint_setup(
     thresholdspec: &TermCollectionSpec,
     log_sigmaspec: &TermCollectionSpec,
     rho0: Array1<f64>,
-    kappa_options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<ExactJointHyperSetup, gam_terms::basis::BasisError> {
     // Survival location-scale uses the shared engine directly: the rho seed is
     // already assembled by the caller (penalty + link-wiggle layout), and the
     // two linear predictors (threshold, log sigma) supply the per-block
     // log(kappa) geometry in theta order.
-    build_location_scale_exact_joint_setup(
-        data,
-        &[thresholdspec, log_sigmaspec],
-        rho0,
-        kappa_options,
-    )
+    build_location_scale_exact_joint_setup(data, &[thresholdspec, log_sigmaspec], rho0)
 }
 
 pub(crate) fn filtered_initial_beta(

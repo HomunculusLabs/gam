@@ -2643,13 +2643,10 @@ pub(crate) fn pairwise_distance_bounds(points: ArrayView2<'_, f64>) -> Option<(f
 /// - `r_min_hat >= true r_min`  (pairwise min over a sub-sample can only
 ///    exclude some pairs, so the sampled min overestimates the true min).
 ///
-/// Both approximations are conservative for κ-bound derivation:
-///   kappa_lo = 1e-2 / r_max_hat  >=  1e-2 / true r_max  (wider window, low κ)
-///   kappa_hi = 1e2  / r_min_hat  <=  1e2  / true r_min  (tighter window, high κ)
-/// so no feasible κ that the exact bound would include is excluded by the
-/// approximation — it can only slightly shrink the high-κ tail, which is
-/// exactly the regime (κ → ∞ ⇒ degenerate kernel) that we want the outer
-/// optimizer to avoid anyway.
+/// Both approximations can only narrow the κ window `spatial_term_psi_bounds`
+/// derives from them, `[√ε / r_max_hat, 1 / (√ε·r_min_hat)]`, and only by the
+/// sampling ratios `r_max / r_max_hat` and `r_min_hat / r_min`. Once the term's
+/// centers are resolved, the window is re-derived from exact center distances.
 ///
 /// Sampling picks `K = 1024` indices spaced evenly across the FULL index range
 /// `[0, n-1]` (endpoints included): `idx(s) = round(s·(n-1)/(K-1))`. For a cap

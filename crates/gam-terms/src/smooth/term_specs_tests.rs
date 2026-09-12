@@ -186,13 +186,7 @@ mod spatial_psi_bound_coordinate_tests {
                 joint_null_rotation: None,
             }],
         };
-        spatial_term_psi_bounds(
-            data.view(),
-            &spec,
-            0,
-            &SpatialLengthScaleOptimizationOptions::default(),
-        )
-        .expect("finite spatial ψ bounds")
+        spatial_term_psi_bounds(data.view(), &spec, 0).expect("finite spatial ψ bounds")
     }
 
     fn assert_close(left: f64, right: f64) {
@@ -225,7 +219,6 @@ mod spatial_psi_bound_coordinate_tests {
             [1.4, -0.7],
             [2.1, 0.5],
         ];
-        let options = SpatialLengthScaleOptimizationOptions::default();
         let box_for = |length_scale: f64| -> ((f64, f64), (f64, f64)) {
             let input_scale =
                 estimate_isotropic_scale(source.view()).expect("isotropic input scale");
@@ -255,17 +248,19 @@ mod spatial_psi_bound_coordinate_tests {
                     joint_null_rotation: None,
                 }],
             };
-            let geometry = spatial_term_psi_bounds(source.view(), &spec, 0, &options)
-                .expect("finite geometry window");
-            let search = spatial_term_psi_search_box(source.view(), &spec, 0, &options)
-                .expect("finite search box");
+            let geometry =
+                spatial_term_psi_bounds(source.view(), &spec, 0).expect("finite geometry window");
+            let search =
+                spatial_term_psi_search_box(source.view(), &spec, 0).expect("finite search box");
             (geometry, search)
         };
 
         // An incumbent far past the long-range edge of the geometry window —
-        // #2454's fixture shape, where `length_scale = 12` sits about six data
-        // diameters out.
-        let far = 1.0e3_f64;
+        // #2454's fixture shape, where `length_scale = 12` sat about six data
+        // diameters out. The geometry window does not depend on the incumbent,
+        // so its own edge places the fixture one nat outside it.
+        let (unit_geometry, _) = box_for(1.0);
+        let far = (1.0 - unit_geometry.0).exp();
         let (geometry, search) = box_for(far);
         let psi_far = -far.ln();
         assert!(

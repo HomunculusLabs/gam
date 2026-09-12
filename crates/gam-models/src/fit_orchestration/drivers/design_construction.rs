@@ -3401,17 +3401,16 @@ fn apply_pilot_spatial_psi_reseed(
     pilot_data: ArrayView2<'_, f64>,
     spec: &TermCollectionSpec,
     spatial_terms: &[usize],
-    kappa_options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<TermCollectionSpec, EstimationError> {
     let dims_per_term = spatial_dims_per_term(spec, spatial_terms);
     let use_aniso = has_aniso_terms(spec, spatial_terms);
     let log_kappa0 = if use_aniso {
-        SpatialLogKappaCoords::from_length_scales_aniso(spec, spatial_terms, kappa_options)
+        SpatialLogKappaCoords::from_length_scales_aniso(spec, spatial_terms)
     } else {
-        SpatialLogKappaCoords::from_length_scales(spec, spatial_terms, kappa_options)
+        SpatialLogKappaCoords::from_length_scales(spec, spatial_terms)
     };
     let log_kappa0 = log_kappa0
-        .reseed_from_data(pilot_data, spec, spatial_terms, kappa_options)
+        .reseed_from_data(pilot_data, spec, spatial_terms)
         .map_err(EstimationError::BasisError)?;
     let log_kappa_lower = if use_aniso {
         SpatialLogKappaCoords::lower_bounds_aniso_from_data(
@@ -3419,15 +3418,9 @@ fn apply_pilot_spatial_psi_reseed(
             spec,
             spatial_terms,
             &dims_per_term,
-            kappa_options,
         )
     } else {
-        SpatialLogKappaCoords::lower_bounds_from_data(
-            pilot_data,
-            spec,
-            spatial_terms,
-            kappa_options,
-        )
+        SpatialLogKappaCoords::lower_bounds_from_data(pilot_data, spec, spatial_terms)
     }
     .map_err(EstimationError::BasisError)?;
     let log_kappa_upper = if use_aniso {
@@ -3436,15 +3429,9 @@ fn apply_pilot_spatial_psi_reseed(
             spec,
             spatial_terms,
             &dims_per_term,
-            kappa_options,
         )
     } else {
-        SpatialLogKappaCoords::upper_bounds_from_data(
-            pilot_data,
-            spec,
-            spatial_terms,
-            kappa_options,
-        )
+        SpatialLogKappaCoords::upper_bounds_from_data(pilot_data, spec, spatial_terms)
     }
     .map_err(EstimationError::BasisError)?;
     log_kappa0
@@ -3457,7 +3444,6 @@ pub(crate) fn apply_spatial_anisotropy_pilot_initializer(
     spec: &mut TermCollectionSpec,
     spatial_terms: &[usize],
     target_size: usize,
-    kappa_options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<usize, EstimationError> {
     if target_size == 0 || data.nrows() <= target_size.saturating_mul(2) || spatial_terms.is_empty()
     {
@@ -3515,12 +3501,7 @@ pub(crate) fn apply_spatial_anisotropy_pilot_initializer(
             updated_terms += usize::from(pass == 0);
         }
 
-        working = apply_pilot_spatial_psi_reseed(
-            pilot_data.view(),
-            &working,
-            spatial_terms,
-            kappa_options,
-        )?;
+        working = apply_pilot_spatial_psi_reseed(pilot_data.view(), &working, spatial_terms)?;
     }
 
     if updated_terms > 0 {

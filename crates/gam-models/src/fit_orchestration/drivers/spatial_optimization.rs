@@ -2320,7 +2320,7 @@ fn try_exact_joint_spatial_length_scale_optimization(
         theta0,
         lower,
         upper,
-    } = exact_joint_spatial_seed(data, resolvedspec, best, kappa_options, spatial_terms)?;
+    } = exact_joint_spatial_seed(data, resolvedspec, best, spatial_terms)?;
     let has_constant_curvature_term = !constant_curvature_term_indices(resolvedspec).is_empty();
 
     // ───────────────────────────────────────────────────────────────────────
@@ -2613,7 +2613,6 @@ fn exact_joint_spatial_seed(
     data: ArrayView2<'_, f64>,
     resolvedspec: &TermCollectionSpec,
     best: &FittedTermCollection,
-    kappa_options: &SpatialLengthScaleOptimizationOptions,
     spatial_terms: &[usize],
 ) -> Result<ExactJointSpatialSeed, EstimationError> {
     let rho_dim = best.fit.lambdas.len();
@@ -2634,14 +2633,14 @@ fn exact_joint_spatial_seed(
     // geometry (r_min, r_max) so κ cannot saturate at an upper bound that
     // has no relationship to the data's distance scale.
     let log_kappa0 = if use_aniso {
-        SpatialLogKappaCoords::from_length_scales_aniso(resolvedspec, spatial_terms, kappa_options)
+        SpatialLogKappaCoords::from_length_scales_aniso(resolvedspec, spatial_terms)
     } else {
-        SpatialLogKappaCoords::from_length_scales(resolvedspec, spatial_terms, kappa_options)
+        SpatialLogKappaCoords::from_length_scales(resolvedspec, spatial_terms)
     };
     // If the user/spec did not set a length_scale, re-seed ψ at the midpoint
-    // of the data-derived window instead of the arbitrary options fallback.
+    // of the data-derived window instead of the constructors' placeholder.
     let mut log_kappa0 = log_kappa0
-        .reseed_from_data(data, resolvedspec, spatial_terms, kappa_options)
+        .reseed_from_data(data, resolvedspec, spatial_terms)
         .map_err(EstimationError::BasisError)?;
     // Constant curvature is selected once, continuously, before the baseline
     // fit. The full joint solve therefore profiles only nuisance ρ (and any
@@ -2666,15 +2665,9 @@ fn exact_joint_spatial_seed(
             resolvedspec,
             spatial_terms,
             &dims_per_term,
-            kappa_options,
         )
     } else {
-        SpatialLogKappaCoords::lower_bounds_from_data(
-            data,
-            resolvedspec,
-            spatial_terms,
-            kappa_options,
-        )
+        SpatialLogKappaCoords::lower_bounds_from_data(data, resolvedspec, spatial_terms)
     }
     .map_err(EstimationError::BasisError)?;
     let log_kappa_upper = if use_aniso {
@@ -2683,15 +2676,9 @@ fn exact_joint_spatial_seed(
             resolvedspec,
             spatial_terms,
             &dims_per_term,
-            kappa_options,
         )
     } else {
-        SpatialLogKappaCoords::upper_bounds_from_data(
-            data,
-            resolvedspec,
-            spatial_terms,
-            kappa_options,
-        )
+        SpatialLogKappaCoords::upper_bounds_from_data(data, resolvedspec, spatial_terms)
     }
     .map_err(EstimationError::BasisError)?;
     let mut log_kappa_lower = log_kappa_lower;
@@ -2704,22 +2691,23 @@ fn exact_joint_spatial_seed(
     // Project seed onto data-derived bounds; spec.length_scale is a hint,
     // not a hard constraint. BFGS requires theta0 ∈ [lower, upper].
     // `{lower,upper}_bounds*_from_data` build the SEARCH box, which already
-    // contains the incumbent length scale (#2454), so this projection now only
-    // fires when the caller's own `min/max_length_scale` excludes the seed.
+    // contains the incumbent length scale (#2454), and `reseed_from_data` puts
+    // every unscaled term at the window midpoint, so for a log-κ slot this
+    // projection has nothing to do.
     let log_kappa0 = log_kappa0.clamp_to_bounds(&log_kappa_lower, &log_kappa_upper);
 
     // #2726: ASSERT the `AT THE SAME POINT theta0` premise instead of stating it
     // in prose. The monotonicity certificate below grades this route's criterion
     // at θ0 against `fit_score(&best.fit)`, the scalar-ρ incumbent — a comparison
     // that only means anything if the ψ half of θ0 is the ψ `best` was realized
-    // at. It was not: the seed constructors projected `length_scale` onto the
-    // caller's window while `best` was fit from the raw value, so the two routes
+    // at. It once was not: the seed constructors projected `length_scale` onto a
+    // caller window while `best` was fit from the raw value, so the two routes
     // sat `ln 10` apart and the refusal reported a criterion defect for a
     // feasible-set mismatch. `resolvedspec` is frozen from `best.design`, so its
-    // `length_scale` IS the incumbent's realized scale; the projection now
-    // happens once upstream, before `best` is fit, which makes this check pass by
-    // construction and makes any future reintroduction of a second projection
-    // site fail here instead of twelve orders of magnitude downstream.
+    // `length_scale` IS the incumbent's realized scale, and with no caller window
+    // (#2902) the seed is −ln of that scale. This check therefore passes by
+    // construction, and any projection site reintroduced between the incumbent
+    // and the seed fails here instead of twelve orders of magnitude downstream.
     for (slot, &term_idx) in spatial_terms.iter().enumerate() {
         if constant_curvature_term_spec(resolvedspec, term_idx).is_some()
             || measure_jet_term_spec(resolvedspec, term_idx).is_some()
@@ -2755,12 +2743,10 @@ fn exact_joint_spatial_seed(
                 "exact joint spatial optimization would grade its criterion at a psi the \
                  scalar-rho incumbent was never realized at (term {term_idx}): \
                  seed_psi_bar={psi_bar:.17e}, incumbent_psi={psi_incumbent:.17e}, \
-                 delta={:.6e}, incumbent_length_scale={incumbent:.17e}, \
-                 window=[{:.6e}, {:.6e}]. theta0 is not shared, so the monotonicity \
-                 certificate below would compare two different functions (#2726).",
+                 delta={:.6e}, incumbent_length_scale={incumbent:.17e}. theta0 is \
+                 not shared, so the monotonicity certificate below would compare two \
+                 different functions (#2726).",
                 psi_bar - psi_incumbent,
-                kappa_options.min_length_scale,
-                kappa_options.max_length_scale,
             )));
         }
     }
@@ -4533,13 +4519,13 @@ fn prepare_exact_joint_spatial_route<'d>(
     // #1033 (rank-stable κ-floor): set to the lowest ψ at which the certified
     // tensor's conditioned Gram holds maximal numerical rank. Below it the
     // reduced basis collapses/rotates and the design-realization skip is SOUNDLY
-    // refused (→ O(n) reset_surface); the κ window floor `ln(2/r_max)` lands
-    // inside that degenerate sliver and DRIFTS with n through the sample-std
+    // refused (→ O(n) reset_surface); the κ window floor lands inside that
+    // degenerate sliver and DRIFTS with n through the sample-std
     // standardization, so n=2000's line search re-enters the slow lane while
     // n=1000's does not. Lifting the optimizer's lower bound to this n-FREE
     // (k-space) floor keeps every in-window trial on the fast path for all n,
-    // and only excludes over-smoothed length scales the `2/r_max` geometry floor
-    // already meant to exclude (the κ-optimum lives well above it).
+    // and only excludes long length scales at which the conditioned Gram has
+    // already lost a direction.
     let mut psi_rank_stable_floor: Option<f64> = None;
     // #1033 (rank-stable κ-ceiling): symmetric twin of the floor. The conditioned
     // Gram is rank-deficient at the HIGH window edge too (the longest-frequency
@@ -8807,7 +8793,6 @@ fn select_isotropic_matern_range_basin(
     mut best: FittedTermCollection,
     family: &LikelihoodSpec,
     options: &FitOptions,
-    kappa_options: &SpatialLengthScaleOptimizationOptions,
     spatial_terms: &[usize],
 ) -> Result<(TermCollectionSpec, FittedTermCollection), EstimationError> {
     // Per-axis anisotropy and signed curvature have dedicated geometry
@@ -8854,9 +8839,8 @@ fn select_isotropic_matern_range_basin(
                 "resolved isotropic Matérn term {term_idx} has no finite center-resolution range"
             ))
         })?;
-        let (psi_long_bound, psi_short_bound) =
-            spatial_term_psi_bounds(data, &resolvedspec, term_idx, kappa_options)
-                .map_err(EstimationError::BasisError)?;
+        let (psi_long_bound, psi_short_bound) = spatial_term_psi_bounds(data, &resolvedspec, term_idx)
+            .map_err(EstimationError::BasisError)?;
         let psi_long = (-companion_length_scale.ln()).clamp(psi_long_bound, psi_short_bound);
         let long_length_scale = (-psi_long).exp();
         if !(long_length_scale.is_finite() && long_length_scale > 0.0) {
@@ -9137,44 +9121,6 @@ fn spatial_kappa_incumbent(
     if !(kappa_options.log_step.is_finite() && kappa_options.log_step > 0.0) {
         crate::bail_invalid_estim!("spatial kappa optimization requires log_step > 0");
     }
-    if !(kappa_options.min_length_scale.is_finite()
-        && kappa_options.max_length_scale.is_finite()
-        && kappa_options.min_length_scale > 0.0
-        && kappa_options.max_length_scale >= kappa_options.min_length_scale)
-    {
-        crate::bail_invalid_estim!(
-            "spatial kappa optimization requires valid positive length_scale bounds"
-        );
-    }
-
-    // #2726: project every spatial term's `length_scale` onto the caller's
-    // `[min_length_scale, max_length_scale]` window ONCE, here, before the
-    // baseline fit — so the scalar-ρ incumbent `best` and the joint [ρ, ψ]
-    // route's seed are derived from the SAME length scale.
-    //
-    // Previously the projection lived only inside the ψ seed constructors. The
-    // joint route seeded ψ from the projected scale while `best` was realized
-    // at the raw one, so on the `length_scale = 1e-3` /
-    // `min_length_scale = 1e-2` arm the two routes evaluated the criterion
-    // `ln 10` apart and the monotonicity certificate refused with
-    // `gap = 98.857` against `accept_tol = 3.873e-5` — while asserting
-    // `AT THE SAME POINT theta0` in its own message. Moving the projection
-    // upstream makes that premise true instead of asserted, and keeps the
-    // caller's window authoritative (widening the ψ box to contain the raw
-    // incumbent would instead admit a scale below the caller's own
-    // `min_length_scale`).
-    let projected_scales =
-        project_spatial_length_scales_in_spec(&mut resolvedspec, &spatial_terms, kappa_options)?;
-    for &(term_idx, raw, projected) in &projected_scales {
-        log::info!(
-            "[spatial-kappa] term {term_idx}: length_scale projected onto the caller's window \
-             before the baseline fit: {raw:.6e} -> {projected:.6e} \
-             (window=[{:.6e}, {:.6e}])",
-            kappa_options.min_length_scale,
-            kappa_options.max_length_scale,
-        );
-    }
-
     let pilot_threshold = kappa_options.pilot_subsample_threshold;
     if pilot_threshold > 0 && n > pilot_threshold * 2 {
         log::info!(
@@ -9186,7 +9132,6 @@ fn spatial_kappa_incumbent(
             &mut resolvedspec,
             &spatial_terms,
             pilot_threshold,
-            kappa_options,
         )?;
     }
 
@@ -9331,7 +9276,6 @@ fn spatial_kappa_incumbent(
         best,
         &family,
         &baseline_options,
-        kappa_options,
         &spatial_terms,
     )?;
     resolvedspec = next_spec;

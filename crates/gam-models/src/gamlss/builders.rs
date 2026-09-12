@@ -211,7 +211,6 @@ pub(crate) fn build_two_block_exact_joint_setup(
     noise_penalties: usize,
     extra_rho0: &[f64],
     rho0_override: Option<&Array1<f64>>,
-    kappa_options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<ExactJointHyperSetup, gam_terms::basis::BasisError> {
     // GAMLSS-specific part: assemble the rho seed in [mean | noise | extra]
     // penalty order, honoring a caller override when it matches the layout.
@@ -227,7 +226,7 @@ pub(crate) fn build_two_block_exact_joint_setup(
 
     // Generic part: per-block log(kappa) seed/bounds and exact-joint assembly,
     // with the two linear predictors (mean, noise) in theta order.
-    build_location_scale_exact_joint_setup(data, &[meanspec, noisespec], rho0vec, kappa_options)
+    build_location_scale_exact_joint_setup(data, &[meanspec, noisespec], rho0vec)
 }
 
 pub(crate) fn gaussian_location_scalewarm_start(
@@ -3156,7 +3155,6 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                 noise_penalty_count,
                 extra_rho0.as_slice().unwrap_or(&[]),
                 None,
-                kappa_options,
             )
             .map_err(|error| error.to_string())?;
             let mean_terms = spatial_length_scale_term_indices(builder.meanspec());
@@ -4307,7 +4305,6 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
     link_kind: InverseLink,
     selected_wiggle_basis: SelectedWiggleBasis,
     options: &BlockwiseFitOptions,
-    kappa_options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<BinomialMeanWiggleTermFitResult, String> {
     // The joint `[rho, psi]` box rule, shared with the standard spatial route
     // (`spatial_optimization.rs` is `include!`d into `drivers`, so it lives at
@@ -4379,16 +4376,14 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
     }
 
     let dims_per_term = spatial_dims_per_term(pilot_spec, &spatial_terms);
-    let log_kappa0 =
-        SpatialLogKappaCoords::from_length_scales_aniso(pilot_spec, &spatial_terms, kappa_options)
-            .reseed_from_data(data, pilot_spec, &spatial_terms, kappa_options)
-            .map_err(|error| error.to_string())?;
+    let log_kappa0 = SpatialLogKappaCoords::from_length_scales_aniso(pilot_spec, &spatial_terms)
+        .reseed_from_data(data, pilot_spec, &spatial_terms)
+        .map_err(|error| error.to_string())?;
     let log_kappa_lower = SpatialLogKappaCoords::lower_bounds_aniso_from_data(
         data,
         pilot_spec,
         &spatial_terms,
         &dims_per_term,
-        kappa_options,
     )
     .map_err(|error| error.to_string())?;
     let log_kappa_upper = SpatialLogKappaCoords::upper_bounds_aniso_from_data(
@@ -4396,7 +4391,6 @@ pub(crate) fn fit_binomial_mean_wiggle_terms_with_selected_basis(
         pilot_spec,
         &spatial_terms,
         &dims_per_term,
-        kappa_options,
     )
     .map_err(|error| error.to_string())?;
     // Project seed onto bounds; spec.length_scale is a hint, not a constraint.

@@ -306,30 +306,13 @@ fn collect_feature_columns(spec: &TermCollectionSpec) -> Vec<usize> {
     out
 }
 
-fn spatial_log_kappa_bounds_from_options(
-    dims_per_term: &[usize],
-    options: &SpatialLengthScaleOptimizationOptions,
-    lower: bool,
-) -> SpatialLogKappaCoords {
-    let total: usize = dims_per_term.iter().sum();
-    let value = if lower {
-        -options.max_length_scale.ln()
-    } else {
-        -options.min_length_scale.ln()
-    };
-    SpatialLogKappaCoords::new_with_dims(
-        Array1::<f64>::from_elem(total, value),
-        dims_per_term.to_vec(),
-    )
-}
-
 // `pub(super)` so the sibling re-homed fixture `adaptive_bounded_duchon_tests`
 // (the other #1601 orphan that shared this monolith helper) resolves it through
 // the `drivers` parent scope instead of duplicating the setup.
 pub(super) fn two_block_exact_joint_hyper_setup(
+    data: ArrayView2<'_, f64>,
     meanspec: &TermCollectionSpec,
     noisespec: &TermCollectionSpec,
-    kappa_options: &SpatialLengthScaleOptimizationOptions,
 ) -> ExactJointHyperSetup {
     let mean_terms = spatial_length_scale_term_indices(meanspec);
     let noise_terms = spatial_length_scale_term_indices(noisespec);
@@ -338,14 +321,14 @@ pub(super) fn two_block_exact_joint_hyper_setup(
     let mean_use_aniso = has_aniso_terms(meanspec, &mean_terms);
     let noise_use_aniso = has_aniso_terms(noisespec, &noise_terms);
     let mean_log_kappa = if mean_use_aniso {
-        SpatialLogKappaCoords::from_length_scales_aniso(meanspec, &mean_terms, kappa_options)
+        SpatialLogKappaCoords::from_length_scales_aniso(meanspec, &mean_terms)
     } else {
-        SpatialLogKappaCoords::from_length_scales(meanspec, &mean_terms, kappa_options)
+        SpatialLogKappaCoords::from_length_scales(meanspec, &mean_terms)
     };
     let noise_log_kappa = if noise_use_aniso {
-        SpatialLogKappaCoords::from_length_scales_aniso(noisespec, &noise_terms, kappa_options)
+        SpatialLogKappaCoords::from_length_scales_aniso(noisespec, &noise_terms)
     } else {
-        SpatialLogKappaCoords::from_length_scales(noisespec, &noise_terms, kappa_options)
+        SpatialLogKappaCoords::from_length_scales(noisespec, &noise_terms)
     };
     let dims_per_term = mean_log_kappa
         .dims_per_term()
@@ -371,12 +354,28 @@ pub(super) fn two_block_exact_joint_hyper_setup(
         ),
         dims_per_term.clone(),
     );
-    ExactJointHyperSetup::new(
-        Array1::zeros(0),
-        log_kappa0,
-        spatial_log_kappa_bounds_from_options(&dims_per_term, kappa_options, true),
-        spatial_log_kappa_bounds_from_options(&dims_per_term, kappa_options, false),
-    )
+    // The production search box of each block, concatenated in block order.
+    let mean_dims = mean_log_kappa.dims_per_term().to_vec();
+    let noise_dims = noise_log_kappa.dims_per_term().to_vec();
+    let concatenated = |mean: SpatialLogKappaCoords, noise: SpatialLogKappaCoords| {
+        SpatialLogKappaCoords::new_with_dims(
+            Array1::from_iter(mean.as_array().iter().chain(noise.as_array().iter()).copied()),
+            dims_per_term.clone(),
+        )
+    };
+    let lower = concatenated(
+        SpatialLogKappaCoords::lower_bounds_aniso_from_data(data, meanspec, &mean_terms, &mean_dims)
+            .expect("mean-block spatial search box"),
+        SpatialLogKappaCoords::lower_bounds_aniso_from_data(data, noisespec, &noise_terms, &noise_dims)
+            .expect("noise-block spatial search box"),
+    );
+    let upper = concatenated(
+        SpatialLogKappaCoords::upper_bounds_aniso_from_data(data, meanspec, &mean_terms, &mean_dims)
+            .expect("mean-block spatial search box"),
+        SpatialLogKappaCoords::upper_bounds_aniso_from_data(data, noisespec, &noise_terms, &noise_dims)
+            .expect("noise-block spatial search box"),
+    );
+    ExactJointHyperSetup::new(Array1::zeros(0), log_kappa0, lower, upper)
 }
 
 fn max_abs_diff_matrix(a: &Array2<f64>, b: &Array2<f64>) -> f64 {
@@ -2234,7 +2233,7 @@ pub(super) fn run_two_block_exact_joint_optimize(
         pilot_subsample_threshold: 0,
         ..SpatialLengthScaleOptimizationOptions::default()
     };
-    let joint_setup = two_block_exact_joint_hyper_setup(meanspec, noisespec, &kappa_options);
+    let joint_setup = two_block_exact_joint_hyper_setup(data, meanspec, noisespec);
     let theta_dim = joint_setup.theta0().len();
 
     let mean_terms = spatial_length_scale_term_indices(meanspec);
@@ -2359,8 +2358,7 @@ fn staged_exact_joint_outer_reoptimizes_and_certifies_the_full_row_measure() {
         pilot_subsample_threshold: 0,
         ..SpatialLengthScaleOptimizationOptions::default()
     };
-    let joint_setup =
-        two_block_exact_joint_hyper_setup(&meanspec, &noisespec, &kappa_options);
+    let joint_setup = two_block_exact_joint_hyper_setup(data.view(), &meanspec, &noisespec);
     let theta_dim = joint_setup.theta0().len();
     assert!(theta_dim > 0, "fixture must expose spatial outer coordinates");
 
@@ -2650,11 +2648,7 @@ fn spatial_aniso_joint_exact_hessian_materializes_small_case() {
     let dims_per_term = spatial_dims_per_term(&frozen, &spatial_terms);
     assert_eq!(dims_per_term, vec![2]);
     let rho_dim = design.penalties.len();
-    let log_kappa0 = SpatialLogKappaCoords::from_length_scales_aniso(
-        &frozen,
-        &spatial_terms,
-        &SpatialLengthScaleOptimizationOptions::default(),
-    );
+    let log_kappa0 = SpatialLogKappaCoords::from_length_scales_aniso(&frozen, &spatial_terms);
     let mut theta = Array1::<f64>::zeros(rho_dim + log_kappa0.as_array().len());
     for j in 0..rho_dim {
         theta[j] = -0.15 + 0.07 * j as f64;
@@ -2838,22 +2832,13 @@ fn exact_spatial_joint_engine_aniso_iso_parity_1d() {
     // shared verbatim between the two engine invocations so that any
     // difference in the result can only come from the coordinate kind.
     let kappa_options = SpatialLengthScaleOptimizationOptions::default();
-    let log_kappa0 =
-        SpatialLogKappaCoords::from_length_scales(&frozen, &spatial_terms, &kappa_options);
-    let log_kappa_lower = SpatialLogKappaCoords::lower_bounds_from_data(
-        data.view(),
-        &frozen,
-        &spatial_terms,
-        &kappa_options,
-    )
-    .expect("lower isotropic-scale bounds");
-    let log_kappa_upper = SpatialLogKappaCoords::upper_bounds_from_data(
-        data.view(),
-        &frozen,
-        &spatial_terms,
-        &kappa_options,
-    )
-    .expect("upper isotropic-scale bounds");
+    let log_kappa0 = SpatialLogKappaCoords::from_length_scales(&frozen, &spatial_terms);
+    let log_kappa_lower =
+        SpatialLogKappaCoords::lower_bounds_from_data(data.view(), &frozen, &spatial_terms)
+            .expect("lower isotropic-scale bounds");
+    let log_kappa_upper =
+        SpatialLogKappaCoords::upper_bounds_from_data(data.view(), &frozen, &spatial_terms)
+            .expect("upper isotropic-scale bounds");
     let log_kappa0 = log_kappa0.clamp_to_bounds(&log_kappa_lower, &log_kappa_upper);
     let setup = ExactJointHyperSetup::new(
         Array1::<f64>::zeros(rho_dim), // log λ seed (λ = 1)
@@ -3024,23 +3009,13 @@ fn psi_gram_tensor_lane_matches_streamed_reml_cost_and_gradient() {
     assert!(rho_dim >= 1, "expect at least one penalty block");
 
     // ψ window straight from the production bounds helpers.
-    let kappa_options = SpatialLengthScaleOptimizationOptions::default();
-    let log_kappa0 =
-        SpatialLogKappaCoords::from_length_scales(&frozen, &spatial_terms, &kappa_options);
-    let log_kappa_lower = SpatialLogKappaCoords::lower_bounds_from_data(
-        data.view(),
-        &frozen,
-        &spatial_terms,
-        &kappa_options,
-    )
-    .expect("lower isotropic-scale bounds");
-    let log_kappa_upper = SpatialLogKappaCoords::upper_bounds_from_data(
-        data.view(),
-        &frozen,
-        &spatial_terms,
-        &kappa_options,
-    )
-    .expect("upper isotropic-scale bounds");
+    let log_kappa0 = SpatialLogKappaCoords::from_length_scales(&frozen, &spatial_terms);
+    let log_kappa_lower =
+        SpatialLogKappaCoords::lower_bounds_from_data(data.view(), &frozen, &spatial_terms)
+            .expect("lower isotropic-scale bounds");
+    let log_kappa_upper =
+        SpatialLogKappaCoords::upper_bounds_from_data(data.view(), &frozen, &spatial_terms)
+            .expect("upper isotropic-scale bounds");
     let log_kappa0 = log_kappa0.clamp_to_bounds(&log_kappa_lower, &log_kappa_upper);
     let setup = ExactJointHyperSetup::new(
         Array1::<f64>::zeros(rho_dim),
@@ -3382,23 +3357,13 @@ fn psi_gram_tensor_e2e_kappa_optimum_matches_streamed() {
     let spatial_terms = spatial_length_scale_term_indices(&frozen);
     let dims_per_term = spatial_dims_per_term(&frozen, &spatial_terms);
     let rho_dim = frozen_design.penalties.len();
-    let kappa_options = SpatialLengthScaleOptimizationOptions::default();
-    let log_kappa0 =
-        SpatialLogKappaCoords::from_length_scales(&frozen, &spatial_terms, &kappa_options);
-    let log_kappa_lower = SpatialLogKappaCoords::lower_bounds_from_data(
-        data.view(),
-        &frozen,
-        &spatial_terms,
-        &kappa_options,
-    )
-    .expect("lower isotropic-scale bounds");
-    let log_kappa_upper = SpatialLogKappaCoords::upper_bounds_from_data(
-        data.view(),
-        &frozen,
-        &spatial_terms,
-        &kappa_options,
-    )
-    .expect("upper isotropic-scale bounds");
+    let log_kappa0 = SpatialLogKappaCoords::from_length_scales(&frozen, &spatial_terms);
+    let log_kappa_lower =
+        SpatialLogKappaCoords::lower_bounds_from_data(data.view(), &frozen, &spatial_terms)
+            .expect("lower isotropic-scale bounds");
+    let log_kappa_upper =
+        SpatialLogKappaCoords::upper_bounds_from_data(data.view(), &frozen, &spatial_terms)
+            .expect("upper isotropic-scale bounds");
     let log_kappa0 = log_kappa0.clamp_to_bounds(&log_kappa_lower, &log_kappa_upper);
     let setup = ExactJointHyperSetup::new(
         Array1::<f64>::zeros(rho_dim),
@@ -3865,13 +3830,7 @@ fn two_block_exact_joint_design_cache_clears_memo_on_theta_change() {
         random_effect_terms: vec![],
         smooth_terms: vec![matern_term("noise", 1.1)],
     };
-    let kappa_options = SpatialLengthScaleOptimizationOptions {
-        max_outer_iter: 1,
-        rel_tol: 1e-6,
-        pilot_subsample_threshold: 0,
-        ..SpatialLengthScaleOptimizationOptions::default()
-    };
-    let joint_setup = two_block_exact_joint_hyper_setup(&meanspec, &noisespec, &kappa_options);
+    let joint_setup = two_block_exact_joint_hyper_setup(data.view(), &meanspec, &noisespec);
     let theta0 = joint_setup.theta0();
 
     let mean_design = build_term_collection_design(data.view(), &meanspec).unwrap_or_else(|e| panic!("{} failed: {:?}", "mean", e));
@@ -4598,20 +4557,18 @@ fn pure_duchon_from_length_scales_aniso_is_isotropic_single_psi() {
         }],
     };
 
-    let opts = SpatialLengthScaleOptimizationOptions::default();
-    let coords = SpatialLogKappaCoords::from_length_scales_aniso(&spec, &[0], &opts);
+    let coords = SpatialLogKappaCoords::from_length_scales_aniso(&spec, &[0]);
 
     // Duchon anisotropy η is a fixed, geometry-derived basis parameter, not
     // a REML hyper axis. Even with multi-axis `aniso_log_scales`,
     // `from_length_scales_aniso` enrolls a Duchon term as a single isotropic
     // ψ̄ slot — matching the lone `SpatialPsiDerivative` the hyper_dirs
     // builder emits — via the `spatial_term_uses_per_axis_psi` single source
-    // of truth. A pure Duchon carries no explicit κ, so ψ̄ defaults to
-    // −ln(min_length_scale).
+    // of truth. A pure Duchon carries no explicit κ, so its ψ̄ slot holds the
+    // placeholder 0 that `reseed_from_data` replaces.
     assert_eq!(coords.dims_per_term(), &[1]);
     assert_eq!(coords.as_array().len(), 1);
-    let expected_psi = -opts.min_length_scale.ln();
-    assert!((coords.as_array()[0] - expected_psi).abs() <= 1e-12);
+    assert_eq!(coords.as_array()[0], 0.0);
 }
 
 #[test]
@@ -4742,11 +4699,7 @@ fn from_length_scales_aniso_keeps_nonaniso_spatial_terms_scalar() {
     };
 
     let term_indices = [0usize, 1usize];
-    let coords = SpatialLogKappaCoords::from_length_scales_aniso(
-        &spec,
-        &term_indices,
-        &SpatialLengthScaleOptimizationOptions::default(),
-    );
+    let coords = SpatialLogKappaCoords::from_length_scales_aniso(&spec, &term_indices);
 
     assert_eq!(spatial_dims_per_term(&spec, &term_indices), vec![2, 1]);
     assert_eq!(coords.dims_per_term(), &[2, 1]);
@@ -4788,23 +4741,14 @@ fn aniso_bounds_clamp_preserves_in_range_global_length_scale_and_eta() {
             joint_null_rotation: None,
         }],
     };
-    let options = SpatialLengthScaleOptimizationOptions {
-        max_outer_iter: 1,
-        rel_tol: 1e-6,
-        min_length_scale: (-2.0_f64).exp(),
-        max_length_scale: 1.0_f64.exp(),
-        pilot_subsample_threshold: 0,
-        ..SpatialLengthScaleOptimizationOptions::default()
-    };
     let spatial_terms = vec![0];
     let dims_per_term = spatial_dims_per_term(&spec, &spatial_terms);
-    let seed = SpatialLogKappaCoords::from_length_scales_aniso(&spec, &spatial_terms, &options);
+    let seed = SpatialLogKappaCoords::from_length_scales_aniso(&spec, &spatial_terms);
     let lower = SpatialLogKappaCoords::lower_bounds_aniso_from_data(
         data.view(),
         &spec,
         &spatial_terms,
         &dims_per_term,
-        &options,
     )
     .expect("lower anisotropic spatial bounds");
     let upper = SpatialLogKappaCoords::upper_bounds_aniso_from_data(
@@ -4812,7 +4756,6 @@ fn aniso_bounds_clamp_preserves_in_range_global_length_scale_and_eta() {
         &spec,
         &spatial_terms,
         &dims_per_term,
-        &options,
     )
     .expect("upper anisotropic spatial bounds");
 
@@ -4946,7 +4889,6 @@ fn spatial_anisotropy_pilot_initializer_seeds_geometry_without_fit() {
         &mut spec,
         &spatial_terms,
         8,
-        &SpatialLengthScaleOptimizationOptions::default(),
     )
     .expect("pilot anisotropy initialization");
 

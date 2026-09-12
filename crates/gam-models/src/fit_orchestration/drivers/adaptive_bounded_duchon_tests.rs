@@ -544,14 +544,8 @@ mod adaptive_bounded_duchon_tests {
             }
         }
 
-        let kappa_options = SpatialLengthScaleOptimizationOptions {
-            max_outer_iter: 1,
-            rel_tol: 1e-6,
-            pilot_subsample_threshold: 0,
-            ..SpatialLengthScaleOptimizationOptions::default()
-        };
         let joint_setup =
-            two_block_exact_joint_hyper_setup(&frozen_specs[0], &frozen_specs[1], &kappa_options);
+            two_block_exact_joint_hyper_setup(data.view(), &frozen_specs[0], &frozen_specs[1]);
         // Design B: Duchon anisotropy η is a fixed, geometry-derived basis
         // parameter, never a REML axis, so two pure-Duchon blocks contribute no
         // outer log-κ axis — the joint outer vector is ρ-only.

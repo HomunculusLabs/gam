@@ -618,7 +618,6 @@ pub(crate) fn fit_survival_location_scale_terms(
         &spec.thresholdspec,
         &spec.log_sigmaspec,
         rho0,
-        kappa_options,
     )
     .map_err(|error| error.to_string())?;
 

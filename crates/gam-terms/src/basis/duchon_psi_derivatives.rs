@@ -2023,36 +2023,6 @@ pub(crate) fn build_duchon_basis_designwithworkspace(
         })
         .transpose()?;
 
-    // Practical safe operating range (document Eq. D.2):
-    //   κ in [1e-2 / r_max, 1e2 / r_min]
-    // where r_min/r_max are pairwise center distance extrema. Under
-    // anisotropy the kernel metric is y-space (y_a = exp(η_a) x_a), so
-    // the relevant r_min/r_max are y-space pairwise distances, not raw.
-    // We keep user-provided κ but emit a warning outside this regime.
-    let warn_bounds = match (length_scale, aniso_log_scales) {
-        (Some(_), Some(eta)) => {
-            let y_centers = points_in_aniso_y_space(centers, eta);
-            pairwise_distance_bounds(y_centers.view())
-        }
-        (Some(_), None) => pairwise_distance_bounds(centers),
-        (None, _) => None,
-    };
-    if let (Some(length_scale), Some((r_min, r_max))) = (length_scale, warn_bounds) {
-        let kappa = duchon_inverse_length_scale(length_scale, "Duchon basis operating range")?;
-        let kappa_lo = 1e-2 / r_max;
-        let kappa_hi = 1e2 / r_min;
-        if kappa < kappa_lo || kappa > kappa_hi {
-            log::debug!(
-                "Duchon κ={} is outside recommended range [{}, {}] derived from centers (r_min={}, r_max={}); numerical conditioning may degrade",
-                kappa,
-                kappa_lo,
-                kappa_hi,
-                r_min,
-                r_max
-            );
-        }
-    }
-
     let kernel_cols = z.ncols();
     let poly_cols = poly_block.ncols();
     let total_cols = kernel_cols + poly_cols;

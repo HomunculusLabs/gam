@@ -581,7 +581,6 @@ pub(super) fn joint_setup(
     slope_penalties: usize,
     absorber_rho0: Option<f64>,
     extra_rho0: &[f64],
-    kappa_options: &SpatialLengthScaleOptimizationOptions,
 ) -> Result<ExactJointHyperSetup, gam_terms::basis::BasisError> {
     let marginal_terms = spatial_length_scale_term_indices(marginalspec);
     let slope_terms = spatial_length_scale_term_indices(slopespec);
@@ -600,15 +599,10 @@ pub(super) fn joint_setup(
     for (idx, &value) in extra_rho0.iter().enumerate() {
         rho0vec[marginal_penalties + slope_penalties + idx] = value;
     }
-    let marginal_kappa = SpatialLogKappaCoords::from_length_scales_aniso(
-        marginalspec,
-        &marginal_terms,
-        kappa_options,
-    )
-    .reseed_from_data(data, marginalspec, &marginal_terms, kappa_options)?;
-    let slope_kappa =
-        SpatialLogKappaCoords::from_length_scales_aniso(slopespec, &slope_terms, kappa_options)
-            .reseed_from_data(data, slopespec, &slope_terms, kappa_options)?;
+    let marginal_kappa = SpatialLogKappaCoords::from_length_scales_aniso(marginalspec, &marginal_terms)
+        .reseed_from_data(data, marginalspec, &marginal_terms)?;
+    let slope_kappa = SpatialLogKappaCoords::from_length_scales_aniso(slopespec, &slope_terms)
+        .reseed_from_data(data, slopespec, &slope_terms)?;
     let mut values = marginal_kappa.as_array().to_vec();
     values.extend(slope_kappa.as_array().iter());
     let marginal_dims = marginal_kappa.dims_per_term().to_vec();
@@ -622,15 +616,9 @@ pub(super) fn joint_setup(
         marginalspec,
         &marginal_terms,
         &marginal_dims,
-        kappa_options,
     )?;
-    let slope_lower = SpatialLogKappaCoords::lower_bounds_aniso_from_data(
-        data,
-        slopespec,
-        &slope_terms,
-        &slope_dims,
-        kappa_options,
-    )?;
+    let slope_lower =
+        SpatialLogKappaCoords::lower_bounds_aniso_from_data(data, slopespec, &slope_terms, &slope_dims)?;
     let mut lower_vals = marginal_lower.as_array().to_vec();
     lower_vals.extend(slope_lower.as_array().iter());
     let log_kappa_lower =
@@ -640,15 +628,9 @@ pub(super) fn joint_setup(
         marginalspec,
         &marginal_terms,
         &marginal_dims,
-        kappa_options,
     )?;
-    let slope_upper = SpatialLogKappaCoords::upper_bounds_aniso_from_data(
-        data,
-        slopespec,
-        &slope_terms,
-        &slope_dims,
-        kappa_options,
-    )?;
+    let slope_upper =
+        SpatialLogKappaCoords::upper_bounds_aniso_from_data(data, slopespec, &slope_terms, &slope_dims)?;
     let mut upper_vals = marginal_upper.as_array().to_vec();
     upper_vals.extend(slope_upper.as_array().iter());
     let log_kappa_upper = SpatialLogKappaCoords::new_with_dims(Array1::from_vec(upper_vals), dims);

@@ -451,18 +451,10 @@ pub(crate) fn joint_setup(
     }
     // Time block has no spatial length scales (pure B-spline on time)
     let empty_kappa = SpatialLogKappaCoords::new_with_dims(Array1::zeros(0), vec![]);
-    let marginal_kappa = SpatialLogKappaCoords::from_length_scales_aniso(
-        marginalspec,
-        &marginal_terms,
-        kappa_options,
-    )
-    .reseed_from_data(data, marginalspec, &marginal_terms, kappa_options)?;
-    let slope_kappa = SpatialLogKappaCoords::from_length_scales_aniso(
-        slopespec,
-        &slope_terms,
-        kappa_options,
-    )
-    .reseed_from_data(data, slopespec, &slope_terms, kappa_options)?;
+    let marginal_kappa = SpatialLogKappaCoords::from_length_scales_aniso(marginalspec, &marginal_terms)
+        .reseed_from_data(data, marginalspec, &marginal_terms)?;
+    let slope_kappa = SpatialLogKappaCoords::from_length_scales_aniso(slopespec, &slope_terms)
+        .reseed_from_data(data, slopespec, &slope_terms)?;
     let mut values = empty_kappa.as_array().to_vec();
     values.extend(marginal_kappa.as_array().iter());
     values.extend(slope_kappa.as_array().iter());
@@ -479,15 +471,9 @@ pub(crate) fn joint_setup(
         marginalspec,
         &marginal_terms,
         &marginal_dims,
-        kappa_options,
     )?;
-    let slope_lower = SpatialLogKappaCoords::lower_bounds_aniso_from_data(
-        data,
-        slopespec,
-        &slope_terms,
-        &slope_dims,
-        kappa_options,
-    )?;
+    let slope_lower =
+        SpatialLogKappaCoords::lower_bounds_aniso_from_data(data, slopespec, &slope_terms, &slope_dims)?;
     let mut lower_vals = Vec::with_capacity(dims.iter().sum());
     lower_vals.extend(marginal_lower.as_array().iter());
     lower_vals.extend(slope_lower.as_array().iter());
@@ -498,15 +484,9 @@ pub(crate) fn joint_setup(
         marginalspec,
         &marginal_terms,
         &marginal_dims,
-        kappa_options,
     )?;
-    let slope_upper = SpatialLogKappaCoords::upper_bounds_aniso_from_data(
-        data,
-        slopespec,
-        &slope_terms,
-        &slope_dims,
-        kappa_options,
-    )?;
+    let slope_upper =
+        SpatialLogKappaCoords::upper_bounds_aniso_from_data(data, slopespec, &slope_terms, &slope_dims)?;
     let mut upper_vals = Vec::with_capacity(dims.iter().sum());
     upper_vals.extend(marginal_upper.as_array().iter());
     upper_vals.extend(slope_upper.as_array().iter());

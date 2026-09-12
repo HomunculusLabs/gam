@@ -165,12 +165,7 @@ impl FitTiming {
 
 /// Outcome of one fit attempt: either timings (converged) or the failure reason
 /// string (so the diagnostic can tabulate instead of aborting).
-fn run_fit(
-    n: usize,
-    kappa_enabled: bool,
-    aniso: bool,
-    bounds: (f64, f64),
-) -> Result<FitTiming, String> {
+fn run_fit(n: usize, kappa_enabled: bool, aniso: bool) -> Result<FitTiming, String> {
     let (x, y) = simulate_1d_gaussian(n);
     let weights = Array1::ones(n);
     let offset = Array1::zeros(n);
@@ -186,8 +181,6 @@ fn run_fit(
         },
         rel_tol: 1e-5,
         log_step: std::f64::consts::LN_2,
-        min_length_scale: bounds.0,
-        max_length_scale: bounds.1,
         pilot_subsample_threshold: 0,
     };
 
@@ -244,8 +237,8 @@ fn run_fit(
     }
 }
 
-fn run_kappa_trial_seconds(n: usize, aniso: bool, bounds: (f64, f64)) -> Result<FitTiming, String> {
-    let timing = run_fit(n, true, aniso, bounds)?;
+fn run_kappa_trial_seconds(n: usize, aniso: bool) -> Result<FitTiming, String> {
+    let timing = run_fit(n, true, aniso)?;
     if timing.kappa_timing.is_none() {
         return Err("κ optimizer did not report internal trial timing".to_string());
     }
@@ -253,24 +246,17 @@ fn run_kappa_trial_seconds(n: usize, aniso: bool, bounds: (f64, f64)) -> Result<
 }
 
 /// Diagnostic: which 1-D Gaussian κ configuration actually converges? Isolates
-/// the optimizer path (isotropic-analytic vs per-axis) and the length-scale
-/// bounds (tight vs wide), so a non-convergence can be attributed to a real
-/// gradient/optimizer defect rather than a boundary solution or a bad fixture.
+/// the optimizer path (isotropic-analytic vs per-axis), so a non-convergence
+/// can be attributed to a real gradient/optimizer defect rather than a boundary
+/// solution or a bad fixture.
 #[test]
 fn kappa_iso_1d_convergence_diagnostic() {
     let n = 600usize;
-    let tight = (1e-2, 1e2);
-    let wide = (1e-4, 1e4);
-    let configs: [(&str, bool, (f64, f64)); 4] = [
-        ("iso  / tight", false, tight),
-        ("iso  / wide ", false, wide),
-        ("aniso/ tight", true, tight),
-        ("aniso/ wide ", true, wide),
-    ];
+    let configs: [(&str, bool); 2] = [("iso  ", false), ("aniso", true)];
     eprintln!("[kappa-diag] n={n}  (1-D hybrid Duchon, Gaussian-identity, single penalty)");
     let mut outcomes = Vec::new();
-    for (label, aniso, bounds) in configs {
-        let r = run_fit(n, true, aniso, bounds);
+    for (label, aniso) in configs {
+        let r = run_fit(n, true, aniso);
         match &r {
             Ok(timing) => eprintln!("[kappa-diag] {label}: CONVERGED in {:.3}s", timing.wall_s),
             Err(reason) => eprintln!("[kappa-diag] {label}: FAILED — {reason}"),
@@ -283,19 +269,19 @@ fn kappa_iso_1d_convergence_diagnostic() {
     // Why this is the right gate for the #2760 root causes, from an angle the
     // n-ladder does not cover. At `n = 600` the scalar-ρ incumbent already puts
     // 4 of 5 coordinates below `−JOINT_RHO_BOUND`, so the pre-#2760 box pasted
-    // its lower wall onto them; and the ψ-Gram surrogate is armed on `tight`
-    // bounds and not on `wide`. `iso / tight` — both defects at once — was the
-    // one red cell here, refusing at `|Pg| = 7.011e-2` against `4.168e-2` after
-    // a `StepSizeTooSmall` line search at 14 iterations. All four cells converge
-    // now, and the four differ in exactly the two axes the repairs touch
-    // (which optimizer routes the ψ block; whether the surrogate arms), so a
-    // regression of either root cause turns a cell red here in seconds — long
-    // before the 16k ladder rung would notice.
+    // its lower wall onto them. The one red cell was then the isotropic route
+    // under a hand-set `[1e-2, 1e2]` length-scale window, on which the ψ-Gram
+    // surrogate armed: it refused at `|Pg| = 7.011e-2` against `4.168e-2` after
+    // a `StepSizeTooSmall` line search at 14 iterations. That window is gone
+    // (#2902): the κ box is derived from the point cloud, so the cells now differ
+    // only in which optimizer routes the ψ block, and a regression of either
+    // root cause on that route turns a cell red here in seconds — long before
+    // the 16k ladder rung would notice.
     for (label, outcome) in &outcomes {
         assert!(
             outcome.is_ok(),
-            "[kappa-diag] {label}: the 1-D Gaussian κ fit must converge at n={n} in every \
-             (optimizer route × length-scale window) configuration; it refused with {:?}. \
+            "[kappa-diag] {label}: the 1-D Gaussian κ fit must converge at n={n} on every \
+             optimizer route; it refused with {:?}. \
              This cell was red before gam#2760 whenever the joint ρ box pinned the graded \
              incumbent on its own wall, or the certified n-free ψ-Gram surrogate was still \
              the measure at certification time.",
@@ -310,8 +296,8 @@ fn kappa_iso_1d_convergence_diagnostic() {
 
 /// Pin the sample-size threshold at which the isotropic-analytic κ optimizer
 /// tips from converging to non-converging on the *same* well-conditioned 1-D
-/// Duchon Gaussian fixture (gentle `y=sin(t)`, 12 centers, single penalty, tight
-/// bounds). n=600 converges; earlier runs showed n=1000 failing with a stuck
+/// Duchon Gaussian fixture (gentle `y=sin(t)`, 12 centers, single penalty).
+/// n=600 converges; earlier runs showed n=1000 failing with a stuck
 /// `grad_norm≈1.9e3`. This sweep brackets the transition so the defect report
 /// carries an exact reproducer.
 ///
@@ -322,16 +308,14 @@ fn kappa_iso_1d_convergence_diagnostic() {
 /// and 1200 all converge — and that sentence is the claim worth defending. It
 /// is a cheap and sharp one: this sweep runs four fits in seconds, and each of
 /// them crosses the regime where the scalar-ρ incumbent falls outside the joint
-/// ±12 prior and where the ψ-Gram surrogate is armed, so a regression of either
-/// #2760 root cause reappears here as a rung going red rather than as a wall-
-/// clock mystery at 16k.
+/// ±12 prior, so a regression of that #2760 root cause reappears here as a rung
+/// going red rather than as a wall-clock mystery at 16k.
 #[test]
 fn kappa_iso_1d_n_threshold_sweep() {
-    let bounds = (1e-2, 1e2);
-    eprintln!("[kappa-nthresh] iso-1D hybrid Duchon, Gaussian, single penalty, bounds={bounds:?}");
+    eprintln!("[kappa-nthresh] iso-1D hybrid Duchon, Gaussian, single penalty");
     let mut refusals = Vec::new();
     for &n in &[600usize, 800, 1000, 1200] {
-        match run_fit(n, true, false, bounds) {
+        match run_fit(n, true, false) {
             Ok(timing) => eprintln!(
                 "[kappa-nthresh] n={n:>5}: CONVERGED in {:.1}s",
                 timing.wall_s
@@ -423,13 +407,13 @@ fn install_nfree_reset_logger() {
 #[test]
 fn zzz_diag_n16000_reset_reasons() {
     install_nfree_reset_logger();
-    let (aniso, bounds) = (false, (1e-2, 1e2));
+    let aniso = false;
     // Warm-up only — a failure here must not fail the diagnostic, but it
     // explains any oddity in the 16k timings below, so say so.
-    if let Err(error) = run_fit(1000, true, aniso, bounds) {
+    if let Err(error) = run_fit(1000, true, aniso) {
         eprintln!("[diag-16k] warm-up fit failed: {error}");
     }
-    let r = run_kappa_trial_seconds(16_000, aniso, bounds).unwrap_or_else(|reason| {
+    let r = run_kappa_trial_seconds(16_000, aniso).unwrap_or_else(|reason| {
         // The refusal text carries |Pg|, its bound, the rung, the rail tests and a
         // rho checkpoint. A bare `.unwrap()` buries all of it in a panic payload,
         // where a capture filter can drop it and leave a panic with no reason --

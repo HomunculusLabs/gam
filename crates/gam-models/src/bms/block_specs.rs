@@ -1294,7 +1294,6 @@ mod runaway_tests {
             3,
             Some(2.5),
             &[0.4],
-            &SpatialLengthScaleOptimizationOptions::default(),
         )
         .expect("empty spatial geometry is valid");
 
@@ -2536,7 +2535,6 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
         slope_design.penalties.len(),
         absorber_rho0,
         &extra_rho0,
-        &effective_kappa_options,
     )
     .map_err(|error| error.to_string())?;
     let setup = if sigma_learnable {

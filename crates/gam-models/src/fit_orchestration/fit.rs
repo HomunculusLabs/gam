@@ -791,7 +791,6 @@ pub(crate) fn fit_standard_model(
         wiggle_link_kind,
         selected_wiggle_basis,
         &wiggle_options,
-        &request.kappa_options,
     ) {
         Ok(solved) => solved,
         Err(e) => {

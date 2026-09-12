@@ -5501,5 +5501,29 @@
     ],
     "reason": "#2908: gam_sae::structure_harvest::ChartTransition was a public carrier of sign, offset and log_e_value built only inside unit_speed_glue_certificate. Its sign and offset duplicated the UnitSpeedChartTransition that CertifiedGlue already carries, and its name collided with manifold::local_charts::ChartTransition, a different map between ambient-patch tangent frames. The certificate now returns its seam log e-value directly; no behaviour changes.",
     "evidence": "At base 23e2cdbb23a5c00c99fdd40ab1939811321eb4f0, git grep -n -w ChartTransition over crates and docs finds this type only in crates/gam-sae/src/structure_harvest.rs: its definition, the certificate's return type and its construction, all changed in this commit. Every other match is the distinct manifold::local_charts::ChartTransition and its tests and docs. No lib.rs, gam-pyffi or gam-cli path names it. Its only readers used log_e_value: the glue census in harvest_glue_proposals and two tests in structure_harvest/tests.rs, all now reading the certificate's plain log e-value."
+  },
+  {
+    "base": "934e00edda846edaca53de76d0903ff3e9479473",
+    "items": [
+      "crates/gam-terms/src/smooth/term_specs.rs:const:KERNEL_RANGE_MIN_DIAMETER_FRACTION",
+      "crates/gam-terms/src/smooth/term_specs.rs:const:KERNEL_RANGE_MAX_SPACING_MULTIPLE",
+      "crates/gam-terms/src/smooth/spatial_length_scale_window.rs:fn:project_spatial_length_scale_into_window",
+      "crates/gam-terms/src/smooth/spatial_length_scale_window.rs:fn:spatial_term_seed_psi",
+      "crates/gam-terms/src/smooth/spatial_length_scale_window.rs:fn:project_spatial_length_scales_in_spec",
+      "crates/gam-terms/src/smooth/spatial_length_scale_projection_2726_tests.rs:const:RAW_LENGTH_SCALE",
+      "crates/gam-terms/src/smooth/spatial_length_scale_projection_2726_tests.rs:const:MIN_LENGTH_SCALE",
+      "crates/gam-terms/src/smooth/spatial_length_scale_projection_2726_tests.rs:const:MAX_LENGTH_SCALE",
+      "crates/gam-terms/src/smooth/spatial_length_scale_projection_2726_tests.rs:fn:options",
+      "crates/gam-terms/src/smooth/spatial_length_scale_projection_2726_tests.rs:fn:duchon_1d_spec",
+      "crates/gam-terms/src/smooth/spatial_length_scale_projection_2726_tests.rs:fn:grid_1d",
+      "crates/gam-terms/src/smooth/spatial_length_scale_projection_2726_tests.rs:fn:joint_psi_seed_equals_the_spec_incumbent_after_upstream_projection",
+      "crates/gam-terms/src/smooth/spatial_length_scale_projection_2726_tests.rs:fn:in_window_length_scale_is_not_moved",
+      "crates/gam-models/src/fit_orchestration/drivers/design_assembly_constraint_tests.rs:fn:spatial_log_kappa_bounds_from_options",
+      "tests/regressions/misc/regression_2726_joint_psi_seed_shares_theta0.rs:const:MIN_LENGTH_SCALE",
+      "tests/regressions/misc/regression_2726_joint_psi_seed_shares_theta0.rs:const:MAX_LENGTH_SCALE",
+      "tests/regressions/misc/regression_2726_joint_psi_seed_shares_theta0.rs:fn:regression_2726_fixture_is_the_out_of_window_arm"
+    ],
+    "reason": "SPEC rule 20 (#2902, table row 11): the spatial kappa search box was clipped by a hand-supplied caller window (SpatialLengthScaleOptimizationOptions::min_length_scale = 1e-3 and max_length_scale = 1e3 by default) and by literal multiples of the cloud's pairwise distances (KERNEL_RANGE_MIN_DIAMETER_FRACTION = 2 over r_max, KERNEL_RANGE_MAX_SPACING_MULTIPLE = 100 over r_min). spatial_term_psi_bounds now derives kappa in [sqrt(eps)/r_max, 1/(sqrt(eps)*r_min)]: every enrolled kernel depends on kappa only through kappa*r, and past those edges every pair's argument is within half-mantissa of a kernel limit. The caller window, its projection module, the projection tests, and the options-window test helper are deleted, together with the control test that exercised the projection.",
+    "evidence": "At the base, git grep finds KERNEL_RANGE_MIN_DIAMETER_FRACTION and KERNEL_RANGE_MAX_SPACING_MULTIPLE only in crates/gam-terms/src/smooth/term_specs.rs: the declarations, spatial_term_psi_bounds, and the clamp_to_bounds log text. The three spatial_length_scale_window.rs functions are re-exported from crates/gam-terms/src/smooth.rs. They are called from term_specs.rs (spatial_term_seed_psi, in both seed constructors), crates/gam-models/src/fit_orchestration/drivers/spatial_optimization.rs (project_spatial_length_scales_in_spec, in spatial_kappa_incumbent), spatial_length_scale_projection_2726_tests.rs, and tests/regressions/misc/regression_2726_joint_psi_seed_shares_theta0.rs. min_length_scale and max_length_scale are set only in tests (gamlss/tests.rs, design_assembly_constraint_tests.rs, owed_1376.rs, matern_integration.rs, aniso_integration.rs, kappa_loop_n_scaling.rs, kappa_loop_n_scaling_ladder_probe.rs, and the two #2726 files). spatial_log_kappa_bounds_from_options had its only caller in two_block_exact_joint_hyper_setup, which now takes the production data-derived search box. The item list applies source_removal_guard.py's ITEM regex by hand, and the guard was not run locally (user directive: no local runs)."
   }
 ]
