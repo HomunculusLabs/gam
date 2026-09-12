@@ -539,16 +539,17 @@ pub(crate) fn identity_face_tangent_reproduces_the_full_space_kernel_bit_for_bit
 }
 
 /// gam#2894: on an active face the criterion prices `log|Zᵀ M Z|` and the kernel
-/// differentiates it. `M` is indefinite off the face (the `[[1, 2], [2, 1]]` block has a
-/// `−1` eigenvalue) and positive definite on its tangent. The full-space
-/// pseudo-determinant drops the negative eigenvalue and prices a different number, which
-/// is the control that this fixture discriminates the two geometries.
+/// differentiates it. `M` is indefinite (one eigenvalue near `−1.02`) and positive definite
+/// on the face tangent. The face normal `e₃` is not an eigenvector of `M`, so the
+/// full-space pseudo-determinant, which keeps `M`'s two positive eigenvalues, prices
+/// `log(15.25 / 1.0209…) ≈ 2.70` where the face prices `log 4.75 ≈ 1.56`. That gap is the
+/// control that this fixture discriminates the two geometries.
 #[test]
 pub(crate) fn face_tangent_kernel_prices_and_differentiates_the_face_determinant_2894() {
     let ranges = vec![(0, 3)];
     let penalties = vec![array![[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.5]]];
-    let h = array![[4.0, 0.3, 0.2], [0.3, -1.0, 2.0], [0.2, 2.0, 0.5]];
-    let active = array![[0.0, 1.0, -1.0]];
+    let h = array![[4.0, 0.5, 0.0], [0.5, -1.0, 2.0], [0.0, 2.0, 0.5]];
+    let active = array![[0.0, 0.0, 1.0]];
     let ActiveConstraintTangentGeometry::Tangent(z) =
         active_constraint_tangent_geometry(&active).expect("one active row has a face tangent")
     else {
@@ -570,9 +571,9 @@ pub(crate) fn face_tangent_kernel_prices_and_differentiates_the_face_determinant
     let (logdet, kernel) = parts(&h, Some(&z));
     let kernel = kernel.expect("a positive-definite face precision has a kernel");
     assert_eq!(kernel.u_s.ncols(), 2);
-    // `M = H + S`; the face spans `e₁` and `(e₂ + e₃)/√2`, so
-    // `Zᵀ M Z ≅ [[5, 0.5/√2], [0.5/√2, 3]]` with determinant `15 − 0.125`.
-    assert_relative_eq!(logdet, 14.875_f64.ln(), epsilon = 1e-12);
+    // `M = H + S = [[5, 0.5, 0], [0.5, 1, 2], [0, 2, 1]]`; the face is `span(e₁, e₂)`, so
+    // `Zᵀ M Z ≅ [[5, 0.5], [0.5, 1]]` with determinant `5 − 0.25`.
+    assert_relative_eq!(logdet, 4.75_f64.ln(), epsilon = 1e-12);
     let (full_logdet, _) = parts(&h, None);
     assert!(
         (full_logdet - logdet).abs() > 1e-2,
