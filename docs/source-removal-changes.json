@@ -4688,5 +4688,38 @@
     ],
     "reason": "SPEC rule 1 (#2901 V1): the dispersion location-scale row kernel took the Gamma, Beta and Tweedie dispersion score and information from forward-mode jet towers, which no speed gate compares with a hand-derived path. The kernel now derives them by hand (digamma/trigamma closed forms and the Tweedie saddlepoint/point-mass derivatives in eta_d). tower_score_info, the helper that read score and information off a tower for that kernel, loses its only caller and is deleted. The three pruned towers move into the file's cfg(test) test_support module as oracles.",
     "evidence": "At the base, git grep -n -w tower_score_info finds only its declaration and its four calls in dispersion_row_kernel (crates/gam-models/src/gamlss/dispersion_family.rs), and all four are replaced here. dispersion_beta_nll_order2, dispersion_gamma_disp_order2 and dispersion_tweedie_disp_order2 keep their declarations in the same file, so the guard sees no removal for them. The new test row_kernel_closed_form_dispersion_channels_match_the_towers checks the hand-derived working sets against the towers. The item list applies source_removal_guard.py's ITEM regex to the base and changed blobs by hand, and tower_score_info is pub(crate), so it is guarded. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "53d420d79d102e86898b8ce9f9f32a04aef101cc",
+    "items": [
+      "crates/gam-solve/src/cone_reduction.rs:fn:constrained_cone_mode",
+      "crates/gam-solve/src/cone_reduction.rs:fn:is_positive_semidefinite",
+      "crates/gam-solve/src/cone_reduction.rs:struct:ConeMode",
+      "crates/gam-solve/src/constrained_posterior.rs:fn:constrained_projection_law",
+      "crates/gam-solve/src/cross_node.rs:fn:receive",
+      "crates/gam-solve/src/estimate/optimizer.rs:fn:optimize_external_design",
+      "crates/gam-solve/src/gaussian_reml.rs:fn:gaussian_reml_multi_closed_form_warm_started_with_nullspace_dim",
+      "crates/gam-solve/src/gpu_kernels/reml_trace.rs:const:HUTCHINSON_GPU_MAX_K",
+      "crates/gam-solve/src/gpu_kernels/reml_trace.rs:const:HUTCHINSON_GPU_MIN_K",
+      "crates/gam-solve/src/gpu_kernels/reml_trace.rs:fn:should_use_gpu_hutchinson",
+      "crates/gam-solve/src/gpu_kernels/sae_resident.rs:fn:cpu_reference_outer_sequence",
+      "crates/gam-solve/src/gpu_kernels/sae_resident.rs:fn:device_fit_outer_sequence",
+      "crates/gam-solve/src/gpu_kernels/sae_resident.rs:fn:run_one_outer",
+      "crates/gam-solve/src/gpu_kernels/sae_resident.rs:fn:run_outer_sequence",
+      "crates/gam-solve/src/gpu_kernels/sae_resident.rs:struct:OuterSequenceOutcome",
+      "crates/gam-solve/src/logdet_bounds.rs:fn:decided_value",
+      "crates/gam-solve/src/measure_jet_glm_sufficient.rs:fn:assert_design_unchanged",
+      "crates/gam-solve/src/quadrature.rs:fn:cloglog_g_derivatives",
+      "crates/gam-solve/src/quadrature.rs:fn:cloglog_ghq_derivatives",
+      "crates/gam-solve/src/quadrature.rs:fn:ghq_nd_integrate",
+      "crates/gam-solve/src/quadrature.rs:fn:normal_expectation_nd_adaptive",
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs:fn:energy_budget_defect",
+      "crates/gam-solve/src/sensitivity.rs:fn:response_jacobian",
+      "crates/gam-terms/src/basis/duchon_psi_derivatives.rs:fn:build_duchon_basis_log_kappa_derivativeswithworkspace",
+      "crates/gam-terms/src/basis/duchon_thinplate.rs:fn:create_thin_plate_spline_basis_scaledwithworkspace",
+      "crates/gam-terms/src/basis/duchon_thinplate.rs:fn:create_thin_plate_spline_basiswithworkspace"
+    ],
+    "reason": "#2829 public-surface rule: no product uses these entry points. Their private helpers, constants and carriers lose their last caller and go with them: is_positive_semidefinite and ConeMode; run_outer_sequence, run_one_outer and OuterSequenceOutcome; HUTCHINSON_GPU_MIN_K/MAX_K; ghq_nd_integrate and cloglog_g_derivatives; create_thin_plate_spline_basis_scaledwithworkspace.",
+    "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 537023, /scratch.global/sauer354/pool/api2829/validate.537023.log). Each derived file's orphan cascade was closed to a fixed point against the base. Prose that described the deleted functions is removed or reworded: sae_resident's Phase 3b sweep comment and frame doc, reml_trace's Gating doc section, kl_certificate's defect-source paragraph and assess doc, and the optimizer, constrained_posterior, measure_jet_glm_sufficient and gam-models moments.rs comments. optimize_external_design leaves gam-solve estimate/mod.rs's pub use; the surviving optimize_external_designwith_heuristic_lambdas is used by gam-pyffi. Compile is covered by the lead's shared tip check."
   }
 ]

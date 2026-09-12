@@ -328,53 +328,6 @@ impl CrossNodeGramReduction {
         self.inner.is_complete()
     }
 
-    /// Receive one shipped partial. Validates rank, ownership, and per-rank
-    /// sequence position, then folds through
-    /// [`StreamingBorderGram::submit_chunk_gram`] (which re-validates index
-    /// range, duplicates, and partial shape). A duplicate of an already-folded
-    /// chunk — the signature of an at-least-once transport retry or a worker
-    /// that resumed from a stale cursor — is rejected with an error naming the
-    /// chunk, never silently double-counted.
-    pub fn receive(&mut self, partial: NodePartial) -> Result<(), String> {
-        let NodePartial {
-            rank,
-            chunk_index,
-            gram,
-        } = partial;
-        if rank >= self.partition.n_ranks {
-            return Err(format!(
-                "CrossNodeGramReduction: rank {rank} out of range (n_ranks = {})",
-                self.partition.n_ranks
-            ));
-        }
-        if self.partition.owner_rank(chunk_index) != rank {
-            return Err(format!(
-                "CrossNodeGramReduction: chunk {chunk_index} is owned by rank {}, not rank {rank}",
-                self.partition.owner_rank(chunk_index)
-            ));
-        }
-        let cursor = self.received_per_rank[rank];
-        match self.partition.owned_chunk(rank, cursor) {
-            Some(expected) if expected == chunk_index => {}
-            Some(expected) => {
-                return Err(format!(
-                    "CrossNodeGramReduction: rank {rank} shipped chunk {chunk_index} but its \
-                     cursor expects chunk {expected} (ordinal {cursor}); a worker resumed from \
-                     a stale or future checkpoint"
-                ));
-            }
-            None => {
-                return Err(format!(
-                    "CrossNodeGramReduction: rank {rank} shipped chunk {chunk_index} past the \
-                     end of its owned sequence"
-                ));
-            }
-        }
-        self.inner.submit_chunk_gram(chunk_index, gram)?;
-        self.received_per_rank[rank] = cursor + 1;
-        Ok(())
-    }
-
     /// Serialize the full coordinator state. Resume-equals-straight-through is
     /// inherited bit-for-bit from the inner accumulator; the per-rank cursors
     /// resume receipt validation exactly where it stopped.

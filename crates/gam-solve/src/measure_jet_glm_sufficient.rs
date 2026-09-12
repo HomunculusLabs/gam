@@ -22,8 +22,8 @@
 //! What is SAVED across trials: the O(n p) construction of the n-row measure-jet
 //! design. The n-row basis kernel is evaluated exactly once, at construction,
 //! and never again as the outer lambda loop sweeps or as IRLS reweights. The
-//! stored rows are immutable; `assert_design_unchanged` lets callers (and the
-//! oracle tests) prove the cache never touches the n-row design on a query.
+//! stored rows are immutable, so the cache never touches the n-row design on a
+//! query.
 //!
 //! What is NOT saved (and cannot be, when `W` moves): the O(n p^2) weighted
 //! contraction `X' diag(w) X` and the O(n p) `X' diag(w) z`. Those are the
@@ -127,22 +127,6 @@ impl GlmFixedDesignSufficient {
         let z2 = z.insert_axis(ndarray::Axis(1));
         let xtwz_mat = fast_xt_diag_y(&self.x, &w, &z2);
         Ok(xtwz_mat.column(0).to_owned())
-    }
-
-    /// Confirm the stored design bytes are unchanged since construction.
-    ///
-    /// This is the n-free-across-trials invariant: a `weighted_gram` /
-    /// `weighted_xty` query must never touch the n-row design. Returns an error
-    /// if the recomputed fingerprint differs from the one captured at build.
-    pub fn assert_design_unchanged(&self) -> Result<(), String> {
-        let current = fingerprint_matrix(self.x.view());
-        if current != self.design_fingerprint {
-            return Err(format!(
-                "stored design fingerprint changed: built {} now {}",
-                self.design_fingerprint, current
-            ));
-        }
-        Ok(())
     }
 
     fn validate_weights(&self, weights: ArrayView1<'_, f64>) -> Result<(), String> {

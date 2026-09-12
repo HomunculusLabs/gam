@@ -95,7 +95,7 @@ pub use joint_hyper::{
     ExternalJointHyperEvaluator, gaussian_identity_outer_response_conditioning,
 };
 pub(crate) use optimizer::optimize_external_designwith_heuristic_lambdas_andwarm_start;
-pub use optimizer::{optimize_external_design, optimize_external_designwith_heuristic_lambdas};
+pub use optimizer::optimize_external_designwith_heuristic_lambdas;
 pub(crate) use penalty::{
     ParametricColumnConditioning, faer_frob_inner, kahan_sum, map_hessian_to_original_basis,
 };

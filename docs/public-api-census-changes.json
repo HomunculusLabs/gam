@@ -1844,5 +1844,29 @@
     },
     "reason": "SPEC rule 1 (#2901 V1): tower_score_info read a dispersion row's score and information off a jet tower for the row kernel, which now derives both by hand, so the helper has no caller.",
     "evidence": "public_api_census.py's public_functions predicate over crates/gam-models/src/gamlss/dispersion_family.rs at the base and after the change yields tower_score_info as the only removed pub or pub(crate) fn. The three towers that move into test_support stay pub(super) fns in the same file. git grep -n -w tower_score_info at the base finds no caller outside dispersion_row_kernel."
+  },
+  {
+    "base": "53d420d79d102e86898b8ce9f9f32a04aef101cc",
+    "removed": {
+      "crates/gam-solve/src/cone_reduction.rs::constrained_cone_mode": 1,
+      "crates/gam-solve/src/constrained_posterior.rs::constrained_projection_law": 1,
+      "crates/gam-solve/src/cross_node.rs::receive": 1,
+      "crates/gam-solve/src/estimate/optimizer.rs::optimize_external_design": 1,
+      "crates/gam-solve/src/gaussian_reml.rs::gaussian_reml_multi_closed_form_warm_started_with_nullspace_dim": 1,
+      "crates/gam-solve/src/gpu_kernels/reml_trace.rs::should_use_gpu_hutchinson": 1,
+      "crates/gam-solve/src/gpu_kernels/sae_resident.rs::cpu_reference_outer_sequence": 1,
+      "crates/gam-solve/src/gpu_kernels/sae_resident.rs::device_fit_outer_sequence": 1,
+      "crates/gam-solve/src/logdet_bounds.rs::decided_value": 1,
+      "crates/gam-solve/src/measure_jet_glm_sufficient.rs::assert_design_unchanged": 1,
+      "crates/gam-solve/src/quadrature.rs::cloglog_ghq_derivatives": 1,
+      "crates/gam-solve/src/quadrature.rs::normal_expectation_nd_adaptive": 1,
+      "crates/gam-solve/src/rho_optimizer/kl_certificate.rs::energy_budget_defect": 1,
+      "crates/gam-solve/src/sensitivity.rs::response_jacobian": 1,
+      "crates/gam-terms/src/basis/duchon_psi_derivatives.rs::build_duchon_basis_log_kappa_derivativeswithworkspace": 1,
+      "crates/gam-terms/src/basis/duchon_thinplate.rs::create_thin_plate_spline_basis_scaledwithworkspace": 1,
+      "crates/gam-terms/src/basis/duchon_thinplate.rs::create_thin_plate_spline_basiswithworkspace": 1
+    },
+    "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. No product uses these restored-in-place gam-solve and gam-terms identities. Several lost their last caller to the earlier #2829 deletions: cloglog_ghq_derivatives, normal_expectation_nd_adaptive, gaussian_reml_multi_closed_form_warm_started_with_nullspace_dim, build_duchon_basis_log_kappa_derivativeswithworkspace and create_thin_plate_spline_basiswithworkspace.",
+    "evidence": "restored_consumers_2829.py at a39a27a17 (MSI job 536241, /scratch.global/sauer354/pool/api2829/consumers.a39a27a17e9346a0b7039f4f25996837a9fe3a52.rows.tsv) scores each deleted TSV identity as unreferenced. The one exception is cross_node::receive, which it scores as python_build_or_rename_only, only because the English word 'receive' occurs in Python and pyffi comments. At the base, git grep -w finds no caller for any of them. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 537023, /scratch.global/sauer354/pool/api2829/validate.537023.log)."
   }
 ]

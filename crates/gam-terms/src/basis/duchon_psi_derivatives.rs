@@ -1475,42 +1475,6 @@ pub(crate) fn duchon_operator_penalties_requested(spec: &DuchonOperatorPenaltySp
         || matches!(spec.stiffness, OperatorPenaltySpec::Active { .. })
 }
 
-pub fn build_duchon_basis_log_kappa_derivativeswithworkspace(
-    data: ArrayView2<'_, f64>,
-    spec: &DuchonBasisSpec,
-    workspace: &mut BasisWorkspace,
-) -> Result<BasisPsiDerivativeBundle, BasisError> {
-    if spec.periodic.is_some() {
-        return build_periodic_duchon_basis_log_kappa_derivativeswithworkspace(
-            data, spec, workspace,
-        );
-    }
-    // #2638: resolve the chart the forward would build — realized centers,
-    // effective null-space order, seeded anisotropy, adopted data-metric
-    // reparam `V`, and the identifiability transform read off the `V`-rotated
-    // design — and hand the RESOLVED spec to every sub-builder below. Passing
-    // the caller's `spec` here is what let the ψ-jet assemble in the raw `Z`
-    // frame while `build_duchon_basis(data, spec)` shipped `Z·V`.
-    let chart = prepare_duchon_derivative_contextwithworkspace(data, spec, workspace)?;
-    let operator_collocation_points =
-        if duchon_operator_penalties_requested(&chart.spec.operator_penalties) {
-            let m = (DUCHON_COLLOCATION_OVERSAMPLE * chart.centers.nrows()).min(data.nrows());
-            Some(select_thin_plate_knots(data, m)?)
-        } else {
-            None
-        };
-    build_duchon_basis_log_kappa_derivativeswith_collocationwithworkspace(
-        data,
-        &chart.spec,
-        chart.centers.view(),
-        chart.identifiability_transform.as_ref(),
-        operator_collocation_points
-            .as_ref()
-            .map(|points| points.view()),
-        workspace,
-    )
-}
-
 /// Per-axis ψ derivatives of a hybrid Duchon basis — the anisotropic sibling of
 /// [`build_duchon_basis_log_kappa_derivativeswith_collocationwithworkspace`]
 /// (gam#2735).

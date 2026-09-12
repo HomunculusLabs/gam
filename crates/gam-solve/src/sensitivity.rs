@@ -259,42 +259,6 @@ impl<'a> FitSensitivity<'a> {
         self.apply_multi(design.t())
     }
 
-    /// Data attribution `∂β̂/∂y` (p × n) — how each fitted coefficient
-    /// responds to each response value, the `t = y` channel of the one
-    /// identity `∂β̂/∂t = −H⁻¹ ∂g/∂t`.
-    ///
-    /// The response enters the penalized score only through the working
-    /// residual, so `∂g/∂y_i = −w_i x_i` and therefore
-    ///
-    /// ```text
-    ///   ∂β̂/∂y_i = w_i · H⁻¹ x_i,
-    /// ```
-    /// i.e. column `i` of [`Self::leverage_block`] scaled by the working
-    /// weight `w_i`. Contracting back through the design recovers the
-    /// smoother/hat matrix `A = X (∂β̂/∂y) = X H⁻¹ Xᵀ W`, whose diagonal is
-    /// the leverage already reported elsewhere. For a Gaussian penalized fit
-    /// `β̂ = H⁻¹ Xᵀ y`, so this Jacobian is exact (and weight-free); for a GLM
-    /// it is the one-step attribution at the fitted working weights.
-    ///
-    /// Returns `None` on a shape mismatch.
-    pub fn response_jacobian(
-        &self,
-        design: &Array2<f64>,
-        working_weights: ArrayView1<'_, f64>,
-    ) -> Option<Array2<f64>> {
-        let n = design.nrows();
-        if design.ncols() != self.dim || working_weights.len() != n {
-            return None;
-        }
-        // Column i is H⁻¹ x_i; scale it by w_i to get ∂β̂/∂y_i.
-        let mut dbeta_dy = self.leverage_block(design);
-        for i in 0..n {
-            let w_i = working_weights[i];
-            dbeta_dy.column_mut(i).mapv_inplace(|v| w_i * v);
-        }
-        Some(dbeta_dy)
-    }
-
     /// Case-deletion influence (dfbetas + Cook's distance) for every
     /// observation, built from the one sensitivity operator — the
     /// "leave-one-out" channel #935 was designed to unify.

@@ -126,15 +126,6 @@ pub enum MarginVerdict {
 }
 
 impl MarginVerdict {
-    /// The certified point value when the margin closed, else `None` — the
-    /// caller that pattern-matches `None` must escalate to the exact path.
-    pub fn decided_value(&self) -> Option<f64> {
-        match self {
-            MarginVerdict::Decided { value, .. } => Some(*value),
-            MarginVerdict::InsufficientMargin { .. } => None,
-        }
-    }
-
     pub fn is_decided(&self) -> bool {
         matches!(self, MarginVerdict::Decided { .. })
     }

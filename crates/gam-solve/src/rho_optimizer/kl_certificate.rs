@@ -133,9 +133,8 @@
 //!
 //! # Defect theorems (exact — not fits)
 //!
-//! See `monotonicity_defect` and `energy_budget_defect`. These are the
-//! *only* sources of [`LoopVerdict::KlInconsistent`]: they are proofs, valid
-//! independent of any rate model.
+//! See `monotonicity_defect`. It is the *only* source of
+//! [`LoopVerdict::KlInconsistent`]: a proof, valid independent of any rate model.
 
 use std::collections::VecDeque;
 
@@ -529,9 +528,7 @@ fn forecast_iters(model: &RateModel, current_gap_bound: f64, target_tol: f64, k_
 /// Order of reasoning:
 /// 1. **Defect first.** Screen the window for a monotonicity defect with the
 ///    default relative rounding band; if it fires, return `KlInconsistent`
-///    (an exact proof outranks any rate forecast). Callers needing the
-///    energy-budget defect (which requires `V_0`/`V_lb`/`a`) call
-///    [`energy_budget_defect`] directly.
+///    (an exact proof outranks any rate forecast).
 /// 2. **Name the rate.** [`fit_rate`]; a `None` fit — or a fit whose model is
 ///    non-convergent, so the forecast is undefined — is `InsufficientData`,
 ///    *never* a defect claim.
@@ -607,53 +604,6 @@ pub fn monotonicity_defect(window: &DecreaseWindow, rounding_band: f64) -> Optio
             band
         )
     })
-}
-
-/// **Energy-budget defect theorem.**
-///
-/// Sufficient decrease in step-norm form, `d_k = V_k − V_{k+1} ≥ a·‖x_{k+1} −
-/// x_k‖²` with `a > 0` (trust-region and Armijo line searches both furnish
-/// this: the accepted decrease dominates a constant times the squared step),
-/// telescopes over `k = 0 … K−1`:
-///
-/// ```text
-///     V_0 − V_K = Σ_k d_k ≥ a · Σ_k ‖x_{k+1} − x_k‖².
-/// ```
-///
-/// Since the objective is bounded below by `V_lb ≤ V_K`,
-///
-/// ```text
-///     Σ_k ‖x_{k+1} − x_k‖² ≤ (V_0 − V_K)/a ≤ (V_0 − V_lb)/a.       (B)
-/// ```
-///
-/// The right-hand side is the **energy budget**. Observing a total squared
-/// step norm exceeding it *proves* that some accepted step violated
-/// `d_k ≥ a‖step_k‖²`, i.e. the sufficient-decrease contract is defective.
-///
-/// Returns `Some(reason)` when `total_step_norm_sq` exceeds `(V_0 − V_lb)/a`;
-/// `None` when the budget holds or when the inputs are outside the theorem's
-/// hypotheses (`a ≤ 0`, or `V_0 < V_lb`, in which case no defect is asserted).
-pub fn energy_budget_defect(
-    total_step_norm_sq: f64,
-    initial_value: f64,
-    lower_bound: f64,
-    sufficient_decrease_a: f64,
-) -> Option<String> {
-    if !(sufficient_decrease_a > 0.0) || !(initial_value >= lower_bound) {
-        // Hypotheses of (B) not met — cannot certify a defect.
-        return None;
-    }
-    let budget = (initial_value - lower_bound) / sufficient_decrease_a;
-    if total_step_norm_sq > budget {
-        Some(format!(
-            "energy-budget defect: total step energy Σ‖x_{{k+1}}−x_k‖² = {:.6e} exceeds the \
-             sufficient-decrease budget (V_0 − V_lb)/a = ({:.6e} − {:.6e})/{:.6e} = {:.6e}; by the \
-             telescoped bound this proves some accepted step violated d_k ≥ a‖step_k‖²",
-            total_step_norm_sq, initial_value, lower_bound, sufficient_decrease_a, budget
-        ))
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]

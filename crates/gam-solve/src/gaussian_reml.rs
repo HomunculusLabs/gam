@@ -1668,27 +1668,6 @@ pub(crate) fn gaussian_reml_multi_closed_form_with_nullspace_dim(
     )
 }
 
-pub fn gaussian_reml_multi_closed_form_warm_started_with_nullspace_dim(
-    x: ArrayView2<'_, f64>,
-    y: ArrayView2<'_, f64>,
-    penalty: ArrayView2<'_, f64>,
-    nullspace_dim: Option<usize>,
-    weights: Option<ArrayView1<'_, f64>>,
-    warm_start: Option<&GaussianRemlWarmStart>,
-) -> Result<GaussianRemlMultiResult, EstimationError> {
-    let init_lambda = warm_start.and_then(|start| start.lambda);
-    let eigen_cache = warm_start.and_then(|start| start.eigen_cache.as_ref());
-    gaussian_reml_multi_closed_form_from_parts(
-        x,
-        y,
-        penalty,
-        nullspace_dim,
-        weights,
-        init_lambda,
-        eigen_cache,
-    )
-}
-
 pub fn gaussian_reml_multi_closed_form_with_cache(
     x: ArrayView2<'_, f64>,
     y: ArrayView2<'_, f64>,

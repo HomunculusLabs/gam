@@ -55,20 +55,6 @@
 //!    same probes produce the same `q_{j,k}` to round-off).
 //! 3. Reproducibility — a probe at `(seed, k, i)` is the same call after
 //!    call regardless of how the grid was scheduled.
-//!
-//! # Gating
-//!
-//! The companion helper `should_use_gpu_hutchinson` mirrors the CPU
-//! gate (`prefers_stochastic_trace_estimation` + matching kernel +
-//! plain-SPD logdet path) and adds the GPU-specific minima from the math
-//! team's section 18:
-//!
-//! * `p ≥ 512`
-//! * `K ∈ [8, 128]`
-//! * Hessian and design held resident or about to be uploaded
-//! * The projected penalty-subspace trace is **inactive** (otherwise the
-//!   CPU path projects through the IFT kernel — that route is required
-//!   for marginal-slope ρ-saturated rows)
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
@@ -185,34 +171,6 @@ pub struct RemlTraceHutchinsonEvidence {
 
 /// Minimum joint-dimension at which the GPU Hutchinson path is enabled.
 pub(crate) const HUTCHINSON_GPU_MIN_P: usize = 512;
-/// Minimum and maximum probe counts the GPU path accepts (math section 18).
-pub(crate) const HUTCHINSON_GPU_MIN_K: usize = 8;
-pub(crate) const HUTCHINSON_GPU_MAX_K: usize = 128;
-
-/// True when the GPU Hutchinson path is eligible at the current shape and
-/// configuration. Caller still has to satisfy the CPU-side gate
-/// (`prefers_stochastic_trace_estimation`, matching kernel, plain-SPD
-/// logdet, projected penalty subspace **inactive**) — the parameters
-/// `prefers_stochastic`, `kernel_matches_hinv`, `plain_spd_logdet`, and
-/// `projected_penalty_subspace_active` carry those CPU-side gate booleans
-/// into the dispatch decision.
-#[must_use]
-pub fn should_use_gpu_hutchinson(
-    p: usize,
-    probe_count: usize,
-    prefers_stochastic: bool,
-    kernel_matches_hinv: bool,
-    plain_spd_logdet: bool,
-    projected_penalty_subspace_active: bool,
-) -> bool {
-    p >= HUTCHINSON_GPU_MIN_P
-        && (HUTCHINSON_GPU_MIN_K..=HUTCHINSON_GPU_MAX_K).contains(&probe_count)
-        && prefers_stochastic
-        && kernel_matches_hinv
-        && plain_spd_logdet
-        && !projected_penalty_subspace_active
-}
-
 // ────────────────────────────────────────────────────────────────────────
 // Stateless SplitMix64 Rademacher RNG (host reference; mirrors the NVRTC
 // kernel byte-for-byte so CPU and GPU produce identical probes for the

@@ -169,7 +169,6 @@
 //! universal formula dominates everywhere.
 
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::estimate::EstimationError;
@@ -4312,24 +4311,6 @@ where
 }
 
 #[inline]
-fn ghq_nd_integrate<const D: usize, F, R>(
-    ctx: &QuadratureContext,
-    mu: [f64; D],
-    cov: [[f64; D]; D],
-    max_n: usize,
-    f: F,
-) -> Option<R>
-where
-    F: Fn([f64; D]) -> R,
-    R: GhqValue,
-{
-    match ghq_nd_integrate_try::<D, _, R, Infallible>(ctx, mu, cov, max_n, |x| Ok(f(x))) {
-        Ok(v) => v,
-        Err(e) => match e {},
-    }
-}
-
-#[inline]
 fn ghq_nd_integrate_result<const D: usize, F, R, E>(
     ctx: &QuadratureContext,
     mu: [f64; D],
@@ -4342,23 +4323,6 @@ where
     R: GhqValue,
 {
     ghq_nd_integrate_try::<D, _, R, E>(ctx, mu, cov, max_n, f)
-}
-
-/// Adaptive N-dimensional GHQ expectation for correlated Gaussian latents.
-pub fn normal_expectation_nd_adaptive<const D: usize, F>(
-    ctx: &QuadratureContext,
-    mu: [f64; D],
-    cov: [[f64; D]; D],
-    max_n: usize,
-    f: F,
-) -> f64
-where
-    F: Fn([f64; D]) -> f64,
-{
-    match ghq_nd_integrate::<D, _, f64>(ctx, mu, cov, max_n, &f) {
-        Some(v) => v,
-        None => f(mu),
-    }
 }
 
 /// Fallible adaptive N-dimensional GHQ expectation for correlated Gaussian latents.
@@ -4572,158 +4536,6 @@ pub(crate) fn cloglog_point_jet5(t: f64) -> (f64, f64, f64, f64, f64, f64) {
         cloglog_stable_poly_times_exp_neg(et, &[0.0, 1.0, -7.0, 6.0, -1.0]),
         cloglog_stable_poly_times_exp_neg(et, &[0.0, 1.0, -15.0, 25.0, -10.0, 1.0]),
     )
-}
-
-/// CLogLog inverse link `g(t) = 1 - exp(-exp(t))` and its first four
-/// derivatives, evaluated in a numerically stable way.
-///
-/// All derivatives share the common factor `h(t) = exp(t - exp(t))`:
-/// ```text
-///   g  (t) = 1 - exp(-exp(t))
-///   g' (t) = h(t)
-///   g''(t) = (1 - exp(t)) h(t)
-///   g'''(t) = (exp(2t) - 3 exp(t) + 1) h(t)
-///   g''''(t) = (-exp(3t) + 6 exp(2t) - 7 exp(t) + 1) h(t)
-/// ```
-#[inline]
-fn cloglog_g_derivatives(t: f64) -> (f64, f64, f64, f64, f64) {
-    let (g, g1, g2, g3, g4, _) = cloglog_point_jet5(t);
-    (g, g1, g2, g3, g4)
-}
-
-/// Compute all partial derivatives of `L(μ,σ)` up to fourth order via
-/// differentiated Gauss-Hermite quadrature.
-///
-/// Uses the identity:
-/// ```text
-///   ∂^a_μ ∂^b_σ L ≈ (√2)^b / √π  Σ_m ω_m x_m^b g^{(a+b)}(t_m)
-/// ```
-///
-/// `n_nodes` selects the GHQ rule size (7, 15, 21, or 31). For location-scale
-/// GAMLSS applications, 21-31 nodes is recommended.
-pub fn cloglog_ghq_derivatives(
-    ctx: &QuadratureContext,
-    mu: f64,
-    sigma: f64,
-    n_nodes: usize,
-) -> CLogLogConvolutionDerivatives {
-    let inv_sqrt_pi = 1.0 / std::f64::consts::PI.sqrt();
-
-    // When sigma is negligibly small, evaluate directly at mu.
-    //
-    // From ∂^a_μ ∂^b_σ L = E[Z^b] g^{(a+b)}(μ) at σ = 0, only the moments
-    // E[Z^0]=1, E[Z^2]=1, E[Z^4]=3 survive (all odd moments vanish). So even
-    // sigma-derivatives are NOT zero: L_σσ = g'', L_μσσ = g''', L_μμσσ = g'''',
-    // and L_σσσσ = 3 g''''.
-    if sigma.abs() < 1e-14 {
-        let (g, g1, g2, g3, g4) = cloglog_g_derivatives(mu);
-        return CLogLogConvolutionDerivatives {
-            l: g,
-            l_mu: g1,
-            l_sigma: 0.0,
-            l_mumu: g2,
-            l_musigma: 0.0,
-            l_sigmasigma: g2,
-            l_mumumu: g3,
-            l_mumusigma: 0.0,
-            l_musigmasigma: g3,
-            l_sigmasigmasigma: 0.0,
-            l_mumumumu: g4,
-            l_mumumusigma: 0.0,
-            l_mumusigmasigma: g4,
-            l_musigmasigmasigma: 0.0,
-            l_sigmasigmasigmasigma: 3.0 * g4,
-        };
-    }
-
-    let scale = SQRT_2 * sigma;
-    let sqrt2 = SQRT_2;
-
-    with_gh_nodesweights(ctx, n_nodes, |nodes, weights| {
-        // Accumulators for the weighted sums. For derivative ∂^a_μ ∂^b_σ L,
-        // we need Σ ω_m x_m^b g^{(a+b)}(t_m). We group by the order of g
-        // derivative needed (k = a + b) and the power of x_m (= b).
-        //
-        // k=0: g(t_m)    — need x^0
-        // k=1: g'(t_m)   — need x^0, x^1
-        // k=2: g''(t_m)  — need x^0, x^1, x^2
-        // k=3: g'''(t_m) — need x^0, x^1, x^2, x^3
-        // k=4: g''''(t_m)— need x^0, x^1, x^2, x^3, x^4
-
-        // s[k][b] = Σ_m ω_m x_m^b g^{(k)}(t_m)
-        let mut s = [[0.0_f64; 5]; 5];
-
-        for i in 0..nodes.len() {
-            let x = nodes[i];
-            let t = mu + scale * x;
-            let (g0, g1, g2, g3, g4) = cloglog_g_derivatives(t);
-            let w = weights[i];
-
-            // Powers of x_m
-            let x2 = x * x;
-            let x3 = x2 * x;
-            let x4 = x3 * x;
-
-            // k=0: only need x^0
-            s[0][0] += w * g0;
-
-            // k=1: need x^0, x^1
-            s[1][0] += w * g1;
-            s[1][1] += w * x * g1;
-
-            // k=2: need x^0, x^1, x^2
-            s[2][0] += w * g2;
-            s[2][1] += w * x * g2;
-            s[2][2] += w * x2 * g2;
-
-            // k=3: need x^0, x^1, x^2, x^3
-            s[3][0] += w * g3;
-            s[3][1] += w * x * g3;
-            s[3][2] += w * x2 * g3;
-            s[3][3] += w * x3 * g3;
-
-            // k=4: need x^0, x^1, x^2, x^3, x^4
-            s[4][0] += w * g4;
-            s[4][1] += w * x * g4;
-            s[4][2] += w * x2 * g4;
-            s[4][3] += w * x3 * g4;
-            s[4][4] += w * x4 * g4;
-        }
-
-        // Now assemble derivatives using:
-        //   ∂^a_μ ∂^b_σ L = (√2)^b / √π · s[a+b][b]
-        let sqrt2_1 = sqrt2;
-        let sqrt2_2 = 2.0; // (√2)^2
-        let sqrt2_3 = 2.0 * sqrt2; // (√2)^3
-        let sqrt2_4 = 4.0; // (√2)^4
-
-        CLogLogConvolutionDerivatives {
-            // 0th: a=0, b=0 → (√2)^0 / √π · s[0][0]
-            l: inv_sqrt_pi * s[0][0],
-
-            // 1st: (a=1,b=0), (a=0,b=1)
-            l_mu: inv_sqrt_pi * s[1][0],
-            l_sigma: inv_sqrt_pi * sqrt2_1 * s[1][1],
-
-            // 2nd: (a=2,b=0), (a=1,b=1), (a=0,b=2)
-            l_mumu: inv_sqrt_pi * s[2][0],
-            l_musigma: inv_sqrt_pi * sqrt2_1 * s[2][1],
-            l_sigmasigma: inv_sqrt_pi * sqrt2_2 * s[2][2],
-
-            // 3rd: (a=3,b=0), (a=2,b=1), (a=1,b=2), (a=0,b=3)
-            l_mumumu: inv_sqrt_pi * s[3][0],
-            l_mumusigma: inv_sqrt_pi * sqrt2_1 * s[3][1],
-            l_musigmasigma: inv_sqrt_pi * sqrt2_2 * s[3][2],
-            l_sigmasigmasigma: inv_sqrt_pi * sqrt2_3 * s[3][3],
-
-            // 4th: (a=4,b=0), (a=3,b=1), (a=2,b=2), (a=1,b=3), (a=0,b=4)
-            l_mumumumu: inv_sqrt_pi * s[4][0],
-            l_mumumusigma: inv_sqrt_pi * sqrt2_1 * s[4][1],
-            l_mumusigmasigma: inv_sqrt_pi * sqrt2_2 * s[4][2],
-            l_musigmasigmasigma: inv_sqrt_pi * sqrt2_3 * s[4][3],
-            l_sigmasigmasigmasigma: inv_sqrt_pi * sqrt2_4 * s[4][4],
-        }
-    })
 }
 
 #[cfg(test)]

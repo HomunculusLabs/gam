@@ -427,8 +427,7 @@ pub(crate) fn exact_survival_response_moments_row(
                 // approximation rather than the law. The pushforward of a
                 // cone-truncated joint through `bᵀ` is not normal for `q > 1`,
                 // so matching its first two moments has an error FLOOR. The
-                // node mixture `gam_solve::constrained_posterior::
-                // constrained_projection_law` produces from the same cubature
+                // node mixture over the same cubature nodes
                 // has an error RATE and puts no mass outside the cone; measured
                 // at the shipped 4096-node refinement on a `q = 2` face against
                 // a tensor-Simpson reference on the exact truncated density,

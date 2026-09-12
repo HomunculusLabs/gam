@@ -839,8 +839,7 @@ impl ConstrainedPosteriorGeometry {
 /// The decomposition every scalar-projection consumer in this module needs, in
 /// one place.
 ///
-/// Two consumers read it — the equal-tailed interval and
-/// [`constrained_projection_law`] — and it is exactly the kind of derivation
+/// The equal-tailed interval reads it, and it is exactly the kind of derivation
 /// that is individually reasonable and quietly different when written twice.
 /// That is the failure genus this sweep is about (#2385), so it is written once.
 struct TruncatedProjection {
@@ -1027,37 +1026,6 @@ impl ConstrainedProjectionLaw {
             .sum::<f64>();
         spread + self.residual_variance
     }
-}
-
-/// Build [`ConstrainedProjectionLaw`] for `cᵀβ` from the persisted geometry and
-/// the ambient covariance, using the SAME cubature the module's moments and
-/// intervals use.
-pub fn constrained_projection_law(
-    ambient_covariance: &Array2<f64>,
-    geometry: &ConstrainedPosteriorGeometry,
-    contrast: &Array1<f64>,
-) -> Result<ConstrainedProjectionLaw, String> {
-    let decomposition = decompose_projection(ambient_covariance, geometry, contrast)?;
-    let Some(truncated) = decomposition.truncated else {
-        return Ok(ConstrainedProjectionLaw {
-            nodes: vec![(decomposition.ambient_mean, 1.0)],
-            residual_variance: decomposition.ambient_variance,
-        });
-    };
-    let nodes = converged_projection_nodes(
-        &truncated.normal_center,
-        &truncated.normal_covariance,
-        &truncated.upper_limits,
-        &truncated.projection_lift,
-        decomposition.ambient_mean,
-    )?;
-    Ok(ConstrainedProjectionLaw {
-        nodes: nodes
-            .into_iter()
-            .map(|node| (node.conditional_mean, node.weight))
-            .collect(),
-        residual_variance: truncated.residual_variance,
-    })
 }
 
 /// One point of the JOINT rule over an inequality-truncated Gaussian posterior:
