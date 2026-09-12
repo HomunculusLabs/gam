@@ -78,12 +78,12 @@ use gam_linalg::utils::KahanSum;
 
 /// Default ring-buffer capacity for [`AsymptoteWindow`]. Enough recent iterates
 /// for a stable constant-`ĉ` drift test while staying local to the current tail.
-pub const DEFAULT_ASYMPTOTE_WINDOW: usize = 12;
+pub(crate) const DEFAULT_ASYMPTOTE_WINDOW: usize = 12;
 
 /// Minimum confirmed-tail samples before any asymptote verdict is attempted.
 /// Two points make `ĉ` trivially "constant" (no drift signal); three is the
 /// smallest count at which the drift band carries information.
-pub const MIN_TAIL_SAMPLES: usize = 3;
+pub(crate) const MIN_TAIL_SAMPLES: usize = 3;
 
 /// Which rail a coordinate is approaching.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -153,7 +153,7 @@ impl Default for AsymptoteWindow {
 }
 
 impl AsymptoteWindow {
-    /// A window with the [`DEFAULT_ASYMPTOTE_WINDOW`] capacity.
+    /// A window with the `DEFAULT_ASYMPTOTE_WINDOW` capacity.
     pub fn new() -> Self {
         Self::default()
     }
@@ -337,7 +337,7 @@ fn coef_step_ratio(samples: &[AsymptoteSample]) -> Option<f64> {
 ///    the estimand is not settling ⇒ `NoAsymptote`.
 /// 4. **Decide.** `travel ≤ estimand_tol` ⇒ `CertifiedAtAsymptote`, else
 ///    `OnTailNotYetEquivalent`.
-pub fn assess_coordinate(
+pub(crate) fn assess_coordinate(
     window: &AsymptoteWindow,
     tol: &AsymptoteTolerances,
 ) -> AsymptoteVerdict {

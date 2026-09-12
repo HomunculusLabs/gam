@@ -62,7 +62,7 @@ impl OuterThetaLayout {
     /// question about the quantity: `psi_dim` is declared by the call site
     /// that knows what it put in each slot, and the trailing block is the ψ
     /// block by construction.
-    pub const fn coordinate_is_log_smoothing(&self, k: usize) -> bool {
+    pub(crate) const fn coordinate_is_log_smoothing(&self, k: usize) -> bool {
         k < self.rho_dim()
     }
 

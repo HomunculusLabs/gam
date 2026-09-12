@@ -59,7 +59,7 @@ pub const SATURATED_RHO_LADDER: [f64; 4] = [21.0, 24.0, 27.0, 30.0];
 /// four rungs — a spread of `4.3e-4`. One percent is two orders of headroom
 /// over that and still refuses the divergent `ĉ` a saturating floor produces
 /// (which is off by a factor `e^9 ≈ 8100`, five orders past the bar).
-pub const PENCIL_CONSTANCY_TOL: f64 = 1.0e-2;
+pub(crate) const PENCIL_CONSTANCY_TOL: f64 = 1.0e-2;
 
 /// Below this fraction of the barrier's own emission, a gradient cannot be
 /// hiding the floor.
@@ -107,7 +107,7 @@ pub struct PencilFit {
     /// single-signed nonzero run (so no constant exists to be spread).
     pub spread: f64,
     /// Whether this hypothesis holds: a finite, single-signed, nonzero pencil
-    /// whose spread is within [`PENCIL_CONSTANCY_TOL`].
+    /// whose spread is within `PENCIL_CONSTANCY_TOL`.
     pub holds: bool,
 }
 

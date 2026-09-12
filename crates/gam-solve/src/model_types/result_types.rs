@@ -748,7 +748,7 @@ impl RailTailEvidence {
 /// model has provably reached its rail limit to within tolerance along it
 /// (#2348 Inc 1 / #2299 layer 3, #2337 Thm 2.1). The certified facts are the
 /// per-coordinate outputs of
-/// [`crate::rho_optimizer::asymptote_certificate::assess_coordinate`].
+/// `crate::rho_optimizer::asymptote_certificate::assess_coordinate`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RailCoordinate {
     /// The ρ-block index of the railed coordinate.

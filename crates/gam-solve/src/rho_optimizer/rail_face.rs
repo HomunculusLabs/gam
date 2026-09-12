@@ -943,7 +943,7 @@ fn assemble_face_limit(input: FaceLimitAssembly<'_>) -> RailFaceLimitOutcome {
 /// without going through a `RemlState`. A caller whose criterion is NOT the
 /// profiled-Gaussian REML must not use it: with `β̂`-dependent working weights
 /// the logdet terms gain a third-derivative contribution at the same order,
-/// which is [`laml_rail_face_limit`]'s rank-2 term.
+/// which is `laml_rail_face_limit`'s rank-2 term.
 ///
 /// `response` must already be net of any offset. `penalties` are in ρ-block
 /// order, so `rho[j]` is `penalties[j]`'s log smoothing parameter, and `face`
@@ -1123,7 +1123,7 @@ pub struct LamlFaceParts<'a> {
 /// uses — through [`LamlFaceParts`]. Everything here is then exact arithmetic
 /// on those outputs: no probe, no finite difference, and no evaluation at a
 /// large λ anywhere.
-pub fn laml_rail_face_limit(
+pub(crate) fn laml_rail_face_limit(
     design: ArrayView2<'_, f64>,
     penalties: &[CanonicalPenalty],
     rho: &Array1<f64>,

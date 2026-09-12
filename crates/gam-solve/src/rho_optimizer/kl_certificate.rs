@@ -144,7 +144,7 @@ use gam_linalg::utils::KahanSum;
 ///
 /// Chosen to hold enough recent accepted steps for a stable two-parameter
 /// log/log-log least-squares fit while staying local to the current basin.
-pub const DEFAULT_WINDOW_CAPACITY: usize = 24;
+pub(crate) const DEFAULT_WINDOW_CAPACITY: usize = 24;
 
 /// Minimum number of positive-decrease points required before a rate fit is
 /// attempted. Two points fit any line exactly (zero residual for *both*
@@ -206,7 +206,7 @@ impl Default for DecreaseWindow {
 }
 
 impl DecreaseWindow {
-    /// A window with the [`DEFAULT_WINDOW_CAPACITY`].
+    /// A window with the `DEFAULT_WINDOW_CAPACITY`.
     pub fn new() -> Self {
         Self::default()
     }

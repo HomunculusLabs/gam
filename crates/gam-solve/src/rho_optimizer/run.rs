@@ -5790,7 +5790,7 @@ impl AsymptoteRailInputs<'_> {
     /// interior gradient and the interior Hessian sub-block, because that
     /// reasoning is about a bound and not about a quantity. Only the first
     /// half may be *certified* by — or *required* to produce — a tail, since
-    /// [`OuterThetaLayout::coordinate_is_log_smoothing`] is what makes
+    /// `OuterThetaLayout::coordinate_is_log_smoothing` is what makes
     /// `ĉ = ∓e^{±ρ}·∂V/∂ρ` a theorem rather than an arithmetic accident.
     ///
     /// The second half needs no tail: its bound is attainable, so the
@@ -6790,7 +6790,7 @@ fn build_and_assess_rail_coordinate(
 /// # Proof condition (evidence-gated; cannot launder a genuine λ→∞ / λ→0 optimum)
 ///
 /// Probe up to [`ASYMPTOTE_PROBE_COUNT`] e-folds inward and let the FIRST
-/// contiguous clean, drift-stable run of at least [`MIN_TAIL_SAMPLES`] decide
+/// contiguous clean, drift-stable run of at least `MIN_TAIL_SAMPLES` decide
 /// the local rail:
 /// 1. above the gradient interior floor, `|g| > interior_grad_tol` (so a probe
 ///    whose gradient has decayed into finite-difference cancellation next to the
@@ -6882,7 +6882,7 @@ fn detect_wrong_rail_pullback(
 /// half-e-fold ladder resolves a narrower local band without mixing step sizes
 /// in one estimand window. Returns the longest finite-difference-clean
 /// constant-`ĉ` run (newest sample nearest `rho[coord]`), or `None` when neither
-/// resolution contains at least [`MIN_TAIL_SAMPLES`] clean rows. The second
+/// resolution contains at least `MIN_TAIL_SAMPLES` clean rows. The second
 /// element dumps `(ρ, ∂V/∂ρ, ĉ)` evidence for every attempted resolution.
 fn probe_tail_window(
     obj: &mut dyn OuterObjective,
@@ -6931,7 +6931,7 @@ fn probe_tail_window(
 /// Probe a single equally-spaced resolution of one coordinate's tail.
 ///
 /// Keeping each returned window at one resolution is essential for
-/// [`assess_coordinate`]: its coefficient-travel bound estimates a geometric
+/// `assess_coordinate`: its coefficient-travel bound estimates a geometric
 /// ratio from consecutive steps, which is only meaningful when their `Δρ`
 /// values are identical.
 fn probe_tail_window_at_resolution(
@@ -7106,7 +7106,7 @@ fn probe_tail_window_at_resolution(
 /// pencil constant is assessed with the pseudo-coordinate `r = mean_k(u_k ρ_k)`
 /// and the directional derivative `g_u = Σ_{k∈face} u_k g_k = dV/dt`.
 ///
-/// The window it returns speaks the [`assess_coordinate`] conventions
+/// The window it returns speaks the `assess_coordinate` conventions
 /// verbatim: on a genuine face `g_u < 0` at every interior probe (descent runs
 /// outward), so the verdict side is `Upper` in the pseudo-coordinate
 /// regardless of the mix of physical sides, and `ĉ = −e^{r}·g_u` recovers the
