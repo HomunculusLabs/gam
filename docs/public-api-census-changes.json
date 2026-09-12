@@ -2153,5 +2153,15 @@
     },
     "reason": "prune-api-b product-use sweep (#2899). The public accessors and constructors of StabilizationLedger (none, delta, kind, matrix_form, chosen_by, objective_policy, backward_error_bound, inertia_before, inertia_after, with_inertia) are removed with the type, which no production path constructs.",
     "evidence": "scripts/public_api_census.py over probe commit fb1e11bc7 on base 7ae0ee589 (MSI acn112, python3.12; sliceG.census.out) reports exactly these ten crates/gam-problem/src/types.rs identities, one declaration each; re-keyed to the push parent after an upstream doc-unrelated change to smoothing_correction.rs, which removes no public function. Compile receipt that production never constructs the ledger: /scratch.global/sauer354/pool/prune-api-b/t1chk.541697.log."
+  },
+  {
+    "base": "ecfe0601e6aed16a1d23d67a409aebf260d66bf2",
+    "removed": {
+      "crates/gam-solve/src/reml/atoms.rs::d1": 1,
+      "crates/gam-solve/src/reml/atoms.rs::hessian_logdet_atom_emits_closed_form_value_and_directional_derivative": 1,
+      "crates/gam-solve/src/reml/atoms.rs::value": 1
+    },
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). CriterionSum::value and CriterionSum::d1 belonged to the production CriterionSum, which nothing outside atoms.rs's unit tests used; the tests now use a test-local fold whose methods are not pub. The third declaration is the pub(crate) unit test that exercised only the deleted HessianLogdetAtom and SampledBlockAtom.",
+    "evidence": "At the base, git grep -w finds CriterionSum only in atoms.rs, the root facade re-export and one comment, all changed in this commit. Emulating public_api_census.py's pub fn predicate over the before and after atoms.rs blobs gives d1 1 to 0, value 1 to 0, and hessian_logdet_atom_emits_closed_form_value_and_directional_derivative 1 to 0."
   }
 ]

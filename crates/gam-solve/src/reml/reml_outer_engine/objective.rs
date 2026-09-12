@@ -598,8 +598,8 @@ pub(crate) fn reml_laml_evaluate(
     // by farming out the per-coordinate Hessian/gradient work.
     // The full gradient-bearing penalty atom. It carries the SAME stable-basis
     // value the cost above consumed, so `value()` and `rho_frozen_d1` are
-    // projections of one object (and any `CriterionSum` built from this atom
-    // reports the numerically-sound stable energy, not the original-basis sum).
+    // projections of one object (and any fold over this atom reports the
+    // numerically-sound stable energy, not the original-basis sum).
     let penalty_quad_atom = crate::estimate::reml::atoms::PenaltyQuadAtom::from_penalty_coords(
         &lambdas,
         &solution.penalty_coords,

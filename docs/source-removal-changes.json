@@ -5357,5 +5357,20 @@
     ],
     "reason": "prune-api-b product-use sweep (#2899). No production path constructs a StabilizationLedger: a compile check of a probe narrowing it to pub(crate) (job 541697, probe fcc4b63b2) failed with \"struct StabilizationLedgerWire is never constructed\", \"struct StabilizationLedger is never constructed\" and \"multiple associated items are never used\" at crates/gam-problem/src/types.rs:276, :290 and :303. The family was kept alive only by pub visibility and its own serde validation test, so StabilizationLedger, StabilizationLedgerWire, StabilizationRule and StabilizationKind are deleted with the ledger constructors, validation, accessors and TryFrom/From serde impls, the serde_cannot_bypass_ledger_semantics test, the ledger taxonomy comment block, and the doc-only root tests/basis_smooth/misc/ridge_ledger_invariants.rs with its mod line. RidgePassport, Inertia and InvalidStabilization stay (used by gam-solve and EstimationError); two gam-solve smoothing_correction.rs doc links to StabilizationKind become plain text.",
     "evidence": "Compile receipt: /scratch.global/sauer354/pool/prune-api-b/t1chk.541697.log (HEAD=fcc4b63b2). At the base git grep -w finds StabilizationLedger, StabilizationLedgerWire and StabilizationRule only in crates/gam-problem/src/types.rs and the doc-only root test, and StabilizationKind additionally only in two doc links in crates/gam-solve/src/estimate/smoothing_correction.rs. The item list is the refusal of scripts/source_removal_guard.py over probe commit fb1e11bc7 on base 7ae0ee589 (MSI acn112, python3.12; sliceG.guard.out in the pool directory), re-keyed to the push parent after an upstream commit changed smoothing_correction.rs outside the doc block this commit edits; fn:from, fn:try_from and type:Error are the deleted serde conversion impls."
+  },
+  {
+    "base": "ecfe0601e6aed16a1d23d67a409aebf260d66bf2",
+    "items": [
+      "crates/gam-solve/src/reml/atoms.rs:fn:beta_channel",
+      "crates/gam-solve/src/reml/atoms.rs:fn:frozen_d1",
+      "crates/gam-solve/src/reml/atoms.rs:fn:hessian_logdet_atom_emits_closed_form_value_and_directional_derivative",
+      "crates/gam-solve/src/reml/atoms.rs:fn:name",
+      "crates/gam-solve/src/reml/atoms.rs:fn:stratum",
+      "crates/gam-solve/src/reml/atoms.rs:fn:value",
+      "crates/gam-solve/src/reml/atoms.rs:struct:HessianLogdetAtom",
+      "crates/gam-solve/src/reml/atoms.rs:struct:SampledBlockAtom"
+    ],
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). The #931-#935 criterion calculus staged CriterionSum, HessianLogdetAtom and SampledBlockAtom as a public interface, and the root gam facade re-exported them, but no production code in any crate ever adopted them, and #931, #934, #935, #901 and #784 are closed. HessianLogdetAtom and SampledBlockAtom are deleted with the one unit test that exercised only them. CriterionSum is deleted from production. The three tests that fold surviving atoms keep a test-local fold with the same fields and methods, so struct:CriterionSum and fn:d1 keep their declaration counts in atoms.rs. The five fn identities fall by two declarations each: the removed CriterionAtom impls and CriterionSum::value.",
+    "evidence": "The prune-api-c census v2 over cc3ae0022 (/scratch.global/sauer354/pool/prune-api-c/census2.tsv) classes all three DELETE, with gam-solve unit-test references and the root facade re-export only. At the base, git grep -w finds the three names only in crates/gam-solve/src/reml/atoms.rs, the src/lib.rs re-export and its comment, and one reml_outer_engine/objective.rs comment, all changed in this commit. The item list comes from emulating source_removal_guard.py's ITEM rule over the before and after blobs: beta_channel, frozen_d1, name and stratum 9 to 7; value 10 to 8; the removed test 1 to 0; HessianLogdetAtom and SampledBlockAtom 1 to 0."
   }
 ]

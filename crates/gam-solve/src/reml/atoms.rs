@@ -29,7 +29,7 @@
 //! # The three-layer design
 //!
 //! ```text
-//!   layer 3   CriterionSum = fold of CriterionAtom emissions      (#931)
+//!   layer 3   a fold of CriterionAtom emissions                   (#931)
 //!   layer 2   Sensitivity  = ONE factored H⁺; β̇, ALO, influence,
 //!             deletion, θ-HVP are four contractions of it          (#935)
 //!   layer 1   row jets     = each family's scalar log-likelihood
@@ -95,7 +95,7 @@
 //! ## Self-certification (#934 falls out)
 //!
 //! Because every atom is a named object emitting value + derivatives from
-//! one internal state, `CriterionSum::certify` can FD-audit EACH ATOM
+//! one internal state, a per-atom certifier can FD-audit EACH ATOM
 //! SEPARATELY at the optimum for ~2 extra evaluations per atom, naming the
 //! desyncing term in the error. The #901 hunt — weeks of triangulating
 //! which of {object, kernel, drift, splice} disagreed — becomes
@@ -266,176 +266,9 @@ pub trait CriterionAtom {
     fn stratum(&self) -> Option<StratumFingerprint>;
 }
 
-/// The criterion as a fold over atoms, with the profiled chain rule applied
-/// in exactly one place.
-///
-/// ```text
-///   V(θ)        = Σ_a value(a)
-///   DV[dir]     = Σ_a frozen_d1(a, dir) + ⟨ Σ_a grad_beta(a), β̇(dir) ⟩
-/// ```
-///
-/// Note the β-channels SUM BEFORE the contraction: one solve-product per
-/// direction for the whole criterion, not per atom — the chain rule is a
-/// linear functional and the calculus exploits that; hand-distributed code
-/// never could.
-pub struct CriterionSum {
-    pub atoms: Vec<Box<dyn CriterionAtom + Send + Sync>>,
-}
-
-impl CriterionSum {
-    pub fn value(&self) -> f64 {
-        self.atoms.iter().map(|a| a.value()).sum()
-    }
-
-    /// Profiled total directional derivative — THE chain rule, applied once.
-    pub fn d1(&self, dir: &ThetaDirection) -> f64 {
-        let frozen: f64 = self.atoms.iter().map(|a| a.frozen_d1(dir)).sum();
-        let beta_dot = dir
-            .beta_dot
-            .as_ref()
-            .expect("calculus must fill beta_dot before profiled d1");
-        let mut chained = 0.0;
-        for atom in &self.atoms {
-            if let Some(channel) = atom.beta_channel() {
-                chained += channel.grad_beta.dot(beta_dot.as_ref());
-            }
-        }
-        frozen + chained
-    }
-
-    // First-order optimality certificate (#934): a per-atom FD audit at the
-    // optimum (~2 evaluations per atom) that names the desyncing term and
-    // refuses probes crossing a declared stratum boundary (rank change /
-    // collapsed eigengap within ±h). It lands with a REAL body — the per-atom
-    // re-evaluation closure it requires does not exist yet — in the #934 pass,
-    // not as a `Vec::new()` placeholder (a stub certifier that always
-    // certifies is worse than none). The "## Self-certification" design above
-    // is the spec; see the module Migration law for the port-with-real-body
-    // discipline.
-}
-
 // ───────────────────────────────────────────────────────────────────────────
-// Worked atom sketches — the three migration anchors.
+// Worked atom sketches.
 // ───────────────────────────────────────────────────────────────────────────
-
-/// Atom 1 (landed math, #901): the Hessian determinant term
-/// `½ log|H_pen|₊` over `range(H_pen)`.
-///
-/// Internal state = the ONE spectral decomposition that
-/// `intrinsic_hessian_pseudo_logdet_parts` already produces; the same
-/// object IS the sensitivity kernel, so the determinant gradient and every
-/// IFT solve share an inverse by construction.
-///
-/// - `value`      = Σ_{σ>thr} log σ (already the production value);
-/// - `frozen_d1`  = ½ tr(H⁺ · Ḣ_frozen\[dir\]) via the spectral kernel —
-///   exact on the constant-rank stratum for ANY drift, moving-subspace ψ
-///   included (first-order eigenvector motion cancels);
-/// - `beta_channel` = NONE — by design. The β̂-motion of H enters through
-///   the direction's `h_dot_total` (the calculus adds `D_βH[β̇]` into the
-///   SHARED drift before atoms see it), not through a per-atom chain. This
-///   single decision removes the #901-layer-2 failure mode: there is no
-///   second place a cubic correction can be (mis)assembled.
-pub struct HessianLogdetAtom {
-    pub sensitivity: Arc<Sensitivity>,
-}
-
-impl CriterionAtom for HessianLogdetAtom {
-    fn name(&self) -> &'static str {
-        "hessian_logdet"
-    }
-    fn value(&self) -> f64 {
-        0.5 * self.sensitivity.logdet
-    }
-    fn frozen_d1(&self, dir: &ThetaDirection) -> f64 {
-        let h_dot = dir
-            .h_dot_total
-            .as_ref()
-            .expect("calculus fills h_dot_total before logdet d1");
-        0.5 * self.sensitivity.kernel.trace_projected_logdet(h_dot)
-    }
-    fn beta_channel(&self) -> Option<BetaChannel> {
-        None
-    }
-    fn stratum(&self) -> Option<StratumFingerprint> {
-        Some(StratumFingerprint {
-            kept_rank: self.sensitivity.stratum.kept_rank,
-            min_relative_eigengap: self.sensitivity.stratum.min_relative_eigengap,
-        })
-    }
-}
-
-/// Atom 3 (the abstraction's hardest test, #784): the block-local sampled
-/// marginal correction `−Δ_b`.
-///
-/// A SAMPLED atom: value from importance draws, derivatives from the
-/// importance-weighted moments specified on
-/// `block_sampled_marginal_correction` — and it fits the same trait with
-/// no special cases:
-///
-/// - `frozen_d1`  = explicit penalty-score channel
-///   PLUS `tr(Ḣ[dir] · (Q_b + Q_c))` — the draw-rescale and frame-rotation
-///   channels collapsed into one rank-≤3m trace against the SHARED drift
-///   (so this atom and the logdet atom cannot disagree about what
-///   direction `dir` means: they trace the same matrix);
-/// - `beta_channel` = the moment vector g_d = E_p[∂ΔF/∂β̂] — the calculus
-///   charges ⟨g_d, β̇⟩ automatically, which is precisely the term the
-///   current splice's "the envelope handles it" comment wrongly waves away;
-/// - `stratum`    = the block eigenframe's minimal gap (Q_c divides by
-///   λ_r − λ_q) and the trust-gate state: near-degenerate frames and gate
-///   flips are declared boundaries, so the certifier refuses rather than
-///   misdiagnoses, and the splice declines rather than clamps.
-pub struct SampledBlockAtom {
-    /// −Δ_b (cost-side sign already applied).
-    pub value: f64,
-    /// Explicit-channel gradient per packed θ coordinate (ρ entries only;
-    /// ψ explicit channel is zero — its motion enters via Q_b/Q_c and g_d).
-    pub explicit: Array1<f64>,
-    /// `Q_b + Q_c`, symmetric rank ≤ 3m, built once from the sampler
-    /// moments (M_r, R_r) and the block eigenpairs.
-    pub q_bc: Arc<Array2<f64>>,
-    /// Mode-motion moment `g_d = E_p[∂ΔF/∂β̂]`.
-    pub g_d: Array1<f64>,
-    pub stratum: StratumFingerprint,
-}
-
-impl CriterionAtom for SampledBlockAtom {
-    fn name(&self) -> &'static str {
-        "sampled_block_marginal"
-    }
-    fn value(&self) -> f64 {
-        self.value
-    }
-    fn frozen_d1(&self, dir: &ThetaDirection) -> f64 {
-        let explicit = match dir.index {
-            Some(idx) if idx < self.explicit.len() => self.explicit[idx],
-            _ => 0.0,
-        };
-        let h_dot = dir
-            .h_dot_total
-            .as_ref()
-            .expect("calculus fills h_dot_total before sampled-block d1");
-        // tr(Ḣ · Q_bc): same drift the logdet atom traces — shared meaning
-        // of the direction is structural, not aspirational.
-        let mut trace = 0.0;
-        for i in 0..h_dot.nrows() {
-            for j in 0..h_dot.ncols() {
-                trace += h_dot[[i, j]] * self.q_bc[[j, i]];
-            }
-        }
-        explicit + trace
-    }
-    fn beta_channel(&self) -> Option<BetaChannel> {
-        Some(BetaChannel {
-            grad_beta: self.g_d.clone(),
-        })
-    }
-    fn stratum(&self) -> Option<StratumFingerprint> {
-        Some(StratumFingerprint {
-            kept_rank: self.stratum.kept_rank,
-            min_relative_eigengap: self.stratum.min_relative_eigengap,
-        })
-    }
-}
 
 /// Atom 4 (the simplest β-channel anchor): the penalty quadratic
 /// `½ Σ_k λ_k (β̂ − μ_k)ᵀ S_k (β̂ − μ_k)`.
@@ -666,7 +499,7 @@ impl CriterionAtom for PenaltyQuadAtom {
 /// Atom 5 (ledger item "TK/Jeffreys/prior atoms"): the universal Jeffreys /
 /// Firth term `Φ_J = G · ½ Σ_i g(λ_i)` on the under-identified reduced
 /// information `H_id = Z_Jᵀ H Z_J` — the spectral-logdet sibling of
-/// [`HessianLogdetAtom`], but over the floored/saturated Jeffreys
+/// the #901 Hessian log-determinant term, but over the floored/saturated Jeffreys
 /// antiderivative `g` (gam#979) instead of the bare `log σ`, and scaled by the
 /// C¹ conditioning gate `G ∈ [0, 1]`.
 ///
@@ -683,7 +516,7 @@ impl CriterionAtom for PenaltyQuadAtom {
 ///   function `value` antidifferentiates, the directional derivative is the
 ///   exact derivative of the value on the constant-rank/constant-gate stratum —
 ///   no second formula to drift (the bug this term stalled on, gam#787);
-/// - `beta_channel` = NONE, exactly as [`HessianLogdetAtom`]: the β̂-motion of
+/// - `beta_channel` = NONE, exactly as the #901 Hessian log-determinant term: the β̂-motion of
 ///   `H_id` (and the gate's own mode-response, gam#854) enters through the
 ///   direction's shared `h_dot_total`, leaving no second site to misassemble;
 /// - `stratum`    = the reduced spectrum's smallest relative eigengap (the
@@ -908,7 +741,7 @@ impl CriterionAtom for ConfiguredRhoPriorAtom {
 /// It is θ-only and separable: `beta_channel` is `None` (no inner-mode
 /// dependence) and the gradient/Hessian are diagonal in ρ. `frozen_d1` reads
 /// the per-coordinate gradient the same emission produced, so the profiled
-/// total derivative through [`CriterionSum`] is consistent by construction.
+/// total derivative of a fold over atoms is consistent by construction.
 pub struct SoftRhoGuardPriorAtom {
     /// Scalar cost `Σ_i w · log cosh(a (ρ_i − anchor))`.
     pub value: f64,
@@ -1225,7 +1058,7 @@ impl CriterionAtom for ThetaOnlyCorrectionAtom {
 // LANDED (pass 4 start, ledger item "TK/Jeffreys/prior atoms"):
 // `JeffreysLogdetAtom` ports the universal Jeffreys/Firth term
 // `Φ_J = G·½ Σ g(λ_i)` on the under-identified reduced information `H_id` as
-// the spectral-logdet sibling of `HessianLogdetAtom`. Value (`½ Σ g`) and
+// the spectral-logdet sibling of the #901 Hessian logdet term. Value (`½ Σ g`) and
 // frozen directional derivative (`½ Σ floored_inverse(λ)·Ṽ_ii`) are pinned to
 // ONE pair of functions — `jeffreys_antiderivative` (the `g` factored out of
 // `joint_jeffreys_term`'s inline value branches) and `floored_inverse` (its
@@ -1300,97 +1133,32 @@ mod tests {
     use super::*;
     use ndarray::array;
 
-    /// Per-atom isolation check the Migration law demands: build the landed
-    /// #901 `HessianLogdetAtom` anchor from a hand-chosen spectral kernel and
-    /// confirm its `value` / `frozen_d1` emissions are exactly the closed-form
-    /// `½ log|H_pen|₊` and `½ tr(H_pen⁺ Ḣ)`, then confirm the `CriterionSum`
-    /// fold assembles the profiled total derivative `Σ frozen_d1 + ⟨Σ ∂_βA,
-    /// β̇⟩` from those emissions plus one shared β̇ contraction.
-    ///
-    /// `H_pen⁺` is taken diagonal in the identity basis (`u_s = I`,
-    /// `h_proj_inverse = diag(1/σ)`) so every quantity is verifiable by hand:
-    /// `tr(H⁺ A) = Σ_a A_aa / σ_a`. This is the same spectral object
-    /// `intrinsic_hessian_pseudo_logdet_parts` emits, so the test pins the
-    /// atom's contract against the production kernel, not a re-derivation.
-    #[test]
-    pub(crate) fn hessian_logdet_atom_emits_closed_form_value_and_directional_derivative() {
-        // σ = (2, 4) ⇒ H⁺ = diag(1/2, 1/4), log|H|₊ = ln 2 + ln 4 = ln 8.
-        let kernel = Arc::new(PenaltySubspaceTrace {
-            u_s: array![[1.0, 0.0], [0.0, 1.0]],
-            h_proj_inverse: array![[0.5, 0.0], [0.0, 0.25]],
-            logdet_correction: 0.0,
-        });
-        let stratum = StratumFingerprint {
-            kept_rank: 2,
-            // smallest relative gap (4 − 2)/4 = 0.5 — well clear of any frame
-            // floor, so this evaluation lives on a single constant-rank stratum.
-            min_relative_eigengap: 0.5,
-        };
-        let sensitivity = Arc::new(Sensitivity {
-            kernel: kernel.clone(),
-            logdet: 8.0_f64.ln(),
-            stratum: StratumFingerprint {
-                kept_rank: stratum.kept_rank,
-                min_relative_eigengap: stratum.min_relative_eigengap,
-            },
-        });
-        let hess = HessianLogdetAtom {
-            sensitivity: sensitivity.clone(),
-        };
+    /// The criterion as a fold over atoms, with the profiled chain rule applied
+    /// once: `V = Σ_a value(a)` and
+    /// `DV[dir] = Σ_a frozen_d1(a, dir) + ⟨Σ_a grad_beta(a), β̇(dir)⟩`.
+    struct CriterionSum {
+        atoms: Vec<Box<dyn CriterionAtom + Send + Sync>>,
+    }
 
-        // value = ½ log|H|₊.
-        assert_eq!(hess.name(), "hessian_logdet");
-        assert!((hess.value() - 0.5 * 8.0_f64.ln()).abs() < 1e-12);
-        assert!(
-            hess.beta_channel().is_none(),
-            "logdet atom has no β-channel"
-        );
-        assert_eq!(hess.stratum().expect("declared stratum").kept_rank, 2);
+    impl CriterionSum {
+        fn value(&self) -> f64 {
+            self.atoms.iter().map(|a| a.value()).sum()
+        }
 
-        // Shared drift Ḣ = [[1, 0.3], [0.3, 1]]. frozen_d1 = ½ tr(H⁺ Ḣ)
-        //   = ½ (1/2 · 1 + 1/4 · 1) = ½ · 0.75 = 0.375.
-        let h_dot = Arc::new(array![[1.0, 0.3], [0.3, 1.0]]);
-        let dir = ThetaDirection {
-            index: Some(0),
-            beta_dot: Some(Arc::new(array![0.5, 0.5])),
-            h_dot_total: Some(h_dot.clone()),
-        };
-        assert!((hess.frozen_d1(&dir) - 0.375).abs() < 1e-12);
-
-        // Sampled atom (#784): frozen_d1 = explicit[idx] + tr(Ḣ · Q_bc);
-        // β-channel = g_d. With explicit[0] = 0.2 and symmetric
-        // Q_bc = [[0.5, 0.1], [0.1, 0.3]]: tr(Ḣ Q_bc) = 1·0.5 + 0.3·0.1 +
-        // 0.3·0.1 + 1·0.3 = 0.86, so frozen_d1 = 1.06.
-        let sampled = SampledBlockAtom {
-            value: -0.4,
-            explicit: array![0.2, -0.1],
-            q_bc: Arc::new(array![[0.5, 0.1], [0.1, 0.3]]),
-            g_d: array![1.0, -2.0],
-            stratum,
-        };
-        assert!((sampled.value() - (-0.4)).abs() < 1e-12);
-        assert!((sampled.frozen_d1(&dir) - 1.06).abs() < 1e-12);
-        assert!(
-            (sampled
-                .beta_channel()
-                .expect("sampled atom declares a β-channel")
-                .grad_beta
-                .dot(&array![0.5, 0.5])
-                - (-0.5))
-                .abs()
-                < 1e-12
-        );
-
-        // CriterionSum fold: value sums, and the profiled d1 adds ONE shared
-        // β̇ contraction of the SUMMED β-channels (here only the sampled atom
-        // contributes g_d). β̇ = [0.5, 0.5] ⇒ ⟨g_d, β̇⟩ = 0.5 − 1.0 = −0.5.
-        //   value = ½ ln 8 − 0.4
-        //   d1    = 0.375 + 1.06 + (−0.5) = 0.935
-        let sum = CriterionSum {
-            atoms: vec![Box::new(hess), Box::new(sampled)],
-        };
-        assert!((sum.value() - (0.5 * 8.0_f64.ln() - 0.4)).abs() < 1e-12);
-        assert!((sum.d1(&dir) - 0.935).abs() < 1e-12);
+        fn d1(&self, dir: &ThetaDirection) -> f64 {
+            let frozen: f64 = self.atoms.iter().map(|a| a.frozen_d1(dir)).sum();
+            let beta_dot = dir
+                .beta_dot
+                .as_ref()
+                .expect("calculus must fill beta_dot before profiled d1");
+            let mut chained = 0.0;
+            for atom in &self.atoms {
+                if let Some(channel) = atom.beta_channel() {
+                    chained += channel.grad_beta.dot(beta_dot.as_ref());
+                }
+            }
+            frozen + chained
+        }
     }
 
     /// Per-atom isolation check for the penalty-quadratic anchor
@@ -1400,7 +1168,7 @@ mod tests {
     /// the penalty-half KKT residual so the `CriterionSum` fold charges its
     /// envelope correction `⟨Sλ(β̂−μ), β̇⟩` exactly once. Everything is chosen
     /// to be verifiable by hand against the closed form, matching the
-    /// `HessianLogdetAtom` isolation discipline above.
+    /// per-atom isolation discipline of the Migration law.
     #[test]
     pub(crate) fn penalty_quad_atom_emits_closed_form_value_score_and_directional_derivative() {
         // Two penalty blocks: λ = (3, 5), block quadratics q = (qᵀS₀q, qᵀS₁q)
@@ -1573,7 +1341,7 @@ mod tests {
     /// Per-atom isolation + value↔gradient consistency check for the Jeffreys
     /// anchor (`JeffreysLogdetAtom`, ledger item "TK/Jeffreys/prior atoms").
     ///
-    /// Two properties, matching the `HessianLogdetAtom` discipline:
+    /// Two properties, matching the per-atom isolation discipline:
     ///
     /// 1. **Closed-form bit-identity.** `value = G·½ Σ g(λ_i)` and
     ///    `frozen_d1 = G·½ Σ d_i Ṽ_ii` are reproduced by hand from a chosen
@@ -1649,7 +1417,7 @@ mod tests {
         );
         assert!(
             atom.beta_channel().is_none(),
-            "Jeffreys logdet rides the shared drift; no β-channel (like HessianLogdetAtom)"
+            "Jeffreys logdet rides the shared drift; no β-channel (like the Hessian logdet term)"
         );
         assert_eq!(atom.stratum().expect("declared stratum").kept_rank, 2);
 
