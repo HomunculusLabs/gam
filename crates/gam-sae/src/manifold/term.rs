@@ -233,8 +233,6 @@ impl SaeBetaPenaltyAssembly {
 /// coarser reporting-scale EV band cannot override a genuine objective descent.
 pub(crate) const SAE_FINAL_EV_DEGRADATION_TOL: f64 = 1.0e-3;
 
-pub(crate) const SAE_SEED_DISPERSION_FLOOR: f64 = 1.0e-12;
-
 /// #1026/#1610 decoder-repulsion conditioner strength as a DIMENSIONLESS ratio of
 /// the primary separation-barrier strength. The collinearity-gated cross-decoder
 /// repulsion injects POSITIVE curvature in the inter-atom co-collapse direction.

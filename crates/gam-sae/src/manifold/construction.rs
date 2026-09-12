@@ -1218,7 +1218,23 @@ impl SaeManifoldTerm {
                 "SaeManifoldTerm::seed_reconstruction_dispersion: non-finite seed RSS {rss}"
             ));
         }
-        Ok((rss / n_scalar).max(SAE_SEED_DISPERSION_FLOOR))
+        let residual_dispersion = rss / n_scalar;
+        if residual_dispersion > 0.0 {
+            return Ok(residual_dispersion);
+        }
+        // An exactly reconstructed seed has no residual scale. The null
+        // reconstruction's dispersion, the target's energy per scalar, is the same
+        // quantity with no atom fitted, so the penalty seeds stay dimensionless.
+        let null_dispersion = target.iter().map(|value| value * value).sum::<f64>() / n_scalar;
+        if null_dispersion > 0.0 {
+            Ok(null_dispersion)
+        } else {
+            Err(
+                "SaeManifoldTerm::seed_reconstruction_dispersion: an all-zero target has no \
+                 dispersion scale"
+                    .to_string(),
+            )
+        }
     }
 
     /// Install per-row design honesty weights (#991) — the `1/π` inclusion

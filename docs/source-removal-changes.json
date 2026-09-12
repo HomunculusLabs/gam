@@ -4731,5 +4731,13 @@
     ],
     "reason": "#2899 group-A public-surface sweep: gam_gpu::{try_fast_ab, try_fast_av, try_fast_atv} were root-level wrappers over the same-named linalg_dispatch functions, and nothing calls them. Product code reaches those kernels through gam_linalg gpu_hook (CudaGemmDispatch, registered by gam::init_parallelism), which calls linalg_dispatch directly. The other root wrappers (try_fast_atb_on_ordinal, try_cholesky_*, try_solve_*, try_fast_abt_*) have gam-solve callers and stay.",
     "evidence": "At f79f1c486, git grep -n over crates, src, examples, tests and gamfit for gpu::try_fast_ab, gpu::try_fast_av, gpu::try_fast_atv and gam_gpu::try_fast_(ab|av|atv) finds no caller. The only remaining root test caller, diagnostics_counters_increment_on_every_dispatch_and_reset_clears_them, was deleted in 56c62255d. The gam-linalg try_fast_* hits are GpuGemmDispatch trait calls into linalg_dispatch. The item list is source_removal_guard.py --base f79f1c486 --head 896f09f22 (/scratch.global/sauer354/pool/prune-api-a/slice10.srg.out)."
+  },
+  {
+    "base": "71fd0f21c4d1b4b8976023159f2f8ceb8cb02404",
+    "items": [
+      "crates/gam-sae/src/manifold/term.rs:const:SAE_SEED_DISPERSION_FLOOR"
+    ],
+    "reason": "#2469: SAE_SEED_DISPERSION_FLOOR (1e-12) floored the seed reconstruction dispersion rss/n in absolute data units, so it bound wrongly at every data scale far from one. seed_reconstruction_dispersion now returns the residual dispersion when positive. An exactly reconstructed seed takes the null reconstruction's dispersion, the target energy per scalar, and an all-zero target is refused because it has no dispersion scale.",
+    "evidence": "git grep -n SAE_SEED_DISPERSION_FLOOR at the base finds its declaration at crates/gam-sae/src/manifold/term.rs:236 and one use, at crates/gam-sae/src/manifold/construction.rs:1221 (seed_reconstruction_dispersion). No test names it. The only production consumer, fit_seed.rs (seed_scaled_by_dispersion_for_assignment), requires a finite positive dispersion, and both returned values satisfy that. Nothing here was compiled or run locally (user directive); compile is covered by the lead's shared tip check."
   }
 ]
