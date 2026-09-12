@@ -1465,6 +1465,8 @@ impl SaeManifoldTerm {
                 //   · at/below the stall band ⇒ the iterate IS the numerical
                 //     stationary root: accept the cache right here (identical
                 //     doctrine to the stall-branch/final-gate acceptances);
+                //   · not certified, before any certificate-paid window ⇒ try the
+                //     terminal exact-Newton polish first (#2267, below);
                 //   · DECREASING geometrically since the last limit hit ⇒ the
                 //     walk is converging in the certificate metric even where
                 //     the objective-decrease and gradient tests cannot see it
@@ -1498,6 +1500,52 @@ impl SaeManifoldTerm {
                              after {total_inner_iter} inner iterations"
                         );
                         return Ok(limit_factor.cache);
+                    }
+                    // #2267 — try the superlinear finish before paying for the first
+                    // majorized window it would replace. On the shipped example's K=8
+                    // rung the certificate kept contracting, so the loop kept granting
+                    // windows (inner_limit 3880 after 40 refine rounds and 1640 inner
+                    // iterations, ‖g‖ trendless in [0.097, 7.09]) and the polish below,
+                    // which only runs once those windows stop paying, never ran inside
+                    // the 900 s contract (job 529628: zero `[SAE-NEWTON]` lines). The
+                    // polish commits only Armijo decreases of the penalized objective
+                    // and bails, leaving the state untouched, when no damping buys one.
+                    // A bail therefore falls through to the certificate windows exactly
+                    // as before, having cost one exact-Hessian materialization. It is
+                    // tried once per evaluation (before any certificate-paid window) and
+                    // shares the committed-phase cap and the arming of the polish below.
+                    if !gradient_stationary
+                        && certificate_escalations == 0
+                        && terminal_newton_polish_armed
+                        && polish_escalations < POLISH_ESCALATION_ANTI_RUNAWAY_CAP
+                    {
+                        terminal_newton_polish_armed = false;
+                        if self.terminal_exact_newton_polish(
+                            target,
+                            rho_fixed,
+                            registry,
+                            &lambda_smooth,
+                            grad_tolerance,
+                            previous_loss_total.abs() + 1.0,
+                            options,
+                            64,
+                            &mut best_seen,
+                        )? {
+                            polish_escalations += 1;
+                            *criterion_fixed_point = false;
+                            consecutive_objective_stalls = 0;
+                            budget_escalation_extra = total_inner_iter
+                                .saturating_sub(refine_limit)
+                                .saturating_add(refine_limit.max(1));
+                            log::debug!(
+                                "SaeManifoldTerm::penalized_quasi_laplace_criterion: polish-paid \
+                                 window {polish_escalations}/\
+                                 {POLISH_ESCALATION_ANTI_RUNAWAY_CAP} at a budget-limit hit before \
+                                 any certificate-paid window, after {total_inner_iter} inner \
+                                 iterations"
+                            );
+                            continue;
+                        }
                     }
                     let certificate_improving = last_limit_certificate.is_none_or(|previous| {
                         predicted_relative_decrease <= CERTIFICATE_ESCALATION_PROGRESS * previous
