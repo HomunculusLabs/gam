@@ -2565,8 +2565,7 @@ fn analyze_cycle(
         quadratic_gaussian_moments(&quadratic, &error_model.covariance);
     let variance_scale = first_order_variance
         .abs()
-        .max(naive_first_order_variance.abs())
-        .max(f64::MIN_POSITIVE);
+        .max(naive_first_order_variance.abs());
     let variance_backward_error = f64::EPSILON * dimension.max(1) as f64 * variance_scale;
     let degenerate = first_order_variance <= variance_backward_error;
     let asymptotic_regime = if degenerate {
@@ -2801,8 +2800,7 @@ fn gauss_bonnet_confidence(
     // make the variance smaller than machine epsilon.
     let variance_scale = naive_contribution_variance
         .abs()
-        .max(first_order_variance.abs())
-        .max(f64::MIN_POSITIVE);
+        .max(first_order_variance.abs());
     let variance_backward_error =
         f64::EPSILON * total_gradients.len().max(1) as f64 * variance_scale;
     if first_order_variance < -variance_backward_error {

@@ -1267,7 +1267,7 @@ fn monomial_critical_points(coeffs: &[f64]) -> Vec<f64> {
         2 => {
             // Linear b + a·u = 0 (a = deriv[1]).
             let (b, a) = (deriv[0], deriv[1]);
-            if a.abs() <= f64::MIN_POSITIVE {
+            if a == 0.0 {
                 Vec::new()
             } else {
                 vec![-b / a]
@@ -1276,8 +1276,8 @@ fn monomial_critical_points(coeffs: &[f64]) -> Vec<f64> {
         3 => {
             // Quadratic c + b·u + a·u² = 0.
             let (c, b, a) = (deriv[0], deriv[1], deriv[2]);
-            if a.abs() <= f64::MIN_POSITIVE {
-                if b.abs() <= f64::MIN_POSITIVE {
+            if a == 0.0 {
+                if b == 0.0 {
                     Vec::new()
                 } else {
                     vec![-c / b]

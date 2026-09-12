@@ -749,7 +749,7 @@ fn jacobi_optimize(y: &mut Array2<f64>, q: &mut Array2<f64>, n_planes: usize, ma
                 // sign-change roots. The old single-cell polish missed maxima
                 // whose grid winner was not bracketed by `+ → -` derivatives.
                 let (best_theta, best_j) = best_pair_rotation(&pa, &pb);
-                if best_j > j0 * (1.0 + ISA_SWEEP_RTOL) + f64::MIN_POSITIVE {
+                if best_j > j0 * (1.0 + ISA_SWEEP_RTOL) {
                     let (c, s) = (best_theta.cos(), best_theta.sin());
                     for col in 0..y.ncols() {
                         let yi = y[[i, col]];
@@ -797,7 +797,8 @@ fn whitened_subsample(residual: ArrayView2<'_, f64>, parts: &IsaEigenParts) -> O
     let cols = subsample_columns(n);
     let mut z = Array2::<f64>::zeros((r, cols.len()));
     for (a, &k) in parts.above.iter().enumerate() {
-        let inv = 1.0 / parts.evals[k].max(f64::MIN_POSITIVE).sqrt();
+        // An above-edge eigenvalue exceeds the positive MP edge.
+        let inv = 1.0 / parts.evals[k].sqrt();
         for (cc, &row) in cols.iter().enumerate() {
             let mut proj = 0.0_f64;
             for j in 0..residual.ncols() {
@@ -981,7 +982,8 @@ fn certify_plane(
     // later rounds keep seeing it instead of the weaker circles.
     let mut amb = Array2::<f64>::zeros((p, 2));
     for (a, &k) in parts.above.iter().enumerate().take(r) {
-        let scale = parts.evals[k].max(f64::MIN_POSITIVE).sqrt();
+        // An above-edge eigenvalue exceeds the positive MP edge.
+        let scale = parts.evals[k].sqrt();
         for j in 0..p {
             amb[[j, 0]] += parts.evecs[[j, k]] * scale * w[[a, 0]];
             amb[[j, 1]] += parts.evecs[[j, k]] * scale * w[[a, 1]];

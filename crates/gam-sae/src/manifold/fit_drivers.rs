@@ -4101,7 +4101,7 @@ impl SaeManifoldTerm {
             }
         }
         let raw = motion.iter().map(|v| v * v).sum::<f64>();
-        if raw <= f64::MIN_POSITIVE || !raw.is_finite() {
+        if raw == 0.0 || !raw.is_finite() {
             return Ok(None);
         }
         motion.mapv_inplace(|v| -v);

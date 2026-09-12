@@ -278,7 +278,7 @@ fn behavior_pinned_chart(
         cumulative[i] = cumulative[i - 1] + 0.5 * step * (speeds[i - 1] + speeds[i]);
     }
     let behavior_length = cumulative[cells];
-    if !(behavior_length.is_finite() && behavior_length > f64::MIN_POSITIVE) {
+    if !(behavior_length.is_finite() && behavior_length > 0.0) {
         return Ok(None);
     }
 

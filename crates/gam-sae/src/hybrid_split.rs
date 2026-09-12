@@ -320,7 +320,7 @@ fn reconstruction_ev(target: ArrayView2<'_, f64>, fitted: ArrayView2<'_, f64>) -
             sst += centered * centered;
         }
     }
-    if rss.is_finite() && sst.is_finite() && sst > f64::MIN_POSITIVE {
+    if rss.is_finite() && sst.is_finite() && sst > 0.0 {
         Some(1.0 - rss / sst)
     } else {
         None
@@ -348,7 +348,7 @@ fn top_m_linear_ev(target: ArrayView2<'_, f64>, basis_size: usize) -> Option<f64
             sst += v * v;
         }
     }
-    if !(sst.is_finite() && sst > f64::MIN_POSITIVE) {
+    if !(sst.is_finite() && sst > 0.0) {
         return None;
     }
     let (_u, sigma, _vt) = centered.svd(false, false).ok()?;
@@ -384,7 +384,7 @@ fn curved_envelope_metrics(
     let curved_ev = reconstruction_ev(target_resid, curved_fit.view());
     let topm_linear_ev = top_m_linear_ev(target_resid, basis_size);
     let curved_vs_envelope_ratio = match (curved_ev, topm_linear_ev) {
-        (Some(curved), Some(topm)) if topm.is_finite() && topm > f64::MIN_POSITIVE => {
+        (Some(curved), Some(topm)) if topm.is_finite() && topm > 0.0 => {
             Some(curved / topm)
         }
         _ => None,

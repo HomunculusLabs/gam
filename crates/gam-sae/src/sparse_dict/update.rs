@@ -464,7 +464,7 @@ impl EvPlateau {
             return true;
         }
         let climb = self.best_ev - self.entry_ev;
-        climb > f64::MIN_POSITIVE && improvement / climb < LINEAR_EV_PLATEAU_FRACTION
+        climb > 0.0 && improvement / climb < LINEAR_EV_PLATEAU_FRACTION
     }
 }
 

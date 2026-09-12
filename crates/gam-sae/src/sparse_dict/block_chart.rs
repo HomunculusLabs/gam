@@ -465,14 +465,19 @@ pub fn block_sparse_dictionary_seed_manifest(
         ));
     }
     let firings = block_sparse_dictionary_firings(blocks, n_blocks)?;
-    let ambient_var = centered_energy_view(x).max(f64::MIN_POSITIVE);
+    let ambient_var = centered_energy_view(x);
     let mut records = Vec::with_capacity(n_blocks);
     for g in 0..n_blocks {
         let coords = block_coords_for_seed_config(x, decoder, config, g)?;
         let coded_var = coordinate_spectrum(&coords)?;
         let total_var = coded_var.iter().sum::<f64>();
         let total_var_report = total_var.max(f64::MIN_POSITIVE);
-        let block_ev = centered_energy(&coords) / ambient_var;
+        // A constant input has no variance for any block to explain.
+        let block_ev = if ambient_var > 0.0 {
+            centered_energy(&coords) / ambient_var
+        } else {
+            0.0
+        };
         let base = format!("{}{}", config.name_prefix, g);
         let n_firings = firings[g].max(1);
         let mdl_block = MdlFeaturizerRow {

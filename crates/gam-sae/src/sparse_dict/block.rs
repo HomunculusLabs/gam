@@ -2498,7 +2498,7 @@ fn fit_block_sparse_dictionary_with_seed_inner(
         // from exiting a still-climbing fit.
         let round_improvement = (next_ev - prev_ev).max(0.0);
         let total_improvement = (next_ev - entry_ev).max(0.0);
-        captured_fraction = if total_improvement > f64::MIN_POSITIVE {
+        captured_fraction = if total_improvement > 0.0 {
             round_improvement / total_improvement
         } else {
             0.0

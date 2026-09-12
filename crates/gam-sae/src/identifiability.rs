@@ -1513,7 +1513,7 @@ fn equal_ard_rotation_generators(atom: &FittedAtom) -> Vec<(Array1<f64>, String)
         for b in (a + 1)..d {
             let va = ard[a];
             let vb = ard[b];
-            let scale = va.abs().max(vb.abs()).max(f64::MIN_POSITIVE);
+            let scale = va.abs().max(vb.abs());
             if (va - vb).abs() <= ARD_EQUAL_REL_TOL * scale {
                 let mut g = Array1::<f64>::zeros(p * d);
                 for i in 0..p {
@@ -1874,7 +1874,7 @@ pub fn isometry_orbit_penalty_operator(
             max_curv_sq = max_curv_sq.max(symmetric_spectral_norm_sq(g_e.view()));
         }
     }
-    let stiffness_sq = (weight * max_curv_sq).max(f64::MIN_POSITIVE);
+    let stiffness_sq = weight * max_curv_sq;
 
     let apply = move |delta_b: ArrayView2<f64>, delta_t: ArrayView2<f64>| -> Array1<f64> {
         let mut image = Array1::<f64>::zeros(n * d * d);
@@ -2094,7 +2094,7 @@ fn exact_orbit_fields(
                 const ARD_EQUAL_REL_TOL: f64 = 1.0e-9;
                 for a in 0..d {
                     for b in (a + 1)..d {
-                        let scale = ard[a].abs().max(ard[b].abs()).max(f64::MIN_POSITIVE);
+                        let scale = ard[a].abs().max(ard[b].abs());
                         if (ard[a] - ard[b]).abs() <= ARD_EQUAL_REL_TOL * scale {
                             out.push((
                                 GeneratorFamily::EqualArdRotation,
@@ -2209,7 +2209,7 @@ fn exact_orbit_verdicts(
             }
         }
         let raw: f64 = u_mot.iter().map(|v| v * v).sum();
-        if raw <= f64::MIN_POSITIVE {
+        if raw == 0.0 {
             // The orbit does not move the fit at all (zero tangents / zero
             // mass): structurally trivial, reported pinned with zero norm,
             // mirroring the frame certificate's convention. Same
@@ -2246,7 +2246,7 @@ fn exact_orbit_verdicts(
         let data_fraction = (resid_sq / raw).clamp(0.0, 1.0);
 
         let penalty_fraction = match penalty {
-            Some(op) if op.stiffness_sq > f64::MIN_POSITIVE => {
+            Some(op) if op.stiffness_sq > 0.0 => {
                 let delta_b = vt.t().dot(&scaled); // δB = −V Σ⁺ Uᵀ u, (M, p)
                 let image = (op.apply)(delta_b.view(), dt.view());
                 // `cost = ‖image‖² = μ·Σ_n ‖δg_n‖²_F` is EXTENSIVE — it sums the
@@ -2262,7 +2262,7 @@ fn exact_orbit_verdicts(
                 // energy `‖δt‖²` so the reported quantity is the penalty cost per
                 // unit coordinate motion relative to the stiffest unit motion.
                 let motion_sq: f64 = dt.iter().map(|v| v * v).sum();
-                if motion_sq > f64::MIN_POSITIVE {
+                if motion_sq > 0.0 {
                     let cost: f64 = image.iter().map(|v| v * v).sum();
                     (cost / (op.stiffness_sq * motion_sq)).clamp(0.0, 1.0)
                 } else {
@@ -2938,7 +2938,7 @@ impl EnumeratedGenerator {
         lowering_error_scale: f64,
     ) -> Self {
         let norm = tangent.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let unit = if norm <= f64::MIN_POSITIVE {
+        let unit = if norm == 0.0 {
             None
         } else {
             let mut unit = tangent;
@@ -2968,7 +2968,7 @@ fn measure_reduced(
             // An identically-flat curvature makes every fraction zero without
             // asking the curvature anything, which is also the only regime in
             // which the ratio would be `0/0`.
-            Some(unit) if sigma_max_sq > f64::MIN_POSITIVE => {
+            Some(unit) if sigma_max_sq > 0.0 => {
                 curvature.unit_generator_energy(unit)
             }
             _ => 0.0,
@@ -3044,7 +3044,7 @@ fn measure_streamed(
     }
     // An identically-flat curvature is reported the way the stored route reports
     // it: every fraction zero, rather than `0/0` clamped.
-    if !(sigma_max_sq > f64::MIN_POSITIVE) {
+    if !(sigma_max_sq > 0.0) {
         energies.iter_mut().for_each(|e| *e = 0.0);
     }
     Ok(CurvatureMeasurement {
@@ -3301,7 +3301,7 @@ fn residual_gauge_inner(
         // lowering-error scale: curvature the mean-frame compression cannot
         // distinguish from gauge motion must not be read as a pin — the
         // certificate refuses to claim resolution it does not have.
-        let pinned_energy_fraction = if sigma_max_sq <= f64::MIN_POSITIVE {
+        let pinned_energy_fraction = if sigma_max_sq == 0.0 {
             0.0
         } else {
             (measurement.energies[index] / sigma_max_sq).clamp(0.0, 1.0)
