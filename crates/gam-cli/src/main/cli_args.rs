@@ -462,9 +462,7 @@ pub(crate) struct SurvivalArgs {
     pub(crate) weights_column: Option<String>,
     pub(crate) offset_column: Option<String>,
     pub(crate) noise_offset_column: Option<String>,
-    pub(crate) frailty_kind: Option<FrailtyKindArg>,
-    pub(crate) frailty_sd: Option<f64>,
-    pub(crate) hazard_loading: Option<HazardLoadingArg>,
+    pub(crate) frailty: gam::families::survival::lognormal_kernel::FrailtySpec,
     pub(crate) persistent_warm_start_store:
         Option<gam_runtime::warm_start::ConfiguredWarmStartStore>,
 }

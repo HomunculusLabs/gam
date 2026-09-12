@@ -1375,6 +1375,73 @@ fn cli_request_document_survival_time_anchor_reaches_the_fit_2631() {
     remove_temp_file(&model_path);
 }
 
+/// A `--request` document's frailty must reach the survival routes. `SurvivalArgs`
+/// used to copy the `--frailty-*` flags, which conflict with `--request`, so a
+/// document frailty arrived as `FrailtySpec::None`. The latent route refuses every
+/// frailty except HazardMultiplier before it fits anything, and its refusal names
+/// the kind it received, so the refusal shows which frailty arrived.
+/// The document names a Weibull baseline because the latent route refuses a
+/// linear one before it looks at the frailty.
+#[test]
+fn cli_request_document_frailty_reaches_the_latent_survival_route() {
+    let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let train_path = td.path().join("request_frailty.csv");
+    let request_path = td.path().join("request_frailty.request.json");
+    let model_path = td.path().join("request_frailty.model.json");
+    fs::write(
+        &train_path,
+        "entry,exit,event,x\n\
+         10,15,1,-0.8\n\
+         20,35,0,0.4\n\
+         40,60,1,-0.2\n\
+         80,100,0,0.7\n\
+         120,150,1,0.1\n\
+         160,220,1,-0.5\n",
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write survival csv", e));
+
+    let refusal = |frailty_fields: &str| -> String {
+        fs::write(
+            &request_path,
+            format!(
+                r#"{{"schema":"gam.fit-request","schema_version":1,
+                     "formula":"Surv(entry, exit, event) ~ x",
+                     "config":{{"survival_likelihood":"latent","baseline_target":"weibull","baseline_scale":15.0,"baseline_shape":1.3{frailty_fields}}}}}"#
+            ),
+        )
+        .unwrap_or_else(|e| panic!("{} failed: {:?}", "write fit-request document", e));
+        let mut args = location_scale_fit_args(
+            train_path.clone(),
+            model_path.clone(),
+            "unused ~ when --request is supplied",
+            "1",
+        );
+        // `--request` carries the formula and the whole model configuration; the CLI
+        // rejects the conflicting flags, so they must be cleared here too.
+        args.request = Some(request_path.clone());
+        args.formula_positional = None;
+        args.predict_noise = None;
+        args.survival_likelihood = None;
+        args.family = FamilyArg::Auto;
+        run_fit(args)
+            .expect_err("the latent survival route must refuse a frailty other than HazardMultiplier")
+            .to_string()
+    };
+
+    // Control: with no frailty in the document the route reports a missing specification.
+    let without = refusal("");
+    assert!(
+        without.contains("requires a HazardMultiplier frailty specification"),
+        "unexpected refusal without a document frailty: {without}"
+    );
+    // The document's GaussianShift frailty must be the one the route receives.
+    let with_shift = refusal(r#","frailty_kind":"gaussian-shift","frailty_sd":0.3"#);
+    assert!(
+        with_shift.contains("not GaussianShift"),
+        "a --request document's frailty must reach the latent survival route: {with_shift}"
+    );
+}
+
 #[test]
 fn cli_surv_predict_noise_routes_to_survival_location_scale() {
     let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
@@ -5036,9 +5103,7 @@ fn parse_survival_time_basis_accepts_ispline() {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     };
     let cfg = parse_survival_time_basis_config(
@@ -5088,9 +5153,7 @@ fn parse_survival_time_basis_rejects_nonstructural_bases() {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     };
     let err = parse_survival_time_basis_config(
@@ -6496,9 +6559,7 @@ fn parse_survival_inverse_link_accepts_sas_init() {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     };
     args.link = Some("sas".to_string());
@@ -6556,9 +6617,7 @@ fn survival_args_for_inverse_link_test() -> SurvivalArgs {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     }
 }
@@ -6677,9 +6736,7 @@ fn parse_survival_inverse_link_supports_loglog_and_cauchit() {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     };
     // `loglog` and `cauchit` are supported survival --link values (issue #1829). Each
@@ -6759,9 +6816,7 @@ fn parse_survival_inverse_link_accepts_flexible_standard_links() {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     };
     args.link = Some("flexible(logit)".to_string());
@@ -6807,9 +6862,7 @@ fn parse_survival_inverse_link_rejects_flexible_blended_links() {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     };
     args.link = Some("flexible(blended(logit,probit))".to_string());
@@ -6856,9 +6909,7 @@ fn parse_survival_inverse_link_reports_survival_specific_supported_links() {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     };
     args.link = Some("bogus".to_string());
@@ -6907,9 +6958,7 @@ fn parse_survival_inverse_link_accepts_loglog_and_cauchit() {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     };
 
@@ -7172,9 +7221,7 @@ fn survival_integration_small_dataset_converges() {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     };
     let result = super::run_survival(args);
@@ -7237,9 +7284,7 @@ fn survival_timewiggle_with_parametric_baseline_skips_base_basis_requirement() {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     };
     super::run_survival(args).unwrap_or_else(|e| {
@@ -7306,9 +7351,7 @@ fn survival_location_scale_rejects_linkwiggle_for_mixture_inverse_link() {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     })
     .expect_err("mixture-backed survival linkwiggle should be rejected before fitting");
@@ -7371,9 +7414,7 @@ fn survival_location_scale_saved_fit_preserves_linkwiggle_metadata() {
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     })
     .unwrap_or_else(|e| {
@@ -8027,9 +8068,7 @@ fn fit_survival_location_scale_live_warp_2695(degree: usize, internal_knots: usi
         weights_column: None,
         offset_column: None,
         noise_offset_column: None,
-        frailty_kind: None,
-        frailty_sd: None,
-        hazard_loading: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
         persistent_warm_start_store: None,
     })
     .unwrap_or_else(|e| panic!("degree={degree} survival location-scale fit failed: {e}"));

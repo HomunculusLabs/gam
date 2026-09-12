@@ -923,7 +923,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
             );
         }
 
-        let frailty = fit_frailty_spec_from_survival_args(&args, "survival marginal-slope")?;
+        let frailty = args.frailty.clone();
         frailty.validate_for_marginal_slope()?;
         let kappa_options = SpatialLengthScaleOptimizationOptions::default();
         let mut options = gam::families::custom_family::BlockwiseFitOptions::default();
@@ -1175,7 +1175,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
         } else {
             "latent binary"
         };
-        let frailty = fit_frailty_spec_from_survival_args(&args, latent_context)?;
+        let frailty = args.frailty.clone();
         let latent_loading = latent_hazard_loading(&frailty, latent_context)?;
         let latent_derivative_guard = survival_derivative_guard_for_likelihood(likelihood_mode);
         let options = gam::families::custom_family::BlockwiseFitOptions {

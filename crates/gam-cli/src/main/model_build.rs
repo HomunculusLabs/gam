@@ -32,18 +32,6 @@ pub(crate) fn fit_frailty_spec_from_args(
     )
 }
 
-pub(crate) fn fit_frailty_spec_from_survival_args(
-    args: &SurvivalArgs,
-    context: &str,
-) -> Result<gam::families::survival::lognormal_kernel::FrailtySpec, String> {
-    crate::config_resolve::resolve_cli_frailty_spec(
-        cli_frailty_kind(args.frailty_kind),
-        args.frailty_sd,
-        cli_hazard_loading(args.hazard_loading),
-        context,
-    )
-}
-
 pub(crate) fn fixed_hazard_multiplier_from_saved_family(
     family: &FittedFamily,
 ) -> Result<

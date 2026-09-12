@@ -95,12 +95,6 @@ pub(crate) fn resolve_fit_invocation(
 }
 
 pub(crate) fn fit_config_from_survival_args(args: &SurvivalArgs) -> Result<FitConfig, String> {
-    let frailty = crate::config_resolve::resolve_cli_frailty_spec(
-        cli_frailty_kind(args.frailty_kind),
-        args.frailty_sd,
-        cli_hazard_loading(args.hazard_loading),
-        "survival fit",
-    )?;
     FitConfig {
         link: args.link.clone(),
         offset_column: args.offset_column.clone(),
@@ -133,7 +127,7 @@ pub(crate) fn fit_config_from_survival_args(args: &SurvivalArgs) -> Result<FitCo
         z_column: args.z_column.clone(),
         scale_dimensions: args.scale_dimensions,
         spatial_optimization: SpatialLengthScaleOptimizationOptions::default(),
-        frailty,
+        frailty: args.frailty.clone(),
         persistent_warm_start_store: args.persistent_warm_start_store.clone(),
         ..FitConfig::default()
     }
@@ -254,10 +248,7 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
             sas_init: effective_sas_init.clone(),
             beta_logistic_init: effective_beta_logistic_init.clone(),
             // From the RESOLVED config, like every other survival knob in this
-            // literal — not from `args`. `resolve_fit_invocation` produces it
-            // either from the `--request` document or from the flags, and the
-            // flag conflicts with `--request`, so reading `args` here would
-            // silently drop a document-supplied anchor (#2631).
+            // literal: the anchor exists only in a `--request` document (#2631).
             survival_time_anchor: fit_config.survival_time_anchor,
             baseline_target: fit_config.baseline_target.clone(),
             baseline_scale: fit_config.baseline_scale,
@@ -280,9 +271,9 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
             weights_column: fit_config.weight_column.clone(),
             offset_column: fit_config.offset_column.clone(),
             noise_offset_column: fit_config.noise_offset_column.clone(),
-            frailty_kind: args.frailty_kind,
-            frailty_sd: args.frailty_sd,
-            hazard_loading: args.hazard_loading,
+            // The resolved frailty, not the `--frailty-*` flags: they conflict with
+            // `--request`, so reading `args` here would drop a document's frailty.
+            frailty: fit_config.frailty.clone(),
             persistent_warm_start_store: fit_config.persistent_warm_start_store.clone(),
         };
         return run_survival(surv_args);
