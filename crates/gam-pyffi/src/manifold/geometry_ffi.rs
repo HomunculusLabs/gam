@@ -5952,7 +5952,6 @@ const SPARSE_DICT_DUAL_CERT_MAX_BIRTHS: usize = 16;
     max_epochs = 30,
     score_tile = 4096,
     code_ridge = 1.0e-6,
-    decoder_ridge = 1.0e-6,
     tolerance = 1.0e-6,
     score_mode = "auto"
 ))]
@@ -5965,7 +5964,6 @@ fn sparse_dictionary_fit<'py>(
     max_epochs: usize,
     score_tile: usize,
     code_ridge: f32,
-    decoder_ridge: f32,
     tolerance: f64,
     score_mode: &str,
 ) -> PyResult<Py<PyDict>> {
@@ -5974,6 +5972,7 @@ fn sparse_dictionary_fit<'py>(
     let admission =
         gam::terms::sae::front_door::admit_sae_fit(x_values.nrows(), x_values.ncols(), k)
             .map_err(py_value_error)?;
+    // The fit selects one shared REML ridge, so the decoder starts at the code ridge.
     let config = SparseDictConfig {
         n_atoms: k,
         active,
@@ -5981,7 +5980,7 @@ fn sparse_dictionary_fit<'py>(
         max_epochs,
         score_tile,
         code_ridge,
-        decoder_ridge,
+        decoder_ridge: code_ridge,
         tolerance,
         score_mode,
     };
@@ -6670,7 +6669,6 @@ impl SparseDictStream {
         max_epochs = 30,
         score_tile = 4096,
         code_ridge = 1.0e-6,
-        decoder_ridge = 1.0e-6,
         tolerance = 1.0e-6,
         score_mode = "auto"
     ))]
@@ -6683,7 +6681,6 @@ impl SparseDictStream {
         max_epochs: usize,
         score_tile: usize,
         code_ridge: f32,
-        decoder_ridge: f32,
         tolerance: f64,
         score_mode: &str,
     ) -> PyResult<Self> {
@@ -6696,7 +6693,7 @@ impl SparseDictStream {
             max_epochs,
             score_tile,
             code_ridge,
-            decoder_ridge,
+            decoder_ridge: code_ridge,
             tolerance,
             score_mode,
         };

@@ -128,16 +128,15 @@ def dimension_spectrometer(
     max_epochs: int = 30,
     score_tile: int = 4096,
     code_ridge: float = 1.0e-6,
-    decoder_ridge: float = 1.0e-6,
     tolerance: float = 1.0e-6,
     score_mode: str = "auto",
 ) -> SpectrometerReport:
     """Estimate intrinsic dimension by fitting single-atom dictionaries along a
     doubling ladder ``k_min * 2**j`` and inverting the loss scaling law.
 
-    The current dictionary fit selects one shared REML ridge, so
-    ``code_ridge`` and ``decoder_ridge`` must be equal. ``score_mode="auto"``
-    uses CUDA when the exact router admits the workload and otherwise uses CPU.
+    The dictionary fit selects one shared REML ridge starting from
+    ``code_ridge``. ``score_mode="auto"`` uses CUDA when the exact router admits
+    the workload and otherwise uses CPU.
     """
     x = _as_2d_f32(data, "data")
     payload = rust_module().dimension_spectrometer(
@@ -149,7 +148,6 @@ def dimension_spectrometer(
         max_epochs,
         score_tile,
         code_ridge,
-        decoder_ridge,
         tolerance,
         score_mode,
     )

@@ -819,8 +819,8 @@ fn atlas_nerve_diagram<'py>(
 /// fitted reconstruction-loss scaling law `L(K) − σ² ∝ K^{-2/d}` into an
 /// intrinsic-dimension estimate `d̂ = −2/m` with delta-method standard errors.
 /// The forwarded dictionary template mirrors `sparse_dictionary_fit`'s fit
-/// knobs; `active` is forced to 1 per rung by the engine regardless. The current
-/// fit owns one shared REML ridge, so the two ridge inputs must be equal.
+/// knobs; `active` is forced to 1 per rung by the engine regardless. The fit owns
+/// one shared REML ridge, so the decoder starts at the code ridge.
 #[pyfunction(signature = (
     data,
     k_min = 4,
@@ -830,7 +830,6 @@ fn atlas_nerve_diagram<'py>(
     max_epochs = 30,
     score_tile = 4096,
     code_ridge = 1.0e-6,
-    decoder_ridge = 1.0e-6,
     tolerance = 1.0e-6,
     score_mode = "auto"
 ))]
@@ -844,7 +843,6 @@ fn dimension_spectrometer<'py>(
     max_epochs: usize,
     score_tile: usize,
     code_ridge: f32,
-    decoder_ridge: f32,
     tolerance: f64,
     score_mode: &str,
 ) -> PyResult<Py<PyDict>> {
@@ -860,7 +858,7 @@ fn dimension_spectrometer<'py>(
             max_epochs,
             score_tile,
             code_ridge,
-            decoder_ridge,
+            decoder_ridge: code_ridge,
             tolerance,
             score_mode,
         },

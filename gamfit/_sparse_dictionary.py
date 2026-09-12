@@ -317,7 +317,7 @@ class SparseDictStream:
         A representative ``N_seed x P`` sample used to fix ``P`` and seed the
         initial atom directions (deterministic farthest-point). One shard, or the
         whole corpus for small problems.
-    K, active, minibatch, max_epochs, score_tile, code_ridge, decoder_ridge, tolerance, score_mode:
+    K, active, minibatch, max_epochs, score_tile, code_ridge, tolerance, score_mode:
         Identical hyper-parameters to :func:`sparse_dictionary_fit`. ``max_epochs``
         is advisory here (the driving Python loop decides how many epochs to run);
         it is carried only so :meth:`end_epoch`'s convergence flag matches the
@@ -336,7 +336,6 @@ class SparseDictStream:
         max_epochs: int = 30,
         score_tile: int = 4096,
         code_ridge: float = 1.0e-6,
-        decoder_ridge: float = 1.0e-6,
         tolerance: float = 1.0e-6,
         score_mode: str = "auto",
     ) -> None:
@@ -349,7 +348,6 @@ class SparseDictStream:
             max_epochs=int(max_epochs),
             score_tile=int(score_tile),
             code_ridge=float(code_ridge),
-            decoder_ridge=float(decoder_ridge),
             tolerance=float(tolerance),
             score_mode=str(score_mode),
         )
@@ -1167,7 +1165,6 @@ def sparse_dictionary_fit_begin(
     max_epochs: int = 30,
     score_tile: int = 4096,
     code_ridge: float = 1.0e-6,
-    decoder_ridge: float = 1.0e-6,
     tolerance: float = 1.0e-6,
     score_mode: str = "auto",
 ) -> SparseDictStream:
@@ -1184,7 +1181,6 @@ def sparse_dictionary_fit_begin(
         max_epochs=max_epochs,
         score_tile=score_tile,
         code_ridge=code_ridge,
-        decoder_ridge=decoder_ridge,
         tolerance=tolerance,
         score_mode=score_mode,
     )
@@ -1199,7 +1195,6 @@ def sparse_dictionary_fit(
     max_epochs: int = 30,
     score_tile: int = 4096,
     code_ridge: float = 1.0e-6,
-    decoder_ridge: float = 1.0e-6,
     tolerance: float = 1.0e-6,
     score_mode: str = "auto",
 ) -> SparseDictionaryFit:
@@ -1217,8 +1212,9 @@ def sparse_dictionary_fit(
         per-atom.
     minibatch, max_epochs, score_tile:
         Streaming / tiling controls.
-    code_ridge, decoder_ridge, tolerance:
-        Shared regularisation and stopping controls.
+    code_ridge, tolerance:
+        Shared starting ridge (REML selects the final value, which the code
+        and decoder solves share) and stopping control.
     score_mode:
         ``"auto"`` (default) uses CUDA when the route is admitted and falls back
         to the exact CPU router otherwise. Use ``"required"`` to fail closed
@@ -1233,7 +1229,6 @@ def sparse_dictionary_fit(
         max_epochs=int(max_epochs),
         score_tile=int(score_tile),
         code_ridge=float(code_ridge),
-        decoder_ridge=float(decoder_ridge),
         tolerance=float(tolerance),
         score_mode=str(score_mode),
     )
