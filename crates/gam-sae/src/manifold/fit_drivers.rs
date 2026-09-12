@@ -1096,16 +1096,13 @@ impl SaeManifoldTerm {
         let old_decoder = self.atoms[atom_idx].decoder_coefficients().clone();
         let old_smooth_penalty = self.atoms[atom_idx].smooth_penalty().clone();
         let new_decoder = fast_ab(&transport, &old_decoder);
-        let old_fit = fast_ab(&old_phi, &old_decoder);
-        let new_fit = fast_ab(&new_phi, &new_decoder);
-        let fit_scale = old_fit
-            .iter()
-            .chain(new_fit.iter())
-            .fold(1.0_f64, |acc, &v| acc.max(v.abs()));
-        let max_abs = old_fit
-            .iter()
-            .zip(new_fit.iter())
-            .fold(0.0_f64, |acc, (&a, &b)| acc.max((a - b).abs()));
+        let (image_scale, max_abs) = image_invariance_extremes(
+            old_phi.view(),
+            old_decoder.view(),
+            new_phi.view(),
+            new_decoder.view(),
+        )?;
+        let fit_scale = image_scale.max(1.0);
         if max_abs > 1.0e-8 * fit_scale {
             return Ok(());
         }
@@ -1558,17 +1555,12 @@ impl SaeManifoldTerm {
         // Per-row image-invariance gate: the grid gate certified the curve at
         // the audit nodes; this certifies it at the coordinates the fit
         // actually sits on. Same honest-fallback contract.
-        let old_fit = fast_ab(
-            &self.atoms[atom_idx].basis_values,
-            self.atoms[atom_idx].decoder_coefficients(),
-        );
-        let new_fit = fast_ab(&new_phi, &repar.new_decoder);
-        let mut fit_scale = 0.0_f64;
-        let mut max_abs = 0.0_f64;
-        for (a, b) in old_fit.iter().zip(new_fit.iter()) {
-            fit_scale = fit_scale.max(a.abs()).max(b.abs());
-            max_abs = max_abs.max((a - b).abs());
-        }
+        let (fit_scale, max_abs) = image_invariance_extremes(
+            self.atoms[atom_idx].basis_values.view(),
+            self.atoms[atom_idx].decoder_coefficients().view(),
+            new_phi.view(),
+            repar.new_decoder.view(),
+        )?;
         if !(fit_scale.is_finite() && max_abs.is_finite()) {
             return Ok(None);
         }
@@ -1623,6 +1615,88 @@ struct PreparedUnitSpeedChart {
     new_decoder: Array2<f64>,
     /// The basis transport `T`.
     decoder_transport: Array2<f64>,
+}
+
+/// The two extremes a canonicalization's per-row image-invariance gate reads:
+/// `maxᵢⱼ max(|Φ_old B_old|ᵢⱼ, |Φ_new B_new|ᵢⱼ)` and `maxᵢⱼ |Φ_old B_old − Φ_new B_new|ᵢⱼ`,
+/// each starting from `0` and ignoring non-finite products exactly as `f64::max` does.
+///
+/// #2283 — folded one row at a time with a `p`-length scratch pair per rayon worker,
+/// never as the two `n × p` images. At the #2283 cell (96 000 rows, `p = 2048`) each
+/// image is 1.47 GiB, and the in-loop unit-speed retraction held two per atom per batch
+/// slot on every accepted inner iteration. Both extremes are maxima, so the folding
+/// order cannot change them; only the rounding of the individual products can differ
+/// from a blocked matrix product.
+fn image_invariance_extremes(
+    old_phi: ArrayView2<'_, f64>,
+    old_decoder: ArrayView2<'_, f64>,
+    new_phi: ArrayView2<'_, f64>,
+    new_decoder: ArrayView2<'_, f64>,
+) -> Result<(f64, f64), String> {
+    use rayon::prelude::*;
+    let (rows, old_width) = old_phi.dim();
+    let (new_rows, new_width) = new_phi.dim();
+    let p = old_decoder.ncols();
+    if new_rows != rows
+        || old_decoder.nrows() != old_width
+        || new_decoder.nrows() != new_width
+        || new_decoder.ncols() != p
+    {
+        return Err(format!(
+            "image-invariance gate: old image {:?}·{:?} and new image {:?}·{:?} do not describe \
+             the same rows and output width",
+            old_phi.dim(),
+            old_decoder.dim(),
+            new_phi.dim(),
+            new_decoder.dim()
+        ));
+    }
+    let old_decoder = old_decoder.as_standard_layout();
+    let old_decoder = old_decoder
+        .as_slice()
+        .expect("a standard-layout array is contiguous");
+    let new_decoder = new_decoder.as_standard_layout();
+    let new_decoder = new_decoder
+        .as_slice()
+        .expect("a standard-layout array is contiguous");
+    Ok((0..rows)
+        .into_par_iter()
+        .map_init(
+            || (vec![0.0_f64; p], vec![0.0_f64; p]),
+            |(old_image, new_image), row| {
+                old_image.fill(0.0);
+                new_image.fill(0.0);
+                for basis in 0..old_width {
+                    let phi = old_phi[[row, basis]];
+                    for (slot, &coefficient) in old_image
+                        .iter_mut()
+                        .zip(&old_decoder[basis * p..(basis + 1) * p])
+                    {
+                        *slot += phi * coefficient;
+                    }
+                }
+                for basis in 0..new_width {
+                    let phi = new_phi[[row, basis]];
+                    for (slot, &coefficient) in new_image
+                        .iter_mut()
+                        .zip(&new_decoder[basis * p..(basis + 1) * p])
+                    {
+                        *slot += phi * coefficient;
+                    }
+                }
+                let mut fit_scale = 0.0_f64;
+                let mut max_abs = 0.0_f64;
+                for (&a, &b) in old_image.iter().zip(new_image.iter()) {
+                    fit_scale = fit_scale.max(a.abs()).max(b.abs());
+                    max_abs = max_abs.max((a - b).abs());
+                }
+                (fit_scale, max_abs)
+            },
+        )
+        .reduce(
+            || (0.0_f64, 0.0_f64),
+            |(scale_a, drift_a), (scale_b, drift_b)| (scale_a.max(scale_b), drift_a.max(drift_b)),
+        ))
 }
 
 impl SaeManifoldTerm {
@@ -1755,17 +1829,12 @@ impl SaeManifoldTerm {
         // Per-row image-invariance gate: the audit grid certified the image
         // at the transport nodes; this certifies it at the coordinates the
         // fit actually sits on. Same honest-fallback contract as d = 1.
-        let old_fit = fast_ab(
-            &self.atoms[atom_idx].basis_values,
-            self.atoms[atom_idx].decoder_coefficients(),
-        );
-        let new_fit = fast_ab(&new_phi, &repar.new_decoder);
-        let mut fit_scale = 0.0_f64;
-        let mut max_abs = 0.0_f64;
-        for (a, b) in old_fit.iter().zip(new_fit.iter()) {
-            fit_scale = fit_scale.max(a.abs()).max(b.abs());
-            max_abs = max_abs.max((a - b).abs());
-        }
+        let (fit_scale, max_abs) = image_invariance_extremes(
+            self.atoms[atom_idx].basis_values.view(),
+            self.atoms[atom_idx].decoder_coefficients().view(),
+            new_phi.view(),
+            repar.new_decoder.view(),
+        )?;
         if !(fit_scale.is_finite() && max_abs.is_finite()) {
             return Ok(false);
         }
@@ -1844,17 +1913,12 @@ impl SaeManifoldTerm {
         // Per-row image-invariance gate: the audit grid certified the image at
         // the transport nodes; this certifies it at the coordinates the fit
         // actually sits on. Same honest-fallback contract as the torus path.
-        let old_fit = fast_ab(
-            &self.atoms[atom_idx].basis_values,
-            self.atoms[atom_idx].decoder_coefficients(),
-        );
-        let new_fit = fast_ab(&new_phi, &repar.new_decoder);
-        let mut fit_scale = 0.0_f64;
-        let mut max_abs = 0.0_f64;
-        for (a, b) in old_fit.iter().zip(new_fit.iter()) {
-            fit_scale = fit_scale.max(a.abs()).max(b.abs());
-            max_abs = max_abs.max((a - b).abs());
-        }
+        let (fit_scale, max_abs) = image_invariance_extremes(
+            self.atoms[atom_idx].basis_values.view(),
+            self.atoms[atom_idx].decoder_coefficients().view(),
+            new_phi.view(),
+            repar.new_decoder.view(),
+        )?;
         if !(fit_scale.is_finite() && max_abs.is_finite()) {
             return Ok(false);
         }
@@ -1933,17 +1997,12 @@ impl SaeManifoldTerm {
         // Per-row image-invariance gate: the audit grid certified the image at
         // the transport nodes; this certifies it at the coordinates the fit
         // actually sits on. Same honest-fallback contract as the torus path.
-        let old_fit = fast_ab(
-            &self.atoms[atom_idx].basis_values,
-            self.atoms[atom_idx].decoder_coefficients(),
-        );
-        let new_fit = fast_ab(&new_phi, &repar.new_decoder);
-        let mut fit_scale = 0.0_f64;
-        let mut max_abs = 0.0_f64;
-        for (a, b) in old_fit.iter().zip(new_fit.iter()) {
-            fit_scale = fit_scale.max(a.abs()).max(b.abs());
-            max_abs = max_abs.max((a - b).abs());
-        }
+        let (fit_scale, max_abs) = image_invariance_extremes(
+            self.atoms[atom_idx].basis_values.view(),
+            self.atoms[atom_idx].decoder_coefficients().view(),
+            new_phi.view(),
+            repar.new_decoder.view(),
+        )?;
         if !(fit_scale.is_finite() && max_abs.is_finite()) {
             return Ok(false);
         }
