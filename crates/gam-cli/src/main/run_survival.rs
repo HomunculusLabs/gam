@@ -537,8 +537,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                 weights: weights.clone(),
                 inverse_link,
                 derivative_guard: exact_derivative_guard,
-                max_iter: 400,
-                tol: 1e-6,
                 time_block: TimeBlockInput {
                     design_entry: prepared.time_design_entry.clone(),
                     design_exit: prepared.time_design_exit.clone(),

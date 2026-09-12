@@ -76,8 +76,9 @@ pub(crate) fn survival_blockwise_fit_options(
     spec: &SurvivalLocationScaleSpec,
 ) -> BlockwiseFitOptions {
     BlockwiseFitOptions {
-        inner_max_cycles: spec.max_iter,
-        inner_tol: spec.tol,
+        // The inner mode is where survival LAML is evaluated, so the solve must meet
+        // the survival family's projected-KKT stationarity contract.
+        inner_tol: crate::survival::SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL,
         outer_max_iter: BLOCKWISE_OUTER_MAX_ITER,
         outer_tol: BLOCKWISE_OUTER_TOL,
         compute_covariance: true,
@@ -122,16 +123,6 @@ pub(crate) fn validate_survival_location_scale_spec(
     }
     if spec.age_entry.len() != n || spec.age_exit.len() != n || spec.weights.len() != n {
         bail_dim_sls!("fit_survival_location_scale: top-level input size mismatch");
-    }
-    if !(spec.tol.is_finite() && spec.tol > 0.0) {
-        return Err(SurvivalLocationScaleError::InvalidConfiguration {
-            reason: format!("fit_survival_location_scale: invalid tol {}", spec.tol),
-        });
-    }
-    if spec.max_iter == 0 {
-        return Err(SurvivalLocationScaleError::InvalidConfiguration {
-            reason: "fit_survival_location_scale: max_iter must be > 0".to_string(),
-        });
     }
     if !spec.derivative_guard.is_finite() || spec.derivative_guard <= 0.0 {
         return Err(SurvivalLocationScaleError::InvalidConfiguration {

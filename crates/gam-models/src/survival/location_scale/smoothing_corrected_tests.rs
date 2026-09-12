@@ -122,8 +122,6 @@ fn penalized_location_spec(x: &Array1<f64>, age_exit: &Array1<f64>) -> SurvivalL
         weights: Array1::<f64>::ones(n),
         inverse_link: residual_distribution_inverse_link(ResidualDistribution::Gaussian),
         derivative_guard: DEFAULT_SURVIVAL_LOCATION_SCALE_DERIVATIVE_GUARD,
-        max_iter: 200,
-        tol: 1e-7,
         time_block: TimeBlockInput {
             design_entry: DesignMatrix::from(Array2::<f64>::zeros((n, p_time))),
             design_exit: DesignMatrix::from(design_exit),

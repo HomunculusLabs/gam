@@ -776,8 +776,6 @@ pub(crate) fn fit_survival_location_scale_terms(
             weights: spec.weights.clone(),
             inverse_link,
             derivative_guard: spec.derivative_guard,
-            max_iter: spec.max_iter,
-            tol: spec.tol,
             time_block: TimeBlockInput {
                 design_entry: spec.time_block.design_entry.clone(),
                 design_exit: spec.time_block.design_exit.clone(),

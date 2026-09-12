@@ -3031,8 +3031,6 @@ fn prepare_model_accepts_time_initializer_when_offset_completes_guard() {
         weights: Array1::ones(n),
         inverse_link: residual_distribution_inverse_link(ResidualDistribution::Gaussian),
         derivative_guard,
-        max_iter: 4,
-        tol: 1e-8,
         time_block: TimeBlockInput {
             design_entry: DesignMatrix::from(Array2::zeros((n, 1))),
             design_exit: DesignMatrix::from(Array2::zeros((n, 1))),
@@ -3107,8 +3105,6 @@ fn prepare_model_seeds_structural_time_initializer_when_offset_equals_guard() {
         weights: Array1::ones(n),
         inverse_link: residual_distribution_inverse_link(ResidualDistribution::Gaussian),
         derivative_guard,
-        max_iter: 4,
-        tol: 1e-8,
         time_block: TimeBlockInput {
             design_entry: DesignMatrix::from(Array2::zeros((n, p_time))),
             design_exit: DesignMatrix::from(Array2::zeros((n, p_time))),
@@ -3180,8 +3176,6 @@ fn prepare_model_assigns_distinct_descending_gauge_priorities() {
         weights: Array1::ones(n),
         inverse_link: residual_distribution_inverse_link(ResidualDistribution::Gaussian),
         derivative_guard,
-        max_iter: 4,
-        tol: 1e-8,
         time_block: TimeBlockInput {
             design_entry: DesignMatrix::from(Array2::zeros((n, 1))),
             design_exit: DesignMatrix::from(Array2::zeros((n, 1))),
@@ -3266,8 +3260,6 @@ fn prepare_model_fixes_the_constant_log_sigma_the_threshold_scale_aliases() {
         weights: Array1::ones(n),
         inverse_link: residual_distribution_inverse_link(ResidualDistribution::Logistic),
         derivative_guard,
-        max_iter: 4,
-        tol: 1e-8,
         time_block: TimeBlockInput {
             design_entry: DesignMatrix::from(Array2::zeros((n, 1))),
             design_exit: DesignMatrix::from(Array2::zeros((n, 1))),
@@ -5047,8 +5039,6 @@ fn heart_failure_full_fit_structural_time_coefficients() {
         weights,
         inverse_link: residual_distribution_inverse_link(ResidualDistribution::Gaussian),
         derivative_guard: DEFAULT_SURVIVAL_LOCATION_SCALE_DERIVATIVE_GUARD,
-        max_iter: 400,
-        tol: 1e-6,
         time_block: TimeBlockInput {
             design_entry: DesignMatrix::from(design_entry),
             design_exit: DesignMatrix::from(design_exit),
@@ -7026,8 +7016,9 @@ fn survival_ls_scale_aware_location_block_trust_metric_floor_caps_starvation_156
 /// and `μ̂/σ̂` recovered to `~1e-6`). With `tol = 1e-8` the OLD gate demanded
 /// `|g|_∞ ≤ 1e-8`, which that `2.3e-7` floor can NEVER reach → a spurious
 /// 200-iteration hard error. The fix stops on the affine-invariant, sample-size-
-/// invariant Newton decrement instead, so this converges. A `tol = 1e-8` here is
-/// therefore exactly the pre-fix failing regime and gives the test teeth.
+/// invariant Newton decrement instead, so this converges. The survival location-scale
+/// fit solves to `SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL = 1e-8`, which is therefore
+/// exactly the pre-fix failing regime and gives the test teeth.
 #[test]
 fn reduced_parametric_aft_converges_and_recovers_lognormal_mle_2112() {
     // Deterministic lognormal sample: log t ~ N(mu0, sigma0), all fully observed.
@@ -7085,9 +7076,6 @@ fn reduced_parametric_aft_converges_and_recovers_lognormal_mle_2112() {
         weights,
         inverse_link: residual_distribution_inverse_link(ResidualDistribution::Gaussian),
         derivative_guard: DEFAULT_SURVIVAL_LOCATION_SCALE_DERIVATIVE_GUARD,
-        max_iter: 200,
-        // 1e-8: the pre-fix failing regime (see `fit_parametric_aft_direct_mle`).
-        tol: 1e-8,
         time_block: TimeBlockInput {
             design_entry: DesignMatrix::from(design_entry),
             design_exit: DesignMatrix::from(design_exit),
@@ -7244,8 +7232,6 @@ fn reduced_aft_lognormal_spec(
         weights: Array1::from_elem(n, weight),
         inverse_link: residual_distribution_inverse_link(ResidualDistribution::Gaussian),
         derivative_guard: DEFAULT_SURVIVAL_LOCATION_SCALE_DERIVATIVE_GUARD,
-        max_iter: 200,
-        tol: 1e-7,
         time_block: TimeBlockInput {
             design_entry: DesignMatrix::from(design_entry),
             design_exit: DesignMatrix::from(design_exit),

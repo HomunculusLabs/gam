@@ -171,8 +171,6 @@ pub(crate) struct SurvivalLocationScaleSpec {
     pub weights: Array1<f64>,
     pub inverse_link: InverseLink,
     pub derivative_guard: f64,
-    pub max_iter: usize,
-    pub tol: f64,
     pub time_block: TimeBlockInput,
     pub threshold_block: CovariateBlockKind,
     pub log_sigma_block: CovariateBlockKind,
@@ -218,8 +216,6 @@ pub struct SurvivalLocationScaleTermSpec {
     /// Strict lower bound on d_eta/dt used by both the event Jacobian term
     /// and the time monotonicity constraints.
     pub derivative_guard: f64,
-    pub max_iter: usize,
-    pub tol: f64,
     pub time_block: TimeBlockInput,
     pub thresholdspec: TermCollectionSpec,
     pub log_sigmaspec: TermCollectionSpec,

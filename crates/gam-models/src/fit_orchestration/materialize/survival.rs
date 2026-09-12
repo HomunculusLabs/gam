@@ -830,8 +830,6 @@ pub(crate) fn materialize_survival<'a>(
                 weights: weights.clone(),
                 inverse_link: survival_inverse_link.clone(),
                 derivative_guard: exact_derivative_guard,
-                max_iter: 200,
-                tol: 1e-7,
                 time_block,
                 thresholdspec: termspec.clone(),
                 log_sigmaspec: log_sigmaspec.clone(),
