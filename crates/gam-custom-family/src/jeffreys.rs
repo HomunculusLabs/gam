@@ -1043,6 +1043,36 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
             .collect::<Result<Vec<_>, String>>()
             .map_err(CustomFamilyError::trial_point)?;
         let mut derivatives: Vec<Option<Array2<f64>>> = vec![None; deltas.len()];
+        // A family with a contraction pass hands over `⟨H²dot[δ, e_a], K_b⟩` against the
+        // base's ambient kernels. Those close the drift exactly as the rotated rows do,
+        // without forming the `p` axis matrices of any direction (#2668).
+        let contracted = family_owned
+            .joint_jeffreys_information_second_directional_axis_contractions_each_with_specs(
+                &states_owned,
+                &specs_owned,
+                deltas,
+                &|| base.ambient_axis_kernels(),
+                &mut |index, contractions| {
+                    let mut derivative = base.perturbation_derivative_from_axis_contractions(
+                        &pert_hs[index],
+                        &contractions,
+                    )?;
+                    if strength != 1.0 {
+                        derivative *= strength;
+                    }
+                    derivatives[index] = Some(derivative);
+                    Ok(())
+                },
+            )
+            .map_err(CustomFamilyError::trial_point)?;
+        if contracted {
+            if derivatives.iter().any(Option::is_none) {
+                return Err(CustomFamilyError::trial_point(
+                    "active Jeffreys drift contraction pass skipped a direction".to_string(),
+                ));
+            }
+            return Ok(derivatives);
+        }
         // Only the rotations of `{H²dot[δ, e_a]}` are read, so the family forms them (#1082).
         let complete = family_owned
             .joint_jeffreys_information_second_directional_rotated_all_axes_each_with_specs(
