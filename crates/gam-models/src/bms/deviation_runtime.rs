@@ -40,14 +40,6 @@ fn breakpoints_from_knots(knots: &[f64], label: &str) -> Result<Vec<f64>, String
     Ok(breakpoints)
 }
 
-/// Round-off tolerance on the minimum monotonicity-derivative slack. The
-/// constraints are constructed with a positive required margin
-/// (`monotonicity_eps`); this separate, tiny negative bound only absorbs the
-/// finite-precision accumulation in evaluating the slack at the I-spline
-/// breakpoints, so a coefficient that is feasible up to a few ulps is not
-/// spuriously rejected. Anything more negative is a genuine violation.
-pub(crate) const MONOTONICITY_SLACK_ROUNDOFF_TOL: f64 = -1e-10;
-
 /// Typed errors emitted by the deviation runtime construction and evaluation
 /// helpers in this module.
 ///
@@ -1511,6 +1503,17 @@ impl DeviationRuntime {
         }
     }
 
+    /// Minimum over the spans of the exact derivative slack `1 + w′(t) − eps`,
+    /// each divided by its span's largest control-row norm.
+    ///
+    /// The constrained QP enforces each span's three quadratic Bernstein controls
+    /// `a_k·β ≥ eps − 1` (`structural_monotonicity_constraints`) only to
+    /// `PRIMAL_FEASIBILITY_TOL` on the scaled slack `(a_k·β − b_k)/‖a_k‖`. The
+    /// slack at a span endpoint is that endpoint control's raw slack, and by the
+    /// convex-hull property the interior minimum is at least the smallest
+    /// control's, so on this scale every β the QP accepts has slack at least
+    /// `−PRIMAL_FEASIBILITY_TOL`. A span whose rows are all zero has a slack that
+    /// does not depend on β and is taken as computed.
     pub(crate) fn exact_monotonicity_min_slack(&self, beta: &Array1<f64>) -> Result<f64, String> {
         if beta.len() != self.basis_dim {
             return Err(DeviationRuntimeError::DimensionMismatch {
@@ -1532,6 +1535,20 @@ impl DeviationRuntime {
             return Err(DeviationRuntimeError::InvalidInput { reason: bad }.into());
         }
 
+        let rows = &self.monotonicity_constraint_rows;
+        if rows.nrows() != 3 * self.span_count() || rows.ncols() != self.basis_dim {
+            return Err(DeviationRuntimeError::DimensionMismatch {
+                reason: format!(
+                    "deviation monotonicity rows are {}x{}, expected {}x{} (three Bernstein \
+                     controls per span)",
+                    rows.nrows(),
+                    rows.ncols(),
+                    3 * self.span_count(),
+                    self.basis_dim
+                ),
+            }
+            .into());
+        }
         let mut min_slack = f64::INFINITY;
         for span_idx in 0..self.span_count() {
             let left = self.endpoint_points[span_idx];
@@ -1549,16 +1566,24 @@ impl DeviationRuntime {
             let d3 = 6.0 * c3;
             let left_slack = 1.0 + d1_left - self.monotonicity_eps;
             let right_slack = 1.0 + d1_right - self.monotonicity_eps;
-            min_slack = min_slack.min(left_slack.min(right_slack));
+            let mut span_slack = left_slack.min(right_slack);
 
             if d3 > 0.0 {
                 let t_star = -d2_left / d3;
                 if t_star > 0.0 && t_star < width {
                     let interior = 1.0 + d1_left + d2_left * t_star + 0.5 * d3 * t_star * t_star
                         - self.monotonicity_eps;
-                    min_slack = min_slack.min(interior);
+                    span_slack = span_slack.min(interior);
                 }
             }
+            let row_scale = (3 * span_idx..3 * span_idx + 3)
+                .map(|row| rows.row(row).dot(&rows.row(row)).sqrt())
+                .fold(0.0_f64, f64::max);
+            min_slack = min_slack.min(if row_scale > 0.0 {
+                span_slack / row_scale
+            } else {
+                span_slack
+            });
         }
         if min_slack.is_finite() {
             Ok(min_slack)
@@ -1577,13 +1602,13 @@ impl DeviationRuntime {
         context: &str,
     ) -> Result<(), String> {
         let slack = self.exact_monotonicity_min_slack(beta)?;
-        if slack >= MONOTONICITY_SLACK_ROUNDOFF_TOL {
+        if slack >= -gam_solve::pirls::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
             Ok(())
         } else {
             let (left, right) = self.support_interval()?;
             Err(DeviationRuntimeError::NumericalFailure {
                 reason: format!(
-                    "{context} violates exact monotonicity on [{left:.6}, {right:.6}] (minimum derivative slack {slack:.3e}, eps={:.3e})",
+                    "{context} violates exact monotonicity on [{left:.6}, {right:.6}] (minimum scaled derivative slack {slack:.3e}, eps={:.3e})",
                     self.monotonicity_eps
                 ),
             }

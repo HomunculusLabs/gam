@@ -4327,5 +4327,13 @@
     ],
     "reason": "#2469. a6a9ca8b2 replaced the last three uses of BMS_DERIV_TOL (1e-8) in bms/cell_moment_assembly.rs: the BMS flex intercept seed now takes its affine inversion whenever the link slope is positive. The same shared-tree edit removed the declaration. c80a51915 restored that declaration while taking foreign hunks back out of f62e7bbf2, because its reference check read a stale origin/main. That left an unused pub(super) const under deny(warnings). This commit completes the #2469 removal.",
     "evidence": "At the base, git grep -n -w BMS_DERIV_TOL over crates, src, tests, examples, bench and benches finds only the declaration in crates/gam-models/src/bms/mod.rs. Since a6a9ca8b2 the three former uses in cell_moment_assembly.rs are gone (l_d1 > BMS_DERIV_TOL, and ell1 > BMS_DERIV_TOL twice). Compile is covered by the lead shared tip check."
+  },
+  {
+    "base": "deac8014582e80bd88424826b9b8ae70a4d23767",
+    "items": [
+      "crates/gam-models/src/bms/deviation_runtime.rs:const:MONOTONICITY_SLACK_ROUNDOFF_TOL"
+    ],
+    "reason": "#2469. monotonicity_feasible refused a deviation whose exact minimum derivative slack fell below MONOTONICITY_SLACK_ROUNDOFF_TOL = -1e-10 in raw constraint units. The judged iterates come from a QP that holds each span's Bernstein-control rows to PRIMAL_FEASIBILITY_TOL on the scaled slack, and by the convex-hull property the exact slack divided by the span's largest row norm inherits that bound. So the check now uses the contract on that scale, and the constant has no other user.",
+    "evidence": "At the base, git grep -n -w MONOTONICITY_SLACK_ROUNDOFF_TOL finds only its declaration and its single use in DeviationRuntime::monotonicity_feasible (crates/gam-models/src/bms/deviation_runtime.rs), which this change replaces. It is pub(crate), production-scoped and declared once, and no test names it. The item list applies source_removal_guard.py's ITEM regex and occurrence rule by hand. Compile is covered by the lead's shared tip check."
   }
 ]
