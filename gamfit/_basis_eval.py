@@ -136,23 +136,22 @@ def bspline_basis_size(spec: Any) -> int:
 def _periodic_curve_basis(t: Any, n_knots: int, degree: int) -> Any:
     """Cyclic uniform-knot B-spline on ``t ∈ [0, 1)``, ``(B, n_knots)``.
 
-    Routes through :func:`gamfit.torch._basis.periodic_spline_curve_basis`
-    which calls the Rust ``periodic_spline_curve_basis`` kernel. Forward
-    only — autograd through ``t`` is not exposed by the Rust binding for
-    this basis. Callers needing gradients through ``t`` should compose
-    with a primitive whose VJP IS exposed (e.g. a 1D BSpline upstream).
+    The periodic B-spline basis on the uniform lattice
+    ``linspace(0, 1, n_knots + 1)``: the same Rust
+    ``build_periodic_bspline_basis_1d`` design ``periodic_spline_curve_basis``
+    returns, routed through :func:`gamfit.torch._basis.bspline_basis` so the
+    first and second derivatives with respect to ``t`` come from the exact
+    periodic derivative kernel.
     """
-    from .torch._basis import periodic_spline_curve_basis
+    from .torch._basis import bspline_basis
 
     torch = _torch()
     if not isinstance(t, torch.Tensor):
         t = torch.as_tensor(t, dtype=torch.float64)
     if t.dim() != 1:
         raise ValueError(f"t must be 1D, got shape {tuple(t.shape)}")
-    basis, _penalty = periodic_spline_curve_basis(
-        t, int(n_knots), degree=int(degree), penalty_order=2,
-    )
-    return basis
+    knots = torch.linspace(0.0, 1.0, int(n_knots) + 1, dtype=torch.float64, device=t.device)
+    return bspline_basis(t, knots, degree=int(degree), periodic=True)
 
 
 # ---------------------------------------------------------------------------

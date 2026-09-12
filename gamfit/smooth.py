@@ -691,6 +691,29 @@ class Pca(Smooth):
         from ._basis_eval import pca_evaluate_numpy
         return pca_evaluate_numpy(self, coords)
 
+    def hessian(self, *coords: Any) -> Any:
+        """Per-row Hessian ``(B, M, d, d)``: identically zero.
+
+        ``Φ(x) = (x − μ) · basis`` is affine in ``x``, so every second derivative
+        is exactly zero. Autograd of the constant first derivative has no graph
+        to differentiate, so the closed form is returned directly.
+        """
+        from ._basis_protocol import _stack_coords_torch, _torch
+
+        torch = _torch()
+        if len(coords) != self.intrinsic_dim:
+            raise ValueError(
+                f"Pca.hessian expected {self.intrinsic_dim} coordinate argument(s), "
+                f"got {len(coords)}"
+            )
+        stacked = _stack_coords_torch(coords)
+        d = self.intrinsic_dim
+        return torch.zeros(
+            (int(stacked.shape[0]), int(self.basis_size), d, d),
+            dtype=stacked.dtype,
+            device=stacked.device,
+        )
+
     def to_rust_descriptor(self) -> dict[str, Any]:
         out = super(Pca, self).to_rust_descriptor()
         if self.K is not None:
@@ -798,6 +821,10 @@ class Sphere(Smooth):
                 )
         else:
             n_centers_i = int(self.n_centers)
+            # A torch caller (jacobian/hessian) passes a grad-tracking tensor;
+            # center resolution reads its values only.
+            if hasattr(coords, "detach"):
+                coords = coords.detach().cpu().numpy()
             pts = np.ascontiguousarray(np.asarray(coords, dtype=np.float64))
             if pts.shape[0] < n_centers_i:
                 raise ValueError(
