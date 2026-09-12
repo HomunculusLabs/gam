@@ -100,6 +100,12 @@ impl ProcessMonitorState {
             .lock()
             .expect("process monitor registry poisoned");
         let resource = ProcessResourceSnapshot::read();
+        // Every line carries the emitting process id. A parent and its spawned
+        // fit child both run a monitor and can share one log; without the id their
+        // lines interleave with no way to tell which RSS or CPU reading belongs to
+        // which process (#2267: two `[process-monitor]` lines at one timestamp
+        // reporting 89.1 MiB and 1.9 GiB).
+        let pid = std::process::id();
 
         // TRUE busy signal: process-wide cores-busy averaged over the interval
         // since the last heartbeat, read from /proc/self/stat. Independent of
@@ -158,7 +164,7 @@ impl ProcessMonitorState {
         };
 
         log::info!(
-            "[process-monitor] elapsed={} {} {} instrumented_threads={}{}",
+            "[process-monitor] pid={pid} elapsed={} {} {} instrumented_threads={}{}",
             format_duration(self.started.elapsed()),
             resource.format(),
             cpu.format(),
@@ -173,7 +179,7 @@ impl ProcessMonitorState {
             .filter(|p| p.deepest_age >= PROCESS_MONITOR_STALL_THRESHOLD)
         {
             log::warn!(
-                "[process-monitor][STALL] thread={} phase={:?} stuck={}",
+                "[process-monitor][STALL] pid={pid} thread={} phase={:?} stuck={}",
                 phase.thread_label,
                 phase.deepest_label,
                 format_duration(phase.deepest_age),
@@ -183,7 +189,7 @@ impl ProcessMonitorState {
         // Compact per-thread phase summary: deepest frame label + age, capped.
         for phase in phases.iter().take(PROCESS_MONITOR_MAX_PHASE_LINES) {
             log::info!(
-                "[process-monitor] phase thread={} depth={} deepest={:?} in_frame={} updated_ago={}",
+                "[process-monitor] pid={pid} phase thread={} depth={} deepest={:?} in_frame={} updated_ago={}",
                 phase.thread_label,
                 phase.depth,
                 phase.deepest_label,
@@ -193,7 +199,7 @@ impl ProcessMonitorState {
         }
         if phases.len() > PROCESS_MONITOR_MAX_PHASE_LINES {
             log::info!(
-                "[process-monitor] phase ... and {} more active thread(s) omitted",
+                "[process-monitor] pid={pid} phase ... and {} more active thread(s) omitted",
                 phases.len() - PROCESS_MONITOR_MAX_PHASE_LINES,
             );
         }
