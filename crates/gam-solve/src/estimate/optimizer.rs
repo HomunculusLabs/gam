@@ -916,6 +916,16 @@ where
         .as_ref()
         .map_or_else(|| y_o.view(), |conditioned| conditioned.view());
 
+    // #2812 / #2902 row 8: the λ-selection domain of each coordinate is derived
+    // from the conditioned design's Gram on that penalty's columns and the
+    // penalty's spectrum, not the picked ±RHO_BOUND box (SPEC rule 20).
+    let (rho_domain_lower, rho_domain_upper) =
+        crate::estimate::rho_domain::resolvability_domain_from_design(
+            w_o.view(),
+            &x_fit,
+            canonical_shared.as_slice(),
+        )
+        .map_err(EstimationError::LayoutError)?;
     let mut reml_state = RemlState::newwith_offset_shared(
         reml_y_view,
         x_fit,
@@ -1109,7 +1119,7 @@ where
                 // component still owns the actual convergence decision.
                 .with_objective_scale(Some(n_obs as f64))
                 .with_problem_size(n_obs, x_o.ncols())
-                .with_rho_bound(crate::estimate::RHO_BOUND)
+                .with_bounds(rho_domain_lower.clone(), rho_domain_upper.clone())
                 // Make the outer smoothing-parameter search invariant to the order
                 // the smooth terms / tensor margins were written (#1538/#1539). The
                 // structural keys label each ρ-coordinate by its placement-
@@ -1193,14 +1203,15 @@ where
                 // silently substituted box and still return a fitted model.
                 // `run_outer_uncertified` already enforces this contract at the outer
                 // entry; the prepass must not undercut it. Crucially the raw pair is
-                // validated BEFORE the `RHO_BOUND` widening below, so the widening
+                // validated BEFORE the widening below, so the widening
                 // can never silently un-invert a drifted box.
                 let bnds = reml_seed_config.bounds;
                 let raw_bounds = OrderedRhoBounds::new(bnds.0, bnds.1)?;
                 // The criterion-ranked prepass evaluates the TRUE REML/LAML cost, so
                 // it is safe — and necessary — to let it explore the full
                 // over-smoothing range the outer optimizer itself can reach
-                // (`RHO_BOUND`), not just the narrower default seed-placement band.
+                // (the derived domain's upper edge), not just the narrower default
+                // seed-placement band.
                 // A double-penalty (null-space-shrinkage) smooth on data living in
                 // one penalty's null space has its global REML optimum at a LARGE
                 // wiggliness λ (range block fully smoothed), often beyond the seed
@@ -1218,9 +1229,11 @@ where
                 // unaffected.
                 // Widen only the upper (over-smoothing) bound to the full range the
                 // outer optimizer can reach. `with_upper_at_least` only ever *raises*
-                // `hi`, so the box stays ordered by construction (`RHO_BOUND` is a
-                // finite constant) — no re-validation needed.
-                let seed_bounds = raw_bounds.with_upper_at_least(crate::estimate::RHO_BOUND);
+                // `hi`, so the box stays ordered by construction (the derived upper
+                // edge is finite) — no re-validation needed.
+                let seed_bounds = raw_bounds.with_upper_at_least(
+                    rho_domain_upper.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                );
                 // risk_shift is the default seed bias when no caller warm-start is given;
                 // it is NOT applied on top of a caller-supplied rho seed.
                 let risk_shift: f64 = match reml_seed_config.risk_profile {

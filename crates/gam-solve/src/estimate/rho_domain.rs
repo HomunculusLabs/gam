@@ -21,7 +21,9 @@
 use crate::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold;
 use faer::Side;
 use gam_linalg::faer_ndarray::FaerEigh;
-use ndarray::{Array1, Array2};
+use gam_linalg::matrix::DesignMatrix;
+use gam_terms::construction::CanonicalPenalty;
+use ndarray::{Array1, Array2, ArrayView1, Axis, s};
 
 /// Generalized eigenvalues `γ_j` of the Gram `G = XᵀX` (or `XᵀWX`) against the
 /// penalty `S` on the penalty's range space, quotiented by `ker(S)`: with
@@ -196,4 +198,71 @@ pub fn resolvability_domain_from_gram_blocks<'a>(
         }
     }
     (lower, upper)
+}
+
+/// The per-coordinate domain of a penalized design given one canonical penalty
+/// per ρ coordinate, from the weighted Gram of each penalty's own columns. The
+/// Grams are accumulated by streaming the design in row chunks sized to the
+/// process's single-materialization budget, so no `p × p` matrix is formed and
+/// sparse or lazy designs are read through the same stream. A coordinate whose
+/// block cannot be projected keeps the precision box.
+pub(crate) fn resolvability_domain_from_design(
+    weights: ArrayView1<'_, f64>,
+    design: &DesignMatrix,
+    penalties: &[CanonicalPenalty],
+) -> Result<(Array1<f64>, Array1<f64>), String> {
+    let n = design.nrows();
+    let p = design.ncols();
+    if weights.len() != n {
+        return Err(format!(
+            "ρ-domain Gram: {} weights for a design with {n} rows",
+            weights.len()
+        ));
+    }
+    let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+    for penalty in penalties {
+        let range = &penalty.col_range;
+        if range.start < range.end && range.end <= p && !ranges.contains(range) {
+            ranges.push(range.clone());
+        }
+    }
+    let mut grams: Vec<Array2<f64>> = ranges
+        .iter()
+        .map(|range| Array2::<f64>::zeros((range.len(), range.len())))
+        .collect();
+    let budget_rows = gam_runtime::resource::ResourcePolicy::default_library()
+        .max_single_materialization_bytes
+        / (std::mem::size_of::<f64>() * p.max(1));
+    let chunk_rows = budget_rows.clamp(1, n.max(1));
+    let mut chunk = Array2::<f64>::zeros((chunk_rows, p));
+    for start in (0..n).step_by(chunk_rows) {
+        let end = (start + chunk_rows).min(n);
+        let rows = end - start;
+        design
+            .row_chunk_into(start..end, chunk.slice_mut(s![0..rows, ..]))
+            .map_err(|err| format!("ρ-domain Gram failed to stream design rows: {err}"))?;
+        let row_weights = weights.slice(s![start..end]).insert_axis(Axis(1));
+        for (range, gram) in ranges.iter().zip(grams.iter_mut()) {
+            let block = chunk.slice(s![0..rows, range.clone()]);
+            let weighted = &block * &row_weights;
+            *gram += &block.t().dot(&weighted);
+        }
+    }
+    let (box_lo, box_hi) = coordinate_domain(None, None);
+    let mut lower = Array1::<f64>::from_elem(penalties.len(), box_lo);
+    let mut upper = Array1::<f64>::from_elem(penalties.len(), box_hi);
+    for (k, penalty) in penalties.iter().enumerate() {
+        let Some(index) = ranges.iter().position(|range| *range == penalty.col_range) else {
+            continue;
+        };
+        let interval = penalty_range_gammas_from_gram(&grams[index], &penalty.local)
+            .as_deref()
+            .and_then(resolvability_interval);
+        if let Some(interval) = interval {
+            let (lo, hi) = coordinate_domain(Some(interval), None);
+            lower[k] = lo;
+            upper[k] = hi;
+        }
+    }
+    Ok((lower, upper))
 }
