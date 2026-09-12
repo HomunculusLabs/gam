@@ -357,7 +357,13 @@ pub(crate) fn sae_build_atom_plans(
                     SaeBasisResolution::Polynomial {
                         degree: SAE_EUCLIDEAN_PATCH_MAX_DEGREE,
                     },
-                    SaeReferenceMetricPlan::EuclideanPolynomial,
+                    // The patch penalizes its function's Dirichlet energy over the
+                    // seed rows, the flat member of the Poincare chart's Gram.
+                    SaeReferenceMetricPlan::FlatDirichletPolynomial {
+                        reference_coords: seed_coords
+                            .slice(s![atom_idx, 0..n_obs, 0..d])
+                            .to_owned(),
+                    },
                 )?,
             }),
             SaeAtomBasisKind::Poincare => plans.push(SaeAtomBuildPlan {

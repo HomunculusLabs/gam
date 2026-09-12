@@ -120,7 +120,20 @@ pub enum SaeReferenceMetricPlan {
     RoundProjectivePlane,
     FlatKleinBottle,
     EuclideanDuchon,
+    /// Identity ridge on the linear coefficients of a degree-1 (`Linear`) atom.
+    /// `∇f = c` is constant, so `‖c‖²` is exactly the Dirichlet energy `E‖∇f‖²`
+    /// under every probability measure: this coefficient ridge is precisely the
+    /// function penalty (SPEC rule 5), and no reference rows are needed.
     EuclideanPolynomial,
+    /// Flat Euclidean polynomial chart whose seminorm is the Dirichlet energy
+    /// `Σ_n ‖∇f(t_n)‖²` over fixed reference rows, the `kappa = 0` member of
+    /// [`SaeReferenceMetricPlan::ConstantCurvatureChart`]'s Gram with no curvature
+    /// estimand. A degree ≥ 2 patch needs it: an identity ridge on its monomial
+    /// coefficients is not a function penalty (SPEC rule 5). These rows are model
+    /// data: OOS rebuild must replay them exactly.
+    FlatDirichletPolynomial {
+        reference_coords: Array2<f64>,
+    },
     /// Constant-curvature tangent chart at sectional curvature `kappa`, with
     /// the fixed reference rows that define the conformal Dirichlet function
     /// Gram. These rows are model data: OOS rebuild must replay them exactly,
@@ -260,9 +273,14 @@ impl SaeAtomGeometryPlan {
                 SaeAtomBasisKind::EuclideanPatch,
                 _,
                 SaeBasisResolution::Polynomial { degree },
-                SaeReferenceMetricPlan::EuclideanPolynomial,
-            ) => (SAE_EUCLIDEAN_PATCH_MAX_DEGREE..=SAE_EUCLIDEAN_PATCH_RACE_MAX_DEGREE)
-                .contains(degree),
+                SaeReferenceMetricPlan::FlatDirichletPolynomial { reference_coords },
+            ) => {
+                (SAE_EUCLIDEAN_PATCH_MAX_DEGREE..=SAE_EUCLIDEAN_PATCH_RACE_MAX_DEGREE)
+                    .contains(degree)
+                    && reference_coords.nrows() > 0
+                    && reference_coords.ncols() == latent_dim
+                    && reference_coords.iter().all(|value| value.is_finite())
+            }
             (
                 SaeAtomBasisKind::Poincare,
                 _,
@@ -745,6 +763,22 @@ impl SaeAtomGeometryPlan {
                 SaeBasisResolution::Polynomial { degree },
                 SaeReferenceMetricPlan::EuclideanPolynomial,
             ) => Ok(polynomial_reference_penalty(self.latent_dim, *degree)),
+            (
+                SaeBasisResolution::Polynomial { .. },
+                SaeReferenceMetricPlan::FlatDirichletPolynomial { reference_coords },
+            ) => {
+                let (_, reference_jacobian) = evaluator.evaluate(reference_coords.view())?;
+                gam_geometry::constant_curvature_dirichlet_penalty(
+                    reference_coords.view(),
+                    reference_jacobian.view(),
+                    0.0,
+                )
+                .map_err(|error| {
+                    format!(
+                        "SaeAtomGeometryPlan::reference_penalty: flat Dirichlet Gram failed: {error}"
+                    )
+                })
+            }
             (
                 SaeBasisResolution::Polynomial { .. },
                 SaeReferenceMetricPlan::ConstantCurvatureChart {
@@ -1349,6 +1383,12 @@ fn donut_penalty_block(
     Ok((penalty, Some(derivative)))
 }
 
+/// Identity ridge on the non-constant monomial coefficients of a `Linear` atom.
+/// The validator admits [`SaeReferenceMetricPlan::EuclideanPolynomial`] only at
+/// degree 1, where `∇f = c` is constant and `‖c‖²` is exactly the Dirichlet
+/// energy under every probability measure, so the ridge is precisely the function
+/// penalty. A degree ≥ 2 patch takes
+/// [`SaeReferenceMetricPlan::FlatDirichletPolynomial`] instead.
 fn polynomial_reference_penalty(latent_dim: usize, degree: usize) -> Array2<f64> {
     let exponents = gam_terms::basis::monomial_exponents(latent_dim, degree);
     let mut penalty = Array2::<f64>::zeros((exponents.len(), exponents.len()));
@@ -1363,6 +1403,62 @@ fn polynomial_reference_penalty(latent_dim: usize, degree: usize) -> Array2<f64>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2901 V23: a degree-2 flat patch penalizes its function's Dirichlet energy
+    /// over the reference rows, not an identity on its monomial coefficients. For
+    /// `f = t₁² + ½·t₁t₂ − t₂` in `d = 2`, where the `kappa = 0` conformal weight is
+    /// the identity, `βᵀSβ` equals `Σ_n ‖∇f(t_n)‖²` computed by hand. The identity
+    /// ridge would report `1 + ¼ + 1` wherever the rows sit. A patch paired with
+    /// that ridge is refused.
+    #[test]
+    fn flat_patch_penalty_is_the_dirichlet_energy_of_the_function() {
+        let rows = ndarray::array![[0.5, -1.0], [1.5, 0.25], [-0.75, 2.0], [0.0, 0.0]];
+        let plan = SaeAtomGeometryPlan::new(
+            SaeAtomBasisKind::EuclideanPatch,
+            2,
+            SaeBasisResolution::Polynomial { degree: 2 },
+            SaeReferenceMetricPlan::FlatDirichletPolynomial {
+                reference_coords: rows.clone(),
+            },
+        )
+        .expect("a flat patch with reference rows validates");
+        let penalty = plan
+            .build_reference_penalty()
+            .expect("flat Dirichlet Gram");
+        let exponents = gam_terms::basis::monomial_exponents(2, 2);
+        let mut beta = ndarray::Array1::<f64>::zeros(exponents.len());
+        for (column, exponent) in exponents.iter().enumerate() {
+            beta[column] = match exponent.as_slice() {
+                [2, 0] => 1.0,
+                [1, 1] => 0.5,
+                [0, 1] => -1.0,
+                _ => 0.0,
+            };
+        }
+        let energy = beta.dot(&penalty.dot(&beta));
+        let by_hand: f64 = rows
+            .outer_iter()
+            .map(|t| {
+                let gradient_first = 2.0 * t[0] + 0.5 * t[1];
+                let gradient_second = 0.5 * t[0] - 1.0;
+                gradient_first * gradient_first + gradient_second * gradient_second
+            })
+            .sum();
+        assert!(
+            (energy - by_hand).abs() <= 1.0e-10 * by_hand.max(1.0),
+            "flat patch energy {energy} vs Σ‖∇f‖² {by_hand}"
+        );
+        assert!(
+            SaeAtomGeometryPlan::new(
+                SaeAtomBasisKind::EuclideanPatch,
+                2,
+                SaeBasisResolution::Polynomial { degree: 2 },
+                SaeReferenceMetricPlan::EuclideanPolynomial,
+            )
+            .is_err(),
+            "a patch paired with the coefficient ridge must be refused"
+        );
+    }
 
     /// The ambient sphere plan is keyed by `latent_dim == 3` and must not be
     /// constructible at the chart's `latent_dim == 2` -- three ambient
