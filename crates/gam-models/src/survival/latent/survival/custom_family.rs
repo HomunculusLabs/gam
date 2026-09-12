@@ -89,16 +89,6 @@ impl CustomFamily for LatentSurvivalFamily {
         true
     }
 
-    fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        // `evaluate_exact_newton_joint_dense` builds a fully dense joint
-        // Hessian over (Σ p_b)² across time, mean, and optional log-σ blocks
-        // via per-row pullback of the latent-survival primary kernel.
-        crate::custom_family::joint_coupled_coefficient_hessian_cost(
-            self.event_target.len() as u64,
-            specs,
-        )
-    }
-
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
         let (ll, joint_gradient, hess_time, hess_mean, hess_log_sigma) =
             self.evaluate_exact_newton_block_diagonals(block_states)?;
@@ -394,13 +384,6 @@ impl CustomFamily for LatentBinaryFamily {
     /// converged β̂ is exact (no REML/LAML bias).
     fn levenberg_on_ill_conditioning(&self) -> bool {
         true
-    }
-
-    fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        crate::custom_family::joint_coupled_coefficient_hessian_cost(
-            self.event_target.len() as u64,
-            specs,
-        )
     }
 
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {

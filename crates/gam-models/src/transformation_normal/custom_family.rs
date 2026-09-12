@@ -182,52 +182,6 @@ impl CustomFamily for TransformationNormalFamily {
         false
     }
 
-    fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        // Khatri–Rao tensor design: the coefficient block is X = R ⊙ C with
-        // rows length p_resp · p_cov. Two regimes:
-        //
-        // * **Dense regime**: per-evaluation cost is the dense
-        //   `n · (p_resp · p_cov)²` Khatri–Rao gram build.
-        //
-        // * **Matrix-free regime** (`JointHessianWork::matrix_free_route`):
-        //   per-`Hv` cost is one `forward_mul` and one `transpose_mul` on the
-        //   Khatri–Rao operands. Each forms `C · β_matᵀ` (or its transpose), an
-        //   `n · p_cov · p_resp` product, so a product streams
-        //   `2 · n · p_total` flops, the row-pullback model. This is only an
-        //   inner coefficient-space cost estimate; outer θθ Hessian
-        //   availability is declared separately.
-        let n_usize = self.response_val_basis.nrows();
-        let p_resp = self.response_val_basis.ncols() as u64;
-        let p_cov = self.covariate_design.ncols() as u64;
-        let expected_p_total = p_resp.saturating_mul(p_cov);
-        // Block-spec preview is optional. Callers without an assembled
-        // ParameterBlockSpec — cost estimators, planners, the
-        // BlockwiseFitOptions screen, every code path that asks "how
-        // expensive would the Hessian be on *this* family?" — pass `&[]`.
-        // The Khatri–Rao layout is fully determined by `p_resp · p_cov`
-        // from the family state, so fall back to `expected_p_total` for
-        // the empty-specs preview rather than returning the `u64::MAX`
-        // unreachable sentinel that would dominate every cost comparison.
-        // When specs IS supplied we still enforce the structural
-        // expectation `spec.design.ncols() == p_resp · p_cov`; a mismatch
-        // is the only condition that legitimately surfaces the sentinel.
-        let p_total = match specs {
-            [] => expected_p_total,
-            [spec] if spec.design.ncols() as u64 == expected_p_total => spec.design.ncols() as u64,
-            _ => return u64::MAX,
-        };
-        let n = n_usize as u64;
-        // Shared operator-aware route (see `coefficient_cost`). The row-pullback
-        // work model is built from the family-derived `p_total` rather than via
-        // `joint_coupled_operator_aware_hessian_cost`, because the empty-specs
-        // preview must still price `p_total` coefficients, not the `0` an empty
-        // `specs` sum yields.
-        crate::coefficient_cost::operator_aware_hessian_cost(
-            crate::custom_family::JointHessianWork::row_pullback(n, p_total),
-            p_total,
-        )
-    }
-
     fn outer_seed_config(&self, n_params: usize) -> gam_solve::seeding::SeedConfig {
         gam_solve::seeding::SeedConfig {
             bounds: (-12.0, 12.0),

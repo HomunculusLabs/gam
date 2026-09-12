@@ -2157,9 +2157,6 @@ impl gam_model_api::families::custom_family::CustomFamily for Traced {
     fn levenberg_on_ill_conditioning(&self) -> bool {
         true
     }
-    fn coefficient_hessian_cost(&self, specs: &[gam_problem::ParameterBlockSpec]) -> u64 {
-        self.0.coefficient_hessian_cost(specs)
-    }
     fn output_channel_assignment(
         &self,
         specs: &[gam_problem::ParameterBlockSpec],

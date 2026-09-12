@@ -1556,43 +1556,6 @@ pub(crate) fn outerobjective_andgradient<F: CustomFamily + Clone + Send + Sync +
 pub(crate) struct OneBlockIdentityFamily;
 
 #[test]
-pub(crate) fn joint_coupled_coefficient_hessian_cost_matches_n_times_p_total_squared() {
-    // Three blocks p_b = (12, 20, 8), n=200. Joint-coupled cost is
-    // n·(Σp_b)² = 200·40² = 320_000. Block-diagonal default with the
-    // same designs would give n·Σp_b² = 200·(144+400+64) = 121_600.
-    // The cross-block fill 2·n·(p_t·p_m + p_t·p_l + p_m·p_l) =
-    // 2·200·(240+96+160) = 198_400 accounts for the difference.
-    let mk_spec = |p: usize| ParameterBlockSpec {
-        name: "test".to_string(),
-        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(Array2::zeros(
-            (200, p),
-        ))),
-        offset: Array1::zeros(200),
-        penalties: Vec::new(),
-        nullspace_dims: Vec::new(),
-        initial_log_lambdas: Array1::zeros(0),
-        initial_beta: None,
-        gauge_priority: 100,
-        jacobian_callback: None,
-        stacked_design: None,
-        stacked_offset: None,
-    };
-    let specs = vec![mk_spec(12), mk_spec(20), mk_spec(8)];
-    assert_eq!(
-        joint_coupled_coefficient_hessian_cost(200, &specs),
-        200 * 40 * 40
-    );
-    assert_eq!(
-        default_coefficient_hessian_cost(&specs),
-        200 * (144 + 400 + 64)
-    );
-    assert!(
-        joint_coupled_coefficient_hessian_cost(200, &specs)
-            > default_coefficient_hessian_cost(&specs)
-    );
-}
-
-#[test]
 pub(crate) fn large_scale_shape_margslope_flex_cycle0_uses_bounded_dense_route() {
     let total_p = 51;
     let total_n = 320_000;

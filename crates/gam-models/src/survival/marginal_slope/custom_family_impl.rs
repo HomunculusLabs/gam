@@ -105,15 +105,6 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         true
     }
 
-    fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        // Operator-aware: the rigid K=4 RowKernel + RowKernelHessianWorkspace
-        // adapter (see `exact_newton_joint_hessian_workspace`) applies joint
-        // Hv at O(n · (p_time + p_marginal + p_slope + p_flex)) per call.
-        // Report the operator work model so diagnostics and first-order-only
-        // policies reflect the representation that actually executes.
-        crate::coefficient_cost::joint_coupled_operator_aware_hessian_cost(self.n as u64, specs)
-    }
-
     fn exact_newton_joint_psi_workspace_for_first_order_terms(&self) -> bool {
         true
     }

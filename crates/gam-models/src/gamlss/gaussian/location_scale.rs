@@ -997,20 +997,6 @@ impl CustomFamily for GaussianLocationScaleFamily {
         )
     }
 
-    fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        // Operator-aware: when the unified evaluator picks the matrix-free
-        // joint Hessian path (see `JointHessianWork::matrix_free_route`), the workspace
-        // applies the joint Hessian via row-streaming Khatri-Rao matvecs at
-        // O(n · (p_t + p_ℓ)) per Hv, never building the dense (p_t + p_ℓ)²
-        // matrix. Report the operator work model so diagnostics and
-        // first-order-only policies reflect the representation that actually
-        // runs.
-        crate::location_scale_engine::location_scale_coefficient_hessian_cost(
-            self.y.len() as u64,
-            specs,
-        )
-    }
-
     /// `D = Σ wᵢ (yᵢ − μ̂ᵢ)²`: the weighted residual sum of squares every
     /// standard Gaussian fit reports — no `σ̂ᵢ` factor, no `ln 2π` (#2786).
     fn classical_deviance(

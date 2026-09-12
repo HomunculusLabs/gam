@@ -28,7 +28,6 @@ use gam_problem::{BlockWorkingSet, ParameterBlockSpec, ParameterBlockState, Pena
 use gam_linalg::matrix::{DenseDesignMatrix, DesignMatrix, SymmetricMatrix};
 use gam_math::jet_scalar::{JetScalar, OneSeed, Order2, TwoSeed};
 use gam_math::nested_dual::JetField;
-use gam_model_api::families::custom_family::joint_coupled_coefficient_hessian_cost;
 use gam_problem::CoefficientCoordinate;
 use gam_solve::model_types::UnifiedFitResult;
 use gam_terms::smooth::{
@@ -1026,10 +1025,6 @@ impl CustomFamily for EventHistoryFamily {
     /// Levenberg–Marquardt damping the sibling latent families use.
     fn levenberg_on_ill_conditioning(&self) -> bool {
         true
-    }
-
-    fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        joint_coupled_coefficient_hessian_cost(self.nodes.total_nodes as u64, specs)
     }
 
     fn output_channel_assignment(&self, specs: &[ParameterBlockSpec]) -> Option<Vec<usize>> {

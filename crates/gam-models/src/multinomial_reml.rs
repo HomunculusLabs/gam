@@ -3108,15 +3108,6 @@ impl CustomFamily for MultinomialFamily {
         self.specs_match_workspace_shape(specs)
     }
 
-    fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        // Every row contributes a rank-M outer product across the joint
-        // (Σ p_b)² = (M · P)² space — the canonical joint-coupled cost.
-        crate::custom_family::joint_coupled_coefficient_hessian_cost(
-            self.weights.len() as u64,
-            specs,
-        )
-    }
-
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
         let eta = self.collect_eta_matrix(block_states)?;
         let (log_lik, fisher, grad_eta_logl) = self.evaluate_row_kernels(eta.view())?;

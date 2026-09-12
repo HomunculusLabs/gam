@@ -16,22 +16,6 @@ use crate::fit_orchestration::drivers::{
 use gam_terms::smooth::{SpatialLogKappaCoords, TermCollectionSpec};
 use ndarray::{Array1, ArrayView2};
 
-/// Shared operator-aware coefficient-Hessian cost for joint-coupled
-/// location-scale families.
-///
-/// Every Gaussian/Binomial location-scale variant exposes the same inner
-/// coefficient Hessian representation: the exact dense fallback is one
-/// row-coupled Hessian over all parameter blocks, while the matrix-free path
-/// applies the joint Hessian in `O(n · Σp_b)`. Keep that trait-method body in
-/// one place so each family implementation only supplies its observation
-/// count.
-pub(crate) fn location_scale_coefficient_hessian_cost(
-    n: u64,
-    specs: &[crate::custom_family::ParameterBlockSpec],
-) -> u64 {
-    crate::coefficient_cost::joint_coupled_operator_aware_hessian_cost(n, specs)
-}
-
 /// The exact-joint hyperparameter setup of a location-scale fit: the ρ seed,
 /// and the κ coordinates and their bounds from the data. The ρ domain is not
 /// this builder's to supply: the driver derives it per coordinate from the

@@ -762,10 +762,6 @@ impl CustomFamily for CauseSpecificRoystonParmarFamily {
         Some((0..specs.len()).collect())
     }
 
-    fn coefficient_hessian_cost(&self, specs: &[crate::custom_family::ParameterBlockSpec]) -> u64 {
-        crate::custom_family::default_coefficient_hessian_cost(specs)
-    }
-
     fn block_linear_constraints(
         &self,
         block_states: &[ParameterBlockState],

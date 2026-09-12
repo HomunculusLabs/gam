@@ -2732,59 +2732,6 @@ fn survival_marginal_slope_advertises_outer_hvp_at_large_psi_dim() {
 }
 
 #[test]
-fn survival_marginal_slope_coefficient_cost_uses_joint_coupled_formula() {
-    // Rigid three-block shape: time p=12, marginal p=20, slope p=8.
-    // The row kernel couples all three blocks, so the joint Hessian is
-    // dense over (12+20+8)²=1600 entries per row. The override must
-    // return n·(Σ p_b)², not the block-diagonal Σ n·p_b².
-    let n = 200usize;
-    let p_time = 12usize;
-    let p_marg = 20usize;
-    let p_log = 8usize;
-    let family = SurvivalMarginalSlopeFamily {
-        n,
-        event: Arc::new(Array1::zeros(n)),
-        weights: Arc::new(Array1::from_elem(n, 1.0)),
-        z: Arc::new(Array1::zeros(n).insert_axis(Axis(1))),
-        score_covariance: unit_score_covariance(),
-        gaussian_frailty_sd: None,
-        family_hyper: SurvivalMarginalSlopeFamilyHyperState::default(),
-        derivative_guard: 1e-6,
-        design_entry: DesignMatrix::from(Array2::zeros((n, p_time))),
-        design_exit: DesignMatrix::from(Array2::zeros((n, p_time))),
-        design_derivative_exit: DesignMatrix::from(Array2::ones((n, p_time))),
-        offset_entry: Arc::new(Array1::zeros(n)),
-        offset_exit: Arc::new(Array1::zeros(n)),
-        derivative_offset_exit: Arc::new(Array1::ones(n)),
-        marginal_design: DesignMatrix::from(Array2::zeros((n, p_marg))),
-        slope_layout: (DesignMatrix::from(Array2::zeros((n, p_log)))).into(),
-        score_warp: None,
-        link_dev: None,
-        influence_absorber: None,
-        time_linear_constraints: None,
-        time_wiggle_knots: None,
-        time_wiggle_degree: None,
-        time_wiggle_ncols: 0,
-        intercept_warm_starts: None,
-        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
-    };
-    let specs = vec![
-        dummy_penalized_blockspec(p_time, 1),
-        dummy_penalized_blockspec(p_marg, 1),
-        dummy_penalized_blockspec(p_log, 1),
-    ];
-    let p_total = (p_time + p_marg + p_log) as u64;
-    let expected_joint = (n as u64) * p_total * p_total;
-    let expected_block_diag_at_full_n =
-        (n as u64) * ((p_time * p_time + p_marg * p_marg + p_log * p_log) as u64);
-    assert_eq!(family.coefficient_hessian_cost(&specs), expected_joint);
-    // Joint coupling exceeds block-diagonal by the cross-block fill
-    // 2·n·(p_t·p_m + p_t·p_l + p_m·p_l).
-    assert!(expected_joint > expected_block_diag_at_full_n);
-}
-
-#[test]
 fn exact_outer_row_work_gate_keeps_large_timewiggle_link_models_under_linear_flex_budget() {
     let link_runtime = test_deviation_runtime();
     let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();

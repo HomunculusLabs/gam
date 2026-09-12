@@ -1373,44 +1373,6 @@ fn survival_ls_block_gradient_tower_body() {
     }
 }
 
-#[test]
-fn survival_location_scale_coefficient_cost_delegates_to_joint_coupled_helper() {
-    // SurvivalLocationScale couples time, threshold, log-σ, and optional
-    // wiggle blocks per row. The override pulls n from `self.n` and
-    // forwards specs to the shared joint-coupled helper.
-    let family = survival_exact_newton_test_family();
-    let n = family.n as u64;
-    let p_time = 5usize;
-    let p_threshold = 3usize;
-    let p_log_sigma = 2usize;
-    let mk_spec = |name: &str, p: usize| ParameterBlockSpec {
-        name: name.to_string(),
-        design: DesignMatrix::Dense(DenseDesignMatrix::from(Array2::<f64>::zeros((family.n, p)))),
-        offset: Array1::zeros(family.n),
-        penalties: Vec::new(),
-        nullspace_dims: Vec::new(),
-        initial_log_lambdas: Array1::zeros(0),
-        initial_beta: None,
-        gauge_priority: 100,
-        jacobian_callback: None,
-        stacked_design: None,
-        stacked_offset: None,
-    };
-    let specs = vec![
-        mk_spec("time", p_time),
-        mk_spec("threshold", p_threshold),
-        mk_spec("log_sigma", p_log_sigma),
-    ];
-    let p_total = (p_time + p_threshold + p_log_sigma) as u64;
-    let expected = crate::custom_family::joint_coupled_coefficient_hessian_cost(n, &specs);
-    assert_eq!(family.coefficient_hessian_cost(&specs), expected);
-    assert_eq!(expected, n * p_total * p_total);
-    assert!(
-        expected > crate::custom_family::default_coefficient_hessian_cost(&specs),
-        "joint-coupled cost must exceed block-diagonal default by the cross-block fill"
-    );
-}
-
 /// Build a location-scale family whose three coefficient blocks are each
 /// `p`-columns wide (and `n`-rows) so `joint_block_dims()` == `[p, p, p]`.
 /// The advertisement guards (`validate_joint_specs`) compare the spec

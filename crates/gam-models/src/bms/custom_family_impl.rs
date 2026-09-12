@@ -728,18 +728,6 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         true
     }
 
-    fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        // Operator-aware: rigid Bernoulli marginal-slope wires the K=2
-        // RowKernel through a matrix-free workspace that applies joint Hv at
-        // O(n · (p_marginal + p_slope + p_flex)) per call. Only fall back
-        // to the dense `n · (Σ p_b)²` build when `JointHessianWork::matrix_free_route`
-        // declines the operator path.
-        crate::location_scale_engine::location_scale_coefficient_hessian_cost(
-            self.y.len() as u64,
-            specs,
-        )
-    }
-
     fn exact_outer_derivative_order(
         &self,
         specs: &[ParameterBlockSpec],

@@ -2128,16 +2128,6 @@ impl CustomFamily for BinomialLocationScaleFamily {
         crate::custom_family::PseudoLogdetMode::HardPseudo
     }
 
-    fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        // Operator-aware: matrix-free workspace applies joint Hv at
-        // O(n · (p_t + p_ℓ)); only fall back to the dense build cost when
-        // `JointHessianWork::matrix_free_route` declines the operator path.
-        crate::location_scale_engine::location_scale_coefficient_hessian_cost(
-            self.y.len() as u64,
-            specs,
-        )
-    }
-
     /// The classical binomial deviance at the location-scale fitted
     /// probabilities (#2786).
     fn classical_deviance(

@@ -308,37 +308,6 @@ impl OuterDerivativePolicy {
     }
 }
 
-/// Default coefficient-space Hessian cost: `Σ_b n_b · p_b²`, summed across
-/// blocks. Represents the work to assemble or apply the dense block-diagonal
-/// inner Hessian once.
-pub fn default_coefficient_hessian_cost(specs: &[ParameterBlockSpec]) -> u64 {
-    specs
-        .iter()
-        .map(|s| {
-            let n = s.design.nrows() as u64;
-            let p = s.design.ncols() as u64;
-            n.saturating_mul(p.saturating_mul(p))
-        })
-        .fold(0u64, |acc, c| acc.saturating_add(c))
-}
-
-/// Joint-coupled coefficient-space Hessian cost: `n · (Σ_b p_b)²`. The honest
-/// per-evaluation work for any family whose row likelihood couples every block
-/// (every observation contributes a rank-`m` outer-product update to the full
-/// joint Hessian over `Σ p_b` coefficients), as opposed to the block-diagonal
-/// `default_coefficient_hessian_cost` which assumes each `X_b' W_b X_b` is
-/// assembled independently.
-///
-/// Used by all GAMLSS, marginal-slope, and joint-latent families. CTN does
-/// not delegate here — it uses its Khatri–Rao factor dimensions internally.
-pub fn joint_coupled_coefficient_hessian_cost(n: u64, specs: &[ParameterBlockSpec]) -> u64 {
-    let p_total: u64 = specs
-        .iter()
-        .map(|s| s.design.ncols() as u64)
-        .fold(0u64, |acc, p| acc.saturating_add(p));
-    n.saturating_mul(p_total.saturating_mul(p_total))
-}
-
 /// Declared work of the two routes for solving with the joint coefficient
 /// Hessian, in flops.
 ///
@@ -692,45 +661,6 @@ mod tests {
             design: DesignMatrix::from(Array2::<f64>::zeros((nrows, ncols))),
             ..ParameterBlockSpec::defaults()
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // default_coefficient_hessian_cost
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn hessian_cost_empty_specs_is_zero() {
-        assert_eq!(default_coefficient_hessian_cost(&[]), 0);
-    }
-
-    #[test]
-    fn hessian_cost_single_block() {
-        // n=10, p=3 → 10 * 3^2 = 90
-        let spec = make_spec(10, 3);
-        assert_eq!(default_coefficient_hessian_cost(&[spec]), 90);
-    }
-
-    #[test]
-    fn hessian_cost_two_blocks_sum() {
-        // n=10, p=3 → 90; n=5, p=4 → 5*16=80; total=170
-        let specs = [make_spec(10, 3), make_spec(5, 4)];
-        assert_eq!(default_coefficient_hessian_cost(&specs), 170);
-    }
-
-    // -----------------------------------------------------------------------
-    // joint_coupled_coefficient_hessian_cost
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn joint_coupled_cost_empty_specs_is_zero() {
-        assert_eq!(joint_coupled_coefficient_hessian_cost(100, &[]), 0);
-    }
-
-    #[test]
-    fn joint_coupled_cost_two_blocks() {
-        // n=10, p_total = 3+4=7 → 10 * 49 = 490
-        let specs = [make_spec(99, 3), make_spec(99, 4)];
-        assert_eq!(joint_coupled_coefficient_hessian_cost(10, &specs), 490);
     }
 
     // -----------------------------------------------------------------------

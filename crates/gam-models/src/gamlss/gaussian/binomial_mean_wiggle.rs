@@ -626,17 +626,6 @@ impl CustomFamily for BinomialMeanWiggleFamily {
     }
 
 
-    fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        // The mean-wiggle Hessian is exposed as a row-coefficient operator,
-        // so the hot representation cost is one Θ(n · (p_eta + p_w)) HVP
-        // rather than dense Θ(n · (p_eta + p_w)^2) assembly.
-        let p_total = specs
-            .iter()
-            .map(|s| s.design.ncols() as u64)
-            .fold(0u64, |acc, p| acc.saturating_add(p));
-        (self.y.len() as u64).saturating_mul(p_total.max(1))
-    }
-
     fn block_linear_constraints(
         &self,
         block_states: &[ParameterBlockState],

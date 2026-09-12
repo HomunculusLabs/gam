@@ -14,7 +14,7 @@ use crate::families::custom_family::options::{
     assert_block_local_beta_direction, assert_block_local_eta_direction,
     assert_blockstates_are_a_point, assert_hyper_layout_matches_specs, assert_psi_index_in_layout,
     assert_rho_matches_specs, assert_states_match_specs, assert_valid_blockspecs,
-    assert_valid_options, default_coefficient_hessian_cost, validate_hessian_workspace_ready,
+    assert_valid_options, validate_hessian_workspace_ready,
 };
 use crate::families::custom_family::psi_design::{
     CustomFamilyHyperLayout, ExactNewtonJointHessianWorkspace,
@@ -425,47 +425,6 @@ pub trait CustomFamily {
     /// subspace. Always enabled by default.
     fn use_projected_penalty_logdet(&self) -> bool {
         true
-    }
-
-    /// Per-evaluation arithmetic cost of forming or applying the inner
-    /// coefficient-space Hessian once, in flop-equivalent units. This is used
-    /// for diagnostics, seed-budget policy, and first-order iteration caps
-    /// when a family genuinely lacks analytic second-order support. It is not
-    /// allowed to hide an analytic Hessian from the outer optimizer.
-    ///
-    /// The default returns `Σ_b n_b · p_b²` via [`default_coefficient_hessian_cost`],
-    /// which is the honest assembly cost only when the joint Hessian is
-    /// **block-diagonal** — i.e. the inner solver assembles each block's
-    /// `X_b' W_b X_b` independently, with no cross-block coupling per row.
-    /// Families whose row likelihood couples all blocks (every row contributes
-    /// a rank-`m` outer-product update to the full joint Hessian over
-    /// `Σ p_b` coefficients) **must** override and delegate to
-    /// `joint_coupled_coefficient_hessian_cost` (or the equivalent factored
-    /// form for tensor designs), otherwise the default undercounts the
-    /// cross-block outer-product terms `2·Σ_{a<b} n·p_a·p_b`.
-    ///
-    /// Concretely:
-    ///
-    /// * **Block-diagonal** (default OK): `LatentBinaryFamily` collects
-    ///   separate `hess_time` and `hess_mean` per row, never forming an
-    ///   off-diagonal contribution.
-    /// * **Joint-coupled** (override via `joint_coupled_coefficient_hessian_cost`):
-    ///   GAMLSS location-scale, GAMLSS wiggle variants, marginal-slope families
-    ///   (Bernoulli, Survival), `LatentSurvivalFamily`,
-    ///   `SurvivalLocationScaleFamily` — every row contributes to the full
-    ///   `(Σ p_b)²` joint Hessian via Jacobian pullback of a multi-dimensional
-    ///   primary kernel.
-    /// * **Single-block** (default OK): tensor designs whose `design.ncols()`
-    ///   already equals `p_total` (e.g. CTN's Khatri–Rao `n × (p_resp·p_cov)`);
-    ///   `n · p²` reduces correctly to `n · p_resp² · p_cov²`.
-    /// * **Matrix-free Hessian operator**: families that expose
-    ///   [`Self::exact_newton_joint_hessian_workspace`] with operator-form
-    ///   directional derivatives (CTN at large scale) may instead return
-    ///   the per-`Hv` matvec cost (e.g. `n·(p_resp + p_cov)` for Khatri–Rao)
-    ///   so the gate reflects the operator path rather than the dense
-    ///   build that the unified evaluator skips.
-    fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        default_coefficient_hessian_cost(specs)
     }
 
     /// Declares how much exact outer calculus this family wants to expose for

@@ -1531,13 +1531,6 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
         Ok(ll)
     }
 
-    fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        crate::location_scale_engine::location_scale_coefficient_hessian_cost(
-            self.y.len() as u64,
-            specs,
-        )
-    }
-
     /// Exact joint coefficient-space Hessian `H_L = -∇²log L` in flattened
     /// `[mean | log-precision]` block order.
     ///

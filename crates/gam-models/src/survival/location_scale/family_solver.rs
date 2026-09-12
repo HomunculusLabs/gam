@@ -1367,18 +1367,6 @@ impl CustomFamily for SurvivalLocationScaleFamily {
         )
     }
 
-    fn coefficient_hessian_cost(&self, specs: &[crate::custom_family::ParameterBlockSpec]) -> u64 {
-        // Survival location-scale couples its blocks (threshold/time/log-σ
-        // and any link/time wiggles) through the survival likelihood: every
-        // row contributes a dense outer-product over (Σ p_b) coefficients.
-        // At large scale the joint outer evaluator routes the coefficient
-        // Hessian through its matrix-free HVP path; the cost remains an honest
-        // dense-assembly diagnostic, while exact outer derivative order is now
-        // driven by the explicit outer-HVP capability below rather than by a
-        // first-order downgrade gate.
-        crate::custom_family::joint_coupled_coefficient_hessian_cost(self.n as u64, specs)
-    }
-
     fn outer_hyper_hessian_hvp_available(
         &self,
         specs: &[crate::custom_family::ParameterBlockSpec],

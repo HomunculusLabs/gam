@@ -75,7 +75,6 @@ pub mod response_geometry;
 pub mod binomial_multi;
 pub mod block_layout;
 pub mod bms;
-pub(crate) mod coefficient_cost;
 pub mod gpu_kernels;
 pub mod custom_family;
 pub(crate) mod exact_mode_branch;
