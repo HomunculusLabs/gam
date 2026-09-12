@@ -18,7 +18,7 @@ enum PirlsLoopLikelihoodScaleKind {
 
 impl PirlsLoopLikelihoodScale {
     #[inline]
-    pub const fn non_gamma() -> Self {
+    pub(crate) const fn non_gamma() -> Self {
         Self(PirlsLoopLikelihoodScaleKind::NonGamma)
     }
 
@@ -3585,7 +3585,7 @@ extern "C" __global__ void status_first_ladder(
 
     /// Exact GPU PLS for Gaussian-identity: assembles QsT A Qs + S on host,
     /// then runs POTRF/POTRS on device.  Replaces the PIRLS loop for this family.
-    pub fn solve_gaussian_pls_on_stream(
+    pub(crate) fn solve_gaussian_pls_on_stream(
         a_orig: ArrayView2<'_, f64>,
         b_orig: ArrayView1<'_, f64>,
         s_transformed: ArrayView2<'_, f64>,
@@ -3760,7 +3760,7 @@ pub fn upload_shared_pirls_gpu(
 /// stream on `shared`'s context. The cuBLAS and cuSOLVER handles are bound
 /// to the workspace stream so peer workspaces achieve overlapped execution.
 #[cfg(target_os = "linux")]
-pub fn allocate_sigma_pirls_workspace(
+pub(crate) fn allocate_sigma_pirls_workspace(
     shared: &PirlsGpuSharedData,
 ) -> Result<SigmaPirlsGpuWorkspace, String> {
     SigmaPirlsGpuWorkspace::allocate_impl(shared)
@@ -3781,7 +3781,7 @@ pub fn upload_qs_pirls(
 /// Upload an identity Qs for the current ρ / σ point. Equivalent to
 /// [`upload_qs_pirls`] with an identity matrix; avoids host allocation.
 #[cfg(target_os = "linux")]
-pub fn upload_qs_identity_pirls(ws: &mut SigmaPirlsGpuWorkspace) -> Result<(), String> {
+pub(crate) fn upload_qs_identity_pirls(ws: &mut SigmaPirlsGpuWorkspace) -> Result<(), String> {
     cuda::upload_qs_identity(ws)
 }
 
@@ -3870,7 +3870,7 @@ pub(crate) fn pirls_loop_on_stream(
 /// Allocate a Stage 3.3 PIRLS loop workspace bound to the same stream
 /// as `ws` against the shared device-resident design matrix.
 #[cfg(target_os = "linux")]
-pub fn allocate_pirls_loop_workspace(
+pub(crate) fn allocate_pirls_loop_workspace(
     shared: &PirlsGpuSharedData,
     ws: &SigmaPirlsGpuWorkspace,
 ) -> Result<cuda::PirlsLoopWorkspace, String> {
@@ -3883,7 +3883,7 @@ pub fn allocate_pirls_loop_workspace(
 /// immediately if the CUDA runtime is initialised; returns an error otherwise
 /// so the caller can fall back to the CPU path.
 #[cfg(target_os = "linux")]
-pub fn solve_gaussian_pls_gpu(
+pub(crate) fn solve_gaussian_pls_gpu(
     a_orig: ndarray::ArrayView2<'_, f64>,
     b_orig: ndarray::ArrayView1<'_, f64>,
     s_transformed: ndarray::ArrayView2<'_, f64>,

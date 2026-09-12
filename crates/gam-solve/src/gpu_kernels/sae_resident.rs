@@ -94,7 +94,7 @@ pub struct DeviceResidentArrowShape {
 
 impl DeviceResidentArrowShape {
     #[inline]
-    pub const fn qwen_non_gating() -> Self {
+    pub(crate) const fn qwen_non_gating() -> Self {
         Self {
             n: 2_000,
             p: 2_048,
@@ -107,7 +107,7 @@ impl DeviceResidentArrowShape {
     /// few rows, very wide border. The dense-Schur device path (cuSOLVER border
     /// POTRF) handles the `p=5120` border that exceeds the fused-kernel `P_MAX`.
     #[inline]
-    pub const fn color_arm() -> Self {
+    pub(crate) const fn color_arm() -> Self {
         Self {
             n: 180,
             p: 5_120,
@@ -2303,7 +2303,7 @@ pub fn run_variant_sweep_multiplexed(
 /// (which builds frames from the deterministic harness fixture), this consumes
 /// real frames, so the printed throughput is the battery's true fits/sec on one
 /// device. Returns per-cell outcomes (in input order) + the throughput summary.
-pub fn run_battery_sweep_multiplexed(
+pub(crate) fn run_battery_sweep_multiplexed(
     workspaces: Vec<DeviceResidentArrowWorkspace>,
     opts: DeviceResidentInnerOptions,
 ) -> Result<

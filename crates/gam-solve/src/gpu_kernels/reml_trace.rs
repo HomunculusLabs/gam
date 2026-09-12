@@ -184,10 +184,10 @@ pub struct RemlTraceHutchinsonEvidence {
 // ────────────────────────────────────────────────────────────────────────
 
 /// Minimum joint-dimension at which the GPU Hutchinson path is enabled.
-pub const HUTCHINSON_GPU_MIN_P: usize = 512;
+pub(crate) const HUTCHINSON_GPU_MIN_P: usize = 512;
 /// Minimum and maximum probe counts the GPU path accepts (math section 18).
-pub const HUTCHINSON_GPU_MIN_K: usize = 8;
-pub const HUTCHINSON_GPU_MAX_K: usize = 128;
+pub(crate) const HUTCHINSON_GPU_MIN_K: usize = 8;
+pub(crate) const HUTCHINSON_GPU_MAX_K: usize = 128;
 
 /// True when the GPU Hutchinson path is eligible at the current shape and
 /// configuration. Caller still has to satisfy the CPU-side gate
@@ -234,7 +234,7 @@ pub fn splitmix64_mix(z: u64) -> u64 {
 /// constants are *different* from the SplitMix increment so the row and
 /// column hashes don't collide on small `(k, i)`.
 #[inline]
-pub fn rademacher_entry(seed: u64, k: u64, i: u64) -> f64 {
+pub(crate) fn rademacher_entry(seed: u64, k: u64, i: u64) -> f64 {
     const ZETA: u64 = 0xD1B5_4A32_D192_ED03;
     const GAMMA: u64 = 0x8CB9_2BA7_2F9D_E81F;
     let composite = seed ^ k.wrapping_mul(ZETA) ^ i.wrapping_mul(GAMMA);
@@ -244,7 +244,7 @@ pub fn rademacher_entry(seed: u64, k: u64, i: u64) -> f64 {
 
 /// Host-side reference: fill a column-major `(p, K)` Rademacher matrix.
 /// Used by tests to verify the GPU kernel produces the same bits.
-pub fn fill_rademacher_host(seed: ProbeSeed, p: usize, k: usize, out: &mut [f64]) {
+pub(crate) fn fill_rademacher_host(seed: ProbeSeed, p: usize, k: usize, out: &mut [f64]) {
     assert_eq!(
         out.len(),
         p * k,
@@ -566,7 +566,7 @@ pub fn evidence_traces_adaptive<'a>(
 /// * `!projected_penalty_subspace_active`: the rank-deficient LAML
 ///   projected kernel `U_S H_proj⁻¹ U_Sᵀ` is **not** installed.
 #[must_use]
-pub fn should_bypass_cpu_with_gpu_adaptive(
+pub(crate) fn should_bypass_cpu_with_gpu_adaptive(
     p: usize,
     dense_spd_h_resident: bool,
     plain_spd_logdet: bool,

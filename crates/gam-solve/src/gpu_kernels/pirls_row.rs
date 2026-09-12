@@ -164,16 +164,16 @@ impl CurvatureMode {
 /// exact offending value).
 pub mod status_codes {
     pub const OK: u32 = 0;
-    pub const ETA_DOMAIN: u32 = 1;
-    pub const PRIOR_WEIGHT: u32 = 2;
-    pub const RESPONSE: u32 = 3;
-    pub const GAMMA_SHAPE: u32 = 4;
-    pub const INVERSE_LINK: u32 = 5;
-    pub const FISHER_WEIGHT: u32 = 6;
-    pub const OBSERVED_WEIGHT: u32 = 7;
-    pub const GRADIENT: u32 = 8;
-    pub const DEVIANCE: u32 = 9;
-    pub const FINAL_OUTPUT: u32 = 10;
+    pub(crate) const ETA_DOMAIN: u32 = 1;
+    pub(crate) const PRIOR_WEIGHT: u32 = 2;
+    pub(crate) const RESPONSE: u32 = 3;
+    pub(crate) const GAMMA_SHAPE: u32 = 4;
+    pub(crate) const INVERSE_LINK: u32 = 5;
+    pub(crate) const FISHER_WEIGHT: u32 = 6;
+    pub(crate) const OBSERVED_WEIGHT: u32 = 7;
+    pub(crate) const GRADIENT: u32 = 8;
+    pub(crate) const DEVIANCE: u32 = 9;
+    pub(crate) const FINAL_OUTPUT: u32 = 10;
 
     pub const fn quantity(code: u32) -> &'static str {
         match code {
@@ -238,7 +238,7 @@ pub fn row_reweight_cpu(
 
 /// Indexed form of [`row_reweight_cpu`], used to reproduce a device refusal
 /// with the correct row in its typed error.
-pub fn row_reweight_cpu_at(
+pub(crate) fn row_reweight_cpu_at(
     row: usize,
     family: PirlsRowFamily,
     mode: CurvatureMode,
@@ -259,7 +259,7 @@ pub fn row_reweight_cpu_at(
 /// threads write one code per row, so scanning in index order makes concurrent
 /// failures deterministic.  The scalar CPU replay supplies the exact
 /// quantity/value payload without expanding the hot GPU ABI.
-pub fn replay_first_refusal(
+pub(crate) fn replay_first_refusal(
     family: PirlsRowFamily,
     mode: CurvatureMode,
     gamma_shape: f64,
@@ -1425,7 +1425,7 @@ pub fn launch_solve_row_on_stream(
 /// reduce the alpha-major status matrix with the deterministic smallest-row
 /// reducer, then read the seven objectives plus seven row/code summaries.
 #[cfg(target_os = "linux")]
-pub fn launch_alpha_ladder_on_stream(
+pub(crate) fn launch_alpha_ladder_on_stream(
     backend: &PirlsRowBackend,
     family: PirlsRowFamily,
     curvature: CurvatureMode,

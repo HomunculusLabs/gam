@@ -1598,7 +1598,7 @@ struct DeterministicOutputGroups {
 /// factored out so the per-trial flatten and the resident frame share one source
 /// and so the marshalling is measurable without a device.
 #[cfg(target_os = "linux")]
-pub fn flatten_frame_host_operands(
+pub(crate) fn flatten_frame_host_operands(
     sys: &ArrowSchurSystem,
     data: &DeviceSaePcgData,
     frame: &crate::arrow_schur::DeviceSaeFrameData,

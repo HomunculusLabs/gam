@@ -27,7 +27,7 @@ use gam_problem::{InverseLink, LikelihoodSpec, ResponseFamily, StandardLink};
 /// RoystonParmar) for which Stage 3.3 has no built-in row kernel, or the
 /// response is supported but the link does not match a built-in pairing
 /// (e.g. Poisson with Identity link).
-pub fn pirls_loop_family_for(spec: &LikelihoodSpec) -> Option<PirlsLoopFamilyKind> {
+pub(crate) fn pirls_loop_family_for(spec: &LikelihoodSpec) -> Option<PirlsLoopFamilyKind> {
     let link = match &spec.link {
         InverseLink::Standard(lf) => *lf,
         // Custom / blended inverse links have no Stage 3.3 row kernel; they
@@ -58,7 +58,7 @@ pub fn pirls_loop_family_for(spec: &LikelihoodSpec) -> Option<PirlsLoopFamilyKin
 
 /// Curvature surface the GPU loop should use given the family mapping and the
 /// CPU PIRLS loop's preferred curvature.
-pub fn pirls_loop_curvature_for(family: PirlsLoopFamilyKind) -> PirlsLoopCurvatureKind {
+pub(crate) fn pirls_loop_curvature_for(family: PirlsLoopFamilyKind) -> PirlsLoopCurvatureKind {
     match family {
         PirlsLoopFamilyKind::BernoulliProbit | PirlsLoopFamilyKind::BernoulliCLogLog => {
             PirlsLoopCurvatureKind::Observed
@@ -74,7 +74,7 @@ pub fn pirls_loop_curvature_for(family: PirlsLoopFamilyKind) -> PirlsLoopCurvatu
 /// `(response, link)` spec and the active design shape `(n, p)`. Returns
 /// `None` when the family / link is not in the JIT-cached set so the caller
 /// skips both the GPU dispatch and the runtime probe.
-pub fn admission_for(
+pub(crate) fn admission_for(
     spec: &LikelihoodSpec,
     n: usize,
     p: usize,
@@ -756,7 +756,7 @@ mod linux_impl {
     /// Cheap admission gate for the GPU Gaussian-identity exact PLS path.
     /// Returns `true` iff cuda_selected(), runtime available, and the likelihood
     /// is Gaussian-identity.
-    pub fn try_gpu_gaussian_pls_admit(
+    pub(crate) fn try_gpu_gaussian_pls_admit(
         likelihood: &gam_problem::GlmLikelihoodSpec,
     ) -> Result<bool, GpuError> {
         if !likelihood.spec.is_gaussian_identity() {

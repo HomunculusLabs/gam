@@ -75,7 +75,7 @@ use crate::arrow_schur::ArrowSchurSystem;
 #[cfg(target_os = "linux")]
 #[inline]
 #[must_use]
-pub fn fused_path_admitted(n: usize, p: usize, r: usize) -> bool {
+pub(crate) fn fused_path_admitted(n: usize, p: usize, r: usize) -> bool {
     if n == 0 || p == 0 || r == 0 {
         return false;
     }
@@ -93,7 +93,7 @@ pub fn fused_path_admitted(n: usize, p: usize, r: usize) -> bool {
 /// concurrent blocks per SM at that ceiling, matching the bench-tuned launch
 /// configuration in math block 3 §8.
 #[cfg(target_os = "linux")] // only the linux fused planner/admission code + its CI tests consume this
-pub const MAX_FUSED_P: usize = 32;
+pub(crate) const MAX_FUSED_P: usize = 32;
 
 /// Compile-time `R` (= border width `K`) widths the NVRTC fused kernel is
 /// templated on. The Arrow-Schur driver always builds the system at a single
@@ -129,7 +129,7 @@ pub const MAX_FUSED_P: usize = 32;
 /// (`ResidentArrowFrame`) is realized on the unfused device path, independent
 /// of the fused kernel's `R` ceiling.
 #[cfg(target_os = "linux")] // only the linux fused planner (ceil_to_template_r) + its CI tests consume this
-pub const FUSED_R_TEMPLATES: &[usize] = &[4, 5, 6, 8, 10, 12, 16, 20, 24, 32];
+pub(crate) const FUSED_R_TEMPLATES: &[usize] = &[4, 5, 6, 8, 10, 12, 16, 20, 24, 32];
 
 /// Smallest entry in `FUSED_R_TEMPLATES` that is ≥ `r`. Used both by the
 /// kernel selector and the `(P, R)` cache key so two systems with the same
@@ -137,7 +137,7 @@ pub const FUSED_R_TEMPLATES: &[usize] = &[4, 5, 6, 8, 10, 12, 16, 20, 24, 32];
 #[cfg(target_os = "linux")] // consumers (fused planner/admission + CI tests) are all linux-gated
 #[inline]
 #[must_use]
-pub fn ceil_to_template_r(r: usize) -> Option<usize> {
+pub(crate) fn ceil_to_template_r(r: usize) -> Option<usize> {
     FUSED_R_TEMPLATES
         .iter()
         .copied()
@@ -393,7 +393,7 @@ pub struct FusedLaunchPlan {
 #[cfg(target_os = "linux")]
 #[inline]
 #[must_use]
-pub fn plan_fused_launch(n: usize, p: usize, r: usize) -> Option<FusedLaunchPlan> {
+pub(crate) fn plan_fused_launch(n: usize, p: usize, r: usize) -> Option<FusedLaunchPlan> {
     if p == 0 || r == 0 || n == 0 || p > MAX_FUSED_P {
         return None;
     }
@@ -418,7 +418,7 @@ pub fn plan_fused_launch(n: usize, p: usize, r: usize) -> Option<FusedLaunchPlan
 #[cfg(target_os = "linux")]
 #[inline]
 #[must_use]
-pub fn forward_kernel_source(p_max: usize, r_template: usize) -> String {
+pub(crate) fn forward_kernel_source(p_max: usize, r_template: usize) -> String {
     format!(
         "#define P_MAX {}\n#define R_TEMPLATE {}\n{}",
         p_max, r_template, FORWARD_KERNEL_SOURCE
@@ -433,7 +433,7 @@ pub fn forward_kernel_source(p_max: usize, r_template: usize) -> String {
 #[cfg(target_os = "linux")]
 #[inline]
 #[must_use]
-pub fn system_admits_fused_path(sys: &ArrowSchurSystem) -> bool {
+pub(crate) fn system_admits_fused_path(sys: &ArrowSchurSystem) -> bool {
     let n = sys.rows.len();
     let p = sys.d;
     let r = sys.k;
