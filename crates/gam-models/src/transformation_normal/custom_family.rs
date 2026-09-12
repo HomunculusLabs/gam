@@ -228,13 +228,6 @@ impl CustomFamily for TransformationNormalFamily {
         )
     }
 
-    fn coefficient_gradient_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        // One row-quantity pass plus two transpose products. The SCOP derivative
-        // is structurally positive, so coefficient line searches no longer run a
-        // full derivative-grid fraction-to-boundary scan on every attempt.
-        self.coefficient_hessian_cost(specs) / 2
-    }
-
     fn outer_seed_config(&self, n_params: usize) -> gam_solve::seeding::SeedConfig {
         gam_solve::seeding::SeedConfig {
             bounds: (-12.0, 12.0),

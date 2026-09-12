@@ -14,8 +14,7 @@ use crate::families::custom_family::options::{
     assert_block_local_beta_direction, assert_block_local_eta_direction,
     assert_blockstates_are_a_point, assert_hyper_layout_matches_specs, assert_psi_index_in_layout,
     assert_rho_matches_specs, assert_states_match_specs, assert_valid_blockspecs,
-    assert_valid_options, default_coefficient_hessian_cost,
-    exact_outer_order_with_outer_hvp, validate_hessian_workspace_ready,
+    assert_valid_options, default_coefficient_hessian_cost, validate_hessian_workspace_ready,
 };
 use crate::families::custom_family::psi_design::{
     CustomFamilyHyperLayout, ExactNewtonJointHessianWorkspace,
@@ -469,24 +468,6 @@ pub trait CustomFamily {
         default_coefficient_hessian_cost(specs)
     }
 
-    /// Per-evaluation arithmetic cost of one analytic-gradient outer
-    /// evaluation, in flop-equivalent units. Used only when the family
-    /// genuinely has no analytic outer Hessian and the planner must use a
-    /// first-order optimizer.
-    ///
-    /// The default returns `coefficient_hessian_cost / 2`: the first-order
-    /// path runs the same inner solve but skips the pairwise Hessian assembly
-    /// and the inner derivative solves. Families whose gradient
-    /// assembly differs structurally should override; in particular,
-    /// joint-coupled families that override `coefficient_hessian_cost` to
-    /// `joint_coupled_coefficient_hessian_cost(n, specs)` automatically
-    /// inherit the corresponding gradient cost via this default — no
-    /// per-family override is required for the GAMLSS / marginal-slope /
-    /// joint-latent path.
-    fn coefficient_gradient_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
-        self.coefficient_hessian_cost(specs) / 2
-    }
-
     /// Declares how much exact outer calculus this family wants to expose for
     /// the current realized problem size.
     ///
@@ -496,29 +477,22 @@ pub trait CustomFamily {
     /// representation; they are not demoted to first-order optimizers.
     ///
     /// **Capability vs representation.** This method reports the highest
-    /// analytic order this family implements. The realized policy carries
-    /// work estimates for dense/operator routing and staged κ schedules, but
-    /// those estimates do not downgrade a second-order family to a first-order
-    /// optimizer.
+    /// analytic order this family implements. Dense versus operator
+    /// representation is chosen below this declaration and never downgrades a
+    /// second-order family to a first-order optimizer.
     fn exact_outer_derivative_order(
         &self,
         specs: &[ParameterBlockSpec],
         options: &BlockwiseFitOptions,
     ) -> ExactOuterDerivativeOrder {
         assert_valid_options(options, "exact outer derivative order");
-        let coefficient_work = self
-            .coefficient_hessian_cost(specs)
-            .max(self.coefficient_gradient_cost(specs));
         if !self.outer_hyper_hessian_dense_available(specs)
             && !self.outer_hyper_hessian_hvp_available(specs)
         {
             return ExactOuterDerivativeOrder::First;
         }
-        exact_outer_order_with_outer_hvp(
-            specs,
-            coefficient_work,
-            self.outer_hyper_hessian_hvp_available(specs),
-        )
+        assert_valid_blockspecs(specs, "exact outer derivative order");
+        ExactOuterDerivativeOrder::Second
     }
 
     /// Realized outer-derivative policy: the capability query

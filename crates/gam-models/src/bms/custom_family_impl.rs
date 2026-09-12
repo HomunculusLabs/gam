@@ -762,9 +762,6 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         );
 
         let flex_active = self.score_warp.is_some() || self.link_dev.is_some();
-        let coefficient_work = self
-            .coefficient_hessian_cost(specs)
-            .max(self.coefficient_gradient_cost(specs));
         let dense_available = self.outer_hyper_hessian_dense_available(specs);
         let hvp_available = self.outer_hyper_hessian_hvp_available(specs);
         // FLEX (`score_warp` / `link_dev`) advertises the EXACT matrix-free
@@ -779,23 +776,23 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         if !dense_available && !hvp_available {
             if log_exact_work(self.y.len()) {
                 log::info!(
-                    "[BMS outer-derivative-policy] n={} p={} flex={} order=First reason=no-outer-hessian dense_available={} outer_hvp_available={} coefficient_work={}",
+                    "[BMS outer-derivative-policy] n={} p={} flex={} order=First reason=no-outer-hessian dense_available={} outer_hvp_available={}",
                     self.y.len(),
                     specs.iter().map(|spec| spec.design.ncols()).sum::<usize>(),
                     flex_active,
                     dense_available,
                     hvp_available,
-                    coefficient_work,
                 );
             }
             return ExactOuterDerivativeOrder::First;
         }
 
-        let order = crate::custom_family::exact_outer_order_with_outer_hvp(
-            specs,
-            coefficient_work,
-            hvp_available,
+        assert!(
+            crate::custom_family::validate_blockspec_consistency(specs).is_ok(),
+            "BernoulliMarginalSlopeFamily exact outer derivative order: \
+             inconsistent parameter block specs"
         );
+        let order = ExactOuterDerivativeOrder::Second;
         if log_exact_work(self.y.len()) {
             let p_total = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
             let matrix_free_inner_requested =
@@ -810,7 +807,7 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
                 "direct-dense"
             };
             log::info!(
-                "[BMS outer-derivative-policy] n={} p={} flex={} order={:?} declared_hessian=analytic outer_hessian_requested={} outer_subsample={} inner_route={} matrix_free_inner_requested={} dense_available={} outer_hvp_available={} coefficient_work={}",
+                "[BMS outer-derivative-policy] n={} p={} flex={} order={:?} declared_hessian=analytic outer_hessian_requested={} outer_subsample={} inner_route={} matrix_free_inner_requested={} dense_available={} outer_hvp_available={}",
                 self.y.len(),
                 p_total,
                 flex_active,
@@ -821,7 +818,6 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
                 matrix_free_inner_requested,
                 dense_available,
                 hvp_available,
-                coefficient_work,
             );
         }
         order

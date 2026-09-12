@@ -1593,41 +1593,6 @@ pub(crate) fn joint_coupled_coefficient_hessian_cost_matches_n_times_p_total_squ
 }
 
 #[test]
-pub(crate) fn large_scale_exact_adaptive_hessian_order_stays_second_order() {
-    let n_train = 320_000u64;
-    let p = 101usize;
-    let retained_rho_dim = 3usize;
-    let spec = ParameterBlockSpec {
-        name: "matern60".to_string(),
-        design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(Array2::zeros(
-            (1, p),
-        ))),
-        offset: Array1::zeros(1),
-        penalties: (0..retained_rho_dim)
-            .map(|_| PenaltyMatrix::Dense(Array2::eye(p)))
-            .collect(),
-        nullspace_dims: vec![0; retained_rho_dim],
-        initial_log_lambdas: Array1::zeros(retained_rho_dim),
-        initial_beta: None,
-        gauge_priority: 100,
-        jacobian_callback: None,
-        stacked_design: None,
-        stacked_offset: None,
-    };
-    let coefficient_hessian_cost = n_train * (p as u64) * (p as u64);
-
-    assert_eq!(coefficient_hessian_cost, 3_264_320_000);
-    assert_eq!(
-        retained_rho_dim as u64 * coefficient_hessian_cost,
-        9_792_960_000
-    );
-    assert_eq!(
-        exact_outer_order_from_capability(&[spec], coefficient_hessian_cost),
-        ExactOuterDerivativeOrder::Second
-    );
-}
-
-#[test]
 pub(crate) fn large_scale_shape_margslope_flex_cycle0_uses_bounded_dense_route() {
     let total_p = 51;
     let total_n = 320_000;

@@ -6119,5 +6119,18 @@
     ],
     "reason": "SPEC rules 23 and 25 (#2263). impl Default for TargetDoseConfig gave the target-dose loop hand-set library defaults: tol_rel 1e-2, max_iter 12, readout_tol_rel 1e-1. Every probe is a patched forward of the caller's model, so stopping accuracy and forward budget are the caller's decisions. No product path read the defaults: the pyffi steer_to_target entry builds the config from three required request items, and oos_entry only carries the field. The impl is deleted. The root steering_dosimetry fixtures state the same numbers through a local dose_config() helper, and the #2249 lib test states them inline.",
     "evidence": "At the base, git grep -w TargetDoseConfig finds the product users pyffi latent_basis_and_sae_ffi_tail.rs (an explicit struct literal from required items) and oos_entry.rs (a request field). The 17 TargetDoseConfig::default() calls in tests/sae/misc/steering_dosimetry.rs and the one in crates/gam-sae/src/inference/tests_dose_calibration_2249.rs are the only default constructions, and this change rewrites all of them. No struct holding a TargetDoseConfig derives Default: oos_entry derives Clone and Debug; TargetDoseRequest derives Clone, Copy and Debug. The item list applies source_removal_guard.py's ITEM regex and occurrence rule to the removed hunks by hand. The trait fn default has no pub, so public_api_census.py records nothing. Not compiled locally; compile rests on the lead's shared tip check."
+  },
+  {
+    "base": "8305537ae732d381938ad260a44a637e8ed7f575",
+    "items": [
+      "crates/gam-custom-family/src/tests.rs:fn:large_scale_exact_adaptive_hessian_order_stays_second_order",
+      "crates/gam-model-api/src/families/custom_family/family_trait.rs:fn:coefficient_gradient_cost",
+      "crates/gam-model-api/src/families/custom_family/options.rs:fn:exact_outer_order_from_capability",
+      "crates/gam-model-api/src/families/custom_family/options.rs:fn:exact_outer_order_with_outer_hvp",
+      "crates/gam-models/src/transformation_normal/custom_family.rs:fn:coefficient_gradient_cost",
+      "tests/src_modules/misc/families_bms_identifiability_rigid_tests.rs:fn:exact_outer_order_stays_second_order_at_large_scale_work_scale"
+    ],
+    "reason": "#2897, SPEC rules 23 and 25. exact_outer_order_from_capability and exact_outer_order_with_outer_hvp took a coefficient_cost argument and matched on it as 0 => Second, _ => Second, so both returned Second after the block-spec check. The trait default and the BMS override computed coefficient_work = max(coefficient_hessian_cost, coefficient_gradient_cost) only to pass it to them. The helpers go: the default and the BMS override validate the specs and return Second directly. coefficient_gradient_cost has no other caller, so the trait method and its CTN override go too. The two tests asserted that the constant helpers return Second at large costs. With the cost argument gone that assertion is empty, so both tests go.",
+    "evidence": "At base 4b1bccae, git grep -n -w over the repo finds exact_outer_order_from_capability only in options.rs, the gam-custom-family test and the rigid test. exact_outer_order_with_outer_hvp appears only in options.rs, the family_trait.rs import and default, bms custom_family_impl.rs and the rigid test. coefficient_gradient_cost appears only in the family_trait.rs declaration and default, the bms coefficient_work line and the CTN override. This change removes every one of those sites. Compile is covered by the lead shared tip check."
   }
 ]

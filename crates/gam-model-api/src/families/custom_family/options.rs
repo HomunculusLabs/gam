@@ -27,15 +27,6 @@ pub use gam_problem::{ExactNewtonOuterObjective, ExactOuterDerivativeOrder};
 // undamped score equation.
 pub use gam_problem::validate_blockspec_consistency;
 
-/// Exact outer derivative order for families that expose second-order
-/// coefficient geometry.
-///
-/// This used to be a cost gate that demoted large large-scale problems to
-/// first-order BFGS. That was a policy leak into the math layer: if the family
-/// supplies analytic dense Hessian blocks or an analytic profiled-Hessian HVP,
-/// the outer optimizer should see the exact second-order objective. Runtime
-/// representation choices (dense vs operator) belong below this declaration,
-/// not in a first-order downgrade.
 /// Precondition check for the family capability / operator hooks (e.g.
 /// `batched_outer_hessian_terms`, `outer_hyper_hessian_operator`).
 ///
@@ -252,44 +243,6 @@ pub(crate) fn validate_hessian_workspace_ready(
             .map_err(|err| format!("{context}: failed to warm Hessian workspace caches: {err}"))?;
     }
     Ok(())
-}
-
-/// Declare second-order outer calculus after validating the coefficient blocks.
-///
-/// `specs` must form a valid custom-family block layout. `coefficient_cost` is
-/// retained for API compatibility and diagnostics; analytic capability is not
-/// demoted on cost. Invalid specifications panic in the common contract
-/// validator.
-pub fn exact_outer_order_from_capability(
-    specs: &[ParameterBlockSpec],
-    coefficient_cost: u64,
-) -> ExactOuterDerivativeOrder {
-    assert_valid_blockspecs(specs, "exact outer derivative order");
-    match coefficient_cost {
-        0 => ExactOuterDerivativeOrder::Second,
-        _ => ExactOuterDerivativeOrder::Second,
-    }
-}
-
-/// Capability-aware variant of [`exact_outer_order_from_capability`].
-///
-/// Kept as the public declaration helper for existing family impls, but it no
-/// longer gates by cost. Once a caller has established dense or HVP analytic
-/// second-order support, the correct derivative order is `Second`.
-pub fn exact_outer_order_with_outer_hvp(
-    specs: &[ParameterBlockSpec],
-    coefficient_cost: u64,
-    outer_hyper_hessian_hvp_available: bool,
-) -> ExactOuterDerivativeOrder {
-    if outer_hyper_hessian_hvp_available {
-        assert_valid_blockspecs(specs, "exact outer derivative order with HVP");
-        match coefficient_cost {
-            0 => ExactOuterDerivativeOrder::Second,
-            _ => ExactOuterDerivativeOrder::Second,
-        }
-    } else {
-        exact_outer_order_from_capability(specs, coefficient_cost)
-    }
 }
 
 /// Realized outer-derivative policy: the family's capability, wrapped for the

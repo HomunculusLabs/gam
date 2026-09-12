@@ -2460,5 +2460,15 @@
     },
     "reason": "#2902 row 8: the REML cost's refused-trial diagnostic logged coordinates within 1e-8 of +-RHO_BOUND, the rails of a box no standard-REML arm searches since 9f2a290c0 and 0b7075c3b. The terminal certificate reports each railed coordinate with the interval it was judged against (railed_facts, #2530). boundary_hit_indices had no other reader.",
     "evidence": "git grep -w boundary_hit_indices over the base finds its definition in crates/gam-linalg/src/utils.rs, the crate-private re-export in crates/gam-solve/src/reml/outer_eval.rs, and the two diagnostic calls in crates/gam-solve/src/reml/objective.rs, all removed in this commit. No test or other crate reads it."
+  },
+  {
+    "base": "8305537ae732d381938ad260a44a637e8ed7f575",
+    "removed": {
+      "crates/gam-custom-family/src/tests.rs::large_scale_exact_adaptive_hessian_order_stays_second_order": 1,
+      "crates/gam-model-api/src/families/custom_family/options.rs::exact_outer_order_from_capability": 1,
+      "crates/gam-model-api/src/families/custom_family/options.rs::exact_outer_order_with_outer_hvp": 1
+    },
+    "reason": "#2897, SPEC rules 23 and 25. Both helpers matched their coefficient_cost argument as 0 => Second, _ => Second, so they returned Second after the block-spec check. Their callers now validate and return Second directly. The pub(crate) test asserted that the constant helper returns Second at a large cost, so it goes with the helper.",
+    "evidence": "At base 4b1bccae, git grep -n -w exact_outer_order_from_capability and exact_outer_order_with_outer_hvp over the repo find only options.rs, the family_trait.rs import and default, bms custom_family_impl.rs, the gam-custom-family test and the rigid test. This change removes every one of those sites. No gam-cli, gam-pyffi, python or examples code names either."
   }
 ]
