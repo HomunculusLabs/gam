@@ -7179,3 +7179,222 @@ fn shared_dense_arc_refuses_a_stale_clone_at_a_reused_address() {
     assert!(Arc::ptr_eq(&shared, &again));
     drop(stale_arc);
 }
+
+// ── gam#2905: the complete Jeffreys completion in the outer Hessian, gate in motion ─────────
+
+/// `DefaultDiagonalExactHookFamily` with its observed Hessian armed as the Jeffreys information
+/// and priced in the criterion. `H(β) = Xᵀ·diag(2 + η²)·X`, so `H''[u, v] =
+/// Xᵀ·diag(2·(Xu)⊙(Xv))·X` is constant in `β`: every third information derivative and every
+/// directional contracted trace vanishes. Near `β = 0` the smallest eigenvalue sits between the
+/// absolute conditioning knots `1` and `16`, so the gate is inside its transition band and the
+/// completion carries gate motion.
+#[derive(Clone)]
+struct GateBandCompletionFamily;
+
+impl GateBandCompletionFamily {
+    fn design() -> Array2<f64> {
+        array![[1.0, 0.5], [0.0, 1.0], [2.0, -1.0]]
+    }
+}
+
+impl CustomFamily for GateBandCompletionFamily {
+    fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {
+        DefaultDiagonalExactHookFamily.evaluate(block_states)
+    }
+
+    fn exact_newton_joint_hessian_beta_dependent(&self) -> bool {
+        true
+    }
+
+    fn diagonalworking_weights_directional_derivative(
+        &self,
+        block_states: &[ParameterBlockState],
+        block_idx: usize,
+        d_eta: &Array1<f64>,
+    ) -> Result<Option<Array1<f64>>, String> {
+        DefaultDiagonalExactHookFamily.diagonalworking_weights_directional_derivative(
+            block_states,
+            block_idx,
+            d_eta,
+        )
+    }
+
+    fn exact_newton_joint_hessiansecond_directional_derivative(
+        &self,
+        block_states: &[ParameterBlockState],
+        u: &Array1<f64>,
+        v: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        DefaultDiagonalExactHookFamily
+            .exact_newton_joint_hessiansecond_directional_derivative(block_states, u, v)
+    }
+
+    fn joint_jeffreys_term_required(&self) -> bool {
+        true
+    }
+
+    fn joint_jeffreys_information_third_directional_available(&self) -> bool {
+        true
+    }
+
+    fn joint_jeffreys_information_third_directional_all_axes_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_v_flat: &Array1<f64>,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        assert_states_finite(block_states, "gate-band completion third drift");
+        assert_specs_consistent(specs, "gate-band completion third drift");
+        assert!(
+            d_beta_u_flat.iter().chain(d_beta_v_flat.iter()).all(|value| value.is_finite()),
+            "gate-band completion third drift: directions must be finite"
+        );
+        // The working weight `2 + η²` has no third derivative.
+        Ok(Some(vec![Array2::zeros((2, 2)); 2]))
+    }
+
+    fn joint_jeffreys_information_contracted_trace_hessian_available(&self) -> bool {
+        true
+    }
+
+    fn joint_jeffreys_information_contracted_trace_hessian_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        weight: &Array2<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        assert_states_finite(block_states, "gate-band completion contracted trace");
+        assert_specs_consistent(specs, "gate-band completion contracted trace");
+        // `⟨W, H''[e_a, e_b]⟩ = Σ_r 2·x_ra·x_rb·(x_rᵀ W x_r)`.
+        let design = Self::design();
+        let mut out = Array2::<f64>::zeros((2, 2));
+        for row in design.rows() {
+            let quadratic = row.dot(&weight.dot(&row));
+            for a in 0..2 {
+                for b in 0..2 {
+                    out[[a, b]] += 2.0 * row[a] * row[b] * quadratic;
+                }
+            }
+        }
+        Ok(Some(out))
+    }
+
+    fn joint_jeffreys_completion_outer_derivatives_available(&self) -> bool {
+        true
+    }
+
+    fn joint_jeffreys_information_contracted_trace_hessian_directional_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        weight: &Array2<f64>,
+        d_beta_u_flat: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        assert_states_finite(block_states, "gate-band completion directional contracted trace");
+        assert_specs_consistent(specs, "gate-band completion directional contracted trace");
+        assert!(
+            weight.iter().chain(d_beta_u_flat.iter()).all(|value| value.is_finite()),
+            "gate-band completion directional contracted trace: inputs must be finite"
+        );
+        Ok(Some(Array2::zeros((2, 2))))
+    }
+
+    fn joint_jeffreys_information_contracted_trace_hessian_second_directional_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        weight: &Array2<f64>,
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_w_flat: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        assert_states_finite(block_states, "gate-band completion second contracted trace");
+        assert_specs_consistent(specs, "gate-band completion second contracted trace");
+        assert!(
+            weight
+                .iter()
+                .chain(d_beta_u_flat.iter())
+                .chain(d_beta_w_flat.iter())
+                .all(|value| value.is_finite()),
+            "gate-band completion second contracted trace: inputs must be finite"
+        );
+        Ok(Some(Array2::zeros((2, 2))))
+    }
+}
+
+/// gam#2905 criterion pin. With the conditioning gate inside its transition band, the outer
+/// criterion priced on the complete Jeffreys curvature has an analytic outer Hessian that matches
+/// central differences of its analytic gradient, and a gradient that matches central differences
+/// of its value. The mode's reduced information must arm the Jeffreys term and its Hessian
+/// motion, so the Hessian exercises the motion half of `D² completion`.
+#[test]
+pub(crate) fn completion_priced_outer_hessian_matches_central_differences_with_gate_motion_2905() {
+    let mut spec = default_diagonal_exact_hook_spec();
+    spec.initial_beta = Some(Array1::zeros(2));
+    let specs = [spec];
+    let options = BlockwiseFitOptions {
+        use_remlobjective: true,
+        use_outer_hessian: true,
+        compute_covariance: false,
+        ..BlockwiseFitOptions::default()
+    };
+    let hyper_layout = test_design_hyper_layout(vec![vec![]]);
+    let family = GateBandCompletionFamily;
+    let evaluate = |rho: f64, mode: EvalMode| {
+        evaluate_custom_family_joint_hyper(
+            &family,
+            &specs,
+            &options,
+            &array![rho],
+            &hyper_layout,
+            None,
+            mode,
+        )
+        .expect("completion-priced outer evaluation")
+    };
+    let rho = 0.3;
+    let at = evaluate(rho, EvalMode::ValueGradientHessian);
+    assert!(at.inner_converged, "the inner mode must converge");
+    let beta = at
+        .warm_start
+        .block_beta_view(0)
+        .expect("block 0 coefficients at the mode")
+        .to_owned();
+    let eta = specs[0].design.apply(&beta);
+    let states = vec![ParameterBlockState { beta, eta }];
+    let information = family
+        .exact_newton_joint_hessian_with_specs(&states, &specs)
+        .expect("information at the mode")
+        .expect("diagonal working sets assemble the information");
+    let plan = gam_solve::estimate::reml::jeffreys_subspace::JointJeffreysPlan::prepare(
+        information.view(),
+        Array2::<f64>::eye(2).view(),
+    )
+    .expect("Jeffreys plan at the mode");
+    assert!(plan.is_active(), "the Jeffreys term must be armed at the mode");
+    assert!(
+        plan.hessian_motion_active(),
+        "the conditioning gate must move with β at the mode"
+    );
+    let analytic_hessian = match &at.outer_hessian {
+        gam_problem::HessianValue::Dense(hessian) => {
+            assert_eq!(hessian.dim(), (1, 1));
+            hessian[[0, 0]]
+        }
+        _ => panic!("the completion-priced criterion must expose an analytic outer Hessian"),
+    };
+    let step = 1e-4;
+    let plus = evaluate(rho + step, EvalMode::ValueAndGradient);
+    let minus = evaluate(rho - step, EvalMode::ValueAndGradient);
+    let gradient_fd = (plus.objective - minus.objective) / (2.0 * step);
+    let hessian_fd = (plus.gradient[0] - minus.gradient[0]) / (2.0 * step);
+    assert!(
+        (at.gradient[0] - gradient_fd).abs() <= 2e-3 * gradient_fd.abs().max(1.0),
+        "completion-priced outer gradient: analytic={} central difference={gradient_fd}",
+        at.gradient[0]
+    );
+    assert!(
+        (analytic_hessian - hessian_fd).abs() <= 2e-3 * hessian_fd.abs().max(1.0),
+        "completion-priced outer Hessian: analytic={analytic_hessian} central difference={hessian_fd}"
+    );
+}
