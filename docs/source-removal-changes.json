@@ -4073,5 +4073,17 @@
     ],
     "reason": "#2899 group-A public-surface sweep, under the #2829 rule in docs/rust-library-surface.md. COMPOSE_UNARY_CALLS and MUL_CALLS were pub AtomicU64 call counters that MultiDirJet::compose_unary and mul incremented on every call, and nothing anywhere ever loaded them: no product, no test, no bench. Each call paid for an atomic write that nobody observed, so the statics, both fetch_add lines and the now-unused atomic import are deleted. The same commit narrows eleven gam-math helpers that only gam-math production code calls to pub(crate) and rewrites eight rustdoc links to newly private items as plain code spans. No pub fn is removed.",
     "evidence": "At 1da5a9cd4, git grep -n -w COMPOSE_UNARY_CALLS and -w MUL_CALLS over crates, src, examples, tests, gamfit and docs find only each declaration and its fetch_add (jet_partitions.rs:112/:242 and :113/:175). The item list is source_removal_guard.py --base 1da5a9cd4 --head 473cfbc39 (/scratch.global/sauer354/pool/prune-api-a/slice3.srg.out). public_api_census.py over the same range reports no removed identity. The compile check is the lead shared tip check."
+  },
+  {
+    "base": "7329e5141da42d814af4d714712a707440d9814c",
+    "items": [
+      "crates/gam-models/src/multinomial.rs:const:CLASS_NAMES",
+      "crates/gam-models/src/multinomial.rs:const:PENGUINS_CSV",
+      "crates/gam-models/src/multinomial.rs:fn:penguins_stride3_train",
+      "crates/gam-models/src/multinomial.rs:fn:softmax_drawn_two_covariate",
+      "crates/gam-models/src/multinomial.rs:fn:zz_measure_2612_arming_certificate_with_and_without_the_penalty"
+    ],
+    "reason": "zz_measure_2612_arming_certificate_with_and_without_the_penalty was a #2612 diagnostic whose own doc says it prints only and never asserts a bound. It fitted two multinomial formulas, printed both separation-certificate spectra and asserted nothing, and it hit the 600 s nextest slow-timeout on every census. A test that cannot fail is not a test (SPEC rule 16). penguins_stride3_train and softmax_drawn_two_covariate were its private fixtures, and PENGUINS_CSV and CLASS_NAMES were consts local to those two functions.",
+    "evidence": "Census job 505917 at 7ad913f69 (/scratch.global/sauer354/pool/t2627models/census7ad9.505917.log): TIMEOUT [ 600.044s] gam-models multinomial::reference_class_invariance_tests::zz_measure_2612_arming_certificate_with_and_without_the_penalty. At the base, git grep -w finds penguins_stride3_train, softmax_drawn_two_covariate and the probe name only at their declarations and in the probe body. CLASS_NAMES and PENGUINS_CSV are each declared once in multinomial.rs, inside the deleted functions. The module's remaining imports keep uses outside the deleted range: load_dataset_projected and writeln! in dataset_xy, fs in its write, tempdir in the invariance tests. Compile is covered by the lead's shared tip check; nothing was built locally."
   }
 ]
