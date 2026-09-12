@@ -2862,13 +2862,18 @@ impl SaeManifoldTerm {
     ///    needs a long step (#2762), and this is the globalization that starts
     ///    long. Its trial count is the number of contractions between the two
     ///    endpoints.
-    /// 2. From that step the search keeps contracting only while the objective
-    ///    still improves; the first trial that does not improve closes a bracket
-    ///    around the valley.
-    /// 3. Golden-section refinement shrinks the bracket to `√ε` relative width. A
-    ///    smooth minimum cannot be located more precisely from f64 values: near it
-    ///    `f` varies quadratically, so a displacement of `√ε·α` changes `f` by
-    ///    `ε`-level noise. That is an information bound, not an iteration count.
+    /// 2. That step may overshoot a valley. The quadratic through `φ(0)`, the
+    ///    exact `φ′(0) = −slope` and `φ` at the incumbent step has its minimizer at
+    ///    `α_q = slope·α²/(2·(φ(α) − φ(0) + slope·α))` whenever the objective sits
+    ///    above its tangent there. `α_q` is tried inside `[near_alpha, α)` and kept
+    ///    only when it improves the incumbent by more than `material_floor`, the
+    ///    resolution below which no commit can change; the stage then repeats from
+    ///    the new incumbent. Every kept trial lowers the objective by more than the
+    ///    floor, so the stage ends. With `negative_curvature > 0` the model has no
+    ///    minimizer and the longest Armijo step stands. This replaced a contraction
+    ///    bracket refined by golden section on objective values, which was
+    ///    derivative-free search (SPEC rule 19) and spent most of a gauge round's
+    ///    evaluations.
     ///
     /// Every trial restores `snapshot` bit-for-bit, so on return the state is the
     /// snapshot's; the caller owns the commit law. A trial whose step fails to
@@ -2991,54 +2996,27 @@ impl SaeManifoldTerm {
             return Ok(line);
         };
 
-        // (2) Contract while the objective still improves. The rejected trial
-        // before the accepted one, or the trust radius itself, bounds the valley
-        // from above.
+        // (2) Interpolate the valley from the derivative in hand.
         let mut best_alpha = accepted.step;
         let mut best_value = accepted.value;
-        let mut high = (best_alpha / contraction).min(far_alpha);
-        let mut low = best_alpha * contraction;
-        while low >= near_alpha {
-            let value = trial_at(self, low, &mut line)?;
-            if value < best_value {
-                high = best_alpha;
-                best_alpha = low;
+        if negative_curvature == 0.0 {
+            loop {
+                // `½κα²` of the quadratic through φ(0), φ′(0) and φ(best_alpha).
+                let excess = best_value - base_objective + slope * best_alpha;
+                if !(excess.is_finite() && excess > 0.0) {
+                    break;
+                }
+                let alpha_q = slope * best_alpha * best_alpha / (2.0 * excess);
+                if !(alpha_q.is_finite() && alpha_q >= near_alpha && alpha_q < best_alpha) {
+                    break;
+                }
+                let value = trial_at(self, alpha_q, &mut line)?;
+                if !(best_value - value > material_floor) {
+                    break;
+                }
+                best_alpha = alpha_q;
                 best_value = value;
-                low = best_alpha * contraction;
-            } else {
-                break;
             }
-        }
-
-        // (3) Golden-section refinement of [low, high] to the f64 information bound.
-        let golden_ratio_inverse = 0.5 * (5.0_f64.sqrt() - 1.0);
-        let resolution = f64::EPSILON.sqrt() * best_alpha;
-        let mut inner_low = high - golden_ratio_inverse * (high - low);
-        let mut inner_high = low + golden_ratio_inverse * (high - low);
-        let mut value_low = trial_at(self, inner_low, &mut line)?;
-        let mut value_high = trial_at(self, inner_high, &mut line)?;
-        while high - low > resolution {
-            if value_low <= value_high {
-                high = inner_high;
-                inner_high = inner_low;
-                value_high = value_low;
-                inner_low = high - golden_ratio_inverse * (high - low);
-                value_low = trial_at(self, inner_low, &mut line)?;
-            } else {
-                low = inner_low;
-                inner_low = inner_high;
-                value_low = value_high;
-                inner_high = low + golden_ratio_inverse * (high - low);
-                value_high = trial_at(self, inner_high, &mut line)?;
-            }
-        }
-        if value_low < best_value {
-            best_value = value_low;
-            best_alpha = inner_low;
-        }
-        if value_high < best_value {
-            best_value = value_high;
-            best_alpha = inner_high;
         }
         line.alpha = best_alpha;
         line.value = best_value;
