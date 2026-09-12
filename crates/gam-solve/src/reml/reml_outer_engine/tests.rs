@@ -5670,62 +5670,6 @@ pub(crate) fn modified_gram_schmidt_drops_redundant_columns() {
 }
 
 #[test]
-pub(crate) fn hutchpp_estimate_trace_hinv_operator_matches_exact_within_tolerance() {
-    // Build a small SPD H and an HVP-only operator wrapping a dense M.
-    // Compare Hutch++ to the exact tr(H⁻¹ M).
-    let h = array![
-        [4.0, 1.0, 0.5, 0.0, 0.0, 0.0],
-        [1.0, 3.0, 0.2, 0.0, 0.0, 0.0],
-        [0.5, 0.2, 2.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 5.0, 0.7, 0.1],
-        [0.0, 0.0, 0.0, 0.7, 4.0, 0.3],
-        [0.0, 0.0, 0.0, 0.1, 0.3, 3.0],
-    ];
-    let m = array![
-        [1.0, 0.3, 0.0, 0.1, 0.0, 0.0],
-        [0.3, 0.5, 0.1, 0.0, 0.2, 0.0],
-        [0.0, 0.1, 0.2, 0.0, 0.0, 0.05],
-        [0.1, 0.0, 0.0, 0.8, 0.2, 0.0],
-        [0.0, 0.2, 0.0, 0.2, 0.6, 0.1],
-        [0.0, 0.0, 0.05, 0.0, 0.1, 0.4],
-    ];
-    let hop = DenseSpectralOperator::from_symmetric(&h).unwrap();
-    let m_op = DenseMatrixHyperOperator { matrix: m.clone() };
-
-    let exact = hop.trace_hinv_product(&m);
-
-    let config = StochasticTraceConfig {
-        n_probes_min: 12,
-        n_probes_max: 64,
-        relative_tol: 0.005,
-        tau_rel: 1e-10,
-        solve_rel_tol: 1e-10,
-        seed: 0xABCDEF,
-        hutchpp_sketch_dim: Some(3),
-    };
-    let est = hutchpp_estimate_trace_hinv_operator(&hop, &m_op, &config);
-    let rel_err = (est - exact).abs() / exact.abs().max(1e-10);
-    assert!(
-        rel_err < 0.05,
-        "Hutch++ trace est={est:.6} exact={exact:.6} rel_err={rel_err:.4}"
-    );
-
-    // Plain Hutchinson with the same probe budget should not be more
-    // accurate; this guards against an inadvertent regression where
-    // the sketch contribution is silently zeroed.
-    let mut config_plain = config.clone();
-    config_plain.hutchpp_sketch_dim = None;
-    config_plain.n_probes_max = 64; // same total budget
-    let est_plain = hutchpp_estimate_trace_hinv_operator(&hop, &m_op, &config_plain);
-    let rel_err_plain = (est_plain - exact).abs() / exact.abs().max(1e-10);
-    // Allow Hutch++ to either beat plain or match it; never be much worse.
-    assert!(
-        rel_err <= rel_err_plain * 2.0 + 0.01,
-        "Hutch++ ({rel_err:.4}) should be competitive with Hutchinson ({rel_err_plain:.4})"
-    );
-}
-
-#[test]
 pub(crate) fn hutchpp_estimate_trace_hinv_op_squared_matches_exact() {
     // SPD H and symmetric A; compare tr(H⁻¹ A H⁻¹ A) to the exact
     // value computed via trace_hinv_product_cross(A, A) =
@@ -5783,60 +5727,11 @@ pub(crate) fn hutchpp_estimate_trace_hinv_op_squared_matches_exact() {
 }
 
 #[test]
-pub(crate) fn hutchpp_estimate_trace_hinv_operator_cross_matches_exact() {
-    let h = array![
-        [4.0, 1.0, 0.5, 0.0, 0.0, 0.0],
-        [1.0, 3.0, 0.2, 0.0, 0.0, 0.0],
-        [0.5, 0.2, 2.0, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 0.0, 5.0, 0.7, 0.1],
-        [0.0, 0.0, 0.0, 0.7, 4.0, 0.3],
-        [0.0, 0.0, 0.0, 0.1, 0.3, 3.0],
-    ];
-    let a = array![
-        [1.0, 0.3, 0.0, 0.1, 0.0, 0.0],
-        [0.3, 0.5, 0.1, 0.0, 0.2, 0.0],
-        [0.0, 0.1, 0.2, 0.0, 0.0, 0.05],
-        [0.1, 0.0, 0.0, 0.8, 0.2, 0.0],
-        [0.0, 0.2, 0.0, 0.2, 0.6, 0.1],
-        [0.0, 0.0, 0.05, 0.0, 0.1, 0.4],
-    ];
-    let b = array![
-        [0.5, 0.0, 0.1, 0.0, 0.05, 0.0],
-        [0.0, 0.7, 0.0, 0.2, 0.0, 0.1],
-        [0.1, 0.0, 0.4, 0.0, 0.15, 0.0],
-        [0.0, 0.2, 0.0, 0.6, 0.0, 0.05],
-        [0.05, 0.0, 0.15, 0.0, 0.3, 0.0],
-        [0.0, 0.1, 0.0, 0.05, 0.0, 0.5],
-    ];
-    let hop = DenseSpectralOperator::from_symmetric(&h).unwrap();
-    let a_op = DenseMatrixHyperOperator { matrix: a.clone() };
-    let b_op = DenseMatrixHyperOperator { matrix: b.clone() };
-
-    let exact = hop.trace_hinv_product_cross(&a, &b);
-
-    let config = StochasticTraceConfig {
-        n_probes_min: 16,
-        n_probes_max: 128,
-        relative_tol: 0.005,
-        tau_rel: 1e-10,
-        solve_rel_tol: 1e-10,
-        seed: 0xDEAD_BEEF,
-        hutchpp_sketch_dim: Some(3),
-    };
-    let est = hutchpp_estimate_trace_hinv_operator_cross(&hop, &a_op, &b_op, &config);
-    let rel_err = (est - exact).abs() / exact.abs().max(1e-10);
-    assert!(
-        rel_err < 0.07,
-        "Hutch++ cross trace est={est:.6} exact={exact:.6} rel_err={rel_err:.4}"
-    );
-}
-
-#[test]
-pub(crate) fn trace_hinv_operator_cross_default_routes_implicit_to_hutchpp() {
-    // Build a synthetic 200-dim SPD H and an HVP-only operator pair
-    // (mark `is_implicit() = true`) so the trait default routes
-    // through the Hutch++ path. The exact reference comes from the
-    // dense materialization of the same operator.
+pub(crate) fn dense_spectral_operator_cross_traces_agree_with_dense_products() {
+    // A synthetic 200-dim SPD H and HVP-only operators (`is_implicit() = true`).
+    // `DenseSpectralOperator` overrides every operator cross trace with its
+    // projected route, so each one must agree with the dense cross-trace product
+    // of the same matrices.
     let p = 200usize;
     let mut h = Array2::<f64>::zeros((p, p));
     for i in 0..p {
@@ -5856,7 +5751,7 @@ pub(crate) fn trace_hinv_operator_cross_default_routes_implicit_to_hutchpp() {
     }
     let hop = DenseSpectralOperator::from_symmetric(&h).unwrap();
 
-    // Wrapper that masquerades as implicit so the default route fires.
+    // Wrapper that reports itself implicit, as an HVP-only drift does.
     struct ImplicitDense(Array2<f64>);
     impl HyperOperator for ImplicitDense {
         fn dim(&self) -> usize {
@@ -5880,16 +5775,16 @@ pub(crate) fn trace_hinv_operator_cross_default_routes_implicit_to_hutchpp() {
 
     let a_op = ImplicitDense(a.clone());
     let exact = hop.trace_hinv_product_cross(&a, &a);
-    // Same-operator path: routes through the squared estimator.
+    // The same operator on both sides.
     let est_same = hop.trace_hinv_operator_cross(&a_op, &a_op);
     assert!(est_same.is_finite(), "cross trace must be finite");
     let rel_err_same = (est_same - exact).abs() / exact.abs().max(1e-10);
     assert!(
         rel_err_same < 0.10,
-        "default same-op cross routing est={est_same:.6} exact={exact:.6} rel_err={rel_err_same:.4}"
+        "same-operator cross trace est={est_same:.6} exact={exact:.6} rel_err={rel_err_same:.4}"
     );
 
-    // Distinct-operator path: routes through the cross estimator.
+    // Two distinct operators.
     let mut b = Array2::<f64>::zeros((p, p));
     for i in 0..p {
         b[[i, i]] = 0.6 + 0.003 * (i as f64);
@@ -5905,18 +5800,17 @@ pub(crate) fn trace_hinv_operator_cross_default_routes_implicit_to_hutchpp() {
     let rel_err_ab = (est_ab - exact_ab).abs() / exact_ab.abs().max(1e-10);
     assert!(
         rel_err_ab < 0.10,
-        "default distinct-op cross routing est={est_ab:.6} exact={exact_ab:.6} rel_err={rel_err_ab:.4}"
+        "distinct-operator cross trace est={est_ab:.6} exact={exact_ab:.6} rel_err={rel_err_ab:.4}"
     );
 
-    // Matrix-operator path: routes through the cross estimator with
-    // a synthetic dense LHS wrapper.
+    // A dense matrix on the left and an operator on the right.
     let exact_ma = hop.trace_hinv_product_cross(&a, &b);
     let est_ma = hop.trace_hinv_matrix_operator_cross(&a, &b_op);
     assert!(est_ma.is_finite(), "matrix-op cross trace must be finite");
     let rel_err_ma = (est_ma - exact_ma).abs() / exact_ma.abs().max(1e-10);
     assert!(
         rel_err_ma < 0.10,
-        "default matrix-operator cross routing est={est_ma:.6} exact={exact_ma:.6} rel_err={rel_err_ma:.4}"
+        "matrix-operator cross trace est={est_ma:.6} exact={exact_ma:.6} rel_err={rel_err_ma:.4}"
     );
 }
 

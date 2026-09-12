@@ -87,25 +87,21 @@
 //! each probe contributes coherently to every coordinate's gradient.
 //! Triggered for very large `p` via `can_use_stochastic_logdet_hinv_kernel`.
 //!
-//! ## Tier 3: Hutch++ (single-target, HVP-only operator)
+//! ## Tier 3: Hutch++ (second-order, HVP-only operator)
 //!
-//! When a single trace `tr(H⁻¹ M)` is needed against an HVP-only
-//! operator and `p ≥ 128`, `hutchpp_estimate_trace_hinv_operator`
-//! splits the trace via Meyer–Musco's randomized range finder. The
-//! sketch captures the dominant subspace of `H⁻¹ M` exactly; the
-//! Hutchinson residual handles the orthogonal complement with greatly
-//! reduced variance. Achieves `O(1/ε)` matvecs vs `O(1/ε²)` for plain
-//! Hutchinson.
+//! `hutchpp_estimate_trace_hinv_op_squared` estimates the symmetric
+//! same-operator cross-trace `tr((H⁻¹A)²)` used by outer-Hessian diagonals
+//! when the stochastic estimator carries a sketch
+//! (`StochasticTraceConfig::hutchpp_sketch_dim`). Meyer–Musco's randomized
+//! range finder captures the dominant subspace of `(H⁻¹A)²` exactly and the
+//! Hutchinson residual handles the orthogonal complement with greatly reduced
+//! variance: `O(1/ε)` matvecs vs `O(1/ε²)` for plain Hutchinson.
 //!
-//! `hutchpp_estimate_trace_hinv_op_squared` handles the symmetric
-//! same-operator cross-trace `tr((H⁻¹A)²)` (used by outer-Hessian
-//! diagonals); `hutchpp_estimate_trace_hinv_operator_cross` handles
-//! the asymmetric `tr(H⁻¹A_L H⁻¹A_R)` via a shared sketch. Default
-//! impls of [`HessianFactorization::trace_hinv_operator`],
-//! [`HessianFactorization::trace_logdet_operator`], and the cross-trace
-//! family auto-select Hutch++ for implicit operators at moderate
-//! `dim()`. Concrete backends with native paths (dense spectral,
-//! Takahashi Cholesky) override and never reach Hutch++.
+//! The operator-trace defaults of [`HessianFactorization`] never estimate;
+//! they densify the drift. Every backend that holds a factor overrides them
+//! with an exact projected route (dense spectral, the Cholesky backends, the
+//! tangent-projected Hessian), and a backend that cannot hold an exact factor
+//! opts into stochastic traces through `prefers_stochastic_trace_estimation`.
 //!
 //! ## Why these three and not more
 //!

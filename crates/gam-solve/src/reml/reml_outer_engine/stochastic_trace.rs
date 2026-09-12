@@ -1627,57 +1627,6 @@ where
     t_low + mean_residual
 }
 
-/// Hutch++ estimate of `tr(H⁻¹ M)` where `M` is accessed through its
-/// matrix-vector product (operator-only, dim p).
-///
-/// Total cost: `2 m_s + m_h` H⁻¹ solves and `M·v` matvecs, where
-/// `m_s = config.hutchpp_sketch_dim.unwrap_or(0)` and `m_h` is the
-/// number of residual Hutchinson probes drawn (between
-/// `config.n_probes_min` and `config.n_probes_max - 2 m_s`).
-///
-/// When `hutchpp_sketch_dim` is `None`, this falls back to plain
-/// Hutchinson on the full probe budget — the result is deterministic
-/// for a given seed because the probe RNG is seeded from
-/// `config.seed`.
-///
-/// # Algorithm (Meyer–Musco 2021, SOSA)
-///
-/// 1. Sketch: draw `Z_s ∈ {±1}^{p × m_s}` Rademacher, compute
-///    `Y = H⁻¹ M Z_s`, orthonormalize columns: `Y = Q R`.
-/// 2. Low-rank trace: `T_low = tr(Qᵀ H⁻¹ M Q)` exactly via `m_s`
-///    additional matvecs into `W = H⁻¹ M Q` and accumulating
-///    `Σ_j Q[:,j] · W[:,j]`.
-/// 3. Residual Hutchinson on the orthogonal complement: for each
-///    residual probe `z`, set `z̃ = (I - Q Qᵀ) z`, compute
-///    `w̃ = H⁻¹ M z̃`, and accumulate `z̃ · w̃` (which equals
-///    `z̃ᵀ (H⁻¹ M) z̃` because `z̃` is in the complement).
-/// 4. Output: `T_low + (1/m_h) Σ residual estimates`.
-///
-/// # When this wins over plain Hutchinson
-///
-/// Hutch++ converges in `O(1/ε)` matvecs vs `O(1/ε²)` for Hutchinson.
-/// The gain is largest when `H⁻¹ M` has rapid singular-value decay —
-/// the sketch captures the dominant subspace exactly and Hutchinson
-/// only handles the small residual. For roughly-flat spectra both
-/// methods perform similarly per-matvec.
-pub(crate) fn hutchpp_estimate_trace_hinv_operator<H, O>(
-    hop: &H,
-    op: &O,
-    config: &StochasticTraceConfig,
-) -> f64
-where
-    H: HessianFactorization + ?Sized,
-    O: HyperOperator + ?Sized,
-{
-    let p = hop.dim();
-    assert_eq!(op.dim(), p, "Hutch++: operator dim mismatch");
-    // B x = H⁻¹ M x: apply M then a single solve.
-    hutchpp_estimate_trace_with_apply(p, config, |x, tmp| {
-        op.mul_vec_into(x, tmp.view_mut());
-        hop.stochastic_trace_solve(tmp, config.solve_rel_tol)
-    })
-}
-
 /// Hutch++ estimate of `tr((H⁻¹ A)²) = tr(H⁻¹ A H⁻¹ A)` for a symmetric
 /// HVP-only operator `A`. Cost per applied "matvec" is 2 H⁻¹ solves and
 /// 2 A applies; total cost is `2 m_s + m_h` such matvecs.
@@ -1702,41 +1651,6 @@ where
         op.mul_vec_into(x, tmp.view_mut());
         let mid = hop.stochastic_trace_solve(tmp, config.solve_rel_tol);
         op.mul_vec_into(mid.view(), tmp.view_mut());
-        hop.stochastic_trace_solve(tmp, config.solve_rel_tol)
-    })
-}
-
-/// Hutch++-style estimate of `tr(H⁻¹ A_left H⁻¹ A_right)` for two
-/// (possibly distinct) symmetric HVP-only operators. Uses a shared
-/// sketch built from `M = M_L M_R` where `M_L = H⁻¹ A_left` and
-/// `M_R = H⁻¹ A_right`; per matvec is 2 H⁻¹ solves + 2 A applies.
-///
-/// On standard Rademacher probes `E[zᵀ M z] = tr(M)` regardless of
-/// symmetry, so the residual Hutchinson average is unbiased even when
-/// `M` is not self-adjoint in the standard inner product.
-///
-/// A leave-one-out XTrace estimator (Epperly & Tropp 2024, arxiv
-/// 2301.07825) would reduce variance further by exchanging each probe
-/// between sketch and residual roles, at O(m²) bookkeeping cost.
-pub(crate) fn hutchpp_estimate_trace_hinv_operator_cross<H, L, R>(
-    hop: &H,
-    left: &L,
-    right: &R,
-    config: &StochasticTraceConfig,
-) -> f64
-where
-    H: HessianFactorization + ?Sized,
-    L: HyperOperator + ?Sized,
-    R: HyperOperator + ?Sized,
-{
-    let p = hop.dim();
-    assert_eq!(left.dim(), p, "cross trace: left operator dim mismatch");
-    assert_eq!(right.dim(), p, "cross trace: right operator dim mismatch");
-    // M x = H⁻¹ A_L H⁻¹ A_R x.
-    hutchpp_estimate_trace_with_apply(p, config, |x, tmp| {
-        right.mul_vec_into(x, tmp.view_mut());
-        let mid = hop.stochastic_trace_solve(tmp, config.solve_rel_tol);
-        left.mul_vec_into(mid.view(), tmp.view_mut());
         hop.stochastic_trace_solve(tmp, config.solve_rel_tol)
     })
 }

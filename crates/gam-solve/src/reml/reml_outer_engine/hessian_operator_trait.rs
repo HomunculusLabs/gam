@@ -26,32 +26,6 @@ pub struct StochasticTraceState {
 /// - `DenseCholeskyOperator`: exact LLT of dense positive-definite H
 /// - Sparse Cholesky operators (external implementations)
 /// - `BlockCoupledOperator`: one LLT or spectral factorization of joint H
-/// Minimum operator dimension at which the Hutch++ stochastic trace estimator is
-/// preferred over materializing an implicit operator densely. Below this, the
-/// `2·m_s + m_h` Hutch++ matvecs do not beat `dim` dense H⁻¹ HVPs, so the dense
-/// fallback is cheaper.
-pub(crate) const HUTCHPP_TRACE_MIN_DIM: usize = 128;
-
-/// Build the Hutch++ stochastic-trace configuration for an operator of the given
-/// dimension. The sketch dimension grows with `dim` (one column per 32 of
-/// dimension, bounded to `[4, 16]`), and the probe budget tracks the sketch so
-/// the estimator's variance and cost stay balanced across problem sizes. Shared
-/// by every implicit-operator trace path so they cannot drift apart.
-pub(crate) fn hutchpp_config_for_dim(dim: usize) -> StochasticTraceConfig {
-    const SKETCH_DIM_PER: usize = 32;
-    const SKETCH_DIM_MIN: usize = 4;
-    const SKETCH_DIM_MAX: usize = 16;
-    const PROBES_PER_SKETCH: usize = 4;
-    const PROBES_MAX_FLOOR: usize = 32;
-    const PROBES_MIN_FLOOR: usize = 8;
-    let sketch = (dim / SKETCH_DIM_PER).clamp(SKETCH_DIM_MIN, SKETCH_DIM_MAX);
-    let mut config = StochasticTraceConfig::default();
-    config.hutchpp_sketch_dim = Some(sketch);
-    config.n_probes_max = (sketch * PROBES_PER_SKETCH).max(PROBES_MAX_FLOOR);
-    config.n_probes_min = sketch.max(PROBES_MIN_FLOOR);
-    config
-}
-
 pub trait HessianFactorization: Send + Sync {
     /// log|H|₊ — pseudo-logdet using only active eigenvalues/pivots.
     fn logdet(&self) -> f64;
@@ -82,22 +56,7 @@ pub trait HessianFactorization: Send + Sync {
     ///
     /// Default implementation materializes `B` densely. Backends with
     /// native operator traces (notably sparse Cholesky) should override it.
-    ///
-    /// For HVP-only (implicit) operators on large problems we route
-    /// through Hutch++ — the Meyer–Musco split estimator achieves O(1/ε)
-    /// matvecs vs O(1/ε²) for plain Hutchinson, and avoids the O(p²)
-    /// memory + O(p) HVP cost of materializing the operator densely.
     fn trace_hinv_operator(&self, op: &dyn HyperOperator) -> f64 {
-        // Hutch++ fast path for the warn-and-materialize default. Only
-        // backends that fall through to this default reach here;
-        // backends with native operator traces override it. We require
-        // an implicit operator (so materialization is expensive) and a
-        // moderately-large dim (so 2 m_s + m_h matvecs beats `dim`
-        // dense HVPs).
-        if op.is_implicit() && self.dim() >= HUTCHPP_TRACE_MIN_DIM {
-            let config = hutchpp_config_for_dim(self.dim());
-            return hutchpp_estimate_trace_hinv_operator(self, op, &config);
-        }
         if op.is_implicit() {
             log::warn!(
                 "trace_hinv_operator: materializing implicit HyperOperator — \
@@ -190,15 +149,6 @@ pub trait HessianFactorization: Send + Sync {
         matrix: &Array2<f64>,
         op: &dyn HyperOperator,
     ) -> f64 {
-        if op.is_implicit() && self.dim() >= HUTCHPP_TRACE_MIN_DIM {
-            let config = hutchpp_config_for_dim(self.dim());
-            // Wrap the dense LHS in a matrix-backed HyperOperator so the
-            // shared cross routine can call mul_vec_into on it.
-            let lhs = DenseMatrixHyperOperator {
-                matrix: matrix.clone(),
-            };
-            return hutchpp_estimate_trace_hinv_operator_cross(self, &lhs, op, &config);
-        }
         if op.is_implicit() {
             log::warn!(
                 "trace_hinv_matrix_operator_cross: materializing implicit HyperOperator — \
@@ -217,21 +167,7 @@ pub trait HessianFactorization: Send + Sync {
         left: &dyn HyperOperator,
         right: &dyn HyperOperator,
     ) -> f64 {
-        let l_implicit = left.is_implicit();
-        let r_implicit = right.is_implicit();
-        if (l_implicit || r_implicit) && self.dim() >= HUTCHPP_TRACE_MIN_DIM {
-            let config = hutchpp_config_for_dim(self.dim());
-            // Same-operator self-cross is PSD; the squared form is the
-            // exact algorithm for that case (lower variance, no sign).
-            if std::ptr::eq(
-                left as *const dyn HyperOperator as *const (),
-                right as *const dyn HyperOperator as *const (),
-            ) {
-                return hutchpp_estimate_trace_hinv_op_squared(self, left, &config);
-            }
-            return hutchpp_estimate_trace_hinv_operator_cross(self, left, right, &config);
-        }
-        if l_implicit || r_implicit {
+        if left.is_implicit() || right.is_implicit() {
             log::warn!(
                 "trace_hinv_operator_cross: materializing implicit HyperOperator(s) — \
                  backend should provide a matrix-free override"
@@ -302,22 +238,7 @@ pub trait HessianFactorization: Send + Sync {
     ///
     /// Default implementation materializes `B` densely. For Cholesky-based
     /// backends this equals `trace_hinv_operator`.
-    ///
-    /// When `logdet_traces_match_hinv_kernel()` is true (Cholesky-style
-    /// backends where `trace_logdet_gradient(A) = trace_hinv_product(A)`)
-    /// and the operator is implicit on a moderate-or-large problem, route
-    /// through Hutch++ to avoid the dense materialization. Spectral
-    /// backends override this to false (their logdet trace uses
-    /// regularized eigenvalue weights, not `H⁻¹`), so they keep the
-    /// materialize path or provide their own override.
     fn trace_logdet_operator(&self, op: &dyn HyperOperator) -> f64 {
-        if op.is_implicit()
-            && self.dim() >= HUTCHPP_TRACE_MIN_DIM
-            && self.logdet_traces_match_hinv_kernel()
-        {
-            let config = hutchpp_config_for_dim(self.dim());
-            return hutchpp_estimate_trace_hinv_operator(self, op, &config);
-        }
         if op.is_implicit() {
             log::warn!(
                 "trace_logdet_operator: materializing implicit HyperOperator — \
