@@ -4335,5 +4335,13 @@
     ],
     "reason": "#2469. monotonicity_feasible refused a deviation whose exact minimum derivative slack fell below MONOTONICITY_SLACK_ROUNDOFF_TOL = -1e-10 in raw constraint units. The judged iterates come from a QP that holds each span's Bernstein-control rows to PRIMAL_FEASIBILITY_TOL on the scaled slack, and by the convex-hull property the exact slack divided by the span's largest row norm inherits that bound. So the check now uses the contract on that scale, and the constant has no other user.",
     "evidence": "At the base, git grep -n -w MONOTONICITY_SLACK_ROUNDOFF_TOL finds only its declaration and its single use in DeviationRuntime::monotonicity_feasible (crates/gam-models/src/bms/deviation_runtime.rs), which this change replaces. It is pub(crate), production-scoped and declared once, and no test names it. The item list applies source_removal_guard.py's ITEM regex and occurrence rule by hand. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "0dad75c5237424df40df490345219df8992f3678",
+    "items": [
+      "crates/gam-inference/src/probability.rs:const:THETA_EFF_MAX"
+    ],
+    "reason": "#2469: THETA_EFF_MAX (1e9) was a picked effective-dispersion threshold above which the estimation-widened Poisson count interval switched from the negative-binomial surrogate to the exact Poisson quantile. The NB surrogate reaches the Poisson only through prob = theta/(theta+mu). statrs' beta_reg, behind negative_binomial_quantile, forms the complement mu/(theta+mu) by rounding, so the NB CDF carries relative error of order u*theta/mu, while the widening the surrogate adds is of order mu/theta. The switch now sits where those two cross, theta_eff > mu/sqrt(u), with u = gam_linalg::roundoff::UNIT_ROUNDOFF. For mu = 10 that is about 9.5e8, so the picked number was of the right order but independent of mu.",
+    "evidence": "git grep -n THETA_EFF_MAX over the base finds two lines, both in crates/gam-inference/src/probability.rs production code: the function-local declaration at :464 and its single use at :470. No other file, test or doc names it. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
   }
 ]

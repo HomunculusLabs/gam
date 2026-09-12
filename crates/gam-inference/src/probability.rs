@@ -457,17 +457,19 @@ pub fn poisson_moment_matched_interval(
     if excess < 0.0 {
         return None;
     }
-    // Above this effective dispersion the NB surrogate and the conditional
-    // Poisson agree to far more than the integer resolution of the quantile, and
-    // `negative_binomial_quantile`'s `I_{θ/(θ+μ)}(θ, k+1)` is better conditioned
-    // as the exact Poisson; below it the NB widening is genuine.
-    const THETA_EFF_MAX: f64 = 1.0e9;
+    // The NB surrogate reaches the conditional Poisson only through
+    // `prob = θ/(θ+μ)`, and the incomplete beta `I_prob(θ, k+1)` behind
+    // `negative_binomial_quantile` forms its complement `μ/(θ+μ)` by rounding, so
+    // the NB CDF carries relative error ~`u·θ/μ` while the widening it adds is
+    // ~`μ/θ`. The two cross at `θ = μ/√u`: past it the exact Poisson quantile is
+    // the more accurate one, below it the NB widening is genuine (#2469).
+    let poisson_limit = mu / gam_linalg::roundoff::UNIT_ROUNDOFF.sqrt();
     let theta_eff = if excess > 0.0 {
         mu * mu / excess
     } else {
         f64::INFINITY
     };
-    let (q_lo, q_hi) = if theta_eff > THETA_EFF_MAX {
+    let (q_lo, q_hi) = if theta_eff > poisson_limit {
         (poisson_quantile(p_lo, mu), poisson_quantile(p_hi, mu))
     } else {
         (
