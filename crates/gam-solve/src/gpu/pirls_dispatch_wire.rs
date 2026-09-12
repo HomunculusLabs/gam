@@ -120,7 +120,7 @@ mod linux_impl {
     /// All inputs needed for the GPU PIRLS loop end-to-end. Built by the
     /// CPU PIRLS driver right before it would invoke `runworking_model_pirls`,
     /// so every field is already in transformed coordinates.
-    pub struct GpuPirlsDispatchInput<'a> {
+    pub(crate) struct GpuPirlsDispatchInput<'a> {
         /// `LikelihoodSpec`-shaped view used by `admission_for`.
         pub likelihood: &'a GlmLikelihoodSpec,
         /// Inverse link the row kernel was driven by.
@@ -706,7 +706,7 @@ mod linux_impl {
     /// Built by the CPU PIRLS driver immediately before the CPU
     /// `solve_penalized_least_squares_implicit` fast-path, so the GPU path
     /// fires first when available.
-    pub struct GpuGaussianPlsInput<'a> {
+    pub(crate) struct GpuGaussianPlsInput<'a> {
         /// Precomputed `XᵀWX` in original (pre-Qs) coordinates, p×p.
         pub xtwx_orig: ArrayView2<'a, f64>,
         /// Precomputed `XᵀW(y − offset)` in original coordinates, length p.
@@ -1111,7 +1111,7 @@ mod linux_impl {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux_impl::{GpuGaussianPlsInput, GpuPirlsDispatchInput};
+pub(crate) use linux_impl::{GpuGaussianPlsInput, GpuPirlsDispatchInput};
 #[cfg(target_os = "linux")]
 pub(crate) use linux_impl::{
     try_gpu_gaussian_pls_dispatch, try_gpu_pirls_loop_admit, try_gpu_pirls_loop_dispatch,

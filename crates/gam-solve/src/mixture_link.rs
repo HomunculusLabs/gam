@@ -969,19 +969,19 @@ pub trait InverseLinkKernel {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ProbitLinkKernel;
+pub(crate) struct ProbitLinkKernel;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LogitLinkKernel;
+pub(crate) struct LogitLinkKernel;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CLogLogLinkKernel;
+pub(crate) struct CLogLogLinkKernel;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LogLogLinkKernel;
+pub(crate) struct LogLogLinkKernel;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CauchitLinkKernel;
+pub(crate) struct CauchitLinkKernel;
 
 /// Construct SAS state from raw optimizer parameters using the same bounded
 /// transform used everywhere in fitting/evaluation.

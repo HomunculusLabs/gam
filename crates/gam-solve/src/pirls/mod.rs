@@ -68,7 +68,7 @@ use damping::{
     add_scaled_diagonal_to_upper_sparse, compute_lm_d2, update_scaled_diagonal_in_place,
 };
 
-pub use edf::StablePLSResult;
+pub(crate) use edf::StablePLSResult;
 
 use edf::{
     calculate_edf_from_sparse_factor, calculate_edf_with_penalty,

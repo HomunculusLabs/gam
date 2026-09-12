@@ -233,7 +233,7 @@ impl OuterHessianDerivativeKernel {
 }
 
 /// Null implementation for Gaussian families (c=d=0).
-pub struct GaussianDerivatives;
+pub(crate) struct GaussianDerivatives;
 
 impl HessianDerivativeProvider for GaussianDerivatives {
     fn outer_hessian_derivative_kernel(&self) -> Option<OuterHessianDerivativeKernel> {
