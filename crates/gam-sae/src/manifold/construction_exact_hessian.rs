@@ -5246,13 +5246,15 @@ mod test_support {
                 .expect("explicit clamp derivative");
             // Hold A's eigensystem fixed to isolate dE. The companion K
             // contraction owns its eigenvector response, tested end to end by
-            // the sparse logdet trace gate. This reference prices log(mu), so
-            // an accidental leading half in Gamma cannot pass.
-            let priced: Vec<usize> = (0..block.eigenvalues.len())
-                .filter(|&index| block.eigenvalues[index] < -block.rank_floor(index))
-                .collect();
+            // the sparse logdet trace gate. The reference is the classifier's
+            // own basin log-determinant at the moved E, so it prices exactly the
+            // modes the criterion prices: log(mu) above the direction floor and
+            // nothing at or inside it, where Gamma carries no weight either. It
+            // prices log(mu) at full scale, so an accidental leading half in
+            // Gamma cannot pass.
             assert!(
-                !priced.is_empty(),
+                (0..block.eigenvalues.len())
+                    .any(|index| block.eigenvalues[index] < -block.rank_floor(index)),
                 "fixture must price a negative direction"
             );
             let value = |moved: &super::SaeManifoldTerm| {
@@ -5264,39 +5266,17 @@ mod test_support {
                 let e_beta = moved
                     .decoder_prior_majorizer_gap_border(&cache)
                     .expect("perturbed border gap");
-                let total_t = e.len();
-                let q = priced.len();
-                let basin = ndarray::Array2::from_shape_fn((q, q), |(i, j)| {
-                    let remainder: f64 = (0..total_t)
-                        .map(|r| {
-                            e[r] * block.eigenvectors[[r, priced[i]]]
-                                * block.eigenvectors[[r, priced[j]]]
-                        })
-                        .sum();
-                    let border = e_beta.as_ref().map_or(0.0, |gap| {
-                        (0..gap.nrows())
-                            .map(|r| {
-                                (0..gap.ncols())
-                                    .map(|c| {
-                                        gap[[r, c]]
-                                            * block.eigenvectors[[total_t + r, priced[i]]]
-                                            * block.eigenvectors[[total_t + c, priced[j]]]
-                                    })
-                                    .sum::<f64>()
-                            })
-                            .sum::<f64>()
-                    });
-                    remainder
-                        + border
-                        + if i == j {
-                            block.eigenvalues[priced[i]]
-                        } else {
-                            0.0
-                        }
-                });
-                let (eigenvalues, _) = basin.eigh(Side::Lower).expect("reference basin");
-                assert!(eigenvalues.iter().all(|&value| value > 0.0));
-                eigenvalues.iter().map(|value| value.ln()).sum::<f64>()
+                super::SaeManifoldTerm::classify_exact_hessian_basin(
+                    block,
+                    &e,
+                    e_beta.as_ref(),
+                    e.len(),
+                    |direction| super::ArrowMetric::Joint(&cache).quadratic_form(direction),
+                    "joint",
+                    None,
+                )
+                .expect("reference basin")
+                .log_det
             };
             for row in 0..term.n_obs() {
                 for (local, variable) in term
