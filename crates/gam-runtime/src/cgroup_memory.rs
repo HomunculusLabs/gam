@@ -683,21 +683,26 @@ mod linux {
             let inactive_file_bytes = parse_stat_counter(&stat_raw, inactive_key, &stat_path)?;
             let usage_after = parse_counter(&read_required(&usage_path)?, &usage_path)?;
             let current_bytes = usage_before.max(usage_after);
-            if inactive_file_bytes > current_bytes {
-                return Err(failure(
-                    CgroupMemoryProbeFailureKind::InconsistentCounters,
-                    &stat_path,
-                    format!(
-                        "{inactive_key}={inactive_file_bytes} exceeds memory.usage_in_bytes={current_bytes}"
-                    ),
-                ));
-            }
+            // v1 enforces `memory.limit_in_bytes` against the charge counter
+            // `memory.usage_in_bytes`, so `limit − usage` is the headroom before the
+            // kernel reclaims, and inactive file cache is only reclaim credit on top of
+            // it. `memory.stat` is summed apart from that counter and can exceed it: an
+            // MSI slurm task cgroup read total_inactive_file=2398375936 against
+            // memory.usage_in_bytes=1192067072. A credit larger than the charge it would
+            // reclaim has no consistent reading, so the level is admitted at its headroom
+            // with no credit. Refusing the level admitted zero bytes and refused every
+            // governed allocation on that node.
+            let reclaim_credit_bytes = if inactive_file_bytes > current_bytes {
+                0
+            } else {
+                inactive_file_bytes
+            };
             inspected_levels = inspected_levels.saturating_add(1);
             let candidate = CgroupMemoryAvailability::from_consistent_counters(
                 directory.display().to_string().into_boxed_str(),
                 limit_bytes,
                 current_bytes,
-                inactive_file_bytes,
+                reclaim_credit_bytes,
                 0,
             )
             .ok_or_else(|| {
@@ -985,6 +990,38 @@ mod linux {
                 panic!("hybrid memory accounting must follow v1");
             };
             assert_eq!(observation.available_bytes(), 1280);
+        }
+
+        #[test]
+        fn v1_reclaim_credit_above_the_charge_counter_admits_the_headroom_without_credit() {
+            let fixture = Fixture::new("/tenant/leaf");
+            let v1_mount = fixture.mount.parent().unwrap().join("cgroup-memory");
+            let v1_leaf = v1_mount.join("legacy");
+            fs::create_dir_all(&v1_leaf).expect("v1 leaf");
+            fs::write(v1_leaf.join("memory.use_hierarchy"), "0\n").expect("hierarchy");
+            fs::write(v1_leaf.join("memory.limit_in_bytes"), "2048\n").expect("limit");
+            fs::write(v1_leaf.join("memory.usage_in_bytes"), "1024\n").expect("usage");
+            fs::write(
+                v1_leaf.join("memory.stat"),
+                "inactive_file 1536\ntotal_inactive_file 1536\n",
+            )
+            .expect("stat");
+            fs::write(&fixture.cgroup_file, "0::/tenant/leaf\n4:memory:/legacy\n")
+                .expect("hybrid membership");
+            let original = fs::read_to_string(&fixture.mountinfo_file).expect("mountinfo");
+            fs::write(
+                &fixture.mountinfo_file,
+                format!(
+                    "{original}31 23 0:30 / {} rw - cgroup cgroup rw,memory\n",
+                    v1_mount.display()
+                ),
+            )
+            .expect("hybrid mountinfo");
+            let CgroupMemoryObservation::V1Limited(observation) = fixture.observe() else {
+                panic!("a v1 inactive-file figure above the charge counter must still bound admission");
+            };
+            assert_eq!(observation.working_set_bytes(), 1024);
+            assert_eq!(observation.available_bytes(), 1024);
         }
     }
 }
