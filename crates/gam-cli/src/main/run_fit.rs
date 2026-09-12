@@ -1633,6 +1633,32 @@ fn refuse_survival_only_settings_without_surv(fit_config: &FitConfig) -> Result<
     Ok(())
 }
 
+/// Refuse a family that conflicts with the response. A `Surv(...)` response selects
+/// the survival fit path, which reads no family, so any family except royston-parmar
+/// would be dropped without a word; royston-parmar names that path and needs a
+/// `Surv(...)` response. Both entry points check the resolved configuration.
+fn refuse_family_mismatched_with_the_response(
+    fit_config: &FitConfig,
+    is_survival: bool,
+) -> Result<(), String> {
+    let royston_parmar = fit_config
+        .family
+        .as_deref()
+        .map(|name| name.eq_ignore_ascii_case("royston-parmar"));
+    if is_survival && royston_parmar == Some(false) {
+        return Err(
+            "--family is ignored by Surv(...) fitting; use survival formula/link options"
+                .to_string(),
+        );
+    }
+    if !is_survival && royston_parmar == Some(true) {
+        return Err(
+            "--family royston-parmar requires a Surv(entry, exit, event) response".to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_fit_args_preflight(
     args: &FitArgs,
     parsed: &ParsedFormula,
@@ -1661,6 +1687,7 @@ pub(crate) fn validate_fit_args_preflight(
     }
     if args.request.is_some() {
         let is_survival = parse_surv_response(&parsed.response)?.is_some();
+        refuse_family_mismatched_with_the_response(fit_config, is_survival)?;
         if is_survival {
             let likelihood =
                 parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
@@ -1755,20 +1782,8 @@ pub(crate) fn validate_fit_args_preflight(
         parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
     let baseline_target_raw = fit_config.baseline_target.trim().to_ascii_lowercase();
     let time_basis_raw = fit_config.time_basis.trim().to_ascii_lowercase();
-    if is_survival {
-        if !matches!(args.family, FamilyArg::Auto | FamilyArg::RoystonParmar) {
-            return Err(
-                "--family is ignored by Surv(...) fitting; use survival formula/link options"
-                    .to_string(),
-            );
-        }
-    }
+    refuse_family_mismatched_with_the_response(fit_config, is_survival)?;
     if !is_survival {
-        if args.family == FamilyArg::RoystonParmar {
-            return Err(
-                "--family royston-parmar requires a Surv(entry, exit, event) response".to_string(),
-            );
-        }
         refuse_survival_only_settings_without_surv(fit_config)?;
     }
     gam::families::fit_orchestration::validate_survival_baseline_config(

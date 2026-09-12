@@ -1611,6 +1611,70 @@ fn cli_request_document_survival_only_settings_need_a_surv_response() {
     );
 }
 
+/// A family on a `Surv(...)` response must be refused whichever entry point
+/// supplied it: the survival fit path reads no family, so the setting would be
+/// dropped without a word. The flags met that refusal in
+/// `validate_fit_args_preflight`. A `--request` document returned before it.
+#[test]
+fn cli_request_document_family_on_a_surv_response_is_refused() {
+    let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let train_path = td.path().join("surv_family.csv");
+    let request_path = td.path().join("surv_family.request.json");
+    let model_path = td.path().join("surv_family.model.json");
+    fs::write(
+        &train_path,
+        "entry,exit,event,x\n\
+         10,15,1,-0.8\n\
+         20,35,0,0.4\n\
+         40,60,1,-0.2\n\
+         80,100,0,0.7\n\
+         120,150,1,0.1\n\
+         160,220,1,-0.5\n",
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write survival csv", e));
+
+    let base = || {
+        let mut args = location_scale_fit_args(
+            train_path.clone(),
+            model_path.clone(),
+            "Surv(entry, exit, event) ~ x",
+            "1",
+        );
+        args.predict_noise = None;
+        args.survival_likelihood = None;
+        args
+    };
+
+    // Control: the flag reaches the refusal.
+    let mut flag_args = base();
+    flag_args.family = FamilyArg::Gaussian;
+    let from_flags = run_fit(flag_args)
+        .expect_err("a family on a Surv(...) response must be refused")
+        .to_string();
+    assert!(
+        from_flags.contains("is ignored by Surv(...) fitting"),
+        "unexpected refusal from flags: {from_flags}"
+    );
+
+    fs::write(
+        &request_path,
+        r#"{"schema":"gam.fit-request","schema_version":1,
+            "formula":"Surv(entry, exit, event) ~ x",
+            "config":{"family":"gaussian"}}"#,
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write fit-request document", e));
+    let mut request_args = base();
+    request_args.request = Some(request_path.clone());
+    request_args.formula_positional = None;
+    let from_request = run_fit(request_args)
+        .expect_err("a request document's family on a Surv(...) response must be refused")
+        .to_string();
+    assert!(
+        from_request.contains("is ignored by Surv(...) fitting"),
+        "a --request document's family must meet the Surv(...) refusal: {from_request}"
+    );
+}
+
 #[test]
 fn cli_surv_predict_noise_routes_to_survival_location_scale() {
     let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
