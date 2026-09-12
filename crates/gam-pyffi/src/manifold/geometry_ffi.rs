@@ -1642,11 +1642,6 @@ fn equivariant_rho<'py>(
 }
 
 #[pyfunction]
-fn equivariant_aux_enabled(aux: Option<String>) -> bool {
-    aux.is_some()
-}
-
-#[pyfunction]
 fn equivariant_rho_so2<'py>(
     py: Python<'py>,
     theta: PyReadonlyArray1<'py, f64>,
@@ -5100,7 +5095,6 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(analytic_penalty_hvp, module)?)?;
     module.add_function(wrap_pyfunction!(gumbel_schedule_tau, module)?)?;
     module.add_function(wrap_pyfunction!(smooth_threshold_gate_value_grad, module)?)?;
-    module.add_function(wrap_pyfunction!(equivariant_penalty_value, module)?)?;
     module.add_function(wrap_pyfunction!(riemannian_gradient_step, module)?)?;
     module.add_function(wrap_pyfunction!(manifold_exp_map, module)?)?;
     module.add_function(wrap_pyfunction!(manifold_exp_map_vjp, module)?)?;
@@ -5187,7 +5181,6 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(equivariant_rho, module)?)?;
-    module.add_function(wrap_pyfunction!(equivariant_aux_enabled, module)?)?;
     module.add_function(wrap_pyfunction!(equivariant_rho_so2, module)?)?;
     module.add_function(wrap_pyfunction!(equivariant_rho_so2_jvp, module)?)?;
     module.add_function(wrap_pyfunction!(equivariant_rho_so3, module)?)?;

@@ -1010,22 +1010,7 @@ See the [Manifold SAE dictionary guide](manifold-sae.md) for the narrative.
 
 ## Equivariant smooths
 
-::: gamfit.EquivariantPenalty
-    options:
-      show_root_heading: true
-      heading_level: 3
-
 ::: gamfit.GaugeCompanion
-    options:
-      show_root_heading: true
-      heading_level: 3
-
-::: gamfit.LieAtom
-    options:
-      show_root_heading: true
-      heading_level: 3
-
-::: gamfit.equivariant_smooth
     options:
       show_root_heading: true
       heading_level: 3

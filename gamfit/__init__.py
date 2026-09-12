@@ -214,10 +214,7 @@ from .identifiability import (
     identifiable_factor_fit,
 )
 from ._equivariant import (
-    EquivariantPenalty,
     GaugeCompanion,
-    LieAtom,
-    equivariant_smooth,
     gauge_companion,
     rho_so2,
     rho_so2_jvp,

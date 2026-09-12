@@ -5568,29 +5568,6 @@ fn bspline_tensor_input_location_first_derivative<'py>(
     Ok(jet.into_pyarray(py).unbind())
 }
 
-#[pyfunction(signature = (group, w, g, z, weight, ard_weight, log_bandwidth = None))]
-fn equivariant_penalty_value<'py>(
-    group: String,
-    w: PyReadonlyArray3<'py, f64>,
-    g: PyReadonlyArrayDyn<'py, f64>,
-    z: PyReadonlyArray2<'py, f64>,
-    weight: f64,
-    ard_weight: f64,
-    log_bandwidth: Option<PyReadonlyArray1<'py, f64>>,
-) -> PyResult<f64> {
-    let log_bandwidth = log_bandwidth.as_ref().map(|values| values.as_array());
-    gam::terms::analytic_penalties::equivariant_penalty::equivariant_penalty_value(
-        group.as_str(),
-        w.as_array(),
-        g.as_array(),
-        z.as_array(),
-        weight,
-        ard_weight,
-        log_bandwidth,
-    )
-    .map_err(py_value_error)
-}
-
 // ===========================================================================
 // Response-geometry transforms (simplex + sphere) and equivariant rho/jvp +
 // gauge-companion loss — rustified from gamfit/_response_geometry.py and

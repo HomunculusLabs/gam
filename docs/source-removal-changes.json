@@ -4225,5 +4225,32 @@
     ],
     "reason": "#2829 public-surface rule: no product uses the measure-jet moment tables or the anisotropic measure-jet energy form, so both modules are deleted with their tests, private helpers and constants.",
     "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 533626, /scratch.global/sauer354/pool/api2829/validate.533626.log). At the base, git grep finds neither module named by path outside basis/mod.rs's mod and pub use lines and one measure_jet_smooth.rs module-doc sentence. That sentence now points only at measure_jet_predict.rs. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "778f8a4aa5c40c8c35e4cf6384e66d9c1568c204",
+    "items": [
+      "crates/gam-pyffi/src/latent/reml_latent_fit_ffi.rs:fn:equivariant_penalty_value",
+      "crates/gam-pyffi/src/manifold/geometry_ffi.rs:fn:equivariant_aux_enabled",
+      "crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs:const:ARD_BANDWIDTH_FLOOR",
+      "crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs:const:PROJECTION_WTW_RIDGE",
+      "crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs:enum:EquivariantGroup",
+      "crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs:fn:dynamic_value",
+      "crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs:fn:equivariant_penalty_value",
+      "crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs:fn:equivariant_rotation",
+      "crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs:fn:invert_small_matrix",
+      "crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs:fn:name",
+      "crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs:fn:parse",
+      "crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs:fn:rep_dim",
+      "crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs:fn:square_matmul",
+      "tests/manifolds/misc/equivariant_lie_atom.rs:fn:argmin",
+      "tests/manifolds/misc/equivariant_lie_atom.rs:fn:bandwidth_grid",
+      "tests/manifolds/misc/equivariant_lie_atom.rs:fn:circle_angles",
+      "tests/manifolds/misc/equivariant_lie_atom.rs:fn:data_fidelity_plus_production_penalty_selects_interior_bandwidth",
+      "tests/manifolds/misc/equivariant_lie_atom.rs:fn:production_equivariant_penalty_has_no_interior_bandwidth_optimum",
+      "tests/manifolds/misc/equivariant_lie_atom.rs:fn:production_penalty_at_bandwidth",
+      "tests/manifolds/misc/equivariant_lie_atom.rs:fn:recon_loss"
+    ],
+    "reason": "#2469 and the delete-useless-public-API rule: equivariant_penalty_value computed 0.5*z*||P_perp W rho(g)||_F^2 with P_perp = I - W (W^T W + ridge I)^-1 W^T. The columns of W rho(g) are a right rotation of W's columns, so they lie in col(W) and an exact projector annihilates them. The whole projection energy was the ridge's own artifact, 0.5*z*ridge^2*tr((G + ridge I)^-1 G (G + ridge I)^-1), independent of g. The test file's comment already said the residual is zero up to the Tikhonov ridge. The only other term was an ARD log-bandwidth prior 0.5*ln(1e-3 + b^2) with a hand-picked floor. So the value pinned no equivariance and carried two arbitrary constants, PROJECTION_WTW_RIDGE = 1e-6 and ARD_BANDWIDTH_FLOOR = 1e-3. Its only product user was gamfit.EquivariantPenalty.evaluate, and nothing builds a fit from EquivariantPenalty, LieAtom or equivariant_smooth: no descriptor, payload or Rust decoder consumes them, and no test calls them. Deleted together: the gam-terms function with every helper that served only it (EquivariantGroup and its name/rep_dim/parse, dynamic_value, invert_small_matrix, square_matmul, equivariant_rotation, both constants); its pyffi shim, registration and capability name; the equivariant_aux_enabled shim that only equivariant_smooth called; the Python EquivariantPenalty, LieAtom and equivariant_smooth with their docs entries; and the two integration tests that pinned the ridge artifact's bandwidth behaviour for #1260, with their helpers. gauge_companion_loss, GaugeCompanion, gauge_companion and the rho shims stay, because examples/partial_supervision uses the companion.",
+    "evidence": "git grep 'EquivariantPenalty\\|equivariant_smooth\\|LieAtom' at the base over gamfit, crates, src, tests, examples, docs and bench finds only gamfit/_equivariant.py, gamfit/__init__.py and docs/api-reference.md, plus doc text in the test file. git grep equivariant_penalty_value finds only the gam-terms declaration, the pyffi shim with its registration and capability string, gamfit/_equivariant.py and tests/manifolds/misc/equivariant_lie_atom.rs. git grep equivariant_aux_enabled finds only its declaration, its registration and gamfit/_equivariant.py's equivariant_smooth. git grep -c -w over *.rs finds EquivariantGroup, invert_small_matrix, square_matmul, equivariant_rotation and rep_dim only in equivariant_penalty.rs. dynamic_value also appears in gam-models slope_geometry.rs as an unrelated local of that name. The test helpers circle_angles, bandwidth_grid, recon_loss, argmin and production_penalty_at_bandwidth were used only by the two deleted tests. The item list applies source_removal_guard.py's ITEM regex by hand. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
   }
 ]

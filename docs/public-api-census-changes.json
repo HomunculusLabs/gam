@@ -1642,5 +1642,13 @@
     },
     "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. gam-terms' measure_jet_moments.rs and measure_jet_anisotropy.rs are whole modules with no user outside their own files and basis/mod.rs's pub use lines. No product uses any item in either, and their tests exercise only these modules, so both files are deleted.",
     "evidence": "restored_consumers_2829.py at d8f6ef9be (MSI job 527977) scores accumulate_moment_table, jet_sufficient_stats, merge_moment_tables and the two measure_jet_anisotropy_energy_form functions as test_only. At the base, git grep -w over crates, src, tests, examples, python and bench finds MeasureJetMomentTable, MeasureJetJetStats, recenter_moment_table, MeasureJetAnisotropyJets, LIndex and lower_triangular_indices only in their own file and in basis/mod.rs. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 533626, /scratch.global/sauer354/pool/api2829/validate.533626.log)."
+  },
+  {
+    "base": "778f8a4aa5c40c8c35e4cf6384e66d9c1568c204",
+    "removed": {
+      "crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs::equivariant_penalty_value": 1
+    },
+    "reason": "#2469 and the delete-useless-public-API rule: equivariant_penalty_value's projection energy is identically zero for an exact projector, because W rho(g) lies in col(W). Its value was the 1e-6 ridge's artifact plus an ARD prior with a 1e-3 floor. Its only product user was gamfit.EquivariantPenalty.evaluate, which no fit consumes. The function, its shim and the Python surface are deleted together.",
+    "evidence": "public_api_census.py's public_functions predicate over this diff's removed hunks yields one pub fn, crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs::equivariant_penalty_value. gauge_companion_loss, the file's other pub fn, is unchanged. The deleted pyffi shims equivariant_penalty_value and equivariant_aux_enabled are private."
   }
 ]

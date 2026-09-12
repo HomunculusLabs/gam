@@ -1,43 +1,20 @@
-"""LieAtom / EquivariantPenalty / gauge_companion — thin FFI shims.
+"""SO(2)/SO(3) representations and the gauge companion — thin FFI shims.
 
-The numerical work (SO(2)/SO(3) representations, their JVPs, commutator
-penalty, gauge-companion HSV/RGB/LCh loss) lives in `gam-pyffi`. This module
-hosts the dataclass surface that REML's analytic-penalty machinery consumes,
-plus a one-shot `equivariant_smooth` constructor.
+The numerical work (SO(2)/SO(3) representations, their JVPs, and the
+gauge-companion HSV/RGB/LCh loss) lives in `gam-pyffi`.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, ClassVar, Literal
+from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
 from ._binding import rust_module
-from .smooth import Smooth
-from ._penalties import _validate_weight, ScalarWeightSchedule
 
 
 GroupName = Literal["SO2", "SO3", "R1", "Trivial"]
 AuxName = Literal["HSV", "RGB", "LCh"]
-
-
-def _scalar_weight(weight: float | ScalarWeightSchedule, name: str) -> float:
-    # allow-list (a): FFI input validation.
-    if not isinstance(weight, (int, float)):
-        raise TypeError(f"{name} must be a scalar for direct evaluation")
-    value = float(weight)
-    # allow-list (a): FFI input validation.
-    if not np.isfinite(value) or value <= 0.0:
-        raise ValueError(f"{name} must be finite and > 0, got {value}")
-    return value
-
-
-def _nonnegative_scalar(value: float, name: str) -> float:
-    out = float(value)
-    # allow-list (a): FFI input validation.
-    if not np.isfinite(out) or out < 0.0:
-        raise ValueError(f"{name} must be finite and >= 0, got {out}")
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -91,71 +68,6 @@ def rho(group: GroupName, g: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# LieAtom Smooth (LatentBasisKind extension)
-# ---------------------------------------------------------------------------
-
-@dataclass(slots=True)
-class LieAtom(Smooth):
-    """A Lie-group atom in the additive-decoder layer.
-
-    Forward (per atom a, sample n):
-        x̂_n  +=  ρ(g_a(z_n)) · W_a · z_a
-
-    REML jointly selects (λ_eq, group-head log_bandwidth).
-    """
-    group: GroupName = "SO2"
-    n_atoms: int = 64
-    bandwidth_init: float = 0.0
-
-    # LieAtom is a config carrier for the additive Lie-decoder layer; it
-    # does not carry its own basis-evaluator surface (the Rust decoder
-    # consumes the dataclass directly). Empty set is the honest contract.
-    SUPPORTED_BACKENDS: ClassVar[frozenset[str]] = frozenset()
-
-
-# ---------------------------------------------------------------------------
-# EquivariantPenalty (AnalyticPenalty)
-# ---------------------------------------------------------------------------
-
-@dataclass
-class EquivariantPenalty:
-    """½ ‖[ρ(g), W] z‖² commutator residual + per-group bandwidth ARD."""
-    target: str | int
-    weight: float | ScalarWeightSchedule = 1.0
-    ard_weight: float = 1e-3
-    group: GroupName = "SO2"
-    _weight_schedule: dict[str, Any] | None = field(default=None, init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        _validate_weight(self.weight, "EquivariantPenalty.weight")
-        _nonnegative_scalar(self.ard_weight, "EquivariantPenalty.ard_weight")
-
-    def __repr__(self) -> str:
-        return (f"EquivariantPenalty(target={self.target!r}, weight={self.weight!r}, "
-                f"ard_weight={self.ard_weight!r}, group={self.group!r})")
-
-    def evaluate(
-        self,
-        W: np.ndarray,
-        g: np.ndarray,
-        z: np.ndarray,
-        log_bandwidth: np.ndarray | None = None,
-    ) -> float:
-        return float(
-            rust_module().equivariant_penalty_value(
-                self.group,
-                np.asarray(W, dtype=np.float64),
-                np.asarray(g, dtype=np.float64),
-                np.asarray(z, dtype=np.float64),
-                _scalar_weight(self.weight, "EquivariantPenalty.weight"),
-                _nonnegative_scalar(self.ard_weight, "EquivariantPenalty.ard_weight"),
-                # allow-list (a): FFI input marshaling.
-                None if log_bandwidth is None else np.asarray(log_bandwidth, dtype=np.float64),
-            )
-        )
-
-
-# ---------------------------------------------------------------------------
 # gauge_companion — auxiliary-supervised gauge-fix recipe as a one-shot helper
 # ---------------------------------------------------------------------------
 
@@ -192,28 +104,8 @@ def gauge_companion(aux: AuxName = "HSV", d_aux: int = 3, weight: float = 1.0,
                           aux_values=aux_values)
 
 
-def equivariant_smooth(
-    group: GroupName = "SO2",
-    aux: AuxName | None = "HSV",
-    n_atoms: int = 128,
-    weight: float = 1.0,
-    ard_weight: float = 1e-3,
-    name: str = "lie",
-) -> tuple[LieAtom, EquivariantPenalty, GaugeCompanion | None]:
-    """Construct (LieAtom, EquivariantPenalty[, GaugeCompanion]) in one call."""
-    atom = LieAtom(name=name, group=group, n_atoms=n_atoms)
-    pen = EquivariantPenalty(target=name, weight=weight, ard_weight=ard_weight, group=group)
-    gc = (
-        lambda: None,
-        lambda: gauge_companion(aux=aux),
-    )[rust_module().equivariant_aux_enabled(aux)]()
-    return atom, pen, gc
-
-
 __all__ = [
     "GroupName",
     "rho", "rho_so2", "rho_so2_jvp", "rho_so3", "rho_so3_jvp",
-    "LieAtom", "EquivariantPenalty",
     "GaugeCompanion", "gauge_companion",
-    "equivariant_smooth",
 ]

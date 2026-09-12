@@ -664,7 +664,6 @@ fn build_info(py: Python<'_>) -> PyResult<Py<PyDict>> {
             "gaussian_reml_fit_latent_backward",
             "glm_reml_fit_latent",
             "glm_reml_fit_latent_backward",
-            "equivariant_penalty_value",
             "_block_diag",
             "tierney_kadane_normalized_score",
             "gaussian_reml_fit_formula_table",
