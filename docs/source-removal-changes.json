@@ -4747,5 +4747,15 @@
     ],
     "reason": "#2469: duchon_pure_closed_form_pair_block_cpd_adequate used LOG_EPS = 1e-12 to decide whether beta = 4(p+s) - 2q - d sat on an even integer 2n (the log case, CPD order n + 1) or not (CPD order ceil((beta+1)/2)). At beta = 2n the power formula already gives ceil(n + 1/2) = n + 1, and at beta = 2n + delta with |delta| < 1e-12 it gives the same n + 1. The tolerance never changed a verdict, so the gate is the single expression p_order >= ceil((beta+1)/2).",
     "evidence": "git grep -w LOG_EPS at the base finds this file-local declaration in matern_kernel.rs and two unrelated function-local declarations of the same name in crates/gam-terms/src/basis/closed_form_penalty.rs (riesz_kernel_value and riesz_block_radial_derivatives), which are untouched. The only caller, matern_kernel.rs:2686, consumes the boolean verdict. The doc's tripwires evaluate the same under the single formula: d=8, p=2, s=3.5 gives beta 12 and 10, orders 7 and 6; TPS d=2, p=2, s=0, q=2 gives beta 2, order 2. The item list applies source_removal_guard.py's ITEM regex by hand. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "495bac02adad04afe2777c6cbe25ca7977d7c3c8",
+    "items": [
+      "crates/gam-geometry/src/manifolds/constant_curvature.rs:fn:distance_batch",
+      "crates/gam-geometry/src/manifolds/constant_curvature.rs:fn:log_map_kappa_jet",
+      "crates/gam-geometry/src/manifolds/constant_curvature.rs:fn:t0x4"
+    ],
+    "reason": "#2829 public-surface rule: no product uses ConstantCurvature::distance_batch or log_map_kappa_jet. distance_batch's SIMD series helper t0x4 loses its only caller and goes with it.",
+    "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 537318, /scratch.global/sauer354/pool/api2829/validate.537318.log). The orphan cascade was closed to a fixed point (t0x4). log_map_kappa_jet leaves gam-geometry's lib.rs and manifolds/mod.rs pub use lines. curvature_estimand.rs's design-seam module-doc section, and gam-terms constant_curvature_smooth.rs's 'Available but not yet consumed' bullet, described only this function and are removed. Compile is covered by the lead's shared tip check."
   }
 ]

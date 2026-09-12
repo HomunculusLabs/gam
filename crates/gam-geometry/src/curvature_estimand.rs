@@ -1,6 +1,6 @@
 //! Curvature-as-an-estimand: the inference layer on top of the κ-jets.
 //!
-//! #944 stage 3. The κ-jets (`distance_kappa_jet` / `log_map_kappa_jet`) and
+//! #944 stage 3. The κ-jet `distance_kappa_jet` and
 //! the analytic Jacobi-field `exp_map_vjp` for the
 //! `ConstantCurvature` chart are landed and
 //! FD-gated. This module turns the fitted curvature `κ̂` from "we chose
@@ -22,18 +22,6 @@
 //! profile-likelihood CI walk and the interior-point κ=0 LR test. None of the
 //! routines here re-enter the inner fit; they only evaluate the `V_p` the caller
 //! provides.
-//!
-//! ## The design seam
-//!
-//! When `ConstantCurvature` becomes a smooth term, its design block `X(κ)` is
-//! built from geodesic normal coordinates `log_{x̄}(yᵢ)` of the latent points
-//! about a base `x̄` (the intrinsic-S² Wahba smooth is the structural template).
-//! The single quantity whose κ-movement the outer gradient consumes is therefore
-//! `∂ log_{x̄}(y)/∂κ` (and `∂²/∂κ²` for the exact Wald curvature). The κ-jet
-//! `log_map_kappa_jet` returns that coordinate with both κ-derivatives, and the
-//! triple feeds the outer assembly's ext-coord channel as the Matérn-κ basis
-//! hyper-derivatives do. κ then optimises as one more signed ψ-coordinate; no
-//! new outer machinery is introduced.
 
 use super::closure_family::inv_std_normal;
 

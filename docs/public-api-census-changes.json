@@ -1878,5 +1878,14 @@
     },
     "reason": "#2899 group-A sweep: gam_gpu root wrappers try_fast_ab, try_fast_av and try_fast_atv had no caller. The linalg_dispatch kernels they forwarded to survive and are reached through the gam_linalg gpu_hook dispatch.",
     "evidence": "public_api_census.py --base f79f1c486 --head 896f09f22 reports exactly these three identities (/scratch.global/sauer354/pool/prune-api-a/slice10.census.json)."
+  },
+  {
+    "base": "495bac02adad04afe2777c6cbe25ca7977d7c3c8",
+    "removed": {
+      "crates/gam-geometry/src/manifolds/constant_curvature.rs::distance_batch": 1,
+      "crates/gam-geometry/src/manifolds/constant_curvature.rs::log_map_kappa_jet": 1
+    },
+    "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. ConstantCurvature::distance_batch and log_map_kappa_jet are restored-in-place gam-geometry identities with no caller in any product, test or example. Batch 9bb88031f deleted log_map_kappa_jet's last production caller, design_coord_kappa_derivative.",
+    "evidence": "restored_consumers_2829.py at a39a27a17 (MSI job 536241, /scratch.global/sauer354/pool/api2829/consumers.a39a27a17e9346a0b7039f4f25996837a9fe3a52.rows.tsv) scores log_map_kappa_jet as test_only. It scores distance_batch as python_build_or_rename_only, because gam-pyffi imports poincare's distance_batch, a different function. At the base, git grep -F '.distance_batch(' finds no method call, and git grep -w log_map_kappa_jet finds only its declaration, two pub use lines and doc mentions. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 537318, /scratch.global/sauer354/pool/api2829/validate.537318.log)."
   }
 ]
