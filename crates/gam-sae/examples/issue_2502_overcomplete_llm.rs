@@ -614,7 +614,8 @@ fn main() -> Result<(), String> {
         println!(
             "[a5] arm={} epoch {}/{} train_ev={:.6} gamma={:.6} dead={} accepted_births={} \
              gamma_residual={:.3e} frame_residual={:.3e} displacement={:.3e} gradient={:.3e} \
-             binding_block={:?} binding_rows={} blocks_above_tolerance={:?} elapsed={:.1}s",
+             binding_block={:?} binding_rows={} blocks_above_tolerance={:?} \
+             median_frame_residual={:.3e} rerouted_rows={:?} admitted_blocks={:.3} elapsed={:.1}s",
             args.arm,
             epoch + 1,
             args.epochs,
@@ -629,6 +630,9 @@ fn main() -> Result<(), String> {
             stats.frame_binding_block,
             stats.frame_binding_block_rows,
             stats.frame_blocks_above_tolerance,
+            stats.frame_residual_median,
+            stats.rerouted_rows,
+            stats.mean_admitted_blocks,
             started.elapsed().as_secs_f64(),
         );
         epoch_rows.push(json!({
@@ -644,6 +648,9 @@ fn main() -> Result<(), String> {
             "frame_binding_block": stats.frame_binding_block,
             "frame_binding_block_rows": stats.frame_binding_block_rows,
             "frame_blocks_above_tolerance": stats.frame_blocks_above_tolerance,
+            "frame_residual_median": stats.frame_residual_median,
+            "rerouted_rows": stats.rerouted_rows,
+            "mean_admitted_blocks": stats.mean_admitted_blocks,
             "converged": stats.converged,
             "seconds": started.elapsed().as_secs_f64(),
         }));

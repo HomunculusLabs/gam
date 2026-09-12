@@ -142,6 +142,22 @@ fn block_row_postings(codes: &[RowBlockCode], blocks: usize) -> Vec<Vec<(usize, 
     postings
 }
 
+/// Whether two codes admit the same set of blocks, in any slot order.
+fn same_admitted_blocks(left: &RowBlockCode, right: &RowBlockCode) -> bool {
+    let admitted = |code: &RowBlockCode| {
+        let mut blocks: Vec<u32> = code
+            .blocks
+            .iter()
+            .zip(&code.gates)
+            .filter(|(_, gate)| **gate != 0.0)
+            .map(|(block, _)| *block)
+            .collect();
+        blocks.sort_unstable();
+        blocks
+    };
+    admitted(left) == admitted(right)
+}
+
 /// One selected row's contribution to its block's tied projector moments over
 /// `W = [U, D]`: `coupling += v (Wᵀx)ᵀ + x (Wᵀv)ᵀ` and `data_cross += x (Wᵀx)ᵀ`,
 /// where `v = k P_g x - Σ_h P_h x` is formed from the row's code `w = Uᵀx` and its
@@ -295,6 +311,19 @@ pub struct BlockEpochStats {
     /// `tolerance.max(STORED_FRAME_RESOLUTION)`; `None` when no frame step was
     /// formed. It tells one slow block apart from a broadly unconverged dictionary.
     pub frame_blocks_above_tolerance: Option<usize>,
+    /// Median over routed blocks of each block's own frame residual, the larger
+    /// of its displacement and its normalized gradient (`f64::INFINITY` when no
+    /// frame step was formed). Against [`Self::frame_residual`] it tells a broadly
+    /// unconverged dictionary from a tail of slow blocks.
+    pub frame_residual_median: f64,
+    /// Rows whose admitted block set differed between a staged frame proposal
+    /// and its baseline in this pass's paired routing; `None` on a pass that
+    /// adjudicated no frame trial. The frame step holds supports fixed, so these
+    /// rows are the support change it cannot see (#2502).
+    pub rerouted_rows: Option<usize>,
+    /// Mean admitted blocks per row this pass, at most `k`: the per-row count
+    /// the simultaneous-update majorizer bounds by `k`.
+    pub mean_admitted_blocks: f64,
     /// Whether EV, gamma and frame-projector residuals meet the tolerance,
     /// with no accepted or pending block birth.
     pub converged: bool,
@@ -336,6 +365,9 @@ struct PendingFrameTrial {
     baseline_rows: usize,
     baseline_usage: Vec<usize>,
     baseline_second: Vec<Array2<f64>>,
+    /// Rows whose admitted block set differs between the proposal and the
+    /// baseline on the paired pass.
+    rerouted_rows: usize,
 }
 
 /// Resumable state for a streaming block-sparse fit. Construct with [`Self::new`]
@@ -363,6 +395,7 @@ pub struct BlockSparseStreamState {
     col_sumsq: Vec<f64>,
     rss: f64,
     row_count: usize,
+    admitted_slots: usize, // admitted (row, block) pairs this pass
     reservoir: ResidualReservoir,
 
     // ---- cross-epoch state ----
@@ -474,6 +507,7 @@ impl BlockSparseStreamState {
             col_sumsq: vec![0.0; p],
             rss: 0.0,
             row_count: 0,
+            admitted_slots: 0,
             reservoir: ResidualReservoir::new(cap),
             prev_ev: f64::NEG_INFINITY,
             last_ev: f64::NEG_INFINITY,
@@ -550,6 +584,7 @@ impl BlockSparseStreamState {
             col_sumsq: vec![0.0; p],
             rss: 0.0,
             row_count: 0,
+            admitted_slots: 0,
             reservoir: ResidualReservoir::new(cap),
             prev_ev: f64::NEG_INFINITY,
             last_ev: f64::NEG_INFINITY,
@@ -661,6 +696,7 @@ impl BlockSparseStreamState {
                 .transpose()?;
             let projected = project_coded_rows(rows, self.decoder.view(), &codes, b, gamma);
             let postings = block_row_postings(&codes, self.g);
+            self.admitted_slots += postings.iter().map(Vec::len).sum::<usize>();
 
             let columns_per_worker = p.div_ceil(rayon::current_num_threads()).max(1);
             self.col_sum
@@ -850,6 +886,11 @@ impl BlockSparseStreamState {
                         *usage += entries.len();
                     });
                 pending.baseline_rows += rows.nrows();
+                pending.rerouted_rows += codes
+                    .iter()
+                    .zip(baseline_codes)
+                    .filter(|(candidate, baseline)| !same_admitted_blocks(candidate, baseline))
+                    .count();
             }
             self.row_count += rows.nrows();
             // Every completed minibatch leaves coherent accumulated state,
@@ -900,7 +941,9 @@ impl BlockSparseStreamState {
             tss += self.col_sumsq[c] - self.col_sum[c] * self.col_sum[c] / n;
         }
         let mut rejected_frame = false;
+        let mut rerouted_rows = None;
         if let Some(mut trial) = self.pending_frame.take() {
+            rerouted_rows = Some(trial.rerouted_rows);
             if trial.baseline_rows != self.row_count {
                 return Err(format!(
                     "BlockSparseStream frame trial saw {} candidate rows but {} baseline rows",
@@ -942,6 +985,7 @@ impl BlockSparseStreamState {
                         baseline_second: (0..self.g)
                             .map(|_| Array2::<f64>::zeros((b, b)))
                             .collect(),
+                        rerouted_rows: 0,
                     });
                 }
                 rejected_frame = true;
@@ -997,6 +1041,7 @@ impl BlockSparseStreamState {
         let mut frame_binding_block = None;
         let mut frame_binding_block_rows = 0usize;
         let mut frame_blocks_above_tolerance = None;
+        let mut frame_residual_median = f64::INFINITY;
         let frame_bar = self.config.tolerance.max(STORED_FRAME_RESOLUTION);
         if !rejected_birth && !rejected_frame {
             // (γ) closed-form shared scalar from the accumulated least-squares.
@@ -1114,7 +1159,17 @@ impl BlockSparseStreamState {
             frame_binding_block = binding.map(|(block, _)| block);
             frame_binding_block_rows = binding.map_or(0, |(block, _)| self.usage[block]);
             frame_blocks_above_tolerance = Some(above);
+            let mut routed: Vec<f64> = displacement
+                .iter()
+                .zip(&gradient)
+                .zip(&self.usage)
+                .filter(|(_, rows)| **rows > 0)
+                .map(|((&moved, &tangent), _)| moved.max(tangent))
+                .collect();
+            routed.sort_by(f64::total_cmp);
+            frame_residual_median = routed.get(routed.len() / 2).copied().unwrap_or(0.0);
         }
+        let mean_admitted_blocks = self.admitted_slots as f64 / self.row_count as f64;
         let ev = crate::k_selection::explained_variance_within_band(
             self.rss,
             tss,
@@ -1161,6 +1216,7 @@ impl BlockSparseStreamState {
                     baseline_rows: 0,
                     baseline_usage: vec![0; self.g],
                     baseline_second: (0..self.g).map(|_| Array2::<f64>::zeros((b, b))).collect(),
+                    rerouted_rows: 0,
                 });
             }
         }
@@ -1203,6 +1259,9 @@ impl BlockSparseStreamState {
             frame_binding_block,
             frame_binding_block_rows,
             frame_blocks_above_tolerance,
+            frame_residual_median,
+            rerouted_rows,
+            mean_admitted_blocks,
             converged,
             epoch,
             decoder_solve_stats,
@@ -1283,6 +1342,7 @@ impl BlockSparseStreamState {
         }
         self.rss = 0.0;
         self.row_count = 0;
+        self.admitted_slots = 0;
         self.reservoir.clear();
     }
 
