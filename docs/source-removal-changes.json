@@ -4034,5 +4034,13 @@
     ],
     "reason": "SPEC rule 5 (#2901 V6). The t2 separable tensor penalty built every block from Euclidean range/null projectors of each margin's penalty, which measure a margin's components by their coefficients. Each block now takes margin j through its roughness S̃_j or through the Gram-weighted mass of its null-space component, both functionals of the margin's functions. The projector struct, its builder and the projector_from_columns helper lose their only caller and are deleted. The replacement builder and struct are private.",
     "evidence": "At the base, git grep -w outside the generated tools/codebase-city bundle finds tensor_margin_range_null_projectors, projector_from_columns and TensorMarginRangeNullProjectors only in crates/gam-terms/src/smooth/term_specs.rs: their declarations, projector_from_columns' two calls in tensor_margin_range_null_projectors, and that function's one call in the t2 Separable branch, which this change replaces. No test, doc or other crate names them. tests/basis_smooth/smooths/t2_tensor_penalty_decomposition.rs asserts only the t2 penalty sources and dimensions, which are unchanged. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "7a1df648c76643950791449e4a021f0877968764",
+    "items": [
+      "crates/gam-sae/src/sparse_dict/update.rs:const:DEAD_DENOM"
+    ],
+    "reason": "#2469: DEAD_DENOM (1e-12) was one absolute floor serving two different questions, so it was wrong for any data scale but one. As an exact-zero test it meant: a dormant decoder row, an atom that never fired, an isolated 0/0 solve, or a zero right-hand-side column. Those checks now compare with 0 exactly, and the PCG lower eigenvalue bound needs no floor, because kappa = infinity already caps CG at its exact m steps. As a revival floor it meant: a residual row already reconstructed. That test is now the row's own rounding energy (residual_rounding_energy): gamma_k*(||x|| + reconstruction mass), squared, with k the f32 or f64 operations that formed each entry.",
+    "evidence": "git grep -n DEAD_DENOM at the base finds the declaration at crates/gam-sae/src/sparse_dict/update.rs:2227 and uses only in update.rs (decoder_fixed_point_residual, routability_gate_decisions, revive_dead_atoms, solve_decoder_recycled, the PCG kappa bound, live columns), stream.rs (import, revive), residual_reservoir.rs (import, offer) and block_stream.rs (import, birth proposal). Every use is replaced in this change, and no test names it. Nothing here was compiled or run locally (user directive); compile is covered by the lead's shared tip check."
   }
 ]

@@ -39,10 +39,10 @@
 //! quiescent.
 
 use super::scoring::TileScorer;
-use super::residual_reservoir::ResidualReservoir;
+use super::residual_reservoir::{ResidualReservoir, residual_rounding_energy};
 use super::update::{
-    DEAD_DENOM, DecoderNormalEq, DecoderRecycleSpace, DecoderSolveStats, route_and_code_all,
-    seed_decoder, solve_decoder_with_routability_gate_recycled, unit_norm_rows,
+    DecoderNormalEq, DecoderRecycleSpace, DecoderSolveStats, route_and_code_all, seed_decoder,
+    solve_decoder_with_routability_gate_recycled, unit_norm_rows,
 };
 use super::{ScoreRouteStats, SparseDictConfig};
 use ndarray::{Array2, ArrayView2};
@@ -218,20 +218,26 @@ impl SparseDictStreamState {
         let mut shard_rss = 0.0f64;
         for (r, code) in codes.iter().enumerate() {
             let xi = shard.row(r);
+            let mut row_energy = 0.0f64;
             for c in 0..self.p {
                 let v = xi[c] as f64;
                 self.col_sum[c] += v;
                 self.col_sumsq[c] += v * v;
+                row_energy += v * v;
             }
             let mut residual = vec![0.0f32; self.p];
             for c in 0..self.p {
                 residual[c] = xi[c];
             }
+            let mut live_codes = 0usize;
+            let mut code_mass = 0.0f64;
             for j in 0..code.indices.len() {
                 let cj = code.codes[j];
                 if cj == 0.0 {
                     continue;
                 }
+                live_codes += 1;
+                code_mass += f64::from(cj).abs();
                 self.alive_mark(code.indices[j] as usize);
                 let drow = self.decoder.row(code.indices[j] as usize);
                 for c in 0..self.p {
@@ -243,7 +249,16 @@ impl SparseDictStreamState {
                 norm2 += residual[c] as f64 * residual[c] as f64;
             }
             shard_rss += norm2;
-            self.reservoir.offer(norm2, base_index + r as u64, residual);
+            // The decoder rows are unit-normed, so `Σ_j |c_j|` is the reconstruction
+            // mass, and each live code costs one f32 product and one subtraction.
+            let rounding_energy = residual_rounding_energy(
+                f64::from(f32::EPSILON) / 2.0,
+                2 * live_codes,
+                row_energy.sqrt(),
+                code_mass,
+            );
+            self.reservoir
+                .offer(norm2, rounding_energy, base_index + r as u64, residual);
         }
 
         self.rss += shard_rss;
@@ -367,10 +382,8 @@ impl SparseDictStreamState {
             if t >= ranked.len() {
                 break; // one atom per distinct row this epoch
             }
+            // The reservoir admits only rows that clear their rounding energy.
             let src = ranked[t];
-            if src.norm2 <= DEAD_DENOM {
-                break; // remaining rows are already reconstructed
-            }
             let mut dst = self.decoder.row_mut(atom);
             for c in 0..self.p {
                 dst[c] = src.residual[c];

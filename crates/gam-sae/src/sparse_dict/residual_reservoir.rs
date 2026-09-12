@@ -8,9 +8,28 @@
 //! atoms) and `k_aux · b` for block births. Peak memory is `cap × P` f32 —
 //! never `N × K`.
 
-use super::update::DEAD_DENOM;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+
+/// Squared norm at or below which a residual row `x − Σ_t w_t·d_t` is rounding
+/// rather than structure. Each entry rounds by at most `γ_k` (at `unit_roundoff`,
+/// over the `k = rounded_operations` operations that formed it) of
+/// `|x_c| + Σ_t |w_t·d_{tc}|`, and by the triangle inequality those bounds have
+/// Euclidean norm at most `γ_k·(‖x‖ + Σ_t |w_t|·‖d_t‖)`, which the caller passes
+/// as `row_norm + reconstruction_mass`.
+pub(super) fn residual_rounding_energy(
+    unit_roundoff: f64,
+    rounded_operations: usize,
+    row_norm: f64,
+    reconstruction_mass: f64,
+) -> f64 {
+    let scaled = rounded_operations as f64 * unit_roundoff;
+    if !(scaled < 1.0) {
+        return f64::INFINITY;
+    }
+    let band = scaled / (1.0 - scaled) * (row_norm + reconstruction_mass);
+    band * band
+}
 
 /// One candidate row: its residual vector (under the pre-refresh decoder) and
 /// the energy used to rank it. Ordered so the [`BinaryHeap`]'s max is the
@@ -60,10 +79,17 @@ impl ResidualReservoir {
         }
     }
 
-    /// Offer a row's residual to the reservoir. Rows already reconstructed (energy
-    /// at or below the dead floor) can seed nothing and are dropped.
-    pub(super) fn offer(&mut self, norm2: f64, global_index: u64, residual: Vec<f32>) {
-        if norm2 <= DEAD_DENOM {
+    /// Offer a row's residual to the reservoir. A row whose residual energy is at
+    /// or below its `rounding_energy` ([`residual_rounding_energy`]) is an exact
+    /// reconstruction to within its own arithmetic, seeds nothing, and is dropped.
+    pub(super) fn offer(
+        &mut self,
+        norm2: f64,
+        rounding_energy: f64,
+        global_index: u64,
+        residual: Vec<f32>,
+    ) {
+        if norm2 <= rounding_energy {
             return;
         }
         let row = ResidRow {

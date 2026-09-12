@@ -54,8 +54,8 @@ use super::block::{
     route_and_code_all, stable_rank_symmetric,
 };
 use super::block_frame::{STORED_FRAME_RESOLUTION, ritz_tied_frame_step, stored_projector_distance};
-use super::residual_reservoir::ResidualReservoir;
-use super::update::{DEAD_DENOM, DecoderSolveStats};
+use super::residual_reservoir::{ResidualReservoir, residual_rounding_energy};
+use super::update::DecoderSolveStats;
 use gam_linalg::faer_ndarray::with_faer_sequential;
 use ndarray::{Array2, ArrayView1, ArrayView2, Axis};
 use rayon::prelude::*;
@@ -67,6 +67,10 @@ struct RowProjection {
     rss: f64,
     gamma_num: f64,
     gamma_den: f64,
+    /// Live `(block, axis)` terms summed into `sum`.
+    live_terms: usize,
+    /// `Σ_t |w_t|`, the mass of `sum` over orthonormal frame rows.
+    projection_mass: f64,
 }
 
 fn project_coded_rows(
@@ -83,6 +87,8 @@ fn project_coded_rows(
             let p = rows.ncols();
             let mut sum = vec![0.0; p];
             let mut projection = vec![0.0; p];
+            let mut live_terms = 0usize;
+            let mut projection_mass = 0.0f64;
             for (slot, &block) in code.blocks.iter().enumerate() {
                 if code.gates[slot] == 0.0 {
                     continue;
@@ -90,6 +96,8 @@ fn project_coded_rows(
                 projection.fill(0.0);
                 let w = &code.projections[slot * b..(slot + 1) * b];
                 for (axis, &weight) in w.iter().enumerate() {
+                    live_terms += 1;
+                    projection_mass += weight.abs();
                     let atom = decoder.row(block as usize * b + axis);
                     for (value, &direction) in projection.iter_mut().zip(atom.iter()) {
                         *value += weight * direction as f64;
@@ -113,6 +121,8 @@ fn project_coded_rows(
                 rss,
                 gamma_num,
                 gamma_den,
+                live_terms,
+                projection_mass,
             }
         })
         .collect()
@@ -682,8 +692,28 @@ impl BlockSparseStreamState {
                         .zip(&projection.sum)
                         .map(|(&x, &sum)| (x as f64 - gamma as f64 * sum) as f32)
                         .collect();
-                    self.reservoir
-                        .offer(projection.rss, (self.row_count + row) as u64, residual);
+                    // Frame rows are orthonormal, so `|γ|·Σ_t |w_t|` is the
+                    // reconstruction mass. An entry costs a product and an addition per
+                    // term, an addition per block, and the scaling and subtraction: at
+                    // most `3t + 2` f64 operations.
+                    let row_norm = rows
+                        .row(row)
+                        .iter()
+                        .map(|&x| x as f64 * x as f64)
+                        .sum::<f64>()
+                        .sqrt();
+                    let rounding_energy = residual_rounding_energy(
+                        gam_linalg::roundoff::UNIT_ROUNDOFF,
+                        3 * projection.live_terms + 2,
+                        row_norm,
+                        (gamma as f64).abs() * projection.projection_mass,
+                    );
+                    self.reservoir.offer(
+                        projection.rss,
+                        rounding_energy,
+                        (self.row_count + row) as u64,
+                        residual,
+                    );
                 }
             }
 
@@ -1200,7 +1230,8 @@ impl BlockSparseStreamState {
         let p = self.p;
         let proposal = {
             let ranked = self.reservoir.ranked();
-            if ranked.len() < b || ranked[0].norm2 <= DEAD_DENOM {
+            // The reservoir admits only rows that clear their rounding energy.
+            if ranked.len() < b {
                 return false;
             }
             let mut seed = Array2::<f32>::zeros((b, p));

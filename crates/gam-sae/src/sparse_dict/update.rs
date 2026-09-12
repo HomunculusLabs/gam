@@ -271,10 +271,10 @@ fn decoder_fixed_point_residual(previous: &Array2<f32>, next: &Array2<f32>) -> f
         .map(|(left, right)| {
             let left_norm2 = left.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>();
             let right_norm2 = right.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>();
-            if left_norm2 <= DEAD_DENOM && right_norm2 <= DEAD_DENOM {
+            if left_norm2 == 0.0 && right_norm2 == 0.0 {
                 return 0.0;
             }
-            if left_norm2 <= DEAD_DENOM || right_norm2 <= DEAD_DENOM {
+            if left_norm2 == 0.0 || right_norm2 == 0.0 {
                 return 1.0;
             }
             let dot = left
@@ -2220,12 +2220,6 @@ impl DecoderRecycleSpace {
     }
 }
 
-/// An atom is "dead" this epoch when its regularised self-energy `A_kk + ρ` is
-/// at or below this floor: it never fired (and, since couplings require two
-/// non-zero codes, it is then necessarily isolated). Such atoms keep their
-/// seeded direction so a later epoch can still route rows to them.
-pub(super) const DEAD_DENOM: f64 = 1.0e-12;
-
 /// Dimensionless residual target for the f64 normal-equation solve. This is the
 /// square root of unit roundoff: below it, the residual norm is dominated by the
 /// dot products used to evaluate that norm. Crucially it is independent of the
@@ -2470,7 +2464,7 @@ pub(super) fn routability_gate_decisions(
     (0..eq.diag.len())
         .map(|atom| {
             let firings = eq.firings[atom];
-            if firings == 0 || eq.diag[atom] <= DEAD_DENOM {
+            if firings == 0 || eq.diag[atom] == 0.0 {
                 return RoutabilityGateDecision {
                     atom,
                     refresh: false,
@@ -2616,24 +2610,32 @@ fn revive_dead_atoms(
     // serial pass.
     let mut resid = Array2::<f32>::zeros((n, p));
     let mut resid_norm2 = vec![0.0f64; n];
+    let mut rounding_energy = vec![0.0f64; n];
     let decoder_view = decoder.view();
     resid
         .as_slice_mut()
         .expect("freshly allocated residual block is standard layout")
         .par_chunks_mut(p)
         .zip(resid_norm2.par_iter_mut())
+        .zip(rounding_energy.par_iter_mut())
         .enumerate()
-        .for_each(|(i, (ri, norm2))| {
+        .for_each(|(i, ((ri, norm2), rounding))| {
             let xi = x.row(i);
+            let mut row_energy = 0.0f64;
             for c in 0..p {
                 ri[c] = xi[c];
+                row_energy += xi[c] as f64 * xi[c] as f64;
             }
             let code = &codes[i];
+            let mut live_codes = 0usize;
+            let mut code_mass = 0.0f64;
             for j in 0..code.indices.len() {
                 let cj = code.codes[j];
                 if cj == 0.0 {
                     continue;
                 }
+                live_codes += 1;
+                code_mass += f64::from(cj).abs();
                 let drow = decoder_view.row(code.indices[j] as usize);
                 for c in 0..p {
                     ri[c] -= cj * drow[c];
@@ -2644,6 +2646,14 @@ fn revive_dead_atoms(
                 acc += ri[c] as f64 * ri[c] as f64;
             }
             *norm2 = acc;
+            // The decoder rows are unit-normed, so `Σ_j |c_j|` is the reconstruction
+            // mass, and each live code costs one f32 product and one subtraction.
+            *rounding = super::residual_reservoir::residual_rounding_energy(
+                f64::from(f32::EPSILON) / 2.0,
+                2 * live_codes,
+                row_energy.sqrt(),
+                code_mass,
+            );
         });
 
     // Rows ranked by descending residual energy (ties by ascending index →
@@ -2657,14 +2667,16 @@ fn revive_dead_atoms(
     });
 
     let mut revived = Vec::new();
-    for (t, &atom) in dead.iter().enumerate() {
-        if t >= n {
-            break; // one atom per distinct row this epoch
-        }
-        let row = order[t];
-        if resid_norm2[row] <= (DEAD_DENOM as f64) {
-            break; // remaining rows are already reconstructed — nothing to seed
-        }
+    // One atom per distinct row this epoch. A row inside its own rounding energy
+    // is already reconstructed and seeds nothing.
+    let mut seed_rows = order
+        .iter()
+        .copied()
+        .filter(|&row| resid_norm2[row] > rounding_energy[row]);
+    for &atom in &dead {
+        let Some(row) = seed_rows.next() else {
+            break;
+        };
         let src = resid.row(row);
         let mut dst = decoder.row_mut(atom);
         for c in 0..p {
@@ -2680,8 +2692,9 @@ fn revive_dead_atoms(
 /// Atoms are walked in ascending index order and grouped into connected
 /// components via BFS over the symmetric coupling adjacency; each component is
 /// sorted (canonical order) before solving so the result is bit-reproducible
-/// regardless of `HashMap` iteration order. Dead atoms ([`DEAD_DENOM`]) and
-/// atoms with no co-firing partner keep / take the trivial solve.
+/// regardless of `HashMap` iteration order. Atoms with no curvature
+/// (`A_kk + ρ = 0`) and atoms with no co-firing partner keep / take the trivial
+/// solve.
 fn solve_decoder_recycled(
     decoder: &mut Array2<f32>,
     eq: &DecoderNormalEq,
@@ -2738,8 +2751,9 @@ fn solve_decoder_recycled(
             stats.component_count += 1;
             stats.max_component_size = stats.max_component_size.max(1);
             let denom = eq.diag[start] + ridge;
-            if denom <= DEAD_DENOM {
-                // Dead atom: keep its seeded direction (no permanent collapse).
+            if denom == 0.0 {
+                // No data curvature and no ridge: keep its seeded direction (no
+                // permanent collapse).
                 continue;
             }
             for c in 0..p {
@@ -3110,7 +3124,9 @@ fn solve_component(
     } else {
         0.0
     };
-    let lambda_min = lambda_min_bound.max(ridge_floor).max(DEAD_DENOM);
+    // With no positive lower bound κ is infinite, and the cap below falls back to
+    // the `m` steps exact CG needs.
+    let lambda_min = lambda_min_bound.max(ridge_floor);
     let kappa_bound = (lambda_max_bound / lambda_min).max(1.0);
     stats.record_kappa_bound(kappa_bound);
     let root = kappa_bound.sqrt();
@@ -3124,11 +3140,9 @@ fn solve_component(
     let chebyshev = 0.5 * root * (2.0 * root / residual_tolerance).ln();
     let jacobi_cap = (chebyshev.max(0.0).ceil() as usize).min(m).max(1);
 
-    // Split live columns from dead ones (right-hand-side norm at/below the
-    // dead-denominator floor). The dead-column norm below is the same strict
-    // ascending fold the legacy per-column gather performed, so the live/dead
-    // split is bit-for-bit the historical one; dead columns are zeroed and —
-    // exactly as before — never enter CG or the solve statistics.
+    // Split live columns from dead ones (an exactly zero right-hand side, whose
+    // solution is zero). Dead columns are zeroed and never enter CG or the solve
+    // statistics.
     let live_columns: Vec<usize> = {
         let mut live_flags = vec![false; p];
         live_flags.par_iter_mut().enumerate().for_each(|(c, live)| {
@@ -3137,7 +3151,7 @@ fn solve_component(
                 let b = eq.b[[a, c]];
                 bnorm2 += b * b;
             }
-            *live = bnorm2.sqrt() > DEAD_DENOM;
+            *live = bnorm2 > 0.0;
         });
         for (c, &live) in live_flags.iter().enumerate() {
             if !live {
