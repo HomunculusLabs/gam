@@ -318,7 +318,7 @@ pub(crate) fn border_hessian_block(
 
 fn solve_shared_border_block(
     topology: &SharedBorderTopology,
-    mut block: Array2<f64>,
+    block: Array2<f64>,
     gradient: &Array1<f64>,
 ) -> Result<Array1<f64>, EstimationError> {
     let m = topology.border_count();
@@ -341,22 +341,6 @@ fn solve_shared_border_block(
             "per-atom shared-border block shape {:?} != expected {m}x{m}",
             block.dim()
         )));
-    }
-
-    let diag_scale = {
-        let mut acc = 0.0_f64;
-        for r in 0..m {
-            acc += block[[r, r]].abs();
-        }
-        acc / (m as f64)
-    };
-    let ridge = if diag_scale.is_finite() && diag_scale > 0.0 {
-        1e-8 * diag_scale
-    } else {
-        1e-8
-    };
-    for r in 0..m {
-        block[[r, r]] += ridge;
     }
 
     let mut g_border = Array1::<f64>::zeros(m);
@@ -385,15 +369,14 @@ fn solve_shared_border_block(
 }
 
 /// Solve the restricted coupled Newton correction on the shared-border axes:
-/// `Δρ_border = − (H_bb + ridge·I)⁻¹ · g_border`, where `H_bb` is the `m × m`
-/// border outer-Hessian block from [`border_hessian_block`] and `g_border` is
-/// the outer gradient restricted to the border axes.
+/// `Δρ_border = − H_bb⁻¹ · g_border`, where `H_bb` is the `m × m` border
+/// outer-Hessian block from [`border_hessian_block`] and `g_border` is the outer
+/// gradient restricted to the border axes.
 ///
-/// Returns a full-length ρ step that is zero off the border. A small adaptive
-/// ridge guards an indefinite/ill-conditioned border block (the border may sit
-/// where the EFS multiplicative surrogate's PSD assumption is weakest); the
-/// ridge scales with the block's diagonal magnitude so it is basis-aware and
-/// vanishes for a well-conditioned block.
+/// Returns a full-length ρ step that is zero off the border. An indefinite or
+/// singular border block is factored by the pivoted symmetric fallback, a
+/// non-finite component is zeroed by `sanitize_step`, and the whole-vector cost
+/// line search decides whether the correction is taken.
 pub(crate) fn shared_border_correction(
     topology: &SharedBorderTopology,
     operator: &Arc<dyn HessianOperator>,
