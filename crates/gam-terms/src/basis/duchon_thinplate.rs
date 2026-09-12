@@ -3535,10 +3535,15 @@ pub fn compute_greville_abscissae(
         g[j] = sum * d_inv;
     }
 
-    // Check for degeneracy (all Greville abscissae equal)
+    // All Greville abscissae equal is a degenerate knot vector. Each abscissa is a
+    // sum of `degree` knots times the rounded 1/degree, so it carries the rounding
+    // of `degree + 1` operations over at most max|t|. A spread within twice that
+    // band cannot be told apart from zero, whatever the knots' units.
     let g_min = g.iter().cloned().fold(f64::INFINITY, f64::min);
     let g_max = g.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    if (g_max - g_min) < 1e-10 {
+    let knot_scale = knot_vector.iter().fold(0.0_f64, |acc, t| acc.max(t.abs()));
+    let spread_band = 2.0 * gam_linalg::roundoff::accumulation_band(degree + 1, knot_scale);
+    if (g_max - g_min) <= spread_band {
         return Err(BasisError::DegenerateKnots);
     }
 
@@ -3591,10 +3596,12 @@ pub fn compute_geometric_constraint_transform(
         c_geom[[1, j]] = g[j];
     }
 
-    // 3. Standardize linear row for numerical conditioning
+    // 3. Standardize linear row for numerical conditioning. The abscissae spread
+    // above their rounding band (`compute_greville_abscissae` refuses less), so the
+    // centered values are not all zero and their stable norm is positive even when
+    // the squares underflow.
     let g_mean = g.mean().unwrap_or(0.0);
-    let gvar = g.iter().map(|&x| (x - g_mean).powi(2)).sum::<f64>() / (k as f64);
-    let g_std = gvar.sqrt().max(1e-10);
+    let g_std = stable_euclidean_norm(g.iter().map(|&x| x - g_mean)) / (k as f64).sqrt();
     for j in 0..k {
         c_geom[[1, j]] = (c_geom[[1, j]] - g_mean) / g_std;
     }

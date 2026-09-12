@@ -69,7 +69,7 @@ fn difference_penalty_value_is_scale_invariant_across_decades() {
     );
 
     // Stay within the range where the Greville-abscissa degeneracy guard
-    // (an absolute `g_max−g_min >= 1e-10` floor in `compute_greville_abscissae`)
+    // (a spread above the abscissae's rounding band in `compute_greville_abscissae`)
     // is satisfied, so we isolate the divided-difference NORMALIZATION rather
     // than that separate guard: widths from 1e-6 to 1e6 all clear it.
     for &c in &[1.0e-6_f64, 1.0e-3, 0.5, 7.0, 1.0e3, 1.0e6] {
