@@ -2208,7 +2208,7 @@ impl<'a> FaerArrayView<'a> {
     }
 }
 
-pub struct FaerColView<'a> {
+pub(crate) struct FaerColView<'a> {
     ptr: *const f64,
     len: usize,
     stride: isize,

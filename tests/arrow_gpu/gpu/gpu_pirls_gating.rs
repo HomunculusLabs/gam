@@ -30,7 +30,7 @@
 use faer::Side;
 use gam::construction::CanonicalPenalty;
 use gam::estimate::PenaltySpec;
-use gam::faer_ndarray::{FaerArrayView, FaerColView, factorize_symmetricwith_fallback};
+use gam::faer_ndarray::{FaerArrayView, factorize_symmetricwith_fallback};
 use gam::pirls::{PenaltyConfig, PirlsConfig, PirlsProblem, PirlsStatus, fit_model_for_fixed_rho};
 use gam::types::{
     GlmLikelihoodSpec, InverseLink, LikelihoodSpec, LogSmoothingParamsView, ResponseFamily,
@@ -90,7 +90,7 @@ fn chol_solve(a: &Array2<f64>, b: &Array1<f64>) -> Array1<f64> {
     let av = FaerArrayView::new(a);
     let factor = factorize_symmetricwith_fallback(av.as_ref(), Side::Lower)
         .expect("matrix must factorize for chol_solve");
-    let bv = FaerColView::new(b);
+    let bv = faer::Mat::<f64>::from_fn(p, 1, |i, _| b[i]);
     let sol = factor.solve(bv.as_ref());
     Array1::from_shape_fn(p, |i| sol[(i, 0)])
 }
