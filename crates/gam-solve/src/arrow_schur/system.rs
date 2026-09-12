@@ -891,6 +891,18 @@ impl ArrowSchurSystem {
         }
         assert_eq!(latent.n_obs(), self.rows.len());
         assert_eq!(latent.latent_dim(), self.d);
+        // On a flat chart (Euclidean and Circle factors only) the tangent projection is
+        // the identity, there is no connection term and no normal pinning, so the loop
+        // below leaves `g_t` and every `H_tβ` column unchanged and returns `H_tt`
+        // symmetrized (see `LatentManifold::preserves_isometry_cross_block_coherence`).
+        // Apply exactly that: the loop materializes one projected vector per `H_tβ`
+        // column of every row on every assembly only to copy it back.
+        if manifold.preserves_isometry_cross_block_coherence() {
+            for row in self.rows.iter_mut() {
+                gam_linalg::matrix::symmetrize_in_place(&mut row.htt);
+            }
+            return;
+        }
         for (i, row) in self.rows.iter_mut().enumerate() {
             let t_i = ArrayView1::from(latent.row(i));
             let gt = manifold.project_gradient_to_tangent(t_i, row.gt.view());
