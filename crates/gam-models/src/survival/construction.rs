@@ -126,7 +126,7 @@ pub struct SurvivalBaselineConfig {
 /// intercept), so the identified shape is the sole time coefficient `beta[0]` and
 /// the identified scale is the anchor itself. The fitted baseline is
 /// `shape * (log(t) - log(anchor))`.
-pub fn fitted_weibull_baseline_from_linear_time_beta(
+pub(crate) fn fitted_weibull_baseline_from_linear_time_beta(
     beta: &Array1<f64>,
     anchor: f64,
 ) -> Option<SurvivalBaselineConfig> {
@@ -488,7 +488,7 @@ pub fn parse_survival_distribution(raw: &str) -> Result<ResidualDistribution, St
     }
 }
 
-pub const fn survival_baseline_targetname(target: SurvivalBaselineTarget) -> &'static str {
+pub(crate) const fn survival_baseline_targetname(target: SurvivalBaselineTarget) -> &'static str {
     match target {
         SurvivalBaselineTarget::Linear => "linear",
         SurvivalBaselineTarget::Weibull => "weibull",
@@ -497,7 +497,7 @@ pub const fn survival_baseline_targetname(target: SurvivalBaselineTarget) -> &'s
     }
 }
 
-pub fn positive_survival_time_seed(age_exit: &Array1<f64>) -> f64 {
+pub(crate) fn positive_survival_time_seed(age_exit: &Array1<f64>) -> f64 {
     let sum = age_exit
         .iter()
         .copied()
@@ -1984,7 +1984,7 @@ pub fn resolved_survival_time_basis_config_from_build(
 /// Honored verbatim by every likelihood mode (subject to the `SURVIVAL_TIME_FLOOR`
 /// clamp that keeps `log(anchor)` finite), because a caller who names the anchor
 /// is overriding the conditioning heuristic on purpose.
-pub fn validate_survival_time_anchor_override(time_anchor: f64) -> Result<f64, String> {
+pub(crate) fn validate_survival_time_anchor_override(time_anchor: f64) -> Result<f64, String> {
     if !time_anchor.is_finite() || time_anchor < 0.0 {
         return Err(format!(
             "survival time anchor must be finite and non-negative, got {time_anchor}"
@@ -2027,7 +2027,7 @@ pub fn survival_earliest_entry_time_anchor(age_entry: &Array1<f64>) -> Result<f6
 /// exits below the median, some above) so the exit-event likelihood pins the
 /// linear trend and the seed score stays bounded. The median is chosen over the
 /// mean for robustness to the heavy right tail of survival times.
-pub fn survival_robust_interior_time_anchor(age_exit: &Array1<f64>) -> Result<f64, String> {
+pub(crate) fn survival_robust_interior_time_anchor(age_exit: &Array1<f64>) -> Result<f64, String> {
     if age_exit.is_empty() {
         return Err(
             "survival robust interior time anchor requires non-empty exit times".to_string(),
@@ -2061,7 +2061,7 @@ pub fn survival_robust_interior_time_anchor(age_exit: &Array1<f64>) -> Result<f6
 /// The threshold is the likelihood engines' own origin convention, so "this row
 /// has a delayed-entry interval" and "this dataset is left-truncated" cannot
 /// drift apart.
-pub fn survival_data_is_left_truncated(age_entry: &Array1<f64>) -> bool {
+pub(crate) fn survival_data_is_left_truncated(age_entry: &Array1<f64>) -> bool {
     age_entry
         .iter()
         .any(|&entry| entry > crate::survival::base::ENTRY_AT_ORIGIN_THRESHOLD)
@@ -2968,7 +2968,7 @@ pub fn evaluate_survival_baseline(
 ///
 /// Returns `(q(age), dq / d age)` such that `Phi(-q(age)) = exp(-H0(age))`.
 /// The derivative is `h0(t) * exp(-H0(t)) / phi(q(t))`.
-pub fn evaluate_survival_marginal_slope_baseline(
+pub(crate) fn evaluate_survival_marginal_slope_baseline(
     age: f64,
     cfg: &SurvivalBaselineConfig,
 ) -> Result<(f64, f64), String> {
@@ -3043,7 +3043,7 @@ pub struct MarginalSlopeBaselineOffsetThetaGeometry {
     pub second: Vec<Vec<(f64, f64)>>,
 }
 
-pub fn marginal_slope_baseline_offset_theta_geometry(
+pub(crate) fn marginal_slope_baseline_offset_theta_geometry(
     age: f64,
     cfg: &SurvivalBaselineConfig,
 ) -> Result<Option<MarginalSlopeBaselineOffsetThetaGeometry>, String> {
@@ -3310,7 +3310,7 @@ pub fn build_survival_baseline_offsets(
 
 /// Compute probit-survival baseline target offsets for all observations.
 /// Returns `(q_entry, q_exit, q_derivative_exit)` where `Phi(-q(t)) = exp(-H0(t))`.
-pub fn build_survival_marginal_slope_baseline_offsets(
+pub(crate) fn build_survival_marginal_slope_baseline_offsets(
     age_entry: &Array1<f64>,
     age_exit: &Array1<f64>,
     cfg: &SurvivalBaselineConfig,
@@ -3382,7 +3382,7 @@ fn validate_marginal_slope_baseline_row_geometry(
 /// constructs or mutates time designs, wiggle knots, penalties, or linear
 /// constraints. Linear baselines have no hyperparameter chart and return
 /// `None`.
-pub fn build_survival_marginal_slope_baseline_geometry(
+pub(crate) fn build_survival_marginal_slope_baseline_geometry(
     age_entry: &Array1<f64>,
     age_exit: &Array1<f64>,
     cfg: &SurvivalBaselineConfig,
@@ -3425,7 +3425,7 @@ pub fn build_survival_marginal_slope_baseline_geometry(
 ///
 /// So: when a caller HAS a θ, that θ is the authority. `cfg` still drives every
 /// row's arithmetic; only the recorded coordinates change.
-pub fn build_survival_marginal_slope_baseline_geometry_at_theta(
+pub(crate) fn build_survival_marginal_slope_baseline_geometry_at_theta(
     age_entry: &Array1<f64>,
     age_exit: &Array1<f64>,
     cfg: &SurvivalBaselineConfig,
@@ -3619,14 +3619,14 @@ impl SurvivalMarginalSlopeFrozenOffsetChart {
         self.target
     }
 
-    pub fn initial_theta(&self) -> &Array1<f64> {
+    pub(crate) fn initial_theta(&self) -> &Array1<f64> {
         &self.initial_theta
     }
 
     /// Finite domain of this frozen nonlinear chart, derived at construction by
     /// `derived_theta_domain` and owned by the chart so a joint solver and its
     /// terminal certificate cannot silently choose a different domain.
-    pub fn theta_bounds(&self) -> (&Array1<f64>, &Array1<f64>) {
+    pub(crate) fn theta_bounds(&self) -> (&Array1<f64>, &Array1<f64>) {
         (&self.lower_theta, &self.upper_theta)
     }
 
@@ -3812,7 +3812,7 @@ pub struct LatentSurvivalBaselineOffsets {
     pub unloaded_hazard_exit: Array1<f64>,
 }
 
-pub fn build_latent_survival_baseline_offsets(
+pub(crate) fn build_latent_survival_baseline_offsets(
     age_entry: &Array1<f64>,
     age_exit: &Array1<f64>,
     cfg: &SurvivalBaselineConfig,
@@ -4040,7 +4040,7 @@ pub fn build_survival_timewiggle_from_baseline(
     })
 }
 
-pub fn append_zero_tail_columns(
+pub(crate) fn append_zero_tail_columns(
     x_entry: &mut DesignMatrix,
     x_exit: &mut DesignMatrix,
     x_derivative: &mut DesignMatrix,
@@ -4239,7 +4239,7 @@ pub fn build_time_varying_survival_covariate_template(
 /// Replay a fit-time threshold/log-scale time margin from its resolved knots.
 /// Prediction and saved ALO use this path so the prediction sample can never
 /// move the spline basis by re-estimating quantile knots.
-pub fn replay_time_varying_survival_covariate_template(
+pub(crate) fn replay_time_varying_survival_covariate_template(
     age_entry: &Array1<f64>,
     age_exit: &Array1<f64>,
     time_basis: &SurvivalCovariateTimeBasis,
@@ -4292,7 +4292,7 @@ pub struct SlopeTimeMarginRows {
     pub derivative: Array2<f64>,
 }
 
-pub fn slope_time_margin_rows(
+pub(crate) fn slope_time_margin_rows(
     time_basis: &SurvivalCovariateTimeBasis,
     times: ndarray::ArrayView1<'_, f64>,
     abscissa: TimeMarginAbscissa,

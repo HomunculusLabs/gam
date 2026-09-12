@@ -175,7 +175,7 @@ impl PenaltyBlocks {
         value
     }
 
-    pub fn addhessian_inplace(&self, h: &mut Array2<f64>) {
+    pub(crate) fn addhessian_inplace(&self, h: &mut Array2<f64>) {
         for block in &self.blocks {
             if block.lambda == 0.0 {
                 continue;
@@ -1738,7 +1738,7 @@ impl WorkingModelSurvival {
         Some(LinearInequalityConstraints { a, b })
     }
 
-    pub fn monotonicity_linear_constraints(&self) -> Option<LinearInequalityConstraints> {
+    pub(crate) fn monotonicity_linear_constraints(&self) -> Option<LinearInequalityConstraints> {
         let p = self.coefficient_dim();
         if p == 0 {
             return None;
@@ -1983,7 +1983,7 @@ impl WorkingModelSurvival {
         ))
     }
 
-    pub fn from_time_covariate_inputswith_offsets(
+    pub(crate) fn from_time_covariate_inputswith_offsets(
         inputs: SurvivalTimeCovarInputs<'_>,
         offsets: Option<SurvivalBaselineOffsets<'_>>,
         penalties: PenaltyBlocks,
@@ -2068,7 +2068,7 @@ impl WorkingModelSurvival {
     /// constrained PIRLS, so the monotone I-spline baseline can adapt its
     /// wiggliness instead of being pinned at a fixed seed. `lambdas` must have
     /// one entry per penalty block.
-    pub fn set_penalty_lambdas(&mut self, lambdas: &[f64]) -> Result<(), EstimationError> {
+    pub(crate) fn set_penalty_lambdas(&mut self, lambdas: &[f64]) -> Result<(), EstimationError> {
         if lambdas.len() != self.penalties.blocks.len() {
             crate::bail_invalid_estim!(
                 "set_penalty_lambdas expects {} lambdas, got {}",
@@ -2723,7 +2723,7 @@ impl WorkingModelSurvival {
     /// Returns `(cost, ∂cost/∂ρ, resolution)`, where the resolution is the
     /// criterion's round-off band — machine precision times the sum of the
     /// magnitudes of its four additive terms (#2812).
-    pub fn unified_lamlobjective_and_rhogradient(
+    pub(crate) fn unified_lamlobjective_and_rhogradient(
         &self,
         beta: &Array1<f64>,
         state: &WorkingState,

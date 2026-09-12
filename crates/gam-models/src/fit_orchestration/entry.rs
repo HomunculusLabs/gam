@@ -171,7 +171,7 @@ pub(crate) fn marginal_slope_hints(config: &FitConfig) -> gam_runtime::resource:
 /// only when both are present and disagree is rejected as a contradiction; when
 /// neither pins `τ`, the median expectile `τ = 0.5` (the ordinary mean fit) is
 /// the default.
-pub fn expectile_tau_for_config(config: &FitConfig) -> Result<Option<f64>, WorkflowError> {
+pub(crate) fn expectile_tau_for_config(config: &FitConfig) -> Result<Option<f64>, WorkflowError> {
     let Some(raw) = config.family.as_deref() else {
         return Ok(None);
     };
@@ -1447,7 +1447,7 @@ pub fn fit_from_formula_with_notes(
 /// `Standard` request would build and discard one complete spatial basis before
 /// the real fit (#1689), duplicating construction work and peak memory on the
 /// Python path.
-pub fn fit_materialized_standard_with_notes(
+pub(crate) fn fit_materialized_standard_with_notes(
     formula: &str,
     data: &Dataset,
     config: &FitConfig,
@@ -1940,7 +1940,7 @@ fn attach_basis_adequacy(
 /// The returned [`StandardFitResult`] carries the full design / resolved spec /
 /// fit, so each caller builds its persistence payload from it exactly as it does
 /// for any other standard fit.
-pub fn fit_expectile_if_requested(
+pub(crate) fn fit_expectile_if_requested(
     formula: &str,
     data: &Dataset,
     config: &FitConfig,

@@ -26,7 +26,7 @@ impl std::fmt::Debug for FrozenCtn {
 }
 
 /// Formula-aware CTN input schema, shared by native fits and both front ends.
-pub fn recipe_columns(recipe: &CtnStage1Recipe) -> Result<BTreeSet<String>, String> {
+pub(crate) fn recipe_columns(recipe: &CtnStage1Recipe) -> Result<BTreeSet<String>, String> {
     let parsed = parse_formula(&format!("{} ~ {}", recipe.response_column, recipe.covariate_formula_rhs))
         .map_err(|error| error.to_string())?;
     let mut names = BTreeSet::from([recipe.response_column.clone()]);
@@ -84,7 +84,7 @@ fn labels(data: &EncodedDataset, column: &str) -> Result<Vec<String>, String> {
 }
 
 /// Explicit folds or seeded whole-group assignment, invariant to row ordering.
-pub fn crossfit_assignment(data: &EncodedDataset, recipe: &CtnStage1Recipe) -> Result<Vec<usize>, String> {
+pub(crate) fn crossfit_assignment(data: &EncodedDataset, recipe: &CtnStage1Recipe) -> Result<Vec<usize>, String> {
     let groups = recipe.group_column.as_deref().map(|name| labels(data, name)).transpose()?;
     let folds = if let Some(name) = recipe.fold_column.as_deref() {
         let values = labels(data, name)?;
@@ -135,7 +135,7 @@ fn project(data: &EncodedDataset, names: &BTreeSet<String>) -> Result<EncodedDat
 }
 
 /// Evaluate the saved score transform with the native observed-score evaluator.
-pub fn observed_scores(model: &FittedModel, data: ndarray::ArrayView2<'_, f64>,
+pub(crate) fn observed_scores(model: &FittedModel, data: ndarray::ArrayView2<'_, f64>,
                        columns: &HashMap<String, usize>) -> Result<Array1<f64>, String> {
     if model.predict_model_class() != PredictModelClass::TransformationNormal || model.score_transform.is_some() {
         return Err("score transformation requires one standalone fitted CTN".into());
@@ -179,7 +179,7 @@ fn scores_from_schema(transform: &FittedModel, data: ndarray::ArrayView2<'_, f64
 }
 
 /// One authoritative score read for both marginal-slope prediction families.
-pub fn latent_scores(model: &FittedModel, data: ndarray::ArrayView2<'_, f64>,
+pub(crate) fn latent_scores(model: &FittedModel, data: ndarray::ArrayView2<'_, f64>,
                      columns: &HashMap<String, usize>) -> Result<Array1<f64>, String> {
     if let Some(payload) = model.score_transform.as_ref() {
         let transform = FittedModel::from_payload((**payload).clone());
@@ -247,7 +247,7 @@ pub fn structural_inputs(formula: &str, dataset: &EncodedDataset, config: &FitCo
 }
 
 /// Fit a shared native CTN/outcome payload, or attach an externally fitted CTN.
-pub fn fit_chain(formula: String, dataset: &EncodedDataset, config: &FitConfig) -> Result<FittedModelPayload, String> {
+pub(crate) fn fit_chain(formula: String, dataset: &EncodedDataset, config: &FitConfig) -> Result<FittedModelPayload, String> {
     validate_chain_inputs(dataset, config)?;
     let columns = dataset.column_map();
     let (transform, z, folds) = if let Some(frozen) = config.frozen_ctn.as_ref() {

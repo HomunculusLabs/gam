@@ -455,7 +455,7 @@ pub struct MultinomialLogitLikelihood {
 
 impl MultinomialLogitLikelihood {
     /// Construct from the total number of classes `K ≥ 2`.
-    pub fn with_classes(total_classes: usize) -> Result<Self, EstimationError> {
+    pub(crate) fn with_classes(total_classes: usize) -> Result<Self, EstimationError> {
         if total_classes < 2 {
             crate::bail_invalid_estim!(
                 "MultinomialLogitLikelihood requires K ≥ 2 classes (got {total_classes})"
@@ -476,7 +476,7 @@ impl MultinomialLogitLikelihood {
 
     /// Total class count `K = M + 1`.
     #[inline]
-    pub fn total_classes(&self) -> usize {
+    pub(crate) fn total_classes(&self) -> usize {
         self.active_classes + 1
     }
 
@@ -493,7 +493,7 @@ impl MultinomialLogitLikelihood {
     /// reference implementation; the FFI surface and any direct
     /// matrix-free callers route through this method rather than carrying
     /// their own softmax.
-    pub fn softmax_with_baseline(eta_active: &[f64], out: &mut [f64]) {
+    pub(crate) fn softmax_with_baseline(eta_active: &[f64], out: &mut [f64]) {
         multinomial_logit_probabilities_into(eta_active, out);
     }
 

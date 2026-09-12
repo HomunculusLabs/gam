@@ -166,7 +166,7 @@ fn cache_build_block_count(n_rows: usize, chunk_rows: usize) -> usize {
 /// lives in the lower `gam-problem` crate (#1135) and the orphan rule forbids
 /// an inherent `impl` on a foreign type; the family-specific
 /// `BlockwiseFitOptions` constructor stays in gam-models (#1521).
-pub fn row_set_from_options(
+pub(crate) fn row_set_from_options(
     opts: &crate::custom_family::BlockwiseFitOptions,
     n_total: usize,
 ) -> RowSet {
@@ -870,7 +870,7 @@ pub fn build_row_kernel_cache<const K: usize>(
 /// contributes its `RowSet` HT weight (`1.0` for `All`, `1/π_i` for
 /// `Subsample`), so the sum is an unbiased estimator of the full-data
 /// Hessian–vector product.
-pub fn row_kernel_hessian_matvec<const K: usize>(
+pub(crate) fn row_kernel_hessian_matvec<const K: usize>(
     kern: &(impl RowKernel<K> + ?Sized),
     cache: &RowKernelCache<K>,
     rows: &RowSet,
@@ -911,7 +911,7 @@ pub fn row_kernel_hessian_matvec<const K: usize>(
 ///
 /// Uses cached row Hessians and the family's sparse-aware diagonal
 /// accumulation. No dense p×p matrix is formed.
-pub fn row_kernel_hessian_diagonal<const K: usize>(
+pub(crate) fn row_kernel_hessian_diagonal<const K: usize>(
     kern: &(impl RowKernel<K> + ?Sized),
     cache: &RowKernelCache<K>,
     rows: &RowSet,
@@ -1020,7 +1020,7 @@ pub fn row_kernel_hessian_dense<const K: usize>(
 /// This is the default body of [`RowKernel::hessian_dense_override`] and the
 /// dispatcher fall-through; a kernel with a BLAS-3 fast path overrides the hook
 /// and may still call this for row-sets it does not accelerate.
-pub fn row_kernel_hessian_dense_generic<const K: usize>(
+pub(crate) fn row_kernel_hessian_dense_generic<const K: usize>(
     kern: &(impl RowKernel<K> + ?Sized),
     rows: &RowSet,
     row_hessians: &[[[f64; K]; K]],
@@ -1070,7 +1070,7 @@ pub fn row_kernel_directional_derivative<const K: usize>(
 /// Default body of [`RowKernel::directional_derivative_dense_override`] and the
 /// dispatcher fall-through; a kernel with a BLAS-3 fast path overrides the hook
 /// and may still call this for row-sets it does not accelerate.
-pub fn row_kernel_directional_derivative_generic<const K: usize>(
+pub(crate) fn row_kernel_directional_derivative_generic<const K: usize>(
     kern: &(impl RowKernel<K> + ?Sized),
     rows: &RowSet,
     d_beta: &[f64],
@@ -1233,7 +1233,7 @@ pub fn row_kernel_second_directional_derivative_all_axes<const K: usize>(
 /// passes with a pullback on every row of each. The result is linear in `W`, and
 /// `W` is never factorized, so signed (and non-symmetric) weights are exact.
 /// Per-row contributions are HT-weighted.
-pub fn row_kernel_contracted_trace_hessian<const K: usize>(
+pub(crate) fn row_kernel_contracted_trace_hessian<const K: usize>(
     kern: &(impl RowKernel<K> + ?Sized),
     rows: &RowSet,
     weight: &Array2<f64>,
@@ -1328,7 +1328,7 @@ pub trait RowKernelFifth<const K: usize>: RowKernel<K> {
 /// contracts that tensor with the row Jacobian's column `J_i e_a` and pulls the
 /// K×K result back, so the row program runs once per row, not once per axis.
 /// Per-row contributions are HT-weighted.
-pub fn row_kernel_third_directional_derivative_all_axes<const K: usize>(
+pub(crate) fn row_kernel_third_directional_derivative_all_axes<const K: usize>(
     kern: &(impl RowKernelFifth<K> + ?Sized + Sync),
     rows: &RowSet,
     d_beta_u: &[f64],

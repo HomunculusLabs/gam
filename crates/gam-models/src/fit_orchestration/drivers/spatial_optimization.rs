@@ -4858,7 +4858,7 @@ pub fn constant_curvature_kappa_is_fixed(spec: &TermCollectionSpec, term_idx: us
 /// it constant, and the κ̂ it then reports is conditional on that choice. CC
 /// terms whose `length_scale=` was omitted (range free, estimated) and non-CC
 /// terms return `false`.
-pub fn constant_curvature_length_scale_is_fixed(
+pub(crate) fn constant_curvature_length_scale_is_fixed(
     spec: &TermCollectionSpec,
     term_idx: usize,
 ) -> bool {
@@ -4866,7 +4866,7 @@ pub fn constant_curvature_length_scale_is_fixed(
 }
 
 /// Indices of every constant-curvature (`curv(...)`) smooth term in `spec`.
-pub fn constant_curvature_term_indices(spec: &TermCollectionSpec) -> Vec<usize> {
+pub(crate) fn constant_curvature_term_indices(spec: &TermCollectionSpec) -> Vec<usize> {
     (0..spec.smooth_terms.len())
         .filter(|&idx| constant_curvature_term_spec(spec, idx).is_some())
         .collect()
@@ -8739,7 +8739,7 @@ fn try_exact_joint_latent_coord_optimization(
     })
 }
 
-pub fn fit_term_collectionwith_latent_coord_optimization(
+pub(crate) fn fit_term_collectionwith_latent_coord_optimization(
     data: ArrayView2<'_, f64>,
     y: Array1<f64>,
     weights: Array1<f64>,

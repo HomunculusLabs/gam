@@ -327,7 +327,7 @@ const fn default_transformation_score_pit_clip_eps() -> f64 {
 }
 
 impl TransformationScoreCalibration {
-    pub fn finite_support_pit() -> Self {
+    pub(crate) fn finite_support_pit() -> Self {
         Self {
             score_kind: TransformationScoreKind::FiniteSupportPit,
             clip_eps: TRANSFORMATION_SCORE_PIT_CLIP_EPS,
@@ -1987,7 +1987,7 @@ impl SavedLinkWiggleRuntime {
 }
 
 impl SavedBaselineTimeWiggleRuntime {
-    pub fn validate_global_monotonicity(&self) -> Result<(), FittedModelError> {
+    pub(crate) fn validate_global_monotonicity(&self) -> Result<(), FittedModelError> {
         validate_monotone_wiggle_beta_nonnegative(&self.beta, "saved baseline-timewiggle")
             .map_err(|reason| FittedModelError::PayloadCorrupt { reason })
     }
@@ -2493,7 +2493,7 @@ impl SavedCompiledFlexBlock {
     /// `correction.dot(beta)` scalar from the linear-predictor contribution
     /// rather than building a full anchor-row matrix). Equivalent to
     /// `design()` when no residual is present.
-    pub fn design_uncorrected(
+    pub(crate) fn design_uncorrected(
         &self,
         values: &Array1<f64>,
     ) -> Result<Array2<f64>, FittedModelError> {
@@ -2508,7 +2508,7 @@ impl SavedCompiledFlexBlock {
     /// row as the corresponding `values[i]`. When the runtime has no
     /// anchor residual, `anchor_rows` must have zero columns (or be
     /// `Array2::zeros((n, 0))`).
-    pub fn design_with_anchor_rows(
+    pub(crate) fn design_with_anchor_rows(
         &self,
         values: &Array1<f64>,
         anchor_rows: ndarray::ArrayView2<f64>,
@@ -2574,7 +2574,7 @@ impl SavedCompiledFlexBlock {
     /// rows at the prediction rows (concatenation of the marginal and
     /// slope design rows in component order). Returns `None` when the
     /// runtime has no anchor residual (zero-cost path).
-    pub fn anchor_correction_matrix(
+    pub(crate) fn anchor_correction_matrix(
         &self,
         n_anchor_rows: ndarray::ArrayView2<f64>,
     ) -> Result<Option<Array2<f64>>, FittedModelError> {
@@ -3995,7 +3995,7 @@ impl FittedModel {
         })
     }
 
-    pub fn saved_beta_logistic_state(&self) -> Result<Option<SasLinkState>, FittedModelError> {
+    pub(crate) fn saved_beta_logistic_state(&self) -> Result<Option<SasLinkState>, FittedModelError> {
         let payload = self.payload();
         let raw = match &payload.family_state {
             FittedFamily::Standard {
@@ -4034,7 +4034,7 @@ impl FittedModel {
         })
     }
 
-    pub fn saved_mixture_state(&self) -> Result<Option<MixtureLinkState>, FittedModelError> {
+    pub(crate) fn saved_mixture_state(&self) -> Result<Option<MixtureLinkState>, FittedModelError> {
         let payload = self.payload();
         match &payload.family_state {
             FittedFamily::Standard {
@@ -5605,7 +5605,7 @@ impl FittedModel {
     ///
     /// The null-valued paths are reported alongside serde's own message
     /// because serde names a line and column in a document nobody kept.
-    pub fn validate_persisted_form_parses_back(&self) -> Result<(), FittedModelError> {
+    pub(crate) fn validate_persisted_form_parses_back(&self) -> Result<(), FittedModelError> {
         let value =
             serde_json::to_value(self).map_err(|error| FittedModelError::PayloadCorrupt {
                 reason: format!("failed to serialize model: {error}"),
@@ -5761,7 +5761,7 @@ impl DerefMut for FittedModel {
 // Reconstruct library types from saved models
 // ---------------------------------------------------------------------------
 
-pub fn survival_baseline_config_from_model(
+pub(crate) fn survival_baseline_config_from_model(
     model: &FittedModel,
 ) -> Result<SurvivalBaselineConfig, FittedModelError> {
     let target = model.survival_baseline_target.as_deref().ok_or_else(|| {

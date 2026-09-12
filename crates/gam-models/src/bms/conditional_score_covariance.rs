@@ -292,7 +292,7 @@ impl ScoreCovarianceField {
 
     /// The covariance at `row`.
     #[inline(always)]
-    pub fn at_row(&self, row: usize) -> &MarginalSlopeCovariance {
+    pub(crate) fn at_row(&self, row: usize) -> &MarginalSlopeCovariance {
         match &self.per_row {
             None => &self.pooled,
             Some(stack) => &stack[row],
@@ -313,7 +313,7 @@ impl ScoreCovarianceField {
 
     /// Whether the covariance varies by row.
     #[inline]
-    pub fn is_conditional(&self) -> bool {
+    pub(crate) fn is_conditional(&self) -> bool {
         self.per_row.is_some()
     }
 
@@ -328,7 +328,7 @@ impl ScoreCovarianceField {
     /// Rows the field was materialised for, when it is conditional. A caller
     /// that indexes past this has mixed two samples.
     #[inline]
-    pub fn materialised_rows(&self) -> Option<usize> {
+    pub(crate) fn materialised_rows(&self) -> Option<usize> {
         self.per_row.as_ref().map(|stack| stack.len())
     }
 }

@@ -656,15 +656,15 @@ impl MonotoneWiggleFamily for BinomialLocationScaleWiggleFamily {
 }
 
 impl BinomialLocationScaleWiggleFamily {
-    pub const BLOCK_T: usize = 0;
+    pub(crate) const BLOCK_T: usize = 0;
     pub const BLOCK_LOG_SIGMA: usize = 1;
-    pub const BLOCK_WIGGLE: usize = 2;
+    pub(crate) const BLOCK_WIGGLE: usize = 2;
 
-    pub fn parameternames() -> &'static [&'static str] {
+    pub(crate) fn parameternames() -> &'static [&'static str] {
         &["threshold", "log_sigma", "wiggle"]
     }
 
-    pub fn parameter_links() -> &'static [ParameterLink] {
+    pub(crate) fn parameter_links() -> &'static [ParameterLink] {
         &[
             ParameterLink::InverseLink,
             ParameterLink::Log,

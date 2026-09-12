@@ -5,14 +5,14 @@
 use super::*;
 
 impl BinomialLocationScaleFamily {
-    pub const BLOCK_T: usize = 0;
+    pub(crate) const BLOCK_T: usize = 0;
     pub const BLOCK_LOG_SIGMA: usize = 1;
 
-    pub fn parameternames() -> &'static [&'static str] {
+    pub(crate) fn parameternames() -> &'static [&'static str] {
         &["threshold", "log_sigma"]
     }
 
-    pub fn parameter_links() -> &'static [ParameterLink] {
+    pub(crate) fn parameter_links() -> &'static [ParameterLink] {
         &[ParameterLink::InverseLink, ParameterLink::Log]
     }
 

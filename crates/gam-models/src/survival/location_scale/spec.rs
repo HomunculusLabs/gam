@@ -73,7 +73,7 @@ impl TimeBlockMonotonicity {
     /// and `StructuralISpline` satisfy this; only `EnforcedByRowConstraint`
     /// requires the row-wise `D β ≥ b` constraint matrix.
     #[inline]
-    pub fn is_coordinate_cone(self) -> bool {
+    pub(crate) fn is_coordinate_cone(self) -> bool {
         matches!(
             self,
             Self::EnforcedByCoordinateCone | Self::StructuralISpline
@@ -84,7 +84,7 @@ impl TimeBlockMonotonicity {
     /// for the inner active-set/KKT machinery to capture binding
     /// multipliers correctly.
     #[inline]
-    pub fn requires_row_constraints(self) -> bool {
+    pub(crate) fn requires_row_constraints(self) -> bool {
         matches!(self, Self::EnforcedByRowConstraint)
     }
 }
@@ -200,7 +200,7 @@ pub enum SurvivalCovariateTermBlockTemplate {
 }
 
 impl SurvivalCovariateTermBlockTemplate {
-    pub fn resolved_time_basis(&self) -> Option<&SurvivalCovariateTimeBasis> {
+    pub(crate) fn resolved_time_basis(&self) -> Option<&SurvivalCovariateTimeBasis> {
         match self {
             Self::Static => None,
             Self::TimeVarying { time_basis, .. } => Some(time_basis),
@@ -247,7 +247,7 @@ pub struct SurvivalLocationScaleTermSpec {
     pub cache_mirror_sessions: Vec<std::sync::Arc<gam_runtime::warm_start::Session>>,
 }
 
-pub const DEFAULT_SURVIVAL_LOCATION_SCALE_DERIVATIVE_GUARD: f64 = 1e-6;
+pub(crate) const DEFAULT_SURVIVAL_LOCATION_SCALE_DERIVATIVE_GUARD: f64 = 1e-6;
 
 pub struct SurvivalLocationScaleTermFitResult {
     pub fit: UnifiedFitResult,

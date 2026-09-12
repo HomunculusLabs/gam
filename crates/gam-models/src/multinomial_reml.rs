@@ -1148,7 +1148,7 @@ impl EtaFingerprint {
 
 impl MultinomialFamily {
     /// Total number of active blocks, `M = K − 1`.
-    pub const fn active_classes(&self) -> usize {
+    pub(crate) const fn active_classes(&self) -> usize {
         self.total_classes - 1
     }
 
@@ -1157,7 +1157,7 @@ impl MultinomialFamily {
     /// The caller is promising the basis is orthonormal, is expressed in the raw
     /// joint coefficient order, and does not change for the lifetime of the fit.
     /// See `Self::joint_jeffreys_span` and `CustomFamily::jeffreys_span_basis`.
-    pub fn with_joint_jeffreys_span(mut self, span: Option<Arc<Array2<f64>>>) -> Self {
+    pub(crate) fn with_joint_jeffreys_span(mut self, span: Option<Arc<Array2<f64>>>) -> Self {
         self.joint_jeffreys_span = span;
         self
     }
@@ -1184,7 +1184,7 @@ impl MultinomialFamily {
     /// [`Self::with_initial_log_lambda`] seed entry-by-entry; the spec builders
     /// reject a wrong length. This is the resume path for a joint-penalty
     /// `rho_checkpoint` and the fixed-ρ pin for criterion diagnostics (#2349).
-    pub fn with_joint_initial_log_lambdas(mut self, seeds: Vec<f64>) -> Self {
+    pub(crate) fn with_joint_initial_log_lambdas(mut self, seeds: Vec<f64>) -> Self {
         self.joint_initial_log_lambdas = Some(seeds);
         self
     }

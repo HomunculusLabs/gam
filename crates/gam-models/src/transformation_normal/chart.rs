@@ -123,7 +123,7 @@ pub struct CtnRowGeometry {
 /// whether a matrix product happened to come back row-major, which is a latent
 /// panic waiting for a shape that flips it.
 #[inline]
-pub fn ctn_chart_component(
+pub(crate) fn ctn_chart_component(
     alpha: ArrayView1<'_, f64>,
     basis: ArrayView1<'_, f64>,
     floor: f64,
@@ -188,7 +188,7 @@ pub fn ctn_row_geometry(
 /// generated-regressor Jacobian carried `2·γ_k` here, the derivative of the
 /// squared chart, against a value path that had already moved.
 #[inline]
-pub fn ctn_component_sensitivity(
+pub(crate) fn ctn_component_sensitivity(
     chart: TransformationNormalParameterization,
     basis: ArrayView1<'_, f64>,
     k: usize,
@@ -318,7 +318,7 @@ pub fn ctn_endpoint_bases(transform: &Array2<f64>) -> (Array1<f64>, Array1<f64>)
 ///
 /// Returns `(per-row ε·(y_i − median), ε·(y_lo − median), ε·(y_hi − median))`
 /// with the support endpoints taken from the fitted knot vector.
-pub fn ctn_floor_offsets(
+pub(crate) fn ctn_floor_offsets(
     response: ArrayView1<'_, f64>,
     knots: ArrayView1<'_, f64>,
     response_median: f64,

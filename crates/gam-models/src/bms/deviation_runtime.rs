@@ -845,7 +845,7 @@ impl DeviationRuntime {
     /// `install_compiled_flex_block`. Save-time code uses this to snapshot
     /// the install state into the saved model; predict-time code reconstructs
     /// the per-row η correction `n_row · anchor_correction · β`.
-    pub fn installed_flex_block(&self) -> Option<&InstalledFlexBlock> {
+    pub(crate) fn installed_flex_block(&self) -> Option<&InstalledFlexBlock> {
         self.installed_flex_block.as_ref()
     }
 
@@ -886,7 +886,7 @@ impl DeviationRuntime {
     /// Used by per-row link-deviation evaluators that need the row's
     /// anchor slice to apply `design_with_anchor_rows` correctly. Returns
     /// `None` for runtimes that have not been reparameterised.
-    pub fn anchor_rows_at_training(&self) -> Option<&Array2<f64>> {
+    pub(crate) fn anchor_rows_at_training(&self) -> Option<&Array2<f64>> {
         self.anchor_rows_at_training.as_ref()
     }
 
@@ -895,7 +895,7 @@ impl DeviationRuntime {
     /// Mandatory when an installed flex block is present; for runtimes
     /// without one this is equivalent to `design(values)` and `anchor_rows`
     /// must be `n × 0`.
-    pub fn design_with_anchor_rows(
+    pub(crate) fn design_with_anchor_rows(
         &self,
         values: &Array1<f64>,
         anchor_rows: ArrayView2<f64>,
@@ -1332,7 +1332,7 @@ impl DeviationRuntime {
         self.basis_span_cubic(span_idx, basis_idx)
     }
 
-    pub fn for_each_basis_cubic_at<F>(&self, value: f64, mut visit: F) -> Result<(), String>
+    pub(crate) fn for_each_basis_cubic_at<F>(&self, value: f64, mut visit: F) -> Result<(), String>
     where
         F: FnMut(usize, exact_kernel::LocalSpanCubic) -> Result<(), String>,
     {
