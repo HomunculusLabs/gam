@@ -2978,3 +2978,212 @@ fn zz_measure_wide_p_cost_exponent_2080() {
         );
     }
 }
+
+/// #2228 regression — the line-search Value lane must price the shared inner
+/// fixed point. The BFGS/ARC cost probe (`OuterEvalOrder::Value`) ranks steps
+/// whose direction came from the gradient lane's exact implicit `∇f`, computed
+/// at the FULLY converged idempotent inner root
+/// (`penalized_quasi_laplace_criterion_with_cache`, `refine_progress_extension =
+/// true`); the outer certification samples that same root. In the
+/// ill-conditioned wide-`p` / over-smoothed regime a COARSE probe
+/// (`refine_progress_extension = false`, a raw reduced-budget policy that no
+/// outer ranking lane may consume) sits ~1% off that root, so (a) no step
+/// reduces the coarsely-ranked value while pointing
+/// down the analytic gradient — BFGS backtracks to `StepSizeTooSmall` at
+/// iteration 1 — and (b) the shipped coarse terminal value fails the outer cert
+/// value-agreement gate ("cost-only value disagrees with analytic-sample value",
+/// #2228). This pins probe == analytic within the certification roundoff bound at
+/// an admitted iterate, so a future rewrite that reintroduces the coarse budget on
+/// the Value lane goes red here instead of silently shipping the desync.
+#[test]
+fn value_lane_prices_at_shared_fixed_point_2228() {
+    let n = 96usize;
+    let p = 48usize;
+    let z = one_circle_wide_target(n, p, 0.05);
+    let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, 2);
+    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+    // Refine budget for BOTH arms. Measured (`zz_measure_2228_value_lane_budget_sweep`,
+    // run 30150455983): the full arm REFUSES at 8 and converges from 16 on, with the
+    // value identical to ten significant figures across 16/32/64/128, while the coarse
+    // arm refuses at EVERY budget with its ‖g‖ pinned at ~1.9032e-1 from 16 through 128
+    // — a 16× budget increase moves it by 4e-7 relative, i.e. the coarse path is at a
+    // floor and no budget rescues it. So 8 no longer buys this fixture the converged
+    // root its own precondition needs, and raising it cannot cost the coarse-inadequacy
+    // premise the assertion below rests on. The stability check after `v_true` turns
+    // "16 is enough" from an assumption into an assertion.
+    let imi = 16usize;
+    let (lr, re, rb) = (0.04_f64, 1.0e-6_f64, 1.0e-6_f64);
+    // Over-smoothed rho: the undamped Laplace log-det is worst-conditioned here, so
+    // the inner (t,beta) solve needs progress-extension refinement beyond the
+    // coarse probe budget to reach the fixed point. The sanity check below asserts
+    // the fixture actually exercises that regime (else the invariant is vacuous).
+    let rho = SaeManifoldRho::new(0.02_f64.ln(), 4.0_f64, vec![array![0.0]])
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .expect("seed dispersion is finite and strictly positive");
+    let rho_flat = rho.to_flat();
+
+    // Sanity: the COARSE (false) refine budget must be demonstrably inadequate at
+    // this rho, else the invariant assertion below would pass vacuously on any
+    // fixture. Inadequacy has two admissible forms and the fixture is pinned to
+    // whichever it lands in:
+    //
+    //   (a) the coarse budget returns a value that differs from the full-budget
+    //       root by more than the certification roundoff bound, or
+    //   (b) the coarse budget REFUSES with the typed non-convergence error — the
+    //       STRONGER form of the same statement, since no value at all is further
+    //       from the root than any finite disagreement.
+    //
+    // (b) is the DESIGNED raw coarse-policy behaviour, not a defect: per #2080 a
+    // reduced-budget probe may return a typed verdict instead of grinding. No
+    // production outer value/ranking entry point consumes that policy: they all
+    // route through `authoritative_envelope_value_probe`, whose full-refine drive
+    // either reaches the shared fixed point or refuses. This assertion is the
+    // only caller that observes the raw coarse policy.
+    //
+    // Landing in (b) makes the Value-lane invariant below STRICTLY harder to
+    // satisfy, not easier: a Value lane wrongly rebuilt on the coarse budget would
+    // surface `OuterEval::infeasible` (+inf) rather than a merely-~1%-off value,
+    // so the regression this test exists to catch still goes red.
+    let v_true = {
+        let mut t = term.clone();
+        t.penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, imi, lr, re, rb)
+            .expect("full-budget bare criterion evaluates")
+            .0
+    };
+    // The full budget must be ADEQUATE, not merely non-erroring: a root that still
+    // moves when given twice the budget is not the root the Value lane is supposed to
+    // price, and pinning the test to one would make every assertion below a statement
+    // about a budget rather than about a fixed point. Doubling must not move it.
+    let v_true_double = {
+        let mut t = term.clone();
+        t.penalized_quasi_laplace_criterion_with_cache(z.view(), &rho, None, 2 * imi, lr, re, rb)
+            .expect("double-budget bare criterion evaluates")
+            .0
+    };
+    let root_bound = f64::EPSILON.sqrt() * v_true.abs().max(v_true_double.abs()).max(1.0);
+    assert!(
+        (v_true - v_true_double).abs() <= root_bound,
+        "the full budget must reach a converged root, but doubling it moved the value: \
+         v_true={v_true:.16e}, v_true(2x)={v_true_double:.16e}, diff={:.3e} > {root_bound:.3e} \
+         (raise `imi` until it stops moving)",
+        (v_true - v_true_double).abs()
+    );
+    let coarse = {
+        let mut t = term.clone();
+        t.penalized_quasi_laplace_criterion_with_cache_refine_policy(
+            z.view(),
+            &rho,
+            None,
+            imi,
+            lr,
+            re,
+            rb,
+            false,
+        )
+        .map(|evaluated| evaluated.0)
+    };
+    match &coarse {
+        Ok(v_false) => {
+            let regime_bound = f64::EPSILON.sqrt() * v_false.abs().max(v_true.abs()).max(1.0);
+            eprintln!(
+                "[#2228] coarse budget returned a value: v_false={v_false:.16e} \
+                 v_true={v_true:.16e} diff={:.3e} regime_bound={regime_bound:.3e}",
+                (v_false - v_true).abs()
+            );
+            assert!(
+                (v_false - v_true).abs() > regime_bound,
+                "fixture must exercise the coarse-vs-full under-refinement regime, else this \
+                 test is vacuous: v_false={v_false:.16e}, v_true={v_true:.16e}, diff={:.3e} \
+                 <= regime_bound={regime_bound:.3e} (strengthen the fixture)",
+                (v_false - v_true).abs()
+            );
+        }
+        Err(err) => {
+            let message = err.numerical_message().unwrap_or_else(|| {
+                panic!(
+                    "the coarse budget may only be inadequate via the typed NUMERICAL \
+                     non-convergence refusal; got a different typed refusal: {err:?}"
+                )
+            });
+            eprintln!(
+                "[#2228] coarse budget REFUSED (the stronger form of coarse-vs-full \
+                 disagreement); v_true={v_true:.16e}; refusal: {message}"
+            );
+            assert!(
+                message.contains("inner solve did not converge at fixed \u{3c1}"),
+                "the coarse budget must be inadequate here via the typed non-convergence \
+                 refusal, not some other numerical failure; got: {message}"
+            );
+        }
+    }
+
+    // Invariant: the line-search Value lane prices the SAME fixed point the
+    // analytic gradient lane differentiates, within the certification roundoff
+    // bound (the exact gate `rho_optimizer::run` enforces at fit end).
+    // ONE objective, value probe first — production's ordering. The outer search
+    // always evaluates the gradient lane at the ρ of the line search's last
+    // successful value probe on the same objective, which lets the `#2080 (a)`
+    // hand-off install that probe's converged inner state before the gradient
+    // lane's criterion loop ("same converged optimum ⇒ identical criterion value").
+    //
+    // A fresh objective per lane instead would assert this invariant against a
+    // construction production never uses, and would fail for a reason that says
+    // nothing about the Value lane: measured (#2439,
+    // `zz_measure_2439_value_vs_gradient_inner_mode`), evaluating the two lanes on
+    // SEPARATE objectives lands them on genuinely different inner modes
+    // (`max|Δβ| = 4.394e-2` over 240 coordinates) whose criterion values differ by
+    // 3.842e-1 — because the inner solve stops at a tolerance rather than at a
+    // unique fixed point, so θ̂ depends on where it started. On one objective the
+    // two lanes agree to 3.6e-12 at a BITWISE-identical β.
+    let mut obj =
+        SaeManifoldOuterObjective::new(term.clone(), z.clone(), None, rho.clone(), imi, lr, re, rb);
+    let value_eval = OuterObjective::eval_with_order(&mut obj, &rho_flat, OuterEvalOrder::Value)
+        .expect("value lane evaluates");
+    let value_lane = value_eval.cost;
+    let value_beta = value_eval
+        .inner_beta_hint
+        .clone()
+        .expect("the Value lane publishes its converged inner state for the hand-off");
+    let gradient_eval =
+        OuterObjective::eval_with_order(&mut obj, &rho_flat, OuterEvalOrder::ValueAndGradient)
+            .expect("gradient lane evaluates");
+    let analytic = gradient_eval.cost;
+
+    // The hand-off is what makes the agreement below hold, and it is load-bearing:
+    // without it the lanes converge to different modes. Pin it directly, so a
+    // refactor that drops it fails here saying so, instead of silently degrading
+    // the value-agreement assertion into a statement about two unrelated modes.
+    let gradient_beta = gradient_eval
+        .inner_beta_hint
+        .as_ref()
+        .expect("the gradient lane publishes the inner state it differentiated at");
+    assert_eq!(
+        value_beta.len(),
+        gradient_beta.len(),
+        "the two lanes must describe the same inner coordinate system"
+    );
+    let beta_gap = value_beta
+        .iter()
+        .zip(gradient_beta.iter())
+        .map(|(v, g)| (v - g).abs())
+        .fold(0.0_f64, f64::max);
+    assert_eq!(
+        beta_gap,
+        0.0,
+        "#2228/#2439: the gradient lane must differentiate AT the mode the Value lane priced,          not at one it re-solved for itself; max|Δβ|={beta_gap:.6e} over {} coordinates",
+        value_beta.len()
+    );
+    let cert_bound = f64::EPSILON.sqrt() * value_lane.abs().max(analytic.abs()).max(1.0);
+    eprintln!(
+        "[#2228] value_lane={value_lane:.16e} analytic={analytic:.16e} diff={:.3e} \
+         cert_bound={cert_bound:.3e}",
+        (value_lane - analytic).abs()
+    );
+    assert!(
+        (value_lane - analytic).abs() <= cert_bound,
+        "#2228: line-search Value lane must price the analytic fixed point within the \
+         certification roundoff bound: value_lane={value_lane:.16e}, \
+         analytic={analytic:.16e}, diff={:.3e}, bound={cert_bound:.3e}",
+        (value_lane - analytic).abs()
+    );
+}

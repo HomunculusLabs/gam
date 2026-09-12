@@ -8955,5 +8955,193 @@ pub(crate) fn near_wall_wiggle_coordinate_keeps_cross_covariance_in_moments_2390
     }
 }
 
+/// #2446: with a DETERMINISTIC wiggle basis row the whole linear predictor is a
+/// single scalar Gaussian, so the nested outer×inner rule has a closed-form
+/// answer and this is an IDENTITY, not an A/B.
+///
+/// Setting the threshold and log-sigma covariance blocks to exactly zero makes
+/// `q0` — and therefore the I-spline row `b` — a constant, and leaves
+///
+/// ```text
+///   η = h + q0 + bᵀβ_w,     E[η] = μ_h + q0 + bᵀE_π[β_w],
+///   Var[η] = aᵀΣ_hh a + 2·aᵀΣ_hw b + bᵀΣ_ww b.
+/// ```
+///
+/// Production must return `E[S(η)]` and `E[S(η)²]` for THAT scalar Gaussian.
+/// The reference integrates it by direct density quadrature — deliberately not
+/// production's Gauss-Hermite rule, so the construction is independent of the
+/// rule under test.
+///
+/// The identity holds because the outer×inner factorization of a joint Gaussian
+/// is exact when the inner mean is the AFFINE conditional mean. It fails as soon
+/// as anything nonlinear is applied to that mean, which is what the
+/// fraction-to-boundary cone clip did: it removed essentially the whole
+/// `2·aᵀΣ_hw b` cross term. The two assertions below the fixture pin that this
+/// gate is not vacuous — the clip bound at every latent node (the per-node
+/// displacement scale is orders above each wall) and the term it destroyed is a
+/// large share of `Var[η]`.
+#[test]
+fn nested_response_moment_rule_reproduces_the_scalar_gaussian_law_2446() {
+    // Near-wall link-wiggle coefficients: `E_π[β_w]` is interior but tiny, which
+    // is the regime the cone clip was written for and the regime it broke.
+    let beta_w = array![0.02, 0.02];
+    let fit = test_survival_fit(
+        array![0.4, -0.1],
+        array![0.2, 0.3],
+        array![-0.5, 0.1],
+        Some(beta_w.clone()),
+    );
+    let a_h = array![1.0, 0.5];
+    let eta_time_offset_exit = array![0.2];
+    let x_threshold_dense = array![[1.0, -0.2]];
+    let x_log_sigma_dense = array![[1.0, 0.3]];
+    let eta_threshold_offset = array![0.7];
+    let eta_log_sigma_offset = array![0.4];
+
+    let mu_h = a_h.dot(&fit.beta_time()) + eta_time_offset_exit[0];
+    let mu_t = x_threshold_dense.row(0).dot(&fit.beta_threshold()) + eta_threshold_offset[0];
+    let mu_ls = x_log_sigma_dense.row(0).dot(&fit.beta_log_sigma()) + eta_log_sigma_offset[0];
+    // Deterministic because the threshold and log-sigma covariance blocks are
+    // zero below, so production evaluates `q0` at exactly this point.
+    let q0 = survival_q0_from_eta(mu_t, mu_ls);
+
+    let degree = fit
+        .artifacts
+        .survival_link_wiggle_degree
+        .expect("fit wiggle degree");
+    let base_knots = fit
+        .artifacts
+        .survival_link_wiggle_knots
+        .clone()
+        .expect("fit wiggle knots");
+    // Re-center the knots on the realized q0 so BOTH I-spline columns carry
+    // weight there; a zero basis row would make the comparison vacuous.
+    let lo = base_knots.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = base_knots.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let knots = base_knots.mapv(|k| k + (q0 - 0.5 * (lo + hi)));
+    let basis = survival_wiggle_basis_with_options(
+        Array1::from_vec(vec![q0]).view(),
+        &knots,
+        degree,
+        BasisOptions::value(),
+    )
+    .expect("link wiggle basis");
+    let b = basis.row(0).to_owned();
+    assert!(
+        b[0] > 1.0e-3 && b[1] > 1.0e-3,
+        "both wiggle coordinates must carry basis weight at q0, got {b:?}"
+    );
+
+    let input = SurvivalLocationScalePredictInput {
+        x_time_exit: array![[1.0, 0.5]],
+        eta_time_offset_exit,
+        time_wiggle_knots: None,
+        time_wiggle_degree: None,
+        time_wiggle_ncols: 0,
+        x_threshold: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            x_threshold_dense.clone(),
+        )),
+        eta_threshold_offset,
+        x_log_sigma: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(
+            x_log_sigma_dense.clone(),
+        )),
+        eta_log_sigma_offset,
+        x_link_wiggle: Some(DesignMatrix::Dense(
+            gam_linalg::matrix::DenseDesignMatrix::from(basis.clone()),
+        )),
+        link_wiggle_knots: Some(knots.clone()),
+        link_wiggle_degree: Some(degree),
+        inverse_link: residual_distribution_inverse_link(ResidualDistribution::Gaussian),
+    };
+
+    // Blocks are [time(0..2), threshold(2..4), log_sigma(4..6), wiggle(6..8)].
+    // The `(time, wiggle)` sub-block is `F Fᵀ`, hence PSD, and the threshold and
+    // log-sigma rows are exactly zero — that is what makes `q0` and `b`
+    // deterministic and the predictor one scalar Gaussian.
+    let f = array![
+        [0.30, 0.00, 0.00, 0.00],
+        [0.10, 0.25, 0.00, 0.00],
+        [0.20, 0.10, 0.15, 0.00],
+        [0.18, 0.12, 0.00, 0.14],
+    ];
+    let block = f.dot(&f.t());
+    let mut covariance = Array2::<f64>::zeros((8, 8));
+    for i in 0..2 {
+        for j in 0..2 {
+            covariance[[i, j]] = block[[i, j]];
+            covariance[[i, 6 + j]] = block[[i, 2 + j]];
+            covariance[[6 + j, i]] = block[[2 + j, i]];
+            covariance[[6 + i, 6 + j]] = block[[2 + i, 2 + j]];
+        }
+    }
+
+    let s_hh = covariance.slice(s![0..2, 0..2]).to_owned();
+    let s_hw = covariance.slice(s![0..2, 6..8]).to_owned();
+    let s_ww = covariance.slice(s![6..8, 6..8]).to_owned();
+    let var_h = a_h.dot(&s_hh.dot(&a_h));
+    let cross = a_h.dot(&s_hw.dot(&b));
+    let mean_eta = mu_h + q0 + b.dot(&beta_w);
+    let var_eta = var_h + 2.0 * cross + b.dot(&s_ww.dot(&b));
+    assert!(var_h > 0.0 && var_eta > 0.0, "degenerate fixture");
+
+    // Non-vacuity 1: the removed clip bound at essentially every latent node.
+    // The per-node conditional-mean displacement is `Σ_wh a / sd_h · z`, so this
+    // is its scale at `|z| = 1` against each coordinate's wall.
+    let displacement_scale = s_hw.t().dot(&a_h).mapv(f64::abs) / var_h.sqrt();
+    for j in 0..2 {
+        assert!(
+            displacement_scale[j] > 5.0 * beta_w[j],
+            "coordinate {j} is not near-wall: displacement scale {} vs wall {}",
+            displacement_scale[j],
+            beta_w[j]
+        );
+    }
+    // Non-vacuity 2: the cross term the clip destroyed is a large share of the
+    // variance being asserted, so passing this cannot be a coincidence.
+    assert!(
+        2.0 * cross > 0.3 * var_eta,
+        "the cross term {} is too small a share of Var[eta] {var_eta} to gate anything",
+        2.0 * cross
+    );
+
+    // Reference: E[S] and E[S^2] for the scalar Gaussian above, by DIRECT
+    // density quadrature. Not production's Gauss-Hermite rule — the point is an
+    // independent construction. Beyond ±10 sd the density is below 1e-22.
+    let sd_eta = var_eta.sqrt();
+    let (nodes, weights) = gam_math::special::gauss_legendre(96);
+    let half = 10.0 * sd_eta;
+    let mut reference_first = 0.0;
+    let mut reference_second = 0.0;
+    let mut mass = 0.0;
+    for (t, wgt) in nodes.iter().zip(weights.iter()) {
+        let eta = mean_eta + half * t;
+        let standardized = half * t / sd_eta;
+        let weight = half * wgt * (-0.5 * standardized * standardized).exp();
+        let p = inverse_link_survival_prob_checked(&input.inverse_link, eta).expect("inverse link");
+        reference_first += weight * p;
+        reference_second += weight * p * p;
+        mass += weight;
+    }
+    reference_first /= mass;
+    reference_second /= mass;
+
+    let (mean, second) =
+        exact_survival_response_moments(&input, &fit, &covariance).expect("response moments");
+    assert!(
+        (mean[0] - reference_first).abs() <= 5.0e-5,
+        "E[S] must equal the scalar-Gaussian law: production {} vs closed-form reference {} \
+         (mean_eta={mean_eta:.6}, var_eta={var_eta:.6})",
+        mean[0],
+        reference_first
+    );
+    assert!(
+        (second[0] - reference_second).abs() <= 5.0e-5,
+        "E[S^2] must equal the scalar-Gaussian law: production {} vs closed-form reference {} \
+         (mean_eta={mean_eta:.6}, var_eta={var_eta:.6})",
+        second[0],
+        reference_second
+    );
+}
+
 /// gam#2695 degree ladder (child module so this file stays under the line gate).
 mod knot_ladder_2695;
