@@ -11,7 +11,7 @@ This is the honest end-to-end run the manifold-SAE machinery exists for:
   * fit the production manifold-SAE with a REAL K (>=16) and TOPOLOGY DISCOVERY
     on — ``atom_topology`` is only a SEED; the Rust structure search does the
     evidence-gated births/fissions and re-derives the per-atom dictionary, so
-    ``m.basis_specs`` / ``m.atom_topologies`` / ``m.chosen_k`` report what the
+    ``m.atom_topologies`` / ``m.chosen_k`` report what the
     model CHOSE, not what was forced;
   * reconstruct the HELD-OUT tokens via the OOS path ``m.reconstruct(z_test)``
     and report held-out reconstruction EV;
@@ -210,7 +210,7 @@ def main() -> None:
     m, ev_m, ev_m_raw, fit_m, recon_m = _fit(
         z_tr, z_te, args.k, args.seed_topology, args.seed, args.n_iter,
         lift=lift, x_te_raw=x_te_raw)
-    kinds = list(m.basis_specs)
+    kinds = list(m.atom_topologies)
     dist = Counter(kinds)
     print(f"[manifold] discovered K = {m.chosen_k}")
     print(f"[manifold] per-atom topology distribution: {dict(dist)}")
@@ -234,7 +234,7 @@ def main() -> None:
     mquad, ev_quad, ev_quad_raw, fit_quad, recon_quad = _fit(
         z_tr, z_te, args.k, "euclidean", args.seed, args.n_iter,
         lift=lift, x_te_raw=x_te_raw)
-    print(f"[quad]     K = {mquad.chosen_k}, topology dist = {dict(Counter(mquad.basis_specs))}")
+    print(f"[quad]     K = {mquad.chosen_k}, topology dist = {dict(Counter(mquad.atom_topologies))}")
     print(f"[quad]     held-out {pc_metric} = {ev_quad:.4f}   "
           f"(fit {fit_quad:.1f}s, recon {recon_quad:.1f}s)")
     print(f"[quad]     held-out raw-resid-stream EV = {ev_quad_raw:.4f}")
@@ -270,7 +270,7 @@ def main() -> None:
             # not misled into calling it the linear baseline.
             "quadratic_patch": {
                 "chosen_k": int(mquad.chosen_k),
-                "topology_distribution": dict(Counter(mquad.basis_specs)),
+                "topology_distribution": dict(Counter(mquad.atom_topologies)),
                 "held_out_pc_ev": ev_quad, "held_out_raw_ev": ev_quad_raw,
                 "fit_s": fit_quad, "recon_s": recon_quad,
             },
