@@ -714,6 +714,7 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         training_mean,
         fitted,
         reconstruction_r2,
+        migration,
     } = fit_sae_support_sparse(SaeSupportSparseFitRequest {
         target: request.target,
         atom_basis: request.atom_basis,
@@ -736,6 +737,7 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         "representation": "support_sparse",
         "inner_fixed_point": fixed,
         "outer_stationarity": outer_certificate,
+        "migration": migration.to_json(),
     });
     let termination = serde_json::json!({
         "verdict": "converged",

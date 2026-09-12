@@ -346,6 +346,44 @@ impl SaeMigrationLedger {
         });
     }
 
+    /// The ledger as a JSON record for a fitted model's payload: the tallies, the
+    /// `pc_reseed_events` invariant, and every move with its stage and seed or
+    /// reason, count, round and evidence. Unscored evidence (`NaN`) is `null`.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        let moves = self
+            .moves
+            .iter()
+            .map(|mv| {
+                let (kind, stage, seed, reason) = match &mv.kind {
+                    SaeMove::Birth { stage, seed } => ("birth", stage, Some(*seed), None),
+                    SaeMove::Death { stage, reason } => ("death", stage, None, Some(reason)),
+                    SaeMove::Refuse { stage, reason } => ("refuse", stage, None, Some(reason)),
+                };
+                serde_json::json!({
+                    "kind": kind,
+                    "stage": stage.code(),
+                    "seed": seed.map(BirthSeed::code),
+                    "reason": reason.map(|reason| format!("{reason:?}")),
+                    "round": mv.round,
+                    "count": mv.count,
+                    "reml_delta": mv.evidence.reml_delta,
+                    "rank_charge": mv.evidence.rank_charge,
+                    "dl_bits": mv.evidence.dl_bits,
+                    "objective": mv.objective,
+                    "predicted_dl_bits": mv.predicted_dl_bits,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "n_births": self.n_births,
+            "n_deaths": self.n_deaths,
+            "n_refusals": self.n_refusals,
+            "pc_reseed_events": self.pc_reseed_events,
+            "moves": moves,
+        })
+    }
+
     /// Fold one structure-search round's [`SearchLedger`] into the unified
     /// currency, mapping each adjudicated move + verdict onto a birth / death /
     /// refusal priced by the banked e-process evidence (`bits_from_nats(log_e)`).

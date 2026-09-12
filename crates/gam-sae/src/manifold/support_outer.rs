@@ -40,6 +40,9 @@ use gam_solve::rho_optimizer::{
 use ndarray::{Array1, Array2, ArrayView1};
 
 use super::*;
+use crate::migration_ledger::{
+    BirthSeed, MoveEvidence, MoveReason, MoveStage, SaeMigrationLedger,
+};
 
 const SUPPORT_LAML_CONTEXT: &str = "support-sparse TopK grouped LAML";
 
@@ -999,6 +1002,12 @@ pub struct SaeSupportSparseFit {
     /// `1 − RSS/TSS` against the training mean; `1` when the target has no
     /// variance about its mean.
     pub reconstruction_r2: f64,
+    /// Every birth and death of this fit. The support lane has no reseed: each
+    /// atom is born once, at the support seed, from the centered rows' own
+    /// projections, and an atom no row selected is pruned at that boundary. So
+    /// the seed's births and prunings are the whole account, and
+    /// `pc_reseed_events` is `0`.
+    pub migration: SaeMigrationLedger,
 }
 
 /// The one production path for an overcomplete (`K > P`) hard-TopK manifold SAE
@@ -1092,6 +1101,34 @@ pub fn fit_sae_support_sparse(
     } else {
         1.0
     };
+    let mut migration = SaeMigrationLedger::new();
+    migration.birth(
+        MoveStage::Curved,
+        BirthSeed::ResidualFactor,
+        retained_atom_indices.len(),
+        Some(0),
+        MoveEvidence::none(),
+        outer.criterion,
+    );
+    let pruned = requested_atoms - retained_atom_indices.len();
+    if pruned > 0 {
+        migration.death(
+            MoveStage::Curved,
+            MoveReason::DeadRouting,
+            pruned,
+            Some(0),
+            MoveEvidence::none(),
+            outer.criterion,
+        );
+    }
+    log::info!(
+        "support-sparse migration ledger: {} births, {} deaths, {} refusals, {} \
+         principal-component reseeds",
+        migration.n_births,
+        migration.n_deaths,
+        migration.n_refusals,
+        migration.pc_reseed_events,
+    );
     Ok(SaeSupportSparseFit {
         outer,
         requested_atoms,
@@ -1101,6 +1138,7 @@ pub fn fit_sae_support_sparse(
         training_mean,
         fitted,
         reconstruction_r2,
+        migration,
     })
 }
 
