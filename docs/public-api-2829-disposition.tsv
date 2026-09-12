@@ -1068,8 +1068,8 @@ crates/gam-terms/src/analytic_penalties/isometry.rs	with_reference	retired-no-su
 crates/gam-terms/src/analytic_penalties/isometry.rs	with_third_decoder_derivative	retired-no-surviving-dependent
 crates/gam-terms/src/analytic_penalties/penalty_trait.rs	advance_scalar_weight	retired-no-surviving-dependent
 crates/gam-terms/src/analytic_penalties/registry.rs	is_row_block_diagonal	retired-no-product-user
-crates/gam-terms/src/analytic_penalties/sparsity.rs	row_dense_hessian	restored-in-place
-crates/gam-terms/src/analytic_penalties/sparsity.rs	row_dense_hessian_logit_derivative	restored-in-place
+crates/gam-terms/src/analytic_penalties/sparsity.rs	row_dense_hessian	retired-no-product-user
+crates/gam-terms/src/analytic_penalties/sparsity.rs	row_dense_hessian_logit_derivative	retired-no-product-user
 crates/gam-terms/src/analytic_penalties/sparsity.rs	row_fisher_metric	retired-by-later-deletion:843e0fc200
 crates/gam-terms/src/analytic_penalties/sparsity.rs	row_fisher_metric_logit_derivative	retired-by-later-deletion:843e0fc200
 crates/gam-terms/src/analytic_penalties/sparsity.rs	row_psd_majorizer_logit_derivative	retired-by-later-deletion:843e0fc200
@@ -1148,8 +1148,8 @@ crates/gam-terms/src/basis/sphere_gpu.rs	build_center_kernel_device	retired-by-l
 crates/gam-terms/src/basis/sphere_gpu.rs	build_householder_constrained_design_device	retired-by-later-deletion:dc325f1909
 crates/gam-terms/src/basis/sphere_gpu.rs	constrained_penalty_host	retired-by-later-deletion:dc325f1909
 crates/gam-terms/src/basis/sphere_gpu.rs	copy_to_host_col_major	restored-in-place
-crates/gam-terms/src/basis/sphere_gpu.rs	householder_reflector_from_weights	restored-in-place
-crates/gam-terms/src/basis/sphere_gpu.rs	solve_penalised_ls_device	restored-in-place
+crates/gam-terms/src/basis/sphere_gpu.rs	householder_reflector_from_weights	retired-no-product-user
+crates/gam-terms/src/basis/sphere_gpu.rs	solve_penalised_ls_device	retired-no-product-user
 crates/gam-terms/src/basis/spline_eval_scalar.rs	evaluate_bsplinesecond_derivative_scalar	retired-no-surviving-dependent
 crates/gam-terms/src/basis/spline_eval_scalar.rs	evaluate_derivative	retired-no-surviving-dependent
 crates/gam-terms/src/basis/spline_eval_scalar.rs	evaluate_ispline_scalar	retired-no-surviving-dependent

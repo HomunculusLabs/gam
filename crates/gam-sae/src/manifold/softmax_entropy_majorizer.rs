@@ -52,7 +52,7 @@ pub(crate) fn softmax_majorizer_log_mean(a: &[f64]) -> f64 {
 
 /// Single `(kk, jj)` entry of the exact per-row dense softmax-entropy Hessian
 /// `H_kj = scale·a_k·(δ_kj·(m−l_k−1) + a_j·(l_k+l_j+1−2m))` (mirrors
-/// [`SoftmaxAssignmentSparsityPenalty::row_dense_hessian`] entry-for-entry). Used
+/// the dense entropy Hessian entry-for-entry). Used
 /// by the #1418 exact-Hessian (`A = B + ΔC`) correction so the compact path can
 /// read only the active `≤ top_k × top_k` sub-block of `H_entropy` without
 /// materialising the full `K×K` dense block per row (#1410). `m` is the shared
@@ -190,8 +190,7 @@ impl<'a> SoftmaxEntropyDerivative<'a> {
         let da_kk = da(kk);
         let dl_kk = dl(kk);
         // `(H_kj, ∂H_kj/∂z_w)` for one column of the row, built from the SAME
-        // `(a, l, m)` algebra the dense `row_dense_hessian` /
-        // `row_dense_hessian_logit_derivative` pair uses.
+        // `(a, l, m)` algebra as the dense entropy Hessian and its logit derivative.
         let indicator = if kk == jj { 1.0 } else { 0.0 };
         let l_jj = l(jj);
         let bracket = indicator * (m - l_kk - 1.0) + a[jj] * (l_kk + l_jj + 1.0 - 2.0 * m);

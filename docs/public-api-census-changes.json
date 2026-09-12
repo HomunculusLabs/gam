@@ -1547,5 +1547,16 @@
     },
     "reason": "SPEC rule 5 (#2901 V6). The t2 separable penalty now builds its blocks from function-space factors through a private builder, so the Euclidean projector builder tensor_margin_range_null_projectors and its helper projector_from_columns have no caller left and are deleted.",
     "evidence": "public_api_census.py's public_functions predicate over the removed hunks of crates/gam-terms/src/smooth/term_specs.rs yields projector_from_columns and tensor_margin_range_null_projectors. At the base, each is the file's only pub fn of that name, and git grep -w finds no use of either outside that file. The new tensor_margin_separable_factors is private."
+  },
+  {
+    "base": "ca8b770e9196efe3c508d033322dee4b5e61abd5",
+    "removed": {
+      "crates/gam-terms/src/analytic_penalties/sparsity.rs::row_dense_hessian": 1,
+      "crates/gam-terms/src/analytic_penalties/sparsity.rs::row_dense_hessian_logit_derivative": 1,
+      "crates/gam-terms/src/basis/sphere_gpu.rs::householder_reflector_from_weights": 1,
+      "crates/gam-terms/src/basis/sphere_gpu.rs::solve_penalised_ls_device": 2
+    },
+    "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. These restored-in-place gam-terms identities have no user in gam-cli, gam-pyffi or Python, examples/, another crate's production code, or any test. solve_penalised_ls_device is declared twice, as the linux cuSOLVER QR solve and its non-linux refusal stub.",
+    "evidence": "restored_consumers_2829.py at d8f6ef9be (MSI job 527977, /scratch.global/sauer354/pool/api2829/consumers.d8f6ef9be98996b5c98bd08667aa4fe121561e8f.rows.tsv) scores row_dense_hessian, row_dense_hessian_logit_derivative and householder_reflector_from_weights as unreferenced. It scores solve_penalised_ls_device as consumed_unexplained, only because of its two cfg(target_os) declarations. At the base, git grep -w over crates, src and tests finds no call to any of them. Other files mention the names only in doc comments and error strings: sparsity.rs lines 121, 293 and 418; gam-sae's softmax_entropy_majorizer.rs, construction_tests.rs and construction_quasi_laplace.rs; and the historical error listing in tests/regressions/gpu/sphere_gpu_macro_unscoped_breaks_build.rs."
   }
 ]

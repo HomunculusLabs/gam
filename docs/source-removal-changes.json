@@ -4085,5 +4085,17 @@
     ],
     "reason": "zz_measure_2612_arming_certificate_with_and_without_the_penalty was a #2612 diagnostic whose own doc says it prints only and never asserts a bound. It fitted two multinomial formulas, printed both separation-certificate spectra and asserted nothing, and it hit the 600 s nextest slow-timeout on every census. A test that cannot fail is not a test (SPEC rule 16). penguins_stride3_train and softmax_drawn_two_covariate were its private fixtures, and PENGUINS_CSV and CLASS_NAMES were consts local to those two functions.",
     "evidence": "Census job 505917 at 7ad913f69 (/scratch.global/sauer354/pool/t2627models/census7ad9.505917.log): TIMEOUT [ 600.044s] gam-models multinomial::reference_class_invariance_tests::zz_measure_2612_arming_certificate_with_and_without_the_penalty. At the base, git grep -w finds penguins_stride3_train, softmax_drawn_two_covariate and the probe name only at their declarations and in the probe body. CLASS_NAMES and PENGUINS_CSV are each declared once in multinomial.rs, inside the deleted functions. The module's remaining imports keep uses outside the deleted range: load_dataset_projected and writeln! in dataset_xy, fs in its write, tempdir in the invariance tests. Compile is covered by the lead's shared tip check; nothing was built locally."
+  },
+  {
+    "base": "ca8b770e9196efe3c508d033322dee4b5e61abd5",
+    "items": [
+      "crates/gam-terms/src/analytic_penalties/sparsity.rs:fn:row_dense_hessian",
+      "crates/gam-terms/src/analytic_penalties/sparsity.rs:fn:row_dense_hessian_logit_derivative",
+      "crates/gam-terms/src/basis/sphere_gpu.rs:fn:householder_reflector_from_weights",
+      "crates/gam-terms/src/basis/sphere_gpu.rs:fn:solve_penalised_ls_device",
+      "crates/gam-terms/src/basis/sphere_gpu.rs:struct:PenalisedLsSolution"
+    ],
+    "reason": "#2829 public-surface rule: no product or test uses SoftmaxAssignmentSparsityPenalty::row_dense_hessian or row_dense_hessian_logit_derivative, the host householder_reflector_from_weights, or the device penalised least-squares solve. PenalisedLsSolution was only that solve's return type.",
+    "evidence": "The sphere_gpu.rs deletion runs from the 'Householder reflector helpers' section header to the line before the 'Tests' header. That covers householder_reflector_from_weights, an orphaned 'Phase 2' comment block with no code, and the 'Phase 4' cuSOLVER QR section: PenalisedLsSolution and both cfg(target_os) declarations of solve_penalised_ls_device. The GpuResultExt import survives with 15 gpu_ctx uses outside the range, and ArrayView2 is still used at lines 85 and 779. The exact entropy Hessian formula from row_dense_hessian's doc now sits on row_psd_majorizer's doc, and the other prose mentions describe the Hessian without naming the deleted functions. The item list applies source_removal_guard.py's ITEM regex by hand. Compile is covered by the lead's shared tip check."
   }
 ]

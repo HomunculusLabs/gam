@@ -1375,7 +1375,7 @@ mod softmax_majorizer_active_entry_1410_tests {
     //!
     //! Correctness is single-sourced: these helpers MUST reproduce the
     //! `SoftmaxAssignmentSparsityPenalty` dense library routines
-    //! (`psd_majorizer_abs_row_sums`, `row_psd_majorizer`, `row_dense_hessian`)
+    //! (`psd_majorizer_abs_row_sums`, `row_psd_majorizer`)
     //! BIT-FOR-BIT, because the assembled `B`, the criterion's `log|H|`, and the
     //! #1006 θ-adjoint all differentiate ONE operator. If the dense library
     //! formula ever changes, this oracle fails and forces the helpers back into

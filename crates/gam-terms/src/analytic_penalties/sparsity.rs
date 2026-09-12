@@ -118,8 +118,7 @@ pub struct SoftmaxAssignmentSparsityPenalty {
     /// Because each of those is linear in the per-row penalty strength, scaling
     /// the strength by `w_i` scales all channels by the same `w_i` and cannot
     /// desync them (the value/gradient FD oracle gates this). The per-row *block*
-    /// helpers (`row_dense_hessian` / `row_psd_majorizer` / their logit
-    /// derivatives / `psd_majorizer_abs_row_sums`) take an explicit `scale` and a
+    /// helpers (`row_psd_majorizer` / `psd_majorizer_abs_row_sums`) take an explicit `scale` and a
     /// single row, so their callers apply `scale·w_i` instead. `None` ⇒ every
     /// weight is `1`, bit-for-bit the unweighted path.
     pub row_weights: Option<std::sync::Arc<[f64]>>,
@@ -290,7 +289,7 @@ impl SoftmaxAssignmentSparsityPenalty {
     /// diagonal-first traversal order the envelope sum uses, so the value and its
     /// θ-adjoint differentiate one floating-point expression. The off-diagonal is
     /// grouped `scale·a_k·(a_j·bracket)` — matching
-    /// `Self::row_dense_hessian`'s `scale·a_k·(δ_kj·… + a_j·bracket)` — rather
+    /// the exact entropy Hessian's `scale·a_k·(δ_kj·… + a_j·bracket)` — rather
     /// than the flat left-to-right `scale·a_k·a_j·bracket`, which differs by an
     /// ulp and made the majorized radius here and the `H` its adjoint
     /// differentiates two operators that disagreed in the last bit. That was
@@ -338,84 +337,8 @@ impl SoftmaxAssignmentSparsityPenalty {
         d
     }
 
-    /// Exact per-row dense softmax-entropy Hessian wrt the row's logits (#1038),
-    /// scaled by `scale = λ/τ²`. Returns the symmetric `K×K` block
-    ///
-    /// ```text
-    ///   H_kj = scale·a_k·[ δ_kj·(m − L_k − 1) + a_j·(L_k + L_j + 1 − 2m) ],
-    ///   L_k = ln a_k + 1,   m = Σ_r a_r L_r,
-    /// ```
-    ///
-    /// whose diagonal coincides with [`AnalyticPenalty::hessian_diag`] and whose
-    /// quadratic form coincides with [`AnalyticPenalty::hvp`]. This is the dense
-    /// block the Arrow-Schur row factor stores so the criterion's `log|H|` and
-    /// the #1006 θ-adjoint differentiate the SAME operator (not just its
-    /// diagonal). The entropy block alone is gauge-null (`H·𝟙 = 0`, softmax
-    /// shift-invariance); callers must add it to the gauge-breaking data-fit
-    /// row block before factoring — never factor it in isolation.
-    #[must_use]
-    pub fn row_dense_hessian(&self, row_logits: &[f64], scale: f64) -> Array2<f64> {
-        let k = self.k_atoms;
-        let a = self.softmax_row(row_logits);
-        let l: Vec<f64> = (0..k).map(|i| entropy_log_plus_one(a[i])).collect();
-        let m: f64 = (0..k).map(|i| a[i] * l[i]).sum();
-        let mut h = Array2::<f64>::zeros((k, k));
-        for kk in 0..k {
-            for jj in 0..k {
-                let indicator = if kk == jj { 1.0 } else { 0.0 };
-                h[[kk, jj]] = scale
-                    * a[kk]
-                    * (indicator * (m - l[kk] - 1.0) + a[jj] * (l[kk] + l[jj] + 1.0 - 2.0 * m));
-            }
-        }
-        h
-    }
-
-    /// Derivative of the exact per-row dense entropy Hessian
-    /// [`Self::row_dense_hessian`] with respect to a single row logit `z_w`,
-    /// scaled by `scale = λ/τ²`. Returns the symmetric `K×K` block
-    /// `∂H_kj/∂z_w`, the third-derivative tensor slice the #1006 θ-adjoint
-    /// contracts against the row's selected inverse. Built from the SAME
-    /// `(a, L, m)` as [`Self::row_dense_hessian`] (`∂a_r/∂z_w = a_r(δ_rw − a_w)/τ`),
-    /// so value, logdet and adjoint stay on one branch.
-    #[must_use]
-    pub fn row_dense_hessian_logit_derivative(
-        &self,
-        row_logits: &[f64],
-        scale: f64,
-        w: usize,
-    ) -> Array2<f64> {
-        let k = self.k_atoms;
-        let inv_tau = 1.0 / self.temperature;
-        let a = self.softmax_row(row_logits);
-        let l: Vec<f64> = (0..k).map(|i| entropy_log_plus_one(a[i])).collect();
-        let m: f64 = (0..k).map(|i| a[i] * l[i]).sum();
-        // ∂a_r/∂z_w = a_r (δ_rw − a_w)/τ ; ∂L_r/∂z_w = (∂a_r/∂z_w)/a_r.
-        let da: Vec<f64> = (0..k)
-            .map(|r| a[r] * (if r == w { 1.0 } else { 0.0 } - a[w]) * inv_tau)
-            .collect();
-        let dl: Vec<f64> = (0..k)
-            .map(|r| if a[r] > 0.0 { da[r] / a[r] } else { 0.0 })
-            .collect();
-        let dm: f64 = (0..k).map(|r| da[r] * l[r] + a[r] * dl[r]).sum();
-        let mut dh = Array2::<f64>::zeros((k, k));
-        for kk in 0..k {
-            for jj in 0..k {
-                let indicator = if kk == jj { 1.0 } else { 0.0 };
-                // bracket = δ_kj(m − L_k − 1) + a_j(L_k + L_j + 1 − 2m).
-                let bracket =
-                    indicator * (m - l[kk] - 1.0) + a[jj] * (l[kk] + l[jj] + 1.0 - 2.0 * m);
-                let dbracket = indicator * (dm - dl[kk])
-                    + da[jj] * (l[kk] + l[jj] + 1.0 - 2.0 * m)
-                    + a[jj] * (dl[kk] + dl[jj] - 2.0 * dm);
-                dh[[kk, jj]] = scale * (da[kk] * bracket + a[kk] * dbracket);
-            }
-        }
-        dh
-    }
-
     /// Per-row **Gershgorin diagonal majorizer** `D̃` of the exact softmax-entropy
-    /// Hessian `Self::row_dense_hessian`, scaled by `scale = λ/τ²`. Returns the
+    /// Hessian `H_kj = scale·a_k·[δ_kj·(m − L_k − 1) + a_j·(L_k + L_j + 1 − 2m)]` (`L_k = ln a_k + 1`, `m = Σ_r a_r L_r`), scaled by `scale = λ/τ²`. Returns the
     /// `K×K` diagonal block `diag(D̃_0, …, D̃_{K−1})` with
     /// `D̃_kk = Σ_j σ_{ε_k}(H_kj) ≥ Σ_j |H_kj|` — the smooth soft-abs envelope of
     /// the Gershgorin radius (#1419 majorizer, #2339 smoothing; the derivation

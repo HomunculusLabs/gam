@@ -5725,8 +5725,7 @@ impl SaeManifoldTerm {
             AssignmentMode::Softmax { .. } => {
                 // #1038: the softmax entropy Hessian is now stored DENSE in
                 // `block.htt` and its full θ-derivative `∂H_{k,j}/∂z_w` (diagonal
-                // AND off-diagonal) is added inline in `logdet_theta_adjoint` from
-                // the shared `row_dense_hessian_logit_derivative`. Returning the
+                // AND off-diagonal) is added inline in `logdet_theta_adjoint`. Returning the
                 // diagonal contribution here too would double-count, so this
                 // primitive is silent for softmax — the dense path is the single
                 // source for value, logdet, and adjoint.
