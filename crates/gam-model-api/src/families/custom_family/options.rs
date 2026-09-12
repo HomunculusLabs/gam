@@ -357,7 +357,7 @@ impl OuterDerivativePolicy {
     /// the gradient sweep takes minutes per outer iter; subsampling the
     /// pilot stage cuts that to seconds and leaves the final polish on
     /// full data to recover the MLE.
-    pub const OUTER_GRADIENT_WORK_BUDGET: u128 = 50_000_000_000;
+    pub(crate) const OUTER_GRADIENT_WORK_BUDGET: u128 = 50_000_000_000;
 
     /// Pilot subsample auto-engages when full-data `n` exceeds this. Below
     /// this the κ schedule collapses to a single full-data stage —

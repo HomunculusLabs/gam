@@ -119,7 +119,7 @@ impl CellMomentFamilySpec {
 
     /// Direct (ladder-quadrature) moment evaluation at `(a, b)` — the ground
     /// truth the interpolant is built from and certified against.
-    pub fn moments_direct(&self, a: f64, b: f64) -> Result<Vec<f64>, String> {
+    pub(crate) fn moments_direct(&self, a: f64, b: f64) -> Result<Vec<f64>, String> {
         let cell = self.cell_at(a, b)?;
         let state = evaluate_cell_derivative_moments_uncached(cell, self.max_degree)?;
         Ok(state.moments.to_vec())
@@ -342,10 +342,10 @@ impl ChebMomentFamily {
 /// Minimum rows a leaf must hold before family interpolants are built for
 /// it: below this the `m²` ladder evaluations per family cost more than the
 /// direct per-row ladder calls they replace.
-pub const FOREST_MIN_ROWS_PER_LEAF: usize = 256;
+pub(crate) const FOREST_MIN_ROWS_PER_LEAF: usize = 256;
 
 /// Maximum k-d subdivision depth of the `(a, b)` box forest.
-pub const FOREST_MAX_DEPTH: usize = 12;
+pub(crate) const FOREST_MAX_DEPTH: usize = 12;
 
 /// Tensor-Chebyshev node-count escalation ladder for forest-built families:
 /// like the quadrature ladder, the build accepts the first rung whose
@@ -355,7 +355,7 @@ pub const FOREST_NODE_LADDER: [usize; 4] = [8, 12, 16, 20];
 
 /// Build a family at the first node count on [`FOREST_NODE_LADDER`] whose
 /// certificate passes; `None` when no rung certifies (⇒ ladder fallback).
-pub fn build_family_escalating(
+pub(crate) fn build_family_escalating(
     spec: &CellMomentFamilySpec,
     a_box: (f64, f64),
     b_box: (f64, f64),

@@ -7,7 +7,7 @@ pub struct SigmaJet1 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SigmaJet3 {
+pub(crate) struct SigmaJet3 {
     pub sigma: f64,
     pub d1: f64,
     pub d2: f64,
@@ -136,7 +136,7 @@ pub fn exp_sigma_eta_for_sigma_scalar(sigma: f64) -> f64 {
 }
 
 #[inline]
-pub fn exp_sigma_jet3_scalar(eta: f64) -> SigmaJet3 {
+pub(crate) fn exp_sigma_jet3_scalar(eta: f64) -> SigmaJet3 {
     let jet = exp_sigma_jet4_scalar(eta);
     SigmaJet3 {
         sigma: jet.sigma,

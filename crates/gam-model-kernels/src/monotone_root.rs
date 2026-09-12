@@ -67,7 +67,7 @@ pub fn solve_monotone_root_detailed(
     )
 }
 
-pub fn solve_monotone_root_detailed_with_bracket(
+pub(crate) fn solve_monotone_root_detailed_with_bracket(
     eval: impl Fn(f64) -> Result<(f64, f64, f64), String>,
     a_init: f64,
     label: &str,

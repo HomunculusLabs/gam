@@ -13,23 +13,23 @@ use gam_linalg::faer_ndarray::FaerSvd;
 /// Khemakhem 2107.10098 §3: encoder must be "non-trivially nonlinear" — bare
 /// linear (1 affine layer) does not satisfy the universal-approximation
 /// argument that pushes identifiability through the encoder.
-pub const DEFAULT_IVAE_MIN_ENCODER_LAYERS: i64 = 2;
+pub(crate) const DEFAULT_IVAE_MIN_ENCODER_LAYERS: i64 = 2;
 
 /// Lachapelle 2401.04890 §2.4: at L1 equilibrium >=50% of the decoder
 /// Jacobian entries on the free block are near zero.
-pub const DEFAULT_MECH_SPARSITY_FRACTION: f64 = 0.50;
+pub(crate) const DEFAULT_MECH_SPARSITY_FRACTION: f64 = 0.50;
 
 /// Relative threshold for "near-zero" decoder entry — mirrors the paper's
 /// column-relative thresholding.
-pub const DEFAULT_MECH_SPARSITY_ZERO_TOL: f64 = 1.0e-3;
+pub(crate) const DEFAULT_MECH_SPARSITY_ZERO_TOL: f64 = 1.0e-3;
 
 /// Khemakhem App. A.3: encoder activation variance must be bounded. We treat
 /// activation variances above this ceiling as a hard fail.
-pub const DEFAULT_RANDPROJ_VAR_CEILING: f64 = 1.0e6;
+pub(crate) const DEFAULT_RANDPROJ_VAR_CEILING: f64 = 1.0e6;
 
 /// Variances above this floor (but below the ceiling) downgrade the random
 /// projection check to a warn — encoder is large but not yet unbounded.
-pub const DEFAULT_RANDPROJ_VAR_WARN: f64 = 1.0e3;
+pub(crate) const DEFAULT_RANDPROJ_VAR_WARN: f64 = 1.0e3;
 
 /// Tunable thresholds — every field has a paper-backed default and can be
 /// overridden per call (constructor kwargs in Python, struct literal here).
@@ -59,7 +59,7 @@ impl Default for Thresholds {
 
 /// Outcome of a single per-theorem precondition check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TheoremResult {
+pub(crate) struct TheoremResult {
     pub theorem_name: String,
     pub status: TheoremStatus,
     pub reason: String,
@@ -68,7 +68,7 @@ pub struct TheoremResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum TheoremStatus {
+pub(crate) enum TheoremStatus {
     Pass,
     Warn,
     Fail,
@@ -199,7 +199,7 @@ fn matrix_rank(mat: ArrayView2<f64>) -> Result<usize, String> {
 }
 
 /// Khemakhem 2107.10098 Theorem 1 preconditions.
-pub fn check_ivae(summary: &FitSummary, thr: &Thresholds) -> TheoremResult {
+pub(crate) fn check_ivae(summary: &FitSummary, thr: &Thresholds) -> TheoremResult {
     let mut metric: BTreeMap<String, f64> = BTreeMap::new();
     let mut issues: Vec<String> = Vec::new();
     let mut status = TheoremStatus::Pass;
@@ -324,7 +324,7 @@ pub fn check_ivae(summary: &FitSummary, thr: &Thresholds) -> TheoremResult {
 }
 
 /// Lachapelle 2401.04890 Theorem preconditions.
-pub fn check_mechanism_sparsity(summary: &FitSummary, thr: &Thresholds) -> TheoremResult {
+pub(crate) fn check_mechanism_sparsity(summary: &FitSummary, thr: &Thresholds) -> TheoremResult {
     let mut metric: BTreeMap<String, f64> = BTreeMap::new();
     let mut issues: Vec<String> = Vec::new();
     let mut status = TheoremStatus::Pass;
@@ -500,7 +500,7 @@ pub fn check_mechanism_sparsity(summary: &FitSummary, thr: &Thresholds) -> Theor
 }
 
 /// Random-projection identifiability precondition (Khemakhem App. A.3).
-pub fn check_random_projection(summary: &FitSummary, thr: &Thresholds) -> TheoremResult {
+pub(crate) fn check_random_projection(summary: &FitSummary, thr: &Thresholds) -> TheoremResult {
     let mut metric: BTreeMap<String, f64> = BTreeMap::new();
 
     let act_rows = match summary.activations.as_ref() {
@@ -581,7 +581,7 @@ pub fn check_random_projection(summary: &FitSummary, thr: &Thresholds) -> Theore
 }
 
 /// Run every applicable identifiability theorem check.
-pub fn identifiability_check(summary: &FitSummary) -> Vec<TheoremResult> {
+pub(crate) fn identifiability_check(summary: &FitSummary) -> Vec<TheoremResult> {
     let thr = summary.thresholds.unwrap_or_default();
     vec![
         check_ivae(summary, &thr),

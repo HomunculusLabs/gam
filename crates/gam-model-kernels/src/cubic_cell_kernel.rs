@@ -968,7 +968,7 @@ pub enum PartitionEdge {
 impl PartitionEdge {
     /// The boundary's z location at the row scalars `(a, b)`.
     #[inline]
-    pub fn z_at(self, a: f64, b: f64) -> f64 {
+    pub(crate) fn z_at(self, a: f64, b: f64) -> f64 {
         match self {
             Self::Fixed(z) => z,
             Self::Crossing { tau } => (tau - a) / b,
@@ -1026,7 +1026,7 @@ impl TailCellMomentCacheStats {
 /// marginal-slope exact-cache build — the same contention class the sharded
 /// per-family cell-moment LRU fix removed.
 #[derive(Debug)]
-pub struct TailCellMomentCache {
+pub(crate) struct TailCellMomentCache {
     moments: ByteLruCache<TailCellMomentCacheKey, CellMomentState>,
     in_flight: std::sync::Mutex<
         std::collections::HashMap<
@@ -1266,7 +1266,7 @@ impl CachedCellMoments {
     }
 
     #[inline]
-    pub fn new_derivative(state: Arc<CellDerivativeMomentState>) -> Self {
+    pub(crate) fn new_derivative(state: Arc<CellDerivativeMomentState>) -> Self {
         Self {
             state: None,
             derivative_state: Some(state),
@@ -1274,7 +1274,7 @@ impl CachedCellMoments {
     }
 
     #[inline]
-    pub fn state_for_degree(&self, max_degree: usize) -> Option<CellMomentState> {
+    pub(crate) fn state_for_degree(&self, max_degree: usize) -> Option<CellMomentState> {
         let state = self.state.as_ref()?;
         if state.moments.len().saturating_sub(1) < max_degree {
             return None;
@@ -1289,7 +1289,7 @@ impl CachedCellMoments {
     }
 
     #[inline]
-    pub fn derivative_state_for_degree(
+    pub(crate) fn derivative_state_for_degree(
         &self,
         max_degree: usize,
     ) -> Option<CellDerivativeMomentState> {
@@ -1310,7 +1310,7 @@ impl CachedCellMoments {
     }
 
     #[inline]
-    pub fn with_derivative(mut self, state: Arc<CellDerivativeMomentState>) -> Self {
+    pub(crate) fn with_derivative(mut self, state: Arc<CellDerivativeMomentState>) -> Self {
         self.derivative_state = Some(state);
         self
     }
@@ -1436,7 +1436,7 @@ pub const GL20_NODES: [f64; 20] = [
 ];
 
 /// Companion weights to [`GL20_NODES`]. Symmetric, summing to 2.
-pub const GL20_WEIGHTS: [f64; 20] = [
+pub(crate) const GL20_WEIGHTS: [f64; 20] = [
     0.017_614_007_139_152_12,
     0.040_601_429_800_386_94,
     0.062_672_048_334_109_06,
@@ -3047,7 +3047,7 @@ fn validate_affine_cell_inputs(cell: DenestedCubicCell, max_degree: usize) -> Re
 /// The zero-moment derivative is exact, and `value` is reconstructed by
 /// integrating `d value / d alpha = INV_TWO_PI * moments[0]` over `alpha`
 /// on a transformed semi-infinite domain.
-pub fn evaluate_affine_cell_state(
+pub(crate) fn evaluate_affine_cell_state(
     cell: DenestedCubicCell,
     max_degree: usize,
 ) -> Result<CellMomentState, String> {
@@ -3516,7 +3516,7 @@ pub fn evaluate_cell_moments(
 ///
 /// This is retained for regression tests and before/after microbenchmarks;
 /// production callers should use [`evaluate_cell_moments`].
-pub fn evaluate_cell_moments_uncached(
+pub(crate) fn evaluate_cell_moments_uncached(
     cell: DenestedCubicCell,
     max_degree: usize,
 ) -> Result<CellMomentState, String> {
