@@ -171,7 +171,7 @@ const TURNING_QUADRATURE_CELLS: usize = 256;
 /// next node (composite Simpson), so the speed field is sampled at
 /// `2·ARC_LENGTH_GRID_CELLS + 1` points; the per-cell quadrature error is
 /// `O(Δu⁴)`, far below the recomposition tolerance.
-pub const ARC_LENGTH_GRID_CELLS: usize = 2048;
+pub(crate) const ARC_LENGTH_GRID_CELLS: usize = 2048;
 
 /// Relative image-recomposition tolerance: the canonicalization is refused
 /// (honest fallback to the fitted chart) when the max-abs difference between
@@ -541,7 +541,7 @@ pub(crate) fn recompose_decoder_exact_ls(
 /// translations) are EXCLUDED on purpose: translations are exact isometries
 /// of `(T², g_ref)`, so they leave the defect invariant and would only insert
 /// null directions into the Gauss–Newton system.
-pub const TORUS_FLOW_MAX_HARMONIC: i32 = 2;
+pub(crate) const TORUS_FLOW_MAX_HARMONIC: i32 = 2;
 
 /// Diffeomorphism floor `δ`: a candidate flow is REJECTED (the line search
 /// treats it as a failed step; the final chart is never produced) when
@@ -582,7 +582,7 @@ pub const TORUS_FLOW_GUARD_NODES_PER_AXIS: usize = 64;
 /// problem is a 48-dimensional smooth nonlinear least squares; quadratic
 /// local convergence makes this cap generous (termination is normally by the
 /// relative step / improvement tolerances below).
-pub const TORUS_FLOW_GN_MAX_ITERS: usize = 80;
+pub(crate) const TORUS_FLOW_GN_MAX_ITERS: usize = 80;
 
 /// Consecutive damping escalations before the Gauss–Newton declares the
 /// current iterate a local minimum and stops.
@@ -620,7 +620,7 @@ const LM_STEP_STALL_REL_FLOOR: f64 = 1.0e-24;
 /// Minimum per-axis node count of the decoder-recomposition audit grid. The
 /// actual count also scales with the basis width (`3·√m` per axis) so the
 /// tensor harmonic basis is always Nyquist-oversampled on the audit grid.
-pub const TORUS_TRANSPORT_MIN_NODES_PER_AXIS: usize = 48;
+pub(crate) const TORUS_TRANSPORT_MIN_NODES_PER_AXIS: usize = 48;
 
 /// Identity of one flow mode (for tests and diagnostics): which coordinate
 /// component the vector field moves, its integer frequency vector, and its
@@ -737,7 +737,7 @@ impl TorusFlowBasis {
     }
 
     /// `φ_θ(t)`, wrapped into `[0, period)` per axis.
-    pub fn map_point(&self, theta: &[f64], t: [f64; 2]) -> [f64; 2] {
+    pub(crate) fn map_point(&self, theta: &[f64], t: [f64; 2]) -> [f64; 2] {
         assert_eq!(theta.len(), self.dim(), "TorusFlowBasis: theta length");
         let mut out = t;
         for (coef, sample) in theta.iter().zip(self.mode_samples(t)) {
@@ -750,7 +750,7 @@ impl TorusFlowBasis {
     }
 
     /// Flow Jacobian `Dφ_θ(t) = I + Σ_k θ_k Dv_k(t)`, row-major.
-    pub fn flow_jacobian(&self, theta: &[f64], t: [f64; 2]) -> [[f64; 2]; 2] {
+    pub(crate) fn flow_jacobian(&self, theta: &[f64], t: [f64; 2]) -> [[f64; 2]; 2] {
         assert_eq!(theta.len(), self.dim(), "TorusFlowBasis: theta length");
         let mut jac = [[1.0, 0.0], [0.0, 1.0]];
         for (coef, sample) in theta.iter().zip(self.mode_samples(t)) {
@@ -1860,12 +1860,12 @@ pub fn torus_isometry_flow_reparameterization(
 /// (rotation / shear / anisotropic scale); the rotation and global-scale
 /// sub-directions are defect-null and the Levenberg damping absorbs them
 /// harmlessly.
-pub const PATCH_FLOW_MAX_DEGREE: usize = 1;
+pub(crate) const PATCH_FLOW_MAX_DEGREE: usize = 1;
 
 /// Diffeomorphism floor `δ` for the free-patch flow — identical contract to
 /// [`TORUS_FLOW_DIFFEO_MIN_DET`]: a candidate with `det Dφ_θ ≤ δ` anywhere on
 /// the check grid is rejected, so the optimizer can never walk through a fold.
-pub const PATCH_FLOW_DIFFEO_MIN_DET: f64 = SAE_FLOW_DIFFEO_MIN_DET;
+pub(crate) const PATCH_FLOW_DIFFEO_MIN_DET: f64 = SAE_FLOW_DIFFEO_MIN_DET;
 
 /// Per-axis node count of the free-patch diffeomorphism-guard check grid. With
 /// the affine flow basis (`PATCH_FLOW_MAX_DEGREE = 1`) the Jacobian `Dφ_θ` is
@@ -1896,11 +1896,11 @@ pub const PATCH_FLOW_DIFFEO_MIN_DET: f64 = SAE_FLOW_DIFFEO_MIN_DET;
 ///
 /// The guard grid spans the normalized patch box `[-1, 1]²` slightly widened to
 /// `[-1.1, 1.1]²` so a fold just outside the data hull is still refused.
-pub const PATCH_FLOW_GUARD_NODES_PER_AXIS: usize = 48;
+pub(crate) const PATCH_FLOW_GUARD_NODES_PER_AXIS: usize = 48;
 
 /// Minimum per-axis node count of the free-patch decoder-recomposition audit
 /// grid (scaled up with the basis width like the torus path).
-pub const PATCH_TRANSPORT_MIN_NODES_PER_AXIS: usize = 48;
+pub(crate) const PATCH_TRANSPORT_MIN_NODES_PER_AXIS: usize = 48;
 
 /// Identity of one free-patch flow mode (for tests / diagnostics): which
 /// coordinate component the vector field moves and its monomial exponents.
@@ -2020,7 +2020,7 @@ impl FreePatchFlowBasis {
     }
 
     /// `φ_θ(t) = t + Σ_k θ_k v_k(t)` (no wrap — the patch is not periodic).
-    pub fn map_point(&self, theta: &[f64], t: [f64; 2]) -> [f64; 2] {
+    pub(crate) fn map_point(&self, theta: &[f64], t: [f64; 2]) -> [f64; 2] {
         assert_eq!(theta.len(), self.dim(), "FreePatchFlowBasis: theta length");
         let mut out = t;
         for (coef, sample) in theta.iter().zip(self.mode_samples(t)) {
@@ -2030,7 +2030,7 @@ impl FreePatchFlowBasis {
     }
 
     /// Flow Jacobian `Dφ_θ(t) = I + Σ_k θ_k Dv_k(t)`, row-major.
-    pub fn flow_jacobian(&self, theta: &[f64], t: [f64; 2]) -> [[f64; 2]; 2] {
+    pub(crate) fn flow_jacobian(&self, theta: &[f64], t: [f64; 2]) -> [[f64; 2]; 2] {
         assert_eq!(theta.len(), self.dim(), "FreePatchFlowBasis: theta length");
         let mut jac = [[1.0, 0.0], [0.0, 1.0]];
         for (coef, sample) in theta.iter().zip(self.mode_samples(t)) {
@@ -2288,7 +2288,7 @@ pub fn patch_isometry_flow_reparameterization(
 /// flow with `det Dφ_θ ≤ δ` anywhere on the data band is rejected, so the
 /// optimizer never walks through a fold (identical contract to the torus /
 /// patch floors).
-pub const SPHERE_FLOW_DIFFEO_MIN_DET: f64 = SAE_FLOW_DIFFEO_MIN_DET;
+pub(crate) const SPHERE_FLOW_DIFFEO_MIN_DET: f64 = SAE_FLOW_DIFFEO_MIN_DET;
 
 /// Latitude band margin (radians) from each pole inside which the sphere
 /// conformal-boost flow is well-conditioned. The off-meridian boost generators
@@ -2935,7 +2935,7 @@ fn sphere_minimize_boost_defect(
 /// Returns `None` on a degenerate atom (no rows, no second jet, a collapsed
 /// coordinate range, or a non-finite integrand) — an honest refusal, never a
 /// fabricated number.
-pub fn d1_atom_fitted_turning(
+pub(crate) fn d1_atom_fitted_turning(
     evaluator: &dyn SaeBasisEvaluator,
     decoder: ArrayView2<'_, f64>,
     row_coords: ArrayView1<'_, f64>,

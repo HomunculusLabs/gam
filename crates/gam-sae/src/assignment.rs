@@ -35,13 +35,13 @@ pub struct SupportMeasure {
 
 impl SupportMeasure {
     #[must_use = "support construction error must be handled"]
-    pub fn from_assignment(assignment: &SaeAssignment, atom_idx: usize) -> Result<Self, String> {
+    pub(crate) fn from_assignment(assignment: &SaeAssignment, atom_idx: usize) -> Result<Self, String> {
         let assignments = assignment.assignments();
         Self::from_assignment_matrix(assignments.view(), atom_idx)
     }
 
     #[must_use = "support construction error must be handled"]
-    pub fn from_assignment_matrix(
+    pub(crate) fn from_assignment_matrix(
         assignments: ArrayView2<'_, f64>,
         atom_idx: usize,
     ) -> Result<Self, String> {
@@ -56,7 +56,7 @@ impl SupportMeasure {
     }
 
     #[must_use = "support construction error must be handled"]
-    pub fn from_weights(atom_idx: usize, weights: Array1<f64>) -> Result<Self, String> {
+    pub(crate) fn from_weights(atom_idx: usize, weights: Array1<f64>) -> Result<Self, String> {
         let mut mass = 0.0_f64;
         let mut fisher_n = 0.0_f64;
         for (row, &w) in weights.iter().enumerate() {
@@ -436,7 +436,7 @@ impl SaeAssignment {
     }
 
     #[must_use = "build error must be handled"]
-    pub fn with_mode(
+    pub(crate) fn with_mode(
         mut logits: Array2<f64>,
         coords: Vec<LatentCoordValues>,
         mode: AssignmentMode,
@@ -510,7 +510,7 @@ impl SaeAssignment {
     }
 
     /// Whether the per-row routing is FROZEN (amortized) rather than free-logit.
-    pub fn routing_is_frozen(&self) -> bool {
+    pub(crate) fn routing_is_frozen(&self) -> bool {
         self.frozen_logits.is_some()
     }
 
@@ -554,7 +554,7 @@ impl SaeAssignment {
     }
 
     /// Whether any atom is ungated (the #1026 background tier is engaged).
-    pub fn has_ungated(&self) -> bool {
+    pub(crate) fn has_ungated(&self) -> bool {
         self.ungated.iter().any(|&u| u)
     }
 
@@ -566,11 +566,11 @@ impl SaeAssignment {
         self.logits.ncols()
     }
 
-    pub fn total_coord_dim(&self) -> usize {
+    pub(crate) fn total_coord_dim(&self) -> usize {
         self.coords.iter().map(|c| c.latent_dim()).sum()
     }
 
-    pub fn assignment_coord_dim(&self) -> usize {
+    pub(crate) fn assignment_coord_dim(&self) -> usize {
         match self.mode {
             AssignmentMode::Softmax { .. } => self.k_atoms().saturating_sub(1),
             AssignmentMode::OrderedBetaBernoulli { .. } | AssignmentMode::ThresholdGate { .. } => {
@@ -587,7 +587,7 @@ impl SaeAssignment {
         self.assignment_coord_dim() + self.total_coord_dim()
     }
 
-    pub fn coord_offsets(&self) -> Vec<usize> {
+    pub(crate) fn coord_offsets(&self) -> Vec<usize> {
         let mut out = Vec::with_capacity(self.k_atoms());
         let mut cursor = self.assignment_coord_dim();
         for coord in &self.coords {
@@ -610,7 +610,7 @@ impl SaeAssignment {
         out
     }
 
-    pub fn assignments_row(&self, row: usize) -> Array1<f64> {
+    pub(crate) fn assignments_row(&self, row: usize) -> Array1<f64> {
         self.try_assignments_row(row)
             .expect("assignment logits must be finite")
     }
@@ -683,7 +683,7 @@ impl SaeAssignment {
     /// #1777 — install (or clear, with `None`) the PER-FIT ordered Beta--Bernoulli-α override on this
     /// assignment. Source of truth used by `Self::resolved_ordered_beta_bernoulli_alpha`; the FFI
     /// reaches it through the term's `set_fit_config`.
-    pub fn set_ordered_beta_bernoulli_alpha_override(&mut self, alpha: Option<f64>) {
+    pub(crate) fn set_ordered_beta_bernoulli_alpha_override(&mut self, alpha: Option<f64>) {
         self.ordered_beta_bernoulli_alpha_override = alpha;
     }
 
@@ -824,7 +824,7 @@ impl SaeAssignment {
     /// Softmax contributes the first `K - 1` reference logits and omits the
     /// fixed reference logit; gate-style assignment modes contribute all `K`
     /// logits.
-    pub fn flatten_ext_coords(&self) -> Array1<f64> {
+    pub(crate) fn flatten_ext_coords(&self) -> Array1<f64> {
         let n = self.n_obs();
         let q = self.row_block_dim();
         let k = self.k_atoms();

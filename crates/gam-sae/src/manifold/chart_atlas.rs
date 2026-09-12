@@ -200,12 +200,12 @@ pub struct SphereChartTransition {
 
 impl SphereChartTransition {
     #[must_use]
-    pub fn from_chart(&self) -> usize {
+    pub(crate) fn from_chart(&self) -> usize {
         self.from_chart
     }
 
     #[must_use]
-    pub fn to_chart(&self) -> usize {
+    pub(crate) fn to_chart(&self) -> usize {
         self.to_chart
     }
 
@@ -215,7 +215,7 @@ impl SphereChartTransition {
     }
 
     #[must_use]
-    pub fn seam_kind(&self) -> AtlasSeamKind {
+    pub(crate) fn seam_kind(&self) -> AtlasSeamKind {
         self.seam_kind
     }
 
@@ -225,7 +225,7 @@ impl SphereChartTransition {
     }
 
     #[must_use = "fitted transition validation errors must be handled"]
-    pub fn new_fitted(
+    pub(crate) fn new_fitted(
         from_chart: usize,
         to_chart: usize,
         rotation: [[f64; 3]; 3],
@@ -298,7 +298,7 @@ impl SphereChartTransition {
     /// A fitted polar factor deliberately returns `None` even though its
     /// numerical determinant is ±1.
     #[must_use]
-    pub fn analytic_sign(&self) -> Option<i8> {
+    pub(crate) fn analytic_sign(&self) -> Option<i8> {
         matches!(self.provenance, SphereTransitionProvenance::Analytic)
             .then(|| if self.determinant() >= 0.0 { 1 } else { -1 })
     }
@@ -420,7 +420,7 @@ pub struct ManifoldChartAtlas {
 
 impl ManifoldChartAtlas {
     #[must_use = "atlas validation errors must be handled"]
-    pub fn from_transition(transition: UnitSpeedChartTransition) -> Result<Self, String> {
+    pub(crate) fn from_transition(transition: UnitSpeedChartTransition) -> Result<Self, String> {
         let charts = vec![
             transition.from_chart.min(transition.to_chart),
             transition.from_chart.max(transition.to_chart),
@@ -435,7 +435,7 @@ impl ManifoldChartAtlas {
     }
 
     #[must_use = "atlas validation errors must be handled"]
-    pub fn from_sphere_transition(transition: SphereChartTransition) -> Result<Self, String> {
+    pub(crate) fn from_sphere_transition(transition: SphereChartTransition) -> Result<Self, String> {
         let charts = vec![
             transition.from_chart.min(transition.to_chart),
             transition.from_chart.max(transition.to_chart),
@@ -461,7 +461,7 @@ impl ManifoldChartAtlas {
 
     /// The registered two-dimensional sphere pole seams, in canonical order.
     #[must_use]
-    pub fn sphere_transitions(&self) -> &[SphereChartTransition] {
+    pub(crate) fn sphere_transitions(&self) -> &[SphereChartTransition] {
         &self.sphere_transitions
     }
 
@@ -493,7 +493,7 @@ impl ManifoldChartAtlas {
     }
 
     #[must_use]
-    pub fn contains_chart(&self, chart: usize) -> bool {
+    pub(crate) fn contains_chart(&self, chart: usize) -> bool {
         self.charts.binary_search(&chart).is_ok()
     }
 
@@ -765,14 +765,14 @@ fn disjoint_set_root(parents: &mut [usize], node: usize) -> usize {
 impl SaeManifoldTerm {
     /// Registered multi-chart semantic atoms in canonical chart-index order.
     #[must_use]
-    pub fn chart_atlases(&self) -> &[ManifoldChartAtlas] {
+    pub(crate) fn chart_atlases(&self) -> &[ManifoldChartAtlas] {
         &self.chart_atlases
     }
 
     /// Whether two numerical chart blocks have already been quotiented into the
     /// same semantic atlas atom.
     #[must_use]
-    pub fn charts_share_atlas(&self, a: usize, b: usize) -> bool {
+    pub(crate) fn charts_share_atlas(&self, a: usize, b: usize) -> bool {
         self.chart_atlases
             .iter()
             .any(|atlas| atlas.contains_chart(a) && atlas.contains_chart(b))
@@ -830,7 +830,7 @@ impl SaeManifoldTerm {
     /// `latent_dim = 2` charts), creating or joining atlas components exactly as
     /// [`Self::register_chart_transition`] does for the one-dimensional kind.
     #[must_use = "atlas registration errors must be handled"]
-    pub fn register_sphere_chart_transition(
+    pub(crate) fn register_sphere_chart_transition(
         &mut self,
         transition: SphereChartTransition,
     ) -> Result<(), String> {
