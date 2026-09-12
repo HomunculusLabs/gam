@@ -1048,6 +1048,19 @@ where
     let mut negbin_alternation_round: usize = 0;
     let mut negbin_rho_seed: Option<Array1<f64>> = None;
     let mut negbin_best_checkpoint: Option<NegbinJointCheckpoint> = None;
+    // The box the outer arm searches the ρ block in, and so the box its
+    // certificate judges rails against. The ρ-only arm searches the #2812
+    // resolvability domain; the mixture/SAS arm still searches the ±RHO_BOUND box
+    // (#2902 row 8). Every post-fit projection below reads this one box (#2412),
+    // so a coordinate railed on a derived face is scored as railed there too.
+    let rho_model_domain: (Array1<f64>, Array1<f64>) = if mixture_dim == 0 && sas_dim == 0 {
+        (rho_domain_lower, rho_domain_upper)
+    } else {
+        (
+            Array1::from_elem(k, -crate::estimate::RHO_BOUND),
+            Array1::from_elem(k, crate::estimate::RHO_BOUND),
+        )
+    };
     loop {
         (
             final_rho,
@@ -1119,7 +1132,7 @@ where
                 // component still owns the actual convergence decision.
                 .with_objective_scale(Some(n_obs as f64))
                 .with_problem_size(n_obs, x_o.ncols())
-                .with_bounds(rho_domain_lower.clone(), rho_domain_upper.clone())
+                .with_bounds(rho_model_domain.0.clone(), rho_model_domain.1.clone())
                 // Make the outer smoothing-parameter search invariant to the order
                 // the smooth terms / tensor margins were written (#1538/#1539). The
                 // structural keys label each ρ-coordinate by its placement-
@@ -1232,7 +1245,7 @@ where
                 // `hi`, so the box stays ordered by construction (the derived upper
                 // edge is finite) — no re-validation needed.
                 let seed_bounds = raw_bounds.with_upper_at_least(
-                    rho_domain_upper.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                    rho_model_domain.1.iter().copied().fold(f64::NEG_INFINITY, f64::max),
                 );
                 // risk_shift is the default seed bias when no caller warm-start is given;
                 // it is NOT applied on top of a caller-supplied rho seed.
@@ -1258,7 +1271,7 @@ where
                 // weight-anchored origin). A smooth whose penalized subspace carries
                 // little data support gets a large `λ_j` by construction, so the
                 // #1266/#1464 high-λ basin is reached analytically without a lattice
-                // search; `(lo, hi)` already widens `hi` to `RHO_BOUND` so a
+                // search; `seed_bounds` already widens `hi` to the domain's upper face so a
                 // genuinely large `λ_j` is not clipped to the seed band. The seed is
                 // order-independent, so no canonical permutation is needed.
                 // Two principled, data-derived candidates are scored against the
@@ -1966,8 +1979,8 @@ where
             // not silently set the theta fixed-point threshold.
             let theta_bound = reml_tol;
 
-            let rho_lower = Array1::from_elem(final_rho.len(), -crate::estimate::RHO_BOUND);
-            let rho_upper = Array1::from_elem(final_rho.len(), crate::estimate::RHO_BOUND);
+            let rho_lower = rho_model_domain.0.clone();
+            let rho_upper = rho_model_domain.1.clone();
             // Judged against `certificate.stationarity.bound()` just below, so
             // it must be projected against the box that certificate used
             // (#2412) — otherwise a railed coordinate's outward pull is scored
@@ -2720,8 +2733,8 @@ where
         (outer_result.final_value, Array1::zeros(0), 0.0)
     } else {
         let (value, gradient) = reml_state.compute_cost_and_gradient(&final_rho)?;
-        let lower = Array1::from_elem(final_rho.len(), -crate::estimate::RHO_BOUND);
-        let upper = Array1::from_elem(final_rho.len(), crate::estimate::RHO_BOUND);
+        let lower = rho_model_domain.0.clone();
+        let upper = rho_model_domain.1.clone();
         // Shipped as the result's `final_grad_norm` and reported in the
         // refusal below, so it uses the certificate's rail-relaxed box (#2412)
         // -- the same projection the certified |Pg| was measured with, even
@@ -3098,13 +3111,10 @@ where
             .collect();
             let smoothing_outcome = reml_state.compute_smoothing_correction_auto(
                 &final_rho,
-                // Use the same domain as both standard REML outer routes and
-                // the shipped-point certificate above. A separately estimated
-                // resolvability box need not contain this certified mode.
-                &(
-                    Array1::from_elem(final_rho.len(), -crate::estimate::RHO_BOUND),
-                    Array1::from_elem(final_rho.len(), crate::estimate::RHO_BOUND),
-                ),
+                // The box the outer arm searched and the shipped-point
+                // certificate above judged rails against, so it contains the
+                // certified mode by construction.
+                &rho_model_domain,
                 &lambdas,
                 &pirls_res,
                 beta_covariance_unscaled.as_ref(),
