@@ -64,7 +64,7 @@
 //!
 //! ```text
 //! cargo run -p gam-sae --example behavioral_curvature_map -- \
-//!   <input_dir_or_json> [out.json] [max_rows] [--grid G]
+//!   <input_dir_or_json> [out.json] [max_rows]
 //! ```
 
 use gam_sae::inference::contracts::{HolonomyReport, invert_o2_edge, loop_holonomy};
@@ -80,8 +80,6 @@ use std::process::ExitCode;
 
 /// Cap on rows fed to each transport fit (deterministic strided subsample).
 const DEFAULT_MAX_ROWS: usize = 20_000;
-/// Grid for the O(2) classification and the analytic composition-law test.
-const DEFAULT_GRID: usize = 256;
 /// Fundamental-harmonic amplitude below this fraction of the per-layer maximum
 /// makes the recovered `atan2(z1, z0)` angle numerically undefined; such rows
 /// are dropped (see module docs).
@@ -113,7 +111,6 @@ struct Args {
     input: PathBuf,
     out: PathBuf,
     max_rows: usize,
-    grid: usize,
 }
 
 impl Args {
@@ -122,24 +119,11 @@ impl Args {
         let program = raw
             .next()
             .unwrap_or_else(|| "behavioral_curvature_map".to_string());
-        let usage =
-            format!("usage: {program} <input_dir_or_json> [out.json] [max_rows] [--grid G]");
+        let usage = format!("usage: {program} <input_dir_or_json> [out.json] [max_rows]");
         let mut input: Option<PathBuf> = None;
         let mut positional: Vec<String> = Vec::new();
-        let mut grid = DEFAULT_GRID;
-        while let Some(arg) = raw.next() {
+        for arg in raw {
             match arg.as_str() {
-                "--grid" => {
-                    let Some(v) = raw.next() else {
-                        return Err(format!("--grid requires an integer\n{usage}"));
-                    };
-                    grid = v
-                        .parse::<usize>()
-                        .map_err(|e| format!("--grid must be a positive integer: {e}\n{usage}"))?;
-                    if grid < 16 {
-                        return Err(format!("--grid must be at least 16, got {grid}\n{usage}"));
-                    }
-                }
                 flag if flag.starts_with("--") => {
                     return Err(format!("unknown argument {flag}\n{usage}"));
                 }
@@ -174,7 +158,6 @@ impl Args {
             input,
             out,
             max_rows,
-            grid,
         })
     }
 }
@@ -366,7 +349,7 @@ fn run(args: &Args) -> Result<PathBuf, String> {
                 // calibrated). Best-effort: record its error rather than aborting
                 // the whole map if a single triple degenerates.
                 let comp: Result<CompositionDefectReport, String> =
-                    composition_defect(&fits[&(a, b)], &fits[&(b, c)], &fits[&(a, c)], args.grid);
+                    composition_defect(&fits[&(a, b)], &fits[&(b, c)], &fits[&(a, c)]);
 
                 // Attribute the excess holonomy uniformly across the adjacent
                 // intervals spanned by the direct edge (a..c).
@@ -471,7 +454,6 @@ fn run(args: &Args) -> Result<PathBuf, String> {
         "n_rows_total": n_full,
         "n_rows_kept_after_gating": n_kept,
         "n_rows_used": n_used,
-        "composition_grid": args.grid,
         "layers": layers,
         "layer_provenance": layer_provenance,
         "attribution_rule": "per-interval computation_score = summed EXCESS holonomy \

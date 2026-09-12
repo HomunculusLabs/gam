@@ -6,8 +6,7 @@
 //! inconsistent triple — with rotation-gauge invariance of the verdict.
 
 use gam::inference::layer_transport::{
-    ChartTopology, DEFAULT_COMPOSITION_GRID, composition_defect, fit_transport_map,
-    transport_ladder,
+    ChartTopology, composition_defect, fit_transport_map, transport_ladder,
 };
 use ndarray::Array1;
 use std::f64::consts::TAU;
@@ -193,7 +192,7 @@ fn composition_law_passes_on_consistent_triples_and_does_not_fit_target_shift_aw
     let h_bc = fit_transport_map(coords_b.view(), coords_c.view(), circle, circle).expect("h_bc");
     let h_ac = fit_transport_map(t.view(), coords_c.view(), circle, circle).expect("h_ac");
 
-    let report = composition_defect(&h_ab, &h_bc, &h_ac, DEFAULT_COMPOSITION_GRID)
+    let report = composition_defect(&h_ab, &h_bc, &h_ac)
         .expect("consistent composition test");
     assert!(
         report.rms_defect < 0.08,
@@ -212,7 +211,7 @@ fn composition_law_passes_on_consistent_triples_and_does_not_fit_target_shift_aw
     let rotated_c = coords_c.mapv(|v| (v + 1.3).rem_euclid(TAU));
     let h_ac_rot =
         fit_transport_map(t.view(), rotated_c.view(), circle, circle).expect("rotated h_ac");
-    let rotated = composition_defect(&h_ab, &h_bc, &h_ac_rot, DEFAULT_COMPOSITION_GRID)
+    let rotated = composition_defect(&h_ab, &h_bc, &h_ac_rot)
         .expect("rotated composition test");
     assert!(
         rotated.rms_defect > 1.0,
@@ -247,7 +246,7 @@ fn composition_law_rejects_a_planted_inconsistent_triple() {
     let h_ac_bad =
         fit_transport_map(t.view(), coords_c_bad.view(), circle, circle).expect("bad h_ac");
 
-    let report = composition_defect(&h_ab, &h_bc, &h_ac_bad, DEFAULT_COMPOSITION_GRID)
+    let report = composition_defect(&h_ab, &h_bc, &h_ac_bad)
         .expect("inconsistent composition test");
     assert!(
         report.rms_defect > 0.2,

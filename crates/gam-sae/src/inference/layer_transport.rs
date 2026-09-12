@@ -31,7 +31,10 @@
 //!    reshaped).
 //! 3. **Composition law** — `h_{l→l+2}` vs `h_{l+1→l+2} ∘ h_{l→l+1}`. The
 //!    defect `d(t) = h_ac(t) ⊖ h_bc(h_ab(t))` (circular difference on circle
-//!    charts) is evaluated on a grid and studentized with a joint shared-row
+//!    charts) is evaluated on a grid that samples every segment of the finer
+//!    source-domain spline with `degree + 1` points (the points that fix one
+//!    polynomial piece, so the grid resolves the fits without a caller-chosen
+//!    density), and is studentized with a joint shared-row
 //!    influence sandwich, with resolution bounded below by the fitted maps'
 //!    observed approximation error. A Bonferroni max test controls the grid
 //!    family under arbitrary pointwise dependence; deterministic fits with
@@ -86,8 +89,6 @@ const MAX_PERIODIC_BASIS: usize = 20;
 /// Open-interval internal-knot bounds.
 const MIN_OPEN_INTERNAL_KNOTS: usize = 4;
 const MAX_OPEN_INTERNAL_KNOTS: usize = 12;
-/// Default evaluation grid for the composition-law defect.
-pub const DEFAULT_COMPOSITION_GRID: usize = 256;
 
 /// Topology of a one-dimensional concept chart.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -242,6 +243,16 @@ impl DomainBasis {
         match self {
             DomainBasis::Periodic(spec) => spec.num_basis,
             DomainBasis::Open { knots, degree } => knots.len() - degree - 1,
+        }
+    }
+
+    /// Polynomial pieces of the spline over its domain: `num_basis` uniform
+    /// segments on the periodic basis, `num_basis − degree` knot spans on the
+    /// open basis.
+    fn num_segments(&self) -> usize {
+        match self {
+            DomainBasis::Periodic(spec) => spec.num_basis,
+            DomainBasis::Open { degree, .. } => self.num_basis() - degree,
         }
     }
 
@@ -1205,6 +1216,8 @@ pub fn fit_layer_transport(
 /// Composition-law test report for one triple `(h_ab, h_bc, h_ac)`.
 #[derive(Debug, Clone)]
 pub struct CompositionDefectReport {
+    /// Grid points tested: `degree + 1` per segment of the finer source-domain
+    /// spline.
     pub n_grid: usize,
     /// Always zero: no post-hoc target rotation is fitted.
     pub gauge_rotation: f64,
@@ -1353,7 +1366,7 @@ fn domain_grid(topology: ChartTopology, n: usize) -> Array1<f64> {
     }
 }
 
-/// Test the composition law `h_ac ≟ h_bc ∘ h_ab` on `n_grid` points.
+/// Test the composition law `h_ac ≟ h_bc ∘ h_ab` on a grid derived from the fits.
 ///
 /// The defect `d(t) = h_ac(t) ⊖ (h_bc ∘ h_ab)(t)` (circular difference on
 /// circle targets) is computed directly in the common target chart: no gauge is
@@ -1362,11 +1375,15 @@ fn domain_grid(topology: ChartTopology, n: usize) -> Array1<f64> {
 /// shared-row covariance. Its resolution is bounded below by the three maps'
 /// observed residual scales, propagated through the composition by Minkowski's
 /// inequality, and the grid is tested by a Bonferroni max statistic.
+///
+/// The grid samples every segment of the finer of the two source-domain
+/// splines (`h_ab`, `h_ac`) with `degree + 1` points, the number that fixes one
+/// polynomial piece. A denser grid adds only dependent contrasts that inflate
+/// the Bonferroni family; a sparser one cannot see a piece.
 pub fn composition_defect(
     h_ab: &FittedTransport,
     h_bc: &FittedTransport,
     h_ac: &FittedTransport,
-    n_grid: usize,
 ) -> Result<CompositionDefectReport, String> {
     if h_ab.topology_from != h_ac.topology_from
         || h_ab.topology_to != h_bc.topology_from
@@ -1376,11 +1393,6 @@ pub fn composition_defect(
              h_ab: A→B, h_bc: B→C, h_ac: A→C"
             .to_string());
     }
-    if n_grid < MIN_TRANSPORT_OBS {
-        return Err(format!(
-            "composition defect grid must have at least {MIN_TRANSPORT_OBS} points, got {n_grid}"
-        ));
-    }
     if h_ab.n_obs != h_bc.n_obs || h_ab.n_obs != h_ac.n_obs {
         return Err(format!(
             "composition defect requires maps fitted on the same rows; got n_ab={}, n_bc={}, n_ac={}",
@@ -1388,6 +1400,8 @@ pub fn composition_defect(
         ));
     }
 
+    let n_grid =
+        (TRANSPORT_SPLINE_DEGREE + 1) * h_ab.basis.num_segments().max(h_ac.basis.num_segments());
     let grid = domain_grid(h_ab.topology_from, n_grid);
     let direct = h_ac.eval(grid.view())?;
     let mid = h_ab.eval(grid.view())?;
@@ -1576,12 +1590,7 @@ pub fn transport_ladder(
                 layers[k + 2]
             )
         })?;
-        let composition = composition_defect(
-            &adjacent_fits[k],
-            &adjacent_fits[k + 1],
-            &direct,
-            DEFAULT_COMPOSITION_GRID,
-        )
+        let composition = composition_defect(&adjacent_fits[k], &adjacent_fits[k + 1], &direct)
         .map_err(|e| {
             format!(
                 "composition test {}→{}→{} failed: {e}",

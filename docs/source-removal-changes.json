@@ -5732,5 +5732,14 @@
     ],
     "reason": "#2897. 7fbdcd955 removed the staged spatial kappa pilot, which was the only producer of a sampled pilot measure. Nothing remains to produce one. That leaves dead: OuterObjective::sampled_pilot_active (the trait default, two forwarding impls and the ClosureObjective impl), its only consumer in finalize_outer_result, ClosureObjective::with_sampled_pilot, and the sampled_pilot_fn field it set. Every query already answered false, so the finalize skip could not fire.",
     "evidence": "At the base, git grep -n -F sampled_pilot over crates, src, tests, examples and python finds only: objective.rs (the trait default, the finalize_outer_result branch, the two forwarding impls, and the ClosureObjective field, impl, builder and conversion line); three sampled_pilot_fn: None lines in run.rs; and five in run_plan_tests.rs. 7fbdcd955 dropped the call in spatial_optimization.rs, the only caller of with_sampled_pilot. Compile is covered by the lead shared tip check."
+  },
+  {
+    "base": "199f06162b3e6d9986d92b7d6cddfa982f265b98",
+    "items": [
+      "crates/gam-sae/examples/behavioral_curvature_map.rs:const:DEFAULT_GRID",
+      "crates/gam-sae/src/inference/layer_transport.rs:const:DEFAULT_COMPOSITION_GRID"
+    ],
+    "reason": "SPEC rules 23 and 25 (#2234). The composition-law test ran on a caller-supplied grid, and every caller passed a hand-set 256 points: DEFAULT_COMPOSITION_GRID in transport_ladder and the root functorial test, and DEFAULT_GRID behind the behavioral_curvature_map example's --grid option. That one number both limited resolution and scaled the Bonferroni family size. composition_defect now derives its grid from the fits: degree + 1 points per segment of the finer source-domain spline, the points that fix one polynomial piece. The n_grid parameter, both constants, the example's --grid option and the composition grid's 16-point floor, which the derived grid cannot reach, are deleted.",
+    "evidence": "At the base, git grep -w DEFAULT_COMPOSITION_GRID finds its declaration and the transport_ladder call in crates/gam-sae/src/inference/layer_transport.rs, plus the import and three calls in tests/manifolds/misc/layer_transport_functorial.rs; this change rewrites all of them. git grep -w DEFAULT_GRID finds only its declaration and the --grid default in crates/gam-sae/examples/behavioral_curvature_map.rs, and args.grid is read only by that example's composition_defect call and its composition_grid summary field, both removed here. composition_defect keeps its name, so no pub fn is removed and no census entry applies. The item list applies source_removal_guard.py's ITEM regex and occurrence rule to the removed hunks by hand. Not compiled locally; compile rests on the lead's shared tip check."
   }
 ]
