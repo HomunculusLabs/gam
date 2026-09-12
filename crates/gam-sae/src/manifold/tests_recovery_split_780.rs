@@ -12,6 +12,7 @@
 use super::*;
 use gam_solve::arrow_schur::{
     ArrowFactorSlab, ArrowHtbetaCache, ArrowPcgDiagnostics, ArrowSolverMode, ArrowUndampedFactors,
+    BetaSchurSpectralConditioning,
 };
 use ndarray::array;
 
@@ -1333,3 +1334,567 @@ pub(crate) fn gamma_fd_tiny_fixture() -> (SaeManifoldTerm, Array2<f64>, SaeManif
 // `tests_logdet_adjoint_780.rs` module for the same gate; they still source the
 // shared `gamma_fd_tiny_fixture` / `fixed_state_logdet_sample` helpers, which remain
 // defined here.
+
+/// Discrete branch identity for a finite-difference endpoint.
+///
+/// A finite-difference endpoint is a different cache by definition: its numeric
+/// Hessian and eigenvalues should change. The quotient is a valid derivative
+/// oracle only when the discrete classifier decisions stay fixed.
+///
+/// Every field below is authoritative classifier output or structural layout,
+/// except `unresolved_eigengap`: whether a recorded row spectrum has two
+/// eigenvalues closer than eigensolver round-off. Derivatives through individual
+/// eigenpairs are undefined at such a degeneracy, so neither the center nor an
+/// endpoint may carry one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FiniteDifferenceStratumCertificate {
+    row_dims: Vec<usize>,
+    row_offsets: Vec<usize>,
+    beta_dim: usize,
+    manifold_mode_fingerprint: u64,
+    solver_mode: ArrowSolverMode,
+    gauge_deflated_directions: usize,
+    deflated_per_row: Vec<usize>,
+    row_spectral_conditioning: Vec<Option<Vec<RowSpectralConditioning>>>,
+    beta_schur_deflated: Option<Vec<bool>>,
+    beta_gauge_rank: usize,
+    unresolved_eigengap: bool,
+    min_row_pivot_branch: PivotBranch,
+    min_schur_pivot_branch: PivotBranch,
+    min_pivot_branch: PivotBranch,
+    max_pivot_branch: PivotBranch,
+}
+
+impl FiniteDifferenceStratumCertificate {
+    pub(crate) fn from_arrow_cache(cache: &ArrowFactorCache) -> Self {
+        let min_pivot = arrow_factor_min_pivot(cache);
+        Self {
+            row_dims: cache.row_dims.to_vec(),
+            row_offsets: cache.row_offsets.to_vec(),
+            beta_dim: cache.k,
+            manifold_mode_fingerprint: cache.manifold_mode_fingerprint,
+            solver_mode: cache.solver_mode,
+            gauge_deflated_directions: cache.gauge_deflated_directions,
+            deflated_per_row: cache.deflated_row_directions.iter().map(Vec::len).collect(),
+            row_spectral_conditioning: cache
+                .deflation_row_spectra
+                .iter()
+                .map(|spectrum| {
+                    spectrum
+                        .as_ref()
+                        .map(|spectrum| spectrum.conditioning.to_vec())
+                })
+                .collect(),
+            beta_schur_deflated: cache
+                .beta_schur_conditioning
+                .as_ref()
+                .map(|spectrum| {
+                    spectrum
+                        .conditioning
+                        .iter()
+                        .map(|state| *state == BetaSchurSpectralConditioning::UnitDeflated)
+                        .collect()
+                }),
+            beta_gauge_rank: cache
+                .beta_gauge_quotient
+                .as_ref()
+                .map_or(0, |quotient| quotient.directions.len()),
+            unresolved_eigengap: row_spectra_have_unresolved_eigengap(cache),
+            min_row_pivot_branch: classify_fd_pivot(min_pivot.min_row_pivot),
+            min_schur_pivot_branch: classify_fd_pivot(min_pivot.min_schur_pivot),
+            min_pivot_branch: classify_fd_pivot(min_pivot.min_pivot),
+            max_pivot_branch: classify_fd_pivot(arrow_factor_max_pivot(cache)),
+        }
+    }
+
+    pub(crate) fn changed_fields(&self, endpoint: &Self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        if self.row_dims != endpoint.row_dims {
+            changed.push("row_dims");
+        }
+        if self.row_offsets != endpoint.row_offsets {
+            changed.push("row_offsets");
+        }
+        if self.beta_dim != endpoint.beta_dim {
+            changed.push("beta_dim");
+        }
+        if self.manifold_mode_fingerprint != endpoint.manifold_mode_fingerprint {
+            changed.push("manifold_mode");
+        }
+        if self.solver_mode != endpoint.solver_mode {
+            changed.push("solver_mode");
+        }
+        if self.gauge_deflated_directions != endpoint.gauge_deflated_directions {
+            changed.push("gauge_deflated_directions");
+        }
+        if self.deflated_per_row != endpoint.deflated_per_row {
+            changed.push("deflated_per_row");
+        }
+        if self.row_spectral_conditioning != endpoint.row_spectral_conditioning {
+            changed.push("row_spectral_conditioning");
+        }
+        if self.beta_schur_deflated != endpoint.beta_schur_deflated {
+            changed.push("beta_schur_deflated");
+        }
+        if self.beta_gauge_rank != endpoint.beta_gauge_rank {
+            changed.push("beta_gauge_rank");
+        }
+        if self.unresolved_eigengap != endpoint.unresolved_eigengap {
+            changed.push("unresolved_eigengap");
+        }
+        if self.min_row_pivot_branch != endpoint.min_row_pivot_branch {
+            changed.push("min_row_pivot_branch");
+        }
+        if self.min_schur_pivot_branch != endpoint.min_schur_pivot_branch {
+            changed.push("min_schur_pivot_branch");
+        }
+        if self.min_pivot_branch != endpoint.min_pivot_branch {
+            changed.push("min_pivot_branch");
+        }
+        if self.max_pivot_branch != endpoint.max_pivot_branch {
+            changed.push("max_pivot_branch");
+        }
+        changed
+    }
+
+    pub(crate) fn assert_same_stratum(&self, label: &str, endpoint: &Self) {
+        assert!(
+            !self.unresolved_eigengap,
+            "{label}: finite-difference center has an unresolved spectral invariant-subspace block"
+        );
+        assert!(
+            !endpoint.unresolved_eigengap,
+            "{label}: finite-difference endpoint has an unresolved spectral invariant-subspace block"
+        );
+        let changed = self.changed_fields(endpoint);
+        assert!(
+            changed.is_empty(),
+            "{label}: finite-difference endpoint crossed a nondifferentiable structural stratum; \
+             changed_fields={changed:?}\ncenter={self:#?}\nendpoint={endpoint:#?}"
+        );
+    }
+}
+
+/// Whether any recorded row deflation spectrum has two finite eigenvalues closer
+/// than eigensolver round-off, `eigen_gap_threshold(max |λ|, n)` over the widest
+/// row and the largest finite magnitude.
+fn row_spectra_have_unresolved_eigengap(cache: &ArrowFactorCache) -> bool {
+    let mut min_gap = f64::INFINITY;
+    let mut max_scale = 0.0_f64;
+    let mut max_count = 0_usize;
+    for spectrum in cache.deflation_row_spectra.iter().flatten() {
+        let mut finite: Vec<f64> = spectrum
+            .raw_evals
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .collect();
+        finite.sort_by(|left, right| left.total_cmp(right));
+        for pair in finite.windows(2) {
+            min_gap = min_gap.min((pair[1] - pair[0]).abs());
+        }
+        max_scale = finite.iter().fold(max_scale, |acc, value| acc.max(value.abs()));
+        max_count = max_count.max(spectrum.raw_evals.len());
+    }
+    min_gap.is_finite() && min_gap < eigen_gap_threshold(max_scale, max_count)
+}
+
+/// Sign branch of one factor pivot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PivotBranch {
+    Missing,
+    Positive,
+    NonPositive,
+    NonFinite,
+}
+
+fn classify_fd_pivot(pivot: Option<f64>) -> PivotBranch {
+    match pivot {
+        None => PivotBranch::Missing,
+        Some(value) if !value.is_finite() => PivotBranch::NonFinite,
+        Some(value) if value > 0.0 => PivotBranch::Positive,
+        Some(_) => PivotBranch::NonPositive,
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct FixedStateLogdetSample {
+    pub(crate) value: f64,
+    pub(crate) stratum: FiniteDifferenceStratumCertificate,
+}
+
+pub(crate) fn fixed_state_logdet_sample(
+    mut term: SaeManifoldTerm,
+    target: &Array2<f64>,
+    rho: &SaeManifoldRho,
+) -> FixedStateLogdetSample {
+    let (_value, _loss, cache) = term
+        .penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            rho,
+            None,
+            0,
+            0.4,
+            1.0e-6,
+            1.0e-6,
+        )
+        .expect("fixed-state cache");
+    let value = cache
+        .arrow_log_det()
+        .expect("fixed-state authoritative joint logdet");
+    let stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+    FixedStateLogdetSample { value, stratum }
+}
+
+pub(crate) fn certified_central_logdet_difference(
+    label: &str,
+    center: &FiniteDifferenceStratumCertificate,
+    plus: FixedStateLogdetSample,
+    minus: FixedStateLogdetSample,
+    step: f64,
+) -> f64 {
+    assert!(
+        step.is_finite() && step > 0.0,
+        "{label}: central-difference step must be finite and positive, got {step}"
+    );
+    center.assert_same_stratum(&format!("{label} (+h)"), &plus.stratum);
+    center.assert_same_stratum(&format!("{label} (-h)"), &minus.stratum);
+    (plus.value - minus.value) / (2.0 * step)
+}
+
+/// What the value-free branch guard could establish about a stencil.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FdBranchRegime {
+    /// Consecutive Richardson gaps fall like `h²`, so the SAMPLED function is
+    /// smooth across the stencil. Carries the measured gap ratio.
+    Smooth { ratio: f64 },
+    /// The gaps have fallen to the roundoff floor, where their ratio measures
+    /// rounding rather than the branch. The guard is INAPPLICABLE at this step
+    /// and reports instead of certifying.
+    RoundoffDominated { coarse_gap: f64, floor: f64 },
+}
+
+/// Value-free branch guard for a central difference (#2366).
+///
+/// # What it adds over the structural stratum certificate
+///
+/// [`FiniteDifferenceStratumCertificate`] pins every discrete decision the
+/// cache CLASSIFIER makes. That is the right guard for classifier-visible
+/// discreteness, and it is all these gates need, because they freeze `θ̂`
+/// (`inner_max_iter = 0`) at every stencil point and so cannot land on a
+/// different inner mode at `±h`. It is blind, however, to any nonsmoothness the
+/// classifier does not label — including a branch that leaves and returns
+/// between sample points.
+///
+/// This guard is blind to nothing, because it reads only the samples. For a
+/// `C⁴` target, `CD(h) = f′ + f‴h²/6 + O(h⁴)`, so
+///
+/// ```text
+///   CD(h)   − CD(h/2) = (3/8)·f‴h²  + O(h⁴)
+///   CD(h/2) − CD(h/4) = (3/32)·f‴h² + O(h⁴)
+/// ```
+///
+/// and the ratio of consecutive gaps is `1/4` with `f′` cancelling out — so
+/// this tests the sampled function, never the claim under test. A jump inside
+/// the stencil leaves the gaps `O(1)` (ratio ≈ 1); a kink leaves them `O(h)`
+/// (ratio ≈ 1/2). The `0.35` bound matches the sibling predicate landed for
+/// `#2354/#2366`, so the fleet asserts one constant.
+///
+/// # Applicability
+///
+/// The identity above holds while TRUNCATION dominates. Once the gaps reach the
+/// roundoff floor `≈ ε·|f|/h_fine` the ratio is noise, and asserting it would
+/// manufacture failures out of rounding. The guard therefore refuses to
+/// conclude below that floor and says so, rather than certifying a stencil it
+/// cannot see.
+pub(crate) fn certified_branch_stable_central_difference(
+    label: &str,
+    center: &FiniteDifferenceStratumCertificate,
+    step: f64,
+    sample: impl Fn(f64) -> FixedStateLogdetSample,
+) -> (f64, FdBranchRegime) {
+    assert!(
+        step.is_finite() && step > 0.0,
+        "{label}: central-difference step must be finite and positive, got {step}"
+    );
+    let mut magnitude = 0.0_f64;
+    let mut quotients = [0.0_f64; 3];
+    for (index, scale) in [1.0_f64, 0.5, 0.25].into_iter().enumerate() {
+        let h = step * scale;
+        let plus = sample(h);
+        let minus = sample(-h);
+        center.assert_same_stratum(&format!("{label} (+{scale}h)"), &plus.stratum);
+        center.assert_same_stratum(&format!("{label} (-{scale}h)"), &minus.stratum);
+        magnitude = magnitude.max(plus.value.abs()).max(minus.value.abs());
+        quotients[index] = (plus.value - minus.value) / (2.0 * h);
+    }
+    let coarse_gap = (quotients[0] - quotients[1]).abs();
+    let fine_gap = (quotients[1] - quotients[2]).abs();
+    // Roundoff floor of the FINEST quotient, which bounds both gaps from below.
+    let floor = f64::EPSILON * magnitude / (0.25 * step);
+    // A hundredfold margin puts the coarse gap unambiguously in the truncation
+    // regime before its ratio is read as evidence about the branch.
+    if coarse_gap <= 100.0 * floor {
+        return (
+            quotients[0],
+            FdBranchRegime::RoundoffDominated { coarse_gap, floor },
+        );
+    }
+    let ratio = fine_gap / coarse_gap;
+    assert!(
+        ratio <= 0.35,
+        "{label}: central-difference gaps must fall as h² across a branch-stable \
+         stencil; coarse(h={step:.3e}) {coarse_gap:.6e}, fine(h/2) {fine_gap:.6e}, \
+         ratio {ratio:.4} (predicted 0.25; O(h) kink gives 0.5, O(1) jump gives 1). \
+         The stratum certificate passed, so this is nonsmoothness the classifier \
+         does not label."
+    );
+    (quotients[0], FdBranchRegime::Smooth { ratio })
+}
+
+/// Row-deflation regime a finite-difference anchor must PROVE.
+///
+/// The deflation state is not a detail of the fixture: it decides which
+/// analytic object even exists at the point. A test whose whole subject is the
+/// deflated Daleckii–Krein correction is vacuous on an undeflated cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FdAnchorDeflation {
+    /// At least one row must deflate.
+    SomeRowDeflates,
+    /// Deflation does not change the object under test.
+    Unconstrained,
+}
+
+/// The regime a finite-difference evaluation point must certify before it may
+/// be used as a derivative-verification anchor.
+///
+/// Every field is a property of the STATE, never of the comparison the test
+/// goes on to make. A search that accepted candidates by how well the analytic
+/// value matched its finite difference would be fitting the oracle to the
+/// answer; a search that accepts by these predicates only is choosing a point
+/// at which the asserted derivative is defined.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FdAnchorRegime {
+    pub(crate) deflation: FdAnchorDeflation,
+}
+
+impl FdAnchorRegime {
+    /// The weakest regime: the frozen state must merely BE a maximum the
+    /// criterion will price. Everything the gate then differentiates is defined
+    /// there; nothing further is asserted about the state.
+    pub(crate) fn any_maximum() -> Self {
+        Self {
+            deflation: FdAnchorDeflation::Unconstrained,
+        }
+    }
+
+    /// The regime a deflated-correction test needs: the Daleckii–Krein path
+    /// must actually fire, or the gate is vacuous.
+    pub(crate) fn deflated() -> Self {
+        Self {
+            deflation: FdAnchorDeflation::SomeRowDeflates,
+        }
+    }
+}
+
+/// A frozen-θ̂ evaluation state whose regime has been PROVED rather than hoped
+/// for, together with the structural stratum its finite differences must stay
+/// inside.
+pub(crate) struct CertifiedFdAnchor {
+    pub(crate) term: SaeManifoldTerm,
+    pub(crate) rho: SaeManifoldRho,
+    pub(crate) cache: ArrowFactorCache,
+    pub(crate) stratum: FiniteDifferenceStratumCertificate,
+}
+
+/// One declared member of an anchor family.
+pub(crate) struct FdAnchorCandidate {
+    /// What this member is, in the family's own terms. Reported on acceptance
+    /// and on rejection.
+    pub(crate) description: String,
+    pub(crate) rho: SaeManifoldRho,
+    pub(crate) term: SaeManifoldTerm,
+    /// Inner-solve budget spent BEFORE the state is frozen. Zero anchors the
+    /// candidate exactly where the caller put it; a positive budget declares
+    /// that the candidate is "wherever the inner solve converges from here",
+    /// and a solve that refuses is a rejection of this member, not a panic.
+    pub(crate) converge_iters: usize,
+    /// Inner-solve gradient/objective tolerance used by that budget. The
+    /// frozen build below never solves, so this governs only how tightly the
+    /// candidate's own mode is reached.
+    pub(crate) converge_tolerance: f64,
+}
+
+/// Reject-or-accept one candidate state against a regime.
+fn classify_fd_anchor_candidate(
+    target: &Array2<f64>,
+    regime: FdAnchorRegime,
+    candidate: FdAnchorCandidate,
+) -> Result<CertifiedFdAnchor, String> {
+    let FdAnchorCandidate {
+        rho,
+        mut term,
+        converge_iters,
+        converge_tolerance,
+        ..
+    } = candidate;
+    if converge_iters > 0 {
+        term.penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            &rho,
+            None,
+            converge_iters,
+            0.4,
+            converge_tolerance,
+            converge_tolerance,
+        )
+        .map_err(|error| format!("inner solve refused to converge: {error}"))?;
+    }
+    // `inner_max_iter = 0` freezes θ̂ at the candidate state: the anchor is the
+    // point the test declares, not whatever the inner solve would wander to.
+    let (value, loss, cache) = term
+        .penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            &rho,
+            None,
+            0,
+            0.4,
+            1.0e-6,
+            1.0e-6,
+        )
+        .map_err(|error| format!("criterion refused the frozen state: {error}"))?;
+    if !(value.is_finite() && loss.total().is_finite()) {
+        return Err(format!(
+            "frozen state priced non-finitely (value={value}, loss={})",
+            loss.total()
+        ));
+    }
+    let deflated_rows = cache
+        .deflated_row_directions
+        .iter()
+        .filter(|directions| !directions.is_empty())
+        .count();
+    if regime.deflation == FdAnchorDeflation::SomeRowDeflates && deflated_rows == 0 {
+        return Err("no row deflates; regime requires at least one".to_string());
+    }
+    let stratum = FiniteDifferenceStratumCertificate::from_arrow_cache(&cache);
+    Ok(CertifiedFdAnchor {
+        term,
+        rho,
+        cache,
+        stratum,
+    })
+}
+
+/// Accept the FIRST member of a declared, ordered, finite candidate family
+/// whose frozen state certifies `regime`.
+///
+/// # Why a family and not a constant
+///
+/// The states that exercise the interesting θ-adjoint paths sit next to the
+/// boundaries that make those paths interesting: the row-deflation floor and
+/// the exact observed information's positive-definite face. A hand-written
+/// constant that lands between them is correct only for the production code it
+/// was measured against; the same constant is a refusal — not a weaker test, an
+/// ABSENT one — as soon as the boundaries move.
+///
+/// A declared family plus a state predicate is the stable form of the same
+/// intent. The family is ordered by how strongly it expresses the test's
+/// purpose (most decisive first), the predicate is the regime the asserted
+/// derivative needs to exist, and the accepted member is reported. Nothing in
+/// the predicate can see the finite difference or the analytic value, so this
+/// cannot converge on "whatever agrees".
+pub(crate) fn certified_fd_anchor(
+    label: &str,
+    target: &Array2<f64>,
+    regime: FdAnchorRegime,
+    candidates: Vec<FdAnchorCandidate>,
+) -> CertifiedFdAnchor {
+    assert!(
+        !candidates.is_empty(),
+        "{label}: an anchor family must declare at least one candidate"
+    );
+    let mut rejections = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let description = candidate.description.clone();
+        match classify_fd_anchor_candidate(target, regime, candidate) {
+            Ok(anchor) => {
+                eprintln!("{label}: anchor certified at {description} ({regime:?})");
+                return anchor;
+            }
+            Err(reason) => rejections.push(format!("  {description}: {reason}")),
+        }
+    }
+    panic!(
+        "{label}: no member of the declared anchor family certifies {regime:?}. \
+         The regime the asserted derivative needs does not exist anywhere on this \
+         family, so widening the family is a fixture decision and weakening the \
+         regime would change what is proved. Rejections:\n{}",
+        rejections.join("\n")
+    );
+}
+
+/// Freeze one already-converged state across a declared ladder of evaluation
+/// `ρ`, ordered by how strongly each member expresses the gate's intent.
+///
+/// An evaluation `ρ` is the other hand-written constant these gates carry: a
+/// lift chosen to put the deflated legs above finite-difference noise while
+/// keeping the frozen state a maximum. Both halves of that requirement are
+/// properties of production, so the ladder is declared and the accepted member
+/// certified.
+pub(crate) fn rho_ladder_family(
+    term: &SaeManifoldTerm,
+    rhos: Vec<(String, SaeManifoldRho)>,
+    converge_iters: usize,
+) -> Vec<FdAnchorCandidate> {
+    rho_ladder_family_with_tolerance(
+        term,
+        rhos,
+        converge_iters,
+        DEFAULT_ANCHOR_CONVERGE_TOLERANCE,
+    )
+}
+
+/// [`rho_ladder_family`] for a gate whose declared mode is reached at a
+/// tolerance other than the shared default.
+pub(crate) fn rho_ladder_family_with_tolerance(
+    term: &SaeManifoldTerm,
+    rhos: Vec<(String, SaeManifoldRho)>,
+    converge_iters: usize,
+    converge_tolerance: f64,
+) -> Vec<FdAnchorCandidate> {
+    rhos.into_iter()
+        .map(|(description, rho)| FdAnchorCandidate {
+            description,
+            rho,
+            term: term.clone(),
+            converge_iters,
+            converge_tolerance,
+        })
+        .collect()
+}
+
+/// The inner-solve tolerance the θ-adjoint gates converge their declared mode
+/// at. These gates differentiate a FROZEN state, so the mode only has to exist;
+/// the shared value keeps every anchor family reaching one under the same
+/// contract.
+const DEFAULT_ANCHOR_CONVERGE_TOLERANCE: f64 = 1.0e-6;
+
+/// A declared `log λ_sparse` lift ladder over one base `ρ`, ordered by lift.
+///
+/// The assignment-strength penalty is the dial these gates use to move a state
+/// between the deflating and non-deflating regimes, so it is the natural
+/// declared axis for a regime the gate needs but cannot control directly.
+pub(crate) fn sparse_lift_ladder(
+    base: &SaeManifoldRho,
+    lifts: &[f64],
+) -> Vec<(String, SaeManifoldRho)> {
+    lifts
+        .iter()
+        .map(|&lift| {
+            let mut rho = base.clone();
+            rho.log_lambda_sparse = lift;
+            (format!("log_lambda_sparse={lift:.2}"), rho)
+        })
+        .collect()
+}

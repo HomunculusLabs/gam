@@ -29,6 +29,9 @@
 #![cfg(test)]
 
 use super::tests::{gamma_fd_tiny_fixture, small_two_atom_periodic_term};
+use super::tests_recovery_split_780::{
+    FdAnchorRegime, certified_fd_anchor, rho_ladder_family, sparse_lift_ladder,
+};
 use super::*;
 
 /// The cold, genuinely indefinite two-atom softmax state, where
@@ -403,170 +406,6 @@ fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
     );
 }
 
-/// One declared member of an anchor family.
-struct FdAnchorCandidate {
-    /// What this member is, in the family's own terms. Reported on acceptance
-    /// and on rejection.
-    description: String,
-    rho: SaeManifoldRho,
-    term: SaeManifoldTerm,
-    /// Inner-solve budget spent BEFORE the state is frozen. Zero anchors the
-    /// candidate exactly where the caller put it; a positive budget declares
-    /// that the candidate is "wherever the inner solve converges from here",
-    /// and a solve that refuses is a rejection of this member, not a panic.
-    converge_iters: usize,
-}
-
-/// A frozen-θ̂ evaluation state at which at least one row provably deflates.
-struct CertifiedFdAnchor {
-    term: SaeManifoldTerm,
-    rho: SaeManifoldRho,
-    cache: ArrowFactorCache,
-}
-
-/// The inner-solve tolerance an anchor family converges its declared mode at.
-/// The gates below compare routes at a FROZEN state, so the mode only has to
-/// exist.
-const ANCHOR_CONVERGE_TOLERANCE: f64 = 1.0e-6;
-
-/// Reject-or-accept one candidate state: converge its declared budget, freeze
-/// θ̂ there, and require a finite price with at least one deflated row.
-fn classify_fd_anchor_candidate(
-    target: &Array2<f64>,
-    candidate: FdAnchorCandidate,
-) -> Result<CertifiedFdAnchor, String> {
-    let FdAnchorCandidate {
-        rho,
-        mut term,
-        converge_iters,
-        ..
-    } = candidate;
-    if converge_iters > 0 {
-        term.penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
-            converge_iters,
-            0.4,
-            ANCHOR_CONVERGE_TOLERANCE,
-            ANCHOR_CONVERGE_TOLERANCE,
-        )
-        .map_err(|error| format!("inner solve refused to converge: {error}"))?;
-    }
-    // `inner_max_iter = 0` freezes θ̂ at the candidate state: the anchor is the
-    // point the test declares, not whatever the inner solve would wander to.
-    let (value, loss, cache) = term
-        .penalized_quasi_laplace_criterion_with_cache(
-            target.view(),
-            &rho,
-            None,
-            0,
-            0.4,
-            1.0e-6,
-            1.0e-6,
-        )
-        .map_err(|error| format!("criterion refused the frozen state: {error}"))?;
-    if !(value.is_finite() && loss.total().is_finite()) {
-        return Err(format!(
-            "frozen state priced non-finitely (value={value}, loss={})",
-            loss.total()
-        ));
-    }
-    let deflated_rows = cache
-        .deflated_row_directions
-        .iter()
-        .filter(|directions| !directions.is_empty())
-        .count();
-    if deflated_rows == 0 {
-        return Err("no row deflates; the anchor requires at least one".to_string());
-    }
-    Ok(CertifiedFdAnchor { term, rho, cache })
-}
-
-/// Accept the FIRST member of a declared, ordered, finite candidate family
-/// whose frozen state has a deflated row.
-///
-/// # Why a family and not a constant
-///
-/// The states that exercise the deflated from-probes paths sit next to the
-/// boundaries that make those paths interesting: the row-deflation floor and
-/// the exact observed information's positive-definite face. A hand-written
-/// constant that lands between them is correct only for the production code it
-/// was measured against; the same constant is a refusal — not a weaker test, an
-/// ABSENT one — as soon as the boundaries move.
-///
-/// A declared family plus a state predicate is the stable form of the same
-/// intent. The family is ordered by how strongly it expresses the test's
-/// purpose (most decisive first), the predicate is the regime the asserted
-/// parity needs, and the accepted member is reported. Nothing in the predicate
-/// can see either route's value, so this cannot converge on "whatever agrees".
-fn certified_fd_anchor(
-    label: &str,
-    target: &Array2<f64>,
-    candidates: Vec<FdAnchorCandidate>,
-) -> CertifiedFdAnchor {
-    assert!(
-        !candidates.is_empty(),
-        "{label}: an anchor family must declare at least one candidate"
-    );
-    let mut rejections = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let description = candidate.description.clone();
-        match classify_fd_anchor_candidate(target, candidate) {
-            Ok(anchor) => {
-                eprintln!("{label}: deflated anchor certified at {description}");
-                return anchor;
-            }
-            Err(reason) => rejections.push(format!("  {description}: {reason}")),
-        }
-    }
-    panic!(
-        "{label}: no member of the declared anchor family has a deflated row. \
-         The regime the asserted parity needs does not exist anywhere on this \
-         family, so widening the family is a fixture decision and weakening the \
-         regime would change what is proved. Rejections:\n{}",
-        rejections.join("\n")
-    );
-}
-
-/// Freeze one already-converged state across a declared ladder of evaluation
-/// `ρ`, ordered by how strongly each member expresses the gate's intent.
-///
-/// An evaluation `ρ` is the other hand-written constant these gates carry: a
-/// lift chosen to put the deflated legs above rounding while keeping the frozen
-/// state a maximum. Both halves of that requirement are properties of
-/// production, so the ladder is declared and the accepted member certified.
-fn rho_ladder_family(
-    term: &SaeManifoldTerm,
-    rhos: Vec<(String, SaeManifoldRho)>,
-    converge_iters: usize,
-) -> Vec<FdAnchorCandidate> {
-    rhos.into_iter()
-        .map(|(description, rho)| FdAnchorCandidate {
-            description,
-            rho,
-            term: term.clone(),
-            converge_iters,
-        })
-        .collect()
-}
-
-/// A declared `log λ_sparse` lift ladder over one base `ρ`, ordered by lift.
-///
-/// The assignment-strength penalty is the dial these gates use to move a state
-/// between the deflating and non-deflating regimes, so it is the natural
-/// declared axis for a regime the gate needs but cannot control directly.
-fn sparse_lift_ladder(base: &SaeManifoldRho, lifts: &[f64]) -> Vec<(String, SaeManifoldRho)> {
-    lifts
-        .iter()
-        .map(|&lift| {
-            let mut rho = base.clone();
-            rho.log_lambda_sparse = lift;
-            (format!("log_lambda_sparse={lift:.2}"), rho)
-        })
-        .collect()
-}
-
 /// The same cache with its PER-ROW deflation metadata stripped.
 ///
 /// #2712 non-vacuity instrument. The per-row Cholesky factors and the reduced
@@ -594,6 +433,7 @@ fn obb_deflated_anchor(label: &str) -> (SaeManifoldTerm, SaeManifoldRho, Array2<
     let anchor = certified_fd_anchor(
         label,
         &target,
+        FdAnchorRegime::deflated(),
         rho_ladder_family(&term, sparse_lift_ladder(&rho, &DEFLATING_SPARSE_LIFTS), 5),
     );
     (anchor.term, anchor.rho, target, anchor.cache)
@@ -669,7 +509,12 @@ fn residual_excited_deflated_anchor(
         )
     })
     .collect();
-    let anchor = certified_fd_anchor(label, &target, rho_ladder_family(&term, eval_rho_ladder, 0));
+    let anchor = certified_fd_anchor(
+        label,
+        &target,
+        FdAnchorRegime::deflated(),
+        rho_ladder_family(&term, eval_rho_ladder, 0),
+    );
     (anchor.term, anchor.rho, target, anchor.cache)
 }
 

@@ -8,6 +8,13 @@
 #![cfg(test)]
 
 use super::*;
+use super::tests::gamma_fd_tiny_fixture;
+use super::tests_behavioral_fisher_rung1::pack_probe_factors;
+use super::tests_recovery_split_780::{
+    FdAnchorRegime, FdBranchRegime, certified_branch_stable_central_difference,
+    certified_central_logdet_difference, certified_fd_anchor, fixed_state_logdet_sample,
+    rho_ladder_family, rho_ladder_family_with_tolerance, sparse_lift_ladder,
+};
 
 #[derive(Clone, Copy)]
 struct TinyComplex {
@@ -812,3 +819,625 @@ fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
         );
     }
 }
+
+/// gam#2144 — the log-det row jets must be whitened whenever the metric
+/// `whitens_likelihood()` at ANY rank, not only when rank-deficient. The
+/// arrow-Schur assembly builds the likelihood Hessian from whitened Jacobians
+/// (`Jᵀ U Uᵀ J`) under any whitening factor, so a FULL-RANK non-identity factor
+/// (here `diag(1, 2, 1.5)`, `rank == p == 3`) rescales the output-space
+/// derivatives just like a low-rank sketch does. The pre-fix code gated jet
+/// whitening on `ordered_beta_bernoulli_low_rank_whiten()` (`whitens_likelihood && rank < p`), so
+/// full-rank whitening left the row jets in RAW output space — differentiating
+/// `JᵀJ` against an assembled `Jᵀ U Uᵀ J`. This pins the production
+/// `logdet_theta_adjoint` against a fixed-state central difference of the
+/// authoritative whitened joint `log|H|`; the unpatched (identity-on-the-jet)
+/// path fails it.
+#[test]
+pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_full_rank_whitening_2144() {
+    use gam_problem::RowMetric;
+    use std::sync::Arc;
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
+    term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, false);
+    let n = term.n_obs();
+    let p = term.output_dim();
+    // Full-rank (rank == p) DIAGONAL non-identity whitening factor U = diag(d).
+    // M_n = U Uᵀ = diag(d²) is genuinely non-identity, so the whitened Jacobian
+    // Jᵀ U Uᵀ J ≠ JᵀJ, yet the metric has NO null space — whitening engages with
+    // no rank-deficiency in play.
+    let d = [1.0_f64, 2.0, 1.5];
+    assert_eq!(p, d.len(), "diagonal whitening factor width must equal p");
+    let s = p;
+    let mut u = Array2::<f64>::zeros((n, p * s));
+    for row in 0..n {
+        for i in 0..p {
+            u[[row, i * s + i]] = d[i];
+        }
+    }
+    term.set_row_metric(RowMetric::behavioral_fisher(Arc::new(u), p, s).unwrap())
+        .unwrap();
+    assert!(
+        term.whiten_logdet_row_jets(),
+        "full-rank whitening metric must whiten the log-det row jets"
+    );
+    assert!(
+        term.row_metric().is_some_and(|m| m.metric_rank() == p),
+        "rank-{s} == p={p} metric must be genuinely full-rank (this test discriminates \
+         jet whitening from rank-deficiency handling)"
+    );
+    // #2144/#1038: the ordered Beta--Bernoulli PSD majorization is now UNCONDITIONAL (any rank, any
+    // metric), so the joint Hessian here is the majorized operator too — the
+    // historical #1416 non-PD landscape at `log_lambda_sparse = 0.5` no longer
+    // exists. Keep the historical PD-island level `−0.8` for continuity (the
+    // discriminating property of this test is unchanged either way:
+    // `Jᵀ U Uᵀ J ≠ JᵀJ` separates whitened row jets from raw ones, which is
+    // what the fixed-state FD comparison pins).
+    let anchor = certified_fd_anchor(
+        "#2144 full-rank whitened theta adjoint",
+        &target,
+        FdAnchorRegime::any_maximum(),
+        rho_ladder_family(
+            &term,
+            sparse_lift_ladder(&rho, &[-0.8, -0.4, 0.0, 0.4, 0.8, 1.2]),
+            200,
+        ),
+    );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let gamma = term
+        .logdet_theta_adjoint(&rho, &cache, &solver)
+        .expect("Gamma");
+    let h = 1.0e-5;
+    let fd_stratum = anchor.stratum;
+    let probes_idx = [
+        (0usize, 0usize, SaeLocalRowVar::Logit { atom: 0 }),
+        (4usize, 1usize, SaeLocalRowVar::Logit { atom: 1 }),
+        (1usize, 2usize, SaeLocalRowVar::Coord { atom: 0, axis: 0 }),
+        (6usize, 3usize, SaeLocalRowVar::Coord { atom: 1, axis: 0 }),
+    ];
+    for (row, local_pos, var) in probes_idx {
+        let mut plus = term.clone();
+        let mut minus = term.clone();
+        match var {
+            SaeLocalRowVar::Logit { atom } => {
+                plus.assignment.logits[[row, atom]] += h;
+                minus.assignment.logits[[row, atom]] -= h;
+            }
+            SaeLocalRowVar::Coord { atom, axis } => {
+                let mut flat_p = plus.assignment.coords[atom].as_flat().clone();
+                let mut flat_m = minus.assignment.coords[atom].as_flat().clone();
+                let idx = row * plus.assignment.coords[atom].latent_dim() + axis;
+                flat_p[idx] += h;
+                flat_m[idx] -= h;
+                plus.assignment.coords[atom].set_flat(flat_p.view());
+                minus.assignment.coords[atom].set_flat(flat_m.view());
+            }
+        }
+        let fd = certified_central_logdet_difference(
+            &format!("full-rank whitened Gamma row={row} local_pos={local_pos}"),
+            &fd_stratum,
+            fixed_state_logdet_sample(plus, &target, &rho),
+            fixed_state_logdet_sample(minus, &target, &rho),
+            h,
+        );
+        let analytic = gamma.t[cache.row_offsets[row] + local_pos];
+        let tol = 3.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
+        // #2330: `local_pos` above is HARDCODED, i.e. this loop asserts every row is
+        // packed `[Logit0, Logit1, Coord0, Coord1]`. If the whitened layout orders its
+        // local block differently, `analytic` is a different variable's derivative and
+        // the comparison is meaningless rather than merely out of tolerance. Report the
+        // resolved block width so a failure distinguishes the two: a width of 4 is
+        // consistent with the assumed packing, whereas a width equal to the coordinate
+        // count alone says the logit probes are indexing coordinate slots.
+        let block_width = cache.row_offsets[row + 1] - cache.row_offsets[row];
+        assert!(
+            (fd - analytic).abs() <= tol,
+            "full-rank whitened Gamma row={row} local_pos={local_pos}: fd={fd:.8e}, \
+             analytic={analytic:.8e} (var={var:?}, row block width={block_width}, \
+             gamma.t len={}, row_offsets[{row}]={})",
+            gamma.t.len(),
+            cache.row_offsets[row],
+        );
+    }
+}
+
+/// Learnable-alpha ordered Beta--Bernoulli logit theta-adjoint.
+/// `learnable_alpha = true`, a path the fixed-alpha `..._ordered_beta_bernoulli` sibling never
+/// exercises. Under learnable α the resolved weight convention flips (`weight`
+/// stays 1.0 and `log_lambda_sparse` drives `α` via `resolve_learnable_weight`
+/// instead of scaling the prior), so a single logit perturbation holds alpha
+/// fixed and moves only `M_k` and the local sigmoid gate.
+///
+/// The comparison point must EXIST and be STATIONARY: like the indefinite-basin
+/// diagnosis driving the whole #1625 fix, the analytic
+/// `Γ = tr(H⁻¹ ∂H/∂θ)` equals the fixed-state central difference of `log|H|`
+/// only at a CONVERGED inner cache. A short inner budget (e.g. `iter = 5`) leaves
+/// (t, β) non-stationary, and `fixed_state_logdet_sample` (which re-solves with
+/// `iter = 0`) then differences `log|H|` about a different state, manufacturing a
+/// spurious O(several-%) mismatch that does NOT shrink with the FD step — the
+/// tell that it is a state desync, not truncation. Converging the inner solve
+/// (`iter = 200`, tol `1e-8`) makes Γ and the FD share one stationary state, and
+/// the learnable-α logit adjoint then matches to ≈6 digits.
+#[test]
+pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_learnable_alpha_1625()
+ {
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
+    term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
+    // The historical `ρ₀ = 0.6` was itself the result of a hand sweep for a
+    // level that drives a PD learnable-α cache. The sweep is the ladder; the
+    // certificate is what the sweep was looking for.
+    let anchor = certified_fd_anchor(
+        "#1625 learnable-alpha ordered Beta--Bernoulli theta adjoint",
+        &target,
+        FdAnchorRegime::any_maximum(),
+        rho_ladder_family_with_tolerance(
+            &term,
+            sparse_lift_ladder(&rho, &[0.6, 0.9, 1.2, 0.3, 0.0, 1.5]),
+            200,
+            1.0e-8,
+        ),
+    );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let gamma = term
+        .logdet_theta_adjoint(&rho, &cache, &solver)
+        .expect("Gamma");
+    let h = 1.0e-5;
+    let fd_stratum = anchor.stratum;
+    // Probe both atoms across distinct rows so the shared-mass channel is
+    // exercised on both columns under learnable alpha.
+    let probes = [
+        (0usize, 0usize, 0usize),
+        (4usize, 1usize, 1usize),
+        (7usize, 0usize, 0usize),
+    ];
+    for (row, local_pos, atom) in probes {
+        let mut plus = term.clone();
+        let mut minus = term.clone();
+        plus.assignment.logits[[row, atom]] += h;
+        minus.assignment.logits[[row, atom]] -= h;
+        let fd = certified_central_logdet_difference(
+            &format!(
+                "learnable-alpha ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}"
+            ),
+            &fd_stratum,
+            fixed_state_logdet_sample(plus, &target, &rho),
+            fixed_state_logdet_sample(minus, &target, &rho),
+            h,
+        );
+        let analytic = gamma.t[cache.row_offsets[row] + local_pos];
+        let tol = 3.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
+        assert!(
+            (fd - analytic).abs() <= tol,
+            "learnable-α ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}: \
+             fd={fd:.8e}, analytic={analytic:.8e}"
+        );
+    }
+}
+
+/// The assembly PSD-majorizes the ordered Beta--Bernoulli curvature
+/// unconditionally, so the
+/// θ-adjoint must differentiate that SAME majorized operator. This is the
+/// metric-first analogue of `..._ordered_beta_bernoulli`: install a rank-2 BehavioralFisher
+/// metric (`s = 2 < p = 3`, a genuinely rank-deficient whitening) on the ordered Beta--Bernoulli tiny
+/// fixture and check the analytic `Γ` matches the fixed-state dense FD of `log|H|`
+/// — both flow through the majorized assembly (`fixed_state_logdet_sample` rebuilds the
+/// SAME majorized `H`). This guards the majorized θ-adjoint channels against the
+/// majorized criterion log-det in the whitened+rank-deficient regime, where the
+/// whitened data curvature cannot dominate the raw indefinite prior pieces.
+#[test]
+pub(crate) fn sae_logdet_theta_adjoint_matches_dense_fd_ordered_beta_bernoulli_low_rank_metric_2144()
+ {
+    use gam_problem::RowMetric;
+    use std::sync::Arc;
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
+    term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, false);
+    let n = term.n_obs();
+    let p = term.output_dim();
+    let s = 2usize;
+    // Deterministic rank-2 output-Fisher sketch, directional (not a scalar × I) so
+    // the metric genuinely whitens with a nontrivial null space.
+    let mut seed = 0x2144_ABCD_u64;
+    let probes = Array3::<f64>::from_shape_fn((n, p, s), |(_, i, kk)| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let base = if kk == 0 && i == 0 {
+            1.2
+        } else if kk == 1 && i + 1 == p {
+            1.0
+        } else {
+            0.0
+        };
+        base + 0.15 * (((seed >> 11) as f64) / ((1u64 << 53) as f64) - 0.5)
+    });
+    let u = pack_probe_factors(probes.view());
+    term.set_row_metric(RowMetric::behavioral_fisher(Arc::new(u), p, s).unwrap())
+        .unwrap();
+    assert!(
+        term.row_metric()
+            .is_some_and(|m| m.whitens_likelihood() && m.metric_rank() < p),
+        "rank-{s} metric on p={p} must be a genuinely rank-deficient whitening metric"
+    );
+    let anchor = certified_fd_anchor(
+        "#2144 low-rank-metric ordered Beta--Bernoulli theta adjoint",
+        &target,
+        FdAnchorRegime::any_maximum(),
+        rho_ladder_family(&term, sparse_lift_ladder(&rho, &PD_BASIN_SPARSE_LIFTS), 200),
+    );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let gamma = term
+        .logdet_theta_adjoint(&rho, &cache, &solver)
+        .expect("Gamma");
+    let h = 1.0e-5;
+    let fd_stratum = anchor.stratum;
+    let probes_idx = [
+        (0usize, 0usize, SaeLocalRowVar::Logit { atom: 0 }),
+        (4usize, 1usize, SaeLocalRowVar::Logit { atom: 1 }),
+        (1usize, 2usize, SaeLocalRowVar::Coord { atom: 0, axis: 0 }),
+        (6usize, 3usize, SaeLocalRowVar::Coord { atom: 1, axis: 0 }),
+    ];
+    for (row, local_pos, var) in probes_idx {
+        let mut plus = term.clone();
+        let mut minus = term.clone();
+        match var {
+            SaeLocalRowVar::Logit { atom } => {
+                plus.assignment.logits[[row, atom]] += h;
+                minus.assignment.logits[[row, atom]] -= h;
+            }
+            SaeLocalRowVar::Coord { atom, axis } => {
+                let mut flat_p = plus.assignment.coords[atom].as_flat().clone();
+                let mut flat_m = minus.assignment.coords[atom].as_flat().clone();
+                let idx = row * plus.assignment.coords[atom].latent_dim() + axis;
+                flat_p[idx] += h;
+                flat_m[idx] -= h;
+                plus.assignment.coords[atom].set_flat(flat_p.view());
+                minus.assignment.coords[atom].set_flat(flat_m.view());
+            }
+        }
+        let fd = certified_central_logdet_difference(
+            &format!("majorized ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}"),
+            &fd_stratum,
+            fixed_state_logdet_sample(plus, &target, &rho),
+            fixed_state_logdet_sample(minus, &target, &rho),
+            h,
+        );
+        let analytic = gamma.t[cache.row_offsets[row] + local_pos];
+        let tol = 3.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
+        assert!(
+            (fd - analytic).abs() <= tol,
+            "majorized ordered Beta--Bernoulli Gamma row={row} local_pos={local_pos}: fd={fd:.8e}, analytic={analytic:.8e}"
+        );
+    }
+}
+
+/// #2330 — the DEFLATED-fixture arbiter for the #1006 envelope adjoint.
+///
+/// The tiny-fixture test above converges to a well-conditioned PD state with NO
+/// per-row deflation, so it never exercises the Daleckii–Krein
+/// [`SaeManifoldTerm::deflation_block_correction`] path. This fixture (the
+/// residual-excited two-atom circle, lifted ρ) carries genuine per-row gauge
+/// deflation on the over-parametrized chart, so `logdet_theta_adjoint` here goes
+/// through the DK correction. `Γ_joint = tr(H⁻¹ ∂H/∂θ)` must equal the fixed-θ̂
+/// central difference of the criterion's authoritative `arrow_log_det()` — the
+/// SAME operator the DK comment claims to differentiate. The #2253 full-set
+/// Hessian gate proved the assembled outer gradient is non-conservative in the
+/// smooth↔ARD cross with the deflated `Γ_joint` as the dominant carrier (bisected
+/// to `asym=1.97e-2`); #2330 tracks that as a defect in the deflated θ-adjoint
+/// itself, which this test isolates independently of ρ and of the CH5 builder.
+/// Its green unblocks the #2253 full-set gate and the capability→Dense flip. FD
+/// is skipped on the ARD majorizer kink (`|cos κt| < 0.2`), where
+/// `max(α cos κt, 0)` is non-smooth.
+#[test]
+pub(crate) fn sae_logdet_theta_adjoint_matches_fd_on_deflated_fixture_2330() {
+    let (mut term, mut target, mut rho) = gamma_fd_tiny_fixture();
+    let (n, p) = (target.nrows(), target.ncols());
+    for row in 0..n {
+        for col in 0..p {
+            let phase = (row as f64 + 0.35) / n as f64;
+            let theta = std::f64::consts::TAU * phase;
+            target[[row, col]] += 0.6 * (3.0 * theta + 0.5 * col as f64).sin();
+        }
+    }
+    rho.log_lambda_sparse = -0.5;
+    for value in rho.log_lambda_smooth.iter_mut() {
+        *value = -1.0;
+    }
+    for axis in rho.log_ard.iter_mut() {
+        for value in axis.iter_mut() {
+            *value = -0.5;
+        }
+    }
+    term.penalized_quasi_laplace_criterion_with_cache(
+        target.view(),
+        &rho,
+        None,
+        40,
+        0.4,
+        1.0e-6,
+        1.0e-6,
+    )
+    .expect("off-manifold fixture converges with both atoms alive");
+
+    // Evaluation ρ, θ̂ frozen: lifted off the floor so the deflated legs sit
+    // above finite-difference noise, and certified to be a MAXIMUM there. The
+    // historical `(0.5, −2.0, [−1.2, −1.0])` lift is the ladder's first member;
+    // #2398 measured that it now lands on a genuine exact-`A` saddle, where the
+    // deflated-PD state this gate differentiates does not exist at all. The
+    // ladder walks the lift down until a deflated maximum is certified.
+    let eval_rho_ladder: Vec<(String, SaeManifoldRho)> = [
+        (0.5_f64, -2.0_f64, -1.2_f64, -1.0_f64),
+        (0.5, -1.5, -1.2, -1.0),
+        (0.2, -2.0, -1.2, -1.0),
+        (0.2, -1.5, -1.0, -0.8),
+        (0.0, -1.5, -1.0, -0.8),
+        (-0.2, -1.2, -0.8, -0.6),
+        (-0.5, -1.0, -0.5, -0.5),
+    ]
+    .iter()
+    .map(|&(sparse, smooth, ard0, ard1)| {
+        let mut candidate = rho.clone();
+        candidate.log_lambda_sparse = sparse;
+        for value in candidate.log_lambda_smooth.iter_mut() {
+            *value = smooth;
+        }
+        candidate.log_ard = vec![ndarray::array![ard0], ndarray::array![ard1]];
+        (
+            format!(
+                "eval rho (sparse={sparse:.1}, smooth={smooth:.1}, ard=[{ard0:.1}, {ard1:.1}])"
+            ),
+            candidate,
+        )
+    })
+    .collect();
+    let anchor = certified_fd_anchor(
+        "#2330 deflated-fixture theta adjoint",
+        &target,
+        FdAnchorRegime::deflated(),
+        rho_ladder_family(&term, eval_rho_ladder, 0),
+    );
+    let term = anchor.term;
+    let rho = anchor.rho;
+    let cache = anchor.cache;
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let gamma = term
+        .logdet_theta_adjoint(&rho, &cache, &solver)
+        .expect("Gamma_joint");
+
+    let h = 1.0e-5;
+    let fd_stratum = anchor.stratum;
+    let mut checked = 0usize;
+    let mut worst = 0.0_f64;
+    // #2366 branch-guard tally. Reported rather than asserted: which regime a
+    // stencil lands in is a measurement about this fixture at this step, and
+    // pinning it would turn an honest "the guard cannot see here" into a gate
+    // on the roundoff floor.
+    let mut branch_smooth = 0usize;
+    let mut branch_roundoff = 0usize;
+    let mut worst_branch_ratio = 0.0_f64;
+    for row in 0..term.n_obs() {
+        let vars = term
+            .row_vars_for_cache_row(row, &cache)
+            .expect("row vars for deflated fixture");
+        for (local_pos, var) in vars.iter().enumerate() {
+            // Probe the ARD coordinate slots (the deflated t-block); skip the
+            // majorizer kink where the fixed-θ̂ central difference is invalid.
+            let SaeLocalRowVar::Coord { atom, axis } = *var else {
+                continue;
+            };
+            let t_val = term.assignment.coords[atom].row(row)[axis];
+            let cos_kt = (std::f64::consts::TAU * t_val).cos();
+            if cos_kt.abs() < 0.2 {
+                continue;
+            }
+            let at = |dt: f64| {
+                let mut t = term.clone();
+                let mut flat = t.assignment.coords[atom].as_flat().clone();
+                let idx = row * t.assignment.coords[atom].latent_dim() + axis;
+                flat[idx] += dt;
+                t.assignment.coords[atom].set_flat(flat.view());
+                fixed_state_logdet_sample(t, &target, &rho)
+            };
+            // The deflated fixture is where classifier-invisible nonsmoothness
+            // is likeliest, so this gate carries the value-free branch guard on
+            // top of the structural stratum certificate (#2366).
+            let (fd, branch) = certified_branch_stable_central_difference(
+                &format!("deflated Gamma_joint row={row} pos={local_pos} atom={atom} axis={axis}"),
+                &fd_stratum,
+                h,
+                at,
+            );
+            match branch {
+                FdBranchRegime::Smooth { ratio } => {
+                    branch_smooth += 1;
+                    worst_branch_ratio = worst_branch_ratio.max(ratio);
+                }
+                FdBranchRegime::RoundoffDominated { coarse_gap, floor } => {
+                    branch_roundoff += 1;
+                    eprintln!(
+                        "deflated Gamma_joint row={row} pos={local_pos}: branch guard \
+                         inapplicable — coarse gap {coarse_gap:.3e} is at the roundoff \
+                         floor {floor:.3e}"
+                    );
+                }
+            }
+            let analytic = gamma.t[cache.row_offsets[row] + local_pos];
+            let err = (fd - analytic).abs();
+            worst = worst.max(err);
+            eprintln!(
+                "deflated Gamma_joint row={row} pos={local_pos} atom={atom} axis={axis} \
+                 cos_kt={cos_kt:.3} fd={fd:.8e} analytic={analytic:.8e} err={err:.3e}"
+            );
+            let tol = 2.0e-3 * (1.0 + fd.abs().max(analytic.abs()));
+            assert!(
+                err <= tol,
+                "deflated Gamma_joint mismatch row={row} pos={local_pos}: \
+                 fd={fd:.8e}, analytic={analytic:.8e} (the deflated log-det θ-adjoint \
+                 does not match ∂arrow_log_det/∂θ — DK correction defect)"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 0,
+        "deflated-fixture adjoint test probed no interior ARD coordinate (worst so far {worst:.3e})"
+    );
+    eprintln!(
+        "#2366 branch guard on the deflated fixture: {branch_smooth} stencil(s) certified \
+         smooth (worst h² gap ratio {worst_branch_ratio:.4}, predicted 0.25), \
+         {branch_roundoff} roundoff-dominated and therefore not concluded"
+    );
+    assert_eq!(
+        branch_smooth + branch_roundoff,
+        checked,
+        "every probed stencil must reach one of the two branch-guard regimes"
+    );
+}
+
+/// #2712 — the identity the whole fix rests on, asserted directly rather than
+/// inferred from a downstream trace: at FULL-BASIS probes the from-probes
+/// reconstruction of a row's selected-inverse blocks equals the dense
+/// [`DeflatedArrowSolver::selected_inverse_row_blocks`] ON A DEFLATED ROW.
+///
+/// If `cache.undamped_factor(i)` factorized the RAW `H_tt^(i)` — the reading the
+/// issue's refusal was written from — this would fail on exactly the deflated
+/// rows, because `A_i⁻¹` would then be the undeflated block. It does not, because
+/// the factor carries the CONDITIONED spectrum: the gate also checks
+/// `A_i v = v` on each deflated direction, which is the unit-stiffness pin
+/// itself.
+#[test]
+fn sae_row_selected_inverse_from_probes_is_the_deflated_block_2712() {
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
+    term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
+    let anchor = certified_fd_anchor(
+        "#2712 deflated selected-inverse reconstruction",
+        &target,
+        FdAnchorRegime::deflated(),
+        rho_ladder_family(
+            &term,
+            sparse_lift_ladder(
+                &rho,
+                &[2.4, 1.8, 1.3, 0.9, 0.5, 0.2, 0.0, -0.3, -0.6, -1.0],
+            ),
+            5,
+        ),
+    );
+    let cache = anchor.cache;
+    let k = cache.k;
+    assert!(k > 0, "the fixture must have a border for S⁻¹ to matter");
+    let sqrt_k = (k as f64).sqrt();
+    let probes: Vec<ndarray::Array1<f64>> = (0..k)
+        .map(|j| {
+            let mut v = ndarray::Array1::<f64>::zeros(k);
+            v[j] = sqrt_k;
+            v
+        })
+        .collect();
+    let sinv: Vec<ndarray::Array1<f64>> = probes
+        .iter()
+        .map(|v| {
+            cache
+                .schur_inverse_apply(v.view())
+                .expect("schur_inverse_apply")
+        })
+        .collect();
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let beta_inv = solver.beta_inv().expect("beta_inv");
+
+    let mut deflated_rows = 0usize;
+    let mut max_block_error = 0.0_f64;
+    let mut block_scale = 0.0_f64;
+    let mut max_unit_pin_error = 0.0_f64;
+    for row in 0..cache.row_dims.len() {
+        let dirs = cache
+            .deflated_row_directions
+            .get(row)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if dirs.is_empty() {
+            continue;
+        }
+        deflated_rows += 1;
+
+        // The unit-stiffness pin, read straight off the cached factor: rebuild
+        // `A_i = L Lᵀ` and check `A_i vᵢ = vᵢ`.
+        let q = cache.row_dims[row];
+        let l = cache.undamped_factor(row);
+        let mut a_block = Array2::<f64>::zeros((q, q));
+        for i in 0..q {
+            for j in 0..q {
+                let mut acc = 0.0_f64;
+                for t in 0..=i.min(j) {
+                    acc += l[[i, t]] * l[[j, t]];
+                }
+                a_block[[i, j]] = acc;
+            }
+        }
+        for v in dirs {
+            let av = a_block.dot(v);
+            for slot in 0..q {
+                max_unit_pin_error = max_unit_pin_error.max((av[slot] - v[slot]).abs());
+            }
+        }
+
+        let (dense_vv, dense_vbeta) = solver
+            .selected_inverse_row_blocks(row, &beta_inv)
+            .expect("dense selected inverse row blocks");
+        let (probe_vv, probe_vbeta) = row_selected_inverse_from_probes(
+            &cache,
+            row,
+            &probes,
+            &sinv,
+            true,
+            "#2712 reconstruction gate",
+        )
+        .expect("from-probes selected inverse row blocks");
+        for (d, p) in dense_vv.iter().zip(probe_vv.iter()) {
+            max_block_error = max_block_error.max((d - p).abs());
+            block_scale = block_scale.max(d.abs());
+        }
+        for (d, p) in dense_vbeta.iter().zip(probe_vbeta.iter()) {
+            max_block_error = max_block_error.max((d - p).abs());
+            block_scale = block_scale.max(d.abs());
+        }
+    }
+    assert!(
+        deflated_rows > 0,
+        "the certified anchor promised a deflated row and delivered none"
+    );
+    eprintln!(
+        "#2712 reconstruction gate: {deflated_rows} deflated row(s), \
+         max|A_i v - v| = {max_unit_pin_error:.6e}, \
+         max|selected-inverse block difference| = {max_block_error:.6e} \
+         against block magnitude {block_scale:.6e}"
+    );
+    assert!(
+        max_unit_pin_error <= 1.0e-9,
+        "`undamped_factor` must carry the CONDITIONED spectrum (A_i v = v on a \
+         deflated direction); got max|A_i v - v| = {max_unit_pin_error:.6e}"
+    );
+    // RELATIVE, deliberately: a kept near-null eigendirection makes `inv_vv`
+    // legitimately huge (measured `1.7e7` on this fixture), so an absolute bar
+    // here would be a statement about the conditioning, not about the
+    // reconstruction.
+    assert!(
+        max_block_error <= 1.0e-11 * (1.0 + block_scale),
+        "the from-probes reconstruction must equal the dense selected inverse on a \
+         DEFLATED row at full-basis probes; got {max_block_error:.6e} against block \
+         magnitude {block_scale:.6e}"
+    );
+}
+
+/// The declared `log λ_sparse` ladder for gates that need any state the
+/// criterion will price as a maximum. `0.5` is the level these gates hard-coded
+/// after the #1625 indefinite-basin diagnosis, so a tree on which that level
+/// still works reproduces the historical anchor exactly; the rest climbs out of
+/// the low-`ρ_sparse` basin the same diagnosis identified, then drops below it
+/// for the fixtures whose maximum lies the other way.
+const PD_BASIN_SPARSE_LIFTS: [f64; 8] = [0.5, 0.9, 1.3, 1.8, 2.4, 0.2, -0.2, -0.6];

@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 /// Pack an `(n_rows, p, probes)` harvest probe stack into the row-major factor layout
 /// `RowMetric::behavioral_fisher` consumes: `u[n, i * probes + k] = probes[n, i, k]`.
-fn pack_probe_factors(probes: ndarray::ArrayView3<'_, f64>) -> Array2<f64> {
+pub(super) fn pack_probe_factors(probes: ndarray::ArrayView3<'_, f64>) -> Array2<f64> {
     let (n_rows, p, s) = probes.dim();
     let mut u = Array2::<f64>::zeros((n_rows, p * s));
     for n in 0..n_rows {
