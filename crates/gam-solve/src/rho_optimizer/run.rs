@@ -8220,12 +8220,10 @@ pub(crate) fn run_outer_uncertified(
     // there instead of replaying the same refuted fixed-point walk or throwing
     // away useful work.
     let mut refuted_fixed_point_continuation: Option<OuterResult> = None;
-    // Iterations spent by attempts whose results this function discards: an
-    // exhausted ARC attempt the budget retry continues, a plan the degraded
-    // ladder replaces, a fixed-point walk handed to BFGS. `OuterResult.iterations`
-    // is the total across solver restarts and these are the restarts, so the
-    // returned result carries them. Reporting only the last attempt's count hid
-    // an exhausted budget behind the retry that followed it (#2817).
+    // Iterations spent by attempts whose results this function discards: a plan
+    // the degraded ladder replaces, a fixed-point walk handed to BFGS.
+    // `OuterResult.iterations` is the total across solver restarts and these are
+    // the restarts, so the returned result carries them (#2817).
     let mut spent_iterations: usize = 0;
 
     'plan_attempts: for (attempt_idx, attempt_cap) in attempts.iter().enumerate() {
@@ -8309,268 +8307,91 @@ pub(crate) fn run_outer_uncertified(
             );
         }
 
-        // ARC budget-exhaustion retry: when an Arc attempt runs out of
-        // outer iterations, reseed a fresh Arc run from the previous
-        // attempt's last ρ and trust radius. Inner caches (PIRLS LRU,
-        // eval bundle, warm-start predictor, adaptive signals) are wiped
-        // by `obj.reset()`; the operator-TR's Cauchy/Newton/CG state has
-        // no resume API and is not preserved. The lever that changes for
-        // the resumed run is the inner-PIRLS cap (uncapped via the
-        // feedback handle), not `max_iter` — empirically the prior stall
-        // was an inner-tolerance / model-fidelity issue, not an outer
-        // budget shortfall, and doubling `max_iter` only replays the
-        // same trajectory byte-for-byte. The retry is gated on observed
-        // `‖g‖` progress so trajectories that made no headway fall
-        // through to the degraded plan instead of replaying.
-        let mut arc_retries_left: u32 = if matches!(the_plan.solver, Solver::Arc) {
-            2
-        } else {
-            0
-        };
-        let mut retry_config: Option<OuterConfig> = None;
-        // Tracks the previous ARC attempt's terminal `‖g‖`. The retry
-        // gate compares attempt-over-attempt: if a retry didn't move
-        // the gradient norm, the trajectory replayed (same seed, same
-        // trust radius, cold caches, deterministic optimizer) and
-        // further retries cannot help. First retry is unconditional
-        // (no prior attempt to compare against).
-        let mut prev_attempt_grad_norm: Option<f64> = None;
-
-        let outcome = loop {
-            // Bind the active config by cloning into a local owned value so
-            // subsequent retry-config assignment does not collide with the
-            // borrow used inside this iteration body.
-            let active_config_owned: OuterConfig = retry_config
-                .clone()
-                .unwrap_or_else(|| attempt_config.clone());
-            let active_config: &OuterConfig = &active_config_owned;
-            match run_outer_with_plan(obj, active_config, context, attempt_cap, &the_plan, true) {
-                Ok(PlanRunOutcome::Converged(result)) => break Ok(result),
-                Ok(PlanRunOutcome::FirstOrderFallbackRequested(request)) => {
-                    log::debug!(
-                        "[OUTER] {context}: attempt {} (plan={the_plan}) requested a joint \
-                         first-order fallback: {}",
-                        attempt_idx + 1,
-                        request.reason(),
-                    );
-                    last_error = Some(EstimationError::RemlOptimizationFailed(
-                        request.reason().to_string(),
-                    ));
-                    spent_iterations = spent_iterations.saturating_add(request.spent_iterations());
-                    continue 'plan_attempts;
-                }
-                Ok(PlanRunOutcome::FixedPointContinuationRequested(request)) => {
-                    let has_bfgs_fallback = attempts
-                        .get(attempt_idx + 1)
-                        .is_some_and(|next| matches!(plan(next).solver, Solver::Bfgs));
-                    if !has_bfgs_fallback {
-                        return Err(EstimationError::RemlOptimizationFailed(format!(
-                            "{context}: {:?} refused a trial after {} iteration(s) of its \
-                             plan attempt at rho={} (cost={:.6e}), but no analytic-gradient BFGS \
-                             continuation is declared: {}",
-                            request.checkpoint.plan_used.solver,
-                            request.checkpoint.iterations,
-                            request.checkpoint.point,
-                            request.checkpoint.sample.value,
-                            request.refusal,
-                        )));
-                    }
-                    last_error = Some(EstimationError::RemlOptimizationFailed(format!(
-                        "{:?} continuation requested after rho-local trial refusal: {}",
-                        request.checkpoint.plan_used.solver, request.refusal,
-                    )));
-                    spent_iterations =
-                        spent_iterations.saturating_add(request.checkpoint.iterations);
-                    fixed_point_continuation = Some(request.checkpoint);
-                    continue 'plan_attempts;
-                }
-                Ok(PlanRunOutcome::Exhausted(result)) => {
-                    // `Exhausted` is a proof-bearing outcome: every solver
-                    // claim in this plan failed the mandatory analytic
-                    // screening certificate.  A fixed-point solver may still
-                    // leave `solver_claimed_convergence == true` on the retained
-                    // checkpoint because its heuristic update was zero.  Do
-                    // not collapse that checkpoint back into success below;
-                    // continue it with the analytic-gradient fallback that the
-                    // capability ladder already declared.
-                    let has_bfgs_fallback = attempts
-                        .get(attempt_idx + 1)
-                        .is_some_and(|next| matches!(plan(next).solver, Solver::Bfgs));
-                    if result.solver_claimed_convergence()
-                        && matches!(the_plan.solver, Solver::Efs | Solver::HybridEfs)
-                        && has_bfgs_fallback
-                    {
-                        log::info!(
-                            "[OUTER] {context}: {:?} stopped at a fixed point, but no \
-                             candidate passed analytic screening; continuing the best finite \
-                             checkpoint with analytic-gradient BFGS",
-                            the_plan.solver,
-                        );
-                        last_error = Some(EstimationError::RemlOptimizationFailed(format!(
-                            "{:?} fixed point was refuted by analytic screening",
-                            the_plan.solver,
-                        )));
-                        spent_iterations = spent_iterations.saturating_add(result.iterations);
-                        refuted_fixed_point_continuation = Some(result);
-                        continue 'plan_attempts;
-                    }
-                    if arc_retries_left == 0
-                        || matches!(
-                            result.operator_stop_reason,
-                            Some(
-                                OperatorTrustRegionStopReason::RejectFloor
-                                    // #1690: a flat-valley cost-stall is a CONVERGED
-                                    // cost plateau over the whole stall window, not a
-                                    // budget shortfall. The ARC retry only reseeds
-                                    // from the same last ρ with a reset trust radius
-                                    // and the same deterministic operator state, so it
-                                    // replays the identical trajectory and re-halts at
-                                    // the same valley floor with the same |g| (verified
-                                    // on the #1690 Gamma repro: two retries, each
-                                    // returning |g|=0.3646 byte-for-byte). Treat it
-                                    // like `RejectFloor` and stop — the genuine
-                                    // stationarity verdict is reconciled downstream
-                                    // against the authoritative shipped-β gradient
-                                    // (`optimizer.rs`), and a non-stationary floor is
-                                    // still reported non-converged. This skips the
-                                    // wasted full-trajectory replay that dominated the
-                                    // count-family slowdown.
-                                    | OperatorTrustRegionStopReason::CostStallFlatValley
-                            )
-                        )
-                    {
-                        break Ok(result);
-                    }
-                    // Gate the retry on attempt-over-attempt `‖g‖`
-                    // progress. The first retry is unconditional (no
-                    // prior attempt). Subsequent retries fall through
-                    // to the degraded plan when the gradient norm did
-                    // not materially shrink — the deterministic
-                    // optimizer with the same seed and trust radius
-                    // would replay the same trajectory.
-                    let Some(cur_grad_norm) = result.final_grad_norm else {
-                        log::info!(
-                            "[OUTER] {context}: ARC attempt exhausted budget at \
-                             iter={} cost={:.6e} without a final gradient norm; \
-                             falling through to degraded plan",
-                            result.iterations,
-                            result.final_value,
-                        );
-                        break Ok(result);
-                    };
-                    if let Some(prev_g) = prev_attempt_grad_norm {
-                        // The gate's job, in its own words above, is to catch a
-                        // trajectory that "didn't move the gradient norm" — a
-                        // REPLAY: same seed, same trust radius, cold caches,
-                        // deterministic optimizer, so the retry recomputes what
-                        // the previous attempt already computed. That is
-                        // `cur >= prev`.
-                        //
-                        // It was implemented as `cur < 0.5 * prev`, which is a
-                        // HALVING requirement, and a retry that improves the
-                        // gradient by less than a factor of two was declared a
-                        // replay and threw away the rest of a two-retry budget.
-                        // Measured on gam#2735's stress fixture: `|g|` went
-                        // 1.966390e0 → 1.605910e0, an 18 % reduction — plainly
-                        // not a replay — and the ladder fell through to the
-                        // degraded plan with a retry still unspent. The retry
-                        // count (`arc_retries_left = 2`) is what bounds slow
-                        // grinding; this gate only has to tell motion from
-                        // stillness.
-                        let progressed = cur_grad_norm.is_finite()
-                            && prev_g.is_finite()
-                            && cur_grad_norm < prev_g;
-                        if !progressed {
-                            log::info!(
-                                "[OUTER] {context}: ARC retry stalled at \
-                                 iter={} cost={:.6e} |g|={:.6e} (prev |g|={:.6e}, \
-                                 ratio {:.4}); the retry did not reduce the gradient \
-                                 at all, so deterministic replay is suspected and \
-                                 further retries cannot help; falling through to \
-                                 degraded plan",
-                                result.iterations,
-                                result.final_value,
-                                cur_grad_norm,
-                                prev_g,
-                                cur_grad_norm / prev_g,
-                            );
-                            break Ok(result);
-                        }
-                        log::info!(
-                            "[OUTER] {context}: ARC retry reduced the gradient \
-                             {:.6e} -> {:.6e} (ratio {:.4}); spending another of \
-                             the {} remaining retries rather than reading slow \
-                             progress as a replay",
-                            prev_g,
-                            cur_grad_norm,
-                            cur_grad_norm / prev_g,
-                            arc_retries_left,
-                        );
-                    }
-                    let next_trust_radius =
-                        sanitized_operator_trust_restart_radius(result.operator_trust_radius);
-                    log::info!(
-                        "[OUTER] {context}: ARC attempt exhausted budget at \
-                         iter={} cost={:.6e} |g|={:.6e}; resuming from last \
-                         rho + trust_radius={:?}, inner-PIRLS uncapped \
-                         (objective caches wiped; operator-TR Cauchy/Newton \
-                         state is not resumable)",
-                        result.iterations,
-                        result.final_value,
-                        cur_grad_norm,
-                        next_trust_radius,
-                    );
-                    // Snapshot the cap-feedback handle before we
-                    // reassign `retry_config` (which currently backs
-                    // `active_config`'s borrow). `InnerProgressFeedback`
-                    // is an Arc-wrapper bundle, so the clone is cheap.
-                    let cap_feedback = active_config.outer_inner_cap.clone();
-                    let mut next = active_config.clone();
-                    prev_attempt_grad_norm = Some(cur_grad_norm);
-                    next.initial_rho = Some(result.rho.clone());
-                    next.operator_initial_trust_radius = next_trust_radius;
-                    // This is a continuation of ONE exhausted trajectory, not a
-                    // new multistart search.  Leaving the original seed policy
-                    // intact caused `run_outer_with_plan` to enumerate all of
-                    // the generated seeds again after installing the checkpoint:
-                    // the three-seed standard-REML sweep therefore ran twice
-                    // whenever one candidate exhausted its budget (#2817).
-                    // Restrict the resumed plan to the checkpoint which carries
-                    // the evidence for the retry.  Besides avoiding unrelated
-                    // work, this preserves the meaning of the progress gate:
-                    // `prev_attempt_grad_norm` and the next terminal norm now
-                    // belong to the same trajectory.
-                    restrict_arc_retry_to_checkpoint(&mut next);
-                    // `seed_budget = 1` is not binding while nothing has certified
-                    // (`should_start_next_seed`), so the resumed plan falls through
-                    // past the checkpoint to the generated seeds and model-derived
-                    // candidates. Each one the exhausted attempt started has already
-                    // run to its terminal state from the state `obj.reset()`
-                    // restores, and entering it again replays that run. Suppress
-                    // exactly those, accumulated across retries; a seed that was
-                    // never started keeps its rescue role (#2817, #2569).
-                    for point in &result.started_seed_points {
-                        if !next.previously_refused_seed_points.contains(point) {
-                            next.previously_refused_seed_points.push(point.clone());
-                        }
-                    }
-                    spent_iterations = spent_iterations.saturating_add(result.iterations);
-                    retry_config = Some(next);
-                    arc_retries_left -= 1;
-                    obj.reset();
-                    // Lift any inner-PIRLS cap for the resumed run. The
-                    // schedule's cold-start ladder (3/5/10) would
-                    // re-coarsen exactly the inner solves whose tolerance
-                    // is suspected to have starved the prior trajectory.
-                    // The next outer iter consumes ρ near a near-stationary
-                    // point where exact β / gradient / Hessian is the
-                    // load-bearing input to the operator-TR geometry.
-                    if let Some(feedback) = cap_feedback.as_ref() {
-                        feedback.cap.store(0, Ordering::Relaxed);
-                    }
-                }
-                Err(e) => break Err(e),
+        // An exhausted iteration budget is a refusal, not a reason to rerun the
+        // search for more iterations: the checkpoint and its iteration ledger go to
+        // the certificate, which mints only a stationary point (SPEC rules 21 and
+        // 23, #2817). Only a strategy change the plan itself requests continues the
+        // attempt with another solver.
+        let outcome = match run_outer_with_plan(
+            obj,
+            &attempt_config,
+            context,
+            attempt_cap,
+            &the_plan,
+            true,
+        ) {
+            Ok(PlanRunOutcome::Converged(result)) => Ok(result),
+            Ok(PlanRunOutcome::FirstOrderFallbackRequested(request)) => {
+                log::debug!(
+                    "[OUTER] {context}: attempt {} (plan={the_plan}) requested a joint \
+                     first-order fallback: {}",
+                    attempt_idx + 1,
+                    request.reason(),
+                );
+                last_error = Some(EstimationError::RemlOptimizationFailed(
+                    request.reason().to_string(),
+                ));
+                spent_iterations = spent_iterations.saturating_add(request.spent_iterations());
+                continue 'plan_attempts;
             }
+            Ok(PlanRunOutcome::FixedPointContinuationRequested(request)) => {
+                let has_bfgs_fallback = attempts
+                    .get(attempt_idx + 1)
+                    .is_some_and(|next| matches!(plan(next).solver, Solver::Bfgs));
+                if !has_bfgs_fallback {
+                    return Err(EstimationError::RemlOptimizationFailed(format!(
+                        "{context}: {:?} refused a trial after {} iteration(s) of its \
+                         plan attempt at rho={} (cost={:.6e}), but no analytic-gradient BFGS \
+                         continuation is declared: {}",
+                        request.checkpoint.plan_used.solver,
+                        request.checkpoint.iterations,
+                        request.checkpoint.point,
+                        request.checkpoint.sample.value,
+                        request.refusal,
+                    )));
+                }
+                last_error = Some(EstimationError::RemlOptimizationFailed(format!(
+                    "{:?} continuation requested after rho-local trial refusal: {}",
+                    request.checkpoint.plan_used.solver, request.refusal,
+                )));
+                spent_iterations =
+                    spent_iterations.saturating_add(request.checkpoint.iterations);
+                fixed_point_continuation = Some(request.checkpoint);
+                continue 'plan_attempts;
+            }
+            Ok(PlanRunOutcome::Exhausted(result)) => {
+                // `Exhausted` is a proof-bearing outcome: every solver
+                // claim in this plan failed the mandatory analytic
+                // screening certificate.  A fixed-point solver may still
+                // leave `solver_claimed_convergence == true` on the retained
+                // checkpoint because its heuristic update was zero.  Do
+                // not collapse that checkpoint back into success below;
+                // continue it with the analytic-gradient fallback that the
+                // capability ladder already declared.
+                let has_bfgs_fallback = attempts
+                    .get(attempt_idx + 1)
+                    .is_some_and(|next| matches!(plan(next).solver, Solver::Bfgs));
+                if result.solver_claimed_convergence()
+                    && matches!(the_plan.solver, Solver::Efs | Solver::HybridEfs)
+                    && has_bfgs_fallback
+                {
+                    log::info!(
+                        "[OUTER] {context}: {:?} stopped at a fixed point, but no \
+                         candidate passed analytic screening; continuing the best finite \
+                         checkpoint with analytic-gradient BFGS",
+                        the_plan.solver,
+                    );
+                    last_error = Some(EstimationError::RemlOptimizationFailed(format!(
+                        "{:?} fixed point was refuted by analytic screening",
+                        the_plan.solver,
+                    )));
+                    spent_iterations = spent_iterations.saturating_add(result.iterations);
+                    refuted_fixed_point_continuation = Some(result);
+                    continue 'plan_attempts;
+                }
+                Ok(result)
+            }
+            Err(e) => Err(e),
         };
 
         match outcome {
@@ -8635,17 +8456,6 @@ pub(crate) fn run_outer_uncertified(
     Err(last_error.unwrap_or_else(|| {
         EstimationError::RemlOptimizationFailed(format!("all plan attempts exhausted ({context})"))
     }))
-}
-
-/// Turn an exhausted ARC plan into a single-checkpoint continuation.
-///
-/// Kept separate from the orchestration loop so the no-multistart-on-retry
-/// contract can be pinned without reproducing a full REML seed cascade.
-pub(crate) fn restrict_arc_retry_to_checkpoint(config: &mut OuterConfig) {
-    config.heuristic_lambdas = None;
-    config.seed_config.max_seeds = 1;
-    config.seed_config.seed_budget = 1;
-    config.screen_initial_rho = false;
 }
 
 // ─── Frontier ρ-scaling auto-switch (issue #986) ─────────────────────────

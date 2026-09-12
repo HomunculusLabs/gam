@@ -4776,5 +4776,20 @@
     ],
     "reason": "#2469. pilot_eta_for_link_dev_orthogonalisation took its Fisher step through a ridge of PILOT_RIDGE_DIAG_FRACTION·max(mean diagonal, PILOT_RIDGE_DIAG_FLOOR). The Gram is PSD (non-negative IRLS weights), so the step is now the minimum-norm solution on its resolved positive eigenspace, and neither constant has a remaining user.",
     "evidence": "At the base, git grep -n -w finds PILOT_RIDGE_DIAG_FRACTION only at its declaration, one doc mention and its single use in pilot_eta_for_link_dev_orthogonalisation (crates/gam-models/src/bms/gradient_paths.rs). PILOT_RIDGE_DIAG_FLOOR appears only at its declaration and that use. This change replaces the use. Both are pub(crate), production-scoped and declared once, and no test names them. The item list applies source_removal_guard.py's ITEM regex and occurrence rule by hand. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "1830404e9744abb0ba6b864d8de7ba6f712e5275",
+    "items": [
+      "crates/gam-solve/src/rho_optimizer/arc_curvature_stationary_2817_tests.rs:const:MAX_ITER",
+      "crates/gam-solve/src/rho_optimizer/arc_curvature_stationary_2817_tests.rs:fn:arc_budget_retry_reports_every_attempts_iterations_2817",
+      "crates/gam-solve/src/rho_optimizer/run.rs:fn:restrict_arc_retry_to_checkpoint",
+      "crates/gam-solve/src/rho_optimizer/run_plan_tests.rs:const:OFFSET",
+      "crates/gam-solve/src/rho_optimizer/run_plan_tests.rs:const:SCALE",
+      "crates/gam-solve/src/rho_optimizer/run_plan_tests.rs:fn:arc_budget_retry_continues_only_the_exhausted_checkpoint",
+      "crates/gam-solve/src/rho_optimizer/run_plan_tests.rs:fn:arc_budget_retry_does_not_replay_a_seed_the_exhausted_attempt_started_2817",
+      "crates/gam-solve/src/rho_optimizer/run_plan_tests.rs:fn:run_nonconverged_arc_returns_typed_checkpoint_after_budget_retry_ladder"
+    ],
+    "reason": "Lead ruling 09-12 (#2817, SPEC rules 21 and 23): the ARC budget retry ladder in run_outer_uncertified reran an exhausted search instead of refusing it, under an arbitrary retry count. It is deleted, and an exhausted budget hands its checkpoint and iteration ledger to the certificate. restrict_arc_retry_to_checkpoint existed only for the ladder. The deleted tests pinned the ladder's own behaviour (replay suppression, checkpoint-only continuation, retry iteration ledger), and the renamed typed-refusal test keeps its assertions. The removed test consts belonged to the deleted tests.",
+    "evidence": "Every caller of restrict_arc_retry_to_checkpoint on main was the ladder or arc_budget_retry_continues_only_the_exhausted_checkpoint. The replacement pin an_exhausted_arc_budget_refuses_instead_of_retrying_2817 asserts that run_outer_uncertified returns the one-pass run_outer_with_plan checkpoint bit for bit. The #2817 fit converges with no retry (job 529179, /scratch.global/sauer354/pool/outer2817/v1.529179.log: 3 of 3 seeds converged, no exhausted budget)."
   }
 ]

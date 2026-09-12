@@ -4464,10 +4464,9 @@ fn automatic_fallbacks_preserve_analytic_hessian_for_arc_primary() {
     // the analytic outer Hessian ARC was using, replaces it with a
     // strictly weaker rank-2 approximation, and silently masks ARC's
     // actual failure mode (budget exhaustion, indefinite curvature)
-    // under a BFGS Strong-Wolfe plateau. ARC budget exhaustion is
-    // handled by the per-attempt retry ladder in
-    // `run_outer_with_strategy`; once that is exhausted, the caller
-    // sees the genuine analytic-Hessian non-convergence verbatim.
+    // under a BFGS Strong-Wolfe plateau. An exhausted ARC budget is a
+    // refusal the caller sees as the genuine analytic-Hessian
+    // non-convergence, verbatim (#2817).
     let cap = OuterCapability {
         gradient: Derivative::Analytic,
         hessian: DeclaredHessianForm::Either,
@@ -4687,8 +4686,8 @@ fn automatic_fallbacks_do_not_repeat_arc_when_fixed_point_is_irrelevant() {
     // planner already chose ARC for. Combined with the
     // analytic-Hessian-preservation contract enforced by
     // `automatic_fallbacks_preserve_analytic_hessian_for_arc_primary`,
-    // the ARC primary now has zero degraded fallbacks — the runner's
-    // ARC budget-bump retry ladder owns recovery.
+    // the ARC primary now has zero degraded fallbacks, and an exhausted
+    // budget refuses rather than retrying (#2817).
     let cap = OuterCapability {
         gradient: Derivative::Analytic,
         hessian: DeclaredHessianForm::Either,
@@ -5881,14 +5880,11 @@ fn run_indefinite_analytic_seed_stays_on_arc_and_its_declared_curvature_is_measu
 
 #[test]
 fn run_seed_materialization_failure_surfaces_arc_error_verbatim() {
-    // Under the budget-bump retry ladder (commit c96c4233), an ARC
-    // primary with `(Analytic, Analytic)` capability has zero degraded
-    // fallbacks. A seed-materialization failure surfaces as `Err`
-    // verbatim — there is no lateral demote to BFGS+BfgsApprox that
-    // would silently discard the analytic outer Hessian. Materialization
-    // failures are deterministic w.r.t. rho, so the budget-bump retry
-    // ladder cannot rescue them; the operator returns the same Err on
-    // every retry. Hence the runner returns the original Err.
+    // An ARC primary with `(Analytic, Analytic)` capability has zero
+    // degraded fallbacks. A seed-materialization failure surfaces as `Err`
+    // verbatim — there is no lateral demote to BFGS+BfgsApprox that would
+    // silently discard the analytic outer Hessian, and no budget retry
+    // (#2817). Hence the runner returns the original Err.
     let mut seed_config = gam_problem::SeedConfig::default();
     seed_config.seed_budget = 1;
     let problem = OuterProblem::new(1)
@@ -5927,24 +5923,15 @@ fn run_seed_materialization_failure_surfaces_arc_error_verbatim() {
 }
 
 #[test]
-fn run_nonconverged_arc_returns_typed_checkpoint_after_budget_retry_ladder() {
-    // When an ARC primary exhausts its iteration budget, the runner
-    // reseeds a fresh ARC attempt from the previous attempt's last
-    // ρ and trust radius (up to two retries) and uncaps the inner
-    // PIRLS cap for the resumed run via the InnerProgressFeedback
-    // handle. Retries are gated on attempt-over-attempt `‖g‖`
-    // halving so a deterministic-replay trajectory falls through.
-    // The objective's analytic outer Hessian is preserved across
-    // every attempt — no lateral demote to BFGS+BfgsApprox. After
-    // the retries are exhausted (or the gate fires), the runner
-    // returns typed non-convergence carrying the last rho checkpoint rather
-    // than an `OuterResult` that could reach fitted-model assembly.
+fn run_nonconverged_arc_returns_typed_checkpoint_without_a_budget_retry() {
+    // When an ARC primary exhausts its iteration budget, the runner refuses:
+    // it hands the best finite checkpoint to the certificate, which returns
+    // typed non-convergence carrying that rho rather than an `OuterResult` that
+    // could reach fitted-model assembly. There is no budget retry (#2817), and
+    // the analytic outer Hessian is kept: no lateral demote to BFGS+BfgsApprox.
     //
     // We use a quartic `cost = SCALE·(x − OFFSET)^4` from `initial_rho = [5.0]`
-    // with `max_iter = 1`. Newton-style ARC steps on a quartic contract the
-    // distance to the optimum by ~⅓ per attempt, so the halving gate passes and
-    // both retries proceed; ARC still cannot reach the optimum in three
-    // single-iter attempts.
+    // with `max_iter = 1`, which no seed can finish.
     //
     // OFFSET is what makes the subject reachable, and it is not cosmetic. The
     // seed budget bounds how many seeds are STARTED SPECULATIVELY, not how many
@@ -5953,9 +5940,9 @@ fn run_nonconverged_arc_returns_typed_checkpoint_after_budget_retry_ladder() {
     // rather than refuse. So with a plain `x^4` the cascade walks past the
     // exhausted `[5.0]` ladder to the always-injected neutral baseline `[0.0]`,
     // which is the EXACT global minimum of `x^4` — it certifies at iteration 0,
-    // the run returns `Ok`, and the retry ladder this test exists to drive is
-    // never measured. Putting the optimum at ½ leaves it stationary at NO
-    // generated candidate (they are integers), so every seed exhausts its ladder
+    // the run returns `Ok`, and the refusal this test exists to observe never
+    // happens. Putting the optimum at ½ leaves it stationary at NO
+    // generated candidate (they are integers), so every seed exhausts its budget
     // and the runner must produce the typed checkpoint. SCALE keeps the residual
     // gradient far above the stationarity band after the cascade, so the verdict
     // cannot turn on how close a seed happened to land.
@@ -5989,120 +5976,19 @@ fn run_nonconverged_arc_returns_typed_checkpoint_after_budget_retry_ladder() {
     );
     let error = problem
         .run(&mut obj, "nonconverged arc should stay on arc")
-        .expect_err("an exhausted ARC ladder must return typed non-convergence");
+        .expect_err("an exhausted ARC budget must return typed non-convergence");
     let EstimationError::RemlDidNotConverge { rho_checkpoint, .. } = error else {
         panic!("expected typed REML non-convergence, got {error}");
     };
-    // The ladder must have neither reached the optimum (ρ = OFFSET, where the
+    // The refusal must have neither reached the optimum (ρ = OFFSET, where the
     // quartic is stationary) nor stalled at a seed: ARC contracts toward OFFSET
     // but cannot arrive within the single-iter budget, so the reported ρ is
     // strictly inside the box and off the optimum.
     assert!(
         (rho_checkpoint[0] - OFFSET).abs() > 1.0e-6 && rho_checkpoint[0].abs() < 5.0,
-        "the budget ladder must have made partial progress toward the quartic \
+        "the exhausted budget must have made partial progress toward the quartic \
          optimum at {OFFSET} without reaching it; got rho={:?}",
         rho_checkpoint
-    );
-}
-
-/// gam#2817 — the ARC budget-exhaustion retry continues ONE exhausted
-/// trajectory, so it must not re-enter a seed the exhausted attempt already ran.
-///
-/// Same quartic ladder as
-/// `run_nonconverged_arc_returns_typed_checkpoint_after_budget_retry_ladder`:
-/// every seed exhausts `max_iter = 1`, the cascade runs past the initial `[5.0]`
-/// to the neutral baseline `[0.0]`, and both retries fire. A retry is seeded at
-/// the exhausted checkpoint, never at `[5.0]`, so `[5.0]`'s evaluation count is
-/// what one solver start from a seed costs on this route. `[0.0]` is started by
-/// the first attempt as well; a retry that re-enters it pays that start again
-/// from the state `obj.reset()` restored, which is the replay gam#1082's penguin
-/// arm measured bit-identically on every retry.
-#[test]
-fn arc_budget_retry_does_not_replay_a_seed_the_exhausted_attempt_started_2817() {
-    const OFFSET: f64 = 0.5;
-    const SCALE: f64 = 1.0e6;
-    let mut seed_config = gam_problem::SeedConfig::default();
-    seed_config.seed_budget = 1;
-    seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;
-    let (_d, session) = tmp_cache_session("arc-retry-replay-2817");
-    let problem = OuterProblem::new(1)
-        .with_gradient(Derivative::Analytic)
-        .with_hessian(DeclaredHessianForm::Either)
-        .with_seed_config(seed_config)
-        .with_initial_rho(array![5.0])
-        .with_max_iter(1)
-        .with_cache_session(Arc::clone(&session));
-    let evaluated: Arc<std::sync::Mutex<Vec<f64>>> = Arc::default();
-    let recorder = Arc::clone(&evaluated);
-    let mut obj = problem.build_objective(
-        (),
-        |_: &mut (), theta: &Array1<f64>| Ok(SCALE * (theta[0] - OFFSET).powi(4)),
-        move |_: &mut (), theta: &Array1<f64>| {
-            recorder
-                .lock()
-                .expect("the evaluation recorder is never poisoned")
-                .push(theta[0]);
-            let d = theta[0] - OFFSET;
-            Ok(OuterEval {
-                cost: SCALE * d.powi(4),
-                gradient: array![SCALE * 4.0 * d.powi(3)],
-                hessian: HessianValue::Dense(array![[SCALE * 12.0 * d.powi(2)]]),
-                inner_beta_hint: None,
-            })
-        },
-        None::<fn(&mut ())>,
-        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
-    );
-    let error = problem
-        .run(&mut obj, "arc budget retry replay #2817")
-        .expect_err("an exhausted ARC ladder must return typed non-convergence");
-    assert!(
-        matches!(error, EstimationError::RemlDidNotConverge { .. }),
-        "expected typed REML non-convergence, got {error}"
-    );
-    let evaluated = evaluated
-        .lock()
-        .expect("the evaluation recorder is never poisoned")
-        .clone();
-    let starts_at = |point: f64| evaluated.iter().filter(|&&theta| theta == point).count();
-    let initial = starts_at(5.0);
-    let baseline = starts_at(0.0);
-    eprintln!(
-        "[#2817 arc retry replay] evaluations at initial seed [5.0]={initial}, at neutral \
-         baseline [0.0]={baseline}; trail={evaluated:?}"
-    );
-    assert!(
-        initial > 0 && baseline > 0,
-        "fixture precondition: the first attempt must start both the initial seed and the \
-         neutral baseline (initial={initial}, baseline={baseline})"
-    );
-    assert_eq!(
-        baseline, initial,
-        "an ARC budget retry re-entered the neutral baseline the exhausted attempt had already \
-         run: {baseline} evaluation(s) there against {initial} at the initial seed, which no \
-         retry can reach"
-    );
-}
-
-#[test]
-fn arc_budget_retry_continues_only_the_exhausted_checkpoint() {
-    let mut config = OuterConfig::default();
-    config.heuristic_lambdas = Some(vec![0.5, 2.0, 8.0]);
-    config.seed_config.max_seeds = 7;
-    config.seed_config.seed_budget = 3;
-    config.screen_initial_rho = true;
-
-    super::super::run::restrict_arc_retry_to_checkpoint(&mut config);
-
-    assert!(
-        config.heuristic_lambdas.is_none(),
-        "a checkpoint continuation must not regenerate heuristic starts"
-    );
-    assert_eq!(config.seed_config.max_seeds, 1);
-    assert_eq!(config.seed_config.seed_budget, 1);
-    assert!(
-        !config.screen_initial_rho,
-        "the already-evaluated terminal checkpoint must be continued directly"
     );
 }
 

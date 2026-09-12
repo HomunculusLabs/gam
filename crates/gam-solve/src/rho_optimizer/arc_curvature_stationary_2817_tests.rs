@@ -643,29 +643,25 @@ fn a_residual_along_a_sub_resolution_negative_direction_keeps_the_search_moving_
     );
 }
 
-// ─── the budget retry's iteration ledger ─────────────────────────────────────
+// ─── an exhausted budget refuses ─────────────────────────────────────────────
 
-/// The ARC budget retry must report every attempt's iterations, not only the
-/// last attempt's.
+/// An exhausted ARC budget is a refusal that carries its iteration ledger, not a
+/// retry (#2817).
 ///
-/// `OuterResult.iterations` is "total outer iterations across all solver
-/// restarts", and a fit-level `outer_iterations < max_iter` is the only evidence
-/// a caller has that no attempt ran out of budget. The retry dropped each
-/// exhausted attempt's count, so a search that burned its budget and was then
-/// continued read as one short run.
+/// `run_outer_uncertified` used to rerun an exhausted ARC plan from its last
+/// iterate, up to twice, which only continued a search that had not converged
+/// (SPEC rule 21) under an arbitrary retry count (rule 23). With the automatic
+/// fallback ladder disabled there is one plan attempt, so what the runner hands
+/// to the certificate must be exactly what one pass of that plan produced: the
+/// same checkpoint, with the same iterations. A retry continues from that
+/// checkpoint and moves it.
 ///
-/// Same quartic ladder as
-/// `run_nonconverged_arc_returns_typed_checkpoint_after_budget_retry_ladder`:
-/// every attempt exhausts `max_iter = 1` and both retries fire, so the ladder
-/// spends more iterations than any one attempt can report. The call goes
-/// through `run_outer_uncertified`, the layer that owns the retry, so the
-/// certification resume in `run_outer` (which adds its own counts) cannot
-/// supply the total.
+/// Every seed of the quartic `SCALE·(θ − OFFSET)⁴` exhausts `max_iter = 1`, since
+/// no generated candidate sits at ½, so the plan pass returns `Exhausted`.
 #[test]
-fn arc_budget_retry_reports_every_attempts_iterations_2817() {
+fn an_exhausted_arc_budget_refuses_instead_of_retrying_2817() {
     const OFFSET: f64 = 0.5;
     const SCALE: f64 = 1.0e6;
-    const MAX_ITER: usize = 1;
     let mut seed_config = gam_problem::SeedConfig::default();
     seed_config.seed_budget = 1;
     seed_config.risk_profile = gam_problem::SeedRiskProfile::Gaussian;
@@ -674,45 +670,95 @@ fn arc_budget_retry_reports_every_attempts_iterations_2817() {
         .with_hessian(DeclaredHessianForm::Either)
         .with_seed_config(seed_config)
         .with_initial_rho(array![5.0])
-        .with_max_iter(MAX_ITER);
-    let mut obj = problem.build_objective(
+        .with_max_iter(1)
+        .with_fallback_policy(FallbackPolicy::Disabled);
+    let cost = |_: &mut (), theta: &Array1<f64>| -> Result<f64, EstimationError> {
+        Ok(SCALE * (theta[0] - OFFSET).powi(4))
+    };
+    let eval = |_: &mut (), theta: &Array1<f64>| -> Result<OuterEval, EstimationError> {
+        let d = theta[0] - OFFSET;
+        Ok(OuterEval {
+            cost: SCALE * d.powi(4),
+            gradient: array![SCALE * 4.0 * d.powi(3)],
+            hessian: HessianValue::Dense(array![[SCALE * 12.0 * d.powi(2)]]),
+            inner_beta_hint: None,
+        })
+    };
+    let config = problem.config();
+    let context = "exhausted ARC budget #2817";
+
+    let mut plan_obj = problem.build_objective(
         (),
-        |_: &mut (), theta: &Array1<f64>| Ok(SCALE * (theta[0] - OFFSET).powi(4)),
-        |_: &mut (), theta: &Array1<f64>| {
-            let d = theta[0] - OFFSET;
-            Ok(OuterEval {
-                cost: SCALE * d.powi(4),
-                gradient: array![SCALE * 4.0 * d.powi(3)],
-                hessian: HessianValue::Dense(array![[SCALE * 12.0 * d.powi(2)]]),
-                inner_beta_hint: None,
-            })
-        },
+        cost,
+        eval,
         None::<fn(&mut ())>,
         None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
     );
-    let checkpoint = super::super::super::run::run_outer_uncertified(
-        &mut obj,
-        &problem.config(),
-        "arc budget retry iterations #2817",
-    )
-    .expect("an exhausted ARC ladder hands its best finite checkpoint to the certificate");
+    let capability = super::super::super::capability::primary_capability_for_config(
+        plan_obj.capability(),
+        &config,
+        context,
+    );
+    let the_plan = plan(&capability);
+    assert_eq!(
+        the_plan.solver,
+        Solver::Arc,
+        "fixture precondition: the quartic plans ARC"
+    );
+    let one_pass =
+        match run_outer_with_plan(&mut plan_obj, &config, context, &capability, &the_plan, true)
+            .expect("one plan pass over the quartic returns an outcome")
+        {
+            PlanRunOutcome::Exhausted(checkpoint) => checkpoint,
+            PlanRunOutcome::Converged(result) => panic!(
+                "fixture precondition: no seed reaches the optimum at {OFFSET} within one \
+                 iteration, but the pass converged at rho={:?}",
+                result.rho
+            ),
+            PlanRunOutcome::FirstOrderFallbackRequested(request) => {
+                panic!("an ARC pass requested a first-order fallback: {}", request.reason())
+            }
+            PlanRunOutcome::FixedPointContinuationRequested(request) => {
+                panic!("an ARC pass requested a fixed-point continuation: {}", request.refusal)
+            }
+        };
+
+    let mut runner_obj = problem.build_objective(
+        (),
+        cost,
+        eval,
+        None::<fn(&mut ())>,
+        None::<fn(&mut (), &Array1<f64>) -> Result<EfsEval, EstimationError>>,
+    );
+    let refused =
+        super::super::super::run::run_outer_uncertified(&mut runner_obj, &config, context)
+            .expect("an exhausted ARC budget hands its checkpoint to the certificate");
     eprintln!(
-        "[#2817 arc retry iterations] iterations={} solver_converged={} rho={:?}",
-        checkpoint.iterations,
-        checkpoint.solver_claimed_convergence(),
-        checkpoint.rho,
+        "[#2817 exhausted budget] one pass: rho={:?} value={:e} iterations={}; runner: \
+         rho={:?} value={:e} iterations={}",
+        one_pass.rho,
+        one_pass.final_value,
+        one_pass.iterations,
+        refused.rho,
+        refused.final_value,
+        refused.iterations,
     );
     assert!(
-        !checkpoint.solver_claimed_convergence(),
-        "fixture precondition: no attempt reaches the quartic optimum at {OFFSET} within \
-         max_iter = {MAX_ITER}"
+        !refused.solver_claimed_convergence(),
+        "an exhausted budget makes no convergence claim"
     );
-    assert!(
-        checkpoint.iterations > MAX_ITER,
-        "the returned checkpoint reports {} iteration(s), a count one exhausted attempt with \
-         max_iter = {MAX_ITER} could spend alone, although the budget retry ran more than one \
-         attempt",
-        checkpoint.iterations
+    assert_eq!(
+        refused.rho, one_pass.rho,
+        "the runner moved the checkpoint one plan pass produced, so it continued the search"
+    );
+    assert_eq!(
+        refused.final_value.to_bits(),
+        one_pass.final_value.to_bits(),
+        "the runner's checkpoint value differs from the one plan pass"
+    );
+    assert_eq!(
+        refused.iterations, one_pass.iterations,
+        "the runner spent iterations beyond the one plan pass"
     );
 }
 
