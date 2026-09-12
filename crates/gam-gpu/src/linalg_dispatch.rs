@@ -581,7 +581,7 @@ fn stitch_batched<L>(
 
 #[inline]
 #[must_use]
-pub fn try_fast_ab(a: ArrayView2<'_, f64>, b: ArrayView2<'_, f64>) -> Option<Array2<f64>> {
+pub(crate) fn try_fast_ab(a: ArrayView2<'_, f64>, b: ArrayView2<'_, f64>) -> Option<Array2<f64>> {
     let (m, k) = a.dim();
     let (kb, n) = b.dim();
     if k != kb {
@@ -606,7 +606,7 @@ pub fn try_fast_ab(a: ArrayView2<'_, f64>, b: ArrayView2<'_, f64>) -> Option<Arr
 
 #[inline]
 #[must_use]
-pub fn try_fast_atb(a: ArrayView2<'_, f64>, b: ArrayView2<'_, f64>) -> Option<Array2<f64>> {
+pub(crate) fn try_fast_atb(a: ArrayView2<'_, f64>, b: ArrayView2<'_, f64>) -> Option<Array2<f64>> {
     let (n_a, p) = a.dim();
     let (n_b, q) = b.dim();
     if n_a != n_b {
@@ -631,7 +631,7 @@ pub fn try_fast_atb(a: ArrayView2<'_, f64>, b: ArrayView2<'_, f64>) -> Option<Ar
 
 /// `Aᵀ·B` on a specific device ordinal, for pool-tiled callers that already own
 /// the ordinal (the worker thread has bound that ordinal's context). Semantics
-/// are identical to [`try_fast_atb`] — `a` is `m×k`, `b` is `m×n`, output is the
+/// are identical to `try_fast_atb` — `a` is `m×k`, `b` is `m×n`, output is the
 /// `k×n` product `aᵀ·b` — but the kernel is pinned to `ordinal` instead of the
 /// probe-selected primary device. Auto returns `None` only when CUDA is absent
 /// or the shape is below policy threshold, so the caller can run its CPU path.
@@ -693,7 +693,7 @@ pub fn try_fast_atb_on_ordinal(
 
 #[inline]
 #[must_use]
-pub fn try_fast_av(a: ArrayView2<'_, f64>, v: ArrayView1<'_, f64>) -> Option<Array1<f64>> {
+pub(crate) fn try_fast_av(a: ArrayView2<'_, f64>, v: ArrayView1<'_, f64>) -> Option<Array1<f64>> {
     let (m, k) = a.dim();
     if k != v.len() {
         invalid_gpu_request("A·v", "the matrix width and vector length differ");
@@ -717,7 +717,7 @@ pub fn try_fast_av(a: ArrayView2<'_, f64>, v: ArrayView1<'_, f64>) -> Option<Arr
 
 #[inline]
 #[must_use]
-pub fn try_fast_atv(a: ArrayView2<'_, f64>, v: ArrayView1<'_, f64>) -> Option<Array1<f64>> {
+pub(crate) fn try_fast_atv(a: ArrayView2<'_, f64>, v: ArrayView1<'_, f64>) -> Option<Array1<f64>> {
     let (n, p) = a.dim();
     if n != v.len() {
         invalid_gpu_request("Aᵀ·v", "the matrix height and vector length differ");
@@ -972,7 +972,7 @@ pub fn try_fast_spectral_leverage_diagonal(
 
 #[inline]
 #[must_use]
-pub fn try_fast_xt_diag_y(
+pub(crate) fn try_fast_xt_diag_y(
     x: ArrayView2<'_, f64>,
     w: ArrayView1<'_, f64>,
     y: ArrayView2<'_, f64>,
