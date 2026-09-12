@@ -883,10 +883,24 @@ impl FittedTransport {
         } else {
             (raw_hi, raw_lo)
         };
-        // Scale-aware image tolerance: an absolute 1e-9 would wrongly accept a
-        // target well outside a tiny image (e.g. [0, 1e-8]).
-        let scale = raw_min.abs().max(raw_max.abs()).max(1.0);
-        let tol = 32.0 * f64::EPSILON * scale;
+        // An endpoint image is `slope·t + offset + Σ_j b_j(t)·β_j` over the `d + 1` live
+        // B-splines. Each basis value costs at most `4d + 1` roundings (the `d`-level
+        // recursion and the partition-of-unity normalization), the weighted sum two per
+        // term, and the affine part three, so an endpoint rounds by at most `γ_{6d+6}`
+        // of `|slope·t| + |offset| + Σ_j |b_j·β_j|`. A target beyond the larger
+        // endpoint band is outside the fitted image.
+        let endpoint_band = |t: f64| -> Result<f64, String> {
+            let row = self.basis.value_rows(Array1::from_elem(1, t).view())?;
+            let smooth_mass: f64 = row
+                .row(0)
+                .iter()
+                .zip(self.beta.iter())
+                .map(|(value, coefficient)| (value * coefficient).abs())
+                .sum();
+            Ok(gam_linalg::roundoff::accumulation_growth(6 * TRANSPORT_SPLINE_DEGREE + 6)
+                * ((self.linear_slope() * t).abs() + self.rotation_offset.abs() + smooth_mass))
+        };
+        let tol = endpoint_band(lo)?.max(endpoint_band(hi)?);
 
         // One reusable single-element buffer for the bisection probes (rebuilt
         // basis rows on every probe otherwise allocated a fresh `Array1`).
