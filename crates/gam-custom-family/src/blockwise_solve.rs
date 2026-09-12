@@ -2536,6 +2536,21 @@ pub(crate) struct ConstrainedHessianGeometry {
 /// the property the dense path relies on. Eigensolver failure is a hard error:
 /// silently reverting to an indefinite or differently damped QP would switch
 /// algorithms after its curvature contract failed.
+///
+/// "Numerical null" means below the eigensolver's own resolution,
+/// `joint_hessian_numerical_eigenvalue_floor` (`λ_max·√p·ε`), the classification
+/// `symmetric_penalized_hessian_nullity` already uses (#2690). The
+/// `KKT_REFUSAL_RANK_TOL·λ_max` conditioning cutoff used here instead calls a
+/// resolvable identified mode null whenever it is stiff next to a huge one, and
+/// then REPLACES its curvature with μ. On the veteran frailty witness (#2714) the
+/// first waypoint-0 cycle logged `lambda_min_signed_raw=1.606e0 nullity=2` with a
+/// stabilized minimum of `1.499e-2`, which is μ: two identified modes at least
+/// 107× flatter in the QP than in the trust-region model that judges its step.
+/// The QP overshot along them every cycle, the model accepted a sliver at
+/// `ρ = 1`, and the solve zig-zagged into the residual-stall guard. Below the
+/// resolution a mode's curvature is not a number and μ supplies gauge
+/// uniqueness; above it every mode keeps at least its exact magnitude, which the
+/// ambient shift only ever raises.
 pub(crate) fn symmetric_constrained_hessian_geometry(
     matrix: &Array2<f64>,
     levenberg_mu: f64,
@@ -2557,7 +2572,7 @@ pub(crate) fn symmetric_constrained_hessian_geometry(
     if !(lambda_max_abs.is_finite() && lambda_max_abs > 0.0) {
         return Err(CustomFamilyError::trial_point("constrained Hessian has no finite nonzero curvature scale".to_string()));
     }
-    let cutoff = KKT_REFUSAL_RANK_TOL * lambda_max_abs;
+    let cutoff = crate::joint_newton::joint_hessian_numerical_eigenvalue_floor(lambda_max_abs, p);
     let nullity = evals.iter().filter(|value| value.abs() < cutoff).count();
     let min_range = evals
         .iter()
@@ -2572,7 +2587,6 @@ pub(crate) fn symmetric_constrained_hessian_geometry(
     let ambient_levenberg = nullity == 0
         && damp_full_rank_ill_conditioned
         && condition > LEVENBERG_ILL_CONDITIONING_THRESHOLD;
-    let floor = lambda_max_abs * (p as f64).sqrt() * f64::EPSILON;
     let mu = if levenberg_mu.is_finite() && levenberg_mu > 0.0 {
         levenberg_mu
     } else {
@@ -2580,11 +2594,11 @@ pub(crate) fn symmetric_constrained_hessian_geometry(
     };
     let stabilized = Array1::from_iter(evals.iter().map(|lambda| {
         if nullity > 0 && lambda.abs() < cutoff {
-            mu.max(floor)
+            mu.max(cutoff)
         } else if ambient_levenberg {
-            (lambda + mu).abs().max(floor)
+            (lambda + mu).abs().max(cutoff)
         } else {
-            lambda.abs().max(floor)
+            lambda.abs().max(cutoff)
         }
     }));
     let stabilized_min_eigenvalue = stabilized.iter().copied().fold(f64::INFINITY, f64::min);
@@ -2668,6 +2682,51 @@ mod constrained_hessian_geometry_tests {
         assert_eq!(symmetric_penalized_hessian_nullity(&weak), Some(0));
         let singular = array![[3.609e8, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]];
         assert_eq!(symmetric_penalized_hessian_nullity(&singular), Some(1));
+    }
+
+    /// #2714: the veteran frailty witness's first waypoint-0 cycle logged
+    /// `lambda_min_signed_raw=1.606e0 nullity=2` with a stabilized minimum of
+    /// `1.499e-2`, which is μ. An identified mode that is stiff next to a huge one
+    /// sat below the `1e-10·λ_max` conditioning cutoff, was counted null, and had
+    /// its curvature replaced by μ, so the QP overshot it about 100× against the
+    /// trust-region model. Only a mode below the eigensolver's resolution may be
+    /// replaced. Here `λ_max = 2e10` puts the old cutoff at `2.0`, above the weak
+    /// mode, so both arms below fail under it.
+    #[test]
+    fn resolvable_weak_curvature_keeps_its_magnitude_in_the_qp_geometry_2714() {
+        let mu = 1.499e-2_f64;
+        let weak = 1.606_f64;
+        let weak_axis = array![0.0_f64, 1.0, 0.0];
+        let null_axis = array![0.0_f64, 0.0, 1.0];
+
+        let rank_deficient = array![[2.0e10, 0.0, 0.0], [0.0, weak, 0.0], [0.0, 0.0, 0.0]];
+        let geometry = symmetric_constrained_hessian_geometry(&rank_deficient, mu, false)
+            .expect("rank-deficient symmetric geometry");
+        assert_eq!(
+            geometry.nullity, 1,
+            "only the exact zero is below the eigensolver's resolution"
+        );
+        let weak_curvature = geometry.matrix.dot(&weak_axis)[1];
+        assert!(
+            (weak_curvature - weak).abs() <= 1e-6 * weak,
+            "a resolvable identified mode must keep its curvature {weak}, got {weak_curvature}"
+        );
+        let null_curvature = geometry.matrix.dot(&null_axis)[2];
+        assert!(
+            (null_curvature - mu).abs() <= 1e-6 * mu,
+            "the numerical-null mode takes μ = {mu}, got {null_curvature}"
+        );
+
+        // Full rank and ill conditioned: the ambient shift only raises curvature.
+        let full_rank = array![[2.0e10, 0.0, 0.0], [0.0, weak, 0.0], [0.0, 0.0, 3.0]];
+        let damped = symmetric_constrained_hessian_geometry(&full_rank, mu, true)
+            .expect("full-rank symmetric geometry");
+        assert_eq!(damped.nullity, 0);
+        let damped_weak = damped.matrix.dot(&weak_axis)[1];
+        assert!(
+            damped_weak >= weak,
+            "the ambient Levenberg shift must not flatten an identified mode: {damped_weak} < {weak}"
+        );
     }
 }
 
