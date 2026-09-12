@@ -1851,6 +1851,14 @@ fn zz_measure_k2_wide_p_gradient_arm_vs_solver_arm_2080() {
                 panic!("B-arm snapshot restore after a failed line search: {error:?}")
             });
             eprintln!("[2080-AB] B/gradient line search found no acceptable step at iter={iter}");
+            // The arm stops here, so its reading at the stopping iterate IS the B side
+            // of the comparison: a steepest-descent arm that cannot take a step has
+            // moved ‖g‖ nowhere, which is the registered "B also stalls" outcome, not
+            // an absent measurement. Readings otherwise come every 25 iterations, so
+            // an arm that stalls earlier used to leave B with none.
+            if report("B/gradient", &mut arm_b, iter).is_some() {
+                b_readings += 1;
+            }
             break;
         }
         // Ratchet the trial length the same way the production loop does.
