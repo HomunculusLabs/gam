@@ -1538,5 +1538,14 @@
     },
     "reason": "#2903: the removed pub and pub(crate) functions belong to PoissonLogFamily and GammaLogFamily (parameternames, parameter_links, metadata), to expect_single_block, whose only callers were in log_link.rs, and to four unit tests that exercised only those families. Neither family has a product user.",
     "evidence": "At the base, git grep -n over the whole tree finds PoissonLogFamily and GammaLogFamily only in log_link.rs, the gaussian.rs module doc, gamlss/tests.rs, gamlss/tests_wiggle_ls.rs and two tests/regressions/misc files. git grep -w expect_single_block finds only its declaration and its log_link.rs callers."
+  },
+  {
+    "base": "6ed2346599b948b7aa071cd1643d7e41655f099c",
+    "removed": {
+      "crates/gam-terms/src/smooth/term_specs.rs::projector_from_columns": 1,
+      "crates/gam-terms/src/smooth/term_specs.rs::tensor_margin_range_null_projectors": 1
+    },
+    "reason": "SPEC rule 5 (#2901 V6). The t2 separable penalty now builds its blocks from function-space factors through a private builder, so the Euclidean projector builder tensor_margin_range_null_projectors and its helper projector_from_columns have no caller left and are deleted.",
+    "evidence": "public_api_census.py's public_functions predicate over the removed hunks of crates/gam-terms/src/smooth/term_specs.rs yields projector_from_columns and tensor_margin_range_null_projectors. At the base, each is the file's only pub fn of that name, and git grep -w finds no use of either outside that file. The new tensor_margin_separable_factors is private."
   }
 ]

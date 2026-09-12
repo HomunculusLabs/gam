@@ -5758,26 +5758,41 @@ pub fn dense_local_margin_to_sparse(
     })
 }
 
-pub struct TensorMarginRangeNullProjectors {
+/// One margin's two factors in the t2 separable tensor penalty. Both are
+/// functionals of the margin's functions, never of its coefficients (SPEC rule 5).
+struct TensorMarginSeparableFactors {
+    /// The margin's normalized roughness penalty `S̃_j`: a block that takes this
+    /// margin from its range integrates the margin's derivative energy.
     range: Array2<f64>,
+    /// `‖S_j‖_F`, the scale `S̃_j` was divided by.
+    range_scale: f64,
+    /// The mass of the function's component in `null(S_j)` under the margin's
+    /// function Gram `G_j`, divided by the domain measure `1ᵀ G_j 1`.
     null: Array2<f64>,
+    /// `1ᵀ G_j 1`.
+    null_scale: f64,
 }
 
-pub fn projector_from_columns(columns: &Array2<f64>, indices: &[usize]) -> Array2<f64> {
-    if indices.is_empty() {
-        return Array2::<f64>::zeros((columns.nrows(), columns.nrows()));
-    }
-    let basis = columns.select(Axis(1), indices);
-    basis.dot(&basis.t())
-}
-
-pub fn tensor_margin_range_null_projectors(
+/// Build every margin's [`TensorMarginSeparableFactors`].
+///
+/// With `U₀` spanning `null(S_j)`, the `G_j`-orthogonal projection of a margin
+/// function onto the null functions has coefficients
+/// `U₀ (U₀ᵀ G U₀)⁻¹ U₀ᵀ G β` and mass `βᵀ G U₀ (U₀ᵀ G U₀)⁻¹ U₀ᵀ G β`. A
+/// Euclidean projector `U₀U₀ᵀ` measures that component by its coefficients,
+/// which agrees with the function only where the basis is Gram-orthonormal, and
+/// B-spline and natural-cubic margins are not. Dividing by the domain measure
+/// keeps the margin's length unit out of the other margins' λ, as the te
+/// decomposition does.
+fn tensor_margin_separable_factors(
     normalized_marginal_penalties: &[(Array2<f64>, f64)],
-) -> Result<Vec<TensorMarginRangeNullProjectors>, BasisError> {
+    marginal_function_grams: &[Array2<f64>],
+) -> Result<Vec<TensorMarginSeparableFactors>, BasisError> {
+    use gam_linalg::faer_ndarray::FaerEigh;
     normalized_marginal_penalties
         .iter()
+        .zip(marginal_function_grams)
         .enumerate()
-        .map(|(dim, (penalty, _))| {
+        .map(|(dim, ((penalty, penalty_scale), gram))| {
             let analysis = crate::basis::analyze_penalty_block(penalty)?;
             if analysis.rank == 0 {
                 crate::bail_invalid_basis!(
@@ -5785,18 +5800,57 @@ pub fn tensor_margin_range_null_projectors(
                      cannot split penalized and null subspaces"
                 );
             }
-            let mut range_idx = Vec::<usize>::new();
-            let mut null_idx = Vec::<usize>::new();
-            for (idx, &ev) in analysis.eigenvalues.iter().enumerate() {
-                if ev > analysis.rank_tol {
-                    range_idx.push(idx);
-                } else {
-                    null_idx.push(idx);
-                }
+            if gram.dim() != penalty.dim() {
+                crate::bail_dim_basis!(
+                    "t2 separable tensor penalty margin {dim}: function Gram is {:?}, penalty is {:?}",
+                    gram.dim(),
+                    penalty.dim()
+                );
             }
-            Ok(TensorMarginRangeNullProjectors {
-                range: projector_from_columns(&analysis.eigenvectors, &range_idx),
-                null: projector_from_columns(&analysis.eigenvectors, &null_idx),
+            let measure = gram.sum();
+            if !(measure.is_finite() && measure > 0.0) {
+                crate::bail_invalid_basis!(
+                    "internal TensorBSpline error at dim {dim}: function Gram measure {measure} is not positive and finite"
+                );
+            }
+            let null_idx: Vec<usize> = analysis
+                .eigenvalues
+                .iter()
+                .enumerate()
+                .filter(|&(_, &ev)| ev <= analysis.rank_tol)
+                .map(|(idx, _)| idx)
+                .collect();
+            let mut null = Array2::<f64>::zeros(penalty.dim());
+            if !null_idx.is_empty() {
+                let null_basis = analysis.eigenvectors.select(Axis(1), &null_idx);
+                let gram_null = gram.dot(&null_basis); // G U₀
+                let null_gram = null_basis.t().dot(&gram_null); // U₀ᵀ G U₀
+                let (null_evals, null_evecs) = null_gram
+                    .eigh(faer::Side::Lower)
+                    .map_err(BasisError::LinalgError)?;
+                // G is positive definite, so U₀ᵀ G U₀ is too; a non-positive mode
+                // means the Gram does not describe this margin's functions.
+                if let Some(&smallest) = null_evals.iter().min_by(|a, b| a.total_cmp(b)) {
+                    if !(smallest > 0.0) {
+                        crate::bail_invalid_basis!(
+                            "t2 separable tensor penalty margin {dim}: the function Gram is not \
+                             positive on the penalty null space (smallest mode {smallest})"
+                        );
+                    }
+                }
+                // G U₀ (U₀ᵀ G U₀)⁻¹ U₀ᵀ G = (G U₀ W Ν^{-1/2})(G U₀ W Ν^{-1/2})ᵀ.
+                let mut whitened = gram_null.dot(&null_evecs);
+                for (k, &value) in null_evals.iter().enumerate() {
+                    let scale = value.sqrt().recip();
+                    whitened.column_mut(k).mapv_inplace(|entry| entry * scale);
+                }
+                null = whitened.dot(&whitened.t()).mapv(|value| value / measure);
+            }
+            Ok(TensorMarginSeparableFactors {
+                range: penalty.clone(),
+                range_scale: *penalty_scale,
+                null,
+                null_scale: measure,
             })
         })
         .collect()
@@ -6353,30 +6407,42 @@ pub fn build_tensor_bspline_basis(
             }
         }
         TensorBSplinePenaltyDecomposition::Separable => {
-            let projectors = tensor_margin_range_null_projectors(&normalized_marginal_penalties)?;
-            let n_masks = 1usize.checked_shl(projectors.len() as u32).ok_or_else(|| {
+            // t2: one penalty per functional-ANOVA block. Each margin enters a block
+            // through its roughness `S̃_j` (the block penalizes that margin's
+            // wiggliness) or through the mass of its null-space component (the block
+            // holds that margin to its unpenalized functions). Both are functionals
+            // of the margin's functions, so every block penalizes the function, never
+            // the coefficients (#2901, SPEC rule 5). The block is the Kronecker
+            // product of its factors as they stand, so those factors describe it
+            // exactly, and the physical scale moves into `normalization_scale` as in
+            // the te decomposition above.
+            let margins =
+                tensor_margin_separable_factors(&normalized_marginal_penalties, &marginal_function_grams)?;
+            let n_masks = 1usize.checked_shl(margins.len() as u32).ok_or_else(|| {
                 BasisError::InvalidInput(format!(
                     "t2 separable tensor penalty supports at most {} margins, got {}",
                     usize::BITS - 1,
-                    projectors.len()
+                    margins.len()
                 ))
             })?;
             for mask in 1..n_masks {
                 let mut matrix = Array2::<f64>::eye(1);
-                let mut factors = Vec::<Array2<f64>>::with_capacity(projectors.len());
+                let mut factors = Vec::<Array2<f64>>::with_capacity(margins.len());
                 let mut penalized_margins = Vec::<usize>::new();
-                for (dim, projector) in projectors.iter().enumerate() {
+                let mut normalization_scale = 1.0_f64;
+                for (dim, margin) in margins.iter().enumerate() {
                     let use_range = ((mask >> dim) & 1) == 1;
                     let factor = if use_range {
                         penalized_margins.push(dim);
-                        projector.range.clone()
+                        normalization_scale *= margin.range_scale;
+                        margin.range.clone()
                     } else {
-                        projector.null.clone()
+                        normalization_scale *= margin.null_scale;
+                        margin.null.clone()
                     };
                     matrix = kronecker_product(&matrix, &factor);
                     factors.push(factor);
                 }
-                let (matrix, normalization_scale) = normalize_penalty_in_constrained_space(&matrix);
                 candidates.push(PenaltyCandidate {
                     matrix: ConstructiveQuadratic::try_from_dense_psd(
                         matrix,
