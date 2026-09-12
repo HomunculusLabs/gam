@@ -1037,11 +1037,11 @@ pub(crate) fn bounding_box_diagonal(points: ArrayView2<'_, f64>) -> f64 {
     diag2.sqrt()
 }
 
-/// The deterministic bracket the representer range `ℓ` is SCREENED over before
+/// The deterministic nodes the representer range `ℓ` is SCREENED from before
 /// the outer ψ search refines it, in the STANDARDIZED frame the basis is
 /// realized in (gam#2750).
 ///
-/// ## Why a bracket exists at all
+/// ## Why a screen exists at all
 ///
 /// `ℓ` is a design-moving coordinate: it decides WHICH span the representers
 /// occupy, and the outer search reaches it by local descent from the seed. The
@@ -1058,9 +1058,9 @@ pub(crate) fn bounding_box_diagonal(points: ArrayView2<'_, f64>) -> f64 {
 /// coefficient chart the ψ trials rebuild in stops being evaluable ~1.6× past
 /// the seed, so the search terminates essentially where it started. The λ that
 /// comes back is then a faithful readout of a range nothing could move — which
-/// is the "1-D fits select a too-large λ" this bracket exists to end.
+/// is the "1-D fits select a too-large λ" this screen exists to end.
 ///
-/// ## Why THIS bracket
+/// ## Why THESE nodes
 ///
 /// The nodes are the term's own realized scale band, verbatim. That is not a
 /// coincidence of convenience: the energy's `ε` and the representer range `ℓ`
@@ -1071,72 +1071,40 @@ pub(crate) fn bounding_box_diagonal(points: ArrayView2<'_, f64>) -> f64 {
 /// the node bounding-box diagonal, at the band's own auto-clamped resolution.
 /// So the screen introduces no length, no count and no step of its own.
 ///
-/// ## Where a walk past the top node stops (#2761)
+/// The screen (`screen_measure_jet_range` in gam-models) starts one certified
+/// outer search from each node, on the exact `ln ℓ` jet of its criterion over
+/// [`measure_jet_ln_range_window`], and keeps the lowest certified criterion. A
+/// node is where a search STARTS; no node's own value is ever the answer
+/// (#2902).
 ///
-/// [`MeasureJetRangeBracket::feasibility_ceiling`] — the range at which the
+/// ## How far the screen may reach (#2761)
+///
+/// Up to [`MeasureJetRangeBracket::feasibility_ceiling`]: the range at which the
 /// closest node pair stops being distinguishable in the chart's own arithmetic,
 /// [`measure_jet_range_feasibility_ceiling`]. It is the SAME wall
-/// [`measure_jet_ln_range_window`] gives the outer search, and it is the same
-/// wall for the same reason: a stopping rule may not be tighter than the model.
+/// [`measure_jet_ln_range_window`] gives the outer search, for the same reason:
+/// a search may not be caged tighter than the model.
 ///
-/// It used to be [`MeasureJetRangeBracket::node_diameter`], on the argument
-/// that at `ℓ` that long every pair of representers overlaps at `≥ exp(−1/2)`
-/// so "there is no distinct model past it". That argument is measurably wrong,
-/// and the tree said so in two places before this: `measure_jet_ln_range_window`
-/// records that *"the profiled criterion genuinely prefers a range AT or ABOVE
-/// the node diameter"* on three fixtures, and
-/// `the_search_window_reaches_past_where_the_screen_stops_walking` pins the
-/// search window as strictly wider. Those reconcile only while something else
-/// keeps searching past the stopping rule. On a term whose `ℓ` dial is FROZEN —
-/// the BMS marginal/slope pair, or any `learn_length_scale=false` — nothing
-/// does, and the stopping rule becomes the wall.
-///
-/// Measured on the #1041 parity fixture (`m = 10`, extent `[2.671, 2.726]`):
-/// band `[1.08074, 1.43607, 1.90823]`, `log_step = 0.284265`, node diameter
-/// `3.81645`. The screen's chosen range for the marginal surface was `3.36930`
-/// — walk node 2 to every printed digit, with walk node 3 at `4.47708` past the
-/// diameter. The walk pushes a node and only then breaks if it failed to
-/// improve, so an argmin that IS the last pushed node improved: the walk left
-/// through the ceiling test with the criterion still descending.
-///
-/// **What raising the stop was actually worth here, measured after the change,
-/// because it is less than the shape of the defect suggests.** The walk now
-/// scores `4.47708`, which does NOT improve — so the criterion has an interior
-/// optimum on this fixture and the old ceiling happened to cut just past it.
-/// What the extra node buys is the PARABOLIC REFINEMENT, which cannot fire on
-/// an argmin that is the last element: with a neighbour on both sides the
-/// refinement lands at `ℓ = 3.10543` with a better criterion value, and
-/// held-out marginal RMSE goes `0.04185 → 0.04179`. A rule that cannot be
-/// stepped past also cannot be refined at, and that is the part of the cost
-/// that was invisible.
-///
-/// The larger held-out number on the same sweep — `0.03788` at `ℓ = 68.5`,
-/// where the block still carries `edf = 7.47` and is not degenerate — is NOT
-/// what this change recovers, and attributing it to the ceiling would be wrong:
-/// the criterion does not want to go there. That gap is a statement about the
-/// screening CRITERION (a profiled Gaussian REML of the term alone against a
-/// binary response) disagreeing with held-out truth at long ranges, and it
-/// belongs to whoever takes that question next.
-///
-/// Raising the stop is safe by the walk's own rule, which only continues while
-/// the criterion improves: on the gam#2750 fixture, where the criterion drops
-/// from `−256.3` to `−198.5` just past the diameter, the walk stops on the
-/// first non-improving node exactly as it does today. The ceiling only ever
-/// binds where the criterion is still descending — which is precisely the case
-/// where stopping is wrong.
+/// The screen used to stop at [`MeasureJetRangeBracket::node_diameter`], on the
+/// argument that at `ℓ` that long every pair of representers overlaps at
+/// `≥ exp(−1/2)`, so "there is no distinct model past it". That argument is
+/// measurably wrong: `measure_jet_ln_range_window` records that *"the profiled
+/// criterion genuinely prefers a range AT or ABOVE the node diameter"* on three
+/// fixtures. On a term whose `ℓ` dial is FROZEN — the BMS marginal/slope pair,
+/// or any `learn_length_scale=false` — nothing searches past the screen, so a
+/// screen stop tighter than the model becomes the model's wall.
 #[derive(Clone, Debug)]
 pub struct MeasureJetRangeBracket {
-    /// Geometric grid of candidate ranges, ascending. The realized scale band.
+    /// The realized scale band, ascending: where the screen's searches start.
     pub nodes: Vec<f64>,
-    /// The band's own log step, so an endpoint walk keeps its resolution.
+    /// The band's own log step.
     pub log_step: f64,
     /// The node bounding-box diagonal. A geometric fact about the cloud,
     /// reported because the band's own ceiling is half of it; NOT a stopping
     /// rule (see the type docs).
     pub node_diameter: f64,
-    /// Hard upper end for any walk past the top node: the feasibility wall
-    /// [`measure_jet_range_feasibility_ceiling`], the same one the outer
-    /// search's [`measure_jet_ln_range_window`] stops at.
+    /// The feasibility wall [`measure_jet_range_feasibility_ceiling`]: the upper
+    /// end of [`measure_jet_ln_range_window`], which the screen searches.
     pub feasibility_ceiling: f64,
 }
 
@@ -1151,10 +1119,10 @@ pub struct MeasureJetRangeBracket {
 /// reason: it is the point past which a direction cannot survive being squared
 /// into a Gram and inverted back out.
 ///
-/// ONE definition, used by both the outer search's window
-/// ([`measure_jet_ln_range_window`]) and the response screen's walk stop
-/// ([`MeasureJetRangeBracket::feasibility_ceiling`]), so the two cannot drift
-/// into disagreeing about where the model ends (#2761).
+/// ONE definition, used by the outer search's window
+/// ([`measure_jet_ln_range_window`], which the response screen searches too) and
+/// reported as [`MeasureJetRangeBracket::feasibility_ceiling`], so the two cannot
+/// drift into disagreeing about where the model ends (#2761).
 pub fn measure_jet_range_feasibility_ceiling(spacing: f64) -> f64 {
     spacing / (2.0 * f64::EPSILON.sqrt()).sqrt()
 }
@@ -1230,8 +1198,8 @@ pub fn measure_jet_range_bracket(
 /// ## What this deliberately is NOT
 ///
 /// It is **not** [`MeasureJetRangeBracket::node_diameter`], the node bounding-box
-/// diagonal. That is where the response SCREEN stops walking, which is a
-/// stopping rule for a search over nodes, not a wall in the model: measured on
+/// diagonal. That is where the response screen USED to stop walking, a stopping
+/// rule for a search over nodes rather than a wall in the model: measured on
 /// three fixtures (`measure_jet_formula_fit_robustness_sweep` seed 1,
 /// `measure_jet_web_quality`, and the two probes that score them), the profiled
 /// criterion genuinely prefers a range AT or ABOVE the node diameter, and a box
