@@ -741,7 +741,7 @@ impl SurvivalMarginalSlopeFamily {
                 let mut acc = Array2::<f64>::zeros((p_total, p_total));
                 for row in range {
                     let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
-                    let (f_pi, h_pi, ud, ue, t_d, t_e, q_de) = if let Some(primary) =
+                    let (f_pi, h_pi, ud, ue, t_d, t_e, q_de, flex_base) = if let Some(primary) =
                         flex_primary.as_ref()
                     {
                         let (_, f_pi, h_pi) = self.compute_row_flex_primary_gradient_hessian_exact(
@@ -764,11 +764,18 @@ impl SurvivalMarginalSlopeFamily {
                             &q_geom,
                             d_v,
                         )?;
-                        let t_d = self.row_flex_primary_third_contracted_exact(row, block_states, &ud)?;
-                        let t_e = self.row_flex_primary_third_contracted_exact(row, block_states, &ue)?;
-                        let q_de =
-                            self.row_flex_primary_fourth_contracted_exact(row, block_states, &ud, &ue)?;
-                        (f_pi, h_pi, ud, ue, t_d, t_e, q_de)
+                        // One direction-independent row base serves every contraction of
+                        // this row; a repeated direction reuses its third contraction.
+                        let base =
+                            self.build_row_flex_third_base_with_states(row, block_states, primary)?;
+                        let t_d = self.row_flex_third_contract_from_base(&base, &ud)?;
+                        let t_e = if ue == ud {
+                            t_d.clone()
+                        } else {
+                            self.row_flex_third_contract_from_base(&base, &ue)?
+                        };
+                        let q_de = self.row_flex_fourth_contract_from_base(&base, &ud, &ue)?;
+                        (f_pi, h_pi, ud, ue, t_d, t_e, q_de, Some(base))
                     } else {
                         let (_, f_pi, h_pi) =
                             self.compute_row_primary_gradient_hessian_uncached(row, block_states)?;
@@ -799,7 +806,7 @@ impl SurvivalMarginalSlopeFamily {
                             ud.view(),
                             ue.view(),
                         )?;
-                        (f_pi, h_pi, ud, ue, t_d, t_e, q_de)
+                        (f_pi, h_pi, ud, ue, t_d, t_e, q_de, None)
                     };
                     let h_ud = h_pi.dot(&ud);
                     let h_ue = h_pi.dot(&ue);
@@ -890,8 +897,8 @@ impl SurvivalMarginalSlopeFamily {
                     };
 
                     // Ψ = Q[ud,ue] + T[due_d]
-                    let t_due = if flex_primary.is_some() {
-                        self.row_flex_primary_third_contracted_exact(row, block_states, &due_d)?
+                    let t_due = if let Some(base) = flex_base.as_ref() {
+                        self.row_flex_third_contract_from_base(base, &due_d)?
                     } else {
                         self.row_primary_third_contracted(row, block_states, due_d.view())?
                     };

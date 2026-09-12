@@ -342,7 +342,9 @@ impl SurvivalMarginalSlopeFamily {
     ///
     /// The mixed second-directional timepoint transport is carried exactly
     /// through the implicit intercept solve, the observed-point eta/chi jets,
-    /// and the cellwise density-normalization integrand.
+    /// and the cellwise density-normalization integrand. The direction-independent
+    /// row state comes from [`Self::build_row_flex_third_base_with_states`] and the
+    /// contraction from [`Self::row_flex_fourth_contract_from_base`].
     pub(crate) fn row_flex_primary_fourth_contracted_exact(
         &self,
         row: usize,
@@ -366,143 +368,90 @@ impl SurvivalMarginalSlopeFamily {
         if dir_u.iter().all(|v| v.abs() == 0.0) || dir_v.iter().all(|v| v.abs() == 0.0) {
             return Ok(Array2::<f64>::zeros((p, p)));
         }
+        let base = self.build_row_flex_third_base_with_states(row, block_states, &primary)?;
+        self.row_flex_fourth_contract_from_base(&base, dir_u, dir_v)
+    }
 
-        let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
-        let q0 = q_geom.q0;
-        let q1 = q_geom.q1;
-        let qd1 = q_geom.qd1;
-        let g = block_states[2].eta[row];
-        let beta_h = self.flex_score_beta(block_states)?;
-        let beta_w = self.flex_link_beta(block_states)?;
-        let o_infl = self.influence_index_offset(row, block_states)?;
-
-        if survival_derivative_guard_violated(qd1, self.derivative_guard) {
-            return Err(SurvivalMarginalSlopeError::MonotonicityViolation {
-                reason: format!(
-                    "survival fourth contracted monotonicity violated at row {row}: qd1={qd1:.3e}"
-                ),
-            }
-            .into());
+    /// Contract the fourth-order tensor of a row against two directions, reusing the
+    /// direction-independent [`FlexThirdRowBase`]. The intercept solves, cached
+    /// partitions and exact base timepoints are the ones the third contraction reads,
+    /// so a caller contracting several directions on one row builds them once
+    /// (gam#2893). Only the directional and bidirectional timepoint extensions and the
+    /// fourth-contraction lowering depend on the directions.
+    pub(crate) fn row_flex_fourth_contract_from_base(
+        &self,
+        base: &FlexThirdRowBase,
+        dir_u: &Array1<f64>,
+        dir_v: &Array1<f64>,
+    ) -> Result<Array2<f64>, String> {
+        let p = base.p;
+        if dir_u.iter().all(|v| v.abs() == 0.0) || dir_v.iter().all(|v| v.abs() == 0.0) {
+            return Ok(Array2::<f64>::zeros((p, p)));
         }
-
-        // Only the solved intercepts are needed; the jet base builder recomputes the
-        // density check internally.
-        let (a0, _) = self.solve_row_survival_intercept_with_slot(
-            q0,
-            g,
-            beta_h,
-            beta_w,
-            Some((row, SurvivalInterceptSlotKind::Entry)),
-        )?;
-        let (a1, _) = self.solve_row_survival_intercept_with_slot(
-            q1,
-            g,
-            beta_h,
-            beta_w,
-            Some((row, SurvivalInterceptSlotKind::Exit)),
-        )?;
-
-        let entry_cached = self.build_cached_partition(&primary, a0, g, beta_h, beta_w)?;
-        let exit_cached = self.build_cached_partition(&primary, a1, g, beta_h, beta_w)?;
-
-        // Contracted-fourth base timepoint via the canonical Jet2 builder.
-        let entry_base = self.compute_survival_timepoint_exact_jet_from_cached(
-            row,
-            &primary,
-            q0,
-            primary.q0,
-            a0,
-            g,
-            beta_h,
-            beta_w,
-            o_infl,
-            &entry_cached,
-        )?;
-        let exit_base = self.compute_survival_timepoint_exact_jet_from_cached(
-            row,
-            &primary,
-            q1,
-            primary.q1,
-            a1,
-            g,
-            beta_h,
-            beta_w,
-            o_infl,
-            &exit_cached,
-        )?;
-
-        if !exit_base.chi.is_finite() || exit_base.chi <= 0.0 {
-            return Err(SurvivalMarginalSlopeError::NumericalFailure {
-                reason: format!(
-                    "survival fourth contracted row {row}: non-positive chi1={:.3e}",
-                    exit_base.chi,
-                ),
-            }
-            .into());
-        }
+        let primary = flex_primary_slices(self);
+        let beta_h = base.beta_h.as_ref();
+        let beta_w = base.beta_w.as_ref();
 
         // Both directional and mixed-directional timepoint extensions instantiate
         // the same expression at Jet3 and Jet4.
         let (entry_ext_u, entry_ext_v, exit_ext_u, exit_ext_v) =
             super::flex_jet::with_flex_third_jet_arena(|jet_arena| -> Result<_, String> {
-                let (_, entry_ext_u) = self
-                    .compute_survival_timepoint_directional_jet_from_cached(
-                        row,
-                        &primary,
-                        q0,
-                        primary.q0,
-                        a0,
-                        g,
-                        beta_h,
-                        beta_w,
-                        o_infl,
-                        &entry_cached,
-                        dir_u,
-                        jet_arena,
-                    )?;
-                jet_arena.reset();
-                let (_, entry_ext_v) = self
-                    .compute_survival_timepoint_directional_jet_from_cached(
-                        row,
-                        &primary,
-                        q0,
-                        primary.q0,
-                        a0,
-                        g,
-                        beta_h,
-                        beta_w,
-                        o_infl,
-                        &entry_cached,
-                        dir_v,
-                        jet_arena,
-                    )?;
-                jet_arena.reset();
-                let (_, exit_ext_u) = self.compute_survival_timepoint_directional_jet_from_cached(
-                    row,
+                let (_, entry_ext_u) = self.compute_survival_timepoint_directional_jet_from_cached(
+                    base.row,
                     &primary,
-                    q1,
-                    primary.q1,
-                    a1,
-                    g,
+                    base.q0,
+                    base.q0_index,
+                    base.a0,
+                    base.g,
                     beta_h,
                     beta_w,
-                    o_infl,
-                    &exit_cached,
+                    base.o_infl,
+                    &base.entry_cached,
+                    dir_u,
+                    jet_arena,
+                )?;
+                jet_arena.reset();
+                let (_, entry_ext_v) = self.compute_survival_timepoint_directional_jet_from_cached(
+                    base.row,
+                    &primary,
+                    base.q0,
+                    base.q0_index,
+                    base.a0,
+                    base.g,
+                    beta_h,
+                    beta_w,
+                    base.o_infl,
+                    &base.entry_cached,
+                    dir_v,
+                    jet_arena,
+                )?;
+                jet_arena.reset();
+                let (_, exit_ext_u) = self.compute_survival_timepoint_directional_jet_from_cached(
+                    base.row,
+                    &primary,
+                    base.q1,
+                    base.q1_index,
+                    base.a1,
+                    base.g,
+                    beta_h,
+                    beta_w,
+                    base.o_infl,
+                    &base.exit_cached,
                     dir_u,
                     jet_arena,
                 )?;
                 jet_arena.reset();
                 let (_, exit_ext_v) = self.compute_survival_timepoint_directional_jet_from_cached(
-                    row,
+                    base.row,
                     &primary,
-                    q1,
-                    primary.q1,
-                    a1,
-                    g,
+                    base.q1,
+                    base.q1_index,
+                    base.a1,
+                    base.g,
                     beta_h,
                     beta_w,
-                    o_infl,
-                    &exit_cached,
+                    base.o_infl,
+                    &base.exit_cached,
                     dir_v,
                     jet_arena,
                 )?;
@@ -511,28 +460,28 @@ impl SurvivalMarginalSlopeFamily {
 
         // Bidirectional extensions D_{d1} D_{d2} (η_uv, χ_uv, D_uv).
         let entry_bi = self.compute_survival_timepoint_bidirectional_jet_from_cached(
-            row,
+            base.row,
             &primary,
-            q0,
-            primary.q0,
-            a0,
-            g,
+            base.q0,
+            base.q0_index,
+            base.a0,
+            base.g,
             beta_h,
             beta_w,
-            &entry_cached,
+            &base.entry_cached,
             dir_u,
             dir_v,
         )?;
         let exit_bi = self.compute_survival_timepoint_bidirectional_jet_from_cached(
-            row,
+            base.row,
             &primary,
-            q1,
-            primary.q1,
-            a1,
-            g,
+            base.q1,
+            base.q1_index,
+            base.a1,
+            base.g,
             beta_h,
             beta_w,
-            &exit_cached,
+            &base.exit_cached,
             dir_u,
             dir_v,
         )?;
@@ -542,10 +491,10 @@ impl SurvivalMarginalSlopeFamily {
         // (`flex_row_nll`) instantiated at the two-seed jet `Jet4`, seeded from
         // the base + both directional + bidirectional timepoint packs.
         self.flex_row_nll_fourth_contracted(
-            row,
+            base.row,
             &primary,
-            q1,
-            qd1,
+            base.q1,
+            base.qd1,
             dir_u
                 .as_slice()
                 .ok_or_else(|| "fourth contraction: dir_u must be contiguous".to_string())?,
@@ -553,8 +502,8 @@ impl SurvivalMarginalSlopeFamily {
                 .as_slice()
                 .ok_or_else(|| "fourth contraction: dir_v must be contiguous".to_string())?,
             super::flex_jet::FlexFourthPacks {
-                entry_base: &pack_flex_timepoint_base(&entry_base),
-                exit_base: &pack_flex_timepoint_base(&exit_base),
+                entry_base: &base.entry_base,
+                exit_base: &base.exit_base,
                 entry_ext_u: &entry_ext_u,
                 exit_ext_u: &exit_ext_u,
                 entry_ext_v: &entry_ext_v,
