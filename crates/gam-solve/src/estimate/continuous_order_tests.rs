@@ -1,4 +1,5 @@
 use super::*;
+use crate::estimate::summary::compute_continuous_smoothness_order;
 
 fn try_compute_continuous_smoothness_order(
     lambda_tilde: &[f64],
