@@ -5746,6 +5746,49 @@ pub fn fit_residual_cascade(
 mod refinement_decision_tests {
     use super::*;
 
+    // Probe instruments for the #2628/#2546/#2503 pins below. 272905c19 retired them from
+    // production (no product caller); they live here, in test scope, and nowhere else.
+    impl SplitMix64 {
+        /// Uniform in (0, 1): 53-bit mantissa, shifted off zero.
+        fn next_unit(&mut self) -> f64 {
+            ((self.next_u64() >> 11) as f64 + 0.5) / 9_007_199_254_740_992.0
+        }
+
+        /// Standard normal via Box–Muller.
+        fn next_normal(&mut self) -> f64 {
+            let u1 = self.next_unit();
+            let u2 = self.next_unit();
+            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        }
+    }
+
+    impl ResidualCascadeDesign {
+        /// The candidate level L+1 at this fit's λ, read through the refinement loop's own screen.
+        fn assess_next_level(
+            &self,
+            fit: &ResidualCascadeFit,
+        ) -> Result<NextLevelAssessment, String> {
+            self.assess_level_at_exponent(fit, self.core.levels.len() as f64)
+        }
+
+        fn assess_level_at_exponent(
+            &self,
+            fit: &ResidualCascadeFit,
+            exponent: f64,
+        ) -> Result<NextLevelAssessment, String> {
+            Ok(self
+                .plan_level_at_exponent(
+                    fit,
+                    exponent,
+                    Some(EvidenceScale {
+                        rss_pen: fit.rss_pen,
+                        dof: (self.core.y.len() - self.core.nullity()) as f64,
+                    }),
+                )?
+                .assessment)
+        }
+    }
+
     const TOLERANCE: f64 = 0.25;
 
     /// The refinement gain bracket is checked against the gain ITSELF, obtained
