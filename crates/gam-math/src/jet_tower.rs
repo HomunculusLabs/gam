@@ -2197,6 +2197,74 @@ mod tests {
 #[cfg(test)]
 mod derivative_stack_tests {
     use super::*;
+
+    // ── power_derivative_stack / sqrt_derivative_stack (#932) ──
+
+    /// Every jet's `sqrt` and `powf` composition reads these stacks (scalar, tower and
+    /// SIMD lanes), and no test pinned them. The references are the closed forms
+    /// `d^k u^a / du^k = a(a−1)…(a−k+1) u^{a−k}`. The square-root stack divides
+    /// successively instead of forming `u^{k−1/2}`, so the closed form through `powf` is
+    /// an independent check, including where that denominator overflows while the
+    /// derivative is still subnormal. The power stack stops at the first zero falling
+    /// factor, so an integer exponent yields exact zeros above its degree instead of
+    /// `0·∞ = NaN`.
+    #[test]
+    fn sqrt_and_power_derivative_stacks_match_closed_forms_932() {
+        fn closed_form(u: f64, a: f64, order: usize) -> f64 {
+            let mut coefficient = 1.0;
+            for k in 0..order {
+                coefficient *= a - k as f64;
+            }
+            if coefficient == 0.0 {
+                0.0
+            } else {
+                coefficient * u.powf(a - order as f64)
+            }
+        }
+        for u in [1.0e-40_f64, 3.0e-3, 0.37, 1.0, 7.5, 2.0e12] {
+            let stack: [f64; 5] = sqrt_derivative_stack(u);
+            for (order, &value) in stack.iter().enumerate() {
+                let reference = closed_form(u, 0.5, order);
+                assert!(
+                    (value - reference).abs() <= 1.0e-12 * reference.abs(),
+                    "sqrt u={u:e} order={order}: stack={value:+.17e} closed form={reference:+.17e}"
+                );
+            }
+        }
+        // At u = 1e90 the fourth derivative −(15/16) u^{−7/2} ≈ −9.4e-316 is subnormal while
+        // u^{7/2} = 1e315 overflows; successive division keeps it representable.
+        let u = 1.0e90_f64;
+        let stack: [f64; 5] = sqrt_derivative_stack(u);
+        let reference = closed_form(u, 0.5, 4);
+        assert!(
+            stack[4] < 0.0 && stack[4].is_subnormal(),
+            "sqrt fourth derivative at u=1e90 must stay a negative subnormal, got {:e}",
+            stack[4]
+        );
+        assert!(
+            (stack[4] - reference).abs() <= 1.0e-6 * reference.abs() + 4.0 * f64::from_bits(1),
+            "sqrt fourth derivative at u=1e90: stack={:e} closed form={reference:e}",
+            stack[4]
+        );
+        for a in [-2.5_f64, -1.0, 0.3, 1.7, 3.0, 4.0] {
+            for u in [0.2_f64, 1.0, 3.5, 40.0] {
+                let stack: [f64; 5] = power_derivative_stack(u, a);
+                for (order, &value) in stack.iter().enumerate() {
+                    let reference = closed_form(u, a, order);
+                    assert!(
+                        (value - reference).abs() <= 1.0e-12 * reference.abs(),
+                        "power a={a} u={u} order={order}: stack={value:+.17e} closed form={reference:+.17e}"
+                    );
+                }
+            }
+        }
+        // An integer exponent above its degree: exact zeros, and no NaN at u = 0.
+        let quadratic: [f64; 5] = power_derivative_stack(0.0, 2.0);
+        assert_eq!(quadratic, [0.0, 0.0, 2.0, 0.0, 0.0]);
+        let cubic: [f64; 5] = power_derivative_stack(0.0, 3.0);
+        assert_eq!(cubic, [0.0, 0.0, 0.0, 6.0, 0.0]);
+    }
+
     // ── ln_gamma_derivative_stack / digamma_derivative_stack ──
 
     #[test]
