@@ -2850,7 +2850,7 @@ pub(crate) fn reduced_schur_lambda_max<B: BatchedBlockSolver + Sync>(
 /// `L(v)` through the arrow elimination, so `(eliminated, border)` is a
 /// displacement of the full system whose curvature is exactly `curvature`.
 #[derive(Debug, Clone)]
-pub struct ReducedSchurNegativeCurvature {
+pub(crate) struct ReducedSchurNegativeCurvature {
     /// `vᵀSv < 0`, measured by an apply rather than reported by the eigensolver.
     pub curvature: f64,
     /// The algebraically smallest Ritz value the shifted solve certified.
@@ -3084,7 +3084,7 @@ pub fn rational_reduced_schur_log_det<B: BatchedBlockSolver + Sync>(
 /// returned plan's `Q` is FROZEN, so
 /// `RationalLogdetPlan::directional_derivative` on its evaluations is the exact
 /// surrogate gradient.
-pub struct DerivedRationalLogdetPlan {
+pub(crate) struct DerivedRationalLogdetPlan {
     /// Frozen statistical plan selected at the entry operator.
     pub plan: RationalLogdetPlan,
     /// Certified value and shifted solves already computed while selecting the
@@ -5129,7 +5129,7 @@ impl AdditiveSchwarzPreconditioner {
 /// Schwarz. For `overlap = 0` and one column per subdomain it reduces exactly to
 /// scalar Jacobi.
 #[derive(Debug, Clone)]
-pub struct DiagAssembledSchwarzPreconditioner {
+pub(crate) struct DiagAssembledSchwarzPreconditioner {
     /// Global per-column multiplier `m[i]`; `out[i] = m[i] · r[i]`.
     pub(crate) inv_diag: Vec<f64>,
 }
@@ -5388,7 +5388,7 @@ impl std::fmt::Debug for Ic0Factor {
 /// is taken as the level-0 fill set, and the no-fill incomplete Cholesky
 /// `S ≈ L̃ L̃ᵀ` is formed keeping only `P` (drop any update landing outside it).
 #[derive(Debug, Clone)]
-pub struct BlockIncompleteCholeskyPreconditioner {
+pub(crate) struct BlockIncompleteCholeskyPreconditioner {
     pub(crate) components: Vec<Ic0Factor>,
 }
 

@@ -13,7 +13,7 @@ use super::*;
 /// drift where dense used the majorizer pencil plus clamp basin while arrow used
 /// a local relative eigenvalue and rejected every negative direction.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ExactADirectionClassification {
+pub(crate) enum ExactADirectionClassification {
     /// Curvature is positive and identifiable in the majorizer metric.
     ResolvedPositive { curvature: f64 },
     /// Curvature lies inside the common numerical-null band and contributes the

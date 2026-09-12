@@ -1671,7 +1671,7 @@ impl BetaPenaltyOp for CompositePenaltyOp {
 ///
 /// `diagonal` holds the precomputed `diag(H_ββ)` supplied alongside the matvec;
 /// `to_dense` falls back to probing all `K` canonical basis vectors.
-pub struct MatvecDiagPenaltyOp {
+pub(crate) struct MatvecDiagPenaltyOp {
     pub(crate) k: usize,
     pub(crate) matvec: SharedBetaMatvec,
     pub(crate) diagonal_vec: Array1<f64>,
