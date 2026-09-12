@@ -657,3 +657,84 @@ fn clamp_basin_price_derivative_matches_the_lane_value_2915() {
          clamp-basin row: adjoint={theta:e} fd={theta_fd:e}"
     );
 }
+
+/// #2914 — the dense and from-probes ARD log-precision traces on clamp-basin rows.
+///
+/// Both siblings gate their Daleckii–Krein correction on `row_deflation_is_live`,
+/// and neither had an arbiter on a row whose spectrum is recorded while its
+/// direction list is empty. On the first clamp-basin rung they must agree per
+/// entry. The from-probes trace on a deflation-blind copy of the same cache must
+/// separate from them, or the bar would also accept the direction-list convention.
+#[test]
+fn ard_trace_dense_and_probes_agree_on_clamp_basin_rows_2914() {
+    let state = first_clamp_basin_state(AssignmentMode::threshold_gate(1.0, 0.0), true);
+    let solver = DeflatedArrowSolver::plain(&state.cache);
+    let dense = state
+        .term
+        .ard_log_precision_hessian_trace(
+            &state.rho,
+            &state.cache,
+            &solver,
+            EvidenceOperator::Majorizer,
+        )
+        .expect("#2914 dense ARD trace on the exact-A factor");
+    let (probes, sinv) = full_basis_bundle(&state.cache);
+    let from_probes = state
+        .term
+        .ard_log_precision_hessian_trace_from_probes(
+            &state.rho,
+            &state.cache,
+            &probes,
+            &sinv,
+            EvidenceOperator::Majorizer,
+        )
+        .expect("#2914 from-probes ARD trace on the exact-A factor");
+    let mut blind = state.cache.clone();
+    let rows = blind.row_dims.len();
+    blind.deflated_row_directions = std::sync::Arc::from(vec![Vec::new(); rows]);
+    blind.deflation_row_spectra = std::sync::Arc::from(vec![None; rows]);
+    let blind_probes = state
+        .term
+        .ard_log_precision_hessian_trace_from_probes(
+            &state.rho,
+            &blind,
+            &probes,
+            &sinv,
+            EvidenceOperator::Majorizer,
+        )
+        .expect("#2914 deflation-blind from-probes ARD trace");
+    assert_eq!(dense.len(), from_probes.len());
+    let mut gap = 0.0_f64;
+    let mut separation = 0.0_f64;
+    let mut scale = 0.0_f64;
+    for atom in 0..dense.len() {
+        assert_eq!(dense[atom].len(), from_probes[atom].len());
+        for axis in 0..dense[atom].len() {
+            let reference = dense[atom][axis];
+            let probed = from_probes[atom][axis];
+            gap = gap.max((reference - probed).abs() / (1.0 + reference.abs()));
+            separation = separation
+                .max((probed - blind_probes[atom][axis]).abs() / (1.0 + probed.abs()));
+            scale = scale.max(reference.abs());
+        }
+    }
+    eprintln!(
+        "#2914 ARD_TRACE_CLAMP_BASIN rows={:?} scale={scale:.6e} gap={gap:.6e} \
+         deflation_separation={separation:.6e}",
+        state.rows
+    );
+    assert!(
+        scale > 1.0e-6,
+        "#2914: a vanishing ARD trace cannot establish agreement; scale={scale:e}"
+    );
+    assert!(
+        gap <= 1.0e-9,
+        "#2914: the dense and from-probes ARD traces must agree on clamp-basin rows: worst \
+         relative entry gap {gap:e}"
+    );
+    assert!(
+        separation > 1.0e-9 && separation > 1.0e3 * gap,
+        "#2914: the agreement bar must reject a deflation-blind trace on this fixture: \
+         separation={separation:e} gap={gap:e}"
+    );
+}
