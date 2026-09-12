@@ -71,7 +71,7 @@ mod tests {
     /// The structured-residual alternation runs UNCONDITIONALLY inside this entry
     /// (it is not gated by `run_outer_rho_search`/`run_structure_search`), so this
     /// exercises the degeneracy guard directly.
-    fn run_primary(target: Array2<f64>) -> SaeFitReport {
+    fn run_primary(target: Array2<f64>, structured_residual_passes: usize) -> SaeFitReport {
         let assignment_kind = SaeFitAssignmentKind::Softmax;
         let minimal = build_sae_minimal_seed(SaeMinimalSeedRequest {
             target: target.view(),
@@ -153,7 +153,7 @@ mod tests {
             promote_from_residual: false,
             run_structure_search: false,
             run_outer_rho_search: false,
-            structured_residual_passes: 2,
+            structured_residual_passes,
             cancel: None,
         })
         .expect("primary fit certifies (structured pass must degrade gracefully)")
@@ -174,7 +174,20 @@ mod tests {
         // near-exact regime the guard exists for.
         let target = with_noise(circle_target(7.0), 3.0e-5);
         let target_energy: f64 = target.iter().map(|v| v * v).sum();
-        let report = run_primary(target.clone());
+        // Premise, measured rather than assumed: the regime this test exists for is a
+        // pass-0 fit whose residual is already inside the guard's floor.
+        let pass0 = run_primary(target.clone(), 0);
+        let pass0_residual_energy: f64 = (&target - &pass0.fitted).iter().map(|v| v * v).sum();
+        let floor = crate::manifold::fit_entry::STRUCTURED_RESIDUAL_MIN_REL_ENERGY;
+        assert!(
+            pass0_residual_energy <= floor * target_energy,
+            "premise: the pass-0 fit leaves residual energy fraction {:e} above the \
+             structured-residual floor {:e}, so this fixture is not in the near-exact regime \
+             the skip guard exists for, and the skip assertion below would measure nothing",
+            pass0_residual_energy / target_energy,
+            floor
+        );
+        let report = run_primary(target.clone(), 2);
         // Reaching here means run_sae_manifold_fit returned Ok — before the floor
         // guard this panicked with the StructuredResidual outer non-certification.
         // The guard compares residual energy with the floor times the target energy, so
@@ -198,7 +211,7 @@ mod tests {
     #[test]
     fn residual_bearing_fit_still_runs_structured_pass() {
         let target = with_noise(circle_target(7.0), 0.1);
-        let report = run_primary(target);
+        let report = run_primary(target, 2);
         assert!(
             !report.structured_residual_diagnostics.is_empty(),
             "a fit that leaves real residual energy must RUN the structured-residual \
