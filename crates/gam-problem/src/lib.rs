@@ -188,6 +188,7 @@ pub use psi_design_contract::{
     SharedCustomFamilyHyperLayout,
 };
 pub use psi_terms::{
+    ExactNewtonJointPsiAxisContractions,
     ExactNewtonJointPsiSecondOrderContracted,
     ExactNewtonJointPsiSecondOrderTerms,
     ExactNewtonJointPsiTerms,

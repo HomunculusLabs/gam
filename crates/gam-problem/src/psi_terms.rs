@@ -87,6 +87,23 @@ pub struct ExactNewtonJointPsiSecondOrderContracted {
     pub hessian: Vec<DriftDerivResult>,
 }
 
+/// A one-pass contraction of every ψ axis's coefficient-axis tensor `{∂_ψ Hdot[e_a]}_a`,
+/// the matrices [`ExactNewtonJointPsiWorkspace::hessian_directional_derivatives_all_beta_axes`]
+/// materializes, on its two information slots, without forming it.
+pub trait ExactNewtonJointPsiAxisContractions {
+    /// For ψ axis `i` the result holds `(kernel_contractions, mixed_contractions)` with
+    /// `kernel_contractions[[a, b]] = ⟨∂_ψᵢ Hdot[e_a], K_b⟩` and
+    /// `mixed_contractions[a] = ⟨∂_ψᵢ Hdot[e_a], mixed_weights[i]⟩`. The symmetric
+    /// kernels `K_b` come from `kernels`, which only a pass that runs calls, and every
+    /// weight is symmetric. `None` means the pass does not cover this point's axes and the
+    /// caller materializes the tensors instead.
+    fn hessian_all_beta_axes_contractions(
+        &self,
+        kernels: &dyn Fn() -> Vec<Array2<f64>>,
+        mixed_weights: &[Array2<f64>],
+    ) -> Result<Option<Vec<(Array2<f64>, Array1<f64>)>>, String>;
+}
+
 pub trait ExactNewtonJointPsiWorkspace: Send + Sync {
     fn first_order_terms(
         &self,
@@ -162,21 +179,10 @@ pub trait ExactNewtonJointPsiWorkspace: Send + Sync {
         per_axis_psi_hessian_directional_derivatives(self, psi_index, total)
     }
 
-    /// Contract every ψ axis's coefficient-axis tensor `{∂_ψ Hdot[e_a]}_a`, the matrices
-    /// [`Self::hessian_directional_derivatives_all_beta_axes`] materializes, on its two
-    /// information slots in one pass, without forming it. For ψ axis `i` the result holds
-    /// `(kernel_contractions, mixed_contractions)` with
-    /// `kernel_contractions[[a, b]] = ⟨∂_ψᵢ Hdot[e_a], K_b⟩` and
-    /// `mixed_contractions[a] = ⟨∂_ψᵢ Hdot[e_a], mixed_weights[i]⟩`. The symmetric
-    /// kernels `K_b` come from `kernels`, which only a workspace that runs the pass calls,
-    /// and every weight is symmetric. `None` means this workspace has no such pass and the
-    /// caller materializes the tensors instead.
-    fn hessian_all_beta_axes_contractions(
-        &self,
-        _kernels: &dyn Fn() -> Vec<Array2<f64>>,
-        _mixed_weights: &[Array2<f64>],
-    ) -> Result<Option<Vec<(Array2<f64>, Array1<f64>)>>, String> {
-        Ok(None)
+    /// This workspace's one-pass contraction of every ψ axis's coefficient-axis tensor.
+    /// `None` means it has no such pass and the caller materializes the tensors instead.
+    fn all_beta_axes_contractions(&self) -> Option<&dyn ExactNewtonJointPsiAxisContractions> {
+        None
     }
 
     /// {D_beta_axis D_beta_direction D_psi H}, under this workspace's row measure.

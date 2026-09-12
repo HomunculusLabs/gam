@@ -569,16 +569,18 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
     // reads `⟨mixed_information, ∂_ψHdot[e_a]⟩`, and the curvature drift reads
     // `⟨∂_ψHdot[e_a], K_b⟩` against the drift base's ambient kernels.
     let contracted_explicit_jeffreys: Option<Vec<(Array2<f64>, Array1<f64>)>> = match (
-        psi_workspace.as_ref(),
+        psi_workspace
+            .as_ref()
+            .and_then(|workspace| workspace.all_beta_axes_contractions()),
         batched_explicit_jeffreys.as_ref(),
         jeffreys_hphi_base.as_ref(),
     ) {
-        (Some(workspace), Some((_, weights)), Some(base)) => {
+        (Some(contractor), Some((_, weights)), Some(base)) => {
             let mixed_weights: Vec<Array2<f64>> = weights
                 .iter()
                 .map(|prepared| prepared.mixed_information.clone())
                 .collect();
-            match workspace
+            match contractor
                 .hessian_all_beta_axes_contractions(&|| base.ambient_axis_kernels(), &mixed_weights)?
             {
                 Some(contractions)
