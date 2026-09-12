@@ -160,8 +160,7 @@ def _validated_control_report(controlled_census: object) -> dict[str, object]:
             control_circular_wins / control_adjudications if control_adjudications else None
         ),
         "pipeline_seed": controlled_census.pipeline_seed,
-        "per_dimension_shuffle_seed": controlled_census.per_dimension_shuffle_seed,
-        "covariance_exact_hadamard_seed": controlled_census.covariance_exact_hadamard_seed,
+        "control_seed": controlled_census.control_seed,
     }
 
 

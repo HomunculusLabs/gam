@@ -61,12 +61,12 @@ def test_shape_controlled_census_replays_the_exact_full_pipeline() -> None:
     expected_shuffle = gamfit.shape_matched_control(
         pristine,
         "per_dimension_shuffle",
-        seed=result.per_dimension_shuffle_seed,
+        seed=result.control_seed,
     )
     expected_hadamard = gamfit.shape_matched_control(
         pristine,
         "covariance_exact_hadamard",
-        seed=result.covariance_exact_hadamard_seed,
+        seed=result.control_seed,
     )
     np.testing.assert_array_equal(calls[1][0], expected_shuffle)
     np.testing.assert_array_equal(calls[2][0], expected_hadamard)
@@ -154,12 +154,12 @@ def test_float32_shape_controls_preserve_dtype_seed_marginals_and_covariance(
     shuffle = gamfit.shape_matched_control_f32(
         activations,
         "per_dimension_shuffle",
-        seed=result.per_dimension_shuffle_seed,
+        seed=result.control_seed,
     )
     repeated_shuffle = gamfit.shape_matched_control_f32(
         activations,
         "per_dimension_shuffle",
-        seed=result.per_dimension_shuffle_seed,
+        seed=result.control_seed,
     )
     assert shuffle.dtype == np.float32
     np.testing.assert_array_equal(shuffle, repeated_shuffle)
@@ -172,12 +172,12 @@ def test_float32_shape_controls_preserve_dtype_seed_marginals_and_covariance(
     hadamard = gamfit.shape_matched_control_f32(
         activations,
         "covariance_exact_hadamard",
-        seed=result.covariance_exact_hadamard_seed,
+        seed=result.control_seed,
     )
     repeated_hadamard = gamfit.shape_matched_control_f32(
         activations,
         "covariance_exact_hadamard",
-        seed=result.covariance_exact_hadamard_seed,
+        seed=result.control_seed,
     )
     assert hadamard.dtype == np.float32
     np.testing.assert_array_equal(hadamard, repeated_hadamard)

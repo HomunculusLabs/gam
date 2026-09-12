@@ -2833,6 +2833,40 @@ pub(crate) fn shape_matched_control_f32<'py>(
     Ok(control.into_pyarray(py))
 }
 
+/// Row order of label-shuffle draw `draw` over `n_rows` labels, seeded only by
+/// `(seed, draw)`.
+#[pyfunction]
+pub(crate) fn label_shuffle_permutation<'py>(
+    py: Python<'py>,
+    n_rows: usize,
+    seed: u64,
+    draw: u64,
+) -> Bound<'py, numpy::PyArray1<u64>> {
+    use numpy::IntoPyArray;
+
+    gam::terms::sae::null_battery::label_shuffle_permutation(n_rows, seed, draw)
+        .into_iter()
+        .map(|row| row as u64)
+        .collect::<Array1<u64>>()
+        .into_pyarray(py)
+}
+
+/// Plus-one-corrected larger-tail randomization p-value of `observed` against
+/// `null_statistics`, with ties counted against the observation. Returns
+/// `(exceedance_count, p_value)`.
+#[pyfunction]
+pub(crate) fn randomization_p_value(
+    observed: f64,
+    null_statistics: numpy::PyReadonlyArray1<'_, f64>,
+) -> PyResult<(usize, f64)> {
+    use gam::terms::sae::null_battery::{Tail, empirical_p_value};
+
+    let samples = null_statistics.as_array().to_vec();
+    empirical_p_value(observed, &samples, Tail::Larger)
+        .map(|calibration| (calibration.extreme_draws, calibration.p_value))
+        .map_err(py_value_error)
+}
+
 /// Adjudicate the representational SHAPE of a recovered atom's intrinsic 2-D
 /// coordinates (issue #977 / #907 / #2262): race a smooth S¹ ring against a
 /// Euclidean Gaussian, the best free k-cluster mixture, and a constrained
@@ -3030,6 +3064,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(glm_full_conformal, module)?)?;
     module.add_function(wrap_pyfunction!(shape_matched_control, module)?)?;
     module.add_function(wrap_pyfunction!(shape_matched_control_f32, module)?)?;
+    module.add_function(wrap_pyfunction!(label_shuffle_permutation, module)?)?;
+    module.add_function(wrap_pyfunction!(randomization_p_value, module)?)?;
     module.add_function(wrap_pyfunction!(adjudicate_atom_shape, module)?)?;
     module.add_function(wrap_pyfunction!(sweep_color_arm_throughput, module)?)?;
     Ok(())

@@ -642,8 +642,7 @@ def main() -> int:
         "control_n_adjudicated": control_adjudicated,
         "seed_provenance": {
             "pipeline_seed": controlled.pipeline_seed,
-            "per_dimension_shuffle_seed": controlled.per_dimension_shuffle_seed,
-            "covariance_exact_hadamard_seed": controlled.covariance_exact_hadamard_seed,
+            "control_seed": controlled.control_seed,
         },
         "wall_seconds": time.time() - t0,
         "config": vars(args),

@@ -10,12 +10,15 @@ from typing import Any, Callable, Generic, TypeVar
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from ._rust import shape_matched_control, shape_matched_control_f32
+from ._rust import (
+    label_shuffle_permutation,
+    randomization_p_value,
+    shape_matched_control,
+    shape_matched_control_f32,
+)
 
 _ResultT = TypeVar("_ResultT")
 _U64_MAX = (1 << 64) - 1
-_SHUFFLE_SEED_DOMAIN = 0xD1AE_510F
-_HADAMARD_SEED_DOMAIN = 0x4841_DA4D
 _FINITE_SCAN_SCALARS = 1 << 20
 _ControlMatrix = NDArray[np.float32] | NDArray[np.float64]
 
@@ -34,8 +37,7 @@ class ShapeControlledCensus(Generic[_ResultT]):
     per_dimension_shuffle: _ResultT
     covariance_exact_hadamard: _ResultT
     pipeline_seed: int
-    per_dimension_shuffle_seed: int
-    covariance_exact_hadamard_seed: int
+    control_seed: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +99,9 @@ def run_label_shuffle_margin_null(
     shuffled draw traverse that same callback. Permuting an already-built chart
     is therefore outside this API's contract.
 
-    The one-sided randomization p-value is
+    Draw ``d`` permutes the labels through the native
+    ``label_shuffle_permutation``, seeded only by ``(shuffle_seed, d)``. The
+    one-sided randomization p-value is the native plus-one calibration
     ``(1 + count(null_margin >= observed_margin)) / (n_draws + 1)``. Ties are
     conservatively counted against the observed result. The source data are a
     shared read-only C-contiguous view so a 200-draw null does not copy a large
@@ -152,14 +156,12 @@ def run_label_shuffle_margin_null(
 
     observed = pipeline(source, label_source.copy(), pipeline_seed)
     observed_margin = _adjudication_margin(observed)
-    rng = np.random.Generator(np.random.PCG64(shuffle_seed))
     null_margins = np.empty(n_draws, dtype=np.float64)
     for draw in range(n_draws):
-        shuffled_labels = np.ascontiguousarray(rng.permutation(label_source))
-        null_result = pipeline(source, shuffled_labels, pipeline_seed)
+        order = label_shuffle_permutation(label_source.shape[0], shuffle_seed, draw)
+        null_result = pipeline(source, label_source[order], pipeline_seed)
         null_margins[draw] = _adjudication_margin(null_result)
-    exceedance_count = int(np.count_nonzero(null_margins >= observed_margin))
-    p_value = (1.0 + exceedance_count) / (n_draws + 1.0)
+    exceedance_count, p_value = randomization_p_value(observed_margin, null_margins)
     null_margins.setflags(write=False)
     return LabelShuffleMarginNull(
         observed=observed,
@@ -204,8 +206,9 @@ def run_shape_controlled_census(
     The controls are generated at pipeline entry, not from a fitted 2-D chart:
     a per-dimension permutation preserves every marginal, while a mean-fixing
     orthogonal randomized Hadamard transform preserves the full empirical mean
-    and covariance in exact arithmetic. Only one control matrix is resident at
-    a time unless the callback retains it.
+    and covariance in exact arithmetic. Both native controls take
+    ``control_seed`` and separate their streams by control kind. Only one
+    control matrix is resident at a time unless the callback retains it.
     """
 
     if not callable(pipeline):
@@ -250,14 +253,12 @@ def run_shape_controlled_census(
     _require_finite(source)
     source.setflags(write=False)
 
-    shuffle_seed = control_seed ^ _SHUFFLE_SEED_DOMAIN
-    hadamard_seed = control_seed ^ _HADAMARD_SEED_DOMAIN
     observed = pipeline(source.copy(order="C"), pipeline_seed)
 
     shuffled = control_function(
         source,
         "per_dimension_shuffle",
-        seed=shuffle_seed,
+        seed=control_seed,
     )
     shuffled_array = np.asarray(shuffled)
     if (
@@ -280,7 +281,7 @@ def run_shape_controlled_census(
     hadamard = control_function(
         source,
         "covariance_exact_hadamard",
-        seed=hadamard_seed,
+        seed=control_seed,
     )
     hadamard_array = np.asarray(hadamard)
     if (
@@ -305,6 +306,5 @@ def run_shape_controlled_census(
         per_dimension_shuffle=shuffled_result,
         covariance_exact_hadamard=hadamard_result,
         pipeline_seed=pipeline_seed,
-        per_dimension_shuffle_seed=shuffle_seed,
-        covariance_exact_hadamard_seed=hadamard_seed,
+        control_seed=control_seed,
     )

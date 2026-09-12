@@ -50,6 +50,7 @@ pub(crate) const COVARIANCE_EXACT_HADAMARD_TARGET_TILE_BYTES: usize = 32 * 1024 
 const HADAMARD_PERMUTATION_SEED_DOMAIN: u64 = 0x4841_4441_5045_524D;
 const HADAMARD_SIGN_SEED_DOMAIN: u64 = 0x4841_4441_5349_474E;
 const PER_DIMENSION_SHUFFLE_SEED_DOMAIN: u64 = 0x5045_5244_494D_5348;
+const LABEL_SHUFFLE_SEED_DOMAIN: u64 = 0x4C41_4245_4C53_4846;
 
 /// Direction of the claim statistic under the null.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,7 +70,7 @@ impl Tail {
 
 /// Plus-one-corrected Monte Carlo tail probability and its sampling uncertainty.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct EmpiricalPValue {
+pub struct EmpiricalPValue {
     pub p_value: f64,
     pub monte_carlo_standard_error: f64,
     pub extreme_draws: usize,
@@ -81,7 +82,7 @@ pub(crate) struct EmpiricalPValue {
 /// This is the single plus-one correction used by every native null-calibrated
 /// report. Ties count as extreme in the requested tail, so a null statistic equal
 /// to the observation is evidence against rejection rather than a free win.
-pub(crate) fn empirical_p_value(
+pub fn empirical_p_value(
     observed: f64,
     null_samples: &[f64],
     tail: Tail,
@@ -109,6 +110,16 @@ pub(crate) fn empirical_p_value(
         extreme_draws,
         draws,
     })
+}
+
+/// Row order of label-shuffle draw `draw`: a uniform permutation of `0..n_rows`
+/// seeded only by `(seed, draw)`, so every draw is reproducible on its own and
+/// independent of how many draws the caller runs.
+pub fn label_shuffle_permutation(n_rows: usize, seed: u64, draw: u64) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n_rows).collect();
+    let mut rng = StdRng::seed_from_u64(mix_seed(seed, LABEL_SHUFFLE_SEED_DOMAIN, draw));
+    order.shuffle(&mut rng);
+    order
 }
 
 /// Marchenko–Pastur reconstruction-rank edge (#2262): the per-observation
