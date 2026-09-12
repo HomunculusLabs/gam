@@ -203,7 +203,7 @@ impl IterationBound {
     }
 
     /// Has the pass count alone exhausted the budget?
-    pub fn count_exhausted(&self) -> bool {
+    pub(crate) fn count_exhausted(&self) -> bool {
         self.used >= self.max
     }
 
@@ -219,7 +219,7 @@ impl IterationBound {
 /// Doubles on every further rejection (geometric escalation), reaching
 /// [`MADSEN_DAMPING_CAP`] from [`MADSEN_DAMPING_FLOOR`] in 15 rejections — the established
 /// reweight.rs schedule, now owned here.
-pub const MADSEN_INITIAL_REJECT_FACTOR: f64 = 2.0;
+pub(crate) const MADSEN_INITIAL_REJECT_FACTOR: f64 = 2.0;
 
 /// Geometric damping escalator for one reject chain
 /// (Madsen–Nielsen–Tingleff eq 3.16: the multiplier starts at 2 and

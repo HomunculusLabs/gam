@@ -283,7 +283,7 @@ impl RhoSensitivitySpectrum {
 
     /// Indices of the directions the certified inversion admitted, i.e. those
     /// with strictly positive resolved curvature.
-    pub fn active_directions(&self) -> Vec<usize> {
+    pub(crate) fn active_directions(&self) -> Vec<usize> {
         self.classifications
             .iter()
             .enumerate()

@@ -78,7 +78,7 @@ impl LogdetEnclosure {
     /// `decision_margin` — the predicate behind [`Self::decide_within_margin`],
     /// exposed for consumers that hold only the gap (e.g. the EFS engine, which
     /// receives the cost's enclosure width through `EfsEval`).
-    pub fn gap_resolves_margin(gap: f64, decision_margin: f64) -> bool {
+    pub(crate) fn gap_resolves_margin(gap: f64, decision_margin: f64) -> bool {
         decision_margin.is_finite()
             && decision_margin > 0.0
             && gap.is_finite()

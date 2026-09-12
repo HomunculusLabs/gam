@@ -344,7 +344,7 @@ impl ContinuationPath {
     /// The upper box is the heavy entry endpoint; the scalar endpoints come
     /// from the typed objective contract. Every endpoint must be finite, and
     /// each upper entry must be at least its target.
-    pub fn heavy_entry_for_rho(
+    pub(crate) fn heavy_entry_for_rho(
         rho_target: Array1<f64>,
         bounds_upper: Array1<f64>,
         scalars: ContinuationScalarContract,
@@ -384,7 +384,7 @@ impl ContinuationPath {
     /// The scalar leg targets (τ, isometry weight) at the current `s`. The
     /// wiring agent installs these before the inner solve at this waypoint.
     #[must_use]
-    pub fn current_scalar_targets(&self) -> ContinuationScalarState {
+    pub(crate) fn current_scalar_targets(&self) -> ContinuationScalarState {
         self.schedules.scalar_targets_at(self.s)
     }
 

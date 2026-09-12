@@ -160,7 +160,7 @@ impl Certificate for CoresetCertificate {
 /// `decision_margin`) onto the shared [`Verdict`] ladder. This is the
 /// margin-resolved entry point a race consumer uses to obtain a unified verdict
 /// without re-deriving the mapping.
-pub fn coreset_race_verdict(verdict: CoresetMarginVerdict) -> Verdict {
+pub(crate) fn coreset_race_verdict(verdict: CoresetMarginVerdict) -> Verdict {
     match verdict {
         CoresetMarginVerdict::Certified { .. } => Verdict::Certified,
         CoresetMarginVerdict::InsufficientMargin { .. } => Verdict::Insufficient,
@@ -169,7 +169,7 @@ pub fn coreset_race_verdict(verdict: CoresetMarginVerdict) -> Verdict {
 
 /// Verdict for an enclosure resolved against a concrete consumer
 /// `decision_margin`, reusing [`LogdetEnclosure::decide_within_margin`].
-pub fn enclosure_margin_verdict(enclosure: &LogdetEnclosure, decision_margin: f64) -> Verdict {
+pub(crate) fn enclosure_margin_verdict(enclosure: &LogdetEnclosure, decision_margin: f64) -> Verdict {
     match enclosure.decide_within_margin(decision_margin) {
         MarginVerdict::Decided { .. } => Verdict::Certified,
         MarginVerdict::InsufficientMargin { .. } => Verdict::Insufficient,

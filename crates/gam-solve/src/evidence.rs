@@ -2485,7 +2485,7 @@ pub struct CircularGaussianFit2d {
 
 impl CircularGaussianFit2d {
     /// Two center coordinates, one radius, and one isotropic noise variance.
-    pub const NUM_FREE_PARAMETERS: usize = 4;
+    pub(crate) const NUM_FREE_PARAMETERS: usize = 4;
 
     /// Construct a circular Gaussian from validated model parameters.
     pub fn from_parameters(
@@ -3576,7 +3576,7 @@ impl RemlCandidate {
     /// an invalid candidate rather than switching to the incomparable raw
     /// evidence headline. The reported `score_table` still carries that raw
     /// diagnostic unchanged.
-    pub fn ranking_score(&self) -> Result<f64, String> {
+    pub(crate) fn ranking_score(&self) -> Result<f64, String> {
         if !self.score.is_finite() {
             return Err(format!(
                 "compare_models: candidate '{}' has non-finite raw REML/LAML score {}",
@@ -3800,7 +3800,7 @@ pub fn compare_reml_fits(mut candidates: Vec<RemlCandidate>) -> Result<RemlCompa
     })
 }
 
-pub fn format_bayes_factor(log_bf: f64) -> String {
+pub(crate) fn format_bayes_factor(log_bf: f64) -> String {
     if !log_bf.is_finite() {
         return "inf".to_string();
     }
@@ -3810,7 +3810,7 @@ pub fn format_bayes_factor(log_bf: f64) -> String {
     format_three_significant(log_bf.exp())
 }
 
-pub fn format_three_significant(value: f64) -> String {
+pub(crate) fn format_three_significant(value: f64) -> String {
     if value == 0.0 {
         return "0".to_string();
     }
@@ -4275,7 +4275,7 @@ pub fn coupling_components(hessian: ArrayView2<'_, f64>) -> Vec<usize> {
 /// (a structurally inactive `ρ_k`, e.g. a rank-0 or out-of-range penalty block)
 /// yields an empty cone: the sensitivity is identically zero and no solve is
 /// needed at all.
-pub fn cone_of_influence(labels: &[usize], support: &[usize]) -> Vec<usize> {
+pub(crate) fn cone_of_influence(labels: &[usize], support: &[usize]) -> Vec<usize> {
     if support.is_empty() {
         return Vec::new();
     }
@@ -4892,7 +4892,7 @@ pub struct HybridAtomChoice {
 /// exact-zero guard from the `Θ → 0 ⇒ N(ε) → 0` limit of the shatter law, not a
 /// tunable knob: it is the curvature scale below which `‖γ' ∧ γ''‖` is at the
 /// floor of the Simpson quadrature for a genuinely straight image.
-pub const HYBRID_LINEAR_TURNING_FLOOR: f64 = 1e-9;
+pub(crate) const HYBRID_LINEAR_TURNING_FLOOR: f64 = 1e-9;
 
 /// Adjudicate the curved-vs-linear parameterization for ONE hybrid-dictionary
 /// atom slot by the common rank-aware Laplace evidence criterion.

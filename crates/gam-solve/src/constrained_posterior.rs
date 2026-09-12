@@ -431,7 +431,7 @@ impl ConstrainedPosteriorCorrection {
 
     /// `diag(G Δ Gᵀ)` — the per-coefficient variance the truncation removes,
     /// for consumers that only ever build the covariance diagonal.
-    pub fn removed_variance_diagonal(&self) -> Array1<f64> {
+    pub(crate) fn removed_variance_diagonal(&self) -> Array1<f64> {
         let scaled = self.lift.dot(&self.removed_normal_variance);
         let p = self.lift.nrows();
         let mut diagonal = Array1::<f64>::zeros(p);
@@ -458,7 +458,7 @@ impl ConstrainedPosteriorCorrection {
     /// budget `16·n·eps` ≈ 1e-14 relative) and the producer (this cubature,
     /// budget 1e-3 relative) hold two independent budgets for one number, ~11
     /// orders apart, with nothing carrying the producer's across the boundary.
-    pub fn diagonal_uncertainty(&self) -> Array1<f64> {
+    pub(crate) fn diagonal_uncertainty(&self) -> Array1<f64> {
         self.removed_variance_diagonal() * ORTHANT_MOMENT_RELATIVE_TOLERANCE
     }
 
@@ -673,7 +673,7 @@ impl ConstrainedPosteriorGeometry {
         }
     }
 
-    pub fn available_parts_mut(
+    pub(crate) fn available_parts_mut(
         &mut self,
     ) -> Option<(&mut Array1<f64>, Option<&mut ConstrainedPosteriorCorrection>)> {
         match &self.moment_status {
@@ -1383,7 +1383,7 @@ pub fn constrained_posterior_correction_from_covariance(
 /// `Σ Aᵀ` — column `j` is `Σ a_j`, `W_ij = a_iᵀ(Σ a_j)`, and the lift is
 /// `(Σ Aᵀ)W⁻¹` — so a factorized inference path supplies `m` solves instead of
 /// a `p × p` inverse.
-pub fn constrained_posterior_correction(
+pub(crate) fn constrained_posterior_correction(
     sigma_times_constraint_transpose: ArrayView2<'_, f64>,
     unconstrained_center: &Array1<f64>,
     constraints: &LinearInequalityConstraints,

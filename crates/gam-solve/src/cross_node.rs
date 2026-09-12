@@ -119,7 +119,7 @@ impl CrossNodePartition {
     }
 
     /// Number of chunks rank `rank` owns.
-    pub fn chunks_owned_by(&self, rank: usize) -> usize {
+    pub(crate) fn chunks_owned_by(&self, rank: usize) -> usize {
         let n = self.n_chunks();
         if rank >= self.n_ranks || n == 0 {
             return 0;
@@ -135,7 +135,7 @@ impl CrossNodePartition {
     /// The `ordinal`-th (0-based) global chunk index owned by `rank`, or `None`
     /// past the end of the rank's sequence. The worker cursor is an ordinal
     /// into exactly this sequence.
-    pub fn owned_chunk(&self, rank: usize, ordinal: usize) -> Option<usize> {
+    pub(crate) fn owned_chunk(&self, rank: usize, ordinal: usize) -> Option<usize> {
         if rank >= self.n_ranks {
             return None;
         }

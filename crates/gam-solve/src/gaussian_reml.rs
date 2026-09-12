@@ -54,7 +54,7 @@ pub struct GaussianRemlBlocksDomain {
 }
 
 impl GaussianRemlBlocksDomain {
-    pub fn from_blockwise_penalties(
+    pub(crate) fn from_blockwise_penalties(
         p_total: usize,
         penalties: &[BlockwisePenalty],
     ) -> Result<Self, EstimationError> {
@@ -243,7 +243,7 @@ impl GaussianRemlBlocksDomain {
     /// Certify that the supplied design and positive penalty scales determine
     /// a unique coefficient vector, returning the exact normal matrix used by
     /// the strict solve.
-    pub fn certify_joint_coefficient_map(
+    pub(crate) fn certify_joint_coefficient_map(
         &self,
         design: ArrayView2<'_, f64>,
         weights: ArrayView1<'_, f64>,
@@ -1648,7 +1648,7 @@ pub fn gaussian_reml_multi_shared_dispersion_closed_form(
     })
 }
 
-pub fn gaussian_reml_multi_closed_form_with_nullspace_dim(
+pub(crate) fn gaussian_reml_multi_closed_form_with_nullspace_dim(
     x: ArrayView2<'_, f64>,
     y: ArrayView2<'_, f64>,
     penalty: ArrayView2<'_, f64>,
@@ -4063,7 +4063,7 @@ fn batched_whitened_penalty_transforms(
     )
 }
 
-pub fn build_gaussian_reml_eigen_cache_with_nullspace_dim(
+pub(crate) fn build_gaussian_reml_eigen_cache_with_nullspace_dim(
     x: ArrayView2<'_, f64>,
     penalty: ArrayView2<'_, f64>,
     nullspace_dim: Option<usize>,
@@ -8600,7 +8600,7 @@ pub struct DenseFisherGaussianFit {
 
 /// Add a block-diagonal `λ·S` penalty (one `S` block per output) into a stacked
 /// `(k·n_outputs)` Hessian in place, symmetrizing `S`.
-pub fn add_block_diagonal_penalty(
+pub(crate) fn add_block_diagonal_penalty(
     hessian: &mut Array2<f64>,
     penalty: ArrayView2<'_, f64>,
     lambda: f64,

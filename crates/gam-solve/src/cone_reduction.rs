@@ -76,7 +76,7 @@ pub struct ConeMode {
 /// Sylvester's law of inertia makes the pivot signs the inertia, so this needs
 /// no eigensolver. Diagonal pivoting keeps it well posed for the indefinite
 /// case, which is the case this module exists for.
-pub fn symmetric_inertia(matrix: ArrayView2<'_, f64>, tolerance: f64) -> Result<Inertia, String> {
+pub(crate) fn symmetric_inertia(matrix: ArrayView2<'_, f64>, tolerance: f64) -> Result<Inertia, String> {
     let n = matrix.nrows();
     if matrix.ncols() != n {
         return Err(format!(
@@ -256,7 +256,7 @@ impl ConeProperness {
 /// The system is nonsingular exactly when `A` has full row rank and `H` is
 /// nonsingular on `null(A)`; a failed pivot therefore refuses by naming which of
 /// those two the face broke, rather than returning a matrix built on neither.
-pub fn reduced_cone_precision(
+pub(crate) fn reduced_cone_precision(
     hessian: ArrayView2<'_, f64>,
     constraints: ArrayView2<'_, f64>,
 ) -> Result<Array2<f64>, String> {
@@ -508,7 +508,7 @@ fn is_positive_semidefinite(a: &Array2<f64>, tolerance: f64) -> bool {
 /// all `2ⁿ − 1` supports and the vertices `M_jj` decides it — no nonconvex QP,
 /// and a non-positive answer is a PROOF of impropriety rather than an
 /// inconclusive bound.
-pub fn copositive_simplex_minimum(
+pub(crate) fn copositive_simplex_minimum(
     matrix: ArrayView2<'_, f64>,
 ) -> Result<(f64, Array1<f64>), String> {
     let n = matrix.nrows();
