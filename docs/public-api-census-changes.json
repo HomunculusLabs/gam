@@ -1684,5 +1684,15 @@
     },
     "reason": "#2901 (SPEC rules 2 and 25): ExternalJointHyperEvaluator::debug_full_h was a debug accessor for finite-difference tests, and nothing calls it.",
     "evidence": "public_api_census.py's public_functions predicate over crates/gam-solve/src/estimate/hessian_fd_probes.rs at the base yields debug_full_h alone, and the file is deleted. git grep -n -w debug_full_h finds no caller. No other changed file loses a pub fn."
+  },
+  {
+    "base": "19662c477508c0099d3faf074312cc330237ea5b",
+    "removed": {
+      "crates/gam-sae/src/manifold/isa_seed.rs::isa_deflate_fitted_curve": 1,
+      "crates/gam-sae/src/manifold/isa_seed.rs::isa_deflationary_producer": 1,
+      "crates/gam-sae/src/manifold/isa_seed.rs::isa_extract_certified_plane": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): the single-plane shim isa_extract_certified_plane has no production caller and is deleted. isa_deflationary_producer and isa_deflate_fitted_curve are called only by isa_seed.rs's #2111 producer-gate tests, so they become private helpers in that file's test module.",
+    "evidence": "At 0073ba7cb, git grep -n -w finds isa_extract_certified_plane called only by the greedy_deflation_probe test helper, which now calls isa_extract_certified_planes(.., 1, ..). isa_deflationary_producer and isa_deflate_fitted_curve are called only inside isa_seed.rs by the producer and its tests. The production birth path in manifold/fit_drivers.rs calls capture_signal_span and isa_extract_certified_planes only. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]
