@@ -422,14 +422,14 @@ impl StabilizationLedger {
         self.matrix_form
     }
 
-    pub(crate) const fn chosen_by(self) -> StabilizationRule {
+    pub const fn chosen_by(self) -> StabilizationRule {
         self.chosen_by
     }
 
     /// Exact determinant/objective provenance for an explicit prior or
     /// objective-accounted algorithmic stabilization. `None` for every
     /// solver-only, numerical, and approximation-only perturbation.
-    pub(crate) const fn objective_policy(self) -> Option<RidgePolicy> {
+    pub const fn objective_policy(self) -> Option<RidgePolicy> {
         self.objective_policy
     }
 
@@ -437,11 +437,11 @@ impl StabilizationLedger {
         self.backward_error_bound
     }
 
-    pub(crate) const fn inertia_before(self) -> Option<Inertia> {
+    pub const fn inertia_before(self) -> Option<Inertia> {
         self.inertia_before
     }
 
-    pub(crate) const fn inertia_after(self) -> Option<Inertia> {
+    pub const fn inertia_after(self) -> Option<Inertia> {
         self.inertia_after
     }
 
