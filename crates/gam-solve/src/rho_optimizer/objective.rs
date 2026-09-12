@@ -1801,7 +1801,6 @@ pub(crate) fn outer_result_to_native(mut result: OuterResult, perm: &[usize]) ->
         .flatten()
         .chain(active_set.into_iter().flatten())
         .chain(result.refused_seed_points.iter_mut())
-        .chain(result.started_seed_points.iter_mut())
     {
         if point.len() == perm.len() {
             *point = permute_to_native(point, perm);
