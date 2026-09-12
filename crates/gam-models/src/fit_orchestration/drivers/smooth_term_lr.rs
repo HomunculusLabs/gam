@@ -4465,12 +4465,13 @@ mod selection_replay_tests {
                     .map(|&nu| (nu * shift.exp()).ln_1p() - nu.ln_1p())
                     .sum::<f64>()
                     - geometry.rank as f64 * shift;
+                let change =
+                    occam_offset(&moved, geometry.rank) - occam_offset(&base, geometry.rank);
                 assert!(
-                    (moved.offset - base.offset - predicted).abs() <= 1e-8 * (1.0 + predicted.abs()),
+                    (change - predicted).abs() <= 1e-8 * (1.0 + predicted.abs()),
                     "at separation {separation} a common shift of {shift} moved the \
-                     criterion's offset by {} where the closed form says {predicted} \
-                     — the log-determinant has lost the scales it cannot see",
-                    moved.offset - base.offset
+                     criterion's offset by {change} where the closed form says {predicted} \
+                     — the log-determinant has lost the scales it cannot see"
                 );
             }
         }
@@ -4584,12 +4585,25 @@ mod selection_replay_tests {
                 .map(|&nu| (nu * shift.exp()).ln_1p() - nu.ln_1p())
                 .sum::<f64>()
                 - geometry.rank as f64 * shift;
+            let change = occam_offset(&moved, geometry.rank) - occam_offset(&base, geometry.rank);
             assert!(
-                (moved.offset - base.offset - predicted).abs() <= 1e-9 * (1.0 + predicted.abs()),
-                "the unpenalized direction leaked a log-determinant term: {} vs {predicted}",
-                moved.offset - base.offset
+                (change - predicted).abs() <= 1e-9 * (1.0 + predicted.abs()),
+                "the unpenalized direction leaked a log-determinant term: {change} vs {predicted}"
             );
         }
+    }
+
+    /// The criterion's Occam offset `log|I + T| − log|T|₊` at an evaluated point,
+    /// read off that point's own spectrum over the structural rank — the quantity
+    /// `SelectionGeometry::at` prices from the stacked roots and refuses on when
+    /// it is not finite.
+    fn occam_offset(point: &super::SelectionPoint, rank: usize) -> f64 {
+        let log_det_hessian: f64 = point.eigenvalues.iter().map(|value| value.ln_1p()).sum();
+        let log_det_penalty: f64 = point.eigenvalues[..rank]
+            .iter()
+            .map(|value| value.ln())
+            .sum();
+        log_det_hessian - log_det_penalty
     }
 }
 
