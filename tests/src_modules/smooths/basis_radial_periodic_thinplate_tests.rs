@@ -1521,20 +1521,18 @@ fn double_penalty_suppressed_on_non_free_boundary_is_single_penalty() {
 }
 
 /// #1476/#1477/#874: in the CENTERED cyclic chart — the one every `cyclic(...)`
-/// / `bs="cc"` term the formula DSL builds actually ships — the constrained
-/// wiggliness penalty has no isolated unpenalized trend left to shrink, so even
-/// with `double_penalty: true` the rebuild helper introduces no ridge. Assert a
-/// single primary penalty and that the design still closes the seam (period
-/// boundary continuity).
+/// / `bs="cc"` term the formula DSL builds actually ships — the harmonic cyclic
+/// roughness leaves the constant and the fundamental harmonic unpenalized. The
+/// centering removes the constant and the fundamental survives, so with
+/// `double_penalty: true` the rebuild ships the primary roughness plus a rank-2
+/// null-function ridge with an identified smoothing parameter. Assert that
+/// topology and that the design still closes the seam (period boundary
+/// continuity).
 ///
-/// The fixture pins `WeightedSumToZero` deliberately. This test previously
-/// asserted the same single-penalty property from an `identifiability: None`
-/// fixture, where the stated reason does not hold: with no constraint the
-/// constant direction survives in the design and IS an isolated unpenalized
-/// trend. The uncentered chart's behaviour is pinned by its own test below
-/// (#2783).
+/// The fixture pins `WeightedSumToZero` deliberately. The uncentered chart's
+/// behaviour is pinned by its own test below (#2783).
 #[test]
-fn double_penalty_on_centered_cyclic_basis_is_single_penalty_no_spurious_ridge() {
+fn double_penalty_on_centered_cyclic_basis_ships_the_fundamental_harmonic_ridge() {
     let x = Array1::from_vec(vec![0.0, 0.25, 0.5, 0.75, 1.0]);
     let spec = BSplineBasisSpec {
         degree: 3,
@@ -1555,22 +1553,26 @@ fn double_penalty_on_centered_cyclic_basis_is_single_penalty_no_spurious_ridge()
         .unwrap_or_else(|e| panic!("cyclic double-penalty build failed: {e:?}"));
     assert_eq!(
         result.active_penalties.len(),
-        1,
-        "cyclic basis must ship a single penalty — no double-penalty ridge"
+        2,
+        "a centered cyclic basis ships its roughness and the fundamental-harmonic ridge"
     );
     assert!(
-        matches!(
-            result.active_penalties[0].info.source,
-            PenaltySource::Primary
-        ),
-        "cyclic basis's sole penalty must be the primary wiggliness penalty"
-    );
-    assert!(
-        !result
+        result
             .active_penalties
             .iter()
-            .any(|active| matches!(active.info.source, PenaltySource::DoublePenaltyNullspace)),
-        "no spurious DoublePenaltyNullspace ridge on a cyclic basis"
+            .any(|active| matches!(active.info.source, PenaltySource::Primary)),
+        "centered cyclic basis must still ship its roughness penalty"
+    );
+    let ridge = result
+        .active_penalties
+        .iter()
+        .find(|active| matches!(active.info.source, PenaltySource::DoublePenaltyNullspace))
+        .expect("centered cyclic basis must ship a DoublePenaltyNullspace ridge");
+    // The centering removes one direction of the {1, sin, cos} null space; the
+    // surviving centered fundamental harmonic is two-dimensional.
+    assert_eq!(
+        ridge.info.effective_rank, 2,
+        "the centered cyclic ridge shrinks exactly the fundamental harmonic"
     );
     // Seam closes: first and last evaluation rows agree column-wise.
     let dense = result.design.to_dense();
@@ -1583,9 +1585,10 @@ fn double_penalty_on_centered_cyclic_basis_is_single_penalty_no_spurious_ridge()
 }
 
 /// #2783: the UNCENTERED cyclic chart is the other half of the same rule. With
-/// `identifiability: None` no constraint removes the cyclic penalty's lone null
-/// direction (the constant), so under `double_penalty` the null-function ridge
-/// is a genuine, identified second REML coordinate and must be shipped.
+/// `identifiability: None` no constraint removes any direction of the harmonic
+/// roughness's null space `{1, sin θ, cos θ}`, so under `double_penalty` the
+/// null-function ridge is a genuine, identified second REML coordinate of rank
+/// three and must be shipped.
 ///
 /// This is not cosmetic. The constant direction of an uncentered cyclic basis is
 /// exactly aliased with the model's global intercept; with no ridge on it the
@@ -1625,11 +1628,11 @@ fn double_penalty_on_uncentered_cyclic_basis_ships_the_null_function_ridge() {
         .iter()
         .find(|active| matches!(active.info.source, PenaltySource::DoublePenaltyNullspace))
         .expect("uncentered cyclic basis must ship a DoublePenaltyNullspace ridge");
-    // The cyclic derivative penalty's null space is one-dimensional (the
-    // constant), so the ridge that shrinks it is exactly rank one.
+    // The harmonic roughness's null space is {1, sin θ, cos θ}, so the ridge that
+    // shrinks it has rank three.
     assert_eq!(
-        ridge.info.effective_rank, 1,
-        "the cyclic null-function ridge shrinks exactly the constant direction"
+        ridge.info.effective_rank, 3,
+        "the cyclic null-function ridge shrinks the constant and the fundamental harmonic"
     );
     // And it really is the constant it shrinks: a constant coefficient vector
     // carries strictly positive ridge energy, while the wiggliness penalty is
