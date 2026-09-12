@@ -419,12 +419,11 @@ class TheLedgerRatchet(unittest.TestCase):
             gate.identity("a/b.rs", "fn zz_measure_thing() {"), "a/b.rs::zz_measure_thing"
         )
 
-    def test_the_checked_in_ledger_matches_this_tree(self):
-        """The wired gate, run against the repository it guards."""
+    def test_this_tree_has_no_assertion_less_tests(self):
+        """The wired gate, run against the repository it guards. The ledger was
+        deleted with its last entry, so the tree must reach zero."""
         repo = Path(__file__).resolve().parents[2]
-        ledger = repo / "scripts" / "assertionless_ledger.txt"
-        self.assertTrue(ledger.is_file(), ledger)
-        self.assertEqual(gate.check_ledger(repo, ledger), 0)
+        self.assertEqual(list(gate.scan_tree(repo)), [])
 
 
 if __name__ == "__main__":

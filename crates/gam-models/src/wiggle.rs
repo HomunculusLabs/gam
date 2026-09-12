@@ -125,8 +125,9 @@ pub(crate) use gam_terms::basis::monotone_warp_knots_from_seed;
 /// (ratio 1.02). Whatever the assembled `∂H/∂β` contracts against at a
 /// crossing, the piecewise-constant part of `I⁗` does not survive into `∇Φ`,
 /// and the piecewise-constant `I‴` of degree 3 does. The constant is the
-/// measured order, `3`, hence degree `4`; the ladder that fixes it prints its
-/// table on every run.
+/// measured order, `3`, hence degree `4`. The knot-crossing arms in
+/// `survival/location_scale/tests.rs` pin it on the production gradient:
+/// degree 3 jumps, and the built degree closes.
 pub(crate) const COMPOSED_WARP_REQUIRED_CONTINUOUS_BASIS_DERIVATIVE_ORDER: usize = 3;
 
 /// The smallest public degree at which a composed warp's basis is continuous to
