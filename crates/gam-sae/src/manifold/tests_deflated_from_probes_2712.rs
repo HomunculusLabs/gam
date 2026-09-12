@@ -26,7 +26,9 @@
 //! as an absolute threshold copied from a sibling gate that was separating two
 //! entirely different operators.
 
-use super::tests::small_two_atom_periodic_term;
+#![cfg(test)]
+
+use super::tests::{gamma_fd_tiny_fixture, small_two_atom_periodic_term};
 use super::*;
 
 /// The cold, genuinely indefinite two-atom softmax state, where
@@ -399,4 +401,527 @@ fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
         parity_error * 1e3 <= separation,
         "probe parity must resolve the Schur inverse contribution by three orders of magnitude"
     );
+}
+
+/// One declared member of an anchor family.
+struct FdAnchorCandidate {
+    /// What this member is, in the family's own terms. Reported on acceptance
+    /// and on rejection.
+    description: String,
+    rho: SaeManifoldRho,
+    term: SaeManifoldTerm,
+    /// Inner-solve budget spent BEFORE the state is frozen. Zero anchors the
+    /// candidate exactly where the caller put it; a positive budget declares
+    /// that the candidate is "wherever the inner solve converges from here",
+    /// and a solve that refuses is a rejection of this member, not a panic.
+    converge_iters: usize,
+}
+
+/// A frozen-θ̂ evaluation state at which at least one row provably deflates.
+struct CertifiedFdAnchor {
+    term: SaeManifoldTerm,
+    rho: SaeManifoldRho,
+    cache: ArrowFactorCache,
+}
+
+/// The inner-solve tolerance an anchor family converges its declared mode at.
+/// The gates below compare routes at a FROZEN state, so the mode only has to
+/// exist.
+const ANCHOR_CONVERGE_TOLERANCE: f64 = 1.0e-6;
+
+/// Reject-or-accept one candidate state: converge its declared budget, freeze
+/// θ̂ there, and require a finite price with at least one deflated row.
+fn classify_fd_anchor_candidate(
+    target: &Array2<f64>,
+    candidate: FdAnchorCandidate,
+) -> Result<CertifiedFdAnchor, String> {
+    let FdAnchorCandidate {
+        rho,
+        mut term,
+        converge_iters,
+        ..
+    } = candidate;
+    if converge_iters > 0 {
+        term.penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            &rho,
+            None,
+            converge_iters,
+            0.4,
+            ANCHOR_CONVERGE_TOLERANCE,
+            ANCHOR_CONVERGE_TOLERANCE,
+        )
+        .map_err(|error| format!("inner solve refused to converge: {error}"))?;
+    }
+    // `inner_max_iter = 0` freezes θ̂ at the candidate state: the anchor is the
+    // point the test declares, not whatever the inner solve would wander to.
+    let (value, loss, cache) = term
+        .penalized_quasi_laplace_criterion_with_cache(
+            target.view(),
+            &rho,
+            None,
+            0,
+            0.4,
+            1.0e-6,
+            1.0e-6,
+        )
+        .map_err(|error| format!("criterion refused the frozen state: {error}"))?;
+    if !(value.is_finite() && loss.total().is_finite()) {
+        return Err(format!(
+            "frozen state priced non-finitely (value={value}, loss={})",
+            loss.total()
+        ));
+    }
+    let deflated_rows = cache
+        .deflated_row_directions
+        .iter()
+        .filter(|directions| !directions.is_empty())
+        .count();
+    if deflated_rows == 0 {
+        return Err("no row deflates; the anchor requires at least one".to_string());
+    }
+    Ok(CertifiedFdAnchor { term, rho, cache })
+}
+
+/// Accept the FIRST member of a declared, ordered, finite candidate family
+/// whose frozen state has a deflated row.
+///
+/// # Why a family and not a constant
+///
+/// The states that exercise the deflated from-probes paths sit next to the
+/// boundaries that make those paths interesting: the row-deflation floor and
+/// the exact observed information's positive-definite face. A hand-written
+/// constant that lands between them is correct only for the production code it
+/// was measured against; the same constant is a refusal — not a weaker test, an
+/// ABSENT one — as soon as the boundaries move.
+///
+/// A declared family plus a state predicate is the stable form of the same
+/// intent. The family is ordered by how strongly it expresses the test's
+/// purpose (most decisive first), the predicate is the regime the asserted
+/// parity needs, and the accepted member is reported. Nothing in the predicate
+/// can see either route's value, so this cannot converge on "whatever agrees".
+fn certified_fd_anchor(
+    label: &str,
+    target: &Array2<f64>,
+    candidates: Vec<FdAnchorCandidate>,
+) -> CertifiedFdAnchor {
+    assert!(
+        !candidates.is_empty(),
+        "{label}: an anchor family must declare at least one candidate"
+    );
+    let mut rejections = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let description = candidate.description.clone();
+        match classify_fd_anchor_candidate(target, candidate) {
+            Ok(anchor) => {
+                eprintln!("{label}: deflated anchor certified at {description}");
+                return anchor;
+            }
+            Err(reason) => rejections.push(format!("  {description}: {reason}")),
+        }
+    }
+    panic!(
+        "{label}: no member of the declared anchor family has a deflated row. \
+         The regime the asserted parity needs does not exist anywhere on this \
+         family, so widening the family is a fixture decision and weakening the \
+         regime would change what is proved. Rejections:\n{}",
+        rejections.join("\n")
+    );
+}
+
+/// Freeze one already-converged state across a declared ladder of evaluation
+/// `ρ`, ordered by how strongly each member expresses the gate's intent.
+///
+/// An evaluation `ρ` is the other hand-written constant these gates carry: a
+/// lift chosen to put the deflated legs above rounding while keeping the frozen
+/// state a maximum. Both halves of that requirement are properties of
+/// production, so the ladder is declared and the accepted member certified.
+fn rho_ladder_family(
+    term: &SaeManifoldTerm,
+    rhos: Vec<(String, SaeManifoldRho)>,
+    converge_iters: usize,
+) -> Vec<FdAnchorCandidate> {
+    rhos.into_iter()
+        .map(|(description, rho)| FdAnchorCandidate {
+            description,
+            rho,
+            term: term.clone(),
+            converge_iters,
+        })
+        .collect()
+}
+
+/// A declared `log λ_sparse` lift ladder over one base `ρ`, ordered by lift.
+///
+/// The assignment-strength penalty is the dial these gates use to move a state
+/// between the deflating and non-deflating regimes, so it is the natural
+/// declared axis for a regime the gate needs but cannot control directly.
+fn sparse_lift_ladder(base: &SaeManifoldRho, lifts: &[f64]) -> Vec<(String, SaeManifoldRho)> {
+    lifts
+        .iter()
+        .map(|&lift| {
+            let mut rho = base.clone();
+            rho.log_lambda_sparse = lift;
+            (format!("log_lambda_sparse={lift:.2}"), rho)
+        })
+        .collect()
+}
+
+/// The same cache with its PER-ROW deflation metadata stripped.
+///
+/// #2712 non-vacuity instrument. The per-row Cholesky factors and the reduced
+/// Schur are untouched — only `deflated_row_directions` / `deflation_row_spectra`
+/// are emptied — so running a production dense trace against this cache yields
+/// exactly the operator a port that silently dropped the Daleckii–Krein
+/// correction would return. It is a REFERENCE, never a route.
+fn deflation_blind_cache(cache: &ArrowFactorCache) -> ArrowFactorCache {
+    let mut blind = cache.clone();
+    let rows = cache.deflated_row_directions.len();
+    blind.deflated_row_directions = std::sync::Arc::from(vec![Vec::new(); rows]);
+    blind.deflation_row_spectra = std::sync::Arc::from(vec![None; rows]);
+    blind
+}
+
+/// The `log λ_sparse` ladder that reaches the deflating regime on the ordered
+/// Beta–Bernoulli tiny fixture.
+const DEFLATING_SPARSE_LIFTS: [f64; 10] = [2.4, 1.8, 1.3, 0.9, 0.5, 0.2, 0.0, -0.3, -0.6, -1.0];
+
+/// The ordered Beta–Bernoulli tiny fixture at its certified deflating anchor.
+fn obb_deflated_anchor(label: &str) -> (SaeManifoldTerm, SaeManifoldRho, Array2<f64>, ArrowFactorCache)
+{
+    let (mut term, target, rho) = gamma_fd_tiny_fixture();
+    term.assignment.mode = AssignmentMode::ordered_beta_bernoulli(0.7, 0.9, true);
+    let anchor = certified_fd_anchor(
+        label,
+        &target,
+        rho_ladder_family(&term, sparse_lift_ladder(&rho, &DEFLATING_SPARSE_LIFTS), 5),
+    );
+    (anchor.term, anchor.rho, target, anchor.cache)
+}
+
+/// The #2330 residual-excited two-atom circle at a certified deflating anchor.
+///
+/// This is the SOFTMAX deflating fixture, and it is not interchangeable with the
+/// ordered Beta–Bernoulli one: there the deflated direction lives in the LOGIT
+/// subspace (the assignment penalty is what drives it), here it lives in the
+/// over-parametrized CHART — the coordinate slots. Which subspace it occupies
+/// decides which channel's deflation correction is non-zero at all, measured:
+/// the ARD log-precision correction contracts `D = hess·eₛeₛᵀ` at a COORDINATE
+/// slot `s`, so on the ordered Beta–Bernoulli anchor it evaluates to exactly
+/// zero (the deflated direction is orthogonal to every ARD slot) and no parity
+/// gate stated there can be non-vacuous.
+///
+/// #2398 measured that the historical single evaluation lift lands on an
+/// exact-`A` saddle where the deflated-PD state does not exist, so the ladder
+/// walks the lift down until a deflated maximum certifies.
+fn residual_excited_deflated_anchor(
+    label: &str,
+) -> (SaeManifoldTerm, SaeManifoldRho, Array2<f64>, ArrowFactorCache) {
+    let (mut term, mut target, mut rho) = gamma_fd_tiny_fixture();
+    let (n, p) = (target.nrows(), target.ncols());
+    for row in 0..n {
+        for col in 0..p {
+            let phase = (row as f64 + 0.35) / n as f64;
+            let theta = std::f64::consts::TAU * phase;
+            target[[row, col]] += 0.6 * (3.0 * theta + 0.5 * col as f64).sin();
+        }
+    }
+    rho.log_lambda_sparse = -0.5;
+    for value in rho.log_lambda_smooth.iter_mut() {
+        *value = -1.0;
+    }
+    for axis in rho.log_ard.iter_mut() {
+        for value in axis.iter_mut() {
+            *value = -0.5;
+        }
+    }
+    term.penalized_quasi_laplace_criterion_with_cache(
+        target.view(),
+        &rho,
+        None,
+        40,
+        0.4,
+        1.0e-6,
+        1.0e-6,
+    )
+    .expect("off-manifold fixture converges with both atoms alive");
+
+    let eval_rho_ladder: Vec<(String, SaeManifoldRho)> = [
+        (0.5_f64, -2.0_f64, -1.2_f64, -1.0_f64),
+        (0.5, -1.5, -1.2, -1.0),
+        (0.2, -2.0, -1.2, -1.0),
+        (0.2, -1.5, -1.0, -0.8),
+        (0.0, -1.5, -1.0, -0.8),
+        (-0.2, -1.2, -0.8, -0.6),
+        (-0.5, -1.0, -0.5, -0.5),
+    ]
+    .iter()
+    .map(|&(sparse, smooth, ard0, ard1)| {
+        let mut candidate = rho.clone();
+        candidate.log_lambda_sparse = sparse;
+        for value in candidate.log_lambda_smooth.iter_mut() {
+            *value = smooth;
+        }
+        candidate.log_ard = vec![ndarray::array![ard0], ndarray::array![ard1]];
+        (
+            format!("eval rho (sparse={sparse:.1}, smooth={smooth:.1}, ard=[{ard0:.1}, {ard1:.1}])"),
+            candidate,
+        )
+    })
+    .collect();
+    let anchor = certified_fd_anchor(label, &target, rho_ladder_family(&term, eval_rho_ladder, 0));
+    (anchor.term, anchor.rho, target, anchor.cache)
+}
+
+/// The shared non-vacuity claim, stated once.
+///
+/// `parity` is how far the from-probes route is from the dense route;
+/// `separation` is how far the DEFLATION-BLIND operator is from the dense route
+/// — that is, what a port which silently dropped the Daleckii–Krein correction
+/// would score on the same comparison. The gate is meaningful exactly when
+/// `parity` is much smaller than `separation`, and the ratio is the margin by
+/// which such a port would be caught.
+///
+/// Deliberately NOT an absolute threshold. The correction's size is a property
+/// of the fixture, so an absolute floor copied from a sibling gate would either
+/// reject an honest fixture or — much worse — pass one on which the two
+/// operators are numerically indistinguishable and the parity assertion proves
+/// nothing at all.
+fn assert_deflation_resolved(what: &str, parity: f64, separation: f64) {
+    assert!(
+        separation.is_finite() && separation > 0.0,
+        "{what}: the deflation-aware and deflation-blind operators do not separate at \
+         all on this fixture (separation {separation:.6e}), so agreement between the \
+         dense and from-probes routes says nothing about the Daleckii–Krein \
+         correction."
+    );
+    let margin = separation / parity.max(f64::MIN_POSITIVE);
+    assert!(
+        parity * 1.0e3 <= separation,
+        "{what}: from-probes parity error {parity:.6e} is not small enough against the \
+         {separation:.6e} distance to the deflation-blind operator. The gate can only \
+         claim the correction is reconstructed if a port that dropped it would be \
+         caught by a wide margin; the measured margin is {margin:.3e}x."
+    );
+    eprintln!(
+        "#2712 {what}: parity {parity:.6e}, deflation-blind separation \
+         {separation:.6e} — a port that dropped the correction would be caught by \
+         {margin:.3e}x"
+    );
+}
+
+/// A cache whose per-row deflation record is REDIRECTED onto the eigendirection
+/// with the largest support at local slot `slot`, keeping every factor, the
+/// reduced Schur and the recorded eigenbasis untouched.
+///
+/// #2712 non-vacuity instrument for the RANK-ONE channels, and the reason one is
+/// needed. The ARD log-precision correction contracts `D = hess·eₛeₛᵀ` at a
+/// single coordinate slot, so `M = Uᵀ D U` has entries `hess·U[s,a]·U[s,b]` and
+/// the whole correction carries a factor `U[s, d]` for the deflated index `d`.
+/// Every deflating fixture in the tree happens to deflate a direction with
+/// (numerically) no support on the ARD slots — measured at `< 1 ulp` of the trace
+/// on both the ordered Beta–Bernoulli and the residual-excited anchors — so a
+/// parity gate on that channel is vacuous there no matter how tight its
+/// tolerance: it cannot distinguish a route that applies the correction from one
+/// that drops it.
+///
+/// Redirecting the RECORD, not the factor, is deliberate. The claim under test is
+/// that the two ROUTES compute the same functional of
+/// `(inv_vv, D, dirs, spectrum)`, and both read those four from the same place;
+/// the physical consistency of the factor with the record is irrelevant to that
+/// claim and would only limit which inputs can be exercised. The from-probes
+/// route still has to reconstruct the DEFLATED `inv_vv` from the bundle to agree,
+/// because the spectral branch reads `W = Uᵀ inv_vv U` — including its
+/// off-diagonal entries.
+fn deflation_redirected_to_slot(cache: &ArrowFactorCache, slot: usize) -> ArrowFactorCache {
+    let mut redirected = cache.clone();
+    let rows = cache.deflation_row_spectra.len();
+    let mut dirs: Vec<Vec<Array1<f64>>> = vec![Vec::new(); rows];
+    let mut spectra: Vec<Option<RowDeflationSpectrum>> = vec![None; rows];
+    for row in 0..rows {
+        let Some(spectrum) = cache.deflation_row_spectra[row].as_ref() else {
+            continue;
+        };
+        let q = spectrum.evecs.nrows();
+        if slot >= q {
+            continue;
+        }
+        // The eigendirection this slot actually loads onto.
+        let mut best = 0usize;
+        let mut best_weight = -1.0_f64;
+        for column in 0..spectrum.evecs.ncols() {
+            let weight = spectrum.evecs[[slot, column]].abs();
+            if weight > best_weight {
+                best_weight = weight;
+                best = column;
+            }
+        }
+        let mut conditioning: Vec<RowSpectralConditioning> =
+            spectrum.conditioning.iter().copied().collect();
+        let mut cond_evals = spectrum.cond_evals.clone();
+        for (index, decision) in conditioning.iter_mut().enumerate() {
+            if index == best {
+                *decision = RowSpectralConditioning::UnitDeflated;
+                cond_evals[index] = 1.0;
+            } else {
+                *decision = RowSpectralConditioning::Raw;
+                cond_evals[index] = spectrum.raw_evals[index];
+            }
+        }
+        dirs[row] = vec![spectrum.evecs.column(best).to_owned()];
+        spectra[row] = Some(RowDeflationSpectrum {
+            evecs: spectrum.evecs.clone(),
+            raw_evals: spectrum.raw_evals.clone(),
+            cond_evals,
+            conditioning: conditioning.into(),
+        });
+    }
+    redirected.deflated_row_directions = std::sync::Arc::from(dirs);
+    redirected.deflation_row_spectra = std::sync::Arc::from(spectra);
+    redirected
+}
+
+/// Parity for the ARD log-precision Hessian trace on a deflated cache, and — on
+/// a deflation record redirected onto an ARD slot — the proof that the parity is
+/// sensitive to the Daleckii–Krein correction at all.
+///
+/// Two claims, because on a real fixture only the first is available:
+///
+/// 1. On the fixture's OWN deflation, dense and from-probes agree. Reported
+///    separation included, so the reader sees that this half is a reconstruction
+///    check, not a correction check.
+/// 2. On the same cache with the deflation record redirected onto the ARD slot
+///    (see [`deflation_redirected_to_slot`]), the correction becomes large and
+///    the two routes must still agree by a wide margin against the
+///    deflation-blind operator. This is the half that would catch a route which
+///    dropped the correction.
+#[test]
+fn ard_log_precision_hessian_trace_from_probes_matches_dense_on_deflated_rows_2712() {
+    let (term, rho, _target, cache) =
+        residual_excited_deflated_anchor("#2712 deflated ARD trace parity");
+    let (probes, sinv) = full_basis_bundle(&cache);
+
+    let compare = |label: &str, cache: &ArrowFactorCache| -> (f64, f64, f64, usize) {
+        let solver = DeflatedArrowSolver::plain(cache);
+        let dense = term
+            .ard_log_precision_hessian_trace(&rho, cache, &solver, EvidenceOperator::Majorizer)
+            .expect("dense ARD trace");
+        let blind_cache = deflation_blind_cache(cache);
+        let blind_solver = DeflatedArrowSolver::plain(&blind_cache);
+        let blind = term
+            .ard_log_precision_hessian_trace(
+                &rho,
+                &blind_cache,
+                &blind_solver,
+                EvidenceOperator::Majorizer,
+            )
+            .expect("deflation-blind dense ARD trace");
+        let from_probes = term
+            .ard_log_precision_hessian_trace_from_probes(
+                &rho,
+                cache,
+                &probes,
+                &sinv,
+                EvidenceOperator::Majorizer,
+            )
+            .expect("the from-probes ARD trace must PRICE a deflated cache, not refuse it");
+        let mut separation = 0.0_f64;
+        let mut parity = 0.0_f64;
+        let mut scale = 0.0_f64;
+        let mut entries = 0usize;
+        for ((d, b), m) in dense.iter().zip(blind.iter()).zip(from_probes.iter()) {
+            assert_eq!(d.len(), m.len());
+            assert_eq!(d.len(), b.len());
+            for ((dv, bv), mv) in d.iter().zip(b.iter()).zip(m.iter()) {
+                separation = separation.max((dv - bv).abs());
+                parity = parity.max((dv - mv).abs());
+                scale = scale.max(dv.abs());
+                entries += 1;
+            }
+        }
+        eprintln!(
+            "#2712 ARD trace [{label}] over {entries} (atom, axis) entries: magnitude \
+             {scale:.6e}, parity {parity:.6e}, deflation-blind separation {separation:.6e}"
+        );
+        (parity, separation, scale, entries)
+    };
+
+    let (parity, _separation, scale, entries) = compare("fixture deflation", &cache);
+    assert!(
+        entries > 0,
+        "the fixture must carry at least one live ARD axis for this gate to mean anything"
+    );
+    assert!(
+        parity <= 1.0e-11 * (1.0 + scale),
+        "from-probes ARD trace must equal the dense trace on a deflated cache: \
+         {parity:.6e} against trace magnitude {scale:.6e}"
+    );
+
+    // WHICH local slots are ARD coordinate slots is a row-layout fact, and this
+    // gate should not assume it: sweep every slot of the row block, require
+    // parity at each, and require that at least one of them makes the correction
+    // decisive. On this fixture slot 0 is a logit slot, so redirecting there
+    // leaves the ARD correction at the rounding floor exactly as the fixture's
+    // own deflation does.
+    let q_max = cache.row_dims.iter().copied().max().unwrap_or(0);
+    assert!(q_max > 0, "the fixture must have a non-empty row block");
+    let mut best_separation = 0.0_f64;
+    let mut best_parity = 0.0_f64;
+    for slot in 0..q_max {
+        let redirected = deflation_redirected_to_slot(&cache, slot);
+        let (parity, separation, scale, _entries) =
+            compare(&format!("deflation redirected to slot {slot}"), &redirected);
+        assert!(
+            parity <= 1.0e-11 * (1.0 + scale),
+            "from-probes ARD trace must equal the dense trace on the record redirected \
+             to slot {slot}: {parity:.6e} against trace magnitude {scale:.6e}"
+        );
+        if separation > best_separation {
+            best_separation = separation;
+            best_parity = parity;
+        }
+    }
+    assert_deflation_resolved("ARD log-precision trace", best_parity, best_separation);
+}
+
+/// Separation + parity for the assignment-strength Hessian trace on a deflated
+/// cache.
+#[test]
+fn assignment_log_strength_hessian_trace_from_probes_matches_dense_on_deflated_rows_2712() {
+    let (term, rho, _target, cache) =
+        obb_deflated_anchor("#2712 deflated assignment-strength trace parity");
+    let (probes, sinv) = full_basis_bundle(&cache);
+    let solver = DeflatedArrowSolver::plain(&cache);
+    let dense = term
+        .assignment_log_strength_hessian_trace(&rho, &cache, &solver)
+        .expect("dense assignment-strength trace");
+
+    let blind_cache = deflation_blind_cache(&cache);
+    let blind_solver = DeflatedArrowSolver::plain(&blind_cache);
+    let blind = term
+        .assignment_log_strength_hessian_trace(&rho, &blind_cache, &blind_solver)
+        .expect("deflation-blind dense assignment-strength trace");
+
+    let from_probes = term
+        .assignment_log_strength_hessian_trace_from_probes(
+            &rho,
+            &cache,
+            &probes,
+            &sinv,
+            EvidenceOperator::Majorizer,
+        )
+        .expect("the from-probes assignment trace must PRICE a deflated cache, not refuse it");
+
+    let separation = (dense - blind).abs();
+    let parity = (dense - from_probes).abs();
+    eprintln!(
+        "#2712 assignment trace: dense {dense:.10e}, deflation-blind {blind:.10e}, \
+         from-probes {from_probes:.10e}"
+    );
+    assert!(
+        parity <= 1.0e-11 * (1.0 + dense.abs()),
+        "from-probes assignment trace must equal the dense trace on a deflated \
+         cache: {parity:.6e}"
+    );
+    assert_deflation_resolved("assignment-strength trace", parity, separation);
 }
