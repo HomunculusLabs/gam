@@ -1609,7 +1609,22 @@ impl SaeManifoldTerm {
                 // per-row manifold is a product of Euclidean parts whose
                 // projector is the identity); we early-out so those rows stay
                 // byte-for-byte the historical compact path.
-                if !self.ext_coord_manifold().is_euclidean() {
+                //
+                // A flat non-Euclidean chart (Euclidean and Circle factors only) makes
+                // every compact row's product flat too, so the per-row pass below would
+                // return `g_t`, `H_tβ` and `kron_jac` unchanged and `H_tt` symmetrized
+                // (`LatentManifold::preserves_isometry_cross_block_coherence`): apply
+                // exactly that, as `ArrowSchurSystem::apply_riemannian_latent_geometry`
+                // does for dense rows.
+                let compact_manifold = self.ext_coord_manifold();
+                if !compact_manifold.is_euclidean()
+                    && compact_manifold.preserves_isometry_cross_block_coherence()
+                {
+                    for row in sys.rows.iter_mut() {
+                        gam_linalg::matrix::symmetrize_in_place(&mut row.htt);
+                    }
+                }
+                if !compact_manifold.preserves_isometry_cross_block_coherence() {
                     // Each row rebuilds its own compact ext-manifold from immutable
                     // `&self`/`layout` and writes ONLY its own `sys.rows[row_idx]` (and,
                     // on the matrix-free path, its own `kron_jac[row_idx]`) — both disjoint
