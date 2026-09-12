@@ -1839,7 +1839,9 @@ pub(crate) fn arrow_quotient_backward_error_certificate(
     Ok(backward_error)
 }
 
-pub(crate) fn arrow_operator_apply(
+/// `(B + ridge) x` for the assembled bordered-arrow operator `B`: every row's
+/// `H_tt` and `H_tβ` blocks plus the shared `H_ββ`, applied without factoring.
+pub fn arrow_operator_apply(
     sys: &ArrowSchurSystem,
     ridge_t: f64,
     ridge_beta: f64,

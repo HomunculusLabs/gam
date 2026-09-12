@@ -3107,17 +3107,19 @@ impl SaeManifoldTerm {
     ///
     /// # The line search, and why every bound in it is derived
     ///
-    /// Each round minimizes `f` along `d̂ = −Π_V g/‖Π_V g‖` with
-    /// [`Self::minimize_objective_along`], a sequential line search between two
-    /// ENDPOINTS THE STATE ITSELF SUPPLIES, not chosen constants:
+    /// Each round minimizes `f` along `d̂ = −V y/‖V y‖`, where `y` is the Newton
+    /// coefficient vector of [`Self::gauge_block_newton_coefficients`] or, when
+    /// that declines, `Vᵀg` itself (steepest descent, `d̂ = −Π_V g/‖Π_V g‖`). The
+    /// search is [`Self::minimize_objective_along`], a sequential line search
+    /// between two ENDPOINTS THE STATE ITSELF SUPPLIES, not chosen constants:
     ///
     /// * the far end is [`Self::inner_iterate_scale`] — one step may not move
     ///   the iterate further than the iterate's own magnitude, the same
     ///   scale-free trust radius the Newton step already clips against and the
     ///   same one the KKT tolerance is measured in;
-    /// * the near end is `material_floor / ‖Π_V g‖`, below which the FIRST-ORDER
-    ///   model itself predicts less than the objective's own resolution — so no
-    ///   shorter step could be committed even if it were exact.
+    /// * the near end is `material_floor / slope` with `slope = −gᵀd̂`, below
+    ///   which the FIRST-ORDER model itself predicts less than the objective's own
+    ///   resolution — so no shorter step could be committed even if it were exact.
     ///
     /// A round commits only a decrease clearing the material
     /// floor `SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL · (1 + |f|)` — the same
@@ -3176,34 +3178,30 @@ impl SaeManifoldTerm {
             for (index, &value) in system.gb.iter().enumerate() {
                 gradient[dense_len + index] = value;
             }
-            drop(system);
             if !gradient.iter().all(|value| value.is_finite()) {
                 return Ok(outcome);
             }
 
             let basis = self.likelihood_flat_block_basis(penalized_gram_scale)?;
             outcome.dimension = basis.len();
-            let mut direction = Array1::<f64>::zeros(gradient.len());
-            let mut max_directional = 0.0_f64;
-            for vector in &basis {
-                if vector.len() != gradient.len() {
-                    continue;
-                }
-                let coeff = gradient.dot(vector);
-                max_directional = max_directional.max(coeff.abs());
-                for index in 0..direction.len() {
-                    direction[index] -= coeff * vector[index];
-                }
-            }
-            outcome.max_directional_derivative = max_directional;
-            let slope = direction.dot(&direction).sqrt();
+            let basis: Vec<Array1<f64>> = basis
+                .into_iter()
+                .filter(|vector| vector.len() == gradient.len())
+                .collect();
+            // `Vᵀg` in the orthonormal basis; its norm is `‖Π_V g‖`.
+            let gradient_coefficients =
+                Array1::from_iter(basis.iter().map(|vector| gradient.dot(vector)));
+            outcome.max_directional_derivative = gradient_coefficients
+                .iter()
+                .fold(0.0_f64, |max, coeff| max.max(coeff.abs()));
+            let projected_norm = gradient_coefficients.dot(&gradient_coefficients).sqrt();
             // #2228 — the residual this block is handed, split the same way as the
             // `[SAE/inner]` trace. After an accepted Newton step this is the only
             // assembly before the post-step hooks, so it separates what the step
             // did to ‖g‖ from what the re-gauge hooks do.
             log::debug!(
                 "SAE gauge-orbit descent: round {} entry ‖g_row‖={:.6e} ‖g_logit‖={:.6e} \
-                 ‖g_β‖={:.6e} ‖Π_V g‖={slope:.6e} (span dim {})",
+                 ‖g_β‖={:.6e} ‖Π_V g‖={projected_norm:.6e} (span dim {})",
                 outcome.rounds + 1,
                 gradient
                     .slice(s![..dense_len])
@@ -3216,11 +3214,35 @@ impl SaeManifoldTerm {
                     .sqrt(),
                 outcome.dimension,
             );
-            if !(slope.is_finite() && slope > 0.0) {
+            if !(projected_norm.is_finite() && projected_norm > 0.0) {
                 return Ok(outcome);
             }
-            for value in direction.iter_mut() {
-                *value /= slope;
+            // #2267 — step coefficients from the restricted majorizer `VᵀBV`, else
+            // the steepest-descent coefficients `Vᵀg` themselves.
+            let step_coefficients = Self::gauge_block_newton_coefficients(
+                &system,
+                &basis,
+                &gradient_coefficients,
+                dense_len,
+                border_dim,
+                q,
+            )
+            .unwrap_or_else(|| gradient_coefficients.clone());
+            drop(system);
+            let mut direction = Array1::<f64>::zeros(gradient.len());
+            for (vector, &coeff) in basis.iter().zip(step_coefficients.iter()) {
+                direction.scaled_add(-coeff, vector);
+            }
+            let direction_norm = direction.dot(&direction).sqrt();
+            if !(direction_norm.is_finite() && direction_norm > 0.0) {
+                return Ok(outcome);
+            }
+            direction.mapv_inplace(|value| value / direction_norm);
+            // `−φ′(0)` along `d̂`. For the steepest-descent coefficients this is
+            // `‖Π_V g‖`; for the Newton coefficients it is `cᵀy/‖y‖ > 0`.
+            let slope = -gradient.dot(&direction);
+            if !(slope.is_finite() && slope > 0.0) {
+                return Ok(outcome);
             }
 
             let base_objective = self.penalized_objective_total(target, rho, registry, 1.0)?;
@@ -3312,12 +3334,75 @@ impl SaeManifoldTerm {
             log::debug!(
                 "SAE gauge-orbit descent: round {} committed {decrease:.6e} at α={best_alpha:.6e} \
                  (objective {base_objective:.9e} → {committed_objective:.9e}, span dim {}, \
-                 maxᵢ|gᵀvᵢ|={max_directional:.6e}, floor {material_floor:.6e})",
+                 maxᵢ|gᵀvᵢ|={:.6e}, floor {material_floor:.6e})",
                 outcome.rounds,
                 outcome.dimension,
+                outcome.max_directional_derivative,
             );
         }
         Ok(outcome)
+    }
+
+    /// #2267 — the coefficients `y = (VᵀBV)⁻¹ Vᵀg` of a Newton step on the
+    /// likelihood-flat block, with `B` the assembled arrow majorizer at this state
+    /// and `V` the orthonormal block basis.
+    ///
+    /// The block's curvature is the priors' alone (the data fit is flat along it),
+    /// and across the block it is far from isotropic. Steepest descent along
+    /// `−Π_V g` zig-zags there: measured on the #2267 K=8 rung (job 531157) as 40
+    /// rounds of about 0.2 per round still committing at the round bound, and one
+    /// round buying 2.589 at `α = 9.73` between rounds buying `4e-3`. The Newton
+    /// coefficients rotate the direction; [`Self::minimize_objective_along`] still
+    /// chooses the length and the material floor still referees the commit.
+    ///
+    /// `None` keeps steepest descent: a system the dense basis layout does not
+    /// index directly (compact rows, or a matrix-free shared block
+    /// [`gam_solve::arrow_schur::arrow_operator_apply`] does not apply), a
+    /// restricted majorizer that does not factor, or coefficients that do not
+    /// give a descent direction.
+    fn gauge_block_newton_coefficients(
+        system: &ArrowSchurSystem,
+        basis: &[Array1<f64>],
+        gradient_coefficients: &Array1<f64>,
+        dense_len: usize,
+        border_dim: usize,
+        q: usize,
+    ) -> Option<Array1<f64>> {
+        let dense_layout = system.row_offsets[system.rows.len()] == dense_len
+            && system.row_dims.iter().all(|&dim| dim == q)
+            && system.k == border_dim
+            && system.hbb.dim() == (border_dim, border_dim)
+            && system.hbb_matvec.is_none();
+        if !dense_layout {
+            return None;
+        }
+        let applied: Vec<Array1<f64>> = basis
+            .iter()
+            .map(|vector| {
+                let (applied_t, applied_beta) = gam_solve::arrow_schur::arrow_operator_apply(
+                    system,
+                    0.0,
+                    0.0,
+                    vector.slice(s![..dense_len]),
+                    vector.slice(s![dense_len..]),
+                );
+                let mut applied = Array1::<f64>::zeros(dense_len + border_dim);
+                applied.slice_mut(s![..dense_len]).assign(&applied_t);
+                applied.slice_mut(s![dense_len..]).assign(&applied_beta);
+                applied
+            })
+            .collect();
+        let dim = basis.len();
+        let mut restricted = Array2::<f64>::zeros((dim, dim));
+        for i in 0..dim {
+            for j in 0..dim {
+                restricted[[i, j]] = 0.5 * (basis[i].dot(&applied[j]) + basis[j].dot(&applied[i]));
+            }
+        }
+        let factor = restricted.cholesky(Side::Lower).ok()?;
+        let coefficients = factor.solvevec(gradient_coefficients);
+        let predicted_decrease = gradient_coefficients.dot(&coefficients);
+        (predicted_decrease.is_finite() && predicted_decrease > 0.0).then_some(coefficients)
     }
 
     /// Quotient KKT-gradient norm² for the inner convergence gate (#1117): the
