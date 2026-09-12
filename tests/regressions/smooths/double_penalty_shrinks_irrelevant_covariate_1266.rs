@@ -12,24 +12,29 @@
 // λ = ∞ face when the criterion is lowest there.
 //
 // WHAT THE DELETION-FACE TEST DOES NOT CLAIM, AND WHY (#2668 group C, measured
-// 2026-09-04). The original contract asserts `mean z edf < 1.0` over five seeds
-// against an "mgcv select=TRUE" reference; #2668 keeps it as its own test
+// 2026-09-04; cause measured 2026-09-12). The original contract asserts
+// `mean z edf < 1.0` over five seeds against an "mgcv select=TRUE" reference;
+// #2668 keeps it as its own test
 // (`default_double_penalty_shrinks_irrelevant_covariate_edf_below_one`, below),
-// reading per-term EDF from the production summary rows. On the identical data, with the identical basis
-// family (gam's default `bs=ps` is a cubic B-spline with an integrated squared
-// second-derivative penalty = mgcv `bs="bs", m=c(3,2)`), mgcv's own REML
-// optimum for `s(z)` was 0.45 / 1.84 / 1.01 / 1.76 / 0.62 edf (mean 1.14) on
-// seeds 200–204, and a scan of mgcv's REML along z's bending coordinate showed
-// the λ = ∞ face is 0.13–0.45 nats WORSE than the interior optimum on four of
-// the five seeds. The "0.31 edf" that motivated the bar is mgcv with its
-// default thin-plate basis on the same seeds — a different penalty spectrum,
-// not a different estimator. Under the null, REML's variance-component estimate
-// is positive with substantial probability per coordinate, so a term's REML
-// optimum keeps a little wiggle on a large fraction of pure-noise draws; that
-// is a property of REML, not of this engine. (The old helper also indexed the
-// per-term edf with the block-LOCAL `coeff_range`, folding the intercept into
-// `s(x)` and `s(x)`'s last column into `s(z)` — the production summary offsets
-// by `smooth_start`; this test reads the summary rows instead.)
+// reading per-term EDF from the production summary rows. On the identical data,
+// mgcv's cubic knot bases miss that bar (`bs="bs", m=c(3,2)` k=12 gives
+// 0.45 / 1.84 / 1.01 / 1.76 / 0.62 edf on seeds 200–204, mean 1.14; `cr` gives
+// 1.43, and gam's pre-`8bee1c631` default 1.42), while mgcv's thin-plate basis
+// meets it (0.31). The bending spectra agree on their leading modes. What
+// differs is the double penalty's null coordinate. A rank-one ridge with range
+// `null(S)` leaves the Euclidean complement of the null vector unpenalized, so
+// the functions that survive once the linear coordinate is killed depend on the
+// coefficient chart. Thin-plate's chart penalizes the mean end slope
+// `½(f'(a) + f'(b))`; the same functional swapped into the `bs` basis meets the
+// bar in mgcv (mean 0.27), and on gam's exact matrices it gives mean 0.27.
+// Since `8bee1c631` gam's default B-spline composes the chart in which its ridge
+// penalizes that end slope. Under the null, REML's variance-component estimate is
+// still positive on some draws, so a term's optimum can keep a little wiggle,
+// which is why the reference-free deletion-face statement below is kept beside
+// the bar. (The old helper also indexed the per-term edf with the block-LOCAL
+// `coeff_range`, folding the intercept into `s(x)` and `s(x)`'s last column into
+// `s(z)` — the production summary offsets by `smooth_start`; this test reads the
+// summary rows instead.)
 //
 // The exact, reference-free statement of "term selection works" is therefore:
 //
