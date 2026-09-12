@@ -275,12 +275,6 @@ fn threshold_gate_sparse_operator_is_the_installed_exact_a_derivative_2500() {
         let sparse = rho
             .sparse_flat_index()
             .expect("a ThresholdGate rho must carry a sparse log-strength coordinate");
-        let operators = term
-            .penalty_curvature_operators_by_flat(&rho, &cache)
-            .expect("#2500: the ThresholdGate sparse curvature operator must be modelled");
-        let block = operators
-            .get(&sparse)
-            .expect("#2500: the sparse coordinate must own a curvature operator");
         let deflated = deflated_direction_count(&term, &cache);
         // #2520 split the gate's signed logit curvature into a PSD clamp in `B`
         // and a non-positive remainder in `dC`, so `dA/drho_sparse` is the
@@ -321,29 +315,15 @@ fn threshold_gate_sparse_operator_is_the_installed_exact_a_derivative_2500() {
         // The partner of a finite difference of `materialize_exact_hessian_dense`
         // is the RAW derivative map: that materializer builds `A = B_raw + ΔC`
         // through `apply_raw_cached_arrow_hessian`, which undoes the per-row
-        // conditioning (#2515). `penalty_curvature_operators_by_flat` is the
-        // CONDITIONED tangent `DΦ[∂B_raw/∂ρ]`, which the arrow selected-inverse
-        // channels contract and which this comparison must NOT use. The two
-        // coincide wherever nothing deflates, which is this fixture — asserted
-        // rather than assumed, so a future fixture that starts deflating cannot
-        // silently re-introduce the mismatch here instead of failing in GATE 6.
+        // conditioning (#2515). This arm is stated on the deflation-free stratum,
+        // asserted rather than assumed.
         let expected = raw_derivatives
             .get(&sparse)
             .expect("#2500: the sparse coordinate must own a raw curvature derivative");
-        let conditioned_pair = match delta {
-            Some(d) => block + d,
-            None => block.clone(),
-        };
-        let conditioning_gap = expected
-            .iter()
-            .zip(conditioned_pair.iter())
-            .fold(0.0_f64, |acc, (x, y)| acc.max((x - y).abs()));
         assert!(
-            deflated == 0 && conditioning_gap == 0.0,
+            deflated == 0,
             "#2500 (straddle={straddle}): this arm is stated on the deflation-free \
-             stratum, where the raw and conditioned tangents are bit-identical; got \
-             {deflated} deflated direction(s) and a conditioning gap of \
-             {conditioning_gap:.3e}"
+             stratum; got {deflated} deflated direction(s)"
         );
 
         let dense_a = |r: &SaeManifoldRho| -> (Array2<f64>, usize) {
@@ -505,36 +485,18 @@ fn deflating_ard_cache(
     cache
 }
 
-/// #2500 GATE 6 — the deflation map is coordinate-agnostic, so a ROW-LOCAL
-/// curvature coordinate that has nothing to do with the assignment prior — the
-/// periodic-ARD precision — must pass through it too.
+/// #2500 GATE 6 — a ROW-LOCAL curvature coordinate that has nothing to do with
+/// the assignment prior, the periodic-ARD precision, must differentiate the
+/// dense exact `A` on the deflating stratum too.
 ///
-/// The gate carries TWO arms because the operator map has two products and the
-/// tree names them separately (`raw_penalty_curvature_operators_by_flat` vs
-/// `penalty_curvature_operators_by_flat`), and #2515 made the difference
-/// observable: `materialize_exact_hessian_dense` builds `A = B_raw + ΔC` through
+/// `materialize_exact_hessian_dense` builds `A = B_raw + ΔC` through
 /// `apply_raw_cached_arrow_hessian`, which UNDOES the per-row conditioning on
-/// every spectrally deflated row. So on the deflating stratum:
-///
-/// * ARM 1 (the numerical claim) — the derivative of the operator the dense `A`
-///   actually is, `exact_stationarity_penalty_derivatives_by_flat` (the tree's
-///   own named owner of `∂(B_raw + ΔC)/∂ρ`, documented for exactly this
-///   comparison), must equal a central difference of `materialize_exact_hessian_dense`
-///   on the t-block. This gate previously compared the CONDITIONED tangent
-///   against that same finite difference; the two coincide only where nothing
-///   deflates, which is the whole reason the mismatch was invisible while the
-///   fixture sat off the stratum.
-/// * ARM 2 (the deflation map itself) — `penalty_curvature_operators_by_flat`
-///   must ANNIHILATE each deflated direction's ρ-response, because the installed
-///   curvature there is the ρ-independent unit stiffness. Stated algebraically
-///   against the raw map rather than by finite difference: the removal is exact
-///   arithmetic, and an FD of the conditioned block cannot resolve it (the
-///   quantity removed is `1.3e-12` against a `1.2e-7` operator scale, six
-///   decades under any usable step). The ARM-2 assertion is its own positive
-///   control: a deflation-blind map leaves `vᵀ(∂B/∂ρ)v` in place, which is the
-///   value the second assertion requires to be strictly resolved.
+/// every spectrally deflated row. So the derivative of the operator the dense `A`
+/// actually is, `exact_stationarity_penalty_derivatives_by_flat` (the tree's own
+/// named owner of `∂(B_raw + ΔC)/∂ρ`), must equal a central difference of
+/// `materialize_exact_hessian_dense` on the t-block of a deflating fixture.
 #[test]
-fn deflation_map_applies_to_every_row_local_curvature_coordinate_2500() {
+fn ard_curvature_derivative_matches_the_dense_exact_a_on_a_deflating_fixture_2500() {
     let (term, target, rho) = deflating_ard_fixture();
     let cache = deflating_ard_cache(&term, &target, &rho);
     let spectral_rows = (0..cache.n_rows())
@@ -552,21 +514,11 @@ fn deflation_map_applies_to_every_row_local_curvature_coordinate_2500() {
     let raw = term
         .exact_stationarity_penalty_derivatives_by_flat(&rho, &cache)
         .expect("#2500: the raw exact-A derivative map");
-    let conditioned = term
-        .penalty_curvature_operators_by_flat(&rho, &cache)
-        .expect("#2500: the conditioned operator map");
-    let deltas = term
-        .exact_stationarity_penalty_derivative_delta_by_flat(&rho, &cache)
-        .expect("delta map");
     let expected = raw
         .get(&coord)
         .expect("#2500: the ARD coordinate must own a curvature operator");
-    let conditioned_b = conditioned
-        .get(&coord)
-        .expect("#2500: the ARD coordinate must own a conditioned curvature operator");
     let total_t = cache.delta_t_len();
 
-    // ── ARM 1 ───────────────────────────────────────────────────────────────
     let base = rho.to_flat();
     let h = 1.0e-5;
     let base_deflated = deflated_direction_count(&term, &cache);
@@ -609,65 +561,13 @@ fn deflation_map_applies_to_every_row_local_curvature_coordinate_2500() {
         "#2500: the ARD curvature operator must equal dA/drho on the t-block of a \
          deflating fixture; worst normalized error {worst:.3} at {label}"
     );
-
-    // ── ARM 2 ───────────────────────────────────────────────────────────────
-    // `∂B/∂ρ_ard` is the raw derivative minus the exact-minus-majorizer delta:
-    // the delta is `∂ΔC/∂ρ`, which the conditioning map does not touch.
-    let raw_b = match deltas.get(&coord) {
-        Some(delta) => expected - delta,
-        None => expected.clone(),
-    };
-    let scale = raw_b.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
-    // The tree's own resolution floor (`sae_exact_a_identifiability_floor`), so
-    // "the map had something to remove" is denominated in the operator's scale
-    // rather than in a threshold invented here.
-    let resolution = f64::EPSILON.sqrt() * scale;
-    let mut removed_rows = 0usize;
-    for row in 0..cache.n_rows() {
-        let width = cache.row_dims[row];
-        let base_index = cache.row_offsets[row];
-        let raw_block = raw_b.slice(s![
-            base_index..base_index + width,
-            base_index..base_index + width
-        ]);
-        let cond_block = conditioned_b.slice(s![
-            base_index..base_index + width,
-            base_index..base_index + width
-        ]);
-        for direction in cache.deflated_row_directions[row].iter() {
-            let raw_response = direction.dot(&raw_block.dot(direction));
-            let conditioned_response = direction.dot(&cond_block.dot(direction));
-            assert!(
-                raw_response > resolution,
-                "#2500 row {row}: the deflated direction's RAW ρ_ard response \
-                 {raw_response:.6e} is not resolved against the operator scale \
-                 {scale:.6e} (floor {resolution:.6e}), so annihilating it is not a \
-                 measurement — this arm would pass on a deflation-blind map"
-            );
-            assert!(
-                conditioned_response.abs() <= 1.0e-6 * raw_response,
-                "#2500 row {row}: the conditioned ARD operator must carry NO \
-                 ρ-response along a unit-stiffness deflated direction; raw \
-                 {raw_response:.6e}, conditioned {conditioned_response:.6e}"
-            );
-            removed_rows += 1;
-        }
-    }
-    assert!(
-        removed_rows >= cache.n_rows(),
-        "#2500: every row of this anchor deflates exactly one direction, so the \
-         map must have been exercised on all {} of them; reached {removed_rows}",
-        cache.n_rows()
-    );
 }
-
 
 /// #2500 GATE 7 — the issue's actual ask, end to end: a ThresholdGate fit whose
 /// ρ carries a sparse log-strength coordinate must be EVALUABLE by the outer
-/// solver, not aborted at the outer-BFGS seed evaluation by
-/// "penalty_curvature_operators_by_flat: rho carries a sparse log-strength
-/// coordinate under an assignment prior whose ∂H/∂ρ_sparse operator this map does
-/// not model".
+/// solver, not aborted at the outer-BFGS seed evaluation by the refusal "rho
+/// carries a sparse log-strength coordinate under an assignment prior whose
+/// ∂H/∂ρ_sparse operator this map does not model".
 ///
 /// The gate is deliberately about REACHABILITY, not fit quality: it asserts the
 /// cascade never reports that refusal (nor its ch4/ch1 siblings), whatever else

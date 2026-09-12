@@ -5380,5 +5380,17 @@
     ],
     "reason": "#2469 (SPEC rule 23): MatrixFreeSpdOperator::EXACT_DENSE_SPECTRAL_MAX_BYTES (512 MiB) was a picked admission cap. When the six dim x dim f64 arrays of the exact dense spectral factor fit under it, the matrix-free operator delegated logdet, traces and solves to that factor; otherwise it routed through CG trace solves. Every other dense outer materialization in gam-solve is admitted against the capacity-derived budget gam_runtime::resource::ResourcePolicy::default_library().max_single_materialization_bytes: the outer-Hessian dense workspace in outer_derivatives/routing.rs (outer_hessian_dense_workspace_budget_bytes) and the operator densify decision in rho_optimizer/hessian_operator.rs. exact_dense_spectral_budget_ok now compares the same six-array total against that budget, so the exact-spectral route widens on a large-memory host and narrows on a small one, instead of switching at a fixed 512 MiB.",
     "evidence": "git grep -n -w EXACT_DENSE_SPECTRAL_MAX_BYTES over the base finds four lines, all in crates/gam-solve/src/reml/reml_outer_engine/sparse_cholesky_backends.rs production code: the associated-const declaration at :1180, the budget comparison at :1224, the log message at :1231 and a doc mention at :1632. No other file or test names it. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "d6d8ddf73d77daa28efec5d79cd53b49bd702681",
+    "items": [
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs:fn:apply_row_deflation_map_derivative",
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs:fn:penalty_curvature_operators_by_flat",
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs:fn:row_deflation_map_derivative",
+      "crates/gam-sae/src/manifold/construction_tests.rs:fn:deflation_type_and_htt_probe_2330",
+      "crates/gam-sae/src/manifold/tests_sparse_curvature_operator_2500.rs:fn:deflation_map_applies_to_every_row_local_curvature_coordinate_2500"
+    ],
+    "reason": "#2333 fix-forward. a39a27a17, fddfa46c8 and 3f04ee7e4 removed the last production callers of the conditioned curvature operator map penalty_curvature_operators_by_flat (the PATH C outer Hessian, the dense theta-adjoint channel option and the softmax Trace adjoint). Under warnings=deny the gam-sae lib build then failed on dead code: apply_row_deflation_map_derivative, penalty_curvature_operators_by_flat and row_deflation_map_derivative are never used. The map, its two helpers, the diagnostic probe that only printed the map, and the map arm of the #2500 GATE 6 test are deleted. GATE 6 keeps its finite-difference arm under a name that says what it checks.",
+    "evidence": "Shared tip compile check HEAD cc5641ab2 (/scratch.global/sauer354/sw-status/tip.latest): construction_exact_hessian.rs:879 methods apply_row_deflation_map_derivative and penalty_curvature_operators_by_flat are never used; construction_quasi_laplace.rs:5433 associated function row_deflation_map_derivative is never used. At the base, git grep -w penalty_curvature_operators_by_flat over crates finds its definition, doc mentions and three test callers (deflation_type_and_htt_probe_2330, threshold_gate_sparse_operator_is_the_installed_exact_a_derivative_2500, deflation_map_applies_to_every_row_local_curvature_coordinate_2500) and no production caller; apply_row_deflation_map_derivative is called only by penalty_curvature_operators_by_flat, and row_deflation_map_derivative only by apply_row_deflation_map_derivative."
   }
 ]

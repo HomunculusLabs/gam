@@ -5441,7 +5441,7 @@ impl SaeManifoldTerm {
     /// `f'(λ_a)`, which is `1` for an unclamped KEPT direction and `0` for a
     /// deflated one. Single source for the two consumers that need it: the trace
     /// form [`Self::deflation_block_correction`] (`tr(inv·(D − DΦ[D]))`) and the
-    /// operator form [`Self::row_deflation_map_derivative`] (`DΦ[D]` itself).
+    /// `E_tt` fold [`Self::deflation_folded_trace_weight`].
     /// `spec.evecs` is assumed `q×q` (checked by both callers).
     fn row_deflation_frechet_coefficients(spec: &RowDeflationSpectrum, q: usize) -> Array2<f64> {
         let raw = &spec.raw_evals;
@@ -5467,63 +5467,6 @@ impl SaeManifoldTerm {
             }
         }
         f
-    }
-
-    /// #2500 — the per-row spectral-deflation map's Daleckii–Krein differential
-    /// as an OPERATOR: `DΦ[D] = U (F ∘ (Uᵀ D U)) Uᵀ`, the ρ-derivative of the
-    /// CONDITIONED block `Φ(H_raw)` given the ρ-derivative `D` of the RAW block.
-    ///
-    /// This is the operator whose trace against a selected inverse
-    /// [`Self::deflation_block_correction`] already reports as
-    /// `tr(inv·(D − DΦ[D]))`; the channels that materialize `∂H/∂ρ` as a MATRIX
-    /// (`penalty_curvature_operators_by_flat`) need the operator itself, because the block they
-    /// contract against — the arrow factors, and hence `apply_cached_arrow_hessian`
-    /// and every `A = B + ΔC` built on it — carries the CONDITIONED spectrum. A
-    /// raw `D` there over-claims curvature on exactly the deflated directions,
-    /// where the installed operator is the ρ-INDEPENDENT unit stiffness.
-    ///
-    /// `spectrum = None` with non-empty `dirs` is gauge-only deflation: a
-    /// ρ-independent structural null, so the map is the two-sided projection
-    /// `DΦ[D] = P D P`, `P = I − Σᵢ vᵢvᵢᵀ`. That is the operator form of the same
-    /// `Σᵢ vᵢᵀD vᵢ` fallback the trace uses (`inv` is `P inv P` on a gauge-deflated
-    /// row, so the two agree under the trace).
-    pub(crate) fn row_deflation_map_derivative(
-        d_mat: &Array2<f64>,
-        dirs: &[Array1<f64>],
-        spectrum: Option<&RowDeflationSpectrum>,
-    ) -> Option<Array2<f64>> {
-        let q = d_mat.nrows();
-        let Some(spec) = spectrum else {
-            if dirs.is_empty() {
-                return None;
-            }
-            let mut p = Array2::<f64>::eye(q);
-            for v in dirs {
-                for a in 0..q {
-                    let va = if a < v.len() { v[a] } else { 0.0 };
-                    if va == 0.0 {
-                        continue;
-                    }
-                    for b in 0..q {
-                        let vb = if b < v.len() { v[b] } else { 0.0 };
-                        p[[a, b]] -= va * vb;
-                    }
-                }
-            }
-            return Some(p.dot(d_mat).dot(&p));
-        };
-        let u = &spec.evecs;
-        if u.nrows() != q || u.ncols() != q {
-            return None;
-        }
-        let f = Self::row_deflation_frechet_coefficients(spec, q);
-        let mut m = u.t().dot(d_mat).dot(u);
-        for a in 0..q {
-            for b in 0..q {
-                m[[a, b]] *= f[[a, b]];
-            }
-        }
-        Some(u.dot(&m).dot(&u.t()))
     }
 
     /// β-tier selected inverse `(H⁻¹)_ββ`, shared across rows (#932 FRONT C). On

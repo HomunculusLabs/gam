@@ -75,7 +75,7 @@ pub struct SaeOuterRhoGradientComponents {
     /// Direct (no-envelope) derivative of `loss.total() + extra_penalty_energy`
     /// with respect to log-strength coordinates, excluding the custom factor
     /// logdet and Occam terms, PLUS the realised-rank charge's direct
-    /// ρ-differential ([`Self::rank_charge_direct_rho`], folded in by
+    /// ρ-differential (`ProductionRankChargeDerivative::direct_rho`, folded in by
     /// `analytic_outer_rho_gradient_components_with_bundle`).
     ///
     /// #2087 — that last summand is why this is NOT the ρ-derivative of
@@ -84,16 +84,8 @@ pub struct SaeOuterRhoGradientComponents {
     /// charge lives in the quasi-Laplace COMPLEXITY and `SaeManifoldTerm::loss`
     /// cannot see it. An audit that finite-differences `loss.total()` and compares
     /// it to this field is comparing two different quantities and will report the
-    /// charge as a data-fit/prior desync; subtract
-    /// [`Self::rank_charge_direct_rho`] first. The previous wording here omitted
-    /// the charge and is what licensed exactly that audit.
+    /// charge as a data-fit/prior desync; subtract the charge's differential first.
     pub explicit: Array1<f64>,
-    /// The realised-rank charge's direct ρ-differential, ALREADY INCLUDED in
-    /// [`Self::explicit`] and therefore NOT a separate gradient channel — do not
-    /// add it to [`Self::gradient`]. It is carried separately only so an audit can
-    /// net it out and compare the loss-visible part of `explicit` against a
-    /// frozen-θ finite difference of `loss.total()`.
-    pub rank_charge_direct_rho: Array1<f64>,
     /// `0.5 * tr(B^{-1} dB/d rho_j)` for the currently available penalty blocks.
     pub logdet_trace: Array1<f64>,
     /// Derivative contribution of `-occam`.
