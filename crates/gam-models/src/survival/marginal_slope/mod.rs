@@ -29,7 +29,7 @@ pub(crate) use gam_problem::{
 
 pub(crate) use crate::model_types::UnifiedFitResult;
 
-pub(crate) use gam_linalg::faer_ndarray::{FaerCholesky, fast_atv, fast_av, fast_xt_diag_x};
+pub(crate) use gam_linalg::faer_ndarray::{fast_atv, fast_av, fast_xt_diag_x};
 
 pub(crate) use crate::bms::{
     CrossBlockIdentifiabilityWarning, DeviationBlockConfig, DeviationRuntime, LatentZNormalization,

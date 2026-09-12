@@ -54,8 +54,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 
-use crate::basis::{AnchorIndicatorEvaluator, SaeBasisEvaluator};
-use crate::manifold::{SaeAtomBasisKind, SaeManifoldAtom};
+use crate::manifold::SaeManifoldAtom;
 
 /// Tier-0: the single shared mean μ (length `p`). The global DC lives here, not
 /// duplicated across `K` per-atom intercepts.

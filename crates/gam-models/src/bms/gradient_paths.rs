@@ -505,8 +505,6 @@ pub(super) fn pilot_eta_for_link_dev_orthogonalisation(
     baseline_slope: f64,
     probit_scale: f64,
 ) -> Result<Array1<f64>, String> {
-    use gam_linalg::faer_ndarray::FaerCholesky;
-
     let n = y.len();
     if marginal_design.nrows() != n {
         return Err(format!(

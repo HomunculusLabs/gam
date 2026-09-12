@@ -508,7 +508,7 @@ mod tests_quality_amplitude_1939;
 #[cfg(test)]
 mod tests_quality_scale_quotient_2099;
 
-pub use arrow_solver::*;
+pub(crate) use arrow_solver::*;
 pub use atom::*;
 pub use basin_bundle::*;
 pub use behavior::*;
@@ -519,7 +519,7 @@ pub use chart_atlas::*;
 pub use chart_degeneracy::*;
 pub use construction_aux_types::*;
 pub use construction_cache_refresh::*;
-pub use construction_padded_blocks::*;
+pub(crate) use construction_padded_blocks::*;
 pub use construction_reconstruction::reconstruct_persisted_atom_set;
 // #16/#2023 — the shared rank-charge DOF core, exposed so the hybrid-split DEMOTE
 // gate prices linear/curved candidates in the SAME currency as the joint REML fit.
@@ -562,7 +562,7 @@ pub use crosscoder_drift::*;
 pub use crosscoder_fit::*;
 pub use curl::*;
 pub use curl_census::*;
-pub use derivative_oracle::*;
+pub(crate) use derivative_oracle::*;
 pub use embeddedness::*;
 pub use evaluator_rebuild::*;
 pub use fisher_metric::*;
@@ -580,7 +580,6 @@ pub use minimal_seed::*;
 pub use oos_entry::*;
 pub use outer_objective::*;
 pub use pair_kappa::*;
-pub use pair_phase::*;
 pub use pca_seed::*;
 pub use penalties::*;
 pub use persistence::*;

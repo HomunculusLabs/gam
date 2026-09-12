@@ -54,7 +54,7 @@ mod row_coeff_operator;
 pub(crate) use row_coeff_operator::*;
 
 mod wiggle;
-pub use wiggle::*;
+pub(crate) use wiggle::*;
 
 mod binomial_mean_wiggle;
 pub use binomial_mean_wiggle::*;

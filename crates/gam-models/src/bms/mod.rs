@@ -2823,7 +2823,7 @@ mod latent_measure_2768_tests;
 mod psi_axis_contractions_979_tests;
 pub(crate) mod row_primary_hessian;
 
-pub use block_specs::fit_bernoulli_marginal_slope_terms;
+pub(crate) use block_specs::fit_bernoulli_marginal_slope_terms;
 pub use conditional_score_covariance::{
     ConditionalScoreCoordinate, ConditionalScoreCovariance, ScoreCovarianceField,
 };
