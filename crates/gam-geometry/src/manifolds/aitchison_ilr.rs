@@ -471,8 +471,10 @@ pub fn sphere_exp_map_jet(
             r_sq += v * v;
         }
         let r = r_sq.sqrt();
-        if r < 1.0e-12 {
-            // z' ≈ 0: the geodesic step reduces to the tangent projection P.
+        if r == 0.0 {
+            // z' = 0: the geodesic step reduces to the tangent projection P. At
+            // any positive r the closed form below is accurate: f'(r) rounds by
+            // about 2u/r, but it multiplies a z' component of size r.
             for j in 0..d {
                 for i in 0..d {
                     let kron = if i == j { 1.0 } else { 0.0 };

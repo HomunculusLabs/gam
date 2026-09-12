@@ -457,7 +457,7 @@ pub fn response_sphere_log_map(
             s_sq += uc * uc;
         }
         let s = s_sq.sqrt();
-        if s < 1.0e-12 {
+        if s == 0.0 {
             for col in 0..d {
                 out[[row, col]] = 0.0;
             }
@@ -508,7 +508,7 @@ pub fn response_sphere_exp_map(
         }
         let r = r_sq.sqrt();
         let mut norm_sq = 0.0_f64;
-        if r < 1.0e-12 {
+        if r == 0.0 {
             for col in 0..d {
                 let v = b_mat[[0, col]] + z[col];
                 out[[row, col]] = v;
@@ -859,7 +859,7 @@ fn sphere_exp_single(
     }
     let r = norm(z.view());
     let mut out = Array1::<f64>::zeros(base.len());
-    if r < 1.0e-12 {
+    if r == 0.0 {
         for col in 0..base.len() {
             out[col] = base[col] + z[col];
         }
