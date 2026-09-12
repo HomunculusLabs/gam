@@ -30,8 +30,8 @@ impl SaeManifoldTerm {
     }
 
     /// The HONEST-units per-layer decoder `B_k^(ℓ)` of atom `k`, output block `ℓ`:
-    /// the decoder columns of block `ℓ` divided by `√λ_ℓ` (un-doing the target
-    /// scaling that `stack_augmented_target` applied), and — when a Tier-0
+    /// the decoder columns of block `ℓ` divided by `√λ_ℓ` (un-doing the `√λ_ℓ`
+    /// target scaling), and — when a Tier-0
     /// column-equilibration scale is installed (#2015; see
     /// [`Self::set_tier0_scale`])
     /// — un-doing that per-column scale too, so the returned decoder is honest in

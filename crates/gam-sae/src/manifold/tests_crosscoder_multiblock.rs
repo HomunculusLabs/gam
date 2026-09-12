@@ -6,7 +6,7 @@ use ndarray::{Array1, Array2};
 use std::sync::Arc;
 
 use crate::manifold::{
-    AssignmentMode, CrosscoderLayout, LatentManifold, OutputBlock, PeriodicHarmonicEvaluator,
+    AssignmentMode, CrosscoderLayout, LatentManifold, PeriodicHarmonicEvaluator,
     SaeAssignment, SaeAtomBasisKind, SaeBasisEvaluator, SaeManifoldAtom, SaeManifoldRho,
     SaeManifoldTerm,
 };
@@ -79,9 +79,8 @@ fn bit_identical(a: &Array2<f64>, b: &Array2<f64>) -> bool {
 }
 
 /// The [`CrosscoderLayout`] owns the stacked-column offset arithmetic and the
-/// per-block `√λ_ℓ` unscaling: its ranges and total width round-trip, its
-/// `√λ_ℓ` matches an [`OutputBlock`] to the bit, and `from_blocks` reconstructs
-/// the same layout as the explicit constructor.
+/// per-block `√λ_ℓ` unscaling: its ranges and total width round-trip, and its
+/// `√λ_ℓ` is `exp(½·log λ_ℓ)` from the log-strength helper to the bit.
 #[test]
 fn crosscoder_layout_round_trips_offsets_and_unscaling() {
     let p_x = 4usize;
@@ -100,24 +99,17 @@ fn crosscoder_layout_round_trips_offsets_and_unscaling() {
     assert_eq!(layout.block_range(1), 7..12);
     assert_eq!(layout.block_range(2), 12..14);
 
-    // √λ_ℓ and log λ_ℓ match OutputBlock bit-for-bit (so an unscaled decoder is
-    // identical whether carved via the layout or the block).
-    for (l, (&dim, &ll)) in dims.iter().zip(logs.iter()).enumerate() {
-        let block = OutputBlock::new("x", Array2::<f64>::zeros((2, dim)), ll).unwrap();
+    // √λ_ℓ and log λ_ℓ are the log-strength helper's values bit-for-bit, so an
+    // unscaled decoder carved via the layout divides by the canonical `√λ_ℓ`.
+    for (l, &ll) in logs.iter().enumerate() {
         assert_eq!(
             layout.sqrt_lambda(l).to_bits(),
-            block.sqrt_lambda().to_bits()
+            gam_problem::checked_exp_log_strength(0.5 * ll)
+                .unwrap()
+                .to_bits()
         );
         assert_eq!(layout.log_lambda(l).to_bits(), ll.to_bits());
     }
-
-    // from_blocks reconstructs the identical layout.
-    let blocks = vec![
-        OutputBlock::new("a", Array2::<f64>::zeros((2, 3)), 0.1).unwrap(),
-        OutputBlock::new("b", Array2::<f64>::zeros((2, 5)), -0.4).unwrap(),
-        OutputBlock::new("c", Array2::<f64>::zeros((2, 2)), 0.7).unwrap(),
-    ];
-    assert_eq!(CrosscoderLayout::from_blocks(p_x, &blocks), layout);
 
     // Validation: mismatched parallel-vector lengths and zero anchor are rejected.
     assert!(CrosscoderLayout::new(p_x, vec![3], vec![], vec![0.1]).is_err());

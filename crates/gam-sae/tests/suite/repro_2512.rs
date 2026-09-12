@@ -5,10 +5,10 @@
 
 use gam_sae::basis::{PeriodicHarmonicEvaluator, SaeBasisEvaluator};
 use gam_sae::manifold::{
-    AssignmentMode, BehaviorBlock, LatentManifold, OutputBlock, SaeAssignment, SaeAtomBasisKind,
-    SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm, stack_augmented_target,
+    AssignmentMode, BehaviorBlock, LatentManifold, SaeAssignment, SaeAtomBasisKind,
+    SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, Axis, concatenate};
 use std::sync::Arc;
 
 const ON: f64 = 6.0;
@@ -92,8 +92,8 @@ fn fresh_arrow_schur_joint_fits_are_bit_reproducible_above_61_rows_2512() {
     }
 
     let behavior = BehaviorBlock::fit(probabilities.view(), p_x, 0.0).unwrap();
-    let blocks = vec![OutputBlock::new("behavior", behavior.target, 0.0).unwrap()];
-    let target = stack_augmented_target(activations.view(), &blocks).unwrap();
+    // The augmented target `[Z | √λ_y·Y]` at log λ_y = 0, where √λ_y = exp(0) = 1.
+    let target = concatenate(Axis(1), &[activations.view(), behavior.target.view()]).unwrap();
     let output_dim = target.ncols();
     assert_eq!(output_dim, 8, "#2512 fixture requires p_x + p_y = 8");
 

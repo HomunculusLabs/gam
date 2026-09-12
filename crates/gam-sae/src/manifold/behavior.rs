@@ -534,114 +534,14 @@ impl BehaviorBlock {
     }
 }
 
-/// A generic output data block of a **multi**-block REML fit: a named
-/// (unscaled) target `Y_ℓ` (`n × p_ℓ`) decoded from the SAME shared latent
-/// coordinate as every other block, plus its own REML-selected relative block
-/// weight `λ_ℓ` (log scale).
-///
-/// # Why this exists — the block-generic core
-///
-/// [`BehaviorBlock`] is the two-block machinery specialized to a behavior
-/// target: the augmented fit `Z̃ = [Z | √λ_y·Y]`, the single shared dispersion
-/// `φ̂`, and the closed-form variance-ratio `λ_y = (R_x/p_x)/(R_y/p_y)`.
-/// **Nothing in that derivation cares that `Y` is
-/// behavior** — it uses only the block's *width* `p_ℓ` and its *residual
-/// variance*. Generalising to `Z̃ = [Z | √λ_1·Y_1 | … | √λ_{K-1}·Y_{K-1}]` and
-/// profiling the `K` dispersions gives, at the joint stationary point,
-///
-/// ```text
-///   λ_ℓ = (R_x / p_x) / (R_ℓ / p_ℓ)   for every block ℓ,
-/// ```
-///
-/// exactly the per-block variance ratio — **decoupled** across blocks even
-/// though the profiled criterion couples them through the shared `φ̂` (the
-/// coupling cancels: summing the `K-1` stationarity equations forces
-/// `φ̂ = R_x/p_x`, and each `λ_ℓ` then reads only its own residual against the
-/// anchor). So one shared latent + per-block decoders + a per-block closed-form
-/// `λ_ℓ` update is the whole generalization.
-///
-/// # Clients
-///
-/// * **Curved crosscoder** — each block is the NEXT layer's activations, so one
-///   shared latent coordinate is decoded into several layers at once and `λ_ℓ`
-///   REML-selects each layer's relevance.
-/// * **Development-coder** (follow-up) — each block is a later training
-///   checkpoint's activations along the *checkpoint* axis.
-///
-/// The target is kept **unscaled** (like [`BehaviorBlock::target`]) so `λ_ℓ` can
-/// move under REML without re-forming `Y_ℓ`, and so
-/// [`SaeManifoldTerm::layer_decoder`](crate::manifold::SaeManifoldTerm::layer_decoder)
-/// returns a fitted decoder in honest units (un-doing `√λ_ℓ`).
-#[derive(Clone, Debug)]
-pub struct OutputBlock {
-    /// A short label for the block (e.g. the layer name), for diagnostics only.
-    pub label: String,
-    /// Unscaled target `Y_ℓ` (`n × p_ℓ`).
-    pub target: Array2<f64>,
-    /// `log(λ_ℓ)`; the relative inferential weight of this block. Moved by the
-    /// closed-form REML variance-ratio update, never a knob.
-    log_lambda: f64,
-    lambda: f64,
-    sqrt_lambda: f64,
-}
-
-impl OutputBlock {
-    /// Build a block from a label, an (unscaled) target, and an initial
-    /// `log(λ_ℓ)`. The target must be non-empty and `log_lambda` finite.
-    pub fn new(
-        label: impl Into<String>,
-        target: Array2<f64>,
-        log_lambda: f64,
-    ) -> Result<Self, String> {
-        let (n, p) = target.dim();
-        if n == 0 || p == 0 {
-            return Err(format!(
-                "OutputBlock::new: target must be a non-empty (n × p_ℓ) matrix; got ({n}, {p})"
-            ));
-        }
-        let lambda = gam_problem::checked_exp_log_strength(log_lambda)
-            .map_err(|error| format!("OutputBlock::new: {error}"))?;
-        let sqrt_lambda = gam_problem::checked_exp_log_strength(0.5 * log_lambda)
-            .map_err(|error| format!("OutputBlock::new square-root strength: {error}"))?;
-        Ok(Self {
-            label: label.into(),
-            target,
-            log_lambda,
-            lambda,
-            sqrt_lambda,
-        })
-    }
-
-    /// Block width `p_ℓ` (the number of output columns this block occupies).
-    pub fn block_dim(&self) -> usize {
-        self.target.ncols()
-    }
-
-    /// The block weight `λ_ℓ = exp(log_lambda)`.
-    pub fn lambda(&self) -> f64 {
-        self.lambda
-    }
-
-    /// `√λ_ℓ`, the per-column scaling applied to the target so a single shared
-    /// dispersion realizes the block's variance ratio.
-    pub fn sqrt_lambda(&self) -> f64 {
-        self.sqrt_lambda
-    }
-
-    pub fn log_lambda(&self) -> f64 {
-        self.log_lambda
-    }
-}
-
 /// Stacked-column offset bookkeeping for a crosscoder target
 /// `Z̃ = [Z | √λ_1·Y_1 | … | √λ_{L-1}·Y_{L-1}]` and the block-columned decoders
 /// carved out of it.
 ///
 /// # Why this exists — one owner of the offset arithmetic
 ///
-/// Every consumer of the augmented layout — stacking the target
-/// ([`stack_augmented_target`]), reading a block's residual sum of squares, and
-/// carving the honest per-layer decoder
+/// Every consumer of the augmented layout — reading a block's residual sum of
+/// squares and carving the honest per-layer decoder
 /// (`B_k^(ℓ) = C̃_k[:, off_ℓ..off_ℓ+p_ℓ] / √λ_ℓ`,
 /// `SaeManifoldTerm::layer_decoder`) — recomputed `off_ℓ = p_x + Σ_{m<ℓ} p_m`
 /// by hand. This type owns that arithmetic once ([`Self::block_range`],
@@ -723,19 +623,6 @@ impl CrosscoderLayout {
         })
     }
 
-    /// Build a layout from the anchor width and the fitted [`OutputBlock`]s (their
-    /// widths, labels, and converged `log λ_ℓ`). Infallible: an `OutputBlock` is
-    /// already validated to carry a non-zero width and a finite `log λ_ℓ`.
-    pub fn from_blocks(p_x: usize, blocks: &[OutputBlock]) -> Self {
-        Self {
-            p_x,
-            block_dims: blocks.iter().map(|b| b.block_dim()).collect(),
-            labels: blocks.iter().map(|b| b.label.clone()).collect(),
-            block_log_lambda: blocks.iter().map(OutputBlock::log_lambda).collect(),
-            block_sqrt_lambda: blocks.iter().map(OutputBlock::sqrt_lambda).collect(),
-        }
-    }
-
     /// Anchor width `p_x` (the leading `[0, p_x)` column block).
     pub fn anchor_dim(&self) -> usize {
         self.p_x
@@ -787,58 +674,11 @@ impl CrosscoderLayout {
         self.block_log_lambda[l]
     }
 
-    /// `√λ_ℓ = exp(½·log λ_ℓ)`, the per-column target scaling. Computed exactly as
-    /// [`OutputBlock::sqrt_lambda`], so a layout built from the fitted blocks
-    /// unscales a decoder bit-for-bit like a by-hand division by the block's `√λ_ℓ`.
+    /// `√λ_ℓ = exp(½·log λ_ℓ)`, the per-column target scaling, computed once from
+    /// the validated `log λ_ℓ` so every consumer unscales by the same value.
     pub fn sqrt_lambda(&self, l: usize) -> f64 {
         self.block_sqrt_lambda[l]
     }
-}
-
-/// Stack an anchor target `Z` (`n × p_x`) with the `√λ_ℓ`-scaled targets of a
-/// list of output blocks to form the augmented multi-block fit target
-/// `Z̃ = [Z | √λ_1·Y_1 | … | √λ_{K-1}·Y_{K-1}]` (`n × p̃`,
-/// `p̃ = p_x + Σ_ℓ p_ℓ`).
-///
-/// The `√λ_ℓ` per
-/// column is what lets the single shared reconstruction dispersion `φ̂` play the
-/// anchor's noise while block `ℓ` carries noise `φ̂/λ_ℓ`.
-pub fn stack_augmented_target(
-    anchor: ArrayView2<'_, f64>,
-    blocks: &[OutputBlock],
-) -> Result<Array2<f64>, String> {
-    let (n, px) = anchor.dim();
-    if n == 0 || px == 0 {
-        return Err(format!(
-            "stack_augmented_target: anchor must be a non-empty (n × p_x) matrix; got ({n}, {px})"
-        ));
-    }
-    for block in blocks {
-        if block.target.nrows() != n {
-            return Err(format!(
-                "stack_augmented_target: block '{}' has {} rows but anchor has {n}",
-                block.label,
-                block.target.nrows()
-            ));
-        }
-    }
-    // The column offsets and total width are owned by the layout (no by-hand
-    // `off_ℓ` accumulation here). `√λ_ℓ` per block matches the two-block path
-    // ([`OutputBlock::sqrt_lambda`]) bit-for-bit.
-    let layout = CrosscoderLayout::from_blocks(px, blocks);
-    let mut augmented = Array2::<f64>::zeros((n, layout.total_dim()));
-    for i in 0..n {
-        for j in 0..px {
-            augmented[[i, j]] = anchor[[i, j]];
-        }
-        for (l, block) in blocks.iter().enumerate() {
-            let sqrt_lambda = layout.sqrt_lambda(l);
-            for (jj, col) in layout.block_range(l).enumerate() {
-                augmented[[i, col]] = sqrt_lambda * block.target[[i, jj]];
-            }
-        }
-    }
-    Ok(augmented)
 }
 
 #[cfg(test)]

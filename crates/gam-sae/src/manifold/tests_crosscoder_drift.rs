@@ -37,8 +37,8 @@ fn layer_block(m: usize, alpha: f64) -> Array2<f64> {
 
 /// Assemble a `p_tot = P·(1 + n_blocks)` augmented decoder from per-layer rotation
 /// angles `[anchor, block0, …]`, optionally scaling block `ℓ`'s columns by
-/// `√λ_ℓ = exp(½·log λ_ℓ)` (what `stack_augmented_target` bakes into the stored
-/// decoder — the honest drift must be invariant to it).
+/// `√λ_ℓ = exp(½·log λ_ℓ)` (the scaling the stored decoder carries — the honest
+/// drift must be invariant to it).
 fn augmented_decoder(m: usize, angles: &[f64], block_log_lambda: &[f64]) -> Array2<f64> {
     let l = angles.len();
     let mut d = Array2::<f64>::zeros((m, P * l));

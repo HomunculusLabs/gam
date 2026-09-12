@@ -2114,5 +2114,19 @@
     },
     "reason": "prune-api-b product-use sweep (#2899). LatentCoordValues::from_matrix is removed; it only forwarded to from_matrix_with_manifold with the Euclidean manifold, and its test callers now call that constructor directly.",
     "evidence": "scripts/public_api_census.py over probe commit 9dd061262 on base 0bf5b572b (MSI acn112, python3.12; sliceF.census.out) reports exactly crates/gam-terms/src/latent.rs::from_matrix 1. The prune-api-b census at 1d34d71bb finds no production reference."
+  },
+  {
+    "base": "1161aed56cb190b6edd29380fc3680fd4559aa69",
+    "removed": {
+      "crates/gam-sae/src/manifold/behavior.rs::block_dim": 1,
+      "crates/gam-sae/src/manifold/behavior.rs::from_blocks": 1,
+      "crates/gam-sae/src/manifold/behavior.rs::lambda": 1,
+      "crates/gam-sae/src/manifold/behavior.rs::log_lambda": 1,
+      "crates/gam-sae/src/manifold/behavior.rs::new": 1,
+      "crates/gam-sae/src/manifold/behavior.rs::sqrt_lambda": 1,
+      "crates/gam-sae/src/manifold/behavior.rs::stack_augmented_target": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): manifold::stack_augmented_target has no production caller (production stacks with stack_crosscoder_targets and builds layouts with CrosscoderLayout::new). It was the only production consumer of CrosscoderLayout::from_blocks, which was the only production consumer of the OutputBlock carrier, so their public functions are deleted with them.",
+    "evidence": "At cc62aa545, git grep -n -w finds stack_augmented_target called only from tests, CrosscoderLayout::from_blocks called only by stack_augmented_target and one layout unit test, and OutputBlock's constructor and accessors used only by from_blocks and tests. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]

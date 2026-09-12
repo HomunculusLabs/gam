@@ -28,10 +28,9 @@ use ndarray::{Array1, Array2};
 use std::sync::Arc;
 
 use crate::manifold::{
-    AssignmentMode, BehaviorBlock, LatentManifold, OutputBlock, PeriodicHarmonicEvaluator,
-    SaeAssignment, SaeAtomBasisKind, SaeBasisEvaluator, SaeManifoldAtom, SaeManifoldRho,
-    SaeManifoldTerm, atom_behavior_isometry, reconstruction_explained_variance,
-    stack_augmented_target,
+    AssignmentMode, BehaviorBlock, LatentManifold, PeriodicHarmonicEvaluator, SaeAssignment,
+    SaeAtomBasisKind, SaeBasisEvaluator, SaeManifoldAtom, SaeManifoldRho, SaeManifoldTerm,
+    atom_behavior_isometry, reconstruction_explained_variance,
 };
 
 /// A probability law whose square-root half-density traces an exact circle.
@@ -143,11 +142,11 @@ fn fitted_defect(uneven: bool) -> (f64, f64, f64) {
 
     let block = BehaviorBlock::fit(probs.view(), p_x, 0.0).unwrap();
     let p_tot = p_x + block.behavior_dim();
-    let augmented = stack_augmented_target(
-        z.view(),
-        &[OutputBlock::new("behavior", block.target.clone(), block.log_lambda_y()).unwrap()],
-    )
-    .unwrap();
+    // The augmented target `[Z | √λ_y·Y]`, scaled by the block's own `√λ_y`.
+    let sqrt_lambda_y = block.sqrt_lambda_y();
+    let scaled_behavior = block.target.mapv(|value| sqrt_lambda_y * value);
+    let augmented =
+        ndarray::concatenate(ndarray::Axis(1), &[z.view(), scaled_behavior.view()]).unwrap();
 
     let (atom, cb) = augmented_circle_atom(&evaluator, &coords, p_tot);
     let (mut term, mut rho) = build_k1(atom, cb);
