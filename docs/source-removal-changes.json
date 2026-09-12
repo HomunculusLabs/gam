@@ -4941,5 +4941,33 @@
     ],
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): a public item stays only when a product root uses it (gam-cli, gam-pyffi, gamfit, examples/, or another crate's production code). SaeAssignment::from_blocks_with_mode had no production caller in any crate; its callers were unit tests, root integration tests and one benchmark fixture. It is exactly from_blocks_with_mode_and_manifolds with every block on the Euclidean manifold, so every caller now calls the production constructor with vec![LatentManifold::Euclidean; n_blocks] and the wrapper is deleted.",
     "evidence": "At 8376b160b, git grep -n -w from_blocks_with_mode over crates, src, tests, examples, bench and gamfit finds the declaration in crates/gam-sae/src/assignment.rs and calls only in test code (assignment.rs tests, manifold/tests.rs, tests_factored_htbeta.rs, tests_outer_quasi_laplace_probe_budget_2080.rs, tests_recovery_split_780.rs, tests/identifiability/misc/structured_residual_974.rs, tests/regressions/sae/latent_sae_gated.rs, tests/sae/sae/sae_arrow_schur_large_scale.rs, sae_audit_is_invoked.rs, sae_streaming_arrow_schur_contract.rs) plus bench/cargo_benches/sae_arrow_schur_bench.rs and a comment in crates/gam-sae/tests/suite/sparse_lane_no_dense_assignment.rs. The wrapper mapped each block through LatentCoordValues::from_matrix(c, LatentIdMode::None), which is from_matrix_with_manifold(c, LatentIdMode::None, LatentManifold::Euclidean) in gam-terms latent.rs, so each rewritten call builds the identical assignment; the manifold vector's length equals the block count by construction. The prune-api-d census v2 at 8376b160b reports from_blocks_with_mode with zero production consumers. Not compiled locally (user directive); compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "8ab4dffae97b5ad39efe7b998c3f966161ee12da",
+    "items": [
+      "crates/gam-sae/src/gpu_kernels/sae_rowjet.rs:fn:contracted_trace_logit_adjoint_matches_softmax_finite_difference_2304",
+      "crates/gam-sae/src/gpu_kernels/sae_rowjet.rs:fn:contracted_trace_matches_manual_selected_inverse_reduction_2304",
+      "crates/gam-sae/src/gpu_kernels/sae_rowjet.rs:fn:device_trace_tile",
+      "crates/gam-sae/src/gpu_kernels/sae_rowjet.rs:fn:primary_kind_atom",
+      "crates/gam-sae/src/gpu_kernels/sae_rowjet.rs:fn:softmax_data_weight_product_logit_factor",
+      "crates/gam-sae/src/manifold/construction_row_jet_logdet_channels.rs:fn:fold_live_rows",
+      "crates/gam-sae/src/manifold/construction_row_jet_logdet_channels.rs:fn:max_abs_gap",
+      "crates/gam-sae/src/manifold/construction_row_jet_logdet_channels.rs:fn:scale_of",
+      "crates/gam-sae/src/manifold/construction_row_jet_logdet_channels.rs:fn:softmax_trace_adjoint_matches_dense_reference_2333",
+      "crates/gam-sae/src/manifold/construction_tests.rs:fn:third_order_conservation_bisection_2253",
+      "crates/gam-sae/src/manifold/construction_tests.rs:fn:third_order_cross_symmetry_split_2330",
+      "crates/gam-sae/src/manifold/tests_exact_a_probes_2828.rs:fn:resident_softmax_theta_adjoint_matches_dense_under_both_operators_2828",
+      "crates/gam-sae/src/manifold/tests_trace_whitening_2333.rs:fn:assert_adjoint_parity",
+      "crates/gam-sae/src/manifold/tests_trace_whitening_2333.rs:fn:deflation_folded_trace_weight_covers_gauge_only_and_undeflated_branches_2333",
+      "crates/gam-sae/src/manifold/tests_trace_whitening_2333.rs:fn:deflation_folded_trace_weight_handles_a_degenerate_pair_split_by_conditioning_2333",
+      "crates/gam-sae/src/manifold/tests_trace_whitening_2333.rs:fn:deflation_folded_trace_weight_prices_a_spectrum_with_no_deflated_direction_2333",
+      "crates/gam-sae/src/manifold/tests_trace_whitening_2333.rs:fn:deflation_folded_trace_weight_reproduces_contract_then_subtract_2333",
+      "crates/gam-sae/src/manifold/tests_trace_whitening_2333.rs:fn:inverse_fixture",
+      "crates/gam-sae/src/manifold/tests_trace_whitening_2333.rs:fn:softmax_trace_whitening_prefold_matches_dense_adjoint_2333",
+      "crates/gam-sae/src/manifold/tests_trace_whitening_2333.rs:fn:spectrum",
+      "crates/gam-sae/src/manifold/tests_trace_whitening_2333.rs:fn:verify_fold"
+    ],
+    "reason": "#2333. After a39a27a17 deleted the discarded PATH C outer Hessian, logdet_theta_adjoint had a single production caller: the dense ThresholdGate outer gradient, with the Majorizer operator, no residual target, the independent-logistic row program and a host tile. The matrix-free lane always carries a probe bundle (logdet_theta_adjoint_from_probes), and the dense exact-A route owns every other family (logdet_theta_adjoint_dense). So the softmax majorizer arm, the ordered Beta-Bernoulli column pass and the exact-A/Patch-D arm of contracted_trace_adjoint, the softmax data-weight substitution in the seam CPU arm (primary_kind_atom, softmax_data_weight_product_logit_factor), and the CUDA Trace kernels with device_trace_tile were reached only by tests. They are deleted, with the tests that only drove them: the softmax parity module, tests_trace_whitening_2333.rs (duplicate fold-identity tests plus a softmax parity test), the resident softmax 2828 test, the PATH C third-order diagnostics, and the two softmax Trace seam tests. The threshold-gate arithmetic is unchanged term for term.",
+    "evidence": "At the base, git grep -w device_trace_tile finds only its declaration and its call from the Trace arm of device_contracted_tile. That arm is reached only through execute_softmax_row_jet_tile_contracted from contracted_trace_adjoint, which plans a device tile only for the softmax program. No linux-gated dispatch table names the Trace contraction. primary_kind_atom and the seam copy of softmax_data_weight_product_logit_factor occur only in the CPU Trace arm and the two deleted seam tests. git grep '.logdet_theta_adjoint(' finds one production call, in analytic_outer_rho_gradient_components_with_bundle on the dense route where dense_exact_a_theta_adjoint_is_modelled is false only for ThresholdGate. The softmax-fixture callers were the deleted tests and the 2080 from-probes test, which now takes its reference from logdet_theta_adjoint_dense. perf2731 and sae2283 were asked at 14:20 whether either is wiring a production caller onto these arms; neither named one. Not compiled locally (user directive); compile rests on the shared tip check."
   }
 ]

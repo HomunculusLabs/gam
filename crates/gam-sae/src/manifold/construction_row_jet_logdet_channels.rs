@@ -118,10 +118,6 @@ impl crate::row_jet_program::SaeOrder2RowProgramSource for ProductionRowProgram<
 }
 
 #[cfg(test)]
-#[path = "tests_trace_whitening_2333.rs"]
-mod tests_trace_whitening_2333;
-
-#[cfg(test)]
 mod tests_reconstruction_program_builder {
     use super::*;
 
@@ -882,29 +878,23 @@ impl SaeManifoldTerm {
         Ok(())
     }
 
-    /// Resident `Γ = tr(H⁻¹ ∂H/∂θ)` reduction over the joint selected inverse,
-    /// for every gate family (#2333).
+    /// Resident `Γ = tr(H⁻¹ ∂H/∂θ)` majorizer θ-adjoint of a threshold-gate fit
+    /// over the joint selected inverse (#2333).
     ///
     /// `H` is the operator the criterion factor builds (Gauss–Newton data
     /// curvature plus the prior majorizers), so every channel is differentiated
-    /// on the criterion's own branch. This is the sole θ-adjoint consumer of the
-    /// Trace seam: it builds the joint selected-inverse blocks, folds each row's
-    /// deflation map into `E_tt`, projects every semantic output base into the
-    /// row metric chart, and sends the complete data-curvature tower of the
-    /// family's own row program (softmax, or independent logistic) through the
-    /// typed Trace seam. The softmax majorizer, assignment-prior, ARD and
-    /// residual third-jet channels, and the ordered Beta–Bernoulli empirical-mass
-    /// column pass, are host post-folds because they are not row-jet channels;
-    /// all use the same `E_tt` so the conditioned operator is differentiated
-    /// exactly once.
+    /// on the branch the criterion prices. This is the sole θ-adjoint consumer of
+    /// the Trace seam: it builds the joint selected-inverse blocks, folds the
+    /// deflation map of each row into `E_tt`, projects every semantic output base
+    /// into the row metric chart, and sends the independent-logistic
+    /// data-curvature tower through the typed Trace seam on the host. The
+    /// assignment-prior and ARD channels are host post-folds against the same
+    /// `E_tt`, so the conditioned operator is differentiated exactly once.
     pub(crate) fn contracted_trace_adjoint(
         &self,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
         solver: &DeflatedArrowSolver<'_>,
-        // #2515 — which operator's `∂H/∂θ` this differentiates.
-        operator: EvidenceOperator,
-        residual_target: Option<ArrayView2<'_, f64>>,
     ) -> Result<SaeArrowVector, String> {
         use crate::gpu_kernels::sae_rowjet::SaeRowGateProgram;
         self.assignment.validate_rho_domain(rho)?;
@@ -915,56 +905,22 @@ impl SaeManifoldTerm {
                     .to_string(),
             );
         }
-        let (program, inv_tau, softmax_entropy_scale) = match self.assignment.mode {
-            AssignmentMode::Softmax {
-                temperature,
-                sparsity,
-            } => {
-                let inv_tau = temperature.recip();
-                let entropy_scale = if self.k_atoms() > 1 {
-                    rho.lambda_sparse()? * sparsity * inv_tau * inv_tau
-                } else {
-                    0.0
-                };
-                (SaeRowGateProgram::Softmax, inv_tau, Some(entropy_scale))
+        // Only a threshold-gate fit reaches this majorizer θ-adjoint: the dense
+        // exact-A route owns every other family (`logdet_theta_adjoint_dense`),
+        // and the matrix-free lane owns the from-probes one.
+        let (inv_tau, threshold_strength) = match self.assignment.mode {
+            AssignmentMode::ThresholdGate { temperature, .. } => {
+                (temperature.recip(), rho.lambda_sparse()?)
             }
-            AssignmentMode::OrderedBetaBernoulli { temperature, .. }
-            | AssignmentMode::ThresholdGate { temperature, .. } => (
-                SaeRowGateProgram::IndependentLogistic,
-                temperature.recip(),
-                None,
-            ),
-            // A top-k row has no logit primary, so its inverse temperature is
-            // unobservable; `row_jets_for_logdet` uses the same unit value.
-            AssignmentMode::TopK { .. } => (SaeRowGateProgram::IndependentLogistic, 1.0, None),
-        };
-        // The CUDA kernels lower only the softmax program; an independent gate
-        // reduces on the host.
-        let gpu_policy = match program {
-            SaeRowGateProgram::Softmax => self.gpu_policy,
-            SaeRowGateProgram::IndependentLogistic => gam_gpu::GpuPolicy::Off,
-        };
-        let threshold_strength = match self.assignment.mode {
-            AssignmentMode::ThresholdGate { .. } => rho.lambda_sparse()?,
-            _ => 0.0,
-        };
-        // The integrated ordered Beta–Bernoulli majorizer depends on the shared
-        // active mass `M_k = Σ_i z_ik`, so its logit derivative has a row-local
-        // channel and a shared-mass channel accumulated column-wise after the
-        // tile walk.
-        let ordered_beta_bernoulli_channels =
-            ordered_beta_bernoulli_psd_majorizer_third_channels_weighted(
-                &self.assignment,
-                rho,
-                self.row_loss_weights.as_deref(),
-            )?;
-        let (patchd_is_obb, patchd_obb_inv_tau) = match self.assignment.mode {
-            AssignmentMode::OrderedBetaBernoulli { temperature, .. } => {
-                (true, temperature.recip())
+            other => {
+                return Err(format!(
+                    "logdet_theta_adjoint: the majorizer theta-adjoint is modelled only for the \
+                     threshold gate; a {} fit takes logdet_theta_adjoint_dense on the dense \
+                     exact-A route or logdet_theta_adjoint_from_probes on the matrix-free lane",
+                    other.family_label()
+                ));
             }
-            _ => (false, 0.0),
         };
-        let exact_a = operator.is_exact_a();
         let n = self.n_obs();
         let p = self.output_dim();
         let k_atoms = self.k_atoms();
@@ -1010,15 +966,6 @@ impl SaeManifoldTerm {
             None
         };
         let projected_p = metric.map_or(p, |metric| metric.metric_rank());
-        let patchd_residual = exact_a.then_some(residual_target).flatten();
-        let patchd_third_jets = if patchd_residual.is_some() {
-            Some(self.atom_third_jets()?)
-        } else {
-            None
-        };
-        // Per ordered Beta–Bernoulli logit site: row, atom, global t-index, and
-        // the folded diagonal weight `E_tt[a,a] = inv_vv[a,a] − correction(e_a e_aᵀ)`.
-        let mut ordered_beta_bernoulli_logit_sites: Vec<(usize, usize, usize, f64)> = Vec::new();
         let host_budget = crate::manifold::sae_host_in_core_budget_bytes().0;
         let mut assignments_scratch = Array1::<f64>::zeros(k_atoms);
         let mut start = 0usize;
@@ -1034,7 +981,6 @@ impl SaeManifoldTerm {
                 q,
                 projected_p,
                 n_beta,
-                gpu_policy,
                 host_budget,
             )?;
             if plan.tile_rows == 0 {
@@ -1072,7 +1018,7 @@ impl SaeManifoldTerm {
                 let mut input =
                     crate::gpu_kernels::sae_rowjet::SaeSoftmaxRowJetInput::from_source(
                         &source,
-                        program,
+                        SaeRowGateProgram::IndependentLogistic,
                         sqrt_row_weight,
                         if metric.is_some() {
                             None
@@ -1116,18 +1062,6 @@ impl SaeManifoldTerm {
                     defl_dirs,
                     defl_spectrum,
                 );
-                if ordered_beta_bernoulli_channels.is_some() {
-                    for (pos, var) in vars.iter().enumerate() {
-                        if let SaeLocalRowVar::Logit { atom } = *var {
-                            ordered_beta_bernoulli_logit_sites.push((
-                                row,
-                                atom,
-                                base + pos,
-                                e_row[[pos, pos]],
-                            ));
-                        }
-                    }
-                }
                 e_tt.extend(e_row.iter().copied());
                 for a in 0..q {
                     for channel in &border {
@@ -1145,7 +1079,6 @@ impl SaeManifoldTerm {
                     e_tt: &e_tt,
                     inv_vbeta: &inv_vbeta,
                     beta_inv: &beta_inv_border,
-                    exact_a,
                 },
             )?;
             if (trace.n_rows, trace.q, trace.n_beta) != (tile_rows, q, n_beta) {
@@ -1158,51 +1091,9 @@ impl SaeManifoldTerm {
                 let row = start + local;
                 let base = cache.row_offsets[row];
                 let vars = &layouts[local];
-                let assignments = Array1::from_vec(inputs[local].gate_values.clone());
-                let a_row = assignments
-                    .as_slice()
-                    .expect("row assignments are contiguous");
                 let e_row = &e_tt[local * q * q..(local + 1) * q * q];
-                let vbeta_row =
-                    &inv_vbeta[local * q * n_beta..(local + 1) * q * n_beta];
-                let softmax_majorizer = softmax_entropy_scale
-                    .map(|entropy_scale| (softmax_majorizer_log_mean(a_row), entropy_scale));
-                let w_row = self.row_loss_weights.as_deref().map_or(1.0, |w| w[row]);
-                let patchd_error_metric = patchd_residual.map(|target| {
-                    self.patchd_row_error_metric(row, w_row, target, &assignments, whiten)
-                });
-                let patchd_ctx = patchd_error_metric.as_deref().map(|error_metric| {
-                    PatchDResidualCtx {
-                        row,
-                        error_metric,
-                        sqrt_w: w_row.sqrt(),
-                        assignments: &assignments,
-                        second_jets: &second_jets,
-                        third_jets: patchd_third_jets.as_deref(),
-                        is_obb: patchd_is_obb,
-                        inv_tau: patchd_obb_inv_tau,
-                    }
-                });
                 for w in 0..q {
                     let mut gamma = trace.t[local * q + w];
-                    if let (Some((m, entropy_scale)), SaeLocalRowVar::Logit { atom: atom_w }) =
-                        (softmax_majorizer, vars[w])
-                    {
-                        for a in 0..q {
-                            if let SaeLocalRowVar::Logit { atom: atom_a } = vars[a] {
-                                gamma += e_row[a * q + a]
-                                    * w_row
-                                    * active_softmax_majorizer_logit_derivative_entry(
-                                        a_row,
-                                        atom_a,
-                                        atom_w,
-                                        m,
-                                        entropy_scale,
-                                        inv_tau,
-                                    );
-                            }
-                        }
-                    }
                     for a in 0..q {
                         if let SaeLocalRowVar::Logit { atom } = vars[a] {
                             gamma += e_row[a * q + a]
@@ -1211,83 +1102,29 @@ impl SaeManifoldTerm {
                                     row,
                                     atom,
                                     vars[w],
-                                    ordered_beta_bernoulli_channels.as_ref(),
-                                    exact_a,
+                                    None,
+                                    false,
                                 );
                         }
                     }
                     if let SaeLocalRowVar::Coord { atom, axis } = vars[w] {
                         if !ard_precisions[atom].is_empty() {
-                            let derivative = if exact_a {
-                                self.ard_exact_hessian_derivative(
-                                    ard_precisions[atom][axis],
-                                    row,
-                                    atom,
-                                    axis,
-                                )
-                            } else {
-                                self.ard_majorized_hessian_derivative(
-                                    ard_precisions[atom][axis],
-                                    row,
-                                    atom,
-                                    axis,
-                                )
-                            };
+                            let derivative = self.ard_majorized_hessian_derivative(
+                                ard_precisions[atom][axis],
+                                row,
+                                atom,
+                                axis,
+                            );
                             gamma += e_row[w * q + w] * derivative;
-                        }
-                    }
-                    if let Some(ctx) = patchd_ctx.as_ref() {
-                        for a in 0..q {
-                            for b in 0..q {
-                                gamma += e_row[a * q + b]
-                                    * self.patchd_residual_third_leg(
-                                        ctx, vars[a], vars[b], vars[w],
-                                    );
-                            }
-                            for (border_pos, channel) in border.iter().enumerate() {
-                                gamma += 2.0
-                                    * vbeta_row[a * n_beta + border_pos]
-                                    * self.patchd_residual_third_leg_beta(
-                                        ctx,
-                                        vars[a],
-                                        vars[w],
-                                        channel,
-                                    );
-                            }
                         }
                     }
                     gamma_t[base + w] = gamma;
                 }
                 for (border_pos, channel) in border.iter().enumerate() {
                     gamma_beta[channel.index] += trace.beta[local * n_beta + border_pos];
-                    if let Some(ctx) = patchd_ctx.as_ref() {
-                        for a in 0..q {
-                            for b in 0..q {
-                                gamma_beta[channel.index] += e_row[a * q + b]
-                                    * self.patchd_residual_third_leg_beta(ctx, vars[a], vars[b], channel);
-                            }
-                        }
-                    }
                 }
             }
             start += tile_rows;
-        }
-        if exact_a {
-            gamma_beta += &self.exact_decoder_prior_theta_trace(cache, beta_inv.view())?;
-        }
-        // Empirical-mass channel of the row-local ordered Beta–Bernoulli
-        // majorizer: its diagonal depends on `M_k = Σ_i z_ik`, so a logit in any
-        // row differentiates every retained row-local diagonal in column `k`,
-        // each weighted by its folded diagonal `E_tt[a,a]`.
-        if let Some(channels) = ordered_beta_bernoulli_channels.as_ref() {
-            let mut column_coefficient = vec![0.0_f64; k_atoms];
-            for &(row, atom, _t_index, diagonal_weight) in &ordered_beta_bernoulli_logit_sites {
-                column_coefficient[atom] +=
-                    diagonal_weight * channels.m_channel[row * k_atoms + atom];
-            }
-            for &(row, atom, t_index, _diagonal_weight) in &ordered_beta_bernoulli_logit_sites {
-                gamma_t[t_index] += column_coefficient[atom] * channels.z_jac[row * k_atoms + atom];
-            }
         }
         Ok(SaeArrowVector {
             t: gamma_t,
@@ -1296,7 +1133,7 @@ impl SaeManifoldTerm {
     }
 }
 
-/// #2333 — the algebraic identity the softmax Trace cutover rests on.
+/// #2333 — the algebraic identity the Trace θ-adjoint rests on.
 ///
 /// `SaeManifoldTerm::contracted_trace_adjoint` no longer computes the
 /// retired hand loop's `contract-then-subtract` shape
@@ -1603,232 +1440,6 @@ mod tests_deflation_trace_fold_2333 {
             "#2333 an empty direction list must NOT disable the spectral fold; \
              largest relative departure from the raw selected inverse was \
              {worst_departure:.3e}"
-        );
-    }
-}
-
-/// #2333 — production acceptance for the softmax Trace cutover.
-///
-/// The identity tests above pin the seam WEIGHT. This pins the CONSUMER: that
-/// `contracted_trace_adjoint` supplies the row's likelihood metric,
-/// selected inverse and Daleckii–Krein fold to the seam correctly enough to
-/// reproduce the independent dense builder `logdet_theta_adjoint_dense`, which
-/// materializes the joint inverse and every `∂H/∂θ` entry densely and shares no
-/// row-jet contraction code with the seam.
-///
-/// This is the `<=1e-12` bar the issue's ruling names. It previously existed as
-/// `softmax_trace_whitening_prefold_matches_dense_adjoint_2333`; that test was
-/// removed one day after it landed by the workspace dead-code purge
-/// `c0a21b554`, which pruned the `ch5_dense_theta_adjoint_selfcheck` test-support
-/// helper it called. Rebuilt here against the production dense builder directly,
-/// so it depends on no test-only helper that a reachability sweep can prune.
-#[cfg(test)]
-mod tests_trace_adjoint_dense_parity_2333 {
-    use super::*;
-
-    /// Rows whose spectral/gauge deflation actually moves the fold away from the
-    /// raw selected inverse. A parity assertion taken on a fixture where every
-    /// row is undeflated would pass with the fold deleted.
-    fn fold_live_rows(cache: &ArrowFactorCache) -> usize {
-        (0..cache.n_rows())
-            .filter(|&row| {
-                let gauge = cache
-                    .deflated_row_directions
-                    .get(row)
-                    .is_some_and(|directions| !directions.is_empty());
-                let spectral = cache
-                    .deflation_row_spectra
-                    .get(row)
-                    .and_then(Option::as_ref)
-                    .is_some_and(|spectrum| {
-                        spectrum
-                            .raw_evals
-                            .iter()
-                            .zip(spectrum.cond_evals.iter())
-                            .any(|(&raw, &conditioned)| raw.to_bits() != conditioned.to_bits())
-                    });
-                gauge || spectral
-            })
-            .count()
-    }
-
-    fn max_abs_gap(left: &SaeArrowVector, right: &SaeArrowVector) -> f64 {
-        let t = left
-            .t
-            .iter()
-            .zip(right.t.iter())
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0_f64, f64::max);
-        let beta = left
-            .beta
-            .iter()
-            .zip(right.beta.iter())
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0_f64, f64::max);
-        t.max(beta)
-    }
-
-    fn scale_of(vector: &SaeArrowVector) -> f64 {
-        vector
-            .t
-            .iter()
-            .chain(vector.beta.iter())
-            .fold(0.0_f64, |scale, &value| scale.max(value.abs()))
-    }
-
-    #[test]
-    fn softmax_trace_adjoint_matches_dense_reference_2333() {
-        let (mut base_term, mut target, base_rho) =
-            crate::manifold::tests_recovery_split_780::gamma_fd_tiny_fixture();
-        assert!(
-            matches!(base_term.assignment.mode, AssignmentMode::Softmax { .. }),
-            "#2333 acceptance must exercise the production Softmax Trace branch"
-        );
-        base_term.gpu_policy = gam_gpu::GpuPolicy::Off;
-        let (n, p) = (base_term.n_obs(), base_term.output_dim());
-        assert_eq!((n, p), (10, 3), "#2333 must retain the bounded 10x3 fixture");
-
-        // A full-rank metric that is neither the identity nor shared across rows:
-        // per-row whitening is the pre-fold under test, and a row-invariant metric
-        // would not detect the `beta_outputs` sharing the pre-fold has to break.
-        let rank = p;
-        let cell = [
-            [1.05_f64, 0.07, -0.03],
-            [-0.04, 0.90, 0.06],
-            [0.02, -0.05, 1.15],
-        ];
-        let drift_cell = [
-            [0.08_f64, 0.0, 0.0],
-            [0.0, -0.05, 0.0],
-            [0.0, 0.0, -0.07],
-        ];
-        let factors = Array2::<f64>::from_shape_fn((n, p * rank), |(row, col)| {
-            let out_col = col / rank;
-            let rank_col = col % rank;
-            let drift = row as f64 / (n - 1) as f64;
-            cell[out_col][rank_col] + drift * drift_cell[out_col][rank_col]
-        });
-        base_term
-            .set_row_metric(
-                gam_problem::RowMetric::behavioral_fisher(std::sync::Arc::new(factors), p, rank)
-                    .expect("#2333 row metric"),
-            )
-            .expect("#2333 row metric installs");
-        let metric = base_term.row_metric().expect("#2333 row metric present");
-        assert!(
-            metric.whitens_likelihood() && base_term.whiten_logdet_row_jets(),
-            "#2333 metric must engage likelihood whitening, else the pre-fold is untested"
-        );
-        assert_ne!(
-            metric.factor_entry(0, 0, 0).to_bits(),
-            metric.factor_entry(n - 1, 0, 0).to_bits(),
-            "#2333 metric must vary by row so decoder-border sharing is observable"
-        );
-
-        // Push the fixture off its own manifold so the row blocks are genuinely
-        // conditioned rather than exactly reconstructible.
-        for row in 0..n {
-            for col in 0..p {
-                let phase = (row as f64 + 0.35) / n as f64;
-                let theta = std::f64::consts::TAU * phase;
-                target[[row, col]] += 0.6 * (3.0 * theta + 0.5 * col as f64).sin();
-            }
-        }
-
-        let mut fit_rho = base_rho.clone();
-        fit_rho.log_lambda_sparse = -0.5;
-        fit_rho.log_lambda_smooth.fill(-1.0);
-        for axis in fit_rho.log_ard.iter_mut() {
-            axis.fill(-0.5);
-        }
-        base_term
-            .penalized_quasi_laplace_criterion_with_cache(
-                target.view(),
-                &fit_rho,
-                None,
-                40,
-                0.4,
-                1.0e-6,
-                1.0e-6,
-            )
-            .expect("#2333 row-metric fixture converges with both atoms alive");
-
-        // Fixed-state evaluation points, walked in a declared order; the FIRST one
-        // whose cache carries a live deflation fold is the anchor. Selection reads
-        // only the cache's own conditioning decisions — never any comparison
-        // against the dense reference — so it cannot select for agreement.
-        let ladder = [
-            (0.5_f64, -2.0_f64, -1.2_f64, -1.0_f64),
-            (0.5, -1.5, -1.2, -1.0),
-            (0.2, -2.0, -1.2, -1.0),
-            (0.2, -1.5, -1.0, -0.8),
-            (0.0, -1.5, -1.0, -0.8),
-            (-0.2, -1.2, -0.8, -0.6),
-            (-0.5, -1.0, -0.5, -0.5),
-        ];
-        let mut anchor = None;
-        for &(sparse, smooth, ard0, ard1) in &ladder {
-            let mut rho = fit_rho.clone();
-            rho.log_lambda_sparse = sparse;
-            rho.log_lambda_smooth.fill(smooth);
-            rho.log_ard = vec![
-                Array1::from_vec(vec![ard0]),
-                Array1::from_vec(vec![ard1]),
-            ];
-            let mut candidate = base_term.clone();
-            let Ok((_value, _loss, cache)) = candidate.penalized_quasi_laplace_criterion_with_cache(
-                target.view(),
-                &rho,
-                None,
-                0,
-                0.4,
-                1.0e-6,
-                1.0e-6,
-            ) else {
-                continue;
-            };
-            let live = fold_live_rows(&cache);
-            if live > 0 {
-                anchor = Some((candidate, rho, cache, live, sparse, smooth));
-                break;
-            }
-        }
-        let (term, rho, cache, live_rows, anchor_sparse, anchor_smooth) = anchor
-            .expect("#2333 no declared evaluation point produced a live deflation fold");
-
-        let solver = DeflatedArrowSolver::plain(&cache);
-        let joint_inverse = term
-            .materialize_joint_inverse(&cache, &solver)
-            .expect("#2333 dense joint inverse");
-        let dense_joint = term
-            .logdet_theta_adjoint_dense(
-                &rho,
-                &cache,
-                &joint_inverse,
-                false,
-                false,
-                None,
-            )
-            .expect("#2333 dense joint theta-adjoint");
-        let production_joint = term
-            .logdet_theta_adjoint(&rho, &cache, &solver)
-            .expect("#2333 production joint adjoint");
-
-        let joint_gap = max_abs_gap(&dense_joint, &production_joint);
-        let joint_scale = scale_of(&production_joint);
-        eprintln!(
-            "#2333 TRACE_DENSE_PARITY live_fold_rows={live_rows} \
-             anchor=(sparse={anchor_sparse:.1}, smooth={anchor_smooth:.1}) \
-             joint_gap={joint_gap:.6e} joint_scale={joint_scale:.6e}"
-        );
-        assert!(
-            joint_scale > 0.0,
-            "#2333 the joint adjoint must be non-trivial; joint scale {joint_scale:.3e}"
-        );
-        assert!(
-            joint_gap <= 1.0e-12 * (1.0 + joint_scale),
-            "#2333 joint Trace/dense parity exceeded 1e-12 relative: gap={joint_gap:.6e} \
-             scale={joint_scale:.6e}"
         );
     }
 }

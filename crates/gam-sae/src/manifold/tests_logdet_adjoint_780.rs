@@ -670,8 +670,11 @@ fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
     eprintln!("#2080 from-probes softmax parity: anchor certified at {accepted}");
 
     let solver = DeflatedArrowSolver::plain(&cache);
+    let inverse = term
+        .materialize_joint_inverse(&cache, &solver)
+        .expect("dense joint inverse");
     let dense = term
-        .logdet_theta_adjoint(&rho, &cache, &solver)
+        .logdet_theta_adjoint_dense(&rho, &cache, &inverse, false, false, None)
         .expect("dense theta-adjoint");
 
     let deflated_rows = cache
@@ -693,8 +696,11 @@ fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
         blind.deflated_row_directions = std::sync::Arc::from(vec![Vec::new(); rows]);
         blind.deflation_row_spectra = std::sync::Arc::from(vec![None; rows]);
         let blind_solver = DeflatedArrowSolver::plain(&blind);
+        let blind_inverse = term
+            .materialize_joint_inverse(&blind, &blind_solver)
+            .expect("deflation-blind joint inverse");
         let blind_gamma = term
-            .logdet_theta_adjoint(&rho, &blind, &blind_solver)
+            .logdet_theta_adjoint_dense(&rho, &blind, &blind_inverse, false, false, None)
             .expect("deflation-blind dense theta-adjoint");
         dense
             .t

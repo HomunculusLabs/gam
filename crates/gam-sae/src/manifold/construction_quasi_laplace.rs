@@ -6276,8 +6276,8 @@ impl SaeManifoldTerm {
         // The joint leg of this entry point is the `B`-majorizer Γ by definition:
         // the exact-A joint adjoint is owned by `logdet_theta_adjoint_dense` (with
         // the priced pseudo-inverse) and by `logdet_theta_adjoint_from_probes`.
-        // Every gate family reduces through the resident Trace seam (#2333).
-        self.contracted_trace_adjoint(rho, cache, solver, EvidenceOperator::Majorizer, None)
+        // A threshold-gate fit reduces through the resident Trace seam (#2333).
+        self.contracted_trace_adjoint(rho, cache, solver)
     }
 
     /// #2080 matrix-free θ-adjoint: the SAME `Γ = tr(H⁻¹ ∂H/∂θ)` the dense

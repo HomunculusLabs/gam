@@ -1,12 +1,9 @@
-//! Exact-A beta derivatives (#2828): resident/dense parity, independent
-//! differences of the exact prior curvature and its majorization gap, and
-//! differences of the priced joint log determinant with all routing gates frozen.
+//! Exact-A beta derivatives (#2828): independent differences of the exact prior
+//! curvature and its majorization gap, and differences of the priced joint log
+//! determinant with all routing gates frozen.
 #![cfg(test)]
 use super::*;
-use crate::assignment::AssignmentMode;
-use crate::manifold::arrow_solver::DeflatedArrowSolver;
 use crate::manifold::tests_sparse_curvature_operator_2500::threshold_gate_tiny_fixture;
-use gam_solve::arrow_schur::{ArrowSolveOptions, solve_arrow_newton_step_with_options};
 use ndarray::Array2;
 
 fn frozen_anchor_and_cache(
@@ -56,82 +53,6 @@ fn frozen_exact_a_logdet(
     endpoint
         .exact_observed_information_log_dets(rho, target.view(), &cache)
         .ok()
-}
-
-#[test]
-fn resident_softmax_theta_adjoint_matches_dense_under_both_operators_2828() {
-    let (mut term, target, rho) = threshold_gate_tiny_fixture(false);
-    term.assignment.mode = AssignmentMode::softmax(0.8);
-    let rho = rho.for_assignment(term.assignment.mode);
-    // The softmax variant of this fixture is not a quasi-Laplace optimum, so
-    // the cache is the plain arrow-Schur factorisation of the assembled
-    // system at this state (the construction the set-aside variant's own
-    // parity gate used), not a criterion cache.
-    let mut anchor = term.clone();
-    let mut system = anchor
-        .assemble_arrow_schur(target.view(), &rho, None)
-        .expect("cold arrow assembly at the softmax fixture state");
-    SaeManifoldTerm::ensure_row_gauge_deflation_for_quasi_laplace(&mut system);
-    let options = ArrowSolveOptions::direct();
-    let (_delta_t, _delta_beta, cache) =
-        solve_arrow_newton_step_with_options(&system, 0.0, 0.0, &options)
-            .expect("direct arrow-Schur factorisation at the softmax fixture state");
-    anchor.streaming_gates_frozen = true;
-    let solver = DeflatedArrowSolver::plain(&cache);
-    let inverse = anchor
-        .materialize_joint_inverse(&cache, &solver)
-        .expect("dense joint inverse");
-    let mut failures = Vec::new();
-    for exact in [false, true] {
-        let operator = if exact {
-            EvidenceOperator::ExactObservedInformation
-        } else {
-            EvidenceOperator::Majorizer
-        };
-        let residual_target = exact.then_some(target.view());
-        let dense = anchor
-            .logdet_theta_adjoint_dense(
-                &rho,
-                &cache,
-                &inverse,
-                false,
-                exact,
-                residual_target,
-            )
-            .expect("dense theta adjoint");
-        let resident = anchor
-            .contracted_trace_adjoint(&rho, &cache, &solver, operator, residual_target)
-            .expect("resident softmax trace adjoint");
-        let scale = dense
-            .t
-            .iter()
-            .chain(dense.beta.iter())
-            .fold(0.0_f64, |m, v| m.max(v.abs()));
-        let gap_t = dense
-            .t
-            .iter()
-            .zip(resident.t.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0_f64, f64::max);
-        let gap_beta = dense
-            .beta
-            .iter()
-            .zip(resident.beta.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0_f64, f64::max);
-        eprintln!(
-            "EXACT_A_PROBE_1 exact={exact} scale={scale:.3e} gap_t={gap_t:.3e} gap_beta={gap_beta:.3e}"
-        );
-        if gap_t.max(gap_beta) > 1.0e-9 * (1.0 + scale) {
-            failures.push(format!(
-                "exact={exact}: t={gap_t:e} beta={gap_beta:e} scale={scale:e}"
-            ));
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "resident and dense softmax θ-adjoints disagree beyond round-off: {failures:?}"
-    );
 }
 
 #[test]
