@@ -18,8 +18,8 @@ fn external_generic_fit_accepts_owned_and_borrowed_designs_2829() {
     ];
     // Both orthogonal columns have norm sqrt(6), so design standardization
     // leaves them unchanged. Residuals [-1,1,0,-1,1,0] are orthogonal to each.
-    // The production solver declares a fixed stabilization ridge of 1e-8;
-    // its exact normal equations are (6 + 1e-8) beta = [12,18].
+    // The PIRLS penalized Hessian carries no stabilization ridge, so the exact
+    // normal equations are 6·beta = [12,18].
     let y = array![-2.0, 0.0, -1.0, 4.0, 6.0, 5.0];
     let weights = Array1::ones(y.len());
     let offset = Array1::zeros(y.len());
@@ -54,7 +54,7 @@ fn external_generic_fit_accepts_owned_and_borrowed_designs_2829() {
         let beta = fit.beta_flat();
         assert_eq!(beta.len(), 2);
         for (actual, right_hand_side) in beta.iter().zip([12.0, 18.0]) {
-            let expected = right_hand_side / (6.0 + 1e-8);
+            let expected = right_hand_side / 6.0;
             assert!((actual - expected).abs() < 1e-12, "{beta:?}");
         }
     }
