@@ -63,11 +63,6 @@ use crate::manifold::{GeometryError, GeometryResult};
 /// `1 - k |y|^2 >= BOUNDARY_EPS` after [`project_into_ball`].
 pub const BOUNDARY_EPS: f64 = 1.0e-5;
 
-/// Floor for raw norms / divisors that could otherwise be zero at the
-/// origin. Distinct from [`BOUNDARY_EPS`] because origin-side zeros are
-/// not a degeneracy — they are the well-defined identity case.
-pub(crate) const ORIGIN_EPS: f64 = 1.0e-15;
-
 /// Largest radial exp-map argument `s = sqrt(k)|v|` worth evaluating
 /// hyperbolic functions at. Above this, `tanh(s)` is already
 /// `1 - BOUNDARY_EPS` in f64 (and `cosh`/`sinh` would eventually overflow to
@@ -85,8 +80,8 @@ const EXP_SATURATION_CAP: f64 = {
 /// clamp baked in. Because `sqrt(k)|exp_0(v)| = tanh(s)`, clamping `tanh(s)`
 /// to `1 - BOUNDARY_EPS` makes the output norm exactly `max_norm`, i.e.
 /// strictly interior and consistent with [`project_into_ball`]. Callers must
-/// guard `s > ORIGIN_EPS` before calling (norms at/under the origin floor
-/// short-circuit to the identity), so no divide-by-zero is introduced.
+/// guard `s > 0` before calling (a zero tangent short-circuits to the
+/// identity), so no divide-by-zero is introduced.
 fn exp_coeff(s: f64) -> f64 {
     (s.tanh().min(1.0 - BOUNDARY_EPS)) / s
 }
@@ -128,7 +123,7 @@ fn dot(a: ArrayView1<'_, f64>, b: ArrayView1<'_, f64>) -> f64 {
 ///
 /// The closed forms below (`distance`, `mobius_add`, `log_origin`) are only
 /// defined on the open ball; for a point outside it the denominators
-/// `1 + c|x|²` go non-positive and the `.max(ORIGIN_EPS)` floors would turn an
+/// `1 + c|x|²` go non-positive and the closed forms would turn an
 /// off-manifold input into a finite but meaningless number. Callers that
 /// genuinely need to accept arbitrary coordinates must
 /// [`project_into_ball`] first (as the decoder/Lorentz paths do). Tangent maps
@@ -172,7 +167,7 @@ pub fn project_into_ball(
     let mut out = point.to_owned();
     let norm = out.iter().map(|v| v * v).sum::<f64>().sqrt();
     let max_norm = (1.0 - BOUNDARY_EPS) / sqrt_negc;
-    if norm > max_norm && norm > ORIGIN_EPS {
+    if norm > max_norm {
         let scale = max_norm / norm;
         for v in out.iter_mut() {
             *v *= scale;
@@ -207,7 +202,18 @@ pub fn mobius_add(
     let vv = dot(v, v);
     let coeff_u = 1.0 + 2.0 * k * uv + k * vv;
     let coeff_v = 1.0 - k * uu;
-    let denom = (1.0 + 2.0 * k * uv + k * k * uu * vv).max(ORIGIN_EPS);
+    // For in-ball `u`, `v` the denominator is at least `(1 − k|u||v|)² > 0`; it reaches
+    // zero only inside the rounding band of its three inner products, product and sums.
+    let denom = 1.0 + 2.0 * k * uv + k * k * uu * vv;
+    let denom_band = gam_linalg::roundoff::accumulation_band(
+        2 * u.len() + 3,
+        1.0 + (2.0 * k * uv).abs() + k * k * uu * vv,
+    );
+    if denom <= denom_band {
+        return Err(GeometryError::Singular(
+            "Poincaré Möbius addition with its denominator inside its rounding band",
+        ));
+    }
     let mut out = Array1::<f64>::zeros(u.len());
     for i in 0..u.len() {
         out[i] = (coeff_u * u[i] + coeff_v * v[i]) / denom;
@@ -243,8 +249,18 @@ pub fn poincare_distance(
         a_sq += a[i] * a[i];
         b_sq += b[i] * b[i];
     }
-    let denom_a = (1.0 + curvature * a_sq).max(ORIGIN_EPS);
-    let denom_b = (1.0 + curvature * b_sq).max(ORIGIN_EPS);
+    let denom_a = 1.0 + curvature * a_sq;
+    let denom_b = 1.0 + curvature * b_sq;
+    // An in-ball point has `1 + c|x|² > 0`. Inside the rounding band of its `d`-term
+    // `|x|²`, the product and the sum it is on the boundary to precision.
+    let rounding = gam_linalg::roundoff::accumulation_growth(a.len() + 2);
+    if denom_a <= rounding * (1.0 - curvature * a_sq)
+        || denom_b <= rounding * (1.0 - curvature * b_sq)
+    {
+        return Err(GeometryError::InvalidPoint(
+            "Poincaré point on the ball boundary to precision",
+        ));
+    }
     // Geodesic distance via the cosh half-angle identity
     //   arccosh(1 + 2δ) = 2·arcsinh(√δ),
     //   δ = (-c)|a-b|² / ((1 + c|a|²)(1 + c|b|²)).
@@ -267,8 +283,9 @@ pub fn log_origin(y: ArrayView1<'_, f64>, curvature: f64) -> GeometryResult<Arra
     require_in_ball(y, sqrt_negc)?;
     let mut out = y.to_owned();
     let norm = y.iter().map(|v| v * v).sum::<f64>().sqrt();
-    if norm <= ORIGIN_EPS {
-        // log_0(0) = 0 in the tangent space; preserve the input shape.
+    if sqrt_negc * norm == 0.0 {
+        // log_0(0) = 0 in the tangent space; preserve the input shape. Any
+        // positive `√k|y|` takes `artanh(t)/t`, which is 1 to rounding at small t.
         return Ok(out);
     }
     // y is validated in-ball, so sqrt(k)·|y| < 1; the clamp only guards the
@@ -286,10 +303,10 @@ pub fn exp_origin(v: ArrayView1<'_, f64>, curvature: f64) -> GeometryResult<Arra
     let sqrt_negc = require_negative_curvature(curvature)?;
     let mut out = v.to_owned();
     let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-    if norm <= ORIGIN_EPS {
+    let s = sqrt_negc * norm;
+    if s == 0.0 {
         return Ok(out);
     }
-    let s = sqrt_negc * norm;
     let coeff = exp_coeff(s);
     for x in out.iter_mut() {
         *x *= coeff;
@@ -538,7 +555,7 @@ fn project_and_log(
     for f in 0..f_atoms {
         let row = atoms.row(f);
         let nrm = row.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let scale = if nrm.is_finite() && nrm > max_norm && nrm > ORIGIN_EPS {
+        let scale = if nrm.is_finite() && nrm > max_norm {
             max_norm / nrm
         } else {
             1.0
@@ -551,7 +568,7 @@ fn project_and_log(
             .map(|i| projected[[f, i]] * projected[[f, i]])
             .sum::<f64>()
             .sqrt();
-        if nrm_proj <= ORIGIN_EPS {
+        if sqrt_negc * nrm_proj == 0.0 {
             // log_0(0) = 0; row stays zero.
             continue;
         }
@@ -585,11 +602,11 @@ pub fn tangent_decode_forward(
     let mut x_hat = Array2::<f64>::zeros((batch, d));
     for b in 0..batch {
         let nrm = (0..d).map(|i| v[[b, i]] * v[[b, i]]).sum::<f64>().sqrt();
-        if nrm <= ORIGIN_EPS {
+        let s = sqrt_negc * nrm;
+        if s == 0.0 {
             // exp_0(0) = 0.
             continue;
         }
-        let s = sqrt_negc * nrm;
         let coeff = exp_coeff(s);
         for i in 0..d {
             x_hat[[b, i]] = coeff * v[[b, i]];
@@ -659,14 +676,16 @@ pub fn tangent_decode_backward(
         let g_row = grad_x_hat.row(b);
         let nrm_sq: f64 = (0..d).map(|i| v_row[i] * v_row[i]).sum();
         let nrm = nrm_sq.sqrt();
-        if nrm <= ORIGIN_EPS {
-            // exp_0 is identity near zero; gradient passes through.
+        let s = sqrt_negc * nrm;
+        // The Jacobian is `(tanh s/s)·I + φ′(s)·s·v̂v̂ᵀ = (1 − s²/3)·I − (2s²/3)·v̂v̂ᵀ + O(s⁴)`:
+        // once `s² ≤ ε` it is the identity to rounding, while the interior `φ′` is a
+        // cancellation of two `O(s)` terms divided by `s²`, which underflows first.
+        if s * s <= f64::EPSILON {
             for i in 0..d {
                 grad_v[[b, i]] = g_row[i];
             }
             continue;
         }
-        let s = sqrt_negc * nrm;
         let tanh_s = s.tanh();
         // The forward `exp_coeff` CLAMPS the radial coefficient to
         // `(1 - BOUNDARY_EPS)/s` once `tanh(s) >= 1 - BOUNDARY_EPS` (s beyond
@@ -723,14 +742,15 @@ pub fn tangent_decode_backward(
         let g_l_row = grad_tangents.row(f);
         let r_sq: f64 = (0..d).map(|i| a_row[i] * a_row[i]).sum();
         let r = r_sq.sqrt();
-        if r <= ORIGIN_EPS {
-            // psi(0) = 1, psi'(0) finite; L = a near origin so gradient passes through.
+        let t = (sqrt_negc * r).min(1.0 - BOUNDARY_EPS);
+        // psi(t) = 1 + t²/3 + O(t⁴) and psi'(t)·t = 2t²/3 + O(t⁴): once `t² ≤ ε` the
+        // Jacobian is the identity to rounding (the same switch as step 1).
+        if t * t <= f64::EPSILON {
             for i in 0..d {
                 grad_atoms_proj[[f, i]] = g_l_row[i];
             }
             continue;
         }
-        let t = (sqrt_negc * r).min(1.0 - BOUNDARY_EPS);
         let psi = t.atanh() / t;
         let psi_prime = (t / (1.0 - t * t) - t.atanh()) / (t * t);
         let dpsi_da_coeff = psi_prime * sqrt_negc / r;
@@ -762,7 +782,7 @@ pub fn tangent_decode_backward(
         }
         let a_row = cache.atoms_projected.row(f);
         let a_norm_sq: f64 = (0..d).map(|i| a_row[i] * a_row[i]).sum();
-        if a_norm_sq <= ORIGIN_EPS * ORIGIN_EPS {
+        if a_norm_sq == 0.0 {
             // Clamp toward the origin cannot fire with a zero-norm projection;
             // nothing radial to remove.
             for j in 0..d {
@@ -795,8 +815,8 @@ pub fn tangent_decode_backward(
 /// The input is first run through [`project_into_ball`] so the boundary-
 /// vanishing denominator `1 - |ŷ|^2` is bounded below by `~2·BOUNDARY_EPS`.
 /// A point on (or outside) the ideal boundary would otherwise drive the
-/// denominator to the `ORIGIN_EPS` floor (`1e-15`) and blow the output up by
-/// `~1e15`; projecting first keeps the map well-conditioned and makes the
+/// denominator to zero and the output to infinity; projecting first keeps the
+/// map well-conditioned and makes the
 /// `from_lorentz ∘ to_lorentz` round-trip equal `project_into_ball(y)`.
 pub fn to_lorentz(y: ArrayView1<'_, f64>, curvature: f64) -> GeometryResult<Array1<f64>> {
     let sqrt_negc = require_negative_curvature(curvature)?;
@@ -808,7 +828,7 @@ pub fn to_lorentz(y: ArrayView1<'_, f64>, curvature: f64) -> GeometryResult<Arra
     let yhat_sq: f64 = y_proj.iter().map(|v| (sqrt_negc * v).powi(2)).sum();
     // After `project_into_ball`, `sqrt(k)|y| <= 1 - BOUNDARY_EPS`, so
     // `1 - yhat_sq >= 2·BOUNDARY_EPS - BOUNDARY_EPS^2 > 0`; the floor is a
-    // defensive no-op held at `BOUNDARY_EPS` (never the `1e15` `ORIGIN_EPS`).
+    // defensive no-op held at `BOUNDARY_EPS`.
     let denom = (1.0 - yhat_sq).max(BOUNDARY_EPS);
     let z0 = (1.0 + yhat_sq) / denom;
     let mut out = Array1::<f64>::zeros(d + 1);
@@ -829,7 +849,14 @@ pub fn from_lorentz(x: ArrayView1<'_, f64>, curvature: f64) -> GeometryResult<Ar
     }
     let d = x.len() - 1;
     let x0_scaled = x[0] * sqrt_negc;
-    let denom = (x0_scaled + 1.0).max(ORIGIN_EPS);
+    let denom = x0_scaled + 1.0;
+    // The upper sheet has `√k·x₀ ≥ 1`, so `denom ≥ 2`. A denominator inside the
+    // rounding of `√k·x₀ + 1` is the lower sheet's projection pole, not a point here.
+    if denom <= gam_linalg::roundoff::accumulation_band(2, 1.0 + x0_scaled.abs()) {
+        return Err(GeometryError::InvalidPoint(
+            "from_lorentz point at or beyond the stereographic pole (√k·x₀ ≤ −1)",
+        ));
+    }
     let mut out = Array1::<f64>::zeros(d);
     for i in 0..d {
         let xs_scaled = x[i + 1] * sqrt_negc;
@@ -865,8 +892,12 @@ pub fn lorentz_log_origin(x: ArrayView1<'_, f64>, curvature: f64) -> GeometryRes
     for i in 0..d {
         xs_norm_sq += x[i + 1] * x[i + 1];
     }
-    let xs_norm = xs_norm_sq.sqrt().max(ORIGIN_EPS);
+    let xs_norm = xs_norm_sq.sqrt();
     let mut out = Array1::<f64>::zeros(d);
+    // A zero spatial part is the origin itself, whose log is the zero tangent.
+    if xs_norm == 0.0 {
+        return Ok(out);
+    }
     for i in 0..d {
         out[i] = dist * x[i + 1] / xs_norm;
     }
@@ -881,7 +912,7 @@ pub fn lorentz_exp_origin(
     let sqrt_negc = require_negative_curvature(curvature)?;
     let d = v_spatial.len();
     let norm_sq: f64 = v_spatial.iter().map(|x| x * x).sum();
-    let norm = norm_sq.sqrt().max(ORIGIN_EPS);
+    let norm = norm_sq.sqrt();
     let s = sqrt_negc * norm;
     // Cap the argument fed to `cosh`/`sinh`. For `s` beyond ~710 these
     // overflow to `inf`, giving an `inf/(inf+1) = NaN` ball point downstream,
@@ -907,7 +938,8 @@ pub fn lorentz_exp_origin(
     // magnitude distributed along `v`. `from_lorentz`'s ratio depends only on
     // `cosh`/`sinh` of `s_eval`, so the cap and projection together fix the
     // output norm at `max_norm` exactly as the Poincaré path does.
-    let coeff = s_eval.sinh() / s;
+    // `sinh(s)/s → 1` as `s → 0`: a zero tangent lands on the origin exactly.
+    let coeff = if s == 0.0 { 1.0 } else { s_eval.sinh() / s };
     for i in 0..d {
         out[i + 1] = coeff * v_spatial[i];
     }
@@ -937,7 +969,7 @@ pub fn lorentz_decode_forward(
     for f in 0..f_atoms {
         let row = atoms.row(f);
         let nrm = row.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let scale = if nrm.is_finite() && nrm > max_norm && nrm > ORIGIN_EPS {
+        let scale = if nrm.is_finite() && nrm > max_norm {
             max_norm / nrm
         } else {
             1.0

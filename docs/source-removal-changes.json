@@ -4343,5 +4343,13 @@
     ],
     "reason": "#2469: THETA_EFF_MAX (1e9) was a picked effective-dispersion threshold above which the estimation-widened Poisson count interval switched from the negative-binomial surrogate to the exact Poisson quantile. The NB surrogate reaches the Poisson only through prob = theta/(theta+mu). statrs' beta_reg, behind negative_binomial_quantile, forms the complement mu/(theta+mu) by rounding, so the NB CDF carries relative error of order u*theta/mu, while the widening the surrogate adds is of order mu/theta. The switch now sits where those two cross, theta_eff > mu/sqrt(u), with u = gam_linalg::roundoff::UNIT_ROUNDOFF. For mu = 10 that is about 9.5e8, so the picked number was of the right order but independent of mu.",
     "evidence": "git grep -n THETA_EFF_MAX over the base finds two lines, both in crates/gam-inference/src/probability.rs production code: the function-local declaration at :464 and its single use at :470. No other file, test or doc names it. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "a1cfce3a3c09c424533a3357c29d2f0ae8019deb",
+    "items": [
+      "crates/gam-geometry/src/manifolds/poincare.rs:const:ORIGIN_EPS"
+    ],
+    "reason": "#2469: ORIGIN_EPS = 1e-15 was an absolute floor under the Poincare ball's divisors and an absolute cut for its zero-tangent short-circuits. Each use now takes what the arithmetic resolves. The Mobius and distance denominators are refused inside their rounding bands instead of floored, because a floor turned a boundary point into a finite, meaningless number. from_lorentz refuses its stereographic pole. The exp and log short-circuits fire at an exactly zero argument, where every formula's limit is the identity. The analytic backward passes the gradient through once s^2 <= eps (or t^2 <= eps), where the Jacobian (1 - s^2/3)I - (2s^2/3) v_hat v_hat^T is the identity to rounding and the interior phi' is a cancellation divided by s^2. The two norm tests beside norm > max_norm were redundant, since max_norm > 0. The constant has no remaining user.",
+    "evidence": "git grep -w ORIGIN_EPS at the base over crates, src, tests, gamfit, python, examples, docs, bench and scripts finds only crates/gam-geometry/src/manifolds/poincare.rs (the declaration, its code uses and four doc comments, all rewritten here) and comment text in tests/regressions/manifolds/poincare_self_distance.rs and tests/test_issue_239_poincare_atoms_distance.py describing an older clamp. No test reads the constant. The item list applies source_removal_guard.py's ITEM regex by hand. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
   }
 ]
