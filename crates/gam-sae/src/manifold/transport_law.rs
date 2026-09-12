@@ -79,7 +79,7 @@ pub enum CrosscoderLayer {
 /// The empirical transport map of one circle atom, the phase-shift law fit, and
 /// the drift statistics.
 #[derive(Clone, Debug)]
-pub(crate) struct AtomTransportReport {
+pub struct AtomTransportReport {
     /// The atom index this report is for.
     pub atom: usize,
     /// The source and target layers the transport was measured between.
@@ -133,7 +133,7 @@ impl AtomTransportReport {
 
 /// Measure the empirical transport of one circle atom between two explicit
 /// crosscoder layers (source image projected onto the target image).
-pub(crate) fn measure_atom_transport_between(
+pub fn measure_atom_transport_between(
     term: &SaeManifoldTerm,
     layout: &CrosscoderLayout,
     atom: usize,

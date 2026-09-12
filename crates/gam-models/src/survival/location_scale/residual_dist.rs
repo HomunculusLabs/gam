@@ -81,7 +81,7 @@ pub enum ResidualDistribution {
     Logistic,
 }
 
-pub(crate) trait ResidualDistributionOps {
+pub trait ResidualDistributionOps {
     fn cdf(&self, z: f64) -> f64;
     fn pdf(&self, z: f64) -> f64;
     fn pdf_derivative(&self, z: f64) -> f64;
@@ -230,7 +230,7 @@ pub fn residual_distribution_inverse_link(distribution: ResidualDistribution) ->
 /// standard links — those carry their full state via `payload.link` and have
 /// no `ResidualDistribution` representation.
 #[inline]
-pub(crate) fn residual_distribution_from_inverse_link(link: &InverseLink) -> Option<ResidualDistribution> {
+pub fn residual_distribution_from_inverse_link(link: &InverseLink) -> Option<ResidualDistribution> {
     match link {
         InverseLink::Standard(StandardLink::Probit) => Some(ResidualDistribution::Gaussian),
         InverseLink::Standard(StandardLink::CLogLog) => Some(ResidualDistribution::Gumbel),

@@ -178,7 +178,7 @@ pub struct PhiEtaSplit {
 }
 
 impl PhiEtaSplit {
-    pub(crate) fn all_base(n_basis: usize) -> Self {
+    pub fn all_base(n_basis: usize) -> Self {
         Self {
             base_cols: (0..n_basis).collect(),
             curved_cols: Vec::new(),
@@ -288,7 +288,7 @@ pub trait SaeBasisSecondJet: SaeBasisEvaluator {
 /// and the Duchon basis (radial third-derivative kernel block + monomial
 /// nullspace block, both in closed form). The full third jet is symmetric in
 /// its three trailing axes.
-pub(crate) trait SaeBasisThirdJet: SaeBasisSecondJet {
+pub trait SaeBasisThirdJet: SaeBasisSecondJet {
     fn third_jet(&self, coords: ArrayView2<'_, f64>) -> Result<Array5<f64>, String>;
 }
 
@@ -487,7 +487,7 @@ impl SaeBasisThirdJet for PeriodicHarmonicEvaluator {
 /// circle phase and the remaining axes are left available to the optimizer but
 /// do not enter this basis.
 #[derive(Debug, Clone)]
-pub(crate) struct RawPeriodicCircleEvaluator {
+pub struct RawPeriodicCircleEvaluator {
     pub latent_dim: usize,
 }
 
@@ -1312,7 +1312,7 @@ impl RealHarmonicComponent {
     }
 
     /// Sign under reflection of the corresponding circle coordinate.
-    pub(crate) fn reflection_sign(self) -> i8 {
+    pub fn reflection_sign(self) -> i8 {
         match self {
             Self::Sine { .. } => -1,
             Self::Constant | Self::Cosine { .. } => 1,
@@ -1371,11 +1371,11 @@ impl TorusHarmonicEvaluator {
         self.latent_dim
     }
 
-    pub(crate) fn num_harmonics(&self) -> usize {
+    pub fn num_harmonics(&self) -> usize {
         self.num_harmonics
     }
 
-    pub(crate) fn axis_basis_size(&self) -> usize {
+    pub fn axis_basis_size(&self) -> usize {
         self.axis_basis_size
     }
 
@@ -1825,7 +1825,7 @@ pub struct QuotientSpectralEvaluator {
 
 /// Number of invariant real spherical harmonics on `RP²` through even cover
 /// degree `2H`: `sum_{r=0}^H (4r+1) = (H+1)(2H+1)`.
-pub(crate) fn projective_plane_basis_size(harmonic_order: usize) -> Result<usize, String> {
+pub fn projective_plane_basis_size(harmonic_order: usize) -> Result<usize, String> {
     if harmonic_order == 0 {
         return Err("projective_plane_basis_size requires harmonic_order >= 1".to_string());
     }
@@ -1842,7 +1842,7 @@ pub(crate) fn projective_plane_basis_size(harmonic_order: usize) -> Result<usize
 
 /// Number of invariant real torus harmonics on the flat Klein quotient through
 /// equal per-axis order `H`: `1 + 2 floor(H/2) + H + 2H²`.
-pub(crate) fn klein_bottle_basis_size(num_harmonics: usize) -> Result<usize, String> {
+pub fn klein_bottle_basis_size(num_harmonics: usize) -> Result<usize, String> {
     if num_harmonics == 0 {
         return Err("klein_bottle_basis_size requires num_harmonics >= 1".to_string());
     }
@@ -1993,7 +1993,7 @@ impl QuotientSpectralEvaluator {
     /// the antipodal map IS the ambient `u -> -u`; in the chart the same map is
     /// the awkward `(lat, lon) -> (-lat, lon + π)`, whose Killing directions the
     /// chart cannot even evaluate at its own poles.
-    pub(crate) fn projective_plane_ambient(harmonic_order: usize) -> Result<Self, String> {
+    pub fn projective_plane_ambient(harmonic_order: usize) -> Result<Self, String> {
         if harmonic_order == 0 {
             return Err(
                 "QuotientSpectralEvaluator::projective_plane_ambient requires harmonic_order >= 1"
@@ -2067,7 +2067,7 @@ impl QuotientSpectralEvaluator {
     /// `H >= KLEIN_BOTTLE_MIN_HARMONICS` is required because the standard smooth `R⁴`
     /// Klein embedding uses theta harmonics one and two; its constant plus six
     /// coordinate modes form the seven-column homotopy base.
-    pub(crate) fn klein_bottle(num_harmonics: usize) -> Result<Self, String> {
+    pub fn klein_bottle(num_harmonics: usize) -> Result<Self, String> {
         if num_harmonics < Self::KLEIN_BOTTLE_MIN_HARMONICS {
             return Err(format!(
                 "QuotientSpectralEvaluator::klein_bottle requires num_harmonics >= {} for the standard R4 embedding",
@@ -2351,7 +2351,7 @@ impl SaeBasisThirdJet for QuotientSpectralEvaluator {
 
 /// Affine Euclidean/Duchon fallback for the minimal fit entrypoint.
 #[derive(Debug, Clone)]
-pub(crate) struct AffineCoordinateEvaluator {
+pub struct AffineCoordinateEvaluator {
     pub latent_dim: usize,
 }
 
@@ -2458,7 +2458,7 @@ impl SaeBasisThirdJet for AffineCoordinateEvaluator {
 /// ([`gam_terms::basis::duchon_sae_atom_basis_with_jet`]) so they always agree on
 /// column count and scaling — the exact contract issue #247 pinned.
 #[derive(Debug, Clone)]
-pub(crate) struct DuchonCoordinateEvaluator {
+pub struct DuchonCoordinateEvaluator {
     pub centers: Array2<f64>,
     pub order: gam_terms::basis::DuchonNullspaceOrder,
 }
@@ -2941,12 +2941,12 @@ impl CylinderHarmonicEvaluator {
     }
 
     /// Circle-axis width `Mc = 2H + 1`.
-    pub(crate) fn circle_basis_size(&self) -> usize {
+    pub fn circle_basis_size(&self) -> usize {
         2 * self.circle_harmonics + 1
     }
 
     /// Line-axis width `Ml = D + 1`.
-    pub(crate) fn line_basis_size(&self) -> usize {
+    pub fn line_basis_size(&self) -> usize {
         self.line_degree + 1
     }
 
@@ -3053,7 +3053,7 @@ impl CylinderHarmonicEvaluator {
     /// canonical unit interval `[0,1)` so the energy is finite and scale-fixed:
     /// `Gl[i,j] = ∫₀¹ tⁱ⁺ʲ dt = 1/(i+j+1)` and
     /// `Sl[i,j] = ∫₀¹ (i(i-1)t^{i-2})(j(j-1)t^{j-2}) dt`.
-    pub(crate) fn roughness_gram(&self) -> Array2<f64> {
+    pub fn roughness_gram(&self) -> Array2<f64> {
         let mc = self.circle_basis_size();
         let ml = self.line_basis_size();
         let two_pi = 2.0 * std::f64::consts::PI;
@@ -3414,7 +3414,7 @@ impl MobiusHarmonicEvaluator {
     /// width Grams are the even-moment tables `∫₋₁¹ w^{i+j} dw`
     /// (`= 2/(i+j+1)` for `i+j` even, `0` odd). The constant column sits in
     /// the null space exactly as the smooth-penalty nullity recovery expects.
-    pub(crate) fn roughness_gram(&self) -> Array2<f64> {
+    pub fn roughness_gram(&self) -> Array2<f64> {
         let pi = std::f64::consts::PI;
         let m = self.columns.len();
         let moment = |exp: usize| -> f64 {

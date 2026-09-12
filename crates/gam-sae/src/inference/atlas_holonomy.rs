@@ -648,7 +648,7 @@ impl GaussianPcaPatch {
     /// leakage by algebra; a reduced pilot frame remains uncertified until a
     /// caller supplies an independent capture theorem.
     #[must_use = "cross-fitted Gaussian PCA construction errors must be handled"]
-    pub(crate) fn fit_cross_fitted_plugin(
+    pub fn fit_cross_fitted_plugin(
         chart: usize,
         row_split: GaussianPatchRowSplit,
         data: ArrayView2<'_, f64>,
@@ -1261,7 +1261,7 @@ impl AtlasCycleHolonomy {
 
 /// A covariance source shared by one or more Gauss--Bonnet angle terms.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct GaussBonnetNoiseSource {
+pub struct GaussBonnetNoiseSource {
     source: usize,
     covariance: Array2<f64>,
 }
@@ -1334,7 +1334,7 @@ impl GaussBonnetSourceGradient {
 
 /// One signed curvature/angle-defect contribution.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct GaussBonnetContribution {
+pub struct GaussBonnetContribution {
     curvature_estimate: f64,
     polar_linearization_remainder_bound: f64,
     geometric_remainder_bound: f64,
@@ -1535,7 +1535,7 @@ impl AtlasHolonomyCertificate {
     /// atlas they are reporting without converting the refusal into a
     /// promotable signed cocycle.
     #[must_use]
-    pub(crate) fn edge_inventory(&self) -> Vec<AtlasHolonomyEdgeId> {
+    pub fn edge_inventory(&self) -> Vec<AtlasHolonomyEdgeId> {
         match self {
             Self::ExactAnalytic(certificate) => certificate
                 .edges()

@@ -178,7 +178,7 @@ impl FrailtySpec {
     /// Typed variant of [`Self::validate_for_marginal_slope`] used internally;
     /// the `String`-returning entry point above is preserved as a one-line
     /// shim for external callers.
-    pub(crate) fn validate_for_marginal_slope_typed(&self) -> Result<(), LognormalKernelError> {
+    pub fn validate_for_marginal_slope_typed(&self) -> Result<(), LognormalKernelError> {
         self.validate()?;
         match self {
             Self::None | Self::GaussianShift { .. } => Ok(()),
@@ -217,7 +217,7 @@ fn probit_frailty_scale_components(sigma: f64) -> (f64, f64) {
 /// E[Φ(η + U)] = Φ(η · s) with s = 1/√(1+σ²); writing α = σ²/(1+σ²) the
 /// derivatives are ∂_t s = −α·s and ∂_{tt} s = α(3α−2)·s.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ProbitFrailtyScaleJet {
+pub struct ProbitFrailtyScaleJet {
     /// s = 1/√(1+σ²)
     pub s: f64,
     /// α = σ²/(1+σ²)  — shared auxiliary for all derivative levels.
@@ -244,7 +244,7 @@ impl ProbitFrailtyScaleJet {
     }
 
     /// Build the jet from t = log(σ) directly.
-    pub(crate) fn from_log_sigma(log_sigma: f64) -> Self {
+    pub fn from_log_sigma(log_sigma: f64) -> Self {
         Self::new(log_sigma.exp())
     }
 }
@@ -408,7 +408,7 @@ impl LogLognormalKernelBundle {
 
 /// Builds a log-space kernel bundle for `k = 0, 1, …, max_k` at fixed
 /// `(m, μ, σ)`.
-pub(crate) fn log_kernel_bundle(
+pub fn log_kernel_bundle(
     quadctx: &QuadratureContext,
     m: f64,
     mu: f64,
@@ -881,7 +881,7 @@ impl LogKernelSumJet {
     ///
     /// Computes `log(K_{k,m})` and its μ-derivatives from exact recurrences,
     /// entirely in log-space.
-    pub(crate) fn single_term(
+    pub fn single_term(
         quadctx: &QuadratureContext,
         k: usize,
         m: f64,
@@ -1128,7 +1128,7 @@ impl LatentSurvivalRow {
     }
 
     /// Delayed-entry interval-censored row with explicit loaded/unloaded masses.
-    pub(crate) fn interval_censored(
+    pub fn interval_censored(
         mass_entry: f64,
         mass_left: f64,
         mass_right: f64,

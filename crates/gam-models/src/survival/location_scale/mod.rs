@@ -161,3 +161,4 @@ pub use spec::*;
 pub use time_block::*;
 pub(crate) use truncated_moments::*;
 pub use wiggle_geometry::*;
+pub use family_solver::*;

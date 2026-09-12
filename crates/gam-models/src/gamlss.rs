@@ -181,7 +181,7 @@ mod gaussian;
 pub use gaussian::*;
 
 mod binomial;
-pub(crate) use binomial::*;
+pub use binomial::*;
 
 mod alo_replay;
 pub use alo_replay::{

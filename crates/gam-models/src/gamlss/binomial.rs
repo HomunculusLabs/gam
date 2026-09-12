@@ -45,7 +45,7 @@ mod location_scale_workspace;
 pub(crate) use location_scale_workspace::*;
 
 mod wiggle;
-pub(crate) use wiggle::*;
+pub use wiggle::*;
 
 mod wiggle_custom_family;
 

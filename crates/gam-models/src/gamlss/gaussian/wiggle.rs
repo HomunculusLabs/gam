@@ -92,7 +92,7 @@ impl GaussianLocationScaleWiggleHessianRowPieces {
     }
 }
 
-pub(crate) struct GaussianLocationScaleWiggleFamily {
+pub struct GaussianLocationScaleWiggleFamily {
     pub y: Array1<f64>,
     pub weights: Array1<f64>,
     pub mu_design: Option<DesignMatrix>,
@@ -141,13 +141,13 @@ impl Clone for GaussianLocationScaleWiggleFamily {
 impl GaussianLocationScaleWiggleFamily {
     pub const BLOCK_MU: usize = 0;
     pub const BLOCK_LOG_SIGMA: usize = 1;
-    pub(crate) const BLOCK_WIGGLE: usize = 2;
+    pub const BLOCK_WIGGLE: usize = 2;
 
-    pub(crate) fn parameternames() -> &'static [&'static str] {
+    pub fn parameternames() -> &'static [&'static str] {
         &["mu", "log_sigma", "wiggle"]
     }
 
-    pub(crate) fn parameter_links() -> &'static [ParameterLink] {
+    pub fn parameter_links() -> &'static [ParameterLink] {
         &[
             ParameterLink::Identity,
             ParameterLink::Log,

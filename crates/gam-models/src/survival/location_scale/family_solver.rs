@@ -958,7 +958,7 @@ impl SurvivalLocationScaleFamily {
 /// When the cross-channel curvature is unavailable (e.g. at the
 /// canonicalize step before any pilot β is known), the identity metric
 /// is used instead — see [`Self::identity`].
-pub(crate) struct SurvivalLocationScaleChannelHessian {
+pub struct SurvivalLocationScaleChannelHessian {
     /// Row-major `(n × 3 × 3)` PSD-clamped per-subject Hessian.
     pub(crate) h: ndarray::Array3<f64>,
 }

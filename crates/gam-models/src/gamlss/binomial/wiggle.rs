@@ -630,7 +630,7 @@ impl<'a> BinomialLocationScaleWiggleRowProgram<'a> {
 }
 
 #[derive(Clone)]
-pub(crate) struct BinomialLocationScaleWiggleFamily {
+pub struct BinomialLocationScaleWiggleFamily {
     pub y: Array1<f64>,
     pub weights: Array1<f64>,
     pub link_kind: InverseLink,
@@ -656,15 +656,15 @@ impl MonotoneWiggleFamily for BinomialLocationScaleWiggleFamily {
 }
 
 impl BinomialLocationScaleWiggleFamily {
-    pub(crate) const BLOCK_T: usize = 0;
+    pub const BLOCK_T: usize = 0;
     pub const BLOCK_LOG_SIGMA: usize = 1;
-    pub(crate) const BLOCK_WIGGLE: usize = 2;
+    pub const BLOCK_WIGGLE: usize = 2;
 
-    pub(crate) fn parameternames() -> &'static [&'static str] {
+    pub fn parameternames() -> &'static [&'static str] {
         &["threshold", "log_sigma", "wiggle"]
     }
 
-    pub(crate) fn parameter_links() -> &'static [ParameterLink] {
+    pub fn parameter_links() -> &'static [ParameterLink] {
         &[
             ParameterLink::InverseLink,
             ParameterLink::Log,

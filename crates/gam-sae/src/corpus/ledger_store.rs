@@ -54,7 +54,7 @@ const LEDGER_RUN_ID: &str = "structure-ledger";
 
 /// Persistent, topology-keyed store for one dictionary's
 /// [`StructureLedger`].
-pub(crate) struct LedgerStore {
+pub struct LedgerStore {
     key: Fingerprint,
     /// `None` when the cache directory is unwritable; the store then
     /// degrades to in-memory-only (load = fresh, save = no-op) without
@@ -139,7 +139,7 @@ pub fn serialize_ledger(ledger: &StructureLedger) -> Result<Vec<u8>, String> {
 }
 
 /// Inverse of [`serialize_ledger`].
-pub(crate) fn deserialize_ledger(bytes: &[u8]) -> Result<StructureLedger, String> {
+pub fn deserialize_ledger(bytes: &[u8]) -> Result<StructureLedger, String> {
     serde_json::from_slice(bytes).map_err(|e| {
         format!(
             "ledger payload exists but failed to decode ({e}); refusing to silently reset \

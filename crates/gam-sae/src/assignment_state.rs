@@ -73,7 +73,7 @@ struct AtomCoordMeta {
 /// block so a later full-support specialization remains an exact inverse of the
 /// dense representation.
 #[derive(Debug, Clone)]
-pub(crate) struct SaeAssignmentAtomSpec {
+pub struct SaeAssignmentAtomSpec {
     pub latent_dim: usize,
     pub id_mode: LatentIdMode,
     pub manifold: LatentManifold,
@@ -132,7 +132,7 @@ impl SaeAssignmentState {
     /// and moves the corresponding gate/coordinate blocks with it, so logically
     /// equivalent routings have one deterministic representation.
     #[must_use = "state build error must be handled"]
-    pub(crate) fn from_topk_support_heterogeneous(
+    pub fn from_topk_support_heterogeneous(
         n_obs: usize,
         k_atoms: usize,
         support_k: usize,
@@ -373,7 +373,7 @@ impl SaeAssignmentState {
     ///
     /// For Euclidean atoms the tangent space is the whole ambient space and
     /// `project_tangent` is the identity, so this is a no-op on flat charts.
-    pub(crate) fn project_row_tangent(
+    pub fn project_row_tangent(
         &self,
         row: usize,
         coords: &[f64],
@@ -446,7 +446,7 @@ impl SaeAssignmentState {
 
     /// [`Self::set_row_coords`] against a caller-held coordinate block — the
     /// identical validation and per-atom manifold projection.
-    pub(crate) fn project_row_coords(
+    pub fn project_row_coords(
         &self,
         row: usize,
         values: &[f64],
@@ -487,7 +487,7 @@ impl SaeAssignmentState {
     /// dimension-generic Euclidean. The caller owns the coordinate remap; this
     /// method changes ONLY the topology metadata every sparse consumer reads
     /// through [`Self::atom_axis_periods`] and the retraction registry.
-    pub(crate) fn convert_atom_to_euclidean(&mut self, atom: usize) -> Result<(), String> {
+    pub fn convert_atom_to_euclidean(&mut self, atom: usize) -> Result<(), String> {
         if atom >= self.k_atoms {
             return Err(format!(
                 "SaeAssignmentState::convert_atom_to_euclidean: atom {atom} out of range K={}",
@@ -502,7 +502,7 @@ impl SaeAssignmentState {
 
     /// Overwrite ONE support slot's coordinate block, projecting through the
     /// atom's manifold exactly as [`Self::set_row_coords`] does for a row.
-    pub(crate) fn set_slot_coords(
+    pub fn set_slot_coords(
         &mut self,
         row: usize,
         slot: usize,

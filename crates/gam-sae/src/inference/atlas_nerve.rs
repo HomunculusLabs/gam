@@ -60,7 +60,7 @@ impl AtlasChart {
     /// `row_count`. Storing only positive weights makes atlas memory scale with
     /// route nonzeros rather than `row_count × number_of_charts`.
     #[must_use = "atlas chart construction errors must be handled"]
-    pub(crate) fn from_sparse_weights(
+    pub fn from_sparse_weights(
         chart_idx: usize,
         row_count: usize,
         support_rows: Vec<usize>,
@@ -221,7 +221,7 @@ impl ConvexIntersectionProof {
     }
 
     #[must_use]
-    pub(crate) fn witness_chart(&self) -> usize {
+    pub fn witness_chart(&self) -> usize {
         self.witness_chart
     }
 }

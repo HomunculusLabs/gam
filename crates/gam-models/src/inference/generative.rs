@@ -486,7 +486,7 @@ fn check_dispersion_len(
 }
 
 /// Draw one synthetic observation vector from a generative spec.
-pub(crate) fn sampleobservations<R: rand::Rng + ?Sized>(
+pub fn sampleobservations<R: rand::Rng + ?Sized>(
     spec: &GenerativeSpec,
     rng: &mut R,
 ) -> Result<Array1<f64>, EstimationError> {
@@ -962,7 +962,7 @@ pub fn sampleobservation_seeded_replicates(
 
 /// Extension trait for custom multi-block families that provide explicit
 /// generative semantics (mean + observation noise) at a fitted state.
-pub(crate) trait CustomFamilyGenerative: CustomFamily {
+pub trait CustomFamilyGenerative: CustomFamily {
     fn generativespec(
         &self,
         block_states: &[ParameterBlockState],

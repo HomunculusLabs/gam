@@ -11,7 +11,7 @@ use super::SaeAtomBasisKind;
 /// 49-column tensor basis at `d=2`, which is the smallest expansion that
 /// reliably resolves a non-trivial signal on `T^2` without exploding the
 /// design.
-pub(crate) const SAE_DEFAULT_TORUS_HARMONICS: usize = 3;
+pub const SAE_DEFAULT_TORUS_HARMONICS: usize = 3;
 
 /// Duchon nullspace knob `m` for a SAE-manifold atom of latent dimension
 /// `dim`, sized so the native reproducing-norm Gram (`PenaltySource::Primary`)
@@ -31,7 +31,7 @@ pub(crate) const SAE_DEFAULT_TORUS_HARMONICS: usize = 3;
 /// `DuchonCoordinateEvaluator` refresh read this same derived `m`, so the
 /// design `Φ`, its jet, and the penalty stay column-consistent (the issue-247
 /// invariant).
-pub(crate) fn sae_duchon_atom_m(dim: usize) -> usize {
+pub fn sae_duchon_atom_m(dim: usize) -> usize {
     dim / 2 + 2
 }
 /// Maximum total monomial degree for a Euclidean tangent-patch SAE atom.
@@ -51,23 +51,23 @@ pub const SAE_EUCLIDEAN_PATCH_MAX_DEGREE: usize = 2;
 /// Seed patches use degree 2 ([`SAE_EUCLIDEAN_PATCH_MAX_DEGREE`]); a structure
 /// birth may explicitly persist the degree-3 line candidate. The degree lives
 /// in `SaeBasisResolution::Polynomial`, never inferred from decoder width.
-pub(crate) const SAE_EUCLIDEAN_PATCH_RACE_MAX_DEGREE: usize = 3;
+pub const SAE_EUCLIDEAN_PATCH_RACE_MAX_DEGREE: usize = 3;
 
 /// Flat-line polynomial degree of a Cylinder `S¹ × ℝ` atom's line axis (axis 1).
 /// Mirrors the Euclidean-patch degree so the cylinder's flat factor matches the
 /// patch candidate it races against; `Ml = SAE_CYLINDER_LINE_DEGREE + 1`.
-pub(crate) const SAE_CYLINDER_LINE_DEGREE: usize = 2;
+pub const SAE_CYLINDER_LINE_DEGREE: usize = 2;
 
 /// Möbius production convention (#2240): circle harmonics on the DOUBLE-COVER
 /// angle and the width monomial degree of the deck-invariant basis. Must match
 /// the seed builder and the topology-race candidate (`MobiusHarmonicEvaluator::
 /// new(3, 2)`, deck-invariant width 10).
-pub(crate) const SAE_MOBIUS_CIRCLE_HARMONICS: usize = 3;
-pub(crate) const SAE_MOBIUS_WIDTH_DEGREE: usize = 2;
+pub const SAE_MOBIUS_CIRCLE_HARMONICS: usize = 3;
+pub const SAE_MOBIUS_WIDTH_DEGREE: usize = 2;
 
-pub(crate) const SAE_MAX_PERIODIC_HARMONICS: usize = 4096;
+pub const SAE_MAX_PERIODIC_HARMONICS: usize = 4096;
 
-pub(crate) fn sae_periodic_basis_size(n_harmonics: usize) -> Result<usize, String> {
+pub fn sae_periodic_basis_size(n_harmonics: usize) -> Result<usize, String> {
     if n_harmonics > SAE_MAX_PERIODIC_HARMONICS {
         return Err(format!(
             "sae_build_periodic_atom: n_harmonics={n_harmonics} exceeds dense limit {SAE_MAX_PERIODIC_HARMONICS}"
@@ -84,7 +84,7 @@ pub(crate) fn sae_periodic_basis_size(n_harmonics: usize) -> Result<usize, Strin
 /// The canonical basis tokens a caller may name. Single source of truth for
 /// both the parser and the error message that rejects everything else, so the
 /// two cannot drift apart.
-pub(crate) const SAE_ATOM_BASIS_TOKENS: [&str; 13] = [
+pub const SAE_ATOM_BASIS_TOKENS: [&str; 13] = [
     "duchon",
     "periodic",
     "sphere",

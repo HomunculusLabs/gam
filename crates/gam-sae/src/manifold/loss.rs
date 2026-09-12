@@ -71,7 +71,7 @@ pub struct SaeManifoldLossBreakdown {
 /// Production objective and certificate paths consume this value object so the
 /// criterion value and gradient are assembled from the same converged cache.
 #[derive(Debug, Clone)]
-pub(crate) struct SaeOuterRhoGradientComponents {
+pub struct SaeOuterRhoGradientComponents {
     /// Direct (no-envelope) derivative of `loss.total() + extra_penalty_energy`
     /// with respect to log-strength coordinates, excluding the custom factor
     /// logdet and Occam terms, PLUS the realised-rank charge's direct
