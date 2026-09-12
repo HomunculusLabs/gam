@@ -2610,6 +2610,14 @@ impl SaeBasisThirdJet for DuchonCoordinateEvaluator {
 pub struct EuclideanPatchEvaluator {
     pub latent_dim: usize,
     pub max_degree: usize,
+    /// The monomial exponents of total degree ≤ `max_degree`, in the column order
+    /// of `gam_terms::basis::monomial_exponents`. They are built once here because
+    /// every evaluation reads them. `evaluate_into` runs once per active
+    /// `(row, slot)` in each pass of the support lane's inner cycle, and the
+    /// support `"linear"` and `"euclidean"` atoms are both patches. Rebuilding
+    /// the table on every call allocated a vector per column inside the in-place
+    /// path that exists to avoid per-call allocation.
+    exponents: Vec<Vec<usize>>,
 }
 
 impl EuclideanPatchEvaluator {
@@ -2620,11 +2628,12 @@ impl EuclideanPatchEvaluator {
         Ok(Self {
             latent_dim,
             max_degree,
+            exponents: gam_terms::basis::monomial_exponents(latent_dim, max_degree),
         })
     }
 
     pub fn basis_size(&self) -> usize {
-        gam_terms::basis::monomial_exponents(self.latent_dim, self.max_degree).len()
+        self.exponents.len()
     }
 }
 
@@ -2654,10 +2663,7 @@ impl SaeBasisEvaluator for EuclideanPatchEvaluator {
         {
             return Ok(None);
         }
-        Ok(Some(Arc::new(Self {
-            latent_dim: self.latent_dim,
-            max_degree: self.max_degree,
-        })))
+        Ok(Some(Arc::new(self.clone())))
     }
 
     fn phi_eta_split(&self, n_basis: usize) -> Result<PhiEtaSplit, String> {
@@ -2707,7 +2713,7 @@ impl SaeBasisEvaluator for EuclideanPatchEvaluator {
                 coords.ncols()
             ));
         }
-        let exponents = gam_terms::basis::monomial_exponents(self.latent_dim, self.max_degree);
+        let exponents = &self.exponents;
         let n = coords.nrows();
         let m = exponents.len();
         if phi.dim() != (n, m) {
@@ -2770,7 +2776,7 @@ impl SaeBasisSecondJet for EuclideanPatchEvaluator {
                 coords.ncols()
             ));
         }
-        let exponents = gam_terms::basis::monomial_exponents(self.latent_dim, self.max_degree);
+        let exponents = &self.exponents;
         let n = coords.nrows();
         let m = exponents.len();
         let d = self.latent_dim;
@@ -2830,7 +2836,7 @@ impl SaeBasisThirdJet for EuclideanPatchEvaluator {
                 coords.ncols()
             ));
         }
-        let exponents = gam_terms::basis::monomial_exponents(self.latent_dim, self.max_degree);
+        let exponents = &self.exponents;
         let n = coords.nrows();
         let m = exponents.len();
         let d = self.latent_dim;
