@@ -108,6 +108,13 @@ impl<'a> PolyaGammaBatchInput<'a> {
         if self.shapes.iter().any(|b| *b == 0) {
             return Err("polya_gamma: b=0 is invalid (PG(0,c) is a point mass at 0)".to_string());
         }
+        // PG(b, c) needs a finite tilt, and the normal-approximation samplers
+        // truncate by rejection, which terminates only for a finite positive mean.
+        if let Some((row, &tilt)) = self.tilts.iter().enumerate().find(|(_, t)| !t.is_finite()) {
+            return Err(format!(
+                "polya_gamma: tilt at row {row} is {tilt}; PG(b, c) needs a finite tilt"
+            ));
+        }
         Ok(())
     }
 }
@@ -665,38 +672,6 @@ extern "C" __device__ double pg1_draw(struct XorwowState* st, double tilt) {
     }
 }
 
-// ── Saddlepoint helpers (math §9) ────────────────────────────────────────
-
-extern "C" __device__ double saddlepoint_t(double x) {
-    if (fabs(x - 1.0) < 1.0e-9) return 0.0;
-    if (x < 1.0) {
-        double v = sqrt(3.0 * (1.0 - x)); if (v < 1.0e-6) v = 1.0e-6;
-        for (int it = 0; it < 6; ++it) {
-            double tanh_v = tanh(v);
-            double f  = tanh_v / v - x;
-            double sech_sq = 1.0 - tanh_v * tanh_v;
-            double df = (sech_sq - tanh_v / v) / v;
-            v -= f / df;
-            if (fabs(v) < 1.0e-12) break;
-        }
-        return -0.5 * v * v;
-    } else {
-        double v = sqrt(3.0 * (x - 1.0));
-        if (v > 0.49 * PG_PI) v = 0.49 * PG_PI;
-        if (v < 1.0e-6) v = 1.0e-6;
-        for (int it = 0; it < 6; ++it) {
-            double tan_v = tan(v);
-            double f  = tan_v / v - x;
-            double sec_sq = 1.0 + tan_v * tan_v;
-            double df = (sec_sq - tan_v / v) / v;
-            v -= f / df;
-            if (v < 1.0e-6) v = 1.0e-6;
-            if (v > 0.499999 * PG_PI) v = 0.499999 * PG_PI;
-        }
-        return 0.5 * v * v;
-    }
-}
-
 // ── Kernels ──────────────────────────────────────────────────────────────
 
 extern "C" __global__ void pg1_kernel(
@@ -739,10 +714,7 @@ extern "C" __global__ void sp_kernel(
     for (unsigned int j = 0; j < b; ++j) {
         acc += pg1_draw(&st, c);
     }
-    // Touch saddlepoint_t so the helper isn’t DCE’d before phase 3 wiring;
-    // the value is unused (multiplied by zero) so this is free.
-    double sp_warm = saddlepoint_t(0.5);
-    out[row] = acc + 0.0 * sp_warm;
+    out[row] = acc;
 }
 
 extern "C" __global__ void normal_kernel(
@@ -774,8 +746,13 @@ extern "C" __global__ void normal_kernel(
         var = b * ratio / (2.0 * c * c * c);
     }
     double sd = sqrt(var);
-    double draw = mean + sd * xorwow_norm(&st);
-    if (draw <= 0.0) draw = -draw + 1.0e-300;
+    // A Pólya-Gamma variable is strictly positive: truncate the Gaussian
+    // approximation to the positive half-line by rejection, as the host oracle
+    // `pg_normal_cpu_oracle` does, instead of reflecting a draw off zero.
+    double draw;
+    do {
+        draw = mean + sd * xorwow_norm(&st);
+    } while (!(draw > 0.0));
     out[row] = draw;
 }
 "#;
