@@ -1405,6 +1405,73 @@ impl HyperOperator for SparseDirectionalHyperOperator {
         out
     }
 
+    /// `tr(Fᵀ B_τ F) = 2⟨W ⊙ X_τF, XF⟩ + ⟨c ⊙ XF, XF⟩ + tr(Fᵀ S_τ F) − tr(Fᵀ H_φ F)`,
+    /// with `XF` and `X_τF` formed one row chunk at a time by GEMM. The trait
+    /// default applies `mul_vec` once per factor column, four `n × p` level-2
+    /// products each, so a gradient trace against a rank-`p` factor cost `p`
+    /// matvecs per ψ coordinate (#2735).
+    fn trace_projected_factor(&self, factor: &Array2<f64>) -> f64 {
+        assert_eq!(factor.nrows(), self.p);
+        let rank = factor.ncols();
+        let n_obs = self.w_diag.len();
+        if rank == 0 || n_obs == 0 {
+            return 0.0;
+        }
+        let chunk_rows = byte_balanced_row_chunk(self.p + rank, n_obs);
+        let w = self.w_diag.as_ref();
+        let c_opt = self.c_x_tau_beta.as_ref();
+        let mut design_total = 0.0_f64;
+        let mut correction_total = 0.0_f64;
+        let mut start = 0usize;
+        while start < n_obs {
+            let end = (start + chunk_rows).min(n_obs);
+            let Some(x_tau_f_chunk) = self.x_tau.dense_rows_times(start..end, factor) else {
+                // An operator-backed `X_τ` has no stored rows: keep the per-column
+                // products its matvec streams.
+                let op_factor = self.mul_mat(factor);
+                return factor
+                    .iter()
+                    .zip(op_factor.iter())
+                    .map(|(&f, &bf)| f * bf)
+                    .sum();
+            };
+            let rows = self
+                .x_design
+                .try_row_chunk(start..end)
+                .unwrap_or_else(|err| {
+                    // SAFETY: row range is a valid sub-range of x_design; failure means operator broke contract.
+                    reml_contract_panic(format!(
+                        "SparseDirectionalHyperOperator::trace_projected_factor row chunk failed: {err}"
+                    ))
+                });
+            let xf_chunk = gam_linalg::faer_ndarray::fast_ab(&rows, factor);
+            for i_local in 0..(end - start) {
+                let i = start + i_local;
+                let w_i = w[i];
+                let xf_row = xf_chunk.row(i_local);
+                let x_tau_f_row = x_tau_f_chunk.row(i_local);
+                for k in 0..rank {
+                    design_total += x_tau_f_row[k] * w_i * xf_row[k];
+                }
+                if let Some(c) = c_opt {
+                    let c_i = c[i];
+                    for k in 0..rank {
+                        let v = xf_row[k];
+                        correction_total += c_i * v * v;
+                    }
+                }
+            }
+            start = end;
+        }
+        let s_f = self.s_tau.dot(factor);
+        let penalty: f64 = factor.iter().zip(s_f.iter()).map(|(&f, &s)| f * s).sum();
+        let firth: f64 = self.firth_hphi_tau_partial.as_ref().map_or(0.0, |hphi| {
+            let h_f = hphi.dot(factor);
+            factor.iter().zip(h_f.iter()).map(|(&f, &h)| f * h).sum()
+        });
+        2.0 * design_total + correction_total + penalty - firth
+    }
+
     fn is_implicit(&self) -> bool {
         false
     }

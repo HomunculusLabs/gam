@@ -6593,6 +6593,52 @@ pub(crate) fn batched_implicit_trace_matches_per_operator_trace() {
     }
 }
 
+/// Contract: `SparseDirectionalHyperOperator::trace_projected_factor`, which
+/// contracts `X_τF` against `XF` row by row, equals `Σ_c f_cᵀ (B_τ f_c)` taken
+/// through `mul_vec` one factor column at a time, with the non-Gaussian and
+/// Firth summands present.
+#[test]
+pub(crate) fn sparse_directional_trace_projected_factor_matches_column_matvecs() {
+    let n = 7usize;
+    let p = 4usize;
+    let rank = 3usize;
+    let x_data = Array2::from_shape_fn((n, p), |(i, j)| {
+        ((i * p + j) as f64 * 0.37).sin() + 0.1 * j as f64
+    });
+    let x_tau_data = Array2::from_shape_fn((n, p), |(i, j)| {
+        ((i + 2 * j) as f64 * 0.23).cos() - 0.05 * i as f64
+    });
+    let weights = Array1::from_shape_fn(n, |i| 0.6 + 0.1 * i as f64);
+    let c_x_tau_beta = Array1::from_shape_fn(n, |i| 0.2 * (i as f64 * 0.41).sin());
+    let s_tau = Array2::from_shape_fn((p, p), |(i, j)| {
+        if i == j { 0.3 + 0.05 * i as f64 } else { 0.02 }
+    });
+    let hphi = Array2::from_shape_fn((p, p), |(i, j)| 0.01 * (i + j + 1) as f64);
+    let factor = Array2::from_shape_fn((p, rank), |(i, k)| ((i * rank + k) as f64 * 0.29).sin());
+    let op = SparseDirectionalHyperOperator {
+        x_tau: crate::estimate::reml::HyperDesignDerivative::from(x_tau_data),
+        x_design: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(x_data)),
+        w_diag: gam_linalg::matrix::SignedWeightsArc::from_array(weights),
+        s_tau,
+        c_x_tau_beta: Some(c_x_tau_beta),
+        firth_hphi_tau_partial: Some(hphi),
+        p,
+    };
+    let column_products = op.mul_mat(&factor);
+    let want: f64 = factor
+        .iter()
+        .zip(column_products.iter())
+        .map(|(&f, &bf)| f * bf)
+        .sum();
+    let got = op.trace_projected_factor(&factor);
+    // Both sides accumulate `n · p · rank` rounded products.
+    let band = (n * p * rank) as f64 * f64::EPSILON * want.abs().max(1.0);
+    assert!(
+        (got - want).abs() <= band,
+        "fused trace {got:.15e} vs column matvecs {want:.15e} (band {band:.3e})"
+    );
+}
+
 /// Contract: `ImplicitHyperOperator::mul_vec(v)` reproduces the analytic
 /// first-order spatial drift
 ///   `B_d v = (∂X/∂ψ_d)ᵀ W X v + Xᵀ W (∂X/∂ψ_d) v + Xᵀ diag(c·X_{ψ_d}β̂) X v + S_{ψ_d} v`.

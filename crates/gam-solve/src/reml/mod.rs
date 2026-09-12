@@ -4220,6 +4220,29 @@ impl HyperDesignDerivative {
         }
     }
 
+    /// `X_τ[rows, ·] · factor` for a derivative that stores its values, or `None`
+    /// for an operator-backed one, whose rows exist only through its matvecs.
+    pub(crate) fn dense_rows_times(
+        &self,
+        rows: Range<usize>,
+        factor: &Array2<f64>,
+    ) -> Option<Array2<f64>> {
+        match &self.storage {
+            DerivativeMatrixStorage::Dense(dense) => Some(gam_linalg::faer_ndarray::fast_ab(
+                &dense.slice(s![rows, ..]),
+                factor,
+            )),
+            DerivativeMatrixStorage::Zero(_) => {
+                Some(Array2::<f64>::zeros((rows.len(), factor.ncols())))
+            }
+            DerivativeMatrixStorage::Embedded(backend) => Some(gam_linalg::faer_ndarray::fast_ab(
+                &backend.local.slice(s![rows, ..]),
+                &factor.slice(s![backend.global_range.clone(), ..]),
+            )),
+            DerivativeMatrixStorage::Implicit(_) | DerivativeMatrixStorage::LatentCoord(_) => None,
+        }
+    }
+
     pub(crate) fn materialize(&self) -> Array2<f64> {
         storage_dispatch!(&self.storage, b => b.materialize())
     }
