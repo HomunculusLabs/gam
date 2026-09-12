@@ -1302,6 +1302,10 @@ pub enum OuterResultOrigin {
     /// ARC exhausted its budget on a last iterate WORSE than the best feasible
     /// iterate it had seen, so the best iterate was substituted (#1371/#1476).
     ArcBestIterateSubstitution,
+    /// A fixed-point walk (EFS / HybridEFS) exhausted its budget on a last iterate
+    /// WORSE than the best iterate it had evaluated, so the best iterate was
+    /// substituted, as ARC does (#1371, #2817).
+    FixedPointBestIterateSubstitution,
     /// ARC hit a run of infeasible probes with no synchronized Hessian, so a
     /// checkpoint was rebuilt from the stored best iterate.
     ArcInfeasibleStallCheckpoint,
@@ -9276,10 +9280,13 @@ where
 ///
 /// A failed evaluation belongs to the proposed *next* point.  Therefore it
 /// must not overwrite `incumbent`: that slot remains the exact last finite
-/// point from which another solver can continue.
+/// point from which another solver can continue. `best_iterate` keeps the
+/// lowest finite sample, which a budget-exhausted walk publishes when its last
+/// iterate is worse (#2817).
 pub(crate) struct RetainingFixedPointObjective<ObjFn> {
     inner: RetainingObjective<ObjFn>,
     incumbent: Arc<Mutex<FixedPointContinuationCheckpoint>>,
+    best_iterate: Arc<Mutex<FixedPointContinuationCheckpoint>>,
     evaluated_inner_seed: Arc<Mutex<Option<BoundInnerSeed>>>,
     successful_iterations: usize,
     plan_used: OuterPlan,
@@ -9290,12 +9297,14 @@ impl<ObjFn> RetainingFixedPointObjective<ObjFn> {
         inner: ObjFn,
         last_error: Arc<Mutex<Option<ObjectiveEvalError>>>,
         incumbent: Arc<Mutex<FixedPointContinuationCheckpoint>>,
+        best_iterate: Arc<Mutex<FixedPointContinuationCheckpoint>>,
         evaluated_inner_seed: Arc<Mutex<Option<BoundInnerSeed>>>,
         plan_used: OuterPlan,
     ) -> Self {
         Self {
             inner: RetainingObjective::new(inner, last_error),
             incumbent,
+            best_iterate,
             evaluated_inner_seed,
             successful_iterations: 0,
             plan_used,
@@ -9317,17 +9326,28 @@ where
                 .expect("fixed-point inner-state publication lock poisoned")
                 .clone()
                 .filter(|seed| outer_theta_bitwise_eq(&seed.theta, x));
+            let checkpoint = FixedPointContinuationCheckpoint {
+                point: x.clone(),
+                sample: sample.clone(),
+                iterations: self.successful_iterations,
+                plan_used: self.plan_used,
+                inner_seed,
+            };
+            {
+                let mut best = self
+                    .best_iterate
+                    .lock()
+                    .expect("fixed-point best-iterate publication lock poisoned");
+                if sample.value.is_finite()
+                    && (!best.sample.value.is_finite() || sample.value < best.sample.value)
+                {
+                    *best = checkpoint.clone();
+                }
+            }
             *self
                 .incumbent
                 .lock()
-                .expect("fixed-point incumbent publication lock poisoned") =
-                FixedPointContinuationCheckpoint {
-                    point: x.clone(),
-                    sample: sample.clone(),
-                    iterations: self.successful_iterations,
-                    plan_used: self.plan_used,
-                    inner_seed,
-                };
+                .expect("fixed-point incumbent publication lock poisoned") = checkpoint;
         }
         outcome
     }
@@ -9397,17 +9417,23 @@ pub(crate) fn run_fixed_point_outer_solver(
         .expect("fixed-point inner-state publication lock poisoned")
         .clone()
         .filter(|inner_seed| outer_theta_bitwise_eq(&inner_seed.theta, seed));
-    let incumbent = Arc::new(Mutex::new(FixedPointContinuationCheckpoint {
+    let seed_checkpoint = FixedPointContinuationCheckpoint {
         point: seed.clone(),
         sample: seed_sample.clone(),
         iterations: 0,
         plan_used: the_plan,
         inner_seed: seed_inner_state,
-    }));
+    };
+    // The best finite iterate the walk evaluated, kept beside the last one: a
+    // budget-exhausted walk must not publish a worse point than it passed
+    // through (#2817).
+    let best_iterate = Arc::new(Mutex::new(seed_checkpoint.clone()));
+    let incumbent = Arc::new(Mutex::new(seed_checkpoint));
     let objective = RetainingFixedPointObjective::new(
         objective,
         Arc::clone(&last_step_error),
         Arc::clone(&incumbent),
+        Arc::clone(&best_iterate),
         Arc::clone(&evaluated_inner_seed),
         the_plan,
     );
@@ -9507,6 +9533,32 @@ pub(crate) fn run_fixed_point_outer_solver(
                 last_solution.final_value,
                 step_norm,
             );
+            let best = best_iterate
+                .lock()
+                .expect("fixed-point best-iterate publication lock poisoned")
+                .clone();
+            if best.sample.value.is_finite()
+                && (!last_solution.final_value.is_finite()
+                    || best.sample.value < last_solution.final_value)
+            {
+                log::warn!(
+                    "[OUTER] {context}: {label} budget-exhaustion last iterate (value={:.6e}) \
+                     is worse than the best iterate it evaluated (value={:.6e}, iteration {}); \
+                     substituting the best iterate (#2817)",
+                    last_solution.final_value,
+                    best.sample.value,
+                    best.iterations,
+                );
+                let mut result = OuterResult::new(
+                    best.point,
+                    best.sample.value,
+                    last_solution.iterations,
+                    false,
+                    the_plan,
+                );
+                result.origin = OuterResultOrigin::FixedPointBestIterateSubstitution;
+                return Ok(result);
+            }
             Ok(solution_into_outer_result(*last_solution, false, the_plan))
         }
         Err(FixedPointError::ObjectiveFailed { .. }) => {

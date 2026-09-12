@@ -643,3 +643,104 @@ fn a_step_norm_stop_at_a_stationary_point_is_certified_2817() {
     assert_eq!(result.rho, seed);
 }
 
+/// A budget-exhausted fixed-point walk publishes the best iterate it evaluated,
+/// not a worse last iterate (#2817).
+///
+/// On #2080's wide-p fixture (job 507123) seed 0's HybridEFS walk evaluated a
+/// criterion of 2.649e1 and then published its last iterate at 3.873e2. Here the
+/// EFS map always proposes the same step and every backtracking probe accepts it
+/// (the value route reads 0), while the fixed-point sample's own criterion reads
+/// 1.0 at the seed, 0.5 at the first iterate and 4.0 from then on. The walk runs
+/// to `max_iter`, and the published result must carry the 0.5.
+#[test]
+fn a_budget_exhausted_efs_walk_publishes_its_best_iterate_2817() {
+    const MAX_ITER: usize = 3;
+    const SAMPLE_COSTS: [f64; 3] = [1.0, 0.5, 4.0];
+    let efs_calls = Arc::new(AtomicUsize::new(0));
+    let problem = OuterProblem::new(3)
+        .with_gradient(Derivative::Analytic)
+        .with_hessian(DeclaredHessianForm::Unavailable)
+        .with_max_iter(MAX_ITER);
+    let mut obj = problem.build_objective(
+        (),
+        |_: &mut (), _: &Array1<f64>| Ok(0.0),
+        |_: &mut (), theta: &Array1<f64>| {
+            Ok(OuterEval {
+                cost: 0.0,
+                gradient: theta.clone(),
+                hessian: HessianValue::Unavailable,
+                inner_beta_hint: None,
+            })
+        },
+        None::<fn(&mut ())>,
+        {
+            let efs_calls = Arc::clone(&efs_calls);
+            Some(move |_: &mut (), theta: &Array1<f64>| {
+                let call = efs_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(EfsEval {
+                    cost: SAMPLE_COSTS[call.min(SAMPLE_COSTS.len() - 1)],
+                    steps: vec![-0.25; theta.len()],
+                    beta: None,
+                    psi_gradient: None,
+                    psi_indices: None,
+                    inner_hessian_scale: None,
+                    logdet_enclosure_gap: None,
+                    consecutive_restored_incumbents: None,
+                })
+            })
+        },
+    );
+    let capability = obj.capability();
+    let the_plan = plan(&capability);
+    assert_eq!(the_plan.solver, Solver::Efs);
+    let seed = Array1::from_elem(3, 1.0);
+
+    let result = match run_fixed_point_outer_solver(
+        &mut obj,
+        capability.theta_layout(),
+        capability.barrier_config.clone(),
+        &problem.config(),
+        "budget-exhausted EFS walk",
+        &seed,
+        the_plan,
+        "EFS",
+        "EFS failed",
+    ) {
+        Ok(result) => result,
+        Err(FixedPointOuterRunError::IterationRejected(request)) => {
+            panic!("a walk whose probes all accept was refused: {}", request.refusal)
+        }
+        Err(FixedPointOuterRunError::SeedRejected(error)) => {
+            panic!("the finite seed evaluation succeeded; this is not a seed rejection: {error}")
+        }
+        Err(FixedPointOuterRunError::ImmediateFallback(request)) => {
+            panic!("an accepted step is not a solver request: {}", request.reason())
+        }
+        Err(FixedPointOuterRunError::Failed(error)) => {
+            panic!("a budget-exhausted walk was made fatal: {error}")
+        }
+    };
+    eprintln!(
+        "[#2817 fixed-point best iterate] efs_calls={} origin={:?} final_value={} iterations={} rho={:?}",
+        efs_calls.load(Ordering::Relaxed),
+        result.origin,
+        result.final_value,
+        result.iterations,
+        result.rho,
+    );
+    assert!(
+        efs_calls.load(Ordering::Relaxed) >= SAMPLE_COSTS.len(),
+        "fixture precondition: the walk evaluated past its best iterate"
+    );
+    assert!(!result.converged(), "a budget-exhausted walk makes no convergence claim");
+    assert_eq!(
+        result.origin,
+        super::run::OuterResultOrigin::FixedPointBestIterateSubstitution,
+        "the walk's last iterate reads 4.0 and its best 0.5, so the best must be published"
+    );
+    assert_eq!(
+        result.final_value.to_bits(),
+        0.5_f64.to_bits(),
+        "the published value must be the best iterate's criterion"
+    );
+}
