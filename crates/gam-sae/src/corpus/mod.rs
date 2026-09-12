@@ -25,10 +25,6 @@
 //!   `gemv_t`, `cross`) that **read `f32` rows and accumulate in `f64`**, the
 //!   numerical contract that keeps the streaming sums deterministic and
 //!   precise despite `f32` on-disk storage.
-//! * [`object_store`] (#987) — the same `v1` shards streamed out of **object
-//!   storage** through a two-method [`object_store::ObjectStore`] trait (no
-//!   cloud SDK in-tree), with a bounded prefetch window and the identical
-//!   deterministic `(row_id, row)` sequence as the mmap reader.
 //!
 //! # The seam
 //!
@@ -48,8 +44,6 @@
 //! Nothing in this module references `sae_manifold.rs`; the term wires these
 //! pieces in on its side of the seam.
 
-pub mod ledger_store;
-pub mod object_store;
 pub mod shard_reader;
 pub mod torus_merge_audit;
 pub mod warm_state;

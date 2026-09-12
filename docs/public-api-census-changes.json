@@ -2253,5 +2253,19 @@
     },
     "reason": "SPEC rule 20 (#2902, table row 11). These three public functions projected a spatial length scale onto the caller's hand-supplied [min_length_scale, max_length_scale] window. The window is deleted, and the kappa search box is derived from each term's point cloud (spatial_term_psi_bounds), so nothing is left to project. The seed constructors read -ln(length_scale) directly through a private helper.",
     "evidence": "At the base, git grep finds the three names re-exported from crates/gam-terms/src/smooth.rs. Their callers are crates/gam-terms/src/smooth/term_specs.rs (spatial_term_seed_psi, in SpatialLogKappaCoords::from_length_scales and from_length_scales_aniso), crates/gam-models/src/fit_orchestration/drivers/spatial_optimization.rs (project_spatial_length_scales_in_spec, in spatial_kappa_incumbent), crates/gam-terms/src/smooth/spatial_length_scale_projection_2726_tests.rs, and tests/regressions/misc/regression_2726_joint_psi_seed_shares_theta0.rs. All of them are removed or rewritten in the same commit. scripts/public_api_census.py was not run locally (user directive: no local runs)."
+  },
+  {
+    "base": "01ba62af58ec5046743f877b96d6cdb7ded8a6fa",
+    "removed": {
+      "crates/gam-sae/src/corpus/ledger_store.rs::deserialize_ledger": 1,
+      "crates/gam-sae/src/corpus/ledger_store.rs::load": 1,
+      "crates/gam-sae/src/corpus/ledger_store.rs::new": 1,
+      "crates/gam-sae/src/corpus/ledger_store.rs::save": 1,
+      "crates/gam-sae/src/corpus/ledger_store.rs::serialize_ledger": 1,
+      "crates/gam-sae/src/corpus/object_store.rs::new": 1,
+      "crates/gam-sae/src/corpus/object_store.rs::open": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): corpus::ledger_store and corpus::object_store have no consumer outside their own files; rustc reported their items never used once narrowed, so the modules and their public functions are deleted.",
+    "evidence": "At d2968d715, git grep -n -w finds every public function of ledger_store.rs and object_store.rs called only inside those files, and pool check 545684 reported them never used after narrowing. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]
