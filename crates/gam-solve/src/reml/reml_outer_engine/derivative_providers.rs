@@ -633,7 +633,7 @@ impl BarrierConfig {
     /// row was transformed; the predicate that recognizes it was not.
     ///
     /// Returns `None` if the constraints are `None` or no simple-bound rows are found.
-    pub fn from_constraints(
+    pub(crate) fn from_constraints(
         constraints: Option<&crate::pirls::LinearInequalityConstraints>,
     ) -> Option<Self> {
         // Default log-barrier strength τ used when a simple-bound BarrierConfig
@@ -691,7 +691,7 @@ impl BarrierConfig {
     }
 
     /// Compute slack values Δ_j = s_j β_j − b_j. Returns `None` if infeasible.
-    pub fn slacks(&self, beta: &Array1<f64>) -> Option<Vec<f64>> {
+    pub(crate) fn slacks(&self, beta: &Array1<f64>) -> Option<Vec<f64>> {
         let mut slacks = Vec::with_capacity(self.constrained_indices.len());
         for (ci, &idx) in self.constrained_indices.iter().enumerate() {
             let sign = self.bound_signs[ci];
@@ -705,7 +705,7 @@ impl BarrierConfig {
     }
 
     /// Add the barrier Hessian diagonal τ·D^(2) to H in-place.
-    pub fn add_barrier_hessian_diagonal(
+    pub(crate) fn add_barrier_hessian_diagonal(
         &self,
         h: &mut Array2<f64>,
         beta: &Array1<f64>,
@@ -777,7 +777,7 @@ impl BarrierConfig {
     /// whose `ref_diag` was a representative diagonal of `X'W_HX + S` that
     /// no call site could compute correctly without surfacing the inner
     /// Hessian out to the EFS bridge.
-    pub fn barrier_curvature_locally_concentrated(
+    pub(crate) fn barrier_curvature_locally_concentrated(
         &self,
         beta: &Array1<f64>,
         ratio: f64,
@@ -823,7 +823,7 @@ impl BarrierConfig {
     ///
     /// `ref_diag` should be a representative diagonal of X'W_HX + S (e.g. the
     /// median or mean). A typical `threshold` is 0.01–0.1.
-    pub fn barrier_curvature_is_significant(
+    pub(crate) fn barrier_curvature_is_significant(
         &self,
         beta: &Array1<f64>,
         ref_diag: f64,

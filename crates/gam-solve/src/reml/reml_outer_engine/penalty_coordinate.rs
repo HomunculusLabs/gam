@@ -136,12 +136,12 @@ impl PenaltySubspaceTrace {
     }
 
     /// Compute `tr(H_proj⁻¹ · R)` given an already-reduced `R = U_Sᵀ A U_S`.
-    pub fn trace_projected_logdet_reduced(&self, r_mat: &Array2<f64>) -> f64 {
+    pub(crate) fn trace_projected_logdet_reduced(&self, r_mat: &Array2<f64>) -> f64 {
         gam_terms::construction::trace_reduced_penalty_covariance(r_mat, &self.h_proj_inverse)
     }
 
     /// Cross-trace given pre-reduced blocks `R_A = U_Sᵀ A U_S`, `R_B = U_Sᵀ B U_S`.
-    pub fn trace_projected_logdet_cross_reduced(&self, ra: &Array2<f64>, rb: &Array2<f64>) -> f64 {
+    pub(crate) fn trace_projected_logdet_cross_reduced(&self, ra: &Array2<f64>, rb: &Array2<f64>) -> f64 {
         // left = H_proj⁻¹ · R_A ;  right = H_proj⁻¹ · R_B ;  tr(left · right).
         let left = self.h_proj_inverse.dot(ra);
         let right = self.h_proj_inverse.dot(rb);
@@ -153,7 +153,7 @@ impl PenaltySubspaceTrace {
     /// Uses `A.mul_mat(U_S)` so an Hv-only operator is probed in `r` matvecs
     /// (each `O(work_of_A)`), then a single `r × p × r` reduction routed
     /// through faer's parallel SIMD GEMM (`fast_atb`).
-    pub fn reduce_operator<O>(&self, a: &O) -> Array2<f64>
+    pub(crate) fn reduce_operator<O>(&self, a: &O) -> Array2<f64>
     where
         O: HyperOperator + ?Sized,
     {
@@ -164,7 +164,7 @@ impl PenaltySubspaceTrace {
     /// `tr(K · A)` for `A` exposed only as a `HyperOperator`.  Mirrors
     /// [`Self::trace_projected_logdet`] without forcing dense materialization
     /// of `A`.
-    pub fn trace_operator<O>(&self, a: &O) -> f64
+    pub(crate) fn trace_operator<O>(&self, a: &O) -> f64
     where
         O: HyperOperator + ?Sized,
     {
@@ -179,7 +179,7 @@ impl PenaltySubspaceTrace {
     /// to `Self::apply` because the `n × p · p × r` GEMM streams the
     /// `p`-axis once.  Streams `X` through `try_row_chunk` so operator-backed
     /// (Lazy) designs at large scale never densify the full `(n × p)` block.
-    pub fn xt_projected_kernel_x_diagonal(&self, x: &DesignMatrix) -> Array1<f64> {
+    pub(crate) fn xt_projected_kernel_x_diagonal(&self, x: &DesignMatrix) -> Array1<f64> {
         let n = x.nrows();
         let p = x.ncols();
         let r = self.u_s.ncols();
@@ -238,7 +238,7 @@ impl PenaltySubspaceTrace {
     /// `a` (≈ the outer-stationarity residual `r`) before the inverse,
     /// without biasing the numerator. Costs `O(p·r + r²)` versus the
     /// `O(p²·r)` full solve.
-    pub fn bilinear_pseudo_inverse(&self, a: &Array1<f64>, b: &Array1<f64>) -> f64 {
+    pub(crate) fn bilinear_pseudo_inverse(&self, a: &Array1<f64>, b: &Array1<f64>) -> f64 {
         let proj_a = gam_linalg::faer_ndarray::fast_atv(&self.u_s, a);
         let proj_b = gam_linalg::faer_ndarray::fast_atv(&self.u_s, b);
         let h_proj_inv_b = self.h_proj_inverse.dot(&proj_b);
@@ -452,7 +452,7 @@ impl<'a> ConstrainedSubspaceKernel<'a> {
 
     /// Whether any active constraints contribute (when false this kernel
     /// is identical to the bare [`PenaltySubspaceTrace::apply_pseudo_inverse`]).
-    pub fn has_active_constraints(&self) -> bool {
+    pub(crate) fn has_active_constraints(&self) -> bool {
         self.k_active > 0
     }
 }

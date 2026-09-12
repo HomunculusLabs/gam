@@ -448,7 +448,7 @@ impl StochasticTraceEstimator {
     }
 
     /// Create with default configuration.
-    pub fn with_defaults() -> Self {
+    pub(crate) fn with_defaults() -> Self {
         Self::new(StochasticTraceConfig::default())
     }
 
@@ -717,7 +717,7 @@ impl StochasticTraceEstimator {
 
     /// Estimate a single trace `tr(H⁻¹ A)` using the same batched Hutchinson
     /// core as the multi-coordinate path.
-    pub fn estimate_single_trace(
+    pub(crate) fn estimate_single_trace(
         &self,
         hop: &dyn HessianFactorization,
         matrix: &Array2<f64>,
@@ -738,7 +738,7 @@ impl StochasticTraceEstimator {
     ///
     /// # Returns
     /// A vector of estimated traces, one per input matrix.
-    pub fn estimate_traces(
+    pub(crate) fn estimate_traces(
         &self,
         hop: &dyn HessianFactorization,
         matrices: &[&Array2<f64>],
@@ -760,7 +760,7 @@ impl StochasticTraceEstimator {
     ///
     /// # Returns
     /// A vector of estimated traces: first for dense matrices, then for operators.
-    pub fn estimate_traces_with_operators(
+    pub(crate) fn estimate_traces_with_operators(
         &self,
         hop: &dyn HessianFactorization,
         dense_matrices: &[&Array2<f64>],
@@ -791,7 +791,7 @@ impl StochasticTraceEstimator {
     ///
     /// # Returns
     /// Estimated traces: first for dense matrices, then for implicit operators.
-    pub fn estimate_traces_structural(
+    pub(crate) fn estimate_traces_structural(
         &self,
         hop: &dyn HessianFactorization,
         dense_matrices: &[&Array2<f64>],
@@ -830,7 +830,7 @@ impl StochasticTraceEstimator {
     ///
     /// # Returns
     /// Estimated D×D matrix of `tr(H⁻¹ A_d H⁻¹ A_e)` values, symmetrized.
-    pub fn estimate_second_order_traces(
+    pub(crate) fn estimate_second_order_traces(
         &self,
         hop: &dyn HessianFactorization,
         dense_matrices: &[&Array2<f64>],
@@ -1037,7 +1037,7 @@ impl StochasticTraceEstimator {
 
     /// Estimate the full D×D matrix of second-order traces `tr(H⁻¹ A_d H⁻¹ A_e)`
     /// for a mix of dense matrices and generic hyperoperators.
-    pub fn estimate_second_order_traces_with_operators(
+    pub(crate) fn estimate_second_order_traces_with_operators(
         &self,
         hop: &dyn HessianFactorization,
         dense_matrices: &[&Array2<f64>],

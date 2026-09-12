@@ -86,7 +86,7 @@ fn penalty_logdet_trace_from_root(
 /// - `rho`: Log smoothing parameters (rho_k = log lambda_k).
 /// - `mode`: What to compute (value only, value+gradient, or all three).
 /// - `prior_cost_gradient`: Optional soft prior on rho (value, gradient, optional Hessian).
-pub fn reml_laml_evaluate(
+pub(crate) fn reml_laml_evaluate(
     solution: &InnerSolution<'_>,
     rho: &[f64],
     mode: EvalMode,

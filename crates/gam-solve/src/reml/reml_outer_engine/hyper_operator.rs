@@ -1234,7 +1234,7 @@ impl ImplicitHyperOperator {
     ///
     /// # Returns
     /// The full bilinear form u^T B_d z = design_part + penalty_part.
-    pub fn bilinear_with_shared_x(
+    pub(crate) fn bilinear_with_shared_x(
         &self,
         x_vec: &Array1<f64>,
         y_vec: &Array1<f64>,
@@ -1284,7 +1284,7 @@ impl ImplicitHyperOperator {
     /// This method computes q_d = A_d z using the shared x_vec = X z:
     ///   q_d = (∂X/∂ψ_d)^T (W (X z)) + X^T (W ((∂X/∂ψ_d) z)) + S_psi z
     /// which is the standard mul_vec but we can share x_vec across axes.
-    pub fn matvec_with_shared_xz_into(
+    pub(crate) fn matvec_with_shared_xz_into(
         &self,
         x_vec: ArrayView1<'_, f64>,
         z: ArrayView1<'_, f64>,

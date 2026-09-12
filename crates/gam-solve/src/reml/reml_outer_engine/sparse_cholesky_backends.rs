@@ -35,7 +35,7 @@ impl SparseCholeskyOperator {
         }
     }
 
-    pub fn with_takahashi(
+    pub(crate) fn with_takahashi(
         mut self,
         taka: std::sync::Arc<gam_linalg::sparse_exact::TakahashiInverse>,
     ) -> Self {
@@ -718,7 +718,7 @@ impl DenseCholeskyOperator {
     ///
     /// Failure is the requested definiteness certificate: callers must refuse
     /// the candidate rather than floor a saddle or singular mode.
-    pub fn from_positive_definite(h: &Array2<f64>) -> Result<Self, String> {
+    pub(crate) fn from_positive_definite(h: &Array2<f64>) -> Result<Self, String> {
         Self::factorize_positive_definite(h)
     }
 
@@ -730,7 +730,7 @@ impl DenseCholeskyOperator {
     /// (gam#2457, below).
     /// On refusal, the caller routes the evaluation to
     /// [`DenseSpectralOperator`], which owns the floored convention.
-    pub fn from_spd_with_smooth_logdet_agreement(h: &Array2<f64>) -> Result<Self, String> {
+    pub(crate) fn from_spd_with_smooth_logdet_agreement(h: &Array2<f64>) -> Result<Self, String> {
         let operator = Self::factorize_positive_definite(h)?;
         let n = operator.n_dim;
         let cached_logdet = operator.cached_logdet;

@@ -377,7 +377,7 @@ pub fn compute_corrected_covariance_with_constraints(
 ///
 /// # Returns
 /// A p-vector of corrected marginal variances.
-pub fn compute_corrected_covariance_diagonal(
+pub(crate) fn compute_corrected_covariance_diagonal(
     v_ks: &[Array1<f64>],
     ext_v: &[Array1<f64>],
     outer_hessian: &Array2<f64>,
@@ -419,7 +419,7 @@ impl CorrectedCovarianceDiagonal {
     }
 }
 
-pub fn compute_corrected_covariance_diagonal_with_constraints(
+pub(crate) fn compute_corrected_covariance_diagonal_with_constraints(
     v_ks: &[Array1<f64>],
     ext_v: &[Array1<f64>],
     outer_hessian: &Array2<f64>,
@@ -543,7 +543,7 @@ pub fn compute_corrected_covariance_diagonal_with_constraints(
 /// Returns a strictly positive value for any real `sigma`. For large positive
 /// `sigma` this is approximately `sigma`; near zero it smoothly floors at `epsilon`.
 #[inline]
-pub fn spectral_regularize(sigma: f64, epsilon: f64) -> f64 {
+pub(crate) fn spectral_regularize(sigma: f64, epsilon: f64) -> f64 {
     let disc = sigma.hypot(2.0 * epsilon);
     if sigma >= 0.0 {
         0.5 * sigma + 0.5 * disc
@@ -591,7 +591,7 @@ pub fn spectral_epsilon(eigenvalues: &[f64]) -> f64 {
 /// would reintroduce exactly the two-quantities-under-one-name drift that
 /// gam#2457 was.
 #[inline]
-pub fn spectral_epsilon_for_dim(dim: usize) -> f64 {
+pub(crate) fn spectral_epsilon_for_dim(dim: usize) -> f64 {
     f64::EPSILON.sqrt() * (dim as f64).max(1.0)
 }
 

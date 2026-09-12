@@ -314,7 +314,7 @@ impl InnerSolution<'_> {
     /// otherwise [`Self::hessian_op`]. Every mode-response site reads this
     /// rather than `hessian_op` directly, so the two can never disagree about
     /// which system `β̂(θ)` is differentiated through.
-    pub fn mode_response_operator(&self) -> &dyn HessianFactorization {
+    pub(crate) fn mode_response_operator(&self) -> &dyn HessianFactorization {
         match self.mode_response_op.as_deref() {
             Some(op) => op,
             None => &*self.hessian_op,
@@ -380,7 +380,7 @@ impl<'dp> InnerSolutionBuilder<'dp> {
     /// Install a pre-built Jeffreys/Firth term (Tier-A operator-backed via
     /// `ExactJeffreysTerm::new`, or the Tier-B value-only carrier via
     /// `ExactJeffreysTerm::value_only`).
-    pub fn firth_term(mut self, term: Option<ExactJeffreysTerm>) -> Self {
+    pub(crate) fn firth_term(mut self, term: Option<ExactJeffreysTerm>) -> Self {
         self.firth = term;
         self
     }
@@ -414,7 +414,7 @@ impl<'dp> InnerSolutionBuilder<'dp> {
     /// By default, `build()` computes nullspace_dim as
     /// `beta.len() - sum(penalty_coord.rank())`. Use this when the caller
     /// has a different authoritative value (e.g. from stored per-penalty dims).
-    pub fn nullspace_dim_override(mut self, dim: f64) -> Self {
+    pub(crate) fn nullspace_dim_override(mut self, dim: f64) -> Self {
         self.nullspace_dim_override = Some(dim);
         self
     }
