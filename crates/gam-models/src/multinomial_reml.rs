@@ -2486,6 +2486,32 @@ impl MultinomialFamily {
         })
     }
 
+    /// `vec(sym(Uᵀ Hdot[e_a] U))` for every coefficient axis `a`, through the row kernel of
+    /// [`Self::assemble_all_axis_directional_derivatives`] but without its `(M·P)×(M·P)` axis
+    /// matrices (#1082). `probs_full` is [`Self::row_probabilities`] at the snapshot.
+    fn assemble_rotated_all_axis_directional_derivatives(
+        &self,
+        probs_full: &Array2<f64>,
+        basis: ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, String> {
+        let m = self.active_classes();
+        let mut normalized = vec![0.0; m];
+        self.assemble_rotated_all_axis_derivatives_from_row_kernel(
+            basis,
+            |row, moving_class, row_kernel| {
+                softmax_fisher_perturbation::<OneSeed<0>>(
+                    m,
+                    self.weights[row],
+                    |class| probs_full[[row, class]],
+                    |class| if class == moving_class { 1.0 } else { 0.0 },
+                    |_| 0.0,
+                    &mut normalized,
+                    row_kernel,
+                );
+            },
+        )
+    }
+
     /// Assemble the FULL set of second-directional joint-Hessian derivatives
     /// `{ H²dot[δ, e_a] }` for a FIXED first direction `δ = d_beta_u` and every
     /// canonical second axis `a = a0·P + i0`, in a SINGLE shared softmax pass and
@@ -3220,6 +3246,27 @@ impl CustomFamily for MultinomialFamily {
             ));
         }
         Ok(Some(axes))
+    }
+
+    fn joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        basis: ArrayView2<'_, f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        // #1082: the Jeffreys term reads only `vec(sym(Uᵀ Hdot[e_a] U))`, so the rows are
+        // formed through the row kernel instead of from `p` dense axis matrices.
+        let eta = self.collect_eta_matrix(block_states)?;
+        let probs = self.row_probabilities(eta.view());
+        let rows = self.assemble_rotated_all_axis_directional_derivatives(&probs, basis)?;
+        let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
+        if rows.nrows() != p {
+            return Err(format!(
+                "multinomial rotated first information has {} axes, expected {p}",
+                rows.nrows()
+            ));
+        }
+        Ok(Some(rows))
     }
 
     fn joint_jeffreys_information_second_directional_all_axes_with_specs(
@@ -6176,6 +6223,70 @@ mod tests {
                     "n={n} p={p} k={k} row {index:?}: materialized {want} != row-kernel {got}"
                 );
             }
+        }
+    }
+
+    /// #1082: the rotated first information derivative formed through the row kernel
+    /// equals the materialized axes rotated by the drift's congruence.
+    #[test]
+    fn rotated_first_information_axes_match_rotated_materialized_axes_1082() {
+        for &(n, p, k, rank) in &[(11, 4, 3, 2), (17, 10, 3, 7), (13, 3, 5, 5)] {
+            let family = toy_family(n, p, k);
+            let m = family.active_classes();
+            let dim = m * p;
+            let design = family.design.view();
+            let block_states: Vec<ParameterBlockState> = (0..m)
+                .map(|a| {
+                    let beta = Array1::<f64>::from_shape_fn(p, |i| {
+                        0.13 * ((a + 2) as f64) - 0.08 * ((i + 1) as f64).cos()
+                    });
+                    let eta = Array1::<f64>::from_shape_fn(n, |row| {
+                        (0..p).map(|i| design[[row, i]] * beta[i]).sum()
+                    });
+                    ParameterBlockState { beta, eta }
+                })
+                .collect();
+            let eta = family
+                .collect_eta_matrix(&block_states)
+                .expect("eta collection must succeed");
+            let basis = Array2::<f64>::from_shape_fn((dim, rank), |(r, c)| {
+                0.31 * ((r + 3 * c + 1) as f64).sin() + 0.07 * ((2 * r + c + 2) as f64).cos()
+            });
+            let materialized = family.assemble_all_axis_directional_derivatives(eta.view());
+            let expected = gam_model_api::jeffreys_rotated_axis_rows(&materialized, basis.view())
+                .expect("rotated materialized axes");
+            let probs = family.row_probabilities(eta.view());
+            let actual = family
+                .assemble_rotated_all_axis_directional_derivatives(&probs, basis.view())
+                .expect("row-kernel rotated axes");
+            assert_eq!(actual.dim(), (dim, rank * rank), "n={n} p={p} k={k}");
+            let scale = expected.iter().fold(0.0_f64, |acc, x| acc.max(x.abs()));
+            let tolerance = 1e-11 * (1.0 + scale);
+            assert!(
+                scale > 1e3 * tolerance,
+                "positive control: the rotated first derivative must exceed the agreement bar by three \
+                 orders (n={n} p={p} k={k}, scale {scale:e}, bar {tolerance:e})"
+            );
+            for ((index, &want), &got) in expected.indexed_iter().zip(actual.iter()) {
+                assert!(
+                    (want - got).abs() <= tolerance,
+                    "n={n} p={p} k={k} row {index:?}: materialized {want} != row-kernel {got}"
+                );
+            }
+            // Negative control: rows rotated by a slightly different basis must not agree.
+            let perturbed = &basis * 1.001;
+            let wrong = family
+                .assemble_rotated_all_axis_directional_derivatives(&probs, perturbed.view())
+                .expect("row-kernel rotated axes, perturbed basis");
+            let gap = expected
+                .iter()
+                .zip(wrong.iter())
+                .fold(0.0_f64, |acc, (want, got)| acc.max((want - got).abs()));
+            assert!(
+                gap > 1e3 * tolerance,
+                "negative control: a perturbed basis must break agreement (n={n} p={p} k={k}, gap \
+                 {gap:e}, bar {tolerance:e})"
+            );
         }
     }
 

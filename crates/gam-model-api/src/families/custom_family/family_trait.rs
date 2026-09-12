@@ -1805,6 +1805,22 @@ pub trait CustomFamily {
         Ok(Some(axes))
     }
 
+    /// [`Self::joint_jeffreys_information_directional_derivative_all_axes_with_specs`]
+    /// rotated into a Jeffreys basis `U` (`p × r`): row `a` is `vec(sym(Uᵀ Hdot[e_a] U))`,
+    /// the only form in which the Jeffreys term and its drift base read the axes (#1082).
+    /// A family whose information is a per-row kernel contracted with design rows can form
+    /// the rows without the `p × p` axis matrices and overrides this. `Ok(None)` declines
+    /// and the caller reduces the dense axes itself, so a family that does not override it
+    /// keeps its arithmetic; the default declines.
+    fn joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
+        &self,
+        _block_states: &[ParameterBlockState],
+        _specs: &[ParameterBlockSpec],
+        _basis: ndarray::ArrayView2<'_, f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        Ok(None)
+    }
+
     /// Second beta-directional derivative of
     /// [`Self::joint_jeffreys_information_with_specs`].
     fn joint_jeffreys_information_second_directional_derivative_with_specs(
