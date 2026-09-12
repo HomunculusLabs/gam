@@ -662,8 +662,13 @@ fn best_pair_rotation(a: &Option<PlanePolys>, b: &Option<PlanePolys>) -> (f64, f
             continue;
         }
         let mut dlo_cur = dlo;
-        for _ in 0..60 {
+        // Bisect to the bracket's working precision: stop once its width is within
+        // `ε·max(|lo|, |hi|)`, or once no representable abscissa lies strictly inside.
+        while hi - lo > f64::EPSILON * lo.abs().max(hi.abs()) {
             let mid = 0.5 * (lo + hi);
+            if !(mid > lo && mid < hi) {
+                break;
+            }
             let dmid = pair_objective_deriv(a, b, mid);
             if dmid == 0.0 {
                 lo = mid;
