@@ -787,14 +787,7 @@ pub(crate) fn materialize_survival<'a>(
             None,
         )?;
         let time_p = prepared.time_design_exit.ncols();
-        let time_initial_log_lambdas = if prepared.time_penalties.is_empty() {
-            None
-        } else {
-            Some(Array1::from_elem(
-                prepared.time_penalties.len(),
-                config.time_smooth_lambda.ln(),
-            ))
-        };
+        let time_initial_log_lambdas = prepared.time_initial_log_lambdas.clone();
         let initial_beta = if survival_mode == SurvivalLikelihoodMode::LocationScale {
             None
         } else {
@@ -869,14 +862,7 @@ pub(crate) fn materialize_survival<'a>(
             "internal error: frozen marginal-slope time state is missing".to_string()
         })?;
         let time_p = prepared.time_design_exit.ncols();
-        let time_initial_log_lambdas = if prepared.time_penalties.is_empty() {
-            None
-        } else {
-            Some(Array1::from_elem(
-                prepared.time_penalties.len(),
-                config.time_smooth_lambda.ln(),
-            ))
-        };
+        let time_initial_log_lambdas = prepared.time_initial_log_lambdas.clone();
         let time_block = TimeBlockInput {
             design_entry: prepared.time_design_entry.clone(),
             design_exit: prepared.time_design_exit.clone(),
@@ -1033,16 +1019,9 @@ pub(crate) fn materialize_survival<'a>(
             let time_initial_log_lambdas = if prepared.time_penalties.is_empty() {
                 None
             } else {
-                Some(
-                    carried_time_log_lambdas
-                        .filter(|carried| carried.len() == prepared.time_penalties.len())
-                        .unwrap_or_else(|| {
-                            Array1::from_elem(
-                                prepared.time_penalties.len(),
-                                config.time_smooth_lambda.ln(),
-                            )
-                        }),
-                )
+                carried_time_log_lambdas
+                    .filter(|carried| carried.len() == prepared.time_penalties.len())
+                    .or_else(|| prepared.time_initial_log_lambdas.clone())
             };
             let time_block = TimeBlockInput {
                 design_entry: prepared.time_design_entry.clone(),
@@ -1104,14 +1083,7 @@ pub(crate) fn materialize_survival<'a>(
                 Some(loading),
             )?;
             let time_p = prepared.time_design_exit.ncols();
-            let time_initial_log_lambdas = if prepared.time_penalties.is_empty() {
-                None
-            } else {
-                Some(Array1::from_elem(
-                    prepared.time_penalties.len(),
-                    config.time_smooth_lambda.ln(),
-                ))
-            };
+            let time_initial_log_lambdas = prepared.time_initial_log_lambdas.clone();
             let time_block = TimeBlockInput {
                 design_entry: prepared.time_design_entry.clone(),
                 design_exit: prepared.time_design_exit.clone(),

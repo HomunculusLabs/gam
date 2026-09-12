@@ -2908,23 +2908,24 @@ pub(crate) fn fit_survival_transformation_model(
             let p_time_total = prepared.time_design_exit.ncols();
             let p = p_time_total + p_cov;
             let mut penalty_blocks = Vec::<PenaltyBlock>::new();
-            // One REML seed for every block on this path: the time basis carries
-            // the configured `time_smooth_lambda` (the library default when the
-            // basis was built without one), and the covariate blocks start from
-            // the same value. It is a starting point for the outer search, never
-            // an estimate, so a single owner is all it needs.
-            let seed_lambda = spec
-                .time_build
-                .smooth_lambda
-                .unwrap_or_else(|| FitConfig::default().time_smooth_lambda);
-            for (idx, penalty) in prepared.time_penalties.iter().enumerate() {
-                if penalty.nrows() == p_time_total && penalty.ncols() == p_time_total {
-                    penalty_blocks.push(PenaltyBlock {
-                        matrix: penalty.clone(),
-                        lambda: seed_lambda,
-                        range: 0..p_time_total,
-                        nullspace_dim: prepared.time_nullspace_dims.get(idx).copied().unwrap_or(0),
-                    });
+            // Each block's REML starting strength is its natural scale: the log
+            // ratio of its design's mean Gram diagonal to the penalty's mean
+            // diagonal. It is a starting point for the outer search, never an
+            // estimate.
+            if let Some(time_log_lambdas) = prepared.time_initial_log_lambdas.as_ref() {
+                for (idx, penalty) in prepared.time_penalties.iter().enumerate() {
+                    if penalty.nrows() == p_time_total && penalty.ncols() == p_time_total {
+                        penalty_blocks.push(PenaltyBlock {
+                            matrix: penalty.clone(),
+                            lambda: time_log_lambdas[idx].exp(),
+                            range: 0..p_time_total,
+                            nullspace_dim: prepared
+                                .time_nullspace_dims
+                                .get(idx)
+                                .copied()
+                                .unwrap_or(0),
+                        });
+                    }
                 }
             }
             // Covariate-smooth penalties (e.g. `s(x)`, `s(group, bs="re")`
@@ -2948,9 +2949,13 @@ pub(crate) fn fit_survival_transformation_model(
                     gam_problem::CoefficientPriorMean::Zero
                 );
                 if block_dim > 0 && matches_dims && zero_prior && cr.end <= p_cov {
+                    let log_lambda = crate::survival::marginal_slope::block_log_lambda_seeds(
+                        &covariate_design.design,
+                        [&cov_penalty.local],
+                    )?[0];
                     penalty_blocks.push(PenaltyBlock {
                         matrix: cov_penalty.local.clone(),
-                        lambda: seed_lambda,
+                        lambda: log_lambda.exp(),
                         range: (p_time_total + cr.start)..(p_time_total + cr.end),
                         nullspace_dim: covariate_design
                             .nullspace_dims

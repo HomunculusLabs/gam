@@ -1,22 +1,5 @@
 use super::*;
 
-pub(crate) fn survival_time_initial_log_lambdas(
-    time_build: &SurvivalTimeBuildOutput,
-    penalties: &[Array2<f64>],
-) -> Option<Array1<f64>> {
-    if penalties.is_empty() {
-        None
-    } else {
-        // The seed the library's survival routes use: the basis's configured
-        // `time_smooth_lambda`, or `FitConfig`'s default when it carries none,
-        // taken as it is.
-        let seed_lambda = time_build
-            .smooth_lambda
-            .unwrap_or_else(|| FitConfig::default().time_smooth_lambda);
-        Some(Array1::from_elem(penalties.len(), seed_lambda.ln()))
-    }
-}
-
 pub(crate) fn build_survival_time_initial_beta(
     likelihood_mode: SurvivalLikelihoodMode,
     exact_derivative_guard: f64,
@@ -571,10 +554,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                     time_monotonicity: gam::families::survival::location_scale::TimeBlockMonotonicity::EnforcedByCoordinateCone,
                     penalties: prepared.time_penalties.clone(),
                     nullspace_dims: prepared.time_nullspace_dims.clone(),
-                    initial_log_lambdas: survival_time_initial_log_lambdas(
-                        &time_build,
-                        &prepared.time_penalties,
-                    ),
+                    initial_log_lambdas: prepared.time_initial_log_lambdas.clone(),
                     initial_beta: Some(time_initial_beta.clone()),
                 },
                 thresholdspec: termspec.clone(),
@@ -989,10 +969,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                 time_monotonicity: gam::families::survival::location_scale::TimeBlockMonotonicity::StructuralISpline,
                 penalties: prepared.time_penalties.clone(),
                 nullspace_dims: prepared.time_nullspace_dims.clone(),
-                initial_log_lambdas: survival_time_initial_log_lambdas(
-                    &time_build,
-                    &prepared.time_penalties,
-                ),
+                initial_log_lambdas: prepared.time_initial_log_lambdas.clone(),
                 initial_beta: Some(build_survival_time_initial_beta(
                     likelihood_mode,
                     exact_derivative_guard,
@@ -1185,8 +1162,7 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
         };
         let build_time_block = |prepared: &PreparedSurvivalTimeStack| {
             let time_p = prepared.time_design_exit.ncols();
-            let time_initial_log_lambdas =
-                survival_time_initial_log_lambdas(&time_build, &prepared.time_penalties);
+            let time_initial_log_lambdas = prepared.time_initial_log_lambdas.clone();
             TimeBlockInput {
                 design_entry: prepared.time_design_entry.clone(),
                 design_exit: prepared.time_design_exit.clone(),

@@ -14,6 +14,10 @@ pub struct PreparedSurvivalTimeStack {
     pub time_nullspace_dims: Vec<usize>,
     pub timewiggle_build: Option<crate::survival::construction::SurvivalTimeWiggleBuild>,
     pub timewiggle_block: Option<TimeWiggleBlockInput>,
+    /// Each time penalty's natural `log λ` REML seed: the log ratio of the exit
+    /// design's mean Gram diagonal to the penalty's mean diagonal. `None` when the
+    /// time basis carries no penalty.
+    pub time_initial_log_lambdas: Option<Array1<f64>>,
 }
 
 pub fn prepare_survival_time_stack(
@@ -153,6 +157,16 @@ pub fn prepare_survival_time_stack(
             ncols: wiggle.ncols,
         });
     }
+    let time_initial_log_lambdas = if time_penalties.is_empty() {
+        None
+    } else {
+        Some(Array1::from_vec(
+            crate::survival::marginal_slope::block_log_lambda_seeds(
+                &time_design_exit,
+                time_penalties.iter(),
+            )?,
+        ))
+    };
     Ok(PreparedSurvivalTimeStack {
         eta_offset_entry,
         eta_offset_exit,
@@ -167,5 +181,6 @@ pub fn prepare_survival_time_stack(
         time_nullspace_dims,
         timewiggle_build,
         timewiggle_block,
+        time_initial_log_lambdas,
     })
 }

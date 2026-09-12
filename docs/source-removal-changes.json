@@ -5972,5 +5972,13 @@
     ],
     "reason": "#2627 / relaunch item 4 (useless public API): the root facade's src/macros.rs carried ten #[macro_export] copies of the crates' error macros (impl_reason_error_boilerplate, bail_invalid_estim, bail_invalid_basis, bail_dim_basis, bail_invalid_gamlss, bail_dim_gamlss, bail_invalid_tnorm, bail_invalid_surv, bail_dim_sls, bail_dim_custom). No product and no source invokes them through the facade, because every crate that raises these errors defines its own copy. The fn fmt / fn from identities are the Display and From impls inside impl_reason_error_boilerplate's template.",
     "evidence": "At the base, git grep -n 'gam::<name>!' over crates, src, tests, examples and benches returns 0 for all ten names, and git grep -n '<name>!' over src/ returns only the macro_rules! declarations. The same macro_rules! definitions live in crates/gam-problem/src/macros.rs, crates/gam-terms/src/lib.rs, crates/gam-models/src/macros.rs, crates/gam-linalg/src/lib.rs, crates/gam-identifiability/src/lib.rs and crates/gam-model-kernels/src/macros.rs. Outside Rust, the only mentions are two Python test docstrings quoting a gam-models error message. The item list applies source_removal_guard.py's ITEM regex to the base blob. Not compiled or run locally (user directive)."
+  },
+  {
+    "base": "9c047552d95ddc733477babb9eda7e23bf58f474",
+    "items": [
+      "crates/gam-cli/src/main/run_survival.rs:fn:survival_time_initial_log_lambdas"
+    ],
+    "reason": "#2469 (SPEC rules 22 and 25): survival_time_initial_log_lambdas seeded every CLI survival time block's REML search at log(time_smooth_lambda), which is FitConfig's 1e-2 default because no user surface sets it. PreparedSurvivalTimeStack now carries time_initial_log_lambdas, computed once in prepare_survival_time_stack by block_log_lambda_seeds from the stack's exit design and penalties, the same owner the library survival routes use. The three CLI call sites read that field instead.",
+    "evidence": "At the base, git grep -n -w survival_time_initial_log_lambdas over crates and docs finds four lines, all in crates/gam-cli/src/main/run_survival.rs: the pub(crate) declaration and its three calls (the location-scale termspec, the marginal-slope spec and the latent build_time_block closure), all replaced in this commit. No test names it. Not compiled or run locally (user directive)."
   }
 ]

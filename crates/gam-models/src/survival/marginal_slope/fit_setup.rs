@@ -355,7 +355,7 @@ where
     let likelihood_scale = mean_abs(design.diag_gram(&unit_weights)?.iter().copied());
     if !(likelihood_scale > 0.0 && likelihood_scale.is_finite()) {
         return Err(format!(
-            "survival marginal-slope log-lambda seed: the design's mean Gram diagonal is \
+            "survival log-lambda seed:the design's mean Gram diagonal is \
              {likelihood_scale:e}, so the block has no likelihood scale to seed against"
         ));
     }
@@ -365,7 +365,7 @@ where
             let penalty_scale = mean_abs(s.diag().iter().copied());
             if !(penalty_scale > 0.0 && penalty_scale.is_finite()) {
                 return Err(format!(
-                    "survival marginal-slope log-lambda seed: a penalty's mean diagonal is \
+                    "survival log-lambda seed:a penalty's mean diagonal is \
                      {penalty_scale:e}, so it has no curvature scale to seed against"
                 ));
             }
