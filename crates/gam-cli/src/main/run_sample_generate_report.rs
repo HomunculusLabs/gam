@@ -1217,15 +1217,22 @@ fn report_family_residuals(
                 .map(|i| {
                     // Var(y_i − μ̂_i) = σ²(1 − h_ii): without the leverage
                     // factor even a correct Gaussian fit under-disperses at
-                    // high-leverage rows.
+                    // high-leverage rows. A row with leverage one is fitted
+                    // exactly, so its residual has no variance to standardize.
                     let h = leverage
                         .and_then(|l| l.get(i).copied())
                         .filter(|h| h.is_finite())
                         .unwrap_or(0.0)
-                        .clamp(0.0, 1.0 - 1e-8);
-                    (y[i] - mu[i]) / (sigma * (1.0 - h).sqrt())
+                        .max(0.0);
+                    if !(h < 1.0) {
+                        return Err(format!(
+                            "observation {i} has leverage {h}: it is fitted exactly, so its \
+                             residual has no variance to standardize"
+                        ));
+                    }
+                    Ok((y[i] - mu[i]) / (sigma * (1.0 - h).sqrt()))
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(FamilyResiduals {
                 values,
                 label: "Standardized Residual",
@@ -1331,10 +1338,25 @@ fn report_family_residuals(
                     if !(y[i] > 0.0 && y[i] < 1.0) {
                         return Err(format!("Beta response must lie in (0,1), got {}", y[i]));
                     }
-                    let m = mu[i].clamp(1e-12, 1.0 - 1e-12);
-                    let dist = Beta::new(m * phi, (1.0 - m) * phi)
-                        .map_err(|e| format!("Beta residual at μ={m}: {e}"))?;
-                    to_normal(dist.cdf(y[i]))
+                    let m = mu[i];
+                    if !(m >= 0.0 && m <= 1.0) {
+                        return Err(format!("Beta mean must lie in [0,1], got {m}"));
+                    }
+                    // As a shape parameter reaches zero the Beta law becomes the
+                    // point mass at that end, so a response strictly inside
+                    // (0,1) has F(y) = 1 when α = μφ is zero and F(y) = 0 when
+                    // β = (1−μ)φ is zero. That includes shapes that underflow.
+                    let (alpha, beta) = (m * phi, (1.0 - m) * phi);
+                    let u = if alpha == 0.0 {
+                        1.0
+                    } else if beta == 0.0 {
+                        0.0
+                    } else {
+                        Beta::new(alpha, beta)
+                            .map_err(|e| format!("Beta residual at μ={m}: {e}"))?
+                            .cdf(y[i])
+                    };
+                    to_normal(u)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(FamilyResiduals {
