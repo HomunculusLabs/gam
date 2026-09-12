@@ -5769,5 +5769,27 @@
     ],
     "reason": "SPEC rules 5 and 23 (#2901 V22, lead ruling (a), slice 1). FIXED_STABILIZATION_RIDGE = 1e-8 added δI to every PIRLS penalized Hessian and charged δ‖β‖² in the objective: a coefficient-space ridge and a magic constant inside the REML criterion. The selectors now assemble H = XᵀWX + S_λ with no ridge. A positive-semidefinite H inside its rounding band p·ε·‖H‖₂ is accepted; on the implicit PLS path it is solved minimum-norm on its identified subspace. Only a materially indefinite H is refused. The constant has no remaining use.",
     "evidence": "At the base, git grep -w FIXED_STABILIZATION_RIDGE outside the generated tools/codebase-city bundle finds the declaration in crates/gam-solve/src/pirls/gam_working_model.rs. It finds code uses in pirls/newton_solve.rs (dense and sparse selectors), pirls/pls_solver.rs (implicit dense PLS) and gpu/pirls_host_dispatch.rs (GPU Gaussian PLS input). It finds test uses in estimate/ridge_continuity_tests.rs and pirls/sparse_fixed_ridge_2657_tests.rs, plus a restated copy in tests/regressions/misc/regression_2644_outer_criterion_conditioning.rs. Prose mentions are in pirls/loop_driver.rs, reml/objective.rs, estimate/joint_hyper.rs, estimate/optimizer.rs and gam-models fit_orchestration/drivers/spatial_optimization.rs. This change replaces every code use with 0 or removes it, restates the three tests to require no ridge, and rewrites every prose mention. Compile is covered by the shared tip check and the guarded before/after job."
+  },
+  {
+    "base": "3fddea6c6c052900d1aa0636b6f1637370a2eea2",
+    "items": [
+      "crates/gam-solve/src/constrained_posterior.rs:fn:exact_orthant_expectation",
+      "crates/gam-solve/src/constrained_posterior.rs:fn:normal_infeasible_mass",
+      "crates/gam-solve/src/constrained_posterior.rs:fn:projection_law_beats_the_moment_matched_normal_on_a_two_row_cone_2446",
+      "crates/gam-solve/src/evidence.rs:enum:UnionDensityModel",
+      "crates/gam-solve/src/evidence.rs:fn:centered",
+      "crates/gam-solve/src/evidence.rs:fn:dimension",
+      "crates/gam-solve/src/evidence.rs:fn:isotropic",
+      "crates/gam-solve/src/evidence.rs:fn:splitmix64",
+      "crates/gam-solve/src/evidence.rs:struct:StableScalarMeanChart",
+      "crates/gam-solve/src/evidence.rs:struct:UnionComponentDensity",
+      "crates/gam-solve/src/inference/certificate_impls.rs:fn:coreset_race_verdict",
+      "crates/gam-solve/src/inference/certificate_impls.rs:fn:enclosure_certifies_only_when_margin_clears_gap",
+      "crates/gam-solve/src/inference/certificate_impls.rs:fn:enclosure_margin_verdict",
+      "crates/gam-solve/src/measure_jet_glm_sufficient.rs:fn:fingerprint_matrix",
+      "crates/gam-solve/src/measure_jet_glm_sufficient.rs:fn:mix"
+    ],
+    "reason": "94fc37dd1 closed the cascade the #2829 deletions left. It removed the evidence.rs union-structure density helpers and splitmix64 that only deleted code reached; the certificate verdict wrappers and the in-file test enclosure_certifies_only_when_margin_clears_gap; the GLM design-fingerprint helpers behind the never-read design_fingerprint field; and the #2446 projection-law pin with its two private helpers, after 574449c98 deleted constrained_projection_law.",
+    "evidence": "Tip check 541148 at 96e121c18 reported each production item as never used, and the #2446 pin calling the deleted constrained_projection_law (E0425). MSI job 550898 ran source_removal_guard.py on 3fddea6c6..94fc37dd1 and produced exactly these guarded identities. dd2fe5aea records the #2446 pin as retired in docs/test-census-2818-recovery.md."
   }
 ]

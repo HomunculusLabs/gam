@@ -2342,5 +2342,14 @@
     },
     "reason": "SPEC rules 21 and 22 (#2902, table row 30): this constraint-KKT cleanliness gate existed only for the constrained long-plateau soft accept. That arm accepted twenty sub-tolerance steps as StalledAtValidMinimum while the gradient sat far outside the near-stationary band. The arm is deleted, so the gate has no caller.",
     "evidence": "At the base, git grep finds constraint_kkt_admits_progress_exhausted_stall only at its declaration and its single call in the long-plateau branch of runworking_model_pirls, both in crates/gam-solve/src/pirls/reweight.rs. scripts/public_api_census.py was not run locally (user directive: no local runs)."
+  },
+  {
+    "base": "3fddea6c6c052900d1aa0636b6f1637370a2eea2",
+    "removed": {
+      "crates/gam-solve/src/inference/certificate_impls.rs::coreset_race_verdict": 1,
+      "crates/gam-solve/src/inference/certificate_impls.rs::enclosure_margin_verdict": 1
+    },
+    "reason": "94fc37dd1 deleted the certificate verdict wrappers after b6bda0923 (#2829) removed the evidence and topology-race entry points, their only production callers. gam-solve's deny-warnings build had rejected them as never used.",
+    "evidence": "Tip check 541148 at 96e121c18 reported coreset_race_verdict and enclosure_margin_verdict as never used. MSI job 550898 ran public_api_census.py on 3fddea6c6..94fc37dd1 and it demanded exactly these two identities."
   }
 ]
