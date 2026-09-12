@@ -95,13 +95,20 @@ pub(crate) fn standardize_latent_z_with_policy(
         .map(|(&zi, &wi)| wi * zi)
         .sum::<f64>()
         / weight_sum;
-    let std_var = (z_std
+    let std_var = z_std
         .iter()
         .zip(weights.iter())
         .map(|(&zi, &wi)| wi * (zi - std_mean) * (zi - std_mean))
         .sum::<f64>()
-        / weight_sum)
-        .max(f64::MIN_POSITIVE);
+        / weight_sum;
+    // `z` passed the spread test above, and `apply` divides by a positive finite sd.
+    // So a non-positive variance here can only come from the standardized scores
+    // underflowing, and the moments below would read 0/0.
+    if !(std_var.is_finite() && std_var > 0.0) {
+        return Err(format!(
+            "{context} latent-score standardization left no representable spread (weighted variance {std_var:e})"
+        ));
+    }
     let skew = z_std
         .iter()
         .zip(weights.iter())
