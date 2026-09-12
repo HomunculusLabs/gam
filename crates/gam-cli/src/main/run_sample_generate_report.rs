@@ -1192,8 +1192,15 @@ fn report_family_residuals(
     if n == 0 {
         return Err("no observations".to_string());
     }
-    // Residual degrees of freedom for the Pearson dispersion estimates.
-    let residual_dof = (n as f64 - edf_total).max(1.0);
+    // Residual degrees of freedom for the Pearson dispersion estimates. With none
+    // left there is no residual scale to estimate, and the diagnostics are omitted
+    // rather than divided by a dof of one that the fit does not have.
+    let residual_dof = n as f64 - edf_total;
+    if !(residual_dof > 0.0) {
+        return Err(format!(
+            "no residual degrees of freedom to estimate a scale (n = {n}, edf = {edf_total})"
+        ));
+    }
     let mut rng = StdRng::seed_from_u64(REPORT_RESIDUAL_SEED);
     // Predictive CDF value → normal scale. Only the exact endpoints have no
     // finite quantile, so u is held inside the representable open interval:
