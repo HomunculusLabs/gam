@@ -3492,8 +3492,8 @@ fn topology_candidates_for_dim(
                             SaeAtomBasisKind::Mobius,
                             2,
                             SaeBasisResolution::MobiusHarmonics {
-                                circle_order: 3,
-                                width_degree: 2,
+                                circle_order: crate::manifold::SAE_MOBIUS_CIRCLE_HARMONICS,
+                                width_degree: crate::manifold::SAE_MOBIUS_WIDTH_DEGREE,
                             },
                             SaeReferenceMetricPlan::MobiusQuotient,
                         )?,
@@ -5311,8 +5311,8 @@ pub(crate) fn discover_primary_atom_topologies(
                                 SaeAtomBasisKind::Mobius,
                                 2,
                                 SaeBasisResolution::MobiusHarmonics {
-                                    circle_order: 3,
-                                    width_degree: 2,
+                                    circle_order: crate::manifold::SAE_MOBIUS_CIRCLE_HARMONICS,
+                                    width_degree: crate::manifold::SAE_MOBIUS_WIDTH_DEGREE,
                                 },
                                 SaeReferenceMetricPlan::MobiusQuotient,
                             )?,
