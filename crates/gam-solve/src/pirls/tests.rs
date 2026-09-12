@@ -5044,7 +5044,6 @@ mod reporting_loglikelihood_tests {
 /// dispersion `φ̂` and every SE / interval derived from it.
 #[cfg(test)]
 mod tweedie_exact_series_tests {
-    use super::super::tweedie_exact_loglik_total_from_eta;
     use super::{
         tweedie_exact_loglik, tweedie_saddlepoint_loglik_approximation, tweedie_series_loglik,
     };
@@ -5084,6 +5083,30 @@ mod tweedie_exact_series_tests {
             .collect();
         let m = terms.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         m + terms.iter().map(|t| (t - m).exp()).sum::<f64>().ln()
+    }
+
+    /// The exact Tweedie log-likelihood summed over rows: the objective a
+    /// variance-power profile maximizes. The rows below are valid responses
+    /// with unit prior weight, so the per-row exact series is summed directly.
+    fn tweedie_exact_loglik_total_from_eta(
+        y: ndarray::ArrayView1<f64>,
+        eta: ndarray::ArrayView1<f64>,
+        priorweights: ndarray::ArrayView1<f64>,
+        p: f64,
+        phi: f64,
+    ) -> Result<f64, crate::estimate::EstimationError> {
+        let mut total = 0.0;
+        for row in 0..y.len() {
+            total += super::super::tweedie_exact_series_loglik_from_eta(
+                row,
+                y[row],
+                eta[row],
+                priorweights[row],
+                p,
+                phi.ln(),
+            )?;
+        }
+        Ok(total)
     }
 
     #[test]

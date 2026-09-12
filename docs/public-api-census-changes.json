@@ -2098,5 +2098,13 @@
     },
     "reason": "#2899 group-A sweep: the LowRankWeight methods new, symmetric, nrows, rank, is_rank_zero and apply are deleted with the gam_linalg::low_rank_weight module. No production code in any crate uses the type, and #2829 retired its assembly consumers.",
     "evidence": "public_api_census.py --base 54a8ffdc8 --head b6a5f630b reports exactly these six identities (/scratch.global/sauer354/pool/prune-api-a/slice18.census.json)."
+  },
+  {
+    "base": "08138a75a33c76c31cd20990d215428216b5c07b",
+    "removed": {
+      "crates/gam-solve/src/pirls/deviance.rs::tweedie_exact_loglik_total_from_eta": 1
+    },
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). The exact Tweedie row-sum was used only by one pirls unit-test module, which now sums the surviving per-row exact series itself.",
+    "evidence": "At the base, git grep -w finds tweedie_exact_loglik_total_from_eta only at its definition in pirls/deviance.rs and inside pirls/tests.rs's tweedie_exact_series_tests module. The prune-api-c census v2 over cc3ae0022 (/scratch.global/sauer354/pool/prune-api-c/census2.tsv) lists no product or other-crate reference."
   }
 ]

@@ -5262,5 +5262,13 @@
     ],
     "reason": "#2899 group-A public-surface sweep: delete gam_linalg::low_rank_weight. LowRankWeight (new, symmetric, nrows, rank, is_rank_zero, apply) has no production caller in any crate. The #2829 sweep already retired its assembly consumers (add_low_rank_xtwx_correction, gram_capacitance, project_u/v, row_capacitance, xtw_y: retired-no-surviving-dependent), and a gam-solve comment is the only other mention. Its only users were two root regression tests that exercised the type itself: low_rank_weight_apply_matches_dense_symmetry_case in linalg_low_rank_utils.rs and low_rank_weight_assembly_satisfies_d_plus_uu_t_identity in matrix_2_2.rs. The module, its lib.rs pub mod line and those two tests are deleted, along with the imports they alone used. The other tests in both files survive.",
     "evidence": "At 54a8ffdc8, git grep -n -w LowRankWeight over crates, src, examples, tests, gamfit and docs finds it only in low_rank_weight.rs, the two root tests and one gam-solve pirls/low_rank.rs comment. No production module imports low_rank_weight. The item list is source_removal_guard.py --base 54a8ffdc8 --head b6a5f630b (/scratch.global/sauer354/pool/prune-api-a/slice18.srg.out). The compile check is the lead shared tip check."
+  },
+  {
+    "base": "08138a75a33c76c31cd20990d215428216b5c07b",
+    "items": [
+      "crates/gam-solve/src/pirls/deviance.rs:fn:tweedie_exact_loglik_total_from_eta"
+    ],
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). gam-solve's tweedie_exact_loglik_total_from_eta, the exact Tweedie log-likelihood summed over rows, is called by no production code in any crate. Its one user is the pirls tweedie_exact_series_tests module, which profiles the variance power. That module now carries its own row-sum over the surviving pub(crate) per-row series tweedie_exact_series_loglik_from_eta, so the test's name, assertions and profile comparison are unchanged.",
+    "evidence": "The prune-api-c census v2 over cc3ae0022 (/scratch.global/sauer354/pool/prune-api-c/census2.tsv) classes tweedie_exact_loglik_total_from_eta DELETE, with two gam-solve unit-test references. At the base, git grep -w finds it only at its definition in pirls/deviance.rs, in a doc mention and the import in pirls/tests.rs, and at the profile call site. The item list follows source_removal_guard.py's ITEM rule over the removed hunk: one pub fn. The test-module helper of the same name is an addition in test scope."
   }
 ]
