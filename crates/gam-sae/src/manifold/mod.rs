@@ -282,6 +282,9 @@ mod tests_chart_collapse_2691;
 mod tests_steering_crosscoder_2234;
 
 #[cfg(test)]
+mod tests_transport_law_2234;
+
+#[cfg(test)]
 mod tests_collateral_e2_2234;
 
 #[cfg(test)]
