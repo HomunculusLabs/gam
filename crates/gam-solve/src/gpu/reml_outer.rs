@@ -177,8 +177,11 @@ where
         gradient: input.seed_gradient,
     };
     let initial_grad_norm = seed_sample.gradient.dot(&seed_sample.gradient).sqrt();
-    let initial_scale = if initial_grad_norm.is_finite() && initial_grad_norm > 0.0 {
-        (1.0 / initial_grad_norm).clamp(1.0e-3, 1.0e3)
+    // `H_0^{-1} = I/‖g₀‖` makes the first quasi-Newton trial step `−g₀/‖g₀‖` unit
+    // length in ρ. A norm with no finite positive reciprocal keeps the unit metric.
+    let reciprocal_grad_norm = 1.0 / initial_grad_norm;
+    let initial_scale = if reciprocal_grad_norm.is_finite() && reciprocal_grad_norm > 0.0 {
+        reciprocal_grad_norm
     } else {
         1.0
     };

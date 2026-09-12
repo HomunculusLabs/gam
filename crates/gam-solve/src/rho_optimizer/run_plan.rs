@@ -2452,8 +2452,10 @@ pub(crate) fn run_outer_with_plan(
                     }
                     if !installed_initial_metric {
                         let g0_norm = seed_eval.gradient.iter().map(|g| g * g).sum::<f64>().sqrt();
-                        if g0_norm.is_finite() && g0_norm > 0.0 {
-                            let scale = (1.0 / g0_norm).clamp(1.0e-3, 1.0e3);
+                        // `H_0^{-1} = I/‖g₀‖` makes the first trial step unit length in
+                        // ρ; a norm with no finite positive reciprocal keeps opt's default.
+                        let scale = 1.0 / g0_norm;
+                        if scale.is_finite() && scale > 0.0 {
                             optimizer = optimizer.with_initial_metric(InitialMetric::Scalar(scale));
                         }
                     }
