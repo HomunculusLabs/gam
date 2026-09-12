@@ -1,37 +1,5 @@
 use super::*;
 
-pub(crate) fn cli_frailty_kind(
-    frailty_kind: Option<FrailtyKindArg>,
-) -> Option<crate::config_resolve::CliFrailtyKind> {
-    frailty_kind.map(|kind| match kind {
-        FrailtyKindArg::GaussianShift => crate::config_resolve::CliFrailtyKind::GaussianShift,
-        FrailtyKindArg::HazardMultiplier => crate::config_resolve::CliFrailtyKind::HazardMultiplier,
-    })
-}
-
-pub(crate) fn cli_hazard_loading(
-    hazard_loading: Option<HazardLoadingArg>,
-) -> Option<crate::config_resolve::CliHazardLoading> {
-    hazard_loading.map(|loading| match loading {
-        HazardLoadingArg::Full => crate::config_resolve::CliHazardLoading::Full,
-        HazardLoadingArg::LoadedVsUnloaded => {
-            crate::config_resolve::CliHazardLoading::LoadedVsUnloaded
-        }
-    })
-}
-
-pub(crate) fn fit_frailty_spec_from_args(
-    args: &FitArgs,
-    context: &str,
-) -> Result<gam::families::survival::lognormal_kernel::FrailtySpec, String> {
-    crate::config_resolve::resolve_cli_frailty_spec(
-        cli_frailty_kind(args.frailty_kind),
-        args.frailty_sd,
-        cli_hazard_loading(args.hazard_loading),
-        context,
-    )
-}
-
 pub(crate) fn fixed_hazard_multiplier_from_saved_family(
     family: &FittedFamily,
 ) -> Result<

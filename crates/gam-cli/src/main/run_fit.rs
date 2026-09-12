@@ -221,9 +221,9 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
         .and_then(|s| s.beta_logistic_init.clone());
     if let Some((entry, exit, event)) = parse_surv_response(&parsed.response)? {
         validate_cli_firth_configuration(CliFirthValidation {
-            enabled: args.firth,
+            enabled: fit_config.firth,
             family: LikelihoodSpec::royston_parmar(),
-            predict_noise: args.predict_noise.is_some(),
+            predict_noise: fit_config.noise_formula.is_some(),
             is_survival: true,
             link_choice: None,
         })?;
@@ -313,6 +313,7 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
         let y = y.to_owned();
         return run_fit_transformation_normal(
             &args,
+            &fit_config,
             &ds,
             &col_map,
             &parsed,
@@ -329,6 +330,7 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
         let y = y.to_owned();
         return run_fit_bernoulli_marginal_slope(
             &args,
+            &fit_config,
             &ds,
             &col_map,
             &parsed,
@@ -538,6 +540,7 @@ pub(crate) fn run_fit(args: FitArgs) -> Result<(), String> {
         .expect("the standard path returned before location-scale dispatch");
     run_fitwith_predict_noise(
         &args,
+        &fit_config,
         &ds,
         &col_map,
         &parsed,
@@ -706,6 +709,7 @@ fn run_canonical_standard_fit(
 }
 pub(crate) fn run_fit_bernoulli_marginal_slope(
     args: &FitArgs,
+    fit_config: &FitConfig,
     ds: &Dataset,
     col_map: &HashMap<String, usize>,
     parsed: &ParsedFormula,
@@ -718,22 +722,22 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
             "bernoulli marginal-slope fitting requires a binary {0,1} response".to_string(),
         );
     }
-    if args.firth {
+    if fit_config.firth {
         inference_notes.push(
             "--firth is redundant for bernoulli marginal-slope: the robust Jeffreys/Firth stabilizer is installed by policy"
                 .to_string(),
         );
     }
-    if args.predict_noise.is_some() {
+    if fit_config.noise_formula.is_some() {
         return Err(
             "--predict-noise cannot be combined with --slope-formula/--z-column".to_string(),
         );
     }
-    let slope_formula_raw = args
+    let slope_formula_raw = fit_config
         .slope_formula
         .as_deref()
         .ok_or_else(|| "missing --slope-formula".to_string())?;
-    let z_column = args
+    let z_column = fit_config
         .z_column
         .as_ref()
         .ok_or_else(|| "missing --z-column".to_string())?;
@@ -780,7 +784,7 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
         inference_notes,
         &gam::ResourcePolicy::default_library(),
     )?;
-    if args.scale_dimensions {
+    if fit_config.scale_dimensions {
         enable_scale_dimensions(&mut marginalspec);
         enable_scale_dimensions(&mut slopespec);
     }
@@ -796,10 +800,10 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
 
     let z_col = resolve_role_col(col_map, z_column, "z")?;
     let z = ds.values.column(z_col).to_owned();
-    let weights = resolve_weight_column(ds, col_map, args.weights_column.as_deref())?;
-    let marginal_offset = resolve_offset_column(ds, col_map, args.offset_column.as_deref())?;
-    let slope_offset = resolve_offset_column(ds, col_map, args.noise_offset_column.as_deref())?;
-    let frailty = fit_frailty_spec_from_args(args, "bernoulli marginal-slope")?;
+    let weights = resolve_weight_column(ds, col_map, fit_config.weight_column.as_deref())?;
+    let marginal_offset = resolve_offset_column(ds, col_map, fit_config.offset_column.as_deref())?;
+    let slope_offset = resolve_offset_column(ds, col_map, fit_config.noise_offset_column.as_deref())?;
+    let frailty = fit_config.frailty.clone();
     let routed_deviations = route_marginal_slope_deviation_blocks(
         parsed.linkwiggle.as_ref(),
         parsed_slope.linkwiggle.as_ref(),
@@ -959,8 +963,8 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
             base_link,
             save_frailty,
         )?;
-        model.offset_column = args.offset_column.clone();
-        model.noise_offset_column = args.noise_offset_column.clone();
+        model.offset_column = fit_config.offset_column.clone();
+        model.noise_offset_column = fit_config.noise_offset_column.clone();
         write_model_json(out, &model)?;
     }
 
@@ -970,6 +974,7 @@ pub(crate) fn run_fit_bernoulli_marginal_slope(
 
 pub(crate) fn run_fit_transformation_normal(
     args: &FitArgs,
+    fit_config: &FitConfig,
     ds: &Dataset,
     col_map: &HashMap<String, usize>,
     parsed: &ParsedFormula,
@@ -977,7 +982,7 @@ pub(crate) fn run_fit_transformation_normal(
     y: &Array1<f64>,
     inference_notes: &mut Vec<String>,
 ) -> Result<(), String> {
-    if args.firth {
+    if fit_config.firth {
         return Err("--firth is not supported for the transformation-normal family".to_string());
     }
     if parsed.linkspec.is_some() {
@@ -988,7 +993,7 @@ pub(crate) fn run_fit_transformation_normal(
             "linkwiggle(...) is not supported for the transformation-normal family".to_string(),
         );
     }
-    if args.predict_noise.is_some() {
+    if fit_config.noise_formula.is_some() {
         return Err("--predict-noise cannot be combined with --transformation-normal".to_string());
     }
 
@@ -999,7 +1004,7 @@ pub(crate) fn run_fit_transformation_normal(
         inference_notes,
         &gam::ResourcePolicy::default_library(),
     )?;
-    if args.scale_dimensions {
+    if fit_config.scale_dimensions {
         enable_scale_dimensions(&mut covariate_spec);
     }
 
@@ -1010,8 +1015,8 @@ pub(crate) fn run_fit_transformation_normal(
 
     let options = blockwise_options_from_fit_args()?;
     let config = TransformationNormalConfig::default();
-    let weights = resolve_weight_column(ds, col_map, args.weights_column.as_deref())?;
-    let offset = resolve_offset_column(ds, col_map, args.offset_column.as_deref())?;
+    let weights = resolve_weight_column(ds, col_map, fit_config.weight_column.as_deref())?;
+    let offset = resolve_offset_column(ds, col_map, fit_config.offset_column.as_deref())?;
     let kappa_options = SpatialLengthScaleOptimizationOptions::default();
 
     let phase_start = std::time::Instant::now();
@@ -1072,8 +1077,8 @@ pub(crate) fn run_fit_transformation_normal(
             &solved.family,
             solved.score_calibration,
         )?;
-        model.offset_column = args.offset_column.clone();
-        model.noise_offset_column = args.noise_offset_column.clone();
+        model.offset_column = fit_config.offset_column.clone();
+        model.noise_offset_column = fit_config.noise_offset_column.clone();
         write_model_json(out, &model)?;
     }
 
@@ -1083,6 +1088,7 @@ pub(crate) fn run_fit_transformation_normal(
 
 pub(crate) fn run_fitwith_predict_noise(
     args: &FitArgs,
+    fit_config: &FitConfig,
     ds: &Dataset,
     col_map: &HashMap<String, usize>,
     parsed: &ParsedFormula,
@@ -1112,7 +1118,7 @@ pub(crate) fn run_fitwith_predict_noise(
         inference_notes,
         &gam::ResourcePolicy::default_library(),
     )?;
-    if args.scale_dimensions {
+    if fit_config.scale_dimensions {
         enable_scale_dimensions(&mut meanspec);
         enable_scale_dimensions(&mut noisespec);
     }
@@ -1126,9 +1132,9 @@ pub(crate) fn run_fitwith_predict_noise(
     emit_smooth_structure_warnings("fit-start", &spatial_usagewarnings);
     print_inference_summary(inference_notes);
     let kappa_options = SpatialLengthScaleOptimizationOptions::default();
-    let weights = resolve_weight_column(ds, col_map, args.weights_column.as_deref())?;
-    let mean_offset = resolve_offset_column(ds, col_map, args.offset_column.as_deref())?;
-    let noise_offset = resolve_offset_column(ds, col_map, args.noise_offset_column.as_deref())?;
+    let weights = resolve_weight_column(ds, col_map, fit_config.weight_column.as_deref())?;
+    let mean_offset = resolve_offset_column(ds, col_map, fit_config.offset_column.as_deref())?;
+    let noise_offset = resolve_offset_column(ds, col_map, fit_config.noise_offset_column.as_deref())?;
     if family == LikelihoodSpec::gaussian_identity() {
         // Response standardization (and the inverse remap back to raw units) now
         // lives in the single Gaussian location-scale model entry point
@@ -1268,8 +1274,8 @@ pub(crate) fn run_fitwith_predict_noise(
                 SavedModelSourceMetadata {
                     training_headers: ds.headers.clone(),
                     training_feature_ranges: Some(ds.feature_ranges()),
-                    offset_column: args.offset_column.clone(),
-                    noise_offset_column: args.noise_offset_column.clone(),
+                    offset_column: fit_config.offset_column.clone(),
+                    noise_offset_column: fit_config.noise_offset_column.clone(),
                 },
             )?;
             write_payload_json(out, payload)?;
@@ -1379,8 +1385,8 @@ pub(crate) fn run_fitwith_predict_noise(
                 SavedModelSourceMetadata {
                     training_headers: ds.headers.clone(),
                     training_feature_ranges: Some(ds.feature_ranges()),
-                    offset_column: args.offset_column.clone(),
-                    noise_offset_column: args.noise_offset_column.clone(),
+                    offset_column: fit_config.offset_column.clone(),
+                    noise_offset_column: fit_config.noise_offset_column.clone(),
                 },
             )?;
             write_payload_json(out, payload)?;
@@ -1563,8 +1569,8 @@ pub(crate) fn run_fitwith_predict_noise(
             SavedModelSourceMetadata {
                 training_headers: ds.headers.clone(),
                 training_feature_ranges: Some(ds.feature_ranges()),
-                offset_column: args.offset_column.clone(),
-                noise_offset_column: args.noise_offset_column.clone(),
+                offset_column: fit_config.offset_column.clone(),
+                noise_offset_column: fit_config.noise_offset_column.clone(),
             },
         )?;
         write_payload_json(out, payload)?;

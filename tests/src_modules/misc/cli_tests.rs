@@ -1442,6 +1442,63 @@ fn cli_request_document_frailty_reaches_the_latent_survival_route() {
     );
 }
 
+/// The fit routes must read the resolved configuration, not the flags. The
+/// bernoulli marginal-slope route used to read `--slope-formula` and `--z-column`
+/// from `FitArgs`. Those flags conflict with `--request`, so a request document
+/// for this route failed with "missing --slope-formula". The route refuses a main
+/// formula that uses its z column before it fits anything, and the refusal must
+/// be the same whichever entry point supplied the model.
+#[test]
+fn cli_request_document_marginal_slope_settings_reach_the_route() {
+    let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let train_path = td.path().join("train.csv");
+    let request_path = td.path().join("request.json");
+    let model_path = td.path().join("model.json");
+    write_bernoulli_marginal_slope_train_csv(&train_path);
+
+    let base = || {
+        let mut args = location_scale_fit_args(
+            train_path.clone(),
+            model_path.clone(),
+            "y ~ x + z",
+            "1",
+        );
+        args.predict_noise = None;
+        args.survival_likelihood = None;
+        args
+    };
+
+    // Control: the flags reach the route, which refuses the reused z column.
+    let mut flag_args = base();
+    flag_args.slope_formula = Some("1".to_string());
+    flag_args.z_column = Some("z".to_string());
+    let from_flags = run_fit(flag_args)
+        .expect_err("a main formula that uses the z column must be refused")
+        .to_string();
+    assert!(
+        from_flags.contains("reserves z column 'z'"),
+        "unexpected refusal from flags: {from_flags}"
+    );
+
+    fs::write(
+        &request_path,
+        r#"{"schema":"gam.fit-request","schema_version":1,
+            "formula":"y ~ x + z",
+            "config":{"slope_formula":"1","z_column":"z"}}"#,
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write fit-request document", e));
+    let mut request_args = base();
+    request_args.request = Some(request_path.clone());
+    request_args.formula_positional = None;
+    let from_request = run_fit(request_args)
+        .expect_err("a main formula that uses the z column must be refused")
+        .to_string();
+    assert!(
+        from_request.contains("reserves z column 'z'"),
+        "a --request document's slope formula and z column must reach the route: {from_request}"
+    );
+}
+
 #[test]
 fn cli_surv_predict_noise_routes_to_survival_location_scale() {
     let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
