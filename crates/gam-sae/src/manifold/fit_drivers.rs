@@ -4995,11 +4995,21 @@ impl SaeManifoldTerm {
             .collect();
         let dims: Vec<usize> = atoms.iter().map(|&a| self.atoms[a].latent_dim()).collect();
         let n = self.n_obs();
-        let seeded =
+        let (seeded, source) =
             match topology_curved_seed_initial_coords(residual, &basis_kinds, &dims, retry)? {
-                Some(harmonic) => harmonic,
-                None => sae_data_row_anchored_coords(residual, &basis_kinds, &dims, retry)?,
+                Some(harmonic) => (harmonic, "kNN-graph harmonics"),
+                None => (
+                    sae_data_row_anchored_coords(residual, &basis_kinds, &dims, retry)?,
+                    "worst-reconstructed rows",
+                ),
             };
+        // #2023 acceptance: every reseed names its source in the log, so a fit's
+        // log shows directly that no principal component seeded a collapsed atom.
+        log::info!(
+            "SaeManifoldTerm: reseeding {} collapsed atom(s) {atoms:?} from the residual's \
+             {source} (retry {retry}); no principal component is read",
+            atoms.len()
+        );
         for (slot, &atom) in atoms.iter().enumerate() {
             let d = dims[slot];
             let mut flat = Array1::<f64>::zeros(n * d);
