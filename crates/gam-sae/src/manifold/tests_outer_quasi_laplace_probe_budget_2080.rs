@@ -1252,6 +1252,134 @@ fn profile_wide_p_criterion_cost_2080() {
     }
 }
 
+/// #2080 / #2336 — a refused exact-A saddle is descended before it is refused, and
+/// a refusal the descent cannot resolve reaches the outer search as a probe value,
+/// never as a fatal abort.
+///
+/// Specimen: the p=16 rung of `profile_wide_p_criterion_cost_2080` (K=1 correctly
+/// specified circle, ordered Beta–Bernoulli gates). Pool job 532798 at 1c456287c read
+/// its converged root refused on four gate-logit modes, then four committed descents,
+/// then a final mode no refused direction could descend above the material floor.
+///
+/// Pinned:
+/// * the converged root, from the criterion's own initial fit and converge without its
+///   descent, is refused on the joint block (non-vacuity);
+/// * after the criterion runs, the installed state's penalized objective is strictly
+///   below the refused root's, so at least one descent committed, whatever the final
+///   verdict;
+/// * the outer evaluation at the same ρ returns a finite value or the `+inf` infeasible
+///   probe, never an error.
+#[test]
+fn refused_exact_a_saddle_is_descended_before_the_refusal_2080() {
+    let (n, p, harmonics, inner_max_iter) = (96usize, 16usize, 2usize, 8usize);
+    let (learning_rate, ridge_ext_coord, ridge_beta) = (0.04, 1.0e-6, 1.0e-6);
+    let z = one_circle_wide_target(n, p, 0.05);
+    let (term, seed_dispersion) = two_circle_periodic_term(z.view(), 1, harmonics);
+    let mode = AssignmentMode::ordered_beta_bernoulli(1.0, 1.0, false);
+    let rho = SaeManifoldRho::new(0.02_f64.ln(), 1.0_f64.ln(), vec![array![0.0]])
+        .seed_scaled_by_dispersion_for_assignment(seed_dispersion, mode)
+        .expect("seed dispersion is finite and strictly positive");
+
+    // The refused root: the criterion's own initial fit and converge, without its descent.
+    let mut root = term.clone();
+    let mut rho_fixed = rho.clone();
+    let initial = root
+        .run_joint_fit_arrow_schur_for_quasi_laplace(
+            z.view(),
+            &mut rho_fixed,
+            None,
+            inner_max_iter,
+            learning_rate,
+            ridge_ext_coord,
+            ridge_beta,
+        )
+        .expect("initial joint fit of the specimen");
+    let mut loss = initial.loss;
+    let mut criterion_fixed_point = initial.fixed_point;
+    let options = gam_solve::arrow_schur::ArrowSolveOptions::direct()
+        .with_gpu_policy(root.gpu_policy)
+        .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
+        .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+    let root_cache = root
+        .converge_inner_for_undamped_logdet(
+            z.view(),
+            &rho,
+            &mut rho_fixed,
+            None,
+            inner_max_iter,
+            learning_rate,
+            ridge_ext_coord,
+            ridge_beta,
+            &mut loss,
+            &mut criterion_fixed_point,
+            &options,
+            true,
+        )
+        .expect("converge the specimen to its inner root");
+    let root_verdict = root.exact_observed_information_log_dets(&rho, z.view(), &root_cache);
+    assert!(
+        matches!(
+            root_verdict,
+            Err(super::construction::SaeCriterionError::IndefiniteObservedInformation { block })
+                if block == "joint"
+        ),
+        "the specimen's converged root must be a refused exact-A saddle, or this gate proves \
+         nothing; got: {root_verdict:?}"
+    );
+    let root_objective = root
+        .penalized_objective_total(z.view(), &rho, None, 1.0)
+        .expect("penalized objective at the refused root");
+
+    // The criterion leaves its final installed state whatever its verdict.
+    let mut descended = term.clone();
+    let verdict = descended.penalized_quasi_laplace_criterion_with_cache(
+        z.view(),
+        &rho,
+        None,
+        inner_max_iter,
+        learning_rate,
+        ridge_ext_coord,
+        ridge_beta,
+    );
+    let descended_objective = descended
+        .penalized_objective_total(z.view(), &rho, None, 1.0)
+        .expect("penalized objective after the criterion");
+    eprintln!(
+        "[#2080 saddle pin] refused root objective {root_objective:.12e}, after the criterion \
+         {descended_objective:.12e}, criterion verdict {:?}",
+        verdict.as_ref().map(|(value, _, _)| *value)
+    );
+    assert!(
+        descended_objective < root_objective,
+        "the criterion must descend the refused root before any verdict: after \
+         {descended_objective:.12e}, refused root {root_objective:.12e}"
+    );
+
+    let rho_flat = rho.to_flat();
+    let mut objective = SaeManifoldOuterObjective::new(
+        term,
+        z,
+        None,
+        rho,
+        inner_max_iter,
+        learning_rate,
+        ridge_ext_coord,
+        ridge_beta,
+    );
+    match objective.eval(&rho_flat) {
+        Ok(evaluation) => assert!(
+            evaluation.cost.is_finite()
+                || (evaluation.cost.is_infinite() && evaluation.cost.is_sign_positive()),
+            "the outer eval must price a finite value or the +inf infeasible probe, got cost={}",
+            evaluation.cost
+        ),
+        Err(err) => panic!(
+            "#2336: an exact-A refusal must be an infeasible probe the outer solver can \
+             backtrack from, not a fatal abort; got: {err}"
+        ),
+    }
+}
+
 /// #2080 wide-p per-eval localizer (zz_measure diagnostics). Splits a single
 /// K=1 criterion evaluation into: (A) the damped inner (t,β) Newton solve,
 /// (M) the dense exact-A materialization column-by-column, (E) the full exact
