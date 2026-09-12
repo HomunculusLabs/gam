@@ -45,7 +45,8 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, ArrayViewMut1, Axis, Zip, 
 ///
 /// `n_neighbors` is clamped to `[1, n − 1]`. Errors only on structurally
 /// impossible requests (too few rows to expose `latent_dim` non-trivial modes,
-/// non-finite inputs, or an eigensolver failure).
+/// non-finite inputs, a cloud whose retained neighbours all coincide, or an
+/// eigensolver failure).
 pub fn laplacian_eigenmap_coords(
     features: ArrayView2<'_, f64>,
     latent_dim: usize,
@@ -71,11 +72,20 @@ pub fn laplacian_eigenmap_coords(
     // Per-row k nearest neighbours (excluding self) and the bandwidth: the
     // median of the retained k-NN squared distances. Median is robust to the
     // far tail and keeps the affinities well-scaled across datasets.
+    // A coincident neighbour carries no scale, so it does not vote for the
+    // bandwidth; a cloud with no two distinct neighbours has none to give.
     let (knn, knn_d2) = nearest_neighbours(features, k);
-    let mut retained: Vec<f64> = knn_d2.iter().copied().collect();
+    let mut retained: Vec<f64> = knn_d2.iter().copied().filter(|&d2| d2 > 0.0).collect();
+    if retained.is_empty() {
+        return Err(
+            "laplacian_eigenmap_coords: every retained neighbour coincides with its row, so \
+             the point cloud gives the affinity bandwidth no scale"
+                .to_string(),
+        );
+    }
     let middle = retained.len() / 2;
     let (_, median, _) = retained.select_nth_unstable_by(middle, f64::total_cmp);
-    let epsilon = median.max(f64::MIN_POSITIVE);
+    let epsilon = *median;
 
     let graph = NormalizedAffinity::from_neighbours(&knn, &knn_d2, epsilon);
     // Ascending modes of the normalized Laplacian. Column 0 is the smallest (the
@@ -183,13 +193,13 @@ impl NormalizedAffinity {
         }
         let neighbours = edges.iter().map(|edge| edge.1).collect();
         let weights: Vec<f64> = edges.iter().map(|edge| edge.2).collect();
-        // An isolated node (zero degree) gets a tiny floor so D^{-1/2} stays
-        // finite; its row of L is then the identity and it contributes no
-        // spurious coupling.
+        // An isolated node (zero degree) has no row in `S`: `D^{-1/2}` is zero
+        // there, so its row of L is the identity, it contributes no coupling, and
+        // its mapped-back coordinate is zero rather than a mode scaled by a floor.
         let dinv_sqrt = (0..n)
             .map(|i| {
                 let degree: f64 = weights[row_start[i]..row_start[i + 1]].iter().sum();
-                1.0 / degree.max(f64::MIN_POSITIVE).sqrt()
+                if degree > 0.0 { 1.0 / degree.sqrt() } else { 0.0 }
             })
             .collect();
         Self {
