@@ -160,16 +160,12 @@ def test_rust_value_matches_internal_helper_for_ard() -> None:
     direct = float(module.rust_value(latent.detach().cpu().numpy()))
 
     rho = module.log_precision.detach().to(dtype=latent.dtype)
-    from gamfit._penalty_bridge import fixed_weight_schedule
     from gamfit.torch.penalties import (  # type: ignore[attr-defined]
         _latent_json,
         _penalty_json,
     )
 
-    descriptor: dict[str, Any] = {"kind": "ard", "target": "t"}
-    schedule = fixed_weight_schedule(module.weight)
-    if schedule is not None:
-        descriptor["weight_schedule"] = schedule
+    descriptor: dict[str, Any] = {"kind": "ard", "target": "t", "weight": module.weight}
 
     value_t, _, _, _ = _call_rust_value_grad(
         latent,

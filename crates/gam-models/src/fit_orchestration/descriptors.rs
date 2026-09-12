@@ -559,9 +559,10 @@ pub fn build_analytic_penalty_registry_from_descriptors(
                 descriptor_no_unknown_keys(
                     descriptor,
                     &context,
-                    &["kind", "target", "weight_schedule"],
+                    &["kind", "target", "weight", "weight_schedule"],
                 )?;
-                let penalty = ARDPenalty::new(slice, target.d);
+                let mut penalty = ARDPenalty::new(slice, target.d);
+                penalty.weight = descriptor_f64(descriptor, "weight", 1.0)?;
                 let penalty = match weight_schedule {
                     Some(schedule) => penalty.with_weight_schedule(schedule),
                     None => penalty,
@@ -1499,6 +1500,20 @@ mod tests {
                 "nested_prefix",
             ]
         );
+    }
+
+    #[test]
+    fn ard_weight_sets_the_base_weight() {
+        let latents = latents();
+        let registry = build_analytic_penalty_registry_from_descriptors(
+            Some(&latents),
+            Some(&json!([{ "kind": "ard", "target": "z", "weight": 2.5 }])),
+        )
+        .expect("ARD with a constant weight is valid");
+        match registry.penalties.as_slice() {
+            [AnalyticPenaltyKind::Ard(penalty)] => assert_eq!(penalty.weight, 2.5),
+            other => panic!("expected one ARD penalty, got {} penalties", other.len()),
+        }
     }
 
     #[test]

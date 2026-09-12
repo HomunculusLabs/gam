@@ -7,7 +7,7 @@ Every penalty surface in gamfit — the composable frame-aware descriptors in
 :mod:`gamfit._sae_manifold` — shares the same plumbing:
 
 * build the latent / penalty JSON the Rust registry consumes
-  (:func:`latent_json`, :func:`penalty_json`, :func:`fixed_weight_schedule`),
+  (:func:`latent_json`, :func:`penalty_json`),
 * run ``analytic_penalty_value_grad`` / ``analytic_penalty_hvp`` once
   (:func:`call_value_grad`, :func:`call_hvp`, :func:`call_rust_value_grad`
   for the isometry-Jacobian variant),
@@ -34,7 +34,6 @@ from ._penalty_jax_vjp import jax_value_grad_from_rust
 
 __all__ = [
     "latent_json",
-    "fixed_weight_schedule",
     "penalty_json",
     "call_value_grad",
     "call_hvp",
@@ -57,19 +56,6 @@ __all__ = [
 def latent_json(n: int, d: int, *, name: str = "t") -> str:
     """Serialize the single-latent-block registry descriptor."""
     return json.dumps({name: {"name": name, "n": int(n), "d": int(d)}})
-
-
-def fixed_weight_schedule(weight: float) -> dict[str, Any] | None:
-    """A constant ``weight_schedule`` payload, or ``None`` at unit weight."""
-    if float(weight) == 1.0:
-        return None
-    return {
-        "w_start": float(weight),
-        "w_end": float(weight),
-        "kind": "linear",
-        "steps": 1,
-        "iter_count": 1,
-    }
 
 
 def penalty_json(descriptor: dict[str, Any]) -> str:
@@ -220,12 +206,8 @@ def call_rust_value_grad(
 
 
 def ard_descriptor(target: str, weight: float) -> dict[str, Any]:
-    """ARD descriptor; folds a constant weight into ``weight_schedule``."""
-    desc: dict[str, Any] = {"kind": "ard", "target": str(target)}
-    schedule = fixed_weight_schedule(weight)
-    if schedule is not None:
-        desc["weight_schedule"] = schedule
-    return desc
+    """ARD descriptor with its constant base weight."""
+    return {"kind": "ard", "target": str(target), "weight": float(weight)}
 
 
 def ordered_beta_bernoulli_descriptor(
