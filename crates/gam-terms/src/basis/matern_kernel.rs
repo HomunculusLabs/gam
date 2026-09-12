@@ -2047,7 +2047,7 @@ pub fn closed_form_anisotropic_pair_block(
 /// Pure-Duchon (κ=0) variant of [`closed_form_anisotropic_pair_block`].
 ///
 /// Uses the analytic radial-derivative path
-/// [`closed_form_penalty::anisotropic_duchon_penalty_radial`] which handles
+/// `closed_form_penalty::anisotropic_duchon_penalty_radial_with_powers`, which handles
 /// κ=0 cleanly by delegating to pure-Riesz radial derivatives. The
 /// Schoenberg path is undefined at κ=0 in low dimensions, so this variant
 /// must be used in place of [`closed_form_anisotropic_pair_block`] for

@@ -1181,7 +1181,7 @@ fn overlap_vs_no_overlap_diag_differs_by_2q_sum() {
 // Closed-form Riesz / Matérn / hybrid Duchon kernel tests
 // ----------------------------------------------------------------------
 
-use super::closed_form_penalty::{bessel_k, matern_kernel_value, riesz_kernel_value};
+use super::closed_form_penalty::bessel_k;
 
 // Hybrid isotropic Duchon evaluation, test-local: the partial-fraction and
 // finite-part Riesz oracle these kernel tests compare production against.
@@ -1806,7 +1806,6 @@ fn test_riesz_satisfies_laplacian_identity() {
     // ρ^{-2(j-1)} = F[R_{j-1}^d]. Any normalization error in
     // riesz_kernel_value would show up here as a constant offset, and
     // a sign flip would make the relation fail outright.
-    use super::closed_form_penalty::riesz_kernel_value;
     // Skip log cases (where 2(j-1) ≥ d and 2(j-1)-d is even); restrict
     // to (d, j) for which both R_j^d and R_{j-1}^d are non-log so the
     // identity holds without subtracting log terms.
@@ -1841,7 +1840,6 @@ fn test_riesz_satisfies_laplacian_identity() {
 
 #[test]
 fn test_log_riesz_finite_part_satisfies_laplacian_identity() {
-    use super::closed_form_penalty::riesz_kernel_value;
 
     // Even-dimensional log-Riesz branches need the finite-part shift
     // A_n in R_{d/2+n}^d = c_n r^{2n}(log r + A_n). The shift is correct
@@ -1892,7 +1890,6 @@ fn test_matern_matches_half_integer_closed_forms() {
     //
     // We tabulate three (d, ℓ) cells covering ν ∈ {1/2, 3/2, 5/2}, all
     // half-integer, all positive (so no singular K_ν at r → 0 issues).
-    use super::closed_form_penalty::matern_kernel_value;
     use std::f64::consts::PI;
     // (d, ℓ): ν = ℓ - d/2 ∈ {1/2, 3/2, 5/2}.
     let cases: &[(usize, usize)] = &[(3, 2), (3, 3), (3, 4), (5, 3), (5, 4)];
@@ -1946,7 +1943,6 @@ fn test_matern_matches_half_integer_closed_forms() {
 
 #[test]
 fn test_matern_satisfies_helmholtz() {
-    use super::closed_form_penalty::matern_kernel_value;
     // (κ² − Δ_radial) M_ℓ^d = M_{ℓ-1}^d in d=3.
     let d = 3usize;
     let kappa = 1.0_f64;
@@ -1973,7 +1969,6 @@ fn test_matern_satisfies_helmholtz() {
 
 #[test]
 fn test_isotropic_duchon_satisfies_partial_fraction_identity() {
-    use super::closed_form_penalty::{matern_kernel_value, riesz_kernel_value};
     let d = 3usize;
     let m = 2usize;
     let s = 2usize;
@@ -2015,7 +2010,6 @@ fn test_isotropic_duchon_satisfies_partial_fraction_identity() {
 
 #[test]
 fn test_isotropic_duchon_kappa_to_zero_limit() {
-    use super::closed_form_penalty::riesz_kernel_value;
     // For positive κ,
     //   ĝ_κ(ρ) = 1 / (ρ^{2a}(κ²+ρ²)^b),  a = 2m-q, b = 2s.
     // The pointwise κ→0 limit equals the pure Riesz representative only
@@ -2054,7 +2048,6 @@ fn test_isotropic_duchon_kappa_to_zero_limit() {
 
 #[test]
 fn test_isotropic_duchon_kappa_to_zero_ir_divergence_is_quotiented_by_finite_part() {
-    use super::closed_form_penalty::riesz_kernel_value;
 
     // Same (m,s,q) as the convergent test but d=5. Now a=1,b=4 and
     // d-2a-2b = -5, so the ordinary low-frequency positive-κ Green's
@@ -2115,7 +2108,7 @@ fn test_small_kappa_finite_part_chart_is_shared_by_value_radial_and_kappa_partia
             max_order: usize,
         ) -> Vec<f64> {
             assert_eq!(d % 2, 1);
-            let value = super::closed_form_penalty::riesz_kernel_value(d, (j) as f64, r);
+            let value = riesz_kernel_value(d, (j) as f64, r);
             let p = 2 * j as i32 - d as i32;
             let mut out = Vec::with_capacity(max_order + 1);
             out.push(value);
@@ -2223,7 +2216,6 @@ fn test_small_kappa_finite_part_chart_is_shared_by_value_radial_and_kappa_partia
 
 #[test]
 fn test_even_log_riesz_small_kappa_uses_full_taylor_series() {
-    use super::closed_form_penalty::riesz_kernel_value;
 
     // Even-dimensional log-Riesz case: d/2 <= N = 2m - q + 2s.
     // This used to return only the leading R_N term under cancellation.
@@ -2260,9 +2252,6 @@ fn test_even_log_riesz_small_kappa_uses_full_taylor_series() {
 
 #[test]
 fn test_even_log_riesz_small_kappa_derivative_bundle_matches_fd() {
-    use super::closed_form_penalty::{
-        anisotropic_duchon_penalty_radial, pair_block_radial_with_j_second_derivatives,
-    };
 
     // Same even-dimensional log-Riesz cancellation basin as the value
     // Taylor test, but through the production derivative bundle. This
@@ -2409,7 +2398,6 @@ fn test_radial_form_isotropic_limit_matches_radial_laplacian_chain() {
     //   q = 0:  f(R)
     //   q = 1: -[ f''(R) + (d-1) f'(R)/R ]
     //   q = 2:  Δ²f(R) (well-known closed form on radial fns)
-    use super::closed_form_penalty::anisotropic_duchon_penalty_radial;
 
     // Use parameter triples covering both Riesz-only (s=0) and
     // hybrid (s>0). All require 2m - q ≥ 1 from
@@ -2497,7 +2485,6 @@ fn det_rand(seed: &mut u64) -> f64 {
 
 #[test]
 fn test_aniso_scale_invariance_via_letter_a_section_9() {
-    use super::closed_form_penalty::anisotropic_duchon_penalty_radial;
 
     let cases: &[(usize, usize, usize, usize, f64)] = &[
         (0, 3, 1, 1, 0.7),
@@ -2633,7 +2620,7 @@ fn singular_convergent_derivative_builders_use_analytic_self_pair() {
     }
 
     let zero_lag = vec![0.0_f64; d];
-    let diag_bundle = closed_form_penalty::pair_block_radial_with_j_second_derivatives(
+    let diag_bundle = pair_block_radial_with_j_second_derivatives(
         q, m, s, kappa, &eta, &zero_lag,
     );
     assert!(
@@ -2646,7 +2633,6 @@ fn singular_convergent_derivative_builders_use_analytic_self_pair() {
 
 #[test]
 fn test_radial_form_matches_q0_laplacian_chain_at_eta_zero_full_sweep() {
-    use super::closed_form_penalty::anisotropic_duchon_penalty_radial;
 
     let qs = [0_usize, 1, 2];
     let ds = [1_usize, 3, 5, 7, 9, 11];
@@ -2716,7 +2702,6 @@ fn test_radial_form_matches_q0_laplacian_chain_at_eta_zero_full_sweep() {
 
 #[test]
 fn test_radial_form_uniform_eta_uses_exact_isotropic_metric_identity() {
-    use super::closed_form_penalty::anisotropic_duchon_penalty_radial;
 
     let cases: &[(usize, usize, usize, usize, f64, f64)] = &[
         (0, 3, 1, 2, 0.5, 0.20),
@@ -2773,9 +2758,7 @@ fn test_letter_b_taylor_matches_partial_fraction_in_overlap() {
 
 #[test]
 fn test_g_2_radial_form_matches_letter_a_explicit_formula() {
-    use super::closed_form_penalty::{
-        anisotropic_duchon_penalty_radial, radial_derivatives_of_isotropic_duchon,
-    };
+    use super::closed_form_penalty::radial_derivatives_of_isotropic_duchon;
 
     let mut seed = 0xFEED_FACE_u64;
 
@@ -2834,9 +2817,7 @@ fn test_g_2_radial_form_matches_letter_a_explicit_formula() {
 
 #[test]
 fn test_isotropic_limit_at_b_equals_i_recovers_radial_bilaplacian() {
-    use super::closed_form_penalty::{
-        anisotropic_duchon_penalty_radial, radial_derivatives_of_isotropic_duchon,
-    };
+    use super::closed_form_penalty::radial_derivatives_of_isotropic_duchon;
 
     let cases: &[(usize, usize, usize, f64)] = &[(3, 2, 1, 0.7), (5, 2, 2, 1.0), (7, 2, 3, 0.5)];
 
@@ -2870,7 +2851,6 @@ fn test_isotropic_limit_at_b_equals_i_recovers_radial_bilaplacian() {
 
 #[test]
 fn test_pair_block_symmetric_under_pair_swap() {
-    use super::closed_form_penalty::anisotropic_duchon_penalty_radial;
 
     let mut seed = 0xBADD_F00D_u64;
     let cases: &[(usize, usize, usize, usize, f64)] = &[
@@ -2901,7 +2881,6 @@ fn test_pair_block_symmetric_under_pair_swap() {
 
 #[test]
 fn test_pair_block_continuous_at_diagonal_via_eps_limit() {
-    use super::closed_form_penalty::anisotropic_duchon_penalty_radial;
 
     // Pure-Duchon (κ=0), q ∈ {1, 2}, with p = 4(m+s)−d > 2q so
     // the finite-part radial limit is bounded.
@@ -3191,7 +3170,7 @@ fn test_pair_block_derivative_branch_matrix_is_fully_fd_gated_2315() {
     use super::closed_form_penalty::{
         AnisoMetricPowers, analytic_self_pair_bundle, aniso_invariants_with_powers,
         hybrid_self_pair_bundle_odd_d,
-        pair_block_radial_with_j_second_derivatives, schoenberg_self_pair_bundle,
+        schoenberg_self_pair_bundle,
         schwinger_radial_is_convergent, use_duchon_small_chi_riesz_series,
     };
 
@@ -3344,7 +3323,6 @@ fn test_pair_block_derivative_branch_matrix_is_fully_fd_gated_2315() {
 
 #[test]
 fn test_pair_block_pure_riesz_kappa_independence_is_exactly_gated_2315() {
-    use super::closed_form_penalty::pair_block_radial_with_j_second_derivatives;
 
     // `s == 0` is a separate production match arm: the hybrid factor is absent,
     // so the value and every eta derivative are exactly independent of kappa,
@@ -3554,9 +3532,6 @@ fn test_even_d_duchon_collision_derivative_matches_finite_difference_2315() {
 
 #[test]
 fn test_eta_derivative_matches_finite_difference() {
-    use super::closed_form_penalty::{
-        anisotropic_duchon_penalty_radial, pair_block_radial_with_j_second_derivatives,
-    };
 
     let mut seed = 0xABCD_1234_u64;
     let cases: &[(usize, usize, usize, usize, f64)] = &[(1, 3, 1, 1, 0.8), (2, 5, 2, 2, 1.0)];

@@ -1903,5 +1903,16 @@
     },
     "reason": "#2899 group-A sweep: bessel_i0_centered_second_log_derivative_from_log_abs lost its only consumer (the von-Mises ARD log-precision Hessian entry) and only special.rs tests called it. It is deleted.",
     "evidence": "public_api_census.py --base 1830404e9 --head 57feaad8a reports exactly this identity (/scratch.global/sauer354/pool/prune-api-a/slice11.census.json)."
+  },
+  {
+    "base": "eb8250dab6f62e71c6475f50e7570cbcd58d8601",
+    "removed": {
+      "crates/gam-terms/src/basis/closed_form_penalty.rs::anisotropic_duchon_penalty_radial": 1,
+      "crates/gam-terms/src/basis/closed_form_penalty.rs::matern_kernel_value": 1,
+      "crates/gam-terms/src/basis/closed_form_penalty.rs::pair_block_radial_with_j_second_derivatives": 1,
+      "crates/gam-terms/src/basis/closed_form_penalty.rs::riesz_kernel_value": 1
+    },
+    "reason": "prune-api-b product-use sweep (#2899). riesz_kernel_value, matern_kernel_value, anisotropic_duchon_penalty_radial and pair_block_radial_with_j_second_derivatives leave the public gam-terms API and become test oracles in crates/gam-terms/src/basis/tests.rs; no product uses them, and production uses the chart-dispatched _with_powers builders.",
+    "evidence": "scripts/public_api_census.py over probe commit bb25d3023 on base 3f4f39e2b (MSI acn112, python3.12; sliceE.census.out) reports exactly these four closed_form_penalty.rs identities, one declaration each; re-keyed to the push parent after an upstream change to matern_kernel.rs, which removes no public function. The prune-api-b census at cfc1cb2fe finds no production reference; the only callers are the basis test fixtures and two benches whose oracle groups are deleted."
   }
 ]

@@ -145,11 +145,6 @@ path = "bench/cargo_benches/sparse_dict_router_topk.rs"
 harness = false
 
 [[bench]]
-name = "closed_form_pair_block"
-path = "bench/cargo_benches/closed_form_pair_block.rs"
-harness = false
-
-[[bench]]
 name = "closed_form_criterion"
 path = "bench/cargo_benches/closed_form_criterion.rs"
 harness = false

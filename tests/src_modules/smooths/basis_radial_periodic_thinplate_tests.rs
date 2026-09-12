@@ -491,7 +491,7 @@ fn stable_hybrid_duchon_radial_obeys_kernel_scaling_and_kappa_zero_limit() {
         for &r in &[0.4_f64, 1.0, 2.5] {
             let kappa = 1e-12_f64;
             let stable = closed_form_penalty::stable_hybrid_duchon_radial(d, m, s, kappa, r, 0)[0];
-            let riesz = closed_form_penalty::riesz_kernel_value(d, (n) as f64, r);
+            let riesz = riesz_kernel_value(d, (n) as f64, r);
             let scale = riesz.abs().max(stable.abs()).max(1e-300);
             let rel = (stable - riesz).abs() / scale;
             // For ν = n − d/2 < 0 (d > 2n), the half-integer K_ν has an
