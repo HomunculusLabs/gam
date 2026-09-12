@@ -6844,8 +6844,10 @@ impl BlockSparseDictStream {
     /// Refresh γ + block frames from the epoch's accumulators and advance the
     /// exact residual-row birth transaction. Returns
     /// `{explained_variance, accepted_births, birth_pending, dead, gamma,
-    /// gamma_residual, frame_residual,
-    /// converged, epoch}`.
+    /// gamma_residual, frame_residual, frame_displacement_residual,
+    /// frame_gradient_residual, frame_binding_block, frame_binding_block_rows,
+    /// frame_blocks_above_tolerance, frame_residual_median, rerouted_rows,
+    /// mean_admitted_blocks, converged, epoch}`.
     fn end_epoch(&mut self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         let stats = py
             .detach(|| self.inner.end_epoch())
@@ -6858,6 +6860,20 @@ impl BlockSparseDictStream {
         out.set_item("gamma", stats.gamma)?;
         out.set_item("gamma_residual", stats.gamma_residual)?;
         out.set_item("frame_residual", stats.frame_residual)?;
+        out.set_item(
+            "frame_displacement_residual",
+            stats.frame_displacement_residual,
+        )?;
+        out.set_item("frame_gradient_residual", stats.frame_gradient_residual)?;
+        out.set_item("frame_binding_block", stats.frame_binding_block)?;
+        out.set_item("frame_binding_block_rows", stats.frame_binding_block_rows)?;
+        out.set_item(
+            "frame_blocks_above_tolerance",
+            stats.frame_blocks_above_tolerance,
+        )?;
+        out.set_item("frame_residual_median", stats.frame_residual_median)?;
+        out.set_item("rerouted_rows", stats.rerouted_rows)?;
+        out.set_item("mean_admitted_blocks", stats.mean_admitted_blocks)?;
         out.set_item("converged", stats.converged)?;
         out.set_item("epoch", stats.epoch)?;
         Ok(out.unbind())

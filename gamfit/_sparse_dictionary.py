@@ -1025,8 +1025,10 @@ class BlockSparseDictStream:
         """Close the epoch: refresh γ + block frames and advance the exact
         residual-row birth transaction. Returns
         ``{explained_variance, accepted_births, birth_pending, dead, gamma,
-        gamma_residual, frame_residual,
-        converged, epoch}``."""
+        gamma_residual, frame_residual, frame_displacement_residual,
+        frame_gradient_residual, frame_binding_block, frame_binding_block_rows,
+        frame_blocks_above_tolerance, frame_residual_median, rerouted_rows,
+        mean_admitted_blocks, converged, epoch}``."""
         return dict(self._handle.end_epoch())
 
     def block_rank_charges(self, n_obs: int) -> dict[str, Any]:
