@@ -4336,6 +4336,190 @@ impl SurvivalLocationScaleFamily {
         Ok(Some(grad))
     }
 
+    /// First-order terms of inverse-link shape axis `axis` as a family-owned
+    /// hyper axis (#2904): `objective_psi = ∂(−ℓ)/∂θ`, `score_psi = ∂θ ∇_β(−ℓ)`
+    /// and `hessian_psi = ∂θ ∇²_β(−ℓ)`, at fixed β.
+    ///
+    /// The link enters the row NLL only through the residual-distribution
+    /// stacks `sls_row_program` composes, and a supplied compose is linear in
+    /// its stack: value `s₀`, gradient `s₁·u_a`, Hessian `s₁·u_ab + s₂·u_a·u_b`.
+    /// So the row gradient's and Hessian's θ-partials are the same order-2
+    /// program evaluated on the θ-partials of each stack's first two derivative
+    /// entries, pulled back through the row Jacobian. The value slots and the
+    /// link-independent `log g` stack are zero in that evaluation, and the
+    /// objective partial is [`Self::link_param_data_fit_gradient`]. `None` when
+    /// the link has no free parameters.
+    pub(crate) fn link_param_joint_psi_terms(
+        &self,
+        block_states: &[ParameterBlockState],
+        axis: usize,
+    ) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
+        let Some(objective) = self.link_param_data_fit_gradient(block_states)? else {
+            return Ok(None);
+        };
+        if axis >= objective.len() {
+            return Err(SurvivalLocationScaleError::DimensionMismatch {
+                reason: format!(
+                    "inverse-link shape axis {axis} is out of range for a link with {} free \
+                     parameters",
+                    objective.len()
+                ),
+            }
+            .into());
+        }
+        if self.x_link_wiggle.is_some() {
+            return Err(SurvivalLocationScaleError::InvalidConfiguration {
+                reason: "inverse-link shape hyper axes are not available with a link wiggle block"
+                    .to_string(),
+            }
+            .into());
+        }
+        let dynamic = self.build_dynamic_geometry(block_states)?;
+        // Shape parameters exist only for links whose derivative log-rescale is
+        // the identity; it departs from zero for CLogLog alone.
+        let kernel = self.survival_ls_row_kernel_rescaled(&dynamic, 0.0);
+        let p_total = *kernel
+            .offsets
+            .last()
+            .ok_or_else(|| "missing joint block offsets".to_string())?;
+        let mut score_psi = Array1::<f64>::zeros(p_total);
+        let mut hessian_psi = Array2::<f64>::zeros((p_total, p_total));
+        for row in 0..self.n {
+            let Some((primary, row_kernel)) = kernel.row_nll_inputs_opt(row)? else {
+                continue;
+            };
+            let (entry_survival_first, entry_survival_second, _, _) =
+                self.link_param_stack_partials(dynamic.h_entry[row] + dynamic.q_entry[row], axis)?;
+            let (exit_survival_first, exit_survival_second, exit_log_pdf_first, exit_log_pdf_second) =
+                self.link_param_stack_partials(dynamic.h_exit[row] + dynamic.q_exit[row], axis)?;
+            let partial_kernel = SurvivalExactRowKernel {
+                w: row_kernel.w,
+                d: row_kernel.d,
+                log_s0: 0.0,
+                r0: entry_survival_first,
+                dr0: entry_survival_second,
+                ddr0: 0.0,
+                dddr0: 0.0,
+                log_s1: 0.0,
+                r1: exit_survival_first,
+                dr1: exit_survival_second,
+                ddr1: 0.0,
+                dddr1: 0.0,
+                logphi1: 0.0,
+                dlogphi1: exit_log_pdf_first,
+                d2logphi1: exit_log_pdf_second,
+                d3logphi1: 0.0,
+                d4logphi1: 0.0,
+                log_pdf1_minus_log_s0: 0.0,
+                log_s1_minus_log_s0: 0.0,
+                log_g: 0.0,
+                d_log_g: 0.0,
+                d2_log_g: 0.0,
+                d3_log_g: 0.0,
+                d4_log_g: 0.0,
+            };
+            let (_, gradient, hessian) = sls_row_vgh_generated(&primary, &partial_kernel);
+            crate::row_kernel::RowKernel::<SLS_ROW_K>::jacobian_transpose_action(
+                &kernel,
+                row,
+                &gradient,
+                score_psi
+                    .as_slice_mut()
+                    .ok_or_else(|| "link-shape score accumulator is not contiguous".to_string())?,
+            );
+            crate::row_kernel::RowKernel::<SLS_ROW_K>::add_pullback_hessian(
+                &kernel,
+                row,
+                &hessian,
+                &mut hessian_psi,
+            );
+        }
+        Ok(Some(ExactNewtonJointPsiTerms {
+            objective_psi: objective[axis],
+            score_psi,
+            hessian_psi,
+            hessian_psi_operator: None,
+        }))
+    }
+
+    /// θ-partials of the first two derivative entries of the survival stack
+    /// (`r = −(ln S)′`, `dr = −(ln S)″`) and the log-density stack (`(ln f)′`,
+    /// `(ln f)″`) at index `u`, for one inverse-link shape axis (#2904), in that
+    /// order. Both stacks are `ln` composed on a jet `(v, x′, x″)`: `(S, −f, −f′)`
+    /// and `(f, f′, f″)` with `f = F′`, whose θ-partials `(dv, dx′, dx″)` are
+    /// `(−∂θF, −∂θf, −∂θf′)` and `(∂θf, ∂θf′, ∂θf″)`. `S` is the stable complement
+    /// the kernel's generic arm uses.
+    fn link_param_stack_partials(
+        &self,
+        u: f64,
+        axis: usize,
+    ) -> Result<(f64, f64, f64, f64), String> {
+        use gam_solve::mixture_link::{InverseLinkKernel, LinkParamPartials};
+        let jet = inverse_link_jet_for_inverse_link(&self.inverse_link, u)
+            .map_err(|e| format!("inverse link evaluation failed at eta={u}: {e}"))?;
+        let survival = inverse_link_survival_probvalue(&self.inverse_link, u);
+        if !(survival.is_finite() && survival > 0.0 && survival <= 1.0) {
+            return Err(SurvivalLocationScaleError::NumericalFailure {
+                reason: format!(
+                    "inverse-link survival probability must lie in (0,1], got {survival} at eta={u}"
+                ),
+            }
+            .into());
+        }
+        let pdf = jet.d1;
+        if !(pdf.is_finite() && pdf > 0.0) {
+            return Err(SurvivalLocationScaleError::NumericalFailure {
+                reason: format!("inverse-link pdf must be finite and positive, got {pdf} at eta={u}"),
+            }
+            .into());
+        }
+        let partials = self
+            .inverse_link
+            .param_partials(u)
+            .map_err(|e| format!("inverse-link param partials failed at eta={u}: {e}"))?
+            .ok_or_else(|| "inverse-link reported no param partials".to_string())?;
+        let djet = match partials {
+            LinkParamPartials::Sas(p) => match axis {
+                0 => p.djet_depsilon,
+                1 => p.djet_dlog_delta,
+                _ => {
+                    return Err(format!(
+                        "an SAS-family link has two shape axes, got axis {axis}"
+                    ));
+                }
+            },
+            LinkParamPartials::Mixture(p) => *p.djet_drho.get(axis).ok_or_else(|| {
+                format!(
+                    "a mixture link has {} shape axes, got axis {axis}",
+                    p.djet_drho.len()
+                )
+            })?,
+        };
+        let (survival_first, survival_second) = Self::log_jet_first_two_theta_partials(
+            survival, -pdf, -jet.d2, -djet.mu, -djet.d1, -djet.d2,
+        );
+        let (log_pdf_first, log_pdf_second) =
+            Self::log_jet_first_two_theta_partials(pdf, jet.d2, jet.d3, djet.d1, djet.d2, djet.d3);
+        Ok((-survival_first, -survival_second, log_pdf_first, log_pdf_second))
+    }
+
+    /// `(∂θ(x′/v), ∂θ(x″/v − (x′/v)²))`: the θ-partials of the first two entries
+    /// of `ln x` for a one-variable jet `(v, x′, x″)` whose θ-partial jet is
+    /// `(dv, dx′, dx″)` (#2904).
+    #[inline]
+    fn log_jet_first_two_theta_partials(
+        v: f64,
+        x1: f64,
+        x2: f64,
+        dv: f64,
+        dx1: f64,
+        dx2: f64,
+    ) -> (f64, f64) {
+        let ratio = x1 / v;
+        let d_ratio = dx1 / v - x1 * dv / (v * v);
+        (d_ratio, dx2 / v - x2 * dv / (v * v) - 2.0 * ratio * d_ratio)
+    }
+
     pub(crate) fn exact_newton_joint_psi_direction(
         &self,
         block_states: &[ParameterBlockState],

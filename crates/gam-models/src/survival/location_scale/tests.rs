@@ -565,6 +565,88 @@ fn link_param_data_fit_gradient_matches_finite_difference_sas() {
     );
 }
 
+/// FD check for `SurvivalLocationScaleFamily::link_param_joint_psi_terms`
+/// (#2904): each SAS shape axis's `score_psi` and `hessian_psi` must match a
+/// central difference over that parameter of the row-kernel NLL gradient and
+/// Hessian at fixed β, and its `objective_psi` must be the data-fit θ-gradient.
+#[test]
+fn link_param_joint_psi_terms_match_finite_difference_sas_2904() {
+    let mut family = survival_exact_newton_test_family();
+    let (epsilon0, log_delta0) = (0.15, -0.25);
+    let sas = |epsilon: f64, log_delta: f64| {
+        InverseLink::Sas(
+            state_from_sasspec(SasLinkSpec {
+                initial_epsilon: epsilon,
+                initial_log_delta: log_delta,
+            })
+            .expect("sas state"),
+        )
+    };
+    family.inverse_link = sas(epsilon0, log_delta0);
+    let states = survival_exact_newton_test_states(&family, 0.35, 0.3, -0.1);
+    let data_fit = family
+        .link_param_data_fit_gradient(&states)
+        .expect("link param data-fit gradient")
+        .expect("SAS link has free parameters");
+    let nll_gradient_and_hessian = |link: InverseLink| {
+        let mut probe = family.clone();
+        probe.inverse_link = link;
+        let dynamic = probe
+            .build_dynamic_geometry(&states)
+            .expect("dynamic geometry");
+        let kernel = probe.survival_ls_row_kernel_rescaled(&dynamic, 0.0);
+        let p = *kernel.offsets.last().expect("joint block offsets");
+        let mut gradient = Array1::<f64>::zeros(p);
+        let mut hessian = Array2::<f64>::zeros((p, p));
+        for row in 0..probe.n {
+            let (_, row_gradient, row_hessian) =
+                crate::row_kernel::RowKernel::<SLS_ROW_K>::row_kernel(&kernel, row)
+                    .expect("row kernel");
+            crate::row_kernel::RowKernel::<SLS_ROW_K>::jacobian_transpose_action(
+                &kernel,
+                row,
+                &row_gradient,
+                gradient.as_slice_mut().expect("contiguous gradient"),
+            );
+            crate::row_kernel::RowKernel::<SLS_ROW_K>::add_pullback_hessian(
+                &kernel,
+                row,
+                &row_hessian,
+                &mut hessian,
+            );
+        }
+        (gradient, hessian)
+    };
+    let h = 1e-6;
+    let probes = [
+        (sas(epsilon0 + h, log_delta0), sas(epsilon0 - h, log_delta0)),
+        (sas(epsilon0, log_delta0 + h), sas(epsilon0, log_delta0 - h)),
+    ];
+    for (axis, (plus, minus)) in probes.into_iter().enumerate() {
+        let terms = family
+            .link_param_joint_psi_terms(&states, axis)
+            .expect("link-shape psi terms")
+            .expect("SAS link has free parameters");
+        assert_eq!(terms.objective_psi, data_fit[axis]);
+        let (gradient_plus, hessian_plus) = nll_gradient_and_hessian(plus);
+        let (gradient_minus, hessian_minus) = nll_gradient_and_hessian(minus);
+        let fd_score = (&gradient_plus - &gradient_minus) / (2.0 * h);
+        let fd_hessian = (&hessian_plus - &hessian_minus) / (2.0 * h);
+        for (analytic, fd) in terms.score_psi.iter().zip(fd_score.iter()) {
+            assert!(
+                (analytic - fd).abs() <= 1e-5 * fd.abs().max(1.0),
+                "axis {axis} score_psi mismatch: analytic={analytic}, fd={fd}"
+            );
+        }
+        for (analytic, fd) in terms.hessian_psi.iter().zip(fd_hessian.iter()) {
+            assert!(
+                (analytic - fd).abs() <= 1e-5 * fd.abs().max(1.0),
+                "axis {axis} hessian_psi mismatch: analytic={analytic}, fd={fd}"
+            );
+        }
+    }
+}
+
 /// Build a single-row survival LS family with the production default
 /// derivative guard (1e-6) for monotonicity-floor probes.
 fn survival_ls_default_guard_unit_family() -> SurvivalLocationScaleFamily {

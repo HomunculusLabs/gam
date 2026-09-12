@@ -1678,10 +1678,10 @@ impl CustomFamily for SurvivalLocationScaleFamily {
         hyper_layout: &CustomFamilyHyperLayout,
         psi_index: usize,
     ) -> Result<Option<ExactNewtonJointPsiTerms>, String> {
-        if hyper_layout.family_axis_count() != 0 {
-            return Err(
-                "SurvivalLocationScaleFamily does not declare family-owned hyper axes".to_string(),
-            );
+        if let Some(axis) = hyper_layout.family_axis(psi_index) {
+            // The family-owned axes are the inverse-link shape parameters, in
+            // the link's own parameter order (#2904).
+            return self.link_param_joint_psi_terms(block_states, axis);
         }
         self.exact_newton_joint_psi_terms_masked(
             block_states,
