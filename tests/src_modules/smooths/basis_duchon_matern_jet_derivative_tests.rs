@@ -962,16 +962,25 @@ fn test_knot_cloud_axis_scales_basic() {
 
 #[test]
 fn test_knot_cloud_axis_scales_zero_variance() {
-    // One axis is constant → should return sigma=1.0 for that axis.
+    // One axis is constant: it carries no shape, so it takes the informative
+    // axes' geometric mean σ (here axis 0's own σ) and its contrast is zero.
     use ndarray::Array2;
     let centers =
         Array2::from_shape_vec((4, 2), vec![1.0, 5.0, 2.0, 5.0, 3.0, 5.0, 4.0, 5.0]).unwrap();
     let scales = knot_cloud_axis_scales(centers.view());
     assert_eq!(scales.len(), 2);
-    // Axis 0 has nonzero variance
-    assert!(scales[0] > 1e-6);
-    // Axis 1 is constant → sigma clamped to 1.0
-    assert_abs_diff_eq!(scales[1], 1.0, epsilon = 1e-12);
+    // Axis 0: sample std of [1, 2, 3, 4].
+    assert_abs_diff_eq!(scales[0], (5.0_f64 / 3.0).sqrt(), epsilon = 1e-12);
+    assert_abs_diff_eq!(scales[1], scales[0], epsilon = 1e-12 * scales[0]);
+    let eta = initial_aniso_contrasts(centers.view());
+    assert_abs_diff_eq!(eta[1], 0.0, epsilon = 1e-12);
+    // No clamp: a common rescaling of the cloud rescales every σ and leaves the
+    // contrasts where they were, however far from unit scale it goes.
+    let tiny = centers.mapv(|v| v * 1.0e-9);
+    let tiny_scales = knot_cloud_axis_scales(tiny.view());
+    assert_abs_diff_eq!(tiny_scales[0], scales[0] * 1.0e-9, epsilon = 1e-12 * scales[0] * 1.0e-9);
+    let tiny_eta = initial_aniso_contrasts(tiny.view());
+    assert_abs_diff_eq!(tiny_eta[0], eta[0], epsilon = 1e-12);
 }
 
 #[test]

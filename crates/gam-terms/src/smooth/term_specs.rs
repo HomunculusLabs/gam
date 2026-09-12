@@ -4312,6 +4312,17 @@ pub fn set_spatial_aniso_log_scales(
     eta: Vec<f64>,
 ) -> Result<(), EstimationError> {
     let eta = center_aniso_log_scales(&eta);
+    // The metric weights are `exp(2ψ_a)` of the centered contrasts. A non-finite
+    // contrast, or one whose weight is not a positive finite double, has no metric
+    // to build; it is refused here rather than pinned to a box downstream.
+    if let Some(bad) = eta.iter().copied().find(|&psi| {
+        let weight = (2.0 * psi).exp();
+        !(weight.is_finite() && weight > 0.0)
+    }) {
+        crate::bail_invalid_estim!(
+            "spatial aniso_log_scales contrast {bad} has no representable metric weight exp(2ψ)"
+        );
+    }
     let Some(term) = spec.smooth_terms.get_mut(term_idx) else {
         crate::bail_invalid_estim!("spatial aniso_log_scales term index {term_idx} out of range");
     };

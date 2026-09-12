@@ -2238,19 +2238,12 @@ pub(crate) fn centered_aniso_log_scale_mean(eta: &[f64]) -> f64 {
 
 #[inline]
 pub(crate) fn centered_aniso_log_scale(value: f64, mean: f64) -> f64 {
-    // This bound exists solely to keep the downstream `.exp()` (axis scale and
-    // metric weight) finite. `f64::clamp` leaves NaN as NaN, so a non-finite
-    // contrast (e.g. an `inf − inf` from a degenerate anisotropy `eta`) would
-    // slip through and poison the Gram matrix. Map any non-finite difference to
-    // the saturating bound explicitly; finite inputs take the identical clamp.
-    let centered = value - mean;
-    if centered.is_finite() {
-        centered.clamp(-50.0, 50.0)
-    } else if centered > 0.0 {
-        50.0
-    } else {
-        -50.0
-    }
+    // The contrast as it is, never pinned to a box. Its exponentials are the axis
+    // scale and the metric weight: `set_spatial_aniso_log_scales` refuses a contrast
+    // whose weight `exp(2ψ)` is not a positive finite double, and a non-finite
+    // contrast from any other route reaches the design and penalty builders'
+    // finiteness refusals as it is instead of being saturated into a valid metric.
+    value - mean
 }
 
 #[inline]
@@ -2455,8 +2448,13 @@ pub(crate) fn points_in_aniso_y_space(points: ArrayView2<'_, f64>, eta: &[f64]) 
 
 /// Compute per-axis standard deviations of knot center coordinates.
 ///
-/// Returns σ_a for each axis column of `centers`. Axes with zero variance
-/// (constant column) get σ_a = 1.0. All values are clamped to [1e-6, 1e6].
+/// Returns σ_a for each axis column of `centers`. An axis whose spread is inside
+/// the rounding of its own mean (a constant column) carries no shape
+/// information, so it takes the geometric mean of the informative axes' σ, which
+/// gives it a zero contrast in [`initial_aniso_contrasts`]; with no informative
+/// axis every σ is 1. Nothing is clamped: rescaling the centers rescales every σ
+/// alike and leaves the contrasts unchanged. A non-finite spread is kept, so it
+/// reaches the contrasts' consumers as it is.
 pub fn knot_cloud_axis_scales(centers: ArrayView2<'_, f64>) -> Vec<f64> {
     let k = centers.nrows();
     let d = centers.ncols();
@@ -2464,17 +2462,28 @@ pub fn knot_cloud_axis_scales(centers: ArrayView2<'_, f64>) -> Vec<f64> {
         return vec![1.0; d];
     }
     let n = k as f64;
-    let mut scales = Vec::with_capacity(d);
-    for a in 0..d {
-        let col = centers.column(a);
-        let mean = col.sum() / n;
-        let var = col.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0);
-        let sigma = var.sqrt();
-        // If variance is zero (constant column), use 1.0 (no scaling).
-        let sigma = if sigma < 1e-12 { 1.0 } else { sigma };
-        scales.push(sigma.clamp(1e-6, 1e6));
-    }
-    scales
+    let spread: Vec<Option<f64>> = (0..d)
+        .map(|a| {
+            let col = centers.column(a);
+            let mean = col.sum() / n;
+            let var = col.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / (n - 1.0);
+            let sigma = var.sqrt();
+            // A constant column's deviations are the rounding of its k-term mean.
+            let max_abs = col.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+            let band = gam_linalg::roundoff::accumulation_band(k, max_abs);
+            (!(sigma <= band)).then_some(sigma)
+        })
+        .collect();
+    let informative: Vec<f64> = spread.iter().flatten().copied().collect();
+    let neutral = if informative.is_empty() {
+        1.0
+    } else {
+        (informative.iter().map(|s| s.ln()).sum::<f64>() / informative.len() as f64).exp()
+    };
+    spread
+        .into_iter()
+        .map(|sigma| sigma.unwrap_or(neutral))
+        .collect()
 }
 
 /// Compute initial anisotropy contrasts η_a from knot center geometry.
