@@ -5144,5 +5144,14 @@
     ],
     "reason": "#2899 group-A public-surface sweep: SparseDesignMatrix::to_csr_arc and gam_linalg::matrix::xt_diag_x_symmetric become pub(crate), because only gam-linalg production code calls them. Their only other users were three root integration tests that exercised the helpers directly: sparse_design_to_csr_arc_returns_some_for_well_formed_matrix (its own file in tests/perf_scale/misc), plus xt_diag_x_symmetric_matches_dense_reference_for_spd_weights and matrix_error_conditions_surface_through_public_apis in tests/regressions/misc/matrix_2_2.rs. Those tests are not deleted. Each moves verbatim, same name and same assertions, into the gam-linalg unit test module of the file that owns the helper: matrix/mod.rs tests and matrix/symmetric.rs tests. The emptied root test file and its mod line are removed, and matrix_2_2.rs keeps its other three tests.",
     "evidence": "At 13628be9b, git grep -n -w to_csr_arc and -w xt_diag_x_symmetric over crates, src, examples, tests and gamfit find, outside gam-linalg, only those three root tests. xt_diag_x_symmetric reaches gam::linalg::matrix only through matrix/mod.rs pub use symmetric::*, which stops re-exporting it once it is pub(crate). The item list is source_removal_guard.py --base 13628be9b --head 3107fc9e2 (/scratch.global/sauer354/pool/prune-api-a/slice16.srg.out). test_census identity is path-independent, so the three names are preserved. public_api_census.py reports no removed identity."
+  },
+  {
+    "base": "e231718288cd271e9faaff74eda6a4b9e7457421",
+    "items": [
+      "crates/gam-sae/src/sparse_dict/block.rs:const:BLOCK_EV_PLATEAU_FRACTION",
+      "crates/gam-sae/src/sparse_dict/block.rs:const:BLOCK_EV_PLATEAU_MIN_ROUNDS"
+    ],
+    "reason": "SPEC rule 22 (#2902): the one-shot block sparse dictionary fit no longer returns a best-effort fit when its EV plateaus with the frame residual open. The captured-fraction plateau detector these two constants parameterized has no remaining user.",
+    "evidence": "At the base, git grep -n finds BLOCK_EV_PLATEAU_FRACTION and BLOCK_EV_PLATEAU_MIN_ROUNDS declared in crates/gam-sae/src/sparse_dict/block.rs and read only by fit_block_sparse_dictionary_with_seed_inner's arm (2) plateau test and its terminal log. One doc comment in crates/gam-sae/src/sparse_dict/update.rs names BLOCK_EV_PLATEAU_FRACTION as the trainer's mirror. Arm (2) is deleted: a plateau without the absolute EV, scale and frame certificate keeps iterating and ends as BlockSparseFitError::NonConvergence. The planted exact and over-complete block fits certify through arm (1) since 8aa65d500 (block_tests exactly_determined_block_fit_certifies_at_the_storage_resolution_2825), and the new a_block_fit_is_returned_only_from_a_certified_fixed_point_2902 pins both sides. The item list applies source_removal_guard.py's ITEM regex by hand, and the guard was not run locally (user directive: no local runs)."
   }
 ]

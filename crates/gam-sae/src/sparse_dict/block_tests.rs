@@ -1753,3 +1753,47 @@ fn exactly_determined_block_fit_certifies_at_the_storage_resolution_2825() {
         over_fit.convergence.frame_residual
     );
 }
+
+/// #2902 (SPEC rule 22): a one-shot block fit is returned only from a certified
+/// fixed point. The objective-plateau "best-effort" arm used to return an `Ok` fit
+/// with the frame residual still open. That is not a converged optimization, so
+/// the fit is now refused as typed non-convergence. Pinned from both sides: the
+/// planted exact and over-complete fits return certified, and a budget that
+/// cannot certify refuses instead of handing back its last iterate.
+#[test]
+fn a_block_fit_is_returned_only_from_a_certified_fixed_point_2902() {
+    let (p, b, n_blocks) = (8usize, 2usize, 3usize);
+    let planted = planted_frames(p, n_blocks, b);
+    let x = planted_data(&planted, n_blocks, b, p, 180);
+    let config = |blocks: usize, max_epochs: usize| BlockSparseConfig {
+        n_blocks: blocks,
+        block_size: b,
+        block_topk: 1,
+        max_epochs,
+        minibatch: 64,
+        block_tile: 8,
+        frame_ridge: 1.0e-9,
+        aux_k: 3,
+        matryoshka_prefix: false,
+        tolerance: 1.0e-10,
+    };
+    for blocks in [n_blocks, n_blocks + 1] {
+        let fit = fit_block_sparse_dictionary(x.view(), &config(blocks, 80))
+            .expect("a planted block fit reaches its certified fixed point");
+        assert!(
+            fit.convergence.certified,
+            "{blocks} blocks: a returned block fit must carry a closed certificate; \
+             frame_residual {:.6e}",
+            fit.convergence.frame_residual
+        );
+    }
+    // Epoch 0 never certifies, so a one-epoch budget has no fixed point to return.
+    match fit_block_sparse_dictionary(x.view(), &config(n_blocks, 1)) {
+        Err(BlockSparseFitError::NonConvergence { epochs, .. }) => assert_eq!(epochs, 1),
+        Ok(fit) => panic!(
+            "a one-epoch budget returned a fit (certified={}, frame_residual={:.6e})",
+            fit.convergence.certified, fit.convergence.frame_residual
+        ),
+        Err(other) => panic!("expected typed non-convergence, got {other:?}"),
+    }
+}

@@ -318,16 +318,13 @@ pub struct BlockSparseConvergence {
     /// certificate always records zero.
     pub polar_failures: usize,
     pub tolerance: f64,
-    /// Whether the frame fixed-point residual ALSO closed to `tolerance` (no
-    /// accepted births, no polar failures, `frame_residual <= tolerance` on the
-    /// replayed full alternation). `false` marks a **best-effort** fit returned at
-    /// `K` (or per-block `b`) above the intrinsic rank, where the `>rank` spurious
-    /// frame directions rotate freely in the equivalent-optima manifold and the
-    /// frame residual legitimately cannot close (#2275) — `frame_residual` then
-    /// quantifies how open the certificate is. Convergence itself is decided by the
-    /// gauge-invariant OBJECTIVE plateau (`ev_residual`/`gamma_residual`), so both
-    /// certified and open fits are returned; the tiered driver runs the next tier on
-    /// an open Tier-1 residual (#2023).
+    /// Whether the absolute fixed point closed: `ev_residual`, `gamma_residual` and
+    /// `frame_residual` within tolerance, with no accepted births and no polar
+    /// failures on the replayed alternation. A block fit is returned only when it
+    /// did, so this is `true` on every returned [`BlockSparseFit`]: an objective
+    /// plateau with the frame residual still open is refused as
+    /// [`BlockSparseFitError::NonConvergence`] rather than returned as a best-effort
+    /// fit (SPEC rule 22, #2902).
     pub certified: bool,
 }
 
@@ -2377,26 +2374,6 @@ pub fn fit_block_sparse_dictionary(
     fit_block_sparse_dictionary_with_seed(x, config, BlockSeedPolicy::DataRows)
 }
 
-/// #2275/#2023 — the captured-fraction EV-plateau constants (the best-effort arm of
-/// the trichotomy). This is the same #1051 stationarity pattern the manifold-SAE inner
-/// solve uses ([`crate::manifold::term::SAE_MANIFOLD_INNER_OBJECTIVE_STALL_FRACTION`] /
-/// `SAE_MANIFOLD_INNER_OBJECTIVE_STALL_MIN_ROUNDS`): a round is stationary when it
-/// captured a negligible FRACTION of the total-since-entry objective improvement, and
-/// convergence needs a few consecutive stationary rounds so a transient early flat can't
-/// stop a still-climbing fit. Scale-free, so it recognises the achievable plateau
-/// wherever it sits — at ~1e-6 for a well-posed `K<=rank` fit, or above the absolute
-/// tolerance for an over-complete `K>>rank` one where the spurious-block gauge motion
-/// pins the frame residual open.
-///
-/// `MIN_ROUNDS = 3` is inherited verbatim from that pattern. `FRACTION` is one order
-/// LOOSER than the manifold-SAE `1e-4`: the block alternation's unit step is a whole
-/// block's polar frame update, coarser-grained than the manifold solve's penalized
-/// objective step, so a per-round EV change floor of `1e-3` (0.1% of the total gain) is
-/// the block-solver-appropriate resolution — below it the reconstruction quality has
-/// stopped improving to within the granularity a single block update can move it.
-const BLOCK_EV_PLATEAU_FRACTION: f64 = 1.0e-3;
-const BLOCK_EV_PLATEAU_MIN_ROUNDS: usize = 3;
-
 /// [`fit_block_sparse_dictionary`] with an explicit [`BlockSeedPolicy`]. The seed
 /// only sets the starting frames; the returned fixed point is the same seed-agnostic
 /// alternation. This is the caller-supplied seed hook the one-shot lane exposes so a
@@ -2434,23 +2411,18 @@ fn fit_block_sparse_dictionary_with_seed_inner(
     };
     canonicalize_matryoshka_state(&mut state, config);
 
-    // #2275/#2023 — TRICHOTOMY (restoring the contract fba60f1f2 deleted). A block
-    // fit terminates in exactly one of three states, decided below:
+    // #2275/#2023/#2902 — a block fit terminates in one of two states, decided below:
     //   (1) CERTIFIED — the absolute fixed-point criterion is met (EV, scale AND the
-    //       gauge-variant frame residual all closed to `tolerance`): the
-    //       exactly-determined `K<=rank` case. `certified = true`, returns.
-    //   (2) BEST-EFFORT — the gauge-invariant OBJECTIVE (reconstruction EV) reached its
-    //       achievable plateau (captured-fraction stationarity) but the absolute
-    //       criterion is NOT met, because at `K` (or per-block `b`) above the intrinsic
-    //       rank the `>rank` spurious frame directions rotate freely in the
-    //       equivalent-optima manifold and the frame residual cannot close (proven
-    //       structural: 50x epochs move it 0.96->0.97). Exit HONESTLY: `certified =
-    //       false`, the open residuals recorded, the fit returned for the caller (e.g.
-    //       the tiered driver runs Tier-2 on it). This is the arm the checkpoint sweep
-    //       deleted; a plateau is NOT relabelled "converged".
-    //   (3) NON-CONVERGED — neither within `max_epochs`: typed `NonConvergence` error.
-    let mut converged = false; // (1) or (2) reached — the fit is returnable
-    let mut certified = false; // (1) specifically — the absolute criterion was met
+    //       gauge-variant frame residual all closed to `tolerance`, the frame at its
+    //       storage floor) and the replay settles: `certified = true`, returns. Since
+    //       8aa65d500 the support step descends the shared objective, so a `K > rank`
+    //       fit reaches this state too.
+    //   (2) NON-CONVERGED — not within `max_epochs`, or the replay showed the structure
+    //       still moving: typed `NonConvergence` error. An objective plateau with the
+    //       frame residual still open used to be returned as a best-effort fit; a fit
+    //       object must only ever come from a converged optimization (SPEC rule 22), so
+    //       it is refused.
+    let mut certified = false; // (1) — the absolute criterion was met
     let mut epochs_run = 0usize;
     let mut ev_residual = f64::INFINITY;
     let mut gamma_residual = f64::INFINITY;
@@ -2465,17 +2437,8 @@ fn fit_block_sparse_dictionary_with_seed_inner(
     let frame_bar = config
         .tolerance
         .max(super::block_frame::STORED_FRAME_RESOLUTION);
-    // The reconstruction EV is the gauge-invariant objective; `entry_ev` anchors the
-    // total-improvement denominator of the captured-fraction plateau test (arm 2).
-    let entry_ev = seed_ev;
-    let mut plateau_rounds = 0usize;
-    // Hoisted so the terminal decision below can report the value that
-    // decided arm (2), not just the arm it fell through to.
-    let mut captured_fraction = f64::NAN;
-
     for epoch in 0..config.max_epochs {
         epochs_run = epoch + 1;
-        let prev_ev = state.explained_variance;
         let step = advance_block_sparse_state(x, &state, config, k)?;
         ev_residual = relative_scalar_change(
             state.explained_variance as f32,
@@ -2489,62 +2452,28 @@ fn fit_block_sparse_dictionary_with_seed_inner(
         polar_failures = step.polar_failures;
         let next_ev = step.next.explained_variance;
         state = step.next;
-
-        // Captured-fraction EV-plateau detector (the #1051 pattern, scale-free so it
-        // fires at the achievable plateau wherever it sits — ~1e-6 for a well-posed
-        // fit, ~1e-4 for an over-complete one): a round is stationary when it captured a
-        // negligible FRACTION of the total EV improvement achieved since entry.
-        // Requiring a few consecutive stationary rounds prevents a transient early flat
-        // from exiting a still-climbing fit.
-        let round_improvement = (next_ev - prev_ev).max(0.0);
-        let total_improvement = (next_ev - entry_ev).max(0.0);
-        captured_fraction = if total_improvement > 0.0 {
-            round_improvement / total_improvement
-        } else {
-            0.0
-        };
-        let objective_plateaued =
-            ev_residual <= config.tolerance || captured_fraction < BLOCK_EV_PLATEAU_FRACTION;
-        if objective_plateaued {
-            plateau_rounds += 1;
-        } else {
-            plateau_rounds = 0;
-        }
         log::debug!(
             "[block-sparse epoch {}/{}] ev={:.9} ev_residual={:.3e} gamma_residual={:.3e} \
-             frame_residual={:.3e} captured_fraction={:.3e} plateau_rounds={} births={} polar={}",
+             frame_residual={:.3e} births={} polar={}",
             epochs_run,
             config.max_epochs,
             next_ev,
             ev_residual,
             gamma_residual,
             frame_residual,
-            captured_fraction,
-            plateau_rounds,
             accepted_births,
             polar_failures,
         );
         if accepted_births != 0 || polar_failures != 0 || epoch == 0 {
             continue;
         }
-        // Arm (1) CERTIFIED: the absolute fixed-point criterion — EV, scale AND the
-        // frame residual all within tolerance. Checked FIRST so an exactly-determined
-        // fit is certified, never demoted to best-effort.
+        // The absolute fixed-point criterion — EV, scale AND the frame residual all
+        // within tolerance — is the only exit that returns a fit (SPEC rule 22).
         if ev_residual <= config.tolerance
             && gamma_residual <= config.tolerance
             && frame_residual <= frame_bar
         {
             certified = true;
-            converged = true;
-            break;
-        }
-        // Arm (2) BEST-EFFORT: the objective plateaued but the absolute criterion is
-        // open (the frame residual is still above tolerance — the over-complete case).
-        // Return honestly with `certified = false`; do NOT keep grinding a gauge-only
-        // frame residual the reconstruction no longer depends on.
-        if plateau_rounds >= BLOCK_EV_PLATEAU_MIN_ROUNDS {
-            certified = false;
-            converged = true;
             break;
         }
     }
@@ -2561,13 +2490,12 @@ fn fit_block_sparse_dictionary_with_seed_inner(
             routing_and_reconstruction_residuals(x, &state, &replay.next, b);
         routing_residual = routing;
         reconstruction_residual = reconstruction;
-        if converged && (replay.accepted_births != 0 || replay.polar_failures != 0) {
+        if certified && (replay.accepted_births != 0 || replay.polar_failures != 0) {
             // A replay that still births or fails polar subsolves has not settled its
-            // STRUCTURE — that is genuine non-convergence (arm 3), not a best-effort
-            // plateau: surface the replay evidence and fall through to the typed error.
+            // STRUCTURE — that is genuine non-convergence: surface the replay evidence
+            // and fall through to the typed error.
             accepted_births = replay.accepted_births;
             polar_failures = replay.polar_failures;
-            converged = false;
             certified = false;
         }
     }
@@ -2581,29 +2509,24 @@ fn fit_block_sparse_dictionary_with_seed_inner(
     // channel until readers filter it out, which is how a useful channel dies.
     let arm = if certified {
         "1-certified"
-    } else if converged {
-        "2-best-effort"
     } else {
-        "3-non-converged"
+        "2-non-converged"
     };
     log::info!(
         "[block-sparse terminal] arm={arm} epochs={epochs_run}/{max_epochs} ev={ev:.9} \
          ev_residual={ev_residual:.3e} gamma_residual={gamma_residual:.3e} \
          frame_residual={frame_residual:.3e} routing_residual={routing_residual:.3e} \
          reconstruction_residual={reconstruction_residual:.3e} tolerance={tolerance:.3e} \
-         captured_fraction={captured_fraction:.3e} plateau_rounds={plateau_rounds}/{min_rounds} \
          births={accepted_births} polar={polar_failures}",
         ev = state.explained_variance,
         max_epochs = config.max_epochs,
         tolerance = config.tolerance,
-        min_rounds = BLOCK_EV_PLATEAU_MIN_ROUNDS,
     );
 
-    // #2275/#2023 arm (3) — NON-CONVERGED: neither the absolute criterion (arm 1) nor
-    // the objective plateau (arm 2) was reached within `max_epochs`, or the replay
-    // showed the structure still moving. Surface the complete evidence; no downstream
-    // tier consumes a still-climbing fit.
-    if !converged {
+    // NON-CONVERGED: the absolute criterion was not reached within `max_epochs`, or
+    // the replay showed the structure still moving. Surface the complete evidence; no
+    // fit object is minted from an open certificate (SPEC rule 22).
+    if !certified {
         return Err(BlockSparseFitError::NonConvergence {
             epochs: epochs_run,
             explained_variance: state.explained_variance,
@@ -2617,10 +2540,8 @@ fn fit_block_sparse_dictionary_with_seed_inner(
             polar_failures,
         });
     }
-    // `certified` was decided by the trichotomy above: arm (1) sets it true (the
-    // absolute frame/EV/scale criterion closed), arm (2) leaves it false (the objective
-    // plateaued with the frame residual still open — a best-effort fit the tiered driver
-    // runs Tier-2 on).
+    // A fit that reaches here is certified: the absolute frame/EV/scale criterion
+    // closed and the replay settled.
 
     let BlockSparseState {
         mut decoder,
