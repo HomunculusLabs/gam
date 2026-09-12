@@ -6027,5 +6027,13 @@
     ],
     "reason": "The whole soft_rho_guard_floor module went with its classifier: SATURATED_RHO_LADDER, PENCIL_CONSTANCY_TOL, ABSENCE_MAGNITUDE_FRACTION, GuardLadderRung, PencilFit with from_residuals, SoftRhoGuardFloor with is_absent, is_carried and summary, soft_rho_guard_emission_at and classify_soft_rho_guard_floor. Pins that could only be stated through its absence verdict or the barrier emission went too: the custom-family injected-barrier control, the gam-models shared-tangent pin, and the gam-sae support-outer and dense-manifold pins with the fixtures and helper only they used. The custom-family measurement survives, restated on the engine's own gradient.",
     "evidence": "Before the push, the landing script checked git grep -w of every removed name over crates, src, tests, examples, bench and benches at the landed tree. The guarded identities follow source_removal_guard.py's rules as read at this base: public or test-scoped items, plus the private from_residuals, which had callers in the same file. MSI validation was unavailable (auth breaker set)."
+  },
+  {
+    "base": "1c3174e1abbf877b8e7bc07136ccbcd77d19e953",
+    "items": [
+      "crates/gam-solve/src/arrow_schur/prelude.rs:const:ARROW_FACTOR_CACHE_HTBETA_BUDGET_BYTES"
+    ],
+    "reason": "#2469 (SPEC rule 23). ARROW_FACTOR_CACHE_HTBETA_BUDGET_BYTES = 256 MiB was a picked cap. ArrowHtbetaCache::from_system cached the per-row H_tbeta blocks densely when their rows * d * k * 8 bytes fit under it, and otherwise disabled the cache. gam-runtime already publishes the routing threshold for a process cache: ResourcePolicy::default_library().max_operator_cache_bytes, which for_observed_memory takes from the governor's stationary capacity, like every other cache and materialization cap. The dense H_tbeta cache is now admitted against that cap, so it widens on a large-memory host and narrows on a small one instead of switching at a fixed 256 MiB. The matrix-free Matvec branch and the Disabled fallback are unchanged.",
+    "evidence": "git grep -n -w ARROW_FACTOR_CACHE_HTBETA_BUDGET_BYTES over the base finds two lines, both production: the declaration at crates/gam-solve/src/arrow_schur/prelude.rs:101 and its single use in ArrowHtbetaCache::from_system at crates/gam-solve/src/arrow_schur/system.rs:1953. No test names it. Not compiled or run locally (user directive)."
   }
 ]

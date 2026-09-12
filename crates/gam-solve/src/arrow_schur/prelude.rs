@@ -98,8 +98,6 @@ pub(crate) const DEFAULT_PROXIMAL_CONVERGENCE_REL_TOL: f64 = 8e-12;
 
 pub(crate) const EUCLIDEAN_MANIFOLD_MODE_FINGERPRINT: u64 = 0;
 
-pub(crate) const ARROW_FACTOR_CACHE_HTBETA_BUDGET_BYTES: usize = 256 * 1024 * 1024;
-
 /// Matrix-free shared-block multiply for large BA/SAE Schur PCG.
 ///
 /// The closure writes `out = H_ββ x` without the LM ridge. This is the hook

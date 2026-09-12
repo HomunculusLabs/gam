@@ -1950,7 +1950,11 @@ impl ArrowHtbetaCache {
                 transpose_op: Arc::clone(transpose_op),
                 estimated_bytes,
             })
-        } else if estimated_bytes <= ARROW_FACTOR_CACHE_HTBETA_BUDGET_BYTES {
+        } else if estimated_bytes
+            <= gam_runtime::resource::ResourcePolicy::default_library().max_operator_cache_bytes
+        {
+            // The dense H_tβ blocks are admitted against the process's operator
+            // cache cap, the capacity-derived threshold every cache routes on.
             Ok(Self::Dense {
                 blocks: sys
                     .rows
