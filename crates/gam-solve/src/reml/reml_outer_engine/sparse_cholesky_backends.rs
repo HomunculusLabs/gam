@@ -1177,7 +1177,6 @@ pub struct MatrixFreeSpdOperator {
 }
 
 impl MatrixFreeSpdOperator {
-    pub(crate) const EXACT_DENSE_SPECTRAL_MAX_BYTES: usize = 512 * 1024 * 1024;
     pub(crate) const EXACT_DENSE_SPECTRAL_ARRAYS: usize = 6;
 
     pub fn new_with_mode<F>(dim: usize, apply: F, mode: PseudoLogdetMode) -> Self
@@ -1220,15 +1219,20 @@ impl MatrixFreeSpdOperator {
     }
 
     pub(crate) fn exact_dense_spectral_budget_ok(&self) -> bool {
+        // The capacity-derived single-materialization budget every other dense
+        // outer workspace is admitted against (`outer_hessian_dense_workspace_budget_bytes`),
+        // not a picked 512 MiB (#2469).
+        let budget =
+            gam_runtime::resource::ResourcePolicy::default_library().max_single_materialization_bytes;
         match self.exact_dense_spectral_bytes() {
-            Some(bytes) if bytes <= Self::EXACT_DENSE_SPECTRAL_MAX_BYTES => true,
+            Some(bytes) if bytes <= budget => true,
             Some(bytes) => {
                 log::error!(
                     "MatrixFreeSpdOperator exact dense spectral materialization requires {:.2} GiB \
-                     for dim={}, exceeding the {:.2} GiB cap",
+                     for dim={}, exceeding the {:.2} GiB single-materialization budget",
                     bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                     self.n_dim,
-                    Self::EXACT_DENSE_SPECTRAL_MAX_BYTES as f64 / (1024.0 * 1024.0 * 1024.0),
+                    budget as f64 / (1024.0 * 1024.0 * 1024.0),
                 );
                 false
             }
@@ -1628,8 +1632,8 @@ impl HessianFactorization for MatrixFreeSpdOperator {
 
     /// The operator delegates `logdet`, `trace_hinv_*`, `trace_logdet_*`,
     /// `solve`, and `solve_multi` to a lazily-built `DenseSpectralOperator`
-    /// whenever the exact-dense materialization fits the configured byte cap
-    /// (see `exact_dense_spectral_budget_ok` / `EXACT_DENSE_SPECTRAL_MAX_BYTES`).
+    /// whenever the exact-dense materialization fits the process's
+    /// single-materialization budget (see `exact_dense_spectral_budget_ok`).
     /// In that regime the algebra is exact spectral — there is no stochastic
     /// preference to advertise, and forcing the caller to take the Hutchinson
     /// path would replace an O(p²) exact reduction with O(k·apply) noisy probes.
