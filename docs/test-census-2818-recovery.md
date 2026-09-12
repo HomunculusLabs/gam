@@ -787,3 +787,29 @@ Two more cannot return as written, for different reasons:
 - `framed_sae_device_matvec_stage_diff_tiny_1551`: its instrument
   `device_matvec_once` lived in the CUDA module and went with the test in
   `c0a21b554`. The pin is device-only and cannot run on CPU lanes.
+
+### The ungated linear tier, deleted by `b66a7d04e`
+
+`b66a7d04e` deleted `with_ungated`, the only API that marked an atom as routed
+with `a_k ≡ 1`. These two pins measured the ungated tier itself, so they are
+retired:
+
+- `ungated_linear_background_atom_reaches_pca_ceiling_and_converges_1026`
+- `ungated_background_resists_sparsity_pressure_gated_degrades_1026`
+
+`sae_outer_objective_never_advertises_finite_difference_curvature_2253` used the
+same fixture helper, but its subject was the outer objective's capability
+report. It was restored in `3f27cdd74` with the atom left on the default gate.
+
+### Device-gated pins not restored on CPU lanes
+
+Each of these returns before asserting anything when no CUDA device is
+available. Restoring them where the pool lanes run would add passes that
+exercise nothing, so they stay absent, as the #932 device pins do in the
+September 11 section.
+
+- `complete_device_matches_cpu_every_channel_when_admitted_2304`
+- `contracted_device_matches_cpu_reduction_when_admitted_2304`
+- `contracted_trace_device_matches_cpu_reduction_when_admitted_2304`
+- `device_direct_applies_beta_gauge_quotient_at_composed_cofit_shape_2660`
+- `moving_ridge_takes_no_host_rebuild_and_matches_independent_2539`
