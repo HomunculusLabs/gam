@@ -655,9 +655,15 @@ mod tests {
         }
 
         fn next_normal(&mut self) -> f64 {
-            // Box-Muller. `next_uniform` lies in [0, 1), so `1 − u` lies in
-            // (0, 1] and its log is finite without truncating the tail.
-            let u1 = 1.0 - self.next_uniform();
+            // Box-Muller. `next_uniform` lies in [0, 1); redrawing only an exact
+            // 0 gives the uniform law on (0, 1), so its log is finite without
+            // truncating the tail, and every other draw is used as it comes.
+            let u1 = loop {
+                let u = self.next_uniform();
+                if u > 0.0 {
+                    break u;
+                }
+            };
             let u2 = self.next_uniform();
             (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
         }
