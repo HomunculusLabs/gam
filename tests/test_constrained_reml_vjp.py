@@ -13,7 +13,8 @@ exact analytic backward in BOTH regimes:
   ``S⁺ → Z(ZᵀSZ)⁺Zᵀ`` while retaining the full affine ``β``.
 
 Both regimes are validated here with ``torch.autograd.gradcheck`` on the free
-inputs ``(x, y, penalty, weights)`` at float64. The active case previously
+inputs ``(x, y, penalty, weights)`` at float64, with the penalty held on its
+admissible face (see ``_on_penalty_face``). The active case previously
 raised ``NotImplementedError`` from the Rust binding; it must now pass.
 """
 
@@ -57,6 +58,21 @@ def _curvature_design(n: int) -> tuple[np.ndarray, np.ndarray]:
 # of the curvature constraint (``Z = span{e0, e1}``) this restricts to a
 # rank-1 ridge on the slope, so the reduced REML problem is well posed.
 _PENALTY = np.diag([0.0, 1.0, 1.0])
+
+
+def _on_penalty_face(p_: "torch.Tensor") -> "torch.Tensor":
+    """Map a gradcheck perturbation of ``_PENALTY`` onto its admissible face.
+
+    ``_PENALTY`` leaves the intercept unpenalized, so it lies on the boundary of
+    the PSD cone. gradcheck perturbs one entry at a time by ``±eps``: ``-eps`` on
+    the intercept diagonal, or any intercept cross term, leaves the cone, and
+    the engine correctly refuses that penalty as not positive semidefinite. No
+    derivative exists across the cone boundary, so the closure holds the
+    intercept row and column at zero and the penalized block symmetric. Every
+    perturbation then keeps that block positive definite and the VJP defined.
+    """
+    penalized = torch.as_tensor(np.diag(_PENALTY) > 0.0, dtype=p_.dtype)
+    return torch.outer(penalized, penalized) * (0.5 * (p_ + p_.transpose(-2, -1)))
 
 # Strictly positive-definite, non-diagonal penalty for the affine-face oracle.
 # Its tangent/normal coupling makes ``Z.T @ S @ beta_particular`` nonzero, so a
@@ -147,10 +163,7 @@ def test_constrained_reml_vjp_interior_cert() -> None:
         p_: "torch.Tensor",
         w_: "torch.Tensor",
     ) -> "torch.Tensor":
-        # A penalty is symmetric: gradcheck perturbs one entry at a time and the
-        # engine refuses a non-symmetric penalty, so the closure symmetrizes it.
-        p_sym = 0.5 * (p_ + p_.transpose(-2, -1))
-        return _scalar_objective(_forward(x_, y_, p_sym, w_))
+        return _scalar_objective(_forward(x_, y_, _on_penalty_face(p_), w_))
 
     assert torch.autograd.gradcheck(
         f,
@@ -206,10 +219,7 @@ def test_constrained_reml_vjp_interior_cert_nonzero_slack_bound() -> None:
         p_: "torch.Tensor",
         w_: "torch.Tensor",
     ) -> "torch.Tensor":
-        # A penalty is symmetric: gradcheck perturbs one entry at a time and the
-        # engine refuses a non-symmetric penalty, so the closure symmetrizes it.
-        p_sym = 0.5 * (p_ + p_.transpose(-2, -1))
-        return _scalar_objective(forward_slack(x_, y_, p_sym, w_))
+        return _scalar_objective(forward_slack(x_, y_, _on_penalty_face(p_), w_))
 
     assert torch.autograd.gradcheck(
         f,
@@ -246,10 +256,7 @@ def test_constrained_reml_vjp_active_cert() -> None:
         p_: "torch.Tensor",
         w_: "torch.Tensor",
     ) -> "torch.Tensor":
-        # A penalty is symmetric: gradcheck perturbs one entry at a time and the
-        # engine refuses a non-symmetric penalty, so the closure symmetrizes it.
-        p_sym = 0.5 * (p_ + p_.transpose(-2, -1))
-        return _scalar_objective(_forward(x_, y_, p_sym, w_))
+        return _scalar_objective(_forward(x_, y_, _on_penalty_face(p_), w_))
 
     # Previously this raised NotImplementedError; it must now both run and
     # agree with finite differences to the float64 default tolerance.
