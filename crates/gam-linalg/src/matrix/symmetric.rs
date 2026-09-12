@@ -410,7 +410,7 @@ pub fn symmetrization_defect_2norm(matrix: &Array2<f64>) -> f64 {
     }
 }
 
-pub fn xt_diag_x_symmetric(
+pub(crate) fn xt_diag_x_symmetric(
     design: &DesignMatrix,
     diag: &Array1<f64>,
 ) -> Result<SymmetricMatrix, String> {
@@ -956,5 +956,48 @@ mod tests {
         assert_eq!(symmetrization_defect_2norm(&rectangular), 0.0);
         let non_finite = array![[1.0_f64, f64::NAN], [0.0, 1.0]];
         assert_eq!(symmetrization_defect_2norm(&non_finite), 0.0);
+    }
+
+    #[test]
+    fn xt_diag_x_symmetric_matches_dense_reference_for_spd_weights() {
+        let x = array![
+            [1.0, 2.0, -1.0],
+            [0.0, -3.0, 2.0],
+            [4.0, 1.0, 0.5],
+            [2.0, -2.0, 3.0]
+        ];
+        let w = array![0.2, 1.5, 0.7, 2.1];
+        let design = DesignMatrix::Dense(DenseDesignMatrix::from(x.clone()));
+        let got = xt_diag_x_symmetric(&design, &w)
+            .expect("xt_diag_x_symmetric should assemble X^T W X for SPD weights")
+            .to_dense();
+        let wx =
+            ndarray::Array2::from_shape_fn((x.nrows(), x.ncols()), |(i, j)| w[i] * x[[i, j]]);
+        let expected = x.t().dot(&wx);
+
+        let mut max_sym_err: f64 = 0.0;
+        let mut max_ref_err: f64 = 0.0;
+        for i in 0..got.nrows() {
+            for j in 0..got.ncols() {
+                max_sym_err = max_sym_err.max((got[[i, j]] - got[[j, i]]).abs());
+                max_ref_err = max_ref_err.max((got[[i, j]] - expected[[i, j]]).abs());
+            }
+        }
+        assert!(
+            max_sym_err <= 1e-12 && max_ref_err <= 1e-9,
+            "xt_diag_x_symmetric should be symmetric to machine precision and match dense reference within 1e-9"
+        );
+    }
+
+    #[test]
+    fn matrix_error_conditions_surface_through_public_apis() {
+        let x = array![[1.0, 2.0], [3.0, 4.0]];
+        let design = DesignMatrix::Dense(DenseDesignMatrix::from(x));
+        let bad_w = array![1.0];
+        let err = xt_diag_x_symmetric(&design, &bad_w).expect_err("row mismatch must be rejected");
+        assert!(
+            err.contains("row mismatch"),
+            "dimension mismatch should surface as an explicit row-mismatch error message"
+        );
     }
 }

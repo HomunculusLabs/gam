@@ -17,6 +17,5 @@ mod row_measure_enrichment;
 mod row_metric_contract;
 mod row_metric_loud_vs_loadbearing;
 mod sparse_dense_imbalance_diagnose;
-mod sparse_design_to_csr_arc_returns_some_for_well_formed_matrix;
 mod trust_region_first_step_respects_max_radius;
 mod trust_region_step_is_radius_bounded;

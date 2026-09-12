@@ -1,38 +1,8 @@
 use faer::{Mat, Side};
 use gam::linalg::faer_ndarray::factorize_symmetricwith_fallback;
 use gam::linalg::low_rank_weight::LowRankWeight;
-use gam::linalg::matrix::{ConditionedDesign, DenseDesignMatrix, DesignMatrix, LinearOperator, xt_diag_x_symmetric};
-use ndarray::{Array2, array};
-
-#[test]
-fn xt_diag_x_symmetric_matches_dense_reference_for_spd_weights() {
-    let x = array![
-        [1.0, 2.0, -1.0],
-        [0.0, -3.0, 2.0],
-        [4.0, 1.0, 0.5],
-        [2.0, -2.0, 3.0]
-    ];
-    let w = array![0.2, 1.5, 0.7, 2.1];
-    let design = DesignMatrix::Dense(DenseDesignMatrix::from(x.clone()));
-    let got = xt_diag_x_symmetric(&design, &w)
-        .expect("xt_diag_x_symmetric should assemble X^T W X for SPD weights")
-        .to_dense();
-    let wx = Array2::from_shape_fn((x.nrows(), x.ncols()), |(i, j)| w[i] * x[[i, j]]);
-    let expected = x.t().dot(&wx);
-
-    let mut max_sym_err: f64 = 0.0;
-    let mut max_ref_err: f64 = 0.0;
-    for i in 0..got.nrows() {
-        for j in 0..got.ncols() {
-            max_sym_err = max_sym_err.max((got[[i, j]] - got[[j, i]]).abs());
-            max_ref_err = max_ref_err.max((got[[i, j]] - expected[[i, j]]).abs());
-        }
-    }
-    assert!(
-        max_sym_err <= 1e-12 && max_ref_err <= 1e-9,
-        "xt_diag_x_symmetric should be symmetric to machine precision and match dense reference within 1e-9"
-    );
-}
+use gam::linalg::matrix::{ConditionedDesign, DenseDesignMatrix, DesignMatrix, LinearOperator};
+use ndarray::array;
 
 #[test]
 fn factorize_symmetric_with_fallback_returns_working_solve_after_cholesky_failure() {
@@ -88,17 +58,5 @@ fn low_rank_weight_assembly_satisfies_d_plus_uu_t_identity() {
     assert!(
         err <= 1e-12,
         "low-rank weight assembly should satisfy (D + U U^T)v = Dv + U(U^T v)"
-    );
-}
-
-#[test]
-fn matrix_error_conditions_surface_through_public_apis() {
-    let x = array![[1.0, 2.0], [3.0, 4.0]];
-    let design = DesignMatrix::Dense(DenseDesignMatrix::from(x));
-    let bad_w = array![1.0];
-    let err = xt_diag_x_symmetric(&design, &bad_w).expect_err("row mismatch must be rejected");
-    assert!(
-        err.contains("row mismatch"),
-        "dimension mismatch should surface as an explicit row-mismatch error message"
     );
 }

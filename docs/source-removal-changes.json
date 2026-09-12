@@ -5134,5 +5134,15 @@
     ],
     "reason": "#2900 SPEC rules 6 and 23: SheafConsistencyPenalty::harmonic_modes switched from an exact dense eigh count to a 64-step single-vector Lanczos Ritz count above total stalk dimension 4096 (DENSE_EIGH_DIM_THRESHOLD). Lanczos from one start vector cannot resolve an eigenvalue's multiplicity, so kernels of dimension d > 1 were undercounted above the window. The count now sums exact dense counts over the connected-component blocks of the sheaf Laplacian at every size, charged on the memory ledger, so the threshold and the Lanczos route are deleted.",
     "evidence": "At base, git grep -n -w DENSE_EIGH_DIM_THRESHOLD over crates, src and tests finds only crates/gam-terms/src/analytic_penalties/sheaf.rs: its declaration, its use in harmonic_modes, and two doc comments, all replaced here. harmonic_modes_lanczos occurs only at its declaration and its one call in harmonic_modes. New tests pin the component count against the whole-matrix dense count, including 2100 components at total dimension 4200. Not compiled locally (user directive); compile rests on the shared tip check."
+  },
+  {
+    "base": "4662d37940566c8fb1b6f2b388bc455d65baf756",
+    "items": [
+      "tests/perf_scale/misc/sparse_design_to_csr_arc_returns_some_for_well_formed_matrix.rs:fn:sparse_design_to_csr_arc_returns_some_for_well_formed_matrix",
+      "tests/regressions/misc/matrix_2_2.rs:fn:matrix_error_conditions_surface_through_public_apis",
+      "tests/regressions/misc/matrix_2_2.rs:fn:xt_diag_x_symmetric_matches_dense_reference_for_spd_weights"
+    ],
+    "reason": "#2899 group-A public-surface sweep: SparseDesignMatrix::to_csr_arc and gam_linalg::matrix::xt_diag_x_symmetric become pub(crate), because only gam-linalg production code calls them. Their only other users were three root integration tests that exercised the helpers directly: sparse_design_to_csr_arc_returns_some_for_well_formed_matrix (its own file in tests/perf_scale/misc), plus xt_diag_x_symmetric_matches_dense_reference_for_spd_weights and matrix_error_conditions_surface_through_public_apis in tests/regressions/misc/matrix_2_2.rs. Those tests are not deleted. Each moves verbatim, same name and same assertions, into the gam-linalg unit test module of the file that owns the helper: matrix/mod.rs tests and matrix/symmetric.rs tests. The emptied root test file and its mod line are removed, and matrix_2_2.rs keeps its other three tests.",
+    "evidence": "At 13628be9b, git grep -n -w to_csr_arc and -w xt_diag_x_symmetric over crates, src, examples, tests and gamfit find, outside gam-linalg, only those three root tests. xt_diag_x_symmetric reaches gam::linalg::matrix only through matrix/mod.rs pub use symmetric::*, which stops re-exporting it once it is pub(crate). The item list is source_removal_guard.py --base 13628be9b --head 3107fc9e2 (/scratch.global/sauer354/pool/prune-api-a/slice16.srg.out). test_census identity is path-independent, so the three names are preserved. public_api_census.py reports no removed identity."
   }
 ]
