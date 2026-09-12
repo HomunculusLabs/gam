@@ -218,7 +218,7 @@ fn complete_gpu_attempt<T>(operation: &'static str, result: Option<T>) -> T {
 impl DispatchOp {
     /// Conservative flop estimate used for the generic `gemm_min_flops` gate.
     #[inline]
-    pub const fn flops(self) -> u128 {
+    pub(crate) const fn flops(self) -> u128 {
         match self {
             Self::Gemm { m, n, k } => 2u128 * (m as u128) * (n as u128) * (k as u128),
             Self::BatchedGemm { batch, m, n, k } => {
@@ -242,7 +242,7 @@ impl DispatchOp {
     /// Pre-probe Auto size gate (the CUDA startup-tax ordering fix): evaluated with
     /// the MOST PERMISSIVE values any production policy can carry — the
     /// calibration crossover floors ([`GpuDispatchPolicy::MIN_CALIBRATABLE_GEMM_FLOPS`],
-    /// [`GpuDispatchPolicy::MIN_CALIBRATABLE_POTRF_P`]) for the calibrated
+    /// `GpuDispatchPolicy::MIN_CALIBRATABLE_POTRF_P`) for the calibrated
     /// fields, and the [`GpuDispatchPolicy::default`] values for the
     /// small-dense-batched-POTRF fields, which `calibration::calibrate_device`
     /// never adjusts. A `false` here means EVERY reachable policy's

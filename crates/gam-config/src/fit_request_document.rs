@@ -219,7 +219,7 @@ pub struct PrecisionHyperpriorDocument {
 pub struct LatentCoordinatesDocument(pub BTreeMap<String, LatentCoordinateDocument>);
 
 impl LatentCoordinatesDocument {
-    pub fn to_json_value(&self) -> Result<JsonValue, String> {
+    pub(crate) fn to_json_value(&self) -> Result<JsonValue, String> {
         for (symbol, coordinate) in &self.0 {
             if symbol.trim().is_empty() {
                 return Err("latent_coordinates keys must be non-empty symbols".to_string());
@@ -272,7 +272,7 @@ pub struct LatentCoordinateDocument {
 pub struct AnalyticPenaltiesDocument(pub Vec<JsonValue>);
 
 impl AnalyticPenaltiesDocument {
-    pub fn to_json_value(&self) -> Result<JsonValue, String> {
+    pub(crate) fn to_json_value(&self) -> Result<JsonValue, String> {
         for (index, descriptor) in self.0.iter().enumerate() {
             let descriptor = descriptor
                 .as_object()
@@ -293,7 +293,7 @@ impl AnalyticPenaltiesDocument {
 pub struct SmoothDescriptorsDocument(pub BTreeMap<String, JsonValue>);
 
 impl SmoothDescriptorsDocument {
-    pub fn to_json_value(&self) -> Result<JsonValue, String> {
+    pub(crate) fn to_json_value(&self) -> Result<JsonValue, String> {
         for (symbol, descriptor) in &self.0 {
             if symbol.trim().is_empty() {
                 return Err("smooth_descriptors keys must be non-empty symbols".to_string());

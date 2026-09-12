@@ -84,7 +84,7 @@ impl GpuDispatchPolicy {
     /// the smallest POTRF calibration dimension (`calibration::POTRF_DIMS[0]`,
     /// pinned by a compile-time assert there). A single (batch ≤ 1) POTRF with
     /// `p` below this is inadmissible under every reachable policy.
-    pub const MIN_CALIBRATABLE_POTRF_P: usize = 64;
+    pub(crate) const MIN_CALIBRATABLE_POTRF_P: usize = 64;
 
     /// The smallest `row_kernel_min_n` / `xtwx_n_min` ANY production dispatch
     /// policy can carry: the smallest XtWX calibration row count
