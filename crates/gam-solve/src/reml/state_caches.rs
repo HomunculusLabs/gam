@@ -957,6 +957,29 @@ impl TkRowPairRoute {
             Self::RowPairs
         }
     }
+
+    /// The route with less leading work for the ρ-Hessian block of
+    /// `¹⁄₁₂ Σ_ij c_i c_j K_ij³` over `n` rows, `p` columns and `k` smoothing
+    /// coordinates. The row-pair jets form `n²·(1 + k + k²)·p` products. The
+    /// tensor route forms `n·(1 + k)·p³` to build its tensors and
+    /// `n·((1 + 2k)·p³ + k²·p²)` to contract them.
+    pub(crate) fn predicted_rho_hessian(n: usize, p: usize, k: usize) -> Self {
+        let p_squared = p.saturating_mul(p);
+        let p_cubed = p_squared.saturating_mul(p);
+        let jet_width = k.saturating_mul(k).saturating_add(k).saturating_add(1);
+        let row_pairs = n.saturating_mul(n).saturating_mul(jet_width).saturating_mul(p);
+        let per_row = k
+            .saturating_mul(3)
+            .saturating_add(2)
+            .saturating_mul(p_cubed)
+            .saturating_add(k.saturating_mul(k).saturating_mul(p_squared));
+        let tensor = n.saturating_mul(per_row);
+        if tensor < row_pairs {
+            Self::Tensor
+        } else {
+            Self::RowPairs
+        }
+    }
 }
 
 /// Per-row contractions of `T = Σ_j c_j x_j⊗x_j⊗x_j` against `z_i = H⁻¹x_i`.

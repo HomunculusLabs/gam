@@ -649,29 +649,8 @@ impl<'a> RemlState<'a> {
             }
         };
         let chunk = p.max(1);
+        let t_mat = Self::tk_weighted_design_tensor(x_dense, c_array);
         let mut outer = Array2::<f64>::zeros((chunk, p * p));
-        let mut weighted = Array2::<f64>::zeros((chunk, p));
-        let mut t_mat = Array2::<f64>::zeros((p * p, p));
-        for start in (0..n).step_by(chunk) {
-            let end = (start + chunk).min(n);
-            for (offset, row) in (start..end).enumerate() {
-                let x_row = x_dense.row(row);
-                let weight = c_array[row];
-                for a in 0..p {
-                    let x_a = x_row[a];
-                    for b in 0..p {
-                        outer[[offset, a * p + b]] = x_a * x_row[b];
-                    }
-                    weighted[[offset, a]] = weight * x_a;
-                }
-            }
-            let rows = end - start;
-            t_mat += &gam_linalg::faer_ndarray::fast_atb(
-                &outer.slice(s![..rows, ..]),
-                &weighted.slice(s![..rows, ..]),
-            );
-        }
-        drop(weighted);
 
         // Contiguous rows of `Zᵀ` (see `tk_shared_intermediates_with_route`).
         let z_transposed = z.t();
@@ -788,6 +767,128 @@ impl<'a> RemlState<'a> {
             .zip(tensor.h_inv.iter())
             .map(|(&left, &right)| left * right)
             .sum::<f64>()
+    }
+
+    /// `T = Σ_j w_j x_j⊗x_j⊗x_j` as a `p²×p` matrix indexed `T[a·p + b, c]`,
+    /// accumulated `p` rows at a time so the chunk of `vec(x xᵀ)` rows beside it
+    /// has the same `p³` footprint.
+    fn tk_weighted_design_tensor(x_dense: &Array2<f64>, weights: &Array1<f64>) -> Array2<f64> {
+        let n = x_dense.nrows();
+        let p = x_dense.ncols();
+        let chunk = p.max(1);
+        let mut outer = Array2::<f64>::zeros((chunk, p * p));
+        let mut weighted = Array2::<f64>::zeros((chunk, p));
+        let mut tensor = Array2::<f64>::zeros((p * p, p));
+        for start in (0..n).step_by(chunk) {
+            let end = (start + chunk).min(n);
+            for (offset, row) in (start..end).enumerate() {
+                let x_row = x_dense.row(row);
+                let weight = weights[row];
+                for a in 0..p {
+                    let x_a = x_row[a];
+                    for b in 0..p {
+                        outer[[offset, a * p + b]] = x_a * x_row[b];
+                    }
+                    weighted[[offset, a]] = weight * x_a;
+                }
+            }
+            let rows = end - start;
+            tensor += &gam_linalg::faer_ndarray::fast_atb(
+                &outer.slice(s![..rows, ..]),
+                &weighted.slice(s![..rows, ..]),
+            );
+        }
+        tensor
+    }
+
+    /// The ρ-Hessian block of `¹⁄₁₂ Σ_ij c_i c_j K_ij³` through design tensors.
+    ///
+    /// `c_v`, `c_g` (n×k) and `c_h` (n×k×k) are the value, ρ-gradient and
+    /// ρ-Hessian parts of the per-row `c` jets. `kmat_x[i] = z_i = H⁻¹x_i`,
+    /// `ki_x[a][i] = K_a x_i` and `k_ij[a][b] = K_ab`. Define
+    /// `T_w = Σ_j w_j x_j⊗x_j⊗x_j`, `r_i = T_c[z_i, z_i, ·]`, `s_i = r_iᵀz_i`
+    /// and `s⁽ᵇ⁾_i = T_{c_g[·,b]}[z_i, z_i, z_i]`. Relabelling `i ↔ j` under the
+    /// symmetry of `H⁻¹`, `K_a` and `K_ab` turns every row-pair sum of the jet
+    /// product `c_i c_j K_ij³` into a row-local one:
+    ///
+    /// ```text
+    ///   12·H[a,b] = 2 Σ_i c_h[i,a,b] s_i + Σ_i (c_g[i,a] s⁽ᵇ⁾_i + c_g[i,b] s⁽ᵃ⁾_i)
+    ///             + 3 Σ_i c_v[i] r_iᵀK_ab x_i + 6 Σ_i c_v[i] T_c[z_i, K_a x_i, K_b x_i]
+    ///             + 6 Σ_i c_g[i,a] r_iᵀK_b x_i + 6 Σ_i c_g[i,b] r_iᵀK_a x_i.
+    /// ```
+    ///
+    /// That costs `O(n·((2 + 3k)·p³ + k²·p²))` against `O(n²·(1 + k + k²)·p)` for
+    /// the row-pair jets. Returns `None` when the memory ledger cannot admit the
+    /// `(1 + k)·p³` tensors, in which case the row-pair route runs.
+    fn tk_rho_hessian_pair_tensor(
+        x_dense: &Array2<f64>,
+        kmat_x: &[Array1<f64>],
+        ki_x: &[Vec<Array1<f64>>],
+        k_ij: &[Vec<Array2<f64>>],
+        c_v: &Array1<f64>,
+        c_g: &Array2<f64>,
+        c_h: &ndarray::Array3<f64>,
+    ) -> Result<Option<Array2<f64>>, EstimationError> {
+        let n = x_dense.nrows();
+        let p = x_dense.ncols();
+        let k = c_g.ncols();
+        let context = "Tierney-Kadane rho-Hessian design tensors";
+        let _working = match gam_runtime::resource::MemoryGovernor::global()
+            .try_reserve_dense_f64_copies(p.saturating_mul(p), p, k.saturating_add(1), context)
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                log::info!("{context} refused by the memory ledger ({error}); evaluating row pairs");
+                return Ok(None);
+            }
+        };
+        let t_c = Self::tk_weighted_design_tensor(x_dense, c_v);
+        let t_g: Vec<Array2<f64>> = (0..k)
+            .map(|b| Self::tk_weighted_design_tensor(x_dense, &c_g.column(b).to_owned()))
+            .collect();
+        let total = gam_linalg::pairwise_reduce::par_deterministic_block_fold(
+            n,
+            |range: core::ops::Range<usize>| {
+                let mut local = Array2::<f64>::zeros((k, k));
+                for row in range {
+                    let z = &kmat_x[row];
+                    let x_row = x_dense.row(row);
+                    let zz = Array1::from_shape_fn(p * p, |index| z[index / p] * z[index % p]);
+                    let r = t_c.t().dot(&zz);
+                    let s = r.dot(z);
+                    let s_g: Vec<f64> = t_g.iter().map(|t| t.t().dot(&zz).dot(z)).collect();
+                    let r_w: Vec<f64> = (0..k).map(|a| r.dot(&ki_x[a][row])).collect();
+                    let tw: Vec<Array1<f64>> = (0..k).map(|b| t_c.dot(&ki_x[b][row])).collect();
+                    for a in 0..k {
+                        let w_a = &ki_x[a][row];
+                        let zw_a =
+                            Array1::from_shape_fn(p * p, |index| z[index / p] * w_a[index % p]);
+                        for b in 0..k {
+                            let w_ab = k_ij[a][b].dot(&x_row);
+                            let triple = zw_a.dot(&tw[b]);
+                            local[[a, b]] += (2.0 * c_h[[row, a, b]] * s
+                                + c_g[[row, a]] * s_g[b]
+                                + c_g[[row, b]] * s_g[a]
+                                + 3.0 * c_v[row] * r.dot(&w_ab)
+                                + 6.0 * c_v[row] * triple
+                                + 6.0 * c_g[[row, a]] * r_w[b]
+                                + 6.0 * c_g[[row, b]] * r_w[a])
+                                / 12.0;
+                        }
+                    }
+                }
+                local
+            },
+            |mut left, right| {
+                left += &right;
+                left
+            },
+        )
+        .unwrap_or_else(|| Array2::<f64>::zeros((k, k)));
+        if total.iter().any(|value| !value.is_finite()) {
+            crate::bail_invalid_estim!("{context} produced a non-finite entry");
+        }
+        Ok(Some(total))
     }
 
     pub(crate) fn tk_scalar_from_shared(
@@ -1601,11 +1702,51 @@ impl<'a> RemlState<'a> {
     where
         S: Fn(&Array1<f64>) -> Result<Array1<f64>, EstimationError>,
     {
+        let route = TkRowPairRoute::predicted_rho_hessian(
+            x_dense.nrows(),
+            x_dense.ncols(),
+            tk_penalties.len(),
+        );
+        Self::tk_hessian_rho_canonical_logit_with_route(
+            x_dense,
+            c_array,
+            d_array,
+            e_array,
+            f_array,
+            tk_penalties,
+            lambdas,
+            beta,
+            firth_op,
+            h_inv_solve,
+            route,
+        )
+        .map(|(hessian, _)| hessian)
+    }
+
+    /// [`Self::tk_hessian_rho_canonical_logit`] with the row-pair route chosen by
+    /// the caller, returning the route that actually ran (the tensor route falls
+    /// back to row pairs when the memory ledger refuses its tensors).
+    pub(crate) fn tk_hessian_rho_canonical_logit_with_route<S>(
+        x_dense: &Array2<f64>,
+        c_array: &Array1<f64>,
+        d_array: &Array1<f64>,
+        e_array: &Array1<f64>,
+        f_array: &Array1<f64>,
+        tk_penalties: &[gam_terms::construction::CanonicalPenalty],
+        lambdas: &[f64],
+        beta: &Array1<f64>,
+        firth_op: Option<&super::FirthDenseOperator>,
+        h_inv_solve: &S,
+        route: TkRowPairRoute,
+    ) -> Result<(Array2<f64>, TkRowPairRoute), EstimationError>
+    where
+        S: Fn(&Array1<f64>) -> Result<Array1<f64>, EstimationError>,
+    {
         let n = x_dense.nrows();
         let p = x_dense.ncols();
         let k = tk_penalties.len();
         if k == 0 {
-            return Ok(Array2::zeros((0, 0)));
+            return Ok((Array2::zeros((0, 0)), route));
         }
         if c_array.len() != n || d_array.len() != n || e_array.len() != n || f_array.len() != n {
             crate::bail_invalid_estim!(
@@ -1949,28 +2090,54 @@ impl<'a> RemlState<'a> {
         for row in 0..n {
             total = total.add(&djet[row].mul(&hdiag[row].square()).scale(-0.125));
         }
-        for irow in 0..n {
-            let xi = &rows[irow];
-            for jrow in 0..n {
-                // K xⱼ, Kᵢ xⱼ, Kᵢⱼ xⱼ are the hoisted row-local matvecs; the
-                // remaining work is the O(p) dot xᵢ · (· xⱼ), evaluated in the
-                // identical irow-outer/jrow-inner order as before (#1575).
-                let mut kg = Jet::constant(xi.dot(&kmat_x[jrow]), k);
-                for a in 0..k {
-                    kg.g[a] = xi.dot(&ki_x[a][jrow]);
-                }
-                for a in 0..k {
-                    for b in 0..k {
-                        kg.h[[a, b]] = kij_bilinear(a, b, xi, jrow);
+        // `¹⁄₁₂ Σ_ij c_i c_j K_ij³` in second-order ρ-jets: through the design
+        // tensor when that route was chosen and the ledger admits it, else by row
+        // pairs. Only `total.h` is returned, so the tensor route supplies the
+        // ρ-Hessian block alone.
+        let tensor_pairs = match route {
+            TkRowPairRoute::RowPairs => None,
+            TkRowPairRoute::Tensor => {
+                let c_v = Array1::from_shape_fn(n, |row| cjet[row].v);
+                let c_g = Array2::from_shape_fn((n, k), |(row, a)| cjet[row].g[a]);
+                let c_h = ndarray::Array3::from_shape_fn((n, k, k), |(row, a, b)| {
+                    cjet[row].h[[a, b]]
+                });
+                Self::tk_rho_hessian_pair_tensor(
+                    x_dense, &kmat_x, &ki_x, &k_ij, &c_v, &c_g, &c_h,
+                )?
+            }
+        };
+        let used_route = match tensor_pairs {
+            Some(pair_hessian) => {
+                total.h += &pair_hessian;
+                TkRowPairRoute::Tensor
+            }
+            None => {
+                for irow in 0..n {
+                    let xi = &rows[irow];
+                    for jrow in 0..n {
+                        // K xⱼ, Kᵢ xⱼ, Kᵢⱼ xⱼ are the hoisted row-local matvecs; the
+                        // remaining work is the O(p) dot xᵢ · (· xⱼ), evaluated in the
+                        // identical irow-outer/jrow-inner order as before (#1575).
+                        let mut kg = Jet::constant(xi.dot(&kmat_x[jrow]), k);
+                        for a in 0..k {
+                            kg.g[a] = xi.dot(&ki_x[a][jrow]);
+                        }
+                        for a in 0..k {
+                            for b in 0..k {
+                                kg.h[[a, b]] = kij_bilinear(a, b, xi, jrow);
+                            }
+                        }
+                        let term = cjet[irow]
+                            .mul(&cjet[jrow])
+                            .mul(&kg.cube())
+                            .scale(1.0 / 12.0);
+                        total = total.add(&term);
                     }
                 }
-                let term = cjet[irow]
-                    .mul(&cjet[jrow])
-                    .mul(&kg.cube())
-                    .scale(1.0 / 12.0);
-                total = total.add(&term);
+                TkRowPairRoute::RowPairs
             }
-        }
+        };
         let mut qjets: Vec<Jet> = (0..p).map(|_| Jet::constant(0.0, k)).collect();
         for row in 0..n {
             let wh = cjet[row].mul(&hdiag[row]);
@@ -1997,7 +2164,7 @@ impl<'a> RemlState<'a> {
                 "Tierney-Kadane analytic Hessian produced a non-finite entry"
             );
         }
-        Ok(total.h)
+        Ok((total.h, used_route))
     }
 
     pub(crate) fn tierney_kadane_analytic_core<S>(
@@ -8976,6 +9143,149 @@ mod firth_hessian_direction_reuse_tests {
             &h_inv_solve,
         )
         .expect("tk hessian")
+    }
+
+    // #2900: `tk_rho_hessian_pair_tensor` must reproduce the row-pair jet sum it
+    // replaces, `¹⁄₁₂ Σ_ij (c_i c_j K_ij³).h`, expanded here term for term with the
+    // `Jet::mul` rule. The fixture is synthetic, and the reference is that block
+    // alone, so agreement cannot be carried by other Hessian terms. The magnitude
+    // floor keeps it from passing on zeros.
+    #[test]
+    fn tk_rho_hessian_pair_tensor_matches_the_row_pair_jet_sum_2900() {
+        let n = 30usize;
+        let p = 4usize;
+        let k = 2usize;
+        let x = Array2::from_shape_fn((n, p), |(i, j)| {
+            ((i as f64 + 1.0) * (j as f64 + 0.5) * 0.37).sin()
+        });
+        let sym = |seed: f64, diag: f64| {
+            Array2::from_shape_fn((p, p), |(a, b)| {
+                0.1 * (((a + b) as f64 + seed) * 0.8).cos() + if a == b { diag } else { 0.0 }
+            })
+        };
+        let k_mat = sym(0.3, 1.2);
+        let k_i: Vec<Array2<f64>> = (0..k).map(|a| sym(1.1 + a as f64, 0.2)).collect();
+        let k_ij: Vec<Vec<Array2<f64>>> = (0..k)
+            .map(|a| (0..k).map(|b| sym(2.3 + (a + b) as f64, 0.1)).collect())
+            .collect();
+        let kmat_x: Vec<Array1<f64>> = (0..n).map(|i| k_mat.dot(&x.row(i))).collect();
+        let ki_x: Vec<Vec<Array1<f64>>> = (0..k)
+            .map(|a| (0..n).map(|i| k_i[a].dot(&x.row(i))).collect())
+            .collect();
+        let c_v = Array1::from_shape_fn(n, |i| 0.2 + 0.1 * ((i as f64) * 0.61).sin());
+        let c_g = Array2::from_shape_fn((n, k), |(i, a)| 0.05 * ((i as f64) * (a as f64 + 0.9)).cos());
+        let c_h = ndarray::Array3::from_shape_fn((n, k, k), |(i, a, b)| {
+            0.03 * ((i as f64) * ((a + b) as f64 + 0.4)).sin()
+        });
+
+        let mut reference = Array2::<f64>::zeros((k, k));
+        for i in 0..n {
+            for j in 0..n {
+                let kv = x.row(i).dot(&kmat_x[j]);
+                let ka: Vec<f64> = (0..k).map(|a| x.row(i).dot(&ki_x[a][j])).collect();
+                let cc_v = c_v[i] * c_v[j];
+                let cc_g: Vec<f64> = (0..k).map(|a| c_g[[i, a]] * c_v[j] + c_v[i] * c_g[[j, a]]).collect();
+                for a in 0..k {
+                    for b in 0..k {
+                        let kab = x.row(i).dot(&k_ij[a][b].dot(&x.row(j)));
+                        let cc_h = c_h[[i, a, b]] * c_v[j]
+                            + c_v[i] * c_h[[j, a, b]]
+                            + c_g[[i, a]] * c_g[[j, b]]
+                            + c_g[[j, a]] * c_g[[i, b]];
+                        let q_h = 3.0 * kv * kv * kab + 6.0 * kv * ka[a] * ka[b];
+                        let q_g_a = 3.0 * kv * kv * ka[a];
+                        let q_g_b = 3.0 * kv * kv * ka[b];
+                        reference[[a, b]] += (cc_h * kv * kv * kv
+                            + q_h * cc_v
+                            + cc_g[a] * q_g_b
+                            + q_g_a * cc_g[b])
+                            / 12.0;
+                    }
+                }
+            }
+        }
+
+        let tensor = RemlState::tk_rho_hessian_pair_tensor(&x, &kmat_x, &ki_x, &k_ij, &c_v, &c_g, &c_h)
+            .expect("tensor pair block")
+            .expect("the ledger admits a 4-column design tensor");
+        for a in 0..k {
+            for b in 0..k {
+                let left = reference[[a, b]];
+                let right = tensor[[a, b]];
+                assert!(left.abs() > 1e-6, "reference[{a},{b}] = {left:e} is too small to compare");
+                let rel = (left - right).abs() / left.abs();
+                assert!(
+                    rel < 1e-10,
+                    "pair block[{a},{b}]: row-pair jets {left:.15e}, tensor {right:.15e}, rel {rel:e}"
+                );
+            }
+        }
+    }
+
+    // #2900: the whole ρ-Hessian on the k=4 Firth fixture through both routes. The
+    // returned route shows the tensor path ran. The block itself is pinned by the
+    // synthetic test above; this one pins its wiring into the jet assembly.
+    #[test]
+    fn tk_hessian_tensor_route_matches_row_pairs_2900() {
+        let (x, beta, op, penalties, lambdas) = synthetic_logit_setup_k4();
+        let n = x.nrows();
+        let p = x.ncols();
+        let c_array = Array1::from_shape_fn(n, |i| 0.05 + 0.02 * ((i as f64) * 0.37).sin());
+        let d_array = Array1::from_shape_fn(n, |i| -0.02 + 0.01 * ((i as f64) * 0.53).cos());
+        let e_array = Array1::from_shape_fn(n, |i| 0.01 + 0.004 * ((i as f64) * 0.71).sin());
+        let f_array = Array1::from_shape_fn(n, |i| -0.005 + 0.002 * ((i as f64) * 0.29).cos());
+        let mut h = RemlState::tk_xt_diag_x(&x, &op.pirls_hat_diag());
+        for d in 0..p {
+            h[[d, d]] += 1.0;
+        }
+        let h_solver = h.clone();
+        let h_inv_solve = move |rhs: &Array1<f64>| -> Result<Array1<f64>, EstimationError> {
+            Ok(
+                gam_linalg::utils::certified_spd_factorize(&h_solver, "Firth k4 tensor route test")
+                    .expect("well-conditioned SPD factor")
+                    .solve(rhs)
+                    .expect("certified SPD solve")
+                    .into_solution(),
+            )
+        };
+        let hessian = |route: TkRowPairRoute| {
+            RemlState::tk_hessian_rho_canonical_logit_with_route(
+                &x,
+                &c_array,
+                &d_array,
+                &e_array,
+                &f_array,
+                &penalties,
+                &lambdas,
+                &beta,
+                Some(&op),
+                &h_inv_solve,
+                route,
+            )
+            .expect("tk hessian")
+        };
+        let (pairs, pairs_route) = hessian(TkRowPairRoute::RowPairs);
+        let (tensor, tensor_route) = hessian(TkRowPairRoute::Tensor);
+        assert_eq!(pairs_route, TkRowPairRoute::RowPairs);
+        assert_eq!(
+            tensor_route,
+            TkRowPairRoute::Tensor,
+            "the ledger must admit the fixture's design tensors"
+        );
+        let k = penalties.len();
+        assert_eq!(tensor.dim(), (k, k));
+        for a in 0..k {
+            for b in 0..k {
+                let left = pairs[[a, b]];
+                let right = tensor[[a, b]];
+                assert!(left.abs() > 1e-12, "H[{a},{b}] = {left:e} is too small to compare");
+                let rel = (left - right).abs() / left.abs();
+                assert!(
+                    rel < 1e-9,
+                    "TK rho-Hessian[{a},{b}]: row pairs {left:.15e}, tensor {right:.15e}, rel {rel:e}"
+                );
+            }
+        }
     }
 
     // The #1575 Rayon fan-out of the first-derivative / eye-cache / pair loops
