@@ -6990,17 +6990,27 @@ impl SaeManifoldTerm {
     /// step no longer overshoots along it. The row–border residual cross term is not
     /// added, and an atom without analytic second jets contributes no coordinate
     /// second-derivative term.
+    ///
+    /// No curvature is added along a row's sub-floor null directions. They are taken
+    /// from the Gauss–Newton block before the addition and returned per row for the
+    /// step's null projection, so the step still freezes exactly the directions the
+    /// evidence log-det deflates; recomputing them from the augmented block would let
+    /// `R₊` lift a deflated radial null above the relative floor.
     fn add_step_row_residual_curvature(
         &self,
         sys: &mut ArrowSchurSystem,
         target: ArrayView2<'_, f64>,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<Vec<Array1<f64>>>, String> {
         use rayon::prelude::*;
         let n = self.n_obs();
         let p = self.output_dim();
         let k_atoms = self.k_atoms();
         if sys.rows.len() != n || sys.row_dims.len() != n || target.dim() != (n, p) {
-            return Ok(());
+            return Ok(sys
+                .rows
+                .iter()
+                .map(|row| row_sub_floor_null_directions(row.htt.view()))
+                .collect());
         }
         let q_dense = self.assignment.row_block_dim();
         let assignment_dim = self.assignment.assignment_coord_dim();
@@ -7146,7 +7156,10 @@ impl SaeManifoldTerm {
             }
             Ok(Some(curvature))
         };
-        let add_positive_part = |curvature: Array2<f64>, htt: &mut Array2<f64>| -> Result<(), String> {
+        let add_positive_part = |curvature: Array2<f64>,
+                                 nulls: &[Array1<f64>],
+                                 htt: &mut Array2<f64>|
+         -> Result<(), String> {
             let q_row = curvature.nrows();
             let mut symmetric = curvature;
             for i in 0..q_row {
@@ -7165,6 +7178,7 @@ impl SaeManifoldTerm {
                      eigendecomposition failed: {e}"
                 )
             })?;
+            let mut positive = Array2::<f64>::zeros((q_row, q_row));
             for (index, &lambda) in evals.iter().enumerate() {
                 if !(lambda > 0.0) {
                     continue;
@@ -7172,8 +7186,27 @@ impl SaeManifoldTerm {
                 for i in 0..q_row {
                     let left = lambda * evecs[[i, index]];
                     for j in 0..q_row {
-                        htt[[i, j]] += left * evecs[[j, index]];
+                        positive[[i, j]] += left * evecs[[j, index]];
                     }
+                }
+            }
+            // `(I − vvᵀ)R₊(I − vvᵀ)` over the orthonormal null directions.
+            for null in nulls {
+                if null.len() != q_row {
+                    continue;
+                }
+                let applied = positive.dot(null);
+                let along = null.dot(&applied);
+                for i in 0..q_row {
+                    for j in 0..q_row {
+                        positive[[i, j]] +=
+                            along * null[i] * null[j] - null[i] * applied[j] - applied[i] * null[j];
+                    }
+                }
+            }
+            for i in 0..q_row {
+                for j in 0..q_row {
+                    htt[[i, j]] += positive[[i, j]];
                 }
             }
             Ok(())
@@ -7182,20 +7215,27 @@ impl SaeManifoldTerm {
             sys.rows
                 .par_iter_mut()
                 .enumerate()
-                .try_for_each(|(row, block)| -> Result<(), String> {
-                    with_nested_parallel(|| match row_curvature(row, row_dims[row])? {
-                        Some(curvature) => add_positive_part(curvature, &mut block.htt),
-                        None => Ok(()),
+                .map(|(row, block)| -> Result<Vec<Array1<f64>>, String> {
+                    with_nested_parallel(|| {
+                        let nulls = row_sub_floor_null_directions(block.htt.view());
+                        if let Some(curvature) = row_curvature(row, row_dims[row])? {
+                            add_positive_part(curvature, &nulls, &mut block.htt)?;
+                        }
+                        Ok(nulls)
                     })
-                })?;
+                })
+                .collect()
         } else {
+            let mut step_row_nulls = Vec::with_capacity(n);
             for (row, block) in sys.rows.iter_mut().enumerate() {
+                let nulls = row_sub_floor_null_directions(block.htt.view());
                 if let Some(curvature) = row_curvature(row, row_dims[row])? {
-                    add_positive_part(curvature, &mut block.htt)?;
+                    add_positive_part(curvature, &nulls, &mut block.htt)?;
                 }
+                step_row_nulls.push(nulls);
             }
+            Ok(step_row_nulls)
         }
-        Ok(())
     }
 
     pub(crate) fn run_joint_fit_arrow_schur_with_termination_policy(
@@ -7664,7 +7704,8 @@ impl SaeManifoldTerm {
                 .map_err(|err| format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}"))?;
             // #2228 — the Newton step's row blocks carry the data term's dropped
             // residual curvature; see `add_step_row_residual_curvature`.
-            self.add_step_row_residual_curvature(&mut sys, target)
+            let step_row_nulls = self
+                .add_step_row_residual_curvature(&mut sys, target)
                 .map_err(|err| format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}"))?;
             let assemble_seconds = iteration_started.elapsed().as_secs_f64();
             let plan = self
@@ -7792,7 +7833,9 @@ impl SaeManifoldTerm {
             // a deflated direction, period, while the identifiable (angular)
             // complement keeps the exact LM/Newton step. `row_sub_floor_null_directions`
             // uses the IDENTICAL spectral floor + hysteresis the criterion deflation
-            // uses, so the step freezes exactly what the log-det deflated. It returns
+            // uses, so the step freezes exactly what the log-det deflated. The directions
+            // come from the Gauss–Newton row block, taken before the step's residual
+            // curvature was added (`add_step_row_residual_curvature`). It returns
             // EMPTY for a genuinely full-rank row (a well-conditioned block, or a
             // merely-ill-conditioned NON-null K>1 block whose weak but data-supported
             // direction must stay with the LM damping, not be frozen) and for
@@ -7848,10 +7891,7 @@ impl SaeManifoldTerm {
                         // #1557 — the null-direction eigendecomp (`sym.eigh`) issues a
                         // faer GEMM; pin it to `Par::Seq` inside this row worker so it
                         // does not re-fan the outer pool (bit-identical result).
-                        let dirs = with_nested_parallel(|| {
-                            row_sub_floor_null_directions(sys.rows[row_idx].htt.view())
-                        });
-                        for dir in dirs {
+                        for dir in &step_row_nulls[row_idx] {
                             if dir.len() != di {
                                 continue;
                             }
@@ -7870,7 +7910,7 @@ impl SaeManifoldTerm {
                 for row_idx in 0..n_rows {
                     let off = sys.row_offsets[row_idx];
                     let di = sys.row_dims[row_idx];
-                    for dir in row_sub_floor_null_directions(sys.rows[row_idx].htt.view()) {
+                    for dir in &step_row_nulls[row_idx] {
                         if dir.len() != di {
                             continue;
                         }
