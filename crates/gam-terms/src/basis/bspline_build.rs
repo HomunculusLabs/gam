@@ -128,31 +128,28 @@ pub fn build_bspline_basis_1d(
             }
             Some((data_range.0, data_range.1, *num_basis))
         }
-        _ => spec.boundary.period().map(|(start, end, _)| {
-            let num_basis = match &spec.knotspec {
-                BSplineKnotSpec::Generate {
-                    num_internal_knots, ..
-                } => num_internal_knots + spec.degree + 1,
-                BSplineKnotSpec::Automatic {
-                    num_internal_knots, ..
-                } => {
-                    num_internal_knots.unwrap_or_else(|| {
-                        default_internal_knot_count_for_data(data.len(), spec.degree)
-                    }) + spec.degree
-                        + 1
-                }
-                BSplineKnotSpec::Provided(knots) => knots.len().saturating_sub(spec.degree + 1),
-                // cr is routed away by the early dispatch; its basis dimension
-                // equals the knot count (no degree offset).
-                BSplineKnotSpec::NaturalCubicRegression { knots } => knots.len(),
-                // This closure runs only in the outer `_` arm, which excludes
-                // `PeriodicUniform`.
-                BSplineKnotSpec::PeriodicUniform { .. } => {
-                    unreachable!("PeriodicUniform knotspec is handled by the outer match arm")
-                }
-            };
-            (start, end, num_basis)
+        BSplineKnotSpec::Generate {
+            num_internal_knots, ..
+        } => spec
+            .boundary
+            .period()
+            .map(|(start, end, _)| (start, end, num_internal_knots + spec.degree + 1)),
+        BSplineKnotSpec::Automatic {
+            num_internal_knots, ..
+        } => spec.boundary.period().map(|(start, end, _)| {
+            let internal = num_internal_knots
+                .unwrap_or_else(|| default_internal_knot_count_for_data(data.len(), spec.degree));
+            (start, end, internal + spec.degree + 1)
         }),
+        BSplineKnotSpec::Provided(knots) => spec
+            .boundary
+            .period()
+            .map(|(start, end, _)| (start, end, knots.len().saturating_sub(spec.degree + 1))),
+        // cr is routed away by the early dispatch; its basis dimension
+        // equals the knot count (no degree offset).
+        BSplineKnotSpec::NaturalCubicRegression { knots } => {
+            spec.boundary.period().map(|(start, end, _)| (start, end, knots.len()))
+        }
     };
 
     if let Some((start, end, num_basis)) = periodic_build {

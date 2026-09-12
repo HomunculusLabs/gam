@@ -154,11 +154,11 @@ fn per_seed_band_mses(formula: &str, seeds: &[u64], sigma: f64) -> Vec<[f64; 5]>
 /// band's RMSE across those draws, in `BANDS` order. Pooling removes the
 /// per-draw polar noise lottery and exposes the systematic latitude profile of
 /// the engine.
-fn pooled_band_rmses(per_seed: &[[f64; 5]], keep: impl Fn(usize) -> bool) -> [f64; 5] {
+fn pooled_band_rmses(per_seed: &[[f64; 5]], left_out: Option<usize>) -> [f64; 5] {
     let mut sumsq = [0.0_f64; 5];
     let mut count = 0usize;
     for (draw, mses) in per_seed.iter().enumerate() {
-        if !keep(draw) {
+        if left_out == Some(draw) {
             continue;
         }
         count += 1;
@@ -198,8 +198,8 @@ fn sphere_polar_latitude_band_profile_remains_even_for_both_engines() {
         0.10,
     );
     let wahba_draws = per_seed_band_mses("y ~ sphere(lat, lon, radians=true, k=100)", &seeds, 0.10);
-    let harmonic = pooled_band_rmses(&harmonic_draws, |_| true);
-    let wahba = pooled_band_rmses(&wahba_draws, |_| true);
+    let harmonic = pooled_band_rmses(&harmonic_draws, None);
+    let wahba = pooled_band_rmses(&wahba_draws, None);
 
     for (label, pooled) in [("harmonic", &harmonic), ("wahba", &wahba)] {
         for (k, (band, _, _)) in BANDS.iter().enumerate() {
@@ -242,8 +242,8 @@ fn sphere_polar_latitude_band_profile_remains_even_for_both_engines() {
     let draws = seeds.len();
     let leave_one_out: Vec<f64> = (0..draws)
         .map(|left_out| {
-            worst_over_equator(&pooled_band_rmses(&harmonic_draws, |draw| draw != left_out))
-                - worst_over_equator(&pooled_band_rmses(&wahba_draws, |draw| draw != left_out))
+            worst_over_equator(&pooled_band_rmses(&harmonic_draws, Some(left_out)))
+                - worst_over_equator(&pooled_band_rmses(&wahba_draws, Some(left_out)))
         })
         .collect();
     let mean_leave_one_out = leave_one_out.iter().sum::<f64>() / draws as f64;
