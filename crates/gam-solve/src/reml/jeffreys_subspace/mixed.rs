@@ -163,6 +163,39 @@ impl InverseDividedDifferences {
         self.triples[order][(first * self.m + middle) * self.m + last]
     }
 
+    /// When every eigenvalue sits in one piece of the capped inverse, `quadruple([i, k, l, j])`
+    /// is `scale · d_i d_k d_l d_j · τ`: `τ = 1` on the floored inverse, and
+    /// `τ = t_i + t_k + t_l + t_j` with `t = d` on the capped inverse and below zero. These
+    /// are the same closed forms `quadruple` evaluates. `None` when the spectrum spans pieces.
+    fn separable_quadruple(&self) -> Option<SeparableQuadruple> {
+        let branch = *self.pieces.first()?;
+        if self.pieces.iter().any(|&piece| piece != branch) {
+            return None;
+        }
+        Some(match branch {
+            3 => SeparableQuadruple {
+                scale: -self.cap,
+                factors: self.recips.clone(),
+                tilted: true,
+            },
+            2 => SeparableQuadruple {
+                scale: -1.0,
+                factors: self.recips.clone(),
+                tilted: false,
+            },
+            1 => SeparableQuadruple {
+                scale: 0.0,
+                factors: vec![0.0; self.m],
+                tilted: false,
+            },
+            _ => SeparableQuadruple {
+                scale: self.floor,
+                factors: self.gap_recips.clone(),
+                tilted: true,
+            },
+        })
+    }
+
     /// `inverse_difference(&[λ_a, λ_b, λ_c, λ_d], floor, 0)`.
     fn quadruple(&self, nodes: [usize; 4]) -> f64 {
         let branch = self.pieces[nodes[0]];
@@ -205,6 +238,119 @@ impl InverseDividedDifferences {
         (self.triple(0, sorted[1], sorted[2], sorted[3]) - self.triple(0, sorted[0], sorted[1], sorted[2]))
             / (self.evals[sorted[3]] - self.evals[sorted[0]])
     }
+}
+
+/// The factored four-node values of a spectrum inside one piece; see
+/// [`InverseDividedDifferences::separable_quadruple`].
+struct SeparableQuadruple {
+    scale: f64,
+    factors: Vec<f64>,
+    /// Whether `τ = Σ` of the four node factors (capped inverse, below zero) rather than 1.
+    tilted: bool,
+}
+
+/// `D³f[E, F, A]` for every axis row `A` through the `m⁴` coefficient loop: for one output
+/// row at a time the linear map is assembled with `coefficient(i, k, l, j)` and contracted
+/// with BLAS-3. The m²-by-m² Loewner map is never allocated.
+fn loewner_second_rows(
+    rows: &Array2<f64>,
+    e: &Array2<f64>,
+    f: &Array2<f64>,
+    m: usize,
+    coefficient: impl Fn(usize, usize, usize, usize) -> f64,
+) -> Array2<f64> {
+    let squared = m * m;
+    let e = e.as_standard_layout();
+    let f = f.as_standard_layout();
+    let e = e.as_slice().expect("standard-layout spectral direction");
+    let f = f.as_slice().expect("standard-layout spectral direction");
+    let mut out = Array2::zeros(rows.raw_dim());
+    let mut weights = Array2::<f64>::zeros((m, squared));
+    for i in 0..m {
+        weights.fill(0.0);
+        let w = weights
+            .as_slice_mut()
+            .expect("freshly allocated weights are contiguous");
+        for j in 0..m {
+            for k in 0..m {
+                for l in 0..m {
+                    let c = coefficient(i, k, l, j);
+                    let (ik, kl, lj) = (i * m + k, k * m + l, l * m + j);
+                    w[j * squared + l * m + j] += c * (e[ik] * f[kl] + f[ik] * e[kl]);
+                    w[j * squared + kl] += c * (e[ik] * f[lj] + f[ik] * e[lj]);
+                    w[j * squared + ik] += c * (e[kl] * f[lj] + f[kl] * e[lj]);
+                }
+            }
+        }
+        out.slice_mut(ndarray::s![.., i * m..(i + 1) * m])
+            .assign(&rows.dot(&weights.t()));
+    }
+    out
+}
+
+/// [`loewner_second_rows`] on a spectrum inside one piece. With `D = diag(d)` and the node
+/// factors of `τ` on each of the four slots, row `r` is
+/// `scale · D · Σ_σ X_σ D Y_σ D Z_σ · D` over the six orderings `(X, Y, Z)` of `(E, F, A_r)`
+/// on the floored inverse, and `scale · D · (T S + S T + S₁ + S₂) · D` on the tilted pieces,
+/// where `S₁`, `S₂` carry `D T` in the first and second interior slot. With
+/// `P = E D F + F D E` formed once per call, the untilted row costs six `m × m` products.
+/// No symmetry of `E`, `F` or `A` is assumed.
+fn separable_second_frechet_rows(
+    separable: &SeparableQuadruple,
+    m: usize,
+    rows: &Array2<f64>,
+    e: &Array2<f64>,
+    f: &Array2<f64>,
+) -> Array2<f64> {
+    use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+    let d = Array1::from(separable.factors.clone());
+    let column_scaled = |matrix: &Array2<f64>, weights: &Array1<f64>| matrix * weights;
+    let row_scaled = |weights: &Array1<f64>, matrix: &Array2<f64>| {
+        &weights.view().insert_axis(ndarray::Axis(1)) * matrix
+    };
+    let ed = column_scaled(e, &d);
+    let fd = column_scaled(f, &d);
+    let p = ed.dot(f) + fd.dot(e);
+    let dt = separable.tilted.then(|| &d * &d);
+    let tilted_pair = dt.as_ref().map(|dt| {
+        let edt = column_scaled(e, dt);
+        let fdt = column_scaled(f, dt);
+        let pt = edt.dot(f) + fdt.dot(e);
+        (edt, fdt, pt)
+    });
+    let mut out = Array2::<f64>::zeros(rows.raw_dim());
+    out.axis_iter_mut(ndarray::Axis(0))
+        .into_par_iter()
+        .zip(rows.axis_iter(ndarray::Axis(0)).into_par_iter())
+        .for_each(|(mut target, source)| {
+            let a = source
+                .to_owned()
+                .into_shape_with_order((m, m))
+                .expect("each axis row holds one m x m block");
+            let da = row_scaled(&d, &a);
+            let ad = column_scaled(&a, &d);
+            let base = p.dot(&da) + ad.dot(&p) + ed.dot(&ad).dot(f) + fd.dot(&ad).dot(e);
+            let total = match (dt.as_ref(), tilted_pair.as_ref()) {
+                (Some(dt), Some((edt, fdt, pt))) => {
+                    let dta = row_scaled(dt, &a);
+                    let adt = column_scaled(&a, dt);
+                    let first = pt.dot(&da) + adt.dot(&p) + edt.dot(&ad).dot(f) + fdt.dot(&ad).dot(e);
+                    let second =
+                        p.dot(&dta) + ad.dot(pt) + ed.dot(&adt).dot(f) + fd.dot(&adt).dot(e);
+                    row_scaled(&d, &base) + column_scaled(&base, &d) + first + second
+                }
+                _ => base,
+            };
+            let values = target
+                .as_slice_mut()
+                .expect("owned axis rows are contiguous");
+            for i in 0..m {
+                for j in 0..m {
+                    values[i * m + j] = separable.scale * d[i] * total[[i, j]] * d[j];
+                }
+            }
+        });
+    out
 }
 
 impl JeffreysHphiDriftBase {
@@ -1324,47 +1470,26 @@ impl JeffreysHphiDriftBase {
         let divided = self.divided_differences();
         let mut out = Array2::zeros(rows.raw_dim());
         if directions.len() == 2 {
-            // D³f[E,F,A] is linear in A. Assemble that linear map for one
-            // output row at a time, sharing its spectral coefficients across
-            // every coefficient axis, then contract with BLAS-3. Scattering
-            // all p axes inside the four spectral loops costs O(p m^4)
-            // strided scalar updates. Here those operations form one dense
-            // contraction and the spectral assembly costs only O(m^4).
-            // A full m²-by-m² Loewner map is never allocated: the scratch
-            // occupies m³ entries and is reused for each output row.
-            let e = directions[0].as_standard_layout();
-            let f = directions[1].as_standard_layout();
-            let e = e.as_slice().expect("standard-layout spectral direction");
-            let f = f.as_slice().expect("standard-layout spectral direction");
-            let mut weights = Array2::<f64>::zeros((m, squared));
-            for i in 0..m {
-                weights.fill(0.0);
-                let w = weights
-                    .as_slice_mut()
-                    .expect("freshly allocated weights are contiguous");
-                for j in 0..m {
-                    for k in 0..m {
-                        for l in 0..m {
-                            let c = if floor_order == 0 {
-                                divided.quadruple([i, k, l, j])
-                            } else {
-                                inverse_difference(
-                                    &[self.evals[i], self.evals[k], self.evals[l], self.evals[j]],
-                                    self.floor,
-                                    floor_order,
-                                )
-                            };
-                            let (ik, kl, lj) = (i * m + k, k * m + l, l * m + j);
-                            w[j * squared + l * m + j] += c * (e[ik] * f[kl] + f[ik] * e[kl]);
-                            w[j * squared + kl] += c * (e[ik] * f[lj] + f[ik] * e[lj]);
-                            w[j * squared + ik] += c * (e[kl] * f[lj] + f[kl] * e[lj]);
-                        }
-                    }
-                }
-                out.slice_mut(ndarray::s![.., i * m..(i + 1) * m])
-                    .assign(&rows.dot(&weights.t()));
+            // D³f[E,F,A] is linear in A. On a spectrum inside one piece of the capped
+            // inverse the four-node values factor and the map closes as `m × m` products
+            // per axis row (#1082); otherwise `loewner_second_rows` assembles it one output
+            // row at a time and contracts with BLAS-3.
+            if floor_order == 0
+                && let Some(separable) = divided.separable_quadruple()
+            {
+                return separable_second_frechet_rows(&separable, m, rows, directions[0], directions[1]);
             }
-            return out;
+            return loewner_second_rows(rows, directions[0], directions[1], m, |i, k, l, j| {
+                if floor_order == 0 {
+                    divided.quadruple([i, k, l, j])
+                } else {
+                    inverse_difference(
+                        &[self.evals[i], self.evals[k], self.evals[l], self.evals[j]],
+                        self.floor,
+                        floor_order,
+                    )
+                }
+            });
         }
         let input = rows.as_standard_layout();
         let input = input.as_slice().expect("standard-layout axis rows");
@@ -1814,6 +1939,45 @@ mod tests {
                 .mixed_perturbation_derivative_batched_axes(&f, &e, &ef, &av, &au, &auv)
                 .unwrap();
             assert!((&actual - &swapped).iter().all(|x| x.abs() < 1e-12 * scale));
+        }
+    }
+
+    /// #1082: on a spectrum inside one piece of the capped inverse, the factored map equals the
+    /// coefficient loop on every piece; a spectrum that spans pieces is never factored.
+    #[test]
+    fn separable_second_frechet_rows_match_the_coefficient_loop_1082() {
+        let floor = 1e-3;
+        let e = array![[0.2, 0.03, -0.04, 0.01], [0.05, -0.1, 0.02, 0.07], [-0.04, 0.02, 0.15, -0.03], [0.02, 0.06, -0.01, 0.09]];
+        let f = array![[0.1, -0.02, 0.01, 0.04], [-0.03, 0.2, 0.03, -0.05], [0.01, 0.03, -0.1, 0.02], [0.06, -0.02, 0.05, 0.12]];
+        let rows = Array2::<f64>::from_shape_fn((3, 16), |(r, c)| 0.11 * ((3 * r + c + 1) as f64).sin() - 0.05 * ((r + 2 * c) as f64).cos());
+        for spectrum in [
+            array![0.3, 1.7, 5.0, 11.0],
+            array![18.0, 25.0, 40.0, 90.0],
+            array![-0.4, -1.1, -2.5, -6.0],
+            array![0.0, 2e-4, 5e-4, 9e-4],
+        ] {
+            let table = InverseDividedDifferences::new(&spectrum, floor);
+            let separable = table
+                .separable_quadruple()
+                .expect("a spectrum inside one piece factors");
+            let expected = loewner_second_rows(&rows, &e, &f, 4, |i, k, l, j| table.quadruple([i, k, l, j]));
+            let actual = separable_second_frechet_rows(&separable, 4, &rows, &e, &f);
+            let scale = expected.iter().fold(0.0_f64, |acc, x| acc.max(x.abs()));
+            for ((index, &want), &got) in expected.indexed_iter().zip(actual.iter()) {
+                assert!(
+                    (want - got).abs() <= 1e-12 * (1.0 + scale),
+                    "spectrum {spectrum:?} entry {index:?}: loop {want} vs factored {got}"
+                );
+            }
+            if spectrum[3] >= floor {
+                assert!(scale > 1e-6, "positive control: the map must not vanish on {spectrum:?}");
+            }
+        }
+        for spectrum in [array![0.3, 20.0], array![-0.2, 0.5], array![5e-4, 3.0]] {
+            assert!(
+                InverseDividedDifferences::new(&spectrum, floor).separable_quadruple().is_none(),
+                "a spectrum spanning pieces must keep the coefficient loop: {spectrum:?}"
+            );
         }
     }
 
