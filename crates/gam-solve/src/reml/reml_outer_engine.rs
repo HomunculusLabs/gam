@@ -163,7 +163,7 @@ mod pseudo_logdet;
 
 pub(crate) use dense_projection::{dense_projected_matrix, dense_trace_projected_factor};
 use gam_linalg::dense;
-pub use pseudo_logdet::exact_pseudo_logdet;
+pub(crate) use pseudo_logdet::exact_pseudo_logdet;
 // Re-exported at `pub` (#1521) so the lifted gam-models bms deviation-runtime
 // driver can call `gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold`.
 pub use pseudo_logdet::positive_eigenvalue_threshold;

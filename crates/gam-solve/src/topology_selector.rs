@@ -401,7 +401,7 @@ impl PredictiveCandidateKind {
 }
 
 /// Parse one exact structured-union display name (#907).
-pub fn parse_union_name(value: &str) -> Option<UnionStructure> {
+pub(crate) fn parse_union_name(value: &str) -> Option<UnionStructure> {
     match value {
         "union_circle+circle" => Some(UnionStructure::CircleCircle),
         "union_circle+cluster" => Some(UnionStructure::CirclePointCluster),
@@ -1072,7 +1072,7 @@ pub fn tk_normalized_score(
 /// divisor scales it exactly as it scales the score — no tolerance is chosen
 /// anywhere. `None` in propagates to `None` out: an unmeasured resolution must
 /// not become a zero one.
-pub fn tk_normalized_score_with_resolution(
+pub(crate) fn tk_normalized_score_with_resolution(
     raw_reml: f64,
     raw_reml_roundoff: Option<f64>,
     null_dim: f64,
@@ -1881,7 +1881,7 @@ pub fn deterministic_cv_folds_seeded(
 /// fold whose eval set contains `i`, so every entry is genuinely held out. This
 /// is exactly the table that feeds
 /// [`crate::evidence::solve_stacking_weights`].
-pub fn build_cv_log_density_table(
+pub(crate) fn build_cv_log_density_table(
     n: usize,
     folds: usize,
     seed: u64,

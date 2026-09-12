@@ -776,7 +776,7 @@ impl<'a> RemlState<'a> {
 /// Process-wide count of cubature upgrades that succeeded inside
 /// `RemlState::compute_smoothing_correction_auto`. Paired with
 /// `SMOOTHING_CORRECTION_NUMERICAL_FAILURE_COUNT` for visibility.
-pub static SMOOTHING_CORRECTION_CUBATURE_COUNT: AtomicU64 = AtomicU64::new(0);
+pub(crate) static SMOOTHING_CORRECTION_CUBATURE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 impl<'a> RemlState<'a> {
     /// Compute the pseudo-logdet `log|Σ λ_k S_k|₊`, its rank, and its first and

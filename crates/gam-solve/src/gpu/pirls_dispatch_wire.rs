@@ -214,7 +214,7 @@ mod linux_impl {
     /// The caller should test this **before** materializing `X·Qs` or any
     /// other transformed design so that CPU-default / no-runtime /
     /// policy-rejected paths pay zero `fast_ab` cost.
-    pub fn try_gpu_pirls_loop_admit(
+    pub(crate) fn try_gpu_pirls_loop_admit(
         likelihood: &gam_problem::GlmLikelihoodSpec,
         n: usize,
         p: usize,
@@ -231,7 +231,7 @@ mod linux_impl {
     /// Attempt to run the Stage 3.3 device-resident PIRLS loop for the
     /// dispatch input. Returns `Some` only when the loop ran end-to-end
     /// and the full CPU-oracle surface was assembled.
-    pub fn try_gpu_pirls_loop_dispatch(
+    pub(crate) fn try_gpu_pirls_loop_dispatch(
         input: GpuPirlsDispatchInput<'_>,
     ) -> Option<Result<(PirlsResult, WorkingModelPirlsResult), EstimationError>> {
         // Gaussian-identity fits have an exact GPU PLS path (issue #272) and
@@ -774,7 +774,7 @@ mod linux_impl {
     /// CPU-oracle surface was assembled; returns `None` when admission was
     /// denied; returns `Some(Err(...))` on admitted-device failure, which is
     /// propagated without a CPU retry.
-    pub fn try_gpu_gaussian_pls_dispatch(
+    pub(crate) fn try_gpu_gaussian_pls_dispatch(
         input: GpuGaussianPlsInput<'_>,
     ) -> Option<Result<(PirlsResult, WorkingModelPirlsResult), String>> {
         match try_gpu_gaussian_pls_admit(input.likelihood) {
@@ -1111,9 +1111,10 @@ mod linux_impl {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux_impl::{
-    GpuGaussianPlsInput, GpuPirlsDispatchInput, try_gpu_gaussian_pls_dispatch,
-    try_gpu_pirls_loop_admit, try_gpu_pirls_loop_dispatch,
+pub use linux_impl::{GpuGaussianPlsInput, GpuPirlsDispatchInput};
+#[cfg(target_os = "linux")]
+pub(crate) use linux_impl::{
+    try_gpu_gaussian_pls_dispatch, try_gpu_pirls_loop_admit, try_gpu_pirls_loop_dispatch,
 };
 
 #[cfg(test)]

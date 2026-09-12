@@ -79,8 +79,8 @@ pub use evidence::{
     GaussianMixtureCheckpoint, GaussianMixtureConfig, GaussianMixtureError, GaussianMixtureFit,
     RingGaussianMixtureFit, StackingCertificate, StackingCheckpoint, StackingConfig, StackingError,
     StackingWeights, TopologyCandidate, TopologyKind, TopologyScoreScale, TopologySelectOptions,
-    UnionComponentFit, UnionComponentKind, UnionStructure, UnionStructureFit, fit_gaussian_mixture,
-    fit_ring_gaussian_mixture, solve_stacking_weights,
+    UnionComponentFit, UnionComponentKind, UnionStructure, UnionStructureFit,
+    solve_stacking_weights,
 };
 pub use topology_selector::{
     AdaptiveRungError, AdaptiveRungFailureStage, AdaptiveRungKind, AdaptiveRungOrderFailure,
@@ -92,19 +92,11 @@ pub use topology_selector::{
     TopologyCandidateFailureStage, TopologyCandidateOutcome, TopologyCandidateRanked,
     TopologyCandidateSelectionResult, TopologyRaceParallelCandidate, TopologySelectionScoreKind,
     TopologySelectionScoreScale, UnionRungFit, UnionRungResult, adjudicate_predictive_race,
-    build_cv_log_density_table, deterministic_cv_folds_seeded, fit_free_cluster_rung,
-    fit_ring_of_clusters_rung, parse_union_name, run_topology_race_parallel,
+    deterministic_cv_folds_seeded, fit_free_cluster_rung,
+    fit_ring_of_clusters_rung, run_topology_race_parallel,
     select_topology_candidate_lifecycle, select_topology_with_fit, tk_normalized_score,
-    tk_normalized_score_with_resolution,
 };
 
-/// Process-wide counter of smoothing-corrections that took the sigma-cubature
-/// (second-order) branch in
-/// `estimate::reml::eval::RemlState::compute_smoothing_correction_auto`.
-/// Re-exported so integration tests can snapshot it before/after a fit and
-/// prove the cubature path (rather than the first-order linearization) was
-/// actually exercised — see the #582 response-scale-equivariance regression.
-pub use estimate::reml::eval::SMOOTHING_CORRECTION_CUBATURE_COUNT;
 /// Public re-export of the log-barrier configuration used by the REML/LAML
 /// evaluators for monotonicity-constrained coefficients. Exposed so callers
 /// (and integration tests) can construct and probe barrier objectives without

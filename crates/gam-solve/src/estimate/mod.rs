@@ -112,7 +112,7 @@ pub use smoothing_correction::RHO_BOUND;
 pub use smooth_term_summary::smooth_term_summary_rows;
 pub use summary::{
     ContinuousSmoothnessOrder, ContinuousSmoothnessOrderStatus, ModelSummary,
-    ParametricTermSummary, SmoothTermSummary, compute_continuous_smoothness_order,
+    ParametricTermSummary, SmoothTermSummary,
 };
 
 #[cfg(test)]

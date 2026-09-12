@@ -166,7 +166,7 @@ fn unscale_to_physical_lambdas(
 //                      nu/kappa2 as diagnostics, but mark non-Matérn status.
 // - IntrinsicLimit:    lambda0 is zero; report nu=1, kappa^2=0.
 // - UndefinedZeroLambda: invalid scaling/lambda inputs or unstable inversion.
-pub fn compute_continuous_smoothness_order(
+pub(crate) fn compute_continuous_smoothness_order(
     lambda_tilde: [f64; 3],
     normalization_scale: [f64; 3],
 ) -> ContinuousSmoothnessOrder {

@@ -1213,7 +1213,7 @@ fn mixture_data_fingerprint(data: ArrayView2<'_, f64>) -> Fingerprint {
 /// The fit is deterministic given `(data, k, config)`: the seed is the
 /// farthest-point/k-means center selection, EM is a deterministic map, so
 /// re-running yields the identical mixture.
-pub fn fit_gaussian_mixture(
+pub(crate) fn fit_gaussian_mixture(
     data: ArrayView2<'_, f64>,
     k: usize,
     config: GaussianMixtureConfig,
@@ -2226,7 +2226,7 @@ fn ring_mixture_m_step(
 
 /// Fit a deterministic, certified `k`-component isotropic Gaussian mixture
 /// whose component centers are constrained to a common circle.
-pub fn fit_ring_gaussian_mixture(
+pub(crate) fn fit_ring_gaussian_mixture(
     data: ArrayView2<'_, f64>,
     k: usize,
     config: GaussianMixtureConfig,
