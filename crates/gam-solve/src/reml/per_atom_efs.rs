@@ -93,10 +93,6 @@ pub(crate) const PER_ATOM_MAX_STEP: f64 = 5.0;
 /// Whole-vector backtracking halvings for the per-atom EFS line search.
 pub(crate) const PER_ATOM_MAX_BACKTRACK: usize = 8;
 
-/// Step components below this magnitude (in θ-space) are treated as numerically
-/// zero for convergence and line-search purposes.
-pub(crate) const PER_ATOM_NEGLIGIBLE_STEP: f64 = 1e-12;
-
 /// Relative tolerance for the descent condition during backtracking; matches
 /// the unified EFS path so ULP-level cost noise near a fixed point does not
 /// trigger spurious backtracking.
@@ -335,7 +331,9 @@ fn solve_shared_border_block(
         .iter()
         .map(|&i| gradient[i].abs())
         .fold(0.0_f64, f64::max);
-    if g_border_inf <= PER_ATOM_NEGLIGIBLE_STEP {
+    // Only an exactly zero border gradient has an exactly zero correction; any
+    // other gradient is solved, and a small one yields a proportionally small step.
+    if g_border_inf == 0.0 {
         return Ok(step);
     }
     if block.dim() != (m, m) {
@@ -595,7 +593,7 @@ pub fn run_per_atom_efs(
         // back to the exact logdet before the EFS step can be called converged.
         let step_inf = full_step.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
         final_step_inf = step_inf;
-        let margin = cfg.tolerance.max(PER_ATOM_NEGLIGIBLE_STEP);
+        let margin = cfg.tolerance;
         let cost_resolved_below_margin = match efs.logdet_enclosure_gap {
             Some(gap) => crate::logdet_bounds::LogdetEnclosure::gap_resolves_margin(gap, margin),
             None => true,
