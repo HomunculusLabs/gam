@@ -5347,15 +5347,35 @@ mod test_support {
                 let e = moved
                     .materialize_ard_concave_clamp_diagonal(&rho, &cache)
                     .expect("perturbed clamp");
+                // #2828 gave E a border block, the decoder priors' majorization
+                // gap, and the priced basin carries it, so this reference does.
+                let e_beta = moved
+                    .decoder_prior_majorizer_gap_border(&cache)
+                    .expect("perturbed border gap");
+                let total_t = e.len();
                 let q = priced.len();
                 let basin = ndarray::Array2::from_shape_fn((q, q), |(i, j)| {
-                    let remainder: f64 = (0..e.len())
+                    let remainder: f64 = (0..total_t)
                         .map(|r| {
                             e[r] * block.eigenvectors[[r, priced[i]]]
                                 * block.eigenvectors[[r, priced[j]]]
                         })
                         .sum();
+                    let border = e_beta.as_ref().map_or(0.0, |gap| {
+                        (0..gap.nrows())
+                            .map(|r| {
+                                (0..gap.ncols())
+                                    .map(|c| {
+                                        gap[[r, c]]
+                                            * block.eigenvectors[[total_t + r, priced[i]]]
+                                            * block.eigenvectors[[total_t + c, priced[j]]]
+                                    })
+                                    .sum::<f64>()
+                            })
+                            .sum::<f64>()
+                    });
                     remainder
+                        + border
                         + if i == j {
                             block.eigenvalues[priced[i]]
                         } else {
