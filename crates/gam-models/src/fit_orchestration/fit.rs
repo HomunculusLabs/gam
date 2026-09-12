@@ -3517,18 +3517,15 @@ pub(crate) fn fit_survival_location_scale_model(
             use gam_problem::{DeclaredHessianForm, Derivative, HessianValue, OuterEval};
             use gam_solve::rho_optimizer::OuterProblem;
             let dim = init.len();
-            // Box bounds keep line-search probes inside a physically admissible
-            // region (|ε|, |log δ| ≤ 6 gives the SAS link a finite range on both
-            // tails; mixture logits stay in a numerically sane band). With an
-            // analytic gradient and no declared Hessian the planner routes this
-            // to BFGS.
-            let lower = init.mapv(|v| v - 6.0);
-            let upper = init.mapv(|v| v + 6.0);
+            // The link-shape search runs on the outer engine's own domain. The
+            // private `init ± 6` box that sat here was a hand-supplied bound, the
+            // same kind the baseline-θ search dropped after it decided the
+            // survival time-block λ until a03438645 (#2670). With an analytic
+            // gradient and no declared Hessian the planner routes this to BFGS.
             let problem = OuterProblem::new(dim)
                 .with_gradient(Derivative::Analytic)
                 .with_hessian(DeclaredHessianForm::Unavailable)
                 .with_max_iter(240)
-                .with_bounds(lower, upper)
                 .with_initial_rho(init.clone())
                 .with_seed_config(gam_problem::SeedConfig {
                     max_seeds: 1,

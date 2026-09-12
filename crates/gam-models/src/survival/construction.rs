@@ -703,8 +703,7 @@ pub fn survival_baseline_config_from_theta(
 /// declaration the `OuterProblem` must advertise. Every baseline-θ path now
 /// supplies an exact analytic gradient (profile-NLL envelope gradient), so both
 /// contracts route to a gradient-based solver. Everything else — θ↔config
-/// conversion, the ±6 log-space box,
-/// the single-seed config, the `run`/convergence/error-formatting boilerplate
+/// conversion, the single-seed config, the `run`/convergence/error-formatting boilerplate
 /// — is identical, so it lives once in [`run_baseline_theta_optimizer`] and
 /// this enum selects the per-contract `OuterProblem` configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -742,8 +741,7 @@ impl BaselineDerivativeContract {
 ///
 /// Owns every step that is identical across the cost-only, gradient-only, and
 /// gradient+Hessian contracts: config→θ seeding (with the linear/no-parameter
-/// early return), the ±6 log-space box, the single-seed `OuterProblem`
-/// skeleton, derivative-contract configuration, `build_objective` wiring,
+/// early return), the single-seed `OuterProblem` skeleton, derivative-contract configuration, `build_objective` wiring,
 /// `run`, the convergence check + error formatting, and θ→config. The only
 /// contract-specific inputs are the already-wired `cost_fn`/`eval_fn` closures
 /// (which embed the derivative shape and dimension validation) and the
