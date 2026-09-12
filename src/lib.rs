@@ -62,8 +62,6 @@ pub mod getting_started {
 // `gam::…` paths and stay drop-in for both compilation units.
 extern crate self as gam;
 
-#[macro_use]
-mod macros;
 
 /// Stack reserved for each worker in the global Rayon pool.
 ///
@@ -208,7 +206,6 @@ pub mod terms {
 pub use gam_test_support as test_support;
 pub use gam_test_support::gam_binary;
 pub mod types;
-pub mod util;
 
 pub use gam_data as data;
 pub use gam_data::{encode_recordswith_inferred_schema, load_csvwith_inferred_schema};

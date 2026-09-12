@@ -5953,5 +5953,24 @@
     ],
     "reason": "#2469: encode.rs held a private copy of the cylinder flat-axis degree (SAE_CYLINDER_LINE_DEGREE = 2) beside manifold::SAE_CYLINDER_LINE_DEGREE in evaluator_rebuild.rs, and its doc said the two must agree. The birth menu wrote a third copy as a bare 2. One convention is now one constant: encode.rs and the birth menu read manifold::SAE_CYLINDER_LINE_DEGREE; the value stays 2.",
     "evidence": "At base 69f01add9860c1b632796439b9ea824e36facf12, the encode.rs declaration is private and its only readers were the Cylinder arm of the encode atlas family builder (ml = D + 1 and CylinderHarmonicEvaluator::new), both now reading crate::manifold::SAE_CYLINDER_LINE_DEGREE in this commit. git grep -F encode::SAE_CYLINDER_LINE_DEGREE over crates finds no path import. The remaining word matches are manifold::SAE_CYLINDER_LINE_DEGREE itself and its readers."
+  },
+  {
+    "base": "85b6376d2b895ab5788b6f3ddb3dd46a11407dc4",
+    "items": [
+      "src/macros.rs:fn:fmt",
+      "src/macros.rs:fn:from",
+      "src/macros.rs:macro_rules!:bail_dim_basis",
+      "src/macros.rs:macro_rules!:bail_dim_custom",
+      "src/macros.rs:macro_rules!:bail_dim_gamlss",
+      "src/macros.rs:macro_rules!:bail_dim_sls",
+      "src/macros.rs:macro_rules!:bail_invalid_basis",
+      "src/macros.rs:macro_rules!:bail_invalid_estim",
+      "src/macros.rs:macro_rules!:bail_invalid_gamlss",
+      "src/macros.rs:macro_rules!:bail_invalid_surv",
+      "src/macros.rs:macro_rules!:bail_invalid_tnorm",
+      "src/macros.rs:macro_rules!:impl_reason_error_boilerplate"
+    ],
+    "reason": "#2627 / relaunch item 4 (useless public API): the root facade's src/macros.rs carried ten #[macro_export] copies of the crates' error macros (impl_reason_error_boilerplate, bail_invalid_estim, bail_invalid_basis, bail_dim_basis, bail_invalid_gamlss, bail_dim_gamlss, bail_invalid_tnorm, bail_invalid_surv, bail_dim_sls, bail_dim_custom). No product and no source invokes them through the facade, because every crate that raises these errors defines its own copy. The fn fmt / fn from identities are the Display and From impls inside impl_reason_error_boilerplate's template.",
+    "evidence": "At the base, git grep -n 'gam::<name>!' over crates, src, tests, examples and benches returns 0 for all ten names, and git grep -n '<name>!' over src/ returns only the macro_rules! declarations. The same macro_rules! definitions live in crates/gam-problem/src/macros.rs, crates/gam-terms/src/lib.rs, crates/gam-models/src/macros.rs, crates/gam-linalg/src/lib.rs, crates/gam-identifiability/src/lib.rs and crates/gam-model-kernels/src/macros.rs. Outside Rust, the only mentions are two Python test docstrings quoting a gam-models error message. The item list applies source_removal_guard.py's ITEM regex to the base blob. Not compiled or run locally (user directive)."
   }
 ]
