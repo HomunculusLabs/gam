@@ -7354,6 +7354,12 @@ struct LatentHessianWorkspace<F: LatentJointHessianFamily> {
     family: F,
     block_states: Vec<ParameterBlockState>,
     slices: LatentSurvivalJointSlices,
+    /// One dense joint Hessian for this workspace's fixed β. A joint-Newton
+    /// cycle reads it as the solve source and again for the Jeffreys term
+    /// (`hessian_dense_forced`), and each read was a full order-two row pass
+    /// over the same immutable states (#2714). Failures are cached too: an
+    /// assembly error at fixed β is deterministic.
+    dense_hessian: std::sync::OnceLock<Result<Array2<f64>, String>>,
 }
 
 impl<F: LatentJointHessianFamily> LatentHessianWorkspace<F> {
@@ -7363,7 +7369,18 @@ impl<F: LatentJointHessianFamily> LatentHessianWorkspace<F> {
             family,
             block_states,
             slices,
+            dense_hessian: std::sync::OnceLock::new(),
         }
+    }
+
+    fn cached_dense_hessian(&self) -> Result<Array2<f64>, String> {
+        self.dense_hessian
+            .get_or_init(|| {
+                self.family
+                    .ws_evaluate_dense(&self.block_states)
+                    .map(|(_, _, hessian)| hessian)
+            })
+            .clone()
     }
 }
 
@@ -7383,9 +7400,7 @@ where
     }
 
     fn hessian_dense(&self) -> Result<Option<Array2<f64>>, String> {
-        self.family
-            .ws_evaluate_dense(&self.block_states)
-            .map(|(_, _, hessian)| Some(hessian))
+        self.cached_dense_hessian().map(Some)
     }
 
     fn hessian_matvec(&self, v: &Array1<f64>) -> Result<Option<Array1<f64>>, String> {
@@ -7410,7 +7425,7 @@ where
     }
 
     fn hessian_diagonal(&self) -> Result<Option<Array1<f64>>, String> {
-        let dense = self.family.ws_evaluate_dense(&self.block_states)?.2;
+        let dense = self.cached_dense_hessian()?;
         Ok(Some(dense.diag().to_owned()))
     }
 
