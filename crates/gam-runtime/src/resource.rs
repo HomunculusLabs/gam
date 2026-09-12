@@ -1,6 +1,6 @@
 use crate::cgroup_memory::detect_cgroup_memory;
 pub use crate::cgroup_memory::{
-    CgroupMemoryAvailability, CgroupMemoryLimit, CgroupMemoryObservation, CgroupMemoryProbeFailure,
+    CgroupMemoryAvailability, CgroupMemoryObservation, CgroupMemoryProbeFailure,
     CgroupMemoryProbeFailureKind,
 };
 

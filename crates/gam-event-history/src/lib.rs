@@ -31,9 +31,8 @@ pub use covariance::{
     DirectionEvidence, DirectionProfile, RidgeProfile, effective_rank, temporal_covariance,
 };
 pub use family::{
-    EventHistoryFamily, EventHistoryFit, EventHistorySpec, JointEvaluation, QuadratureCertificate,
-    RankStart, RankStep, ReferenceTables, RefinementCheck, RiskSetCentring,
-    fit_event_history_formulas,
+    EventHistoryFamily, EventHistoryFit, EventHistorySpec, QuadratureCertificate, RankStep,
+    RefinementCheck, RiskSetCentring, fit_event_history_formulas,
 };
 pub use forecast::{
     Forecast, ForecastRequest, FutureSegment, HistoryForecastRequest, PopulationForecastRequest,

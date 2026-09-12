@@ -11,7 +11,7 @@ use std::fmt;
 
 /// The exact syntax of one cgroup-v2 `memory.max` value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CgroupMemoryLimit {
+pub(crate) enum CgroupMemoryLimit {
     /// The literal `max` token: this level imposes no hard memory ceiling.
     Unlimited,
     /// A finite hard ceiling in bytes. Zero is valid and authoritative.

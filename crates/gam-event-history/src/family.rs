@@ -110,7 +110,7 @@ impl Directional for TwoSeed<0> {
 /// A full joint evaluation in coefficient space. `hessian` is the negative
 /// log-likelihood Hessian, the convention the custom-family engine expects.
 #[derive(Clone, Debug)]
-pub struct JointEvaluation {
+pub(crate) struct JointEvaluation {
     pub log_likelihood: f64,
     pub gradient: Array1<f64>,
     pub hessian: Array2<f64>,
@@ -240,7 +240,7 @@ impl ReferenceTables {
 
 /// The reference population's own grid, its per-stratum design rows, and
 /// where every cohort node sits on that grid.
-pub struct ReferenceTables {
+pub(crate) struct ReferenceTables {
     pub grid: ReferenceGrid,
     /// Covariate profiles retained independently of the training histories.
     pub(crate) profiles: Array2<f64>,
@@ -1573,7 +1573,7 @@ fn preflight(
 
 /// What a rank-`K+1` fit starts from: the converged rank-`K` latent block
 /// and the atom the covariance score proposed.
-pub struct RankStart {
+pub(crate) struct RankStart {
     /// The incumbent fit's coefficients of every mark block, in mark order,
     /// so a candidate starts its population surfaces where the fit one rank
     /// down left them rather than from zero; empty when nothing is carried.
