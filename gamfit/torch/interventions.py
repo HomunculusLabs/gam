@@ -15,16 +15,11 @@ to audit when the only thing this module can do is *measure*.
 Splicing reuses the exact forward-hook path the downstream harvest exercises
 (:func:`gamfit.torch.harvest._capture_activations`'s replace-one-row closure),
 so a patched forward is the same code path as a probed one.
-
-The shard `.npz` I/O mirrors :func:`gamfit.torch.harvest.save_harvest_shard`:
-f32/f64 as measured, validated shapes, provenance-free (the shard *is* its own
-provenance: the plan and seed are stored).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -36,8 +31,6 @@ __all__ = [
     "InterventionPlan",
     "InterventionShardData",
     "run_interventions",
-    "save_intervention_shard",
-    "load_intervention_shard",
 ]
 
 
@@ -197,55 +190,5 @@ def run_interventions(
         is_control=is_control,
         layer=int(layer),
         seed=int(seed),
-    )
-
-
-def save_intervention_shard(shard: InterventionShardData, path: str | Path) -> str:
-    """Write the shard to ``.npz`` (the harvest-shard suffix rule). ``nu_hat_2``
-    absence is stored as an empty array so the schema is stable."""
-    out = Path(path)
-    if out.suffix != ".npz":
-        out = out.with_name(out.name + ".npz")
-    nu2 = (
-        np.asarray([], dtype=np.float64)
-        if shard.nu_hat_2 is None
-        else np.asarray(shard.nu_hat_2, dtype=np.float64)
-    )
-    np.savez(
-        out,
-        row_id=np.asarray(shard.row_id, dtype=np.int64),
-        atom=np.asarray(shard.atom, dtype=np.int64),
-        dose=np.asarray(shard.dose, dtype=np.float64),
-        nu_hat_1=np.asarray(shard.nu_hat_1, dtype=np.float64),
-        nu_hat_2=nu2,
-        nu_measured=np.asarray(shard.nu_measured, dtype=np.float64),
-        group=np.asarray(shard.group, dtype=np.int64),
-        is_control=np.asarray(shard.is_control, dtype=bool),
-        layer=np.int64(shard.layer),
-        seed=np.uint64(shard.seed),
-    )
-    return str(out)
-
-
-def load_intervention_shard(path: str | Path) -> InterventionShardData:
-    """Load a shard written by :func:`save_intervention_shard`."""
-    target = Path(path)
-    if not target.exists() and target.suffix != ".npz":
-        suffixed = target.with_name(target.name + ".npz")
-        if suffixed.exists():
-            target = suffixed
-    npz = np.load(target)
-    nu2 = np.asarray(npz["nu_hat_2"], dtype=np.float64)
-    return InterventionShardData(
-        row_id=np.asarray(npz["row_id"], dtype=np.int64),
-        atom=np.asarray(npz["atom"], dtype=np.int64),
-        dose=np.asarray(npz["dose"], dtype=np.float64),
-        nu_hat_1=np.asarray(npz["nu_hat_1"], dtype=np.float64),
-        nu_hat_2=None if nu2.size == 0 else nu2,
-        nu_measured=np.asarray(npz["nu_measured"], dtype=np.float64),
-        group=np.asarray(npz["group"], dtype=np.int64),
-        is_control=np.asarray(npz["is_control"], dtype=bool),
-        layer=int(npz["layer"].item()),
-        seed=int(npz["seed"].item()),
     )
 
