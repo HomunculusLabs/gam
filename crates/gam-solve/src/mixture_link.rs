@@ -1224,25 +1224,6 @@ pub fn softmax_last_fixedzero(rho: &Array1<f64>) -> Array1<f64> {
     Array1::from_iter(exps.into_iter().map(|v| v * inv))
 }
 
-/// Returns softmax weights and Jacobian wrt free logits (last logit fixed at zero).
-/// Jacobian shape is (K, K-1): d pi_k / d rho_j.
-pub fn softmaxwith_jacobian_last_fixedzero(
-    rho: &Array1<f64>,
-) -> (Array1<f64>, ndarray::Array2<f64>) {
-    let pi = softmax_last_fixedzero(rho);
-    let k = pi.len();
-    let m = k.saturating_sub(1);
-    let mut jac = ndarray::Array2::<f64>::zeros((k, m));
-    for j in 0..m {
-        let pi_j = pi[j];
-        for kk in 0..k {
-            let delta = if kk == j { 1.0 } else { 0.0 };
-            jac[[kk, j]] = pi[kk] * (delta - pi_j);
-        }
-    }
-    (pi, jac)
-}
-
 pub fn state_fromspec(spec: &MixtureLinkSpec) -> Result<MixtureLinkState, String> {
     validate_mixturespec(spec)?;
     let pi = softmax_last_fixedzero(&spec.initial_rho);
@@ -2030,18 +2011,6 @@ fn royston_parmar_inverse_link_jet(eta: f64) -> Result<InverseLinkJet, Estimatio
     })
 }
 
-pub fn inverse_link_jet_for_family(
-    spec: &LikelihoodSpec,
-    eta: f64,
-) -> Result<InverseLinkJet, EstimationError> {
-    // RoystonParmar uses its own analytic survival inverse link irrespective of
-    // the (nominal `Identity`) link slot carried in the spec.
-    if matches!(spec.response, ResponseFamily::RoystonParmar) {
-        return royston_parmar_inverse_link_jet(eta);
-    }
-    spec.link.jet(eta)
-}
-
 /// Exact-public log inverse-link jet: `mu = d1 = d2 = d3 = exp(η)` with no
 /// solver-domain restriction. The solver-internal sibling evaluates the same
 /// exact expression only on [`LOG_LINK_SOLVER_ETA_MIN`] through
@@ -2062,7 +2031,7 @@ fn log_inverse_link_jet_exact(eta: f64) -> InverseLinkJet {
 
 /// EXACT public inverse-link jet for response-scale prediction outputs.
 ///
-/// Identical to `inverse_link_jet_for_family` for every link EXCEPT the
+/// Identical to the family's standard inverse-link jet for every link EXCEPT the
 /// standard `Log` link, where it accepts every IEEE input while the shared
 /// solver derivative seam accepts only its declared domain. For example,
 /// `eta = 705` remains a valid public prediction (`exp(705) ≈ 1.5e306`) but is

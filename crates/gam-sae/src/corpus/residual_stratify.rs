@@ -521,12 +521,6 @@ impl StratifiedCorpusTarget {
         self.row_ids.is_empty()
     }
 
-    /// `Σ 1/π_i` over the selected rows — the Horvitz–Thompson estimate of the
-    /// corpus row count (exactly `N` in expectation). A consumer can sanity-gate
-    /// the design by checking this lands near `N`.
-    pub fn estimated_corpus_rows(&self) -> f64 {
-        self.likelihood_weights.iter().sum()
-    }
 }
 
 /// Collect a residual-energy-stratified target from a streaming source.

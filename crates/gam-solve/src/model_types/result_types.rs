@@ -1130,17 +1130,6 @@ impl CurvatureEvidence {
         }
     }
 
-    /// Whether a curvature question was actually answered here.
-    ///
-    /// [`Self::CriterionContradicted`] answers `false`: a Hessian was measured
-    /// there, but its verdict was withdrawn by the criterion, so no curvature
-    /// ANSWER survives. Reporting `true` would let a consumer that asked for a
-    /// real second-order guarantee read a withdrawn verdict as a delivered one,
-    /// which is the #2578 conflation one variant further along.
-    pub fn was_measured(self) -> bool {
-        matches!(self, Self::Measured { .. })
-    }
-
     /// Build from a raw optional measurement: `Some` was measured, `None`
     /// means the route had no analytic Hessian to test. Sites that mean
     /// [`Self::NotSpent`] or [`Self::NoEstimand`] must say so explicitly —
@@ -4723,7 +4712,7 @@ impl UnifiedFitResult {
     ///
     /// Boundary accessor: returns `&Array2<f64>` so out-of-scope consumers
     /// (CLI, GPU, families) keep their pre-newtype call shape. Use
-    /// `Self::penalized_hessian_unscaled` when the caller wants the
+    /// the `UnscaledPrecision` newtype directly when the caller wants the
     /// `UnscaledPrecision` newtype to enforce the dispersion-ownership
     /// invariant.
     pub fn penalized_hessian(&self) -> Option<&Array2<f64>> {
@@ -4735,20 +4724,6 @@ impl UnifiedFitResult {
                     .as_ref()
                     .map(|geom| geom.penalized_hessian.as_array())
             })
-    }
-
-    /// Get the active-coordinate penalized Hessian as the
-    /// `UnscaledPrecision` newtype if available. Use this when constructing
-    /// newtype-aware APIs (HMC whitening, sampling) so both the dispersion
-    /// convention and the accompanying `geometry.coefficient_gauge` are
-    /// handled explicitly.
-    pub fn penalized_hessian_unscaled(
-        &self,
-    ) -> Option<&gam_problem::dispersion_cov::UnscaledPrecision> {
-        self.inference
-            .as_ref()
-            .map(|inf| &inf.penalized_hessian)
-            .or_else(|| self.geometry.as_ref().map(|geom| &geom.penalized_hessian))
     }
 
     /// Get owned row-wise diagonal working evidence if available.

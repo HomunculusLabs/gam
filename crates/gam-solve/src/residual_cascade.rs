@@ -436,18 +436,6 @@ impl SplitMix64 {
         gam_linalg::utils::splitmix64(&mut self.0)
     }
 
-    /// Uniform in (0, 1): 53-bit mantissa, shifted off zero.
-    fn next_unit(&mut self) -> f64 {
-        ((self.next_u64() >> 11) as f64 + 0.5) / 9_007_199_254_740_992.0
-    }
-
-    /// Standard normal via Box–Muller.
-    fn next_normal(&mut self) -> f64 {
-        let u1 = self.next_unit();
-        let u2 = self.next_unit();
-        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
-    }
-
     /// Rademacher ±1.
     fn next_sign(&mut self) -> f64 {
         if self.next_u64() & 1 == 0 { 1.0 } else { -1.0 }
@@ -3981,17 +3969,6 @@ impl ResidualCascadeDesign {
         self.core.m
     }
 
-    /// Structural nonzero count of the sparse design `X` (its CSR size). Each
-    /// iterative-route PCG iteration applies the operator `A = XᵀWX + λD` as two
-    /// CSR products against `X`, so its per-iteration cost is `Θ(nnz(X))`; the
-    /// certified sparse-solve work is therefore `solve_iters · num_nonzeros()`,
-    /// the figure the residual-cascade complexity certificate compares against
-    /// the dense `m³/3` factorization cost. Zero on a predict-only core rebuilt
-    /// from a persisted snapshot (the training CSR is intentionally dropped).
-    pub fn num_nonzeros(&self) -> usize {
-        self.core.col_idx.len()
-    }
-
     /// Total centers across all levels.
     pub fn num_centers(&self) -> usize {
         self.core.m - self.core.nullity()
@@ -4042,14 +4019,6 @@ impl ResidualCascadeDesign {
             .zip(self.core.pen_diag.iter())
             .map(|(&c, &d)| d * c * c)
             .sum())
-    }
-
-    /// Exact dense log-determinant of `X'WX + λD` (errors past the sizing
-    /// cap) — exposed for the in-test SLQ-vs-exact oracle.
-    pub fn logdet_exact(&self, log_lambda: f64) -> Result<f64, String> {
-        let lambda = gam_problem::checked_exp_log_strength(log_lambda)
-            .map_err(|error| format!("residual cascade: {error}"))?;
-        self.core.logdet_dense(lambda)
     }
 
     /// SLQ log-determinant estimate on the fixed deterministic probes —
@@ -4318,46 +4287,6 @@ impl ResidualCascadeDesign {
             None,
             Some(selected.normalized_logdet),
         )?)
-    }
-
-    /// Assess the candidate level L+1 at this fit's λ. A complete candidate
-    /// reports a certified UPPER bound on its penalized-objective decrease (see
-    /// the module header for the Schur-complement argument). Empty-net
-    /// exhaustion and structural capacity are different typed outcomes because
-    /// only an empty net certifies zero remaining gain. A complete candidate
-    /// that outruns data identifiability or the certified-spectrum budget still
-    /// carries its finite bound, so the automatic route can return one honest
-    /// `Underresolved` result before invoking either downstream failure mode.
-    ///
-    /// This is the SIZE of what one more level could buy, not the decision:
-    /// whether it is worth buying is `gain > rss_pen·(1 − e^{−occam/dof})` for
-    /// that set's own Occam factor, which [`fit_residual_cascade`] settles by
-    /// building the set and comparing restricted likelihoods (#2759).
-    pub fn assess_next_level(
-        &self,
-        fit: &ResidualCascadeFit,
-    ) -> Result<NextLevelAssessment, String> {
-        self.assess_level_at_exponent(fit, self.core.levels.len() as f64)
-    }
-
-    fn assess_level_at_exponent(
-        &self,
-        fit: &ResidualCascadeFit,
-        exponent: f64,
-    ) -> Result<NextLevelAssessment, String> {
-        // The same screen the refinement loop stops its bracket on, so the
-        // assessment a caller reads is the assessment the loop acted on rather
-        // than a differently-converged neighbour of it.
-        Ok(self
-            .plan_level_at_exponent(
-                fit,
-                exponent,
-                Some(EvidenceScale {
-                    rss_pen: fit.rss_pen,
-                    dof: (self.core.y.len() - self.core.nullity()) as f64,
-                }),
-            )?
-            .assessment)
     }
 
     /// Assess the candidate level at `exponent` AND decide what the refinement
@@ -5112,40 +5041,6 @@ impl ResidualCascadeFit {
             quad += a * b;
         }
         Ok((mean, self.sigma2 * quad))
-    }
-
-    /// EXACT posterior coefficient samples by perturb-and-solve:
-    /// `c_s = A^{−1}(X'Wy + σ(X'W^{1/2}z₁ + √λ D^{1/2}z₂))` has mean ĉ and
-    /// covariance exactly `σ̂²A^{−1}`. Deterministically seeded; one certified
-    /// solve per sample (warm-started at the mode).
-    pub fn sample_coefficients(&self, n_samples: usize) -> Result<Vec<Vec<f64>>, String> {
-        let core = &self.core;
-        let lambda = gam_problem::checked_exp_log_strength(self.log_lambda)
-            .map_err(|error| format!("residual cascade fit: {error}"))?;
-        let sigma = self.sigma2.sqrt();
-        let sqrt_lambda = lambda.sqrt();
-        let n = core.y.len();
-        let mut rng = SplitMix64::new(RNG_SEED ^ 0xA11C_E5A_u64);
-        let mut samples = Vec::with_capacity(n_samples);
-        for _ in 0..n_samples {
-            let mut b = core.rhs.clone();
-            // X'W^{1/2} z₁: one CSR pass with per-row factor √w_i·z₁_i.
-            for i in 0..n {
-                let f = sigma * core.w[i].sqrt() * rng.next_normal();
-                for e in core.row_ptr[i]..core.row_ptr[i + 1] {
-                    b[core.col_idx[e] as usize] += f * core.vals[e];
-                }
-            }
-            // √λ D^{1/2} z₂ on the penalized columns.
-            for (bj, &dj) in b.iter_mut().zip(core.pen_diag.iter()) {
-                if dj > 0.0 {
-                    *bj += sigma * sqrt_lambda * dj.sqrt() * rng.next_normal();
-                }
-            }
-            let (c, _, _) = core.solve_coeff(lambda, &b, Some(&self.coeff))?;
-            samples.push(c);
-        }
-        Ok(samples)
     }
 
     /// Number of resolution levels in the fitted cascade.

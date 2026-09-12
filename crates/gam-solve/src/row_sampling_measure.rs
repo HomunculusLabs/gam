@@ -533,12 +533,6 @@ impl RowSamplingMeasure {
         self.weights.len()
     }
 
-    /// Whether this measure actually enriches (is non-uniform Fisher-mass).
-    /// `false` for the uniform fallback.
-    pub fn is_enriched(&self) -> bool {
-        matches!(self.provenance, MeasureProvenance::FisherMass(_))
-    }
-
     /// Deterministic **systematic-resampling** enrichment ordering.
     ///
     /// Returns a length-`count` vector of row indices drawn `∝ weights`, using
@@ -599,16 +593,6 @@ impl RowSamplingMeasure {
             out.push(cursor);
         }
         out
-    }
-
-    /// Expected number of times each row is drawn in a `count`-sized enrichment
-    /// batch: `count · weights[row]`. A diagnostic for the discovery-recall
-    /// control — it lets a test assert that a rare-but-live feature's rows have
-    /// markedly higher expected representation under enrichment than under
-    /// uniform, with no sampling noise.
-    pub fn expected_representation(&self, count: usize) -> Vec<f64> {
-        let c = count as f64;
-        self.weights.iter().map(|&w| c * w).collect()
     }
 
     /// Draw a **designed subsample** with honest inclusion weights — the
@@ -738,102 +722,6 @@ impl RowSamplingMeasure {
         }
     }
 
-    /// Draw a **certified** designed subsample within a target `eps` of the full
-    /// corpus on BOTH evidence halves (#1012).
-    ///
-    /// Unlike [`Self::designed_subsample`] — whose Horvitz–Thompson design is
-    /// unbiased only in expectation — this is the deterministic CERTIFIED mode:
-    ///
-    /// * **spectral half (`½log|H|`):** deterministic Batson–Spielman–Srivastava
-    ///   selection of `O(dim/eps²)` weighted rows from the per-row factors
-    ///   `R_i` (`H_i = R_iᵀR_i`), giving `(1−eps)H ⪯ H_C ⪯ (1+eps)H` and hence
-    ///   `|log|H_C| − log|H|| ≤ dim·log((1+eps)/(1−eps))`;
-    /// * **likelihood half (`L`):** the sensitivity bounds
-    ///   `σ_i ≤ leverage_i·(1 + κ̂·chart_radius)` on the documented chart ball,
-    ///   greedily selected against the row budget; the residual sensitivity mass
-    ///   is the additive `eps_likelihood·L` the certificate carries.
-    ///
-    /// The two selections are unioned (a row certified for either half is kept),
-    /// the rows carry their deterministic BSS / sensitivity weights, and the
-    /// [`CoresetCertificate`] rides the result so a race consumer can gate the
-    /// transfer with [`CoresetCertificate::race_transfer_margin`] — the SAME
-    /// margin seam the enclosure path (#1011) declares. Below that margin the
-    /// consumer must grow the coreset, never silently decide.
-    ///
-    /// `row_factors` is the per-row factor list aligned with this measure's rows;
-    /// `leverage`, `kappa_hat`, `chart_radius` are the sensitivity inputs (the
-    /// #1007 SVD-anchor leverage and the #1008 curvature slack). `budget` caps
-    /// the likelihood-half greedy selection.
-    pub fn designed_subsample_certified<'a, I>(
-        &self,
-        row_factors: I,
-        target_eps: f64,
-        leverage: &[f64],
-        kappa_hat: f64,
-        chart_radius: f64,
-        budget: usize,
-    ) -> Result<CertifiedRowSample, String>
-    where
-        I: IntoIterator<Item = ArrayView2<'a, f64>>,
-    {
-        // Spectral half: deterministic BSS coreset + its spectral certificate.
-        let spectral = bss_spectral_coreset_certified(row_factors, target_eps)?;
-
-        // Likelihood half: sensitivity-bounded greedy coreset; the residual mass
-        // not covered by the budget becomes the additive eps_likelihood.
-        let sigma = sensitivity_upper_bounds(leverage, kappa_hat, chart_radius)?;
-        let sensitivity = greedy_sensitivity_coreset(&sigma, budget)?;
-        let total_sensitivity =
-            sensitivity.selected_sensitivity_mass + sensitivity.residual_sensitivity_mass;
-        let eps_likelihood = if total_sensitivity > 0.0 {
-            sensitivity.residual_sensitivity_mass / total_sensitivity
-        } else {
-            0.0
-        };
-
-        // Union the two selections; a row certified for either half is retained.
-        // Carry the BSS weight where present, else the HT scale-up `1/π` proxy
-        // (uniform `n/|S|`) so the likelihood-only rows still enter the criterion
-        // unbiasedly.
-        let n = self.weights.len();
-        let bss_weight: std::collections::BTreeMap<usize, f64> = spectral
-            .indices
-            .iter()
-            .zip(spectral.weights.iter())
-            .map(|(&i, &w)| (i, w))
-            .collect();
-        let mut selected: std::collections::BTreeSet<usize> =
-            spectral.indices.iter().copied().collect();
-        for &i in &sensitivity.indices {
-            selected.insert(i);
-        }
-        let selected_len = selected.len().max(1);
-        let ht_scale = if n > 0 {
-            n as f64 / selected_len as f64
-        } else {
-            1.0
-        };
-
-        let rows: Vec<usize> = selected.iter().copied().collect();
-        let weights: Vec<f64> = rows
-            .iter()
-            .map(|i| *bss_weight.get(i).unwrap_or(&ht_scale))
-            .collect();
-
-        let certificate = CoresetCertificate::new(
-            spectral.certificate.eps_spectral,
-            eps_likelihood,
-            spectral.certificate.dim_effective,
-            rows.len(),
-        )?;
-
-        Ok(CertifiedRowSample {
-            provenance: self.provenance,
-            rows,
-            weights,
-            certificate,
-        })
-    }
 }
 
 /// A designed importance subsample with honest Horvitz–Thompson likelihood
@@ -865,19 +753,12 @@ impl DesignedRowSample {
         self.rows.is_empty()
     }
 
-    /// `Σ 1/π_i` over the selected rows — the Horvitz–Thompson estimate of the
-    /// corpus row count. A consumer can sanity-gate the design by checking
-    /// this lands near `n` (it is exactly `n` in expectation).
-    pub fn estimated_corpus_rows(&self) -> f64 {
-        self.likelihood_weights.iter().sum()
-    }
 }
 
 /// A **certified** designed subsample (#1012): the rows that certify BOTH
 /// evidence halves within the target `eps`, their deterministic BSS /
 /// sensitivity weights, and the [`CoresetCertificate`] a race consumer gates
-/// the verdict transfer against. Produced by
-/// `RowSamplingMeasure::designed_subsample_certified`.
+/// the verdict transfer against.
 #[derive(Clone, Debug)]
 pub struct CertifiedRowSample {
     /// Provenance of the measure that shaped the design.

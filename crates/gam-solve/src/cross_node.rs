@@ -241,13 +241,6 @@ impl NodeWorker {
         }
     }
 
-    /// `true` once this rank's sequence is exhausted.
-    pub fn is_done(&self) -> bool {
-        self.partition
-            .owned_chunk(self.rank, self.next_ordinal)
-            .is_none()
-    }
-
     /// Global chunk index and row range of the next chunk to compute, or
     /// `None` when done. The caller fetches exactly these rows.
     pub fn next_chunk_rows(&self) -> Option<(usize, std::ops::Range<usize>)> {
@@ -328,12 +321,6 @@ impl CrossNodeGramReduction {
     /// The shared partition (workers must be constructed with an equal one).
     pub fn partition(&self) -> CrossNodePartition {
         self.partition
-    }
-
-    /// How many partials rank `rank` has had accepted — the ordinal a
-    /// replacement worker for that rank should resume from.
-    pub fn rank_cursor(&self, rank: usize) -> Option<usize> {
-        self.received_per_rank.get(rank).copied()
     }
 
     /// `true` once every chunk of every rank has been received and folded.
