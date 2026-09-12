@@ -353,7 +353,7 @@ pub(crate) fn survival_nonrigid_pilot_eta(
             .into());
         }
     }
-    // Normal equations: (Xᵀ W X + λI) β = -Xᵀ g, where W = diag(hess_eta1)
+    // Normal equations: (Xᵀ W X) β = -Xᵀ g, where W = diag(hess_eta1)
     // along η₁, g = grad_eta1, and X is the η₁ chain-corrected joint design
     // (each location column scaled by chain_q, each slope column by
     // chain_g). X is never materialized at full height: a one-shot dense
@@ -403,23 +403,26 @@ pub(crate) fn survival_nonrigid_pilot_eta(
         }
         chunk_start = chunk_end;
     }
-    // Adaptive ridge: 1e-6 × average diagonal, floored at 1e-12. Keeps the
-    // Cholesky well-conditioned even when the rigid design has near-null
-    // directions (which it often does at construction — the whole point of
-    // the eventual cross-block reparam).
-    let avg_diag = if p_joint > 0 {
-        (0..p_joint).map(|j| gram[[j, j]]).sum::<f64>() / (p_joint as f64)
-    } else {
-        0.0
-    };
-    let ridge_eff = (1.0e-6 * avg_diag).max(1.0e-12);
-    for j in 0..p_joint {
-        gram[[j, j]] += ridge_eff;
+    // The step is the minimum-norm solution of Gram·δ = rhs on the Gram's resolved
+    // positive eigenspace. Every row curvature was checked non-negative above, so
+    // the Gram is PSD, and a direction the rigid design does not identify at
+    // construction (the reason for the eventual cross-block reparam) has a null or
+    // roundoff eigenvalue: it takes no step, where a chosen ridge would have given
+    // it one.
+    let (evals, evecs) = gam_linalg::faer_ndarray::FaerEigh::eigh(&gram, faer::Side::Lower)
+        .map_err(|e| format!("survival_nonrigid_pilot_eta: eigendecomposition failed: {e:?}"))?;
+    let threshold = gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold(
+        evals.as_slice().ok_or_else(|| {
+            "survival_nonrigid_pilot_eta: eigenvalues are not contiguous".to_string()
+        })?,
+    );
+    let projected_rhs = evecs.t().dot(&rhs);
+    let mut beta_step = Array1::<f64>::zeros(p_joint);
+    for k in 0..p_joint {
+        if evals[k] > threshold {
+            beta_step.scaled_add(projected_rhs[k] / evals[k], &evecs.column(k));
+        }
     }
-    let factor = gram
-        .cholesky(faer::Side::Lower)
-        .map_err(|e| format!("survival_nonrigid_pilot_eta: Cholesky failed: {e:?}"))?;
-    let beta_step = factor.solvevec(&rhs);
     if beta_step.iter().any(|value| !value.is_finite()) {
         return Err(SurvivalMarginalSlopeError::NumericalFailure {
             reason: "survival non-rigid pilot Newton solve produced a non-finite coefficient"
