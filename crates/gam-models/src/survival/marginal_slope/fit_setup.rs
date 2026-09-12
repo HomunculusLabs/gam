@@ -29,7 +29,7 @@ pub(crate) fn build_time_blockspec(
             let lo = col.iter().copied().fold(f64::INFINITY, f64::min);
             let hi = col.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             let span = hi - lo;
-            if span.abs() <= 1e-10 {
+            if span == 0.0 {
                 degenerate_cols += 1;
             }
             spans.push(span);
@@ -67,7 +67,7 @@ pub(crate) fn build_time_blockspec(
             })
             .collect();
         log::info!(
-            "[marginal-slope/time_surface-diag] design_exit {n_rows}x{p_cols}; near-constant cols={degenerate_cols}/{p_cols}; ref_col={ref_col}; per-col span={:?}; |cos vs ref (mean-centered)|={:?}",
+            "[marginal-slope/time_surface-diag] design_exit {n_rows}x{p_cols}; constant cols={degenerate_cols}/{p_cols}; ref_col={ref_col}; per-col span={:?}; |cos vs ref (mean-centered)|={:?}",
             spans.iter().map(|s| format!("{s:.3e}")).collect::<Vec<_>>(),
             cosines,
         );
