@@ -842,6 +842,30 @@ impl SurvivalMarginalSlopeFamily {
         })
     }
 
+    /// `{D_β_a ∂²_ψiψj H}` along every coefficient axis `a` for a pair of design
+    /// hyperparameters (gam#2765); see
+    /// `SurvivalMarginalSlopeRowKernel::design_psi_pair_third_information_all_axes_from`.
+    pub(crate) fn design_psi_pair_hessian_directional_derivative_all_beta_axes_with_options(
+        &self,
+        block_states: &[ParameterBlockState],
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_i: usize,
+        psi_j: usize,
+        options: &BlockwiseFitOptions,
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        self.require_rigid_third(block_states, "design-pair third information derivative")?;
+        let row_weights = self.rigid_third_row_weights(options);
+        in_slope_frame!(self, P, Frame, {
+            SurvivalMarginalSlopeRowKernel::<P, Frame>::new(self.clone(), block_states.to_vec())
+                .design_psi_pair_third_information_all_axes(
+                    derivative_blocks,
+                    psi_i,
+                    psi_j,
+                    &row_weights,
+                )
+        })
+    }
+
     /// A flat coefficient direction as a finite contiguous slice of the joint width.
     fn finite_flat_direction<'direction>(
         &self,

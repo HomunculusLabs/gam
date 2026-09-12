@@ -536,8 +536,17 @@ impl ExactNewtonJointPsiWorkspace for SurvivalMarginalSlopePsiWorkspace {
                     &self.options,
                 )
                 .map(Some),
+            (None, None) => self
+                .family
+                .design_psi_pair_hessian_directional_derivative_all_beta_axes_with_options(
+                    &self.block_states,
+                    self.hyper_layout.design_derivative_blocks(),
+                    psi_i,
+                    psi_j,
+                    &self.options,
+                ),
             _ => Err(format!(
-                "survival marginal-slope psi pair ({psi_i}, {psi_j}) has an exact third information derivative only when both axes are baseline-chart coordinates"
+                "survival marginal-slope psi pair ({psi_i}, {psi_j}) has an exact third information derivative only when both axes are baseline-chart coordinates or both are design axes"
             )),
         }
     }

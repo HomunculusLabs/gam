@@ -234,6 +234,23 @@ impl SurvivalMarginalSlopeRowKernel<DYNAMIC_SLOPE_PRIMARIES, DynamicSlopeGeometr
             dynamic_row_fifth,
         )
     }
+
+    /// [`Self::design_psi_pair_third_information_all_axes_from`] on the follow-up-varying slope frame.
+    pub(crate) fn design_psi_pair_third_information_all_axes(
+        &self,
+        derivative_blocks: &[Vec<crate::custom_family::CustomFamilyBlockPsiDerivative>],
+        psi_i: usize,
+        psi_j: usize,
+        row_weights: &[f64],
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        self.design_psi_pair_third_information_all_axes_from(
+            derivative_blocks,
+            psi_i,
+            psi_j,
+            row_weights,
+            dynamic_row_fifth,
+        )
+    }
 }
 
 #[cfg(test)]

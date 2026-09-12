@@ -1360,6 +1360,75 @@ fn design_psi_by_beta_third_information_matches_finite_difference_2765() {
     }
 }
 
+/// Two design ψ axes: a marginal length scale, then a slope length scale.
+fn two_design_axis_blocks() -> Vec<Vec<CustomFamilyBlockPsiDerivative>> {
+    let axis = |x_psi: Array2<f64>| {
+        CustomFamilyBlockPsiDerivative::new(
+            None,
+            x_psi,
+            Array2::zeros((2, 2)),
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+    vec![
+        Vec::new(),
+        vec![axis(marginal_design_derivative())],
+        vec![axis(slope_design_derivative())],
+    ]
+}
+
+/// `D_β ∂²_ψψ' H` for design pairs: the marginal diagonal in both slope frames, and
+/// the cross-block and slope-diagonal pairs of a time-constant slope.
+#[test]
+fn design_psi_pair_third_information_matches_finite_difference_2765() {
+    let options = BlockwiseFitOptions::default();
+    let blocks = two_design_axis_blocks();
+    for (frame, psi_i, psi_j) in [
+        (SlopeFrame::Static, 0, 0),
+        (SlopeFrame::Static, 0, 1),
+        (SlopeFrame::Static, 1, 1),
+        (SlopeFrame::FollowUpVarying, 0, 0),
+    ] {
+        let (family, beta) = drift_family_and_states(frame);
+        let total = beta.len();
+        let analytic = family
+            .design_psi_pair_hessian_directional_derivative_all_beta_axes_with_options(
+                &states_at_beta(&family, &beta),
+                &blocks,
+                psi_i,
+                psi_j,
+                &options,
+            )
+            .expect("design-pair third information derivative")
+            .expect("a design pair on supported blocks publishes its third information derivative");
+        grade_all_beta_axes(
+            &format!("{}/design pair ({psi_i},{psi_j})", frame.label()),
+            &analytic,
+            &beta,
+            |displaced| {
+                let terms = family
+                    .psi_second_order_terms_inner_with_options(
+                        &states_at_beta(&family, displaced),
+                        &blocks,
+                        psi_i,
+                        psi_j,
+                        None,
+                        &options,
+                    )
+                    .expect("design pair terms")
+                    .expect("a design pair on supported blocks publishes its terms");
+                match terms.hessian_psi_psi_operator.as_ref() {
+                    Some(operator) => operator.mul_mat(&Array2::<f64>::eye(total)),
+                    None => terms.hessian_psi_psi.clone(),
+                }
+            },
+        );
+    }
+}
+
 /// `D_β ∂²_θθ' H` for diagonal and cross baseline pairs, in both slope frames.
 #[test]
 fn baseline_psi_pair_third_information_matches_finite_difference_2765() {
