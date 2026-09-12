@@ -8006,6 +8006,12 @@ pub fn build_factor_smooth(
     // λ per marginal penalty), the defining feature of a factor smooth. For
     // `Re` the marginal penalty is replaced by one ridge per parametric
     // coordinate so intercept and slope variances can be learned separately.
+    // These coefficient ridges are precisely the function penalty (SPEC rule 5):
+    // `c` is the midpoint of the marginal domain `[a, b]`, so under the domain's
+    // uniform measure a level's function `b₀ + b₁(x − c)` has mass
+    // `b₀² + b₁²(b − a)²/12`, the cross term vanishing. The two ridges are the
+    // masses of its constant and slope components, and the constant `(b − a)²/12`
+    // is absorbed by the slope's own λ and by the penalty normalization.
     let marginal_penalties: Vec<(Array2<f64>, PenaltySource, f64)> =
         if matches!(spec.flavour, FactorSmoothFlavour::Re) {
             (0..p)
