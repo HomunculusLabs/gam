@@ -299,17 +299,15 @@ pub fn isa_eigen_parts(residual: ArrayView2<'_, f64>) -> Result<Option<IsaEigenP
     // first median is already in noise and the iterate is a no-op (bit-identical
     // to the old median floor); on pure noise the whole spectrum is the fixed
     // point and nothing clears the edge (the natural-stop is preserved).
+    // Called only on nonempty prefixes of `surviving`, whose eigenvalues all exceed
+    // `rank_tol ≥ 0`, so the median is positive without a floor.
     let median_prefix = |xs: &[f64]| -> f64 {
         let m = xs.len();
-        if m == 0 {
-            return f64::MIN_POSITIVE;
-        }
         if m % 2 == 1 {
             xs[m / 2]
         } else {
             0.5 * (xs[m / 2 - 1] + xs[m / 2])
         }
-        .max(f64::MIN_POSITIVE)
     };
     let mut noise_len = surviving.len();
     let mut sigma2 = median_prefix(&surviving[..noise_len]);
@@ -370,14 +368,20 @@ pub struct IsaPlaneCandidate {
 /// no RNG crate, reproducible across thread/device counts.
 fn lcg_normal(state: &mut u64) -> f64 {
     let mut u = [0.0_f64; 2];
-    for slot in u.iter_mut() {
-        *state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        *slot = ((*state >> 11) as f64) / ((1u64 << 53) as f64);
+    // Box–Muller needs `u₁ > 0`. A pair whose first draw is exactly zero is
+    // rejected and redrawn, which changes nothing before the first such draw.
+    loop {
+        for slot in u.iter_mut() {
+            *state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *slot = ((*state >> 11) as f64) / ((1u64 << 53) as f64);
+        }
+        if u[0] > 0.0 {
+            break;
+        }
     }
-    let u1 = u[0].max(f64::MIN_POSITIVE);
-    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u[1]).cos()
+    (-2.0 * u[0].ln()).sqrt() * (std::f64::consts::TAU * u[1]).cos()
 }
 
 /// Modified Gram–Schmidt orthonormalization of the two columns of a `(d, 2)`
@@ -991,7 +995,8 @@ fn certify_plane(
     if !orthonormalize2(&mut amb) {
         return None;
     }
-    let noise_2plane = 2.0 * parts.sigma2_cert.max(f64::MIN_POSITIVE) * (n as f64).ln();
+    // `sigma2_cert` is the MP fixed-point median of positive eigenvalues.
+    let noise_2plane = 2.0 * parts.sigma2_cert * (n as f64).ln();
     let mut phases = Array2::<f64>::zeros((n, 1));
     let mut gate = vec![f64::NEG_INFINITY; n];
     let (mut r2_sum, mut r4_sum) = (0.0_f64, 0.0_f64);
@@ -1031,7 +1036,8 @@ fn certify_plane(
         return None;
     }
     let q_hat = n_active as f64 / n as f64;
-    let m2 = (r2_sum / n as f64).max(f64::MIN_POSITIVE);
+    // At least `active_floor ≥ 4` rows cleared the positive χ²₂ floor, so `m₂ > 0`.
+    let m2 = r2_sum / n as f64;
     let kappa_obs = (r4_sum / n as f64) / (m2 * m2);
     let sig2 = parts.sigma2_cert;
     // Noise-corrected squared amplitude: m₂ = q̂a² + 2σ̂².
