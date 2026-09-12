@@ -4757,5 +4757,15 @@
     ],
     "reason": "#2829 public-surface rule: no product uses ConstantCurvature::distance_batch or log_map_kappa_jet. distance_batch's SIMD series helper t0x4 loses its only caller and goes with it.",
     "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 537318, /scratch.global/sauer354/pool/api2829/validate.537318.log). The orphan cascade was closed to a fixed point (t0x4). log_map_kappa_jet leaves gam-geometry's lib.rs and manifolds/mod.rs pub use lines. curvature_estimand.rs's design-seam module-doc section, and gam-terms constant_curvature_smooth.rs's 'Available but not yet consumed' bullet, described only this function and are removed. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "8376b160b942c273a169ff35fa9dd0211e32642f",
+    "items": [
+      "crates/gam-solve/src/reml/gradient_hessian.rs:const:FIRTH_TK_EXACT_HESSIAN_MAX_ROW_PAIR_WORK",
+      "crates/gam-solve/src/reml/gradient_hessian.rs:fn:firth_tk_exact_hessian_scale_allows",
+      "crates/gam-solve/src/reml/mod.rs:fn:canonical_logit_firth_declines_exact_tk_hessian_when_row_pair_work_is_large"
+    ],
+    "reason": "#2900 SPEC rules 6 and 23: analytic_outer_hessian_enabled routed canonical-logit Firth outer curvature to BFGS whenever n^2*p > 1e7 (firth_tk_exact_hessian_scale_allows, with its local constant FIRTH_TK_EXACT_HESSIAN_MAX_ROW_PAIR_WORK), because the exact Tierney-Kadane Hessian used to contract every row pair. 5e4a9a39b added an exact design-tensor route chosen by predicted work, so the budget guards nothing. It is deleted with its planner branch, and the unit test that asserted the BFGS routing is replaced by one that asserts exact curvature on the same fixture.",
+    "evidence": "At base, git grep -n -w firth_tk_exact_hessian_scale_allows over crates, src and tests finds its declaration and planner call in crates/gam-solve/src/reml/gradient_hessian.rs, plus the two unit-test asserts in crates/gam-solve/src/reml/mod.rs. FIRTH_TK_EXACT_HESSIAN_MAX_ROW_PAIR_WORK occurs only inside that function. canonical_logit_firth_declines_exact_tk_hessian_when_row_pair_work_is_large is the n = 2000, p = 28 fixture, now canonical_logit_firth_keeps_exact_tk_hessian_beyond_row_pair_scale. Not compiled locally (user directive); compile rests on the shared tip check."
   }
 ]

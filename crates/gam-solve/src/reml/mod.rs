@@ -633,7 +633,10 @@ mod tests {
     }
 
     #[test]
-    fn canonical_logit_firth_declines_exact_tk_hessian_when_row_pair_work_is_large() {
+    fn canonical_logit_firth_keeps_exact_tk_hessian_beyond_row_pair_scale() {
+        // n²·p = 1.12e8: ten times the row-pair budget that used to send this
+        // fit's outer curvature to BFGS. The exact TK Hessian has a design-tensor
+        // route now (#2900), so the planner keeps it.
         let n = 2_000usize;
         let p = 28usize;
         let y = Array1::from_iter((0..n).map(|i| if i % 3 == 0 { 1.0 } else { 0.0 }));
@@ -655,12 +658,8 @@ mod tests {
         let state = build_logit_state(&y, &w, &x, &s, &cfg);
 
         assert!(
-            !RemlState::firth_tk_exact_hessian_scale_allows(n, p),
-            "fixture must sit beyond the O(n²·p) exact-Hessian budget"
-        );
-        assert!(
-            !state.analytic_outer_hessian_enabled(),
-            "large canonical-logit Firth fits should keep exact value/gradient but route outer curvature to BFGS"
+            state.analytic_outer_hessian_enabled(),
+            "canonical-logit Firth fits keep exact TK Hessian curvature at row-pair scale"
         );
     }
 
@@ -685,7 +684,6 @@ mod tests {
         let cfg = RemlConfig::external(binomial_logit_glm_spec(), 1e-10, true);
         let state = build_logit_state(&y, &w, &x, &s, &cfg);
 
-        assert!(RemlState::firth_tk_exact_hessian_scale_allows(n, p));
         assert!(
             state.analytic_outer_hessian_enabled(),
             "small Firth rescue fits should keep exact TK Hessian curvature"

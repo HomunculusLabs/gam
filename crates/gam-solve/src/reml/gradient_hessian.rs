@@ -193,24 +193,12 @@ impl<'a> RemlState<'a> {
             );
             return false;
         }
-        // Canonical-logit Firth fits have an exact Tierney-Kadane Hessian, but
-        // its skewness correction contains an O(n²) row-pair contraction.  Keep
-        // that exact curvature for small separation-rescue fits, where it is
-        // cheap and useful; for ordinary multi-thousand-row binomial GAMs keep
-        // the same Firth objective and analytic gradient while routing outer
-        // curvature to BFGS instead of spending minutes on one Hessian probe
-        // (#1575).
-        if reml_robust_jeffreys_link(&self.config).is_some()
-            && self.tk_exact_hessian_is_canonical_logit()
-            && !Self::firth_tk_exact_hessian_scale_allows(n_obs, p_dim)
-        {
-            log::info!(
-                "[standard-GAM] declining canonical-logit Firth exact outer Hessian for \
-                 n={n_obs} p={p_dim} (row-pair TK Hessian work n²·p exceeds budget); \
-                 routing to analytic-gradient BFGS"
-            );
-            return false;
-        }
+        // Canonical-logit Firth fits keep their exact Tierney-Kadane outer Hessian
+        // at every problem scale: its row-pair jets run by blocked row pairs or
+        // through design tensors, whichever predicted work is smaller
+        // (`TkRowPairRoute::predicted_rho_hessian`, #2900), so no row count sends
+        // their curvature to BFGS.
+        //
         // The corrected objective and its exact analytic gradient are
         // link-general, but an exact TK outer Hessian additionally needs the
         // fourth eta derivative of the observed-information surface. That
@@ -223,16 +211,6 @@ impl<'a> RemlState<'a> {
             return false;
         }
         true
-    }
-
-    pub(crate) fn firth_tk_exact_hessian_scale_allows(n_obs: usize, p_coeff: usize) -> bool {
-        // The exact TK Hessian's row-pair jets cost O(n²·(1 + k + k²)·p). The
-        // design-tensor route (`TkRowPairRoute::predicted_rho_hessian`) is cheaper
-        // at large n, but this budget still sends optimizer curvature to BFGS by
-        // row-pair work alone (#2900 row 6.7).
-        const FIRTH_TK_EXACT_HESSIAN_MAX_ROW_PAIR_WORK: usize = 10_000_000;
-        n_obs.saturating_mul(n_obs).saturating_mul(p_coeff)
-            <= FIRTH_TK_EXACT_HESSIAN_MAX_ROW_PAIR_WORK
     }
 
     /// Whether the exact analytic outer Hessian of the Tierney-Kadane

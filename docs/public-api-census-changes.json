@@ -1887,5 +1887,13 @@
     },
     "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. ConstantCurvature::distance_batch and log_map_kappa_jet are restored-in-place gam-geometry identities with no caller in any product, test or example. Batch 9bb88031f deleted log_map_kappa_jet's last production caller, design_coord_kappa_derivative.",
     "evidence": "restored_consumers_2829.py at a39a27a17 (MSI job 536241, /scratch.global/sauer354/pool/api2829/consumers.a39a27a17e9346a0b7039f4f25996837a9fe3a52.rows.tsv) scores log_map_kappa_jet as test_only. It scores distance_batch as python_build_or_rename_only, because gam-pyffi imports poincare's distance_batch, a different function. At the base, git grep -F '.distance_batch(' finds no method call, and git grep -w log_map_kappa_jet finds only its declaration, two pub use lines and doc mentions. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 537318, /scratch.global/sauer354/pool/api2829/validate.537318.log)."
+  },
+  {
+    "base": "8376b160b942c273a169ff35fa9dd0211e32642f",
+    "removed": {
+      "crates/gam-solve/src/reml/gradient_hessian.rs::firth_tk_exact_hessian_scale_allows": 1
+    },
+    "reason": "#2900 SPEC rules 6 and 23: the pub(crate) row-pair budget firth_tk_exact_hessian_scale_allows sent canonical-logit Firth outer curvature to BFGS above n^2*p = 1e7. The exact Tierney-Kadane rho-Hessian now has a design-tensor route chosen by predicted work (5e4a9a39b), so the budget and its planner branch are deleted.",
+    "evidence": "At base, git grep -n -w firth_tk_exact_hessian_scale_allows over crates, src and tests finds its declaration and one planner call in crates/gam-solve/src/reml/gradient_hessian.rs, both removed here, and two unit-test asserts in crates/gam-solve/src/reml/mod.rs, also removed here. The removed map is exactly that one pub(crate) fn. Not compiled locally (user directive); compile rests on the shared tip check."
   }
 ]
