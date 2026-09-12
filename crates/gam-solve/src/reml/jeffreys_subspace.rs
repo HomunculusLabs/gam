@@ -1960,17 +1960,37 @@ impl JointJeffreysPlan {
     /// Explicit-parameter derivative `∂_s Φ` of the gated Jeffreys value from
     /// THIS prepared spectrum, given `pert_info = ∂_s H_info|_β`.
     ///
+    /// `Φ = G(λ)·½ Σ_i g(λ_i)`, with `λ` the reduced spectrum of `H_id = Z_Jᵀ H_info Z_J`,
+    /// `g` the floored antiderivative and `G` the conditioning gate, is differentiated
+    /// along an outer parameter `s` that enters `H_info` EXPLICITLY (β held fixed).
+    ///
+    /// This is the VALUE companion to [`joint_jeffreys_hphi_explicit_param_derivative`]
+    /// (the curvature `∂_s H_Φ`). The outer LAML cost folds `−Φ`, so its `s`-gradient
+    /// needs `−∂_s Φ`; for a ρ hyperparameter `H_info` has no explicit dependence
+    /// (only through β̂, handled by the mode-response envelope), but for a ψ
+    /// hyperparameter that reshapes the design (matern/duchon length-scale) `H_info`
+    /// depends on ψ explicitly and this term is nonzero. Omitting it left the outer
+    /// ψ-gradient short by the full Firth value motion (gam#1607).
+    ///
+    /// The arithmetic mirrors [`joint_jeffreys_term`]'s gradient projection — the
+    /// SAME reduced eigendecomposition, conditioning gate, relative floor and
+    /// floor-response — applied to the reduced perturbation `Ṽ = Vᵀ Z_Jᵀ pert_info Z_J V`:
+    ///   `∂_s Φ = G·½[ Σ_i d_i Ṽ_ii + (Σ_i ∂g/∂floor) · ∂_s floor ] + (∂_s G)·½ Σ_i g(λ_i)`,
+    /// with `d = g'` the floored inverse and `∂_s floor = REL·Ṽ_{max,max}` in the
+    /// active relative regime. Unlike the per-axis β-gradient (which treats the gate
+    /// as a soft switch held fixed), the explicit-`s` motion crosses the gate band as
+    /// the spectrum shifts, so the gate-derivative term is retained for exactness.
+    /// Returns `0.0` when the term is gated out (`G = 0`) or the span is empty.
+    ///
     /// The spectrum, gate, floor and dominant-eigenvalue indices are properties
     /// of the snapshot `(H_info, Z_J)` alone, so a caller that differentiates
     /// along many parameters prepares the plan once and calls this per
-    /// direction. [`joint_jeffreys_phi_explicit_param_derivative`] is exactly
-    /// this method behind a fresh `prepare`; the arithmetic below is unchanged
-    /// from that free function, which is why the two agree to the bit.
+    /// direction.
     pub fn explicit_param_derivative(&self, pert_info: &Array2<f64>) -> Result<f64, String> {
         let p = self.coefficient_dim();
         if pert_info.nrows() != p || pert_info.ncols() != p {
             return Err(format!(
-                "joint_jeffreys_phi_explicit_param_derivative: pert_info shape {}x{} != {p}x{p}",
+                "JointJeffreysPlan::explicit_param_derivative: pert_info shape {}x{} != {p}x{p}",
                 pert_info.nrows(),
                 pert_info.ncols()
             ));
@@ -2489,7 +2509,7 @@ where
     // sat in its smooth transition band — breaking the outer envelope identity
     // and biasing smoothing selection (the residual over-smoothing on Firth
     // custom-family fits, e.g. multinomial smooth-by-factor). This mirrors the
-    // gate-aware explicit-parameter derivative `joint_jeffreys_phi_explicit_param_derivative`
+    // gate-aware explicit-parameter derivative `JointJeffreysPlan::explicit_param_derivative`
     // and the floor-response fix already applied to the eigenvalue drift.
     let (gate_grad_min, gate_grad_max) = conditioning_gate_weight_grad(lambda_min, lambda_max);
     let gate_motion_active = gate_grad_min != 0.0 || gate_grad_max != 0.0;
@@ -3016,40 +3036,9 @@ where
     )
 }
 
-/// Explicit-parameter derivative of the joint-Jeffreys VALUE
-/// `Φ = G(λ)·½ Σ_i g(λ_i)` (`λ` the reduced spectrum of `H_id = Z_Jᵀ H_info Z_J`,
-/// `g` the floored antiderivative, `G` the conditioning gate) with respect to an
-/// outer parameter `s` that enters `H_info` EXPLICITLY (β held fixed), given the
-/// snapshot `H_info` and its explicit derivative `pert_info = ∂_s H_info|_β`.
-///
-/// This is the VALUE companion to [`joint_jeffreys_hphi_explicit_param_derivative`]
-/// (the curvature `∂_s H_Φ`). The outer LAML cost folds `−Φ`, so its `s`-gradient
-/// needs `−∂_s Φ`; for a ρ hyperparameter `H_info` has no explicit dependence
-/// (only through β̂, handled by the mode-response envelope), but for a ψ
-/// hyperparameter that reshapes the design (matern/duchon length-scale) `H_info`
-/// depends on ψ explicitly and this term is nonzero. Omitting it left the outer
-/// ψ-gradient short by the full Firth value motion (gam#1607).
-///
-/// The arithmetic mirrors [`joint_jeffreys_term`]'s gradient projection — the
-/// SAME reduced eigendecomposition, conditioning gate, relative floor and
-/// floor-response — applied to the reduced perturbation `Ṽ = Vᵀ Z_Jᵀ pert_info Z_J V`:
-///   `∂_s Φ = G·½[ Σ_i d_i Ṽ_ii + (Σ_i ∂g/∂floor) · ∂_s floor ] + (∂_s G)·½ Σ_i g(λ_i)`,
-/// with `d = g'` the floored inverse and `∂_s floor = REL·Ṽ_{max,max}` in the
-/// active relative regime. Unlike the per-axis β-gradient (which treats the gate
-/// as a soft switch held fixed), the explicit-`s` motion crosses the gate band as
-/// the spectrum shifts, so the gate-derivative term is retained for exactness.
-/// Returns `0.0` when the term is gated out (`G = 0`) or the span is empty.
-pub fn joint_jeffreys_phi_explicit_param_derivative(
-    h_joint: ArrayView2<'_, f64>,
-    z_j: ArrayView2<'_, f64>,
-    pert_info: &Array2<f64>,
-) -> Result<f64, String> {
-    JointJeffreysPlan::prepare(h_joint, z_j)?.explicit_param_derivative(pert_info)
-}
-
 /// Explicit-parameter SECOND derivative of the joint-Jeffreys VALUE `Φ` with
 /// respect to two outer parameters `(s_i, s_j)` that enter `H_info` explicitly
-/// (β held fixed). Companion to [`joint_jeffreys_phi_explicit_param_derivative`],
+/// (β held fixed). Companion to [`JointJeffreysPlan::explicit_param_derivative`],
 /// supplying the `∂²(−Φ)` contribution the outer-Hessian ψψ block needs once the
 /// first-order `−∂_ψΦ` is folded into the gradient (gam#1607).
 ///
@@ -5566,7 +5555,10 @@ mod tests {
         let eps = 1e-5_f64;
         let fd1 = (phi_at(eps) - phi_at(-eps)) / (2.0 * eps);
         let fd2 = (phi_at(eps) - 2.0 * phi_at(0.0) + phi_at(-eps)) / (eps * eps);
-        let an1 = joint_jeffreys_phi_explicit_param_derivative(h0.view(), z.view(), &pert).unwrap();
+        let an1 = JointJeffreysPlan::prepare(h0.view(), z.view())
+            .unwrap()
+            .explicit_param_derivative(&pert)
+            .unwrap();
         let an2 = joint_jeffreys_phi_explicit_param_second_derivative(
             h0.view(),
             z.view(),
@@ -5727,8 +5719,10 @@ mod tests {
         let mut compared_second = 0usize;
         for first in &perturbations {
             let hoisted = plan.explicit_param_derivative(first).unwrap();
-            let per_direction =
-                joint_jeffreys_phi_explicit_param_derivative(h.view(), z.view(), first).unwrap();
+            let per_direction = JointJeffreysPlan::prepare(h.view(), z.view())
+                .unwrap()
+                .explicit_param_derivative(first)
+                .unwrap();
             assert_eq!(
                 hoisted.to_bits(),
                 per_direction.to_bits(),

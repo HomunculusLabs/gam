@@ -2359,5 +2359,13 @@
     },
     "reason": "#2897, SPEC rules 23 and 25. apply_spatial_anisotropy_pilot_initializer seeded spatial anisotropy from a pilot subsample whenever n exceeded twice SpatialLengthScaleOptimizationOptions::pilot_subsample_threshold. That was a row-count window that changed where the length-scale search starts. The option, the gate and the initializer are removed.",
     "evidence": "At the base, git grep -n -w apply_spatial_anisotropy_pilot_initializer over crates, src, tests and examples finds its declaration in design_construction.rs, the gate call in spatial_optimization.rs, and one unit test in design_assembly_constraint_tests.rs. This change removes all three. No gam-cli, gam-pyffi, python or examples code names it."
+  },
+  {
+    "base": "6497bcc5cd5a3d6c11b11d2f1ae81126788241b9",
+    "removed": {
+      "crates/gam-solve/src/reml/jeffreys_subspace.rs::joint_jeffreys_phi_explicit_param_derivative": 1
+    },
+    "reason": "#2905: the free function joint_jeffreys_phi_explicit_param_derivative was a fresh JointJeffreysPlan::prepare followed by explicit_param_derivative. It has no product caller, and its two test callers now call the method.",
+    "evidence": "At the base, git grep -n -w joint_jeffreys_phi_explicit_param_derivative over the whole repository finds one pub fn declaration (crates/gam-solve/src/reml/jeffreys_subspace.rs), two rustdoc links, one error string, one comment and two calls inside mod tests. It is declared once, so the census falls by one. Not run through public_api_census.py locally (user directive)."
   }
 ]
