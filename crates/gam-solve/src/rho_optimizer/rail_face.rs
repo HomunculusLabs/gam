@@ -329,7 +329,7 @@ fn half_trace_inverse_product(a: &Array2<f64>, c: &Array2<f64>) -> Result<f64, S
 /// The proof is a single positive-definiteness test on the first-order form
 /// `C`; see the module derivation. Refusals carry the measured margin so a
 /// declined face explains itself.
-pub fn certify_rail_face(limit: &RailFaceLimit) -> RailFaceVerdict {
+pub(crate) fn certify_rail_face(limit: &RailFaceLimit) -> RailFaceVerdict {
     let refuse = |reason: String| RailFaceVerdict::Refused { reason };
     let q = limit.first_order_form.nrows();
     if limit.face.is_empty() {
@@ -953,7 +953,7 @@ fn assemble_face_limit(input: FaceLimitAssembly<'_>) -> RailFaceLimitOutcome {
 /// The returned `limit_beta` is the λ=∞ fit itself, which is also the canonical
 /// maximal-smoothing anchor a continuation can start from (#2366) instead of
 /// solving at a large-but-finite ρ.
-pub fn gaussian_rail_face_limit(
+pub(crate) fn gaussian_rail_face_limit(
     design: ArrayView2<'_, f64>,
     response: ArrayView1<'_, f64>,
     weights: ArrayView1<'_, f64>,

@@ -413,7 +413,7 @@ impl OuterProblem {
     /// outer search is canonicalized to be invariant to the order the smooth
     /// terms / tensor margins were written (#1538/#1539). See
     /// `OuterConfig::rho_canonical_keys`.
-    pub fn with_rho_canonical_keys(mut self, keys: Option<Vec<u64>>) -> Self {
+    pub(crate) fn with_rho_canonical_keys(mut self, keys: Option<Vec<u64>>) -> Self {
         self.rho_canonical_keys = keys;
         self
     }
@@ -469,7 +469,7 @@ impl OuterProblem {
         self.psi_dim = dim;
         self
     }
-    pub fn with_barrier(mut self, cfg: Option<BarrierConfig>) -> Self {
+    pub(crate) fn with_barrier(mut self, cfg: Option<BarrierConfig>) -> Self {
         self.barrier_config = cfg;
         self
     }
@@ -501,7 +501,7 @@ impl OuterProblem {
         self.initial_rho = Some(rho);
         self
     }
-    pub fn with_initial_rho_candidates(mut self, candidates: Vec<Array1<f64>>) -> Self {
+    pub(crate) fn with_initial_rho_candidates(mut self, candidates: Vec<Array1<f64>>) -> Self {
         self.initial_rho_candidates = candidates;
         self
     }
@@ -530,7 +530,7 @@ impl OuterProblem {
     ///     last_iters: Arc::clone(&reml_state.last_inner_iters),
     ///     last_converged: Arc::clone(&reml_state.last_inner_converged),
     /// }` so the inner and outer observe the same atomics.
-    pub fn with_outer_inner_cap(mut self, feedback: InnerProgressFeedback) -> Self {
+    pub(crate) fn with_outer_inner_cap(mut self, feedback: InnerProgressFeedback) -> Self {
         self.outer_inner_cap = Some(feedback);
         self
     }
@@ -8669,7 +8669,7 @@ pub(crate) fn restrict_arc_retry_to_checkpoint(config: &mut OuterConfig) {
 /// fixed-point not disabled, and a frontier-scale ρ-dimension. This is the
 /// single auto-switch predicate; `plan` keeps selecting the
 /// dense or standard-EFS solver for everything below the frontier threshold.
-pub fn is_per_atom_efs_frontier(cap: &OuterCapability) -> bool {
+pub(crate) fn is_per_atom_efs_frontier(cap: &OuterCapability) -> bool {
     crate::estimate::reml::per_atom_efs::per_atom_efs_eligible(cap)
 }
 

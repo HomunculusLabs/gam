@@ -249,7 +249,7 @@ pub struct OuterCapability {
 }
 
 impl OuterCapability {
-    pub const fn theta_layout(&self) -> OuterThetaLayout {
+    pub(crate) const fn theta_layout(&self) -> OuterThetaLayout {
         OuterThetaLayout::new(self.n_params, self.psi_dim)
     }
 
@@ -258,11 +258,11 @@ impl OuterCapability {
     }
 
     /// True when all coordinates are penalty-like (no ψ coords).
-    pub const fn all_penalty_like(&self) -> bool {
+    pub(crate) const fn all_penalty_like(&self) -> bool {
         self.psi_dim == 0
     }
     /// True when ψ (design-moving) coordinates are present.
-    pub const fn has_psi_coords(&self) -> bool {
+    pub(crate) const fn has_psi_coords(&self) -> bool {
         self.psi_dim > 0
     }
 
@@ -445,7 +445,7 @@ impl OuterPlan {
     /// Planning alone does not prove the runtime Hessian representation;
     /// matrix-free routing is decided after the seed evaluation returns an
     /// operator Hessian, so the static plan token reports `false`.
-    pub fn routing_log_line(&self) -> String {
+    pub(crate) fn routing_log_line(&self) -> String {
         let matrix_free = false;
         format!(
             "solver={:?};hessian={:?};matrix-free={}",
@@ -534,7 +534,7 @@ pub fn plan(cap: &OuterCapability) -> OuterPlan {
 
 /// Log the outer optimization plan. Called once per fit at the start of
 /// outer optimization so the user can see what strategy was selected and why.
-pub fn log_plan(context: &str, cap: &OuterCapability, the_plan: &OuterPlan) {
+pub(crate) fn log_plan(context: &str, cap: &OuterCapability, the_plan: &OuterPlan) {
     let hess_warning = match the_plan.hessian_source {
         HessianSource::BfgsApprox if cap.n_params > 0 => {
             " [no Hessian: BFGS approximation]".to_string()

@@ -101,7 +101,7 @@ impl AsymptoteSide {
     /// toward, or `None` when `|grad|` is within `interior_grad_tol` (the point
     /// is interior-stationary in this coordinate — an [`super`] Interior case,
     /// not an asymptote).
-    pub fn from_gradient(grad: f64, interior_grad_tol: f64) -> Option<Self> {
+    pub(crate) fn from_gradient(grad: f64, interior_grad_tol: f64) -> Option<Self> {
         if !grad.is_finite() || grad.abs() <= interior_grad_tol {
             None
         } else if grad < 0.0 {
@@ -218,22 +218,22 @@ impl AsymptoteTolerances {
     /// The interior-stationary floor of the exp4_rail characterization: a
     /// railed coordinate's tail gradient must exceed this (all confirmed-tail
     /// rows do) to be an asymptote rather than an interior-zero point.
-    pub const EXP4_INTERIOR_GRAD_TOL: f64 = 1.0e-8;
+    pub(crate) const EXP4_INTERIOR_GRAD_TOL: f64 = 1.0e-8;
     /// The pencil-constant noise floor of the exp4_rail characterization: below
     /// this `ĉ` is finite-difference noise, not a confirmed tail. See the
     /// module tail-law derivation and the `exp4_verified_tail_certifies_...`
     /// characterization test.
-    pub const EXP4_TAIL_NOISE_FLOOR: f64 = 1.0e-6;
+    pub(crate) const EXP4_TAIL_NOISE_FLOOR: f64 = 1.0e-6;
     /// The relative drift band of the exp4_rail characterization: the confirmed
     /// tail rows (`ρ ∈ {14,…,24}`) hold `ĉ` constant to well within this, while
     /// the finite-difference floor rows (`ρ ≥ 28`) swing far outside it.
-    pub const EXP4_TAIL_DRIFT_REL: f64 = 1.0e-3;
+    pub(crate) const EXP4_TAIL_DRIFT_REL: f64 = 1.0e-3;
 
     /// Rail-certificate tolerances on the exp4_rail characterization bands (the
     /// same interior/noise/drift constants the `exp4_verified_tail_certifies_...`
     /// characterization test measures), parameterized only by the estimand
     /// tolerance, which scales with the fitted coefficient magnitude.
-    pub fn exp4_rail_bands(estimand_tol: f64) -> Self {
+    pub(crate) fn exp4_rail_bands(estimand_tol: f64) -> Self {
         Self {
             interior_grad_tol: Self::EXP4_INTERIOR_GRAD_TOL,
             tail_noise_floor: Self::EXP4_TAIL_NOISE_FLOOR,

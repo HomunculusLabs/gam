@@ -1459,7 +1459,7 @@ impl<S, Fc, Fe, Fr, Fefs, Feo, Fsp, Fseed> ClosureObjective<S, Fc, Fe, Fr, Fefs,
     }
 
     /// Install the analytic λ→∞ rail-face limit hook (#2348 Inc 5).
-    pub fn with_rail_face_limit<Fface>(mut self, limit: Fface) -> Self
+    pub(crate) fn with_rail_face_limit<Fface>(mut self, limit: Fface) -> Self
     where
         Fface: FnMut(
                 &mut S,
@@ -1494,7 +1494,7 @@ impl<S, Fc, Fe, Fr, Fefs, Feo, Fsp, Fseed> ClosureObjective<S, Fc, Fe, Fr, Fefs,
     /// this hook at all: `None` is the correct answer for an objective that
     /// carries no barrier, and publishing a zero array would be indistinguishable
     /// from publishing a real one at the consumers.
-    pub fn with_soft_rho_guard_gradient<Fguard>(mut self, guard: Fguard) -> Self
+    pub(crate) fn with_soft_rho_guard_gradient<Fguard>(mut self, guard: Fguard) -> Self
     where
         Fguard: FnMut(&mut S, &Array1<f64>) -> Array1<f64> + 'static,
     {
