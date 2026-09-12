@@ -1014,7 +1014,7 @@ impl TailCellMomentCacheStats {
 
 /// Affine-tail cell-moment memo.
 ///
-/// Stand-alone instances (`TailCellMomentCache::new()`) are useful when a
+/// Stand-alone instances (`TailCellMomentCache::default()`) are useful when a
 /// caller needs deterministic hit/miss bookkeeping that is not polluted by
 /// concurrent traffic on the global memo. The production path uses the
 /// global instance behind [`evaluate_cell_moments`].
@@ -1061,12 +1061,6 @@ impl Default for TailCellMomentCache {
 }
 
 impl TailCellMomentCache {
-    /// Construct an empty cache. Hits/misses start at zero.
-    #[inline]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Reset the cache to its empty state. Existing entries are dropped and
     /// the hit/miss counters are zeroed.
     #[inline]
@@ -3880,7 +3874,7 @@ mod tests {
         // global memo through `evaluate_cell_moments`. Asserting on the
         // global counters made this test race-flaky when the suite ran in
         // parallel.
-        let cache = TailCellMomentCache::new();
+        let cache = TailCellMomentCache::default();
         let c0s = [-2.0, -0.25, 0.0, 1.5];
         let c1s = [-1.2, -0.05, 0.0, 0.8];
         let endpoints = [-4.0, -1.0, 0.0, 2.5, 6.0];
