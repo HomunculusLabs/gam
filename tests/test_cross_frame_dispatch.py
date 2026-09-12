@@ -199,13 +199,17 @@ def test_ard_penalty_jax_grad_matches_numpy() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mixed-frame rejection
+# Mixed NumPy + torch inputs
 # ---------------------------------------------------------------------------
 
 
 @needs_torch
-def test_mixed_frame_inputs_raise_typeerror() -> None:
+def test_numpy_coordinate_joins_the_torch_frame() -> None:
+    # `detect_frame` documents that NumPy never forces a frame: a NumPy
+    # coordinate beside a torch coordinate evaluates in the torch frame.
+    # torch + jax is the refused mix (test_detect_frame_mixed_raises).
     theta_np = np.linspace(0.0, 1.0, 5)
-    ell_t = _torch.linspace(0.0, 1.0, 5)
-    with pytest.raises(TypeError, match="same frame"):
-        gamfit.Cylinder(n_knots=(5, 4)).evaluate(theta_np, ell_t)
+    ell_t = _torch.linspace(0.0, 1.0, 5, dtype=_torch.float64)
+    phi = gamfit.Cylinder(n_knots=(5, 4)).evaluate(theta_np, ell_t)
+    assert isinstance(phi, _torch.Tensor)
+    assert phi.shape[0] == 5
