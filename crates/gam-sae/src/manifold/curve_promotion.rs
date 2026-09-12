@@ -77,6 +77,8 @@
 //! proposal later; whether `accept` is set is a pure function of the DL ledger,
 //! the crossover pre-screen, and the ring geometry screens.
 
+use faer::Side;
+use gam_linalg::faer_ndarray::FaerEigh;
 use ndarray::{Array1, Array2, ArrayView2};
 
 use super::curl::{CircleSeed, CurlVerdict, curl_seed, curl_verdict};
@@ -220,7 +222,7 @@ pub fn propose_curve_promotion(
             z[[i, k]] -= zmean[k];
         }
     }
-    // Coord covariance (r × r) and its symmetric eigendecomposition (Jacobi).
+    // Coord covariance (r × r) and its symmetric eigendecomposition.
     let mut cov = Array2::<f64>::zeros((r, r));
     for a in 0..r {
         for b in 0..r {
@@ -231,7 +233,9 @@ pub fn propose_curve_promotion(
             cov[[a, b]] = acc / f as f64;
         }
     }
-    let (eigvals, eigvecs) = jacobi_symmetric_eig(&cov);
+    let (eigvals, eigvecs) = cov.eigh(Side::Lower).map_err(|error| {
+        format!("curve_promotion: coordinate covariance eigendecomposition: {error}")
+    })?;
     // Descending eigenvalue order.
     let mut order: Vec<usize> = (0..r).collect();
     order.sort_by(|&a, &b| eigvals[b].total_cmp(&eigvals[a]));
@@ -394,69 +398,6 @@ fn participation_ratio(spectrum: &[f64]) -> f64 {
 fn curved_topology_for_span(span: f64) -> Result<(usize, usize), String> {
     let plan = SaeAtomGeometryPlan::curved_prescreen_atom_for_span(span)?;
     Ok((plan.intrinsic_dim(), plan.basis_size()?))
-}
-
-/// Cyclic Jacobi eigendecomposition of a small symmetric `r × r` matrix. Returns
-/// `(eigenvalues, eigenvectors)` with eigenvectors as COLUMNS of the returned
-/// matrix. Deterministic; converges quadratically for the small covariances here.
-fn jacobi_symmetric_eig(sym: &Array2<f64>) -> (Vec<f64>, Array2<f64>) {
-    let r = sym.nrows();
-    let mut a = sym.clone();
-    let mut v = Array2::<f64>::eye(r);
-    if r == 1 {
-        return (vec![a[[0, 0]]], v);
-    }
-    // Sweep until the off-diagonal is negligible relative to the diagonal scale.
-    for _sweep in 0..100 {
-        let mut off = 0.0;
-        for p in 0..r {
-            for q in (p + 1)..r {
-                off += a[[p, q]] * a[[p, q]];
-            }
-        }
-        let diag_scale: f64 = (0..r).map(|i| a[[i, i]] * a[[i, i]]).sum();
-        if off <= diag_scale * f64::EPSILON * f64::EPSILON || off == 0.0 {
-            break;
-        }
-        for p in 0..r {
-            for q in (p + 1)..r {
-                let apq = a[[p, q]];
-                if apq == 0.0 {
-                    continue;
-                }
-                let app = a[[p, p]];
-                let aqq = a[[q, q]];
-                // Jacobi rotation angle that zeros the (p,q) entry.
-                let tau = (aqq - app) / (2.0 * apq);
-                let t = tau.signum() / (tau.abs() + (1.0 + tau * tau).sqrt());
-                let t = if tau == 0.0 { 1.0 } else { t };
-                let c = 1.0 / (1.0 + t * t).sqrt();
-                let sn = t * c;
-                // Apply the rotation to rows/cols p, q of A.
-                for k in 0..r {
-                    let akp = a[[k, p]];
-                    let akq = a[[k, q]];
-                    a[[k, p]] = c * akp - sn * akq;
-                    a[[k, q]] = sn * akp + c * akq;
-                }
-                for k in 0..r {
-                    let apk = a[[p, k]];
-                    let aqk = a[[q, k]];
-                    a[[p, k]] = c * apk - sn * aqk;
-                    a[[q, k]] = sn * apk + c * aqk;
-                }
-                // Accumulate the eigenvector rotation.
-                for k in 0..r {
-                    let vkp = v[[k, p]];
-                    let vkq = v[[k, q]];
-                    v[[k, p]] = c * vkp - sn * vkq;
-                    v[[k, q]] = sn * vkp + c * vkq;
-                }
-            }
-        }
-    }
-    let eigvals: Vec<f64> = (0..r).map(|i| a[[i, i]]).collect();
-    (eigvals, v)
 }
 
 #[cfg(test)]
@@ -659,11 +600,12 @@ mod curve_promotion_tests {
 
     #[test]
     fn eigendecomposition_matches_known_symmetric_matrix() {
-        // Sanity on the Jacobi solver: a 2×2 with known spectrum. Eigenvalues of
+        // Sanity on the eigendecomposition the ring verdict reads: a 2×2 with known
+        // spectrum. Eigenvalues of
         // [[2,1],[1,2]] are 3 and 1.
         let m = ndarray::arr2(&[[2.0, 1.0], [1.0, 2.0]]);
-        let (vals, vecs) = jacobi_symmetric_eig(&m);
-        let mut sorted = vals.clone();
+        let (vals, vecs) = m.eigh(Side::Lower).expect("2×2 symmetric eigendecomposition");
+        let mut sorted = vals.to_vec();
         sorted.sort_by(|a, b| b.total_cmp(a));
         assert!((sorted[0] - 3.0).abs() < 1.0e-10, "top eig {}", sorted[0]);
         assert!((sorted[1] - 1.0).abs() < 1.0e-10, "low eig {}", sorted[1]);

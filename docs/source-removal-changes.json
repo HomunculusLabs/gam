@@ -6201,5 +6201,13 @@
     ],
     "reason": "SPEC rule 16 (#2627): these root test files exercise no gam code. arrow_schur_inertia_matches_sylvester_law checks Sylvester's inertia law on a 2x2 ndarray example; effective_jacobian_at_bms_marginal_slope compares a local copy of the BMS eta formula with a central difference, and the promised public-builder pass no longer exists; autodiff_gaussian_location_scale_exact runs external AD crates against each other on local expressions. margslope_inner_pirls_scaling and standard_gam_scaling are probe shells with no test that only #[path]-include the empty power_law_common.rs.",
     "evidence": "At the base, the three test files contain no 'gam' string. The two probe shells contain only doc comments and the #[path]/mod lines for power_law_common.rs, and that file is empty. git grep -w on each stem over tests, crates, scripts, .config, .github and Cargo.toml finds only its mod declaration, the two #[path] includes, and doc-comment mentions in tests/perf_scale/misc/power_law_analyzer.rs and tests/inference/misc/margslope_smallcondition_smoke.rs. The item list applies source_removal_guard.py's ITEM regex to the base blobs. Not compiled or run locally (user directive)."
+  },
+  {
+    "base": "c2b7cf529d5ecdb497ddf9e611930c90e58f5805",
+    "items": [
+      "crates/gam-sae/src/manifold/curve_promotion.rs:fn:jacobi_symmetric_eig"
+    ],
+    "reason": "#2469: the hand-rolled cyclic Jacobi solver carried a 100-sweep cap and an off-diagonal stop at eps^2 of the diagonal energy, which rounding need not reach. Its two callers (the ring verdict's coordinate covariance and its 2x2 sanity test) sort the spectrum themselves, so the crate's FaerEigh replaces it with no order dependence.",
+    "evidence": "git grep -w jacobi_symmetric_eig at the base finds the definition, the propose_curve_promotion call and the eigendecomposition_matches_known_symmetric_matrix test call; both calls now read cov.eigh(Side::Lower) / m.eigh(Side::Lower), and no other reference exists in crates/, tests/ or docs/."
   }
 ]
