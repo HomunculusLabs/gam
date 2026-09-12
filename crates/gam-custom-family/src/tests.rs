@@ -2823,6 +2823,283 @@ pub(crate) fn jeffreys_psi_mixed_geometry_preserves_workspace_authority() {
     );
 }
 
+/// gam#979: a psi workspace that answers `all_beta_axes_contractions` serves the
+/// explicit-psi Jeffreys score correction and curvature drift from contractions of
+/// `{∂_ψ Hdot[e_a]}`, without materializing them. Both routes must build the same
+/// coordinates, and the contracted route must never call the per-direction
+/// derivative that the materializing route reads.
+#[test]
+pub(crate) fn contracted_explicit_jeffreys_psi_route_matches_materialized_route_979() {
+    const P: usize = 3;
+    const PSI: usize = 2;
+
+    fn symmetric(seed: f64) -> Array2<f64> {
+        let raw = Array2::from_shape_fn((P, P), |(i, j)| {
+            (seed + 0.37 * i as f64 - 0.19 * j as f64).sin()
+                + 0.5 * ((i + j) as f64 * seed).cos()
+        });
+        (&raw + &raw.t()).mapv(|value| 0.5 * value)
+    }
+
+    fn axis_tensor(psi: usize, axis: usize) -> Array2<f64> {
+        symmetric(20.0 + 3.0 * psi as f64 + 1.7 * axis as f64)
+    }
+
+    #[derive(Clone)]
+    struct ContractionJeffreysFamily;
+
+    impl CustomFamily for ContractionJeffreysFamily {
+        fn evaluate(
+            &self,
+            block_states: &[ParameterBlockState],
+        ) -> Result<FamilyEvaluation, String> {
+            assert_states_finite(block_states, "contraction-Jeffreys family evaluate");
+            Ok(FamilyEvaluation {
+                log_likelihood: 0.0,
+                blockworking_sets: Vec::new(),
+            })
+        }
+
+        fn joint_jeffreys_term_required(&self) -> bool {
+            true
+        }
+
+        fn joint_jeffreys_information_with_specs(
+            &self,
+            block_states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+        ) -> Result<Option<Array2<f64>>, String> {
+            assert_states_finite(block_states, "contraction-Jeffreys information");
+            assert_specs_consistent(specs, "contraction-Jeffreys information");
+            // The smallest eigenvalue sits inside the absolute conditioning-gate
+            // band, so both explicit-psi Jeffreys terms are active.
+            Ok(Some(array![
+                [30.0, 1.0, 0.2],
+                [1.0, 12.0, 0.1],
+                [0.2, 0.1, 0.5]
+            ]))
+        }
+
+        fn joint_jeffreys_information_directional_derivative_with_specs(
+            &self,
+            block_states: &[ParameterBlockState],
+            specs: &[ParameterBlockSpec],
+            direction: &Array1<f64>,
+        ) -> Result<Option<Array2<f64>>, String> {
+            assert_states_finite(block_states, "contraction-Jeffreys information drift");
+            assert_specs_consistent(specs, "contraction-Jeffreys information drift");
+            assert_eq!(direction.len(), P);
+            let mut derivative = Array2::<f64>::zeros((P, P));
+            for (axis, &weight) in direction.iter().enumerate() {
+                derivative.scaled_add(weight, &symmetric(1.0 + axis as f64));
+            }
+            Ok(Some(derivative))
+        }
+    }
+
+    struct ContractionJeffreysPsi {
+        answers_contractions: bool,
+        derivative_calls: Arc<AtomicUsize>,
+        contraction_calls: Arc<AtomicUsize>,
+    }
+
+    impl ExactNewtonJointPsiWorkspace for ContractionJeffreysPsi {
+        fn first_order_terms_all(&self) -> Result<Option<Vec<ExactNewtonJointPsiTerms>>, String> {
+            Ok(Some(
+                (0..PSI)
+                    .map(|psi| {
+                        let mut terms = ExactNewtonJointPsiTerms::zeros(P);
+                        terms.hessian_psi = symmetric(7.0 + 2.0 * psi as f64);
+                        terms
+                    })
+                    .collect(),
+            ))
+        }
+
+        fn second_order_terms(
+            &self,
+            psi_i: usize,
+            psi_j: usize,
+        ) -> Result<Option<ExactNewtonJointPsiSecondOrderTerms>, String> {
+            assert!(
+                psi_i < PSI && psi_j < PSI,
+                "psi pair ({psi_i}, {psi_j}) outside the fixture's two axes"
+            );
+            Ok(None)
+        }
+
+        fn hessian_directional_derivative(
+            &self,
+            psi_index: usize,
+            direction: &Array1<f64>,
+        ) -> Result<Option<DriftDerivResult>, String> {
+            assert!(psi_index < PSI, "psi axis {psi_index} outside the fixture");
+            assert_eq!(direction.len(), P);
+            self.derivative_calls.fetch_add(1, Ordering::Relaxed);
+            let mut derivative = Array2::<f64>::zeros((P, P));
+            for (axis, &weight) in direction.iter().enumerate() {
+                derivative.scaled_add(weight, &axis_tensor(psi_index, axis));
+            }
+            Ok(Some(DriftDerivResult::Dense(derivative)))
+        }
+
+        fn all_beta_axes_contractions(
+            &self,
+        ) -> Option<&dyn gam_problem::ExactNewtonJointPsiAxisContractions> {
+            if self.answers_contractions {
+                Some(self)
+            } else {
+                None
+            }
+        }
+    }
+
+    impl gam_problem::ExactNewtonJointPsiAxisContractions for ContractionJeffreysPsi {
+        fn hessian_all_beta_axes_contractions(
+            &self,
+            kernels: &dyn Fn() -> Vec<Array2<f64>>,
+            mixed_weights: &[Array2<f64>],
+        ) -> Result<Option<Vec<(Array2<f64>, Array1<f64>)>>, String> {
+            self.contraction_calls.fetch_add(1, Ordering::Relaxed);
+            let kernels = kernels();
+            assert_eq!(kernels.len(), P);
+            assert_eq!(mixed_weights.len(), PSI);
+            let frobenius = |left: &Array2<f64>, right: &Array2<f64>| -> f64 {
+                left.iter().zip(right.iter()).map(|(&l, &r)| l * r).sum()
+            };
+            Ok(Some(
+                (0..PSI)
+                    .map(|psi| {
+                        let kernel_contractions = Array2::from_shape_fn((P, P), |(a, b)| {
+                            frobenius(&axis_tensor(psi, a), &kernels[b])
+                        });
+                        let mixed_contractions = Array1::from_shape_fn(P, |a| {
+                            frobenius(&axis_tensor(psi, a), &mixed_weights[psi])
+                        });
+                        (kernel_contractions, mixed_contractions)
+                    })
+                    .collect(),
+            ))
+        }
+    }
+
+    let build = |answers_contractions: bool| {
+        let derivative_calls = Arc::new(AtomicUsize::new(0));
+        let contraction_calls = Arc::new(AtomicUsize::new(0));
+        let spec = ParameterBlockSpec {
+            name: "contraction-jeffreys".to_string(),
+            design: DesignMatrix::from(array![[1.0, 0.5, -0.25]]),
+            offset: array![0.0],
+            penalties: Vec::new(),
+            nullspace_dims: Vec::new(),
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta: None,
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        };
+        let beta = array![0.2, -0.1, 0.3];
+        let state = ParameterBlockState {
+            eta: array![0.075],
+            beta: beta.clone(),
+        };
+        let layout = CustomFamilyHyperLayout::new(vec![Vec::new()], vec![0, 1], array![0.0, 0.0])
+            .expect("two explicit family axes");
+        let workspace = ContractionJeffreysPsi {
+            answers_contractions,
+            derivative_calls: Arc::clone(&derivative_calls),
+            contraction_calls: Arc::clone(&contraction_calls),
+        };
+        let coords = build_psi_hyper_coords(
+            &ContractionJeffreysFamily,
+            &[state],
+            &[spec],
+            &layout,
+            &beta,
+            &[],
+            &[0],
+            None,
+            false,
+            Some(Arc::new(workspace)),
+        )
+        .expect("explicit-psi Jeffreys coordinates");
+        (
+            coords,
+            derivative_calls.load(Ordering::Relaxed),
+            contraction_calls.load(Ordering::Relaxed),
+        )
+    };
+
+    let (materialized, materialized_derivative_calls, materialized_contraction_calls) =
+        build(false);
+    let (contracted, contracted_derivative_calls, contracted_contraction_calls) = build(true);
+    assert_eq!(
+        (materialized_contraction_calls, contracted_contraction_calls),
+        (0, 1),
+        "only the answering workspace is asked for contractions, once per evaluation"
+    );
+    assert!(
+        materialized_derivative_calls > 0,
+        "the materializing route must read the per-direction derivative"
+    );
+    assert_eq!(
+        contracted_derivative_calls, 0,
+        "the contracted route must not materialize any axis tensor"
+    );
+    assert_eq!(materialized.len(), PSI);
+    assert_eq!(contracted.len(), PSI);
+    let max_abs = |values: &mut dyn Iterator<Item = f64>| {
+        values.fold(0.0_f64, |acc, value| acc.max(value.abs()))
+    };
+    for psi in 0..PSI {
+        let (reference, candidate) = (&materialized[psi], &contracted[psi]);
+        assert!(
+            (reference.a - candidate.a).abs() <= 1e-12 * reference.a.abs().max(1.0),
+            "psi axis {psi}: value derivative {} against {}",
+            candidate.a,
+            reference.a
+        );
+        let score_scale = max_abs(&mut reference.g.iter().copied());
+        let score_gap = max_abs(&mut (&reference.g - &candidate.g).iter().copied());
+        assert!(
+            score_scale > 1e-8,
+            "psi axis {psi}: the explicit Jeffreys score correction is not exercised \
+             (max {score_scale:e})"
+        );
+        assert!(
+            score_gap <= 1e-10 * score_scale,
+            "psi axis {psi}: contracted score differs by {score_gap:e} (max {score_scale:e})"
+        );
+        let reference_drift = reference
+            .drift
+            .dense
+            .as_ref()
+            .expect("materialized dense drift");
+        let candidate_drift = candidate
+            .drift
+            .dense
+            .as_ref()
+            .expect("contracted dense drift");
+        let explicit_scale = max_abs(
+            &mut (reference_drift - &symmetric(7.0 + 2.0 * psi as f64))
+                .iter()
+                .copied(),
+        );
+        let drift_scale = max_abs(&mut reference_drift.iter().copied());
+        let drift_gap = max_abs(&mut (reference_drift - candidate_drift).iter().copied());
+        assert!(
+            explicit_scale > 1e-8,
+            "psi axis {psi}: the explicit Jeffreys curvature drift is not exercised \
+             (max {explicit_scale:e})"
+        );
+        assert!(
+            drift_gap <= 1e-10 * drift_scale,
+            "psi axis {psi}: contracted drift differs by {drift_gap:e} (max {drift_scale:e})"
+        );
+    }
+}
+
 #[test]
 pub(crate) fn psi_drift_deriv_workspace_preserves_block_local_operator() {
     #[derive(Clone)]
