@@ -348,7 +348,6 @@ mod linux_impl {
                 pt.linear_shift.view(),
                 pt.constant_shift,
                 super::SIGMA_PIRLS_INITIAL_LM_LAMBDA,
-                0.0,
                 max_iter,
                 convergence_tol,
                 None,

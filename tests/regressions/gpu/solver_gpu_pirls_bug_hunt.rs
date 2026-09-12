@@ -23,7 +23,6 @@ fn gpu_pirls_step_falls_back_to_cpu_and_matches_beta_update_when_cuda_unavailabl
         penalty_hessian: penalty.view(),
         gradient: gradient.view(),
         step_lm_lambda: 0.0,
-        objective_ridge: 0.0,
     })
     .expect("PIRLS GPU path should fall back to CPU and produce the same beta update when CUDA is unavailable");
     assert_eq!(
@@ -66,7 +65,6 @@ fn gpu_hessian_assembly_matches_cpu_hessian_within_1e8_under_fallback() {
         penalty_hessian: penalty.view(),
         gradient: gradient.view(),
         step_lm_lambda: 0.3,
-        objective_ridge: 0.0,
     })
     .expect("GPU PIRLS solve should fall back to CPU and assemble the same penalized Hessian");
 
@@ -82,8 +80,7 @@ fn gpu_hessian_assembly_matches_cpu_hessian_within_1e8_under_fallback() {
     // `step_lm_lambda` is Levenberg–Marquardt damping; per the documented
     // contract on `PirlsGpuInput::step_lm_lambda`, it is added to H only for
     // the Newton solve and is *stripped* from the exported `penalized_hessian`
-    // (which carries XᵀWX + S + objective_ridge·I). `objective_ridge` is 0
-    // here, so the expected exported Hessian is just XᵀWX + S.
+    // (which carries XᵀWX + S), so the expected exported Hessian is XᵀWX + S.
     let cpu_h = cpu_xtwx + penalty;
 
     for i in 0..cpu_h.nrows() {

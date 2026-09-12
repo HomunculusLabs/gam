@@ -66,9 +66,6 @@ pub struct PirlsGpuInput<'a> {
     /// only. Never enters the exported `penalized_hessian`, `RidgePassport`,
     /// EDF, REML curvature, or penalty term.
     pub step_lm_lambda: f64,
-    /// Real model-objective ridge. Enters the exported `penalized_hessian`,
-    /// `RidgePassport`, EDF, REML curvature, and penalty term.
-    pub objective_ridge: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -93,9 +90,6 @@ pub struct PirlsStepStreamInput<'a> {
     /// Temporary LM damping for this Newton solve step only. Added to H
     /// before potrf; stripped out of the snapshotted `penalized_hessian`.
     pub step_lm_lambda: f64,
-    /// Real model-objective ridge. Appears in the exported
-    /// `penalized_hessian` that flows to EDF / REML curvature.
-    pub objective_ridge: f64,
 }
 
 /// Stage 3.2 device-input variant of [`PirlsStepStreamInput`].
@@ -118,9 +112,6 @@ pub struct PirlsStepStreamDeviceInput<'a, 'b> {
     /// Temporary LM damping for this Newton solve step only. Added to H
     /// before potrf; stripped out of the snapshotted `penalized_hessian`.
     pub step_lm_lambda: f64,
-    /// Real model-objective ridge. Appears in the exported
-    /// `penalized_hessian` that flows to EDF / REML curvature.
-    pub objective_ridge: f64,
     /// Current coefficient vector β (length p), consumed in place by the
     /// device-side Newton RHS correction.
     pub beta_dev: &'b cudarc::driver::CudaSlice<f64>,
@@ -785,7 +776,7 @@ extern "C" __global__ void chol_logdet_col_major(
             .memcpy_htod(g_slice, &mut ws.rhs_dev)
             .map_err(|e| format!("upload gradient: {e}"))?;
 
-        // Exported penalised Hessian: H_final = Qsᵀ·XᵀWX·Qs + S + objective_ridge·I.
+        // Exported penalised Hessian: H_final = Qsᵀ·XᵀWX·Qs + S.
         // Apply Qs rotation host-side on the downloaded XᵀWX so LM damping
         // never contaminates exported EDF / REML curvature / RidgePassport.
         let xtwx_col = ws
@@ -801,8 +792,7 @@ extern "C" __global__ void chol_logdet_col_major(
             from_col_major(&qs_col, p, p).ok_or("Qs layout conversion failed (host-input step)")?;
         let tmp_aq = xtwx_host.dot(&qs_host);
         let h_rotated = qs_host.t().dot(&tmp_aq);
-        let penalty_export = penalty_with_ridge(input.penalty_hessian, input.objective_ridge);
-        let penalized_hessian = h_rotated + &penalty_export;
+        let penalized_hessian = h_rotated + &input.penalty_hessian;
 
         // Factor + solve in place on the stream using pre-allocated workspace
         // and info buffers — no per-step allocation, no per-step info download.
@@ -842,9 +832,9 @@ extern "C" __global__ void chol_logdet_col_major(
         check_deferred_potrs_info(&ws.stream, &ws.potrs_info_dev)?;
 
         // Iterative refinement on the Qs-rotated system.
-        // penalized_hessian = Qsᵀ·XtWX·Qs + S + objective_ridge·I.
-        // H_step = penalized_hessian + (step_lm_lambda − objective_ridge)·I.
-        let lm_ridge_delta = input.step_lm_lambda - input.objective_ridge;
+        // penalized_hessian = Qsᵀ·XtWX·Qs + S.
+        // H_step = penalized_hessian + step_lm_lambda·I.
+        let lm_ridge_delta = input.step_lm_lambda;
         let direction_raw = newton_step_refine_once(
             &ws.solver,
             &ws.stream,
@@ -1141,7 +1131,7 @@ extern "C" __global__ void chol_logdet_col_major(
                 .map_err(|e| format!("re-upload corrected rhs (device-input): {e}"))?;
         }
 
-        // Exported penalised Hessian: H_final = Qsᵀ·XᵀWX·Qs + S + objective_ridge·I.
+        // Exported penalised Hessian: H_final = Qsᵀ·XᵀWX·Qs + S.
         // Apply Qs rotation host-side on the downloaded XᵀWX so LM damping
         // never contaminates exported EDF / REML curvature / RidgePassport.
         let xtwx_col = ws
@@ -1158,8 +1148,7 @@ extern "C" __global__ void chol_logdet_col_major(
             from_col_major(&qs_col, p, p).ok_or("Qs layout conversion failed (device-input)")?;
         let tmp_aq = xtwx_host.dot(&qs_host);
         let h_rotated = qs_host.t().dot(&tmp_aq);
-        let penalty_export = penalty_with_ridge(input.penalty_hessian, input.objective_ridge);
-        let penalized_hessian = h_rotated + &penalty_export;
+        let penalized_hessian = h_rotated + &input.penalty_hessian;
 
         // Factor + solve in place on the stream using pre-allocated workspace
         // and info buffers — no per-step allocation, no per-step info download.
@@ -1477,7 +1466,7 @@ extern "C" __global__ void chol_logdet_col_major(
         Ok(logdet)
     }
 
-    /// Rebuild the penalised Hessian `H = XᵀW_hessianX + S + objective_ridge·I`
+    /// Rebuild the penalised Hessian `H = XᵀW_hessianX + S`
     /// on device using the accepted `w_hessian` weights and download it once.
     /// Called once after PIRLS convergence so the exported Hessian reflects
     /// the accepted eta, not a stale mid-loop snapshot.
@@ -1489,7 +1478,6 @@ extern "C" __global__ void chol_logdet_col_major(
         ws: &mut SigmaPirlsGpuWorkspace,
         w_hessian_dev: &CudaSlice<f64>,
         penalty_hessian: ArrayView2<'_, f64>,
-        objective_ridge: f64,
     ) -> Result<Array2<f64>, String> {
         let n = shared.n;
         let p = shared.p;
@@ -1545,7 +1533,7 @@ extern "C" __global__ void chol_logdet_col_major(
             launch_symmetrize_lower(&ws.stream, &shared.ctx, p, &mut ws.xtwx_dev)?;
         }
 
-        // H_final = Qsᵀ (XtWX) Qs + S + objective_ridge·I.
+        // H_final = Qsᵀ (XtWX) Qs + S.
         let p_i = to_i32(p)?;
         // tmp = XtWX · Qs → ws.qs_tmp_dev.
         {
@@ -1589,8 +1577,7 @@ extern "C" __global__ void chol_logdet_col_major(
             }
             .map_err(|e| format!("dgemm Qsᵀ·A·Qs (final H rebuild): {e}"))?;
         }
-        let penalty = penalty_with_ridge(penalty_hessian, objective_ridge);
-        let penalty_col = to_col_major(&penalty);
+        let penalty_col = to_col_major(&penalty_hessian);
         ws.stream
             .memcpy_htod(penalty_col.as_ref(), &mut ws.penalty_dev)
             .map_err(|e| format!("upload penalty (final H rebuild): {e}"))?;
@@ -1685,7 +1672,6 @@ extern "C" __global__ void chol_logdet_col_major(
                 penalty_hessian: input.penalty_hessian,
                 gradient: input.gradient,
                 step_lm_lambda: input.step_lm_lambda,
-                objective_ridge: input.objective_ridge,
             },
         )
     }
@@ -2366,7 +2352,7 @@ extern "C" __global__ void status_first_ladder(
     /// `firth`, `edf`, `beta_transformed`, `derivatives_unsupported`)
     /// take safe defaults: empty arrays, `PirlsStatus::Converged` or
     /// `MaxIterationsReached` reflecting `converged`, no KKT
-    /// diagnostics, identity ridge with `objective_ridge` magnitude,
+    /// diagnostics, a zero identity-ridge passport,
     /// `FirthDiagnostics::Inactive`, `edf = NaN`,
     /// `beta_transformed = beta`, `derivatives_unsupported = true`.
     /// Existing callers that do not need the CPU oracle surface can
@@ -2407,12 +2393,10 @@ extern "C" __global__ void status_first_ladder(
         /// outcome matches the CPU oracle's `exported_laplace_curvature`
         /// contract.
         pub exported_curvature: crate::pirls::HessianCurvatureKind,
-        /// Pre-built ridge passport carrying the stabilization
-        /// magnitude + policy that the dispatch wirer wants stamped on
-        /// `PirlsResult::ridge_passport`. When `None`, the postpass
-        /// uses `RidgePassport::scaled_identity(objective_ridge,
-        /// RidgePolicy::explicit_stabilization_full())`, which mirrors
-        /// the CPU oracle's default for a no-escalation fit.
+        /// Pre-built ridge passport that the dispatch wirer wants stamped on
+        /// `PirlsResult::ridge_passport`. When `None`, the postpass uses a
+        /// zero ridge, matching the CPU oracle: no PIRLS path adds a
+        /// stabilization ridge (#2901 V22).
         pub ridge_passport: Option<gam_problem::RidgePassport>,
         /// Firth bias-reduction diagnostics. Today the GPU loop does
         /// not implement Firth; pass `None` to land
@@ -2497,10 +2481,8 @@ extern "C" __global__ void status_first_ladder(
         /// those go non-finite; `MaxIterationsReached` when the loop
         /// hit its iteration cap without converging.
         pub status: crate::pirls::PirlsStatus,
-        /// Ridge passport carrying the stabilization δ and policy.
-        /// When `extra.ridge_passport` is `Some`, this is the supplied
-        /// value verbatim. Otherwise a default `scaled_identity(
-        /// objective_ridge, explicit_stabilization_full())` passport.
+        /// Ridge passport. When `extra.ridge_passport` is `Some`, this is the
+        /// supplied value verbatim; otherwise a zero-ridge passport.
         pub ridge_passport: gam_problem::RidgePassport,
         /// Firth diagnostics. `Inactive` unless the caller passes an
         /// `Active` value through `extra.firth`.
@@ -2571,9 +2553,6 @@ extern "C" __global__ void status_first_ladder(
         // Temporary LM damping for the Newton solves only; never enters
         // RidgePassport / exported Hessian / EDF / penalty term.
         lm_ridge: f64,
-        // Real model-objective ridge; enters RidgePassport / exported
-        // Hessian / EDF / penalty term.
-        objective_ridge: f64,
         max_iter: usize,
         tol: f64,
         extra: Option<&PirlsLoopExtra<'_>>,
@@ -2742,7 +2721,6 @@ extern "C" __global__ void status_first_ladder(
                     grad_eta_dev: &loop_ws.row_solve.grad_eta,
                     penalty_hessian,
                     step_lm_lambda: lm_ridge,
-                    objective_ridge,
                     beta_dev: &loop_ws.beta_dev,
                     linear_shift,
                 },
@@ -3018,7 +2996,6 @@ extern "C" __global__ void status_first_ladder(
                     ws,
                     &loop_ws.row_final.w_hessian,
                     penalty_hessian,
-                    objective_ridge,
                 )
                 .map_err(|e| format!("rebuild H_final (converged): {e}"))?;
                 return build_loop_outcome(
@@ -3030,7 +3007,6 @@ extern "C" __global__ void status_first_ladder(
                     it + 1,
                     converged,
                     lm_ridge,
-                    objective_ridge,
                     extra,
                     LoopDiagnostics {
                         last_deviance_change: last_dev_delta,
@@ -3076,7 +3052,6 @@ extern "C" __global__ void status_first_ladder(
             ws,
             &loop_ws.row_final.w_hessian,
             penalty_hessian,
-            objective_ridge,
         )
         .map_err(|e| format!("rebuild H_final (max_iter): {e}"))?;
         build_loop_outcome(
@@ -3088,7 +3063,6 @@ extern "C" __global__ void status_first_ladder(
             max_iter,
             converged,
             lm_ridge,
-            objective_ridge,
             extra,
             LoopDiagnostics {
                 last_deviance_change: last_dev_delta,
@@ -3143,7 +3117,6 @@ extern "C" __global__ void status_first_ladder(
         iterations: usize,
         converged: bool,
         step_lm_lambda: f64,
-        objective_ridge: f64,
         extra: Option<&PirlsLoopExtra<'_>>,
         diagnostics: LoopDiagnostics,
     ) -> Result<PirlsLoopOutcome, PirlsGpuLoopError> {
@@ -3179,10 +3152,10 @@ extern "C" __global__ void status_first_ladder(
             crate::pirls::PirlsStatus::MaxIterationsReached
         };
 
-        // RidgePassport is built from objective_ridge only — step_lm_lambda
-        // is a solve-only artefact and must never contaminate EDF / REML.
+        // No PIRLS path adds a stabilization ridge (#2901 V22), and
+        // step_lm_lambda is a solve-only artefact that never enters EDF / REML.
         let default_ridge = gam_problem::RidgePassport::scaled_identity(
-            objective_ridge,
+            0.0,
             gam_linalg::RidgePolicy::exact_full_objective(),
         )
         .map_err(gam_problem::EstimationError::from)?;
@@ -3231,8 +3204,8 @@ extern "C" __global__ void status_first_ladder(
                         return None;
                     }
                     // Reconstruct the penalised gradient at the
-                    // converged β: g = Xᵀ(grad_eta) + S β + objective_ridge·β.
-                    // `penalized_hessian` is already XᵀWX + S + objective_ridge·I
+                    // converged β: g = Xᵀ(grad_eta) + S β.
+                    // `penalized_hessian` is already XᵀWX + S
                     // (step_lm_lambda was stripped from the export), so
                     // H_pen·β ≈ Xᵀ·grad_eta at a KKT-feasible solution.
                     let grad = penalized_hessian.dot(&beta);
@@ -3805,8 +3778,7 @@ pub fn solve_pirls_step_on_stream_device(
 ///
 /// `step_lm_lambda` is the Levenberg–Marquardt damping applied to each
 /// Newton solve only; it never enters the exported `penalized_hessian`,
-/// `RidgePassport`, EDF, or penalty term.  `objective_ridge` is the
-/// real model ridge that enters all of those.
+/// `RidgePassport`, EDF, or penalty term.
 #[cfg(target_os = "linux")]
 pub(crate) fn pirls_loop_on_stream(
     shared: &PirlsGpuSharedData,
@@ -3823,7 +3795,6 @@ pub(crate) fn pirls_loop_on_stream(
     // Constant shift `c` for the shifted-quadratic penalty. Pass `0.0` when absent.
     constant_shift: f64,
     step_lm_lambda: f64,
-    objective_ridge: f64,
     max_iter: usize,
     tol: f64,
     extra: Option<&cuda::PirlsLoopExtra<'_>>,
@@ -3843,7 +3814,6 @@ pub(crate) fn pirls_loop_on_stream(
         linear_shift,
         constant_shift,
         step_lm_lambda,
-        objective_ridge,
         max_iter,
         tol,
         extra,
@@ -3917,14 +3887,9 @@ mod cpu_fallback {
             ));
         }
         let xtwx = weighted_crossprod_cpu(input.x, input.weights)?;
-        // Exported H_final = XᵀWX + S + objective_ridge·I.
+        // Exported H_final = XᵀWX + S.
         let mut penalized_hessian = xtwx.clone();
         penalized_hessian += &input.penalty_hessian;
-        if input.objective_ridge != 0.0 {
-            for i in 0..p {
-                penalized_hessian[[i, i]] += input.objective_ridge;
-            }
-        }
         // H_step = XᵀWX + S + step_lm_lambda·I for the Newton solve only.
         let mut h_step = xtwx;
         h_step += &input.penalty_hessian;
@@ -4111,7 +4076,6 @@ mod stream_device_parity_tests {
             penalty_hessian: penalty,
             gradient,
             step_lm_lambda,
-            objective_ridge: 0.0,
         })
         .expect("the one-shot PIRLS step entry must succeed on every host");
 
@@ -4213,7 +4177,6 @@ mod stream_device_parity_tests {
                 penalty_hessian: penalty.view(),
                 gradient: gradient.view(),
                 step_lm_lambda: lm_ridge,
-                objective_ridge: 0.0,
             },
         )
         .expect("host-input step");
@@ -4242,7 +4205,6 @@ mod stream_device_parity_tests {
                 grad_eta_dev: &g_dev,
                 penalty_hessian: penalty.view(),
                 step_lm_lambda: lm_ridge,
-                objective_ridge: 0.0,
                 beta_dev: &beta_dev_test,
                 linear_shift: linear_shift_test.view(),
             },
@@ -4499,7 +4461,6 @@ mod stream_device_parity_tests {
                     warm_shift.view(),
                     0.0,
                     0.0,
-                    0.0,
                     30,
                     1e-6,
                     None,
@@ -4523,7 +4484,6 @@ mod stream_device_parity_tests {
             beta0.view(),
             penalty.view(),
             linear_shift_zero.view(),
-            0.0,
             0.0,
             0.0,
             30,
@@ -4699,7 +4659,6 @@ mod stream_device_parity_tests {
             beta0.view(),
             penalty.view(),
             linear_shift_zero.view(),
-            0.0,
             0.0,
             0.0,
             20,

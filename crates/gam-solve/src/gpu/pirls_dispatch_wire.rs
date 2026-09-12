@@ -341,9 +341,6 @@ mod linux_impl {
             edf: input.edf,
         };
         // step_lm_lambda = lm_ridge (temporary Newton stabilization only).
-        // objective_ridge = 0.0: the model's ridge is already baked into
-        // s_transformed by the outer REML loop; no separate identity ridge
-        // enters the exported Hessian / EDF / RidgePassport here.
         let outcome = pirls_gpu::pirls_loop_on_stream(
             &shared,
             &mut ws,
@@ -356,7 +353,6 @@ mod linux_impl {
             input.linear_shift,
             input.constant_shift,
             lm_ridge,
-            0.0,
             input.max_iterations,
             input.convergence_tolerance,
             Some(&extra),
@@ -489,16 +485,10 @@ mod linux_impl {
             finalweights_arr.clone()
         };
 
-        // Stabilised Hessian = penalized_hessian + δI per ridge_passport.
-        let delta = ridge_passport.delta();
-        let mut stab = penalized_hessian.clone();
-        if delta > 0.0 {
-            for i in 0..p {
-                stab[[i, i]] += delta;
-            }
-        }
+        // No stabilization ridge (#2901 V22): the stabilized Hessian is the
+        // penalized Hessian itself.
         let penalized_hessian_sym = SymmetricMatrix::Dense(penalized_hessian.clone());
-        let stabilizedhessian_sym = SymmetricMatrix::Dense(stab);
+        let stabilizedhessian_sym = penalized_hessian_sym.clone();
 
         // max_abs_eta — recompute from the actual eta if outcome's was zero
         // (older GPU outcomes pre-dating the field surface stamp 0.0).
@@ -545,15 +535,10 @@ mod linux_impl {
         let lastgradient_norm = gradient_total.dot(&gradient_total).sqrt();
         let score_norm = xt_grad_eta.dot(&xt_grad_eta).sqrt();
         let s_beta_norm = s_beta.dot(&s_beta).sqrt();
-        let ridge_grad_norm = if delta > 0.0 {
-            delta * beta.dot(&beta).sqrt()
-        } else {
-            0.0
-        };
-        let gradient_natural_scale = score_norm + s_beta_norm + ridge_grad_norm;
+        let gradient_natural_scale = score_norm + s_beta_norm;
 
-        // Penalty term = βᵀSβ + δ‖β‖².
-        let penalty_term = beta.dot(&s_beta) + delta * beta.dot(&beta);
+        // Penalty term = βᵀSβ.
+        let penalty_term = beta.dot(&s_beta);
         let min_penalized_deviance = {
             let cand = min_deviance + penalty_term;
             if cand.is_finite() {
