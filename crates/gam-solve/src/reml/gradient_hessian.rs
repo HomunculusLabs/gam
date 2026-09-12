@@ -811,7 +811,7 @@ impl<'a> RemlState<'a> {
         let p = x_dense.ncols();
         let k = c_g.ncols();
         let context = "Tierney-Kadane rho-Hessian design tensors";
-        let _working = match gam_runtime::resource::MemoryGovernor::global()
+        let working = match gam_runtime::resource::MemoryGovernor::global()
             .try_reserve_dense_f64_copies(p.saturating_mul(p), p, k.saturating_add(1), context)
         {
             Ok(reservation) => reservation,
@@ -863,6 +863,9 @@ impl<'a> RemlState<'a> {
             },
         )
         .unwrap_or_else(|| Array2::<f64>::zeros((k, k)));
+        // The ledger charge covers the design tensors, so it is released after them.
+        drop((t_c, t_g));
+        drop(working);
         if total.iter().any(|value| !value.is_finite()) {
             crate::bail_invalid_estim!("{context} produced a non-finite entry");
         }
