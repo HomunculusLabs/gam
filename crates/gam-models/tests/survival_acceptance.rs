@@ -10,6 +10,8 @@ mod follow_up_varying_slope_2765;
 mod latent_frailty_inner_solve_2714;
 #[path = "survival_acceptance/location_scale_heteroscedastic_globalization_1569.rs"]
 mod location_scale_heteroscedastic_globalization_1569;
+#[path = "survival_acceptance/margslope_face_criterion_fd_2894.rs"]
+mod margslope_face_criterion_fd_2894;
 
 fn initialize_cpu_fitting() {
     static INIT: std::sync::Once = std::sync::Once::new();
