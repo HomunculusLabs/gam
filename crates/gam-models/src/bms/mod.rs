@@ -2817,6 +2817,10 @@ mod flex_measure_932_tests;
 // allowed `*_tests` name so the build.rs ban-scanner exempts it.
 #[cfg(test)]
 mod latent_measure_2768_tests;
+// gam#979: the rigid ψ axis contractions against the materialized all-beta-axes
+// tensors. Bare `#[cfg(test)] mod` with the allowed `*_tests` name.
+#[cfg(test)]
+mod psi_axis_contractions_979_tests;
 pub(crate) mod row_primary_hessian;
 
 pub use block_specs::fit_bernoulli_marginal_slope_terms;
