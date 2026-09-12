@@ -5,10 +5,10 @@ without a Rust round-trip on synthetic inputs.
 See: https://github.com/SauersML/gam/issues/224
 
 Each test asserts the descriptor contract the Python API advertises. Without
-explicit ``centers=``, ``Sphere.evaluate`` resolves centers by farthest-point
-sampling from the evaluation rows and refuses fewer than ``n_centers`` rows, so
-the tests that evaluate fewer rows than centers fail. That is the #224 defect,
-still unfixed, not an expected outcome.
+explicit ``centers=``, ``Sphere.evaluate`` resolves centers once from the rows of
+its first evaluation, and completes fewer distinct directions than
+``n_centers`` from the Fibonacci lattice, so the basis width never depends on the
+evaluation row count.
 """
 
 from __future__ import annotations

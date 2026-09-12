@@ -988,8 +988,16 @@ fn distinct_spherical_orbit(
 /// distinct-direction tie class atomically. Because `num_centers` is an exact
 /// resource contract, a class that does not fit in the remaining budget is
 /// refused as unrepresentable rather than truncated by row index. Coincident
-/// rows remain one kernel column; consequently a request exceeding the number
-/// of distinct directions is also refused rather than silently undersized.
+/// rows remain one kernel column.
+///
+/// When the data hold fewer distinct directions than `num_centers` (#224), every
+/// distinct direction is a center and the set is completed to `num_centers` from
+/// the `num_centers`-point golden-angle (Fibonacci) lattice, each candidate added
+/// farthest (geodesically) from the centers chosen so far, so the completion only
+/// fills regions with no data. A completed set is pinned to the (lat, lon) frame
+/// and so is not rotation-equivariant; it is still invariant to row order. With at
+/// least `num_centers` distinct directions the selection is exactly the data rule
+/// above.
 ///
 /// The previous implementation ignored `data` and laid down a fixed golden-angle
 /// (Fibonacci) lattice pinned in the (lat, lon) frame: a rigid rotation moved the
@@ -1028,13 +1036,100 @@ pub fn select_spherical_farthest_point_centers(
     );
     // Return the selected rows VERBATIM (in the data's own lat/lon units), so
     // the centers ARE data points and carry the rotation exactly.
-    Ok(Array2::from_shape_fn((chosen.rows.len(), 2), |(r, c)| {
+    let selected = Array2::from_shape_fn((chosen.rows.len(), 2), |(r, c)| {
         data[[chosen.rows[r], c]]
-    }))
+    });
+    let centers = if selected.nrows() < num_centers {
+        complete_spherical_centers_from_lattice(selected, num_centers, radians)?
+    } else {
+        selected
+    };
+    if centers.nrows() < 2 {
+        return Err(BasisError::InsufficientColumnsForConstraint {
+            found: centers.nrows(),
+        });
+    }
+    Ok(centers)
+}
+
+/// Complete a center set holding every distinct data direction to `num_centers`
+/// with candidates from the `num_centers`-point golden-angle lattice on S², each
+/// added farthest (smallest nearest-center dot) from the centers chosen so far.
+/// A candidate coinciding with a chosen center is never added, since a duplicate
+/// kernel column makes the Wahba Gram singular. Exact ties go to the lower lattice
+/// index, which depends on neither the data's row order nor its values.
+fn complete_spherical_centers_from_lattice(
+    centers: Array2<f64>,
+    num_centers: usize,
+    radians: bool,
+) -> Result<Array2<f64>, BasisError> {
+    let pi = std::f64::consts::PI;
+    let to_rad = if radians { 1.0 } else { pi / 180.0 };
+    let unit = |lat: f64, lon: f64| -> [f64; 3] {
+        let (lat, lon) = (lat * to_rad, lon * to_rad);
+        let cos_lat = lat.cos();
+        [cos_lat * lon.cos(), cos_lat * lon.sin(), lat.sin()]
+    };
+    let golden = pi * (1.0 + 5.0_f64.sqrt());
+    let candidates: Vec<[f64; 2]> = (0..num_centers)
+        .map(|idx| {
+            let i = idx as f64 + 0.5;
+            let lat = (1.0 - 2.0 * i / num_centers as f64).asin();
+            let mut lon = (golden * i).rem_euclid(2.0 * pi);
+            if lon > pi {
+                lon -= 2.0 * pi;
+            }
+            [lat / to_rad, lon / to_rad]
+        })
+        .collect();
+    let candidate_units: Vec<[f64; 3]> = candidates.iter().map(|c| unit(c[0], c[1])).collect();
+    let mut max_dot: Vec<f64> = candidate_units
+        .iter()
+        .map(|u| {
+            centers
+                .outer_iter()
+                .map(|row| spherical_center_dot(u, &unit(row[0], row[1])))
+                .fold(f64::NEG_INFINITY, f64::max)
+        })
+        .collect();
+    let mut taken = vec![false; num_centers];
+    let mut rows: Vec<[f64; 2]> = centers.outer_iter().map(|row| [row[0], row[1]]).collect();
+    while rows.len() < num_centers {
+        let mut best: Option<usize> = None;
+        for c in 0..num_centers {
+            if taken[c] || max_dot[c] >= 1.0 - SPHERICAL_CENTER_COINCIDENT_TOL {
+                continue;
+            }
+            let farther = match best {
+                None => true,
+                Some(b) => max_dot[c] < max_dot[b],
+            };
+            if farther {
+                best = Some(c);
+            }
+        }
+        let Some(pick) = best else {
+            crate::bail_invalid_basis!(
+                "spherical center completion found no lattice candidate distinct from the {} chosen centers while completing to {num_centers}",
+                rows.len()
+            );
+        };
+        taken[pick] = true;
+        rows.push(candidates[pick]);
+        for c in 0..num_centers {
+            let d = spherical_center_dot(&candidate_units[c], &candidate_units[pick]);
+            if d > max_dot[c] {
+                max_dot[c] = d;
+            }
+        }
+    }
+    Ok(Array2::from_shape_fn((rows.len(), 2), |(r, c)| rows[r][c]))
 }
 
 /// The row indices [`select_spherical_farthest_point_centers`] selects, with
-/// the number of sorted dot profiles the selection had to build.
+/// the number of sorted dot profiles the selection had to build. When the data
+/// hold fewer distinct directions than the budget, `rows` holds every distinct
+/// direction and the caller completes the set.
 pub(crate) struct SphericalCenterSelection {
     pub(crate) rows: Vec<usize>,
     /// How many `O(n log n)` sorted dot profiles the tie-break machinery built.
@@ -1056,14 +1151,6 @@ fn select_spherical_farthest_point_center_rows(
         crate::bail_invalid_basis!("spherical farthest-point center count must be positive");
     }
     let n = data.nrows();
-    if n < 2 {
-        return Err(BasisError::InsufficientColumnsForConstraint { found: n });
-    }
-    if num_centers > n {
-        crate::bail_invalid_basis!(
-            "requested {num_centers} spherical farthest-point centers but only {n} rows are available"
-        );
-    }
 
     let to_rad = if radians {
         1.0
@@ -1154,7 +1241,8 @@ fn select_spherical_farthest_point_center_rows(
     // `≲ 1.4e-6` rad: the
     // candidate coincides with an already-chosen center, so selecting it would add
     // a duplicate kernel column and a singular Wahba Gram. Stopping here caps the
-    // center set at the number of DISTINCT data directions.
+    // selected rows at the number of DISTINCT data directions; the caller completes
+    // a shorter set from the lattice.
     while selected.len() < target {
         // Maximin: prefer the larger geodesic distance to the chosen set (the
         // SMALLER `max_dot`). Exact `max_dot` ties — common on symmetric clouds
@@ -1233,18 +1321,6 @@ fn select_spherical_farthest_point_center_rows(
         });
     }
 
-    if selected.len() < target {
-        crate::bail_invalid_basis!(
-            "requested {target} distinct spherical farthest-point centers but the data contain only {} numerically distinct directions",
-            selected.len()
-        );
-    }
-    if selected.len() < 2 {
-        return Err(BasisError::InsufficientColumnsForConstraint {
-            found: selected.len(),
-        });
-    }
-
     Ok(SphericalCenterSelection {
         rows: selected,
         profile_builds,
@@ -1309,6 +1385,62 @@ mod spherical_farthest_point_symmetry_tests {
                 .contains("only 1 of the exact 2-center budget remain"),
             "unexpected refusal: {error}"
         );
+    }
+
+    /// #224: fewer distinct directions than the budget. Every distinct direction is
+    /// a center, the set is completed to the budget with no two centers coincident,
+    /// and the physical center set does not depend on row order.
+    #[test]
+    fn fewer_distinct_directions_than_budget_are_completed_from_the_lattice() {
+        let data = array![
+            [10.0_f64, 20.0],
+            [10.0, 20.0],
+            [-45.0, 100.0],
+            [60.0, -30.0],
+            [-45.0, 100.0],
+            [0.0, 170.0]
+        ];
+        let sites = [[10.0_f64, 20.0], [-45.0, 100.0], [60.0, -30.0], [0.0, 170.0]];
+        let permutations = [[0_usize, 1, 2, 3, 4, 5], [5, 4, 3, 2, 1, 0], [2, 0, 5, 1, 3, 4]];
+        let to_rad = std::f64::consts::PI / 180.0;
+        let mut reference: Option<Vec<[f64; 2]>> = None;
+        for order in permutations {
+            let permuted = permute_rows(&data, &order);
+            let centers = select_spherical_farthest_point_centers(permuted.view(), 12, false)
+                .expect("four distinct directions complete to a twelve-center set");
+            assert_eq!(centers.nrows(), 12, "the completed set must meet the budget");
+            for site in sites {
+                assert!(
+                    centers.outer_iter().any(|row| row[0] == site[0] && row[1] == site[1]),
+                    "distinct data direction {site:?} must be a center"
+                );
+            }
+            let units: Vec<[f64; 3]> = centers
+                .outer_iter()
+                .map(|row| {
+                    let (lat, lon) = (row[0] * to_rad, row[1] * to_rad);
+                    [lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin()]
+                })
+                .collect();
+            for a in 0..units.len() {
+                for b in (a + 1)..units.len() {
+                    assert!(
+                        spherical_center_dot(&units[a], &units[b])
+                            < 1.0 - SPHERICAL_CENTER_COINCIDENT_TOL,
+                        "centers {a} and {b} coincide"
+                    );
+                }
+            }
+            let center_set = sorted_center_rows(&centers);
+            if let Some(expected) = &reference {
+                assert_eq!(
+                    &center_set, expected,
+                    "completed center set changed under row permutation"
+                );
+            } else {
+                reference = Some(center_set);
+            }
+        }
     }
 
     /// A symmetry orbit is indivisible. If even one orbit is larger than the

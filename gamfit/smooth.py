@@ -754,9 +754,12 @@ class Sphere(Smooth):
     -----
     Centers are a property of the basis, not of the evaluation set. If the
     user does not supply explicit ``centers``, the descriptor resolves
-    centers on first evaluation by farthest-point sampling (Rust) from the
-    eval rows, which requires at least ``n_centers`` of them. The resolved
-    centers are then cached and reused for every later evaluation.
+    centers once, on first evaluation, by farthest-point sampling (Rust) from
+    those rows. When they hold fewer than ``n_centers`` distinct directions,
+    every distinct direction is kept and the set is completed to
+    ``n_centers`` with Fibonacci-lattice candidates chosen farthest-point from
+    it. The resolved centers are cached and reused for every later
+    evaluation, at any row count.
 
     Streaming row-chunked evaluation activates automatically when the
     would-be dense basis buffer exceeds ~1 GiB; no opt-in is required.
@@ -799,8 +802,9 @@ class Sphere(Smooth):
         ``None``. For Wahba kernels the resolution order is:
 
         1. User-supplied ``centers``.
-        2. Farthest-point sampling (Rust) from ``coords``, which requires
-           at least ``n_centers`` rows (otherwise a clear error is raised).
+        2. Farthest-point sampling (Rust) from ``coords``, completed from the
+           Fibonacci lattice when ``coords`` holds fewer than ``n_centers``
+           distinct directions.
         """
         if str(self.kernel).lower() == "harmonic":
             return None
@@ -826,12 +830,6 @@ class Sphere(Smooth):
             if hasattr(coords, "detach"):
                 coords = coords.detach().cpu().numpy()
             pts = np.ascontiguousarray(np.asarray(coords, dtype=np.float64))
-            if pts.shape[0] < n_centers_i:
-                raise ValueError(
-                    f"Sphere.evaluate: need at least n_centers={n_centers_i} "
-                    f"evaluation rows to resolve centers, got {pts.shape[0]}. "
-                    "Supply explicit `centers=(K, 2)` for small evaluation sets."
-                )
             from . import _api
 
             ctrs = np.asarray(
