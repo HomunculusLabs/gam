@@ -2995,3 +2995,192 @@ mod standard_payload_penalty_topology_tests {
         check_flexible_binomial_payload(StandardLink::Probit, "probit");
     }
 }
+
+#[cfg(test)]
+mod latent_saved_baseline_tests {
+    use super::*;
+    use crate::inference::model::FittedModel;
+    use crate::survival::lognormal_kernel::{
+        FrailtyScale, FrailtySpec, HazardLoading, LatentSurvivalRow, LatentSurvivalRowJet,
+    };
+    use crate::survival::predict::{
+        SurvivalPredictEstimand, SurvivalPredictRequest, predict_latent_window_survival,
+    };
+    use csv::StringRecord;
+    use ndarray::Array1;
+
+    /// Deterministic Weibull survival rows with a covariate effect and
+    /// administrative censoring, encoded through the ordinary schema inference.
+    fn weibull_survival_dataset(n: usize) -> EncodedDataset {
+        let headers = vec!["time".to_string(), "status".to_string(), "x".to_string()];
+        let records = (0..n)
+            .map(|i| {
+                let x = ((i * 37) % n) as f64 / n as f64;
+                let u = (((i * 53 + 11) % 97) as f64 + 0.5) / 97.0;
+                let event_time = 60.0 * (-u.ln() / (0.8 * x).exp()).powf(1.0 / 1.4);
+                let censor_time = 20.0 + 100.0 * ((((i * 29 + 7) % 83) as f64 + 0.5) / 83.0);
+                let (time, status) = if event_time <= censor_time {
+                    (event_time, 1.0)
+                } else {
+                    (censor_time, 0.0)
+                };
+                StringRecord::from(vec![time.to_string(), status.to_string(), x.to_string()])
+            })
+            .collect();
+        gam_data::encode_recordswith_inferred_schema(headers, records)
+            .expect("encode synthetic latent survival rows")
+    }
+
+    fn saved_window_log_survival(model: &FittedModel, data: &EncodedDataset) -> Array1<f64> {
+        let col_map = data.column_map();
+        let zeros = Array1::<f64>::zeros(data.values.nrows());
+        predict_latent_window_survival(SurvivalPredictRequest {
+            model,
+            data: data.values.view(),
+            col_map: &col_map,
+            training_headers: Some(&data.headers),
+            primary_offset: &zeros,
+            noise_offset: &zeros,
+            time_grid: None,
+            with_uncertainty: false,
+            estimand: SurvivalPredictEstimand::Plugin,
+        })
+        .expect("saved latent survival model must predict at the training rows")
+        .window_survival
+        .mapv(f64::ln)
+    }
+
+    fn max_abs_gap(left: &Array1<f64>, right: &Array1<f64>) -> f64 {
+        left.iter()
+            .zip(right.iter())
+            .fold(0.0_f64, |acc, (l, r)| acc.max((l - r).abs()))
+    }
+
+    /// #2714: a saved latent survival model predicts with the baseline its time
+    /// coefficients were fitted against. The payload used to re-parse the user's
+    /// `FitConfig`, which persisted the seed baseline instead of the fitted one,
+    /// and failed outright when scale and shape were unset.
+    ///
+    /// The in-memory side is evaluated from the fit's own coefficients and the
+    /// request's realized time designs and offsets; nothing there is rebuilt from
+    /// saved fields. The positive control persists a different shape and must
+    /// move the predictions far past the agreement bar, so a payload that saved
+    /// the wrong baseline cannot pass.
+    #[test]
+    fn saved_latent_survival_model_predicts_at_its_fitted_baseline_2714() {
+        let n = 80;
+        let data = weibull_survival_dataset(n);
+        let formula = "Surv(time, status) ~ x";
+        let sigma = 0.5;
+        let config = FitConfig {
+            survival_likelihood: Some("latent".to_string()),
+            baseline_target: "weibull".to_string(),
+            time_basis: "ispline".to_string(),
+            frailty: FrailtySpec::HazardMultiplier {
+                scale: FrailtyScale::Fixed { sigma },
+                loading: HazardLoading::Full,
+            },
+            ..FitConfig::default()
+        };
+        assert!(
+            config.baseline_scale.is_none() && config.baseline_shape.is_none(),
+            "precondition: the pin covers the unset scale/shape configuration"
+        );
+
+        let materialized =
+            materialize(formula, &data, &config).expect("latent survival formula must materialize");
+        let survival_time_basis = materialized.survival_time_basis.clone();
+        let FitRequest::LatentSurvival(request) = materialized.request else {
+            panic!("survival_likelihood=latent must materialize a latent survival request");
+        };
+        let time_design_entry = request.spec.time_block.design_entry.clone();
+        let time_design_exit = request.spec.time_block.design_exit.clone();
+        let offset_entry = request.spec.time_block.offset_entry.clone();
+        let offset_exit = request.spec.time_block.offset_exit.clone();
+        let unloaded_entry = request.spec.unloaded_mass_entry.clone();
+        let unloaded_exit = request.spec.unloaded_mass_exit.clone();
+        let mean_offset = request.spec.mean_offset.clone();
+        let frailty = request.frailty.clone();
+
+        let result = match fit_model(FitRequest::LatentSurvival(request)) {
+            Ok(FitResult::LatentSurvival(result)) => result,
+            Ok(_) => panic!("latent survival request returned another result variant"),
+            Err(error) => panic!("latent survival fit failed: {error}"),
+        };
+        let fitted_baseline = result.baseline_config.clone();
+        assert!(
+            fitted_baseline.shape.is_some_and(|shape| shape != 1.0),
+            "precondition: the fitted baseline shape must differ from the unset-shape seed 1.0, \
+             otherwise persisting the seed and persisting the fit are indistinguishable here \
+             (got {:?})",
+            fitted_baseline.shape
+        );
+
+        let mean_beta = result
+            .fit
+            .block_by_role(gam_problem::BlockRole::Mean)
+            .expect("latent survival fit carries a mean block")
+            .beta
+            .clone();
+        let time_beta = result
+            .fit
+            .block_by_role(gam_problem::BlockRole::Time)
+            .expect("latent survival fit carries a time block")
+            .beta
+            .clone();
+        let eta = result.design.design.dot(&mean_beta) + &mean_offset;
+        let q_entry = time_design_entry.dot(&time_beta) + &offset_entry;
+        let q_exit = time_design_exit.dot(&time_beta) + &offset_exit;
+        let quadrature = gam_solve::quadrature::QuadratureContext::new();
+        let in_memory_log_survival = Array1::from_shape_fn(n, |row| {
+            let latent_row = LatentSurvivalRow::right_censored(
+                q_entry[row].exp(),
+                q_exit[row].exp(),
+                unloaded_entry[row],
+                unloaded_exit[row],
+            );
+            LatentSurvivalRowJet::evaluate(&quadrature, &latent_row, eta[row], sigma)
+                .expect("in-memory latent survival row evaluation")
+                .log_lik
+        });
+
+        let payload = payload_for_latent_survival(
+            formula.to_string(),
+            &data,
+            &config,
+            frailty,
+            result,
+            survival_time_basis,
+        )
+        .expect("a latent survival fit with baseline scale/shape unset must build its payload");
+        assert_eq!(payload.survival_baseline_scale, fitted_baseline.scale);
+        assert_eq!(payload.survival_baseline_shape, fitted_baseline.shape);
+
+        let saved_log_survival =
+            saved_window_log_survival(&FittedModel::from_payload(payload.clone()), &data);
+        let agreement_gap = max_abs_gap(&saved_log_survival, &in_memory_log_survival);
+
+        let mut seed_payload = payload;
+        seed_payload.survival_baseline_shape = Some(1.0);
+        let seed_log_survival =
+            saved_window_log_survival(&FittedModel::from_payload(seed_payload), &data);
+        let seed_gap = max_abs_gap(&seed_log_survival, &in_memory_log_survival);
+
+        eprintln!(
+            "[2714] saved latent baseline pin: fitted shape={:?} scale={:?} \
+             agreement_gap={agreement_gap:.3e} seed_gap={seed_gap:.3e}",
+            fitted_baseline.shape, fitted_baseline.scale
+        );
+        let bar = 1e-10;
+        assert!(
+            agreement_gap <= bar,
+            "saved latent survival predictions disagree with the fit at its baseline: \
+             max |log S_saved - log S_fit| = {agreement_gap:.3e} > {bar:.1e}"
+        );
+        assert!(
+            seed_gap > 1e3 * bar,
+            "positive control: persisting the seed shape must move the predictions past the \
+             agreement bar, got max gap {seed_gap:.3e}"
+        );
+    }
+}
