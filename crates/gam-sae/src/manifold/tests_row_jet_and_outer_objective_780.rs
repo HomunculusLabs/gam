@@ -542,6 +542,35 @@ pub(crate) fn threshold_gate_compiled_schedule_matches_hand_full_channels_932() 
     );
 }
 
+/// #932. `TopK` reaches the row jets through the constant-gate degeneration of the
+/// independent logistic schedule, and no cell compared that route with the hand
+/// assembly. This test runs the same full-channel parity and allocation checks at
+/// every width, with no speed cell. The support gate carries no logit coordinates, so
+/// the fixture drops the logit variables and keeps the coordinate and border channels.
+#[test]
+pub(crate) fn top_k_compiled_schedule_matches_hand_full_channels_932() {
+    fn top_k_schedule_perf_fixture(
+        k_atoms: usize,
+        p: usize,
+    ) -> (
+        SaeManifoldTerm,
+        Vec<SaeLocalRowVar>,
+        Vec<Array4<f64>>,
+        Vec<SaeBorderChannel>,
+        Array1<f64>,
+    ) {
+        let (term, mut vars, second_jets, border, assignments) = schedule_perf_fixture(
+            k_atoms,
+            p,
+            AssignmentMode::top_k_support((k_atoms / 2).max(1)),
+        );
+        vars.retain(|var| !matches!(var, SaeLocalRowVar::Logit { .. }));
+        (term, vars, second_jets, border, assignments)
+    }
+    let mut gate: Option<SpeedGate> = None;
+    compiled_schedule_beats_hand_full_channels_932("TOPK", &mut gate, top_k_schedule_perf_fixture);
+}
+
 #[test]
 pub(crate) fn ordered_beta_bernoulli_outer_objective_advertises_analytic_gradient() {
     // The ordered Beta--Bernoulli shared-mass third channel is assembled from
