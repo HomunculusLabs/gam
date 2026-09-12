@@ -5181,7 +5181,13 @@ impl SaeManifoldTerm {
             .copied()
             .filter(|v| v.is_finite() && *v >= 0.0)
             .collect();
-        Ok(leading_direction_above_noise_floor(&energies))
+        // Each Gram entry sums `n` products, so formation moves every eigenvalue by at
+        // most `γ_n·tr(G)` (Weyl, with `‖E‖₂ ≤ ‖E‖_F ≤ γ_n·‖R‖_F²`), and the SVD adds
+        // `p·ε·σ_max ≤ γ_{2p}·tr(G)`. An energy within that band is rounding.
+        let numerical_band =
+            gam_linalg::roundoff::accumulation_growth(residual.nrows() + 2 * residual.ncols())
+                * energies.iter().sum::<f64>();
+        Ok(leading_direction_above_noise_floor(&energies, numerical_band))
     }
 
     /// #2132 — SEQUENTIAL-DEFLATION birth reseed for CURVED co-collapsed atoms.
@@ -9735,12 +9741,12 @@ impl SaeManifoldTerm {
 /// direction carries signal when its energy exceeds `median · log2(#dirs)` — the
 /// Bonferroni expected-one-false-alarm bound over the `#dirs` directions (the
 /// energy of the largest of `#dirs` noise directions in units of the median grows
-/// only logarithmically), guarded below by a numerical-zero fraction of the peak.
+/// only logarithmically), guarded below by the caller's rounding band of the energies.
 /// This is the same measured-floor shape as the #2243 spectral bandwidth. The test
 /// errs toward RESEED (a false "signal present" only wastes a budget-bounded
 /// reseed; a false "noise" would wrongly demote a real atom), so the log2 factor is
 /// deliberately conservative rather than an MP-exact edge.
-fn leading_direction_above_noise_floor(energies: &[f64]) -> bool {
+fn leading_direction_above_noise_floor(energies: &[f64], numerical_band: f64) -> bool {
     if energies.is_empty() {
         return false;
     }
@@ -9767,7 +9773,7 @@ fn leading_direction_above_noise_floor(energies: &[f64]) -> bool {
     // still tracks the flat bulk, so the `·log2(#dirs)` Bonferroni multiple keeps a
     // spike-free spectrum below the floor exactly as before.
     let noise_scale = sorted[(((m - 1) as f64) * 0.25).round() as usize];
-    let floor = (peak * 1e-12).max(noise_scale * (m as f64).max(2.0).log2());
+    let floor = numerical_band.max(noise_scale * (m as f64).max(2.0).log2());
     peak > floor
 }
 
@@ -9923,14 +9929,14 @@ mod projection_policy_tests {
             .map(|i| 1.0 + 0.15 * ((i % 5) as f64 - 2.0))
             .collect();
         assert!(
-            !leading_direction_above_noise_floor(&noise),
+            !leading_direction_above_noise_floor(&noise, 0.0),
             "a flat (pure-noise) residual spectrum must read as NO uncovered signal"
         );
         // One dominant uncovered direction rises far above the noise quantile ⇒ signal.
         let mut signal = noise.clone();
         signal[7] = 100.0;
         assert!(
-            leading_direction_above_noise_floor(&signal),
+            leading_direction_above_noise_floor(&signal, 0.0),
             "a residual spectrum with a dominant direction must read as uncovered signal"
         );
         // #2132 root-cause pin — signal spanning HALF the (few) directions must NOT
@@ -9940,18 +9946,18 @@ mod projection_policy_tests {
         // peak (48), so a median floor reads real two-circle signal as pure noise
         // and reseeds NOTHING. The lower-quartile floor must read it as signal.
         assert!(
-            leading_direction_above_noise_floor(&[7.68, 7.68, 48.0, 48.0]),
+            leading_direction_above_noise_floor(&[7.68, 7.68, 48.0, 48.0], 0.0),
             "two circles filling all p=4 directions must read as uncovered signal, not noise"
         );
         // And the peeled remainder (circle A subtracted) — circle B alone, a rank-2
         // structure in p=4 with two near-zero directions — must still read as signal
         // so the sequential-deflation reseed lands the second atom.
         assert!(
-            leading_direction_above_noise_floor(&[1.0e-9, 1.0e-9, 7.68, 7.68]),
+            leading_direction_above_noise_floor(&[1.0e-9, 1.0e-9, 7.68, 7.68], 0.0),
             "the weaker uncovered circle must still clear the floor after the dominant peel"
         );
         // Degenerate inputs carry no signal to reseed onto.
-        assert!(!leading_direction_above_noise_floor(&[]));
-        assert!(!leading_direction_above_noise_floor(&[0.0, 0.0, 0.0]));
+        assert!(!leading_direction_above_noise_floor(&[], 0.0));
+        assert!(!leading_direction_above_noise_floor(&[0.0, 0.0, 0.0], 0.0));
     }
 }
