@@ -16,7 +16,7 @@ of #980:
   ``RowMetric::OutputFisher`` changes *only* the inner product the gauge / lens
   / isometry are read through; it does **not** whiten the reconstruction
   likelihood. With the isometry gauge off (the default), the shard run and the
-  no-shard run must agree on ``reml_score`` / ``reconstruction_r2`` / ``fitted``
+  no-shard run must agree on ``penalized_quasi_laplace_criterion`` / ``reconstruction_r2`` / ``fitted``
   exactly. This is the single most important assertion in the file: a divergence
   means the metric leaked into the likelihood.
 * **The two-score lens is present and sane.** Under OutputFisher provenance the
@@ -202,14 +202,16 @@ def test_data_fit_identical_to_euclidean(
 
     With the isometry gauge off, the OutputFisher metric only changes the inner
     product the gauge / lens are read through, never the data fit. So the two
-    runs must agree *exactly* on the criterion (``reml_score``), the predictive
+    runs must agree *exactly* on the criterion (``penalized_quasi_laplace_criterion``), the predictive
     summary (``reconstruction_r2``), and the fitted reconstruction (``fitted``).
     A nonzero difference here is the #980 leak we are guarding against.
     """
     # Exact agreement (same solver, same data, same seed; only the gauge metric
     # differs and it is off-likelihood). atol is a hair above 0 for f64 FFI
     # round-trip noise, not a tolerance on a genuine numerical difference.
-    assert fit_with_shard.reml_score == pytest.approx(fit_no_shard.reml_score, abs=1e-12)
+    assert fit_with_shard.penalized_quasi_laplace_criterion == pytest.approx(
+        fit_no_shard.penalized_quasi_laplace_criterion, abs=1e-12
+    )
     assert fit_with_shard.reconstruction_r2 == pytest.approx(
         fit_no_shard.reconstruction_r2, abs=1e-12
     )

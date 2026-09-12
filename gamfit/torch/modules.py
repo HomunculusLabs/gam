@@ -35,9 +35,8 @@ class _FittedGamModule(nn.Module):
 
     The module accepts a ``(N, F)`` tensor of features in the column order used
     at training time (the engine names columns ``x0``, ``x1``, ...) and returns
-    a ``(N, P)`` tensor of predictions where ``P`` is the number of prediction
-    columns the underlying model class emits (typically ``eta`` followed by
-    ``mean``).
+    the ``(N,)`` response-scale posterior mean, the vector
+    :meth:`gamfit.Model.predict_array` returns with no interval.
     """
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
@@ -60,8 +59,8 @@ def from_fitted(model: "Model") -> nn.Module:
     Returns
     -------
     torch.nn.Module
-        A module whose ``forward(X)`` accepts a ``(N, F)`` tensor and returns a
-        ``(N, P)`` tensor of predictions on the same device and dtype as ``X``.
+        A module whose ``forward(X)`` accepts a ``(N, F)`` tensor and returns the
+        ``(N,)`` posterior-mean prediction on the same device and dtype as ``X``.
         The wrapped model is treated as frozen: it has no trainable parameters,
         and gradients do not flow back through ``X`` in this v1 implementation
         because the prediction path crosses the numpy / Rust boundary. See the

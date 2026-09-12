@@ -147,7 +147,10 @@ def test_constrained_reml_vjp_interior_cert() -> None:
         p_: "torch.Tensor",
         w_: "torch.Tensor",
     ) -> "torch.Tensor":
-        return _scalar_objective(_forward(x_, y_, p_, w_))
+        # A penalty is symmetric: gradcheck perturbs one entry at a time and the
+        # engine refuses a non-symmetric penalty, so the closure symmetrizes it.
+        p_sym = 0.5 * (p_ + p_.transpose(-2, -1))
+        return _scalar_objective(_forward(x_, y_, p_sym, w_))
 
     assert torch.autograd.gradcheck(
         f,
@@ -203,7 +206,10 @@ def test_constrained_reml_vjp_interior_cert_nonzero_slack_bound() -> None:
         p_: "torch.Tensor",
         w_: "torch.Tensor",
     ) -> "torch.Tensor":
-        return _scalar_objective(forward_slack(x_, y_, p_, w_))
+        # A penalty is symmetric: gradcheck perturbs one entry at a time and the
+        # engine refuses a non-symmetric penalty, so the closure symmetrizes it.
+        p_sym = 0.5 * (p_ + p_.transpose(-2, -1))
+        return _scalar_objective(forward_slack(x_, y_, p_sym, w_))
 
     assert torch.autograd.gradcheck(
         f,
@@ -240,7 +246,10 @@ def test_constrained_reml_vjp_active_cert() -> None:
         p_: "torch.Tensor",
         w_: "torch.Tensor",
     ) -> "torch.Tensor":
-        return _scalar_objective(_forward(x_, y_, p_, w_))
+        # A penalty is symmetric: gradcheck perturbs one entry at a time and the
+        # engine refuses a non-symmetric penalty, so the closure symmetrizes it.
+        p_sym = 0.5 * (p_ + p_.transpose(-2, -1))
+        return _scalar_objective(_forward(x_, y_, p_sym, w_))
 
     # Previously this raised NotImplementedError; it must now both run and
     # agree with finite differences to the float64 default tolerance.

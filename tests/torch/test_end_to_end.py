@@ -42,16 +42,15 @@ def test_from_fitted_inside_torch_module() -> None:
     wrapped = gt.from_fitted(model)
 
     # Composing into a tiny torch network: a learned linear head on top of the
-    # frozen GAM's mean prediction column. The GAM's `mean` channel sits at the
-    # second emitted column (index 1) for Gaussian families.
+    # frozen GAM's prediction. With no interval the module returns the (N,)
+    # response-scale posterior mean, the vector `Model.predict_array` returns.
     head = torch.nn.Linear(1, 1, dtype=torch.float64)
 
     X_t = torch.as_tensor(X, dtype=torch.float64)
     preds = wrapped(X_t)
-    assert preds.shape[0] == n
-    assert preds.shape[1] >= 2  # eta + mean (at least)
+    assert preds.shape == (n,)
 
-    mean_col = preds[:, 1:2]
+    mean_col = preds.unsqueeze(1)
     out = head(mean_col).squeeze(1)
     target = torch.as_tensor(Y, dtype=torch.float64)
     initial_loss = torch.nn.functional.mse_loss(out, target).item()
