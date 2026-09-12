@@ -737,3 +737,53 @@ counts them by file.
   `compiled_softmax_schedule_matches_generic_tower_all_channels_932`,
   `independent_compiled_schedule_matches_fixed_oracle_above_old_arity_ceiling_932`
   and `jet_hoist_and_order1_border_beat_redundant_baselines_932`.
+
+### Pins whose production subject was deleted as code only tests used
+
+Each pin below exercised a production item that only tests called. The sweep or a
+later deletion commit removed that item, under the 2026-09-11 directive to delete
+code only tests use. No such item is named in any `.rs` file on origin/main. Each
+group gives the removing commit, found with `git log -S` on the defining file.
+
+| Deleted subject | Removing commit | Retired pins |
+| --- | --- | --- |
+| `logit_posterior_mean_exact`, the Faddeeva exact-logit oracle | `fd8d65e5c` (#2829) | `test_logit_posterior_mean_exact_no_truncation_bias_1459` |
+| `with_log_lambda_block` | `e6fd4251e` | `block_efs_step_reaches_gradient_root_2231`, `block_gradient_matches_central_difference_of_cost_2231`, `block_relevance_has_interior_stationary_minimum_2231`, `outer_criterion_prices_block_relevance_2231` |
+| `analytic_outer_rho_gradient_components` | `e6fd4251e` | `full_gradient_hessian_channel_set_matches_finite_difference_2253`, `third_order_forward_sensitivity_hessian_matches_finite_difference_2253`, `frozen_state_per_coordinate_channel_fd_audit_2253`, `k1_softmax_active_rho_gradient_matches_directional_fd_2253`, `exact_a_route_gap_is_two_coordinates_with_two_causes_2515`, `complete_outer_gradient_deflation_contribution_is_route_independent_2712` |
+| `analytic_outer_rho_gradient_components` plus `schur_inverse_block_deflated` (`e3b50feaf`) | `e6fd4251e` | `zz_measure_smoothness_dof_bundle_vs_deflated_2499` |
+| `analytic_outer_rho_gradient_components` plus `coordinate_block_ard_log_precision_hessian_trace` and `coordinate_block_logdet_theta_adjoint` (`65c63d9df`, #2668) | `e6fd4251e` | `zz_measure_exact_a_geometry_bundle_channels_2515` |
+| `coordinate_block_assignment_log_strength_hessian_trace`, removed when the complexity kept the coordinate block | `65c63d9df` (#2668) | `exact_a_quotient_value_and_sparse_trace_share_one_classification_2515` |
+| `analytic_outer_rho_gradient_at_converged` | `e6fd4251e` | `threshold_gate_analytic_outer_gradient_assembles_2500`, `threshold_gate_outer_gradient_uses_the_modelled_logdet_channels_2500`, `outer_rho_gradient_is_k_dim_and_n_invariant_1033` |
+| `assignment_prior_log_strength_hdiag` | `b66a7d04e` | `threshold_gate_sparse_curvature_operator_is_modelled_2500`, `threshold_gate_sparse_operator_is_not_the_raw_prior_on_deflated_rows_2500` |
+| `with_ungated` | `b66a7d04e` | `ungated_logit_slot_carries_zero_gradient_and_curvature_1026` |
+| `hybrid_collapse_verdict_from_assignments` | `e6fd4251e` | `hybrid_collapse_verdict_accessor_reports_collapsed_slots_2394`, `collapse_verdict_observable_when_reconstruction_is_bit_identical_2394`, `linear_dominance_curved_fit_not_worse_than_linear_on_linear_data_1026` |
+| `linear_span_anchor` | `e6fd4251e` | `linear_span_anchor_reaches_pca_ceiling_at_dictionary_rank_1026`, `linear_span_anchor_reaches_pca_ceiling_at_large_dictionary_rank_1026`, `sparse_routing_strictly_underreconstructs_dense_anchor_1026` |
+| `derivative_oracle`'s `DerivativeTraceChannel`, `BranchCertificate`, `MajorizerAnchorMode` and `from_arrow_cache`; for the logit-0 localization also `row_psd_majorizer_logit_derivative` (`843e0fc20`) | `e6fd4251e` | `branch_guarded_dual_oracle_pins_live_softmax_channels_2156`, `end_to_end_dual_vs_analytic_logdet_parity_battery_2156_2144`, `sae_logdet_theta_adjoint_logit0_dense_trace_localization_2156` |
+| `separation_barrier_value_and_grad_for_test` | `d484a091a` | `separation_barrier_gated_gradient_matches_fd_1625`, `separation_barrier_is_collapse_prevention_not_bandaid_1522`, `zz_measure_separation_force_vs_c2_2253`, `separation_barrier_analytic_gradient_matches_central_fd_1026` |
+| `constant_curvature_kernel_kappa_jets` | `d484a091a` | `kernel_kappa_jets_match_central_fd_1404` |
+| `fixed_decoder_step_lean_vs_full_1407` | `d484a091a` | `fixed_decoder_lean_step_equals_full_step_1407` |
+| `fit_row_metric` | `d484a091a` | `fit_row_metric_one_shot_matches_fit_then_row_metric_2021` |
+| `matrix_free_arrow_evidence_log_det` | `d484a091a` | `beta_gauge_quotient_value_inverse_and_gradient_are_orbit_invariant_2022` |
+| `reconstruction_energies` (WBIC audit) | `d484a091a` | `rank_charge_deff_is_piecewise_constant_with_monotone_scale_transitions_2099` |
+| the in-frame curved route (`InFrameCurvedConfig`, `CurvedRegion`, `fit_inframe_curved_regions`) | `d484a091a` | `inframe_curved_p4096_feasible_where_dense_joint_ooms_2134` |
+| `penalized_quasi_laplace_criterion_streaming_exact`, `streaming_exact_arrow_log_det`, `exact_joint_chart_gauge_basis` | `d484a091a` | `zz_measure_dense_vs_streaming_evidence_logdet_terms_2755` |
+| `with_fixed_point_certificate` | `d484a091a` | `analytically_refuted_fixed_point_continues_from_checkpoint_with_bfgs_2653` |
+| `tail_probability` and `selection_mean` in `smooth_term_lr.rs` | `418c732d2` | `the_null_spectrum_reaches_the_reference_with_a_parametric_term_2672`, `zz_measure_gaussian_reference_against_the_profiled_scale_2672` |
+| `weighted_chi_square_sf`, `signed_weighted_chi_square_sf` | `368528959` | `the_two_routes_to_the_null_spectrum_agree_on_real_fits_2672`, `the_two_moment_summary_is_exact_when_shrunk_and_one_signed_otherwise_2672` |
+| `cell_third_derivative_boundary_integrand`, `poly_eval_at` | `e95479f25` | `third_order_self_flux_telescopes_but_third_integrand_jumps_at_c2_knot_1454` |
+| `jacobian_radial` | `f83e9aeba` | `jacobian_radial_is_stable_through_flat_and_at_d_le_1` |
+| the resident-arrow kernel module (`ResidentRowJetHandle`, `ArrowCurvature`, `accumulate_arrow_blocks`) | `2f844874e` | `resident_arrow_blocks_match_materialized_tower_contraction_1017`, `resident_arrow_curvature_channel_is_live_and_beta_block_is_linear_1017`, `resident_arrow_device_matches_host_reduced_blocks_1017`, `resident_arrow_hvp_matches_dense_block_product_1017` |
+| `atom_transport_ladder_reports`, `AtomTransportLadderInput` | `95168f488` | `ladder_first_error_is_deterministic_across_dispatch_1017`, `ladder_parallel_matches_sequential_1017` |
+| `emulate_certified_encode_batch`, `emulate_certified_encode_row`, `EncodeAtomDevice`, `encode_reconstruction_error` | `fb2a87bc8` | `device_exhaustive_routing_cost_multiplier_2518` |
+| `new_with_empty_hbb_and_htbeta_cols` | `e3b50feaf` | `g_matvec_output_owners_are_bit_reproducible_on_device_2535` |
+
+Two more cannot return as written, for different reasons:
+
+- `certified_central_logdet_difference_refuses_floor_clamp_crossing_2398`: its
+  subject, `certified_central_logdet_difference`, was finite-difference
+  certification scaffolding in `tests_recovery_split_780.rs`, not production code.
+  `c0a21b554` deleted it with the tests that used it, so no production contract
+  remains for the pin to test.
+- `framed_sae_device_matvec_stage_diff_tiny_1551`: its instrument
+  `device_matvec_once` lived in the CUDA module and went with the test in
+  `c0a21b554`. The pin is device-only and cannot run on CPU lanes.
