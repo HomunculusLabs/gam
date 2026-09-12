@@ -595,13 +595,15 @@ pub fn basis_adequacy_report(
 /// ordinary 5% read `p_value` themselves.
 pub const BASIS_ADEQUACY_NOTE_LEVEL: f64 = 1.0e-3;
 
-/// The user-facing advisories a basis-adequacy report produces, in the same
-/// `inference_notes` channel as the mgcv-style basis-reduction notes.
+/// The rows whose lack-of-fit test rejects basis adequacy at the family-wise
+/// [`BASIS_ADEQUACY_NOTE_LEVEL`], Bonferroni-corrected over the tested terms.
 ///
-/// Only `Inadequate` terms produce a note. An `Undetermined` row is not an
-/// advisory — it is an absence of evidence, and saying so at fit time on every
-/// random-effect term would drown the channel it shares.
-pub fn basis_adequacy_notes(rows: &[BasisAdequacyRow]) -> Vec<String> {
+/// Both consumers of the verdict read it here: the fit-time note, and the
+/// adaptive spatial-resolution loop that grows the basis the note tells a user
+/// to grow. One reading keeps the advisory and the action from disagreeing.
+pub(crate) fn basis_adequacy_rows_lacking_fit(
+    rows: &[BasisAdequacyRow],
+) -> impl Iterator<Item = &BasisAdequacyRow> {
     let tested = rows
         .iter()
         .filter(|row| row.p_value.is_some())
@@ -609,7 +611,17 @@ pub fn basis_adequacy_notes(rows: &[BasisAdequacyRow]) -> Vec<String> {
         .max(1);
     let level = BASIS_ADEQUACY_NOTE_LEVEL / tested as f64;
     rows.iter()
-        .filter(|row| row.is_inadequate_at(level).unwrap_or(false))
+        .filter(move |row| row.is_inadequate_at(level).unwrap_or(false))
+}
+
+/// The user-facing advisories a basis-adequacy report produces, in the same
+/// `inference_notes` channel as the mgcv-style basis-reduction notes.
+///
+/// Only `Inadequate` terms produce a note. An `Undetermined` row is not an
+/// advisory — it is an absence of evidence, and saying so at fit time on every
+/// random-effect term would drown the channel it shares.
+pub fn basis_adequacy_notes(rows: &[BasisAdequacyRow]) -> Vec<String> {
+    basis_adequacy_rows_lacking_fit(rows)
         .map(|row| {
             let p_value = row.p_value.unwrap_or(f64::NAN);
             let rank = row.enrichment_rank.unwrap_or(0);

@@ -1490,17 +1490,18 @@ fn finish_adaptive_spatial_fit(
             return Ok(current);
         }
 
-        // Grow one saturated term at a time in stable formula order. The next
-        // loop iteration re-fits and re-measures every term, so interactions
-        // between smooths are handled from a converged joint optimum instead
-        // of applying several decisions made against stale EDF evidence.
+        // Grow one under-resolved term at a time in stable formula order. The
+        // next loop iteration re-fits and re-measures every term, so
+        // interactions between smooths are handled from a converged joint
+        // optimum instead of applying several decisions made against stale
+        // evidence.
         let term_count = candidates.term_count;
         let candidate = candidates
             .terms
             .into_iter()
             .next()
             .expect("non-empty adaptive candidate set");
-        // Expansion is mandatory once a certified fit is saturated, so the
+        // Expansion is mandatory once a certified fit is under-resolved, so the
         // old design/covariance can be released before constructing the larger
         // one. Keeping both complete fits alive would make adaptive resolution
         // itself an avoidable peak-memory multiplier.
@@ -1529,12 +1530,12 @@ fn finish_adaptive_spatial_fit(
             });
         }
 
-        // The current fit's EDF reached its realizable function-space ceiling;
-        // once the larger fit is certified it is the estimator state to resume
-        // from. Comparing raw REML/LAML values across different center charts
-        // is not a valid rejection gate (and a strict `<` accepts numerical
-        // noise), so resolution growth is controlled solely by the next
-        // converged fit's saturation evidence.
+        // The current fit was under-resolved; once the larger fit is certified
+        // it is the estimator state to resume from. Comparing raw REML/LAML
+        // values across different center charts is not a valid rejection gate
+        // (and a strict `<` accepts numerical noise), so resolution growth is
+        // controlled solely by the next converged fit's own saturation and
+        // lack-of-fit evidence.
         config = candidate_config;
         current = candidate_outcome;
     }
@@ -1565,6 +1566,18 @@ enum AdaptiveCenterDecision {
     Exhausted,
 }
 
+/// Decide one adaptive spatial term's resolution from its converged fit.
+///
+/// Two pieces of evidence say the realized basis is too small. EDF saturation
+/// fires once λ has been driven to its floor and the penalized capacity is used
+/// up. The #2774 lack-of-fit score test (`lacks_fit`) fires while λ still binds,
+/// where saturation is blind: REML trades basis size against λ, so a basis that
+/// is far too small can sit below its algebraic ceiling while the residuals keep
+/// structure it cannot represent. Either one grows the basis.
+///
+/// Only saturation at the validated ceiling is exhaustion. A lack-of-fit verdict
+/// at the ceiling leaves the fit certified with its fit-time advisory, since
+/// growing past the validated default is not this loop's to do.
 fn adaptive_center_decision(
     current_centers: usize,
     ceiling_centers: usize,
@@ -1572,13 +1585,17 @@ fn adaptive_center_decision(
     realized_width: usize,
     nullspace_dim: usize,
     resolution_tol: f64,
+    lacks_fit: bool,
 ) -> AdaptiveCenterDecision {
-    if !gam_terms::basis::basis_is_saturated(edf, realized_width, nullspace_dim, resolution_tol) {
+    let saturated =
+        gam_terms::basis::basis_is_saturated(edf, realized_width, nullspace_dim, resolution_tol);
+    if !saturated && !lacks_fit {
         return AdaptiveCenterDecision::Certified;
     }
     match gam_terms::basis::expanded_num_centers(current_centers, ceiling_centers) {
         Some(proposed) => AdaptiveCenterDecision::Expand(proposed),
-        None => AdaptiveCenterDecision::Exhausted,
+        None if saturated => AdaptiveCenterDecision::Exhausted,
+        None => AdaptiveCenterDecision::Certified,
     }
 }
 
@@ -1615,6 +1632,12 @@ fn adaptive_spatial_candidates(
         .design
         .ncols()
         .saturating_sub(result.design.smooth.total_smooth_cols());
+    // The #2774 lack-of-fit verdict this fit already carries, read at the same
+    // family-wise level as its fit-time note.
+    let lacking_fit: Vec<usize> =
+        crate::fit_orchestration::drivers::basis_adequacy_rows_lacking_fit(&result.basis_adequacy)
+            .map(|row| row.term_idx)
+            .collect();
     let mut candidates = Vec::new();
     for term_index in 0..term_count {
         let realized = &result.design.smooth.terms[term_index];
@@ -1664,6 +1687,7 @@ fn adaptive_spatial_candidates(
                 realized.coeff_range.len(),
                 nullspace_dim,
                 resolution_tol,
+                lacking_fit.contains(&term_index),
             ) {
                 AdaptiveCenterDecision::Certified => {}
                 AdaptiveCenterDecision::Expand(proposed_centers) => {
@@ -1701,7 +1725,7 @@ mod adaptive_spatial_resolution_tests {
     #[test]
     fn unsaturated_basis_is_certified_without_a_probe_refit() {
         assert_eq!(
-            adaptive_center_decision(8, 100, 5.0, 10, 2, 1.0e-6),
+            adaptive_center_decision(8, 100, 5.0, 10, 2, 1.0e-6, false),
             AdaptiveCenterDecision::Certified
         );
     }
@@ -1709,11 +1733,11 @@ mod adaptive_spatial_resolution_tests {
     #[test]
     fn saturated_basis_expands_geometrically_and_respects_validated_ceiling() {
         assert_eq!(
-            adaptive_center_decision(8, 100, 10.0, 10, 2, 1.0e-6),
+            adaptive_center_decision(8, 100, 10.0, 10, 2, 1.0e-6, false),
             AdaptiveCenterDecision::Expand(16)
         );
         assert_eq!(
-            adaptive_center_decision(64, 100, 10.0, 10, 2, 1.0e-6),
+            adaptive_center_decision(64, 100, 10.0, 10, 2, 1.0e-6, false),
             AdaptiveCenterDecision::Expand(100)
         );
     }
@@ -1721,8 +1745,26 @@ mod adaptive_spatial_resolution_tests {
     #[test]
     fn saturated_basis_at_validated_ceiling_is_typed_exhaustion() {
         assert_eq!(
-            adaptive_center_decision(100, 100, 10.0, 10, 2, 1.0e-6),
+            adaptive_center_decision(100, 100, 10.0, 10, 2, 1.0e-6, false),
             AdaptiveCenterDecision::Exhausted
+        );
+    }
+
+    #[test]
+    fn unsaturated_basis_lacking_fit_expands_1561() {
+        // The 2-D default-rank Duchon pilot at n=1500: 30 centers, penalized
+        // EDF 24.7 of 27, below the saturation ceiling while λ still binds.
+        assert_eq!(
+            adaptive_center_decision(30, 187, 27.7, 30, 3, 1.0e-6, true),
+            AdaptiveCenterDecision::Expand(60)
+        );
+    }
+
+    #[test]
+    fn lack_of_fit_at_validated_ceiling_stays_certified_1561() {
+        assert_eq!(
+            adaptive_center_decision(187, 187, 27.7, 190, 3, 1.0e-6, true),
+            AdaptiveCenterDecision::Certified
         );
     }
 }
