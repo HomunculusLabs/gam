@@ -1275,25 +1275,6 @@ pub(crate) fn lower_bound_active_coeffs_to_rows(
     active_rows
 }
 
-pub(crate) fn lower_bound_active_coeffs_from_solution(
-    bounds: &SimpleLowerBounds,
-    beta: &Array1<f64>,
-) -> Vec<usize> {
-    let mut active_coeffs = Vec::new();
-    for coeff in 0..beta.len() {
-        let lower = bounds.lower_bounds[coeff];
-        if !lower.is_finite() {
-            continue;
-        }
-        let scale = beta[coeff].abs().max(lower.abs()).max(1.0);
-        let tol = 1e-6 * scale + 1e-10;
-        if beta[coeff] <= lower + tol {
-            active_coeffs.push(coeff);
-        }
-    }
-    active_coeffs
-}
-
 pub(crate) fn project_to_lower_bounds(beta: &mut Array1<f64>, lower_bounds: &Array1<f64>) {
     for i in 0..beta.len() {
         let lower = lower_bounds[i];
@@ -1323,8 +1304,17 @@ pub(crate) fn solve_quadratic_with_simple_lower_bounds(
     )
     .map_err(|e| CustomFamilyError::trial_point(format!("lower-bound Newton solve failed: {e}")))?;
     let mut beta_new = beta_start + &delta;
+    // The active-set QP leaves its final KKT set in `active_coeffs`. Each active
+    // coefficient took the step `lower − β` to its bound, which one rounding can
+    // leave just off it, so it is placed exactly on the bound. The reported face
+    // is the solver's own, not a band re-derived from the resulting values.
+    for &coeff in &active_coeffs {
+        let lower = bounds.lower_bounds[coeff];
+        if lower.is_finite() {
+            beta_new[coeff] = lower;
+        }
+    }
     project_to_lower_bounds(&mut beta_new, &bounds.lower_bounds);
-    active_coeffs = lower_bound_active_coeffs_from_solution(bounds, &beta_new);
     let active = lower_bound_active_coeffs_to_rows(bounds, &active_coeffs);
     Ok((beta_new, active))
 }
