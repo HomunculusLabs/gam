@@ -31,7 +31,7 @@ use super::*;
 /// data-supported subspace instead of stalling on the flat REML valley. An
 /// empty slice leaves every atom in snapshot-only mode.
 #[must_use = "build error must be handled"]
-fn term_from_padded_blocks_with_mode(
+pub(super) fn term_from_padded_blocks_with_mode(
     n_obs: usize,
     p_out: usize,
     basis_kinds: &[SaeAtomBasisKind],

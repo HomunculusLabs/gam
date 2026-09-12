@@ -14,6 +14,7 @@
 //! separately checking the recovered intensity ratio of the two live atoms.
 
 use super::tests::deterministic_circle_noise;
+use super::tests_cocollapse_disjoint_2027::term_from_padded_blocks_with_mode;
 use super::*;
 
 /// Two circles on disjoint output-column parities with UNEQUAL amplitudes, plus a
