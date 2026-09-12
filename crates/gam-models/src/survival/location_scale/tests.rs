@@ -2011,6 +2011,114 @@ fn survival_ls_all_axes_second_directional_is_the_per_axis_hook_2668() {
     }
 }
 
+/// #2668: `SurvivalLsRowKernel::second_directional_derivative_all_axes_dense_override`
+/// builds each row's plan, channel rows and `J·u` once and reduces in chunk order. That is
+/// only a valid optimisation if every matrix is the generic per-axis fold's, bit for bit.
+/// The 3-row fixture above never leaves one chunk, so this pin uses `n = 300` rows (the
+/// `ARROW_ROW_CHUNK = 256` reduction spans two tiles), multi-column threshold and log-σ
+/// designs, mixed event and censored rows and non-unit weights. It also asserts that the
+/// full-data dispatcher actually takes the override.
+#[test]
+fn survival_ls_all_axes_second_directional_override_is_the_per_axis_fold_across_chunks_2668() {
+    use crate::row_kernel::{
+        RowKernel, RowSet, row_kernel_second_directional_derivative,
+        row_kernel_second_directional_derivative_all_axes,
+    };
+
+    let n = 300usize;
+    let p_thr = 3usize;
+    let p_ls = 3usize;
+    let x_time_entry = Array2::from_elem((n, 1), 0.7);
+    let x_time_exit =
+        Array2::from_shape_fn((n, 1), |(r, _)| 1.2 + 0.4 * ((r as f64) * 0.37).sin());
+    let x_time_deriv = Array2::from_elem((n, 1), 1.0);
+    let x_threshold = Array2::from_shape_fn((n, p_thr), |(r, j)| {
+        0.3 + 0.5 * ((r as f64) * 0.11 + j as f64).cos() - 0.02 * (j as f64)
+    });
+    let x_log_sigma = Array2::from_shape_fn((n, p_ls), |(r, j)| {
+        0.1 + 0.4 * ((r as f64) * 0.07 - 0.5 * (j as f64)).sin()
+    });
+    let beta_t = array![0.3];
+    let beta_thr = array![-0.4, 0.25, 0.1];
+    let beta_ls = array![0.2, -0.15, 0.05];
+    let u = array![0.7, -0.5, 0.9, 0.3, -0.2, 0.6, -0.4];
+    let u_slice = u.as_slice().expect("contiguous u");
+    let p = u.len();
+
+    for distribution in [
+        ResidualDistribution::Gaussian,
+        ResidualDistribution::Gumbel,
+        ResidualDistribution::Logistic,
+    ] {
+        let mut family = survival_exact_newton_test_familywith_inverse_link(
+            residual_distribution_inverse_link(distribution),
+        );
+        family.n = n;
+        family.y = Array1::from_iter((0..n).map(|r| if r % 3 == 0 { 0.0 } else { 1.0 }));
+        family.w = Array1::from_iter((0..n).map(|r| 0.6 + 0.1 * ((r % 7) as f64)));
+        family.x_time_entry = Arc::new(x_time_entry.clone());
+        family.x_time_exit = Arc::new(x_time_exit.clone());
+        family.x_time_deriv = Arc::new(x_time_deriv.clone());
+        family.x_threshold =
+            DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(x_threshold.clone()));
+        family.x_log_sigma =
+            DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(x_log_sigma.clone()));
+        // Stacked time eta layout `[entry; exit; deriv]`, as `survival_exact_newton_test_states`.
+        let mut eta_time = Array1::<f64>::zeros(3 * n);
+        for i in 0..n {
+            eta_time[i] = x_time_entry[[i, 0]] * beta_t[0];
+            eta_time[n + i] = x_time_exit[[i, 0]] * beta_t[0];
+            eta_time[2 * n + i] = x_time_deriv[[i, 0]] * beta_t[0];
+        }
+        let states = vec![
+            ParameterBlockState {
+                beta: beta_t.clone(),
+                eta: eta_time,
+            },
+            ParameterBlockState {
+                beta: beta_thr.clone(),
+                eta: x_threshold.dot(&beta_thr),
+            },
+            ParameterBlockState {
+                beta: beta_ls.clone(),
+                eta: x_log_sigma.dot(&beta_ls),
+            },
+        ];
+        let dynamic = family
+            .build_dynamic_geometry(&states)
+            .expect("dynamic geometry");
+        let kernel = family.survival_ls_row_kernel_rescaled(&dynamic, 0.0);
+        assert!(
+            matches!(
+                kernel.second_directional_derivative_all_axes_dense_override(&RowSet::All, u_slice),
+                Some(Ok(_))
+            ),
+            "{distribution:?}: the full-data dispatcher must take the build-once override"
+        );
+        let batched =
+            row_kernel_second_directional_derivative_all_axes(&kernel, &RowSet::All, u_slice)
+                .expect("all-axes second directional derivative");
+        assert_eq!(batched.len(), p, "{distribution:?}: one matrix per axis");
+        let mut largest = 0.0_f64;
+        for (axis, matrix) in batched.iter().enumerate() {
+            let mut e_a = vec![0.0_f64; p];
+            e_a[axis] = 1.0;
+            let per_axis =
+                row_kernel_second_directional_derivative(&kernel, &RowSet::All, u_slice, &e_a)
+                    .expect("per-axis second directional fold");
+            largest = largest.max(per_axis.iter().fold(0.0_f64, |acc, v| acc.max(v.abs())));
+            assert_eq!(
+                matrix, &per_axis,
+                "{distribution:?} axis {axis}: the override must be the per-axis fold bit for bit"
+            );
+        }
+        assert!(
+            largest > 1.0e-3,
+            "{distribution:?}: I''[u, e_a] is too small ({largest:.3e}) for equality to say anything"
+        );
+    }
+}
+
 fn sparse_survival_exact_newton_test_family() -> SurvivalLocationScaleFamily {
     let mut family = survival_exact_newton_test_family();
     family.x_threshold = sparse_design_from_dense(&array![[1.0], [0.4], [-0.6]]);
