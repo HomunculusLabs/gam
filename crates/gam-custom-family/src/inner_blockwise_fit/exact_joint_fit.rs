@@ -151,7 +151,6 @@ fn clear_stall_evidence_collected_under_the_previous_model(
 /// residual under the complete model had been falling since cycle 5. Re-arming an
 /// armed latch clears nothing: the model did not change, and a clear there would
 /// erase the evidence a genuine stall under the complete model has to accumulate.
-#[allow(clippy::too_many_arguments)]
 fn arm_jeffreys_completion_endgame(
     jeffreys_completion_endgame: &mut bool,
     best_residual_seen: &mut f64,
