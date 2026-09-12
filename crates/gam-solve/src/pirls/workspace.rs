@@ -62,7 +62,7 @@ impl PirlsWorkspace {
     /// norm. It never enters an IRLS iteration, so allocating the general
     /// workspace's five observation-length vectors would reintroduce O(n)
     /// work before the zero-iteration branch can consume those statistics.
-    pub fn coefficient_only(p: usize) -> Self {
+    pub(crate) fn coefficient_only(p: usize) -> Self {
         Self::new(0, p)
     }
 

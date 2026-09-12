@@ -36,7 +36,7 @@ impl VarianceJet {
     /// rewriting it would move existing well-conditioned fits by an ulp for no
     /// accuracy gained.
     #[inline]
-    pub fn bernoulli_with_complement(mu: f64, one_minus_mu: f64) -> Self {
+    pub(crate) fn bernoulli_with_complement(mu: f64, one_minus_mu: f64) -> Self {
         Self {
             v: mu * one_minus_mu,
             v1: 1.0 - 2.0 * mu,
@@ -84,7 +84,7 @@ impl VarianceJet {
 
     /// Negative-binomial variance V(μ) = μ + μ² / theta.
     #[inline]
-    pub fn negative_binomial(mu: f64, theta: f64) -> Self {
+    pub(crate) fn negative_binomial(mu: f64, theta: f64) -> Self {
         let inv_theta = if valid_negbin_theta(theta) {
             1.0 / theta
         } else {
@@ -116,7 +116,7 @@ impl VarianceJet {
     /// The trial count `n` enters as a prior-weight multiplier, not through
     /// the variance function itself.
     #[inline]
-    pub fn binomial_n(mu: f64, one_minus_mu: f64) -> Self {
+    pub(crate) fn binomial_n(mu: f64, one_minus_mu: f64) -> Self {
         // V(μ) = μ(1−μ), same jet as Bernoulli
         Self::bernoulli_with_complement(mu, one_minus_mu)
     }
@@ -139,7 +139,7 @@ impl VarianceJet {
 /// Certify and return the exact statistical `(W, dW/deta, d2W/deta2)` surface.
 /// Positive-definiteness stabilization belongs to the assembled matrix/ridge
 /// layer; changing individual row weights would change the likelihood Hessian.
-pub fn exact_hessian_surface_arrays(
+pub(crate) fn exact_hessian_surface_arrays(
     hessian_weights: gam_linalg::matrix::SignedWeightsView<'_>,
     c_array: &Array1<f64>,
     d_array: &Array1<f64>,
@@ -268,7 +268,7 @@ pub(crate) fn penalized_objective_deviance_scale(
 }
 
 #[inline]
-pub fn weight_family_for_glm_likelihood(
+pub(crate) fn weight_family_for_glm_likelihood(
     likelihood: &GlmLikelihoodSpec,
 ) -> Result<WeightFamily, EstimationError> {
     let resolved = likelihood
@@ -544,7 +544,7 @@ pub(crate) fn compute_observed_hessian_curvature_arrays(
 /// `(w_obs, c_obs, d_obs)` -- the observed weight and its first two
 /// eta-derivatives, all pre-multiplied by `pw`.
 #[inline]
-pub fn observed_weight_noncanonical(
+pub(crate) fn observed_weight_noncanonical(
     resid: f64,
     h1: f64,
     h2: f64,
@@ -603,7 +603,7 @@ pub fn observed_weight_noncanonical(
 /// `T₄` requires `h5`; callers that only need orders up to 3 may pass any value
 /// for it and ignore the last entry.
 #[inline]
-pub fn weight_ratio_tower(
+pub(crate) fn weight_ratio_tower(
     h1: f64,
     h2: f64,
     h3: f64,
@@ -718,7 +718,7 @@ pub fn e_obs_from_jets(
 /// d_obs =  ω y / (φ μ)
 /// ```
 #[inline]
-pub fn observed_weight_gamma_log(y: f64, mu: f64, phi: f64, pw: f64) -> (f64, f64, f64) {
+pub(crate) fn observed_weight_gamma_log(y: f64, mu: f64, phi: f64, pw: f64) -> (f64, f64, f64) {
     let w = (pw / phi) * (y / mu);
     (w, -w, w)
 }
@@ -728,7 +728,7 @@ pub fn observed_weight_gamma_log(y: f64, mu: f64, phi: f64, pw: f64) -> (f64, f6
 /// `W_obs = prior (y+theta) r s`, `W' = W(r-s)`, and
 /// `W'' = W((r-s)^2 - 2rs)`.
 #[inline]
-pub fn observed_weight_negative_binomial_log(
+pub(crate) fn observed_weight_negative_binomial_log(
     y: f64,
     mu: f64,
     theta: f64,
@@ -780,7 +780,7 @@ pub enum WeightLink {
 /// `μ` has saturated to exactly `1.0`; the families whose variance does not
 /// involve the complement ignore it.
 #[inline]
-pub fn variance_jet_for_weight_family(
+pub(crate) fn variance_jet_for_weight_family(
     family: WeightFamily,
     mu: f64,
     one_minus_mu: f64,
@@ -817,7 +817,7 @@ pub fn variance_jet_for_weight_family(
 /// and every other family fall through to the ordinary difference, which does
 /// not cancel for them.
 #[inline]
-pub fn bernoulli_pair_residual(family: WeightFamily, y: f64, mu: f64, one_minus_mu: f64) -> f64 {
+pub(crate) fn bernoulli_pair_residual(family: WeightFamily, y: f64, mu: f64, one_minus_mu: f64) -> f64 {
     if matches!(family, WeightFamily::Binomial) {
         if y == 1.0 {
             return one_minus_mu;
@@ -873,7 +873,7 @@ pub enum DirectionalWorkingCurvature {
     Diagonal(Array1<f64>),
 }
 
-pub fn directionalworking_curvature_from_c_array(
+pub(crate) fn directionalworking_curvature_from_c_array(
     c_array: &Array1<f64>,
     eta_direction: &Array1<f64>,
 ) -> DirectionalWorkingCurvature {

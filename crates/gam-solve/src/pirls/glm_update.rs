@@ -118,7 +118,7 @@ fn scatter_certified_bernoulli_rows(
     }
 }
 
-pub fn update_glmvectors(
+pub(crate) fn update_glmvectors(
     y: ArrayView1<f64>,
     eta: &Array1<f64>,
     inverse_link: &InverseLink,
@@ -264,7 +264,7 @@ pub(crate) fn integrated_inverse_link_from_family(
 ///-level integrated updates should reconstruct an `InverseLink` and delegate
 /// here.
 #[inline]
-pub fn update_glmvectors_integrated_for_link(
+pub(crate) fn update_glmvectors_integrated_for_link(
     quadctx: &crate::quadrature::QuadratureContext,
     y: ArrayView1<f64>,
     eta: &Array1<f64>,
@@ -357,7 +357,7 @@ pub fn update_glmvectors_integrated_for_link(
 /// with link-specific special-function code and lets each family choose the
 /// mathematically correct integration strategy.
 #[inline]
-pub fn update_glmvectors_integrated_by_family(
+pub(crate) fn update_glmvectors_integrated_by_family(
     quadctx: &crate::quadrature::QuadratureContext,
     y: ArrayView1<f64>,
     eta: &Array1<f64>,

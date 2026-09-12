@@ -3041,7 +3041,7 @@ pub(super) mod test_support {
             const { std::cell::RefCell::new(None) };
     }
 
-    pub fn record_penalized_deviance(value: f64) {
+    pub(crate) fn record_penalized_deviance(value: f64) {
         PIRLS_PENALIZED_DEVIANCE_TRACE.with(|trace| {
             if let Some(ref mut buf) = *trace.borrow_mut() {
                 buf.push(value);

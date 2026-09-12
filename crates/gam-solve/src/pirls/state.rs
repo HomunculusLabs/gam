@@ -171,7 +171,7 @@ impl WorkingState {
     /// 2.5e-8 bias visible only when the user asked for sub-1e-6
     /// precision).
     #[inline]
-    pub fn near_stationary_kkt(&self, g_norm: f64, tol: f64) -> bool {
+    pub(crate) fn near_stationary_kkt(&self, g_norm: f64, tol: f64) -> bool {
         let near_tol = tol * 10.0;
         g_norm <= near_tol * self.kkt_dimension_scale()
             || self.relative_gradient_norm(g_norm) <= near_tol
@@ -300,7 +300,7 @@ impl PirlsStatus {
     /// Both the iteration-cap and LM-exhausted exits should be treated the
     /// same by callers that just want to know "did we get a valid solution?".
     #[inline]
-    pub const fn is_failed_max_iterations(self) -> bool {
+    pub(crate) const fn is_failed_max_iterations(self) -> bool {
         matches!(
             self,
             PirlsStatus::MaxIterationsReached | PirlsStatus::LmStepSearchExhausted
@@ -551,7 +551,7 @@ impl PirlsResult {
     /// the raw `Array1<f64>` so the function-boundary type contract from
     /// `linalg/matrix.rs` is construction-enforced.
     #[inline]
-    pub fn final_weights_signed(&self) -> SignedWeightsView<'_> {
+    pub(crate) fn final_weights_signed(&self) -> SignedWeightsView<'_> {
         SignedWeightsView::new(self.finalweights.view())
     }
 
