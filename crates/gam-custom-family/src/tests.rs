@@ -7359,18 +7359,47 @@ pub(crate) fn completion_priced_outer_hessian_matches_central_differences_with_g
         }
         _ => panic!("the completion-priced criterion must expose an analytic outer Hessian"),
     };
+    // Central differences at h, 2h and 4h. The reference is their Richardson extrapolation, and
+    // its measured error bar is four times its disagreement with the extrapolation one octave
+    // coarser, plus 1e-9 of the reference for a coincidentally small disagreement.
     let step = 1e-4;
-    let plus = evaluate(rho + step, EvalMode::ValueAndGradient);
-    let minus = evaluate(rho - step, EvalMode::ValueAndGradient);
-    let gradient_fd = (plus.objective - minus.objective) / (2.0 * step);
-    let hessian_fd = (plus.gradient[0] - minus.gradient[0]) / (2.0 * step);
-    assert!(
-        (at.gradient[0] - gradient_fd).abs() <= 2e-3 * gradient_fd.abs().max(1.0),
-        "completion-priced outer gradient: analytic={} central difference={gradient_fd}",
+    let central = |width: f64| {
+        let plus = evaluate(rho + width, EvalMode::ValueAndGradient);
+        let minus = evaluate(rho - width, EvalMode::ValueAndGradient);
+        (
+            (plus.objective - minus.objective) / (2.0 * width),
+            (plus.gradient[0] - minus.gradient[0]) / (2.0 * width),
+        )
+    };
+    let (fine, middle, wide) = (central(step), central(2.0 * step), central(4.0 * step));
+    let richardson = |fine: f64, middle: f64, wide: f64| {
+        let reference = (4.0 * fine - middle) / 3.0;
+        let coarse = (4.0 * middle - wide) / 3.0;
+        (reference, 4.0 * (reference - coarse).abs() + 1e-9 * reference.abs())
+    };
+    let (gradient_reference, gradient_bar) = richardson(fine.0, middle.0, wide.0);
+    let (hessian_reference, hessian_bar) = richardson(fine.1, middle.1, wide.1);
+    eprintln!(
+        "[#2905 criterion] gradient analytic={:+.10e} reference={gradient_reference:+.10e} \
+         bar={gradient_bar:.3e}; hessian analytic={analytic_hessian:+.10e} \
+         reference={hessian_reference:+.10e} bar={hessian_bar:.3e}",
         at.gradient[0]
     );
     assert!(
-        (analytic_hessian - hessian_fd).abs() <= 2e-3 * hessian_fd.abs().max(1.0),
-        "completion-priced outer Hessian: analytic={analytic_hessian} central difference={hessian_fd}"
+        hessian_reference.abs() > hessian_bar,
+        "the differences do not resolve the outer Hessian (|reference| {:.3e} <= bar \
+         {hessian_bar:.3e}), so the pin decides nothing",
+        hessian_reference.abs()
+    );
+    assert!(
+        (at.gradient[0] - gradient_reference).abs() <= gradient_bar,
+        "completion-priced outer gradient: analytic={} reference={gradient_reference} \
+         (gap above the measured bar {gradient_bar:.3e})",
+        at.gradient[0]
+    );
+    assert!(
+        (analytic_hessian - hessian_reference).abs() <= hessian_bar,
+        "completion-priced outer Hessian: analytic={analytic_hessian} \
+         reference={hessian_reference} (gap above the measured bar {hessian_bar:.3e})"
     );
 }
