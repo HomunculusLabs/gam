@@ -590,9 +590,16 @@ fn periodic_sobolev_block_psi_jet(r: f64, kappa: f64, period: f64, order: usize)
     }
     let h2 = h * h;
     let b2 = b * b;
-    // Enough terms to converge sinh(√u₀ h)/(√u₀ h); the guard below exits early.
-    const MAX_TERMS: usize = 8192;
-    for i in 1..=MAX_TERMS {
+    // Each running term advances by `u·h²/((2i)(2i+1))` (and its PB/PH twins), with
+    // non-negative jet coefficients, so the terms rise at most until `i ≈ √u₀·h/2`
+    // and then fall faster than any geometric ratio. The first step that moves no
+    // coefficient of any of the three sums is past the peak (a term below one ulp
+    // before it would force `u₀h²` itself below one ulp), so no later term can move
+    // them either. A non-finite coefficient ends the sweep and reaches the
+    // callers' finiteness checks as it is.
+    let mut i = 0usize;
+    loop {
+        i += 1;
         let fi = i as f64;
         let ratio_s = h2 / ((2.0 * fi) * (2.0 * fi + 1.0));
         let ratio_pb = b2 / ((2.0 * fi + 1.0) * (2.0 * fi + 2.0));
@@ -600,16 +607,19 @@ fn periodic_sobolev_block_psi_jet(r: f64, kappa: f64, period: f64, order: usize)
         st = st.mul(&uj).scaled(ratio_s);
         pbt = pbt.mul(&uj).scaled(ratio_pb);
         pht = pht.mul(&uj).scaled(ratio_ph);
+        let mut moved = false;
+        let mut finite = true;
         for t in 0..=order {
-            sh.c[t] += st.c[t];
-            pb.c[t] += pbt.c[t];
-            ph.c[t] += pht.c[t];
+            let next_s = sh.c[t] + st.c[t];
+            let next_b = pb.c[t] + pbt.c[t];
+            let next_h = ph.c[t] + pht.c[t];
+            moved |= next_s != sh.c[t] || next_b != pb.c[t] || next_h != ph.c[t];
+            finite &= next_s.is_finite() && next_b.is_finite() && next_h.is_finite();
+            sh.c[t] = next_s;
+            pb.c[t] = next_b;
+            ph.c[t] = next_h;
         }
-        if i > 4
-            && st.c[0].abs() < 1e-18 * sh.c[0].abs().max(f64::MIN_POSITIVE)
-            && pbt.c[0].abs() < 1e-18 * pb.c[0].abs().max(f64::MIN_POSITIVE)
-            && pht.c[0].abs() < 1e-18 * ph.c[0].abs().max(f64::MIN_POSITIVE)
-        {
+        if !moved || !finite {
             break;
         }
     }
