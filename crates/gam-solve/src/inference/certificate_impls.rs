@@ -67,10 +67,9 @@ impl Certificate for OuterCriterionCertificate {
         let rung = self.stationarity.rung();
         e.insert("stationarity_rung", rung.label.clone().into());
         e.insert("stationarity_rung_derived", rung.derived_standard.into());
-        // `kind_label` rather than `is_fixed_point()` + else: the old two-way
-        // test reported an AsymptoteRail certificate as "analytic_gradient" —
-        // a route wearing another route's name, in the map a reader consults
-        // precisely to find out which route ran.
+        // `kind_label` names all three routes, so an AsymptoteRail certificate
+        // is never reported as "analytic_gradient" in the map a reader consults
+        // to find out which route ran.
         e.insert("stationarity_kind", self.stationarity.kind_label().into());
         e.insert(
             "hessian_psd",

@@ -864,20 +864,15 @@ impl OuterStationarityCertificate {
 
     /// A stable label for which stationarity equation certified this point.
     ///
-    /// Previously derived as `if is_fixed_point() { .. } else { "analytic_gradient" }`,
-    /// which reported an `AsymptoteRail` certificate as an analytic gradient —
-    /// a verdict wearing another route's name, in the evidence map a reader
-    /// consults precisely to find out which route ran.
+    /// Each variant has its own label, so an `AsymptoteRail` certificate is
+    /// never reported as an analytic gradient in the evidence map a reader
+    /// consults to find out which route ran.
     pub fn kind_label(&self) -> &'static str {
         match self {
             Self::AnalyticGradient { .. } => "analytic_gradient",
             Self::FixedPoint { .. } => "fixed_point",
             Self::AsymptoteRail { .. } => "asymptote_rail",
         }
-    }
-
-    pub fn is_fixed_point(&self) -> bool {
-        matches!(self, Self::FixedPoint { .. })
     }
 
     /// The certified asymptote rails, when this is an `AsymptoteRail`.

@@ -4685,55 +4685,8 @@ impl JacobiPreconditioner {
 }
 
 // ---------------------------------------------------------------------------
-// Preconditioner ladder: SchurPreconditionerKind, ClusterJacobi,
-// AdditiveSchwarz  (issue #299)
+// Preconditioner ladder: ClusterJacobi, AdditiveSchwarz  (issue #299)
 // ---------------------------------------------------------------------------
-
-/// Which Schur preconditioner to use in the inexact-PCG path.
-///
-/// Ladder ordered by cost / effectiveness:
-/// - `Diagonal`: scalar Jacobi (pre-#283 behaviour).
-/// - `BetaBlockJacobi`: block-Jacobi per `block_offsets` term (#287).
-/// - `ClusterJacobi`: one dense block per beta-graph connected component.
-/// - `AdditiveSchwarz { overlap }`: component + `overlap`-hop expansion,
-///   overlapping columns averaged by partition-of-unity weights (full dense
-///   local-inverse apply per subdomain).
-/// - `DiagAssembledSchwarz { overlap }`: the cheap Schwarz variant (#299) —
-///   same overlapping decomposition, but each subdomain contributes only the
-///   diagonal of its local inverse `(A_k⁻¹)_ii`, assembled additively with
-///   partition-of-unity weights into a single `O(K)`-apply diagonal.
-/// - `BlockIncompleteCholesky`: level-0 incomplete Cholesky (#299). Within each
-///   connected component of the β-coupling graph the dense reduced-Schur block
-///   `S[C,C]` is assembled once, its structural-nonzero pattern is taken as the
-///   level-0 fill pattern, and a no-fill incomplete Cholesky `S ≈ L̃ L̃ᵀ` is
-///   formed keeping ONLY that pattern (Saad, *Iterative Methods*, IC(0)). Apply
-///   is a sparse triangular forward/back solve over `nnz(S[C,C])`, so for a
-///   large component with internal sparsity it is far cheaper to build and apply
-///   than `ClusterJacobi`'s full dense Cholesky (which fills the whole `b×b`
-///   factor) while retaining the inter-block coupling that ClusterJacobi keeps
-///   but the diagonal/Schwarz tiers discard. A non-PD incomplete pivot degrades
-///   that component to the scalar reciprocal diagonal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SchurPreconditionerKind {
-    Diagonal,
-    BetaBlockJacobi,
-    ClusterJacobi,
-    /// Cluster-Jacobi whose blocks come from the bounded co-visibility PARTITION
-    /// (`BetaCouplingGraph::covisibility_cluster_partition`) rather than the
-    /// connected-component partition. At real over-complete widths the co-firing
-    /// graph is a single giant component, so plain `ClusterJacobi` exceeds the
-    /// size cap and degrades to scalar Jacobi; this tier splits that component
-    /// into bounded strongly-co-firing clusters so the dense per-cluster factor
-    /// conditions the cross-atom coupling scalar Jacobi cannot see.
-    CoVisibilityClusterJacobi,
-    AdditiveSchwarz {
-        overlap: usize,
-    },
-    DiagAssembledSchwarz {
-        overlap: usize,
-    },
-    BlockIncompleteCholesky,
-}
 
 /// Escalate beyond BetaBlockJacobi only when K exceeds this value and PCG
 /// exhausted `max_iterations`.
@@ -5434,7 +5387,6 @@ impl std::fmt::Debug for Ic0Factor {
 /// structural-nonzero pattern `P = { (i,j) : |S_ij| > drop·sqrt(S_ii S_jj) }`
 /// is taken as the level-0 fill set, and the no-fill incomplete Cholesky
 /// `S ≈ L̃ L̃ᵀ` is formed keeping only `P` (drop any update landing outside it).
-/// See [`SchurPreconditionerKind::BlockIncompleteCholesky`].
 #[derive(Debug, Clone)]
 pub struct BlockIncompleteCholeskyPreconditioner {
     pub(crate) components: Vec<Ic0Factor>,
