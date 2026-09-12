@@ -1211,6 +1211,36 @@ impl CustomFamily for SurvivalLocationScaleFamily {
         .map(Some)
     }
 
+    /// `⟨I''[δ, e_a], K_b⟩` for every drift direction in one pass on the non-wiggle row
+    /// kernel. The kernel products are formed once per row for the batch, and each direction
+    /// contracts nine fourth-order rows, so no `p × p` axis matrix is materialized (#2668).
+    /// The link-wiggle lowering has no fixed-width row kernel and declines.
+    fn joint_jeffreys_information_second_directional_axis_contractions_each_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        directions: &[Array1<f64>],
+        kernels: &dyn Fn() -> Vec<Array2<f64>>,
+        consume: &mut dyn FnMut(usize, Array2<f64>) -> Result<(), String>,
+    ) -> Result<bool, String> {
+        self.validate_joint_specs(
+            specs,
+            "SurvivalLocationScaleFamily joint Jeffreys all-axes second directional contractions",
+        )?;
+        if !self.row_kernel_directional_supported() {
+            return Ok(false);
+        }
+        crate::block_layout::block_count::validate_block_count::<SurvivalLocationScaleError>(
+            "SurvivalLocationScaleFamily joint Jeffreys all-axes second directional contractions",
+            self.expected_blocks(),
+            block_states.len(),
+        )?;
+        let dynamic = self.build_dynamic_geometry(block_states)?;
+        let kernel = self.survival_ls_row_kernel_rescaled(&dynamic, 0.0);
+        kernel.second_directional_axis_contractions_each(directions, &kernels(), consume)?;
+        Ok(true)
+    }
+
     /// `∇²_β tr(W · I(β))` for the unscaled observed information: the same
     /// fourth-order row contraction that
     /// [`Self::joint_jeffreys_information_second_directional_derivative_with_specs`]

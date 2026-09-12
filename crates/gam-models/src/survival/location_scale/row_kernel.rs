@@ -423,6 +423,132 @@ impl SurvivalLsRowKernel<'_> {
             .collect()
     }
 
+    /// `⟨H²dot[u, e_a], K_b⟩` for every direction `u`, axis `a` and symmetric kernel `K_b`,
+    /// without forming any axis matrix: `consume(index, contractions)` receives the `p × p`
+    /// matrix `contractions[[a, b]]` for `directions[index]`.
+    ///
+    /// Per row, `H²dot[u, e_a] = Σ_{x,y} T4[J·u, J·e_a]_{xy} r_x r_yᵀ` over the channel design
+    /// rows `r_x`, so its kernel contraction is `Σ_{x,y} T4[J·u, J·e_a]_{xy} w^b_{xy}` with
+    /// `w^b_{xy} = r_xᵀ K_b r_y`. The fourth contraction is linear in `J·e_a = Σ_c r_c[a]·e_c`,
+    /// so each row forms the nine `T4[J·u, e_c]` once per direction and scatters
+    /// `⟨T4[J·u, e_c], w^b⟩` through the channel rows `r_c`. The kernel products `w^b` do not
+    /// depend on the direction and are formed once per row for the whole batch. Rows reduce in
+    /// `ARROW_ROW_CHUNK` tiles combined in tile order; a row without an exact kernel
+    /// (non-positive weight) contributes nothing, as in the per-axis fold.
+    pub(crate) fn second_directional_axis_contractions_each(
+        &self,
+        directions: &[Array1<f64>],
+        kernels: &[Array2<f64>],
+        consume: &mut dyn FnMut(usize, Array2<f64>) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let p = crate::row_kernel::RowKernel::<SLS_ROW_K>::n_coefficients(self);
+        if kernels.len() != p || kernels.iter().any(|kernel| kernel.dim() != (p, p)) {
+            return Err(format!(
+                "survival location-scale axis contractions: expected {p} kernels of shape \
+                 ({p}, {p}), got {}",
+                kernels.len(),
+            ));
+        }
+        let direction_slices = directions
+            .iter()
+            .map(|direction| {
+                direction.as_slice().filter(|slice| slice.len() == p).ok_or_else(|| {
+                    format!(
+                        "survival location-scale axis contractions: a direction is not a \
+                         contiguous vector of length {p}"
+                    )
+                })
+            })
+            .collect::<Result<Vec<&[f64]>, String>>()?;
+        let n = gam_math::jet_tower::RowProgram::n_rows(self);
+        let count = directions.len();
+        let tiles = (0..arrow_row_chunk_count(n))
+            .into_par_iter()
+            .map(|chunk_idx| -> Result<Vec<Array2<f64>>, String> {
+                let start = chunk_idx * ARROW_ROW_CHUNK;
+                let end = (start + ARROW_ROW_CHUNK).min(n);
+                let mut totals = vec![Array2::<f64>::zeros((p, p)); count];
+                let mut kernel_times_row = vec![0.0_f64; p];
+                for row in start..end {
+                    let Some((primary, exact)) = self.row_nll_inputs_opt(row)? else {
+                        continue;
+                    };
+                    let plan = sls_outer_plan::<5>(&exact);
+                    let chans = self.cached_channel_rows(row);
+                    let weights: Vec<[[f64; SLS_ROW_K]; SLS_ROW_K]> = kernels
+                        .iter()
+                        .map(|kernel| {
+                            let mut w = [[0.0_f64; SLS_ROW_K]; SLS_ROW_K];
+                            for (y, slot_y) in chans.iter().enumerate() {
+                                let Some((off_y, row_y)) = slot_y.as_ref() else {
+                                    continue;
+                                };
+                                for (i, value) in kernel_times_row.iter_mut().enumerate() {
+                                    *value = row_y
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(ib, &entry)| kernel[[i, off_y + ib]] * entry)
+                                        .sum();
+                                }
+                                for (x, slot_x) in chans.iter().enumerate() {
+                                    let Some((off_x, row_x)) = slot_x.as_ref() else {
+                                        continue;
+                                    };
+                                    w[x][y] = row_x
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(ia, &entry)| entry * kernel_times_row[off_x + ia])
+                                        .sum();
+                                }
+                            }
+                            w
+                        })
+                        .collect();
+                    for (index, direction) in direction_slices.iter().enumerate() {
+                        let direction_u = crate::row_kernel::RowKernel::<SLS_ROW_K>::jacobian_action(
+                            self, row, direction,
+                        );
+                        let total = &mut totals[index];
+                        for (c, slot_c) in chans.iter().enumerate() {
+                            let Some((off_c, row_c)) = slot_c.as_ref() else {
+                                continue;
+                            };
+                            let mut unit = [0.0_f64; SLS_ROW_K];
+                            unit[c] = 1.0;
+                            let fourth =
+                                sls_row_fourth_generated_with_plan(&primary, &plan, &direction_u, &unit);
+                            for (b, w) in weights.iter().enumerate() {
+                                let mut value = 0.0_f64;
+                                for x in 0..SLS_ROW_K {
+                                    for y in 0..SLS_ROW_K {
+                                        value += fourth[x][y] * w[x][y];
+                                    }
+                                }
+                                if value == 0.0 {
+                                    continue;
+                                }
+                                for (ia, &entry) in row_c.iter().enumerate() {
+                                    total[[off_c + ia, b]] += entry * value;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(totals)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut totals = vec![Array2::<f64>::zeros((p, p)); count];
+        for tile in tiles {
+            for (total, part) in totals.iter_mut().zip(tile) {
+                *total += &part;
+            }
+        }
+        for (index, total) in totals.into_iter().enumerate() {
+            consume(index, total)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn row_primary_values(&self, row: usize) -> [f64; SLS_ROW_K] {
         let inv_sigma_exit = self.dynamic.inv_sigma_exit[row];
         let eta_t_exit = -self.dynamic.q_base_exit[row] / inv_sigma_exit;

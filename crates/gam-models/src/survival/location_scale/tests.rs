@@ -2201,6 +2201,122 @@ fn survival_ls_all_axes_second_directional_override_is_the_per_axis_fold_across_
     }
 }
 
+/// #2668: the survival location-scale contraction pass `⟨H²dot[u, e_a], K_b⟩`, which the
+/// Jeffreys drift consumes in place of the rotated axis rows, is the dense all-axes matrices
+/// contracted with the same kernels. The pass forms no axis matrix and sums in a different
+/// order, so agreement is to roundoff. It is checked on the `n = 300` two-tile fixture with
+/// multi-column blocks, two directions and non-diagonal symmetric kernels.
+#[test]
+fn survival_ls_second_directional_axis_contractions_are_the_dense_axes_contracted_2668() {
+    use crate::row_kernel::{RowSet, row_kernel_second_directional_derivative_all_axes};
+
+    let n = 300usize;
+    let p_thr = 3usize;
+    let p_ls = 3usize;
+    let x_time_entry = Array2::from_elem((n, 1), 0.7);
+    let x_time_exit =
+        Array2::from_shape_fn((n, 1), |(r, _)| 1.2 + 0.4 * ((r as f64) * 0.37).sin());
+    let x_time_deriv = Array2::from_elem((n, 1), 1.0);
+    let x_threshold = Array2::from_shape_fn((n, p_thr), |(r, j)| {
+        0.3 + 0.5 * ((r as f64) * 0.11 + j as f64).cos() - 0.02 * (j as f64)
+    });
+    let x_log_sigma = Array2::from_shape_fn((n, p_ls), |(r, j)| {
+        0.1 + 0.4 * ((r as f64) * 0.07 - 0.5 * (j as f64)).sin()
+    });
+    let beta_t = array![0.3];
+    let beta_thr = array![-0.4, 0.25, 0.1];
+    let beta_ls = array![0.2, -0.15, 0.05];
+    let directions = vec![
+        array![0.7, -0.5, 0.9, 0.3, -0.2, 0.6, -0.4],
+        array![-0.3, 0.8, 0.1, -0.6, 0.4, 0.2, 0.5],
+    ];
+    let p = directions[0].len();
+    let kernels: Vec<Array2<f64>> = (0..p)
+        .map(|b| {
+            Array2::from_shape_fn((p, p), |(i, j)| {
+                (0.3 * ((b + 1) as f64) * ((i + j) as f64)).cos() + if i == j { 1.0 } else { 0.0 }
+            })
+        })
+        .collect();
+
+    for distribution in [ResidualDistribution::Gaussian, ResidualDistribution::Logistic] {
+        let mut family = survival_exact_newton_test_familywith_inverse_link(
+            residual_distribution_inverse_link(distribution),
+        );
+        family.n = n;
+        family.y = Array1::from_iter((0..n).map(|r| if r % 3 == 0 { 0.0 } else { 1.0 }));
+        family.w = Array1::from_iter((0..n).map(|r| 0.6 + 0.1 * ((r % 7) as f64)));
+        family.x_time_entry = Arc::new(x_time_entry.clone());
+        family.x_time_exit = Arc::new(x_time_exit.clone());
+        family.x_time_deriv = Arc::new(x_time_deriv.clone());
+        family.x_threshold =
+            DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(x_threshold.clone()));
+        family.x_log_sigma =
+            DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(x_log_sigma.clone()));
+        let mut eta_time = Array1::<f64>::zeros(3 * n);
+        for i in 0..n {
+            eta_time[i] = x_time_entry[[i, 0]] * beta_t[0];
+            eta_time[n + i] = x_time_exit[[i, 0]] * beta_t[0];
+            eta_time[2 * n + i] = x_time_deriv[[i, 0]] * beta_t[0];
+        }
+        let states = vec![
+            ParameterBlockState {
+                beta: beta_t.clone(),
+                eta: eta_time,
+            },
+            ParameterBlockState {
+                beta: beta_thr.clone(),
+                eta: x_threshold.dot(&beta_thr),
+            },
+            ParameterBlockState {
+                beta: beta_ls.clone(),
+                eta: x_log_sigma.dot(&beta_ls),
+            },
+        ];
+        let dynamic = family
+            .build_dynamic_geometry(&states)
+            .expect("dynamic geometry");
+        let kernel = family.survival_ls_row_kernel_rescaled(&dynamic, 0.0);
+        let mut contracted: Vec<Option<Array2<f64>>> = vec![None; directions.len()];
+        kernel
+            .second_directional_axis_contractions_each(&directions, &kernels, &mut |index, matrix| {
+                contracted[index] = Some(matrix);
+                Ok(())
+            })
+            .expect("axis contraction pass");
+        for (index, direction) in directions.iter().enumerate() {
+            let axes = row_kernel_second_directional_derivative_all_axes(
+                &kernel,
+                &RowSet::All,
+                direction.as_slice().expect("contiguous direction"),
+            )
+            .expect("dense all-axes second directional derivative");
+            let got = contracted[index]
+                .as_ref()
+                .expect("the pass hands over every direction");
+            assert_eq!(got.dim(), (p, p), "{distribution:?}: one p x p contraction matrix");
+            let mut largest = 0.0_f64;
+            for a in 0..p {
+                for b in 0..p {
+                    let dense: f64 = axes[a].iter().zip(kernels[b].iter()).map(|(x, y)| x * y).sum();
+                    largest = largest.max(dense.abs());
+                    assert!(
+                        (got[[a, b]] - dense).abs() <= 1.0e-10 * (1.0 + dense.abs()),
+                        "{distribution:?} direction {index} axis {a} kernel {b}: contraction {} \
+                         vs dense {dense}",
+                        got[[a, b]]
+                    );
+                }
+            }
+            assert!(
+                largest > 1.0e-3,
+                "{distribution:?} direction {index}: contractions too small ({largest:.3e}) for \
+                 agreement to say anything"
+            );
+        }
+    }
+}
+
 fn sparse_survival_exact_newton_test_family() -> SurvivalLocationScaleFamily {
     let mut family = survival_exact_newton_test_family();
     family.x_threshold = sparse_design_from_dense(&array![[1.0], [0.4], [-0.6]]);
