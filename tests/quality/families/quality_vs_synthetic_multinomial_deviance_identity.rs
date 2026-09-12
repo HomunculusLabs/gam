@@ -363,8 +363,31 @@ emit("mgcv_logloss", ll)
     // recompute `-2·Σ log p̂` over the training rows — no penalty leakage, no
     // permuted/dropped reference class. This is a bookkeeping invariant, not a
     // peer-tool comparison.
-    let probs_train =
-        predict_multinomial_formula(&model, &ds_train).expect("multinomial predict (train)");
+    //
+    // `p̂` is the MODE's own `softmax(η̂)`, the probability `−2 · log L(β̂)` is
+    // defined against, rebuilt from the payload's training design and active
+    // coefficients with the reference class's `η = 0` last.
+    // `predict_multinomial_formula` publishes the posterior mean `E[softmax(η)]`
+    // (gam#2612), a different estimand, so its log-likelihood is not the stored
+    // deviance's to within any roundoff bar.
+    let probs_train = {
+        let design = model.training_design().expect("training design");
+        let beta = model.coefficients_active().expect("active coefficients");
+        let eta = design.dot(&beta);
+        let active = eta.ncols();
+        let mut probs = Array2::<f64>::zeros((eta.nrows(), active + 1));
+        for (row, mut out) in eta.rows().into_iter().zip(probs.rows_mut()) {
+            let shift = row.iter().copied().fold(0.0_f64, f64::max);
+            let partition =
+                (-shift).exp() + row.iter().map(|&value| (value - shift).exp()).sum::<f64>();
+            for (class, &value) in row.iter().enumerate() {
+                out[class] = (value - shift).exp() / partition;
+            }
+            out[active] = (-shift).exp() / partition;
+        }
+        probs
+    };
+    assert_eq!(probs_train.nrows(), train.len(), "saved training design rows");
     let mut loglik_train = 0.0_f64;
     for (i, o) in train.iter().enumerate() {
         let c = class_index(&o.label);
