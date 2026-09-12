@@ -499,3 +499,161 @@ fn threshold_gate_exact_sparse_logdet_trace_matches_the_lane_value_2915() {
          straddling gate: majorizer={majorizer:e} fd={fd:e} bar={bar:e}"
     );
 }
+
+/// #2915 — the clamp-basin price's own derivative on the matrix-free lane.
+///
+/// On a threshold-gate state whose exact-A evidence factor prices clamp-basin
+/// rows, every exact-operator from-probes channel must be the central difference
+/// of the lane value on one discrete stratum: the sparse log-strength trace and
+/// one ARD precision trace against `½ arrow_log_det` over frozen θ̂, and the
+/// θ-adjoint entry of a logit on a clamp-basin row against `arrow_log_det` at
+/// frozen ρ. The premise requires a material basin price, so the clamp leg is
+/// live on the rows the gate measures. Each gap prints before any assertion.
+#[test]
+fn clamp_basin_price_derivative_matches_the_lane_value_2915() {
+    let mode = AssignmentMode::threshold_gate(1.0, 0.0);
+    let state = first_clamp_basin_state(mode, true);
+    let (mut term, target, _) = threshold_gate_tiny_fixture(true);
+    term.assignment.mode = mode;
+    let basin_price = state
+        .rows
+        .iter()
+        .filter_map(|&row| state.cache.deflation_row_spectra[row].as_ref())
+        .flat_map(|spectrum| {
+            spectrum
+                .raw_evals
+                .iter()
+                .zip(spectrum.cond_evals.iter())
+                .zip(spectrum.conditioning.iter())
+                .filter(|((raw, _), conditioning)| {
+                    **raw < 0.0 && **conditioning == RowSpectralConditioning::Raw
+                })
+                .map(|((raw, priced), _)| priced - raw)
+                .collect::<Vec<f64>>()
+        })
+        .fold(0.0_f64, f64::max);
+    assert!(
+        basin_price > 1.0e-3,
+        "#2915 premise: the clamp-basin rows {:?} must carry a material price; largest \
+         v'Ev = {basin_price:e}",
+        state.rows
+    );
+    let (probes, sinv) = full_basis_bundle(&state.cache);
+    let operator = EvidenceOperator::ExactObservedInformation;
+    let stratum = |c: &ArrowFactorCache| -> (Vec<usize>, usize) {
+        let directions: usize = c.deflated_row_directions.iter().map(Vec::len).sum();
+        (clamp_basin_rows(c), directions)
+    };
+    let anchor_stratum = stratum(&state.cache);
+    let log_det_at = |moved_term: &SaeManifoldTerm, moved_rho: &SaeManifoldRho| -> f64 {
+        let (_, endpoint) = exact_a_evidence_cache(moved_term, &target, moved_rho)
+            .expect("#2915 exact-A factor at a finite-difference endpoint");
+        assert_eq!(
+            stratum(&endpoint),
+            anchor_stratum,
+            "#2915: both endpoints must sit on the anchor's clamp-basin stratum"
+        );
+        endpoint
+            .arrow_log_det()
+            .expect("#2915 authoritative joint log-det of the exact-A factor")
+    };
+    let h = 1.0e-5;
+
+    let sparse = state
+        .term
+        .assignment_log_strength_hessian_trace_from_probes(
+            &state.rho,
+            &state.cache,
+            &probes,
+            &sinv,
+            operator,
+        )
+        .expect("#2915 exact-operator sparse trace");
+    let sparse_fd = {
+        let mut plus = state.rho.clone();
+        let mut minus = state.rho.clone();
+        plus.log_lambda_sparse += h;
+        minus.log_lambda_sparse -= h;
+        0.5 * (log_det_at(&term, &plus) - log_det_at(&term, &minus)) / (2.0 * h)
+    };
+
+    let ard_atom = (0..state.rho.log_ard.len())
+        .find(|&atom| !state.rho.log_ard[atom].is_empty())
+        .expect("#2915 premise: the fixture must carry an ARD precision");
+    let ard = state
+        .term
+        .ard_log_precision_hessian_trace_from_probes(
+            &state.rho,
+            &state.cache,
+            &probes,
+            &sinv,
+            operator,
+        )
+        .expect("#2915 exact-operator ARD trace")[ard_atom][0];
+    let ard_fd = {
+        let mut plus = state.rho.clone();
+        let mut minus = state.rho.clone();
+        plus.log_ard[ard_atom][0] += h;
+        minus.log_ard[ard_atom][0] -= h;
+        0.5 * (log_det_at(&term, &plus) - log_det_at(&term, &minus)) / (2.0 * h)
+    };
+
+    let row = state.rows[0];
+    let variables = term
+        .row_vars_for_cache_row(row, &state.cache)
+        .expect("#2915 row variables");
+    let (position, atom) = variables
+        .iter()
+        .enumerate()
+        .find_map(|(position, variable)| match *variable {
+            SaeLocalRowVar::Logit { atom } => Some((position, atom)),
+            SaeLocalRowVar::Coord { .. } => None,
+        })
+        .expect("#2915 premise: a threshold-gate row carries a free logit");
+    let theta = state
+        .term
+        .logdet_theta_adjoint_from_probes(
+            &state.rho,
+            &state.cache,
+            &probes,
+            &sinv,
+            operator,
+            Some(target.view()),
+        )
+        .expect("#2915 exact-operator theta-adjoint")
+        .t[state.cache.row_offsets[row] + position];
+    let theta_fd = {
+        let mut plus = term.clone();
+        let mut minus = term.clone();
+        plus.assignment.logits[[row, atom]] += h;
+        minus.assignment.logits[[row, atom]] -= h;
+        (log_det_at(&plus, &state.rho) - log_det_at(&minus, &state.rho)) / (2.0 * h)
+    };
+
+    let rho_bar = |fd: f64| 1.0e-6 * (1.0 + fd.abs());
+    let theta_bar = 1.0e-5 * (1.0 + theta_fd.abs());
+    eprintln!(
+        "#2915 CLAMP_BASIN_PRICE rows={:?} basin_price={basin_price:.6e}\n  sparse={sparse:.12e} \
+         fd={sparse_fd:.12e} gap={:.3e}\n  ard[{ard_atom},0]={ard:.12e} fd={ard_fd:.12e} \
+         gap={:.3e}\n  theta[row {row}, logit {atom}]={theta:.12e} fd={theta_fd:.12e} gap={:.3e}",
+        state.rows,
+        (sparse - sparse_fd).abs(),
+        (ard - ard_fd).abs(),
+        (theta - theta_fd).abs()
+    );
+    assert!(
+        (sparse - sparse_fd).abs() <= rho_bar(sparse_fd),
+        "#2915: the exact-operator sparse trace must differentiate the lane value on \
+         clamp-basin rows: trace={sparse:e} fd={sparse_fd:e}"
+    );
+    assert!(
+        (ard - ard_fd).abs() <= rho_bar(ard_fd),
+        "#2915: the exact-operator ARD trace must differentiate the lane value on \
+         clamp-basin rows: trace={ard:e} fd={ard_fd:e}"
+    );
+    assert!(
+        (theta - theta_fd).abs() <= theta_bar,
+        "#2915: the exact-operator theta-adjoint must differentiate the lane value on a \
+         clamp-basin row: adjoint={theta:e} fd={theta_fd:e}"
+    );
+}

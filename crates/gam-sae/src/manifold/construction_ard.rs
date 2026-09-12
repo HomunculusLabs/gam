@@ -1113,6 +1113,16 @@ impl SaeManifoldTerm {
                 }
             })
             .collect();
+        // #2915 — a clamp-basin price moves with the clamp itself, which the exact
+        // operator's `α·cos κt` does not carry.
+        let clamp = if operator.is_exact_a() {
+            Some(
+                self.materialize_ard_concave_clamp_diagonal_for_rows(rho, &cache.row_dims)
+                    .map_err(|reason| ArrowSchurError::SchurFactorFailed { reason })?,
+            )
+        } else {
+            None
+        };
         for row in 0..n {
             let w_row = row_w.map_or(1.0, |w| w[row]);
             let q = cache.row_dims[row];
@@ -1137,6 +1147,14 @@ impl SaeManifoldTerm {
                 .deflation_row_spectra
                 .get(row)
                 .and_then(Option::as_ref);
+            let row_base = cache.row_offsets[row];
+            let price = clamp.as_ref().and_then(|clamp| {
+                Self::clamp_basin_price_weights(
+                    &inv_vv,
+                    clamp.slice(ndarray::s![row_base..row_base + q]),
+                    spectrum,
+                )
+            });
             // Correction for one local coordinate slot `s` with curvature `hess`,
             // identical to the dense sibling's `slot_correction`.
             let slot_correction = |s: usize, hess: f64| -> f64 {
@@ -1161,6 +1179,14 @@ impl SaeManifoldTerm {
                     let s = block_start + axis;
                     traces[k][axis] += 0.5 * inv_diag_local[s] * hess;
                     traces[k][axis] -= 0.5 * slot_correction(s, hess);
+                    if let (Some((explicit, response)), Some(clamp)) = (price.as_ref(), clamp.as_ref())
+                    {
+                        if s < q {
+                            // `∂E/∂ρ_ard` at slot `s` is the ARD clamp itself: degree one in `α`.
+                            traces[k][axis] += 0.5
+                                * (explicit[s] * clamp[row_base + s] + response[[s, s]] * hess);
+                        }
+                    }
                 }
             };
             match self.last_row_layout {

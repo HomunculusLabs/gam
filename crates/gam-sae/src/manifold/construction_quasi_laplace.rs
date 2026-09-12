@@ -5303,6 +5303,13 @@ impl SaeManifoldTerm {
                 self.row_loss_weights.as_deref(),
             )?;
         }
+        // #2915 — a clamp-basin price moves with the clamp itself, and the
+        // Daleckii–Krein map does not see that motion.
+        let clamp = if operator.is_exact_a() {
+            Some(self.materialize_ard_concave_clamp_diagonal_for_rows(rho, &cache.row_dims)?)
+        } else {
+            None
+        };
         let assignment_dim = self.assignment.assignment_coord_dim();
         let row_loss_weights = self.row_loss_weights.as_deref();
         let mut trace = 0.0_f64;
@@ -5328,6 +5335,10 @@ impl SaeManifoldTerm {
                 .deflation_row_spectra
                 .get(row)
                 .and_then(Option::as_ref);
+            let price = clamp.as_ref().and_then(|clamp| {
+                let base = cache.row_offsets[row];
+                Self::clamp_basin_price_weights(&inv_vv, clamp.slice(s![base..base + q]), spectrum)
+            });
 
             if let Some((_temperature, scale)) = softmax.as_ref() {
                 let row_weight = row_loss_weights.map_or(1.0, |weights| weights[row]);
@@ -5392,6 +5403,11 @@ impl SaeManifoldTerm {
                                         &inv_vv, &d_mat, dirs, spectrum,
                                     );
                                 }
+                                // #2915 — softmax logits carry no clamp, so only the
+                                // basin prices' response to `dA` is added.
+                                if let Some((_, response)) = price.as_ref() {
+                                    trace += (response * &d_mat).sum();
+                                }
                             }
                         }
                     }
@@ -5429,6 +5445,23 @@ impl SaeManifoldTerm {
                         d_mat[[slot, slot]] = d_diag[slot];
                     }
                     trace -= Self::deflation_block_correction(&inv_vv, &d_mat, dirs, spectrum);
+                }
+                if let (Some((explicit, response)), Some(clamp)) = (price.as_ref(), clamp.as_ref())
+                {
+                    // `∂E/∂ρ_sparse` is the gate's clamp on its logit slots, degree one
+                    // in `λ_sparse`; a coordinate slot's ARD clamp does not move with it.
+                    // Every other family writes no clamp on its logits.
+                    let base = cache.row_offsets[row];
+                    let logit_slots = match self.last_row_layout {
+                        Some(ref layout) => layout.active_atoms[row].len().min(q),
+                        None => assignment_dim.min(q),
+                    };
+                    for slot in 0..logit_slots {
+                        trace += explicit[slot] * clamp[base + slot];
+                    }
+                    for slot in 0..q {
+                        trace += response[[slot, slot]] * d_diag[slot];
+                    }
                 }
             }
         }
@@ -5598,6 +5631,68 @@ impl SaeManifoldTerm {
             }
         }
         f
+    }
+
+    /// #2915 — contraction weights for the part of a row's clamp-basin prices
+    /// that the Daleckii–Krein map does not differentiate.
+    ///
+    /// A clamp-basin direction `v_a` of the raw exact-A row block (raw `λ_a < 0`,
+    /// conditioning `Raw`) is priced at `λ̃_a = λ_a + c_a` with `c_a = v_aᵀ E v_a`
+    /// (`classify_exact_a_direction`). `DΦ[dA]` moves `λ̃_a` only through `λ_a`, so
+    /// an exact-operator trace on the row is short by `Σ_a g_aa·dc_a`, where
+    /// `g_aa = (UᵀGU)_aa` and
+    /// `dc_a = v_aᵀ dE v_a + 2 Σ_{b≠a} (UᵀEU)_ab (UᵀdAU)_ab / (λ_a − λ_b)`.
+    ///
+    /// Returns `(explicit, response)`: `explicit[s] = Σ_a g_aa·v_a[s]²` contracts a
+    /// diagonal `dE`, and `response = U W Uᵀ` contracts the raw derivative `dA`.
+    /// A near-degenerate pair takes the gap convention of
+    /// [`Self::row_deflation_frechet_coefficients`]. `None` when the row prices no
+    /// clamp basin.
+    pub(crate) fn clamp_basin_price_weights(
+        inv_vv: &Array2<f64>,
+        clamp_row: ArrayView1<'_, f64>,
+        spectrum: Option<&RowDeflationSpectrum>,
+    ) -> Option<(Array1<f64>, Array2<f64>)> {
+        let spec = spectrum?;
+        let q = inv_vv.nrows();
+        let u = &spec.evecs;
+        if u.nrows() != q || u.ncols() != q || clamp_row.len() != q {
+            return None;
+        }
+        let raw = &spec.raw_evals;
+        let basins: Vec<usize> = (0..q)
+            .filter(|&a| spec.conditioning[a] == RowSpectralConditioning::Raw && raw[a] < 0.0)
+            .collect();
+        if basins.is_empty() {
+            return None;
+        }
+        let eigen_scale = raw
+            .iter()
+            .chain(spec.cond_evals.iter())
+            .copied()
+            .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+        let gap_threshold = eigen_gap_threshold(eigen_scale, raw.len());
+        let g = u.t().dot(inv_vv).dot(u);
+        let clamp = Array2::from_diag(&clamp_row.to_owned());
+        let e_rot = u.t().dot(&clamp).dot(u);
+        let mut explicit = Array1::<f64>::zeros(q);
+        let mut w = Array2::<f64>::zeros((q, q));
+        for &a in &basins {
+            let g_aa = g[[a, a]];
+            for s in 0..q {
+                explicit[s] += g_aa * u[[s, a]] * u[[s, a]];
+            }
+            for b in 0..q {
+                let denom = raw[a] - raw[b];
+                if b == a || denom.abs() <= gap_threshold {
+                    continue;
+                }
+                let weight = g_aa * e_rot[[a, b]] / denom;
+                w[[a, b]] += weight;
+                w[[b, a]] += weight;
+            }
+        }
+        Some((explicit, u.dot(&w).dot(&u.t())))
     }
 
     /// β-tier selected inverse `(H⁻¹)_ββ`, shared across rows (#932 FRONT C). On
@@ -6488,6 +6583,16 @@ impl SaeManifoldTerm {
         let exact_a = operator.is_exact_a();
         self.assignment.validate_rho_domain(rho)?;
         let ard_precisions = self.validated_ard_precisions(rho)?;
+        // #2915 — on the exact operator a clamp-basin price moves with the clamp
+        // itself (`E` and its θ-diagonal), which the Daleckii–Krein map does not see.
+        let clamp_price_inputs = if exact_a {
+            Some((
+                self.materialize_ard_concave_clamp_diagonal_for_rows(rho, &cache.row_dims)?,
+                self.ard_concave_clamp_dt_diagonal(rho, cache)?,
+            ))
+        } else {
+            None
+        };
         // Threshold-gate sparsity strength for the assignment-prior H-diagonal
         // derivative (#1006/#1556): the ThresholdGate penalty differentiates
         // `λ_sparse`, every other assignment mode contributes zero. Same binding
@@ -6644,6 +6749,13 @@ impl SaeManifoldTerm {
                 .get(row)
                 .and_then(Option::as_ref);
             let defl_live = Self::row_deflation_is_live(defl_dirs, defl_spectrum);
+            let clamp_price = clamp_price_inputs.as_ref().and_then(|(clamp, _)| {
+                Self::clamp_basin_price_weights(
+                    &inv_vv,
+                    clamp.slice(s![base..base + q]),
+                    defl_spectrum,
+                )
+            });
 
             // #2330 Patch D per-row residual context (#2515 port). `w_row_prior`
             // is bound below for the majorizer legs; the residual weighting is the
@@ -6688,7 +6800,10 @@ impl SaeManifoldTerm {
                             row,
                             atom,
                             base + position,
-                            inv_vv[[position, position]] - diag_deflation_weight,
+                            inv_vv[[position, position]] - diag_deflation_weight
+                                + clamp_price
+                                    .as_ref()
+                                    .map_or(0.0, |(_, response)| response[[position, position]]),
                         ));
                     }
                 }
@@ -6872,6 +6987,13 @@ impl SaeManifoldTerm {
                         defl_spectrum,
                     );
                 }
+                if let (Some((explicit, response)), Some((_, clamp_dt))) =
+                    (clamp_price.as_ref(), clamp_price_inputs.as_ref())
+                {
+                    // #2915 — `∂E/∂θ_w` is diagonal, nonzero only at slot `w`.
+                    gamma += explicit[w] * clamp_dt[base + w]
+                        + (response * &deflated_base_dh_mat).sum();
+                }
                 // t–β block: reuse the dense contraction with the reconstructed inv_vβ.
                 for a in 0..q {
                     for (beta_pos, channel) in border.iter().enumerate() {
@@ -6949,6 +7071,11 @@ impl SaeManifoldTerm {
                         defl_dirs,
                         defl_spectrum,
                     );
+                }
+                if let Some((_, response)) = clamp_price.as_ref() {
+                    // #2915 — the clamp does not depend on β, so a border variable
+                    // moves a basin price only through `dA`.
+                    gamma += (response * &dh_mat).sum();
                 }
                 for a in 0..q {
                     for (beta_pos, channel) in border.iter().enumerate() {
