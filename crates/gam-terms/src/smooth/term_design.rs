@@ -62,14 +62,6 @@ fn linear_function_mass(column: ArrayView1<'_, f64>, term_name: &str) -> Result<
     Ok(mass)
 }
 
-pub fn build_term_collection_design_inner(
-    data: ArrayView2<'_, f64>,
-    spec: &TermCollectionSpec,
-) -> Result<TermCollectionDesign, BasisError> {
-    let policy = gam_runtime::resource::ResourcePolicy::default_library();
-    build_term_collection_design_inner_with_policy(data, spec, &policy)
-}
-
 /// Build a planned term collection while preserving the caller's resource
 /// policy through the actual basis realization. The policy must reach the
 /// [`BasisWorkspace`]: using it only while lowering the formula spec leaves a

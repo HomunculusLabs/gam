@@ -68,7 +68,7 @@ pub use isotropic_scale::{IsotropicScale, IsotropicScaleError, OriginalUnits, St
 pub use penalty_spec::{PenaltySpec, validate_penalty_spec_shape};
 
 pub use analytic_penalties::{
-    ARDPenalty, AnalyticPenalty, AnalyticPenaltyKind, AnalyticPenaltyOp, AnalyticPenaltyRegistry,
+    ARDPenalty, AnalyticPenalty, AnalyticPenaltyKind, AnalyticPenaltyRegistry,
     BlockOrthogonalityPenalty, BlockSparsityPenalty, DecoderIncoherencePenalty, DifferenceOpKind,
     EdgeRestriction, FrozenAnalyticPenaltyOp, HarmonicRoughnessPenalty, IsometryDuchonRadialSource,
     IsometryPenalty, IsometryReference, IvaeRidgeMeanGauge, MechanismSparsityPenalty,

@@ -3,7 +3,7 @@
 // The joint-build variants below STAY here: they return a `gam_solve`
 // `EstimationError` / call `freeze_term_collection_from_design`
 // (`spatial_optimization.rs`), so they belong to the gam-models orchestration
-// tier. They reach the relocated `build_term_collection_design_inner` /
+// tier. They reach the relocated `build_term_collection_design_with_policy` /
 // `build_term_collection_design` via the module's `use gam_terms::smooth::*`.
 pub fn build_term_collection_designs_joint(
     data: ArrayView2<'_, f64>,

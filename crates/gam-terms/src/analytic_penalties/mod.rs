@@ -72,10 +72,9 @@
 //! the quadratic ARD penalty produces a [`crate::smooth::BlockwisePenalty`]
 //! that slots directly into the canonical-penalty pipeline, while the
 //! non-quadratic Sparsity, TV, NuclearNorm, SCAD/MCP, Orthogonality,
-//! DecoderIncoherence, and Isometry
-//! penalties produce [`AnalyticPenaltyOp`] handles that downstream PIRLS / REML consumers query
-//! through the same `value / gradient / hvp` interface they already use for
-//! smoothness.
+//! DecoderIncoherence, and Isometry penalties implement [`AnalyticPenalty`],
+//! which downstream PIRLS / REML consumers query through the same
+//! `value / gradient / hvp` interface they already use for smoothness.
 //!
 //! ## Registration with REML
 //!

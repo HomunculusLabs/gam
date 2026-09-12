@@ -2,25 +2,6 @@ use super::*;
 use ndarray::s;
 
 // ---------------------------------------------------------------------------
-// Operator-form wrapper for the REML/PIRLS canonical pipeline
-// ---------------------------------------------------------------------------
-
-/// Wraps any [`AnalyticPenalty`] so the existing PIRLS / REML consumers
-/// (which expect a `value + gradient + (hvp | hessian-diag)` quintuple) can
-/// query it uniformly. The wrapper is `Send + Sync` and `Arc`-shared so the
-/// outer loop can hand it to multiple workers.
-pub struct AnalyticPenaltyOp {
-    pub penalty: Arc<dyn AnalyticPenalty>,
-}
-
-impl AnalyticPenaltyOp {
-    #[must_use]
-    pub fn new(penalty: Arc<dyn AnalyticPenalty>) -> Self {
-        Self { penalty }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Registration helper — collects penalty kinds for the outer REML driver
 // ---------------------------------------------------------------------------
 

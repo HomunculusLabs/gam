@@ -1650,5 +1650,23 @@
     },
     "reason": "#2469 and the delete-useless-public-API rule: equivariant_penalty_value's projection energy is identically zero for an exact projector, because W rho(g) lies in col(W). Its value was the 1e-6 ridge's artifact plus an ARD prior with a 1e-3 floor. Its only product user was gamfit.EquivariantPenalty.evaluate, which no fit consumes. The function, its shim and the Python surface are deleted together.",
     "evidence": "public_api_census.py's public_functions predicate over this diff's removed hunks yields one pub fn, crates/gam-terms/src/analytic_penalties/equivariant_penalty.rs::equivariant_penalty_value. gauge_companion_loss, the file's other pub fn, is unchanged. The deleted pyffi shims equivariant_penalty_value and equivariant_aux_enabled are private."
+  },
+  {
+    "base": "7e34b8f7357e67488e387980bf941962d50bb4f4",
+    "removed": {
+      "crates/gam-terms/src/analytic_penalties/normalized_gram.rs::gauss_newton_action": 1,
+      "crates/gam-terms/src/analytic_penalties/normalized_gram.rs::gauss_newton_diagonal": 1,
+      "crates/gam-terms/src/analytic_penalties/registry.rs::new": 1,
+      "crates/gam-terms/src/decoders/behavioral_head.rs::basis": 1,
+      "crates/gam-terms/src/decoders/behavioral_head.rs::rank": 1,
+      "crates/gam-terms/src/inference/higher_order.rs::info": 1,
+      "crates/gam-terms/src/inference/higher_order.rs::nu3": 1,
+      "crates/gam-terms/src/inference/higher_order.rs::nu4": 1,
+      "crates/gam-terms/src/inference/structure_evidence.rs::absorb_probe_outcome": 1,
+      "crates/gam-terms/src/smooth/term_design.rs::build_term_collection_design_inner": 1,
+      "crates/gam-terms/src/structure/anova_atom.rs::predict": 1
+    },
+    "reason": "prune-api-b product-use sweep (#2899). Public functions with no product user are removed with the types that carried them: NormalizedCrossGram::gauss_newton_diagonal/gauss_newton_action, AnalyticPenaltyOp::new, LeakageAbsorber::rank/basis, CumulantArrays::info/nu3/nu4, StructureLedger::absorb_probe_outcome, build_term_collection_design_inner and PairSurfaceFit::predict.",
+    "evidence": "scripts/public_api_census.py over the probe commit b2e4c4c69 with these removals on base c58034b1e (MSI acn112, python3.12; sliceB.census.out) reports exactly these eleven path::name removals, one declaration each; re-keyed to the push parent after de4203504 touched other regions of registry.rs and term_specs.rs. The prune-api-b census at 11a52ed5f finds no production or test reference to any of them."
   }
 ]

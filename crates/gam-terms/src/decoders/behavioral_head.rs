@@ -29,20 +29,10 @@
 //! block exactly the way the arrow-Schur border already hosts a β-border
 //! coupled to per-row latent blocks.
 //!
-//! # The three pieces
-//!
-//! 1. [`BehavioralHead`] — the head GLM itself: value + gradient of the head
-//!    log-likelihood w.r.t. the head coefficients `(a, w)` AND w.r.t. the
-//!    latent codes `t` (the cross-channel coupling), under a `RowSubsampleMask`
-//!    weighting so unlabeled rows carry zero head weight (semi-supervised).
-//!
-//! 2. [`LeakageAbsorber`] — the #461 Neyman-orthogonal device. Joint fitting
-//!    can sculpt the dictionary to *encode the label* (rediscover your own
-//!    probe). The absorber widens the reconstruction design with the head's
-//!    score-influence directions so the dictionary update is orthogonalized
-//!    against the label channel. The boundary it enforces is precisely
-//!    "orient what `p(x)` put there" vs. "hallucinate geometry from the label"
-//!    — the novel statistical content of the whole construction.
+//! [`BehavioralHead`] is the head GLM itself: value + gradient of the head
+//! log-likelihood w.r.t. the head coefficients `(a, w)` AND w.r.t. the latent
+//! codes `t` (the cross-channel coupling), under a `RowSubsampleMask` weighting
+//! so unlabeled rows carry zero head weight (semi-supervised).
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
@@ -304,79 +294,4 @@ impl BehavioralHead {
         }
         Ok((nll, grad_coeffs, grad_t))
     }
-}
-
-/// The #461 Neyman-orthogonal leakage absorber for the behavioral head.
-///
-/// # The boundary it enforces
-///
-/// You want the behavioral channel to *orient* the existing manifold (fix the
-/// frame) but *not* to *invent* geometry absent from `p(x)` (sculpt a manifold
-/// to fit the label). The orthogonalization is precisely the boundary between
-/// those two — between "orient what's there" and "hallucinate structure from
-/// the label." Getting it exactly right is the single most important statistical
-/// content of the whole construction.
-///
-/// # Mechanism (mirrors the survival/BMS install)
-///
-/// The head's score-influence directions in latent-code space are the rows of
-/// the *score-influence Jacobian*
-///
-/// ```text
-///   Z[n, :] = √s_n · ∂η_n/∂t_n = √s_n · w   (per η-channel)
-/// ```
-///
-/// i.e. the realized, per-row, Fisher-weighted directions along which a change
-/// in the latent codes moves the label-channel linear predictor. We
-/// orthonormalize their span (thin QR) to obtain the *label-channel subspace*
-/// `Q` in latent-code space. The dictionary (reconstruction) update is then
-/// projected onto the orthogonal complement of `Q`:
-///
-/// ```text
-///   Δt_recon  ←  (I − Q Qᵀ) Δt_recon
-/// ```
-///
-/// so the reconstruction channel can only move the codes in directions the
-/// label channel does *not* already explain. Equivalently, the reconstruction
-/// design is widened with `Q` as a null-penalized absorbed block, making the
-/// dictionary's estimating equation orthogonal to `span(Q)` — the label channel
-/// orients the frame, but cannot drag the dictionary toward encoding the label.
-#[derive(Debug, Clone)]
-pub struct LeakageAbsorber {
-    /// Orthonormal basis `Q ∈ ℝ^{d × r}` of the label-channel subspace in
-    /// latent-code space (`r ≤ min(d, n_eta)`). The reconstruction update is
-    /// projected onto `range(Q)^⊥`.
-    q: Array2<f64>,
-}
-
-impl LeakageAbsorber {
-
-    /// Rank of the absorbed label-channel subspace (`r`). Zero ⇒ the absorber
-    /// is a no-op (the label channel pins no direction the dictionary must be
-    /// orthogonalized against).
-    pub fn rank(&self) -> usize {
-        self.q.ncols()
-    }
-
-    /// Orthonormal basis `Q` of the absorbed subspace (`d × r`).
-    pub fn basis(&self) -> ArrayView2<'_, f64> {
-        self.q.view()
-    }
-
-}
-
-/// Per-feature (per-atom) behavioral-significance report for the head.
-#[derive(Debug, Clone)]
-pub struct HeadFeatureSignificance {
-    /// Wald statistic per latent axis (feature).
-    pub statistic: Vec<f64>,
-    /// Raw p-value per latent axis.
-    pub p_value: Vec<f64>,
-    /// Indices of features rejected by e-BH at the chosen FDR level — the
-    /// features whose behavioral loading is statistically real after the
-    /// multiplicity correction. These are the reportable behaviorally-anchored
-    /// atoms.
-    pub fdr_rejected: Vec<usize>,
-    /// The FDR level the rejection set was computed at.
-    pub alpha: f64,
 }

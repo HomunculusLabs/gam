@@ -24,74 +24,6 @@ pub fn bartlett_factor_from_mean(mean_w: f64, ref_df: f64) -> Option<f64> {
     Some(mean_w / ref_df)
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Penalized-null cumulant assembly from the #932 derivative towers (issue #939)
-// ───────────────────────────────────────────────────────────────────────────
-
-/// Per-row log-likelihood derivatives in the row's linear-predictor `η`, for a
-/// single-predictor (`K = 1`) GLM-type family: `ℓ'ᵢ, ℓ''ᵢ, ℓ'''ᵢ, ℓ''''ᵢ`.
-///
-/// These are exactly the diagonal channels of the `K = 1` #932 row tower
-/// ([`gam_math::jet_tower::Tower4`]): the tower carries the row *negative*
-/// log-likelihood, so `ℓ⁽ᵏ⁾ᵢ = −towerᵢ.derivative_k`. Callers fill this struct
-/// with those sign-flipped channels or with closed-form derivatives (e.g. the
-/// Gaussian fixture).
-#[derive(Debug, Clone, Copy)]
-pub struct RowLogLikDerivs {
-    /// `ℓ'ᵢ = ∂ℓᵢ/∂ηᵢ` (the score contribution).
-    pub d1: f64,
-    /// `ℓ''ᵢ = ∂²ℓᵢ/∂ηᵢ²` (≤ 0 for a concave row likelihood).
-    pub d2: f64,
-    /// `ℓ'''ᵢ`.
-    pub d3: f64,
-    /// `ℓ''''ᵢ`.
-    pub d4: f64,
-}
-
-/// The exact cumulant arrays the Bartlett/Skovgaard expansions consume, over a
-/// tested coefficient block `Z` (the `n × q` design columns of the term under
-/// test). For a GLM-type log-likelihood `ℓ = Σᵢ ℓᵢ(ηᵢ)` with `ηᵢ = xᵢᵀβ`, the
-/// derivatives w.r.t. the block coefficients factor through `ηᵢ` by the chain
-/// rule, so every cumulant array is a row sum of the per-row `η`-derivative
-/// times an outer product of `Z`-rows:
-///
-/// ```text
-/// info_{ab}     =  −Σᵢ ℓ''ᵢ · Z_{ia} Z_{ib}          (observed/expected Fisher info)
-/// nu3_{abc}     =   Σᵢ ℓ'''ᵢ · Z_{ia} Z_{ib} Z_{ic}
-/// nu4_{abcd}    =   Σᵢ ℓ''''ᵢ · Z_{ia} Z_{ib} Z_{ic} Z_{id}
-/// ```
-///
-/// These are exact (the per-row `ℓ⁽ᵏ⁾` come from the #932 tower) and fully
-/// symmetric in their indices by construction. They are stored flattened in
-/// row-major order (`nu3` length `q³`, `nu4` length `q⁴`) so the consuming
-/// contraction can stride them without re-deriving the symmetry.
-#[derive(Debug, Clone)]
-pub struct CumulantArrays {
-    /// Block dimension `q`.
-    pub q: usize,
-    /// Fisher information block `info_{ab}` (`q × q`, row-major).
-    pub info: Vec<f64>,
-    /// Third cumulant array `nu3_{abc}` (`q³`, row-major).
-    pub nu3: Vec<f64>,
-    /// Fourth cumulant array `nu4_{abcd}` (`q⁴`, row-major).
-    pub nu4: Vec<f64>,
-}
-
-impl CumulantArrays {
-    #[inline]
-    pub fn info(&self, a: usize, b: usize) -> f64 {
-        self.info[a * self.q + b]
-    }
-    #[inline]
-    pub fn nu3(&self, a: usize, b: usize, c: usize) -> f64 {
-        self.nu3[(a * self.q + b) * self.q + c]
-    }
-    #[inline]
-    pub fn nu4(&self, a: usize, b: usize, c: usize, d: usize) -> f64 {
-        self.nu4[((a * self.q + b) * self.q + c) * self.q + d]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,7 +36,4 @@ mod tests {
         assert!(bartlett_factor_from_mean(-1.0, 4.0).is_none());
         assert!(bartlett_factor_from_mean(6.0, 0.0).is_none());
     }
-
-    // ── Cumulant assembly from the towers (#939) ──────────────────────────
-
 }

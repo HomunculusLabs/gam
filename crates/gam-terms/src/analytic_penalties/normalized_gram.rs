@@ -164,20 +164,9 @@ impl NormalizedCrossGram {
         out
     }
 
-    /// The diagonal of the frozen-normalizer cross-Gram Gauss–Newton matrix.
-    /// This is the positive curvature used by decoder incoherence assembly.
-    pub fn gauss_newton_diagonal(&self) -> Array1<f64> {
-        &self.diagonals[0] * self.scalar_first[0]
-    }
-
-    pub fn gauss_newton_action(&self, direction: ArrayView1<'_, f64>) -> Array1<f64> {
-        let (l, r) = self.split(direction);
-        let dc = l.dot(&self.right.t()) + self.left.dot(&r.t());
-        flatten_pair(dc.dot(&self.right), dc.t().dot(&self.left)) * (2.0 * self.scalar_first[0])
-    }
-
-    /// Gradient of left' B right for that installed majorizer. Its live
-    /// normalizer is differentiated too; the directional vectors stay fixed.
+    /// Gradient of left' B right for the frozen-normalizer cross-Gram
+    /// Gauss–Newton majorizer B. Its live normalizer is differentiated too; the
+    /// directional vectors stay fixed.
     pub fn gauss_newton_bilinear_gradient(
         &self,
         left: ArrayView1<'_, f64>,

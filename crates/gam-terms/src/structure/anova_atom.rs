@@ -89,7 +89,6 @@
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 
-use crate::grid_spline_2d::axis_basis_at;
 use crate::inference::smooth_test::{
     SmoothTestInput, SmoothTestResult, SmoothTestScale, wood_smooth_test,
 };
@@ -837,85 +836,6 @@ pub fn carve_input_from_fitted_atom(
         surface,
         joint_covariance,
     })
-}
-
-/// Which estimator produced a [`PairSurfaceFit`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PairSurfaceBackend {
-    /// The streaming 2-D grid engine: exact REML on the full anisotropic
-    /// biharmonic penalty (mixed `f_{x1x2}` term included), O(n) assembly,
-    /// exact log-determinants — the first-class pair-component estimator.
-    GridExact,
-    /// The dense function-mass fallback ([`fit_tensor_surface`]) on the SAME
-    /// B-spline tensor basis, used only when the grid solve degenerates
-    /// (e.g. a non-positive-definite penalized system or `n − edf < 1`).
-    DenseRidge,
-}
-
-/// A pair-component fit from RAW coordinates: the factor bases it was fit
-/// on (the grid engine's per-axis uniform cubic B-splines, evaluated on the
-/// sample — exactly what [`CarveInput`] consumes, one measure end to end)
-/// plus the [`TensorSurfaceFit`] carve product and which backend produced it.
-#[derive(Clone, Debug)]
-pub struct PairSurfaceFit {
-    /// Axis-1 basis on the sample (`n × (K+3)`, partition of unity).
-    pub phi_a: Array2<f64>,
-    /// Axis-2 basis on the sample (`n × (K+3)`, partition of unity).
-    pub phi_b: Array2<f64>,
-    /// The carve product: coefficients, covariances, λ, EDF.
-    pub surface: TensorSurfaceFit,
-    pub backend: PairSurfaceBackend,
-    /// Lower corner of the per-axis uniform knot range (the data's
-    /// bounding box) — with [`Self::cell_widths`], everything needed to
-    /// rebuild a basis row at an arbitrary point.
-    pub lower_corner: [f64; 2],
-    /// Knot-cell width per axis.
-    pub cell_widths: [f64; 2],
-}
-
-impl PairSurfaceFit {
-    /// Posterior `(mean, variance)` of response dimension `dim` at an
-    /// arbitrary point, through the carve-facing posterior objects — valid
-    /// for BOTH backends, since both populate the same surface contract:
-    /// `mean = b₁ᵀ C_d b₂` and `variance = σ̂²_d · xᵀUx` with `U` the shared
-    /// scale-free coefficient covariance, `σ̂²_d` the residual variance at
-    /// `n − edf`, and `x` the 16-entry tensor basis row. Outside the data
-    /// bounding box the boundary cell's cubic polynomial extends (the grid
-    /// engine's convention).
-    pub fn predict(&self, dim: usize, x1: f64, x2: f64) -> Result<(f64, f64), String> {
-        let d_dims = self.surface.coeffs.len();
-        if dim >= d_dims {
-            return Err(format!(
-                "pair surface: response dimension {dim} out of range (D = {d_dims})"
-            ));
-        }
-        if !(x1.is_finite() && x2.is_finite()) {
-            return Err(format!(
-                "pair surface: non-finite prediction point ({x1}, {x2})"
-            ));
-        }
-        let m = self.phi_a.ncols();
-        let cells = m - 3;
-        let (j1, b1) = axis_basis_at(self.lower_corner[0], self.cell_widths[0], cells, x1);
-        let (j2, b2) = axis_basis_at(self.lower_corner[1], self.cell_widths[1], cells, x2);
-        let c = &self.surface.coeffs[dim];
-        let u = &self.surface.unit_covariance;
-        let mut mean = 0.0;
-        let mut quad = 0.0;
-        for i in 0..4 {
-            for j in 0..4 {
-                let v_ij = b1[i] * b2[j];
-                mean += v_ij * c[[j1 + i, j2 + j]];
-                let g_ij = (j1 + i) * m + (j2 + j);
-                for a in 0..4 {
-                    for b in 0..4 {
-                        quad += v_ij * b1[a] * b2[b] * u[[g_ij, (j1 + a) * m + (j2 + b)]];
-                    }
-                }
-            }
-        }
-        Ok((mean, self.surface.residual_cross_cov[[dim, dim]] * quad))
-    }
 }
 
 /// Inputs for one notion's carve over one fitted product atom.

@@ -2096,7 +2096,7 @@ impl TermCollectionSpec {
         for lt in &mut out.linear_terms {
             lt.feature_col = remap(lt.feature_col)?;
             // Also remap the full interaction-factor list. The design builder
-            // (`build_term_collection_design_inner`) materializes the column from
+            // (`build_term_collection_design_inner_with_policy`) materializes the column from
             // `effective_feature_cols()` — which returns `feature_cols` whenever
             // it is non-empty (i.e. essentially always, including a plain linear
             // term where `feature_cols == [feature_col]`). Remapping only the

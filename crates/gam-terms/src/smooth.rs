@@ -66,19 +66,18 @@ mod structure_warnings;
 pub use self::structure_warnings::collect_smooth_structure_warnings;
 
 // Term-collection design construction (#1521), relocated DOWN from gam-models
-// `fit_orchestration/drivers/design_construction.rs`. The three re-exports are
-// the entry points the staying gam-models drivers still call (via their
-// `use gam_terms::smooth::*` glob): `build_term_collection_design` (public API),
-// `build_term_collection_design_inner` (the joint-build variants that stay in
-// gam-models), and `term_collection_has_anchored_bspline`
-// (`spatial_optimization.rs`).
+// `fit_orchestration/drivers/design_construction.rs`. The staying gam-models
+// drivers reach these entry points through their `use gam_terms::smooth::*`
+// glob, among them `build_term_collection_design` (public API), the
+// policy-carrying builders the joint-build variants that stay in gam-models
+// call, and `term_collection_has_anchored_bspline` (`spatial_optimization.rs`).
 mod term_design;
 pub use term_design::{
     CollectionGaugedTerm, LocalTermRealization, RealizedCollectionGauge,
     TermCollectionDerivativeDesign,
     apply_smooth_transform_to_design,
     build_term_collection_derivative_design, build_term_collection_design,
-    build_planned_term_collection_design_inner_with_policy, build_term_collection_design_inner,
+    build_planned_term_collection_design_inner_with_policy,
     build_term_collection_design_with_policy,
     orthogonality_relative_residual_for_design, place_term_in_collection_gauge,
     realize_smooth_collection_gauge, smooth_intrinsic_parametric_feature_cols,
