@@ -5186,27 +5186,32 @@ pub(crate) fn discover_primary_atom_topologies(
             }
             let mut specs: Vec<TopologyCandidateSpec> = Vec::with_capacity(4);
             // Circle: phase of the leading principal pair (unit-period
-            // convention, matching the periodic seed refinement). The phase
-            // coordinate is retained so that, if the circle wins the topology
-            // race, its harmonic RESOLUTION can be selected by evidence (#2243)
-            // on the same coordinate the topology race discriminated on.
-            let circle_coords = {
+            // convention, matching the periodic seed refinement). #2243 — the circle
+            // races at the order a winner installs: this phase chart's periodogram
+            // bandwidth, selected before the race rather than after it, so no fixed
+            // race order handicaps a factor with high-frequency angular content. A
+            // chart carrying no angular energy realizes no circle, so none is offered.
+            let circle_order = {
                 let mut coords = Array2::<f64>::zeros((n_obs, 1));
                 for row in 0..n_obs {
                     coords[[row, 0]] = phase(proj[[row, 0]], proj[[row, 1]]);
                 }
-                specs.push(TopologyCandidateSpec::new(
-                    AutoTopologyKind::Circle,
-                    SaeAtomGeometryPlan::new(
-                        SaeAtomBasisKind::Periodic,
-                        1,
-                        SaeBasisResolution::PeriodicHarmonics { order: 1 },
-                        SaeReferenceMetricPlan::UnitCircle,
-                    )?,
-                    LatentManifold::Circle { period: 1.0 },
-                    coords.clone(),
-                )?);
-                coords
+                let selected =
+                    select_periodic_resolution(coords.view(), target, weights.view(), rows.len());
+                if let Some(order) = selected {
+                    specs.push(TopologyCandidateSpec::new(
+                        AutoTopologyKind::Circle,
+                        SaeAtomGeometryPlan::new(
+                            SaeAtomBasisKind::Periodic,
+                            1,
+                            SaeBasisResolution::PeriodicHarmonics { order },
+                            SaeReferenceMetricPlan::UnitCircle,
+                        )?,
+                        LatentManifold::Circle { period: 1.0 },
+                        coords,
+                    )?);
+                }
+                selected
             };
             let mut sheet_coords: Option<Array2<f64>> = None;
             let mut torus_order: Option<usize> = None;
@@ -5478,18 +5483,15 @@ pub(crate) fn discover_primary_atom_topologies(
             if fit_kind == SaeAtomBasisKind::Duchon {
                 sheet_coords = Some(fit.coords.clone());
             }
-            // #2243 — for a circle winner, GROW the harmonic resolution by the
-            // same REML evidence: the topology race ran the circle at a fixed low
-            // budget only to discriminate topology, but a genuinely 1-D factor's
-            // fidelity is capped by that budget. Every other kind carries a chart
-            // whose resolution is not a harmonic count, so it selects none.
+            // #2243 — a circle winner raced at the order its phase chart's periodogram
+            // selected, so that order is the one it installs. Every other kind carries
+            // a chart whose resolution is not a harmonic count, so it selects none.
             let n_harmonics = if fit_kind == SaeAtomBasisKind::Periodic {
-                Some(select_periodic_resolution(
-                    circle_coords.view(),
-                    target,
-                    weights.view(),
-                    rows.len(),
-                )?)
+                Some(circle_order.ok_or_else(|| {
+                    format!(
+                        "discover_primary_atom_topologies: circle winner without a selected order for auto atom {atom_idx}"
+                    )
+                })?)
             } else {
                 None
             };
@@ -6000,15 +6002,17 @@ fn spectral_noise_floor(energies: &[f64], numerical_band: f64) -> f64 {
 /// weighted angular periodogram's BANDWIDTH — the highest harmonic whose energy
 /// clears the measured [`spectral_noise_floor`] — bounded by the
 /// identifiability limit `2H + 1 < n_cluster` (the weighted fit cannot be
-/// identified with more basis columns than the cluster has observations). A
-/// target with no angular energy returns an error (the caller surfaces it as a
-/// discovery failure rather than silently pinning a resolution).
+/// identified with more basis columns than the cluster has observations). It is
+/// selected before the topology race, so the circle races at the order a winner
+/// installs. A chart carrying no angular energy returns `None`: it realizes no
+/// circle, so the caller offers no circle candidate rather than pinning a
+/// resolution.
 fn select_periodic_resolution(
     circle_coords: ArrayView2<'_, f64>,
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
     n_cluster: usize,
-) -> Result<usize, String> {
+) -> Option<usize> {
     let n_obs = target.nrows();
     let p_out = target.ncols();
     // 2H + 1 basis columns must stay strictly below the cluster sample count for
@@ -6037,9 +6041,7 @@ fn select_periodic_resolution(
         energies.push(energy);
     }
     if !(peak_energy > 0.0) {
-        return Err(
-            "select_periodic_resolution: the circle winner carries no angular energy".to_string(),
-        );
+        return None;
     }
     // Each coefficient sums `w·x·cos(2πh·t)` over the rows at five roundings per term,
     // so it rounds by at most `γ_{n+5}·Σ_row |w·x|`, and an exactly-zero harmonic
@@ -6059,7 +6061,7 @@ fn select_periodic_resolution(
         .rposition(|&energy| energy > floor)
         .map(|idx| idx + 1)
         .unwrap_or(1);
-    Ok(bandwidth.min(ident_ceiling).max(1))
+    Some(bandwidth.min(ident_ceiling).max(1))
 }
 
 /// Evidence-driven per-axis harmonic order for a torus chart (#2243 — the circle
