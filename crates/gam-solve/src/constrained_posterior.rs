@@ -149,7 +149,7 @@ fn log1mexp_of_log_removed_mass(d: f64) -> f64 {
     }
     gam_math::probability::log1mexp_positive(-d)
 }
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView2, Zip};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -2451,16 +2451,19 @@ impl OrthantAccumulator {
     }
 
     fn push(&mut self, log_weight: f64, point: &Array1<f64>) {
-        let q = point.len();
         self.rescale_to(log_weight);
         let weight = (log_weight - self.log_scale).exp();
         self.weight_sum += weight;
         self.weight_square_sum += weight * weight;
-        for i in 0..q {
-            self.weighted_mean[i] += weight * point[i];
-            for j in 0..=i {
-                self.weighted_second[[i, j]] += weight * point[i] * point[j];
-            }
+        for (i, &point_i) in point.iter().enumerate() {
+            // `w·p_i·p_j` is `(w·p_i)·p_j`, so hoisting `w·p_i` keeps every
+            // entry's arithmetic, and the row update runs over contiguous views.
+            let weighted_point = weight * point_i;
+            self.weighted_mean[i] += weighted_point;
+            let mut row = self.weighted_second.row_mut(i);
+            Zip::from(row.slice_mut(ndarray::s![..=i]))
+                .and(point.slice(ndarray::s![..=i]))
+                .for_each(|second, &point_j| *second += weighted_point * point_j);
         }
     }
 
@@ -3269,6 +3272,7 @@ impl OrthantRule {
         let upper = &self.face.upper;
         let factor = &self.face.factor;
         let mut z = Array1::<f64>::zeros(q);
+        let mut conditional_bound = Array1::<f64>::zeros(q);
         let mut ordered_point = Array1::<f64>::zeros(q);
         let mut point = Array1::<f64>::zeros(q);
         let mut tangent = vec![0.0f64; self.tangent_dimension];
@@ -3285,6 +3289,7 @@ impl OrthantRule {
                 for j in 0..i {
                     bound -= factor[[i, j]] * z[j];
                 }
+                conditional_bound[i] = bound;
                 let mut wall = bound / factor[[i, i]] - mu;
                 // The affine wall, if it pivots here, is a second candidate
                 // limit on the SAME interval. Merging it before the interval is
@@ -3412,12 +3417,13 @@ impl OrthantRule {
             if !log_weight.is_finite() {
                 continue;
             }
+            // `conditional_bound[i]` was accumulated as `−mean_i − L_i0 z_0 − …`,
+            // term by term in the order `mean_i + L_i0 z_0 + …` would be, and
+            // rounding commutes with negation, so it is that partial sum negated
+            // (up to the sign of an exact zero). Adding `L_ii z_i` completes the
+            // ordered coordinate without a second pass over the factor row.
             for i in 0..q {
-                let mut value = mean[i];
-                for j in 0..=i {
-                    value += factor[[i, j]] * z[j];
-                }
-                ordered_point[i] = value;
+                ordered_point[i] = factor[[i, i]] * z[i] - conditional_bound[i];
             }
             for (position, &original) in self.face.order.iter().enumerate() {
                 point[original] = ordered_point[position];
