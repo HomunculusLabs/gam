@@ -30,8 +30,7 @@
 //! deterministic order — it never reorders, drops, or duplicates rows, and the
 //! sequence of `(row_id, row)` pairs is byte-identical across runs and
 //! platforms. That stable `row_id` is what [`super::warm_state`] keys its
-//! per-row warm starts on and what [`super::residual_stratify`] hashes to pick
-//! a subsample.
+//! per-row warm starts on.
 //!
 //! # Bounded prefetch
 //!

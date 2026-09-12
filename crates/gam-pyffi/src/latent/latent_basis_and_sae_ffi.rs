@@ -2718,8 +2718,7 @@ fn sae_residual_gauge_dict<'py>(
 /// Build the per-atom SAE curvature report (#1099, rescoped under #1115). Each
 /// `kappa_hat` is the fitted empirical second-fundamental-form sup-norm bound
 /// already computed for the curved-dictionary certificate
-/// (`CertificateInputs::per_atom_kappa_hat`, the one source of truth shared with
-/// `dictionary_report`). It is a descriptive plug-in geometry summary, not an
+/// (`CertificateInputs::per_atom_kappa_hat`). It is a descriptive plug-in geometry summary, not an
 /// estimand with a profiled criterion: a sup-norm curvature BOUND has no
 /// confidence interval, and the delta-method SE that #1099 first shipped was
 /// conditioned on the generated latent coordinates as if known (omitting the

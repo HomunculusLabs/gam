@@ -59,9 +59,7 @@
 //! gate with demote-never-reject [`GateVerdict`]s; the runner enforces
 //! the predictability contract by call order) → [`StructureLedger`] (one
 //! e-process per claim, serializable across #973 shards) →
-//! [`StructureLedger::certify`] (the e-BH [`StructureCertificate`],
-//! shipped beside the gauge report via
-//! `crate::terms::sae::identifiability::dictionary_report`) →
+//! [`StructureLedger::certify`] (the e-BH [`StructureCertificate`]) →
 //! [`plan_probe_for_contested_claim`] (the design loop: contested claims
 //! get a [`ProbePlan`] whose δ runs through
 //! `crate::inference::steering::steer_delta` and whose per-hypothesis

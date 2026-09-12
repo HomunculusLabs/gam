@@ -3093,7 +3093,7 @@ fn reactive_rho_domain_upper(
 /// * the chart coordinate the occupancy adjudicator reads is the UNIT-PERIOD
 ///   fold `u = t / P` (`coordinate_fidelity::fold_for_occupancy_weighted`), so
 ///   that same prior scale is `sigma_u = 1 / (P * sqrt(alpha))`;
-/// * `coordinate_fidelity::classify_occupancy` returns
+/// * `coordinate_fidelity::classify_occupancy_weighted` returns
 ///   `coordinate_fidelity::OccupancyLaw::Collapsed` once the
 ///   occupied extent falls below its own data-derived resolution floor
 ///   `sigma_floor = 1 / (2n)` — half the mean spacing of `n` points on the unit

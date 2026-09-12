@@ -1705,7 +1705,7 @@ impl SaeManifoldAtom {
     ///
     /// `B_k` is unchanged numerically: the installed frame spans exactly
     /// `range(B_kᵀ)` (the column space of the decoder) up to the truncation
-    /// floor, so `Self::reconstruct_decoder_coefficients` recovers `B_k` to
+    /// floor, so the installed frame recovers `B_k` to
     /// machine precision when `r` equals the true rank. Returns the activated
     /// frame rank, or `None` if the full-`B` path was kept.
     pub fn maybe_activate_decoder_frame(&mut self) -> Result<Option<usize>, String> {
@@ -1780,20 +1780,6 @@ impl SaeManifoldAtom {
             )),
             None => Ok(None),
         }
-    }
-
-    /// Reconstruct the full decoder `B_k = C_k · Uᵀ` from a border coordinate
-    /// matrix `C_k` (`M_k × r`) and the active frame (issue #972). Used when the
-    /// border solver returns updated coordinates and the authoritative
-    /// `decoder_coefficients` must be refreshed for the full-`B` consumers.
-    pub fn reconstruct_decoder_coefficients(
-        &self,
-        coords: ArrayView2<'_, f64>,
-    ) -> Result<Array2<f64>, String> {
-        let frame = self.decoder_frame.as_ref().ok_or_else(|| {
-            "SaeManifoldAtom::reconstruct_decoder_coefficients: no active frame".to_string()
-        })?;
-        frame.reconstruct_decoder(coords)
     }
 
     /// Closed-form streaming polar refresh of the active frame from an

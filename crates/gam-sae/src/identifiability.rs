@@ -94,7 +94,6 @@ use gam_linalg::faer_ndarray::{
     FaerCholesky, FaerEigh, FaerSvd, default_rrqr_rank_alpha, rrqr_with_permutation,
 };
 use gam_problem::{MetricProvenance, RowMetric};
-use gam_terms::inference::structure_evidence::{StructureCertificate, StructureLedger};
 use ndarray::{Array1, Array2, Array3, Array4, ArrayView1, ArrayView2, s};
 
 /// Smoothed column-2-norm of the decoder Jacobian.
@@ -863,7 +862,7 @@ pub struct FittedAtom {
     /// Per-atom inner-decoder-smooth byproducts harvested at fit time, the
     /// single source the post-PIRLS atom inference reports
     /// ([`AtomFunctionalReport`] #1097, [`AtomSmoothSignificance`] #1103)
-    /// consume in `dictionary_report`.
+    /// consume.
     ///
     /// The certificate path that builds `FittedSaeManifold` does so *without* a
     /// fit harness in scope, so it leaves this `None`; callers that own the
@@ -3509,58 +3508,6 @@ fn residual_gauge_inner(
     })
 }
 
-/// The model's two certificates, shipped together (#984 work-plan step 2):
-/// the residual-gauge report says what NO data could distinguish (the
-/// symmetry group the fit is identified up to — a statement about the
-/// model class), the structure certificate says what THIS data
-/// established (the e-BH-confirmed subset of the dictionary's structural
-/// claims, FDR ≤ α, valid at the caller's stopping time — a statement
-/// about the world). A claim can fail both ways, and the failure modes
-/// are independent: an atom can be perfectly identified yet statistically
-/// unestablished, or strongly evidenced yet gauge-ambiguous with a twin.
-///
-/// These two reports are the nearest thing in this file to the "one
-/// statistic, two notations" pairing (Cor F): `gauge` is a curvature-based,
-/// model-class statement about identification, `structure` is a
-/// likelihood/evidence-ledger statement about which claims the data has
-/// established, and at the shared asymptotic limit (a well-identified atom
-/// with enough data to certify its structure) the two MUST cohere — a
-/// perfectly-identified atom that never accumulates structural evidence, or a
-/// strongly-evidenced atom that is simultaneously gauge-ambiguous with an
-/// exchangeable twin, is not a conflict to silently paper over. It is a
-/// finite-sample MISSPECIFICATION SIGNAL: either the isometry/ARD pin that
-/// `gauge` reads is not actually active in the fit that produced `structure`'s
-/// evidence, or the ledger's shard evidence is itself confounded by the
-/// unresolved symmetry `gauge` is reporting. Callers that see the two reports
-/// disagree on the same atom should treat that disagreement as diagnostic
-/// input, not as a tie to break by preferring one report over the other.
-#[derive(Debug, Clone)]
-pub struct DictionaryReport {
-    /// What cannot be distinguished in principle (`residual_gauge`).
-    pub gauge: ResidualGaugeReport,
-    /// What the data established
-    /// ([`gam_terms::inference::structure_evidence::StructureLedger::certify`]).
-    pub structure: StructureCertificate,
-    /// Per-atom inter-layer transport ladders (#1096). No entry point fills this
-    /// field, so it is empty. A report here is in the transport module's chart
-    /// convention: circle coordinates are radians on `[0, 2π)`.
-    pub transport_ladders: Vec<AtomTransportLadderReport>,
-    /// Per-atom post-PIRLS inference reports (#1097 penalty-debiased functional
-    /// POINT summaries, #1103 split-LRT smooth-structure e-value), one entry
-    /// per atom in [`FittedSaeManifold::atoms`] order. The #1099 per-atom
-    /// curvature CI was removed under #1115 (a curvature BOUND is not an
-    /// estimand and its SE conditioned on generated regressors); the surviving
-    /// plug-in curvature point estimate lives on
-    /// [`crate::manifold::CertificateInputs::per_atom_kappa_hat`],
-    /// not here. Each report's
-    /// fields are computed when the atom carries its fit-time
-    /// [`AtomInnerFit`] byproducts and the relevant numerics succeed; otherwise
-    /// the field is `None` (a bare certificate-only `FittedSaeManifold` — one
-    /// built by the residual-gauge path with no fit harness — leaves every
-    /// `inner_fit` `None`, so both fields are `None`).
-    pub atom_inference: Vec<AtomInferenceReport>,
-}
-
 /// One atom's fitted inter-layer transport ladder.
 #[derive(Debug, Clone)]
 pub struct AtomTransportLadderReport {
@@ -3645,195 +3592,6 @@ fn atom_functional_report(fit: &AtomInnerFit) -> AtomFunctionalReport {
         average_value,
         decoder_variation_norm,
     }
-}
-
-/// #1103 Any-n-valid structure evidence that one atom's inner smooth is
-/// non-constant, via the split-likelihood-ratio e-value.
-///
-/// The inner decoder smooth is the Gaussian-identity penalized WLS fit
-/// `a_ik · Φ_k(t)ᵀ β_{k,j}` with dispersion `φ = `[`AtomInnerFit::dispersion`],
-/// working response `z_i` reconstructed from the captured per-row scores. H0 is
-/// "the smooth is constant": only the intercept column 0 is free.
-///
-/// We compute the universal-inference e-value the atom-birth gate
-/// ([`gam_terms::inference::structure_evidence::split_likelihood_log_e_value`]) uses:
-///
-/// * Split the active rows deterministically into an ESTIMATION fold (even
-///   index) and an EVALUATION fold (odd index).
-/// * On the estimation fold, fit the penalized smooth (the alternative) by
-///   `β̂ = (ΦᵀWΦ + S)⁻¹ ΦᵀW z` — any fitter is admissible; zero conditions.
-/// * On the evaluation fold, score the Gaussian log-likelihood under that
-///   prefit alternative, and the SUPREMUM of the evaluation-fold log-likelihood
-///   over the null class (the constant fit = weighted-mean response refit on the
-///   eval fold — the honest constrained sup on D₀).
-/// * `log E = ℓ_alt(D₀) − sup_{H0} ℓ(D₀)`, with `E_{H0}[E] ≤ 1` exactly.
-///
-/// The dispersion `φ` is held fixed at the fitted reconstruction dispersion in
-/// both log-likelihoods so it cancels structurally and the e-value isolates the
-/// mean-curvature evidence. Returns `None` when the design has no curvature
-/// column (`M_k ≤ 1`), either fold is empty, or the inner Gram is not SPD.
-fn atom_smooth_significance(fit: &AtomInnerFit) -> Option<AtomSmoothSignificance> {
-    let m = fit.design.ncols();
-    if m <= 1 || fit.beta.len() != m {
-        // No curvature column: the constant null IS the full model — there is no
-        // non-constant alternative to earn an e-value.
-        return None;
-    }
-    let n = fit.design.nrows();
-    if n == 0 || fit.weights.len() != n || fit.row_scores.nrows() != n {
-        return None;
-    }
-    let phi = if fit.dispersion.is_finite() && fit.dispersion > 0.0 {
-        fit.dispersion
-    } else {
-        return None;
-    };
-
-    // Per-row working response z_i = μ̂_i + r_i, reconstructing the scalar
-    // residual r_i from the captured score projected onto the design row
-    // (s_iᵀ Φ_i = −w_i r_i ‖Φ_i‖² / φ ⇒ r_i). Same reconstruction the previous
-    // deviance path used; here it feeds the two folds' likelihoods.
-    let mut z = Array1::<f64>::zeros(n);
-    for i in 0..n {
-        let mu_hat = fit.design.row(i).dot(&fit.beta);
-        let w_i = fit.weights[i];
-        let phi_row = fit.design.row(i);
-        let phi_norm_sq = phi_row.dot(&phi_row);
-        let r_i = if w_i > 0.0 && phi_norm_sq > 0.0 {
-            let s_dot_phi = fit.row_scores.row(i).dot(&phi_row);
-            -phi * s_dot_phi / (w_i * phi_norm_sq)
-        } else {
-            0.0
-        };
-        z[i] = mu_hat + r_i;
-    }
-
-    // Deterministic estimation/evaluation split by row parity.
-    let est: Vec<usize> = (0..n).filter(|i| i % 2 == 0).collect();
-    let eval: Vec<usize> = (0..n).filter(|i| i % 2 == 1).collect();
-    if est.is_empty() || eval.is_empty() {
-        return None;
-    }
-
-    // Penalized smooth fit on the estimation fold: β̂ = (ΦᵀWΦ + S)⁻¹ ΦᵀW z.
-    let mut a_gram = fit.penalty.clone();
-    let mut b = Array1::<f64>::zeros(m);
-    for &i in &est {
-        let w_i = fit.weights[i];
-        if !(w_i > 0.0) {
-            continue;
-        }
-        let row = fit.design.row(i);
-        for r in 0..m {
-            let xr = row[r];
-            if xr == 0.0 {
-                continue;
-            }
-            b[r] += w_i * xr * z[i];
-            for c in 0..m {
-                a_gram[[r, c]] += w_i * xr * row[c];
-            }
-        }
-    }
-    let beta_alt = a_gram.cholesky(Side::Lower).ok()?.solvevec(&b);
-
-    // Null sup on the EVALUATION fold: the weighted-mean response (the constant
-    // fit's MLE on D₀, the honest constrained sup over the null class).
-    let mut eval_mass = 0.0_f64;
-    let mut eval_wz = 0.0_f64;
-    for &i in &eval {
-        let w_i = fit.weights[i];
-        eval_mass += w_i;
-        eval_wz += w_i * z[i];
-    }
-    if !(eval_mass > 0.0) {
-        return None;
-    }
-    let null_mean = eval_wz / eval_mass;
-
-    // Gaussian log-likelihoods on the evaluation fold at fixed dispersion φ;
-    // the −½ log(2πφ) and weight-log terms are identical under both models, so
-    // log E = −(½/φ) [ Σ w(z − μ_alt)² − Σ w(z − μ_null)² ].
-    let mut sse_alt = 0.0_f64;
-    let mut sse_null = 0.0_f64;
-    for &i in &eval {
-        let w_i = fit.weights[i];
-        let mu_alt = fit.design.row(i).dot(&beta_alt);
-        let r_alt = z[i] - mu_alt;
-        let r_null = z[i] - null_mean;
-        sse_alt += w_i * r_alt * r_alt;
-        sse_null += w_i * r_null * r_null;
-    }
-    let log_lik_alt = -0.5 * sse_alt / phi;
-    let log_lik_null_sup = -0.5 * sse_null / phi;
-    let log_e = gam_terms::inference::structure_evidence::split_likelihood_log_e_value(
-        log_lik_alt,
-        log_lik_null_sup,
-    )
-    .ok()?;
-    if !log_e.is_finite() {
-        return None;
-    }
-
-    Some(AtomSmoothSignificance {
-        log_e_nonconstant: Some(log_e),
-    })
-}
-
-/// Assemble the post-PIRLS inference reports for every atom, reusing the
-/// per-atom [`AtomInnerFit`] harvested at fit time.
-///
-/// * #1097 penalty-debiased functional POINT summaries and the #1103 split-LRT
-///   smooth-structure e-value are computed from the captured inner-decoder
-///   smooth (design, penalized Hessian, row scores, roughness Gram) — they need
-///   only the fixed fitted snapshot.
-/// * The #1099 per-atom curvature *confidence interval* was removed under #1115:
-///   a sup-norm curvature BOUND is not an estimand with a profiled criterion,
-///   and its delta-method SE conditioned on generated latent coordinates as if
-///   known. The plug-in curvature point estimate survives on
-///   [`crate::manifold::CertificateInputs::per_atom_kappa_hat`] (the
-///   #1008 empirical curved-dictionary report), not on this report.
-pub(crate) fn atom_inference_reports(model: &FittedSaeManifold) -> Vec<AtomInferenceReport> {
-    model
-        .atoms
-        .iter()
-        .enumerate()
-        .map(|(atom_index, atom)| {
-            let (functionals, smooth_significance) = match &atom.inner_fit {
-                Some(fit) => (
-                    Some(atom_functional_report(fit)),
-                    atom_smooth_significance(fit),
-                ),
-                None => (None, None),
-            };
-            AtomInferenceReport {
-                atom_index,
-                atom_name: atom.name.clone(),
-                functionals,
-                smooth_significance,
-            }
-        })
-        .collect()
-}
-
-/// Produce the paired certificate for a fitted model: the residual-gauge
-/// report computed here plus the anytime-valid structure certificate from
-/// the discovery run's evidence ledger at level `alpha`. The ledger is the
-/// one the structure search absorbed its shard evidence into
-/// (`structure_evidence::StructureLedger`); certifying at any
-/// data-dependent stopping time is sound — that is the ledger's whole
-/// design.
-pub fn dictionary_report(
-    model: &FittedSaeManifold,
-    ledger: &StructureLedger,
-    alpha: f64,
-) -> Result<DictionaryReport, String> {
-    Ok(DictionaryReport {
-        gauge: residual_gauge(model)?,
-        structure: ledger.certify(alpha).map_err(|error| error.to_string())?,
-        transport_ladders: Vec::new(),
-        atom_inference: atom_inference_reports(model),
-    })
 }
 
 #[cfg(test)]

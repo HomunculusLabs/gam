@@ -75,62 +75,6 @@ pub struct TieredHarvest {
 }
 
 impl TieredHarvest {
-    /// Attach a Fisher tier: `tier_rows` are the corpus rows that carry
-    /// factors (strictly ascending, in range), `inclusion[t]` the design
-    /// inclusion probability of `tier_rows[t]` (all `1.0` for an unweighted
-    /// tier), and `metric` the
-    /// [`RowMetric`] built over exactly those rows in that order.
-    pub fn with_designed_tier(
-        n_rows: usize,
-        tier_rows: Vec<usize>,
-        inclusion: Vec<f64>,
-        metric: RowMetric,
-    ) -> Result<Self, String> {
-        if metric.n_rows() != tier_rows.len() {
-            return Err(format!(
-                "TieredHarvest: metric covers {} rows but the tier names {}",
-                metric.n_rows(),
-                tier_rows.len()
-            ));
-        }
-        if inclusion.len() != tier_rows.len() {
-            return Err(format!(
-                "TieredHarvest: {} inclusion probabilities for {} tier rows",
-                inclusion.len(),
-                tier_rows.len()
-            ));
-        }
-        for (t, &r) in tier_rows.iter().enumerate() {
-            if r >= n_rows {
-                return Err(format!(
-                    "TieredHarvest: tier row {r} out of corpus range (n_rows = {n_rows})"
-                ));
-            }
-            if t > 0 && tier_rows[t - 1] >= r {
-                return Err(
-                    "TieredHarvest: tier rows must be strictly ascending (sorted, deduplicated)"
-                        .to_string(),
-                );
-            }
-        }
-        for (t, &p) in inclusion.iter().enumerate() {
-            if !(p.is_finite() && p > 0.0 && p <= 1.0) {
-                return Err(format!(
-                    "TieredHarvest: tier row {} has invalid inclusion probability {p}",
-                    tier_rows[t]
-                ));
-            }
-        }
-        Ok(Self {
-            n_rows,
-            fisher: Some(FisherTier {
-                rows: tier_rows,
-                inclusion,
-                metric,
-            }),
-        })
-    }
-
     /// Total corpus rows (tier 1).
     pub fn n_rows(&self) -> usize {
         self.n_rows

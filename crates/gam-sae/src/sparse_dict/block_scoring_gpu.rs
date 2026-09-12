@@ -80,7 +80,7 @@ pub enum BlockRoutePath {
 /// `[g·b, g·b+b)`), one thread per `(row, block)` output reduces that block's `b`
 /// adjacent `z` columns to `gate = sqrt(Σ_r z_r²)`, writing the `n_rows ×
 /// n_blocks` gate block. Separate-rounding f32 ops + IEEE `sqrtf` match the CPU
-/// reference ([`block_gate_block_cpu`]) to the bit, so the downstream fold
+/// reference to the bit, so the downstream fold
 /// selects the identical block support.
 ///
 /// `b` is a runtime argument (blocks are 2–4 rows and the width varies per fit),
@@ -258,24 +258,6 @@ pub fn block_gate_row_cpu(
 ) -> Vec<f32> {
     let w = block_projections_row(row, decoder, n_blocks, b);
     block_gates(w.view())
-}
-
-/// CPU reference for a whole minibatch's gate block: `gates[r*n_blocks + g] =
-/// ‖x_r D_gᵀ‖₂`, row-major. The bit-exact oracle for the device gate block.
-#[must_use]
-pub fn block_gate_block_cpu(
-    rows: ArrayView2<'_, f32>,
-    decoder: ArrayView2<'_, f32>,
-    n_blocks: usize,
-    b: usize,
-) -> Vec<f32> {
-    let n_rows = rows.nrows();
-    let mut gates = vec![0.0f32; n_rows * n_blocks];
-    for r in 0..n_rows {
-        let g = block_gate_row_cpu(rows.row(r), decoder, n_blocks, b);
-        gates[r * n_blocks..(r + 1) * n_blocks].copy_from_slice(&g);
-    }
-    gates
 }
 
 /// CPU oracle for the block route: each row's top-`k` `(block, gate)` shortlist,

@@ -1914,5 +1914,40 @@
     },
     "reason": "prune-api-b product-use sweep (#2899). riesz_kernel_value, matern_kernel_value, anisotropic_duchon_penalty_radial and pair_block_radial_with_j_second_derivatives leave the public gam-terms API and become test oracles in crates/gam-terms/src/basis/tests.rs; no product uses them, and production uses the chart-dispatched _with_powers builders.",
     "evidence": "scripts/public_api_census.py over probe commit bb25d3023 on base 3f4f39e2b (MSI acn112, python3.12; sliceE.census.out) reports exactly these four closed_form_penalty.rs identities, one declaration each; re-keyed to the push parent after an upstream change to matern_kernel.rs, which removes no public function. The prune-api-b census at cfc1cb2fe finds no production reference; the only callers are the basis test fixtures and two benches whose oracle groups are deleted."
+  },
+  {
+    "base": "df9a8cc6a09541bab9c6086ce8ac22d57b4897d7",
+    "removed": {
+      "crates/gam-sae/src/corpus/designed_target.rs::auto_designed_budget": 1,
+      "crates/gam-sae/src/corpus/designed_target.rs::collect_designed_target": 1,
+      "crates/gam-sae/src/corpus/designed_target.rs::collect_designed_target_auto": 1,
+      "crates/gam-sae/src/corpus/designed_target.rs::collect_designed_target_from_harvest": 1,
+      "crates/gam-sae/src/corpus/designed_target.rs::is_empty": 1,
+      "crates/gam-sae/src/corpus/designed_target.rs::len": 1,
+      "crates/gam-sae/src/corpus/residual_stratify.rs::budget": 1,
+      "crates/gam-sae/src/corpus/residual_stratify.rs::collect_stratified_target": 1,
+      "crates/gam-sae/src/corpus/residual_stratify.rs::design_stratified_subsample": 1,
+      "crates/gam-sae/src/corpus/residual_stratify.rs::is_empty": 1,
+      "crates/gam-sae/src/corpus/residual_stratify.rs::len": 1,
+      "crates/gam-sae/src/corpus/residual_stratify.rs::new": 1,
+      "crates/gam-sae/src/corpus/residual_stratify.rs::strata": 1,
+      "crates/gam-sae/src/corpus/residual_stratify.rs::total_rows": 1,
+      "crates/gam-sae/src/corpus/residual_stratify.rs::uniform_rate": 1,
+      "crates/gam-sae/src/corpus/residual_stratify.rs::width": 1,
+      "crates/gam-sae/src/identifiability.rs::atom_inference_reports": 1,
+      "crates/gam-sae/src/identifiability.rs::dictionary_report": 1,
+      "crates/gam-sae/src/inference/harvest.rs::with_designed_tier": 1,
+      "crates/gam-sae/src/manifold/atom.rs::reconstruct_decoder_coefficients": 1,
+      "crates/gam-sae/src/manifold/coordinate_fidelity.rs::classify_occupancy": 1,
+      "crates/gam-sae/src/sparse_dict/block_scoring_gpu.rs::block_gate_block_cpu": 1,
+      "crates/gam-sae/src/sparse_dict/coordinate.rs::block_measure_valued_codes": 1,
+      "crates/gam-sae/src/sparse_dict/coordinate.rs::explained_variance_from_reconstruction": 1,
+      "crates/gam-sae/src/sparse_dict/coordinate.rs::harmonic_firing_coordinates": 1,
+      "crates/gam-sae/src/sparse_dict/coordinate.rs::reconstruct_single_coordinate_rows": 1,
+      "crates/gam-sae/src/sparse_dict/scoring_gpu.rs::score_block_required": 1,
+      "crates/gam-sae/src/tiered/mod.rs::fit_tier05_sink_atom": 1
+    },
+    "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. No product uses gam-sae's designed-corpus and residual-stratified corpus modules (corpus/designed_target.rs, corpus/residual_stratify.rs), so both files are deleted whole. Nor does any product use dictionary_report, with_designed_tier, reconstruct_decoder_coefficients, classify_occupancy, block_gate_block_cpu, the four coordinate.rs readouts, score_block_required or fit_tier05_sink_atom.",
+    "evidence": "restored_consumers_2829.py at a39a27a17 (MSI job 536241, /scratch.global/sauer354/pool/api2829/consumers.a39a27a17e9346a0b7039f4f25996837a9fe3a52.rows.tsv) scores the listed identities as unreferenced, and residual_stratify's `new` as exempt_name. At the base, git grep -w over crates, src, tests, examples, python and bench finds every pub item of both corpus modules only in its own file and corpus/mod.rs. The one exception is Stratum, whose other hits are a gam-sae example's own struct and a gam-problem doc word. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 538036, /scratch.global/sauer354/pool/api2829/validate.538036.log)."
   }
 ]

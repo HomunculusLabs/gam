@@ -64,7 +64,7 @@ pub use block_chart::{
     compose_block_coordinate_charts,
 };
 pub use block_scoring_gpu::{
-    BlockRoutePath, block_gate_block_cpu, block_gate_row_cpu, code_block_shortlists_cpu,
+    BlockRoutePath, block_gate_row_cpu, code_block_shortlists_cpu,
     route_blocks_cpu,
 };
 #[cfg(target_os = "linux")]
@@ -77,15 +77,15 @@ pub use block_stream::{
 pub use codes::SparseCode;
 pub use coordinate::{
     BlockCoordinateReport, BlockMeasureCoordinateReport, FiringCoordinate, MeasureSpikeCoordinate,
-    MeasureValuedCode, block_firing_coordinates, block_measure_valued_codes,
-    block_route_firing_coordinates, explained_variance_from_reconstruction,
-    harmonic_firing_coordinates, harmonic_measure_coordinates, harmonic_route_firing_coordinates,
-    reconstruct_measure_valued_rows, reconstruct_single_coordinate_rows, recover_measure_from_code,
+    MeasureValuedCode, block_firing_coordinates,
+    block_route_firing_coordinates,
+    harmonic_measure_coordinates, harmonic_route_firing_coordinates,
+    reconstruct_measure_valued_rows, recover_measure_from_code,
 };
 pub use scoring::{ScoreRoutePath, ScoreRouteResult, ScoreRouteStats, TileScorer, top_s_online};
 #[cfg(target_os = "linux")]
 pub use scoring_gpu::{
-    DEVICE_SCORE_BLOCK_MIN_ELEMS, ScoreBlockPath, score_block_cpu, score_block_required,
+    DEVICE_SCORE_BLOCK_MIN_ELEMS, ScoreBlockPath, score_block_cpu,
 };
 pub use split_lr_fdr::{
     FdrCertificate, crossfit_ui_log_evalue, family_fdr_certificate, shell_vs_ring_log_evalue,

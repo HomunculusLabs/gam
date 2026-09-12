@@ -445,68 +445,6 @@ pub enum ScoreBlockPath {
     Cpu,
 }
 
-/// Fail-loud, residency-aware score-block entry point (#1026 scale-K lane).
-///
-/// Honours the process-wide [`gam_gpu::GpuPolicy`] contract: under
-/// [`gam_gpu::GpuPolicy::Required`] a missing CUDA runtime, an NVRTC/arch compile
-/// failure, a launch fault, or a block below the device break-even all return
-/// `Err` instead of silently degrading to the CPU. [`gam_gpu::GpuPolicy::Auto`]
-/// uses the device when admitted and the block clears the break-even, uses the
-/// CPU only when no device is available, and propagates device faults;
-/// [`gam_gpu::GpuPolicy::Off`] always uses the CPU. The returned
-/// [`ScoreBlockPath`] reports which path actually ran.
-///
-/// Both paths produce a BIT-IDENTICAL `f32` score block (see module docs), so
-/// the routed top-`s` support is identical whichever path runs.
-///
-/// # Errors
-/// Returns [`gam_gpu::GpuError`] when CUDA admission or execution fails.
-pub fn score_block_required(
-    rows: ArrayView2<'_, f32>,
-    atoms: ArrayView2<'_, f32>,
-    mode: gam_gpu::GpuPolicy,
-) -> Result<(Vec<f32>, ScoreBlockPath), gam_gpu::GpuError> {
-    use gam_gpu::GpuPolicy;
-
-    let n_rows = rows.nrows();
-    let n_atoms = atoms.nrows();
-    let plan = gam_gpu::DictionaryScoreRoutePlan::with_limits(
-        n_rows,
-        n_atoms,
-        rows.ncols(),
-        DEVICE_SCORE_BLOCK_MIN_ELEMS,
-        GPU_ROUTE_TILE_ELEMS,
-    );
-
-    if mode == GpuPolicy::Off {
-        return Ok((score_block_cpu(rows, atoms), ScoreBlockPath::Cpu));
-    }
-
-    if mode == GpuPolicy::Required && !plan.device_admitted {
-        return Err(gam_gpu::gpu_err!(
-            "sparse_dict score-block GpuPolicy::Required: block of {n_rows}×{n_atoms} = {} \
-             elems is below the device launch break-even \
-             (DEVICE_SCORE_BLOCK_MIN_ELEMS={DEVICE_SCORE_BLOCK_MIN_ELEMS}); refusing \
-             to silently run on the CPU",
-            n_rows.saturating_mul(n_atoms)
-        ));
-    }
-    if plan.device_admitted {
-        let runtime = if mode == GpuPolicy::Required {
-            Some(gam_gpu::GpuRuntime::require()?)
-        } else {
-            gam_gpu::GpuRuntime::resolve(mode)?
-        };
-        if runtime.is_none() {
-            return Ok((score_block_cpu(rows, atoms), ScoreBlockPath::Cpu));
-        }
-        let out = device::score_block_device(rows, atoms)?;
-        return Ok((out, ScoreBlockPath::Device));
-    }
-
-    Ok((score_block_cpu(rows, atoms), ScoreBlockPath::Cpu))
-}
-
 /// Peak score elements per device launch for the tiled GPU router. The router
 /// NEVER materialises the whole `m × K` block: it walks `K` in atom-column tiles
 /// sized so each launch's `m × cols` block stays under this cap (~2M f32 ≈ 8 MB

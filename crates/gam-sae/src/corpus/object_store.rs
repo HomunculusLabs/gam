@@ -24,9 +24,8 @@
 //! `0..n0`, then shard-1 rows `0..n1`, … with stable global `row_id`s. Fetch
 //! latency, retries, and prefetch depth can never reorder, drop, or duplicate
 //! rows; the `(row_id, row)` sequence is byte-identical across runs, fleets,
-//! and backends, so warm-start keys ([`super::warm_state`]), subsample hashes
-//! ([`super::residual_stratify`]), and the cross-node chunk partition
-//! ([`gam_solve::cross_node`]) all agree with a local-disk run.
+//! and backends, so warm-start keys ([`super::warm_state`]) and the cross-node
+//! chunk partition ([`gam_solve::cross_node`]) all agree with a local-disk run.
 //!
 //! ## Bounded prefetch, never materialize
 //!

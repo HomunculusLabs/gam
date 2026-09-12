@@ -51,12 +51,11 @@ pub use fit::{
 };
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 
 use crate::basis::{AnchorIndicatorEvaluator, SaeBasisEvaluator};
-use crate::manifold::{SaeAtomBasisKind, SaeManifoldAtom, finite_set_rank_charge};
+use crate::manifold::{SaeAtomBasisKind, SaeManifoldAtom};
 
 /// Tier-0: the single shared mean μ (length `p`). The global DC lives here, not
 /// duplicated across `K` per-atom intercepts.
@@ -246,9 +245,6 @@ impl SinkAnchor {
         }
     }
 
-    fn is_sink(self) -> bool {
-        !matches!(self, Self::Semantic)
-    }
 }
 
 /// Flag-gated Tier-0.5 sink-atom configuration.
@@ -310,146 +306,6 @@ pub struct Tier05SinkAtom {
     pub anchor_counts: Vec<usize>,
     pub rank_charge: usize,
     pub variance_absorbed: f64,
-}
-
-/// Fit the Tier-0.5 sink atom on a post-Tier-0 residual.
-///
-/// `positions` are within-sequence token positions. `delimiter_classes` is either
-/// empty (no delimiter support supplied) or length `N`; entries not listed in
-/// `config.delimiter_classes` remain in the semantic reference anchor. Position
-/// 0 takes precedence over delimiter labels, because the measured confound is
-/// the first-token sink itself.
-pub fn fit_tier05_sink_atom(
-    residual: ArrayView2<'_, f64>,
-    positions: &[i64],
-    delimiter_classes: &[Option<SinkDelimiterClass>],
-    config: &Tier05SinkAtomConfig,
-) -> Result<Option<Tier05SinkAtom>, String> {
-    if !config.enabled {
-        return Ok(None);
-    }
-    let n = residual.nrows();
-    let p = residual.ncols();
-    if n == 0 || p == 0 {
-        return Err("fit_tier05_sink_atom: residual must be a non-empty N×P matrix".to_string());
-    }
-    if positions.len() != n {
-        return Err(format!(
-            "fit_tier05_sink_atom: positions length {} != N {n}",
-            positions.len()
-        ));
-    }
-    if !delimiter_classes.is_empty() && delimiter_classes.len() != n {
-        return Err(format!(
-            "fit_tier05_sink_atom: delimiter_classes length {} must be 0 or N {n}",
-            delimiter_classes.len()
-        ));
-    }
-    if !config.delimiter_classes.is_empty() && delimiter_classes.is_empty() {
-        return Err(
-            "fit_tier05_sink_atom: delimiter classes configured but no per-row delimiter labels supplied"
-                .to_string(),
-        );
-    }
-
-    let anchors = config.anchors()?;
-    let delimiter_set: BTreeSet<SinkDelimiterClass> =
-        config.delimiter_classes.iter().copied().collect();
-    let mut anchor_lookup = BTreeMap::new();
-    for (idx, anchor) in anchors.iter().copied().enumerate() {
-        anchor_lookup.insert(anchor, idx);
-    }
-
-    let mut coords = Array2::<f64>::zeros((n, 1));
-    let mut counts = vec![0usize; anchors.len()];
-    for row in 0..n {
-        let delimiter = if delimiter_classes.is_empty() {
-            None
-        } else {
-            delimiter_classes[row]
-        };
-        let anchor = if config.include_position_zero && positions[row] == 0 {
-            SinkAnchor::PositionZero
-        } else if let Some(class) = delimiter {
-            if delimiter_set.contains(&class) {
-                SinkAnchor::Delimiter(class)
-            } else {
-                SinkAnchor::Semantic
-            }
-        } else {
-            SinkAnchor::Semantic
-        };
-        let idx = anchor_lookup.get(&anchor).copied().ok_or_else(|| {
-            format!(
-                "fit_tier05_sink_atom: support anchor {} was not configured",
-                anchor.label()
-            )
-        })?;
-        coords[[row, 0]] = idx as f64;
-        counts[idx] += 1;
-    }
-
-    let sink_rows: usize = anchors
-        .iter()
-        .zip(counts.iter())
-        .filter(|(anchor, _count)| anchor.is_sink())
-        .map(|(_anchor, &count)| count)
-        .sum();
-    if sink_rows == 0 {
-        return Err(
-            "fit_tier05_sink_atom: enabled sink atom has no sink-supported rows".to_string(),
-        );
-    }
-
-    let evaluator = Arc::new(AnchorIndicatorEvaluator::new(anchors.len())?);
-    let (basis_values, basis_jacobian) = evaluator.evaluate(coords.view())?;
-    let mut decoder = Array2::<f64>::zeros((anchors.len(), p));
-    for row in 0..n {
-        let anchor = coords[[row, 0]] as usize;
-        for col in 0..p {
-            decoder[[anchor, col]] += residual[[row, col]];
-        }
-    }
-    for anchor in 0..anchors.len() {
-        if counts[anchor] > 0 {
-            let scale = 1.0 / counts[anchor] as f64;
-            for col in 0..p {
-                decoder[[anchor, col]] *= scale;
-            }
-        }
-    }
-    let smooth_penalty = Array2::<f64>::zeros((anchors.len(), anchors.len()));
-    let atom = SaeManifoldAtom::new_with_provided_function_gram(
-        "tier0_5_attention_sink",
-        SaeAtomBasisKind::FiniteSet,
-        1,
-        basis_values,
-        basis_jacobian,
-        decoder,
-        smooth_penalty,
-    )?
-    .with_basis_second_jet(evaluator);
-
-    let reconstruction = atom.basis_values.dot(atom.decoder_coefficients());
-    let mut rss = 0.0f64;
-    let mut tss = 0.0f64;
-    for row in 0..n {
-        for col in 0..p {
-            let r = residual[[row, col]] - reconstruction[[row, col]];
-            rss += r * r;
-            let v = residual[[row, col]];
-            tss += v * v;
-        }
-    }
-    let variance_absorbed = if tss <= 0.0 { 0.0 } else { 1.0 - rss / tss };
-
-    Ok(Some(Tier05SinkAtom {
-        atom,
-        anchors,
-        anchor_counts: counts,
-        rank_charge: finite_set_rank_charge(anchor_lookup.len()),
-        variance_absorbed,
-    }))
 }
 
 /// `1 − RSS/TSS` — the one definition of explained variance in the SAE stack.

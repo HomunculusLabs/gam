@@ -33,12 +33,6 @@
 //!   must see a designed, honesty-weighted subsample
 //!   (`gam_solve::row_sampling_measure::RowSamplingMeasure::designed_subsample`), not
 //!   a full exact pass.
-//! * [`designed_target`] (#991) — the consumer bridge: design a row sample
-//!   from a [`gam_solve::row_sampling_measure::RowSamplingMeasure`] (uniform cold start,
-//!   or a previous harvest's lifted Fisher measure), stream-collect exactly
-//!   those rows into the `budget × p` fit target, and hand the `1/π` honesty
-//!   weights to `SaeManifoldTerm::set_row_loss_weights`. Full budget ⇒ the
-//!   exact pass, bit-for-bit (weights collapse to the unweighted path).
 //!
 //! # The seam
 //!
@@ -58,10 +52,8 @@
 //! Nothing in this module references `sae_manifold.rs`; the term wires these
 //! pieces in on its side of the seam.
 
-pub mod designed_target;
 pub mod ledger_store;
 pub mod object_store;
-pub mod residual_stratify;
 pub mod shard_reader;
 pub mod torus_merge_audit;
 pub mod warm_state;
@@ -78,23 +70,8 @@ pub use shard_reader::{
 /// Per-row inner-solve warm-state cache (seam half 2).
 pub use warm_state::{DiskRowWarmCache, RowWarmCache, RowWarmState};
 
-/// Residual-energy-stratified birth screen: make the dictionary tail reachable
-/// by guaranteeing rare high-residual rows representation in the discovery
-/// subsample, with Horvitz–Thompson weights that keep every criterion unbiased.
-pub use residual_stratify::{
-    RowResidualEnergy, SpanResidualEnergy, StratifiedCorpusTarget, Stratum, StratumDesign,
-    collect_stratified_target, design_stratified_subsample,
-};
-
 /// ISA post-fit torus-merge audit: flag pairs of accepted atoms that are really
 /// one curved structure, by the fourth-moment `(κ − 2)²` contrast on their
 /// co-assigned rows.
 pub use torus_merge_audit::{MergeCandidate, audit_torus_merges};
-
-/// Designed corpus target collection (#991): stream → designed sample +
-/// honesty weights, the row set the term actually fits.
-pub use designed_target::{
-    DESIGNED_SAMPLE_DEFAULT_BUDGET_ROWS, DesignedCorpusTarget, auto_designed_budget,
-    collect_designed_target, collect_designed_target_auto, collect_designed_target_from_harvest,
-};
 

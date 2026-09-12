@@ -16,9 +16,8 @@
 //!   per-entry checksums). Anytime validity is exactly what makes this
 //!   sound: an e-process resumed mid-stream is still an e-process, so a
 //!   killed-and-restarted discovery run loses compute, never validity.
-//! * **At the chosen stop**, the caller certifies:
-//!   `sae::identifiability::dictionary_report(model, &ledger, α)` pairs
-//!   the e-BH structure certificate with the residual-gauge report.
+//! * **At the chosen stop**, `StructureLedger::certify` issues the e-BH
+//!   structure certificate.
 //!
 //! # Keying
 //!
