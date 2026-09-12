@@ -1393,6 +1393,130 @@ impl SaeSupportSparseTerm {
         Ok(profiled)
     }
 
+    /// #2576 — profile the affine gauge of every one-dimensional `Linear` atom.
+    ///
+    /// A linear atom `f(t) = β₀ + c·t` represents the same function under
+    /// `t = a + b·t'` with `β₀' = β₀ + a·c` and `c' = b·c`, so the data fit is exactly
+    /// invariant along that two-parameter orbit and only the priors curve it: the
+    /// coordinate ARD energy `½α Σ t²` and the atom's slope ridge `½λ s‖c‖²` (its
+    /// function penalty, `polynomial_reference_penalty`). Coordinate sweeps crawl
+    /// along such a weakly curved orbit, and the recurrence distance — which removes
+    /// only periodic phase gauges — counts the crawl as state change, so the fixed
+    /// point cannot recur while it lasts.
+    ///
+    /// Along the orbit that prior energy is `½α Σ (t − a)²/b² + ½λ s b² ‖c‖²`,
+    /// minimised by the mean `a*` of the routed coordinates and `b*⁴ = α S / (λ s ‖c‖²)`
+    /// with `S = Σ (t − a*)²`. The candidate is installed only when the exact prior
+    /// energy of the atom — its ARD terms and its smoothing quadratic form, both
+    /// re-evaluated — decreases by more than a roundoff bound, so a profiled atom is
+    /// left where it is.
+    fn profile_linear_affine_gauges(
+        &mut self,
+        lambda_smooth: &[f64],
+        ard_precisions: &[Vec<f64>],
+    ) -> Result<usize, String> {
+        let mut profiled = 0usize;
+        for atom_index in 0..self.k_atoms() {
+            if self.atoms[atom_index].basis_kind() != &SaeAtomBasisKind::Linear
+                || self.assignment.atom_coord_dim(atom_index) != 1
+                || self.atom_rows[atom_index].is_empty()
+                || self.atoms[atom_index].basis_size() != 2
+                || self.atoms[atom_index]
+                    .basis_values
+                    .column(0)
+                    .iter()
+                    .any(|&value| value != 1.0)
+            {
+                continue;
+            }
+            let alpha = ard_precisions[atom_index][0];
+            let lambda = lambda_smooth[atom_index];
+            if !(alpha.is_finite() && alpha > 0.0 && lambda.is_finite() && lambda >= 0.0) {
+                continue;
+            }
+            let rows = self.atom_rows[atom_index].len();
+            let mut coordinate_sum = KahanSum::default();
+            for &(row, slot) in &self.atom_rows[atom_index] {
+                coordinate_sum.add(self.assignment.coords_for_slot(row, slot)[0]);
+            }
+            let shift = coordinate_sum.sum() / rows as f64;
+            let mut spread = KahanSum::default();
+            for &(row, slot) in &self.atom_rows[atom_index] {
+                let centered = self.assignment.coords_for_slot(row, slot)[0] - shift;
+                spread.add(centered * centered);
+            }
+            let spread = spread.sum();
+            let slope_ridge = self.atoms[atom_index].smooth_penalty()[[1, 1]];
+            let slope_energy = self.atoms[atom_index]
+                .decoder_coefficients()
+                .row(1)
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>();
+            let curvature = lambda * slope_ridge * slope_energy;
+            let scale = if spread > 0.0 && curvature.is_finite() && curvature > 0.0 {
+                (alpha * spread / curvature).sqrt().sqrt()
+            } else {
+                1.0
+            };
+            if !(scale.is_finite() && scale > 0.0) {
+                continue;
+            }
+
+            let old_decoder = self.atoms[atom_index].decoder_coefficients().clone();
+            let mut new_decoder = old_decoder.clone();
+            for output in 0..new_decoder.ncols() {
+                let slope = old_decoder[[1, output]];
+                new_decoder[[0, output]] += shift * slope;
+                new_decoder[[1, output]] = scale * slope;
+            }
+            let penalty = self.atoms[atom_index].smooth_penalty().clone();
+            let smoothing_energy = |decoder: &Array2<f64>| -> f64 {
+                let penalized = penalty.dot(decoder);
+                0.5 * lambda
+                    * decoder
+                        .iter()
+                        .zip(penalized.iter())
+                        .map(|(left, right)| left * right)
+                        .sum::<f64>()
+            };
+            let mut old_energy = KahanSum::default();
+            let mut new_energy = KahanSum::default();
+            let mut profiled_coordinates = Vec::with_capacity(rows);
+            for &(row, slot) in &self.atom_rows[atom_index] {
+                let coordinate = self.assignment.coords_for_slot(row, slot)[0];
+                let reparameterized = (coordinate - shift) / scale;
+                old_energy.add(ArdAxisPrior::eval(alpha, coordinate, None).value);
+                new_energy.add(ArdAxisPrior::eval(alpha, reparameterized, None).value);
+                profiled_coordinates.push((row, slot, reparameterized));
+            }
+            old_energy.add(smoothing_energy(&old_decoder));
+            new_energy.add(smoothing_energy(&new_decoder));
+            let old_energy = old_energy.sum();
+            let new_energy = new_energy.sum();
+            let resolution =
+                gam_linalg::roundoff::compensated_band(9, old_energy.abs() + new_energy.abs());
+            if !(old_energy - new_energy > resolution) {
+                continue;
+            }
+
+            let basis_values = self.atoms[atom_index].basis_values.clone();
+            let basis_jacobian = self.atoms[atom_index].basis_jacobian.clone();
+            self.atoms[atom_index].install_reparameterized_basis(
+                basis_values,
+                basis_jacobian,
+                new_decoder,
+                penalty,
+            )?;
+            for (row, slot, coordinate) in profiled_coordinates {
+                self.assignment
+                    .set_slot_coords(row, slot, &[coordinate])?;
+            }
+            profiled += 1;
+        }
+        Ok(profiled)
+    }
+
     pub fn k_atoms(&self) -> usize {
         self.atoms.len()
     }
@@ -6227,7 +6351,8 @@ impl SaeSupportSparseTerm {
                 tolerance,
                 Some(&mut fitted_state),
             )?;
-            let phase_profiles = self.profile_periodic_phase_origins(ard_precisions)?;
+            let phase_profiles = self.profile_periodic_phase_origins(ard_precisions)?
+                + self.profile_linear_affine_gauges(lambda_smooth, ard_precisions)?;
             if phase_profiles > 0 {
                 self.reconstruct_into(&mut fitted_state)?;
             }
@@ -6300,7 +6425,10 @@ impl SaeSupportSparseTerm {
                         // it back in the unique ARD-selected phase chart before
                         // either the recurrence certificate or the Laplace
                         // caller observes the state.
-                        if self.profile_periodic_phase_origins(ard_precisions)? > 0 {
+                        if self.profile_periodic_phase_origins(ard_precisions)?
+                            + self.profile_linear_affine_gauges(lambda_smooth, ard_precisions)?
+                            > 0
+                        {
                             self.reconstruct_into(&mut fitted_state)?;
                         }
                         residual = &target - &fitted_state;
@@ -7166,5 +7294,86 @@ mod tests {
             error,
             SaeInnerKktScaleError::InvalidCurvature { .. }
         ));
+    }
+
+    /// #2576 — a linear atom's affine gauge is profiled to the prior-selected
+    /// representative: the fit is unchanged, the penalized objective strictly
+    /// decreases, the routed coordinates are centered, and a second profile finds
+    /// nothing left to install.
+    #[test]
+    fn linear_affine_gauge_profile_lowers_the_prior_at_a_fixed_fit_2576() {
+        let rows = 8usize;
+        let evaluator: Arc<dyn SaeBasisSecondJet> =
+            Arc::new(EuclideanPatchEvaluator::new(1, 1).expect("patch"));
+        let probe = Array2::from_shape_vec((1, 1), vec![0.0]).expect("probe");
+        let (phi, jet) = evaluator.evaluate(probe.view()).expect("evaluate");
+        let atoms = vec![
+            SaeManifoldAtom::new_with_provided_function_gram(
+                "offset-line",
+                SaeAtomBasisKind::Linear,
+                1,
+                phi,
+                jet,
+                array![[0.3, -0.2], [2.0, 0.5]],
+                array![[0.0, 0.0], [0.0, 1.0]],
+            )
+            .expect("atom")
+            .with_basis_second_jet(evaluator),
+        ];
+        let coordinates: Vec<Vec<f64>> = (0..rows)
+            .map(|row| vec![5.0 + 3.0 * (row as f64 - 3.5) / 3.5])
+            .collect();
+        let state = SaeAssignmentState::from_topk_support_heterogeneous(
+            rows,
+            1,
+            1,
+            vec![SaeAssignmentAtomSpec::euclidean(1)],
+            vec![vec![0]; rows],
+            vec![vec![1.0]; rows],
+            coordinates,
+        )
+        .expect("state");
+        let mut term = SaeSupportSparseTerm::new(atoms, state).expect("term");
+        let before = term.reconstruct().expect("fitted");
+        let target = before.mapv(|value| value + 1.0e-3);
+        let lambda = vec![0.5];
+        let ard = vec![vec![1.0]];
+        let objective_before = term
+            .penalized_objective(target.view(), &lambda, &ard)
+            .expect("objective");
+
+        assert_eq!(
+            term.profile_linear_affine_gauges(&lambda, &ard)
+                .expect("profile"),
+            1,
+            "an offset, unscaled linear atom must be profiled"
+        );
+        let after = term.reconstruct().expect("fitted");
+        let scale = before.iter().fold(1.0_f64, |acc, value| acc.max(value.abs()));
+        assert!(
+            before
+                .iter()
+                .zip(after.iter())
+                .all(|(left, right)| (left - right).abs() <= 1.0e-10 * scale),
+            "the affine gauge must leave the reconstruction unchanged"
+        );
+        let objective_after = term
+            .penalized_objective(target.view(), &lambda, &ard)
+            .expect("objective");
+        assert!(
+            objective_after < objective_before,
+            "profiling must lower the penalized objective: {objective_before} -> {objective_after}"
+        );
+        let mean = (0..rows)
+            .map(|row| term.assignment.coords_for_slot(row, 0)[0])
+            .sum::<f64>()
+            / rows as f64;
+        assert!(mean.abs() <= 1.0e-12, "profiled coordinates must be centered, mean {mean}");
+        assert_eq!(
+            term.profile_linear_affine_gauges(&lambda, &ard)
+                .expect("profile"),
+            0,
+            "a profiled atom is already at its prior-selected representative"
+        );
     }
 }
