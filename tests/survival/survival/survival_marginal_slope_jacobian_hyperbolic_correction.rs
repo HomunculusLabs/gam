@@ -50,7 +50,7 @@
 //! yielding overlap = 1.0 — triggering a spurious fatal audit halt.
 
 use gam::custom_family::{
-    BlockEffectiveJacobian, FamilyLinearizationState, ParameterBlockSpec, RowScaledJacobian,
+    BlockEffectiveJacobian, FamilyLinearizationState, ParameterBlockSpec,
 };
 use gam::identifiability::audit::audit_identifiability_channel_aware;
 use gam::identifiability::families::compiler::{IdentityRowHessian, RowJacobianOperator};
@@ -107,8 +107,6 @@ struct SyntheticData {
     phi: Array2<f64>,
     /// Marginal design matrix, shape (N, P_BLOCK).
     phi_marg: Array2<f64>,
-    /// Time design matrix (exit), shape (N, P_BLOCK).
-    phi_time: Array2<f64>,
     /// Baseline q0, q1, qd1 vectors (primary scalars for time/marginal blocks at β=0).
     q0_base: Array1<f64>,
     q1_base: Array1<f64>,
@@ -167,10 +165,9 @@ fn make_synthetic_data(seed: u64) -> SyntheticData {
     };
 
     let phi = make_design(0.0);
-    // Marginal and time blocks share the same structural design but slightly
-    // different offset so they are NOT exactly collinear (tests overlap < 1).
+    // The marginal block uses a slightly different offset from the slope design
+    // so the two are NOT exactly collinear (tests overlap < 1).
     let phi_marg = make_design(1.0);
-    let phi_time = make_design(2.0);
 
     // Baseline q0/q1/qd1: represent pilot values at β_time = β_marg = 0.
     // At β=0 the time and marginal blocks produce constant q. Use modest
@@ -189,7 +186,6 @@ fn make_synthetic_data(seed: u64) -> SyntheticData {
         z,
         phi,
         phi_marg,
-        phi_time,
         q0_base,
         q1_base,
         qd1_base,
@@ -983,129 +979,6 @@ fn channel_aware_audit_overlap_below_one_at_moderate_beta() {
          Summary: {}",
         audit.summary,
     );
-}
-
-/// The time block contributes `c * design` to both η0 and η1. At β_time = 0
-/// this equals just `1 * design`.  The test verifies the time block's c=1
-/// effective design can serve as an FD-correct baseline.
-#[test]
-fn time_and_marginal_blocks_at_zero_beta_have_trivial_scaling() {
-    let data = make_synthetic_data(55);
-    let s_f = 1.0_f64;
-    let beta_zero = vec![0.0; P_BLOCK];
-
-    // At β_time = 0: g_time = 0, c = 1 for all rows.
-    // Time Jacobian (η0 rows) = 1 * Phi_time, (η1 rows) = 1 * Phi_time.
-    // FD on η0: d/dβ [q0 * c(Phi_time * β) + s_f * g_time * z]|β=0 = 0 for q0 term
-    // because dc/dβ|g=0 = 0 (c is stationary at g=0). BUT the time block
-    // contributes to q via the design: dq0/dβ = Phi_time (for the time block).
-    // So d(η0)/dβ_time = (dq0/dβ_time) * c_i = 1 * Phi_time_{i,j}.
-    // This is effectively an additive contribution through the q-channel.
-    //
-    // For this block, the "effective design" at β=0 is just Phi_time (c=1).
-
-    // Build a simple additive spec for the time block (c=1 means row-scaling = ones).
-    let scaling: Arc<[f64]> = vec![1.0_f64; N].into();
-    let spec = ParameterBlockSpec {
-        name: "time".to_string(),
-        design: DesignMatrix::Dense(DenseDesignMatrix::from(data.phi_time.clone())),
-        offset: Array1::<f64>::zeros(N),
-        penalties: Vec::new(),
-        nullspace_dims: Vec::new(),
-        initial_log_lambdas: Array1::<f64>::zeros(0),
-        initial_beta: None,
-        gauge_priority: 200,
-        jacobian_callback: Some(Arc::new(RowScaledJacobian {
-            design: Arc::new(data.phi_time.clone()),
-            eta_scaling: scaling,
-        })),
-        stacked_design: None,
-        stacked_offset: None,
-    };
-
-    // Effective Jacobian via spec.effective_jacobian_at (RowScaledJacobian with scaling=1).
-    let state = FamilyLinearizationState {
-        beta: &beta_zero,
-        family_scalars: None,
-        channel_hessian: None,
-        probit_frailty_scale: s_f,
-    };
-    let jac = spec
-        .effective_jacobian_at("test", &state)
-        .expect("time block effective_jacobian_at must succeed");
-
-    // Check shape.
-    assert_eq!(
-        jac.nrows(),
-        N,
-        "time block Jacobian must have N rows (single output), got {}",
-        jac.nrows()
-    );
-    assert_eq!(
-        jac.ncols(),
-        P_BLOCK,
-        "time block Jacobian must have P_BLOCK cols, got {}",
-        jac.ncols()
-    );
-
-    // With row-scaling=1, effective Jacobian = design.
-    for i in 0..N {
-        for j in 0..P_BLOCK {
-            let got = jac[[i, j]];
-            let expected = data.phi_time[[i, j]];
-            let err = (got - expected).abs();
-            assert!(
-                err < 1e-12,
-                "time block: jac[{i},{j}]={got:.6e} != phi_time[{i},{j}]={expected:.6e}",
-            );
-        }
-    }
-
-    // Also verify marginal block with s_f·z row scaling (what T1 should use
-    // for the β=0 case — but for marginal, s_f·z is the CORRECT scaling at all β
-    // only if the marginal block contributes additively to q, not g).
-    let sf_z: Vec<f64> = data.z.iter().map(|&zi| s_f * zi).collect();
-    let sf_z_arc: Arc<[f64]> = sf_z.into();
-    let marg_spec = ParameterBlockSpec {
-        name: "marginal_z_scaled".to_string(),
-        design: DesignMatrix::Dense(DenseDesignMatrix::from(data.phi_marg.clone())),
-        offset: Array1::<f64>::zeros(N),
-        penalties: Vec::new(),
-        nullspace_dims: Vec::new(),
-        initial_log_lambdas: Array1::<f64>::zeros(0),
-        initial_beta: None,
-        gauge_priority: 150,
-        jacobian_callback: Some(Arc::new(RowScaledJacobian {
-            design: Arc::new(data.phi_marg.clone()),
-            eta_scaling: sf_z_arc,
-        })),
-        stacked_design: None,
-        stacked_offset: None,
-    };
-    let marg_state = FamilyLinearizationState {
-        beta: &beta_zero,
-        family_scalars: None,
-        channel_hessian: None,
-        probit_frailty_scale: s_f,
-    };
-    let marg_jac = marg_spec
-        .effective_jacobian_at("test", &marg_state)
-        .expect("marginal block effective_jacobian_at must succeed");
-
-    // Verify RowScaledJacobian applied correctly: row i should equal s_f*z_i * Phi_marg[i,:]
-    for i in 0..N {
-        let scale = s_f * data.z[i];
-        for j in 0..P_BLOCK {
-            let got = marg_jac[[i, j]];
-            let expected = scale * data.phi_marg[[i, j]];
-            let err = (got - expected).abs();
-            let denom = expected.abs().max(1e-12);
-            assert!(
-                err / denom < 1e-10 || err < 1e-12,
-                "marginal z-scaled: jac[{i},{j}]={got:.6e} != {expected:.6e}",
-            );
-        }
-    }
 }
 
 // The production `SlopeBlockJacobian` contract test moved in-crate

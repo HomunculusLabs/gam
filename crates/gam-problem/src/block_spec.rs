@@ -125,7 +125,6 @@ pub struct FamilyLinearizationState<'a> {
 /// ```
 ///
 /// - Single-output linear block: returns `design.clone()`.
-/// - Row-scaled block (`RowScaledJacobian`): returns `diag(eta_scaling) · design` (still linear in β).
 /// - Multi-output block (e.g. survival marginal-slope with η0, η1, ad1):
 ///   stacks `∂eta_r/∂β_k` for `r ∈ 0..n_outputs`, row-major ordering.
 ///
@@ -168,15 +167,6 @@ pub trait BlockEffectiveJacobian: Send + Sync {
     /// Number of stacked output channels. 1 for most blocks.
     fn n_outputs(&self) -> usize {
         1
-    }
-
-    /// Returns the per-row scaling vector when this callback is a simple
-    /// diagonal-scaling block (`RowScaledJacobian`).  Used by the
-    /// identifiability audit's skewness-aware bias correction (T25).
-    ///
-    /// Returns `None` for all blocks except `RowScaledJacobian`.
-    fn eta_row_scaling_for_skewness(&self) -> Option<Arc<[f64]>> {
-        None
     }
 
     /// Whether the identifiability canonicaliser must keep this block at its
@@ -247,58 +237,6 @@ impl BlockEffectiveJacobian for AdditiveBlockJacobian {
 
     fn n_outputs(&self) -> usize {
         self.n_family_outputs
-    }
-}
-
-/// A [`BlockEffectiveJacobian`] for a single-output block whose contribution
-/// to the linear predictor is `diag(eta_scaling) · design` (row-wise scaling).
-///
-/// This is the canonical replacement for the former `eta_row_scaling` field on
-/// [`ParameterBlockSpec`].  The identifiability audit's skewness-aware bias
-/// correction can recover the scaling vector via
-/// [`BlockEffectiveJacobian::eta_row_scaling_for_skewness`].
-pub struct RowScaledJacobian {
-    pub design: Arc<Array2<f64>>,
-    pub eta_scaling: Arc<[f64]>,
-}
-
-impl BlockEffectiveJacobian for RowScaledJacobian {
-    fn effective_jacobian_rows(
-        &self,
-        state: &FamilyLinearizationState<'_>,
-        rows: Range<usize>,
-    ) -> Result<Array2<f64>, String> {
-        let n = self.design.nrows();
-        let rows = clamp_jacobian_rows(rows, n);
-        if self.eta_scaling.len() != n {
-            return Err(format!(
-                "RowScaledJacobian: eta_scaling length {} != design nrows {}",
-                self.eta_scaling.len(),
-                n,
-            ));
-        }
-        // Row-scaled blocks are β-linear; verify the linearization point
-        // contains no NaN when β is provided (sanity check on caller state).
-        if !state.beta.is_empty() && state.beta.iter().any(|v| v.is_nan()) {
-            return Err(
-                "RowScaledJacobian::effective_jacobian_at: state.beta contains NaN".to_string(),
-            );
-        }
-        let mut scaled = self
-            .design
-            .slice(ndarray::s![rows.start..rows.end, ..])
-            .to_owned();
-        for local_i in 0..scaled.nrows() {
-            let s = self.eta_scaling[rows.start + local_i];
-            for j in 0..scaled.ncols() {
-                scaled[[local_i, j]] *= s;
-            }
-        }
-        Ok(scaled)
-    }
-
-    fn eta_row_scaling_for_skewness(&self) -> Option<Arc<[f64]>> {
-        Some(Arc::clone(&self.eta_scaling))
     }
 }
 
@@ -403,12 +341,6 @@ impl BlockEffectiveJacobian for GaugeComposedJacobian {
 
     fn n_outputs(&self) -> usize {
         self.inner.n_outputs()
-    }
-
-    // Skewness scaling is a raw-row property; reducing the column space does not
-    // change the per-row scaling, so it is forwarded unchanged when present.
-    fn eta_row_scaling_for_skewness(&self) -> Option<Arc<[f64]>> {
-        self.inner.eta_row_scaling_for_skewness()
     }
 }
 
@@ -587,8 +519,7 @@ pub struct ParameterBlockSpec {
     /// affine/null-space directions (e.g. baseline time in survival).
     pub gauge_priority: u8,
     /// Full β-dependent Jacobian callback.  When `Some`, this is the
-    /// authoritative source for `effective_jacobian_at`.  For simple
-    /// single-output row-scaled blocks use [`RowScaledJacobian`].
+    /// authoritative source for `effective_jacobian_at`.
     pub jacobian_callback: Option<Arc<dyn BlockEffectiveJacobian>>,
     /// Optional multi-channel eta-producing operator used by the solver.
     ///

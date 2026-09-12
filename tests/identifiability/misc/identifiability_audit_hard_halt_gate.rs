@@ -214,7 +214,7 @@ fn audit_partial_overlap_below_threshold_does_not_halt() {
 ///   - survive both the pilot path AND the outer-inner-fit path.
 #[test]
 fn cross_block_alias_with_distinct_priorities_is_not_fatal() {
-    use gam::families::custom_family::{ParameterBlockSpec, RowScaledJacobian};
+    use gam::families::custom_family::ParameterBlockSpec;
     use gam::linalg::matrix::{DenseDesignMatrix, DesignMatrix};
     use ndarray::Array1;
 
@@ -348,31 +348,11 @@ fn cross_block_alias_with_distinct_priorities_is_not_fatal() {
     // independent of the unscaled marginal rows (z varies row-by-row), so
     // the joint rank is full and no drops are needed.
     {
-        let z_scaling: std::sync::Arc<[f64]> = std::sync::Arc::from(
-            z_primary
-                .as_slice()
-                .expect("z_primary must be C-contiguous"),
-        );
-        let slope_scaled_spec = ParameterBlockSpec {
-            name: "slope_surface".to_string(),
-            design: DesignMatrix::Dense(DenseDesignMatrix::from(slope.clone())),
-            offset: Array1::<f64>::zeros(n),
-            penalties: Vec::new(),
-            nullspace_dims: Vec::new(),
-            initial_log_lambdas: Array1::<f64>::zeros(0),
-            initial_beta: None,
-            gauge_priority: 120,
-            jacobian_callback: Some(std::sync::Arc::new(RowScaledJacobian {
-                design: std::sync::Arc::new(slope.clone()),
-                eta_scaling: z_scaling,
-            })),
-            stacked_design: None,
-            stacked_offset: None,
-        };
+        let slope_scaled = &slope * &z_primary.view().insert_axis(ndarray::Axis(1));
         let specs_with_z_scaling = [
             make_spec("time_surface", time, 200),
             make_spec("marginal_surface", marginal, 150),
-            slope_scaled_spec,
+            make_spec("slope_surface", slope_scaled, 120),
         ];
         let audit = audit_identifiability(&specs_with_z_scaling).expect("z-scaled audit must run");
         assert!(

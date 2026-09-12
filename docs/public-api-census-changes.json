@@ -2033,5 +2033,14 @@
     },
     "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. No product uses these restored-in-place gam-solve identities. psis::expected_reported_shape and psis::shape_resolution appear in gam-inference and gam-problem prose as sizing formulas, but no code calls either. streaming_border's ChunkAssembler::push_rows is the only way rows enter ChunkAssembler, which nothing outside its own file references.",
     "evidence": "restored_consumers_2829.py at 3693c2c2c (MSI job 539356, /scratch.global/sauer354/pool/api2829/consumers.3693c2c2c769830ff8f2769e77061d353ff01697.rows.tsv) scores all three as unreferenced. At the base, git grep -w finds expected_reported_shape and shape_resolution only at their declarations and in doc prose. It finds ChunkAssembler only in streaming_border.rs, while StreamingBorderGram, chunk_gram_flat and BorderGramCheckpoint keep their gam-solve cross_node.rs users. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 540016, /scratch.global/sauer354/pool/api2829/validate.540016.log)."
+  },
+  {
+    "base": "a6ecf9d1a4d499b71ad00613726bc3f73ae90207",
+    "removed": {
+      "crates/gam-identifiability/src/audit.rs::bias_shift_for_pair": 1,
+      "crates/gam-identifiability/src/audit.rs::compute_skewness_mu3": 1
+    },
+    "reason": "prune-api-b product-use sweep (#2899). compute_skewness_mu3 and bias_shift_for_pair are removed with the skewness-aware bias correction of the identifiability audit, which only RowScaledJacobian could enable and no production family constructs; the cosine null band is now centred at zero, the value production always used.",
+    "evidence": "scripts/public_api_census.py over probe commit 8b1421e8f on base 39db8c791 (MSI acn112, python3.12; sliceD.census.out) reports exactly crates/gam-identifiability/src/audit.rs::bias_shift_for_pair 1 and ::compute_skewness_mu3 1. At the base both are named only in audit.rs and in the deleted tests/identifiability/misc/identifiability_audit_skewness_aware.rs."
   }
 ]

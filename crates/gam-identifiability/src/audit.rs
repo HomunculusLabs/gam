@@ -181,163 +181,6 @@ fn compute_leverage_s2(col: &ndarray::ArrayView1<f64>) -> f64 {
     col.iter().map(|v| (v * v / sq_norm).powi(2)).sum()
 }
 
-/// Compute the standardised (unit-variance) third central moment μ_3 of a
-/// row-scaling vector z from a `RowScaledJacobian` callback, applying the
-/// finite-sample unbiased correction factor n / ((n-1)(n-2)).
-///
-/// # Derivation of the null-mean bias term
-///
-/// When one of the two blocks in a cross-block cosine comparison carries
-/// a `RowScaledJacobian` with scaling `z`, the effective Jacobian column is `z ⊙ φ`
-/// instead of `φ`.  The population cosine between `φ` (from the other block)
-/// and `z ⊙ φ` (from the scaled block) is, under independence of z and φ,
-///
-///   E[cos(φ, z⊙φ)] = E_p\[z\] / √(E_p\[z²\])
-///
-/// where E_p[·] = Σ_i p_i(·) with p_i = φ_i² / Σ_j φ_j² (leverage weights).
-///
-/// For sample-standardised z (zero sample mean, unit sample variance),
-/// E_p\[z\] = Σ_i p_i z_i and E_p\[z²\] = Σ_i p_i z_i².  At small leverage
-/// concentrations (S2_k ≈ 1/n, i.e. uniform φ) the leading-order expansion
-/// of the cosine about E_p\[z\] = 0 gives:
-///
-///   E\[cos\] ≈ −(μ_3 / 2) · S2_k
-///
-/// where μ_3 = E[(z − z̄)³] / σ_z³ is the standardised third moment
-/// (skewness) of z, and the negative sign comes from the sign of the
-/// second-order term in the Taylor expansion of 1/√(E_p\[z²\]) around the
-/// point E_p\[z\] = 0, E_p\[z²\] = 1.
-///
-/// Derivation sketch:
-///   Let δ_i = z_i − z̄ (centred residuals, σ_z = 1 after standardisation).
-///   cos = Σ_i p_i z_i / √(Σ_i p_i z_i²)
-///       = Σ_i p_i δ_i / √(Σ_i p_i(1 + δ_i² + 2δ_i z̄ − z̄²))
-///   Under independence and after isolating the O(S2_k) term, the mean
-///   of Σ_i p_i δ_i vanishes (zero mean of z) but the covariance of the
-///   numerator with the denominator's expansion produces a shift
-///   proportional to E\[δ_i³\] = μ_3 and Σ_i p_i² = S2_k.
-///
-/// When BOTH blocks carry the same z, the shift cancels.  When NEITHER
-/// carries a row-scaling, μ_3 = 0 (the raw-cosine case), and the formula
-/// reduces to T11's symmetric form with shift = 0.
-///
-/// # Finite-sample correction
-///
-/// The raw (biased) third central moment estimator m_3 = Σ(z_i−z̄)³/n has
-/// expectation μ_3 · σ³ · n(n−1)/n² + O(1/n²) under iid sampling.
-/// The standard unbiased estimator uses the correction factor
-///   n / ((n−1)(n−2))
-/// (the G1 formula, identical to `scipy.stats.skew(bias=False)`).
-/// For n ≥ 3, this gives a less biased estimator of μ_3.  For n < 3 we
-/// return 0 (conservative — no correction applied, shift defaults to 0).
-///
-/// Returns μ_3 (dimensionless).  Returns 0.0 when σ_z ≤ 0 (constant z).
-pub fn compute_skewness_mu3(z: &[f64]) -> f64 {
-    let n = z.len();
-    if n < 3 {
-        return 0.0;
-    }
-    let mean = z.iter().sum::<f64>() / n as f64;
-    let mut m2 = 0.0_f64;
-    for &zi in z {
-        let d = zi - mean;
-        m2 += d * d;
-    }
-    m2 /= n as f64;
-    let max_abs = z.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-    if m2 <= f64::EPSILON * max_abs.max(1.0).powi(2) {
-        return 0.0;
-    }
-    let sigma = m2.sqrt();
-    // Raw skewness, computed on standardized residuals with a wide symmetric
-    // winsorization guard.  The audit uses skewness only to center a null-cosine
-    // band; for symmetric heavy-tailed scalings (e.g. Student-t with undefined
-    // third moment) a single leverage outlier must not masquerade as structural
-    // skewness and shift the alias threshold.  The ±3.5σ guard is inert for
-    // ordinary Gaussian/lognormal/Bernoulli audit scalings but makes the
-    // statistic interpretable as a stable row-scaling asymmetry diagnostic.
-    let raw_skew = z
-        .iter()
-        .map(|&zi| ((zi - mean) / sigma).clamp(-3.5, 3.5).powi(3))
-        .sum::<f64>()
-        / n as f64;
-    // Finite-sample unbiased correction (G1 / Fisher-adjusted):
-    //   μ_3_unbiased = (n / ((n−1)(n−2))) * n * raw_skew
-    //   simplified to: raw_skew * n² / ((n−1)(n−2))
-    let nf = n as f64;
-    let correction = nf / ((nf - 1.0) * (nf - 2.0));
-    correction * nf * raw_skew
-}
-
-/// Bias shift of the null cosine distribution for a pair of columns where
-/// at most one of the two blocks carries a row-scaling vector z.
-///
-/// # Formula
-///
-/// Under independence of z and φ, and for standardised z, the null mean
-/// of cos(φ_a, φ_b) when φ_b = z⊙φ_a is (to leading order in S2_k):
-///
-///   shift_k = −(μ_3 / 2) · S2_k
-///
-/// where S2_k = max(S2_a, S2_b) is the leverage concentration of the
-/// more-concentrated column (the wider-null column controls the threshold
-/// width; it also controls the shift magnitude via S2_k).
-///
-/// # When the shift is applied
-///
-/// * Both blocks carry the SAME row-scaling vector → the scaled and unscaled
-///   columns are from the same distribution; the shift cancels exactly (shift = 0).
-/// * Block A carries a `RowScaledJacobian` with scaling `z`, block B has none (or vice versa):
-///   shift = −(μ_3(z) / 2) · S2_k.
-/// * Both have `None`: shift = 0 (T11's symmetric form, μ_3 = 0).
-/// * Both have DIFFERENT row-scaling vectors z_a ≠ z_b: shift is derived from
-///   whichever of z_a or z_b produced the column with larger S2 (the dominant
-///   concentration), as a conservative approximation.
-///
-/// The shift is clamped to ±0.5 to prevent a degenerate skewed z from
-/// placing the null band entirely outside [−1, 1].
-pub fn bias_shift_for_pair(z_a: Option<&[f64]>, z_b: Option<&[f64]>, s2_a: f64, s2_b: f64) -> f64 {
-    // Both blocks have the same row scaling → shift cancels.
-    match (z_a, z_b) {
-        // Pointwise equality check: if the vectors are identical, shift = 0.
-        (Some(za), Some(zb))
-            if za.len() == zb.len() && za.iter().zip(zb.iter()).all(|(a, b)| a == b) =>
-        {
-            return 0.0;
-        }
-        (None, None) => return 0.0,
-        // Different lengths, different values, or only one side row-scaled: the
-        // scaled and unscaled columns are not from the same distribution, so
-        // the shift does not cancel and is derived from the dominant μ_3 below.
-        (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) => {}
-    }
-    // Identify which block's scaling to use for μ_3.
-    // Use the block whose column has the LARGER S2 (dominates the null width)
-    // because the shift formula is shift = −(μ_3/2)·S2_k and S2_k = max(S2_a, S2_b).
-    let s2_dominant = s2_a.max(s2_b);
-    let mu3 = if s2_a >= s2_b {
-        match z_a {
-            Some(z) => compute_skewness_mu3(z),
-            None => match z_b {
-                Some(z) => compute_skewness_mu3(z),
-                None => 0.0,
-            },
-        }
-    } else {
-        match z_b {
-            Some(z) => compute_skewness_mu3(z),
-            None => match z_a {
-                Some(z) => compute_skewness_mu3(z),
-                None => 0.0,
-            },
-        }
-    };
-    // shift_k = −(μ_3 / 2) · S2_k
-    let shift = -(mu3 / 2.0) * s2_dominant;
-    // Clamp to ±0.5 to keep the band inside [−1, 1].
-    shift.clamp(-0.5, 0.5)
-}
-
 /// Result of a gauge-priority-respecting rank-revealing factorization of a
 /// joint design's Gram. Mirrors the shape of [`RrqrWithPermutation`] so it
 /// drops straight into the existing attribution path: `column_permutation`
@@ -754,19 +597,14 @@ fn pair_halt_threshold(s2_a: f64, s2_b: f64, n: usize) -> f64 {
     (10.0_f64 * sigma).clamp(0.05, ALIAS_BOUNDARY_COSINE)
 }
 
-/// Decide whether a cosine (signed) falls outside the bias-corrected null band.
+/// Decide whether a signed cosine falls outside the null band.
 ///
-/// The null distribution for cos(φ_a, φ_b) is approximately
-///   N(shift, σ²)
-/// where σ = pair_null_sigma(s2_a, s2_b, n) and
-/// shift = bias_shift_for_pair(...).
-///
-/// Returns `true` when |cosine − shift| ≥ half_width.
-///
-/// The `half_width` argument is the K·σ half-band (either the report or
+/// The null distribution for cos(φ_a, φ_b) is approximately N(0, σ²) with
+/// σ = pair_null_sigma(s2_a, s2_b, n). Returns `true` when |cosine| ≥
+/// half_width, where `half_width` is the K·σ half-band (either the report or
 /// halt multiplied sigma).
-fn cosine_outside_null_band(cosine: f64, shift: f64, half_width: f64) -> bool {
-    (cosine - shift).abs() >= half_width
+fn cosine_outside_null_band(cosine: f64, half_width: f64) -> bool {
+    cosine.abs() >= half_width
 }
 
 /// Compute the signed cosine between two normalised column vectors.
@@ -1345,13 +1183,6 @@ fn audit_identifiability_impl(
     // concentration S2_k = Σ_i p_i² (p_i = φ_i²/‖φ‖²).  See the
     // doc-comments on `compute_leverage_s2`, `pair_report_threshold`,
     // and `pair_halt_threshold` for the underlying finite-sample identity.
-    //
-    // Bias correction: when one block carries a RowScaledJacobian with scaling z,
-    // the null distribution of the cross-block cosine is no longer centred
-    // at 0.  The null mean is approximately shift_k = −(μ_3/2)·S2_k where
-    // μ_3 is the standardised third moment of z (skewness).  We test
-    // |cosine − shift_k| >= half_width instead of |cosine| >= half_width.
-    // See `bias_shift_for_pair` and `compute_skewness_mu3` for the derivation.
     let pairwise_started = std::time::Instant::now();
     log::info!(
         "[STAGE] identifiability audit: pairwise overlap scan start n={} p_total={} blocks={}",
@@ -1431,22 +1262,9 @@ fn audit_identifiability_impl(
     for a_block_idx in 0..specs.len() {
         let a_start = col_offsets[a_block_idx];
         let a_end = col_offsets[a_block_idx + 1];
-        // Extract the row-scaling vector for block A (used for the bias shift).
-        // Only RowScaledJacobian callbacks expose this; all other callbacks return None.
-        let z_a_arc = specs[a_block_idx]
-            .jacobian_callback
-            .as_ref()
-            .and_then(|cb| cb.eta_row_scaling_for_skewness());
-        let z_a: Option<&[f64]> = z_a_arc.as_deref();
         for b_block_idx in (a_block_idx + 1)..specs.len() {
             let b_start = col_offsets[b_block_idx];
             let b_end = col_offsets[b_block_idx + 1];
-            // Extract the row-scaling vector for block B.
-            let z_b_arc = specs[b_block_idx]
-                .jacobian_callback
-                .as_ref()
-                .and_then(|cb| cb.eta_row_scaling_for_skewness());
-            let z_b: Option<&[f64]> = z_b_arc.as_deref();
             for ja in a_start..a_end {
                 let na = col_norms[ja];
                 if na == 0.0 {
@@ -1459,17 +1277,12 @@ fn audit_identifiability_impl(
                     }
                     // Precomputed Gram entry caᵀcb (see joint_gram above).
                     let dot = joint_gram[[ja, jb]];
-                    // Signed cosine: preserves direction for bias-shift test.
+                    // Signed cosine of the column pair.
                     let cosine = signed_cosine(dot, na, nb);
                     let s2_ja = col_s2[ja];
                     let s2_jb = col_s2[jb];
-                    // Bias shift: non-zero when exactly one block carries
-                    // row-scaling (or the two scalings differ).
-                    let shift = bias_shift_for_pair(z_a, z_b, s2_ja, s2_jb);
                     // Store the unsigned |cosine| in AliasedPair.overlap for
                     // backwards compatibility and human-readable diagnostics.
-                    // Store `shift` so each band applies the same directional
-                    // (skewness) correction to the null mean.
                     let overlap = cosine.abs();
                     let make_pair = || AliasedPair {
                         block_a: specs[a_block_idx].name.clone(),
@@ -1477,20 +1290,19 @@ fn audit_identifiability_impl(
                         direction_a: ja - a_start,
                         direction_b: jb - b_start,
                         overlap,
-                        bias_shift: shift,
                     };
                     // REPORT band (diagnostics, floored at the near-exact-alias
                     // boundary).
                     let report_half_width =
                         pair_report_threshold(s2_ja, s2_jb, n, total_cross_pairs);
-                    if cosine_outside_null_band(cosine, shift, report_half_width) {
+                    if cosine_outside_null_band(cosine, report_half_width) {
                         aliased_pairs.push(make_pair());
                     }
                     // HALT band (structural fittability, pure leverage K·σ with
                     // no near-exact floor). Computed directly from the same cosine
                     // so it is independent of the report verdict (gam#1397).
                     let halt_half_width = pair_halt_threshold(s2_ja, s2_jb, n);
-                    if cosine_outside_null_band(cosine, shift, halt_half_width) {
+                    if cosine_outside_null_band(cosine, halt_half_width) {
                         halt_pairs.push(make_pair());
                     }
                 }
@@ -1909,14 +1721,9 @@ fn audit_identifiability_impl(
                 col_s2.get(jb).copied().unwrap_or(1.0),
                 n,
             );
-            let shift_note = if pair.bias_shift != 0.0 {
-                format!(" bias_shift={:.4}", pair.bias_shift)
-            } else {
-                String::new()
-            };
             parts.push(format!(
                 "alias pair: '{}'[{}] ~ '{}'[{}] overlap={:.4} >= leverage-based halt \
-                 half-width {:.4}{} (n_eff_a≈{:.0}, n_eff_b≈{:.0}; \
+                 half-width {:.4} (n_eff_a≈{:.0}, n_eff_b≈{:.0}; \
                  reparam: orthogonalise one block's column {} against the other \
                  via sum-to-zero, or absorb the shared direction into a single \
                  parametric block)",
@@ -1926,7 +1733,6 @@ fn audit_identifiability_impl(
                 pair.direction_b,
                 pair.overlap,
                 halt_half_width,
-                shift_note,
                 1.0 / col_s2.get(ja).copied().unwrap_or(1.0),
                 1.0 / col_s2.get(jb).copied().unwrap_or(1.0),
                 pair.direction_b,
@@ -3028,11 +2834,6 @@ fn channel_aware_aliased_pairs(
                 direction_a: dir_a,
                 direction_b: dir_b,
                 overlap,
-                // Channel-aware path: no row-scaling bias correction; the
-                // channel weighting already accounts for per-block structure,
-                // and the row Jacobian operators are not parameterised through
-                // RowScaledJacobian here.
-                bias_shift: 0.0,
             };
             let report_thr =
                 pair_report_threshold(col_s2[a], col_s2[b], n_design_rows, total_cross_pairs);

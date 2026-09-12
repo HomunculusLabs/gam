@@ -90,7 +90,6 @@ pub use block_spec::{
     GaugeComposedJacobian,
     ParameterBlockSpec,
     ParameterBlockState,
-    RowScaledJacobian,
 };
 pub use coefficient_prior_mean::{CoefficientPriorMean, PriorMeanError};
 pub use constraint_set::{
