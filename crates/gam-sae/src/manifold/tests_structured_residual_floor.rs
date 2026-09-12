@@ -66,12 +66,39 @@ mod tests {
         target
     }
 
+    /// The guard's own measurement, in the frame the fit runs in. The Tier-0 peel
+    /// centers every output column and divides it by its centered RMS `σ_c`, so each
+    /// standardized column carries energy `n` and the guard's fraction is
+    /// `Σ_c RSS_c / σ_c² / (n·p)`. No fixture column is anywhere near the peel's
+    /// empty-column gate, so every column is standardized.
+    fn guard_frame_residual_fraction(target: &Array2<f64>, fitted: &Array2<f64>) -> f64 {
+        let (n, p) = target.dim();
+        let mut residual_energy = 0.0_f64;
+        for c in 0..p {
+            let column = target.column(c);
+            let mean = column.sum() / n as f64;
+            let sigma_sq = column.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n as f64;
+            let rss: f64 = column
+                .iter()
+                .zip(fitted.column(c).iter())
+                .map(|(t, f)| (t - f) * (t - f))
+                .sum();
+            residual_energy += rss / sigma_sq;
+        }
+        residual_energy / (n * p) as f64
+    }
+
     /// Drive the full typed primary pipeline on `target` (mirrors
     /// `examples/sae_fit.rs` / the tier0 primary test with a single periodic atom).
     /// The structured-residual alternation runs UNCONDITIONALLY inside this entry
     /// (it is not gated by `run_outer_rho_search`/`run_structure_search`), so this
-    /// exercises the degeneracy guard directly.
-    fn run_primary(target: Array2<f64>, structured_residual_passes: usize) -> SaeFitReport {
+    /// exercises the degeneracy guard directly. `smoothness` is the seed's
+    /// dimensionless smoothing strength, held fixed because the outer ρ search is off.
+    fn run_primary(
+        target: Array2<f64>,
+        smoothness: f64,
+        structured_residual_passes: usize,
+    ) -> SaeFitReport {
         let assignment_kind = SaeFitAssignmentKind::Softmax;
         let minimal = build_sae_minimal_seed(SaeMinimalSeedRequest {
             target: target.view(),
@@ -113,7 +140,7 @@ mod tests {
             learnable_alpha: false,
             assignment_kind,
             sparsity_strength: 1.0,
-            smoothness: 1.0,
+            smoothness,
             max_iter: 4,
             learning_rate: 1.0,
             ridge_ext_coord: 1.0e-6,
@@ -167,32 +194,43 @@ mod tests {
     #[test]
     fn near_exact_fit_skips_structured_pass_and_certifies() {
         // #2822: an exactly representable target leaves a profiled residual of zero, which
-        // Gaussian REML refuses to score by design (#2723), so the pass-0 criterion was
-        // infeasible and the fit refused before the floor guard was reached. A 3e-5
-        // perturbation keeps the residual resolvable while its relative energy (about 6e-12)
-        // stays far below STRUCTURED_RESIDUAL_MIN_REL_ENERGY, so this is still the
-        // near-exact regime the guard exists for.
-        let target = with_noise(circle_target(7.0), 3.0e-5);
-        let target_energy: f64 = target.iter().map(|v| v * v).sum();
-        // Premise, measured rather than assumed: the regime this test exists for is a
-        // pass-0 fit whose residual is already inside the guard's floor.
-        let pass0 = run_primary(target.clone(), 0);
-        let pass0_residual_energy: f64 = (&target - &pass0.fitted).iter().map(|v| v * v).sum();
+        // Gaussian REML refuses to score by design (#2723), so the target carries a small
+        // perturbation that keeps the residual resolvable. Both knobs are sized in the
+        // guard's frame, where this circle's floor admits a raw residual energy of
+        // 1e-10 · n·p · σ_c² = 8e-10.
+        //
+        // Shrinkage. A single atom takes the full seed dispersion shift,
+        // log λ_smooth = ln(smoothness) + ln φ_seed, and `periodic_reference_penalty` weighs
+        // the fundamental at 1/2 against a per-column Gram Σcos²θ_i = 4. The fitted
+        // amplitude therefore shrinks by δ = (λ/2)/(4 + λ/2), and moving the coordinates
+        // only rotates the points, so the guard reads δ². At smoothness 1 (guarded sw0k job
+        // 543027 at 96b42e9e8, log λ_smooth = −5.658) that is about 2e-7, a radial residual
+        // the guard correctly mines: the premise failed there with a raw-energy fraction of
+        // 2.02e-9, which is 8δ²/792. Smoothness 1e-3 cuts the shrinkage term to about 2e-13.
+        //
+        // Perturbation. After the fit absorbs the column means, coefficients and
+        // coordinates, about three residual degrees of freedom remain. A uniform ±σ
+        // perturbation then leaves raw residual energy of about σ², so the former
+        // σ = 3e-5 sat at the floor. σ = 5e-6 leaves about 2.5e-11, a guard fraction near
+        // 3e-12, and each output's residual stays far above REML arithmetic resolution.
+        const SMOOTHNESS: f64 = 1.0e-3;
+        let target = with_noise(circle_target(7.0), 5.0e-6);
         let floor = crate::manifold::fit_entry::STRUCTURED_RESIDUAL_MIN_REL_ENERGY;
+        // Premise, measured rather than assumed: the regime this test exists for is a
+        // pass-0 fit whose residual is already inside the guard's floor, in the guard's frame.
+        let pass0 = run_primary(target.clone(), SMOOTHNESS, 0);
+        let pass0_fraction = guard_frame_residual_fraction(&target, &pass0.fitted);
         assert!(
-            pass0_residual_energy <= floor * target_energy,
+            pass0_fraction <= floor,
             "premise: the pass-0 fit leaves residual energy fraction {:e} above the \
              structured-residual floor {:e}, so this fixture is not in the near-exact regime \
              the skip guard exists for, and the skip assertion below would measure nothing",
-            pass0_residual_energy / target_energy,
+            pass0_fraction,
             floor
         );
-        let report = run_primary(target.clone(), 2);
+        let report = run_primary(target.clone(), SMOOTHNESS, 2);
         // Reaching here means run_sae_manifold_fit returned Ok — before the floor
         // guard this panicked with the StructuredResidual outer non-certification.
-        // The guard compares residual energy with the floor times the target energy, so
-        // a failure reports where the returned fit's residual sits against that floor.
-        let residual_energy: f64 = (&target - &report.fitted).iter().map(|v| v * v).sum();
         assert!(
             report.structured_residual_diagnostics.is_empty(),
             "near-exact fit must SKIP the structured-residual pass (nothing to \
@@ -200,8 +238,8 @@ mod tests {
              {:e} against the floor {:e}",
             report.structured_residual_diagnostics.len(),
             report.structured_residual_diagnostics,
-            residual_energy / target_energy,
-            crate::manifold::fit_entry::STRUCTURED_RESIDUAL_MIN_REL_ENERGY
+            guard_frame_residual_fraction(&target, &report.fitted),
+            floor
         );
     }
 
@@ -211,7 +249,7 @@ mod tests {
     #[test]
     fn residual_bearing_fit_still_runs_structured_pass() {
         let target = with_noise(circle_target(7.0), 0.1);
-        let report = run_primary(target, 2);
+        let report = run_primary(target, 1.0, 2);
         assert!(
             !report.structured_residual_diagnostics.is_empty(),
             "a fit that leaves real residual energy must RUN the structured-residual \
