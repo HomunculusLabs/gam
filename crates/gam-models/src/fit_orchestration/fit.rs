@@ -1,177 +1,6 @@
 use super::*;
 use gam_solve::estimate::reml::reml_outer_engine::penalty_matrix_root;
 
-pub(crate) fn survival_inverse_link_has_free_parameters(link: &InverseLink) -> bool {
-    match link {
-        InverseLink::Sas(_) | InverseLink::BetaLogistic(_) => true,
-        InverseLink::Mixture(state) => !state.rho.is_empty(),
-        InverseLink::LatentCLogLog(_) | InverseLink::Standard(_) => false,
-    }
-}
-
-#[derive(Debug)]
-struct ProfiledOuterPayload<T> {
-    theta: Array1<f64>,
-    objective: f64,
-    gradient: Array1<f64>,
-    value: T,
-}
-
-/// Consume only the exact terminal payload reinstalled by the shared outer
-/// runner. The sealed carrier owns the independently re-measured certificate;
-/// bitwise identity across all analytic channels prevents a stale trial, an
-/// independent refit, or caller-written convergence metadata from crossing
-/// this fit-minting boundary.
-fn consume_certified_profiled_outer_payload<T>(
-    selected: Option<ProfiledOuterPayload<T>>,
-    outer: &gam_solve::rho_optimizer::CertifiedOuterResult,
-    context: &str,
-) -> Result<ProfiledOuterPayload<T>, String> {
-    let selected = selected
-        .ok_or_else(|| format!("{context} retained no optimizer-installed terminal profile"))?;
-    if selected.theta.len() != outer.rho().len()
-        || selected
-            .theta
-            .iter()
-            .zip(outer.rho().iter())
-            .any(|(selected, certified)| selected.to_bits() != certified.to_bits())
-    {
-        return Err(format!(
-            "{context} terminal profile hyperparameters do not bitwise match the certified optimum"
-        ));
-    }
-    if selected.objective.to_bits() != outer.final_value().to_bits() {
-        return Err(format!(
-            "{context} terminal profile objective does not bitwise match the certified optimum: selected={:.17e}, certified={:.17e}",
-            selected.objective,
-            outer.final_value(),
-        ));
-    }
-    let certified_gradient = outer.final_gradient().ok_or_else(|| {
-        format!("{context} certified result retained no analytic terminal gradient")
-    })?;
-    if selected.gradient.len() != certified_gradient.len()
-        || selected
-            .gradient
-            .iter()
-            .zip(certified_gradient.iter())
-            .any(|(selected, certified)| selected.to_bits() != certified.to_bits())
-    {
-        return Err(format!(
-            "{context} terminal profile gradient does not bitwise match the certified optimum"
-        ));
-    }
-    Ok(selected)
-}
-
-#[cfg(test)]
-mod profiled_outer_payload_tests {
-    use super::*;
-    use gam_problem::{DeclaredHessianForm, Derivative, HessianValue, OuterEval};
-    use gam_solve::rho_optimizer::OuterProblem;
-
-    fn certified_quadratic() -> gam_solve::rho_optimizer::CertifiedOuterResult {
-        let problem = OuterProblem::new(1)
-            .with_gradient(Derivative::Analytic)
-            .with_hessian(DeclaredHessianForm::Unavailable)
-            .with_tolerance(1.0e-8)
-            .with_max_iter(40)
-            .with_initial_rho(Array1::from_vec(vec![0.5]))
-            .with_seed_config(gam_problem::SeedConfig {
-                max_seeds: 1,
-                seed_budget: 1,
-                ..Default::default()
-            });
-        let mut objective = problem.build_objective(
-            (),
-            |_: &mut (), theta: &Array1<f64>| Ok(0.5 * (theta[0] - 0.25).powi(2)),
-            |_: &mut (), theta: &Array1<f64>| {
-                Ok(OuterEval {
-                    cost: 0.5 * (theta[0] - 0.25).powi(2),
-                    gradient: Array1::from_vec(vec![theta[0] - 0.25]),
-                    hessian: HessianValue::Unavailable,
-                    inner_beta_hint: None,
-                })
-            },
-            None::<fn(&mut ())>,
-            None::<
-                fn(
-                    &mut (),
-                    &Array1<f64>,
-                )
-                    -> Result<gam_problem::EfsEval, gam_solve::estimate::EstimationError>,
-            >,
-        );
-        problem
-            .run_certified(&mut objective, "profiled-payload unit")
-            .expect("quadratic outer problem must certify")
-    }
-
-    fn matching_payload(
-        outer: &gam_solve::rho_optimizer::CertifiedOuterResult,
-    ) -> ProfiledOuterPayload<&'static str> {
-        ProfiledOuterPayload {
-            theta: outer.rho().clone(),
-            objective: outer.final_value(),
-            gradient: outer
-                .final_gradient()
-                .expect("analytic fixture must retain its terminal gradient")
-                .clone(),
-            value: "terminal profile",
-        }
-    }
-
-    #[test]
-    fn selected_profile_requires_theta_objective_and_gradient_identity() {
-        let outer = certified_quadratic();
-
-        let mut wrong_theta = matching_payload(&outer);
-        wrong_theta.theta[0] += 1.0;
-        assert!(
-            consume_certified_profiled_outer_payload(
-                Some(wrong_theta),
-                &outer,
-                "theta substitution",
-            )
-            .expect_err("theta substitution must be rejected")
-            .contains("hyperparameters")
-        );
-
-        let mut wrong_objective = matching_payload(&outer);
-        wrong_objective.objective = f64::from_bits(wrong_objective.objective.to_bits() + 1);
-        assert!(
-            consume_certified_profiled_outer_payload(
-                Some(wrong_objective),
-                &outer,
-                "objective substitution",
-            )
-            .expect_err("objective substitution must be rejected")
-            .contains("objective")
-        );
-
-        let mut wrong_gradient = matching_payload(&outer);
-        wrong_gradient.gradient[0] += 1.0;
-        assert!(
-            consume_certified_profiled_outer_payload(
-                Some(wrong_gradient),
-                &outer,
-                "gradient substitution",
-            )
-            .expect_err("gradient substitution must be rejected")
-            .contains("gradient")
-        );
-
-        let selected = consume_certified_profiled_outer_payload(
-            Some(matching_payload(&outer)),
-            &outer,
-            "valid terminal profile",
-        )
-        .expect("the exact runner-installed terminal payload must be consumable");
-        assert_eq!(selected.value, "terminal profile");
-        assert!(outer.criterion_certificate().certifies());
-    }
-}
-
 /// Inner-PIRLS controls shared by the survival-transformation baseline and
 /// smoothing-coordinate eval closures. The baseline geometry is mildly
 /// nonlinear, so the iteration budget is generous. The convergence target is
@@ -192,21 +21,6 @@ struct SurvivalLocationScaleProfile {
     inverse_link: InverseLink,
     wiggle_knots: Option<Array1<f64>>,
     wiggle_degree: Option<usize>,
-}
-
-fn survival_inverse_link_profile_objective(
-    profile: &SurvivalLocationScaleProfile,
-    context: &str,
-) -> Result<f64, String> {
-    let objective = -profile.fit.fit.log_likelihood + 0.5 * profile.fit.fit.stable_penalty_term;
-    if objective.is_finite() {
-        Ok(objective)
-    } else {
-        Err(format!(
-            "{context}: non-finite profile objective (log_likelihood={}, stable_penalty_term={})",
-            profile.fit.fit.log_likelihood, profile.fit.fit.stable_penalty_term,
-        ))
-    }
 }
 
 fn survival_pirls_status_is_certified(status: gam_solve::pirls::PirlsStatus) -> bool {
@@ -3540,9 +3354,9 @@ pub(crate) fn fit_survival_transformation_model(
 pub(crate) fn fit_survival_location_scale_model(
     request: SurvivalLocationScaleFitRequest<'_>,
 ) -> Result<SurvivalLocationScaleFitResult, String> {
-    // Profile one coherent survival subproblem at a fixed inverse-link state:
-    // select/apply the link-wiggle basis for that state, then solve the full
-    // penalized location-scale fit on the resulting model.
+    // Fit one coherent survival subproblem: select/apply the link-wiggle basis,
+    // then solve the full penalized location-scale fit, whose outer selects the
+    // inverse-link shape together with ρ (#2904).
     fn profile_survival_location_scale(
         data: ArrayView2<'_, f64>,
         spec: SurvivalLocationScaleTermSpec,
@@ -3551,10 +3365,9 @@ pub(crate) fn fit_survival_location_scale_model(
     ) -> Result<SurvivalLocationScaleProfile, String> {
         let mut wiggle_knots = None;
         let mut wiggle_degree = None;
-        let inverse_link = spec.inverse_link.clone();
 
         let fit = if let Some(wiggle) = wiggle {
-            require_inverse_link_supports_joint_wiggle(&inverse_link, "survival link wiggle")?;
+            require_inverse_link_supports_joint_wiggle(&spec.inverse_link, "survival link wiggle")?;
             let mut pilot_spec = spec.clone();
             pilot_spec.linkwiggle_block = None;
             let pilot = fit_survival_location_scale_terms(data, pilot_spec, kappa_options)?;
@@ -3581,241 +3394,19 @@ pub(crate) fn fit_survival_location_scale_model(
         };
 
         Ok(SurvivalLocationScaleProfile {
+            inverse_link: fit.inverse_link.clone(),
             fit,
-            inverse_link,
             wiggle_knots,
             wiggle_degree,
         })
     }
 
-    /// Profile the survival location-scale fit at a fixed inverse-link state:
-    /// substitutes `inverse_link` into the spec and runs the full penalized fit.
-    fn profile_survival_location_scale_with_inverse_link(
-        data: ArrayView2<'_, f64>,
-        spec: &SurvivalLocationScaleTermSpec,
-        inverse_link: InverseLink,
-        wiggle: Option<LinkWiggleConfig>,
-        kappa_options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Result<SurvivalLocationScaleProfile, String> {
-        let mut spec_at_link = spec.clone();
-        spec_at_link.inverse_link = inverse_link;
-        profile_survival_location_scale(data, spec_at_link, wiggle, kappa_options)
-    }
-
-    fn optimize_survival_inverse_link_profile(
-        data: ArrayView2<'_, f64>,
-        spec: &SurvivalLocationScaleTermSpec,
-        wiggle: Option<LinkWiggleConfig>,
-        kappa_options: &SpatialLengthScaleOptimizationOptions,
-    ) -> Result<SurvivalLocationScaleProfile, String> {
-        // Analytic-gradient BFGS over the inverse-link parameters θ_link
-        // (SAS ε/log_δ, BetaLogistic ε/log_δ, Mixture ρ). The link enters the
-        // location-scale likelihood through the standardized residual it maps,
-        // and the EXACT data-fit θ-gradient
-        //   ∂(−ℓ)/∂θ_link = −Σ_i w_i·( event_mix(d, ∂logφ(u1), ∂logS(u1)) − ∂logS(u0) )
-        // is formed analytically from the inverse-link param partials
-        // (`SurvivalLocationScaleFamily::link_param_data_fit_gradient`, carried
-        // on the fit result as `link_param_data_fit_gradient`). We optimize the
-        // *profile penalized NLL* `−ℓ + ½βᵀSβ` — not the LAML `reml_score` whose
-        // ½log|H+S_λ| term has its own θ_link dependence through H(β̂,θ) — so the
-        // envelope-theorem gradient matches the cost surface. Each profile picks
-        // ρ on the full REML surface; the runner-installed terminal profile is
-        // retained directly once the link optimum certifies.
-        fn optimize_link_parameters(
-            data: ArrayView2<'_, f64>,
-            spec: &SurvivalLocationScaleTermSpec,
-            kappa_options: &SpatialLengthScaleOptimizationOptions,
-            init: Array1<f64>,
-            name: &str,
-            wiggle_cfg: Option<LinkWiggleConfig>,
-            make_link: impl Fn(&Array1<f64>) -> Result<InverseLink, String> + Clone,
-        ) -> Result<SurvivalLocationScaleProfile, String> {
-            use gam_problem::{DeclaredHessianForm, Derivative, HessianValue, OuterEval};
-            use gam_solve::rho_optimizer::OuterProblem;
-            let dim = init.len();
-            // The link-shape search runs on the outer engine's own domain. The
-            // private `init ± 6` box that sat here was a hand-supplied bound, the
-            // same kind the baseline-θ search dropped after it decided the
-            // survival time-block λ until a03438645 (#2670). With an analytic
-            // gradient and no declared Hessian the planner routes this to BFGS.
-            let problem = OuterProblem::new(dim)
-                .with_gradient(Derivative::Analytic)
-                .with_hessian(DeclaredHessianForm::Unavailable)
-                .with_max_iter(240)
-                .with_initial_rho(init.clone())
-                .with_seed_config(gam_problem::SeedConfig {
-                    max_seeds: 1,
-                    seed_budget: 1,
-                    num_auxiliary_trailing: dim,
-                    ..Default::default()
-                });
-            let context = format!("survival inverse-link optimization ({name}, dim={dim})");
-            // The objective returns the profile-NLL cost and the exact analytic
-            // θ_link-gradient from the converged fit at this candidate link.
-            let eval_link = move |theta: &Array1<f64>| -> Result<
-                ProfiledOuterPayload<SurvivalLocationScaleProfile>,
-                String,
-            > {
-                let link = make_link(theta)?;
-                let profile = profile_survival_location_scale_with_inverse_link(
-                    data,
-                    spec,
-                    link,
-                    wiggle_cfg.clone(),
-                    kappa_options,
-                )?;
-                let cost = survival_inverse_link_profile_objective(
-                    &profile,
-                    &format!("survival inverse-link ({name})"),
-                )?;
-                let gradient = profile
-                    .fit
-                    .link_param_data_fit_gradient
-                    .clone()
-                    .ok_or_else(|| {
-                        format!(
-                            "survival inverse-link ({name}): fit reported no link-parameter \
-                             data-fit gradient"
-                        )
-                    })?;
-                if gradient.len() != theta.len() {
-                    return Err(format!(
-                        "survival inverse-link ({name}): gradient dim {} != theta dim {}",
-                        gradient.len(),
-                        theta.len()
-                    ));
-                }
-                Ok(ProfiledOuterPayload {
-                    theta: theta.clone(),
-                    objective: cost,
-                    gradient,
-                    value: profile,
-                })
-            };
-            let cost_eval = eval_link.clone();
-            let cost_fn =
-                move |selected: &mut Option<ProfiledOuterPayload<SurvivalLocationScaleProfile>>,
-                      theta: &Array1<f64>| {
-                    let payload = cost_eval(theta)
-                        .map_err(gam_solve::estimate::EstimationError::InvalidInput)?;
-                    let cost = payload.objective;
-                    *selected = Some(payload);
-                    Ok(cost)
-                };
-            let eval_fn =
-                move |selected: &mut Option<ProfiledOuterPayload<SurvivalLocationScaleProfile>>,
-                      theta: &Array1<f64>| {
-                    let payload = eval_link(theta)
-                        .map_err(gam_solve::estimate::EstimationError::InvalidInput)?;
-                    let evaluation = OuterEval {
-                        cost: payload.objective,
-                        gradient: payload.gradient.clone(),
-                        hessian: HessianValue::Unavailable,
-                        inner_beta_hint: None,
-                    };
-                    *selected = Some(payload);
-                    Ok(evaluation)
-                };
-            let mut obj = problem.build_objective(
-                None::<ProfiledOuterPayload<SurvivalLocationScaleProfile>>,
-                cost_fn,
-                eval_fn,
-                None::<fn(&mut Option<ProfiledOuterPayload<SurvivalLocationScaleProfile>>)>,
-                None::<
-                    fn(
-                        &mut Option<ProfiledOuterPayload<SurvivalLocationScaleProfile>>,
-                        &Array1<f64>,
-                    )
-                        -> Result<gam_problem::EfsEval, gam_solve::estimate::EstimationError>,
-                >,
-            );
-            let certified_outer = problem
-                .run_certified(&mut obj, &context)
-                .map_err(|err| format!("{context} failed: {err}"))?;
-            let selected = consume_certified_profiled_outer_payload(
-                obj.state.take(),
-                &certified_outer,
-                &context,
-            )?;
-            let replayed_objective =
-                survival_inverse_link_profile_objective(&selected.value, &context)?;
-            if replayed_objective.to_bits() != certified_outer.final_value().to_bits() {
-                return Err(format!(
-                    "{context} retained profile no longer reproduces its certified objective: replayed={replayed_objective:.17e}, certified={:.17e}",
-                    certified_outer.final_value(),
-                ));
-            }
-            Ok(selected.value)
-        }
-
-        match spec.inverse_link.clone() {
-            InverseLink::Sas(state0) => optimize_link_parameters(
-                data,
-                spec,
-                kappa_options,
-                Array1::from_vec(vec![state0.epsilon, state0.log_delta]),
-                "SAS",
-                wiggle.clone(),
-                |theta| {
-                    state_from_sasspec(SasLinkSpec {
-                        initial_epsilon: theta[0],
-                        initial_log_delta: theta[1],
-                    })
-                    .map(InverseLink::Sas)
-                },
-            ),
-            InverseLink::BetaLogistic(state0) => optimize_link_parameters(
-                data,
-                spec,
-                kappa_options,
-                Array1::from_vec(vec![state0.epsilon, state0.log_delta]),
-                "BetaLogistic",
-                wiggle.clone(),
-                |theta| {
-                    state_from_beta_logisticspec(SasLinkSpec {
-                        initial_epsilon: theta[0],
-                        initial_log_delta: theta[1],
-                    })
-                    .map(InverseLink::BetaLogistic)
-                },
-            ),
-            InverseLink::Mixture(state0) if !state0.rho.is_empty() => {
-                let components = state0.components.clone();
-                optimize_link_parameters(
-                    data,
-                    spec,
-                    kappa_options,
-                    state0.rho.clone(),
-                    "mixture",
-                    wiggle.clone(),
-                    move |rho| {
-                        state_fromspec(&MixtureLinkSpec {
-                            components: components.clone(),
-                            initial_rho: rho.clone(),
-                        })
-                        .map(InverseLink::Mixture)
-                    },
-                )
-            }
-            _ => profile_survival_location_scale(data, spec.clone(), wiggle, kappa_options),
-        }
-    }
-
-    let profile = if request.optimize_inverse_link {
-        optimize_survival_inverse_link_profile(
-            request.data,
-            &request.spec,
-            request.wiggle.clone(),
-            &request.kappa_options,
-        )?
-    } else {
-        profile_survival_location_scale(
-            request.data,
-            request.spec.clone(),
-            request.wiggle.clone(),
-            &request.kappa_options,
-        )?
-    };
+    let profile = profile_survival_location_scale(
+        request.data,
+        request.spec,
+        request.wiggle,
+        &request.kappa_options,
+    )?;
 
     Ok(profile.into_result())
 }

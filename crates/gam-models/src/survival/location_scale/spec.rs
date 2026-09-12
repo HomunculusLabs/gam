@@ -268,12 +268,10 @@ pub struct SurvivalLocationScaleTermFitResult {
     /// the row likelihood is separable in `(u0, u1, g)`. Used by the analytic
     /// θ-Hessian builder (chain rule second derivative).
     pub baseline_offset_curvatures: OffsetChannelCurvatures,
-    /// Exact data-fit gradient `∂(−ℓ)/∂θ_link` of the unpenalized
-    /// log-likelihood w.r.t. the inverse-link parameters at the converged β̂
-    /// (`None` when the inverse link carries no free parameters). Equals the
-    /// envelope-theorem θ_link-gradient of the profile penalized NLL, consumed
-    /// by the inverse-link BFGS optimizer.
-    pub link_param_data_fit_gradient: Option<Array1<f64>>,
+    /// The inverse link the fit was certified at. Its shape parameters are outer
+    /// coordinates that the LAML selects together with ρ (#2904), so this is the
+    /// fitted link, not the caller's seed.
+    pub inverse_link: InverseLink,
 }
 
 /// Helper struct so callers can build a `UnifiedFitResult` from

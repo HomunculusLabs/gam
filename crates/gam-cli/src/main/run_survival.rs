@@ -547,11 +547,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
         };
 
         let kappa_options = SpatialLengthScaleOptimizationOptions::default();
-        let optimize_inverse_link = match &survival_inverse_link {
-            InverseLink::Sas(_) | InverseLink::BetaLogistic(_) => true,
-            InverseLink::Mixture(state) => !state.rho.is_empty(),
-            InverseLink::LatentCLogLog(_) | InverseLink::Standard(_) => false,
-        };
         let buildtermspec = |prepared: &PreparedSurvivalTimeStack,
                              inverse_link: InverseLink|
          -> SurvivalLocationScaleTermSpec {
@@ -636,7 +631,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                                 double_penalty: cfg.double_penalty,
                             }),
                             kappa_options: kappa_options.clone(),
-                            optimize_inverse_link,
                         },
                     )) {
                         Ok(FitResult::SurvivalLocationScale(result)) => result,
@@ -722,7 +716,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                     double_penalty: cfg.double_penalty,
                 }),
                 kappa_options: kappa_options.clone(),
-                optimize_inverse_link,
             },
         )) {
             Ok(FitResult::SurvivalLocationScale(result)) => {

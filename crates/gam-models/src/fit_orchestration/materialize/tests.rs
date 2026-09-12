@@ -2353,7 +2353,6 @@ fn survival_location_scale_wiggle_rejects_unsupported_inverse_link() {
         })
         .expect("valid SAS state"),
     );
-    request.optimize_inverse_link = false;
 
     let err = match fit_survival_location_scale_model(request) {
         Ok(_) => panic!("survival link wiggle should reject unsupported inverse links"),

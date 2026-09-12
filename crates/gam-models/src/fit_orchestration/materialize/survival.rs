@@ -825,8 +825,7 @@ pub(crate) fn materialize_survival<'a>(
     let location_scale_smoothing_warm_start: RefCell<Option<(Array1<f64>, Array1<f64>)>> =
         RefCell::new(None);
     let build_location_scale_request =
-        |candidate: &crate::survival::construction::SurvivalBaselineConfig,
-         allow_inverse_link_optimization: bool| {
+        |candidate: &crate::survival::construction::SurvivalBaselineConfig| {
             let (prepared, time_block) = build_time_block(candidate)?;
             let (initial_threshold_log_lambdas, initial_log_sigma_log_lambdas) =
                 match location_scale_smoothing_warm_start.borrow().as_ref() {
@@ -857,21 +856,11 @@ pub(crate) fn materialize_survival<'a>(
                 persistent_warm_start_store: config.persistent_warm_start_store.clone(),
                 cache_mirror_sessions: Vec::new(),
             };
-            // During baseline-θ BFGS probes we hold the inverse-link state
-            // fixed: otherwise every probe would trigger a nested
-            // optimization over the SAS / BetaLogistic / Mixture link
-            // parameters, defeating the BFGS speedup entirely. The final
-            // fit (after baseline has converged) flips this back on, so
-            // joint baseline + link optimization still happens — just
-            // alternating instead of nested.
-            let optimize_inverse_link = allow_inverse_link_optimization
-                && survival_inverse_link_has_free_parameters(&spec.inverse_link);
             Ok::<_, String>(SurvivalLocationScaleFitRequest {
                 data: data.values.view(),
                 spec,
                 wiggle: effective_linkwiggle_cfg.clone(),
                 kappa_options: config.spatial_optimization.clone(),
-                optimize_inverse_link,
             })
         };
 
@@ -1206,7 +1195,7 @@ pub(crate) fn materialize_survival<'a>(
             "workflow survival location-scale baseline",
             |candidate| {
                 let fit_result = fit_survival_location_scale_model(build_location_scale_request(
-                    candidate, false,
+                    candidate,
                 )?)
                 .map_err(|e| format!("survival location-scale fit failed: {e}"))?;
                 // Warm-start the next probe's threshold / log-σ smoothing parameters
@@ -1425,7 +1414,7 @@ pub(crate) fn materialize_survival<'a>(
             })
         }
         SurvivalLikelihoodMode::LocationScale => {
-            FitRequest::SurvivalLocationScale(build_location_scale_request(&baseline_cfg, true)?)
+            FitRequest::SurvivalLocationScale(build_location_scale_request(&baseline_cfg)?)
         }
         SurvivalLikelihoodMode::MarginalSlope => {
             FitRequest::SurvivalMarginalSlope(build_marginal_slope_request()?)

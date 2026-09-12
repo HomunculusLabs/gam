@@ -126,7 +126,6 @@ pub struct SurvivalLocationScaleFitRequest<'a> {
     pub spec: SurvivalLocationScaleTermSpec,
     pub wiggle: Option<LinkWiggleConfig>,
     pub kappa_options: SpatialLengthScaleOptimizationOptions,
-    pub optimize_inverse_link: bool,
 }
 
 pub struct SurvivalTransformationFitRequest<'a> {
