@@ -2,7 +2,7 @@
 //!
 //! Runs the DETERMINISTIC framed reduced-Schur `S·v` — the operator that feeds
 //! the SLQ/surrogate `log|S|` evidence lane — on a real CUDA device and checks
-//! (1) it matches the bit-for-bit CPU oracle `sae_framed_schur_matvec_cpu` to
+//! (1) it matches the bit-for-bit CPU oracle to
 //! ≤1e-9, and (2) it is run-to-run bit-identical (the determinism contract the
 //! shared atomic step-PCG matvec cannot satisfy). A separate utilization test
 //! drives many applies through the resident builder (the SLQ apply loop) on a

@@ -129,9 +129,7 @@ fn add_into(acc: &mut [f64], rhs: &[f64]) {
 /// Exposed as a free function so a **remote producer** (a worker node in the
 /// cross-node reduction, [`crate::cross_node`]) can compute exactly the
 /// partial this accumulator would have computed from the same rows, then ship
-/// the `k·k` partial instead of the rows. Bit-identical by construction to the
-/// in-process path: `StreamingBorderGram::submit_chunk` routes through this
-/// same function.
+/// the `k·k` partial instead of the rows.
 pub(crate) fn chunk_gram_flat(rows: ArrayView2<'_, f64>) -> Vec<f64> {
     let k = rows.ncols();
     let r = rows.nrows();
@@ -196,119 +194,6 @@ impl StreamingBorderGram {
     /// `true` once every chunk of the pass has been submitted.
     pub fn is_complete(&self) -> bool {
         self.frontier == self.n_chunks() && self.pending.is_empty()
-    }
-
-    /// Submit the rows of chunk `chunk_index` (shape
-    /// `(chunk_rows(chunk_index).len(), border_dim)`).
-    ///
-    /// Chunks may arrive in **any order**; each may be submitted exactly once.
-    /// The per-chunk Gram contribution is computed immediately (each entry a
-    /// [`pairwise_sum`] over the chunk's rows, in row order), so the caller's
-    /// row buffer can be dropped/remapped right after this returns.
-    pub fn submit_chunk(
-        &mut self,
-        chunk_index: usize,
-        rows: ArrayView2<'_, f64>,
-    ) -> Result<(), String> {
-        let n_chunks = self.n_chunks();
-        if chunk_index >= n_chunks {
-            return Err(format!(
-                "StreamingBorderGram: chunk index {chunk_index} out of range (n_chunks = {n_chunks})"
-            ));
-        }
-        if chunk_index < self.frontier || self.pending.contains_key(&chunk_index) {
-            return Err(format!(
-                "StreamingBorderGram: chunk {chunk_index} was already submitted"
-            ));
-        }
-        let expected_rows = self.chunk_rows(chunk_index).len();
-        if rows.nrows() != expected_rows || rows.ncols() != self.border_dim {
-            return Err(format!(
-                "StreamingBorderGram: chunk {chunk_index} has shape ({}, {}) but expected ({}, {})",
-                rows.nrows(),
-                rows.ncols(),
-                expected_rows,
-                self.border_dim
-            ));
-        }
-        let gram = self.chunk_gram(rows);
-        self.fold_or_park(chunk_index, gram);
-        Ok(())
-    }
-
-    /// Fold an accepted chunk partial in-order, or park it in the pending
-    /// buffer until the frontier reaches it. Shared tail of the row-level and
-    /// gram-level submission paths so both produce identical fold behavior.
-    fn fold_or_park(&mut self, chunk_index: usize, gram: Vec<f64>) {
-        if chunk_index == self.frontier {
-            self.fold_chunk(gram);
-            self.frontier += 1;
-            // Drain any pending chunks the frontier has now reached.
-            while let Some(next) = self.pending.remove(&self.frontier) {
-                self.fold_chunk(next);
-                self.frontier += 1;
-            }
-        } else {
-            self.pending.insert(chunk_index, gram);
-        }
-    }
-
-    /// Per-chunk Gram contribution, flattened `k·k` row-major — delegates to
-    /// the shared free function `chunk_gram_flat` so the in-process and
-    /// cross-node producers are the same code path, bit for bit.
-    fn chunk_gram(&self, rows: ArrayView2<'_, f64>) -> Vec<f64> {
-        chunk_gram_flat(rows)
-    }
-
-    /// Fold one in-order chunk partial into the cross-chunk cascade. This is
-    /// an incremental pairwise-tree push, applied entry-wise to whole chunk Grams:
-    /// sequential accumulation within a `CROSS_CHUNK_BASE`-chunk base block
-    /// (seeded from the block's first partial), then power-of-two cascade
-    /// merges of completed blocks.
-    fn fold_chunk(&mut self, gram: Vec<f64>) {
-        match self.block_partial.as_mut() {
-            None => {
-                self.block_partial = Some(gram);
-                self.block_len = 1;
-            }
-            Some(acc) => {
-                add_into(acc, &gram);
-                self.block_len += 1;
-            }
-        }
-        if self.block_len == CROSS_CHUNK_BASE {
-            let block = self
-                .block_partial
-                .take()
-                .expect("block_len == CROSS_CHUNK_BASE implies a live block partial");
-            self.block_len = 0;
-            self.absorb(CROSS_CHUNK_BASE, block);
-        }
-    }
-
-    /// Merge a completed subtree partial of the given chunk-count `weight`
-    /// into the forest, cascading equal-weight merges entry-wise on matrices.
-    fn absorb(&mut self, weight: usize, value: Vec<f64>) {
-        let mut w = weight;
-        let mut v = value;
-        while let Some((top_w, _)) = self.forest.last() {
-            if *top_w == w {
-                let (_, top_v) = self
-                    .forest
-                    .pop()
-                    .expect("forest top exists: just observed by last()");
-                // combine(left, right): entry-wise add (commutative bitwise).
-                v = {
-                    let mut merged = top_v;
-                    add_into(&mut merged, &v);
-                    merged
-                };
-                w = w.saturating_mul(2);
-            } else {
-                break;
-            }
-        }
-        self.forest.push((w, v));
     }
 
     /// Serialize the full accumulation state — partial Grams + chunk cursor —

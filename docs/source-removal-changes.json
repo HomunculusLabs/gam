@@ -5452,5 +5452,29 @@
     ],
     "reason": "Lead ruling 09-12 (#2817, SPEC rules 21 and 23): the certify-last reseed loop's count caps were derived away. certify_reseed_admitted takes the first published reseed and each later one only after strict certified descent since the previous refusal, comparing the certificate's own evaluations, so the loop ends without a count and a warm improvement the certificate does not reproduce returns the refusal. OUTER_CERTIFY_RESUME_BUDGET and OUTER_SADDLE_ESCAPE_BUDGET had no other role.",
     "evidence": "git grep -w over the base: both constants are read only by the certify loop in run_outer (the resume counter and the interior-escape counter), by doc links and prose in run.rs and run_plan_saddle_escape_tests.rs, and by one test assertion in run_plan_tests.rs (certify_four_spends_order_four_once_and_prices_the_curvature_against_the_criterion_2359), which now asserts exactly one order-four call. Every one of those mentions is rewritten in the same commit."
+  },
+  {
+    "base": "c3dd0d16776b95b8883852d75110234940eb62af",
+    "items": [
+      "crates/gam-solve/src/evidence.rs:fn:num_components",
+      "crates/gam-solve/src/gpu_kernels/arrow_schur.rs:fn:framed_reduced_schur_det_once_on_device",
+      "crates/gam-solve/src/gpu_kernels/arrow_schur.rs:fn:framed_sae_schur_matvec_matches_dense_reference_large_k_1026",
+      "crates/gam-solve/src/gpu_kernels/arrow_schur.rs:fn:framed_schur_matvec_once_on_device",
+      "crates/gam-solve/src/gpu_kernels/arrow_schur.rs:fn:sae_framed_schur_matvec_cpu",
+      "crates/gam-solve/src/gpu_kernels/arrow_schur.rs:fn:solve_reduced_beta_pcg",
+      "crates/gam-solve/src/row_sampling_measure.rs:enum:CoresetMarginVerdict",
+      "crates/gam-solve/src/row_sampling_measure.rs:fn:certify_margin",
+      "crates/gam-solve/src/sensitivity.rs:fn:leverage_block",
+      "crates/gam-solve/src/streaming_border.rs:fn:absorb",
+      "crates/gam-solve/src/streaming_border.rs:fn:chunk_gram",
+      "crates/gam-solve/src/streaming_border.rs:fn:fold_chunk",
+      "crates/gam-solve/src/streaming_border.rs:fn:fold_or_park",
+      "crates/gam-solve/src/streaming_border.rs:fn:submit_chunk",
+      "crates/gam-terms/src/basis/periodic_duchon.rs:fn:periodic_hybrid_duchon_kernel_psi_triplet",
+      "crates/gam-terms/src/basis/sphere_basis.rs:fn:prepare_periodic_duchon_centers_1d",
+      "tests/src_modules/smooths/basis_radial_periodic_thinplate_tests.rs:fn:periodic_hybrid_duchon_psi_triplet_matchesfd_2372"
+    ],
+    "reason": "Public functions no product uses, the private streaming-border helpers only submit_chunk reached (fold_or_park, chunk_gram, fold_chunk, absorb), CoresetMarginVerdict (returned only by certify_margin), and the two tests that only drove deleted code: the #1026 dense-reference framed Schur matvec test and the #2372 periodic Duchon psi-triplet finite-difference test.",
+    "evidence": "Consumer scan job 539356 and narrow scan job 541705 at 0bf5b572b gave verdict no_production_user. MSI validation job 545537 produced exactly these guarded identities on the built commit. At the landed tree, git grep -w finds no occurrence of any removed name except homonyms: two `0..num_components` comments in evidence.rs; for absorb, other types' methods (gam-linalg matrix hashing, gam-sae score route stats, gam-terms structure evidence), a test-local fn in gam-terms tests, and the English word in comments."
   }
 ]

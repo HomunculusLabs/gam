@@ -894,7 +894,7 @@ crates/gam-solve/src/evidence.rs	hessian_log_det_from_hvp	retired-no-product-use
 crates/gam-solve/src/evidence.rs	ift_dbeta_drho	retired-no-product-user
 crates/gam-solve/src/evidence.rs	ift_du_dbeta	retired-no-product-user
 crates/gam-solve/src/evidence.rs	laplace_evidence	retired-no-product-user
-crates/gam-solve/src/evidence.rs	num_components	restored-in-place
+crates/gam-solve/src/evidence.rs	num_components	retired-no-product-user
 crates/gam-solve/src/evidence.rs	resume_gaussian_mixture	retired-no-product-user
 crates/gam-solve/src/evidence.rs	resume_stacking_weights	retired-no-product-user
 crates/gam-solve/src/evidence.rs	select_topology	retired-no-product-user
@@ -913,11 +913,11 @@ crates/gam-solve/src/glm_sufficient_lane.rs	d2rhs_dpsi2	defined-elsewhere-in-cra
 crates/gam-solve/src/glm_sufficient_lane.rs	frozen_w_single_step_beta	retired-no-surviving-dependent
 crates/gam-solve/src/glm_sufficient_lane.rs	frozen_weights	retired-no-surviving-dependent
 crates/gam-solve/src/glm_sufficient_lane.rs	rhs_at	defined-elsewhere-in-crate
-crates/gam-solve/src/gpu_kernels/arrow_schur.rs	framed_reduced_schur_det_once_on_device	restored-in-place
-crates/gam-solve/src/gpu_kernels/arrow_schur.rs	framed_schur_matvec_once_on_device	restored-in-place
+crates/gam-solve/src/gpu_kernels/arrow_schur.rs	framed_reduced_schur_det_once_on_device	retired-no-product-user
+crates/gam-solve/src/gpu_kernels/arrow_schur.rs	framed_schur_matvec_once_on_device	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/arrow_schur.rs	refactor_and_solve_with_gradient	restored-in-place
-crates/gam-solve/src/gpu_kernels/arrow_schur.rs	sae_framed_schur_matvec_cpu	restored-in-place
-crates/gam-solve/src/gpu_kernels/arrow_schur.rs	solve_reduced_beta_pcg	restored-in-place
+crates/gam-solve/src/gpu_kernels/arrow_schur.rs	sae_framed_schur_matvec_cpu	retired-no-product-user
+crates/gam-solve/src/gpu_kernels/arrow_schur.rs	solve_reduced_beta_pcg	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/batched_k1.rs	solve_batched_k1_border	restored-in-place
 crates/gam-solve/src/gpu_kernels/pirls_row.rs	cuda_source	restored-in-place
 crates/gam-solve/src/gpu_kernels/pirls_row.rs	kernel_name	restored-in-place
@@ -1014,7 +1014,7 @@ crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs	is_absent	restored-in
 crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs	is_carried	restored-in-place
 crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs	soft_rho_guard_emission_at	restored-in-place
 crates/gam-solve/src/row_sampling_measure.rs	bss_spectral_coreset_certified	retired-no-product-user
-crates/gam-solve/src/row_sampling_measure.rs	certify_margin	restored-in-place
+crates/gam-solve/src/row_sampling_measure.rs	certify_margin	retired-no-product-user
 crates/gam-solve/src/row_sampling_measure.rs	designed_subsample	retired-no-product-user
 crates/gam-solve/src/row_sampling_measure.rs	designed_subsample_certified	retired-no-product-user
 crates/gam-solve/src/row_sampling_measure.rs	estimated_corpus_rows	retired-no-product-user
@@ -1024,12 +1024,12 @@ crates/gam-solve/src/row_sampling_measure.rs	is_enriched	retired-no-product-user
 crates/gam-solve/src/row_sampling_measure.rs	sensitivity_upper_bounds	retired-no-product-user
 crates/gam-solve/src/sensitivity.rs	case_deletion	retired-no-product-user
 crates/gam-solve/src/sensitivity.rs	from_lower_triangular	retired-no-product-user
-crates/gam-solve/src/sensitivity.rs	leverage_block	restored-in-place
+crates/gam-solve/src/sensitivity.rs	leverage_block	retired-no-product-user
 crates/gam-solve/src/sensitivity.rs	response_jacobian	retired-no-product-user
 crates/gam-solve/src/spline_scan.rs	deriv_at_knot	retired-no-surviving-dependent
 crates/gam-solve/src/streaming_border.rs	is_complete	restored-in-place
 crates/gam-solve/src/streaming_border.rs	push_rows	retired-no-product-user
-crates/gam-solve/src/streaming_border.rs	submit_chunk	restored-in-place
+crates/gam-solve/src/streaming_border.rs	submit_chunk	retired-no-product-user
 crates/gam-solve/src/streaming_border.rs	submit_chunk_gram	retired-no-product-user
 crates/gam-solve/src/topology_selector.rs	deterministic_cv_folds	retired-no-product-user
 crates/gam-solve/src/topology_selector.rs	fit_mixture_rung	retired-no-product-user
@@ -1128,7 +1128,7 @@ crates/gam-terms/src/basis/measure_jet_predict.rs	measure_jet_extrapolation_vari
 crates/gam-terms/src/basis/measure_jet_smooth.rs	measure_jet_center_masses	retired-no-product-user
 crates/gam-terms/src/basis/measure_jet_smooth.rs	measure_jet_energy_form_with_jets	retired-no-product-user
 crates/gam-terms/src/basis/measure_jet_smooth.rs	measure_jet_scale_spectrum	retired-no-product-user
-crates/gam-terms/src/basis/periodic_duchon.rs	periodic_hybrid_duchon_kernel_psi_triplet	restored-in-place
+crates/gam-terms/src/basis/periodic_duchon.rs	periodic_hybrid_duchon_kernel_psi_triplet	retired-no-product-user
 crates/gam-terms/src/basis/radial_jets_nd.rs	duchon_radial_second_derivative_nd	retired-no-surviving-dependent
 crates/gam-terms/src/basis/radial_jets_nd.rs	duchon_radial_third_derivative_nd	retired-no-surviving-dependent
 crates/gam-terms/src/basis/radial_jets_nd.rs	matern_radial_second_derivative_nd	retired-no-surviving-dependent
@@ -1143,7 +1143,7 @@ crates/gam-terms/src/basis/sphere_basis.rs	build_periodic_duchon_basis_log_kappa
 crates/gam-terms/src/basis/sphere_basis.rs	fill_periodic_duchon_kernel_psi_matrices	retired-no-product-user
 crates/gam-terms/src/basis/sphere_basis.rs	periodic_duchon_identifiability_transformwithworkspace	retired-no-product-user
 crates/gam-terms/src/basis/sphere_basis.rs	prepare_duchon_derivative_contextwithworkspace	retired-no-product-user
-crates/gam-terms/src/basis/sphere_basis.rs	prepare_periodic_duchon_centers_1d	restored-in-place
+crates/gam-terms/src/basis/sphere_basis.rs	prepare_periodic_duchon_centers_1d	retired-no-product-user
 crates/gam-terms/src/basis/sphere_gpu.rs	build_center_kernel_device	retired-by-later-deletion:dc325f1909
 crates/gam-terms/src/basis/sphere_gpu.rs	build_householder_constrained_design_device	retired-by-later-deletion:dc325f1909
 crates/gam-terms/src/basis/sphere_gpu.rs	constrained_penalty_host	retired-by-later-deletion:dc325f1909

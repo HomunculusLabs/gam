@@ -2915,25 +2915,7 @@ pub(crate) fn build_duchon_native_penalty_psi_derivatives_in_directions(
     Ok(out)
 }
 
-/// Validate a 1D periodic Duchon center matrix, compute the circular
-/// domain ``[left, left + period]``, and drop any centers that are
-/// periodically equivalent to ``left`` past the first occurrence.
-///
-/// All periodic Duchon code paths (`build_periodic_duchon_basis_1d`,
-/// `build_periodic_duchon_basis_log_kappa_derivatives…`) must use the
-/// *same* collapsed centers, otherwise the kernel-column count diverges
-/// between the design build and its log-κ derivative — producing
-/// `ShapeError` mismatches at the consumer (e.g. the finite-difference
-/// regression test against the analytic derivative). Centralising the
-/// collapse in one helper makes it impossible to add a new periodic path
-/// that forgets the dedup.
-pub fn prepare_periodic_duchon_centers_1d(
-    centers: Array2<f64>,
-) -> Result<(Array2<f64>, f64, f64), BasisError> {
-    prepare_periodic_duchon_centers_1d_with_period(centers, None)
-}
-
-/// Variant of [`prepare_periodic_duchon_centers_1d`] that honors an explicit
+/// Collapse duplicate periodic Duchon centers, honoring an explicit
 /// domain-wrap `period`.
 ///
 /// The period is the circumference of the circle the smooth lives on, NOT the

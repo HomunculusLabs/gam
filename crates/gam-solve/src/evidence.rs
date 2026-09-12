@@ -2736,10 +2736,6 @@ impl UnionStructure {
         }
     }
 
-    /// Number of components (= the responsibility-split order `m`).
-    pub const fn num_components(self) -> usize {
-        self.components().len()
-    }
 }
 
 /// One fitted component of a union: its pinned structure, the rows used to fit

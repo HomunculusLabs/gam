@@ -2196,5 +2196,22 @@
     },
     "reason": "#2899 group-A sweep, lead ruling (A): the public functions of gam_linalg::test_support, test_support::fd_checker and test_support::numeric_derivative move with the module into the dev-only crate gam-linalg-test-support (src/lib.rs, src/fd_checker.rs, src/numeric_derivative.rs), where each is re-declared unchanged. Their only callers are tests and gam-test-support.",
     "evidence": "public_api_census.py --base 6269205d8 --head 66833d813 reports exactly these 26 identities, with 12096 public function declarations at both base and head (/scratch.global/sauer354/pool/prune-api-a/slice20.census.json)."
+  },
+  {
+    "base": "c3dd0d16776b95b8883852d75110234940eb62af",
+    "removed": {
+      "crates/gam-solve/src/evidence.rs::num_components": 1,
+      "crates/gam-solve/src/gpu_kernels/arrow_schur.rs::framed_reduced_schur_det_once_on_device": 2,
+      "crates/gam-solve/src/gpu_kernels/arrow_schur.rs::framed_schur_matvec_once_on_device": 2,
+      "crates/gam-solve/src/gpu_kernels/arrow_schur.rs::sae_framed_schur_matvec_cpu": 1,
+      "crates/gam-solve/src/gpu_kernels/arrow_schur.rs::solve_reduced_beta_pcg": 1,
+      "crates/gam-solve/src/row_sampling_measure.rs::certify_margin": 1,
+      "crates/gam-solve/src/sensitivity.rs::leverage_block": 1,
+      "crates/gam-solve/src/streaming_border.rs::submit_chunk": 1,
+      "crates/gam-terms/src/basis/periodic_duchon.rs::periodic_hybrid_duchon_kernel_psi_triplet": 1,
+      "crates/gam-terms/src/basis/sphere_basis.rs::prepare_periodic_duchon_centers_1d": 1
+    },
+    "reason": "#2829 product-root rule: no product (gam-cli, gam-pyffi with the Python package, examples/) and no other crate's production code uses these functions. Only tests, or their own private helpers, called them, so they are deleted rather than kept restored in place.",
+    "evidence": "Consumer scan job 539356 and narrow scan job 541705 at 0bf5b572b gave verdict no_production_user. MSI validation job 545537 ran the census and the source-removal guard on the built commit and measured exactly this removal set. git grep -w over crates, src, tests, examples, bench, benches, gamfit and python at the landed tree leaves only homonyms: two `0..num_components` comments in evidence.rs; for absorb, other types' methods (gam-linalg matrix hashing, gam-sae score route stats, gam-terms structure evidence), a test-local fn in gam-terms tests, and the English word in comments."
   }
 ]

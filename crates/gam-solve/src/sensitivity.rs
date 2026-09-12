@@ -39,8 +39,6 @@
 //! - `mode_response_coned` — the same
 //!   response confined to its cone of influence (#779); the lazy/local form
 //!   the smoothing-correction IFT uses.
-//! - `leverage_block` — `H⁻¹Xᵀ`, whose
-//!   column `i` is at once ALO's per-row solve and the case/response channel.
 //!
 //! What is deliberately NOT folded in: the matrix-free `hop.solve_multi`
 //! (PCG/GPU), the constrained kernel `K_T = K_S − K_S Aᵀ(A K_S Aᵀ)⁻¹A K_S`,
@@ -238,15 +236,6 @@ impl<'a> FitSensitivity<'a> {
             }
         }
         Some(out)
-    }
-
-    /// `H⁻¹Xᵀ` (p × n) — the shared leverage/case-sensitivity block: its
-    /// column i is simultaneously ALO's per-observation solve, the case-
-    /// weight channel `∂g/∂w_i ∝ x_i`, and the response channel
-    /// `∂g/∂y_i ∝ x_i`. One blocked solve serves all three diagnostics.
-    pub fn leverage_block(&self, design: &Array2<f64>) -> Array2<f64> {
-        assert_eq!(design.ncols(), self.dim, "FitSensitivity design width");
-        self.apply_multi(design.t())
     }
 
 }

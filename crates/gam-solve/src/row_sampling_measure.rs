@@ -143,36 +143,6 @@ impl CoresetCertificate {
         2.0 * (self.logdet_error_bound() + self.eps_likelihood)
     }
 
-    /// Explicit verdict for a proposed coreset race margin. Consumers should
-    /// propagate [`CoresetMarginVerdict::InsufficientMargin`] instead of making
-    /// a silent decision below the certificate margin.
-    pub fn certify_margin(&self, decision_margin: f64) -> CoresetMarginVerdict {
-        let required_margin = self.race_transfer_margin();
-        if decision_margin.is_finite() && decision_margin > required_margin {
-            CoresetMarginVerdict::Certified {
-                decision_margin,
-                required_margin,
-            }
-        } else {
-            CoresetMarginVerdict::InsufficientMargin {
-                decision_margin,
-                required_margin,
-            }
-        }
-    }
-}
-
-/// Certificate gate for coreset-backed race decisions.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum CoresetMarginVerdict {
-    Certified {
-        decision_margin: f64,
-        required_margin: f64,
-    },
-    InsufficientMargin {
-        decision_margin: f64,
-        required_margin: f64,
-    },
 }
 
 impl RowSamplingMeasure {

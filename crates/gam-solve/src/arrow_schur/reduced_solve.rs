@@ -2038,8 +2038,7 @@ pub(crate) fn maybe_build_evidence_gpu_matvec(
     // returns `None` (no `device_sae_pcg`), so the lane is byte-identical.
     // `Unavailable` is the device saying "not this shape/config", which is a
     // DECLINE and not a fault: every other exit from this function reports a
-    // decline as `Ok(None)`, the CPU lane, and the sibling device seam at
-    // `solve_reduced_beta_pcg` above already falls through on the same variant.
+    // decline as `Ok(None)`, the CPU lane.
     // Surfacing it as an error made a host WITH a GPU fail where a CPU-only host
     // returned `Ok(None)` at the runtime probe and passed. Genuine faults
     // (`RidgeBumpRequired`, `SchurFactorFailed`) still surface.
