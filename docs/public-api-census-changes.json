@@ -2404,5 +2404,14 @@
     },
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899); api2829 approved retiring these six structs (#2829). NodeWorker and CrossNodeGramReduction (cross_node.rs), GlmFixedDesignSufficient (measure_jet_glm_sufficient.rs), FixedDesignGramCache and FixedDesignRowCache (measure_jet_gram_cache.rs), and JitFamilySpec (gpu_kernels/pirls_row.rs) are named by no code outside their own files and those files' unit tests. The three modules held nothing else a product reaches (CrossNodePartition, NodePartial and both checkpoint carriers only fed the worker and the coordinator), so each module is deleted whole with its unit tests and private helpers. streaming_border.rs's chunk_gram_flat had NodeWorker::emit as its only caller and is deleted with it.",
     "evidence": "Emulating public_api_census.py's pub fn predicate over literal-stripped before and after blobs gives these declaration counts. The census counts pub(crate) declarations as well, which is why chunks_owned_by, owned_chunk, next_chunk_rows and chunk_gram_flat appear. pirls_row.rs keeps PirlsRowFamily::kernel_name, so that identity falls from 2 to 1."
+  },
+  {
+    "base": "deea7ad64c3f7166c73307ea7b1515724ec3144c",
+    "removed": {
+      "crates/gam-terms/src/smooth/term_specs.rs::nrows": 1,
+      "crates/gam-terms/src/smooth/term_specs.rs::total_smooth_cols": 1
+    },
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). RawSmoothDesign's total_smooth_cols and nrows copied SmoothDesign's methods of the same names, but nothing calls them on a RawSmoothDesign. Its one consumer destructures it into the SmoothDesign that callers use, and SmoothDesign keeps its own copies.",
+    "evidence": "At base deea7ad64, term_specs.rs declares pub fn total_smooth_cols and pub fn nrows twice each, once for SmoothDesign and once for RawSmoothDesign. This commit deletes the RawSmoothDesign impl, so each identity falls by one. The only producers of RawSmoothDesign are pub(crate) builders, its only consumer destructures it into a SmoothDesign, and job 549347 compiled gam-terms with the type narrowed and reported both methods as never used. Not run through public_api_census.py (MSI auth unavailable)."
   }
 ]

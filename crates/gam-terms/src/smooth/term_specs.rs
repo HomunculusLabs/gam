@@ -1175,15 +1175,6 @@ pub struct RawSmoothDesign {
     pub linear_constraints: Option<LinearInequalityConstraints>,
 }
 
-impl RawSmoothDesign {
-    pub fn total_smooth_cols(&self) -> usize {
-        self.term_designs.iter().map(DesignMatrix::ncols).sum()
-    }
-    pub fn nrows(&self) -> usize {
-        self.term_designs.first().map_or(0, DesignMatrix::nrows)
-    }
-}
-
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub enum BoundedCoefficientPriorSpec {
     #[default]
