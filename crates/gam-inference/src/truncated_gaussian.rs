@@ -199,17 +199,38 @@ pub fn sample_truncated_gaussian_posterior(
     // genuinely infeasible start would corrupt every trajectory.
     let start_diff = feasible_start - center;
     let z0 = l.t().dot(&start_diff) / sqrt_phi;
+    // The start is the persisted feasible optimizer mode, which the constrained
+    // solver certifies to a scaled violation `(aᵢᵀx − bᵢ)/‖aᵢ‖` of at most
+    // `PRIMAL_FEASIBILITY_TOL`, a zero row being infeasible iff `bᵢ > 0`. Refuse
+    // exactly what that contract refuses: a tighter or differently scaled test
+    // rejects valid boundary modes (gam#2719, #2469).
+    let feasibility_tol = gam_problem::PRIMAL_FEASIBILITY_TOL;
     for i in 0..m {
-        let slack = a.row(i).dot(feasible_start) - b[i];
-        let scale = a.row(i).iter().map(|v| v.abs()).sum::<f64>().max(1.0)
-            * feasible_start
+        let row_scale = a.row(i).iter().fold(0.0_f64, |s, &v| s.max(v.abs()));
+        let scaled_slack = if row_scale > 0.0 {
+            let unit_norm = a
+                .row(i)
                 .iter()
-                .map(|v| v.abs())
-                .fold(1.0_f64, f64::max);
-        if slack < -1e-8 * scale {
+                .map(|&v| (v / row_scale) * (v / row_scale))
+                .sum::<f64>()
+                .sqrt();
+            let unit_dot = a
+                .row(i)
+                .iter()
+                .zip(feasible_start.iter())
+                .map(|(&v, &x)| (v / row_scale) * x)
+                .sum::<f64>();
+            (unit_dot - b[i] / row_scale) / unit_norm
+        } else if b[i] > 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        if !(scaled_slack >= -feasibility_tol) {
             return Err(format!(
                 "truncated-Gaussian posterior: start point violates constraint row {i} \
-                 (slack {slack:.3e}); the constrained mode must be feasible"
+                 (scaled slack {scaled_slack:.3e}, contract tolerance {feasibility_tol:.3e}); \
+                 the constrained mode must be feasible"
             ));
         }
     }
