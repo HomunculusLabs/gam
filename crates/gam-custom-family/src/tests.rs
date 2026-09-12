@@ -6707,7 +6707,7 @@ fn outer_jeffreys_hphi_drift_matches_a_central_difference_of_hphi_2765() {
     let drift = custom_family_outer_jeffreys_hphi_drift_batched(&family, &states, &specs, &ranges)
         .expect("Jeffreys drift construction")
         .expect("an active Jeffreys geometry exposes a drift");
-    let analytic = drift(std::slice::from_ref(&direction))
+    let analytic = (drift.first)(std::slice::from_ref(&direction))
         .expect("drift evaluation")
         .pop()
         .flatten()
