@@ -7344,6 +7344,8 @@ fn predict_dataset_with_options_impl(
     serde_json::to_string(&PredictionPayload {
         columns,
         model_class: prediction_model_class_label(model),
+        point_column: model_class.point_column(),
+        point_shape: model_class.point_shape(),
         family: family_link_kind(&model_likelihood_spec(model)).to_string(),
         // The plain dataset predict path returns the model-based credible /
         // predictive band (or no interval at all); the jackknife+ provenance
@@ -7851,6 +7853,8 @@ fn predict_encoded_table_conformal_impl(
     serde_json::to_string(&PredictionPayload {
         columns,
         model_class: prediction_model_class_label(&model),
+        point_column: model.predict_model_class().point_column(),
+        point_shape: model.predict_model_class().point_shape(),
         family: family_link_kind(&model_likelihood_spec(&model)).to_string(),
         interval_method: Some(
             "split-conformal (distribution-free, finite-sample marginal coverage)".to_string(),
@@ -7970,6 +7974,8 @@ fn predict_encoded_table_jackknife_plus_impl(
     serde_json::to_string(&PredictionPayload {
         columns,
         model_class: prediction_model_class_label(&model),
+        point_column: model.predict_model_class().point_column(),
+        point_shape: model.predict_model_class().point_shape(),
         family: family_link_kind(&model_likelihood_spec(&model)).to_string(),
         interval_method: Some(format!(
             "jackknife+ targeting {:.0}% coverage (distribution-free finite-sample \
@@ -8104,6 +8110,8 @@ fn predict_encoded_table_full_conformal_impl(
     serde_json::to_string(&PredictionPayload {
         columns,
         model_class: prediction_model_class_label(&model),
+        point_column: model.predict_model_class().point_column(),
+        point_shape: model.predict_model_class().point_shape(),
         family: family_link_kind(&model_likelihood_spec(&model)).to_string(),
         interval_method: Some(format!(
             "full-conformal at frozen smoothing parameters (exact set given Sλ; the \

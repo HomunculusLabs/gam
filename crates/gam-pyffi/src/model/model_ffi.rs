@@ -412,9 +412,12 @@ struct PredictionPayload {
     /// `Model.predict()` with `KeyError: 'model_class'` once the defensive
     /// `parsed.get(...)` fallback was removed from the post-shim shaper (#866/#867).
     model_class: String,
+    /// Response-scale point column of this class (`PredictModelClass::point_column`).
+    point_column: &'static str,
+    /// Point-payload shape of this class (`PredictModelClass::point_shape`); the
+    /// Python shaper branches on it instead of the class label.
+    point_shape: &'static str,
     /// Inverse-link family kind tag (`identity`, `logit`, `probit`, `log`, ...).
-    /// The shaper consults it alongside `model_class` to disambiguate the
-    /// Bernoulli marginal-slope path from the survival marginal-slope variant.
     family: String,
     /// Provenance of the returned prediction interval (#942). Present only when
     /// an interval was requested. `"jackknife+ (distribution-free, finite-sample
@@ -7272,6 +7275,8 @@ mod prediction_payload_tests {
         let payload = PredictionPayload {
             columns: BTreeMap::from([("mean".to_string(), vec![1.0])]),
             model_class: "standard".to_string(),
+            point_column: "posterior_mean",
+            point_shape: "estimand_explicit",
             family: "identity".to_string(),
             interval_method: None,
             covariance_source: Some("smoothing-corrected".to_string()),

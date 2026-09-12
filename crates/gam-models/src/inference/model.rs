@@ -1148,6 +1148,24 @@ impl PredictModelClass {
         }
     }
 
+    /// Which point-payload shape this class's prediction publishes, read by the
+    /// Python shaper instead of the class label: the estimand-explicit schema,
+    /// a transformation-normal conditional mean, or a Bernoulli marginal-slope
+    /// probability that is clipped to `(0, 1)`. Survival classes publish a
+    /// survival payload, never a point payload.
+    #[inline]
+    pub const fn point_shape(self) -> &'static str {
+        match self {
+            Self::TransformationNormal => "transformation_normal_mean",
+            Self::BernoulliMarginalSlope => "marginal_slope_probability",
+            Self::Survival => "survival",
+            Self::Standard
+            | Self::GaussianLocationScale
+            | Self::BinomialLocationScale
+            | Self::DispersionLocationScale => "estimand_explicit",
+        }
+    }
+
     #[inline]
     pub const fn name(self) -> &'static str {
         match self {

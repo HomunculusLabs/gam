@@ -38,7 +38,6 @@ from typing import Any
 
 from ._binding import rust_module
 from ._survival import (
-    _TRANSFORMATION_NORMAL_MODEL_CLASSES,
     competing_risks_prediction_from_ffi_payload,
     survival_prediction_from_ffi_payload,
 )
@@ -92,8 +91,8 @@ def shape_predict_response(
     Survival and competing-risks payloads are recognised by their class
     discriminator and routed to their structured containers. Every Survival
     predict class takes that route in Rust, so every remaining payload is a
-    point payload dispatched on ``model_class``. The dispatcher never decides
-    shape itself — it picks a shaper and the shaper consults
+    point payload dispatched on the Rust ``point_shape``. The dispatcher never
+    decides shape itself — it picks a shaper and the shaper consults
     :func:`wants_table`.
     """
     parsed = json.loads(raw)
@@ -107,7 +106,8 @@ def shape_predict_response(
 
     columns_json = json.dumps(parsed["columns"], separators=(",", ":"))
     columns = json.loads(rust_module().ordered_prediction_columns(columns_json))
-    model_class = str(parsed["model_class"])
+    point_shape = str(parsed["point_shape"])
+    point_column = str(parsed["point_column"])
 
     table_requested = wants_table(
         return_type=return_type,
@@ -121,7 +121,7 @@ def shape_predict_response(
     # encodes exactly those two per-class differences; the shared shaper
     # (`_shape_point_payload`) owns the identical "return the vector, or restore
     # a one-column table" tail that the three forked shapers used to duplicate.
-    point, table_columns = _point_payload_spec(model_class, columns)
+    point, table_columns = _point_payload_spec(point_shape, point_column, columns)
     shaped = _shape_point_payload(
         point,
         table_columns,
@@ -166,7 +166,8 @@ def _attach_covariance_provenance(result: Any, key: str, source: Any) -> Any:
 
 
 def _point_payload_spec(
-    model_class: str,
+    point_shape: str,
+    point_column: str,
     columns: dict[str, list[Any]],
 ) -> tuple[Any, dict[str, list[Any]]]:
     """Resolve a point-payload class to its ``(point_vector, table_columns)``.
@@ -197,23 +198,23 @@ def _point_payload_spec(
       and ``posterior_mean`` always, plus ``posterior_mean_standard_error`` /
       ``posterior_mean_lower`` / ``posterior_mean_upper`` when an interval was
       set, and ``noise_scale`` when the family fits a response-side scale).
-      The Rust ``PredictModelClass::publishes_estimand_explicit_schema`` owns
-      which classes emit these names.
+      The Rust ``PredictModelClass::point_shape`` / ``point_column`` decide
+      which shape and point column a class publishes.
 
     The shared "return the vector, else restore a table" tail lives in
     :func:`_shape_point_payload`; this function owns only the differences.
     """
-    if model_class in _TRANSFORMATION_NORMAL_MODEL_CLASSES:
+    if point_shape == "transformation_normal_mean":
         mean = rust_module().vec_to_array1_f64(
-            [float(value) for value in columns["mean"]]
+            [float(value) for value in columns[point_column]]
         )
-        return mean, {"mean": mean.tolist()}
+        return mean, {point_column: mean.tolist()}
 
-    if model_class == "bernoulli marginal-slope":
+    if point_shape == "marginal_slope_probability":
         # The Rust core may emit linear-predictor-scale values that need
         # clipping back to (0, 1) before exposure — the only transformation.
         prob_values = rust_module().marginal_slope_clip_probabilities(
-            [float(value) for value in columns.get("mean", [])]
+            [float(value) for value in columns.get(point_column, [])]
         )
         probs = rust_module().vec_to_array1_f64(prob_values)
         # #1049: when an interval was requested the Rust posterior-mean path
@@ -233,7 +234,7 @@ def _point_payload_spec(
             table_columns["linear_predictor"] = [
                 float(value) for value in columns["linear_predictor"]
             ]
-        table_columns["mean"] = probs.tolist()
+        table_columns[point_column] = probs.tolist()
         if has_interval:
             table_columns["std_error"] = [
                 float(value) for value in columns["std_error"]
@@ -251,7 +252,7 @@ def _point_payload_spec(
         return probs, table_columns
 
     posterior_mean = rust_module().vec_to_array1_f64(
-        [float(value) for value in columns["posterior_mean"]]
+        [float(value) for value in columns[point_column]]
     )
     # Standard models keep the full multi-column payload in tabular form.
     return posterior_mean, columns

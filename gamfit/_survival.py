@@ -22,11 +22,6 @@ from ._binding import rust_module
     DENSE_SURVIVAL_AUTO_CHUNK_CELLS,
 ) = (int(value) for value in rust_module().survival_chunk_defaults())
 
-_TRANSFORMATION_NORMAL_MODEL_CLASSES = frozenset(
-    {
-        "transformation-normal",
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -751,5 +746,4 @@ __all__ = [
     "numeric_matrix",
     "ordered_prediction_columns",
     "survival_prediction_from_ffi_payload",
-    "_TRANSFORMATION_NORMAL_MODEL_CLASSES",
 ]
