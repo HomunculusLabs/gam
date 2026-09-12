@@ -2702,10 +2702,7 @@ fn rrqr_nullspace_basis_inner<S: Data<Elem = f64>>(
     let leading_diag = if diag_len > 0 { r[(0, 0)].abs() } else { 0.0 };
     let tol = match cutoff {
         RrqrRankCutoff::RelativeAlpha(rank_alpha) => {
-            rank_alpha
-                * f64::EPSILON
-                * (a.nrows().max(a.ncols()).max(1) as f64)
-                * leading_diag.max(1.0)
+            rank_alpha * f64::EPSILON * (a.nrows().max(a.ncols()).max(1) as f64) * leading_diag
         }
         RrqrRankCutoff::Absolute(tol) => tol,
     };
@@ -2787,10 +2784,9 @@ pub fn rrqr_with_permutation<S: Data<Elem = f64>>(
     let r = qr.thin_R();
     let diag_len = r.nrows().min(r.ncols());
     let leading_diag = if diag_len > 0 { r[(0, 0)].abs() } else { 0.0 };
-    let tol = rank_alpha
-        * f64::EPSILON
-        * (a.nrows().max(a.ncols()).max(1) as f64)
-        * leading_diag.max(1.0);
+    // The pivoted QR's backward error is `α·ε·max(m, p)·|R₁₁|`, in the matrix's own
+    // units: a pivot inside it is zero to the precision the factorization has.
+    let tol = rank_alpha * f64::EPSILON * (a.nrows().max(a.ncols()).max(1) as f64) * leading_diag;
     let rank = (0..diag_len).filter(|&i| r[(i, i)].abs() > tol).count();
     let (forward, _inverse) = qr.P().arrays();
     let column_permutation: Vec<usize> = forward.iter().copied().map(|idx| idx.unbound()).collect();
@@ -2912,7 +2908,7 @@ pub fn rrqr_from_gram_with_permutation<S: Data<Elem = f64>>(
     // Re-scale the tolerance from F's `max(p, p)=p` row dimension to the
     // original tall design's `max(m_rows, p)`, keeping the rank cut bit-
     // identical to what the tall [`rrqr_with_permutation`] would have produced.
-    let tol = rank_alpha * f64::EPSILON * (m_rows.max(p).max(1) as f64) * leading_diag.max(1.0);
+    let tol = rank_alpha * f64::EPSILON * (m_rows.max(p).max(1) as f64) * leading_diag;
     let rank = pivots.iter().filter(|&&v| v > tol).count();
     let min_kept = pivots[..rank].iter().copied().fold(f64::INFINITY, f64::min);
     let max_dropped = pivots[rank..].iter().copied().fold(0.0f64, f64::max);
@@ -2924,10 +2920,11 @@ pub fn rrqr_from_gram_with_permutation<S: Data<Elem = f64>>(
     } else {
         min_kept / tol
     };
-    let dropped_margin = if rank == diag_len {
+    // Exactly zero dropped pivots sit infinitely far below any cutoff.
+    let dropped_margin = if rank == diag_len || max_dropped == 0.0 {
         f64::INFINITY
     } else {
-        tol / max_dropped.max(f64::MIN_POSITIVE)
+        tol / max_dropped
     };
     // Gram-squaring precision floor. Forming `G = XᵀX` collapses the bottom half
     // of the spectrum: a true singular value below `√ε · σ_max` is lost in the
@@ -2950,11 +2947,13 @@ pub fn rrqr_from_gram_with_permutation<S: Data<Elem = f64>>(
     // pivot in the floor regime shrinks `verdict_margin` below the caller's
     // fallback threshold; for a genuinely full-rank design every kept pivot is
     // `≫ √ε · leading` and this term is large, leaving the fast path intact.
-    let gram_precision_floor = f64::EPSILON.sqrt() * leading_diag.max(1.0);
+    // A kept pivot implies a positive leading pivot, so this floor is positive
+    // wherever it divides.
+    let gram_precision_floor = f64::EPSILON.sqrt() * leading_diag;
     let kept_floor_margin = if rank == 0 {
         f64::INFINITY
     } else {
-        min_kept / gram_precision_floor.max(f64::MIN_POSITIVE)
+        min_kept / gram_precision_floor
     };
     let verdict_margin = kept_margin.min(dropped_margin).min(kept_floor_margin);
     Ok(RrqrFromGram {
