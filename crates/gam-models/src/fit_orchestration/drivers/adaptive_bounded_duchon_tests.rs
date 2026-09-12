@@ -317,7 +317,14 @@ mod adaptive_bounded_duchon_tests {
             let t = i as f64 / (n as f64 - 1.0);
             data[[i, 0]] = t;
             data[[i, 1]] = (i % 4) as f64;
-            y[i] = 0.5 + 1.5 * t;
+            // A finite residual variance keeps this contract about the frozen spec off
+            // the zero-dispersion boundary. With y exactly linear, the design's aliased
+            // constant (intercept, four undropped levels, the unconstrained B-spline
+            // partition of unity) left the exact-inference factorization without a
+            // resolvable pivot: "a Cholesky pivot inside its derived roundoff band
+            // 2.1628474414334926e-2" at 994668d56, NonPositivePivot { index: 12 } at
+            // 7ad913f69. The deterministic Weyl residual has spread ≈ 0.029.
+            y[i] = 0.5 + 1.5 * t + 0.1 * ((i as f64 * 0.754_877_666_246_692_7).fract() - 0.5);
         }
 
         let spec = TermCollectionSpec {
