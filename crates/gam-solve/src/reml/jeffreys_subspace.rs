@@ -3019,6 +3019,9 @@ pub struct JeffreysHphiDriftBase {
     /// Capped-inverse divided differences on `evals`, tabulated on first use by the
     /// Fréchet rows of the drift derivatives.
     divided_differences: std::sync::OnceLock<mixed::InverseDividedDifferences>,
+    /// `aw_rows · a_rowsᵀ`, formed on first use: every drift whose conditioning gate
+    /// moves reads it, and an outer Hessian closes `k(k+1)/2` pairs from one base.
+    weighted_gram: std::sync::OnceLock<Array2<f64>>,
 }
 
 /// Coefficient-axis information derivatives `{H²[d, e_a]}` rotated once into a
@@ -3622,6 +3625,7 @@ impl JeffreysHphiDriftBase {
             a_rows,
             aw_rows,
             divided_differences: std::sync::OnceLock::new(),
+            weighted_gram: std::sync::OnceLock::new(),
         }))
     }
 

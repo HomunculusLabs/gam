@@ -109,6 +109,10 @@ pub(super) struct InverseDividedDifferences {
     pairs: [Vec<f64>; 3],
     /// `triples[order][(i·m + k)·m + j] = inverse_difference(&[λ_i, λ_k, λ_j], floor, order)`.
     triples: [Vec<f64>; 3],
+    /// `λ_i⁻¹`, the factors of a four-node value on one branch above the floor.
+    recips: Vec<f64>,
+    /// `(floor − λ_i)⁻¹`, the factors of a four-node value below the floor.
+    gap_recips: Vec<f64>,
 }
 
 impl InverseDividedDifferences {
@@ -140,6 +144,8 @@ impl InverseDividedDifferences {
             }
             table
         });
+        let recips = values.iter().map(|&x| x.recip()).collect();
+        let gap_recips = values.iter().map(|&x| (floor - x).recip()).collect();
         Self {
             m,
             floor,
@@ -148,6 +154,8 @@ impl InverseDividedDifferences {
             pieces,
             pairs,
             triples,
+            recips,
+            gap_recips,
         }
     }
 
@@ -159,21 +167,23 @@ impl InverseDividedDifferences {
     fn quadruple(&self, nodes: [usize; 4]) -> f64 {
         let branch = self.pieces[nodes[0]];
         if nodes.iter().all(|&index| self.pieces[index] == branch) {
-            let [a, b, c, d] = nodes.map(|index| self.evals[index]);
             let sign = -1.0;
             return match branch {
                 3 => {
-                    let product = a.recip() * b.recip() * c.recip() * d.recip();
-                    let sum = a.recip() + b.recip() + c.recip() + d.recip();
+                    let [a, b, c, d] = nodes.map(|index| self.recips[index]);
+                    let product = a * b * c * d;
+                    let sum = a + b + c + d;
                     sign * self.cap * product * sum
                 }
-                2 => sign * (a.recip() * b.recip() * c.recip() * d.recip()),
+                2 => {
+                    let [a, b, c, d] = nodes.map(|index| self.recips[index]);
+                    sign * (a * b * c * d)
+                }
                 1 => 0.0,
                 _ => {
                     let mut product = 1.0;
                     let mut s1 = 0.0;
-                    for x in [a, b, c, d] {
-                        let z = (self.floor - x).recip();
+                    for z in nodes.map(|index| self.gap_recips[index]) {
                         product *= z;
                         s1 += z;
                     }
@@ -201,6 +211,12 @@ impl JeffreysHphiDriftBase {
     fn divided_differences(&self) -> &InverseDividedDifferences {
         self.divided_differences
             .get_or_init(|| InverseDividedDifferences::new(&self.evals, self.floor))
+    }
+
+    /// `aw_rows · a_rowsᵀ`, the Gram the gate's motion scales, formed on first use.
+    fn weighted_gram(&self) -> &Array2<f64> {
+        self.weighted_gram
+            .get_or_init(|| self.aw_rows.dot(&self.a_rows.t()))
     }
 
     /// Apply the derivative of the omitted true-Hessian completion to a
@@ -743,7 +759,7 @@ impl JeffreysHphiDriftBase {
         let dg = g_min * e[[self.idx_min, self.idx_min]]
             + g_max * e[[self.idx_max, self.idx_max]];
         if dg != 0.0 {
-            result.scaled_add(-0.5 * dg, &self.aw_rows.dot(&self.a_rows.t()));
+            result.scaled_add(-0.5 * dg, self.weighted_gram());
         }
         let mut result = result.as_standard_layout().to_owned();
         symmetrize_contiguous(&mut result);
@@ -802,7 +818,7 @@ impl JeffreysHphiDriftBase {
         let dg = g_min * e[[self.idx_min, self.idx_min]]
             + g_max * e[[self.idx_max, self.idx_max]];
         if dg != 0.0 {
-            result.scaled_add(-0.5 * dg, &self.aw_rows.dot(&self.a_rows.t()));
+            result.scaled_add(-0.5 * dg, self.weighted_gram());
         }
         let mut result = result.as_standard_layout().to_owned();
         symmetrize_contiguous(&mut result);
@@ -1071,7 +1087,7 @@ impl JeffreysHphiDriftBase {
         wuv += &self.first_frechet_rows(&u.rows, f, v.floor_motion);
         wuv += &self.inverse_frechet_rows(auv, &[], 0);
         let w = &self.aw_rows;
-        let raw = w.dot(&a.t()) * -0.5;
+        let raw = self.weighted_gram() * -0.5;
         let mut result = (wuv.dot(&a.t())
             + u.first.dot(&v.rows.t())
             + v.first.dot(&u.rows.t())
@@ -1297,5 +1313,33 @@ mod tests {
                 .unwrap();
             assert!((&actual - &swapped).iter().all(|x| x.abs() < 1e-12 * scale));
         }
+    }
+
+    /// #1082: the cached gate-drift Gram is `aw_rows · a_rowsᵀ` bit for bit, so every
+    /// drift that reads it closes on the matrix it used to re-form on each call.
+    #[test]
+    fn weighted_gram_matches_the_gate_drift_gram_bitwise_1082() {
+        let h = Array2::from_diag(&array![3.0, 7.0, 30.0]);
+        let z = Array2::eye(3);
+        let e = array![[0.2, 0.03, -0.04], [0.03, -0.1, 0.02], [-0.04, 0.02, 0.15]];
+        let f = array![[0.1, -0.02, 0.01], [-0.02, 0.2, 0.03], [0.01, 0.03, -0.1]];
+        let axes = vec![e.clone(), f.clone(), &e + &f];
+        let base = JeffreysHphiDriftBase::prepare_with_axes(h.view(), z.view(), axes)
+            .unwrap()
+            .unwrap();
+        let direct = base.aw_rows.dot(&base.a_rows.t());
+        let cached = base.weighted_gram();
+        assert_eq!(cached.dim(), direct.dim());
+        assert!(
+            cached
+                .iter()
+                .zip(direct.iter())
+                .all(|(left, right)| left.to_bits() == right.to_bits()),
+            "cached {cached:?} vs direct {direct:?}"
+        );
+        assert!(
+            direct.iter().any(|value| *value != 0.0),
+            "positive control: the fixture's Gram does not vanish"
+        );
     }
 }
