@@ -530,10 +530,11 @@ pub fn fit_transformation_normal(
     };
 
     let exact_mode_candidates = |eval_mode: gam_problem::EvalMode,
+                                 theta: &Array1<f64>,
                                  rho: &Array1<f64>|
      -> Vec<Option<CustomFamilyWarmStart>> {
         let (first_iterate, candidates) =
-            exact_mode_branch.borrow_mut().candidates(eval_mode, rho);
+            exact_mode_branch.borrow_mut().candidates(eval_mode, theta, rho);
         if first_iterate {
             log::info!(
                 "[transformation-normal] first derivative-bearing outer seed evaluation: its certified mode becomes the coefficient-mode anchor every later probe starts from"
@@ -591,7 +592,7 @@ pub fn fit_transformation_normal(
             let fit = match provenance {
                 SpatialFitProvenance::NoOuterOptimization => {
                     let warm_starts =
-                        exact_mode_candidates(gam_problem::EvalMode::ValueOnly, &rho);
+                        exact_mode_candidates(gam_problem::EvalMode::ValueOnly, theta, &rho);
                     let selection = evaluate_custom_family_joint_hyper_best_mode_shared(
                         &geometry.family,
                         &geometry.blocks,
@@ -707,7 +708,7 @@ pub fn fit_transformation_normal(
                 )
                 .map_err(|e| format!("transformation exact joint mode upgrade: {e}"))?
             } else {
-                let warm_starts = exact_mode_candidates(eval_mode, &rho);
+                let warm_starts = exact_mode_candidates(eval_mode, theta, &rho);
                 let carried = evaluate_custom_family_joint_hyper_best_mode_shared(
                     &geometry.family,
                     &geometry.blocks,
@@ -766,6 +767,7 @@ pub fn fit_transformation_normal(
             let outer_hessian = selection.result.outer_hessian.clone();
             exact_mode_branch.borrow_mut().record_value(
                 eval_mode,
+                theta,
                 selection.result.warm_start.clone(),
                 selection.result.inner_converged,
             );

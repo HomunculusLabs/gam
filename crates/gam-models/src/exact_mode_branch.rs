@@ -29,6 +29,17 @@ use ndarray::Array1;
 /// function of `θ` and of the accepted iterate, not of the probe order. Before
 /// the first derivative-bearing evaluation there is no accepted iterate, so the
 /// value-only seed probes carry their converged mode forward.
+///
+/// An evaluation at a `θ` the walk has already accepted is solved from that
+/// iterate's own certified mode, not from the anchor. After a multi-start the
+/// anchor belongs to whichever walk accepted an iterate last, while the terminal
+/// certification re-evaluates the winning walk's iterate. Solving that
+/// evaluation from another walk's mode is a different inner problem at the
+/// certified `θ` (gam#2765: seed 0 certified, a later seed moved the anchor, and
+/// the terminal `ValueGradientHessian` evaluation at seed 0's `θ` started from
+/// `|β|∞ = 9.46` and diverged onto the singular Jeffreys face). The certified
+/// modes are keyed by the bits of the full `θ`, so a ψ move is a different
+/// iterate even where `ρ` did not move.
 #[derive(Default)]
 pub(crate) struct ExactCoefficientModeBranch {
     /// The mode every evaluation is solved from.
@@ -37,30 +48,40 @@ pub(crate) struct ExactCoefficientModeBranch {
     /// (written by a derivative-bearing evaluation) rather than a seed-time
     /// carry. Once true, seeds and value-only probes can no longer write it.
     anchored_at_iterate: bool,
+    /// The certified mode of every accepted outer iterate, keyed by its `θ` bits.
+    iterate_modes: Vec<(Vec<u64>, CustomFamilyWarmStart)>,
+}
+
+fn theta_bits(theta: &Array1<f64>) -> Vec<u64> {
+    theta.iter().map(|value| value.to_bits()).collect()
 }
 
 impl ExactCoefficientModeBranch {
-    /// The warm-start candidates for one evaluation: the anchor when it is
-    /// dimensionally compatible with `rho`, otherwise a cold solve.
+    /// The warm-start candidates for one evaluation at `theta`: the certified
+    /// mode of the accepted iterate at `theta` when there is one, otherwise the
+    /// anchor, when it is dimensionally compatible with `rho`; otherwise a cold
+    /// solve.
     ///
     /// The returned flag is true exactly at the first derivative-bearing
     /// evaluation, the moment the anchor becomes iterate-owned.
     pub(crate) fn candidates(
         &mut self,
         eval_mode: EvalMode,
+        theta: &Array1<f64>,
         rho: &Array1<f64>,
     ) -> (bool, Vec<Option<CustomFamilyWarmStart>>) {
         let first_iterate_evaluation =
             !self.anchored_at_iterate && !matches!(eval_mode, EvalMode::ValueOnly);
+        let key = theta_bits(theta);
         let warm = self
-            .anchor
-            .as_ref()
+            .iterate_modes
+            .iter()
+            .find(|(bits, _)| *bits == key)
+            .map(|(_, warm)| warm)
+            .or(self.anchor.as_ref())
             .filter(|warm| warm.compatible_with_rho(rho))
             .cloned();
-        match warm {
-            Some(warm) => (first_iterate_evaluation, vec![Some(warm)]),
-            None => (first_iterate_evaluation, vec![None]),
-        }
+        (first_iterate_evaluation, vec![warm])
     }
 
     /// Install a seed mode from outside the walk (an outer ρ-cache coefficient
@@ -75,14 +96,16 @@ impl ExactCoefficientModeBranch {
         }
     }
 
-    /// Record the mode an evaluation converged to. A derivative-bearing
-    /// evaluation is an accepted iterate and replaces the anchor; a value-only
-    /// probe writes only while no iterate has been accepted yet. A mode that
-    /// did not converge is never recorded — the evaluation it came from is
-    /// refused by the caller, and a refused trial must leave no trace.
+    /// Record the mode an evaluation at `theta` converged to. A
+    /// derivative-bearing evaluation is an accepted iterate: it replaces the
+    /// anchor and becomes the certified mode at `theta`. A value-only probe
+    /// writes only while no iterate has been accepted yet. A mode that did not
+    /// converge is never recorded — the evaluation it came from is refused by
+    /// the caller, and a refused trial must leave no trace.
     pub(crate) fn record_value(
         &mut self,
         eval_mode: EvalMode,
+        theta: &Array1<f64>,
         warm_start: CustomFamilyWarmStart,
         converged: bool,
     ) {
@@ -90,6 +113,9 @@ impl ExactCoefficientModeBranch {
             return;
         }
         if !matches!(eval_mode, EvalMode::ValueOnly) {
+            let key = theta_bits(theta);
+            self.iterate_modes.retain(|(bits, _)| *bits != key);
+            self.iterate_modes.push((key, warm_start.clone()));
             self.anchor = Some(warm_start);
             self.anchored_at_iterate = true;
         } else if !self.anchored_at_iterate {

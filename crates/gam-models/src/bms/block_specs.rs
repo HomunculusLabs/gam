@@ -2955,7 +2955,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
             } else {
                 let (first_iterate, candidates) = exact_mode_branch
                     .borrow_mut()
-                    .candidates(effective_mode, &rho);
+                    .candidates(effective_mode, theta, &rho);
                 if first_iterate {
                     log::info!(
                         "[BMS] first derivative-bearing outer evaluation: its certified mode becomes the coefficient-mode anchor every later probe starts from"
@@ -2984,6 +2984,7 @@ pub fn fit_bernoulli_marginal_slope_terms(
             }
             exact_mode_branch.borrow_mut().record_value(
                 eval_mode,
+                theta,
                 selection.result.warm_start.clone(),
                 selection.result.inner_converged,
             );

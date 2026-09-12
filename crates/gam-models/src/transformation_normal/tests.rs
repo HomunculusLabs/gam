@@ -31,40 +31,41 @@ pub(crate) fn exact_ctn_mode_branch_anchors_on_the_accepted_iterate_2765() {
             .expect("one CTN coefficient")[0]
     };
     let rho = Array1::zeros(0);
+    let theta = array![0.5];
     let value_only = gam_problem::EvalMode::ValueOnly;
     let with_gradient = gam_problem::EvalMode::ValueAndGradient;
 
     // No mode exists yet: the only candidate is a cold solve.
     let mut state = ExactCoefficientModeBranch::default();
-    let (first_iterate, candidates) = state.candidates(value_only, &rho);
+    let (first_iterate, candidates) = state.candidates(value_only, &theta, &rho);
     assert!(!first_iterate);
     assert_eq!(candidates.len(), 1);
     assert!(candidates[0].is_none());
 
     // Before any iterate is accepted, value-only seed probes carry their
     // converged mode forward; a probe that did not converge leaves no trace.
-    state.record_value(value_only, warm(1.0), true);
-    state.record_value(value_only, warm(9.0), false);
-    let (_, candidates) = state.candidates(value_only, &rho);
+    state.record_value(value_only, &theta, warm(1.0), true);
+    state.record_value(value_only, &theta, warm(9.0), false);
+    let (_, candidates) = state.candidates(value_only, &theta, &rho);
     assert_eq!(candidates.len(), 1, "one start per evaluation, never a cold solve beside it");
     assert_eq!(anchor_beta(&candidates), 1.0);
-    state.record_value(value_only, warm(2.0), true);
+    state.record_value(value_only, &theta, warm(2.0), true);
 
     // The first derivative-bearing evaluation is an accepted iterate: it is
     // solved from the carried mode and announces itself once.
-    let (first_iterate, candidates) = state.candidates(with_gradient, &rho);
+    let (first_iterate, candidates) = state.candidates(with_gradient, &theta, &rho);
     assert!(first_iterate);
     assert_eq!(anchor_beta(&candidates), 2.0);
-    state.record_value(with_gradient, warm(3.0), true);
-    let (first_iterate, _) = state.candidates(with_gradient, &rho);
+    state.record_value(with_gradient, &theta, warm(3.0), true);
+    let (first_iterate, _) = state.candidates(with_gradient, &theta, &rho);
     assert!(!first_iterate, "the announcement is made exactly once");
 
     // Line-search probes start from the accepted iterate's mode and cannot
     // replace it, whether they converge or not, so the value at a trial θ is
     // a function of θ and the iterate — not of the probe order.
-    state.record_value(value_only, warm(4.0), true);
-    state.record_value(value_only, warm(5.0), false);
-    let (_, candidates) = state.candidates(value_only, &rho);
+    state.record_value(value_only, &theta, warm(4.0), true);
+    state.record_value(value_only, &theta, warm(5.0), false);
+    let (_, candidates) = state.candidates(value_only, &theta, &rho);
     assert_eq!(
         anchor_beta(&candidates),
         3.0,
@@ -77,16 +78,30 @@ pub(crate) fn exact_ctn_mode_branch_anchors_on_the_accepted_iterate_2765() {
 
     // The next accepted iterate moves the anchor with the walk; a
     // derivative-bearing evaluation that did not converge does not.
-    state.record_value(with_gradient, warm(7.0), false);
-    let (_, candidates) = state.candidates(value_only, &rho);
+    state.record_value(with_gradient, &theta, warm(7.0), false);
+    let (_, candidates) = state.candidates(value_only, &theta, &rho);
     assert_eq!(anchor_beta(&candidates), 3.0);
-    state.record_value(with_gradient, warm(8.0), true);
-    let (_, candidates) = state.candidates(value_only, &rho);
+    state.record_value(with_gradient, &theta, warm(8.0), true);
+    let (_, candidates) = state.candidates(value_only, &theta, &rho);
     assert_eq!(anchor_beta(&candidates), 8.0);
+
+    // An evaluation at an iterate the walk already accepted starts from that
+    // iterate's own certified mode, not from whichever later walk moved the
+    // anchor: a multi-start's terminal certification re-evaluates its winner.
+    let later_theta = array![-1.5];
+    state.record_value(with_gradient, &later_theta, warm(10.0), true);
+    let (_, candidates) = state.candidates(with_gradient, &theta, &rho);
+    assert_eq!(
+        anchor_beta(&candidates),
+        8.0,
+        "the accepted iterate at θ keeps its own certified mode"
+    );
+    let (_, candidates) = state.candidates(value_only, &array![2.0], &rho);
+    assert_eq!(anchor_beta(&candidates), 10.0, "a θ no iterate owns starts from the anchor");
 
     // A branch that has never seen a mode solves cold at its first iterate.
     let mut cold = ExactCoefficientModeBranch::default();
-    let (first_iterate, candidates) = cold.candidates(with_gradient, &rho);
+    let (first_iterate, candidates) = cold.candidates(with_gradient, &theta, &rho);
     assert!(first_iterate);
     assert_eq!(candidates.len(), 1);
     assert!(candidates[0].is_none());
