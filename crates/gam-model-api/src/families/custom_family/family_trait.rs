@@ -215,6 +215,24 @@ impl OuterDerivativePilotSchedule {
     }
 }
 
+/// A one-pass contraction of a family's all-axes second information derivative against the
+/// Jeffreys drift base's ambient kernels, without forming any `p × p` axis matrix. A family
+/// exposes it through [`CustomFamily::jeffreys_axis_contractions`].
+pub trait JeffreysAxisContractions {
+    /// `consume(index, contractions)` receives `contractions[[a, b]] = ⟨H²[δ_index, e_a], K_b⟩`
+    /// for every direction `δ_index`, with the symmetric kernels `K_b` returned by `kernels`,
+    /// which only a pass that runs calls. The Jeffreys drift closes from these `p × p`
+    /// contractions exactly as it does from the rotated axis rows.
+    fn second_directional_axis_contractions_each(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        directions: &[Array1<f64>],
+        kernels: &dyn Fn() -> Vec<Array2<f64>>,
+        consume: &mut dyn FnMut(usize, Array2<f64>) -> Result<(), String>,
+    ) -> Result<(), String>;
+}
+
 /// User-defined family contract for multi-block generalized models.
 pub trait CustomFamily {
     /// Optional sampled-derivative pilot owned by this family.
@@ -1899,22 +1917,11 @@ pub trait CustomFamily {
         )
     }
 
-    /// [`Self::joint_jeffreys_information_second_directional_all_axes_each_with_specs`]
-    /// contracted against the Jeffreys drift base's ambient kernels: `consume(index,
-    /// contractions)` receives `contractions[[a, b]] = ⟨H²[δ_index, e_a], K_b⟩` for the
-    /// symmetric `K_b` returned by `kernels`, which only a pass that runs calls. The drift
-    /// closes from these `p × p` contractions exactly as it does from the rotated axis rows,
-    /// and no `p × p` axis matrix is formed. `Ok(false)` means the family has no such pass
-    /// and the caller forms the rotated rows instead; the default declines.
-    fn joint_jeffreys_information_second_directional_axis_contractions_each_with_specs(
-        &self,
-        _block_states: &[ParameterBlockState],
-        _specs: &[ParameterBlockSpec],
-        _directions: &[Array1<f64>],
-        _kernels: &dyn Fn() -> Vec<Array2<f64>>,
-        _consume: &mut dyn FnMut(usize, Array2<f64>) -> Result<(), String>,
-    ) -> Result<bool, String> {
-        Ok(false)
+    /// The one-pass Jeffreys axis contraction this family provides, if any (see
+    /// [`JeffreysAxisContractions`]). `None` means the Jeffreys drift forms the rotated axis
+    /// rows instead.
+    fn jeffreys_axis_contractions(&self) -> Option<&dyn JeffreysAxisContractions> {
+        None
     }
 
     /// Whether this family implements

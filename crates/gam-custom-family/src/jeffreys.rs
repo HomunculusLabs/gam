@@ -1046,26 +1046,26 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
         // A family with a contraction pass hands over `⟨H²dot[δ, e_a], K_b⟩` against the
         // base's ambient kernels. Those close the drift exactly as the rotated rows do,
         // without forming the `p` axis matrices of any direction (#2668).
-        let contracted = family_owned
-            .joint_jeffreys_information_second_directional_axis_contractions_each_with_specs(
-                &states_owned,
-                &specs_owned,
-                deltas,
-                &|| base.ambient_axis_kernels(),
-                &mut |index, contractions| {
-                    let mut derivative = base.perturbation_derivative_from_axis_contractions(
-                        &pert_hs[index],
-                        &contractions,
-                    )?;
-                    if strength != 1.0 {
-                        derivative *= strength;
-                    }
-                    derivatives[index] = Some(derivative);
-                    Ok(())
-                },
-            )
-            .map_err(CustomFamilyError::trial_point)?;
-        if contracted {
+        if let Some(contractor) = family_owned.jeffreys_axis_contractions() {
+            contractor
+                .second_directional_axis_contractions_each(
+                    &states_owned,
+                    &specs_owned,
+                    deltas,
+                    &|| base.ambient_axis_kernels(),
+                    &mut |index, contractions| {
+                        let mut derivative = base.perturbation_derivative_from_axis_contractions(
+                            &pert_hs[index],
+                            &contractions,
+                        )?;
+                        if strength != 1.0 {
+                            derivative *= strength;
+                        }
+                        derivatives[index] = Some(derivative);
+                        Ok(())
+                    },
+                )
+                .map_err(CustomFamilyError::trial_point)?;
             if derivatives.iter().any(Option::is_none) {
                 return Err(CustomFamilyError::trial_point(
                     "active Jeffreys drift contraction pass skipped a direction".to_string(),
