@@ -5753,5 +5753,13 @@
     ],
     "reason": "SPEC rules 21 and 22 (#2902, table row 30). Three P-IRLS soft-accept arms classified a stall as StalledAtValidMinimum without a near-stationary gradient, and each was gated on a picked number. The outer REML search then consumed that state as a mode. BoundarySaturation fired at max|eta| >= 40*(1 - 1e-12), but P-IRLS never clips eta, so there is no boundary to be pinned against. RelativeBandPlateau took a relative gradient <= progress_tol with a 0.1*tol deviance plateau; that gradient either already passes the strict certificate or relaxes the tighter tolerance the outer schedule asked for. The constrained long plateau took twenty steps of 0.1*tol progress with |eta| < 20 and the gradient far outside the band, which also describes a slow walk down an unbounded ray. All three arms are deleted, together with their gate constant, the cleanliness helper only that arm used, the enum that named the arms (the near-stationary plateau is now a bool), and the test that pinned a linear objective as a valid stall. That test is replaced by linear_objective_plateau_is_not_a_valid_stall_2902.",
     "evidence": "At the base, git grep finds PIRLS_ETA_ABS_CAP only at its declaration in crates/gam-solve/src/pirls/dispersion.rs and at the two gates (newton_solve.rs BoundarySaturation, reweight.rs long plateau). PirlsSoftAccept, constraint_kkt_admits_progress_exhausted_stall and CONSTRAINED_OBJECTIVE_PLATEAU_STREAK appear only in newton_solve.rs and reweight.rs. long_constrained_objective_plateau_reports_valid_stall exercised LinearObjectivePlateauModel (deviance = 1 + g*beta, g = -5e-5), a linear objective with no minimum. UnifiedFitResult::try_from_parts already refuses StalledAtValidMinimum (only_converged_inner_status_mints_a_fit), so no fit object was minted from these arms; the defect was the outer criterion evaluated at uncertified inner states. The item list applies source_removal_guard.py's ITEM regex by hand, and the guard was not run locally (user directive: no local runs)."
+  },
+  {
+    "base": "cdead25df4010925635d62941327eba7220b4c03",
+    "items": [
+      "crates/gam-solve/src/reml/atoms.rs:struct:Sensitivity"
+    ],
+    "reason": "#2829 product-root rule: the #935 Sensitivity operator struct had no impl, no constructor and no reader anywhere in the workspace; its only other code mention was the gam facade re-export, removed with it.",
+    "evidence": "git grep -w Sensitivity over crates, src, tests, examples, bench and benches at the base finds the declaration, the src/lib.rs re-export and prose only. MSI job 550898 ran source_removal_guard.py on the built commit and produced exactly this guarded identity, with no public-api census identity."
   }
 ]

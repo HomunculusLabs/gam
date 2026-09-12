@@ -130,7 +130,7 @@ use super::jeffreys_subspace::{
     floored_inverse, floored_inverse_divided_differences, jeffreys_antiderivative,
     jeffreys_antiderivative_floor_sensitivity,
 };
-use super::reml_outer_engine::{PenaltyCoordinate, PenaltySubspaceTrace};
+use super::reml_outer_engine::PenaltyCoordinate;
 
 /// An outer-coordinate direction with its induced inner motion, built ONCE
 /// per direction by the calculus and shared by every atom.
@@ -164,42 +164,6 @@ pub struct ThetaDirection {
     /// is the matrix the logdet trace, the #784 Q_b/Q_c trace, and the θ-HVP
     /// all consume — one construction, no per-consumer reassembly.
     pub h_dot_total: Option<Arc<Array2<f64>>>,
-}
-
-/// The one sensitivity operator (#935): a factored, convention-complete
-/// `H⁺` built once at the inner optimum.
-///
-/// Owns the ONLY answer to "which inverse": the spectral pseudo-inverse
-/// whose kept set matches the criterion's pseudo-logdet threshold exactly
-/// (#901 — value, trace kernel, IFT energy correction, and every solve here
-/// share one eigendecomposition and one threshold), or the sparse Cholesky
-/// /  Takahashi form at scale. Every consumer below is a CONTRACTION of
-/// this object; none holds its own factorization:
-///
-/// - `beta_dot(dir)`       — dβ̂/dθ for the REML gradient (IFT);
-/// - `alo_leverages()`     — t = case-weight perturbations for ALO diagnostics;
-/// - `influence(J)`        — t = stage-1 nuisance (#461 absorber);
-/// - `hvp(dir)`            — outer-Hessian θ-HVP (#740): directional trace
-///                           + β̈ channel, no K² pair assembly;
-/// - `energy(r)`           — −½ rᵀH⁺r noise-floor cost correction with the
-///                           same kept-set masking as the logdet value.
-///
-/// `kernel` doubles as the logdet atom's trace kernel: `tr(H⁺ Ḣ)` IS the
-/// pseudo-logdet derivative on the constant-rank stratum, so the gradient
-/// of the determinant term and the IFT solves cannot use different
-/// inverses — they are fields of the same struct.
-pub struct Sensitivity {
-    /// Spectral form (U_kept, diag σ_kept) of the penalized Hessian at the
-    /// optimum — the same object `intrinsic_hessian_pseudo_logdet_parts`
-    /// emits; `kernel.h_proj_inverse = diag(1/σ)` exactly.
-    pub kernel: Arc<PenaltySubspaceTrace>,
-    /// Pseudo-logdet of the SAME kept set — pinning value and solve to one
-    /// threshold decision (the #748/#752/#901 invariant, structural here).
-    pub logdet: f64,
-    /// Smoothness-stratum fingerprint: kept-rank plus the smallest kept
-    /// eigengap. `certify` refuses FD probes that cross a stratum boundary
-    /// (rank change or near-degenerate frame) instead of flagging them.
-    pub stratum: StratumFingerprint,
 }
 
 /// Where the criterion is — and is not — differentiable.

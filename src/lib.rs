@@ -230,15 +230,14 @@ pub use inference::{
 pub use gam_linalg::{faer_ndarray, matrix, utils};
 pub use inference::hmc_io as hmc;
 // #931-#935 criterion calculus: the profiled-criterion abstraction
-// (CriterionAtom / Sensitivity) that kills the objective↔gradient
+// (CriterionAtom) that kills the objective↔gradient
 // desync class. Exposed as the staged public criterion-calculus interface it is
 // designed to be; the #935 calculus that consumes it inside the inner REML path
 // lands per the module's Migration law (one term per pass, FD-verified, old code
-// deleted in the same commit). `PenaltySubspaceTrace` is the #901 spectral kernel
-// the logdet atom's `Sensitivity` is built from.
+// deleted in the same commit). `PenaltySubspaceTrace` is the #901 spectral kernel.
 pub use solver::estimate::reml::atoms::{
-    BetaChannel, CriterionAtom, JeffreysLogdetAtom, PenaltyQuadAtom, Sensitivity,
-    StratumFingerprint, ThetaDirection,
+    BetaChannel, CriterionAtom, JeffreysLogdetAtom, PenaltyQuadAtom, StratumFingerprint,
+    ThetaDirection,
 };
 pub use solver::estimate::reml::reml_outer_engine::PenaltySubspaceTrace;
 // #986 frontier ρ-scaling: the per-atom decoupled EFS outer engine. `run_outer`
