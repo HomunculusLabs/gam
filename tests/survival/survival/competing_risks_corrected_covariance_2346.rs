@@ -26,6 +26,27 @@
 use csv::StringRecord;
 use gam::model_types::SmoothingCorrectionMethod;
 use gam::{FitConfig, FitResult, encode_recordswith_inferred_schema, fit_from_formula};
+use std::sync::Once;
+
+/// Routes the fit's Info lines (derivative policy, certificate, and the
+/// `[smoothing-correction]` outcome) to stderr, so a red run says why the
+/// corrected covariance is absent.
+struct StderrInfoLogger;
+
+impl log::Log for StderrInfoLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            eprintln!("{}", record.args());
+        }
+    }
+    fn flush(&self) {}
+}
+
+static LOGGER: StderrInfoLogger = StderrInfoLogger;
+static INIT_LOGGER: Once = Once::new();
 
 /// Deterministic SplitMix64 → byte-identical data run-to-run (no external RNG,
 /// and no library helper whose removal could take this fixture with it).
@@ -53,6 +74,11 @@ impl SplitMix64 {
 
 #[test]
 fn competing_risks_fit_carries_smoothing_corrected_covariance_2346() {
+    INIT_LOGGER.call_once(|| {
+        if log::set_logger(&LOGGER).is_ok() {
+            log::set_max_level(log::LevelFilter::Info);
+        }
+    });
     // Two-cause competing-risks data with asymmetric cause-specific hazards
     // (cause 1 rises with x, cause 2 falls) — the same generator shape as the
     // #1593 invariance guard, smaller n for a CI-affordable REML solve.

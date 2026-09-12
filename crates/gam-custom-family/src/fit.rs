@@ -3390,7 +3390,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     excluded.push(rail.index);
                 }
             }
-            crate::covariance::joint_smoothing_correction(
+            let minted = crate::covariance::joint_smoothing_correction(
                 v_cond,
                 specs,
                 &label_layout,
@@ -3411,9 +3411,26 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                         rho_dimension: rho_star.len(),
                     },
                 )
-            })
+            });
+            if minted.is_none() {
+                log::info!(
+                    "[smoothing-correction] branch=unavailable \
+                     reason=interior-outer-hessian-not-positive-definite rho_dimension={} railed={}",
+                    rho_star.len(),
+                    excluded.len(),
+                );
+            }
+            minted
         }
-        _ => None,
+        (Some(_), None) => {
+            log::info!(
+                "[smoothing-correction] branch=unavailable reason=outer-hessian-not-analytic \
+                 rho_dimension={}",
+                rho_star.len(),
+            );
+            None
+        }
+        (None, _) => None,
     };
     install_reported_posterior_mean(
         family,
