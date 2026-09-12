@@ -20,58 +20,6 @@ fn hashed_unit(index: u64) -> f64 {
     (z >> 11) as f64 / (1u64 << 53) as f64
 }
 
-#[test]
-fn probe_basis_level_topology_versus_range() {
-    for (d, centers) in [(1usize, 49usize), (3, 16)] {
-        let n = 200usize;
-        let mut data = Array2::<f64>::zeros((n, d));
-        for i in 0..n {
-            let t = i as f64 / (n as f64 - 1.0);
-            for k in 0..d {
-                data[[i, k]] = match k {
-                    0 => t,
-                    1 => 0.5 + 0.5 * (std::f64::consts::TAU * t).sin(),
-                    _ => t * t + 0.01 * hashed_unit(i as u64),
-                };
-            }
-        }
-        let strategy = CenterStrategy::FarthestPoint {
-            num_centers: centers,
-        };
-        let seeds = select_centers_by_strategy(data.view(), &strategy).expect("seeds");
-        let (nodes, _m) = measure_jet_quadrature_nodes(data.view(), seeds.view()).expect("nodes");
-        let auto = realized_measure_jet_length_scale(nodes.view(), 0.0).expect("auto");
-        println!("[basis] d={d} centers={centers} auto_ell={auto:.6}");
-        for f in [1.0_f64, 2.0, 4.0, 8.0] {
-            let spec = MeasureJetBasisSpec {
-                center_strategy: strategy.clone(),
-                length_scale: auto * f,
-                identifiability: MeasureJetIdentifiability::CenterSumToZero,
-                ..MeasureJetBasisSpec::default()
-            };
-            let built = build_measure_jet_basis(data.view(), &spec).expect("build");
-            let ranks: Vec<usize> = built
-                .active_penalties
-                .iter()
-                .map(|p| p.info.effective_rank)
-                .collect();
-            let frames: Vec<String> = built
-                .active_penalties
-                .iter()
-                .map(|p| match p.info.structural_null_frame.as_ref() {
-                    Some(fr) => format!("{:?}x{}", p.info.source, fr.ncols()),
-                    None => format!("{:?}x-", p.info.source),
-                })
-                .collect();
-            println!(
-                "[basis]   f={f:<4} p={} active={} ranks={ranks:?} frames={frames:?}",
-                built.design.ncols(),
-                built.active_penalties.len()
-            );
-        }
-    }
-}
-
 fn dataset_1d(n: usize) -> Dataset {
     let headers = ["y", "x"];
     let mut values = Array2::<f64>::zeros((n, 2));

@@ -13,4 +13,3 @@ mod measure_jet_psi_box_is_its_own_geometry_2750;
 mod measure_jet_range_moves_the_span_2761;
 mod parametric_orthogonality_costs_no_dimension_2747;
 mod probe_2761_penalty_topology;
-mod probe_ispline_boundary_2705;
