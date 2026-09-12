@@ -2284,7 +2284,8 @@ pub fn spline_scan_fast_path(request: &StandardFitRequest<'_>) -> Option<SplineS
     // Double-penalty (mgcv `select = TRUE`) is NOT representable by the scan and
     // must fall through to the dense two-rho path (#1266). On a free B-spline the
     // double penalty emits a *second* REML coordinate — the Marra & Wood (2011)
-    // null-space shrinkage block `Z Zᵀ` (see `bspline_penalty_candidates`) —
+    // null-space shrinkage block, in its function-space form `G Z (ZᵀGZ)⁻¹ ZᵀG`
+    // with `G` the basis Gram (see `bspline_penalty_candidates`) —
     // whose entire purpose is to let REML shrink the unpenalized `{1, x, …}`
     // polynomial null space toward `EDF → 0` for an unsupported term. The scan,
     // by construction, carries that null space as an *improper diffuse* prior it
