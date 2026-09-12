@@ -3339,7 +3339,7 @@ pub fn build_smooth_basis(
             } else {
                 auto_spatial_center_strategy(centers, cols.len())
             };
-            // Multiscale (per-scale spectral split + (α, lnτ) ψ dials + the
+            // Multiscale (per-scale spectral split + the α ψ dial + the
             // affine-preserving ridge) is an explicit opt-in (#1116): default
             // single-scale at any center count, the Duchon/Matérn footprint.
             let multiscale = option_bool(options, "multiscale").unwrap_or(false);

@@ -58,7 +58,7 @@
 //!   derivatives cannot drift apart (the objective↔gradient desync class is
 //!   structurally excluded).
 //! - **single-scale/multiscale opt-in (#1039/#1116).** The per-scale spectrum
-//!   and the `(α, ln τ)` ψ dials are the multiscale-mode realization, engaged
+//!   and the `α` ψ dial are the multiscale-mode realization, engaged
 //!   ONLY when the spec opts in (`MeasureJetBasisSpec::multiscale = true`, the
 //!   DSL `mjs(…, multiscale=true)`); see [`measure_jet_multiscale_mode`]. There
 //!   is NO center-count auto-gate: at ANY center count the default is
@@ -328,7 +328,7 @@ pub struct MeasureJetBasisSpec {
     #[serde(default = "measure_jet_learn_length_scale_default")]
     pub learn_length_scale: bool,
     /// Explicit opt-in for multiscale mode: the per-scale spectral penalty
-    /// split plus the `(α, ln τ)` outer ψ dials. `false` (default) keeps the
+    /// split plus the `α` outer ψ dial. `false` (default) keeps the
     /// energy in single-scale mode at ANY center count. The separate
     /// `double_penalty` null component is available in both modes. There is no
     /// center-count auto-gate; the user opts in via
@@ -2338,7 +2338,7 @@ pub fn measure_jet_input_noise_scale(
 }
 
 /// Whether a measure-jet spec runs in multiscale mode (per-scale spectral
-/// energies + `(α, ln τ)` ψ dials). The separate `double_penalty`
+/// energies + the `α` ψ dial). The separate `double_penalty`
 /// affine/null-component candidate is available in both modes. This is the
 /// single source of truth shared by the builder and outer enrollment predicates,
 /// so the energy layout and ψ dimension cannot disagree. Multiscale is an
@@ -2600,12 +2600,13 @@ pub fn build_measure_jet_basis(
 /// the anisotropic group-ψ carrier the spatial optimizer consumes.
 ///
 /// Coordinates (the layout contract for the registration arm):
-/// - per-level (spectral) mode: `[ln ℓ?, α, ln τ]` — order is absorbed by the
-///   REML-learned scale amplitudes; `ln τ` is retained as an inert coordinate;
+/// - per-level (spectral) mode: `[ln ℓ?, α]` — order is absorbed by the
+///   REML-learned scale amplitudes, and the ridge τ moves nothing because the
+///   energy uses the exact weighted affine projection;
 /// - single-scale mode: `[ln ℓ?]`, because its energy dials are fixed.
 ///
 /// Only `ln ℓ` moves the design. It also moves every coefficient-space penalty
-/// pullback through the center evaluation map `E(ℓ)`; `(α, ln τ)` move only the
+/// pullback through the center evaluation map `E(ℓ)`; `α` moves only the
 /// per-scale center-value forms. Exact diagonal and mixed product-rule jets are
 /// emitted before Frobenius normalization.
 /// Penalty derivatives are routed through the SAME constrained Frobenius
@@ -2613,7 +2614,7 @@ pub fn build_measure_jet_basis(
 /// (`normalize_penaltywith_psi_derivatives` + the cross rule), so criterion
 /// value and criterion derivative share one normalization — the #901 lesson
 /// made structural. The function-space null candidate has nonzero `ln ℓ` jets
-/// and zero `(α, ln τ)` jets. The per-candidate layout follows the builder's
+/// and zero `α` jets. The per-candidate layout follows the builder's
 /// ORIGINAL order (scale candidates or Primary, then null component); consumers
 /// align to the FITTED penalty list via
 /// `ActivePenaltyInfo.original_index` when the candidate filter dropped
@@ -2622,12 +2623,6 @@ pub fn build_measure_jet_basis_psi_derivatives(
     data: ArrayView2<'_, f64>,
     spec: &MeasureJetBasisSpec,
 ) -> Result<AnisoBasisPsiDerivatives, BasisError> {
-    if !(spec.tau0.is_finite() && spec.tau0 > 0.0) {
-        crate::bail_invalid_basis!(
-            "measure-jet ψ derivatives need tau0 > 0 because the retained τ coordinate is ln τ; got {}",
-            spec.tau0
-        );
-    }
     let geom = realize_measure_jet_geometry(data, spec)?;
     let band = MeasureJetBand {
         eps: geom.eps_band.clone(),
@@ -2686,7 +2681,7 @@ pub fn build_measure_jet_basis_psi_derivatives(
     };
 
     let coord_offset = usize::from(length_scale_jets.is_some());
-    let n_coords = coord_offset + if geom.per_level { 2 } else { 0 };
+    let n_coords = coord_offset + usize::from(geom.per_level);
     let pairs: Vec<(usize, usize)> = (0..n_coords)
         .flat_map(|a| ((a + 1)..n_coords).map(move |b| (a, b)))
         .collect();
@@ -2719,7 +2714,7 @@ pub fn build_measure_jet_basis_psi_derivatives(
     };
 
     // Raw (pre-normalization) value + exact jet stacks per ORIGINAL candidate.
-    // Coordinate order is `[lnℓ?, α, lnτ]` in multiscale mode and `[lnℓ?]`
+    // Coordinate order is `[lnℓ?, α]` in multiscale mode and `[lnℓ?]`
     // in single-scale mode. Candidate order exactly mirrors the value builder:
     // scale candidates or Primary first, then the optional null-component
     // candidate. Active filtering aligns through `ActivePenaltyInfo::original_index`.
@@ -2729,8 +2724,8 @@ pub fn build_measure_jet_basis_psi_derivatives(
     let mut single_scale_primary: Option<ConstructiveQuadratic> = None;
     let mut raw: Vec<RawPenaltyJets> = if geom.per_level {
         let l_count = band.eps.len();
-        // Six forms per scale: value, ∂α, ∂α², and zero τ slots — same
-        // blocks, one walk (single-source rule).
+        // Three forms per scale: value, ∂α, ∂α² — same blocks, one walk
+        // (single-source rule).
         let forms = assemble_weighted_forms(
             geom.centers.view(),
             geom.masses.view(),
@@ -2738,7 +2733,7 @@ pub fn build_measure_jet_basis_psi_derivatives(
             geom.order_s_eval,
             spec.alpha,
             spec.tau0,
-            6 * l_count,
+            3 * l_count,
             3,
             &|scale_idx, eps: f64, q: f64, base: f64, out: &mut [[f64; 3]]| {
                 for slot in out.iter_mut() {
@@ -2746,26 +2741,20 @@ pub fn build_measure_jet_basis_psi_derivatives(
                 }
                 let intrinsic_dim = geom.centers.ncols() as f64;
                 let ga = 2.0 * intrinsic_dim * eps.ln() - 2.0 * q.max(f64::MIN_POSITIVE).ln();
-                let k0 = 6 * scale_idx;
+                let k0 = 3 * scale_idx;
                 out[k0] = [base, 0.0, 0.0];
                 out[k0 + 1] = [ga * base, 0.0, 0.0];
                 out[k0 + 2] = [ga * ga * base, 0.0, 0.0];
-                out[k0 + 3] = [0.0, 0.0, 0.0];
-                out[k0 + 4] = [0.0, 0.0, 0.0];
-                out[k0 + 5] = [0.0, 0.0, 0.0];
             },
         )?;
         let alpha_coord = coord_offset;
-        let tau_coord = coord_offset + 1;
         let mut raw = Vec::with_capacity(l_count + usize::from(spec.double_penalty));
         for level in 0..l_count {
-            let chunk = &forms[6 * level..6 * level + 6];
+            let chunk = &forms[3 * level..3 * level + 3];
             let mut first: Vec<Array2<f64>> = (0..n_coords).map(|_| zero_p()).collect();
             let mut second_diag: Vec<Array2<f64>> = (0..n_coords).map(|_| zero_p()).collect();
             first[alpha_coord] = sandwich(&chunk[1]);
-            first[tau_coord] = sandwich(&chunk[3]);
             second_diag[alpha_coord] = sandwich(&chunk[2]);
-            second_diag[tau_coord] = sandwich(&chunk[4]);
             if coord_offset == 1 {
                 let (ell_first, ell_second) = length_diag(&chunk[0]);
                 first[0] = ell_first;
@@ -2775,10 +2764,6 @@ pub fn build_measure_jet_basis_psi_derivatives(
             for (pair_idx, &(a, b)) in pairs.iter().enumerate() {
                 cross[pair_idx] = if coord_offset == 1 && a == 0 && b == alpha_coord {
                     length_cross(&chunk[1])
-                } else if coord_offset == 1 && a == 0 && b == tau_coord {
-                    length_cross(&chunk[3])
-                } else if a == alpha_coord && b == tau_coord {
-                    sandwich(&chunk[5])
                 } else {
                     zero_p()
                 };
@@ -2792,7 +2777,7 @@ pub fn build_measure_jet_basis_psi_derivatives(
         }
         raw
     } else {
-        // Single-scale mode enrolls no `(s, α, lnτ)` penalty dials. It still
+        // Single-scale mode enrolls no `(s, α)` penalty dials. It still
         // emits the pure Primary and, when requested, a separate REML null
         // component; an opt-in `lnℓ` coordinate differentiates both pullbacks.
         let q_form = measure_jet_energy_form(
@@ -3527,7 +3512,7 @@ mod tests {
     }
 
     /// ψ-producer vs central finite differences of the NORMALIZED fit-time
-    /// candidates under frozen geometry — per-level mode (coords α, lnτ).
+    /// candidates under frozen geometry — per-level mode (coordinate α).
     /// This is the end-to-end gate #901 never had: the derivative is checked
     /// against the exact object the optimizer consumes.
     #[test]
@@ -3543,15 +3528,17 @@ mod tests {
             .len();
         assert_eq!(
             derivs.penalties_first.len(),
-            2,
-            "per-level coords are (α, lnτ)"
+            1,
+            "the per-level coordinate is α alone"
         );
         assert_eq!(derivs.penalties_first[0].len(), l_count + 1);
-        assert_eq!(derivs.penalties_cross_pairs, vec![(0, 1)]);
-        let pen_at = |alpha: f64, tau0: f64| {
+        assert!(
+            derivs.penalties_cross_pairs.is_empty(),
+            "a single penalty dial has no cross pair"
+        );
+        let pen_at = |alpha: f64| {
             let trial = MeasureJetBasisSpec {
                 alpha,
-                tau0,
                 ..frozen.clone()
             };
             build_measure_jet_basis(data.view(), &trial)
@@ -3561,64 +3548,33 @@ mod tests {
                 .map(|penalty| penalty.matrix)
                 .collect::<Vec<_>>()
         };
-        // Second-difference-optimal step (see the jets FD test): the 4-point
-        // cross stencil shares the ~ε·scale/h² roundoff floor.
         let h = 1e-4;
-        let (a0, t0) = (frozen.alpha, frozen.tau0);
-        let ap = pen_at(a0 + h, t0);
-        let am = pen_at(a0 - h, t0);
-        let tp = pen_at(a0, t0 * h.exp());
-        let tm = pen_at(a0, t0 * (-h).exp());
+        let a0 = frozen.alpha;
+        let ap = pen_at(a0 + h);
+        let am = pen_at(a0 - h);
         assert_eq!(
             ap.len(),
             l_count + 1,
             "fixture must keep every scale active"
         );
         for level in 0..l_count {
-            let fd_alpha = (&ap[level] - &am[level]) / (2.0 * h);
-            let fd_tau = (&tp[level] - &tm[level]) / (2.0 * h);
-            for (name, analytic, fd) in [
-                ("alpha", &derivs.penalties_first[0][level], fd_alpha),
-                ("ln_tau", &derivs.penalties_first[1][level], fd_tau),
-            ] {
-                let scale = fd.iter().fold(1e-30_f64, |acc, v| acc.max(v.abs()));
-                for (x, y) in analytic.iter().zip(fd.iter()) {
-                    assert!(
-                        (x - y).abs() <= 5e-5 * scale,
-                        "{name} jet of scale-candidate {level}: analytic {x:.6e} vs FD {y:.6e}"
-                    );
-                }
-            }
-        }
-        // The function-space null candidate is independent of α and τ.
-        for coord in 0..2 {
-            assert!(
-                derivs.penalties_first[coord][l_count]
-                    .iter()
-                    .all(|v| *v == 0.0),
-                "null-component candidate must have zero (α, lnτ) drift"
-            );
-        }
-        // Cross derivative through the provider, against a 4-point FD.
-        let provider = derivs
-            .penalties_cross_provider
-            .as_ref()
-            .expect("cross provider");
-        let cross = provider.evaluate(0, 1).expect("cross pair (α, lnτ)");
-        let pp = pen_at(a0 + h, t0 * h.exp());
-        let pm = pen_at(a0 + h, t0 * (-h).exp());
-        let mp = pen_at(a0 - h, t0 * h.exp());
-        let mm = pen_at(a0 - h, t0 * (-h).exp());
-        for level in 0..l_count {
-            let fd = (&(&pp[level] - &pm[level]) - &(&mp[level] - &mm[level])) / (4.0 * h * h);
+            let fd = (&ap[level] - &am[level]) / (2.0 * h);
+            let analytic = &derivs.penalties_first[0][level];
             let scale = fd.iter().fold(1e-30_f64, |acc, v| acc.max(v.abs()));
-            for (x, y) in cross[level].iter().zip(fd.iter()) {
+            for (x, y) in analytic.iter().zip(fd.iter()) {
                 assert!(
-                    (x - y).abs() <= 5e-4 * scale,
-                    "cross (α, lnτ) jet of scale-candidate {level}: analytic {x:.6e} vs FD {y:.6e}"
+                    (x - y).abs() <= 5e-5 * scale,
+                    "alpha jet of scale-candidate {level}: analytic {x:.6e} vs FD {y:.6e}"
                 );
             }
         }
+        // The function-space null candidate is independent of α.
+        assert!(
+            derivs.penalties_first[0][l_count]
+                .iter()
+                .all(|v| *v == 0.0),
+            "null-component candidate must have zero α drift"
+        );
     }
 
     /// Design-moving ℓ dial (#1116): the producer's design jets and every

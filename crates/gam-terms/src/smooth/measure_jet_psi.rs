@@ -27,23 +27,19 @@ pub fn measure_jet_term_spec(
         })
 }
 
-/// Single source for measure-jet outer-ψ enrollment: the lnτ dial is
-/// undefined in the τ = 0 pseudo-inverse oracle mode (see
-/// `build_measure_jet_basis_psi_derivatives`), so only a positive ridge
-/// enrolls the dial group. `spatial_term_supports_hyper_optimization` and
-/// `spatial_term_uses_per_axis_psi` both defer here so the θ-layout
-/// sources cannot disagree.
+/// Single source for measure-jet outer-ψ enrollment.
+/// `spatial_term_supports_hyper_optimization` and
+/// `spatial_term_uses_per_axis_psi` both defer here so the θ-layout sources
+/// cannot disagree.
 pub fn measure_jet_enrolls_psi(mj: &crate::basis::MeasureJetBasisSpec) -> bool {
     // Two independent enrollment sources (#1116), both explicit:
     //   * the design-moving representer length-scale ℓ (`learn_length_scale`),
     //     available in every mode when the spec opts in;
-    //   * the multiscale penalty dials (s, α, lnτ): the per-scale spectral
-    //     split's (α, lnτ) ride the explicit `multiscale` opt-in, and the lnτ
-    //     channel additionally needs a positive ridge (τ = 0 is the
-    //     pseudo-inverse oracle mode where lnτ is undefined).
+    //   * the multiscale penalty dial α, which rides the explicit `multiscale`
+    //     opt-in. The energy uses the exact weighted affine projection, so the
+    //     ridge τ moves nothing and is not a dial (#2902).
     // A term enrolls if EITHER source is active.
-    measure_jet_learns_length_scale(mj)
-        || (mj.tau0 > 0.0 && crate::basis::measure_jet_multiscale_mode(mj))
+    measure_jet_learns_length_scale(mj) || crate::basis::measure_jet_multiscale_mode(mj)
 }
 
 /// Whether the design-moving ℓ dial is enrolled for this term. ℓ is fixed by
@@ -65,30 +61,22 @@ pub fn freeze_measure_jet_length_scale_learning(spec: &mut TermCollectionSpec) -
     frozen
 }
 
-/// Measure-jet ψ dial boxes. The dials are NOT log-kernel-scales, so the
-/// κ-window machinery never applies: `α` spans density-weighted (0) through
-/// past-Coifman–Lafon (>1) normalization, and `lnτ` covers the ridge from
-/// numerically-exact-projection to heavy noise-floor damping. (The energy
-/// order `s` is the pinned explicit value or absorbed by the REML-learned
-/// per-scale amplitudes — see `measure_jet_penalty_psi_dim` — so it carries no
-/// dial box.)
+/// Measure-jet α dial box. The dial is NOT a log-kernel-scale, so the κ-window
+/// machinery never applies: `α` spans density-weighted (0) through
+/// past-Coifman–Lafon (>1) normalization. (The energy order `s` is the pinned
+/// explicit value or absorbed by the REML-learned per-scale amplitudes — see
+/// `measure_jet_penalty_psi_dim` — so it carries no dial box.)
 pub const MEASURE_JET_PSI_ALPHA_BOUNDS: (f64, f64) = (-1.0, 3.0);
 
-pub const MEASURE_JET_PSI_LN_TAU_BOUNDS: (f64, f64) = (-18.420680743952367, 4.605170185988092);
-
 /// Number of multiscale PENALTY dials (excluding the design-moving ℓ):
-/// multiscale (per-scale spectral) mode carries (α, lnτ) = 2 — the order is
-/// either the pinned explicit `s` or absorbed by the REML-learned per-scale
-/// amplitudes, so it is NOT a dial; single-scale (the default) carries none.
-/// MUST agree with the penalty-coordinate layout of
+/// multiscale (per-scale spectral) mode carries α = 1 — the order is either the
+/// pinned explicit `s` or absorbed by the REML-learned per-scale amplitudes, so
+/// it is NOT a dial, and the ridge τ moves nothing; single-scale (the default)
+/// carries none. MUST agree with the penalty-coordinate layout of
 /// `build_measure_jet_basis_psi_derivatives` (its `per_level` branch always
-/// emits exactly the (α, lnτ) coordinate pair).
+/// emits exactly the α coordinate).
 pub fn measure_jet_penalty_psi_dim(mj: &crate::basis::MeasureJetBasisSpec) -> usize {
-    if crate::basis::measure_jet_multiscale_mode(mj) {
-        2
-    } else {
-        0
-    }
+    usize::from(crate::basis::measure_jet_multiscale_mode(mj))
 }
 
 /// ψ dimension of a measure-jet term. The design-moving ℓ dial (when enrolled)
@@ -116,9 +104,8 @@ pub fn measure_jet_psi_seed(mj: &crate::basis::MeasureJetBasisSpec) -> Vec<f64> 
         seed.push(ell.ln());
     }
     if measure_jet_penalty_psi_dim(mj) > 0 {
-        // Multiscale penalty dials, producer order: (α, lnτ).
-        let ln_tau = mj.tau0.max(f64::MIN_POSITIVE).ln();
-        seed.extend_from_slice(&[mj.alpha, ln_tau]);
+        // Multiscale penalty dial, producer order: α.
+        seed.push(mj.alpha);
     }
     seed
 }
@@ -126,13 +113,12 @@ pub fn measure_jet_psi_seed(mj: &crate::basis::MeasureJetBasisSpec) -> Vec<f64> 
 /// One end of the per-coordinate dial boxes, in producer coordinate order
 /// (ℓ first when enrolled, then the multiscale penalty dials).
 ///
-/// The two PENALTY dials are dimensionless — `α` selects a density
-/// normalization exponent and `ln τ` a ridge on the local projection — so
-/// nothing in the data's geometry bounds them and their boxes are the fixed
-/// intervals above. The design-moving `ln ℓ` dial is the opposite case: it is a
-/// LENGTH in the chart the basis is realized in, and its window is the term's
-/// own [`crate::basis::measure_jet_ln_range_window`] — the node-spacing floor
-/// and the node-diameter ceiling the range bracket already derives (gam#2750).
+/// The PENALTY dial `α` is dimensionless — it selects a density normalization
+/// exponent — and its box is the fixed interval above. The design-moving `ln ℓ`
+/// dial is the opposite case: it is a LENGTH in the chart the basis is realized
+/// in, and its window is the term's own
+/// [`crate::basis::measure_jet_ln_range_window`] — the node-spacing floor and
+/// the feasibility ceiling the range bracket already derives (gam#2750).
 /// The window is WIDENED, never narrowed, to contain the incumbent range, the
 /// same feasible-set rule [`spatial_term_psi_search_box`] applies to the other
 /// spatial families (#2454): a box that excludes the incumbent turns a
@@ -174,9 +160,8 @@ pub fn measure_jet_psi_bound_values(
         bounds.push(if upper { hi } else { lo });
     }
     if measure_jet_penalty_psi_dim(mj) > 0 {
-        // Multiscale penalty dials, producer order: (α, lnτ).
+        // Multiscale penalty dial, producer order: α.
         bounds.push(pick(MEASURE_JET_PSI_ALPHA_BOUNDS));
-        bounds.push(pick(MEASURE_JET_PSI_LN_TAU_BOUNDS));
     }
     Ok(bounds)
 }
@@ -215,21 +200,16 @@ pub fn apply_measure_jet_psi(
         }
     }
     if measure_jet_penalty_psi_dim(mj) > 0 {
-        // Multiscale penalty dials, producer order: (α, lnτ). The order `s` is
-        // not a dial (pinned explicit or absorbed by the per-scale amplitudes).
+        // Multiscale penalty dial, producer order: α. The order `s` is not a
+        // dial (pinned explicit or absorbed by the per-scale amplitudes).
         let next_alpha = psi[cursor];
-        let next_tau = psi[cursor + 1].exp();
-        if !(next_alpha.is_finite() && next_tau.is_finite() && next_tau > 0.0) {
+        if !next_alpha.is_finite() {
             crate::bail_invalid_estim!(
-                "measure-jet ψ write-back produced non-finite dials (alpha={next_alpha}, tau={next_tau})"
+                "measure-jet ψ write-back produced a non-finite dial (alpha={next_alpha})"
             );
         }
         if next_alpha != mj.alpha {
             mj.alpha = next_alpha;
-            changed = true;
-        }
-        if next_tau != mj.tau0 {
-            mj.tau0 = next_tau;
             changed = true;
         }
     }
