@@ -235,7 +235,14 @@ fn production_objective_forced_streaming_value_gradient_matches_dense() {
         dense_norm_sq.is_finite() && dense_norm_sq > 1.0e-12,
         "route parity must exercise a nonzero analytic gradient; norm^2={dense_norm_sq}"
     );
-    assert_abs_diff_eq!(streaming_eval.cost, dense_eval.cost, epsilon = 1.0e-7);
+    // Two objectives price the two routes, and each converges its own inner solve
+    // at this rho first, so their costs can agree only to the resolution of those
+    // solves: the inner objective stall band. A fixed absolute epsilon has no scale;
+    // census job 532879 at 4bf15f660 measured a 1.75e-7 gap (1.6e-9 relative)
+    // against 1e-7 on a cost of 111.25.
+    let cost_resolution =
+        SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * dense_eval.cost.abs().max(1.0);
+    assert_abs_diff_eq!(streaming_eval.cost, dense_eval.cost, epsilon = cost_resolution);
     for (coordinate, (&streamed, &direct)) in streaming_eval
         .gradient
         .iter()
