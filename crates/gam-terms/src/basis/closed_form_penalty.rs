@@ -251,10 +251,11 @@ pub fn bessel_k(nu: f64, x: f64) -> f64 {
     assert!(nu.is_finite(), "bessel_k requires finite ν");
     let nu_abs = nu.abs(); // K_{-ν} = K_ν
 
-    // Half-integer fast path.
+    // Half-integer fast path, for an exactly half-integer ν. Any other ν reduces to
+    // an order μ inside [−1/2, 1/2), where the general route is accurate.
     let two_nu = 2.0 * nu_abs;
     let n_round = two_nu.round();
-    if (two_nu - n_round).abs() < 1e-12 && (n_round as i64) % 2 == 1 {
+    if two_nu == n_round && (n_round as i64) % 2 == 1 {
         let n = ((n_round as i64 - 1) / 2) as usize; // ν = n + 1/2
         return bessel_k_half_integer(n, x);
     }
@@ -262,8 +263,6 @@ pub fn bessel_k(nu: f64, x: f64) -> f64 {
     bessel_k_bessik(nu_abs, x)
 }
 
-pub(crate) const BESSEL_K_EPS: f64 = 1.0e-15;
-pub(crate) const BESSEL_K_MAX_ITER: usize = 10_000;
 pub(crate) const BESSEL_K_CHEB_C1: [f64; 7] = [
     -1.142_022_680_371_168,
     6.516_511_267_073_7e-3,
@@ -320,18 +319,12 @@ pub(crate) fn bessel_k_temme(mu: f64, x: f64) -> (f64, f64) {
     let half_x = 0.5 * x;
     let mu2 = mu * mu;
     let pimu = std::f64::consts::PI * mu;
-    let fact = if pimu.abs() < BESSEL_K_EPS {
-        1.0
-    } else {
-        pimu / pimu.sin()
-    };
+    // `πμ/sin πμ` and `sinh σ/σ` are formed as ratios for every nonzero argument
+    // (a tiny argument rounds both parts alike); only zero needs its limit, 1.
+    let fact = if pimu == 0.0 { 1.0 } else { pimu / pimu.sin() };
     let dlog = -half_x.ln();
     let sigma = mu * dlog;
-    let fact2 = if sigma.abs() < BESSEL_K_EPS {
-        1.0
-    } else {
-        sigma.sinh() / sigma
-    };
+    let fact2 = if sigma == 0.0 { 1.0 } else { sigma.sinh() / sigma };
     let (gam1, gam2, gampl, gammi) = bessel_k_beschb(mu);
     let mut ff = fact * (gam1 * sigma.cosh() + gam2 * fact2 * dlog);
     let mut sum = ff;
@@ -342,31 +335,32 @@ pub(crate) fn bessel_k_temme(mu: f64, x: f64) -> (f64, f64) {
     let d = half_x * half_x;
     let mut sum1 = p;
 
-    for i in 1..=BESSEL_K_MAX_ITER {
+    // Temme's series for |μ| ≤ 1/2 and 0 < x ≤ 2 (the reduced-order, small-x
+    // branch `bessel_k_bessik` enters; `bessel_k` asserts finite ν and 0 < x
+    // finite). Its terms carry `c = (x²/4)^i / i!`, which falls faster than any
+    // geometric ratio, so once a term changes neither partial sum no later term
+    // can: the series has converged to the precision the sums can hold. A
+    // non-finite sum is an invariant violation upstream, and emitting any finite
+    // substitute would silently corrupt the penalty matrix.
+    let mut i = 0usize;
+    loop {
+        i += 1;
         let i_f = i as f64;
         ff = (i_f * ff + p + q) / (i_f * i_f - mu2);
         c *= d / i_f;
         p /= i_f - mu;
         q /= i_f + mu;
-        let del = c * ff;
-        sum += del;
-        let del1 = c * (p - i_f * ff);
-        sum1 += del1;
-        if del.abs() < BESSEL_K_EPS * sum.abs() {
+        let next = sum + c * ff;
+        let next1 = sum1 + c * (p - i_f * ff);
+        if !(next.is_finite() && next1.is_finite()) {
+            panic!("bessel_k Temme series produced a non-finite sum for mu={mu} x={x}");
+        }
+        if next == sum && next1 == sum1 {
             return (sum, sum1 * 2.0 / x);
         }
+        sum = next;
+        sum1 = next1;
     }
-    // SAFETY: Temme's series converges geometrically for |μ| ≤ 1/2 and
-    // 0 < x ≤ 2 (the reduced-order, small-x branch entered by
-    // `bessel_k_bessik`). Public entry `bessel_k` asserts finite ν and
-    // 0 < x finite, and `nl = (|ν| + 1/2).floor()` produces μ = |ν| − nl
-    // in [−1/2, 1/2). With BESSEL_K_EPS = 1e-15 the term ratio
-    // |del_{i+1}/del_i| ~ (x/2)² / i² drops below ε within ~40
-    // iterations for x ≤ 2; BESSEL_K_MAX_ITER = 10_000 is an
-    // overdetermined defensive cap whose only reachable trigger would
-    // be invariant violation upstream. Emitting any finite substitute
-    // here would silently corrupt the penalty matrix.
-    panic!("bessel_k Temme series failed to converge for mu={mu} x={x}");
 }
 
 pub(crate) fn bessel_k_steed_cf2(mu: f64, x: f64) -> (f64, f64) {
@@ -382,7 +376,16 @@ pub(crate) fn bessel_k_steed_cf2(mu: f64, x: f64) -> (f64, f64) {
     let mut a = -a1;
     let mut s = 1.0 + q * delh;
 
-    for i in 2..=BESSEL_K_MAX_ITER {
+    // Steed's CF2 (NR §6.7) for |μ| ≤ 1/2 at x > 2, the reduced-order, large-x
+    // branch `bessel_k_bessik` routes in. The modified-Lentz increments shrink
+    // like a product of `(x+i)^{-1}` factors, so once an increment changes
+    // neither `h` nor `s` no later one can: the fraction has converged to the
+    // precision it can hold. A non-finite iterate is an invariant violation
+    // upstream, and emitting any finite substitute would silently corrupt the
+    // penalty matrix.
+    let mut i = 1usize;
+    loop {
+        i += 1;
         let i_f = i as f64;
         a -= 2.0 * (i_f - 1.0);
         c = -a * c / i_f;
@@ -393,25 +396,21 @@ pub(crate) fn bessel_k_steed_cf2(mu: f64, x: f64) -> (f64, f64) {
         b += 2.0;
         d = 1.0 / (b + a * d);
         delh *= b * d - 1.0;
-        h += delh;
-        let dels = q * delh;
-        s += dels;
-        if dels.abs() < BESSEL_K_EPS * s.abs() {
+        let next_h = h + delh;
+        let next_s = s + q * delh;
+        if !(next_h.is_finite() && next_s.is_finite()) {
+            panic!("bessel_k Steed CF2 produced a non-finite iterate for mu={mu} x={x}");
+        }
+        let settled = next_h == h && next_s == s;
+        h = next_h;
+        s = next_s;
+        if settled {
             h *= a1;
             let rkmu = (std::f64::consts::PI / (2.0 * x)).sqrt() * (-x).exp() / s;
             let rk1 = rkmu * (mu + x + 0.5 - h) / x;
             return (rkmu, rk1);
         }
     }
-    // SAFETY: Steed's CF2 (NR §6.7) converges uniformly for |μ| ≤ 1/2 at
-    // x > 2 — the reduced-order, large-x branch routed in by
-    // `bessel_k_bessik`. With x > 2, the modified Lentz tail shrinks as
-    // ~(x+i)^{-1}, reaching BESSEL_K_EPS = 1e-15 in well under 100
-    // iterations for x up to 100. BESSEL_K_MAX_ITER = 10_000 is a defensive
-    // cap whose only reachable trigger would be invariant violation upstream
-    // (public `bessel_k` asserts finite ν and 0 < x finite). Emitting any
-    // finite substitute here would silently corrupt the penalty matrix.
-    panic!("bessel_k Steed CF2 failed to converge for mu={mu} x={x}");
 }
 
 pub(crate) fn bessel_k_beschb(mu: f64) -> (f64, f64, f64, f64) {
