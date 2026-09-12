@@ -16,14 +16,6 @@ use super::*;
 // so there is exactly one cross-block residualisation math implementation in
 // the codebase.
 
-/// Tolerance (in constraint units) by which a structural-monotonicity slack
-/// `A·β − b` may dip below zero before we treat it as a genuine violation
-/// rather than floating-point round-off in the constraint inner products. The
-/// constraint rows are O(1)-scaled deviation differences, so a few ulps of
-/// accumulation sit comfortably under this bound while any real infeasibility
-/// is orders of magnitude larger.
-pub(crate) const MONOTONICITY_SLACK_TOL: f64 = -1e-10;
-
 /// Assembled inputs for the BMS flex-block spec-builder → compile pipeline.
 ///
 /// Produced by [`build_bms_flex_block_context`] and consumed by
@@ -573,18 +565,15 @@ pub(crate) fn validate_monotone_structural_feasible(
             .unwrap_or_else(|| format!("{label} coefficient is non-finite"));
         return Err(bad);
     }
-    let slack = constraints.a.dot(beta) - &constraints.b;
-    let mut min_slack = f64::INFINITY;
-    let mut min_row = 0usize;
-    for (row, &value) in slack.iter().enumerate() {
-        if value < min_slack {
-            min_slack = value;
-            min_row = row;
-        }
-    }
-    if min_slack < MONOTONICITY_SLACK_TOL {
+    // The carrier's own feasibility verdict: the largest scaled violation
+    // `(b − a·β)/‖a‖`, feasible at or below the QP's primal feasibility contract.
+    let (violation, worst_row) = gam_solve::pirls::ConstraintSet::from(constraints)
+        .max_scaled_violation(beta.view())
+        .map_err(|error| format!("{label} structural monotonicity: {error}"))?;
+    if violation > gam_solve::pirls::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL {
+        let row = worst_row.map_or_else(|| "none".to_string(), |row| row.to_string());
         return Err(format!(
-            "{label} violates structural monotonicity row {min_row}: slack={min_slack:.3e}; \
+            "{label} violates structural monotonicity row {row}: scaled violation={violation:.3e}; \
              deviation monotonicity must be enforced by analytic linear constraints, not post-update projection"
         ));
     }
@@ -618,14 +607,15 @@ pub(crate) fn max_linear_constraint_segment_alpha(
         let a_row = constraints.a.row(row);
         let slack = a_row.dot(current) - constraints.b[row];
         let drift = a_row.dot(&direction);
-        // Decide the row only if it CAN be decided (gam#2721). `NaN` fails
-        // `slack < MONOTONICITY_SLACK_TOL` and fails `drift < 0.0`, so a
-        // non-finite iterate or segment would pass the violation check and then
+        let row_norm = a_row.dot(&a_row).sqrt();
+        // Decide the row only if it CAN be decided (gam#2721). `NaN` fails the
+        // scaled-slack violation test and fails `drift < 0.0`, so a non-finite
+        // iterate or segment would pass the violation check and then
         // contribute nothing to the minimum — this cap would return the
         // maximal `alpha = 1.0`, "take the whole segment", for a segment that
         // is not a segment. The predicate is the one the constraint carrier
         // itself uses, so the two cannot drift apart.
-        if !gam_problem::feasibility_quantities_are_finite(&[slack, drift]) {
+        if !gam_problem::feasibility_quantities_are_finite(&[slack, drift, row_norm]) {
             return Err(format!(
                 "{label} linear-constraint segment row {row} cannot be decided: \
                  slack={slack:.3e}, drift={drift:.3e}; every comparison in the \
@@ -633,7 +623,10 @@ pub(crate) fn max_linear_constraint_segment_alpha(
                  would report the whole segment feasible (gam#2721)"
             ));
         }
-        if slack < MONOTONICITY_SLACK_TOL {
+        // The carrier's feasibility metric, row by row: violated when the scaled
+        // slack `slack/‖a‖` is below `−PRIMAL_FEASIBILITY_TOL`. A zero row with a
+        // positive bound has a negative slack and is refused, as the metric does.
+        if slack < -gam_solve::pirls::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL * row_norm {
             return Err(format!(
                 "{label} current beta violates structural monotonicity row {row}: slack={slack:.3e}"
             ));
