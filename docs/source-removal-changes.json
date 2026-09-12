@@ -5493,5 +5493,13 @@
     ],
     "reason": "#2469 (SPEC rule 23): SECOND_ORDER_GEOMETRY_PROBE_MAX_PARAMS (64) was a picked dimension above which validate_second_order_seed_hessian skipped materializing and checking the analytic outer Hessian at the seed. The check costs one dense k x k materialization and a finiteness scan, so the admission that decides it is the materialization work model gam-solve already uses for densifying an outer Hessian (rho_optimizer/hessian_operator.rs operator_hessian_densifies): an Explicit operator, or a Dense Hessian, is validated when k^2 * 8 bytes fit gam_runtime::resource::ResourcePolicy::default_library().max_single_materialization_bytes; a BatchedHvp or RepeatedHvp operator, which would pay Hessian-vector products per column, is not densified here at any k.",
     "evidence": "git grep -n -w SECOND_ORDER_GEOMETRY_PROBE_MAX_PARAMS over the base finds two lines, both production: the declaration at crates/gam-solve/src/rho_optimizer/capability.rs:24 and its single use in validate_second_order_seed_hessian at crates/gam-solve/src/rho_optimizer/objective.rs:1676, whose only caller is rho_optimizer/run_plan.rs:1349. No test names it. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "23e2cdbb23a5c00c99fdd40ab1939811321eb4f0",
+    "items": [
+      "crates/gam-sae/src/structure_harvest.rs:struct:ChartTransition"
+    ],
+    "reason": "#2908: gam_sae::structure_harvest::ChartTransition was a public carrier of sign, offset and log_e_value built only inside unit_speed_glue_certificate. Its sign and offset duplicated the UnitSpeedChartTransition that CertifiedGlue already carries, and its name collided with manifold::local_charts::ChartTransition, a different map between ambient-patch tangent frames. The certificate now returns its seam log e-value directly; no behaviour changes.",
+    "evidence": "At base 23e2cdbb23a5c00c99fdd40ab1939811321eb4f0, git grep -n -w ChartTransition over crates and docs finds this type only in crates/gam-sae/src/structure_harvest.rs: its definition, the certificate's return type and its construction, all changed in this commit. Every other match is the distinct manifold::local_charts::ChartTransition and its tests and docs. No lib.rs, gam-pyffi or gam-cli path names it. Its only readers used log_e_value: the glue census in harvest_glue_proposals and two tests in structure_harvest/tests.rs, all now reading the certificate's plain log e-value."
   }
 ]

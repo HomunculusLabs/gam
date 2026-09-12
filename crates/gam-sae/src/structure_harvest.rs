@@ -1065,30 +1065,6 @@ pub struct HarvestReport {
 /// the value read per-atom by [`atom_axis_period`].
 const GLUE_DEFAULT_PERIOD: f64 = 1.0;
 
-/// A fitted seam transition between two d=1 charts A, B of one manifold under
-/// the unit-speed gauge: `t_A = sign · t_B + offset` (mod the `2π` period), with
-/// the seam equivalence e-value that certifies the two decoded charts coincide
-/// within an isometry tolerance against the churn null.
-///
-/// `sign = +1` is a plain over-tile (two arcs of one ORIENTED circle → a single
-/// periodic atom covers the union: the fuse outcome, Increment 1). `sign = -1`
-/// is ORIENTATION-REVERSING — the sphere-pole / Möbius signature no single
-/// orientable chart can represent, which must instead be REGISTERED as a
-/// partition-of-unity atlas atom (Increment 2, in the atom/construction types
-/// this lane does not own). The sign is the detector either way.
-#[derive(Clone, Copy, Debug)]
-pub struct ChartTransition {
-    /// `+1` orientation-preserving (fuse), `-1` orientation-reversing (register).
-    pub sign: i8,
-    /// Latent offset `c` in `t_A = sign·t_B + c`, wrapped into `[0, 2π)`.
-    pub offset: f64,
-    /// Seam equivalence e-value (log scale) against the churn-null scatter. Large
-    /// positive ⇒ the two charts coincide within the reconstruction band beyond
-    /// what independent curves would; carried on the proposal trigger and banked
-    /// by the engine's Glue gate.
-    pub log_e_value: f64,
-}
-
 /// The geometric half of a chart glue (no e-value): the fitted sign + offset and
 /// the decoded seam clouds/curves, shared by the acceptance e-value
 /// ([`unit_speed_glue_certificate`]) and the warm-start coordinate transplant
@@ -1388,7 +1364,7 @@ fn unit_speed_glue_certificate(
     residuals: ArrayView2<'_, f64>,
     a: usize,
     b: usize,
-) -> Option<(ChartTransition, CertifiedGlue)> {
+) -> Option<(f64, CertifiedGlue)> {
     let seam = fit_seam_transition(term, a, b)?;
     let log_e = seam_equivalence_log_e(
         residuals,
@@ -1399,12 +1375,12 @@ fn unit_speed_glue_certificate(
         &seam.points_b,
         &seam.mapped_b_to_a,
     )?;
-    let chart_transition = ChartTransition {
-        sign: seam.sign as i8,
-        offset: seam.offset,
-        log_e_value: log_e,
-    };
-    let outcome = if chart_transition.sign == 1 {
+    // `sign = +1` is a plain over-tile: two arcs of one oriented circle, which a single
+    // periodic atom covers, so the pair fuses. `sign = -1` is orientation-reversing, the
+    // sphere-pole / Möbius signature no single orientable chart represents, so the pair
+    // is registered as a partition-of-unity atlas atom instead.
+    let sign = seam.sign as i8;
+    let outcome = if sign == 1 {
         ChartGlueOutcome::Fuse
     } else {
         ChartGlueOutcome::RegisterAtlas
@@ -1412,14 +1388,14 @@ fn unit_speed_glue_certificate(
     let transition = UnitSpeedChartTransition::new(
         b,
         a,
-        chart_transition.sign,
-        chart_transition.offset,
+        sign,
+        seam.offset,
         seam.period,
         AtlasSeamKind::Regular,
     )
     .ok()?;
     Some((
-        chart_transition,
+        log_e,
         CertifiedGlue {
             a,
             b,
@@ -2064,7 +2040,7 @@ fn harvest_glue_proposals(
 
     let mut proposed = 0usize;
     for &(a, b, _score) in candidates.iter().take(budget) {
-        if let Some((tr, certificate)) = unit_speed_glue_certificate(term, residuals, a, b) {
+        if let Some((log_e, certificate)) = unit_speed_glue_certificate(term, residuals, a, b) {
             proposals.push(proposal(
                 term,
                 StructureMove::Glue {
@@ -2072,7 +2048,7 @@ fn harvest_glue_proposals(
                     b,
                     outcome: certificate.outcome,
                 },
-                tr.log_e_value,
+                log_e,
             ));
             certified_glues.push(certificate);
             proposed += 1;

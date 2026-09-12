@@ -1287,9 +1287,8 @@ fn distinct_concentric_circles_do_not_glue() {
     let (e_distinct, _) = unit_speed_glue_certificate(&term, residuals.view(), 0, 1)
         .expect("the aligned pair yields a seam e-value and transition certificate");
     assert!(
-        e_distinct.log_e_value < 0.0,
-        "distinct concentric circles must NOT glue (negative log-e), got {}",
-        e_distinct.log_e_value
+        e_distinct < 0.0,
+        "distinct concentric circles must NOT glue (negative log-e), got {e_distinct}"
     );
 
     // Any emitted glue proposal therefore carries negative evidence — rejected
@@ -1360,9 +1359,8 @@ fn over_tiling_physical_excision_reduces_k_toward_one() {
     let (e_arc, _) = unit_speed_glue_certificate(&term, residuals0.view(), 0, 2)
         .expect("a d=1 aligned disjoint pair yields a certified seam e-value");
     assert!(
-        e_arc.log_e_value > 5.0,
-        "e_glue must certify two arcs of one circle, got {}",
-        e_arc.log_e_value
+        e_arc > 5.0,
+        "e_glue must certify two arcs of one circle, got {e_arc}"
     );
     let params0 = HarvestParams {
         max_fusions: 16,
