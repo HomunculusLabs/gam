@@ -1538,13 +1538,6 @@ pub struct AtlasNerveReport {
     pub covering_side: AtlasCoveringSide,
 }
 
-impl AtlasNerveReport {
-    /// Whether the nerve recovers a single circle `S¹` (one component, one loop).
-    pub fn is_circle(&self) -> bool {
-        self.n_components == 1 && self.b1 == 1
-    }
-}
-
 fn nerve_find(parent: &mut [usize], x: usize) -> usize {
     let mut root = x;
     while parent[root] != root {

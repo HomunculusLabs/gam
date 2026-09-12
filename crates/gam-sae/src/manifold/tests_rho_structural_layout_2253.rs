@@ -60,10 +60,6 @@ fn invalid_constructor_rho_is_refused_before_bounds_or_fixed_fit_2253() {
 fn fixed_assignment_strength_is_absent_from_flat_rho_layout_2253() {
     let softmax = SaeManifoldRho::new(-1.7, 0.4, vec![array![-0.2]])
         .for_assignment(AssignmentMode::softmax(0.8));
-    assert_eq!(
-        softmax.assignment_strength_layout(),
-        AssignmentStrengthLayout::SoftmaxEntropy
-    );
     assert_eq!(softmax.sparse_flat_index(), None);
     assert_eq!(softmax.smooth_flat_index(0), 0);
     assert_eq!(softmax.ard_flat_index(0, 0), 1);
@@ -81,10 +77,6 @@ fn fixed_assignment_strength_is_absent_from_flat_rho_layout_2253() {
     // the sparsity constraint itself.
     let topk = SaeManifoldRho::new(-0.9, 0.1, vec![array![0.2], array![0.3]])
         .for_assignment(AssignmentMode::top_k_support(1));
-    assert_eq!(
-        topk.assignment_strength_layout(),
-        AssignmentStrengthLayout::FixedSupport
-    );
     assert_eq!(topk.sparse_flat_index(), None);
     assert_eq!(topk.to_flat(), array![0.1, 0.1, 0.2, 0.3]);
 

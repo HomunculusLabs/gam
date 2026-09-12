@@ -194,10 +194,6 @@ impl MemoryAvailability {
         self.host_available_bytes
     }
 
-    pub const fn host_total_bytes(&self) -> u64 {
-        self.host_total_bytes
-    }
-
     /// The stationary ceiling on memory this process could ever address:
     /// `min(host total, binding cgroup hard limit)`, or zero when the cgroup
     /// probe failed closed. Unlike [`Self::available_bytes`] this does not move
@@ -214,10 +210,6 @@ impl MemoryAvailability {
 
     pub const fn available_bytes(&self) -> u64 {
         self.available_bytes
-    }
-
-    pub const fn limiting_source(&self) -> MemoryAvailabilitySource {
-        self.limiting_source
     }
 }
 

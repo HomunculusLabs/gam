@@ -330,12 +330,6 @@ impl SaeManifoldRho {
         self
     }
 
-    /// Assignment-strength layout bound to this rho.
-    #[must_use]
-    pub fn assignment_strength_layout(&self) -> AssignmentStrengthLayout {
-        self.assignment_strength_layout
-    }
-
     /// Flat index of `log_lambda_sparse`, or `None` when assignment strength is
     /// structurally absent from the outer problem.
     #[must_use]

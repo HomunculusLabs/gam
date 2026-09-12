@@ -2129,28 +2129,8 @@ impl QuotientSpectralEvaluator {
         Ok(evaluator)
     }
 
-    pub fn quotient_name(&self) -> &str {
-        &self.quotient_name
-    }
-
     pub fn basis_size(&self) -> usize {
         self.cover_columns.len()
-    }
-
-    pub fn cover_width(&self) -> usize {
-        self.cover_width
-    }
-
-    pub fn cover_columns(&self) -> &[usize] {
-        &self.cover_columns
-    }
-
-    pub fn laplace_eigenvalues(&self) -> &[f64] {
-        &self.laplace_eigenvalues
-    }
-
-    pub fn l2_gram_weights(&self) -> &[f64] {
-        &self.l2_gram_weights
     }
 
     /// Exact spectral penalty `G · diag(lambda_laplace^power)`.

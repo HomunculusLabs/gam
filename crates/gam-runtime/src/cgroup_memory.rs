@@ -121,10 +121,6 @@ impl CgroupMemoryAvailability {
         })
     }
 
-    pub fn binding_path(&self) -> &str {
-        &self.binding_path
-    }
-
     pub const fn limit_bytes(&self) -> u64 {
         self.limit_bytes
     }
@@ -133,20 +129,8 @@ impl CgroupMemoryAvailability {
         self.current_bytes
     }
 
-    pub const fn inactive_file_bytes(&self) -> u64 {
-        self.inactive_file_bytes
-    }
-
-    pub const fn working_set_bytes(&self) -> u64 {
-        self.working_set_bytes
-    }
-
     pub const fn available_bytes(&self) -> u64 {
         self.available_bytes
-    }
-
-    pub const fn inspected_levels(&self) -> usize {
-        self.inspected_levels
     }
 }
 
@@ -1020,7 +1004,8 @@ mod linux {
             let CgroupMemoryObservation::V1Limited(observation) = fixture.observe() else {
                 panic!("a v1 inactive-file figure above the charge counter must still bound admission");
             };
-            assert_eq!(observation.working_set_bytes(), 1024);
+            // The working set is limit - available: no reclaim credit was taken.
+            assert_eq!(observation.limit_bytes() - observation.available_bytes(), 1024);
             assert_eq!(observation.available_bytes(), 1024);
         }
     }

@@ -408,14 +408,6 @@ impl Gauge {
             .collect()
     }
 
-    /// Per-block reduced widths.
-    pub fn reduced_widths(&self) -> Vec<usize> {
-        self.block_starts_reduced
-            .windows(2)
-            .map(|w| w[1] - w[0])
-            .collect()
-    }
-
     /// The diagonal slab `T_b = T[raw_b, reduced_b]` of block `b`.
     /// For a block-diagonal gauge this is the whole story for the
     /// block; for a triangular gauge it omits the cross-block `−R`.

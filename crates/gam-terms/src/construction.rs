@@ -1970,14 +1970,6 @@ pub struct ReparamInvariant {
     max_balanced_eigenvalue: f64,
 }
 
-impl ReparamInvariant {
-    /// Returns the largest eigenvalue of the balanced penalty matrix.
-    /// This is lambda-independent and provides a natural scale for shrinkage.
-    pub const fn max_balanced_eigenvalue(&self) -> f64 {
-        self.max_balanced_eigenvalue
-    }
-}
-
 /// Precompute the lambda-invariant reparameterization structure from canonical penalties.
 ///
 /// Uses block-local roots directly instead of requiring rank x p global roots.

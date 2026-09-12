@@ -169,11 +169,6 @@ impl SphereTangentEmbedding {
         self.tangent_basis.ncols()
     }
 
-    /// The basepoint half-density `q̄` (length `V`).
-    pub fn basepoint(&self) -> ArrayView1<'_, f64> {
-        self.basepoint.view()
-    }
-
     /// Embed further behavioral summaries onto this (already-fitted) chart,
     /// returning their nats-unit tangent coordinates (`m × (V-1)`). Uses the
     /// chart's fixed basepoint/basis, so out-of-sample rows are placed

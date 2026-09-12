@@ -6258,5 +6258,29 @@
     ],
     "reason": "#2897, SPEC rules 23 and 25. CustomFamily::coefficient_hessian_cost estimated the flops of one inner coefficient-Hessian build or product. Its readers were the cost gates: default_outer_derivative_policy_costs, removed in fffa5b846, and the coefficient_work fed to the constant order helpers, removed in 1d49be4e6. With them gone nothing in the product called it, yet 15 families still overrode it, backed by four free cost functions and the coefficient_cost module. This change removes the trait method, every override, the event-history test wrapper forward, default_coefficient_hessian_cost, joint_coupled_coefficient_hessian_cost, location_scale_coefficient_hessian_cost, the coefficient_cost module with its tests, and the tests that pinned each override's cost formula.",
     "evidence": "At base 621f95bee8a739548d97a38bd40990ea74e82cc5, git grep -n -F .coefficient_hessian_cost( over the repo finds only the event-history test wrapper forward and assertions in the tests this change removes. git grep -l -w -E 'coefficient_hessian_cost|coefficient_cost|operator_aware_hessian_cost' over the repo lists only the staged files and the deleted coefficient_cost.rs, apart from ledgers and measurement JSON. Representation routing reads JointHessianWork::matrix_free_route directly, not these costs. Compile is covered by the lead shared tip check."
+  },
+  {
+    "base": "7e7d4ce399cdc3f006e4f447a3a72fa443e00e60",
+    "items": [
+      "crates/gam-linalg/src/curvature_resolution.rs:fn:dominant_source",
+      "crates/gam-problem/src/gauge.rs:fn:reduced_widths",
+      "crates/gam-runtime/src/cgroup_memory.rs:fn:binding_path",
+      "crates/gam-runtime/src/cgroup_memory.rs:fn:inactive_file_bytes",
+      "crates/gam-runtime/src/cgroup_memory.rs:fn:inspected_levels",
+      "crates/gam-runtime/src/cgroup_memory.rs:fn:working_set_bytes",
+      "crates/gam-runtime/src/resource.rs:fn:host_total_bytes",
+      "crates/gam-runtime/src/resource.rs:fn:limiting_source",
+      "crates/gam-sae/src/basis.rs:fn:cover_columns",
+      "crates/gam-sae/src/basis.rs:fn:cover_width",
+      "crates/gam-sae/src/basis.rs:fn:l2_gram_weights",
+      "crates/gam-sae/src/basis.rs:fn:laplace_eigenvalues",
+      "crates/gam-sae/src/basis.rs:fn:quotient_name",
+      "crates/gam-sae/src/manifold/behavior.rs:fn:basepoint",
+      "crates/gam-sae/src/manifold/persistence.rs:fn:is_circle",
+      "crates/gam-sae/src/manifold/rho.rs:fn:assignment_strength_layout",
+      "crates/gam-terms/src/construction.rs:fn:max_balanced_eigenvalue"
+    ],
+    "reason": "#2829 product-root rule: these restored getters had no caller in any crate. The narrow scan had counted their own field or a same-named local as a production user. Every field behind them is still read elsewhere, so only the getters go.",
+    "evidence": "At the base, git grep over crates, src, tests, examples, bench, benches, gamfit and python finds no `.name(` or `::name(` call for any of them, apart from one cgroup v1 fixture assertion and two #2253 layout assertions, which this commit rewrites or drops. The landing script refuses the push if any call survives at the landed tree. MSI validation is re-run after landing; these identities follow public_api_census.py and source_removal_guard.py as read at this base."
   }
 ]

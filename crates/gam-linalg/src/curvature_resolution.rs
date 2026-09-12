@@ -247,12 +247,6 @@ impl CurvatureResolution {
         })
     }
 
-    /// The measured component that set this resolution, when it was built from
-    /// a named set of them.
-    pub fn dominant_source(&self) -> Option<&'static str> {
-        self.dominant_source
-    }
-
     /// Which law produced this resolution.
     pub fn law(&self) -> CurvatureLaw {
         self.law
