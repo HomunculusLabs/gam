@@ -99,66 +99,6 @@ pub fn in_nested_parallel_region() -> bool {
 /// into a log line.
 static EIGH_CALLS: AtomicU64 = AtomicU64::new(0);
 static EIGH_NANOS: AtomicU64 = AtomicU64::new(0);
-/// Of those calls, how many observed `Par::Seq`. This is the field that makes
-/// the census ASSERTABLE rather than merely observable: a test can state "the
-/// large decomposition ran sequentially" as a bar instead of a human reading it
-/// out of a log.
-static EIGH_SEQ_CALLS: AtomicU64 = AtomicU64::new(0);
-/// The largest `dim` seen, so a run can be asked whether it ever reached the
-/// shape under investigation rather than being assumed to have.
-static EIGH_MAX_DIM: AtomicU64 = AtomicU64::new(0);
-
-// The same four tallies, for the CALLING THREAD only.
-//
-// The process-global counters above answer *"how many `eigh` calls did this
-// RUN make?"*. They cannot answer *"how many did THIS REGION make?"*, because
-// every other thread's `eigh` lands inside the same window — and under
-// `cargo test` there are as many such threads as the harness chose. An exact
-// delta taken across a region of a global counter is therefore an assertion
-// about which OTHER tests happened to share the process, which is not a
-// property anybody meant to test: measured at `0033169a9`,
-// `eigh_census_counts_calls_and_separates_the_sequential_arm` read `+12`
-// instead of `+1` under the default thread count and passed under
-// `--test-threads=1`. The per-thread tallies make the delta exact under any
-// schedule, so the assertion can stay an equality instead of being weakened to
-// an inequality that no longer detects over-counting.
-thread_local! {
-    static EIGH_THREAD: std::cell::Cell<EighCensus> = const {
-        std::cell::Cell::new(EighCensus {
-            calls: 0,
-            sequential_calls: 0,
-            max_dim: 0,
-            nanos: 0,
-        })
-    };
-}
-
-/// Add one `eigh` to the calling thread's tallies.
-fn record_thread_eigh(sequential: bool, dim: u64, nanos: u64) {
-    EIGH_THREAD.with(|cell| {
-        let mut census = cell.get();
-        census.calls += 1;
-        if sequential {
-            census.sequential_calls += 1;
-        }
-        census.max_dim = census.max_dim.max(dim);
-        census.nanos += nanos;
-        cell.set(census);
-    });
-}
-
-/// #2267/#2738 — the eigendecomposition census, readable from a test.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EighCensus {
-    /// Total `eigh` calls since process start.
-    pub calls: u64,
-    /// How many of them observed faer's global parallelism as `Par::Seq`.
-    pub sequential_calls: u64,
-    /// Largest matrix dimension decomposed.
-    pub max_dim: u64,
-    /// Cumulative wall time across all calls, in nanoseconds.
-    pub nanos: u64,
-}
 
 /// #2738 — the thread configuration actually in force, read INSIDE the running
 /// process and carried as DATA a test can read.
@@ -2504,18 +2444,9 @@ impl<S: Data<Elem = f64>> FaerEigh for ArrayBase<S, Ix2> {
             .map_err(FaerLinalgError::SelfAdjointEigen)?;
             let eigh_elapsed = eigh_started.elapsed();
             let eigh_calls = EIGH_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
-            if eigh_par == Par::Seq {
-                EIGH_SEQ_CALLS.fetch_add(1, Ordering::Relaxed);
-            }
-            EIGH_MAX_DIM.fetch_max(matrix.nrows() as u64, Ordering::Relaxed);
             let eigh_nanos_total = EIGH_NANOS
                 .fetch_add(eigh_elapsed.as_nanos() as u64, Ordering::Relaxed)
                 + eigh_elapsed.as_nanos() as u64;
-            record_thread_eigh(
-                eigh_par == Par::Seq,
-                matrix.nrows() as u64,
-                eigh_elapsed.as_nanos() as u64,
-            );
             log::debug!(
                 "[eigh] dim={} elapsed={:.3}s faer_global_parallelism={:?} \
                  calls_so_far={eigh_calls} cumulative={:.3}s",

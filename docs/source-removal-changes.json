@@ -4572,5 +4572,21 @@
     ],
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): a public item stays only when a product root uses it (gam-cli, gam-pyffi, gamfit, examples/, or another crate's production code). encode::row_certificate was a Euclidean wrapper over the crate-private row_certificate_core, and no production code called it. Its callers were one encode.rs unit test and the root integration test tests/sae/sae/sae_encode_atlas_certified.rs. Those three #1010 tests check the surviving Kantorovich certificate (the antipodal start flags, h grows with distance from the root, h is linear in the Lipschitz constant), so they move into encode.rs's new atlas_certificate_tests module. There they call row_certificate_core with EncodeObjective::euclidean(), which is exactly what the wrapper forwarded to. The root test file and its mod declaration are deleted, the encode.rs unit test calls row_certificate_core directly, and doc text naming row_certificate now names row_certificate_core.",
     "evidence": "At 0a246e52, git grep -n -w row_certificate over crates, src, tests, examples, bench and gamfit finds the declaration and doc mentions in crates/gam-sae/src/encode.rs, the unit-test call at encode.rs:3525, a test doc comment in crates/gam-sae/src/manifold/tests.rs, and the four calls in tests/sae/sae/sae_encode_atlas_certified.rs. The wrapper's body was row_certificate_core(atom, evaluator, t0, x, amplitude, lipschitz, &EncodeObjective::euclidean()), so each moved assertion measures the same certificate. The prune-api-d census v2 at 0a246e52 reports row_certificate with zero production consumers. Not compiled locally (user directive). Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "d5f54467f373aafccd3ef10cd041afb437b1cb73",
+    "items": [
+      "crates/gam-linalg/src/faer_ndarray.rs:fn:record_thread_eigh",
+      "crates/gam-linalg/src/faer_ndarray.rs:static:EIGH_MAX_DIM",
+      "crates/gam-linalg/src/faer_ndarray.rs:static:EIGH_SEQ_CALLS",
+      "crates/gam-linalg/src/faer_ndarray.rs:static:EIGH_THREAD",
+      "crates/gam-linalg/src/faer_ndarray.rs:struct:EighCensus",
+      "crates/gam-linalg/src/governed_capture.rs:enum:GovernedArm",
+      "crates/gam-linalg/src/governed_capture.rs:fn:record_governed_decision",
+      "crates/gam-linalg/src/governed_capture.rs:static:CAPTURE",
+      "crates/gam-linalg/src/governed_capture.rs:struct:GovernedDecision"
+    ],
+    "reason": "#2899 group-A public-surface sweep: delete gam-linalg diagnostic instruments that only ever write. The #2829 sweep retired both readers (begin_governed_decision_capture and take_governed_decision_capture, recorded retired-no-surviving-dependent in docs/public-api-2829-disposition.tsv), so the thread-local CAPTURE slot can no longer be switched on and nothing reads it. Every densification still paid a thread-local borrow in record_governed_decision at eight call sites in matrix/mod.rs. The governed_capture module (GovernedArm, GovernedDecision, CAPTURE, record_governed_decision) and those call sites are deleted, and both densification functions keep the same refusals and errors. In faer_ndarray.rs the eigh census readers were retired the same way (eigh_census and eigh_census_this_thread in the same TSV). EIGH_SEQ_CALLS, EIGH_MAX_DIM, the per-thread EIGH_THREAD tallies, record_thread_eigh and EighCensus were written on every self-adjoint eigendecomposition and never read, so they are deleted. EIGH_CALLS and EIGH_NANOS survive because the [eigh] debug log line reads them.",
+    "evidence": "At 5e4a9a39b, git grep -n over crates, src, tests, docs, examples and gamfit: governed_capture, GovernedArm, GovernedDecision and record_governed_decision occur only in governed_capture.rs, the eight matrix/mod.rs call sites and lib.rs:32. CAPTURE occurs only inside governed_capture.rs. EighCensus, EIGH_THREAD and record_thread_eigh occur only in faer_ndarray.rs (declaration, initializer, writer, one call). EIGH_SEQ_CALLS and EIGH_MAX_DIM occur only at their declarations and one fetch_add/fetch_max each. The item list is source_removal_guard.py --base 5e4a9a39b --head 2f67adcc3 (/scratch.global/sauer354/pool/prune-api-a/slice8.srg.out). The compile check is the lead shared tip check."
   }
 ]

@@ -1809,5 +1809,13 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): encode::row_certificate, a Euclidean wrapper over the crate-private row_certificate_core, has no production caller and is deleted. Its tests now call row_certificate_core with EncodeObjective::euclidean().",
     "evidence": "At 0a246e52, git grep -n -w finds row_certificate called only by one encode.rs unit test and tests/sae/sae/sae_encode_atlas_certified.rs. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "d5f54467f373aafccd3ef10cd041afb437b1cb73",
+    "removed": {
+      "crates/gam-linalg/src/governed_capture.rs::record_governed_decision": 1
+    },
+    "reason": "#2899 group-A sweep: gam_linalg::governed_capture::record_governed_decision wrote into a thread-local capture that nothing could enable or read, after #2829 retired begin_governed_decision_capture and take_governed_decision_capture. It is deleted with the module and its eight call sites.",
+    "evidence": "public_api_census.py --base 5e4a9a39b --head 2f67adcc3 reports exactly this identity (/scratch.global/sauer354/pool/prune-api-a/slice8.census.json). At the base, git grep -n -w record_governed_decision finds only its declaration and the eight matrix/mod.rs call sites."
   }
 ]
