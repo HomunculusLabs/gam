@@ -583,3 +583,157 @@ Not restored, with the reason each stays absent:
   are device-only and cannot run on CPU lanes.
 - The two `flex_jet.rs` pins and the other three `row_jet_program.rs` pins:
   their subjects either still have test references or have no production caller.
+
+## Retired: pins whose subject was later deleted or whose contract was replaced, September 12
+
+The census at `7ad913f69` (MSI job 505822,
+`/scratch.global/sauer354/pool/restore2818/census-absent.505822.log`) found 224
+issue-suffixed `#[test]` names that no `.rs` file declares. This section covers
+the names that cannot come back as written, for one of three reasons:
+
+- a later commit deleted the production code the pin exercised;
+- a later fix replaced the contract the pin asserted;
+- the sweep deleted a production item that nothing outside tests called.
+
+Each group names its commit. Every deleted subject named below was checked with
+`git grep -w` over `*.rs` at origin/main on 2026-09-12. Any remaining match is
+prose, and that is stated where it occurs. None of these tests is counted as
+recovered.
+
+### Stagewise birth engine, deleted by `e6fd4251e`
+
+`e6fd4251e` deleted the stagewise engine under the directive to delete code only
+tests use: `StagewiseConfig`, `residual_principal_birth_candidate`,
+`top_factor_birth_decoder`, `activity_of`, `BirthCandidateDecision`,
+`fit_single_atom_response_in_place` and `column_signal_rank`. The same commit
+deleted `sae_intrinsic_seed_initial_coords` and `intrinsic_chart_embedding_axes`.
+None of these names appears on main.
+
+- `anchor_scored_birth_prefers_uncontested_factor_2080`
+- `residual_principal_fallback_fires_on_disjoint_not_noise_2080`
+- `residual_principal_seeds_circle_as_rank2_not_dc_2101`
+- `born_circle_survives_on_incumbent_sparse_rows_2109`
+- `top_factor_birth_mirrors_circle_seed_2109`
+- `certificate_rejects_two_circle_blend_2111`
+- `kappa_deflation_extracts_clean_circle_from_dense_torus_2111`
+- `dense_torus_fixture_has_2k_signal_dirs_2111`
+- `dense_torus_integrated_birth_recovery_2111`
+- `serial_birth_ledger_retains_errors_and_selects_the_best_arm_2556`
+- `batch_birth_ledger_preserves_harvest_order_and_exact_dispositions_2556`
+- `intrinsic_seed_allocates_every_chart_function_2240`: `ae42b188c` restored it,
+  and `e6fd4251e` then deleted both the test and its subject.
+
+### #2576 reduced-Schur instruments, deleted by `0b6aac49b`
+
+`0b6aac49b` deleted `resident_schur_elimination_diagonal` and
+`reduced_schur_logdet_preconditioner_study`, which only tests reached.
+
+- `elimination_share_of_the_border_diagonal_is_fixture_dependent_2576`
+- `resident_schur_elimination_diagonal_matches_operator_diagonal_2576`
+
+### Coefficient-group realizer and diagnostic evaluators, deleted by `48f48f910`
+
+`48f48f910` deleted `realize_coefficient_groups_for_custom_family` (only its own
+tests called it) and `evaluate_labeled_outer_criterion_for_diagnostics`, the only
+subject of `multinomial_jeffreys_outer_gradient_fd_2612.rs`. The realizer's name
+survives only in the module doc of
+`tests/misc/misc/composed_config_depth3_layout_consistency_2315.rs`, whose tests
+are gone.
+
+- `coefficient_group_labels_cannot_reclassify_base_penalties_2315`
+- `tied_and_fixed_base_penalties_use_optimizer_coordinate_priors_2315`
+- `composed_depth3_group_priors_land_on_their_own_outer_coordinate_2315`
+- `composed_two_of_everything_depth3_layout_stays_consistent_2315`
+- `derived_penalty_outer_index_equals_emitted_position_across_spec_zoo_2315`
+- `unbiased_outer_gradient_matches_central_differences_2612`
+- `jeffreys_armed_outer_gradient_matches_central_differences_2612`
+- `the_jeffreys_term_is_live_on_this_fixture_2612`
+- `unbiased_outer_hessian_matches_the_gradient_jacobian_2612`
+- `jeffreys_armed_outer_hessian_agrees_on_the_curvature_verdict_2612`
+
+### Hand-supplied rho boxes, deleted by `14e1ce6d8` and kept deleted by `87c355b12`
+
+`14e1ce6d8` deleted `RhoBox`, `RhoLowerWall`, `RhoCeiling`, `upper_bounds_for`
+and `effective_df_floor_rho_upper_bounds`, together with
+`effective_df_floor_box_2370.rs`. The per-file repair `87c355b12` kept "derived
+rho domains replacing the RhoBox hand boxes", and SPEC forbids hand-supplied
+search boxes. `EFFECTIVE_DF_CEILING`, `EFFECTIVE_DF_FLOOR_RELATIVE_FRACTION` and
+`effective_df_floor_rho_upper_bounds` survive only in comments.
+
+- `a_caller_box_that_is_already_inverted_is_a_typed_error_2370`
+- `a_pinned_box_yields_a_well_ordered_single_point_box_2370`
+- `crossing_between_neg_ceiling_and_the_box_floor_keeps_the_ceiling_2370`
+- `derived_upper_bound_never_inverts_the_box_across_the_crossing_range_2370`
+- `interior_crossing_still_tightens_the_upper_bound_2370`
+- `the_rho_box_constructor_rejects_an_inverted_pair_but_accepts_a_pinned_one_2370`
+- `effective_df_ceiling_never_emits_upper_below_true_rho_lower_wall_2370`
+- `the_rank_one_relative_floor_is_a_logit_of_the_prior_to_data_odds_2615`
+- `the_relative_floor_is_scale_free_so_no_single_fixture_can_call_it_inert_2612`
+
+### Production finite-difference curvature ladder, deleted by `c9481ef60`
+
+`c9481ef60` deleted the second-difference ladder the optimizer used to adjudicate
+negative curvature, because SPEC keeps finite differences in tests. The only
+surviving `hessian_error_2norm` is a parameter name of
+`CurvatureResolution::analytic_weyl` in gam-linalg.
+
+- `an_honest_negative_curvature_escapes_on_the_measured_floor_the_declared_one_hid_2748`
+- `the_ladder_recovers_a_criterion_curvature_the_analytic_hessian_got_wrong_2748`
+- `the_ladder_spans_signal_and_plateau_on_both_sides_of_the_derived_end_2748`
+
+### Contracts replaced by later fixes
+
+| Historical test identity | Removing commit | What replaced the contract |
+| --- | --- | --- |
+| `target_dose_only_rescales_the_unit_chord_and_cannot_correct_a_displacement_2263` | `ddba34412` | A target dose now moves the atom's coordinate along its chart and solves `t_to`, so the chord-amplitude behavior this pin described is gone. |
+| `bernoulli_marginal_slope_ctn_stage1_recipe_only_dispatches_to_bms_issue_2139` | `9c0e6b484` (#2886) | CTN composition moved into the shared native fit service. The commit deleted the unreachable CTN placeholders and this test with them. |
+| `co_routed_frame_sweep_is_fixed_code_descent_2634` | `33dc78655` (#2825) | The tied projector objective is optimized in one-shot block sweeps. The test went in that commit. |
+| `block_sparse_open_fixed_point_returns_open_certificate_2275` | `8aa65d500` (#2825, #2275) | The block support step now descends the objective the frame and gamma steps descend. The test went in that commit. |
+| `contracting_kkt_tail_remains_eligible_after_eight_plateaus_2653` | `4735a7d2a` | The #2653 frontier certificate (`StallPolishProgressCertificate`, `permits_continuation`) is deleted. The polish is permitted at every armed plateau. |
+| `either_kkt_currency_can_pay_but_a_repeated_frontier_cannot_2653` | `4735a7d2a` | As above. |
+| `terminal_polish_never_raises_the_kkt_residual_2762` | `7a38b3b2e`, kept removed by `87c355b12` | `14e1ce6d8` resurrected it and `87c355b12` removed it again. `4735a7d2a` deleted the #2762 trajectory stop it guarded. |
+| `a_replayed_seed_refusal_never_drops_the_reseed_point_2569` | `934d60aa9`, kept removed by `87c355b12` | `14e1ce6d8` resurrected it and `87c355b12` removed it again. |
+| `cross_row_preconditioner_build_honors_pd_floor_1795` | `846c51bff` | The cross-row matrix-free PCG route could no longer run. It is deleted with `ArrowBlockDiagInverse`. |
+| `threshold_gate_coordinate_block_theta_adjoint_matches_finite_difference_2500` | `65c63d9df` (#2668) | The quasi-Laplace complexity keeps the coordinate block. `coordinate_block_logdet_theta_adjoint` is deleted. |
+| `newton_friendly_regime_admits_floor_to_1e_minus_9` | `7ff6dcf9a` (#2469) | The Levenberg-Marquardt damping window is derived from unit roundoff, and `adaptive_lm_lambda_hint` is gone. |
+
+### Arrow-routed co-fit, deleted by the sweep
+
+`cofit_linear_via_arrow`, `cofit_composed_via_arrow`, `ArrowCofitConfig`,
+`build_linear_cofit_term`, `build_composed_cofit_term` and
+`cofit_block_and_curved` were production functions that no production artifact
+called. `d484a091a` deleted them, and `cb8dd972c` later removed the doc-only
+`cofit_arrow.rs` that remained. The 2026-09-11 directive is to delete code only
+tests use, so these pins are retired. #2023 is still open, and its owner decides
+whether the arrow route returns as production code.
+
+- `arrow_linear_cofit_second_pass_is_a_noop_2023`
+- `arrow_routed_linear_tier_matches_or_beats_block_reconstruction_2023`
+- `composed_arrow_matches_or_beats_block_cofit_2023`
+- `composed_arrow_second_pass_is_a_noop_on_curved_and_framed_tiers_2397`
+
+### #932 pins counted by file in the September 11 section
+
+These pins keep the reasons given there. They are named here because that section
+counts them by file.
+
+- The five `bms/cell_moment_assembly.rs` pins:
+  `canonical_flex_row_program_order2_matches_production_lowering_932`,
+  `canonical_flex_row_program_order2_matches_tower_and_scalar_932`,
+  `empirical_rigid_kernel_matches_exact_implicit_solve_tower_932`,
+  `flex_factored_matches_jet2_degenerate_grids_932` and
+  `planted_833_style_omission_is_caught_by_exact_tower_932`.
+- The four device-only `bms/gpu/row.rs` pins:
+  `bms_flex_row_dense_hvp_materialization_matches_cpu_above_block_cap_932`,
+  `generated_cuda_row_kernel_r33_matches_canonical_cpu_lowering_932`,
+  `mandatory_required_gpu_workspace_consumes_device_cache_end_to_end_932` and
+  `release_measure_generated_bms_full_row_vs_strongest_cpu_932`. The same file's
+  `generated_cuda_row_kernel_matches_canonical_cpu_lowering_415` is device-only
+  for the same reason.
+- The two `flex_jet.rs` pins:
+  `cell_moment_recurrence_jet_value_matches_numeric_932` and
+  `flex_timepoint_inputs_nested_dual_matches_jet4_contraction_932`.
+- The three `row_jet_program.rs` pins:
+  `compiled_softmax_schedule_matches_generic_tower_all_channels_932`,
+  `independent_compiled_schedule_matches_fixed_oracle_above_old_arity_ceiling_932`
+  and `jet_hoist_and_order1_border_beat_redundant_baselines_932`.
