@@ -136,6 +136,106 @@ fn clear_stall_evidence_collected_under_the_previous_model(
     geometric_tail_history.clear();
 }
 
+/// Latch the exact Jeffreys second-order completion (gam#979), clearing the stall
+/// evidence collected under the surrogate on the latch's false→true transition
+/// (gam#2714).
+///
+/// Arming the completion changes the step model, so every statistic
+/// `clear_stall_evidence_collected_under_the_previous_model` clears describes a
+/// solver that no longer exists. The three guard-driven arms cleared it. The
+/// mode-certificate revoke, the #2485 stall-certificate arm, the residual-band
+/// latch and the decrement-precondition arm did not. The veteran frailty witness
+/// armed through the decrement precondition at cycle 4 and kept the cycle-0
+/// surrogate residual `1.499e1` as `best_residual_seen`. The residual-stall guard
+/// then conceded at cycle 57 against it (`no_improve_cycles=56`), although the
+/// residual under the complete model had been falling since cycle 5. Re-arming an
+/// armed latch clears nothing: the model did not change, and a clear there would
+/// erase the evidence a genuine stall under the complete model has to accumulate.
+#[allow(clippy::too_many_arguments)]
+fn arm_jeffreys_completion_endgame(
+    jeffreys_completion_endgame: &mut bool,
+    best_residual_seen: &mut f64,
+    cycles_since_residual_improved: &mut usize,
+    tr_clamped_during_stall: &mut bool,
+    residual_descent_history: &mut std::collections::VecDeque<f64>,
+    residual_rate_history: &mut std::collections::VecDeque<f64>,
+    merit_window: &mut std::collections::VecDeque<f64>,
+    geometric_tail_history: &mut std::collections::VecDeque<f64>,
+) {
+    if *jeffreys_completion_endgame {
+        return;
+    }
+    *jeffreys_completion_endgame = true;
+    clear_stall_evidence_collected_under_the_previous_model(
+        best_residual_seen,
+        cycles_since_residual_improved,
+        tr_clamped_during_stall,
+        residual_descent_history,
+        residual_rate_history,
+        merit_window,
+        geometric_tail_history,
+    );
+}
+
+#[cfg(test)]
+mod jeffreys_endgame_arming_tests {
+    use super::*;
+
+    /// gam#2714: the first arm of the completion clears every stall statistic
+    /// collected under the surrogate; a re-arm keeps the evidence gathered under
+    /// the complete model.
+    #[test]
+    fn arming_the_completion_clears_surrogate_stall_evidence_once_2714() {
+        let mut armed = false;
+        let mut best_residual_seen = 1.499e1_f64;
+        let mut cycles_since_residual_improved = 3_usize;
+        let mut tr_clamped_during_stall = true;
+        let mut residual_descent_history = std::collections::VecDeque::from(vec![1.499e1_f64, 1.904e1]);
+        let mut residual_rate_history = std::collections::VecDeque::from(vec![1.499e1_f64]);
+        let mut merit_window = std::collections::VecDeque::from(vec![5.603273e2_f64]);
+        let mut geometric_tail_history = std::collections::VecDeque::from(vec![1.0_f64]);
+
+        arm_jeffreys_completion_endgame(
+            &mut armed,
+            &mut best_residual_seen,
+            &mut cycles_since_residual_improved,
+            &mut tr_clamped_during_stall,
+            &mut residual_descent_history,
+            &mut residual_rate_history,
+            &mut merit_window,
+            &mut geometric_tail_history,
+        );
+        assert!(armed);
+        assert_eq!(best_residual_seen, f64::INFINITY);
+        assert_eq!(cycles_since_residual_improved, 0);
+        assert!(!tr_clamped_during_stall);
+        assert!(residual_descent_history.is_empty());
+        assert!(residual_rate_history.is_empty());
+        assert!(merit_window.is_empty());
+        assert!(geometric_tail_history.is_empty());
+
+        best_residual_seen = 6.311e1;
+        cycles_since_residual_improved = 29;
+        tr_clamped_during_stall = true;
+        merit_window.push_back(5.417023e2);
+        arm_jeffreys_completion_endgame(
+            &mut armed,
+            &mut best_residual_seen,
+            &mut cycles_since_residual_improved,
+            &mut tr_clamped_during_stall,
+            &mut residual_descent_history,
+            &mut residual_rate_history,
+            &mut merit_window,
+            &mut geometric_tail_history,
+        );
+        assert!(armed);
+        assert_eq!(best_residual_seen, 6.311e1);
+        assert_eq!(cycles_since_residual_improved, 29);
+        assert!(tr_clamped_during_stall);
+        assert_eq!(merit_window.len(), 1);
+    }
+}
+
 /// The block whose penalty is too weak to close the direction the last
 /// accepted step was descending, and the strength at which it would close it
 /// (gam#2695).
@@ -2573,7 +2673,16 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     ),
                 );
                 if head_jeffreys_term.is_some() {
-                    jeffreys_completion_endgame = true;
+                    arm_jeffreys_completion_endgame(
+                        &mut jeffreys_completion_endgame,
+                        &mut best_residual_seen,
+                        &mut cycles_since_residual_improved,
+                        &mut tr_clamped_during_stall,
+                        &mut residual_descent_history,
+                        &mut residual_rate_history,
+                        &mut merit_window,
+                        &mut geometric_tail_history,
+                    );
                 }
                 // A cost-resolution stop can arrive with a radius collapsed
                 // by rounded objective differences, while the exact mode
@@ -4566,7 +4675,16 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                     && head_jeffreys_completion.is_none()
                     && stall_numerical_null_stationarity.is_some_and(|v| v > residual_tol)
                 {
-                    jeffreys_completion_endgame = true;
+                    arm_jeffreys_completion_endgame(
+                        &mut jeffreys_completion_endgame,
+                        &mut best_residual_seen,
+                        &mut cycles_since_residual_improved,
+                        &mut tr_clamped_during_stall,
+                        &mut residual_descent_history,
+                        &mut residual_rate_history,
+                        &mut merit_window,
+                        &mut geometric_tail_history,
+                    );
                     continue 'joint_newton_cycles;
                 }
                 if let (Some(decrement), Some(weak_decrement), Some(null_score)) = (
@@ -5010,7 +5128,16 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
         // un-armed) so the endgame model cannot oscillate between the
         // divided-difference and exact Hessians across cycles.
         if residual.is_finite() && residual <= JEFFREYS_COMPLETION_RESIDUAL_BAND * residual_tol {
-            jeffreys_completion_endgame = true;
+            arm_jeffreys_completion_endgame(
+                &mut jeffreys_completion_endgame,
+                &mut best_residual_seen,
+                &mut cycles_since_residual_improved,
+                &mut tr_clamped_during_stall,
+                &mut residual_descent_history,
+                &mut residual_rate_history,
+                &mut merit_window,
+                &mut geometric_tail_history,
+            );
         }
         // Active-set-projected stationarity residual vector (multiplier
         // mass of every pinned bound row already subtracted). Keep the full
@@ -5353,7 +5480,16 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                  |Δobj|={objective_change:.3e} against {objective_tol:.3e}); arming the \
                  exact Jeffreys second-order completion before any certificate is taken"
             );
-            jeffreys_completion_endgame = true;
+            arm_jeffreys_completion_endgame(
+                &mut jeffreys_completion_endgame,
+                &mut best_residual_seen,
+                &mut cycles_since_residual_improved,
+                &mut tr_clamped_during_stall,
+                &mut residual_descent_history,
+                &mut residual_rate_history,
+                &mut merit_window,
+                &mut geometric_tail_history,
+            );
             continue 'joint_newton_cycles;
         }
         // Conditioning-robust safety (gam#1449) and the raw decrement bound are
