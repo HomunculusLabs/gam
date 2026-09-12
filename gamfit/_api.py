@@ -2019,17 +2019,11 @@ def conditional_prior_ivae(
         raise map_exception(exc) from exc
 
 
-def derive_ivae_aux_scale(
-    aux: Any,
-    log_amplitude: float,
-    frequency_scale: float,
-) -> Any:
+def derive_ivae_aux_scale(aux: Any) -> Any:
     """Derive the Rust iVAE conditional-prior scale from the auxiliary table."""
 
     try:
-        return rust_module().derive_ivae_aux_scale(
-            aux, float(log_amplitude), float(frequency_scale)
-        )
+        return rust_module().derive_ivae_aux_scale(aux)
     except Exception as exc:
         raise map_exception(exc) from exc
 

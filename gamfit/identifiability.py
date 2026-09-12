@@ -15,7 +15,6 @@ The runner is:
 
 >>> result = gamfit.identifiable_factor_fit(
 ...     X, aux=labels, n_supervised=3, n_free=3,
-...     mech_sparsity_weight="auto", aux_prior_weight="auto",
 ...     encoder="mlp[256, 256]",
 ... )
 >>> result.T_supervised.shape
@@ -61,34 +60,8 @@ __all__ = [
 
 # The theorem-check thresholds (encoder depth, mechanism-sparsity fraction and
 # zero tolerance, random-projection variance bounds) live with their paper
-# citations in ``gam_identifiability::precondition``. The constants below
-# belong to the torch fitting recipe.
-_IVAE_AUX_SCALE_LOG_AMPLITUDE = 0.4
-# Khemakhem 2107.10098 Thm. 1 identifies the latent up to a component-wise
-# transform iff the conditional prior `p(t | u)` spans a 2k-dimensional set
-# of natural parameters. For the diagonal Gaussian iVAE prior the natural
-# parameters are `(η_1, η_2) = (μ(u) / σ(u)², −1 / (2 σ(u)²))`, which the
-# constructor in ``src/identifiability/sae.rs`` checks via the column rank of the
-# stacked signature ``[μ(u) ‖ log σ(u)]`` (an invertible reparameterisation).
-# A *constant* scale collapses the ``log σ`` half of that signature to zero,
-# leaving rank ≤ k < 2k — that is exactly the supervised-path failure mode of
-# issue #576. The conditional scale must therefore be a genuine function of
-# the auxiliary. A purely *linear* `log σ = a + b·u` would lie in the span of
-# ``{1, μ}`` and still not lift the rank; the lift requires `log σ(u)` to be
-# *nonlinear* in `u` (Khemakhem §3, and the SVD argument in
-# ``ivae_precondition_pair``). We use a bounded, column-distinct nonlinear map
-# of the standardised auxiliary — ``log σ_j(u) = A · tanh((j+1)·z_j)`` — whose
-# amplitude ``A`` is small enough to keep `σ` well-conditioned (σ ∈ [e^−A, e^A])
-# yet large enough that the ``tanh`` curvature gives `log σ` an SVD direction
-# genuinely independent of the affine `μ` columns.
-_AUTO_AUX_PRIOR_WEIGHT = 2.0
-_AUTO_MECH_SPARSITY_WEIGHT = 1.0e-4
-# The torch encoder used by this recipe is not wired into the Rust REML
-# engine, so there is no exact marginal-likelihood optimizer for these two
-# weights. The previous "auto" path ran a 5x5 Laplace-proxy grid centred at
-# 1.0; on clean planted-factor problems it missed the useful
-# mechanism-sparsity scale and paid 25 inner fits for a worse answer. "auto"
-# now means these calibrated one-fit recipe weights.
+# citations in ``gam_identifiability::precondition``. The recipe penalty
+# weights and the iVAE aux-scale amplitude live in ``gam_sae::identifiability``.
 
 
 @dataclass(slots=True)
@@ -471,36 +444,6 @@ def _build_encoder(
     return nn.Sequential(*layers)
 
 
-def _resolve_weight(weight: Any, name: str) -> float:
-    """Return the numeric penalty weight.
-
-    ``"auto"`` resolves to the calibrated recipe default for ``name``.
-    Numeric values must be positive and finite.
-    """
-
-    if isinstance(weight, str):
-        if weight.strip().lower() != "auto":
-            raise ValueError(
-                f"{name}: only 'auto' is accepted as a string; got {weight!r}"
-            )
-        if name == "aux_prior_weight":
-            return _AUTO_AUX_PRIOR_WEIGHT
-        if name == "mech_sparsity_weight":
-            return _AUTO_MECH_SPARSITY_WEIGHT
-        raise ValueError(f"unknown identifiable-factor weight name {name!r}")
-    try:
-        w = float(weight)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{name} must be 'auto' or a positive finite float; got {weight!r}"
-        ) from exc
-    if not math.isfinite(w) or w <= 0.0:
-        raise ValueError(
-            f"{name} must be positive and finite; got {w}"
-        )
-    return w
-
-
 def _derive_aux_scale(aux_np: np.ndarray) -> np.ndarray:
     """Derive the iVAE conditional scale ``σ(u)`` from the auxiliary.
 
@@ -513,8 +456,9 @@ def _derive_aux_scale(aux_np: np.ndarray) -> np.ndarray:
 
     For each auxiliary column we standardise to ``z_j`` (zero mean, unit
     spread over the rows) and set
-    ``log σ_j(u) = A · tanh((j + 1) · z_j)`` with ``A =
-    _IVAE_AUX_SCALE_LOG_AMPLITUDE``. The per-column frequency ``(j + 1)``
+    ``log σ_j(u) = A · tanh((j + 1) · z_j)`` with the Rust-owned amplitude
+    ``A = gam_sae::identifiability::IVAE_AUX_SCALE_LOG_AMPLITUDE``. The
+    per-column frequency ``(j + 1)``
     pushes each ``log σ`` column into its own subspace (mirroring the
     distinct-frequency construction in ``ivae_precondition_pair``), and the
     ``tanh`` nonlinearity makes ``log σ_j`` linearly independent of the affine
@@ -529,11 +473,7 @@ def _derive_aux_scale(aux_np: np.ndarray) -> np.ndarray:
     """
 
     aux2d = np.ascontiguousarray(np.asarray(aux_np, dtype=float))
-    return np.ascontiguousarray(
-        rust_module().derive_ivae_aux_scale(
-            aux2d, float(_IVAE_AUX_SCALE_LOG_AMPLITUDE), 1.0
-        )
-    )
+    return np.ascontiguousarray(rust_module().derive_ivae_aux_scale(aux2d))
 
 
 def _one_fit(
@@ -698,8 +638,8 @@ def identifiable_factor_fit(
     n_supervised: int,
     n_free: int,
     *,
-    mech_sparsity_weight: Any = "auto",
-    aux_prior_weight: Any = "auto",
+    mech_sparsity_weight: float | None = None,
+    aux_prior_weight: float | None = None,
     encoder: str = "mlp[256, 256]",
     max_iter: int = 400,
     learning_rate: float = 1.0e-2,
@@ -712,8 +652,8 @@ def identifiable_factor_fit(
     split. ``T_sup`` is supervised by ``aux`` via an iVAE-style Gaussian
     auxiliary-conditional prior; ``T_free`` is unsupervised and constrained
     by a mechanism-sparsity penalty on its decoder rows. Both penalty
-    weights default to ``"auto"``, which resolves to calibrated recipe
-    weights. The resulting single fit is scored with a Laplace-style log
+    weights default to the calibrated recipe weights owned by Rust. The
+    resulting single fit is scored with a Laplace-style log
     marginal-likelihood proxy.
 
     Parameters
@@ -728,8 +668,8 @@ def identifiable_factor_fit(
         Dimensions of the supervised / free latent blocks. Required —
         forcing the user to make the split explicit avoids silent
         identifiability surprises.
-    mech_sparsity_weight, aux_prior_weight : ``"auto"`` or positive float
-        Penalty weights. ``"auto"`` resolves to the recipe defaults
+    mech_sparsity_weight, aux_prior_weight : positive float or ``None``
+        Penalty weights. ``None`` takes the Rust recipe weights
         ``mech_sparsity_weight=1e-4`` and ``aux_prior_weight=2.0``.
     encoder : str
         ``"linear"`` for a single-Linear encoder, or ``"mlp[w1, w2, ...]"``
@@ -748,9 +688,9 @@ def identifiable_factor_fit(
     -----
     The ``evidence`` sign convention is "log evidence" — *higher is better*.
     The proxy is approximate: REML wiring for arbitrary custom torch
-    encoders is not yet plumbed through the Rust engine. ``"auto"`` therefore
-    uses calibrated recipe weights rather than treating the Laplace proxy as
-    an exact REML selector like :func:`gamfit.fit` returns for formula-based
+    encoders is not yet plumbed through the Rust engine, so the default
+    weights are calibrated recipe weights; the Laplace proxy is not an exact
+    REML selector like the one :func:`gamfit.fit` uses for formula-based
     smooths.
     """
 
@@ -764,8 +704,9 @@ def identifiable_factor_fit(
             "identifiable_factor_fit requires PyTorch; install with `pip install torch`"
         ) from exc
 
-    aux_w = _resolve_weight(aux_prior_weight, "aux_prior_weight")
-    mech_w = _resolve_weight(mech_sparsity_weight, "mech_sparsity_weight")
+    aux_w, mech_w = rust_module().identifiable_factor_weights(
+        aux_prior_weight, mech_sparsity_weight
+    )
 
     x_t = torch_mod.as_tensor(x_np, dtype=torch_mod.float64)
     aux_t = torch_mod.as_tensor(aux_np, dtype=torch_mod.float64)

@@ -138,7 +138,7 @@ def test_derive_ivae_aux_scale_matches_old_numpy_formula() -> None:
     freq = np.arange(1, aux2d.shape[1] + 1, dtype=float).reshape(1, -1)
     expected = np.ascontiguousarray(np.exp(amplitude * np.tanh(freq * z)))
 
-    actual = np.asarray(gamfit.derive_ivae_aux_scale(aux2d, amplitude, 1.0))
+    actual = np.asarray(gamfit.derive_ivae_aux_scale(aux2d))
     np.testing.assert_allclose(actual, expected, rtol=0.0, atol=1.0e-12)
 
 

@@ -5337,6 +5337,7 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(mechanism_sparsity_jacobian, module)?)?;
     module.add_function(wrap_pyfunction!(derive_ivae_aux_scale, module)?)?;
+    module.add_function(wrap_pyfunction!(identifiable_factor_weights, module)?)?;
     module.add_function(wrap_pyfunction!(conditional_prior_ivae, module)?)?;
     module.add_function(wrap_pyfunction!(diagnostics_aux_richness, module)?)?;
     module.add_function(wrap_pyfunction!(diagnostics_jacobian_sparsity, module)?)?;
@@ -5457,19 +5458,27 @@ fn mechanism_sparsity_jacobian<'py>(
 }
 
 /// Derive the iVAE auxiliary-conditional scale σ(u) from the auxiliary table.
-#[pyfunction(signature = (aux, log_amplitude, frequency_scale))]
+#[pyfunction]
 fn derive_ivae_aux_scale<'py>(
     py: Python<'py>,
     aux: PyReadonlyArray2<'py, f64>,
-    log_amplitude: f64,
-    frequency_scale: f64,
 ) -> PyResult<Py<PyArray2<f64>>> {
-    let scale = gam::terms::sae::identifiability::derive_ivae_aux_scale(
-        aux.as_array(),
-        log_amplitude,
-        frequency_scale,
-    );
+    let scale = gam::terms::sae::identifiability::derive_ivae_aux_scale(aux.as_array());
     Ok(scale.into_pyarray(py).unbind())
+}
+
+/// Resolve the identifiable-factor penalty weights `(aux_prior, mech_sparsity)`;
+/// `None` takes the recipe weight.
+#[pyfunction]
+fn identifiable_factor_weights(
+    aux_prior_weight: Option<f64>,
+    mech_sparsity_weight: Option<f64>,
+) -> PyResult<(f64, f64)> {
+    gam::terms::sae::identifiability::identifiable_factor_weights(
+        aux_prior_weight,
+        mech_sparsity_weight,
+    )
+    .map_err(py_value_error)
 }
 
 /// iVAE conditional-Gaussian log-prior. Given per-row `(mean, scale)` arrays

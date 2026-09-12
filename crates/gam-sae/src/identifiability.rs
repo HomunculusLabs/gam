@@ -315,18 +315,28 @@ impl ConditionalPriorIvae {
     }
 }
 
+/// Log-amplitude `A` of the iVAE auxiliary-conditional scale map.
+///
+/// Khemakhem 2107.10098 Thm. 1 identifies the latent up to a component-wise
+/// transform iff the conditional prior `p(t | u)` spans a 2k-dimensional set of
+/// natural parameters, which [`ConditionalPriorIvae::new`] checks through the
+/// column rank of the stacked signature `[μ(u) ‖ log σ(u)]`. A constant scale
+/// collapses the `log σ` half to zero (issue #576), and a scale linear in `u`
+/// stays in the span of `{1, μ}`, so `log σ(u)` must be nonlinear in `u`. `A`
+/// keeps `σ ∈ [e^−A, e^A]` well conditioned while the `tanh` curvature still
+/// gives `log σ` an SVD direction independent of the affine `μ` columns.
+pub const IVAE_AUX_SCALE_LOG_AMPLITUDE: f64 = 0.4;
+
 /// Derive the iVAE auxiliary-conditional scale `σ(u)` from the auxiliary table.
 ///
 /// Each auxiliary column is population-standardized across rows, then mapped as
-/// `log σ_j(u) = log_amplitude * tanh(frequency_scale * (j + 1) * z_j)`.
-/// Constant columns standardize to zero, so their derived scale is exactly one
-/// and the downstream [`ConditionalPriorIvae::new`] rank check reports the
-/// resulting non-identifiability instead of fabricating variation.
-pub fn derive_ivae_aux_scale(
-    aux: ArrayView2<f64>,
-    log_amplitude: f64,
-    frequency_scale: f64,
-) -> Array2<f64> {
+/// `log σ_j(u) = A * tanh((j + 1) * z_j)` with `A` =
+/// [`IVAE_AUX_SCALE_LOG_AMPLITUDE`]. The distinct per-column frequency pushes
+/// each `log σ` column into its own subspace. Constant columns standardize to
+/// zero, so their derived scale is exactly one and the downstream
+/// [`ConditionalPriorIvae::new`] rank check reports the resulting
+/// non-identifiability instead of fabricating variation.
+pub fn derive_ivae_aux_scale(aux: ArrayView2<f64>) -> Array2<f64> {
     let (n_rows, n_cols) = aux.dim();
     let mut out = Array2::<f64>::zeros((n_rows, n_cols));
     let n = n_rows as f64;
@@ -344,10 +354,10 @@ pub fn derive_ivae_aux_scale(
         }
         let std = (var / n).sqrt();
         let safe_std = if std > 0.0 { std } else { 1.0 };
-        let freq = frequency_scale * (col + 1) as f64;
+        let freq = (col + 1) as f64;
         for row in 0..n_rows {
             let z = (aux[[row, col]] - mean) / safe_std;
-            let log_sigma = log_amplitude * (freq * z).tanh();
+            let log_sigma = IVAE_AUX_SCALE_LOG_AMPLITUDE * (freq * z).tanh();
             out[[row, col]] = log_sigma.exp();
         }
     }
@@ -383,6 +393,45 @@ pub fn identifiable_factor_log_evidence(
     }
     let observations = n_obs as f64;
     Ok(-0.5 * observations * (residual_sum_squares / observations).ln() - 0.5 * penalty)
+}
+
+/// Recipe weight of the identifiable-factor iVAE auxiliary-conditional prior.
+///
+/// The recipe's torch encoder is not wired into the REML engine, so neither
+/// penalty weight has an exact marginal-likelihood optimizer. A 5x5
+/// Laplace-proxy grid centred at 1.0 missed the useful mechanism-sparsity scale
+/// on planted-factor problems at the cost of 25 inner fits; these calibrated
+/// one-fit weights replaced it.
+pub const IDENTIFIABLE_FACTOR_AUX_PRIOR_WEIGHT: f64 = 2.0;
+
+/// Recipe weight of the identifiable-factor mechanism-sparsity decoder penalty.
+/// See [`IDENTIFIABLE_FACTOR_AUX_PRIOR_WEIGHT`].
+pub const IDENTIFIABLE_FACTOR_MECH_SPARSITY_WEIGHT: f64 = 1.0e-4;
+
+/// Resolve the identifiable-factor penalty weights `(aux_prior, mech_sparsity)`.
+///
+/// `None` takes the recipe weight; a supplied weight must be positive and finite.
+pub fn identifiable_factor_weights(
+    aux_prior_weight: Option<f64>,
+    mech_sparsity_weight: Option<f64>,
+) -> Result<(f64, f64), String> {
+    let resolve = |requested: Option<f64>, recipe: f64, name: &str| match requested {
+        None => Ok(recipe),
+        Some(weight) if weight.is_finite() && weight > 0.0 => Ok(weight),
+        Some(weight) => Err(format!("{name} must be positive and finite; got {weight}")),
+    };
+    Ok((
+        resolve(
+            aux_prior_weight,
+            IDENTIFIABLE_FACTOR_AUX_PRIOR_WEIGHT,
+            "aux_prior_weight",
+        )?,
+        resolve(
+            mech_sparsity_weight,
+            IDENTIFIABLE_FACTOR_MECH_SPARSITY_WEIGHT,
+            "mech_sparsity_weight",
+        )?,
+    ))
 }
 
 /// Column-centred thin-SVD scores: returns the leading `k` columns of
@@ -4104,7 +4153,7 @@ mod tests {
             [-0.5, 4.0, 5.0],
             [3.0, 0.5, 5.0],
         ];
-        let scale = derive_ivae_aux_scale(aux.view(), 0.4, 1.0);
+        let scale = derive_ivae_aux_scale(aux.view());
         let expected = array![
             [0.8694483838365188_f64, 1.2655369552163311, 1.0],
             [1.2831253020529474, 0.6734640022297076, 1.0],
