@@ -2727,9 +2727,6 @@ fn survival_marginal_slope_advertises_outer_hvp_at_large_psi_dim() {
         family.exact_outer_derivative_order(&specs, &options),
         ExactOuterDerivativeOrder::Second
     );
-    assert!(
-        gam_solve::estimate::reml::reml_outer_engine::prefer_outer_hessian_operator(50_001, 2, 32,)
-    );
     assert_eq!(gradient, gam_problem::Derivative::Analytic);
     assert_eq!(hessian, gam_problem::DeclaredHessianForm::Either);
 }

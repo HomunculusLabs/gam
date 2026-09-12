@@ -3496,10 +3496,10 @@ fn exact_joint_spatial_outer_hessian_available(
     // Royston-Parmar) routes through the unified evaluator's outer-Hessian
     // path: Gaussian Identity uses the no-correction dense form, all GLM
     // variants supply scalar-GLM derivative ingredients consumed by
-    // `compute_outer_hessian` / `build_outer_hessian_operator`, and the
-    // (n, p, K) crossover in `prefer_outer_hessian_operator` chooses the
-    // matrix-free `HessianValue::Operator` representation at large scale
-    // for dense-lazy designs.  The previous `Identity || sparse_design`
+    // `compute_outer_hessian` / `build_outer_hessian_operator`, and
+    // `outer_hessian_route_plan` chooses the matrix-free
+    // `HessianValue::Operator` representation when the dense assembly exceeds
+    // the materialization cap.  The previous `Identity || sparse_design`
     // gate predates that operator routing and forced binomial+logit+Matern
     // (and any other non-Gaussian dense-lazy spatial design) onto the
     // gradient-only BFGS path even though analytic Hessian is fully

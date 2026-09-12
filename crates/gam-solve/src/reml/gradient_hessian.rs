@@ -173,26 +173,6 @@ impl<'a> RemlState<'a> {
         // kept during the manual conflict merge that landed the TK Hessian
         // implementation; it is now stale and was suppressing the analytic
         // path that was actually in place.
-        //
-        // Large-scale fallback: analytic outer Hessian is only safe when
-        // the unified evaluator can express it as a matrix-free Hv operator
-        // (`prefer_outer_hessian_operator`). Whenever that path is
-        // unavailable at large scale, the dense `O(K²·n·p²)` LAML pairwise
-        // assembly would run instead — route to BFGS.
-        let n_obs = self.x.nrows();
-        let p_dim = self.x.ncols();
-        let k_outer = self.canonical_penalties.len();
-        let operator_path_available =
-            super::reml_outer_engine::prefer_outer_hessian_operator(n_obs, p_dim, k_outer);
-        if n_obs > 50_000 && !operator_path_available {
-            log::info!(
-                "[standard-GAM] declining analytic outer Hessian for \
-                 n={n_obs} p={p_dim} k={k_outer} (matrix-free operator \
-                 path unavailable, dense LAML pairwise assembly is \
-                 O(k²·n·p²)); routing to BFGS"
-            );
-            return false;
-        }
         // Canonical-logit Firth fits keep their exact Tierney-Kadane outer Hessian
         // at every problem scale: its row-pair jets run by blocked row pairs or
         // through design tensors, whichever predicted work is smaller

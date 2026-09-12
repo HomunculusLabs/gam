@@ -1956,12 +1956,10 @@ pub(crate) fn reml_laml_evaluate(
         }
         let hessian_kernel = effective_deriv.outer_hessian_derivative_kernel();
         // Cost selects representation (operator vs dense), not capability.
-        // The (n, p, K) scale rule routes large-scale problems through the
-        // matrix-free Hv operator path even when the per-axis thresholds
-        // (`p >= 512` or `K >= 32`) alone do not fire.  At Matern large-scale
-        // scale (n=320 000, p=101, K=6) the dense path's per-outer-eval
-        // O(K·n·p²) assembly is ≈ 2·10¹⁰ FLOPs and dominates wall-clock; the
-        // operator path absorbs it via O(n·p) HVPs.
+        // Both representations build the same drifts and pair traces and the
+        // operator pays its products on top, so the dense assembly is taken
+        // whenever its workspace fits the materialization cap
+        // (`outer_hessian_route_plan`).
         //
         // The matrix-free operator path supports both full-space and projected
         // logdet kernels.  When a `penalty_subspace_trace` is installed, the
@@ -1980,11 +1978,9 @@ pub(crate) fn reml_laml_evaluate(
         );
         let has_subspace_trace = solution.penalty_subspace_trace.is_some();
         let route_plan = outer_hessian_route_plan(
-            n_obs,
             p_dim,
             k_outer,
             hessian_kernel.is_some(),
-            callback_operator_kernel,
             has_subspace_trace,
         );
         // #740: when the direction-contracted ψψ hook is installed, the operator

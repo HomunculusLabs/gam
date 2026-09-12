@@ -851,8 +851,9 @@ pub(crate) fn large_n_gaussian_location_scale_keeps_exact_outer_hessian_plan() {
 
     let p_total = p_mu + p_log_sigma;
     assert!(
-        gam_solve::estimate::reml::reml_outer_engine::prefer_outer_hessian_operator(n, p_total, 2),
-        "the large-n work model should select the scalable explicit Hessian-operator representation"
+        !gam_solve::estimate::reml::reml_outer_engine::outer_hessian_route_plan(p_total, 2, true, false)
+            .use_operator,
+        "the 2 x 2 outer Hessian's dense workspace fits the materialization cap, so it is assembled densely at n = {n}"
     );
 
     let plan = gam_solve::rho_optimizer::plan(&gam_solve::rho_optimizer::OuterCapability {

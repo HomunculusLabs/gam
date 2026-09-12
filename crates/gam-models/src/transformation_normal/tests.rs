@@ -2144,39 +2144,17 @@ pub(crate) fn ctn_inner_and_outer_hvp_capabilities_are_advertised() {
 }
 
 #[test]
-pub(crate) fn ctn_large_n_outer_hvp_capability_selects_operator_path() {
+pub(crate) fn ctn_outer_hvp_capability_keeps_analytic_outer_derivatives() {
     let psi = array![0.15, -0.10];
-    let (family, derivative_blocks, _, spec) = toy_family_and_derivatives(&psi);
+    let (family, _, _, spec) = toy_family_and_derivatives(&psi);
     let specs = std::slice::from_ref(&spec);
     assert!(family.outer_hyper_hessian_hvp_available(specs));
 
-    let rho_dim = spec.initial_log_lambdas.len();
-    let psi_dim = derivative_blocks[0].len();
-    let k_outer = rho_dim + psi_dim;
-    // `outer_hessian_route_plan` is purely a cost-based crossover
-    // over `(n_obs, p_dim, k_outer)`; commit 7f7705c removed the
-    // callback-kernel short-circuit that previously let CTN trip the
-    // operator path on its analytic HVP alone.  Per the current
-    // function docstring, family-supplied directional θθ operators
-    // route via `HessianDerivativeProvider::family_outer_hessian_operator`
-    // and short-circuit this predicate at the call site.  The
-    // meaningful invariant for this test is therefore the dispatcher
-    // verdict below — `custom_family_outer_derivatives` must still
-    // return `Analytic / Analytic` for both gradient and Hessian.
-    // We retain the threshold-tuple sanity check on the predicate so
-    // a future regression that broke the cost crossover (e.g. flipped
-    // a `>=` to `>`) would still be caught here.
-    assert!(
-        gam_solve::estimate::reml::reml_outer_engine::outer_hessian_route_plan(
-            gam_solve::estimate::reml::reml_outer_engine::MATRIX_FREE_OUTER_HESSIAN_LARGE_N_THRESHOLD,
-            gam_solve::estimate::reml::reml_outer_engine::MATRIX_FREE_OUTER_HESSIAN_DIM_AT_LARGE_N,
-            k_outer,
-            true,
-            false,
-            false,
-        )
-        .use_operator
-    );
+    // Family-supplied directional θθ operators route via
+    // `HessianDerivativeProvider::family_outer_hessian_operator` and
+    // short-circuit `outer_hessian_route_plan` at the call site, so the
+    // invariant here is the dispatcher verdict: `custom_family_outer_derivatives`
+    // must still return analytic curvature.
 
     let options = BlockwiseFitOptions {
         use_remlobjective: true,

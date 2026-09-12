@@ -1245,7 +1245,7 @@ impl<'a> RemlState<'a> {
             // representation choice (Operator vs Analytic) is preserved
             // end-to-end. The previous hand-rolled assembly forced a dense
             // materialization via `compute_lamlhessian_consistent`, which
-            // bypassed the matrix-free routing in `prefer_outer_hessian_operator`
+            // bypassed the matrix-free routing in `outer_hessian_route_plan`
             // and silently degraded large-K joint-hyper outers to the dense
             // path even when the eval-side had elected Operator.
             let eval = self.compute_outer_eval_with_order(&rho, order)?;

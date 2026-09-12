@@ -2,9 +2,9 @@
 //! stops on its own verdict inside one iteration budget.
 //!
 //! The issue's fit is `yg ~ s(x1) + s(x2) + s(x3) + s(x4) + te(x5, x6)`,
-//! gaussian, n = 50 000, p = 93, 13 smoothing parameters. At that size the outer
-//! Hessian takes the operator route (`large_n_moderate_p`), and the dense ARC
-//! solve reaches it by materializing the operator. On that fit every seed ran
+//! gaussian, n = 50 000, p = 93, 13 smoothing parameters. The dense ARC solve
+//! factors that fit's exact outer Hessian, assembled densely since #2900 row 6.8
+//! and by materializing the operator when the issue was filed. On that fit every seed ran
 //! its 200-iteration budget and the ARC budget retry re-ran the sweep; at
 //! 7ad913f69 the accepted tail steps bought 0.17 to 0.27 of the decrease their
 //! model predicted and the certificate refused the fit (job 506109).
@@ -16,9 +16,6 @@
 use csv::StringRecord;
 use gam_data::encode_recordswith_inferred_schema;
 use gam_models::fit_orchestration::{FitConfig, FitResult, fit_from_formula};
-use gam_solve::estimate::reml::reml_outer_engine::{
-    MATRIX_FREE_OUTER_HESSIAN_DIM_AT_LARGE_N, MATRIX_FREE_OUTER_HESSIAN_LARGE_N_THRESHOLD,
-};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal, Uniform};
@@ -40,7 +37,8 @@ fn truth(x: &[f64; 6]) -> f64 {
 
 #[test]
 fn gaussian_additive_fit_outer_search_stops_within_one_budget_2817() {
-    let n = MATRIX_FREE_OUTER_HESSIAN_LARGE_N_THRESHOLD;
+    // The issue's fit size.
+    let n = 50_000;
     let mut rng = StdRng::seed_from_u64(2817);
     let covariate = Uniform::new(-1.0_f64, 1.0).expect("valid uniform range");
     let noise = Normal::new(0.0, NOISE_SD).expect("valid normal");
@@ -75,11 +73,6 @@ fn gaussian_additive_fit_outer_search_stops_within_one_budget_2817() {
     eprintln!(
         "[#2817 acceptance] n={n} p={p} outer_iterations={} log_lambdas={:?}",
         fit.fit.outer_iterations, fit.fit.log_lambdas,
-    );
-    assert!(
-        p >= MATRIX_FREE_OUTER_HESSIAN_DIM_AT_LARGE_N,
-        "fixture precondition: the operator route at n = {n} needs p >= {}, got p = {p}",
-        MATRIX_FREE_OUTER_HESSIAN_DIM_AT_LARGE_N,
     );
     assert!(
         fit.fit.outer_iterations < MAX_ITER,

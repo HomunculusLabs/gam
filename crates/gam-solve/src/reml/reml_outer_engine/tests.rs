@@ -4026,70 +4026,6 @@ pub(crate) fn penalty_subspace_batched_reduction_matches_serial_operator_reducti
 }
 
 #[test]
-pub(crate) fn subspace_trace_large_k_routes_to_projected_operator() {
-    let h = array![[3.0, 0.2], [0.2, 5.0]];
-    let hop = Arc::new(DenseSpectralOperator::from_symmetric(&h).unwrap());
-    let pcoord = PenaltyCoordinate::from_dense_root(array![[0.0, 1.0]]);
-    let k = MATRIX_FREE_OUTER_HESSIAN_K_THRESHOLD;
-    let x = array![[1.0, 0.2], [1.0, 1.1], [1.0, -0.8], [1.0, 0.5]];
-    let deriv_provider = SinglePredictorGlmDerivatives {
-        c_array: array![0.31, -0.27, 0.19, -0.11],
-        d_array: Some(array![0.17, -0.11, 0.23, 0.07]),
-        hessian_weights: Array1::ones(4),
-        x_transformed: DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(x)),
-    };
-    let h_proj = h[[1, 1]];
-    let solution = InnerSolution {
-        log_likelihood: -2.3,
-        penalty_quadratic: 0.6,
-        hessian_op: hop.clone(),
-        mode_response_op: None,
-        beta: array![0.4, -0.7],
-        penalty_coords: vec![pcoord; k],
-        penalty_logdet: PenaltyLogdetDerivs {
-            value: 0.0,
-            first: Array1::zeros(k),
-            second: Some(Array2::zeros((k, k))),
-        },
-        deriv_provider: Box::new(deriv_provider),
-        firth: None,
-        hessian_logdet_correction: h_proj.ln() - hop.logdet(),
-        penalty_subspace_trace: Some(Arc::new(PenaltySubspaceTrace {
-            u_s: array![[0.0], [1.0]],
-            h_proj_inverse: array![[1.0 / h_proj]],
-            logdet_correction: 0.0,
-        })),
-        rho_curvature_scale: 1.0,
-        rho_prior: gam_problem::RhoPrior::Flat,
-        n_observations: 4,
-        nullspace_dim: 1.0,
-        gaussian_weight_log_sum_half: 0.0,
-        dp_floor_scale: 1.0,
-        dispersion: DispersionHandling::Fixed {
-            phi: 1.0,
-            include_logdet_h: true,
-            include_logdet_s: true,
-        },
-        ext_coords: Vec::new(),
-        ext_coord_pair_fn: None,
-        rho_ext_pair_fn: None,
-        fixed_drift_deriv: None,
-        contracted_psi_second_order: None,
-        barrier_config: None,
-        kkt_residual: None,
-        active_constraints: None,
-        stochastic_trace_state: Arc::new(Mutex::new(StochasticTraceState::default())),
-    };
-    let rho = vec![0.0_f64; k];
-    let result = reml_laml_evaluate(&solution, &rho, EvalMode::ValueGradientHessian, None).unwrap();
-
-    assert!(
-        matches!(result.hessian, gam_problem::HessianValue::Operator(_)),
-        "large-k subspace-trace case should use projected outer Hessian operator"
-    );
-}
-
-#[test]
 pub(crate) fn test_dense_spectral_operator_singular() {
     // Rank-1 matrix: H = [1 1; 1 1] has eigenvalues {0, 2}.
     let h = array![[1.0, 1.0], [1.0, 1.0]];
@@ -4215,34 +4151,21 @@ pub(crate) fn gaussian_derivatives_advertise_exact_outer_hvp_kernel() {
 }
 
 #[test]
-pub(crate) fn standard_gam_large_n_gaussian_prefers_operator_when_dense_work_is_large() {
-    assert!(prefer_outer_hessian_operator(320_000, 42, 6));
-    assert!(matches!(
-        GaussianDerivatives.outer_hessian_derivative_kernel(),
-        Some(OuterHessianDerivativeKernel::Gaussian)
-    ));
-}
-
-#[test]
-pub(crate) fn callback_outer_hessian_routes_by_row_pair_work_even_at_small_p() {
-    assert!(!prefer_outer_hessian_operator(155_980, 19, 23));
-    assert!(outer_hessian_route_plan(155_980, 19, 23, true, true, false).use_operator);
-    assert!(!outer_hessian_route_plan(155_980, 19, 23, true, false, false).use_operator);
-    assert!(!outer_hessian_route_plan(1_000, 19, 23, true, true, false).use_operator);
-}
-
-#[test]
-pub(crate) fn callback_outer_hessian_ignores_generic_large_n_small_p_crossover() {
-    assert!(prefer_outer_hessian_operator(195_780, 33, 8));
-    assert!(!outer_hessian_route_plan(195_780, 33, 8, true, true, false).use_operator);
-    assert!(outer_hessian_route_plan(195_780, 512, 8, true, true, false).use_operator);
-    assert!(outer_hessian_route_plan(195_780, 33, 32, true, true, false).use_operator);
-
-    let plan = outer_hessian_route_plan(195_780, 33, 8, true, true, false);
-    assert!(!plan.use_operator);
-    assert_eq!(plan.choice(), "dense");
-    assert_eq!(plan.reason, "below_crossover");
-    assert!(!plan.scale_prefers_operator);
+pub(crate) fn outer_hessian_route_is_dense_whenever_the_workspace_fits() {
+    // Shapes that crossed the removed cliffs: the Matern standard GAM (p = 42,
+    // K = 6), the callback row-pair shape (p = 19, K = 23), the generic large-n
+    // crossover (p = 33, K = 8), p = 512, K = 32, and #2817's p = 93, K = 13. The
+    // operator build pays the dense assembly's work and its products on top, so
+    // each stays dense while its workspace fits the materialization cap.
+    for (p, k) in [(42usize, 6usize), (19, 23), (33, 8), (512, 8), (33, 32), (93, 13)] {
+        assert!(dense_outer_hessian_workspace_fits(p, k), "p={p} k={k}");
+        let plan = outer_hessian_route_plan(p, k, true, false);
+        assert!(!plan.use_operator, "p={p} k={k}");
+        assert_eq!(plan.choice(), "dense");
+        assert_eq!(plan.reason, "dense_workspace_fits");
+        assert!(!plan.scale_prefers_operator);
+        assert!(!outer_hessian_route_plan(p, k, true, true).use_operator, "p={p} k={k} projected");
+    }
 }
 
 #[test]
@@ -4250,21 +4173,24 @@ pub(crate) fn outer_hessian_route_respects_dense_workspace_budget() {
     // The budget comes from the host's resource policy (#2317: host
     // MemAvailable), so a FIXED p only exceeds it on small machines. Derive a
     // p just past THIS host's budget — the route decision is pure size
-    // arithmetic, nothing is allocated — so the memory-budget arm (checked
-    // before every other scale rule) fires on any host.
+    // arithmetic, nothing is allocated — so the memory-budget arm fires on any
+    // host.
     let k = 2usize;
     let per_matrix_bytes = 8usize * (2 * k + 3);
     let budget = outer_hessian_dense_workspace_budget_bytes();
     let p_over_budget = ((budget / per_matrix_bytes) as f64).sqrt() as usize + 2;
-    let plan = outer_hessian_route_plan(10_000, p_over_budget, k, true, true, false);
+    let plan = outer_hessian_route_plan(p_over_budget, k, true, false);
     assert!(plan.use_operator);
     assert_eq!(plan.reason, "dense_memory_budget");
     assert!(plan.dense_workspace_bytes > outer_hessian_dense_workspace_budget_bytes());
+    let projected = outer_hessian_route_plan(p_over_budget, k, true, true);
+    assert!(projected.use_operator);
+    assert_eq!(projected.reason, "subspace_projected_operator");
 }
 
 #[test]
 pub(crate) fn outer_hessian_route_reports_kernel_absent_before_scale_model() {
-    let plan = outer_hessian_route_plan(1_000_000, 10_000, 64, false, false, false);
+    let plan = outer_hessian_route_plan(10_000, 64, false, false);
     assert!(!plan.use_operator);
     assert_eq!(plan.reason, "kernel_absent");
     assert!(!plan.scale_prefers_operator);

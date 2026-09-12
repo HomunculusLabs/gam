@@ -1416,11 +1416,11 @@ def run_cmd_stream(cmd: list[str], cwd: Path | None = None) -> tuple[int, str, s
 # because the engine no longer emits them:
 #   * `[OUTER guard] convergence-guard re-eval` — no emission site.
 #   * `[OUTER hessian-route] reason=subspace_forced_dense` — the routing
-#     reason set is now below_crossover / callback_row_pair_work /
-#     dense_memory_budget / kernel_absent / large_k / large_linear_work /
-#     large_n_moderate_p / large_p / family_op, with no forced-dense label.
-#   * the biobank-family `declining analytic outer Hessian` tags — that
-#     line is now emitted under a single `[standard-GAM]` tag.
+#     reason set is now dense_workspace_fits / dense_memory_budget /
+#     kernel_absent / subspace_projected_operator / family_op, with no
+#     forced-dense label.
+#   * the biobank-family `declining analytic outer Hessian` tags — the
+#     engine no longer declines the analytic outer Hessian by row count.
 # Two `[IFT-QUALITY]` fields the previous version aggregated
 # (`drho_norm`, `h_pen_logdet`) are likewise absent from the current
 # marker, so the Δρ-magnitude and log|H_pen| distributions are not

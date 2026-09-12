@@ -642,13 +642,13 @@ _MARKER_SAMPLES: dict[str, tuple[str, str]] = {
         "[PIRLS solve-end] iters={} elapsed=",
     ),
     "_OUTER_HESSIAN_ROUTE_PATTERN": (
-        "[OUTER hessian-route] choice=operator reason=large_k n=320000 p=128 k=32 "
+        "[OUTER hessian-route] choice=operator reason=dense_memory_budget n=320000 p=128 k=32 "
         "callback_kernel=false subspace_trace=false scale_prefers_operator=true "
         "dense_workspace_bytes=5600000000",
         "[OUTER hessian-route] choice={route_choice} reason={route_reason} ",
     ),
     "_OUTER_HESSIAN_ELAPSED_PATTERN": (
-        "[OUTER hessian-elapsed] choice=dense reason=below_crossover n=1000 p=20 k=4 "
+        "[OUTER hessian-elapsed] choice=dense reason=dense_workspace_fits n=1000 p=20 k=4 "
         "elapsed=12.347s",
         "[OUTER hessian-elapsed] choice={route_choice} reason={route_reason} ",
     ),
@@ -945,9 +945,9 @@ class MarkerPatternTests(unittest.TestCase):
     def test_outer_hessian_elapsed_pattern_extracts_timing(self) -> None:
         cases = [
             (
-                "[OUTER hessian-elapsed] choice=dense reason=below_crossover "
+                "[OUTER hessian-elapsed] choice=dense reason=dense_workspace_fits "
                 "n=1000 p=20 k=4 elapsed=12.347s",
-                "dense", "below_crossover", "12.347",
+                "dense", "dense_workspace_fits", "12.347",
             ),
             (
                 "[OUTER hessian-elapsed] choice=operator reason=family_op "

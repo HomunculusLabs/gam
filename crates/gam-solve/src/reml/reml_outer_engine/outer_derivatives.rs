@@ -35,9 +35,8 @@ pub(crate) use dense_assembly::*;
 pub(crate) use kkt::*;
 pub(crate) use operator::*;
 // Re-flatten `routing` at each item's own declared visibility: the outer-Hessian
-// routing predicates/thresholds (`OuterHessianRoutePlan`, `outer_hessian_route_plan`,
-// `prefer_outer_hessian_operator`, `MATRIX_FREE_OUTER_HESSIAN_{LARGE_N_THRESHOLD,
-// DIM_AT_LARGE_N}`) are declared `pub` so the relocated families' cross-crate
+// route plan (`OuterHessianRoutePlan`, `outer_hessian_route_plan`) is declared
+// `pub` so the relocated families' cross-crate
 // regression tests (#1521 carve) reach them through the flat
 // `gam_solve::estimate::reml::reml_outer_engine::<Name>` path; everything else in
 // `routing` is `pub(crate)`. A single `pub use` glob carries those visibilities
