@@ -220,7 +220,7 @@ pub fn effect_weighted_retention(
 /// because coordinates are useful only if interventions in those coordinates
 /// land in the intended downstream behavior; reconstruction EV is secondary.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct EffectWeightedFitReport {
+pub(crate) struct EffectWeightedFitReport {
     pub headline: FitQualityMetric,
     pub interchange_accuracy: f64,
     pub explained_variance: f64,

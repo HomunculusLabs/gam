@@ -1627,7 +1627,7 @@ struct CanonicalChart<'a> {
 /// The canonical (arc-length) reading of one `d = 1` chart, plus the gauge
 /// diagnostics that say whether the raw chart could have been read instead.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CanonicalChartCoordinates {
+pub(crate) struct CanonicalChartCoordinates {
     /// The atom whose chart was read.
     pub atom: usize,
     /// Canonical span (`period` for a circle chart, `1` for an interval chart).

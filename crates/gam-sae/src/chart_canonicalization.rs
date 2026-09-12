@@ -2347,7 +2347,7 @@ pub enum SphereBoostAxis {
 /// keeps every evaluated row away from the `1/c` singularity, so the three
 /// fields are smooth and bounded on the data and the pin is well-posed.
 #[derive(Debug, Clone)]
-pub struct SphereBoostFlowBasis;
+pub(crate) struct SphereBoostFlowBasis;
 
 impl SphereBoostFlowBasis {
     /// The three boost modes are always present; the dimension is fixed at 3.

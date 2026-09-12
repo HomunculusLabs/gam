@@ -111,7 +111,7 @@ impl Tier0Mean {
 /// grouped data; [`Tier0Mean`] is the single-group (global) special case. Same
 /// structural DC-atom kill as `Tier0Mean` (#10), applied within each context.
 #[derive(Clone, Debug)]
-pub struct PerContextMean {
+pub(crate) struct PerContextMean {
     /// Global fallback mean (used for groups unseen at fit time), length `p`.
     pub global: Array1<f64>,
     /// Per-group column means, keyed by context/template id.
@@ -249,7 +249,7 @@ impl SinkAnchor {
 
 /// Flag-gated Tier-0.5 sink-atom configuration.
 #[derive(Clone, Debug)]
-pub struct Tier05SinkAtomConfig {
+pub(crate) struct Tier05SinkAtomConfig {
     /// Disabled by default: callers must opt in after supplying row support.
     pub enabled: bool,
     /// Include the fixed position-0 support anchor.

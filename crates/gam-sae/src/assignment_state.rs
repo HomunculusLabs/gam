@@ -73,7 +73,7 @@ struct AtomCoordMeta {
 /// block so a later full-support specialization remains an exact inverse of the
 /// dense representation.
 #[derive(Debug, Clone)]
-pub struct SaeAssignmentAtomSpec {
+pub(crate) struct SaeAssignmentAtomSpec {
     pub latent_dim: usize,
     pub id_mode: LatentIdMode,
     pub manifold: LatentManifold,

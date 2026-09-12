@@ -59,7 +59,7 @@ pub(crate) const NULL_REPLICATES: usize = 200;
 /// Curveball state: each row's active-atom index list (kept sorted so a trade's
 /// shared/exclusive split is a linear merge) plus the driving RNG. Preserves
 /// every row sum and every column sum under [`Self::trade`].
-pub struct CurveballSampler {
+pub(crate) struct CurveballSampler {
     rows: Vec<Vec<usize>>,
     rng: StdRng,
 }
@@ -445,7 +445,7 @@ impl AuditSparseRoute {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct LiveAmplitudeMoments {
+pub(crate) struct LiveAmplitudeMoments {
     pub count: usize,
     pub sum: f64,
     pub sum2: f64,

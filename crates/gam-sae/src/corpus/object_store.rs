@@ -206,7 +206,7 @@ fn parse_header(key: &str, header: &[u8]) -> Result<(usize, usize), ShardError> 
 /// A [`CorpusRowSource`] streaming `v1` shards out of an [`ObjectStore`] with a
 /// bounded prefetch window. See the module docs for the determinism and
 /// residency contracts.
-pub struct ObjectStoreShardSource {
+pub(crate) struct ObjectStoreShardSource {
     store: Arc<dyn ObjectStore>,
     /// Shard metadata in lexicographic key order — the pinned global row order.
     shards: Vec<ShardMeta>,

@@ -63,7 +63,7 @@ pub struct CrossFitConfig {
 /// Uses a splitmix64 hash of `(seed, row)` to assign each row a fold, giving a
 /// balanced, reproducible, order-independent split with no external RNG state.
 #[derive(Debug, Clone)]
-pub struct KFoldAssignment {
+pub(crate) struct KFoldAssignment {
     fold_of_row: Vec<usize>,
 }
 

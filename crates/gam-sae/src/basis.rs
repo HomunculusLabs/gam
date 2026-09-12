@@ -288,7 +288,7 @@ pub trait SaeBasisSecondJet: SaeBasisEvaluator {
 /// and the Duchon basis (radial third-derivative kernel block + monomial
 /// nullspace block, both in closed form). The full third jet is symmetric in
 /// its three trailing axes.
-pub trait SaeBasisThirdJet: SaeBasisSecondJet {
+pub(crate) trait SaeBasisThirdJet: SaeBasisSecondJet {
     fn third_jet(&self, coords: ArrayView2<'_, f64>) -> Result<Array5<f64>, String>;
 }
 
@@ -487,7 +487,7 @@ impl SaeBasisThirdJet for PeriodicHarmonicEvaluator {
 /// circle phase and the remaining axes are left available to the optimizer but
 /// do not enter this basis.
 #[derive(Debug, Clone)]
-pub struct RawPeriodicCircleEvaluator {
+pub(crate) struct RawPeriodicCircleEvaluator {
     pub latent_dim: usize,
 }
 
@@ -2351,7 +2351,7 @@ impl SaeBasisThirdJet for QuotientSpectralEvaluator {
 
 /// Affine Euclidean/Duchon fallback for the minimal fit entrypoint.
 #[derive(Debug, Clone)]
-pub struct AffineCoordinateEvaluator {
+pub(crate) struct AffineCoordinateEvaluator {
     pub latent_dim: usize,
 }
 
@@ -2458,7 +2458,7 @@ impl SaeBasisThirdJet for AffineCoordinateEvaluator {
 /// ([`gam_terms::basis::duchon_sae_atom_basis_with_jet`]) so they always agree on
 /// column count and scaling — the exact contract issue #247 pinned.
 #[derive(Debug, Clone)]
-pub struct DuchonCoordinateEvaluator {
+pub(crate) struct DuchonCoordinateEvaluator {
     pub centers: Array2<f64>,
     pub order: gam_terms::basis::DuchonNullspaceOrder,
 }

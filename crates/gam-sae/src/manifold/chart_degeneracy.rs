@@ -290,7 +290,7 @@ impl SaeManifoldTerm {
 /// "the chart is still a coordinate" as an explicit claim rather than leaving
 /// it to a caller to notice its absence.
 #[derive(Clone, Debug)]
-pub struct ChartNondegeneracyCertificate {
+pub(crate) struct ChartNondegeneracyCertificate {
     axes: usize,
     degenerate_axes: usize,
     collapsed_atoms: usize,

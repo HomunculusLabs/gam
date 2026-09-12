@@ -352,7 +352,7 @@ pub(crate) fn curl_seed(
 
 /// The verdict for the inverse move — demoting a circle back to flat.
 #[derive(Debug, Clone)]
-pub struct FlattenVerdict {
+pub(crate) struct FlattenVerdict {
     /// `κ` of the radius law (`≈ 2` ⇒ Gaussian fill ⇒ rank-2 plane).
     pub kappa: f64,
     /// Second resultant (`≈ 1` ⇒ diameter collapse ⇒ rank-1 line).

@@ -1261,7 +1261,7 @@ impl AtlasCycleHolonomy {
 
 /// A covariance source shared by one or more Gauss--Bonnet angle terms.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GaussBonnetNoiseSource {
+pub(crate) struct GaussBonnetNoiseSource {
     source: usize,
     covariance: Array2<f64>,
 }
@@ -1334,7 +1334,7 @@ impl GaussBonnetSourceGradient {
 
 /// One signed curvature/angle-defect contribution.
 #[derive(Clone, Debug, PartialEq)]
-pub struct GaussBonnetContribution {
+pub(crate) struct GaussBonnetContribution {
     curvature_estimate: f64,
     polar_linearization_remainder_bound: f64,
     geometric_remainder_bound: f64,

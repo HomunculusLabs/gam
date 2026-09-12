@@ -38,7 +38,7 @@ use std::sync::Arc;
 /// u_p       -= L_i^T v_q                  // q × p apply-t (apply_l_t)
 /// y_β[s, :] += φ_i[s] * u_p              // scatter (scatter_jbeta_t)
 /// ```
-pub trait SaeKroneckerRow {
+pub(crate) trait SaeKroneckerRow {
     /// `u_out[j] = Σ_s φ_i[s] * x_beta[s * p + j]` for `j in 0..p`.
     ///
     /// Gather step: projects the full `K·p` beta vector down to the `p`-dimensional
@@ -294,7 +294,7 @@ impl SaeKroneckerRow for SaeKroneckerRows {
 /// materialized `p × p`. With `M_n = I_p` it reproduces the isotropic
 /// `SparseBlockKroneckerPenaltyOp` exactly (pinned by the parity test), so it is
 /// only installed on the whitening path.
-pub struct WhitenedRowGramPenaltyOp {
+pub(crate) struct WhitenedRowGramPenaltyOp {
     /// Shared per-row support `φ_n` (`a_phi`) + output metric `M_n`, reused from
     /// the cross-block operator so the two β-tier objects cannot drift apart.
     pub(crate) kron: Arc<SaeKroneckerRows>,
@@ -458,7 +458,7 @@ impl BetaPenaltyOp for WhitenedRowGramPenaltyOp {
 /// `(M·p)²` per-atom covariance. With `M_n = I_p` it reduces bit-for-bit to the
 /// isotropic factored operator (pinned by the reduction test), so it is only
 /// installed on the whitening path.
-pub struct WhitenedFactoredFrameOp {
+pub(crate) struct WhitenedFactoredFrameOp {
     /// Decoder output dimension `p`.
     p: usize,
     /// Total reduced border dimension `Σ_k M_k · r_k`.

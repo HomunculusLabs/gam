@@ -54,7 +54,7 @@ const LEDGER_RUN_ID: &str = "structure-ledger";
 
 /// Persistent, topology-keyed store for one dictionary's
 /// [`StructureLedger`].
-pub struct LedgerStore {
+pub(crate) struct LedgerStore {
     key: Fingerprint,
     /// `None` when the cache directory is unwritable; the store then
     /// degrades to in-memory-only (load = fresh, save = no-op) without

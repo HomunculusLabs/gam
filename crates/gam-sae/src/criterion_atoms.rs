@@ -172,7 +172,7 @@ impl SaeCriterionAtom {
 /// was emitted from one cache by [`Self::assemble`], the value and gradient are
 /// projections of a single factorization and cannot disagree by construction.
 #[derive(Debug, Clone)]
-pub struct SaeCriterion {
+pub(crate) struct SaeCriterion {
     atoms: Vec<SaeCriterionAtom>,
     n_rho: usize,
 }

@@ -97,7 +97,7 @@ impl PersistenceBar {
 /// (finite loops die when their disk fills), and `h2` holds shells when the
 /// caller asks for sphere/torus homology.
 #[derive(Clone, Debug)]
-pub struct PersistenceDiagram {
+pub(crate) struct PersistenceDiagram {
     pub h0: Vec<PersistenceBar>,
     pub h1: Vec<PersistenceBar>,
     pub h2: Vec<PersistenceBar>,
@@ -278,7 +278,7 @@ impl TopologyResolution {
 /// dictionary-level claim to the shared certificate ledger: every audited atom's
 /// measured persistent topology must agree with its raced topology.
 #[derive(Debug, Clone, Copy)]
-pub struct TopologyPersistenceCertificate<'a> {
+pub(crate) struct TopologyPersistenceCertificate<'a> {
     pub atoms: &'a [Option<AtomTopologyPersistence>],
 }
 

@@ -937,7 +937,7 @@ impl GrassmannFrame {
 /// frame can be re-polared from accumulated evidence WITHOUT re-touching the
 /// border. Accumulation is `O(p r)` per update and never forms a `p × p` matrix.
 #[derive(Debug, Clone)]
-pub struct GrassmannCrossMoment {
+pub(crate) struct GrassmannCrossMoment {
     moment: Array2<f64>,
 }
 

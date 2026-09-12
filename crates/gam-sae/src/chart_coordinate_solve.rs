@@ -11,7 +11,7 @@ pub(crate) use stationary_roots::PeriodicCurveExtrema;
 
 /// Periodic Fourier basis used by continuous chart transport diagnostics.
 #[derive(Debug, Clone, Copy)]
-pub enum ChartBasisKind {
+pub(crate) enum ChartBasisKind {
     /// `[1, sin(2πt), cos(2πt), …, sin(2πHt), cos(2πHt)]`.
     Periodic { n_harmonics: usize },
 }

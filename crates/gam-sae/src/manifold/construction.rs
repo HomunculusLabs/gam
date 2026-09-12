@@ -55,7 +55,7 @@ use super::fit_drivers::GaugeOrbitDescent;
 /// then prices atoms through the SAME `rank_dof_from_grams` MP hard count as the
 /// dense path (the dense-vs-streaming parity guarantee).
 #[derive(Default)]
-pub struct StreamingRankInputs {
+pub(crate) struct StreamingRankInputs {
     pub(crate) grams: Vec<Array2<f64>>,
     pub(crate) n_eff: Vec<f64>,
 }

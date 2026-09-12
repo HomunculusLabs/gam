@@ -79,7 +79,7 @@ pub enum CrosscoderLayer {
 /// The empirical transport map of one circle atom, the phase-shift law fit, and
 /// the drift statistics.
 #[derive(Clone, Debug)]
-pub struct AtomTransportReport {
+pub(crate) struct AtomTransportReport {
     /// The atom index this report is for.
     pub atom: usize,
     /// The source and target layers the transport was measured between.

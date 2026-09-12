@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Debug, Clone)]
-pub struct SaeArrowVector {
+pub(crate) struct SaeArrowVector {
     pub t: Array1<f64>,
     pub beta: Array1<f64>,
 }

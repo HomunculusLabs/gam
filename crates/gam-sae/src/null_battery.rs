@@ -69,7 +69,7 @@ impl Tail {
 
 /// Plus-one-corrected Monte Carlo tail probability and its sampling uncertainty.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct EmpiricalPValue {
+pub(crate) struct EmpiricalPValue {
     pub p_value: f64,
     pub monte_carlo_standard_error: f64,
     pub extreme_draws: usize,
@@ -352,7 +352,7 @@ pub struct SpikeInRocPoint {
 /// topology, Betti, and conditionality claims should ship when the detector has
 /// an explicit operating FPR.
 #[derive(Clone, Debug)]
-pub struct CalibratedRocClaimReport {
+pub(crate) struct CalibratedRocClaimReport {
     pub claim: String,
     pub claimed_snr: f64,
     pub claimed_false_positive_rate: f64,

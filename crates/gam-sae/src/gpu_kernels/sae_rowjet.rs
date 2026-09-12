@@ -564,7 +564,7 @@ impl SaeRowJetChannels {
 /// row-varying upload beyond the semantic inputs is one `n·p` probe vector
 /// (plus the small direction coefficients for the bilinear form).
 #[derive(Debug, Clone, Copy)]
-pub enum SaeRowJetContraction<'a> {
+pub(crate) enum SaeRowJetContraction<'a> {
     /// `t[r][a] = ⟨first(r,a,·), probe_r⟩`, `beta[r][c] = ⟨beta(r,c,·), probe_r⟩`.
     ///
     /// This is the IFT right-hand-side shape: the consumer's whitened metric
@@ -624,7 +624,7 @@ pub enum SaeRowJetContraction<'a> {
 
 /// Reduced outputs of one contracted tile: per-row t and β coefficients only.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SaeRowJetContractedTile {
+pub(crate) struct SaeRowJetContractedTile {
     pub n_rows: usize,
     pub q: usize,
     pub n_beta: usize,
@@ -1234,7 +1234,7 @@ pub enum SaeRowJetPath {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SaeRowJetExecutionPlan {
+pub(crate) struct SaeRowJetExecutionPlan {
     pub path: SaeRowJetPath,
     pub tile_rows: usize,
     pub ledger: SaeRowJetMemoryLedger,

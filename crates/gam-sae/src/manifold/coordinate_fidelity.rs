@@ -831,7 +831,7 @@ pub struct AtomCoordinateFidelity {
 /// this adapter contributes the conservative dictionary-level claim to the
 /// shared ledger: every eligible d=1 coordinate must have an honest reading.
 #[derive(Debug, Clone, Copy)]
-pub struct CoordinateFidelityCertificate<'a> {
+pub(crate) struct CoordinateFidelityCertificate<'a> {
     pub atoms: &'a [Option<AtomCoordinateFidelity>],
 }
 
