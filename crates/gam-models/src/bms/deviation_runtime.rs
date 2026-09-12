@@ -82,7 +82,7 @@ impl_reason_error_boilerplate! {
 /// The compiler bakes the orthonormalising rotation into M, so no
 /// separate rotation matrix is stored on the install state.
 #[derive(Clone, Debug)]
-pub struct InstalledFlexBlock {
+pub(crate) struct InstalledFlexBlock {
     /// Anchor correction matrix `M ∈ R^{d × k}` from
     /// `CompiledBlock::anchor_correction`. The design evaluator subtracts
     /// `n_row · M` per row.

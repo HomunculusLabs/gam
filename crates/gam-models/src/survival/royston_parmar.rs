@@ -31,7 +31,7 @@ pub struct RoystonParmarInputs<'a> {
 /// `A·β + offset ≥ 0` enforcing dη/da ≥ 0; the `*_offset_*` views carry the
 /// fixed (non-coefficient) addends to η at entry, η at exit, and dη/da at
 /// exit.  All views are zero-copy borrows of caller-owned storage.
-pub struct RoystonParmarSharedTimeCovariateInputs<'a> {
+pub(crate) struct RoystonParmarSharedTimeCovariateInputs<'a> {
     pub age_entry: ArrayView1<'a, f64>,
     pub age_exit: ArrayView1<'a, f64>,
     pub event_target: ArrayView1<'a, u8>,

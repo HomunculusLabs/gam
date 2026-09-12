@@ -337,7 +337,7 @@ pub enum MultinomialPosteriorRule {
 /// all-ones direction, as required by `sum_c p_c = 1`.  A value of this type is
 /// only constructed after the requested level-difference certificate succeeds.
 #[derive(Clone, Debug)]
-pub struct MultinomialPosteriorMoments {
+pub(crate) struct MultinomialPosteriorMoments {
     /// `E[p_c]`, length `K`, including the reference class last.
     pub class_mean: Array1<f64>,
     /// `Cov(p_c, p_d)`, shape `(K, K)`.

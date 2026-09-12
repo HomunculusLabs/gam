@@ -6,7 +6,7 @@ use ndarray::{Array1, Array2, ArrayView1};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
-pub struct WiggleBlockConfig {
+pub(crate) struct WiggleBlockConfig {
     pub degree: usize,
     pub num_internal_knots: usize,
     pub penalty_order: usize,

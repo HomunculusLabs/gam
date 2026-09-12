@@ -217,7 +217,7 @@ fn probit_frailty_scale_components(sigma: f64) -> (f64, f64) {
 /// E[Φ(η + U)] = Φ(η · s) with s = 1/√(1+σ²); writing α = σ²/(1+σ²) the
 /// derivatives are ∂_t s = −α·s and ∂_{tt} s = α(3α−2)·s.
 #[derive(Clone, Copy, Debug)]
-pub struct ProbitFrailtyScaleJet {
+pub(crate) struct ProbitFrailtyScaleJet {
     /// s = 1/√(1+σ²)
     pub s: f64,
     /// α = σ²/(1+σ²)  — shared auxiliary for all derivative levels.

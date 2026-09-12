@@ -826,7 +826,7 @@ impl StationarityQuadratic {
 /// `|∂e_i/∂ρ| = |∂μ̂_i/∂ρ|` (the absolute-residual score's only ρ-dependence
 /// is through μ̂). Everything is assembled from ONE Cholesky of `A(λ)` plus a
 /// handful of solves.
-pub struct GaussianRemlRhoResponse<'a> {
+pub(crate) struct GaussianRemlRhoResponse<'a> {
     x: &'a Array2<f64>,
     y: &'a Array1<f64>,
     s: &'a Array2<f64>,

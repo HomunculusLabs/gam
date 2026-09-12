@@ -14,7 +14,7 @@ use gam_math::jet_scalar::SymmetricQuadraticCoefficients;
 /// - `c_i`: `sqrt(1 + s² g_iᵀΣg_i)` (per-row, length n)
 /// - `timewiggle_primary_rows`: canonical channel-major q-gradient rows when
 ///   the nonlinear timewiggle map is active
-pub struct SurvivalMarginalSlopeFamilyScalars {
+pub(crate) struct SurvivalMarginalSlopeFamilyScalars {
     pub(crate) q0_i: Vec<f64>,
     pub(crate) q1_i: Vec<f64>,
     pub(crate) qd1_i: Vec<f64>,
@@ -153,7 +153,7 @@ impl SurvivalMarginalSlopeFamilyScalars {
 /// `Σ`, and `c = sqrt(1 + s² gᵀΣg)`, this emits
 /// `q0·dc + dlinear`, `q1·dc + dlinear`, and `qd1·dc`, where
 /// `dc = s²(Σg)ᵀG/c` and `dlinear = s zᵀG`.
-pub struct SlopeBlockJacobian {
+pub(crate) struct SlopeBlockJacobian {
     pub(crate) layout: SlopeLayout,
     pub(crate) z: Arc<Array2<f64>>,
     pub(crate) covariance: ScoreCovarianceField,
@@ -412,7 +412,7 @@ impl crate::custom_family::BlockEffectiveJacobian for SlopeBlockJacobian {
 /// ```
 ///
 /// At g=0 (β=0 init): c=1, so each row is just M\[i,:\].
-pub struct MarginalBlockJacobian {
+pub(crate) struct MarginalBlockJacobian {
     /// The marginal basis design (n × p_marginal), `Arc`-shared with its
     /// owner rather than copied for the callback lifetime.
     pub(crate) design: Arc<Array2<f64>>,
@@ -500,7 +500,7 @@ impl crate::custom_family::BlockEffectiveJacobian for MarginalBlockJacobian {
 /// ```
 ///
 /// At g=0 (β=0 init): c=1.
-pub struct TimeBlockJacobian {
+pub(crate) struct TimeBlockJacobian {
     // `Arc`-shared with their owners.
     pub(crate) design_entry: Arc<Array2<f64>>,
     pub(crate) design_exit: Arc<Array2<f64>>,

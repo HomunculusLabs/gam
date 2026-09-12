@@ -962,7 +962,7 @@ pub fn sampleobservation_seeded_replicates(
 
 /// Extension trait for custom multi-block families that provide explicit
 /// generative semantics (mean + observation noise) at a fitted state.
-pub trait CustomFamilyGenerative: CustomFamily {
+pub(crate) trait CustomFamilyGenerative: CustomFamily {
     fn generativespec(
         &self,
         block_states: &[ParameterBlockState],

@@ -92,7 +92,7 @@ impl GaussianLocationScaleWiggleHessianRowPieces {
     }
 }
 
-pub struct GaussianLocationScaleWiggleFamily {
+pub(crate) struct GaussianLocationScaleWiggleFamily {
     pub y: Array1<f64>,
     pub weights: Array1<f64>,
     pub mu_design: Option<DesignMatrix>,

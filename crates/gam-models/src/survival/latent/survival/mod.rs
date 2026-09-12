@@ -380,7 +380,7 @@ pub struct LatentSurvivalFamily {
 }
 
 #[derive(Clone)]
-pub struct LatentBinaryFamily {
+pub(crate) struct LatentBinaryFamily {
     pub event_target: Array1<u8>,
     pub weights: Array1<f64>,
     pub latent_sd: f64,
@@ -2107,7 +2107,7 @@ struct LatentKernelPrimaryState {
 /// Keeping these coupled channels together prevents boundary reordering and
 /// cross-row mean/scale mismatches when selecting a derivative backend.
 #[derive(Clone, Copy, Debug)]
-pub struct LatentSurvivalPrimaryPoint {
+pub(crate) struct LatentSurvivalPrimaryPoint {
     pub q_entry: f64,
     pub q_exit: f64,
     pub qdot_exit: f64,

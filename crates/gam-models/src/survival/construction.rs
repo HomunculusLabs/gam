@@ -3037,7 +3037,7 @@ pub fn marginal_slope_baseline_offset_theta_partials(
 /// value and derivatives because origin rows are anchored outside the finite
 /// probit chart. Linear baselines have no coordinates and return `None`.
 #[derive(Clone, Debug)]
-pub struct MarginalSlopeBaselineOffsetThetaGeometry {
+pub(crate) struct MarginalSlopeBaselineOffsetThetaGeometry {
     pub value: (f64, f64),
     pub first: Vec<(f64, f64)>,
     pub second: Vec<Vec<(f64, f64)>>,
@@ -3803,7 +3803,7 @@ pub fn add_survival_time_derivative_guard_offset(
 }
 
 #[derive(Clone, Debug)]
-pub struct LatentSurvivalBaselineOffsets {
+pub(crate) struct LatentSurvivalBaselineOffsets {
     pub loaded_eta_entry: Array1<f64>,
     pub loaded_eta_exit: Array1<f64>,
     pub loaded_derivative_exit: Array1<f64>,
@@ -4074,7 +4074,7 @@ pub(crate) fn append_zero_tail_columns(
 
 /// Which follow-up time a time-margin basis is evaluated at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TimeMarginAbscissa {
+pub(crate) enum TimeMarginAbscissa {
     /// An entry time. A row entering at the origin
     /// (`age ≤ ENTRY_AT_ORIGIN_THRESHOLD`) carries no entry term in the
     /// likelihood (`entry_active = false` in `survival::base`), so it has no
@@ -4287,7 +4287,7 @@ pub(crate) fn replay_time_varying_survival_covariate_template(
 /// is the only B-spline evaluation on the slope time axis, so the batch
 /// replay below and the per-`(row, t)` survival-curve replay cannot disagree
 /// about which basis they are asking for.
-pub struct SlopeTimeMarginRows {
+pub(crate) struct SlopeTimeMarginRows {
     pub value: Array2<f64>,
     pub derivative: Array2<f64>,
 }

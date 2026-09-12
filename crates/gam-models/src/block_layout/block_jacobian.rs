@@ -24,7 +24,7 @@ use crate::custom_family::{AdditiveBlockJacobian, BlockEffectiveJacobian, Parame
 /// (i.e. `own_output == block_idx`). `wiggle_block` is the optional nonlinear
 /// link-modulation block whose effective linear Jacobian is all zeros; its row
 /// count is taken from the first additive block's design.
-pub struct AdditiveWiggleBlockLayout<'a> {
+pub(crate) struct AdditiveWiggleBlockLayout<'a> {
     /// Family name used as the message prefix and `effective_design` context,
     /// e.g. `"SurvivalLocationScaleFamily"`.
     pub family: &'a str,

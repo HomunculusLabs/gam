@@ -630,7 +630,7 @@ impl<'a> BinomialLocationScaleWiggleRowProgram<'a> {
 }
 
 #[derive(Clone)]
-pub struct BinomialLocationScaleWiggleFamily {
+pub(crate) struct BinomialLocationScaleWiggleFamily {
     pub y: Array1<f64>,
     pub weights: Array1<f64>,
     pub link_kind: InverseLink,

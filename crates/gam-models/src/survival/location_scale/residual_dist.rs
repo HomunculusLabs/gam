@@ -81,7 +81,7 @@ pub enum ResidualDistribution {
     Logistic,
 }
 
-pub trait ResidualDistributionOps {
+pub(crate) trait ResidualDistributionOps {
     fn cdf(&self, z: f64) -> f64;
     fn pdf(&self, z: f64) -> f64;
     fn pdf_derivative(&self, z: f64) -> f64;

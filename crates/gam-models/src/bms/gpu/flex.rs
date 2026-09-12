@@ -71,7 +71,7 @@ extern "C" __global__ void bms_flex_probe() {
 /// Process-wide BMS-flex GPU backend. Lazy-initialised on first call to
 /// [`BmsFlexGpuBackend::probe`].
 #[must_use]
-pub struct BmsFlexGpuBackend {
+pub(crate) struct BmsFlexGpuBackend {
     #[cfg(target_os = "linux")]
     pub(crate) inner: gam_gpu::backend_probe::CudaBackendContext,
 }

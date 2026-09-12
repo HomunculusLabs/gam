@@ -1303,7 +1303,7 @@ pub(crate) fn row_kernel_contracted_trace_hessian<const K: usize>(
 /// Only a family that declares the third information derivative available has
 /// this channel. It is therefore a separate capability, not a declining default
 /// on [`RowKernel`].
-pub trait RowKernelFifth<const K: usize>: RowKernel<K> {
+pub(crate) trait RowKernelFifth<const K: usize>: RowKernel<K> {
     /// Fifth-order contracted derivative along every primary axis:
     /// `∂⁵ℓ_i / (∂p_z ∂p_a ∂p_b ∂[dir_u] ∂[dir_v])`, indexed `[z][a][b]`.
     ///

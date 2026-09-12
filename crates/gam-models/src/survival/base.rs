@@ -89,7 +89,7 @@ pub struct SurvivalEngineInputs<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct SurvivalTimeCovarInputs<'a> {
+pub(crate) struct SurvivalTimeCovarInputs<'a> {
     pub age_entry: ArrayView1<'a, f64>,
     pub age_exit: ArrayView1<'a, f64>,
     pub event_target: ArrayView1<'a, u8>,

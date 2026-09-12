@@ -139,7 +139,7 @@ pub struct TimeDependentCovariateBlockInput {
 /// Whether a covariate block (threshold or log-sigma) is time-invariant or
 /// depends on the survival time axis via a tensor product.
 #[derive(Clone)]
-pub enum CovariateBlockKind {
+pub(crate) enum CovariateBlockKind {
     Static(ParameterBlockInput),
     TimeVarying(TimeDependentCovariateBlockInput),
 }

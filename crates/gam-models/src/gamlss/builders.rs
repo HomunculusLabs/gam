@@ -806,7 +806,7 @@ pub struct GaussianLocationScaleTermSpec {
 }
 
 #[derive(Clone)]
-pub struct GaussianLocationScaleWiggleTermSpec {
+pub(crate) struct GaussianLocationScaleWiggleTermSpec {
     pub y: Array1<f64>,
     pub weights: Array1<f64>,
     pub meanspec: TermCollectionSpec,
@@ -830,7 +830,7 @@ pub struct BinomialLocationScaleTermSpec {
 }
 
 #[derive(Clone)]
-pub struct BinomialLocationScaleWiggleTermSpec {
+pub(crate) struct BinomialLocationScaleWiggleTermSpec {
     pub y: Array1<f64>,
     pub weights: Array1<f64>,
     pub link_kind: InverseLink,
@@ -860,13 +860,13 @@ pub(crate) struct BlockwiseTermFitResultParts {
     pub noise_design: TermCollectionDesign,
 }
 
-pub struct BlockwiseTermWiggleFitResult {
+pub(crate) struct BlockwiseTermWiggleFitResult {
     pub fit: BlockwiseTermFitResult,
     pub wiggle_knots: Array1<f64>,
     pub wiggle_degree: usize,
 }
 
-pub struct BinomialMeanWiggleTermFitResult {
+pub(crate) struct BinomialMeanWiggleTermFitResult {
     pub fit: UnifiedFitResult,
     pub resolvedspec: TermCollectionSpec,
     pub design: TermCollectionDesign,
