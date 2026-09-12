@@ -2937,8 +2937,8 @@ fn timewiggle_marginal_slope_family(score_warp: Option<DeviationRuntime>) -> Sur
         gaussian_frailty_sd: None,
         family_hyper: SurvivalMarginalSlopeFamilyHyperState::default(),
         derivative_guard: 1e-6,
-        design_entry: DesignMatrix::from(array![[0.0, 0.0, 0.0, 0.0, 0.0]]),
-        design_exit: DesignMatrix::from(array![[0.0, 0.0, 0.0, 0.0, 0.0]]),
+        design_entry: DesignMatrix::from(array![[0.4, 0.0, 0.0, 0.0, 0.0]]),
+        design_exit: DesignMatrix::from(array![[0.7, 0.0, 0.0, 0.0, 0.0]]),
         design_derivative_exit: DesignMatrix::from(array![[1.0, 0.0, 0.0, 0.0, 0.0]]),
         offset_entry: Arc::new(array![0.05]),
         offset_exit: Arc::new(array![0.15]),
@@ -3012,7 +3012,9 @@ fn timewiggle_marginal_slope_beta(family: &SurvivalMarginalSlopeFamily) -> Array
 /// Ridders-certified central difference of the family's own `D_β H[v]` along `u`, after
 /// `D_β H[v]` is itself differenced against the joint Hessian. A score-warp coordinate moves
 /// the flex primaries, so a rigid primary evaluator misses its curvature; `dJ` has q rows only,
-/// so `dJᵀ H dJ` never reaches the slope or flex columns.
+/// so `dJᵀ H dJ` never reaches the slope or flex columns. Both directions move the wiggle
+/// coefficients and the entry and exit design rows are nonzero, so every `m_k` moves through
+/// `γ` as well as through `h` in the base and marginal columns.
 #[test]
 fn timewiggle_beta_hessian_second_directional_derivative_matches_finite_difference_2893() {
     for score_warp in [None, Some(test_deviation_runtime())] {

@@ -174,10 +174,15 @@ impl SurvivalMarginalSlopeFamily {
         let q0_idx = primary_layout.map_or(0, |primary| primary.q0);
         let q1_idx = primary_layout.map_or(1, |primary| primary.q1);
         let qd1_idx = primary_layout.map_or(2, |primary| primary.qd1);
-        out[q0_idx] = eg.d2q_dq02[0] * mu * dh0 + eg.dq_dq0[0] * dmu;
-        out[q1_idx] = xg.d2q_dq02[0] * mu * dh1 + xg.dq_dq0[0] * dmu;
-        out[qd1_idx] =
-            xg.d3q_dq03[0] * d_raw * mu * dh1 + xg.d2q_dq02[0] * (dd_raw * mu + d_raw * dmu);
+        // `m_k = Σ_l B_l^{(k)}(h)·γ_l` moves with the wiggle coefficients as well as with `h`
+        // (gam#2893).
+        let d_wiggle = dt.slice(s![time_tail.clone()]);
+        let dm1_entry = eg.d2q_dq02[0] * dh0 + eg.basis_d1.row(0).dot(&d_wiggle);
+        let dm1_exit = xg.d2q_dq02[0] * dh1 + xg.basis_d1.row(0).dot(&d_wiggle);
+        let dm2_exit = xg.d3q_dq03[0] * dh1 + xg.basis_d2.row(0).dot(&d_wiggle);
+        out[q0_idx] = dm1_entry * mu + eg.dq_dq0[0] * dmu;
+        out[q1_idx] = dm1_exit * mu + xg.dq_dq0[0] * dmu;
+        out[qd1_idx] = dm2_exit * d_raw * mu + xg.d2q_dq02[0] * (dd_raw * mu + d_raw * dmu);
         Ok(out)
     }
 

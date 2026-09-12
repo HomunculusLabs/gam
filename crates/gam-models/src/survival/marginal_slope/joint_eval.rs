@@ -234,15 +234,23 @@ impl SurvivalMarginalSlopeFamily {
             .ok_or_else(|| "timewiggle geometry missing at exit".to_string())?;
         let (m2e, m3e) = (eg.d2q_dq02[0], eg.d3q_dq03[0]);
         let (m2x, m3x, m4x) = (xg.d2q_dq02[0], xg.d3q_dq03[0], xg.d4q_dq04[0]);
+        // `m_k = Σ_l B_l^{(k)}(h)·γ_l` moves with the wiggle coefficients as well as with `h`:
+        // along `d` it moves by `m_{k+1}·dh + Σ_l B_l^{(k)}(h)·dγ_l` (gam#2893).
+        let d_wiggle = d_time.slice(s![time_tail.clone()]);
+        let dm1e = m2e * dh0 + eg.basis_d1.row(0).dot(&d_wiggle);
+        let dm2e = m3e * dh0 + eg.basis_d2.row(0).dot(&d_wiggle);
+        let dm1x = m2x * dh1 + xg.basis_d1.row(0).dot(&d_wiggle);
+        let dm2x = m3x * dh1 + xg.basis_d2.row(0).dot(&d_wiggle);
+        let dm3x = m4x * dh1 + xg.basis_d3.row(0).dot(&d_wiggle);
 
         // dJ_{q,time}[a] / dβ[d]
         let mut dj0t = vec![0.0f64; p_time];
         let mut dj1t = vec![0.0f64; p_time];
         let mut djdt = vec![0.0f64; p_time];
         for a in 0..p_base {
-            dj0t[a] = m2e * dh0 * xe[a];
-            dj1t[a] = m2x * dh1 * xx[a];
-            djdt[a] = m3x * dh1 * dr * xx[a] + m2x * ddr * xx[a] + m2x * dh1 * xd[a];
+            dj0t[a] = dm1e * xe[a];
+            dj1t[a] = dm1x * xx[a];
+            djdt[a] = dm2x * dr * xx[a] + m2x * ddr * xx[a] + dm1x * xd[a];
         }
         for li in 0..time_tail.len() {
             let ci = time_tail.start + li;
@@ -255,9 +263,9 @@ impl SurvivalMarginalSlopeFamily {
         let mut dj1m = vec![0.0f64; p_marginal];
         let mut djdm = vec![0.0f64; p_marginal];
         for a in 0..p_marginal {
-            dj0m[a] = m2e * dh0 * mr[a];
-            dj1m[a] = m2x * dh1 * mr[a];
-            djdm[a] = m3x * dh1 * dr * mr[a] + m2x * ddr * mr[a];
+            dj0m[a] = dm1e * mr[a];
+            dj1m[a] = dm1x * mr[a];
+            djdm[a] = dm2x * dr * mr[a] + m2x * ddr * mr[a];
         }
         let djm = [&dj0m[..], &dj1m[..], &djdm[..]];
         let jt: [&Array1<f64>; 3] = [&q_geom.dq0_time, &q_geom.dq1_time, &q_geom.dqd1_time];
@@ -357,11 +365,11 @@ impl SurvivalMarginalSlopeFamily {
         // Term 4: Σ_r f_r dK_r/d
         for a in 0..p_base {
             for b in 0..p_base {
-                let dk0 = m3e * dh0 * xe[a] * xe[b];
-                let dk1 = m3x * dh1 * xx[a] * xx[b];
-                let dkd = m4x * dh1 * dr * xx[a] * xx[b]
+                let dk0 = dm2e * xe[a] * xe[b];
+                let dk1 = dm2x * xx[a] * xx[b];
+                let dkd = dm3x * dr * xx[a] * xx[b]
                     + m3x * ddr * xx[a] * xx[b]
-                    + m3x * dh1 * (xx[a] * xd[b] + xd[a] * xx[b]);
+                    + dm2x * (xx[a] * xd[b] + xd[a] * xx[b]);
                 acc[[slices.time.start + a, slices.time.start + b]] +=
                     f_pi[0] * dk0 + f_pi[1] * dk1 + f_pi[2] * dkd;
             }
@@ -381,11 +389,11 @@ impl SurvivalMarginalSlopeFamily {
         }
         for a in 0..p_base {
             for b in 0..p_marginal {
-                let dk0 = m3e * dh0 * xe[a] * mr[b];
-                let dk1 = m3x * dh1 * xx[a] * mr[b];
-                let dkd = m4x * dh1 * dr * xx[a] * mr[b]
+                let dk0 = dm2e * xe[a] * mr[b];
+                let dk1 = dm2x * xx[a] * mr[b];
+                let dkd = dm3x * dr * xx[a] * mr[b]
                     + m3x * ddr * xx[a] * mr[b]
-                    + m3x * dh1 * xd[a] * mr[b];
+                    + dm2x * xd[a] * mr[b];
                 let v = f_pi[0] * dk0 + f_pi[1] * dk1 + f_pi[2] * dkd;
                 acc[[slices.time.start + a, slices.marginal.start + b]] += v;
                 acc[[slices.marginal.start + b, slices.time.start + a]] += v;
@@ -405,9 +413,9 @@ impl SurvivalMarginalSlopeFamily {
         }
         for a in 0..p_marginal {
             for b in 0..p_marginal {
-                let dk0 = m3e * dh0 * mr[a] * mr[b];
-                let dk1 = m3x * dh1 * mr[a] * mr[b];
-                let dkd = m4x * dh1 * dr * mr[a] * mr[b] + m3x * ddr * mr[a] * mr[b];
+                let dk0 = dm2e * mr[a] * mr[b];
+                let dk1 = dm2x * mr[a] * mr[b];
+                let dkd = dm3x * dr * mr[a] * mr[b] + m3x * ddr * mr[a] * mr[b];
                 acc[[slices.marginal.start + a, slices.marginal.start + b]] +=
                     f_pi[0] * dk0 + f_pi[1] * dk1 + f_pi[2] * dkd;
             }
@@ -696,7 +704,8 @@ impl SurvivalMarginalSlopeFamily {
     }
     /// Fully exact second directional derivative D²H[d,e] for a time wiggle, with or
     /// without the flexible score/link warps. Differentiates DH[e] along d analytically
-    /// using m₂–m₅ scalars.
+    /// using m₂–m₅ scalars and the wiggle basis derivatives: each `m_k = Σ_l B_l^{(k)}(h)·γ_l`
+    /// moves with the wiggle coefficients as well as with `h` (gam#2893).
     ///
     /// D²H[d,e] = J^T Ψ J  +  Σ γ_r K_r
     ///   + Σ bilinear(W_k, left_k, right_k)  for k in {T_e×dJ_d, T_d×dJ_e, H×d²J, H×dJ_d×dJ_e}
@@ -862,16 +871,60 @@ impl SurvivalMarginalSlopeFamily {
                     let dh1e = xx.dot(&dv_t.slice(s![..p_base])) + mr.dot(&dv_m);
                     let ddre = xd.dot(&dv_t.slice(s![..p_base]));
 
+                    // Moves of `m_k` along d, along e, and along d then e. `m_k` is linear in
+                    // the wiggle coefficients and `h` is linear in β, so
+                    //   dm_k[d]    = m_{k+1}·dh_d + B^{(k)}·dγ_d
+                    //   d²m_k[d,e] = m_{k+2}·dh_d·dh_e + B^{(k+1)}·dγ_d·dh_e + B^{(k+1)}·dγ_e·dh_d
+                    let dwd = du_t.slice(s![time_tail.clone()]);
+                    let dwe = dv_t.slice(s![time_tail.clone()]);
+                    let (b1e_d, b2e_d, b3e_d) = (
+                        eg.basis_d1.row(0).dot(&dwd),
+                        eg.basis_d2.row(0).dot(&dwd),
+                        eg.basis_d3.row(0).dot(&dwd),
+                    );
+                    let (b1e_e, b2e_e, b3e_e) = (
+                        eg.basis_d1.row(0).dot(&dwe),
+                        eg.basis_d2.row(0).dot(&dwe),
+                        eg.basis_d3.row(0).dot(&dwe),
+                    );
+                    let (b1x_d, b2x_d, b3x_d, b4x_d) = (
+                        xg.basis_d1.row(0).dot(&dwd),
+                        xg.basis_d2.row(0).dot(&dwd),
+                        xg.basis_d3.row(0).dot(&dwd),
+                        xg.basis_d4.row(0).dot(&dwd),
+                    );
+                    let (b1x_e, b2x_e, b3x_e, b4x_e) = (
+                        xg.basis_d1.row(0).dot(&dwe),
+                        xg.basis_d2.row(0).dot(&dwe),
+                        xg.basis_d3.row(0).dot(&dwe),
+                        xg.basis_d4.row(0).dot(&dwe),
+                    );
+                    let dm1_en_d = m2_en * dh0d + b1e_d;
+                    let dm2_en_d = m3_en * dh0d + b2e_d;
+                    let dm1_en_e = m2_en * dh0e + b1e_e;
+                    let dm2_en_e = m3_en * dh0e + b2e_e;
+                    let dm1_ex_d = m2_ex * dh1d + b1x_d;
+                    let dm2_ex_d = m3_ex * dh1d + b2x_d;
+                    let dm3_ex_d = m4_ex * dh1d + b3x_d;
+                    let dm1_ex_e = m2_ex * dh1e + b1x_e;
+                    let dm2_ex_e = m3_ex * dh1e + b2x_e;
+                    let dm3_ex_e = m4_ex * dh1e + b3x_e;
+                    let d2m1_en = m3_en * dh0d * dh0e + b2e_d * dh0e + b2e_e * dh0d;
+                    let d2m2_en = m4_en * dh0d * dh0e + b3e_d * dh0e + b3e_e * dh0d;
+                    let d2m1_ex = m3_ex * dh1d * dh1e + b2x_d * dh1e + b2x_e * dh1d;
+                    let d2m2_ex = m4_ex * dh1d * dh1e + b3x_d * dh1e + b3x_e * dh1d;
+                    let d2m3_ex = m5_ex * dh1d * dh1e + b4x_d * dh1e + b4x_e * dh1d;
+
                     // du_e/dd = (dJ/dd)·e_v — primary direction of e perturbed by d
-                    // dJ[q0,time_a]/dd = m2_en*dh0d*xe[a] for base, basis_d1*dh0d for wiggle
+                    // dJ[q0,time_a]/dd = dm1_en_d*xe[a] for base, basis_d1*dh0d for wiggle
                     let due_d = {
                         let mut v = [0.0f64; 4];
                         for a in 0..p_base {
-                            v[0] += m2_en * dh0d * xe[a] * dv_t[a];
-                            v[1] += m2_ex * dh1d * xx[a] * dv_t[a];
-                            v[2] += (m3_ex * dh1d * dr * xx[a]
+                            v[0] += dm1_en_d * xe[a] * dv_t[a];
+                            v[1] += dm1_ex_d * xx[a] * dv_t[a];
+                            v[2] += (dm2_ex_d * dr * xx[a]
                                 + m2_ex * ddrd * xx[a]
-                                + m2_ex * dh1d * xd[a])
+                                + dm1_ex_d * xd[a])
                                 * dv_t[a];
                         }
                         for li in 0..time_tail.len() {
@@ -883,9 +936,9 @@ impl SurvivalMarginalSlopeFamily {
                                 * dv_t[ci];
                         }
                         for a in 0..p_marginal {
-                            v[0] += m2_en * dh0d * mr[a] * dv_m[a];
-                            v[1] += m2_ex * dh1d * mr[a] * dv_m[a];
-                            v[2] += (m3_ex * dh1d * dr * mr[a] + m2_ex * ddrd * mr[a]) * dv_m[a];
+                            v[0] += dm1_en_d * mr[a] * dv_m[a];
+                            v[1] += dm1_ex_d * mr[a] * dv_m[a];
+                            v[2] += (dm2_ex_d * dr * mr[a] + m2_ex * ddrd * mr[a]) * dv_m[a];
                         }
                         // v[3] = 0 (slope J is constant), and the identity-mapped flex
                         // coordinates have a constant J as well.
@@ -1037,16 +1090,24 @@ impl SurvivalMarginalSlopeFamily {
                     // ── Build dJ arrays for both directions ────────────
                     // (same code as first directional, for d and e)
                     type DjArrays = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
-                    let build_dj = |dh0: f64, dh1: f64, ddr_val: f64| -> DjArrays {
+                    // `dm1_en`, `dm1_ex` and `dm2_ex` are the direction's moves of `m₁` at entry
+                    // and exit and of `m₂` at exit.
+                    let build_dj = |dh0: f64,
+                                    dh1: f64,
+                                    ddr_val: f64,
+                                    dm1_en: f64,
+                                    dm1_ex: f64,
+                                    dm2_ex: f64|
+                     -> DjArrays {
                         let mut j0t = vec![0.0f64; p_time];
                         let mut j1t = vec![0.0f64; p_time];
                         let mut jdt = vec![0.0f64; p_time];
                         for a in 0..p_base {
-                            j0t[a] = m2_en * dh0 * xe[a];
-                            j1t[a] = m2_ex * dh1 * xx[a];
-                            jdt[a] = m3_ex * dh1 * dr * xx[a]
+                            j0t[a] = dm1_en * xe[a];
+                            j1t[a] = dm1_ex * xx[a];
+                            jdt[a] = dm2_ex * dr * xx[a]
                                 + m2_ex * ddr_val * xx[a]
-                                + m2_ex * dh1 * xd[a];
+                                + dm1_ex * xd[a];
                         }
                         for li in 0..time_tail.len() {
                             let ci = time_tail.start + li;
@@ -1059,18 +1120,20 @@ impl SurvivalMarginalSlopeFamily {
                         let mut j1m = vec![0.0f64; p_marginal];
                         let mut jdm = vec![0.0f64; p_marginal];
                         for a in 0..p_marginal {
-                            j0m[a] = m2_en * dh0 * mr[a];
-                            j1m[a] = m2_ex * dh1 * mr[a];
-                            jdm[a] = m3_ex * dh1 * dr * mr[a] + m2_ex * ddr_val * mr[a];
+                            j0m[a] = dm1_en * mr[a];
+                            j1m[a] = dm1_ex * mr[a];
+                            jdm[a] = dm2_ex * dr * mr[a] + m2_ex * ddr_val * mr[a];
                         }
                         (j0t, j1t, jdt, j0m, j1m, jdm)
                     };
 
-                    let (djd0t, djd1t, djddt, djd0m, djd1m, djddm) = build_dj(dh0d, dh1d, ddrd);
+                    let (djd0t, djd1t, djddt, djd0m, djd1m, djddm) =
+                        build_dj(dh0d, dh1d, ddrd, dm1_en_d, dm1_ex_d, dm2_ex_d);
                     let djd_t = [&djd0t[..], &djd1t[..], &djddt[..]];
                     let djd_m = [&djd0m[..], &djd1m[..], &djddm[..]];
 
-                    let (dje0t, dje1t, djedt, dje0m, dje1m, djedm) = build_dj(dh0e, dh1e, ddre);
+                    let (dje0t, dje1t, djedt, dje0m, dje1m, djedm) =
+                        build_dj(dh0e, dh1e, ddre, dm1_en_e, dm1_ex_e, dm2_ex_e);
                     let dje_t = [&dje0t[..], &dje1t[..], &djedt[..]];
                     let dje_m = [&dje0m[..], &dje1m[..], &djedm[..]];
 
@@ -1079,11 +1142,11 @@ impl SurvivalMarginalSlopeFamily {
                     let mut d2j1t = vec![0.0f64; p_time];
                     let mut d2jdt = vec![0.0f64; p_time];
                     for a in 0..p_base {
-                        d2j0t[a] = m3_en * dh0d * dh0e * xe[a];
-                        d2j1t[a] = m3_ex * dh1d * dh1e * xx[a];
-                        d2jdt[a] = m4_ex * dh1d * dh1e * dr * xx[a]
-                            + m3_ex * (dh1d * ddre + dh1e * ddrd) * xx[a]
-                            + m3_ex * dh1d * dh1e * xd[a];
+                        d2j0t[a] = d2m1_en * xe[a];
+                        d2j1t[a] = d2m1_ex * xx[a];
+                        d2jdt[a] = d2m2_ex * dr * xx[a]
+                            + (dm2_ex_d * ddre + dm2_ex_e * ddrd) * xx[a]
+                            + d2m1_ex * xd[a];
                     }
                     for li in 0..time_tail.len() {
                         let ci = time_tail.start + li;
@@ -1097,10 +1160,10 @@ impl SurvivalMarginalSlopeFamily {
                     let mut d2j1m = vec![0.0f64; p_marginal];
                     let mut d2jdm = vec![0.0f64; p_marginal];
                     for a in 0..p_marginal {
-                        d2j0m[a] = m3_en * dh0d * dh0e * mr[a];
-                        d2j1m[a] = m3_ex * dh1d * dh1e * mr[a];
-                        d2jdm[a] = m4_ex * dh1d * dh1e * dr * mr[a]
-                            + m3_ex * (dh1d * ddre + dh1e * ddrd) * mr[a];
+                        d2j0m[a] = d2m1_en * mr[a];
+                        d2j1m[a] = d2m1_ex * mr[a];
+                        d2jdm[a] =
+                            d2m2_ex * dr * mr[a] + (dm2_ex_d * ddre + dm2_ex_e * ddrd) * mr[a];
                     }
                     let d2j_m = [&d2j0m[..], &d2j1m[..], &d2jdm[..]];
 
@@ -1136,39 +1199,39 @@ impl SurvivalMarginalSlopeFamily {
                     // (H·ud)_r dK_r/de + (H·ue)_r dK_r/dd + f_r d²K_r/ded
                     //
                     // dK[q,a,b]/dd = d(K[q,a,b])/dd where K = m_{k}*product-of-design-rows
-                    // d²K[q,a,b]/ded = m_{k+2}*dh_d*dh_e*(...) since d²h/ded=0
+                    // d²K[q,a,b]/ded moves each m_k twice (d²h/ded = 0, m_k linear in γ)
                     //
                     // For q0 base×base: K = m2_en*xe[a]*xe[b]
-                    //   dK/dd = m3_en*dh0d*xe[a]*xe[b]
-                    //   d²K/ded = m4_en*dh0d*dh0e*xe[a]*xe[b]
+                    //   dK/dd = dm2_en_d*xe[a]*xe[b]
+                    //   d²K/ded = d2m2_en*xe[a]*xe[b]
                     // For q1 base×base: K = m2_ex*xx[a]*xx[b]
-                    //   dK/dd = m3_ex*dh1d*xx[a]*xx[b]
-                    //   d²K/ded = m4_ex*dh1d*dh1e*xx[a]*xx[b]
+                    //   dK/dd = dm2_ex_d*xx[a]*xx[b]
+                    //   d²K/ded = d2m2_ex*xx[a]*xx[b]
                     // For qd1 base×base: K = m3_ex*dr*xx[a]*xx[b] + m2_ex*(xx[a]*xd[b]+xd[a]*xx[b])
-                    //   dK/dd = m4_ex*dh1d*dr*xx[a]*xx[b] + m3_ex*ddrd*xx[a]*xx[b]
-                    //         + m3_ex*dh1d*(xx[a]*xd[b]+xd[a]*xx[b])
-                    //   d²K/ded = m5_ex*dh1d*dh1e*dr*xx[a]*xx[b]
-                    //           + m4_ex*(dh1d*ddre+dh1e*ddrd)*xx[a]*xx[b]
-                    //           + m4_ex*dh1d*dh1e*(xx[a]*xd[b]+xd[a]*xx[b])
+                    //   dK/dd = dm3_ex_d*dr*xx[a]*xx[b] + m3_ex*ddrd*xx[a]*xx[b]
+                    //         + dm2_ex_d*(xx[a]*xd[b]+xd[a]*xx[b])
+                    //   d²K/ded = d2m3_ex*dr*xx[a]*xx[b]
+                    //           + (dm3_ex_d*ddre+dm3_ex_e*ddrd)*xx[a]*xx[b]
+                    //           + d2m2_ex*(xx[a]*xd[b]+xd[a]*xx[b])
 
                     // base×base time×time
                     for a in 0..p_base {
                         for b in 0..p_base {
-                            let dke_0 = m3_en * dh0e * xe[a] * xe[b];
-                            let dke_1 = m3_ex * dh1e * xx[a] * xx[b];
-                            let dke_d = m4_ex * dh1e * dr * xx[a] * xx[b]
+                            let dke_0 = dm2_en_e * xe[a] * xe[b];
+                            let dke_1 = dm2_ex_e * xx[a] * xx[b];
+                            let dke_d = dm3_ex_e * dr * xx[a] * xx[b]
                                 + m3_ex * ddre * xx[a] * xx[b]
-                                + m3_ex * dh1e * (xx[a] * xd[b] + xd[a] * xx[b]);
-                            let dkd_0 = m3_en * dh0d * xe[a] * xe[b];
-                            let dkd_1 = m3_ex * dh1d * xx[a] * xx[b];
-                            let dkd_d = m4_ex * dh1d * dr * xx[a] * xx[b]
+                                + dm2_ex_e * (xx[a] * xd[b] + xd[a] * xx[b]);
+                            let dkd_0 = dm2_en_d * xe[a] * xe[b];
+                            let dkd_1 = dm2_ex_d * xx[a] * xx[b];
+                            let dkd_d = dm3_ex_d * dr * xx[a] * xx[b]
                                 + m3_ex * ddrd * xx[a] * xx[b]
-                                + m3_ex * dh1d * (xx[a] * xd[b] + xd[a] * xx[b]);
-                            let d2k_0 = m4_en * dh0d * dh0e * xe[a] * xe[b];
-                            let d2k_1 = m4_ex * dh1d * dh1e * xx[a] * xx[b];
-                            let d2k_d = m5_ex * dh1d * dh1e * dr * xx[a] * xx[b]
-                                + m4_ex * (dh1d * ddre + dh1e * ddrd) * xx[a] * xx[b]
-                                + m4_ex * dh1d * dh1e * (xx[a] * xd[b] + xd[a] * xx[b]);
+                                + dm2_ex_d * (xx[a] * xd[b] + xd[a] * xx[b]);
+                            let d2k_0 = d2m2_en * xe[a] * xe[b];
+                            let d2k_1 = d2m2_ex * xx[a] * xx[b];
+                            let d2k_d = d2m3_ex * dr * xx[a] * xx[b]
+                                + (dm3_ex_d * ddre + dm3_ex_e * ddrd) * xx[a] * xx[b]
+                                + d2m2_ex * (xx[a] * xd[b] + xd[a] * xx[b]);
                             acc[[slices.time.start + a, slices.time.start + b]] += h_ud[0] * dke_0
                                 + h_ud[1] * dke_1
                                 + h_ud[2] * dke_d
@@ -1222,21 +1285,21 @@ impl SurvivalMarginalSlopeFamily {
                     // base×marginal time×marginal
                     for a in 0..p_base {
                         for b in 0..p_marginal {
-                            let dke_0 = m3_en * dh0e * xe[a] * mr[b];
-                            let dke_1 = m3_ex * dh1e * xx[a] * mr[b];
-                            let dke_d = m4_ex * dh1e * dr * xx[a] * mr[b]
+                            let dke_0 = dm2_en_e * xe[a] * mr[b];
+                            let dke_1 = dm2_ex_e * xx[a] * mr[b];
+                            let dke_d = dm3_ex_e * dr * xx[a] * mr[b]
                                 + m3_ex * ddre * xx[a] * mr[b]
-                                + m3_ex * dh1e * xd[a] * mr[b];
-                            let dkd_0 = m3_en * dh0d * xe[a] * mr[b];
-                            let dkd_1 = m3_ex * dh1d * xx[a] * mr[b];
-                            let dkd_d = m4_ex * dh1d * dr * xx[a] * mr[b]
+                                + dm2_ex_e * xd[a] * mr[b];
+                            let dkd_0 = dm2_en_d * xe[a] * mr[b];
+                            let dkd_1 = dm2_ex_d * xx[a] * mr[b];
+                            let dkd_d = dm3_ex_d * dr * xx[a] * mr[b]
                                 + m3_ex * ddrd * xx[a] * mr[b]
-                                + m3_ex * dh1d * xd[a] * mr[b];
-                            let d2k_0 = m4_en * dh0d * dh0e * xe[a] * mr[b];
-                            let d2k_1 = m4_ex * dh1d * dh1e * xx[a] * mr[b];
-                            let d2k_d = m5_ex * dh1d * dh1e * dr * xx[a] * mr[b]
-                                + m4_ex * (dh1d * ddre + dh1e * ddrd) * xx[a] * mr[b]
-                                + m4_ex * dh1d * dh1e * xd[a] * mr[b];
+                                + dm2_ex_d * xd[a] * mr[b];
+                            let d2k_0 = d2m2_en * xe[a] * mr[b];
+                            let d2k_1 = d2m2_ex * xx[a] * mr[b];
+                            let d2k_d = d2m3_ex * dr * xx[a] * mr[b]
+                                + (dm3_ex_d * ddre + dm3_ex_e * ddrd) * xx[a] * mr[b]
+                                + d2m2_ex * xd[a] * mr[b];
                             let v = h_ud[0] * dke_0
                                 + h_ud[1] * dke_1
                                 + h_ud[2] * dke_d
@@ -1284,18 +1347,18 @@ impl SurvivalMarginalSlopeFamily {
                     // marginal×marginal
                     for a in 0..p_marginal {
                         for b in 0..p_marginal {
-                            let dke_0 = m3_en * dh0e * mr[a] * mr[b];
-                            let dke_1 = m3_ex * dh1e * mr[a] * mr[b];
+                            let dke_0 = dm2_en_e * mr[a] * mr[b];
+                            let dke_1 = dm2_ex_e * mr[a] * mr[b];
                             let dke_d =
-                                m4_ex * dh1e * dr * mr[a] * mr[b] + m3_ex * ddre * mr[a] * mr[b];
-                            let dkd_0 = m3_en * dh0d * mr[a] * mr[b];
-                            let dkd_1 = m3_ex * dh1d * mr[a] * mr[b];
+                                dm3_ex_e * dr * mr[a] * mr[b] + m3_ex * ddre * mr[a] * mr[b];
+                            let dkd_0 = dm2_en_d * mr[a] * mr[b];
+                            let dkd_1 = dm2_ex_d * mr[a] * mr[b];
                             let dkd_d =
-                                m4_ex * dh1d * dr * mr[a] * mr[b] + m3_ex * ddrd * mr[a] * mr[b];
-                            let d2k_0 = m4_en * dh0d * dh0e * mr[a] * mr[b];
-                            let d2k_1 = m4_ex * dh1d * dh1e * mr[a] * mr[b];
-                            let d2k_d = m5_ex * dh1d * dh1e * dr * mr[a] * mr[b]
-                                + m4_ex * (dh1d * ddre + dh1e * ddrd) * mr[a] * mr[b];
+                                dm3_ex_d * dr * mr[a] * mr[b] + m3_ex * ddrd * mr[a] * mr[b];
+                            let d2k_0 = d2m2_en * mr[a] * mr[b];
+                            let d2k_1 = d2m2_ex * mr[a] * mr[b];
+                            let d2k_d = d2m3_ex * dr * mr[a] * mr[b]
+                                + (dm3_ex_d * ddre + dm3_ex_e * ddrd) * mr[a] * mr[b];
                             acc[[slices.marginal.start + a, slices.marginal.start + b]] += h_ud[0]
                                 * dke_0
                                 + h_ud[1] * dke_1
