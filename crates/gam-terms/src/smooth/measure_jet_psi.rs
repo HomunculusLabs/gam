@@ -61,13 +61,6 @@ pub fn freeze_measure_jet_length_scale_learning(spec: &mut TermCollectionSpec) -
     frozen
 }
 
-/// Measure-jet α dial box. The dial is NOT a log-kernel-scale, so the κ-window
-/// machinery never applies: `α` spans density-weighted (0) through
-/// past-Coifman–Lafon (>1) normalization. (The energy order `s` is the pinned
-/// explicit value or absorbed by the REML-learned per-scale amplitudes — see
-/// `measure_jet_penalty_psi_dim` — so it carries no dial box.)
-pub const MEASURE_JET_PSI_ALPHA_BOUNDS: (f64, f64) = (-1.0, 3.0);
-
 /// Number of multiscale PENALTY dials (excluding the design-moving ℓ):
 /// multiscale (per-scale spectral) mode carries α = 1 — the order is either the
 /// pinned explicit `s` or absorbed by the REML-learned per-scale amplitudes, so
@@ -113,13 +106,16 @@ pub fn measure_jet_psi_seed(mj: &crate::basis::MeasureJetBasisSpec) -> Vec<f64> 
 /// One end of the per-coordinate dial boxes, in producer coordinate order
 /// (ℓ first when enrolled, then the multiscale penalty dials).
 ///
-/// The PENALTY dial `α` is dimensionless — it selects a density normalization
-/// exponent — and its box is the fixed interval above. The design-moving `ln ℓ`
-/// dial is the opposite case: it is a LENGTH in the chart the basis is realized
-/// in, and its window is the term's own
-/// [`crate::basis::measure_jet_ln_range_window`] — the node-spacing floor and
-/// the feasibility ceiling the range bracket already derives (gam#2750).
-/// The window is WIDENED, never narrowed, to contain the incumbent range, the
+/// Both windows are measured off the term's own node cloud, in the chart the
+/// basis is realized in. The design-moving `ln ℓ` dial is a LENGTH, and its window
+/// is [`crate::basis::measure_jet_ln_range_window`]: the node-spacing floor and
+/// the feasibility ceiling the range bracket already derives (gam#2750). The
+/// penalty dial `α` is a density-normalization exponent, and its window is
+/// [`crate::basis::measure_jet_alpha_window`]: the range over which it still
+/// moves the relative weight of the outer centers (#2902). The `κ`-window
+/// machinery never applies to either.
+///
+/// Each window is WIDENED, never narrowed, to contain the incumbent dial, the
 /// same feasible-set rule [`spatial_term_psi_search_box`] applies to the other
 /// spatial families (#2454): a box that excludes the incumbent turns a
 /// monotonicity contract into a contradiction.
@@ -139,29 +135,32 @@ pub fn measure_jet_psi_bound_values(
             term.structural_kind()
         );
     };
-    let pick = |b: (f64, f64)| if upper { b.1 } else { b.0 };
     let mut bounds = Vec::with_capacity(measure_jet_psi_dim(mj));
+    if measure_jet_psi_dim(mj) == 0 {
+        return Ok(bounds);
+    }
+    let mut columns = select_columns(data, feature_cols)?;
+    // A term that carries an input scale is realized in the standardized frame,
+    // and so is the `length_scale` the ψ seed reads; convert the view before
+    // measuring the cloud in it.
+    if let Some(scale) = input_scale {
+        scale.standardize(&mut columns);
+    }
+    let pick = |(lo, hi): (f64, f64), incumbent: Option<f64>| {
+        let (lo, hi) = match incumbent.filter(|value| value.is_finite()) {
+            Some(value) => (lo.min(value), hi.max(value)),
+            None => (lo, hi),
+        };
+        if upper { hi } else { lo }
+    };
     if measure_jet_learns_length_scale(mj) {
-        let mut columns = select_columns(data, feature_cols)?;
-        // A term that carries an input scale is realized in the standardized
-        // frame, and so is the `length_scale` the ψ seed reads; convert the
-        // view before measuring lengths in it.
-        if let Some(scale) = input_scale {
-            scale.standardize(&mut columns);
-        }
-        let (mut lo, mut hi) = crate::basis::measure_jet_ln_range_window(columns.view(), mj)?;
-        if mj.length_scale > 0.0 {
-            let incumbent = mj.length_scale.ln();
-            if incumbent.is_finite() {
-                lo = lo.min(incumbent);
-                hi = hi.max(incumbent);
-            }
-        }
-        bounds.push(if upper { hi } else { lo });
+        let window = crate::basis::measure_jet_ln_range_window(columns.view(), mj)?;
+        bounds.push(pick(window, (mj.length_scale > 0.0).then(|| mj.length_scale.ln())));
     }
     if measure_jet_penalty_psi_dim(mj) > 0 {
         // Multiscale penalty dial, producer order: α.
-        bounds.push(pick(MEASURE_JET_PSI_ALPHA_BOUNDS));
+        let window = crate::basis::measure_jet_alpha_window(columns.view(), mj)?;
+        bounds.push(pick(window, Some(mj.alpha)));
     }
     Ok(bounds)
 }

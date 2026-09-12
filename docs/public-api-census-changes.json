@@ -1765,5 +1765,13 @@
     },
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). fit_event_history_formula was a one-formula wrapper that only tests called. gam-cli and gam-pyffi now fit through fit_event_history_formulas, which gains their reference-strata argument (SPEC rule 18).",
     "evidence": "At db0e784da, git grep -w finds fit_event_history_formula only at its definition, the crate-root re-export, gam-event-history tests.rs lines 14, 2622 and 2663, and tests/event_history_scaling.rs lines 17 and 82, all rewritten in this commit. The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) lists no product reference."
+  },
+  {
+    "base": "5e4a9a39b4e5a9d2ad85a586cdef283ad84944a1",
+    "removed": {
+      "crates/gam-terms/src/smooth/measure_jet_psi.rs::MEASURE_JET_PSI_ALPHA_BOUNDS": 1
+    },
+    "reason": "SPEC rule 20 (#2902, table row 24): the literal [-1, 3] search box of the measure-jet α ψ dial is replaced by measure_jet_alpha_window. That window is 1/2 plus or minus ln(1/sqrt(eps)) / (2 max_eps ln(q_max/q_min)), measured off the kernel masses the energy assembly walks, over the range where α still moves the relative weight of the outer centers.",
+    "evidence": "At the base, git grep -n MEASURE_JET_PSI_ALPHA_BOUNDS finds the declaration and its one use in measure_jet_psi_bound_values, both in crates/gam-terms/src/smooth/measure_jet_psi.rs. That function now reads crate::basis::measure_jet_alpha_window over the term's standardized columns and widens it to the incumbent α, as the ln ℓ window already was. The census difference was applied by hand and public_api_census.py was not run locally (user directive: no local runs)."
   }
 ]

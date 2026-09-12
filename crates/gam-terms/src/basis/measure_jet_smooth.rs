@@ -1230,6 +1230,78 @@ pub fn measure_jet_ln_range_window(
     Ok((spacing.ln(), ceiling.ln()))
 }
 
+/// The `α` SEARCH WINDOW for the density-normalization exponent, measured off
+/// the node cloud `spec` realizes on `data` (#2902).
+///
+/// ## What `α` can move
+///
+/// At scale `ε` the energy weights the local jet residual of outer center `i` by
+/// `ε^{−η}·net_mass_i·q_i^{1−2α}`, with `q_i` the kernel mass around `i` and
+/// `η = 2s + d(2 − 2α)`. In multiscale mode every scale is its own penalty
+/// candidate, Frobenius-normalized, so every factor common to a scale cancels,
+/// `ε^{−η}` included. What `α` moves is the RELATIVE weight of the outer centers
+/// within a scale, `(q_i/q_j)^{1−2α}`, and at `α = ½` that is flat.
+///
+/// ## Where it stops moving anything distinct
+///
+/// The relative weights span `(q_max/q_min)^{|1−2α|}` at the scale with the widest
+/// kernel-mass spread. Past `1/√ε`, the lightest center's block sits below
+/// half-mantissa of the heaviest in the assembled form. That is the same bar the
+/// #2812 resolvability interval puts on a smoothing parameter against the data
+/// curvature. Pushing `α` further only removes centers the arithmetic already
+/// could not see. So the window is `½ ± ln(1/√ε) / (2·max_ε ln(q_max/q_min))`: its
+/// centre is the flat weighting and its width is measured off the cloud.
+///
+/// A cloud whose kernel masses are equal at every scale gives `α` nothing to
+/// move, and the window collapses onto the spec's own `α`.
+pub fn measure_jet_alpha_window(
+    data: ArrayView2<'_, f64>,
+    spec: &MeasureJetBasisSpec,
+) -> Result<(f64, f64), BasisError> {
+    let geom = realize_measure_jet_geometry(data, spec)?;
+    let band = MeasureJetBand {
+        eps: geom.eps_band.clone(),
+        log_step: geom.log_step,
+    };
+    // `(min ln q, max ln q)` per scale, read off the SAME walk the energy is
+    // assembled by, so the window and the form cannot disagree about which outer
+    // centers exist or what their kernel masses are.
+    let spread = std::sync::Mutex::new(vec![(f64::INFINITY, f64::NEG_INFINITY); band.eps.len()]);
+    assemble_weighted_forms(
+        geom.centers.view(),
+        geom.masses.view(),
+        &band,
+        geom.order_s_eval,
+        spec.alpha,
+        spec.tau0,
+        1,
+        1,
+        &|scale_idx, _: f64, q: f64, _: f64, out: &mut [[f64; 3]]| {
+            out[0] = [0.0, 0.0, 0.0];
+            let ln_q = q.ln();
+            let mut table = spread
+                .lock()
+                .expect("kernel-mass spread table poisoned by a panic during assembly");
+            let (low, high) = &mut table[scale_idx];
+            *low = low.min(ln_q);
+            *high = high.max(ln_q);
+        },
+    )?;
+    let table = spread
+        .into_inner()
+        .expect("kernel-mass spread table poisoned by a panic during assembly");
+    let widest = table
+        .iter()
+        .filter(|(low, high)| low.is_finite() && high.is_finite())
+        .map(|(low, high)| high - low)
+        .fold(0.0_f64, f64::max);
+    if !(widest > 0.0) {
+        return Ok((spec.alpha, spec.alpha));
+    }
+    let half_width = -0.5 * f64::EPSILON.ln() / (2.0 * widest);
+    Ok((0.5 - half_width, 0.5 + half_width))
+}
+
 /// Build the realized geometric scale band from the center set: floor at the
 /// median nearest-center spacing (below it the quadrature resolves nothing),
 /// ceiling at half the bounding-box diagonal (a deterministic diameter-scale
@@ -3574,6 +3646,41 @@ mod tests {
                 .iter()
                 .all(|v| *v == 0.0),
             "null-component candidate must have zero α drift"
+        );
+    }
+
+    /// #2902: the α window is measured off the node cloud. It is centred on the
+    /// flat weighting `α = ½`, and an isotropic rescale of the data, which leaves
+    /// every kernel mass unchanged, leaves the window unchanged.
+    #[test]
+    fn alpha_window_is_measured_off_the_node_cloud_2902() {
+        let chart = |scale: f64| {
+            Array2::from_shape_fn((240, 1), |(i, _)| {
+                let t = i as f64 / 239.0;
+                scale * (t * t + 0.04 * (7.0 * t).sin())
+            })
+        };
+        let spec = MeasureJetBasisSpec {
+            center_strategy: CenterStrategy::FarthestPoint { num_centers: 40 },
+            multiscale: true,
+            ..MeasureJetBasisSpec::default()
+        };
+        let (lower, upper) =
+            measure_jet_alpha_window(chart(1.0).view(), &spec).expect("alpha window");
+        assert!(
+            lower < 0.5 && 0.5 < upper,
+            "a density-varying cloud must leave α a window around the flat weighting: [{lower}, {upper}]"
+        );
+        assert!(
+            ((0.5 - lower) - (upper - 0.5)).abs() <= 1e-12,
+            "the window must be symmetric about α = ½: [{lower}, {upper}]"
+        );
+        let (scaled_lower, scaled_upper) =
+            measure_jet_alpha_window(chart(10.0).view(), &spec).expect("rescaled alpha window");
+        assert!(
+            (scaled_lower - lower).abs() <= 1e-9 * (1.0 + lower.abs())
+                && (scaled_upper - upper).abs() <= 1e-9 * (1.0 + upper.abs()),
+            "an isotropic rescale moved the α window: [{lower}, {upper}] -> [{scaled_lower}, {scaled_upper}]"
         );
     }
 
