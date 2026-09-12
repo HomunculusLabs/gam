@@ -826,3 +826,10 @@ defining file.
 | `analytic_outer_rho_gradient_at_converged` | `e6fd4251e` | `sae_ift_uses_exact_stationarity_jacobian_softmax_high_residual_1418`, `sae_ift_uses_exact_stationarity_jacobian_threshold_gate_high_residual_1418` (`tests/regressions/misc/owed_1418.rs`); `sae_outer_rho_gradient_channel_decomposition_ordered_beta_bernoulli_2087`, `sae_outer_rho_gradient_channel_decomposition_softmax_2087` (`tests/sae/sae/sae_outer_gradient_fd_gate.rs`, whose module is no longer registered) |
 | `fit_pair_surface` in `gam-terms` `structure::anova_atom`, now named only in two root-test module docs | `843e0fc20` | `carve_classifies_bound_vs_separable_feature_pairs_975` (`tests/sae/sae/owed_975.rs`, whose module is no longer registered) |
 | `weighted_chi_square_sf` | `368528959` | `zz_measure_size_under_candidate_reference_shapes_2672` |
+
+### Two more pins whose fixture subject was deleted
+
+| Deleted subject | Removing commit | Retired pin |
+| --- | --- | --- |
+| `LatentZPolicy::exploratory_fit_weighted` and `DeviationBlockConfig::triple_penalty_default`, the constructors the BMS audit fixture built its request from | `f2156a78e` and `7c185e2c5` | `bms_rigid_nonzero_slope_offset_audit_fits_in_time_370`. Its sibling `bms_callbacks_self_compute_nonzero_slope_baseline_at_beta_zero_370` survives in the same file. |
+| `amortized_encode_batch_fast`, `amortized_reconstruct_batch_fast` and `build_data_driven`, the fast encode/decode path that `oos_train_curved` trained through | `728caa9b1` | `curved_warm_start_matches_or_beats_linear_baseline_out_of_sample_2261` |
