@@ -45,7 +45,7 @@ const NON_FINITE_GLYPH: char = '·';
 /// The output has exactly one glyph per input value (it does not resample);
 /// callers that want a fixed width should pre-thin or pre-interpolate their
 /// grid.
-pub fn render_sparkline(values: &[f64]) -> String {
+pub(crate) fn render_sparkline(values: &[f64]) -> String {
     if values.is_empty() {
         return String::new();
     }
@@ -96,7 +96,7 @@ pub fn render_sparkline(values: &[f64]) -> String {
 /// `xs` and `ys` are paired grid samples (same length); `ys` is the fitted
 /// partial effect that gets drawn, `xs` only supplies the x-range label. If the
 /// lengths differ the shorter is used so the label never lies about the curve.
-/// Ranges ignore non-finite samples, matching [`render_sparkline`].
+/// Ranges ignore non-finite samples, matching `render_sparkline`.
 pub fn render_smooth_line(name: &str, xs: &[f64], ys: &[f64]) -> String {
     let n = xs.len().min(ys.len());
     let xs = &xs[..n];
