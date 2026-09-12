@@ -196,10 +196,7 @@ pub trait HessianFactorization: Send + Sync {
         let n = x.nrows();
         let p = x.ncols();
 
-        let block = {
-            const TARGET_CHUNK_FLOATS: usize = 1 << 16;
-            (TARGET_CHUNK_FLOATS / p.max(1)).clamp(1, n.max(1))
-        };
+        let block = gam_runtime::resource::byte_balanced_row_chunk(p, n);
 
         let mut h = Array1::<f64>::zeros(n);
         let mut start = 0usize;
