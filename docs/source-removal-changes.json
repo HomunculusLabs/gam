@@ -4791,5 +4791,13 @@
     ],
     "reason": "Lead ruling 09-12 (#2817, SPEC rules 21 and 23): the ARC budget retry ladder in run_outer_uncertified reran an exhausted search instead of refusing it, under an arbitrary retry count. It is deleted, and an exhausted budget hands its checkpoint and iteration ledger to the certificate. restrict_arc_retry_to_checkpoint existed only for the ladder. The deleted tests pinned the ladder's own behaviour (replay suppression, checkpoint-only continuation, retry iteration ledger), and the renamed typed-refusal test keeps its assertions. The removed test consts belonged to the deleted tests.",
     "evidence": "Every caller of restrict_arc_retry_to_checkpoint on main was the ladder or arc_budget_retry_continues_only_the_exhausted_checkpoint. The replacement pin an_exhausted_arc_budget_refuses_instead_of_retrying_2817 asserts that run_outer_uncertified returns the one-pass run_outer_with_plan checkpoint bit for bit. The #2817 fit converges with no retry (job 529179, /scratch.global/sauer354/pool/outer2817/v1.529179.log: 3 of 3 seeds converged, no exhausted budget)."
+  },
+  {
+    "base": "d5d49d03a629871f3ccb78964e08f6ddab018263",
+    "items": [
+      "crates/gam-terms/src/basis/matern_kernel.rs:const:R_EPS"
+    ],
+    "reason": "#2469: the Matérn collocation operator assembly treated a (collocation, center) pair with r <= R_EPS = 1e-12 as coincident. It zeroed the gradient row and the mixed Hessian term, and it decided the nu = 1/2 collision refusal (d > 1) and the 1-D nu = 1/2 limit. The limits hold only at r = 0, and every positive r has a formula. The coincidence tests are now exact zeros. The mixed Hessian term (phi'' - phi'/r)(w_a h_a/r)(w_b h_b/r) is formed from unit-vector components rather than t = (phi'' - phi'/r)/r^2. The old division amplified rounding by 1/r^2 and underflowed long before r did, which is what made a threshold look necessary.",
+    "evidence": "git grep -w R_EPS at the base finds this file-local declaration and its five uses in the collocation assembly of crates/gam-terms/src/basis/matern_kernel.rs, and an unrelated function-local R_EPS in crates/gam-terms/src/basis/duchon_kernel_math.rs, which is untouched. The rewrite is algebraically the same Hessian, delta_bc w_b q + (w_b h_b)(w_c h_c) t with t r^2 = phi'' - q. The item list applies source_removal_guard.py's ITEM regex by hand. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
   }
 ]

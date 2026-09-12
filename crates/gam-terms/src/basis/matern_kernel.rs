@@ -3408,7 +3408,6 @@ pub fn build_matern_collocation_operator_matrices(
     let mut d1_raw = Array2::<f64>::zeros((p * d, p));
     let mut d2_raw = Array2::<f64>::zeros((p * d * d, p));
     let metric_weights = aniso_log_scales.map(centered_aniso_metric_weights);
-    const R_EPS: f64 = 1e-12;
     // Row blocks are independent: output rows [k] in d0, [k*d..(k+1)*d] in d1,
     // and [k*d*d..(k+1)*d*d] in d2 are disjoint for each collocation row k.
     // Keep small assemblies serial to avoid Rayon scheduling overhead.
@@ -3446,13 +3445,13 @@ pub fn build_matern_collocation_operator_matrices(
                 } else {
                     stable_euclidean_norm((0..d).map(|c| centers[[k, c]] - centers[[j, c]]))
                 };
-                if matches!(nu, MaternNu::Half) && r <= R_EPS && d > 1 {
+                if matches!(nu, MaternNu::Half) && r == 0.0 && d > 1 {
                     crate::bail_invalid_basis!(
                         "Matérn nu=1/2 has singular Laplacian at center collisions for d>1; choose nu>=3/2 or avoid collocation at centers"
                     );
                 }
                 let (phi, _, phi_rr, phi_r_over_r) =
-                    if matches!(nu, MaternNu::Half) && r <= R_EPS && d == 1 {
+                    if matches!(nu, MaternNu::Half) && r == 0.0 && d == 1 {
                         // In 1D: Delta phi = phi'' and the singular phi'/r term is absent.
                         let s = 1.0 / length_scale;
                         let e = 1.0;
@@ -3461,7 +3460,7 @@ pub fn build_matern_collocation_operator_matrices(
                         matern_kernel_radial_tripletwith_safe_ratio(r, length_scale, nu)?
                     };
                 d0_chunk[[local_k, j]] = scale_k * phi;
-                if r > R_EPS {
+                if r > 0.0 {
                     for c in 0..d {
                         let delta = centers[[k, c]] - centers[[j, c]];
                         let axis_scale = metric_weights.as_ref().map(|w| w[c]).unwrap_or(1.0);
@@ -3474,11 +3473,11 @@ pub fn build_matern_collocation_operator_matrices(
                         d1_chunk[[local_k * d + c, j]] = 0.0;
                     }
                 }
-                let t = if r > R_EPS {
-                    (phi_rr - phi_r_over_r) / (r * r)
-                } else {
-                    0.0
-                };
+                // The mixed Hessian term `(φ'' − φ'/r)·(w_a h_a/r)(w_b h_b/r)` is formed
+                // from unit-vector components, never through `1/r²`: its limit at a
+                // coincidence is zero, and `r²` underflows long before `r` does.
+                let curvature = phi_rr - phi_r_over_r;
+                let inverse_r = if r > 0.0 { 1.0 / r } else { 0.0 };
                 for a in 0..d {
                     let h_a = centers[[k, a]] - centers[[j, a]];
                     let w_a = metric_weights.as_ref().map(|w| w[a]).unwrap_or(1.0);
@@ -3486,11 +3485,8 @@ pub fn build_matern_collocation_operator_matrices(
                         let h_b = centers[[k, b]] - centers[[j, b]];
                         let w_b = metric_weights.as_ref().map(|w| w[b]).unwrap_or(1.0);
                         let diagonal = if a == b { phi_r_over_r * w_a } else { 0.0 };
-                        let mixed = if r > R_EPS {
-                            t * w_a * h_a * w_b * h_b
-                        } else {
-                            0.0
-                        };
+                        let mixed =
+                            curvature * (w_a * h_a * inverse_r) * (w_b * h_b * inverse_r);
                         let row = (local_k * d + a) * d + b;
                         d2_chunk[[row, j]] = scale_k * (diagonal + mixed);
                     }
