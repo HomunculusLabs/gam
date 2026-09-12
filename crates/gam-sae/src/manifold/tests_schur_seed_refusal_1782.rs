@@ -96,6 +96,9 @@ pub(crate) fn non_pd_schur_seed_refusal_is_recoverable_1782() {
 pub(crate) fn planted_circle_multi_atom_threshold_gate_clears_startup_validation_1782() {
     use gam_solve::rho_optimizer::OuterProblem;
     use gam_solve::seeding::SeedConfig;
+    // #2267 — surface the solver's own phase and progress lines; a timeout of this
+    // fixture otherwise records nothing about where the time went.
+    gam_runtime::test_support::install_diagnostic_logger();
 
     let n = 40usize;
     let k_atoms = 3usize;

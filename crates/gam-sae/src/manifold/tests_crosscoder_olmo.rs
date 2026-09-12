@@ -21,6 +21,9 @@ fn center_columns(mut x: Array2<f64>) -> Array2<f64> {
 
 #[test]
 fn olmo_l18_l19_pair_crosscoder_fits_with_measured_drift() {
+    // #2267 — surface the solver's own phase and progress lines; a timeout of this
+    // fixture otherwise records nothing about where the time went.
+    gam_runtime::test_support::install_diagnostic_logger();
     let anchor = center_columns(read_npy_f32_2d(&olmo_fixture_path(
         "olmo_l18_pair_pca64_635.npy",
     )));
