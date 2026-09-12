@@ -1868,5 +1868,15 @@
     },
     "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. No product uses these restored-in-place gam-solve and gam-terms identities. Several lost their last caller to the earlier #2829 deletions: cloglog_ghq_derivatives, normal_expectation_nd_adaptive, gaussian_reml_multi_closed_form_warm_started_with_nullspace_dim, build_duchon_basis_log_kappa_derivativeswithworkspace and create_thin_plate_spline_basiswithworkspace.",
     "evidence": "restored_consumers_2829.py at a39a27a17 (MSI job 536241, /scratch.global/sauer354/pool/api2829/consumers.a39a27a17e9346a0b7039f4f25996837a9fe3a52.rows.tsv) scores each deleted TSV identity as unreferenced. The one exception is cross_node::receive, which it scores as python_build_or_rename_only, only because the English word 'receive' occurs in Python and pyffi comments. At the base, git grep -w finds no caller for any of them. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 537023, /scratch.global/sauer354/pool/api2829/validate.537023.log)."
+  },
+  {
+    "base": "160325f46a000bc0810c31a9a3c70187254efb03",
+    "removed": {
+      "crates/gam-gpu/src/mod.rs::try_fast_ab": 1,
+      "crates/gam-gpu/src/mod.rs::try_fast_atv": 1,
+      "crates/gam-gpu/src/mod.rs::try_fast_av": 1
+    },
+    "reason": "#2899 group-A sweep: gam_gpu root wrappers try_fast_ab, try_fast_av and try_fast_atv had no caller. The linalg_dispatch kernels they forwarded to survive and are reached through the gam_linalg gpu_hook dispatch.",
+    "evidence": "public_api_census.py --base f79f1c486 --head 896f09f22 reports exactly these three identities (/scratch.global/sauer354/pool/prune-api-a/slice10.census.json)."
   }
 ]

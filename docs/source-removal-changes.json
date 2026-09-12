@@ -4721,5 +4721,15 @@
     ],
     "reason": "#2829 public-surface rule: no product uses these entry points. Their private helpers, constants and carriers lose their last caller and go with them: is_positive_semidefinite and ConeMode; run_outer_sequence, run_one_outer and OuterSequenceOutcome; HUTCHINSON_GPU_MIN_K/MAX_K; ghq_nd_integrate and cloglog_g_derivatives; create_thin_plate_spline_basis_scaledwithworkspace.",
     "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 537023, /scratch.global/sauer354/pool/api2829/validate.537023.log). Each derived file's orphan cascade was closed to a fixed point against the base. Prose that described the deleted functions is removed or reworded: sae_resident's Phase 3b sweep comment and frame doc, reml_trace's Gating doc section, kl_certificate's defect-source paragraph and assess doc, and the optimizer, constrained_posterior, measure_jet_glm_sufficient and gam-models moments.rs comments. optimize_external_design leaves gam-solve estimate/mod.rs's pub use; the surviving optimize_external_designwith_heuristic_lambdas is used by gam-pyffi. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "160325f46a000bc0810c31a9a3c70187254efb03",
+    "items": [
+      "crates/gam-gpu/src/mod.rs:fn:try_fast_ab",
+      "crates/gam-gpu/src/mod.rs:fn:try_fast_atv",
+      "crates/gam-gpu/src/mod.rs:fn:try_fast_av"
+    ],
+    "reason": "#2899 group-A public-surface sweep: gam_gpu::{try_fast_ab, try_fast_av, try_fast_atv} were root-level wrappers over the same-named linalg_dispatch functions, and nothing calls them. Product code reaches those kernels through gam_linalg gpu_hook (CudaGemmDispatch, registered by gam::init_parallelism), which calls linalg_dispatch directly. The other root wrappers (try_fast_atb_on_ordinal, try_cholesky_*, try_solve_*, try_fast_abt_*) have gam-solve callers and stay.",
+    "evidence": "At f79f1c486, git grep -n over crates, src, examples, tests and gamfit for gpu::try_fast_ab, gpu::try_fast_av, gpu::try_fast_atv and gam_gpu::try_fast_(ab|av|atv) finds no caller. The only remaining root test caller, diagnostics_counters_increment_on_every_dispatch_and_reset_clears_them, was deleted in 56c62255d. The gam-linalg try_fast_* hits are GpuGemmDispatch trait calls into linalg_dispatch. The item list is source_removal_guard.py --base f79f1c486 --head 896f09f22 (/scratch.global/sauer354/pool/prune-api-a/slice10.srg.out)."
   }
 ]

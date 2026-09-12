@@ -310,33 +310,12 @@ pub fn log_backend_inventory_once() {
 }
 
 #[inline]
-pub fn try_fast_ab(
-    a: ndarray::ArrayView2<'_, f64>,
-    b: ndarray::ArrayView2<'_, f64>,
-) -> Option<ndarray::Array2<f64>> {
-    linalg_dispatch::try_fast_ab(a, b)
-}
-#[inline]
 pub fn try_fast_atb_on_ordinal(
     ordinal: usize,
     a: ndarray::ArrayView2<'_, f64>,
     b: ndarray::ArrayView2<'_, f64>,
 ) -> Option<ndarray::Array2<f64>> {
     linalg_dispatch::try_fast_atb_on_ordinal(ordinal, a, b)
-}
-#[inline]
-pub fn try_fast_av(
-    a: ndarray::ArrayView2<'_, f64>,
-    v: ndarray::ArrayView1<'_, f64>,
-) -> Option<ndarray::Array1<f64>> {
-    linalg_dispatch::try_fast_av(a, v)
-}
-#[inline]
-pub fn try_fast_atv(
-    a: ndarray::ArrayView2<'_, f64>,
-    v: ndarray::ArrayView1<'_, f64>,
-) -> Option<ndarray::Array1<f64>> {
-    linalg_dispatch::try_fast_atv(a, v)
 }
 #[inline]
 pub fn try_fast_ab_broadcast_b_batched(
