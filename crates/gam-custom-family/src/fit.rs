@@ -2224,11 +2224,14 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
             reason: format!("{error}; no fit was assembled"),
         })?;
         let warm_start = constrained_warm_start_from_inner(&rho0, &inner);
-        store_persistent_custom_family_warm_start(
-            persistent_warm_start_cache.as_ref(),
-            specs,
-            &warm_start,
-        );
+        // An unconverged solve never seeds a later fit (#2902).
+        if inner.converged {
+            store_persistent_custom_family_warm_start(
+                persistent_warm_start_cache.as_ref(),
+                specs,
+                &warm_start,
+            );
+        }
         if !inner.converged {
             return Err(CustomFamilyError::Optimization {
                 context: "fit_custom_family no-smoothing inner solve",
@@ -2766,7 +2769,10 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     } else {
                         inner_solve_not_converged_error(&eval.inner, rho.len(), 0)
                     };
-                    outer.warm_cache = Some(eval.warm_start);
+                    // An unconverged solve never seeds the next evaluation (#2902).
+                    if eval.inner_converged {
+                        outer.warm_cache = Some(eval.warm_start);
+                    }
                     outer.last_error = Some(failure);
                     Ok(OuterEval::infeasible(rho.len()))
                 }
@@ -2833,7 +2839,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
         ) {
             Ok(eval) if !eval.inner_converged => {
                 let failure = inner_solve_not_converged_error(&eval.inner, rho.len(), 0);
-                outer.warm_cache = Some(eval.warm_start.clone());
+                // An unconverged solve never seeds the next evaluation (#2902).
                 outer.last_error = Some(failure);
                 // Recoverable at the trial level: the outer optimizer may
                 // retreat to another rho, but this state can never certify the
@@ -3014,7 +3020,10 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     } else {
                         inner_solve_not_converged_error(&eval.inner, rho.len(), 0)
                     };
-                    outer.warm_cache = Some(eval.warm_start);
+                    // An unconverged solve never seeds the next evaluation (#2902).
+                    if eval.inner_converged {
+                        outer.warm_cache = Some(eval.warm_start);
+                    }
                     outer.last_error = Some(failure);
                     // Recoverable (data-driven): this value-only probe is the
                     // line-search cost the outer optimizer calls most often. A
@@ -3078,9 +3087,9 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     outer.last_error = None;
                     Ok(eval)
                 }
-                Ok((_eval, warm, false, inner)) => {
+                Ok((_eval, _warm, false, inner)) => {
                     let failure = inner_solve_not_converged_error(&inner, rho.len(), 0);
-                    outer.warm_cache = Some(warm);
+                    // An unconverged solve never seeds the next evaluation (#2902).
                     outer.last_error = Some(failure.clone());
                     // EFS cannot form a valid fixed-point update away from an
                     // inner mode. Returning an error lets the outer strategy
@@ -3108,16 +3117,18 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                 warm_ref,
                 &rho_prior,
             ) {
-                Ok((score, warm_start, _inner_converged)) if score.is_finite() => {
-                    outer.warm_cache = Some(warm_start);
+                Ok((score, warm_start, inner_converged)) if score.is_finite() => {
+                    // An unconverged screening solve never seeds the next evaluation (#2902).
+                    if inner_converged {
+                        outer.warm_cache = Some(warm_start);
+                    }
                     outer.last_error = None;
                     Ok(score)
                 }
-                Ok((score, warm_start, _inner_converged)) => {
+                Ok((score, _warm_start, _inner_converged)) => {
                     let failure = CustomFamilyError::trial_point(format!(
                         "custom-family seed-screening proxy produced non-finite score {score}"
                     ));
-                    outer.warm_cache = Some(warm_start);
                     outer.last_error = Some(failure.clone());
                     // Screening RANKS seeds; it does not decide whether the
                     // problem is fittable. `rank_seeds_with_screening`
