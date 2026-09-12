@@ -75,7 +75,7 @@ use super::marginal::{
     ForwardPass, SubjectInputs, expected_intensities, forward_filter, latent_state_moments,
 };
 use gam_terms::smooth::build_term_collection_design;
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array2, ArrayView2};
 
 /// One piece of a forecast window during which the covariates are
 /// constant: from `start` until the next segment's start (or the last
