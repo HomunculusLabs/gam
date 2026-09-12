@@ -1457,7 +1457,7 @@ pub(crate) fn build_sae_resident_frame(
 /// here is a pure function of `(sys, data, frame)` — invariant across the ridge
 /// ladder — which is exactly why the resident frame can upload them once.
 #[cfg(target_os = "linux")]
-pub struct FrameHostOperands {
+pub(crate) struct FrameHostOperands {
     pub s_off: Vec<i32>,
     pub s_m: Vec<i32>,
     pub s_r: Vec<i32>,

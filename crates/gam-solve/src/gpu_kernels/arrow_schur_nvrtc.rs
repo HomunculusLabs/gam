@@ -152,7 +152,7 @@ pub(crate) fn ceil_to_template_r(r: usize) -> Option<usize> {
 // so it is not dead on non-linux release builds.
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct FusedModuleCacheKey {
+pub(crate) struct FusedModuleCacheKey {
     pub cc_major: i32,
     pub cc_minor: i32,
     pub p_max: u32,
@@ -378,7 +378,7 @@ void arrow_schur_back_sub_pgroup(
 // inspecting a plan.
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug)]
-pub struct FusedLaunchPlan {
+pub(crate) struct FusedLaunchPlan {
     pub p_max: usize,
     pub r_template: usize,
     pub threads_per_block: u32,

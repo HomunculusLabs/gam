@@ -8,7 +8,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 /// final ABI conversion writes a NaN poison value so any future accidental
 /// non-Gamma read fails loudly rather than silently becoming unit scale.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PirlsLoopLikelihoodScale(PirlsLoopLikelihoodScaleKind);
+pub(crate) struct PirlsLoopLikelihoodScale(PirlsLoopLikelihoodScaleKind);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum PirlsLoopLikelihoodScaleKind {
@@ -233,7 +233,7 @@ pub(crate) mod cuda {
     /// typed [`gam_problem::EstimationError`] instead of being stringified or
     /// retried on a different numerical path.
     #[derive(Debug)]
-    pub enum PirlsGpuLoopError {
+    pub(crate) enum PirlsGpuLoopError {
         Geometry(gam_problem::EstimationError),
         Runtime(String),
     }
@@ -2283,7 +2283,7 @@ extern "C" __global__ void status_first_ladder(
     /// - `row_solve`: solve-row (4 fields), refreshed each Newton iteration.
     /// - `alpha_ladder`: candidate-objective (objective[7] + status[7*n]).
     /// - `row_final`: five numerical fields + status, written once at convergence.
-    pub struct PirlsLoopWorkspace {
+    pub(crate) struct PirlsLoopWorkspace {
         pub beta_dev: CudaSlice<f64>,
         /// Fixed shifted-quadratic linear term, uploaded once per loop.
         pub linear_shift_dev: CudaSlice<f64>,
@@ -3577,7 +3577,7 @@ extern "C" __global__ void status_first_ladder(
     }
 
     /// Result of one GPU Gaussian exact penalised least-squares solve.
-    pub struct GaussianPlsResult {
+    pub(crate) struct GaussianPlsResult {
         pub beta: Array1<f64>,
         pub penalized_hessian: Array2<f64>,
         pub logdet: f64,

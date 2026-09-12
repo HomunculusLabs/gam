@@ -11,7 +11,7 @@ use ndarray::{Array1, Array2, ArrayView1};
 use gam_gpu::gpu_error::GpuError;
 
 #[derive(Debug)]
-pub enum SigmaCubatureGpuError {
+pub(crate) enum SigmaCubatureGpuError {
     /// Only the Linux/CUDA dispatch path can surface a geometry error; the
     /// non-Linux stub declines before any geometry is evaluated.
     #[cfg(target_os = "linux")]
@@ -58,7 +58,7 @@ pub(crate) fn certified_sigma_point_covariance(
 /// ONCE into [`crate::gpu::pirls_gpu::PirlsGpuSharedData`]; only the
 /// small per-point algebra (p×p Qs, p×p S, length-p shift, scalar) needs
 /// uploading per sigma point.
-pub struct SigmaPointGpuInput {
+pub(crate) struct SigmaPointGpuInput {
     /// `p × p` penalised-Hessian contribution `S_λ` in the transformed basis.
     pub s_transformed: Array2<f64>,
     /// `p × p` reparameterisation matrix `Qs`. Uploaded via

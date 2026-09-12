@@ -30,7 +30,7 @@ use gam_gpu::policy::RemlOuterAdmission;
 /// arrays are only consulted for the seed evaluation and the post-loop
 /// `OuterResult` payload.
 #[derive(Clone, Debug)]
-pub struct RemlOuterGpuInput {
+pub(crate) struct RemlOuterGpuInput {
     /// Initial ρ to start BFGS from. Same convention as the host BFGS branch
     /// in `rho_optimizer::run_outer_with_plan` — already projected onto the
     /// bounds box at the dispatch site.
@@ -65,7 +65,7 @@ pub struct RemlOuterGpuInput {
 /// surface the device-resident path through the same `OuterResult` envelope as
 /// the host BFGS branch.
 #[derive(Clone, Debug)]
-pub struct RemlOuterGpuOutcome {
+pub(crate) struct RemlOuterGpuOutcome {
     /// Final ρ after BFGS convergence (or last accepted ρ at max-iter).
     pub rho: Array1<f64>,
     /// Final REML objective value at `rho`.
@@ -86,7 +86,7 @@ pub struct RemlOuterGpuOutcome {
 /// Per-step evaluation handed back by the unified outer objective closure.
 /// The driver feeds `objective` + `gradient` into the BFGS state update.
 #[derive(Clone, Debug)]
-pub struct RemlOuterDeviceEval {
+pub(crate) struct RemlOuterDeviceEval {
     /// Penalised REML objective at the trial ρ. Single scalar download.
     pub objective: f64,
     /// Per-ρ gradient assembled from `evidence_derivatives_gpu` on the
