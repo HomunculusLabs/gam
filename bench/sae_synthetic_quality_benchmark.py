@@ -97,17 +97,17 @@ def run_one(
 
     t0 = time.perf_counter()
     fit = gamfit.sae_manifold_fit(
-        Z=train,
-        n_atoms=2,
+        X=train,
+        K=2,
         atom_basis="periodic",
-        atom_dim=1,
+        d_atom=1,
         assignment="softmax",
         top_k=1,
         isometry_weight=0.0,
         ard_per_atom=False,
         sparsity_weight=0.01,
         smoothness_weight=0.01,
-        max_iter=int(max_iter),
+        n_iter=int(max_iter),
         learning_rate=1.0,
         random_state=seed,
     )

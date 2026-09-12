@@ -36,7 +36,7 @@ import numpy as np
 import gamfit
 
 from downstream_battery import FeaturizerCodes, run_battery
-from synth_sae_bench_manifold import SynthConfig, SynthSAEBenchData
+from synth_sae_bench_manifold import SynthConfig, SynthSAEBenchData, _published_basis_plan
 from synth_sae_compare import (
     BatchTopKSAE,
     L1SAE,
@@ -109,7 +109,7 @@ def _manifold_codes(
     """
     fit = gamfit.sae_manifold_fit(
         X=train_x,
-        n_atoms=atoms,
+        K=atoms,
         atom_topology=basis,
         d_atom=atom_dim,
         assignment="softmax",
@@ -127,9 +127,9 @@ def _manifold_codes(
     train_latents: list[np.ndarray] = []
     test_latents: list[np.ndarray] = []
     for k, block in enumerate(fit.decoder_blocks):
-        n_harmonics = fit._n_harmonics[k] if k < len(fit._n_harmonics) else 1
-        train_phi = _basis_values(fit.basis_specs[k], np.asarray(fit.coords[k], dtype=float), n_harmonics)
-        test_phi = _basis_values(fit.basis_specs[k], np.asarray(payload["coords"][k], dtype=float), n_harmonics)
+        basis_kind, n_harmonics = _published_basis_plan(fit, k)
+        train_phi = _basis_values(basis_kind, np.asarray(fit.coords[k], dtype=float), n_harmonics)
+        test_phi = _basis_values(basis_kind, np.asarray(payload["coords"][k], dtype=float), n_harmonics)
         train_assign = np.asarray(fit.assignments, dtype=float)[:, k]
         test_assign = np.asarray(payload["assignments"], dtype=float)[:, k]
         for row in range(1, min(block.shape[0], train_phi.shape[1])):

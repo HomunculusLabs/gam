@@ -269,16 +269,42 @@ def _basis_values(
     )
 
 
+def _published_basis_plan(fit: gamfit.ManifoldSAE, atom: int) -> tuple[str, int]:
+    """``(basis kind, harmonic count)`` of one fitted atom, read from the plan the fit publishes.
+
+    A fitted ``ManifoldSAE`` exposes ``basis_kinds`` / ``basis_sizes``; it carries no
+    ``basis_specs``, ``_n_harmonics`` or ``_duchon_centers``, so reading those raised
+    ``AttributeError`` at the first scored atom. A periodic basis of width ``m`` evaluates to
+    ``[1, cos, sin, cos2, sin2, …]``, so ``m = 2H + 1`` pins ``H``. A torus width has no such
+    identity here, so it refuses. Linear and Duchon atoms carry no harmonic count;
+    :func:`_basis_values` evaluates the affine block and refuses a Duchon atom, whose centers
+    the fit does not publish.
+    """
+    kind = str(fit.basis_kinds[atom])
+    width = int(fit.basis_sizes[atom])
+    if kind == "torus":
+        raise ValueError(
+            f"atom {atom} has a torus basis of width {width}; its harmonic count is not "
+            "recoverable from the published plan, and scoring a guessed basis would not be "
+            "the fitted model"
+        )
+    if kind != "periodic":
+        return kind, 0
+    if width < 1 or width % 2 == 0:
+        raise ValueError(
+            f"atom {atom} reports a periodic basis of width {width}, which is not of the form 2H+1"
+        )
+    return kind, (width - 1) // 2
+
+
 def _learned_components(fit: gamfit.ManifoldSAE) -> tuple[np.ndarray, np.ndarray]:
     directions: list[np.ndarray] = []
     activations: list[np.ndarray] = []
     assignments = np.asarray(fit.assignments, dtype=float)
     for k, block in enumerate(fit.decoder_blocks):
-        basis = fit.basis_specs[k]
+        basis, n_harmonics = _published_basis_plan(fit, k)
         coords = np.asarray(fit.coords[k], dtype=float)
-        n_harmonics = fit._n_harmonics[k] if k < len(fit._n_harmonics) else 1
-        centers = fit._duchon_centers[k] if k < len(fit._duchon_centers) else None
-        phi = _basis_values(basis, coords, n_harmonics, centers)
+        phi = _basis_values(basis, coords, n_harmonics)
         rows = min(phi.shape[1], block.shape[0])
         for row in range(rows):
             direction = np.asarray(block[row], dtype=float)
@@ -288,7 +314,8 @@ def _learned_components(fit: gamfit.ManifoldSAE) -> tuple[np.ndarray, np.ndarray
             directions.append(direction / norm)
             activations.append(assignments[:, k] * phi[:, row])
     if not directions:
-        return np.zeros((0, fit.training_data.shape[1])), np.zeros((fit.training_data.shape[0], 0))
+        n_rows, p_out = np.asarray(fit.fitted, dtype=float).shape
+        return np.zeros((0, p_out)), np.zeros((n_rows, 0))
     return np.vstack(directions), np.column_stack(activations)
 
 
@@ -306,9 +333,8 @@ def _manifold_total_slots(fit: gamfit.ManifoldSAE) -> int:
     """
     total = 0
     for k, block in enumerate(fit.decoder_blocks):
-        basis = fit.basis_specs[k]
+        basis, n_harmonics = _published_basis_plan(fit, k)
         coords = np.asarray(fit.coords[k], dtype=float)
-        n_harmonics = fit._n_harmonics[k] if k < len(fit._n_harmonics) else 1
         phi = _basis_values(basis, coords, n_harmonics)
         # -1: the intercept row (row 0) is never a direction slot.
         total += max(min(phi.shape[1], block.shape[0]) - 1, 0)
@@ -339,9 +365,8 @@ def _component_scores_from_payload(fit: gamfit.ManifoldSAE, payload: dict[str, A
     assignments = np.asarray(payload["assignments"], dtype=float)
     all_scores: list[np.ndarray] = []
     for k, block in enumerate(fit.decoder_blocks):
-        basis = fit.basis_specs[k]
+        basis, n_harmonics = _published_basis_plan(fit, k)
         coords = np.asarray(payload["coords"][k], dtype=float)
-        n_harmonics = fit._n_harmonics[k] if k < len(fit._n_harmonics) else 1
         phi = _basis_values(basis, coords, n_harmonics)
         for row in range(min(phi.shape[1], block.shape[0])):
             direction = np.asarray(block[row], dtype=float)
@@ -375,7 +400,7 @@ def run_one(args: argparse.Namespace, seed: int) -> BenchmarkMetrics:
     t0 = time.perf_counter()
     fit = gamfit.sae_manifold_fit(
         X=train_x,
-        n_atoms=args.atoms,
+        K=args.atoms,
         atom_basis=args.atom_basis,
         d_atom=args.atom_dim,
         assignment=args.assignment,
