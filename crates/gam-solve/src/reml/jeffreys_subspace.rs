@@ -4378,8 +4378,11 @@ mod tests {
 
     /// gam#2905: the complete second completion drift matrix, frozen policy and gate/floor
     /// motion, against central differences of the first completion drift matrix along `w`, with
-    /// the drift base re-prepared at every perturbed β. Returns `(motion active, max |matrix|,
-    /// relative error)`.
+    /// the drift base re-prepared at every perturbed β. The reference is the Richardson
+    /// extrapolation of central differences at `h` and `2h`. Its measured error bar is four times
+    /// its disagreement with the same extrapolation one octave coarser (`2h`, `4h`), plus `1e-9`
+    /// of the reference for a coincidentally small disagreement. Returns `(motion active,
+    /// max |matrix|, max |matrix − reference|, measured bar, max |reference|)`.
     fn jeffreys_complete_second_drift_matrix_errors_2905<I, F, S, T, Q>(
         beta: &Array1<f64>,
         information: I,
@@ -4387,7 +4390,7 @@ mod tests {
         second: S,
         third: T,
         fourth: Q,
-    ) -> (bool, f64, f64)
+    ) -> (bool, f64, f64, f64, f64)
     where
         I: Fn(&Array1<f64>) -> Array2<f64>,
         F: Fn(&Array1<f64>, &Array1<f64>) -> Array2<f64>,
@@ -4456,16 +4459,23 @@ mod tests {
                 },
             )
             .expect("complete second completion drift matrix");
+        let central = |step: f64| {
+            (drift_matrix_at(&(beta + &(&w * step))) - drift_matrix_at(&(beta - &(&w * step))))
+                / (2.0 * step)
+        };
         let step = 1e-5;
-        let finite_difference = (drift_matrix_at(&(beta + &(&w * step)))
-            - drift_matrix_at(&(beta - &(&w * step))))
-            / (2.0 * step);
+        let (fine, middle, wide) = (central(step), central(2.0 * step), central(4.0 * step));
+        let reference = (&fine * 4.0 - &middle) / 3.0;
+        let coarse = (&middle * 4.0 - &wide) / 3.0;
         let max_abs = |x: &Array2<f64>| x.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
-        let scale = max_abs(&finite_difference).max(1e-12);
+        let reference_scale = max_abs(&reference);
+        let bar = 4.0 * max_abs(&(&reference - &coarse)) + 1e-9 * reference_scale;
         (
             base.hessian_motion_active(),
             max_abs(&matrix),
-            max_abs(&(&matrix - &finite_difference)) / scale,
+            max_abs(&(&matrix - &reference)),
+            bar,
+            reference_scale,
         )
     }
 
@@ -4501,7 +4511,8 @@ mod tests {
         let (evals, _) = raw(&beta, &[]).eigh(Side::Lower).expect("fixture spectrum");
         let lambda_min = evals.iter().copied().fold(f64::INFINITY, f64::min);
         let scale = 4.0 / lambda_min;
-        let (active, magnitude, error) = jeffreys_complete_second_drift_matrix_errors_2905(
+        let (active, magnitude, gap, bar, reference_scale) =
+            jeffreys_complete_second_drift_matrix_errors_2905(
             &beta,
             |b| raw(b, &[]).mapv(|value| scale * value),
             |b, d| raw(b, &[d]).mapv(|value| scale * value),
@@ -4511,13 +4522,21 @@ mod tests {
         );
         eprintln!(
             "[#2905 gate-band] motion_active={active} max|D2 completion|={magnitude:e} \
-             rel_error_vs_central_differences={error:e}"
+             gap_to_richardson_reference={gap:e} measured_bar={bar:e} rel_error={:e} \
+             named_bar=1e-6",
+            gap / reference_scale.max(1e-12)
         );
         assert!(active, "the fixture must sit inside the gate's transition band");
         assert!(magnitude > 1e-8, "the fixture must exercise a nonzero second drift");
         assert!(
-            error < 1e-5,
-            "complete second completion drift vs central differences: rel {error:e}"
+            bar < 1e-6 * reference_scale,
+            "the differences do not resolve #2905's named relative bar 1e-6 (measured bar {bar:e} \
+             against max |reference| {reference_scale:e}), so they cannot decide it"
+        );
+        assert!(
+            gap <= bar,
+            "complete second completion drift differs from the Richardson reference by {gap:e}, \
+             above the differences' measured error {bar:e}"
         );
     }
 
@@ -4549,7 +4568,8 @@ mod tests {
             h[[2, 2]] += tail;
             h
         };
-        let (active, magnitude, error) = jeffreys_complete_second_drift_matrix_errors_2905(
+        let (active, magnitude, gap, bar, reference_scale) =
+            jeffreys_complete_second_drift_matrix_errors_2905(
             &beta,
             |b| raw(b, &[]),
             |b, d| raw(b, &[d]),
@@ -4559,13 +4579,21 @@ mod tests {
         );
         eprintln!(
             "[#2905 moving-floor] motion_active={active} max|D2 completion|={magnitude:e} \
-             rel_error_vs_central_differences={error:e}"
+             gap_to_richardson_reference={gap:e} measured_bar={bar:e} rel_error={:e} \
+             named_bar=1e-6",
+            gap / reference_scale.max(1e-12)
         );
         assert!(active, "a below-floor eigenvalue must activate the floor motion");
         assert!(magnitude > 1e-8, "the fixture must exercise a nonzero second drift");
         assert!(
-            error < 1e-4,
-            "complete second completion drift vs central differences: rel {error:e}"
+            bar < 1e-6 * reference_scale,
+            "the differences do not resolve #2905's named relative bar 1e-6 (measured bar {bar:e} \
+             against max |reference| {reference_scale:e}), so they cannot decide it"
+        );
+        assert!(
+            gap <= bar,
+            "complete second completion drift differs from the Richardson reference by {gap:e}, \
+             above the differences' measured error {bar:e}"
         );
     }
 
