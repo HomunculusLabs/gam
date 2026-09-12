@@ -4596,5 +4596,29 @@
     ],
     "reason": "A #1569 sweep that fitted four survival location-scale configurations and only printed their iterations, gradient norms and truth RMSEs, asserting nothing, so it could fail only when a fit errored. Its third configuration is exactly the fixture survival_location_scale_heteroscedastic_globalization_converges_1569 gates with finite-RMSE and truth-recovery bars. A test that cannot fail on behaviour is not a test (SPEC rule 16), and it spent 304.8 s per census.",
     "evidence": "Census job 505917 at 7ad913f69 (/scratch.global/sauer354/pool/t2627models/census7ad9.505917.log): FAIL [ 304.843s] gam-models::survival_acceptance location_scale_heteroscedastic_globalization_1569::survival_location_scale_heteroscedastic_sweep_diagnostic, the same outer certification refusal the asserting test reports. At the base, git grep -w finds the name only at its declaration and in the generated artefacts bench/measurements/issue_triage_20260907/rust-shard9-summary-34253714873.txt and tools/codebase-city/public/city-data.json. fit_heteroscedastic, super::initialize_cpu_fitting and gam_runtime::test_support::install_diagnostic_logger remain used by the asserting test in the same file. Compile is covered by the lead's shared tip check; nothing was built locally."
+  },
+  {
+    "base": "8e8a0239a2e3fad51f6951f3bae414b3f34a2c0d",
+    "items": [
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:const:LOGSL_W",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:const:MARG_W",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:const:P",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:const:TIME_W",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:block_hit_boundary",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:block_metric_norm",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:block_metric_norms",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:build_anisotropic_block_fixture",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:feasibility_alpha_preserves_the_joint_newton_direction",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:joint_newton_isotropic_l2_tr_produces_production_linearized_rate_stall",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:joint_trust_region_step_norm",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:null_subspace_of_h_pen_with_nonzero_gradient_is_ill_posed",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:rejected_step_shrinks_only_boundary_block_radii",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:shrink_active_block_radii",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:truncate_block_metric",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:truncate_joint_step_to_radius",
+      "tests/perf_scale/misc/joint_newton_isotropic_tr_starvation.rs:fn:update_radius_joint_rho"
+    ],
+    "reason": "SPEC rule 16 (#2627; reported by surv2714): every test in joint_newton_isotropic_tr_starvation.rs scores a hand-written copy of joint-Newton trust-region primitives: the historical raw-L2 truncation, a block-metric truncation, a boundary-block shrink, and update_radius_joint_rho, a 4-argument mirror of update_joint_trust_region_radius with fixed rho thresholds 0.25/0.75 and no noise floor (the production controller takes 9 arguments and delegates to opt::TrustRegionPolicy::noise_aware). The file imports nothing from gam, so no product behaviour can turn any of its tests red.",
+    "evidence": "At the base, the file contains no gam:: path, and its only reference in crates, src, tests, docs, scripts and .config is `mod joint_newton_isotropic_tr_starvation;` in tests/perf_scale/misc/mod.rs, which this commit removes. The production primitives stay under in-crate tests: crates/gam-custom-family/src/tests/inner_solver_numerics.rs calls update_joint_trust_region_radius (lines 549, 576, 599, 617) and shrink_active_joint_block_trust_radii (5911, 6158). The item list applies source_removal_guard.py's ITEM regex to the base blob. Not compiled or run locally (user directive)."
   }
 ]
