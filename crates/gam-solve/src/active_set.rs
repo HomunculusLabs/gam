@@ -237,11 +237,11 @@ fn solve_dense_system_via_pseudoinverse(
         crate::bail_invalid_estim!("dense pseudoinverse solve missing singular vectors");
     };
 
-    let max_singular = singular.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
-    let tol = 100.0
-        * f64::EPSILON
-        * (matrix.nrows().max(matrix.ncols()).max(1) as f64)
-        * max_singular.max(1.0);
+    // The SVD's own rounding band, relative to σ_max alone: an absolute
+    // `max(σ_max, 1)` floor zeroes a uniformly small but well-conditioned system
+    // purely because of its units, and no extra factor on the band buys safety
+    // (#2469).
+    let tol = svd_rank_band(&singular, matrix.nrows(), matrix.ncols());
     let mut coeff = u.t().dot(rhs);
     for (idx, value) in coeff.iter_mut().enumerate() {
         let sigma = singular[idx];
@@ -444,13 +444,20 @@ pub fn binding_constraint_rows(
     Some(rows)
 }
 
-/// Numerical rank of a `rows × cols` matrix from its singular values, at the
-/// SVD's own rounding band `max(rows, cols)·ε·σ_max`. There is no absolute floor
-/// and no extra factor: `cR` has the rank of `R` for every `c > 0` (#2469).
+/// The SVD's own rounding band `max(rows, cols)·ε·σ_max` for a `rows × cols`
+/// matrix: a singular value at or below it is indistinguishable from zero. There
+/// is no absolute floor and no extra factor, so `cR` has the rank of `R` for every
+/// `c > 0` (#2469).
+pub(crate) fn svd_rank_band(singular: &Array1<f64>, rows: usize, cols: usize) -> f64 {
+    let smax = singular.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+    smax * (rows.max(cols) as f64) * f64::EPSILON
+}
+
+/// Numerical rank of a `rows × cols` matrix from its singular values, at
+/// [`svd_rank_band`].
 pub(crate) fn svd_rank(singular: &Array1<f64>, rows: usize, cols: usize) -> usize {
-    let smax = singular.iter().fold(0.0_f64, |acc, &v| acc.max(v));
-    let rank_tol = smax * (rows.max(cols) as f64) * f64::EPSILON;
-    singular.iter().filter(|&&s| s > rank_tol).count()
+    let band = svd_rank_band(singular, rows, cols);
+    singular.iter().filter(|&&s| s > band).count()
 }
 
 /// Orthonormal basis `Z` (`p × (p − rank)`) of the complement of the row space
@@ -984,14 +991,10 @@ pub(crate) fn feasible_point_for_linear_constraints(
     let (Some(u), Some(vt)) = (u_opt, vt_opt) else {
         return None;
     };
-    let max_singular = singular.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
-    // Rank tolerance: the symmetric eigensolve's own rounding band `m·ε·σ_max`
-    // of the `m × m` Gram, relative to the LARGEST singular value only — an
-    // absolute `max(σ_max, 1)` floor declares a uniformly small (but perfectly
-    // well-conditioned) system rank-deficient purely because of its units. The
-    // candidate is certified feasible below whichever directions this keeps, so
-    // no extra factor on the band buys safety (#2469). `m ≥ 1` was checked above.
-    let tol = constraints.a.nrows() as f64 * f64::EPSILON * max_singular;
+    // Rank tolerance: the `m × m` Gram's own SVD rounding band `m·ε·σ_max`
+    // (`svd_rank_band`). The candidate is certified feasible below whichever
+    // directions this keeps, so no extra factor on the band buys safety (#2469).
+    let tol = svd_rank_band(&singular, gram.nrows(), gram.ncols());
     let mut coeff = u.t().dot(&constraints.b);
     for (idx, value) in coeff.iter_mut().enumerate() {
         let sigma = singular[idx];
