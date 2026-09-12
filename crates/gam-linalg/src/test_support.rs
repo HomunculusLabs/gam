@@ -32,6 +32,7 @@
 //! bridge.
 
 pub mod fd_checker;
+pub mod numeric_derivative;
 
 /// #2738 — serialize every test that MUTATES or OBSERVES faer's process-global
 /// parallelism, across every module in the binary.
