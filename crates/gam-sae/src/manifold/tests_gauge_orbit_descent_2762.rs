@@ -489,18 +489,22 @@ fn gauge_orbit_descent_is_monotone_and_reports_the_decrease_it_made_2762() {
     }
 }
 
-/// ANGLE 4 — the refine loop's terminal mover and terminal restore must have
-/// ONE state authority.
+/// ANGLE 4 — the refine loop's stall-branch gauge visit descends the LIVE
+/// excursion and never restores `best_seen` over it (#2228).
 ///
-/// `terminal_exact_newton_polish` may save a smaller-decrement state and then
-/// leave a different excursion live.  The historical third #2762 call descended
-/// that excursion; the refusal immediately restored the saved state and threw
-/// the committed descent away.  Plant a material likelihood-flat displacement
-/// in the saved state while leaving the live excursion at the seed.  The
-/// terminal wrapper must restore and descend the planted state, report that
-/// state's measured decrease, and consume its now-stale certificate.
+/// `terminal_exact_newton_polish` saves the smallest-certificate state in
+/// `best_seen`, and that key is not the objective: the saved state can sit
+/// above the live excursion. The visit runs on a continuation path, and a
+/// restore there replayed a whole cycle on the p=2048, charts=8 curved-tier cell
+/// (perf2731 job 448182). The polish and the next round took the objective 0.28
+/// below the best-certificate state, the visit restored that state, and the loop
+/// replayed the identical polish before refusing. Plant a material
+/// likelihood-flat displacement in the LIVE excursion and put the seed in
+/// `best_seen`. The mover must enter at the planted live state, descend it,
+/// telescope its decrease from that entry, and consume the certificate. A
+/// restore-first wrapper enters at the seed and misses the plant on every count.
 #[test]
-fn terminal_gauge_descent_moves_the_state_that_best_seen_would_restore_2762() {
+fn terminal_gauge_descent_keeps_the_live_excursion_2228() {
     let k = 2usize;
     let (mut term, z, rho) = seeded_two_circle_term(48, 16, k);
     let lambda_smooth = rho.lambda_smooth_vec().expect("one block per atom");
@@ -558,18 +562,22 @@ fn terminal_gauge_descent_moves_the_state_that_best_seen_would_restore_2762() {
             .expect("the live excursion restores");
         alpha *= 0.5;
     }
-    let (saved_objective, saved_state) = planted.expect("the production sweep has a finite plant");
+    let (planted_objective, planted_state) =
+        planted.expect("the production sweep has a finite plant");
     assert!(
-        saved_objective - seed_objective > material_floor,
+        planted_objective - seed_objective > material_floor,
         "fixture must admit a material ascent inside the production sweep: \
-         seed={seed_objective:.9e}, saved={saved_objective:.9e}, floor={material_floor:.6e}"
+         seed={seed_objective:.9e}, planted={planted_objective:.9e}, floor={material_floor:.6e}"
     );
 
-    // `self` is the live excursion; `best_seen` names a different terminal
-    // state.  This is the exact state split at the objective-stall refusal.
-    let mut best_seen = Some((0.0, slope, saved_state));
+    // The planted state is the LIVE excursion; `best_seen` names the seed, the
+    // state split the stall branch sees after a polish lowered the objective
+    // past its best-certificate state.
+    term.restore_mutable_state(&planted_state)
+        .expect("the planted excursion restores");
+    let mut best_seen = Some((0.0, slope, seed_state));
     let outcome = term
-        .descend_gauge_orbit_at_terminal_candidate(
+        .descend_gauge_orbit_consuming_best_seen(
             z.view(),
             &rho,
             None,
@@ -577,31 +585,39 @@ fn terminal_gauge_descent_moves_the_state_that_best_seen_would_restore_2762() {
             &mut best_seen,
             8,
         )
-        .expect("terminal candidate descent runs");
+        .expect("stall-branch gauge descent runs");
     let after = term
         .penalized_objective_total(z.view(), &rho, None, 1.0)
-        .expect("finite objective after terminal descent");
-    let resolution = SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * (1.0 + saved_objective.abs());
+        .expect("finite objective after the gauge descent");
+    let resolution = SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * (1.0 + planted_objective.abs());
 
     assert!(
         outcome.moved(),
-        "the planted best-seen state has material flat-block descent"
+        "the planted live excursion has material flat-block descent"
     );
     assert!(
         best_seen.is_none(),
-        "a committed move must consume the certificate for the pre-move state"
+        "a committed move must consume the certificate for the state the live one left"
+    );
+    let entry = outcome
+        .entry_objective
+        .expect("a moving descent evaluated its entry objective");
+    assert!(
+        (entry - planted_objective).abs() <= resolution,
+        "the mover must enter at the live excursion, not at best_seen: \
+         entry={entry:.9e}, live={planted_objective:.9e}, best_seen={seed_objective:.9e}"
     );
     assert!(
-        saved_objective - after > resolution,
-        "the mover must descend the saved terminal candidate, not the live excursion: \
-         saved={saved_objective:.9e}, live={seed_objective:.9e}, after={after:.9e}"
+        planted_objective - after > resolution,
+        "the mover must descend the live excursion: live={planted_objective:.9e}, \
+         after={after:.9e}"
     );
     assert!(
-        (saved_objective - after - outcome.objective_decrease).abs()
+        (entry - after - outcome.objective_decrease).abs()
             <= resolution + 1.0e-6 * outcome.objective_decrease.abs(),
-        "the reported decrease must be measured from best_seen: reported {}, measured {}",
+        "the reported decrease must telescope from the live entry: reported {}, measured {}",
         outcome.objective_decrease,
-        saved_objective - after,
+        entry - after,
     );
 }
 

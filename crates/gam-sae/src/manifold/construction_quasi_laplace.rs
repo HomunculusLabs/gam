@@ -2058,7 +2058,7 @@ impl SaeManifoldTerm {
                 // disarmed.
                 if gauge_block_armed {
                     gauge_block_armed = false;
-                    let orbit = self.descend_gauge_orbit_at_terminal_candidate(
+                    let orbit = self.descend_gauge_orbit_consuming_best_seen(
                         target,
                         rho_fixed,
                         registry,
@@ -2189,21 +2189,28 @@ impl SaeManifoldTerm {
         }
     }
 
-    /// Run the likelihood-flat-block mover on the state this terminal path
-    /// would actually retain (#2762).
+    /// Run the likelihood-flat-block mover on the LIVE state at the refine loop's
+    /// objective-stall fixed-point claim, and consume the saved decrement
+    /// certificate when the mover commits (#2762, #2228).
     ///
-    /// The terminal Newton polish records the smallest `½λ²/scale` state in
-    /// `best_seen`, while the refine loop may subsequently leave a different
-    /// live excursion in `self`.  A terminal descent on that excursion followed
-    /// by the refusal's restore of `best_seen` discards the descent and reports
-    /// the untouched state as the fixed point.  Restore first, so the mover and
-    /// the terminal diagnostic have one state authority.
+    /// `best_seen` is keyed on the `½λ²/scale` certificate, not on the penalized
+    /// objective, so the state it names can sit materially above the live
+    /// excursion. Every mover of the refine loop commits only objective
+    /// decreases, so the live state is the objective incumbent, and this visit is
+    /// a continuation path: the loop refuses only after
+    /// `SAE_MANIFOLD_INNER_OBJECTIVE_STALL_MIN_ROUNDS` stalled rounds. Restoring
+    /// `best_seen` before descending traded that incumbent for a worse state.
+    /// Measured on the p=2048, charts=8 curved-tier cell (#2283, perf2731 job
+    /// 448182): the polish and the next refine round took the objective from
+    /// 9.4299854865e4 to 9.4299574102e4, this visit restored the 9.4299854865e4
+    /// state, and the loop replayed the identical polish before refusing. Only
+    /// the terminal exits restore `best_seen`: the refusal's report and the
+    /// certify-at-best-seen gate.
     ///
-    /// A committed move invalidates the saved decrement certificate: it belongs
-    /// to the pre-move state and must not restore over the move later.  An inert
-    /// call leaves the certificate in place because `self` is then still exactly
-    /// that saved state.
-    pub(crate) fn descend_gauge_orbit_at_terminal_candidate(
+    /// A committed move invalidates the saved certificate, because it belongs to
+    /// a state the live one has left; a later refusal then reports the live state
+    /// and cannot restore over the descent. An inert call leaves it in place.
+    pub(crate) fn descend_gauge_orbit_consuming_best_seen(
         &mut self,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
@@ -2212,9 +2219,6 @@ impl SaeManifoldTerm {
         best_seen: &mut Option<(f64, f64, SaeManifoldMutableState)>,
         max_rounds: usize,
     ) -> Result<GaugeOrbitDescent, String> {
-        if let Some((_, _, best_state)) = best_seen.as_ref() {
-            self.restore_mutable_state(best_state)?;
-        }
         let outcome =
             self.descend_gauge_orbit(target, rho, registry, penalized_gram_scale, max_rounds)?;
         if outcome.moved() {
