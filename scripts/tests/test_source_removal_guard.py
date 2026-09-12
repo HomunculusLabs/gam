@@ -81,6 +81,21 @@ class SourceRemovalGuard(unittest.TestCase):
                 self.assertEqual(guard.test_lines(source, path), {1, 2, 3})
         self.assertEqual(guard.test_lines(source, "crates/demo/src/testsuite.rs"), set())
 
+    def test_a_brace_less_test_item_ends_at_its_semicolon_2829(self):
+        source = ("#[cfg(test)]\n"
+                  "mod tests_x;\n"
+                  "pub fn production() {\n"
+                  "}\n"
+                  "#[cfg(test)] use std::fmt;\n"
+                  "#[cfg(test)]\n"
+                  "const TABLE: [u8; 2] = [1, 2];\n"
+                  "fn also_production() {}\n"
+                  "#[cfg(test)]\n"
+                  "mod tests {\n"
+                  "    fn helper() {}\n"
+                  "}\n")
+        self.assertEqual(guard.test_lines(source, "crates/demo/src/lib.rs"), {1, 2, 5, 6, 7, 9, 10, 11, 12})
+
     def test_a_line_that_merely_starts_with_a_keyword_is_not_a_declaration_2818(self):
         for line in ("    constant_curvature_kernel_matrix(x, y)", "enumerate_generators(&mut out);",
                      "    type_per_point_log_density = 3;", "fnord();", "static_bound.check()"):

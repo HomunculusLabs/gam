@@ -143,20 +143,28 @@ def test_lines(source, path, clean=None):
     lines = clean.splitlines()
     if any(re.search(r"#!\s*\[\s*cfg\s*\([^]]*\btest\b", line) for line in lines):
         return set(range(1, len(lines) + 1))
-    marked, pending, depth, gates = set(), False, 0, []
+    marked, pending, depth, gates, nesting = set(), False, 0, [], 0
     for number, line in enumerate(lines, 1):
         if re.search(r"#\s*\[\s*(?:test\b|cfg\s*\([^]]*\btest\b)", line):
             pending = True
-        starts_in_gate = bool(gates)
+        starts_in_gate, starts_pending = bool(gates), pending
         for ch in line:
-            if ch == "{":
+            if ch in "([":
+                nesting += 1
+            elif ch in ")]":
+                nesting -= 1
+            elif ch == "{":
                 if pending:
                     gates.append(depth); pending = False
                 depth += 1
             elif ch == "}":
                 depth -= 1
                 while gates and depth <= gates[-1]: gates.pop()
-        if starts_in_gate or gates or pending:
+            elif ch == ";" and pending and nesting == 0:
+                # A brace-less item (`#[cfg(test)] mod x;`, `#[cfg(test)] use y;`) ends at its
+                # semicolon. Left pending, the attribute gated the next production block instead.
+                pending = False
+        if starts_in_gate or starts_pending or gates or pending:
             marked.add(number)
     return marked
 
