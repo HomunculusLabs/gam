@@ -1694,5 +1694,14 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): the single-plane shim isa_extract_certified_plane has no production caller and is deleted. isa_deflationary_producer and isa_deflate_fitted_curve are called only by isa_seed.rs's #2111 producer-gate tests, so they become private helpers in that file's test module.",
     "evidence": "At 0073ba7cb, git grep -n -w finds isa_extract_certified_plane called only by the greedy_deflation_probe test helper, which now calls isa_extract_certified_planes(.., 1, ..). isa_deflationary_producer and isa_deflate_fitted_curve are called only inside isa_seed.rs by the producer and its tests. The production birth path in manifold/fit_drivers.rs calls capture_signal_span and isa_extract_certified_planes only. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "7149e5bf29131153600876368b3b0b2155988b03",
+    "removed": {
+      "crates/gam-sae/src/manifold/chart_atlas.rs::shift_indices": 1,
+      "crates/gam-sae/src/manifold/construction.rs::merge_tiers": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): SaeManifoldTerm::merge_tiers has no production caller and is deleted with the tests that only exercised it. The crate-private chart-atlas method shift_indices loses its only caller and is deleted too.",
+    "evidence": "At db0e784da, git grep -n -w finds merge_tiers called only by manifold/tests_two_tier_2023.rs, and shift_indices called only by merge_tiers. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]

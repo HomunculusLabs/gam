@@ -746,20 +746,6 @@ impl ManifoldChartAtlas {
         self.canonicalize_transitions();
         self.validate()
     }
-
-    pub(crate) fn shift_indices(&mut self, offset: usize) {
-        for chart in &mut self.charts {
-            *chart += offset;
-        }
-        for transition in &mut self.transitions {
-            transition.from_chart += offset;
-            transition.to_chart += offset;
-        }
-        for transition in &mut self.sphere_transitions {
-            transition.from_chart += offset;
-            transition.to_chart += offset;
-        }
-    }
 }
 
 fn disjoint_set_root(parents: &mut [usize], node: usize) -> usize {

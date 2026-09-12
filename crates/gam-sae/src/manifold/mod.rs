@@ -356,9 +356,6 @@ mod tests_behavioral_fisher_rung1;
 mod tests_inner_budget_trajectory_2015;
 
 #[cfg(test)]
-mod tests_two_tier_2023;
-
-#[cfg(test)]
 mod tests_tier0_shared_mean_2023;
 
 #[cfg(test)]

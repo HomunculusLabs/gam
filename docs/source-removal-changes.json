@@ -4367,5 +4367,18 @@
     ],
     "reason": "#2469. validate_monotone_structural_feasible and max_linear_constraint_segment_alpha refused a flex deviation whose raw structural-monotonicity row slack fell below MONOTONICITY_SLACK_TOL = -1e-10. The rows are enforced by the QP only to PRIMAL_FEASIBILITY_TOL on the scaled slack, so the first check now uses ConstraintSet::max_scaled_violation and the second uses the same predicate row by row. The constant has no remaining user.",
     "evidence": "At the base, git grep -n -w MONOTONICITY_SLACK_TOL finds only its declaration, one comment and two uses in crates/gam-models/src/bms/install_flex.rs (validate_monotone_structural_feasible and max_linear_constraint_segment_alpha), all of which this change replaces. It is pub(crate), production-scoped and declared once, and no test names it. The item list applies source_removal_guard.py's ITEM regex and occurrence rule by hand. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "7149e5bf29131153600876368b3b0b2155988b03",
+    "items": [
+      "crates/gam-sae/src/manifold/chart_atlas.rs:fn:shift_indices",
+      "crates/gam-sae/src/manifold/construction.rs:fn:merge_tiers",
+      "crates/gam-sae/src/manifold/tests_two_tier_2023.rs:fn:merge_tiers_concatenates_atoms_assignment_and_rho",
+      "crates/gam-sae/src/manifold/tests_two_tier_2023.rs:fn:merge_tiers_is_exactly_additive_under_threshold_gates",
+      "crates/gam-sae/src/manifold/tests_two_tier_2023.rs:fn:merge_tiers_rejects_shape_mismatch",
+      "crates/gam-sae/src/manifold/tests_two_tier_2023.rs:fn:merge_tiers_resets_stale_gauge_deflation_state"
+    ],
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): a public item stays only when a product root uses it (gam-cli, gam-pyffi, gamfit, examples/, or another crate's production code). SaeManifoldTerm::merge_tiers, the #2023 two-tier term-merge primitive, has no production caller in any crate. The only callers are the four tests in manifold/tests_two_tier_2023.rs, and they pin nothing but its concatenation contract. It is deleted with that test file and its mod declaration. merge_tiers was the only caller of the crate-private chart-atlas method shift_indices, which would otherwise be dead under deny(warnings), so shift_indices goes too. The tiered/mod.rs module doc no longer names merge_tiers as the term-level composition route.",
+    "evidence": "At db0e784da, git grep -n -w over crates, src, tests, examples, bench, docs, experiments and gamfit finds merge_tiers only at its declaration and in its own error strings in manifold/construction.rs, the four tests of manifold/tests_two_tier_2023.rs, the tiered/mod.rs module doc, and experiments/compose_tiers.py. That last file only says gamfit has no merge_tiers API, which stays true. shift_indices appears only at its declaration in manifold/chart_atlas.rs and at its call inside merge_tiers. merge_tiers' other helpers (SaeManifoldRho::for_assignment, and the test fixture small_two_atom_periodic_term) keep many other callers, and construction.rs keeps two other s![..] uses. The prune-api-d census at 3ef484e06 reports merge_tiers with zero production consumers. Not compiled locally (user directive). Compile is covered by the lead's shared tip check."
   }
 ]

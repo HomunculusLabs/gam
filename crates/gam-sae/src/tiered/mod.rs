@@ -35,12 +35,9 @@
 //!     fixed-support anchors and decoder rows, is charged as a finite set, and
 //!     only the residual after peeling it is handed to semantic charting.
 //!
-//! Term-level composition (concatenating a Tier-1 linear term with a Tier-2
-//! curved term into one solve) already lives in [`crate::manifold`]:
-//! `SaeManifoldTerm::merge_tiers` (exact additivity under independent
-//! ThresholdGate/ordered Beta--Bernoulli gates). The Mode-A per-block
-//! scale-out (one K=1 curved chart per orthonormal Tier-1 block) consumes the
-//! block frames on the block-sparse fit directly; see `sparse_dict::block`.
+//! The Mode-A per-block scale-out (one K=1 curved chart per orthonormal Tier-1
+//! block) consumes the block frames on the block-sparse fit directly; see
+//! `sparse_dict::block`.
 
 mod code_space;
 mod fit;
