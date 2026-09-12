@@ -379,10 +379,34 @@ mod tensor_function_space_runtime_tests {
         spec.double_penalty = false;
         let singly_penalized = build_tensor_bspline_basis(data.view(), &[0, 1], &spec)
             .expect("single-penalty tensor basis");
+        // Each margin block is `S_dim ⊗ G_other / 1ᵀ G_other 1` (#1561, SPEC rule 5).
+        // The legacy factored runtime diagonalizes each margin's `S` in its
+        // Euclidean eigenbasis, so it solves `S ⊗ I` and cannot carry these
+        // function-space blocks either.
         assert!(
-            singly_penalized.kronecker_factored.is_some(),
-            "the exact marginal-only fast path must remain available"
+            singly_penalized.kronecker_factored.is_none(),
+            "the factored runtime solves S ⊗ I, not the function-space margin blocks"
         );
+        let mut margin_blocks = 0usize;
+        for penalty in &singly_penalized.active_penalties {
+            let PenaltySource::TensorMarginal { dim } = &penalty.info.source else {
+                continue;
+            };
+            margin_blocks += 1;
+            let factors = penalty
+                .info
+                .kronecker_factors
+                .as_ref()
+                .expect("a tensor margin block keeps its Kronecker factors");
+            assert_eq!(factors.len(), 2);
+            let gram = &factors[1 - *dim];
+            let measure = gram.sum();
+            assert!(
+                (measure - 1.0).abs() <= gam_linalg::roundoff::accumulation_growth(2 * gram.len()),
+                "margin {dim}'s other-margin Gram is not averaged over its domain: 1ᵀG1 = {measure}"
+            );
+        }
+        assert_eq!(margin_blocks, 2, "one penalty block per margin");
     }
 
     fn cubic_marginal() -> BSplineBasisSpec {
