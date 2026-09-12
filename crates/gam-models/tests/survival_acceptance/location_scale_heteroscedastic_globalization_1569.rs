@@ -55,13 +55,16 @@ fn fit_heteroscedastic(
     k_scale: usize,
     seed: u64,
 ) -> HeteroFit {
-    let two_pi = 2.0 * std::f64::consts::PI;
+    let half_pi = std::f64::consts::FRAC_PI_2;
     let mut rng = Lcg::new(seed);
 
-    //   location  μ(x)   = loc_amp   * sin(2πx)
-    //   log-scale η_σ(x) = scale_amp * cos(2πx)
-    let mu = |x: f64| loc_amp * (two_pi * x).sin();
-    let log_sigma = |x: f64| scale_amp * (two_pi * x).cos();
+    //   location  μ(x)   = loc_amp   * sin(πx/2)
+    //   log-scale η_σ(x) = scale_amp * cos(πx/2)
+    // One cycle over the covariate range x ∈ [−2, 2], which a k = 8 smooth resolves.
+    // At period 1 the range held four cycles, so every certified fit shrank both
+    // smooths to flat and scored exactly amplitude/√2, whatever the solver did.
+    let mu = |x: f64| loc_amp * (half_pi * x).sin();
+    let log_sigma = |x: f64| scale_amp * (half_pi * x).cos();
 
     let mut x = Vec::with_capacity(n);
     let mut exit = Vec::with_capacity(n);
