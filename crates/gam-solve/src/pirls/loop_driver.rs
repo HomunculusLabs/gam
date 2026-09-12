@@ -1539,47 +1539,13 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
         let s_beta_norm = array1_l2_norm(&s_beta);
         let mut gradient = gradient_data;
         gradient += &s_beta;
-        let mut penalty_term = penalty_active.shifted_quadratic(beta_transformed.as_ref());
+        let penalty_term = penalty_active.shifted_quadratic(beta_transformed.as_ref());
         let ridge_used = baseridge;
-        // ONE OWNER FOR δ, AND IT IS THE ASSEMBLER.
-        //
-        // `solve_penalized_least_squares_implicit` folds `ridge_used` into the
-        // diagonal of the matrix it returns, on BOTH of its branches: the dense
-        // branch adds it in place before factorizing, and the sparse branch
-        // asks `assemble_sparse_penalized_hessian` for `H = XᵀWX + S_λ + δI`.
-        // So `penalized_hessian` ALREADY carries δ and this seam must not add
-        // it a second time.
-        //
-        // This used to add `ridge_used` to `penalized_hessian` a second time. It was
-        // masked, not correct: the sparse branch reported `ridge_used = 0.0`
-        // while handing back a matrix that carried δ = 1e-8 (its assembler
-        // closure rewrote a requested 0 into `FIXED_STABILIZATION_RIDGE`), so
-        // the `> 0.0` guard skipped the second addition. Making the reported
-        // ridge equal the applied ridge — the point of the #2519 repair —
-        // unmasks it, and every sparse fit would silently get `H + 2δ` in
-        // `0.5·log|H|` while `penalty_term` and the gradient carried only one δ.
-        //
-        // The finalization seam of the ITERATED path already states this
-        // contract for the same reason ("P-IRLS already folded any
-        // stabilization ridge directly into the Hessian. Keep that exact matrix
-        // so outer LAML derivatives stay consistent"), and
-        // `gam_working_model::update` is the assembler that folds it there. The
-        // zero-iteration synthesis now matches: `penalized_hessian ==
-        // stabilizedhessian == XᵀWX + S_λ + δI`.
-        //
-        // The objective bookkeeping below is NOT double counting: `δ‖β‖²` in
-        // `penalty_term` and `δβ` in the gradient are the scalar/vector
-        // companions of the δI already in the matrix, exactly as
-        // `gam_working_model::update` adds them alongside its in-place ridge.
+        // `solve_penalized_least_squares_implicit` assembles `H = XᵀWX + S_λ`
+        // with no stabilization ridge on both of its branches (#2901 V22), so
+        // `penalized_hessian` is the exact matrix the outer criterion reads, and
+        // `penalty_term` and the gradient carry no ridge term either.
         let stabilizedhessian = penalized_hessian.clone();
-        let mut ridge_grad_norm = 0.0;
-        if ridge_used > 0.0 {
-            let ridge_penalty =
-                ridge_used * beta_transformed.as_ref().dot(beta_transformed.as_ref());
-            penalty_term += ridge_penalty;
-            gradient += &beta_transformed.as_ref().mapv(|v| ridge_used * v);
-            ridge_grad_norm = ridge_used * array1_l2_norm(beta_transformed.as_ref());
-        }
 
         let gradient_norm = array1_l2_norm(&gradient);
         let working_state = WorkingState {
@@ -1593,7 +1559,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             firth: FirthDiagnostics::Inactive,
             ridge_used,
             hessian_curvature: HessianCurvatureKind::Fisher,
-            gradient_natural_scale: score_norm + s_beta_norm + ridge_grad_norm,
+            gradient_natural_scale: score_norm + s_beta_norm,
         };
 
         let zero_iter_penalized = deviance + penalty_term;
@@ -1668,7 +1634,7 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             iteration: 1,
             max_abs_eta,
             lastgradient_norm: gradient_norm,
-            gradient_natural_scale: score_norm + s_beta_norm + ridge_grad_norm,
+            gradient_natural_scale: score_norm + s_beta_norm,
             penalized_gradient_transformed: gradient.clone(),
             last_deviance_change: 0.0,
             last_step_halving: 0,

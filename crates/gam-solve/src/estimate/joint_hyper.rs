@@ -107,15 +107,16 @@ pub(crate) fn validate_joint_hyper_direction_shapes(
 /// (#1000 centering, #1127 scaling) and reports `reml_score` as the outer value
 /// OF THE CONDITIONED PROBLEM. The joint `[ρ, ψ]` spatial route builds its
 /// `RemlState` here, from `y` verbatim, and its criterion is graded against the
-/// scalar route's. With `FIXED_STABILIZATION_RIDGE` charged against a target of
-/// zero the two problems differ by `delta*(2*c*beta0 + c^2)` on the intercept
-/// axis, so the two criteria disagree by `(n/2)/D_p * delta*((beta0+c)^2 −
-/// beta0^2)` — MEASURED `3.674e-8` at `c = mean(y) = 0.213` and `5.047e-5`
-/// after adding 10 to the same response, against an agreement tolerance of
-/// `2.787e-8`. The joint route must therefore condition through the SAME gate
-/// and the SAME arithmetic, which is what this function exposes; re-deriving
-/// either at the call site is how the two routes drifted apart in the first
-/// place.
+/// scalar route's, so the two criteria agree only when both are formed on the
+/// SAME conditioned response. While PIRLS charged a fixed stabilization ridge
+/// `delta*||beta||^2` against a target of zero (removed in #2901 V22), the two
+/// problems differed by `delta*(2*c*beta0 + c^2)` on the intercept axis and the
+/// criteria disagreed by `(n/2)/D_p * delta*((beta0+c)^2 − beta0^2)` — MEASURED
+/// `3.674e-8` at `c = mean(y) = 0.213` and `5.047e-5` after adding 10 to the
+/// same response, against an agreement tolerance of `2.787e-8`. The joint route
+/// must therefore condition through the SAME gate and the SAME arithmetic, which
+/// is what this function exposes; re-deriving either at the call site is how
+/// the two routes drifted apart in the first place.
 ///
 /// The conditioning is exactly invertible and is applied for the hyperparameter
 /// SEARCH only: the accept-fit re-fits the original response at the selected

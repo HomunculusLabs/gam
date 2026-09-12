@@ -244,8 +244,8 @@ fn te_with_disparate_scales_certifies() {
 //                                       2.13012903753208305e-1; coordinates
 //                                       1..6 agree to ~10 digits
 //   H[0][0] = 1.50000000100000008e1 = n + 1e-8, so coordinate 0 is the
-//   intercept and it carries the absolute `FIXED_STABILIZATION_RIDGE`, which
-//   that constant's own doc says `penalty_term` carries as `ridge*||beta||^2`.
+//   intercept and it carried the absolute fixed stabilization ridge, which
+//   `penalty_term` priced as `ridge*||beta||^2` (removed in #2901 V22).
 //
 // The gap is then fully accounted for, with no free parameter:
 //
@@ -254,9 +254,9 @@ fn te_with_disparate_scales_certifies() {
 //   (n/2) * dDp / Dp       = 3.6736410122e-8 vs measured gap = 3.673641e-8
 //
 // So 100% of the disagreement is `(n/2)*d log(rss+pen)`, 0% is either
-// log-determinant, and the ONLY term that notices the intercept moving is the
-// 1e-8 ridge. The refusal is the certificate correctly reporting that the
-// criterion assigns two values to one predictor.
+// log-determinant, and the ONLY term that noticed the intercept moving was the
+// 1e-8 ridge. The refusal was the certificate correctly reporting that the
+// criterion assigned two values to one predictor.
 //
 // REFUTED along the way, so nobody re-runs them: the offset seam (instrumented
 // `compose_offset` itself; both routes compose an identically ZERO offset from
@@ -324,8 +324,8 @@ fn matern_low_n_fit_certifies_2644() {
 // `outer_criterion_is_invariant_to_the_origin_of_y` fitted `y ~ s(x, k=5)`
 // against `y + 10` on `mk_1d(15, t^2, 0.05, 7)`, measured `gap = 4.085621e-14`
 // (relative 4.504937e-15) against a `5.092357e-05` prediction, and that nine-
-// order miss was recorded — here and in `FIXED_STABILIZATION_RIDGE`'s doc — as a
-// REFUTATION of the claim that the ridge shrinks toward a FIXED zero.
+// order miss was recorded — here and in the stabilization ridge's doc — as a
+// REFUTATION of the claim that the ridge shrank toward a FIXED zero.
 //
 // It refuted nothing. **THE QUANTITY WAS NEVER FREE TO DISAGREE.** That fixture
 // is Gaussian, identity-link, has an unpenalized intercept and no linear
@@ -345,10 +345,10 @@ fn matern_low_n_fit_certifies_2644() {
 // handed `y` to `ExternalJointHyperEvaluator::new` VERBATIM — it never called
 // the conditioning function — and
 // `try_exact_joint_spatial_length_scale_optimization` then graded its criterion
-// against the scalar-rho route's `fit_score`, which IS conditioned. With
-// `FIXED_STABILIZATION_RIDGE = 1e-8` priced as `delta*||beta||^2` against zero,
-// the two routes minimized problems differing by `delta*(2*c*beta0 + c^2)` on
-// the intercept axis.
+// against the scalar-rho route's `fit_score`, which IS conditioned. With the
+// fixed stabilization ridge `delta = 1e-8` priced as `delta*||beta||^2` against
+// zero (removed in #2901 V22), the two routes minimized problems differing by
+// `delta*(2*c*beta0 + c^2)` on the intercept axis.
 //
 // MEASURED at `517b6303f`, release, one run, three arms of THIS fixture, against
 // the law `gap = (n/2)/D_p * delta * ((beta0 + m)^2 - beta0^2)` registered as a
@@ -371,27 +371,22 @@ fn matern_low_n_fit_certifies_2644() {
 //    ~67x above the residue the conditioned route actually leaves (~1.5e-14
 //    relative) and 1.8e7x BELOW the pre-fix 1.811e-5. It cannot pass by
 //    roundoff and it cannot fail on roundoff.
-// 3. THE ARMS COULD HAVE DIFFERED — asserted from live values, not from this
-//    comment. The fitted coefficient vectors of the `asis` and `plus10` arms
-//    must differ by exactly one coordinate moved by `SHIFT` (checked in both the
-//    L-infinity and L1 norms, so it is one coordinate and not a spread), and the
-//    ridge term the criterion is built from,
-//    `delta*(||b'||^2 - ||b||^2)`, must therefore differ between the arms by
-//    at least 1e-7 in absolute value — five orders ABOVE the invariance bar.
-//    That is the clause the retired guard lacked: the criterion was free to move
-//    by ~1e-6 and did not.
+// 3. THE ARMS REALLY DIFFER — asserted from live values, not from this
+//    comment. The arms' response means must be separated by `SHIFT`, and the
+//    fitted coefficient vectors of the `asis` and `plus10` arms must differ by
+//    exactly one coordinate moved by `SHIFT` (checked in both the L-infinity and
+//    L1 norms, so it is one coordinate and not a spread). A former clause 3c
+//    required the ridge term `delta*(||b'||^2 - ||b||^2)` to differ between the
+//    arms by at least 1e-7. It was removed with the ridge (#2901 V22): the
+//    criterion no longer prices the intercept's distance from zero, so the
+//    origin of `y` cannot enter it through the model, and clause 2 guards that
+//    the joint route does not lose that invariance to precision.
 //
 // The fixture is deliberately the one whose route DOES NOT satisfy the
 // `gaussian_identity_response_center` gate upstream of the criterion under test.
 // If a future change routes `y ~ matern(x, nu=5/2)` away from the joint spatial
 // route, clause 3 is what will notice that this test has gone mute.
 // ─────────────────────────────────────────────────────────────────────────
-
-/// `FIXED_STABILIZATION_RIDGE` (`gam-solve/src/pirls/gam_working_model.rs`),
-/// which is `pub(crate)` and therefore restated here. Clause 3 only needs its
-/// ORDER of magnitude, but the exact value is what makes the 1e-7 floor below a
-/// derived number rather than a guess.
-const FIXED_STABILIZATION_RIDGE: f64 = 1.0e-8;
 
 #[test]
 fn joint_route_outer_criterion_is_invariant_to_the_origin_of_y() {
@@ -497,9 +492,7 @@ fn joint_route_outer_criterion_is_invariant_to_the_origin_of_y() {
                  fit REFUSED; the conditioned route measured 1.34e-15. A failure here means an \
                  outer lambda-search is again forming its criterion on an unconditioned \
                  response, so lambda-hat depends on the origin of the user's response units. Do \
-                 NOT fix it by exempting the intercept from `FIXED_STABILIZATION_RIDGE` (that \
-                 deletes the detector) and do NOT fix it by deleting the #1000 centering (that \
-                 is what makes lambda-hat origin-invariant)."
+                 NOT fix it by deleting the #1000 centering."
             ));
         }
     }
@@ -559,40 +552,9 @@ fn joint_route_outer_criterion_is_invariant_to_the_origin_of_y() {
         ));
     }
 
-    // Clause 3c: THE FREEDOM CLAUSE. The criterion therefore carried a term that
-    // genuinely differed between the arms. `penalty_term` charges
-    // `delta*||beta||^2` against a target of zero (`gam_working_model.rs` and
-    // `loop_driver.rs` both spell it literally, with no `prior_mean_target` in
-    // the expression), so the two arms priced ridges differing by `ridge_gap` --
-    // which must sit far ABOVE clause 2's bar, or clause 2 is a property of the
-    // fixture rather than of the code.
-    let ridge_asis = FIXED_STABILIZATION_RIDGE * betas[1].dot(&betas[1]);
-    let ridge_plus10 = FIXED_STABILIZATION_RIDGE * betas[2].dot(&betas[2]);
-    let ridge_gap = (ridge_plus10 - ridge_asis).abs();
-    let clause2_absolute_bar = bar * scores[1].abs();
-    println!(
-        "[2671-origin] CLAUSE3c ridge_term_gap={ridge_gap:.17e} \
-         clause2_absolute_bar={clause2_absolute_bar:.6e} \
-         headroom={:.3e}x",
-        ridge_gap / clause2_absolute_bar.max(f64::MIN_POSITIVE)
-    );
-    if !(ridge_gap > 1.0e-7) {
-        failures.push(format!(
-            "CLAUSE 3c -- THE QUANTITY MUST BE FREE TO DISAGREE. The outer criterion is built \
-             from a penalty carrying `delta*||beta||^2` against a FIXED zero target \
-             (delta={FIXED_STABILIZATION_RIDGE:.1e}), and the arms' coefficient vectors differ by \
-             {SHIFT} on the intercept, so that term differs between them by {ridge_gap:.6e} -- \
-             which must be far above clause 2's absolute bar of {clause2_absolute_bar:.6e}, or \
-             the invariance is a property of the fixture rather than of the code. The retired \
-             guard `outer_criterion_is_invariant_to_the_origin_of_y` failed exactly here: its \
-             route centered the response upstream, so its two arms were the SAME problem and its \
-             4.5e-15 agreement was arithmetic, not evidence."
-        ));
-    }
-
     assert!(
         failures.is_empty(),
-        "#2671: {} of 4 clauses failed. Every clause was MEASURED before this panic, so the \
+        "#2671: {} of 3 clauses failed. Every clause was MEASURED before this panic, so the \
          picture below is complete rather than truncated at the first failure.\n\n{}",
         failures.len(),
         failures.join("\n\n"),

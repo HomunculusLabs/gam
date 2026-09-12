@@ -1695,22 +1695,20 @@ impl<'a> RemlState<'a> {
         };
 
         let ctx = self.build_sparse_derivative_context(pirls_result, bundle)?;
-        // Sparse-exact `log|H_δ|` is the ordinary Cholesky log determinant of
+        // Sparse-exact `log|H|` is the ordinary Cholesky log determinant of
         //
-        //     H_δ(ρ) = X'W(ρ)X + S_λ(ρ) + FIXED_STABILIZATION_RIDGE · I.
+        //     H(ρ) = X'W(ρ)X + S_λ(ρ),
         //
-        // Every sparse evaluation assembles that same declared matrix. It
-        // attempts one factorization and either returns its exact log
-        // determinant or refuses with `HessianNotPositiveDefinite`; the
-        // Gershgorin lower bound is diagnostic only and never selects δ
-        // (#2657). Thus δ contributes to the value exactly as assembled while
-        // `dδ/dρ = 0`, and no pseudo-logdet floor or range(S_+) projection
-        // correction belongs in this path.
+        // with no stabilization ridge (#2901 V22). Every sparse evaluation
+        // assembles that same declared matrix. It attempts one factorization and
+        // either returns its exact log determinant or refuses with
+        // `HessianNotPositiveDefinite`; the Gershgorin lower bound is diagnostic
+        // only and never selects a shift (#2657). So no pseudo-logdet floor or
+        // range(S_+) projection correction belongs in this path.
         //
-        // This argument deliberately makes no claim about n versus p or the
-        // rank of the unstabilized Hessian. Sparse-native selection observes
-        // sparsity, not n, so a wide or rank-deficient system remains eligible;
-        // the fixed-ridge matrix is the criterion in that case as well.
+        // This argument makes no claim about n versus p. Sparse-native selection
+        // observes sparsity, not n, so a wide system remains eligible. A
+        // rank-deficient sparse H has no Cholesky factor and is refused.
         // Sparse-exact assembles β and H in the original basis (see `beta =
         // sparse_exact_beta_original`), so the envelope residual is mapped to
         // that basis. Sparse-native fits are unconstrained on this path.

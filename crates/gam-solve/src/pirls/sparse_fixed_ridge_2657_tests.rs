@@ -1,4 +1,4 @@
-use super::{FIXED_STABILIZATION_RIDGE, ensure_sparse_positive_definite_with_fixed_ridge};
+use super::ensure_sparse_positive_definite_with_fixed_ridge;
 use crate::estimate::EstimationError;
 use faer::sparse::{SparseColMat, Triplet};
 
@@ -24,11 +24,12 @@ fn sparse_indefiniteness_refuses_without_selecting_a_rho_dependent_ridge_2657() 
             result,
             Err(EstimationError::HessianNotPositiveDefinite { .. })
         ),
-        "the fixed-ridged matrix has eigenvalue 1 + δ - 2 < 0 and must be refused"
+        "the assembled matrix has eigenvalue 1 - 2 < 0 and must be refused"
     );
     assert_eq!(
         requested_ridges,
-        [FIXED_STABILIZATION_RIDGE],
-        "the sparse selector must never derive a second ridge from H(rho)"
+        [0.0],
+        "the sparse selector assembles H with no stabilization ridge and never derives one \
+         from H(rho) (#2901 V22)"
     );
 }

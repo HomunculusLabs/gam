@@ -11,18 +11,20 @@
 
 use super::loop_driver::max_symmetric_asymmetry;
 use super::{
-    FIXED_STABILIZATION_RIDGE, PirlsPenalty, PirlsWorkspace, SparseXtWxCache, StablePLSResult,
-    WorkingReparamTransform, calculate_edf_from_sparse_factor,
-    calculate_edfwithworkspace_from_factor, ensure_sparse_positive_definite_with_fixed_ridge,
-    solve_sparse_spd,
+    PirlsPenalty, PirlsWorkspace, SparseXtWxCache, StablePLSResult, WorkingReparamTransform,
+    calculate_edf_from_sparse_factor, calculate_edfwithworkspace_from_factor,
+    ensure_sparse_positive_definite_with_fixed_ridge, solve_sparse_spd,
 };
 use super::{
     calculate_deviance_from_eta, computeworkingweight_derivatives_from_eta,
     pirls_data_log_kernel_from_eta,
 };
 use crate::estimate::EstimationError;
+use faer::Side;
 use faer::sparse::SparseColMat;
-use gam_linalg::faer_ndarray::{FaerLinalgError, array1_to_col_matmut};
+use gam_linalg::faer_ndarray::{
+    FaerEigh, FaerLinalgError, FaerSymmetricFactor, array1_to_col_matmut,
+};
 use gam_linalg::matrix::{DesignMatrix, LinearOperator, SymmetricMatrix};
 use gam_linalg::utils::{StableSolver, array_is_finite, inf_norm};
 use gam_problem::{Coefficients, GlmLikelihoodSpec, InverseLink};
@@ -260,22 +262,10 @@ pub(super) fn solve_penalized_least_squares_implicit(
         let precomputed_xtwx =
             gaussian_fixed_cache.and_then(|c| c.xtwx_sparse_orig.as_ref().map(|arc| arc.as_ref()));
 
-        // 1. Sparse penalized Hessian: H = X'diag(w)X + S_λ + ridge·I.
-        //    The Cholesky factor is reused from the SPD check so we avoid
-        //    factorizing the same matrix twice.
-        //
-        //    The closure assembles EXACTLY the ridge it is handed. It used to
-        //    rewrite a requested `0.0` into `FIXED_STABILIZATION_RIDGE`, which
-        //    desynchronized the passport from the matrix: the ladder's first
-        //    rung asked for `0.0`, got a matrix carrying δ = 1e-8, and reported
-        //    `ridge_used = 0.0`. β̂ was then the stationary point of the RIDGED
-        //    system while the criterion was assembled as if unridged — the
-        //    Tikhonov RHS term `δ·μ` below was skipped, `penalty_term +=
-        //    δ‖β‖²` in `loop_driver` was skipped, and every consumer of
-        //    `ridge_passport.delta()` was told 0. The rewrite is redundant now
-        //    that `ensure_sparse_positive_definite_with_fixed_ridge` applies δ on its
-        //    first rung, and it was the mechanism that made the report differ
-        //    from the application.
+        // 1. Sparse penalized Hessian: H = X'diag(w)X + S_λ, with no
+        //    stabilization ridge (#2901 V22). The closure assembles exactly the
+        //    ridge it is handed, which is 0. The Cholesky factor is reused from
+        //    the SPD check so we avoid factorizing the same matrix twice.
         let (h_sparse, factor, ridge_used) =
             ensure_sparse_positive_definite_with_fixed_ridge(|ridge| {
                 workspace.assemble_sparse_penalized_hessian(
@@ -445,94 +435,110 @@ pub(super) fn solve_penalized_least_squares_implicit(
         );
     }
 
-    // 4. Ridge stabilization — UNCONDITIONAL, matching the dense Newton path
-    // (`ensure_positive_definitewithridge`, made unconditional in `fc2b286a2`)
-    // and the sparse selector (`ensure_sparse_positive_definite_with_fixed_ridge`).
-    //
-    // δ MUST NOT BE CHOSEN BY A BRANCH. `FIXED_STABILIZATION_RIDGE`'s own doc
-    // (`gam_working_model.rs`) states the invariant this file has to honour:
-    //
-    //   V(ρ) includes log|H(ρ)| with H(ρ) = XᵀWX + S_λ(ρ) + δI. If δ = δ(ρ) is
-    //   adaptive, V(ρ) is only piecewise-smooth and ∂V/∂ρ ignores ∂δ/∂ρ.
-    //
-    // This site used to factor the BARE matrix first and report `ridge_used =
-    // 0` when that succeeded, adding δ only on failure. A Cholesky-success
-    // predicate on a near-singular matrix is a function of ρ, so δ became a
-    // function of ρ — and δ is carried as `RidgePolicy::exact_full_objective()`
-    // straight into the outer criterion through `0.5·log|H|`. Measured on the
-    // #1575 binomial/logit fixture (dense Newton twin of this selector): the
-    // outer cost jumped by exactly `0.5·ln(1e8) = 9.2103400803` between
-    // neighbouring ρ at identical deviance, edf and penalty term, the whole
-    // difference being δ = 1e-8 at one point and 0 at its neighbours. That
-    // discontinuity is #2519: no line search and no certificate is well posed
-    // on a criterion that jumps by 9.21 between neighbouring ρ.
-    //
-    // The bare-first shape was introduced for the opposite failure (#1122): an
-    // ADAPTIVE nonzero δ broke the envelope identity, because β̂ is the
-    // stationary point of `½βᵀ(H+δI)β` (inner residual `Xᵀu − S_λβ̂ = δβ̂`, with
-    // `cos(Xᵀu−S_λβ̂, β̂) = 1.0000` pinning the residual to the ridge gradient)
-    // while the outer ψ-gradient differentiated the un-ridged surface. A
-    // CONSTANT δ does not have that defect: the ridge is part of the objective
-    // at every ρ, `penalty_term` carries `δ‖β‖²` and the gradient carries `δβ`
-    // (see `loop_driver`'s zero-iteration synthesis and
-    // `gam_working_model::update`), so the criterion and its derivative expand
-    // the SAME operator `XᵀWX + S_λ + δI`. The augmented RHS `r + δμ` below
-    // keeps the system a Tikhonov regularization centered at the prior-mean
-    // target rather than at zero.
-    //
-    // On a well-conditioned Hessian this is numerically inert in the direction
-    // that matters: the criterion shifts by `½·Σ ln(1 + δ/λ_i) ≤ ½·δ·tr(H⁻¹)`,
-    // far below the convergence tolerances when `λ_i ≫ δ = 1e-8`. What it
-    // removes is the 9.21 jump, not the scale.
-    //
-    // OWNERSHIP: δ is folded into `penalized_hessian` HERE, so the matrix this
-    // function returns already carries it — the same contract
-    // `gam_working_model::update` follows (its dense arm mutates the Hessian in
-    // place through `ensure_positive_definitewithridge`) and the same contract
-    // `loop_driver`'s finalization reads ("P-IRLS already folded any
-    // stabilization ridge directly into the Hessian"). The zero-iteration
-    // synthesis in `loop_driver` must therefore NOT add `ridge_used` again.
-    let ridge_used = FIXED_STABILIZATION_RIDGE;
-    for i in 0..penalized_hessian.nrows() {
-        penalized_hessian[[i, i]] += ridge_used;
-    }
-    let factor = StableSolver::new()
-        .factorize(&penalized_hessian)
-        .map_err(EstimationError::LinearSystemSolveFailed)?;
-
-    // 5. Solve
+    // 4. No stabilization ridge (#2901 V22, SPEC rules 5 and 23). H is exactly
+    // `XᵀWX + S_λ`: no δI is added, no `δ·μ` enters the RHS, and the returned
+    // matrix is the one the outer criterion reads. A strict Cholesky certifies a
+    // positive-definite H. When it refuses, H is solved on its numerically
+    // identified subspace by `minimum_norm_pls_solve`.
     if workspace.rhs_full.len() != p_dim {
         workspace.rhs_full = Array1::zeros(p_dim);
     }
     workspace.rhs_full.assign(&workspace.vec_buf_p);
-    if ridge_used > 0.0 {
-        let prior_mean_target = penalty.prior_mean_target();
-        if prior_mean_target.len() == p_dim {
-            workspace.rhs_full.scaled_add(ridge_used, prior_mean_target);
-        }
-    }
-    let mut rhsview = array1_to_col_matmut(&mut workspace.rhs_full);
-    factor.solve_in_place(rhsview.as_mut());
-    if !array_is_finite(&workspace.rhs_full) {
-        return Err(EstimationError::LinearSystemSolveFailed(
-            FaerLinalgError::FactorizationFailed {
-                context: "PIRLS implicit PLS non-finite solve",
-            },
-        ));
-    }
-    let betavec = workspace.rhs_full.clone();
+    let (betavec, edf) = match StableSolver::new().factorize(&penalized_hessian) {
+        Ok(factor @ FaerSymmetricFactor::Llt(_)) => {
+            // 5. Solve
+            let mut rhsview = array1_to_col_matmut(&mut workspace.rhs_full);
+            factor.solve_in_place(rhsview.as_mut());
+            if !array_is_finite(&workspace.rhs_full) {
+                return Err(EstimationError::LinearSystemSolveFailed(
+                    FaerLinalgError::FactorizationFailed {
+                        context: "PIRLS implicit PLS non-finite solve",
+                    },
+                ));
+            }
+            let betavec = workspace.rhs_full.clone();
 
-    // 6. EDF — reuse the factor already produced in step 5 to avoid a second
-    // O(p³) factorization of the identical regularized Hessian.
-    let edf = calculate_edfwithworkspace_from_factor(&factor, penalty, workspace)?;
+            // 6. EDF — reuse the factor already produced in step 5 to avoid a
+            // second O(p³) factorization of the identical Hessian.
+            let edf = calculate_edfwithworkspace_from_factor(&factor, penalty, workspace)?;
+            (betavec, edf)
+        }
+        _ => minimum_norm_pls_solve(&penalized_hessian, &workspace.rhs_full, penalty)?,
+    };
 
     Ok((
         StablePLSResult {
             beta: Coefficients::new(betavec),
             penalized_hessian: SymmetricMatrix::Dense(penalized_hessian),
             edf,
-            ridge_used,
+            ridge_used: 0.0,
         },
         p_dim,
     ))
+}
+
+/// Minimum-norm penalized least squares on the numerically identified subspace
+/// of `H = XᵀWX + S_λ`, for an H that a strict Cholesky refused (#2901 V22).
+///
+/// With `H = V Λ Vᵀ` and the rounding band `τ = p·ε·‖H‖₂`, the identified
+/// directions are those with `λ_i > τ`:
+///
+///   β   = Σ_{λ_i > τ} v_i (v_iᵀ r) / λ_i,
+///   EDF = tr(H⁺ XᵀWX) = rank − tr(H⁺ S_λ) = rank − Σ_{λ_i > τ} v_iᵀ S_λ v_i / λ_i.
+///
+/// No ridge is added and no eigenvalue is floored. An eigenvalue below `−τ` is
+/// material indefiniteness, which `XᵀWX + S_λ` with non-negative weights cannot
+/// have, so it is refused.
+fn minimum_norm_pls_solve(
+    penalized_hessian: &Array2<f64>,
+    rhs: &Array1<f64>,
+    penalty: &PirlsPenalty,
+) -> Result<(Array1<f64>, f64), EstimationError> {
+    let p = penalized_hessian.nrows();
+    let (eigenvalues, eigenvectors) = penalized_hessian
+        .eigh(Side::Lower)
+        .map_err(EstimationError::LinearSystemSolveFailed)?;
+    let spectral_radius = eigenvalues
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    let rounding_band = f64::EPSILON * p as f64 * spectral_radius;
+    let min_eigenvalue = eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+    if !(min_eigenvalue >= -rounding_band) {
+        return Err(EstimationError::HessianNotPositiveDefinite { min_eigenvalue });
+    }
+    let mut beta = Array1::<f64>::zeros(p);
+    let mut rank = 0usize;
+    let mut penalty_trace = 0.0;
+    for (k, &lambda) in eigenvalues.iter().enumerate() {
+        if lambda <= rounding_band {
+            continue;
+        }
+        rank += 1;
+        let v = eigenvectors.column(k);
+        beta.scaled_add(v.dot(rhs) / lambda, &v);
+        let penalty_energy = match penalty {
+            PirlsPenalty::Dense { e_transformed, .. } => {
+                let root_v = e_transformed.dot(&v);
+                root_v.dot(&root_v)
+            }
+            PirlsPenalty::Diagonal {
+                diag,
+                positive_indices,
+                ..
+            } => positive_indices
+                .iter()
+                .map(|&idx| diag[idx] * v[idx] * v[idx])
+                .sum::<f64>(),
+        };
+        penalty_trace += penalty_energy / lambda;
+    }
+    if !array_is_finite(&beta) || !penalty_trace.is_finite() {
+        return Err(EstimationError::LinearSystemSolveFailed(
+            FaerLinalgError::FactorizationFailed {
+                context: "PIRLS implicit PLS minimum-norm solve",
+            },
+        ));
+    }
+    let edf = (rank as f64 - penalty_trace).clamp(0.0, rank as f64);
+    Ok((beta, edf))
 }

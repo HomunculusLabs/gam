@@ -3727,10 +3727,10 @@ fn run_exact_joint_spatial_optimization(
     // #2671: condition the response through the SAME gate and the SAME
     // arithmetic the scalar-ρ route uses before it builds its `RemlState`
     // (#1000 centering / #1127 scaling). This route used to hand `y` to
-    // `ExternalJointHyperEvaluator::new` VERBATIM, so the two routes minimized
-    // penalized problems differing by `delta*(2*c*beta0 + c^2)` on the intercept
-    // axis (`delta = FIXED_STABILIZATION_RIDGE`, charged against a target that
-    // is `Array1::zeros(p)` at every construction site) — and
+    // `ExternalJointHyperEvaluator::new` VERBATIM, so while PIRLS charged a fixed
+    // stabilization ridge `delta*||beta||^2` against a target of zero (removed in
+    // #2901 V22) the two routes minimized penalized problems differing by
+    // `delta*(2*c*beta0 + c^2)` on the intercept axis — and
     // `try_exact_joint_spatial_length_scale_optimization` then grades
     // `joint_seed_value` against the scalar route's `fit_score`.
     //

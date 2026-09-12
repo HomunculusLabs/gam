@@ -487,16 +487,16 @@ fn with_reml_beta_seed_hook<'state, 'data>() -> impl FnMut(
 /// the shift, and has no linear constraints that could pin the intercept. A zero
 /// or non-finite mean also returns `None` — there is nothing to gain.
 ///
-/// # It is a CORRECTNESS requirement, not only a precision one (#2671)
+/// # It was a CORRECTNESS requirement while PIRLS carried a ridge (#2671)
 ///
-/// `PirlsPenalty` charges `FIXED_STABILIZATION_RIDGE * ||beta||^2` against a
-/// target that is `Array1::zeros(p)` at every construction site, so the outer
-/// criterion is a function of WHERE THE ORIGIN OF `y` SITS: shifting `y` by `m`
-/// moves the intercept by `m` and moves the criterion by
-/// `(n/2)/D_p * delta * ((beta0 + m)^2 - beta0^2)`. Centering here pins that
-/// origin at the weighted response mean, which is what makes λ̂ invariant to a
-/// constant added to the response — which it must be for an identity-link
-/// Gaussian fit with an estimated intercept.
+/// PIRLS used to charge a fixed stabilization ridge `delta * ||beta||^2` against
+/// a target of zero, so the outer criterion was a function of WHERE THE ORIGIN
+/// OF `y` SAT: shifting `y` by `m` moved the intercept by `m` and moved the
+/// criterion by `(n/2)/D_p * delta * ((beta0 + m)^2 - beta0^2)`. Centering here
+/// pinned that origin at the weighted response mean. That ridge is removed
+/// (#2901 V22), so an unpenalized intercept absorbs the shift exactly and
+/// centering is a precision requirement. The scalar and joint routes must still
+/// share this gate, so that they grade criteria formed on the same response.
 ///
 /// MEASURED at `517b6303f` on `mk_1d(15, t^2, 0.05, 7)`, `y ~ matern(x,nu=5/2)`,
 /// three arms of one run: the route that DOES center moved `4.085e-14` under a
@@ -504,8 +504,8 @@ fn with_reml_beta_seed_hook<'state, 'data>() -> impl FnMut(
 /// `1.24e9`, and the un-centered route's fit went from ACCEPTED (pre-centered
 /// response) to REFUSED (`+10`). Any outer λ-search over this family must
 /// therefore condition through this gate and
-/// [`conditioned_outer_response`]; a route that skips it selects λ̂/ψ̂ from the
-/// user's choice of response units.
+/// [`conditioned_outer_response`]; while the ridge existed, a route that skipped
+/// it selected λ̂/ψ̂ from the user's choice of response units.
 pub(crate) fn gaussian_identity_response_center(
     cfg: &RemlConfig,
     conditioning: &ParametricColumnConditioning,

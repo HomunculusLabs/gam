@@ -18,8 +18,6 @@
 
 use crate::estimate::EstimationError;
 #[cfg(target_os = "linux")]
-use crate::pirls::FIXED_STABILIZATION_RIDGE;
-#[cfg(target_os = "linux")]
 use crate::pirls::loop_driver::make_reparam_operator;
 use crate::pirls::{
     GaussianFixedCache, GaussianFrozenRows, LinearInequalityConstraints, PirlsConfig,
@@ -131,7 +129,7 @@ where
                     prior_mean_target: prior_mean_target.view(),
                     constant_shift: *constant_shift,
                     qs: qs_view,
-                    ridge: FIXED_STABILIZATION_RIDGE,
+                    ridge: 0.0,
                     likelihood: &config.likelihood,
                     inverse_link: &config.link_kind,
                     x_original,

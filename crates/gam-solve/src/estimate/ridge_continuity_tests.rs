@@ -1,46 +1,20 @@
-//! #2519: is the stabilization ridge constant along ρ on the paths the dense
-//! GLM selector fix did not touch?
+//! #2519 / #2901 V22: no PIRLS fit carries a stabilization ridge, at any ρ.
 //!
-//! `ensure_positive_definitewithridge` used to factor the bare penalized
-//! Hessian first and return `ridge = 0.0` on success, adding
-//! `FIXED_STABILIZATION_RIDGE` only on failure — so δ was a function of ρ
-//! through a Cholesky-success predicate, while being carried into the outer
-//! criterion through `0.5·log|H|`. On the #1575 binomial fixture that moved the
-//! cost by exactly `0.5·ln(1e8) = 9.2103` between neighbouring ρ. That selector
-//! now applies δ unconditionally.
+//! The ridge selectors (`ensure_positive_definitewithridge`, the sparse
+//! `ensure_sparse_positive_definite_with_fixed_ridge`, and `pls_solver`'s
+//! Gaussian-identity branches) once added δ to H only when a bare factorization
+//! failed. That made δ a function of ρ through a Cholesky-success predicate and
+//! moved the #1575 cost by `0.5·ln(1e8) = 9.2103` between neighbouring ρ
+//! (#2519). They then added a fixed δ = 1e-8 at every ρ. That was continuous,
+//! but it put a coefficient-space ridge and a magic constant into the REML
+//! criterion (SPEC rules 5 and 23). δ is now zero on every path, so H is exactly
+//! `XᵀWX + S_λ` and the criterion is continuous in ρ because nothing is added to
+//! it.
 //!
-//! Two selectors USED TO keep the bare-first shape:
-//!   * `pirls::pls_solver`'s Gaussian-identity PLS branch, and
-//!   * `pirls::newton_solve::ensure_sparse_positive_definite_with_fixed_ridge`.
-//!
-//! Both are now unconditional as well, so all four ridge selectors agree.
-//!
-//! MEASURED RESULT FROM BEFORE THAT REPAIR, so the next reader does not repeat
-//! the scan: across Vandermonde degrees 6–16 and ρ ∈ [−12, 12] — 208
-//! evaluations — the Gaussian-identity PLS branch never changed its ridge. Its
-//! bare attempt went through `StableSolver::factorize`, which succeeded at
-//! every point, so δ ≡ 0 and the branch never bit. That was a NEGATIVE RESULT,
-//! not a clearance: it said this fixture family could not make that selector
-//! flip, not that no fixture could. Its bare-first shape was repaired on the
-//! argument the dense selector's own comment makes — a δ chosen by a
-//! Cholesky-success predicate is a function of ρ, whatever a given fixture
-//! happens to exercise — and because the #1122 objection it was built for
-//! (`a value/derivative desync under a nonzero δ`) is an objection to an
-//! ADAPTIVE δ, not to a constant one.
-//!
-//! The sparse ladder was repaired at the same time for a second reason: it
-//! reported the REQUESTED ridge rather than the APPLIED one. `pls_solver`'s
-//! closure rewrote a requested `0.0` into `FIXED_STABILIZATION_RIDGE`, so the
-//! ladder's first rung handed back a matrix carrying δ while reporting
-//! `ridge_used = 0.0` — β̂ solved the ridged system while the criterion was
-//! assembled as if unridged.
-//!
-//! What this file gates is the contract all four selectors now share: δ is
-//! applied at every ρ, not only where a factorization fails. Note that
-//! constancy alone does not gate it — with the fix reverted the ridge is a
-//! constant 0.0 across the whole scan and a distinct-count check still passes.
-//! Only pinning the VALUE catches the revert, and it was confirmed to do so
-//! (it fires on 104 observations of 0.0). Both checks are armed below.
+//! This file pins that VALUE across a Vandermonde degree × ρ scan: every
+//! observation must report ridge 0.0. Constancy alone is not the gate, because a
+//! reverted selector applying a fixed δ is also constant. Pinning zero catches a
+//! reintroduced δ, fixed or adaptive.
 
 #![cfg(test)]
 
@@ -243,7 +217,7 @@ fn stabilization_ridge_is_constant_along_rho_2519() {
             ("poisson/log", &poisson_ridges),
         ] {
             for &ridge in ridges {
-                if ridge != crate::pirls::FIXED_STABILIZATION_RIDGE {
+                if ridge != 0.0 {
                     off_value.push(format!("k={k} {family} delta={ridge:.6e}"));
                 }
             }
@@ -264,27 +238,15 @@ fn stabilization_ridge_is_constant_along_rho_2519() {
         "the pls_solver selector changes the ridge with rho at degrees {gaussian_flips:?}, \
          so delta is not constant along rho\n{summary}"
     );
-    // The VALUE gate, now ARMED. Constancy alone verifies nothing: a bare-first
-    // selector on a fixture that factors bare everywhere is also constant, at
-    // zero — that is exactly what this file measured before the repair (104
-    // observations of 0.0 on the Gaussian arm, distinct-count 1 at every
-    // degree). Only pinning the VALUE distinguishes "δ is applied at every ρ"
-    // from "δ is never applied here", and it was confirmed to bite in that
-    // direction.
-    //
-    // It was previously held back because always-on δ made the companion forms
-    // wrong (the rail-face λ→∞ certificate refused outright: "the limit fit
-    // needed a stabilization ridge (1.000e-8), so its criterion is not the
-    // plain LAML this form expands"). `LamlFaceParts::stabilization_ridge` now
-    // carries δ into `laml_rail_face_limit`, so that prerequisite is met and
-    // both selectors apply δ unconditionally.
+    // The VALUE gate. Constancy alone verifies nothing: a selector applying a
+    // fixed δ at every ρ is also constant. Only pinning the value 0 shows that no
+    // ridge enters H, penalty_term or the gradient on either branch (#2901 V22).
     assert!(
         off_value.is_empty(),
-        "every fit must carry exactly FIXED_STABILIZATION_RIDGE = {:.6e}; a selector that \
-         answers with any other delta is choosing it from the data or from a \
-         factorization-success predicate, which makes 0.5*log|H| a discontinuous function \
-         of rho (#2519). Off-value observations: {:?}\n{}",
-        crate::pirls::FIXED_STABILIZATION_RIDGE,
+        "every fit must carry no stabilization ridge; a selector that answers with a nonzero \
+         delta adds a coefficient-space ridge to the REML criterion (#2901 V22), and one that \
+         chooses it from a factorization-success predicate makes 0.5*log|H| a discontinuous \
+         function of rho (#2519). Off-value observations: {:?}\n{}",
         off_value,
         summary,
     );

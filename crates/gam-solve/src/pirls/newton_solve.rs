@@ -459,12 +459,6 @@ pub(crate) fn ensure_positive_definitewithridge(
     hess: &mut Array2<f64>,
     label: &str,
 ) -> Result<f64, EstimationError> {
-    let ridge = if FIXED_STABILIZATION_RIDGE > 0.0 {
-        FIXED_STABILIZATION_RIDGE
-    } else {
-        0.0
-    };
-
     // A non-finite assembly is a different defect class from indefiniteness
     // (and eigh of a NaN-carrying triangle can report arbitrary "positive"
     // spectra); name it precisely instead of letting it masquerade as a
@@ -475,91 +469,40 @@ pub(crate) fn ensure_positive_definitewithridge(
         );
     }
 
-    // δ IS APPLIED UNCONDITIONALLY HERE. THE HISTORY BELOW IS WHY.
+    // NO STABILIZATION RIDGE (#2901 V22, SPEC rules 5 and 23). This selector once
+    // added δ only when a bare factorization failed, which made δ a function of ρ
+    // through a Cholesky-success predicate and moved the #1575 cost by
+    // `0.5·ln(1e8)` between neighbouring ρ (#2519). Then it added a fixed δ = 1e-8
+    // at every ρ and charged `δ‖β‖²` in the objective. That was continuous in ρ,
+    // but it put a coefficient-space ridge and a magic constant into the REML
+    // criterion. δ is now zero on every path: H stays exactly `XᵀWX + S_λ`, the
+    // returned ridge is always 0, and nothing here can alter H, so the criterion
+    // is continuous in ρ because nothing is added to it.
     //
-    // This paragraph used to open "δ IS CHOSEN BY A BRANCH HERE, AND THAT IS A
-    // KNOWN DEFECT", forty lines above this same block's own statement that δ
-    // is now unconditional and above the code that applies it that way. That
-    // sentence outlived the defect it described and sent at least one later
-    // reader hunting for a branching selector that no longer exists, so it is
-    // written in the past tense now.
-    //
-    // This selector USED TO return `0.0` when the bare factorization succeeded
-    // and FIXED_STABILIZATION_RIDGE when it did not, which makes δ a function
-    // of ρ — through a Cholesky-success predicate on a near-singular matrix —
-    // while δ is carried as `RidgePolicy::exact_full_objective()` and so enters
-    // the outer criterion through `0.5·log|H|`. Measured on the #1575
-    // binomial/logit fixture: the outer cost at ρ displacements of 1e-9 and
-    // 1e-12 differed from its value at ρ₀ by exactly −9.2103400803 and
-    // +18.4206788262 — `0.5·ln(1e8)` and `0.5·ln(1e16)` — at identical
-    // deviance, edf and penalty term, the whole difference being `ridge = 1e-8`
-    // at one point and `ridge = 0` at its neighbours. A criterion that jumps by
-    // 9.21 between neighbouring ρ is not a function of ρ, and neither a line
-    // search nor a certificate is well posed on it.
-    //
-    // Applying δ unconditionally removes the jump and fixes both #1575 gates
-    // (REML 503.36, edf 18.38, |g| 1.5e-5, 26 inner solves — better than the
-    // 2026-07-04 healthy record on every axis). It was landed as `3213e26d3`,
-    // REVERTED in `386ba9e37`, and RELANDED in `fc2b286a2` once the companion
-    // forms carried δ. The revert happened because an unconditional δ also
-    // makes every companion form that assumes δ = 0 unavailable or wrong.
-    // Measured on the full `gam-solve --lib` suite at that time: 7 failing
-    // before, 11 after. The four `rail_face_limit` refusals named the reason
-    // exactly —
-    //
-    //   FaceUnavailable { reason: "the limit fit needed a stabilization ridge
-    //   (1.000e-8), so its criterion is not the plain LAML this form expands" }
-    //
-    // — so the λ→∞ face certificate (#2348) can no longer prove an
-    // infinite-smoothing face at all, plus
-    // `estimated_nuisance_fits_land_in_the_same_place_cold_and_warm_2363` and
-    // `sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19`. `pls_solver`'s own
-    // comment warned about this class from the other direction (#1122: a
-    // nonzero δ broke the envelope identity because the derivative was taken on
-    // the un-ridged surface while the value used `log|H + δI|`).
-    //
-    // THE COMPANION FORM NOW CARRIES δ, SO δ IS APPLIED UNCONDITIONALLY.
-    //
-    // The prerequisite this comment used to name — "carry δ through the
-    // companion forms, re-deriving the rail-face λ→∞ expansion with
-    // `H = XᵀWX + S_λ + δI`, and only then make δ unconditional" — is done.
-    // `LamlFaceParts::stabilization_ridge` carries δ into
-    // `laml_rail_face_limit`, which adds it to the same diagonal, so the face
-    // form and the criterion expand the same operator. The `rail_face_limit`
-    // gate that declined any nonzero δ is gone with it; declining was only
-    // ever a way of saying "this form does not know about δ".
-    //
-    // With that in place, applying δ always is what makes `∂δ/∂ρ = 0` hold
-    // identically, which is the invariant `FIXED_STABILIZATION_RIDGE`'s own doc
-    // states and which a Cholesky-success predicate breaks.
-    //
-    // On a well-conditioned Hessian this is numerically inert in the direction
-    // that matters: the criterion shifts by `½·Σ ln(1 + δ/λ_i) ≤ ½·δ·tr(H⁻¹)`,
-    // far below the convergence tolerances when `λ_i ≫ δ = 1e-8`. What it
-    // removes is the 9.21 jump, not the scale.
-    // WHAT HAPPENS WHEN THAT IS NOT ENOUGH IS ALSO UNIFORM (#2657). A
-    // genuinely non-PD Hessian is a REFUSAL: `eigh` is computed only to report
-    // λ_min, and δ stays exactly FIXED_STABILIZATION_RIDGE or there is no fit.
-    // The sparse twin follows the same rule, using a Gershgorin lower bound
-    // only as diagnostic evidence. Thus `∂δ/∂ρ = 0` holds on every accepted
-    // dense and sparse path.
-    if ridge > 0.0 {
-        for i in 0..hess.nrows() {
-            hess[[i, i]] += ridge;
-        }
-    }
+    // A positive-definite H is accepted as it is. A positive-semidefinite H whose
+    // smallest eigenvalue lies inside its own rounding band `p·ε·‖H‖₂` is also
+    // accepted unmodified: its near-null directions are numerically unidentified,
+    // and the Newton step is taken on `descent_curvature`'s Gill–Murray
+    // modification under LM damping. Only a materially indefinite H is refused
+    // (#2657).
     if hess.cholesky(Side::Lower).is_ok() {
-        return Ok(ridge);
+        return Ok(0.0);
     }
-
-    if let Ok((evals, _)) = hess.eigh(Side::Lower) {
-        let min_eig = evals.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    let Ok((evals, _)) = hess.eigh(Side::Lower) else {
         return Err(EstimationError::HessianNotPositiveDefinite {
-            min_eigenvalue: min_eig,
+            min_eigenvalue: f64::NEG_INFINITY,
         });
+    };
+    let spectral_radius = evals
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    let rounding_band = f64::EPSILON * hess.nrows() as f64 * spectral_radius;
+    let min_eig = evals.iter().fold(f64::INFINITY, |acc, &value| acc.min(value));
+    if min_eig >= -rounding_band {
+        return Ok(0.0);
     }
     Err(EstimationError::HessianNotPositiveDefinite {
-        min_eigenvalue: f64::NEG_INFINITY,
+        min_eigenvalue: min_eig,
     })
 }
 
@@ -1811,14 +1754,14 @@ pub(super) fn should_use_sparse_native_pirls(
     )
 }
 
-/// Assemble a sparse SPD Hessian with the fixed stabilization ridge.
+/// Assemble and factorize the sparse penalized Hessian `H = XᵀWX + S_λ`.
 ///
-/// The returned matrix and factor always carry exactly
-/// [`FIXED_STABILIZATION_RIDGE`]. If that matrix cannot be factorized, the
-/// helper refuses rather than selecting a larger shift from the Hessian.
-/// Choosing a shift from `H(ρ)` would make the outer criterion's
-/// `0.5·log|H(ρ) + δI|` use `δ(ρ)` while its envelope derivative omits
-/// `∂δ/∂ρ` (#2657).
+/// No stabilization ridge is added (#2901 V22): `assemble` is asked for exactly
+/// `0.0`, and the returned ridge is always `0.0`. If H cannot be factorized, the
+/// helper refuses rather than selecting a shift from the Hessian. A shift chosen
+/// from `H(ρ)` would make the outer criterion's `0.5·log|H|` a discontinuous
+/// function of ρ (#2519, #2657). This path has no rank-revealing sparse
+/// factorization, so a rank-deficient sparse H is refused.
 ///
 /// Returning the factor avoids the previous double-factorization where the SPD
 /// check would factor the matrix and discard the factor, then the caller would
@@ -1836,52 +1779,14 @@ pub(super) fn ensure_sparse_positive_definite_with_fixed_ridge<F>(
 where
     F: FnMut(f64) -> Result<SparseColMat<usize, f64>, EstimationError>,
 {
-    // Step 1 — the fixed stabilization ridge, applied UNCONDITIONALLY.
-    //
-    // A symmetric Hessian assembled from `XᵀWX + S_λ` is mathematically PSD;
-    // the only reason an exact-arithmetic PSD matrix fails a Cholesky is
-    // floating-point round-off in the assembly, which a fixed tiny nugget on
-    // the diagonal cures. This is the principled, scale-free first attempt and
-    // the common case.
-    //
-    // δ IS NOT CHOSEN BY A BRANCH. This ladder used to try `assemble(0.0)`
-    // first and return `ridge = 0.0` when that factorized. Two things were
-    // wrong with that:
-    //
-    //  1. A Cholesky-success predicate on a near-singular matrix is a function
-    //     of ρ, so δ became a function of ρ — and δ enters the outer criterion
-    //     through `0.5·log|H|`. `FIXED_STABILIZATION_RIDGE`'s own doc in
-    //     `gam_working_model.rs` states the invariant: δ must be constant
-    //     w.r.t. ρ or the envelope-theorem gradient `dV/dρ_k` is invalid. The
-    //     dense twin (`ensure_positive_definitewithridge`) was measured jumping
-    //     by exactly `0.5·ln(1e8) = 9.21` between neighbouring ρ for this
-    //     reason (#1575/#2519), which is what kills the outer line search.
-    //
-    //  2. It reported the REQUESTED ridge, not the APPLIED one. `pls_solver`'s
-    //     sparse branch passed a closure that rewrote a requested `0.0` into
-    //     `FIXED_STABILIZATION_RIDGE`, so the first rung returned a matrix
-    //     carrying δ = 1e-8 together with `ridge_used = 0.0`. β̂ was then the
-    //     stationary point of the RIDGED system while the criterion was
-    //     assembled as if unridged: the Tikhonov RHS term `δ·μ` was skipped,
-    //     `penalty_term += δ‖β‖²` was skipped, and `ridge_passport.delta()`
-    //     reported 0 to every consumer. Asking for δ up front makes the
-    //     reported ridge equal the applied ridge by construction.
-    //
-    // A secondary consequence of the old order: when the first factorization
-    // failed, `assemble(FIXED_STABILIZATION_RIDGE)` produced a BIT-IDENTICAL
-    // matrix under that clamping closure, so it failed again and control fell
-    // through to the former Gershgorin escalation, which set a DATA-DEPENDENT
-    // τ(ρ) — an unbounded ρ-dependent jump in `log|H|`, strictly worse than the
-    // 9.21 one. That escalation is gone: the bound below diagnoses the refusal
-    // but cannot alter δ.
-    let h_eps = assemble(FIXED_STABILIZATION_RIDGE)?;
-    if let Ok(factor) = factorize_sparse_spd(&h_eps) {
-        return Ok((h_eps, factor, FIXED_STABILIZATION_RIDGE));
+    let h = assemble(0.0)?;
+    if let Ok(factor) = factorize_sparse_spd(&h) {
+        return Ok((h, factor, 0.0));
     }
 
     // The bound is diagnostic only. It may depend on H(ρ), but it never changes
     // the accepted matrix or objective.
-    let gershgorin_min = gershgorin_min_eigenvalue_lower_bound(&h_eps);
+    let gershgorin_min = gershgorin_min_eigenvalue_lower_bound(&h);
 
     Err(EstimationError::HessianNotPositiveDefinite {
         min_eigenvalue: gershgorin_min,

@@ -5761,5 +5761,13 @@
     ],
     "reason": "#2829 product-root rule: the #935 Sensitivity operator struct had no impl, no constructor and no reader anywhere in the workspace; its only other code mention was the gam facade re-export, removed with it.",
     "evidence": "git grep -w Sensitivity over crates, src, tests, examples, bench and benches at the base finds the declaration, the src/lib.rs re-export and prose only. MSI job 550898 ran source_removal_guard.py on the built commit and produced exactly this guarded identity, with no public-api census identity."
+  },
+  {
+    "base": "c1d94847c9ffc035f8b04f981b3a7f136d812fe5",
+    "items": [
+      "crates/gam-solve/src/pirls/gam_working_model.rs:const:FIXED_STABILIZATION_RIDGE"
+    ],
+    "reason": "SPEC rules 5 and 23 (#2901 V22, lead ruling (a), slice 1). FIXED_STABILIZATION_RIDGE = 1e-8 added δI to every PIRLS penalized Hessian and charged δ‖β‖² in the objective: a coefficient-space ridge and a magic constant inside the REML criterion. The selectors now assemble H = XᵀWX + S_λ with no ridge. A positive-semidefinite H inside its rounding band p·ε·‖H‖₂ is accepted; on the implicit PLS path it is solved minimum-norm on its identified subspace. Only a materially indefinite H is refused. The constant has no remaining use.",
+    "evidence": "At the base, git grep -w FIXED_STABILIZATION_RIDGE outside the generated tools/codebase-city bundle finds the declaration in crates/gam-solve/src/pirls/gam_working_model.rs. It finds code uses in pirls/newton_solve.rs (dense and sparse selectors), pirls/pls_solver.rs (implicit dense PLS) and gpu/pirls_host_dispatch.rs (GPU Gaussian PLS input). It finds test uses in estimate/ridge_continuity_tests.rs and pirls/sparse_fixed_ridge_2657_tests.rs, plus a restated copy in tests/regressions/misc/regression_2644_outer_criterion_conditioning.rs. Prose mentions are in pirls/loop_driver.rs, reml/objective.rs, estimate/joint_hyper.rs, estimate/optimizer.rs and gam-models fit_orchestration/drivers/spatial_optimization.rs. This change replaces every code use with 0 or removes it, restates the three tests to require no ridge, and rewrites every prose mention. Compile is covered by the shared tip check and the guarded before/after job."
   }
 ]
