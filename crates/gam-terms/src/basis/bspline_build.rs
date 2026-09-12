@@ -145,16 +145,10 @@ pub fn build_bspline_basis_1d(
                 // cr is routed away by the early dispatch; its basis dimension
                 // equals the knot count (no degree offset).
                 BSplineKnotSpec::NaturalCubicRegression { knots } => knots.len(),
+                // This closure runs only in the outer `_` arm, which excludes
+                // `PeriodicUniform`.
                 BSplineKnotSpec::PeriodicUniform { .. } => {
-                    // Filtered upstream by the outer match arm; if we ever
-                    // reach this branch, the upstream filter is broken.
-                    // Surface a debug-assert in test builds and fall back
-                    // to 0 in release so the build does not panic.
-                    assert!(
-                        false,
-                        "PeriodicUniform knotspec should have been handled by the outer match arm"
-                    );
-                    0
+                    unreachable!("PeriodicUniform knotspec is handled by the outer match arm")
                 }
             };
             (start, end, num_basis)
