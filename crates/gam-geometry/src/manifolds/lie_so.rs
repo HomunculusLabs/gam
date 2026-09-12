@@ -107,10 +107,9 @@ pub fn rho_so3(omega: ArrayView2<'_, f64>) -> Result<Array3<f64>, String> {
 /// directional derivative only when `dω ∥ ω` or `ω = 0`.
 ///
 /// Small-θ expansion (Taylor): `A = (1 − cos θ)/θ = θ/2 − θ³/24 + …` and
-/// `B = (θ − sin θ)/θ = θ²/6 − θ⁴/120 + …`. For θ ≤ a small cutoff we
-/// use the second-order polynomial `J_r ≈ I − ½[ω]× + (1/6)[ω]×²`, which
-/// agrees with the exact expression to relative O(θ⁴) and avoids the
-/// 0/0 in `A/θ`, `B/θ`.
+/// `B = (θ − sin θ)/θ = θ²/6 − θ⁴/120 + …`. Below the angle where the two
+/// routes' errors balance, the coefficients come from their series through
+/// θ⁴, which also avoids the 0/0 in `A/θ`, `B/θ`.
 pub(crate) fn so3_right_jacobian_times_vec(
     ox: f64,
     oy: f64,
@@ -132,12 +131,19 @@ pub(crate) fn so3_right_jacobian_times_vec(
     ];
     // Coefficient of [ω]×/‖ω‖ = (1−cos θ)/θ  →  scaled to [ω]× factor is −(1−cos θ)/θ²
     // Coefficient of [ω]×²/‖ω‖² = (θ−sin θ)/θ  →  scaled to [ω]×² factor is  (θ−sin θ)/θ³
-    let (alpha, beta) = if theta < 1.0e-6 {
+    //
+    // The route switches where the two errors balance. The closed forms round
+    // cos θ and sin θ once, and the cancelling numerators 1 − cos θ ≈ θ²/2 and
+    // θ − sin θ ≈ θ³/6 turn that into relative errors ε/θ² and 3ε/θ². The series
+    // keeps terms through θ⁴, so it misses θ⁶/40320 and θ⁶/362880, a relative
+    // θ⁶/20160 and θ⁶/60480. The worse error of each route is equal at
+    // θ⁸ = 60480ε (θ ≈ 0.044), where both are about 3.5e-13.
+    let series_balance = (60480.0 * f64::EPSILON).powf(0.125);
+    let (alpha, beta) = if theta < series_balance {
         // Taylor series of −A/θ = −(1 − cos θ)/θ² and B/θ² = (θ − sin θ)/θ³,
-        // expressed as power series in θ². Truncating at O(θ²) keeps relative
-        // error below 1e-13 for θ < 1e-3.
-        // −A/θ = −1/2 + θ²/24 − θ⁴/720 + …
-        // B/θ² = 1/6 − θ²/120 + θ⁴/5040 − …
+        // expressed as power series in θ² through θ⁴.
+        // −A/θ = −1/2 + θ²/24 − θ⁴/720 + θ⁶/40320 − …
+        // B/θ² = 1/6 − θ²/120 + θ⁴/5040 − θ⁶/362880 + …
         (
             -0.5 + theta2 / 24.0 - theta2 * theta2 / 720.0,
             1.0 / 6.0 - theta2 / 120.0 + theta2 * theta2 / 5040.0,
