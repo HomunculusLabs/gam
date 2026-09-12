@@ -4330,7 +4330,7 @@ impl SheafConsistencyPenalty {
                 "SheafConsistencyPenalty.harmonic_modes: tol must be finite and >= 0, got {tol}"
             )));
         }
-        Ok(self.inner.harmonic_modes(tol))
+        self.inner.harmonic_modes(tol).map_err(PyValueError::new_err)
     }
 
     fn __repr__(&self) -> String {

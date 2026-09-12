@@ -33,24 +33,16 @@
 //!     `None` it defaults to the identity (`δs[e] = R_uv·s_u − s_v`), which
 //!     is the "single-restriction edge" convention common in sheaf-diffusion
 //!     networks.
-//!   * `harmonic_modes(tol)` auto-routes through faer's self-adjoint
-//!     eigendecomposition (`gam_linalg::faer_ndarray::FaerEigh`). For
-//!     `Σ d_v > 4096`, the dense Gram of `δ` exceeds 128 MB; we use a Lanczos
-//!     trace-style probe (HKS-bounded null-space count) in that regime so we
-//!     stay matrix-free.
+//!   * `harmonic_modes(tol)` counts exactly at every size: `L` is block
+//!     diagonal over the connected components of the edge graph, and each
+//!     component block is counted by faer's self-adjoint eigendecomposition
+//!     (`gam_linalg::faer_ndarray::FaerEigh`) under a memory-ledger charge.
 
 use faer::Side;
 use ndarray::{Array1, Array2, ArrayView1};
 
 use crate::analytic_penalties::{AnalyticPenalty, PenaltyTier};
 use gam_linalg::faer_ndarray::FaerEigh;
-use gam_linalg::lanczos::{SymmetricLanczosOptions, symmetric_lanczos_eigenpairs};
-
-/// Threshold above which `harmonic_modes` switches from a dense faer eigen
-/// solve to a matrix-free Lanczos null-space count. The dense path
-/// materialises `L` (one `n×n` symmetric matrix); at `n = 4096` that's
-/// `n² · 8 B ≈ 128 MB`, our hard ceiling for the dense route.
-const DENSE_EIGH_DIM_THRESHOLD: usize = 4096;
 
 /// A single edge's pair of restriction operators.
 ///
@@ -443,25 +435,83 @@ impl SheafConsistencyPenalty {
         hv
     }
 
-    /// Materialise the dense Laplacian `L` (no weight applied).
-    ///
-    /// Used by [`Self::harmonic_modes`] when `total_dim() ≤
-    /// DENSE_EIGH_DIM_THRESHOLD`. Cost is `O(n²)` memory and `O(n · |E| · max d_e)`
-    /// flops via `n` independent matvecs against the standard basis.
-    /// **Not** called on the inner-loop hot path.
-    fn dense_laplacian(&self) -> Array2<f64> {
-        let n = self.total_dim();
-        let mut l = Array2::<f64>::zeros((n, n));
-        let mut e = Array1::<f64>::zeros(n);
-        for j in 0..n {
-            e[j] = 1.0;
-            let col = self.laplacian_apply(e.view());
-            for i in 0..n {
-                l[[i, j]] = col[i];
+    /// The vertex sets of the connected components of the edge graph, each in
+    /// increasing vertex order. No edge joins two components, so `L` is block
+    /// diagonal over them up to a permutation.
+    fn components(&self) -> Vec<Vec<usize>> {
+        fn find(parent: &mut [usize], mut vertex: usize) -> usize {
+            while parent[vertex] != vertex {
+                parent[vertex] = parent[parent[vertex]];
+                vertex = parent[vertex];
             }
-            e[j] = 0.0;
+            vertex
         }
-        l
+        let k = self.stalk_dims.len();
+        let mut parent: Vec<usize> = (0..k).collect();
+        for &(u, v) in &self.edges {
+            let root_u = find(&mut parent, u);
+            let root_v = find(&mut parent, v);
+            if root_u != root_v {
+                parent[root_u.max(root_v)] = root_u.min(root_v);
+            }
+        }
+        let mut members: Vec<Vec<usize>> = vec![Vec::new(); k];
+        for vertex in 0..k {
+            let root = find(&mut parent, vertex);
+            members[root].push(vertex);
+        }
+        members.into_iter().filter(|vertices| !vertices.is_empty()).collect()
+    }
+
+    /// The block of `L = δᵀδ` over one component's edges, in that component's
+    /// stacked-stalk coordinates (`local_offset[v]` is vertex `v`'s first
+    /// coordinate inside its component).
+    ///
+    /// `δs[e] = R_uv s_u − R_vu s_v`, so each edge adds `R_uvᵀR_uv` to the `u`
+    /// block, `R_vuᵀR_vu` to the `v` block, and `−R_uvᵀR_vu` and its transpose to
+    /// the two off-diagonal blocks. For a self-loop all four land in one block and
+    /// sum to `(R_uv − R_vu)ᵀ(R_uv − R_vu)`, matching `laplacian_apply`.
+    fn component_laplacian(&self, edges: &[usize], local_offset: &[usize], dim: usize) -> Array2<f64> {
+        let mut block = Array2::<f64>::zeros((dim, dim));
+        for &edge in edges {
+            let (u, v) = self.edges[edge];
+            let restriction = &self.restrictions[edge];
+            let tail = &restriction.r_uv;
+            let head_identity;
+            let head: &Array2<f64> = match &restriction.r_vu {
+                Some(r_vu) => r_vu,
+                None => {
+                    head_identity = Array2::<f64>::eye(self.stalk_dims[v]);
+                    &head_identity
+                }
+            };
+            let (u_start, d_u) = (local_offset[u], self.stalk_dims[u]);
+            let (v_start, d_v) = (local_offset[v], self.stalk_dims[v]);
+            let tail_tail = tail.t().dot(tail);
+            let head_head = head.t().dot(head);
+            let tail_head = tail.t().dot(head);
+            {
+                let mut uu =
+                    block.slice_mut(ndarray::s![u_start..u_start + d_u, u_start..u_start + d_u]);
+                uu += &tail_tail;
+            }
+            {
+                let mut vv =
+                    block.slice_mut(ndarray::s![v_start..v_start + d_v, v_start..v_start + d_v]);
+                vv += &head_head;
+            }
+            {
+                let mut uv =
+                    block.slice_mut(ndarray::s![u_start..u_start + d_u, v_start..v_start + d_v]);
+                uv -= &tail_head;
+            }
+            {
+                let mut vu =
+                    block.slice_mut(ndarray::s![v_start..v_start + d_v, u_start..u_start + d_u]);
+                vu -= &tail_head.t();
+            }
+        }
+        block
     }
 
     /// Count eigenvalues of the unweighted Laplacian `L` strictly below
@@ -469,83 +519,68 @@ impl SheafConsistencyPenalty {
     /// `tol`-tolerance). The penalty weight is **not** folded in: harmonic
     /// modes are an intrinsic property of `δ`.
     ///
-    /// Auto-routing: dense faer eigh when `total_dim ≤ DENSE_EIGH_DIM_THRESHOLD`;
-    /// matrix-free Lanczos null-space count otherwise.
-    pub fn harmonic_modes(&self, tol: f64) -> usize {
-        assert!(
-            tol.is_finite() && tol >= 0.0,
-            "harmonic_modes requires finite non-negative tol, got {tol}",
-        );
-        let n = self.total_dim();
-        if n == 0 {
-            return 0;
+    /// `L` is block diagonal over the connected components of the edge graph, so
+    /// the count is the sum of exact dense counts over the component blocks, and
+    /// it is exact at every total stalk dimension. An edge-free component has a
+    /// zero block, so each of its coordinates counts when `tol > 0`. Each dense
+    /// block and its eigenvectors are charged on the memory ledger, and a
+    /// component too large for the ledger returns an error instead of a count.
+    pub fn harmonic_modes(&self, tol: f64) -> Result<usize, String> {
+        if !(tol.is_finite() && tol >= 0.0) {
+            return Err(format!(
+                "SheafConsistencyPenalty::harmonic_modes requires finite non-negative tol, got {tol}"
+            ));
         }
-        if n <= DENSE_EIGH_DIM_THRESHOLD {
-            let l = self.dense_laplacian();
-            match l.eigh(Side::Lower) {
-                Ok((evals, _)) => evals.iter().filter(|&&e| e < tol).count(),
-                // SAFETY: dense Laplacian above is symmetric positive semidefinite by construction
-                // (graph Laplacian of an undirected weighted graph), so eigh on the lower triangle
-                // must succeed; any err indicates a corrupted matrix and bailing here is correct.
-                Err(err) => {
-                    panic!("SheafConsistencyPenalty::harmonic_modes faer eigh failed: {err:?}")
+        let components = self.components();
+        let k = self.stalk_dims.len();
+        let mut component_of = vec![0usize; k];
+        let mut local_offset = vec![0usize; k];
+        let mut component_dims = Vec::with_capacity(components.len());
+        for (index, vertices) in components.iter().enumerate() {
+            let mut dim = 0usize;
+            for &vertex in vertices {
+                component_of[vertex] = index;
+                local_offset[vertex] = dim;
+                dim += self.stalk_dims[vertex];
+            }
+            component_dims.push(dim);
+        }
+        let mut component_edges: Vec<Vec<usize>> = vec![Vec::new(); components.len()];
+        for (edge, &(u, _)) in self.edges.iter().enumerate() {
+            component_edges[component_of[u]].push(edge);
+        }
+        let governor = gam_runtime::resource::MemoryGovernor::global();
+        let mut count = 0usize;
+        for (index, &dim) in component_dims.iter().enumerate() {
+            if component_edges[index].is_empty() {
+                if tol > 0.0 {
+                    count += dim;
                 }
+                continue;
             }
-        } else {
-            self.harmonic_modes_lanczos(tol)
+            let _reservation = governor
+                .try_reserve_dense_f64_copies(
+                    dim,
+                    dim,
+                    2,
+                    "SheafConsistencyPenalty::harmonic_modes component Laplacian",
+                )
+                .map_err(|error| {
+                    format!(
+                        "SheafConsistencyPenalty::harmonic_modes: refusing a {dim}x{dim} component \
+                         Laplacian: {error}"
+                    )
+                })?;
+            let block = self.component_laplacian(&component_edges[index], &local_offset, dim);
+            let (eigenvalues, _) = block.eigh(Side::Lower).map_err(|error| {
+                format!(
+                    "SheafConsistencyPenalty::harmonic_modes: eigendecomposition of a {dim}x{dim} \
+                     component Laplacian failed: {error:?}"
+                )
+            })?;
+            count += eigenvalues.iter().filter(|&&value| value < tol).count();
         }
-    }
-
-    /// Matrix-free null-space-dim estimate via Lanczos tridiagonalisation +
-    /// Sturm-style sign count. We build a `k`-step Lanczos tridiagonal `T`
-    /// for `L` against a random start vector, eigendecompose `T` densely
-    /// (`k ≪ n`), and count Ritz values below `tol`. This **lower-bounds**
-    /// the harmonic-mode count for generic starts; for sheaf Laplacians the
-    /// kernel direction is reached within `k = min(n, 64)` iterations in
-    /// practice, but we expose the result as a tight bound rather than an
-    /// exact count.
-    fn harmonic_modes_lanczos(&self, tol: f64) -> usize {
-        let n = self.total_dim();
-        let k = n.min(64).max(1);
-        // Deterministic pseudo-random start to keep the bound reproducible.
-        let mut q0 = vec![0.0_f64; n];
-        for i in 0..n {
-            // Splitmix-style scrambling of i: deterministic, dependency-free.
-            // The canonical stateful step adds G internally, so seed it with
-            // `i·G − G` to finalize the same `i·G` input and stay bit-identical.
-            let mut state = (i as u64)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .wrapping_sub(0x9E37_79B9_7F4A_7C15);
-            let z = gam_linalg::utils::splitmix64(&mut state);
-            q0[i] = (z as f64 / u64::MAX as f64) - 0.5;
-        }
-        match symmetric_lanczos_eigenpairs(
-            n,
-            &q0,
-            SymmetricLanczosOptions {
-                max_steps: k,
-                residual_tol: 1e-12,
-                local_reorthogonalize: true,
-                full_reorthogonalize: false,
-            },
-            |q, out| {
-                let w = self.laplacian_apply(ArrayView1::from(q));
-                out.copy_from_slice(w.as_slice().ok_or_else(|| {
-                    "SheafConsistencyPenalty::harmonic_modes Lanczos matvec produced non-contiguous output"
-                        .to_string()
-                })?);
-                Ok(())
-            },
-        ) {
-            Ok(eigen) => eigen.eigenvalues.iter().filter(|&&e| e < tol).count(),
-            Err(err) => {
-                // SAFETY: A Lanczos breakdown here is a non-recoverable numerical
-                // failure of the harmonic-mode decomposition (e.g. a malformed or
-                // non-symmetric operator); there is no meaningful count to return,
-                // so the error must surface rather than be silently swallowed.
-                panic!("SheafConsistencyPenalty::harmonic_modes Lanczos failed: {err}")
-            }
-        }
+        Ok(count)
     }
 }
 
@@ -649,6 +684,106 @@ mod tests {
         m
     }
 
+    /// The dense Laplacian `L` (no weight) from `total_dim` matvecs against the
+    /// standard basis: the matvec oracle for the assembled blocks and counts.
+    fn dense_laplacian(pen: &SheafConsistencyPenalty) -> Array2<f64> {
+        let n = pen.total_dim();
+        let mut l = Array2::<f64>::zeros((n, n));
+        let mut e = Array1::<f64>::zeros(n);
+        for j in 0..n {
+            e[j] = 1.0;
+            let col = pen.laplacian_apply(e.view());
+            for i in 0..n {
+                l[[i, j]] = col[i];
+            }
+            e[j] = 0.0;
+        }
+        l
+    }
+
+    /// Dense-eigh count of eigenvalues of the matvec Laplacian below `tol`.
+    fn dense_count_below(pen: &SheafConsistencyPenalty, tol: f64) -> usize {
+        let (evals, _) = dense_laplacian(pen)
+            .eigh(Side::Lower)
+            .expect("dense Laplacian eigendecomposition");
+        evals.iter().filter(|&&value| value < tol).count()
+    }
+
+    // #2900: the component blocks must reassemble the matvec Laplacian exactly on a
+    // connected sheaf mixing paired, single-restriction and self-loop edges.
+    #[test]
+    fn component_laplacian_matches_the_matvec_laplacian_2900() {
+        let edges = vec![(0usize, 1usize), (1usize, 2usize), (2usize, 2usize)];
+        let restrictions = vec![
+            EdgeRestriction::paired(array![[0.9_f64, 0.1], [-0.2, 0.7]], identity(2)),
+            EdgeRestriction::single(array![[0.5_f64, -0.3], [0.4, 0.8]]),
+            EdgeRestriction::paired(array![[0.6_f64, 0.2], [0.1, 1.1]], array![[0.3_f64, 0.0], [0.5, 0.2]]),
+        ];
+        let pen =
+            SheafConsistencyPenalty::new(edges, restrictions, 1.0, vec![2, 2, 2]).expect("build");
+        let local_offset = vec![0usize, 2, 4];
+        let block = pen.component_laplacian(&[0, 1, 2], &local_offset, pen.total_dim());
+        let reference = dense_laplacian(&pen);
+        for i in 0..pen.total_dim() {
+            for j in 0..pen.total_dim() {
+                assert_abs_diff_eq!(block[[i, j]], reference[[i, j]], epsilon = 1e-12);
+            }
+        }
+    }
+
+    // #2900: on a sheaf with several components (one with a self-loop, one edge-free
+    // vertex, one rank-deficient restriction), the component count must equal the
+    // dense count of the whole matvec Laplacian for tolerances below, between and
+    // above its eigenvalues.
+    #[test]
+    fn harmonic_modes_matches_the_dense_count_across_components_2900() {
+        let edges = vec![(0usize, 1usize), (1usize, 1usize), (3usize, 4usize)];
+        let restrictions = vec![
+            EdgeRestriction::paired(array![[1.0_f64, 0.0], [0.0, 0.0]], identity(2)),
+            EdgeRestriction::paired(array![[0.4_f64, 0.3], [0.2, 0.9]], array![[0.1_f64, 0.0], [0.0, 0.2]]),
+            EdgeRestriction::single(array![[0.8_f64, 0.6], [-0.6, 0.8]]),
+        ];
+        let pen = SheafConsistencyPenalty::new(edges, restrictions, 1.0, vec![2, 2, 3, 2, 2])
+            .expect("build");
+        let (evals, _) = dense_laplacian(&pen).eigh(Side::Lower).expect("eigh");
+        // Probes sit well away from every eigenvalue, so the two eigensolvers'
+        // roundoff cannot put an eigenvalue on opposite sides of a probe: above
+        // the null modes, midway across each resolved gap, and above the spectrum.
+        let top = evals.iter().copied().fold(0.0_f64, f64::max);
+        let mut probes = vec![1e-10_f64, top + 1.0];
+        probes.extend(
+            evals
+                .windows(2)
+                .into_iter()
+                .filter(|pair| pair[1] - pair[0] > 1e-6)
+                .map(|pair| 0.5 * (pair[0] + pair[1])),
+        );
+        for tol in probes {
+            assert_eq!(
+                pen.harmonic_modes(tol).expect("harmonic modes"),
+                dense_count_below(&pen, tol),
+                "tol = {tol:e}"
+            );
+        }
+    }
+
+    // #2900: 2100 disconnected identity-restricted pairs with one-dimensional stalks
+    // (total dimension 4200, above the retired 4096-dimension Lanczos switch) have
+    // exactly one harmonic mode per pair. A single-vector Lanczos sees that
+    // eigenvalue only once, so it could never report 2100.
+    #[test]
+    fn harmonic_modes_counts_multiplicity_at_every_size_2900() {
+        let pairs = 2100usize;
+        let edges: Vec<(usize, usize)> = (0..pairs).map(|p| (2 * p, 2 * p + 1)).collect();
+        let restrictions = (0..pairs)
+            .map(|_| EdgeRestriction::paired(identity(1), identity(1)))
+            .collect();
+        let pen = SheafConsistencyPenalty::new(edges, restrictions, 1.0, vec![1; 2 * pairs])
+            .expect("build");
+        assert_eq!(pen.total_dim(), 4200);
+        assert_eq!(pen.harmonic_modes(1e-10).expect("harmonic modes"), pairs);
+    }
+
     #[test]
     fn single_edge_identity_restriction_value() {
         // K=2, d_0 = d_1 = 3, R_uv = R_vu = I.
@@ -700,7 +835,7 @@ mod tests {
         let pen =
             SheafConsistencyPenalty::new(edges, restrictions, 1.0, vec![2, 2, 2]).expect("build");
         // Reconstruct L densely via 6 matvecs.
-        let l_dense = pen.dense_laplacian();
+        let l_dense = dense_laplacian(&pen);
         let n = pen.total_dim();
         let s = array![0.1_f64, -0.2, 0.3, 0.4, -0.5, 0.6];
         let v = array![0.7_f64, 0.2, -0.1, 0.5, 0.3, -0.4];
@@ -723,7 +858,7 @@ mod tests {
     fn harmonic_modes_two_components_identity_restrictions() {
         // Two disconnected vertices (no edges), d = 3 each → ker L = R^{6}, all 6 modes.
         let pen = SheafConsistencyPenalty::new(vec![], vec![], 1.0, vec![3, 3]).expect("build");
-        let h = pen.harmonic_modes(1e-10);
+        let h = pen.harmonic_modes(1e-10).expect("harmonic modes");
         assert_eq!(h, 6);
 
         // K=4, two connected components: (0-1) and (2-3) with identity restrictions, d=2 each.
@@ -736,7 +871,7 @@ mod tests {
         ];
         let pen2 = SheafConsistencyPenalty::new(edges, restrictions, 1.0, vec![2, 2, 2, 2])
             .expect("build");
-        let h2 = pen2.harmonic_modes(1e-10);
+        let h2 = pen2.harmonic_modes(1e-10).expect("harmonic modes");
         assert_eq!(h2, 4);
     }
 
@@ -786,7 +921,7 @@ mod tests {
         let n = pen.total_dim();
         let s = Array1::<f64>::zeros(n);
         let diag = pen.hessian_diag(s.view());
-        let l = pen.dense_laplacian();
+        let l = dense_laplacian(&pen);
         for i in 0..n {
             assert_abs_diff_eq!(diag[i], 0.3 * l[[i, i]], epsilon = 1e-12);
         }
@@ -805,7 +940,7 @@ mod tests {
         let n = pen.total_dim();
         let s = Array1::<f64>::zeros(n);
         let diag = pen.hessian_diag(s.view());
-        let l = pen.dense_laplacian();
+        let l = dense_laplacian(&pen);
         for i in 0..n {
             assert_abs_diff_eq!(diag[i], 0.7 * l[[i, i]], epsilon = 1e-12);
         }
@@ -826,7 +961,7 @@ mod tests {
         let n = pen.total_dim();
         let s = Array1::<f64>::zeros(n);
         let diag = pen.hessian_diag(s.view());
-        let l = pen.dense_laplacian();
+        let l = dense_laplacian(&pen);
         for i in 0..n {
             assert_abs_diff_eq!(diag[i], 1.3 * l[[i, i]], epsilon = 1e-12);
         }
@@ -857,7 +992,7 @@ mod tests {
         let n = pen.total_dim();
         let s = Array1::<f64>::zeros(n);
         let diag = pen.hessian_diag(s.view());
-        let l = pen.dense_laplacian();
+        let l = dense_laplacian(&pen);
         for i in 0..n {
             assert_abs_diff_eq!(diag[i], 0.5 * l[[i, i]], epsilon = 1e-12);
         }
