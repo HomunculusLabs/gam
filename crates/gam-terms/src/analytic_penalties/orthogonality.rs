@@ -872,6 +872,8 @@ impl DecoderIncoherencePenalty {
         let offsets = self.block_offsets();
         let weight = self.resolved_weight(rho);
         let p_out = self.p_out;
+        // Whether each atom's block of `v` holds a nonzero entry, filled on first use.
+        let mut live_blocks: Vec<Option<bool>> = vec![None; self.block_sizes.len()];
         for &(j, k, w_sym) in &self.pairs {
             {
                 let w_pair = w_sym * weight;
@@ -882,6 +884,19 @@ impl DecoderIncoherencePenalty {
                 let off_k = offsets[k];
                 let m_j = self.block_sizes[j];
                 let m_k = self.block_sizes[k];
+                // #2731 — for a finite target, a pair whose two blocks are zero in `v`
+                // adds `κ·(±0)` to accumulators that start at `+0` and only receive
+                // `+=`, so skipping it is bit-identical. A unit probe touching one atom
+                // block pays only the pairs incident to that atom.
+                let live_j = *live_blocks[j].get_or_insert_with(|| {
+                    (off_j..off_j + m_j * p_out).any(|idx| v[idx] != 0.0)
+                });
+                let live_k = *live_blocks[k].get_or_insert_with(|| {
+                    (off_k..off_k + m_k * p_out).any(|idx| v[idx] != 0.0)
+                });
+                if !(live_j || live_k) {
+                    continue;
+                }
                 // #2343 — curvature of the degree-0 normalized penalty
                 // `½·w·E/(N_j·N_k)`, whose gradient is `κ·(G_j − (E/N_j)B_j)` with
                 // `κ = w_pair/(N_j·N_k)`, `G_j[a,o]=Σ_b C[a,b]B_k[b,o]`, `E=‖C‖²_F`.

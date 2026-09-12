@@ -2184,6 +2184,13 @@ impl SaeManifoldTerm {
             let b = self.atoms[entry.atom].decoder_coefficients();
             let m = entry.basis_size;
             let off = entry.offset;
+            // #2731 — an atom block that is zero in `v` adds only `±0` below, to
+            // accumulators that start at `+0` and only receive `+=`, so skipping it
+            // is bit-identical. A border probe of the dense exact-A build touches
+            // one atom block.
+            if !(off..off + m * p).any(|idx| v[idx] != 0.0) {
+                continue;
+            }
             let mut radial = 0.0_f64;
             for a in 0..m {
                 for o in 0..p {
