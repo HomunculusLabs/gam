@@ -6074,5 +6074,15 @@
     ],
     "reason": "#2902 row 8: the REML cost's refused-trial diagnostic logged coordinates within 1e-8 of +-RHO_BOUND, the rails of a box no standard-REML arm searches since 9f2a290c0 and 0b7075c3b. The terminal certificate reports each railed coordinate with the interval it was judged against (railed_facts, #2530). boundary_hit_indices had no other reader.",
     "evidence": "git grep -w boundary_hit_indices over the base finds its definition in crates/gam-linalg/src/utils.rs, the crate-private re-export in crates/gam-solve/src/reml/outer_eval.rs, and the two diagnostic calls in crates/gam-solve/src/reml/objective.rs, all removed in this commit. No test or other crate reads it."
+  },
+  {
+    "base": "67607d85128d787d70f91611386aab2f4c378bc3",
+    "items": [
+      "crates/gam-solve/src/evidence.rs:const:ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD",
+      "crates/gam-solve/src/evidence.rs:enum:EvidenceLogDetSource",
+      "crates/gam-solve/src/evidence.rs:struct:EvidenceHvpLogDet"
+    ],
+    "reason": "#2469 (SPEC rule 23: delete useless public API). EvidenceLogDetSource and its payload EvidenceHvpLogDet described a Laplace-evidence log-determinant source, either factored arrow Cholesky factors with an HVP fallback, or an HVP callback. Nothing constructs or matches either type, and the gam-solve facade's `pub use evidence::{...}` was their only other appearance. ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD = 1024 was a pub constant that no code read. Its one mention was the Hvp variant's doc, which claimed that dimensions up to it are materialized exactly, but no gam-solve code makes that decision. gam-terms' analytic_penalties/registry.rs keeps its own private constant of the same name, untouched by this change. All three items are deleted, together with the two names in the facade's re-export list. The gam-sae hybrid_split.rs doc that said its evidence was 'kept inline rather than routed through EvidenceLogDetSource' now gives only the reason it is inline.",
+    "evidence": "git grep -n -w over the base, repo-wide. EvidenceLogDetSource: its definition (evidence.rs:66), the gam-solve src/mod.rs:75 re-export, and the gam-sae hybrid_split.rs:81 doc. EvidenceHvpLogDet: its definition (evidence.rs:59), two uses inside the deleted enum (evidence.rs:71, :77), and the same re-export. ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD in gam-solve: the declaration (evidence.rs:54) and the doc of the deleted variant (evidence.rs:74). The gam-terms registry.rs lines belong to that crate's own private constant. The public API census counts pub fn, and no function is removed. Not compiled or run locally (user directive)."
   }
 ]

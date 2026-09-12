@@ -72,12 +72,11 @@ pub mod warm_start_artifact;
 pub mod warm_start_transfer;
 
 pub use evidence::{
-    CircularGaussianFit2d, EvidenceHvpLogDet, EvidenceLogDetSource, GaussianMixtureCertificate,
-    GaussianMixtureCheckpoint, GaussianMixtureConfig, GaussianMixtureError, GaussianMixtureFit,
-    RingGaussianMixtureFit, StackingCertificate, StackingCheckpoint, StackingConfig, StackingError,
-    StackingWeights, TopologyCandidate, TopologyKind, TopologyScoreScale, TopologySelectOptions,
-    UnionComponentFit, UnionComponentKind, UnionStructure, UnionStructureFit,
-    solve_stacking_weights,
+    CircularGaussianFit2d, GaussianMixtureCertificate, GaussianMixtureCheckpoint,
+    GaussianMixtureConfig, GaussianMixtureError, GaussianMixtureFit, RingGaussianMixtureFit,
+    StackingCertificate, StackingCheckpoint, StackingConfig, StackingError, StackingWeights,
+    TopologyCandidate, TopologyKind, TopologyScoreScale, TopologySelectOptions, UnionComponentFit,
+    UnionComponentKind, UnionStructure, UnionStructureFit, solve_stacking_weights,
 };
 pub use topology_selector::{
     AdaptiveRungError, AdaptiveRungFailureStage, AdaptiveRungKind, AdaptiveRungOrderFailure,

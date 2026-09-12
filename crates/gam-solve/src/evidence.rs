@@ -45,37 +45,10 @@ use gam_runtime::warm_start::{Fingerprint, Fingerprinter};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 use serde::{Deserialize, Serialize};
 
-use crate::arrow_schur::ArrowFactorCache;
 use crate::priority_selection::{PriorityCandidate, rank_priority_candidates};
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_linalg::pairwise_reduce::{BASE_CHUNK, pairwise_sum};
 use gam_math::special::bessel_i0_log_minus_abs_and_ratio;
-
-pub const ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD: usize = 1024;
-/// Matrix-free SPD Hessian logdet source used when the arrow Schur factor is
-/// not materialized. The callback must apply the same undamped Hessian whose
-/// determinant enters the Laplace evidence.
-#[derive(Clone, Copy)]
-pub struct EvidenceHvpLogDet<'a> {
-    pub dim: usize,
-    pub apply: &'a dyn Fn(&[f64]) -> Vec<f64>,
-}
-
-/// Source for the Hessian log determinant of the Laplace evidence.
-#[derive(Clone, Copy)]
-pub enum EvidenceLogDetSource<'a> {
-    /// Use the exact arrow Cholesky factors, falling back to `fallback_hvp`
-    /// when the Schur factor is absent on a matrix-free solve.
-    FactoredArrow {
-        cache: &'a ArrowFactorCache,
-        fallback_hvp: Option<EvidenceHvpLogDet<'a>>,
-    },
-    /// Use an HVP callback directly. Dimensions at or below
-    /// [`ANALYTIC_LOGDET_DENSE_DIM_THRESHOLD`] are materialized exactly;
-    /// larger operators use the same Rademacher-Lanczos SLQ constants as
-    /// `FrozenAnalyticPenaltyOp`.
-    Hvp(EvidenceHvpLogDet<'a>),
-}
 
 // ---------------------------------------------------------------------------
 // Topology candidate enum and selection result
