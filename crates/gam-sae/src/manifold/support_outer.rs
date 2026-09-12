@@ -953,6 +953,157 @@ pub fn run_sae_support_outer(
     })
 }
 
+/// Request for [`fit_sae_support_sparse`]: one overcomplete hard-TopK
+/// support-sparse fit of an uncentered `N×P` target.
+pub struct SaeSupportSparseFitRequest<'a> {
+    /// Activations `N×P`. The fit centers them on their column mean.
+    pub target: ndarray::ArrayView2<'a, f64>,
+    /// Per-atom chart family. `"auto"` entries resolve through
+    /// [`resolve_support_auto_atoms`].
+    pub atom_basis: Vec<String>,
+    /// Per-atom public dimension.
+    pub atom_dim: Vec<usize>,
+    /// Per-row TopK support width.
+    pub support_k: usize,
+    /// Initial isotropic smoothing strength seeding the outer LAML search.
+    pub initial_smoothness: f64,
+    /// Outer (smoothing-selection) iteration budget.
+    pub max_outer_iter: usize,
+    /// Inner fixed-point iteration budget.
+    pub max_inner_iter: usize,
+    /// Inner fixed-point relative stationarity tolerance.
+    pub inner_tolerance: f64,
+    /// Inner coordinate trust radius.
+    pub trust_radius: f64,
+    /// Deterministic seed for the support routing and the evidence probes.
+    pub random_state: u64,
+}
+
+/// A converged overcomplete support-sparse fit, in target coordinates.
+pub struct SaeSupportSparseFit {
+    /// The certified outer report: converged term, selected smoothing, criterion
+    /// and both certificates.
+    pub outer: SaeSupportOuterReport,
+    /// Atoms requested, before the seed prunes zero-mass atoms.
+    pub requested_atoms: usize,
+    /// Indices of the requested atoms the seed retained.
+    pub retained_atom_indices: Vec<usize>,
+    /// Resolved chart family of each retained atom.
+    pub atom_basis: Vec<String>,
+    /// Public dimension of each retained atom.
+    pub atom_dim: Vec<usize>,
+    /// Column mean the target was centered on, length `P`.
+    pub training_mean: Vec<f64>,
+    /// In-sample reconstruction `training_mean + Ĉ`, `N×P`.
+    pub fitted: Array2<f64>,
+    /// `1 − RSS/TSS` against the training mean; `1` when the target has no
+    /// variance about its mean.
+    pub reconstruction_r2: f64,
+}
+
+/// The one production path for an overcomplete (`K > P`) hard-TopK manifold SAE
+/// fit (#2023). It resolves the `"auto"` portfolio, admits the support-sparse
+/// lane, centers on the training mean, seeds the support routing and the charts,
+/// and selects the grouped-LAML smoothing through [`run_sae_support_outer`]. The
+/// public FFI entry, the tiered Tier-2 refinement and the code-space pair chart
+/// all fit through it, so none of them carries its own copy of the cadence.
+pub fn fit_sae_support_sparse(
+    request: SaeSupportSparseFitRequest<'_>,
+) -> Result<SaeSupportSparseFit, String> {
+    let (n_obs, output_dim) = request.target.dim();
+    let requested_atoms = request.atom_basis.len();
+    let mut resolved_basis = request.atom_basis;
+    resolve_support_auto_atoms(&mut resolved_basis);
+    let effective_dims = sae_support_effective_atom_dims(&resolved_basis, &request.atom_dim)?;
+    let d_max = effective_dims.iter().copied().max().unwrap_or(1);
+    let admission = crate::front_door::admit_topk_manifold(
+        n_obs,
+        output_dim,
+        requested_atoms,
+        d_max,
+        request.support_k,
+    )?;
+    if admission.lane != crate::front_door::SaeFitLane::CurvedStreaming {
+        return Err(format!(
+            "support-sparse fit requires CurvedStreaming admission; got {:?}",
+            admission.lane
+        ));
+    }
+    let training_mean = request
+        .target
+        .mean_axis(ndarray::Axis(0))
+        .ok_or_else(|| "support-sparse fit requires positive rows".to_string())?
+        .to_vec();
+    let centered = Array2::from_shape_fn((n_obs, output_dim), |(row, column)| {
+        request.target[[row, column]] - training_mean[column]
+    });
+    let seed = build_sae_support_seed(SaeSupportSeedRequest {
+        target: centered.view(),
+        atom_basis: &resolved_basis,
+        atom_dim: &request.atom_dim,
+        support_k: request.support_k,
+        random_state: request.random_state,
+        admission,
+    })?;
+    let retained_atom_indices = seed.retained_atom_indices;
+    let atom_basis = retained_atom_indices
+        .iter()
+        .map(|&atom| resolved_basis[atom].clone())
+        .collect::<Vec<_>>();
+    let atom_dim = retained_atom_indices
+        .iter()
+        .map(|&atom| request.atom_dim[atom])
+        .collect::<Vec<_>>();
+    let term_seed = build_sae_support_term_seed(SaeSupportTermSeedRequest {
+        assignment: seed.assignment,
+        atom_basis: atom_basis.clone(),
+        atom_dim: atom_dim.clone(),
+        output_dim,
+        random_state: request.random_state,
+    })?;
+    let ard_precisions = (0..term_seed.term.k_atoms())
+        .map(|atom| vec![1.0; term_seed.term.assignment.atom_coord_dim(atom)])
+        .collect::<Vec<_>>();
+    let outer = run_sae_support_outer(SaeSupportOuterRequest {
+        term: term_seed.term,
+        target: centered,
+        initial_smoothness: request.initial_smoothness,
+        ard_precisions,
+        max_outer_iter: request.max_outer_iter,
+        max_inner_iter: request.max_inner_iter,
+        inner_tolerance: request.inner_tolerance,
+        trust_radius: request.trust_radius,
+        random_state: request.random_state,
+    })
+    .map_err(|error| error.to_string())?;
+    let mut fitted = outer.term.reconstruct()?;
+    let mut residual_ss = 0.0_f64;
+    let mut total_ss = 0.0_f64;
+    for row in 0..n_obs {
+        for column in 0..output_dim {
+            fitted[[row, column]] += training_mean[column];
+            let truth = request.target[[row, column]];
+            residual_ss += (truth - fitted[[row, column]]).powi(2);
+            total_ss += (truth - training_mean[column]).powi(2);
+        }
+    }
+    let reconstruction_r2 = if total_ss > 0.0 {
+        1.0 - residual_ss / total_ss
+    } else {
+        1.0
+    };
+    Ok(SaeSupportSparseFit {
+        outer,
+        requested_atoms,
+        retained_atom_indices,
+        atom_basis,
+        atom_dim,
+        training_mean,
+        fitted,
+        reconstruction_r2,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

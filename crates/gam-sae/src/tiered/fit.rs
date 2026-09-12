@@ -25,9 +25,9 @@
 //!
 //! **(b) Curved refinement** — Tier-2 charts the Tier-1 residual `R1 = R0 − L`
 //!    through the canonical overcomplete hard-TopK support-sparse engine
-//!    ([`run_sae_support_outer`], driven exactly as the public support-sparse fit
-//!    entry drives it: [`build_sae_support_seed`] → [`build_sae_support_term_seed`]
-//!    → grouped-LAML outer solve). The residual's local mean is peeled before the
+//!    ([`fit_sae_support_sparse`], the one path the public support-sparse fit also
+//!    runs: seed → term seed → grouped-LAML outer solve). The residual's local mean
+//!    is peeled before the
 //!    fit and added back on reconstruction, so the curved correction `C` lives in
 //!    residual space and the composed model is `μ + L + C`. This is the `K > P`
 //!    representation — the front door refuses any resident `N×K` alternative — so
@@ -45,11 +45,9 @@ use ndarray::{Array1, Array2, ArrayView2, Axis};
 
 use gam_solve::rho_optimizer::OuterCriterionCertificate;
 
-use crate::front_door::{SaeFitLane, admit_topk_manifold};
 use crate::manifold::{
-    SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER, SaeSupportFixedPointReport, SaeSupportOuterRequest,
-    SaeSupportSeedRequest, SaeSupportSparseTerm, SaeSupportTermSeedRequest, build_sae_support_seed,
-    build_sae_support_term_seed, run_sae_support_outer, sae_support_effective_atom_dims,
+    SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER, SaeSupportFixedPointReport, SaeSupportSparseFitRequest,
+    SaeSupportSparseTerm, fit_sae_support_sparse,
 };
 use crate::migration_ledger::{BirthSeed, MoveEvidence, MoveReason, MoveStage, SaeMigrationLedger};
 use crate::sparse_dict::{
@@ -93,7 +91,8 @@ impl TieredSeedPolicy {
 /// support-sparse dictionary fit on the Tier-1 residual (#2023). The residual
 /// is charted by `n_atoms` curved atoms of the declared `atom_basis`/`atom_dim`
 /// family under a per-row `support_k` TopK support, and its smoothing strengths
-/// are selected by the grouped-LAML outer engine ([`run_sae_support_outer`]).
+/// are selected by the grouped-LAML outer engine
+/// ([`crate::manifold::run_sae_support_outer`]).
 ///
 /// The support-sparse lane is the ONLY representation of a `K > P` TopK curved
 /// dictionary (the front door refuses any resident `N×K` alternative), so
@@ -105,7 +104,8 @@ pub struct Tier2SupportConfig {
     /// charts), passed verbatim to the support-sparse atom planner.
     pub atom_basis: String,
     /// Public per-atom dimension (periodic entries are harmonic resolution; the
-    /// live chart width is resolved by [`sae_support_effective_atom_dims`]).
+    /// live chart width is resolved by
+    /// [`crate::manifold::sae_support_effective_atom_dims`]).
     pub atom_dim: usize,
     /// Overcomplete curved dictionary width `K`. Must exceed the residual `P`.
     pub n_atoms: usize,
@@ -366,7 +366,7 @@ pub struct TieredFitReport {
 /// of the schedule, called by its tests and the `tiered_*` examples.
 ///
 /// The curved tier is fit on the Tier-1 residual through the canonical
-/// support-sparse engine (`fit_tier2_support` → [`run_sae_support_outer`]),
+/// support-sparse engine (`fit_tier2_support` → [`fit_sae_support_sparse`]),
 /// whose returned fit carries a certified inner fixed point and outer stationarity
 /// certificate. No principal-component reseeding occurs; the [`SaeMigrationLedger`]
 /// accounts for the curved births / deaths and pins `pc_reseed_events = 0`.
@@ -463,9 +463,8 @@ pub fn fit_tiered(
 }
 
 /// Fit the Tier-2 curved refinement: the overcomplete hard-TopK support-sparse
-/// dictionary on the [`LinearPeel`]'s centered residual, driven end to end through
-/// the canonical support-sparse engine (seed → term → grouped-LAML outer solve),
-/// exactly as the public support-sparse fit entry drives it.
+/// dictionary on the [`LinearPeel`]'s centered residual, through
+/// [`fit_sae_support_sparse`], the path the public support-sparse fit runs.
 ///
 /// The peel already removed the residual's local mean, which is added back on
 /// reconstruction, so the curved correction `C` lives in residual space and the
@@ -476,90 +475,39 @@ fn fit_tier2_support(
     peel: &LinearPeel,
     config: &Tier2SupportConfig,
 ) -> Result<Tier2SupportFit, String> {
-    let (n_obs, output_dim) = peel.residual.dim();
-    let mean = peel.residual_mean.clone();
-    let centered = peel.residual.clone();
-
     let requested_atoms = config.n_atoms;
-    let atom_basis = vec![config.atom_basis.clone(); requested_atoms];
-    let atom_dim = vec![config.atom_dim; requested_atoms];
-    let effective_dims = sae_support_effective_atom_dims(&atom_basis, &atom_dim)?;
-    let d_max = effective_dims.iter().copied().max().unwrap_or(1);
-    let admission =
-        admit_topk_manifold(n_obs, output_dim, requested_atoms, d_max, config.support_k)?;
-    if admission.lane != SaeFitLane::CurvedStreaming {
-        return Err(format!(
-            "fit_tier2_support: the curved refinement is the overcomplete support-sparse lane, \
-             which requires K > P (CurvedStreaming admission); got lane {:?} at N={n_obs}, \
-             P={output_dim}, K={requested_atoms}. Widen the Tier-2 dictionary past the residual \
-             dimension",
-            admission.lane
-        ));
-    }
-    let seed = build_sae_support_seed(SaeSupportSeedRequest {
-        target: centered.view(),
-        atom_basis: &atom_basis,
-        atom_dim: &atom_dim,
+    let fit = fit_sae_support_sparse(SaeSupportSparseFitRequest {
+        target: peel.residual.view(),
+        atom_basis: vec![config.atom_basis.clone(); requested_atoms],
+        atom_dim: vec![config.atom_dim; requested_atoms],
         support_k: config.support_k,
-        random_state: config.random_state,
-        admission,
-    })?;
-    let retained_atom_indices = seed.retained_atom_indices;
-    let retained_atoms = retained_atom_indices.len();
-    let retained_basis = retained_atom_indices
-        .iter()
-        .map(|&atom| atom_basis[atom].clone())
-        .collect::<Vec<_>>();
-    let retained_dim = retained_atom_indices
-        .iter()
-        .map(|&atom| atom_dim[atom])
-        .collect::<Vec<_>>();
-    let term_seed = build_sae_support_term_seed(SaeSupportTermSeedRequest {
-        assignment: seed.assignment,
-        atom_basis: retained_basis,
-        atom_dim: retained_dim,
-        output_dim,
-        random_state: config.random_state,
-    })?;
-    let ard_precisions = (0..term_seed.term.k_atoms())
-        .map(|atom| vec![1.0; term_seed.term.assignment.atom_coord_dim(atom)])
-        .collect::<Vec<_>>();
-    let outer = run_sae_support_outer(SaeSupportOuterRequest {
-        term: term_seed.term,
-        target: centered.clone(),
         initial_smoothness: config.initial_smoothness,
-        ard_precisions,
         max_outer_iter: config.max_outer_iter,
         max_inner_iter: config.max_inner_iter,
         inner_tolerance: config.inner_tolerance,
         trust_radius: config.trust_radius,
         random_state: config.random_state,
-    })
-    .map_err(|error| error.to_string())?;
-
-    // Composed residual against R0 is exactly the curved fit's residual on the
-    // centered target: (R0 − L) − (mean + Ĉ) = centered − Ĉ.
-    let curved_centered = outer.term.reconstruct()?;
-    let mut rss = 0.0f64;
-    for row in 0..n_obs {
-        for column in 0..output_dim {
-            let delta = centered[[row, column]] - curved_centered[[row, column]];
-            rss += delta * delta;
-        }
-    }
-    let tss = peel.baseline_energy;
-    let explained_variance = crate::tiered::explained_variance_from_sums(rss, tss);
-
+    })?;
+    // Composed residual against R0 is the curved fit's own residual on the peel's
+    // centered target: (R0 − L) − (residual mean + fitted) = residual − fitted.
+    let rss = peel
+        .residual
+        .iter()
+        .zip(fit.fitted.iter())
+        .map(|(truth, fitted)| (truth - fitted).powi(2))
+        .sum::<f64>();
+    let explained_variance =
+        crate::tiered::explained_variance_from_sums(rss, peel.baseline_energy);
     Ok(Tier2SupportFit {
-        mean,
-        term: outer.term,
-        lambda_smooth: outer.lambda_smooth,
-        criterion: outer.criterion,
-        fixed_point: outer.fixed_point,
-        outer_certificate: outer.outer_certificate,
-        outer_iterations: outer.outer_iterations,
+        mean: &peel.residual_mean + &Array1::from(fit.training_mean),
+        retained_atoms: fit.retained_atom_indices.len(),
+        term: fit.outer.term,
+        lambda_smooth: fit.outer.lambda_smooth,
+        criterion: fit.outer.criterion,
+        fixed_point: fit.outer.fixed_point,
+        outer_certificate: fit.outer.outer_certificate,
+        outer_iterations: fit.outer.outer_iterations,
         requested_atoms,
-        retained_atoms,
         explained_variance,
     })
 }

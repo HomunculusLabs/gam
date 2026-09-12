@@ -37,18 +37,15 @@
 //! wants from a manifold SAE: how much of the dictionary curves, feature by
 //! feature, with the refusals recorded next to the acceptances.
 
-use ndarray::{Array2, ArrayView2, Axis};
+use ndarray::{Array2, ArrayView2};
 
 use crate::atom_codes::SparseAtomCodes;
-use crate::front_door::admit_topk_manifold;
 use crate::manifold::curve_promotion::{
     CurvePromotionProposal, LinearCommunity, PromotionContext, propose_curve_promotion,
 };
 use crate::manifold::{
-    GraphCompressionKind, LocalAtlas, LocalAtlasConfig, SaeSupportOuterRequest,
-    SaeSupportSeedRequest, SaeSupportTermSeedRequest, build_sae_support_seed,
-    build_sae_support_term_seed, observe_atlas_topology, run_sae_support_outer,
-    sae_support_effective_atom_dims,
+    GraphCompressionKind, LocalAtlas, LocalAtlasConfig, SaeSupportSparseFitRequest,
+    fit_sae_support_sparse, observe_atlas_topology,
 };
 use crate::sparse_dict::BlockSparseFit;
 
@@ -772,10 +769,9 @@ pub struct PairChartFit {
 
 /// Fit a REML-smoothed periodic chart to one pair's joint code cloud (`f×2`,
 /// the two co-firing weights), through the canonical overcomplete support-sparse
-/// engine — the same lane the public curved fit uses, at the smallest admitted
-/// width (`K = 3 > P = 2`, TopK `s = 1`). The cloud is centered here and the
-/// chart fits the centered target; `random_state` seeds the deterministic
-/// support routing.
+/// engine — the same [`fit_sae_support_sparse`] path the public curved fit runs,
+/// at `K = 8 > P = 2` atoms with TopK `s = 2`. The fit centers the cloud on its
+/// mean; `random_state` seeds the deterministic support routing.
 pub fn fit_pair_chart(
     cloud: ArrayView2<'_, f64>,
     random_state: u64,
@@ -809,72 +805,38 @@ fn fit_pair_chart_at_seed(
             "fit_pair_chart: {f} rows cannot support a certified chart fit (need ≥ 16)"
         ));
     }
-    let mean = cloud
-        .mean_axis(Axis(0))
-        .ok_or_else(|| "fit_pair_chart: mean_axis failed".to_string())?;
-    let centered = &cloud - &mean.view().insert_axis(Axis(0));
-
-    // K=8/s=2 mirrors the in-crate curved-chart precedent (`chart_curved` in
-    // the tiered peel tests); the minimal K=3/s=1 shape starves an atom into a
-    // zero adjoint-majorizer eigenvalue the outer engine rightly refuses.
+    // K=8/s=2: the minimal K=3/s=1 shape starves an atom into a zero
+    // adjoint-majorizer eigenvalue the outer engine rightly refuses.
     let n_atoms = 8usize;
-    let support_k = 2usize;
-    let atom_basis = vec!["periodic".to_string(); n_atoms];
-    let atom_dim = vec![1usize; n_atoms];
-    let effective = sae_support_effective_atom_dims(&atom_basis, &atom_dim)?;
-    let d_max = effective.iter().copied().max().unwrap_or(1);
-    let admission = admit_topk_manifold(f, 2, n_atoms, d_max, support_k)?;
-    let seed = build_sae_support_seed(SaeSupportSeedRequest {
-        target: centered.view(),
-        atom_basis: &atom_basis,
-        atom_dim: &atom_dim,
-        support_k,
-        random_state,
-        admission,
-    })?;
-    let retained = seed.retained_atom_indices.len();
-    let term_seed = build_sae_support_term_seed(SaeSupportTermSeedRequest {
-        assignment: seed.assignment,
-        atom_basis: vec!["periodic".to_string(); retained],
-        atom_dim: vec![1usize; retained],
-        output_dim: 2,
-        random_state,
-    })?;
-    let ard_precisions = (0..term_seed.term.k_atoms())
-        .map(|atom| vec![1.0; term_seed.term.assignment.atom_coord_dim(atom)])
-        .collect::<Vec<_>>();
-    let outer = run_sae_support_outer(SaeSupportOuterRequest {
-        term: term_seed.term,
-        target: centered.clone(),
+    let fit = fit_sae_support_sparse(SaeSupportSparseFitRequest {
+        target: cloud,
+        atom_basis: vec!["periodic".to_string(); n_atoms],
+        atom_dim: vec![1usize; n_atoms],
+        support_k: 2,
         initial_smoothness: 1.0,
-        ard_precisions,
         max_outer_iter: 32,
         max_inner_iter: 256,
         // The public entry's relative inner tolerance (#2517).
         inner_tolerance: 1.0e-4,
         trust_radius: 1.0,
         random_state,
-    })
-    .map_err(|error| error.to_string())?;
-
-    let recon = outer.term.reconstruct()?;
+    })?;
     let mut rss = 0.0f64;
     let mut tss = 0.0f64;
     for i in 0..f {
         for c in 0..2 {
-            let d = centered[[i, c]] - recon[[i, c]];
-            rss += d * d;
-            tss += centered[[i, c]] * centered[[i, c]];
+            rss += (cloud[[i, c]] - fit.fitted[[i, c]]).powi(2);
+            tss += (cloud[[i, c]] - fit.training_mean[c]).powi(2);
         }
     }
     Ok(PairChartFit {
-        lambda_smooth: outer.lambda_smooth,
-        criterion: outer.criterion,
+        lambda_smooth: fit.outer.lambda_smooth,
+        criterion: fit.outer.criterion,
         explained_variance: crate::tiered::explained_variance_from_sums(rss, tss),
-        outer_iterations: outer.outer_iterations,
-        certified: outer.outer_certificate.certifies(),
-        recurred: outer.fixed_point.recurred,
-        retained_atoms: outer.term.k_atoms(),
+        outer_iterations: fit.outer.outer_iterations,
+        certified: fit.outer.outer_certificate.certifies(),
+        recurred: fit.outer.fixed_point.recurred,
+        retained_atoms: fit.outer.term.k_atoms(),
     })
 }
 

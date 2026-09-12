@@ -6,15 +6,12 @@
 //! full-support specialization; crossing `K>P` changes representation before
 //! any seed allocation.
 
-use gam::terms::sae::front_door::{SaeFitLane, admit_topk_manifold};
 use gam::terms::sae::manifold::{
-    SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER, SaeSupportFixedPointReport, SaeSupportOuterRequest,
-    SaeSupportRehydrateRequest, SaeSupportSparseTerm, SaeSupportTermSeedRequest,
-    build_sae_support_seed, build_sae_support_term_seed, rehydrate_sae_support_term,
-    run_sae_support_outer, sae_support_effective_atom_dims,
+    SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER, SaeSupportFixedPointReport, SaeSupportRehydrateRequest,
+    SaeSupportSparseFit, SaeSupportSparseFitRequest, SaeSupportSparseTerm, SaeSupportStationarity,
+    fit_sae_support_sparse, rehydrate_sae_support_term,
 };
-use gam::terms::sae::manifold::{SaeSupportSeedRequest, SaeSupportStationarity};
-use ndarray::{Array1, Array2, ArrayView2, Axis};
+use ndarray::{Array1, Array2, ArrayView2};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -708,90 +705,30 @@ pub(crate) fn fit_support_sparse_manifold_sae(
     py: Python<'_>,
     request: SupportSparseFitRequest<'_>,
 ) -> PyResult<PyObject> {
-    let (n_obs, output_dim) = request.target.dim();
-    let requested_k = request.atom_basis.len();
-    let mut resolved_basis = request.atom_basis.clone();
-    gam::terms::sae::manifold::resolve_support_auto_atoms(&mut resolved_basis);
-    let effective_dims = sae_support_effective_atom_dims(&resolved_basis, &request.atom_dim)
-        .map_err(py_value_error)?;
-    let d_max = effective_dims.iter().copied().max().unwrap_or(1);
-    let admission = admit_topk_manifold(n_obs, output_dim, requested_k, d_max, request.support_k)
-        .map_err(py_value_error)?;
-    if admission.lane != SaeFitLane::CurvedStreaming {
-        return Err(py_value_error(format!(
-            "support-sparse fit requires CurvedStreaming admission; got {:?}",
-            admission.lane
-        )));
-    }
-    let training_mean = request
-        .target
-        .mean_axis(Axis(0))
-        .ok_or_else(|| py_value_error("support-sparse fit requires positive rows".to_string()))?
-        .to_vec();
-    let centered_target = centered(request.target, &training_mean);
-    let seed = build_sae_support_seed(SaeSupportSeedRequest {
-        target: centered_target.view(),
-        atom_basis: &resolved_basis,
-        atom_dim: &request.atom_dim,
+    let SaeSupportSparseFit {
+        outer,
+        requested_atoms,
+        retained_atom_indices,
+        atom_basis,
+        atom_dim,
+        training_mean,
+        fitted,
+        reconstruction_r2,
+    } = fit_sae_support_sparse(SaeSupportSparseFitRequest {
+        target: request.target,
+        atom_basis: request.atom_basis,
+        atom_dim: request.atom_dim,
         support_k: request.support_k,
-        random_state: request.random_state,
-        admission,
-    })
-    .map_err(py_value_error)?;
-    let retained_atom_indices = seed.retained_atom_indices;
-    let atom_basis = retained_atom_indices
-        .iter()
-        .map(|&atom| resolved_basis[atom].clone())
-        .collect::<Vec<_>>();
-    let atom_dim = retained_atom_indices
-        .iter()
-        .map(|&atom| request.atom_dim[atom])
-        .collect::<Vec<_>>();
-    let term_seed = build_sae_support_term_seed(SaeSupportTermSeedRequest {
-        assignment: seed.assignment,
-        atom_basis: atom_basis.clone(),
-        atom_dim: atom_dim.clone(),
-        output_dim,
-        random_state: request.random_state,
-    })
-    .map_err(py_value_error)?;
-    let ard_precisions = (0..term_seed.term.k_atoms())
-        .map(|atom| vec![1.0; term_seed.term.assignment.atom_coord_dim(atom)])
-        .collect::<Vec<_>>();
-    let outer = run_sae_support_outer(SaeSupportOuterRequest {
-        term: term_seed.term,
-        target: centered_target.clone(),
         initial_smoothness: request.initial_smoothness,
-        ard_precisions: ard_precisions.clone(),
         max_outer_iter: request.max_iter,
         // `max_iter` is the caller's OUTER smoothing-search budget; the inner
-        // fixed point gets the engine's own, which the tiered driver already
-        // reads from the same declaration.
+        // fixed point gets the engine's own declaration.
         max_inner_iter: SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
         inner_tolerance: request.tolerance,
         trust_radius: request.trust_radius,
         random_state: request.random_state,
     })
-    .map_err(|error| py_value_error(error.to_string()))?;
-    let centered_fitted = outer.term.reconstruct().map_err(py_value_error)?;
-    let fitted = add_mean(centered_fitted, &training_mean);
-    let residual_ss = request
-        .target
-        .iter()
-        .zip(fitted.iter())
-        .map(|(truth, fit)| (truth - fit).powi(2))
-        .sum::<f64>();
-    let mut total_ss = 0.0;
-    for row in request.target.rows() {
-        for (column, value) in row.iter().enumerate() {
-            total_ss += (value - training_mean[column]).powi(2);
-        }
-    }
-    let reconstruction_r2 = if total_ss > 0.0 {
-        1.0 - residual_ss / total_ss
-    } else {
-        1.0
-    };
+    .map_err(py_value_error)?;
     let fixed = fixed_point_json(&outer.fixed_point);
     let outer_certificate = serde_json::to_value(&outer.outer_certificate)
         .map_err(|error| py_value_error(error.to_string()))?;
@@ -811,7 +748,7 @@ pub(crate) fn fit_support_sparse_manifold_sae(
     let log_lambda_smooth = outer.lambda_smooth.iter().map(|value| value.ln()).collect();
     let model = SupportSparseManifoldSaeCore {
         term: outer.term,
-        requested_k,
+        requested_k: requested_atoms,
         retained_atom_indices,
         atom_basis,
         atom_dim,
@@ -821,7 +758,7 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         fitted,
         reconstruction_r2,
         log_lambda_smooth,
-        ard_precisions,
+        ard_precisions: outer.ard_precisions,
         criterion: outer.criterion,
         certificates,
         termination,
