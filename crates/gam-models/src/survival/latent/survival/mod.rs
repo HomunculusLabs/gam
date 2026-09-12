@@ -6987,6 +6987,145 @@ impl LatentBinaryFamily {
         Ok(out)
     }
 
+    /// Every canonical-axis first directional derivative of the latent-binary joint
+    /// Hessian from one row pass (#2714): the binary twin of the survival family's
+    /// one-build lift.
+    ///
+    /// Per row the binary chain reads the survival value, gradient `g`, Hessian `H`
+    /// and the one-seed third contraction `T(u)` along `u = X_i e_a`:
+    ///
+    /// ```text
+    ///   grad_scale·T(u) − outer_scale·(g·u)·H + outer_scale′·(g·u)·g gᵀ
+    ///     + outer_scale·((−H u) gᵀ + g (−H u)ᵀ),
+    /// ```
+    ///
+    /// where `grad_scale`, `outer_scale` and `outer_scale′` are functions of the row's
+    /// value alone. That is linear in `u`, and `X_i e_a` only combines the primaries a
+    /// binary row reads (`q_entry`, `q_exit`, `μ`), so each row lifts once per primary
+    /// and closes every axis. The per-axis sweep this replaces ran `p` serial row
+    /// passes on every joint-Newton cycle that forms the Jeffreys term.
+    fn exact_newton_joint_hessian_directional_derivative_all_axes_dense(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Vec<Array2<f64>>, String> {
+        const BINARY_PRIMARIES: [usize; 3] = [
+            LATENT_SURVIVAL_PRIMARY_Q_ENTRY,
+            LATENT_SURVIVAL_PRIMARY_Q_EXIT,
+            LATENT_SURVIVAL_PRIMARY_MU,
+        ];
+        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-binary")
+            .map_err(String::from)?;
+        let (q_entry, q_exit, mu) = self.split_time_eta(block_states)?;
+        let slices = self.joint_slices();
+        let total = slices.total;
+        let unit = |index: usize, len: usize| {
+            let mut axis = Array1::<f64>::zeros(len);
+            axis[index] = 1.0;
+            axis
+        };
+        let coefficient_axes: Vec<Array1<f64>> = (0..total).map(|a| unit(a, total)).collect();
+        let mut out = vec![Array2::<f64>::zeros((total, total)); total];
+        for row_idx in 0..self.event_target.len() {
+            let wi = weights.at(row_idx);
+            if wi == 0.0 {
+                continue;
+            }
+            let row =
+                self.build_right_censored_row_at(row_idx, q_entry[row_idx], q_exit[row_idx])?;
+            let point = LatentSurvivalPrimaryPoint {
+                q_entry: q_entry[row_idx],
+                q_exit: q_exit[row_idx],
+                qdot_exit: 1.0,
+                q_right: q_exit[row_idx],
+                mu: mu[row_idx],
+                sigma: self.latent_sd,
+            };
+            let lifts = BINARY_PRIMARIES
+                .iter()
+                .map(|&gamma| {
+                    latent_survival_row_primary_one_seed_fixed_sigma(
+                        &self.quadctx,
+                        &row,
+                        point,
+                        &unit(gamma, LATENT_SURVIVAL_PRIMARY_DIM),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // The base channels do not depend on the seed: read them off the first lift.
+            let base = &lifts[0].base;
+            let (binary, outer_scale_prime) =
+                binary_from_log_survival_through_third(base.value(), self.event_target[row_idx])?;
+            let base_gradient = base.g();
+            let base_hessian = base.h();
+            let survival_gradient = Array1::from_shape_fn(LATENT_SURVIVAL_PRIMARY_DIM, |a| {
+                if a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA {
+                    base_gradient[a]
+                } else {
+                    0.0
+                }
+            });
+            let survival_hessian = Array2::from_shape_fn(
+                (LATENT_SURVIVAL_PRIMARY_DIM, LATENT_SURVIVAL_PRIMARY_DIM),
+                |(a, b)| {
+                    if a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
+                        && b < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
+                    {
+                        -base_hessian[a][b]
+                    } else {
+                        0.0
+                    }
+                },
+            );
+            let primary_thirds: Vec<Array2<f64>> = lifts
+                .iter()
+                .map(|lift| {
+                    let contracted_third = lift.contracted_third();
+                    Array2::from_shape_fn(
+                        (LATENT_SURVIVAL_PRIMARY_DIM, LATENT_SURVIVAL_PRIMARY_DIM),
+                        |(a, b)| {
+                            if a < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
+                                && b < LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
+                            {
+                                -contracted_third[a][b]
+                            } else {
+                                0.0
+                            }
+                        },
+                    )
+                })
+                .collect();
+            for (axis, target) in coefficient_axes.iter().zip(out.iter_mut()) {
+                let direction = self.row_primary_direction_from_flat(row_idx, &slices, axis);
+                let mut third =
+                    Array2::<f64>::zeros((LATENT_SURVIVAL_PRIMARY_DIM, LATENT_SURVIVAL_PRIMARY_DIM));
+                for (&gamma, primary_third) in BINARY_PRIMARIES.iter().zip(primary_thirds.iter()) {
+                    if direction[gamma] != 0.0 {
+                        third.scaled_add(direction[gamma], primary_third);
+                    }
+                }
+                let g_u = -survival_hessian.dot(&direction);
+                let t_u = survival_gradient.dot(&direction);
+                let mut primary = binary.grad_scale * third;
+                primary.scaled_add(-binary.outer_scale * t_u, &survival_hessian);
+                for a in 0..LATENT_SURVIVAL_PRIMARY_DIM {
+                    for b in 0..LATENT_SURVIVAL_PRIMARY_DIM {
+                        primary[[a, b]] +=
+                            outer_scale_prime * t_u * survival_gradient[a] * survival_gradient[b]
+                                + binary.outer_scale
+                                    * (g_u[a] * survival_gradient[b] + survival_gradient[a] * g_u[b]);
+                    }
+                }
+                let weighted_primary =
+                    checked_weighted_row_matrix(wi, &primary, row_idx, "binary contracted third")?;
+                self.add_pullback_primary_hessian(target, row_idx, &slices, &weighted_primary);
+            }
+        }
+        for axis in &out {
+            require_finite_likelihood_matrix(axis, "binary directional Hessian derivative")?;
+        }
+        Ok(out)
+    }
+
     fn exact_newton_joint_hessian_second_directional_derivative_dense(
         &self,
         block_states: &[ParameterBlockState],
@@ -7337,6 +7476,14 @@ impl LatentJointHessianFamily for LatentBinaryFamily {
         }
         require_finite_likelihood_vector(out, "binary Hessian matvec")?;
         Ok(true)
+    }
+
+    fn ws_dh_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        self.exact_newton_joint_hessian_directional_derivative_all_axes_dense(block_states)
+            .map(Some)
     }
 
     fn ws_label() -> &'static str {

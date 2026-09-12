@@ -689,6 +689,29 @@ impl CustomFamily for LatentBinaryFamily {
         .map(Some)
     }
 
+    /// All `p` axes of `exact_newton_joint_hessian_directional_derivative` from one
+    /// build of the row lifts (#2714). The latent-binary Jeffreys information is the
+    /// observed joint Hessian (trait default), so its all-axes derivative is exactly
+    /// this batch; the trait default sweeps the per-axis hook, one full row pass per
+    /// axis.
+    fn joint_jeffreys_information_directional_derivative_all_axes_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        // Same parallel-array precondition as the workspace hooks above.
+        if specs.len() != block_states.len() {
+            return Err(format!(
+                "joint_jeffreys_information_directional_derivative_all_axes_with_specs: {} \
+                 parameter-block specs for {} block states",
+                specs.len(),
+                block_states.len()
+            ));
+        }
+        self.exact_newton_joint_hessian_directional_derivative_all_axes_dense(block_states)
+            .map(Some)
+    }
+
     fn requires_joint_outer_hyper_path(&self) -> bool {
         true
     }

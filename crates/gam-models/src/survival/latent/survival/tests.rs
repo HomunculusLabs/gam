@@ -1259,6 +1259,58 @@
         );
     }
 
+    /// #2714: the latent-binary one-build all-axes Hessian derivative is the per-axis
+    /// sweep, `Hdot[e_a]` for every canonical axis, on the fixed-sigma binary fixture;
+    /// and the binary Hessian workspace serves it, where the trait default answered
+    /// `None` and sent every Jeffreys cycle through `p` per-axis row passes.
+    #[test]
+    fn latent_binary_all_axes_hessian_derivative_matches_per_axis_sweep_2714() {
+        let family = fixed_sigma_binary_test_family();
+        let beta = array![0.15, 0.25, 0.1, -0.15];
+        let states = latent_binary_states_from_joint_beta(&family, &beta);
+        let total = family.joint_slices().total;
+
+        let per_axis: Vec<Array2<f64>> = (0..total)
+            .map(|a| {
+                let mut axis = Array1::<f64>::zeros(total);
+                axis[a] = 1.0;
+                family
+                    .exact_newton_joint_hessian_directional_derivative_dense(&states, &axis)
+                    .expect("per-axis latent binary dH")
+            })
+            .collect();
+        let all_axes = family
+            .exact_newton_joint_hessian_directional_derivative_all_axes_dense(&states)
+            .expect("one-build latent binary dH");
+        assert_eq!(all_axes.len(), total);
+
+        let scale = per_axis
+            .iter()
+            .flat_map(|matrix| matrix.iter())
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let max_abs_diff = all_axes
+            .iter()
+            .zip(per_axis.iter())
+            .flat_map(|(left, right)| left.iter().zip(right.iter()))
+            .fold(0.0_f64, |acc, (left, right)| acc.max((left - right).abs()));
+        assert!(
+            scale > 1e-6,
+            "the per-axis binary sweep is too small to grade an agreement against: scale={scale:.3e}"
+        );
+        assert!(
+            max_abs_diff <= 1e-10 * scale,
+            "one-build latent binary dH disagrees with the per-axis sweep: \
+             max_abs_diff={max_abs_diff:.3e} against scale={scale:.3e}"
+        );
+
+        let workspace = LatentBinaryHessianWorkspace::new(family.clone(), states.clone());
+        let served = workspace
+            .directional_derivative_all_axes()
+            .expect("binary workspace all-axes dH evaluation")
+            .expect("the latent binary workspace must serve the batched derivative");
+        assert_eq!(served, all_axes);
+    }
+
     #[test]
     fn latent_binary_exact_joint_hessian_and_workspace_matvec_match_fd() {
         let family = fixed_sigma_binary_test_family();
