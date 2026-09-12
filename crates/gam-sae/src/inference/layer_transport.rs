@@ -918,16 +918,18 @@ impl FittedTransport {
                     ywrapped + TAU * m
                 }
             };
-            // Monotone bisection on the pre-wrap map over [lo, hi]; stop once
-            // the bracket is below the source-coordinate precision floor (f64
-            // bisection stagnates well before 100 iterations).
+            // Monotone bisection on the pre-wrap map over [lo, hi], down to the
+            // source coordinate's relative precision `ε·max(|lo|, |hi|)`. Float
+            // spacing inside the bracket is at most that, so each halving narrows it
+            // and about `log₂(2/ε)` passes suffice; the adjacency test only guards a
+            // collapsed midpoint.
             let (mut a, mut b) = (lo, hi);
-            let width_floor = f64::EPSILON * hi.abs().max(lo.abs()).max(1.0);
-            for _ in 0..100 {
-                if (b - a) <= width_floor {
+            let width_floor = f64::EPSILON * hi.abs().max(lo.abs());
+            while (b - a) > width_floor {
+                let mid = 0.5 * (a + b);
+                if mid <= a || mid >= b {
                     break;
                 }
-                let mid = 0.5 * (a + b);
                 let rm = raw_at_into(mid)?;
                 let go_right = if increasing { rm < target } else { rm > target };
                 if go_right {

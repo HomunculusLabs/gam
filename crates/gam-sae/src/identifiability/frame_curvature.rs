@@ -710,13 +710,10 @@ impl BlockPlusRowsSpectrum {
         if self.count_above(lo)? == 0 {
             return Ok(lo);
         }
-        // 100 halvings drives the bracket below any representable relative
-        // width; the loop exits on the width test long before that, and the
-        // bound only exists so a pathological counter cannot spin.
-        for _ in 0..100 {
-            if hi - lo <= f64::EPSILON * hi.abs().max(1.0) {
-                break;
-            }
+        // Bisect down to the relative width `ε·hi` (`hi > 0`, since the update is
+        // nonzero). `hi − lo ≤ hi` at entry, so at most `log₂(1/ε) + 1` halvings
+        // reach it; the adjacency test only guards a collapsed midpoint.
+        while hi - lo > f64::EPSILON * hi {
             let mid = lo + 0.5 * (hi - lo);
             if mid <= lo || mid >= hi {
                 break;
