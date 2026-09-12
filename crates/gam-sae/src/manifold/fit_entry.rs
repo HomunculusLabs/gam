@@ -53,7 +53,7 @@ use super::{
 };
 
 /// Hard cap on evidence-certified #2021 whitened-residual refit passes.
-pub const STRUCTURED_RESIDUAL_PASSES_MAX: usize = 4;
+pub(crate) const STRUCTURED_RESIDUAL_PASSES_MAX: usize = 4;
 
 fn validate_structured_residual_passes(passes: usize) -> Result<(), SaeFitError> {
     if passes > STRUCTURED_RESIDUAL_PASSES_MAX {

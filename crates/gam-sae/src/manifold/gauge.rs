@@ -93,7 +93,7 @@ pub struct AmplitudeConcentrationCertificate {
 impl AmplitudeConcentrationCertificate {
     /// `true` iff the certificate calls for promoting a radial latent axis: the
     /// amplitude is a continuous (radial) coordinate, not a binary presence.
-    pub fn recommends_radial_axis(&self) -> bool {
+    pub(crate) fn recommends_radial_axis(&self) -> bool {
         matches!(self.verdict, AmplitudeConcentration::Continuous)
     }
 }

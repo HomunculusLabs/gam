@@ -833,7 +833,7 @@ impl<'a> MultinomialPredictiveModel<'a> {
 /// `E[p_c]` come from two different ratios, so a negative difference means the
 /// two expansions disagree by more than the quantity being reported, which is
 /// exactly the situation in which a clamped `sd = 0` would be a lie.
-pub fn predictive_standard_deviation(
+pub(crate) fn predictive_standard_deviation(
     moments: &MultinomialPredictiveMoments,
 ) -> Result<Array2<f64>, EstimationError> {
     let second = moments.class_second_moment.as_ref().ok_or_else(|| {

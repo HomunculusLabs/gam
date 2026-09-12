@@ -198,7 +198,7 @@ fn centered_second_moment_chunk(
 /// Center `residual`, eigendecompose its second moment, and derive the MP floor
 /// context. `Ok(None)` when the residual has no above-floor direction (pure
 /// noise ⇒ the caller's natural stop) or is too small to carry structure.
-pub fn isa_eigen_parts(residual: ArrayView2<'_, f64>) -> Result<Option<IsaEigenParts>, String> {
+pub(crate) fn isa_eigen_parts(residual: ArrayView2<'_, f64>) -> Result<Option<IsaEigenParts>, String> {
     let (n, p) = residual.dim();
     if n < 2 || p == 0 {
         return Ok(None);

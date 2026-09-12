@@ -395,15 +395,15 @@ pub struct LatentBinaryFamily {
 }
 
 impl LatentSurvivalFamily {
-    pub const BLOCK_TIME: usize = 0;
-    pub const BLOCK_MEAN: usize = 1;
+    pub(crate) const BLOCK_TIME: usize = 0;
+    pub(crate) const BLOCK_MEAN: usize = 1;
     pub const BLOCK_LOG_SIGMA: usize = 2;
 
     pub fn parameter_names() -> &'static [&'static str] {
         &["time_transform", "mean"]
     }
 
-    pub fn parameter_links() -> &'static [ParameterLink] {
+    pub(crate) fn parameter_links() -> &'static [ParameterLink] {
         &[ParameterLink::Identity, ParameterLink::Identity]
     }
 
@@ -513,8 +513,8 @@ impl LatentSurvivalFamily {
 }
 
 impl LatentBinaryFamily {
-    pub const BLOCK_TIME: usize = 0;
-    pub const BLOCK_MEAN: usize = 1;
+    pub(crate) const BLOCK_TIME: usize = 0;
+    pub(crate) const BLOCK_MEAN: usize = 1;
 
     fn split_time_eta<'a>(
         &self,
@@ -617,7 +617,7 @@ struct LatentSurvivalTimeJet {
     neg_hess_exit: f64,
 }
 
-pub fn fit_latent_survival_terms(
+pub(crate) fn fit_latent_survival_terms(
     data: ArrayView2<'_, f64>,
     mut spec: LatentSurvivalTermSpec,
     frailty: FrailtySpec,
@@ -835,7 +835,7 @@ pub fn fit_latent_survival_terms(
     })
 }
 
-pub fn fit_latent_binary_terms(
+pub(crate) fn fit_latent_binary_terms(
     data: ArrayView2<'_, f64>,
     spec: LatentBinaryTermSpec,
     frailty: FrailtySpec,

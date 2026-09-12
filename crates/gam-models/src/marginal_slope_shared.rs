@@ -84,7 +84,7 @@ pub const fn eval_coeff4_at(coefficients: &[f64; 4], z: f64) -> f64 {
 }
 
 #[inline]
-pub fn add_scaled_coeff4(target: &mut [f64; 4], source: &[f64; 4], scale: f64) {
+pub(crate) fn add_scaled_coeff4(target: &mut [f64; 4], source: &[f64; 4], scale: f64) {
     for j in 0..4 {
         target[j] += scale * source[j];
     }
@@ -1363,7 +1363,7 @@ pub fn outer_row_weights_by_index(
 /// must restore feasibility by projecting onto that face — no smaller step can
 /// help, because `slack / -drift` is invariant under `direction -> c·direction`
 /// once its numerator is zero.
-pub fn feasible_step_fraction(
+pub(crate) fn feasible_step_fraction(
     constraints: &gam_problem::LinearInequalityConstraints,
     beta: &Array1<f64>,
     direction: &Array1<f64>,

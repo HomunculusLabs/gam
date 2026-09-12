@@ -5071,7 +5071,7 @@ pub struct PrimaryTopologyChoice {
 /// atom must produce an evidence-backed winner. Invalid inputs, undersupported
 /// clusters, or numerical failures are returned to the caller instead of
 /// silently substituting a different topology.
-pub fn discover_primary_atom_topologies(
+pub(crate) fn discover_primary_atom_topologies(
     target: ArrayView2<'_, f64>,
     labels: &[usize],
     k_atoms: usize,
@@ -6175,7 +6175,7 @@ fn select_torus_resolution(
 /// candidate that earned the evidence verdict. `geometry_overrides[k]` is the
 /// complete post-growth typed plan of an evidence winner; installing it is what
 /// preserves continuously selected reference metrics across seed construction.
-pub fn resolve_auto_primary_atoms(
+pub(crate) fn resolve_auto_primary_atoms(
     target: ArrayView2<'_, f64>,
     labels: &[usize],
     atom_basis: &mut [String],
@@ -6672,7 +6672,7 @@ const ESTIMATION_FRACTION: f64 = 0.6;
 /// rows (contiguous) are the estimation set, the remainder is partitioned into
 /// `n_shards` contiguous held-out evaluation blocks. Deterministic — contiguous
 /// blocks, no shuffle. Each shard shares the full target by reference.
-pub fn estimation_eval_split(target: ArrayView2<'_, f64>, n_shards: usize) -> EstimationEvalSplit {
+pub(crate) fn estimation_eval_split(target: ArrayView2<'_, f64>, n_shards: usize) -> EstimationEvalSplit {
     let n = target.nrows();
     if n == 0 {
         return EstimationEvalSplit {
@@ -6736,7 +6736,7 @@ impl StructureSearchResult {
     /// proposed residual-factor birth's `predicted_dl_bits` sits on the same
     /// migration record its post-refit verdict fills in.
     #[must_use]
-    pub fn from_rounds_with_predictions(
+    pub(crate) fn from_rounds_with_predictions(
         term: SaeManifoldTerm,
         rho: SaeManifoldRho,
         rounds: Vec<SearchLedger>,
@@ -7860,7 +7860,7 @@ pub fn run_production_structure_search(
 /// ran the search reports every birth, death and refusal in one currency, with
 /// its `pc_reseed_events` invariant (#2023). Byte-deterministic for identical
 /// inputs.
-pub fn rounds_to_json(
+pub(crate) fn rounds_to_json(
     rounds: &[SearchLedger],
     migration: &SaeMigrationLedger,
 ) -> Result<String, String> {

@@ -4015,7 +4015,7 @@ impl SaeManifoldTerm {
 
     /// The streaming exact criterion with the #2080 surrogate lane
     /// threaded to the streaming `log|S|` term (`None` = bit-identical SLQ).
-    pub fn penalized_quasi_laplace_criterion_streaming_exact_with_lane(
+    pub(crate) fn penalized_quasi_laplace_criterion_streaming_exact_with_lane(
         &mut self,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
@@ -5913,7 +5913,7 @@ impl SaeManifoldTerm {
         }
     }
 
-    pub fn outer_rho_gradient_ift_rhs(
+    pub(crate) fn outer_rho_gradient_ift_rhs(
         &self,
         rho: &SaeManifoldRho,
         j: usize,

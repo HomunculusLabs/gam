@@ -2167,7 +2167,7 @@ impl MultinomialSavedModel {
 
     /// The training frame, penalty and terminal precision this model carries, as
     /// the borrowed view [`crate::multinomial_predictive`] consumes.
-    pub fn predictive_model<'a>(
+    pub(crate) fn predictive_model<'a>(
         &'a self,
         training_design: ndarray::ArrayView2<'a, f64>,
         training_weights: ndarray::ArrayView1<'a, f64>,
@@ -2268,7 +2268,7 @@ impl MultinomialSavedModel {
     /// Default posterior-mean class probabilities. This integrates
     /// `softmax(eta)` under the per-row Gaussian predictor posterior rather than
     /// evaluating softmax at the coefficient mode.
-    pub fn predict_probabilities(
+    pub(crate) fn predict_probabilities(
         &self,
         x_new: ArrayView2<'_, f64>,
     ) -> Result<Array2<f64>, EstimationError> {
@@ -2476,7 +2476,7 @@ impl MultinomialSavedModel {
     /// The posterior mode in the stacked class-major order the joint covariance,
     /// the joint penalty and [`crate::multinomial_predictive`] all use:
     /// `θ[a·P + i] = β[i, a]`.
-    pub fn stacked_mode(&self) -> Result<Array1<f64>, EstimationError> {
+    pub(crate) fn stacked_mode(&self) -> Result<Array1<f64>, EstimationError> {
         let coefficients = self.coefficients_active()?;
         let p = self.p_per_class;
         let m = self.n_active_classes;
@@ -2669,7 +2669,7 @@ pub const MULTINOMIAL_MODEL_CLASS: &str = "multinomial";
 /// Exact multinomial persistence schema. Version 2 requires the canonical
 /// per-component lambda labels and training-table provenance; successful
 /// deserialization therefore yields a complete current model without repair.
-pub const MULTINOMIAL_MODEL_FORMAT_VERSION: u32 = 2;
+pub(crate) const MULTINOMIAL_MODEL_FORMAT_VERSION: u32 = 2;
 
 /// Round-trip persistence envelope for a fitted multinomial model. The
 /// `model_class` discriminator lets a loader tell a multinomial payload apart

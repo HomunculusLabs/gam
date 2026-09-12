@@ -1950,7 +1950,7 @@ fn inner_fit_from_certified_outer(
     .map_err(|error| error.to_string())
 }
 
-pub fn fit_bernoulli_marginal_slope_terms(
+pub(crate) fn fit_bernoulli_marginal_slope_terms(
     data: ArrayView2<'_, f64>,
     spec: BernoulliMarginalSlopeTermSpec,
     options: &BlockwiseFitOptions,

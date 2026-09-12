@@ -73,7 +73,7 @@ use faer::Side;
 /// The Kantorovich convergence threshold `h ≤ ½`. Below this the Newton
 /// iteration is guaranteed to converge quadratically into the unique root in
 /// the certified ball; at or above it the start is uncertified.
-pub const KANTOROVICH_THRESHOLD: f64 = 0.5;
+pub(crate) const KANTOROVICH_THRESHOLD: f64 = 0.5;
 
 /// Newton refinement convergence floor. Once a refinement step's length `‖δ‖`
 /// falls below this (relative to the coordinate scale `1 + ‖t‖`), the iterate has
@@ -2438,7 +2438,7 @@ impl EncodeAtlas {
     /// the certificate — and therefore the trust/fallback decision — is honest about
     /// the metric-and-prior objective the fit optimized. `EncodeObjective::euclidean`
     /// reproduces the metric-free distilled path exactly.
-    pub fn amortized_encode_row_with_objective(
+    pub(crate) fn amortized_encode_row_with_objective(
         &self,
         atom: &SaeManifoldAtom,
         atom_index: usize,

@@ -2164,7 +2164,7 @@ impl BernoulliMarginalSlopePredictor {
     /// Rigid, empirical, and flexible latent laws each supply both exact
     /// partials. In the flexible path `a_q = mu_q/F_a` and `a_b = -F_b/F_a`
     /// are the two implicit derivatives of the calibrated intercept.
-    pub fn predict_eta_and_time_tangent(
+    pub(crate) fn predict_eta_and_time_tangent(
         &self,
         input: &PredictInput,
         q_t: &Array1<f64>,

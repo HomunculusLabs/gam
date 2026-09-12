@@ -141,7 +141,7 @@ pub struct TransformationNormalFitResult {
 /// If no spatial length-scale terms are present in the covariate spec, the
 /// model is fit directly. Otherwise, the N-block joint hyper-parameter
 /// optimizer is used with a single block (the covariate spec).
-pub fn fit_transformation_normal(
+pub(crate) fn fit_transformation_normal(
     response: &Array1<f64>,
     weights: &Array1<f64>,
     offset: &Array1<f64>,
