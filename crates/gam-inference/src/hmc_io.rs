@@ -3717,7 +3717,7 @@ pub(crate) fn run_logit_polya_gamma_gibbs(
         }
         .into());
     }
-    if !weights.iter().all(|w| (*w - 1.0).abs() <= 1e-10) {
+    if !weights.iter().all(|w| *w == 1.0) {
         return Err(HmcError::InvalidConfig {
             reason: "run_logit_polya_gamma_gibbs requires unit weights (PG(1,·)); use NUTS for non-unit weights".to_string(),
         }
@@ -4392,7 +4392,7 @@ pub fn run_nuts_sampling_flattened_family(
             // we deliberately do not duplicate.
             if !glm.firth_bias_reduction
                 && glm.offset.is_none()
-                && glm.weights.iter().all(|w| (*w - 1.0).abs() <= 1e-10)
+                && glm.weights.iter().all(|w| *w == 1.0)
             {
                 run_logit_polya_gamma_gibbs(
                     glm.x,
@@ -5009,9 +5009,11 @@ fn cubic_power_iteration_refinement(
     };
 
     // Evaluate |gamma(u)| for whitened direction u.
+    // A direction normalizes exactly for every positive finite norm; only a zero
+    // (or non-finite) norm has no direction to evaluate or refine.
     let eval_gamma = |u: &Array1<f64>| -> f64 {
         let norm = u.dot(u).sqrt();
-        if norm < 1e-30 {
+        if !(norm > 0.0 && norm.is_finite()) {
             return 0.0;
         }
         let u_normed: Array1<f64> = u / norm;
@@ -5024,7 +5026,7 @@ fn cubic_power_iteration_refinement(
     // One step of Riemannian gradient ascent on the whitened sphere for |T[v,v,v]|.
     let refine_step = |u: &Array1<f64>| -> Array1<f64> {
         let norm = u.dot(u).sqrt();
-        if norm < 1e-30 {
+        if !(norm > 0.0 && norm.is_finite()) {
             return u.clone();
         }
         let u_normed: Array1<f64> = u / norm;
@@ -5042,7 +5044,7 @@ fn cubic_power_iteration_refinement(
         let step_size = 0.3;
         let mut u_new = &u_normed + &(&grad_u * (sign * step_size));
         let new_norm = u_new.dot(&u_new).sqrt();
-        if new_norm > 1e-30 {
+        if new_norm > 0.0 && new_norm.is_finite() {
             u_new /= new_norm;
         }
         u_new
