@@ -34,12 +34,13 @@
 //!    representation — the front door refuses any resident `N×K` alternative — so
 //!    the Tier-2 dictionary width must exceed the residual dimension.
 //!
-//! The unified [`SaeMigrationLedger`] records every retained curved atom as a
-//! chart promoted from the Tier-1 linear residual support (a curved birth seeded
-//! [`crate::migration_ledger::BirthSeed::LinearAtom`]), the atoms pruned for zero
-//! support mass as structural curved deaths, and the Tier-1 block deaths. The
-//! support-sparse lane prices complexity through its grouped-LAML smoothing, not a
-//! per-move description-length charge, so those curved moves carry no `dl_bits`.
+//! The unified [`SaeMigrationLedger`] records the Tier-1 block deaths, the
+//! code-space census's adjudicated promotions and refusals, and Tier-2's own
+//! account folded from its support fit: every curved atom born at the support
+//! seed from projections of the Tier-1 residual rows (the residual-factor pool),
+//! and the atoms that seed pruned for zero support mass. The support-sparse lane
+//! prices complexity through its grouped-LAML smoothing, not a per-move
+//! description-length charge, so those curved moves carry no `dl_bits`.
 //! `pc_reseed_events` is always `0` on this path.
 
 use ndarray::{Array1, Array2, ArrayView2, Axis};
@@ -334,6 +335,8 @@ pub struct Tier2SupportFit {
     pub retained_atoms: usize,
     /// Composed explained variance (`1 − RSS/TSS` of μ + L + C vs the Tier-0 mean).
     pub explained_variance: f64,
+    /// The support fit's own migration account: its seed births and prunings.
+    pub migration: SaeMigrationLedger,
 }
 
 /// The composed tiered fit.
@@ -592,39 +595,20 @@ fn fit_tier2_support(
         outer_iterations: fit.outer.outer_iterations,
         requested_atoms,
         explained_variance,
+        migration: fit.migration,
     })
 }
 
-/// Translate the Tier-2 support-sparse outcome into unified migration-ledger
-/// moves. Every retained curved atom is a chart promoted from the Tier-1 linear
-/// residual support ([`BirthSeed::LinearAtom`] — never a principal component, so
-/// the `pc_reseed_events` invariant holds by construction); the atoms pruned for
-/// zero support mass at the seed boundary are structural curved deaths
-/// ([`MoveReason::DeadRouting`]). The support-sparse lane prices complexity
-/// through its grouped-LAML smoothing rather than a per-move description-length
-/// charge, so the moves carry no `dl_bits` evidence (an unscored structural tally,
-/// not a fabricated charge).
+/// Fold the Tier-2 support fit's own migration account into the tiered ledger.
+///
+/// The support lane seeds each curved atom from projections of the Tier-1
+/// residual rows — the residual-factor pool — and prunes the atoms no row selected
+/// at that boundary, so its ledger is the account of Tier-2's births and deaths.
+/// The former tally re-recorded those births as promotions from linear atoms,
+/// which no seed in this lane is.
 fn record_support_moves(ledger: &mut SaeMigrationLedger, fit: &Tier2SupportFit) {
-    if fit.retained_atoms > 0 {
-        ledger.birth(
-            MoveStage::Curved,
-            BirthSeed::LinearAtom,
-            fit.retained_atoms,
-            Some(0),
-            MoveEvidence::none(),
-            fit.criterion,
-        );
-    }
-    let pruned = fit.requested_atoms - fit.retained_atoms;
-    if pruned > 0 {
-        ledger.death(
-            MoveStage::Curved,
-            MoveReason::DeadRouting,
-            pruned,
-            None,
-            MoveEvidence::none(),
-            fit.criterion,
-        );
+    for mv in &fit.migration.moves {
+        ledger.record(mv.clone());
     }
 }
 
