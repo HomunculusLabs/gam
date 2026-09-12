@@ -1499,6 +1499,65 @@ fn cli_request_document_marginal_slope_settings_reach_the_route() {
     );
 }
 
+/// `run_fit_multinomial` refused the settings a softmax fit cannot use by reading
+/// the flags, which conflict with `--request`. A request document's settings
+/// therefore got past those refusals. The refusal must be the same whichever entry
+/// point supplied the setting, and it comes before the data is read.
+#[test]
+fn cli_request_document_firth_is_refused_for_multinomial() {
+    let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let train_path = td.path().join("multinomial.csv");
+    let request_path = td.path().join("multinomial.request.json");
+    let model_path = td.path().join("multinomial.model.json");
+    fs::write(
+        &train_path,
+        "x,class\n-1.0,a\n0.0,b\n1.0,c\n-0.5,a\n0.5,b\n1.5,c\n",
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write multinomial csv", e));
+
+    let base = || {
+        let mut args = location_scale_fit_args(
+            train_path.clone(),
+            model_path.clone(),
+            "class ~ x",
+            "1",
+        );
+        args.predict_noise = None;
+        args.survival_likelihood = None;
+        args
+    };
+
+    // Control: the flags reach the refusal.
+    let mut flag_args = base();
+    flag_args.family = FamilyArg::Multinomial;
+    flag_args.firth = true;
+    let from_flags = run_fit(flag_args)
+        .expect_err("multinomial must refuse Firth")
+        .to_string();
+    assert!(
+        from_flags.contains("--firth is not accepted for --family multinomial"),
+        "unexpected refusal from flags: {from_flags}"
+    );
+
+    fs::write(
+        &request_path,
+        r#"{"schema":"gam.fit-request","schema_version":1,
+            "formula":"class ~ x",
+            "config":{"family":"multinomial","firth":true}}"#,
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write fit-request document", e));
+    let mut request_args = base();
+    request_args.request = Some(request_path.clone());
+    request_args.formula_positional = None;
+    let from_request = run_fit(request_args)
+        .expect_err("multinomial must refuse a request document's Firth setting")
+        .to_string();
+    assert!(
+        from_request.contains("--firth is not accepted for --family multinomial"),
+        "a --request document's firth must meet the multinomial refusal: {from_request}"
+    );
+}
+
 #[test]
 fn cli_surv_predict_noise_routes_to_survival_location_scale() {
     let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));

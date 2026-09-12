@@ -111,14 +111,16 @@ pub(crate) fn run_fit_multinomial(
     formula_text: &str,
     fit_config: &FitConfig,
 ) -> Result<(), String> {
-    // Surface-level flag rejections. The softmax link is fixed and the fit runs
+    // Refusals of settings the softmax family cannot use. They read the resolved
+    // configuration, so a `--request` document meets the same refusals as the flags.
+    // The softmax link is fixed and the fit runs
     // a single joint softmax likelihood, so the location-scale / marginal-slope
     // / link-deviation controls have no meaning here; reject rather than
     // silently ignore.
-    if args.predict_noise.is_some() {
+    if fit_config.noise_formula.is_some() {
         return Err("--predict-noise is not supported for --family multinomial".to_string());
     }
-    if args.slope_formula.is_some() || args.z_column.is_some() {
+    if fit_config.slope_formula.is_some() || fit_config.z_column.is_some() {
         return Err(
             "--slope-formula/--z-column is not supported for --family multinomial".to_string(),
         );
@@ -135,21 +137,21 @@ pub(crate) fn run_fit_multinomial(
     if parsed.linkwiggle.is_some() {
         return Err("linkwiggle(...) is not supported for --family multinomial".to_string());
     }
-    if args.firth {
+    if fit_config.firth {
         return Err(
             "--firth is not accepted for --family multinomial: the Firth/Jeffreys separation \
              stabilizer is armed automatically when the fit detects complete separation"
                 .to_string(),
         );
     }
-    if args.frailty_kind.is_some() || args.frailty_sd.is_some() || args.hazard_loading.is_some() {
+    if fit_config.frailty != gam::families::survival::lognormal_kernel::FrailtySpec::None {
         return Err("frailty options are not supported for --family multinomial".to_string());
     }
     // Case weights (`--weights-column` → `fit_config.weight_column`) are
     // honored by the shared driver; offsets and the other config fields the
     // softmax family cannot consume are rejected with a typed error inside
     // `fit_penalized_multinomial_formula`, shared with the Python surface.
-    if args.expectile_tau.is_some() {
+    if fit_config.expectile_tau.is_some() {
         return Err("--expectile-tau requires --family expectile".to_string());
     }
     let Some(out) = args.out.as_ref() else {
