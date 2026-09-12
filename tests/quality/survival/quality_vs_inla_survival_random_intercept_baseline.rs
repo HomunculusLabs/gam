@@ -990,12 +990,10 @@ fn baseline_cumulative_hazard(
     let degree = saved.degree.expect("saved ispline degree");
     let knots = Array1::from_vec(saved.knots.clone().expect("saved ispline knots"));
     let keep_cols = saved.keep_cols.clone().expect("saved ispline keep_cols");
-    let smooth_lambda = saved.smooth_lambda.expect("saved ispline smooth_lambda");
     let cfg = SurvivalTimeBasisConfig::ISpline {
         degree,
         knots,
         keep_cols,
-        smooth_lambda,
     };
 
     let time_cols = fit.time_base_ncols;

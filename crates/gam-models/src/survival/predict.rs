@@ -395,7 +395,6 @@ pub fn predict_latent_window_survival(
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )?;
     let time_anchor =
         model
@@ -2049,7 +2048,6 @@ pub fn predict_survival(
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )?;
     // Single-cause Weibull without a learned baseline timewiggle carries its
     // ENTIRE log-cumulative-hazard baseline in the fitted `[1, log t]` linear
@@ -2486,7 +2484,6 @@ pub fn predict_competing_risks_survival(
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )?;
     // See the single-cause `predict_survival` note: per-cause Weibull baselines
     // (no learned timewiggle) live in the anchor-centered linear time-basis
@@ -3666,7 +3663,6 @@ fn predict_survival_location_scale_batch(
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )?;
     let time_anchor = model
         .survival_time_anchor

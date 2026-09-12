@@ -2162,7 +2162,6 @@ fn payload_for_survival_marginal_slope(
             &fit_config.time_basis,
             fit_config.time_degree,
             fit_config.time_num_internal_knots,
-            fit_config.time_smooth_lambda,
         )?
     };
     // Re-derivation, so it must ask the same question the fit asked — including
@@ -2178,10 +2177,7 @@ fn payload_for_survival_marginal_slope(
         &age_entry,
         &age_exit,
         time_cfg,
-        Some((
-            fit_config.time_num_internal_knots,
-            fit_config.time_smooth_lambda,
-        )),
+        Some(fit_config.time_num_internal_knots),
     )?;
     let timewiggle = match (
         ms_result.time_wiggle_knots.as_ref(),

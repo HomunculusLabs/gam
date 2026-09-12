@@ -6047,5 +6047,13 @@
     ],
     "reason": "#2897, SPEC rules 23 and 25. OuterDerivativePolicy carried predicted_gradient_work and predicted_hessian_work. 7fbdcd955 removed should_use_staged_kappa, their last decision reader, so only one diagnostic log line read them. Their cost model goes with them: default_outer_derivative_policy_costs, its helper outer_coord_dim_for_policy, and the BMS, survival marginal-slope and CTN outer_derivative_policy overrides. Each override computed the same capability as the trait default plus a private work model.",
     "evidence": "At base 45e58748, git grep -n -w predicted_gradient_work and predicted_hessian_work over crates, src, tests, examples and python find field constructions in the trait default, bms, survival marginal slope, survival location-scale, gamlss builders, transformation normal and one test literal; and two calibration comments. The only read is the derivative-policy log in gam-custom-family fit.rs. default_outer_derivative_policy_costs is called by the trait default, bms and survival marginal slope, and outer_coord_dim_for_policy only by default_outer_derivative_policy_costs. Each removed override starts with let capability = self.exact_outer_derivative_order(specs, options), which is exactly the default. Compile is covered by the lead shared tip check."
+  },
+  {
+    "base": "6f8d3dcad8722e2a43430140f58ac5a0c7c10b2c",
+    "items": [
+      "crates/gam-models/src/survival/construction.rs:const:SURVIVAL_TIME_SMOOTH_LAMBDA_SEED"
+    ],
+    "reason": "#2469 (SPEC rules 22 and 25): SURVIVAL_TIME_SMOOTH_LAMBDA_SEED (1e-2) filled a missing smooth_lambda when a survival time-basis config was resolved from a build. After 790e62703 every survival time block seeds its REML search from its own design and penalty scale, so nothing reads smooth_lambda. This commit deletes the whole carrier chain (FitConfig::time_smooth_lambda, the config, build and saved-snapshot fields, FittedModelPayload::survival_time_smooth_lambda, and the parser and resolver parameters) and the constant with it.",
+    "evidence": "At the base, git grep -n -w SURVIVAL_TIME_SMOOTH_LAMBDA_SEED finds three lines, all in crates/gam-models/src/survival/construction.rs: the private declaration and its two uses in resolved_survival_time_basis_config_from_build (bspline and ispline arms). Both uses are removed with the smooth_lambda field they filled. After the edit, every call of build_survival_time_basis (36), parse_survival_time_basis_config (8) and resolved_survival_time_basis_config_from_build (27) across crates and tests was re-checked for arity. Not compiled or run locally (user directive)."
   }
 ]

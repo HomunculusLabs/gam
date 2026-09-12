@@ -256,7 +256,6 @@ fn gam_weibull_survival_out_of_sample_quality_on_veteran_lung() {
         fit.time_basis.degree,
         fit.time_basis.knots.as_ref(),
         fit.time_basis.keep_cols.as_ref(),
-        fit.time_basis.smooth_lambda,
     )
     .expect("resolve frozen survival time-basis config");
     let anchor_row = evaluate_survival_time_basis_row(fit.time_basis.anchor, &time_cfg)
@@ -571,7 +570,6 @@ fn gam_weibull_survival_out_of_sample_quality_on_veteran_lung_on_real_data() {
         fit.time_basis.degree,
         fit.time_basis.knots.as_ref(),
         fit.time_basis.keep_cols.as_ref(),
-        fit.time_basis.smooth_lambda,
     )
     .expect("resolve frozen survival time-basis config");
     let anchor_row = evaluate_survival_time_basis_row(fit.time_basis.anchor, &time_cfg)

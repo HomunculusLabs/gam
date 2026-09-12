@@ -178,7 +178,6 @@ fn build_saved_cause_specific_survival_alo_input(
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )?;
     // The fit centers every non-empty survival time design at its persisted
     // anchor, independent of likelihood mode. ALO must replay that same affine
@@ -489,7 +488,6 @@ fn build_saved_marginal_slope_survival_alo_input(
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )?;
     let anchor_row = evaluate_survival_time_basis_row(anchor, &resolved_time_config)?;
     center_survival_time_designs_at_anchor(
@@ -775,7 +773,6 @@ fn build_saved_location_scale_survival_alo_input(
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )?;
     let anchor_row = evaluate_survival_time_basis_row(anchor, &resolved_time_config)?;
     center_survival_time_designs_at_anchor(
@@ -1572,7 +1569,6 @@ fn build_saved_latent_window_alo_input(
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )?;
     let anchor_row = evaluate_survival_time_basis_row(anchor, &resolved_time_config)?;
     center_survival_time_designs_at_anchor(
@@ -2132,7 +2128,6 @@ pub(crate) fn run_predict_survival(
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )?;
     // The fit centers every non-empty time design, so prediction does too. The
     // former likelihood-mode allow-list omitted Transformation and evaluated

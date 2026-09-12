@@ -383,7 +383,6 @@ fn resolve_training_time_basis(
         degree: 3,
         knots: Array1::zeros(0),
         keep_cols: Vec::new(),
-        smooth_lambda: 1e-2,
     };
     let time_build = build_survival_time_basis(
         train_entry,
@@ -391,7 +390,7 @@ fn resolve_training_time_basis(
         cfg,
         // Must match the FitConfig's time_num_internal_knots so the resolved
         // basis (knots + keep_cols) agrees with what the training engine used.
-        Some((time_num_internal_knots, 1e-2)),
+        Some(time_num_internal_knots),
     )
     .expect("resolve training survival time basis");
     let resolved_cfg = resolved_survival_time_basis_config_from_build(
@@ -399,7 +398,6 @@ fn resolve_training_time_basis(
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )
     .expect("resolve survival time basis config");
     let anchor = resolve_survival_time_anchor_for_mode(

@@ -153,7 +153,6 @@ pub enum SurvivalTimeBasisConfig {
     BSpline {
         degree: usize,
         knots: Array1<f64>,
-        smooth_lambda: f64,
     },
     /// I-spline value rows on the `log(t)` axis with non-negative
     /// coefficients (`γ ≥ 0`) enforcing structural monotonicity of
@@ -196,7 +195,6 @@ pub enum SurvivalTimeBasisConfig {
         degree: usize,
         knots: Array1<f64>,
         keep_cols: Vec<usize>,
-        smooth_lambda: f64,
     },
 }
 
@@ -219,7 +217,6 @@ pub struct SavedSurvivalTimeBasis {
     pub degree: Option<usize>,
     pub knots: Option<Vec<f64>>,
     pub keep_cols: Option<Vec<usize>>,
-    pub smooth_lambda: Option<f64>,
     pub anchor: f64,
 }
 
@@ -232,7 +229,6 @@ impl SavedSurvivalTimeBasis {
             degree: build.degree,
             knots: build.knots.clone(),
             keep_cols: build.keep_cols.clone(),
-            smooth_lambda: build.smooth_lambda,
             anchor,
         }
     }
@@ -250,19 +246,9 @@ pub struct SurvivalTimeBuildOutput {
     pub degree: Option<usize>,
     pub knots: Option<Vec<f64>>,
     pub keep_cols: Option<Vec<usize>>,
-    pub smooth_lambda: Option<f64>,
 }
 
 pub const SURVIVAL_TIME_FLOOR: f64 = 1e-9;
-
-/// Seed smoothing penalty `λ` used when a survival time basis is reconstructed
-/// from a build (or saved model) that did not carry an explicit `smooth_lambda`.
-/// This is only an initial value for the REML smoothing search, not a fixed
-/// policy: a small positive seed keeps the baseline spline lightly regularized
-/// at the start so the outer optimizer begins from a well-conditioned point and
-/// then adapts `λ` to the data. Kept in one place so the b-spline and i-spline
-/// reconstruction paths cannot drift apart.
-const SURVIVAL_TIME_SMOOTH_LAMBDA_SEED: f64 = 1e-2;
 
 /// Default initial Gompertz / Gompertz-Makeham shape parameter when the user
 /// does not supply `--baseline-shape`. The Gompertz hazard is
@@ -938,7 +924,6 @@ pub fn parse_survival_time_basis_config(
     time_basis: &str,
     time_degree: usize,
     time_num_internal_knots: usize,
-    time_smooth_lambda: f64,
 ) -> Result<SurvivalTimeBasisConfig, String> {
     match time_basis.to_ascii_lowercase().as_str() {
         "none" => Ok(SurvivalTimeBasisConfig::None),
@@ -955,20 +940,10 @@ pub fn parse_survival_time_basis_config(
                         .to_string(),
                 );
             }
-            if !time_smooth_lambda.is_finite() || time_smooth_lambda < 0.0 {
-                return Err(
-                    "time-basis smoothing lambda must be finite and >= 0; it is \
-                     the REML seed for the time block (FitConfig::time_smooth_lambda, \
-                     default 1e-2), carried on a saved model as \
-                     survival_time_smooth_lambda -- no user surface sets it"
-                        .to_string(),
-                );
-            }
             Ok(SurvivalTimeBasisConfig::ISpline {
                 degree: time_degree,
                 knots: Array1::zeros(0),
                 keep_cols: Vec::new(),
-                smooth_lambda: time_smooth_lambda,
             })
         }
         "linear" | "bspline" => {
@@ -1001,7 +976,7 @@ pub fn build_survival_time_basis(
     age_entry: &Array1<f64>,
     age_exit: &Array1<f64>,
     cfg: SurvivalTimeBasisConfig,
-    infer_knots_if_needed: Option<(usize, f64)>,
+    infer_knots_if_needed: Option<usize>,
 ) -> Result<SurvivalTimeBuildOutput, String> {
     fn checked_log_survival_times(times: &Array1<f64>, label: &str) -> Result<Array1<f64>, String> {
         if let Some(row) = times.iter().position(|t| !t.is_finite()) {
@@ -1316,7 +1291,6 @@ pub fn build_survival_time_basis(
             degree: None,
             knots: None,
             keep_cols: None,
-            smooth_lambda: None,
         }),
         SurvivalTimeBasisConfig::Linear => {
             // Single column `log t` — the Weibull baseline slope (shape). The
@@ -1350,16 +1324,14 @@ pub fn build_survival_time_basis(
                 degree: None,
                 knots: None,
                 keep_cols: None,
-                smooth_lambda: None,
             })
         }
         SurvivalTimeBasisConfig::BSpline {
             degree,
             knots,
-            smooth_lambda,
         } => {
             let knotvec = if knots.is_empty() {
-                let (num_internal_knots, _) = infer_knots_if_needed.ok_or_else(|| {
+                let num_internal_knots = infer_knots_if_needed.ok_or_else(|| {
                     "internal error: bspline time basis requested without knot source".to_string()
                 })?;
                 let combined = survival_time_knot_input(&log_entry, &log_exit);
@@ -1459,14 +1431,12 @@ pub fn build_survival_time_basis(
                 degree: Some(degree),
                 knots: Some(knotvec.to_vec()),
                 keep_cols: None,
-                smooth_lambda: Some(smooth_lambda),
             })
         }
         SurvivalTimeBasisConfig::ISpline {
             degree,
             knots,
             keep_cols,
-            smooth_lambda,
         } => {
             let requested_bspline_degree = degree
                 .checked_add(1)
@@ -1484,7 +1454,7 @@ pub fn build_survival_time_basis(
             // An explicit knot vector is the user's own geometry and is never
             // re-derived, so it keeps the requested degrees.
             let (knotvec, degree, bspline_degree) = if knots.is_empty() {
-                let (num_internal_knots, _) = infer_knots_if_needed.ok_or_else(|| {
+                let num_internal_knots = infer_knots_if_needed.ok_or_else(|| {
                     "internal error: ispline time basis requested without knot source".to_string()
                 })?;
                 let combined = survival_time_knot_input(&log_entry, &log_exit);
@@ -1905,7 +1875,6 @@ pub fn build_survival_time_basis(
                 degree: Some(degree),
                 knots: Some(knotvec.to_vec()),
                 keep_cols: Some(keep_cols),
-                smooth_lambda: Some(smooth_lambda),
             })
         }
     }
@@ -1916,7 +1885,6 @@ pub fn resolved_survival_time_basis_config_from_build(
     degree: Option<usize>,
     knots: Option<&Vec<f64>>,
     keep_cols: Option<&Vec<usize>>,
-    smooth_lambda: Option<f64>,
 ) -> Result<SurvivalTimeBasisConfig, String> {
     match basisname {
         "none" => Ok(SurvivalTimeBasisConfig::None),
@@ -1928,7 +1896,6 @@ pub fn resolved_survival_time_basis_config_from_build(
                     .cloned()
                     .ok_or_else(|| "survival bspline basis is missing knots".to_string())?,
             ),
-            smooth_lambda: smooth_lambda.unwrap_or(SURVIVAL_TIME_SMOOTH_LAMBDA_SEED),
         }),
         "ispline" => Ok(SurvivalTimeBasisConfig::ISpline {
             degree: degree.ok_or_else(|| "survival ispline basis is missing degree".to_string())?,
@@ -1940,7 +1907,6 @@ pub fn resolved_survival_time_basis_config_from_build(
             keep_cols: keep_cols
                 .cloned()
                 .ok_or_else(|| "survival ispline basis is missing keep_cols".to_string())?,
-            smooth_lambda: smooth_lambda.unwrap_or(SURVIVAL_TIME_SMOOTH_LAMBDA_SEED),
         }),
         other => Err(format!("unsupported survival time basis '{other}'")),
     }
@@ -4781,9 +4747,8 @@ mod tests {
                 degree: 3,
                 knots: Array1::zeros(0),
                 keep_cols: Vec::new(),
-                smooth_lambda: 1e-2,
             },
-            Some((4, 1e-2)),
+            Some(4),
         )
         .expect("build survival time basis");
         let resolved = resolved_survival_time_basis_config_from_build(
@@ -4791,7 +4756,6 @@ mod tests {
             build.degree,
             build.knots.as_ref(),
             build.keep_cols.as_ref(),
-            build.smooth_lambda,
         )
         .expect("resolve time basis config");
 
@@ -4924,9 +4888,8 @@ mod tests {
                 degree: requested_degree,
                 knots: Array1::zeros(0),
                 keep_cols: Vec::new(),
-                smooth_lambda: 1e-2,
             },
-            Some((num_internal_knots, 1e-2)),
+            Some(num_internal_knots),
         )
         .expect("automatic cubic ispline with one interior knot builds");
 
@@ -4985,7 +4948,6 @@ mod tests {
                 degree: 2,
                 knots: knots.clone(),
                 keep_cols: Vec::new(),
-                smooth_lambda: 1e-2,
             },
             None,
         )
@@ -5011,7 +4973,6 @@ mod tests {
                 degree: 2,
                 knots,
                 keep_cols: keep_cols.clone(),
-                smooth_lambda: 1e-2,
             },
             None,
         )
@@ -6715,9 +6676,8 @@ mod tests {
                 degree: 3,
                 knots: Array1::zeros(0),
                 keep_cols: Vec::new(),
-                smooth_lambda: 1.0,
             },
-            Some((3, 1.0)),
+            Some(3),
         )
         .expect("ispline time basis builds");
         let resolved = resolved_survival_time_basis_config_from_build(
@@ -6725,7 +6685,6 @@ mod tests {
             build.degree,
             build.knots.as_ref(),
             build.keep_cols.as_ref(),
-            build.smooth_lambda,
         )
         .expect("resolved ispline config");
 
@@ -6833,9 +6792,8 @@ mod tests {
                 degree: 3,
                 knots: Array1::zeros(0),
                 keep_cols: Vec::new(),
-                smooth_lambda: 1.0,
             },
-            Some((3, 1.0)),
+            Some(3),
         )
         .expect("ispline time basis builds");
         let entry = build.x_entry_time.to_dense();
@@ -6883,9 +6841,8 @@ mod tests {
                 degree: 3,
                 knots: Array1::zeros(0),
                 keep_cols: Vec::new(),
-                smooth_lambda: 1.0,
             },
-            Some((3, 1.0)),
+            Some(3),
         )
         .expect("ispline time basis builds");
         let resolved = resolved_survival_time_basis_config_from_build(
@@ -6893,7 +6850,6 @@ mod tests {
             build.degree,
             build.knots.as_ref(),
             build.keep_cols.as_ref(),
-            build.smooth_lambda,
         )
         .expect("resolved ispline config");
         let anchor_at_origin = evaluate_survival_time_basis_row(0.0, &resolved)

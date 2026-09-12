@@ -274,7 +274,6 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
                     &effective_config.time_basis,
                     effective_config.time_degree,
                     effective_config.time_num_internal_knots,
-                    effective_config.time_smooth_lambda,
                 )?
             }
         }
@@ -459,17 +458,13 @@ pub(crate) fn run_survival(args: SurvivalArgs) -> Result<(), String> {
         &age_entry,
         &age_exit,
         time_basis_cfg,
-        Some((
-            effective_config.time_num_internal_knots,
-            effective_config.time_smooth_lambda,
-        )),
+        Some(effective_config.time_num_internal_knots),
     )?;
     let resolved_time_cfg = resolved_survival_time_basis_config_from_build(
         &time_build.basisname,
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )?;
     let time_anchor_row = evaluate_survival_time_basis_row(time_anchor, &resolved_time_cfg)?;
     if likelihood_mode != SurvivalLikelihoodMode::Weibull && !learn_timewiggle {

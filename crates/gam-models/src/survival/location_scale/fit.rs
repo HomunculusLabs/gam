@@ -510,7 +510,7 @@ pub(crate) fn fit_survival_location_scale_terms(
         // carries penalties: it fell through to the weak default time seed and
         // its exact-joint outer search crawled the flat time ridge forever.
         //
-        // Seeding the weak default (`time_smooth_lambda ≈ 1e-2`) drops the
+        // Seeding the weak default (a fixed `1e-2` time seed) drops the
         // inner REML search into the *interior* of that ridge, where it crawls
         // toward the strong-smoothing boundary one short, ill-conditioned step
         // at a time and never terminates in reasonable time (#736, #735, #721).

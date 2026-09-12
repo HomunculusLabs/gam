@@ -497,7 +497,6 @@ pub struct FitConfig {
     pub time_basis: String,
     pub time_degree: usize,
     pub time_num_internal_knots: usize,
-    pub time_smooth_lambda: f64,
     /// Survival likelihood mode: `Some("transformation" | "location-scale" |
     /// "weibull" | "marginal-slope" | "latent" | "latent-binary")`, or `None`
     /// (the default), which resolves to `"transformation"` at the `Surv(...)`
@@ -726,7 +725,6 @@ impl Default for FitConfig {
             time_basis: "ispline".into(),
             time_degree: 3,
             time_num_internal_knots: 8,
-            time_smooth_lambda: 1e-2,
             survival_likelihood: None,
             survival_time_anchor: None,
             survival_distribution: "gaussian".into(),

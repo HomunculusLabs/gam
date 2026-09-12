@@ -586,8 +586,6 @@ pub struct FittedModelPayload {
     #[serde(default)]
     pub survival_time_keep_cols: Option<Vec<usize>>,
     #[serde(default)]
-    pub survival_time_smooth_lambda: Option<f64>,
-    #[serde(default)]
     pub survival_time_anchor: Option<f64>,
     #[serde(default)]
     pub survival_likelihood: Option<String>,
@@ -927,7 +925,6 @@ impl FittedModelPayload {
             survival_time_degree: None,
             survival_time_knots: None,
             survival_time_keep_cols: None,
-            survival_time_smooth_lambda: None,
             survival_time_anchor: None,
             survival_likelihood: None,
             survival_location_scale_structure: None,
@@ -1001,7 +998,6 @@ impl FittedModelPayload {
         self.survival_time_degree = snapshot.degree;
         self.survival_time_knots = snapshot.knots.clone();
         self.survival_time_keep_cols = snapshot.keep_cols.clone();
-        self.survival_time_smooth_lambda = snapshot.smooth_lambda;
         self.survival_time_anchor = Some(snapshot.anchor);
     }
 
@@ -5666,10 +5662,6 @@ impl FittedModel {
             ("survival_baseline_shape", self.survival_baseline_shape),
             ("survival_baseline_rate", self.survival_baseline_rate),
             ("survival_baseline_makeham", self.survival_baseline_makeham),
-            (
-                "survival_time_smooth_lambda",
-                self.survival_time_smooth_lambda,
-            ),
             ("survival_time_anchor", self.survival_time_anchor),
         ] {
             if let Some(v) = opt {
@@ -5824,7 +5816,6 @@ pub fn load_survival_time_basis_config_from_model(
                     reason: "saved survival bspline model missing survival_time_knots".to_string(),
                 }
             })?;
-            let smooth_lambda = model.survival_time_smooth_lambda.unwrap_or(1e-2);
             if degree < 1 || knots.is_empty() {
                 return Err(FittedModelError::SchemaMismatch {
                     reason: "saved survival bspline time basis metadata is invalid".to_string(),
@@ -5833,7 +5824,6 @@ pub fn load_survival_time_basis_config_from_model(
             Ok(SurvivalTimeBasisConfig::BSpline {
                 degree,
                 knots: Array1::from_vec(knots),
-                smooth_lambda,
             })
         }
         "ispline" => {
@@ -5855,7 +5845,6 @@ pub fn load_survival_time_basis_config_from_model(
                         .to_string(),
                 }
             })?;
-            let smooth_lambda = model.survival_time_smooth_lambda.unwrap_or(1e-2);
             if degree < 1 || knots.is_empty() || keep_cols.is_empty() {
                 return Err(FittedModelError::SchemaMismatch {
                     reason: "saved survival ispline time basis metadata is invalid".to_string(),
@@ -5865,7 +5854,6 @@ pub fn load_survival_time_basis_config_from_model(
                 degree,
                 knots: Array1::from_vec(knots),
                 keep_cols,
-                smooth_lambda,
             })
         }
         other => Err(FittedModelError::IncompatibleConfig {
@@ -6930,7 +6918,6 @@ mod tests {
             degree: Some(3),
             knots: Some(vec![0.0, 1.0, 2.0]),
             keep_cols: Some(vec![0, 2]),
-            smooth_lambda: Some(0.5),
             anchor: 0.25,
         };
         payload.apply_survival_time_basis(&snapshot);
@@ -6942,7 +6929,6 @@ mod tests {
         assert_eq!(payload.survival_time_degree, Some(3));
         assert_eq!(payload.survival_time_knots, Some(vec![0.0, 1.0, 2.0]));
         assert_eq!(payload.survival_time_keep_cols, Some(vec![0, 2]));
-        assert_eq!(payload.survival_time_smooth_lambda, Some(0.5));
         assert_eq!(payload.survival_time_anchor, Some(0.25));
     }
 

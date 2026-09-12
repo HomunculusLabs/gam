@@ -326,7 +326,6 @@ pub(crate) fn materialize_survival<'a>(
             &config.time_basis,
             config.time_degree,
             config.time_num_internal_knots,
-            config.time_smooth_lambda,
         )?
     };
     // The one anchor rule, shared with every other front end — see
@@ -345,7 +344,7 @@ pub(crate) fn materialize_survival<'a>(
         &age_entry,
         &age_exit,
         time_cfg.clone(),
-        Some((config.time_num_internal_knots, config.time_smooth_lambda)),
+        Some(config.time_num_internal_knots),
     )?;
     if survival_mode != SurvivalLikelihoodMode::Weibull && effective_timewiggle.is_none() {
         require_structural_survival_time_basis(&time_build.basisname, "workflow survival fitting")?;
@@ -355,7 +354,6 @@ pub(crate) fn materialize_survival<'a>(
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )?;
     let time_anchor_row = evaluate_survival_time_basis_row(time_anchor, &resolved_time_cfg)?;
     center_survival_time_designs_at_anchor(
@@ -375,7 +373,7 @@ pub(crate) fn materialize_survival<'a>(
             &age_entry,
             age_right,
             resolved_time_cfg.clone(),
-            Some((config.time_num_internal_knots, config.time_smooth_lambda)),
+            Some(config.time_num_internal_knots),
         )?;
         center_survival_time_designs_at_anchor(
             &mut build_right.x_entry_time,

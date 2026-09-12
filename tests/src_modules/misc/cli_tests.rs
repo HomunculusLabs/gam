@@ -5226,7 +5226,6 @@ fn parse_survival_time_basis_accepts_ispline() {
         &args.time_basis,
         args.time_degree,
         args.time_num_internal_knots,
-        gam::families::fit_orchestration::FitConfig::default().time_smooth_lambda,
     )
     .unwrap_or_else(|e| panic!("{} failed: {:?}", "parse ispline time basis", e));
     assert!(matches!(cfg, SurvivalTimeBasisConfig::ISpline { .. }));
@@ -5276,7 +5275,6 @@ fn parse_survival_time_basis_rejects_nonstructural_bases() {
         &args.time_basis,
         args.time_degree,
         args.time_num_internal_knots,
-        gam::families::fit_orchestration::FitConfig::default().time_smooth_lambda,
     )
     .expect_err("linear survival time basis should be rejected");
     assert!(err.contains("structural"));
@@ -5288,7 +5286,6 @@ fn parse_survival_time_basis_rejects_nonstructural_bases() {
         &args.time_basis,
         args.time_degree,
         args.time_num_internal_knots,
-        gam::families::fit_orchestration::FitConfig::default().time_smooth_lambda,
     )
     .expect_err("bspline survival time basis should be rejected");
     assert!(err.contains("structural"));
@@ -5594,7 +5591,6 @@ fn saved_survival_marginal_slope_predictor_keeps_operator_backed_designs_lazy() 
         degree: Some(1),
         knots: None,
         keep_cols: None,
-        smooth_lambda: None,
     };
     let fit_saved = compact_saved_multiblock_fit_result(
         vec![
@@ -5885,7 +5881,6 @@ fn saved_survival_marginal_slope_prediction_replays_latent_z_normalization() {
         degree: Some(1),
         knots: None,
         keep_cols: None,
-        smooth_lambda: None,
     };
     let cov_design = DesignMatrix::from(Array2::<f64>::zeros((1, 0)));
     let slope_design = DesignMatrix::from(array![[1.0]]);
@@ -6154,13 +6149,12 @@ fn run_predict_survival_supports_saved_latent_survival_model() {
         degree: 2,
         knots: Array1::zeros(0),
         keep_cols: Vec::new(),
-        smooth_lambda: 1e-4,
     };
     let time_build = gam::families::survival::construction::build_survival_time_basis(
         &age_entry,
         &age_exit,
         time_cfg,
-        Some((2, 1e-4)),
+        Some(2),
     )
     .unwrap_or_else(|e| {
         panic!(
@@ -6224,7 +6218,6 @@ fn run_predict_survival_supports_saved_latent_survival_model() {
     payload.survival_time_degree = time_build.degree;
     payload.survival_time_knots = time_build.knots.clone();
     payload.survival_time_keep_cols = time_build.keep_cols.clone();
-    payload.survival_time_smooth_lambda = Some(1e-4);
     payload.survival_time_anchor = Some(time_anchor);
     payload.survival_beta_time = Some(vec![0.0; p_time]);
     payload.survival_likelihood = Some("latent".to_string());
@@ -7131,7 +7124,6 @@ fn structural_survival_fit_is_time_unit_invariant() {
                 degree: 2,
                 knots,
                 keep_cols: Vec::new(),
-                smooth_lambda: 5e-1,
             },
             None,
         )
@@ -7573,9 +7565,8 @@ fn survival_time_basis_inference_rejects_nonfinite_times_before_knot_retry() {
         SurvivalTimeBasisConfig::BSpline {
             degree: 3,
             knots: Array1::zeros(0),
-            smooth_lambda: 1e-2,
         },
-        Some((4, 1e-6)),
+        Some(4),
     ) {
         Ok(_) => panic!("non-finite times should not retry through uniform knots"),
         Err(err) => err,
@@ -7628,9 +7619,8 @@ fn survival_time_basis_rejects_reversed_intervals_before_basis_construction() {
         SurvivalTimeBasisConfig::BSpline {
             degree: 3,
             knots: Array1::zeros(0),
-            smooth_lambda: 1e-2,
         },
-        Some((4, 1e-6)),
+        Some(4),
     ) {
         Ok(_) => panic!("exit before entry should fail"),
         Err(err) => err,
@@ -7649,9 +7639,8 @@ fn survival_time_basiszerowidth_data_surfaces_range_errorwithout_uniform_retry()
         SurvivalTimeBasisConfig::BSpline {
             degree: 3,
             knots: Array1::zeros(0),
-            smooth_lambda: 1e-2,
         },
-        Some((4, 1e-6)),
+        Some(4),
     ) {
         Ok(_) => panic!("zero-width time support should fail"),
         Err(err) => err,
@@ -7673,7 +7662,6 @@ fn ispline_time_basis_reuses_saved_keep_cols_on_narrow_prediction_range() {
             degree: 2,
             knots: knots.clone(),
             keep_cols: Vec::new(),
-            smooth_lambda: 1e-2,
         },
         None,
     )
@@ -7691,7 +7679,6 @@ fn ispline_time_basis_reuses_saved_keep_cols_on_narrow_prediction_range() {
                 .keep_cols
                 .clone()
                 .unwrap_or_else(|| panic!("{} failed", "saved keep cols")),
-            smooth_lambda: 1e-2,
         },
         None,
     )

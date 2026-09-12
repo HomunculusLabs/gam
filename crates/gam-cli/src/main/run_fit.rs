@@ -1665,7 +1665,6 @@ pub(crate) fn validate_fit_args_preflight(
                     &fit_config.time_basis,
                     fit_config.time_degree,
                     fit_config.time_num_internal_knots,
-                    fit_config.time_smooth_lambda,
                 )?;
             }
         }
@@ -1783,7 +1782,6 @@ pub(crate) fn validate_fit_args_preflight(
             &fit_config.time_basis,
             fit_config.time_degree,
             fit_config.time_num_internal_knots,
-            fit_config.time_smooth_lambda,
         )?;
     }
     Ok(())

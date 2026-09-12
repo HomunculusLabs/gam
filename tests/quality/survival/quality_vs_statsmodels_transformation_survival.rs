@@ -245,7 +245,6 @@ fn gam_transformation_survival_prediction_grid_matches_scipy() {
         fit.time_basis.degree,
         fit.time_basis.knots.as_ref(),
         fit.time_basis.keep_cols.as_ref(),
-        fit.time_basis.smooth_lambda,
     )
     .expect("resolve frozen survival time-basis config");
     let anchor_row = evaluate_survival_time_basis_row(fit.time_basis.anchor, &time_cfg)

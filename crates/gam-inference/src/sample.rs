@@ -1341,7 +1341,6 @@ fn sample_survival(
         time_build.degree,
         time_build.knots.as_ref(),
         time_build.keep_cols.as_ref(),
-        time_build.smooth_lambda,
     )?;
     let time_anchor_row = if saved_likelihood_mode == SurvivalLikelihoodMode::MarginalSlope {
         let time_anchor = model

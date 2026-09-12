@@ -2756,10 +2756,6 @@ fn persistent_survival_transformation_key(
         }
         None => hasher.write_bool(false),
     }
-    hasher.write_bool(spec.time_build.smooth_lambda.is_some());
-    if let Some(lambda) = spec.time_build.smooth_lambda {
-        hasher.write_f64(lambda);
-    }
     hasher.write_usize(n_cols);
     hash_workflow_array_view(&mut hasher, spec.age_entry.view());
     hash_workflow_array_view(&mut hasher, spec.age_exit.view());
