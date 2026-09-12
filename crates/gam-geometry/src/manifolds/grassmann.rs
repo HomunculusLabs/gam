@@ -357,7 +357,13 @@ impl RiemannianManifold for GrassmannManifold {
         let yy = trace(&gyy);
         let xy = trace(&gxy);
         let denom = xx * yy - xy * xy;
-        if denom.abs() <= 1.0e-14 {
+        // A degenerate plane has ⟨X,X⟩⟨Y,Y⟩ = ⟨X,Y⟩² exactly. Each inner product
+        // sums n·k rounded products, and |⟨X,Y⟩| ≤ √(⟨X,X⟩⟨Y,Y⟩), so the computed
+        // area carries at most γ(4nk + 4)·⟨X,X⟩⟨Y,Y⟩ of rounding. Within that band
+        // it cannot be told from zero, whatever the tangents' scale.
+        let area_band =
+            gam_linalg::roundoff::accumulation_band(4 * self.n * self.k + 4, xx * yy);
+        if denom.abs() <= area_band {
             return Err(GeometryError::Singular(
                 "Grassmann sectional curvature plane is degenerate",
             ));
