@@ -1,0 +1,196 @@
+{
+  "design_condition_numbers": {
+    "r_mgcv": 2666.4374732877636,
+    "rust_gam": 50.30064805286674
+  },
+  "design_numerical_ranks": {
+    "r_mgcv": [
+      85,
+      85,
+      85,
+      85,
+      85
+    ],
+    "rust_gam": [
+      24,
+      24,
+      24,
+      24,
+      24
+    ]
+  },
+  "design_per_fold": [
+    {
+      "condition_numbers": {
+        "r_mgcv": 2666.4374732877636,
+        "rust_gam": 50.30064805286674
+      },
+      "fold_id": 0,
+      "max_principal_sine": 0.9939242163918734,
+      "numerical_ranks": {
+        "r_mgcv": 85,
+        "rust_gam": 24
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 0.13721124376044644,
+        "rust_outside_mgcv": 0.06841774915243615
+      }
+    },
+    {
+      "condition_numbers": {
+        "r_mgcv": 1703.0473913922215,
+        "rust_gam": 43.42304721246592
+      },
+      "fold_id": 1,
+      "max_principal_sine": 0.9999750909624067,
+      "numerical_ranks": {
+        "r_mgcv": 85,
+        "rust_gam": 24
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 0.18904905444497316,
+        "rust_outside_mgcv": 0.08621105539807056
+      }
+    },
+    {
+      "condition_numbers": {
+        "r_mgcv": 1594.078896758492,
+        "rust_gam": 42.390801757031106
+      },
+      "fold_id": 2,
+      "max_principal_sine": 0.9998934756469535,
+      "numerical_ranks": {
+        "r_mgcv": 85,
+        "rust_gam": 24
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 0.17782610689827114,
+        "rust_outside_mgcv": 0.08396050656407902
+      }
+    },
+    {
+      "condition_numbers": {
+        "r_mgcv": 1866.932241547259,
+        "rust_gam": 45.290382874144804
+      },
+      "fold_id": 3,
+      "max_principal_sine": 0.9997345006482831,
+      "numerical_ranks": {
+        "r_mgcv": 85,
+        "rust_gam": 24
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 0.1487362016581001,
+        "rust_outside_mgcv": 0.08185559332547458
+      }
+    },
+    {
+      "condition_numbers": {
+        "r_mgcv": 1926.6049488567016,
+        "rust_gam": 44.01729023130183
+      },
+      "fold_id": 4,
+      "max_principal_sine": 0.9960447797289862,
+      "numerical_ranks": {
+        "r_mgcv": 85,
+        "rust_gam": 24
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 0.15954703656966823,
+        "rust_outside_mgcv": 0.07583286009729064
+      }
+    }
+  ],
+  "design_relative_projection_residuals": {
+    "mgcv_outside_rust": 0.18904905444497316,
+    "rust_outside_mgcv": 0.08621105539807056
+  },
+  "design_subspace_max_principal_sine": 0.9999750909624067,
+  "edf_total": 5.53548712601538,
+  "eta_variance_difference": {
+    "max_abs": 0.5434564764445409,
+    "rms": 0.14940566306716918
+  },
+  "final_neg_v": 157.91750641715365,
+  "linear_predictor_difference": {
+    "max_abs": 1.3744600454466234,
+    "rms": 0.294962308428025
+  },
+  "n_folds_with_quality": 5,
+  "outer_gradient_norm": 5.27970176606972e-05,
+  "outer_iterations": 21.8,
+  "outer_stationarity_bound": 0.00021505657249332248,
+  "per_fold": [
+    {
+      "edf_total": 6.873580550396625,
+      "final_neg_v": 157.03285237431362,
+      "outer_gradient_norm": 7.671342790255419e-05,
+      "outer_iterations": 21.0,
+      "outer_stationarity_bound": 0.00017150658079138933,
+      "smoothing_parameters": [
+        3.8343038720187924e-08,
+        1881959.2568389978,
+        9.546533440562123e-06,
+        0.9633564760161012
+      ]
+    },
+    {
+      "edf_total": 8.251010945863797,
+      "final_neg_v": 156.93019569898712,
+      "outer_gradient_norm": 2.6796631234760675e-05,
+      "outer_iterations": 21.0,
+      "outer_stationarity_bound": 4.752232504925031e-05,
+      "smoothing_parameters": [
+        1.7556895342824566e-06,
+        35648.730623580355,
+        0.34078417309175796,
+        4.309926759991578e-06
+      ]
+    },
+    {
+      "edf_total": 4.8573358667010424,
+      "final_neg_v": 158.57921874561143,
+      "outer_gradient_norm": 6.374436316302773e-05,
+      "outer_iterations": 17.0,
+      "outer_stationarity_bound": 0.0001691066619597291,
+      "smoothing_parameters": [
+        0.2618618105361125,
+        18572.07872457947,
+        0.49776490353651665,
+        0.33530544066903384
+      ]
+    },
+    {
+      "edf_total": 6.110494780800064,
+      "final_neg_v": 158.09928442819623,
+      "outer_gradient_norm": 7.042373355020726e-05,
+      "outer_iterations": 27.0,
+      "outer_stationarity_bound": 0.000631658889340915,
+      "smoothing_parameters": [
+        0.7559604089017496,
+        89686.60249239209,
+        0.22067914634352095,
+        0.09501983078221463
+      ]
+    },
+    {
+      "edf_total": 1.585013486315372,
+      "final_neg_v": 158.9459808386598,
+      "outer_gradient_norm": 2.6306932452936155e-05,
+      "outer_iterations": 23.0,
+      "outer_stationarity_bound": 5.548840532532847e-05,
+      "smoothing_parameters": [
+        0.00022098538693351213,
+        39130.49290510573,
+        7.760686221822264e-08,
+        17.993661846533453
+      ]
+    }
+  ],
+  "smoothing_parameters": [
+    0.20360899977147376,
+    412999.4323169311,
+    0.21184756942241964,
+    3.8774695807855126
+  ]
+}

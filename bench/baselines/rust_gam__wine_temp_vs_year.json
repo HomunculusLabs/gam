@@ -1,0 +1,69 @@
+{
+  "edf_total": 3.585862353098341,
+  "final_neg_v": 41.66078353787106,
+  "n_folds_with_quality": 5,
+  "outer_gradient_norm": 2.717431609449999e-09,
+  "outer_iterations": 12.6,
+  "outer_stationarity_bound": 0.0019595317378492292,
+  "per_fold": [
+    {
+      "edf_total": 3.7490574844881994,
+      "final_neg_v": 39.23976233521505,
+      "outer_gradient_norm": 2.6970471900272196e-09,
+      "outer_iterations": 9.0,
+      "outer_stationarity_bound": 0.0019202859622913485,
+      "smoothing_parameters": [
+        276.5279916355847,
+        0.08029383076703855
+      ]
+    },
+    {
+      "edf_total": 3.6366244816144704,
+      "final_neg_v": 41.756107991292815,
+      "outer_gradient_norm": 3.6189141862451667e-10,
+      "outer_iterations": 10.0,
+      "outer_stationarity_bound": 0.0019815055048416534,
+      "smoothing_parameters": [
+        318.5495825276659,
+        0.07730904696108894
+      ]
+    },
+    {
+      "edf_total": 3.4914815252689255,
+      "final_neg_v": 42.93420788267894,
+      "outer_gradient_norm": 6.975792274148146e-11,
+      "outer_iterations": 20.0,
+      "outer_stationarity_bound": 0.0019942677884525824,
+      "smoothing_parameters": [
+        431.03228924579923,
+        0.09311298941199266
+      ]
+    },
+    {
+      "edf_total": 3.729880499132064,
+      "final_neg_v": 41.975841947903305,
+      "outer_gradient_norm": 1.0036873523379681e-08,
+      "outer_iterations": 9.0,
+      "outer_stationarity_bound": 0.0019449427152857172,
+      "smoothing_parameters": [
+        283.6064545652048,
+        0.11702063128650464
+      ]
+    },
+    {
+      "edf_total": 3.3222677749880436,
+      "final_neg_v": 42.3979975322652,
+      "outer_gradient_norm": 4.2158799247709655e-10,
+      "outer_iterations": 15.0,
+      "outer_stationarity_bound": 0.0019566567183748463,
+      "smoothing_parameters": [
+        540.4304493476503,
+        0.11870590408757702
+      ]
+    }
+  ],
+  "smoothing_parameters": [
+    370.02935346438096,
+    0.09728848050284036
+  ]
+}

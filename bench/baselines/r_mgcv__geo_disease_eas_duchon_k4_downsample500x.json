@@ -1,0 +1,300 @@
+{
+  "design_condition_numbers": {
+    "r_mgcv": 14.855286953808191,
+    "rust_gam": 12.170838366474104
+  },
+  "design_numerical_ranks": {
+    "r_mgcv": [
+      3,
+      3,
+      2,
+      2,
+      2
+    ],
+    "rust_gam": [
+      3,
+      3,
+      2,
+      2,
+      2
+    ]
+  },
+  "design_per_fold": [
+    {
+      "condition_numbers": {
+        "r_mgcv": 14.855286953808191,
+        "rust_gam": 12.170838366474104
+      },
+      "duchon_penalty_congruence": {
+        "lambda_difference": 0.13624009470562512,
+        "lambda_relative_difference": 0.39315594981085045,
+        "mapped_mgcv_lambda": 0.2102893035425026,
+        "mgcv_lambda": 0.0906356594011659,
+        "mgcv_over_rust_penalty_scale": 2.320160794679423,
+        "relative_residual_after_scalar": 0.28494868033756904,
+        "rust_lambda": 0.34652939824812773
+      },
+      "fold_id": 0,
+      "max_principal_sine": 1.4901161193847656e-08,
+      "numerical_ranks": {
+        "r_mgcv": 3,
+        "rust_gam": 3
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 2.958957121201436e-16,
+        "rust_outside_mgcv": 3.308278207687357e-16
+      }
+    },
+    {
+      "condition_numbers": {
+        "r_mgcv": 10.772109573504792,
+        "rust_gam": 11.867885548397428
+      },
+      "duchon_penalty_congruence": {
+        "lambda_difference": 0.032888443050796724,
+        "lambda_relative_difference": 0.9999999999999417,
+        "mapped_mgcv_lambda": 1.9154885489665312e-15,
+        "mgcv_lambda": 5.88108797975771e-16,
+        "mgcv_over_rust_penalty_scale": 3.257030936383723,
+        "relative_residual_after_scalar": 0.5233473952211857,
+        "rust_lambda": 0.03288844305079864
+      },
+      "fold_id": 1,
+      "max_principal_sine": 2.1073424255447017e-08,
+      "numerical_ranks": {
+        "r_mgcv": 3,
+        "rust_gam": 3
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 2.2623692536202446e-16,
+        "rust_outside_mgcv": 3.059249138400914e-16
+      }
+    },
+    {
+      "condition_numbers": {
+        "r_mgcv": 3.567958006429695,
+        "rust_gam": 4.6262943505571625
+      },
+      "duchon_penalty_congruence": {
+        "lambda_difference": 7.412678319445962e-08,
+        "lambda_relative_difference": 0.9999999950606235,
+        "mapped_mgcv_lambda": 3.66140089777638e-16,
+        "mgcv_lambda": 2.46102255881488e-16,
+        "mgcv_over_rust_penalty_scale": 1.4877559267638527,
+        "relative_residual_after_scalar": 0.4675312380993407,
+        "rust_lambda": 7.412678356059971e-08
+      },
+      "fold_id": 2,
+      "max_principal_sine": 0.0,
+      "numerical_ranks": {
+        "r_mgcv": 2,
+        "rust_gam": 2
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 8.115855818310479e-17,
+        "rust_outside_mgcv": 3.4972397460767084e-16
+      }
+    },
+    {
+      "condition_numbers": {
+        "r_mgcv": 3.9007280671987234,
+        "rust_gam": 3.4442758434883785
+      },
+      "duchon_penalty_congruence": {
+        "lambda_difference": 0.3955054236817426,
+        "lambda_relative_difference": 0.999999999999999,
+        "mapped_mgcv_lambda": 4.0211712273475484e-16,
+        "mgcv_lambda": 1.74527260118545e-16,
+        "mgcv_over_rust_penalty_scale": 2.304036185875048,
+        "relative_residual_after_scalar": 0.40864372750147554,
+        "rust_lambda": 0.39550542368174296
+      },
+      "fold_id": 3,
+      "max_principal_sine": 2.5809568279517847e-08,
+      "numerical_ranks": {
+        "r_mgcv": 2,
+        "rust_gam": 2
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 3.0253298995673656e-16,
+        "rust_outside_mgcv": 3.377020287071042e-16
+      }
+    },
+    {
+      "condition_numbers": {
+        "r_mgcv": 2.8849177030452533,
+        "rust_gam": 3.39247791440161
+      },
+      "duchon_penalty_congruence": {
+        "lambda_difference": 0.03405283694613069,
+        "lambda_relative_difference": 0.9999999999999882,
+        "mapped_mgcv_lambda": 4.020371079943777e-16,
+        "mgcv_lambda": 2.47256340335294e-16,
+        "mgcv_over_rust_penalty_scale": 1.6259931189193852,
+        "relative_residual_after_scalar": 0.4088223343039342,
+        "rust_lambda": 0.03405283694613109
+      },
+      "fold_id": 4,
+      "max_principal_sine": 0.0,
+      "numerical_ranks": {
+        "r_mgcv": 2,
+        "rust_gam": 2
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 4.1131697352809776e-16,
+        "rust_outside_mgcv": 4.593026923784159e-16
+      }
+    }
+  ],
+  "design_relative_projection_residuals": {
+    "mgcv_outside_rust": 4.1131697352809776e-16,
+    "rust_outside_mgcv": 4.593026923784159e-16
+  },
+  "design_subspace_max_principal_sine": 2.5809568279517847e-08,
+  "duchon_penalty_congruence": {
+    "max_abs_lambda_difference": 0.3955054236817426,
+    "max_abs_lambda_relative_difference": 0.999999999999999,
+    "max_relative_residual_after_scalar": 0.5233473952211857
+  },
+  "edf_per_term": {
+    "s(pc1,pc2,pc3,pc4,pc5,pc6,pc7,pc8,pc9,pc10,pc11,pc12,pc13,pc14,pc15,pc16)": 2.336289204658596
+  },
+  "edf_total": 3.336289204658594,
+  "eta_variance_difference": {
+    "max_abs": 445895668287374.9,
+    "rms": 211455594320367.72
+  },
+  "inner_iterations": 53.6,
+  "linear_predictor_difference": {
+    "max_abs": 1091.4826137890714,
+    "rms": 430.80909598737134
+  },
+  "n_folds_with_quality": 5,
+  "outer_gradient_norm": 1.9763709583129239,
+  "outer_iterations": 45.2,
+  "per_fold": [
+    {
+      "edf_per_term": {
+        "s(pc1,pc2,pc3,pc4,pc5,pc6,pc7,pc8,pc9,pc10,pc11,pc12,pc13,pc14,pc15,pc16)": 1.7891326517609
+      },
+      "edf_total": 2.7891326517609,
+      "inner_iterations": 2,
+      "outer_gradient_norm": 2.76223488526739e-13,
+      "outer_iterations": 5,
+      "smooth_penalty_eigenvalues": [
+        {
+          "S": [
+            126.916137188624,
+            42.9107097007101,
+            21.6590644950091
+          ]
+        }
+      ],
+      "smoothing_parameters": [
+        0.0906356594011659
+      ],
+      "spectral_iterations": [
+        9
+      ]
+    },
+    {
+      "edf_per_term": {
+        "s(pc1,pc2,pc3,pc4,pc5,pc6,pc7,pc8,pc9,pc10,pc11,pc12,pc13,pc14,pc15,pc16)": 2.19267330782004
+      },
+      "edf_total": 3.19267330782003,
+      "inner_iterations": 2,
+      "outer_gradient_norm": 3.39549442935761,
+      "outer_iterations": 200,
+      "smooth_penalty_eigenvalues": [
+        {
+          "S": [
+            83.1488113542614,
+            61.7037574721633,
+            47.0620680289408
+          ]
+        }
+      ],
+      "smoothing_parameters": [
+        5.88108797975771e-16
+      ],
+      "spectral_iterations": [
+        9
+      ]
+    },
+    {
+      "edf_per_term": {
+        "s(pc1,pc2,pc3,pc4,pc5,pc6,pc7,pc8,pc9,pc10,pc11,pc12,pc13,pc14,pc15,pc16)": 2.59773798751461
+      },
+      "edf_total": 3.59773798751461,
+      "inner_iterations": 44,
+      "outer_gradient_norm": 0.0855273800340826,
+      "outer_iterations": 11,
+      "smooth_penalty_eigenvalues": [
+        {
+          "S": [
+            106.226215433136,
+            37.5842235866,
+            7.62611081631507
+          ]
+        }
+      ],
+      "smoothing_parameters": [
+        2.46102255881488e-16
+      ],
+      "spectral_iterations": [
+        10
+      ]
+    },
+    {
+      "edf_per_term": {
+        "s(pc1,pc2,pc3,pc4,pc5,pc6,pc7,pc8,pc9,pc10,pc11,pc12,pc13,pc14,pc15,pc16)": 2.67502019380774
+      },
+      "edf_total": 3.67502019380774,
+      "inner_iterations": 200,
+      "outer_gradient_norm": 3.37609809853199,
+      "outer_iterations": 1,
+      "smooth_penalty_eigenvalues": [
+        {
+          "S": [
+            137.061942600738,
+            54.812493691565,
+            15.8926895609193
+          ]
+        }
+      ],
+      "smoothing_parameters": [
+        1.74527260118545e-16
+      ],
+      "spectral_iterations": [
+        10
+      ]
+    },
+    {
+      "edf_per_term": {
+        "s(pc1,pc2,pc3,pc4,pc5,pc6,pc7,pc8,pc9,pc10,pc11,pc12,pc13,pc14,pc15,pc16)": 2.42688188238969
+      },
+      "edf_total": 3.42688188238969,
+      "inner_iterations": 20,
+      "outer_gradient_norm": 3.02473488364066,
+      "outer_iterations": 9,
+      "smooth_penalty_eigenvalues": [
+        {
+          "S": [
+            111.128508699044,
+            41.4091942587424,
+            9.49529542228773
+          ]
+        }
+      ],
+      "smoothing_parameters": [
+        2.47256340335294e-16
+      ],
+      "spectral_iterations": [
+        10
+      ]
+    }
+  ],
+  "smoothing_parameters": [
+    0.018127131880233432
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "edf_total": 20.28168763551877,
+  "final_neg_v": 2145.1199638608905,
+  "n_folds_with_quality": 5,
+  "outer_gradient_norm": 0.0023472300013960305,
+  "outer_iterations": 30.2,
+  "outer_stationarity_bound": 0.004384912226942734,
+  "per_fold": [
+    {
+      "edf_total": 21.532960052807137,
+      "final_neg_v": 2125.8766109401013,
+      "outer_gradient_norm": 5.813871287154935e-06,
+      "outer_iterations": 33.0,
+      "outer_stationarity_bound": 4.766881465911865e-05,
+      "smoothing_parameters": [
+        6.428265637546489e-07,
+        0.10203371668227673,
+        0.08756600628536623,
+        3.1711153347181916e-06
+      ]
+    },
+    {
+      "edf_total": 19.905571979932038,
+      "final_neg_v": 2141.2891133734024,
+      "outer_gradient_norm": 0.004332831950332647,
+      "outer_iterations": 23.0,
+      "outer_stationarity_bound": 0.006190667934430104,
+      "smoothing_parameters": [
+        0.010857004434914129,
+        0.35514490562461926,
+        0.06062519886489567,
+        0.01181833838517526
+      ]
+    },
+    {
+      "edf_total": 20.17333544892104,
+      "final_neg_v": 2156.527225764001,
+      "outer_gradient_norm": 2.249222075438711e-05,
+      "outer_iterations": 27.0,
+      "outer_stationarity_bound": 0.00043791696207983084,
+      "smoothing_parameters": [
+        9.379230043474926e-07,
+        0.2195240788118281,
+        0.11894729734319055,
+        0.002384195985071971
+      ]
+    },
+    {
+      "edf_total": 20.175952915437204,
+      "final_neg_v": 2159.0428204052732,
+      "outer_gradient_norm": 0.006932934287422905,
+      "outer_iterations": 32.0,
+      "outer_stationarity_bound": 0.011385045700580678,
+      "smoothing_parameters": [
+        0.01944854101324627,
+        0.19391397516521003,
+        0.12657006970146514,
+        2.5857535449804527e-05
+      ]
+    },
+    {
+      "edf_total": 19.620617780496445,
+      "final_neg_v": 2142.864048821675,
+      "outer_gradient_norm": 0.000442077677183057,
+      "outer_iterations": 36.0,
+      "outer_stationarity_bound": 0.003863261722963937,
+      "smoothing_parameters": [
+        2.806487299603828e-06,
+        0.3939552816693635,
+        0.04306272533449882,
+        0.03513983557915992
+      ]
+    }
+  ],
+  "smoothing_parameters": [
+    0.006061986537005621,
+    0.25291439159065954,
+    0.08735425950588328,
+    0.009874279720038336
+  ]
+}

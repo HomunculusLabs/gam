@@ -1,0 +1,75 @@
+{
+  "edf_total": 10.49136417206101,
+  "final_neg_v": 1666.9083376757437,
+  "n_folds_with_quality": 5,
+  "outer_gradient_norm": 4.876460482894081e-05,
+  "outer_iterations": 23.6,
+  "outer_stationarity_bound": 0.0003538523009788487,
+  "per_fold": [
+    {
+      "edf_total": 10.297781210311387,
+      "final_neg_v": 1662.460192783338,
+      "outer_gradient_norm": 9.79067226052773e-05,
+      "outer_iterations": 31.0,
+      "outer_stationarity_bound": 0.0008547267201825233,
+      "smoothing_parameters": [
+        0.06987921531181696,
+        2.628460674492564e-10,
+        2.833697606172502e-07
+      ]
+    },
+    {
+      "edf_total": 10.046011752484716,
+      "final_neg_v": 1659.480121561305,
+      "outer_gradient_norm": 4.971203295005967e-05,
+      "outer_iterations": 27.0,
+      "outer_stationarity_bound": 0.00028387833548921355,
+      "smoothing_parameters": [
+        0.08930822755067336,
+        4.1251321715705786e-10,
+        6.394161685087844e-07
+      ]
+    },
+    {
+      "edf_total": 10.111294698606383,
+      "final_neg_v": 1662.0770563459514,
+      "outer_gradient_norm": 1.997690296442248e-05,
+      "outer_iterations": 29.0,
+      "outer_stationarity_bound": 0.00014064660449506744,
+      "smoothing_parameters": [
+        0.0939119919248018,
+        1.6599184365033602e-09,
+        5.363678809918605e-07
+      ]
+    },
+    {
+      "edf_total": 10.001733198913414,
+      "final_neg_v": 1659.8404555045656,
+      "outer_gradient_norm": 5.674855676594984e-05,
+      "outer_iterations": 28.0,
+      "outer_stationarity_bound": 0.00041846936983577684,
+      "smoothing_parameters": [
+        0.0987632521283532,
+        5.082321385225523e-10,
+        1.0705036583811499e-06
+      ]
+    },
+    {
+      "edf_total": 11.999999999989152,
+      "final_neg_v": 1690.6838621835575,
+      "outer_gradient_norm": 1.9478808858994776e-05,
+      "outer_iterations": 3.0,
+      "outer_stationarity_bound": 7.15404748916626e-05,
+      "smoothing_parameters": [
+        9.357622968840175e-14,
+        9.357622968840175e-14,
+        9.357622968840175e-14
+      ]
+    }
+  ],
+  "smoothing_parameters": [
+    0.07037253738314778,
+    5.68720687172383e-10,
+    5.059315124150549e-07
+  ]
+}

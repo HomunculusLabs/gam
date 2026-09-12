@@ -1,0 +1,69 @@
+{
+  "edf_total": 9.525401132863351,
+  "final_neg_v": -178.82909665563778,
+  "n_folds_with_quality": 5,
+  "outer_gradient_norm": 9.807837048528192e-09,
+  "outer_iterations": 6.8,
+  "outer_stationarity_bound": 0.0042284436493600554,
+  "per_fold": [
+    {
+      "edf_total": 9.333568740557567,
+      "final_neg_v": -178.8516314652397,
+      "outer_gradient_norm": 1.206033455710831e-08,
+      "outer_iterations": 7.0,
+      "outer_stationarity_bound": 0.004229046649583317,
+      "smoothing_parameters": [
+        481.40377367287084,
+        0.003362846306796398
+      ]
+    },
+    {
+      "edf_total": 9.442895547632315,
+      "final_neg_v": -183.04667982539007,
+      "outer_gradient_norm": 1.766036544187488e-10,
+      "outer_iterations": 7.0,
+      "outer_stationarity_bound": 0.004277927421805773,
+      "smoothing_parameters": [
+        455.34342533659736,
+        0.0031082880242058524
+      ]
+    },
+    {
+      "edf_total": 8.86384586105559,
+      "final_neg_v": -173.31356915208278,
+      "outer_gradient_norm": 7.253632371181822e-09,
+      "outer_iterations": 7.0,
+      "outer_stationarity_bound": 0.004163232496422731,
+      "smoothing_parameters": [
+        605.9250044320396,
+        0.0036469819927019147
+      ]
+    },
+    {
+      "edf_total": 9.773718383901464,
+      "final_neg_v": -175.95150936921678,
+      "outer_gradient_norm": 2.879016588696204e-08,
+      "outer_iterations": 6.0,
+      "outer_stationarity_bound": 0.004193477801712979,
+      "smoothing_parameters": [
+        385.35012456037265,
+        0.0036563657319855017
+      ]
+    },
+    {
+      "edf_total": 10.212977131169822,
+      "final_neg_v": -182.98209346625964,
+      "outer_gradient_norm": 7.584487729700398e-10,
+      "outer_iterations": 7.0,
+      "outer_stationarity_bound": 0.004278533877275476,
+      "smoothing_parameters": [
+        312.3538471811585,
+        0.0030808764092739656
+      ]
+    }
+  ],
+  "smoothing_parameters": [
+    448.07523503660775,
+    0.0033710716929927264
+  ]
+}

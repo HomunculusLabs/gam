@@ -1,0 +1,273 @@
+{
+  "design_condition_numbers": {
+    "r_mgcv": 40.95890547838618,
+    "rust_gam": 34.041254685019325
+  },
+  "design_numerical_ranks": {
+    "r_mgcv": [
+      6,
+      6,
+      6,
+      6,
+      6
+    ],
+    "rust_gam": [
+      6,
+      6,
+      6,
+      6,
+      6
+    ]
+  },
+  "design_per_fold": [
+    {
+      "condition_numbers": {
+        "r_mgcv": 38.7649546769463,
+        "rust_gam": 30.58929690034536
+      },
+      "duchon_penalty_congruence": {
+        "lambda_difference": -1.1133861013105637,
+        "lambda_relative_difference": -0.04201610531079534,
+        "mapped_mgcv_lambda": 26.4990315755063,
+        "mgcv_lambda": 424.736475197677,
+        "mgcv_over_rust_penalty_scale": 0.06238934756703756,
+        "relative_residual_after_scalar": 2.0620750757676274e-15,
+        "rust_lambda": 25.385645474195737
+      },
+      "fold_id": 0,
+      "max_principal_sine": 3.650024149988857e-08,
+      "numerical_ranks": {
+        "r_mgcv": 6,
+        "rust_gam": 6
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 2.0930752911872054e-15,
+        "rust_outside_mgcv": 1.1732876094876356e-15
+      }
+    },
+    {
+      "condition_numbers": {
+        "r_mgcv": 38.23385162705068,
+        "rust_gam": 30.07252063331503
+      },
+      "duchon_penalty_congruence": {
+        "lambda_difference": -6405892.792697281,
+        "lambda_relative_difference": -0.999697787482313,
+        "mapped_mgcv_lambda": 6407829.318928663,
+        "mgcv_lambda": 99925539.666787,
+        "mgcv_over_rust_penalty_scale": 0.06412604165357819,
+        "relative_residual_after_scalar": 1.8903516270713734e-15,
+        "rust_lambda": 1936.5262313822475
+      },
+      "fold_id": 1,
+      "max_principal_sine": 4.2146848510894035e-08,
+      "numerical_ranks": {
+        "r_mgcv": 6,
+        "rust_gam": 6
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 1.9745613292160723e-15,
+        "rust_outside_mgcv": 7.756423848432416e-16
+      }
+    },
+    {
+      "condition_numbers": {
+        "r_mgcv": 37.68751382594454,
+        "rust_gam": 29.76603277436359
+      },
+      "duchon_penalty_congruence": {
+        "lambda_difference": -9.597223540303013e-05,
+        "lambda_relative_difference": -5.994852141415598e-05,
+        "mapped_mgcv_lambda": 1.6009108004516632,
+        "mgcv_lambda": 25.6967856657876,
+        "mgcv_over_rust_penalty_scale": 0.0623000409962985,
+        "relative_residual_after_scalar": 1.845083450586401e-15,
+        "rust_lambda": 1.6008148282162602
+      },
+      "fold_id": 2,
+      "max_principal_sine": 2.9802322387695312e-08,
+      "numerical_ranks": {
+        "r_mgcv": 6,
+        "rust_gam": 6
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 2.0498844015704983e-15,
+        "rust_outside_mgcv": 1.1750473898864824e-15
+      }
+    },
+    {
+      "condition_numbers": {
+        "r_mgcv": 37.955548954395,
+        "rust_gam": 34.041254685019325
+      },
+      "duchon_penalty_congruence": {
+        "lambda_difference": 2.43536501520758e-08,
+        "lambda_relative_difference": 5.7260690320422366e-08,
+        "mapped_mgcv_lambda": 0.42531182598899103,
+        "mgcv_lambda": 6.48359087677022,
+        "mgcv_over_rust_penalty_scale": 0.06559818996488852,
+        "relative_residual_after_scalar": 2.058570721363287e-15,
+        "rust_lambda": 0.4253118503426412
+      },
+      "fold_id": 3,
+      "max_principal_sine": 3.332000937312528e-08,
+      "numerical_ranks": {
+        "r_mgcv": 6,
+        "rust_gam": 6
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 2.15198476232343e-15,
+        "rust_outside_mgcv": 3.520384128238163e-16
+      }
+    },
+    {
+      "condition_numbers": {
+        "r_mgcv": 40.95890547838618,
+        "rust_gam": 30.693354571119396
+      },
+      "duchon_penalty_congruence": {
+        "lambda_difference": -6.172271518556371e-05,
+        "lambda_relative_difference": -2.950157200057529e-05,
+        "mapped_mgcv_lambda": 2.0921839413967533,
+        "mgcv_lambda": 33.8993259772867,
+        "mgcv_over_rust_penalty_scale": 0.06171756756457527,
+        "relative_residual_after_scalar": 5.2471507362111554e-15,
+        "rust_lambda": 2.092122218681568
+      },
+      "fold_id": 4,
+      "max_principal_sine": 3.650024149988857e-08,
+      "numerical_ranks": {
+        "r_mgcv": 6,
+        "rust_gam": 6
+      },
+      "relative_projection_residuals": {
+        "mgcv_outside_rust": 1.9882900211395977e-15,
+        "rust_outside_mgcv": 6.634341652857244e-16
+      }
+    }
+  ],
+  "design_relative_projection_residuals": {
+    "mgcv_outside_rust": 2.15198476232343e-15,
+    "rust_outside_mgcv": 1.1750473898864824e-15
+  },
+  "design_subspace_max_principal_sine": 4.2146848510894035e-08,
+  "duchon_penalty_congruence": {
+    "max_abs_lambda_difference": 6405892.792697281,
+    "max_abs_lambda_relative_difference": 0.999697787482313,
+    "max_relative_residual_after_scalar": 5.2471507362111554e-15
+  },
+  "edf_total": 1.4465748529381446,
+  "eta_variance_difference": {
+    "max_abs": 6.856768364087856e-05,
+    "rms": 1.905881200010295e-05
+  },
+  "final_neg_v": 158.9089631352446,
+  "linear_predictor_difference": {
+    "max_abs": 0.0002180974653258616,
+    "rms": 5.915783226953559e-05
+  },
+  "n_folds_with_quality": 5,
+  "outer_gradient_norm": 6.2623414920370385e-06,
+  "outer_iterations": 7.2,
+  "outer_stationarity_bound": 0.0009630724426077127,
+  "per_fold": [
+    {
+      "duchon_spectral_penalty_eigenvalues": [
+        [
+          0.03984258041970891,
+          0.0558348603416798,
+          0.08407367965247407,
+          0.11760682317821662,
+          0.20709071032343251
+        ]
+      ],
+      "edf_total": 1.0335109097775215,
+      "final_neg_v": 158.95377362253535,
+      "outer_gradient_norm": 8.588449992686788e-06,
+      "outer_iterations": 10.0,
+      "outer_stationarity_bound": 8.277216301347541e-05,
+      "smoothing_parameters": [
+        25.385645474195737
+      ]
+    },
+    {
+      "duchon_spectral_penalty_eigenvalues": [
+        [
+          0.0388529929571912,
+          0.05718634215705398,
+          0.08208862074931435,
+          0.11803001306576857,
+          0.20869355222927438
+        ]
+      ],
+      "edf_total": 1.0004478809705004,
+      "final_neg_v": 158.95388950274997,
+      "outer_gradient_norm": 1.9745619232185478e-05,
+      "outer_iterations": 13.0,
+      "outer_stationarity_bound": 0.00016637919829043887,
+      "smoothing_parameters": [
+        1936.5262313822475
+      ]
+    },
+    {
+      "duchon_spectral_penalty_eigenvalues": [
+        [
+          0.039679727289497466,
+          0.05629275882310986,
+          0.08323089970546475,
+          0.11490211228859945,
+          0.2115491888393153
+        ]
+      ],
+      "edf_total": 1.4723900911545869,
+      "final_neg_v": 158.93033260217265,
+      "outer_gradient_norm": 2.2136891563844006e-06,
+      "outer_iterations": 4.0,
+      "outer_stationarity_bound": 0.0010887026686084344,
+      "smoothing_parameters": [
+        1.6008148282162602
+      ]
+    },
+    {
+      "duchon_spectral_penalty_eigenvalues": [
+        [
+          0.03880077799223252,
+          0.05690554038207915,
+          0.08311035747026232,
+          0.11988184271779842,
+          0.20590967435857502
+        ]
+      ],
+      "edf_total": 2.3599285275326802,
+      "final_neg_v": 158.76768701918562,
+      "outer_gradient_norm": 3.2314703736014466e-08,
+      "outer_iterations": 5.0,
+      "outer_stationarity_bound": 0.0025849341087381046,
+      "smoothing_parameters": [
+        0.4253118503426412
+      ]
+    },
+    {
+      "duchon_spectral_penalty_eigenvalues": [
+        [
+          0.04074284377404634,
+          0.05638408936976095,
+          0.0846005631354547,
+          0.11143796588173258,
+          0.21073310153720282
+        ]
+      ],
+      "edf_total": 1.3665968552554348,
+      "final_neg_v": 158.93913292957936,
+      "outer_gradient_norm": 7.316343751925137e-07,
+      "outer_iterations": 4.0,
+      "outer_stationarity_bound": 0.0008925740743881102,
+      "smoothing_parameters": [
+        2.092122218681568
+      ]
+    }
+  ],
+  "smoothing_parameters": [
+    393.20602515073676
+  ]
+}

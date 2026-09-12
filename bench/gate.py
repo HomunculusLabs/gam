@@ -27,7 +27,9 @@ Tolerances (rationale):
 
 Lanes whose model.json lacks both ``reml_score`` and ``edf_by_block``
 (e.g. R mgcv lanes, non-GAM contenders, survival lanes that don't surface
-the score) are SKIPPED from the gate with a warning, not failed.
+the score) are SKIPPED from the gate with a warning, not failed. A lane that
+does carry them but has no baseline file FAILS in strict mode: a gate that
+compared nothing is not a pass.
 
 Two entry points:
 
@@ -265,7 +267,12 @@ def _gate_one(key: str, current: dict[str, Any], *, update: bool, mode: str) -> 
         print(f"[gate] wrote baseline {baseline_path}")
         return True
     if not baseline_path.is_file():
-        print(f"[BENCH-GATE] no baseline for lane '{key}', skipping (not fail)")
+        # A lane that carries fit_quality but has no baseline compares nothing, so it is
+        # not a pass: strict mode fails it until `--update-baseline` records one.
+        if mode == "strict":
+            print(f"[gate] {key} FAIL: no baseline at {baseline_path}; record one with --update-baseline")
+            return False
+        print(f"[gate] (mode=report) {key}: no baseline at {baseline_path}; nothing compared")
         return True
     # A checked-in baseline the gate cannot compare against is a broken gate,
     # not an unmeasured lane: `--update-baseline` only writes a dict carrying
