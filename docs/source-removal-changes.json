@@ -4122,5 +4122,13 @@
     ],
     "reason": "SPEC rules 18 and 19 (#2902): the measure-jet representer range screen now minimizes the profiled Gaussian REML over its derived ln-range window with the outer engine on the exact ln ℓ jet (measure_jet_range_screen_jet), starting from each band node and keeping only certified searches. The value-only evaluator that fed the node scan, the upward walk and the parabolic step has no remaining caller.",
     "evidence": "At the base, git grep -n measure_jet_range_screen_value finds the declaration and its three call sites (the node scan, the walk and the parabolic refinement), all inside screen_measure_jet_range in crates/gam-models/src/fit_orchestration/drivers/measure_jet_range_seed.rs, and nothing outside that file. This change replaces all three with OuterProblem searches on measure_jet_range_screen_jet, which computes the same criterion and its ln ℓ derivatives. The item list applies source_removal_guard.py's ITEM regex by hand, and the guard was not run locally (user directive: no local runs). Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "e3c3bfa4d557d6711c8de5aee9bf507d030268cc",
+    "items": [
+      "crates/gam-event-history/src/family.rs:fn:mark_eta"
+    ],
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). EventHistoryFit::mark_eta lost its only production caller when 83787ff53 deleted training_eta. Nothing in gam-cli, gam-pyffi, gamfit, examples or another crate's production code names it. Its one remaining user was a gam-event-history unit test, which now reads the same fitted block state directly.",
+    "evidence": "In the prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv), mark_eta's only production reference is crates/gam-event-history/src/forecast.rs:1111, inside training_eta, and it has one unit-test reference at tests.rs:3842. At 6272b6588, git grep -w finds mark_eta only in family.rs (definition and a doc link reworded here), forecast.rs:1111 (removed by 83787ff53) and tests.rs:3842 (rewritten here). It does not appear in docs, gamfit, examples, gam-pyffi or gam-cli."
   }
 ]

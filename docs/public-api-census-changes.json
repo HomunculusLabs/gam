@@ -1566,5 +1566,13 @@
     },
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). The stationarity certificate's is_fixed_point predicate has no caller anywhere, tests included; kind_label names every route.",
     "evidence": "The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes it DELETE with zero references in every category. At 6272b6588, git grep -w finds it only at its definition and in two comments reworded in this commit."
+  },
+  {
+    "base": "e3c3bfa4d557d6711c8de5aee9bf507d030268cc",
+    "removed": {
+      "crates/gam-event-history/src/family.rs::mark_eta": 1
+    },
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). EventHistoryFit::mark_eta lost its only production caller, training_eta, in 83787ff53, and no product names it. The one unit test that read it now reads fit.block_states[0].eta directly.",
+    "evidence": "At 6272b6588, git grep -w finds mark_eta only at its definition, a doc link reworded here, forecast.rs:1111 (removed by 83787ff53) and tests.rs:3842 (rewritten here). The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) lists no product or other-crate reference."
   }
 ]

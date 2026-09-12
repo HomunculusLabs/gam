@@ -3839,7 +3839,7 @@ fn a_risk_set_centred_fit_reads_its_baseline_as_the_marginal_incidence() {
     // The fitted baseline in each bin: the mean of `exp(η⁰)` over the
     // training nodes that fall in it.
     let fitted_in_bins = |fit: &EventHistoryFit| -> Vec<f64> {
-        let eta = fit.mark_eta(0);
+        let eta = &fit.fit.block_states[0].eta;
         let mut total = vec![0.0; bins];
         let mut count = vec![0.0; bins];
         for subject in &fit.nodes.subjects {
