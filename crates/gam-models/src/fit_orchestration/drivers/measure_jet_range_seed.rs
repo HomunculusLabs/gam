@@ -668,3 +668,71 @@ mod marginal_slope_screen_response_tests {
         assert!((s[1] - 0.5).abs() < 1e-12, "s[1]={} != 0.5", s[1]);
     }
 }
+
+#[cfg(test)]
+mod range_screen_tests {
+    use super::*;
+
+    /// A 1-D scatter with a deterministic irregular spacing, so the median nearest
+    /// node spacing is a real median rather than a constant grid step.
+    fn chart() -> Array2<f64> {
+        Array2::from_shape_fn((240, 1), |(i, _)| {
+            let t = i as f64 / 239.0;
+            t + 0.04 * (7.0 * t).sin()
+        })
+    }
+
+    fn response(data: &Array2<f64>) -> Array1<f64> {
+        Array1::from_shape_fn(data.nrows(), |i| {
+            (4.0 * data[(i, 0)]).sin() + 0.1 * (i as f64 * 1.618).sin()
+        })
+    }
+
+    fn spec() -> gam_terms::basis::MeasureJetBasisSpec {
+        gam_terms::basis::MeasureJetBasisSpec {
+            center_strategy: gam_terms::basis::CenterStrategy::FarthestPoint { num_centers: 40 },
+            ..gam_terms::basis::MeasureJetBasisSpec::default()
+        }
+    }
+
+    /// #2902: the screen's exact `ln ℓ` jet against central differences of its own
+    /// value and gradient, at ranges a few node spacings above the window floor
+    /// where the identified rank does not change under the step. The certified
+    /// multi-start screen then returns a range inside the window.
+    #[test]
+    fn range_screen_jet_matches_central_differences_2902() {
+        let data = chart();
+        let y = response(&data);
+        let spec = spec();
+        let (lower, upper) =
+            gam_terms::basis::measure_jet_ln_range_window(data.view(), &spec).expect("window");
+        let jet = |ln_ell: f64| {
+            measure_jet_range_screen_jet(data.view(), y.view(), None, &spec, ln_ell)
+                .expect("the screen jet at a representable range")
+        };
+        let step = 1e-4;
+        for offset in [0.4_f64, 1.0] {
+            let at = lower + offset;
+            let (_, first, second) = jet(at);
+            let (up_value, up_first, _) = jet(at + step);
+            let (down_value, down_first, _) = jet(at - step);
+            let first_difference = (up_value - down_value) / (2.0 * step);
+            let second_difference = (up_first - down_first) / (2.0 * step);
+            assert!(
+                (first - first_difference).abs() <= 1e-3 * (1.0 + first.abs()),
+                "ln ℓ = {at}: V′ {first} vs central difference {first_difference}"
+            );
+            assert!(
+                (second - second_difference).abs() <= 1e-3 * (1.0 + second.abs()),
+                "ln ℓ = {at}: V″ {second} vs central difference {second_difference}"
+            );
+        }
+        let screened = screen_measure_jet_range(data.view(), y.view(), None, &spec)
+            .expect("at least one certified range search");
+        let ln_screened = screened.ln();
+        assert!(
+            ln_screened >= lower - 1e-9 && ln_screened <= upper + 1e-9,
+            "the screened range ln ℓ = {ln_screened} left the window [{lower}, {upper}]"
+        );
+    }
+}
