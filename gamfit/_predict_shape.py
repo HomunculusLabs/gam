@@ -38,11 +38,8 @@ from typing import Any
 
 from ._binding import rust_module
 from ._survival import (
-    _BERNOULLI_FAMILY_PREFIXES,
-    _SURVIVAL_MODEL_CLASSES,
     _TRANSFORMATION_NORMAL_MODEL_CLASSES,
     competing_risks_prediction_from_ffi_payload,
-    survival_prediction_from_columns,
     survival_prediction_from_ffi_payload,
 )
 
@@ -93,11 +90,11 @@ def shape_predict_response(
     """Dispatch a ``predict_table`` payload to the right per-class shaper.
 
     Survival and competing-risks payloads are recognised by their class
-    discriminator and routed to their structured containers; everything
-    else is dispatched on ``model_class`` (with ``family`` consulted for
-    Bernoulli marginal-slope, whose model_class overlaps with the survival
-    marginal-slope variant). The dispatcher never decides shape itself —
-    it picks a shaper and the shaper consults :func:`wants_table`.
+    discriminator and routed to their structured containers. Every Survival
+    predict class takes that route in Rust, so every remaining payload is a
+    point payload dispatched on ``model_class``. The dispatcher never decides
+    shape itself — it picks a shaper and the shaper consults
+    :func:`wants_table`.
     """
     parsed = json.loads(raw)
     payload_class = parsed.get("class")
@@ -111,7 +108,6 @@ def shape_predict_response(
     columns_json = json.dumps(parsed["columns"], separators=(",", ":"))
     columns = json.loads(rust_module().ordered_prediction_columns(columns_json))
     model_class = str(parsed["model_class"])
-    family = str(parsed["family"])
 
     table_requested = wants_table(
         return_type=return_type,
@@ -119,24 +115,13 @@ def shape_predict_response(
         interval=interval,
     )
 
-    # Survival column payloads (no structured FFI container) keep their own
-    # tabular shaper: they expand into a per-time grid, not a single point
-    # vector, so they are a genuinely distinct shape — not a point payload.
-    if (
-        model_class in _SURVIVAL_MODEL_CLASSES
-        and not _is_bernoulli_marginal_slope(model_class, family)
-    ):
-        return survival_prediction_from_columns(
-            model_class, columns, id_column=id_column, row_ids=row_ids
-        )
-
     # Every remaining class is a POINT payload: one scalar per row. They differ
     # only in (a) which column carries the point and how it is transformed, and
     # (b) the column key used when a table is requested. `_point_payload_spec`
     # encodes exactly those two per-class differences; the shared shaper
     # (`_shape_point_payload`) owns the identical "return the vector, or restore
     # a one-column table" tail that the three forked shapers used to duplicate.
-    point, table_columns = _point_payload_spec(model_class, family, columns)
+    point, table_columns = _point_payload_spec(model_class, columns)
     shaped = _shape_point_payload(
         point,
         table_columns,
@@ -182,7 +167,6 @@ def _attach_covariance_provenance(result: Any, key: str, source: Any) -> Any:
 
 def _point_payload_spec(
     model_class: str,
-    family: str,
     columns: dict[str, list[Any]],
 ) -> tuple[Any, dict[str, list[Any]]]:
     """Resolve a point-payload class to its ``(point_vector, table_columns)``.
@@ -225,7 +209,7 @@ def _point_payload_spec(
         )
         return mean, {"mean": mean.tolist()}
 
-    if _is_bernoulli_marginal_slope(model_class, family):
+    if model_class == "bernoulli marginal-slope":
         # The Rust core may emit linear-predictor-scale values that need
         # clipping back to (0, 1) before exposure — the only transformation.
         prob_values = rust_module().marginal_slope_clip_probabilities(
@@ -326,23 +310,6 @@ def _restore_with_optional_id(
         requested=return_type,
         input_kind=table_kind,
         training_kind=training_table_kind,
-    )
-
-
-def _is_bernoulli_marginal_slope(model_class: str, family: str) -> bool:
-    """Distinguish Bernoulli marginal-slope from survival marginal-slope.
-
-    The two share ``"marginal-slope"`` as a model_class label in some
-    code paths; the family discriminator (``"bernoulli"`` /
-    ``"binomial"`` prefix) settles which shaper to use.
-    """
-    normalized_family = family.strip().lower().replace("_", "-")
-    return (
-        model_class == "bernoulli marginal-slope"
-        or (
-            model_class == "marginal-slope"
-            and normalized_family.startswith(_BERNOULLI_FAMILY_PREFIXES)
-        )
     )
 
 

@@ -22,21 +22,11 @@ from ._binding import rust_module
     DENSE_SURVIVAL_AUTO_CHUNK_CELLS,
 ) = (int(value) for value in rust_module().survival_chunk_defaults())
 
-_SURVIVAL_MODEL_CLASSES = frozenset(
-    {
-        "survival",
-        "competing risks survival",
-        "survival marginal-slope",
-        "survival location-scale",
-        "latent survival",
-    }
-)
 _TRANSFORMATION_NORMAL_MODEL_CLASSES = frozenset(
     {
         "transformation-normal",
     }
 )
-_BERNOULLI_FAMILY_PREFIXES = ("bernoulli", "binomial")
 
 
 @dataclass(frozen=True, slots=True)
@@ -666,38 +656,6 @@ def extract_row_ids(
     return rust_module().extract_row_ids(headers, rows, id_column)
 
 
-def survival_prediction_from_columns(
-    model_class: str,
-    columns: dict[str, list[float]],
-    *,
-    id_column: str | None = None,
-    row_ids: Sequence[str] | None = None,
-) -> SurvivalPrediction:
-    # Strip the uncertainty / interval columns; what remains describes the
-    # per-row survival parameter vector. ``std_error`` is the response-scale
-    # SE column (issue #310 renamed it from the engine-internal ``eta_se``
-    # label).
-    parameter_names = [
-        name
-        for name in columns
-        if name not in {"mean_lower", "mean_upper", "std_error"}
-    ]
-    if not parameter_names:
-        raise KeyError(
-            f"survival prediction payload for '{model_class}' was empty"
-        )
-    stacked = rust_module().column_stack_f64(
-        [[float(value) for value in columns[name]] for name in parameter_names]
-    )
-    return SurvivalPrediction(
-        model_class=model_class,
-        parameters=stacked,
-        parameter_names=tuple(parameter_names),
-        id_column=id_column,
-        row_ids=row_ids,
-    )
-
-
 def survival_prediction_from_ffi_payload(
     raw: str,
     *,
@@ -792,8 +750,6 @@ __all__ = [
     "extract_row_ids",
     "numeric_matrix",
     "ordered_prediction_columns",
-    "survival_prediction_from_columns",
     "survival_prediction_from_ffi_payload",
-    "_SURVIVAL_MODEL_CLASSES",
     "_TRANSFORMATION_NORMAL_MODEL_CLASSES",
 ]
