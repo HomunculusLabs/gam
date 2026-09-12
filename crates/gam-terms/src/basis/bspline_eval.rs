@@ -1036,7 +1036,7 @@ pub(crate) fn generate_basis_internal<S: BasisStorage>(
 }
 
 /// Returns true if the B-spline basis should be built in sparse form based on density.
-pub fn should_use_sparse_basis(num_basis_cols: usize, degree: usize, dim: usize) -> bool {
+pub(crate) fn should_use_sparse_basis(num_basis_cols: usize, degree: usize, dim: usize) -> bool {
     if num_basis_cols == 0 {
         return false;
     }

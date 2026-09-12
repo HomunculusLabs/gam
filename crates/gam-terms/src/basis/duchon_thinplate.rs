@@ -3433,7 +3433,7 @@ pub fn apply_sum_to_zero_constraint_sparse(
 ///
 /// The result enforces orthogonality by construction while retaining the largest possible
 /// smooth subspace under the given constraints.
-pub fn applyweighted_orthogonality_constraint(
+pub(crate) fn applyweighted_orthogonality_constraint(
     basis_matrix: ArrayView2<f64>,
     constraint_matrix: ArrayView2<f64>,
     weights: Option<ArrayView1<f64>>,
@@ -3574,7 +3574,7 @@ pub fn compute_greville_abscissae(
 /// Tuple of (transform Z, projected_penalty Z'SZ) where:
 /// - Z: k × (k-2) matrix mapping raw coefficients to constrained space
 /// - S_constrained: (k-2) × (k-2) projected second-difference penalty
-pub fn compute_geometric_constraint_transform(
+pub(crate) fn compute_geometric_constraint_transform(
     knot_vector: &Array1<f64>,
     degree: usize,
     penalty_order: usize,

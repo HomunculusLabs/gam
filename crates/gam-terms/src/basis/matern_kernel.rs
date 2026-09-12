@@ -2194,7 +2194,7 @@ pub(crate) fn pure_duchon_diagonal_epsilon(
     (median * 1e-6).max(1e-12)
 }
 
-pub fn closed_form_operator_penalty_in_total_basis(
+pub(crate) fn closed_form_operator_penalty_in_total_basis(
     centers: ArrayView2<'_, f64>,
     q: usize,
     p_order: usize,
@@ -2245,7 +2245,7 @@ pub fn closed_form_operator_penalty_in_total_basis(
 /// All three matrices share the same Z + poly-pad + outer-T transform pipeline
 /// as `closed_form_operator_penalty_in_total_basis` (the transforms are
 /// linear and commute with parameter differentiation).
-pub fn closed_form_psi_derivatives_in_total_basis(
+pub(crate) fn closed_form_psi_derivatives_in_total_basis(
     centers: ArrayView2<'_, f64>,
     q: usize,
     p_order: usize,
@@ -2407,7 +2407,7 @@ pub(crate) fn duchon_pure_closed_form_pair_block_cpd_adequate(
     p_order >= cpd_required
 }
 
-pub fn operator_penalty_candidates_closed_form(
+pub(crate) fn operator_penalty_candidates_closed_form(
     centers: ArrayView2<'_, f64>,
     d0: &Array2<f64>,
     d1: &Array2<f64>,
@@ -2626,7 +2626,7 @@ pub(crate) fn closed_form_operator_penalty_in_total_basis_pure(
 }
 
 /// Pure-Duchon (κ=0 / `length_scale = None`) counterpart of
-/// [`operator_penalty_candidates_closed_form`].
+/// `operator_penalty_candidates_closed_form`.
 ///
 /// Builds the three operator penalty candidates (mass, tension, stiffness)
 /// from the pure-Duchon closed-form path, which is a polyharmonic of order
@@ -2642,7 +2642,7 @@ pub(crate) fn closed_form_operator_penalty_in_total_basis_pure(
 /// polynomial that drops out of `Δ_B^q`); in those regimes we fall back to
 /// the collocation Gram `D_q^T D_q`, which is the same regularization the
 /// pre-closed-form path used.
-pub fn operator_penalty_candidates_closed_form_pure(
+pub(crate) fn operator_penalty_candidates_closed_form_pure(
     centers: ArrayView2<'_, f64>,
     d0: &Array2<f64>,
     d1: &Array2<f64>,
@@ -3373,7 +3373,7 @@ pub(crate) fn normalize_constructive_penalty_candidate(
     })
 }
 
-pub fn build_matern_collocation_operator_matrices(
+pub(crate) fn build_matern_collocation_operator_matrices(
     centers: ArrayView2<'_, f64>,
     collocationweights: Option<ArrayView1<'_, f64>>,
     length_scale: f64,

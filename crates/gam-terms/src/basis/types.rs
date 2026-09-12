@@ -1225,7 +1225,7 @@ impl DuchonBasisSpec {
 /// Convert a Duchon spectral-power `f64` into the integer view used by the
 /// closed-form code paths. Non-finite, negative, or fractional values clamp to
 /// `0` so the validator downstream emits the canonical error.
-pub fn duchon_power_to_usize(power: f64) -> usize {
+pub(crate) fn duchon_power_to_usize(power: f64) -> usize {
     if !power.is_finite() || power < 0.0 {
         return 0;
     }

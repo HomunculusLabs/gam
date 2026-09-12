@@ -938,7 +938,7 @@ pub(crate) fn evaluate_bspline_derivative_recurrence_into(
 /// This returns derivatives in the raw spline basis. If a model uses an
 /// identifiability/constrained basis `BZ`, the caller must apply that same
 /// constraint transform in derivative space as `B'''Z`.
-pub fn evaluate_bsplinethird_derivative_scalar(
+pub(crate) fn evaluate_bsplinethird_derivative_scalar(
     x: f64,
     knot_vector: ArrayView1<f64>,
     degree: usize,
@@ -956,7 +956,7 @@ pub fn evaluate_bsplinethird_derivative_scalar(
 /// This returns derivatives in the raw spline basis. If a model uses an
 /// identifiability/constrained basis `BZ`, the caller must apply that same
 /// constraint transform in derivative space as `B''''Z`.
-pub fn evaluate_bspline_fourth_derivative_scalar(
+pub(crate) fn evaluate_bspline_fourth_derivative_scalar(
     x: f64,
     knot_vector: ArrayView1<f64>,
     degree: usize,

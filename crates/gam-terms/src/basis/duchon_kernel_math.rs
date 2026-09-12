@@ -1,7 +1,7 @@
 use crate::smooth::center_aniso_log_scales;
 use super::*;
 
-pub fn build_duchon_collocation_operator_matrices(
+pub(crate) fn build_duchon_collocation_operator_matrices(
     centers: ArrayView2<'_, f64>,
     collocationweights: Option<ArrayView1<'_, f64>>,
     length_scale: Option<f64>,
@@ -68,7 +68,7 @@ pub fn build_thin_plate_penalty_matrix(
     Ok(ThinPlatePenaltyMatrix { penalty })
 }
 
-pub fn build_duchon_collocation_operator_matriceswithworkspace(
+pub(crate) fn build_duchon_collocation_operator_matriceswithworkspace(
     centers: ArrayView2<'_, f64>,
     collocation_points: ArrayView2<'_, f64>,
     collocationweights: Option<ArrayView1<'_, f64>>,
@@ -2455,7 +2455,7 @@ pub(crate) fn points_in_aniso_y_space(points: ArrayView2<'_, f64>, eta: &[f64]) 
 /// axis every σ is 1. Nothing is clamped: rescaling the centers rescales every σ
 /// alike and leaves the contrasts unchanged. A non-finite spread is kept, so it
 /// reaches the contrasts' consumers as it is.
-pub fn knot_cloud_axis_scales(centers: ArrayView2<'_, f64>) -> Vec<f64> {
+pub(crate) fn knot_cloud_axis_scales(centers: ArrayView2<'_, f64>) -> Vec<f64> {
     let k = centers.nrows();
     let d = centers.ncols();
     if k < 2 || d == 0 {

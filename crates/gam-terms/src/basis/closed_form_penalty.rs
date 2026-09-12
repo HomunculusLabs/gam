@@ -246,7 +246,7 @@ pub(crate) fn factorial_f64(n: usize) -> f64 {
 /// - Otherwise: reduce the order to μ ∈ [-1/2, 1/2], evaluate K_μ and K_{μ+1}
 ///   by Temme's small-x series or Steed's CF2 large-x continued fraction,
 ///   then use the stable upward recurrence to return K_ν.
-pub fn bessel_k(nu: f64, x: f64) -> f64 {
+pub(crate) fn bessel_k(nu: f64, x: f64) -> f64 {
     assert!(x > 0.0 && x.is_finite(), "bessel_k requires finite x > 0");
     assert!(nu.is_finite(), "bessel_k requires finite ν");
     let nu_abs = nu.abs(); // K_{-ν} = K_ν
@@ -1283,7 +1283,7 @@ pub(crate) fn riesz_block_radial_derivatives(
 /// isotropic Duchon kernel `f(R) = isotropic_duchon_penalty(0, d, m, s as f64, κ, R)`.
 ///
 /// Used by the radial-derivative anisotropic form.  Requires `R > 0`.
-pub fn radial_derivatives_of_isotropic_duchon(
+pub(crate) fn radial_derivatives_of_isotropic_duchon(
     d: usize,
     m: usize,
     s: f64,
@@ -1788,7 +1788,7 @@ pub(crate) fn aniso_invariants_with_powers(
 ///                       − 2 ℓ κ · B_ℓ(κ) · [M_{ℓ+1}^d]^{(k)} ).
 ///
 /// Fully analytic κ partial for the radial derivative ladder.
-pub fn radial_derivatives_of_isotropic_duchon_kappa_partial(
+pub(crate) fn radial_derivatives_of_isotropic_duchon_kappa_partial(
     d: usize,
     m: usize,
     s: usize,
@@ -1868,7 +1868,7 @@ pub fn radial_derivatives_of_isotropic_duchon_kappa_partial(
 /// Composition (treat each Matérn term as a product B_ℓ(κ) · M_ℓ(R; κ)):
 ///   ∂²_κ (B_ℓ · M_ℓ) = B_ℓ'' M_ℓ + 2 B_ℓ' (-2 ℓ κ M_{ℓ+1})
 ///                   + B_ℓ (-2 ℓ M_{ℓ+1} + 4 ℓ (ℓ+1) κ² M_{ℓ+2}).
-pub fn radial_derivatives_of_isotropic_duchon_kappa_partial2(
+pub(crate) fn radial_derivatives_of_isotropic_duchon_kappa_partial2(
     d: usize,
     m: usize,
     s: usize,

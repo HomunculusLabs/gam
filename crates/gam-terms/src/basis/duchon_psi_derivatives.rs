@@ -361,7 +361,7 @@ pub(crate) fn duchon_axis_log_kappa_derivatives(
 /// Duchon penalty assembly consumes this and nothing else, so a route can only
 /// differ from another by its `direction`.
 #[inline(always)]
-pub fn duchon_direction_derivatives(
+pub(crate) fn duchon_direction_derivatives(
     direction: DuchonPsiDirection,
     value: f64,
     radial_first: f64,

@@ -2060,7 +2060,7 @@ pub fn analyze_penalty_block(penalty: &Array2<f64>) -> Result<CanonicalPenaltyBl
     analyze_penalty_block_with_op(penalty, None)
 }
 
-pub fn analyze_penalty_block_with_op(
+pub(crate) fn analyze_penalty_block_with_op(
     penalty: &Array2<f64>,
     op: Option<std::sync::Arc<dyn crate::analytic_penalties::PenaltyOp>>,
 ) -> Result<CanonicalPenaltyBlock, BasisError> {
