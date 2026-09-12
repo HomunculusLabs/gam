@@ -389,11 +389,26 @@ pub(crate) fn mobius_double_cover_coords_from_projection(
         .sum::<f64>()
         * inv)
         .sqrt();
-    let scale_floor = f64::EPSILON.sqrt();
+    // Each radial value is one `hypot` minus the mean radius (`N` hypots summed and
+    // scaled), so it rounds by at most `γ_{N+3}` of `|hypot| + mean_radius`, whose
+    // RMS over the cluster is at most twice the RMS radius: a radial spread inside
+    // that band is rounding, not a band width. The transverse coordinate is the
+    // projection itself, so only an exactly zero spread is degenerate there.
+    let rms_radius = (cluster_rows
+        .iter()
+        .map(|&row| {
+            let radius = projection[[row, 0]].hypot(projection[[row, 1]]);
+            radius * radius
+        })
+        .sum::<f64>()
+        * inv)
+        .sqrt();
+    let radial_band =
+        gam_linalg::roundoff::accumulation_growth(cluster_rows.len() + 3) * 2.0 * rms_radius;
     if !radial_sd.is_finite()
         || !transverse_sd.is_finite()
-        || radial_sd <= scale_floor
-        || transverse_sd <= scale_floor
+        || radial_sd <= radial_band
+        || transverse_sd == 0.0
     {
         return Err(format!(
             "mobius_double_cover_coords_from_projection: degenerate half-angle plane (radial sd {radial_sd}, transverse sd {transverse_sd})"
@@ -406,9 +421,10 @@ pub(crate) fn mobius_double_cover_coords_from_projection(
     // reversing it destroys that first circular moment.  Choose the stronger
     // of the two orientations, a closed-form two-symmetry comparison rather
     // than a parameter grid.
-    let moment = |orientation: f64| -> (f64, f64) {
+    let moment = |orientation: f64| -> (f64, f64, f64) {
         let mut re = 0.0_f64;
         let mut im = 0.0_f64;
+        let mut magnitude = 0.0_f64;
         for &row in cluster_rows {
             let qr = radial[row];
             let qi = transverse[row];
@@ -418,8 +434,9 @@ pub(crate) fn mobius_double_cover_coords_from_projection(
             let (sin_phase, cos_phase) = phase.sin_cos();
             re += q2_re * cos_phase + q2_im * sin_phase;
             im += q2_im * cos_phase - q2_re * sin_phase;
+            magnitude += qr * qr + qi * qi;
         }
-        (re * inv, im * inv)
+        (re * inv, im * inv, magnitude * inv)
     };
     let forward = moment(1.0);
     let reverse = moment(-1.0);
@@ -431,7 +448,13 @@ pub(crate) fn mobius_double_cover_coords_from_projection(
         (-1.0, reverse)
     };
     let moment_norm = chosen.0.hypot(chosen.1);
-    if !moment_norm.is_finite() || moment_norm <= 64.0 * f64::EPSILON {
+    // A moment term costs at most six roundings (the two squares and their
+    // difference, the cross product, the rotation's products and sum) before `N`
+    // terms are summed and scaled, and each component of a term is at most
+    // `√2·|q|²`, so the moment is uncertain by at most `2·γ_{N+6}` of the mean `|q|²`.
+    let moment_band =
+        gam_linalg::roundoff::accumulation_growth(cluster_rows.len() + 6) * 2.0 * chosen.2;
+    if !moment_norm.is_finite() || moment_norm <= moment_band {
         return Err(format!(
             "mobius_double_cover_coords_from_projection: half-angle moment is not identifiable ({moment_norm})"
         ));
