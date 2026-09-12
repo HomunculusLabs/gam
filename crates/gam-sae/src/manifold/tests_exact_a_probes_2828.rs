@@ -5,7 +5,6 @@
 use super::*;
 use crate::assignment::AssignmentMode;
 use crate::manifold::arrow_solver::DeflatedArrowSolver;
-use crate::manifold::construction::ThetaAdjointDhChannel;
 use crate::manifold::tests_sparse_curvature_operator_2500::threshold_gate_tiny_fixture;
 use gam_solve::arrow_schur::{ArrowSolveOptions, solve_arrow_newton_step_with_options};
 use ndarray::Array2;
@@ -95,7 +94,6 @@ fn resident_softmax_theta_adjoint_matches_dense_under_both_operators_2828() {
                 &rho,
                 &cache,
                 &inverse,
-                ThetaAdjointDhChannel::All,
                 false,
                 exact,
                 residual_target,

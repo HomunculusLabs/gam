@@ -5376,7 +5376,7 @@ impl SaeManifoldTerm {
     /// This is the operator whose trace against a selected inverse
     /// [`Self::deflation_block_correction`] already reports as
     /// `tr(inv·(D − DΦ[D]))`; the channels that materialize `∂H/∂ρ` as a MATRIX
-    /// (the PATH C operator map) need the operator itself, because the block they
+    /// (`penalty_curvature_operators_by_flat`) need the operator itself, because the block they
     /// contract against — the arrow factors, and hence `apply_cached_arrow_hessian`
     /// and every `A = B + ΔC` built on it — carries the CONDITIONED spectrum. A
     /// raw `D` there over-claims curvature on exactly the deflated directions,

@@ -96,16 +96,6 @@ pub(crate) fn sae_exact_a_direction_floor(
     gam_solve::arrow_schur::exact_a_direction_floor(spectral_dim, spectral_norm, b_quadratic_form)
 }
 
-/// Which subset of the joint θ-derivative operator `K_w = ∂H/∂θ_w` a dense
-/// θ-adjoint contraction assembles. Only the full set is assembled.
-#[derive(Clone, Copy)]
-pub(crate) enum ThetaAdjointDhChannel {
-    /// Every `∂H/∂θ_w` contribution: data residual curvature, the softmax
-    /// data-weight logit factor, the softmax entropy Gershgorin majorizer, and
-    /// the periodic ARD majorizer diagonal.
-    All,
-}
-
 /// One row's assembled `ΔC = A − B` blocks, in the arrow layout the streaming
 /// evidence system already uses (`ArrowRowBlock::{htt, htbeta}`).
 #[derive(Debug, Clone)]
@@ -1729,7 +1719,7 @@ impl SaeManifoldTerm {
         solve_exact_stationarity_krylov(rhs, &apply_a, &apply_b)
     }
 
-    /// PATH C (#2253) — the raw per-flat-coordinate penalty curvature operators
+    /// The raw per-flat-coordinate penalty curvature operators
     /// `M_i = ∂H_raw/∂ρ_i` at a frozen inner state, keyed by flat outer coordinate.
     /// This is the single assembly source for both consumers: dense statistical
     /// channels use its raw product, while arrow-factor channels pass that product
@@ -1739,8 +1729,7 @@ impl SaeManifoldTerm {
     /// on atom `k`'s β-block for smoothing; `w_row·max(α cos κt,0)` on the active
     /// row-local t-slots for periodic ARD (`w_row·α` Euclidean); the softmax
     /// Gershgorin majorizer `w_row·diag(Σ_j|H_kj|)` on the logit slots for the
-    /// sparse coordinate. The sparse refusals (compact top-k layout, non-softmax
-    /// prior) match ch4's so both channels decline the same unmodelled cases.
+    /// sparse coordinate, which refuses a compact top-k layout and a non-softmax prior.
     fn raw_penalty_curvature_operators_by_flat(
         &self,
         rho: &SaeManifoldRho,
@@ -1953,7 +1942,7 @@ impl SaeManifoldTerm {
         Ok(operators)
     }
 
-    /// PATH C (#2253) CH5 — the ρ-derivative of the EXACT-minus-majorizer
+    /// The ρ-derivative of the EXACT-minus-majorizer
     /// stationarity correction, `∂(ΔC)/∂ρ_i` where `ΔC = A − B`
     /// (`Self::apply_exact_hessian_minus_b`), keyed by flat coordinate. The IFT
     /// sensitivity `∂a/∂ρ_i = A⁺(∂Γ/∂ρ_i − (∂A/∂ρ_i)a)` differentiates the EXACT
@@ -2153,22 +2142,6 @@ impl SaeManifoldTerm {
         Ok(derivatives)
     }
 
-    /// PATH C (#2253) CH5 — dense reconstruction of the θ-adjoint contraction
-    /// `Γ_w = tr(inv · K_w)`, `K_w = ∂H/∂θ_w`, for an ARBITRARY dense joint
-    /// inverse `inv` (dim×dim over the `(t, β)` blocks) and a chosen subset of
-    /// the `K_w` operator ([`ThetaAdjointDhChannel`]).
-    ///
-    /// With `inv = G` and `ThetaAdjointDhChannel::All` this reproduces the
-    /// production [`Self::logdet_theta_adjoint`] (self-checked by the FD gate);
-    /// Feeding the TWISTED inverse `−G M_i G` gives the part-(a) term
-    /// `−tr(G M_i G K_w)` of `dΓ/dρ_i`; the two MIXED channels give part-(b).
-    ///
-    /// Covered config ONLY (validated by the caller): softmax assignment, dense
-    /// per-atom row layout (`last_row_layout = None`), no per-row deflation, no
-    /// border frames, no ordered Beta--Bernoulli. The `dh` assembly mirrors the
-    /// production builder's inner loop for exactly that config; the softmax
-    /// diagonal `assignment_prior_hdiag_derivative_entry` is 0 for softmax and is
-    /// omitted here for the same reason.
     /// #2330 Patch D — the t--β residual-curvature second-derivative leg
     /// `⟨error_metric, ∂²(gate_kβ·φ_mβ)/∂θ_a∂θ_w⟩` (term-2 of `∂ΔC_tβ[a,β]/∂θ_w`;
     /// the term-1 `⟨jets.first(w), jets.beta_deriv(a,β)⟩` is added inline). The
@@ -2433,12 +2406,13 @@ impl SaeManifoldTerm {
         sqrt_w * gate_factor * acc
     }
 
+    /// Dense reconstruction of the θ-adjoint `Γ_w = tr(inv · ∂H/∂θ_w)` against an
+    /// arbitrary dense joint inverse `inv` (`dim×dim` over the `(t, β)` blocks).
     pub(crate) fn logdet_theta_adjoint_dense(
         &self,
         rho: &SaeManifoldRho,
         cache: &ArrowFactorCache,
         inv: &Array2<f64>,
-        channel: ThetaAdjointDhChannel,
         skip_deflation_dk: bool,
         exact_a: bool,
         // #2330 Patch D — the data target, required ONLY for the exact-A
@@ -2448,9 +2422,8 @@ impl SaeManifoldTerm {
         residual_target: Option<ArrayView2<'_, f64>>,
     ) -> Result<SaeArrowVector, String> {
         // #2330 — `skip_deflation_dk` drops the Daleckii–Krein deflation
-        // correction, leaving the raw trace contraction. The split probe uses it
-        // to attribute the g3 cross non-conservation to the trace vs the
-        // frozen-DK piece of the twist. Production callers pass `false`.
+        // correction, leaving the raw trace contraction (a deflation-blind
+        // counterfactual for tests). Production callers pass `false`.
         let ard_precisions = self.validated_ard_precisions(rho)?;
         let total_t = cache.delta_t_len();
         let k = cache.k;
@@ -2461,15 +2434,6 @@ impl SaeManifoldTerm {
         let second_jets = self.atom_second_jets()?;
         let border = self.border_channels_for_cache(cache)?;
         let whiten_row_jets = self.whiten_logdet_row_jets();
-        let want_data = matches!(channel, ThetaAdjointDhChannel::All);
-        let want_entropy = matches!(
-            channel,
-            ThetaAdjointDhChannel::All
-        );
-        let want_ard = matches!(
-            channel,
-            ThetaAdjointDhChannel::All
-        );
         // `1/τ` (always, for the softmax data-weight logit factor) and the
         // entropy Gershgorin majorizer scale `λ_sparse·s/τ²` (only a live free
         // logit, i.e. `k_atoms > 1`, carries the sparsity penalty).
@@ -2601,44 +2565,42 @@ impl SaeManifoldTerm {
                 for a in 0..q {
                     for b in 0..q {
                         let mut dh = 0.0_f64;
-                        if want_data {
-                            dh += match (logit_w, jets.vars[a], jets.vars[b]) {
-                                (
-                                    Some(atom_w),
-                                    SaeLocalRowVar::Coord { atom: atom_a, .. },
-                                    SaeLocalRowVar::Coord { atom: atom_b, .. },
-                                ) => {
-                                    sae_dot(jets.first(a), jets.first(b))
-                                        * (Self::softmax_data_weight_product_logit_factor(
-                                            a_soft, atom_a, atom_b, atom_w, inv_tau,
-                                        ) + if patchd_is_obb {
-                                            // #2330 / #2371 -- ordered-Beta--Bernoulli gate
-                                            // gradient of the GN curvature. `B[a,b] = <J_a, J_b>`
-                                            // and each leg `J_k` carries its INDEPENDENT gate
-                                            // `g_k = sigma(l_k/tau)` linearly, so
-                                            // `dB/dl_w = [1(w==a) + 1(w==b)] * (1-g_w)/tau * B`.
-                                            // The matching leg gate is `g_w`, so a single
-                                            // `(1 - a_soft[atom_w])` is correct per side:
-                                            // same-atom-both gives sided=2 (bitwise the prior
-                                            // landed value), one-sided cross-atom gives sided=1
-                                            // (the #2371 term wrongly dropped as exactly zero).
-                                            // The softmax factor above is 0 here (`inv_tau` is
-                                            // 0 for non-softmax modes), so softmax is unchanged.
-                                            let sided = (atom_w == atom_a) as u32
-                                                + (atom_w == atom_b) as u32;
-                                            sided as f64
-                                                * (1.0 - a_soft[atom_w])
-                                                * patchd_obb_inv_tau
-                                        } else {
-                                            0.0
-                                        })
-                                }
-                                _ => {
-                                    sae_dot(jets.second(a, w), jets.first(b))
-                                        + sae_dot(jets.first(a), jets.second(b, w))
-                                }
-                            };
-                        }
+                        dh += match (logit_w, jets.vars[a], jets.vars[b]) {
+                            (
+                                Some(atom_w),
+                                SaeLocalRowVar::Coord { atom: atom_a, .. },
+                                SaeLocalRowVar::Coord { atom: atom_b, .. },
+                            ) => {
+                                sae_dot(jets.first(a), jets.first(b))
+                                    * (Self::softmax_data_weight_product_logit_factor(
+                                        a_soft, atom_a, atom_b, atom_w, inv_tau,
+                                    ) + if patchd_is_obb {
+                                        // #2330 / #2371 -- ordered-Beta--Bernoulli gate
+                                        // gradient of the GN curvature. `B[a,b] = <J_a, J_b>`
+                                        // and each leg `J_k` carries its INDEPENDENT gate
+                                        // `g_k = sigma(l_k/tau)` linearly, so
+                                        // `dB/dl_w = [1(w==a) + 1(w==b)] * (1-g_w)/tau * B`.
+                                        // The matching leg gate is `g_w`, so a single
+                                        // `(1 - a_soft[atom_w])` is correct per side:
+                                        // same-atom-both gives sided=2 (bitwise the prior
+                                        // landed value), one-sided cross-atom gives sided=1
+                                        // (the #2371 term wrongly dropped as exactly zero).
+                                        // The softmax factor above is 0 here (`inv_tau` is
+                                        // 0 for non-softmax modes), so softmax is unchanged.
+                                        let sided = (atom_w == atom_a) as u32
+                                            + (atom_w == atom_b) as u32;
+                                        sided as f64
+                                            * (1.0 - a_soft[atom_w])
+                                            * patchd_obb_inv_tau
+                                    } else {
+                                        0.0
+                                    })
+                            }
+                            _ => {
+                                sae_dot(jets.second(a, w), jets.first(b))
+                                    + sae_dot(jets.first(a), jets.second(b, w))
+                            }
+                        };
                         if let Some(ctx) = patchd_ctx.as_ref() {
                             dh += self.patchd_residual_third_leg(
                                 ctx,
@@ -2647,7 +2609,7 @@ impl SaeManifoldTerm {
                                 jets.vars[w],
                             );
                         }
-                        if want_data && exact_a {
+                        if exact_a {
                             // #2330 Patch D (1a) — `A = B + ΔC` carries the residual
                             // curvature `ΔC_tt[a,b] = ⟨error_metric, ∂²f_ab⟩` that the
                             // Gauss-Newton assembly drops, and that block moves with
@@ -2664,49 +2626,42 @@ impl SaeManifoldTerm {
                             // channel `SaeRowJets` does not expose.
                             dh += sae_dot(jets.first(w), jets.second(a, b));
                         }
-                        if want_entropy {
-                            if let (
-                                Some(atom_w),
-                                SaeLocalRowVar::Logit { atom: atom_a },
-                                SaeLocalRowVar::Logit { atom: atom_b },
-                            ) = (logit_w, jets.vars[a], jets.vars[b])
-                            {
-                                if atom_a == atom_b {
-                                    dh += w_row
-                                        * active_softmax_majorizer_logit_derivative_entry(
-                                            a_soft,
-                                            atom_a,
-                                            atom_w,
-                                            m_log_mean,
-                                            entropy_scale,
-                                            inv_tau,
-                                        );
-                                }
+                        if let (
+                            Some(atom_w),
+                            SaeLocalRowVar::Logit { atom: atom_a },
+                            SaeLocalRowVar::Logit { atom: atom_b },
+                        ) = (logit_w, jets.vars[a], jets.vars[b])
+                        {
+                            if atom_a == atom_b {
+                                dh += w_row
+                                    * active_softmax_majorizer_logit_derivative_entry(
+                                        a_soft,
+                                        atom_a,
+                                        atom_w,
+                                        m_log_mean,
+                                        entropy_scale,
+                                        inv_tau,
+                                    );
                             }
                         }
-                        if want_ard && a == b && a == w {
+                        if a == b && a == w {
                             if let SaeLocalRowVar::Coord { atom, axis } = jets.vars[a] {
                                 if !ard_precisions[atom].is_empty() {
-                                    let include = match channel {
-                                        _ => true,
+                                    dh += if exact_a {
+                                        self.ard_exact_hessian_derivative(
+                                            ard_precisions[atom][axis],
+                                            row,
+                                            atom,
+                                            axis,
+                                        )
+                                    } else {
+                                        self.ard_majorized_hessian_derivative(
+                                            ard_precisions[atom][axis],
+                                            row,
+                                            atom,
+                                            axis,
+                                        )
                                     };
-                                    if include {
-                                        dh += if exact_a {
-                                            self.ard_exact_hessian_derivative(
-                                                ard_precisions[atom][axis],
-                                                row,
-                                                atom,
-                                                axis,
-                                            )
-                                        } else {
-                                            self.ard_majorized_hessian_derivative(
-                                                ard_precisions[atom][axis],
-                                                row,
-                                                atom,
-                                                axis,
-                                            )
-                                        };
-                                    }
                                 }
                             }
                         }
@@ -2724,98 +2679,92 @@ impl SaeManifoldTerm {
                         defl_spectrum,
                     );
                 }
-                if want_data {
-                    for a in 0..q {
-                        for (beta_pos, ch) in border.iter().enumerate() {
-                            // #2330 Patch D (1a), t--beta leg: `ΔC_tβ[a,β] =
-                            // ⟨error_metric, ∂²f_aβ⟩` moves with `θ_w` through the
-                            // residual exactly as the t--t block does.
-                            let mut dh = sae_dot(jets.second(a, w), jets.beta(beta_pos))
-                                + sae_dot(jets.first(a), jets.beta_deriv(w, beta_pos))
-                                + if exact_a {
-                                    sae_dot(jets.first(w), jets.beta_deriv(a, beta_pos))
-                                } else {
-                                    0.0
-                                };
-                            if let Some(ctx) = patchd_ctx.as_ref() {
-                                dh += self.patchd_residual_third_leg_beta(
-                                    ctx,
-                                    jets.vars[a],
-                                    jets.vars[w],
-                                    ch,
-                                );
-                            }
-                            gamma += 2.0 * inv[[base + a, total_t + ch.index]] * dh;
+                for a in 0..q {
+                    for (beta_pos, ch) in border.iter().enumerate() {
+                        // #2330 Patch D (1a), t--beta leg: `ΔC_tβ[a,β] =
+                        // ⟨error_metric, ∂²f_aβ⟩` moves with `θ_w` through the
+                        // residual exactly as the t--t block does.
+                        let mut dh = sae_dot(jets.second(a, w), jets.beta(beta_pos))
+                            + sae_dot(jets.first(a), jets.beta_deriv(w, beta_pos))
+                            + if exact_a {
+                                sae_dot(jets.first(w), jets.beta_deriv(a, beta_pos))
+                            } else {
+                                0.0
+                            };
+                        if let Some(ctx) = patchd_ctx.as_ref() {
+                            dh += self.patchd_residual_third_leg_beta(
+                                ctx,
+                                jets.vars[a],
+                                jets.vars[w],
+                                ch,
+                            );
                         }
+                        gamma += 2.0 * inv[[base + a, total_t + ch.index]] * dh;
                     }
-                    for (beta_i, ch_i) in border.iter().enumerate() {
-                        for (beta_j, ch_j) in border.iter().enumerate() {
-                            let dh = sae_dot(jets.beta_deriv(w, beta_i), jets.beta(beta_j))
-                                + sae_dot(jets.beta(beta_i), jets.beta_deriv(w, beta_j));
-                            gamma += inv[[total_t + ch_i.index, total_t + ch_j.index]] * dh;
-                        }
+                }
+                for (beta_i, ch_i) in border.iter().enumerate() {
+                    for (beta_j, ch_j) in border.iter().enumerate() {
+                        let dh = sae_dot(jets.beta_deriv(w, beta_i), jets.beta(beta_j))
+                            + sae_dot(jets.beta(beta_i), jets.beta_deriv(w, beta_j));
+                        gamma += inv[[total_t + ch_i.index, total_t + ch_j.index]] * dh;
                     }
                 }
                 gamma_t[base + w] = gamma;
             }
-            if want_data {
-                for (w_beta_pos, w_channel) in border.iter().enumerate() {
-                    let mut gamma = 0.0_f64;
-                    let mut dh_mat = if !defl_live {
-                        Array2::<f64>::zeros((0, 0))
-                    } else {
-                        Array2::<f64>::zeros((q, q))
-                    };
-                    for a in 0..q {
-                        for b in 0..q {
-                            let mut dh = sae_dot(jets.beta_l_deriv(a, w_beta_pos), jets.first(b))
-                                + sae_dot(jets.first(a), jets.beta_l_deriv(b, w_beta_pos));
-                            if exact_a {
-                                dh += sae_dot(jets.beta(w_beta_pos), jets.second(a, b));
-                            }
-                            if let Some(ctx) = patchd_ctx.as_ref() {
-                                dh += self.patchd_residual_third_leg_beta(
-                                    ctx, jets.vars[a], jets.vars[b], w_channel,
-                                );
-                            }
-                            if defl_live {
-                                dh_mat[[a, b]] = dh;
-                            }
-                            gamma += inv[[base + b, base + a]] * dh;
+            for (w_beta_pos, w_channel) in border.iter().enumerate() {
+                let mut gamma = 0.0_f64;
+                let mut dh_mat = if !defl_live {
+                    Array2::<f64>::zeros((0, 0))
+                } else {
+                    Array2::<f64>::zeros((q, q))
+                };
+                for a in 0..q {
+                    for b in 0..q {
+                        let mut dh = sae_dot(jets.beta_l_deriv(a, w_beta_pos), jets.first(b))
+                            + sae_dot(jets.first(a), jets.beta_l_deriv(b, w_beta_pos));
+                        if exact_a {
+                            dh += sae_dot(jets.beta(w_beta_pos), jets.second(a, b));
                         }
-                    }
-                    if defl_live && !skip_deflation_dk {
-                        gamma -= Self::deflation_block_correction(
-                            &inv_vv_block,
-                            &dh_mat,
-                            defl_dirs,
-                            defl_spectrum,
-                        );
-                    }
-                    for a in 0..q {
-                        for (beta_pos, ch) in border.iter().enumerate() {
-                            let mut dh = sae_dot(jets.beta_l_deriv(a, w_beta_pos), jets.beta(beta_pos));
-                            if exact_a {
-                                dh += sae_dot(jets.beta(w_beta_pos), jets.beta_deriv(a, beta_pos));
-                            }
-                            gamma += 2.0 * inv[[base + a, total_t + ch.index]] * dh;
+                        if let Some(ctx) = patchd_ctx.as_ref() {
+                            dh += self.patchd_residual_third_leg_beta(
+                                ctx, jets.vars[a], jets.vars[b], w_channel,
+                            );
                         }
+                        if defl_live {
+                            dh_mat[[a, b]] = dh;
+                        }
+                        gamma += inv[[base + b, base + a]] * dh;
                     }
-                    gamma_beta[w_channel.index] += gamma;
                 }
+                if defl_live && !skip_deflation_dk {
+                    gamma -= Self::deflation_block_correction(
+                        &inv_vv_block,
+                        &dh_mat,
+                        defl_dirs,
+                        defl_spectrum,
+                    );
+                }
+                for a in 0..q {
+                    for (beta_pos, ch) in border.iter().enumerate() {
+                        let mut dh = sae_dot(jets.beta_l_deriv(a, w_beta_pos), jets.beta(beta_pos));
+                        if exact_a {
+                            dh += sae_dot(jets.beta(w_beta_pos), jets.beta_deriv(a, beta_pos));
+                        }
+                        gamma += 2.0 * inv[[base + a, total_t + ch.index]] * dh;
+                    }
+                }
+                gamma_beta[w_channel.index] += gamma;
             }
         }
-        if want_data && exact_a {
+        if exact_a {
             gamma_beta += &self.exact_decoder_prior_theta_trace(
                 cache, inv.slice(s![total_t.., total_t..]),
             )?;
         }
         // Fold the entire ordered-BB prior derivative into the logit slots.
-        if want_data {
-            if let Some(data) = patchd_obb_adjoint.as_ref() {
-                let obb = self.dense_exact_a_ordered_bb_logit_theta_adjoint(cache, inv, data)?;
-                gamma_t += &obb;
-            }
+        if let Some(data) = patchd_obb_adjoint.as_ref() {
+            let obb = self.dense_exact_a_ordered_bb_logit_theta_adjoint(cache, inv, data)?;
+            gamma_t += &obb;
         }
         Ok(SaeArrowVector {
             t: gamma_t,
@@ -4494,7 +4443,6 @@ impl SaeManifoldTerm {
             rho,
             cache,
             &a_pinv,
-            ThetaAdjointDhChannel::All,
             true,
             true,
             Some(target),
@@ -4930,7 +4878,6 @@ mod test_support {
     use super::Side;
     use super::{
         ArrowFactorCache, DeflatedArrowSolver, SaeArrowVector, SaeManifoldRho,
-        ThetaAdjointDhChannel,
     };
     use gam_linalg::faer_ndarray::FaerEigh;
     use ndarray::{Array1, Array2};
@@ -5587,7 +5534,6 @@ mod test_support {
                 rho,
                 cache,
                 &geometry.joint_pricing.a_derivative,
-                ThetaAdjointDhChannel::All,
                 true,
                 true,
                 Some(target),

@@ -25,7 +25,6 @@
 //! exactly those directions. These gates pin both halves.
 
 use super::*;
-use crate::manifold::construction::ThetaAdjointDhChannel;
 use ndarray::{Array1, Array2, s};
 
 /// A `ThresholdGate` twin of `gamma_fd_tiny_fixture`: two periodic atoms on one
@@ -740,7 +739,6 @@ fn dense_theta_adjoint_is_not_interchangeable_for_a_threshold_gate_2500() {
                 &rho,
                 &cache,
                 &g,
-                ThetaAdjointDhChannel::All,
                 false,
                 false,
                 None,

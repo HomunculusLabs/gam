@@ -88,7 +88,6 @@ fn full_basis_bundle(cache: &ArrowFactorCache) -> (Vec<Array1<f64>>, Vec<Array1<
 /// on an indefinite fit or on a structurally null direction with zero derivative.
 #[test]
 fn sae_logdet_theta_adjoint_from_probes_matches_dense_on_deflated_rows_2712() {
-    use crate::manifold::construction::ThetaAdjointDhChannel;
     use gam_linalg::utils::{SMOOTH_PSD_CLAMP_TEMPERATURE, SPECTRAL_DEFLATION_REL_FLOOR};
 
     let (mut term, target, rho) = small_two_atom_periodic_term();
@@ -136,7 +135,6 @@ fn sae_logdet_theta_adjoint_from_probes_matches_dense_on_deflated_rows_2712() {
             &rho,
             &cache,
             &inverse,
-            ThetaAdjointDhChannel::All,
             false,
             false,
             None,
@@ -147,7 +145,6 @@ fn sae_logdet_theta_adjoint_from_probes_matches_dense_on_deflated_rows_2712() {
             &rho,
             &cache,
             &inverse,
-            ThetaAdjointDhChannel::All,
             true,
             false,
             None,
@@ -300,7 +297,6 @@ fn row_selected_inverse_from_probes_matches_dense_on_spectrally_deflated_rows_27
 /// requires a derivative-sensitive deflated fixture.
 #[test]
 fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
-    use crate::manifold::construction::ThetaAdjointDhChannel;
 
     let (mut term, target, rho) = small_two_atom_periodic_term();
     let n = term.n_obs();
@@ -335,7 +331,6 @@ fn sae_logdet_theta_adjoint_from_probes_matches_dense_softmax_2080() {
             &rho,
             &cache,
             &inverse,
-            ThetaAdjointDhChannel::All,
             false,
             false,
             None,

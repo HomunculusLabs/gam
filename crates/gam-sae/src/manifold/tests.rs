@@ -4685,7 +4685,6 @@ fn exact_a_ard_operator_derivative_is_the_unmajorized_hessian_2515() {
 /// and by a margin far above the tolerance it then demands they agree within.
 #[test]
 fn from_probes_exact_a_theta_adjoint_matches_dense_2515() {
-    use crate::manifold::construction::ThetaAdjointDhChannel;
     let n = 24usize;
     let coords = Array2::from_shape_fn((n, 1), |(row, _)| (row as f64 + 0.25) / n as f64);
     let (phi, jet) = periodic_basis(&coords);
@@ -4745,7 +4744,6 @@ fn from_probes_exact_a_theta_adjoint_matches_dense_2515() {
             &rho,
             &cache,
             &inv,
-            ThetaAdjointDhChannel::All,
             true,
             true,
             None,
@@ -4756,7 +4754,6 @@ fn from_probes_exact_a_theta_adjoint_matches_dense_2515() {
             &rho,
             &cache,
             &inv,
-            ThetaAdjointDhChannel::All,
             true,
             false,
             None,

@@ -1805,7 +1805,6 @@ mod tests_trace_adjoint_dense_parity_2333 {
                 &rho,
                 &cache,
                 &joint_inverse,
-                ThetaAdjointDhChannel::All,
                 false,
                 false,
                 None,

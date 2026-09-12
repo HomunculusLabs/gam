@@ -196,7 +196,6 @@ fn softmax_trace_whitening_prefold_matches_dense_adjoint_2333() {
             &rho,
             &cache,
             inverse,
-            ThetaAdjointDhChannel::All,
             false,
             false,
             None,
