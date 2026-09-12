@@ -172,7 +172,7 @@ The dictionary supports four gating families (`assignment="ordered_beta_bernoull
 `gamfit.torch.ManifoldSAE` tensor adapter over the same converged native fit.
 Around it: `select_topology`
 to choose an atom's shape by evidence; `sae_checkpoint_dynamics` to track
-atoms across training checkpoints; `gamfit.crosscoder.Crosscoder` and
+atoms across training checkpoints; `sae_crosscoder_fit` and
 `layer_transport_fit` / `layer_transport_ladder` for cross-layer
 dictionaries; and `gamfit.identifiability` factor-recovery diagnostics.
 

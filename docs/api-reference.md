@@ -1272,11 +1272,6 @@ These symbols are re-exported at the top level for convenience but their
 implementations live behind the optional `torch` dependency; accessing them
 without torch installed raises `AttributeError`. See [torch.md](torch.md).
 
-::: gamfit.crosscoder.Crosscoder
-    options:
-      show_root_heading: true
-      heading_level: 3
-
 ::: gamfit.torch.interchange.InterchangeSwapDecoder
     options:
       show_root_heading: true

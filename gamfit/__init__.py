@@ -412,7 +412,6 @@ except _metadata.PackageNotFoundError:
 # Names whose implementation lives behind the optional ``torch`` extra. They
 # are loaded lazily while keeping the cold-start import path torch-free.
 _LAZY_TORCH_ATTRS: dict[str, tuple[str, str]] = {
-    "Crosscoder": ("gamfit.crosscoder", "Crosscoder"),
     "PoincareAtoms": ("gamfit.torch.hyperbolic", "PoincareAtoms"),
     "InterchangeSwapDecoder": ("gamfit.torch.interchange", "InterchangeSwapDecoder"),
 }
