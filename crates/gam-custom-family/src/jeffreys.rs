@@ -662,18 +662,31 @@ pub(crate) fn custom_family_joint_jeffreys_second_order_completion<
             z_joint.view(),
         )?;
         if plan.hessian_motion_active() {
-            let axes = family
-                .joint_jeffreys_information_directional_derivative_all_axes_with_specs(
-                    states, specs,
-                )?
-                .ok_or_else(|| {
-                    CustomFamilyError::trial_point(
-                        "active Jeffreys gate/floor motion requires exact first information \
-                         derivatives"
-                            .to_string(),
-                    )
-                })?;
-            Some(plan.hessian_motion(&axes)?)
+            // A family that forms the rotated rows hands them over, and no `p × p` axis
+            // matrix is built (#1082).
+            let rotated = family
+                .joint_jeffreys_information_directional_derivative_rotated_all_axes_with_specs(
+                    states,
+                    specs,
+                    plan.ambient_eigenbasis().view(),
+                )?;
+            match rotated {
+                Some(rows) => Some(plan.hessian_motion_from_rotated_rows(&rows)?),
+                None => {
+                    let axes = family
+                        .joint_jeffreys_information_directional_derivative_all_axes_with_specs(
+                            states, specs,
+                        )?
+                        .ok_or_else(|| {
+                            CustomFamilyError::trial_point(
+                                "active Jeffreys gate/floor motion requires exact first information \
+                                 derivatives"
+                                    .to_string(),
+                            )
+                        })?;
+                    Some(plan.hessian_motion(&axes)?)
+                }
+            }
         } else {
             None
         }

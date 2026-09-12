@@ -1812,15 +1812,9 @@ impl JointJeffreysPlan {
                 hdots.len()
             ));
         }
-        let mut motion = JointJeffreysHessianMotion {
-            extra_trace_weight: Array2::zeros((p, p)),
-            remainder: Array2::zeros((p, p)),
-            extra_reduced_weight: Array2::zeros((self.reduced_dim, self.reduced_dim)),
-        };
         if !self.hessian_motion_active() {
-            return Ok(motion);
+            return Ok(self.inactive_hessian_motion());
         }
-        let m = self.reduced_dim;
         let basis = self.z_j.dot(&self.evecs);
         let mut reduced = Vec::with_capacity(p);
         for (axis, hdot) in hdots.iter().enumerate() {
@@ -1832,6 +1826,60 @@ impl JointJeffreysPlan {
             }
             reduced.push(symmetric_basis_contraction(hdot.view(), basis.view()));
         }
+        Ok(self.hessian_motion_from_reduced(basis, reduced))
+    }
+
+    /// [`Self::hessian_motion`] from the axes already rotated into
+    /// [`Self::ambient_eigenbasis`]: row `a` of `rows` is `vec(sym(Uᵀ Hdot[e_a] U))`, the
+    /// reduced object the dense form contracts, so no `p × p` axis matrix is needed (#1082).
+    pub fn hessian_motion_from_rotated_rows(
+        &self,
+        rows: &Array2<f64>,
+    ) -> Result<JointJeffreysHessianMotion, String> {
+        let p = self.coefficient_dim();
+        let m = self.reduced_dim;
+        if rows.dim() != (p, m * m) {
+            return Err(format!(
+                "joint Jeffreys Hessian motion: rotated rows have shape {:?}, expected ({p}, {})",
+                rows.dim(),
+                m * m
+            ));
+        }
+        if !self.hessian_motion_active() {
+            return Ok(self.inactive_hessian_motion());
+        }
+        let basis = self.z_j.dot(&self.evecs);
+        let reduced = rows
+            .outer_iter()
+            .map(|row| {
+                row.to_owned()
+                    .into_shape_with_order((m, m))
+                    .expect("each rotated axis row holds one m x m block")
+            })
+            .collect();
+        Ok(self.hessian_motion_from_reduced(basis, reduced))
+    }
+
+    /// The zero motion of a saturated gate and a fixed floor.
+    fn inactive_hessian_motion(&self) -> JointJeffreysHessianMotion {
+        let p = self.coefficient_dim();
+        JointJeffreysHessianMotion {
+            extra_trace_weight: Array2::zeros((p, p)),
+            remainder: Array2::zeros((p, p)),
+            extra_reduced_weight: Array2::zeros((self.reduced_dim, self.reduced_dim)),
+        }
+    }
+
+    /// The motion from `basis = Z_J V` and the reduced axis derivatives
+    /// `reduced[a] = sym(Uᵀ Hdot[e_a] U)` of an active motion.
+    fn hessian_motion_from_reduced(
+        &self,
+        basis: Array2<f64>,
+        reduced: Vec<Array2<f64>>,
+    ) -> JointJeffreysHessianMotion {
+        let p = self.coefficient_dim();
+        let m = self.reduced_dim;
+        let mut motion = self.inactive_hessian_motion();
         let gate = self.gate_weight;
         let (g1, g2) = conditioning_gate_weight_grad(self.lambda_min, self.lambda_max);
         let (g11, g12, g22) = conditioning_gate_weight_hess(self.lambda_min, self.lambda_max);
@@ -1955,7 +2003,7 @@ impl JointJeffreysPlan {
                 }
             }
         }
-        Ok(motion)
+        motion
     }
 
     fn coefficient_dim(&self) -> usize {
@@ -5357,6 +5405,67 @@ mod tests {
             per_axis_error.contains("requires a second directional information derivative"),
             "unexpected per-axis derivative-contract error: {per_axis_error}"
         );
+    }
+
+    /// #1082: the gate and floor motion from rotated axis rows equals the dense form bitwise on
+    /// rows formed with the same congruence, over the full span and a narrower Jeffreys span.
+    #[test]
+    fn hessian_motion_from_rotated_rows_matches_the_dense_axes_bitwise_1082() {
+        let p = 4usize;
+        let h0 = array![
+            [30.0, 1.0, 0.5, 0.2],
+            [1.0, 12.0, 0.3, 0.1],
+            [0.5, 0.3, 5.0, 0.4],
+            [0.2, 0.1, 0.4, 1.5],
+        ];
+        let make_sym = |seed: f64| -> Array2<f64> {
+            let a = Array2::from_shape_fn((p, p), |(i, j)| {
+                (seed + 0.37 * i as f64 - 0.19 * j as f64).sin()
+                    + 0.5 * ((i + j) as f64 * seed).cos()
+            });
+            (&a + &a.t()).mapv(|v| 0.5 * v)
+        };
+        let hdots: Vec<Array2<f64>> = (0..p).map(|a| make_sym(1.0 + a as f64)).collect();
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        let narrow = array![
+            [1.0, 0.0, 0.0],
+            [0.0, half, 0.0],
+            [0.0, half, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let bitwise = |left: &Array2<f64>, right: &Array2<f64>| {
+            left.dim() == right.dim()
+                && left.iter().zip(right.iter()).all(|(a, b)| a.to_bits() == b.to_bits())
+        };
+        for z in [Array2::<f64>::eye(p), narrow] {
+            let width = z.ncols();
+            let plan = JointJeffreysPlan::prepare(h0.view(), z.view()).expect("Jeffreys plan");
+            assert!(
+                plan.hessian_motion_active(),
+                "positive control: span width {width}: the gate-band spectrum must move the gate"
+            );
+            let dense = plan.hessian_motion(&hdots).expect("dense motion");
+            let rows = gam_model_api::jeffreys_rotated_axis_rows(&hdots, plan.ambient_eigenbasis().view())
+                .expect("rotated dense axes");
+            let rotated = plan
+                .hessian_motion_from_rotated_rows(&rows)
+                .expect("motion from rotated rows");
+            let magnitude = dense.remainder.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+            assert!(
+                magnitude > 0.0,
+                "positive control: span width {width}: the motion remainder must not vanish"
+            );
+            for (label, dense_values, rows_values) in [
+                ("remainder", &dense.remainder, &rotated.remainder),
+                ("extra_trace_weight", &dense.extra_trace_weight, &rotated.extra_trace_weight),
+                ("extra_reduced_weight", &dense.extra_reduced_weight, &rotated.extra_reduced_weight),
+            ] {
+                assert!(
+                    bitwise(dense_values, rows_values),
+                    "span width {width}: {label} from rows must equal the dense motion bitwise"
+                );
+            }
+        }
     }
 
     /// #1082: the Jeffreys term and the drift base from rotated axis rows, over the full span
