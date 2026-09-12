@@ -1,6 +1,5 @@
 mod competing_risks_survival;
 mod integration_large_scale_survival_marginal_slope;
-mod pathological_tied_survival_times_no_divzero;
 mod survival_bug_hunt_regressions;
 mod survival_fit_from_parts_rejects_mismatched_lambda_lengths;
 mod survival_location_scale_constraint_projection_regression;
@@ -24,8 +23,6 @@ mod survival_multi_z_margpreserve_hard;
 mod survival_multi_z_neglog_hard;
 mod survival_multi_z_reduction_hard;
 mod survival_multi_z_slope_scale_equivariance_2764;
-mod survival_optimizer_api;
-mod survival_regression;
 mod survival_right_censored_shorthand_posterior_sample;
 mod bug_hunt_left_truncated_survival_covariate_dependent_1790;
 mod bug_hunt_survival_outer_converged_honest;

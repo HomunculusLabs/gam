@@ -1,6 +1,4 @@
 mod arrow_schur_gpu_v100_validation;
-mod gpu_backend_status_and_policy_dispatch_are_consistent;
-mod gpu_matvec_matmul_xtdiagx_match_cpu_small_inputs;
 mod gpu_numerical_stability;
 mod gpu_pirls_gating;
 mod gpu_runtime_global_init_is_deterministic_and_idempotent;

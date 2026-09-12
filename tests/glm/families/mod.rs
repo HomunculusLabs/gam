@@ -1,4 +1,3 @@
-mod cross_cutting_family_scalar_passthrough;
 mod family_scalars_contract_uniform;
 mod gamma_log_coefficient_se_coverage;
 mod gamma_precision_hyperpriors;

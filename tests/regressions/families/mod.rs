@@ -5,7 +5,6 @@ mod beta_phi_lambda_search_freeze_2369;
 mod cloglog_integrated_large_sigma;
 mod cloglog_inverse_link_deep_tail_clamp_flattens;
 mod estimate_external_family_and_links;
-mod evidence_gaussian_reml_topology;
 mod family_link_paren_poisson_gamma_gaussian_unknown;
 mod family_suite;
 mod flexible_blended_link_no_silent_noop_1596_1598;

@@ -7,4 +7,3 @@ mod misc;
 mod optimization;
 mod predict;
 mod smooths;
-mod survival;

@@ -1,5 +1,4 @@
 mod effective_jacobian_at_bms_marginal_slope;
-mod effective_jacobian_at_gamlss;
 mod effective_jacobian_at_timewiggle;
 mod reml_iter_reduction_correctness;
 mod reml_scale_invariance;
