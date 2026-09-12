@@ -1909,7 +1909,7 @@ fn audit_identifiability_impl(
                 col_s2.get(jb).copied().unwrap_or(1.0),
                 n,
             );
-            let shift_note = if pair.bias_shift.abs() > 1e-8 {
+            let shift_note = if pair.bias_shift != 0.0 {
                 format!(" bias_shift={:.4}", pair.bias_shift)
             } else {
                 String::new()
@@ -1927,8 +1927,8 @@ fn audit_identifiability_impl(
                 pair.overlap,
                 halt_half_width,
                 shift_note,
-                1.0 / col_s2.get(ja).copied().unwrap_or(1.0).max(f64::EPSILON),
-                1.0 / col_s2.get(jb).copied().unwrap_or(1.0).max(f64::EPSILON),
+                1.0 / col_s2.get(ja).copied().unwrap_or(1.0),
+                1.0 / col_s2.get(jb).copied().unwrap_or(1.0),
                 pair.direction_b,
             ));
         }
