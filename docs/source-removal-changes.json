@@ -5170,5 +5170,14 @@
     ],
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). gam-event-history's transition_score_polynomials was a pub wrapper over the private gap_score_polynomials, re-exported at the crate root, and only one unit test called it. The test moves unchanged in substance into a new #[cfg(test)] mod tests in marginal.rs, where it calls gap_score_polynomials directly. The wrapper and its re-export are deleted. The tests.rs identity is the test's old location; the same test fn now lives in marginal.rs's test module.",
     "evidence": "The prune-api-c census v2 over cc3ae0022 (/scratch.global/sauer354/pool/prune-api-c/census2.tsv) classes transition_score_polynomials DELETE, with one gam-event-history unit-test reference. At the base, git grep -w finds it only at its definition, the lib.rs re-export and tests.rs:159. The item list follows source_removal_guard.py's ITEM rule over the removed hunks: the pub fn and the test-scoped test fn removed from tests.rs."
+  },
+  {
+    "base": "57d22720e056f78a51c6c60970d2d297ce122212",
+    "items": [
+      "tests/perf_scale/misc/resource_policy_auto_strict.rs:fn:default_library_admits_small_dense_materialization",
+      "tests/perf_scale/misc/resource_policy_auto_strict.rs:fn:strict_policy_rejects_dense_materialization_with_helpful_message"
+    ],
+    "reason": "#2899 group-A public-surface sweep: gam_linalg::matrix::panic_or_error_if_large_scale_mode_and_to_dense_called_with_policy becomes pub(crate). gam-linalg production calls it at four densification sites, and outside gam-linalg only two root integration tests in tests/perf_scale/misc/resource_policy_auto_strict.rs call it, through gam::matrix. Those tests, strict_policy_rejects_dense_materialization_with_helpful_message and default_library_admits_small_dense_materialization, move verbatim (same names and assertions) into the matrix/mod.rs unit test module beside the existing admission-cap tests of the same function. The root file keeps its three ResourcePolicy::for_problem mode-selection tests.",
+    "evidence": "At d39b6eef0, git grep -n -w panic_or_error_if_large_scale_mode_and_to_dense_called_with_policy over crates, src, examples, tests and gamfit finds, outside gam-linalg, only resource_policy_auto_strict.rs:56-85. The moved tests use gam_runtime::resource::{ResourcePolicy::analytic_operator_required, ResourcePolicy::for_problem, ProblemHints}, the types gam::resource re-exports. The item list is source_removal_guard.py --base d39b6eef0 --head af82d886c (/scratch.global/sauer354/pool/prune-api-a/slice17.srg.out). public_api_census.py reports no removed identity."
   }
 ]

@@ -138,7 +138,7 @@ pub(crate) fn checked_dense_nbytes(nrows: usize, ncols: usize, context: &str) ->
         })
 }
 
-pub fn panic_or_error_if_large_scale_mode_and_to_dense_called_with_policy(
+pub(crate) fn panic_or_error_if_large_scale_mode_and_to_dense_called_with_policy(
     context: &str,
     n: usize,
     p: usize,
@@ -7278,5 +7278,49 @@ mod tests {
             csr.is_some(),
             "Expected to_csr_arc to return Some for a well-formed sparse matrix"
         );
+    }
+
+    #[test]
+    fn strict_policy_rejects_dense_materialization_with_helpful_message() {
+        // Strict mode comes from the structural preset, not a row count.
+        let policy = ResourcePolicy::analytic_operator_required();
+        let err = super::panic_or_error_if_large_scale_mode_and_to_dense_called_with_policy(
+            "TestOperator::to_dense",
+            200_000,
+            50,
+            &policy,
+        )
+        .unwrap_err();
+        // The error must name the operator (so users can find the missing analytic
+        // path) and the policy mode (so the cause is unambiguous).
+        assert!(
+            err.contains("TestOperator::to_dense"),
+            "expected operator name in error, got: {err}"
+        );
+        assert!(
+            err.contains("AnalyticOperatorRequired"),
+            "expected policy name in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn default_library_admits_small_dense_materialization() {
+        let policy =
+            ResourcePolicy::for_problem(gam_runtime::resource::ProblemHints::default());
+        // Small dense block (1k rows * 50 cols * 8 B = 400 KiB) is well under the
+        // single-materialization cap and the policy is permissive, so the guard
+        // returns Ok.
+        super::panic_or_error_if_large_scale_mode_and_to_dense_called_with_policy(
+            "TestOperator::to_dense",
+            1_000,
+            50,
+            &policy,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "{} failed: {:?}",
+                "small-data densification should be permitted", e
+            )
+        });
     }
 }
