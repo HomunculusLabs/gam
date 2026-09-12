@@ -2334,5 +2334,13 @@
     },
     "reason": "#2897. ClosureObjective::with_sampled_pilot set the sampled-pilot query for the staged spatial kappa schedule. 7fbdcd955 removed that schedule, so nothing calls it.",
     "evidence": "At the base, git grep -n -F with_sampled_pilot over crates, src, tests, examples and python finds only its declaration, in gam-solve rho_optimizer/objective.rs."
+  },
+  {
+    "base": "532a020d58aa76056728490d45e30766b43892ea",
+    "removed": {
+      "crates/gam-solve/src/pirls/reweight.rs::constraint_kkt_admits_progress_exhausted_stall": 1
+    },
+    "reason": "SPEC rules 21 and 22 (#2902, table row 30): this constraint-KKT cleanliness gate existed only for the constrained long-plateau soft accept. That arm accepted twenty sub-tolerance steps as StalledAtValidMinimum while the gradient sat far outside the near-stationary band. The arm is deleted, so the gate has no caller.",
+    "evidence": "At the base, git grep finds constraint_kkt_admits_progress_exhausted_stall only at its declaration and its single call in the long-plateau branch of runworking_model_pirls, both in crates/gam-solve/src/pirls/reweight.rs. scripts/public_api_census.py was not run locally (user directive: no local runs)."
   }
 ]

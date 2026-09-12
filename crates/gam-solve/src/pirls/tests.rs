@@ -4081,8 +4081,14 @@ mod root_cause_tests {
         assert_eq!(result.status, PirlsStatus::Converged);
     }
 
+    /// A linear objective has no minimum, so no plateau on it is a valid stall
+    /// (#2902). `deviance = 1 − 5e-5·β` falls without bound as β grows, and the
+    /// one constraint, `β ≥ −100`, sits on the far side. Every damped Newton step
+    /// buys a sub-tolerance decrease. The deleted long-plateau arm accepted
+    /// twenty such steps as `StalledAtValidMinimum`. The loop must instead report
+    /// that it reached no minimum.
     #[test]
-    pub(crate) fn long_constrained_objective_plateau_reports_valid_stall() {
+    pub(crate) fn linear_objective_plateau_is_not_a_valid_stall_2902() {
         let mut model = LinearObjectivePlateauModel { gradient: -5e-5 };
         let options = WorkingModelPirlsOptions {
             max_iterations: 25,
@@ -4102,16 +4108,17 @@ mod root_cause_tests {
 
         let result =
             runworking_model_pirls(&mut model, Coefficients::new(array![0.0]), &options, None)
-                .expect("long constrained objective plateau should preserve the final state");
+                .expect("a plateau on an unbounded ray still returns its final state");
 
-        assert_eq!(
-            result.status,
-            PirlsStatus::StalledAtValidMinimum,
-            "a long monotone objective plateau under explicit constraints is a valid bounded stall, unlike the unconstrained one-step plateau guard above"
-        );
         assert!(
-            result.iterations < options.max_iterations,
-            "the long-plateau certificate should exit before exhausting the whole iteration budget"
+            !matches!(
+                result.status,
+                PirlsStatus::Converged | PirlsStatus::StalledAtValidMinimum
+            ),
+            "a linear objective has no minimum to converge or stall at, got {:?} after {} \
+             iterations",
+            result.status,
+            result.iterations,
         );
     }
 

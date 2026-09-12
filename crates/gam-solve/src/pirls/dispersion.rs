@@ -8,9 +8,6 @@
 
 use super::*;
 
-/// Saturation threshold used only by inner-loop separation diagnostics.
-pub(super) const PIRLS_ETA_ABS_CAP: f64 = 40.0;
-
 /// The NB2 profile score `∂ℓ/∂θ`, its observed information `−∂²ℓ/∂θ²`, and the
 /// rounding band of the score's accumulation.
 #[derive(Clone, Copy, Debug)]

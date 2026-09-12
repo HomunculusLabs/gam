@@ -1474,38 +1474,6 @@ pub(super) fn projected_gradient_norm(
     sum_sq.sqrt()
 }
 
-/// "Soft" P-IRLS acceptance reasons — fits that did not certify strict KKT
-/// stationarity but that the post-loop rescue would still classify as
-/// `StalledAtValidMinimum`. Evaluating them per-iter (gated by a streak)
-/// lets the loop exit at the iteration that first meets the criterion
-/// instead of grinding to `MaxIterations` only to be rescued with the
-/// same conditions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum PirlsSoftAccept {
-    /// Projected gradient inside the 10× near-stationary band AND the
-    /// progress signal has plateaued at `tol · objective_scale` (or, in
-    /// the LM-rejection context, at the much tighter `1e-12 · |Φ|` model
-    /// noise floor — see [`SoftAcceptProgress`]). The standard
-    /// "good-enough plateau" rescue, and the only branch that fires
-    /// when no LM step was accepted.
-    NearStationaryPlateau,
-    /// `max|η|` is pinned against [`PIRLS_ETA_ABS_CAP`] AND the deviance
-    /// has plateaued. Same saturated-boundary class as separated binomial
-    /// fits: extra Newton work only re-tries the clipped boundary. Only
-    /// meaningful when a step was actually taken — the LM-rejection
-    /// context skips this branch.
-    BoundarySaturation,
-    /// Projected gradient is small *relative to the objective magnitude*
-    /// (not just the dimension scale) AND the deviance has plateaued
-    /// strictly (×0.1 floor) AND is non-decreasing. This is the
-    /// per-observation rescue for large-scale GLMs where ‖g‖ scales
-    /// with √n and the absolute KKT test becomes systematically too
-    /// tight even when the fit is functionally converged. Like
-    /// [`PirlsSoftAccept::BoundarySaturation`], this is only meaningful
-    /// when a step was actually taken.
-    RelativeBandPlateau,
-}
-
 /// Source of the "is the fit still moving?" signal handed to
 /// [`pirls_soft_acceptance`]. There are two contexts in which we need to
 /// decide whether a fit should be accepted as a soft minimum:
@@ -1514,17 +1482,12 @@ pub(super) enum PirlsSoftAccept {
 ///   path) or the loop has run out of iterations (post-loop rescue). We
 ///   know the realized change in penalized deviance and can compare it
 ///   directly against the standard `tol · objective_scale` plateau band.
-///   All three [`PirlsSoftAccept`] branches are eligible.
 ///
 /// - [`SoftAcceptProgress::Predicted`] — no LM candidate step survived
 ///   screening, so there is no realized Δdev to test. Instead, the
 ///   model's *predicted* reduction from the unaccepted step (`predicted
-///   = -(g·d + ½ d·H·d)`) is compared against the much tighter model
-///   noise floor `1e-12 · max(|Φ|, 1)`. This preserves the historical
-///   LM-rejection acceptance criterion exactly: only the
-///   near-stationary-plateau branch is eligible (saturated-η and
-///   relative-band tests both rely on a realized deviance change and
-///   would widen acceptance if applied with `predicted=0`).
+///   = -(g·d + ½ d·H·d)`) is compared against the objective's own rounding
+///   band.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum SoftAcceptProgress {
     /// Realized change in penalized deviance from the most recent
@@ -1532,44 +1495,55 @@ pub(super) enum SoftAcceptProgress {
     Realized { dev_change: f64 },
     /// Predicted reduction `-(g·d + ½ d·H·d)` from the unaccepted LM
     /// candidate step, paired with the current penalized objective so
-    /// the helper can scale the model noise floor consistently with the
-    /// LM-rejection branch's historical `1e-12 · max(|Φ|, 1)` cutoff.
+    /// the helper can scale the rounding band to the objective's magnitude.
     Predicted {
         predicted_reduction: f64,
         current_penalized: f64,
     },
 }
 
-/// Evaluate every "soft" acceptance criterion that the post-loop rescue
-/// applies to a fit which has hit `MaxIterations`. Returns the first
-/// matching reason, or `None` if no criterion fires.
+/// The near-stationary plateau, the one "soft" P-IRLS acceptance. It covers a
+/// fit that did not certify strict KKT stationarity, whose projected gradient
+/// sits inside the 10× near-stationary band while its progress signal has
+/// stopped. Such a state is classified `StalledAtValidMinimum`, a checkpoint that
+/// never mints a fit.
 ///
 /// Three call sites share this helper:
 ///
 /// 1. **Per-iter** (after an accepted step) — gated on a 2-iter plateau
 ///    streak so a single noisy step that briefly satisfies the band
-///    can't trigger an early exit. All three branches are eligible.
-/// 2. **Post-loop rescue** (MaxIterations hit) — accepts immediately;
-///    all three branches are eligible.
+///    can't trigger an early exit.
+/// 2. **Post-loop rescue** (MaxIterations hit) — accepts immediately.
 /// 3. **LM-rejection** (no candidate step survived screening) — accepts
-///    immediately, but only the [`PirlsSoftAccept::NearStationaryPlateau`]
-///    branch is eligible, with the tighter model noise floor that the
-///    historical LM-rejection check used. Saturated-η and relative-band
-///    tests need a realized Δdev and are skipped.
+///    immediately, with the predicted reduction held to the objective's
+///    rounding band.
 ///
-/// Sharing the helper guarantees the three acceptance contexts stay in
-/// lockstep — anything accepted post-loop is also a candidate for
-/// early-exit, and the LM-rejection branch accepts exactly the same set
-/// of states it accepted before unification.
+/// Sharing the helper keeps the three contexts in lockstep: anything accepted
+/// post-loop is also a candidate for early exit.
+///
+/// # What is deliberately not accepted (#2902)
+///
+/// Two more arms used to classify a stall as a valid minimum without a
+/// near-stationary gradient, on picked numbers:
+///
+/// * **Boundary saturation** accepted a plateau whenever `max|η| ≥ 40·(1 − 1e-12)`.
+///   P-IRLS never clips η, so the iterate had no boundary to be pinned
+///   against. A large-η plateau whose gradient is still open is a stall, not
+///   a minimum.
+/// * **Relative-band plateau** accepted a relative gradient `≤ progress_tol`
+///   with a `0.1·tol` Δdev plateau. When `kkt_tol ≥ progress_tol`, that gradient
+///   already passes the strict certificate. Otherwise, it relaxed the tighter
+///   tolerance the outer schedule had asked for.
+///
+/// Both papered over an open certificate (SPEC rule 21) and are deleted.
 #[inline]
 pub(super) fn pirls_soft_acceptance(
     state: &WorkingState,
     projected_grad: f64,
     progress: SoftAcceptProgress,
-    max_abs_eta: f64,
     progress_tol: f64,
     kkt_tol: f64,
-) -> Option<PirlsSoftAccept> {
+) -> bool {
     // Scale-equivariant objective magnitude for the Δdeviance plateau band.
     //
     // The deviance-change tests below ask "has the penalized objective stopped
@@ -1597,10 +1571,9 @@ pub(super) fn pirls_soft_acceptance(
     // Progress tests stay on the fixed PIRLS tolerance; only KKT stationarity uses kkt_tol.
     let scaled_dev_tol = progress_tol * objective_scale;
 
-    // Near-stationary plateau is eligible in every context. The only
-    // thing that varies is which "is the fit still moving?" signal we
-    // compare against which floor.
-    let near_stationary_plateau = match progress {
+    // The only thing that varies between the contexts is which "is the fit
+    // still moving?" signal we compare against which floor.
+    match progress {
         SoftAcceptProgress::Realized { dev_change } => {
             state.near_stationary_kkt(projected_grad, kkt_tol) && dev_change.abs() < scaled_dev_tol
         }
@@ -1623,45 +1596,7 @@ pub(super) fn pirls_soft_acceptance(
             state.near_stationary_kkt(projected_grad, kkt_tol)
                 && predicted_reduction.abs() <= reduction_noise_floor
         }
-    };
-    if near_stationary_plateau {
-        return Some(PirlsSoftAccept::NearStationaryPlateau);
     }
-
-    // The remaining branches both require a realized Δdev to be
-    // meaningful: η-cap saturation tests "did the step move and yet η
-    // stayed pinned at the cap?", and the relative-band plateau tests a
-    // signed, magnitude-bounded Δdev. Substituting `predicted=0` would
-    // trivially satisfy both with zero diagnostic value and would widen
-    // the LM-rejection acceptance set, so they are gated on a Realized
-    // progress signal.
-    let dev_change = match progress {
-        SoftAcceptProgress::Realized { dev_change } => dev_change,
-        SoftAcceptProgress::Predicted { .. } => return None,
-    };
-
-    if max_abs_eta >= PIRLS_ETA_ABS_CAP * (1.0 - 1e-12) && dev_change.abs() < scaled_dev_tol {
-        return Some(PirlsSoftAccept::BoundarySaturation);
-    }
-
-    // Gradient and objective live on different response scales: for `y → a·y`
-    // the projected gradient is `O(a)` while `objective_scale` (deviance +
-    // penalty) is `O(a²)`. Compare each against a same-units scale-invariant
-    // band — the gradient against the data-driven natural gradient scale via
-    // `relative_gradient_norm`, the Δdeviance against `scaled_dev_tol` — so the
-    // relative-band plateau is equivariant rather than mixing the two scales
-    // (which the old `objective_scale`-only gradient test did, and which the
-    // `.max(1.0)` floor then masked at unit scale). The gradient band is
-    // `progress_tol` itself: a `.max(1e-6)` floor widened it for every caller
-    // asking for sub-1e-6 precision, the defect `near_stationary_kkt` records.
-    if state.relative_gradient_norm(projected_grad) <= progress_tol
-        && dev_change.abs() < scaled_dev_tol * 0.1
-        && dev_change >= 0.0
-    {
-        return Some(PirlsSoftAccept::RelativeBandPlateau);
-    }
-
-    None
 }
 
 /// The GRADIENT-SPACE stationarity residual of a constrained iterate.

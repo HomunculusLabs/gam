@@ -10,7 +10,7 @@
 //! - `test_support` — thread-local penalized-deviance trace harness.
 
 use super::{
-    ExportedLaplaceCurvature, HessianCurvatureKind, PIRLS_ETA_ABS_CAP, PirlsAcceptedStateCacheKey,
+    ExportedLaplaceCurvature, HessianCurvatureKind, PirlsAcceptedStateCacheKey,
     PirlsStatus, SoftAcceptProgress, WorkingModel, WorkingModelIterationInfo,
     WorkingModelPirlsOptions, WorkingModelPirlsResult, WorkingState,
     add_scaled_diagonal_to_upper_sparse, commit_pending_arrow_latent,
@@ -210,60 +210,6 @@ pub(crate) fn constraint_kkt_admits_soft_accept(
             let stationarity_rel = kkt.stationarity / kkt.gradient_scale.max(1.0);
             kkt.primal_feasibility <= crate::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL
                 && (kkt.stationarity <= stationarity_band || stationarity_rel <= stationarity_band)
-        }
-    }
-}
-
-/// Constraint-KKT cleanliness gate for the LONG (20-iteration) constrained
-/// objective-plateau certificate — the stall exit for fits whose objective is
-/// genuinely exhausted while the raw stationarity residual stays above the
-/// `near_stationary_kkt` band (e.g. a shallow, almost-linear direction where
-/// the gradient is small-but-not-tiny and every Newton step buys progress far
-/// below the convergence tolerance).
-///
-/// Deliberately DIFFERENT from [`constraint_kkt_admits_soft_accept`]: the
-/// stationarity band is *not* required here. What discriminates a legitimate
-/// progress-exhausted stall from the failure modes the stationarity band
-/// protects against is carried by the certificate's other conjuncts:
-///
-/// * **Value↔gradient desync** (the recurring objective/gradient drift class)
-///   cannot certify: its quadratic model keeps PREDICTING above-tolerance
-///   progress that the value never realizes, and the long-plateau branch
-///   requires the model-predicted reduction itself to be sub-tolerance for
-///   the whole streak (see `model_progress_exhausted` at the call site).
-/// * **The #873 degenerate-vertex stall** cannot certify: a rank-deficient
-///   working set is refused outright here (the fast 2-iteration path keeps
-///   its relaxed degenerate band — that path still demands stationarity).
-/// * **A wrong-side or infeasible iterate** cannot certify: primal
-///   feasibility, dual feasibility (no wrong-sign multipliers), and
-///   complementarity must all sit inside the same bands the outer gate uses.
-///
-/// At a strictly-interior iterate every constraint-KKT component except
-/// stationarity is exactly zero, so this gate reduces to "feasible, clean,
-/// non-degenerate" — which is precisely the set of states for which a
-/// 20-iteration monotone sub-tolerance plateau with a sub-tolerance model
-/// prediction is an honest "no useful progress is available" certificate.
-pub(crate) fn constraint_kkt_admits_progress_exhausted_stall(
-    options: &WorkingModelPirlsOptions,
-    beta: &Array1<f64>,
-    gradient: &Array1<f64>,
-    kkt_tolerance: f64,
-) -> bool {
-    let diag = match options.linear_constraints.as_ref() {
-        Some(lin) => Some(compute_constraint_kkt_diagnostics(beta, gradient, lin)),
-        None => options.coefficient_lower_bounds.as_ref().and_then(|lb| {
-            linear_constraints_from_lower_bounds(lb)
-                .map(|lin| compute_constraint_kkt_diagnostics(beta, gradient, &lin))
-        }),
-    };
-    match diag {
-        None => true,
-        Some(kkt) => {
-            let cleanliness_band = kkt_tolerance * 10.0;
-            !kkt.working_set_rank_deficient
-                && kkt.primal_feasibility <= crate::active_set::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL
-                && kkt.dual_feasibility <= cleanliness_band
-                && kkt.complementarity <= cleanliness_band
         }
     }
 }
@@ -479,8 +425,6 @@ pub fn runworking_model_pirls<M>(
 where
     M: WorkingModel + ?Sized,
 {
-    const CONSTRAINED_OBJECTIVE_PLATEAU_STREAK: usize = 20;
-
     // ── Anderson acceleration of depth 1 (AA(1)) for the Fisher fixed-point ──
     // PIRLS normally uses observed-information Newton (already super-linear, no
     // help available from AA). When `force_fisher_for_rest` engages, the inner
@@ -716,8 +660,6 @@ where
     // — virtually free when the optimizer has truly settled, and a
     // principled defence against false positives otherwise.
     let mut plateau_streak = FlatStreak::new(2);
-    let mut constrained_objective_plateau_streak =
-        FlatStreak::new(CONSTRAINED_OBJECTIVE_PLATEAU_STREAK);
     let polish_inequalities = polish_inequality_system(options);
     let has_explicit_constraints = polish_inequalities.is_some();
     let mut min_penalized_deviance = f64::INFINITY;
@@ -1631,14 +1573,13 @@ where
                                     predicted_reduction,
                                     current_penalized,
                                 },
-                                f64::NAN,
                                 options.convergence_tolerance,
                                 kkt_tolerance,
                             );
-                            if let Some(reason) = lm_rejection_soft {
+                            if lm_rejection_soft {
                                 log::debug!(
-                                    "[PIRLS] gain-rejection soft acceptance: {reason:?} \
-                                     (‖g‖={projected_grad:.3e}, \
+                                    "[PIRLS] gain-rejection soft acceptance: near-stationary \
+                                     plateau (‖g‖={projected_grad:.3e}, \
                                      predicted_reduction={predicted_reduction:.3e})"
                                 );
                                 lastgradient_norm = projected_grad;
@@ -1967,113 +1908,35 @@ where
                         // protection against false positives. For a
                         // constrained fit the soft acceptance additionally
                         // requires the constraint-KKT band above, so a
-                        // relative-band / boundary-saturation plateau on a
-                        // non-degenerate cone face cannot mask a stalled,
-                        // outer-gate-rejected iterate (#873).
-                        match pirls_soft_acceptance(
-                            final_state_ref,
-                            convergence_grad_norm,
-                            SoftAcceptProgress::Realized {
-                                dev_change: deviance_change,
-                            },
-                            max_abs_eta,
-                            options.convergence_tolerance,
-                            kkt_tolerance,
-                        )
-                        .filter(|_| soft_accept_kkt_ok)
-                        {
-                            Some(reason) => {
-                                if plateau_streak.note(true) == LoopVerdict::Plateaued {
-                                    log::debug!(
-                                        "[PIRLS] iter {iter} early-exit on soft acceptance: \
-                                         {reason:?} (‖g‖={convergence_grad_norm:.3e}, \
-                                         Δdev={deviance_change:.3e})"
-                                    );
-                                    status = PirlsStatus::StalledAtValidMinimum;
-                                    break 'pirls_loop;
-                                }
-                            }
-                            None => {
-                                plateau_streak.note(false);
-                            }
-                        }
-
-                        // Explicitly constrained fits can reach a valid
-                        // bounded optimum with a flat objective trace while
-                        // the raw projected-gradient certificate remains
-                        // noisy, especially when small monotone I-spline
-                        // bases are underdetermined. Accept only a long
-                        // streak of finite, monotone, sub-tolerance
-                        // objective movement with eta safely away from the
-                        // clipping boundary. This is deliberately separate
-                        // from the two-iteration soft-acceptance gate above:
-                        // unconstrained one-off plateaus must still run out
-                        // as MaxIterationsReached.
+                        // near-stationary plateau on a non-degenerate cone
+                        // face cannot mask a stalled, outer-gate-rejected
+                        // iterate (#873).
                         //
-                        // Gate composition for the long streak (vs the fast
-                        // path's stationarity band):
-                        //
-                        // * `model_progress_exhausted` — the accepted step's
-                        //   OWN quadratic model predicted only sub-tolerance
-                        //   progress. This is the discriminator that keeps a
-                        //   value↔gradient desync (analytic gradient
-                        //   promising progress the value never realizes) from
-                        //   ever certifying: a desynced model keeps predicting
-                        //   above-tolerance reductions, breaking the streak,
-                        //   while a genuinely exhausted direction predicts
-                        //   next-to-nothing for 20 consecutive accepted steps.
-                        //   A small-but-not-tiny gradient along an almost-flat
-                        //   ray (e.g. ‖g‖ ~ 50× the near-stationary band with
-                        //   per-step gains ~10⁻⁹·scale) is exactly the
-                        //   progress-exhausted stall this branch certifies —
-                        //   the stationarity band would starve it into
-                        //   MaxIterationsReached after burning the entire
-                        //   budget on numerically invisible progress.
-                        // * `constraint_kkt_admits_progress_exhausted_stall`
-                        //   — primal/dual/complementarity cleanliness inside
-                        //   the outer gate's bands plus a hard refusal of
-                        //   rank-deficient working sets, so the #873
-                        //   degenerate-vertex stall still cannot be accepted
-                        //   here (it remains confined to the fast path's
-                        //   relaxed degenerate band, which demands
-                        //   stationarity).
-                        // Scale-equivariant objective magnitude (issue #1127):
-                        // the predicted reduction and Δdeviance compared against
-                        // this band both scale as `O(a²)` under a response
-                        // rescaling `y → a·y`, so the band must track the
-                        // objective's own magnitude rather than the absolute
-                        // `.max(1.0)` floor, which pinned it at `1.0` for a
-                        // micro-unit response and accepted a non-converged
-                        // constrained iterate. Well-scaled fits (`|obj| ≳ 1`)
-                        // are unchanged.
-                        let objective_scale =
-                            final_state_ref.deviance.abs() + final_state_ref.penalty_term.abs();
-                        let plateau_band = options.convergence_tolerance * objective_scale * 0.1;
-                        let model_progress_exhausted = predicted_reduction.is_finite()
-                            && predicted_reduction.abs() <= plateau_band;
-                        let strict_objective_plateau = has_explicit_constraints
-                            && deviance_change.is_finite()
-                            && deviance_change >= 0.0
-                            && deviance_change.abs()
-                                // Objective-plateau progress test, not a KKT certificate.
-                                <= plateau_band
-                            && model_progress_exhausted
-                            && max_abs_eta.is_finite()
-                            && max_abs_eta < PIRLS_ETA_ABS_CAP * 0.5
-                            && constraint_kkt_admits_progress_exhausted_stall(
-                                options,
-                                beta.as_ref(),
-                                &final_state_ref.gradient,
+                        // There is no long-plateau exit for constrained fits
+                        // (#2902). It accepted twenty sub-tolerance steps as
+                        // a valid minimum with the gradient up to 50× outside
+                        // the near-stationary band, gated on `0.1·tol` and
+                        // `|η| < 20`. That is also what a slow walk down an
+                        // unbounded ray looks like. A state whose objective
+                        // resolution is exhausted hands over to the undamped
+                        // refinement above, which either certifies it on the
+                        // active face or leaves the non-converged status
+                        // standing.
+                        let near_stationary_plateau = soft_accept_kkt_ok
+                            && pirls_soft_acceptance(
+                                final_state_ref,
+                                convergence_grad_norm,
+                                SoftAcceptProgress::Realized {
+                                    dev_change: deviance_change,
+                                },
+                                options.convergence_tolerance,
                                 kkt_tolerance,
                             );
-                        if constrained_objective_plateau_streak.note(strict_objective_plateau)
-                            == LoopVerdict::Plateaued
-                        {
+                        if plateau_streak.note(near_stationary_plateau) == LoopVerdict::Plateaued {
                             log::debug!(
-                                "[PIRLS] iter {iter} early-exit on constrained objective \
-                                 plateau (streak={}, ‖g‖={convergence_grad_norm:.3e}, \
-                                 Δdev={deviance_change:.3e})",
-                                constrained_objective_plateau_streak.streak(),
+                                "[PIRLS] iter {iter} early-exit on soft acceptance: \
+                                 near-stationary plateau (‖g‖={convergence_grad_norm:.3e}, \
+                                 Δdev={deviance_change:.3e})"
                             );
                             status = PirlsStatus::StalledAtValidMinimum;
                             break 'pirls_loop;
@@ -2145,10 +2008,8 @@ where
                         // is tiny and the model predicts an essentially-zero step.
                         // Routed through the unified soft-acceptance helper so
                         // this branch stays in lockstep with the per-iter and
-                        // post-loop checks. Only the NearStationaryPlateau branch
-                        // can fire here — the helper gates the η-cap and
-                        // relative-band branches behind a Realized Δdev signal,
-                        // which we don't have without an accepted step.
+                        // post-loop checks; without an accepted step the
+                        // predicted reduction is the progress signal.
                         let lm_rejection_soft = pirls_soft_acceptance(
                             &state,
                             projected_grad,
@@ -2156,20 +2017,15 @@ where
                                 predicted_reduction,
                                 current_penalized,
                             },
-                            // `pirls_soft_acceptance` returns early on the
-                            // `Predicted` arm before reading `max_abs_eta`, so
-                            // skip the redundant `O(n)` |η| sweep here. The
-                            // accept-branch below recomputes it when needed.
-                            f64::NAN,
                             options.convergence_tolerance,
                             kkt_tolerance,
                         );
                         let near_stationary_pass =
                             state.near_stationary_kkt(projected_grad, kkt_tolerance);
 
-                        if let Some(reason) = lm_rejection_soft {
+                        if lm_rejection_soft {
                             log::debug!(
-                                "[PIRLS] LM-rejection soft acceptance: {reason:?} \
+                                "[PIRLS] LM-rejection soft acceptance: near-stationary plateau \
                                  (‖g‖={projected_grad:.3e}, \
                                  predicted_reduction={predicted_reduction:.3e})"
                             );
@@ -2764,13 +2620,11 @@ where
     }
     if can_still_certify {
         // Strict KKT is a convergence certificate regardless of which bounded
-        // loop exit led to the final state. The remaining soft-acceptance
-        // criteria (near-stationary plateau, boundary saturation, relative
-        // band) are checked uniformly through `pirls_soft_acceptance` so the
-        // post-loop rescue and the per-iter early-exit stay in lockstep —
-        // anything accepted here is also a candidate for early-exit, and
-        // anything that meets the early criterion would have been rescued
-        // here.
+        // loop exit led to the final state. The near-stationary plateau is
+        // checked through `pirls_soft_acceptance` so the post-loop rescue and
+        // the per-iter early-exit stay in lockstep — anything accepted here is
+        // also a candidate for early-exit, and anything that meets the early
+        // criterion would have been rescued here.
         // The geometric constraint channels are a separate, always-required
         // obligation; `final_projected_grad` is the gradient-space residual only
         // (#2705 group B).
@@ -2799,25 +2653,21 @@ where
                 SoftAcceptProgress::Realized {
                     dev_change: last_deviance_change,
                 },
-                max_abs_eta,
                 options.convergence_tolerance,
                 kkt_tolerance,
             )
-            // A constrained fit may only be rescued onto a plateau / relative-band /
-            // boundary-saturation soft acceptance when its constraint-KKT residual
-            // is within the SAME degeneracy-aware band the outer gate applies, so
-            // the rescue cannot certify a stalled non-degenerate cone face the outer
-            // gate would reject (#873). Unconstrained fits keep the existing rescue.
-            .filter(|_| {
-                !has_explicit_constraints
-                    || constraint_kkt_admits_soft_accept(
-                        options,
-                        beta.as_ref(),
-                        &state.gradient,
-                        kkt_tolerance,
-                    )
-            })
-            .is_some()
+            // A constrained fit may only be rescued onto a near-stationary plateau
+            // when its constraint-KKT residual is within the SAME degeneracy-aware
+            // band the outer gate applies, so the rescue cannot certify a stalled
+            // non-degenerate cone face the outer gate would reject (#873).
+            // Unconstrained fits keep the existing rescue.
+            && (!has_explicit_constraints
+                || constraint_kkt_admits_soft_accept(
+                    options,
+                    beta.as_ref(),
+                    &state.gradient,
+                    kkt_tolerance,
+                ))
         {
             log::debug!(
                 "[PIRLS] post-loop rescue on soft acceptance \
