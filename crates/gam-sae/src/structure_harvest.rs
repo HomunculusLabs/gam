@@ -4602,10 +4602,11 @@ fn race_birth_topology(
 /// #2243 — re-realize a birth menu's harmonic candidates at the order a born atom
 /// installs. A born atom is seeded from its race's winning fit and nothing regrows its
 /// resolution, so the order has to be right before the race: a circle takes its phase
-/// chart's periodogram bandwidth and a torus or Klein bottle its phase pair's, each
-/// selected against the birth image and the rows its weights select. A chart carrying
-/// no angular energy realizes neither kind, so that candidate is dropped. Every other
-/// candidate passes through unchanged.
+/// chart's periodogram bandwidth, a torus or Klein bottle its phase pair's, and a
+/// cylinder its angle column's, each selected against the birth image and the rows its
+/// weights select (for the cylinder, per line-degree block of its product design). A
+/// chart carrying no angular energy realizes none of these kinds, so that candidate is
+/// dropped. Every other candidate passes through unchanged.
 fn realize_birth_harmonic_orders(
     specs: Vec<TopologyCandidateSpec>,
     target: ArrayView2<'_, f64>,
