@@ -48,7 +48,7 @@ pub(crate) const TRUST_REGION_RELATIVE_GRADIENT_CONTEXT: &str =
 /// Terminal state of a trust-region run: the iterate reached, and the numbers the
 /// first-order certificate was decided against.
 #[derive(Clone, Debug)]
-pub struct TrustRegionTermination {
+pub(crate) struct TrustRegionTermination {
     /// The last iterate. Present whether or not the certificate holds — this is
     /// the work a budget-exhausted run has to hand back.
     pub point: Array1<f64>,
@@ -63,7 +63,7 @@ pub struct TrustRegionTermination {
 impl TrustRegionTermination {
     /// Whether `point` satisfies the first-order certificate that controls the
     /// loop. This is the same test `minimize` applies before returning a point.
-    pub fn certifies(&self) -> bool {
+    pub(crate) fn certifies(&self) -> bool {
         self.residual <= self.tolerance
     }
 }

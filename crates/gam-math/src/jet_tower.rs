@@ -1057,7 +1057,7 @@ pub fn ln_gamma_derivative_stack_order3(x: f64) -> [f64; 4] {
     ]
 }
 
-pub fn digamma_derivative_stack(x: f64) -> [f64; 5] {
+pub(crate) fn digamma_derivative_stack(x: f64) -> [f64; 5] {
     [
         digamma_positive(x),
         polygamma_positive::<1>(x),

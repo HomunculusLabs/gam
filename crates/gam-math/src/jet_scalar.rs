@@ -577,7 +577,7 @@ pub trait JetScalar<const K: usize>: crate::nested_dual::JetField + Copy {
 
     /// `ψ(self) = d/dx ln Γ(x)` (digamma). Caller guarantees a positive
     /// argument. Same hand-certified stack
-    /// [`crate::jet_tower::digamma_derivative_stack`].
+    /// `crate::jet_tower::digamma_derivative_stack`.
     fn digamma(&self) -> Self {
         self.compose_unary(crate::jet_tower::digamma_derivative_stack(self.value()))
     }
@@ -1700,7 +1700,7 @@ impl<'arena> DynamicOrder2<'arena> {
     /// one block.
     #[inline(always)]
     #[must_use]
-    pub fn scaled_product_sum(scales: &[f64], lefts: &[Self], rights: &[Self]) -> Self {
+    pub(crate) fn scaled_product_sum(scales: &[f64], lefts: &[Self], rights: &[Self]) -> Self {
         assert!(
             !lefts.is_empty() && lefts.len() == rights.len() && lefts.len() == scales.len(),
             "dynamic product sum needs matching non-empty term lists"
@@ -1742,7 +1742,7 @@ impl<'arena> DynamicOrder2<'arena> {
     /// `a·b + c·d + e` in one pass over the result.
     #[inline(always)]
     #[must_use]
-    pub fn product_pair_sum_plus(a: &Self, b: &Self, c: &Self, d: &Self, e: &Self) -> Self {
+    pub(crate) fn product_pair_sum_plus(a: &Self, b: &Self, c: &Self, d: &Self, e: &Self) -> Self {
         a.assert_compatible(b);
         a.assert_compatible(c);
         a.assert_compatible(d);

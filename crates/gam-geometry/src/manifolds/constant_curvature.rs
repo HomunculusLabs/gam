@@ -100,7 +100,7 @@ const T_SERIES_TERMS: usize = 48;
 /// Derivative stacks `[f, f′, f″, f‴, f⁗]` (in `u`) of the entire
 /// functions `C(u)` and `S(u)`. Exact: series inside
 /// `CS_SERIES_U_MAX`, closed forms + the mutual recurrence outside.
-pub fn cs_stacks(u: f64) -> ([f64; 5], [f64; 5]) {
+pub(crate) fn cs_stacks(u: f64) -> ([f64; 5], [f64; 5]) {
     if u.abs() <= CS_SERIES_U_MAX {
         let mut c = [0.0; 5];
         let mut s = [0.0; 5];

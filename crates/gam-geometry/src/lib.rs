@@ -28,7 +28,7 @@ pub use manifolds::{
     constant_curvature_dirichlet_penalty, constant_curvature_dirichlet_penalty_kappa_derivative,
     distance_kappa_jet,
 };
-pub use optimizer::{RiemannianObjective, RiemannianTrustRegion, TrustRegionTermination};
+pub use optimizer::{RiemannianObjective, RiemannianTrustRegion};
 pub use response_geometry::{
     ResponseCurvatureFit, ResponseGeometryError, ResponseManifold, fit_response_curvature,
     response_curvature_criterion, response_exp_map, response_frechet_mean, response_log_map,
