@@ -8459,7 +8459,7 @@ pub(crate) fn run_outer_uncertified(
 /// per-atom decoupled EFS primary should take over from the dense outer.
 ///
 /// Delegates the eligibility decision to
-/// [`crate::estimate::reml::per_atom_efs::per_atom_efs_eligible`], which
+/// `crate::estimate::reml::per_atom_efs::per_atom_efs_eligible`, which
 /// requires all-penalty-like coordinates, a working `eval_efs` hook,
 /// fixed-point not disabled, and a frontier-scale ρ-dimension. This is the
 /// single auto-switch predicate; `plan` keeps selecting the

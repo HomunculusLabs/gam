@@ -38,7 +38,7 @@
 //! ([`cross_fit_scalar`]) that is agnostic to what "structure" and "artifact"
 //! mean (the caller supplies the discover/evaluate closures, so it wires onto
 //! EV, Θ, or dose forecasts identically), and the linear-subspace reconstruction
-//! ([`fit_subspace`] / [`project_onto_subspace`]) that is the honest minimal
+//! ([`fit_subspace`] / `project_onto_subspace`) that is the honest minimal
 //! analog of a linear dictionary — used by the optimism test to exhibit the
 //! `q/n` naive inflation and the cross-fit's honesty.
 //!

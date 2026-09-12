@@ -3393,7 +3393,7 @@ impl<'a> RemlState<'a> {
     /// previously three separate `compute_soft_prior{cost,grad,hess}` functions
     /// that each independently re-derived the anchor, the `a = sharpness/bound`
     /// scale, and the `tanh` argument — the canonical objective↔gradient desync
-    /// surface. [`SoftRhoGuardPriorAtom::evaluate_anchored`] evaluates the
+    /// surface. `SoftRhoGuardPriorAtom::evaluate_anchored` evaluates the
     /// antiderivative chain (`log cosh → tanh → 1 − tanh²`) ONCE per coordinate,
     /// so cost, gradient, and curvature are projections of one computation and
     /// cannot drift.

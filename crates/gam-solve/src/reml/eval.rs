@@ -24,7 +24,7 @@ pub(crate) const AUTO_CUBATURE_RHOVAR_TRIGGER: f64 = 0.1;
 /// failed, the inverse Hessian's spectrum is non-positive, a sigma-point
 /// inner PIRLS diverged, or the assembled total covariance is
 /// non-finite. These log at `warn` and increment
-/// [`SMOOTHING_CORRECTION_NUMERICAL_FAILURE_COUNT`] so they are visible
+/// `SMOOTHING_CORRECTION_NUMERICAL_FAILURE_COUNT` so they are visible
 /// in long-running fits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SmoothingCorrectionFallbackSeverity {
@@ -174,7 +174,7 @@ impl SmoothingCorrectionOutcome {
 /// [`RemlState::compute_smoothing_correction_auto`]. Incremented whenever
 /// cubature was requested by the eligibility gate but a downstream numerical
 /// step refused to produce a usable second-order correction.
-pub static SMOOTHING_CORRECTION_NUMERICAL_FAILURE_COUNT: AtomicU64 = AtomicU64::new(0);
+pub(crate) static SMOOTHING_CORRECTION_NUMERICAL_FAILURE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Outcome of one sigma-point evaluation: the inverted-Hessian `A_m = H_m⁻¹`
 /// in the original (Qs-mapped) basis, and the original-basis coefficient
@@ -954,7 +954,7 @@ impl<'a> RemlState<'a> {
     /// as `π(β, ρ | y) = π(β | ρ, y) · π(ρ | y)` with
     /// `π(ρ|y) ∝ exp(−criterion(ρ))`, and the certificate needs to evaluate the
     /// outer criterion at a handful of `ρ` near `ρ̂`. The criterion IS
-    /// [`Self::compute_cost`] and the proposal Hessian IS
+    /// `Self::compute_cost` and the proposal Hessian IS
     /// [`Self::compute_lamlhessian_consistent`] — both `&self` — so a converged
     /// fit can produce the certificate WITHOUT retaining or rebuilding a
     /// separate objective: it runs against the same `RemlState` the fit
@@ -974,7 +974,7 @@ impl<'a> RemlState<'a> {
     /// when the certificate reads [`Escalate`] AND `allow_escalation` is set, the
     /// tiers (#938) run HERE, against the same live objective — Tier 1 quadrature
     /// for `K ≤ 4`, Tier 2 NUTS with the exact LAML `ρ`-gradient
-    /// ([`Self::compute_gradient`]) for `K ≤ 16`, honest `Unavailable` beyond.
+    /// (`Self::compute_gradient`) for `K ≤ 16`, honest `Unavailable` beyond.
     /// Post-hoc escalation after the `RemlState` is gone would need an owned
     /// rebuild recipe; running at the live seam avoids that entirely. When
     /// `allow_escalation` is `false` the returned escalation is always `None`, so

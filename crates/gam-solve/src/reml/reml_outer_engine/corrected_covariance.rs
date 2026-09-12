@@ -261,7 +261,7 @@ pub(crate) fn projected_inverse_with_inertia_gate(
 ///     rank-deficient (Moore-Penrose drop) and listed in
 ///     `rank_deficient_directions` for the caller to surface;
 ///   - otherwise H_FF is inverted exactly via the spectral expansion.
-pub fn compute_corrected_covariance(
+pub(crate) fn compute_corrected_covariance(
     v_ks: &[Array1<f64>],
     ext_v: &[Array1<f64>],
     outer_hessian: &Array2<f64>,
@@ -280,12 +280,12 @@ pub fn compute_corrected_covariance(
         })
 }
 
-/// Constraint- and inertia-aware version of [`compute_corrected_covariance`].
+/// Constraint- and inertia-aware version of `compute_corrected_covariance`.
 ///
 /// Prefer this entry point when θ at the optimum and the outer-gradient norm
 /// are available — it auto-derives the active-bound set on ρ and emits the
 /// rank-deficient diagnostic alongside the matrix.
-pub fn compute_corrected_covariance_with_constraints(
+pub(crate) fn compute_corrected_covariance_with_constraints(
     v_ks: &[Array1<f64>],
     ext_v: &[Array1<f64>],
     outer_hessian: &Array2<f64>,
@@ -404,7 +404,7 @@ pub(crate) fn compute_corrected_covariance_diagonal(
 }
 
 /// Diagonal of the corrected covariance plus active-set / rank-deficiency
-/// diagnostics. See [`compute_corrected_covariance_with_constraints`] for the
+/// diagnostics. See `compute_corrected_covariance_with_constraints` for the
 /// full version (the inertia gate logic is identical).
 #[derive(Debug, Clone)]
 pub struct CorrectedCovarianceDiagonal {
@@ -577,15 +577,15 @@ pub(crate) fn spectral_regularize(sigma: f64, epsilon: f64) -> f64 {
 /// meaningful eigenvalue (for p ≤ 10⁶, ε ≤ 1.5e-2; well-conditioned
 /// problems have min σ ≫ ε and are unaffected).
 #[inline]
-pub fn spectral_epsilon(eigenvalues: &[f64]) -> f64 {
+pub(crate) fn spectral_epsilon(eigenvalues: &[f64]) -> f64 {
     spectral_epsilon_for_dim(eigenvalues.len())
 }
 
-/// [`spectral_epsilon`] for a caller holding a factorization rather than an
+/// `spectral_epsilon` for a caller holding a factorization rather than an
 /// eigendecomposition.
 ///
 /// The regularization scale is deliberately a function of the matrix dimension
-/// alone (see [`spectral_epsilon`]), so a Cholesky-backed operator can name the
+/// alone (see `spectral_epsilon`), so a Cholesky-backed operator can name the
 /// SAME floor the spectral operator will apply without ever forming the
 /// spectrum.  One definition behind two entry points: a second literal here
 /// would reintroduce exactly the two-quantities-under-one-name drift that

@@ -930,7 +930,7 @@ impl SoftRhoGuardPriorAtom {
     /// emissions, so value/gradient/Hessian are projections of one computation.
     /// Evaluate the soft guard prior with an explicit weight anchor
     /// (issue #877): the prior is evaluated at `ρ_i − anchor`.
-    pub fn evaluate_anchored(
+    pub(crate) fn evaluate_anchored(
         rho: &Array1<f64>,
         weight: f64,
         sharpness: f64,

@@ -87,7 +87,7 @@ impl<'a> RemlState<'a> {
     ///   - log|S|_+ follows fixed-rank pseudo-determinant conventions in the
     ///     transformed penalty basis, optionally including ridge policy.
     /// These conventions are mirrored in gradient code via corresponding trace terms.
-    pub fn compute_cost(&self, p: &Array1<f64>) -> Result<f64, EstimationError> {
+    pub(crate) fn compute_cost(&self, p: &Array1<f64>) -> Result<f64, EstimationError> {
         self.compute_cost_with_ext_count(p, 0)
     }
 
@@ -439,7 +439,7 @@ impl<'a> RemlState<'a> {
     /// criterion, whose `0.5·log|H|` term is dominated by noise at a
     /// poorly-conditioned partial β̂.
     ///
-    /// Outside of screening mode this delegates to [`Self::compute_cost`] so
+    /// Outside of screening mode this delegates to `Self::compute_cost` so
     /// the optimization objective itself is never changed by this method's
     /// presence.
     pub(crate) fn compute_screening_proxy(&self, p: &Array1<f64>) -> Result<f64, EstimationError> {
@@ -2731,7 +2731,7 @@ impl<'a> RemlState<'a> {
         self.evaluate_efs(rho, &bundle, ext_coords)
     }
 
-    pub fn compute_gradient(&self, p: &Array1<f64>) -> Result<Array1<f64>, EstimationError> {
+    pub(crate) fn compute_gradient(&self, p: &Array1<f64>) -> Result<Array1<f64>, EstimationError> {
         self.arena
             .lastgradient_used_stochastic_fallback
             .store(false, Ordering::Relaxed);

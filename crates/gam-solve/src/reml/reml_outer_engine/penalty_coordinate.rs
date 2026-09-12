@@ -247,7 +247,7 @@ impl PenaltySubspaceTrace {
 
     /// Euclidean projection onto the retained penalty/Hessian range used by
     /// this projected kernel: `P_S a = U_S U_Sᵀ a`.
-    pub fn project_onto_subspace(&self, a: &Array1<f64>) -> Array1<f64> {
+    pub(crate) fn project_onto_subspace(&self, a: &Array1<f64>) -> Array1<f64> {
         let proj_a = gam_linalg::faer_ndarray::fast_atv(&self.u_s, a);
         gam_linalg::faer_ndarray::fast_av(&self.u_s, &proj_a)
     }
@@ -324,7 +324,7 @@ impl PenaltySubspaceTrace {
     /// `k_active × k_active` Cholesky/QR. Per-vector `apply` cost: one
     /// `K_S` apply + one `k_active × p` matvec + one small triangular
     /// solve + one `p × k_active` matvec.
-    pub fn with_active_constraints<'a>(
+    pub(crate) fn with_active_constraints<'a>(
         &'a self,
         a_act: ndarray::ArrayView2<'a, f64>,
     ) -> ConstrainedSubspaceKernel<'a> {
@@ -418,7 +418,7 @@ impl PenaltySubspaceTrace {
 /// [`PenaltySubspaceTrace`] with an active inequality-constraint block,
 /// producing the constraint-aware pseudo-inverse
 /// `K_T = K_S − K_S Aᵀ (A K_S Aᵀ)⁻¹ A K_S`. See
-/// [`PenaltySubspaceTrace::with_active_constraints`] for the math.
+/// `PenaltySubspaceTrace::with_active_constraints` for the math.
 ///
 /// Caches the small `k_active × k_active` Schur inverse so subsequent
 /// per-coordinate `apply` calls only do `O(p · k_active)` work each.
@@ -462,7 +462,7 @@ impl<'a> ConstrainedSubspaceKernel<'a> {
 /// `|A_act · v|` is compared against this fraction of the cancellation
 /// scale `|A_act| · |v|` (per active row). Generous enough that legitimate
 /// rank-deficient active sets (whose dropped Schur directions leave
-/// ε-level residue, see [`PenaltySubspaceTrace::with_active_constraints`])
+/// ε-level residue, see `PenaltySubspaceTrace::with_active_constraints`)
 /// never trip it; the historical failure mode it guards (the d6b17a7f
 /// `1/σ_min ≈ 10¹²` null-space amplification) exceeds it by six orders.
 pub(crate) const THETA_MODE_RESPONSE_TANGENCY_GATE: f64 = 1e-6;

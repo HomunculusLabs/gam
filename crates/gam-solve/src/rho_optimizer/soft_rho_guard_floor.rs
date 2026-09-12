@@ -261,7 +261,7 @@ impl SoftRhoGuardFloor {
 /// The soft ρ-guard barrier's own gradient emission at `rho`, from the SAME
 /// atom `RemlState::build_prior` adds.
 ///
-/// Not a re-derivation: this calls [`SoftRhoGuardPriorAtom::evaluate_anchored`]
+/// Not a re-derivation: this calls `SoftRhoGuardPriorAtom::evaluate_anchored`
 /// with the shipped policy constants, so a change to the weight, the sharpness,
 /// or the bound moves the criterion and this classifier together. A closed form
 /// written here would be a second copy of the thing #931 collapsed into one

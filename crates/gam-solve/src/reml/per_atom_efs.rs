@@ -116,7 +116,7 @@ pub(crate) fn is_frontier_rho_scale(rho_dim: usize) -> bool {
 /// EFS cannot resolve; those still route to HybridEFS / BFGS), a working
 /// fixed-point hook (`eval_efs`), fixed-point not disabled by the caller, and
 /// a frontier-scale ρ-dimension.
-pub fn per_atom_efs_eligible(cap: &OuterCapability) -> bool {
+pub(crate) fn per_atom_efs_eligible(cap: &OuterCapability) -> bool {
     cap.all_penalty_like()
         && cap.fixed_point_available
         && !cap.disable_fixed_point
@@ -181,7 +181,7 @@ impl SharedBorderTopology {
     /// No shared border: every atom is block-disjoint and the decoupled
     /// per-atom step is exact. This is the common ARD-per-atom case where each
     /// atom owns a private penalty block.
-    pub fn disjoint(rho_dim: usize) -> Self {
+    pub(crate) fn disjoint(rho_dim: usize) -> Self {
         Self {
             border_axes: Vec::new(),
             rho_dim,
@@ -443,7 +443,7 @@ pub(crate) fn backtrack_cost(
 ///
 /// `seed` is the starting ρ (already within bounds). `cap` declares the outer
 /// capability (used only for the layout/border defaults). The topology selects
-/// which axes get the coupled correction; pass [`SharedBorderTopology::disjoint`]
+/// which axes get the coupled correction; pass `SharedBorderTopology::disjoint`
 /// when every atom owns a private penalty block (the common ARD-per-atom case).
 pub fn run_per_atom_efs(
     obj: &mut dyn OuterObjective,
