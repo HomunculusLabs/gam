@@ -520,3 +520,55 @@ One saving remains on the generated side: it multiplies all ten slots by
 strongest-hand schedule can use the same identity, so that saving cannot give a
 robust margin. Whether the third cells keep a strict `faster` contract at parity is
 an open decision.
+
+### Live-family derivative census, continued: the coefficient-space pullbacks
+
+This closes the families the census above left untraced. It reads main at
+`df35a6c97`. In each of these families the primary-space tower is derived
+mechanically; what differs is how that tower is pulled back into coefficient
+space.
+
+- **`GaussianLocationScaleWiggleFamily`.**
+  - Its predictor-space tower is generated: `gaussian_row_first_tower` and
+    `gaussian_row_second_tower` read `GaussianJointRowProgram`, lowered from
+    `gaussian_normalized_row`.
+  - The pullback through the warp `q = q₀ + Σ_j βw_j B_j(q₀)` is written by hand:
+    `gls_wiggle_first_directional_coeffs`, `gls_wiggle_second_directional_coeffs`
+    and the dense `_from_designs` blocks.
+  - No test compared it with the likelihood. The nearby FD gates cover the
+    non-wiggle binomial family, and the wiggle ψ tests difference the dense Hessian
+    against the ψ builders.
+  - `5786dcd74` adds
+    `gaussian_wiggle_joint_hessian_and_directional_derivatives_match_exact_derivatives_932`.
+    It checks the dense H, `D_β H[u]` and `D²_β H[u, v]` against nested num-dual
+    derivatives of `Σ_i w_i (½ (y_i − q_i)² / σ_i² + log σ_i)`, with
+    `σ = LOGB_SIGMA_FLOOR + e^{η_ls}`, at 1e-10 relative. The warp is composed as its
+    Taylor polynomial about the base index.
+  - Reading the first-directional blocks against the chain rule (`h_mm`, `h_ml`,
+    `h_mw`, `h_lw`, `h_ww = a_ww + a_wwᵀ + Bᵀ diag(H′_qq) B`) finds them consistent.
+    **The test has not run yet.**
+- **`SurvivalMarginalSlopeFamily`.**
+  - Rigid rows go through `SurvivalMarginalSlopeRowKernel`.
+  - Flex rows read their primary tower from the flex jet evaluators
+    (`flex_row_nll<J: FlexJet>`, `row_flex_primary_third_contracted_exact`).
+  - The pullback over the dynamic q geometry is written by hand:
+    `accumulate_dynamic_q_core_hessian`, the identity-block crosses, and
+    `accumulate_timewiggle_directional_row`.
+  - The time-wiggle arm is gated by
+    `timewiggle_beta_hessian_second_directional_derivative_matches_finite_difference_2893`:
+    resolving central differences at 1e-5 relative plus four times the
+    uncertainty.
+  - The flex no-wiggle arm had only build-once versus per-axis and
+    subsample-operator identity checks. `63ad6877f` adds the same resolving gate,
+    `flex_no_wiggle_beta_hessian_directional_derivatives_match_finite_difference_932`.
+    **It has not run yet.**
+- **`BernoulliMarginalSlopeFamily` flex.**
+  - The coefficient-to-primary map is linear: the marginal and slope designs, plus
+    the score-warp and link-deviation coefficients as primaries (see
+    `perturb_standard_normal_flex_states`). `D_β H` is therefore `Jᵀ T3[J u] J`
+    with a constant `J`.
+  - The primary channels are pinned by
+    `standard_normal_flex_canonical_derivative_ladder_matches_vgh_t3_t4_932` and the
+    Richardson verifier.
+  - The coefficient-space directional surfaces are covered only by operator,
+    batched and cache identity tests (`families_bms_joint_hessian_hvp_correction_tests.rs`).
