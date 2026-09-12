@@ -270,29 +270,76 @@ fn two_basin_outer_fit_engages_exact_envelope() {
 
 /// (B) The `inner_max_iter == 0` FREEZE contract MUST bypass the bundle: a freeze
 /// evaluation is verbatim reuse, no exploration, so the envelope machinery never
-/// engages and the bundle is never even seeded.
+/// engages and the bundle never grows.
+///
+/// Production's one freeze lane is `for_installed_state_audit`, which re-prices an
+/// installed converged `(term, ρ)`. A literal dense K=2 cold seed has no defined score
+/// (see (C) and `reactive_domain_scalar_contract`). The literal-seed version of this
+/// test priced `+∞` there and failed "freeze-lane value must be finite", which says
+/// nothing about the lane. So the test converges the typed reactive entry at a
+/// positive budget and audits that state. The entry evaluation is also the positive
+/// control: on this fixture a dense evaluation runs the envelope and seeds the
+/// bundle, so an unchanged counter under freeze is a measurement, not an absence.
 #[test]
 fn freeze_contract_bypasses_the_bundle() {
-    let n = 64;
-    let p = 32;
+    let n = 96;
+    let p = 48;
     let k = 2;
-    // inner_max_iter == 0 ⇒ freeze lane.
-    let (mut objective, _z, seed) = two_circle_objective(n, p, k, 2, 0);
-    // Drive the production value lane directly a few times.
+    let (mut objective, _z, _seed) = two_circle_objective(n, p, k, 2, 8);
+    let legal_rho = OuterObjective::outer_domain_upper_bound(&objective)
+        .expect("objective legal rho construction must succeed")
+        .expect("dense K=2 objective must advertise a legal rho entry");
+    let scalar_contract = OuterObjective::reactive_domain_scalar_contract(&objective)
+        .expect("reactive scalar contract construction must succeed")
+        .expect("dense K=2 objective must advertise a reactive scalar entry");
+    OuterObjective::begin_reactive_domain_waypoint(&mut objective)
+        .expect("the objective must open a reactive waypoint transaction");
+    OuterObjective::install_reactive_domain_scalar_state(&mut objective, scalar_contract.entry())
+        .expect("objective must install its own legal scalar entry");
+    let entry_value = objective
+        .eval_cost(&legal_rho)
+        .expect("the dense entry evaluation must complete");
+    let control = objective.probe_telemetry();
+    eprintln!(
+        "[#2230 freeze] entry value={entry_value}, envelope evals={}, admissions={}, max members={}",
+        control.basin_envelope_evals, control.basin_admissions, control.basin_max_members
+    );
+    assert!(
+        entry_value.is_finite(),
+        "the converged legal entry must have a defined score, got {entry_value}"
+    );
+    assert!(
+        control.basin_envelope_evals == 1 && control.basin_max_members >= 1,
+        "positive control: a dense evaluation on this fixture must run the envelope and seed \
+         the bundle (envelope evals {}, max members {})",
+        control.basin_envelope_evals,
+        control.basin_max_members
+    );
+
+    // inner_max_iter == 0 ⇒ freeze lane, auditing the installed converged state.
+    let mut objective = objective.for_installed_state_audit();
+    let mut values = Vec::with_capacity(4);
     for _ in 0..4 {
-        let value = objective
-            .eval_cost(&seed)
-            .expect("freeze-lane value evaluation should complete");
-        assert!(value.is_finite(), "freeze-lane value must be finite");
+        values.push(
+            objective
+                .eval_cost(&legal_rho)
+                .expect("freeze-lane value evaluation should complete"),
+        );
     }
     let telemetry = objective.probe_telemetry();
+    eprintln!("[#2230 freeze] audit values={values:?}");
+    assert!(
+        values.iter().all(|value| value.is_finite()),
+        "freeze-lane values must be finite on a converged installed state: {values:?}"
+    );
     assert_eq!(
-        telemetry.basin_envelope_evals, 0,
+        telemetry.basin_envelope_evals, control.basin_envelope_evals,
         "the freeze lane must never run the basin envelope"
     );
     assert_eq!(
-        telemetry.basin_max_members, 0,
-        "the freeze lane must never seed the basin bundle"
+        (telemetry.basin_admissions, telemetry.basin_max_members),
+        (control.basin_admissions, control.basin_max_members),
+        "the freeze lane must never admit to or grow the basin bundle"
     );
 }
 
