@@ -2561,32 +2561,21 @@ fn certify_four_spends_order_four_once_and_prices_the_curvature_against_the_crit
     );
     // Order four is spent once per TERMINAL CERTIFICATION, not once per
     // multistart candidate — that is the economics #2359 exists to protect, and
-    // it is what the bound below pins.
+    // it is what the assertion below pins.
     //
-    // It is deliberately not `== 1`. Until `bf43b3861` the plan level minted
-    // before `run_outer` did, so an indefinite-curvature refusal propagated out
-    // of `run_outer_uncertified` and never reached `run_outer`'s certify-last
-    // loop — which meant the #2357 interior strict-saddle escape was
-    // unreachable for every analytic-Hessian objective. Now the refusal lands
-    // where the escape lives, so a genuine saddle gets its bounded attempt to
-    // step below itself and re-certify there. This mock's declared curvature is
-    // not its criterion's, so the adjudication withdraws it after one terminal
-    // certification rather than spending the escape budget on it.
+    // This run takes one terminal certification: the declared curvature is not
+    // the criterion's, so the adjudication withdraws the verdict and the run mints
+    // there. The mint evaluates order four once. Screening escalates to order four
+    // only when its first-order band would refuse (#2596), and the initial
+    // `theta = 0` is the exact stationary point of `1 + theta^2`.
     //
     // A regression that re-introduced per-candidate order four would scale with
-    // the seed budget and blow this ceiling; a regression that dropped the mint
-    // entirely would fall below the floor.
+    // the seed budget; a regression that dropped the mint entirely would read 0.
     let fourth_order_calls = fourth_order_calls.load(Ordering::Relaxed);
-    assert!(
-        fourth_order_calls >= 1,
-        "the mint audit must actually evaluate order four; got {fourth_order_calls}"
-    );
-    assert!(
-        fourth_order_calls <= 1 + crate::rho_optimizer::run::OUTER_SADDLE_ESCAPE_BUDGET,
-        "order four is paid once per terminal certification, and terminal \
-         certifications are bounded by the saddle-escape budget \
-         ({}); got {fourth_order_calls}",
-        crate::rho_optimizer::run::OUTER_SADDLE_ESCAPE_BUDGET,
+    assert_eq!(
+        fourth_order_calls, 1,
+        "order four is paid once, at the one terminal certification this fit takes; got \
+         {fourth_order_calls}"
     );
 }
 

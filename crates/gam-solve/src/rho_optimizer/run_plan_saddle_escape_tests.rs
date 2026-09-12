@@ -931,9 +931,9 @@ fn a_descent_below_the_criterion_resolution_is_not_an_escape_2612() {
 // At ρ = (0, 0) the gradient vanishes and `H` is indefinite, exactly as in the
 // wells above; unlike them, `argmin` over the box is the FACE ρ₁ = ±rho_bound
 // and the descent runs the whole width of the box. A reseed capped at α = 1
-// covers 1/30th of it, which on the real fixture cost one
-// `OUTER_SADDLE_ESCAPE_BUDGET` unit per e-fold and refused the fit six e-folds
-// short.
+// covers 1/30th of it, which on the real fixture cost one unit of the
+// interior-escape count (3, since deleted, #2817) per e-fold and refused the fit
+// six e-folds short.
 //
 // Both directions descend identically here, so the sign is a tie and either
 // face is correct; the assertions are on |ρ₁|.
@@ -1119,9 +1119,9 @@ fn outer_search_clears_a_monotone_ridge_on_the_gradient_only_plan_2612() {
 // ─── #2612 a criterion whose minimum over the box is a CORNER ────────
 //
 // The ridge fixture above has ONE indefinite coordinate, so one escape clears
-// it. That is still inside the premise `OUTER_SADDLE_ESCAPE_BUDGET = 3` rests
-// on — *"a genuine saddle is cleared in one escape"* — and so it cannot test
-// that premise.
+// it. That is still inside the premise the interior-escape count of 3 (since
+// deleted, #2817) rested on — *"a genuine saddle is cleared in one escape"* —
+// and so it cannot test that premise.
 //
 // This one is outside it, and it is the shape the multinomial fit has:
 //
@@ -1140,7 +1140,7 @@ fn outer_search_clears_a_monotone_ridge_on_the_gradient_only_plan_2612() {
 // criterion strictly decreases and the free dimension strictly shrinks. It is
 // finite by construction and needs `K` escapes.
 //
-// With `K = 5` against a budget of 3 the fit is refused with two coordinates
+// With `K = 5` against a count of 3 the fit was refused with two coordinates
 // still un-retired. That is the measurement the premise cannot survive, and it
 // is here as a fixture rather than as an argument.
 const CORNER_CURVATURES: [f64; 5] = [5.0e-3, 4.0e-3, 3.0e-3, 2.0e-3, 1.0e-3];
@@ -1193,7 +1193,7 @@ fn corner_problem() -> OuterProblem {
 
 #[test]
 fn outer_search_reaches_a_corner_minimum_that_needs_more_than_one_escape_2612() {
-    // The premise `OUTER_SADDLE_ESCAPE_BUDGET` rests on, as a fixture. Every
+    // The premise the deleted interior-escape count rested on, as a fixture. Every
     // escape here is a strict descent AND retires one coordinate onto a rail, so
     // the sequence is finite by construction; capping it by a count refuses a
     // point the criterion is still descending toward.

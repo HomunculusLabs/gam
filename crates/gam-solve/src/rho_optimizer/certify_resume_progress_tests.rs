@@ -1,12 +1,14 @@
 //! Unit coverage for the certify-last reseed loop (#2374, #2817). The loop
 //! re-runs from a strategy change the refused certificate published, and only
-//! while each re-run exploits real descent: `take_certify_reseed` decides whether
-//! there is a strategy change at all, and `certify_resume_made_progress` is the
-//! exact predicate that decides "real descent" vs "genuine floor".
+//! while the certified value strictly drops between refusals:
+//! `take_certify_reseed` decides whether there is a strategy change at all,
+//! `certify_reseed_admitted` whether the loop may take it, and
+//! `certify_resume_made_progress` is the exact predicate that decides "real
+//! descent" vs "genuine floor".
 use super::{
     ActiveSetReseed, CERTIFY_RESUME_PROGRESS_REL, CertifyReseedKind, HessianSource, OuterConfig,
-    OuterPlan, OuterResult, Solver, certify_resume_made_progress, outer_rel_cost_floor,
-    take_certify_reseed,
+    OuterPlan, OuterResult, Solver, certify_reseed_admitted, certify_resume_made_progress,
+    outer_rel_cost_floor, take_certify_reseed,
 };
 use ndarray::array;
 
@@ -127,7 +129,7 @@ fn a_refused_checkpoint_without_a_strategy_change_returns_the_refusal_2817() {
         "fixture precondition: the solver claimed convergence at the refused checkpoint"
     );
     assert!(
-        take_certify_reseed(&mut claimed, &OuterConfig::default()).is_none(),
+        take_certify_reseed(&mut claimed).is_none(),
         "a refusal with no published reseed must stand, not re-run the search from the checkpoint"
     );
 }
@@ -143,7 +145,7 @@ fn a_published_reseed_is_taken_in_precedence_order_and_the_rest_dropped_2817() {
         rho: array![1.0, 2.0],
         bounds: (array![-4.0, 2.0], array![4.0, 2.0]),
     });
-    let reseed = take_certify_reseed(&mut result, &OuterConfig::default())
+    let reseed = take_certify_reseed(&mut result)
         .expect("a confirmed-tail snap was published");
     assert_eq!(reseed.kind, CertifyReseedKind::TailSnap);
     assert_eq!(reseed.rho, array![1.0, 3.0]);
@@ -153,7 +155,35 @@ fn a_published_reseed_is_taken_in_precedence_order_and_the_rest_dropped_2817() {
         "lower-precedence reseeds are dropped with the one taken"
     );
     assert!(
-        take_certify_reseed(&mut result, &OuterConfig::default()).is_none(),
+        take_certify_reseed(&mut result).is_none(),
         "no reseed survives into the next iteration"
+    );
+}
+
+/// #2817 (lead ruling 09-12): the certify-last loop has no resume count. The first
+/// published reseed is taken; a later one only after the certified value strictly
+/// dropped since the previous refusal, so a re-run that found no descent returns
+/// the refusal instead of taking another reseed.
+#[test]
+fn a_reseed_without_certified_descent_since_the_last_refusal_returns_the_refusal_2817() {
+    assert!(
+        certify_reseed_admitted(None, 455.40),
+        "the first published reseed is taken"
+    );
+    assert!(
+        certify_reseed_admitted(Some(455.40), 455.40 - 5.0e-4),
+        "a reseed after strict certified descent is taken"
+    );
+    assert!(
+        !certify_reseed_admitted(Some(455.40), 455.40),
+        "a re-run that certified the same value found no descent"
+    );
+    assert!(
+        !certify_reseed_admitted(Some(455.40), 455.41),
+        "a re-run that certified a higher value found no descent"
+    );
+    assert!(
+        !certify_reseed_admitted(Some(455.40), f64::NAN),
+        "a non-finite certified value is never descent"
     );
 }

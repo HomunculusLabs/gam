@@ -2711,8 +2711,8 @@ fn max_feasible_step_along(
 /// so the wall step is worth **26×** the ladder's, and the BFGS resume seeded at
 /// the ladder's point makes no progress at all (reseed and next refused point
 /// bit-identical), leaving the escape as the only thing moving ρ — one e-fold
-/// per escape, against `OUTER_SADDLE_ESCAPE_BUDGET = 3`, on a ridge six e-folds
-/// long. The fit refused.
+/// per escape, against an interior-escape count of 3 (since deleted, #2817), on a
+/// ridge six e-folds long. The fit refused.
 ///
 /// # The rule, and why it needs no constant
 ///
@@ -7465,83 +7465,25 @@ pub enum OperatorTrustRegionStopReason {
     StepNormStall,
 }
 
-/// Run the outer smoothing-parameter optimization.
-///
-/// This is the single entry point that replaces the scattered optimizer wiring
-/// across estimate.rs, joint.rs, and custom_family.rs. It:
-///
-/// 1. Queries and canonicalizes the objective's capability declaration.
-/// 2. Calls `plan()` to select solver + hessian source.
-/// 3. Logs the plan and the analytic derivative capabilities it will consume.
-/// 4. Generates seed candidates.
-/// 5. Runs the chosen solver on candidates in heuristic order up to budget.
-/// 6. If the configured fallback policy allows it, re-plans with degraded
-///    capabilities chosen centrally inside outer_strategy and retries.
-/// 7. Returns the best result (including which plan was actually used).
-///
-/// Do not wrap `run_outer` calls in try/catch with ad-hoc solver recovery.
-/// Callers should declare only the primary capability and, at most, whether
-/// automatic fallback is enabled at all.
-///
-/// Bound on the certify-last reseed loop. When the mandatory analytic
-/// certificate refuses and publishes a strategy change (a saddle escape, a
-/// confirmed-tail snap, a wrong-rail pull-back or an active-set reduction), the
-/// loop re-runs the outer search from that reseed while each re-run strictly
-/// reduces the objective. A refusal that publishes no reseed is returned as is:
-/// re-running from the refused checkpoint only continued the same search with
-/// more iterations (SPEC rules 21 and 23, #2817).
-const OUTER_CERTIFY_RESUME_BUDGET: usize = 16;
-
-/// Max **interior** strict-saddle escape resumes (#2357/#2155/#2612).
-///
-/// The pathology this guards is named in #2155/#2363: a bimodal inner solve
-/// whose warm re-descent keeps reporting a phantom improvement the cold
-/// certificate cannot reproduce. `certify_resume_made_progress` is the loop's
-/// own descent gate and it can be fooled by exactly that hysteresis — the warm
-/// value looks improved — so a small cap is the backstop, and it stays.
-///
-/// It applies only to an escape whose reseed lands in the **interior** of the
-/// box. Such an escape retires nothing and can in principle repeat forever, so a
-/// count is the only bound available for it.
-///
-/// It does NOT apply to an escape whose reseed lands ON the box face, and that
-/// distinction is the whole of #2612. The escape direction is exactly zero on
-/// every railed coordinate (`judged_subspace_basis`), so the ray's box
-/// intersection is set by a FREE coordinate: a reseed on the face has retired a
-/// previously-free coordinate onto a rail. There are only `n` coordinates to
-/// retire, so that escape cannot be the repeating pathology, and it is bounded
-/// by [`OUTER_CERTIFY_RESUME_BUDGET`] like every other reseed kind.
-///
-/// The old value carried the premise *"a genuine saddle is cleared in one
-/// escape"*, and #2612 measured that false: on the multinomial banded fixture
-/// the criterion descends monotonically for six e-folds to the wall, and on
-/// penguins four successive escapes each ran to a face
-/// (`α_box = 9.39, 4.77, 9.14, 6.11`) while the criterion fell
-/// `2.158034 → 2.156725`. Capping THAT by a count refuses a point the criterion
-/// is still descending toward, one coordinate short of the corner.
-pub(crate) const OUTER_SADDLE_ESCAPE_BUDGET: usize = 3;
-
-/// Roundoff-relative scale below which a certify-last reseed's objective
-/// reduction is numerical noise rather than exploited descent (#2374). A re-run
-/// from a certificate's reseed that ends no lower than the refused checkpoint
-/// (to roundoff) found no descent — a genuine floor — while exploited descent
-/// yields a reduction orders of magnitude above this scale. The progress gate MUST anchor on roundoff, not the much larger
-/// cost-stall relative floor: a flat valley crawls out in per-reseed steps far
-/// smaller than `rel_cost·(1 + |cost|)` (the transformation-survival LAML moves
-/// ~4e-5 relative per reseed), and gating on that coarser floor stops the crawl
-/// after a single hop and refuses a well-posed fit.
+/// Roundoff-relative scale below which a drop in the certified objective between
+/// two refusals of the certify-last reseed loop is numerical noise rather than
+/// exploited descent (#2374, #2817). Both values are the certificate's own
+/// evaluations, so a re-run that found no descent certifies a value no lower,
+/// to roundoff, than the previous refusal's, while exploited descent lowers it
+/// by orders of magnitude more than this scale. The gate MUST anchor on
+/// roundoff, not the much larger cost-stall relative floor: a flat valley
+/// crawls out in per-reseed steps far smaller than `rel_cost·(1 + |cost|)` (the
+/// transformation-survival LAML moves ~4e-5 relative per reseed), and gating on
+/// that coarser floor stops the crawl after a single hop and refuses a
+/// well-posed fit.
 const CERTIFY_RESUME_PROGRESS_REL: f64 = 32.0 * f64::EPSILON;
 
 /// The kind of strategy change a refused mint certificate published.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CertifyReseedKind {
     /// A negative-curvature escape stepped strictly below a strict saddle
-    /// (#2357/#2155) that stays inside the box and retires no coordinate.
-    InteriorSaddleEscape,
-    /// A negative-curvature escape that landed on the box face: it retired a
-    /// previously-free coordinate onto a rail, and there are only `n` of those
-    /// (#2612).
-    FaceSaddleEscape,
+    /// (#2357/#2155, #2612).
+    SaddleEscape,
     /// A confirmed-tail snapped face (#2348 Inc 2b, #2349).
     TailSnap,
     /// A wrong-rail pull-back to the coordinate's clean-band interior (#2392).
@@ -7571,34 +7513,16 @@ struct CertifyReseed {
 /// published no strategy change, and the refusal stands: re-running the same
 /// search from the refused checkpoint only continued it with more iterations
 /// (SPEC rules 21 and 23, #2817).
-fn take_certify_reseed(result: &mut OuterResult, config: &OuterConfig) -> Option<CertifyReseed> {
+fn take_certify_reseed(result: &mut OuterResult) -> Option<CertifyReseed> {
     let saddle_escape = result.saddle_escape_reseed.take();
     let tail_snap = result.tail_snap_reseed.take();
     let wrong_rail = result.wrong_rail_reseed.take();
     let active_set = result.active_set_reseed.take();
     if let Some(reseed) = saddle_escape {
-        // Did this escape retire a free coordinate onto a rail (#2612)? It is a
-        // property of the two points and the box: the escape direction is exactly
-        // zero on every already-railed coordinate, so a reseed on a bound that the
-        // refused checkpoint held strictly inside has retired that coordinate.
-        let (lower, upper) = outer_model_domain_bounds_template(config, reseed.len());
-        let retires_a_coordinate = (0..reseed.len()).any(|i| {
-            let on_bound = reseed[i] <= lower[i] || reseed[i] >= upper[i];
-            let was_interior = result
-                .rho
-                .get(i)
-                .is_some_and(|held| *held > lower[i] && *held < upper[i]);
-            on_bound && was_interior
-        });
-        let kind = if retires_a_coordinate {
-            CertifyReseedKind::FaceSaddleEscape
-        } else {
-            CertifyReseedKind::InteriorSaddleEscape
-        };
         return Some(CertifyReseed {
             rho: reseed,
             search_bounds_override: None,
-            kind,
+            kind: CertifyReseedKind::SaddleEscape,
         });
     }
     if let Some(reseed) = tail_snap {
@@ -7622,6 +7546,23 @@ fn take_certify_reseed(result: &mut OuterResult, config: &OuterConfig) -> Option
     })
 }
 
+/// Run the outer smoothing-parameter optimization.
+///
+/// This is the single entry point that replaces the scattered optimizer wiring
+/// across estimate.rs, joint.rs, and custom_family.rs. It:
+///
+/// 1. Queries and canonicalizes the objective's capability declaration.
+/// 2. Calls `plan()` to select solver + hessian source.
+/// 3. Logs the plan and the analytic derivative capabilities it will consume.
+/// 4. Generates seed candidates.
+/// 5. Runs the chosen solver on candidates in heuristic order up to budget.
+/// 6. If the configured fallback policy allows it, re-plans with degraded
+///    capabilities chosen centrally inside outer_strategy and retries.
+/// 7. Returns the best result (including which plan was actually used).
+///
+/// Do not wrap `run_outer` calls in try/catch with ad-hoc solver recovery.
+/// Callers should declare only the primary capability and, at most, whether
+/// automatic fallback is enabled at all.
 pub(crate) fn run_outer(
     obj: &mut dyn OuterObjective,
     config: &OuterConfig,
@@ -7772,18 +7713,14 @@ pub(crate) fn run_outer(
     };
     // Certify-last reseed loop (#2357, #2348, #2392). When the mandatory analytic
     // certificate refuses and publishes a strategy change (`take_certify_reseed`),
-    // the search re-runs from that reseed with a fresh metric, and the loop stops
-    // the moment certification passes or a re-run fails to strictly reduce the
-    // objective. A refusal that publishes no reseed is returned as is (#2817).
-    let mut resumes_remaining = OUTER_CERTIFY_RESUME_BUDGET;
-    // INTERIOR strict-saddle escapes are bounded separately and tightly: one that
-    // lands inside the box retires nothing, so a count is the only bound there is
-    // for it, and a non-convergent bimodal-inner grind (#2155/#2363) is cut off
-    // well before it exhausts the general resume budget (#2357). An escape that
-    // lands on the box FACE has retired a free coordinate onto a rail and is
-    // bounded by the general budget instead — see [`OUTER_SADDLE_ESCAPE_BUDGET`]
-    // (#2612).
-    let mut interior_saddle_escapes_remaining: usize = OUTER_SADDLE_ESCAPE_BUDGET;
+    // the search re-runs from that reseed with a fresh metric. A refusal that
+    // publishes no reseed is returned as is (#2817). The loop is bounded by
+    // certified descent, not by a count (`certify_reseed_admitted`): after the
+    // first reseed, one is taken only while the value the certificate evaluated at
+    // the refused point is strictly below the value it evaluated at the previous
+    // refusal. A re-run whose warm solver value improved but whose certified value
+    // did not (#2155/#2363) returns the refusal instead of taking another reseed.
+    let mut last_refused_certified_value: Option<f64> = None;
     // #2569 — seed points this loop has already started and already had refused.
     // A resume changes `initial_rho` and nothing else the cascade reads, and it
     // runs from a reset objective, so a NON-initial seed re-entered on a later
@@ -7797,35 +7734,23 @@ pub(crate) fn run_outer(
         match certify_diagnose_and_install(obj, &mut result) {
             Ok(certificate) => break certificate,
             Err(refusal) => {
-                let Some(reseed) = take_certify_reseed(&mut result, config) else {
+                let Some(reseed) = take_certify_reseed(&mut result) else {
                     return Err(refusal);
                 };
-                if resumes_remaining == 0
-                    || (reseed.kind == CertifyReseedKind::InteriorSaddleEscape
-                        && interior_saddle_escapes_remaining == 0)
-                {
+                // `result.final_value` is the certifying evaluation's value at the
+                // refused point.
+                let certified_value = result.final_value;
+                if !certify_reseed_admitted(last_refused_certified_value, certified_value) {
                     return Err(refusal);
                 }
-                resumes_remaining -= 1;
-                if reseed.kind == CertifyReseedKind::InteriorSaddleEscape {
-                    // An interior escape retires nothing, so it can in principle
-                    // repeat: a bimodal inner solve whose warm re-descent reports a
-                    // phantom improvement the cold certificate cannot reproduce
-                    // (#2155/#2363) would re-escape a family of shallow saddles. A
-                    // face escape retires a coordinate and is bounded by
-                    // `resumes_remaining` and the descent gate below (#2612).
-                    interior_saddle_escapes_remaining -= 1;
-                }
+                last_refused_certified_value = Some(certified_value);
                 let prior_iterations = result.iterations;
-                let prior_value = result.final_value;
                 log::info!(
                     "[OUTER] {context}: analytic certification refused after \
-                     {prior_iterations} iteration(s) (final_value={prior_value:.6e}); re-running \
-                     from the certificate's reseed {} ({resumes_remaining} resume(s) left after \
-                     this one; #2357/#2348/#2392)",
+                     {prior_iterations} iteration(s) (final_value={certified_value:.6e}); re-running \
+                     from the certificate's reseed {} (#2357/#2348/#2392)",
                     match reseed.kind {
-                        CertifyReseedKind::InteriorSaddleEscape
-                        | CertifyReseedKind::FaceSaddleEscape => {
+                        CertifyReseedKind::SaddleEscape => {
                             "off the negative-curvature saddle ridge"
                         }
                         CertifyReseedKind::TailSnap => "at the confirmed-tail snapped face",
@@ -7887,25 +7812,7 @@ pub(crate) fn run_outer(
                 match run_outer_uncertified(obj, &retry_cfg, context) {
                     Ok(mut retried) => {
                         retried.iterations = retried.iterations.saturating_add(prior_iterations);
-                        // Progress gate. A re-run that ends no lower than the
-                        // refused checkpoint beyond roundoff found no descent from
-                        // the certificate's evidence — a genuine floor — while
-                        // exploited descent yields a reduction orders of magnitude
-                        // larger. Gate on
-                        // roundoff (NOT the coarser cost-stall floor) so a valley
-                        // that crawls out in tiny per-reseed steps is not cut off
-                        // after one hop; stop only when a reseed truly stalls, so
-                        // the next iteration certifies the best point once more
-                        // and takes the honest refusal.
-                        let improved = certify_resume_made_progress(
-                            prior_value,
-                            retried.final_value,
-                            CERTIFY_RESUME_PROGRESS_REL,
-                        );
                         result = retried;
-                        if !improved {
-                            resumes_remaining = 0;
-                        }
                     }
                     // The reseed could not even run (e.g. the checkpoint is a
                     // hard refusal wall for the objective): surface the
@@ -8641,15 +8548,15 @@ pub(crate) fn criterion_curvature_resolution(rel_cost_floor: f64, cost: f64) -> 
     }
 }
 
-/// Whether a certify-last checkpoint reseed (#2273/#2374) exploited real descent.
+/// Whether the certified objective strictly dropped between two refusals of the
+/// certify-last reseed loop (#2374, #2817).
 ///
-/// A reseed that does not strictly reduce the outer objective past the shared
-/// relative cost floor `rel_cost_floor·(1 + min(|prior|, |retried|))` is at a
-/// genuine non-stationary floor (or a true flat valley) a fresh metric cannot
-/// escape, so the resume loop must stop rather than spend its remaining budget
-/// re-deriving the same refusal. Anchoring the floor on the SMALLER of the two
-/// costs keeps a tiny uphill wobble from a metric restart from reading as
-/// progress, and a non-finite retried value is never progress.
+/// `prior_value` is the value certified at the previous refusal and
+/// `retried_value` the value certified at this one. A drop no larger than
+/// `rel_cost_floor·(1 + min(|prior|, |retried|))` means the re-run found no
+/// descent. Anchoring the floor on the SMALLER of the two costs keeps a tiny
+/// uphill wobble from reading as progress, and a non-finite retried value is
+/// never progress.
 pub(crate) fn certify_resume_made_progress(
     prior_value: f64,
     retried_value: f64,
@@ -8657,6 +8564,18 @@ pub(crate) fn certify_resume_made_progress(
 ) -> bool {
     let floor = rel_cost_floor * (1.0 + prior_value.abs().min(retried_value.abs()));
     retried_value.is_finite() && retried_value < prior_value - floor
+}
+
+/// Whether the certify-last loop may take the reseed published at a refusal whose
+/// certifying evaluation read `certified_value`, given the value certified at the
+/// previous refusal (#2817). The first reseed is taken; every later one only after
+/// strict certified descent (`certify_resume_made_progress` at the roundoff
+/// scale), so the certified values strictly decrease across the loop and it ends
+/// without a count.
+fn certify_reseed_admitted(previous_certified_value: Option<f64>, certified_value: f64) -> bool {
+    previous_certified_value.is_none_or(|previous| {
+        certify_resume_made_progress(previous, certified_value, CERTIFY_RESUME_PROGRESS_REL)
+    })
 }
 
 /// The user-requested outer precision, expressed relative to the criterion's
