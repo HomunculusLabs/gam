@@ -5361,7 +5361,7 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                 .as_ref()
                 .map(|spectrum| spectrum.null_residual_inf())
                 .unwrap_or(0.0);
-            if excluded_null_residual > residual_tol.max(1e-6) {
+            if excluded_null_residual > residual_tol {
                 log::warn!(
                     "[PIRLS/joint-Newton convergence] cycle {cycle:>3} | Newton-decrement \
                      certificate fired with LARGE excluded near-null residual \
