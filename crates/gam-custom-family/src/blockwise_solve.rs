@@ -1213,7 +1213,9 @@ pub(crate) fn extract_simple_lower_bounds(
         let mut coeff_value = 0.0;
         for col in 0..p {
             let value = constraints.a[[row, col]];
-            if value.abs() <= 1e-12 {
+            // A row is a simple bound only when every other coefficient is exactly
+            // zero; a small nonzero entry is still part of the constraint.
+            if value == 0.0 {
                 continue;
             }
             if coeff_idx.is_some() {
