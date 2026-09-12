@@ -1714,6 +1714,76 @@
         );
     }
 
+    /// #2714: the one-pass all-axes Hessian derivative is the per-axis sweep,
+    /// `Hdot[e_a]` for every canonical axis, on the stress fixture with
+    /// exact-event and right-censored rows and a learned scale. The Hessian
+    /// workspace must serve it as well: the trait default answers `None`, which
+    /// sent every joint-Newton cycle's Jeffreys term back through `p` per-axis
+    /// row passes after discarding the dense Hessian it had just built.
+    #[test]
+    fn latent_survival_all_axes_hessian_derivative_matches_per_axis_sweep_2714() {
+        let family = survival_stress_test_family(24);
+        let beta = survival_stress_test_joint_beta();
+        let states = latent_survival_states_from_joint_beta(&family, &beta);
+        let slices = family.joint_slices();
+        assert!(
+            slices.log_sigma.is_some(),
+            "the fixture must learn its scale so the log-sigma lift is exercised"
+        );
+        let total = slices.total;
+
+        let per_axis_start = std::time::Instant::now();
+        let per_axis: Vec<Array2<f64>> = (0..total)
+            .map(|a| {
+                let mut axis = Array1::<f64>::zeros(total);
+                axis[a] = 1.0;
+                family
+                    .exact_newton_joint_hessian_directional_derivative_dense(&states, &axis)
+                    .expect("per-axis joint dH evaluation")
+            })
+            .collect();
+        let per_axis_elapsed = per_axis_start.elapsed();
+
+        let all_axes_start = std::time::Instant::now();
+        let all_axes = family
+            .exact_newton_joint_hessian_directional_derivative_all_axes_dense(&states)
+            .expect("one-pass all-axes joint dH evaluation");
+        let all_axes_elapsed = all_axes_start.elapsed();
+        assert_eq!(all_axes.len(), total);
+
+        let scale = per_axis
+            .iter()
+            .flat_map(|matrix| matrix.iter())
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        let max_abs_diff = all_axes
+            .iter()
+            .zip(per_axis.iter())
+            .flat_map(|(left, right)| left.iter().zip(right.iter()))
+            .fold(0.0_f64, |acc, (left, right)| acc.max((left - right).abs()));
+        eprintln!(
+            "[2714] all-axes joint dH: p={total} scale={scale:.6e} max_abs_diff={max_abs_diff:.3e} \
+             per_axis={:.3}ms all_axes={:.3}ms",
+            per_axis_elapsed.as_secs_f64() * 1e3,
+            all_axes_elapsed.as_secs_f64() * 1e3,
+        );
+        assert!(
+            scale > 1e-3,
+            "the per-axis sweep is too small to grade an agreement against: scale={scale:.3e}"
+        );
+        assert!(
+            max_abs_diff <= 1e-10 * scale,
+            "one-pass all-axes joint dH disagrees with the per-axis sweep: \
+             max_abs_diff={max_abs_diff:.3e} against scale={scale:.3e}"
+        );
+
+        let workspace = LatentSurvivalHessianWorkspace::new(family.clone(), states.clone());
+        let served = workspace
+            .directional_derivative_all_axes()
+            .expect("workspace all-axes joint dH evaluation")
+            .expect("the latent survival workspace must serve the batched derivative");
+        assert_eq!(served, all_axes);
+    }
+
     #[test]
     fn latent_survival_exact_joint_dh_matches_hessian_fd() {
         let family = learnable_sigma_test_family();

@@ -319,6 +319,27 @@ impl CustomFamily for LatentSurvivalFamily {
         .map(Some)
     }
 
+    /// All `p` axes of `exact_newton_joint_hessian_directional_derivative` from
+    /// one build of the row lifts (#2714). The trait default sweeps that hook
+    /// once per axis, and every sweep step is a full row pass.
+    fn joint_jeffreys_information_directional_derivative_all_axes_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        // Same parallel-array precondition as the workspace hooks above.
+        if specs.len() != block_states.len() {
+            return Err(format!(
+                "joint_jeffreys_information_directional_derivative_all_axes_with_specs: {} \
+                 parameter-block specs for {} block states",
+                specs.len(),
+                block_states.len()
+            ));
+        }
+        self.exact_newton_joint_hessian_directional_derivative_all_axes_dense(block_states)
+            .map(Some)
+    }
+
     /// One-pass Jeffreys completion (#2714). The latent-survival Jeffreys
     /// information is the observed joint Hessian (trait default), so the
     /// contracted second derivative is `∇²_β tr(W · H(β))`, the object the

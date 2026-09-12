@@ -5330,6 +5330,158 @@ impl LatentSurvivalFamily {
         Ok(acc.hessian)
     }
 
+    /// Every canonical-axis first directional derivative of the joint Hessian,
+    /// `Hdot[e_a]` for `a = 0..p`, with one row lift per primary instead of one
+    /// full row pass per axis (#2714).
+    ///
+    /// The per-axis route, `exact_newton_joint_hessian_directional_derivative_dense`
+    /// called `p` times, rebuilds every row's kernel bundles and runs a one-seed
+    /// third-order lift along `X_i e_a` on each pass, and that sweep is what the
+    /// joint-Newton Jeffreys term reads on every cycle. The lift is linear in its
+    /// seed and `X_i e_a` only combines the row's primary axes, so each row lifts
+    /// once along every primary `e_γ` its design touches, and every axis closes as
+    ///
+    /// ```text
+    ///   Hdot[e_a]_i = X_iᵀ (Σ_γ (X_i e_a)_γ T_{i,γ}) X_i
+    /// ```
+    ///
+    /// through the same chunked pullback reduction the per-axis route runs. The
+    /// lifts are held per row (at most six `6×6` matrices) and the axes are
+    /// reduced one at a time, so in-flight memory is `O(n + p²)` per axis on top
+    /// of the `p³` result rather than a `p³` accumulator per chunk.
+    fn exact_newton_joint_hessian_directional_derivative_all_axes_dense(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Vec<Array2<f64>>, String> {
+        use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
+        let weights = ValidatedLikelihoodWeights::new(&self.weights, "latent-survival")
+            .map_err(String::from)?;
+        let (q_entry, q_exit, qdot_exit, mu) = self.split_time_eta(block_states)?;
+        let q_right = self.time_q_right(block_states)?;
+        let sigma = self.latent_sd(block_states)?;
+        let slices = self.joint_slices();
+        let include_log_sigma = slices.log_sigma.is_some();
+        let live_primaries = if include_log_sigma {
+            LATENT_SURVIVAL_PRIMARY_DIM
+        } else {
+            LATENT_SURVIVAL_PRIMARY_LOG_SIGMA
+        };
+        let total = slices.total;
+        let unit = |index: usize, len: usize| {
+            let mut axis = Array1::<f64>::zeros(len);
+            axis[index] = 1.0;
+            axis
+        };
+        let row_lifts: Vec<Option<Vec<Option<Array2<f64>>>>> = (0..self.event_target.len())
+            .into_par_iter()
+            .map(|row_idx| -> Result<Option<Vec<Option<Array2<f64>>>>, String> {
+                if weights.at(row_idx) == 0.0 {
+                    return Ok(None);
+                }
+                // A primary is read by some axis exactly when its design row is
+                // nonzero; the mean and log-sigma primaries are read whenever
+                // their blocks exist.
+                let mut touched = [false; LATENT_SURVIVAL_PRIMARY_DIM];
+                touched[LATENT_SURVIVAL_PRIMARY_Q_ENTRY] =
+                    self.x_time_entry.row(row_idx).iter().any(|&value| value != 0.0);
+                touched[LATENT_SURVIVAL_PRIMARY_Q_EXIT] =
+                    self.x_time_exit.row(row_idx).iter().any(|&value| value != 0.0);
+                touched[LATENT_SURVIVAL_PRIMARY_QDOT_EXIT] = self
+                    .x_time_derivative_exit
+                    .row(row_idx)
+                    .iter()
+                    .any(|&value| value != 0.0);
+                touched[LATENT_SURVIVAL_PRIMARY_Q_RIGHT] =
+                    self.x_time_right.row(row_idx).iter().any(|&value| value != 0.0);
+                touched[LATENT_SURVIVAL_PRIMARY_MU] = !slices.mean.is_empty();
+                touched[LATENT_SURVIVAL_PRIMARY_LOG_SIGMA] = include_log_sigma;
+                let row = self.build_row_at(
+                    row_idx,
+                    q_entry[row_idx],
+                    q_exit[row_idx],
+                    qdot_exit[row_idx],
+                    q_right[row_idx],
+                )?;
+                let point = LatentSurvivalPrimaryPoint {
+                    q_entry: q_entry[row_idx],
+                    q_exit: q_exit[row_idx],
+                    qdot_exit: qdot_exit[row_idx],
+                    q_right: q_right[row_idx],
+                    mu: mu[row_idx],
+                    sigma,
+                };
+                let lifts = (0..live_primaries)
+                    .map(|gamma| -> Result<Option<Array2<f64>>, String> {
+                        if !touched[gamma] {
+                            return Ok(None);
+                        }
+                        Ok(Some(latent_survival_row_primary_third_contracted(
+                            &self.quadctx,
+                            &row,
+                            point,
+                            &unit(gamma, LATENT_SURVIVAL_PRIMARY_DIM),
+                            include_log_sigma,
+                        )?))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(Some(lifts))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        let mut axes = Vec::with_capacity(total);
+        for axis_index in 0..total {
+            let axis = unit(axis_index, total);
+            let acc = deterministic_latent_survival_row_reduction(
+                self.event_target.len(),
+                || LatentSurvivalDenseHessianAccum {
+                    hessian: Array2::<f64>::zeros((total, total)),
+                },
+                |row_idx, acc| {
+                    let Some(lifts) = row_lifts[row_idx].as_ref() else {
+                        return Ok(());
+                    };
+                    let direction = self.row_primary_direction_from_flat(row_idx, &slices, &axis);
+                    let mut third = Array2::<f64>::zeros((
+                        LATENT_SURVIVAL_PRIMARY_DIM,
+                        LATENT_SURVIVAL_PRIMARY_DIM,
+                    ));
+                    for (&component, lift) in direction.iter().zip(lifts.iter()) {
+                        if component == 0.0 {
+                            continue;
+                        }
+                        let lift = lift.as_ref().ok_or_else(|| {
+                            format!(
+                                "latent survival all-axes dH: row {row_idx} reads a primary \
+                                 whose design row was classified as untouched"
+                            )
+                        })?;
+                        third.scaled_add(component, lift);
+                    }
+                    let weighted_third = checked_weighted_row_matrix(
+                        weights.at(row_idx),
+                        &third,
+                        row_idx,
+                        "contracted third",
+                    )?;
+                    self.add_pullback_primary_hessian(
+                        &mut acc.hessian,
+                        row_idx,
+                        &slices,
+                        &weighted_third,
+                    )?;
+                    Ok(())
+                },
+                |total_acc, chunk_acc| {
+                    total_acc.hessian += &chunk_acc.hessian;
+                },
+            )?;
+            require_finite_likelihood_matrix(&acc.hessian, "directional Hessian derivative")?;
+            axes.push(acc.hessian);
+        }
+        Ok(axes)
+    }
+
     fn exact_newton_joint_hessian_second_directional_derivative_dense(
         &self,
         block_states: &[ParameterBlockState],
@@ -7002,6 +7154,16 @@ trait LatentJointHessianFamily {
         out: &mut Array1<f64>,
     ) -> Result<bool, String>;
 
+    /// Every canonical-axis first Hessian derivative from one build of the
+    /// family's row lifts, or `None` when the family has no batched route and
+    /// consumers sweep `ws_dh_directional` instead.
+    fn ws_dh_all_axes(
+        &self,
+        _block_states: &[ParameterBlockState],
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        Ok(None)
+    }
+
     /// Family-name fragment used in the workspace's dimension-mismatch error
     /// message, so callers still see "latent survival …" / "latent binary …"
     /// after the workspace impl was unified.
@@ -7085,6 +7247,14 @@ impl LatentJointHessianFamily for LatentSurvivalFamily {
         }
         require_finite_likelihood_vector(out, "Hessian matvec")?;
         Ok(true)
+    }
+
+    fn ws_dh_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+        self.exact_newton_joint_hessian_directional_derivative_all_axes_dense(block_states)
+            .map(Some)
     }
 
     fn ws_label() -> &'static str {
@@ -7251,6 +7421,10 @@ where
         self.family
             .ws_dh_directional(&self.block_states, d_beta_flat)
             .map(Some)
+    }
+
+    fn directional_derivative_all_axes(&self) -> Result<Option<Vec<Array2<f64>>>, String> {
+        self.family.ws_dh_all_axes(&self.block_states)
     }
 
     fn second_directional_derivative(
