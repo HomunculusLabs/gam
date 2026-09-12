@@ -1456,10 +1456,11 @@ fn survival_location_scale_advertises_outer_hvp_at_large_scale_dimensions() {
     ];
 
     assert!(family.outer_hyper_hessian_hvp_available(&specs));
-    assert!(crate::custom_family::use_joint_matrix_free_path(
-        specs.iter().map(|spec| spec.design.ncols()).sum(),
-        family.n,
-    ));
+    let p_total: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
+    assert!(
+        crate::custom_family::JointHessianWork::row_pullback(family.n as u64, p_total as u64)
+            .matrix_free_route(p_total)
+    );
     assert!(
         !family.outer_hyper_hessian_dense_available(&specs),
         "large-scale survival location-scale should expose the outer Hessian through HVPs, not dense pairwise assembly"

@@ -2131,7 +2131,7 @@ impl CustomFamily for BinomialLocationScaleFamily {
     fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
         // Operator-aware: matrix-free workspace applies joint Hv at
         // O(n · (p_t + p_ℓ)); only fall back to the dense build cost when
-        // `use_joint_matrix_free_path` declines the operator path.
+        // `JointHessianWork::matrix_free_route` declines the operator path.
         crate::location_scale_engine::location_scale_coefficient_hessian_cost(
             self.y.len() as u64,
             specs,

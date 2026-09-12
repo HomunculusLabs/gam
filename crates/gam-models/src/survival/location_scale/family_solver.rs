@@ -1412,7 +1412,8 @@ impl CustomFamily for SurvivalLocationScaleFamily {
         specs: &[crate::custom_family::ParameterBlockSpec],
     ) -> bool {
         let p_total: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
-        !crate::custom_family::use_joint_matrix_free_path(p_total, self.n)
+        !crate::custom_family::JointHessianWork::row_pullback(self.n as u64, p_total as u64)
+            .matrix_free_route(p_total)
     }
 
     fn evaluate(&self, block_states: &[ParameterBlockState]) -> Result<FamilyEvaluation, String> {

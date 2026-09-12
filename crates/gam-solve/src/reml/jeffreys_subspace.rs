@@ -817,9 +817,7 @@ fn conditioning_ramp_down_derivatives(x: f64, under: f64, clear: f64) -> (f64, f
 /// false-fall-through. We therefore run the exact path directly for small joint
 /// systems and reserve the cheap pre-check for the wide systems whose `O(p³)`
 /// eigendecomposition (and the dense `H_id` it needs) is the cost we want to
-/// avoid on a well-conditioned fit. This threshold matches the matrix-free joint
-/// path's `JOINT_MATRIX_FREE_MIN_DIM_AT_LARGE_N` so the pre-check exists exactly
-/// where the dense formation is the regression.
+/// avoid on a well-conditioned fit.
 pub const CHEAP_CONDITIONING_PRECHECK_MIN_DIM: usize = 128;
 
 /// Safety factor by which the CONSERVATIVE spectral bounds must clear each

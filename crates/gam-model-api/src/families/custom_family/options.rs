@@ -434,6 +434,60 @@ pub fn joint_coupled_coefficient_hessian_cost(n: u64, specs: &[ParameterBlockSpe
     n.saturating_mul(p_total.saturating_mul(p_total))
 }
 
+/// Declared work of the two routes for solving with the joint coefficient
+/// Hessian, in flops.
+///
+/// The dense route assembles the `p × p` Hessian once (`build`) and factors it
+/// (`p³/3`). The matrix-free route runs preconditioned CG, whose worst case is
+/// `p` operator products (`apply` each).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JointHessianWork {
+    /// Flops to assemble the dense joint Hessian once.
+    pub build: u64,
+    /// Flops of one operator Hessian-vector product.
+    pub apply: u64,
+}
+
+impl JointHessianWork {
+    /// Work of a row pullback `H = Σ_i J_iᵀ W_i J_i` over `n` rows and `p`
+    /// coefficients: assembly is `n·p²`, and one product streams the rows
+    /// forward and back, `2·n·p`.
+    pub fn row_pullback(n: u64, p: u64) -> Self {
+        Self {
+            build: n.saturating_mul(p.saturating_mul(p)),
+            apply: n.saturating_mul(p).saturating_mul(2),
+        }
+    }
+
+    /// Whether solving with the `p × p` joint Hessian takes the matrix-free
+    /// route.
+    ///
+    /// The dense route is taken iff `build + p³/3 ≤ p · apply`, the build plus
+    /// a Cholesky factorization against CG's worst case; for a row pullback
+    /// that is `p ≤ 3n`. A Hessian whose dense storage exceeds the memory
+    /// governor's single-materialization cap takes the matrix-free route
+    /// whatever either route costs.
+    pub fn matrix_free_route(&self, p: usize) -> bool {
+        self.matrix_free_route_under_cap(
+            p,
+            gam_runtime::resource::MemoryGovernor::global().single_materialization_cap_bytes(),
+        )
+    }
+
+    fn matrix_free_route_under_cap(&self, p: usize, cap_bytes: usize) -> bool {
+        let p = p as u128;
+        let dense_bytes = p
+            .saturating_mul(p)
+            .saturating_mul(std::mem::size_of::<f64>() as u128);
+        if dense_bytes > cap_bytes as u128 {
+            return true;
+        }
+        let factor = p.saturating_mul(p).saturating_mul(p) / 3;
+        let dense_work = (self.build as u128).saturating_add(factor);
+        dense_work > p.saturating_mul(self.apply as u128)
+    }
+}
+
 /// Compute β-block column ranges from a slice of `ParameterBlockSpec`s.
 ///
 /// Returns one `Range<usize>` per spec, covering the spec's columns in the
@@ -809,5 +863,30 @@ mod tests {
         let options = BlockwiseFitOptions::default();
         assert_eq!(options.ridge_floor, 0.0);
         assert!(!options.ridge_policy.accounts_for_objective());
+    }
+
+    // -----------------------------------------------------------------------
+    // JointHessianWork
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn row_pullback_route_turns_matrix_free_past_three_rows_per_coefficient() {
+        // n·p² + p³/3 ≤ 2·n·p² exactly when p ≤ 3n; p = 3n is the tie.
+        let n = 100u64;
+        let cases = [(1usize, false), (299, false), (300, false), (301, true), (2048, true)];
+        for (p, matrix_free) in cases {
+            let work = JointHessianWork::row_pullback(n, p as u64);
+            assert_eq!(work.matrix_free_route_under_cap(p, usize::MAX), matrix_free, "p={p}");
+        }
+    }
+
+    #[test]
+    fn joint_hessian_over_the_materialization_cap_routes_matrix_free() {
+        // A tall problem prices dense until its p×p storage is one byte over the cap.
+        let p = 64usize;
+        let work = JointHessianWork::row_pullback(1_000_000, p as u64);
+        let dense_bytes = p * p * std::mem::size_of::<f64>();
+        assert!(!work.matrix_free_route_under_cap(p, dense_bytes));
+        assert!(work.matrix_free_route_under_cap(p, dense_bytes - 1));
     }
 }

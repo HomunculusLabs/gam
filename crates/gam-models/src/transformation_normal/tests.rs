@@ -2033,29 +2033,28 @@ pub(crate) fn ctn_joint_hessian_workspace_matvec_into_primes_dense_cache() {
 
 #[test]
 pub(crate) fn ctn_coefficient_hessian_cost_uses_dense_for_small_problems() {
-    // Toy family: n=4, p_resp=2, p_cov=2 → p_total=4. The matrix-free
-    // gate `use_joint_matrix_free_path(4, 4)` returns false (well below
-    // every threshold), so the override must report the dense Khatri–Rao
-    // gram cost n·(p_resp·p_cov)² = 4·16 = 64.
+    // Toy family: n=4, p_resp=2, p_cov=2 → p_total=4. The row-pullback work
+    // model keeps p_total ≤ 3n on the dense route, so the override must
+    // report the dense Khatri–Rao gram cost n·(p_resp·p_cov)² = 4·16 = 64.
     let psi = array![0.15, -0.10];
     let (family, _, _, _) = toy_family_and_derivatives(&psi);
     let n = family.response_val_basis.nrows() as u64;
     let p_resp = family.response_val_basis.ncols() as u64;
     let p_cov = family.covariate_design.ncols() as u64;
-    assert!(!crate::custom_family::use_joint_matrix_free_path(
-        (p_resp * p_cov) as usize,
-        n as usize,
-    ));
     let p_total = p_resp * p_cov;
+    assert!(
+        !crate::custom_family::JointHessianWork::row_pullback(n, p_total)
+            .matrix_free_route(p_total as usize)
+    );
     let expected_dense = n * p_total * p_total;
     assert_eq!(family.coefficient_hessian_cost(&[]), expected_dense);
 }
 
 #[test]
 pub(crate) fn ctn_coefficient_hessian_cost_switches_to_matvec_when_matrix_free_active() {
-    // p_cov=256 keeps p_total = p_resp · p_cov ≥ JOINT_MATRIX_FREE_MIN_DIM
-    // so matrix-free is ALWAYS active for any n. The override must report
-    // the per-Hv matvec cost n·(p_resp + p_cov), not the dense p² gram.
+    // p_cov=256 over n=8 rows puts p_total = p_resp · p_cov far past 3n, so
+    // the route is matrix-free. The override must report one row-pullback
+    // product 2·n·p_total, not the dense p² gram.
     // n=8 keeps the test allocation small (~16 KB for covariate_design).
     let n = 8usize;
     let p_cov = 256usize;
@@ -2090,11 +2089,11 @@ pub(crate) fn ctn_coefficient_hessian_cost_switches_to_matvec_when_matrix_free_a
     let p_resp = family.response_val_basis.ncols() as u64;
     let actual_p_cov = family.covariate_design.ncols() as u64;
     let p_total = p_resp * actual_p_cov;
-    assert!(crate::custom_family::use_joint_matrix_free_path(
-        p_total as usize,
-        n,
-    ));
-    let expected_matvec = (n as u64) * (p_resp + actual_p_cov);
+    assert!(
+        crate::custom_family::JointHessianWork::row_pullback(n as u64, p_total)
+            .matrix_free_route(p_total as usize)
+    );
+    let expected_matvec = 2 * (n as u64) * p_total;
     assert_eq!(family.coefficient_hessian_cost(&[]), expected_matvec);
     // Sanity: the matrix-free cost is dramatically smaller than the dense
     // would have been (the whole point of branching).

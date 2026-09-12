@@ -999,7 +999,7 @@ impl CustomFamily for GaussianLocationScaleFamily {
 
     fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
         // Operator-aware: when the unified evaluator picks the matrix-free
-        // joint Hessian path (see `use_joint_matrix_free_path`), the workspace
+        // joint Hessian path (see `JointHessianWork::matrix_free_route`), the workspace
         // applies the joint Hessian via row-streaming Khatri-Rao matvecs at
         // O(n · (p_t + p_ℓ)) per Hv, never building the dense (p_t + p_ℓ)²
         // matrix. Report the operator work model so diagnostics and

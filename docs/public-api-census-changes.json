@@ -2413,5 +2413,14 @@
     },
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). RawSmoothDesign's total_smooth_cols and nrows copied SmoothDesign's methods of the same names, but nothing calls them on a RawSmoothDesign. Its one consumer destructures it into the SmoothDesign that callers use, and SmoothDesign keeps its own copies.",
     "evidence": "At base deea7ad64, term_specs.rs declares pub fn total_smooth_cols and pub fn nrows twice each, once for SmoothDesign and once for RawSmoothDesign. This commit deletes the RawSmoothDesign impl, so each identity falls by one. The only producers of RawSmoothDesign are pub(crate) builders, its only consumer destructures it into a SmoothDesign, and job 549347 compiled gam-terms with the type narrowed and reported both methods as never used. Not run through public_api_census.py (MSI auth unavailable)."
+  },
+  {
+    "base": "38224d4c09c8734261c2a59c2e98f7a7c2cbbce9",
+    "removed": {
+      "crates/gam-custom-family/src/covariance.rs::use_joint_matrix_free_path": 1,
+      "crates/gam-custom-family/src/tests.rs::use_joint_matrix_free_path_triggers_at_each_documented_threshold": 1
+    },
+    "reason": "#2900 row 6.9, SPEC rules 6 and 10, under the lead's rule (D). use_joint_matrix_free_path chose the joint coefficient Hessian route at hand-picked cliffs: JOINT_MATRIX_FREE_MIN_DIM (p >= 512), JOINT_MATRIX_FREE_MIN_ROWS with JOINT_MATRIX_FREE_MIN_DIM_AT_LARGE_N (n >= 50,000 and p >= 128) and JOINT_MATRIX_FREE_MIN_LINEAR_WORK (n * p >= 4,000,000 and p >= 128). JointHessianWork::matrix_free_route now derives the route from the work (dense iff build + p^3/3 <= p * apply; PCG when the p x p Hessian exceeds the materialization cap), so the predicate, its constants and the tests pinning the cliffs go: use_joint_matrix_free_path_triggers_at_each_documented_threshold, the coefficient_cost anchors MIN_DIM, MIN_ROWS and MIN_DIM_AT_LARGE_N, gate_large_n_branch_boundary and gate_linear_work_branch. joint_coupled_wide_returns_matrix_free_n_times_p is renamed joint_coupled_wide_returns_one_operator_product because one row-pullback product is 2 * n * p. The owed_1395 p = 512 fixture has n = p rows and a materialized Hessian, so it now runs the dense route and its two tests are renamed from matrix_free to wide.",
+    "evidence": "use_joint_matrix_free_path is declared once, as a pub fn in gam-custom-family covariance.rs, and use_joint_matrix_free_path_triggers_at_each_documented_threshold once, as a pub(crate) test in gam-custom-family tests.rs; both are deleted, so each census count falls by one. Not run through public_api_census.py locally (user directive)."
   }
 ]

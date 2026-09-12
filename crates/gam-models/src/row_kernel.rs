@@ -19,7 +19,7 @@
 
 use crate::custom_family::{
     ExactNewtonJointGradientEvaluation, ExactNewtonJointHessianWorkspace,
-    JointHessianSourcePreference, MaterializationIntent, use_joint_matrix_free_path,
+    JointHessianSourcePreference, JointHessianWork, MaterializationIntent,
 };
 use crate::util::loop_progress::LoopProgress;
 use gam_linalg::faer_ndarray::fast_ab;
@@ -2209,10 +2209,11 @@ impl<const K: usize, T: RowKernel<K> + 'static> ExactNewtonJointHessianWorkspace
     ) -> JointHessianSourcePreference {
         match intent {
             // The inner Newton step only needs H·v and the diagonal
-            // preconditioner. Keep large row-kernel families on the
-            // matrix-free path instead of forcing the direct dense build.
+            // preconditioner. Serve the operator whenever the row-pullback
+            // work model routes the joint solve matrix-free.
             MaterializationIntent::InnerSolve
-                if use_joint_matrix_free_path(self.cache.p, self.cache.n) =>
+                if JointHessianWork::row_pullback(self.cache.n as u64, self.cache.p as u64)
+                    .matrix_free_route(self.cache.p) =>
             {
                 JointHessianSourcePreference::Operator
             }
@@ -2526,7 +2527,9 @@ mod gram_inner_contraction_tests {
 
     #[test]
     fn row_kernel_workspace_routes_inner_solve_to_operator() {
-        let p = crate::custom_family::JOINT_MATRIX_FREE_MIN_DIM;
+        // 512 coefficients over 8 rows is far past the p ≤ 3n dense turn.
+        let p = 512;
+        assert!(crate::custom_family::JointHessianWork::row_pullback(8, p as u64).matrix_free_route(p));
         let kernel = SyntheticKernel::new(8, p, 0x979);
         let workspace: Arc<dyn ExactNewtonJointHessianWorkspace> =
             Arc::new(RowKernelHessianWorkspace::new(kernel).expect("workspace"));

@@ -5,14 +5,6 @@
 
 use super::*;
 
-pub const JOINT_MATRIX_FREE_MIN_DIM: usize = 512;
-
-pub(crate) const JOINT_MATRIX_FREE_MIN_ROWS: usize = 50_000;
-
-pub(crate) const JOINT_MATRIX_FREE_MIN_DIM_AT_LARGE_N: usize = 128;
-
-pub(crate) const JOINT_MATRIX_FREE_MIN_LINEAR_WORK: usize = 4_000_000;
-
 pub(crate) const JOINT_TRACE_STABILITY_RIDGE: f64 = 1e-10;
 
 pub(crate) const JOINT_PCG_MAX_ITER_MULTIPLIER: usize = 4;
@@ -25,24 +17,26 @@ pub(crate) fn joint_observation_count(states: &[ParameterBlockState]) -> usize {
         .unwrap_or(0)
 }
 
-/// Whether the unified evaluator will pick the matrix-free joint Hessian path
-/// for a problem of size `(total_p, total_n)`. Exposed at crate scope so
-/// families with matrix-free operators can branch their `coefficient_hessian_cost`
-/// estimate on the same predicate the evaluator will use at fit time.
-///
-/// For large-scale row counts with only tens of coefficients, exact
-/// materialization is bounded by `total_p` Hessian-vector products and then a
-/// tiny dense factorization. That is cheaper and more predictable than PCG when
-/// each matrix-free product streams all rows through expensive FLEX marginal-
-/// slope kernels and the initial joint Hessian is ill-conditioned. Keep the
-/// matrix-free route for genuinely wide joint systems, where `total_p` dense
-/// products and factorization dominate.
-pub fn use_joint_matrix_free_path(total_p: usize, total_n: usize) -> bool {
-    total_p >= JOINT_MATRIX_FREE_MIN_DIM
-        || (total_n >= JOINT_MATRIX_FREE_MIN_ROWS
-            && total_p >= JOINT_MATRIX_FREE_MIN_DIM_AT_LARGE_N)
-        || (total_p >= JOINT_MATRIX_FREE_MIN_DIM_AT_LARGE_N
-            && total_n.saturating_mul(total_p) >= JOINT_MATRIX_FREE_MIN_LINEAR_WORK)
+/// Whether the outer evaluation runs the joint Hessian `source` over `total`
+/// coefficients and `n` rows as a matrix-free operator
+/// ([`JointHessianWork::matrix_free_route`]). A materialized source has nothing
+/// left to build and each product is a dense `p²` product, so factoring it
+/// (`p³/3`) never loses to CG's worst case (`p³`) and only the materialization
+/// cap sends it matrix-free. An operator source is priced as a row pullback.
+pub(crate) fn joint_outer_matrix_free_route(
+    source: &JointHessianSource,
+    n: usize,
+    total: usize,
+) -> bool {
+    let p = total as u64;
+    let work = match source {
+        JointHessianSource::Dense(_) => JointHessianWork {
+            build: 0,
+            apply: p.saturating_mul(p),
+        },
+        JointHessianSource::Operator { .. } => JointHessianWork::row_pullback(n as u64, p),
+    };
+    work.matrix_free_route(total)
 }
 
 pub(crate) fn apply_joint_block_penalty(

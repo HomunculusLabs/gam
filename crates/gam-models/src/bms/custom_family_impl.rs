@@ -732,7 +732,7 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         // Operator-aware: rigid Bernoulli marginal-slope wires the K=2
         // RowKernel through a matrix-free workspace that applies joint Hv at
         // O(n · (p_marginal + p_slope + p_flex)) per call. Only fall back
-        // to the dense `n · (Σ p_b)²` build when `use_joint_matrix_free_path`
+        // to the dense `n · (Σ p_b)²` build when `JointHessianWork::matrix_free_route`
         // declines the operator path.
         crate::location_scale_engine::location_scale_coefficient_hessian_cost(
             self.y.len() as u64,
@@ -799,7 +799,8 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         if log_exact_work(self.y.len()) {
             let p_total = specs.iter().map(|spec| spec.design.ncols()).sum::<usize>();
             let matrix_free_inner_requested =
-                crate::custom_family::use_joint_matrix_free_path(p_total, self.y.len());
+                crate::custom_family::JointHessianWork::row_pullback(self.y.len() as u64, p_total as u64)
+                    .matrix_free_route(p_total);
             let workspace_available = self.inner_coefficient_hessian_hvp_available(specs);
             let inner_route = if matrix_free_inner_requested && workspace_available {
                 "workspace-hvp"
@@ -1578,17 +1579,17 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     }
 
     /// Request the matrix-free inner-Newton/PCG path for BMS flex, on top of
-    /// the generic `use_joint_matrix_free_path` heuristic.
+    /// the row-pullback work model (`JointHessianWork::matrix_free_route`).
     ///
     /// Without a pinned per-row primary Hessian cache, dense joint-H assembly
     /// streams every row through the expensive flex row kernel and pays a
     /// BLAS-3 design-matrix gram per chunk on top (~63s per inner cycle at
     /// n≈195k with `linkwiggle()`). Each HVP reuses the row stream at
     /// near-gradient cost (~3s), and PCG with the joint penalty preconditioner
-    /// typically converges in a handful of iters. The generic gate only fires
-    /// for `p >= 128`, but BMS-flex per-row work is heavy enough that the
-    /// matrix-free path wins well below that, so this family drops the `p`
-    /// floor.
+    /// typically converges in a handful of iters. The work model prices CG at
+    /// its worst case of `p` products, which keeps a tall flex fit dense, but
+    /// BMS-flex per-row work is heavy enough that the matrix-free path wins
+    /// there, so this family requests it.
     ///
     /// The request selects PCG only when the workspace serves an operator
     /// source, which `matrix_free_inner_route` decides from the row-primary

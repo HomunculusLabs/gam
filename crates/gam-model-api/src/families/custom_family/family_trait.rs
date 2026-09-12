@@ -1220,15 +1220,15 @@ pub trait CustomFamily {
     }
 
     /// Opt families in to the matrix-free inner-Newton/PCG path on top of the
-    /// generic `use_joint_matrix_free_path` heuristic.
+    /// row-pullback work model (`JointHessianWork::matrix_free_route`).
     ///
-    /// `use_joint_matrix_free_path` is tuned for families with cheap per-row
-    /// work where dense `O(n·p²)` assembly is itself the bottleneck and HVPs
-    /// cost the same. Families with very expensive per-row work (e.g. BMS flex
-    /// streaming cell partitions + flex-jet evaluations per row) can override
-    /// this to force the operator path even at moderate `p`, because each HVP
-    /// reuses the row stream once and PCG converges in a handful of iters.
-    /// Default `false` keeps the heuristic untouched for everyone else.
+    /// The work model prices a dense `n·p²` assembly plus factorization against
+    /// CG's worst case of `p` row-streaming products, which suits families with
+    /// cheap per-row work. Families with very expensive per-row work (e.g. BMS
+    /// flex streaming cell partitions + flex-jet evaluations per row) can
+    /// override this to force the operator path even at moderate `p`, because
+    /// each HVP reuses the row stream once and PCG converges in a handful of
+    /// iters. Default `false` leaves the work model's route for everyone else.
     fn prefers_matrix_free_inner_joint(
         &self,
         specs: &[ParameterBlockSpec],

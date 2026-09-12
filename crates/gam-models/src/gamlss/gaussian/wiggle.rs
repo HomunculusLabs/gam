@@ -1927,7 +1927,7 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
 
     fn coefficient_hessian_cost(&self, specs: &[ParameterBlockSpec]) -> u64 {
         // Operator-aware (see GaussianLocationScaleFamily for derivation): when
-        // `use_joint_matrix_free_path` selects the workspace operator, joint
+        // `JointHessianWork::matrix_free_route` selects the workspace operator, joint
         // Hv apply is O(n · (p_t + p_ℓ + p_w)) — the row-streaming RowCoeffOperator
         // never materializes the dense (p_t + p_ℓ + p_w)² matrix.
         crate::location_scale_engine::location_scale_coefficient_hessian_cost(

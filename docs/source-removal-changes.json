@@ -5980,5 +5980,26 @@
     ],
     "reason": "#2469 (SPEC rules 22 and 25): survival_time_initial_log_lambdas seeded every CLI survival time block's REML search at log(time_smooth_lambda), which is FitConfig's 1e-2 default because no user surface sets it. PreparedSurvivalTimeStack now carries time_initial_log_lambdas, computed once in prepare_survival_time_stack by block_log_lambda_seeds from the stack's exit design and penalties, the same owner the library survival routes use. The three CLI call sites read that field instead.",
     "evidence": "At the base, git grep -n -w survival_time_initial_log_lambdas over crates and docs finds four lines, all in crates/gam-cli/src/main/run_survival.rs: the pub(crate) declaration and its three calls (the location-scale termspec, the marginal-slope spec and the latent build_time_block closure), all replaced in this commit. No test names it. Not compiled or run locally (user directive)."
+  },
+  {
+    "base": "38224d4c09c8734261c2a59c2e98f7a7c2cbbce9",
+    "items": [
+      "crates/gam-custom-family/src/covariance.rs:const:JOINT_MATRIX_FREE_MIN_DIM",
+      "crates/gam-custom-family/src/covariance.rs:const:JOINT_MATRIX_FREE_MIN_DIM_AT_LARGE_N",
+      "crates/gam-custom-family/src/covariance.rs:const:JOINT_MATRIX_FREE_MIN_LINEAR_WORK",
+      "crates/gam-custom-family/src/covariance.rs:const:JOINT_MATRIX_FREE_MIN_ROWS",
+      "crates/gam-custom-family/src/covariance.rs:fn:use_joint_matrix_free_path",
+      "crates/gam-custom-family/src/tests.rs:fn:use_joint_matrix_free_path_triggers_at_each_documented_threshold",
+      "crates/gam-models/src/coefficient_cost.rs:const:MIN_DIM",
+      "crates/gam-models/src/coefficient_cost.rs:const:MIN_DIM_AT_LARGE_N",
+      "crates/gam-models/src/coefficient_cost.rs:const:MIN_ROWS",
+      "crates/gam-models/src/coefficient_cost.rs:fn:gate_large_n_branch_boundary",
+      "crates/gam-models/src/coefficient_cost.rs:fn:gate_linear_work_branch",
+      "crates/gam-models/src/coefficient_cost.rs:fn:joint_coupled_wide_returns_matrix_free_n_times_p",
+      "tests/regressions/misc/owed_1395.rs:fn:owed_1395_matrix_free_pseudo_laplace_rho_gradient_matches_num_dual",
+      "tests/regressions/misc/owed_1395.rs:fn:owed_1395_matrix_free_pseudo_laplace_rho_objective_matches_closed_form"
+    ],
+    "reason": "#2900 row 6.9, SPEC rules 6 and 10, under the lead's rule (D). use_joint_matrix_free_path chose the joint coefficient Hessian route at hand-picked cliffs: JOINT_MATRIX_FREE_MIN_DIM (p >= 512), JOINT_MATRIX_FREE_MIN_ROWS with JOINT_MATRIX_FREE_MIN_DIM_AT_LARGE_N (n >= 50,000 and p >= 128) and JOINT_MATRIX_FREE_MIN_LINEAR_WORK (n * p >= 4,000,000 and p >= 128). JointHessianWork::matrix_free_route now derives the route from the work (dense iff build + p^3/3 <= p * apply; PCG when the p x p Hessian exceeds the materialization cap), so the predicate, its constants and the tests pinning the cliffs go: use_joint_matrix_free_path_triggers_at_each_documented_threshold, the coefficient_cost anchors MIN_DIM, MIN_ROWS and MIN_DIM_AT_LARGE_N, gate_large_n_branch_boundary and gate_linear_work_branch. joint_coupled_wide_returns_matrix_free_n_times_p is renamed joint_coupled_wide_returns_one_operator_product because one row-pullback product is 2 * n * p. The owed_1395 p = 512 fixture has n = p rows and a materialized Hessian, so it now runs the dense route and its two tests are renamed from matrix_free to wide.",
+    "evidence": "At the base, git grep -n over crates, src and tests finds use_joint_matrix_free_path called in assembly.rs (twice), inner_blockwise_fit.rs, joint_newton.rs, gam-models row_kernel.rs, survival location_scale family_solver.rs, bms custom_family_impl.rs and coefficient_cost.rs, each replaced here; every other occurrence is a test or a comment this change rewrites. The four constants occur only in covariance.rs, the gam-custom-family lib.rs re-export, row_kernel.rs and transformation_normal tests (JOINT_MATRIX_FREE_MIN_DIM) and prose in gam-models custom_family.rs and gam-solve jeffreys_subspace.rs, all updated. Outside crates, src and tests the only mentions are the two old owed_1395 test names in the historical bench/measurements/issue_2668 inventories, which record past runs. The items are the guard's identities by its rules (public or test-scoped declarations whose count falls). Not run through the guard or census locally (user directive); compile is covered by the tip check."
   }
 ]

@@ -2861,8 +2861,10 @@ fn inner_blockwise_fit_for_product<F: CustomFamily + Clone + Send + Sync + 'stat
             specs.len(),
         );
     }
-    let matrix_free_joint_requested = use_joint_matrix_free_path(total_joint_p, total_joint_n)
-        || family.prefers_matrix_free_inner_joint(specs, &states);
+    let matrix_free_joint_requested =
+        JointHessianWork::row_pullback(total_joint_n as u64, total_joint_p as u64)
+            .matrix_free_route(total_joint_p)
+            || family.prefers_matrix_free_inner_joint(specs, &states);
     let has_workspace_source = family.inner_coefficient_hessian_hvp_available(specs);
     // Probe the *spec-aware* joint Hessian: it is the canonical source of the
     // coupled joint curvature. A family may override only

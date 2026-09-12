@@ -186,17 +186,16 @@ impl CustomFamily for TransformationNormalFamily {
         // Khatri–Rao tensor design: the coefficient block is X = R ⊙ C with
         // rows length p_resp · p_cov. Two regimes:
         //
-        // * **Dense regime** (small enough that the unified evaluator builds
-        //   `weighted_gram` directly): per-evaluation cost is the dense
+        // * **Dense regime**: per-evaluation cost is the dense
         //   `n · (p_resp · p_cov)²` Khatri–Rao gram build.
         //
-        // * **Matrix-free regime** (large enough that
-        //   `use_joint_matrix_free_path` returns true and the evaluator
-        //   factors `H v` through `forward_mul` / `transpose_mul` on the
-        //   Khatri–Rao operands): per-`Hv` matvec cost is just
-        //   `n · (p_resp + p_cov)` flops — see `ctn_matrix_free_workspace`.
-        //   This is only an inner coefficient-space cost estimate; outer
-        //   θθ Hessian availability is declared separately.
+        // * **Matrix-free regime** (`JointHessianWork::matrix_free_route`):
+        //   per-`Hv` cost is one `forward_mul` and one `transpose_mul` on the
+        //   Khatri–Rao operands. Each forms `C · β_matᵀ` (or its transpose), an
+        //   `n · p_cov · p_resp` product, so a product streams
+        //   `2 · n · p_total` flops, the row-pullback model. This is only an
+        //   inner coefficient-space cost estimate; outer θθ Hessian
+        //   availability is declared separately.
         let n_usize = self.response_val_basis.nrows();
         let p_resp = self.response_val_basis.ncols() as u64;
         let p_cov = self.covariate_design.ncols() as u64;
@@ -218,17 +217,14 @@ impl CustomFamily for TransformationNormalFamily {
             _ => return u64::MAX,
         };
         let n = n_usize as u64;
-        // Shared operator-aware gate (see `coefficient_cost`): matrix-free Hv
-        // streams the Khatri–Rao operands at `n · (p_resp + p_cov)`; the dense
-        // fallback is the `n · p_total²` Khatri–Rao gram build. The dense count
-        // is supplied inline rather than via `joint_coupled_coefficient_hessian_cost`
-        // because the empty-specs preview must still report `n · p_total²` from
-        // the family-derived `p_total`, not the `n · 0²` an empty `specs` sum yields.
+        // Shared operator-aware route (see `coefficient_cost`). The row-pullback
+        // work model is built from the family-derived `p_total` rather than via
+        // `joint_coupled_operator_aware_hessian_cost`, because the empty-specs
+        // preview must still price `p_total` coefficients, not the `0` an empty
+        // `specs` sum yields.
         crate::coefficient_cost::operator_aware_hessian_cost(
+            crate::custom_family::JointHessianWork::row_pullback(n, p_total),
             p_total,
-            n,
-            n.saturating_mul(p_resp.saturating_add(p_cov)),
-            n.saturating_mul(p_total.saturating_mul(p_total)),
         )
     }
 

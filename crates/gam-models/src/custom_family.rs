@@ -39,7 +39,7 @@ pub use gam_problem::{
 pub use gam_problem::PseudoLogdetMode;
 
 // Solver half (inner blockwise solve, joint Newton, outer objective, Jeffreys,
-// covariance, the `fit_custom_family_with_rho_prior` drivers, JOINT_MATRIX_FREE_MIN_DIM,
+// covariance, the `fit_custom_family_with_rho_prior` drivers,
 // …). Extracted (#1521) into the dedicated `gam-custom-family` crate, which sits
 // ABOVE gam-solve and below gam-models. This glob re-export reconstructs the prior
 // flat namespace so the relocated families resolve `crate::custom_family::*`

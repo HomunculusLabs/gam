@@ -1631,7 +1631,10 @@ pub(crate) fn blockwise_logdet_terms_with_workspace<
             MaterializationIntent::LogdetFactorization,
             "joint exact-newton operator mismatch in logdet terms",
         )?
-    } else if !strict_spd && use_joint_matrix_free_path(total, joint_observation_count(states)) {
+    } else if !strict_spd
+        && JointHessianWork::row_pullback(joint_observation_count(states) as u64, total as u64)
+            .matrix_free_route(total)
+    {
         family
             .exact_newton_joint_hessian_workspace_with_options(states, specs, options)?
             .as_ref()

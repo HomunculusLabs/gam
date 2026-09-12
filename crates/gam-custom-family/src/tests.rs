@@ -1628,31 +1628,6 @@ pub(crate) fn large_scale_exact_adaptive_hessian_order_stays_second_order() {
 }
 
 #[test]
-pub(crate) fn use_joint_matrix_free_path_triggers_at_each_documented_threshold() {
-    // p ≥ 512 is sufficient regardless of n.
-    assert!(use_joint_matrix_free_path(512, 1));
-    assert!(use_joint_matrix_free_path(2048, 4));
-    assert!(!use_joint_matrix_free_path(511, 1));
-
-    // n ≥ 50_000 AND p ≥ 128: both must hold. This keeps p≈51 FLEX
-    // marginal-slope large-scale fits on the bounded dense-materialized path.
-    assert!(use_joint_matrix_free_path(128, 50_000));
-    assert!(!use_joint_matrix_free_path(127, 50_000));
-    assert!(!use_joint_matrix_free_path(128, 31_249));
-    assert!(!use_joint_matrix_free_path(51, 320_000));
-
-    // n · p ≥ 4_000_000 is the linear-work fallback, but only after the
-    // same moderate-p guard; below that, materializing `p` columns is a
-    // deterministic small-p bound on expensive row-kernel HVPs.
-    assert!(use_joint_matrix_free_path(128, 31_250));
-    assert!(!use_joint_matrix_free_path(127, 31_497));
-
-    // Below every threshold: dense path.
-    assert!(!use_joint_matrix_free_path(8, 100));
-    assert!(!use_joint_matrix_free_path(64, 1000));
-}
-
-#[test]
 pub(crate) fn large_scale_shape_margslope_flex_cycle0_uses_bounded_dense_route() {
     let total_p = 51;
     let total_n = 320_000;
@@ -1660,7 +1635,7 @@ pub(crate) fn large_scale_shape_margslope_flex_cycle0_uses_bounded_dense_route()
 
     assert_eq!(max_pcg_hvps_before_fix, 204);
     assert!(
-        !use_joint_matrix_free_path(total_p, total_n),
+        !JointHessianWork::row_pullback(total_n, total_p as u64).matrix_free_route(total_p),
         "p=51/n=320k should materialize exactly 51 columns instead of risking up to {max_pcg_hvps_before_fix} expensive PCG matvecs in cycle 0"
     );
 }

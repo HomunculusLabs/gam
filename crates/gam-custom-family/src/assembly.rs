@@ -1153,9 +1153,10 @@ pub(crate) fn joint_outer_evaluate(
             );
             cached
         } else {
-            let built: Arc<dyn HessianFactorization> = if use_joint_matrix_free_path(
-                total,
+            let built: Arc<dyn HessianFactorization> = if joint_outer_matrix_free_route(
+                &h_joint_unpen,
                 joint_observation_count(&inner.block_states),
+                total,
             ) {
                 let ranges_vec = ranges.to_vec();
                 let s_lambdas = Arc::new(scaled_s_lambdas.clone());
@@ -1777,9 +1778,10 @@ pub(crate) fn joint_outer_evaluate_efs(
             Some(matrix)
         });
 
-    let hessian_op: Arc<dyn HessianFactorization> = if use_joint_matrix_free_path(
-        total,
+    let hessian_op: Arc<dyn HessianFactorization> = if joint_outer_matrix_free_route(
+        &h_joint_unpen,
         joint_observation_count(&inner.block_states),
+        total,
     ) {
         let ranges_vec = ranges.to_vec();
         let s_lambdas = Arc::new(scaled_s_lambdas.clone());
