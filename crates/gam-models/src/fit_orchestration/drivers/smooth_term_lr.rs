@@ -4188,7 +4188,16 @@ mod selection_replay_tests {
             let mut coordinates = vec![0.0_f64; geometry.rank];
             for log_t in [[0.0_f64, 0.0], [-2.5, 1.75], [3.0, -4.0], [-8.0, -8.0]] {
                 let evaluated = geometry.at(&log_t).expect("eigen route");
-                let mut criterion = evaluated.offset;
+                // The eigen route's criterion from its own spectrum: the Occam term
+                // `log|I + T| − log|T|₊` over the structural rank, then the data
+                // operator `f_j = e_j/(1 + e_j)` on each squared coordinate.
+                let log_det_hessian: f64 =
+                    evaluated.eigenvalues.iter().map(|value| value.ln_1p()).sum();
+                let log_det_penalty: f64 = evaluated.eigenvalues[..geometry.rank]
+                    .iter()
+                    .map(|value| value.ln())
+                    .sum();
+                let mut criterion = log_det_hessian - log_det_penalty;
                 let mut statistic = 0.0_f64;
                 for column in 0..geometry.dimension {
                     let mut coordinate = 0.0_f64;
@@ -4196,7 +4205,8 @@ mod selection_replay_tests {
                         coordinate += draw[row] * evaluated.basis[[row, column]];
                     }
                     let square = coordinate * coordinate;
-                    criterion += square * evaluated.shares[column];
+                    let eigenvalue = evaluated.eigenvalues[column];
+                    criterion += square * (eigenvalue / (1.0 + eigenvalue));
                     statistic += square * evaluated.weights[column];
                 }
                 assert!(

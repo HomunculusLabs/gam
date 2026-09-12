@@ -1031,7 +1031,6 @@ struct PenaltyWrapperManifest {
     kind_tag: String,
     rust_type: String,
     python_wrapper: String,
-    row_block_diagonal: bool,
 }
 
 fn emit_python_penalty_manifest(manifest_dir: &Path) -> std::io::Result<()> {
@@ -1064,7 +1063,6 @@ fn emit_python_penalty_manifest(manifest_dir: &Path) -> std::io::Result<()> {
             kind_tag: manifest_const_string(&source, "KIND_TAG")?,
             rust_type: format!("{variant}:{rust_type}"),
             python_wrapper: manifest_const_string(&source, "PYTHON_WRAPPER")?,
-            row_block_diagonal: manifest_const_bool(&source, "ROW_BLOCK_DIAGONAL")?,
         });
     }
     let mut output = String::from(
@@ -1078,14 +1076,6 @@ fn emit_python_penalty_manifest(manifest_dir: &Path) -> std::io::Result<()> {
         output.push_str(&format!(
             "        \"python\": {:?},\n",
             wrapper.python_wrapper
-        ));
-        output.push_str(&format!(
-            "        \"row_block_diagonal\": {},\n",
-            if wrapper.row_block_diagonal {
-                "True"
-            } else {
-                "False"
-            }
         ));
         output.push_str("    },\n");
     }
@@ -1131,32 +1121,6 @@ fn manifest_const_string(source: &str, key: &str) -> std::io::Result<String> {
             .trim_end_matches(';')
             .trim();
         return Ok(value.trim_matches('"').to_string());
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!("missing manifest const {key}"),
-    ))
-}
-
-fn manifest_const_bool(source: &str, key: &str) -> std::io::Result<bool> {
-    let needle = format!("const {key}: bool = ");
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with(&needle) {
-            continue;
-        }
-        let value = trimmed
-            .trim_start_matches(&needle)
-            .trim_end_matches(';')
-            .trim();
-        return match value {
-            "true" => Ok(true),
-            "false" => Ok(false),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("invalid bool manifest const {key}: {value}"),
-            )),
-        };
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
