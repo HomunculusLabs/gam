@@ -26,11 +26,12 @@ import numpy as np
 
 pytest = cast(Any, importlib.import_module("pytest"))
 
-try:
-    import torch
-    import gamfit.torch as gt
-except ImportError:
-    pytest.skip("torch dependency unavailable", allow_module_level=True)
+# Only the external torch dependency is optional. gamfit and gamfit.torch are
+# imported unconditionally, so an ImportError inside our own modules fails the
+# file instead of reading as a missing dependency.
+torch = pytest.importorskip("torch")
+
+import gamfit.torch as gt
 
 
 def _require_ffi(name: str) -> None:

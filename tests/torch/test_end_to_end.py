@@ -3,23 +3,19 @@
 from __future__ import annotations
 
 from importlib import import_module
-from typing import NoReturn, Protocol, cast
+from typing import Any, cast
 
 import numpy as np
 
+pytest = cast(Any, import_module("pytest"))
 
-class _Pytest(Protocol):
-    def skip(self, reason: str, *, allow_module_level: bool = False) -> NoReturn: ...
+# Only the external torch dependency is optional. gamfit and gamfit.torch are
+# imported unconditionally, so an ImportError inside our own modules fails the
+# file instead of reading as a missing dependency.
+torch = pytest.importorskip("torch")
 
-
-pytest = cast(_Pytest, import_module("pytest"))
-
-try:
-    import torch
-    import gamfit
-    import gamfit.torch as gt
-except ImportError:
-    pytest.skip("torch dependency unavailable", allow_module_level=True)
+import gamfit
+import gamfit.torch as gt
 
 
 def _require_ffi(*names: str) -> None:
