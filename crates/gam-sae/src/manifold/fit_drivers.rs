@@ -3160,14 +3160,38 @@ impl SaeManifoldTerm {
             // #2228 trace: the logit slots lead every dense row block.
             let logit_dim = self.assignment.assignment_coord_dim();
             let mut logit_norm_sq = 0.0_f64;
+            // The block basis lives in the dense product chart (`row * q + offset`).
+            // A hard-TopK system holds only each row's active coordinate blocks at
+            // variable-stride offsets, so every compact row is expanded into its
+            // dense slot. Copying it at the compact offset projected the gradient
+            // onto the wrong coordinates (#2228).
+            let compact_layout = self.last_row_layout.clone();
+            let mut full_row = vec![0.0_f64; q];
             for (row_index, row) in system.rows.iter().enumerate() {
                 let base = system.row_offsets[row_index];
                 let dim = system.row_dims[row_index];
-                if base + dim > dense_len || row.gt.len() < dim {
+                if row.gt.len() < dim {
                     return Ok(outcome);
                 }
-                for axis in 0..dim {
-                    gradient[base + axis] = row.gt[axis];
+                match compact_layout.as_ref() {
+                    Some(layout) => {
+                        if dim != layout.row_q_active(row_index) {
+                            return Ok(outcome);
+                        }
+                        let compact_row: Vec<f64> = row.gt.iter().take(dim).copied().collect();
+                        layout.expand_row(row_index, &compact_row, &mut full_row);
+                        for axis in 0..q {
+                            gradient[row_index * q + axis] = full_row[axis];
+                        }
+                    }
+                    None => {
+                        if base + dim > dense_len {
+                            return Ok(outcome);
+                        }
+                        for axis in 0..dim {
+                            gradient[base + axis] = row.gt[axis];
+                        }
+                    }
                 }
                 if dim == q {
                     for axis in 0..logit_dim.min(dim) {
@@ -3228,6 +3252,7 @@ impl SaeManifoldTerm {
                 q,
             )
             .unwrap_or_else(|| gradient_coefficients.clone());
+            let arrow_row_offsets = system.row_offsets.clone();
             drop(system);
             let mut direction = Array1::<f64>::zeros(gradient.len());
             for (vector, &coeff) in basis.iter().zip(step_coefficients.iter()) {
@@ -3244,6 +3269,18 @@ impl SaeManifoldTerm {
             if !(slope.is_finite() && slope > 0.0) {
                 return Ok(outcome);
             }
+            // The line search and the commit step through the assembled arrow chart:
+            // under hard TopK `apply_newton_step` accepts only the compact coordinate
+            // layout, and a dense-length direction failed every trial. Restricting
+            // drops inactive coordinate blocks, where the expanded gradient is zero,
+            // so `−φ′(0)` along the restricted direction is still `slope`.
+            let step_direction = self.dense_joint_vector_in_arrow_layout(
+                direction.view(),
+                &arrow_row_offsets,
+                border_dim,
+                "SaeManifoldTerm::descend_gauge_orbit",
+            )?;
+            let step_coord_len = arrow_row_offsets[n];
 
             let base_objective = self.penalized_objective_total(target, rho, registry, 1.0)?;
             if outcome.entry_objective.is_none() {
@@ -3263,8 +3300,8 @@ impl SaeManifoldTerm {
                 target,
                 rho,
                 registry,
-                direction.view(),
-                dense_len,
+                step_direction.view(),
+                step_coord_len,
                 base_objective,
                 slope,
                 0.0,
@@ -3280,8 +3317,8 @@ impl SaeManifoldTerm {
                 return Ok(outcome);
             }
             if let Err(err) = self.apply_newton_step(
-                direction.slice(s![..dense_len]),
-                direction.slice(s![dense_len..]),
+                step_direction.slice(s![..step_coord_len]),
+                step_direction.slice(s![step_coord_len..]),
                 best_alpha,
             ) {
                 self.restore_mutable_state(&snapshot).map_err(|restore_err| {
@@ -3457,15 +3494,39 @@ impl SaeManifoldTerm {
         let mut grad_ext_coord = Array1::<f64>::zeros(dense_len);
         let mut dense_layout_ok = sys.rows.len() == n && sys.row_offsets.len() == n + 1;
         if dense_layout_ok {
+            // Same dense product chart as the quotient basis: a hard-TopK row is
+            // expanded into its dense slot, never copied at its compact offset
+            // (#2228).
+            let compact_layout = self.last_row_layout.as_ref();
+            let mut full_row = vec![0.0_f64; q];
             for (row_idx, row) in sys.rows.iter().enumerate() {
                 let base = sys.row_offsets[row_idx];
                 let di = sys.row_dims[row_idx];
-                if base + di > dense_len || row.gt.len() < di {
+                if row.gt.len() < di {
                     dense_layout_ok = false;
                     break;
                 }
-                for axis in 0..di {
-                    grad_ext_coord[base + axis] = row.gt[axis];
+                match compact_layout {
+                    Some(layout) => {
+                        if di != layout.row_q_active(row_idx) {
+                            dense_layout_ok = false;
+                            break;
+                        }
+                        let compact_row: Vec<f64> = row.gt.iter().take(di).copied().collect();
+                        layout.expand_row(row_idx, &compact_row, &mut full_row);
+                        for axis in 0..q {
+                            grad_ext_coord[row_idx * q + axis] = full_row[axis];
+                        }
+                    }
+                    None => {
+                        if base + di > dense_len {
+                            dense_layout_ok = false;
+                            break;
+                        }
+                        for axis in 0..di {
+                            grad_ext_coord[base + axis] = row.gt[axis];
+                        }
+                    }
                 }
             }
         }

@@ -2482,16 +2482,38 @@ impl SaeManifoldTerm {
             return "orbit=unresolved(non-dense layout)".to_string();
         }
         let mut gradient = Array1::<f64>::zeros(dense_len + border_dim);
+        // Dense product chart, as in `descend_gauge_orbit`: a hard-TopK row is
+        // expanded into its dense slot, never copied at its compact offset (#2228).
+        let compact_layout = self.last_row_layout.clone();
+        let mut full_row = vec![0.0_f64; q];
         for (row_index, row) in system.rows.iter().enumerate() {
             let base = system.row_offsets[row_index];
             let dim = system.row_dims[row_index];
-            if base + dim > dense_len || row.gt.len() < dim {
+            if row.gt.len() < dim {
                 return "orbit=unresolved(row layout)".to_string();
             }
-            for axis in 0..dim {
-                gradient[base + axis] = row.gt[axis];
+            match compact_layout.as_ref() {
+                Some(layout) => {
+                    if dim != layout.row_q_active(row_index) {
+                        return "orbit=unresolved(row layout)".to_string();
+                    }
+                    let compact_row: Vec<f64> = row.gt.iter().take(dim).copied().collect();
+                    layout.expand_row(row_index, &compact_row, &mut full_row);
+                    for axis in 0..q {
+                        gradient[row_index * q + axis] = full_row[axis];
+                    }
+                }
+                None => {
+                    if base + dim > dense_len {
+                        return "orbit=unresolved(row layout)".to_string();
+                    }
+                    for axis in 0..dim {
+                        gradient[base + axis] = row.gt[axis];
+                    }
+                }
             }
         }
+        let arrow_row_offsets = system.row_offsets.clone();
         for (index, &value) in system.gb.iter().enumerate() {
             gradient[dense_len + index] = value;
         }
@@ -2543,12 +2565,24 @@ impl SaeManifoldTerm {
         let material_floor =
             SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * (1.0 + base_objective.abs());
         let snapshot = self.snapshot_mutable_state();
+        // Both walks step through the assembled arrow chart; under hard TopK a
+        // dense-length direction fails every trial (#2228).
+        let descent_step = match self.dense_joint_vector_in_arrow_layout(
+            descent.view(),
+            &arrow_row_offsets,
+            border_dim,
+            "SaeManifoldTerm::gauge_orbit_descent_diagnostic",
+        ) {
+            Ok(step) => step,
+            Err(reason) => return format!("orbit=unresolved(layout: {reason})"),
+        };
+        let step_coord_len = arrow_row_offsets[n];
         let orbit = match self.minimize_objective_along(
             target,
             rho,
             registry,
-            descent.view(),
-            dense_len,
+            descent_step.view(),
+            step_coord_len,
             base_objective,
             descent_norm,
             0.0,
@@ -2587,12 +2621,21 @@ impl SaeManifoldTerm {
                 *value /= -steepest_norm;
             }
             let analytic_slope = gradient.dot(&steepest);
+            let steepest_step = match self.dense_joint_vector_in_arrow_layout(
+                steepest.view(),
+                &arrow_row_offsets,
+                border_dim,
+                "SaeManifoldTerm::gauge_orbit_descent_diagnostic",
+            ) {
+                Ok(step) => step,
+                Err(reason) => return format!("ambient=unresolved(layout: {reason})"),
+            };
             match self.minimize_objective_along(
                 target,
                 rho,
                 registry,
-                steepest.view(),
-                dense_len,
+                steepest_step.view(),
+                step_coord_len,
                 base_objective,
                 steepest_norm,
                 0.0,
