@@ -1586,6 +1586,9 @@ struct SurvivalSmoothingSelection {
     /// The analytic LAML ρ-Hessian the terminal mint evaluated at the selected
     /// ρ, which the fit's smoothing correction inverts (#2912).
     outer_hessian: Option<Array2<f64>>,
+    /// The outer gradient at the selected ρ: the certificate's gradient floor
+    /// the correction's identified inverse is judged against (#2346).
+    outer_gradient: Option<Array1<f64>>,
 }
 
 fn optimize_survival_transformation_smoothing(
@@ -1919,6 +1922,7 @@ fn optimize_survival_transformation_smoothing(
     let outer_iterations = result.iterations;
     let criterion_certificate = result.criterion_certificate;
     let outer_hessian = result.final_hessian;
+    let outer_gradient = result.final_gradient;
     let selected_rho = result.rho;
     if selected_rho.len() != num_smoothing {
         return Err(format!(
@@ -1936,6 +1940,7 @@ fn optimize_survival_transformation_smoothing(
         criterion_certificate,
         certified_mode: warm_beta.into_inner(),
         outer_hessian,
+        outer_gradient,
     }))
 }
 
@@ -1992,6 +1997,9 @@ fn survival_unified_fit_result(
     // The analytic LAML ρ-Hessian at the selected ρ: the curvature the
     // smoothing correction inverts (#2912). `None` on the fixed-outer path.
     outer_hessian: Option<Array2<f64>>,
+    // The outer gradient at the selected ρ, whose certificate floor decides
+    // which ρ directions the correction resolves (#2346).
+    outer_gradient: Option<Array1<f64>>,
 ) -> Result<UnifiedFitResult, String> {
     if state.eta.len() != training_sample_size {
         return Err(format!(
@@ -2122,8 +2130,9 @@ fn survival_unified_fit_result(
     // `∂(S_λ β̂)/∂ρ_k = λ_k S_k β̂` over block k's range, in the identity-gauge
     // coordinates `Vb` lives in, and railed coordinates carry no finite
     // rho-variance (#2337 Thm 2.3); the custom-family mint goes through the same
-    // helper. A non-PD interior keeps the typed absence: handing back `Vb` under
-    // a corrected request would silently under-report every interval.
+    // helper, which drops directions under the certificate's gradient floor. A
+    // refused interior keeps the typed absence: handing back `Vb` under a
+    // corrected request would silently under-report every interval.
     let lambda_is_fixed = outer_iterations == 0 && criterion_certificate.is_none();
     let smoothing_corrected = if lambda_is_fixed {
         None
@@ -2147,10 +2156,12 @@ fn survival_unified_fit_result(
                         .slice_mut(s![block.range.clone(), coordinate])
                         .scaled_add(lambdas[coordinate], &s_beta);
                 }
-                let minted = gam_custom_family::first_order_smoothing_correction(
+                let no_gradient = Array1::<f64>::zeros(0);
+                gam_custom_family::first_order_smoothing_correction(
                     v_cond,
                     &u_mat,
                     outer_hessian,
+                    outer_gradient.as_ref().unwrap_or(&no_gradient),
                     &excluded,
                 )
                 .map_err(|reason| {
@@ -2164,16 +2175,7 @@ fn survival_unified_fit_result(
                             rho_dimension: lambdas.len(),
                         },
                     )
-                });
-                if minted.is_none() {
-                    log::info!(
-                        "[smoothing-correction] branch=unavailable \
-                         reason=interior-outer-hessian-not-positive-definite rho_dimension={} railed={}",
-                        lambdas.len(),
-                        excluded.len(),
-                    );
-                }
-                minted
+                })
             }
             (Some(_), None, _) => {
                 log::info!(
@@ -3186,6 +3188,7 @@ pub(crate) fn fit_survival_transformation_model(
         survival_outer_iterations,
         survival_outer_certificate,
         survival_outer_hessian,
+        survival_outer_gradient,
         selected_mode,
     ) = if let Some(selection) = optimize_survival_transformation_smoothing(
         &model,
@@ -3203,6 +3206,7 @@ pub(crate) fn fit_survival_transformation_model(
             selection.outer_iterations,
             selection.criterion_certificate,
             selection.outer_hessian,
+            selection.outer_gradient,
             Some(selection.certified_mode),
         )
     } else {
@@ -3211,7 +3215,7 @@ pub(crate) fn fit_survival_transformation_model(
         // iterations and no analytic certificate — assembly reads that as
         // `Fixed` convergence evidence rather than demanding a certificate
         // (#2301 defect D).
-        (0, None, None, None)
+        (0, None, None, None, None)
     };
     let opts = gam_solve::pirls::WorkingModelPirlsOptions {
         max_iterations: SURVIVAL_TRANSFORMATION_PIRLS_MAX_ITERATIONS,
@@ -3334,6 +3338,7 @@ pub(crate) fn fit_survival_transformation_model(
         survival_outer_iterations,
         survival_outer_certificate,
         survival_outer_hessian,
+        survival_outer_gradient,
     )?;
 
     let time_base_ncols = spec.time_build.x_exit_time.ncols();

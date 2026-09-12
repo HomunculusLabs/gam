@@ -3386,7 +3386,8 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // coefficient covariance, from the SAME analytic outer ρ-Hessian the
     // certificate judged. Rail coordinates (box rails + typed AsymptoteRail
     // rails) have no finite ρ-variance and are excluded (#2337 Thm 2.3);
-    // a non-PD interior V_ρ yields a typed absence, never an error.
+    // directions under the certificate's gradient floor are dropped from V_ρ,
+    // and a refused interior yields a typed absence, never an error.
     let smoothing_corrected = match (
         covariance_conditional.as_ref(),
         certified_outer.final_hessian(),
@@ -3399,13 +3400,15 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                     excluded.push(rail.index);
                 }
             }
-            let minted = crate::covariance::joint_smoothing_correction(
+            let no_gradient = Array1::<f64>::zeros(0);
+            crate::covariance::joint_smoothing_correction(
                 v_cond,
                 specs,
                 &label_layout,
                 &rho_star,
                 &inner.block_states,
                 outer_hessian,
+                certified_outer.final_gradient().unwrap_or(&no_gradient),
                 &excluded,
             )
             .map_err(|reason| CustomFamilyError::Optimization {
@@ -3420,16 +3423,7 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
                         rho_dimension: rho_star.len(),
                     },
                 )
-            });
-            if minted.is_none() {
-                log::info!(
-                    "[smoothing-correction] branch=unavailable \
-                     reason=interior-outer-hessian-not-positive-definite rho_dimension={} railed={}",
-                    rho_star.len(),
-                    excluded.len(),
-                );
-            }
-            minted
+            })
         }
         (Some(_), None) => {
             log::info!(

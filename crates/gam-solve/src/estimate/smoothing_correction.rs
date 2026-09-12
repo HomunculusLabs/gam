@@ -371,7 +371,7 @@ pub(crate) enum SmoothingCorrectionUnavailable {
 /// structural penalty map; positive curvature is never truncated and negative
 /// curvature is never salvaged as covariance.
 #[derive(Debug)]
-pub(crate) struct InvertedRhoHessian {
+pub struct InvertedRhoHessian {
     pub inverse: Array2<f64>,
     pub active_rank: usize,
     pub structural_zero: usize,
@@ -400,7 +400,7 @@ pub(crate) struct InvertedRhoHessian {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EigenClassification {
+pub enum EigenClassification {
     Active,
     StructuralZero,
     /// Curvature indistinguishable from zero at the accuracy the OUTER LOOP
@@ -636,7 +636,7 @@ pub(crate) fn eigenpair_backward_error_bound(
 /// this site excluded nothing — is gone as of #2676: both sites now deflate the
 /// same invariance through `crate::penalty_invariance::judged_subspace_basis`,
 /// and the certificate's rail exclusion is expressed through the same call.
-pub(crate) fn invert_identified_rho_hessian(
+pub fn invert_identified_rho_hessian(
     hessian_rho: &Array2<f64>,
     expected_structural_nullity: usize,
     outer_gradient: &Array1<f64>,

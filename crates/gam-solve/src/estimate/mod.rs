@@ -109,6 +109,12 @@ pub(crate) use smoothing_correction::{
 // #1521 carve: the spatial-optimization driver reads the unified rho bound as
 // `gam_solve::estimate::RHO_BOUND`.
 pub use smoothing_correction::RHO_BOUND;
+// The identified ρ-Hessian inverse is the one owner of the first-order
+// smoothing correction's `V_ρ`, including on the custom-family and single-cause
+// survival lanes (#2346, #2912).
+pub use smoothing_correction::{
+    EigenClassification, InvertedRhoHessian, invert_identified_rho_hessian,
+};
 pub use smooth_term_summary::smooth_term_summary_rows;
 pub use summary::{
     ContinuousSmoothnessOrder, ContinuousSmoothnessOrderStatus, ModelSummary,

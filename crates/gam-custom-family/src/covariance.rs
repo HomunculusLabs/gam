@@ -2178,10 +2178,11 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
 ///
 /// Rail-aware (#2337 Thm 2.3): outer coordinates in `excluded_outer` (box
 /// rails and typed AsymptoteRail coordinates) have no finite ρ-variance and
-/// are excluded from the inflation. The interior sub-Hessian must be strictly
-/// PD; a non-PD interior returns `Ok(None)` — a typed absence, not an error,
-/// because the deep-smoothing regime legitimately reaches it. Returns the
-/// correction together with the identified interior rank.
+/// are excluded from the inflation. The interior sub-Hessian is inverted on its
+/// identified subspace (see [`first_order_smoothing_correction`]); a refused
+/// interior returns `Ok(None)` — a typed absence, not an error, because the
+/// deep-smoothing regime legitimately reaches it. Returns the correction
+/// together with the identified interior rank.
 ///
 /// When EVERY outer coordinate is excluded the answer is not an absence: with
 /// no free ρ direction `Var(ρ)` is the zero-dimensional zero matrix, so the
@@ -2195,6 +2196,7 @@ pub(crate) fn joint_smoothing_correction(
     rho_outer: &Array1<f64>,
     block_states: &[ParameterBlockState],
     outer_hessian: &Array2<f64>,
+    outer_gradient: &Array1<f64>,
     excluded_outer: &[usize],
 ) -> Result<Option<(Array2<f64>, usize)>, CustomFamilyError> {
     let p_total: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
@@ -2280,7 +2282,7 @@ pub(crate) fn joint_smoothing_correction(
         }
     }
 
-    first_order_smoothing_correction(v_cond, &u_mat, outer_hessian, excluded_outer)
+    first_order_smoothing_correction(v_cond, &u_mat, outer_hessian, outer_gradient, excluded_outer)
         .map_err(CustomFamilyError::trial_point)
 }
 
@@ -2291,18 +2293,31 @@ pub(crate) fn joint_smoothing_correction(
 ///
 /// Outer coordinates in `excluded_outer` (box rails and typed AsymptoteRail
 /// coordinates) have no finite ρ-variance and are excluded (#2337 Thm 2.3).
-/// The remaining sub-Hessian must be strictly positive definite; a non-PD
-/// interior returns `Ok(None)`. With every coordinate excluded the correction
-/// is exactly zero at identified rank 0. Returns the correction together with
-/// the identified interior rank. Both the custom-family joint mint and the
-/// single-cause survival transformation fit mint through here (#2912).
+/// The remaining sub-Hessian is inverted on its identified subspace by the
+/// standard lane's [`gam_solve::estimate::invert_identified_rho_hessian`], with
+/// `outer_gradient` the certified point's outer gradient (empty when
+/// unavailable). A direction whose curvature sits under the certificate's own
+/// gradient floor `Σ_k |g_k| v_k²` is a saturated λ, where `∂β̂/∂ρ → 0`, so it
+/// is dropped from `V_ρ`; a curvature the certificate could not have passed is
+/// refused, logged, and returned as `Ok(None)`. With every coordinate excluded
+/// the correction is exactly zero at identified rank 0. Returns the correction
+/// together with the identified interior rank. Both the custom-family joint
+/// mint and the single-cause survival transformation fit mint through here
+/// (#2346, #2912).
 pub fn first_order_smoothing_correction(
     v_cond: &Array2<f64>,
     u_mat: &Array2<f64>,
     outer_hessian: &Array2<f64>,
+    outer_gradient: &Array1<f64>,
     excluded_outer: &[usize],
 ) -> Result<Option<(Array2<f64>, usize)>, String> {
     let (p_total, k_outer) = u_mat.dim();
+    if !outer_gradient.is_empty() && outer_gradient.len() != k_outer {
+        return Err(format!(
+            "smoothing correction: outer gradient has {} coordinate(s) for {k_outer}",
+            outer_gradient.len()
+        ));
+    }
     if v_cond.dim() != (p_total, p_total) {
         return Err(format!(
             "smoothing correction: V_cond shape {:?} ≠ ({p_total}, {p_total})",
@@ -2338,29 +2353,26 @@ pub fn first_order_smoothing_correction(
             h_sub[[i, j]] = outer_hessian[[oi, oj]];
         }
     }
-    let (evals, evecs) = FaerEigh::eigh(&h_sub, Side::Lower).map_err(|e| {
-        format!("smoothing correction: outer Hessian eigendecomposition failed: {e}")
-    })?;
-    // The outer Hessian's positive spectrum at the eigensolver's resolution,
-    // relative to its largest eigenvalue and never floored at an absolute value.
-    let tol = positive_eigenvalue_threshold(
-        evals
-            .as_slice()
-            .expect("eigh returns an owned standard-layout eigenvalue vector"),
-    );
-    if evals.iter().any(|&ev| ev <= tol) {
-        return Ok(None);
-    }
-    let mut v_rho = Array2::<f64>::zeros((ki, ki));
-    for (idx, &ev) in evals.iter().enumerate() {
-        let inv = 1.0 / ev;
-        for i in 0..ki {
-            let vi = evecs[[i, idx]];
-            for j in 0..ki {
-                v_rho[[i, j]] += inv * vi * evecs[[j, idx]];
+    let g_sub = if outer_gradient.is_empty() {
+        Array1::<f64>::zeros(0)
+    } else {
+        included
+            .iter()
+            .map(|&o| outer_gradient[o])
+            .collect::<Array1<f64>>()
+    };
+    let inverted =
+        match gam_solve::estimate::invert_identified_rho_hessian(&h_sub, 0, &g_sub, None, &[]) {
+            Ok(inverted) => inverted,
+            Err(refusal) => {
+                log::info!(
+                    "[smoothing-correction] branch=unavailable reason=interior-rho-hessian-refused \
+                     rho_dimension={k_outer} railed={}: {refusal}",
+                    k_outer - ki,
+                );
+                return Ok(None);
             }
-        }
-    }
+        };
 
     // C = (V·U_inc) · V_ρ · (V·U_inc)ᵀ — symmetric PSD by construction.
     let mut u_inc = Array2::<f64>::zeros((p_total, ki));
@@ -2368,9 +2380,9 @@ pub fn first_order_smoothing_correction(
         u_inc.column_mut(col).assign(&u_mat.column(o));
     }
     let a_mat = v_cond.dot(&u_inc);
-    let mut correction = a_mat.dot(&v_rho).dot(&a_mat.t());
+    let mut correction = a_mat.dot(&inverted.inverse).dot(&a_mat.t());
     symmetrize_dense_in_place(&mut correction);
-    Ok(Some((correction, ki)))
+    Ok(Some((correction, inverted.active_rank)))
 }
 
 #[cfg(test)]
@@ -2383,6 +2395,34 @@ mod required_covariance_tests {
     //! knife-edge), so the assertion is deterministic and load-independent.
     use super::*;
     use ndarray::array;
+
+    /// A saturated λ direction whose curvature sits under the certificate's
+    /// gradient floor is dropped from `V_ρ` rather than refusing the whole
+    /// correction, and a curvature below that floor's negative is a typed
+    /// absence (#2346).
+    #[test]
+    fn first_order_smoothing_correction_drops_directions_under_the_gradient_floor_2346() {
+        let v_cond = array![[1.0_f64, 0.0], [0.0, 1.0]];
+        let u = array![[1.0_f64, 0.0], [0.0, 1.0]];
+        let gradient = array![0.0_f64, 1.0e-6];
+        let saturated = array![[2.0_f64, 0.0], [0.0, -1.0e-7]];
+        let (correction, active_rank) =
+            first_order_smoothing_correction(&v_cond, &u, &saturated, &gradient, &[])
+                .expect("well-formed inputs")
+                .expect("a direction under the gradient floor is dropped, not refused");
+        assert_eq!(active_rank, 1);
+        assert!((correction[[0, 0]] - 0.5).abs() <= 1e-12, "{correction:?}");
+        assert!(correction[[1, 1]].abs() <= 1e-12, "{correction:?}");
+        assert!(correction[[0, 1]].abs() <= 1e-12, "{correction:?}");
+
+        let contradicted = array![[2.0_f64, 0.0], [0.0, -1.0e-3]];
+        assert!(
+            first_order_smoothing_correction(&v_cond, &u, &contradicted, &gradient, &[])
+                .expect("well-formed inputs")
+                .is_none(),
+            "a curvature below the certificate's bar is a typed absence"
+        );
+    }
 
     #[test]
     fn posterior_inverse_preserves_small_positive_curvature() {
