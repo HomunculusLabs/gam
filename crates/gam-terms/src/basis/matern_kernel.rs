@@ -1933,9 +1933,18 @@ pub(crate) fn centered_operator_gram_and_psi_derivatives(
     gram_and_psi_derivatives_from_operator(&d_centered, &d_psi_centered, &d_psi_psi_centered)
 }
 
+/// Frobenius-normalize a penalty and return it with its norm as the scale.
+///
+/// An exactly zero penalty has no scale, so it is returned as it is with scale
+/// `1`. Any other finite penalty has a positive stable norm, and dividing each
+/// entry by a norm at least as large as the entry cannot overflow.
 pub(crate) fn normalize_penalty(matrix: &Array2<f64>) -> (Array2<f64>, f64) {
-    let norm = matrix.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-12);
-    (matrix.mapv(|v| v / norm), norm)
+    let norm = stable_euclidean_norm(matrix.iter().copied());
+    if norm == 0.0 {
+        (matrix.clone(), 1.0)
+    } else {
+        (matrix.mapv(|v| v / norm), norm)
+    }
 }
 
 pub(crate) fn closed_form_anisotropic_pair_value_with_powers(
@@ -3344,15 +3353,12 @@ pub(crate) fn normalize_constructive_penalty_candidate(
     matrix: ConstructiveQuadratic,
     source: PenaltySource,
 ) -> Result<PenaltyCandidate, BasisError> {
-    let (matrix, normalization_scale) = if matrix.iter().all(|v| v.abs() <= 1e-12) {
+    // Same convention as `normalize_penalty`: only an exactly zero quadratic is
+    // left unnormalized with scale 1.
+    let norm = stable_euclidean_norm(matrix.dense().iter().copied());
+    let (matrix, normalization_scale) = if norm == 0.0 {
         (matrix, 1.0)
     } else {
-        let norm = matrix
-            .iter()
-            .map(|value| value * value)
-            .sum::<f64>()
-            .sqrt()
-            .max(1e-12);
         (
             matrix.scaled(1.0 / norm, "normalized constructive function penalty")?,
             norm,

@@ -123,7 +123,8 @@ use super::{
     AnisoBasisPsiDerivatives, AnisoPenaltyCrossProvider, BasisBuildResult, BasisError,
     BasisMetadata, CenterStrategy, ConstructiveQuadratic, PenaltyCandidate, PenaltySource,
     filter_penalty_candidates, normalize_penalty, normalize_penalty_cross_psi_derivative,
-    normalize_penaltywith_psi_derivatives, select_centers_by_strategy, trace_of_product,
+    normalize_penaltywith_psi_derivatives, select_centers_by_strategy, stable_euclidean_norm,
+    trace_of_product,
 };
 
 /// Truncation radius of the Gaussian profile in units of the scale ε: weights
@@ -579,17 +580,12 @@ fn restrict_jet_to_frame(jet: &Array2<f64>, frame: &Array2<f64>) -> Array2<f64> 
     (&restricted + &restricted.t()) * 0.5
 }
 
-/// Frobenius scale of a constructive quadratic, with the same degenerate
-/// convention `normalize_penalty` uses: a scale at or below `1e-12` reports
-/// `1e-12` so the division can never blow up.
+/// Frobenius scale of a constructive quadratic, with the degenerate convention
+/// `normalize_penalty` uses: an exactly zero quadratic has no scale and reports
+/// `1`.
 fn constructive_frobenius_scale(quadratic: &ConstructiveQuadratic) -> f64 {
-    quadratic
-        .dense()
-        .iter()
-        .map(|value| value * value)
-        .sum::<f64>()
-        .sqrt()
-        .max(1e-12)
+    let norm = stable_euclidean_norm(quadratic.dense().iter().copied());
+    if norm == 0.0 { 1.0 } else { norm }
 }
 
 /// First and diagonal-second `u = ln ℓ` derivatives of `E(u)ᵀ H E(u)` for a
