@@ -4377,8 +4377,7 @@ impl SaeManifoldTerm {
     /// construction.
     ///
     /// MEASURED on `threshold_gate_tiny_fixture`, dense vs the production
-    /// `logdet_theta_adjoint` on the SAME inverse (they agree for softmax by
-    /// design — the dense route is documented as self-checked against it):
+    /// `logdet_theta_adjoint` on the SAME inverse:
     ///
     /// ```text
     ///   deflation-free arm   worst |production − dense| = 2.53e0  (on a 8.91e-1 entry)

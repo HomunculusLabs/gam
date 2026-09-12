@@ -1196,9 +1196,8 @@ mod tests_deflation_trace_fold_2333 {
     }
 
     /// Exactly what the Trace kernel reduces: `Σ_{a,b} E[a,b]·dh[a,b]` over the
-    /// full `q×q` index range (`cpu_contracted_tile`'s Trace arm and
-    /// `sae_rowjet_trace_t` both walk both indices, so the weight is never
-    /// required to be symmetric).
+    /// full `q×q` index range (`cpu_contracted_tile`'s Trace arm walks both
+    /// indices, so the weight is never required to be symmetric).
     fn seam_contraction(e: &Array2<f64>, d: &Array2<f64>) -> f64 {
         let q = e.nrows();
         let mut acc = 0.0_f64;
@@ -1348,8 +1347,8 @@ mod tests_deflation_trace_fold_2333 {
     /// `|λ_a − λ_b| ≤ gap_threshold` takes the divided difference to its
     /// diagonal limit `f'(λ)`, which is `1` for a retained direction and `0` for
     /// a conditioned one — so `F`, and hence the seam weight, is genuinely
-    /// ASYMMETRIC here. That is legal: both the CPU oracle and the device kernel
-    /// walk the full `(a,b)` range, and the identity still holds because
+    /// ASYMMETRIC here. That is legal: the CPU Trace arm
+    /// walks the full `(a,b)` range, and the identity still holds because
     /// `Σ_{a,b} (U G Uᵀ)[a,b]·D[a,b] = Σ_{a,b} G[a,b]·(UᵀDU)[a,b]` needs no
     /// symmetry of `G`.
     #[test]
