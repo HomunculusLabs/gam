@@ -1969,8 +1969,33 @@ mod tests {
                     "spectrum {spectrum:?} entry {index:?}: loop {want} vs factored {got}"
                 );
             }
+            // The agreement bar is only informative where the compared values dwarf it. The
+            // capped-inverse spectrum's coefficients are `16·Π(1/λ)·Σ(1/λ) ≈ 1.2e-6`, so its
+            // map is O(1e-8): a fixed floor would reject a sound fixture.
+            let tolerance = 1e-12 * (1.0 + scale);
             if spectrum[3] >= floor {
-                assert!(scale > 1e-6, "positive control: the map must not vanish on {spectrum:?}");
+                assert!(
+                    scale > 1e3 * tolerance,
+                    "positive control: the map on {spectrum:?} must exceed the agreement bar by three \
+                     orders (scale {scale:e}, bar {tolerance:e})"
+                );
+            }
+            if separable.tilted {
+                let untilted = SeparableQuadruple {
+                    scale: separable.scale,
+                    factors: separable.factors.clone(),
+                    tilted: false,
+                };
+                let wrong = separable_second_frechet_rows(&untilted, 4, &rows, &e, &f);
+                let gap = expected
+                    .iter()
+                    .zip(wrong.iter())
+                    .fold(0.0_f64, |acc, (want, got)| acc.max((want - got).abs()));
+                assert!(
+                    gap > 1e3 * tolerance,
+                    "negative control: dropping the tilt on {spectrum:?} must break agreement \
+                     (gap {gap:e}, bar {tolerance:e})"
+                );
             }
         }
         for spectrum in [array![0.3, 20.0], array![-0.2, 0.5], array![5e-4, 3.0]] {
