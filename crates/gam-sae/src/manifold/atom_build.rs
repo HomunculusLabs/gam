@@ -291,9 +291,10 @@ pub(crate) fn sae_build_atom_plans(
                         "sae_build_atom_plans: atom {atom_idx} basis 'klein_bottle' requires atom_dim == 2, got {d}"
                     ));
                 }
+                let min_order = crate::basis::QuotientSpectralEvaluator::KLEIN_BOTTLE_MIN_HARMONICS;
                 let per_axis_order = resolution_overrides[atom_idx]
-                    .map(|order| order.max(2))
-                    .unwrap_or(2);
+                    .map(|order| order.max(min_order))
+                    .unwrap_or(min_order);
                 plans.push(SaeAtomBuildPlan {
                     geometry: SaeAtomGeometryPlan::klein_bottle(per_axis_order)?,
                 });

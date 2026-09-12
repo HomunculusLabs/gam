@@ -3396,7 +3396,9 @@ fn topology_candidates_for_dim(
             )?);
             specs.push(TopologyCandidateSpec::new(
                 AutoTopologyKind::KleinBottle,
-                SaeAtomGeometryPlan::klein_bottle(2)?,
+                SaeAtomGeometryPlan::klein_bottle(
+                    crate::basis::QuotientSpectralEvaluator::KLEIN_BOTTLE_MIN_HARMONICS,
+                )?,
                 LatentManifold::Product(vec![
                     LatentManifold::Circle { period: 1.0 },
                     LatentManifold::Circle { period: 1.0 },
@@ -5346,7 +5348,9 @@ pub(crate) fn discover_primary_atom_topologies(
                     )?);
                     specs.push(TopologyCandidateSpec::new(
                         AutoTopologyKind::KleinBottle,
-                        SaeAtomGeometryPlan::klein_bottle(2)?,
+                        SaeAtomGeometryPlan::klein_bottle(
+                    crate::basis::QuotientSpectralEvaluator::KLEIN_BOTTLE_MIN_HARMONICS,
+                )?,
                         LatentManifold::Product(vec![
                             LatentManifold::Circle { period: 1.0 },
                             LatentManifold::Circle { period: 1.0 },
@@ -5519,7 +5523,7 @@ pub(crate) fn discover_primary_atom_topologies(
                     rows.len(),
                 )?;
                 Some(if fit_kind == SaeAtomBasisKind::KleinBottle {
-                    selected.max(2)
+                    selected.max(crate::basis::QuotientSpectralEvaluator::KLEIN_BOTTLE_MIN_HARMONICS)
                 } else {
                     selected
                 })

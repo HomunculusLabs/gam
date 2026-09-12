@@ -2056,17 +2056,23 @@ impl QuotientSpectralEvaluator {
         Ok(evaluator)
     }
 
+    /// The smallest per-axis harmonic order [`Self::klein_bottle`] realizes. The
+    /// standard smooth `R⁴` Klein embedding uses theta harmonics one and two, so the
+    /// seven-column homotopy base (its constant plus six coordinate modes) needs
+    /// order two. It is a property of the embedding, not a resolution choice.
+    pub(crate) const KLEIN_BOTTLE_MIN_HARMONICS: usize = 2;
+
     /// Real harmonics on the flat Klein bottle
     /// `T²/{(theta, phi) ~ (theta + 1/2, -phi)}` through order `H` per axis.
-    /// `H >= 2` is required because the standard smooth `R⁴` Klein embedding
-    /// uses theta harmonics one and two; its constant plus six coordinate modes
-    /// form the seven-column homotopy base.
+    /// `H >= KLEIN_BOTTLE_MIN_HARMONICS` is required because the standard smooth `R⁴`
+    /// Klein embedding uses theta harmonics one and two; its constant plus six
+    /// coordinate modes form the seven-column homotopy base.
     pub(crate) fn klein_bottle(num_harmonics: usize) -> Result<Self, String> {
-        if num_harmonics < 2 {
-            return Err(
-                "QuotientSpectralEvaluator::klein_bottle requires num_harmonics >= 2 for the standard R4 embedding"
-                    .to_string(),
-            );
+        if num_harmonics < Self::KLEIN_BOTTLE_MIN_HARMONICS {
+            return Err(format!(
+                "QuotientSpectralEvaluator::klein_bottle requires num_harmonics >= {} for the standard R4 embedding",
+                Self::KLEIN_BOTTLE_MIN_HARMONICS
+            ));
         }
         let expected_width = klein_bottle_basis_size(num_harmonics)?;
 
