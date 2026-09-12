@@ -8,7 +8,7 @@ check that:
 1. The driver runs end-to-end on small planted data and the curved tier adds
    reconstruction (combined EV strictly exceeds T1-only EV).
 2. The combined reconstruction has the shape of the corpus.
-3. The stratified subsample reproduces the ``rho_cascade`` contract: it is
+3. The stratified subsample reproduces the hashed-inclusion contract: it is
    deterministic, realizes the target fraction in expectation, and carries the
    ``1/fraction`` importance weight.
 4. An over-large curved ``K`` is rejected before any expensive Rust call.

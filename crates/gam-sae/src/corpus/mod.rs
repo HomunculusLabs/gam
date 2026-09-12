@@ -21,12 +21,6 @@
 //!   the existing warm-start cache does (#869,
 //!   `TermCollectionSpec::write_structural_shape_hash`), so distinct topologies
 //!   never cross-seed.
-//! * [`rho_cascade`] — a subsample-converge-then-full-pass ρ schedule that
-//!   carries **importance weights**. Every outer ρ step is a full corpus pass
-//!   in expectation; early steps run on a deterministic hashed-`row_id`
-//!   subsample with each included row reweighted by `1/inclusion_probability`
-//!   (the subsample-honesty contract), and the trailing steps are honest full
-//!   passes.
 //! * `kernels` — fused mixed-precision kernels (`dot`, `gram`, `gemv`,
 //!   `gemv_t`, `cross`) that **read `f32` rows and accumulate in `f64`**, the
 //!   numerical contract that keeps the streaming sums deterministic and
@@ -56,9 +50,8 @@
 //! * [`RowWarmCache`] — "give me / take back this row's inner-solve warm
 //!   start".
 //!
-//! Together with [`rho_cascade::RhoCascadeSchedule`] (which step's subsample +
-//! importance weights to apply) and the `kernels` (how to accumulate a
-//! batch's contribution), these let the term run a full streaming, warm-started,
+//! Together with the `kernels` (how to accumulate a batch's contribution),
+//! these let the term run a full streaming, warm-started,
 //! mixed-precision REML fit over an out-of-core corpus while keeping the
 //! determinism and crash-resume guarantees the rest of #973 established.
 //!
@@ -69,7 +62,6 @@ pub mod designed_target;
 pub mod ledger_store;
 pub mod object_store;
 pub mod residual_stratify;
-pub mod rho_cascade;
 pub mod shard_reader;
 pub mod torus_merge_audit;
 pub mod warm_state;
@@ -85,9 +77,6 @@ pub use shard_reader::{
 
 /// Per-row inner-solve warm-state cache (seam half 2).
 pub use warm_state::{DiskRowWarmCache, RowWarmCache, RowWarmState};
-
-/// Subsample → full-pass ρ schedule with importance weights.
-pub use rho_cascade::{RhoCascadeSchedule, RhoStepPlan, row_in_fraction};
 
 /// Residual-energy-stratified birth screen: make the dictionary tail reachable
 /// by guaranteeing rare high-residual rows representation in the discovery

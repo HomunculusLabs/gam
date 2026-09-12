@@ -30,8 +30,8 @@
 //! deterministic order — it never reorders, drops, or duplicates rows, and the
 //! sequence of `(row_id, row)` pairs is byte-identical across runs and
 //! platforms. That stable `row_id` is what [`super::warm_state`] keys its
-//! per-row warm starts on and what [`super::rho_cascade`] hashes to pick a
-//! subsample.
+//! per-row warm starts on and what [`super::residual_stratify`] hashes to pick
+//! a subsample.
 //!
 //! # Bounded prefetch
 //!
@@ -184,8 +184,7 @@ impl RowBatch {
 ///   `row_id`s, independent of OS readahead, until the corpus is exhausted
 ///   (then `Ok(None)`).
 /// * `reset` rewinds to the first row so a new outer ρ pass replays the exact
-///   same `(row_id, row)` sequence — the every-step-is-a-full-corpus-pass
-///   contract [`super::rho_cascade`] relies on.
+///   same `(row_id, row)` sequence.
 /// * `total_rows` / `width` are known up front (from shard headers) so callers
 ///   can size accumulators before the first read.
 pub trait CorpusRowSource {

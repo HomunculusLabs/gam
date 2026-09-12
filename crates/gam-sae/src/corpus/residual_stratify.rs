@@ -49,10 +49,9 @@
 //! The allocation `{π_h}` affects only the **variance**
 //! `Var = Σ_h Σ_{i∈H_h} ℓ_i² (1−π_h)/π_h`, never the expectation. So REML/LAML,
 //! the evidence criterion, `φ̂`, and the ρ gradient are all unbiased on this
-//! stream regardless of how we allocate — the accept decision is untouched. The
-//! ρ cascade ([`super::rho_cascade`]) can therefore keep its own
-//! importance-weighted uniform stream unchanged; this stratified stream is the
-//! *discovery* target, and its HT weights keep it a valid unbiased design in its
+//! stream regardless of how we allocate — the accept decision is untouched. This
+//! stratified stream is the *discovery* target, and its HT weights keep it a
+//! valid unbiased design in its
 //! own right.
 //!
 //! # The allocation (every boundary derived, no magic constants — SPEC.md §19)

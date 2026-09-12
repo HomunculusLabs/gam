@@ -4130,5 +4130,30 @@
     ],
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). EventHistoryFit::mark_eta lost its only production caller when 83787ff53 deleted training_eta. Nothing in gam-cli, gam-pyffi, gamfit, examples or another crate's production code names it. Its one remaining user was a gam-event-history unit test, which now reads the same fitted block state directly.",
     "evidence": "In the prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv), mark_eta's only production reference is crates/gam-event-history/src/forecast.rs:1111, inside training_eta, and it has one unit-test reference at tests.rs:3842. At 6272b6588, git grep -w finds mark_eta only in family.rs (definition and a doc link reworded here), forecast.rs:1111 (removed by 83787ff53) and tests.rs:3842 (rewritten here). It does not appear in docs, gamfit, examples, gam-pyffi or gam-cli."
+  },
+  {
+    "base": "582de32809bc52aff549fa31548703d1483ad429",
+    "items": [
+      "crates/gam-sae/src/corpus/rho_cascade.rs:const:FULL_PASS_TAIL_STEPS",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:const:HASH_SPACE",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:const:MIN_FRACTION",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:const:MIN_SUBSAMPLE_ROWS",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:fn:full_fraction_includes_every_row",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:fn:importance_weight_unbiases_subsample",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:fn:new",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:fn:row_in_fraction",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:fn:schedule_ends_in_full_passes",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:fn:schedule_fraction_is_monotone_nondecreasing",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:fn:steps",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:fn:subsample_fraction_is_approximately_realized",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:fn:subsample_is_deterministic",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:fn:tiny_corpus_is_all_full_passes",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:fn:total_rows",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:fn:zero_fraction_excludes_every_row",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:struct:RhoCascadeSchedule",
+      "crates/gam-sae/src/corpus/rho_cascade.rs:struct:RhoStepPlan"
+    ],
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): a public item stays only when a product root uses it (gam-cli, gam-pyffi, gamfit, examples/, or another crate's production code). The rho cascade schedule, crates/gam-sae/src/corpus/rho_cascade.rs (RhoCascadeSchedule with new/steps/total_rows, RhoStepPlan, row_in_fraction and its private constants), has no consumer outside its own file: nothing in any crate builds a schedule or calls row_in_fraction except the module's unit tests. The whole module is deleted with those tests, its corpus/mod.rs declaration and re-export, and the rustdoc links in corpus/mod.rs, residual_stratify.rs, object_store.rs and shard_reader.rs that pointed at it. The two links describing row_id subsample hashing now point at residual_stratify, which hashes the same stable row_id (residual_stratify.rs:491). Prose in tests/test_examples_compose_tiers.py and experiments/compose_tiers.py that cited the Rust module as the contract it mirrors now names the contract itself.",
+    "evidence": "At 713456dd5, git grep -n -w over crates, src, tests, examples, bench and gamfit finds RhoCascadeSchedule and RhoStepPlan only in rho_cascade.rs, the corpus/mod.rs re-export and a corpus/mod.rs doc link. row_in_fraction appears only in rho_cascade.rs (its declaration and five unit tests) and that re-export. git grep -w rho_cascade finds only the module declaration, the re-export, the doc links reworded here, a Python test docstring and comments in experiments/compose_tiers.py. The prune-api-d census at 3ef484e06 reports row_in_fraction with zero production consumers. It reports RhoCascadeSchedule and RhoStepPlan as consumed only inside rho_cascade.rs itself (their own impl block and field types). splitmix64_hash, the module's only import, keeps callers across gam-sae, gam-solve, gam-inference and gam-problem. Not compiled locally (user directive). Compile is covered by the lead's shared tip check."
   }
 ]

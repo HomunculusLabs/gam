@@ -26,11 +26,9 @@ Integration seams:
   * Sharded-memmap activation I/O (``examples/residual_shard_io.py``,
     ``read_manifest`` / ``iter_shard_rows``) is imported lazily; when absent, the
     ``--synthetic`` path exercises the full pipeline.
-  * The stratified draw replicates the ``gam_sae::corpus::rho_cascade`` contract
-    (deterministic ``splitmix64`` row-hash Bernoulli inclusion + ``1/fraction``
-    importance weight). That schedule is Rust-only today; ``_row_in_fraction``
-    below mirrors its ``row_in_fraction`` so a subsample drawn here matches the
-    one the streaming lane would pick. Swap to the Rust binding once exposed.
+  * The stratified draw is a deterministic ``splitmix64`` row-hash Bernoulli
+    inclusion with a ``1/fraction`` importance weight (``_row_in_fraction``
+    below), so the same rows and seed always draw the same subsample.
 """
 
 from __future__ import annotations
@@ -50,7 +48,7 @@ from compose_artifact_schema import (
     require_gamfit_version,
 )
 
-# Mask constant shared with `gam_sae::corpus::rho_cascade` (full u64 hash space).
+# Full u64 hash space mask.
 _U64 = np.uint64(0xFFFFFFFFFFFFFFFF)
 
 
@@ -64,11 +62,10 @@ def _splitmix64(state: np.ndarray) -> np.ndarray:
 
 
 def _row_in_fraction(row_ids: np.ndarray, fraction: float, seed: int) -> np.ndarray:
-    """Deterministic Bernoulli(``fraction``) row inclusion (rho_cascade contract).
+    """Deterministic Bernoulli(``fraction``) row inclusion.
 
-    A row is included iff ``splitmix64(row_id ^ seed) < fraction * 2^64``. Mirrors
-    ``gam_sae::corpus::rho_cascade::row_in_fraction`` so the subsample drawn here
-    is the one the streaming ρ-cascade would pick for the same rows.
+    A row is included iff ``splitmix64(row_id ^ seed) <= fraction * 2^64``, so the
+    same rows and seed always draw the same subsample.
     """
     if not 0.0 < fraction <= 1.0:
         raise ValueError(f"fraction must be in (0, 1]; got {fraction}")
@@ -80,7 +77,7 @@ def _row_in_fraction(row_ids: np.ndarray, fraction: float, seed: int) -> np.ndar
 def stratified_subsample(
     n_rows: int, target: int, seed: int
 ) -> tuple[np.ndarray, float]:
-    """Draw <= ``target`` rows via the rho_cascade hashed-inclusion schedule.
+    """Draw <= ``target`` rows by hashed Bernoulli inclusion.
 
     Returns ``(row_index, importance_weight)`` where ``importance_weight`` is
     ``1/fraction`` (the unbiasing weight an included row carries). If the corpus
@@ -608,7 +605,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="one deflation alternation (default on)")
     resid.add_argument("--no-alternation", dest="alternation", action="store_false")
     resid.add_argument("--subsample-tokens", type=int, default=1_000_000,
-                       help="stratified curved-fit subsample target (rho_cascade draw)")
+                       help="stratified curved-fit subsample target (hashed-inclusion draw)")
     ap.add_argument("--random-state", type=int, default=0)
     return ap
 
