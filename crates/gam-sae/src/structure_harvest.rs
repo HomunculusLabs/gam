@@ -4387,6 +4387,16 @@ fn atlas_prior_for_coords(
     target: ArrayView2<'_, f64>,
     intrinsic_dim: usize,
 ) -> Option<AtlasTopologyReadout> {
+    atlas_readout(&birth_atlas(target, intrinsic_dim)?)
+}
+
+/// The local-chart atlas of a birth image at chart rank `intrinsic_dim`, or `None` when
+/// `LocalAtlas::build` refuses it. This is the build half of `atlas_prior_for_coords`,
+/// kept separate so discovery can develop the same atlas it read its prior from.
+fn birth_atlas(
+    target: ArrayView2<'_, f64>,
+    intrinsic_dim: usize,
+) -> Option<crate::manifold::LocalAtlas> {
     let (n, p) = target.dim();
     // A birth with no chart rank asks the atlas no question. Every other small or
     // degenerate image is refused by `LocalAtlas::build` itself, with its typed reason
@@ -4415,7 +4425,12 @@ fn atlas_prior_for_coords(
                 .join("; ")
         );
     }
-    let readout = crate::manifold::observe_atlas_topology(&atlas).ok()?;
+    Some(atlas)
+}
+
+/// The atlas's topology readout, logged, or `None` when it cannot be computed.
+fn atlas_readout(atlas: &crate::manifold::LocalAtlas) -> Option<AtlasTopologyReadout> {
+    let readout = crate::manifold::observe_atlas_topology(atlas).ok()?;
     log::debug!("#2280 {readout}");
     Some(readout)
 }
@@ -5347,7 +5362,8 @@ pub fn discover_primary_atom_topologies(
             // charts and their transition holonomy measure; the REML race stays the
             // sole arbiter.
             let local = target.select(Axis(0), &rows);
-            let atlas = atlas_prior_for_coords(local.view(), max_dims[atom_idx]);
+            let local_atlas = birth_atlas(local.view(), max_dims[atom_idx]);
+            let atlas = local_atlas.as_ref().and_then(atlas_readout);
             // PCA/linear race is the cheaper DEFAULT.
             let pca_winner = race_spec_set(specs, target, weights.view(), atlas.as_ref()).map_err(|error| {
                 format!(
@@ -5378,27 +5394,60 @@ pub fn discover_primary_atom_topologies(
                     )?,
                     None => None,
                 };
+            // #2280 — the atlas's OWN chart as a second intrinsic challenger: the
+            // local charts glued along the least-residual spanning tree of their
+            // transitions. It is offered only on an atlas that names a disk, because
+            // the developing map is a global chart exactly when the holonomy is
+            // trivial; over a non-trivial class its non-tree edges cut seams, and a
+            // cut strip is not a sheet. It races under the same REML evidence, and a
+            // certified disk that fails to develop is returned as an error.
+            let developed_challenger = match developed_sheet_specs(
+                local_atlas.as_ref(),
+                atlas.as_ref(),
+                local.view(),
+                &rows,
+                n_obs,
+            )
+            .map_err(|error| {
+                format!(
+                    "discover_primary_atom_topologies: developed chart failed for auto atom {atom_idx}: {error}"
+                )
+            })? {
+                Some(developed_specs) => {
+                    race_spec_set(developed_specs, target, weights.view(), atlas.as_ref()).map_err(
+                        |error| {
+                            format!(
+                                "discover_primary_atom_topologies: developed evidence race failed for auto atom {atom_idx}: {error}"
+                            )
+                        },
+                    )?
+                }
+                None => None,
+            };
             // A race winner is ATOMIC: its topology kind and the coordinates on
             // which that kind earned its evidence come from the same fitted
             // handle.  Never track coordinate provenance in a parallel optional
             // flag; that split allowed a Duchon kind verdict to survive while
-            // its intrinsic chart was discarded and rebuilt from PCA.
-            let fit = match (pca_winner, intrinsic_challenger) {
-                (Some(pca), Some(intrinsic)) => {
-                    if intrinsic.tk_score < pca.tk_score {
-                        intrinsic.fit
+            // its intrinsic chart was discarded and rebuilt from PCA. The arms are
+            // read in a fixed order, PCA first, and a later arm replaces the
+            // incumbent only with a strictly better score, so the cheaper chart
+            // keeps a tie.
+            let fit = [pca_winner, intrinsic_challenger, developed_challenger]
+                .into_iter()
+                .flatten()
+                .reduce(|incumbent, challenger| {
+                    if challenger.tk_score < incumbent.tk_score {
+                        challenger
                     } else {
-                        pca.fit
+                        incumbent
                     }
-                }
-                (Some(pca), None) => pca.fit,
-                (None, Some(intrinsic)) => intrinsic.fit,
-                (None, None) => {
-                    return Err(format!(
+                })
+                .ok_or_else(|| {
+                    format!(
                         "discover_primary_atom_topologies: evidence race returned no winner for auto atom {atom_idx}"
-                    ));
-                }
-            };
+                    )
+                })?
+                .fit;
             let fit_kind = fit.geometry.kind().clone();
             let fit_dim = fit.geometry.latent_dim();
             if fit_kind == SaeAtomBasisKind::Duchon {
@@ -5592,29 +5641,66 @@ fn build_intrinsic_primary_specs(
     if max_dim < 2 || rows.len() < 3 {
         return Ok(None);
     }
-    let n_obs = target.nrows();
     let local_target = target.select(Axis(0), rows);
     let embed = crate::manifold::intrinsic_geodesic_embedding(local_target.view(), 2)?;
-    if embed.ncols() < 2 {
+    sheet_specs_on_local_chart(&embed, rows, target.nrows())
+}
+
+/// The atlas's developed chart as a sheet challenger (#2280), or `None` unless the
+/// atlas has chart rank 2 and its readout names a disk. The developing map is a
+/// global chart exactly when the atlas's holonomy is trivial, and a disk is the
+/// manifold for which the readout certifies that. `local_target` is the
+/// cluster-local image the atlas was built on, its row `i` being cluster row
+/// `rows[i]`.
+fn developed_sheet_specs(
+    atlas: Option<&crate::manifold::LocalAtlas>,
+    readout: Option<&AtlasTopologyReadout>,
+    local_target: ArrayView2<'_, f64>,
+    rows: &[usize],
+    n_obs: usize,
+) -> Result<Option<Vec<TopologyCandidateSpec>>, String> {
+    let atlas = match (atlas, readout) {
+        (Some(atlas), Some(readout))
+            if atlas.intrinsic_dim() == 2
+                && readout.observed_manifold() == Some(GraphCompressionKind::Disk) =>
+        {
+            atlas
+        }
+        _ => return Ok(None),
+    };
+    let developed = atlas.developed_coordinates(local_target)?;
+    sheet_specs_on_local_chart(&developed, rows, n_obs)
+}
+
+/// The two FOLD-SENSITIVE `d = 2` candidates, a flat patch and a thin-plate sheet, on
+/// a centered cluster-local 2-D chart whose row `i` is cluster row `rows[i]`; the
+/// Isomap embedding and the atlas's developed chart both arrive this way. Rows
+/// outside the cluster carry zero coordinates, and the race gives them zero weight.
+fn sheet_specs_on_local_chart(
+    chart: &Array2<f64>,
+    rows: &[usize],
+    n_obs: usize,
+) -> Result<Option<Vec<TopologyCandidateSpec>>, String> {
+    if chart.ncols() < 2 {
         return Ok(None);
     }
     // Standardize each intrinsic axis to unit in-cluster SD (the PCA flat patch's
     // O(1)-coordinate convention). A collapsed axis (no intrinsic spread) means the
-    // geodesic embedding found no second dimension — the challenger is not
-    // realizable, so bail and keep the PCA winner.
+    // chart found no second dimension — the challenger is not realizable, so bail
+    // and keep the PCA winner.
     let inv_count = 1.0 / rows.len().max(1) as f64;
     let mut coords = Array2::<f64>::zeros((n_obs, 2));
     for col in 0..2 {
         let mut acc = 0.0_f64;
         for local_row in 0..rows.len() {
-            acc += embed[[local_row, col]] * embed[[local_row, col]];
+            acc += chart[[local_row, col]] * chart[[local_row, col]];
         }
         let sd = (acc * inv_count).sqrt();
         if !(sd > 1e-12) || !sd.is_finite() {
             return Ok(None);
         }
         for (local_row, &global_row) in rows.iter().enumerate() {
-            coords[[global_row, col]] = embed[[local_row, col]] / sd;
+            coords[[global_row, col]] = chart[[local_row, col]] / sd;
         }
     }
     let mut specs: Vec<TopologyCandidateSpec> = Vec::with_capacity(2);

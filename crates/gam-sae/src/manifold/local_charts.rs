@@ -855,6 +855,172 @@ impl LocalAtlas {
         self.intrinsic_cover_multiplicity
     }
 
+    /// The developing map (#2280): one `d`-coordinate realization of the rows `z` the
+    /// atlas was built on, glued from its local charts along a spanning tree of the
+    /// well-conditioned transitions.
+    ///
+    /// Every chart `a` receives a rigid motion `G_a(c) = Q_a c + s_a` into the frame of
+    /// chart `0`, the root, whose `G_0` is the identity. A tree edge carries its
+    /// transition `c_to ≈ R c_from + t` across in either direction: `G_to(c) =
+    /// G_from(Rᵀ(c − t))` and `G_from(c) = G_to(R c + t)`. The tree is Kruskal's least
+    /// total residual (`ChartTransition::residual`, `overlap_id` breaking ties), so the
+    /// gluing crosses the overlaps on which two charts agree best. Only well-conditioned
+    /// transitions are eligible: a degenerate one carries no resolved handedness, and
+    /// composing through a wrongly handed `R` would mirror everything beyond it.
+    ///
+    /// A row takes its image in its home chart, the patch that contains it with the
+    /// nearest center (lowest index on a tie). A row no patch contains takes the nearest
+    /// center's chart, whose map `Fᵀ(x − μ)` is defined at every ambient point. The
+    /// result is centered, which fixes the translation the root chart leaves free.
+    ///
+    /// This is a global chart only when the atlas's holonomy is trivial, which is what
+    /// the topology readout certifies when it names a contractible manifold. Over a
+    /// cover with a non-trivial class the non-tree edges cut seams into it. Refused when
+    /// the well-conditioned transitions leave the charts in more than one component,
+    /// because then no single chart develops them.
+    pub(crate) fn developed_coordinates(
+        &self,
+        z: ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, String> {
+        fn find_root(parent: &mut [usize], mut node: usize) -> usize {
+            while parent[node] != node {
+                parent[node] = parent[parent[node]];
+                node = parent[node];
+            }
+            node
+        }
+
+        let (n, p) = z.dim();
+        if p != self.ambient_dim {
+            return Err(format!(
+                "developed_coordinates: rows have {p} columns but the atlas was built in {} dimensions",
+                self.ambient_dim
+            ));
+        }
+        let largest_member = self
+            .patches
+            .iter()
+            .flat_map(|patch| patch.members.iter().copied())
+            .max()
+            .unwrap_or(0);
+        if n <= largest_member {
+            return Err(format!(
+                "developed_coordinates: the atlas charts row {largest_member} but only {n} rows were supplied"
+            ));
+        }
+        let d = self.intrinsic_dim;
+        let m = self.charts.len();
+        let mut order: Vec<usize> = (0..self.transitions.len())
+            .filter(|&index| {
+                matches!(
+                    self.transitions[index].conditioning,
+                    TransitionConditioning::WellConditioned
+                )
+            })
+            .collect();
+        order.sort_by(|&left, &right| {
+            let (left, right) = (&self.transitions[left], &self.transitions[right]);
+            left.residual
+                .total_cmp(&right.residual)
+                .then(left.overlap_id.cmp(&right.overlap_id))
+        });
+        let mut parent: Vec<usize> = (0..m).collect();
+        let mut tree: Vec<Vec<usize>> = vec![Vec::new(); m];
+        let mut tree_edges = 0usize;
+        for edge in order {
+            let transition = &self.transitions[edge];
+            let from = find_root(&mut parent, transition.from_patch);
+            let to = find_root(&mut parent, transition.to_patch);
+            if from != to {
+                parent[from.max(to)] = from.min(to);
+                tree[transition.from_patch].push(edge);
+                tree[transition.to_patch].push(edge);
+                tree_edges += 1;
+            }
+        }
+        if tree_edges + 1 != m {
+            return Err(format!(
+                "developed_coordinates: the well-conditioned transitions leave the {m} charts in {} components",
+                m - tree_edges
+            ));
+        }
+
+        let mut rotation: Vec<Array2<f64>> = vec![Array2::<f64>::eye(d); m];
+        let mut offset: Vec<Array1<f64>> = vec![Array1::<f64>::zeros(d); m];
+        let mut placed = vec![false; m];
+        placed[0] = true;
+        let mut queue = std::collections::VecDeque::from([0usize]);
+        while let Some(chart) = queue.pop_front() {
+            for &edge in &tree[chart] {
+                let transition = &self.transitions[edge];
+                let forward = transition.from_patch == chart;
+                let next = if forward {
+                    transition.to_patch
+                } else {
+                    transition.from_patch
+                };
+                if placed[next] {
+                    continue;
+                }
+                let (composed, shifted) = if forward {
+                    // G_to(c) = G_from(Rᵀ(c − t)) = Q Rᵀ c + s − Q Rᵀ t.
+                    let composed = rotation[chart].dot(&transition.rotation.t());
+                    let shifted = &offset[chart] - &composed.dot(&transition.translation);
+                    (composed, shifted)
+                } else {
+                    // G_from(c) = G_to(R c + t) = Q R c + Q t + s.
+                    let composed = rotation[chart].dot(&transition.rotation);
+                    let shifted = rotation[chart].dot(&transition.translation) + &offset[chart];
+                    (composed, shifted)
+                };
+                rotation[next] = composed;
+                offset[next] = shifted;
+                placed[next] = true;
+                queue.push_back(next);
+            }
+        }
+
+        let mut home: Vec<Option<(usize, f64)>> = vec![None; n];
+        for (chart, patch) in self.patches.iter().enumerate() {
+            for &row in &patch.members {
+                let distance = sq_distance(z, row, patch.center);
+                let nearer = match home[row] {
+                    Some((_, nearest)) => distance < nearest,
+                    None => true,
+                };
+                if nearer {
+                    home[row] = Some((chart, distance));
+                }
+            }
+        }
+        let mut coords = Array2::<f64>::zeros((n, d));
+        for (row, owner) in home.into_iter().enumerate() {
+            let chart = match owner {
+                Some((chart, _)) => chart,
+                None => {
+                    let mut nearest_chart = 0usize;
+                    let mut nearest = f64::INFINITY;
+                    for (chart, patch) in self.patches.iter().enumerate() {
+                        let distance = sq_distance(z, row, patch.center);
+                        if distance < nearest {
+                            nearest = distance;
+                            nearest_chart = chart;
+                        }
+                    }
+                    nearest_chart
+                }
+            };
+            let image =
+                rotation[chart].dot(&self.charts[chart].project(z.row(row))) + &offset[chart];
+            coords.row_mut(row).assign(&image);
+        }
+        let mean = coords
+            .mean_axis(ndarray::Axis(0))
+            .ok_or_else(|| "developed_coordinates: there are no rows to develop".to_string())?;
+        coords -= &mean;
+        Ok(coords)
+    }
+
     /// Numerically well-conditioned observed transition signs as
     /// `(a, b, overlap, sign)`.
     ///
@@ -1812,5 +1978,65 @@ mod tests {
         assert!((determinant(&reflection) + 1.0).abs() < 1e-12);
         let rotation = Array2::<f64>::eye(3);
         assert!((determinant(&rotation) - 1.0).abs() < 1e-12);
+    }
+
+    /// #2280 — the developing map of an exact plane is an isometry of the planted
+    /// lattice. Every transition between two charts of one plane is an exact rigid
+    /// motion, so gluing along the tree accumulates only rounding and every pairwise
+    /// distance survives, at the rounding bound the plane's cocycle test uses. The map
+    /// is also bit-identical run to run.
+    #[test]
+    fn developed_plane_is_an_isometry_of_the_planted_lattice_2280() {
+        let points = embedded_plane(12, 12);
+        let develop = || {
+            LocalAtlas::build(points.view(), LocalAtlasConfig::balanced(points.nrows(), 2))
+                .expect("the plane atlas builds")
+                .developed_coordinates(points.view())
+                .expect("a connected plane atlas develops")
+        };
+        let developed = develop();
+        let again = develop();
+        assert_eq!(developed.dim(), (points.nrows(), 2));
+        for (left, right) in developed.iter().zip(again.iter()) {
+            assert_eq!(
+                left.to_bits(),
+                right.to_bits(),
+                "the developing map is deterministic"
+            );
+        }
+        let mut worst = 0.0_f64;
+        for a in 0..points.nrows() {
+            for b in (a + 1)..points.nrows() {
+                let ambient = sq_distance(points.view(), a, b).sqrt();
+                let chart = sq_distance(developed.view(), a, b).sqrt();
+                worst = worst.max((chart - ambient).abs());
+            }
+        }
+        assert!(
+            worst < 1e-8,
+            "the developed plane must preserve every pairwise distance: worst discrepancy {worst:.3e}"
+        );
+    }
+
+    /// #2280 — two copies of a sheet displaced far beyond any patch radius share no
+    /// transition, so no single chart develops them, and the map refuses rather than
+    /// placing the second copy arbitrarily.
+    #[test]
+    fn developed_coordinates_refuse_a_disconnected_cover_2280() {
+        let sheet = embedded_plane(14, 14);
+        let n = sheet.nrows();
+        let mut z = Array2::<f64>::zeros((2 * n, 4));
+        for row in 0..n {
+            for column in 0..4 {
+                z[[row, column]] = sheet[[row, column]];
+                z[[n + row, column]] = sheet[[row, column]] + if column == 0 { 1.0e4 } else { 0.0 };
+            }
+        }
+        let atlas = LocalAtlas::build(z.view(), LocalAtlasConfig::balanced(z.nrows(), 2))
+            .expect("each copy certifies its own charts");
+        let refusal = atlas
+            .developed_coordinates(z.view())
+            .expect_err("a two-component cover has no single developed chart");
+        assert!(refusal.contains("components"), "{refusal}");
     }
 }
