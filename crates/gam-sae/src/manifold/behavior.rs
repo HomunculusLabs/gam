@@ -32,7 +32,8 @@
 //! a row is the tangential component of its chord to `q̄`, expressed in an
 //! orthonormal basis `E` (`V × (V-1)`) of the tangent hyperplane `T_{q̄}S =
 //! {v : v·q̄ = 0}`, and scaled by `√2` so that, by (★), squared Euclidean length
-//! in the coordinate *is* nats:
+//! in the coordinate is nats at the basepoint. Away from it the chart's Fisher
+//! metric adds a radial term ([`SphereTangentEmbedding::predicted_nats`]):
 //!
 //! ```text
 //!   c_i = Eᵀ q_i,          y_i = √2 · c_i,        ‖y_i‖² = 2‖c_i‖² ≈ KL.
@@ -277,14 +278,40 @@ impl SphereTangentEmbedding {
         Ok(probabilities)
     }
 
-    /// Local (flat-metric) predicted dose in nats for a tangent displacement
-    /// `Δy`: `‖Δy‖²`. By construction of the `√2` scaling this equals the
-    /// second-order KL between the two decoded distributions, and it is the
-    /// calibration target the unit-speed behavior decoder is fit to reproduce
-    /// (a step `Δt` of the latent producing `Δy = (d(ΨC)/dt)·Δt` costs
-    /// `‖Δy‖²` nats).
-    pub fn predicted_nats(delta_y: ArrayView1<'_, f64>) -> f64 {
-        delta_y.dot(&delta_y)
+    /// Predicted dose in nats of a tangent displacement `Δy` taken at chart point
+    /// `y`: `Δyᵀ G(y) Δy`, with the chart's pulled-back Fisher metric
+    /// `G(y) = I + y yᵀ/(2 − ‖y‖²)`.
+    ///
+    /// The decode `q = √(1 − ‖c‖²) q̄ + E c`, `c = y/√2`, moves `q` by
+    /// `dq = E dc − (cᵀdc/√(1 − ‖c‖²)) q̄`, so `‖dq‖² = ‖dc‖² + (cᵀdc)²/(1 − ‖c‖²)`
+    /// and by (★) `KL(p ‖ p + dp) = 2‖dq‖² + O(‖dq‖³) = ‖Δy‖² + (yᵀΔy)²/(2 − ‖y‖²)`.
+    /// At the basepoint (`y = 0`) this is exactly `‖Δy‖²`. Away from it the flat
+    /// `‖Δy‖²` alone under-prices a radial step by `cos²θ`, where `θ` is the
+    /// point's angle from `q̄`. The metric diverges at the hemisphere boundary
+    /// `‖y‖² = 2`, past which the chart represents no distribution, so such a `y`
+    /// is refused. A latent step `Δt` producing `Δy = (d(ΨC)/dt)·Δt` at `y = ΨC`
+    /// costs this dose.
+    pub fn predicted_nats(
+        y: ArrayView1<'_, f64>,
+        delta_y: ArrayView1<'_, f64>,
+    ) -> Result<f64, String> {
+        if y.len() != delta_y.len() {
+            return Err(format!(
+                "SphereTangentEmbedding::predicted_nats: the point has length {} but the \
+                 displacement has length {}",
+                y.len(),
+                delta_y.len()
+            ));
+        }
+        let norm_sq = y.dot(&y);
+        if !(norm_sq < 2.0) {
+            return Err(format!(
+                "SphereTangentEmbedding::predicted_nats: ‖y‖² = {norm_sq} is not inside the \
+                 chart's hemisphere (‖y‖² < 2), so the chart has no finite Fisher metric there"
+            ));
+        }
+        let cross = y.dot(&delta_y);
+        Ok(delta_y.dot(&delta_y) + cross * cross / (2.0 - norm_sq))
     }
 
     /// Exact KL divergence `Σ_j p_a[j] · log(p_a[j] / p_b[j])` in nats between
@@ -902,7 +929,9 @@ mod tests {
             let p = make(eps);
             let (chart, y) = SphereTangentEmbedding::fit(p.view()).unwrap();
             let delta_y = &y.row(1).to_owned() - &y.row(0).to_owned();
-            let predicted = SphereTangentEmbedding::predicted_nats(delta_y.view());
+            // The metric is read at row 1, the first argument of the KL below.
+            let predicted = SphereTangentEmbedding::predicted_nats(y.row(1), delta_y.view())
+                .expect("both rows lie inside the chart's hemisphere");
             // Measure exact KL between the two decoded distributions (which equal
             // the originals by the round-trip property).
             let p0 = chart.decode(y.row(0)).unwrap();

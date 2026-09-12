@@ -74,7 +74,8 @@ pub struct AtomBehaviorIsometry {
     pub behavior_metric_collapse_rows: usize,
     /// Support-weighted RMS of the activation induced speed `s_x = ‖dx/dt‖`.
     pub activation_speed_rms: f64,
-    /// Support-weighted RMS of the nats-unit behavior induced speed `s_y = ‖dy/dt‖`.
+    /// Support-weighted RMS of the behavior induced speed `s_y = √(ẏᵀ G(y) ẏ)`, in
+    /// the behavior chart's Fisher metric.
     pub behavior_speed_rms: f64,
     /// The isometry **scale**: support-weighted mean of `r = s_x/s_y` over the
     /// rows where behavior moves. Activation length per unit behavior length.
@@ -127,7 +128,7 @@ pub struct BehaviorPinnedChart {
     /// `+1` or `-1`, selected deterministically from the behavior tangent at
     /// the pinned origin.
     pub orientation: i8,
-    /// Total behavior-image length in nats-unit tangent space.
+    /// Total behavior-image length in the behavior chart's Fisher metric.
     pub behavior_length: f64,
     /// Period of `coords` for a circular chart (`behavior_length / sqrt(2)`),
     /// or `None` for an interval.
@@ -195,10 +196,12 @@ pub fn atom_behavior_isometry(
     }
 
     // One jet evaluation at the fitted rows, contracted with each decoder block:
-    // s_x = ‖Φ'(t) B_k‖, s_y = ‖Φ'(t) C_k‖ (nats-unit).
-    let (_phi, jet) = evaluator.evaluate(coords.view())?;
+    // s_x = ‖Φ'(t) B_k‖, and s_y = √(ẏᵀ G(y) ẏ) with ẏ = Φ'(t) C_k at y = Φ(t) C_k,
+    // in the behavior chart's Fisher metric.
+    let (phi, jet) = evaluator.evaluate(coords.view())?;
     let s_x = curve_speeds(&jet, b_k.view())?;
-    let s_y = curve_speeds(&jet, c_k.view())?;
+    let behavior_points = phi.dot(&c_k);
+    let s_y = behavior_curve_speeds(&jet, c_k.view(), behavior_points.view())?;
     if s_x.len() != coords.nrows() || s_y.len() != coords.nrows() {
         return Err(format!(
             "atom_behavior_isometry: speed profiles have lengths {}/{} but atom has {} rows",
@@ -224,6 +227,44 @@ pub fn atom_behavior_isometry(
             behavior_pinned_chart(evaluator.as_ref(), c_k.view(), coords.column(0), &topology)?;
     }
     Ok(Some(report))
+}
+
+/// Behavior induced speeds `s_y = √(ẏᵀ G(y) ẏ)` of the curve `y(t) = Φ(t) C`, in
+/// the sphere-tangent chart's Fisher metric
+/// ([`super::SphereTangentEmbedding::predicted_nats`]), so `s_y²·Δt²` is the
+/// second-order KL of a latent step wherever the behavior image sits, not only at
+/// the chart basepoint. `points` holds the decoded behavior coordinates `Φ(t) C`
+/// at the jet's rows.
+fn behavior_curve_speeds(
+    jet: &ndarray::Array3<f64>,
+    decoder: ArrayView2<'_, f64>,
+    points: ArrayView2<'_, f64>,
+) -> Result<Vec<f64>, String> {
+    let (rows, m, d) = jet.dim();
+    if d != 1 || decoder.nrows() != m || points.dim() != (rows, decoder.ncols()) {
+        return Err(format!(
+            "behavior_curve_speeds: jet {:?}, decoder {:?} and points {:?} do not describe \
+             one 1-D behavior curve",
+            jet.dim(),
+            decoder.dim(),
+            points.dim()
+        ));
+    }
+    let mut velocity = Array1::<f64>::zeros(decoder.ncols());
+    let mut speeds = Vec::with_capacity(rows);
+    for row in 0..rows {
+        velocity.fill(0.0);
+        for basis in 0..m {
+            let dphi = jet[[row, basis, 0]];
+            for (slot, &coefficient) in velocity.iter_mut().zip(decoder.row(basis)) {
+                *slot += dphi * coefficient;
+            }
+        }
+        let dose = super::SphereTangentEmbedding::predicted_nats(points.row(row), velocity.view())
+            .map_err(|error| format!("behavior_curve_speeds: row {row}: {error}"))?;
+        speeds.push(dose.sqrt());
+    }
+    Ok(speeds)
 }
 
 /// Construct the behavior-pinned arc-length representative on a dense audit
@@ -265,7 +306,7 @@ fn behavior_pinned_chart(
     }
     let (phi, jet) = evaluator.evaluate(grid.view())?;
     let behavior_points = phi.dot(&behavior_decoder);
-    let speeds = curve_speeds(&jet, behavior_decoder)?;
+    let speeds = behavior_curve_speeds(&jet, behavior_decoder, behavior_points.view())?;
     if speeds.len() != cells + 1
         || speeds
             .iter()

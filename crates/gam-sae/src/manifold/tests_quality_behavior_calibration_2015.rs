@@ -89,12 +89,14 @@ fn qwen_behavior_chart_is_lossless_and_nats_unit_is_exact_2015() {
          max round-trip abs error {max_abs}"
     );
 
-    // (2) EXACT nats unit: predicted_nats(y) == y·y with no slack (this is the
-    // dose the unit-speed decoder is fit to reproduce).
+    // (2) EXACT nats unit: at the basepoint (y = 0) the chart metric is the
+    // identity, so the dose of the displacement y is identically y·y, with no slack.
     let mut max_unit_err = 0.0_f64;
     for i in 0..GATE_ROWS {
         let y = target.row(i);
-        let predicted = SphereTangentEmbedding::predicted_nats(y);
+        let basepoint = Array1::<f64>::zeros(y.len());
+        let predicted = SphereTangentEmbedding::predicted_nats(basepoint.view(), y)
+            .expect("the basepoint lies inside the chart's hemisphere");
         let raw = y.dot(&y);
         max_unit_err = max_unit_err.max((predicted - raw).abs());
     }
@@ -107,8 +109,11 @@ fn qwen_behavior_chart_is_lossless_and_nats_unit_is_exact_2015() {
 /// (3) NATS CALIBRATION on real behavior — the "2 nats per unit²" law verified
 /// against EXACT KL. For each real row we take a controlled small displacement of
 /// its fitted coordinate (`y' = (1−ε)·y`, ε = 1e-3) and compare the PREDICTED dose
-/// `‖y − y'‖² = ε²‖y‖²` against the EXACT `KL(decode(y) ‖ decode(y'))`. By (★) the
-/// two must agree to second order; the ratio → 1 as ε → 0. We measure the
+/// `Δyᵀ G(y) Δy` of the chart's Fisher metric at `y` against the EXACT
+/// `KL(decode(y) ‖ decode(y'))`. By (★) the two must agree to second order; the
+/// ratio → 1 as ε → 0. The flat `‖Δy‖²` alone is exact only at the basepoint: on
+/// these real rows it under-prices this radial step by `cos²θ` (median defect 0.575
+/// in census job 505903), which is what this bar exists to catch. We measure the
 /// isometry defect HONESTLY (median and tail relative error) and bound it, and
 /// require the predicted dose to track the exact KL near-perfectly across rows.
 #[test]
@@ -135,7 +140,8 @@ fn qwen_behavior_nats_calibration_matches_exact_kl_2015() {
         }
         let y_near: Array1<f64> = &y * (1.0 - eps);
         let delta: Array1<f64> = &y - &y_near;
-        let predicted = SphereTangentEmbedding::predicted_nats(delta.view());
+        let predicted = SphereTangentEmbedding::predicted_nats(y.view(), delta.view())
+            .expect("every embedded row lies inside the chart's hemisphere");
         // decode(y) round-trips to the real distribution; decode(y_near) is a
         // controlled nearby distribution. Their EXACT KL is the realized dose.
         let p_full = embedding.decode(y.view()).expect("decode y");
