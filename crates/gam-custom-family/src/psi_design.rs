@@ -497,7 +497,7 @@ impl EmbeddedDensePsiDerivativeOperator {
         Ok(u.slice(ndarray::s![self.global_range.clone()]).to_owned())
     }
 
-    pub fn cross_local(
+    pub(crate) fn cross_local(
         &self,
         axis_e: usize,
         context: &str,
@@ -758,7 +758,7 @@ impl RowwiseKroneckerPsiDerivativeOperator {
         })
     }
 
-    pub fn split_time_columns(&self, u: &ArrayView1<'_, f64>) -> Vec<Array1<f64>> {
+    pub(crate) fn split_time_columns(&self, u: &ArrayView1<'_, f64>) -> Vec<Array1<f64>> {
         let p_base = self.base.p_out();
         assert_eq!(u.len(), self.p_out);
         let mut cols = vec![Array1::<f64>::zeros(p_base); self.p_time];
@@ -770,7 +770,7 @@ impl RowwiseKroneckerPsiDerivativeOperator {
         cols
     }
 
-    pub fn lifted_row_chunk_with_base<F>(
+    pub(crate) fn lifted_row_chunk_with_base<F>(
         &self,
         rows: Range<usize>,
         mut base_chunk: F,
@@ -810,7 +810,7 @@ impl RowwiseKroneckerPsiDerivativeOperator {
     /// Canonical transpose-direction lifted matvec: for each time column `t`,
     /// weight `v` by the time basis column, delegate to the base operator via
     /// `base_op`, and scatter the per-base accumulator into the lifted layout.
-    pub fn lifted_transpose_mul_with_base<F>(
+    pub(crate) fn lifted_transpose_mul_with_base<F>(
         &self,
         v: &ArrayView1<'_, f64>,
         mut base_op: F,
@@ -840,7 +840,7 @@ impl RowwiseKroneckerPsiDerivativeOperator {
     /// Canonical forward-direction lifted matvec: split `u` into per-time-column
     /// coefficient vectors, delegate each to the base operator via `base_op`, and
     /// accumulate the time-basis-weighted contributions into the block rows.
-    pub fn lifted_forward_mul_with_base<F>(
+    pub(crate) fn lifted_forward_mul_with_base<F>(
         &self,
         u: &ArrayView1<'_, f64>,
         mut base_op: F,
@@ -1150,7 +1150,7 @@ pub struct CustomFamilyPsiSecondDesignAction {
 }
 
 impl CustomFamilyPsiSecondDesignAction {
-    pub fn from_second_derivative(
+    pub(crate) fn from_second_derivative(
         deriv_i: &CustomFamilyBlockPsiDerivative,
         deriv_j: &CustomFamilyBlockPsiDerivative,
         total_rows: usize,
@@ -1438,7 +1438,7 @@ impl PsiDesignMap {
     /// Return a reference to the first-derivative operator action if this map
     /// holds one. Useful for callers that need to pass ownership of the action
     /// into downstream operator builders.
-    pub fn as_first_action(&self) -> Option<&CustomFamilyPsiDesignAction> {
+    pub(crate) fn as_first_action(&self) -> Option<&CustomFamilyPsiDesignAction> {
         match self {
             Self::First { action } => Some(action),
             _ => None,
@@ -2048,7 +2048,7 @@ impl<T> ExactNewtonJointPsiDirectCache<T> {
         }
     }
 
-    pub fn touch_lru(&self, index: usize) -> Result<(), CustomFamilyError> {
+    pub(crate) fn touch_lru(&self, index: usize) -> Result<(), CustomFamilyError> {
         let mut lru = self
             .lru
             .lock()

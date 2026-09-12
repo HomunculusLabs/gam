@@ -7,7 +7,7 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-pub const DEFAULT_LOOP_PROGRESS_INTERVAL_SECS: u64 = 25;
+pub(crate) const DEFAULT_LOOP_PROGRESS_INTERVAL_SECS: u64 = 25;
 
 fn elapsed_nanos(elapsed: std::time::Duration) -> u64 {
     u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)

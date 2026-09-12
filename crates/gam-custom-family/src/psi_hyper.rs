@@ -1057,7 +1057,7 @@ impl JeffreysPsiWeightCache {
     /// A concurrent first use recomputes rather than blocks; the result is a
     /// pure function of the plan and the axis derivative, so either writer
     /// stores the same weights.
-    pub fn weights_for_axis(
+    pub(crate) fn weights_for_axis(
         &self,
         axis: usize,
     ) -> Result<
@@ -1087,7 +1087,7 @@ impl JeffreysPsiWeightCache {
     }
 }
 
-pub fn build_jeffreys_hphi_ctx<F: CustomFamily + Clone + Send + Sync + 'static>(
+pub(crate) fn build_jeffreys_hphi_ctx<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     synced_states: &[ParameterBlockState],
     specs: &[ParameterBlockSpec],
@@ -4515,7 +4515,7 @@ pub fn evaluate_custom_family_joint_hyper_efs_owned<
 
 /// Shared-layout variant of
 /// [`evaluate_custom_family_joint_hyper_efs_owned`].
-pub fn evaluate_custom_family_joint_hyper_efs_owned_shared<
+pub(crate) fn evaluate_custom_family_joint_hyper_efs_owned_shared<
     F: CustomFamily + Clone + Send + Sync + 'static,
 >(
     family: &F,

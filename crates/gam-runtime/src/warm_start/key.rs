@@ -54,7 +54,7 @@ impl Fingerprint {
         s
     }
 
-    pub fn from_hex(s: &str) -> Option<Self> {
+    pub(crate) fn from_hex(s: &str) -> Option<Self> {
         if s.len() != 64 {
             return None;
         }
