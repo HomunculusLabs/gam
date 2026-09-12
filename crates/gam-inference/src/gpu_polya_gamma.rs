@@ -616,19 +616,20 @@ extern "C" __device__ double sample_small_z(struct XorwowState* st, double z, do
 }
 
 extern "C" __device__ double sample_large_z(struct XorwowState* st, double mean, double trunc) {
-    double sample = 1.0e300;
-    while (sample > trunc) {
+    for (;;) {
         double n = xorwow_norm(st);
         double n_sq = n * n;
         double half_mean = 0.5 * mean;
         double mn_sq = mean * n_sq;
         double disc = sqrt(4.0 * mn_sq + mn_sq * mn_sq);
-        sample = mean + half_mean * mn_sq - half_mean * disc;
+        double sample = mean + half_mean * mn_sq - half_mean * disc;
         if (xorwow_unit(st) > mean / (mean + sample)) {
             sample = mean * mean / sample;
         }
+        if (!(sample > trunc)) {
+            return sample;
+        }
     }
-    return sample;
 }
 
 extern "C" __device__ double sample_trunc_inv_gauss(struct XorwowState* st, double z, double trunc) {
