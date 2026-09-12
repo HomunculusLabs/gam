@@ -172,7 +172,7 @@ impl<C: Ord + Clone> ResolvedGroupHierarchy<C> {
     /// vector is the concatenation of its child vectors under one precision:
     /// overlapping children stay separate factors so their log normalizers and
     /// quadratic contributions both add — it is not a block-sum shortcut.
-    pub fn concatenated_penalty_components(&self, label: &str) -> Vec<BTreeSet<C>> {
+    pub(crate) fn concatenated_penalty_components(&self, label: &str) -> Vec<BTreeSet<C>> {
         let Some(children) = self.children_by_parent.get(label) else {
             return vec![
                 self.coordinates_by_label

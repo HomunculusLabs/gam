@@ -2577,7 +2577,7 @@ pub(crate) const CLOSED_FORM_OPERATOR_THRESHOLD: usize = 1500;
 /// is finite for R > 0 in any (m, s, d, q) regime where
 /// `radial_derivatives_of_isotropic_duchon` is defined. Self-pair (R=0)
 /// regularization is handled inside the pair-block routine.
-pub fn closed_form_operator_penalty_in_total_basis_pure(
+pub(crate) fn closed_form_operator_penalty_in_total_basis_pure(
     centers: ArrayView2<'_, f64>,
     q: usize,
     p_order: usize,

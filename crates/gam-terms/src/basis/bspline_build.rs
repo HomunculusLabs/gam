@@ -2159,7 +2159,7 @@ pub(crate) fn nullspace_basis_from_block(block: &CanonicalPenaltyBlock) -> Optio
 /// when the local dimension is zero, or when the joint penalty is
 /// full-rank (joint nullity = 0). A non-trivial `joint_nullity` is the
 /// only state encoded as `Some`.
-pub fn compute_joint_null_rotation(
+pub(crate) fn compute_joint_null_rotation(
     penalties: &[ActivePenalty],
 ) -> Result<Option<JointNullRotation>, BasisError> {
     if penalties.is_empty() {

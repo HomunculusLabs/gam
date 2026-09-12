@@ -1812,7 +1812,7 @@ pub fn create_balanced_penalty_root_from_canonical(
 /// Relative cut of the balanced penalty spectrum below which a direction is
 /// structurally unpenalized: `eigenvalue ≤ BALANCED_PENALTY_RANK_RELATIVE_TOL ·
 /// max|eigenvalue|` of [`balanced_penalty_sum`].
-pub const BALANCED_PENALTY_RANK_RELATIVE_TOL: f64 = 1.0e-12;
+pub(crate) const BALANCED_PENALTY_RANK_RELATIVE_TOL: f64 = 1.0e-12;
 
 /// The λ-invariant penalty operator the structural rank is read from:
 /// `Σ_k S_k / ‖S_k‖_F`, each component embedded on its own column range.
@@ -2883,7 +2883,7 @@ pub struct KroneckerReparamResult {
 impl KroneckerReparamResult {
     /// Materialize the joint Qs matrix (U_1 ⊗ ... ⊗ U_d) as dense p×p.
     /// Only for fallback paths — avoid in hot loops.
-    pub fn materialize_qs(&self) -> Array2<f64> {
+    pub(crate) fn materialize_qs(&self) -> Array2<f64> {
         let mut qs = Array2::<f64>::eye(1);
         for u_k in self.marginal_qs.iter() {
             qs = kronecker_product(&qs, u_k);
@@ -2893,7 +2893,7 @@ impl KroneckerReparamResult {
 
     /// Materialize s_transformed (the penalty in the reparameterized basis).
     /// In the eigenbasis, this is diagonal with entries Σ_k λ_k μ_{k,j_k}.
-    pub fn materialize_s_transformed(&self, lambdas: &[f64]) -> Array2<f64> {
+    pub(crate) fn materialize_s_transformed(&self, lambdas: &[f64]) -> Array2<f64> {
         let d = self.marginal_dims.len();
         let p: usize = self.marginal_dims.iter().copied().product();
         let mut s = Array2::<f64>::zeros((p, p));
@@ -3128,7 +3128,7 @@ pub(crate) fn kronecker_multi_index_advance(multi_idx: &mut [usize], dims: &[usi
     carry
 }
 
-pub fn kronecker_logdet_and_derivatives(
+pub(crate) fn kronecker_logdet_and_derivatives(
     marginal_eigenvalues: &[ArrayView1<'_, f64>],
     marginal_dims: &[usize],
     lambdas: &[f64],

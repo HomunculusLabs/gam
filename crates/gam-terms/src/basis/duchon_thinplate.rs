@@ -1425,7 +1425,7 @@ pub(crate) fn thin_plate_polynomial_block(points: ArrayView2<'_, f64>) -> Array2
     monomial_basis_block(points, thin_plate_polynomial_degree(points.ncols()))
 }
 
-pub fn thin_plate_polynomial_basis_dimension(dimension: usize) -> usize {
+pub(crate) fn thin_plate_polynomial_basis_dimension(dimension: usize) -> usize {
     monomial_exponents(dimension, thin_plate_polynomial_degree(dimension)).len()
 }
 
@@ -3176,7 +3176,7 @@ pub fn build_thin_plate_basis_log_kappa_derivatives(
     build_thin_plate_basis_log_kappa_derivativeswithworkspace(data, spec, &mut workspace)
 }
 
-pub fn build_thin_plate_basis_log_kappa_derivativeswithworkspace(
+pub(crate) fn build_thin_plate_basis_log_kappa_derivativeswithworkspace(
     data: ArrayView2<'_, f64>,
     spec: &ThinPlateBasisSpec,
     workspace: &mut BasisWorkspace,
@@ -3715,7 +3715,7 @@ pub fn auto_knot_vector_1d_quantile(
 /// would create a degenerate knot span). The data range itself is derived from
 /// the covariate so the spline domain still spans the observed data even when
 /// the user only pins a few interior knots.
-pub fn clamped_knot_vector_from_internal_positions(
+pub(crate) fn clamped_knot_vector_from_internal_positions(
     data_range: (f64, f64),
     internal_positions: &[f64],
     degree: usize,

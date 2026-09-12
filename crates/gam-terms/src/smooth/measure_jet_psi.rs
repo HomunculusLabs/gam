@@ -31,7 +31,7 @@ pub fn measure_jet_term_spec(
 /// `spatial_term_supports_hyper_optimization` and
 /// `spatial_term_uses_per_axis_psi` both defer here so the θ-layout sources
 /// cannot disagree.
-pub fn measure_jet_enrolls_psi(mj: &crate::basis::MeasureJetBasisSpec) -> bool {
+pub(crate) fn measure_jet_enrolls_psi(mj: &crate::basis::MeasureJetBasisSpec) -> bool {
     // Two independent enrollment sources (#1116), both explicit:
     //   * the design-moving representer length-scale ℓ (`learn_length_scale`),
     //     available in every mode when the spec opts in;
@@ -44,7 +44,7 @@ pub fn measure_jet_enrolls_psi(mj: &crate::basis::MeasureJetBasisSpec) -> bool {
 
 /// Whether the design-moving ℓ dial is enrolled for this term. ℓ is fixed by
 /// default and learnable in every mode only when `learn_length_scale = true`.
-pub fn measure_jet_learns_length_scale(mj: &crate::basis::MeasureJetBasisSpec) -> bool {
+pub(crate) fn measure_jet_learns_length_scale(mj: &crate::basis::MeasureJetBasisSpec) -> bool {
     mj.learn_length_scale
 }
 
@@ -68,7 +68,7 @@ pub fn freeze_measure_jet_length_scale_learning(spec: &mut TermCollectionSpec) -
 /// carries none. MUST agree with the penalty-coordinate layout of
 /// `build_measure_jet_basis_psi_derivatives` (its `per_level` branch always
 /// emits exactly the α coordinate).
-pub fn measure_jet_penalty_psi_dim(mj: &crate::basis::MeasureJetBasisSpec) -> usize {
+pub(crate) fn measure_jet_penalty_psi_dim(mj: &crate::basis::MeasureJetBasisSpec) -> usize {
     usize::from(crate::basis::measure_jet_multiscale_mode(mj))
 }
 
@@ -83,7 +83,7 @@ pub fn measure_jet_psi_dim(mj: &crate::basis::MeasureJetBasisSpec) -> usize {
 /// (when enrolled), then the multiscale penalty dials. The ℓ seed is the
 /// realized representer range `ln(length_scale)` (the resolved spec carries the
 /// concrete auto value after the design build/freeze).
-pub fn measure_jet_psi_seed(mj: &crate::basis::MeasureJetBasisSpec) -> Vec<f64> {
+pub(crate) fn measure_jet_psi_seed(mj: &crate::basis::MeasureJetBasisSpec) -> Vec<f64> {
     let mut seed = Vec::with_capacity(measure_jet_psi_dim(mj));
     if measure_jet_learns_length_scale(mj) {
         // length_scale > 0 after resolution; the 0.0 sentinel (pre-resolution)
@@ -119,7 +119,7 @@ pub fn measure_jet_psi_seed(mj: &crate::basis::MeasureJetBasisSpec) -> Vec<f64> 
 /// same feasible-set rule [`spatial_term_psi_search_box`] applies to the other
 /// spatial families (#2454): a box that excludes the incumbent turns a
 /// monotonicity contract into a contradiction.
-pub fn measure_jet_psi_bound_values(
+pub(crate) fn measure_jet_psi_bound_values(
     data: ArrayView2<'_, f64>,
     term: &SmoothBasisSpec,
     upper: bool,
@@ -169,7 +169,7 @@ pub fn measure_jet_psi_bound_values(
 /// any dial actually moved. The geometry (centers, masses, band, ℓ, z) is
 /// ψ-FIXED by contract — only the dials change, so frozen-quadrature
 /// rebuilds reproduce the identical penalty layout at the new dials.
-pub fn apply_measure_jet_psi(
+pub(crate) fn apply_measure_jet_psi(
     mj: &mut crate::basis::MeasureJetBasisSpec,
     psi: &[f64],
 ) -> Result<bool, EstimationError> {

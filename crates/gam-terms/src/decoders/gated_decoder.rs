@@ -28,7 +28,7 @@ impl GatedSAEDecoder {
         Ok(Self { w_gate, w_amp })
     }
 
-    pub fn input_dim(&self) -> usize {
+    pub(crate) fn input_dim(&self) -> usize {
         self.w_gate.ncols()
     }
 

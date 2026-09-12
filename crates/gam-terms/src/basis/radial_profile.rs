@@ -71,10 +71,10 @@ pub const PROFILE_CERT_RTOL: f64 = 3.0e-12;
 pub const PROFILE_SPOT_RTOL: f64 = 3.0e-9;
 
 /// Node-count escalation ladder for the profile build.
-pub const PROFILE_NODE_LADDER: [usize; 3] = [64, 128, 256];
+pub(crate) const PROFILE_NODE_LADDER: [usize; 3] = [64, 128, 256];
 
 /// Number of deterministic off-grid spot-check points.
-pub const PROFILE_SPOT_CHECK_POINTS: usize = 5;
+pub(crate) const PROFILE_SPOT_CHECK_POINTS: usize = 5;
 
 /// Certified Chebyshev interpolant of `(φ, q, t)` over `u = ln r ∈
 /// [u_lo, u_hi]` for one frozen [`RadialScalarKind`].

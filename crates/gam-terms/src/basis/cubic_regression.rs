@@ -110,7 +110,7 @@ impl CubicRegressionBasis {
 
     /// Evaluate the cr design row for a single point `x` into `row` (length k).
     /// `row` is overwritten.
-    pub fn eval_row_into(&self, x: f64, row: &mut [f64]) {
+    pub(crate) fn eval_row_into(&self, x: f64, row: &mut [f64]) {
         let k = self.knots.len();
         // assert_eq!, not debug_assert_eq!: the ban-scanner forbids debug_assert
         // (silent in release → debug/release divergence). The length check is a
@@ -308,7 +308,7 @@ fn thomas_solve_multi(
 /// the min/max, and the interior knots are at the `1/(k-1) … (k-2)/(k-1)`
 /// quantiles of the *unique* observed values. Returns a strictly increasing
 /// length-`k` knot vector.
-pub fn select_cr_knots(data: ArrayView1<'_, f64>, k: usize) -> Result<Array1<f64>, BasisError> {
+pub(crate) fn select_cr_knots(data: ArrayView1<'_, f64>, k: usize) -> Result<Array1<f64>, BasisError> {
     if k < 3 {
         crate::bail_invalid_basis!("cubic regression spline requires k >= 3, got {k}");
     }

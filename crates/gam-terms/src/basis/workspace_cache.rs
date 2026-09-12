@@ -508,7 +508,7 @@ pub(crate) fn build_matern_double_penalty_candidates(
 ///
 /// NOTE: This follows the RKHS Gram construction S = K_CC (not K_CC^{-1}) in
 /// coefficient space, with global scaling absorbed by the smoothing parameter λ.
-pub fn create_matern_spline_basiswithworkspace(
+pub(crate) fn create_matern_spline_basiswithworkspace(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
     length_scale: f64,

@@ -400,7 +400,7 @@ pub fn duchon_direction_derivatives(
 /// and the convention only has to keep `Σ_a σ_a = 1` — which is what makes the
 /// isotropic contraction identity hold at collision too.
 #[inline(always)]
-pub fn duchon_axis_shares(components: &[f64], r: f64) -> Vec<f64> {
+pub(crate) fn duchon_axis_shares(components: &[f64], r: f64) -> Vec<f64> {
     let d = components.len().max(1);
     let r2 = r * r;
     if !(r2 > 0.0) || !r2.is_finite() {

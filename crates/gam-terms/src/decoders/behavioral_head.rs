@@ -59,7 +59,7 @@ pub enum AuxOutcomeFamily {
 impl AuxOutcomeFamily {
     /// Number of linear-predictor channels the head produces per row.
     /// Binomial = 1; Multinomial with `K` classes = `K − 1` (reference-coded).
-    pub fn n_eta_channels(&self) -> usize {
+    pub(crate) fn n_eta_channels(&self) -> usize {
         match self {
             AuxOutcomeFamily::Binomial => 1,
             AuxOutcomeFamily::Multinomial { n_classes } => n_classes.saturating_sub(1),

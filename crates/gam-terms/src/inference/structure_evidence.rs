@@ -340,7 +340,7 @@ impl PredictablePluginEProcess {
     /// product a supermartingale; violating it voids the guarantee, which
     /// is why the SAE integration must hand this function the PREVIOUS
     /// shard's fitted dictionary, never the current one).
-    pub fn try_absorb_batch(
+    pub(crate) fn try_absorb_batch(
         &mut self,
         log_lik_alternative_prefit: f64,
         log_lik_null_sup_on_batch: f64,
@@ -443,7 +443,7 @@ impl AtomBirthGate {
     }
 
     /// Absorb one shard's split-likelihood ratio (see type-level contract).
-    pub fn try_absorb_shard(
+    pub(crate) fn try_absorb_shard(
         &mut self,
         log_lik_alternative_prefit: f64,
         log_lik_null_sup_on_shard: f64,

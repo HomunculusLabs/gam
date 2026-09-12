@@ -254,7 +254,7 @@ impl TotalVariationPenalty {
         out
     }
 
-    pub fn log_det_plus_lambda_i_forward_1d(
+    pub(crate) fn log_det_plus_lambda_i_forward_1d(
         &self,
         target: ArrayView1<'_, f64>,
         rho: ArrayView1<'_, f64>,

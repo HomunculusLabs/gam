@@ -283,7 +283,7 @@ impl ClosedFormPenaltyOperator {
     /// callers that explicitly request a matrix or for validation against
     /// `closed_form_operator_penalty_in_total_basis`. Uses the internal
     /// cache: the first call builds, subsequent calls clone from the cache.
-    pub fn dense_form(&self) -> Array2<f64> {
+    pub(crate) fn dense_form(&self) -> Array2<f64> {
         self.ensure_dense().clone()
     }
 

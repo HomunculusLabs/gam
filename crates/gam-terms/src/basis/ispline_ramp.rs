@@ -30,7 +30,7 @@ use super::*;
 /// and are returned as such rather than refused, because the derivative tower a
 /// warp consumer asks for is fixed by the objective, not by the degree it
 /// happens to be built at.
-pub fn bspline_derivative_dense_any_order(
+pub(crate) fn bspline_derivative_dense_any_order(
     data: ArrayView1<'_, f64>,
     knot_vector: ArrayView1<'_, f64>,
     degree: usize,

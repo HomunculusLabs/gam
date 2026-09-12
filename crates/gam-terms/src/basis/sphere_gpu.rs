@@ -703,7 +703,7 @@ pub struct S2ModuleCacheKey {
 
 /// Returns `true` if this build was compiled with the Linux + cudarc GPU
 /// backend that runs the S² Wahba kernels.
-pub const fn sphere_gpu_compiled() -> bool {
+pub(crate) const fn sphere_gpu_compiled() -> bool {
     cfg!(target_os = "linux")
 }
 
@@ -739,7 +739,7 @@ pub fn sphere_kernel_decision(n: usize, m: usize, lmax: usize) -> Result<GpuDeci
 /// polylogarithms / deep-`L` series the device kernel does not evaluate), so
 /// `Sobolev`/`Pseudo` return `None` and stay on the CPU closed-form path.
 #[must_use]
-pub fn truncated_device_kind(
+pub(crate) fn truncated_device_kind(
     kernel: crate::basis::SphereWahbaKernel,
 ) -> Option<(SphereSpectralKernelKind, u16)> {
     use crate::basis::SphereWahbaKernel;
@@ -775,7 +775,7 @@ pub fn truncated_device_kind(
 ///
 /// `data` / `centers` are `(_, 2)` lat/lon matrices (degrees unless
 /// `radians`), matching `spherical_wahba_kernel_matrix_with_kind`.
-pub fn try_build_truncated_kernel_matrix_gpu(
+pub(crate) fn try_build_truncated_kernel_matrix_gpu(
     data: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
     penalty_order: usize,
@@ -959,7 +959,7 @@ impl SphereGpuBackend {
 
 /// Build the raw `(n × m)` Wahba kernel matrix on device using
 /// `s2_wahba_legendre_colmajor`. Phase 1 entry point.
-pub fn build_kernel_matrix_device(
+pub(crate) fn build_kernel_matrix_device(
     inputs: S2KernelBuildInputs<'_>,
 ) -> Result<DeviceS2KernelMatrix, GpuError> {
     inputs.validate()?;

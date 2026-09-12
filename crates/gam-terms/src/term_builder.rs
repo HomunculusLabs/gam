@@ -256,7 +256,7 @@ impl TermBuilderError {
 /// than rely on string-classification of human prose. Internal callers that
 /// still flow `Result<_, String>` get byte-identical text via
 /// `From<DataError> for String`.
-pub fn resolve_col(col_map: &HashMap<String, usize>, name: &str) -> Result<usize, DataError> {
+pub(crate) fn resolve_col(col_map: &HashMap<String, usize>, name: &str) -> Result<usize, DataError> {
     col_map
         .get(name)
         .copied()
@@ -360,7 +360,7 @@ pub fn column_map_with_alias(
 
 /// The canonical marginal-slope alias: `z` in a formula binds to the column
 /// named by `z_column`.
-pub const MARGINAL_SLOPE_Z_ALIAS: &str = "z";
+pub(crate) const MARGINAL_SLOPE_Z_ALIAS: &str = "z";
 
 /// Whether writing `z` in a formula would resolve to `z_column` for this frame.
 ///
@@ -4353,7 +4353,7 @@ fn promote_thin_plate_for_scale_dimensions(basis: &mut SmoothBasisSpec) {
 // Data-aware helpers
 // ---------------------------------------------------------------------------
 
-pub fn spatial_center_strategy_for_dimension(num_centers: usize, d: usize) -> CenterStrategy {
+pub(crate) fn spatial_center_strategy_for_dimension(num_centers: usize, d: usize) -> CenterStrategy {
     if d <= 3 {
         // In low-dimensional spatial smooths, an explicit `k` is a resolution
         // request rather than a request for marginal quantile-midpoint centers.
@@ -4397,7 +4397,7 @@ fn duchon_center_strategy(num_centers: usize, d: usize, automatic: bool) -> Cent
     }
 }
 
-pub fn col_minmax(col: ArrayView1<'_, f64>) -> Result<(f64, f64), String> {
+pub(crate) fn col_minmax(col: ArrayView1<'_, f64>) -> Result<(f64, f64), String> {
     let min = col.iter().fold(f64::INFINITY, |a, &b| a.min(b));
     let max = col.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
     if !min.is_finite() || !max.is_finite() {
@@ -5436,10 +5436,10 @@ pub(crate) const PCA_SMOOTH_OPTION_KEYS: &[&str] = &[
 /// `__by_col` in every arm's whitelist, and the cap in none, is how a
 /// location-scale `noise_formula` with a `thinplate()` smooth came to refuse on
 /// its own injected option (gam#2781 tightened the whitelists).
-pub const ENGINE_OPTION_PREFIX: &str = "__";
+pub(crate) const ENGINE_OPTION_PREFIX: &str = "__";
 
 /// Whether `key` belongs to the engine-injected option namespace.
-pub fn is_engine_option(key: &str) -> bool {
+pub(crate) fn is_engine_option(key: &str) -> bool {
     key.starts_with(ENGINE_OPTION_PREFIX)
 }
 
@@ -5615,7 +5615,7 @@ pub fn parse_countwith_basis_alias(
 /// top of that. This refuses the conflict the way `parse_countwith_basis_alias`
 /// refuses `centers=` together with `k=`, and parses strictly so `m=1.5` is a
 /// user mistake rather than "m not specified".
-pub fn parse_penalty_order_alias(
+pub(crate) fn parse_penalty_order_alias(
     options: &BTreeMap<String, String>,
 ) -> Result<Option<usize>, String> {
     let primary = option_usize_strict(options, "penalty_order")?;
@@ -5644,7 +5644,7 @@ pub fn has_explicit_countwith_basis_alias(
             .any(|alias| options.contains_key(*alias))
 }
 
-pub fn parse_cyclic_boundary(
+pub(crate) fn parse_cyclic_boundary(
     options: &BTreeMap<String, String>,
     minv: f64,
     maxv: f64,
@@ -5677,7 +5677,7 @@ pub fn parse_cyclic_boundary(
 /// `period_start` / `start`, `period_end` / `end`, falling back to the
 /// data range `[minv, maxv)` when neither bound is provided. The period
 /// must be strictly positive.
-pub fn parse_periodic_domain_1d(
+pub(crate) fn parse_periodic_domain_1d(
     options: &BTreeMap<String, String>,
     minv: f64,
     maxv: f64,
@@ -5794,7 +5794,7 @@ pub enum DuchonPowerPolicy {
     CubicStructuralDefault,
 }
 
-pub fn parse_duchon_power_policy(
+pub(crate) fn parse_duchon_power_policy(
     options: &BTreeMap<String, String>,
 ) -> Result<DuchonPowerPolicy, String> {
     if let Some(raw_nu) = options.get("nu") {
@@ -5837,7 +5837,7 @@ pub fn parse_duchon_power_policy(
 /// when the caller had named one (#2781's family) — contradicting this module's
 /// own contract that "an explicit `order=0` still selects the constant-only
 /// space".
-pub fn parse_duchon_order_opt(
+pub(crate) fn parse_duchon_order_opt(
     options: &BTreeMap<String, String>,
 ) -> Result<Option<DuchonNullspaceOrder>, String> {
     if !options.contains_key("order") && !options.contains_key("nullspace_order") {

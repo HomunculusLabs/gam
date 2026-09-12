@@ -80,7 +80,7 @@ impl EdgeRestriction {
     }
 
     /// Output (edge-stalk) dimension `d_e` for this edge.
-    pub fn edge_dim(&self) -> usize {
+    pub(crate) fn edge_dim(&self) -> usize {
         self.r_uv.nrows()
     }
 }
@@ -312,7 +312,7 @@ impl SheafConsistencyPenalty {
 
     /// Apply the sheaf Laplacian `L = δᵀ δ` to a stacked-stalk vector `s`.
     /// Cost: two matvecs per edge; never materialises `L`.
-    pub fn laplacian_apply(&self, s: ArrayView1<'_, f64>) -> Array1<f64> {
+    pub(crate) fn laplacian_apply(&self, s: ArrayView1<'_, f64>) -> Array1<f64> {
         let ds = self.delta(s);
         self.delta_transpose(&ds)
     }

@@ -154,7 +154,7 @@ pub struct AnovaBlocks {
 /// Empirical mean of each basis column over the code sample — the
 /// centering vector `m` that pins the ANOVA gauge to the empirical code
 /// measure.
-pub fn basis_means(phi: ArrayView2<'_, f64>) -> Array1<f64> {
+pub(crate) fn basis_means(phi: ArrayView2<'_, f64>) -> Array1<f64> {
     let n = phi.nrows().max(1) as f64;
     let mut m = Array1::<f64>::zeros(phi.ncols());
     for row in phi.rows() {
@@ -167,7 +167,7 @@ pub fn basis_means(phi: ArrayView2<'_, f64>) -> Array1<f64> {
 }
 
 /// The exact reparameterization (see [`AnovaBlocks`]).
-pub fn anova_blocks(
+pub(crate) fn anova_blocks(
     c: ArrayView2<'_, f64>,
     mean_a: ArrayView1<'_, f64>,
     mean_b: ArrayView1<'_, f64>,

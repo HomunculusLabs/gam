@@ -708,7 +708,7 @@ impl SmoothBasisSpec {
 
     /// Validate every scale-bearing field before construction or frozen replay.
     /// Wrapper recursion is exhaustive; no basis can bypass this check.
-    pub fn validate_scale_configuration(&self) -> Result<(), BasisError> {
+    pub(crate) fn validate_scale_configuration(&self) -> Result<(), BasisError> {
         let contract = self.scale_contract();
         match self {
             SmoothBasisSpec::ByVariable { inner, .. }

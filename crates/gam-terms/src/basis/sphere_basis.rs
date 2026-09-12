@@ -1914,7 +1914,7 @@ pub fn build_duchon_operator_penalty_psi_derivatives(
 /// this: the normalized first derivative is linear in the raw first and the
 /// normalized second is (first-order linear in the raw second, quadratic in the
 /// raw first), so the same `(1/d, 1/d²)` scaling passes through it exactly.
-pub fn build_duchon_operator_penalty_psi_derivatives_in_directions(
+pub(crate) fn build_duchon_operator_penalty_psi_derivatives_in_directions(
     collocation_points: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
     spec: &DuchonBasisSpec,
@@ -2583,7 +2583,7 @@ pub fn build_duchon_native_penalty_psi_derivatives(
 /// Bessel-dominated cost — and one assembly path. Only the *contraction* of
 /// those jets differs, which is what keeps the isotropic and per-axis routes
 /// from being two derivations of the same penalty (gam#2735).
-pub fn build_duchon_native_penalty_psi_derivatives_in_directions(
+pub(crate) fn build_duchon_native_penalty_psi_derivatives_in_directions(
     centers: ArrayView2<'_, f64>,
     spec: &DuchonBasisSpec,
     identifiability_transform: Option<&Array2<f64>>,
@@ -3440,7 +3440,7 @@ pub fn build_matern_basis_log_kappa_derivatives(
     build_matern_basis_log_kappa_derivativeswithworkspace(data, spec, &mut workspace)
 }
 
-pub fn build_matern_basis_log_kappa_derivativeswithworkspace(
+pub(crate) fn build_matern_basis_log_kappa_derivativeswithworkspace(
     data: ArrayView2<'_, f64>,
     spec: &MaternBasisSpec,
     workspace: &mut BasisWorkspace,

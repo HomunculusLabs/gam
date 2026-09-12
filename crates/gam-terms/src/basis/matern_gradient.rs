@@ -109,7 +109,7 @@ impl StreamingMaternBasisGradientEvaluator {
         self.centers.ncols()
     }
 
-    pub fn row_chunk_gradient(
+    pub(crate) fn row_chunk_gradient(
         &self,
         data: ArrayView2<'_, f64>,
         start: usize,

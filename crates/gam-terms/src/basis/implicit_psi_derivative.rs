@@ -149,7 +149,7 @@ impl FixedRowSpaceProjector {
     /// with `R` satisfying `C R = Q_C Q_C^T D`.  The cross `Q_C^T D` is
     /// streamed in bounded row chunks; the projected design is represented as
     /// one block operator, so an outer-psi replay never materializes `n x p`.
-    pub fn project_design(
+    pub(crate) fn project_design(
         &self,
         design: DesignMatrix,
         context: &str,
@@ -822,7 +822,7 @@ impl LatentCoordDesignDerivative {
         Self::from_jet(latent, jet, None)
     }
 
-    pub fn from_jet(
+    pub(crate) fn from_jet(
         latent: Arc<crate::latent::LatentCoordValues>,
         jet: Array3<f64>,
         ident_transform: Option<Array2<f64>>,
@@ -1251,7 +1251,7 @@ impl ImplicitDesignPsiDerivative {
     /// (#1521) the REML planner tests live in `gam-solve` and build streaming
     /// operators as fixtures, so this constructor is part of the cross-crate
     /// surface, not a crate-private helper.
-    pub fn new_streaming(
+    pub(crate) fn new_streaming(
         data: Arc<Array2<f64>>,
         centers: Arc<Array2<f64>>,
         eta: Vec<f64>,
@@ -3464,7 +3464,7 @@ pub struct DesignKernelChart {
 }
 
 impl DesignKernelChart {
-    pub const IDENTITY: Self = Self {
+    pub(crate) const IDENTITY: Self = Self {
         scale: 1.0,
         reference_pair: None,
     };

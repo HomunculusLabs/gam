@@ -326,7 +326,7 @@ impl BSplineBoundaryConditions {
     }
 
     /// Whether either endpoint carries an inhomogeneous value constraint.
-    pub fn has_nonzero_anchor(&self) -> bool {
+    pub(crate) fn has_nonzero_anchor(&self) -> bool {
         let nonzero = |condition: BSplineEndpointBoundaryCondition| {
             matches!(
                 condition,
@@ -743,7 +743,7 @@ pub const fn default_spatial_center_strategy(num_centers: usize, d: usize) -> Ce
     }
 }
 
-pub fn auto_spatial_center_strategy(num_centers: usize, d: usize) -> CenterStrategy {
+pub(crate) fn auto_spatial_center_strategy(num_centers: usize, d: usize) -> CenterStrategy {
     let strategy = if d == 1 {
         // In one dimension, farthest-point selection is the deterministic
         // maximin grid over the observed domain. Equal-mass midpoints leave the
@@ -830,7 +830,7 @@ mod duchon_center_state_tests {
     }
 }
 
-pub fn center_strategy_kind(strategy: &CenterStrategy) -> CenterStrategyKind {
+pub(crate) fn center_strategy_kind(strategy: &CenterStrategy) -> CenterStrategyKind {
     match strategy {
         CenterStrategy::Auto(inner) => center_strategy_kind(inner.as_ref()),
         CenterStrategy::DuchonSpectral { knots, .. } => center_strategy_kind(knots),
@@ -984,7 +984,7 @@ impl MaternLengthScale {
         Self::Fixed(value)
     }
 
-    pub const fn is_fixed(self) -> bool {
+    pub(crate) const fn is_fixed(self) -> bool {
         matches!(self, Self::Fixed(_))
     }
 
@@ -1005,7 +1005,7 @@ impl MaternLengthScale {
 
     /// Resolve an omitted scale exactly once.  Replanning a frozen or
     /// κ-updated Auto scale must retain its current numeric value.
-    pub fn resolve_auto_once(&mut self, value: f64) {
+    pub(crate) fn resolve_auto_once(&mut self, value: f64) {
         if let Self::Auto { resolved } = self
             && resolved.is_none()
         {
@@ -1138,7 +1138,7 @@ impl DuchonSpectralBasis {
         }
     }
 
-    pub fn kernel_transform(&self) -> Option<&Array2<f64>> {
+    pub(crate) fn kernel_transform(&self) -> Option<&Array2<f64>> {
         match self {
             Self::Fresh { .. } => None,
             Self::Frozen {
@@ -1147,7 +1147,7 @@ impl DuchonSpectralBasis {
         }
     }
 
-    pub fn bending_penalty(&self) -> Option<&Array2<f64>> {
+    pub(crate) fn bending_penalty(&self) -> Option<&Array2<f64>> {
         match self {
             Self::Fresh { .. } => None,
             Self::Frozen {
@@ -1220,7 +1220,7 @@ impl DuchonBasisSpec {
     /// Integer view of `power` for the existing integer-only downstream chain.
     /// Non-finite or non-integer values fall back to `0` (the integer-only
     /// validators downstream already reject this case with a clear message).
-    pub fn power_as_usize(&self) -> usize {
+    pub(crate) fn power_as_usize(&self) -> usize {
         duchon_power_to_usize(self.power)
     }
 }
@@ -1307,7 +1307,7 @@ impl DuchonOperatorPenaltySpec {
     /// stiffness energy belongs to H². Omitting that block leaves the rough
     /// kernel with only mass+tension, inflates EDF, and changes the REML model
     /// class relative to its stated RKHS.
-    pub fn matern_for_smoothness(nu: MaternNu, d: usize) -> Self {
+    pub(crate) fn matern_for_smoothness(nu: MaternNu, d: usize) -> Self {
         // `m` and every gated order are small half-integers, which f64 represents
         // exactly, so the inclusive `j ≤ m` boundary is an exact comparison.
         let m = nu.half_integer_value() + 0.5 * d as f64;
@@ -2057,7 +2057,7 @@ impl ConstructiveQuadratic {
     /// or `None` when no frame is declared or the frame has support outside
     /// the block (in which case the block does not own the null space and a
     /// consumer must fall back to measuring).
-    pub fn structural_null_frame_block(&self, lo: usize, hi: usize) -> Option<Array2<f64>> {
+    pub(crate) fn structural_null_frame_block(&self, lo: usize, hi: usize) -> Option<Array2<f64>> {
         let frame = self.structural_null_frame.as_ref()?;
         if lo >= hi || hi > frame.nrows() {
             return None;
@@ -2582,7 +2582,7 @@ pub(crate) fn should_cache_implicit_radial_components(
     implicit_radial_cache_bytes(n, k, n_axes) <= policy.max_operator_cache_bytes
 }
 
-pub fn assert_no_dense_derivative_materialization(n: usize, p: usize, d_pc: usize) {
+pub(crate) fn assert_no_dense_derivative_materialization(n: usize, p: usize, d_pc: usize) {
     let first = dense_design_bytes(n, p).saturating_mul(d_pc);
     let second = dense_design_bytes(n, p).saturating_mul(d_pc.saturating_mul(d_pc));
     // Consult the library default ResourcePolicy. Production large-scale runs
@@ -2627,7 +2627,7 @@ pub fn assert_no_dense_derivative_materialization(n: usize, p: usize, d_pc: usiz
     }
 }
 
-pub fn assert_spatial_centers_below_large_scale_cap(
+pub(crate) fn assert_spatial_centers_below_large_scale_cap(
     d_pc: usize,
     centers: ArrayView2<'_, f64>,
 ) -> Result<(), BasisError> {

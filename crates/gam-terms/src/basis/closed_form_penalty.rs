@@ -1511,7 +1511,7 @@ pub fn radial_derivatives_of_isotropic_duchon(
 ///
 /// Returns `None` if the analytic limit is unavailable for the given
 /// (q, d, m, s); caller should keep its ε-regularization path.
-pub fn pure_duchon_self_pair_value(
+pub(crate) fn pure_duchon_self_pair_value(
     q: usize,
     d: usize,
     m: usize,

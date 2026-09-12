@@ -647,7 +647,7 @@ impl LatentManifold {
     /// the tangent space. The ambient derivative includes the normal
     /// curvature term `-<grad_R, ξ> t`; the tangent action is equivalent to
     /// `P_t(eh ξ) - <eg, t> ξ`.
-    pub fn euclidean_to_riemannian_hessian(
+    pub(crate) fn euclidean_to_riemannian_hessian(
         &self,
         t: ArrayView1<'_, f64>,
         eg: ArrayView1<'_, f64>,

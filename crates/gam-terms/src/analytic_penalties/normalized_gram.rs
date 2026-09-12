@@ -167,7 +167,7 @@ impl NormalizedCrossGram {
     /// Gradient of left' B right for the frozen-normalizer cross-Gram
     /// Gauss–Newton majorizer B. Its live normalizer is differentiated too; the
     /// directional vectors stay fixed.
-    pub fn gauss_newton_bilinear_gradient(
+    pub(crate) fn gauss_newton_bilinear_gradient(
         &self,
         left: ArrayView1<'_, f64>,
         right: ArrayView1<'_, f64>,

@@ -710,7 +710,7 @@ fn is_exact_ident(raw: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.')
 }
 
-pub fn parse_function_call(input: &str) -> Result<FunctionCallSpec, String> {
+pub(crate) fn parse_function_call(input: &str) -> Result<FunctionCallSpec, String> {
     validate_balanced_delimiters(input, "invalid function call syntax")?;
     let mut parsed = FormulaParser::parse(Rule::top_function_call, input).map_err(|e| {
         FormulaDslError::ParseError {
@@ -1562,7 +1562,7 @@ pub fn parsed_term_column_names(
     }
 }
 
-pub fn parsed_terms_reference_column(terms: &[ParsedTerm], column_name: &str) -> bool {
+pub(crate) fn parsed_terms_reference_column(terms: &[ParsedTerm], column_name: &str) -> bool {
     terms.iter().any(|term| match term {
         ParsedTerm::Linear { name, .. }
         | ParsedTerm::BoundedLinear { name, .. }
@@ -1723,11 +1723,11 @@ pub fn effectivelinkwiggle_formulaspec(
     })
 }
 
-pub const fn linkname_supports_joint_wiggle(link: LinkFunction) -> bool {
+pub(crate) const fn linkname_supports_joint_wiggle(link: LinkFunction) -> bool {
     !matches!(link, LinkFunction::Sas | LinkFunction::BetaLogistic)
 }
 
-pub const fn linkchoice_supports_joint_wiggle(choice: &LinkChoice) -> bool {
+pub(crate) const fn linkchoice_supports_joint_wiggle(choice: &LinkChoice) -> bool {
     match &choice.mixture_components {
         None => linkname_supports_joint_wiggle(choice.link),
         Some(_) => false,
@@ -1745,7 +1745,7 @@ pub fn require_linkchoice_supports_joint_wiggle(
     }
 }
 
-pub const fn likelihood_spec_supports_joint_wiggle(likelihood: &LikelihoodSpec) -> bool {
+pub(crate) const fn likelihood_spec_supports_joint_wiggle(likelihood: &LikelihoodSpec) -> bool {
     inverse_link_supports_joint_wiggle(&likelihood.link)
 }
 
@@ -1807,7 +1807,7 @@ pub fn require_inverse_link_supports_joint_wiggle(
 /// so the config was accepted then aborted deep in the solver. The state-bearing
 /// links (SAS/BetaLogistic/Mixture/LatentCLogLog) and identity/log stay out: the
 /// warp is defined only over a fixed state-less base probability link.
-pub const fn binomial_inverse_link_supports_joint_wiggle(link: &InverseLink) -> bool {
+pub(crate) const fn binomial_inverse_link_supports_joint_wiggle(link: &InverseLink) -> bool {
     matches!(
         link,
         InverseLink::Standard(StandardLink::Logit)
@@ -1844,7 +1844,7 @@ pub fn joint_wiggle_unsupported_link_message(context: &str) -> String {
 // Option-map helpers (shared by formula parsing and term construction)
 // ---------------------------------------------------------------------------
 
-pub fn option_usize(map: &BTreeMap<String, String>, key: &str) -> Option<usize> {
+pub(crate) fn option_usize(map: &BTreeMap<String, String>, key: &str) -> Option<usize> {
     map.get(key).and_then(|v| v.parse::<usize>().ok())
 }
 
@@ -1884,7 +1884,7 @@ fn validate_known_term_options(
     Ok(())
 }
 
-pub fn option_usize_any(map: &BTreeMap<String, String>, keys: &[&str]) -> Option<usize> {
+pub(crate) fn option_usize_any(map: &BTreeMap<String, String>, keys: &[&str]) -> Option<usize> {
     for key in keys {
         if let Some(v) = option_usize(map, key) {
             return Some(v);
@@ -1899,7 +1899,7 @@ pub fn option_usize_any(map: &BTreeMap<String, String>, keys: &[&str]) -> Option
 /// the lenient `option_usize` silently drops invalid values and reverts to
 /// the default — `k=-1` and `k=1.5` were both accepted as "k not specified"
 /// instead of being flagged as user mistakes.
-pub fn option_usize_strict(
+pub(crate) fn option_usize_strict(
     map: &BTreeMap<String, String>,
     key: &str,
 ) -> Result<Option<usize>, String> {
@@ -1919,7 +1919,7 @@ pub fn option_usize_strict(
 
 /// Strict variant of `option_usize_any` that errors on the first present-but-
 /// unparseable key rather than silently falling through.
-pub fn option_usize_any_strict(
+pub(crate) fn option_usize_any_strict(
     map: &BTreeMap<String, String>,
     keys: &[&str],
 ) -> Result<Option<usize>, String> {
@@ -1938,7 +1938,7 @@ pub fn option_f64(map: &BTreeMap<String, String>, key: &str) -> Option<f64> {
 /// Strict float option: `Ok(None)` if absent, `Ok(Some(n))` if parses as a
 /// finite f64, `Err` if the user passed an unparseable value (rather than
 /// silently dropping it like the lenient `option_f64`).
-pub fn option_f64_strict(map: &BTreeMap<String, String>, key: &str) -> Result<Option<f64>, String> {
+pub(crate) fn option_f64_strict(map: &BTreeMap<String, String>, key: &str) -> Result<Option<f64>, String> {
     match map.get(key) {
         None => Ok(None),
         Some(raw) => match raw.parse::<f64>() {
@@ -1957,7 +1957,7 @@ pub fn option_f64_strict(map: &BTreeMap<String, String>, key: &str) -> Result<Op
     }
 }
 
-pub fn option_bool(map: &BTreeMap<String, String>, key: &str) -> Option<bool> {
+pub(crate) fn option_bool(map: &BTreeMap<String, String>, key: &str) -> Option<bool> {
     map.get(key)
         .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
             "true" | "1" | "yes" | "y" => Some(true),
@@ -1971,7 +1971,7 @@ pub fn option_bool(map: &BTreeMap<String, String>, key: &str) -> Option<bool> {
 /// lenient `option_bool` maps an unrecognized value to `None`, which callers
 /// then silently treat as "not specified" — masking user typos like
 /// `double_penalty=ture`.
-pub fn option_bool_strict(
+pub(crate) fn option_bool_strict(
     map: &BTreeMap<String, String>,
     key: &str,
 ) -> Result<Option<bool>, String> {
@@ -1991,7 +1991,7 @@ pub fn option_bool_strict(
     }
 }
 
-pub fn strip_quotes(v: &str) -> &str {
+pub(crate) fn strip_quotes(v: &str) -> &str {
     let b = v.as_bytes();
     if b.len() >= 2
         && ((b[0] == b'\'' && b[b.len() - 1] == b'\'') || (b[0] == b'"' && b[b.len() - 1] == b'"'))
@@ -2763,7 +2763,7 @@ pub fn parse_formula(formula: &str) -> Result<ParsedFormula, FormulaDslError> {
     })
 }
 
-pub fn parse_term(raw: &str) -> Result<ParsedTerm, String> {
+pub(crate) fn parse_term(raw: &str) -> Result<ParsedTerm, String> {
     fn split_call_args(call: &FunctionCallSpec) -> (Vec<String>, BTreeMap<String, String>) {
         let mut vars = Vec::<String>::new();
         let mut options = BTreeMap::<String, String>::new();
@@ -3476,7 +3476,7 @@ pub fn parse_linkname(v: &str) -> Result<LinkFunction, FormulaDslError> {
     }
 }
 
-pub fn parse_link_component(v: &str) -> Result<LinkComponent, String> {
+pub(crate) fn parse_link_component(v: &str) -> Result<LinkComponent, String> {
     match v.trim() {
         "logit" => Ok(LinkComponent::Logit),
         "probit" => Ok(LinkComponent::Probit),
@@ -3492,7 +3492,7 @@ pub fn parse_link_component(v: &str) -> Result<LinkComponent, String> {
     }
 }
 
-pub fn parse_link_component_list(v: &str) -> Result<Vec<LinkComponent>, String> {
+pub(crate) fn parse_link_component_list(v: &str) -> Result<Vec<LinkComponent>, String> {
     let mut out = Vec::new();
     for part in v.split(',') {
         let trimmed = part.trim();

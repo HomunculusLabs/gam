@@ -65,7 +65,7 @@ pub fn bspline_derivative_penalty_matrix(
 ///
 /// Each row is one weighted derivative-evaluation functional from the exact
 /// span quadrature, so `S = AᵀA` without first materializing a dense Gram.
-pub fn bspline_derivative_penalty_factor(
+pub(crate) fn bspline_derivative_penalty_factor(
     knot_vector: ArrayView1<f64>,
     degree: usize,
     order: usize,

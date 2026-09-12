@@ -130,7 +130,7 @@ pub fn create_basis<O: BasisOutputFormat>(
 /// Given `z_raw` and `z_clamped = clamp(z_raw, left, right)`, this mutates
 /// `basisvalues` in-place as:
 /// `B_ext(z_raw) = B(z_clamped) + (z_raw - z_clamped) * B'(z_clamped)`.
-pub fn apply_linear_extension_from_first_derivative(
+pub(crate) fn apply_linear_extension_from_first_derivative(
     z_raw: ArrayView1<f64>,
     z_clamped: ArrayView1<f64>,
     knot_vector: ArrayView1<f64>,

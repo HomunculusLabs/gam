@@ -410,7 +410,7 @@ pub fn duchon_polynomial_first_derivative_nd(
 /// At a collision (`r ≤ 1e-12`) the gradient is the zero vector — the radial
 /// kernel has a stationary point at the center, so every axis derivative
 /// vanishes there. Output shape `(n_rows, n_centers, dim)`.
-pub fn radial_input_location_jet_nd(
+pub(crate) fn radial_input_location_jet_nd(
     t: ArrayView2<'_, f64>,
     centers: ArrayView2<'_, f64>,
     phi_r: ArrayView2<'_, f64>,

@@ -67,7 +67,7 @@ fn linear_function_mass(column: ArrayView1<'_, f64>, term_name: &str) -> Result<
 /// [`BasisWorkspace`]: using it only while lowering the formula spec leaves a
 /// later spatial build free to reverse the routing decision under the library
 /// default.
-pub fn build_term_collection_design_inner_with_policy(
+pub(crate) fn build_term_collection_design_inner_with_policy(
     data: ArrayView2<'_, f64>,
     spec: &TermCollectionSpec,
     policy: &gam_runtime::resource::ResourcePolicy,
