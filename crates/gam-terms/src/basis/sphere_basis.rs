@@ -427,8 +427,8 @@ pub(crate) fn build_wahba_decomposed_hessian(
             let low_cols = decomposition.low_degree_cols;
             let low_hessian = low_hessian.select(Axis(1), &decomposition.low_degree_columns);
             let mut out = ndarray::Array4::<f64>::zeros((n, kernel_cols + low_cols, 2, 2));
-            for a in 0..2 {
-                for b in 0..2 {
+            for a in 0..2usize {
+                for b in 0..2usize {
                     let raw_ab = raw_kernel_hessian.slice(s![.., .., a, b]);
                     let low_ab = low_hessian.slice(s![.., .., a, b]);
                     let kernel_ab =
@@ -441,8 +441,8 @@ pub(crate) fn build_wahba_decomposed_hessian(
         }
         _ => {
             let mut out = ndarray::Array4::<f64>::zeros((n, kernel_cols, 2, 2));
-            for a in 0..2 {
-                for b in 0..2 {
+            for a in 0..2usize {
+                for b in 0..2usize {
                     let raw_ab = raw_kernel_hessian.slice(s![.., .., a, b]);
                     out.slice_mut(s![.., .., a, b])
                         .assign(&raw_ab.dot(&decomposition.kernel_basis));

@@ -2039,8 +2039,8 @@ pub(crate) fn apply_identifiability_to_hessian(
         k
     );
     let mut out = ndarray::Array4::<f64>::zeros((n, z.ncols(), 2, 2));
-    for a in 0..2 {
-        for b in 0..2 {
+    for a in 0..2usize {
+        for b in 0..2usize {
             let projected = raw_hessian.slice(ndarray::s![.., .., a, b]).dot(z);
             out.slice_mut(ndarray::s![.., .., a, b]).assign(&projected);
         }
