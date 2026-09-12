@@ -4523,61 +4523,20 @@ impl<'a> RemlState<'a> {
 
     pub(crate) fn active_constraint_free_basis(&self, pr: &PirlsResult) -> Option<Array2<f64>> {
         let lin = pr.linear_constraints_transformed.as_ref()?;
-        let beta_t = pr.beta_transformed.as_ref();
-        let mut activerows: Vec<Array1<f64>> = Vec::new();
-        for i in 0..lin.a.nrows() {
-            let slack = lin.a.row(i).dot(beta_t) - lin.b[i];
-            if slack <= ACTIVE_CONSTRAINT_SLACK_TOL {
-                activerows.push(lin.a.row(i).to_owned());
-            }
-        }
-        if activerows.is_empty() {
+        // The active face the constrained solver and the outer KKT gate certify:
+        // scaled slack `(aᵢᵀβ − bᵢ)/‖aᵢ‖` within the primal feasibility contract, on
+        // unit-scaled rows (#2469).
+        let face = crate::active_set::active_face(pr.beta_transformed.as_ref(), lin)?;
+        if face.active_idx.is_empty() {
             return None;
         }
-
-        let p_t = lin.a.ncols();
-        let mut a_t = Array2::<f64>::zeros((p_t, activerows.len()));
-        for (j, row) in activerows.iter().enumerate() {
-            for k in 0..p_t {
-                a_t[[k, j]] = row[k];
-            }
-        }
-
-        let qrow = Self::orthonormalize_columns(&a_t, ORTHONORM_DROP_TOL); // basis for active row-space^T
-        let rank = qrow.ncols();
+        // Orthonormal basis for null(A_active): the SVD's own rank band, completed by
+        // pivoted Gram-Schmidt with no cutoff on an accepted residual.
+        let (rank, null_basis) = crate::active_set::null_space_of_rows(&face.a_active)?;
         if rank == 0 {
             return None;
         }
-        if rank >= p_t {
-            return Some(Array2::<f64>::zeros((p_t, 0)));
-        }
-
-        // Build orthonormal basis for null(A_active) as complement of row-space.
-        let mut z = Array2::<f64>::zeros((p_t, p_t - rank));
-        let mut kept = 0usize;
-        for j in 0..p_t {
-            let mut v = Array1::<f64>::zeros(p_t);
-            v[j] = 1.0;
-            for t in 0..rank {
-                let qt = qrow.column(t);
-                let proj = qt.dot(&v);
-                v -= &qt.mapv(|x| x * proj);
-            }
-            for t in 0..kept {
-                let zt = z.column(t);
-                let proj = zt.dot(&v);
-                v -= &zt.mapv(|x| x * proj);
-            }
-            let nrm = v.dot(&v).sqrt();
-            if nrm > ORTHONORM_DROP_TOL {
-                z.column_mut(kept).assign(&v.mapv(|x| x / nrm));
-                kept += 1;
-                if kept == p_t - rank {
-                    break;
-                }
-            }
-        }
-        Some(z.slice(ndarray::s![.., 0..kept]).to_owned())
+        Some(null_basis)
     }
 
     /// Construct a `BarrierConfig` from linear inequality constraints `A β ≥ b`

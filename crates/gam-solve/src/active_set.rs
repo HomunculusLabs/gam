@@ -398,12 +398,12 @@ pub(crate) fn stationarity_residual_reachability(
 /// One derivation shared by [`compute_constraint_kkt_diagnostics`] and
 /// [`stationarity_residual_reachability`], so the reported reachability split
 /// can never describe a different face than the residual it explains.
-struct ActiveFace {
+pub(crate) struct ActiveFace {
     a_scaled: Array2<f64>,
     slack: Array1<f64>,
     primal_feasibility: f64,
-    active_idx: Vec<usize>,
-    a_active: Array2<f64>,
+    pub(crate) active_idx: Vec<usize>,
+    pub(crate) a_active: Array2<f64>,
 }
 
 /// The unit-scaled rows of the constraints that BIND at `(beta, gradient)`:
@@ -444,7 +444,68 @@ pub fn binding_constraint_rows(
     Some(rows)
 }
 
-fn active_face(
+/// Numerical rank of a `rows × cols` matrix from its singular values, at the
+/// SVD's own rounding band `max(rows, cols)·ε·σ_max`. There is no absolute floor
+/// and no extra factor: `cR` has the rank of `R` for every `c > 0` (#2469).
+pub(crate) fn svd_rank(singular: &Array1<f64>, rows: usize, cols: usize) -> usize {
+    let smax = singular.iter().fold(0.0_f64, |acc, &v| acc.max(v));
+    let rank_tol = smax * (rows.max(cols) as f64) * f64::EPSILON;
+    singular.iter().filter(|&&s| s > rank_tol).count()
+}
+
+/// Orthonormal basis `Z` (`p × (p − rank)`) of the complement of the row space
+/// spanned by the first `rank` rows of `vt` (orthonormal rows, `p` columns), by
+/// pivoted Gram-Schmidt of the standard axes. The columns of `residual` are every
+/// axis's component outside the span collected so far, i.e. the columns of the
+/// projector onto that span's complement, whose squared Frobenius norm is the
+/// complement's dimension `d ≥ 1`. The longest column therefore has squared norm
+/// at least `d/p ≥ 1/p`, so taking it fills all `p − rank` columns without a
+/// cutoff on how short an accepted residual may be (#2469).
+pub(crate) fn null_space_complement(vt: &Array2<f64>, rank: usize) -> Option<Array2<f64>> {
+    fn deflate(residual: &mut Array2<f64>, unit: ArrayView1<'_, f64>) {
+        let coefficients = unit.dot(&*residual);
+        for (row, &component) in unit.iter().enumerate() {
+            residual.row_mut(row).scaled_add(-component, &coefficients);
+        }
+    }
+    let p = vt.ncols();
+    let nullity = p.checked_sub(rank)?;
+    if rank > vt.nrows() {
+        return None;
+    }
+    let mut residual = Array2::<f64>::eye(p);
+    for i in 0..rank {
+        deflate(&mut residual, vt.row(i));
+    }
+    let mut z = Array2::<f64>::zeros((p, nullity));
+    for col in 0..nullity {
+        let (pivot, squared_norm) = (0..p)
+            .map(|axis| (axis, residual.column(axis).dot(&residual.column(axis))))
+            .fold((0usize, 0.0_f64), |best, candidate| {
+                if candidate.1 > best.1 { candidate } else { best }
+            });
+        if !(squared_norm > 0.0) {
+            return None;
+        }
+        let unit = residual.column(pivot).to_owned() / squared_norm.sqrt();
+        deflate(&mut residual, unit.view());
+        z.column_mut(col).assign(&unit);
+    }
+    Some(z)
+}
+
+/// Numerical rank and orthonormal null basis of a `k × p` row set: the thin SVD's
+/// right singular vectors give the row space at [`svd_rank`], and
+/// [`null_space_complement`] completes its orthonormal complement. `None` when the
+/// SVD fails.
+pub(crate) fn null_space_of_rows(rows: &Array2<f64>) -> Option<(usize, Array2<f64>)> {
+    let (_, singular, vt_opt) = rows.svd(false, true).ok()?;
+    let vt = vt_opt?;
+    let rank = svd_rank(&singular, rows.nrows(), rows.ncols());
+    Some((rank, null_space_complement(&vt, rank)?))
+}
+
+pub(crate) fn active_face(
     beta: &Array1<f64>,
     constraints: &LinearInequalityConstraints,
 ) -> Option<ActiveFace> {
@@ -1173,12 +1234,9 @@ pub fn project_point_strictly_into_feasible_cone(
         }
         let (u_opt, sing, vt_opt) = e_mat.svd(true, true).ok()?;
         let (u_mat, vt) = (u_opt?, vt_opt?);
-        let smax = sing.iter().fold(0.0_f64, |acc, &v| acc.max(v));
-        // The SVD's own rounding band `max(k, p)·ε·σ_max`, with no absolute
-        // floor and no extra factor: `cE` has the rank of `E` for every `c > 0`,
-        // and the seed is certified against the original rows below (#2469).
-        let rank_tol = smax * (k.max(p) as f64) * f64::EPSILON;
-        let rank = sing.iter().filter(|&&s| s > rank_tol).count();
+        // The seed is certified against the original rows below, so the rank is
+        // the SVD's own rounding band (`svd_rank`).
+        let rank = svd_rank(&sing, k, p);
         if rank == 0 || rank >= p {
             return None;
         }
@@ -1187,38 +1245,8 @@ pub fn project_point_strictly_into_feasible_cone(
             let coeff = u_mat.column(idx).dot(&e_rhs) / sing[idx];
             beta_p.scaled_add(coeff, &vt.row(idx));
         }
-        // Orthonormal null basis: pivoted Gram-Schmidt of the standard axes
-        // against the row space `vt[0..rank]`. The columns of `residual` are
-        // every axis's component outside the span collected so far, i.e. the
-        // columns of the projector onto that span's complement, whose squared
-        // Frobenius norm is the complement's dimension `d ≥ 1`. The longest
-        // column therefore has squared norm at least `d/p ≥ 1/p`, so taking it
-        // fills all `p − rank` columns without a cutoff on how short an accepted
-        // residual may be (#2469).
-        fn deflate(residual: &mut Array2<f64>, unit: ArrayView1<'_, f64>) {
-            let coefficients = unit.dot(&*residual);
-            for (row, &component) in unit.iter().enumerate() {
-                residual.row_mut(row).scaled_add(-component, &coefficients);
-            }
-        }
-        let mut residual = Array2::<f64>::eye(p);
-        for i in 0..rank {
-            deflate(&mut residual, vt.row(i));
-        }
-        let mut z = Array2::<f64>::zeros((p, p - rank));
-        for col in 0..(p - rank) {
-            let (pivot, squared_norm) = (0..p)
-                .map(|axis| (axis, residual.column(axis).dot(&residual.column(axis))))
-                .fold((0usize, 0.0_f64), |best, candidate| {
-                    if candidate.1 > best.1 { candidate } else { best }
-                });
-            if !(squared_norm > 0.0) {
-                return None;
-            }
-            let unit = residual.column(pivot).to_owned() / squared_norm.sqrt();
-            deflate(&mut residual, unit.view());
-            z.column_mut(col).assign(&unit);
-        }
+        // Orthonormal null basis completing the row space `vt[0..rank]`.
+        let z = null_space_complement(&vt, rank)?;
         let a_red = a_ineq.dot(&z);
         let b_red = &b_ineq - &a_ineq.dot(&beta_p);
         let u0 = z.t().dot(&(point - &beta_p));

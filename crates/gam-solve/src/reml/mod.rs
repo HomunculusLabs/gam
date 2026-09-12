@@ -31,7 +31,6 @@ pub mod reml_outer_engine;
 pub mod reparameterized_inner;
 mod rho_key;
 mod sparse_exact_penalty;
-mod trace;
 
 pub(crate) use sparse_exact_penalty::sparse_penalty_block_count_from_canonical;
 

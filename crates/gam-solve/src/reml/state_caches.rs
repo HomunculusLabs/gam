@@ -44,18 +44,6 @@ pub(crate) const KKT_TOL_COMP: f64 = 1e-7;
 
 pub(crate) const KKT_TOL_STAT: f64 = 5e-6;
 
-// Slack threshold below which a linear-inequality constraint Aβ ≥ b is
-// considered active when extracting the constraint-free tangent basis.
-// Chosen ~3 orders of magnitude above f64 roundoff on the dot product so
-// constraints that just-touch within IRLS roundoff are correctly flagged.
-pub(crate) const ACTIVE_CONSTRAINT_SLACK_TOL: f64 = 1e-8;
-
-// Norm threshold for accepting a Gram–Schmidt residual as a basis
-// direction when orthonormalising active-row vectors / null-space
-// directions. One order of magnitude below ACTIVE_CONSTRAINT_SLACK_TOL
-// because we are comparing squared-norm residuals after subtraction.
-pub(crate) const ORTHONORM_DROP_TOL: f64 = 1e-10;
-
 pub(crate) fn transformed_penalty_matvec(
     penalty: &gam_terms::construction::CanonicalPenalty,
     beta: &Array1<f64>,
