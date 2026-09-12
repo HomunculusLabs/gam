@@ -558,7 +558,7 @@ impl SheafConsistencyPenalty {
                 }
                 continue;
             }
-            let _reservation = governor
+            let reservation = governor
                 .try_reserve_dense_f64_copies(
                     dim,
                     dim,
@@ -579,6 +579,7 @@ impl SheafConsistencyPenalty {
                 )
             })?;
             count += eigenvalues.iter().filter(|&&value| value < tol).count();
+            drop(reservation);
         }
         Ok(count)
     }
