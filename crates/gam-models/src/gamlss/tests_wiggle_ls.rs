@@ -2679,3 +2679,220 @@ pub(crate) fn gls_wiggle_joint_loglik_gradient_matches_finite_difference_and_leg
     );
 }
 
+/// #932. `GaussianLocationScaleWiggleFamily` reads its predictor-space row tower from
+/// the generated `gaussian_normalized_row` atom, then pulls it back through the warp
+/// `q = q₀ + Σ_j βw_j B_j(q₀)` by hand: `gls_wiggle_first_directional_coeffs`,
+/// `gls_wiggle_second_directional_coeffs` and the dense `_from_designs` blocks. Nothing
+/// compared that pullback with the likelihood it differentiates. This test takes exact
+/// nested num-dual derivatives in β of
+/// `f(β) = Σ_i w_i (½ (y_i − q_i)² / σ_i² + log σ_i)`, `σ = LOGB_SIGMA_FLOOR + e^{η_ls}`,
+/// and requires the dense observed Hessian and its first and second directional
+/// derivatives to match to rounding.
+///
+/// The warp enters as its Taylor polynomial about the base index `q₀*`:
+/// `Σ_{k≤3} B_j^(k)(q₀*) δ^k / k!` per column, plus the base-coefficient term
+/// `(Σ_j βw*_j B_j''''(q₀*)) δ⁴ / 24 = d⁴q/dq₀⁴ · δ⁴ / 24`. Every compared channel is at
+/// most a fourth β-derivative and `βw` enters linearly, so `(βw − βw*)·δ⁴` is fifth
+/// order and the polynomial is exact for every channel under test. The basis tables are
+/// the production primitives; what this pins is the algebra built on them.
+#[test]
+pub(crate) fn gaussian_wiggle_joint_hessian_and_directional_derivatives_match_exact_derivatives_932()
+{
+    use num_dual::{Dual2, DualNum, HyperDual, second_derivative, second_partial_derivative};
+
+    struct WarpTables {
+        q0: Array1<f64>,
+        basis: Array2<f64>,
+        d1: Array2<f64>,
+        d2: Array2<f64>,
+        d3: Array2<f64>,
+        d4q: Array1<f64>,
+    }
+
+    fn warped_negative_log_likelihood<D: DualNum<f64> + Copy>(
+        family: &GaussianLocationScaleWiggleFamily,
+        xmu: &Array2<f64>,
+        xls: &Array2<f64>,
+        warp: &WarpTables,
+        coefficients: &[D],
+    ) -> D {
+        let p_mu = xmu.ncols();
+        let p_ls = xls.ncols();
+        let p_w = warp.basis.ncols();
+        let half = D::from(0.5);
+        let mut total = D::zero();
+        for i in 0..family.y.len() {
+            let mut q0 = D::zero();
+            for j in 0..p_mu {
+                q0 += D::from(xmu[[i, j]]) * coefficients[j];
+            }
+            let delta = q0 - D::from(warp.q0[i]);
+            let delta2 = delta * delta;
+            let delta3 = delta2 * delta;
+            let mut q = q0 + D::from(warp.d4q[i] / 24.0) * delta2 * delta2;
+            for j in 0..p_w {
+                let column = D::from(warp.basis[[i, j]])
+                    + D::from(warp.d1[[i, j]]) * delta
+                    + D::from(0.5 * warp.d2[[i, j]]) * delta2
+                    + D::from(warp.d3[[i, j]] / 6.0) * delta3;
+                q += coefficients[p_mu + p_ls + j] * column;
+            }
+            let mut eta_ls = D::zero();
+            for j in 0..p_ls {
+                eta_ls += D::from(xls[[i, j]]) * coefficients[p_mu + j];
+            }
+            let sigma = D::from(crate::sigma_link::LOGB_SIGMA_FLOOR) + eta_ls.exp();
+            let residual = D::from(family.y[i]) - q;
+            total += D::from(family.weights[i])
+                * (half * residual * residual / (sigma * sigma) + sigma.ln());
+        }
+        total
+    }
+
+    let (family, states, _specs, xmu, xls, _xw_seed) = gls_wiggle_workspace_fixture();
+    let beta: Vec<f64> = states
+        .iter()
+        .flat_map(|state| state.beta.iter().copied())
+        .collect();
+    let total = beta.len();
+    let p_mu = states[GaussianLocationScaleWiggleFamily::BLOCK_MU].beta.len();
+    let p_ls = states[GaussianLocationScaleWiggleFamily::BLOCK_LOG_SIGMA]
+        .beta
+        .len();
+    let q0 = states[GaussianLocationScaleWiggleFamily::BLOCK_MU].eta.clone();
+    let geometry = family
+        .wiggle_geometry(
+            q0.view(),
+            states[GaussianLocationScaleWiggleFamily::BLOCK_WIGGLE]
+                .beta
+                .view(),
+        )
+        .expect("wiggle geometry at the base index");
+    let warp = WarpTables {
+        q0,
+        basis: geometry.basis.clone(),
+        d1: geometry.basis_d1.clone(),
+        d2: geometry.basis_d2.clone(),
+        d3: geometry.basis_d3.clone(),
+        d4q: geometry.d4q_dq04.clone(),
+    };
+    let u = Array1::from_shape_fn(total, |k| 0.3 * ((k as f64) * 0.71 + 0.2).sin());
+    let v = Array1::from_shape_fn(total, |k| -0.25 * ((k as f64) * 0.43 + 0.9).cos());
+
+    // One outer mixed partial in `(s, t)` evaluates each Hessian entry at
+    // `β + s·u + t·v`, returning `(H_ab, D H[u]_ab, D H[v]_ab, D² H[u, v]_ab)`.
+    let lift = |value: f64| HyperDual::<f64, f64>::from(value);
+    let mut hessian = Array2::<f64>::zeros((total, total));
+    let mut hessian_u = Array2::<f64>::zeros((total, total));
+    let mut hessian_uv = Array2::<f64>::zeros((total, total));
+    for a in 0..total {
+        for b in a..total {
+            let (entry, entry_u, _, entry_uv) = second_partial_derivative(
+                |(s, t): (HyperDual<f64, f64>, HyperDual<f64, f64>)| {
+                    let point: Vec<HyperDual<f64, f64>> = (0..total)
+                        .map(|k| lift(beta[k]) + s * lift(u[k]) + t * lift(v[k]))
+                        .collect();
+                    if a == b {
+                        second_derivative(
+                            |x: Dual2<HyperDual<f64, f64>, f64>| {
+                                let mut coefficients: Vec<Dual2<HyperDual<f64, f64>, f64>> =
+                                    point.iter().map(|&value| Dual2::from_re(value)).collect();
+                                coefficients[a] = x;
+                                warped_negative_log_likelihood(
+                                    &family,
+                                    &xmu,
+                                    &xls,
+                                    &warp,
+                                    &coefficients,
+                                )
+                            },
+                            point[a],
+                        )
+                        .2
+                    } else {
+                        second_partial_derivative(
+                            |(x, other): (
+                                HyperDual<HyperDual<f64, f64>, f64>,
+                                HyperDual<HyperDual<f64, f64>, f64>,
+                            )| {
+                                let mut coefficients: Vec<HyperDual<HyperDual<f64, f64>, f64>> =
+                                    point.iter().map(|&value| HyperDual::from_re(value)).collect();
+                                coefficients[a] = x;
+                                coefficients[b] = other;
+                                warped_negative_log_likelihood(
+                                    &family,
+                                    &xmu,
+                                    &xls,
+                                    &warp,
+                                    &coefficients,
+                                )
+                            },
+                            (point[a], point[b]),
+                        )
+                        .3
+                    }
+                },
+                (0.0, 0.0),
+            );
+            for (matrix, value) in [
+                (&mut hessian, entry),
+                (&mut hessian_u, entry_u),
+                (&mut hessian_uv, entry_uv),
+            ] {
+                matrix[[a, b]] = value;
+                matrix[[b, a]] = value;
+            }
+        }
+    }
+
+    let produced = family
+        .exact_newton_joint_hessian(&states)
+        .expect("dense wiggle joint Hessian")
+        .expect("dense wiggle joint Hessian present");
+    let produced_u = family
+        .exact_newton_joint_hessian_directional_derivative(&states, &u)
+        .expect("wiggle dH[u]")
+        .expect("wiggle dH[u] present");
+    let produced_uv = family
+        .exact_newton_joint_hessiansecond_directional_derivative(&states, &u, &v)
+        .expect("wiggle d2H[u, v]")
+        .expect("wiggle d2H[u, v] present");
+    assert_eq!(produced.dim(), (total, total));
+    for a in 0..total {
+        for b in 0..total {
+            for (label, got, want) in [
+                ("H", produced[[a, b]], hessian[[a, b]]),
+                ("dH[u]", produced_u[[a, b]], hessian_u[[a, b]]),
+                ("d2H[u,v]", produced_uv[[a, b]], hessian_uv[[a, b]]),
+            ] {
+                let tolerance = 1.0e-10 * got.abs().max(want.abs()).max(1.0);
+                assert!(
+                    (got - want).abs() <= tolerance,
+                    "{label}[{a},{b}]: production {got:+.17e} against the exact derivative {want:+.17e}"
+                );
+            }
+        }
+    }
+
+    // The pullback under test lives in the wiggle blocks; they must carry curvature
+    // or the comparison above passes on zeros.
+    let block_peak = |matrix: &Array2<f64>, rows: std::ops::Range<usize>, cols: std::ops::Range<usize>| {
+        let mut peak = 0.0_f64;
+        for r in rows {
+            for c in cols.clone() {
+                peak = peak.max(matrix[[r, c]].abs());
+            }
+        }
+        peak
+    };
+    for (label, matrix) in [("dH[u]", &hessian_u), ("d2H[u,v]", &hessian_uv)] {
+        let mean_wiggle = block_peak(matrix, 0..p_mu, p_mu + p_ls..total);
+        let scale_wiggle = block_peak(matrix, p_mu..p_mu + p_ls, p_mu + p_ls..total);
+        assert!(
+            mean_wiggle > 1.0e-6 && scale_wiggle > 1.0e-6,
+            "the exact {label} must carry mean×wiggle ({mean_wiggle:.3e}) and \
+             scale×wiggle ({scale_wiggle:.3e}) curvature, or the pullback is compared on zeros"
+        );
+    }
+}
+
