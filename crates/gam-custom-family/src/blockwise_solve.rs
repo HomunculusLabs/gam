@@ -581,7 +581,9 @@ pub(crate) fn weighted_normal_equations(
 
 /// Smallest diagonal shift that makes the penalized joint Hessian
 /// Cholesky-factorable (i.e. positive definite at the solver floor), or `None`
-/// when the matrix is already PD and needs no shift.
+/// when no shift is needed (the matrix is already PD) or none can help (a
+/// non-finite or overflowing source Hessian, which the consuming solve then
+/// resolves or refuses).
 ///
 /// PERF (gam#729/#826): the stabilizing shift is recomputed every inner Newton
 /// cycle. For a coupled K-block family (Dirichlet/multinomial) the joint Hessian
@@ -686,11 +688,12 @@ fn stabilizing_shift_core(
         }
         gershgorin_min = gershgorin_min.min(diag - radius);
     }
+    // A disc bound that is not finite (a non-finite or overflowing source
+    // Hessian) gives no bracket to bisect in, and no diagonal shift makes a
+    // non-finite system positive definite. The matrix goes back unshifted, so the
+    // solve that consumes it either resolves it or refuses it.
     if !gershgorin_min.is_finite() {
-        let diag_max = (0..cholesky_test.nrows())
-            .map(|d| cholesky_test[[d, d]].abs())
-            .fold(0.0_f64, f64::max);
-        return Some(floor.max(diag_max * 1e-6).max(1e-6));
+        return None;
     }
     if gershgorin_min >= floor {
         // Gershgorin certifies PD-at-floor but the no-shift Cholesky failed
