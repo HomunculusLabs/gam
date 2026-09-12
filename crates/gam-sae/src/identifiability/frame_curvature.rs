@@ -630,9 +630,11 @@ impl BlockPlusRowsSpectrum {
     pub fn count_above(&self, shift: f64) -> Result<usize, String> {
         let (p, d) = self.block_eigenvalues.dim();
         let mut shift = shift;
-        // Each pass clears the highest colliding eigenvalue; a handful suffices
-        // because the shift only ever moves upward past distinct values.
-        for _ in 0..8 {
+        // Each pass moves the shift strictly above the highest colliding eigenvalue,
+        // by at least `8ε·max(|λ|, |s|)` net, which leaves that eigenvalue outside
+        // its tolerance; only higher eigenvalues can collide afterwards, so the
+        // passes end within the eigenvalue count.
+        loop {
             let mut collided: Option<f64> = None;
             for lambda in self.block_eigenvalues.iter() {
                 let tol = 8.0 * f64::EPSILON * lambda.abs().max(shift.abs());
