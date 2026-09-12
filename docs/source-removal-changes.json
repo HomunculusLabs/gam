@@ -5069,5 +5069,22 @@
     ],
     "reason": "#2829 public-surface rule: no product uses the two PSIS resolution helpers or the ChunkAssembler row bridge. ChunkAssembler goes whole: struct, impl, buffer helpers and checkpoint.",
     "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 540016, /scratch.global/sauer354/pool/api2829/validate.540016.log). Neither deletion leaves an orphan behind. gam-inference rho_posterior.rs and gam-problem rho_posterior.rs now state the standard error `√n(1+k)/(n+10)` and the shrunk shape inline instead of naming the deleted helpers, and psis::tail_count's doc no longer points at shape_resolution. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "9836bbd2cfabedc6a0f856789ad452214bd43fe2",
+    "items": [
+      "crates/gam-solve/src/arrow_schur/penalty_ops.rs:fn:block",
+      "crates/gam-solve/src/arrow_schur/penalty_ops.rs:fn:diagonal",
+      "crates/gam-solve/src/arrow_schur/penalty_ops.rs:fn:dim",
+      "crates/gam-solve/src/arrow_schur/penalty_ops.rs:fn:fingerprint",
+      "crates/gam-solve/src/arrow_schur/penalty_ops.rs:fn:gradient",
+      "crates/gam-solve/src/arrow_schur/penalty_ops.rs:fn:matvec",
+      "crates/gam-solve/src/arrow_schur/penalty_ops.rs:fn:matvec_local",
+      "crates/gam-solve/src/arrow_schur/penalty_ops.rs:fn:output_range",
+      "crates/gam-solve/src/arrow_schur/penalty_ops.rs:fn:to_dense",
+      "crates/gam-solve/src/arrow_schur/penalty_ops.rs:struct:KroneckerPenaltyOp"
+    ],
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). gam-solve's KroneckerPenaltyOp (a general A ⊗ B BetaPenaltyOp) is constructed by nothing in gam-cli, gam-pyffi, gamfit, examples or any crate's production code. Production builds IdentityRightKroneckerPenaltyOp and SparseBlockKroneckerPenaltyOp instead. Its one user was a unit test that used it as the dense G ⊗ I_p comparator; that test now materialises G ⊗ I_p into a DensePenaltyOp. The nine fn identities are the method declarations of the removed BetaPenaltyOp impl; the same methods on the surviving operators are untouched.",
+    "evidence": "The prune-api-c census v2 over cc3ae0022 (/scratch.global/sauer354/pool/prune-api-c/census2.tsv) classes KroneckerPenaltyOp DELETE, with one gam-solve unit-test reference and four intra-doc links. At the base, git grep -w finds it only at its definition and impl, in doc links in penalty_ops.rs and gam-models multinomial.rs and multinomial_reml.rs (all reworded here), in two ArrowSchurSystem doc lines and two gam-sae comments (reworded here, the gam-sae ones to name IdentityRightKroneckerPenaltyOp, which that code constructs), and in the unit test rewritten here. The item list follows source_removal_guard.py's ITEM rule over the removed hunks. No pub fn is removed, so there is no public-api-census entry."
   }
 ]

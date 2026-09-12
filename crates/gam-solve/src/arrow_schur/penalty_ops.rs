@@ -724,182 +724,13 @@ impl BetaPenaltyOp for CoupledCarrierPenaltyOp {
     }
 }
 
-/// Kronecker-product penalty: `P = A ⊗ B` applied without materialising
-/// the full `(p_a·p_b)×(p_a·p_b)` matrix.
-pub struct KroneckerPenaltyOp {
-    /// Left factor `A`, shape `(p_a, p_a)`.
-    pub factor_a: Array2<f64>,
-    /// Right factor `B`, shape `(p_b, p_b)`.
-    pub factor_b: Array2<f64>,
-    /// Global offset into the β vector where this block starts.
-    pub global_offset: usize,
-    /// Full β dimension `K`.
-    pub k: usize,
-}
-
-impl BetaPenaltyOp for KroneckerPenaltyOp {
-    fn dim(&self) -> usize {
-        self.k
-    }
-
-    fn matvec(&self, x: &[f64], y: &mut [f64]) {
-        let p_a = self.factor_a.nrows();
-        let p_b = self.factor_b.nrows();
-        let off = self.global_offset;
-        // (A ⊗ B) vec(V) where V is (p_b, p_a) with Fortran/vec ordering.
-        for i_a in 0..p_a {
-            for i_b in 0..p_b {
-                let gi = off + i_a * p_b + i_b;
-                let mut acc = 0.0_f64;
-                for j_a in 0..p_a {
-                    let a_ij = self.factor_a[[i_a, j_a]];
-                    if a_ij == 0.0 {
-                        continue;
-                    }
-                    for j_b in 0..p_b {
-                        acc += a_ij * self.factor_b[[i_b, j_b]] * x[off + j_a * p_b + j_b];
-                    }
-                }
-                y[gi] += acc;
-            }
-        }
-    }
-
-    fn output_range(&self) -> Option<Range<usize>> {
-        let off = self.global_offset;
-        Some(off..off + self.factor_a.nrows() * self.factor_b.nrows())
-    }
-
-    fn matvec_local(&self, x: &[f64], y_local: &mut [f64]) {
-        // Byte-for-byte the `matvec` arithmetic with the output written at the
-        // LOCAL index `i_a·p_b + i_b` (== global `gi - off`), so the composite
-        // can apply this block into its own `y[off..off+p_a·p_b]` sub-slice in
-        // parallel. Per-index accumulation order is unchanged ⇒ bit-identical.
-        let p_a = self.factor_a.nrows();
-        let p_b = self.factor_b.nrows();
-        let off = self.global_offset;
-        for i_a in 0..p_a {
-            for i_b in 0..p_b {
-                let li = i_a * p_b + i_b;
-                let mut acc = 0.0_f64;
-                for j_a in 0..p_a {
-                    let a_ij = self.factor_a[[i_a, j_a]];
-                    if a_ij == 0.0 {
-                        continue;
-                    }
-                    for j_b in 0..p_b {
-                        acc += a_ij * self.factor_b[[i_b, j_b]] * x[off + j_a * p_b + j_b];
-                    }
-                }
-                y_local[li] += acc;
-            }
-        }
-    }
-
-    fn gradient(&self, beta: &[f64], out: &mut [f64]) {
-        let p_a = self.factor_a.nrows();
-        let p_b = self.factor_b.nrows();
-        let off = self.global_offset;
-        for i_a in 0..p_a {
-            for i_b in 0..p_b {
-                let gi = off + i_a * p_b + i_b;
-                let mut acc = 0.0_f64;
-                for j_a in 0..p_a {
-                    let a_ij = self.factor_a[[i_a, j_a]];
-                    if a_ij == 0.0 {
-                        continue;
-                    }
-                    for j_b in 0..p_b {
-                        acc += a_ij * self.factor_b[[i_b, j_b]] * beta[off + j_a * p_b + j_b];
-                    }
-                }
-                out[gi] += acc;
-            }
-        }
-    }
-
-    fn diagonal(&self, diag: &mut [f64]) {
-        let p_a = self.factor_a.nrows();
-        let p_b = self.factor_b.nrows();
-        let off = self.global_offset;
-        for i_a in 0..p_a {
-            for i_b in 0..p_b {
-                diag[off + i_a * p_b + i_b] +=
-                    self.factor_a[[i_a, i_a]] * self.factor_b[[i_b, i_b]];
-            }
-        }
-    }
-
-    fn block(&self, id: BetaBlockId, offsets: &[Range<usize>], out: &mut Array2<f64>) {
-        let range = &offsets[id.0];
-        let b = range.end - range.start;
-        let p_a = self.factor_a.nrows();
-        let p_b = self.factor_b.nrows();
-        let off = self.global_offset;
-        let block_end = off + p_a * p_b;
-        if block_end <= range.start || off >= range.end {
-            return;
-        }
-        for bi in 0..b {
-            let gi = range.start + bi;
-            if gi < off || gi >= block_end {
-                continue;
-            }
-            let li = gi - off;
-            let i_a = li / p_b;
-            let i_b = li % p_b;
-            for bj in 0..b {
-                let gj = range.start + bj;
-                if gj < off || gj >= block_end {
-                    continue;
-                }
-                let lj = gj - off;
-                let j_a = lj / p_b;
-                let j_b = lj % p_b;
-                out[[bi, bj]] += self.factor_a[[i_a, j_a]] * self.factor_b[[i_b, j_b]];
-            }
-        }
-    }
-
-    fn to_dense(&self) -> Array2<f64> {
-        let p_a = self.factor_a.nrows();
-        let p_b = self.factor_b.nrows();
-        let off = self.global_offset;
-        let mut out = Array2::<f64>::zeros((self.k, self.k));
-        for i_a in 0..p_a {
-            for i_b in 0..p_b {
-                let gi = off + i_a * p_b + i_b;
-                for j_a in 0..p_a {
-                    let a_ij = self.factor_a[[i_a, j_a]];
-                    if a_ij == 0.0 {
-                        continue;
-                    }
-                    for j_b in 0..p_b {
-                        let gj = off + j_a * p_b + j_b;
-                        out[[gi, gj]] += a_ij * self.factor_b[[i_b, j_b]];
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    fn fingerprint(&self, hasher: &mut Fingerprinter) {
-        hasher.write_str("kronecker-penalty-op-v1");
-        hasher.write_usize(self.global_offset);
-        hasher.write_usize(self.k);
-        hasher.write_f64_array2(&self.factor_a);
-        hasher.write_f64_array2(&self.factor_b);
-    }
-}
-
 /// Kronecker-product penalty with an identity right factor:
 /// `P = A ⊗ I_p`.
 ///
 /// This is the hot SAE smoothness case. Storing `I_p` as a dense matrix costs
 /// `O(p²)` memory per atom and makes every matvec pay an unnecessary right-factor
 /// loop. This operator stores only the identity dimension and keeps the same
-/// layout as [`KroneckerPenaltyOp`]: local index `i_a * p + i_b`.
+/// `A ⊗ I_p` layout: local index `i_a * p + i_b`.
 pub struct IdentityRightKroneckerPenaltyOp {
     /// Left factor `A`, shape `(p_a, p_a)`.
     pub factor_a: Array2<f64>,
@@ -1067,15 +898,15 @@ pub struct SparseGBlock {
 /// matrix.
 ///
 /// This is the sparse-atom (`K = 100K`) replacement for wrapping the dense
-/// data-fit Gauss-Newton Gram `G` (`m_total × m_total`) in a
-/// [`KroneckerPenaltyOp`]: with per-row active sets of size `k_active ≪ K`,
+/// data-fit Gauss-Newton Gram `G` (`m_total × m_total`) in a dense
+/// `G ⊗ I_p` operator: with per-row active sets of size `k_active ≪ K`,
 /// only the `(atom, atom')` pairs that co-occur in some row contribute a
 /// non-zero `(m_i × m_j)` block, so the storage and every matvec/diagonal
 /// pass cost `O(Σ_pairs m_i m_j · p)` instead of `O((m_total · p)²)`.
 ///
 /// The β index of left-factor coordinate `μ` and output channel `oc` is
-/// `μ · p + oc` (the same `μ`-major / `oc`-minor layout the dense
-/// `KroneckerPenaltyOp { factor_b: I_p }` uses), so this op is a drop-in
+/// `μ · p + oc` (the `μ`-major / `oc`-minor layout of the dense `G ⊗ I_p`), so this op
+/// is a drop-in
 /// structured replacement: with the full dense pair set it reproduces the
 /// dense operator exactly.
 pub struct SparseBlockKroneckerPenaltyOp {

@@ -23,9 +23,9 @@
 //! scaled by a single `λ_a` per class is exactly the multi-term fusion that
 //! over-smooths a rough term while under-smoothing a smooth one (#561), so the
 //! per-term list is carried through verbatim. The single-term case (`n_terms =
-//! 1`) degenerates to the classic `I_{K-1} ⊗ (λ_a S)` Kronecker form referenced
-//! by [`gam_solve::arrow_schur::KroneckerPenaltyOp`] when the outer solve
-//! later switches to matrix-free penalty application.
+//! 1`) degenerates to the classic `I_{K-1} ⊗ (λ_a S)` Kronecker form, which a
+//! matrix-free Kronecker penalty operator can apply once the outer solve
+//! switches to matrix-free penalty application.
 //!
 //! # Likelihood
 //!

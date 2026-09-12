@@ -305,7 +305,7 @@ impl SaeManifoldTerm {
             _ => None,
         };
 
-        // Decoder smoothness penalty: build one KroneckerPenaltyOp per atom
+        // Decoder smoothness penalty: build one IdentityRightKroneckerPenaltyOp per atom
         // (structure = λ·S_k ⊗ I_p, offset = beta_offsets[k]) instead of
         // materialising the dense K×K block.  The gradient is a dense K-vector
         // accumulated into `smooth_grad_gb` and written into sys.gb after sys
@@ -2201,7 +2201,7 @@ impl SaeManifoldTerm {
             // `[beta_offsets[k] .. beta_offsets[k] + basis_size[k] * p_out]`.
             sys.set_block_offsets(self.beta_block_offsets());
             // Install the composite BetaPenaltyOp (#296): smoothness contributions
-            // via per-atom KroneckerPenaltyOp (avoid dense K×K materialisation), the
+            // via per-atom IdentityRightKroneckerPenaltyOp (avoid dense K×K materialisation), the
             // data-fit Gauss-Newton β-Hessian as the structured `G ⊗ I_p`
             // SparseBlockKroneckerPenaltyOp (block-sparse over co-occurring
             // `(atom, atom')` pairs, block-diagonal across the `p` output channels,

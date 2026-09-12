@@ -137,8 +137,8 @@ pub(crate) fn reduced_schur_operator_matvec_is_bit_identical_without_quotient_22
     }
 }
 
-/// `SparseBlockKroneckerPenaltyOp` must reproduce the dense
-/// `KroneckerPenaltyOp { factor_a: G, factor_b: I_p }` on every interface
+/// `SparseBlockKroneckerPenaltyOp` must reproduce the dense `G ⊗ I_p`
+/// operator on every interface
 /// (matvec, gradient, diagonal, to_dense) when the sparse block set covers
 /// the same `(atom, atom')` couplings — this is the equivalence that makes
 /// the sparse op a drop-in replacement for the dense data Gram.
@@ -157,12 +157,16 @@ pub(crate) fn sparse_block_kronecker_matches_dense_kronecker() {
         [-0.1, 0.3, 0.4, 5.0, 0.6],
         [0.0, 0.1, -0.2, 0.6, 1.5],
     ];
-    let dense = KroneckerPenaltyOp {
-        factor_a: g_dense.clone(),
-        factor_b: Array2::<f64>::eye(p),
-        global_offset: 0,
-        k,
-    };
+    // Dense reference: `G ⊗ I_p` materialised in the `μ · p + oc` layout.
+    let mut kron = Array2::<f64>::zeros((k, k));
+    for i_a in 0..dim_a {
+        for j_a in 0..dim_a {
+            for oc in 0..p {
+                kron[[i_a * p + oc, j_a * p + oc]] = g_dense[[i_a, j_a]];
+            }
+        }
+    }
+    let dense = DensePenaltyOp(kron);
     // Sparse: atom 0 block = G[0..2, 0..2], cross blocks G[0..2,2..5] and
     // its transpose, atom 1 block = G[2..5, 2..5].
     let block_00 = g_dense.slice(ndarray::s![0..2, 0..2]).to_owned();

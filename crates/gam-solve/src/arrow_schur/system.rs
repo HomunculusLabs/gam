@@ -177,7 +177,7 @@ pub struct ArrowSchurSystem {
     /// When set, all hot paths (`schur_matvec`, `build_dense_schur_*`,
     /// `JacobiPreconditioner`, quadratic-form reduction) route through this
     /// operator instead of the dense `hbb` accumulator, enabling
-    /// `KroneckerPenaltyOp` and the other structured operators to skip the
+    /// the structured Kronecker operators to skip the
     /// `O(K²)` dense materialisation for structured smoothness penalties.
     ///
     /// When `None`, those paths fall back to wrapping `hbb` in a transient
@@ -603,7 +603,7 @@ impl ArrowSchurSystem {
     /// When set, all hot paths (`schur_matvec`, `build_dense_schur_*`,
     /// `JacobiPreconditioner`, quadratic-form reduction) route through this
     /// operator instead of the dense `hbb` accumulator, enabling
-    /// `KroneckerPenaltyOp` and the other structured operators to avoid `O(K²)`
+    /// the structured Kronecker operators to avoid `O(K²)`
     /// allocation for structured smoothness penalties.
     pub fn set_penalty_op(&mut self, op: Arc<dyn BetaPenaltyOp>) {
         assert_eq!(

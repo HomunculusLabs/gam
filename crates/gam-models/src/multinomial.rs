@@ -732,9 +732,8 @@ impl std::fmt::Display for MultinomialSeparationCertificate {
 /// The penalty matrix `S` is shared across classes; per-class smoothing
 /// parameters `lambdas` (length `K - 1`) scale `S` independently for each
 /// active class. The full block-replicated penalty is `diag_a(λ_a) ⊗ S`,
-/// which is exactly what [`gam_solve::arrow_schur::KroneckerPenaltyOp`]
-/// expresses in matrix-free form when this driver is later lifted into the
-/// arrow-Schur loop.
+/// which a matrix-free Kronecker penalty operator can apply without
+/// materialising it once this driver is lifted into the arrow-Schur loop.
 #[derive(Debug, Clone)]
 pub struct MultinomialFitInputs<'a> {
     /// Design matrix `X ∈ ℝ^{N×P}` (one row per observation).
