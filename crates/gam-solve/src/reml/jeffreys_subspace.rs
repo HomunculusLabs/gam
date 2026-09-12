@@ -4380,7 +4380,8 @@ mod tests {
     /// extrapolation of central differences at `h` and `2h`. Its measured error bar is four times
     /// its disagreement with the same extrapolation one octave coarser (`2h`, `4h`), plus `1e-9`
     /// of the reference for a coincidentally small disagreement. Returns `(motion active,
-    /// max |matrix|, max |matrix − reference|, measured bar, max |reference|)`.
+    /// max |matrix|, max |matrix − reference|, measured bar, max |reference|,
+    /// max |zeroed-motion control − reference|)`.
     fn jeffreys_complete_second_drift_matrix_errors_2905<I, F, S, T, Q>(
         beta: &Array1<f64>,
         information: I,
@@ -4388,7 +4389,7 @@ mod tests {
         second: S,
         third: T,
         fourth: Q,
-    ) -> (bool, f64, f64, f64, f64)
+    ) -> (bool, f64, f64, f64, f64, f64)
     where
         I: Fn(&Array1<f64>) -> Array2<f64>,
         F: Fn(&Array1<f64>, &Array1<f64>) -> Array2<f64>,
@@ -4441,22 +4442,39 @@ mod tests {
         let second_u = rotated(&|a| second(beta, &u, &axis(a)));
         let second_w = rotated(&|a| second(beta, &w, &axis(a)));
         let third_uw = rotated(&|a| third(beta, &u, &w, &axis(a)));
-        let matrix = base
-            .completion_second_drift_matrix(
+        let contracted =
+            |weight: &Array2<f64>| contract(weight, &|a, c| second(beta, &axis(a), &axis(c)));
+        let along_u =
+            |weight: &Array2<f64>| contract(weight, &|a, c| third(beta, &u, &axis(a), &axis(c)));
+        let along_w =
+            |weight: &Array2<f64>| contract(weight, &|a, c| third(beta, &w, &axis(a), &axis(c)));
+        let along_uw = |weight: &Array2<f64>| {
+            contract(weight, &|a, c| fourth(beta, &u, &w, &axis(a), &axis(c)))
+        };
+        let assemble = |second_u: &JeffreysRotatedAxes,
+                        second_w: &JeffreysRotatedAxes,
+                        third_uw: &JeffreysRotatedAxes| {
+            base.completion_second_drift_matrix(
                 &first(beta, &u),
                 &first(beta, &w),
                 &second(beta, &u, &w),
-                Some(&second_u),
-                Some(&second_w),
-                Some(&third_uw),
-                &|weight: &Array2<f64>| contract(weight, &|a, c| second(beta, &axis(a), &axis(c))),
-                &|weight: &Array2<f64>| contract(weight, &|a, c| third(beta, &u, &axis(a), &axis(c))),
-                &|weight: &Array2<f64>| contract(weight, &|a, c| third(beta, &w, &axis(a), &axis(c))),
-                &|weight: &Array2<f64>| {
-                    contract(weight, &|a, c| fourth(beta, &u, &w, &axis(a), &axis(c)))
-                },
+                Some(second_u),
+                Some(second_w),
+                Some(third_uw),
+                &contracted,
+                &along_u,
+                &along_w,
+                &along_uw,
             )
-            .expect("complete second completion drift matrix");
+        };
+        let matrix =
+            assemble(&second_u, &second_w, &third_uw).expect("complete second completion drift matrix");
+        // Control: the same assembly with the motion's axis inputs H²[u,·], H²[w,·] and
+        // H³[u,w,·] zeroed. Where the motion is active they are load-bearing, so the control
+        // must miss the reference by more than the measured bar.
+        let zero_axes = rotated(&|_| Array2::<f64>::zeros((p, p)));
+        let control =
+            assemble(&zero_axes, &zero_axes, &zero_axes).expect("zeroed-motion control matrix");
         let central = |step: f64| {
             (drift_matrix_at(&(beta + &(&w * step))) - drift_matrix_at(&(beta - &(&w * step))))
                 / (2.0 * step)
@@ -4474,6 +4492,7 @@ mod tests {
             max_abs(&(&matrix - &reference)),
             bar,
             reference_scale,
+            max_abs(&(&control - &reference)),
         )
     }
 
@@ -4509,7 +4528,7 @@ mod tests {
         let (evals, _) = raw(&beta, &[]).eigh(Side::Lower).expect("fixture spectrum");
         let lambda_min = evals.iter().copied().fold(f64::INFINITY, f64::min);
         let scale = 4.0 / lambda_min;
-        let (active, magnitude, gap, bar, reference_scale) =
+        let (active, magnitude, gap, bar, reference_scale, control_gap) =
             jeffreys_complete_second_drift_matrix_errors_2905(
             &beta,
             |b| raw(b, &[]).mapv(|value| scale * value),
@@ -4521,7 +4540,7 @@ mod tests {
         eprintln!(
             "[#2905 gate-band] motion_active={active} max|D2 completion|={magnitude:e} \
              gap_to_richardson_reference={gap:e} measured_bar={bar:e} rel_error={:e} \
-             named_bar=1e-6",
+             named_bar=1e-6 zeroed_motion_control_gap={control_gap:e}",
             gap / reference_scale.max(1e-12)
         );
         assert!(active, "the fixture must sit inside the gate's transition band");
@@ -4535,6 +4554,11 @@ mod tests {
             gap <= bar,
             "complete second completion drift differs from the Richardson reference by {gap:e}, \
              above the differences' measured error {bar:e}"
+        );
+        assert!(
+            control_gap > bar,
+            "zeroing H²[u,·], H²[w,·] and H³[u,w,·] leaves the drift within the measured bar \
+             ({control_gap:e} <= {bar:e}), so the pin does not exercise the motion's axis inputs"
         );
     }
 
@@ -4566,7 +4590,7 @@ mod tests {
             h[[2, 2]] += tail;
             h
         };
-        let (active, magnitude, gap, bar, reference_scale) =
+        let (active, magnitude, gap, bar, reference_scale, control_gap) =
             jeffreys_complete_second_drift_matrix_errors_2905(
             &beta,
             |b| raw(b, &[]),
@@ -4578,7 +4602,7 @@ mod tests {
         eprintln!(
             "[#2905 moving-floor] motion_active={active} max|D2 completion|={magnitude:e} \
              gap_to_richardson_reference={gap:e} measured_bar={bar:e} rel_error={:e} \
-             named_bar=1e-6",
+             named_bar=1e-6 zeroed_motion_control_gap={control_gap:e}",
             gap / reference_scale.max(1e-12)
         );
         assert!(active, "a below-floor eigenvalue must activate the floor motion");
@@ -4592,6 +4616,11 @@ mod tests {
             gap <= bar,
             "complete second completion drift differs from the Richardson reference by {gap:e}, \
              above the differences' measured error {bar:e}"
+        );
+        assert!(
+            control_gap > bar,
+            "zeroing H²[u,·], H²[w,·] and H³[u,w,·] leaves the drift within the measured bar \
+             ({control_gap:e} <= {bar:e}), so the pin does not exercise the motion's axis inputs"
         );
     }
 
