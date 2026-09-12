@@ -1282,6 +1282,21 @@ mod tests {
         m.iter().map(|x| x * x).sum::<f64>() / 2.0
     }
 
+    /// Mean-centered energy per row of `data` inside the ambient 2-plane `plane`:
+    /// the variance an exactly estimated deflation of that plane would remove.
+    fn plane_signal_energy(data: &Array2<f64>, plane: &Array2<f64>) -> f64 {
+        let mean = data
+            .mean_axis(ndarray::Axis(0))
+            .expect("the fixture has at least one row");
+        let mut energy = 0.0_f64;
+        for row in data.rows() {
+            let centered = &row - &mean;
+            let coords = plane.t().dot(&centered);
+            energy += coords.dot(&coords);
+        }
+        energy / data.nrows() as f64
+    }
+
     const PLANE_OVERLAP_REAL_FLOOR: f64 = 0.9;
     const PLANE_OVERLAP_BLEND_CEIL: f64 = 0.2;
 
@@ -1296,6 +1311,10 @@ mod tests {
         power_plane_count: usize,
         residual_power_dim: usize,
         residual_excess_energy: f64,
+        /// `Σ_m E_m·(1 − truth_overlap_m)`: the in-plane energy of each true circle
+        /// that its best recovered plane misses, hence what deflating that plane
+        /// can leave behind.
+        deflation_residue_bound: f64,
         truth_overlaps: Vec<f64>,
         best_overlaps: Vec<f64>,
         second_overlaps: Vec<f64>,
@@ -1357,6 +1376,11 @@ mod tests {
         }
         let (residual_power_dim, residual_excess_energy) = residual_power_metrics(&deflated);
         let truth_overlaps = candidate_overlaps(&harvest.planes, true_planes);
+        let deflation_residue_bound = true_planes
+            .iter()
+            .zip(&truth_overlaps)
+            .map(|(plane, &overlap)| plane_signal_energy(data, plane) * (1.0 - overlap))
+            .sum::<f64>();
         ProducerGateMetrics {
             n_distinct: claimed.len(),
             n_real,
@@ -1367,6 +1391,7 @@ mod tests {
             power_plane_count,
             residual_power_dim,
             residual_excess_energy,
+            deflation_residue_bound,
             truth_overlaps,
             best_overlaps,
             second_overlaps,
@@ -1399,9 +1424,28 @@ mod tests {
                 .all(|&ov| ov <= PLANE_OVERLAP_BLEND_CEIL),
             "{label}: at least one emitted plane remains blended: metrics={metrics:?}"
         );
+        // Deflation removes each accepted plane's own projection, so what it can
+        // leave of a true circle is the in-plane energy its recovered plane misses:
+        // the circle is isotropic in its plane, so a plane at affinity `overlap`
+        // captures that fraction of the circle's measured energy E_m and leaves
+        // E_m·(1 − overlap). Above-MP residual energy up to that sum is the recovered
+        // planes' own estimation error. Energy beyond it is covariance that
+        // deflation failed to remove: a deflation that removed nothing would sit
+        // about 1/(1 − overlap) times above the sum, and a circle with no recovered
+        // plane is refused by the overlap floor above. The finite-n fluctuation of
+        // the Marchenko–Pastur edge itself (~n^(-2/3)·σ²) is orders below the sum at
+        // these designs. The former `== 0.0` bar demanded overlap 1 from a
+        // fourth-order estimator at finite n: at 7ad913f69 (census job 505903) the
+        // sparse arm recovered all six planes at overlap ≥ 0.9958 and one residual
+        // eigenvalue sat 4.17e-5 above the edge.
         assert!(
-            metrics.residual_power_dim == 0 && metrics.residual_excess_energy == 0.0,
-            "{label}: accepted-plane deflation left above-MP residual energy: metrics={metrics:?}"
+            metrics.residual_excess_energy <= metrics.deflation_residue_bound,
+            "{label}: accepted-plane deflation left above-MP residual energy {} in {} \
+             direction(s), beyond the {} its recovered planes' misalignment accounts for: \
+             metrics={metrics:?}",
+            metrics.residual_excess_energy,
+            metrics.residual_power_dim,
+            metrics.deflation_residue_bound
         );
     }
 
