@@ -430,3 +430,93 @@ answer the loosened-tolerance row differently.
   guarded by `base_moment_jets_{first,second}_derivative_matches_fd_932`. Those
   bars are percent-level too. Replacing them with an exact oracle remains an open
   item under the loosened-tolerance row.
+
+### Live-family derivative census: where each joint Hessian derivative comes from
+
+This covers the first requirement row, one row likelihood definition for every
+live family. The census follows each production
+`exact_newton_joint_hessian_directional_derivative` (and each `RowKernel`
+third/fourth surface) to the expression it differentiates, reading main at
+`89a782786`.
+
+- **Derived from one row expression** (a `row_program!` lowering or a
+  `JetScalar`/`RuntimeJetScalar`-generic body):
+  - `EventHistoryFamily`: `evaluate_generic::<OneSeed<0>>` / `TwoSeed<0>`.
+    spec-derivs (#2901 V1, SPEC rule 1) is measuring this path before choosing a
+    Speed Gate or closed forms.
+  - `BernoulliMarginalSlopeFamily`: rigid rows through `BernoulliRigidRowKernel`,
+    flex rows through the runtime-jet flex program (`flex_row_program.rs`).
+  - `BinomialLocationScaleFamily`: the order-2, third and fourth surfaces of
+    `binomial_ls_row_program` (`ad41db449`), read by
+    `binomial_location_scale_row_score`, `_row_hessian` and the first and second
+    directional coefficients.
+  - `BinomialLocationScaleWiggleFamily`: `BinomialLocationScaleWiggleRowProgram`.
+  - `GaussianLocationScaleFamily`: `GaussianJointRowProgram`, lowered from
+    `gaussian_normalized_row`. Its ALO replay reads the same row atom (`93ba47a33`).
+  - `MultinomialFamily`: `directional_fisher_jet`.
+  - `LatentSurvivalFamily`, `LatentBinaryFamily`:
+    `latent_survival_row_primary_jet` with one- and two-seed backends.
+  - `SurvivalLocationScaleRowKernel`: `sls_row_third_generated` /
+    `sls_row_fourth_generated`; wiggle rows through `sls_row_nll_wiggle`.
+- **1-D primitives** (derivative stacks of one scalar function, the kind this
+  issue keeps): the GLM observed-information tower (`weight_ratio_tower`, above),
+  the survival residual distributions (`residual_dist.rs`), the inverse links
+  (`mixture_link.rs`), and `BoundedLinearFamily`'s per-coefficient bounded
+  transform.
+- **Hand-derived, checked against the single expression**:
+  - The dispersion families (NB, Gamma and Beta in `gamlss/dispersion_family.rs`).
+    `bf64d52d8` and `de14c2367` replaced the production jets with hand closed
+    forms under SPEC rule 1. The generic row NLLs stay as test oracles
+    (`dispersion_*_nll_generic`).
+  - `TransformationNormalFamily`. Six producers in
+    `transformation_normal/scop_curvature.rs` are written by hand for
+    `f(β) = Σ_i w_i (½ h_i² − log h'_i)`: gradient, information, diagonal, matvec,
+    and the first and second directional derivatives. Until `497956d82` they were
+    checked only against one another.
+    `ctn_scop_curvature_producers_match_exact_derivatives_of_the_likelihood_932`
+    now checks all six against nested num-dual derivatives of that one expression,
+    at 1e-11 relative. **It has not run yet.** At `5e8436c44` gam-models did not
+    build (gam-model-kernels, fixed by `d519f0c24`), and at `3693c2c2c` gam-terms did
+    not build (fixed by `a8fbb3fa2`).
+
+Not traced here: `GaussianLocationScaleWiggleFamily` and `SurvivalMarginalSlopeFamily`
+past their `_for_specs` / flex dispatchers.
+
+### Rigid BMS third cells on EPYC 9V74: the two programs are the same size
+
+Nightly Speed Gates run 34689392350 at `f5693bb51` (gam-row-macros job, AMD EPYC
+9V74) failed `RIGID-BMS-HAND-932`:
+
+- `channel=third`: median ratio **0.988054**, wins 0.07, resolution 0.0048;
+- `channel=third_full`: **0.958507**, wins 0.00, resolution 0.0063.
+
+The newest completed run, 34706875875 at `a3f5987a9` (EPYC 7763), passed every
+package.
+
+**Emitted source.** Pool job 535606 at `5e8436c44` expanded the macro. Both
+`generated_rigid_bms_third_contracted` (178 lines, 48 `*` operators) and
+`generated_rigid_bms_third_full` (171 lines, 47) form the latent tower's ten live
+slots, keeping the separable support of `q(η)` and the observed scale, then apply
+the specialised root composition. That is the hand opponents' schedule.
+
+**Instruction counts.** Pool job 539972 at `3693c2c2c` counted instructions in the
+release timing closures of `generated_rigid_bms_matches_strongest_hand_932`, mapping
+the ten closures in source order by their v0 disambiguators:
+
+| channel | generated | strongest hand |
+|---|---|---|
+| order2 | 179 | 187 |
+| third | 270 | 277 |
+| fourth | 421 | 307 |
+| third_full | 243 | 250 |
+| fourth_full | 403 | 257 |
+
+**Reading.** The two red cells race programs within 3% of each other in size. The
+workflow sets no `target-cpu`, so every host runs this machine code, and whether
+the generated arm wins depends on the host.
+
+One saving remains on the generated side: it multiplies all ten slots by
+`outcome_sign`, where composing on `s·x` needs only the stack powers `s^k`. A
+strongest-hand schedule can use the same identity, so that saving cannot give a
+robust margin. Whether the third cells keep a strict `faster` contract at parity is
+an open decision.
