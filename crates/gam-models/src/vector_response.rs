@@ -124,7 +124,7 @@ pub trait VectorLikelihood {
     ///
     /// The returned array is consumed by
     /// [`gam_solve::pirls::dense_block_xtwx`] /
-    /// [`gam_solve::pirls::dense_block_xtwy`] to build `XᵀWX` and `XᵀWy`
+    /// `gam_solve::pirls::dense_block_xtwy` to build `XᵀWX` and `XᵀWy`
     /// for vector-response IRLS in output-major coefficient ordering.
     fn hess_block(
         &self,

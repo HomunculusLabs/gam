@@ -5,7 +5,7 @@
 //! parameters λ, using the canonical multinomial-logit likelihood
 //! ([`MultinomialLogitLikelihood`]) and the existing dense block-Fisher
 //! assembly in [`gam_solve::pirls::dense_block_xtwx`] /
-//! [`gam_solve::pirls::dense_block_xtwy`].
+//! `gam_solve::pirls::dense_block_xtwy`.
 //!
 //! # What this module does
 //!

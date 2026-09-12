@@ -122,7 +122,7 @@ pub fn dense_block_xtwx(
 
 /// Dense multi-output block right-hand side `X^T W Y`, using the same
 /// output-major coefficient ordering as [`dense_block_xtwx`].
-pub fn dense_block_xtwy(
+pub(crate) fn dense_block_xtwy(
     design: ArrayView2<'_, f64>,
     fisher_blocks: ArrayView3<'_, f64>,
     response: ArrayView2<'_, f64>,

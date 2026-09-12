@@ -3176,7 +3176,7 @@ impl<'a> RemlState<'a> {
     ///
     /// For non-canonical Bernoulli links (Probit, CLogLog, SAS,
     /// BetaLogistic, Mixture) we use the analytic
-    /// [`pirls::e_obs_from_jets`] formula. It expresses
+    /// `pirls::e_obs_from_jets` formula. It expresses
     ///   ∂³W_obs/∂η³ = W_F''' + h₃ T₁ + 3 h₂ T₂ + 3 h₁ T₃ − (y−μ) T₄
     /// where T = h₁/(φV), T_k = ∂^k T/∂η^k, and W_F = h₁ T. Everything
     /// is closed-form in h₁..h₅ (inverse-link jet plus

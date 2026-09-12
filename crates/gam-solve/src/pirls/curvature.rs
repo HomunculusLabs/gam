@@ -665,7 +665,7 @@ pub(crate) fn weight_ratio_tower(
 /// scales identically to `(w_obs, c_obs, d_obs)` from
 /// `observed_weight_noncanonical`.
 #[inline]
-pub fn e_obs_from_jets(
+pub(crate) fn e_obs_from_jets(
     resid: f64,
     h1: f64,
     h2: f64,
@@ -750,7 +750,7 @@ pub(crate) fn observed_weight_negative_binomial_log(
 /// Family tag for the observed-information weight dispatch.
 ///
 /// This is a simplified family tag that identifies the variance function,
-/// independent of the link function. It is used by [`observed_weight_dispatch`]
+/// independent of the link function. It is used by `observed_weight_dispatch`
 /// to select closed-form weight specializations.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WeightFamily {
@@ -766,7 +766,7 @@ pub enum WeightFamily {
 /// Link tag for the observed-information weight dispatch.
 ///
 /// Identifies the link function for selecting closed-form weight
-/// specializations in [`observed_weight_dispatch`].
+/// specializations in `observed_weight_dispatch`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightLink {
     Log,
@@ -829,7 +829,7 @@ pub(crate) fn bernoulli_pair_residual(family: WeightFamily, y: f64, mu: f64, one
     y - mu
 }
 
-pub fn observed_weight_dispatch(
+pub(crate) fn observed_weight_dispatch(
     family: WeightFamily,
     link: WeightLink,
     y: f64,
