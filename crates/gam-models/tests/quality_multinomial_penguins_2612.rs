@@ -49,15 +49,13 @@
 //! penalized smooth-additive one, so the two land on materially different
 //! surfaces; matching nnet's noisy linear fit would prove nothing about quality.
 //!
-//! The log-loss halves of criterion 3 are not the same estimand, and the
-//! real-data arm now prints both so a reader can see which one a failure is
-//! about (#2612). `predict_multinomial_formula` publishes the posterior-MEAN
-//! probability `E[softmax(η)]`; `nnet` publishes the plug-in `softmax(η̂)`.
-//! Posterior integration moves probability toward the centre of the simplex
-//! without moving the argmax, so an over-wide posterior costs log-loss at
-//! unchanged accuracy — the exact signature #2612 records. `gam_logloss_plugin`
-//! is gam's own plug-in number from the SAME fit; the comparison is only
-//! estimand-matched at that column.
+//! The log-loss halves of criterion 3 are not the same estimand (#2612).
+//! `predict_multinomial_formula` publishes the posterior-MEAN probability
+//! `E[softmax(η)]`; `nnet` publishes the plug-in `softmax(η̂)`. Posterior
+//! integration moves probability toward the centre of the simplex without moving
+//! the argmax, so an over-wide posterior costs log-loss at unchanged accuracy —
+//! the exact signature #2612 records. The pass criterion stays the estimand gam
+//! publishes.
 
 use csv::StringRecord;
 use gam_data::encode_recordswith_inferred_schema;
