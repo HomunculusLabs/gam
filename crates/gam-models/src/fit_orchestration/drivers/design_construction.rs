@@ -686,7 +686,7 @@ impl BlockEffectiveJacobian for BoundedEffectiveJacobian {
             } else {
                 state.beta[term.col_idx]
             };
-            let (_, _, db_dtheta, _, _) = bounded_latent_derivatives(theta, term.min, term.max);
+            let (_, _, db_dtheta, _, _, _) = bounded_latent_derivatives(theta, term.min, term.max);
             if !(db_dtheta.is_finite() && db_dtheta > 0.0) {
                 return Err(format!(
                     "BoundedEffectiveJacobian::effective_jacobian_at: bounded column {} has unrepresentable derivative {db_dtheta} at theta={theta}",
@@ -720,6 +720,7 @@ struct StandardFamilyObservationState {
     fisherweight: Array1<f64>,
     neghessian_eta: Array1<f64>,
     neghessian_eta_derivative: Array1<f64>,
+    neghessian_eta_second_derivative: Array1<f64>,
     log_likelihood: f64,
 }
 
@@ -977,7 +978,7 @@ fn bounded_latent_injective_limit() -> f64 {
     (2.0 / f64::EPSILON).ln()
 }
 
-fn bounded_latent_derivatives(theta: f64, min: f64, max: f64) -> (f64, f64, f64, f64, f64) {
+fn bounded_latent_derivatives(theta: f64, min: f64, max: f64) -> (f64, f64, f64, f64, f64, f64) {
     let jet = logit_inverse_link_jet5(theta);
     let z = jet.mu;
     let width = max - min;
@@ -985,13 +986,14 @@ fn bounded_latent_derivatives(theta: f64, min: f64, max: f64) -> (f64, f64, f64,
     let db_dtheta = width * jet.d1;
     let d2b_dtheta2 = width * jet.d2;
     let d3b_dtheta3 = width * jet.d3;
-    (beta, z, db_dtheta, d2b_dtheta2, d3b_dtheta3)
+    let d4b_dtheta4 = width * jet.d4;
+    (beta, z, db_dtheta, d2b_dtheta2, d3b_dtheta3, d4b_dtheta4)
 }
 
 fn bounded_prior_terms(
     theta: f64,
     prior: &BoundedCoefficientPriorSpec,
-) -> Result<(f64, f64, f64, f64), String> {
+) -> Result<(f64, f64, f64, f64, f64), String> {
     if !theta.is_finite() {
         return Err(format!(
             "bounded coefficient prior requires a finite latent coordinate, got {theta}"
@@ -999,7 +1001,7 @@ fn bounded_prior_terms(
     }
     let (a, b) = match prior {
         // `None` means constrained MLE with no extra prior term on the bounded coefficient.
-        BoundedCoefficientPriorSpec::None => return Ok((0.0, 0.0, 0.0, 0.0)),
+        BoundedCoefficientPriorSpec::None => return Ok((0.0, 0.0, 0.0, 0.0, 0.0)),
         // Uniform on the normalized user-scale coefficient z in (0, 1). In latent space this is
         // exactly the Jacobian term for the logistic transform, up to an additive width constant.
         BoundedCoefficientPriorSpec::Uniform => (1.0, 1.0),
@@ -1021,8 +1023,9 @@ fn bounded_prior_terms(
     let grad = a - (a + b) * z;
     let neghess = (a + b) * jet.d1;
     let neghess_derivative = (a + b) * jet.d2;
-    let terms = (logp, grad, neghess, neghess_derivative);
-    if [terms.0, terms.1, terms.2, terms.3]
+    let neghess_second_derivative = (a + b) * jet.d3;
+    let terms = (logp, grad, neghess, neghess_derivative, neghess_second_derivative);
+    if [terms.0, terms.1, terms.2, terms.3, terms.4]
         .iter()
         .any(|value| !value.is_finite())
     {
@@ -1040,6 +1043,7 @@ struct ExactStandardObservationRow {
     fisherweight: f64,
     neghessian_eta: f64,
     neghessian_eta_derivative: f64,
+    neghessian_eta_second_derivative: f64,
     log_likelihood: f64,
 }
 
@@ -1052,6 +1056,7 @@ impl ExactStandardObservationRow {
             fisherweight: 0.0,
             neghessian_eta: 0.0,
             neghessian_eta_derivative: 0.0,
+            neghessian_eta_second_derivative: 0.0,
             log_likelihood: 0.0,
         }
     }
@@ -1072,6 +1077,10 @@ fn certify_bounded_row(
         (
             "bounded-family observed Hessian derivative",
             state.neghessian_eta_derivative,
+        ),
+        (
+            "bounded-family observed Hessian second derivative",
+            state.neghessian_eta_second_derivative,
         ),
         ("bounded-family log likelihood", state.log_likelihood),
     ] {
@@ -1181,6 +1190,7 @@ fn exact_logit_observation_row(
             fisherweight,
             neghessian_eta: fisherweight,
             neghessian_eta_derivative: fisherweight * (one_minus_mu - mu),
+            neghessian_eta_second_derivative: fisherweight * (1.0 - 6.0 * mu * one_minus_mu),
             log_likelihood: weight * log_likelihood_unit,
         },
     )
@@ -1215,6 +1225,8 @@ fn exact_noncanonical_binomial_observation_row(
             fisherweight,
             neghessian_eta: weight * observation.negative_hessian,
             neghessian_eta_derivative: weight * observation.negative_hessian_derivative,
+            neghessian_eta_second_derivative: weight
+                * observation.negative_hessian_second_derivative,
             log_likelihood: weight * observation.log_likelihood,
         },
     )
@@ -1369,6 +1381,7 @@ fn exact_standard_observation_row(
                     fisherweight: scaled_weight,
                     neghessian_eta: scaled_weight,
                     neghessian_eta_derivative: 0.0,
+                    neghessian_eta_second_derivative: 0.0,
                     log_likelihood: -loss,
                 },
             )
@@ -1408,6 +1421,7 @@ fn exact_standard_observation_row(
                     fisherweight,
                     neghessian_eta: fisherweight,
                     neghessian_eta_derivative: fisherweight,
+                    neghessian_eta_second_derivative: fisherweight,
                     log_likelihood,
                 },
             )
@@ -1445,6 +1459,7 @@ fn exact_standard_observation_row(
                     fisherweight: weighted_shape,
                     neghessian_eta: weighted_ratio,
                     neghessian_eta_derivative: -weighted_ratio,
+                    neghessian_eta_second_derivative: weighted_ratio,
                     log_likelihood: -weighted_ratio - weighted_shape * eta,
                 },
             )
@@ -1486,6 +1501,14 @@ fn exact_standard_observation_row(
                 -weighted_product3(weight * (p - 1.0).powi(2), y, a)
                     + weight * (2.0 - p).powi(2) * b
             };
+            let observed_second_derivative_unit =
+                (p - 1.0).powi(3) * y * a + (2.0 - p).powi(3) * b;
+            let neghessian_eta_second_derivative = if observed_second_derivative_unit.is_finite() {
+                weight * observed_second_derivative_unit
+            } else {
+                weighted_product3(weight * (p - 1.0).powi(3), y, a)
+                    + weight * (2.0 - p).powi(3) * b
+            };
             // Centering Q at eta=0 removes response-only poles as p approaches
             // 1 or 2 without changing any eta derivative.
             let q_left = eta_exprel(1.0 - p, eta);
@@ -1513,6 +1536,7 @@ fn exact_standard_observation_row(
                     fisherweight,
                     neghessian_eta,
                     neghessian_eta_derivative,
+                    neghessian_eta_second_derivative,
                     log_likelihood,
                 },
             )
@@ -1545,6 +1569,8 @@ fn exact_standard_observation_row(
             let observed_theta = weighted_positive_from_log(weight, log_theta + log_qr);
             let neghessian_eta = observed_y + observed_theta;
             let neghessian_eta_derivative = neghessian_eta * (r - q);
+            // d(qr)/dδ = qr(r - q) and d(r - q)/dδ = -2qr.
+            let neghessian_eta_second_derivative = neghessian_eta * ((r - q) * (r - q) - 2.0 * q * r);
             let softplus_tail = if delta >= 0.0 {
                 gam_linalg::utils::stable_softplus(-delta)
             } else {
@@ -1576,6 +1602,7 @@ fn exact_standard_observation_row(
                     fisherweight,
                     neghessian_eta,
                     neghessian_eta_derivative,
+                    neghessian_eta_second_derivative,
                     log_likelihood,
                 },
             )
@@ -1614,6 +1641,7 @@ fn evaluate_resolved_standard_family_observations(
     let mut fisherweight = Array1::<f64>::zeros(n);
     let mut neghessian_eta = Array1::<f64>::zeros(n);
     let mut neghessian_eta_derivative = Array1::<f64>::zeros(n);
+    let mut neghessian_eta_second_derivative = Array1::<f64>::zeros(n);
     let mut log_likelihood = 0.0;
     let mut log_likelihood_compensation = 0.0;
 
@@ -1631,6 +1659,7 @@ fn evaluate_resolved_standard_family_observations(
         fisherweight[i] = row.fisherweight;
         neghessian_eta[i] = row.neghessian_eta;
         neghessian_eta_derivative[i] = row.neghessian_eta_derivative;
+        neghessian_eta_second_derivative[i] = row.neghessian_eta_second_derivative;
         let adjusted = row.log_likelihood - log_likelihood_compensation;
         let updated = log_likelihood + adjusted;
         log_likelihood_compensation = (updated - log_likelihood) - adjusted;
@@ -1651,6 +1680,7 @@ fn evaluate_resolved_standard_family_observations(
         fisherweight,
         neghessian_eta,
         neghessian_eta_derivative,
+        neghessian_eta_second_derivative,
         log_likelihood,
     })
 }
@@ -1774,7 +1804,7 @@ impl BoundedLinearFamily {
                     term.col_idx, term.min, term.max
                 ));
             }
-            let (beta, _, db_dtheta, d2b_dtheta2, d3b_dtheta3) =
+            let (beta, _, db_dtheta, d2b_dtheta2, d3b_dtheta3, _) =
                 bounded_latent_derivatives(latent_beta[term.col_idx], term.min, term.max);
             if [beta, db_dtheta, d2b_dtheta2, d3b_dtheta3]
                 .iter()
@@ -1789,7 +1819,7 @@ impl BoundedLinearFamily {
             jac_diag[term.col_idx] = db_dtheta;
             second_diag[term.col_idx] = d2b_dtheta2;
             third_diag[term.col_idx] = d3b_dtheta3;
-            let (_, _, _, prior_neghess_derivative) =
+            let (_, _, _, prior_neghess_derivative, _) =
                 bounded_prior_terms(latent_beta[term.col_idx], &term.prior)?;
             priorthird[term.col_idx] = prior_neghess_derivative;
         }
@@ -1866,7 +1896,7 @@ impl BoundedLinearFamily {
         let mut prior_neghess = Array2::<f64>::zeros((latent_beta.len(), latent_beta.len()));
         let mut prior_loglik = 0.0;
         for term in &self.bounded_terms {
-            let (logp, grad, neghess, _) =
+            let (logp, grad, neghess, _, _) =
                 bounded_prior_terms(latent_beta[term.col_idx], &term.prior)?;
             prior_loglik += logp;
             priorgrad[term.col_idx] += grad;
@@ -2010,6 +2040,114 @@ impl CustomFamily for BoundedLinearFamily {
         }
 
         Ok(Some(dhessian))
+    }
+
+    /// Exact `D²H[u, v]` of the latent joint Hessian
+    /// `H = Eᵀ·diag(W)·E − diag_b(x_bᵀ·score·b'') + diag_b(P'')`, where `E` scales
+    /// each bounded column by `b'` (#2903). The family keeps the β-independent
+    /// default objective, so the trait's block default would return zeros for a
+    /// Hessian that moves through both the bounded transform and the likelihood
+    /// curvature `W(η)`.
+    fn exact_newton_joint_hessiansecond_directional_derivative(
+        &self,
+        block_states: &[ParameterBlockState],
+        d_beta_u_flat: &Array1<f64>,
+        d_betav_flat: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        /// `Aᵀ·diag(c)·B + Bᵀ·diag(c)·A` over the rows of two same-shape designs.
+        fn add_symmetric_weighted_cross(
+            target: &mut Array2<f64>,
+            a: &Array2<f64>,
+            c: &Array1<f64>,
+            b: &Array2<f64>,
+        ) {
+            let cols = a.ncols();
+            for i in 0..a.nrows() {
+                let ci = c[i];
+                if ci == 0.0 {
+                    continue;
+                }
+                for r in 0..cols {
+                    let ar = a[[i, r]];
+                    let br = b[[i, r]];
+                    for s in 0..cols {
+                        target[[r, s]] += ci * (ar * b[[i, s]] + br * a[[i, s]]);
+                    }
+                }
+            }
+        }
+
+        let latent_beta = &expect_single_block_state(block_states, "bounded linear family")?.beta;
+        let p = latent_beta.len();
+        if d_beta_u_flat.len() != p || d_betav_flat.len() != p {
+            return Err(SmoothError::dimension_mismatch(format!(
+                "bounded linear family second directional derivative length mismatch: got {} and {}, expected {p}",
+                d_beta_u_flat.len(),
+                d_betav_flat.len()
+            ))
+            .into());
+        }
+
+        let (obs, _, _, _, second_diag, third_diag, _) =
+            self.exacthessian_andgradient(latent_beta)?;
+        let (_, jac_diag, _, _, _) = self.bounded_term_derivative_data(latent_beta)?;
+        let x_eff = self.effective_design_for_latent(&jac_diag);
+        let deta_u = x_eff.dot(d_beta_u_flat);
+        let deta_v = x_eff.dot(d_betav_flat);
+
+        // The moving effective design: dE[w] scales bounded columns by b''·w, and
+        // d²E[u, v] by b'''·u·v.
+        let scaled_bounded_columns = |scale: &dyn Fn(usize) -> f64| {
+            let mut out = Array2::<f64>::zeros(x_eff.raw_dim());
+            for term in &self.bounded_terms {
+                let factor = scale(term.col_idx);
+                if factor != 0.0 {
+                    let mut col = out.column_mut(term.col_idx);
+                    col.assign(&self.design.column(term.col_idx));
+                    col.mapv_inplace(|value| value * factor);
+                }
+            }
+            out
+        };
+        let dx_u = scaled_bounded_columns(&|col| second_diag[col] * d_beta_u_flat[col]);
+        let dx_v = scaled_bounded_columns(&|col| second_diag[col] * d_betav_flat[col]);
+        let ddx_uv =
+            scaled_bounded_columns(&|col| third_diag[col] * d_beta_u_flat[col] * d_betav_flat[col]);
+        // d²η[u, v] = Σ_b x_b·b''·u_b·v_b.
+        let ddeta_uv = dx_v.dot(d_beta_u_flat);
+
+        let w = &obs.neghessian_eta;
+        let w1 = &obs.neghessian_eta_derivative;
+        let w2 = &obs.neghessian_eta_second_derivative;
+        let diag_eta = w2 * &(&deta_u * &deta_v) + w1 * &ddeta_uv;
+        let mut d2h = xt_diag_x_dense(x_eff.view(), diag_eta.view())?;
+        add_symmetric_weighted_cross(&mut d2h, &dx_v, &(w1 * &deta_u), &x_eff);
+        add_symmetric_weighted_cross(&mut d2h, &dx_u, &(w1 * &deta_v), &x_eff);
+        add_symmetric_weighted_cross(&mut d2h, &ddx_uv, w, &x_eff);
+        add_symmetric_weighted_cross(&mut d2h, &dx_u, w, &dx_v);
+
+        // Bounded diagonal: the second derivative of −(x_bᵀ·score)·b'' plus the
+        // prior's fourth derivative, with D score[w] = −W·dη[w].
+        let dd_score_uv = -(w1 * &(&deta_u * &deta_v)) - &(w * &ddeta_uv);
+        let d_score_u = -(w * &deta_u);
+        let d_score_v = -(w * &deta_v);
+        for term in &self.bounded_terms {
+            let col = term.col_idx;
+            let x_b = self.design.column(col);
+            let (_, _, _, _, _, d4b_dtheta4) =
+                bounded_latent_derivatives(latent_beta[col], term.min, term.max);
+            let (_, _, _, _, prior_neghess_second_derivative) =
+                bounded_prior_terms(latent_beta[col], &term.prior)?;
+            let u_b = d_beta_u_flat[col];
+            let v_b = d_betav_flat[col];
+            d2h[[col, col]] -= x_b.dot(&dd_score_uv) * second_diag[col]
+                + x_b.dot(&d_score_u) * third_diag[col] * v_b
+                + x_b.dot(&d_score_v) * third_diag[col] * u_b
+                + x_b.dot(&obs.score) * d4b_dtheta4 * u_b * v_b;
+            d2h[[col, col]] += prior_neghess_second_derivative * u_b * v_b;
+        }
+
+        Ok(Some(d2h))
     }
 
     fn block_geometry(

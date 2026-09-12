@@ -942,7 +942,7 @@ mod adaptive_bounded_duchon_tests {
         let theta = 0.7;
         let none = bounded_prior_terms(theta, &BoundedCoefficientPriorSpec::None)
             .expect("flat prior geometry");
-        assert_eq!(none, (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(none, (0.0, 0.0, 0.0, 0.0, 0.0));
 
         let uniform = bounded_prior_terms(theta, &BoundedCoefficientPriorSpec::Uniform)
             .expect("uniform prior geometry");
@@ -1054,6 +1054,89 @@ mod adaptive_bounded_duchon_tests {
                     analytic[[i, j]],
                     fd[[i, j]]
                 );
+            }
+        }
+    }
+
+    /// #2903: the family keeps the β-independent default objective, so the
+    /// trait's block default returned an exact-looking zero D²H while its first
+    /// derivative moves. The analytic D²H[u, v] must equal a central difference
+    /// of the analytic D¹H[u] along v: on a Gaussian fixture only the bounded
+    /// transform curves, and on a Poisson fixture the likelihood's W'' enters too.
+    #[test]
+    fn bounded_joint_hessian_second_directional_derivative_matches_finite_difference_2903() {
+        let x = array![[0.2, -1.0], [0.8, 0.5], [1.1, 1.2], [1.7, -0.3]];
+        let cases = [
+            (
+                LikelihoodSpec::gaussian_identity(),
+                array![0.4, 1.0, 1.7, 2.2],
+                BoundedCoefficientPriorSpec::Uniform,
+            ),
+            (
+                LikelihoodSpec::poisson_log(),
+                array![0.0, 1.0, 3.0, 2.0],
+                BoundedCoefficientPriorSpec::Beta { a: 2.0, b: 3.0 },
+            ),
+        ];
+        let u = array![0.3, -0.4];
+        let v = array![-0.25, 0.5];
+        let h = 1e-5;
+        for (spec, y, prior) in cases {
+            let family = BoundedLinearFamily {
+                likelihood: gam_spec::GlmLikelihoodSpec::canonical(spec),
+                latent_cloglog_state: None,
+                mixture_link_state: None,
+                sas_link_state: None,
+                y: y.clone(),
+                weights: Array1::ones(y.len()),
+                design: x.clone(),
+                designzeroed: {
+                    let mut dz = x.clone();
+                    dz.column_mut(0).fill(0.0);
+                    dz
+                },
+                offset: Array1::zeros(y.len()),
+                bounded_terms: vec![BoundedLinearTermMeta {
+                    col_idx: 0,
+                    min: -1.0,
+                    max: 2.0,
+                    prior,
+                }],
+            };
+            let at = |beta: Array1<f64>| {
+                vec![ParameterBlockState {
+                    beta,
+                    eta: Array1::zeros(y.len()),
+                }]
+            };
+            let beta = array![0.4, -0.2];
+            let analytic = family
+                .exact_newton_joint_hessiansecond_directional_derivative(&at(beta.clone()), &u, &v)
+                .expect("analytic second derivative")
+                .expect("joint second derivative");
+            let plus = family
+                .exact_newton_joint_hessian_directional_derivative(&at(&beta + &(&v * h)), &u)
+                .expect("plus derivative")
+                .expect("plus joint derivative");
+            let minus = family
+                .exact_newton_joint_hessian_directional_derivative(&at(&beta - &(&v * h)), &u)
+                .expect("minus derivative")
+                .expect("minus joint derivative");
+            let fd = (plus - minus) / (2.0 * h);
+            assert!(
+                analytic[[0, 0]].abs() > 1e-3,
+                "the bounded column's D²H must not be the declared zero: {}",
+                analytic[[0, 0]]
+            );
+            for i in 0..analytic.nrows() {
+                for j in 0..analytic.ncols() {
+                    assert!(
+                        (analytic[[i, j]] - fd[[i, j]]).abs() < 1e-6 * (1.0 + fd[[i, j]].abs()),
+                        "second directional derivative mismatch at ({i},{j}): analytic={}, fd={}",
+                        analytic[[i, j]],
+                        fd[[i, j]]
+                    );
+                }
             }
         }
     }
