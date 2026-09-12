@@ -640,8 +640,15 @@ fn deterministic_gaussian_standard_fit(
             .rows()
             .into_iter()
             .map(|row| row.iter().map(|value| value.abs()).sum::<f64>())
-            .fold(0.0_f64, f64::max)
-            .max(f64::MIN_POSITIVE);
+            .fold(0.0_f64, f64::max);
+        if !(information_scale.is_finite() && information_scale > 0.0) {
+            return Err(WorkflowError::IntegrationFailed {
+                reason: format!(
+                    "deterministic Gaussian shortcut: the weighted design carries no information \
+                     (‖X'WX‖∞ = {information_scale:e}), so the λ→∞ boundary has no scale"
+                ),
+            });
+        }
         let lambda = information_scale / (f64::EPSILON.sqrt() * weakest_penalty);
         if !(lambda.is_finite() && lambda > 0.0) {
             return Err(WorkflowError::IntegrationFailed {
