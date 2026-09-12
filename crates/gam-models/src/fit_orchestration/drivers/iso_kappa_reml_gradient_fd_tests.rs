@@ -680,7 +680,7 @@ fn iso_kappa_fd_variant_driver_on(
     //     objective at that θ, not about the gradient formula;
     //   * `worst_psi_rel` is measured against the extrapolant, so it is a
     //     property of the gradient rather than of the step.
-    let ridders = gam_linalg::test_support::fd_checker::RiddersConfig::default();
+    let ridders = gam_linalg_test_support::fd_checker::RiddersConfig::default();
     let rel_tol = 5e-3_f64;
     // Below this the `rel_tol` band would be tighter than the criterion's own
     // evaluation noise, which no oracle can see through; it is the historical
@@ -747,7 +747,7 @@ fn iso_kappa_fd_variant_driver_on(
             if skip_psi && is_psi {
                 continue;
             }
-            let measured = gam_linalg::test_support::fd_checker::ridders_derivative(
+            let measured = gam_linalg_test_support::fd_checker::ridders_derivative(
                 |t| {
                     let mut probe_theta = theta.clone();
                     probe_theta[j] += t;
@@ -767,7 +767,7 @@ fn iso_kappa_fd_variant_driver_on(
                  unc={:.3e} step={:.1e} order={} {verdict:?}",
                 measured.uncertainty, measured.step, measured.order,
             );
-            if verdict != gam_linalg::test_support::fd_checker::FdVerdict::Agree {
+            if verdict != gam_linalg_test_support::fd_checker::FdVerdict::Agree {
                 // The ladder is the evidence for whichever way the verdict
                 // went; printing it here is what let #2461 be settled from a
                 // log instead of a re-run.
@@ -777,7 +777,7 @@ fn iso_kappa_fd_variant_driver_on(
                 );
             }
             match verdict {
-                gam_linalg::test_support::fd_checker::FdVerdict::Unresolved => {
+                gam_linalg_test_support::fd_checker::FdVerdict::Unresolved => {
                     unresolved.push(format!(
                         "{probe} {kind} j={j}: analytic={analytic:+.6e} fd={fd:+.6e} \
                          unc={:.3e} at h={:.1e} (order {})",
@@ -785,7 +785,7 @@ fn iso_kappa_fd_variant_driver_on(
                     ));
                     continue;
                 }
-                gam_linalg::test_support::fd_checker::FdVerdict::Disagree => {
+                gam_linalg_test_support::fd_checker::FdVerdict::Disagree => {
                     judged += 1;
                     violations.push(format!(
                         "{probe} {kind} j={j}: analytic={analytic:+.6e} fd={fd:+.6e} \
@@ -793,7 +793,7 @@ fn iso_kappa_fd_variant_driver_on(
                         measured.uncertainty, measured.step, measured.order
                     ));
                 }
-                gam_linalg::test_support::fd_checker::FdVerdict::Agree => {
+                gam_linalg_test_support::fd_checker::FdVerdict::Agree => {
                     judged += 1;
                 }
             }
@@ -3840,7 +3840,7 @@ fn outer_gradient_at_large_rho_has_a_lambda_infinity_face_2450() {
 ///     own truncation as a gradient defect — would become invisible again.
 #[test]
 fn iso_kappa_duchon_psi_gradient_is_certified_at_a_saturated_rho_2461() {
-    use gam_linalg::test_support::fd_checker::{FdVerdict, RiddersConfig, ridders_derivative};
+    use gam_linalg_test_support::fd_checker::{FdVerdict, RiddersConfig, ridders_derivative};
 
     const RUNG: f64 = 15.0;
     const REL_TOL: f64 = 5e-3;

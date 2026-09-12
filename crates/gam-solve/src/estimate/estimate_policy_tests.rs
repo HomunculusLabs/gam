@@ -1246,7 +1246,7 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
     // noise floor. The two agree to ~1e-8; a 1e-5 bound is a meaningful guard
     // (still ~1000× the observed residual) that would catch a dropped ε-jet
     // channel without flaking (gam#855).
-    gam_linalg::test_support::fd_checker::assert_matrix_derivativefd(
+    gam_linalg_test_support::fd_checker::assert_matrix_derivativefd(
         &fd_du_raw.insert_axis(Axis(1)),
         &du_raw.insert_axis(Axis(1)),
         1e-5,
@@ -1370,7 +1370,7 @@ fn sas_beta_raw_epsilon_sensitivity_matchesfd_at_seed19() {
          so the stabilization ridge must not change across the perturbation \
          (gam#855): analytic δ={ridge_0:.3e}, δ(+h)={ridge_p:.3e}, δ(-h)={ridge_m:.3e}"
     );
-    gam_linalg::test_support::fd_checker::assert_matrix_derivativefd(
+    gam_linalg_test_support::fd_checker::assert_matrix_derivativefd(
         &fd_beta.insert_axis(Axis(1)),
         &dbeta_exact.insert_axis(Axis(1)),
         1e-5,
@@ -1547,7 +1547,7 @@ fn sas_true_score_beta_jacobian_matchesfd_at_seed19() {
         fd_j.column_mut(j).assign(&fd_col);
     }
 
-    gam_linalg::test_support::fd_checker::assert_matrix_derivativefd(
+    gam_linalg_test_support::fd_checker::assert_matrix_derivativefd(
         &fd_j,
         &analytic_j,
         2e-3,

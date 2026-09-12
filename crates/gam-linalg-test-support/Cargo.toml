@@ -1,0 +1,23 @@
+[package]
+name = "gam-linalg-test-support"
+version = "0.3.157"
+edition = "2024"
+rust-version = "1.97"
+description = "Linear-algebra test fixtures (Ridders finite-difference oracle, paired quality comparison, no-densify design) for the gam workspace"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/SauersML/gam"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+gam-linalg = { path = "../gam-linalg", version = "=0.3.157" }
+gam-runtime = { path = "../gam-runtime", version = "=0.3.157" }
+ndarray = { version = "0.17.2", features = ["serde", "rayon"] }
+
+[dev-dependencies]
+# `fd_checker`'s self-tests compare stencils against closed forms.
+approx = "0.5.1"
+
+[lints.rust]
+warnings = "deny"

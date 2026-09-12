@@ -48,6 +48,7 @@ cudarc.workspace = true
 approx = "0.5.1"
 csv = "1.4.0"
 gam-inference = { path = "../gam-inference" }
+gam-linalg-test-support = { path = "../gam-linalg-test-support" }
 gam-predict = { path = "../gam-predict" }
 gam-test-support = { path = "../gam-test-support" }
 num-dual = "0.14.1"

@@ -2163,5 +2163,38 @@
     },
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). CriterionSum::value and CriterionSum::d1 belonged to the production CriterionSum, which nothing outside atoms.rs's unit tests used; the tests now use a test-local fold whose methods are not pub. The third declaration is the pub(crate) unit test that exercised only the deleted HessianLogdetAtom and SampledBlockAtom.",
     "evidence": "At the base, git grep -w finds CriterionSum only in atoms.rs, the root facade re-export and one comment, all changed in this commit. Emulating public_api_census.py's pub fn predicate over the before and after atoms.rs blobs gives d1 1 to 0, value 1 to 0, and hessian_logdet_atom_emits_closed_form_value_and_directional_derivative 1 to 0."
+  },
+  {
+    "base": "70defacd8d2f0704a266cc2bc407f3af1f6e3034",
+    "removed": {
+      "crates/gam-linalg/src/test_support.rs::advantage_upper_bound": 1,
+      "crates/gam-linalg/src/test_support.rs::assert_paired_match_or_beat": 1,
+      "crates/gam-linalg/src/test_support.rs::critical_t": 1,
+      "crates/gam-linalg/src/test_support.rs::deficit_lower_bound": 1,
+      "crates/gam-linalg/src/test_support.rs::effect_size": 1,
+      "crates/gam-linalg/src/test_support.rs::gam_resolved_better": 1,
+      "crates/gam-linalg/src/test_support.rs::gam_resolved_worse": 1,
+      "crates/gam-linalg/src/test_support.rs::new": 1,
+      "crates/gam-linalg/src/test_support.rs::no_densify_design": 1,
+      "crates/gam-linalg/src/test_support.rs::paired_holdout_partition": 1,
+      "crates/gam-linalg/src/test_support.rs::pairing_gain": 1,
+      "crates/gam-linalg/src/test_support.rs::report": 1,
+      "crates/gam-linalg/src/test_support.rs::student_t_cdf": 1,
+      "crates/gam-linalg/src/test_support.rs::student_t_upper_quantile": 1,
+      "crates/gam-linalg/src/test_support.rs::verdict": 1,
+      "crates/gam-linalg/src/test_support/fd_checker.rs::assert_matrix_derivativefd": 1,
+      "crates/gam-linalg/src/test_support/fd_checker.rs::assert_matrix_derivativefd_rel": 1,
+      "crates/gam-linalg/src/test_support/fd_checker.rs::numerical_gradient_central_diff": 1,
+      "crates/gam-linalg/src/test_support/fd_checker.rs::numerical_hessian_central_diff": 1,
+      "crates/gam-linalg/src/test_support/fd_checker.rs::ridders_partial_derivative": 1,
+      "crates/gam-linalg/src/test_support/numeric_derivative.rs::agreement_bound": 1,
+      "crates/gam-linalg/src/test_support/numeric_derivative.rs::band": 1,
+      "crates/gam-linalg/src/test_support/numeric_derivative.rs::resolved": 1,
+      "crates/gam-linalg/src/test_support/numeric_derivative.rs::ridders_derivative": 1,
+      "crates/gam-linalg/src/test_support/numeric_derivative.rs::ridders_from_stencil": 1,
+      "crates/gam-linalg/src/test_support/numeric_derivative.rs::self_band": 1
+    },
+    "reason": "#2899 group-A sweep, lead ruling (A): the public functions of gam_linalg::test_support, test_support::fd_checker and test_support::numeric_derivative move with the module into the dev-only crate gam-linalg-test-support (src/lib.rs, src/fd_checker.rs, src/numeric_derivative.rs), where each is re-declared unchanged. Their only callers are tests and gam-test-support.",
+    "evidence": "public_api_census.py --base 6269205d8 --head 66833d813 reports exactly these 26 identities, with 12096 public function declarations at both base and head (/scratch.global/sauer354/pool/prune-api-a/slice20.census.json)."
   }
 ]

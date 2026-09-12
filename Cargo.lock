@@ -3754,7 +3754,6 @@ dependencies = [
 name = "gam-linalg"
 version = "0.3.157"
 dependencies = [
- "approx",
  "dyn-stack",
  "faer",
  "gam-runtime",
@@ -3764,6 +3763,16 @@ dependencies = [
  "rayon",
  "serde",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "gam-linalg-test-support"
+version = "0.3.157"
+dependencies = [
+ "approx",
+ "gam-linalg",
+ "gam-runtime",
+ "ndarray 0.17.2",
 ]
 
 [[package]]
@@ -3819,6 +3828,7 @@ dependencies = [
  "gam-identifiability",
  "gam-inference",
  "gam-linalg",
+ "gam-linalg-test-support",
  "gam-math",
  "gam-model-api",
  "gam-model-kernels",
@@ -3981,6 +3991,7 @@ dependencies = [
  "gam-geometry",
  "gam-gpu",
  "gam-linalg",
+ "gam-linalg-test-support",
  "gam-math",
  "gam-model-api",
  "gam-problem",
@@ -4020,6 +4031,7 @@ dependencies = [
  "gam-geometry",
  "gam-gpu",
  "gam-linalg",
+ "gam-linalg-test-support",
  "gam-math",
  "gam-problem",
  "gam-runtime",
@@ -4048,6 +4060,7 @@ dependencies = [
  "csv",
  "faer",
  "gam-linalg",
+ "gam-linalg-test-support",
  "gam-models",
  "gam-problem",
  "gam-runtime",

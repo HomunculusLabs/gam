@@ -10,10 +10,10 @@
 //! routes through one audited implementation instead of an open-coded loop.
 //!
 //! These helpers own no model-layer types: they are `ndarray` in, `ndarray` out.
-//! That is exactly why they live in `gam-linalg` (the leaf that owns the dense
-//! array seam) rather than in the model-level `gam-test-support` crate. Any
-//! crate needing an FD cross-check gets it from a leaf dependency it already
-//! has, instead of dragging the entire model layer into its test build.
+//! That is exactly why they live in `gam-linalg-test-support` (a dev-only leaf
+//! over `gam-linalg`) rather than in the model-level `gam-test-support` crate.
+//! Any crate needing an FD cross-check gets it from a leaf dev-dependency
+//! instead of dragging the entire model layer into its test build.
 //!
 //! The scalar self-certifying oracle these helpers build on lives in
 //! [`super::numeric_derivative`], and is re-exported below so there is one

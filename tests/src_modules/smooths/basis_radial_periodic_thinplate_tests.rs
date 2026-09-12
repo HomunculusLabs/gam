@@ -3322,7 +3322,7 @@ fn test_fourth_derivative_matches_finite_difference() {
     evaluate_bspline_fourth_derivative_scalar(x, knots.view(), degree, &mut d4)
         .unwrap_or_else(|e| panic!("{} failed: {:?}", "fourth derivative", e));
 
-    gam_linalg::assert_central_difference_array!(
+    gam_linalg_test_support::assert_central_difference_array!(
         x,
         h,
         |x_eval| {

@@ -3,9 +3,9 @@
 //!
 //! These methods decide agreement and render the ladder for a diagnostic line.
 //! They live here rather than on the [`FdDerivative`] type, whose measurement
-//! API stays in `gam-linalg`'s `test_support`.
+//! API stays in `gam-linalg-test-support`.
 
-use gam_linalg::test_support::numeric_derivative::{FdDerivative, FdVerdict};
+use gam_linalg_test_support::numeric_derivative::{FdDerivative, FdVerdict};
 
 /// Test-side judgement of an [`FdDerivative`] measurement.
 pub trait FdDerivativeJudgement {

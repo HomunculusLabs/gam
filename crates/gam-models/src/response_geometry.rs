@@ -1629,7 +1629,7 @@ mod rotation_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gam_linalg::test_support::no_densify_design;
+    use gam_linalg_test_support::no_densify_design;
     use ndarray::{Array3, array};
 
     fn fixture_request(fisher_metric: Option<Array3<f64>>) -> SharedTangentRemlRequest {

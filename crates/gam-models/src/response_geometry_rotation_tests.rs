@@ -206,7 +206,7 @@ fn streamed_qr_preserves_fit_across_chunks_and_zero_weights_2627() {
         ((row + 1) as f64 * (output + 2) as f64 * 0.3).sin()
     });
     let request = SharedTangentRemlRequest::new(
-        gam_linalg::test_support::no_densify_design(design),
+        gam_linalg_test_support::no_densify_design(design),
         response,
         array![0.0, 0.0, 1.0, 0.8, 1.2, 1.0, 0.0, 0.9, 1.1],
         None,
@@ -235,7 +235,7 @@ fn streamed_qr_preserves_fit_across_chunks_and_zero_weights_2627() {
 #[test]
 fn shared_tangent_rejects_negative_penalty_without_positive_range_2627() {
     let request = SharedTangentRemlRequest::new(
-        gam_linalg::test_support::no_densify_design(array![[1.0, -1.0], [1.0, 0.0], [1.0, 1.0]]),
+        gam_linalg_test_support::no_densify_design(array![[1.0, -1.0], [1.0, 0.0], [1.0, 1.0]]),
         array![[0.2], [0.3], [0.7]],
         Array1::ones(3),
         None,
@@ -254,7 +254,7 @@ fn shared_tangent_penalty_rank_is_independent_of_strength_2627() {
         })
         .collect();
     let prepared = PreparedSharedTangent::from_request(SharedTangentRemlRequest::new(
-        gam_linalg::test_support::no_densify_design(array![
+        gam_linalg_test_support::no_densify_design(array![
             [1.0, -1.0, 0.5],
             [1.0, 0.0, -0.3],
             [1.0, 1.0, 0.2],

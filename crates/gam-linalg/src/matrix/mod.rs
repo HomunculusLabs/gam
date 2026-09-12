@@ -5979,7 +5979,6 @@ mod tests {
 
     use super::{BlockDesignOperator, CoefficientTransformOperator, ConditionedDesign, DenseDesignMatrix, DenseDesignOperator, DesignBlock, DesignMatrix, EmbeddedColumnBlock, FiniteSignedWeightsView, MultiChannelOperator, PsdWeightsView, RandomEffectOperator, ReparamOperator, RowwiseKroneckerOperator, SparseDesignMatrix, dense_operator_to_dense_by_chunks, dense_transpose_weighted_response, fast_atv, fast_av, streaming_sparse_csc_xt_diag_x, weighted_crossprod_dense_view};
     use crate::matrix::LinearOperator;
-    use crate::test_support::no_densify_design;
     use faer::sparse::{SparseColMat, SymbolicSparseColMat, Triplet};
     use gam_runtime::resource::{MaterializationPolicy, MatrixMaterializationError, ResourcePolicy};
     use ndarray::{Array1, Array2, ArrayViewMut2, Axis, array, s};
@@ -6692,13 +6691,17 @@ mod tests {
 
     #[test]
     fn coefficient_transform_operator_preserves_lazy_inner_storage() {
-        let inner_values = array![[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]];
         let transform = array![[0.5, -1.0], [1.0, 0.25]];
-        let expected = inner_values.dot(&transform);
-        let DesignMatrix::Dense(inner) = no_densify_design(inner_values) else {
-            panic!("no-densify fixture must be dense-operator-backed");
-        };
-        let op = CoefficientTransformOperator::new(inner, transform)
+        // `ChunkOnlyOperator::to_dense` panics, so densifying the inner design
+        // fails this test.
+        let inner_op = Arc::new(ChunkOnlyOperator {
+            n: 3,
+            p: 2,
+            row_chunk_calls: AtomicUsize::new(0),
+            materialization_policy: None,
+        });
+        let expected = Array2::from_shape_fn((3, 2), |(i, j)| inner_op.value(i, j)).dot(&transform);
+        let op = CoefficientTransformOperator::new(DenseDesignMatrix::from(inner_op), transform)
             .expect("coefficient transform operator");
         let dense_design = DenseDesignMatrix::from(Arc::new(op));
 

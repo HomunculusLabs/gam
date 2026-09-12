@@ -38,7 +38,8 @@ pub mod parallel;
 pub mod pcg;
 pub mod roundoff;
 pub mod sparse_exact;
-pub mod test_support;
+#[cfg(test)]
+mod test_support;
 pub mod triangular;
 pub mod types;
 pub mod utils;

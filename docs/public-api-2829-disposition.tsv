@@ -125,7 +125,7 @@ crates/gam-linalg/src/matrix/symmetric.rs	xt_diag_x_psd	retired-by-later-deletio
 crates/gam-linalg/src/matrix/weights.rs	as_psd	retired-by-later-deletion:b66b773539
 crates/gam-linalg/src/matrix/weights.rs	from_array	restored-in-place
 crates/gam-linalg/src/matrix/weights.rs	view_signed	retired-by-later-deletion:b66b773539
-crates/gam-linalg/src/test_support/numeric_derivative.rs	agreement_bound	restored-in-place
+crates/gam-linalg-test-support/src/numeric_derivative.rs	agreement_bound	restored-in-place
 crates/gam-linalg/src/numeric_derivative.rs	judge	retired-by-owner:jets
 crates/gam-linalg/src/numeric_derivative.rs	ladder_report	retired-by-owner:jets
 crates/gam-linalg/src/packed_symmetric_spectrum.rs	packed_upper_index	retired-no-surviving-dependent

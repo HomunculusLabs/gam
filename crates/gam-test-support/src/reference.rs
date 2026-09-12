@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub use gam_linalg::test_support::{
+pub use gam_linalg_test_support::{
     PairedFoldComparison, PairedHoldout, RESOLUTION_TAIL, assert_paired_match_or_beat,
     paired_holdout_partition,
 };
