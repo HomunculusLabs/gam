@@ -742,8 +742,23 @@ impl JeffreysHphiDriftBase {
         if pert_h.dim() != (self.p, self.p) {
             return Err("Jeffreys drift information dimension mismatch".into());
         }
+        let da = self.rotate_axes(pert_hdots)?;
+        self.perturbation_derivative_from_rotated_axes(pert_h, &da)
+    }
+
+    /// The perturbation derivative from coefficient-axis rows a family has already
+    /// rotated into this base's eigenbasis, so the `p × p` axis matrices are never
+    /// formed (#1082). The axis-matrix entry point rotates and then closes here.
+    pub fn perturbation_derivative_from_rotated_axes(
+        &self,
+        pert_h: &Array2<f64>,
+        axes: &JeffreysRotatedAxes,
+    ) -> Result<Array2<f64>, String> {
+        if pert_h.dim() != (self.p, self.p) {
+            return Err("Jeffreys drift information dimension mismatch".into());
+        }
         let e = symmetric_basis_contraction(pert_h.view(), self.ambient_eigenbasis.view());
-        let da = self.rotate_axis_rows(pert_hdots)?;
+        let da = &axes.rows;
         let mut dw = self.inverse_frechet_rows(&self.a_rows, &[&e], 0);
         if self.floor_in_relative_regime {
             let dfloor = REDUCED_INFO_RELATIVE_FLOOR * e[[self.idx_max, self.idx_max]];
@@ -980,8 +995,23 @@ impl JeffreysHphiDriftBase {
             return Err("Jeffreys mixed drift information dimension mismatch".into());
         }
         self.refuse_inverse_kernel_branch_boundary()?;
-        let e = symmetric_basis_contraction(pert.view(), self.ambient_eigenbasis.view());
         let rows = self.rotate_axis_rows(axes)?;
+        self.direction_frame_from_rotated(pert, JeffreysRotatedAxes { rows })
+    }
+
+    /// [`Self::direction_frame`] from coefficient-axis rows a family has already rotated
+    /// into this base's eigenbasis (#1082).
+    pub fn direction_frame_from_rotated(
+        &self,
+        pert: &Array2<f64>,
+        axes: JeffreysRotatedAxes,
+    ) -> Result<JeffreysDirectionFrame, String> {
+        if pert.dim() != (self.p, self.p) {
+            return Err("Jeffreys mixed drift information dimension mismatch".into());
+        }
+        self.refuse_inverse_kernel_branch_boundary()?;
+        let e = symmetric_basis_contraction(pert.view(), self.ambient_eigenbasis.view());
+        let rows = axes.rows;
         let (g_min, g_max) =
             conditioning_gate_weight_grad(self.evals[self.idx_min], self.evals[self.idx_max]);
         let min = e[[self.idx_min, self.idx_min]];

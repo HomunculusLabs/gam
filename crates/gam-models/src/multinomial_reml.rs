@@ -2542,6 +2542,35 @@ impl MultinomialFamily {
         )
     }
 
+    /// `vec(sym(Uᵀ H²[δ, e_a] U))` for every coefficient axis `a`, through the same row
+    /// kernel as [`Self::assemble_all_axis_second_directional_derivatives`] but without
+    /// its `(M·P)×(M·P)` axis matrices (#1082). `probs_full` is the snapshot's row
+    /// probabilities, shared by every direction of a batch.
+    fn assemble_rotated_all_axis_second_directional_derivatives(
+        &self,
+        probs_full: &Array2<f64>,
+        d_beta_u: &Array1<f64>,
+        basis: ArrayView2<'_, f64>,
+    ) -> Result<Array2<f64>, String> {
+        let m = self.active_classes();
+        let d_eta_u = self.d_eta_from_d_beta(d_beta_u)?;
+        let mut normalized = vec![[0.0; 3]; m];
+        self.assemble_rotated_all_axis_derivatives_from_row_kernel(
+            basis,
+            |row, moving_class, row_kernel| {
+                softmax_fisher_perturbation::<TwoSeed<0>>(
+                    m,
+                    self.weights[row],
+                    |class| probs_full[[row, class]],
+                    |class| d_eta_u[[row, class]],
+                    |class| if class == moving_class { 1.0 } else { 0.0 },
+                    &mut normalized,
+                    row_kernel,
+                );
+            },
+        )
+    }
+
     /// Third Fisher derivative, using centered categorical moments through
     /// order three. Differentiating diag(p)-pp' needs only the probability
     /// derivatives below; the coefficient pullback reuses the same batched
@@ -3222,6 +3251,33 @@ impl CustomFamily for MultinomialFamily {
             ));
         }
         Ok(Some(axes))
+    }
+
+    fn joint_jeffreys_information_second_directional_rotated_all_axes_each_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        directions: &[Array1<f64>],
+        basis: ArrayView2<'_, f64>,
+        consume: &mut dyn FnMut(usize, Array2<f64>) -> Result<(), String>,
+    ) -> Result<bool, String> {
+        // #1082: the Jeffreys drift reads only `vec(sym(Uᵀ H²[δ, e_a] U))`, and the row
+        // probabilities belong to the snapshot, so they are formed once for the batch.
+        let eta = self.collect_eta_matrix(block_states)?;
+        let probs = self.row_probabilities(eta.view());
+        let p: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
+        for (index, direction) in directions.iter().enumerate() {
+            let rows = self
+                .assemble_rotated_all_axis_second_directional_derivatives(&probs, direction, basis)?;
+            if rows.nrows() != p {
+                return Err(format!(
+                    "multinomial rotated second information has {} axes, expected {p}",
+                    rows.nrows()
+                ));
+            }
+            consume(index, rows)?;
+        }
+        Ok(true)
     }
 
     fn joint_jeffreys_information_third_directional_available(&self) -> bool {
@@ -6062,6 +6118,57 @@ mod tests {
             assert!(
                 scale > 1e-6,
                 "positive control: the rotated third derivative must not vanish (n={n} p={p} k={k})"
+            );
+            for ((index, &want), &got) in expected.indexed_iter().zip(actual.iter()) {
+                assert!(
+                    (want - got).abs() <= 1e-11 * (1.0 + scale),
+                    "n={n} p={p} k={k} row {index:?}: materialized {want} != row-kernel {got}"
+                );
+            }
+        }
+    }
+
+    /// #1082: the rotated second information derivative formed through the row kernel
+    /// equals the materialized axes rotated by the drift's congruence.
+    #[test]
+    fn rotated_second_information_axes_match_rotated_materialized_axes_1082() {
+        for &(n, p, k, rank) in &[(11, 4, 3, 2), (17, 10, 3, 7), (13, 3, 5, 5)] {
+            let family = toy_family(n, p, k);
+            let m = family.active_classes();
+            let dim = m * p;
+            let design = family.design.view();
+            let block_states: Vec<ParameterBlockState> = (0..m)
+                .map(|a| {
+                    let beta = Array1::<f64>::from_shape_fn(p, |i| {
+                        0.13 * ((a + 2) as f64) - 0.08 * ((i + 1) as f64).cos()
+                    });
+                    let eta = Array1::<f64>::from_shape_fn(n, |row| {
+                        (0..p).map(|i| design[[row, i]] * beta[i]).sum()
+                    });
+                    ParameterBlockState { beta, eta }
+                })
+                .collect();
+            let eta = family
+                .collect_eta_matrix(&block_states)
+                .expect("eta collection must succeed");
+            let u = Array1::<f64>::from_shape_fn(dim, |idx| 0.23 * ((idx + 1) as f64).sin());
+            let basis = Array2::<f64>::from_shape_fn((dim, rank), |(r, c)| {
+                0.31 * ((r + 3 * c + 1) as f64).sin() + 0.07 * ((2 * r + c + 2) as f64).cos()
+            });
+            let materialized = family
+                .assemble_all_axis_second_directional_derivatives(eta.view(), &u)
+                .expect("materialized second information derivatives");
+            let expected = gam_model_api::jeffreys_rotated_axis_rows(&materialized, basis.view())
+                .expect("rotated materialized axes");
+            let probs = family.row_probabilities(eta.view());
+            let actual = family
+                .assemble_rotated_all_axis_second_directional_derivatives(&probs, &u, basis.view())
+                .expect("row-kernel rotated axes");
+            assert_eq!(actual.dim(), (dim, rank * rank), "n={n} p={p} k={k}");
+            let scale = expected.iter().fold(0.0_f64, |acc, x| acc.max(x.abs()));
+            assert!(
+                scale > 1e-6,
+                "positive control: the rotated second derivative must not vanish (n={n} p={p} k={k})"
             );
             for ((index, &want), &got) in expected.indexed_iter().zip(actual.iter()) {
                 assert!(

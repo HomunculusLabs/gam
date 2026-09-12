@@ -1889,6 +1889,31 @@ pub trait CustomFamily {
         Ok(true)
     }
 
+    /// [`Self::joint_jeffreys_information_second_directional_all_axes_each_with_specs`] in a
+    /// Jeffreys drift basis `U` (`p × r`): `consume(index, rows)` receives row `a` =
+    /// `vec(sym(Uᵀ H²[δ_index, e_a] U))`, the only form the outer Jeffreys drift reads
+    /// (#1082). The default rotates each direction's `p` dense axis derivatives with
+    /// [`jeffreys_rotated_axis_rows`], so a family that does not override it keeps its
+    /// arithmetic. A family whose information is a per-row kernel contracted with design
+    /// rows can form the rows without the `p × p` axis matrices and overrides this.
+    /// `Ok(false)` means the family does not expose an exact second derivative on some
+    /// axis.
+    fn joint_jeffreys_information_second_directional_rotated_all_axes_each_with_specs(
+        &self,
+        block_states: &[ParameterBlockState],
+        specs: &[ParameterBlockSpec],
+        directions: &[Array1<f64>],
+        basis: ndarray::ArrayView2<'_, f64>,
+        consume: &mut dyn FnMut(usize, Array2<f64>) -> Result<(), String>,
+    ) -> Result<bool, String> {
+        self.joint_jeffreys_information_second_directional_all_axes_each_with_specs(
+            block_states,
+            specs,
+            directions,
+            &mut |index, axes| consume(index, jeffreys_rotated_axis_rows(&axes, basis)?),
+        )
+    }
+
     /// Whether this family implements
     /// [`Self::joint_jeffreys_information_third_directional_all_axes_with_specs`]
     /// exactly, i.e. returns `Some` from it.

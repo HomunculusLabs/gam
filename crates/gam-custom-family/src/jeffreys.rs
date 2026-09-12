@@ -985,10 +985,21 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
             // a pair only rotates its own third derivative.
             let rotated = |direction: &Array1<f64>| {
                 kept_along_response(&kept_second, direction, || {
-                    let axes = family
-                        .joint_jeffreys_information_second_directional_all_axes_with_specs(&states, &specs, direction)?
-                        .ok_or_else(missing)?;
-                    Ok(base.rotate_axes(&axes)?)
+                    // Only the rotation of `H²[d, ·]` is read, so the family forms it (#1082).
+                    let mut rows = None;
+                    let complete = family
+                        .joint_jeffreys_information_second_directional_rotated_all_axes_each_with_specs(
+                            &states,
+                            &specs,
+                            std::slice::from_ref(direction),
+                            base.ambient_eigenbasis(),
+                            &mut |_, axis_rows| {
+                                rows = Some(axis_rows);
+                                Ok(())
+                            },
+                        )?;
+                    let rows = rows.filter(|_| complete).ok_or_else(missing)?;
+                    Ok(base.rotated_axes_from_rows(rows)?)
                 })
             };
             let axes_v = rotated(v)?;
@@ -1032,14 +1043,17 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
             .collect::<Result<Vec<_>, String>>()
             .map_err(CustomFamilyError::trial_point)?;
         let mut derivatives: Vec<Option<Array2<f64>>> = vec![None; deltas.len()];
+        // Only the rotations of `{H²dot[δ, e_a]}` are read, so the family forms them (#1082).
         let complete = family_owned
-            .joint_jeffreys_information_second_directional_all_axes_each_with_specs(
+            .joint_jeffreys_information_second_directional_rotated_all_axes_each_with_specs(
                 &states_owned,
                 &specs_owned,
                 deltas,
-                &mut |index, axes| {
+                base.ambient_eigenbasis(),
+                &mut |index, rows| {
+                    let axes = base.rotated_axes_from_rows(rows)?;
                     let mut derivative =
-                        base.perturbation_derivative_batched_axes(&pert_hs[index], Some(axes))?;
+                        base.perturbation_derivative_from_rotated_axes(&pert_hs[index], &axes)?;
                     if strength != 1.0 {
                         derivative *= strength;
                     }
@@ -1100,13 +1114,16 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
         let mut frame_slots = Vec::with_capacity(frame_directions.len());
         frame_slots.resize_with(frame_directions.len(), || None);
         let complete = family_second
-            .joint_jeffreys_information_second_directional_all_axes_each_with_specs(
+            .joint_jeffreys_information_second_directional_rotated_all_axes_each_with_specs(
                 &states_second,
                 &specs_second,
                 &frame_directions,
-                &mut |index, axes| {
-                    frame_slots[index] =
-                        Some(base.direction_frame(&frame_perturbations[index], &axes)?);
+                base.ambient_eigenbasis(),
+                &mut |index, rows| {
+                    frame_slots[index] = Some(base.direction_frame_from_rotated(
+                        &frame_perturbations[index],
+                        base.rotated_axes_from_rows(rows)?,
+                    )?);
                     Ok(())
                 },
             )
