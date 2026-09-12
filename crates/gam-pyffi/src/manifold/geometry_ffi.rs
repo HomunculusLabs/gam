@@ -491,8 +491,16 @@ pub(crate) fn manifold_description_length_from_arrays(
         coord_variances.extend(coordinate_variance_spectrum(*block)?);
     }
 
+    if !ev.is_finite() {
+        return Err(format!(
+            "manifold description length ev must be finite; got {ev}"
+        ));
+    }
     let total_var: f64 = coord_variances.iter().sum();
-    let delta2 = (1.0 - ev).max(1.0e-12) * total_var;
+    // The achieved distortion. A reconstruction with ev = 1 has none, and the
+    // water-filling rate of a continuous coordinate at zero distortion is
+    // infinite: that is its description length, not a value to floor away.
+    let delta2 = (1.0 - ev) * total_var;
     let mut codes = gam::terms::sae::atom_codes::SparseAtomCodes::empty(n_obs, k_atoms);
     for row in 0..n_obs {
         for atom in 0..k_atoms {
