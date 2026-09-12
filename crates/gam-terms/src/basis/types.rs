@@ -126,7 +126,6 @@ pub struct ThinPlateSplineBasis {
     pub penalty_ridge: Array2<f64>,
     pub num_kernel_basis: usize,
     pub num_polynomial_basis: usize,
-    pub dimension: usize,
     /// Wood-TPRS radial reparameterization matrix `V`.
     ///
     /// Rows live in the side-constrained radial coefficient space. Columns are
@@ -181,10 +180,7 @@ impl MaternNu {
 pub struct MaternSplineBasis {
     pub basis: Array2<f64>,
     pub penalty_kernel: Array2<f64>,
-    pub penalty_ridge: Array2<f64>,
-    pub num_kernel_basis: usize,
     pub num_polynomial_basis: usize,
-    pub dimension: usize,
 }
 
 #[derive(Debug, Clone)]

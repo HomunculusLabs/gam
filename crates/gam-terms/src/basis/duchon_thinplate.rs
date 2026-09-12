@@ -2764,7 +2764,6 @@ pub(crate) fn create_thin_plate_spline_basis_scaledwithworkspace(
         penalty_ridge,
         num_kernel_basis: kernel_cols,
         num_polynomial_basis: poly_cols,
-        dimension: d,
         radial_reparam,
     })
 }

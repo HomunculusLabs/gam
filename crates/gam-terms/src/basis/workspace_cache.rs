@@ -503,8 +503,7 @@ pub(crate) fn build_matern_double_penalty_candidates(
 ///
 /// The default kernel penalty is `alpha' S alpha` with `S_jl = k(||c_j - c_l||)`, embedded
 /// in the full coefficient space. With intercept included, that column is unpenalized by
-/// `penalty_kernel`; optional `penalty_ridge` is the center-function-metric
-/// penalty for double-penalty shrinkage of the explicit intercept direction.
+/// `penalty_kernel`.
 ///
 /// NOTE: This follows the RKHS Gram construction S = K_CC (not K_CC^{-1}) in
 /// coefficient space, with global scaling absorbed by the smoothing parameter λ.
@@ -604,22 +603,11 @@ pub(crate) fn create_matern_spline_basiswithworkspace(
     penalty_kernel
         .slice_mut(s![0..k, 0..k])
         .assign(&center_kernel);
-    let function_gram = matern_center_function_gram(&penalty_kernel, include_intercept, None)?;
-    let penalty_ridge = if include_intercept {
-        let mut intercept_frame = Array2::<f64>::zeros((total_cols, 1));
-        intercept_frame[[total_cols - 1, 0]] = 1.0;
-        function_space_subspace_shrinkage(&intercept_frame, &function_gram)?
-    } else {
-        Array2::<f64>::zeros((total_cols, total_cols))
-    };
 
     Ok(MaternSplineBasis {
         basis,
         penalty_kernel,
-        penalty_ridge,
-        num_kernel_basis: k,
         num_polynomial_basis: usize::from(include_intercept),
-        dimension: d,
     })
 }
 
