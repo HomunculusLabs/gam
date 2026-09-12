@@ -140,7 +140,7 @@ pub fn serialize_ledger(ledger: &StructureLedger) -> Result<Vec<u8>, String> {
 }
 
 /// Inverse of [`serialize_ledger`].
-pub fn deserialize_ledger(bytes: &[u8]) -> Result<StructureLedger, String> {
+pub(crate) fn deserialize_ledger(bytes: &[u8]) -> Result<StructureLedger, String> {
     serde_json::from_slice(bytes).map_err(|e| {
         format!(
             "ledger payload exists but failed to decode ({e}); refusing to silently reset \

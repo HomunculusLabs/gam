@@ -5,7 +5,7 @@
 /// NO independence assumption across the e-values — the property that lets the
 /// dependent pair statistics share one ledger. Sort descending, find the largest
 /// `k` with the `k`-th largest e-value `≥ m/(α·k)`, reject those `k`.
-pub fn ebh_reject(e_values: &[f64], alpha: f64) -> Vec<usize> {
+pub(crate) fn ebh_reject(e_values: &[f64], alpha: f64) -> Vec<usize> {
     let m = e_values.len();
     if m == 0 || !(alpha > 0.0) {
         return Vec::new();

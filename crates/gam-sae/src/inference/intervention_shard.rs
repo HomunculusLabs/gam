@@ -527,7 +527,7 @@ impl InterventionShard {
     }
 
     /// Number of records.
-    pub fn n_records(&self) -> usize {
+    pub(crate) fn n_records(&self) -> usize {
         self.row_id.len()
     }
 }

@@ -25,7 +25,7 @@ pub fn canonical_assignment_kind(kind: &str) -> Result<&'static str, String> {
 }
 
 /// Validate a basis kind that may appear in a converged native artifact.
-pub fn validate_fitted_basis_kind(name: &str) -> Result<(), String> {
+pub(crate) fn validate_fitted_basis_kind(name: &str) -> Result<(), String> {
     match name {
         "periodic" | "sphere" | "torus" | "projective_plane" | "klein_bottle" | "linear"
         | "linear_block" | "euclidean" | "duchon" | "poincare" | "cylinder" | "mobius"

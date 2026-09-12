@@ -648,7 +648,7 @@ impl GaussianPcaPatch {
     /// leakage by algebra; a reduced pilot frame remains uncertified until a
     /// caller supplies an independent capture theorem.
     #[must_use = "cross-fitted Gaussian PCA construction errors must be handled"]
-    pub fn fit_cross_fitted_plugin(
+    pub(crate) fn fit_cross_fitted_plugin(
         chart: usize,
         row_split: GaussianPatchRowSplit,
         data: ArrayView2<'_, f64>,
@@ -1535,7 +1535,7 @@ impl AtlasHolonomyCertificate {
     /// atlas they are reporting without converting the refusal into a
     /// promotable signed cocycle.
     #[must_use]
-    pub fn edge_inventory(&self) -> Vec<AtlasHolonomyEdgeId> {
+    pub(crate) fn edge_inventory(&self) -> Vec<AtlasHolonomyEdgeId> {
         match self {
             Self::ExactAnalytic(certificate) => certificate
                 .edges()

@@ -121,7 +121,7 @@ struct RowCertificate {
 /// not `a_new > a`. This returns `sup_t η(t)` against the active measure mass;
 /// values above `1` are the threshold-free multiplicity/birth trigger from
 /// convex duality.
-pub fn harmonic_dual_birth_eta(residual_coeffs: &[(f64, f64)], active_mass: f64) -> f64 {
+pub(crate) fn harmonic_dual_birth_eta(residual_coeffs: &[(f64, f64)], active_mass: f64) -> f64 {
     if residual_coeffs.is_empty() {
         return 0.0;
     }
@@ -375,7 +375,7 @@ pub fn block_dual_certificate(
 /// the residual dual uses the decoder-coordinate scale (`dual_scale = 1`); the
 /// fitted-object convenience [`block_dual_certificate`] supplies its learned
 /// tied-encoder scale internally.
-pub fn block_route_dual_certificate(
+pub(crate) fn block_route_dual_certificate(
     data: ArrayView2<'_, f32>,
     decoder: ArrayView2<'_, f32>,
     blocks: ArrayView2<'_, u32>,

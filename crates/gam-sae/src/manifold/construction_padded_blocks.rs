@@ -14,7 +14,7 @@ use super::*;
 /// are observations of those
 /// plans and are validated against them; they are never metadata authorities.
 #[must_use = "build error must be handled"]
-pub fn term_from_geometry_plans_with_mode(
+pub(crate) fn term_from_geometry_plans_with_mode(
     n_obs: usize,
     p_out: usize,
     geometry_plans: &[SaeAtomGeometryPlan],

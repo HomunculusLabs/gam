@@ -367,7 +367,7 @@ fn validate_label(label: &str, role: &str) -> Result<(), String> {
 /// `[anchor | block_0 | ...]` order.  This allocation happens exactly once;
 /// block-weight movement thereafter is in-place from the objective's pristine
 /// copy.
-pub fn stack_crosscoder_targets(
+pub(crate) fn stack_crosscoder_targets(
     anchor_label: &str,
     anchor: &Array2<f64>,
     blocks: &[NamedCrosscoderTarget],
@@ -600,7 +600,7 @@ fn wire_layer_label(
 }
 
 impl SaeCrosscoderFitReport {
-    pub fn layer_from_label(&self, label: &str) -> Result<CrosscoderLayer, String> {
+    pub(crate) fn layer_from_label(&self, label: &str) -> Result<CrosscoderLayer, String> {
         let anchor = self
             .layers
             .first()

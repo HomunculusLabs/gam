@@ -57,7 +57,7 @@ use gam_problem::{MetricProvenance, RowMetric};
 /// Legacy active-row floor used by geometry-only summaries and reseed heuristics
 /// that still report a count of materially active rows. Behavior lens scores
 /// consume [`SupportMeasure`] directly and do not threshold support.
-pub const SAE_TRUST_ACTIVE_MASS_FLOOR: f64 = 1e-6;
+pub(crate) const SAE_TRUST_ACTIVE_MASS_FLOOR: f64 = 1e-6;
 
 /// One atom's lens entry.
 #[derive(Clone, Debug, PartialEq)]

@@ -133,7 +133,7 @@ impl AtomTransportReport {
 
 /// Measure the empirical transport of one circle atom between two explicit
 /// crosscoder layers (source image projected onto the target image).
-pub fn measure_atom_transport_between(
+pub(crate) fn measure_atom_transport_between(
     term: &SaeManifoldTerm,
     layout: &CrosscoderLayout,
     atom: usize,

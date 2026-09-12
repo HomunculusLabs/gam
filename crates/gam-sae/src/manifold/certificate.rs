@@ -349,7 +349,7 @@ pub struct SaeAtomTrustDiagnostics {
 /// into [`curved_dictionary_global_optimality_verdict`] below is deliberately
 /// pessimistic per-atom: the certificate is only as strong as its most
 /// fragile, most tightly-curved constituent.
-pub fn dictionary_incoherence_report_with_dispersion(
+pub(crate) fn dictionary_incoherence_report_with_dispersion(
     term: &SaeManifoldTerm,
     dispersion: f64,
     fitted: ArrayView2<'_, f64>,

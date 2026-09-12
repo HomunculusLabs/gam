@@ -187,7 +187,7 @@ impl TopSSelector {
     /// weakest. The selection is bit-identical to a fresh full rescan per offer:
     /// the accept test and the weakest-slot definition are unchanged.
     #[inline]
-    pub fn offer(&mut self, atom: u32, score: f32) {
+    pub(crate) fn offer(&mut self, atom: u32, score: f32) {
         let mag = score.abs();
         if self.heap.len() < self.capacity {
             self.heap.push((atom, score, mag));
@@ -220,7 +220,7 @@ impl TopSSelector {
 /// atoms) and fold every score into `sel`. `atom_offset` is the global index of
 /// the tile's first atom.
 #[inline]
-pub fn score_row_tile(
+pub(crate) fn score_row_tile(
     row: ArrayView1<'_, f32>,
     atoms_tile: ArrayView2<'_, f32>,
     atom_offset: usize,

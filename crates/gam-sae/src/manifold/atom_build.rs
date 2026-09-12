@@ -36,7 +36,7 @@ impl SaeAtomBuildPlan {
 /// Deterministically pick Duchon centers from the PCA-seeded coordinates.
 /// Uses a Lehmer (LCG) walk over `0..n_obs` keyed by `random_state` so the
 /// result is reproducible without a heavy RNG dependency.
-pub fn sae_pick_duchon_center_indices(
+pub(crate) fn sae_pick_duchon_center_indices(
     n_obs: usize,
     n_centers: usize,
     random_state: u64,
@@ -149,7 +149,7 @@ pub fn sae_build_padded_basis_stacks(
 /// the identifiability floor and to `n_obs`), or the per-axis harmonic order for
 /// a #2243 torus winner (clamped to the dense guard). `None` entries keep the
 /// fixed economy budget below.
-pub fn sae_build_atom_plans(
+pub(crate) fn sae_build_atom_plans(
     z: ArrayView2<'_, f64>,
     atom_basis: &[String],
     atom_dim: &[usize],

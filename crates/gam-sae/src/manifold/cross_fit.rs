@@ -276,7 +276,7 @@ pub(crate) fn subspace_reconstruction_ev(
 /// — the post-selection optimism. This is the reconstruction analog of a linear
 /// dictionary; a curved/gated SAE plugs into [`cross_fit_scalar`] the same way by
 /// supplying its own discover/score closures.
-pub fn cross_fit_reconstruction_ev(
+pub(crate) fn cross_fit_reconstruction_ev(
     data: ArrayView2<'_, f64>,
     config: CrossFitConfig,
     q: usize,

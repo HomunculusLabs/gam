@@ -2947,7 +2947,7 @@ pub fn block_sparse_dictionary_lift_block(
 /// built from THOSE codes — re-deriving tied codes from `x` here would hand the
 /// chart a residual belonging to a different (stale) linear tier, so the block
 /// coordinate-descent would not be minimizing its stated objective.
-pub fn block_sparse_dictionary_project_residual_with_codes(
+pub(crate) fn block_sparse_dictionary_project_residual_with_codes(
     x: ArrayView2<'_, f32>,
     decoder: ArrayView2<'_, f32>,
     blocks: ArrayView2<'_, u32>,

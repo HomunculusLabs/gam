@@ -580,7 +580,7 @@ pub fn sae_pca_seed_initial_coords(
 /// are distinct by construction. The offset is a pure deterministic function of
 /// the retry count (no RNG), so the seed stays bit-reproducible run-to-run and
 /// across thread/device counts.
-pub fn sae_pca_seed_initial_coords_with_pc_offset(
+pub(crate) fn sae_pca_seed_initial_coords_with_pc_offset(
     z: ArrayView2<'_, f64>,
     basis_kinds: &[SaeAtomBasisKind],
     atom_dim: &[usize],

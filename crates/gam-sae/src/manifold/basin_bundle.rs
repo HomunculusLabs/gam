@@ -79,7 +79,7 @@ impl<S> BasinBundle<S> {
         self.members.is_empty()
     }
 
-    pub fn member_capacity(&self) -> usize {
+    pub(crate) fn member_capacity(&self) -> usize {
         self.member_capacity
     }
 
@@ -136,7 +136,7 @@ impl<S> BasinBundle<S> {
     /// cannot fire and any predicate handed to it would be inert. Same capacity
     /// contract as `admit` — a distinct state beyond `member_capacity` is
     /// refused explicitly.
-    pub fn admit_distinct(&mut self, state: S, value: f64) -> Result<(), BasinAdmissionError> {
+    pub(crate) fn admit_distinct(&mut self, state: S, value: f64) -> Result<(), BasinAdmissionError> {
         if self.members.len() >= self.member_capacity {
             return Err(BasinAdmissionError {
                 member_capacity: self.member_capacity,

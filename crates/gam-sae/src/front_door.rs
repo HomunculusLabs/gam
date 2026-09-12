@@ -285,7 +285,7 @@ pub fn admit_linear_dictionary(
 /// and the refusal names the frame default as the remedy: the crosscoder lane
 /// pays the layer widening on the cheap frame side, never by silently
 /// narrowing the stacked target.
-pub fn admit_crosscoder_border(
+pub(crate) fn admit_crosscoder_border(
     border_dim: usize,
     full_beta_dim: usize,
     budget_bytes: usize,

@@ -435,7 +435,7 @@ fn behavior_pinned_chart(
 /// The representation–behavior isometry certificate for every atom of the term
 /// (in atom order); each entry is `None` when [`atom_behavior_isometry`] returns
 /// `None` for that atom (non-`d = 1`, or no behavior block installed).
-pub fn behavior_isometry_report(
+pub(crate) fn behavior_isometry_report(
     term: &SaeManifoldTerm,
 ) -> Result<Vec<Option<AtomBehaviorIsometry>>, String> {
     (0..term.atoms.len())

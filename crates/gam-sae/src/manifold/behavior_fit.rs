@@ -25,7 +25,7 @@ impl SaeManifoldTerm {
 
     /// The installed crosscoder stacked-column layout, or `None` for a term with
     /// no multi-block layout recorded.
-    pub fn crosscoder_layout(&self) -> Option<&CrosscoderLayout> {
+    pub(crate) fn crosscoder_layout(&self) -> Option<&CrosscoderLayout> {
         self.crosscoder_layout.as_ref()
     }
 

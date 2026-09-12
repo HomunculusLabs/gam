@@ -67,7 +67,7 @@ impl CircleTransportReport {
 /// more than the natural `2/√n` resultant scale — i.e. the data cannot
 /// distinguish shift from reflection, which for genuine O(2) elements happens
 /// only at `n` too small to matter.
-pub fn classify_circle_transport(
+pub(crate) fn classify_circle_transport(
     theta_in: &[f64],
     theta_out: &[f64],
     layer_from: usize,

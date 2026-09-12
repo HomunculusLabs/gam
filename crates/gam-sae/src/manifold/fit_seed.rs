@@ -20,7 +20,7 @@ pub const DEFAULT_SAE_SPARSITY_STRENGTH: f64 = 1.0;
 
 /// Atom count at which native ARD switches from per-atom coordinates to one
 /// shared coordinate per intrinsic axis.
-pub const SAE_SHARED_ARD_K_THRESHOLD: usize = 256;
+pub(crate) const SAE_SHARED_ARD_K_THRESHOLD: usize = 256;
 
 /// Strict typed assignment family for fit-seed construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +127,7 @@ pub struct SaeFitSeedReport {
 }
 
 /// Admit one manifold fit shape through the assignment-aware front door.
-pub fn admit_sae_fit_shape(
+pub(crate) fn admit_sae_fit_shape(
     n_obs: usize,
     p_out: usize,
     k_atoms: usize,

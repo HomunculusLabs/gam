@@ -124,7 +124,7 @@ pub const EMBEDDEDNESS_CENTER_NODES: usize = 512;
 /// has its coincidence) is a node — the one point where an exactly folded atom
 /// is caught by the sample rather than only by the correction. Like
 /// [`EMBEDDEDNESS_CENTER_NODES`] this is a resolution and not a threshold.
-pub const EMBEDDEDNESS_SEPARATION_NODES: usize = 257;
+pub(crate) const EMBEDDEDNESS_SEPARATION_NODES: usize = 257;
 
 /// Per-atom certificate that a fitted `d = 1` periodic decoder's image is an
 /// embedded circle — produced by [`certify_periodic_decoder_embeddedness`].
@@ -311,7 +311,7 @@ pub fn certify_periodic_decoder_embeddedness(
 /// Build the embeddedness certificate for one fitted atom, or `None` when the
 /// atom is not a `d = 1` periodic (trig-polynomial) decoder — the only family
 /// whose separation function this module's algebra covers.
-pub fn atom_decoder_embeddedness(
+pub(crate) fn atom_decoder_embeddedness(
     term: &SaeManifoldTerm,
     atom_idx: usize,
 ) -> Result<Option<AtomEmbeddednessCertificate>, String> {

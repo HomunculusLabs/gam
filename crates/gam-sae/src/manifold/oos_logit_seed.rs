@@ -22,7 +22,7 @@ impl SaeManifoldTerm {
     /// softmax gauge. Puts every row in the decisive basin before the
     /// fixed-decoder Newton refinement re-optimizes the coordinates and logits
     /// jointly.
-    pub fn seed_oos_softmax_logits_from_projection_residuals(
+    pub(crate) fn seed_oos_softmax_logits_from_projection_residuals(
         &mut self,
         target: ArrayView2<'_, f64>,
         tau: f64,
@@ -56,7 +56,7 @@ impl SaeManifoldTerm {
     /// in `[0,1]`; the seeded logit is their temperature-scaled inverse sigmoid.
     /// Ordered shrinkage is applied by the ordered Beta--Bernoulli prior during fitting, not as a
     /// second cap in this reconstruction seed.
-    pub fn seed_oos_ordered_beta_bernoulli_logits_from_projected_decoder_lsq(
+    pub(crate) fn seed_oos_ordered_beta_bernoulli_logits_from_projected_decoder_lsq(
         &mut self,
         target: ArrayView2<'_, f64>,
         tau: f64,

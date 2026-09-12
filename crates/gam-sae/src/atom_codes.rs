@@ -113,7 +113,7 @@ impl BitVec {
     }
 
     /// Iterator over set indices in ascending order.
-    pub fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
+    pub(crate) fn iter_ones(&self) -> impl Iterator<Item = usize> + '_ {
         (0..self.len).filter(move |&i| self.get(i))
     }
 
@@ -276,7 +276,7 @@ impl SparseAtomCodes {
     /// This is the structure-search candidate index: rows contribute only their
     /// active-set pairs, so the producer cost is `Σ_row |S_row|²` and the output
     /// is bounded by observed co-firings, not by `K²`.
-    pub fn coactive_pair_stats(&self) -> Vec<(usize, usize, CoactivationStats)> {
+    pub(crate) fn coactive_pair_stats(&self) -> Vec<(usize, usize, CoactivationStats)> {
         #[derive(Clone, Copy, Debug, Default)]
         struct PairAccum {
             n_joint: usize,

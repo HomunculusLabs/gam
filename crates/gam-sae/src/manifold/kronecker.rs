@@ -176,7 +176,7 @@ impl SaeKroneckerRows {
     /// (#974). `None` leaves the operator on the isotropic `M_n = I_p` path
     /// (bit-for-bit identical applies). Builder form so the isotropic
     /// constructor `new` stays a two-argument drop-in for existing callers.
-    pub fn with_output_metric(mut self, metric: Option<gam_problem::RowMetric>) -> Self {
+    pub(crate) fn with_output_metric(mut self, metric: Option<gam_problem::RowMetric>) -> Self {
         self.output_metric = metric;
         self
     }

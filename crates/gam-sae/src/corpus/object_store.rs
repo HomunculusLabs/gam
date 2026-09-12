@@ -79,7 +79,7 @@ pub const PREFETCH_SHARDS_AHEAD: usize = 2;
 /// single linear pass per outer iteration dominates the entire fit budget and
 /// where the #973 cascade's honest-subsample arms stop being an optimization
 /// and become the only affordable unbiased estimator.
-pub const DESIGNED_SAMPLE_MANDATORY_MIN_ROWS: u64 = 100_000_000;
+pub(crate) const DESIGNED_SAMPLE_MANDATORY_MIN_ROWS: u64 = 100_000_000;
 
 /// Auto-switch predicate (#987): must this corpus be fit through a designed,
 /// honesty-weighted subsample? Pure function of the row count; no flag.

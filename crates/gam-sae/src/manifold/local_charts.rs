@@ -1036,7 +1036,7 @@ impl LocalAtlas {
     /// sign certificate. It deliberately returns ordinary tuples that no
     /// authoritative holonomy constructor accepts as analytic provenance.
     #[must_use]
-    pub fn observed_signed_edges(&self) -> Vec<(usize, usize, usize, i8)> {
+    pub(crate) fn observed_signed_edges(&self) -> Vec<(usize, usize, usize, i8)> {
         self.transitions
             .iter()
             .filter(|transition| {

@@ -57,7 +57,7 @@ impl SaeManifoldAtom {
     /// Errors when the atom has no installed evaluator (a caller-managed basis
     /// cannot be re-evaluated at off-grid coordinates) or when `coords` has the
     /// wrong latent width.
-    pub fn decode_at_coords(&self, coords: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+    pub(crate) fn decode_at_coords(&self, coords: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
         let evaluator = self.basis_evaluator.as_ref().ok_or_else(|| {
             "SaeManifoldAtom::decode_at_coords: atom has no installed basis evaluator; a \
              caller-managed basis cannot be re-evaluated at steered coordinates"

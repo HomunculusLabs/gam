@@ -155,7 +155,7 @@ impl AtomLinearImage {
     /// Whether this image is a #1777 collapse-rescued image (carries a projection
     /// direction `v`) rather than an ordinary straight image evaluated at the
     /// atom's own coordinate.
-    pub fn is_collapse_rescued(&self) -> bool {
+    pub(crate) fn is_collapse_rescued(&self) -> bool {
         self.v.is_some()
     }
 }

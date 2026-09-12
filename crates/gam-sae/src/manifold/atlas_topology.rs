@@ -316,7 +316,7 @@ impl AtlasTopologyReadout {
     /// structural: the twist has to have survived cocycle closure, connectivity,
     /// and the classification table before it counts as observed.
     #[must_use]
-    pub fn observes_non_orientable(&self) -> bool {
+    pub(crate) fn observes_non_orientable(&self) -> bool {
         matches!(
             self.observed_manifold(),
             Some(

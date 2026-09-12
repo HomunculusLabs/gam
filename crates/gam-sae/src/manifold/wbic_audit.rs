@@ -133,7 +133,7 @@ impl ReconSpectrum {
     /// Only an exactly zero reconstruction spectrum stays at rank 0 here.
     /// The stronger state-aware vanished-atom certificate runs before evidence
     /// pricing and may categorically refuse roundoff-indistinguishable signal.
-    pub fn production_chargeable_rank(&self) -> usize {
+    pub(crate) fn production_chargeable_rank(&self) -> usize {
         self.rank_classification().production_chargeable_rank
     }
 
@@ -146,7 +146,7 @@ impl ReconSpectrum {
 /// `super::construction::realised_rank_charge_dof` byte-for-byte on the shared
 /// quantities (checked in the parity test), returning the spectrum instead of the
 /// collapsed `rank_eff · basis_edf`.
-pub fn recon_spectrum(
+pub(crate) fn recon_spectrum(
     gram: &Array2<f64>,
     decoder: &Array2<f64>,
     n_eff: f64,

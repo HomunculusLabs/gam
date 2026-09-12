@@ -127,7 +127,7 @@ impl SaeRowLayout {
 
     /// Expand a compact TopK coordinate step back into the full coordinate row,
     /// writing zeros for inactive atoms.
-    pub fn expand_row(&self, row: usize, delta_t_row: &[f64], out: &mut [f64]) {
+    pub(crate) fn expand_row(&self, row: usize, delta_t_row: &[f64], out: &mut [f64]) {
         for v in out.iter_mut() {
             *v = 0.0;
         }

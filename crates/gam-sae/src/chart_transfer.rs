@@ -30,7 +30,7 @@ pub struct TransferCertificate {
 
 
 /// Compute one pulled-back operator from an output chart jet and ambient JVPs.
-pub fn pulled_back_operator(
+pub(crate) fn pulled_back_operator(
     output_chart_jet: ArrayView2<'_, f64>,
     ambient_jvp_input_chart: ArrayView2<'_, f64>,
 ) -> Result<Array2<f64>, String> {
