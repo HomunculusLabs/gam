@@ -4069,13 +4069,25 @@ pub(crate) mod whitened_spectrum {
             let mut hi = lambda_lo_eval
                 .max(self.lambda_max_abs)
                 .max(f64::MIN_POSITIVE);
-            let mut grow_guard = 0;
-            while self.step_norm_sq(hi).sqrt() > target && grow_guard < 200 {
-                hi *= 2.0;
-                grow_guard += 1;
+            // Grow the upper bracket until the step norm falls to the radius. The
+            // doubling is precision-complete: from `MIN_POSITIVE` it reaches
+            // `f64::MAX` in about two thousand steps, so no count is needed.
+            while self.step_norm_sq(hi).sqrt() > target && hi < f64::MAX {
+                hi = (2.0 * hi).min(f64::MAX);
             }
+            // Termination belongs to the arithmetic, not to a count. The loop ends
+            // when φ is inside the rounding band of the norm it is computed from,
+            // or when no representable λ lies strictly inside the bracket. Every
+            // iteration moves `lo` or `hi` onto a point strictly inside, and an
+            // iteration that fails to halve the bracket makes the next proposal the
+            // midpoint, so the bracket at least halves every two iterations and the
+            // loop ends by exhaustion at worst.
+            let phi_band =
+                gam_linalg::roundoff::accumulation_growth(4 * self.gamma.len() + 3) / target;
+            let mut width = hi - lo;
+            let mut force_bisection = false;
             let mut lambda = 0.5 * (lo + hi);
-            for _ in 0..100 {
+            while lambda > lo && lambda < hi {
                 let q = self.step_norm_sq(lambda);
                 let norm = q.sqrt();
                 if !norm.is_finite() {
@@ -4090,7 +4102,7 @@ pub(crate) mod whitened_spectrum {
                     hi = lambda;
                 }
                 let phi = 1.0 / norm - 1.0 / target;
-                if phi.abs() <= 1e-12 / target {
+                if phi.abs() <= phi_band {
                     break;
                 }
                 // q'(λ) = -2 Σ c_k²/(γ_k+λ)³ ⇒ d/dλ (1/norm) = -½ q^{-3/2} q'.
@@ -4114,15 +4126,16 @@ pub(crate) mod whitened_spectrum {
                 } else {
                     0.5 * (lo + hi)
                 };
-                // Safeguard into the bracket.
-                lambda = if next.is_finite() && next > lo && next < hi {
+                let halved = hi - lo <= 0.5 * width;
+                width = hi - lo;
+                // Safeguard into the bracket, and bisect after an iteration that did
+                // not halve it.
+                lambda = if !force_bisection && next.is_finite() && next > lo && next < hi {
                     next
                 } else {
                     0.5 * (lo + hi)
                 };
-                if (hi - lo) <= 1e-14 * (1.0 + hi.abs()) {
-                    break;
-                }
+                force_bisection = !halved;
             }
             self.assemble(lambda, None)
         }
