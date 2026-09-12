@@ -92,11 +92,6 @@ fn contains_fd_identifier_token(source: &str) -> bool {
 /// the old `root/src/...` monolith and down into a `crates/<crate>/src/...`
 /// tree).
 const SANCTIONED_FD_FILES: &[&str] = &[
-    // Declares the `hessian_fd_probes` module, whose pub accessors hand tests the
-    // dense effective Hessian and the converged inner state at a fixed theta.
-    // The accessors difference nothing; the tests that call them form the
-    // differences.
-    "crates/gam-solve/src/estimate/mod.rs",
     // Implements the external `opt` crate's `set_finite_difference_bounds` hook by
     // delegation. gam takes no finite difference there.
     "crates/gam-solve/src/rho_optimizer/run.rs",

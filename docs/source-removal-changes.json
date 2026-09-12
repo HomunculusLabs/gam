@@ -4285,5 +4285,13 @@
     ],
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). StreamingArrowSchur::reduced_schur_and_log_det_tt has no caller in gam-cli, gam-pyffi, gamfit, examples, another crate's production code or any test. It was also the only code that set the streaming lane's evidence_factorization and refuse_resolved_indefinite fields to anything other than false. Those two pub(crate) fields are therefore removed, and factor_row passes false directly, so behaviour is unchanged for every surviving caller.",
     "evidence": "The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes the method DELETE with zero references in every category. At 6272b6588, git grep -w finds it only at its definition and in one factorization.rs comment reworded here. git grep over crates and src finds the two fields read only in system.rs factor_row and written only in the constructor (false), in solve (false) and in the deleted method. The item list follows source_removal_guard.py's ITEM rule over the removed hunks: one pub fn. Struct fields are not guarded items."
+  },
+  {
+    "base": "1d1013904ab3de9bc621a337587d672a2e0f49db",
+    "items": [
+      "crates/gam-solve/src/estimate/hessian_fd_probes.rs:fn:debug_full_h"
+    ],
+    "reason": "#2901 (SPEC rules 2 and 25). crates/gam-solve/src/estimate/hessian_fd_probes.rs held one pub method, ExternalJointHyperEvaluator::debug_full_h, a DEBUG ONLY accessor whose stated purpose was to let tests difference the dense effective Hessian. Nothing calls it, in production or in tests: the gam-models regression guards its module comment names no longer use it. The file and its mod declaration are deleted, and estimate/mod.rs leaves the FD scanner allowlist because it no longer declares an FD-named module.",
+    "evidence": "At the base, git grep -n -w debug_full_h over the whole repository finds only its declaration in hessian_fd_probes.rs, the mod.rs comment removed here, and its restored-in-place row in docs/public-api-2829-disposition.tsv, which becomes retired-no-product-user with the counts table in docs/rust-library-surface.md adjusted by one. Its callees keep other callers: prepare_eval_state_cost_only (joint_hyper.rs), compute_cost, and objective_innerhessian (smoothing_correction.rs). The item list applies source_removal_guard.py's ITEM regex to the base blob by hand, and debug_full_h is public, so it is guarded. Compile is covered by the lead's shared tip check."
   }
 ]

@@ -1676,5 +1676,13 @@
     },
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). StreamingArrowSchur::reduced_schur_and_log_det_tt has no caller anywhere, tests included.",
     "evidence": "The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes it DELETE with zero references in every category. At 6272b6588, git grep -w finds it only at its definition and in one factorization.rs comment reworded in this commit."
+  },
+  {
+    "base": "1d1013904ab3de9bc621a337587d672a2e0f49db",
+    "removed": {
+      "crates/gam-solve/src/estimate/hessian_fd_probes.rs::debug_full_h": 1
+    },
+    "reason": "#2901 (SPEC rules 2 and 25): ExternalJointHyperEvaluator::debug_full_h was a debug accessor for finite-difference tests, and nothing calls it.",
+    "evidence": "public_api_census.py's public_functions predicate over crates/gam-solve/src/estimate/hessian_fd_probes.rs at the base yields debug_full_h alone, and the file is deleted. git grep -n -w debug_full_h finds no caller. No other changed file loses a pub fn."
   }
 ]

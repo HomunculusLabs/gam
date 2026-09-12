@@ -874,7 +874,7 @@ crates/gam-solve/src/cross_node.rs	rank_cursor	restored-in-place
 crates/gam-solve/src/cross_node.rs	receive	restored-in-place
 crates/gam-solve/src/estimate/evaluation.rs	evaluate_external_ift_residual_at_perturbed_rho	retired-no-surviving-dependent
 crates/gam-solve/src/estimate/fit.rs	fit_gam	retired-by-decision
-crates/gam-solve/src/estimate/hessian_fd_probes.rs	debug_full_h	restored-in-place
+crates/gam-solve/src/estimate/hessian_fd_probes.rs	debug_full_h	retired-no-product-user
 crates/gam-solve/src/estimate/joint_hyper.rs	psi_gram_tensor_handle	retired-no-surviving-dependent
 crates/gam-solve/src/estimate/optimizer.rs	optimize_external_design	restored-in-place
 crates/gam-solve/src/estimate/outer_eval_capture.rs	enable_outer_eval_capture	retired-no-surviving-dependent
