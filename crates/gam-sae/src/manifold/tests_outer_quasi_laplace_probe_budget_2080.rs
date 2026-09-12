@@ -1072,7 +1072,8 @@ fn entangled_two_circle_outer_reml_separates_2080() {
 /// proximal-correction LM ridge escalation keeps every step a descent step, so
 /// the fit reaches a finite, materially-positive-EV basin at every ρ instead of
 /// diverging. Each fixed-ρ evaluation must return `Ok` with a finite penalized quasi-Laplace cost
-/// and (for the feasible low-to-mid smoothing range) a materially positive EV.
+/// and end no worse than the seed's own block optimum; a materially positive EV is required only
+/// where the objective's ridge shrinkage at the seed still supports one (#2228).
 #[test]
 fn small_fold_high_rank_circle_inner_solve_converges_2138() {
     let n = 35usize;
@@ -1128,7 +1129,7 @@ fn small_fold_high_rank_circle_inner_solve_converges_2138() {
         "circle",
         SaeAtomBasisKind::Periodic,
         1,
-        phi,
+        phi.clone(),
         jet,
         decoder,
         Array2::<f64>::eye(m),
@@ -1146,6 +1147,7 @@ fn small_fold_high_rank_circle_inner_solve_converges_2138() {
         .expect("the single atom and its assignment agree on atom count");
     // The whole smoothing sweep, from flexible (-8) through the over-smoothed tail
     // (+8) where the undamped Laplace log-det is worst conditioned.
+    let mut ev_floor_arms = 0usize;
     for &smooth in &[-8.0_f64, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0, 8.0] {
         let mut t = base.clone();
         let r = SaeManifoldRho::new(0.02_f64.ln(), smooth, vec![array![0.0]]);
@@ -1179,13 +1181,90 @@ fn small_fold_high_rank_circle_inner_solve_converges_2138() {
             cost.is_finite(),
             "#2138: inner solve returned a non-finite penalized quasi-Laplace cost at smoothing={smooth}",
         );
-        assert!(
-            ev.is_finite() && ev > 0.30,
-            "#2138: high-working-rank small-fold circle fit must recover a materially positive \
-             EV at smoothing={smooth} (got {ev:.4}), proving the inner solve reached a real \
-             basin rather than a diverged / collapsed state",
+        // #2228 — the atom carries the identity function Gram, so the smoothness prior is
+        // ½·λ·‖B‖² and the posterior ridge-shrinks every harmonic. With ΦᵀΦ ≈ n/2 per
+        // harmonic column that predicts EV ≈ 0.43 at log λ = 4, 0.08 at log λ = 6 (measured
+        // 0.1016 at de5cc1107, pool job 507706) and 0.012 at log λ = 8, so one EV floor at
+        // every smoothing contradicts the objective it judges. Both bars below come from the
+        // objective at this ρ instead.
+        //
+        // The reference state is the seed coordinates with the closed-form ridge decoder
+        // `(DᵀD + λS)⁻¹DᵀZ`, `D = gate·Φ(seed)`: the decoder block optimum at the seed.
+        let lambda = r.lambda_smooth_vec().expect("one smoothing block for the single atom")[0];
+        let penalty = base.atoms[0].smooth_penalty();
+        let mut design = Array2::<f64>::zeros((n, m));
+        for row in 0..n {
+            let gate = base
+                .assignment
+                .try_assignments_row(row)
+                .expect("the seed routing has a finite gate on every row")[0];
+            for col in 0..m {
+                design[[row, col]] = gate * phi[[row, col]];
+            }
+        }
+        let mut normal = fast_atb(&design, &design);
+        for i in 0..m {
+            for j in 0..m {
+                normal[[i, j]] += lambda * 0.5 * (penalty[[i, j]] + penalty[[j, i]]);
+            }
+        }
+        let ridge_decoder = normal
+            .cholesky(Side::Lower)
+            .expect("DᵀD + λS is positive definite for λ > 0 and S = I")
+            .solve_mat(&fast_atb(&design, &z));
+        let mut flat = Array1::<f64>::zeros(m * p);
+        for a in 0..m {
+            for o in 0..p {
+                flat[a * p + o] = ridge_decoder[[a, o]];
+            }
+        }
+        let mut reference = base.clone();
+        reference
+            .set_flat_beta(flat.view())
+            .expect("the ridge decoder has the atom's full-B shape");
+        // Read both objectives under the converged term's frozen barrier gate.
+        reference.amplitude_barrier_gate = t.amplitude_barrier_gate;
+        let reference_objective = reference
+            .penalized_objective_total(z.view(), &r, None, 1.0)
+            .expect("finite objective at the seed block optimum");
+        let converged_objective = t
+            .penalized_objective_total(z.view(), &r, None, 1.0)
+            .expect("finite objective at the converged state");
+        let reference_ev = global_ev(z.view(), reference.fitted().view());
+        eprintln!(
+            "[#2138] smoothing={smooth} ev={ev:.4} seed_ridge_ev={reference_ev:.4} \
+             objective={converged_objective:.9e} seed_block_objective={reference_objective:.9e}"
         );
+        // (a) Every committed inner move lowers the penalized objective, so a converged
+        // state above the seed's block optimum sits in a worse basin than the one its own
+        // seed offers: the diverged or collapsed state this test exists to catch.
+        let resolution =
+            SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * (1.0 + reference_objective.abs());
+        assert!(
+            converged_objective.is_finite() && converged_objective <= reference_objective + resolution,
+            "#2138: at smoothing={smooth} the converged penalized objective \
+             {converged_objective:.9e} is above the seed block optimum {reference_objective:.9e} \
+             (seed coordinates, closed-form ridge decoder), so the inner solve ended in a worse \
+             basin than its own seed's",
+        );
+        // (b) A materially positive EV is owed only where the same ridge at the seed already
+        // clears the floor.
+        if reference_ev > 0.30 {
+            ev_floor_arms += 1;
+            assert!(
+                ev.is_finite() && ev > 0.30,
+                "#2138: high-working-rank small-fold circle fit must recover a materially \
+                 positive EV at smoothing={smooth} (got {ev:.4}; the seed ridge predicts \
+                 {reference_ev:.4}), proving the inner solve reached a real basin rather than \
+                 a diverged / collapsed state",
+            );
+        }
     }
+    assert!(
+        ev_floor_arms > 0,
+        "#2138: the EV floor must be live at some smoothing of the sweep, but the seed ridge \
+         cleared 0.30 at none of them",
+    );
 }
 
 /// #2080 COST-LANE PROFILER + criterion-finiteness gate.
