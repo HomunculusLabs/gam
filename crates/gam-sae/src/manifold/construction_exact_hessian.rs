@@ -868,8 +868,10 @@ impl SaeManifoldTerm {
         }
     }
 
-    /// `Self::apply_exact_hessian_minus_b` against a β-tier decoder-prior plan
-    /// prepared once for this state.
+    /// Legs (1)–(4) of `Self::apply_exact_hessian_minus_b` against a β-tier
+    /// decoder-prior plan prepared once for this state. Leg (5) is
+    /// `Self::decoder_prior_gap_border_leg`, which
+    /// [`Self::apply_exact_hessian_minus_b_prepared`] folds in after these four.
     ///
     /// #2828 — the β leg's plan is a property of the DECODER STATE, not of the
     /// direction, so a caller that applies `ΔC` many times at one state (a dense
@@ -881,7 +883,7 @@ impl SaeManifoldTerm {
     /// #2731 — the residual-curvature legs are the same kind of object and take
     /// the same treatment: `residual` is
     /// [`Self::prepare_residual_curvature_rows`] at this state.
-    pub(crate) fn apply_exact_hessian_minus_b_prepared(
+    fn apply_exact_hessian_minus_b_prepared_before_beta_prior_leg(
         &self,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
@@ -1241,167 +1243,89 @@ impl SaeManifoldTerm {
             }
         }
 
-        // (5) #2828 — the β-tier decoder priors' exact-minus-majorizer curvature.
-        // Until this leg existed `ΔC` had NO β block at all, so `A_ββ` was
-        // whatever PSD majorizer the assembly installed (the repulsion's
-        // Gauss-Newton block, the amplitude barrier's isotropic ridge, the
-        // separation barrier's `|M|` coupling and `lev` ridge) rather than the
-        // second derivative of the objective `assemble_arrow_schur` gradients —
-        // the whole of the #2330 disagreement, and one-directional: a majorizer
-        // only ever OVER-claims curvature, which is exactly how an
-        // `IndefiniteObservedInformation` refusal can fire on a mode that is not
-        // a saddle.
-        //
-        // The remainder is derived in the full-`B` decoder layout because that is
-        // where the priors live and where the assembly writes them (BEFORE the
-        // frame transform). Under an engaged frame the border coordinate is the
-        // factored `C`, and `B = ΦC` with `Φ = blkdiag(I_M ⊗ U_k)`, `U_kᵀU_k = I`,
-        // so the correct factored operator is the congruence `Φᵀ ΔC_ββ Φ` — lift
-        // the direction, apply, project back. That is the same sandwich
-        // `add_factored_repulsion_curvature` applies to the majorizer this
-        // subtracts, so the two stay in one coordinate system.
+        Ok(out)
+    }
+
+    /// `ΔC·v` against plans prepared once for this state: legs (1)–(4) from
+    /// `Self::apply_exact_hessian_minus_b_prepared_before_beta_prior_leg`, then
+    /// leg (5) from `Self::decoder_prior_gap_border_leg`, added to `out.β` in index
+    /// order.
+    pub(crate) fn apply_exact_hessian_minus_b_prepared(
+        &self,
+        rho: &SaeManifoldRho,
+        target: ArrayView2<'_, f64>,
+        cache: &ArrowFactorCache,
+        v: &SaeArrowVector,
+        prepared: &PreparedDecoderPriorBetaCurvature,
+        residual: &PreparedResidualCurvatureRows,
+    ) -> Result<SaeArrowVector, String> {
+        let mut out = self.apply_exact_hessian_minus_b_prepared_before_beta_prior_leg(
+            rho, target, cache, v, prepared, residual,
+        )?;
         if cache.k > 0 {
-            let beta_dim = self.beta_dim();
             let projection = crate::frames::FrameProjection::new(self);
-            let framed = self.last_frames_active && cache.k == self.factored_border_dim();
-            if framed {
-                let lifted = projection.lift_border_vec(v.beta.view());
-                let delta = self.decoder_prior_exact_minus_majorizer_beta_hvp_prepared(
-                    prepared,
-                    lifted.view(),
-                )?;
-                let projected = projection.project_border_vec(delta.view());
-                for (index, &value) in projected.iter().enumerate() {
-                    out.beta[index] += value;
-                }
-            } else if cache.k == beta_dim {
-                let delta = self.decoder_prior_exact_minus_majorizer_beta_hvp_prepared(
-                    prepared,
-                    v.beta.view(),
-                )?;
-                for (index, &value) in delta.iter().enumerate() {
-                    out.beta[index] += value;
-                }
-            } else {
-                return Err(format!(
-                    "apply_exact_hessian_minus_b: border width {} is neither the full-B \
-                     beta_dim {beta_dim} nor the factored border dim {}, so the beta-tier \
-                     decoder-prior curvature correction has no coordinate system to be \
-                     expressed in",
-                    cache.k,
-                    self.factored_border_dim(),
-                ));
+            let leg =
+                self.decoder_prior_gap_border_leg(cache, prepared, &projection, v.beta.view())?;
+            for (index, &value) in leg.iter().enumerate() {
+                out.beta[index] += value;
             }
         }
         Ok(out)
     }
 
-    /// #2828 — the border block of `E = B − A`, restricted to the β-tier decoder
-    /// priors' MAJORIZATION artefact: `E_ββ = (installed PSD majorizer) − (exact
-    /// prior Hessian)`, i.e. exactly the negation of the β leg
-    /// `Self::apply_exact_hessian_minus_b` now adds to `A`. Dense `k × k` in the
-    /// cache's own border coordinates (factored when a frame is engaged), `None`
-    /// when no β-tier prior is live and the block is identically zero.
+    /// Leg (5) of `ΔC·v` (#2828): the β-tier decoder priors' exact-minus-majorizer
+    /// curvature along `v_beta`, in the cache's own border coordinates.
     ///
-    /// This is the border sibling of [`Self::materialize_ard_concave_clamp_diagonal`]
-    /// and it exists for the same reason. Before #2828 the exact `A` silently
-    /// carried the assembly's β majorizers, so `A` and `B` agreed there and the
-    /// pricing had nothing to attribute. Making `A_ββ` exact makes it genuinely
-    /// indefinite wherever a decoder prior is nonconvex — measured on
-    /// `threshold_gate_tiny_fixture(false)`: 14 negative eigenvalues, nine of them
-    /// O(1)–O(10), against 5 small ones before. Every one of those nine is a known
-    /// bounded majorization gap, not a saddle of the objective, and this is the
-    /// operator that says so: `A + E` restores the majorizer on exactly the β
-    /// block, so `vᵀ(A+E)v` is `vᵀBv` there and the
-    /// `IndefiniteObservedInformation` refusal keeps meaning "not attributable".
+    /// Until this leg existed `ΔC` had NO β block at all, so `A_ββ` was
+    /// whatever PSD majorizer the assembly installed (the repulsion's
+    /// Gauss-Newton block, the amplitude barrier's isotropic ridge, the
+    /// separation barrier's `|M|` coupling and `lev` ridge) rather than the
+    /// second derivative of the objective `assemble_arrow_schur` gradients —
+    /// the whole of the #2330 disagreement, and one-directional: a majorizer
+    /// only ever OVER-claims curvature, which is exactly how an
+    /// `IndefiniteObservedInformation` refusal can fire on a mode that is not
+    /// a saddle.
     ///
-    /// Cost is `k` applies of the closed-form remainder — the same order as the
-    /// `k` border probes [`Self::materialize_exact_hessian_dense`] already pays on
-    /// this route, and strictly smaller than the `dim × dim` block it is priced
-    /// beside.
-    pub(crate) fn decoder_prior_majorizer_gap_border(
+    /// The remainder is derived in the full-`B` decoder layout because that is
+    /// where the priors live and where the assembly writes them (BEFORE the
+    /// frame transform). Under an engaged frame the border coordinate is the
+    /// factored `C`, and `B = ΦC` with `Φ = blkdiag(I_M ⊗ U_k)`, `U_kᵀU_k = I`,
+    /// so the correct factored operator is the congruence `Φᵀ ΔC_ββ Φ` — lift
+    /// the direction, apply, project back. That is the same sandwich
+    /// `add_factored_repulsion_curvature` applies to the majorizer this
+    /// subtracts, so the two stay in one coordinate system.
+    ///
+    /// `E_ββ = B − A` on the border is this leg's negation, so a caller that keeps
+    /// the columns of `k` border probes has the gap border without a second pass.
+    fn decoder_prior_gap_border_leg(
         &self,
         cache: &ArrowFactorCache,
-    ) -> Result<Option<Array2<f64>>, String> {
-        let k = cache.k;
-        if k == 0 {
-            return Ok(None);
-        }
+        prepared: &PreparedDecoderPriorBetaCurvature,
+        projection: &crate::frames::FrameProjection,
+        v_beta: ArrayView1<'_, f64>,
+    ) -> Result<Array1<f64>, String> {
         let beta_dim = self.beta_dim();
-        let projection = crate::frames::FrameProjection::new(self);
-        let framed = self.last_frames_active && k == self.factored_border_dim();
-        if !framed && k != beta_dim {
-            return Err(format!(
-                "decoder_prior_majorizer_gap_border: border width {k} is neither the \
-                 full-B beta_dim {beta_dim} nor the factored border dim {}",
+        let framed = self.last_frames_active && cache.k == self.factored_border_dim();
+        if framed {
+            let lifted = projection.lift_border_vec(v_beta);
+            let delta = self.decoder_prior_exact_minus_majorizer_beta_hvp_prepared(
+                prepared,
+                lifted.view(),
+            )?;
+            Ok(projection.project_border_vec(delta.view()))
+        } else if cache.k == beta_dim {
+            self.decoder_prior_exact_minus_majorizer_beta_hvp_prepared(prepared, v_beta)
+        } else {
+            Err(format!(
+                "apply_exact_hessian_minus_b: border width {} is neither the full-B \
+                 beta_dim {beta_dim} nor the factored border dim {}, so the beta-tier \
+                 decoder-prior curvature correction has no coordinate system to be \
+                 expressed in",
+                cache.k,
                 self.factored_border_dim(),
-            ));
+            ))
         }
-        let mut gap = Array2::<f64>::zeros((k, k));
-        let prepared = self.prepare_decoder_prior_beta_curvature(1.0);
-        // #2731 — every column is an independent apply against the plan prepared
-        // above, so the columns run on the rayon pool in batches of the pool width
-        // and are written serially in column order: `gap` is bit-identical to the
-        // one-column-at-a-time loop, and the first failing column's error is the one
-        // returned. Job 510613 read ~84 s per polish step between `operator BUILT`
-        // and a 0.106 s eigendecomposition at `p = 2048, charts = 32` (`k = 288`) on
-        // one core, the order of 288 applies at the border probes' ~296 ms each.
-        use rayon::prelude::*;
-        let pool_threads = rayon::current_num_threads().max(1);
-        let build_started = std::time::Instant::now();
-        for batch_start in (0..k).step_by(pool_threads) {
-            let batch_end = (batch_start + pool_threads).min(k);
-            let columns: Vec<Result<Array1<f64>, String>> = (batch_start..batch_end)
-                .into_par_iter()
-                .map(|col| -> Result<Array1<f64>, String> {
-                    let mut unit = Array1::<f64>::zeros(k);
-                    unit[col] = 1.0;
-                    if framed {
-                        let lifted = projection.lift_border_vec(unit.view());
-                        let delta = self.decoder_prior_exact_minus_majorizer_beta_hvp_prepared(
-                            &prepared,
-                            lifted.view(),
-                        )?;
-                        Ok(projection.project_border_vec(delta.view()))
-                    } else {
-                        self.decoder_prior_exact_minus_majorizer_beta_hvp_prepared(
-                            &prepared,
-                            unit.view(),
-                        )
-                    }
-                })
-                .collect();
-            for (offset, column) in columns.into_iter().enumerate() {
-                let column = column?;
-                let col = batch_start + offset;
-                // `E = B − A` and the β leg of `A − B` is `column`, so `E` is its
-                // negation.
-                for row in 0..k {
-                    gap[[row, col]] = -column[row];
-                }
-            }
-        }
-        log::info!(
-            "[SAE-EXACT-DENSE] decoder-prior majorizer gap border BUILT: k={k}, {k} applies on \
-             {pool_threads} pool threads in {:.3} s",
-            build_started.elapsed().as_secs_f64(),
-        );
-        if gap.iter().all(|&value| value == 0.0) {
-            return Ok(None);
-        }
-        // The remainder is a difference of two symmetric operators; symmetrize the
-        // probe assembly so the basin quadratic forms below cannot pick up an
-        // asymmetric round-off residue.
-        for row in 0..k {
-            for col in (row + 1)..k {
-                let average = 0.5 * (gap[[row, col]] + gap[[col, row]]);
-                gap[[row, col]] = average;
-                gap[[col, row]] = average;
-            }
-        }
-        Ok(Some(gap))
     }
-
     /// #2828 — `Σ_{r,c} e_beta[r,c]·left[total_t+r]·right[total_t+c]`, the border
     /// block's contribution to a quadratic form in the `(t, β)` layout. `0` when
     /// the block is absent or the vectors carry no border rows (the
@@ -2042,7 +1966,7 @@ impl SaeManifoldTerm {
     ///
     /// Keeping this sum behind one named owner makes it possible to compare the
     /// operator derivative directly with finite differences of
-    /// [`Self::materialize_exact_hessian_dense`], instead of validating only a
+    /// [`Self::materialize_exact_hessian_dense_with_gap_border`], instead of validating only a
     /// downstream trace where spectral classification can obscure which operand
     /// drifted (#2515).
     pub(crate) fn exact_stationarity_penalty_derivatives_by_flat(
@@ -3246,10 +3170,11 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
     ) -> Result<f64, SaeCriterionError> {
         let total_t = cache.delta_t_len();
-        let a = self.materialize_exact_hessian_dense(rho, target, cache)?;
+        // #2828 — the border half of `E = B − A`, read off the same border probes
+        // that build `A` (#2731).
+        let (a, e_beta) =
+            self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        // #2828 — the border half of `E = B − A`.
-        let e_beta = self.decoder_prior_majorizer_gap_border(cache)?;
         let joint = Self::exact_hessian_spectral_block(
             a,
             &e_diag,
@@ -3282,9 +3207,9 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
     ) -> Result<Vec<(Array1<f64>, f64)>, SaeCriterionError> {
         let total_t = cache.delta_t_len();
-        let a = self.materialize_exact_hessian_dense(rho, target, cache)?;
+        let (a, e_beta) =
+            self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        let e_beta = self.decoder_prior_majorizer_gap_border(cache)?;
         let joint = Self::exact_hessian_spectral_block(
             a,
             &e_diag,
@@ -3693,9 +3618,9 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
     ) -> Result<ExactHessianSpectralBlock, String> {
         let total_t = cache.delta_t_len();
-        let a = self.materialize_exact_hessian_dense(rho, target, cache)?;
+        let (a, e_beta) =
+            self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        let e_beta = self.decoder_prior_majorizer_gap_border(cache)?;
         Self::exact_hessian_spectral_block(
             a,
             &e_diag,
@@ -3718,9 +3643,9 @@ impl SaeManifoldTerm {
         cache: &ArrowFactorCache,
     ) -> Result<ExactHessianQuotientGeometry, String> {
         let total_t = cache.delta_t_len();
-        let a = self.materialize_exact_hessian_dense(rho, target, cache)?;
+        let (a, e_beta) =
+            self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)?;
         let e_diag = self.materialize_ard_concave_clamp_diagonal(rho, cache)?;
-        let e_beta = self.decoder_prior_majorizer_gap_border(cache)?;
         let joint = Self::exact_hessian_spectral_block(
             a,
             &e_diag,
@@ -3813,7 +3738,7 @@ impl SaeManifoldTerm {
                     .to_string(),
             );
         }
-        // The probe batches `materialize_exact_hessian_dense` performs: one probe per
+        // The probe batches `materialize_exact_hessian_dense_with_gap_border` performs: one probe per
         // coordinate slot of the widest row and one per border column, run in
         // batches of the pool width. A batch cannot finish before one of its applies
         // does, so one apply per batch keeps this a lower bound on the pooled build.
@@ -3854,12 +3779,17 @@ impl SaeManifoldTerm {
     ///
     /// [`Self::materialize_exact_hessian_dense_by_columns`] is that column
     /// loop, kept as the oracle the equality pin measures this against.
-    pub(crate) fn materialize_exact_hessian_dense(
+    ///
+    /// The border probes also yield `E_ββ`, the β-tier decoder-prior majorizer gap
+    /// on the border (#2828): it is the negation of the leg-(5) columns those probes
+    /// compute (#2731), symmetrized, and `None` when no β-tier prior is live and
+    /// the block is identically zero.
+    pub(crate) fn materialize_exact_hessian_dense_with_gap_border(
         &self,
         rho: &SaeManifoldRho,
         target: ArrayView2<'_, f64>,
         cache: &ArrowFactorCache,
-    ) -> Result<Array2<f64>, String> {
+    ) -> Result<(Array2<f64>, Option<Array2<f64>>), String> {
         let total_t = cache.delta_t_len();
         let k = cache.k;
         let dim = sae_exact_stationarity_dim(total_t, k);
@@ -3967,30 +3897,59 @@ impl SaeManifoldTerm {
                 }
             }
         }
+        // #2731 — each border probe is `apply_exact_hessian_prepared` with leg (5)
+        // of `ΔC` computed here and folded into `ΔC·e_j` exactly as
+        // `apply_exact_hessian_minus_b_prepared` folds it, so the column is
+        // bit-identical, and the leg column is kept: `E_ββ` is its negation, so the
+        // gap border needs no second pass of `k` β-tier applies. Job 539190 read that
+        // second pass at 11.109–13.432 s of each 32.00–40.34 s polish step
+        // (`p = 2048, charts = 32, k = 288`).
+        let projection = crate::frames::FrameProjection::new(self);
+        let mut leg_columns = Array2::<f64>::zeros((k, k));
         for batch_start in (0..k).step_by(pool_threads) {
             let batch_end = (batch_start + pool_threads).min(k);
-            let columns: Vec<Result<SaeArrowVector, String>> = (batch_start..batch_end)
-                .into_par_iter()
-                .map(|j| -> Result<SaeArrowVector, String> {
-                    let mut unit = SaeArrowVector {
-                        t: Array1::<f64>::zeros(total_t),
-                        beta: Array1::<f64>::zeros(k),
-                    };
-                    unit.beta[j] = 1.0;
-                    self.apply_exact_hessian_prepared(
-                        rho, target, cache, &unit, &prepared, &residual,
-                    )
-                })
-                .collect();
-            for (offset, av) in columns.into_iter().enumerate() {
-                let av = av?;
-                let col = total_t + batch_start + offset;
+            let columns: Vec<Result<(SaeArrowVector, Array1<f64>), String>> =
+                (batch_start..batch_end)
+                    .into_par_iter()
+                    .map(|j| -> Result<(SaeArrowVector, Array1<f64>), String> {
+                        let mut unit = SaeArrowVector {
+                            t: Array1::<f64>::zeros(total_t),
+                            beta: Array1::<f64>::zeros(k),
+                        };
+                        unit.beta[j] = 1.0;
+                        let b_v =
+                            apply_raw_cached_arrow_hessian(cache, unit.t.view(), unit.beta.view())?;
+                        let mut dc_v = self
+                            .apply_exact_hessian_minus_b_prepared_before_beta_prior_leg(
+                                rho, target, cache, &unit, &prepared, &residual,
+                            )?;
+                        let leg = self.decoder_prior_gap_border_leg(
+                            cache,
+                            &prepared,
+                            &projection,
+                            unit.beta.view(),
+                        )?;
+                        for (index, &value) in leg.iter().enumerate() {
+                            dc_v.beta[index] += value;
+                        }
+                        let av = SaeArrowVector {
+                            t: &b_v.t + &dc_v.t,
+                            beta: &b_v.beta + &dc_v.beta,
+                        };
+                        Ok((av, leg))
+                    })
+                    .collect();
+            for (offset, column) in columns.into_iter().enumerate() {
+                let (av, leg) = column?;
+                let j = batch_start + offset;
+                let col = total_t + j;
                 for i in 0..total_t {
                     a[[i, col]] = av.t[i];
                     a[[col, i]] = av.t[i];
                 }
                 for i in 0..k {
                     a[[total_t + i, col]] = av.beta[i];
+                    leg_columns[[i, j]] = leg[i];
                 }
             }
         }
@@ -4001,16 +3960,38 @@ impl SaeManifoldTerm {
                 a[[c, r]] = avg;
             }
         }
+        // `E = B − A` and leg (5) is the β-tier part of `A − B` on the border, so
+        // `E_ββ` negates the kept columns. The remainder is a difference of two
+        // symmetric operators; symmetrize the probe assembly so the basin quadratic
+        // forms cannot pick up an asymmetric round-off residue.
+        let gap_border = if k == 0 {
+            None
+        } else {
+            let mut gap = leg_columns.mapv(|value| -value);
+            if gap.iter().all(|&value| value == 0.0) {
+                None
+            } else {
+                for row in 0..k {
+                    for col in (row + 1)..k {
+                        let average = 0.5 * (gap[[row, col]] + gap[[col, row]]);
+                        gap[[row, col]] = average;
+                        gap[[col, row]] = average;
+                    }
+                }
+                Some(gap)
+            }
+        };
         let build_elapsed = build_started.elapsed();
         log::info!(
             "[SAE-EXACT-DENSE] operator BUILT: dim={dim}, {} arrow probes on {pool_threads} pool \
-             threads + symmetrization in {:.3} s ({:.3} ms wall per probe); the O(dim^3) \
-             symmetric eigendecomposition has NOT started yet",
+             threads + symmetrization in {:.3} s ({:.3} ms wall per probe), with the \
+             decoder-prior majorizer gap border from the same {k} border probes; the \
+             O(dim^3) symmetric eigendecomposition has NOT started yet",
             slots + k,
             build_elapsed.as_secs_f64(),
             build_elapsed.as_secs_f64() * 1.0e3 / ((slots + k).max(1) as f64),
         );
-        Ok(a)
+        Ok((a, gap_border))
     }
 
     /// #2330 Phase-2 — the A-based logdet gradient channels on the dense direct
@@ -6284,3 +6265,59 @@ mod tests_clamp_basin_deflation_2333;
 #[cfg(test)]
 #[path = "tests_residual_curvature_rows_2731.rs"]
 mod tests_residual_curvature_rows_2731;
+
+/// #2731 — test-side names for the two halves production reads together from
+/// `SaeManifoldTerm::materialize_exact_hessian_dense_with_gap_border`.
+#[cfg(test)]
+mod tests_dense_exact_a_names_2731 {
+    use super::*;
+
+    impl SaeManifoldTerm {
+        /// The dense exact `A` alone.
+        pub(crate) fn materialize_exact_hessian_dense(
+            &self,
+            rho: &SaeManifoldRho,
+            target: ArrayView2<'_, f64>,
+            cache: &ArrowFactorCache,
+        ) -> Result<Array2<f64>, String> {
+            self.materialize_exact_hessian_dense_with_gap_border(rho, target, cache)
+                .map(|(a, _)| a)
+        }
+
+        /// `E_ββ` alone, from its own `k` applies of leg (5): an independent arm
+        /// against the columns the dense build keeps.
+        pub(crate) fn decoder_prior_majorizer_gap_border(
+            &self,
+            cache: &ArrowFactorCache,
+        ) -> Result<Option<Array2<f64>>, String> {
+            let k = cache.k;
+            if k == 0 {
+                return Ok(None);
+            }
+            let prepared = self.prepare_decoder_prior_beta_curvature(1.0);
+            let projection = crate::frames::FrameProjection::new(self);
+            let mut gap = Array2::<f64>::zeros((k, k));
+            let mut unit = Array1::<f64>::zeros(k);
+            for col in 0..k {
+                unit.fill(0.0);
+                unit[col] = 1.0;
+                let column =
+                    self.decoder_prior_gap_border_leg(cache, &prepared, &projection, unit.view())?;
+                for row in 0..k {
+                    gap[[row, col]] = -column[row];
+                }
+            }
+            if gap.iter().all(|&value| value == 0.0) {
+                return Ok(None);
+            }
+            for row in 0..k {
+                for col in (row + 1)..k {
+                    let average = 0.5 * (gap[[row, col]] + gap[[col, row]]);
+                    gap[[row, col]] = average;
+                    gap[[col, row]] = average;
+                }
+            }
+            Ok(Some(gap))
+        }
+    }
+}
