@@ -4844,12 +4844,14 @@ mod tests {
         let raw = |u: Option<&Array1<f64>>, v: Option<&Array1<f64>>| {
             let mut h = Array2::<f64>::zeros((3, 3));
             for x in rows.rows() {
-                let mut weight = x.dot(&beta).exp();
+                let mut weight = f64::exp(x.dot(&beta));
                 if let Some(u) = u {
-                    weight *= x.dot(u);
+                    let along_u: f64 = x.dot(u);
+                    weight *= along_u;
                 }
                 if let Some(v) = v {
-                    weight *= x.dot(v);
+                    let along_v: f64 = x.dot(v);
+                    weight *= along_v;
                 }
                 for i in 0..3 {
                     for j in 0..3 {
