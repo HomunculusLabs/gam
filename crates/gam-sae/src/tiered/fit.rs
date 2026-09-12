@@ -1209,4 +1209,61 @@ mod fit_tests {
         assert_eq!(record["ledger"]["pc_reseed_events"].as_u64(), Some(0));
         assert!(record["ledger"]["moves"].is_array());
     }
+
+    /// #2023 criterion 3 on the public support-sparse entry: the fit's migration
+    /// ledger accounts for every requested atom — born at the support seed or
+    /// pruned there — records no principal-component reseed, and the payload
+    /// census record is exactly the typed census (its bulk, or its refusal).
+    #[test]
+    fn public_support_fit_accounts_for_every_birth_and_death_2023() {
+        use crate::manifold::{SaeSupportSparseFitRequest, fit_sae_support_sparse_with_census};
+        let z = two_circle_fixture_2634();
+        let p = z.ncols();
+        let censused = fit_sae_support_sparse_with_census(SaeSupportSparseFitRequest {
+            target: z.view(),
+            atom_basis: vec!["periodic".to_string(); p + 1],
+            atom_dim: vec![1; p + 1],
+            support_k: 1,
+            initial_smoothness: 1.0,
+            max_outer_iter: 32,
+            max_inner_iter: SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
+            inner_tolerance: 1.0e-8,
+            trust_radius: 1.0,
+            random_state: 0xC0FF_EE00_D15E_A5E5,
+        })
+        .expect("public support-sparse fit on the two-circle fixture");
+        let fit = &censused.fit;
+        assert!(
+            fit.outer.outer_certificate.certifies() && fit.outer.fixed_point.recurred,
+            "the public entry returns only a certified, recurred fit"
+        );
+        let migration = &fit.migration;
+        assert_eq!(migration.pc_reseed_events, 0, "the support lane never PC-reseeds");
+        assert_eq!(
+            migration.n_births,
+            fit.retained_atom_indices.len(),
+            "every retained atom is one seed birth"
+        );
+        assert_eq!(
+            migration.n_births + migration.n_deaths,
+            fit.requested_atoms,
+            "every requested atom is born or pruned at the seed"
+        );
+        assert_eq!(migration.n_refusals, 0);
+        let record = censused.census_json();
+        match &censused.linear_bulk_census {
+            Ok(report) => {
+                assert_eq!(
+                    record["linear_bulk"]["n_blocks"].as_u64(),
+                    Some(report.tier1.block_utilization.len() as u64)
+                );
+                assert_eq!(report.tier1.block_utilization.len(), p);
+                assert_eq!(report.tier1.block_topk, 1);
+                assert!(report.tier2.is_none());
+            }
+            Err(reason) => {
+                assert_eq!(record["refused"].as_str(), Some(reason.as_str()));
+            }
+        }
+    }
 }
