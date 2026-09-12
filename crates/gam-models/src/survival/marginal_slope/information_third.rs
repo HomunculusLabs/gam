@@ -530,14 +530,15 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
         else {
             return Ok(None);
         };
-        let block_loading = spatial_block_primary_loading(family, block_idx)?;
-        if block_loading.len() != P {
-            return Err(format!(
-                "survival design ψ third information derivative: primary loading has {} entries for a {P}-primary frame",
-                block_loading.len()
-            ));
-        }
-        let loading: [f64; P] = std::array::from_fn(|k| block_loading[k]);
+        let primary_array = |vector: &Array1<f64>| -> Result<[f64; P], String> {
+            if vector.len() != P {
+                return Err(format!(
+                    "survival design ψ third information derivative: a primary vector has {} entries for a {P}-primary frame",
+                    vector.len()
+                ));
+            }
+            Ok(std::array::from_fn(|k| vector[k]))
+        };
         let p = self.n_coefficients();
         if d_beta.len() != p || row_weights.len() != family.n {
             return Err(format!(
@@ -560,22 +561,21 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
         )
         .map_err(|error| error.to_string())?;
         let d_beta_block = ndarray::ArrayView1::from(&d_beta[psi_range.clone()]);
-        let psi_row_at = |row: usize| {
-            psi_map
+        let channels_at = |row: usize| -> Result<PsiRowChannels, String> {
+            let psi_row = psi_map
                 .row_vector(row)
-                .map_err(|error| format!("survival design ψ third information row: {error}"))
+                .map_err(|error| format!("survival design ψ third information row: {error}"))?;
+            psi_row_channels(family, None, block_idx, psi_row)
         };
 
         let mut axes = self.primary_third_information_all_axes_from(
             row_weights,
             |row| {
-                let psi_row = psi_row_at(row)?;
-                let motion = psi_row.dot(beta_block);
-                let action = psi_row.dot(&d_beta_block);
+                let channels = channels_at(row)?;
                 Ok((
-                    std::array::from_fn(|k| loading[k] * motion),
+                    primary_array(&channels.direction(beta_block.view()))?,
                     self.jacobian_action(row, d_beta),
-                    Some(std::array::from_fn(|k| loading[k] * action)),
+                    Some(primary_array(&channels.direction(d_beta_block))?),
                 ))
             },
             fifth,
@@ -612,49 +612,54 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                     std::array::from_fn(|axis| SparseTower4::variable(primaries[axis], axis));
                 let tower = rigid_row_nll::<P, G, _>(&vars, &inputs)?;
                 let jv = self.jacobian_action(row, d_beta);
-                // `K[k, γ] = w·T⁴[L, e_k, e_γ, Jv]`: the J_ψ-sided kernel and, on an
-                // axis the design moves, that axis's pullback coefficient.
+                let channels = channels_at(row)?;
+                // `K_c[k, γ] = w·T⁴[L_c, e_k, e_γ, Jv]` for each channel: the J_ψ-sided
+                // kernel and, on an axis the design moves, that axis's pullback coefficient.
                 let weight = row_weights[row];
-                let mut kernel = Array2::<f64>::zeros((P, P));
-                for k in 0..P {
-                    for gamma in 0..P {
-                        let mut sum = 0.0;
-                        for alpha in 0..P {
-                            if loading[alpha] == 0.0 {
-                                continue;
+                let kernels: Vec<Array2<f64>> = channels
+                    .channels()
+                    .iter()
+                    .map(|(loading, _)| {
+                        Array2::from_shape_fn((P, P), |(k, gamma)| {
+                            let mut sum = 0.0;
+                            for alpha in 0..P {
+                                if loading[alpha] == 0.0 {
+                                    continue;
+                                }
+                                for delta in 0..P {
+                                    sum += loading[alpha] * tower.t4[alpha][k][gamma][delta] * jv[delta];
+                                }
                             }
-                            for delta in 0..P {
-                                sum += loading[alpha] * tower.t4[alpha][k][gamma][delta] * jv[delta];
-                            }
-                        }
-                        kernel[[k, gamma]] = weight * sum;
-                    }
-                }
-                let psi_row = psi_row_at(row)?;
+                            weight * sum
+                        })
+                    })
+                    .collect();
                 let mut right_primary = ndarray::Array1::<f64>::zeros(P);
                 for (axis, accumulator) in accumulators.iter_mut().enumerate() {
-                    right_primary.fill(0.0);
-                    for k in 0..P {
-                        let axis_loading = jacobians[[row, k * p + axis]];
-                        if axis_loading != 0.0 {
-                            right_primary.scaled_add(axis_loading, &kernel.row(k));
+                    for ((_, design_row), kernel) in channels.channels().iter().zip(&kernels) {
+                        right_primary.fill(0.0);
+                        for k in 0..P {
+                            let axis_loading = jacobians[[row, k * p + axis]];
+                            if axis_loading != 0.0 {
+                                right_primary.scaled_add(axis_loading, &kernel.row(k));
+                            }
                         }
-                    }
-                    accumulator.add_rank1_psi_cross(
-                        family,
-                        row,
-                        block_idx,
-                        &psi_row,
-                        &right_primary,
-                    )?;
-                    if psi_range.contains(&axis) {
-                        let coefficient = psi_row[axis - psi_range.start];
-                        if coefficient != 0.0 {
-                            accumulator.add_pullback(
-                                family,
-                                row,
-                                &kernel.mapv(|value| value * coefficient),
-                            )?;
+                        accumulator.add_rank1_psi_cross(
+                            family,
+                            row,
+                            block_idx,
+                            design_row,
+                            &right_primary,
+                        )?;
+                        if psi_range.contains(&axis) {
+                            let coefficient = design_row[axis - psi_range.start];
+                            if coefficient != 0.0 {
+                                accumulator.add_pullback(
+                                    family,
+                                    row,
+                                    &kernel.mapv(|value| value * coefficient),
+                                )?;
+                            }
                         }
                     }
                 }
@@ -702,18 +707,15 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
         else {
             return Ok(None);
         };
-        let loading_of = |block: usize| -> Result<[f64; P], String> {
-            let loading = spatial_block_primary_loading(family, block)?;
-            if loading.len() != P {
+        let primary_array = |vector: &Array1<f64>| -> Result<[f64; P], String> {
+            if vector.len() != P {
                 return Err(format!(
-                    "survival design ψ-pair third information derivative: primary loading has {} entries for a {P}-primary frame",
-                    loading.len()
+                    "survival design ψ-pair third information derivative: a primary vector has {} entries for a {P}-primary frame",
+                    vector.len()
                 ));
             }
-            Ok(std::array::from_fn(|k| loading[k]))
+            Ok(std::array::from_fn(|k| vector[k]))
         };
-        let loading_i = loading_of(block_i)?;
-        let loading_j = loading_of(block_j)?;
         let p = self.n_coefficients();
         if row_weights.len() != n {
             return Err(format!(
@@ -765,27 +767,34 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
             None
         };
         let row_error = |error| format!("survival design ψ-pair third information row: {error}");
-        let rows_at = |row: usize| -> Result<(Array1<f64>, Array1<f64>, Option<Array1<f64>>), String> {
+        let channels_at = |row: usize| -> Result<
+            (PsiRowChannels, PsiRowChannels, Option<PsiRowChannels>),
+            String,
+        > {
             let x_i = map_i.row_vector(row).map_err(row_error)?;
             let x_j = map_j.row_vector(row).map_err(row_error)?;
             let x_ij = map_ij
                 .as_ref()
                 .map(|map| map.row_vector(row).map_err(row_error))
                 .transpose()?;
-            Ok((x_i, x_j, x_ij))
-        };
-        let motion = |loading: &[f64; P], value: f64| -> [f64; P] {
-            std::array::from_fn(|k| loading[k] * value)
+            Ok((
+                psi_row_channels(family, None, block_i, x_i)?,
+                psi_row_channels(family, None, block_j, x_j)?,
+                x_ij.map(|x_ij| psi_row_channels(family, None, block_i, x_ij))
+                    .transpose()?,
+            ))
         };
 
         let mut axes = self.primary_third_information_all_axes_from(
             row_weights,
             |row| {
-                let (x_i, x_j, x_ij) = rows_at(row)?;
+                let (channels_i, channels_j, channels_ij) = channels_at(row)?;
                 Ok((
-                    motion(&loading_i, x_i.dot(beta_i)),
-                    motion(&loading_j, x_j.dot(beta_j)),
-                    x_ij.map(|x_ij| motion(&loading_i, x_ij.dot(beta_i))),
+                    primary_array(&channels_i.direction(beta_i.view()))?,
+                    primary_array(&channels_j.direction(beta_j.view()))?,
+                    channels_ij
+                        .map(|channels| primary_array(&channels.direction(beta_i.view())))
+                        .transpose()?,
                 ))
             },
             fifth,
@@ -821,90 +830,150 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                 let vars: [SparseTower4<P, RIGID_LINEAR_MASK>; P] =
                     std::array::from_fn(|axis| SparseTower4::variable(primaries[axis], axis));
                 let tower = rigid_row_nll::<P, G, _>(&vars, &inputs)?;
-                let (x_i, x_j, x_ij) = rows_at(row)?;
-                let d_i = motion(&loading_i, x_i.dot(beta_i));
-                let d_j = motion(&loading_j, x_j.dot(beta_j));
-                // Row kernels, each contracted per axis with `r_a`:
-                // `k3[k, γ] = w·T³[L_i, e_k, e_γ]`, `k4i[k, γ] = w·T⁴[L_i, e_k, e_γ, d_j]`,
-                // `k4j[k, γ] = w·T⁴[L_j, e_k, e_γ, d_i]` and `s3[k] = w·T³[L_i, L_j, e_k]`.
+                let (channels_i, channels_j, channels_ij) = channels_at(row)?;
+                let d_i = primary_array(&channels_i.direction(beta_i.view()))?;
+                let d_j = primary_array(&channels_j.direction(beta_j.view()))?;
+                // Row kernels, each contracted per axis with `r_a`: for a channel `c` of ψ_i,
+                // `k3i_c[k, γ] = w·T³[L_c, e_k, e_γ]` and `k4i_c[k, γ] = w·T⁴[L_c, e_k, e_γ, d_j]`;
+                // for a channel `c'` of ψ_j, `k4j_c'[k, γ] = w·T⁴[L_c', e_k, e_γ, d_i]`; and
+                // `s3_cc'[k] = w·T³[L_c, L_c', e_k]`. The second-derivative rows carry ψ_i's
+                // loadings.
                 let weight = row_weights[row];
-                let mut k3 = Array2::<f64>::zeros((P, P));
-                let mut k4i = Array2::<f64>::zeros((P, P));
-                let mut k4j = Array2::<f64>::zeros((P, P));
-                for k in 0..P {
-                    for gamma in 0..P {
-                        let (mut third, mut fourth_i, mut fourth_j) = (0.0, 0.0, 0.0);
+                let third_kernel = |loading: &Array1<f64>| {
+                    Array2::from_shape_fn((P, P), |(k, gamma)| {
+                        let mut third = 0.0;
                         for alpha in 0..P {
-                            third += loading_i[alpha] * tower.t3[alpha][k][gamma];
+                            third += loading[alpha] * tower.t3[alpha][k][gamma];
+                        }
+                        weight * third
+                    })
+                };
+                let fourth_kernel = |loading: &Array1<f64>, direction: &[f64; P]| {
+                    Array2::from_shape_fn((P, P), |(k, gamma)| {
+                        let mut fourth = 0.0;
+                        for alpha in 0..P {
                             for delta in 0..P {
-                                let t4 = tower.t4[alpha][k][gamma][delta];
-                                fourth_i += loading_i[alpha] * t4 * d_j[delta];
-                                fourth_j += loading_j[alpha] * t4 * d_i[delta];
+                                fourth += loading[alpha]
+                                    * tower.t4[alpha][k][gamma][delta]
+                                    * direction[delta];
                             }
                         }
-                        k3[[k, gamma]] = weight * third;
-                        k4i[[k, gamma]] = weight * fourth_i;
-                        k4j[[k, gamma]] = weight * fourth_j;
-                    }
-                }
-                let s3 = k3.dot(&ndarray::Array1::from(loading_j.to_vec()));
-                let mut right_i = ndarray::Array1::<f64>::zeros(P);
-                let mut right_j = ndarray::Array1::<f64>::zeros(P);
-                let mut right_ij = ndarray::Array1::<f64>::zeros(P);
+                        weight * fourth
+                    })
+                };
+                let k3i: Vec<Array2<f64>> = channels_i
+                    .channels()
+                    .iter()
+                    .map(|(loading, _)| third_kernel(loading))
+                    .collect();
+                let k4i: Vec<Array2<f64>> = channels_i
+                    .channels()
+                    .iter()
+                    .map(|(loading, _)| fourth_kernel(loading, &d_j))
+                    .collect();
+                let k4j: Vec<Array2<f64>> = channels_j
+                    .channels()
+                    .iter()
+                    .map(|(loading, _)| fourth_kernel(loading, &d_i))
+                    .collect();
+                let k3ij: Vec<Array2<f64>> = channels_ij.as_ref().map_or_else(Vec::new, |channels| {
+                    channels
+                        .channels()
+                        .iter()
+                        .map(|(loading, _)| third_kernel(loading))
+                        .collect()
+                });
+                let s3: Vec<Vec<Array1<f64>>> = k3i
+                    .iter()
+                    .map(|k3| {
+                        channels_j
+                            .channels()
+                            .iter()
+                            .map(|(loading, _)| k3.dot(loading))
+                            .collect()
+                    })
+                    .collect();
+                let mut right = ndarray::Array1::<f64>::zeros(P);
                 for (axis, accumulator) in accumulators.iter_mut().enumerate() {
-                    right_i.fill(0.0);
-                    right_j.fill(0.0);
-                    right_ij.fill(0.0);
-                    let mut cross = 0.0;
-                    for k in 0..P {
-                        let axis_loading = jacobians[[row, k * p + axis]];
-                        if axis_loading != 0.0 {
-                            right_i.scaled_add(axis_loading, &k4i.row(k));
-                            right_j.scaled_add(axis_loading, &k4j.row(k));
-                            right_ij.scaled_add(axis_loading, &k3.row(k));
-                            cross += axis_loading * s3[k];
+                    let axis_direction: [f64; P] =
+                        std::array::from_fn(|k| jacobians[[row, k * p + axis]]);
+                    let contract = |target: &mut Array1<f64>, kernel: &Array2<f64>| {
+                        for k in 0..P {
+                            if axis_direction[k] != 0.0 {
+                                target.scaled_add(axis_direction[k], &kernel.row(k));
+                            }
+                        }
+                    };
+                    for (c, (_, row_i)) in channels_i.channels().iter().enumerate() {
+                        right.fill(0.0);
+                        contract(&mut right, &k4i[c]);
+                        if range_j.contains(&axis) {
+                            for (c_prime, (_, row_j)) in channels_j.channels().iter().enumerate() {
+                                right.scaled_add(row_j[axis - range_j.start], &s3[c][c_prime]);
+                            }
+                        }
+                        accumulator.add_rank1_psi_cross(family, row, block_i, row_i, &right)?;
+                    }
+                    for (c_prime, (_, row_j)) in channels_j.channels().iter().enumerate() {
+                        right.fill(0.0);
+                        contract(&mut right, &k4j[c_prime]);
+                        if range_i.contains(&axis) {
+                            for (c, (_, row_i)) in channels_i.channels().iter().enumerate() {
+                                right.scaled_add(row_i[axis - range_i.start], &s3[c][c_prime]);
+                            }
+                        }
+                        accumulator.add_rank1_psi_cross(family, row, block_j, row_j, &right)?;
+                    }
+                    if let Some(channels) = channels_ij.as_ref() {
+                        for (c, (_, row_ij)) in channels.channels().iter().enumerate() {
+                            right.fill(0.0);
+                            contract(&mut right, &k3ij[c]);
+                            accumulator.add_rank1_psi_cross(family, row, block_i, row_ij, &right)?;
                         }
                     }
-                    if range_j.contains(&axis) {
-                        right_i.scaled_add(x_j[axis - range_j.start], &s3);
-                    }
-                    if range_i.contains(&axis) {
-                        right_j.scaled_add(x_i[axis - range_i.start], &s3);
-                    }
-                    accumulator.add_rank1_psi_cross(family, row, block_i, &x_i, &right_i)?;
-                    accumulator.add_rank1_psi_cross(family, row, block_j, &x_j, &right_j)?;
-                    if let Some(x_ij) = x_ij.as_ref() {
-                        accumulator.add_rank1_psi_cross(family, row, block_i, x_ij, &right_ij)?;
-                    }
-                    accumulator.add_psi_psi_outer(block_i, &x_i, block_j, &x_j, cross);
-                    if range_i.contains(&axis) {
-                        let coefficient = x_i[axis - range_i.start];
-                        if coefficient != 0.0 {
-                            accumulator.add_pullback(
-                                family,
-                                row,
-                                &k4i.mapv(|value| value * coefficient),
-                            )?;
+                    for (c, (_, row_i)) in channels_i.channels().iter().enumerate() {
+                        for (c_prime, (_, row_j)) in channels_j.channels().iter().enumerate() {
+                            let cross: f64 = (0..P)
+                                .filter(|&k| axis_direction[k] != 0.0)
+                                .map(|k| axis_direction[k] * s3[c][c_prime][k])
+                                .sum();
+                            accumulator.add_psi_psi_outer(block_i, row_i, block_j, row_j, cross);
                         }
-                        if let Some(x_ij) = x_ij.as_ref() {
-                            let coefficient = x_ij[axis - range_i.start];
+                    }
+                    if range_i.contains(&axis) {
+                        for (c, (_, row_i)) in channels_i.channels().iter().enumerate() {
+                            let coefficient = row_i[axis - range_i.start];
                             if coefficient != 0.0 {
                                 accumulator.add_pullback(
                                     family,
                                     row,
-                                    &k3.mapv(|value| value * coefficient),
+                                    &k4i[c].mapv(|value| value * coefficient),
                                 )?;
+                            }
+                        }
+                        if let Some(channels) = channels_ij.as_ref() {
+                            for (c, (_, row_ij)) in channels.channels().iter().enumerate() {
+                                let coefficient = row_ij[axis - range_i.start];
+                                if coefficient != 0.0 {
+                                    accumulator.add_pullback(
+                                        family,
+                                        row,
+                                        &k3ij[c].mapv(|value| value * coefficient),
+                                    )?;
+                                }
                             }
                         }
                     }
                     if range_j.contains(&axis) {
-                        let coefficient = x_j[axis - range_j.start];
-                        if coefficient != 0.0 {
-                            accumulator.add_pullback(
-                                family,
-                                row,
-                                &k4j.mapv(|value| value * coefficient),
-                            )?;
+                        for (c_prime, (_, row_j)) in channels_j.channels().iter().enumerate() {
+                            let coefficient = row_j[axis - range_j.start];
+                            if coefficient != 0.0 {
+                                accumulator.add_pullback(
+                                    family,
+                                    row,
+                                    &k4j[c_prime].mapv(|value| value * coefficient),
+                                )?;
+                            }
                         }
                     }
                 }

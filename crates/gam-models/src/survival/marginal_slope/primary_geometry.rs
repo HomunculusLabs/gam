@@ -444,6 +444,48 @@ pub(crate) fn primary_direction_from_psi_row(
     Ok(out)
 }
 
+/// A design-moving ψ's motion on one row: the design rows it moves, each with
+/// the primary loading that row moves.
+///
+/// The marginal block moves `q₀` and `q₁` through one row and a time-constant
+/// slope moves `g` through one row, so every configuration today carries exactly
+/// one channel. Callers contract and pull back channel by channel, which is the
+/// shape a slope whose covariate factor is tensored against a follow-up margin
+/// needs: there one covariate derivative row moves three slope primaries through
+/// three different design rows (gam#2767).
+pub(crate) struct PsiRowChannels(Vec<(Array1<f64>, Array1<f64>)>);
+
+impl PsiRowChannels {
+    /// The `(primary loading, design row)` pairs, in primary order.
+    pub(crate) fn channels(&self) -> &[(Array1<f64>, Array1<f64>)] {
+        &self.0
+    }
+
+    /// `Σ_c L_c (x_c · v)`: the primary-space motion of a block coefficient
+    /// vector `v` along this ψ axis.
+    pub(crate) fn direction(&self, block_vector: ndarray::ArrayView1<'_, f64>) -> Array1<f64> {
+        let mut out = Array1::<f64>::zeros(self.0[0].0.len());
+        for (loading, design_row) in &self.0 {
+            out.scaled_add(design_row.dot(&block_vector), loading);
+        }
+        out
+    }
+}
+
+/// The channels of one row's design ψ motion; see [`PsiRowChannels`].
+pub(crate) fn psi_row_channels(
+    family: &SurvivalMarginalSlopeFamily,
+    flex_primary: Option<&FlexPrimarySlices>,
+    block_idx: usize,
+    psi_row: Array1<f64>,
+) -> Result<PsiRowChannels, String> {
+    let loading = match flex_primary {
+        Some(primary) => spatial_block_primary_loading_flex(primary, block_idx)?,
+        None => spatial_block_primary_loading(family, block_idx)?,
+    };
+    Ok(PsiRowChannels(vec![(loading, psi_row)]))
+}
+
 pub(crate) fn spatial_block_primary_loading_flex(
     primary: &FlexPrimarySlices,
     block_idx: usize,
@@ -466,87 +508,6 @@ pub(crate) fn spatial_block_primary_loading_flex(
         }
         .into()),
     }
-}
-
-pub(crate) fn primary_direction_from_psi_row_flex(
-    primary: &FlexPrimarySlices,
-    block_idx: usize,
-    psi_row: &Array1<f64>,
-    beta_block: &Array1<f64>,
-) -> Array1<f64> {
-    let mut out = Array1::<f64>::zeros(primary.total);
-    let value = psi_row.dot(beta_block);
-    // Only blocks 1 and 2 carry a loading onto primary space (see
-    // `spatial_block_primary_loading_flex`); every other block leaves the
-    // direction at zero.
-    if block_idx == 1 {
-        out[primary.q0] = value;
-        out[primary.q1] = value;
-    } else if block_idx == 2 {
-        out[primary.g] = value;
-    }
-    out
-}
-
-/// Derive a primary-space psi action on a direction from a precomputed psi design row.
-pub(crate) fn primary_psi_action_from_psi_row(
-    family: &SurvivalMarginalSlopeFamily,
-    block_idx: usize,
-    psi_row: &Array1<f64>,
-    d_beta_block: ndarray::ArrayView1<'_, f64>,
-) -> Result<Array1<f64>, String> {
-    let mut out = Array1::<f64>::zeros(family.core_primary_dimension());
-    let value = psi_row.dot(&d_beta_block);
-    // Only blocks 1 and 2 carry a loading onto primary space (see
-    // `spatial_block_primary_loading`); every other block contributes nothing
-    // to the psi action.
-    if block_idx == 1 {
-        out[PRIMARY_Q0] = value;
-        out[PRIMARY_Q1] = value;
-    } else if block_idx == 2 {
-        refuse_follow_up_varying_design_psi(family)?;
-        out[PRIMARY_SLOPE] = value;
-    }
-    Ok(out)
-}
-
-pub(crate) fn primary_psi_action_from_psi_row_flex(
-    primary: &FlexPrimarySlices,
-    block_idx: usize,
-    psi_row: &Array1<f64>,
-    d_beta_block: ndarray::ArrayView1<'_, f64>,
-) -> Array1<f64> {
-    let mut out = Array1::<f64>::zeros(primary.total);
-    let value = psi_row.dot(&d_beta_block);
-    // Only blocks 1 and 2 carry a loading onto primary space (see
-    // `spatial_block_primary_loading_flex`); every other block contributes
-    // nothing to the psi action.
-    if block_idx == 1 {
-        out[primary.q0] = value;
-        out[primary.q1] = value;
-    } else if block_idx == 2 {
-        out[primary.g] = value;
-    }
-    out
-}
-
-/// Derive a primary-space second-order direction from a precomputed second psi design row.
-pub(crate) fn primary_second_direction_from_psi_row(
-    family: &SurvivalMarginalSlopeFamily,
-    block_idx: usize,
-    psi_second_row: &Array1<f64>,
-    beta_block: &Array1<f64>,
-) -> Result<Array1<f64>, String> {
-    primary_direction_from_psi_row(family, block_idx, psi_second_row, beta_block)
-}
-
-pub(crate) fn primary_second_direction_from_psi_row_flex(
-    primary: &FlexPrimarySlices,
-    block_idx: usize,
-    psi_second_row: &Array1<f64>,
-    beta_block: &Array1<f64>,
-) -> Array1<f64> {
-    primary_direction_from_psi_row_flex(primary, block_idx, psi_second_row, beta_block)
 }
 
 // ── Block-local Hessian accumulator ────────────────────────────────────

@@ -220,11 +220,6 @@ impl SurvivalMarginalSlopeFamily {
             return Ok(None);
         };
         let deriv = &derivative_blocks[block_idx][local_idx];
-        let loading = if let Some(primary) = flex_primary.as_ref() {
-            spatial_block_primary_loading_flex(primary, block_idx)?
-        } else {
-            spatial_block_primary_loading(self, block_idx)?
-        };
         let beta_psi = match block_idx {
             1 => &block_states[1].beta,
             _ => &block_states[2].beta,
@@ -307,12 +302,12 @@ impl SurvivalMarginalSlopeFamily {
                         None
                     };
 
+                    let channels =
+                        psi_row_channels(self, flex_primary.as_ref(), block_idx, psi_row)?;
                     let dir = if let Some(lift) = psi_lift.as_ref() {
                         lift.dir.clone()
-                    } else if let Some(primary) = flex_primary.as_ref() {
-                        primary_direction_from_psi_row_flex(primary, block_idx, &psi_row, beta_psi)
                     } else {
-                        primary_direction_from_psi_row(self, block_idx, &psi_row, beta_psi)?
+                        channels.direction(beta_psi.view())
                     };
 
                     let q_geom_lazy;
@@ -356,10 +351,12 @@ impl SurvivalMarginalSlopeFamily {
                     // ── Eq (45): objective_psi += f_i^T u_i^α ──
                     a.0 += f_pi.dot(&dir);
 
-                    let s1 = f_pi.dot(&loading);
-                    match block_idx {
-                        1 => a.2.scaled_add(s1, &psi_row),
-                        _ => a.3.scaled_add(s1, &psi_row),
+                    for (loading, design_row) in channels.channels() {
+                        let s1 = f_pi.dot(loading);
+                        match block_idx {
+                            1 => a.2.scaled_add(s1, design_row),
+                            _ => a.3.scaled_add(s1, design_row),
+                        }
                     }
                     let pb = f_pipi.dot(&dir);
                     if let Some(lift) = psi_lift.as_ref() {
@@ -379,18 +376,20 @@ impl SurvivalMarginalSlopeFamily {
                         Some(&mut a.5),
                     );
 
-                    let right_primary = f_pipi.dot(&loading);
-                    if let Some(q) = q_geom.as_ref() {
-                        a.6.add_rank1_psi_cross_with_q_geometry(
-                            self,
-                            row,
-                            q,
-                            block_idx,
-                            &psi_row,
-                            &right_primary,
-                        )?;
-                    } else {
-                        a.6.add_rank1_psi_cross(self, row, block_idx, &psi_row, &right_primary)?;
+                    for (loading, design_row) in channels.channels() {
+                        let right_primary = f_pipi.dot(loading);
+                        if let Some(q) = q_geom.as_ref() {
+                            a.6.add_rank1_psi_cross_with_q_geometry(
+                                self,
+                                row,
+                                q,
+                                block_idx,
+                                design_row,
+                                &right_primary,
+                            )?;
+                        } else {
+                            a.6.add_rank1_psi_cross(self, row, block_idx, design_row, &right_primary)?;
+                        }
                     }
                     if let Some(q) = q_geom.as_ref() {
                         let zero_grad = Array1::zeros(third.nrows());
@@ -744,16 +743,6 @@ impl SurvivalMarginalSlopeFamily {
         };
         let deriv_i = &derivative_blocks[block_idx_i][local_idx_i];
         let deriv_j = &derivative_blocks[block_idx_j][local_idx_j];
-        let loading_i = if let Some(primary) = flex_primary.as_ref() {
-            spatial_block_primary_loading_flex(primary, block_idx_i)?
-        } else {
-            spatial_block_primary_loading(self, block_idx_i)?
-        };
-        let loading_j = if let Some(primary) = flex_primary.as_ref() {
-            spatial_block_primary_loading_flex(primary, block_idx_j)?
-        } else {
-            spatial_block_primary_loading(self, block_idx_j)?
-        };
         let beta_i = match block_idx_i {
             1 => &block_states[1].beta,
             _ => &block_states[2].beta,
@@ -883,50 +872,43 @@ impl SurvivalMarginalSlopeFamily {
                     None
                 };
 
+                let channels_i =
+                    psi_row_channels(self, flex_primary.as_ref(), block_idx_i, psi_row_i)?;
+                let channels_j =
+                    psi_row_channels(self, flex_primary.as_ref(), block_idx_j, psi_row_j)?;
                 let dir_i = if let Some(lift) = psi_lift_i.as_ref() {
                     lift.dir.clone()
-                } else if let Some(primary) = flex_primary.as_ref() {
-                    primary_direction_from_psi_row_flex(primary, block_idx_i, &psi_row_i, beta_i)
                 } else {
-                    primary_direction_from_psi_row(self, block_idx_i, &psi_row_i, beta_i)?
+                    channels_i.direction(beta_i.view())
                 };
                 let dir_j = if let Some(lift) = psi_lift_j.as_ref() {
                     lift.dir.clone()
-                } else if let Some(primary) = flex_primary.as_ref() {
-                    primary_direction_from_psi_row_flex(primary, block_idx_j, &psi_row_j, beta_j)
                 } else {
-                    primary_direction_from_psi_row(self, block_idx_j, &psi_row_j, beta_j)?
+                    channels_j.direction(beta_j.view())
                 };
 
-                let (psi_row_ij, dir_ij) = if same_block {
+                // The cross-ψ rows, kept only when they are present AND not
+                // identically zero. Both consumers below need the rows
+                // themselves, so bind them here rather than re-deriving
+                // presence from a bool and unwrapping the Option back open.
+                let channels_ij = if same_block {
                     let r = psi_map_ij
                         .as_ref()
                         .expect("psi_map_ij built when same_block")
                         .row_vector(row)
                         .map_err(|e| format!("survival rowwise psi map: {e}"))?;
-                    let d = if let Some(primary) = flex_primary.as_ref() {
-                        primary_second_direction_from_psi_row_flex(primary, block_idx_i, &r, beta_i)
+                    if r.iter().any(|v| v.abs() > 0.0) {
+                        Some(psi_row_channels(self, flex_primary.as_ref(), block_idx_i, r)?)
                     } else {
-                        primary_second_direction_from_psi_row(self, block_idx_i, &r, beta_i)?
-                    };
-                    (Some(r), d)
+                        None
+                    }
                 } else {
-                    (
-                        None,
-                        Array1::<f64>::zeros(
-                            flex_primary
-                                .as_ref()
-                                .map_or(N_PRIMARY, |primary| primary.total),
-                        ),
-                    )
+                    None
                 };
-                // The cross-ψ row, kept only when it is present AND not
-                // identically zero. Both consumers below need the row itself,
-                // so bind it here rather than re-deriving presence from a bool
-                // and unwrapping the Option back open.
-                let psi_row_ij_active = psi_row_ij
-                    .as_ref()
-                    .filter(|r| r.iter().any(|v| v.abs() > 0.0));
+                let dir_ij = match channels_ij.as_ref() {
+                    Some(channels) => channels.direction(beta_i.view()),
+                    None => Array1::<f64>::zeros(dir_i.len()),
+                };
 
                 let q_geom_lazy;
                 let (mut f_pi, mut f_pipi) = if let Some(primary) = flex_primary.as_ref() {
@@ -972,22 +954,30 @@ impl SurvivalMarginalSlopeFamily {
                 a.objective_psi_psi += dir_i.dot(&f_pipi.dot(&dir_j)) + f_pi.dot(&dir_ij);
 
                 // Score
-                if let Some(psi_ij) = psi_row_ij_active {
-                    let s_ij = f_pi.dot(&loading_i);
-                    match block_idx_i {
-                        1 => a.score_m.scaled_add(s_ij, psi_ij),
-                        _ => a.score_g.scaled_add(s_ij, psi_ij),
+                if let Some(channels) = channels_ij.as_ref() {
+                    for (loading, design_row) in channels.channels() {
+                        let s_ij = f_pi.dot(loading);
+                        match block_idx_i {
+                            1 => a.score_m.scaled_add(s_ij, design_row),
+                            _ => a.score_g.scaled_add(s_ij, design_row),
+                        }
                     }
                 }
-                let s_i = loading_i.dot(&f_pipi.dot(&dir_j));
-                match block_idx_i {
-                    1 => a.score_m.scaled_add(s_i, &psi_row_i),
-                    _ => a.score_g.scaled_add(s_i, &psi_row_i),
+                let hessian_dir_j = f_pipi.dot(&dir_j);
+                for (loading, design_row) in channels_i.channels() {
+                    let s_i = loading.dot(&hessian_dir_j);
+                    match block_idx_i {
+                        1 => a.score_m.scaled_add(s_i, design_row),
+                        _ => a.score_g.scaled_add(s_i, design_row),
+                    }
                 }
-                let s_j = loading_j.dot(&f_pipi.dot(&dir_i));
-                match block_idx_j {
-                    1 => a.score_m.scaled_add(s_j, &psi_row_j),
-                    _ => a.score_g.scaled_add(s_j, &psi_row_j),
+                let hessian_dir_i = f_pipi.dot(&dir_i);
+                for (loading, design_row) in channels_j.channels() {
+                    let s_j = loading.dot(&hessian_dir_i);
+                    match block_idx_j {
+                        1 => a.score_m.scaled_add(s_j, design_row),
+                        _ => a.score_g.scaled_add(s_j, design_row),
+                    }
                 }
                 let pb1 = f_pipi.dot(&dir_ij);
                 if let Some(q) = q_geom.as_ref() {
@@ -1041,62 +1031,71 @@ impl SurvivalMarginalSlopeFamily {
                 );
 
                 // Hessian
-                if let Some(psi_ij) = psi_row_ij_active {
-                    let rp_ij = f_pipi.dot(&loading_i);
+                if let Some(channels) = channels_ij.as_ref() {
+                    for (loading, design_row) in channels.channels() {
+                        let rp_ij = f_pipi.dot(loading);
+                        if let Some(q) = q_geom.as_ref() {
+                            a.hessian.add_rank1_psi_cross_with_q_geometry(
+                                self,
+                                row,
+                                q,
+                                block_idx_i,
+                                design_row,
+                                &rp_ij,
+                            )?;
+                        } else {
+                            a.hessian.add_rank1_psi_cross(
+                                self,
+                                row,
+                                block_idx_i,
+                                design_row,
+                                &rp_ij,
+                            )?;
+                        }
+                    }
+                }
+                for (loading_i, row_i) in channels_i.channels() {
+                    for (loading_j, row_j) in channels_j.channels() {
+                        a.hessian.add_psi_psi_outer(
+                            block_idx_i,
+                            row_i,
+                            block_idx_j,
+                            row_j,
+                            loading_i.dot(&f_pipi.dot(loading_j)),
+                        );
+                    }
+                }
+                for (loading_i, row_i) in channels_i.channels() {
+                    let rp_i = third_j.t().dot(loading_i);
                     if let Some(q) = q_geom.as_ref() {
                         a.hessian.add_rank1_psi_cross_with_q_geometry(
                             self,
                             row,
                             q,
                             block_idx_i,
-                            psi_ij,
-                            &rp_ij,
+                            row_i,
+                            &rp_i,
                         )?;
                     } else {
-                        a.hessian.add_rank1_psi_cross(
-                            self,
-                            row,
-                            block_idx_i,
-                            psi_ij,
-                            &rp_ij,
-                        )?;
+                        a.hessian
+                            .add_rank1_psi_cross(self, row, block_idx_i, row_i, &rp_i)?;
                     }
                 }
-                let scalar_ij = loading_i.dot(&f_pipi.dot(&loading_j));
-                a.hessian.add_psi_psi_outer(
-                    block_idx_i,
-                    &psi_row_i,
-                    block_idx_j,
-                    &psi_row_j,
-                    scalar_ij,
-                );
-                let rp_i = third_j.t().dot(&loading_i);
-                if let Some(q) = q_geom.as_ref() {
-                    a.hessian.add_rank1_psi_cross_with_q_geometry(
-                        self,
-                        row,
-                        q,
-                        block_idx_i,
-                        &psi_row_i,
-                        &rp_i,
-                    )?;
-                } else {
-                    a.hessian
-                        .add_rank1_psi_cross(self, row, block_idx_i, &psi_row_i, &rp_i)?;
-                }
-                let rp_j = third_i.t().dot(&loading_j);
-                if let Some(q) = q_geom.as_ref() {
-                    a.hessian.add_rank1_psi_cross_with_q_geometry(
-                        self,
-                        row,
-                        q,
-                        block_idx_j,
-                        &psi_row_j,
-                        &rp_j,
-                    )?;
-                } else {
-                    a.hessian
-                        .add_rank1_psi_cross(self, row, block_idx_j, &psi_row_j, &rp_j)?;
+                for (loading_j, row_j) in channels_j.channels() {
+                    let rp_j = third_i.t().dot(loading_j);
+                    if let Some(q) = q_geom.as_ref() {
+                        a.hessian.add_rank1_psi_cross_with_q_geometry(
+                            self,
+                            row,
+                            q,
+                            block_idx_j,
+                            row_j,
+                            &rp_j,
+                        )?;
+                    } else {
+                        a.hessian
+                            .add_rank1_psi_cross(self, row, block_idx_j, row_j, &rp_j)?;
+                    }
                 }
                 if let Some(q) = q_geom.as_ref() {
                     let zero_grad = Array1::zeros(fourth.nrows());
@@ -1243,11 +1242,6 @@ impl SurvivalMarginalSlopeFamily {
             return Ok(None);
         };
         let deriv = &derivative_blocks[block_idx][local_idx];
-        let loading = if let Some(primary) = flex_primary.as_ref() {
-            spatial_block_primary_loading_flex(primary, block_idx)?
-        } else {
-            spatial_block_primary_loading(self, block_idx)?
-        };
         let beta_psi = match block_idx {
             1 => &block_states[1].beta,
             _ => &block_states[2].beta,
@@ -1308,15 +1302,8 @@ impl SurvivalMarginalSlopeFamily {
                     None
                 };
 
-                let psi_dir = if let Some(lift) = psi_lift.as_ref() {
-                    lift.dir.clone()
-                } else if let Some(primary) = flex_primary.as_ref() {
-                    primary_direction_from_psi_row_flex(primary, block_idx, &psi_row, beta_psi)
-                } else {
-                    primary_direction_from_psi_row(self, block_idx, &psi_row, beta_psi)?
-                };
-                let psi_action = if psi_lift.is_some() {
-                    self.timewiggle_psi_action(
+                let lift_action = if psi_lift.is_some() {
+                    Some(self.timewiggle_psi_action(
                         row,
                         block_states,
                         &slices,
@@ -1324,11 +1311,20 @@ impl SurvivalMarginalSlopeFamily {
                         &psi_row,
                         beta_psi,
                         d_beta_flat,
-                    )?
-                } else if let Some(primary) = flex_primary.as_ref() {
-                    primary_psi_action_from_psi_row_flex(primary, block_idx, &psi_row, d_beta_block)
+                    )?)
                 } else {
-                    primary_psi_action_from_psi_row(self, block_idx, &psi_row, d_beta_block)?
+                    None
+                };
+                let channels =
+                    psi_row_channels(self, flex_primary.as_ref(), block_idx, psi_row)?;
+                let psi_dir = if let Some(lift) = psi_lift.as_ref() {
+                    lift.dir.clone()
+                } else {
+                    channels.direction(beta_psi.view())
+                };
+                let psi_action = match lift_action {
+                    Some(action) => action,
+                    None => channels.direction(d_beta_block),
                 };
                 let row_dir = self.row_primary_direction_from_flat_dynamic(
                     row,
@@ -1373,18 +1369,20 @@ impl SurvivalMarginalSlopeFamily {
                     fourth.mapv_inplace(|v| v * w);
                 }
 
-                let right_primary = third_beta.t().dot(&loading);
-                if let Some(q) = q_geom.as_ref() {
-                    acc.add_rank1_psi_cross_with_q_geometry(
-                        self,
-                        row,
-                        q,
-                        block_idx,
-                        &psi_row,
-                        &right_primary,
-                    )?;
-                } else {
-                    acc.add_rank1_psi_cross(self, row, block_idx, &psi_row, &right_primary)?;
+                for (loading, design_row) in channels.channels() {
+                    let right_primary = third_beta.t().dot(loading);
+                    if let Some(q) = q_geom.as_ref() {
+                        acc.add_rank1_psi_cross_with_q_geometry(
+                            self,
+                            row,
+                            q,
+                            block_idx,
+                            design_row,
+                            &right_primary,
+                        )?;
+                    } else {
+                        acc.add_rank1_psi_cross(self, row, block_idx, design_row, &right_primary)?;
+                    }
                 }
                 if let Some(q) = q_geom.as_ref() {
                     let zero_grad = Array1::zeros(fourth.nrows());
@@ -1508,7 +1506,7 @@ impl SurvivalMarginalSlopeFamily {
         };
         let primary_dim = self.core_primary_dimension();
         // The ψ action of the per-axis path is `psi_row · d_beta_block` placed
-        // in these primary slots (`primary_psi_action_from_psi_row`).
+        // in these primary slots (`PsiRowChannels::direction`).
         let mut placement = Array1::<f64>::zeros(primary_dim);
         if block_idx == 1 {
             placement[PRIMARY_Q0] = 1.0;
