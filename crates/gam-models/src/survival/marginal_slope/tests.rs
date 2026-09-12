@@ -6822,6 +6822,54 @@ fn survival_jointhessian_flex_no_wiggle_all_axes_matches_per_axis() {
     }
 }
 
+/// gam#2893: the build-once flex third contraction reads the absorbed-influence offset
+/// `o_infl[row] = Z̃_infl[row,:]·γ` exactly as the single-direction route does. The base used to
+/// drop it and contract every directional timepoint at `o_infl = 0`, so with an influence absorber
+/// the build-once Jeffreys sweeps computed a different contraction from the per-axis one.
+#[test]
+fn survival_flex_third_contraction_from_base_reads_influence_offset_2893() {
+    let n = 40usize;
+    let mut family = make_flex_no_wiggle_test_family(n);
+    family.influence_absorber = Some(Array2::from_shape_fn((n, 2), |(i, j)| {
+        0.3 * (((i * (7 + 4 * j) + 3 * j + 1) % n) as f64 / n as f64 - 0.5)
+    }));
+    let mut states = flex_no_wiggle_test_block_states(&family);
+    states.push(ParameterBlockState {
+        beta: array![0.4, -0.3],
+        eta: Array1::zeros(n),
+    });
+    assert!(family.effective_flex_active(&states).unwrap());
+    let primary = flex_primary_slices(&family);
+    let direction =
+        Array1::from_shape_fn(primary.total, |i| ((i * 5 + 2) % 7) as f64 / 7.0 - 0.4);
+    let mut max_offset = 0.0_f64;
+    for row in [0usize, 7, 19, 33] {
+        let offset = family
+            .influence_index_offset(row, &states)
+            .expect("influence offset");
+        max_offset = max_offset.max(offset.abs());
+        let exact = family
+            .row_flex_primary_third_contracted_exact(row, &states, &direction)
+            .expect("exact third contraction");
+        let base = family
+            .build_row_flex_third_base_with_states(row, &states, &primary)
+            .expect("third-order base");
+        let from_base = family
+            .row_flex_third_contract_from_base(&base, &direction)
+            .expect("build-once third contraction");
+        let rel = rel_diff_array2_survival(&from_base, &exact);
+        assert!(
+            rel < 1e-12,
+            "row {row} (o_infl={offset:.3e}): build-once third contraction diverged from the \
+             exact route, rel {rel:e}"
+        );
+    }
+    assert!(
+        max_offset > 0.0,
+        "the fixture must carry a nonzero influence offset"
+    );
+}
+
 #[test]
 fn survival_jointhessian_flex_no_wiggle_operator_subsample_half_scales_correctly() {
     use crate::outer_subsample::OuterScoreSubsample;

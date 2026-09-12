@@ -158,6 +158,9 @@ pub(crate) struct FlexThirdRowBase {
     pub(crate) a0: f64,
     pub(crate) a1: f64,
     pub(crate) g: f64,
+    /// The absorbed-influence index offset `o_infl[row]` that the directional
+    /// timepoints read, exactly as the single-direction contraction reads it.
+    pub(crate) o_infl: f64,
     pub(crate) beta_h: Option<Array1<f64>>,
     pub(crate) beta_w: Option<Array1<f64>>,
     pub(crate) entry_cached: CachedPartitionCells,
