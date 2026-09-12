@@ -296,7 +296,6 @@ pub struct IntegratedMomentsJet {
     pub mode: IntegratedExpectationMode,
 }
 
-const LOGIT_SIGMA_DEGENERATE: f64 = 1e-10;
 const LOGIT_ERFCX_SIGMA_MIN: f64 = 2.5e-1;
 const LOGIT_TAIL_LOG_MAX: f64 = -18.0;
 const LOGIT_ERFCX_MU_MAX: f64 = 40.0;
@@ -997,7 +996,10 @@ pub(crate) fn logit_posterior_meanwith_deriv_exact(
     if !(mu.is_finite() && sigma.is_finite()) {
         crate::bail_invalid_estim!("logit exact expectation requires finite mu and sigma");
     }
-    if sigma <= LOGIT_SIGMA_DEGENERATE {
+    // The point-mass limit `σ(μ)` differs from `E[σ(μ + σZ)]` by `½σ²σ''(μ) + O(σ⁴)`,
+    // and the logistic has `|σ''/σ| ≤ 1` (and `|σ'''/σ'| ≤ 1` for the derivative),
+    // so below `σ = √(2u) = √ε` the limit is exact to the rounding of `σ(μ)` (#2469).
+    if sigma <= f64::EPSILON.sqrt() {
         let (mean, dmean_dmu) = stable_sigmoidwith_derivative(mu);
         return Ok(IntegratedMeanDerivative {
             mean,
