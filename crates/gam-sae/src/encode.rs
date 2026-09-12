@@ -1255,7 +1255,7 @@ pub(crate) fn joint_encode_refine_row(
 /// `None`, and the row is flagged (no silent Gauss-Newton fallback).
 ///
 /// The Hessian returned is the TRUE `∇²f_k` — no Levenberg ridge is added
-/// (F2). The Kantorovich certificate (`row_certificate`) and its `λ_min(H) > 0`
+/// (F2). The Kantorovich certificate (`row_certificate_core`) and its `λ_min(H) > 0`
 /// saddle gate must see the genuine field: a ridged `H + λI` certifies neither
 /// the original objective nor a consistently regularized one (a
 /// locally-constant reconstruction has `H = 0`, whose ridged `λI` would falsely
@@ -1520,31 +1520,9 @@ fn beta_eta_newton_positive_definite(
     Ok(Some((beta, eta, delta)))
 }
 
-/// Compute the per-row Kantorovich certificate for encoding target row `x`
-/// against atom `atom` at start coordinate `t₀`, with fixed amplitude `z` and
-/// the chart's closed-form Lipschitz constant `lipschitz`. Returns the
-/// certificate AND the Newton step `δ = −H⁻¹ g` so the caller can advance.
-pub fn row_certificate(
-    atom: &SaeManifoldAtom,
-    evaluator: &dyn SaeBasisEvaluator,
-    t0: ArrayView1<'_, f64>,
-    x: ArrayView1<'_, f64>,
-    amplitude: f64,
-    lipschitz: f64,
-) -> Result<(RowCertificate, Array1<f64>), String> {
-    // Euclidean, prior-free objective — bit-identical to the metric-free encode.
-    row_certificate_core(
-        atom,
-        evaluator,
-        t0,
-        x,
-        amplitude,
-        lipschitz,
-        &EncodeObjective::euclidean(),
-    )
-}
-
-/// Objective-aware [`row_certificate`] (F3): the certificate `h = β·η·L` is
+/// The per-row Kantorovich certificate (F3) for encoding target row `x` against
+/// `atom` at start coordinate `t₀`, returned with the Newton step `δ = −H⁻¹ g`
+/// so the caller can advance. The certificate `h = β·η·L` is
 /// computed from the TRUE objective's gradient/Hessian ([`encode_grad_hess_core`])
 /// so it certifies the metric- and prior-weighted field. `lipschitz` must already
 /// be the objective's effective bound ([`EncodeObjective::effective_lipschitz`]).
@@ -1692,7 +1670,7 @@ fn refine_certified_start(
 /// slow-but-genuine geometric contractions near the `½` certifiable boundary
 /// (false plateaus → premature exact fallback); at `c = 1/640` the plateau bound
 /// loosens ~10× (`N` grows from a few hundred to a few thousand
-/// `row_certificate` solves on a pathological row). `1/64` keeps the bound at a
+/// `row_certificate_core` solves on a pathological row). `1/64` keeps the bound at a
 /// few hundred while leaving a wide margin below Newton's actual contraction.
 const WARMUP_MIN_MULTIPLICATIVE_DECREASE: f64 = 1.0 / 64.0;
 
@@ -1720,7 +1698,7 @@ const WARMUP_QUADRATIC_KAPPA: f64 = 0.5;
 /// (`h_new >= h_prev` — strict decrease or quit) never fires for an `h`-sequence
 /// that decreases *monotonically toward a limit above ½*: the increments fall
 /// below one ulp long before `h` crosses the certifiable ½ bound, so a single
-/// pathological row could spin ~1e15 full `row_certificate` solves (Hessian
+/// pathological row could spin ~1e15 full `row_certificate_core` solves (Hessian
 /// build + solve) on the encode hot path. We instead require genuine
 /// *multiplicative* progress each step, which matches Newton's actual behavior:
 /// a healthy contraction clears the geometric floor by a wide margin (and the
@@ -1779,7 +1757,7 @@ fn certify_with_basin_warmup(
     // only a valid bound over this chart's ball `‖t − center‖ ≤ radius` for the
     // chart-local families (`EuclideanPatch`/`Linear`/`Poincare` monomial patches,
     // `Cylinder` line axis, `Duchon` radial kernels). If a warm-up iterate leaves
-    // that ball, `row_certificate` would compute `h = β·η·L` with an `L` that no
+    // that ball, `row_certificate_core` would compute `h = β·η·L` with an `L` that no
     // longer bounds the true geometry there, so `h ≤ ½` would NOT imply Kantorovich
     // convergence — a false certificate. (The `h`-contraction check does NOT catch
     // this: `h` can decrease monotonically toward an out-of-chart root the whole
@@ -1847,7 +1825,7 @@ fn certify_with_basin_warmup(
         // The warm-up only helps while h keeps *multiplicatively* contracting
         // toward ½. A plain strict-decrease test (`h >= prev_h`) never fires for
         // a sequence that decreases monotonically toward a limit above ½, so it
-        // could spin ~1e15 `row_certificate` solves for one row; require genuine
+        // could spin ~1e15 `row_certificate_core` solves for one row; require genuine
         // multiplicative progress instead (bounded to a few hundred steps, see
         // `warmup_progress_sufficient`). Once a step fails that bar the iterate is
         // not converging to a certifiable in-chart root — flag for the exact
@@ -3522,8 +3500,16 @@ mod encode_fix_tests {
             "gradient is 0 at a flat reconstruction"
         );
 
-        let (cert, _) = row_certificate(&atom, &eval, t0.view(), x.view(), 1.0, 1.0)
-            .expect("row_certificate runs");
+        let (cert, _) = row_certificate_core(
+            &atom,
+            &eval,
+            t0.view(),
+            x.view(),
+            1.0,
+            1.0,
+            &EncodeObjective::euclidean(),
+        )
+        .expect("row_certificate_core runs");
         assert!(
             !cert.certified(),
             "a singular true Hessian must NOT be certified (the old ridged H falsely did)"
@@ -3796,5 +3782,169 @@ mod encode_fix_tests {
         let hd1 = h[[1, 0]] * delta[0] + h[[1, 1]] * delta[1];
         assert!((hd0 + g[0]).abs() < 1e-9 && (hd1 + g[1]).abs() < 1e-9);
         assert!((eta - delta.dot(&delta).sqrt()).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod atlas_certificate_tests {
+    //! Kantorovich-certified encode atlas (issue #1010).
+    //!
+    //! **Planted single-circle, analytically-known basin boundary.** One periodic
+    //! atom whose decoder traces the unit circle `m(t) = (cos 2πt, sin 2πt)`.
+    //! Encoding a target `x = m(t*)` is the Newton problem `min_t ½‖x − m(t)‖²`.
+    //! The Newton basin of the true root `t*` is the open half-circle around it; the
+    //! basin BOUNDARY is the antipode `t* + ½`, where the gradient vanishes but the
+    //! curvature flips sign (a local maximum, not a minimum). A start near `t*` must
+    //! certify (`h ≤ ½`) and converge to the true coordinate; a start near the
+    //! antipode must FLAG (`h > ½` or singular curvature), never silently converge
+    //! to the wrong root.
+    use super::*;
+    use crate::basis::PeriodicHarmonicEvaluator;
+    use crate::manifold::SaeAtomBasisKind;
+    use ndarray::{Array1, Array2};
+    use std::f64::consts::TAU;
+    use std::sync::Arc;
+
+    /// `M = 3` periodic basis: `[1, sin(2πt), cos(2πt)]` (one harmonic).
+    const M: usize = 3;
+    /// Ambient dimension of the planted circle.
+    const P: usize = 2;
+
+    /// Build the single planted-circle atom. The decoder maps the basis to the unit
+    /// circle: `m(t) = cos(2πt)·e_x + sin(2πt)·e_y`. Coordinates are seeded at the
+    /// origin; the atlas evaluates the basis at its own chart centers, so the seed
+    /// values only set `n_obs`.
+    fn planted_circle_atom(n_obs: usize) -> SaeManifoldAtom {
+        let evaluator = PeriodicHarmonicEvaluator::new(M).expect("evaluator");
+        let coords = Array2::<f64>::zeros((n_obs.max(1), 1));
+        let (phi, jet) = evaluator.evaluate(coords.view()).expect("evaluate");
+        // decoder rows: [1]->(0,0), [sin]->(0,1), [cos]->(1,0)  => m=(cos,sin).
+        let mut decoder = Array2::<f64>::zeros((M, P));
+        decoder[[2, 0]] = 1.0; // cos column -> x
+        decoder[[1, 1]] = 1.0; // sin column -> y
+        SaeManifoldAtom::new_with_provided_function_gram(
+            "circle".to_string(),
+            SaeAtomBasisKind::Periodic,
+            1,
+            phi,
+            jet,
+            decoder,
+            Array2::<f64>::eye(M),
+        )
+        .expect("atom build")
+        .with_basis_evaluator(Arc::new(
+            PeriodicHarmonicEvaluator::new(M).expect("evaluator clone"),
+        ))
+    }
+
+    /// Target on the planted circle at coordinate `t` (fraction of one period).
+    fn circle_target(t: f64) -> Array1<f64> {
+        let angle = TAU * t;
+        Array1::from(vec![angle.cos(), angle.sin()])
+    }
+
+    /// The Euclidean, prior-free certificate at start `t0`.
+    fn euclidean_certificate(
+        atom: &SaeManifoldAtom,
+        evaluator: &dyn SaeBasisEvaluator,
+        t0: &Array1<f64>,
+        x: &Array1<f64>,
+        lipschitz: f64,
+    ) -> RowCertificate {
+        row_certificate_core(
+            atom,
+            evaluator,
+            t0.view(),
+            x.view(),
+            1.0,
+            lipschitz,
+            &EncodeObjective::euclidean(),
+        )
+        .expect("certificate")
+        .0
+    }
+
+    #[test]
+    fn antipodal_start_flags_never_silently_wrong() {
+        let atom = planted_circle_atom(8);
+
+        // True root t* = 0.0 (target = (1, 0)). The antipode t = 0.5 (target's
+        // far side) is the basin boundary: at a start there the encode Hessian for
+        // THIS target has the wrong sign (local max), so beta is undefined and the
+        // certificate must flag. We evaluate the certificate DIRECTLY at the
+        // antipodal start to exercise the basin-boundary detection, independent of
+        // routing.
+        let evaluator: Arc<dyn SaeBasisEvaluator> =
+            Arc::new(PeriodicHarmonicEvaluator::new(M).unwrap());
+        let x = circle_target(0.0); // (1, 0)
+
+        // A large Lipschitz constant (any finite L) — the antipodal start fails on
+        // the curvature (beta = +inf), so it flags for ALL L.
+        let antipode = Array1::from(vec![0.5_f64]);
+        let cert = euclidean_certificate(&atom, evaluator.as_ref(), &antipode, &x, 100.0);
+
+        assert!(
+            !cert.certified(),
+            "a start at the antipodal basin boundary must FLAG, never certify; got h = {} (beta={}, eta={})",
+            cert.h,
+            cert.beta,
+            cert.eta
+        );
+    }
+
+    #[test]
+    fn certificate_h_is_monotone_in_distance_from_root() {
+        // The Kantorovich h grows as the start moves away from the root toward the
+        // antipode: near the root the residual is small and curvature is positive
+        // (small h), near the antipode curvature degrades (large/infinite h). This
+        // exercises the analytically-known basin structure: there is a crossing
+        // radius where h passes 1/2 — the certified region boundary.
+        let atom = planted_circle_atom(8);
+        let evaluator: Arc<dyn SaeBasisEvaluator> =
+            Arc::new(PeriodicHarmonicEvaluator::new(M).unwrap());
+        let x = circle_target(0.0); // root at t = 0
+
+        let h_at = |t: f64| -> f64 {
+            let start = Array1::from(vec![t]);
+            euclidean_certificate(&atom, evaluator.as_ref(), &start, &x, 50.0).h
+        };
+
+        // Near the root: certified.
+        assert!(
+            h_at(0.02) <= KANTOROVICH_THRESHOLD,
+            "near-root start must be certified; h(0.02) = {}",
+            h_at(0.02)
+        );
+        // Far toward the antipode: uncertified (curvature flips before t = 0.25).
+        let h_far = h_at(0.30);
+        assert!(
+            !(h_far <= KANTOROVICH_THRESHOLD),
+            "start past the basin boundary must be uncertified; h(0.30) = {h_far}"
+        );
+    }
+
+    #[test]
+    fn lipschitz_constant_shrinks_certified_radius_monotonically() {
+        // Sanity on the certificate's soundness lever: a LARGER Hessian-Lipschitz
+        // constant L only ever shrinks the certified region (h = beta*eta*L grows
+        // with L), so an over-estimate of L can never falsely certify a row.
+        let atom = planted_circle_atom(8);
+        let evaluator: Arc<dyn SaeBasisEvaluator> =
+            Arc::new(PeriodicHarmonicEvaluator::new(M).unwrap());
+        let x = circle_target(0.0);
+        let start = Array1::from(vec![0.1_f64]);
+
+        let h_small = euclidean_certificate(&atom, evaluator.as_ref(), &start, &x, 10.0).h;
+        let h_large = euclidean_certificate(&atom, evaluator.as_ref(), &start, &x, 1000.0).h;
+        assert!(
+            h_large > h_small,
+            "larger L must yield larger h (smaller certified region): {h_large} vs {h_small}"
+        );
+        // The ratio is exactly the L ratio (h is linear in L).
+        let ratio = h_large / h_small;
+        assert!(
+            (ratio - 100.0).abs() < 1e-6,
+            "h must be exactly linear in L; ratio = {ratio}"
+        );
     }
 }

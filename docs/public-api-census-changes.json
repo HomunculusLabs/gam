@@ -1801,5 +1801,13 @@
     },
     "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. No product uses these 21 restored-in-place identities: residual_cascade (assess_next_level, logdet_exact, num_nonzeros, sample_coefficients), inference/alo (compute_alo_diagnostics_from_fit, compute_alo_diagnostics_from_pirls, compute_case_deletion_from_pirls), row_sampling_measure (designed_subsample_certified, expected_representation, is_enriched, estimated_corpus_rows), gam-sae residual_stratify estimated_corpus_rows, psi_gram_tensor (d2gram_dpsi2, d2rhs_dpsi2, rank_margin), mixture_link (inverse_link_jet_for_family, softmaxwith_jacobian_last_fixedzero), result_types (penalized_hessian_unscaled, was_measured), cross_node (is_done, rank_cursor).",
     "evidence": "restored_consumers_2829.py at d8f6ef9be (MSI job 527977, /scratch.global/sauer354/pool/api2829/consumers.d8f6ef9be98996b5c98bd08667aa4fe121561e8f.rows.tsv) scores 19 as unreferenced and the two estimated_corpus_rows as consumed_unexplained. Each is the other's homonym on a different type, and neither has a caller. At the base, git grep -w finds none of the 21 outside its own file. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 536240, /scratch.global/sauer354/pool/api2829/validate.536240.log)."
+  },
+  {
+    "base": "272905c196c68ed3ef8cd268f1bbd0aec07ba23f",
+    "removed": {
+      "crates/gam-sae/src/encode.rs::row_certificate": 1
+    },
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): encode::row_certificate, a Euclidean wrapper over the crate-private row_certificate_core, has no production caller and is deleted. Its tests now call row_certificate_core with EncodeObjective::euclidean().",
+    "evidence": "At 0a246e52, git grep -n -w finds row_certificate called only by one encode.rs unit test and tests/sae/sae/sae_encode_atlas_certified.rs. The removed map is public_api_census.py's census difference over this change, computed on MSI."
   }
 ]

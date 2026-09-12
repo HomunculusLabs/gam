@@ -4557,5 +4557,20 @@
     ],
     "reason": "#2829 public-surface rule: no product uses these entry points. Their private helpers and constants lose their last caller and go with them. In alo.rs that is the PIRLS ALO implementation chain (compute_alo_diagnostics_from_pirls_impl/_inner, alo_covariance_scale, alo_link_needs_exact_curvature_refinement, log_leverage_diagnostics, percentile_from_sorted, percentile_index, LEVERAGE_* thresholds). residual_cascade.rs loses next_normal, next_unit and assess_level_at_exponent, and psi_gram_tensor.rs loses cheb_t_double_prime.",
     "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 536240, /scratch.global/sauer354/pool/api2829/validate.536240.log). The orphan cascade was closed to a fixed point: a scan of each derived file finds no private item or import left with only its own declaration, compared with the base. The five imports only the deleted alo chain used (UnifiedFitResult, dispersion_from_likelihood, pirls, LikelihoodScaleMetadata, LinkFunction, ResponseFamily) are dropped. Four doc mentions are reworded. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "272905c196c68ed3ef8cd268f1bbd0aec07ba23f",
+    "items": [
+      "crates/gam-sae/src/encode.rs:fn:row_certificate",
+      "tests/sae/sae/sae_encode_atlas_certified.rs:const:M",
+      "tests/sae/sae/sae_encode_atlas_certified.rs:const:P",
+      "tests/sae/sae/sae_encode_atlas_certified.rs:fn:antipodal_start_flags_never_silently_wrong",
+      "tests/sae/sae/sae_encode_atlas_certified.rs:fn:certificate_h_is_monotone_in_distance_from_root",
+      "tests/sae/sae/sae_encode_atlas_certified.rs:fn:circle_target",
+      "tests/sae/sae/sae_encode_atlas_certified.rs:fn:lipschitz_constant_shrinks_certified_radius_monotonically",
+      "tests/sae/sae/sae_encode_atlas_certified.rs:fn:planted_circle_atom"
+    ],
+    "reason": "#2899 public API sweep of gam-sae (prune-api-d): a public item stays only when a product root uses it (gam-cli, gam-pyffi, gamfit, examples/, or another crate's production code). encode::row_certificate was a Euclidean wrapper over the crate-private row_certificate_core, and no production code called it. Its callers were one encode.rs unit test and the root integration test tests/sae/sae/sae_encode_atlas_certified.rs. Those three #1010 tests check the surviving Kantorovich certificate (the antipodal start flags, h grows with distance from the root, h is linear in the Lipschitz constant), so they move into encode.rs's new atlas_certificate_tests module. There they call row_certificate_core with EncodeObjective::euclidean(), which is exactly what the wrapper forwarded to. The root test file and its mod declaration are deleted, the encode.rs unit test calls row_certificate_core directly, and doc text naming row_certificate now names row_certificate_core.",
+    "evidence": "At 0a246e52, git grep -n -w row_certificate over crates, src, tests, examples, bench and gamfit finds the declaration and doc mentions in crates/gam-sae/src/encode.rs, the unit-test call at encode.rs:3525, a test doc comment in crates/gam-sae/src/manifold/tests.rs, and the four calls in tests/sae/sae/sae_encode_atlas_certified.rs. The wrapper's body was row_certificate_core(atom, evaluator, t0, x, amplitude, lipschitz, &EncodeObjective::euclidean()), so each moved assertion measures the same certificate. The prune-api-d census v2 at 0a246e52 reports row_certificate with zero production consumers. Not compiled locally (user directive). Compile is covered by the lead's shared tip check."
   }
 ]

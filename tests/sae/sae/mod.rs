@@ -3,7 +3,6 @@ mod sae_1026_tiny_toy_parity;
 mod sae_arrow_schur_large_scale;
 mod sae_audit_is_invoked;
 mod sae_curvature_estimand_sims;
-mod sae_encode_atlas_certified;
 mod sae_ev_vs_k_frontier;
 mod sae_factored_frame_solve;
 mod sae_incoherence_phase_diagram;
