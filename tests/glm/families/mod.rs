@@ -18,7 +18,6 @@ mod bug_hunt_binomial_coefficient_not_exact_below_2_53;
 mod bug_hunt_binomial_loglog_cauchit_link_legal_but_unfittable;
 mod bug_hunt_flexible_loglog_cauchit_binomial_wiggle;
 mod bug_hunt_gaussian_constant_response_2254;
-mod bug_hunt_logit_posterior_mean_exact_oracle_biased;
 mod bughunt_2369_beta_phi_repro;
 mod issue_1426_gammalog_recovery;
 mod issue_1477_tweedie_ps_basis_biased_mean;

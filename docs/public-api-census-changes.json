@@ -1703,5 +1703,20 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): SaeManifoldTerm::merge_tiers has no production caller and is deleted with the tests that only exercised it. The crate-private chart-atlas method shift_indices loses its only caller and is deleted too.",
     "evidence": "At db0e784da, git grep -n -w finds merge_tiers called only by manifold/tests_two_tier_2023.rs, and shift_indices called only by merge_tiers. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "9f591bd53db998a9319dc8b6d928b8b955f838ae",
+    "removed": {
+      "crates/gam-solve/src/quadrature.rs::cloglog_ghq_derivatives_adaptive": 1,
+      "crates/gam-solve/src/quadrature.rs::cloglog_ghq_value": 1,
+      "crates/gam-solve/src/quadrature.rs::cloglog_posterior_mean": 1,
+      "crates/gam-solve/src/quadrature.rs::logit_posterior_mean": 1,
+      "crates/gam-solve/src/quadrature.rs::logit_posterior_mean_batch": 1,
+      "crates/gam-solve/src/quadrature.rs::logit_posterior_mean_exact": 1,
+      "crates/gam-solve/src/quadrature.rs::logit_posterior_meanwith_deriv_batch": 1,
+      "crates/gam-solve/src/quadrature.rs::normal_expectation_3d_adaptive": 1
+    },
+    "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. No product uses these eight restored-in-place gam-solve quadrature entry points: the Gauss-Hermite logit and cloglog posterior-mean wrappers, their batch variants, the adaptive cloglog GHQ value and derivative evaluators, the 3-D adaptive normal expectation, and the Faddeeva-series exact logit oracle.",
+    "evidence": "restored_consumers_2829.py at d8f6ef9be (MSI job 527977, /scratch.global/sauer354/pool/api2829/consumers.d8f6ef9be98996b5c98bd08667aa4fe121561e8f.rows.tsv) scores all eight as unreferenced. At the base, git grep -w over crates, src, tests, examples and python finds each only in quadrature.rs and in the module doc of tests/glm/families/bug_hunt_logit_posterior_mean_exact_oracle_biased.rs, a 20-line file with no test in it. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 535248, /scratch.global/sauer354/pool/api2829/validate.535248.log)."
   }
 ]

@@ -4388,5 +4388,31 @@
     ],
     "reason": "#2469: DuchonOperatorPenaltySpec::matern_for_smoothness gated the tension and stiffness operator penalties on m + ORDER_EPS >= order, with ORDER_EPS = 1e-9 described as keeping the inclusive j <= m boundary stable under floating-point representation of half-integer orders. But m = nu.half_integer_value() + 0.5*d is a sum of a small half-integer (0.5, 1.5, ..., 4.5) and 0.5*d, and the gated orders are 1.0 and 2.0. Every one of those values is exactly representable, and so is the sum, so the comparison m >= order is already exact and the tolerance changed nothing. The matching gate in term_specs.rs's Matérn candidate builder already compares exactly, with a comment saying so.",
     "evidence": "git grep -w ORDER_EPS at the base over crates, src and tests finds only its declaration and its single use in matern_for_smoothness in crates/gam-terms/src/basis/types.rs. half_integer_value (types.rs:152) returns the literals 0.5, 1.5, 2.5, 3.5 and 4.5. The item list applies source_removal_guard.py's ITEM regex by hand. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "9f591bd53db998a9319dc8b6d928b8b955f838ae",
+    "items": [
+      "crates/gam-solve/src/quadrature.rs:const:CLOGLOG_GHQ_CONV_TOL",
+      "crates/gam-solve/src/quadrature.rs:const:CLOGLOG_GHQ_ORDER_LADDER",
+      "crates/gam-solve/src/quadrature.rs:const:FADDEEVA_ASYMPTOTIC_RADIUS",
+      "crates/gam-solve/src/quadrature.rs:const:FADDEEVA_ASYMPTOTIC_TERMS",
+      "crates/gam-solve/src/quadrature.rs:const:FADDEEVA_TAIL_MIN_INDEX",
+      "crates/gam-solve/src/quadrature.rs:const:FADDEEVA_WEIDEMAN_N",
+      "crates/gam-solve/src/quadrature.rs:fn:cloglog_ghq_derivatives_adaptive",
+      "crates/gam-solve/src/quadrature.rs:fn:cloglog_ghq_value",
+      "crates/gam-solve/src/quadrature.rs:fn:cloglog_posterior_mean",
+      "crates/gam-solve/src/quadrature.rs:fn:faddeeva_asymptotic_a",
+      "crates/gam-solve/src/quadrature.rs:fn:faddeeva_pole_series_em_tail",
+      "crates/gam-solve/src/quadrature.rs:fn:faddeeva_upper_halfplane",
+      "crates/gam-solve/src/quadrature.rs:fn:faddeeva_weideman_coeffs",
+      "crates/gam-solve/src/quadrature.rs:fn:logit_posterior_mean",
+      "crates/gam-solve/src/quadrature.rs:fn:logit_posterior_mean_batch",
+      "crates/gam-solve/src/quadrature.rs:fn:logit_posterior_mean_exact",
+      "crates/gam-solve/src/quadrature.rs:fn:logit_posterior_meanwith_deriv_batch",
+      "crates/gam-solve/src/quadrature.rs:fn:normal_expectation_3d_adaptive",
+      "crates/gam-solve/src/quadrature.rs:static:CACHE"
+    ],
+    "reason": "#2829 public-surface rule: no product uses the eight quadrature entry points. The exact logit oracle's private Faddeeva helpers (faddeeva_asymptotic_a, faddeeva_pole_series_em_tail, faddeeva_upper_halfplane, faddeeva_weideman_coeffs) and their FADDEEVA_* constants lose their only caller and go with it, as do the two function-local GHQ ladder constants.",
+    "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 535248, /scratch.global/sauer354/pool/api2829/validate.535248.log). A scan of the derived quadrature.rs finds no private item or import left with a single occurrence beyond the pre-existing aliased stable_polynomial_times_exp_neg import. The #1459 bug-hunt file tests/glm/families/bug_hunt_logit_posterior_mean_exact_oracle_biased.rs held only a module doc about the deleted oracle, so it and its mod line go. Compile is covered by the lead's shared tip check."
   }
 ]
