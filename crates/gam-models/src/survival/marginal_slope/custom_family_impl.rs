@@ -596,8 +596,9 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         // #979 Jeffreys hot path pays per arms-the-gate cycle. The batched API
         // builds the kernel once and dispatches to the kernel's BLAS-3 all-axes
         // override when present, falling back to the bit-identical per-axis sweep
-        // otherwise. Flex / time-wiggle / per-z directional derivatives route
-        // through their own dynamic-q evaluators, so they keep the per-axis path.
+        // otherwise. Flex directional derivatives, with or without a time wiggle,
+        // build their dynamic-q row geometry once below; a time wiggle alone and a
+        // per-z slope keep the per-axis path.
         if !self.per_z_slope_active()
             && !self.effective_flex_active(block_states)?
             && !self.flex_timewiggle_active()
@@ -627,6 +628,19 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         {
             let axes = self
                 .exact_newton_joint_hessian_directional_derivative_flex_no_wiggle_all_axes(
+                    block_states,
+                )?;
+            return Ok(Some(axes));
+        }
+
+        // Flex with a time wiggle: the same build-once sweep, adding the time-wiggle
+        // transport of the q Jacobian per axis (gam#2893).
+        if !self.per_z_slope_active()
+            && self.effective_flex_active(block_states)?
+            && self.flex_timewiggle_active()
+        {
+            let axes = self
+                .exact_newton_joint_hessian_directional_derivative_timewiggle_flex_all_axes(
                     block_states,
                 )?;
             return Ok(Some(axes));

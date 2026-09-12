@@ -2981,6 +2981,89 @@ fn timewiggle_scorewarp_beta_hessian_second_directional_derivative_returns_finit
     assert!(second.iter().all(|value| value.is_finite()));
 }
 
+/// The single-row time-wiggle fixture of the #2893 gates, with an optional score warp.
+fn timewiggle_marginal_slope_family(score_warp: Option<DeviationRuntime>) -> SurvivalMarginalSlopeFamily {
+    let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
+    SurvivalMarginalSlopeFamily {
+        n: 1,
+        event: Arc::new(array![1.0]),
+        weights: Arc::new(array![1.0]),
+        z: Arc::new(array![0.15].insert_axis(Axis(1))),
+        score_covariance: unit_score_covariance(),
+        gaussian_frailty_sd: None,
+        family_hyper: SurvivalMarginalSlopeFamilyHyperState::default(),
+        derivative_guard: 1e-6,
+        design_entry: DesignMatrix::from(array![[0.0, 0.0, 0.0, 0.0, 0.0]]),
+        design_exit: DesignMatrix::from(array![[0.0, 0.0, 0.0, 0.0, 0.0]]),
+        design_derivative_exit: DesignMatrix::from(array![[1.0, 0.0, 0.0, 0.0, 0.0]]),
+        offset_entry: Arc::new(array![0.05]),
+        offset_exit: Arc::new(array![0.15]),
+        derivative_offset_exit: Arc::new(array![0.9]),
+        marginal_design: DesignMatrix::from(array![[0.7, -0.2]]),
+        slope_layout: (DesignMatrix::from(array![[1.0]])).into(),
+        score_warp,
+        link_dev: None,
+        influence_absorber: None,
+        time_linear_constraints: None,
+        time_wiggle_knots: Some(time_wiggle_knots),
+        time_wiggle_degree: Some(time_wiggle_degree),
+        time_wiggle_ncols,
+        intercept_warm_starts: None,
+        auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
+        auto_subsample_last_rho: Arc::new(Mutex::new(None)),
+    }
+}
+
+/// Block states of `timewiggle_marginal_slope_family` at a flat β: time (5), marginal (2),
+/// slope (1), then the score warp when present, with every `η` rebuilt from β.
+fn timewiggle_marginal_slope_states(
+    family: &SurvivalMarginalSlopeFamily,
+    beta: &Array1<f64>,
+) -> Vec<ParameterBlockState> {
+    let marginal_beta = beta.slice(s![5..7]).to_owned();
+    let marginal_design = family.marginal_design.to_dense().to_owned();
+    let mut states = vec![
+        ParameterBlockState {
+            beta: beta.slice(s![..5]).to_owned(),
+            eta: array![0.0],
+        },
+        ParameterBlockState {
+            eta: marginal_design.dot(&marginal_beta),
+            beta: marginal_beta,
+        },
+        ParameterBlockState {
+            beta: beta.slice(s![7..8]).to_owned(),
+            eta: array![beta[7]],
+        },
+    ];
+    if family.score_warp.is_some() {
+        states.push(ParameterBlockState {
+            beta: beta.slice(s![8..]).to_owned(),
+            eta: Array1::zeros(1),
+        });
+    }
+    states
+}
+
+/// A flat β for `timewiggle_marginal_slope_family`, with small alternating score-warp
+/// coefficients when the warp is present.
+fn timewiggle_marginal_slope_beta(family: &SurvivalMarginalSlopeFamily) -> Array1<f64> {
+    let base = [0.0, 0.08, -0.03, 0.02, -0.01, 0.35, -0.1, 0.2];
+    let score_width = family
+        .score_warp
+        .as_ref()
+        .map_or(0, |runtime| runtime.basis_dim());
+    Array1::from_shape_fn(base.len() + score_width, |i| {
+        if i < base.len() {
+            base[i]
+        } else if i % 2 == 0 {
+            0.02
+        } else {
+            -0.02
+        }
+    })
+}
+
 /// gam#2893: `D²_β H[u, v]` for a time wiggle, alone and with a score warp, against a
 /// Ridders-certified central difference of the family's own `D_β H[v]` along `u`, after
 /// `D_β H[v]` is itself differenced against the joint Hessian. A score-warp coordinate moves
@@ -2988,77 +3071,15 @@ fn timewiggle_scorewarp_beta_hessian_second_directional_derivative_returns_finit
 /// so `dJᵀ H dJ` never reaches the slope or flex columns.
 #[test]
 fn timewiggle_beta_hessian_second_directional_derivative_matches_finite_difference_2893() {
-    let (time_wiggle_knots, time_wiggle_degree, time_wiggle_ncols) = standard_test_time_wiggle();
-    let marginal_design = array![[0.7, -0.2]];
     for score_warp in [None, Some(test_deviation_runtime())] {
-        let score_width = score_warp.as_ref().map_or(0, |runtime| runtime.basis_dim());
         let label = if score_warp.is_some() {
             "timewiggle + score warp"
         } else {
             "timewiggle"
         };
-        let family = SurvivalMarginalSlopeFamily {
-            n: 1,
-            event: Arc::new(array![1.0]),
-            weights: Arc::new(array![1.0]),
-            z: Arc::new(array![0.15].insert_axis(Axis(1))),
-            score_covariance: unit_score_covariance(),
-            gaussian_frailty_sd: None,
-            family_hyper: SurvivalMarginalSlopeFamilyHyperState::default(),
-            derivative_guard: 1e-6,
-            design_entry: DesignMatrix::from(array![[0.0, 0.0, 0.0, 0.0, 0.0]]),
-            design_exit: DesignMatrix::from(array![[0.0, 0.0, 0.0, 0.0, 0.0]]),
-            design_derivative_exit: DesignMatrix::from(array![[1.0, 0.0, 0.0, 0.0, 0.0]]),
-            offset_entry: Arc::new(array![0.05]),
-            offset_exit: Arc::new(array![0.15]),
-            derivative_offset_exit: Arc::new(array![0.9]),
-            marginal_design: DesignMatrix::from(marginal_design.clone()),
-            slope_layout: (DesignMatrix::from(array![[1.0]])).into(),
-            score_warp: score_warp.clone(),
-            link_dev: None,
-            influence_absorber: None,
-            time_linear_constraints: None,
-            time_wiggle_knots: Some(time_wiggle_knots.clone()),
-            time_wiggle_degree: Some(time_wiggle_degree),
-            time_wiggle_ncols,
-            intercept_warm_starts: None,
-            auto_subsample_phase_counter: Arc::new(AtomicUsize::new(0)),
-            auto_subsample_last_rho: Arc::new(Mutex::new(None)),
-        };
-        let states_at = |beta: &Array1<f64>| {
-            let marginal_beta = beta.slice(s![5..7]).to_owned();
-            let mut states = vec![
-                ParameterBlockState {
-                    beta: beta.slice(s![..5]).to_owned(),
-                    eta: array![0.0],
-                },
-                ParameterBlockState {
-                    eta: marginal_design.dot(&marginal_beta),
-                    beta: marginal_beta,
-                },
-                ParameterBlockState {
-                    beta: beta.slice(s![7..8]).to_owned(),
-                    eta: array![beta[7]],
-                },
-            ];
-            if score_width > 0 {
-                states.push(ParameterBlockState {
-                    beta: beta.slice(s![8..]).to_owned(),
-                    eta: Array1::zeros(1),
-                });
-            }
-            states
-        };
-        let base = [0.0, 0.08, -0.03, 0.02, -0.01, 0.35, -0.1, 0.2];
-        let beta = Array1::from_shape_fn(8 + score_width, |i| {
-            if i < base.len() {
-                base[i]
-            } else if i % 2 == 0 {
-                0.02
-            } else {
-                -0.02
-            }
-        });
+        let family = timewiggle_marginal_slope_family(score_warp);
+        let beta = timewiggle_marginal_slope_beta(&family);
+        let states_at = |beta: &Array1<f64>| timewiggle_marginal_slope_states(&family, beta);
         let u = Array1::from_shape_fn(beta.len(), |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
         let v = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
         let h = 1e-3;
@@ -3112,6 +3133,38 @@ fn timewiggle_beta_hessian_second_directional_derivative_matches_finite_differen
                 .expect("displaced D_beta H[v]")
                 .expect("a time wiggle publishes D_beta H")
         });
+    }
+}
+
+/// gam#2893: the build-once flex + time-wiggle sweep reproduces the single-axis `D_β H[e_a]` on
+/// every coefficient axis.
+#[test]
+fn timewiggle_flex_all_axes_directional_derivative_matches_single_axis_2893() {
+    let family = timewiggle_marginal_slope_family(Some(test_deviation_runtime()));
+    let beta = timewiggle_marginal_slope_beta(&family);
+    let states = timewiggle_marginal_slope_states(&family, &beta);
+    let axes = family
+        .exact_newton_joint_hessian_directional_derivative_timewiggle_flex_all_axes(&states)
+        .expect("build-once all-axes sweep");
+    assert_eq!(axes.len(), beta.len());
+    for (index, swept) in axes.iter().enumerate() {
+        let mut axis = Array1::<f64>::zeros(beta.len());
+        axis[index] = 1.0;
+        let single = family
+            .exact_newton_joint_hessian_directional_derivative(&states, &axis)
+            .expect("single-axis D_beta H")
+            .expect("a time wiggle publishes D_beta H");
+        let scale = single
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()))
+            .max(1e-12);
+        let gap = (swept - &single)
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()));
+        assert!(
+            gap <= 1e-12 * scale,
+            "axis {index}: build-once sweep vs single axis: gap {gap:e}, scale {scale:e}"
+        );
     }
 }
 

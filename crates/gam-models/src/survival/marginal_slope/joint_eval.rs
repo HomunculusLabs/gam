@@ -581,6 +581,95 @@ impl SurvivalMarginalSlopeFamily {
         Ok(result)
     }
 
+    /// Build-once all-axes variant of
+    /// [`Self::exact_newton_joint_hessian_directional_derivative_timewiggle_flex`].
+    ///
+    /// The Jeffreys all-axes sweep asks for `D_β H[e_a]` along every coefficient axis. The
+    /// single-direction routine rebuilds each row's `q`-geometry, flex primary Hessian and
+    /// third-order base once per axis; this variant builds them once per row and contracts every
+    /// axis against them through the same per-row assemblers as the single-axis call, so each
+    /// matrix equals that call up to the cross-row reduction order (gam#2893).
+    pub(crate) fn exact_newton_joint_hessian_directional_derivative_timewiggle_flex_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+    ) -> Result<Vec<Array2<f64>>, String> {
+        let slices = block_slices(self, block_states);
+        let primary = flex_primary_slices(self);
+        let identity_blocks = flex_identity_block_pairs(&primary, &slices);
+        let p_total = slices.total;
+        let time_tail = self.time_wiggle_range();
+        let beta_time = &block_states[0].beta;
+        let beta_time_w = beta_time.slice(s![time_tail.clone()]);
+        let zeros = || vec![Array2::<f64>::zeros((p_total, p_total)); p_total];
+        let result = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+            self.n,
+            |range| -> Result<Vec<Array2<f64>>, String> {
+                let mut acc = zeros();
+                // `accumulate_dynamic_q_joint_row` also scatters a gradient; the sweep reads
+                // only the Hessian, so one scratch vector absorbs it.
+                let mut gradient_scratch = Array1::<f64>::zeros(p_total);
+                for row in range {
+                    // Direction-independent per-row geometry, built once.
+                    let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
+                    let (_, f_pi, h_pi) = self.compute_row_flex_primary_gradient_hessian_exact(
+                        row,
+                        block_states,
+                        &q_geom,
+                        &primary,
+                    )?;
+                    let base =
+                        self.build_row_flex_third_base_with_states(row, block_states, &primary)?;
+                    for axis_idx in 0..p_total {
+                        let mut axis = Array1::<f64>::zeros(p_total);
+                        axis[axis_idx] = 1.0;
+                        let u_d = self.row_primary_direction_from_flat_dynamic_with_q_geometry(
+                            row,
+                            block_states,
+                            &slices,
+                            &q_geom,
+                            &axis,
+                        )?;
+                        let t_ud = self.row_flex_third_contract_from_base(&base, &u_d)?;
+                        let h_ud = h_pi.dot(&u_d);
+                        self.accumulate_dynamic_q_joint_row(
+                            row,
+                            &slices,
+                            &q_geom,
+                            h_ud.view(),
+                            t_ud.view(),
+                            &identity_blocks,
+                            &mut gradient_scratch,
+                            &mut acc[axis_idx],
+                        )?;
+                        self.accumulate_timewiggle_directional_row(
+                            row,
+                            block_states,
+                            &slices,
+                            &q_geom,
+                            &f_pi,
+                            h_pi.view(),
+                            axis.slice(s![slices.time.clone()]),
+                            axis.slice(s![slices.marginal.clone()]),
+                            beta_time,
+                            beta_time_w,
+                            &identity_blocks,
+                            &mut acc[axis_idx],
+                        )?;
+                    }
+                }
+                Ok(acc)
+            },
+            |mut a, b| -> Result<_, String> {
+                for (ai, bi) in a.iter_mut().zip(b.into_iter()) {
+                    *ai += &bi;
+                }
+                Ok(a)
+            },
+        )?
+        .unwrap_or_else(zeros);
+        Ok(result)
+    }
+
     pub(crate) fn exact_newton_joint_hessian_directional_derivative_timewiggle_cached(
         &self,
         block_states: &[ParameterBlockState],
