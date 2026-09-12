@@ -24,6 +24,33 @@ use gam::terms::basis::{
 use gam::types::LikelihoodSpec;
 use ndarray::{Array1, Array2};
 
+/// Forwards the κ route's own trace records (`[#1464-trace]`, `[spatial-kappa]`)
+/// to stderr, so a run names the route that produced κ̂ whichever way the
+/// assertions go.
+struct KappaTraceLogger;
+
+impl log::Log for KappaTraceLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        let message = record.args().to_string();
+        if message.starts_with("[#1464-trace]") || message.starts_with("[spatial-kappa]") {
+            eprintln!("{message}");
+        }
+    }
+    fn flush(&self) {}
+}
+
+static KAPPA_TRACE_LOGGER: KappaTraceLogger = KappaTraceLogger;
+
+fn install_kappa_trace_logger() {
+    // Losing the race to an already-installed logger leaves that logger in place.
+    if log::set_logger(&KAPPA_TRACE_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+}
+
 use gam::utils::splitmix64;
 fn next_unit(state: &mut u64) -> f64 {
     (splitmix64(state) >> 11) as f64 / (1u64 << 53) as f64
@@ -117,6 +144,7 @@ fn fitted_kappa(data: &Array2<f64>, ell_ref: f64, kappa_true: f64) -> f64 {
 
 #[test]
 fn curv_production_estimand_identifies_curvature_sign_both_ways() {
+    install_kappa_trace_logger();
     let data = disk_points(220, 0xC0FF_EE12);
     // κ=0 reference length (auto chart spacing) — the L(κ) target is pinned to it.
     let ell_ref = realized_constant_curvature_length_scale(data.view(), 0.0).unwrap();

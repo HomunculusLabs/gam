@@ -24,6 +24,33 @@ use gam::{
 
 use csv::StringRecord;
 
+/// Forwards the κ route's own trace records (`[#1464-trace]`, `[spatial-kappa]`)
+/// to stderr, so a run names the route that produced κ̂ whichever way the
+/// assertions go.
+struct KappaTraceLogger;
+
+impl log::Log for KappaTraceLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        let message = record.args().to_string();
+        if message.starts_with("[#1464-trace]") || message.starts_with("[spatial-kappa]") {
+            eprintln!("{message}");
+        }
+    }
+    fn flush(&self) {}
+}
+
+static KAPPA_TRACE_LOGGER: KappaTraceLogger = KappaTraceLogger;
+
+fn install_kappa_trace_logger() {
+    // Losing the race to an already-installed logger leaves that logger in place.
+    if log::set_logger(&KAPPA_TRACE_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+}
+
 // --- deterministic RNG (splitmix64 → unit / gaussian), no external deps -------
 use gam::utils::splitmix64;
 fn next_unit(state: &mut u64) -> f64 {
@@ -105,6 +132,7 @@ fn fit_kappa_hat(kappa_star: f64, seed: u64) -> f64 {
 #[test]
 fn curv_full_fit_identifies_curvature_sign_on_mirror_datasets() {
     init_parallelism();
+    install_kappa_trace_logger();
 
     // Control: genuinely spherical data must recover POSITIVE curvature.
     let kappa_spherical = fit_kappa_hat(2.0, 0x5151_0001);
