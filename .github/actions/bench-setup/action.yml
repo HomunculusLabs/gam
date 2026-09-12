@@ -95,11 +95,22 @@ runs:
           repos <- if (nzchar(rspm)) c(CRAN = rspm) else c(CRAN = "https://cloud.r-project.org")
           required <- c("mgcv","jsonlite","survival","glmnet","gamlss",
                         "gamlss.dist","gamboostLSS","mboost","bamlss","brms")
-          install.packages(required, repos = repos,
-                           lib = lib_path,
-                           Ncpus = max(1L, parallel::detectCores() - 1L))
-          installed <- rownames(installed.packages(lib.loc = lib_path))
-          missing <- setdiff(required, installed)
+          # A CRAN download can fail transiently: download.file errors left
+          # gamlss uninstalled and killed the 2026-09-10 nightly bootstrap
+          # (run 34455565090). Re-request only what is still missing, a bounded
+          # number of times; a package that never installs still stops the job
+          # below.
+          missing <- required
+          for (attempt in 1:3) {
+            install.packages(missing, repos = repos,
+                             lib = lib_path,
+                             Ncpus = max(1L, parallel::detectCores() - 1L))
+            installed <- rownames(installed.packages(lib.loc = lib_path))
+            missing <- setdiff(required, installed)
+            if (length(missing) == 0L) break
+            cat("install attempt ", attempt, " left missing: ",
+                paste(missing, collapse = ", "), "\n", sep = "")
+          }
           cat("installed in ", lib_path, " (", length(installed), " pkgs):\n  ",
               paste(installed, collapse = ", "), "\n", sep = "")
           if (length(missing) > 0L) {
