@@ -854,10 +854,12 @@ pub(crate) fn penalized_trace_and_null_dim(
     let (eigenvalues, eigenvectors) = symmetric
         .eigh(Side::Lower)
         .map_err(|error| format!("{context}: eigh: {error}"))?;
-    // Both operands are now scaled to G's own magnitude, so the floor for a
-    // meaningless ratio is set by that magnitude.
+    // `G~` is PSD and `P~` diagonal, so the shifted matrix's largest eigenvalue is at
+    // most `tr(G~) + max P~`. The trace also covers the rotation's formation
+    // rounding. An eigenvalue within `m·ε` of that magnitude is a null mode, not rank.
     let scaled_trace = (0..m).map(|mode| scaled[[mode, mode]]).sum::<f64>();
-    let tolerance = f64::EPSILON * scaled_trace.max(1.0) * m.max(1) as f64;
+    let largest_penalty_fraction = penalty_fraction.iter().copied().fold(0.0_f64, f64::max);
+    let tolerance = f64::EPSILON * (scaled_trace + largest_penalty_fraction) * m.max(1) as f64;
     let projected = eigenvectors.t().dot(&scaled).dot(&eigenvectors);
     let mut trace = 0.0_f64;
     for mode in 0..m {

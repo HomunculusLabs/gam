@@ -701,10 +701,14 @@ pub(crate) fn sae_pca_seed_initial_coords_with_pc_offset(
                     } else {
                         0.0
                     };
-                    let s0 = s_vals.get(pc1_row).copied().unwrap_or(0.0).abs();
                     let s1 = s_vals.get(pc2_row).copied().unwrap_or(0.0).abs();
+                    // Numerical rank of the centered SVD: a singular value at or below
+                    // `max(n, p)·ε·σ_max` is rounding, not a second phase axis.
+                    let rank_cutoff = n_obs.max(z.ncols()) as f64
+                        * f64::EPSILON
+                        * s_vals.iter().copied().fold(0.0_f64, f64::max);
                     let has_two_dimensional_phase =
-                        vt_rows >= 2 && pc2_row != pc1_row && s1 > 1.0e-10 * s0.max(1.0);
+                        vt_rows >= 2 && pc2_row != pc1_row && s1 > rank_cutoff;
                     // `two_dimensional_phase` gates the atan2 (2-plane) read vs the
                     // min-max (1-span) read. Non-surplus atoms keep the rank check
                     // above unchanged; surplus atoms use the Gram-Schmidt residual
