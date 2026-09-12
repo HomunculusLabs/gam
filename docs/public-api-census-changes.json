@@ -1731,5 +1731,13 @@
     },
     "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. No product uses these six restored-in-place gam-solve gaussian_reml.rs entry points (build_gaussian_reml_eigen_cache, GaussianRemlMultiResult::from_multi_result, gaussian_reml_multi_closed_form_batch, _warm_started, _with_cache_no_alloc, gaussian_reml_point_eval_at_rho).",
     "evidence": "restored_consumers_2829.py at d8f6ef9be (MSI job 527977, /scratch.global/sauer354/pool/api2829/consumers.d8f6ef9be98996b5c98bd08667aa4fe121561e8f.rows.tsv) scores all six as unreferenced, and at the base git grep -w finds each only in gaussian_reml.rs. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 535467, /scratch.global/sauer354/pool/api2829/validate.535467.log)."
+  },
+  {
+    "base": "4b710d1309f0036413b7ece18dd782d2e4ccebc5",
+    "removed": {
+      "crates/gam-terms/src/basis/input_loc_derivatives.rs::dim": 1
+    },
+    "reason": "prune-api-b product-use sweep (#2899). RadialInputKernel::dim is removed with RadialInputKernel, which no product or test outside its own file uses; its two in-file tests now construct the production RadialScalarKind directly.",
+    "evidence": "scripts/public_api_census.py over probe commit 5b681a41d on base 86c542772 (MSI acn112, python3.12; sliceC.census.out) reports exactly crates/gam-terms/src/basis/input_loc_derivatives.rs::dim 1. At the base git grep -w finds RadialInputKernel only in its own file."
   }
 ]

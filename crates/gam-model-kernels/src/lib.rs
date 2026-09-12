@@ -22,7 +22,6 @@ pub mod cell_moment_family;
 pub mod cubic_cell_kernel;
 pub mod inverse_link;
 pub mod monotone_root;
-pub mod natural_observation;
 pub mod penalized_projection;
 pub mod scale_design;
 pub mod sigma_link;

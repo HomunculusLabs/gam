@@ -43,64 +43,7 @@
 
 use ndarray::{Array1, Array3, ArrayView2};
 
-use crate::basis::{BasisError, MaternNu};
-
-// =========================================================================
-// Kernel parameter bundle
-// =========================================================================
-
-/// Closed-form parameterisation of the radial families supported by the
-/// input-location derivative routines below.
-///
-/// This is a thin convenience over `RadialScalarKind` (which itself is a
-/// crate-internal enum carrying the same parameters). The public layer here
-/// is kept as a separate type so that downstream consumers — including the
-/// Python pyffi layer that will surface `LatentCoord` — can construct kernel
-/// descriptors without poking at `pub(crate)` items.
-#[derive(Debug, Clone)]
-pub enum RadialInputKernel {
-    /// Matérn isotropic kernel with closed-form `(½, 3⁄2, 5⁄2, 7⁄2, 9⁄2)`-ν.
-    Matern { length_scale: f64, nu: MaternNu },
-    /// Hybrid Duchon kernel `||w||^(2p) · (κ² + ||w||²)^s`.
-    DuchonHybrid {
-        length_scale: f64,
-        p_order: usize,
-        s_order: usize,
-        dim: usize,
-    },
-    /// Pure scale-free Duchon kernel (single polyharmonic block of the
-    /// given order). Equivalent to `DuchonHybrid` with `s_order = 0` and no
-    /// finite length scale.
-    DuchonPure {
-        block_order: usize,
-        p_order: usize,
-        s_order: usize,
-        dim: usize,
-    },
-    /// Thin-plate spline kernel with explicit length-scale (used by the
-    /// 1-D thin-plate streaming path; for the general d-D thin-plate this
-    /// coincides with the polyharmonic Duchon kernel of order `m_d`).
-    ThinPlate { length_scale: f64, dim: usize },
-}
-
-impl RadialInputKernel {
-    /// Ambient input dimension `d` (the kernel argument length).
-    pub const fn dim(&self) -> usize {
-        match self {
-            RadialInputKernel::Matern { .. } => {
-                // Matérn is ambient-dimension agnostic in `q, t`; the caller
-                // is responsible for matching `centers.ncols()` to the data
-                // dimensionality. We return the conventional sentinel `0`
-                // here so consumers can short-circuit a dimension cross-check
-                // on the centers themselves.
-                0
-            }
-            RadialInputKernel::DuchonHybrid { dim, .. }
-            | RadialInputKernel::DuchonPure { dim, .. }
-            | RadialInputKernel::ThinPlate { dim, .. } => *dim,
-        }
-    }
-}
+use crate::basis::BasisError;
 
 // =========================================================================
 // Contraction helper (mirrors LatentCoordValues::contract_gradient)
@@ -148,51 +91,8 @@ pub fn contract_input_loc_gradient(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::basis::{RadialScalarKind, duchon_partial_fraction_coeffs};
+    use crate::basis::{MaternNu, RadialScalarKind};
     use ndarray::array;
-
-    /// Project a `RadialInputKernel` onto the internal `RadialScalarKind`
-    /// enum so the radial-jet routines can be reused verbatim by the
-    /// divergence-witness tests.
-    fn into_scalar_kind(kernel: &RadialInputKernel) -> RadialScalarKind {
-        match kernel {
-            RadialInputKernel::Matern { length_scale, nu } => RadialScalarKind::Matern {
-                length_scale: *length_scale,
-                nu: *nu,
-            },
-            RadialInputKernel::DuchonHybrid {
-                length_scale,
-                p_order,
-                s_order,
-                dim,
-            } => {
-                let kappa = 1.0 / length_scale.max(1e-300);
-                let coeffs = duchon_partial_fraction_coeffs(*p_order, *s_order, kappa);
-                RadialScalarKind::Duchon {
-                    length_scale: *length_scale,
-                    p_order: *p_order,
-                    s_order: *s_order,
-                    dim: *dim,
-                    coeffs,
-                }
-            }
-            RadialInputKernel::DuchonPure {
-                block_order,
-                p_order,
-                s_order,
-                dim,
-            } => RadialScalarKind::PureDuchon {
-                block_order: *block_order,
-                p_order: *p_order,
-                s_order: *s_order,
-                dim: *dim,
-            },
-            RadialInputKernel::ThinPlate { length_scale, dim } => RadialScalarKind::ThinPlate {
-                length_scale: *length_scale,
-                dim: *dim,
-            },
-        }
-    }
 
     #[test]
     fn contract_input_loc_gradient_matches_einsum() {
@@ -231,11 +131,10 @@ mod tests {
         // q·s_axis = −exp(−ε)/ε · ε = −exp(−ε) ≈ −1, but the per-r
         // scalar q itself blows up at ~1/ε, which is the witness for the
         // divergence flagged by F1.
-        let kernel = RadialInputKernel::Matern {
+        let kind = RadialScalarKind::Matern {
             length_scale: 1.0,
             nu: MaternNu::Half,
         };
-        let kind = into_scalar_kind(&kernel);
         let eps = 1e-8_f64;
         let (_, q, _) = kind
             .eval_design_triplet(eps)
@@ -249,11 +148,10 @@ mod tests {
     #[test]
     fn thin_plate_collision_2d_finite_difference_diverges() {
         // φ(r) = (r/ℓ)² log(r/ℓ); q = (1/ℓ²)(2 log(r/ℓ) + 1) → −∞.
-        let kernel = RadialInputKernel::ThinPlate {
+        let kind = RadialScalarKind::ThinPlate {
             length_scale: 1.0,
             dim: 2,
         };
-        let kind = into_scalar_kind(&kernel);
         let eps = 1e-10_f64;
         let (_, q, _) = kind
             .eval_design_triplet(eps)
