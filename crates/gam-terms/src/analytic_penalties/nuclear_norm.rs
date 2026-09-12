@@ -50,6 +50,20 @@ pub struct NuclearNormPenalty {
     pub weight_schedule: Option<ScalarWeightSchedule>,
 }
 
+/// Relative eigenvalue gap `|Δλ|/λ̄` below which the Fréchet coefficient of the
+/// filter `f(λ) = λ^{-1/2}` is taken as the midpoint derivative `½(f′ᵢ + f′ⱼ)`
+/// instead of the divided difference `(fᵢ − fⱼ)/Δλ`.
+///
+/// Each `f` and each regularized `λ = σ² + ε²` rounds once, so the divided
+/// difference carries about `3u·f` in its numerator and `2u·λ̄` in `Δλ`;
+/// against `|f′| = ½λ̄^{-3/2}` that is a relative `4ε·λ̄/|Δλ|`. The midpoint
+/// derivative misses `f‴Δλ²/12`, a relative `(5/16)(Δλ/λ̄)²`. The two errors
+/// are equal at `|Δλ|/λ̄ = ∛(64ε/5)`, and each route is the more accurate one
+/// on its own side of that gap.
+fn frechet_route_balance() -> f64 {
+    (64.0 / 5.0 * f64::EPSILON).cbrt()
+}
+
 struct NuclearSvdCache {
     u: Array2<f64>,
     singular: Array1<f64>,
@@ -364,20 +378,17 @@ impl NuclearNormPenalty {
         // identical pair rules to the dense path. All pairs touching S⊥ have
         // B = 0 (dG is supported on S), so they need no representation.
         let b_basis = q.t().dot(&dgh).dot(&q);
+        let balance = frechet_route_balance();
         let mut deriv_basis = Array2::<f64>::zeros((s_dim, s_dim));
         for i in 0..s_dim {
             for j in 0..s_dim {
                 let denom = regularized_evals[i] - regularized_evals[j];
-                let scale = (regularized_evals[i].abs() + regularized_evals[j].abs())
-                    .max(f64::MIN_POSITIVE);
-                let divided_difference = if denom.abs() <= 1.0e-12 * scale {
-                    let i_active = i >= active_start_s;
-                    let j_active = j >= active_start_s;
-                    if i_active && j_active {
-                        0.5 * (df[i] + df[j])
-                    } else {
-                        0.0
-                    }
+                let midpoint = 0.5 * (regularized_evals[i] + regularized_evals[j]);
+                let both_active = i >= active_start_s && j >= active_start_s;
+                let divided_difference = if both_active && denom.abs() <= balance * midpoint {
+                    0.5 * (df[i] + df[j])
+                } else if denom == 0.0 {
+                    0.0
                 } else {
                     (f[i] - f[j]) / denom
                 };
@@ -525,20 +536,17 @@ impl NuclearNormPenalty {
             }
         }
 
+        let balance = frechet_route_balance();
         let mut derivative_basis = Array2::<f64>::zeros((d, d));
         for i in 0..d {
             for j in 0..d {
                 let denom = regularized_evals[i] - regularized_evals[j];
-                let scale = (regularized_evals[i].abs() + regularized_evals[j].abs())
-                    .max(f64::MIN_POSITIVE);
-                let divided_difference = if denom.abs() <= 1.0e-12 * scale {
-                    let i_active = i >= active_start;
-                    let j_active = j >= active_start;
-                    if i_active && j_active {
-                        0.5 * (df[i] + df[j])
-                    } else {
-                        0.0
-                    }
+                let midpoint = 0.5 * (regularized_evals[i] + regularized_evals[j]);
+                let both_active = i >= active_start && j >= active_start;
+                let divided_difference = if both_active && denom.abs() <= balance * midpoint {
+                    0.5 * (df[i] + df[j])
+                } else if denom == 0.0 {
+                    0.0
                 } else {
                     (f[i] - f[j]) / denom
                 };
