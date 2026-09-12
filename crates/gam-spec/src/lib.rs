@@ -1246,7 +1246,7 @@ impl std::error::Error for ResponseInferenceRefusal {}
 /// Only the legal `(response, link)` cells enumerated by [`LikelihoodSpec::kind`]
 /// are representable through the public surface: [`LikelihoodSpec::try_new`]
 /// validates the legal matrix on construction, and deserialization routes
-/// through [`LikelihoodSpecWire`] (`#[serde(try_from / into)]`) so saved bytes
+/// through `LikelihoodSpecWire` (`#[serde(try_from / into)]`) so saved bytes
 /// cannot resurrect an illegal cell. The on-wire shape is byte-identical to the
 /// historical `{ response, link }` struct, so legal saved models load unchanged.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1263,7 +1263,7 @@ pub struct LikelihoodSpec {
 /// saved-bytes hole: an illegal `(response, link)` cell deserializes into a
 /// serde error instead of a silently-masked spec.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LikelihoodSpecWire {
+pub(crate) struct LikelihoodSpecWire {
     pub response: ResponseFamily,
     pub link: InverseLink,
 }
@@ -1457,7 +1457,7 @@ impl LikelihoodSpec {
     /// the `binomial_*` family, …), every one of which builds a cell that is
     /// legal by construction. The public, fallible entry point for an arbitrary
     /// `(response, link)` pair is [`LikelihoodSpec::try_new`]; the serde path
-    /// also validates via [`LikelihoodSpecWire`]. Do not expose illegal cells
+    /// also validates via `LikelihoodSpecWire`. Do not expose illegal cells
     /// through this method.
     #[inline]
     pub const fn new(response: ResponseFamily, link: InverseLink) -> Self {
@@ -1589,7 +1589,7 @@ impl LikelihoodSpec {
     /// `(ResponseFamily, InverseLink)` is a 40-cell product (8 response × 5
     /// inverse-link); only the cells listed here are legal. Construction
     /// ([`LikelihoodSpec::try_new`]) and deserialization (the
-    /// [`LikelihoodSpecWire`] `try_from`) both enforce
+    /// `LikelihoodSpecWire` `try_from`) both enforce
     /// [`LikelihoodSpec::is_legal_cell`], so an illegal cell can never reach
     /// this method. Each link-pinned family therefore matches its *one* legal
     /// link explicitly; the remaining (now-unreachable) illegal combinations
