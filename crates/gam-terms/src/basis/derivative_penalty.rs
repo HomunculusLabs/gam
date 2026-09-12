@@ -705,9 +705,6 @@ fn derivative_energy_factor_spans(
     Ok(factor)
 }
 
-/// Exact symmetrization: the accumulation is symmetric in exact arithmetic;
-/// this removes the last-ulp asymmetry from floating-point summation order so
-/// downstream eigen/Cholesky consumers see a bit-exact symmetric matrix.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1566,6 +1563,88 @@ mod tests {
                 max_relative_error < 1e-12,
                 "period scaling must be c^(1-2m) for c={c}; rel={max_relative_error}"
             );
+        }
+    }
+
+    /// The harmonic cyclic roughness leaves the constant exactly null and charges
+    /// the discrete frequency-one mode (the representer of the fundamental
+    /// harmonic) only its alias energy, a vanishing fraction of what it charges
+    /// the frequency-two mode, while the derivative roughness of the same order
+    /// charges the fundamental a fixed fraction of the second harmonic. The
+    /// declared null frame spans the constant and that mode, and the Gram scales
+    /// with the period exactly like the order-`m` derivative roughness.
+    #[test]
+    fn cyclic_harmonic_penalty_leaves_constant_and_fundamental_unpenalized() {
+        let (degree, n) = (3usize, 24usize);
+        let frame = cyclic_harmonic_null_frame(n).unwrap();
+        let frame_gram = fast_ata(&frame);
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (frame_gram[[i, j]] - expected).abs() < 1e-12,
+                    "null frame must be orthonormal; FᵀF[{i},{j}]={}",
+                    frame_gram[[i, j]]
+                );
+            }
+        }
+        let mode = |frequency: usize| {
+            Array1::from_shape_fn(n, |a| {
+                (std::f64::consts::TAU * (frequency * a) as f64 / n as f64 + 0.3).sin()
+            })
+        };
+        let (fundamental, second) = (mode(1), mode(2));
+        let residual = &fundamental - &frame.dot(&frame.t().dot(&fundamental));
+        assert!(
+            residual.dot(&residual).sqrt() < 1e-12 * fundamental.dot(&fundamental).sqrt(),
+            "the frequency-one mode must lie in the declared null frame"
+        );
+        let rayleigh = |s: &Array2<f64>, v: &Array1<f64>| v.dot(&s.dot(v)) / v.dot(v);
+        for order in [2usize, 3] {
+            let harmonic =
+                fast_ata(&cyclic_bspline_harmonic_penalty_factor(degree, n, 1.0, order).unwrap());
+            let scale = harmonic.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            let ones = Array1::<f64>::ones(n);
+            let constant_energy = harmonic
+                .dot(&ones)
+                .iter()
+                .fold(0.0_f64, |m, v| m.max(v.abs()));
+            assert!(
+                constant_energy < 1e-10 * scale,
+                "order {order}: constants must be null; |S·1|={constant_energy}"
+            );
+            let harmonic_ratio = rayleigh(&harmonic, &fundamental) / rayleigh(&harmonic, &second);
+            assert!(
+                harmonic_ratio < 1e-3,
+                "order {order}: harmonic roughness charges the fundamental {harmonic_ratio} of the second harmonic"
+            );
+            // Positive control: the derivative roughness charges the fundamental
+            // about 2^(-2m) of the second harmonic, far above the bar above.
+            let derivative =
+                cyclic_bspline_derivative_penalty_matrix(degree, n, 1.0, order).unwrap();
+            let derivative_ratio =
+                rayleigh(&derivative, &fundamental) / rayleigh(&derivative, &second);
+            assert!(
+                derivative_ratio > 5e-3,
+                "order {order}: derivative roughness must charge the fundamental; ratio={derivative_ratio}"
+            );
+            for c in [3.5_f64, 0.25] {
+                let scaled =
+                    fast_ata(&cyclic_bspline_harmonic_penalty_factor(degree, n, c, order).unwrap());
+                let factor = c.powi(1 - 2 * order as i32);
+                let max_relative_error = harmonic
+                    .iter()
+                    .zip(scaled.iter())
+                    .map(|(&base, &observed)| {
+                        (base * factor - observed).abs()
+                            / observed.abs().max((base * factor).abs()).max(1.0)
+                    })
+                    .fold(0.0_f64, f64::max);
+                assert!(
+                    max_relative_error < 1e-10,
+                    "order {order}: period scaling must be c^(1-2m) for c={c}; rel={max_relative_error}"
+                );
+            }
         }
     }
 }
