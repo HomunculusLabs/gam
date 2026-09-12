@@ -55,7 +55,7 @@ use gam_linalg::faer_ndarray::FaerCholeskyFactor;
 
 /// The fitted curvature in whichever factored form the solver produced —
 /// the SINGLE place that knows how to invert it.
-pub enum FittedInverse<'a> {
+pub(crate) enum FittedInverse<'a> {
     /// Cholesky factor of the (stabilized) penalized Hessian: the
     /// full-rank convention (PIRLS / ALO path).
     FaerCholesky(&'a FaerCholeskyFactor),

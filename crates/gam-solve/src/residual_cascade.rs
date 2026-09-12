@@ -770,7 +770,7 @@ impl std::fmt::Display for RefinementObstruction {
 /// design. Empty-net exhaustion is distinct from representation capacity:
 /// only the former proves that the remaining gain is exactly zero.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum NextLevelAssessment {
+pub(crate) enum NextLevelAssessment {
     /// The nested net produced no new centers, so the next-level gain is zero.
     EmptyNet,
     /// The complete candidate level was assessed and has this gain bound.

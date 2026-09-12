@@ -37,7 +37,7 @@ pub struct RhoUncertaintyProblemSize {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RhoUncertaintyCostGate {
+pub(crate) struct RhoUncertaintyCostGate {
     pub sample_count: usize,
     pub problem_size: RhoUncertaintyProblemSize,
 }

@@ -47,7 +47,7 @@ const BLOCK_ORTHOGONAL_BLOCK_UPDATES_PER_PASS: usize = 32;
 /// gauge-dependent coefficients.  There is deliberately no ridge, spectral
 /// floor, pseudoinverse coefficient solve, or compatibility fallback.
 #[derive(Clone)]
-pub struct GaussianRemlBlocksDomain {
+pub(crate) struct GaussianRemlBlocksDomain {
     p_total: usize,
     canonical_penalties: Vec<CanonicalPenalty>,
     nullspace_dims: Vec<usize>,
@@ -978,7 +978,7 @@ pub struct GaussianRemlMultiBackwardProblem<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct GaussianRemlNoAllocWorkspace {
+pub(crate) struct GaussianRemlNoAllocWorkspace {
     pub xtwy: Array2<f64>,
     pub ywy: Array1<f64>,
     pub projected_rhs: Array2<f64>,

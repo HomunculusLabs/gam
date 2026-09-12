@@ -1397,7 +1397,7 @@ impl InverseLinkKernel for SasLinkState {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct BetaLogisticKernel {
+pub(crate) struct BetaLogisticKernel {
     /// Unconstrained log of the geometric-mean beta shape — the raw optimization
     /// parameter `SasLinkState::log_delta`, NOT the derived `SasLinkState::delta`.
     pub log_shape_center: f64,

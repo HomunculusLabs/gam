@@ -2514,7 +2514,7 @@ impl OrthantNodeSink for OrthantAccumulator {
 /// `pivot` is that last touched coordinate. The wall says nothing about any
 /// coordinate before it and must not be consulted there.
 #[derive(Clone, Debug)]
-pub struct StandardizedCeiling {
+pub(crate) struct StandardizedCeiling {
     /// `Lᵀa`, in the cubature's standardized coordinates.
     coefficients: Array1<f64>,
     /// `c − aᵀmean`.
