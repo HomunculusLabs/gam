@@ -1306,11 +1306,10 @@ fn cli_weibull_route_anchors_left_truncated_data_at_the_median_exit_2631() {
 /// #2631: a `--request` document's `survival_time_anchor` must reach the fit on
 /// EVERY survival route, including the ones the CLI still materializes itself.
 ///
-/// `--survival-time-anchor` declares `conflicts_with = --request` precisely
-/// because the document is supposed to carry the complete scientific model
-/// configuration. Under `--request` the flag is therefore always `None`, so a
-/// survival route that read the anchor from `FitArgs` rather than from the
-/// resolved `FitConfig` would drop a document-supplied anchor without a word.
+/// The anchor has no CLI flag: it reaches `gam fit` only inside a request
+/// document. A survival route that took its settings from `FitArgs` rather
+/// than the resolved `FitConfig` would drop a document-supplied anchor without
+/// a word.
 /// This exercises the location-scale route, which `run_survival` materializes
 /// itself rather than delegating to the engine.
 #[test]

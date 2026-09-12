@@ -766,8 +766,8 @@ def fit(
         dataset (any row entering above the time origin), the earliest entry age
         otherwise. Re-centering is an exact affine reparameterization of the
         baseline offset, so this selects the frame the smoothing selection sees
-        rather than the model being fitted. Corresponds to
-        ``--survival-time-anchor``.
+        rather than the model being fitted. Corresponds to the fit-request
+        document key ``survival_time_anchor``.
     baseline_target:
         Parametric baseline target for survival models. One of ``"linear"``,
         ``"weibull"``, ``"gompertz"``, ``"gompertz-makeham"``. Corresponds to

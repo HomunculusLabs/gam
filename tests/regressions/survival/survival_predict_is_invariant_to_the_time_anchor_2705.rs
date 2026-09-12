@@ -6,8 +6,8 @@
 //! `center_survival_time_designs_at_anchor` subtracts the time-basis row at the
 //! anchor from every entry and exit design row, so the anchor sets the origin
 //! of the baseline reparameterization. Its own documentation calls that "an
-//! exact affine reparameterization of the baseline offset", and the CLI flag
-//! `--survival-time-anchor` is documented as a conditioning knob: it may change
+//! exact affine reparameterization of the baseline offset", and the fit-request key
+//! `survival_time_anchor` is documented as a conditioning knob: it may change
 //! the coefficients, and it must not change the model.
 //!
 //! The FIT honours that. Measured on this fixture's shape, the maximised
@@ -25,11 +25,11 @@
 //! there is the earliest entry — the time origin — where `I_k(left) = 0`
 //! exactly and the shift is zero. It appears the moment the anchor moves: on
 //! any genuinely left-truncated dataset, which takes the robust interior anchor
-//! by rule (#751/#1790/#2631), and on any explicit `--survival-time-anchor`.
+//! by rule (#751/#1790/#2631), and on any explicit `survival_time_anchor`.
 //!
 //! # What is asserted
 //!
-//! Two fits of the SAME data differing only in `--survival-time-anchor` must
+//! Two fits of the SAME data differing only in `survival_time_anchor` must
 //! produce the same predicted survival surface through BOTH public prediction
 //! routes: the in-process library and `gam predict`. The non-vacuity check is
 //! the other half of the same contract: the two fits' coefficients must DIFFER,
@@ -168,12 +168,22 @@ fn fit_at_anchor(
     tag: &str,
 ) -> (Array2<f64>, Array2<f64>, Vec<f64>) {
     let model_path = dir.join(format!("model_{tag}.json"));
+    // The anchor reaches `gam fit` through a fit-request document, the one CLI
+    // spelling of `survival_time_anchor`.
+    let request_path = dir.join(format!("request_{tag}.json"));
+    std::fs::write(
+        &request_path,
+        format!(
+            r#"{{"schema":"gam.fit-request","schema_version":1,"formula":"Surv(entry, exit, event) ~ s(x)","config":{{"survival_time_anchor":{anchor}}}}}"#
+        ),
+    )
+    .expect("write fit-request document");
     let mut fit_cmd = Command::new(gam::gam_binary!());
     fit_cmd
         .arg("fit")
         .arg(train_path)
-        .arg("Surv(entry, exit, event) ~ s(x)")
-        .args(["--survival-time-anchor", &format!("{anchor}")])
+        .arg("--request")
+        .arg(&request_path)
         .arg("--out")
         .arg(&model_path);
     run_or_panic(fit_cmd, "gam fit Surv(entry, exit, event) ~ s(x)");
@@ -196,7 +206,7 @@ fn fit_at_anchor(
         .expect("saved model must carry its time anchor");
     assert!(
         (saved_anchor - anchor).abs() <= 1.0e-9,
-        "the fit did not honour --survival-time-anchor: asked {anchor}, saved {saved_anchor}"
+        "the fit did not honour survival_time_anchor: asked {anchor}, saved {saved_anchor}"
     );
 
     let dataset = predict_rows();

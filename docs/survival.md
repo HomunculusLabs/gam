@@ -145,8 +145,8 @@ gamfit.fit(df,
 )
 ```
 
-The CLI spelling is `--survival-time-anchor 55.0` and the fit-request document
-key is `survival_time_anchor`. The chosen anchor is persisted on the saved
+The CLI takes it through a fit-request document (`gam fit --request`), whose
+key is also `survival_time_anchor`. The chosen anchor is persisted on the saved
 model as `survival_time_anchor`, and prediction re-centers at that value, so a
 model always predicts in the frame it was fitted in. Supplying it without a
 `Surv(...)` response is a configuration error, not a silent no-op.
