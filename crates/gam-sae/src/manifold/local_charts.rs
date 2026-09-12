@@ -651,6 +651,7 @@ pub struct LocalAtlas {
     transitions: Vec<ChartTransition>,
     rejected_centers: Vec<RejectedCenter>,
     intrinsic_cover_multiplicity: (usize, f64),
+    intrinsic_coordinates: Array2<f64>,
 }
 
 impl LocalAtlas {
@@ -802,6 +803,7 @@ impl LocalAtlas {
             transitions,
             rejected_centers,
             intrinsic_cover_multiplicity: (intrinsic_max, intrinsic_mean),
+            intrinsic_coordinates: membership_coords,
         })
     }
 
@@ -853,6 +855,12 @@ impl LocalAtlas {
 
     pub(super) fn intrinsic_cover_multiplicity(&self) -> (usize, f64) {
         self.intrinsic_cover_multiplicity
+    }
+
+    /// The Landmark-Isomap realization of the atlas's rows at chart rank `d` that
+    /// `build` audited its cover against, row-aligned with the rows it was built on.
+    pub(crate) fn intrinsic_coordinates(&self) -> &Array2<f64> {
+        &self.intrinsic_coordinates
     }
 
     /// The developing map (#2280): one `d`-coordinate realization of the rows `z` the

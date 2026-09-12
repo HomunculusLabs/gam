@@ -5378,7 +5378,7 @@ pub fn discover_primary_atom_topologies(
             // is returned to the caller instead of silently substituting the PCA
             // result.
             let intrinsic_challenger =
-                match build_intrinsic_primary_specs(target, &rows, max_dims[atom_idx]).map_err(
+                match build_intrinsic_primary_specs(target, &rows, max_dims[atom_idx], local_atlas.as_ref()).map_err(
                     |error| {
                         format!(
                             "discover_primary_atom_topologies: intrinsic chart failed for auto atom {atom_idx}: {error}"
@@ -5637,13 +5637,23 @@ fn build_intrinsic_primary_specs(
     target: ArrayView2<'_, f64>,
     rows: &[usize],
     max_dim: usize,
+    atlas: Option<&crate::manifold::LocalAtlas>,
 ) -> Result<Option<Vec<TopologyCandidateSpec>>, String> {
     if max_dim < 2 || rows.len() < 3 {
         return Ok(None);
     }
-    let local_target = target.select(Axis(0), rows);
-    let embed = crate::manifold::intrinsic_geodesic_embedding(local_target.view(), 2)?;
-    sheet_specs_on_local_chart(&embed, rows, target.nrows())
+    // A rank-2 atlas of the same cluster rows already computed this exact embedding
+    // to audit its cover, so it is read back rather than recomputed.
+    let computed;
+    let embed = match atlas {
+        Some(atlas) if atlas.intrinsic_dim() == 2 => atlas.intrinsic_coordinates(),
+        _ => {
+            let local_target = target.select(Axis(0), rows);
+            computed = crate::manifold::intrinsic_geodesic_embedding(local_target.view(), 2)?;
+            &computed
+        }
+    };
+    sheet_specs_on_local_chart(embed, rows, target.nrows())
 }
 
 /// The atlas's developed chart as a sheet challenger (#2280), or `None` unless the
