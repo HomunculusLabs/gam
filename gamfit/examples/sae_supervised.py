@@ -173,24 +173,12 @@ def _supervised_table(
     return table
 
 
-def _default_k(n: int, p: int) -> int:
-    """Pick a sane default atom count from problem characteristics.
-
-    Heuristic: K = min(p, max(2, floor(sqrt(n)/2))). Keeps K below the
-    "n > K" guard in ``sae_manifold_fit`` while scaling with the data.
-    """
-    n_root = int(np.floor(np.sqrt(max(n, 4)) / 2))
-    k = max(2, n_root)
-    # Stay strictly below n (Rust guard requires n > K).
-    return int(min(k, max(2, p), n - 1))
-
-
 def sae_supervised(
     X: np.ndarray,
     Y: np.ndarray,
     supervised_mask: np.ndarray,
     *,
-    K: int | None = None,
+    K: int,
     d_atom: int = 2,
     atom_topology: str = "circle",
     family: str = "auto",
@@ -212,9 +200,9 @@ def sae_supervised(
     supervised_mask : (N,) bool array_like
         Boolean (or 0/1 integer) mask flagging the supervised rows.
         Must select at least one row.
-    K : int, optional
-        Number of SAE atoms. When ``None``, the example picks a sane
-        default from ``(n, p)``.
+    K : int
+        Number of SAE atoms, forwarded to ``sae_manifold_fit``, which requires
+        it.
     d_atom : int, default 2
         Latent atom dimension passed to ``sae_manifold_fit``.
     atom_topology : str, default ``"circle"``
@@ -247,7 +235,7 @@ def sae_supervised(
     X_arr = np.ascontiguousarray(np.asarray(X, dtype=np.float64))
     if X_arr.ndim != 2:
         raise ValueError(f"X must be 2D; got shape {X_arr.shape}")
-    n, p = X_arr.shape
+    n = X_arr.shape[0]
     Y_arr = np.ascontiguousarray(np.asarray(Y, dtype=np.float64))
     if Y_arr.ndim != 1 or Y_arr.shape[0] != n:
         raise ValueError(
@@ -255,7 +243,7 @@ def sae_supervised(
         )
     mask_arr = _validate_supervised_mask(supervised_mask, n)
 
-    k_atoms = int(K) if K is not None else _default_k(n, p)
+    k_atoms = int(K)
     if k_atoms < 2:
         raise ValueError(
             f"K must be >= 2 to form a non-degenerate latent block; got {k_atoms}"
@@ -266,7 +254,6 @@ def sae_supervised(
         )
 
     sae_call_kwargs: dict[str, Any] = dict(sae_kwargs or {})
-    # Magic-by-default: pick a small enough atom dim for circular bases.
     sae = sae_manifold_fit(
         X=X_arr,
         K=k_atoms,
