@@ -2324,8 +2324,13 @@ pub(crate) fn joint_smoothing_correction(
     let (evals, evecs) = FaerEigh::eigh(&h_sub, Side::Lower).map_err(|e| {
         format!("joint smoothing correction: outer Hessian eigendecomposition failed: {e}")
     })?;
-    let max_abs = evals.iter().fold(0.0_f64, |acc, &ev| acc.max(ev.abs()));
-    let tol = (100.0 * f64::EPSILON * (ki as f64) * max_abs).max(100.0 * f64::EPSILON);
+    // The outer Hessian's positive spectrum at the eigensolver's resolution,
+    // relative to its largest eigenvalue and never floored at an absolute value.
+    let tol = positive_eigenvalue_threshold(
+        evals
+            .as_slice()
+            .expect("eigh returns an owned standard-layout eigenvalue vector"),
+    );
     if evals.iter().any(|&ev| ev <= tol) {
         return Ok(None);
     }
