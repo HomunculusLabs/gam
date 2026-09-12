@@ -139,23 +139,17 @@ use super::reml_outer_engine::{PenaltyCoordinate, PenaltySubspaceTrace};
 /// assembles its own `Ḣ` (penalty drift + cubic IFT correction) and its own
 /// `β̇`, and they disagree. Here the direction owns them; atoms borrow.
 ///
-/// Channels are filled lazily by [`Sensitivity`] (β̇ needs the factored
-/// solve; Ḣ_total needs β̇) so a value-only evaluation pays nothing.
+/// Channels are optional (β̇ needs the factored solve; Ḣ_total needs β̇) so
+/// a value-only evaluation pays nothing.
 ///
-/// The channels the LANDED first-order calculus reads live here: `index`
-/// (unit θ-coordinate), `beta_dot` (the shared β̇), and `h_dot_total` (the
-/// total drift Ḣ every atom traces). They are filled in exactly one place —
-/// `Sensitivity::fill_direction` (#935 now closed) — which runs the
-/// `β̇ = −H⁺ F_{βθ}` solve through the shared [`FitSensitivity`] operator and
-/// assembles `h_dot_total = h_dot_frozen + D_βH[β̇]` against THAT β̇ (the cubic
-/// correction supplied as the caller's existing operator, not re-implemented).
+/// The channels the first-order calculus reads live here: `index` (unit
+/// θ-coordinate), `beta_dot` (the shared β̇), and `h_dot_total` (the total
+/// drift Ḣ every atom traces).
 /// The further channels the design names — a dense `dir` for general (non-unit)
 /// directions, and the staged `s_dot` (∂Sλ/∂θ) input — re-land as fields with
 /// the code that fills AND reads them; carrying them now would be unread design
 /// surface (the same no-stub discipline this module applies to its
 /// second-order and certify passes).
-///
-/// [`FitSensitivity`]: crate::sensitivity::FitSensitivity
 pub struct ThetaDirection {
     /// Coordinate index in the packed θ = (ρ‖ψ) layout, with the unit
     /// direction implied. (A dense general-direction channel re-lands with
@@ -166,7 +160,7 @@ pub struct ThetaDirection {
     pub beta_dot: Option<Arc<Array1<f64>>>,
     /// Total Hessian drift `Ḣ = ∂H/∂θ[dir]|_{β̂} + D_βH[β̇]` (the frozen
     /// penalty/design drift plus the cubic correction `Xᵀdiag(c ⊙ Xβ̇)X`
-    /// applied to the SAME β̇ above), assembled once by [`Sensitivity`]. This
+    /// applied to the SAME β̇ above). This
     /// is the matrix the logdet trace, the #784 Q_b/Q_c trace, and the θ-HVP
     /// all consume — one construction, no per-consumer reassembly.
     pub h_dot_total: Option<Arc<Array2<f64>>>,
@@ -185,7 +179,6 @@ pub struct ThetaDirection {
 /// - `beta_dot(dir)`       — dβ̂/dθ for the REML gradient (IFT);
 /// - `alo_leverages()`     — t = case-weight perturbations for ALO diagnostics;
 /// - `influence(J)`        — t = stage-1 nuisance (#461 absorber);
-/// - `case_deletion(i)`    — exact Cook's/dfbeta diagnostics;
 /// - `hvp(dir)`            — outer-Hessian θ-HVP (#740): directional trace
 ///                           + β̈ channel, no K² pair assembly;
 /// - `energy(r)`           — −½ rᵀH⁺r noise-floor cost correction with the
@@ -207,83 +200,6 @@ pub struct Sensitivity {
     /// eigengap. `certify` refuses FD probes that cross a stratum boundary
     /// (rank change or near-degenerate frame) instead of flagging them.
     pub stratum: StratumFingerprint,
-}
-
-impl Sensitivity {
-    /// Fill a [`ThetaDirection`]'s shared inner-motion channels (`beta_dot`,
-    /// `h_dot_total`) from the one factored sensitivity operator — the #935
-    /// pass that fills AND reads them (no unread design surface).
-    ///
-    /// This is the ONE place the chain-rule data is assembled, killing the
-    /// #901-layer-2 per-consumer drift: given the direction's frozen score
-    /// derivative `f_beta_theta = ∂g/∂θ[dir]` (the `F_{βθ}` column) and the
-    /// frozen Hessian drift `h_dot_frozen = ∂H/∂θ[dir]|_{β̂}`, it produces
-    ///
-    /// ```text
-    ///   β̇(dir)      = −H⁺ · F_{βθ}[dir]            (one solve through `op`)
-    ///   Ḣ_total     = h_dot_frozen + D_βH[β̇]       (the cubic correction
-    ///                                                applied to THAT β̇)
-    /// ```
-    ///
-    /// The cubic correction `D_βH[β̇] = Xᵀ diag(c ⊙ X β̇) X` is NOT
-    /// re-implemented here — it is supplied as the caller's existing operator
-    /// `cubic_drift`, so there is exactly one assembly of it in the codebase
-    /// (the migration law's no-parallel-layer rule). Every atom that traces
-    /// `dir.h_dot_total` (the logdet, the #784 sampled block, the Jeffreys
-    /// term) then rides the SAME β̇ and the SAME drift: they structurally
-    /// cannot disagree about what `dir` means.
-    ///
-    /// `op` MUST be the operator inverting the SAME curvature `H` this
-    /// `Sensitivity`'s `kernel` describes (the #935 single-inverse contract);
-    /// a dimension mismatch against the kernel declines (`None`). Returns
-    /// `None` (declining, never approximating) if the mode-response solve
-    /// produced a non-finite β̇ — matching `FitSensitivity::mode_response`.
-    ///
-    /// [`FitSensitivity`]: crate::sensitivity::FitSensitivity
-    pub fn fill_direction<F>(
-        &self,
-        index: usize,
-        op: &crate::sensitivity::FitSensitivity<'_>,
-        f_beta_theta: &Array1<f64>,
-        h_dot_frozen: &Array2<f64>,
-        cubic_drift: F,
-    ) -> Option<ThetaDirection>
-    where
-        F: FnOnce(&Array1<f64>) -> Array2<f64>,
-    {
-        // The operator MUST invert the same curvature this Sensitivity's
-        // kernel describes (the #935 single-inverse contract): the score
-        // dimension, the operator dimension, and the kernel's basis height
-        // (`u_s.nrows()` = p) must all agree, else `dir` would mean different
-        // things to the solve and to the trace atoms. A mismatch declines.
-        let p = self.kernel.u_s.nrows();
-        if f_beta_theta.len() != p
-            || op.dim() != p
-            || h_dot_frozen.nrows() != p
-            || h_dot_frozen.ncols() != p
-        {
-            return None;
-        }
-        // β̇ = −H⁺ F_{βθ}, one batched solve through the shared operator.
-        let rhs = f_beta_theta.view().insert_axis(ndarray::Axis(1));
-        let beta_dot_col = op.mode_response(rhs)?;
-        let beta_dot = beta_dot_col.column(0).to_owned();
-        if beta_dot.iter().any(|v| !v.is_finite()) {
-            return None;
-        }
-        // Ḣ_total = ∂H/∂θ|_{β̂} + D_βH[β̇]: the frozen drift plus the cubic
-        // correction applied to THE SAME β̇ (no second β̇, no second cubic).
-        let mut h_dot_total = h_dot_frozen.clone();
-        h_dot_total += &cubic_drift(&beta_dot);
-        if h_dot_total.iter().any(|v| !v.is_finite()) {
-            return None;
-        }
-        Some(ThetaDirection {
-            index: Some(index),
-            beta_dot: Some(Arc::new(beta_dot)),
-            h_dot_total: Some(Arc::new(h_dot_total)),
-        })
-    }
 }
 
 /// Where the criterion is — and is not — differentiable.
@@ -1305,24 +1221,6 @@ impl CriterionAtom for ThetaOnlyCorrectionAtom {
 // orders, so collapsing them would break bit-identity with the pre-port
 // assemblies. The per-site solve SHAPES (`respond_one` single-RHS vs
 // `respond_stack` batched) also stay distinct on purpose.
-//
-// LANDED (pass 3, the #935 Sensitivity operator → ThetaDirection channel
-// fill): `Sensitivity::fill_direction` is now the ONE place the shared inner
-// motion is assembled — it runs `β̇ = −H⁺ F_{βθ}` through the shared
-// `crate::sensitivity::FitSensitivity` (#935 closed) operator and
-// builds `Ḣ_total = h_dot_frozen + D_βH[β̇]` against THAT β̇, with the cubic
-// correction `D_βH[β̇] = Xᵀdiag(c⊙Xβ̇)X` supplied as the caller's EXISTING
-// operator (no second copy — the no-parallel-layer rule). The `beta_dot` /
-// `h_dot_total` channels are filled there and READ by `CriterionSum::d1` and
-// every atom's `frozen_d1` (the calculus contracts ONE β̇ and traces ONE
-// drift), so there is no unread design surface. End-to-end pin:
-// `sensitivity_fill_direction_feeds_criterion_sum_end_to_end` builds the
-// operator from a Cholesky factor, fills a direction, and asserts the logdet
-// + penalty-quadratic profiled `d1` from the filled β̇/Ḣ_total. The dense
-// general-direction `dir` and staged `s_dot` channels stay unbuilt until a
-// consumer reads them. Folding `fill_direction` into the deeply-cached
-// `gradient_hessian.rs` per-consumer Ḣ assemblies (deleting them) is the
-// per-pass cluster-FD-verified step against the iso-κ suite, not done here.
 //
 // LANDED (pass 4 start, ledger item "TK/Jeffreys/prior atoms"):
 // `JeffreysLogdetAtom` ports the universal Jeffreys/Firth term

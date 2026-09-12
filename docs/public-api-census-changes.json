@@ -2058,5 +2058,32 @@
     },
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). ZeroPsiDerivativeOperator and its pub constructor new are used only by two gam-custom-family unit tests, and move into that test file as private test support.",
     "evidence": "At the base, git grep -w finds ZeroPsiDerivativeOperator only in psi_design.rs and in two tests in src/tests/inner_solver_numerics.rs. The one pub fn declaration removed from psi_design.rs is ZeroPsiDerivativeOperator::new. The prune-api-c census v2 over cc3ae0022 (/scratch.global/sauer354/pool/prune-api-c/census2.tsv) lists no product or other-crate reference."
+  },
+  {
+    "base": "9585745a79ac7bcd1db9126115d437d4ca9814b0",
+    "removed": {
+      "crates/gam-sae/src/corpus/object_store.rs::designed_sampling_mandatory": 1,
+      "crates/gam-sae/src/inference/harvest.rs::corpus_measure": 1,
+      "crates/gam-sae/src/manifold/atom.rs::finite_set_rank_charge": 1,
+      "crates/gam-sae/src/sparse_dict/coordinate.rs::reconstruct_measure_valued_rows": 1,
+      "crates/gam-sae/src/sparse_dict/scoring_gpu.rs::score_block_cpu": 1,
+      "crates/gam-sae/src/sparse_dict/scoring_gpu.rs::score_block_device": 1,
+      "crates/gam-solve/src/cross_node.rs::owner_rank": 1,
+      "crates/gam-solve/src/pirls/state.rs::solve_weights_psd": 1,
+      "crates/gam-solve/src/reml/atoms.rs::fill_direction": 1,
+      "crates/gam-solve/src/row_sampling_measure.rs::bss_spectral_coreset_certified": 1,
+      "crates/gam-solve/src/row_sampling_measure.rs::designed_subsample": 1,
+      "crates/gam-solve/src/row_sampling_measure.rs::greedy_sensitivity_coreset": 1,
+      "crates/gam-solve/src/row_sampling_measure.rs::sensitivity_upper_bounds": 1,
+      "crates/gam-solve/src/sensitivity.rs::case_deletion": 1,
+      "crates/gam-solve/src/sensitivity.rs::from_lower_triangular": 1,
+      "crates/gam-solve/src/streaming_border.rs::submit_chunk_gram": 1,
+      "crates/gam-terms/src/basis/sphere_basis.rs::build_periodic_duchon_basis_log_kappa_derivativeswithworkspace": 1,
+      "crates/gam-terms/src/basis/sphere_basis.rs::fill_periodic_duchon_kernel_psi_matrices": 1,
+      "crates/gam-terms/src/basis/sphere_basis.rs::periodic_duchon_identifiability_transformwithworkspace": 1,
+      "crates/gam-terms/src/basis/sphere_basis.rs::prepare_duchon_derivative_contextwithworkspace": 1
+    },
+    "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. No product uses these restored-in-place gam-solve, gam-sae and gam-terms identities; several lost their last caller to earlier #2829 deletions. The gam-solve identities are cross_node owner_rank, pirls state solve_weights_psd, the row_sampling_measure coreset and designed-subsample family, sensitivity case_deletion, streaming_border submit_chunk_gram and reml atoms fill_direction. The gam-sae identities are designed_sampling_mandatory, corpus_measure, finite_set_rank_charge, reconstruct_measure_valued_rows, score_block_cpu and score_block_device. In gam-terms, the periodic Duchon workspace builders go.",
+    "evidence": "restored_consumers_2829.py at 3693c2c2c (MSI job 539356, /scratch.global/sauer354/pool/api2829/consumers.3693c2c2c769830ff8f2769e77061d353ff01697.rows.tsv) scores each deleted TSV identity as unreferenced. At the base, git grep -w over crates, src, tests, examples, python and gamfit finds no call to any of them, only doc prose. The two production ThetaDirection constructions in reml/jeffreys_subspace.rs set beta_dot and h_dot_total to None and call frozen_d1, so fill_direction had no production caller. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 541389, /scratch.global/sauer354/pool/api2829/validate.541389.log)."
   }
 ]

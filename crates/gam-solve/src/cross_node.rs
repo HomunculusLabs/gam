@@ -30,8 +30,7 @@
 //!    cursors are positions in deterministic sequences.
 //! 3. **Partials, never rows, cross the wire.** A worker streams its shard rows
 //!    locally (object store / mmap — `gam_sae::corpus`) and ships
-//!    only `k·k` f64 partials. The coordinator's ingest seam is
-//!    `StreamingBorderGram::submit_chunk_gram`; both producers route through
+//!    only `k·k` f64 partials. Both producers route through
 //!    the one [`chunk_gram_flat`] free function, so a shipped partial is
 //!    bit-identical to the partial the coordinator would have computed from the
 //!    same rows.
@@ -110,12 +109,6 @@ impl CrossNodePartition {
         let lo = chunk_index * self.chunk_size;
         let hi = ((chunk_index + 1) * self.chunk_size).min(self.n_rows);
         lo..hi
-    }
-
-    /// Which rank owns global chunk `chunk_index`: round-robin by index.
-    #[inline]
-    pub fn owner_rank(&self, chunk_index: usize) -> usize {
-        chunk_index % self.n_ranks
     }
 
     /// Number of chunks rank `rank` owns.

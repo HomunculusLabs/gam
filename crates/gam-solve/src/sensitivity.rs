@@ -41,8 +41,6 @@
 //!   the smoothing-correction IFT uses.
 //! - `leverage_block` — `H⁻¹Xᵀ`, whose
 //!   column `i` is at once ALO's per-row solve and the case/response channel.
-//! - `case_deletion` — dfbetas + Cook's
-//!   distance, the leave-one-out channel, one scaled column of `H⁻¹Xᵀ` each.
 //!
 //! What is deliberately NOT folded in: the matrix-free `hop.solve_multi`
 //! (PCG/GPU), the constrained kernel `K_T = K_S − K_S Aᵀ(A K_S Aᵀ)⁻¹A K_S`,
@@ -51,7 +49,7 @@
 //! routing them through here would regress performance and couple unrelated
 //! concerns rather than remove the bug class.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView2};
 
 use gam_linalg::faer_ndarray::FaerCholeskyFactor;
 
@@ -84,14 +82,6 @@ impl<'a> FitSensitivity<'a> {
     pub fn from_faer_cholesky(factor: &'a FaerCholeskyFactor, dim: usize) -> Self {
         Self {
             inverse: FittedInverse::FaerCholesky(factor),
-            dim,
-        }
-    }
-
-    pub fn from_lower_triangular(factor: &'a Array2<f64>) -> Self {
-        let dim = factor.nrows();
-        Self {
-            inverse: FittedInverse::LowerTriangular(factor),
             dim,
         }
     }
@@ -259,103 +249,6 @@ impl<'a> FitSensitivity<'a> {
         self.apply_multi(design.t())
     }
 
-    /// Case-deletion influence (dfbetas + Cook's distance) for every
-    /// observation, built from the one sensitivity operator — the
-    /// "leave-one-out" channel #935 was designed to unify.
-    ///
-    /// Deleting observation `i` perturbs the penalized score by exactly its
-    /// own contribution, so the IFT mode response gives the coefficient
-    /// change in closed form (the penalized Sherman–Morrison identity):
-    ///
-    /// ```text
-    ///   β̂ − β̂₍ᵢ₎ = (w_i r_i / (1 − h_ii)) · H⁻¹ x_i
-    /// ```
-    ///
-    /// where `x_i` is row `i` of `design`, `w_i = working_weights[i]` the
-    /// IRLS working weight, `r_i = working_residual[i]` the working residual
-    /// `z_i − x_iᵀβ̂`, and `h_ii = w_i x_iᵀ H⁻¹ x_i` the leverage. Column `i`
-    /// of [`Self::leverage_block`] **is** `H⁻¹ x_i`, so each dfbeta is one
-    /// scaled column — no per-observation refit, no second factorization.
-    /// For a Gaussian penalized fit the identity is exact; for a GLM it is
-    /// the standard one-step (ALO) approximation, consistent with the
-    /// leverage already reported by `AloDiagnostics`.
-    ///
-    /// Cook's distance uses the metric the fit actually moves in,
-    /// `H = XᵀWX + S`:
-    ///
-    /// ```text
-    ///   D_i = (β̂−β̂₍ᵢ₎)ᵀ H (β̂−β̂₍ᵢ₎) / (p · φ)
-    ///       = scale_i² · (x_iᵀ H⁻¹ x_i) / (p · φ),   scale_i = w_i r_i / (1 − h_ii),
-    /// ```
-    ///
-    /// the second form following from `(H⁻¹x_i)ᵀ H (H⁻¹x_i) = x_iᵀ H⁻¹ x_i`,
-    /// so the single quadratic form `x_iᵀ H⁻¹ x_i` gates the leverage, the
-    /// deletion denominator, and Cook's distance alike — no separate `H` apply.
-    ///
-    /// This is an *opt-in* diagnostic: `dfbeta` is `n × p` and is never
-    /// materialized on the default fit path (it would be ruinous at large-scale
-    /// scale). Returns `None` on a shape mismatch or if any leverage reaches
-    /// `1` (a point the deletion identity cannot resolve).
-    pub fn case_deletion(
-        &self,
-        design: &Array2<f64>,
-        working_weights: ArrayView1<'_, f64>,
-        working_residual: ArrayView1<'_, f64>,
-        phi: f64,
-    ) -> Option<CaseDeletionInfluence> {
-        let n = design.nrows();
-        let p = design.ncols();
-        if p != self.dim
-            || working_weights.len() != n
-            || working_residual.len() != n
-            || !(phi.is_finite() && phi > 0.0)
-            || p == 0
-        {
-            return None;
-        }
-        // Column i of H⁻¹Xᵀ is H⁻¹ x_i — one blocked solve for all n.
-        let h_inv_xt = self.leverage_block(design);
-
-        let mut dfbeta = Array2::<f64>::zeros((n, p));
-        let mut leverage = Array1::<f64>::zeros(n);
-        let mut cooks = Array1::<f64>::zeros(n);
-        let p_phi = p as f64 * phi;
-        for i in 0..n {
-            // hinv_xi = H⁻¹x_i is column i of the leverage block; the single
-            // quadratic form x_iᵀ H⁻¹ x_i gates everything below.
-            let hinv_xi = h_inv_xt.column(i);
-            let xhx = design.row(i).dot(&hinv_xi);
-            let h_ii = working_weights[i] * xhx;
-            let denom = 1.0 - h_ii;
-            // Leverage 1 pins the row to its own fit: the closed-form
-            // deletion is singular there, so we refuse rather than emit ∞.
-            if !denom.is_finite() || denom.abs() < f64::EPSILON {
-                return None;
-            }
-            // β̂ − β̂₍ᵢ₎ = scale · H⁻¹x_i — one scaled column, no refit.
-            let scale = working_weights[i] * working_residual[i] / denom;
-            dfbeta.row_mut(i).assign(&(&hinv_xi * scale));
-            leverage[i] = h_ii;
-            cooks[i] = scale * scale * xhx / p_phi;
-        }
-        Some(CaseDeletionInfluence {
-            dfbeta,
-            leverage,
-            cooks_distance: cooks,
-        })
-    }
-}
-
-/// Exact (Gaussian) / one-step (GLM) case-deletion influence produced by
-/// `FitSensitivity::case_deletion`. See that method for the identities.
-pub struct CaseDeletionInfluence {
-    /// `dfbeta[[i, j]]` = change in coefficient `j` when observation `i` is
-    /// left out, `β̂_j − β̂₍ᵢ₎_j`.
-    pub dfbeta: Array2<f64>,
-    /// Leverage (hat value) `h_ii = w_i x_iᵀ H⁻¹ x_i` per observation.
-    pub leverage: Array1<f64>,
-    /// Cook's distance per observation.
-    pub cooks_distance: Array1<f64>,
 }
 
 #[cfg(test)]

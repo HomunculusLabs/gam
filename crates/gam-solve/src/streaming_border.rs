@@ -236,47 +236,6 @@ impl StreamingBorderGram {
         Ok(())
     }
 
-    /// Submit chunk `chunk_index` as a **precomputed** per-chunk Gram partial
-    /// (flattened `k·k` row-major), produced by [`chunk_gram_flat`] over exactly
-    /// the rows of [`Self::chunk_rows`]`(chunk_index)`.
-    ///
-    /// This is the cross-node ingestion seam ([`crate::cross_node`]):
-    /// a worker node computes its chunks' partials locally and ships the `k·k`
-    /// values; the coordinator folds them through the **same** fixed in-order
-    /// cascade as row-level submission, so the result is bit-identical to a
-    /// single process having seen all the rows. The validation here is
-    /// structural (index range, duplicate, partial length); the *content*
-    /// contract — that the partial really is `chunk_gram_flat` of the chunk's
-    /// rows — is the producer's, enforced by routing both producers through the
-    /// one free function.
-    pub fn submit_chunk_gram(&mut self, chunk_index: usize, gram: Vec<f64>) -> Result<(), String> {
-        let n_chunks = self.n_chunks();
-        if chunk_index >= n_chunks {
-            return Err(format!(
-                "StreamingBorderGram: chunk index {chunk_index} out of range (n_chunks = {n_chunks})"
-            ));
-        }
-        if chunk_index < self.frontier || self.pending.contains_key(&chunk_index) {
-            return Err(format!(
-                "StreamingBorderGram: chunk {chunk_index} was already submitted"
-            ));
-        }
-        let kk = self.border_dim * self.border_dim;
-        if gram.len() != kk {
-            return Err(format!(
-                "StreamingBorderGram: chunk {chunk_index} partial has len {} but expected {kk}",
-                gram.len()
-            ));
-        }
-        if !gram.iter().all(|v| v.is_finite()) {
-            return Err(format!(
-                "StreamingBorderGram: chunk {chunk_index} partial contains non-finite entries"
-            ));
-        }
-        self.fold_or_park(chunk_index, gram);
-        Ok(())
-    }
-
     /// Fold an accepted chunk partial in-order, or park it in the pending
     /// buffer until the frontier reaches it. Shared tail of the row-level and
     /// gram-level submission paths so both produce identical fold behavior.

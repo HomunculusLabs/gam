@@ -28,11 +28,7 @@
 //! * [`object_store`] (#987) — the same `v1` shards streamed out of **object
 //!   storage** through a two-method [`object_store::ObjectStore`] trait (no
 //!   cloud SDK in-tree), with a bounded prefetch window and the identical
-//!   deterministic `(row_id, row)` sequence as the mmap reader. Also carries
-//!   the frontier predicate
-//!   must see a designed, honesty-weighted subsample
-//!   (`gam_solve::row_sampling_measure::RowSamplingMeasure::designed_subsample`), not
-//!   a full exact pass.
+//!   deterministic `(row_id, row)` sequence as the mmap reader.
 //!
 //! # The seam
 //!

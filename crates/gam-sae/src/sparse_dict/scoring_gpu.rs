@@ -57,7 +57,7 @@ use ndarray::ArrayView2;
 /// `PP` (the column count) is baked in as a `#define` so the inner loop is a
 /// fixed trip count (matching the other NVRTC kernels in this repo, which
 /// monomorphise their shape macros for a pure `compile_ptx`). `BM`/`BN` are the
-/// output-tile dimensions; the host launch (`score_block_device`) must use a
+/// output-tile dimensions; a host launch must use a
 /// `(BN, BM)` block and a `ceil(n_atoms/BN) × ceil(n_rows/BM)` grid.
 pub const SCORE_BLOCK_KERNEL_SOURCE: &str = r#"
 // Register-blocked score GEMM. A block computes a BM×BN output tile with a
@@ -398,36 +398,6 @@ pub fn score_block_kernel_source(p: usize) -> String {
     format!("#define PP {p}\n{SCORE_BLOCK_KERNEL_SOURCE}")
 }
 
-/// CPU reference for the score block: `scores[r*n_atoms + a] = Σ_c
-/// rows[r][c]·atoms[a][c]`, accumulated in ascending `c` with separate f32
-/// rounding — the SAME arithmetic `super::scoring::score_row_tile` runs
-/// per atom. This is the parity oracle the device kernel is locked against.
-#[must_use]
-pub fn score_block_cpu(rows: ArrayView2<'_, f32>, atoms: ArrayView2<'_, f32>) -> Vec<f32> {
-    let n_rows = rows.nrows();
-    let n_atoms = atoms.nrows();
-    let p = rows.ncols();
-    assert_eq!(
-        p,
-        atoms.ncols(),
-        "score_block_cpu: P mismatch rows vs atoms"
-    );
-    let mut scores = vec![0.0f32; n_rows * n_atoms];
-    for r in 0..n_rows {
-        let xr = rows.row(r);
-        for a in 0..n_atoms {
-            let da = atoms.row(a);
-            let mut acc = 0.0f32;
-            for c in 0..p {
-                // separate mul then add — matches the kernel's __fmul_rn/__fadd_rn
-                acc += xr[c] * da[c];
-            }
-            scores[r * n_atoms + a] = acc;
-        }
-    }
-    scores
-}
-
 /// Minimum score-block element count (`n_rows · n_atoms`) below which the device
 /// launch is not worth its fixed cost (probe + H2D + D2H). Below this the CPU
 /// reference is used. Tuned to the same genus as the other SAE device floors
@@ -565,104 +535,6 @@ mod device {
     fn module_for(b: &Backend, p: usize) -> Result<Arc<CudaModule>, GpuError> {
         b.modules
             .get_or_compile(&b.ctx, p, "sparse_dict score-block", score_block_kernel_source)
-    }
-
-    /// Compute the `n_rows × n_atoms` score block on the device. Flattens the
-    /// two views row-major (the kernel reads them as `[*, PP]`), launches one
-    /// thread per output element, and downloads the block.
-    pub(super) fn score_block_device(
-        rows: ArrayView2<'_, f32>,
-        atoms: ArrayView2<'_, f32>,
-    ) -> Result<Vec<f32>, GpuError> {
-        let n_rows = rows.nrows();
-        let n_atoms = atoms.nrows();
-        let p = rows.ncols();
-        if p != atoms.ncols() {
-            return Err(gam_gpu::gpu_err!(
-                "sparse_dict score-block: P mismatch rows={p} atoms={}",
-                atoms.ncols()
-            ));
-        }
-        if n_rows == 0 || n_atoms == 0 || p == 0 {
-            return Ok(vec![0.0f32; n_rows * n_atoms]);
-        }
-
-        let b = backend()?;
-        let module = module_for(b, p)?;
-        let func = module
-            .load_function("sparse_dict_score_block")
-            .gpu_ctx("sparse_dict score-block load_function")?;
-        let stream = b.stream.clone();
-
-        // Row-major contiguous host buffers (handles non-contiguous views).
-        let rows_host: Vec<f32> = rows.iter().copied().collect();
-        let atoms_host: Vec<f32> = atoms.iter().copied().collect();
-        assert_eq!(
-            rows_host.len(),
-            n_rows * p,
-            "score-block rows flatten length"
-        );
-        assert_eq!(
-            atoms_host.len(),
-            n_atoms * p,
-            "score-block atoms flatten length"
-        );
-
-        let rows_dev = stream
-            .clone_htod(&rows_host)
-            .gpu_ctx("sparse_dict score-block htod rows")?;
-        let atoms_dev = stream
-            .clone_htod(&atoms_host)
-            .gpu_ctx("sparse_dict score-block htod atoms")?;
-        let mut scores_dev = stream
-            .alloc_zeros::<f32>(n_rows * n_atoms)
-            .gpu_ctx("sparse_dict score-block alloc scores")?;
-
-        let n_rows_i32 = i32::try_from(n_rows).map_err(|_| {
-            gam_gpu::gpu_err!("sparse_dict score-block n_rows={n_rows} overflows i32")
-        })?;
-        let n_atoms_i32 = i32::try_from(n_atoms).map_err(|_| {
-            gam_gpu::gpu_err!("sparse_dict score-block n_atoms={n_atoms} overflows i32")
-        })?;
-
-        // `BM × BN` output tiles with a register-blocked `TN × TM` thread block:
-        // grid `ceil(n_atoms/BN) × ceil(n_rows/BM)`, each thread emitting an
-        // `(BM/TM) × (BN/TN)` micro-tile via `blockIdx.{x,y}`/`threadIdx.{x,y}`.
-        let tile_m = super::SCORE_BLOCK_TILE_M;
-        let tile_n = super::SCORE_BLOCK_TILE_N;
-        let grid_x: u32 = u32::try_from(n_atoms.div_ceil(tile_n as usize))
-            .map_err(|_| gam_gpu::gpu_err!("sparse_dict score-block grid_x overflow"))?;
-        let grid_y: u32 = u32::try_from(n_rows.div_ceil(tile_m as usize))
-            .map_err(|_| gam_gpu::gpu_err!("sparse_dict score-block grid_y overflow"))?;
-        let cfg = LaunchConfig {
-            grid_dim: (grid_x, grid_y, 1),
-            block_dim: (
-                super::SCORE_BLOCK_THREADS_N,
-                super::SCORE_BLOCK_THREADS_M,
-                1,
-            ),
-            shared_mem_bytes: 0,
-        };
-        let mut builder = stream.launch_builder(&func);
-        builder
-            .arg(&rows_dev)
-            .arg(&atoms_dev)
-            .arg(&n_rows_i32)
-            .arg(&n_atoms_i32)
-            .arg(&mut scores_dev);
-        // SAFETY: grid/block validated; all device pointers are cudarc-checked
-        // allocations on this stream; the kernel reads rows[0..n_rows*P] /
-        // atoms[0..n_atoms*P] and writes within scores[0..n_rows*n_atoms].
-        unsafe { builder.launch(cfg) }.gpu_ctx("sparse_dict score-block launch")?;
-
-        let mut scores = vec![0.0f32; n_rows * n_atoms];
-        stream
-            .memcpy_dtoh(&scores_dev, &mut scores)
-            .gpu_ctx("sparse_dict score-block dtoh scores")?;
-        stream
-            .synchronize()
-            .gpu_ctx("sparse_dict score-block synchronize")?;
-        Ok(scores)
     }
 
     const TOP_S_FOLD_THREADS: u32 = 32;

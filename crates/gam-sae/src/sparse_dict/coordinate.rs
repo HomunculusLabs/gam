@@ -131,7 +131,7 @@
 use super::block::BlockSparseFit;
 use crate::dual_certificate::harmonic_dual_birth_eta;
 use crate::super_resolution::{recover_spikes, separation_limit};
-use ndarray::{Array2, ArrayView2, ArrayView3};
+use ndarray::{ArrayView2, ArrayView3};
 use std::f64::consts::TAU;
 
 /// The phase and amplitude of one firing on a coordinate (circle/harmonic)
@@ -1022,59 +1022,6 @@ pub fn harmonic_measure_coordinates(
         n_firings: firings.len(),
         firings: measures,
     })
-}
-
-/// Reconstruct dense rows by integrating the decoder against variable-length
-/// harmonic measures. This is the measure-valued analogue of
-/// [`crate::sparse_dict::reconstruct_block_sparse_rows`].
-pub fn reconstruct_measure_valued_rows(
-    decoder: ArrayView2<'_, f32>,
-    measures: &[MeasureValuedCode],
-    n_rows: usize,
-    block_size: usize,
-) -> Result<Array2<f32>, String> {
-    let b = block_size;
-    if b < 2 || b % 2 != 0 {
-        return Err(format!(
-            "reconstruct_measure_valued_rows: block_size must be even and >= 2, got {b}"
-        ));
-    }
-    if decoder.nrows() % b != 0 {
-        return Err(format!(
-            "reconstruct_measure_valued_rows: decoder rows {} not divisible by block_size {b}",
-            decoder.nrows()
-        ));
-    }
-    let g_total = decoder.nrows() / b;
-    let h_count = b / 2;
-    let p = decoder.ncols();
-    let mut out = Array2::<f32>::zeros((n_rows, p));
-    for measure in measures {
-        if measure.row >= n_rows {
-            return Err(format!(
-                "reconstruct_measure_valued_rows: row {} out of range 0..{n_rows}",
-                measure.row
-            ));
-        }
-        if measure.block >= g_total {
-            return Err(format!(
-                "reconstruct_measure_valued_rows: block {} out of range 0..{g_total}",
-                measure.block
-            ));
-        }
-        let code = code_from_spikes(&measure.spikes, h_count);
-        for r in 0..b {
-            let coeff = code[r] as f32;
-            if coeff == 0.0 {
-                continue;
-            }
-            let atom = decoder.row(measure.block * b + r);
-            for c in 0..p {
-                out[[measure.row, c]] += coeff * atom[c];
-            }
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

@@ -35,16 +35,8 @@
 //!   the corpus↔tier mapping owned here) serves the gauge/lens/measure roles,
 //!   and any corpus row outside the tier reports "no factors" (`None`), never
 //!   an error and never a fabricated identity block.
-//!
-//! The designed subsample itself comes from
-//! `RowSamplingMeasure::designed_subsample` (uniform on the first harvest; measure-
-//! driven re-designs once a previous tier exists), so tier membership carries
-//! honest inclusion weights wherever an *estimate over the corpus* is lifted
-//! from the tier — the same #973 honesty discipline, applied to the metric's
-//! estimation roles instead of the likelihood.
 
 use gam_problem::RowMetric;
-use gam_solve::row_sampling_measure::{RowSamplingMeasure, per_row_fisher_mass};
 
 /// The Fisher-bearing tier: which corpus rows carry factors, and the metric
 /// over exactly those rows.
@@ -88,51 +80,5 @@ impl TieredHarvest {
         }
     }
 
-    /// Lift the tier's Fisher masses to a full-corpus enrichment measure
-    /// (role (c) of #980, served from the subsample as #987 prescribes).
-    ///
-    /// * Tier rows carry their own `tr(M_t)` mass, Horvitz–Thompson-corrected
-    ///   by `1 / inclusion` so a measure-designed tier does not double-count
-    ///   the very enrichment that designed it.
-    /// * Corpus rows **outside** the tier carry the tier's mean corrected
-    ///   mass — the honest "unobserved" imputation: they are neither zeroed
-    ///   (which would starve un-harvested rows of all future attention,
-    ///   freezing the design) nor boosted. When tier masses are flat this
-    ///   collapses the whole measure to uniform, exactly the no-signal
-    ///   degeneracy [`RowSamplingMeasure`] already normalizes to.
-    /// * No tier ⇒ exactly [`RowSamplingMeasure::uniform`].
-    ///
-    /// The result obeys every [`RowSamplingMeasure`] invariant — discovery/seeding
-    /// attention only, never a loss weight.
-    pub fn corpus_measure(&self) -> RowSamplingMeasure {
-        let Some(tier) = self.fisher.as_ref() else {
-            return RowSamplingMeasure::uniform(self.n_rows);
-        };
-        if self.n_rows == 0 {
-            return RowSamplingMeasure::uniform(0);
-        }
-        let tier_mass: Vec<f64> = per_row_fisher_mass(&tier.metric);
-        let mut corrected = vec![0.0_f64; tier.rows.len()];
-        let mut total = 0.0_f64;
-        let mut usable = true;
-        for (t, &m) in tier_mass.iter().enumerate() {
-            if !m.is_finite() {
-                usable = false;
-                break;
-            }
-            let v = if m > 0.0 { m / tier.inclusion[t] } else { 0.0 };
-            corrected[t] = v;
-            total += v;
-        }
-        if !usable || !(total > 0.0) {
-            return RowSamplingMeasure::uniform(self.n_rows);
-        }
-        let mean = total / tier.rows.len() as f64;
-        let mut masses = vec![mean; self.n_rows];
-        for (t, &r) in tier.rows.iter().enumerate() {
-            masses[r] = corrected[t];
-        }
-        RowSamplingMeasure::from_masses(tier.metric.provenance(), masses)
-    }
 }
 

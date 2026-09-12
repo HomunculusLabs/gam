@@ -36,18 +36,6 @@
 //! corpus size. (An async/multipart store hides its latency *inside*
 //! [`ObjectStore::fetch_range`]; this driver only promises it will never ask
 //! for more than the window.)
-//!
-//! ## Mandatory selectivity at this scale
-//!
-//! At object-store scale, fitting every row is not on the table: the #987
-//! contract is that the fit sees a **designed sample** whose inclusion weights
-//! are carried into the likelihood so the criterion stays unbiased (the #973
-//! subsample-honesty contract, mechanized by
-//! `gam_solve::row_sampling_measure::RowSamplingMeasure::designed_subsample`).
-//! `designed_sampling_mandatory` is the auto-derived predicate drivers
-//! consult: above the threshold a full-corpus pass is refused as a default and
-//! the designed-sample path is the only sanctioned one — selectivity is a
-//! correctness-of-economics requirement here, not an optimization.
 
 use ndarray::Array2;
 use std::collections::VecDeque;
@@ -68,24 +56,6 @@ use super::shard_reader::{
 /// the per-shard payload this bounds the resident set independent of corpus
 /// size.
 pub const PREFETCH_SHARDS_AHEAD: usize = 2;
-
-/// Corpus row count at and above which designed (importance-weighted)
-/// subsampling is **mandatory** rather than optional: a fit driver seeing at
-/// least this many rows must route through
-/// `gam_solve::row_sampling_measure::RowSamplingMeasure::designed_subsample` and carry
-/// the inclusion weights into the likelihood, instead of attempting a
-/// full-corpus exact pass. Auto-derived threshold: 10⁸ rows is where even a
-/// single linear pass per outer iteration dominates the entire fit budget and
-/// where the #973 cascade's honest-subsample arms stop being an optimization
-/// and become the only affordable unbiased estimator.
-pub(crate) const DESIGNED_SAMPLE_MANDATORY_MIN_ROWS: u64 = 100_000_000;
-
-/// Auto-switch predicate (#987): must this corpus be fit through a designed,
-/// honesty-weighted subsample? Pure function of the row count; no flag.
-#[inline]
-pub fn designed_sampling_mandatory(total_rows: u64) -> bool {
-    total_rows >= DESIGNED_SAMPLE_MANDATORY_MIN_ROWS
-}
 
 /// Minimal object-store abstraction: list shard keys, fetch object bytes.
 ///

@@ -124,7 +124,7 @@ pub enum SaeAtomBasisKind {
     /// model for cluster-like structure (weekdays as 7 points with cyclic
     /// adjacency, not an occupied circle). Its rank charge is `anchors − 1` (the
     /// categorical `t` has `anchors − 1` independent contrasts, one anchor being
-    /// the reference) — see `finite_set_rank_charge`. The anchor count is carried
+    /// the reference). The anchor count is carried
     /// by the evaluator (as harmonics/degree are for the periodic/patch kinds), so
     /// this stays a unit variant.
     ///
@@ -136,16 +136,6 @@ pub enum SaeAtomBasisKind {
     /// continuous-latent optimizer is the remaining follow-up.
     FiniteSet,
     Precomputed(String),
-}
-
-/// The rank charge (effective latent dimension) of a finite-set atom with
-/// `anchors` anchors: `anchors − 1`. A categorical coordinate over `k` anchors has
-/// `k − 1` independent contrasts (one anchor is the reference level), so that — not
-/// `k`, and not a continuous manifold's intrinsic `d` — is what the race must
-/// charge the finite-set alternative. Returns `0` for the degenerate `anchors ≤ 1`
-/// (a single anchor is the constant, no contrasts).
-pub fn finite_set_rank_charge(anchors: usize) -> usize {
-    anchors.saturating_sub(1)
 }
 
 impl SaeAtomBasisKind {

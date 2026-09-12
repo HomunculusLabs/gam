@@ -3779,7 +3779,7 @@ impl SaeBasisSecondJet for SubspaceReducedEvaluator {
 /// so its first, second, and third jets are identically zero (the derivative of a
 /// step is zero a.e.; the anchor assignment moves by re-labelling, not by a
 /// tangent step). The design width equals `anchors`; the rank charge the race
-/// prices is `anchors − 1` (`crate::manifold::finite_set_rank_charge`), one
+/// prices is `anchors − 1`, one
 /// anchor being the reference contrast.
 #[derive(Debug, Clone)]
 pub struct AnchorIndicatorEvaluator {
