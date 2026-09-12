@@ -122,9 +122,8 @@ pub(crate) fn detect_prefit_unpenalized_rank_deficiency_in_design(
 
     let mut active_rows = 0usize;
     let mut gram = Array2::<f64>::zeros((q, q));
-    let target_cells = 1_000_000usize;
     let p = x.ncols();
-    let chunk_rows = (target_cells / p.max(1)).clamp(1, x.nrows().max(1));
+    let chunk_rows = gam_runtime::resource::byte_balanced_row_chunk(p, x.nrows());
     let mut chunk = Array2::<f64>::zeros((chunk_rows, p));
     for start in (0..x.nrows()).step_by(chunk_rows) {
         let end = (start + chunk_rows).min(x.nrows());
@@ -324,8 +323,7 @@ pub(crate) fn detect_prefit_binomial_single_column_separation_in_design(
     let mut max_pos = vec![f64::NEG_INFINITY; p];
     let mut min_neg = vec![f64::INFINITY; p];
     let mut max_neg = vec![f64::NEG_INFINITY; p];
-    let target_cells = 1_000_000usize;
-    let chunk_rows = (target_cells / p.max(1)).clamp(1, x.nrows().max(1));
+    let chunk_rows = gam_runtime::resource::byte_balanced_row_chunk(p, x.nrows());
     let mut chunk = Array2::<f64>::zeros((chunk_rows, p));
     for start in (0..x.nrows()).step_by(chunk_rows) {
         let end = (start + chunk_rows).min(x.nrows());
@@ -387,8 +385,7 @@ fn certify_prefit_binomial_linear_separator(
     }
 
     let p = x.ncols();
-    let target_cells = 1_000_000usize;
-    let chunk_rows = (target_cells / p.max(1)).clamp(1, x.nrows().max(1));
+    let chunk_rows = gam_runtime::resource::byte_balanced_row_chunk(p, x.nrows());
     let mut chunk = Array2::<f64>::zeros((chunk_rows, p));
     let mut min_signed_margin = f64::INFINITY;
     for start in (0..x.nrows()).step_by(chunk_rows) {
@@ -456,8 +453,7 @@ fn detect_prefit_binomial_linear_combination_separation_in_design(
     }
 
     let p = x.ncols();
-    let target_cells = 1_000_000usize;
-    let chunk_rows = (target_cells / p.max(1)).clamp(1, x.nrows().max(1));
+    let chunk_rows = gam_runtime::resource::byte_balanced_row_chunk(p, x.nrows());
     let mut chunk = Array2::<f64>::zeros((chunk_rows, p));
     let mut direction = vec![0.0_f64; q];
     let max_passes = (8 * q.max(1)).clamp(16, 128);
