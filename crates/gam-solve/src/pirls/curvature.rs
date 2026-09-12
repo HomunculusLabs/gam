@@ -4,7 +4,7 @@
 
 use super::*;
 
-pub(crate) struct VarianceJet {
+pub struct VarianceJet {
     pub v: f64,
     pub v1: f64,
     pub v2: f64,

@@ -969,7 +969,7 @@ pub struct GaussianRemlMultiBackwardProblem<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct GaussianRemlNoAllocWorkspace {
+pub struct GaussianRemlNoAllocWorkspace {
     pub xtwy: Array2<f64>,
     pub ywy: Array1<f64>,
     pub projected_rhs: Array2<f64>,

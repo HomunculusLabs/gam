@@ -3750,7 +3750,7 @@ pub fn integrated_family_moments_jet(
     }
 }
 
-pub(crate) trait GhqValue: Sized {
+pub trait GhqValue: Sized {
     fn zero() -> Self;
     fn addweighted(&mut self, weight: f64, value: Self);
     fn scale(self, factor: f64) -> Self;

@@ -249,7 +249,7 @@ pub fn slq_logdet(
 /// (see #2308). `lambda_max_abs` and `deflate_floor` are reported so callers can
 /// audit the scale at which deflation kicked in.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SlqUnitDeflatedLogDet {
+pub struct SlqUnitDeflatedLogDet {
     /// Estimate of the unit-deflated log-determinant `Σ_{λ ≥ floor} ln λ`.
     pub estimate: f64,
     /// Standard error of the estimate across probes (`0.0` for a single probe).
