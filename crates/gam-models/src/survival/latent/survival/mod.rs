@@ -7294,14 +7294,11 @@ trait LatentJointHessianFamily {
     ) -> Result<bool, String>;
 
     /// Every canonical-axis first Hessian derivative from one build of the
-    /// family's row lifts, or `None` when the family has no batched route and
-    /// consumers sweep `ws_dh_directional` instead.
+    /// family's row lifts (#2714).
     fn ws_dh_all_axes(
         &self,
-        _block_states: &[ParameterBlockState],
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
-        Ok(None)
-    }
+        block_states: &[ParameterBlockState],
+    ) -> Result<Vec<Array2<f64>>, String>;
 
     /// Family-name fragment used in the workspace's dimension-mismatch error
     /// message, so callers still see "latent survival …" / "latent binary …"
@@ -7391,9 +7388,8 @@ impl LatentJointHessianFamily for LatentSurvivalFamily {
     fn ws_dh_all_axes(
         &self,
         block_states: &[ParameterBlockState],
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+    ) -> Result<Vec<Array2<f64>>, String> {
         self.exact_newton_joint_hessian_directional_derivative_all_axes_dense(block_states)
-            .map(Some)
     }
 
     fn ws_label() -> &'static str {
@@ -7481,9 +7477,8 @@ impl LatentJointHessianFamily for LatentBinaryFamily {
     fn ws_dh_all_axes(
         &self,
         block_states: &[ParameterBlockState],
-    ) -> Result<Option<Vec<Array2<f64>>>, String> {
+    ) -> Result<Vec<Array2<f64>>, String> {
         self.exact_newton_joint_hessian_directional_derivative_all_axes_dense(block_states)
-            .map(Some)
     }
 
     fn ws_label() -> &'static str {
@@ -7586,7 +7581,7 @@ where
     }
 
     fn directional_derivative_all_axes(&self) -> Result<Option<Vec<Array2<f64>>>, String> {
-        self.family.ws_dh_all_axes(&self.block_states)
+        self.family.ws_dh_all_axes(&self.block_states).map(Some)
     }
 
     fn second_directional_derivative(
