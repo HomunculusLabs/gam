@@ -4,7 +4,6 @@ pub mod constrained_gaussian_reml;
 pub mod constrained_posterior;
 pub mod cone_reduction;
 pub mod continuation_path;
-pub mod cross_node;
 // The custom-family blockwise carrier (`custom_family` + its persistent
 // warm-start cache) was extracted into the `gam-custom-family` crate (#1521),
 // which sits ABOVE gam-solve. gam-solve core no longer references it; consumers
@@ -25,8 +24,6 @@ pub mod latent_cache;
 pub mod latent_inner;
 pub mod logdet_bounds;
 pub mod loop_guard;
-pub mod measure_jet_glm_sufficient;
-pub mod measure_jet_gram_cache;
 pub mod mixture_link;
 // #1521 carve: promoted for `gam-custom-family` (consumes
 // `add_rho_block_dense_to_hessian`).

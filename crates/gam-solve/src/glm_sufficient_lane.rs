@@ -11,9 +11,9 @@
 //! weight is `W = W(ψ, β)` — it moves with the linear predictor
 //! `η = X(ψ)β` every PIRLS iteration, so `XᵀW(ψ)X(ψ)` is NOT a fixed bilinear
 //! in the design slabs and the Gaussian tensor cannot be reused as-is.
-//! Mechanism (a) (see [`crate::measure_jet_glm_sufficient`]) covers the
-//! complementary case `dX/dψ == 0` (design fixed, only `W` moves); the open
-//! frontier this module addresses is `dX/dψ ≠ 0` (design MOVING) for a GLM.
+//! Mechanism (a) covers the complementary case `dX/dψ == 0` (design fixed,
+//! only `W` moves); the open frontier this module addresses is `dX/dψ ≠ 0`
+//! (design MOVING) for a GLM.
 //!
 //! ## The first correct, certified instance
 //!

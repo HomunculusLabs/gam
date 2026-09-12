@@ -2367,5 +2367,42 @@
     },
     "reason": "#2905: the free function joint_jeffreys_phi_explicit_param_derivative was a fresh JointJeffreysPlan::prepare followed by explicit_param_derivative. It has no product caller, and its two test callers now call the method.",
     "evidence": "At the base, git grep -n -w joint_jeffreys_phi_explicit_param_derivative over the whole repository finds one pub fn declaration (crates/gam-solve/src/reml/jeffreys_subspace.rs), two rustdoc links, one error string, one comment and two calls inside mod tests. It is declared once, so the census falls by one. Not run through public_api_census.py locally (user directive)."
+  },
+  {
+    "base": "f397bcebf079dadd7d13d3eeb4b15dc5df3f292b",
+    "removed": {
+      "crates/gam-solve/src/cross_node.rs::checkpoint": 2,
+      "crates/gam-solve/src/cross_node.rs::chunk_rows": 1,
+      "crates/gam-solve/src/cross_node.rs::chunks_owned_by": 1,
+      "crates/gam-solve/src/cross_node.rs::emit": 1,
+      "crates/gam-solve/src/cross_node.rs::finish": 1,
+      "crates/gam-solve/src/cross_node.rs::is_complete": 1,
+      "crates/gam-solve/src/cross_node.rs::n_chunks": 1,
+      "crates/gam-solve/src/cross_node.rs::new": 3,
+      "crates/gam-solve/src/cross_node.rs::next_chunk_rows": 1,
+      "crates/gam-solve/src/cross_node.rs::owned_chunk": 1,
+      "crates/gam-solve/src/cross_node.rs::partition": 1,
+      "crates/gam-solve/src/cross_node.rs::resume": 2,
+      "crates/gam-solve/src/gpu_kernels/pirls_row.rs::cuda_source": 1,
+      "crates/gam-solve/src/gpu_kernels/pirls_row.rs::glm": 1,
+      "crates/gam-solve/src/gpu_kernels/pirls_row.rs::kernel_name": 1,
+      "crates/gam-solve/src/gpu_kernels/pirls_row.rs::raw": 1,
+      "crates/gam-solve/src/measure_jet_glm_sufficient.rs::build": 1,
+      "crates/gam-solve/src/measure_jet_glm_sufficient.rs::design": 1,
+      "crates/gam-solve/src/measure_jet_glm_sufficient.rs::n": 1,
+      "crates/gam-solve/src/measure_jet_glm_sufficient.rs::p": 1,
+      "crates/gam-solve/src/measure_jet_glm_sufficient.rs::weighted_gram": 1,
+      "crates/gam-solve/src/measure_jet_glm_sufficient.rs::weighted_xty": 1,
+      "crates/gam-solve/src/measure_jet_gram_cache.rs::build": 2,
+      "crates/gam-solve/src/measure_jet_gram_cache.rs::design": 1,
+      "crates/gam-solve/src/measure_jet_gram_cache.rs::n": 2,
+      "crates/gam-solve/src/measure_jet_gram_cache.rs::p": 2,
+      "crates/gam-solve/src/measure_jet_gram_cache.rs::xtwx": 2,
+      "crates/gam-solve/src/measure_jet_gram_cache.rs::xtwy": 1,
+      "crates/gam-solve/src/measure_jet_gram_cache.rs::ywy": 1,
+      "crates/gam-solve/src/streaming_border.rs::chunk_gram_flat": 1
+    },
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899); api2829 approved retiring these six structs (#2829). NodeWorker and CrossNodeGramReduction (cross_node.rs), GlmFixedDesignSufficient (measure_jet_glm_sufficient.rs), FixedDesignGramCache and FixedDesignRowCache (measure_jet_gram_cache.rs), and JitFamilySpec (gpu_kernels/pirls_row.rs) are named by no code outside their own files and those files' unit tests. The three modules held nothing else a product reaches (CrossNodePartition, NodePartial and both checkpoint carriers only fed the worker and the coordinator), so each module is deleted whole with its unit tests and private helpers. streaming_border.rs's chunk_gram_flat had NodeWorker::emit as its only caller and is deleted with it.",
+    "evidence": "Emulating public_api_census.py's pub fn predicate over literal-stripped before and after blobs gives these declaration counts. The census counts pub(crate) declarations as well, which is why chunks_owned_by, owned_chunk, next_chunk_rows and chunk_gram_flat appear. pirls_row.rs keeps PirlsRowFamily::kernel_name, so that identity falls from 2 to 1."
   }
 ]

@@ -867,7 +867,7 @@ crates/gam-solve/src/arrow_schur/system.rs	take_accumulators	retired-by-later-de
 crates/gam-solve/src/arrow_schur/system.rs	used_device	restored-in-place
 crates/gam-solve/src/cone_reduction.rs	constrained_cone_mode	retired-no-product-user
 crates/gam-solve/src/constrained_posterior.rs	constrained_projection_law	retired-no-product-user
-crates/gam-solve/src/cross_node.rs	is_complete	restored-in-place
+crates/gam-solve/src/cross_node.rs	is_complete	retired-no-product-user
 crates/gam-solve/src/cross_node.rs	is_done	retired-no-product-user
 crates/gam-solve/src/cross_node.rs	owner_rank	retired-no-product-user
 crates/gam-solve/src/cross_node.rs	rank_cursor	retired-no-product-user
@@ -919,8 +919,8 @@ crates/gam-solve/src/gpu_kernels/arrow_schur.rs	refactor_and_solve_with_gradient
 crates/gam-solve/src/gpu_kernels/arrow_schur.rs	sae_framed_schur_matvec_cpu	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/arrow_schur.rs	solve_reduced_beta_pcg	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/batched_k1.rs	solve_batched_k1_border	restored-in-place
-crates/gam-solve/src/gpu_kernels/pirls_row.rs	cuda_source	restored-in-place
-crates/gam-solve/src/gpu_kernels/pirls_row.rs	kernel_name	restored-in-place
+crates/gam-solve/src/gpu_kernels/pirls_row.rs	cuda_source	retired-no-product-user
+crates/gam-solve/src/gpu_kernels/pirls_row.rs	kernel_name	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/pirls_row.rs	row_reweight_cpu	restored-in-place
 crates/gam-solve/src/gpu_kernels/reml_trace.rs	should_use_gpu_hutchinson	retired-no-product-user
 crates/gam-solve/src/gpu_kernels/sae_resident.rs	cpu_reference_outer_sequence	retired-no-product-user
@@ -941,8 +941,8 @@ crates/gam-solve/src/logdet_bounds.rs	is_decided	restored-in-place
 crates/gam-solve/src/logdet_bounds.rs	refine_logdet_enclosure_to_margin	restored-in-place
 crates/gam-solve/src/loop_guard.rs	verdict_at	retired-no-surviving-dependent
 crates/gam-solve/src/measure_jet_glm_sufficient.rs	assert_design_unchanged	retired-no-product-user
-crates/gam-solve/src/measure_jet_glm_sufficient.rs	weighted_gram	restored-in-place
-crates/gam-solve/src/measure_jet_glm_sufficient.rs	weighted_xty	restored-in-place
+crates/gam-solve/src/measure_jet_glm_sufficient.rs	weighted_gram	retired-no-product-user
+crates/gam-solve/src/measure_jet_glm_sufficient.rs	weighted_xty	retired-no-product-user
 crates/gam-solve/src/measure_jet_gram_cache.rs	penalized_normal_matrix	retired-no-surviving-dependent
 crates/gam-solve/src/measure_jet_gram_cache.rs	penalized_rss	retired-no-surviving-dependent
 crates/gam-solve/src/measure_jet_gram_cache.rs	xtwz	retired-no-surviving-dependent

@@ -9,7 +9,7 @@
 //!
 //! * The chunk partition is a pure function of `(n_rows, chunk_size)` — chunk
 //!   `j` covers rows `[j·chunk_size, min((j+1)·chunk_size, n_rows))`.
-//! * Each within-chunk Gram entry is a [`pairwise_sum`] over the chunk's rows
+//! * Each within-chunk Gram entry is a `pairwise_sum` over the chunk's rows
 //!   (the already-landed deterministic pairwise tree of
 //!   [`gam_linalg::pairwise_reduce`]).
 //! * Cross-chunk reduction follows the **same fixed pairwise tree**, applied
@@ -17,7 +17,7 @@
 //!   of `CROSS_CHUNK_BASE` chunk partials, then power-of-two cascade merges.
 //!   The tree shape depends only on the chunk count — never on values, device
 //!   timing, or thread scheduling. A unit test pins the cross-chunk
-//!   association bit-for-bit to [`pairwise_sum`] over the per-chunk entries.
+//!   association bit-for-bit to `pairwise_sum` over the per-chunk entries.
 //! * Chunks may be **submitted in any order** (e.g. shards finishing on
 //!   different devices at different times): every chunk is keyed by its chunk
 //!   index, the in-order fold frontier advances eagerly, and out-of-order
@@ -40,8 +40,8 @@
 //! returned Gram; per-row weights `w_n` are pre-scaled into the rows as
 //! `√w_n · x_n` by the caller.
 
-use gam_linalg::pairwise_reduce::{BASE_CHUNK, pairwise_sum};
-use ndarray::{Array2, ArrayView2};
+use gam_linalg::pairwise_reduce::BASE_CHUNK;
+use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -49,7 +49,7 @@ use std::collections::BTreeMap;
 ///
 /// Pinned to the landed [`BASE_CHUNK`] of
 /// [`gam_linalg::pairwise_reduce`] so that the entry-wise association order
-/// of the cross-chunk fold is bit-identical to [`pairwise_sum`] over the
+/// of the cross-chunk fold is bit-identical to `pairwise_sum` over the
 /// per-chunk entry values (unit-tested below). A pure compile-time constant:
 /// the tree shape never depends on tuning, platform, or runtime conditions.
 pub(crate) const CROSS_CHUNK_BASE: usize = BASE_CHUNK;
@@ -118,34 +118,6 @@ fn add_into(acc: &mut [f64], rhs: &[f64]) {
     for (a, r) in acc.iter_mut().zip(rhs.iter()) {
         *a += *r;
     }
-}
-
-/// Deterministic per-chunk Gram contribution, flattened `k·k` row-major, with
-/// `k = rows.ncols()`. Entry `(a, b)` is the [`pairwise_sum`] of
-/// `x_i[a]·x_i[b]` over the chunk's rows in row order; the symmetric mirror
-/// entry reuses the same products in the same order, so the matrix is bitwise
-/// symmetric.
-///
-/// Exposed as a free function so a **remote producer** (a worker node in the
-/// cross-node reduction, [`crate::cross_node`]) can compute exactly the
-/// partial this accumulator would have computed from the same rows, then ship
-/// the `k·k` partial instead of the rows.
-pub(crate) fn chunk_gram_flat(rows: ArrayView2<'_, f64>) -> Vec<f64> {
-    let k = rows.ncols();
-    let r = rows.nrows();
-    let mut gram = vec![0.0_f64; k * k];
-    let mut products = vec![0.0_f64; r];
-    for a in 0..k {
-        for b in a..k {
-            for (i, p) in products.iter_mut().enumerate() {
-                *p = rows[[i, a]] * rows[[i, b]];
-            }
-            let s = pairwise_sum(&products);
-            gram[a * k + b] = s;
-            gram[b * k + a] = s;
-        }
-    }
-    gram
 }
 
 impl StreamingBorderGram {
