@@ -41,7 +41,8 @@
 use super::scoring::TileScorer;
 use super::residual_reservoir::{ResidualReservoir, residual_rounding_energy};
 use super::update::{
-    DecoderNormalEq, DecoderRecycleSpace, DecoderSolveStats, route_and_code_all, seed_decoder,
+    DecoderNormalEq, DecoderRecycleSpace, DecoderSolveStats, decoder_fixed_point_residual,
+    fixed_point_tolerance, route_and_code_all, seed_decoder,
     solve_decoder_with_routability_gate_recycled, unit_norm_rows,
 };
 use super::{ScoreRouteStats, SparseDictConfig};
@@ -74,8 +75,14 @@ pub struct EpochStats {
     pub revived: usize,
     /// Dead atoms detected this epoch (fired for no row before revival).
     pub dead: usize,
-    /// Whether the EV-improvement tolerance was met AND no atom was revived (the
-    /// same stopping rule as the one-shot loop: never converge with a live tail).
+    /// Gauge-invariant displacement between the decoder routed against this pass
+    /// and the refreshed decoder (`1 − cos²` per atom, maximum over atoms).
+    pub decoder_residual: f64,
+    /// Whether this epoch certified the absolute fixed point of the streaming map:
+    /// the EV change and the decoder displacement within tolerance, no atom
+    /// revived, a sound decoder solve, and no deferred atom still holding evidence
+    /// for a later refresh (SPEC rule 22, #2902). An EV plateau alone never
+    /// certifies, because the decoder can keep turning under it.
     pub converged: bool,
     /// Epochs completed so far (this one inclusive).
     pub epoch: usize,
@@ -109,6 +116,7 @@ pub struct SparseDictStreamState {
     prev_ev: f64,
     last_ev: f64,
     last_ev_residual: f64,
+    last_decoder_residual: f64,
     epochs_run: usize,
     last_revived: usize,
     converged: bool,
@@ -160,6 +168,7 @@ impl SparseDictStreamState {
             prev_ev: f64::NEG_INFINITY,
             last_ev: f64::NEG_INFINITY,
             last_ev_residual: f64::INFINITY,
+            last_decoder_residual: f64::INFINITY,
             epochs_run: 0,
             last_revived: 0,
             converged: false,
@@ -311,6 +320,9 @@ impl SparseDictStreamState {
             ),
         );
 
+        // The decoder this pass routed against: the state this epoch certifies.
+        let routed_decoder = self.decoder.clone();
+
         // (c) routability-gated decoder refresh from accumulated normal equations,
         // then (d) unit-norm. Deferred atoms keep their evidence streaming.
         let sigma = (self.rss / (self.row_count * self.p) as f64).sqrt();
@@ -332,16 +344,35 @@ impl SparseDictStreamState {
             unit_norm_rows(&mut self.decoder)?;
         }
 
-        // Same stopping rule as the one-shot loop: never converge while atoms are
-        // still being revived (a large dictionary populates its tail over several
-        // epochs); once quiescent, an EV plateau converges.
+        // The absolute fixed point of the streaming map, as in the one-shot trainer
+        // (SPEC rule 22, #2902). The EV change and the gauge-invariant decoder
+        // displacement must both close, no atom may be revived (a large dictionary
+        // populates its tail over several epochs), the decoder solve must be sound,
+        // and no deferred atom may still hold evidence that a later refresh would
+        // install. An EV plateau alone never certifies: the decoder can keep turning
+        // under it.
+        let decoder_residual = decoder_fixed_point_residual(&routed_decoder, &self.decoder);
+        let fixed_point_tol = fixed_point_tolerance(
+            self.config.tolerance,
+            self.row_count,
+            self.decoder.nrows(),
+            self.p,
+        );
+        let numerically_sound = decoder_solve_stats.cg_nonconverged_columns == 0
+            && decoder_solve_stats.cg_relative_residual <= decoder_solve_stats.cg_residual_stop;
+        let evidence_settled = self.eq.firings.iter().all(|&firings| firings == 0);
         let improve = ev - self.prev_ev;
-        let converged =
-            revived == 0 && improve.abs() <= self.config.tolerance && self.epochs_run > 0;
+        let converged = self.epochs_run > 0
+            && revived == 0
+            && numerically_sound
+            && evidence_settled
+            && improve.abs() <= fixed_point_tol
+            && decoder_residual <= fixed_point_tol;
 
         self.prev_ev = ev;
         self.last_ev = ev;
         self.last_ev_residual = improve.abs();
+        self.last_decoder_residual = decoder_residual;
         self.last_revived = revived;
         self.converged = converged;
         self.epochs_run += 1;
@@ -354,6 +385,7 @@ impl SparseDictStreamState {
             explained_variance: ev,
             revived,
             dead,
+            decoder_residual,
             converged,
             epoch,
             decoder_solve_stats,
@@ -420,12 +452,13 @@ impl SparseDictStreamState {
         if !self.converged {
             return Err(format!(
                 "SparseDictStream.finalize: streaming fit has not converged after {} epoch(s) \
-                 (last EV {:.6e}, EV residual {:.3e} vs tolerance {:.3e}, {} atom(s) revived in \
-                 the last epoch); the stream state is a resumable checkpoint, not a model — run \
-                 more epochs until end_epoch reports convergence",
+                 (last EV {:.6e}, EV residual {:.3e}, decoder residual {:.3e} vs tolerance \
+                 {:.3e}, {} atom(s) revived in the last epoch); the stream state is a resumable \
+                 checkpoint, not a model — run more epochs until end_epoch reports convergence",
                 self.epochs_run,
                 self.last_ev,
                 self.last_ev_residual,
+                self.last_decoder_residual,
                 self.config.tolerance,
                 self.last_revived,
             ));
@@ -502,7 +535,10 @@ fn validate_config(config: &SparseDictConfig) -> Result<(), String> {
 #[cfg(test)]
 mod stream_tests {
     use super::{SparseDictConfig, SparseDictStreamState, TileScorer, route_and_code_all};
-    use crate::sparse_dict::update::{DecoderRecycleSpace, run_linear_fast_kernel};
+    use crate::sparse_dict::update::{
+        DecoderRecycleSpace, decoder_fixed_point_residual, fixed_point_tolerance,
+        run_linear_fast_kernel,
+    };
     use ndarray::{Array2, ArrayView2};
 
     /// Deterministic synthetic corpus: `n` rows, each a scaled planted atom plus a
@@ -657,6 +693,53 @@ mod stream_tests {
         assert!(
             ev_stream > 0.9,
             "planted corpus should fit well, got EV {ev_stream}"
+        );
+    }
+
+    /// SPEC rule 22 (#2902): a stream that reports convergence is a fixed point of
+    /// its own epoch map. One more pass over the same rows must leave the decoder
+    /// where the certificate found it and revive nothing.
+    #[test]
+    fn a_converged_stream_is_a_fixed_point_of_its_next_epoch_2902() {
+        let (n, k, p) = (240usize, 6usize, 8usize);
+        let x = planted(n, k, p);
+        let config = SparseDictConfig {
+            n_atoms: k,
+            active: 1,
+            minibatch: 32,
+            max_epochs: 40,
+            score_tile: 16,
+            code_ridge: 1.0e-6,
+            decoder_ridge: 1.0e-6,
+            tolerance: 1.0e-9,
+            score_mode: gam_gpu::GpuPolicy::Off,
+        };
+        let mut state = SparseDictStreamState::new(x.view(), &config).expect("fit_begin");
+        let mut certified = None;
+        for _ in 0..config.max_epochs {
+            state.partial_fit(x.view()).expect("partial_fit");
+            let stats = state.end_epoch().expect("end_epoch");
+            if stats.converged {
+                certified = Some(stats);
+                break;
+            }
+        }
+        let certified = certified.expect("the planted corpus must certify within the budget");
+        let floor = fixed_point_tolerance(config.tolerance, n, k, p);
+        assert!(
+            certified.decoder_residual <= floor,
+            "a certified epoch must close the decoder displacement: {} > {floor}",
+            certified.decoder_residual
+        );
+        let before = state.decoder().to_owned();
+        state.partial_fit(x.view()).expect("partial_fit");
+        let next = state.end_epoch().expect("end_epoch");
+        let moved = decoder_fixed_point_residual(&before, &state.decoder().to_owned());
+        assert!(
+            next.revived == 0 && moved <= floor,
+            "the certified decoder moved under its next epoch: displacement {moved} vs {floor}, \
+             revived {}",
+            next.revived
         );
     }
 

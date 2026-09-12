@@ -268,7 +268,7 @@ pub(super) fn route_and_code_all(
 /// Gauge-invariant displacement of two unit-row dictionaries. Active atoms are
 /// compared as rank-one projectors (`1 - cos² θ`), so a harmless sign flip is
 /// zero; a transition between active and dormant (zero) capacity is one.
-fn decoder_fixed_point_residual(previous: &Array2<f32>, next: &Array2<f32>) -> f64 {
+pub(super) fn decoder_fixed_point_residual(previous: &Array2<f32>, next: &Array2<f32>) -> f64 {
     previous
         .axis_iter(Axis(0))
         .zip(next.axis_iter(Axis(0)))
@@ -394,6 +394,14 @@ fn routing_fixed_point_residual(
 /// be laundered as converged.
 const SPARSE_DICT_FIXED_POINT_ROUNDING: f64 = 32.0 * f64::EPSILON;
 
+/// The tolerance a sparse-dictionary fixed point is certified against: the
+/// requested tolerance, floored at the rounding of a reduction over
+/// `max(n, k, p)` terms (see [`SPARSE_DICT_FIXED_POINT_ROUNDING`]). The one-shot
+/// trainer and the streaming lane certify against the same floor.
+pub(super) fn fixed_point_tolerance(requested: f64, n: usize, k: usize, p: usize) -> f64 {
+    requested.max(SPARSE_DICT_FIXED_POINT_ROUNDING * (n.max(k).max(p) as f64))
+}
+
 /// Seed one inner alternation, then run it to its fixed point at the ridges
 /// carried by `config`.
 ///
@@ -509,9 +517,7 @@ fn run_from_decoder(
     // arithmetic can express (#2396). A `config.tolerance` of `0.0` asks for the
     // tightest achievable fixed point, which in floating point is the rounding
     // floor of the residual reductions, not literal zero.
-    let fixed_point_tol = config
-        .tolerance
-        .max(SPARSE_DICT_FIXED_POINT_ROUNDING * (n.max(k).max(p) as f64));
+    let fixed_point_tol = fixed_point_tolerance(config.tolerance, n, k, p);
 
     for epoch in 0..config.max_epochs {
         epochs_run = epoch + 1;

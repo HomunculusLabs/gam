@@ -321,7 +321,7 @@ class SparseDictStream:
         Identical hyper-parameters to :func:`sparse_dictionary_fit`. ``max_epochs``
         is advisory here (the driving Python loop decides how many epochs to run);
         it is carried only so :meth:`end_epoch`'s convergence flag matches the
-        one-shot stopping rule. ``score_mode="auto"`` uses CUDA when admitted
+        one-shot fixed-point rule. ``score_mode="auto"`` uses CUDA when admitted
         and otherwise runs the exact CPU router; use ``"required"`` to fail
         closed or ``"off"`` for deliberate CPU-only runs.
     """
@@ -370,10 +370,13 @@ class SparseDictStream:
         normal equations, revive dead atoms onto worst-reconstructed residual
         rows, and reset the epoch accumulators.
 
-        Returns ``{explained_variance, revived, dead, converged, epoch}`` where
-        ``explained_variance`` is the EV of the decoder routed against this epoch
-        (pre-refresh) and ``converged`` follows the one-shot stopping rule (an EV
-        plateau with no atom revived).
+        Returns ``{explained_variance, revived, dead, decoder_residual, converged,
+        epoch}``. ``explained_variance`` is the EV of the decoder routed against
+        this epoch (pre-refresh), and ``decoder_residual`` is the gauge-invariant
+        displacement of the decoder under this epoch's refresh. ``converged``
+        certifies the absolute fixed point: the EV change and the decoder
+        displacement within tolerance, no atom revived, a sound decoder solve and
+        no deferred atom evidence (#2902). An EV plateau alone never converges.
         """
         return dict(self._handle.end_epoch())
 

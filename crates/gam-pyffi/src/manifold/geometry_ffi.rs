@@ -6729,7 +6729,7 @@ impl SparseDictStream {
 
     /// Refresh the decoder from the epoch's accumulated normal equations, revive
     /// dead atoms onto worst-reconstructed residual rows, and reset the epoch.
-    /// Returns `{explained_variance, revived, dead, converged, epoch}`.
+    /// Returns `{explained_variance, revived, dead, decoder_residual, converged, epoch}`.
     fn end_epoch(&mut self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         let stats = py
             .detach(|| self.inner.end_epoch())
@@ -6738,6 +6738,7 @@ impl SparseDictStream {
         out.set_item("explained_variance", stats.explained_variance)?;
         out.set_item("revived", stats.revived)?;
         out.set_item("dead", stats.dead)?;
+        out.set_item("decoder_residual", stats.decoder_residual)?;
         out.set_item("converged", stats.converged)?;
         out.set_item("epoch", stats.epoch)?;
         Ok(out.unbind())
