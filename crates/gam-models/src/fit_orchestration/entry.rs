@@ -1573,58 +1573,30 @@ enum AdaptiveCenterDecision {
     Exhausted,
 }
 
-/// A converged adaptive spatial term's evidence about its own resolution.
-#[derive(Clone, Copy, Debug)]
-struct AdaptiveTermEvidence {
-    /// Total term EDF over the realized coefficient block.
-    edf: f64,
-    realized_width: usize,
-    /// Columns no penalty shrinks; excluded from the penalizable capacity.
-    nullspace_dim: usize,
-    /// Posterior standard deviation of the term's EDF under the fit's own
-    /// smoothing-parameter uncertainty ([`term_edf_resolution`]), or `0.0` when
-    /// the fit retained no smoothing-parameter covariance.
-    edf_resolution: f64,
-    /// The #2774 lack-of-fit test rejects the basis at the note's family-wise level.
-    lacks_fit: bool,
-}
-
 /// Decide one adaptive spatial term's resolution from its converged fit.
 ///
-/// Three pieces of evidence say the realized basis is too small. EDF saturation
+/// Two pieces of evidence say the realized basis is too small. EDF saturation
 /// fires once λ has been driven to its floor and the penalized capacity is used
-/// up. EDF within its own REML resolution of that capacity fires while λ still
-/// binds but the fit cannot tell its EDF apart from the ceiling: REML trades
-/// basis size against λ, so a basis that is too small stops short of its
-/// algebraic ceiling by less than the smoothing parameter's own uncertainty
-/// moves the EDF (#1561: the 30-center 2-D Duchon pilot at n=1500 leaves 1.25 of
-/// 29 dimensions unused, while 49 centers cut its truth error by a third). The
-/// #2774 lack-of-fit score test (`lacks_fit`) fires on residual structure the
-/// basis cannot represent. Any one of them grows the basis.
+/// up. The #2774 lack-of-fit score test (`lacks_fit`) fires while λ still binds,
+/// where saturation is blind: REML trades basis size against λ, so a basis that
+/// is far too small can sit below its algebraic ceiling while the residuals keep
+/// structure it cannot represent. Either one grows the basis.
 ///
-/// Only algebraic saturation at the validated ceiling is exhaustion. The other
-/// two verdicts at the ceiling leave the fit certified, since growing past the
-/// validated default is not this loop's to do.
+/// Only saturation at the validated ceiling is exhaustion. A lack-of-fit verdict
+/// at the ceiling leaves the fit certified with its fit-time advisory, since
+/// growing past the validated default is not this loop's to do.
 fn adaptive_center_decision(
     current_centers: usize,
     ceiling_centers: usize,
-    evidence: AdaptiveTermEvidence,
+    edf: f64,
+    realized_width: usize,
+    nullspace_dim: usize,
     resolution_tol: f64,
+    lacks_fit: bool,
 ) -> AdaptiveCenterDecision {
-    let saturated = gam_terms::basis::basis_is_saturated(
-        evidence.edf,
-        evidence.realized_width,
-        evidence.nullspace_dim,
-        resolution_tol,
-    );
-    let capacity = evidence
-        .realized_width
-        .saturating_sub(evidence.nullspace_dim) as f64;
-    let penalized_edf = (evidence.edf - evidence.nullspace_dim as f64).clamp(0.0, capacity);
-    let within_resolution = capacity > 0.0
-        && evidence.edf.is_finite()
-        && capacity - penalized_edf <= evidence.edf_resolution;
-    if !saturated && !within_resolution && !evidence.lacks_fit {
+    let saturated =
+        gam_terms::basis::basis_is_saturated(edf, realized_width, nullspace_dim, resolution_tol);
+    if !saturated && !lacks_fit {
         return AdaptiveCenterDecision::Certified;
     }
     match gam_terms::basis::expanded_num_centers(current_centers, ceiling_centers) {
@@ -1632,82 +1604,6 @@ fn adaptive_center_decision(
         None if saturated => AdaptiveCenterDecision::Exhausted,
         None => AdaptiveCenterDecision::Certified,
     }
-}
-
-/// Posterior standard deviation of a term's EDF under the fit's own
-/// smoothing-parameter uncertainty: the delta-method `sqrt(gᵀ V_ρ g)`, with
-/// `V_ρ` the REML/LAML covariance of `ρ = log λ` and
-/// `g_k = ∂edf_t/∂ρ_k = −tr_t(H⁻¹ λ_k S_k H⁻¹ X'WX)`, the trace over the term's
-/// coefficients of the influence matrix's derivative.
-///
-/// `None` when the fit retained no weighted Gram or `V_ρ`, their layouts disagree
-/// with the design's penalties, or the penalized Hessian they rebuild does not
-/// certify SPD.
-fn term_edf_resolution(
-    result: &StandardFitResult,
-    global_range: std::ops::Range<usize>,
-) -> Option<f64> {
-    let gram = result.fit.weighted_gram()?;
-    let rho_covariance = result.fit.artifacts.rho_covariance.as_ref()?;
-    let lambdas = &result.fit.lambdas;
-    let penalties = &result.design.penalties;
-    let p = gram.nrows();
-    if gram.ncols() != p
-        || global_range.is_empty()
-        || global_range.end > p
-        || penalties.len() != lambdas.len()
-        || rho_covariance.dim() != (lambdas.len(), lambdas.len())
-    {
-        return None;
-    }
-    let mut hessian = gram.clone();
-    for (penalty, &lambda) in penalties.iter().zip(lambdas.iter()) {
-        let range = penalty.col_range.clone();
-        if range.end > p || penalty.local.dim() != (range.len(), range.len()) {
-            return None;
-        }
-        hessian
-            .slice_mut(ndarray::s![range.clone(), range])
-            .scaled_add(lambda, &penalty.local);
-    }
-    // The estimand is symmetric, but a penalty block rebuilt through its PSD-cone
-    // projection carries triangle roundoff; symmetrize as the optimizer does for
-    // the same sum before certifying the factor.
-    gam_linalg::matrix::symmetrize_in_place(&mut hessian);
-    let factor =
-        gam_linalg::utils::certified_spd_factorize(&hessian, "adaptive spatial EDF resolution")
-            .ok()?;
-    let mut unit_columns = ndarray::Array2::<f64>::zeros((p, global_range.len()));
-    for (column, row) in global_range.clone().enumerate() {
-        unit_columns[[row, column]] = 1.0;
-    }
-    // Column i of `inverse_columns` is H⁻¹eᵢ and column i of `influence_columns`
-    // is H⁻¹X'WX eᵢ, for each coefficient i of the term.
-    let (inverse_columns, _) = factor.solve_matrix(&unit_columns).ok()?;
-    let gram_columns = gram.slice(ndarray::s![.., global_range]).to_owned();
-    let (influence_columns, _) = factor.solve_matrix(&gram_columns).ok()?;
-    let gradient: Vec<f64> = penalties
-        .iter()
-        .zip(lambdas.iter())
-        .map(|(penalty, &lambda)| {
-            let range = penalty.col_range.clone();
-            let inverse_rows = inverse_columns.slice(ndarray::s![range.clone(), ..]);
-            let influence_rows = influence_columns.slice(ndarray::s![range, ..]);
-            -lambda
-                * inverse_rows
-                    .t()
-                    .dot(&penalty.local.dot(&influence_rows))
-                    .diag()
-                    .sum()
-        })
-        .collect();
-    let mut variance = 0.0_f64;
-    for (a, gradient_a) in gradient.iter().enumerate() {
-        for (b, gradient_b) in gradient.iter().enumerate() {
-            variance += gradient_a * rho_covariance[[a, b]] * gradient_b;
-        }
-    }
-    (variance.is_finite() && variance >= 0.0).then(|| variance.sqrt())
 }
 
 fn standard_result(outcome: &FormulaFitResult) -> Option<&StandardFitResult> {
@@ -1786,7 +1682,6 @@ fn adaptive_spatial_candidates(
                 .max(current_centers);
             let global_range = (smooth_offset + realized.coeff_range.start)
                 ..(smooth_offset + realized.coeff_range.end);
-            let edf_resolution = term_edf_resolution(result, global_range.clone()).unwrap_or(0.0);
             let edf =
                 result
                     .fit
@@ -1795,14 +1690,11 @@ fn adaptive_spatial_candidates(
             match adaptive_center_decision(
                 current_centers,
                 ceiling_centers,
-                AdaptiveTermEvidence {
-                    edf,
-                    realized_width: realized.coeff_range.len(),
-                    nullspace_dim,
-                    edf_resolution,
-                    lacks_fit: lacking_fit.contains(&term_index),
-                },
+                edf,
+                realized.coeff_range.len(),
+                nullspace_dim,
                 resolution_tol,
+                lacking_fit.contains(&term_index),
             ) {
                 AdaptiveCenterDecision::Certified => {}
                 AdaptiveCenterDecision::Expand(proposed_centers) => {
@@ -1835,28 +1727,12 @@ fn adaptive_spatial_candidates(
 
 #[cfg(test)]
 mod adaptive_spatial_resolution_tests {
-    use super::{AdaptiveCenterDecision, AdaptiveTermEvidence, adaptive_center_decision};
-
-    fn evidence(
-        edf: f64,
-        realized_width: usize,
-        nullspace_dim: usize,
-        edf_resolution: f64,
-        lacks_fit: bool,
-    ) -> AdaptiveTermEvidence {
-        AdaptiveTermEvidence {
-            edf,
-            realized_width,
-            nullspace_dim,
-            edf_resolution,
-            lacks_fit,
-        }
-    }
+    use super::{AdaptiveCenterDecision, adaptive_center_decision};
 
     #[test]
     fn unsaturated_basis_is_certified_without_a_probe_refit() {
         assert_eq!(
-            adaptive_center_decision(8, 100, evidence(5.0, 10, 2, 0.0, false), 1.0e-6),
+            adaptive_center_decision(8, 100, 5.0, 10, 2, 1.0e-6, false),
             AdaptiveCenterDecision::Certified
         );
     }
@@ -1864,11 +1740,11 @@ mod adaptive_spatial_resolution_tests {
     #[test]
     fn saturated_basis_expands_geometrically_and_respects_validated_ceiling() {
         assert_eq!(
-            adaptive_center_decision(8, 100, evidence(10.0, 10, 2, 0.0, false), 1.0e-6),
+            adaptive_center_decision(8, 100, 10.0, 10, 2, 1.0e-6, false),
             AdaptiveCenterDecision::Expand(16)
         );
         assert_eq!(
-            adaptive_center_decision(64, 100, evidence(10.0, 10, 2, 0.0, false), 1.0e-6),
+            adaptive_center_decision(64, 100, 10.0, 10, 2, 1.0e-6, false),
             AdaptiveCenterDecision::Expand(100)
         );
     }
@@ -1876,7 +1752,7 @@ mod adaptive_spatial_resolution_tests {
     #[test]
     fn saturated_basis_at_validated_ceiling_is_typed_exhaustion() {
         assert_eq!(
-            adaptive_center_decision(100, 100, evidence(10.0, 10, 2, 0.0, false), 1.0e-6),
+            adaptive_center_decision(100, 100, 10.0, 10, 2, 1.0e-6, false),
             AdaptiveCenterDecision::Exhausted
         );
     }
@@ -1886,7 +1762,7 @@ mod adaptive_spatial_resolution_tests {
         // The 2-D default-rank Duchon pilot at n=1500: 30 centers, penalized
         // EDF 24.7 of 27, below the saturation ceiling while λ still binds.
         assert_eq!(
-            adaptive_center_decision(30, 187, evidence(27.7, 30, 3, 0.0, true), 1.0e-6),
+            adaptive_center_decision(30, 187, 27.7, 30, 3, 1.0e-6, true),
             AdaptiveCenterDecision::Expand(60)
         );
     }
@@ -1894,29 +1770,7 @@ mod adaptive_spatial_resolution_tests {
     #[test]
     fn lack_of_fit_at_validated_ceiling_stays_certified_1561() {
         assert_eq!(
-            adaptive_center_decision(187, 187, evidence(27.7, 190, 3, 0.0, true), 1.0e-6),
-            AdaptiveCenterDecision::Certified
-        );
-    }
-
-    #[test]
-    fn edf_within_its_reml_resolution_of_capacity_expands_1561() {
-        // Job 541813's n=1500 pilot: 29 realized columns, EDF 27.75, 1.25 unused.
-        assert_eq!(
-            adaptive_center_decision(30, 187, evidence(27.75, 29, 0, 1.6, false), 1.0e-6),
-            AdaptiveCenterDecision::Expand(60)
-        );
-        // The same fit whose EDF is resolved more finely than its gap stays put.
-        assert_eq!(
-            adaptive_center_decision(30, 187, evidence(27.75, 29, 0, 1.0, false), 1.0e-6),
-            AdaptiveCenterDecision::Certified
-        );
-    }
-
-    #[test]
-    fn edf_resolution_at_validated_ceiling_stays_certified_1561() {
-        assert_eq!(
-            adaptive_center_decision(187, 187, evidence(185.0, 186, 0, 2.0, false), 1.0e-6),
+            adaptive_center_decision(187, 187, 27.7, 190, 3, 1.0e-6, true),
             AdaptiveCenterDecision::Certified
         );
     }
