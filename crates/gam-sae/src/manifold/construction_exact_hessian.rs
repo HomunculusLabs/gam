@@ -5571,21 +5571,49 @@ mod test_support {
         // point. This fixture's inner solve does not reach it (#2681), so
         // demanding convergence here only prevented the parity from ever being
         // checked. Take the pinned shared state and factor once at it through
-        // the production `FROZEN_INNER_STATE` freeze lane.
+        // the production `FROZEN_INNER_STATE` freeze lane: the criterion's own
+        // refresh and freeze-lane converge, without the criterion's ½log|A|
+        // pricing. The pinned state is not a KKT point and its exact A is
+        // indefinite, so that pricing refuses (census job 532879 read
+        // `IndefiniteObservedInformation { block: "joint" }` here). That verdict is
+        // about the Laplace normaliser, not about the parity pinned below.
         let (term0, target, rho) =
             crate::manifold::tests::small_two_atom_periodic_term_at_shared_inner_state();
         let mut term = term0;
-        let (_cost, _loss, cache) = term
-            .penalized_quasi_laplace_criterion_with_cache(
+        let mut rho_fixed = rho.clone();
+        let frozen_refresh = term
+            .run_joint_fit_arrow_schur_for_quasi_laplace(
                 target.view(),
-                &rho,
+                &mut rho_fixed,
                 None,
                 crate::manifold::tests::FROZEN_INNER_STATE,
                 0.25,
                 1.0e-4,
                 1.0e-4,
             )
-            .expect("dense criterion must evaluate at the pinned #2509 witness state");
+            .expect("freeze-lane refresh at the pinned #2509 witness state");
+        let mut frozen_loss = frozen_refresh.loss;
+        let mut frozen_fixed_point = frozen_refresh.fixed_point;
+        let options = gam_solve::arrow_schur::ArrowSolveOptions::direct()
+            .with_gpu_policy(term.gpu_policy)
+            .with_newton_schur_tikhonov(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR)
+            .with_evidence_unit_deflation(gam_solve::arrow_schur::SPECTRAL_DEFLATION_REL_FLOOR);
+        let cache = term
+            .converge_inner_for_undamped_logdet(
+                target.view(),
+                &rho,
+                &mut rho_fixed,
+                None,
+                crate::manifold::tests::FROZEN_INNER_STATE,
+                0.25,
+                1.0e-4,
+                1.0e-4,
+                &mut frozen_loss,
+                &mut frozen_fixed_point,
+                &options,
+                true,
+            )
+            .expect("freeze-lane factorization at the pinned #2509 witness state");
 
         let blocks = term
             .assemble_exact_hessian_minus_b_rows(&rho, target.view(), &cache.row_dims, cache.k)
