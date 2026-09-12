@@ -2499,25 +2499,6 @@ impl CustomFamily for GaussianLocationScaleWiggleFamily {
         Ok(Some(Arc::new(workspace)))
     }
 
-    /// Outer-derivative policy: declare HT-subsample capability.
-    ///
-    /// GaussianLocationScaleWiggleFamily overrides
-    /// `log_likelihood_only_with_options` and
-    /// `exact_newton_joint_hessian_workspace_with_options` to consume
-    /// `options.outer_score_subsample` with per-row Horvitz–Thompson weights
-    /// (each sampled row's contribution is multiplied by
-    /// `WeightedOuterRow.weight = 1/π_i`; non-sampled rows are zeroed),
-    /// yielding unbiased estimators of the full-data log-likelihood and
-    /// joint Hessian. The ψ-workspace path is also subsample-aware via
-    /// `exact_newton_joint_psi_workspace_with_options`, which threads the
-    /// subsample down to per-row weight masking inside the joint-ψ second-
-    /// order and directional-derivative reductions. Inner-PIRLS and final-
-    /// covariance paths never install the option, so they continue to
-    /// consume the exact full-data quantities.
-    fn outer_derivative_subsample_capable(&self) -> bool {
-        true
-    }
-
     fn inner_coefficient_hessian_hvp_available(&self, specs: &[ParameterBlockSpec]) -> bool {
         // Same gating as the workspace impl above: matrix-free fires when
         // `exact_joint_dense_block_designs` is satisfiable, which requires

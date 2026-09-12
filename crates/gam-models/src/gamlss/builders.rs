@@ -3228,11 +3228,6 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                             capability,
                             predicted_gradient_work: u128::MAX,
                             predicted_hessian_work: u128::MAX,
-                            // No GAMLSS family today overrides its
-                            // outer-only `_with_options` hooks to consume
-                            // `outer_score_subsample`; staged-κ would
-                            // build pilot masks the family then ignores.
-                            subsample_capable: false,
                         }
                     }
                 };

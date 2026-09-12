@@ -1572,8 +1572,7 @@ impl<'d> SingleBlockExactJointDesignCache<'d> {
     /// different MEASURES at the same θ apart. `begin_exact_polish` changes the
     /// measure — it retires the #1033b n-free surrogate — so the surrogate's
     /// value at the search checkpoint must not be served to the exact lane that
-    /// follows (gam#2760). The sibling N-block driver's staged-pilot exit does
-    /// the same thing for the same reason.
+    /// follows (gam#2760).
     fn forget_eval_memo(&mut self) {
         self.last_eval_theta = None;
         self.last_cost = None;
@@ -4187,10 +4186,9 @@ fn run_exact_joint_spatial_optimization(
         // envelope — `270×` `outer_value_agreement_bound`, `4e-6` relative where
         // `√ε` is the contract.
         //
-        // That makes the surrogate exactly the same KIND of object as the
-        // staged-pilot row subsample the sibling N-block driver already retires
-        // here: an optimization stage, never a certifiable measure. So it gets
-        // the same exit. `run_outer` calls this once, after the search has
+        // That makes the surrogate an optimization stage, never a certifiable
+        // measure, so it gets an exact exit. `run_outer` calls this once, after
+        // the search has
         // converged, and then re-runs the optimizer from that checkpoint on
         // whatever measure the objective now prices — here the exact streamed
         // criterion — before the mandatory analytic certificate. The n-free
@@ -7635,8 +7633,6 @@ where
 
     struct NBlockExactJointState<'d, M> {
         cache: ExactJointDesignCache<'d>,
-        row_set: gam_problem::outer_subsample::RowSet,
-        staged_pilot_active: bool,
         terminal_mode: Option<(Array1<f64>, f64, M)>,
     }
 
@@ -7681,106 +7677,10 @@ where
 
     let mut state = NBlockExactJointState {
         cache: ExactJointDesignCache::new(data, cache_blocks, rho_dim, all_dims.clone())?,
-        row_set: gam_problem::outer_subsample::RowSet::All,
-        staged_pilot_active: false,
         terminal_mode: None,
     };
 
-    // ── P7: staged-κ schedule ────────────────────────────────────────────
-    //
-    // The κ MLE for a stationary spatial process is asymptotically
-    // *invariant* in `n` once `n` is past the Monte-Carlo resolution of
-    // the cell-moment kernel. At large scale (`n ≥ STAGED_KAPPA_*`) the
-    // Monte-Carlo error of a `K = 5_000`-row pilot is ≪ the κ posterior
-    // width, so estimating θ on a stratified `K`-row pilot returns
-    // statistically the *same* estimate as the full-data fit at a
-    // fraction of the wall-clock cost. The shared outer runner then continues
-    // from that checkpoint on the exact full-data measure and issues its
-    // mandatory analytic certificate only after the transition.
-    //
-    // This is **not a heuristic shortcut**. It is the textbook
-    // pilot-then-refine schedule for stationary-process likelihoods,
-    // chosen here because the per-eval cost of the κ gradient grows
-    // linearly in `n` and the pilot subsample reduces that cost by a
-    // factor of `n / K`. The exact full-data refinement starts literally at
-    // the pilot checkpoint and retains the learned trust radius and Hessian;
-    // it costs one terminal
-    // full-data evaluation when the pilot point already certifies and keeps
-    // optimizing when it does not.
-    //
-    // At `n < STAGED_KAPPA_TRIGGER_N` the schedule collapses to one
-    // full-data stage — identical to the pre-P7 behaviour.
-    // Note: the n≥30_000 pilot trigger lives in
-    // `outer_derivative_policy.should_use_staged_kappa(n_total)`; this fn
-    // only carries the constants it consumes directly.
-    const KAPPA_PILOT_K: usize = 5_000;
-
     let n_total = data.nrows();
-    let use_staged_kappa = outer_derivative_policy.should_use_staged_kappa(n_total);
-    if use_staged_kappa {
-        log::info!(
-            "[KAPPA-STAGED] auto-engaging pilot+exact schedule: n={} pilot_k={}",
-            n_total,
-            KAPPA_PILOT_K,
-        );
-    }
-
-    // Build the initial row mask for the κ optimization.
-    //
-    // * `use_staged_kappa = false`: full data (`RowSet::All`). The
-    //   schedule collapses to the historical single-stage path.
-    // * `use_staged_kappa = true`: deterministic uniform pilot of size
-    //   `min(KAPPA_PILOT_K, n_total)`, wrapped as a `RowSet::Subsample`
-    //   with per-row HT weight `n_total / k_pilot`. The uniform pick is
-    //   a valid unbiased estimator on its own; the stratified
-    //   per-decile picker
-    //   (`marginal_slope_shared::auto_outer_score_subsample`) requires
-    //   the response vector `z`, which only the family evaluator can
-    //   produce. **Agent C replaces this with the stratified pick once
-    //   `exact_fn` exposes the per-row score.**
-    //
-    // Sampling RNG is seeded from `n_total` so the pilot is
-    // deterministic across reruns at fixed `n`.
-    fn build_uniform_pilot_subsample(
-        n_total: usize,
-        k_target: usize,
-        seed: u64,
-    ) -> gam_problem::outer_subsample::OuterScoreSubsample {
-        use gam_problem::outer_subsample::OuterScoreSubsample;
-        let k = k_target.min(n_total);
-        if k == 0 || n_total == 0 {
-            return OuterScoreSubsample::from_uniform_inclusion_mask(Vec::new(), n_total, seed);
-        }
-        // Reservoir-free deterministic pick: linear congruential walk
-        // over a shuffled index set; for the pilot, a fast Floyd-style
-        // sample is sufficient.
-        let mut mask: Vec<usize> = Vec::with_capacity(k);
-        // Splitmix64-driven Floyd's sampler.
-        let mut state = seed.wrapping_add(0x9E3779B97F4A7C15);
-        let splitmix = |s: &mut u64| -> u64 { gam_linalg::utils::splitmix64(s) };
-        let mut taken = std::collections::HashSet::with_capacity(k);
-        for j in (n_total - k)..n_total {
-            let r = (splitmix(&mut state) % (j as u64 + 1)) as usize;
-            if !taken.insert(r) {
-                taken.insert(j);
-                mask.push(j);
-            } else {
-                mask.push(r);
-            }
-        }
-        mask.sort_unstable();
-        mask.dedup();
-        OuterScoreSubsample::from_uniform_inclusion_mask(mask, n_total, seed)
-    }
-
-    if use_staged_kappa {
-        let pilot = build_uniform_pilot_subsample(n_total, KAPPA_PILOT_K, n_total as u64);
-        state.row_set = gam_problem::outer_subsample::RowSet::Subsample {
-            rows: std::sync::Arc::clone(&pilot.rows),
-            n_full: n_total,
-        };
-        state.staged_pilot_active = true;
-    }
 
     let exact_fn_cell = std::cell::RefCell::new(&mut exact_fn);
     let exact_efs_fn_cell = std::cell::RefCell::new(&mut exact_efs_fn);
@@ -7958,7 +7858,7 @@ where
                 &specs,
                 &designs,
                 eval_mode,
-                &ctx.row_set,
+                &gam_problem::outer_subsample::RowSet::All,
                 owned_value_mode,
             );
             let elapsed_s = t0.elapsed().as_secs_f64();
@@ -8053,7 +7953,7 @@ where
                     &specs,
                     &designs,
                     gam_solve::estimate::reml::reml_outer_engine::EvalMode::ValueOnly,
-                    &ctx.row_set,
+                    &gam_problem::outer_subsample::RowSet::All,
                     None,
                 );
                 let elapsed_s = t0.elapsed().as_secs_f64();
@@ -8112,7 +8012,7 @@ where
                         theta,
                         &specs,
                         &designs,
-                        &ctx.row_set,
+                        &gam_problem::outer_subsample::RowSet::All,
                     );
                     let elapsed_s = t0.elapsed().as_secs_f64();
                     kphase_efs_calls.set(kphase_efs_calls.get() + 1);
@@ -8149,25 +8049,6 @@ where
                     (seed_inner_beta_fn)(beta)
                 },
             )
-            .with_exact_polish(|ctx: &mut &mut NBlockExactJointState<'_, Mode>| {
-                if !ctx.staged_pilot_active {
-                    return false;
-                }
-                // Objective memoization is theta-only, so a pilot value at the
-                // warm checkpoint must not alias the exact full-data value.
-                // Keep the realized design and warm coefficient state: only the
-                // score measure changes here.
-                ctx.cache.invalidate_objective_memo();
-                ctx.terminal_mode = None;
-                ctx.row_set = gam_problem::outer_subsample::RowSet::All;
-                ctx.staged_pilot_active = false;
-                true
-            })
-            // The runner asks this before installing the pilot's terminal
-            // state, which the transition above then discards.
-            .with_sampled_pilot(|ctx: &&mut NBlockExactJointState<'_, Mode>| {
-                ctx.staged_pilot_active
-            })
             // Declare the terminal evaluation order, which is what makes this
             // objective OWN its terminal coefficient mode.
             //
@@ -8247,28 +8128,19 @@ where
         nfree_miss_second_order: 0,
         nfree_miss_other: 0,
         // The N-block driver never arms the #1033b ψ-Gram surrogate, so it has
-        // no surrogate to retire. Its own staged-pilot exit is a different
-        // transition (row measure, not criterion measure) and is asserted by
-        // the `RowSet::All` check immediately below.
+        // no surrogate to retire.
         exact_polish_ran: false,
         polish_slow_path_resets: 0,
         polish_nfree_skip_row_touches: 0,
         optim_total_s: kphase_total_s,
     };
 
-    if !matches!(state.row_set, gam_problem::outer_subsample::RowSet::All) {
-        return Err(
-            "n-block exact-joint spatial optimization returned before its exact full-data transition"
-                .to_string(),
-        );
-    }
     let certified_outer = result;
     let theta_star = certified_outer.rho().clone();
 
-    // ── P7 stage rotation ────────────────────────────────────────────────
-    // The returned theta and certificate now belong to the exact full-data
-    // refinement. No separate probe may mutate that certified identity before
-    // the final coefficient fit.
+    // The returned theta and certificate belong to the certified optimum. No
+    // separate probe may mutate that certified identity before the final
+    // coefficient fit.
     state.ensure_theta(&theta_star)?;
     let (mode_theta, mode_objective, mode) = state.terminal_mode.take().ok_or_else(|| {
         "n-block exact-joint spatial optimization produced a certificate without retaining the owned terminal coefficient mode"

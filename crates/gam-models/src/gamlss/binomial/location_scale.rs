@@ -2656,26 +2656,6 @@ impl CustomFamily for BinomialLocationScaleFamily {
         Ok(Some(Arc::new(workspace)))
     }
 
-    /// Outer-derivative policy: declare HT-subsample capability.
-    ///
-    /// BinomialLocationScaleFamily overrides
-    /// `log_likelihood_only_with_options` and
-    /// `exact_newton_joint_hessian_workspace_with_options` to consume
-    /// `options.outer_score_subsample` with per-row Horvitz–Thompson weights
-    /// (each sampled row's contribution is multiplied by
-    /// `WeightedOuterRow.weight = 1/π_i`; non-sampled rows are zeroed),
-    /// yielding unbiased estimators of the full-data log-likelihood and
-    /// joint Hessian. The ψ-workspace path is not yet subsample-aware: it
-    /// builds the exact full-data ψ Hessian blocks, which are trivially
-    /// unbiased; so the outer-score components are a sum of HT-unbiased and
-    /// exact-unbiased pieces and the total remains an unbiased estimator of
-    /// the full-data outer score. Inner-PIRLS and final-covariance paths
-    /// never install the option, so they continue to consume the exact
-    /// full-data quantities.
-    fn outer_derivative_subsample_capable(&self) -> bool {
-        true
-    }
-
     fn inner_coefficient_hessian_hvp_available(&self, specs: &[ParameterBlockSpec]) -> bool {
         // Representation support means the realized two-block designs can be
         // applied as β-space operators. It does not imply that exact

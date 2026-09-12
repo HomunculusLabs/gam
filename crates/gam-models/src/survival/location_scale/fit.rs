@@ -807,9 +807,6 @@ pub(crate) fn fit_survival_location_scale_terms(
             capability,
             predicted_gradient_work,
             predicted_hessian_work,
-            // Survival location-scale consumes `outer_score_subsample` on its
-            // outer-only LL, joint-Hessian, and ψ workspace paths.
-            subsample_capable: true,
         }
     };
     let solved = optimize_spatial_length_scale_exact_joint(

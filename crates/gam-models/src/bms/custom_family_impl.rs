@@ -843,7 +843,6 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
             capability,
             predicted_gradient_work,
             predicted_hessian_work,
-            subsample_capable: true,
         }
     }
 

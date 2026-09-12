@@ -5659,5 +5659,25 @@
     ],
     "reason": "#2023 / SPEC rule 25 and the user's directive to delete code only tests use: the tiered spine's per-context Tier-0 mean (PerContextMean) and the flag-gated Tier-0.5 attention-sink atom surface (Tier05SinkAtomConfig, Tier05SinkAtom, SinkAnchor, SinkDelimiterClass) have no product user. No production entry constructs them; the one test that reached any of them, per_context_mean_zeros_each_group_and_falls_back, only exercised PerContextMean itself. The Tier-0 mean the public fits run is Tier0Mean, which stays.",
     "evidence": "At the base, git grep -w over crates, src, tests, examples, gamfit, python and bench finds PerContextMean, Tier05SinkAtom, Tier05SinkAtomConfig, SinkAnchor and SinkDelimiterClass only in crates/gam-sae/src/tiered/mod.rs. Tip check 545703 reported PerContextMean, its methods, Tier05SinkAtomConfig and anchors as never used once 5d3434e3d narrowed them. The items are the guard's identities derived by its own rules (sorted path:kind:name over ITEM declarations whose count falls; fn:fit, fn:apply and fn:reconstruct keep Tier0Mean's declarations, fn:default is a private homonym with other occurrences, the test is test-scoped). The census counts are the removed pub fn declarations (label is declared twice). BTreeMap, BTreeSet and SaeManifoldAtom imports and the two module-doc paragraphs naming Tier05SinkAtom go with them. Not run through the guard or census locally (user directive); compile is covered by the tip check."
+  },
+  {
+    "base": "789ba4da250d30d72d584ba2942e9603252efcdb",
+    "items": [
+      "crates/gam-model-api/src/families/custom_family/family_trait.rs:fn:outer_derivative_subsample_capable",
+      "crates/gam-model-api/src/families/custom_family/options.rs:const:OUTER_GRADIENT_WORK_BUDGET",
+      "crates/gam-model-api/src/families/custom_family/options.rs:const:STAGED_KAPPA_TRIGGER_N",
+      "crates/gam-model-api/src/families/custom_family/options.rs:fn:should_use_staged_kappa",
+      "crates/gam-models/src/fit_orchestration/drivers/design_assembly_constraint_tests.rs:fn:staged_exact_joint_outer_reoptimizes_and_certifies_the_full_row_measure",
+      "crates/gam-models/src/fit_orchestration/drivers/design_assembly_constraint_tests.rs:struct:TerminalEvidence",
+      "crates/gam-models/src/fit_orchestration/drivers/spatial_optimization.rs:const:KAPPA_PILOT_K",
+      "crates/gam-models/src/fit_orchestration/drivers/spatial_optimization.rs:fn:build_uniform_pilot_subsample",
+      "crates/gam-models/src/gamlss/binomial/location_scale.rs:fn:outer_derivative_subsample_capable",
+      "crates/gam-models/src/gamlss/binomial/wiggle_custom_family.rs:fn:outer_derivative_subsample_capable",
+      "crates/gam-models/src/gamlss/gaussian/location_scale.rs:fn:outer_derivative_subsample_capable",
+      "crates/gam-models/src/gamlss/gaussian/wiggle.rs:fn:outer_derivative_subsample_capable",
+      "crates/gam-models/src/survival/location_scale/family_solver.rs:fn:outer_derivative_subsample_capable"
+    ],
+    "reason": "#2897, SPEC rules 23 and 25. OuterDerivativePolicy::should_use_staged_kappa switched the spatial length-scale outer search onto a different estimator path at a row-count window. Once n >= STAGED_KAPPA_TRIGGER_N (30,000), or predicted gradient work exceeded OUTER_GRADIENT_WORK_BUDGET (5e10), for a family whose policy set subsample_capable, the N-block exact-joint driver searched on a uniform KAPPA_PILOT_K = 5,000 row pilot (build_uniform_pilot_subsample) before continuing on full data. The trigger, the pilot size and the uniform pick were hand-picked knobs, not the work model the families use for their own auto outer subsample. This removes the schedule; its trigger and constants; the capability flag that existed only to gate it (CustomFamily::outer_derivative_subsample_capable and its five overrides); and the test that forced the staged path, with its nested TerminalEvidence struct. Every spatial search now evaluates the full row measure.",
+    "evidence": "At base cbd23e611, a git grep -n -F over crates, src, tests, examples and python finds should_use_staged_kappa called once, at spatial_optimization.rs:7733. STAGED_KAPPA_TRIGGER_N and OUTER_GRADIENT_WORK_BUDGET occur only in options.rs and one spatial_optimization.rs comment. subsample_capable (17 lines) occurs only in: the policy field; its read inside should_use_staged_kappa; the trait default outer_derivative_subsample_capable and its five overrides; and seven struct literals (bms, survival marginal slope twice, survival location-scale fit, gamlss builders, transformation normal, two constraint tests). KAPPA_PILOT_K and build_uniform_pilot_subsample occur only inside the staged block. staged_exact_joint_outer_reoptimizes_and_certifies_the_full_row_measure tested only the staged path, forcing it with subsample_capable and u128::MAX work; TerminalEvidence has one declaration, inside that test. Compile is covered by the lead shared tip check."
   }
 ]

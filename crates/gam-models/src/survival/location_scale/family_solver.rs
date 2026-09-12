@@ -2111,10 +2111,6 @@ impl CustomFamily for SurvivalLocationScaleFamily {
         Ok(Some(Arc::new(workspace)))
     }
 
-    fn outer_derivative_subsample_capable(&self) -> bool {
-        true
-    }
-
     // Inherent `exact_newton_joint_psi_terms_masked` is defined in the
     // `impl SurvivalLocationScaleFamily` block below. It is invoked directly
     // by both this trait method and the ψ workspace's `first_order_terms`

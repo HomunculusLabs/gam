@@ -308,13 +308,10 @@ pub fn exact_outer_order_with_outer_hvp(
 ///   evaluation order against the policy gate.
 /// * [`declared_hessian_form`](Self::declared_hessian_form) — what shape the
 ///   outer-strategy planner should declare to its plan ladder.
-/// * [`should_use_staged_kappa`](Self::should_use_staged_kappa) — auto-route
-///   the κ optimizer through the pilot/polish schedule at large `n`.
 ///
-/// All thresholds are *const* — no env vars, no CLI flags. The cost model is
-/// the family's own `coefficient_gradient_cost` / `coefficient_hessian_cost`
-/// scaled by the joint outer-coordinate dimension, with `saturating_mul` so
-/// overflow rounds up to the budget ceiling rather than wrapping silently.
+/// The cost model is the family's own `coefficient_gradient_cost` /
+/// `coefficient_hessian_cost` scaled by the joint outer-coordinate dimension,
+/// with `saturating_mul` so overflow saturates rather than wrapping silently.
 #[derive(Clone, Copy, Debug)]
 pub struct OuterDerivativePolicy {
     /// What exact calculus the family advertises in principle.
@@ -326,44 +323,9 @@ pub struct OuterDerivativePolicy {
     /// Predicted per-eval work for one `ValueAndGradient` evaluation.
     /// Rounded conservatively *up* via `saturating_mul`.
     pub predicted_gradient_work: u128,
-    /// True when the family's outer-only paths consume
-    /// [`BlockwiseFitOptions::outer_score_subsample`] and produce
-    /// Horvitz-Thompson-weighted partial sums (i.e. the family overrides
-    /// `log_likelihood_only_with_options`,
-    /// `exact_newton_joint_psi_workspace_with_options`, and any other
-    /// outer-only hooks reached by `evaluate_custom_family_joint_hyper`).
-    ///
-    /// Determines whether the κ optimizer's pilot/polish staging schedule
-    /// engages: when this is `false`, [`Self::should_use_staged_kappa`]
-    /// returns `false` regardless of `n`. Engaging the schedule on a
-    /// family that ignores the subsample is strictly worse than not
-    /// engaging it — the schedule builds a `RowSet::Subsample` and the
-    /// boundary plumbing installs an `OuterScoreSubsample` on options,
-    /// but the family's default outer-only paths fall back to full-data
-    /// sums, so the pilot evaluation costs the same as the polish but
-    /// adds a Vec allocation per eval.
-    ///
-    /// Families that do **not** consume the subsample (default for new
-    /// implementations, including the GAMLSS location-scale families
-    /// today) leave this `false`. Families that do consume (today:
-    /// `BernoulliMarginalSlopeFamily`) override `outer_derivative_policy`
-    /// to set this `true`.
-    pub subsample_capable: bool,
 }
 
 impl OuterDerivativePolicy {
-    /// Per-eval gradient work ceiling above which the κ schedule switches
-    /// to the staged pilot/polish path. At large scale (n ≳ 100 k) even
-    /// the gradient sweep takes minutes per outer iter; subsampling the
-    /// pilot stage cuts that to seconds and leaves the final polish on
-    /// full data to recover the MLE.
-    pub(crate) const OUTER_GRADIENT_WORK_BUDGET: u128 = 50_000_000_000;
-
-    /// Pilot subsample auto-engages when full-data `n` exceeds this. Below
-    /// this the κ schedule collapses to a single full-data stage —
-    /// behaviour identical to the pre-P7 path.
-    pub const STAGED_KAPPA_TRIGGER_N: usize = 30_000;
-
     /// Clamp a requested evaluation order against the policy gate.
     ///
     /// Returns the highest order this policy permits for the requested order:
@@ -402,27 +364,6 @@ impl OuterDerivativePolicy {
             return DeclaredHessianForm::Unavailable;
         }
         DeclaredHessianForm::Either
-    }
-
-    /// True when the κ optimizer should auto-route through the staged
-    /// pilot/polish schedule. Triggers when **either** the data is big
-    /// (`n ≥ STAGED_KAPPA_TRIGGER_N`) **or** the per-eval gradient work
-    /// exceeds `OUTER_GRADIENT_WORK_BUDGET`. The second clause catches
-    /// problems with moderate `n` but very wide design (large `p_total`
-    /// or `psi_dim`) where a single full-data gradient sweep still
-    /// dominates the κ trajectory.
-    pub fn should_use_staged_kappa(&self, n: usize) -> bool {
-        if !self.subsample_capable {
-            // Family does not consume `outer_score_subsample` on its
-            // outer-only paths. Engaging the schedule would build a
-            // pilot `RowSet::Subsample` whose only effect is per-eval
-            // Vec/Arc bookkeeping — the underlying coefficient gradient
-            // would still sum every row. Gate the schedule off until
-            // the family override declares consumption.
-            return false;
-        }
-        n >= Self::STAGED_KAPPA_TRIGGER_N
-            || self.predicted_gradient_work > Self::OUTER_GRADIENT_WORK_BUDGET
     }
 }
 

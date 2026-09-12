@@ -283,16 +283,6 @@ impl CustomFamily for TransformationNormalFamily {
             capability,
             predicted_hessian_work: work_hess,
             predicted_gradient_work: work_grad,
-            // CTN's outer-score reductions are mathematically per-row
-            // sums whose contributions are linear in `wᵢ` at every assembly
-            // site (gradient, joint Hessian dense / matvec / diagonal, ψ,
-            // ψ-ψ, log-likelihood). The `_with_options` overrides install a
-            // mask-aware family clone whose `effective_weights()` returns
-            // `wᵢ · mᵢ` (HT-weighted), yielding an unbiased estimator
-            // `E[score_subsample] = score_full`. The persistent
-            // dense-Hessian cache is keyed on the mask hash so subsampled
-            // and full-data builds at the same β do not alias.
-            subsample_capable: true,
         }
     }
 

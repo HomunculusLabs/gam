@@ -1531,31 +1531,6 @@ impl CustomFamily for GaussianLocationScaleFamily {
                 Ok(Some(_))
             )
     }
-
-    /// Outer-derivative policy: declare HT-subsample capability.
-    ///
-    /// GaussianLocationScaleFamily overrides
-    /// `log_likelihood_only_with_options`,
-    /// `exact_newton_joint_hessian_workspace_with_options`, and
-    /// `exact_newton_joint_psi_workspace_with_options` to consume
-    /// `options.outer_score_subsample` with per-row Horvitz–Thompson weights
-    /// (each sampled row's contribution is multiplied by
-    /// `WeightedOuterRow.weight = 1/π_i`; non-sampled rows are zeroed),
-    /// yielding unbiased estimators of the full-data log-likelihood, joint
-    /// Hessian, and second-order ψ Hessian / ψ-Hessian directional
-    /// derivative. The ψ-workspace masking happens inside
-    /// `apply_ht_mask_first`, `apply_ht_mask_second`, and
-    /// `apply_ht_mask_mixed` on the `GaussianJointPsi{First,Second,
-    /// MixedDrift}Weights` per-row arrays, immediately after the row-scalar
-    /// reductions and before the row-linear `weighted_crossprod_psi_maps` /
-    /// `xt_diag_*_dense` assemblies, so the masked outputs remain unbiased.
-    /// First-order ψ terms remain full-data exact (= trivially unbiased), so
-    /// the total outer score is still unbiased. Inner-PIRLS and final-
-    /// covariance paths never install the option, so they continue to
-    /// consume the exact full-data quantities.
-    fn outer_derivative_subsample_capable(&self) -> bool {
-        true
-    }
 }
 
 impl CustomFamilyGenerative for GaussianLocationScaleFamily {

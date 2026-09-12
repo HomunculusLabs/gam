@@ -160,7 +160,6 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
                 capability,
                 predicted_gradient_work: gradient_work,
                 predicted_hessian_work: hessian_work,
-                subsample_capable: true,
             };
         };
 
@@ -168,7 +167,6 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
             capability,
             predicted_gradient_work: predicted_hessian_work / 2,
             predicted_hessian_work,
-            subsample_capable: true,
         }
     }
 
