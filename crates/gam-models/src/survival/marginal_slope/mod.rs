@@ -164,7 +164,7 @@ pub(crate) use block_layout::*;
 pub use error::*;
 pub(crate) use family::*;
 pub(crate) use generated_regressor::*;
-pub use fit_entry::*;
+pub(crate) use fit_entry::*;
 pub(crate) use fit_setup::*;
 pub(crate) use hessian::*;
 pub(crate) use joint_eval::*;

@@ -14,7 +14,6 @@ use gam_terms::basis::{
     build_matern_basis_log_kappa_aniso_derivatives, build_matern_basis_log_kappa_derivatives,
     build_measure_jet_basis_psi_derivatives,
     build_thin_plate_basis_log_kappa_derivatives, estimate_penalty_nullity,
-    initial_aniso_contrasts,
 };
 
 use gam_custom_family::{
