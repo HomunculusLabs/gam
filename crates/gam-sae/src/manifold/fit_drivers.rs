@@ -3174,6 +3174,10 @@ impl SaeManifoldTerm {
         penalized_gram_scale: &[f64],
         max_rounds: usize,
     ) -> Result<GaugeOrbitDescent, String> {
+        // #2267 — name this phase to the process monitor for every exit of the call.
+        let _gauge_orbit_scope = gam_runtime::process_monitor::track_scope(format!(
+            "sae gauge-orbit descent max_rounds={max_rounds}"
+        ));
         let mut outcome = GaugeOrbitDescent::default();
         let n = self.n_obs();
         let q = self.assignment.row_block_dim();

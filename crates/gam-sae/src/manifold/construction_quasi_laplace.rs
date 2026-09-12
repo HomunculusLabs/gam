@@ -1115,6 +1115,13 @@ impl SaeManifoldTerm {
         // honestly at best-seen, never accepted past the band.
         let mut best_seen: Option<(f64, f64, SaeManifoldMutableState)> = None;
         let refine_started = std::time::Instant::now();
+        // #2267 — name this phase to the process monitor. gam-sae registered no
+        // monitor scope, so every heartbeat of an SAE fit read `instrumented_threads=0
+        // active=<idle>` whatever the fit was doing. The guard lives to every exit of
+        // this function.
+        let _criterion_scope = gam_runtime::process_monitor::track_scope(format!(
+            "sae criterion inner converge inner_max_iter={inner_max_iter}"
+        ));
         // #2228 Stage-2 / #2132 — whether the terminal exact-Newton polish
         // (`terminal_exact_newton_polish`) is armed for the NEXT objective-stall
         // plateau. Re-armed by any materially-descending refine round, so a
@@ -1831,6 +1838,10 @@ impl SaeManifoldTerm {
             })?;
             let refine_iter = inner_max_iter.max(1).min(remaining);
             previous_refine_grad_norm = Some(grad_norm);
+            let refine_window_scope = gam_runtime::process_monitor::track_scope(format!(
+                "sae refine window round={} refine_iter={refine_iter} inner_total={total_inner_iter}",
+                refine_rounds + 1
+            ));
             let refine = self.run_joint_fit_arrow_schur_for_quasi_laplace(
                 target,
                 rho_fixed,
@@ -1840,6 +1851,7 @@ impl SaeManifoldTerm {
                 ridge_ext_coord,
                 ridge_beta,
             )?;
+            drop(refine_window_scope);
             *loss = refine.loss;
             *criterion_fixed_point = refine.fixed_point;
             total_inner_iter += refine_iter;
@@ -2956,6 +2968,12 @@ impl SaeManifoldTerm {
         let polish_started = std::time::Instant::now();
         for step in 0..max_steps {
             let step_started = std::time::Instant::now();
+            // #2267 — name each step to the process monitor; the guard ends with the
+            // loop body on every exit.
+            let _polish_step_scope = gam_runtime::process_monitor::track_scope(format!(
+                "sae terminal Newton polish step {}/{max_steps}",
+                step + 1
+            ));
             let mut sys = self
                 .assemble_arrow_schur(target, rho_fixed, registry)
                 .map_err(|err| format!("SaeManifoldTerm::terminal_exact_newton_polish: {err}"))?;
