@@ -62,7 +62,9 @@ fn constant_curvature_psi_profile_value(
         None,
     )?;
     let (rho_lower, rho_upper) = fit.rho_domain;
-    let rho_at_bound = (fit.rho - rho_lower).abs() <= 1.0e-9 || (fit.rho - rho_upper).abs() <= 1.0e-9;
+    // The closed-form selector evaluates both walls exactly and starts from the
+    // better one, so a railed ρ̂ is the wall value itself.
+    let rho_at_bound = fit.rho == rho_lower || fit.rho == rho_upper;
     Ok((fit.reml_score, rho_at_bound))
 }
 
