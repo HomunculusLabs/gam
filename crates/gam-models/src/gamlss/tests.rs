@@ -4327,6 +4327,118 @@ impl Zz2155Problem {
 // module file to respect the crate-wide source-file length budget. Child
 // modules see this module's entire scope (helpers AND imports) via
 // `use super::*`, so the split is purely physical.
+/// Helper: build a GLS Wiggle family + states + specs fixture
+/// (mirrors the inline structure of
+/// `gaussian_location_scale_wiggle_workspace_matvec_matches_dense`).
+pub(crate) fn gls_wiggle_workspace_fixture() -> (
+    GaussianLocationScaleWiggleFamily,
+    Vec<ParameterBlockState>,
+    Vec<ParameterBlockSpec>,
+    Array2<f64>,
+    Array2<f64>,
+    Array2<f64>,
+) {
+    let n = 10usize;
+    let p_mu = 3usize;
+    let p_ls = 2usize;
+    let xmu = Array2::from_shape_fn((n, p_mu), |(i, j)| {
+        ((i as f64) * 0.13 + (j as f64) * 0.31).sin() * 0.4
+    });
+    let xls = Array2::from_shape_fn((n, p_ls), |(i, j)| {
+        ((i as f64) * 0.21 + (j as f64) * 0.47).cos() * 0.3
+    });
+    let beta_mu = array![0.10, -0.20, 0.30];
+    let beta_ls = array![0.40, -0.10];
+    let eta_mu = xmu.dot(&beta_mu);
+    let eta_ls = xls.dot(&beta_ls);
+    let q_seed = Array1::linspace(-1.0, 1.0, n);
+    let (wiggle_block, knots) =
+        BinomialLocationScaleWiggleFamily::buildwiggle_block_input(q_seed.view(), 2, 3, 2, false)
+            .expect("wiggle block");
+    let pw = wiggle_block.design.ncols();
+    let beta_w = Array1::from_shape_fn(pw, |j| 0.05 * ((j + 1) as f64).sin());
+    let y = Array1::from_shape_fn(n, |i| 0.5 + 0.1 * (i as f64).cos());
+    let weights = Array1::from_elem(n, 1.0);
+    let mu_design = DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(xmu.clone()));
+    let log_sigma_design =
+        DesignMatrix::Dense(gam_linalg::matrix::DenseDesignMatrix::from(xls.clone()));
+    let family = GaussianLocationScaleWiggleFamily {
+        y,
+        weights,
+        mu_design: Some(mu_design.clone()),
+        log_sigma_design: Some(log_sigma_design.clone()),
+        wiggle_knots: knots,
+        wiggle_degree: 2,
+        policy: gam_runtime::resource::ResourcePolicy::default_library(),
+        cached_row_scalars: std::sync::RwLock::new(None),
+    };
+    // The wiggle block has dynamic geometry (q0-dependent basis): the
+    // model is q = q0 + B(q0)·β_w, so η_w must be evaluated at the
+    // *current* q0, not at the spec's static seed grid. Mirror what
+    // `refresh_all_block_etas` does at fit time so the fixture state
+    // satisfies the analytical formula's invariant.
+    let xw_at_q0 = family
+        .wiggle_design(eta_mu.view())
+        .expect("wiggle basis at q0");
+    let eta_w = xw_at_q0.dot(&beta_w);
+    let states = vec![
+        ParameterBlockState {
+            beta: beta_mu,
+            eta: eta_mu,
+        },
+        ParameterBlockState {
+            beta: beta_ls,
+            eta: eta_ls,
+        },
+        ParameterBlockState {
+            beta: beta_w,
+            eta: eta_w,
+        },
+    ];
+    let specs = vec![
+        ParameterBlockSpec {
+            name: "mu".to_string(),
+            design: mu_design,
+            offset: Array1::zeros(n),
+            penalties: Vec::new(),
+            nullspace_dims: Vec::new(),
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta: None,
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        },
+        ParameterBlockSpec {
+            name: "log_sigma".to_string(),
+            design: log_sigma_design,
+            offset: Array1::zeros(n),
+            penalties: Vec::new(),
+            nullspace_dims: Vec::new(),
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta: None,
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        },
+        ParameterBlockSpec {
+            name: "wiggle".to_string(),
+            design: wiggle_block.design,
+            offset: Array1::zeros(n),
+            penalties: Vec::new(),
+            nullspace_dims: Vec::new(),
+            initial_log_lambdas: Array1::zeros(0),
+            initial_beta: None,
+            gauge_priority: 100,
+            jacobian_callback: None,
+            stacked_design: None,
+            stacked_offset: None,
+        },
+    ];
+    (family, states, specs, xmu, xls, xw_at_q0)
+}
+
 #[path = "tests_wiggle_ls.rs"]
 mod wiggle_ls;
 mod zz2155_mode_geography_tests;
