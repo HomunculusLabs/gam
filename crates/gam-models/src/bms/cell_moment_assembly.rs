@@ -3889,12 +3889,14 @@ mod empirical_rigid_jet_oracle_tests {
 
     // Independent normalized Taylor-polynomial oracle. Production stores dense
     // derivative tensors and lifts its root with a filtered jet iteration.
-    // This witness stores the 15 monomial coefficients of total degree <= 4,
+    // This witness stores the 21 monomial coefficients of total degree <= 5,
     // multiplies by ordinary polynomial convolution, and solves the calibration
     // identity one homogeneous degree at a time. It shares neither production
-    // tensor algebra, implicit lifting, nor the signed-log-CDF derivative stack.
+    // tensor algebra, implicit lifting, nor the signed-log-CDF derivative stack,
+    // and its fifth degree pins the analytic fifth-order implicit differentiation
+    // (`empirical_rigid_row_fifth_full`) exactly (#932).
     #[derive(Clone, Copy)]
-    struct OraclePolynomial([f64; 15]);
+    struct OraclePolynomial([f64; 21]);
 
     impl OraclePolynomial {
         fn slot(m: usize, g: usize) -> usize {
@@ -3903,7 +3905,7 @@ mod empirical_rigid_jet_oracle_tests {
         }
 
         fn constant(value: f64) -> Self {
-            let mut out = Self([0.0; 15]);
+            let mut out = Self([0.0; 21]);
             out.0[0] = value;
             out
         }
@@ -3923,7 +3925,7 @@ mod empirical_rigid_jet_oracle_tests {
 
         fn product(self, other: Self) -> Self {
             let mut out = Self::constant(0.0);
-            for degree in 0..=4 {
+            for degree in 0..=5 {
                 for g in 0..=degree {
                     let m = degree - g;
                     let mut coefficient = 0.0;
@@ -3939,14 +3941,14 @@ mod empirical_rigid_jet_oracle_tests {
             out
         }
 
-        fn compose(self, coefficients: [f64; 5]) -> Self {
+        fn compose(self, coefficients: [f64; 6]) -> Self {
             let mut delta = self;
             delta.0[0] = 0.0;
             let mut power = Self::constant(1.0);
             let mut out = Self::constant(0.0);
             for (degree, coefficient) in coefficients.into_iter().enumerate() {
                 out = out.add_scaled(power, coefficient);
-                if degree < 4 {
+                if degree < 5 {
                     power = power.product(delta);
                 }
             }
@@ -3962,6 +3964,7 @@ mod empirical_rigid_jet_oracle_tests {
                 -x * pdf / 2.0,
                 (x * x - 1.0) * pdf / 6.0,
                 (3.0 * x - x * x * x) * pdf / 24.0,
+                (x.powi(4) - 6.0 * x * x + 3.0) * pdf / 120.0,
             ])
         }
 
@@ -3975,13 +3978,14 @@ mod empirical_rigid_jet_oracle_tests {
                 -inverse.powi(2) / 2.0,
                 inverse.powi(3) / 3.0,
                 -inverse.powi(4) / 4.0,
+                inverse.powi(5) / 5.0,
             ])
         }
 
         fn derivative(self, axes: &[usize]) -> f64 {
             let g = axes.iter().filter(|&&axis| axis == 1).count();
             let m = axes.len() - g;
-            let factorial = [1.0, 1.0, 2.0, 6.0, 24.0];
+            let factorial = [1.0, 1.0, 2.0, 6.0, 24.0, 120.0];
             self.0[Self::slot(m, g)] * factorial[m] * factorial[g]
         }
     }
@@ -4014,7 +4018,7 @@ mod empirical_rigid_jet_oracle_tests {
         };
         let mut intercept = OraclePolynomial::constant(root);
         assert!(residual(intercept).0[0].abs() <= 2e-14, "independent scalar root");
-        for degree in 1..=4 {
+        for degree in 1..=5 {
             let known = residual(intercept);
             for g in 0..=degree {
                 let slot = OraclePolynomial::slot(degree - g, g);
@@ -4048,8 +4052,8 @@ mod empirical_rigid_jet_oracle_tests {
             (2.1, 0.45, 1.6, 0.0, 0.7),
             (-2.4, -0.55, -1.4, 1.0, 1.4),
         ];
-        let mut worst = [0.0_f64; 5];
-        let mut checked = [0usize; 5];
+        let mut worst = [0.0_f64; 6];
+        let mut checked = [0usize; 6];
         for frailty_sd in [None, Some(0.6)] {
             for (row, &(m, g, z, y, w)) in rows.iter().enumerate() {
                 let family = empirical_family(vec![y], vec![z], vec![w], frailty_sd, grid.clone());
@@ -4065,6 +4069,9 @@ mod empirical_rigid_jet_oracle_tests {
                 let fourth = family.empirical_rigid_fourth_full_closed_form(
                     0, marginal, g, &grid.nodes, &grid.weights,
                 ).expect("empirical rigid fourth");
+                let fifth = family.empirical_rigid_row_fifth_full(
+                    0, marginal, g, &grid.nodes, &grid.weights,
+                ).expect("empirical rigid fifth");
                 let oracle = independent_rigid_polynomial(
                     m, g, z, y, w, family.probit_frailty_scale(), &grid,
                 );
@@ -4085,13 +4092,16 @@ mod empirical_rigid_jet_oracle_tests {
                             check(third[a][b][c], &[a, b, c]);
                             for d in 0..2 {
                                 check(fourth[a][b][c][d], &[a, b, c, d]);
+                                for e in 0..2 {
+                                    check(fifth[a][b][c][d][e], &[a, b, c, d, e]);
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        assert_eq!(checked, [14, 28, 56, 112, 224]);
+        assert_eq!(checked, [14, 28, 56, 112, 224, 448]);
         eprintln!("EMPIRICAL-RIGID-POLYNOMIAL-932 checked={checked:?} worst_scaled_error={worst:?}");
     }
 
