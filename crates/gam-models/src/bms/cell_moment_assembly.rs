@@ -3106,13 +3106,19 @@ impl BernoulliMarginalSlopeFamily {
             rigid_intercept_from_marginal(marginal.q, slope, probit_scale) / probit_scale;
         if beta_w.is_some() {
             let (l_val, l_d1) = self.link_terms_value_d1_at_row(row, a_rigid_pre_scale, beta_w)?;
-            if l_d1 > BMS_DERIV_TOL {
+            // The affine inversion divides by ℓ₁ = 1 + w′(a), which the deviation's
+            // structural monotonicity constraints keep positive. Where it is not
+            // positive, or the quotient is not representable, the rigid seed stands.
+            if l_d1 > 0.0 {
                 let ell0 = l_val - l_d1 * a_rigid_pre_scale;
                 let observed_slope = probit_scale * l_d1 * slope;
-                return Ok((marginal.q * (1.0 + observed_slope * observed_slope).sqrt()
+                let seed = (marginal.q * (1.0 + observed_slope * observed_slope).sqrt()
                     / probit_scale
                     - ell0)
-                    / l_d1);
+                    / l_d1;
+                if seed.is_finite() {
+                    return Ok(seed);
+                }
             }
         }
         Ok(a_rigid_pre_scale)
@@ -3197,7 +3203,7 @@ impl BernoulliMarginalSlopeFamily {
             .map(|row| {
                 let a = a_pre_scale_vec[row];
                 let ell1 = l_d1_vec[row];
-                if ell1 > BMS_DERIV_TOL {
+                if ell1 > 0.0 {
                     let ell0 = l_val_vec[row] - ell1 * a;
                     let observed_slope = probit_scale * ell1 * slope_eta[row];
                     (marginals[row].q * (1.0 + observed_slope * observed_slope).sqrt()
@@ -3314,7 +3320,7 @@ impl BernoulliMarginalSlopeFamily {
             .map(|&(row, ref m)| {
                 let a = a_pre_scale_vec[row];
                 let ell1 = l_d1_vec[row];
-                let seed = if ell1 > BMS_DERIV_TOL {
+                let seed = if ell1 > 0.0 {
                     let ell0 = l_val_vec[row] - ell1 * a;
                     let observed_slope = probit_scale * ell1 * slope_eta[row];
                     (m.q * (1.0 + observed_slope * observed_slope).sqrt() / probit_scale - ell0)
