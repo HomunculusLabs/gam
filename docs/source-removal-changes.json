@@ -4799,5 +4799,19 @@
     ],
     "reason": "#2469: the Matérn collocation operator assembly treated a (collocation, center) pair with r <= R_EPS = 1e-12 as coincident. It zeroed the gradient row and the mixed Hessian term, and it decided the nu = 1/2 collision refusal (d > 1) and the 1-D nu = 1/2 limit. The limits hold only at r = 0, and every positive r has a formula. The coincidence tests are now exact zeros. The mixed Hessian term (phi'' - phi'/r)(w_a h_a/r)(w_b h_b/r) is formed from unit-vector components rather than t = (phi'' - phi'/r)/r^2. The old division amplified rounding by 1/r^2 and underflowed long before r did, which is what made a threshold look necessary.",
     "evidence": "git grep -w R_EPS at the base finds this file-local declaration and its five uses in the collocation assembly of crates/gam-terms/src/basis/matern_kernel.rs, and an unrelated function-local R_EPS in crates/gam-terms/src/basis/duchon_kernel_math.rs, which is untouched. The rewrite is algebraically the same Hessian, delta_bc w_b q + (w_b h_b)(w_c h_c) t with t r^2 = phi'' - q. The item list applies source_removal_guard.py's ITEM regex by hand. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "da23977fc706b7e7dc6f15347d138f54adb3f04f",
+    "items": [
+      "crates/gam-math/src/special.rs:const:CASES",
+      "crates/gam-math/src/special.rs:const:CURVATURE_TOL",
+      "crates/gam-math/src/special.rs:const:STEP",
+      "crates/gam-math/src/special.rs:fn:bessel_i0_centered_second_log_derivative_from_log_abs",
+      "crates/gam-math/src/special.rs:fn:centered_bessel_second_log_derivative_is_continuous_across_the_crossover",
+      "crates/gam-math/src/special.rs:fn:centered_bessel_second_log_derivative_matches_finite_difference",
+      "crates/gam-math/src/special.rs:fn:centered_bessel_second_log_derivative_matches_high_precision_reference"
+    ],
+    "reason": "#2899 group-A public-surface sweep: gam_math::special::bessel_i0_centered_second_log_derivative_from_log_abs has no caller outside special.rs tests. Its doc names its one consumer, the von-Mises ARD log-precision Hessian entry, and nothing in the tree calls it any more. It is deleted with the three tests that exercised only it (finite-difference, high-precision reference and crossover continuity) and their CASES, STEP and CURVATURE_TOL constants. The c-prime-prime assertions are removed from four tests that also pin the surviving bessel_i0_centered_terms (reference table, defining relations, seam steps, boundary arguments), and those tests keep every centered/ratio/d1 assertion. The reference table drops its curvature column. In the asymptotic series, s0_scaled_derivative was read only by the deleted function and is removed. n_scaled_derivative stays because the truncation test scales by it, so bessel_i0_centered_terms is unchanged bit for bit.",
+    "evidence": "At 1830404e9, git grep -n -w bessel_i0_centered_second_log_derivative_from_log_abs over crates, src, examples, tests, gamfit and docs finds only its declaration and special.rs test-module calls. s0_scaled_derivative occurs only in its field, initializer, one accumulation and the deleted function. The item list is source_removal_guard.py --base 1830404e9 --head 57feaad8a (/scratch.global/sauer354/pool/prune-api-a/slice11.srg.out). A narrow gam-math lib test job at the landed sha follows (receipt on #2899)."
   }
 ]

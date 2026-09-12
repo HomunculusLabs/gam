@@ -139,25 +139,12 @@ pub fn stable_polynomial_times_exp_neg(x: f64, coeffs: &[f64]) -> f64 {
 /// expansion's optimal-truncation error is `O(e^{−2x})` — below `5e−18` already
 /// at `x = 20`, and shrinking from there.
 ///
-/// That `O(e^{−2x})` is the VALUE channel's floor, and only its. Differentiating
-/// an asymptotic series term by term multiplies the `k`-th term by `k`, and both
-/// derivative accumulators additionally carry the `x²` factored out of their
-/// powers, so their own smallest term is larger by `≈ k·x² ≈ 2x³`. Measured, the
-/// curvature channel's optimal truncation is `1.6e−14` absolute at the crossover
-/// — against a numerator of `1/8` — so `c''` cannot be better than `≈ 1e−13`
-/// relative there no matter how the loop is truncated. It achieves `2.5e−13`,
-/// within a factor of two of that floor. Anyone tightening `CURVATURE_TOL`
-/// further is chasing a bound the expansion itself does not admit; the fix would
-/// have to be a different expansion, not a different stopping rule.
-///
 /// The former implementation used the single-precision Abramowitz & Stegun
 /// 9.8.1–9.8.4 minimax polynomials (crossover 3.75), whose stated accuracy is
 /// `|ε| < 2e−7`. That is seven digits short of `f64` and it was the accuracy
 /// floor of everything derived from them: `I1/I0` carried `1e−6` relative
-/// error, the von-Mises ARD gradient channel `x·(I1/I0 − 1)` carried `4e−6`,
-/// and the ARD log-precision curvature carried `6e−3` — a 0.6% error in a
-/// quantity an outer Newton step consumes as an exact second derivative, with
-/// visible jumps across both the 3.75 and the 30 branch seams.
+/// error and the von-Mises ARD gradient channel `x·(I1/I0 − 1)` carried `4e−6`,
+/// with visible jumps across both the 3.75 and the 30 branch seams.
 const BESSEL_ASYMPTOTIC_THRESHOLD: f64 = 20.0;
 
 /// Loop bound for the ascending series. It converges for every argument; below
@@ -262,14 +249,10 @@ struct BesselAsymptotic {
     /// term `b_1 − c_1 = −1/2` — which is precisely the `d1 → −½` limit. No
     /// near-equal quantities are ever subtracted at run time.
     n: f64,
-    /// `x²·S0′ = Σ_{k≥1} (−k) c_k x^{−(k−1)}`.
-    s0_scaled_derivative: f64,
-    /// `x²·N′ = Σ_{k≥2} −(k−1)(b_k − c_k) x^{−(k−2)}`.
-    ///
-    /// Both derivative accumulators carry the common `x²` factored out, which
-    /// is what keeps `c″(log x) = (x²N′·S0 − N·x²S0′)/(x·S0²)` representable —
-    /// and non-zero — out to the largest finite argument, where the unscaled
-    /// `x^{−k}` factors would have underflowed to zero.
+    /// `x²·N′ = Σ_{k≥2} −(k−1)(b_k − c_k) x^{−(k−2)}`, with the common `x²`
+    /// factored out so it stays representable out to the largest finite
+    /// argument. It carries the largest power of the sums, so it is the scale
+    /// the truncation test measures every increment against.
     n_scaled_derivative: f64,
 }
 
@@ -281,7 +264,6 @@ fn bessel_asymptotic_series(ax: f64) -> BesselAsymptotic {
         s0: 1.0,
         s1: 1.0,
         n: 0.0,
-        s0_scaled_derivative: 0.0,
         n_scaled_derivative: 0.0,
     };
     // `x^{−(k−2)}` and `x^{−(k−1)}` at the current `k`, carried as their own
@@ -310,11 +292,10 @@ fn bessel_asymptotic_series(ax: f64) -> BesselAsymptotic {
         acc.s0 += term_c;
         acc.s1 += b * power;
         acc.n += difference * power_one_back;
-        acc.s0_scaled_derivative -= kf * c * power_one_back;
         if k >= 2 {
             acc.n_scaled_derivative -= curvature_term;
         }
-        // `n_scaled_derivative` carries the largest power of the four sums, so
+        // `n_scaled_derivative` carries the largest power of the sums, so
         // once ITS increment is negligible every other one is too.
         let scale = acc.n_scaled_derivative.abs().max(acc.n.abs());
         if k >= 3 && curvature_term.abs() <= f64::EPSILON * scale {
@@ -386,99 +367,6 @@ pub fn bessel_i0_centered_terms_from_log_abs(log_abs_eta: f64) -> (f64, f64, f64
         return bessel_i0_centered_terms(log_abs_eta.exp());
     }
     (-0.5 * (std::f64::consts::TAU.ln() + log_abs_eta), 1.0, -0.5)
-}
-
-/// Second log-scale derivative of the centered Bessel primitive:
-/// `d²/d(log η)²[log I0(η) − η]`, i.e. the derivative of the third term `d1`
-/// returned by [`bessel_i0_centered_terms`] (`d1 = η d/dη[log I0(η) − η]`).
-///
-/// Writing `s = log η`, `r = I1(η)/I0(η)`, and `c(s) = log I0(η) − η`, the first
-/// log-derivative is `c'(s) = d1 = η(r − 1)`. Differentiating again and using
-/// the modified-Bessel ratio ODE `r'(η) = 1 − r/η − r²` gives the exact closed
-/// form `c''(s) = −η + η²(1 − r²)`. That direct form is numerically unusable
-/// for moderate/large `η`: its two terms each grow like `η` and cancel to
-/// `O(1/η)`, so the ratio's `~ε_poly` approximation error is amplified by `η²`.
-/// The algebraically identical rearrangement in terms of the STABLE third term
-///
-/// `c''(s) = −η(2·d1 + 1) − d1²`
-///
-/// cancels safely instead: `d1 → −½` with `2·d1 + 1 → 0`, so the amplification
-/// drops to `η·δd1`. It is also, by construction, the exact derivative of the
-/// SAME `d1` the outer gradient's periodic-ARD normalizer channel reports, so
-/// gradient and Hessian differentiate one quantity. Beyond the float range
-/// `c'(s) → −½` (constant) so `c''(s) → 0`; likewise `η → 0` gives `c''(s) → 0`.
-/// The von-Mises ARD log-precision normalizer `n[−η + log I0(η)]` therefore has
-/// `∂²/∂(log α)² = n · c''(log η)` up to the affine `log η = log α + const` shift.
-///
-/// Three regimes, each chosen so that nothing cancels in it:
-///
-/// * `η ≥ 20`: read `c''(s) = η(N′S0 − N S0′)/S0²` straight off the asymptotic
-///   expansion (`BesselAsymptotic`). Its two products are `3/16` and `1/16` at
-///   leading order — a benign ratio, where the `−η(2d1+1)` and `d1²` of the
-///   closed form both approach `¼` and cancel down to `1/(8η)`.
-/// * `1 ≤ η < 20`: the closed form, with that `¼` removed symbolically. Writing
-///   `q = d1 + ½` (which decays like `−1/(8η)`), `d1² = q² − q + ¼` and
-///   `−2ηq − ¼ = −2η(q + 1/(8η))`, leaving `c''(s) = −2η(q + 1/(8η)) + q − q²`
-///   with no constant term for the answer to be dwarfed by.
-///
-///   Removing the constant is not the same as removing the amplification, and
-///   this branch keeps the latter. `q` is only ever known to `d1`'s own absolute
-///   error, so `δc'' ≈ 2η·δd1`, while the answer it sits on is `|c''| ≈ 1/(8η)`
-///   — a RELATIVE amplification of `16η²·δd1` that grows quadratically across
-///   the branch. `d1` in turn carries `|d1|·κ(η)·ε` from the `I0 − I1` sum whose
-///   condition number `κ = Σ|terms|/|Σ terms|` grows like `√η` (3.1 at `η = 5`,
-///   6.8 at `η = 20`), so the floor of this representation is `≈ 8η²·κ(η)·ε`:
-///
-///   ```text
-///     η          5        10        15        19       20⁻
-///     floor   3.9e−14   3.3e−13   1.0e−12   2.0e−12   2.2e−12
-///     worst   1.9e−13   1.2e−12   3.3e−12   7.4e−12   8.9e−12
-///   ```
-///
-///   Measured against an 80-digit reference over 24000 points, the branch holds
-///   a uniform 3−5x of that floor across its whole range, peaking at `8.9e−12`
-///   just under the crossover; the asymptotic branch resumes at `1.6e−13` on
-///   the far side.
-///   That step is a property of the two representations, not a mis-placed
-///   threshold: the asymptotic expansion's own truncation error at this channel
-///   is `1.0e−12` at `η = 19` and `6.6e−12` at `η = 18`, so the two curves
-///   cross within a few tenths of where the code already switches and no
-///   choice of threshold caps the band below `≈ 4e−12`.
-///
-///   Nor is it reachable by a better formula in `f64`. The cancellation is
-///   intrinsic to the ascending representation rather than to how it is
-///   collected: accumulating the whole numerator `I0 − 2η(I0 − I1)` termwise —
-///   the same pairing trick that buys the `I0 − I1` sum its `√η` — gives terms
-///   `t_k·[(k+1)(1−2η) + η²/... ]` whose `Σ|terms|/|Σ terms|` is again `8η²`,
-///   because the leading `¼` cancels BETWEEN terms of one series and not within
-///   any term. Closing the band needs `d1` carried wider than `f64`, and its one
-///   consumer — the von-Mises ARD log-precision Hessian entry, where the
-///   pre-2025 A&S polynomials delivered `6e−3` — is nine orders clear of caring.
-/// * `η < 1`: `c''(s) = −η + η²(1 − r²) = −η·[1 + d1(1 + r)]`, whose bracket
-///   tends to `1`. The rearrangement above would instead subtract two numbers
-///   that both tend to `¼` while the answer itself tends to `−η`.
-pub fn bessel_i0_centered_second_log_derivative_from_log_abs(log_abs_eta: f64) -> f64 {
-    if log_abs_eta.is_nan() {
-        return f64::NAN;
-    }
-    if log_abs_eta == f64::NEG_INFINITY {
-        return 0.0;
-    }
-    if log_abs_eta > f64::MAX.ln() {
-        return 0.0;
-    }
-    let eta = log_abs_eta.exp();
-    if eta >= BESSEL_ASYMPTOTIC_THRESHOLD {
-        let series = bessel_asymptotic_series(eta);
-        return (series.n_scaled_derivative * series.s0 - series.n * series.s0_scaled_derivative)
-            / (eta * series.s0 * series.s0);
-    }
-    let (_centered, ratio, d1) = bessel_i0_centered_terms(eta);
-    if eta < 1.0 {
-        return -eta * (1.0 + d1 * (1.0 + ratio));
-    }
-    let q = d1 + 0.5;
-    -2.0 * eta * (q + 0.125 / eta) + q - q * q
 }
 
 /// Overflow-free `(log I0(eta) - |eta|, I1(|eta|) / I0(|eta|))`.
@@ -1225,248 +1113,164 @@ mod tests {
         assert_eq!(centered, -0.5 * (std::f64::consts::TAU.ln() + log_eta));
     }
 
-    #[test]
-    fn centered_bessel_second_log_derivative_matches_finite_difference() {
-        // c''(log η) must be the derivative of the third term (c'(log η)) of
-        // `bessel_i0_centered_terms`, across small, mid, and large arguments.
-        // c''(log η) is the log-derivative of the STABLE third term `d1` (the
-        // quantity the outer gradient's ARD normalizer channel reports), so the
-        // self-consistent reference is a central difference of that same term.
-        // The sweep straddles every seam this function has ever had: the retired
-        // A&S 3.75 and 30 seams, and the live 1.0 (small-η rearrangement) and
-        // 20.0 (series/asymptotic) ones.
-        let first_log_derivative = |x: f64| bessel_i0_centered_terms(x).2;
-        for eta in [
-            0.02_f64, 0.05, 0.25, 0.999, 1.0, 1.001, 2.0, 3.5, 4.0, 8.0, 19.9, 20.1, 29.9, 30.1,
-        ] {
-            let log_eta = eta.ln();
-            let analytic = bessel_i0_centered_second_log_derivative_from_log_abs(log_eta);
-
-            let log_step = 1.0e-6_f64;
-            let first_plus = first_log_derivative(eta * log_step.exp());
-            let first_minus = first_log_derivative(eta * (-log_step).exp());
-            let finite_difference = (first_plus - first_minus) / (2.0 * log_step);
-            // `ε·|d1|/log_step ≈ 1e-10` of central-difference roundoff is the
-            // floor here; the analytic value is far better than that. The old
-            // `5e-5 + 1e-3·|analytic|` band was three orders wider than the
-            // finite difference could even be wrong by — it was sized to the
-            // 0.6% error the A&S polynomials put into `analytic`.
-            assert!(
-                (analytic - finite_difference).abs() < 1.0e-8 + 1.0e-6 * analytic.abs(),
-                "centered Bessel second log-derivative mismatch at eta={eta}: \
-                 analytic={analytic}, finite_difference={finite_difference}"
-            );
-        }
-        // Large-η decay: the normalizer curvature vanishes like the leading
-        // asymptotic term 1/(8η) (its Hessian contribution is then negligible
-        // beside the ∝α energy term), stays finite and positive, and the
-        // overflow-free gateway rounds it to exactly zero past the float range.
-        // Held against THREE terms of the expansion rather than one, so the
-        // admissible band is the size of the first omitted term (`≲ 2/η⁴`)
-        // instead of a 25% shrug.
-        for eta in [50.0_f64, 200.0, 1.0e4] {
-            let c2 = bessel_i0_centered_second_log_derivative_from_log_abs(eta.ln());
-            let inverse = 1.0 / eta;
-            let expansion = inverse * (0.125 + inverse * (0.25 + inverse * (75.0 / 128.0)));
-            assert!(
-                c2 > 0.0 && (c2 - expansion).abs() < 8.0 * inverse.powi(4),
-                "large-eta centered second derivative must track its own expansion; \
-                 eta={eta}, c2={c2}, expansion={expansion}"
-            );
-        }
-        // η → 0 and the overflow-free large-|η| gateway both round to 0.
-        assert_eq!(
-            bessel_i0_centered_second_log_derivative_from_log_abs(f64::NEG_INFINITY),
-            0.0
-        );
-        assert_eq!(
-            bessel_i0_centered_second_log_derivative_from_log_abs(1_200.0),
-            0.0
-        );
-    }
-
-    /// Every quantity `bessel_i0_centered_terms` and the second log-derivative
-    /// return, against an INDEPENDENT 60-decimal-digit evaluation of the same
-    /// closed forms (`mpmath.besseli`, `mpmath.diff`), rounded to `f64`.
+    /// Every quantity `bessel_i0_centered_terms` returns, against an
+    /// INDEPENDENT 60-decimal-digit evaluation of the same closed forms
+    /// (`mpmath.besseli`), rounded to `f64`.
     ///
     /// This is the assertion the module lacked. Everything else here is a
     /// self-consistency check — a finite difference of the evaluator against
     /// the evaluator — and a self-consistent evaluator can be uniformly wrong.
     /// The A&S 9.8.x polynomials this replaced were exactly that: internally
     /// consistent to the last digit and off the true value by up to `4e-6` in
-    /// `d1` and `6e-3` in the curvature, with steps at their branch seams. No
+    /// `d1`, with steps at their branch seams. No
     /// test in the tree compared them to anything but themselves.
     #[test]
     fn bessel_primitives_match_independent_high_precision_reference() {
-        // (η, log I0(η) − η, I1(η)/I0(η), η(I1/I0 − 1), d²/d(log η)²[log I0 − η])
-        const REFERENCE: [[f64; 5]; 24] = [
+        // (η, log I0(η) − η, I1(η)/I0(η), η(I1/I0 − 1))
+        const REFERENCE: [[f64; 4]; 24] = [
             [
                 1e-06,
                 -9.9999975e-07,
                 4.999999999999375e-07,
                 -9.999995e-07,
-                -9.99999e-07,
             ],
             [
                 0.001,
                 -0.000999750000015625,
                 0.0004999999375000105,
                 -0.0009995000000625,
-                -0.00099900000025,
             ],
             [
                 0.05,
                 -0.049375097629132,
                 0.024992190753810217,
                 -0.048750390462309494,
-                -0.04750156152399669,
             ],
             [
                 0.25,
                 -0.23443561468661894,
                 0.12403350191792471,
                 -0.21899162452051882,
-                -0.18846151934987648,
             ],
             [
                 0.5,
                 -0.4384502808145187,
                 0.24249961258080194,
                 -0.378750193709599,
-                -0.2647015155254598,
             ],
             [
                 1.0,
                 -0.7640856414928213,
                 0.4463899658965345,
                 -0.5536100341034655,
-                -0.19926400165310923,
             ],
             [
                 2.0,
                 -1.1760064585170438,
                 0.697774657964008,
                 -0.604450684071984,
-                0.05244210681284669,
             ],
             [
                 3.75,
                 -1.5396457880279808,
                 0.8531704594530685,
                 -0.5506107770509933,
-                0.0764086000777509,
             ],
             [
                 5.0,
                 -1.6953182241774665,
                 0.8933831370440852,
                 -0.5330843147795739,
-                0.0466642611317311,
             ],
             [
                 8.0,
                 -1.941895744572186,
                 0.9352354935294386,
                 -0.5181160517644912,
-                0.02141258513583364,
             ],
             [
                 12.0,
                 -2.1504975008971563,
                 0.9573814053952422,
                 -0.5114231352570932,
-                0.01260162289404047,
             ],
             [
                 17.0,
                 -2.327961358737179,
                 0.9701275885919403,
                 -0.5078309939370159,
-                0.008361475455484893,
             ],
             [
                 19.5,
                 -2.397561575434808,
                 0.9740118676091061,
                 -0.5067685816224307,
-                0.007160287955186735,
             ],
             [
                 19.999999,
                 -2.410389546426233,
                 0.9746705066059314,
                 -0.5065898425518784,
-                0.006960420318717729,
             ],
             [
                 20.0,
                 -2.4103895717557258,
                 0.9746705078898071,
                 -0.5065898422038575,
-                0.006960419930170057,
             ],
             [
                 20.000001,
                 -2.410389597085217,
                 0.9746705091736827,
                 -0.5065898418558366,
-                0.006960419541622429,
             ],
             [
                 25.0,
                 -2.5232719950007563,
                 0.9797914534905159,
                 -0.5052136627371017,
-                0.005442291838848013,
             ],
             [
                 30.0,
                 -2.615298566828064,
                 0.9831895553653361,
                 -0.5043133390399173,
-                0.004468398461442669,
             ],
             [
                 64.0,
                 -2.996411436485784,
                 0.9921564935488112,
                 -0.5019844128760834,
-                0.002016497368136742,
             ],
             [
                 150.0,
                 -3.423420049648141,
                 0.9966610736828279,
                 -0.5008389475758167,
-                0.0008446213361703931,
             ],
             [
                 900.0,
                 -4.319996948727984,
                 0.9994442899516907,
                 -0.5001390434784159,
-                0.0001391983371050074,
             ],
             [
                 10000.0,
                 -5.524096218567699,
                 0.999949998749875,
                 -0.5000125012501954,
-                1.2502500586100053e-05,
             ],
             [
                 1000000.0,
                 -7.826693687186747,
                 0.999999499999875,
                 -0.500000125000125,
-                1.2500025000058594e-07,
             ],
             [
                 1000000000000.0,
                 -14.734449091168822,
                 0.9999999999995,
                 -0.500000000000125,
-                1.2500000000025e-13,
             ],
         ];
 
@@ -1479,21 +1283,12 @@ mod tests {
         // change, so it carries a condition number, but that grows only like
         // `√x` (6.8 at the crossover) instead of the `1/(1 − I1/I0)` ≈ 40 of the
         // naive form: tens of ulp, not thousands.
-        //
-        // The curvature is the one term still amplified, inheriting ≈ 2η from
-        // `d1`'s ABSOLUTE error — `40 · 1e−15 / 0.007 ≈ 6e−12` just under the
-        // crossover, where `c''` is smallest and `η` already large. That is
-        // intrinsic to reaching `c''` through a `d1` held in one f64: `q = d1+½`
-        // is `−0.0066` there, so even a correctly rounded `d1` pins `q` no
-        // tighter than `ulp(½)/0.0066 ≈ 1.7e−14` relative.
         const CENTERED_TOL: f64 = 4.0e-15;
         const RATIO_TOL: f64 = 4.0e-15;
         const D1_TOL: f64 = 4.0e-15;
-        const CURVATURE_TOL: f64 = 2.0e-11;
 
-        for [eta, want_centered, want_ratio, want_d1, want_curvature] in REFERENCE {
+        for [eta, want_centered, want_ratio, want_d1] in REFERENCE {
             let (centered, ratio, d1) = bessel_i0_centered_terms(eta);
-            let curvature = bessel_i0_centered_second_log_derivative_from_log_abs(eta.ln());
             let relative = |got: f64, want: f64| (got - want).abs() / want.abs();
             assert!(
                 relative(centered, want_centered) < CENTERED_TOL,
@@ -1506,10 +1301,6 @@ mod tests {
             assert!(
                 relative(d1, want_d1) < D1_TOL,
                 "η(I1/I0 − 1) at {eta}: got {d1:.17e}, want {want_d1:.17e}"
-            );
-            assert!(
-                relative(curvature, want_curvature) < CURVATURE_TOL,
-                "c''(log η) at {eta}: got {curvature:.17e}, want {want_curvature:.17e}"
             );
         }
     }
@@ -1538,31 +1329,6 @@ mod tests {
                 "d1 must equal η(I1/I0 − 1) at eta={eta}: d1={d1:.17e}, naive={naive:.17e}"
             );
 
-            // c''(s) ≡ −η(2·d1 + 1) − d1², the rearrangement's starting point.
-            // Both sides are fed the log-round-tripped argument the function
-            // itself sees, so the ONLY admissible difference is the rounding of
-            // the rearranged grouping: the two intermediate products are of
-            // size `2η|d1|` and `d1²`, so a few ulp of those is the budget.
-            //
-            // Only checked where the naive form still HAS digits. Its two terms
-            // both approach ¼ and cancel down to `1/(8η)`, which costs `≈ 8εη²`
-            // in relative terms — already `1e-12` at η = 64 and total loss by
-            // `η ≈ 1e8`. That collapse is the whole reason for the rearrangement,
-            // so asserting agreement past it would assert nothing.
-            if eta <= 64.0 {
-                let round_tripped = eta.ln().exp();
-                let (_, _, same_d1) = bessel_i0_centered_terms(round_tripped);
-                let curvature = bessel_i0_centered_second_log_derivative_from_log_abs(eta.ln());
-                let naive = -round_tripped * (2.0 * same_d1 + 1.0) - same_d1 * same_d1;
-                let budget =
-                    8.0 * f64::EPSILON * (2.0 * round_tripped * same_d1.abs() + same_d1 * same_d1);
-                assert!(
-                    (curvature - naive).abs() <= budget,
-                    "c'' must equal −η(2d1+1) − d1² at eta={eta}: \
-                     c2={curvature:.17e}, naive={naive:.17e}, budget={budget:.3e}"
-                );
-            }
-
             // `I1 < I0` for every η > 0, so `I1/I0 ∈ (0,1)` and `d1 < 0`. `d1`
             // is NOT monotone: it falls to a global minimum
             // `−0.608891247247801…` at `η = 1.702379944878764…` (the root of
@@ -1577,7 +1343,7 @@ mod tests {
     }
 
     /// A branch crossover must not be observable in the output. The retired A&S
-    /// pair stepped by `4e-6` in `d1` and `2e-4` in the curvature at its own
+    /// pair stepped by `4e-6` in `d1` at its own
     /// 3.75 seam — a jump discontinuity in the objective and gradient an outer
     /// optimizer differentiates through.
     #[test]
@@ -1587,10 +1353,6 @@ mod tests {
             let delta = 1.0e-11 * seam;
             let (below_c, below_r, below_d1) = bessel_i0_centered_terms(seam - delta);
             let (above_c, above_r, above_d1) = bessel_i0_centered_terms(seam + delta);
-            let below_c2 =
-                bessel_i0_centered_second_log_derivative_from_log_abs((seam - delta).ln());
-            let above_c2 =
-                bessel_i0_centered_second_log_derivative_from_log_abs((seam + delta).ln());
 
             // Over `2δ` the true functions can move by at most `2δ·|f'|`, and
             // every derivative here is bounded by 1 in magnitude. Anything past
@@ -1608,10 +1370,6 @@ mod tests {
                 (above_d1 - below_d1).abs() < slope_budget,
                 "d1 steps at the {seam} seam: {below_d1:.17e} -> {above_d1:.17e}"
             );
-            assert!(
-                (above_c2 - below_c2).abs() < slope_budget,
-                "c'' steps at the {seam} seam: {below_c2:.17e} -> {above_c2:.17e}"
-            );
         }
     }
 
@@ -1626,7 +1384,6 @@ mod tests {
 
         let (centered, ratio, d1) = bessel_i0_centered_terms(f64::NAN);
         assert!(centered.is_nan() && ratio.is_nan() && d1.is_nan());
-        assert!(bessel_i0_centered_second_log_derivative_from_log_abs(f64::NAN).is_nan());
 
         // I0 and I1 are even/odd, so every returned term is a function of |η|.
         for eta in [0.5_f64, 5.0, 25.0, 1.0e6] {
@@ -2154,75 +1911,5 @@ mod tests {
         let expected = (2.0 * x.ln() - x).exp();
         let rel = (got - expected).abs() / expected.abs();
         assert!(rel < 1e-12, "got={got} expected={expected} rel={rel}");
-    }
-
-    /// Pins the measured accuracy of `c''(log η)` against an 80-digit
-    /// reference, per regime, so the branch structure cannot silently drift.
-    ///
-    /// The tolerances are the MEASURED worst case in each regime plus a factor
-    /// of two, not aspirations: the `1 ≤ η < 20` band is bounded below by the
-    /// `8η²·κ(η)·ε` floor of the ascending representation (see
-    /// [`bessel_i0_centered_second_log_derivative_from_log_abs`]), and 1e-11 is
-    /// what that floor permits at the top of the band. Tightening it needs a
-    /// wider-than-`f64` `d1`, not a smaller constant here.
-    #[test]
-    fn centered_bessel_second_log_derivative_matches_high_precision_reference() {
-        // (η, c''(log η) to 20 significant digits, tolerance).
-        const CASES: [(f64, f64, f64); 13] = [
-            (0.5, -0.2647015155254598, 1e-14),
-            (1.0, -0.19926400165310923, 1e-14),
-            (2.0, 0.05244210681284669, 1e-13),
-            (5.0, 0.0466642611317311, 1e-13),
-            (10.0, 0.015837019843595493, 1e-12),
-            (15.0, 0.009659446256568909, 1e-11),
-            // The worst point of the whole domain, just under the crossover.
-            (18.85, 0.00743799786561837, 1e-11),
-            (19.99, 0.006964307582746309, 1e-11),
-            // First point on the asymptotic side: two orders better, at once.
-            (20.0, 0.006960419930170057, 1e-12),
-            (25.0, 0.005442291838848013, 1e-14),
-            (50.0, 0.0026049656149811874, 1e-15),
-            (200.0, 0.0006313242744933583, 1e-15),
-            (1e4, 1.2502500586100053e-05, 1e-15),
-        ];
-        for (eta, expected, tolerance) in CASES {
-            let got = bessel_i0_centered_second_log_derivative_from_log_abs(eta.ln());
-            let relative = (got - expected).abs() / expected.abs();
-            assert!(
-                relative < tolerance,
-                "eta={eta}: got={got} expected={expected} rel={relative:e} tol={tolerance:e}"
-            );
-        }
-    }
-
-    /// The crossover at `BESSEL_ASYMPTOTIC_THRESHOLD` is a step DOWN in error,
-    /// so the value itself must still be continuous across it to within what
-    /// the worse (ascending) side delivers — nothing tighter is available, and
-    /// nothing looser would catch a branch that had been mis-derived.
-    ///
-    /// The step size matters and is not free to enlarge. `c''` genuinely varies:
-    /// `|dc''/dη| / |c''| = 1/η`, so a step `δ` moves the true value by `δ/η`
-    /// RELATIVE. At `δ = 1e−9` that is `5e−11` — larger than the seam being
-    /// measured, and a test written that way reports the function's own slope
-    /// as a discontinuity. `1e−11` puts the true variation at `5e−13`, an order
-    /// under the ascending branch's `8.9e−12` floor, while still clearing
-    /// `ulp(20) = 3.6e−15` by four orders.
-    #[test]
-    fn centered_bessel_second_log_derivative_is_continuous_across_the_crossover() {
-        const STEP: f64 = 1e-11;
-        let below = bessel_i0_centered_second_log_derivative_from_log_abs(
-            (BESSEL_ASYMPTOTIC_THRESHOLD - STEP).ln(),
-        );
-        let above =
-            bessel_i0_centered_second_log_derivative_from_log_abs(BESSEL_ASYMPTOTIC_THRESHOLD.ln());
-        assert!(
-            below != above,
-            "step {STEP:e} was rounded away; the two sides are the same evaluation"
-        );
-        let jump = (below - above).abs() / above.abs();
-        assert!(
-            jump < 3e-11,
-            "seam jump {jump:e}: below={below} above={above}"
-        );
     }
 }

@@ -1895,5 +1895,13 @@
     },
     "reason": "#2900 SPEC rules 6 and 23: the pub(crate) row-pair budget firth_tk_exact_hessian_scale_allows sent canonical-logit Firth outer curvature to BFGS above n^2*p = 1e7. The exact Tierney-Kadane rho-Hessian now has a design-tensor route chosen by predicted work (5e4a9a39b), so the budget and its planner branch are deleted.",
     "evidence": "At base, git grep -n -w firth_tk_exact_hessian_scale_allows over crates, src and tests finds its declaration and one planner call in crates/gam-solve/src/reml/gradient_hessian.rs, both removed here, and two unit-test asserts in crates/gam-solve/src/reml/mod.rs, also removed here. The removed map is exactly that one pub(crate) fn. Not compiled locally (user directive); compile rests on the shared tip check."
+  },
+  {
+    "base": "da23977fc706b7e7dc6f15347d138f54adb3f04f",
+    "removed": {
+      "crates/gam-math/src/special.rs::bessel_i0_centered_second_log_derivative_from_log_abs": 1
+    },
+    "reason": "#2899 group-A sweep: bessel_i0_centered_second_log_derivative_from_log_abs lost its only consumer (the von-Mises ARD log-precision Hessian entry) and only special.rs tests called it. It is deleted.",
+    "evidence": "public_api_census.py --base 1830404e9 --head 57feaad8a reports exactly this identity (/scratch.global/sauer354/pool/prune-api-a/slice11.census.json)."
   }
 ]
