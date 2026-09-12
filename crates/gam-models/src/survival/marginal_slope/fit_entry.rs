@@ -195,22 +195,14 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         &spec.slope_template,
     )?;
     if slope_follow_up.is_some() {
-        // The spatial-psi hyperparameter path, the learned-frailty scale jet and
-        // the flex/time-wiggle surfaces all evaluate the row program through the
-        // four-primary frame. Each is a real combination to support, and each is
-        // a separate piece of chain rule; refusing by name is honest, whereas
-        // running them would silently differentiate a model that is not the one
-        // being fitted.
-        if !spatial_length_scale_term_indices(&slopespec_boot).is_empty() {
-            return Err(SurvivalMarginalSlopeError::InvalidInput {
-                reason: "a follow-up-varying slope is not yet supported together with a \
-                         spatial (automatic length-scale) term on the slope surface: the \
-                         spatial hyperparameter derivatives are lowered through the \
-                         time-constant primary frame"
-                    .to_string(),
-            }
-            .into());
-        }
+        // The learned-frailty scale jet and the flex/time-wiggle surfaces all
+        // evaluate the row program through the four-primary frame. Each is a real
+        // combination to support, and each is a separate piece of chain rule;
+        // refusing by name is honest, whereas running them would silently
+        // differentiate a model that is not the one being fitted. A spatial term
+        // on the slope surface is supported: the ψ calculus lifts the covariate
+        // derivative onto the three channel designs from the stored margin
+        // (gam#2767).
         if !matches!(spec.frailty, FrailtySpec::None) {
             return Err(SurvivalMarginalSlopeError::InvalidInput {
                 reason: "a follow-up-varying slope is not yet supported together with a \
@@ -247,6 +239,15 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
             .into());
         }
     }
+    // Width of the follow-up margin the slope covariate factor is tensored against:
+    // a spatial term on the slope surface differentiates that covariate factor, and
+    // its penalty derivatives must carry the same `⊗ I_t` the block's penalties do.
+    let slope_time_width = match &spec.slope_template {
+        SurvivalCovariateTermBlockTemplate::TimeVarying {
+            time_basis_exit, ..
+        } => Some(time_basis_exit.ncols()),
+        SurvivalCovariateTermBlockTemplate::Static => None,
+    };
     let slope_template = spec.slope_template.clone();
     // The outer spatial/kappa search rebuilds the block designs from their term
     // specs on every probe, so the time margin has to be applied where the
@@ -1484,12 +1485,21 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
                 Vec::new()
             },
             if slope_has_spatial {
-                build_block_spatial_psi_derivatives(data, &specs[1], &designs[1])?.ok_or_else(
-                    || {
-                        "survival marginal-slope: slope block has spatial terms but spatial psi derivatives are unavailable"
-                            .to_string()
-                    },
-                )?
+                match slope_time_width {
+                    Some(time_width) => {
+                        crate::spatial_psi_bridge::build_block_spatial_psi_derivatives_with_transform(
+                            data,
+                            &specs[1],
+                            &designs[1],
+                            &SlopeTimeMarginPsiTransform { time_width },
+                        )?
+                    }
+                    None => build_block_spatial_psi_derivatives(data, &specs[1], &designs[1])?,
+                }
+                .ok_or_else(|| {
+                    "survival marginal-slope: slope block has spatial terms but spatial psi derivatives are unavailable"
+                        .to_string()
+                })?
             } else {
                 Vec::new()
             },

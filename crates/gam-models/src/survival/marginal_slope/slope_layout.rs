@@ -185,6 +185,47 @@ pub(crate) enum SlopeChannels {
 pub(crate) struct SlopeFollowUpDesigns {
     pub(crate) entry: DesignMatrix,
     pub(crate) derivative_exit: DesignMatrix,
+    /// The margin the covariate factor was tensored against, when the layout
+    /// was built from one.
+    pub(crate) time_margin: Option<SlopeTimeMargin>,
+}
+
+/// The follow-up margin a slope's covariate factor is tensored against: the
+/// margin basis at each row's entry time and exit time, and its exit-time rate.
+///
+/// Each channel design is `X_cov ⊗ B_c` row by row in covariate-major column
+/// order, so a covariate-width row lifts onto a channel by the same product.
+/// That is what lets a hyperparameter that moves the covariate factor reach all
+/// three slope primaries (gam#2767).
+#[derive(Clone, Debug)]
+pub(crate) struct SlopeTimeMargin {
+    pub(crate) entry: Arc<Array2<f64>>,
+    pub(crate) exit: Arc<Array2<f64>>,
+    pub(crate) derivative_exit: Arc<Array2<f64>>,
+}
+
+impl SlopeTimeMargin {
+    /// Columns in the margin basis.
+    pub(crate) fn width(&self) -> usize {
+        self.exit.ncols()
+    }
+
+    /// `x ⊗ b_c(row)` for the entry, exit and exit-rate channels, in primary
+    /// order `(g₀, g₁, ġ₁)`.
+    pub(crate) fn lift_row(&self, row: usize, covariate_row: &Array1<f64>) -> [Array1<f64>; 3] {
+        let lift = |margin: &Array2<f64>| {
+            let time_row = margin.row(row);
+            let p_time = time_row.len();
+            Array1::from_shape_fn(covariate_row.len() * p_time, |index| {
+                covariate_row[index / p_time] * time_row[index % p_time]
+            })
+        };
+        [
+            lift(&self.entry),
+            lift(&self.exit),
+            lift(&self.derivative_exit),
+        ]
+    }
 }
 
 /// The slope block's `(primary, design)` channels for one layout.
@@ -271,8 +312,52 @@ impl SlopeLayout {
         self.follow_up = Some(SlopeFollowUpDesigns {
             entry,
             derivative_exit,
+            time_margin: None,
         });
         Ok(self)
+    }
+
+    /// Attach the margin the covariate factor was tensored against, so a
+    /// hyperparameter that moves the covariate factor can be lifted onto the
+    /// three channel designs (gam#2767).
+    pub(crate) fn with_follow_up_time_margin(
+        mut self,
+        margin: SlopeTimeMargin,
+    ) -> Result<Self, String> {
+        let width = margin.width();
+        for (name, basis) in [
+            ("entry", &margin.entry),
+            ("exit", &margin.exit),
+            ("derivative", &margin.derivative_exit),
+        ] {
+            if basis.nrows() != self.nrows || basis.ncols() != width {
+                return Err(format!(
+                    "slope time-margin {name} basis is {}x{} but the layout has {} rows and a {width}-column margin",
+                    basis.nrows(),
+                    basis.ncols(),
+                    self.nrows,
+                ));
+            }
+        }
+        if width == 0 || self.current_width % width != 0 {
+            return Err(format!(
+                "slope layout width {} is not a multiple of its {width}-column time margin",
+                self.current_width,
+            ));
+        }
+        let Some(follow_up) = self.follow_up.as_mut() else {
+            return Err("a slope time margin needs a follow-up-varying layout".to_string());
+        };
+        follow_up.time_margin = Some(margin);
+        Ok(self)
+    }
+
+    /// The follow-up margin, when the layout was built from one.
+    #[inline]
+    pub(crate) fn time_margin(&self) -> Option<&SlopeTimeMargin> {
+        self.follow_up
+            .as_ref()
+            .and_then(|follow_up| follow_up.time_margin.as_ref())
     }
 
     /// The block's design channels paired with the primary each one

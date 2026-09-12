@@ -313,12 +313,17 @@ impl SurvivalMarginalSlopeFamily {
                 self.marginal_design.ncols(),
                 "SurvivalMarginalSlope marginal",
             ))),
-            2 => Ok(Some((
-                block_idx,
-                local_idx,
-                self.slope_layout.coefficient_design().ncols(),
-                "SurvivalMarginalSlope slope",
-            ))),
+            2 => {
+                // A slope tensored against a follow-up margin differentiates its
+                // covariate factor, and the family lifts each covariate row onto the
+                // three channel designs itself (gam#2767).
+                let coefficient_width = self.slope_layout.coefficient_design().ncols();
+                let width = match self.slope_layout.time_margin() {
+                    Some(margin) => coefficient_width / margin.width(),
+                    None => coefficient_width,
+                };
+                Ok(Some((block_idx, local_idx, width, "SurvivalMarginalSlope slope")))
+            }
             _ => Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
                 reason: format!(
                     "survival marginal-slope psi: only baseline/slope spatial blocks are supported, got block {block_idx}"

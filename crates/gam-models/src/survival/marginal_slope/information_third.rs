@@ -565,7 +565,7 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
             let psi_row = psi_map
                 .row_vector(row)
                 .map_err(|error| format!("survival design ψ third information row: {error}"))?;
-            psi_row_channels(family, None, block_idx, psi_row)
+            psi_row_channels(family, None, row, block_idx, psi_row)
         };
 
         let mut axes = self.primary_third_information_all_axes_from(
@@ -778,9 +778,9 @@ impl<const P: usize, G: SlopeRowGeometry<P>> SurvivalMarginalSlopeRowKernel<P, G
                 .map(|map| map.row_vector(row).map_err(row_error))
                 .transpose()?;
             Ok((
-                psi_row_channels(family, None, block_i, x_i)?,
-                psi_row_channels(family, None, block_j, x_j)?,
-                x_ij.map(|x_ij| psi_row_channels(family, None, block_i, x_ij))
+                psi_row_channels(family, None, row, block_i, x_i)?,
+                psi_row_channels(family, None, row, block_j, x_j)?,
+                x_ij.map(|x_ij| psi_row_channels(family, None, row, block_i, x_ij))
                     .transpose()?,
             ))
         };

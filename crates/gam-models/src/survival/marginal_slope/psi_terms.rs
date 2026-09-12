@@ -303,7 +303,7 @@ impl SurvivalMarginalSlopeFamily {
                     };
 
                     let channels =
-                        psi_row_channels(self, flex_primary.as_ref(), block_idx, psi_row)?;
+                        psi_row_channels(self, flex_primary.as_ref(), row, block_idx, psi_row)?;
                     let dir = if let Some(lift) = psi_lift.as_ref() {
                         lift.dir.clone()
                     } else {
@@ -873,9 +873,9 @@ impl SurvivalMarginalSlopeFamily {
                 };
 
                 let channels_i =
-                    psi_row_channels(self, flex_primary.as_ref(), block_idx_i, psi_row_i)?;
+                    psi_row_channels(self, flex_primary.as_ref(), row, block_idx_i, psi_row_i)?;
                 let channels_j =
-                    psi_row_channels(self, flex_primary.as_ref(), block_idx_j, psi_row_j)?;
+                    psi_row_channels(self, flex_primary.as_ref(), row, block_idx_j, psi_row_j)?;
                 let dir_i = if let Some(lift) = psi_lift_i.as_ref() {
                     lift.dir.clone()
                 } else {
@@ -898,7 +898,7 @@ impl SurvivalMarginalSlopeFamily {
                         .row_vector(row)
                         .map_err(|e| format!("survival rowwise psi map: {e}"))?;
                     if r.iter().any(|v| v.abs() > 0.0) {
-                        Some(psi_row_channels(self, flex_primary.as_ref(), block_idx_i, r)?)
+                        Some(psi_row_channels(self, flex_primary.as_ref(), row, block_idx_i, r)?)
                     } else {
                         None
                     }
@@ -1316,7 +1316,7 @@ impl SurvivalMarginalSlopeFamily {
                     None
                 };
                 let channels =
-                    psi_row_channels(self, flex_primary.as_ref(), block_idx, psi_row)?;
+                    psi_row_channels(self, flex_primary.as_ref(), row, block_idx, psi_row)?;
                 let psi_dir = if let Some(lift) = psi_lift.as_ref() {
                     lift.dir.clone()
                 } else {

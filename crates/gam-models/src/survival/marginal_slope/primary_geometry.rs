@@ -369,13 +369,12 @@ pub(crate) struct TimewiggleMarginalPsiRowLift {
 ///
 /// The marginal block loads onto `q₀` and `q₁` in EITHER frame — the location
 /// index is what the frame does not change. The slope block is the one that
-/// gains channels, and a ψ that moves its design is refused by name rather than
-/// lowered through one of them: with a time margin the block's three channel
-/// designs are `X_cov ⊗ B_entry`, `X_cov ⊗ B_exit` and `X_cov ⊗ B′_exit`, while
-/// the ψ-derivative contract carries a single `X_ψ`, so the other two channels
-/// are not recoverable from what the caller has. `fit_entry` refuses that
-/// combination at construction; this is the same refusal one layer down, so a
-/// future caller cannot reach it silently.
+/// gains channels: with a time margin its three channel designs are
+/// `X_cov ⊗ B_entry`, `X_cov ⊗ B_exit` and `X_cov ⊗ B′_exit`, and one loading
+/// cannot represent a ψ that moves `X_cov`. [`psi_row_channels`] lifts such a ψ
+/// onto the three channels from the layout's stored margin. A follow-up layout
+/// without a stored margin has nothing to lift from, so a slope ψ is refused
+/// here by name rather than lowered through one channel.
 pub(crate) fn spatial_block_primary_loading(
     family: &SurvivalMarginalSlopeFamily,
     block_idx: usize,
@@ -410,10 +409,10 @@ fn refuse_follow_up_varying_design_psi(
     if family.slope_layout.is_follow_up_varying() {
         return Err(SurvivalMarginalSlopeError::UnsupportedConfiguration {
             reason: "a follow-up-varying slope carries three channel designs \
-                     (X_cov ⊗ B_entry, X_cov ⊗ B_exit, X_cov ⊗ B′_exit) and the ψ \
-                     design-derivative contract carries one X_ψ, so a spatial \
-                     length scale on the slope surface cannot be lowered \
-                     through this frame"
+                     (X_cov ⊗ B_entry, X_cov ⊗ B_exit, X_cov ⊗ B′_exit), and this \
+                     layout records no time margin to lift a covariate derivative \
+                     onto them, so a spatial length scale on the slope surface \
+                     cannot be lowered through this frame"
                 .to_string(),
         }
         .into());
@@ -473,12 +472,33 @@ impl PsiRowChannels {
 }
 
 /// The channels of one row's design ψ motion; see [`PsiRowChannels`].
+///
+/// On a slope tensored against a follow-up margin the ψ row is covariate-width,
+/// and it lifts onto that row's entry, exit and exit-rate channel designs.
 pub(crate) fn psi_row_channels(
     family: &SurvivalMarginalSlopeFamily,
     flex_primary: Option<&FlexPrimarySlices>,
+    row: usize,
     block_idx: usize,
     psi_row: Array1<f64>,
 ) -> Result<PsiRowChannels, String> {
+    if flex_primary.is_none()
+        && block_idx == 2
+        && let Some(margin) = family.slope_layout.time_margin()
+    {
+        let dimension = family.core_primary_dimension();
+        let unit = |primary: usize| {
+            let mut loading = Array1::<f64>::zeros(dimension);
+            loading[primary] = 1.0;
+            loading
+        };
+        let [entry, exit, rate] = margin.lift_row(row, &psi_row);
+        return Ok(PsiRowChannels(vec![
+            (unit(PRIMARY_SLOPE), entry),
+            (unit(PRIMARY_SLOPE_EXIT), exit),
+            (unit(PRIMARY_SLOPE_RATE), rate),
+        ]));
+    }
     let loading = match flex_primary {
         Some(primary) => spatial_block_primary_loading_flex(primary, block_idx)?,
         None => spatial_block_primary_loading(family, block_idx)?,

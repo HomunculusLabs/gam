@@ -1115,6 +1115,11 @@ pub(crate) fn tensorize_slope_design_over_time(
     let follow_up = SlopeFollowUpDesigns {
         entry: crate::survival::location_scale::rowwise_kronecker(&cov_design, time_basis_entry),
         derivative_exit: crate::survival::location_scale::rowwise_kronecker(&cov_design, time_basis_derivative_exit),
+        time_margin: Some(SlopeTimeMargin {
+            entry: std::sync::Arc::new(time_basis_entry.clone()),
+            exit: std::sync::Arc::new(time_basis_exit.clone()),
+            derivative_exit: std::sync::Arc::new(time_basis_derivative_exit.clone()),
+        }),
     };
 
     let n = cov_design.nrows();
@@ -1134,6 +1139,23 @@ pub(crate) fn tensorize_slope_design_over_time(
     tensored.random_effect_ranges = Vec::new();
     tensored.intercept_range = 0..0;
     Ok((tensored, Some(follow_up)))
+}
+
+/// The spatial-ψ transform for a slope covariate factor tensored against a
+/// follow-up margin.
+///
+/// The design derivative stays at covariate width, because the ψ calculus lifts
+/// each covariate row onto the three channel designs from the layout's stored
+/// margin. Each penalty derivative is `S_ψ ⊗ I_t`, the derivative of the tensored
+/// penalty `S ⊗ I_t` that [`tensorize_slope_design_over_time`] builds (gam#2767).
+pub(crate) struct SlopeTimeMarginPsiTransform {
+    pub(crate) time_width: usize,
+}
+
+impl crate::spatial_psi_bridge::SpatialPsiBlockTransform for SlopeTimeMarginPsiTransform {
+    fn transform_penalty(&self, penalty: Array2<f64>) -> Array2<f64> {
+        gam_terms::kronecker::kronecker_product(&penalty, &Array2::<f64>::eye(self.time_width))
+    }
 }
 
 /// Dimension of the null space of a symmetric positive-semidefinite penalty,
@@ -1163,7 +1185,12 @@ pub(crate) fn attach_slope_follow_up(
     match follow_up {
         None => Ok(layout),
         Some(follow_up) => {
-            layout.with_follow_up(follow_up.entry.clone(), follow_up.derivative_exit.clone())
+            let layout = layout
+                .with_follow_up(follow_up.entry.clone(), follow_up.derivative_exit.clone())?;
+            match follow_up.time_margin.as_ref() {
+                Some(margin) => layout.with_follow_up_time_margin(margin.clone()),
+                None => Ok(layout),
+            }
         }
     }
 }

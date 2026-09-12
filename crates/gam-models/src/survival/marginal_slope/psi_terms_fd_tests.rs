@@ -623,17 +623,15 @@ fn marginal_design_psi_terms_match_finite_difference_follow_up_2765() {
     run_first_order_gate(PsiAxis::MarginalDesign, SlopeFrame::FollowUpVarying);
 }
 
-/// A design ψ on the slope surface of a follow-up-varying slope must be
-/// REFUSED, by name, rather than lowered through one of its three channels.
+/// A design ψ on the slope surface of a follow-up-varying layout that carries
+/// NO stored margin must be REFUSED, by name, rather than lowered through one of
+/// its three channels.
 ///
-/// With a time margin the block's channel designs are `X_cov ⊗ B_entry`,
-/// `X_cov ⊗ B_exit` and `X_cov ⊗ B′_exit`, while the ψ design-derivative
-/// contract carries a single `X_ψ` — the other two channels are not recoverable
-/// from what the caller holds, so any answer this could return would be the
-/// derivative of a model nobody asked for. `fit_entry` already refuses the
-/// combination at construction; this pins the same refusal one layer down, so a
-/// future caller reaching the primary-space helpers directly cannot get silent
-/// wrong math instead.
+/// This fixture's channel designs are arbitrary matrices, not tensor products
+/// of a covariate factor with a recorded margin, so there is nothing to lift the
+/// covariate derivative from, and any answer would be the derivative of a model
+/// nobody asked for. A layout built from a margin lifts the derivative instead;
+/// see `slope_design_psi_on_a_follow_up_margin_matches_finite_difference_2767`.
 #[test]
 fn a_slope_design_psi_on_a_follow_up_varying_slope_is_refused_2765() {
     let family = family_at(PsiAxis::SlopeDesign, SlopeFrame::FollowUpVarying, 0.0);
@@ -830,6 +828,147 @@ fn a_zero_psi_design_derivative_publishes_zero_terms_2765() {
         None => terms.hessian_psi.clone(),
     };
     assert!(hessian.iter().all(|value| *value == 0.0));
+}
+
+// ── A slope design ψ on a follow-up margin ───────────────────────────────────
+//
+// With a time margin the slope's channel designs are `X_cov ⊗ B_entry`,
+// `X_cov ⊗ B_exit` and `X_cov ⊗ Ḃ_exit`, and a length-scale ψ moves `X_cov`. The
+// family lifts the covariate derivative row onto all three channels from the
+// layout's stored margin (gam#2767), so the fixture below builds each channel as a
+// genuine tensor product and differences the family's own objective, score and
+// Hessian as `X_cov` moves.
+
+/// The follow-up-varying family whose slope covariate factor is displaced by `t`
+/// along the slope design derivative, and its block states at fixed β.
+fn tensored_slope_family_at(t: f64) -> (SurvivalMarginalSlopeFamily, Vec<ParameterBlockState>) {
+    let mut family = family_at(PsiAxis::Baseline(0), SlopeFrame::Static, 0.0);
+    let mut covariate = base_slope_exit_design();
+    covariate.scaled_add(t, &slope_design_derivative());
+    let margin = SlopeTimeMargin {
+        entry: Arc::new(base_slope_entry_design()),
+        exit: Arc::new(base_marginal_design()),
+        derivative_exit: Arc::new(base_slope_rate_design()),
+    };
+    let tensor = |basis: &Array2<f64>| {
+        Array2::from_shape_fn((N_ROWS, 4), |(row, column)| {
+            covariate[[row, column / 2]] * basis[[row, column % 2]]
+        })
+    };
+    let layout: SlopeLayout = DesignMatrix::from(tensor(&margin.exit)).into();
+    family.slope_layout = layout
+        .with_follow_up(
+            DesignMatrix::from(tensor(&margin.entry)),
+            DesignMatrix::from(tensor(&margin.derivative_exit)),
+        )
+        .expect("a shared slope layout accepts a follow-up margin")
+        .with_follow_up_time_margin(margin.clone())
+        .expect("the tensored layout carries its margin");
+    let m_beta = marginal_beta();
+    let g_beta = ndarray::array![0.22, 0.13, -0.09, 0.17];
+    let states = vec![
+        ParameterBlockState {
+            beta: Array1::zeros(0),
+            eta: Array1::zeros(N_ROWS),
+        },
+        ParameterBlockState {
+            eta: family.marginal_design.to_dense().to_owned().dot(&m_beta),
+            beta: m_beta,
+        },
+        ParameterBlockState {
+            eta: family
+                .slope_layout
+                .coefficient_design()
+                .to_dense()
+                .to_owned()
+                .dot(&g_beta),
+            beta: g_beta,
+        },
+    ];
+    (family, states)
+}
+
+#[test]
+fn slope_design_psi_on_a_follow_up_margin_matches_finite_difference_2767() {
+    let blocks = vec![
+        Vec::new(),
+        Vec::new(),
+        vec![CustomFamilyBlockPsiDerivative::new(
+            None,
+            slope_design_derivative(),
+            Array2::zeros((2, 2)),
+            None,
+            None,
+            None,
+            None,
+        )],
+    ];
+    let (family, states) = tensored_slope_family_at(0.0);
+    assert!(
+        family.slope_layout.is_follow_up_varying(),
+        "the fixture must run the six-primary frame"
+    );
+    let terms = family
+        .psi_terms(&states, &blocks, 0)
+        .expect("follow-up slope design ψ terms")
+        .expect("a slope design ψ on a follow-up margin publishes terms");
+    let total: usize = states.iter().map(|state| state.beta.len()).sum();
+    let hessian_psi = match terms.hessian_psi_operator.as_ref() {
+        Some(operator) => operator.mul_mat(&Array2::<f64>::eye(total)),
+        None => terms.hessian_psi.clone(),
+    };
+
+    let evaluate = |t: f64| {
+        let (family, states) = tensored_slope_family_at(t);
+        let specs = specs_for(&family);
+        let evaluation = family
+            .exact_newton_joint_gradient_evaluation(&states, &specs)
+            .expect("joint gradient evaluation")
+            .expect("survival marginal-slope publishes a joint gradient evaluation");
+        let hessian = family
+            .exact_newton_joint_hessian(&states)
+            .expect("joint hessian")
+            .expect("survival marginal-slope publishes an explicit joint hessian");
+        (-evaluation.log_likelihood, -evaluation.gradient, hessian)
+    };
+    let h = 1e-3;
+    let (coarse_plus, coarse_minus) = (evaluate(h), evaluate(-h));
+    let (fine_plus, fine_minus) = (evaluate(0.5 * h), evaluate(-0.5 * h));
+    let oracle = |plus: f64, minus: f64, fine_p: f64, fine_m: f64| {
+        ridders((plus - minus) / (2.0 * h), (fine_p - fine_m) / h)
+    };
+
+    assert_matches(
+        "follow-up slope design objective_psi",
+        terms.objective_psi,
+        &oracle(coarse_plus.0, coarse_minus.0, fine_plus.0, fine_minus.0),
+        terms.objective_psi.abs(),
+    );
+    let score_scale = max_abs(terms.score_psi.iter()).max(1e-12);
+    for i in 0..total {
+        assert_matches(
+            &format!("follow-up slope design score_psi[{i}]"),
+            terms.score_psi[i],
+            &oracle(coarse_plus.1[i], coarse_minus.1[i], fine_plus.1[i], fine_minus.1[i]),
+            score_scale,
+        );
+    }
+    let hessian_scale = max_abs(hessian_psi.iter()).max(1e-12);
+    for r in 0..total {
+        for c in 0..total {
+            assert_matches(
+                &format!("follow-up slope design hessian_psi[{r},{c}]"),
+                hessian_psi[[r, c]],
+                &oracle(
+                    coarse_plus.2[[r, c]],
+                    coarse_minus.2[[r, c]],
+                    fine_plus.2[[r, c]],
+                    fine_minus.2[[r, c]],
+                ),
+                hessian_scale,
+            );
+        }
+    }
 }
 
 // ── The β-drift of the joint Hessian: `D_β H[δ]` ────────────────────────────
