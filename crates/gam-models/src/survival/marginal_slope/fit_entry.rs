@@ -646,15 +646,15 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         seeds.extend(block_log_lambda_seeds(
             &spec.time_block.design_exit,
             spec.time_block.penalties.iter(),
-        ));
+        )?);
         seeds.extend(block_log_lambda_seeds(
             &marginal_design.design,
             marginal_design.penalties.iter().map(|bp| &bp.local),
-        ));
+        )?);
         seeds.extend(block_log_lambda_seeds(
             &slope_design.design,
             slope_design.penalties.iter().map(|bp| &bp.local),
-        ));
+        )?);
         seeds
     };
     // The ρ domain per coordinate, in the layout the seeds above use: the time

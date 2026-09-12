@@ -338,20 +338,38 @@ pub(crate) fn mean_abs(values: impl IntoIterator<Item = f64>) -> f64 {
     if count == 0 { 0.0 } else { sum / count as f64 }
 }
 
-pub(crate) fn block_log_lambda_seeds<'a, I>(design: &DesignMatrix, penalty_locals: I) -> Vec<f64>
+/// Each penalty block's natural `log λ` seed: the log ratio of the design's mean
+/// Gram diagonal to the penalty's mean diagonal.
+///
+/// A design whose Gram diagonal is all zero, or a penalty whose diagonal is all
+/// zero (for a PSD penalty, the zero matrix), has no scale to seed against, and is
+/// refused rather than given a floored one.
+pub(crate) fn block_log_lambda_seeds<'a, I>(
+    design: &DesignMatrix,
+    penalty_locals: I,
+) -> Result<Vec<f64>, String>
 where
     I: IntoIterator<Item = &'a Array2<f64>>,
 {
     let unit_weights = Array1::<f64>::ones(design.nrows());
-    let likelihood_scale = match design.diag_gram(&unit_weights) {
-        Ok(d) => mean_abs(d.iter().copied()).max(1.0e-8),
-        Err(_) => 1.0,
-    };
+    let likelihood_scale = mean_abs(design.diag_gram(&unit_weights)?.iter().copied());
+    if !(likelihood_scale > 0.0 && likelihood_scale.is_finite()) {
+        return Err(format!(
+            "survival marginal-slope log-lambda seed: the design's mean Gram diagonal is \
+             {likelihood_scale:e}, so the block has no likelihood scale to seed against"
+        ));
+    }
     penalty_locals
         .into_iter()
         .map(|s| {
-            let penalty_scale = mean_abs(s.diag().iter().copied()).max(1.0e-8);
-            (likelihood_scale / penalty_scale).ln()
+            let penalty_scale = mean_abs(s.diag().iter().copied());
+            if !(penalty_scale > 0.0 && penalty_scale.is_finite()) {
+                return Err(format!(
+                    "survival marginal-slope log-lambda seed: a penalty's mean diagonal is \
+                     {penalty_scale:e}, so it has no curvature scale to seed against"
+                ));
+            }
+            Ok((likelihood_scale / penalty_scale).ln())
         })
         .collect()
 }
@@ -377,7 +395,9 @@ mod log_lambda_domain_tests {
     fn scale_matched_log_lambda_seed_owns_a_resolution_derived_domain_2767() {
         let design = DesignMatrix::from(Array2::from_elem((2, 1), 1.0e4));
         let penalty = Array2::from_elem((1, 1), 1.0e-4);
-        let seeds = Array1::from_vec(block_log_lambda_seeds(&design, [&penalty]));
+        let seeds = Array1::from_vec(
+            block_log_lambda_seeds(&design, [&penalty]).expect("a scaled design and penalty seed"),
+        );
         assert!(seeds[0] > 12.0, "the fixture must cross the removed hand box");
 
         let (lower, upper) = log_lambda_domain(&seeds);
