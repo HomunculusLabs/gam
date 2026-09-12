@@ -25,7 +25,7 @@ use faer::sparse::SparseColMat;
 use gam_linalg::faer_ndarray::{FaerLinalgError, array1_to_col_matmut};
 use gam_linalg::matrix::{DesignMatrix, LinearOperator, SymmetricMatrix};
 use gam_linalg::utils::{StableSolver, array_is_finite, inf_norm};
-use gam_problem::{Coefficients, GlmLikelihoodSpec, InverseLink, LinkFunction};
+use gam_problem::{Coefficients, GlmLikelihoodSpec, InverseLink};
 use ndarray::{ArcArray1, Array1, Array2, ArrayView1, ShapeBuilder};
 use std::sync::Arc;
 
@@ -235,8 +235,6 @@ pub(super) fn solve_penalized_least_squares_implicit(
     offset: ArrayView1<f64>,
     penalty: &PirlsPenalty,
     workspace: &mut PirlsWorkspace,
-    y: ArrayView1<f64>,
-    link_function: LinkFunction,
     gaussian_fixed_cache: Option<&GaussianFixedCache>,
 ) -> Result<(StablePLSResult, usize), EstimationError> {
     let p_dim = penalty.dim();
@@ -314,41 +312,11 @@ pub(super) fn solve_penalized_least_squares_implicit(
         let h_sym = SymmetricMatrix::Sparse(h_sparse);
         let edf = calculate_edf_from_sparse_factor(&factor, penalty)?;
 
-        // 5. Scale. When Gaussian sufficient statistics are installed, compute
-        // RSS from k-space only; the design rows may be a stale reference
-        // surface on the #1033 ψ-tensor fast path.
-        let standard_deviation = match link_function {
-            LinkFunction::Identity => {
-                let weighted_rss = if let Some(cache) = gaussian_fixed_cache {
-                    let quadratic = betavec.dot(&cache.xtwx_orig.dot(&betavec));
-                    (cache.centered_weighted_y_sq - 2.0 * betavec.dot(&cache.xtwy_orig) + quadratic)
-                        .max(0.0)
-                } else {
-                    let fitted_vals = {
-                        let xb = x_original.apply(&betavec);
-                        let mut f = xb;
-                        f += &offset;
-                        f
-                    };
-                    let residuals = &y - &fitted_vals;
-                    weights
-                        .iter()
-                        .zip(residuals.iter())
-                        .map(|(&w, &r)| w * r * r)
-                        .sum()
-                };
-                let effective_n = y.len() as f64;
-                (weighted_rss / (effective_n - edf).max(1.0)).sqrt()
-            }
-            _ => 1.0,
-        };
-
         return Ok((
             StablePLSResult {
                 beta: Coefficients::new(betavec),
                 penalized_hessian: h_sym,
                 edf,
-                standard_deviation,
                 ridge_used,
             },
             p_dim,
@@ -558,43 +526,11 @@ pub(super) fn solve_penalized_least_squares_implicit(
     // O(p³) factorization of the identical regularized Hessian.
     let edf = calculate_edfwithworkspace_from_factor(&factor, penalty, workspace)?;
 
-    // 7. Scale (composed: eta = offset + X Qs beta). When Gaussian sufficient
-    // statistics are installed, compute RSS from k-space only; the design rows
-    // may be a stale reference surface on the #1033 ψ-tensor fast path.
-    let qbeta = if let Some(transform) = transform {
-        transform.apply(&betavec)
-    } else {
-        betavec.clone()
-    };
-    let standard_deviation = match link_function {
-        LinkFunction::Identity => {
-            let weighted_rss = if let Some(cache) = gaussian_fixed_cache {
-                let quadratic = qbeta.dot(&cache.xtwx_orig.dot(&qbeta));
-                (cache.centered_weighted_y_sq - 2.0 * qbeta.dot(&cache.xtwy_orig) + quadratic)
-                    .max(0.0)
-            } else {
-                let xqbeta = x_original.apply(&qbeta);
-                let mut fitted = xqbeta;
-                fitted += &offset;
-                let residuals = &y - &fitted;
-                weights
-                    .iter()
-                    .zip(residuals.iter())
-                    .map(|(&w, &r)| w * r * r)
-                    .sum()
-            };
-            let effective_n = y.len() as f64;
-            (weighted_rss / (effective_n - edf).max(1.0)).sqrt()
-        }
-        _ => 1.0,
-    };
-
     Ok((
         StablePLSResult {
             beta: Coefficients::new(betavec),
             penalized_hessian: SymmetricMatrix::Dense(penalized_hessian),
             edf,
-            standard_deviation,
             ridge_used,
         },
         p_dim,

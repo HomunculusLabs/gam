@@ -1301,8 +1301,6 @@ pub(crate) fn fit_model_for_fixed_rho_with_adaptive_kkt<'a, X: Into<DesignMatrix
             offset,
             &penalty_active,
             &mut workspace,
-            y,
-            link_function,
             cache_for_solve,
         )?;
 

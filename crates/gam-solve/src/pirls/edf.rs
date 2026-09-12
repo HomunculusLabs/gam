@@ -16,11 +16,6 @@ pub struct StablePLSResult {
     pub penalized_hessian: SymmetricMatrix,
     /// Effective degrees of freedom
     pub edf: f64,
-    /// Residual standard deviation estimate.
-    ///
-    /// Contract: for Gaussian identity models this is the residual standard
-    /// deviation (sigma), not the residual variance/dispersion.
-    pub standard_deviation: f64,
     /// Ridge added to ensure the SPD solve is well-posed.
     pub ridge_used: f64,
 }
