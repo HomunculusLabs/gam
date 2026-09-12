@@ -160,34 +160,6 @@ fn fit_heteroscedastic(
     }
 }
 
-#[test]
-fn survival_location_scale_heteroscedastic_sweep_diagnostic() {
-    super::initialize_cpu_fitting();
-    gam_runtime::test_support::install_diagnostic_logger();
-    let configs = [
-        (200usize, 0.3f64, 0.4f64, 6usize, 4usize, 1234u64), // mild control
-        (180, 0.8, 1.0, 8, 6, 1234),                         // moderate
-        (180, 1.0, 1.2, 8, 8, 7),                            // aggressive
-        (160, 1.2, 1.5, 10, 8, 42),                          // very aggressive
-    ];
-    for (n, la, sa, kl, ks, seed) in configs {
-        let t0 = std::time::Instant::now();
-        let r = fit_heteroscedastic(n, la, sa, kl, ks, seed);
-        let secs = t0.elapsed().as_secs_f64();
-        eprintln!(
-            "[#1569 sweep] n={n} loc_amp={la} scale_amp={sa} k_loc={kl} k_scale={ks} seed={seed} \
-             censor={:.2} elapsed={secs:.1}s -> converged=certified outer_iters={} inner_cycles={} \
-             grad_norm={:?} rmse_loc={:.4} rmse_logsig={:.4}",
-            r.censor_frac,
-            r.outer_iterations,
-            r.inner_cycles,
-            r.grad_norm,
-            r.rmse_loc,
-            r.rmse_logsig,
-        );
-    }
-}
-
 /// Asserting regression guard for #1569.
 #[test]
 fn survival_location_scale_heteroscedastic_globalization_converges_1569() {
