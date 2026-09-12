@@ -4562,8 +4562,8 @@ mod exact_solve_tests {
         let x_low = planted_noisy(n, p, k, 0.03, 0x1111_2222_3333_4444);
         let x_high = planted_noisy(n, p, k, 0.40, 0x1111_2222_3333_4444);
 
-        // The production schedule TERMINATES (bounded outer iterations) with a
-        // best-effort-open ρ selection for each noise level.
+        // The production schedule settles on a certified ρ selection for each noise
+        // level.
         let low = run_linear_reml_schedule(x_low.view(), &config).expect("low-noise reml schedule");
         let high =
             run_linear_reml_schedule(x_high.view(), &config).expect("high-noise reml schedule");
@@ -4571,8 +4571,8 @@ mod exact_solve_tests {
         let rho_high = high.convergence.selected_rho;
 
         // (1) Both selections are finite, strictly positive, and SETTLED within the
-        // schedule's honest (best-effort-aware) band — the schedule stopped because
-        // ρ reached the achievable precision, not because it ran out of steps.
+        // schedule's band — the schedule stopped because the ρ step settled, not
+        // because it ran out of steps.
         assert!(
             rho_low.is_finite() && rho_low > 0.0 && rho_high.is_finite() && rho_high > 0.0,
             "shared ρ* must be finite and positive (low={rho_low}, high={rho_high})"
@@ -4604,15 +4604,11 @@ mod exact_solve_tests {
     #[test]
     fn reml_schedule_terminates_on_noise_floored_interior_fixed_point() {
         // #2396 termination guarantee (different angle from the noise-tracking test):
-        // the outer FS loop is an uncapped `loop {}` that stops only at
-        // `log_change ≤ band` or the ρ→0 identifiability boundary. For a
-        // non-interpolating OVER-COMPLETE fit the ρ fixed point is INTERIOR (ρ never
-        // reaches the boundary) and the best-effort inner solve makes the FS map
-        // noisy, so the machine-precision band `√tolerance` is never met on a single
-        // step. Before the fix that combination did not terminate. This test pins
-        // that the schedule now RETURNS — bounded outer iterations, best-effort-open
-        // certificate, ρ residual settled within the honest (best-effort-aware)
-        // band — on exactly that regime.
+        // for a non-interpolating OVER-COMPLETE fit the ρ fixed point is INTERIOR (ρ
+        // never reaches the identifiability boundary) and top-s routing may never
+        // certify its inner fixed point. The schedule must still end: it returns a
+        // certified fit whose ρ step settled within the requested band, or refuses
+        // with typed inner or outer non-convergence within the outer-iteration cap.
         use super::run_linear_reml_schedule;
 
         // Deterministic over-complete planted mixture (K=32 atoms in p=10, so K >>
