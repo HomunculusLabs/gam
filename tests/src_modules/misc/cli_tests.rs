@@ -869,9 +869,7 @@ fn cli_sample_bounded_model_reaches_sampler_config_validation() {
     let err = run_sample(SampleArgs {
         model: model_path,
         data: data_path,
-        chains: Some(1),
         samples: Some(1),
-        warmup: Some(1),
         seed: Some(760),
         out: Some(out_path),
     })

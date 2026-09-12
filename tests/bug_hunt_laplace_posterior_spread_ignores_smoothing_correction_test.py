@@ -77,7 +77,7 @@ def _fit_and_sample(formula: str) -> tuple[Any, Any, np.ndarray, np.ndarray]:
     data = _data()
     model = gamfit.fit(data, formula, family="gaussian")
     summary = model.summary()
-    posterior = model.sample(data, seed=11, samples=_DRAWS, chains=2)
+    posterior = model.sample(data, seed=11, samples=_DRAWS)
     reported = np.asarray(
         [c["std_error"] for c in summary.coefficients], dtype=float
     )

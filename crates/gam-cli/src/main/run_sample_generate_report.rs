@@ -97,9 +97,7 @@ fn saved_alo_report_data(
 }
 
 pub(crate) fn run_sample(args: SampleArgs) -> Result<(), String> {
-    validate_positive_optional_usize("--chains", args.chains)?;
     validate_positive_optional_usize("--samples", args.samples)?;
-    validate_positive_optional_usize("--warmup", args.warmup)?;
     reject_multinomial_model(&args.model, "sample")?;
     let model = SavedModel::load_from_path(&args.model)?;
     let ds = load_datasetwith_model_schema_for_diagnostics(&args.data, &model)?;
@@ -114,8 +112,6 @@ pub(crate) fn run_sample(args: SampleArgs) -> Result<(), String> {
     let adaptive = NutsConfig::for_dimension(n_base_params);
     let cfg = NutsConfig {
         n_samples: args.samples.unwrap_or(adaptive.n_samples),
-        nwarmup: args.warmup.unwrap_or(adaptive.nwarmup),
-        n_chains: args.chains.unwrap_or(adaptive.n_chains),
         seed: args.seed.unwrap_or(adaptive.seed),
         ..adaptive
     };
@@ -191,10 +187,11 @@ pub(crate) fn run_sample(args: SampleArgs) -> Result<(), String> {
     }
     cli_out!();
     cli_out!(
-        "  convergence: rhat={:.4}  ess={:.1}  converged={}",
+        "  convergence: rhat={:.4}  ess={:.1}  converged={}  warmup={} transitions per chain",
         nuts.rhat,
         nuts.ess,
-        nuts.converged
+        nuts.converged,
+        nuts.warmup_transitions
     );
 
     // Write per-coefficient posterior summary (mean, std, 95% CI) to CSV.

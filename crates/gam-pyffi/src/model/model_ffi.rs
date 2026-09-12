@@ -28,11 +28,6 @@ struct PySampleOptions {
     /// Posterior draws per chain (after warmup). When omitted, falls back to
     /// `NutsConfig::for_dimension`.
     samples: Option<usize>,
-    /// Warmup iterations per chain. When omitted, matches `samples` via the
-    /// dimension-adaptive default.
-    warmup: Option<usize>,
-    /// Number of parallel chains.
-    chains: Option<usize>,
     /// RNG seed for deterministic chain initialisation.
     seed: Option<u64>,
 }
@@ -2316,21 +2311,10 @@ fn competing_risks_cif_from_predictions_impl(
 }
 
 #[pyfunction]
-fn build_sample_payload_json(
-    samples: Option<i64>,
-    warmup: Option<i64>,
-    chains: Option<i64>,
-    seed: Option<i64>,
-) -> PyResult<String> {
+fn build_sample_payload_json(samples: Option<i64>, seed: Option<i64>) -> PyResult<String> {
     let mut payload = serde_json::Map::new();
     if let Some(value) = samples {
         payload.insert("samples".to_string(), serde_json::Value::from(value));
-    }
-    if let Some(value) = warmup {
-        payload.insert("warmup".to_string(), serde_json::Value::from(value));
-    }
-    if let Some(value) = chains {
-        payload.insert("chains".to_string(), serde_json::Value::from(value));
     }
     if let Some(value) = seed {
         payload.insert("seed".to_string(), serde_json::Value::from(value));

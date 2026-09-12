@@ -161,9 +161,9 @@ print(posterior)
 bands = posterior.predict(test, level=0.95)
 ```
 
-Defaults for `samples`, `warmup`, and `chains` are derived from the
-coefficient count. See [posterior-sampling.md](posterior-sampling.md)
-for the exact rule and how to override.
+The default for `samples` is derived from the coefficient count. Warmup
+has no fixed length: it ends once the two chains have converged. See
+[posterior-sampling.md](posterior-sampling.md) for both rules.
 
 NUTS is used for most exact sampling paths; Bernoulli-logit standard
 GLMs use the Polya-Gamma Gibbs path. Gaussian Laplace is used for

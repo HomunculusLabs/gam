@@ -8348,9 +8348,8 @@ fn parse_sample_options(options_json: Option<&str>) -> Result<PySampleOptions, S
 }
 
 fn resolve_nuts_config(model: &FittedModel, options: PySampleOptions) -> NutsConfig {
-    // Mirror the CLI's adaptive sizing so Python users get sensible defaults
-    // without having to think about chain/warmup counts: NUTS samples needed
-    // grow with the coefficient count, so we anchor on the saved beta length.
+    // Mirror the CLI's adaptive sizing: NUTS draws needed grow with the
+    // coefficient count, so we anchor on the saved beta length.
     let n_base_params = model
         .fit_result
         .as_ref()
@@ -8359,8 +8358,6 @@ fn resolve_nuts_config(model: &FittedModel, options: PySampleOptions) -> NutsCon
     let adaptive = NutsConfig::for_dimension(n_base_params);
     NutsConfig {
         n_samples: options.samples.unwrap_or(adaptive.n_samples),
-        nwarmup: options.warmup.unwrap_or(adaptive.nwarmup),
-        n_chains: options.chains.unwrap_or(adaptive.n_chains),
         seed: options.seed.unwrap_or(adaptive.seed),
         ..adaptive
     }

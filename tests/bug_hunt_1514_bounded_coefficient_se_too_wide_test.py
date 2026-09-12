@@ -76,7 +76,7 @@ def test_bounded_gaussian_draw_std_tracks_summary_se() -> None:
 
     mb = gamfit.fit(df, "y ~ bounded(x, min=0, max=1)")
     se = _se(mb)
-    draws = mb.sample(df, samples=8000, chains=2, seed=1).to_numpy()[:, 1]
+    draws = mb.sample(df, samples=8000, seed=1).to_numpy()[:, 1]
     draw_std = float(draws.std())
 
     # Fit export and sampler must agree (the sampler re-applies √σ̂²).

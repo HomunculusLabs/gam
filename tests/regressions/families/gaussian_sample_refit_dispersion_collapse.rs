@@ -101,8 +101,6 @@ fn gaussian_saved_model_subset_sampling_does_not_tighten_posterior() {
     let (model, p) = saved_standard_gaussian_model("y ~ x1 + x2", &ds);
     let cfg = NutsConfig {
         n_samples: 256,
-        nwarmup: 64,
-        n_chains: 2,
         seed: 521,
         ..NutsConfig::for_dimension(p)
     };

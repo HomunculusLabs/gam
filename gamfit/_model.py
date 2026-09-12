@@ -872,15 +872,13 @@ class Model:
         data: Any,
         *,
         samples: int | None = None,
-        warmup: int | None = None,
-        chains: int | None = None,
         seed: int | None = None,
     ) -> PosteriorSamples:
         """Draw from the model's posterior with NUTS."""
         headers, rows, _ = normalize_table(data)
         try:
             ffi = rust_module()
-            options_json = ffi.build_sample_payload_json(samples, warmup, chains, seed)
+            options_json = ffi.build_sample_payload_json(samples, seed)
             payload = ffi.sample_table(
                 self._model_bytes,
                 headers,

@@ -106,7 +106,7 @@ marginal-slope predictions retain their model-specific schemas.
 ## Sample and Generate
 
 ```bash
-gam sample model.gam train.csv --chains 4 --samples 1000 --warmup 500 --seed 42
+gam sample model.gam train.csv --samples 1000 --seed 42
 gam generate model.gam new.csv --n-draws 20 --seed 42 --out generated.csv
 ```
 

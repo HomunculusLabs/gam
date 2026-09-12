@@ -138,7 +138,7 @@ fn gam_sample_succeeds_on_right_censored_shorthand_survival_model() {
         .arg("sample")
         .arg(&model_path)
         .arg(&csv_path)
-        .args(["--chains", "1", "--samples", "4", "--warmup", "4"])
+        .args(["--samples", "4"])
         .arg("--out")
         .arg(&sample_path);
     let output = sample_cmd

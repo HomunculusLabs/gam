@@ -41,7 +41,7 @@ def test_monotone_increasing_posterior_curves_are_monotone() -> None:
     fitted = np.asarray(m.predict(grid)).ravel()
     assert np.diff(fitted).min() >= -1e-6  # point estimate monotone
 
-    s = m.sample(df, samples=600, chains=2, seed=1)
+    s = m.sample(df, samples=600, seed=1)
     curves = np.asarray(s.predict_draws(grid).mean)  # (n_draws, n_grid)
     span = np.ptp(curves)
     worst = np.array([np.diff(c).min() for c in curves])
@@ -62,7 +62,7 @@ def test_monotone_decreasing_posterior_curves_are_monotone() -> None:
     fitted = np.asarray(m.predict(grid)).ravel()
     assert np.diff(fitted).max() <= 1e-6  # point estimate monotone-decreasing
 
-    s = m.sample(df, samples=600, chains=2, seed=2)
+    s = m.sample(df, samples=600, seed=2)
     curves = np.asarray(s.predict_draws(grid).mean)
     span = np.ptp(curves)
     worst = np.array([np.diff(c).max() for c in curves])  # largest *increase*
@@ -85,7 +85,7 @@ def test_convex_posterior_curves_are_convex() -> None:
     fitted = np.asarray(m.predict(grid)).ravel()
     assert np.diff(fitted, 2).min() >= -1e-5  # point estimate convex
 
-    s = m.sample(df, samples=600, chains=2, seed=3)
+    s = m.sample(df, samples=600, seed=3)
     curves = np.asarray(s.predict_draws(grid).mean)
     span = np.ptp(curves)
     worst = np.array([np.diff(c, 2).min() for c in curves])  # most-concave 2nd diff
@@ -104,7 +104,7 @@ def test_monotone_posterior_is_non_degenerate() -> None:
     m = gamfit.fit(df, "y ~ s(x, shape='monotone_increasing')")
 
     grid = _grid()
-    s = m.sample(df, samples=600, chains=2, seed=1)
+    s = m.sample(df, samples=600, seed=1)
     curves = np.asarray(s.predict_draws(grid).mean)
     # Pointwise posterior SD at the grid points is non-trivial.
     sd = curves.std(axis=0)

@@ -33,8 +33,8 @@ import gamfit
 FEASIBLE_TOL = 1e-6
 
 
-def _coef_draws(model, frame, *, samples=3000, chains=2, seed=1, col=1):
-    return model.sample(frame, samples=samples, chains=chains, seed=seed).to_numpy()[:, col]
+def _coef_draws(model, frame, *, samples=3000, seed=1, col=1):
+    return model.sample(frame, samples=samples, seed=seed).to_numpy()[:, col]
 
 
 def test_nonnegative_active_bound_gaussian() -> None:

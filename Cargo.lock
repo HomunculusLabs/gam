@@ -4189,9 +4189,8 @@ dependencies = [
 
 [[package]]
 name = "general-mcmc"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9661c68572fa5960694a33b8bd4a1d3ecc249b5bd8c3fbacfebd421a712a91b6"
+version = "0.10.1"
+source = "git+https://github.com/SauersML/general-mcmc.git?rev=adc78bb049a81da80089330f9db43d8a45d8ed2d#adc78bb049a81da80089330f9db43d8a45d8ed2d"
 dependencies = [
  "burn",
  "indicatif",

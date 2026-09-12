@@ -64,7 +64,7 @@ def python_context():
     train = df.copy()
     test = df.head(4).drop(columns=["y", "outcome", "case", "disease", "event"])
     model = gamfit.fit(train, "y ~ x")
-    posterior = model.sample(train, samples=20, warmup=20, chains=1, seed=42)
+    posterior = model.sample(train, samples=20, seed=42)
     x_matrix = train[["x", "x2"]]
     return {
         "gamfit": gamfit, "np": np, "pd": pd, "df": df, "data": df,

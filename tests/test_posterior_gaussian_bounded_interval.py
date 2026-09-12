@@ -30,8 +30,8 @@ import pandas as pd
 import gamfit
 
 
-def _bounded_draws(model, frame, *, samples=4000, chains=2, seed=1):
-    return model.sample(frame, samples=samples, chains=chains, seed=seed).to_numpy()[:, 1]
+def _bounded_draws(model, frame, *, samples=4000, seed=1):
+    return model.sample(frame, samples=samples, seed=seed).to_numpy()[:, 1]
 
 
 def test_gaussian_bounded_posterior_stays_in_interval() -> None:

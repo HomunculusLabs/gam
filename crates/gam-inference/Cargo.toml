@@ -31,9 +31,7 @@ log = "0.4.29"
 serde = { version = "1.0.228", features = ["derive"] }
 
 [dependencies.general-mcmc]
-package = "general-mcmc"
-version = "0.10"
-default-features = false
+workspace = true
 
 # The `gpu_polya_gamma` Linux CUDA path drives cudarc directly (gated by
 # `#[cfg(target_os = "linux")]` in the source), mirroring gam-models' GPU deps.

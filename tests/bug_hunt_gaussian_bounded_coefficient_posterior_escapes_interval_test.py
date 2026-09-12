@@ -50,7 +50,7 @@ import gamfit
 
 
 def _bounded_slope_draws(model: Any, frame: pd.DataFrame) -> np.ndarray:
-    samples = model.sample(frame, samples=4000, chains=2, seed=1)
+    samples = model.sample(frame, samples=4000, seed=1)
     names = list(samples.coefficient_names)
     slope_idx = names.index("beta_1") if "beta_1" in names else len(names) - 1
     return np.asarray(samples.to_numpy())[:, slope_idx]

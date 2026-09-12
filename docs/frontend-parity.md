@@ -27,7 +27,7 @@ APIs such as a matrix kernel.
 | Prediction and posterior-mean uncertainty | `gam::predict` saved-model machinery | `predict`, `--uncertainty`, `--level`, `--covariance-mode`, offsets and IDs | `Model.predict`, `predict_array`; interval, observation interval, covariance mode, IDs | Parity; Python exposes richer typed return objects |
 | CTN observed-response score | saved-model prediction machinery | `transformation-score` | `Model.transformation_score` | Parity |
 | Diagnostics / ALO | `gam::inference::alo`, saved-model ALO | `diagnose`; report may include diagnostics | `Model.diagnose`, `check`, `basis_check`, `curvature`, `smooth_significance` | Core diagnostics shared; Python methods are programmatic views |
-| Posterior coefficient sampling | `gam::inference::sample` / `gam::hmc` | `sample --chains --samples --warmup --seed` | `Model.sample` with the same controls | Same Rust sampler |
+| Posterior coefficient sampling | `gam::inference::sample` / `gam::hmc` | `sample --samples --seed` | `Model.sample` with the same controls | Same Rust sampler |
 | Posterior predictive / response generation | `gam::predict::generative` | `generate --n-draws --seed` | `sample_replicates`, `iter_replicates`; multinomial `posterior_predict` | Same Rust generator |
 | Summary and HTML report | saved model / `gam::report` | `report` | `summary`, `report` | Parity |
 | Persistence | saved-model envelope | fit writes and all consumers read it | `save`, `load`, `loads`, `Model.save`, `dumps`, `model_from_dict` | One Rust wire format |
@@ -46,7 +46,7 @@ The one global flag is `--log-level`.
 | `predict` | `MODEL NEW_DATA --out`; offset/noise-offset/ID, `--uncertainty`, `--level`, `--covariance-mode` |
 | `transformation-score` | `MODEL LABELLED_DATA --out`; offset and ID columns |
 | `diagnose` | `MODEL DATA` |
-| `sample` | `MODEL DATA`; `--chains`, `--samples`, `--warmup`, `--seed`, `--out` |
+| `sample` | `MODEL DATA`; `--samples`, `--seed`, `--out` |
 | `generate` | `MODEL DATA`; `--n-draws`, `--seed`, `--out` |
 | `report` | `MODEL [DATA] [OUT]` |
 | `fit-events` | `--subjects`, `--events`, `--covariates`, `--formula` or `--mark-formula` (one per mark), `--marks`, `--horizons-after-exit`, `--forecast-cutoff`, `--reference-row`, `--reference-stratum`, `--out` |

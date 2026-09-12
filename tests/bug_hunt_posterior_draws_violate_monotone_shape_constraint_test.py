@@ -59,7 +59,7 @@ def test_posterior_draws_of_monotone_smooth_are_monotone() -> None:
         f"fitted monotone curve must be increasing; got min step {np.diff(fitted).min()}"
     )
 
-    samples = model.sample(frame, samples=600, chains=2, seed=1)
+    samples = model.sample(frame, samples=600, seed=1)
     predictive = samples.predict_draws(grid)
     curves = np.asarray(predictive.mean)  # (n_draws, n_grid)
     if curves.shape[1] != len(grid):

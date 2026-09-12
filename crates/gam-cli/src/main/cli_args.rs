@@ -513,23 +513,11 @@ pub(crate) struct SampleArgs {
     )]
     pub(crate) data: PathBuf,
     #[arg(
-        long = "chains",
-        value_parser = parse_positive_usize_cli,
-        help = "Number of NUTS chains to run (default: family-dependent)"
-    )]
-    pub(crate) chains: Option<usize>,
-    #[arg(
         long = "samples",
         value_parser = parse_positive_usize_cli,
         help = "Post-warmup draws per chain (default: family-dependent)"
     )]
     pub(crate) samples: Option<usize>,
-    #[arg(
-        long = "warmup",
-        value_parser = parse_positive_usize_cli,
-        help = "Warmup iterations per chain (default: family-dependent)"
-    )]
-    pub(crate) warmup: Option<usize>,
     #[arg(
         long = "seed",
         help = "RNG seed for deterministic posterior sampling (default: 42)"

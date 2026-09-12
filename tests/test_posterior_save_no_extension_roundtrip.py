@@ -16,7 +16,7 @@ import gamfit
 def _fit_and_sample():
     rows = [{"y": float(i % 5) + 0.1 * i, "x": float(i)} for i in range(40)]
     model = gamfit.fit(rows, "y ~ x")
-    return model.sample(rows, samples=24, warmup=24, chains=1, seed=42)
+    return model.sample(rows, samples=24, seed=42)
 
 
 def test_save_without_extension_returns_loadable_path() -> None:

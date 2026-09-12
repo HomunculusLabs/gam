@@ -102,8 +102,6 @@ fn slope_draws(
     let col = ds.column_map();
     let cfg = NutsConfig {
         n_samples: 1500,
-        nwarmup: 300,
-        n_chains: 2,
         seed: 1507,
         ..NutsConfig::for_dimension(p)
     };

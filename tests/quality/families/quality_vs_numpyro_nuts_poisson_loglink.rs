@@ -281,12 +281,11 @@ fn gam_nuts_poisson_loglink_predicts_heldout_counts() {
     // ---- sample gam's NUTS conditioning on TRAINING cells only ------------
     // Restrict the dataset rows to the training cells; the posterior is
     // beta | y_train under the frozen penalized Poisson density. Same seed /
-    // chains / warmup / draws we give NumPyro below.
+    // chains / draws we give NumPyro below; gam's warmup ends when its
+    // adaptation has stabilized.
     let train_values = agg_ds.values.select(Axis(0), &train_idx);
     let nuts_cfg = gam::hmc::NutsConfig {
         n_samples: 1000,
-        nwarmup: 1000,
-        n_chains: 2,
         target_accept: 0.9,
         seed: 42,
     };

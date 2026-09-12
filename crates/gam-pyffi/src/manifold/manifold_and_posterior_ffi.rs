@@ -318,8 +318,8 @@ fn build_sample_payload(
         converged: nuts.converged,
         config: SampleConfigPayload {
             n_samples: cfg.n_samples,
-            n_warmup: cfg.nwarmup,
-            n_chains: cfg.n_chains,
+            n_warmup: nuts.warmup_transitions,
+            n_chains: gam::sample::NUTS_CHAINS,
             target_accept: cfg.target_accept,
             seed: cfg.seed,
         },

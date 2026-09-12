@@ -148,8 +148,6 @@ fn posterior_draws_of_monotone_smooth_stay_in_the_cone() {
     let col = ds.column_map();
     let cfg = NutsConfig {
         n_samples: 600,
-        nwarmup: 300,
-        n_chains: 2,
         seed: 1509,
         ..NutsConfig::for_dimension(p)
     };

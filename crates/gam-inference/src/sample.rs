@@ -18,7 +18,7 @@ use super::hmc_io::{
     FamilyNutsInputs, GlmFlatInputs, SurvivalFlatInputs, explicit_fit_hessian_for_whitening,
     run_nuts_sampling_flattened_family, run_survival_nuts_sampling_flattened, validate_nuts_config,
 };
-pub use super::hmc_io::{NutsConfig, NutsResult, PosteriorSampler};
+pub use super::hmc_io::{NUTS_CHAINS, NutsConfig, NutsResult, PosteriorSampler};
 use gam_solve::model_types::InferenceCovarianceMode;
 use crate::formula_dsl::{LinkWiggleFormulaSpec, parse_formula};
 use crate::model::{
@@ -352,10 +352,10 @@ pub(crate) fn laplace_gaussian_fallback(
     cfg: &NutsConfig,
     rationale: &'static str,
 ) -> Result<NutsResult, String> {
-    // Defense in depth: this is `pub`, so guard the same degenerate
-    // draw/chain counts the NUTS / PG paths reject (issue #399) rather than
-    // papering over `n_chains == 0` / `n_samples == 0` with `.max(1)`, which
-    // would silently fabricate draws the caller never asked for.
+    // Defense in depth: this is `pub`, so guard the same degenerate draw
+    // counts the NUTS / PG paths reject (issue #399) rather than papering
+    // over `n_samples == 0` with `.max(1)`, which would silently fabricate
+    // draws the caller never asked for.
     validate_nuts_config(cfg).map_err(String::from)?;
     let fit = fit_result_from_saved_model_for_prediction(model)?;
     let mode = fit.beta.clone();
@@ -438,14 +438,14 @@ pub(crate) fn laplace_gaussian_fallback(
         }
     };
 
-    // `validate_nuts_config` above guarantees `n_chains >= 1` and
-    // `n_samples >= 4`, so the draw grid is always non-empty and densely
-    // filled — no `.max(1)` clamping or bounds guard is needed.
-    let n_total = cfg.n_samples.saturating_mul(cfg.n_chains);
+    // `validate_nuts_config` above guarantees `n_samples >= 4`, so the draw
+    // grid is always non-empty and densely filled — no `.max(1)` clamping or
+    // bounds guard is needed.
+    let n_total = cfg.n_samples.saturating_mul(NUTS_CHAINS);
     let mut samples = Array2::<f64>::zeros((n_total, p));
     let mut eps = Array1::<f64>::zeros(p);
     let mut delta = Array1::<f64>::zeros(p);
-    for chain in 0..cfg.n_chains {
+    for chain in 0..NUTS_CHAINS {
         let mut rng = rand::rngs::StdRng::seed_from_u64(chain_stream_seed(
             cfg.seed,
             chain,
@@ -475,6 +475,7 @@ pub(crate) fn laplace_gaussian_fallback(
         rhat: 1.0,
         ess: n_total as f64,
         converged: true,
+        warmup_transitions: 0,
         sampler: PosteriorSampler::Laplace,
         covariance: factor.covariance_source(),
     })
@@ -651,7 +652,7 @@ fn sample_transformation_normal_constrained(
     })?;
     let l = chol.lower_triangular();
 
-    let n_total = cfg.n_samples.saturating_mul(cfg.n_chains);
+    let n_total = cfg.n_samples.saturating_mul(NUTS_CHAINS);
     let mut samples = Array2::<f64>::zeros((n_total, p));
     let mut eps = Array1::<f64>::zeros(p);
     let mut delta = Array1::<f64>::zeros(p);
@@ -663,7 +664,7 @@ fn sample_transformation_normal_constrained(
     let mut total_attempts: u64 = 0;
     let mut total_accepted: u64 = 0;
 
-    for chain in 0..cfg.n_chains {
+    for chain in 0..NUTS_CHAINS {
         let mut rng = rand::rngs::StdRng::seed_from_u64(chain_stream_seed(
             cfg.seed,
             chain,
@@ -712,6 +713,7 @@ fn sample_transformation_normal_constrained(
         rhat: 1.0,
         ess: n_total as f64,
         converged: true,
+        warmup_transitions: 0,
         sampler: PosteriorSampler::Laplace,
         covariance: InferenceCovarianceMode::Conditional,
     })
@@ -1100,7 +1102,7 @@ fn sample_standard_bounded(
     // (gam#1514); the truncated-constraint path does the analogous √φ lift.
     let sqrt_cov_scale =
         sampling_sqrt_covariance_scale(&fit, "standard bounded-coefficient posterior")?;
-    let n_total = cfg.n_samples.saturating_mul(cfg.n_chains);
+    let n_total = cfg.n_samples.saturating_mul(NUTS_CHAINS);
     let samples = gam_models::fit_orchestration::drivers::sample_bounded_latent_posterior_internal(
         &mode,
         user_hessian,
@@ -1123,6 +1125,7 @@ fn sample_standard_bounded(
         rhat: 1.0,
         ess: n_total as f64,
         converged: true,
+        warmup_transitions: 0,
         sampler: PosteriorSampler::Laplace,
         covariance: InferenceCovarianceMode::Conditional,
     })
@@ -1193,7 +1196,7 @@ fn sample_standard_truncated(
         sqrt_cov_scale,
         &constrained.constraints,
         cfg.n_samples,
-        cfg.n_chains,
+        NUTS_CHAINS,
         chain_stream_seed(cfg.seed, 0, 0x7290_C047_5D6E_B14Du64),
     )?;
     // Reflective HMC draws are iid only while no wall is hit; an active
@@ -1202,8 +1205,8 @@ fn sample_standard_truncated(
     // iid triple (the sampler stacks rows chain-major: chain*n_samples+draw).
     // Diagnose the active Markov state before lifting: a rectangular gauge can
     // add deterministic raw coordinates whose zero variance has no R-hat.
-    let mut chains = ndarray::Array3::<f64>::zeros((cfg.n_chains, cfg.n_samples, p));
-    for chain in 0..cfg.n_chains {
+    let mut chains = ndarray::Array3::<f64>::zeros((NUTS_CHAINS, cfg.n_samples, p));
+    for chain in 0..NUTS_CHAINS {
         for draw in 0..cfg.n_samples {
             let row = chain * cfg.n_samples + draw;
             for j in 0..p {
@@ -1239,6 +1242,7 @@ fn sample_standard_truncated(
         rhat,
         ess,
         converged,
+        warmup_transitions: 0,
         sampler: PosteriorSampler::TruncatedLaplaceHmc,
         covariance: InferenceCovarianceMode::Conditional,
     })

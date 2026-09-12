@@ -32,8 +32,6 @@ model.sample(
     data,
     *,
     samples: int | None = None,
-    warmup:  int | None = None,
-    chains:  int | None = None,
     seed:    int | None = None,
 ) -> PosteriorSamples
 ```
@@ -42,11 +40,12 @@ model.sample(
 | --- | --- | --- |
 | `data` | required | Table-like input matching the training schema. Survival models also consume the entry/exit/event columns. |
 | `samples` | derived from coefficient count | Post-warmup draws per chain. |
-| `warmup` | matches `samples` | Warmup iterations per chain (discarded). |
-| `chains` | `2` if `p <= 50`, else `4` | Independent chains. |
 | `seed` | `42` | RNG seed consumed by the sampler. |
 
-Total returned draws are `chains * samples`.
+Every run uses two chains, the fewest from which split R-hat can see chains
+that disagree, so it returns `2 * samples` draws. Warmup has no count: it
+ends when the step size and metric have stabilized and the chains meet the
+convergence targets below.
 
 ## Posterior predictive replicates
 
@@ -127,7 +126,7 @@ the conditional `phi * H_penalized^{-1}` from the saved penalized Hessian's
 Cholesky factor and the saved dispersion scale — the same choice
 `summary()` makes, reported in `covariance_source`. Every Laplace draw set
 reports `rhat == 1.0`,
-`ess == chains * samples`, and `converged == True` by construction: no chain
+`ess == 2 * samples`, and `converged == True` by construction: no chain
 ran, so those numbers diagnose nothing. The `PosteriorSamples` API is
 identical either way.
 
@@ -160,7 +159,9 @@ Fields:
 | `target_accept` | `float` |
 | `seed` | `int` |
 
-`posterior.config.to_dict()` returns the same fields as a plain dict.
+`n_warmup` is the warmup the run spent per chain (`0` for independent
+draws), and `n_chains` is always `2`. `posterior.config.to_dict()` returns
+the same fields as a plain dict.
 
 ## PosteriorSamples
 
@@ -174,8 +175,8 @@ Frozen dataclass holding the draws and convergence diagnostics.
 | `coefficient_names` | `tuple[str, ...]` | Currently emitted as `("beta_0", "beta_1", ...)`. |
 | `mean`, `std` | `numpy.ndarray` | Per-coefficient posterior mean and standard deviation. |
 | `rhat` | `float` | Maximum split-Rhat. `1.0` exactly for Laplace draws. |
-| `ess` | `float` | Minimum effective sample size across coefficients. For Laplace draws this is `chains * samples`. |
-| `converged` | `bool` | Sampler convergence flag. Laplace draws set this to `True`; most NUTS / Gibbs paths require `rhat < 1.1` and enough ESS. |
+| `ess` | `float` | Minimum effective sample size across coefficients. For Laplace draws this is `2 * samples`. |
+| `converged` | `bool` | Sampler convergence flag. Laplace draws set this to `True`; NUTS and Gibbs paths require `rhat < 1.1` and `ess > 100`. |
 | `method` | `str` | `"nuts"`, `"polya-gamma"`, `"laplace"`, or `"truncated-laplace"` — the sampler that ran (table above). |
 | `exact` | `bool` | Whether `method` targets the exact posterior; the value behind `is_exact`. |
 | `covariance_source` | `str` | `"conditional"` (MCMC routes, and Laplace draws on a fit without a smoothing correction) or `"smoothing-corrected"` (Laplace draws from the published `Vp`). Same vocabulary as `predict()`. |
@@ -282,12 +283,16 @@ use `Model.predict(...)` for those.
 ## Convergence
 
 `rhat < 1.01` is typical for well-mixed NUTS chains; `rhat < 1.1` is
-the split-Rhat threshold used by `converged`. Standard NUTS and
-Polya-Gamma Gibbs paths also require `ess > 100`; survival NUTS currently
-uses the R-hat threshold only. If a NUTS run looks unhealthy:
+the split-Rhat threshold used by `converged`. NUTS and Polya-Gamma Gibbs
+paths also require `ess > 100`. The same two targets end warmup. NUTS warms
+up in doubling windows until its step size and metric have stabilized and a
+window meets both targets; Gibbs burns in the same way. When two consecutive
+windows have chains that each mix on their own but disagree with one
+another, the run ends with an error rather than warming up forever. If a run
+looks unhealthy:
 
 1. Set `seed=` to retry from a different initialisation.
-2. Increase `warmup` and `samples`.
+2. Increase `samples`.
 3. Inspect `posterior.plot_trace(...)`.
 
 ## Default sampling parameters
@@ -297,9 +302,7 @@ from the coefficient count `p`:
 
 | Parameter | Rule |
 | --- | --- |
-| `n_chains` | `2` if `p <= 50`, else `4`. |
 | `n_samples` | `clamp(floor(100 * p * (1 + 2 * max(1, sqrt(p))) * 1.5), 500, 10_000)`. |
-| `n_warmup` | Same as `n_samples`. |
 | `target_accept` | `0.9`, not user-settable; `robust_target_accept` floors it by dimension and caps it. |
 | `seed` | `42` unless `seed=` is passed. |
 

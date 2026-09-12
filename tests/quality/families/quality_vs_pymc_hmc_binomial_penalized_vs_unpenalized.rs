@@ -285,8 +285,6 @@ fn gam_penalized_binomial_posterior_matches_pymc_and_concentrates_with_lambda() 
     let lambdas = [0.1_f64, 1.0, 10.0];
     let nuts_cfg = NutsConfig {
         n_samples: 1500,
-        nwarmup: 1000,
-        n_chains: 4,
         target_accept: 0.9,
         seed: 20_260_529,
     };
@@ -330,7 +328,7 @@ fn gam_penalized_binomial_posterior_matches_pymc_and_concentrates_with_lambda() 
             "gam posterior failed to converge at lambda={lam}: R-hat={:.4}",
             res.rhat
         );
-        let total_draws = (nuts_cfg.n_samples * nuts_cfg.n_chains) as f64;
+        let total_draws = (nuts_cfg.n_samples * gam::hmc::NUTS_CHAINS) as f64;
         assert!(
             res.ess > 0.05 * total_draws,
             "gam effective sample size too low at lambda={lam}: ess={:.1} of {total_draws} draws",

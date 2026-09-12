@@ -75,7 +75,7 @@ def _sample(family: str) -> Any:
     }[family]
     data = {"x": x, "y": response}
     model = gamfit.fit(data, "y ~ s(x)", family=family)
-    return model.sample(data, seed=3, samples=800, chains=2)
+    return model.sample(data, seed=3, samples=800)
 
 
 def test_gaussian_identity_standard_fit_is_badged_laplace() -> None:

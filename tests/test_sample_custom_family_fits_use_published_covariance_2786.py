@@ -36,7 +36,7 @@ def test_gaussian_location_scale_sample_matches_summary_standard_errors() -> Non
     data = _data()
     model = gamfit.fit(data, "y ~ s(x)", family="gaussian", noise_formula="s(x)")
     summary = model.summary()
-    posterior = model.sample(data, seed=3, samples=_DRAWS, chains=1)
+    posterior = model.sample(data, seed=3, samples=_DRAWS)
 
     assert posterior.covariance_source in {"smoothing-corrected", "conditional"}
     assert posterior.covariance_source == summary.covariance_kind, (

@@ -39,7 +39,8 @@ use gam_solve::estimate::{UnifiedFitResult, validate_explicit_dense_hessian_for_
 use gam_solve::model_types::InferenceCovarianceMode;
 use general_mcmc::generic_hmc::HamiltonianTarget;
 pub use general_mcmc::generic_nuts::NUTSMassMatrixConfig;
-use general_mcmc::generic_nuts::{GenericNUTS, MassMatrixAdaptation};
+use general_mcmc::generic_nuts::{GenericNUTS, MassMatrixAdaptation, MixingTargets};
+use general_mcmc::stats::split_rhat_mean_ess;
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, Axis, s};
 use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
@@ -1134,7 +1135,7 @@ mod tests {
         }
     }
 
-    use super::{FamilyNutsInputs, GlmFlatInputs, NutsConfig, NutsPosterior, NutsResult, SharedData, exact_glm_logp_and_grad_into, firth_jeffreys_logp_and_grad, laplace_directional_cubic_diagnostic, laplace_skewness_threshold, laplace_trustworthiness_from_skewness, run_logit_polya_gamma_gibbs, run_nuts_sampling_flattened_family};
+    use super::{FamilyNutsInputs, GlmFlatInputs, NUTS_CHAINS, NutsConfig, NutsPosterior, NutsResult, SharedData, exact_glm_logp_and_grad_into, firth_jeffreys_logp_and_grad, laplace_directional_cubic_diagnostic, laplace_skewness_threshold, laplace_trustworthiness_from_skewness, run_logit_polya_gamma_gibbs, run_nuts_sampling_flattened_family};
     use gam_linalg::matrix::DesignMatrix;
     use gam_models::survival::{PenaltyBlocks, SurvivalMonotonicityPenalty, SurvivalSpec};
     use gam_problem::types::{GlmLikelihoodSpec, InverseLink, LikelihoodScaleMetadata, LikelihoodSpec, LogLikelihoodNormalization, ResponseFamily, StandardLink};
@@ -1157,6 +1158,7 @@ mod tests {
             rhat: 1.0,
             ess: 4.0,
             converged: true,
+            warmup_transitions: 0,
             sampler: PosteriorSampler::Nuts,
             covariance: InferenceCovarianceMode::Conditional,
         };
@@ -1954,8 +1956,6 @@ mod tests {
         let mode = array![0.0, 0.0];
         let cfg = NutsConfig {
             n_samples: 30,
-            nwarmup: 30,
-            n_chains: 2,
             target_accept: 0.8,
             seed: 123,
         };
@@ -1969,7 +1969,8 @@ mod tests {
         )
         .expect("pg gibbs should run");
         assert_eq!(out.samples.ncols(), 2);
-        assert_eq!(out.samples.nrows(), cfg.n_samples * cfg.n_chains);
+        assert_eq!(out.samples.nrows(), cfg.n_samples * NUTS_CHAINS);
+        assert!(out.warmup_transitions >= 4, "burn-in ran {} sweeps", out.warmup_transitions);
         assert!(out.samples.iter().all(|v| v.is_finite()));
         assert!(out.posterior_mean.iter().all(|v| v.is_finite()));
         assert!(
@@ -2001,8 +2002,6 @@ mod tests {
         let non_spdhessian = array![[0.0, 0.0], [0.0, 0.0]];
         let cfg = NutsConfig {
             n_samples: 20,
-            nwarmup: 20,
-            n_chains: 2,
             target_accept: 0.8,
             seed: 456,
         };
@@ -2026,7 +2025,7 @@ mod tests {
             &cfg,
         )
         .expect("dispatch should use PG Gibbs and not require Hessian factorization");
-        assert_eq!(out.samples.nrows(), cfg.n_samples * cfg.n_chains);
+        assert_eq!(out.samples.nrows(), cfg.n_samples * NUTS_CHAINS);
         assert!(out.samples.iter().all(|v| v.is_finite()));
     }
 
@@ -2055,8 +2054,6 @@ mod tests {
         let non_spd_hessian = array![[0.0, 0.0], [0.0, 0.0]];
         let cfg = NutsConfig {
             n_samples: 4000,
-            nwarmup: 20,
-            n_chains: 2,
             target_accept: 0.8,
             seed: 20260911,
         };
@@ -2104,7 +2101,7 @@ mod tests {
         assert!(out.sampler.targets_exact_posterior());
         assert_eq!(out.sampler.label(), "conjugate-gaussian");
         assert_eq!(out.rhat, 1.0);
-        assert_eq!(out.ess, (cfg.n_samples * cfg.n_chains) as f64);
+        assert_eq!(out.ess, (cfg.n_samples * NUTS_CHAINS) as f64);
         assert!(out.converged);
         for j in 0..2 {
             assert!(
@@ -2121,7 +2118,7 @@ mod tests {
             );
         }
 
-        let draws = cfg.n_samples * cfg.n_chains;
+        let draws = cfg.n_samples * NUTS_CHAINS;
         assert_eq!(out.samples.dim(), (draws, 2));
         assert!(out.samples.iter().all(|v| v.is_finite()));
         let sample_mean = out
@@ -2157,8 +2154,6 @@ mod tests {
         let non_spdhessian = array![[0.0, 0.0], [0.0, 0.0]];
         let cfg = NutsConfig {
             n_samples: 20,
-            nwarmup: 20,
-            n_chains: 2,
             target_accept: 0.8,
             seed: 654,
         };
@@ -2202,8 +2197,6 @@ mod tests {
         let hessian = array![[1.5, 0.1], [0.1, 1.2]];
         let cfg = NutsConfig {
             n_samples: 20,
-            nwarmup: 20,
-            n_chains: 2,
             target_accept: 0.8,
             seed: 111,
         };
@@ -2249,8 +2242,6 @@ mod tests {
         let hessian = array![[1.25]];
         let cfg = NutsConfig {
             n_samples: 10,
-            nwarmup: 10,
-            n_chains: 1,
             target_accept: 1.0,
             seed: 222,
         };
@@ -2294,8 +2285,6 @@ mod tests {
         for bad_samples in [0usize, 1, 2, 3] {
             let cfg = NutsConfig {
                 n_samples: bad_samples,
-                nwarmup: 10,
-                n_chains: 2,
                 target_accept: 0.8,
                 seed: 222,
             };
@@ -2323,46 +2312,21 @@ mod tests {
     }
 
     #[test]
-    fn polya_gamma_gibbs_rejects_degenerate_counts_but_accepts_single_chain() {
+    fn polya_gamma_gibbs_rejects_too_few_samples() {
         // Issue #399 (missed path): the canonical unit-weight Bernoulli-logit
         // GAM auto-selects the hand-rolled Pólya-Gamma Gibbs sampler, NOT the
         // general-mcmc NUTS engine. Pre-fix that path never validated
-        // n_samples/n_chains, so `chains=0` / `samples=0` silently returned a
-        // degenerate empty `(0, p)` posterior instead of the typed error the
-        // NUTS path raised — a divergent contract on one public API. Assert PG
-        // now rejects the degenerate counts up front, and (mirroring NUTS)
-        // still accepts a single chain.
+        // n_samples, so `samples=0` silently returned a degenerate empty
+        // `(0, p)` posterior instead of the typed error the NUTS path raised —
+        // a divergent contract on one public API.
         let x = array![[1.0], [1.0], [1.0], [1.0]];
         let y = array![1.0, 0.0, 1.0, 0.0];
         let weights = array![1.0, 1.0, 1.0, 1.0];
         let penalty = array![[0.25]];
         let mode = array![0.0];
 
-        let zero_chain_cfg = NutsConfig {
-            n_samples: 20,
-            nwarmup: 10,
-            n_chains: 0,
-            target_accept: 0.8,
-            seed: 7,
-        };
-        let err = super::run_logit_polya_gamma_gibbs(
-            x.view(),
-            y.view(),
-            weights.view(),
-            penalty.view(),
-            mode.view(),
-            &zero_chain_cfg,
-        )
-        .expect_err("PG Gibbs must reject zero chains up front, not return an empty posterior");
-        assert!(
-            err.contains("n_chains must be >= 1"),
-            "PG n_chains=0 gave unexpected error: {err}"
-        );
-
         let zero_sample_cfg = NutsConfig {
             n_samples: 0,
-            nwarmup: 10,
-            n_chains: 2,
             target_accept: 0.8,
             seed: 7,
         };
@@ -2378,28 +2342,6 @@ mod tests {
         assert!(
             err.contains("n_samples must be >= 4"),
             "PG n_samples=0 gave unexpected error: {err}"
-        );
-
-        let single_chain_cfg = NutsConfig {
-            n_samples: 20,
-            nwarmup: 10,
-            n_chains: 1,
-            target_accept: 0.8,
-            seed: 7,
-        };
-        let result = super::run_logit_polya_gamma_gibbs(
-            x.view(),
-            y.view(),
-            weights.view(),
-            penalty.view(),
-            mode.view(),
-            &single_chain_cfg,
-        )
-        .expect("PG Gibbs must accept a single chain and return draws");
-        assert_eq!(
-            result.samples.nrows(),
-            20,
-            "single-chain PG run should return all 20 requested draws"
         );
     }
 
@@ -2434,82 +2376,6 @@ mod tests {
         assert_eq!(super::compute_split_rhat_and_ess(&agree).0, 1.0);
         let stuck = ndarray::Array3::from_shape_fn((2, 8, 1), |(c, _, _)| 0.1 + c as f64);
         assert_eq!(super::compute_split_rhat_and_ess(&stuck).0, f64::INFINITY);
-    }
-
-    #[test]
-    fn run_nuts_sampling_rejects_zero_chains_but_accepts_single_chain() {
-        // Issue #399: only `chains=0` is degenerate — it produces an empty
-        // initial-position vector and panics in `ndarray::stack`, so it must be
-        // rejected up front with a typed error.
-        //
-        // A *single* chain, by contrast, is a supported, tested configuration
-        // (`tests/test_sample_seed_is_reproducible.py`,
-        // `tests/test_posterior_save_no_extension_roundtrip.py`,
-        // `tests/test_penalty_sampling_survival_diagnostics_regressions.py` all
-        // sample with `chains=1`): the engine splits each chain in half, so one
-        // chain still yields the two split-chains the R-hat path needs, and
-        // `compute_split_rhat_and_ess` early-returns gracefully for
-        // `n_chains < 2`. The original #399 fix wrongly raised the floor to 2
-        // and regressed those tests; this asserts `chains=1` *returns draws*.
-        let x = array![[1.0], [1.0], [1.0]];
-        let y = array![0.5, -0.5, 1.0];
-        let weights = array![1.0, 1.0, 1.0];
-        let penalty = array![[0.25]];
-        let mode = array![0.0];
-        let hessian = array![[1.25]];
-
-        let zero_chain_cfg = NutsConfig {
-            n_samples: 50,
-            nwarmup: 10,
-            n_chains: 0,
-            target_accept: 0.8,
-            seed: 222,
-        };
-        let err = super::run_nuts_sampling(
-            x.view(),
-            y.view(),
-            weights.view(),
-            penalty.view(),
-            mode.view(),
-            hessian.view(),
-            nuts_test_likelihood(NutsFamily::Gaussian, 1.0),
-            gam_solve::estimate::Dispersion::UNIT,
-            false,
-            None,
-            &zero_chain_cfg,
-        )
-        .expect_err("zero chains must be rejected before sampling");
-        assert!(
-            err.contains("n_chains must be >= 1"),
-            "n_chains=0 gave unexpected error: {err}"
-        );
-
-        let single_chain_cfg = NutsConfig {
-            n_samples: 50,
-            nwarmup: 10,
-            n_chains: 1,
-            target_accept: 0.8,
-            seed: 222,
-        };
-        let result = super::run_nuts_sampling(
-            x.view(),
-            y.view(),
-            weights.view(),
-            penalty.view(),
-            mode.view(),
-            hessian.view(),
-            nuts_test_likelihood(NutsFamily::Gaussian, 1.0),
-            gam_solve::estimate::Dispersion::UNIT,
-            false,
-            None,
-            &single_chain_cfg,
-        )
-        .expect("a single chain is a supported configuration and must return draws");
-        assert_eq!(
-            result.samples.nrows(),
-            50,
-            "single-chain run should return all 50 requested draws"
-        );
     }
 
     #[test]
@@ -3286,15 +3152,13 @@ impl HamiltonianTarget<Array1<f64>> for NutsPosterior {
     }
 }
 
-/// Configuration for NUTS sampling.
+/// Configuration for NUTS sampling. It carries no warmup count and no chain
+/// count: warmup ends when adaptation has stabilized and the chains agree, and
+/// every run uses [`NUTS_CHAINS`] chains.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NutsConfig {
-    /// Number of samples to collect (after warmup)
+    /// Draws to collect per chain after warmup
     pub n_samples: usize,
-    /// Number of warmup samples to discard
-    pub nwarmup: usize,
-    /// Number of parallel chains
-    pub n_chains: usize,
     /// Target acceptance probability (0.6-0.9 recommended)
     pub target_accept: f64,
     /// Seed for deterministic chain initialization
@@ -3327,30 +3191,16 @@ fn validate_nuts_target_accept(target_accept: f64) -> Result<(), HmcError> {
 /// panic across the FFI boundary instead of returning a typed error.
 const MIN_NUTS_SAMPLES: usize = 4;
 
-/// Minimum number of parallel chains. With zero chains the engine receives an
-/// empty initial-position vector and panics in `ndarray::stack` (and the
-/// Laplace fallback would produce an empty `(0, p)` posterior). A *single*
-/// chain is well-defined and is a supported, tested configuration: the engine
-/// splits each chain in half for the diagnostic, so one chain still yields the
-/// two split-chains the R-hat path needs, and `compute_split_rhat_and_ess`
-/// gracefully early-returns for `n_chains < 2`. We therefore only reject the
-/// genuinely-degenerate `n_chains == 0`.
-const MIN_NUTS_CHAINS: usize = 1;
+/// Chains per sampler run: two, the fewest from which a between-chain variance
+/// exists, which split R-hat needs to tell chains that sample different regions
+/// apart from one posterior.
+pub const NUTS_CHAINS: usize = 2;
 
-/// Validate the draw / chain counts of a NUTS configuration up front, mirroring
-/// `validate_nuts_target_accept`, so that out-of-range values surface as a typed
-/// `HmcError::InvalidConfig` *before* the sampling engine is constructed rather
-/// than as a panic caught at the FFI boundary.
+/// Validate the draw count of a NUTS configuration up front, mirroring
+/// `validate_nuts_target_accept`, so that an out-of-range value surfaces as a
+/// typed `HmcError::InvalidConfig` *before* the sampling engine is constructed
+/// rather than as a panic caught at the FFI boundary.
 fn validate_nuts_draws(config: &NutsConfig) -> Result<(), HmcError> {
-    if config.n_chains < MIN_NUTS_CHAINS {
-        return Err(HmcError::InvalidConfig {
-            reason: format!(
-                "NUTS n_chains must be >= {MIN_NUTS_CHAINS}; with zero chains the \
-                 sampler has no initial positions to run, got {}",
-                config.n_chains
-            ),
-        });
-    }
     if config.n_samples < MIN_NUTS_SAMPLES {
         return Err(HmcError::InvalidConfig {
             reason: format!(
@@ -3450,12 +3300,6 @@ const LOW_DIM_TARGET_ACCEPT_FLOOR: f64 = 0.90;
 /// 1 collapses the step size and stalls mixing, so we cap the requested value.
 const MAX_TARGET_ACCEPT: f64 = 0.95;
 
-/// Minimum warmup length below which mass-matrix adaptation is disabled: the
-/// windowed (Stan-style) adaptation schedule needs enough warmup iterations to
-/// populate its initial / terminal buffers, otherwise the estimated metric is
-/// noise. With fewer warmup steps the sampler runs on the identity metric.
-const MIN_WARMUP_FOR_MASS_ADAPT: usize = 80;
-
 /// Largest parameter dimension for which the engine attempts *dense* mass-matrix
 /// adaptation; above this it falls back to a diagonal metric (an `O(p²)` dense
 /// metric is neither affordable nor reliably estimable from limited warmup).
@@ -3491,7 +3335,7 @@ fn jittered_initial_positions(
     scale: f64,
     stream: u64,
 ) -> Vec<Array1<f64>> {
-    (0..config.n_chains)
+    (0..NUTS_CHAINS)
         .map(|chain| {
             let mut rng = StdRng::seed_from_u64(chain_stream_seed(config.seed, chain, stream));
             Array1::from_shape_fn(dim, |_| sample_standard_normal(&mut rng) * scale)
@@ -3499,18 +3343,14 @@ fn jittered_initial_positions(
         .collect()
 }
 
-fn robust_mass_matrix_config(dim: usize, nwarmup: usize) -> NUTSMassMatrixConfig {
-    if nwarmup < MIN_WARMUP_FOR_MASS_ADAPT {
-        return NUTSMassMatrixConfig::disabled();
-    }
-    let start_buffer = (nwarmup / 8).clamp(35, 180);
-    let end_buffer = (nwarmup / 5).clamp(50, 250);
-    let initial_window = (nwarmup / 20).clamp(10, 60);
+/// Diagonal metric adaptation for the mean families. The open warmup chooses its
+/// own windows, so the fixed-schedule buffers stay zero.
+fn robust_mass_matrix_config(dim: usize) -> NUTSMassMatrixConfig {
     NUTSMassMatrixConfig {
         adaptation: MassMatrixAdaptation::Diagonal,
-        start_buffer,
-        end_buffer,
-        initial_window,
+        start_buffer: 0,
+        end_buffer: 0,
+        initial_window: 0,
         regularize: if dim > HIGH_DIM_THRESHOLD {
             MASS_REGULARIZE_HIGH_DIM
         } else {
@@ -3521,20 +3361,15 @@ fn robust_mass_matrix_config(dim: usize, nwarmup: usize) -> NUTSMassMatrixConfig
     }
 }
 
-fn robust_survival_mass_matrix_config(dim: usize, nwarmup: usize) -> NUTSMassMatrixConfig {
-    if nwarmup < MIN_WARMUP_FOR_MASS_ADAPT {
-        return NUTSMassMatrixConfig::disabled();
-    }
-    // Survival posteriors with censoring/rare events are often skewed; this
-    // configuration uses diagonal adaptation.
-    let start_buffer = (nwarmup / 7).clamp(40, 200);
-    let end_buffer = (nwarmup / 4).clamp(60, 280);
-    let initial_window = (nwarmup / 20).clamp(10, 60);
+/// Diagonal metric adaptation for survival posteriors, which censoring and rare
+/// events often skew. The open warmup chooses its own windows, so the
+/// fixed-schedule buffers stay zero.
+fn robust_survival_mass_matrix_config(dim: usize) -> NUTSMassMatrixConfig {
     NUTSMassMatrixConfig {
         adaptation: MassMatrixAdaptation::Diagonal,
-        start_buffer,
-        end_buffer,
-        initial_window,
+        start_buffer: 0,
+        end_buffer: 0,
+        initial_window: 0,
         regularize: if dim > HIGH_DIM_THRESHOLD {
             SURVIVAL_MASS_REGULARIZE_HIGH_DIM
         } else {
@@ -3549,8 +3384,6 @@ impl Default for NutsConfig {
     fn default() -> Self {
         Self {
             n_samples: 1000,
-            nwarmup: 500,
-            n_chains: 4,
             target_accept: 0.9,
             seed: 42,
         }
@@ -3558,7 +3391,7 @@ impl Default for NutsConfig {
 }
 
 impl NutsConfig {
-    /// Create a config with sample counts tuned for the model dimension.
+    /// Create a config with a draw count tuned for the model dimension.
     ///
     /// Higher dimensions need more samples because:
     /// - ESS decreases with dimension (autocorrelation grows)
@@ -3578,16 +3411,8 @@ impl NutsConfig {
         // Clamp to reasonable range [500, 10000]
         let n_samples = raw_samples.clamp(500, 10_000);
 
-        // Warmup ≈ samples (standard practice for adaptation)
-        let nwarmup = n_samples;
-
-        // More chains for higher dims (better R-hat estimation)
-        let n_chains = if n_params > 50 { 4 } else { 2 };
-
         Self {
             n_samples,
-            nwarmup,
-            n_chains,
             target_accept: 0.9,
             seed: 42,
         }
@@ -3662,8 +3487,11 @@ pub struct NutsResult {
     pub rhat: f64,
     /// Effective sample size
     pub ess: f64,
-    /// Whether sampling converged (R-hat < 1.1)
+    /// Whether sampling converged (split R-hat below 1.1 and ESS above 100)
     pub converged: bool,
+    /// Warmup transitions per chain before the draws: the open warmup of NUTS,
+    /// the burn-in of Pólya-Gamma Gibbs, and 0 for independent draws
+    pub warmup_transitions: usize,
     /// Which sampler produced the draws.
     pub sampler: PosteriorSampler,
     /// Which coefficient covariance the draws describe. MCMC on the exact
@@ -3673,23 +3501,22 @@ pub struct NutsResult {
     pub covariance: InferenceCovarianceMode,
 }
 
-#[derive(Clone, Copy)]
-struct NutsConvergenceThresholds {
-    max_rhat: f64,
-    min_ess: Option<f64>,
+/// Every coordinate's split R-hat below 1.1 and ESS above 100: when a sampler run
+/// counts as converged, and when an open warmup or a Gibbs burn-in hands over to
+/// collecting draws.
+const NUTS_CONVERGENCE: MixingTargets = MixingTargets {
+    max_rhat: 1.1,
+    min_ess: 100.0,
+};
+
+#[inline]
+fn mixing_converged(rhat: f64, ess: f64) -> bool {
+    rhat < NUTS_CONVERGENCE.max_rhat && ess > NUTS_CONVERGENCE.min_ess
 }
 
-impl NutsConvergenceThresholds {
-    #[inline]
-    fn converged(self, rhat: f64, ess: f64) -> bool {
-        let rhat_ok = rhat < self.max_rhat;
-        match self.min_ess {
-            Some(min_ess) => rhat_ok && ess > min_ess,
-            None => rhat_ok,
-        }
-    }
-}
-
+/// Runs the whitened target until its adaptation has stabilized and its chains
+/// meet [`NUTS_CONVERGENCE`], then collects `config.n_samples` draws per chain.
+/// Returns the draws, a run summary, and the warmup transitions per chain.
 fn run_whitened_nuts_samples<Target>(
     target: Target,
     initial_positions: Vec<Array1<f64>>,
@@ -3698,7 +3525,7 @@ fn run_whitened_nuts_samples<Target>(
     mass_cfg: NUTSMassMatrixConfig,
     transition_seed_stream: u64,
     sampling_error_label: &str,
-) -> Result<(Array3<f64>, String), String>
+) -> Result<(Array3<f64>, String, usize), String>
 where
     Target: HamiltonianTarget<Array1<f64>> + Sync + Send,
 {
@@ -3710,10 +3537,17 @@ where
     )
     .set_seed(nuts_transition_seed(config.seed, transition_seed_stream));
 
-    let (samples_array, run_stats) = sampler
-        .run_progress(config.n_samples, config.nwarmup)
+    let (samples_array, run_stats, warmup) = sampler
+        .run_adaptive(config.n_samples, NUTS_CONVERGENCE)
         .map_err(|e| format!("{sampling_error_label}: {e}"))?;
-    Ok((samples_array, run_stats.to_string()))
+    Ok((
+        samples_array,
+        format!(
+            "{run_stats}\nwarmup: {} transitions per chain over {} windows",
+            warmup.transitions, warmup.windows
+        ),
+        warmup.transitions,
+    ))
 }
 
 fn unwhiten_samples(
@@ -3747,12 +3581,11 @@ fn summarize_unwhitened_nuts_samples(
     samples: Array2<f64>,
     samples_array: &Array3<f64>,
     empty_mean: Array1<f64>,
-    convergence: NutsConvergenceThresholds,
+    warmup_transitions: usize,
 ) -> NutsResult {
     let posterior_mean = samples.mean_axis(Axis(0)).unwrap_or(empty_mean);
     let posterior_std = samples.std_axis(Axis(0), 0.0);
     let (rhat, ess) = compute_split_rhat_and_ess(samples_array);
-    let converged = convergence.converged(rhat, ess);
 
     NutsResult {
         samples,
@@ -3760,7 +3593,8 @@ fn summarize_unwhitened_nuts_samples(
         posterior_std,
         rhat,
         ess,
-        converged,
+        converged: mixing_converged(rhat, ess),
+        warmup_transitions,
         sampler: PosteriorSampler::Nuts,
         covariance: InferenceCovarianceMode::Conditional,
     }
@@ -3777,12 +3611,11 @@ fn run_whitened_nuts_result<Target>(
     transition_seed_stream: u64,
     sampling_error_label: &str,
     empty_mean: Array1<f64>,
-    convergence: NutsConvergenceThresholds,
 ) -> Result<(NutsResult, String), String>
 where
     Target: HamiltonianTarget<Array1<f64>> + Sync + Send,
 {
-    let (samples_array, run_stats) = run_whitened_nuts_samples(
+    let (samples_array, run_stats, warmup_transitions) = run_whitened_nuts_samples(
         target,
         initial_positions,
         config,
@@ -3792,8 +3625,12 @@ where
         sampling_error_label,
     )?;
     let samples = unwhiten_samples(&samples_array, mode, chol, dim, 0);
-    let result =
-        summarize_unwhitened_nuts_samples(samples, &samples_array, empty_mean, convergence);
+    let result = summarize_unwhitened_nuts_samples(
+        samples,
+        &samples_array,
+        empty_mean,
+        warmup_transitions,
+    );
     Ok((result, run_stats))
 }
 
@@ -3888,20 +3725,17 @@ pub(crate) fn run_logit_polya_gamma_gibbs(
     }
     validate_binary_responses("run_logit_polya_gamma_gibbs", &y, &weights).map_err(String::from)?;
     // Issue #399: the auto-selected PG-Gibbs path is reached for the canonical
-    // unit-weight Bernoulli-logit GAM. Without this guard, `n_chains == 0` /
-    // `n_samples == 0` would not panic but silently return a degenerate empty
-    // `(0, p)` posterior, diverging from the typed error the NUTS path raises
-    // for the same inputs. Route it through the shared validator so every
-    // `Model.sample` surface rejects degenerate draw/chain counts identically.
+    // unit-weight Bernoulli-logit GAM. Without this guard, `n_samples == 0` would
+    // not panic but silently return a degenerate empty `(0, p)` posterior,
+    // diverging from the typed error the NUTS path raises for the same inputs.
+    // Route it through the shared validator so every `Model.sample` surface
+    // rejects degenerate draw counts identically.
     validate_nuts_config(config).map_err(String::from)?;
-
-    let n_iter = config.nwarmup + config.n_samples;
 
     // b = X^T (y - 1/2), constant across iterations.
     let kappa = y.mapv(|v| v - 0.5);
     let rhs_b = fast_atv(&x, &kappa);
 
-    let mut samples_array = Array3::<f64>::zeros((config.n_chains, config.n_samples, p));
     let mut eta = Array1::<f64>::zeros(n);
     let mut omega = Array1::<f64>::ones(n);
     let pg_shapes = Array1::<u32>::from_elem(n, 1);
@@ -3913,67 +3747,129 @@ pub(crate) fn run_logit_polya_gamma_gibbs(
     let mut z = Array1::<f64>::zeros(p);
     let mut noise = Array1::<f64>::zeros(p);
 
-    for chain in 0..config.n_chains {
-        let mut init_rng =
-            StdRng::seed_from_u64(chain_stream_seed(config.seed, chain, 0xB3C4_5A1F_8E9D_7632));
-        let mut draw_rng =
-            StdRng::seed_from_u64(chain_stream_seed(config.seed, chain, 0x17A9_26D5_4C1B_E083));
-        let mut beta = mode.to_owned();
-        // Small jitter so chains are not perfectly coupled.
-        for j in 0..p {
-            beta[j] += 0.05 * sample_standard_normal(&mut init_rng);
-        }
-
-        for iter in 0..n_iter {
-            eta.assign(&gam_linalg::faer_ndarray::fast_av(&x, &beta));
-            draw_logit_pg1_omega(
-                pg_shapes.view(),
-                eta.view(),
-                gibbs_pg_seed(config.seed, chain, 0x4D94_DF4E_5D72_81AB, iter),
-                &mut omega,
-            )?;
-
-            // Build Xweighted = diag(sqrt(ω)) X and compute X^T Ω X via faer GEMM.
-            // Per-row scaling is fully independent across rows.
-            ndarray::Zip::from(xw.rows_mut())
-                .and(x.rows())
-                .and(&omega)
-                .par_for_each(|mut xw_row, x_row, omega_i| {
-                    let s = omega_i.sqrt();
-                    for j in 0..p {
-                        xw_row[j] = x_row[j] * s;
-                    }
-                });
-            fast_ata_into(&xw, &mut xt_omega_x);
-
-            q.assign(&penalty);
-            q += &xt_omega_x;
-
-            // β | ω,y ~ N(Q^{-1} b, Q^{-1})
-            let factor = q
-                .cholesky(Side::Lower)
-                .map_err(|e| format!("PG Gibbs failed to factor Q: {:?}", e))?;
-            mean.assign(&factor.solvevec(&rhs_b));
-
+    // Per chain: the coefficients, the normal-draw stream, and the sweep counter
+    // that seeds the Pólya-Gamma stream.
+    let mut chains: Vec<(Array1<f64>, StdRng, usize)> = (0..NUTS_CHAINS)
+        .map(|chain| {
+            let mut init_rng =
+                StdRng::seed_from_u64(chain_stream_seed(config.seed, chain, 0xB3C4_5A1F_8E9D_7632));
+            let draw_rng =
+                StdRng::seed_from_u64(chain_stream_seed(config.seed, chain, 0x17A9_26D5_4C1B_E083));
+            let mut beta = mode.to_owned();
+            // Small jitter so chains are not perfectly coupled.
             for j in 0..p {
-                z[j] = sample_standard_normal(&mut draw_rng);
+                beta[j] += 0.05 * sample_standard_normal(&mut init_rng);
             }
-            let l = factor.lower_triangular();
-            back_substitution_lower_transpose_guarded_into(&l, &z, &mut noise);
-            beta.assign(&(&mean + &noise));
+            (beta, draw_rng, 0)
+        })
+        .collect();
 
-            if iter >= config.nwarmup {
-                let keep_idx = iter - config.nwarmup;
-                samples_array
-                    .slice_mut(ndarray::s![chain, keep_idx, ..])
-                    .assign(&beta);
+    // One Gibbs sweep of a chain: ω | β, then β | ω.
+    let mut sweep = |chain: usize, state: &mut (Array1<f64>, StdRng, usize)| -> Result<(), String> {
+        let (beta, draw_rng, iter) = state;
+        eta.assign(&gam_linalg::faer_ndarray::fast_av(&x, &*beta));
+        draw_logit_pg1_omega(
+            pg_shapes.view(),
+            eta.view(),
+            gibbs_pg_seed(config.seed, chain, 0x4D94_DF4E_5D72_81AB, *iter),
+            &mut omega,
+        )?;
+
+        // Build Xweighted = diag(sqrt(ω)) X and compute X^T Ω X via faer GEMM.
+        // Per-row scaling is fully independent across rows.
+        ndarray::Zip::from(xw.rows_mut())
+            .and(x.rows())
+            .and(&omega)
+            .par_for_each(|mut xw_row, x_row, omega_i| {
+                let s = omega_i.sqrt();
+                for j in 0..p {
+                    xw_row[j] = x_row[j] * s;
+                }
+            });
+        fast_ata_into(&xw, &mut xt_omega_x);
+
+        q.assign(&penalty);
+        q += &xt_omega_x;
+
+        // β | ω,y ~ N(Q^{-1} b, Q^{-1})
+        let factor = q
+            .cholesky(Side::Lower)
+            .map_err(|e| format!("PG Gibbs failed to factor Q: {:?}", e))?;
+        mean.assign(&factor.solvevec(&rhs_b));
+
+        for j in 0..p {
+            z[j] = sample_standard_normal(draw_rng);
+        }
+        let l = factor.lower_triangular();
+        back_substitution_lower_transpose_guarded_into(&l, &z, &mut noise);
+        beta.assign(&(&mean + &noise));
+        *iter += 1;
+        Ok(())
+    };
+
+    // Burn-in runs in windows that double from the fewest draws split R-hat needs,
+    // and ends at the first window whose chains meet NUTS_CONVERGENCE. When every
+    // chain meets the ESS target on its own but the chains disagree in two windows
+    // in a row, they sample different regions and more burn-in cannot join them.
+    let mut window_len = MIN_NUTS_SAMPLES;
+    let mut burn_in = 0usize;
+    let mut disagreeing_windows = 0usize;
+    loop {
+        let mut window = Array3::<f64>::zeros((NUTS_CHAINS, window_len, p));
+        for (chain, state) in chains.iter_mut().enumerate() {
+            for t in 0..window_len {
+                sweep(chain, state)?;
+                window.slice_mut(ndarray::s![chain, t, ..]).assign(&state.0);
             }
+        }
+        burn_in += window_len;
+        let (rhat, ess) = compute_split_rhat_and_ess(&window);
+        if mixing_converged(rhat, ess) {
+            break;
+        }
+        let mut within_ess = Array1::<f64>::zeros(p);
+        for chain in 0..NUTS_CHAINS {
+            let (_, chain_ess) =
+                split_rhat_mean_ess(window.slice(ndarray::s![chain..chain + 1, .., ..]));
+            within_ess += &chain_ess;
+        }
+        if within_ess
+            .iter()
+            .all(|value| *value > NUTS_CONVERGENCE.min_ess)
+        {
+            disagreeing_windows += 1;
+            if disagreeing_windows == 2 {
+                return Err(HmcError::SamplingFailed {
+                    reason: format!(
+                        "Pólya-Gamma Gibbs chains disagree after {burn_in} burn-in sweeps per chain: split R-hat {rhat} stayed at or above {} in two consecutive windows whose chains each met the ESS target",
+                        NUTS_CONVERGENCE.max_rhat
+                    ),
+                }
+                .into());
+            }
+        } else {
+            disagreeing_windows = 0;
+        }
+        window_len = window_len.checked_mul(2).ok_or_else(|| {
+            format!(
+                "Pólya-Gamma Gibbs burn-in window cannot double again after {burn_in} sweeps per chain"
+            )
+        })?;
+    }
+
+    let mut samples_array = Array3::<f64>::zeros((NUTS_CHAINS, config.n_samples, p));
+    for (chain, state) in chains.iter_mut().enumerate() {
+        for s in 0..config.n_samples {
+            sweep(chain, state)?;
+            samples_array
+                .slice_mut(ndarray::s![chain, s, ..])
+                .assign(&state.0);
         }
     }
 
-    let total_samples = config.n_chains * config.n_samples;
+    let total_samples = NUTS_CHAINS * config.n_samples;
     let mut samples = Array2::<f64>::zeros((total_samples, p));
-    for chain in 0..config.n_chains {
+    for chain in 0..NUTS_CHAINS {
         for s in 0..config.n_samples {
             let idx = chain * config.n_samples + s;
             samples
@@ -3986,12 +3882,7 @@ pub(crate) fn run_logit_polya_gamma_gibbs(
         .mean_axis(Axis(0))
         .unwrap_or_else(|| Array1::zeros(p));
     let posterior_std = samples.std_axis(Axis(0), 0.0);
-    let (rhat, ess) = if config.n_chains >= 2 && config.n_samples >= 4 {
-        compute_split_rhat_and_ess(&samples_array)
-    } else {
-        (1.0, (total_samples as f64) * 0.5)
-    };
-    let converged = rhat < 1.1 && ess > 100.0;
+    let (rhat, ess) = compute_split_rhat_and_ess(&samples_array);
 
     Ok(NutsResult {
         samples,
@@ -3999,7 +3890,8 @@ pub(crate) fn run_logit_polya_gamma_gibbs(
         posterior_std,
         rhat,
         ess,
-        converged,
+        converged: mixing_converged(rhat, ess),
+        warmup_transitions: burn_in,
         sampler: PosteriorSampler::PolyaGammaGibbs,
         covariance: InferenceCovarianceMode::Conditional,
     })
@@ -4055,7 +3947,7 @@ pub(crate) fn run_nuts_sampling(
     let mode_arr = target.mode().clone();
 
     let initial_positions = jittered_initial_positions(config, dim, 0.1, 0x0F65_83B2_BC71_4D9E);
-    let mass_cfg = robust_mass_matrix_config(dim, config.nwarmup);
+    let mass_cfg = robust_mass_matrix_config(dim);
     let (result, run_stats) = run_whitened_nuts_result(
         target,
         &mode_arr,
@@ -4067,10 +3959,6 @@ pub(crate) fn run_nuts_sampling(
         0xF1D3_C2B5_A697_804E,
         "NUTS sampling failed",
         Array1::zeros(dim),
-        NutsConvergenceThresholds {
-            max_rhat: 1.1,
-            min_ess: Some(100.0),
-        },
     )?;
     log::info!("NUTS sampling complete: {}", run_stats);
 
@@ -4160,10 +4048,10 @@ fn run_conjugate_gaussian_sampling(
     let posterior_mean = chol.dot(&whitening.chol_t.dot(&rhs));
     let posterior_std = chol.map_axis(Axis(1), |row| row.dot(&row).sqrt());
 
-    let total_samples = config.n_chains * config.n_samples;
+    let total_samples = NUTS_CHAINS * config.n_samples;
     let mut samples = Array2::<f64>::zeros((total_samples, dim));
     let mut z = Array1::<f64>::zeros(dim);
-    for chain in 0..config.n_chains {
+    for chain in 0..NUTS_CHAINS {
         let mut rng = StdRng::seed_from_u64(chain_stream_seed(
             config.seed,
             chain,
@@ -4187,6 +4075,7 @@ fn run_conjugate_gaussian_sampling(
         rhat: 1.0,
         ess: total_samples as f64,
         converged: true,
+        warmup_transitions: 0,
         sampler: PosteriorSampler::ConjugateGaussian,
         covariance: InferenceCovarianceMode::Conditional,
     })
@@ -4342,10 +4231,6 @@ where
         0x6B42_E9A1_05D7_C83F,
         "rho-posterior NUTS sampling failed",
         mode.clone(),
-        NutsConvergenceThresholds {
-            max_rhat: 1.1,
-            min_ess: None,
-        },
     )?;
     log::info!("rho-posterior NUTS (#938 tier 2): sampling complete dim={dim} {run_stats}");
     Ok(result)
@@ -5754,7 +5639,7 @@ mod survival_hmc {
 
         let initial_positions = jittered_initial_positions(config, dim, 0.1, 0xEC2D_7A9B_4051_F638);
 
-        let mass_cfg = robust_survival_mass_matrix_config(dim, config.nwarmup);
+        let mass_cfg = robust_survival_mass_matrix_config(dim);
         let (result, run_stats) = run_whitened_nuts_result(
             target,
             &mode_arr,
@@ -5766,10 +5651,6 @@ mod survival_hmc {
             0x731B_60D4_AE52_9C8F,
             "NUTS sampling failed",
             Array1::zeros(dim),
-            NutsConvergenceThresholds {
-                max_rhat: 1.1,
-                min_ess: None,
-            },
         )?;
 
         log::info!("Survival NUTS sampling complete: {}", run_stats);

@@ -59,7 +59,7 @@ def test_posterior_predictive_uses_model_offset() -> None:
         f"got {point.mean():.1f}"
     )
 
-    samples = model.sample(frame, samples=300, chains=2, seed=1)
+    samples = model.sample(frame, samples=300, seed=1)
     predictive = samples.predict_draws(frame)
     pp_mean = np.asarray(predictive.mean).mean(axis=0)  # per-row posterior mean mu
     if pp_mean.shape[0] != n:
