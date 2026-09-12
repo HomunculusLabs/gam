@@ -2205,18 +2205,6 @@ pub(crate) fn joint_smoothing_correction(
 ) -> Result<Option<(Array2<f64>, usize)>, CustomFamilyError> {
     let p_total: usize = specs.iter().map(|spec| spec.design.ncols()).sum();
     let k_outer = rho_outer.len();
-    if v_cond.dim() != (p_total, p_total) {
-        return Err(CustomFamilyError::trial_point(format!(
-            "joint smoothing correction: V_cond shape {:?} ≠ ({p_total}, {p_total})",
-            v_cond.dim()
-        )));
-    }
-    if outer_hessian.dim() != (k_outer, k_outer) {
-        return Err(CustomFamilyError::trial_point(format!(
-            "joint smoothing correction: outer Hessian shape {:?} ≠ ({k_outer}, {k_outer})",
-            outer_hessian.dim()
-        )));
-    }
     if block_states.len() != specs.len() {
         return Err(CustomFamilyError::trial_point(format!(
             "joint smoothing correction: {} block states vs {} specs",
@@ -2298,6 +2286,41 @@ pub(crate) fn joint_smoothing_correction(
         }
     }
 
+    first_order_smoothing_correction(v_cond, &u_mat, outer_hessian, excluded_outer)
+        .map_err(CustomFamilyError::trial_point)
+}
+
+/// First-order ρ-uncertainty inflation `C = A·V_ρ·Aᵀ` of a conditional
+/// coefficient covariance, `A = V_cond·U`, where column `o` of `U` is
+/// `∂(S_λ β̂)/∂ρ_o` in V_cond's coefficient frame, so `−A[:, o]` is the
+/// first-order IFT `∂β̂/∂ρ_o`, and `V_ρ` inverts the outer ρ-Hessian.
+///
+/// Outer coordinates in `excluded_outer` (box rails and typed AsymptoteRail
+/// coordinates) have no finite ρ-variance and are excluded (#2337 Thm 2.3).
+/// The remaining sub-Hessian must be strictly positive definite; a non-PD
+/// interior returns `Ok(None)`. With every coordinate excluded the correction
+/// is exactly zero at identified rank 0. Returns the correction together with
+/// the identified interior rank. Both the custom-family joint mint and the
+/// single-cause survival transformation fit mint through here (#2912).
+pub fn first_order_smoothing_correction(
+    v_cond: &Array2<f64>,
+    u_mat: &Array2<f64>,
+    outer_hessian: &Array2<f64>,
+    excluded_outer: &[usize],
+) -> Result<Option<(Array2<f64>, usize)>, String> {
+    let (p_total, k_outer) = u_mat.dim();
+    if v_cond.dim() != (p_total, p_total) {
+        return Err(format!(
+            "smoothing correction: V_cond shape {:?} ≠ ({p_total}, {p_total})",
+            v_cond.dim()
+        ));
+    }
+    if outer_hessian.dim() != (k_outer, k_outer) {
+        return Err(format!(
+            "smoothing correction: outer Hessian shape {:?} ≠ ({k_outer}, {k_outer})",
+            outer_hessian.dim()
+        ));
+    }
     // Interior V_ρ: strict SPD inverse of the non-excluded outer sub-block.
     let included: Vec<usize> = (0..k_outer)
         .filter(|o| !excluded_outer.contains(o))
@@ -2322,7 +2345,7 @@ pub(crate) fn joint_smoothing_correction(
         }
     }
     let (evals, evecs) = FaerEigh::eigh(&h_sub, Side::Lower).map_err(|e| {
-        format!("joint smoothing correction: outer Hessian eigendecomposition failed: {e}")
+        format!("smoothing correction: outer Hessian eigendecomposition failed: {e}")
     })?;
     // The outer Hessian's positive spectrum at the eigensolver's resolution,
     // relative to its largest eigenvalue and never floored at an absolute value.

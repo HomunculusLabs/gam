@@ -1769,6 +1769,9 @@ struct SurvivalSmoothingSelection {
     /// ρ, a 20-step objective plateau exit at the selected ρ) and the fit was
     /// refused although its certified mode already existed (#2670).
     certified_mode: Array1<f64>,
+    /// The analytic LAML ρ-Hessian the terminal mint evaluated at the selected
+    /// ρ, which the fit's smoothing correction inverts (#2912).
+    outer_hessian: Option<Array2<f64>>,
 }
 
 fn optimize_survival_transformation_smoothing(
@@ -2101,6 +2104,7 @@ fn optimize_survival_transformation_smoothing(
     let result = problem.run(&mut obj, &context).map_err(|error| error.to_string())?;
     let outer_iterations = result.iterations;
     let criterion_certificate = result.criterion_certificate;
+    let outer_hessian = result.final_hessian;
     let selected_rho = result.rho;
     if selected_rho.len() != num_smoothing {
         return Err(format!(
@@ -2117,6 +2121,7 @@ fn optimize_survival_transformation_smoothing(
         outer_iterations,
         criterion_certificate,
         certified_mode: warm_beta.into_inner(),
+        outer_hessian,
     }))
 }
 
@@ -2170,6 +2175,9 @@ fn survival_unified_fit_result(
     // gradient norm are inner quantities and must NOT be used for the outer.
     outer_iterations: usize,
     criterion_certificate: Option<gam_solve::estimate::OuterCriterionCertificate>,
+    // The analytic LAML ρ-Hessian at the selected ρ: the curvature the
+    // smoothing correction inverts (#2912). `None` on the fixed-outer path.
+    outer_hessian: Option<Array2<f64>>,
 ) -> Result<UnifiedFitResult, String> {
     if state.eta.len() != training_sample_size {
         return Err(format!(
@@ -2294,14 +2302,84 @@ fn survival_unified_fit_result(
     // compute. The sibling conditional covariance right above was persisted for
     // the same reason under #2373; this is the other half of that fix.
     //
-    // A fit whose lambda WAS selected keeps the typed absence. There the
-    // correction is a real, non-zero term this path does not compute, and
-    // handing back `Vb` under a corrected request would silently under-report
-    // every interval.
+    // A fit whose lambda WAS selected publishes `Vp = Vb + C`, the first-order
+    // rho-uncertainty correction `C = A·V_ρ·Aᵀ`, `A = Vb·U`, from the analytic
+    // LAML rho-Hessian the certificate judged (#2912). Column k of `U` is
+    // `∂(S_λ β̂)/∂ρ_k = λ_k S_k β̂` over block k's range, in the identity-gauge
+    // coordinates `Vb` lives in, and railed coordinates carry no finite
+    // rho-variance (#2337 Thm 2.3); the custom-family mint goes through the same
+    // helper. A non-PD interior keeps the typed absence: handing back `Vb` under
+    // a corrected request would silently under-report every interval.
     let lambda_is_fixed = outer_iterations == 0 && criterion_certificate.is_none();
-    let covariance_corrected = lambda_is_fixed
-        .then(|| covariance_conditional.clone())
-        .flatten();
+    let smoothing_corrected = if lambda_is_fixed {
+        None
+    } else {
+        match (
+            covariance_conditional.as_ref(),
+            outer_hessian.as_ref(),
+            criterion_certificate.as_ref(),
+        ) {
+            (Some(v_cond), Some(outer_hessian), Some(certificate)) => {
+                let mut excluded: Vec<usize> = certificate.lambdas_railed.clone();
+                for rail in certificate.stationarity.rails() {
+                    if !excluded.contains(&rail.index) {
+                        excluded.push(rail.index);
+                    }
+                }
+                let mut u_mat = Array2::<f64>::zeros((beta.len(), lambdas.len()));
+                for (coordinate, block) in penalty_blocks.iter().enumerate() {
+                    let s_beta = block.matrix.dot(&beta.slice(s![block.range.clone()]));
+                    u_mat
+                        .slice_mut(s![block.range.clone(), coordinate])
+                        .scaled_add(lambdas[coordinate], &s_beta);
+                }
+                let minted = gam_custom_family::first_order_smoothing_correction(
+                    v_cond,
+                    &u_mat,
+                    outer_hessian,
+                    &excluded,
+                )
+                .map_err(|reason| {
+                    format!("survival transformation smoothing correction: {reason}")
+                })?
+                .map(|(correction, active_rank)| {
+                    (
+                        correction,
+                        gam_solve::model_types::SmoothingCorrectionMethod::FirstOrderIdentifiedSubspace {
+                            active_rank,
+                            rho_dimension: lambdas.len(),
+                        },
+                    )
+                });
+                if minted.is_none() {
+                    log::info!(
+                        "[smoothing-correction] branch=unavailable \
+                         reason=interior-outer-hessian-not-positive-definite rho_dimension={} railed={}",
+                        lambdas.len(),
+                        excluded.len(),
+                    );
+                }
+                minted
+            }
+            (Some(_), None, _) => {
+                log::info!(
+                    "[smoothing-correction] branch=unavailable reason=outer-hessian-not-analytic \
+                     rho_dimension={}",
+                    lambdas.len(),
+                );
+                None
+            }
+            _ => None,
+        }
+    };
+    let covariance_corrected = if lambda_is_fixed {
+        covariance_conditional.clone()
+    } else {
+        smoothing_corrected
+            .as_ref()
+            .zip(covariance_conditional.as_ref())
+            .map(|((correction, _), v_cond)| v_cond + correction)
+    };
     let beta_standard_errors_corrected = covariance_corrected
         .as_ref()
         .map(gam_problem::se_from_covariance)
@@ -2314,10 +2392,18 @@ fn survival_unified_fit_result(
         edf_by_block: edf_by_block.clone(),
         penalty_block_trace,
         edf_total,
-        smoothing_correction: None,
-        smoothing_correction_method: None,
-        smoothing_correction_first_order: None,
-        smoothing_correction_method_first_order: None,
+        // This lane computes only the first-order correction, so its retained
+        // first-order pair is its primary pair, as on the custom-family lane.
+        smoothing_correction: smoothing_corrected
+            .as_ref()
+            .map(|(correction, _)| correction.clone()),
+        smoothing_correction_method: smoothing_corrected.as_ref().map(|(_, method)| *method),
+        smoothing_correction_first_order: smoothing_corrected
+            .as_ref()
+            .map(|(correction, _)| correction.clone()),
+        smoothing_correction_method_first_order: smoothing_corrected
+            .as_ref()
+            .map(|(_, method)| *method),
         penalized_hessian: penalized_hessian.clone(),
         reparam_qs: None,
         dispersion: gam_solve::estimate::Dispersion::UNIT,
@@ -3281,9 +3367,12 @@ pub(crate) fn fit_survival_transformation_model(
     // candidate, so the constrained optimum stays valid. The selected λ is written
     // back into both the working model and `penalty_blocks` so the final fit,
     // edf, and warm-start cache all use the data-adaptive value.
-    let (survival_outer_iterations, survival_outer_certificate, selected_mode) = if let Some(
-        selection,
-    ) = optimize_survival_transformation_smoothing(
+    let (
+        survival_outer_iterations,
+        survival_outer_certificate,
+        survival_outer_hessian,
+        selected_mode,
+    ) = if let Some(selection) = optimize_survival_transformation_smoothing(
         &model,
         &penalty_blocks,
         &beta0,
@@ -3298,6 +3387,7 @@ pub(crate) fn fit_survival_transformation_model(
         (
             selection.outer_iterations,
             selection.criterion_certificate,
+            selection.outer_hessian,
             Some(selection.certified_mode),
         )
     } else {
@@ -3306,7 +3396,7 @@ pub(crate) fn fit_survival_transformation_model(
         // iterations and no analytic certificate — assembly reads that as
         // `Fixed` convergence evidence rather than demanding a certificate
         // (#2301 defect D).
-        (0, None, None)
+        (0, None, None, None)
     };
     let opts = gam_solve::pirls::WorkingModelPirlsOptions {
         max_iterations: SURVIVAL_TRANSFORMATION_PIRLS_MAX_ITERATIONS,
@@ -3428,6 +3518,7 @@ pub(crate) fn fit_survival_transformation_model(
         &penalty_blocks,
         survival_outer_iterations,
         survival_outer_certificate,
+        survival_outer_hessian,
     )?;
 
     let time_base_ncols = spec.time_build.x_exit_time.ncols();

@@ -164,12 +164,15 @@ pub use self::block_spec::validate_blockspecs;
 pub use assembly::*;
 pub(crate) use blockwise_solve::*;
 pub(crate) use covariance::*;
-// Two covariance helpers are part of the public flat-namespace API consumed by
-// the relocated families (`crate::{use_joint_matrix_free_path,
-// projected_linear_constraint_stationarity_vector}`); surface them publicly
-// (the `pub(crate) use covariance::*` glob above keeps them crate-internal).
+// Covariance helpers that are part of the public flat-namespace API: two consumed
+// by the relocated families (`crate::{use_joint_matrix_free_path,
+// projected_linear_constraint_stationarity_vector}`), and the first-order
+// smoothing correction the single-cause survival fit mints through (#2912).
+// Surface them publicly (the `pub(crate) use covariance::*` glob above keeps
+// them crate-internal).
 pub use covariance::{
     JOINT_MATRIX_FREE_MIN_DIM,
+    first_order_smoothing_correction,
     projected_linear_constraint_stationarity_vector,
     use_joint_matrix_free_path,
 };

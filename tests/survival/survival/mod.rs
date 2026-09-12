@@ -38,3 +38,4 @@ mod sbc_survival_prediction_se_coverage;
 mod sbc_survival_probability_band_coverage;
 mod survival_transformation_persists_conditional_covariance_2373;
 mod survival_transformation_resumes_flat_stall_checkpoint_2373;
+mod survival_transformation_smoothing_corrected_covariance_2912;
