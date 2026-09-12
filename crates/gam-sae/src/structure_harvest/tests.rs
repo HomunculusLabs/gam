@@ -37,10 +37,14 @@ fn intrinsic_primary_chart_is_cluster_local_2240() {
         second[[row, 2]] = 2.0e6;
     }
     let rows = (0..local_rows).collect::<Vec<_>>();
-    let first_specs = build_intrinsic_primary_specs(first.view(), &rows, 2, None)
-        .expect("first local embedding")
-        .expect("realizable first local chart");
-    let second_specs = build_intrinsic_primary_specs(second.view(), &rows, 2, None)
+    let first_weights = ndarray::Array1::<f64>::ones(first.nrows());
+    let second_weights = ndarray::Array1::<f64>::ones(second.nrows());
+    let first_specs =
+        build_intrinsic_primary_specs(first.view(), first_weights.view(), &rows, 2, None)
+            .expect("first local embedding")
+            .expect("realizable first local chart");
+    let second_specs =
+        build_intrinsic_primary_specs(second.view(), second_weights.view(), &rows, 2, None)
         .expect("second local embedding")
         .expect("realizable second local chart");
     let first_chart = &first_specs[0].coords;

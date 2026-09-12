@@ -5219,7 +5219,6 @@ pub(crate) fn discover_primary_atom_topologies(
                 }
                 selected
             };
-            let mut sheet_coords: Option<Array2<f64>> = None;
             let mut torus_order: Option<usize> = None;
             if max_dims[atom_idx] >= 2 {
                 // Flat 2-D patch: standardized leading principal projections.
@@ -5250,11 +5249,15 @@ pub(crate) fn discover_primary_atom_topologies(
                 // so the #944 Euclidean/Sphere fusion cannot absorb it —
                 // without it, any race that also carried a sphere candidate
                 // fused the flat patch away and left a rolled sheet NO
-                // admissible chart at all. A cluster too small to identify the
-                // thin-plate nullspace simply skips the candidate (the flat
-                // patch above stays as the sheet fallback).
+                // admissible chart at all. It races at the center count a winner
+                // installs, the chart's cosine bandwidth, selected before the race
+                // rather than after it. A chart that realizes no sheet (a cluster too
+                // small to identify the thin-plate nullspace, a collapsed axis, or no
+                // energy beyond the constant mode) skips the candidate, and the flat
+                // patch above stays as the sheet fallback.
                 if let Some(centers) =
-                    duchon_sheet_centers(&coords, &rows, duchon_sheet_race_center_budget(rows.len()))
+                    select_duchon_sheet_resolution(&coords, target, weights.view(), &rows)
+                        .and_then(|count| duchon_sheet_centers(&coords, &rows, count))
                 {
                     specs.push(TopologyCandidateSpec::new(
                         AutoTopologyKind::DuchonSheet,
@@ -5265,10 +5268,9 @@ pub(crate) fn discover_primary_atom_topologies(
                             SaeReferenceMetricPlan::EuclideanDuchon,
                         )?,
                         LatentManifold::Euclidean,
-                        coords.clone(),
+                        coords,
                     )?);
                 }
-                sheet_coords = Some(coords);
                 if n_pcs >= 3 {
                     // Sphere: the unit-normalized leading 3-frame, kept AS a
                     // direction. The superseded chart computed exactly this
@@ -5416,7 +5418,14 @@ pub(crate) fn discover_primary_atom_topologies(
             // is returned to the caller instead of silently substituting the PCA
             // result.
             let intrinsic_challenger =
-                match build_intrinsic_primary_specs(target, &rows, max_dims[atom_idx], local_atlas.as_ref()).map_err(
+                match build_intrinsic_primary_specs(
+                    target,
+                    weights.view(),
+                    &rows,
+                    max_dims[atom_idx],
+                    local_atlas.as_ref(),
+                )
+                .map_err(
                     |error| {
                         format!(
                             "discover_primary_atom_topologies: intrinsic chart failed for auto atom {atom_idx}: {error}"
@@ -5443,8 +5452,9 @@ pub(crate) fn discover_primary_atom_topologies(
                 local_atlas.as_ref(),
                 atlas.as_ref(),
                 local.view(),
+                target,
+                weights.view(),
                 &rows,
-                n_obs,
             )
             .map_err(|error| {
                 format!(
@@ -5488,9 +5498,6 @@ pub(crate) fn discover_primary_atom_topologies(
                 .fit;
             let fit_kind = fit.geometry.kind().clone();
             let fit_dim = fit.geometry.latent_dim();
-            if fit_kind == SaeAtomBasisKind::Duchon {
-                sheet_coords = Some(fit.coords.clone());
-            }
             // #2243 — a circle winner raced at the order its phase chart's periodogram
             // selected, so that order is the one it installs. Every other kind carries
             // a chart whose resolution is not a harmonic count, so it selects none.
@@ -5503,23 +5510,17 @@ pub(crate) fn discover_primary_atom_topologies(
             } else {
                 None
             };
-            // #2240 — for a Duchon-sheet winner, set the center count to the
-            // chart's cosine bandwidth (the #2243 spectral rule lifted from
-            // harmonics to thin-plate centers): the race ran the sheet at the
-            // seed-economy budget only to discriminate topology; a tightly rolled
-            // sheet's fidelity is capped by that budget.
+            // #2240 — a Duchon-sheet winner raced at its chart's cosine bandwidth, so its
+            // center count is the one its own plan carries.
             let n_duchon_centers = if fit_kind == SaeAtomBasisKind::Duchon {
-                let coords = sheet_coords.as_ref().ok_or_else(|| {
-                    format!(
-                        "discover_primary_atom_topologies: duchon-sheet winner without a 2-D chart for auto atom {atom_idx}"
-                    )
-                })?;
-                Some(select_duchon_sheet_resolution(
-                    coords,
-                    target,
-                    weights.view(),
-                    &rows,
-                )?)
+                match fit.geometry.resolution() {
+                    SaeBasisResolution::DuchonCoordinates { centers } => Some(centers.nrows()),
+                    other => {
+                        return Err(format!(
+                            "discover_primary_atom_topologies: Duchon winner carries a {other:?} resolution for auto atom {atom_idx}"
+                        ));
+                    }
+                }
             } else {
                 None
             };
@@ -5553,9 +5554,9 @@ pub(crate) fn discover_primary_atom_topologies(
                     coords[[row, col]] = fit.coords[[row, col]];
                 }
             }
-            // A torus or Klein winner's plan is the race fit's own: the race scored it
-            // at the selected order, the torus through its metric fit, so the default
-            // arm installs it unchanged.
+            // A torus, Klein or Duchon-sheet winner's plan is the race fit's own: the race
+            // scored it at the selected order or center count, the torus through its
+            // metric fit, so the default arm installs it unchanged.
             let geometry = match &fit_kind {
                 SaeAtomBasisKind::Periodic => SaeAtomGeometryPlan::new(
                     SaeAtomBasisKind::Periodic,
@@ -5569,29 +5570,6 @@ pub(crate) fn discover_primary_atom_topologies(
                     },
                     SaeReferenceMetricPlan::UnitCircle,
                 )?,
-                SaeAtomBasisKind::Duchon => {
-                    let center_count = n_duchon_centers.ok_or_else(|| {
-                        format!(
-                            "discover_primary_atom_topologies: Duchon winner without selected centers for auto atom {atom_idx}"
-                        )
-                    })?;
-                    let chart = sheet_coords.as_ref().ok_or_else(|| {
-                        format!(
-                            "discover_primary_atom_topologies: Duchon winner without chart for auto atom {atom_idx}"
-                        )
-                    })?;
-                    let centers = duchon_sheet_centers(chart, &rows, center_count).ok_or_else(|| {
-                        format!(
-                            "discover_primary_atom_topologies: cannot realize {center_count} selected Duchon centers for auto atom {atom_idx}"
-                        )
-                    })?;
-                    SaeAtomGeometryPlan::new(
-                        SaeAtomBasisKind::Duchon,
-                        fit_dim,
-                        SaeBasisResolution::DuchonCoordinates { centers },
-                        SaeReferenceMetricPlan::EuclideanDuchon,
-                    )?
-                }
                 _ => fit.geometry.clone(),
             };
             Ok(PrimaryTopologyChoice {
@@ -5626,6 +5604,7 @@ pub(crate) fn discover_primary_atom_topologies(
 /// the embedding is degenerate.
 fn build_intrinsic_primary_specs(
     target: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
     rows: &[usize],
     max_dim: usize,
     atlas: Option<&crate::manifold::LocalAtlas>,
@@ -5644,7 +5623,7 @@ fn build_intrinsic_primary_specs(
             &computed
         }
     };
-    sheet_specs_on_local_chart(embed, rows, target.nrows())
+    sheet_specs_on_local_chart(embed, target, weights, rows)
 }
 
 /// The atlas's developed chart as a sheet challenger (#2280), or `None` unless the
@@ -5657,8 +5636,9 @@ fn developed_sheet_specs(
     atlas: Option<&crate::manifold::LocalAtlas>,
     readout: Option<&AtlasTopologyReadout>,
     local_target: ArrayView2<'_, f64>,
+    target: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
     rows: &[usize],
-    n_obs: usize,
 ) -> Result<Option<Vec<TopologyCandidateSpec>>, String> {
     let atlas = match (atlas, readout) {
         (Some(atlas), Some(readout))
@@ -5670,17 +5650,19 @@ fn developed_sheet_specs(
         _ => return Ok(None),
     };
     let developed = atlas.developed_coordinates(local_target)?;
-    sheet_specs_on_local_chart(&developed, rows, n_obs)
+    sheet_specs_on_local_chart(&developed, target, weights, rows)
 }
 
 /// The two FOLD-SENSITIVE `d = 2` candidates, a flat patch and a thin-plate sheet, on
 /// a centered cluster-local 2-D chart whose row `i` is cluster row `rows[i]`; the
 /// Isomap embedding and the atlas's developed chart both arrive this way. Rows
 /// outside the cluster carry zero coordinates, and the race gives them zero weight.
+/// The sheet races at the chart's cosine bandwidth, the center count a winner installs.
 fn sheet_specs_on_local_chart(
     chart: &Array2<f64>,
+    target: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
     rows: &[usize],
-    n_obs: usize,
 ) -> Result<Option<Vec<TopologyCandidateSpec>>, String> {
     if chart.ncols() < 2 {
         return Ok(None);
@@ -5704,7 +5686,7 @@ fn sheet_specs_on_local_chart(
     if sd.iter().any(|&spread| !spread.is_finite() || spread <= resolution) {
         return Ok(None);
     }
-    let mut coords = Array2::<f64>::zeros((n_obs, 2));
+    let mut coords = Array2::<f64>::zeros((target.nrows(), 2));
     for col in 0..2 {
         for (local_row, &global_row) in rows.iter().enumerate() {
             coords[[global_row, col]] = chart[[local_row, col]] / sd[col];
@@ -5724,8 +5706,8 @@ fn sheet_specs_on_local_chart(
         LatentManifold::Euclidean,
         coords.clone(),
     )?);
-    if let Some(centers) =
-        duchon_sheet_centers(&coords, rows, duchon_sheet_race_center_budget(rows.len()))
+    if let Some(centers) = select_duchon_sheet_resolution(&coords, target, weights, rows)
+        .and_then(|count| duchon_sheet_centers(&coords, rows, count))
     {
         specs.push(TopologyCandidateSpec::new(
             AutoTopologyKind::DuchonSheet,
@@ -5747,21 +5729,6 @@ fn sheet_specs_on_local_chart(
 /// the six monomials of total degree at most two. The center count must clear
 /// this dimension for the kernel block to have positive rank.
 const DUCHON_SHEET_NULLSPACE_DIM: usize = 6;
-
-/// Race-time center budget for the 2-D Duchon-sheet candidate (#2240) —
-/// mirrors the seed builder's economy band (`sae_build_atom_plans`: floor
-/// `nullspace + d + 1`, dense ceiling 32) so the race scores the exact chart a
-/// default seed would build; a WINNER's installed resolution is then the chart's
-/// cosine bandwidth ([`select_duchon_sheet_resolution`]).
-/// Returns 0 (no realizable candidate) when the cluster cannot identify the
-/// thin-plate nullspace.
-fn duchon_sheet_race_center_budget(n_cluster: usize) -> usize {
-    let floor = DUCHON_SHEET_NULLSPACE_DIM + 2 + 1;
-    if n_cluster <= floor {
-        return 0;
-    }
-    n_cluster.min(32).max(floor)
-}
 
 /// Deterministic adaptive centers for the Duchon-sheet candidate: `n_centers`
 /// evenly-strided IN-CLUSTER rows of the standardized 2-PC chart, so the
@@ -5787,11 +5754,12 @@ fn duchon_sheet_centers(
     Some(centers)
 }
 
-/// Spectral center count for a Duchon-sheet primary winner (#2240 — the #2243
-/// bandwidth rule lifted from harmonics to thin-plate centers). The race scored
-/// the sheet at the seed-economy budget only to discriminate topology; the
-/// installed resolution is the chart's COSINE BANDWIDTH. No model is fitted and
-/// no resolution is searched.
+/// Spectral center count for a Duchon-sheet chart (#2240 — the #2243 bandwidth
+/// rule lifted from harmonics to thin-plate centers), selected before the topology
+/// race so each sheet races at the count a winner installs: the chart's COSINE
+/// BANDWIDTH. No model is fitted and no resolution is searched. `None` when the
+/// chart realizes no sheet: the cluster cannot identify the thin-plate nullspace,
+/// an axis has no spread, or the target carries no energy beyond the constant mode.
 ///
 /// The chart is normalized to the unit square over the weighted cluster rows,
 /// where the products `cos(π·h₀·u)·cos(π·h₁·v)` are a complete spectral basis for
@@ -5823,7 +5791,7 @@ fn select_duchon_sheet_resolution(
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
     rows: &[usize],
-) -> Result<usize, String> {
+) -> Option<usize> {
     let floor = DUCHON_SHEET_NULLSPACE_DIM + 2 + 1;
     // The design is scaled by `√w`, exactly as the fit weights the rows.
     let active: Vec<(usize, f64)> = rows
@@ -5833,10 +5801,7 @@ fn select_duchon_sheet_resolution(
         .collect();
     let m = active.len();
     if m <= floor {
-        return Err(format!(
-            "select_duchon_sheet_resolution: {m} weighted cluster rows cannot identify the \
-             thin-plate nullspace, which needs more than {floor}"
-        ));
+        return None;
     }
     let ceiling = m - 1;
     let mut lo = [f64::INFINITY; 2];
@@ -5850,10 +5815,7 @@ fn select_duchon_sheet_resolution(
     for axis in 0..2 {
         let span = hi[axis] - lo[axis];
         if !(span > 0.0 && span.is_finite()) {
-            return Err(format!(
-                "select_duchon_sheet_resolution: the sheet chart's axis {axis} has no finite \
-                 spread over the cluster"
-            ));
+            return None;
         }
     }
     let unit: Vec<[f64; 2]> = active
@@ -5922,11 +5884,7 @@ fn select_duchon_sheet_resolution(
     let values: Vec<f64> = energies.iter().map(|&(_, energy)| energy).collect();
     let peak = values.iter().copied().fold(0.0_f64, f64::max);
     if !(peak > 0.0) {
-        return Err(
-            "select_duchon_sheet_resolution: the duchon-sheet winner carries no energy beyond \
-             the constant mode"
-                .to_string(),
-        );
+        return None;
     }
     // A mode's energy is `Σ_out (qᵀy_out)²` for a unit column `q` and the √w-scaled
     // target `y_out`. Each projection rounds by at most `γ_{m+2}·‖y_out‖` (two
@@ -5952,7 +5910,7 @@ fn select_duchon_sheet_resolution(
         .map(|&(order, _)| order)
         .max()
         .unwrap_or(1);
-    Ok(((bandwidth + 1) * (bandwidth + 1)).clamp(floor, ceiling))
+    Some(((bandwidth + 1) * (bandwidth + 1)).clamp(floor, ceiling))
 }
 
 /// Measured spectral noise floor for evidence-driven resolution selection
