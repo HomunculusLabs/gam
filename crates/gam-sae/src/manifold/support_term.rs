@@ -691,11 +691,19 @@ fn support_arrow_majorizer_apply(
     })
 }
 
-/// Exact application of the majorizer inverse used as the flexible-GMRES
-/// preconditioner.  The reduced CG cap is its algebraic dimension: in exact
-/// arithmetic an SPD `k x k` system terminates in at most `k` directions.  A
-/// floating-point solve that cannot meet the scalar-derived `sqrt(eps)` floor
-/// in that span is refused rather than returned as an unbounded approximation.
+/// Application of the majorizer inverse used as the flexible-GMRES
+/// preconditioner.
+///
+/// The reduced solve is conjugate gradients on the SPD reduced Schur, capped at its
+/// algebraic dimension `k`. Flexible GMRES admits a different preconditioner at
+/// every Arnoldi direction and certifies the physical residual `‖rhs − A x‖`
+/// itself, so a CG iterate that has not reached the `sqrt(eps)` floor within `k`
+/// directions is still a legitimate `P_j(v_j)`; only the iteration count of the
+/// outer solve depends on how good it is. Refusing that iterate ended the whole
+/// outer evaluation on exactly the narrow, ill-conditioned borders where
+/// finite-precision CG needs more than `k` directions: the exact-arithmetic
+/// termination premise #2576 corrected for the rational log-det surrogate. A
+/// breakdown is still refused.
 fn support_arrow_majorizer_inverse(
     system: &ArrowSchurSystem,
     factors: &ArrowFactorSlab,
@@ -741,12 +749,14 @@ fn support_arrow_majorizer_inverse(
             )
         })?;
         if !report.converged() {
-            return Err(format!(
-                "support outer differential: reduced-Schur preconditioner did not converge in its {}-direction algebraic span (relative residual {:.3e}, tolerance {:.3e})",
-                system.k,
+            log::debug!(
+                "support outer differential: reduced-Schur preconditioner iterate at relative \
+                 residual {:.3e} (floor {:.3e}) after its {}-direction span; flexible GMRES \
+                 certifies the physical residual",
                 report.relative_residual,
                 report.tolerance,
-            ));
+                system.k,
+            );
         }
         solved
     };
