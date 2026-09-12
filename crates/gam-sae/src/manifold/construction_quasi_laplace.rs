@@ -2823,7 +2823,7 @@ impl SaeManifoldTerm {
             // host blocks with `dim = coords + border`, and the coordinate block grows
             // with ROWS: the #2283 cell's 96 000 training rows with 2 active circle
             // charts each give 192 000 coordinates before the border. Both criterion
-            // routes reach this phase through `converge_inner_for_undamped_logdet`, and
+            // routes reach this phase through the gate-frozen inner converge, and
             // the log-determinant and ρ-adjoint already route away from the dense lane
             // on #2724's ledger; this phase never asked it, so a streaming-routed fit
             // allocated the blocks at its first plateau. Ask the SAME predicate at the
