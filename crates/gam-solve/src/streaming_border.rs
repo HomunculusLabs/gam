@@ -14,7 +14,7 @@
 //!   [`gam_linalg::pairwise_reduce`]).
 //! * Cross-chunk reduction follows the **same fixed pairwise tree**, applied
 //!   entry-wise to whole chunk Grams: sequential base blocks
-//!   of [`CROSS_CHUNK_BASE`] chunk partials, then power-of-two cascade merges.
+//!   of `CROSS_CHUNK_BASE` chunk partials, then power-of-two cascade merges.
 //!   The tree shape depends only on the chunk count — never on values, device
 //!   timing, or thread scheduling. A unit test pins the cross-chunk
 //!   association bit-for-bit to [`pairwise_sum`] over the per-chunk entries.
@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 /// of the cross-chunk fold is bit-identical to [`pairwise_sum`] over the
 /// per-chunk entry values (unit-tested below). A pure compile-time constant:
 /// the tree shape never depends on tuning, platform, or runtime conditions.
-pub const CROSS_CHUNK_BASE: usize = BASE_CHUNK;
+pub(crate) const CROSS_CHUNK_BASE: usize = BASE_CHUNK;
 
 /// Serializable accumulation state of a [`StreamingBorderGram`]: the partial
 /// Grams plus the chunk cursor. Writing this to disk after every accepted
@@ -132,7 +132,7 @@ fn add_into(acc: &mut [f64], rhs: &[f64]) {
 /// the `k·k` partial instead of the rows. Bit-identical by construction to the
 /// in-process path: `StreamingBorderGram::submit_chunk` routes through this
 /// same function.
-pub fn chunk_gram_flat(rows: ArrayView2<'_, f64>) -> Vec<f64> {
+pub(crate) fn chunk_gram_flat(rows: ArrayView2<'_, f64>) -> Vec<f64> {
     let k = rows.ncols();
     let r = rows.nrows();
     let mut gram = vec![0.0_f64; k * k];
@@ -254,7 +254,7 @@ impl StreamingBorderGram {
     }
 
     /// Per-chunk Gram contribution, flattened `k·k` row-major — delegates to
-    /// the shared free function [`chunk_gram_flat`] so the in-process and
+    /// the shared free function `chunk_gram_flat` so the in-process and
     /// cross-node producers are the same code path, bit for bit.
     fn chunk_gram(&self, rows: ArrayView2<'_, f64>) -> Vec<f64> {
         chunk_gram_flat(rows)
@@ -262,7 +262,7 @@ impl StreamingBorderGram {
 
     /// Fold one in-order chunk partial into the cross-chunk cascade. This is
     /// an incremental pairwise-tree push, applied entry-wise to whole chunk Grams:
-    /// sequential accumulation within a [`CROSS_CHUNK_BASE`]-chunk base block
+    /// sequential accumulation within a `CROSS_CHUNK_BASE`-chunk base block
     /// (seeded from the block's first partial), then power-of-two cascade
     /// merges of completed blocks.
     fn fold_chunk(&mut self, gram: Vec<f64>) {

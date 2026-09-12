@@ -637,7 +637,7 @@ pub(crate) fn eigenpair_backward_error_bound(
 ///
 /// The other difference — that the certificate excludes railed coordinates and
 /// this site excluded nothing — is gone as of #2676: both sites now deflate the
-/// same invariance through [`crate::penalty_invariance::judged_subspace_basis`],
+/// same invariance through `crate::penalty_invariance::judged_subspace_basis`,
 /// and the certificate's rail exclusion is expressed through the same call.
 pub(crate) fn invert_identified_rho_hessian(
     hessian_rho: &Array2<f64>,

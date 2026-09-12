@@ -29,14 +29,14 @@
 //! pseudo-inverse `U · M⁻¹ · Uᵀ` (the #752/#901 intrinsic-quotient
 //! convention) — and every consumer asks it, never a factor directly.
 //! Consumers therefore cannot disagree about the inverse, and every
-//! batching/cone improvement made inside [`FitSensitivity::apply_multi`] is
+//! batching/cone improvement made inside `FitSensitivity::apply_multi` is
 //! inherited by all of them at once.
 //!
 //! The channels, each a one-line restatement of the identity above:
 //!
 //! - [`mode_response`](FitSensitivity::mode_response) — `−H⁻¹ ∂g/∂t`, the
 //!   REML outer gradient's `∂β̂/∂ρ`.
-//! - [`mode_response_coned`](FitSensitivity::mode_response_coned) — the same
+//! - `mode_response_coned` — the same
 //!   response confined to its cone of influence (#779); the lazy/local form
 //!   the smoothing-correction IFT uses.
 //! - `leverage_block` — `H⁻¹Xᵀ`, whose
@@ -128,7 +128,7 @@ impl<'a> FitSensitivity<'a> {
     /// form every multi-channel consumer should use (outer ρ-pair solves,
     /// ALO's `H⁻¹Xᵀ` leverage block) so the factor is traversed once per
     /// block instead of once per column.
-    pub fn apply_multi(&self, rhs: ArrayView2<'_, f64>) -> Array2<f64> {
+    pub(crate) fn apply_multi(&self, rhs: ArrayView2<'_, f64>) -> Array2<f64> {
         assert_eq!(rhs.nrows(), self.dim, "FitSensitivity RHS dimension");
         match &self.inverse {
             FittedInverse::FaerCholesky(factor) => {
@@ -174,7 +174,7 @@ impl<'a> FitSensitivity<'a> {
     /// `−H⁻¹ ∂g/∂t_a` is exactly zero outside the coupling component of
     /// `hessian` containing that support. Columns whose support is empty (a
     /// structurally inactive channel) are skipped with no solve; the active
-    /// columns are solved as ONE batched block through [`Self::apply_multi`]
+    /// columns are solved as ONE batched block through `Self::apply_multi`
     /// — strictly better than the per-column BLAS-2 loop this replaces — and
     /// each result confined to its cone. On a fully coupled `hessian` every
     /// cone is the whole space and the result equals [`Self::mode_response`]
@@ -183,7 +183,7 @@ impl<'a> FitSensitivity<'a> {
     /// `hessian` must be the same curvature this operator inverts; a
     /// dimension mismatch (or any non-finite solved entry) returns `None`
     /// rather than silently substituting an approximation.
-    pub fn mode_response_coned(
+    pub(crate) fn mode_response_coned(
         &self,
         hessian: ArrayView2<'_, f64>,
         dg_dt: ArrayView2<'_, f64>,

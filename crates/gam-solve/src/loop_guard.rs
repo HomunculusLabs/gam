@@ -15,9 +15,9 @@
 //!
 //! # The policy pieces
 //!
-//! [`madsen_can_retry`] / [`madsen_retry_exhausted`] own the damped-retry
+//! `madsen_can_retry` / `madsen_retry_exhausted` own the damped-retry
 //! exhaustion question for Madsen-style Levenberg–Marquardt loops: a retry
-//! is alive while the damping is finite and below [`MADSEN_DAMPING_CAP`],
+//! is alive while the damping is finite and below `MADSEN_DAMPING_CAP`,
 //! and dead once attempts run out or damping leaves that window. Both
 //! engines (reweight.rs Madsen-LM and the custom_family.rs spectral
 //! Newton) must answer this question through these functions — never
@@ -64,7 +64,7 @@
 //!    module's policy.
 //! 2. (done) The 7 copies of the reweight.rs reject ritual
 //!    (`loop_lambda *= factor; factor *= 2.0; continue`) collapsed onto
-//!    [`RejectEscalator::escalate`], and the per-iteration hard count
+//!    `RejectEscalator::escalate`, and the per-iteration hard count
 //!    moved into [`IterationBound`], so neither discipline can drift
 //!    per-branch.
 //! 3. (done) custom_family.rs: the joint-Newton objective-flat counter
@@ -86,7 +86,7 @@
 /// damping below `u` adds nothing the arithmetic can hold and the damped system
 /// IS the Newton system. No smaller value means anything; a larger floor would
 /// be a ridge nobody chose.
-pub const MADSEN_DAMPING_FLOOR: f64 = gam_linalg::roundoff::UNIT_ROUNDOFF;
+pub(crate) const MADSEN_DAMPING_FLOOR: f64 = gam_linalg::roundoff::UNIT_ROUNDOFF;
 
 /// Damping ceiling for Madsen-style LM retries: the reciprocal unit roundoff.
 ///
@@ -94,18 +94,18 @@ pub const MADSEN_DAMPING_FLOOR: f64 = gam_linalg::roundoff::UNIT_ROUNDOFF;
 /// coordinate once the damping dominates, so beyond `1/u` it is below the
 /// roundoff of the step it replaces — numerically a zero step. Retrying cannot
 /// make progress, so the retry chain is declared dead.
-pub const MADSEN_DAMPING_CAP: f64 = 1.0 / gam_linalg::roundoff::UNIT_ROUNDOFF;
+pub(crate) const MADSEN_DAMPING_CAP: f64 = 1.0 / gam_linalg::roundoff::UNIT_ROUNDOFF;
 
 /// Is a damped retry still alive at this damping level?
 #[inline]
-pub fn madsen_can_retry(damping: f64) -> bool {
+pub(crate) fn madsen_can_retry(damping: f64) -> bool {
     damping.is_finite() && damping < MADSEN_DAMPING_CAP
 }
 
 /// Has the retry chain exhausted its budget — by attempt count or by the
 /// damping leaving the productive window?
 #[inline]
-pub fn madsen_retry_exhausted(damping: f64, attempts: usize, max_attempts: usize) -> bool {
+pub(crate) fn madsen_retry_exhausted(damping: f64, attempts: usize, max_attempts: usize) -> bool {
     attempts >= max_attempts || !damping.is_finite() || damping > MADSEN_DAMPING_CAP
 }
 
@@ -171,7 +171,7 @@ impl FlatStreak {
 /// Per-iteration hard bound for a damped retry loop: the net that makes
 /// an unbounded `loop {}` safe. Tick it once at the top of EVERY pass —
 /// accepted, rejected, or any `continue` path that reaches neither — and
-/// ask [`IterationBound::exhausted_at`] wherever the loop's exhaustion
+/// ask `IterationBound::exhausted_at` wherever the loop's exhaustion
 /// question is posed. Created fresh per outer iteration.
 #[derive(Clone, Debug)]
 pub struct IterationBound {
@@ -208,8 +208,8 @@ impl IterationBound {
     }
 
     /// The single exhaustion question: count OR damping window
-    /// ([`madsen_retry_exhausted`], answered from owned state).
-    pub fn exhausted_at(&self, damping: f64) -> bool {
+    /// (`madsen_retry_exhausted`, answered from owned state).
+    pub(crate) fn exhausted_at(&self, damping: f64) -> bool {
         madsen_retry_exhausted(damping, self.used, self.max)
     }
 
@@ -217,7 +217,7 @@ impl IterationBound {
 
 /// Initial damping multiplier on the first rejection of an iteration.
 /// Doubles on every further rejection (geometric escalation), reaching
-/// [`MADSEN_DAMPING_CAP`] from [`MADSEN_DAMPING_FLOOR`] in 15 rejections — the established
+/// `MADSEN_DAMPING_CAP` from `MADSEN_DAMPING_FLOOR` in 15 rejections — the established
 /// reweight.rs schedule, now owned here.
 pub(crate) const MADSEN_INITIAL_REJECT_FACTOR: f64 = 2.0;
 
@@ -251,7 +251,7 @@ impl RejectEscalator {
 
     /// Record a rejection: bumps the damping and advances the geometric
     /// schedule in one indivisible step.
-    pub fn escalate(&mut self, damping: &mut f64) {
+    pub(crate) fn escalate(&mut self, damping: &mut f64) {
         *damping *= self.factor;
         self.factor *= 2.0;
         self.rejects += 1;

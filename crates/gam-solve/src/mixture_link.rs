@@ -21,9 +21,9 @@ const SAS_U_CLAMP: f64 = 50.0;
 /// positive, and normal, so the value and every analytic derivative are exactly
 /// the same operation. Solver callers must reject steps outside this domain;
 /// silently projecting eta would define a different, nonsmooth link.
-pub const LOG_LINK_SOLVER_ETA_MIN: f64 = -700.0;
+pub(crate) const LOG_LINK_SOLVER_ETA_MIN: f64 = -700.0;
 /// Inclusive upper endpoint of the standard log-link solver domain.
-pub const LOG_LINK_SOLVER_ETA_MAX: f64 = 700.0;
+pub(crate) const LOG_LINK_SOLVER_ETA_MAX: f64 = 700.0;
 /// Bound B used by the bounded sinh-arcsinh log-delta parameterisation:
 /// `delta = exp(B * tanh(raw_log_delta / B))`. Exposed for the outer-strategy
 /// edge-barrier helpers in `solver/estimate.rs` that previously had to
@@ -1476,7 +1476,7 @@ impl InverseLinkKernel for InverseLink {
 ///
 /// For `BinomialSas` and `BinomialMixture`, required state must be provided.
 /// The standard log link is defined here only on the inclusive solver domain
-/// [`LOG_LINK_SOLVER_ETA_MIN`] through [`LOG_LINK_SOLVER_ETA_MAX`]; inputs
+/// `LOG_LINK_SOLVER_ETA_MIN` through `LOG_LINK_SOLVER_ETA_MAX`; inputs
 /// outside it return [`EstimationError::InverseLinkDomainViolation`].
 pub fn inverse_link_jet_for_inverse_link(
     link: &InverseLink,
@@ -2013,8 +2013,8 @@ fn royston_parmar_inverse_link_jet(eta: f64) -> Result<InverseLinkJet, Estimatio
 
 /// Exact-public log inverse-link jet: `mu = d1 = d2 = d3 = exp(η)` with no
 /// solver-domain restriction. The solver-internal sibling evaluates the same
-/// exact expression only on [`LOG_LINK_SOLVER_ETA_MIN`] through
-/// [`LOG_LINK_SOLVER_ETA_MAX`] and returns a typed refusal outside it; see issue
+/// exact expression only on `LOG_LINK_SOLVER_ETA_MIN` through
+/// `LOG_LINK_SOLVER_ETA_MAX` and returns a typed refusal outside it; see issue
 /// #963. Every derivative of `exp` is `exp`, so all four jet slots carry the
 /// same value — finite wherever representable, `0.0` on underflow, and `+∞` on
 /// overflow.

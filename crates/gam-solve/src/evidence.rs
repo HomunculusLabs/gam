@@ -3102,7 +3102,7 @@ impl Default for TopologySelectOptions {
 /// yields the all-singletons partition (one component per block-decoupled
 /// coordinate); a fully coupled `H` yields a single component (no shortcut, the
 /// full joint solve is required — and is what the non-coned path performs).
-pub fn coupling_components(hessian: ArrayView2<'_, f64>) -> Vec<usize> {
+pub(crate) fn coupling_components(hessian: ArrayView2<'_, f64>) -> Vec<usize> {
     let p = hessian.nrows();
     if p == 0 || hessian.ncols() != p {
         return Vec::new();
@@ -3162,7 +3162,7 @@ pub fn coupling_components(hessian: ArrayView2<'_, f64>) -> Vec<usize> {
 /// The cone of influence of a single stationarity-gradient derivative column
 /// whose support (the coefficient indices where `∂g/∂ρ_k` is nonzero) lies in
 /// `support`: the set of coefficient indices in the same coupling component(s)
-/// as that support, given precomputed `labels` from [`coupling_components`].
+/// as that support, given precomputed `labels` from `coupling_components`.
 ///
 /// `β_k = -H⁻¹ ∂g/∂ρ_k` is exactly zero outside this cone, so a confined solve
 /// (or reuse of a cached zero) is exact, not an approximation. An empty support

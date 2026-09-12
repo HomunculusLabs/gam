@@ -722,7 +722,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
     /// already maximal across the whole window. The κ caller lifts the optimizer's
     /// lower bound to this n-FREE floor so every in-window trial stays on the
     /// design-realization skip (#1033). See
-    /// [`crate::psi_gram_tensor::PsiGramTensor::rank_stable_psi_floor`].
+    /// `crate::psi_gram_tensor::PsiGramTensor::rank_stable_psi_floor`.
     pub fn psi_gram_rank_stable_floor(&self, psi_anchor: f64) -> Option<f64> {
         self.psi_gram_tensor
             .as_ref()
@@ -737,7 +737,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
     /// to `psi_hi`. The κ caller clamps the optimizer's upper bound to this n-FREE
     /// ceiling so a line-search overshoot never leaves the maximal-rank band and
     /// trips the O(n) `reset_surface` lane (#1033). See
-    /// [`crate::psi_gram_tensor::PsiGramTensor::rank_stable_psi_ceiling`].
+    /// `crate::psi_gram_tensor::PsiGramTensor::rank_stable_psi_ceiling`.
     pub fn psi_gram_rank_stable_ceiling(&self, psi_anchor: f64) -> Option<f64> {
         self.psi_gram_tensor
             .as_ref()
@@ -752,7 +752,7 @@ impl<'a> ExternalJointHyperEvaluator<'a> {
     /// by the κ driver so that collapse is attributable rather than indistinguishable
     /// from "no clamp needed". `None` when no tensor is installed or `psi` is
     /// off-window. See
-    /// [`crate::psi_gram_tensor::PsiGramTensor::range_projector_error_bar`].
+    /// `crate::psi_gram_tensor::PsiGramTensor::range_projector_error_bar`.
     pub fn psi_gram_projector_error_bar(&self, psi: f64) -> Option<f64> {
         self.psi_gram_tensor
             .as_ref()

@@ -678,7 +678,7 @@ impl StructuredResidualModel {
     /// noise, so the downstream unit-dispersion REML criterion prices the
     /// smoothing penalty against the real dispersion rather than an assumed
     /// unit one. Floored at `f64::MIN_POSITIVE` so the blend stays SPD.
-    pub fn isotropic_dispersion(&self) -> f64 {
+    pub(crate) fn isotropic_dispersion(&self) -> f64 {
         let p = self.p.max(1) as f64;
         let n = self.row_scale.len().max(1) as f64;
         let mean_c = self.row_scale.iter().copied().sum::<f64>() / n;
@@ -696,7 +696,7 @@ impl StructuredResidualModel {
     /// where `Σ̂_t(row) = c_t(z)·ΛΛᵀ + D` is this model's per-row covariance
     /// (built from the hoisted-M0 / occupancy-weighted `c(z)` path), and
     /// `Σ_prev(row)` is `prev`'s per-row covariance when `Some`, else the
-    /// MEASURED iid anchor `φ̂·I_p` ([`Self::isotropic_dispersion`], #2243 cap
+    /// MEASURED iid anchor `φ̂·I_p` (`Self::isotropic_dispersion`, #2243 cap
     /// #2: a unit `I_p` anchor silently assumed unit noise, which on
     /// near-noiseless data pinned the whitened likelihood — and therefore the
     /// REML smoothing balance — at a noise scale ~1/φ̂ too coarse, i.e. the

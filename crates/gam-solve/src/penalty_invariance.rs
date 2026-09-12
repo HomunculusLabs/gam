@@ -676,7 +676,7 @@ pub fn orthonormalize_columns(columns: &Array2<f64>) -> Option<Array2<f64>> {
 /// `Some(Z)` with `Z' Z = I` otherwise. With `deflate = None` this is exactly
 /// the indicator basis of the un-excluded coordinates, so `Z' H Z` is the
 /// interior sub-block the certificate has always taken — bit for bit.
-pub fn judged_subspace_basis(
+pub(crate) fn judged_subspace_basis(
     dimension: usize,
     excluded: &[usize],
     deflate: Option<&Array2<f64>>,
@@ -802,7 +802,7 @@ pub fn judged_subspace_basis(
 }
 
 /// Orthonormal basis of the orthogonal complement of `basis` in `R^dimension`
-/// — i.e. exactly the directions [`judged_subspace_basis`] removed.
+/// — i.e. exactly the directions `judged_subspace_basis` removed.
 ///
 /// Derived from `basis` rather than from whatever was passed in as the
 /// deflation: the judged basis is the authority on what was actually deflated
@@ -840,7 +840,7 @@ pub(crate) fn deflated_directions(dimension: usize, basis: &Array2<f64>) -> Opti
 ///
 /// Let `T` have orthonormal columns lying inside the criterion's certified
 /// invariance, lifted to `ρ` (the subspace [`PenaltyMapInvariance`] certifies
-/// and [`judged_subspace_basis`] deflates). Along any `t` in it the criterion
+/// and `judged_subspace_basis` deflates). Along any `t` in it the criterion
 /// is exactly constant in `λ`, so with `w = diag(λ)t` and `ρ(s) = log(λ + sw)`
 ///
 /// ```text

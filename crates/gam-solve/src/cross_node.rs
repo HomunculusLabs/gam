@@ -3,7 +3,7 @@
 //! [`crate::streaming_border`] made the in-process accumulation of the
 //! Schur border Gram `G = Σ_n x_n x_nᵀ` bit-reproducible by construction: the
 //! chunk partition is a pure function of `(n_rows, chunk_size)`, per-chunk
-//! partials are deterministic [`chunk_gram_flat`] reductions, and the
+//! partials are deterministic `chunk_gram_flat` reductions, and the
 //! cross-chunk fold is a fixed pairwise tree keyed by **chunk index** — never by
 //! arrival order, thread timing, or device count. This module extends that same
 //! fixed-shape-by-construction discipline **one level up**, to a fleet of
@@ -31,7 +31,7 @@
 //! 3. **Partials, never rows, cross the wire.** A worker streams its shard rows
 //!    locally (object store / mmap — `gam_sae::corpus`) and ships
 //!    only `k·k` f64 partials. Both producers route through
-//!    the one [`chunk_gram_flat`] free function, so a shipped partial is
+//!    the one `chunk_gram_flat` free function, so a shipped partial is
 //!    bit-identical to the partial the coordinator would have computed from the
 //!    same rows.
 //!
@@ -152,7 +152,7 @@ pub struct NodePartial {
     /// Global chunk index of the partial.
     pub chunk_index: usize,
     /// Flattened `k·k` row-major per-chunk Gram, as produced by
-    /// [`chunk_gram_flat`] over the chunk's rows.
+    /// `chunk_gram_flat` over the chunk's rows.
     pub gram: Vec<f64>,
 }
 
@@ -173,7 +173,7 @@ pub struct NodeWorkerCheckpoint {
 /// sequence, turning row slices into shippable [`NodePartial`]s.
 ///
 /// The worker does **not** do I/O: the caller streams rows (from its shards /
-/// object store) for the row range [`NodeWorker::next_chunk_rows`] names, hands
+/// object store) for the row range `NodeWorker::next_chunk_rows` names, hands
 /// them to [`NodeWorker::emit`], and ships the returned partial. The cursor
 /// advances only on `emit`, so "ship durably, then checkpoint" gives exactly-
 /// once production under crash-resume (re-shipping an already-folded chunk is
@@ -236,14 +236,14 @@ impl NodeWorker {
 
     /// Global chunk index and row range of the next chunk to compute, or
     /// `None` when done. The caller fetches exactly these rows.
-    pub fn next_chunk_rows(&self) -> Option<(usize, std::ops::Range<usize>)> {
+    pub(crate) fn next_chunk_rows(&self) -> Option<(usize, std::ops::Range<usize>)> {
         let idx = self.partition.owned_chunk(self.rank, self.next_ordinal)?;
         Some((idx, self.partition.chunk_rows(idx)))
     }
 
     /// Compute the next chunk's deterministic partial from its rows and advance
     /// the cursor. `rows` must be exactly the rows of
-    /// [`NodeWorker::next_chunk_rows`] (shape-validated here; content is the
+    /// `NodeWorker::next_chunk_rows` (shape-validated here; content is the
     /// caller's contract, same as the in-process path).
     pub fn emit(&mut self, rows: ArrayView2<'_, f64>) -> Result<NodePartial, String> {
         let (chunk_index, range) = self

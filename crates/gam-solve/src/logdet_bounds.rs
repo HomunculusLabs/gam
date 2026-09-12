@@ -75,7 +75,7 @@ impl LogdetEnclosure {
     /// resolve, so the verdict is identical to the one the exact logdet would
     /// have produced.
     /// Whether a bare enclosure `gap` is resolved more tightly than a consumer's
-    /// `decision_margin` — the predicate behind [`Self::decide_within_margin`],
+    /// `decision_margin` — the predicate behind `Self::decide_within_margin`,
     /// exposed for consumers that hold only the gap (e.g. the EFS engine, which
     /// receives the cost's enclosure width through `EfsEval`).
     pub(crate) fn gap_resolves_margin(gap: f64, decision_margin: f64) -> bool {
@@ -85,7 +85,7 @@ impl LogdetEnclosure {
             && gap < decision_margin
     }
 
-    pub fn decide_within_margin(&self, decision_margin: f64) -> MarginVerdict {
+    pub(crate) fn decide_within_margin(&self, decision_margin: f64) -> MarginVerdict {
         let gap = self.gap();
         if decision_margin.is_finite() && decision_margin > 0.0 && gap < decision_margin {
             MarginVerdict::Decided {

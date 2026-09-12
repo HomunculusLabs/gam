@@ -38,7 +38,7 @@
 //! Same discipline as [`gam_terms::basis::radial_profile`]: [`PsiGramTensor::build`]
 //! returns an error unless BOTH
 //! 1. the Chebyshev coefficient tails of the Gram and RHS reach their DCT-I
-//!    accumulation floor, subject to the [`PSI_GRAM_CERT_RTOL`] ceiling, and
+//!    accumulation floor, subject to the `PSI_GRAM_CERT_RTOL` ceiling, and
 //! 2. deterministic off-node spot checks of the assembled Gram AND RHS against
 //!    exact rebuilt statistics agree to [`PSI_GRAM_SPOT_RTOL`].
 //! Nested Lobatto refinement reuses every prior node's sufficient statistics.
@@ -63,7 +63,7 @@ use rayon::prelude::*;
 /// residual into visible beta-hat drift across the reduced-basis rotation. A
 /// genuinely non-analytic design (a true kink) still refuses here or at the
 /// assembled-Gram spot check.
-pub const PSI_GRAM_CERT_RTOL: f64 = 1.0e-9;
+pub(crate) const PSI_GRAM_CERT_RTOL: f64 = 1.0e-9;
 
 /// Relative agreement required at the off-node Gram spot checks.
 pub const PSI_GRAM_SPOT_RTOL: f64 = 1.0e-10;
@@ -88,7 +88,7 @@ pub(crate) const PSI_GRAM_SPOT_POINTS: usize = 3;
 /// magnitude across the ψ-window; a directly-below-cutoff direction is exactly
 /// the one whose inclusion flips with ψ and silently rotates the frozen reduced
 /// basis, which this witness must catch.
-pub const PSI_GRAM_SKIP_RANK_RTOL: f64 = 1.0e-10;
+pub(crate) const PSI_GRAM_SKIP_RANK_RTOL: f64 = 1.0e-10;
 
 /// Max-norm tolerance on the range-PROJECTOR agreement between the pinning ψ and
 /// the candidate ψ in [`PsiGramTensor::reduced_basis_equal`] (#1264). The
@@ -100,7 +100,7 @@ pub const PSI_GRAM_SKIP_RANK_RTOL: f64 = 1.0e-10;
 pub const PSI_GRAM_SKIP_PROJ_ATOL: f64 = 1.0e-7;
 
 /// Bisection budget for the rank-stable ψ-band edge search
-/// ([`PsiGramTensor::rank_stable_psi_floor`] / `_ceiling`). The band edge is a
+/// (`PsiGramTensor::rank_stable_psi_floor` / `_ceiling`). The band edge is a
 /// monotone crossing of the projector witness, so bisection converges to the
 /// true edge, and the loop stops once the bracket's ends are adjacent floats (no
 /// representable ψ lies strictly between them); 64 halvings reach that from any
@@ -117,7 +117,7 @@ const PSI_BAND_BISECTION_ITERS: usize = 64;
 /// low-degree polynomial in the order. `p(k) ≤ SLACK·k` with `SLACK = 8` covers
 /// the measured LAPACK-class constant together with the few extra ulps of
 /// `λ_max` the tensor's own `D·(Chebyshev sum)·D` reassembly contributes. The
-/// band edges of [`PSI_GRAM_SKIP_RANK_RTOL`] are decided on `λ_r ≈ rtol·λ_max`,
+/// band edges of `PSI_GRAM_SKIP_RANK_RTOL` are decided on `λ_r ≈ rtol·λ_max`,
 /// so that absolute bar is a RELATIVE bar of `SLACK·k·ε/rtol ≈ 1.2e-4` on the
 /// decided quantity — the margin any trustworthy rank claim here must clear
 /// (theory master §9-step-6: decide with a margin wider than the backward error
@@ -1002,7 +1002,7 @@ impl PsiGramTensor {
     /// tolerance being gated on. The comparison then decides on roundoff: measured
     /// `sinθ` there is non-monotone in `Δψ` (2.9e-7 at 1e-8, 8.6e-9 at 1e-7,
     /// 1.6e-7 at 1.8e-7), so the witness accepts and refuses in alternation and
-    /// [`Self::rank_stable_psi_floor`]'s monotone-step precondition is false.
+    /// `Self::rank_stable_psi_floor`'s monotone-step precondition is false.
     ///
     /// So the gate is not `measured ≤ ATOL` but the CERTIFIED BOUND on the true
     /// distance, `measured + err_ref + err_new ≤ ATOL` — the triangle inequality
@@ -1049,7 +1049,7 @@ impl PsiGramTensor {
     /// independent of n.
     ///
     /// This is the measurement, NOT the quantity [`Self::reduced_basis_equal`]
-    /// gates on: that gate uses [`Self::reduced_basis_subspace_distance_bound`],
+    /// gates on: that gate uses `Self::reduced_basis_subspace_distance_bound`,
     /// which adds each projector's own Davis–Kahan error bar (#2448). Reading a
     /// small value here as "the subspaces coincide" is exactly the mistake the
     /// bound exists to stop — compare the two to attribute a refusal to a real
@@ -1086,7 +1086,7 @@ impl PsiGramTensor {
     /// numerically degenerate cluster). `None` for an off-window ψ, a rank
     /// mismatch, or an eigendecomp failure. `Some(0.0)` for an equal-ψ pair, which
     /// is trivially and exactly sound. Purely k-space (O(k³)) — independent of n.
-    pub fn reduced_basis_subspace_distance_bound(&self, psi_ref: f64, psi_new: f64) -> Option<f64> {
+    pub(crate) fn reduced_basis_subspace_distance_bound(&self, psi_ref: f64, psi_new: f64) -> Option<f64> {
         if !(self.contains(psi_ref) && self.contains(psi_new)) {
             return None;
         }
@@ -1104,7 +1104,7 @@ impl PsiGramTensor {
     }
 
     /// The Davis–Kahan error bar `‖P̂(ψ) − P(ψ)‖₂` on the range projector at `psi`
-    /// alone — how much of [`Self::reduced_basis_subspace_distance_bound`] is this
+    /// alone — how much of `Self::reduced_basis_subspace_distance_bound` is this
     /// endpoint's instrument rather than a real subspace move (#2448).
     ///
     /// Exposed so a refused skip, or a band edge that collapsed onto its anchor,
@@ -1115,7 +1115,7 @@ impl PsiGramTensor {
     /// double precision — a property of the geometry and the rank cutoff, not of
     /// the trial. `f64::INFINITY` when the gap is fully closed, `0.0` at full rank.
     /// `None` for an off-window / non-finite / all-zero Gram. Purely k-space.
-    pub fn range_projector_error_bar(&self, psi: f64) -> Option<f64> {
+    pub(crate) fn range_projector_error_bar(&self, psi: f64) -> Option<f64> {
         if !self.contains(psi) {
             return None;
         }
@@ -1127,7 +1127,7 @@ impl PsiGramTensor {
     /// relative cutoff (`PSI_GRAM_SKIP_RANK_RTOL`·λ_max) the design-revision skip's
     /// `reduced_basis_equal` witness uses. Returns `None` for an off-window /
     /// non-finite / all-zero Gram. Purely k-space (O(k³)) — independent of n.
-    pub fn gram_numerical_rank(&self, psi: f64) -> Option<usize> {
+    pub(crate) fn gram_numerical_rank(&self, psi: f64) -> Option<usize> {
         if !self.contains(psi) {
             return None;
         }
@@ -1166,7 +1166,7 @@ impl PsiGramTensor {
 
     /// The conditioned Gram's rank decision at `psi` in the theory-master
     /// decision currency (`gam_linalg::decision`): the same partition
-    /// [`Self::gram_numerical_rank`] reports, but posed against a two-sided guard
+    /// `Self::gram_numerical_rank` reports, but posed against a two-sided guard
     /// band so the answer comes with a MARGIN. `Certified` means every kept
     /// eigenvalue clears the cutoff — and every dropped one falls below it — by
     /// the guard gap, which is `PSI_BAND_RANK_GUARD_SLACK` times the
@@ -1205,8 +1205,8 @@ impl PsiGramTensor {
         }
     }
 
-    /// Band-edge acceptance predicate shared by [`Self::rank_stable_psi_floor`]
-    /// and [`Self::rank_stable_psi_ceiling`].
+    /// Band-edge acceptance predicate shared by `Self::rank_stable_psi_floor`
+    /// and `Self::rank_stable_psi_ceiling`.
     ///
     /// It is the production skip witness [`Self::reduced_basis_equal`] AND — when
     /// the anchor's own rank decision has a margin — a CERTIFIED rank claim equal
@@ -1273,7 +1273,7 @@ impl PsiGramTensor {
     ///
     /// Returns `None` when the band already reaches `psi_lo` (no lift needed), when
     /// the anchor is off-window / projector-indeterminate, or when the window is empty.
-    pub fn rank_stable_psi_floor(&self, psi_anchor: f64) -> Option<f64> {
+    pub(crate) fn rank_stable_psi_floor(&self, psi_anchor: f64) -> Option<f64> {
         if !(self.psi_hi > self.psi_lo) {
             return None;
         }
@@ -1313,7 +1313,7 @@ impl PsiGramTensor {
     }
 
     /// Upper edge of the contiguous skip-acceptable ψ-band, the symmetric twin of
-    /// [`Self::rank_stable_psi_floor`] (#1033). The conditioned Gram `XᵀWX(ψ)` is
+    /// `Self::rank_stable_psi_floor` (#1033). The conditioned Gram `XᵀWX(ψ)` is
     /// rank-deficient at BOTH window ends — at small ψ the longest-length-scale
     /// radial mode collapses into the polynomial nullspace, and at very large ψ
     /// every radial column goes collinear with the low-frequency mode, so the
@@ -1332,7 +1332,7 @@ impl PsiGramTensor {
     /// (#2054). Purely O(iters·k³) — no row access.
     ///
     /// The edge is n-FREE IN COST but not n-INVARIANT IN LOCATION; see
-    /// [`Self::rank_stable_psi_floor`] for the transport bound that replaces the
+    /// `Self::rank_stable_psi_floor` for the transport bound that replaces the
     /// former (false) invariance claim, and the `band_accepts` predicate for why
     /// the returned edge is the last CERTIFIED-rank ψ rather than the ψ sitting
     /// exactly on the cutoff.
@@ -1340,7 +1340,7 @@ impl PsiGramTensor {
     /// Returns `None` when the band already reaches `psi_hi` (no clamp needed),
     /// when the anchor is off-window / projector-indeterminate, or when the window is
     /// empty.
-    pub fn rank_stable_psi_ceiling(&self, psi_anchor: f64) -> Option<f64> {
+    pub(crate) fn rank_stable_psi_ceiling(&self, psi_anchor: f64) -> Option<f64> {
         // Bisection mirror of `rank_stable_psi_floor` (#2054): the anchor always
         // accepts and sits inside the contiguous band, so `accepts` is a monotone
         // step on `[psi_anchor, psi_hi]` (true up to the upper edge, false above).

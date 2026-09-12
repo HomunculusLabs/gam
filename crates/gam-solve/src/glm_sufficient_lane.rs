@@ -102,7 +102,7 @@
 //! `X_τᵀu − XᵀW X_τβ̂ = ∂b/∂ψ − ∂G/∂ψ·β̂`). [`FrozenWeightGramTensor::gradient_pair_if_sound`]
 //! is the n-free provider for this channel: it returns `(∂G/∂ψ, ∂b/∂ψ)` only
 //! when ψ is in the certified gradient sub-window AND the converged working
-//! weight is within the TIGHT [`FrozenWeightGramTensor::GRADIENT_WEIGHT_DRIFT_RTOL`]
+//! weight is within the TIGHT `FrozenWeightGramTensor::GRADIENT_WEIGHT_DRIFT_RTOL`
 //! of the frozen snapshot — unlike the value lane (which RECONVERGES the true
 //! `W`, so its value is exact at any drift), the gradient is read once at the
 //! converged point with no safety net, so the gate must keep the frozen-W
@@ -117,7 +117,7 @@
 //! analogue of the Gaussian `install_gaussian_psi_gram_deriv` install). This
 //! module is the n-free provider they consume, with both guards
 //! (`weight_drift_within` for the value lane,
-//! [`FrozenWeightGramTensor::GRADIENT_WEIGHT_DRIFT_RTOL`] for the gradient lane)
+//! `FrozenWeightGramTensor::GRADIENT_WEIGHT_DRIFT_RTOL` for the gradient lane)
 //! that keep the approximation honest.
 //!
 //! ### The full mechanism-(c) endgame, for the next builder
@@ -273,7 +273,7 @@ impl FrozenWeightGramTensor {
     ///      derivative is bit-tight against the exact frozen-`W` design
     ///      derivative, AND
     ///   2. the trial's converged working weight `w_trial` is within the TIGHT
-    ///      [`Self::GRADIENT_WEIGHT_DRIFT_RTOL`] of the frozen `W`, so the
+    ///      `Self::GRADIENT_WEIGHT_DRIFT_RTOL` of the frozen `W`, so the
     ///      frozen-`W` derivative IS the converged-`W` derivative to the
     ///      outer-gradient bar.
     ///
@@ -314,7 +314,7 @@ impl FrozenWeightGramTensor {
     /// same discipline as [`crate::psi_gram_tensor::PSI_GRAM_SPOT_RTOL`]
     /// for the Gaussian lane) the gradient channel must only fire when
     /// the converged `W` is within a TIGHT relative drift of the frozen `W`.
-    pub const GRADIENT_WEIGHT_DRIFT_RTOL: f64 = 1.0e-9;
+    pub(crate) const GRADIENT_WEIGHT_DRIFT_RTOL: f64 = 1.0e-9;
 
     /// Per-trial honesty guard: true when the trial's converged working weight
     /// `w_trial` (formed from the new ψ's converged predictor) is within

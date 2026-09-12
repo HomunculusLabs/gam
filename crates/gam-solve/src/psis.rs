@@ -34,9 +34,9 @@ const MAX_TAIL_FRACTION: f64 = 0.2;
 /// convex combination `(n·k_raw + P·SHAPE_PRIOR_MEAN) / (n + P)` of the profile
 /// fit and the prior mean, so it is materially prior-driven whenever the tail
 /// sample `n` is not large compared with `P`.
-pub const SHAPE_PRIOR_PSEUDO_OBSERVATIONS: f64 = 10.0;
+pub(crate) const SHAPE_PRIOR_PSEUDO_OBSERVATIONS: f64 = 10.0;
 /// Prior mean the reported shape is shrunk toward.
-pub const SHAPE_PRIOR_MEAN: f64 = 0.5;
+pub(crate) const SHAPE_PRIOR_MEAN: f64 = 0.5;
 
 /// How many of the `n` sorted weights form the tail the GPD is fitted to.
 ///

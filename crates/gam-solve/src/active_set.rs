@@ -1750,7 +1750,7 @@ pub struct ConstraintRowDependence {
 
 /// The result of reducing a tight active face to a minimal independent set — the
 /// shared output of the `ConstraintSet` reduced-face op (Dense arm =
-/// [`dense_reduced_face`]; KhatriRaoCone / BlockDiagonal arms produce the same
+/// `dense_reduced_face`; KhatriRaoCone / BlockDiagonal arms produce the same
 /// shape). Determinism: representatives are the lowest-flat-index row per
 /// independent direction, ascending, with no float tie-break.
 ///
@@ -1776,7 +1776,7 @@ pub struct ReducedFace {
 
 /// Reduce the tight active face of a Khatri–Rao monotonicity cone to its minimal
 /// independent set — the `KhatriRaoCone` arm of the `ConstraintSet` reduced-face
-/// op (gam#2306; the Dense arm is [`dense_reduced_face`]).
+/// op (gam#2306; the Dense arm is `dense_reduced_face`).
 ///
 /// A cone row `(slot, i)` has normal `e_{k} ⊗ ψ_i` (`k = coupled_rows[slot]`),
 /// so two normals' inner product is `δ_{slot,slot'}·(ψ_iᵀ ψ_{i'})`: cross-block
@@ -1796,7 +1796,7 @@ pub struct ReducedFace {
 /// tolerance mirrors the Dense scan (`100·ε·max(n_tight, p_cov)·max‖ψ‖`), so the
 /// two arms cut to the same numerical rank. Flat id is `slot*n + obs`, matching
 /// [`KhatriRaoConeConstraints::values`].
-pub fn khatri_rao_cone_reduced_face(
+pub(crate) fn khatri_rao_cone_reduced_face(
     cone: &KhatriRaoConeConstraints,
     beta: ndarray::ArrayView1<'_, f64>,
     membership_tol: f64,
@@ -1910,13 +1910,13 @@ pub fn khatri_rao_cone_reduced_face(
 
 /// Dense arm of the reduced-face op: reduce the tight rows of an explicit
 /// `A x ≥ b` set at `beta` to a minimal independent set. Mirrors
-/// [`khatri_rao_cone_reduced_face`] exactly — ascending-index greedy MGS,
+/// `khatri_rao_cone_reduced_face` exactly — ascending-index greedy MGS,
 /// `RANK_ALPHA·ε·max(n_tight,p)·max‖a‖` tolerance, (A)-strict parallel-only
 /// dependence (|cos| ≥ 1−1e-9, `coeff = a_depᵀa_rep/‖a_rep‖²`, `row` = the
 /// dependent row's flat id) — so both carriers produce the same `ReducedFace`
 /// contract. Flat id = the constraint row index. A zero-norm row is vacuous
 /// (never a direction, never a representative).
-pub fn dense_reduced_face(
+pub(crate) fn dense_reduced_face(
     lin: &LinearInequalityConstraints,
     beta: ndarray::ArrayView1<'_, f64>,
     membership_tol: f64,

@@ -1982,7 +1982,7 @@ impl EvidenceCertification {
     /// The smallest race lead Δ for which this candidate's evidence is
     /// trustworthy. Exact evidence transfers at any positive lead; an enclosure
     /// needs its gap; a coreset needs its certified transfer margin.
-    pub fn required_margin(&self) -> f64 {
+    pub(crate) fn required_margin(&self) -> f64 {
         match self {
             EvidenceCertification::Exact => 0.0,
             EvidenceCertification::Enclosure { gap } => *gap,
