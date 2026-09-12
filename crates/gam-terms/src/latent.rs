@@ -738,33 +738,6 @@ impl LatentManifold {
         out
     }
 
-    /// In-place column-wise tangent projection: writes the projection of every
-    /// column of `matrix` into the matching column of `out`. Both `matrix` and
-    /// `out` must have shape `(ambient_dim × ncols)`. Callers that project the
-    /// same `(q × p)` scratch every row hoist `out` outside the loop to avoid
-    /// reallocating an `Array2` per row; the projection itself reuses the
-    /// allocation-free [`Self::project_to_tangent`] per column.
-    pub fn project_matrix_columns_to_tangent_into(
-        &self,
-        t: ArrayView1<'_, f64>,
-        matrix: ArrayView2<'_, f64>,
-        mut out: ndarray::ArrayViewMut2<'_, f64>,
-    ) {
-        assert_eq!(
-            matrix.dim(),
-            out.dim(),
-            "project_matrix_columns_to_tangent_into: matrix {:?} != out {:?}",
-            matrix.dim(),
-            out.dim(),
-        );
-        for col_idx in 0..matrix.ncols() {
-            let col = self.project_to_tangent(t, matrix.column(col_idx));
-            for row_idx in 0..matrix.nrows() {
-                out[[row_idx, col_idx]] = col[row_idx];
-            }
-        }
-    }
-
     fn add_normal_pinning(&self, t: ArrayView1<'_, f64>, matrix: &mut Array2<f64>) {
         match self {
             Self::Sphere { dim } => {

@@ -567,11 +567,6 @@ impl GridSpline2dDesign {
     }
 
 
-    /// Basis functions per axis, `K + 3`.
-    pub fn basis_per_axis(&self) -> usize {
-        self.m_axis
-    }
-
     /// Total coefficient count `(K + 3)²`.
     pub fn num_coeffs(&self) -> usize {
         self.p
@@ -595,22 +590,6 @@ impl GridSpline2dDesign {
     /// Number of response dimensions sharing the design.
     pub fn num_responses(&self) -> usize {
         self.rhs.len()
-    }
-
-    /// The four active cubic B-spline values of one AXIS at `x`: returns
-    /// `(j0, values)` where `values[i]` weights basis `j0 + i` of that axis
-    /// (`0..K+3`). The tensor flat index of `(j1, j2)` is `j1·(K+3) + j2` —
-    /// row-major, axis 0 major. Outside the bounding box the boundary cell's
-    /// cubic polynomial extends (same convention as fitting and prediction).
-    pub fn axis_basis(&self, axis: usize, x: f64) -> Result<(usize, [f64; 4]), String> {
-        if axis > 1 {
-            return Err(format!("grid spline 2d: axis {axis} out of range"));
-        }
-        if !x.is_finite() {
-            return Err(format!("grid spline 2d: non-finite axis-{axis} point {x}"));
-        }
-        let ax = self.axes[axis];
-        Ok(axis_basis_at(ax.lo, ax.h, ax.cells, x))
     }
 
     /// Exact penalty quadratic form `J(f) = c'Sc` of a coefficient vector —

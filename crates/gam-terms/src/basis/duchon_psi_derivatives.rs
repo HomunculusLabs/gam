@@ -1469,16 +1469,6 @@ pub(crate) fn build_duchon_design_psi_derivativeswithworkspace(
     )
 }
 
-pub fn build_duchon_basis_log_kappa_derivativewithworkspace(
-    data: ArrayView2<'_, f64>,
-    spec: &DuchonBasisSpec,
-    workspace: &mut BasisWorkspace,
-) -> Result<BasisPsiDerivativeResult, BasisError> {
-    let mut bundle = build_duchon_basis_log_kappa_derivativeswithworkspace(data, spec, workspace)?;
-    bundle.first.implicit_operator = bundle.implicit_operator;
-    Ok(bundle.first)
-}
-
 pub(crate) fn duchon_operator_penalties_requested(spec: &DuchonOperatorPenaltySpec) -> bool {
     matches!(spec.mass, OperatorPenaltySpec::Active { .. })
         || matches!(spec.tension, OperatorPenaltySpec::Active { .. })
@@ -1753,16 +1743,6 @@ pub fn build_duchon_basis_log_kappa_derivativeswith_collocationwithworkspace(
         },
         implicit_operator: design_derivatives.implicit_operator,
     })
-}
-
-pub fn build_duchon_basis_log_kappasecond_derivativewithworkspace(
-    data: ArrayView2<'_, f64>,
-    spec: &DuchonBasisSpec,
-    workspace: &mut BasisWorkspace,
-) -> Result<BasisPsiSecondDerivativeResult, BasisError> {
-    let mut bundle = build_duchon_basis_log_kappa_derivativeswithworkspace(data, spec, workspace)?;
-    bundle.second.implicit_operator = bundle.implicit_operator;
-    Ok(bundle.second)
 }
 
 /// Multiplicative amplification factor that lifts an underflowing Duchon

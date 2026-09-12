@@ -3168,17 +3168,6 @@ pub(crate) fn build_thin_plate_scalar_design_psi_derivatives(
     )
 }
 
-pub fn build_thin_plate_basis_log_kappa_derivativewithworkspace(
-    data: ArrayView2<'_, f64>,
-    spec: &ThinPlateBasisSpec,
-    workspace: &mut BasisWorkspace,
-) -> Result<BasisPsiDerivativeResult, BasisError> {
-    let mut bundle =
-        build_thin_plate_basis_log_kappa_derivativeswithworkspace(data, spec, workspace)?;
-    bundle.first.implicit_operator = bundle.implicit_operator;
-    Ok(bundle.first)
-}
-
 pub fn build_thin_plate_basis_log_kappa_derivatives(
     data: ArrayView2<'_, f64>,
     spec: &ThinPlateBasisSpec,
@@ -3257,27 +3246,6 @@ pub fn build_thin_plate_basis_log_kappa_derivativeswithworkspace(
         },
         implicit_operator: scalar.implicit_operator,
     })
-}
-
-pub fn build_thin_plate_basis_log_kappasecond_derivativewithworkspace(
-    data: ArrayView2<'_, f64>,
-    spec: &ThinPlateBasisSpec,
-    workspace: &mut BasisWorkspace,
-) -> Result<BasisPsiSecondDerivativeResult, BasisError> {
-    let mut bundle =
-        build_thin_plate_basis_log_kappa_derivativeswithworkspace(data, spec, workspace)?;
-    bundle.second.implicit_operator = bundle.implicit_operator;
-    Ok(bundle.second)
-}
-
-pub fn create_thin_plate_spline_basis_with_knot_count_andworkspace(
-    data: ArrayView2<f64>,
-    num_knots: usize,
-    workspace: &mut BasisWorkspace,
-) -> Result<(ThinPlateSplineBasis, Array2<f64>), BasisError> {
-    let knots = select_thin_plate_knots(data, num_knots)?;
-    let basis = create_thin_plate_spline_basiswithworkspace(data, knots.view(), workspace)?;
-    Ok((basis, knots))
 }
 
 /// Applies a sum-to-zero constraint to a basis matrix for model identifiability.

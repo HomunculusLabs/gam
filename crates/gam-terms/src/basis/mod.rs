@@ -93,15 +93,15 @@ pub use measure_jet_predict::{
 };
 
 pub use measure_jet_smooth::{
-    MeasureJetBand, MeasureJetBasisSpec, MeasureJetEnergyJets, MeasureJetFrozenQuadrature,
+    MeasureJetBand, MeasureJetBasisSpec, MeasureJetFrozenQuadrature,
     MeasureJetIdentifiability, MeasureJetRangeBracket, build_measure_jet_basis,
     build_measure_jet_basis_psi_derivatives, measure_jet_affine_head_block,
     measure_jet_affine_head_lift, measure_jet_affine_head_transform, measure_jet_band,
-    measure_jet_center_masses, measure_jet_design_matrix, measure_jet_energy_form,
-    measure_jet_energy_form_with_jets, measure_jet_energy_forms_per_scale,
+    measure_jet_design_matrix, measure_jet_energy_form,
+    measure_jet_energy_forms_per_scale,
     measure_jet_input_noise_scale, measure_jet_ln_range_window, measure_jet_multiscale_mode,
     measure_jet_quadrature_nodes, measure_jet_range_bracket,
-    measure_jet_range_feasibility_ceiling, measure_jet_scale_spectrum,
+    measure_jet_range_feasibility_ceiling,
     measure_jet_support_curve,
     realized_measure_jet_length_scale,
 };

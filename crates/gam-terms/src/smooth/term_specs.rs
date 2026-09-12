@@ -9083,21 +9083,6 @@ pub fn build_single_local_smooth_term(
     })
 }
 
-/// Build the raw smooth design, honoring the caller workspace policy while
-/// building each planned smooth term with an independent per-term workspace.
-///
-/// Independent workspaces avoid shared mutable distance-cache state during the
-/// parallel term build; the final design, penalties, and metadata are assembled
-/// in the original smooth-term order.
-pub fn build_smooth_design_withworkspace(
-    data: ArrayView2<'_, f64>,
-    terms: &[SmoothTermSpec],
-    workspace: &mut crate::basis::BasisWorkspace,
-) -> Result<RawSmoothDesign, BasisError> {
-    validate_smooth_terms_finite_inputs(data, terms)?;
-    build_smooth_design_withworkspace_unvalidated(data, terms, workspace)
-}
-
 pub fn build_smooth_design_withworkspace_unvalidated(
     data: ArrayView2<'_, f64>,
     terms: &[SmoothTermSpec],

@@ -1468,5 +1468,27 @@
     },
     "reason": "#2899 public API sweep of gam-models (prune-api-d): constant_curvature_profiled_reml_scores, the #1464 pinned-kappa diagnostic entry point, has no caller. fixed_kappa_profiled_reml_score was called in production only by it, and otherwise only by the #2496 routing regression that tested the diagnostic itself, which is deleted too.",
     "evidence": "At f32e348d2, git grep -n -w over crates, src, tests, examples, bench, benches and gamfit finds no caller of constant_curvature_profiled_reml_scores. It finds fixed_kappa_profiled_reml_score called only by constant_curvature_profiled_reml_scores and by tests/regressions/misc/fixed_kappa_profiled_reml_routes_production_2496.rs; src/lib.rs only re-exports both. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "586a8903d543b9cc9a613e785aa2732b951166f6",
+    "removed": {
+      "crates/gam-terms/src/analytic_penalties/registry.rs::is_row_block_diagonal": 1,
+      "crates/gam-terms/src/basis/duchon_psi_derivatives.rs::build_duchon_basis_log_kappa_derivativewithworkspace": 1,
+      "crates/gam-terms/src/basis/duchon_psi_derivatives.rs::build_duchon_basis_log_kappasecond_derivativewithworkspace": 1,
+      "crates/gam-terms/src/basis/duchon_thinplate.rs::build_thin_plate_basis_log_kappa_derivativewithworkspace": 1,
+      "crates/gam-terms/src/basis/duchon_thinplate.rs::build_thin_plate_basis_log_kappasecond_derivativewithworkspace": 1,
+      "crates/gam-terms/src/basis/duchon_thinplate.rs::create_thin_plate_spline_basis_with_knot_count_andworkspace": 1,
+      "crates/gam-terms/src/basis/measure_jet_smooth.rs::measure_jet_center_masses": 1,
+      "crates/gam-terms/src/basis/measure_jet_smooth.rs::measure_jet_energy_form_with_jets": 1,
+      "crates/gam-terms/src/basis/measure_jet_smooth.rs::measure_jet_scale_spectrum": 1,
+      "crates/gam-terms/src/basis/sphere_basis.rs::build_matern_basis_log_kappa_derivativewithworkspace": 1,
+      "crates/gam-terms/src/basis/sphere_basis.rs::build_matern_basis_log_kappasecond_derivativewithworkspace": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::axis_basis": 1,
+      "crates/gam-terms/src/grid_spline_2d.rs::basis_per_axis": 1,
+      "crates/gam-terms/src/latent.rs::project_matrix_columns_to_tangent_into": 1,
+      "crates/gam-terms/src/smooth/term_specs.rs::build_smooth_design_withworkspace": 1
+    },
+    "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. These fifteen restored-in-place gam-terms identities have no user in gam-cli, gam-pyffi or Python, examples/, another crate's production code, or any test.",
+    "evidence": "restored_consumers_2829.py at d8f6ef9be (MSI job 527977, /scratch.global/sauer354/pool/api2829/consumers.d8f6ef9be98996b5c98bd08667aa4fe121561e8f.rows.tsv) scores all fifteen as unreferenced. At the base, git grep -w over crates, src, tests, examples, python and bench finds each name only in its own file. The three measure_jet_smooth names also appear in gam-terms basis/mod.rs's pub use block. In-file hits are the declaration, a module-doc intra-doc link to measure_jet_energy_form_with_jets, and one comment naming measure_jet_scale_spectrum. The seven *withworkspace functions are 9-to-11-line forwarding wrappers over surviving builders."
   }
 ]

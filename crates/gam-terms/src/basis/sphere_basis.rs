@@ -3432,16 +3432,6 @@ pub(crate) fn active_matern_double_penalty_derivatives(
         .collect()
 }
 
-pub fn build_matern_basis_log_kappa_derivativewithworkspace(
-    data: ArrayView2<'_, f64>,
-    spec: &MaternBasisSpec,
-    workspace: &mut BasisWorkspace,
-) -> Result<BasisPsiDerivativeResult, BasisError> {
-    let mut bundle = build_matern_basis_log_kappa_derivativeswithworkspace(data, spec, workspace)?;
-    bundle.first.implicit_operator = bundle.implicit_operator;
-    Ok(bundle.first)
-}
-
 pub fn build_matern_basis_log_kappa_derivatives(
     data: ArrayView2<'_, f64>,
     spec: &MaternBasisSpec,
@@ -3559,16 +3549,6 @@ pub fn build_matern_basis_log_kappa_derivativeswithworkspace(
         },
         implicit_operator: design_derivatives.implicit_operator,
     })
-}
-
-pub fn build_matern_basis_log_kappasecond_derivativewithworkspace(
-    data: ArrayView2<'_, f64>,
-    spec: &MaternBasisSpec,
-    workspace: &mut BasisWorkspace,
-) -> Result<BasisPsiSecondDerivativeResult, BasisError> {
-    let mut bundle = build_matern_basis_log_kappa_derivativeswithworkspace(data, spec, workspace)?;
-    bundle.second.implicit_operator = bundle.implicit_operator;
-    Ok(bundle.second)
 }
 
 /// Build per-axis ψ_a design-matrix derivatives for anisotropic Matérn terms.

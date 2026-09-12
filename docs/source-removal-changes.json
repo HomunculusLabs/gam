@@ -3911,5 +3911,29 @@
     ],
     "reason": "#2469. project_monotone_wiggle_beta_nonnegative snapped a coefficient to zero within MONOTONE_WIGGLE_ACTIVE_SET_TOL = 1e-6 below it. The constrained QP publishes its primal feasibility contract as gam_problem::PRIMAL_FEASIBILITY_TOL (re-exported as ACTIVE_SET_PRIMAL_FEASIBILITY_TOL) on the scaled slack, and the wiggle cone's rows are unit coordinate rows, so that contract is the band. The projection now reads it directly, and the constant has no other production user.",
     "evidence": "At the base, git grep -n -w MONOTONE_WIGGLE_ACTIVE_SET_TOL finds its declaration and doc links in crates/gam-models/src/wiggle.rs, its one production use in project_monotone_wiggle_beta_nonnegative (wiggle.rs:545), and two uses in the frozen_warp_keeps_exact_nonnegative_i_spline_cone test (crates/gam-models/src/gamlss/gaussian/binomial_mean_wiggle.rs:1858 and :1873). This change moves all of them onto gam_solve::pirls::ACTIVE_SET_PRIMAL_FEASIBILITY_TOL. The constant is pub(crate), production-scoped and declared once. The item list applies source_removal_guard.py's ITEM regex and occurrence rule by hand. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "586a8903d543b9cc9a613e785aa2732b951166f6",
+    "items": [
+      "crates/gam-terms/src/analytic_penalties/manifest.rs:const:ROW_BLOCK_DIAGONAL",
+      "crates/gam-terms/src/analytic_penalties/registry.rs:fn:is_row_block_diagonal",
+      "crates/gam-terms/src/basis/duchon_psi_derivatives.rs:fn:build_duchon_basis_log_kappa_derivativewithworkspace",
+      "crates/gam-terms/src/basis/duchon_psi_derivatives.rs:fn:build_duchon_basis_log_kappasecond_derivativewithworkspace",
+      "crates/gam-terms/src/basis/duchon_thinplate.rs:fn:build_thin_plate_basis_log_kappa_derivativewithworkspace",
+      "crates/gam-terms/src/basis/duchon_thinplate.rs:fn:build_thin_plate_basis_log_kappasecond_derivativewithworkspace",
+      "crates/gam-terms/src/basis/duchon_thinplate.rs:fn:create_thin_plate_spline_basis_with_knot_count_andworkspace",
+      "crates/gam-terms/src/basis/measure_jet_smooth.rs:fn:measure_jet_center_masses",
+      "crates/gam-terms/src/basis/measure_jet_smooth.rs:fn:measure_jet_energy_form_with_jets",
+      "crates/gam-terms/src/basis/measure_jet_smooth.rs:fn:measure_jet_scale_spectrum",
+      "crates/gam-terms/src/basis/measure_jet_smooth.rs:struct:MeasureJetEnergyJets",
+      "crates/gam-terms/src/basis/sphere_basis.rs:fn:build_matern_basis_log_kappa_derivativewithworkspace",
+      "crates/gam-terms/src/basis/sphere_basis.rs:fn:build_matern_basis_log_kappasecond_derivativewithworkspace",
+      "crates/gam-terms/src/grid_spline_2d.rs:fn:axis_basis",
+      "crates/gam-terms/src/grid_spline_2d.rs:fn:basis_per_axis",
+      "crates/gam-terms/src/latent.rs:fn:project_matrix_columns_to_tangent_into",
+      "crates/gam-terms/src/smooth/term_specs.rs:fn:build_smooth_design_withworkspace"
+    ],
+    "reason": "#2829 public-surface rule: no product or test uses these gam-terms functions. Two dependents cascade with them. MeasureJetEnergyJets was only measure_jet_energy_form_with_jets's return type. PenaltyManifest::ROW_BLOCK_DIAGONAL, the trait associated const and its 22 impl values, was read only by AnalyticPenaltyKind::is_row_block_diagonal.",
+    "evidence": "At the base, git grep -w ROW_BLOCK_DIAGONAL finds the trait declaration and 22 impl lines in analytic_penalties/manifest.rs, plus the single read inside is_row_block_diagonal in registry.rs's define_analytic_penalty_kind macro body. git grep -w MeasureJetEnergyJets finds its declaration, the deleted function's signature and body, and basis/mod.rs's pub use. The module doc's 'Exact (s, α) penalty jets are shipped' bullet described only the deleted function and is gone. A scan of each touched file for private fns and imports finds none that lose their last use. term_specs.rs holds uncommitted foreign work in the shared tree, so its blob was derived from main's copy and the shared file was left untouched. The item list applies source_removal_guard.py's ITEM regex and occurrence rule by hand. Compile is covered by the lead's shared tip check."
   }
 ]
