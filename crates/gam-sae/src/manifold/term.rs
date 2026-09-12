@@ -689,7 +689,7 @@ pub struct SaeManifoldTerm {
     /// SAME data-derived softening `ε_C` across an inner line search. The decoder
     /// overlaps `O` are NOT frozen — they are the LIVE shapes
     /// the barrier separates
-    /// ([`super::penalties::SaeManifoldTerm::decoder_gram_cosine_sq`]), moving with
+    /// (`decoder_gram_cosine_sq_memoized` in `penalties.rs`), moving with
     /// the trial decoders. The Jeffreys exponent `½` is fixed, so there is no
     /// per-pair strength `μ_jk` to freeze (that under-derived scalar is gone).
     pub(crate) barrier_coactivation_gate: Option<BarrierCoactivationGate>,

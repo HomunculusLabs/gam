@@ -386,6 +386,7 @@ impl SaeManifoldTerm {
         // #1610 data-derived strength, hoisted (μ_C is a per-dictionary scalar,
         // not per-pair); the gate is refreshed once per assembly.
         let repulsion_strength = self.decoder_repulsion_strength();
+        let mut self_gram_norms: Vec<Option<f64>> = vec![None; k_atoms];
         for (j, k, _qjk) in candidates {
             // Both decoders need a usable scale; a ~zero decoder has no
             // direction to be collinear with, so leave the pair at 0 (the
@@ -396,7 +397,7 @@ impl SaeManifoldTerm {
             // #2 fix — the collinearity GATE keys on the TRUE rank-aware decoder
             // subspace overlap `o_jk = ‖B_jB_kᵀ‖²_F/(‖B_jB_jᵀ‖_F·‖B_kB_kᵀ‖_F)`
             // (the squared cosine between the OUTPUT Grams `B_jᵀB_j`, `B_kᵀB_k` in
-            // the Frobenius inner product; see `decoder_gram_cosine_sq`), NOT the
+            // the Frobenius inner product; see `decoder_gram_cosine_sq_memoized`), NOT the
             // Frobenius-NORM-normalized `‖B_jB_kᵀ‖²_F/(‖B_j‖²_F‖B_k‖²_F)`. The
             // latter is a true cosine² only for rank-1 blocks and reads `1/r` for
             // two IDENTICAL rank-r subspaces (e.g. `1/2` for identical 2-row
@@ -411,7 +412,7 @@ impl SaeManifoldTerm {
             {
                 continue;
             }
-            let s_jk = self.decoder_gram_cosine_sq(j, k);
+            let s_jk = self.decoder_gram_cosine_sq_memoized(j, k, &mut self_gram_norms);
             // C1 smoothstep gate: 0 below s0, smooth ramp to 1 at o=1.
             let gate_value = if s_jk <= s0 {
                 0.0
@@ -1149,10 +1150,13 @@ impl SaeManifoldTerm {
     fn barrier_components(&self, norm_sq: &[f64], floor2: f64) -> Vec<BarrierComponent> {
         let (support_pairs, atom_neff) = self.barrier_coactivation_pairs();
         // Co-firing edges with a defined decoder shape at BOTH endpoints.
+        let mut self_gram_norms: Vec<Option<f64>> = vec![None; self.k_atoms()];
         let raw: Vec<(usize, usize, f64, f64)> = support_pairs
             .into_iter()
             .filter(|&(j, k, _q)| norm_sq[j] > floor2 && norm_sq[k] > floor2)
-            .map(|(j, k, q)| (j, k, q, self.decoder_gram_cosine_sq(j, k)))
+            .map(|(j, k, q)| {
+                (j, k, q, self.decoder_gram_cosine_sq_memoized(j, k, &mut self_gram_norms))
+            })
             .collect();
         if raw.is_empty() {
             return Vec::new();
@@ -1426,7 +1430,8 @@ impl SaeManifoldTerm {
     /// Frobenius norm `‖BBᵀ‖_F = sqrt(Σ_{a,a'}(Σ_o B[a,o]B[a',o])²)` of a decoder
     /// block's own row-Gram. Equal to `‖BᵀB‖_F` (same nonzero spectrum) and to
     /// `sqrt(Σ_r σ_r⁴)` in the singular values of `B`; `= ‖B‖²_F` only for a
-    /// rank-1 block. The rank-aware normalizer of [`Self::decoder_gram_cosine_sq`].
+    /// rank-1 block. The rank-aware normalizer of
+    /// [`Self::decoder_gram_cosine_sq_memoized`].
     fn decoder_self_gram_frobenius_norm(b: &Array2<f64>) -> f64 {
         let (m, p) = (b.nrows(), b.ncols());
         // #2731 — contiguous row slices, same accumulation order as the indexed
@@ -1470,7 +1475,18 @@ impl SaeManifoldTerm {
     /// either self-Gram is ~0 (a shapeless / vanishing decoder). It is the LIVE,
     /// differentiated collinearity scalar of the separation barrier and repulsion
     /// gate (its analytic gradient is derived in `add_sae_separation_barrier`).
-    pub(crate) fn decoder_gram_cosine_sq(&self, j: usize, k: usize) -> f64 {
+    ///
+    /// #2731 — `self_gram_norms` holds `‖B_xB_xᵀ‖_F` per atom, filled on first use,
+    /// across the calls one caller makes over many pairs. Each call used to
+    /// recompute both endpoints' norms, two of its three `O(M²p)` passes. The
+    /// memo stores the values `decoder_self_gram_frobenius_norm` computes, so the
+    /// overlap is bit-identical.
+    fn decoder_gram_cosine_sq_memoized(
+        &self,
+        j: usize,
+        k: usize,
+        self_gram_norms: &mut [Option<f64>],
+    ) -> f64 {
         let bj = self.atoms[j].decoder_coefficients();
         let bk = self.atoms[k].decoder_coefficients();
         let p = bj.ncols();
@@ -1478,8 +1494,10 @@ impl SaeManifoldTerm {
             return 0.0;
         }
         let cross_sq = self.barrier_cross_shape_energy(j, k);
-        let dj = Self::decoder_self_gram_frobenius_norm(bj);
-        let dk = Self::decoder_self_gram_frobenius_norm(bk);
+        let dj =
+            *self_gram_norms[j].get_or_insert_with(|| Self::decoder_self_gram_frobenius_norm(bj));
+        let dk =
+            *self_gram_norms[k].get_or_insert_with(|| Self::decoder_self_gram_frobenius_norm(bk));
         if !(dj > 0.0 && dk > 0.0) {
             return 0.0;
         }
@@ -3880,6 +3898,12 @@ mod tests_decoder_prior_hvp_wrapper {
         ) -> Result<(Array1<f64>, Array1<f64>), String> {
             let prepared = self.prepare_decoder_prior_beta_curvature(penalty_scale);
             self.decoder_prior_beta_hvp_pair_prepared(&prepared, v)
+        }
+
+        /// #2731 — one pair's overlap, with no norm memo shared across pairs.
+        pub(crate) fn decoder_gram_cosine_sq(&self, j: usize, k: usize) -> f64 {
+            let mut self_gram_norms: Vec<Option<f64>> = vec![None; self.k_atoms()];
+            self.decoder_gram_cosine_sq_memoized(j, k, &mut self_gram_norms)
         }
     }
 }
