@@ -6822,6 +6822,111 @@ fn survival_jointhessian_flex_no_wiggle_all_axes_matches_per_axis() {
     }
 }
 
+/// #932. The flex no-wiggle arm pulls its jet-derived primary tower back into coefficient
+/// space by hand (`accumulate_directional_joint_hessian_row` over the dynamic q geometry,
+/// with the identity-block crosses). Its other tests compare the build-once sweep with the
+/// per-axis route and the subsampled operator with the dense one, so the β-directional
+/// derivatives themselves were never checked against the object they differentiate. This
+/// applies the time-wiggle gate to this arm: `D_β H[v]` against a resolving central
+/// difference of the dense joint Hessian, and `D²_β H[u, v]` against a resolving central
+/// difference of `D_β H[v]` along `u`. Small nonzero score-warp coefficients make the warp
+/// columns carry curvature.
+#[test]
+fn flex_no_wiggle_beta_hessian_directional_derivatives_match_finite_difference_932() {
+    let family = make_flex_no_wiggle_test_family(40);
+    let base_states = flex_no_wiggle_test_block_states(&family);
+    let score_dim = base_states[3].beta.len();
+    let beta = Array1::from_shape_fn(2 + score_dim, |i| match i {
+        0 => base_states[1].beta[0],
+        1 => base_states[2].beta[0],
+        _ if i % 2 == 0 => 0.02,
+        _ => -0.02,
+    });
+    let marginal_design = family.marginal_design.to_dense().to_owned();
+    let slope_design = family
+        .slope_layout
+        .coefficient_design()
+        .to_dense()
+        .to_owned();
+    let states_at = |beta: &Array1<f64>| -> Vec<ParameterBlockState> {
+        let marginal_beta = beta.slice(s![0..1]).to_owned();
+        let slope_beta = beta.slice(s![1..2]).to_owned();
+        vec![
+            base_states[0].clone(),
+            ParameterBlockState {
+                eta: marginal_design.dot(&marginal_beta),
+                beta: marginal_beta,
+            },
+            ParameterBlockState {
+                eta: slope_design.dot(&slope_beta),
+                beta: slope_beta,
+            },
+            ParameterBlockState {
+                beta: beta.slice(s![2..]).to_owned(),
+                eta: base_states[3].eta.clone(),
+            },
+        ]
+    };
+    let states = states_at(&beta);
+    assert!(family.effective_flex_active(&states).unwrap());
+    assert!(!family.flex_timewiggle_active());
+    let label = "flex no-wiggle";
+    let u = Array1::from_shape_fn(beta.len(), |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
+    let v = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
+    let h = 1e-3;
+    let gate = |what: &str, analytic: &Array2<f64>, at: &dyn Fn(f64) -> Array2<f64>| {
+        let coarse = (at(h) - at(-h)) / (2.0 * h);
+        let fine = (at(0.5 * h) - at(-0.5 * h)) / h;
+        let scale = analytic
+            .iter()
+            .fold(0.0_f64, |acc, value| acc.max(value.abs()))
+            .max(1e-12);
+        assert!(
+            scale > 1e-6,
+            "{label}: {what} carries no curvature on this fixture ({scale:.3e}), so the \
+             comparison would pass on zeros"
+        );
+        for ((index, &want), (&c, &f)) in analytic
+            .indexed_iter()
+            .zip(coarse.iter().zip(fine.iter()))
+        {
+            let value = (4.0 * f - c) / 3.0;
+            let uncertainty = (f - c).abs() / 3.0;
+            let denominator = scale.max(want.abs()).max(value.abs());
+            assert!(
+                uncertainty <= 0.05 * denominator,
+                "{label}: {what}{index:?}: the difference oracle did not resolve \
+                 (value={value:.6e}, uncertainty={uncertainty:.3e})"
+            );
+            assert!(
+                (want - value).abs() <= 1e-5 * denominator + 4.0 * uncertainty,
+                "{label}: {what}{index:?}: analytic={want:.9e} fd={value:.9e} \
+                 uncertainty={uncertainty:.3e} scale={scale:.3e}"
+            );
+        }
+    };
+    let first = family
+        .exact_newton_joint_hessian_directional_derivative(&states, &v)
+        .expect("D_beta H[v]")
+        .expect("the flex arm publishes D_beta H");
+    gate("D_beta H[v]", &first, &|t| {
+        family
+            .exact_newton_joint_hessian(&states_at(&(&beta + &(&v * t))))
+            .expect("joint Hessian")
+            .expect("survival marginal-slope publishes an explicit joint Hessian")
+    });
+    let second = family
+        .exact_newton_joint_hessiansecond_directional_derivative(&states, &u, &v)
+        .expect("D2_beta H[u, v]")
+        .expect("the flex arm publishes D2_beta H");
+    gate("D2_beta H[u, v]", &second, &|t| {
+        family
+            .exact_newton_joint_hessian_directional_derivative(&states_at(&(&beta + &(&u * t))), &v)
+            .expect("displaced D_beta H[v]")
+            .expect("the flex arm publishes D_beta H")
+    });
+}
+
 /// gam#2893: the build-once flex third contraction reads the absorbed-influence offset
 /// `o_infl[row] = Z̃_infl[row,:]·γ` exactly as the single-direction route does. The base used to
 /// drop it and contract every directional timepoint at `o_infl = 0`, so with an influence absorber
