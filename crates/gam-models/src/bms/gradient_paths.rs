@@ -493,16 +493,6 @@ pub(super) fn rigid_pooled_probit_pilot_eta(
     Ok(out)
 }
 
-/// Tikhonov ridge for the pilot IRLS marginal solve, as a fraction of the mean
-/// Hessian diagonal: `ridge = PILOT_RIDGE_DIAG_FRACTION * max(mean_diag, floor)`.
-/// Scaling by the diagonal keeps the ridge scale-invariant; the fraction is
-/// small enough to be numerically negligible against a well-conditioned design
-/// yet still regularise a near-singular pilot Gram.
-pub(crate) const PILOT_RIDGE_DIAG_FRACTION: f64 = 1e-6;
-/// Positivity floor on the mean Hessian diagonal used to scale the pilot ridge,
-/// so a degenerate (all-zero-diagonal) Gram still receives a tiny ridge.
-pub(crate) const PILOT_RIDGE_DIAG_FLOOR: f64 = 1e-12;
-
 pub(super) fn pilot_eta_for_link_dev_orthogonalisation(
     base_link: &InverseLink,
     y: &Array1<f64>,
@@ -553,18 +543,28 @@ pub(super) fn pilot_eta_for_link_dev_orthogonalisation(
         return Ok(working_eta);
     }
     let xtwr = marginal_design.compute_xtwy(weights, &score_residual)?;
-    let mut xtwx =
+    let xtwx =
         marginal_design.xt_diag_x_signed_op(FiniteSignedWeightsView::try_from_array(&w_irls)?)?;
-    let trace_diag: f64 = (0..p_marg).map(|i| xtwx[[i, i]]).sum();
-    let ridge =
-        (trace_diag / p_marg as f64).max(PILOT_RIDGE_DIAG_FLOOR) * PILOT_RIDGE_DIAG_FRACTION;
-    for i in 0..p_marg {
-        xtwx[[i, i]] += ridge;
+    // One Fisher step on the marginal block, taken as the minimum-norm solution of
+    // XᵀWX·δ = XᵀW·r on the Gram's resolved positive eigenspace. The weights
+    // `w·φ²/V` are non-negative, so the Gram is PSD and a direction the pilot data
+    // do not identify has a null or roundoff eigenvalue: it takes no step, where a
+    // chosen ridge would have given it one.
+    let (evals, evecs) = FaerEigh::eigh(&xtwx, faer::Side::Lower).map_err(|e| {
+        format!("pilot_eta_for_link_dev_orthogonalisation eigendecomposition failed: {e}")
+    })?;
+    let threshold = gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold(
+        evals.as_slice().ok_or_else(|| {
+            "pilot_eta_for_link_dev_orthogonalisation: eigenvalues are not contiguous".to_string()
+        })?,
+    );
+    let projected_rhs = evecs.t().dot(&xtwr);
+    let mut delta_beta_marg = Array1::<f64>::zeros(p_marg);
+    for k in 0..p_marg {
+        if evals[k] > threshold {
+            delta_beta_marg.scaled_add(projected_rhs[k] / evals[k], &evecs.column(k));
+        }
     }
-    let factor = xtwx
-        .cholesky(faer::Side::Lower)
-        .map_err(|e| format!("pilot_eta_for_link_dev_orthogonalisation Cholesky failed: {e}"))?;
-    let delta_beta_marg = factor.solvevec(&xtwr);
     let marg_contrib = marginal_design.dot(&delta_beta_marg);
     Ok(&working_eta + &marg_contrib)
 }

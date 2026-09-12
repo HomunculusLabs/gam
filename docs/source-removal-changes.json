@@ -4767,5 +4767,14 @@
     ],
     "reason": "#2900 SPEC rules 6 and 23: analytic_outer_hessian_enabled routed canonical-logit Firth outer curvature to BFGS whenever n^2*p > 1e7 (firth_tk_exact_hessian_scale_allows, with its local constant FIRTH_TK_EXACT_HESSIAN_MAX_ROW_PAIR_WORK), because the exact Tierney-Kadane Hessian used to contract every row pair. 5e4a9a39b added an exact design-tensor route chosen by predicted work, so the budget guards nothing. It is deleted with its planner branch, and the unit test that asserted the BFGS routing is replaced by one that asserts exact curvature on the same fixture.",
     "evidence": "At base, git grep -n -w firth_tk_exact_hessian_scale_allows over crates, src and tests finds its declaration and planner call in crates/gam-solve/src/reml/gradient_hessian.rs, plus the two unit-test asserts in crates/gam-solve/src/reml/mod.rs. FIRTH_TK_EXACT_HESSIAN_MAX_ROW_PAIR_WORK occurs only inside that function. canonical_logit_firth_declines_exact_tk_hessian_when_row_pair_work_is_large is the n = 2000, p = 28 fixture, now canonical_logit_firth_keeps_exact_tk_hessian_beyond_row_pair_scale. Not compiled locally (user directive); compile rests on the shared tip check."
+  },
+  {
+    "base": "db275ecd2a652b4c3025f496e63557a530dc0215",
+    "items": [
+      "crates/gam-models/src/bms/gradient_paths.rs:const:PILOT_RIDGE_DIAG_FLOOR",
+      "crates/gam-models/src/bms/gradient_paths.rs:const:PILOT_RIDGE_DIAG_FRACTION"
+    ],
+    "reason": "#2469. pilot_eta_for_link_dev_orthogonalisation took its Fisher step through a ridge of PILOT_RIDGE_DIAG_FRACTION·max(mean diagonal, PILOT_RIDGE_DIAG_FLOOR). The Gram is PSD (non-negative IRLS weights), so the step is now the minimum-norm solution on its resolved positive eigenspace, and neither constant has a remaining user.",
+    "evidence": "At the base, git grep -n -w finds PILOT_RIDGE_DIAG_FRACTION only at its declaration, one doc mention and its single use in pilot_eta_for_link_dev_orthogonalisation (crates/gam-models/src/bms/gradient_paths.rs). PILOT_RIDGE_DIAG_FLOOR appears only at its declaration and that use. This change replaces the use. Both are pub(crate), production-scoped and declared once, and no test names them. The item list applies source_removal_guard.py's ITEM regex and occurrence rule by hand. Compile is covered by the lead's shared tip check."
   }
 ]
