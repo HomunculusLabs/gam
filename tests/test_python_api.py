@@ -1141,12 +1141,13 @@ def test_survival_prediction_write_csv_preserves_ids(tmp_path: pathlib.Path) -> 
     text = pathlib.Path(out).read_text(encoding="utf-8").splitlines()
 
     assert text[0] == "row,person_id,time,survival"
-    assert [line.split(",")[:3] for line in text[1:]] == [
-        ["0", "p0", "1.0"],
-        ["0", "p0", "2.0"],
-        ["1", "p1", "1.0"],
-        ["1", "p1", "2.0"],
+    assert [line.split(",")[:2] for line in text[1:]] == [
+        ["0", "p0"],
+        ["0", "p0"],
+        ["1", "p1"],
+        ["1", "p1"],
     ]
+    assert [float(line.split(",")[2]) for line in text[1:]] == [1.0, 2.0, 1.0, 2.0]
     values = [float(line.split(",")[3]) for line in text[1:]]
     assert values[1] < values[0]
     assert values[3] < values[2]

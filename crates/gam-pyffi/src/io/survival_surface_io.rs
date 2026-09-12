@@ -10,12 +10,13 @@
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::ops::Range;
 
 use gam::families::survival::{
     ExponentialSurvivalParameters, SurvivalSurface, SurvivalSurfaceChunkPolicy,
     SurvivalSurfaceKind, cumulative_hazard_from_survival, failure_probability_from_survival,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1, s};
 use numpy::{
     IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2,
     PyReadonlyArrayDyn,
@@ -129,22 +130,83 @@ pub(crate) fn survival_chunk_iter_collect<'py>(
     Ok(out.into_pyarray(py).unbind())
 }
 
+/// The one survival source a CSV is streamed from: a stored survival surface,
+/// or the exponential log-hazard parameters of a compact prediction payload.
+enum SurvivalCsvSource {
+    Surface {
+        grid: Array1<f64>,
+        values: Array2<f64>,
+    },
+    Exponential(Array2<f64>),
+}
+
+impl SurvivalCsvSource {
+    fn nrows(&self) -> usize {
+        match self {
+            Self::Surface { values, .. } => values.nrows(),
+            Self::Exponential(parameters) => parameters.nrows(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Surface { grid, values } => {
+                SurvivalSurface::new(SurvivalSurfaceKind::Survival, grid.view(), values.view())
+                    .map(drop)
+            }
+            Self::Exponential(parameters) => {
+                ExponentialSurvivalParameters::new(parameters.view()).map(drop)
+            }
+        }
+    }
+
+    /// Survival for `rows` at `query`, through the same kernels `survival_at` uses.
+    fn tile(
+        &self,
+        rows: Range<usize>,
+        query: ArrayView1<'_, f64>,
+    ) -> Result<Array2<f64>, String> {
+        match self {
+            Self::Surface { grid, values } => SurvivalSurface::new(
+                SurvivalSurfaceKind::Survival,
+                grid.view(),
+                values.slice(s![rows, ..]),
+            )?
+            .interpolate(query),
+            Self::Exponential(parameters) => {
+                ExponentialSurvivalParameters::new(parameters.slice(s![rows, ..]))?.survival(query)
+            }
+        }
+    }
+}
+
 #[pyfunction]
 pub(crate) fn write_survival_csv(
     py: Python<'_>,
     path: &str,
-    grid: PyReadonlyArray1<'_, f64>,
-    surface: PyReadonlyArray2<'_, f64>,
+    surface: Option<(PyReadonlyArray1<'_, f64>, PyReadonlyArray2<'_, f64>)>,
+    parameters: Option<PyReadonlyArray2<'_, f64>>,
     times: PyReadonlyArray1<'_, f64>,
     id_column: Option<String>,
     row_ids: Option<Vec<String>>,
     people_chunk: usize,
     time_grid_chunk: usize,
 ) -> PyResult<String> {
-    let grid = grid.as_array().to_owned();
-    let values = surface.as_array().to_owned();
+    let source = match (surface, parameters) {
+        (Some((grid, values)), None) => SurvivalCsvSource::Surface {
+            grid: grid.as_array().to_owned(),
+            values: values.as_array().to_owned(),
+        },
+        (None, Some(parameters)) => SurvivalCsvSource::Exponential(parameters.as_array().to_owned()),
+        _ => {
+            return Err(py_value_error(
+                "write_survival_csv needs exactly one of a stored survival surface or exponential parameters"
+                    .to_string(),
+            ));
+        }
+    };
     let times = times.as_array().to_owned();
-    let n_rows = values.nrows();
+    let n_rows = source.nrows();
     if id_column.is_some() {
         match row_ids.as_ref() {
             Some(ids) if ids.len() >= n_rows => {}
@@ -163,10 +225,9 @@ pub(crate) fn write_survival_csv(
     }
     let path_owned = path.to_string();
     py.detach(move || -> Result<String, String> {
-        let surface =
-            SurvivalSurface::new(SurvivalSurfaceKind::Survival, grid.view(), values.view())?;
+        source.validate()?;
         let chunks = SurvivalSurfaceChunkPolicy::default().chunks(
-            surface.nrows(),
+            n_rows,
             times.len(),
             Some(people_chunk),
             Some(time_grid_chunk),
@@ -191,10 +252,11 @@ pub(crate) fn write_survival_csv(
         }
 
         for chunk in chunks {
-            for row_idx in chunk.row_start..chunk.row_end {
-                for time_index in chunk.time_start..chunk.time_end {
-                    let query_value = times[time_index];
-                    let survival = surface.value_at(row_idx, query_value)?;
+            let query = times.slice(s![chunk.time_start..chunk.time_end]);
+            let tile = source.tile(chunk.row_start..chunk.row_end, query)?;
+            for (local_row, survival_row) in tile.outer_iter().enumerate() {
+                let row_idx = chunk.row_start + local_row;
+                for (&query_value, &survival) in query.iter().zip(survival_row.iter()) {
                     match (id_column.as_ref(), row_ids.as_ref()) {
                         (Some(_column), Some(ids)) => {
                             write!(writer, "{row_idx},").map_err(|error| {

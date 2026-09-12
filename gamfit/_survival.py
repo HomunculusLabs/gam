@@ -487,50 +487,20 @@ class SurvivalPrediction:
     ) -> str:
         times_arr = self._coerce_times(times)
         grid, surface = self._ffi_surface("survival")
-        if grid is not None and surface is not None:
-            include_ids = self.id_column is not None and self.row_ids is not None
-            return str(
-                rust_module().write_survival_csv(
-                    str(path),
-                    grid,
-                    surface,
-                    times_arr,
-                    self.id_column if include_ids else None,
-                    list(self.row_ids) if include_ids else None,
-                    people_chunk,
-                    time_grid_chunk,
-                )
-            )
-
-        import csv
-
-        with Path(path).open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            if self.id_column is not None and self.row_ids is not None:
-                writer.writerow(["row", self.id_column, "time", "survival"])
-            else:
-                writer.writerow(["row", "time", "survival"])
-            for row_slice, time_slice, block in self.survival_at_chunks(
+        stored = None if grid is None or surface is None else (grid, surface)
+        include_ids = self.id_column is not None and self.row_ids is not None
+        return str(
+            rust_module().write_survival_csv(
+                str(path),
+                stored,
+                self._parameters_array() if stored is None else None,
                 times_arr,
-                people_chunk=people_chunk,
-                time_grid_chunk=time_grid_chunk,
-            ):
-                time_block = times_arr[time_slice]
-                for local_row, values in enumerate(block):
-                    row_index = row_slice.start + local_row
-                    for time, survival in zip(time_block, values, strict=True):
-                        if self.id_column is not None and self.row_ids is not None:
-                            writer.writerow(
-                                [
-                                    row_index,
-                                    self.row_ids[row_index],
-                                    float(time),
-                                    float(survival),
-                                ]
-                            )
-                        else:
-                            writer.writerow([row_index, float(time), float(survival)])
-        return str(path)
+                self.id_column if include_ids else None,
+                list(self.row_ids) if include_ids else None,
+                people_chunk,
+                time_grid_chunk,
+            )
+        )
 
     def _survival_block(self, params: Any, times_arr: Any) -> Any:
         return rust_module().survival_block(params, times_arr)
