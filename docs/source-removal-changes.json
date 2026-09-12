@@ -5639,5 +5639,25 @@
     ],
     "reason": "#2899, SPEC rules 13, 23 and 25 (lead ruling on gam sample --chains/--warmup). NutsConfig loses nwarmup and n_chains. NUTS warmup now runs in doubling windows through general-mcmc GenericNUTS::run_adaptive and ends when the step size and metric have stabilized and split R-hat and ESS meet one shared target. Pólya-Gamma Gibbs burns in the same way. Every run uses two chains, the fewest from which a between-chain variance exists. MIN_NUTS_CHAINS, which let a caller choose the count, is replaced by pub const NUTS_CHAINS. MIN_WARMUP_FOR_MASS_ADAPT gated the fixed schedule this replaces. NutsConvergenceThresholds and its converged method held a survival/rho variant with no ESS target and become one NUTS_CONVERGENCE MixingTargets constant. RHO_POSTERIOR_NUTS_WARMUP_FLOOR fed the deleted nwarmup field. Two tests pinned chain counts that no longer exist: run_nuts_sampling_rejects_zero_chains_but_accepts_single_chain is deleted, and polya_gamma_gibbs_rejects_degenerate_counts_but_accepts_single_chain keeps its zero-samples arm and is renamed polya_gamma_gibbs_rejects_too_few_samples.",
     "evidence": "At the base, git grep -w finds MIN_NUTS_CHAINS, MIN_WARMUP_FOR_MASS_ADAPT and NutsConvergenceThresholds only in crates/gam-inference/src/hmc_io.rs: at their declarations, the chain-count check, the two mass-matrix configs, and the three NutsConvergenceThresholds literals this change rewrites. The converged method is declared once, inside impl NutsConvergenceThresholds. RHO_POSTERIOR_NUTS_WARMUP_FLOOR occurs twice in crates/gam-inference/src/rho_posterior.rs: its declaration and the NutsConfig literal that loses nwarmup. Each of the two old test names occurs only at its declaration. Every file at the base that names nwarmup, the NutsConfig n_chains field, build_sample_payload_json, resolve_nuts_config, or a chains=/warmup= argument to Model.sample is in this commit. The item list applies source_removal_guard.py's ITEM regex by hand. Not compiled or tested before landing. A guarded pool job at the landed sha runs the hmc_io and shorthand survival tests."
+  },
+  {
+    "base": "6f733933b077b847771b0c9720429ba26e42f39f",
+    "items": [
+      "crates/gam-sae/src/tiered/mod.rs:enum:SinkAnchor",
+      "crates/gam-sae/src/tiered/mod.rs:enum:SinkDelimiterClass",
+      "crates/gam-sae/src/tiered/mod.rs:fn:anchors",
+      "crates/gam-sae/src/tiered/mod.rs:fn:apply",
+      "crates/gam-sae/src/tiered/mod.rs:fn:default",
+      "crates/gam-sae/src/tiered/mod.rs:fn:fit",
+      "crates/gam-sae/src/tiered/mod.rs:fn:label",
+      "crates/gam-sae/src/tiered/mod.rs:fn:per_context_mean_zeros_each_group_and_falls_back",
+      "crates/gam-sae/src/tiered/mod.rs:fn:reconstruct",
+      "crates/gam-sae/src/tiered/mod.rs:fn:row_mean",
+      "crates/gam-sae/src/tiered/mod.rs:struct:PerContextMean",
+      "crates/gam-sae/src/tiered/mod.rs:struct:Tier05SinkAtom",
+      "crates/gam-sae/src/tiered/mod.rs:struct:Tier05SinkAtomConfig"
+    ],
+    "reason": "#2023 / SPEC rule 25 and the user's directive to delete code only tests use: the tiered spine's per-context Tier-0 mean (PerContextMean) and the flag-gated Tier-0.5 attention-sink atom surface (Tier05SinkAtomConfig, Tier05SinkAtom, SinkAnchor, SinkDelimiterClass) have no product user. No production entry constructs them; the one test that reached any of them, per_context_mean_zeros_each_group_and_falls_back, only exercised PerContextMean itself. The Tier-0 mean the public fits run is Tier0Mean, which stays.",
+    "evidence": "At the base, git grep -w over crates, src, tests, examples, gamfit, python and bench finds PerContextMean, Tier05SinkAtom, Tier05SinkAtomConfig, SinkAnchor and SinkDelimiterClass only in crates/gam-sae/src/tiered/mod.rs. Tip check 545703 reported PerContextMean, its methods, Tier05SinkAtomConfig and anchors as never used once 5d3434e3d narrowed them. The items are the guard's identities derived by its own rules (sorted path:kind:name over ITEM declarations whose count falls; fn:fit, fn:apply and fn:reconstruct keep Tier0Mean's declarations, fn:default is a private homonym with other occurrences, the test is test-scoped). The census counts are the removed pub fn declarations (label is declared twice). BTreeMap, BTreeSet and SaeManifoldAtom imports and the two module-doc paragraphs naming Tier05SinkAtom go with them. Not run through the guard or census locally (user directive); compile is covered by the tip check."
   }
 ]
