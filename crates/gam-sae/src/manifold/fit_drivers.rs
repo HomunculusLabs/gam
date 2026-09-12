@@ -6973,6 +6973,231 @@ impl SaeManifoldTerm {
         })
     }
 
+    /// #2228 — the positive part of the data term's residual curvature on every row
+    /// block, added to the inner Newton STEP operator only.
+    ///
+    /// `assemble_arrow_schur` writes the Gauss–Newton row block `J Mₙ Jᵀ` plus PSD
+    /// Loewner majorizers of the priors, and every evidence factor keeps exactly that
+    /// operator. The exact row curvature of the data term also carries
+    /// `R = w·⟨Mₙ r, ∂²fitted⟩`, which Gauss–Newton drops and which is not
+    /// sign-definite. Where `R` is positive the step model understates the curvature
+    /// and a unit step overshoots: on the logit of an atom with routing mass `a`,
+    /// Gauss–Newton curvature is `O(a²)` while `R` is `O(a)`. Measured on the 2132
+    /// anchor (pool job 531611, C=3 K=3 softmax): the row gradient norm rises
+    /// 10^0.18× across α = 1 steps and falls 10^0.32× across α < 1 steps, a period-2
+    /// cycle, while every re-gauge hook left the state untouched. `GN + R₊ ⪰ GN + R`
+    /// makes the row block a majorizer of the row-local data term again, so the unit
+    /// step no longer overshoots along it. The row–border residual cross term is not
+    /// added, and an atom without analytic second jets contributes no coordinate
+    /// second-derivative term.
+    fn add_step_row_residual_curvature(
+        &self,
+        sys: &mut ArrowSchurSystem,
+        target: ArrayView2<'_, f64>,
+    ) -> Result<(), String> {
+        use rayon::prelude::*;
+        let n = self.n_obs();
+        let p = self.output_dim();
+        let k_atoms = self.k_atoms();
+        if sys.rows.len() != n || sys.row_dims.len() != n || target.dim() != (n, p) {
+            return Ok(());
+        }
+        let q_dense = self.assignment.row_block_dim();
+        let assignment_dim = self.assignment.assignment_coord_dim();
+        let coord_offsets = self.assignment.coord_offsets();
+        let fixed_logits = self.assignment.fixed_logit_mask();
+        let inv_tau = 1.0 / self.assignment.mode.temperature();
+        let softmax = matches!(self.assignment.mode, AssignmentMode::Softmax { .. });
+        let second_jets = self.atom_second_jets().ok();
+        let layout = self.last_row_layout.as_ref();
+        let whitens = self
+            .row_metric
+            .as_ref()
+            .is_some_and(|metric| metric.whitens_likelihood());
+        let row_weights = self.row_loss_weights.as_deref();
+        let row_dims = sys.row_dims.clone();
+        let row_curvature = |row: usize, q_row: usize| -> Result<Option<Array2<f64>>, String> {
+            // Coordinate blocks of this row as `(atom, first slot)`.
+            let blocks: Vec<(usize, usize)> = match layout {
+                Some(layout) => {
+                    if q_row != layout.row_q_active(row) {
+                        return Ok(None);
+                    }
+                    layout.active_atoms[row]
+                        .iter()
+                        .copied()
+                        .zip(layout.coord_starts[row].iter().copied())
+                        .collect()
+                }
+                None => {
+                    if q_row != q_dense {
+                        return Ok(None);
+                    }
+                    (0..k_atoms).map(|atom| (atom, coord_offsets[atom])).collect()
+                }
+            };
+            let mut assignments = vec![0.0_f64; k_atoms];
+            self.assignment.try_assignments_row_into(row, &mut assignments)?;
+            let mut decoded = vec![0.0_f64; k_atoms * p];
+            let mut fitted = Array1::<f64>::zeros(p);
+            for &(atom, _) in &blocks {
+                self.atoms[atom].fill_decoded_row(row, &mut decoded[atom * p..(atom + 1) * p]);
+                for out in 0..p {
+                    fitted[out] += assignments[atom] * decoded[atom * p + out];
+                }
+            }
+            let mut residual = Array1::<f64>::zeros(p);
+            for out in 0..p {
+                residual[out] = fitted[out] - target[[row, out]];
+            }
+            let probe: Vec<f64> = match self.row_metric.as_ref() {
+                Some(metric) if whitens => metric.apply_metric_row(row, residual.view()),
+                _ => residual.to_vec(),
+            };
+            if probe.len() != p {
+                return Ok(None);
+            }
+            let weight = row_weights.map_or(1.0, |weights| weights[row]);
+            let contract = |values: &[f64]| -> f64 {
+                weight * values.iter().zip(probe.iter()).map(|(a, b)| a * b).sum::<f64>()
+            };
+            let mut curvature = Array2::<f64>::zeros((q_row, q_row));
+            // Coordinate–coordinate, same atom: `a_k·⟨Mr, ∂²f_k/∂t_a∂t_b⟩`.
+            if let Some(jets) = second_jets.as_ref() {
+                let mut second = vec![0.0_f64; p];
+                for &(atom, start) in &blocks {
+                    let a_k = assignments[atom];
+                    let d = self.assignment.coords[atom].latent_dim();
+                    let jet = &jets[atom];
+                    let decoder = self.atoms[atom].decoder_coefficients();
+                    for axis_a in 0..d {
+                        for axis_b in 0..d {
+                            second.fill(0.0);
+                            for basis in 0..decoder.nrows() {
+                                let jet_value = jet[[row, basis, axis_a, axis_b]];
+                                if jet_value == 0.0 {
+                                    continue;
+                                }
+                                for out in 0..p {
+                                    second[out] += jet_value * decoder[[basis, out]];
+                                }
+                            }
+                            curvature[[start + axis_a, start + axis_b]] += a_k * contract(&second);
+                        }
+                    }
+                }
+            }
+            if layout.is_none() && assignment_dim > 0 {
+                // `⟨Mr, f_k − fitted⟩` for softmax, `⟨Mr, f_k⟩` for independent gates.
+                let channel: Vec<f64> = (0..k_atoms)
+                    .map(|atom| {
+                        let shifted: Vec<f64> = (0..p)
+                            .map(|out| {
+                                let base = if softmax { fitted[out] } else { 0.0 };
+                                decoded[atom * p + out] - base
+                            })
+                            .collect();
+                        contract(&shifted)
+                    })
+                    .collect();
+                let mut derivative = vec![0.0_f64; p];
+                for j in 0..assignment_dim {
+                    if fixed_logits.get(j).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    let a_j = assignments[j];
+                    // Logit–logit: `Σ_k ∂²a_k/∂z_j∂z_l · ⟨Mr, f_k⟩`.
+                    for l in 0..assignment_dim {
+                        if fixed_logits.get(l).copied().unwrap_or(false) {
+                            continue;
+                        }
+                        let a_l = assignments[l];
+                        let value = if softmax {
+                            let diagonal = if j == l { a_j * channel[j] } else { 0.0 };
+                            (diagonal - a_j * a_l * (channel[j] + channel[l])) * inv_tau * inv_tau
+                        } else if j == l {
+                            a_j * (1.0 - a_j) * (1.0 - 2.0 * a_j) * channel[j] * inv_tau * inv_tau
+                        } else {
+                            0.0
+                        };
+                        curvature[[j, l]] += value;
+                    }
+                    // Logit–coordinate: `∂a_k/∂z_j · ⟨Mr, ∂f_k/∂t_a⟩`.
+                    for &(atom, start) in &blocks {
+                        let gate_derivative = if softmax {
+                            let kronecker = if atom == j { 1.0 } else { 0.0 };
+                            assignments[atom] * (kronecker - a_j) * inv_tau
+                        } else if atom == j {
+                            a_j * (1.0 - a_j) * inv_tau
+                        } else {
+                            0.0
+                        };
+                        if gate_derivative == 0.0 {
+                            continue;
+                        }
+                        for axis in 0..self.assignment.coords[atom].latent_dim() {
+                            self.atoms[atom].fill_decoded_derivative_row(row, axis, &mut derivative);
+                            let value = gate_derivative * contract(&derivative);
+                            curvature[[j, start + axis]] += value;
+                            curvature[[start + axis, j]] += value;
+                        }
+                    }
+                }
+            }
+            Ok(Some(curvature))
+        };
+        let add_positive_part = |curvature: Array2<f64>, htt: &mut Array2<f64>| -> Result<(), String> {
+            let q_row = curvature.nrows();
+            let mut symmetric = curvature;
+            for i in 0..q_row {
+                for j in 0..i {
+                    let value = 0.5 * (symmetric[[i, j]] + symmetric[[j, i]]);
+                    symmetric[[i, j]] = value;
+                    symmetric[[j, i]] = value;
+                }
+            }
+            if htt.dim() != (q_row, q_row) || !symmetric.iter().all(|value| value.is_finite()) {
+                return Ok(());
+            }
+            let (evals, evecs) = symmetric.eigh(Side::Lower).map_err(|e| {
+                format!(
+                    "SaeManifoldTerm::add_step_row_residual_curvature: row block \
+                     eigendecomposition failed: {e}"
+                )
+            })?;
+            for (index, &lambda) in evals.iter().enumerate() {
+                if !(lambda > 0.0) {
+                    continue;
+                }
+                for i in 0..q_row {
+                    let left = lambda * evecs[[i, index]];
+                    for j in 0..q_row {
+                        htt[[i, j]] += left * evecs[[j, index]];
+                    }
+                }
+            }
+            Ok(())
+        };
+        if n >= SAE_LOSS_PARALLEL_ROW_MIN && rayon::current_thread_index().is_none() {
+            sys.rows
+                .par_iter_mut()
+                .enumerate()
+                .try_for_each(|(row, block)| -> Result<(), String> {
+                    with_nested_parallel(|| match row_curvature(row, row_dims[row])? {
+                        Some(curvature) => add_positive_part(curvature, &mut block.htt),
+                        None => Ok(()),
+                    })
+                })?;
+        } else {
+            for (row, block) in sys.rows.iter_mut().enumerate() {
+                if let Some(curvature) = row_curvature(row, row_dims[row])? {
+                    add_positive_part(curvature, &mut block.htt)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn run_joint_fit_arrow_schur_with_termination_policy(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -7436,6 +7661,10 @@ impl SaeManifoldTerm {
             // has been removed in favour of the criterion-driven update.
             let mut sys = self
                 .assemble_arrow_schur(target, rho, analytic_penalties)
+                .map_err(|err| format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}"))?;
+            // #2228 — the Newton step's row blocks carry the data term's dropped
+            // residual curvature; see `add_step_row_residual_curvature`.
+            self.add_step_row_residual_curvature(&mut sys, target)
                 .map_err(|err| format!("SaeManifoldTerm::run_joint_fit_arrow_schur: {err}"))?;
             let assemble_seconds = iteration_started.elapsed().as_secs_f64();
             let plan = self
