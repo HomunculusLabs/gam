@@ -241,20 +241,19 @@ pub(crate) fn compute_outer_hessian(
             .operator_ref()
             .is_some_and(|op| c.drift.uses_operator_fast_path() && op.is_implicit())
     });
-    let total_p = hop.dim();
     // Stochastic cross-traces are only used when:
     // (1) implicit operators are present
-    // (2) problem is large (p > 500)
-    // (3) dense operator (eigendecomposition-based)
-    // (4) logdet_h is included
-    // (5) no third-derivative corrections (Gaussian family)
+    // (2) the backend prefers stochastic traces (it cannot hold an exact
+    //     factor) and its logdet traces match the H⁻¹ kernel
+    // (3) logdet_h is included
+    // (4) no third-derivative corrections (Gaussian family)
     //
-    // Condition (5) ensures correctness: the stochastic estimator uses
+    // Condition (4) ensures correctness: the stochastic estimator uses
     // B_d (the implicit operator) which equals Ḣ_d only when C[v_d] = 0.
     // For non-Gaussian families, Ḣ_d = B_d + C[v_d] and the correction
     // is a dense p x p matrix, so we fall back to dense materialization.
     let use_stochastic_cross_traces = any_ext_implicit
-        && can_use_stochastic_logdet_hinv_kernel(hop, total_p, incl_logdet_h)
+        && can_use_stochastic_logdet_hinv_kernel(hop, incl_logdet_h)
         && !effective_deriv.has_corrections()
         && solution.penalty_subspace_trace.is_none();
 

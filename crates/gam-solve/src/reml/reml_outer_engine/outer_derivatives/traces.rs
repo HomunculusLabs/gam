@@ -453,11 +453,9 @@ pub(crate) fn trace_logdet_hessian_crosses_dense_spectral_drifts(
 #[inline]
 pub(crate) fn can_use_stochastic_logdet_hinv_kernel(
     hop: &dyn HessianFactorization,
-    total_p: usize,
     incl_logdet_h: bool,
 ) -> bool {
-    total_p > STOCHASTIC_TRACE_DIM_THRESHOLD
-        && hop.prefers_stochastic_trace_estimation()
+    hop.prefers_stochastic_trace_estimation()
         && hop.logdet_traces_match_hinv_kernel()
         && incl_logdet_h
 }

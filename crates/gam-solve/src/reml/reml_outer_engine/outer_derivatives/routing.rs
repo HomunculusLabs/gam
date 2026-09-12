@@ -37,13 +37,6 @@ pub(crate) const MATRIX_FREE_OUTER_HESSIAN_K_THRESHOLD: usize = 32;
 /// contractions over the upper-triangular coordinate pairs.
 pub(crate) const CALLBACK_OUTER_HESSIAN_ROW_PAIR_WORK_THRESHOLD: usize = 25_000_000;
 
-/// Coefficient-dimension threshold above which a stochastic (Hutch++) trace
-/// kernel is preferred over the exact dense trace for the logdet-H⁻¹ and ψ-Gram
-/// paths. Below this the exact dense O(p³) work is cheap enough that the
-/// estimator's variance is not worth trading for; above it the stochastic
-/// estimator's O(p²·m) cost wins.
-pub(crate) const STOCHASTIC_TRACE_DIM_THRESHOLD: usize = 500;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OuterHessianRoutePlan {
     pub use_operator: bool,

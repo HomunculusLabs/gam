@@ -844,7 +844,7 @@ pub(crate) fn reml_laml_evaluate(
     // replaces the kernel with the projected `U_S · (U_Sᵀ H U_S)⁻¹ · U_Sᵀ`,
     // which the Hutchinson path cannot produce — stay exact when it is active.
     let total_p = hop.dim();
-    let use_stochastic_traces = can_use_stochastic_logdet_hinv_kernel(hop, total_p, incl_logdet_h)
+    let use_stochastic_traces = can_use_stochastic_logdet_hinv_kernel(hop, incl_logdet_h)
         && solution.penalty_subspace_trace.is_none();
 
     // When using stochastic traces, pre-collect all H_k drifts (both rho and

@@ -373,14 +373,12 @@ pub fn compute_hybrid_efs_update(
             });
         }
 
-        let total_p = hop.dim();
         let any_psi_operator = psi_local_indices.iter().any(|&li| {
             let drift = &solution.ext_coords[li].drift;
             drift.uses_operator_fast_path()
         });
-        let use_stochastic_psi_gram = any_psi_operator
-            && total_p > STOCHASTIC_TRACE_DIM_THRESHOLD
-            && hop.prefers_stochastic_trace_estimation();
+        let use_stochastic_psi_gram =
+            any_psi_operator && hop.prefers_stochastic_trace_estimation();
 
         // Step 1: Build the trace Gram matrix
         //   G_{de} = tr(H⁻¹ B_d H⁻¹ B_e).

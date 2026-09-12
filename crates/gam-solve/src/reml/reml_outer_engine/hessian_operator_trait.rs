@@ -446,22 +446,20 @@ pub trait HessianFactorization: Send + Sync {
 
     /// Whether this operator is backed by a dense factorization.
     ///
-    /// Dense operators (eigendecomposition) have O(p²) trace cost per matrix,
-    /// making stochastic trace estimation worthwhile for large p.  Sparse
-    /// operators (Cholesky) have O(nnz) solve cost, so exact column-by-column
-    /// traces are already cheap and stochastic estimation is not needed.
+    /// Dense operators (eigendecomposition) have O(p²) trace cost per matrix;
+    /// sparse operators (Cholesky) have O(nnz) solve cost.
     fn is_dense(&self) -> bool {
         false
     }
 
-    /// Whether the unified evaluator should batch large trace computations
-    /// through the stochastic Hutchinson path for this operator.
+    /// Whether the unified evaluator should route trace computations through
+    /// the stochastic Hutchinson path for this operator.
     ///
-    /// Dense eigendecomposition backends prefer this once `p` is large because
-    /// exact per-coordinate traces are O(p²). Matrix-free iterative backends
-    /// have the same preference even though they do not store a dense factor.
+    /// A backend that holds an exact factor computes its traces exactly, so the
+    /// default is `false`. Only a backend that cannot hold an exact factor
+    /// within its memory budget prefers the estimator.
     fn prefers_stochastic_trace_estimation(&self) -> bool {
-        self.is_dense()
+        false
     }
 
     /// Whether stochastic Hutchinson estimates based on `H⁻¹` are valid for

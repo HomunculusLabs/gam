@@ -5954,13 +5954,13 @@ pub(crate) fn dense_spectral_logdet_traces_do_not_claim_hinv_kernel_equivalence(
     let op = DenseSpectralOperator::from_symmetric(&h).unwrap();
     assert!(!op.prefers_stochastic_trace_estimation());
     assert!(!op.logdet_traces_match_hinv_kernel());
-    assert!(!can_use_stochastic_logdet_hinv_kernel(&op, 1024, true));
+    assert!(!can_use_stochastic_logdet_hinv_kernel(&op, true));
 
     let block =
         BlockCoupledOperator::from_joint_hessian_with_mode(&h, PseudoLogdetMode::Smooth).unwrap();
     assert!(!block.prefers_stochastic_trace_estimation());
     assert!(!block.logdet_traces_match_hinv_kernel());
-    assert!(!can_use_stochastic_logdet_hinv_kernel(&block, 1024, true));
+    assert!(!can_use_stochastic_logdet_hinv_kernel(&block, true));
 }
 
 #[test]
@@ -6275,9 +6275,8 @@ pub(crate) fn matrix_free_logdet_traces_use_exact_spectral_algebra() {
     );
     assert!(!op.prefers_stochastic_trace_estimation());
     assert!(!op.logdet_traces_match_hinv_kernel());
-    assert!(!can_use_stochastic_logdet_hinv_kernel(&op, 1024, true));
-    assert!(!can_use_stochastic_logdet_hinv_kernel(&op, 128, true));
-    assert!(!can_use_stochastic_logdet_hinv_kernel(&op, 1024, false));
+    assert!(!can_use_stochastic_logdet_hinv_kernel(&op, true));
+    assert!(!can_use_stochastic_logdet_hinv_kernel(&op, false));
 }
 
 #[test]
