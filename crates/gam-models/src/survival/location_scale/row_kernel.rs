@@ -908,8 +908,25 @@ fn sls_row_fourth_generated(
     direction_u: &[f64; SLS_ROW_K],
     direction_v: &[f64; SLS_ROW_K],
 ) -> [[f64; SLS_ROW_K]; SLS_ROW_K] {
-    let plan = sls_outer_plan::<5>(kernel);
-    let (u1, g) = sls_program_stacks(&plan);
+    sls_row_fourth_generated_with_plan(
+        primary,
+        &sls_outer_plan::<5>(kernel),
+        direction_u,
+        direction_v,
+    )
+}
+
+/// [`sls_row_fourth_generated`] from the row's outer derivative plan. The plan is a
+/// function of the row alone, so a sweep over many directions for one row builds it
+/// once; the contraction has this one source either way.
+#[inline(always)]
+fn sls_row_fourth_generated_with_plan(
+    primary: &[f64; SLS_ROW_K],
+    plan: &SlsOuterPlan<5>,
+    direction_u: &[f64; SLS_ROW_K],
+    direction_v: &[f64; SLS_ROW_K],
+) -> [[f64; SLS_ROW_K]; SLS_ROW_K] {
+    let (u1, g) = sls_program_stacks(plan);
     sls_row_program_fourth_contracted(
         primary[0],
         primary[1],
