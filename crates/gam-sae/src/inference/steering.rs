@@ -336,6 +336,11 @@ pub type AppliedDoseProbe<'a> =
     dyn FnMut(&SteerPlan) -> Result<AppliedDoseObservation, String> + 'a;
 
 /// Tuning for the closed-loop correction in [`steer_to_target_nats`].
+///
+/// There is no library default. Every probe is a patched forward of the
+/// caller's model, so the accuracy the loop stops at and the number of forwards
+/// it may spend are the caller's decisions, stated in each request (the Python
+/// surface already requires all three).
 #[derive(Clone, Copy, Debug)]
 pub struct TargetDoseConfig {
     /// Relative tolerance on measured KL vs the target that stops the loop. An
@@ -348,16 +353,6 @@ pub struct TargetDoseConfig {
     /// measured KL matches the probe's exact directional local-Fisher dose
     /// within this relative tolerance.
     pub readout_tol_rel: f64,
-}
-
-impl Default for TargetDoseConfig {
-    fn default() -> Self {
-        Self {
-            tol_rel: 1.0e-2,
-            max_iter: 12,
-            readout_tol_rel: 1.0e-1,
-        }
-    }
 }
 
 /// One target-dose solve along one atom's chart.

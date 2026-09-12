@@ -52,6 +52,16 @@ use gam::terms::{
 const R: f64 = 1.3;
 const TWO_PI: f64 = 2.0 * std::f64::consts::PI;
 
+/// The dose-loop tuning these fixtures run under, stated explicitly: the library
+/// carries no default accuracy or probe budget.
+fn dose_config() -> TargetDoseConfig {
+    TargetDoseConfig {
+        tol_rel: 1.0e-2,
+        max_iter: 12,
+        readout_tol_rel: 1.0e-1,
+    }
+}
+
 /// The closed-form KL of the quadratic readout for a latent move of `delta`
 /// (amplitude 1, `F = I₂`): `R² (1 − cos(2π Δ))`.
 fn analytic_kl(delta: f64) -> f64 {
@@ -479,7 +489,7 @@ fn target_dose_exact_factor_lands_the_dose_on_the_chart() {
             t_from: &[t0],
             direction: &[1.0],
             target_nats: target,
-            config: TargetDoseConfig::default(),
+            config: dose_config(),
         },
         None,
     )
@@ -563,7 +573,7 @@ fn target_dose_exact_probe_lands_to_a_tight_tolerance() {
             target_nats: target,
             config: TargetDoseConfig {
                 tol_rel,
-                ..TargetDoseConfig::default()
+                ..dose_config()
             },
         },
         Some(&mut probe as &mut AppliedDoseProbe<'_>),
@@ -583,7 +593,7 @@ fn target_dose_exact_probe_lands_to_a_tight_tolerance() {
         "measured KL {measured} must equal target {target} to {tol_rel:e}"
     );
     assert!(
-        plan.iterations <= TargetDoseConfig::default().max_iter,
+        plan.iterations <= dose_config().max_iter,
         "an exact probe must land within the probe budget; took {}",
         plan.iterations
     );
@@ -633,7 +643,7 @@ fn target_dose_saturating_probe_secant_corrects_upward() {
             t_from: &[t0],
             direction: &[1.0],
             target_nats: target,
-            config: TargetDoseConfig::default(),
+            config: dose_config(),
         },
         Some(&mut probe as &mut AppliedDoseProbe<'_>),
     )
@@ -649,7 +659,7 @@ fn target_dose_saturating_probe_secant_corrects_upward() {
         plan.iterations, plan.displacement, plan.seed_displacement
     );
     assert!(
-        (measured - target).abs() / target <= TargetDoseConfig::default().tol_rel,
+        (measured - target).abs() / target <= dose_config().tol_rel,
         "corrected measured KL {measured} must reach target {target}"
     );
     // Saturation ⇒ the quadratic over-predicts, so the realized move is longer than
@@ -699,7 +709,7 @@ fn target_dose_plateau_is_an_explicit_unreachable_error() {
             t_from: &[t0],
             direction: &[1.0],
             target_nats: target,
-            config: TargetDoseConfig::default(),
+            config: dose_config(),
         },
         Some(&mut probe),
     )
@@ -738,7 +748,7 @@ fn target_dose_apparent_plateau_without_certificate_is_only_unbracketed() {
             target_nats: target,
             config: TargetDoseConfig {
                 max_iter: 3,
-                ..TargetDoseConfig::default()
+                ..dose_config()
             },
         },
         Some(&mut probe),
@@ -782,7 +792,7 @@ fn target_dose_chart_end_is_a_typed_refusal_never_a_clamp() {
             t_from: &[t0],
             direction: &[1.0],
             target_nats: target,
-            config: TargetDoseConfig::default(),
+            config: dose_config(),
         },
         Some(&mut probe),
     )
@@ -799,7 +809,7 @@ fn target_dose_chart_end_is_a_typed_refusal_never_a_clamp() {
     assert_eq!(extent, 1.0, "the circle's extent along +1 is one period");
     assert_eq!(max_observed_nats, 0.1);
     assert!(
-        probed.len() < TargetDoseConfig::default().max_iter,
+        probed.len() < dose_config().max_iter,
         "the refusal must come from the chart's end, not from the probe budget: {} probes",
         probed.len()
     );
@@ -845,7 +855,7 @@ fn target_dose_expansion_continues_through_a_local_decrease() {
             config: TargetDoseConfig {
                 tol_rel: 0.0,
                 max_iter: 3,
-                ..TargetDoseConfig::default()
+                ..dose_config()
             },
         },
         Some(&mut probe),
@@ -883,7 +893,7 @@ fn target_dose_probe_exhaustion_never_returns_an_unconverged_plan() {
             target_nats: target,
             config: TargetDoseConfig {
                 max_iter: 1,
-                ..TargetDoseConfig::default()
+                ..dose_config()
             },
         },
         Some(&mut probe),
@@ -917,7 +927,7 @@ fn target_dose_relative_tolerances_have_fractional_finite_domain() {
             config: TargetDoseConfig {
                 tol_rel: 0.0,
                 readout_tol_rel: 0.0,
-                ..TargetDoseConfig::default()
+                ..dose_config()
             },
         },
         None,
@@ -928,11 +938,11 @@ fn target_dose_relative_tolerances_have_fractional_finite_domain() {
         for config in [
             TargetDoseConfig {
                 tol_rel: invalid,
-                ..TargetDoseConfig::default()
+                ..dose_config()
             },
             TargetDoseConfig {
                 readout_tol_rel: invalid,
-                ..TargetDoseConfig::default()
+                ..dose_config()
             },
         ] {
             let error = steer_to_target_nats(
@@ -969,7 +979,7 @@ fn target_dose_direction_must_be_a_finite_nonzero_chart_vector() {
         t_from: &[0.0],
         direction,
         target_nats: target,
-        config: TargetDoseConfig::default(),
+        config: dose_config(),
     };
     for direction in [&[0.0][..], &[f64::NAN][..], &[1.0, 0.0][..]] {
         let error = steer_to_target_nats(&term, &metric, request(direction), None)
@@ -1045,7 +1055,7 @@ fn applied_dose_probe_payload_fails_closed() {
                 t_from: &[t0],
                 direction: &[1.0],
                 target_nats: target,
-                config: TargetDoseConfig::default(),
+                config: dose_config(),
             },
             Some(&mut probe),
         )
@@ -1083,7 +1093,7 @@ fn target_dose_moves_the_coordinate_and_refuses_what_the_chart_cannot_produce_22
         t_from: &[0.0],
         direction: &[1.0],
         target_nats,
-        config: TargetDoseConfig::default(),
+        config: dose_config(),
     };
 
     let reachable = 4.0 * unit_month;

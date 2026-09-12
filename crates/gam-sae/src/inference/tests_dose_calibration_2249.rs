@@ -434,7 +434,11 @@ mod tests {
             t_from: &t_from,
             direction: &direction,
             target_nats,
-            config: TargetDoseConfig::default(),
+            config: TargetDoseConfig {
+                tol_rel: 1.0e-2,
+                max_iter: 12,
+                readout_tol_rel: 1.0e-1,
+            },
         };
 
         let uncertified_metric = metric
