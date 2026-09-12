@@ -282,10 +282,10 @@ impl SavedLatentZNormalization {
                 reason: format!("{context} latent z mean must be finite"),
             });
         }
-        if !(self.sd.is_finite() && self.sd > 1e-12) {
+        if !(self.sd.is_finite() && self.sd > 0.0) {
             return Err(FittedModelError::PayloadCorrupt {
                 reason: format!(
-                    "{context} latent z sd must be finite and > 1e-12; got {}",
+                    "{context} latent z sd must be finite and positive; got {}",
                     self.sd
                 ),
             });
