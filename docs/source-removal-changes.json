@@ -5791,5 +5791,24 @@
     ],
     "reason": "94fc37dd1 closed the cascade the #2829 deletions left. It removed the evidence.rs union-structure density helpers and splitmix64 that only deleted code reached; the certificate verdict wrappers and the in-file test enclosure_certifies_only_when_margin_clears_gap; the GLM design-fingerprint helpers behind the never-read design_fingerprint field; and the #2446 projection-law pin with its two private helpers, after 574449c98 deleted constrained_projection_law.",
     "evidence": "Tip check 541148 at 96e121c18 reported each production item as never used, and the #2446 pin calling the deleted constrained_projection_law (E0425). MSI job 550898 ran source_removal_guard.py on 3fddea6c6..94fc37dd1 and produced exactly these guarded identities. dd2fe5aea records the #2446 pin as retired in docs/test-census-2818-recovery.md."
+  },
+  {
+    "base": "3cfc54e0d0f11e0e0b3773f87f1792921b0dfcdd",
+    "items": [
+      "crates/gam-models/src/fit_orchestration/drivers/design_assembly_constraint_tests.rs:fn:spatial_anisotropy_pilot_initializer_seeds_geometry_without_fit",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:const:GEOMETRY_UPDATES",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:const:TARGET_POINTS_PER_CELL",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:fn:apply_pilot_spatial_psi_reseed",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:fn:apply_spatial_anisotropy_pilot_initializer",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:fn:blended_pilot_axis_contrasts",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:fn:finite_centered_axis_contrasts",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:fn:sampled_rows",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:fn:spatial_seed_mix",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:fn:spatial_subsample_seed",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:fn:spatial_term_user_centers",
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs:fn:stratified_spatial_subsample"
+    ],
+    "reason": "#2897, SPEC rules 23 and 25. SpatialLengthScaleOptimizationOptions::pilot_subsample_threshold (default 10,000) changed how the spatial length-scale search was seeded, at a row-count window. Once n exceeded twice the threshold, spatial_kappa_incumbent ran apply_spatial_anisotropy_pilot_initializer before the full-data search. That initializer drew a stratified subsample of threshold rows, resolved centers on it, set the anisotropy contrasts from the pilot geometry, and reseeded psi twice. The same data at 20,000 and 20,001 rows therefore started the kappa/anisotropy search from different points. This removes the option, the gate, the initializer, the eight private helpers only it used (with the GEOMETRY_UPDATES pass count), and its unit test.",
+    "evidence": "At the base, git grep -n -w over crates, src, tests and examples finds each helper only inside the removed range of design_construction.rs: stratified_spatial_subsample, spatial_subsample_seed, spatial_seed_mix, sampled_rows (the other sampled_rows hits are a local variable in gam-sae atlas_nerve.rs), spatial_term_user_centers, finite_centered_axis_contrasts, blended_pilot_axis_contrasts, apply_pilot_spatial_psi_reseed and GEOMETRY_UPDATES. apply_spatial_anisotropy_pilot_initializer has two callers: the gate in spatial_optimization.rs and spatial_anisotropy_pilot_initializer_seeds_geometry_without_fit. pilot_subsample_threshold appears only in the option, its default, the gate and fifteen option literals, all of which this change updates. Compile is covered by the lead shared tip check."
   }
 ]

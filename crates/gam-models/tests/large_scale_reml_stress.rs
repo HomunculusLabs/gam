@@ -493,16 +493,7 @@ fn large_scale_reml_stress_main() {
     // `fit_term_collectionwith_spatial_length_scale_optimization` is the entry
     // the production path uses (`StandardFitRequest` → `fit_standard_base`), so
     // it is the one whose reconstruction the bar is about.
-    //
-    // `pilot_subsample_threshold: 0` disables the large-n pilot geometry
-    // initializer deliberately: the pilot exists to seed κ/η cheaply from a
-    // subsample, and this fixture is scoring what the FULL-data outer solve
-    // learns. Leaving the pilot on would make the measurement partly a
-    // measurement of the subsample.
-    let kappa_options = SpatialLengthScaleOptimizationOptions {
-        pilot_subsample_threshold: 0,
-        ..SpatialLengthScaleOptimizationOptions::default()
-    };
+    let kappa_options = SpatialLengthScaleOptimizationOptions::default();
     let start = Instant::now();
     let fitted = fit_term_collectionwith_spatial_length_scale_optimization(
         x_train.view(),

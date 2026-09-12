@@ -8993,28 +8993,13 @@ fn spatial_kappa_incumbent(
     if !(kappa_options.log_step.is_finite() && kappa_options.log_step > 0.0) {
         crate::bail_invalid_estim!("spatial kappa optimization requires log_step > 0");
     }
-    let pilot_threshold = kappa_options.pilot_subsample_threshold;
-    if pilot_threshold > 0 && n > pilot_threshold * 2 {
-        log::info!(
-            "[spatial-kappa] n={n} exceeds pilot threshold {}; using pilot geometry only for deterministic anisotropy initialization",
-            pilot_threshold * 2,
-        );
-        apply_spatial_anisotropy_pilot_initializer(
-            data,
-            &mut resolvedspec,
-            &spatial_terms,
-            pilot_threshold,
-        )?;
-    }
-
     // #1376: the geometry-only anisotropy seed (`initial_aniso_contrasts`, from
     // per-axis knot-coordinate spread) is blind to the response, so a signal
     // axis and a nuisance axis with equal coordinate spread both seed to ~0 and
     // the κ optimizer can stall at the symmetric point (it found a weak/flat
     // antisymmetric gradient, amplified by double-penalty nullspace shrinkage).
     // Add a bounded, response-aware per-axis nudge so the optimizer starts in
-    // the correct basin. This runs whether or not the pilot initializer fired
-    // (the pilot path is gated on a large-n threshold).
+    // the correct basin.
     apply_response_aware_anisotropy_seed(data, y.view(), &mut resolvedspec, &spatial_terms);
 
     // Select every free constant-curvature coordinate once from its continuous,

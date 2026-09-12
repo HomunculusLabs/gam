@@ -2351,5 +2351,13 @@
     },
     "reason": "94fc37dd1 deleted the certificate verdict wrappers after b6bda0923 (#2829) removed the evidence and topology-race entry points, their only production callers. gam-solve's deny-warnings build had rejected them as never used.",
     "evidence": "Tip check 541148 at 96e121c18 reported coreset_race_verdict and enclosure_margin_verdict as never used. MSI job 550898 ran public_api_census.py on 3fddea6c6..94fc37dd1 and it demanded exactly these two identities."
+  },
+  {
+    "base": "3cfc54e0d0f11e0e0b3773f87f1792921b0dfcdd",
+    "removed": {
+      "crates/gam-models/src/fit_orchestration/drivers/design_construction.rs::apply_spatial_anisotropy_pilot_initializer": 1
+    },
+    "reason": "#2897, SPEC rules 23 and 25. apply_spatial_anisotropy_pilot_initializer seeded spatial anisotropy from a pilot subsample whenever n exceeded twice SpatialLengthScaleOptimizationOptions::pilot_subsample_threshold. That was a row-count window that changed where the length-scale search starts. The option, the gate and the initializer are removed.",
+    "evidence": "At the base, git grep -n -w apply_spatial_anisotropy_pilot_initializer over crates, src, tests and examples finds its declaration in design_construction.rs, the gate call in spatial_optimization.rs, and one unit test in design_assembly_constraint_tests.rs. This change removes all three. No gam-cli, gam-pyffi, python or examples code names it."
   }
 ]

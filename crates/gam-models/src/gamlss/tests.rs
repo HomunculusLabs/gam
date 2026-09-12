@@ -2282,7 +2282,6 @@ pub(crate) fn spatial_kappa_options() -> SpatialLengthScaleOptimizationOptions {
         max_outer_iter: 4,
         rel_tol: 1e-4,
         log_step: std::f64::consts::LN_2,
-        pilot_subsample_threshold: 10_000,
     }
 }
 

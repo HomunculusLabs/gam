@@ -132,10 +132,7 @@ fn fitted_kappa(data: &Array2<f64>, ell_ref: f64, kappa_true: f64) -> f64 {
         &resolved_spec,
         LikelihoodSpec::gaussian_identity(),
         &options,
-        &SpatialLengthScaleOptimizationOptions {
-            pilot_subsample_threshold: 0,
-            ..SpatialLengthScaleOptimizationOptions::default()
-        },
+        &SpatialLengthScaleOptimizationOptions::default(),
     )
     .expect("free-curvature production fit");
     get_constant_curvature_kappa(&fitted.resolvedspec, 0)

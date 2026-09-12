@@ -2230,7 +2230,6 @@ pub(super) fn run_two_block_exact_joint_optimize(
     let kappa_options = SpatialLengthScaleOptimizationOptions {
         max_outer_iter: 1,
         rel_tol: 1e-6,
-        pilot_subsample_threshold: 0,
         ..SpatialLengthScaleOptimizationOptions::default()
     };
     let joint_setup = two_block_exact_joint_hyper_setup(data, meanspec, noisespec);
@@ -4625,75 +4624,6 @@ fn pure_duchon_aniso_fit_optimizes_without_introducing_hybrid_scale() {
             );
         }
         _ => panic!("expected Duchon term"),
-    }
-}
-
-#[test]
-fn spatial_anisotropy_pilot_initializer_seeds_geometry_without_fit() {
-    let data = Array2::from_shape_fn((32, 2), |(i, j)| {
-        if j == 0 {
-            i as f64 / 31.0
-        } else {
-            ((i % 8) as f64) * 0.03
-        }
-    });
-    let mut spec = TermCollectionSpec {
-        linear_terms: vec![],
-        random_effect_terms: vec![],
-        smooth_terms: vec![SmoothTermSpec {
-            frozen_parametric_residualization: None,
-            name: "pc_matern".to_string(),
-            basis: SmoothBasisSpec::Matern {
-                feature_cols: vec![0, 1],
-                spec: MaternBasisSpec {
-                    periodic: None,
-                    center_strategy: CenterStrategy::UserProvided(array![
-                        [0.0, 0.0],
-                        [1.0, 0.0],
-                        [0.0, 0.05],
-                        [1.0, 0.05],
-                    ]),
-                    length_scale: gam_terms::basis::MaternLengthScale::fixed(1.0),
-                    nu: MaternNu::FiveHalves,
-                    include_intercept: false,
-                    double_penalty: true,
-                    identifiability: MaternIdentifiability::None,
-                    aniso_log_scales: Some(vec![0.0, 0.0]),
-                },
-                input_scale: Some(gam_terms::IsotropicScale::ONE),
-            },
-            shape: ShapeConstraint::None,
-            joint_null_rotation: None,
-        }],
-    };
-    let spatial_terms = spatial_length_scale_term_indices(&spec);
-    let updated = apply_spatial_anisotropy_pilot_initializer(
-        data.view(),
-        &mut spec,
-        &spatial_terms,
-        8,
-    )
-    .expect("pilot anisotropy initialization");
-
-    assert_eq!(updated, 1);
-    match &spec.smooth_terms[0].basis {
-        SmoothBasisSpec::Matern { spec, .. } => {
-            let eta = spec
-                .aniso_log_scales
-                .as_ref()
-                .unwrap_or_else(|| panic!("{} failed", "pilot initializer should preserve anisotropy"));
-            assert_eq!(eta.len(), 2);
-            assert!((eta[0] + eta[1]).abs() <= 1e-12);
-            assert!(
-                eta.iter().any(|value| value.abs() > 1e-6),
-                "pilot geometry should seed nonzero axis contrast"
-            );
-            assert!(spec
-                .length_scale
-                .resolved()
-                .is_some_and(|value| value.is_finite() && value > 0.0));
-        }
-        _ => panic!("expected Matern term"),
     }
 }
 

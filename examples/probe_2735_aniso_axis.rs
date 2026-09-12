@@ -246,10 +246,7 @@ fn production_fit(
             InverseLink::Standard(StandardLink::Identity),
         ),
         &fit_options(40),
-        &SpatialLengthScaleOptimizationOptions {
-            pilot_subsample_threshold: 0,
-            ..SpatialLengthScaleOptimizationOptions::default()
-        },
+        &SpatialLengthScaleOptimizationOptions::default(),
     ) {
         Ok(f) => f,
         Err(err) => {

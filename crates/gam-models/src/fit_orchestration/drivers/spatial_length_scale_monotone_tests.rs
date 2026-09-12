@@ -70,7 +70,6 @@ mod spatial_length_scale_monotone_tests {
                 // monotone-improvement contract this test pins is unchanged.
                 max_outer_iter: 16,
                 rel_tol: 1e-5,
-                pilot_subsample_threshold: 0,
                 ..SpatialLengthScaleOptimizationOptions::default()
             },
         )
@@ -832,7 +831,6 @@ mod spatial_length_scale_monotone_tests {
                 &SpatialLengthScaleOptimizationOptions {
                     max_outer_iter: cap,
                     rel_tol: 1e-5,
-                    pilot_subsample_threshold: 0,
                     ..SpatialLengthScaleOptimizationOptions::default()
                 },
             );

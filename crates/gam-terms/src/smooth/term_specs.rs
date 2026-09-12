@@ -4333,19 +4333,6 @@ pub struct SpatialLengthScaleOptimizationOptions {
     pub rel_tol: f64,
     /// Initial log(length_scale) perturbation used for seed construction.
     pub log_step: f64,
-    /// Automatic geometry-initializer threshold for large-scale spatial fits.
-    ///
-    /// When n exceeds twice this value, the fitter uses a spatially stratified
-    /// subsample only to seed κ/anisotropy geometry: centers are resolved,
-    /// axis contrasts are initialized from center/data spread, and one or two
-    /// cheap ψ reseeding updates are applied. It never runs PIRLS, REML, ARC,
-    /// BFGS, or any recursive optimizer on the pilot.
-    ///
-    /// The final coefficients, smoothing parameters, and spatial geometry are
-    /// always optimized on the full dataset.
-    ///
-    /// Set to 0 to skip the pilot geometry initializer.
-    pub pilot_subsample_threshold: usize,
 }
 
 impl Default for SpatialLengthScaleOptimizationOptions {
@@ -4355,7 +4342,6 @@ impl Default for SpatialLengthScaleOptimizationOptions {
             max_outer_iter: 80,
             rel_tol: 1e-4,
             log_step: std::f64::consts::LN_2,
-            pilot_subsample_threshold: 10_000,
         }
     }
 }

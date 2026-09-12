@@ -181,7 +181,6 @@ fn run_fit(n: usize, kappa_enabled: bool, aniso: bool) -> Result<FitTiming, Stri
         },
         rel_tol: 1e-5,
         log_step: std::f64::consts::LN_2,
-        pilot_subsample_threshold: 0,
     };
 
     let t0 = Instant::now();

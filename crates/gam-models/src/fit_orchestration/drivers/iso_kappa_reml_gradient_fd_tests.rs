@@ -3271,7 +3271,6 @@ fn production_kappa_route_psi_gradient_matches_its_value_2895() {
     let kappa_options = SpatialLengthScaleOptimizationOptions {
         max_outer_iter: 16,
         rel_tol: 1e-5,
-        pilot_subsample_threshold: 0,
         ..SpatialLengthScaleOptimizationOptions::default()
     };
     let family = LikelihoodSpec::gaussian_identity();
