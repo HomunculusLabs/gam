@@ -1482,11 +1482,7 @@ pub(crate) fn run_outer_with_plan(
                         // with the iterate.
                         .with_model_decrement_tolerance(
                             outer_rel_cost_floor(config) * (1.0 + seed_eval.cost.abs()),
-                        )
-                        // The matrix-free route is exclusively for
-                        // exact analytic Hessians; an `Unavailable`
-                        // here is a routing/contract violation.
-                        .with_hessian_fallback_policy(HessianFallbackPolicy::Error);
+                        );
                     // Installed unconditionally now that it also carries the
                     // trajectory census (#2735): a walk that ends on its budget
                     // has to be able to say whether it crawled or thrashed, and
@@ -1759,22 +1755,14 @@ pub(crate) fn run_outer_with_plan(
                         accepted_steps: None,
                         census: Some(Arc::clone(&arc_census)),
                     });
-                    // On the exact-Hessian ARC route, forbid both (a)
-                    // finite-difference Hessian estimation if the
-                    // objective ever returns
-                    // `SecondOrderSample { hessian: None }` and (b)
-                    // `opt`'s internal AutoBfgs demotion on step
-                    // failure. `HessianFallbackPolicy::Error` plus
-                    // `FallbackPolicy::Never` is the precise
-                    // expression of "stay inside analytic-Hessian
-                    // geometry; surface mismatches loudly". opt 0.3.0
-                    // API; previously this was approximated by the
-                    // coarse `Profile::Deterministic` knob (which also
-                    // tightens unrelated `eta_accept` / history caps).
+                    // On the exact-Hessian ARC route, forbid `opt`'s
+                    // internal AutoBfgs demotion on step failure, so the
+                    // run stays inside analytic-Hessian geometry and
+                    // surfaces mismatches loudly. opt itself refuses a
+                    // missing Hessian (`SecondOrderSample { hessian: None }`)
+                    // as a fatal evaluation error; it never estimates one.
                     if matches!(hessian_source, HessianSource::Analytic) {
-                        optimizer = optimizer
-                            .with_hessian_fallback_policy(HessianFallbackPolicy::Error)
-                            .with_fallback_policy(OptFallbackPolicy::Never);
+                        optimizer = optimizer.with_fallback_policy(OptFallbackPolicy::Never);
                     }
                     match optimizer.run() {
                         Ok(sol) => Ok(solution_into_outer_result(sol, true, *the_plan)),

@@ -2858,11 +2858,9 @@ fn outer_second_order_bridge_keeps_structural_refusals_fatal_2627() {
 
 /// Phase 1.1 — On `HessianSource::Analytic` the bridge MUST surface a
 /// fatal error rather than producing `SecondOrderSample { hessian: None }`
-/// when the runtime returns `HessianValue::Unavailable`. A `None` here
-/// would let `opt::SecondOrderCache::finite_difference_hessian` silently
-/// estimate the Hessian by finite-differencing the gradient — at large-scale
-/// scale, hours of work per silently-mis-routed step. The seed loop
-/// should retry, demote, or fail loudly instead.
+/// when the runtime returns `HessianValue::Unavailable`, so the seed loop
+/// retries, demotes, or fails loudly with the route's own diagnosis instead
+/// of opt's generic missing-Hessian refusal.
 #[test]
 fn analytic_route_unavailable_hessian_is_fatal() {
     let problem = OuterProblem::new(1)

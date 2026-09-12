@@ -5322,5 +5322,13 @@
     ],
     "reason": "#2829 public-surface rule: no product or test uses the three mode_layout methods. Their return carriers TorusFlowModeKey, PatchFlowModeKey and SphereBoostAxis have no other use and go with them.",
     "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 542607, /scratch.global/sauer354/pool/api2829/validate.542607.log). After the deletion, the derived file keeps no use of mode_layout or of the three carriers, and no private item or import is orphaned. The two flow_theta field docs no longer point at mode_layout. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "1ad6dd365382784bf50ac9bd79217f63b5207af1",
+    "items": [
+      "crates/gam-solve/src/rho_optimizer/run.rs:fn:set_finite_difference_bounds"
+    ],
+    "reason": "SPEC rule 2 (#2901): opt dc6a62eda removes its finite-difference derivatives, the Hessian fallback and FiniteDiffGradient, together with the FirstOrderObjective::set_finite_difference_bounds hook that fed the wrapper its box. gam pins that revision, so RetainingObjective's delegation of the hook in crates/gam-solve/src/rho_optimizer/run.rs no longer implements a trait method and is deleted.",
+    "evidence": "At the base, git grep -n -w set_finite_difference_bounds in crates, src, tests, examples and benches finds only the delegation in run.rs (declaration and the inner call) and the FD scanner's allowlist comment, which this change also removes. opt at dc6a62eda has no set_finite_difference_bounds (checked by grep of opt/src/lib.rs at that revision). The item list applies source_removal_guard.py's ITEM regex to the base and changed blobs by hand; the method is private but its name occurs more than once tree-wide at the base, so it is guarded. HessianFallbackPolicy leaves only an import and two builder calls in run_plan.rs and rho_optimizer.rs, which declare nothing. Compile is covered by the lead's shared tip check and MSI job 542989, which builds and tests opt at dc6a62eda."
   }
 ]

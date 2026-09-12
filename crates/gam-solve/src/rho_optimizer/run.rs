@@ -9042,10 +9042,6 @@ where
         self.publish(&outcome);
         outcome
     }
-
-    fn set_finite_difference_bounds(&mut self, bounds: Option<&Bounds>) {
-        self.inner.set_finite_difference_bounds(bounds);
-    }
 }
 
 impl<ObjFn> SecondOrderObjective for RetainingObjective<ObjFn>

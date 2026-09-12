@@ -91,11 +91,7 @@ fn contains_fd_identifier_token(source: &str) -> bool {
 /// full workspace-crate path (the #1521 carve-out relocated every entry out of
 /// the old `root/src/...` monolith and down into a `crates/<crate>/src/...`
 /// tree).
-const SANCTIONED_FD_FILES: &[&str] = &[
-    // Implements the external `opt` crate's `set_finite_difference_bounds` hook by
-    // delegation. gam takes no finite difference there.
-    "crates/gam-solve/src/rho_optimizer/run.rs",
-];
+const SANCTIONED_FD_FILES: &[&str] = &[];
 
 /// The root crate `src` plus every `crates/*/src`, in stable sorted order. This
 /// is the whole production tree the #1521 carve-out spread across the workspace;
@@ -635,7 +631,10 @@ fn sanctioned_fd_allowlist_membership_is_correct() {
     assert!(!fd_ok_markers_allowed(Path::new(
         "crates/gam-solve/src/rho_optimizer/fd_audit.rs"
     )));
-    assert!(fd_ok_markers_allowed(Path::new(
+    // `run.rs` delegated opt's `set_finite_difference_bounds` hook; opt dc6a62eda
+    // removed the hook with its finite-difference gradient wrapper, so no file is
+    // allowlisted at all.
+    assert!(!fd_ok_markers_allowed(Path::new(
         "/Users/anyone/gam/crates/gam-solve/src/rho_optimizer/run.rs"
     )));
     // The dead geodesic-acceleration probe was removed, so the P-IRLS update

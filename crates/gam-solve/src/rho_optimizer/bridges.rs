@@ -4047,14 +4047,10 @@ pub(crate) fn project_to_bounds(
 /// implied by the planner's `HessianSource`.
 ///
 /// For `HessianSource::Analytic` (the exact second-order route) a missing
-/// or non-materializable Hessian is FATAL: returning `None` here would
-/// invite `opt::SecondOrderCache::finite_difference_hessian` to silently
-/// estimate the Hessian by finite-differencing the gradient, which (a)
-/// throws away the analytic structure the route was selected for, and
-/// (b) costs O(K) full outer evaluations per ARC iteration — at large-scale
-/// scale, hours of work per silently-mis-routed step. The right
-/// behavior on a planner/runtime mismatch is to surface it loudly so
-/// the seed loop can either retry, demote the plan, or fail the seed.
+/// or non-materializable Hessian is FATAL. opt refuses `None` too, but with a
+/// generic missing-Hessian message; refusing here names the planner/runtime
+/// mismatch that produced it, so the seed loop can either retry, demote the
+/// plan, or fail the seed on the route's own diagnosis.
 ///
 /// Operator Hessians that `operator_hessian_densifies` admits are converted to
 /// dense in place so dense ARC can run an exact factorization. The seed loop
@@ -4086,13 +4082,13 @@ pub(crate) fn build_bridge_hessian_for_source(
             HessianValue::Operator(op) => Err(ObjectiveEvalError::fatal(format!(
                     "outer plan declared HessianSource::Analytic but the runtime returned a \
                      non-materializable Hessian operator (dim={}, materialization={:?}); \
-                     finite-difference Hessian estimation is not permitted on the analytic route",
+                     the analytic route requires an explicit Hessian",
                     op.dim(),
                     op.materialization(),
                 ))),
             HessianValue::Unavailable => Err(ObjectiveEvalError::fatal("outer plan declared HessianSource::Analytic but the runtime returned \
-                          HessianValue::Unavailable; finite-difference Hessian estimation is \
-                          not permitted on the analytic route"
+                          HessianValue::Unavailable; the analytic route requires an explicit \
+                          Hessian"
                     .to_string())),
         },
         HessianSource::BfgsApprox

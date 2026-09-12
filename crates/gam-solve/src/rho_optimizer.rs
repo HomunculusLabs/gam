@@ -30,7 +30,7 @@ use crate::startup_stats::{
 use ::opt::{
     Arc as ArcOptimizer, ArcError, Bfgs, BfgsError, Bounds, FallbackPolicy as OptFallbackPolicy,
     FirstOrderObjective, FirstOrderSample, FixedPoint, FixedPointError, FixedPointObjective,
-    FixedPointSample, FixedPointStatus, GradientTolerance, HessianFallbackPolicy,
+    FixedPointSample, FixedPointStatus, GradientTolerance,
     HessianMaterialization, HessianOperator, InitialMetric, LineSearchFailureReason,
     MatrixFreeTrustRegion, MaxIterations,
     ObjectiveEvalError, ObjectiveEvalKind, OperatorObjective, OperatorSample, OptimizationStatus,
