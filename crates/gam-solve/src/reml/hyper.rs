@@ -609,13 +609,19 @@ impl<'a> RemlState<'a> {
             .collect()
     }
 
+    /// The transformed `X_τ` of `dir`, formed on the first request and reused by
+    /// every later reader of the same slot.
     pub(crate) fn ensure_transformed_x_tau_dense<'b>(
         slot: &'b mut Option<Array2<f64>>,
         dir: &DirectionalHyperParam,
         qs: &Array2<f64>,
         free_basis_opt: Option<&Array2<f64>>,
     ) -> Result<&'b Array2<f64>, EstimationError> {
-        Ok(slot.get_or_insert(dir.transformed_x_tau(qs, free_basis_opt)?))
+        let dense = match slot.take() {
+            Some(dense) => dense,
+            None => dir.transformed_x_tau(qs, free_basis_opt)?,
+        };
+        Ok(&*slot.insert(dense))
     }
 
     pub(crate) fn tau_design_forward_mul(
@@ -1906,8 +1912,9 @@ impl<'a> RemlState<'a> {
                     free_basis_opt.as_ref(),
                 )?;
                 let x_dense = x_dense.expect("dense X should exist when materializing hyper drift");
-                let mut b_j = Self::weighted_cross(x_tau_j, x_dense, w_diag);
-                b_j += &Self::weighted_cross(x_dense, x_tau_j, w_diag);
+                // `Xᵀ W X_τ` is the transpose of `X_τᵀ W X`: `W` is diagonal.
+                let cross = Self::weighted_cross(x_tau_j, x_dense, w_diag);
+                let mut b_j = &cross + &cross.t();
                 b_j += &s_tau_j;
 
                 if !is_gaussian_identity {
@@ -1946,15 +1953,13 @@ impl<'a> RemlState<'a> {
             // --- ld_s_j: penalty pseudo-logdet derivative ---
             // ld_s_j = tr(S⁺ S_{τ_j}).
             let ld_s_j = penalty_logdet.tau_gradient_component(&s_tau_j);
-            let tk_x_fixed = Some(
-                Self::ensure_transformed_x_tau_dense(
-                    &mut x_tau_j_dense,
-                    &hyper_dirs[j],
-                    &reparam_result.qs,
-                    free_basis_opt.as_ref(),
-                )?
-                .clone(),
-            );
+            Self::ensure_transformed_x_tau_dense(
+                &mut x_tau_j_dense,
+                &hyper_dirs[j],
+                &reparam_result.qs,
+                free_basis_opt.as_ref(),
+            )?;
+            let tk_x_fixed = x_tau_j_dense.take();
 
             let stored_g_j = if let Some(firth_g_j) = firth_g_j.as_ref() {
                 -&g_j - &(2.0 * firth_g_j)
