@@ -716,7 +716,7 @@ impl ResponseFamily {
     /// binarity remains an auto-inference policy, not the support of an
     /// explicitly requested binomial model.
     #[inline]
-    pub fn response_support_requirement(&self) -> Option<&'static str> {
+    pub(crate) fn response_support_requirement(&self) -> Option<&'static str> {
         match self {
             Self::Gamma => Some("strictly positive response values (y > 0)"),
             Self::Poisson | Self::NegativeBinomial { .. } | Self::Tweedie { .. } => {
@@ -1015,7 +1015,7 @@ impl ResponseSupportViolation {
     /// Maximum number of offending row indices reported in the error message.
     /// Keeps the message bounded on large-scale data while still pointing
     /// the user at concrete bad rows to inspect.
-    pub const MAX_REPORTED: usize = 5;
+    pub(crate) const MAX_REPORTED: usize = 5;
 
     /// Format the violation against a specific response column name. The
     /// column name is supplied by the caller because [`ResponseFamily`] does
@@ -1067,7 +1067,7 @@ impl std::error::Error for ResponseSupportViolation {}
 /// rather than the divergent near-constant case, so it fits (#1856); only a
 /// response that varies below this floor without being exactly constant is
 /// rejected.
-pub const GAUSSIAN_MIN_SAMPLE_SD: f64 = 1.0e-10;
+pub(crate) const GAUSSIAN_MIN_SAMPLE_SD: f64 = 1.0e-10;
 
 /// Classifier for a [`ResponseDegeneracy`]. Each variant carries the family-
 /// specific evidence the caller needs to format a useful message without
@@ -1085,7 +1085,7 @@ pub enum ResponseDegeneracyKind {
     /// log-rate likelihood has no finite optimum or finite posterior moments.
     NegativeBinomialAllZeros,
     /// Gaussian response that is effectively constant in `f64` arithmetic
-    /// (sample standard deviation at or below [`GAUSSIAN_MIN_SAMPLE_SD`]). The
+    /// (sample standard deviation at or below `GAUSSIAN_MIN_SAMPLE_SD`). The
     /// marginal REML log-likelihood `−n/2·log σ²` diverges to `+∞` as the
     /// fitted scale `σ → 0`, so every outer evaluation rejects with a
     /// non-finite score. Carries the observed `sample_sd` and the `min_sd`
@@ -1093,7 +1093,7 @@ pub enum ResponseDegeneracyKind {
     GaussianNearConstant {
         /// The two-pass, mean-centred sample standard deviation of the response.
         sample_sd: f64,
-        /// The rejection threshold ([`GAUSSIAN_MIN_SAMPLE_SD`]).
+        /// The rejection threshold (`GAUSSIAN_MIN_SAMPLE_SD`).
         min_sd: f64,
     },
 }
@@ -1854,7 +1854,7 @@ impl std::fmt::Display for UnsupportedLinkError {
 impl std::error::Error for UnsupportedLinkError {}
 
 #[inline]
-pub fn inverse_link_diagnostic_name(link: &InverseLink) -> String {
+pub(crate) fn inverse_link_diagnostic_name(link: &InverseLink) -> String {
     match link {
         InverseLink::Standard(lf) => lf.name().to_string(),
         InverseLink::LatentCLogLog(_) => "latent-cloglog".to_string(),
@@ -2024,7 +2024,7 @@ impl LikelihoodScaleMetadata {
     }
 
     #[inline]
-    pub const fn gamma_shape_is_estimated(self) -> bool {
+    pub(crate) const fn gamma_shape_is_estimated(self) -> bool {
         matches!(self, Self::EstimatedGammaShape { .. })
     }
 

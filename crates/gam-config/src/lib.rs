@@ -133,7 +133,7 @@ pub fn parse_fit_config_json(config_json: Option<&str>) -> Result<FitConfig, Str
     resolve_fit_request_config(config)
 }
 
-pub fn resolve_fit_request_config(
+pub(crate) fn resolve_fit_request_config(
     json_config: FitRequestConfigDocument,
 ) -> Result<FitConfig, String> {
     let mut fit_config = FitConfig::default();
