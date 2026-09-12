@@ -2944,8 +2944,10 @@ pub fn smooth_term_lr_inference_forspec(
             SmoothLrCorrection::LawleyLrEstimatedLambda
             | SmoothLrCorrection::LawleyLrFixedLambda => {
                 let factor_move = (bartlett_factor - 1.0).abs();
-                let p_denom = p_uncorrected.max(p_corrected).max(f64::MIN_POSITIVE);
-                let p_move = if p_uncorrected.is_finite() && p_corrected.is_finite() {
+                let p_denom = p_uncorrected.max(p_corrected);
+                // Two zero p-values have not moved.
+                let p_move = if p_uncorrected.is_finite() && p_corrected.is_finite() && p_denom > 0.0
+                {
                     (p_corrected - p_uncorrected).abs() / p_denom
                 } else {
                     0.0
