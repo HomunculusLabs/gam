@@ -1384,20 +1384,29 @@ impl BernoulliMarginalSlopePredictor {
             let (l_val, l_d1) =
                 self.link_terms_value_d1(&one_pt, Some(beta), link_dev_correction_for_row)?;
             let ell1 = l_d1[0];
-            if ell1 > 1e-8 {
+            // The affine inversion divides by ℓ₁ = 1 + w′(a), which the deviation's
+            // structural monotonicity keeps positive. Where it is not positive, or
+            // the quotient is not representable, the rigid seed stands.
+            if ell1 > 0.0 {
                 let ell0 = l_val[0] - ell1 * a_rigid;
                 let observed_slope = probit_scale * ell1 * slope;
-                intercept = (marginal.q * (1.0 + observed_slope * observed_slope).sqrt()
+                let seed = (marginal.q * (1.0 + observed_slope * observed_slope).sqrt()
                     / probit_scale
                     - ell0)
                     / ell1;
+                if seed.is_finite() {
+                    intercept = seed;
+                }
             }
         }
 
-        // Same adaptive tolerance the acceptance check below uses; passing
-        // a tighter `convergence_tol` would just iterate past what we accept.
+        // The implicit-function gradients (`a_q`, `a_b`) read this root exactly as
+        // the fit's derivatives read the fitted one, so the saved model accepts it
+        // at the fit's residual contract. The root solver is driven to the same
+        // tolerance the acceptance check below uses.
         let target = marginal.mu;
-        let abs_tol = 1e-8_f64.max(1e-4 * target.abs());
+        let abs_tol =
+            crate::bms::row_primary_hessian::bernoulli_intercept_residual_tolerance(target);
 
         let (root, _, f_best) = crate::monotone_root::solve_monotone_root(
             eval,
