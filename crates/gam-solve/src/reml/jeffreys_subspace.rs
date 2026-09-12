@@ -3182,7 +3182,7 @@ impl JeffreysHphiDriftBase {
     /// ```
     ///
     /// The outer Hessian's second-order mode response reads `D_β(completion)[u]·v`.
-    /// This is the frozen-policy drift ([`Self::completion_drift_action`]) minus
+    /// This is the frozen-policy drift (`completion_drift_from_rows` on the rotated objects) minus
     /// `D_u M[·, v]`, which the product rule gives over every factor above, with the
     /// extreme eigenvalues differentiated to third order:
     ///
@@ -4108,7 +4108,11 @@ mod tests {
             .expect("H_Φ drift");
         let frozen = hphi_drift.dot(&v)
             + base
-                .completion_drift_action(&pert_h, &axes_v, &moving)
+                .completion_drift_from_rows(
+                    &symmetric_basis_contraction(pert_h.view(), base.ambient_eigenbasis.view()),
+                    &base.rotate_axis_rows(&axes_v).expect("rotated H²[v,·] rows"),
+                    &base.rotate_axis_rows(&moving).expect("rotated H³[u,v,·] rows"),
+                )
                 .expect("frozen completion drift");
         let exact = hphi_drift.dot(&v)
             + base

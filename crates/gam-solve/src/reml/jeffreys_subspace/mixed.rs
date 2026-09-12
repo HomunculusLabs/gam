@@ -365,27 +365,10 @@ impl JeffreysHphiDriftBase {
             .get_or_init(|| self.aw_rows.dot(&self.a_rows.t()))
     }
 
-    /// Apply the derivative of the omitted true-Hessian completion to a
-    /// coefficient direction. `axes` contains `H[v,e_a]` and `moving_axes`
-    /// its derivative under `pert_h`. This contracts the fifth likelihood
-    /// derivative directly, without assembling a third coefficient tensor.
-    pub fn completion_drift_action(
-        &self,
-        pert_h: &Array2<f64>,
-        axes: &[Array2<f64>],
-        moving_axes: &[Array2<f64>],
-    ) -> Result<Array1<f64>, String> {
-        if pert_h.dim() != (self.p, self.p) {
-            return Err("Jeffreys completion drift information dimension mismatch".into());
-        }
-        let e = symmetric_basis_contraction(pert_h.view(), self.ambient_eigenbasis.view());
-        let a = self.rotate_axis_rows(axes)?;
-        let da = self.rotate_axis_rows(moving_axes)?;
-        self.completion_drift_from_rows(&e, &a, &da)
-    }
-
-    /// [`Self::completion_drift_action`] on already-rotated objects: `e = Uᵀ H[u] U`,
-    /// and `a`, `da` the rotated rows of `{H[v, e_a]}` and `{H[u, v, e_a]}`.
+    /// Apply the frozen-policy derivative of the omitted true-Hessian completion to a
+    /// coefficient direction, on already-rotated objects: `e = Uᵀ H[u] U`, and `a`, `da`
+    /// the rotated rows of `{H[v, e_a]}` and `{H[u, v, e_a]}`. This contracts the fifth
+    /// likelihood derivative directly, without assembling a third coefficient tensor.
     pub(super) fn completion_drift_from_rows(
         &self,
         e: &Array2<f64>,
@@ -1786,7 +1769,13 @@ mod tests {
             let base = JeffreysHphiDriftBase::prepare_with_axes(h.view(), z.view(), axes.clone())
                 .unwrap()
                 .unwrap();
-            let completion_actual = base.completion_drift_action(&e, &axes, &au).unwrap();
+            let completion_actual = base
+                .completion_drift_from_rows(
+                    &symmetric_basis_contraction(e.view(), base.ambient_eigenbasis.view()),
+                    &base.rotate_axis_rows(&axes).unwrap(),
+                    &base.rotate_axis_rows(&au).unwrap(),
+                )
+                .unwrap();
             let score = base.explicit_score_pair(&e, &f, &ef, &au, &av, &auv).unwrap();
             for axis in 0..3 {
                 let at = |t: f64| joint_jeffreys_phi_explicit_param_second_derivative(

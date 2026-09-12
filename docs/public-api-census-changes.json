@@ -2318,5 +2318,13 @@
     },
     "reason": "#2897, SPEC rules 23 and 25. OuterDerivativePolicy::should_use_staged_kappa was the row-count trigger (n >= 30,000, or gradient work > 5e10) that moved the spatial length-scale outer search onto a uniform 5,000-row pilot. The staged schedule and its trigger are removed, so the spatial search evaluates the full row measure at every n.",
     "evidence": "At base cbd23e611, git grep -n -F should_use_staged_kappa over crates, src, tests, examples and python finds its declaration, two doc links inside options.rs, and one call at gam-models fit_orchestration/drivers/spatial_optimization.rs:7733, which this change removes along with the schedule. No gam-cli, gam-pyffi, python or examples code names it."
+  },
+  {
+    "base": "a81ae5b772de231da8985a3a25f6daf8505eff5a",
+    "removed": {
+      "crates/gam-solve/src/reml/jeffreys_subspace/mixed.rs::completion_drift_action": 1
+    },
+    "reason": "#2905: completion_drift_action, a rotate-then-delegate wrapper over completion_drift_from_rows, has no product caller. Production uses completion_drift_action_from_rotated, and the two test callers now call completion_drift_from_rows on the rotated objects.",
+    "evidence": "At the base, git grep -n completion_drift_action over the whole repository, excluding completion_drift_action_from_rotated, finds one pub fn declaration (crates/gam-solve/src/reml/jeffreys_subspace/mixed.rs), two rustdoc links and two calls inside mod tests. It is declared once, so the census falls by one. Not run through public_api_census.py locally (user directive)."
   }
 ]
