@@ -338,7 +338,9 @@ def test_batched_positions_rejects_fractional_row_offsets() -> None:
     n = 100
     t = torch.rand(2 * n)
     y = torch.randn(2 * n, 1)
-    with pytest.raises((TypeError, ValueError)):
+    # Integral floats such as 150.0 are accepted by design (gam#581), so the
+    # middle offset must carry a genuine fractional part to be refused.
+    with pytest.raises(TypeError, match="integer-valued"):
         gamfit.gaussian_reml_fit_positions_batched(
-            t, y, np.array([0.0, 1.5 * n, 2.0 * n]), basis_kind="duchon", basis_order=2
+            t, y, np.array([0.0, 1.5 * n + 0.5, 2.0 * n]), basis_kind="duchon", basis_order=2
         )
