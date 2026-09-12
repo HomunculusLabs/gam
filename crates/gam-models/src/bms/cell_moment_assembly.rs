@@ -3370,11 +3370,12 @@ impl BernoulliMarginalSlopeFamily {
         f_a: f64,
         abs_tol: f64,
     ) -> bool {
-        if !a.is_finite() || !f.is_finite() || !f_a.is_finite() || f_a == 0.0 {
-            return false;
-        }
-        let correction = (f / f_a).abs();
-        f.abs() <= abs_tol || correction <= 1e-10 * (1.0 + a.abs())
+        // A probe accepts exactly what the safeguarded solve's final check accepts,
+        // the residual contract, with a derivative the implicit-function gradient
+        // can divide by. A small relative Newton correction is not that contract:
+        // the residual behind it is |F_a| times the correction, which exceeds the
+        // contract wherever the calibration is steep against μ.
+        a.is_finite() && f.is_finite() && f_a.is_finite() && f_a != 0.0 && f.abs() <= abs_tol
     }
 }
 

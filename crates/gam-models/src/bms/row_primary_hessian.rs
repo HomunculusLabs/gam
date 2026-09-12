@@ -432,7 +432,7 @@ impl BernoulliMarginalSlopeFamily {
         // Note: an explicit `eval(a_closed_form)` short-circuit at this point
         // would be redundant. On cold cycle-0 `cached_a` is None, so `a_init`
         // already equals `a_closed_form` and the two-step Newton probe below
-        // evaluates there with the 1e-10 tolerance from
+        // evaluates there with the residual contract from
         // `row_intercept_newton_is_converged`, matching the exact-root path
         // in `monotone_root::solve_monotone_root` (see monotone_root.rs:50-66).
         // On warm cycles, evaluating at `a_closed_form` would add an extra
