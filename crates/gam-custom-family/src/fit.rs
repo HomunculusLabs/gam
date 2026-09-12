@@ -3151,11 +3151,15 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     // owns the exact objective/gradient/coefficient-mode identity consumed by
     // fit assembly. Force the runner's final full-fidelity installation
     // through that evaluator regardless of the search plan.
-    .with_terminal_eval_order(if need_outer_hessian {
-        OuterEvalOrder::ValueGradientHessian
-    } else {
-        OuterEvalOrder::ValueAndGradient
-    });
+    //
+    // That installation needs objective, gradient and mode, not curvature
+    // (#2898). The mint that follows at the same rho requests
+    // `ValueGradientHessian` wherever the Hessian is declared, re-installs the
+    // mode, and owns the Hessian the certificate judges and the smoothing
+    // correction reads. Installing at order four as well assembled the outer
+    // Hessian, order-five Jeffreys pieces included, twice at the selected point
+    // and discarded the first.
+    .with_terminal_eval_order(OuterEvalOrder::ValueAndGradient);
 
     let outer_result = problem.run_certified(&mut obj, "custom family");
 
