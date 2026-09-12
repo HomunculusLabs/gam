@@ -386,18 +386,13 @@ struct SelectionFactor {
     projected: Vec<f64>,
 }
 
-/// One grid point of the replay: the criterion's data operator, the statistic's
-/// weights, the criterion's log-determinant offset, and the basis all three are
-/// diagonal in.
+/// One grid point of the replay: the data operator's eigenvalues, the statistic's
+/// weights, and the basis both are diagonal in.
 struct SelectionPoint {
     /// `e_j = eig T(t)`, descending.
     eigenvalues: Vec<f64>,
-    /// `f_j = e_j/(1 + e_j)`, the criterion's data operator.
-    shares: Vec<f64>,
     /// `w_j = 2f̄_j − f̄_j²` with `f̄ = 1 − f`, the statistic's null weights.
     weights: Vec<f64>,
-    /// `log|I + T| − log|T|₊`, the criterion's `t`-dependent Occam term.
-    offset: f64,
     /// Columns are the eigenvectors of `T(t)`, in the same order.
     basis: Array2<f64>,
 }
@@ -531,7 +526,6 @@ impl SelectionGeometry {
             return None;
         }
         let mut eigenvalues = Vec::with_capacity(self.dimension);
-        let mut shares = Vec::with_capacity(self.dimension);
         let mut weights = Vec::with_capacity(self.dimension);
         let mut log_det_hessian = 0.0_f64;
         let mut log_det_penalty = 0.0_f64;
@@ -555,7 +549,6 @@ impl SelectionGeometry {
             };
             let shrinkage = 1.0 - fraction;
             eigenvalues.push(eigenvalue);
-            shares.push(fraction);
             weights.push(2.0 * shrinkage - shrinkage * shrinkage);
         }
         let offset = log_det_hessian - log_det_penalty;
@@ -572,9 +565,7 @@ impl SelectionGeometry {
         }
         Some(SelectionPoint {
             eigenvalues,
-            shares,
             weights,
-            offset,
             basis,
         })
     }
