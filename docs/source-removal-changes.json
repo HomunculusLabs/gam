@@ -4739,5 +4739,13 @@
     ],
     "reason": "#2469: SAE_SEED_DISPERSION_FLOOR (1e-12) floored the seed reconstruction dispersion rss/n in absolute data units, so it bound wrongly at every data scale far from one. seed_reconstruction_dispersion now returns the residual dispersion when positive. An exactly reconstructed seed takes the null reconstruction's dispersion, the target energy per scalar, and an all-zero target is refused because it has no dispersion scale.",
     "evidence": "git grep -n SAE_SEED_DISPERSION_FLOOR at the base finds its declaration at crates/gam-sae/src/manifold/term.rs:236 and one use, at crates/gam-sae/src/manifold/construction.rs:1221 (seed_reconstruction_dispersion). No test names it. The only production consumer, fit_seed.rs (seed_scaled_by_dispersion_for_assignment), requires a finite positive dispersion, and both returned values satisfy that. Nothing here was compiled or run locally (user directive); compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "e160991417bc8589db34c8efccf3dafa6d26c4ff",
+    "items": [
+      "crates/gam-terms/src/basis/matern_kernel.rs:const:LOG_EPS"
+    ],
+    "reason": "#2469: duchon_pure_closed_form_pair_block_cpd_adequate used LOG_EPS = 1e-12 to decide whether beta = 4(p+s) - 2q - d sat on an even integer 2n (the log case, CPD order n + 1) or not (CPD order ceil((beta+1)/2)). At beta = 2n the power formula already gives ceil(n + 1/2) = n + 1, and at beta = 2n + delta with |delta| < 1e-12 it gives the same n + 1. The tolerance never changed a verdict, so the gate is the single expression p_order >= ceil((beta+1)/2).",
+    "evidence": "git grep -w LOG_EPS at the base finds this file-local declaration in matern_kernel.rs and two unrelated function-local declarations of the same name in crates/gam-terms/src/basis/closed_form_penalty.rs (riesz_kernel_value and riesz_block_radial_derivatives), which are untouched. The only caller, matern_kernel.rs:2686, consumes the boolean verdict. The doc's tripwires evaluate the same under the single formula: d=8, p=2, s=3.5 gives beta 12 and 10, orders 7 and 6; TPS d=2, p=2, s=0, q=2 gives beta 2, order 2. The item list applies source_removal_guard.py's ITEM regex by hand. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
   }
 ]

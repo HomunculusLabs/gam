@@ -2389,20 +2389,12 @@ pub(crate) fn duchon_pure_closed_form_pair_block_cpd_adequate(
     if beta < 0.0 {
         return false;
     }
-    const LOG_EPS: f64 = 1e-12;
-    let n_f = (beta / 2.0).round();
-    let is_log_case =
-        dimension.is_multiple_of(2) && n_f >= 0.0 && (n_f * 2.0 - beta).abs() < LOG_EPS;
-    let cpd_required = if is_log_case {
-        // Log case: kernel `c · r^{2n}(ln r + A_n)` is CPD of order n + 1
-        // (Wendland Thm 8.18).
-        (n_f as usize).saturating_add(1)
-    } else {
-        // Non-log case: kernel `c · r^β` is CPD of order ⌈(β+1)/2⌉
-        // (Wendland Thm 8.17). For odd β this is `(β+1)/2`; for
-        // fractional β it rounds up.
-        ((beta + 1.0) / 2.0).ceil() as usize
-    };
+    // Non-log case: kernel `c · r^β` is CPD of order ⌈(β+1)/2⌉ (Wendland
+    // Thm 8.17); for odd β this is `(β+1)/2`, and fractional β rounds up. Log
+    // case: kernel `c · r^{2n}(ln r + A_n)` at `β = 2n` is CPD of order `n + 1`
+    // (Thm 8.18), which is the same `⌈(2n+1)/2⌉`. One expression therefore
+    // decides both, with no test of whether `β` is an even integer.
+    let cpd_required = ((beta + 1.0) / 2.0).ceil() as usize;
     p_order >= cpd_required
 }
 
