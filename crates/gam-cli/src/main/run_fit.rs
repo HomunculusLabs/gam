@@ -1606,6 +1606,33 @@ pub(crate) fn block_role_label(role: &gam::estimate::BlockRole) -> &'static str 
     }
 }
 
+/// Refuse survival-only settings on a response that is not `Surv(...)`. Only the
+/// survival fit path reads them, so on any other response they would be dropped
+/// without a word. Both entry points check the resolved configuration, so a
+/// `--request` document meets the same refusal as the flags.
+fn refuse_survival_only_settings_without_surv(fit_config: &FitConfig) -> Result<(), String> {
+    let survival_only = fit_config.baseline_scale.is_some()
+        || fit_config.baseline_shape.is_some()
+        || fit_config.baseline_rate.is_some()
+        || fit_config.baseline_makeham.is_some()
+        || fit_config.threshold_time_k.is_some()
+        || fit_config.sigma_time_k.is_some()
+        || fit_config.slope_time_k.is_some()
+        || fit_config.survival_time_anchor.is_some()
+        || !fit_config
+            .resolved_survival_likelihood()
+            .eq_ignore_ascii_case("transformation")
+        || !fit_config.baseline_target.trim().eq_ignore_ascii_case("linear")
+        || !fit_config.time_basis.trim().eq_ignore_ascii_case("ispline");
+    if survival_only {
+        return Err("survival-only options require a Surv(entry, exit, event) response".to_string());
+    }
+    if fit_config.noise_offset_column.is_some() && fit_config.noise_formula.is_none() {
+        return Err("--noise-offset-column requires --predict-noise".to_string());
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_fit_args_preflight(
     args: &FitArgs,
     parsed: &ParsedFormula,
@@ -1667,6 +1694,8 @@ pub(crate) fn validate_fit_args_preflight(
                     fit_config.time_num_internal_knots,
                 )?;
             }
+        } else {
+            refuse_survival_only_settings_without_surv(fit_config)?;
         }
         return Ok(());
     }
@@ -1724,9 +1753,6 @@ pub(crate) fn validate_fit_args_preflight(
     let is_survival = parse_surv_response(&parsed.response)?.is_some();
     let survival_likelihood =
         parse_survival_likelihood_mode(fit_config.resolved_survival_likelihood())?;
-    let survival_likelihood_raw = fit_config
-        .resolved_survival_likelihood()
-        .to_ascii_lowercase();
     let baseline_target_raw = fit_config.baseline_target.trim().to_ascii_lowercase();
     let time_basis_raw = fit_config.time_basis.trim().to_ascii_lowercase();
     if is_survival {
@@ -1743,24 +1769,7 @@ pub(crate) fn validate_fit_args_preflight(
                 "--family royston-parmar requires a Surv(entry, exit, event) response".to_string(),
             );
         }
-        if fit_config.baseline_scale.is_some()
-            || fit_config.baseline_shape.is_some()
-            || fit_config.baseline_rate.is_some()
-            || fit_config.baseline_makeham.is_some()
-            || args.threshold_time_k.is_some()
-            || args.sigma_time_k.is_some()
-            || args.slope_time_k.is_some()
-            || survival_likelihood_raw != "transformation"
-            || baseline_target_raw != "linear"
-            || time_basis_raw != "ispline"
-        {
-            return Err(
-                "survival-only options require a Surv(entry, exit, event) response".to_string(),
-            );
-        }
-        if args.noise_offset_column.is_some() && args.predict_noise.is_none() {
-            return Err("--noise-offset-column requires --predict-noise".to_string());
-        }
+        refuse_survival_only_settings_without_surv(fit_config)?;
     }
     gam::families::fit_orchestration::validate_survival_baseline_config(
         survival_likelihood,

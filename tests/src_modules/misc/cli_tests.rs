@@ -1557,6 +1557,60 @@ fn cli_request_document_firth_is_refused_for_multinomial() {
     );
 }
 
+/// Survival-only settings on a response that is not `Surv(...)` must be refused
+/// whichever entry point supplied them. The flags met that refusal in
+/// `validate_fit_args_preflight`. A `--request` document returned before it, so a
+/// document's survival-only settings on an ordinary response were dropped silently.
+#[test]
+fn cli_request_document_survival_only_settings_need_a_surv_response() {
+    let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let train_path = td.path().join("gaussian.csv");
+    let request_path = td.path().join("gaussian.request.json");
+    let model_path = td.path().join("gaussian.model.json");
+    fs::write(
+        &train_path,
+        "x,y\n-1.0,0.2\n-0.5,0.4\n0.0,0.9\n0.5,1.1\n1.0,1.6\n1.5,2.0\n",
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write gaussian csv", e));
+
+    let base = || {
+        let mut args =
+            location_scale_fit_args(train_path.clone(), model_path.clone(), "y ~ x", "1");
+        args.predict_noise = None;
+        args.survival_likelihood = None;
+        args
+    };
+
+    // Control: the flag reaches the refusal.
+    let mut flag_args = base();
+    flag_args.baseline_target = "weibull".to_string();
+    let from_flags = run_fit(flag_args)
+        .expect_err("a survival baseline on an ordinary response must be refused")
+        .to_string();
+    assert!(
+        from_flags.contains("survival-only options require a Surv(entry, exit, event) response"),
+        "unexpected refusal from flags: {from_flags}"
+    );
+
+    fs::write(
+        &request_path,
+        r#"{"schema":"gam.fit-request","schema_version":1,
+            "formula":"y ~ x",
+            "config":{"baseline_target":"weibull"}}"#,
+    )
+    .unwrap_or_else(|e| panic!("{} failed: {:?}", "write fit-request document", e));
+    let mut request_args = base();
+    request_args.request = Some(request_path.clone());
+    request_args.formula_positional = None;
+    let from_request = run_fit(request_args)
+        .expect_err("a request document's survival baseline on an ordinary response must be refused")
+        .to_string();
+    assert!(
+        from_request.contains("survival-only options require a Surv(entry, exit, event) response"),
+        "a --request document's survival-only settings must meet the refusal: {from_request}"
+    );
+}
+
 #[test]
 fn cli_surv_predict_noise_routes_to_survival_location_scale() {
     let td = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
