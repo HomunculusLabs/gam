@@ -822,12 +822,17 @@ impl SaeManifoldTerm {
     /// so a direction whose decrease is second-order (`slope ≈ 0` at a KKT point)
     /// is searched from the step at which `½·|μ|·α²` reaches the material floor.
     ///
-    /// The first direction whose committed, re-evaluated decrease clears
+    /// Every refused direction is tried in turn, from the state the directions
+    /// before it left, against that state's own gradient and objective. A
+    /// direction is kept only when its committed, re-evaluated decrease clears
     /// `SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL · (1 + |f|)`, the floor every
-    /// inner mover commits against, is kept and `true` is returned; the caller
-    /// converges again from there. Every commit lowers one gate-frozen objective by
-    /// more than that floor, so repeated descents end. `false` means no refused
-    /// direction realizes a material decrease, and the state is as it was found.
+    /// inner mover commits against. One pass therefore descends every refused mode
+    /// that can be descended, instead of paying a refine and a dense
+    /// re-materialization per mode. `true` means at least one direction committed
+    /// and the caller converges again. Every commit lowers one gate-frozen
+    /// objective by more than the floor, so repeated passes end. `false` means no
+    /// refused direction realizes a material decrease, and the state is as it was
+    /// found.
     fn descend_exact_a_saddle(
         &mut self,
         target: ArrayView2<'_, f64>,
@@ -837,45 +842,51 @@ impl SaeManifoldTerm {
         directions: &[(Array1<f64>, f64)],
     ) -> Result<bool, String> {
         let total_t = cache.delta_t_len();
-        let system = self.assemble_arrow_schur(target, rho, registry)?;
-        let mut gradient = Array1::<f64>::zeros(total_t + cache.k);
-        let mut offset = 0usize;
-        for row in &system.rows {
-            if offset + row.gt.len() > total_t {
-                break;
-            }
-            for (axis, &value) in row.gt.iter().enumerate() {
-                gradient[offset + axis] = value;
-            }
-            offset += row.gt.len();
-        }
-        if offset != total_t || system.gb.len() != cache.k {
-            return Err(format!(
-                "SaeManifoldTerm::descend_exact_a_saddle: the assembled gradient has {offset} row \
-                 coordinates and border width {}, but the evidence cache has {total_t} and {}",
-                system.gb.len(),
-                cache.k,
-            ));
-        }
-        for (index, &value) in system.gb.iter().enumerate() {
-            gradient[total_t + index] = value;
-        }
-        drop(system);
-        let base_objective = self.penalized_objective_total(target, rho, registry, 1.0)?;
-        if !base_objective.is_finite() {
-            return Ok(false);
-        }
-        let material_floor =
-            SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * (1.0 + base_objective.abs());
+        let mut committed = 0usize;
+        let mut last_floor = f64::NAN;
         for (vector, curvature) in directions {
-            if vector.len() != gradient.len() {
+            if vector.len() != total_t + cache.k {
                 return Err(format!(
                     "SaeManifoldTerm::descend_exact_a_saddle: direction length {} != joint \
                      dimension {}",
                     vector.len(),
-                    gradient.len(),
+                    total_t + cache.k,
                 ));
             }
+            // The gradient and objective of the CURRENT state: an earlier direction
+            // may already have moved it.
+            let system = self.assemble_arrow_schur(target, rho, registry)?;
+            let mut gradient = Array1::<f64>::zeros(total_t + cache.k);
+            let mut offset = 0usize;
+            for row in &system.rows {
+                if offset + row.gt.len() > total_t {
+                    break;
+                }
+                for (axis, &value) in row.gt.iter().enumerate() {
+                    gradient[offset + axis] = value;
+                }
+                offset += row.gt.len();
+            }
+            if offset != total_t || system.gb.len() != cache.k {
+                return Err(format!(
+                    "SaeManifoldTerm::descend_exact_a_saddle: the assembled gradient has {offset} \
+                     row coordinates and border width {}, but the evidence cache has {total_t} \
+                     and {}",
+                    system.gb.len(),
+                    cache.k,
+                ));
+            }
+            for (index, &value) in system.gb.iter().enumerate() {
+                gradient[total_t + index] = value;
+            }
+            drop(system);
+            let base_objective = self.penalized_objective_total(target, rho, registry, 1.0)?;
+            if !base_objective.is_finite() {
+                break;
+            }
+            let material_floor =
+                SAE_MANIFOLD_INNER_OBJECTIVE_STALL_REL_TOL * (1.0 + base_objective.abs());
+            last_floor = material_floor;
             let along = gradient.dot(vector);
             let direction = if along > 0.0 { -vector } else { vector.clone() };
             let slope = along.abs();
@@ -911,44 +922,47 @@ impl SaeManifoldTerm {
                     "SaeManifoldTerm::descend_exact_a_saddle: committed step application: {err}"
                 ));
             }
-            let committed = match self.penalized_objective_total(target, rho, registry, 1.0) {
-                Ok(value) => value,
-                Err(err) => {
-                    self.restore_mutable_state(&snapshot).map_err(|restore_err| {
-                        format!(
+            let committed_objective =
+                match self.penalized_objective_total(target, rho, registry, 1.0) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.restore_mutable_state(&snapshot).map_err(|restore_err| {
+                            format!(
+                                "SaeManifoldTerm::descend_exact_a_saddle: committed objective \
+                                 evaluation failed ({err}); restoring the pre-descent state \
+                                 also failed ({restore_err})"
+                            )
+                        })?;
+                        return Err(format!(
                             "SaeManifoldTerm::descend_exact_a_saddle: committed objective \
-                             evaluation failed ({err}); restoring the pre-descent state also \
-                             failed ({restore_err})"
-                        )
-                    })?;
-                    return Err(format!(
-                        "SaeManifoldTerm::descend_exact_a_saddle: committed objective \
-                         evaluation: {err}"
-                    ));
-                }
-            };
-            let decrease = base_objective - committed;
-            if !(committed.is_finite() && decrease > material_floor) {
+                             evaluation: {err}"
+                        ));
+                    }
+                };
+            let decrease = base_objective - committed_objective;
+            if !(committed_objective.is_finite() && decrease > material_floor) {
                 self.restore_mutable_state(&snapshot)
                     .map_err(|err| format!("SaeManifoldTerm::descend_exact_a_saddle: {err}"))?;
                 continue;
             }
+            committed += 1;
             log::info!(
                 "[SAE-SADDLE] descended a refused exact-A direction: basin curvature \
                  {curvature:.6e}, slope {slope:.6e}, α={:.6e}, objective \
-                 {base_objective:.10e} → {committed:.10e} (decrease {decrease:.6e}, floor \
-                 {material_floor:.6e}, {} objective evaluations)",
+                 {base_objective:.10e} → {committed_objective:.10e} (decrease {decrease:.6e}, \
+                 floor {material_floor:.6e}, {} objective evaluations)",
                 line.alpha,
                 line.objective_evaluations,
             );
-            return Ok(true);
         }
-        log::info!(
-            "[SAE-SADDLE] none of {} refused exact-A direction(s) realizes a decrease above \
-             the material floor {material_floor:.6e}; the saddle stays refused",
-            directions.len(),
-        );
-        Ok(false)
+        if committed == 0 {
+            log::info!(
+                "[SAE-SADDLE] none of {} refused exact-A direction(s) realizes a decrease above \
+                 the material floor {last_floor:.6e}; the saddle stays refused",
+                directions.len(),
+            );
+        }
+        Ok(committed > 0)
     }
 
     fn converge_inner_for_undamped_logdet_gate_frozen(
