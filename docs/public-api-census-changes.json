@@ -1585,5 +1585,13 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): corpus/rho_cascade.rs has no consumer outside its own unit tests, so its public functions RhoCascadeSchedule::new, RhoCascadeSchedule::steps, RhoCascadeSchedule::total_rows and row_in_fraction are deleted with the module.",
     "evidence": "At 713456dd5, git grep -n -w finds RhoCascadeSchedule and row_in_fraction named only inside rho_cascade.rs, the corpus/mod.rs re-export and doc text. Every call of new, steps, total_rows and row_in_fraction on these types is in the module's own tests. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "da78ccdafdd77d0488c2dfe57cbb214ff1448bb5",
+    "removed": {
+      "crates/gam-solve/src/inference/alo.rs::compute_alo_diagnostics_from_unified": 1
+    },
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). compute_alo_diagnostics_from_unified has no caller in gam-cli, gam-pyffi, gamfit, examples or another crate's production code, and no test calls it. ALO from a fit remains compute_alo_diagnostics_from_fit, compute_alo_diagnostics_from_pirls and compute_alo_from_input.",
+    "evidence": "The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes it DELETE with zero references in every category. At 6272b6588, git grep -w finds the name only at its definition."
   }
 ]
