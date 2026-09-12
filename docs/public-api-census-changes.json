@@ -1668,5 +1668,13 @@
     },
     "reason": "prune-api-b product-use sweep (#2899). Public functions with no product user are removed with the types that carried them: NormalizedCrossGram::gauss_newton_diagonal/gauss_newton_action, AnalyticPenaltyOp::new, LeakageAbsorber::rank/basis, CumulantArrays::info/nu3/nu4, StructureLedger::absorb_probe_outcome, build_term_collection_design_inner and PairSurfaceFit::predict.",
     "evidence": "scripts/public_api_census.py over the probe commit b2e4c4c69 with these removals on base c58034b1e (MSI acn112, python3.12; sliceB.census.out) reports exactly these eleven path::name removals, one declaration each; re-keyed to the push parent after de4203504 touched other regions of registry.rs and term_specs.rs. The prune-api-b census at 11a52ed5f finds no production or test reference to any of them."
+  },
+  {
+    "base": "1517f78324afd05f3e7c1fc30bfe91c89bdcdbe2",
+    "removed": {
+      "crates/gam-solve/src/arrow_schur/system.rs::reduced_schur_and_log_det_tt": 1
+    },
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). StreamingArrowSchur::reduced_schur_and_log_det_tt has no caller anywhere, tests included.",
+    "evidence": "The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes it DELETE with zero references in every category. At 6272b6588, git grep -w finds it only at its definition and in one factorization.rs comment reworded in this commit."
   }
 ]

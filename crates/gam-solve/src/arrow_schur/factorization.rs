@@ -1047,8 +1047,8 @@ pub(crate) fn factor_one_row_result(
                     // contribution), but this `Ok` arm previously returned the RAW
                     // barely-PD factor whose tiny pivot contributes a large
                     // `2·ln(√ε)` instead. The two memory-budget routes (dense
-                    // `factor_blocks_for_system` vs streaming
-                    // `reduced_schur_and_log_det_tt`) then disagreed on the
+                    // `factor_blocks_for_system` vs the streaming per-row
+                    // factor) then disagreed on the
                     // per-row log-det, breaking the streaming-plan identical-logdet
                     // invariant and surfacing as a NON-PD `H_tt` on whichever route
                     // landed on the failing side of the edge.

@@ -1001,15 +1001,6 @@ pub struct StreamingArrowSchur {
     /// `htbeta_dense_supplement || htbeta_matvec.is_none()`; the streaming lane
     /// had no way to ask the question at all.
     pub(crate) htbeta_dense_supplement: bool,
-    /// Whether streaming rows are being factored for undamped evidence rather
-    /// than for a Newton step. Defaults to `false` so direct chunk callers keep
-    /// the full step-accuracy guard.
-    pub(crate) evidence_factorization: bool,
-    /// #2515 — whether a RESOLVED negative direction of a streamed evidence row
-    /// is a typed refusal rather than a unit pin. Set from the same
-    /// `ArrowEvidencePolicy` as `evidence_factorization`, in the same place, so
-    /// the two halves of one policy cannot describe different policies.
-    pub(crate) refuse_resolved_indefinite: bool,
     /// SAE manifold evidence-path per-row gauge deflation, copied from the
     /// source [`ArrowSchurSystem::row_gauge_deflation`] (#1273/#1377). When
     /// present, the streaming per-row factor MUST apply the SAME spectral
@@ -1077,8 +1068,6 @@ impl StreamingArrowSchur {
             htbeta_matvec: None,
             htbeta_transpose_matvec: None,
             htbeta_dense_supplement: false,
-            evidence_factorization: false,
-            refuse_resolved_indefinite: false,
             row_gauge_deflation: None,
             exact_a_classification: None,
         }
@@ -1173,24 +1162,27 @@ impl StreamingArrowSchur {
                 .exact_a_classification
                 .as_ref()
                 .and_then(|geometry| geometry.rows.get(row_idx));
+            // No streaming caller factors rows for undamped evidence, so the
+            // full step-accuracy guard stays on and a resolved negative
+            // direction is pinned, not refused.
             factor_one_row_result(
                 row,
                 ridge_t,
                 di,
                 row_idx,
-                self.evidence_factorization,
+                false,
                 gauge,
                 // Evidence path: opt into spectral discovery of an
                 // intrinsic-dimension-flat direction even when this row's
                 // supplied gauge list is empty/non-spanning — matching the
                 // `allow_spectral_deflation = true` the dense path passes.
                 true,
-                self.refuse_resolved_indefinite,
+                false,
                 exact_a,
             )
             .map(|result| result.factor)
         } else {
-            factor_one_row(row, ridge_t, di, row_idx, self.evidence_factorization)
+            factor_one_row(row, ridge_t, di, row_idx, false)
         }
     }
 
@@ -1389,60 +1381,6 @@ impl StreamingArrowSchur {
         Ok(())
     }
 
-    /// Compute the exact arrow Hessian log-determinant by accumulating the
-    /// reduced Schur complement in row chunks, without retaining the full set
-    /// of per-row Cholesky factors.
-    ///
-    /// This is the streaming analogue of [`ArrowFactorCache::arrow_log_det`]:
-    ///
-    /// ```text
-    /// log|H| = Σ_i log|H_tt^(i)| + log|H_ββ - Σ_i H_βt^(i) H_tt^(i)⁻¹ H_tβ^(i)|.
-    /// ```
-    ///
-    /// The same row builder and procedural `H_tβ` callbacks used by the
-    /// streaming Newton solve are consumed here, so callers can score REML
-    /// evidence without materialising the full `(N × q × K)` cross block or
-    /// the full list of row factors.
-    pub fn reduced_schur_and_log_det_tt(
-        &mut self,
-        ridge_t: f64,
-        ridge_beta: f64,
-        options: &ArrowSolveOptions,
-    ) -> Result<(f64, Array2<f64>), ArrowSchurError> {
-        self.evidence_factorization = options.evidence_policy.factors_undamped_evidence();
-        self.refuse_resolved_indefinite = options.evidence_policy.refuses_resolved_indefinite();
-        self.reset_accumulator(ridge_beta)?;
-        let backend = CpuBatchedBlockSolver;
-        let mut log_det_tt = 0.0_f64;
-        for start in (0..self.n_rows).step_by(self.chunk_size) {
-            let end = (start + self.chunk_size).min(self.n_rows);
-            for row_idx in start..end {
-                let row = (self.row_builder)(row_idx)?;
-                let di = row.htt.nrows();
-                self.validate_row(row_idx, &row)?;
-                let htbeta = self.row_htbeta(row_idx, &row, di);
-                let factor = self.factor_row(&row, ridge_t, di, row_idx)?;
-                for axis in 0..di {
-                    log_det_tt += 2.0 * factor[[axis, axis]].ln();
-                }
-                match options.mode {
-                    ArrowSolverMode::Direct | ArrowSolverMode::InexactPCG => {
-                        let solved = backend.solve_block_matrix(factor.view(), htbeta.view());
-                        backend.block_gemm_subtract(&mut self.s_acc, &htbeta, &solved);
-                    }
-                    ArrowSolverMode::SqrtBA => {
-                        let whitened =
-                            backend.sqrt_solve_block_matrix(factor.view(), htbeta.view());
-                        backend.block_gemm_subtract(&mut self.s_acc, &whitened, &whitened);
-                    }
-                }
-            }
-        }
-        symmetrize_upper_from_lower(&mut self.s_acc);
-        let schur = std::mem::replace(&mut self.s_acc, Array2::<f64>::zeros((self.k, self.k)));
-        Ok((log_det_tt, schur))
-    }
-
     /// Form a complete chunk contribution for exact-A evidence classification.
     pub fn evidence_schur_chunk(
         &mut self,
@@ -1555,9 +1493,6 @@ impl StreamingArrowSchur {
         ridge_beta: f64,
         options: &ArrowSolveOptions,
     ) -> Result<(Array1<f64>, Array1<f64>, Option<Array2<f64>>), ArrowSchurError> {
-        // Newton streaming factors always retain the step-accuracy guard.
-        self.evidence_factorization = false;
-        self.refuse_resolved_indefinite = false;
         self.reset_accumulator(ridge_beta)?;
         for start in (0..self.n_rows).step_by(self.chunk_size) {
             let end = (start + self.chunk_size).min(self.n_rows);
