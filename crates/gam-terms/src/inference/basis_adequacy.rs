@@ -655,9 +655,9 @@ mod tests {
         }
 
         fn next_normal(&mut self) -> f64 {
-            // Box-Muller; the tail truncation from clamping u away from 0 is
-            // far below anything these moment-level checks resolve.
-            let u1 = self.next_uniform().max(1e-12);
+            // Box-Muller. `next_uniform` lies in [0, 1), so `1 − u` lies in
+            // (0, 1] and its log is finite without truncating the tail.
+            let u1 = 1.0 - self.next_uniform();
             let u2 = self.next_uniform();
             (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
         }
