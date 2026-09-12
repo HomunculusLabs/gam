@@ -9,7 +9,7 @@ use super::{PirlsPenalty, PirlsWorkspace};
 
 /// Result of the stable penalized least squares solve
 #[derive(Clone)]
-pub(crate) struct StablePLSResult {
+pub struct StablePLSResult {
     /// Solution vector beta
     pub beta: Coefficients,
     /// Final penalized Hessian matrix (sparse or dense depending on solve path)
