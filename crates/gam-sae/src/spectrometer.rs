@@ -600,9 +600,14 @@ fn profile_noise_floor(losses: &[f64], t: &[f64], t_bar: f64, stt: f64) -> Resul
         Ok((rss, gradient * l_min, hessian * l_min * l_min))
     };
 
+    // `s` is a ψ coordinate, not a log smoothing strength: its box is the real
+    // domain of the floor (the smallest excess vanishes at `s = 1`), not a proxy
+    // for `λ = e^ρ` at infinity. No exponential-tail law applies at its faces, so
+    // the engine must never snap it onto one (#2453).
     let problem = OuterProblem::new(1)
         .with_gradient(Derivative::Analytic)
         .with_hessian(DeclaredHessianForm::Dense)
+        .with_psi_dim(1)
         .with_bounds(Array1::from_vec(vec![0.0]), Array1::from_vec(vec![1.0]))
         .with_initial_rho(Array1::from_vec(vec![0.5]))
         .with_seed_config(gam_solve::seeding::SeedConfig {
