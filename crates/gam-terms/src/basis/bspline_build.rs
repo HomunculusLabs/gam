@@ -815,7 +815,7 @@ pub fn build_bspline_basis_1d(
 /// `cs` (shrinkage) differs from `cr` only via `spec.double_penalty`: when set,
 /// the Marra & Wood (2011) null-space ridge is emitted as a separate REML
 /// coordinate, then rebuilt in the constrained chart.
-pub fn build_cubic_regression_basis_1d(
+pub(crate) fn build_cubic_regression_basis_1d(
     data: ArrayView1<'_, f64>,
     spec: &BSplineBasisSpec,
     knots: &Array1<f64>,

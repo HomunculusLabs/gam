@@ -145,7 +145,7 @@ pub enum BindingNotion {
 /// interaction block on the centered tensor basis is `C` itself (tested
 /// in its gauge quotient, see module docs).
 #[derive(Clone, Debug)]
-pub struct AnovaBlocks {
+pub(crate) struct AnovaBlocks {
     pub mean: f64,
     pub main_a: Array1<f64>,
     pub main_b: Array1<f64>,

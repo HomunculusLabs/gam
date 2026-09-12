@@ -4649,7 +4649,7 @@ pub(crate) fn spatial_term_group_key(term: &SmoothTermSpec) -> Option<JointSpati
     })
 }
 
-pub fn spatial_term_center_strategy(term: &SmoothTermSpec) -> Option<&CenterStrategy> {
+pub(crate) fn spatial_term_center_strategy(term: &SmoothTermSpec) -> Option<&CenterStrategy> {
     match &term.basis {
         SmoothBasisSpec::ThinPlate { spec, .. } => Some(&spec.center_strategy),
         SmoothBasisSpec::Matern { spec, .. } => Some(&spec.center_strategy),
@@ -4682,7 +4682,7 @@ pub(crate) fn set_spatial_term_centers(
     }
 }
 
-pub fn standardized_spatial_term_data(
+pub(crate) fn standardized_spatial_term_data(
     data: ArrayView2<'_, f64>,
     term: &SmoothTermSpec,
 ) -> Result<Array2<f64>, BasisError> {

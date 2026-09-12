@@ -328,12 +328,12 @@ pub fn compile(
 /// `protected[b] == true` forces block `b` to retain every raw column,
 /// suppressing both the structural and curvature eigenspace drops for that
 /// block while still using it as a full-width anchor for later blocks. See
-/// [`compile_from_raw_grams_protected`] for the motivation: a block whose
+/// `compile_from_raw_grams_protected` for the motivation: a block whose
 /// effective Jacobian is a fixed nonlinear functional basis (e.g. the survival
 /// marginal-slope time-wiggle block) cannot be expressed on a linearly reduced
 /// design, so it must not be reparameterised/dropped. `protected` may be
 /// shorter than `ordering`; an empty slice reproduces [`compile`] exactly.
-pub fn compile_protected(
+pub(crate) fn compile_protected(
     operators: &[Arc<dyn RowJacobianOperator>],
     row_hess: &dyn RowHessian,
     ordering: &[BlockOrder],
@@ -383,8 +383,8 @@ pub fn compile_protected(
 ///
 /// `protected[b] == true` replaces block `b`'s structural and curvature
 /// eigenspace drops with identity, so the block emerges at full raw width
-/// while still anchoring later blocks (see [`compile_protected`] /
-/// [`compile_from_raw_grams_protected`] for the motivation). `protected` may
+/// while still anchoring later blocks (see `compile_protected` /
+/// `compile_from_raw_grams_protected` for the motivation). `protected` may
 /// be shorter than `ordering`; an empty slice protects nothing.
 pub fn compile_with_dual_metric_protected(
     operators: &[Arc<dyn RowJacobianOperator>],
@@ -1162,7 +1162,7 @@ pub fn compile_from_raw_grams(
 ///
 /// `protected` may be shorter than `ordering` (missing entries default to
 /// `false`); an empty slice reproduces [`compile_from_raw_grams`] exactly.
-pub fn compile_from_raw_grams_protected(
+pub(crate) fn compile_from_raw_grams_protected(
     gram_h: &Array2<f64>,
     gram_struct: &Array2<f64>,
     raw_block_ranges: &[std::ops::Range<usize>],
