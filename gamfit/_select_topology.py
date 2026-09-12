@@ -509,12 +509,9 @@ def _holdout_predictive_interval(
 
 
 def _predict_response_mean(model: Any, data: Any, **predict_kwargs: Any) -> list[float]:
+    """The ``posterior_mean`` column, the same point the held-out stack scored."""
     prediction = model.predict(data, return_type="dict", **predict_kwargs)
-    if isinstance(prediction, Mapping) and "posterior_mean" in prediction:
-        return [float(value) for value in prediction["posterior_mean"]]
-    # Families whose predict() returns a bare response vector (e.g. probabilities)
-    # rather than the linear-predictor/mean table.
-    return [float(value) for value in prediction]
+    return [float(value) for value in prediction["posterior_mean"]]
 
 
 def _normalize_candidates(
