@@ -3254,9 +3254,11 @@ impl OrthantRule {
                 // the untilted rule.
                 let mu = self.tilt.as_ref().map_or(0.0, |tilt| tilt[i]);
                 let mut bound = -mean[i];
-                for j in 0..i {
-                    bound -= factor[[i, j]] * z[j];
-                }
+                // In index order over contiguous views: the same subtractions,
+                // in the same order, without a bounds check per entry.
+                Zip::from(factor.row(i).slice(ndarray::s![..i]))
+                    .and(z.slice(ndarray::s![..i]))
+                    .for_each(|&l_ij, &z_j| bound -= l_ij * z_j);
                 conditional_bound[i] = bound;
                 let mut wall = bound / factor[[i, i]] - mu;
                 // The affine wall, if it pivots here, is a second candidate
