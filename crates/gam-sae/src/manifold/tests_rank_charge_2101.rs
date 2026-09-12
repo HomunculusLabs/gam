@@ -34,6 +34,14 @@ fn lcg_normal(s: &mut u64) -> f64 {
     (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
 }
 
+/// Inner iteration budget shared by the subset fit and by the criterion that
+/// prices it. The criterion gets this budget, never `0`: `inner_max_iter == 0`
+/// is the verbatim-reuse freeze. It prices the subset fit's last iterate as it
+/// stands and skips the evidence drive, including the drive's descent of refused
+/// exact-A saddles (#2080), so a leave-one-out margin taken there compares two
+/// states neither of which is a converged root.
+const SUBSET_FIT_ITERATIONS: usize = 60;
+
 /// Build + fit a term with circles on the given output-dim indices (each circle
 /// c on dims (2c, 2c+1)), against the shared target `x`. Used for leave-one-out
 /// decision margins.
@@ -87,7 +95,15 @@ fn fit_circle_subset(
         .expect("the fixture's atoms and assignment describe the same latent blocks");
     term.set_guards_enabled(false);
     let mut rho = SaeManifoldRho::new(0.0, 0.0, vec![Array1::<f64>::zeros(1); circles.len()]);
-    term.run_joint_fit_arrow_schur(x.view(), &mut rho, None, 60, 1.0, 1e-6, 1e-6)
+    term.run_joint_fit_arrow_schur(
+        x.view(),
+        &mut rho,
+        None,
+        SUBSET_FIT_ITERATIONS,
+        1.0,
+        1e-6,
+        1e-6,
+    )
         .expect("subset fit");
     (term, rho)
 }
@@ -121,10 +137,20 @@ fn rank_charge_k3_accepts_clean_atoms() {
     }
     // Compute each circle's leave-one-out margin:
     // margin_k = reml(all 3) − reml(drop k). <0 ⇒ keeping k is favored.
+    // Both sides are priced at the criterion's converged evidence root (see
+    // `SUBSET_FIT_ITERATIONS`).
     let margins = || -> Vec<f64> {
         let (mut t3, r3) = fit_circle_subset(&x, &theta, &[0, 1, 2]);
         let (v3, _, _) = t3
-            .penalized_quasi_laplace_criterion_with_cache(x.view(), &r3, None, 0, 1.0, 1e-6, 1e-6)
+            .penalized_quasi_laplace_criterion_with_cache(
+                x.view(),
+                &r3,
+                None,
+                SUBSET_FIT_ITERATIONS,
+                1.0,
+                1e-6,
+                1e-6,
+            )
             .unwrap();
         (0..ncirc)
             .map(|drop| {
@@ -135,7 +161,7 @@ fn rank_charge_k3_accepts_clean_atoms() {
                         x.view(),
                         &r2,
                         None,
-                        0,
+                        SUBSET_FIT_ITERATIONS,
                         1.0,
                         1e-6,
                         1e-6,
