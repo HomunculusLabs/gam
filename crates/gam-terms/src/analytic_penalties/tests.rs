@@ -1705,10 +1705,10 @@ fn nuclear_norm_right_gram_divided_difference_uses_shared_eigen_shift() {
         .right_spectral_inverse_sqrt_derivative(t.view(), v.view())
         .expect("right-Gram derivative");
 
-    // The robustness floor is an additive shift, not a clamp, so the spectral
-    // value and its divided difference remain derivatives of the same function.
-    let eps2 = smoothing_eps * smoothing_eps;
-    let eigen_shift = eps2.max(1.0e-15);
+    // The eigen shift is the user's ε² — additive, never a clamp and no floor — so
+    // the spectral value and its divided difference remain derivatives of the same
+    // function even at an ε far below any absolute scale (here ε² = 1e-20).
+    let eigen_shift = smoothing_eps * smoothing_eps;
     let lambda0 = a * a + eigen_shift;
     let lambda1 = b * b + eigen_shift;
     let f0 = lambda0.powf(-0.5);
