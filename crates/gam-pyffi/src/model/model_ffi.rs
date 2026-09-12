@@ -4490,7 +4490,9 @@ fn stack_topologies_gaussian(
         .map_err(|err| py_value_error(format!("stack_topologies_gaussian: serialise: {err}")))
 }
 
-const REML_SCORE_KEYS: &[&str] = &["reml_score", "evidence", "laml", "score"];
+// Each lookup below names the one `SummaryPayload` field that publishes the
+// quantity; there are no alternative spellings to probe.
+const REML_SCORE_KEYS: &[&str] = &["reml_score"];
 
 const RAW_REML_SCORE_KEYS: &[&str] = &["raw_reml_score"];
 
@@ -4508,37 +4510,22 @@ fn no_criterion_error(payload: &serde_json::Value, surface: &str) -> pyo3::PyErr
     match json_lookup_str(payload, REML_UNAVAILABLE_KEYS) {
         Some(reason) => py_value_error(format!("{surface}: {reason}")),
         None => py_value_error(format!(
-            "{surface}: this model summary carries no reml_score / evidence field"
+            "{surface}: this model summary carries no reml_score field"
         )),
     }
 }
 
-const EDF_KEYS: &[&str] = &["edf_total", "edf", "effective_dof"];
+const EDF_KEYS: &[&str] = &["edf_total"];
 
-const LOG_LIK_KEYS: &[&str] = &["log_likelihood", "loglik", "log_lik"];
-// Response-family tag, used only by the compare_models comparability guard
-// (#1384). `family_name` is the SummaryPayload field; the aliases cover a
-// dict / .evidence object that exposes it under a shorter key.
-const FAMILY_KEYS: &[&str] = &["family_name", "family"];
-// Observation count, used only by the compare_models comparability guard. `n_obs`
-// is the SummaryPayload field; the aliases cover a dict / .evidence object that
-// exposes it under a longer name.
-const NUM_OBS_KEYS: &[&str] = &["n_obs", "n_observations", "num_observations", "nobs"];
-
-const PENALTY_RANK_KEYS: &[&str] = &["penalty_rank", "rank_s", "rank_S", "cache_penalty_rank"];
+const LOG_LIK_KEYS: &[&str] = &["log_likelihood"];
+// Response-family tag, used only by the compare_models comparability guard (#1384).
+const FAMILY_KEYS: &[&str] = &["family_name"];
+// Observation count, used only by the compare_models comparability guard.
+const NUM_OBS_KEYS: &[&str] = &["n_obs"];
 
 const NULL_DIM_KEYS: &[&str] = &["null_dim"];
 
-const NULLITY_KEYS: &[&str] = &["nullity", "penalty_nullity", "cache_nullity"];
-
-const NULL_HESSIAN_LOGDET_KEYS: &[&str] = &[
-    "null_space_logdet",
-    "null_hessian_logdet",
-    "h_null_logdet",
-    "logdet_h_null",
-];
-
-const DIM_KEYS: &[&str] = &["effective_dim", "dim_h", "dim_H", "hessian_dim"];
+const NULL_HESSIAN_LOGDET_KEYS: &[&str] = &["null_space_logdet"];
 
 enum RemlFitView<'py> {
     SavedSummary(serde_json::Value),
@@ -4697,8 +4684,8 @@ fn extract_reml_score_raw_from_view(view: &RemlFitView<'_>) -> PyResult<f64> {
     match view {
         RemlFitView::SavedSummary(payload) => Err(no_criterion_error(payload, "compare_models")),
         RemlFitView::PythonObject(fit) => Err(PyTypeError::new_err(format!(
-            "compare_models: cannot extract reml_score from {}; pass a gamfit.Model, \
-             a dict with 'reml_score', or an object exposing .evidence",
+            "compare_models: cannot extract reml_score from {}; pass a gamfit.Model \
+             or a summary mapping with 'reml_score'",
             fit.get_type().name()?
         ))),
     }
@@ -4775,50 +4762,11 @@ fn required_summary_ranking_value(payload: &serde_json::Value, key: &str) -> PyR
 }
 
 fn extract_null_dim_from_view(view: &RemlFitView<'_>) -> PyResult<Option<f64>> {
-    if let Some(null_dim) = extract_float_metadata_from_view(view, NULL_DIM_KEYS)? {
-        return Ok(Some(null_dim));
-    }
-    if let Some(nullity) = extract_float_metadata_from_view(view, NULLITY_KEYS)? {
-        return Ok(Some(nullity * extract_output_dim_from_view(view)?));
-    }
-    let dim_h = extract_float_metadata_from_view(view, DIM_KEYS)?;
-    let penalty_rank = extract_float_metadata_from_view(view, PENALTY_RANK_KEYS)?;
-    Ok(match (dim_h, penalty_rank) {
-        (Some(dim_h), Some(penalty_rank)) => Some(dim_h - penalty_rank),
-        _ => None,
-    })
-}
-
-fn extract_output_dim_from_view(view: &RemlFitView<'_>) -> PyResult<f64> {
-    match view {
-        RemlFitView::SavedSummary(payload) => Ok(json_output_dim(payload)),
-        RemlFitView::PythonObject(_) => {
-            let Some(coefficients) = extract_py_metadata_value(view, &["coefficients"])? else {
-                return Ok(1.0);
-            };
-            let Ok(shape) = coefficients.getattr("shape") else {
-                return Ok(1.0);
-            };
-            let dims: Vec<usize> = shape.extract()?;
-            if dims.len() >= 2 {
-                Ok(dims[1] as f64)
-            } else {
-                Ok(1.0)
-            }
-        }
-    }
+    extract_float_metadata_from_view(view, NULL_DIM_KEYS)
 }
 
 fn extract_edf_from_view(view: &RemlFitView<'_>) -> PyResult<Option<f64>> {
-    match view {
-        RemlFitView::SavedSummary(payload) => Ok(json_lookup_edf(payload, EDF_KEYS)),
-        RemlFitView::PythonObject(_) => {
-            let Some(value) = extract_py_metadata_value(view, EDF_KEYS)? else {
-                return Ok(None);
-            };
-            py_value_to_float_or_sum(&value).map(Some)
-        }
-    }
+    extract_float_metadata_from_view(view, EDF_KEYS)
 }
 
 fn extract_required_ranking_edf_from_view(
@@ -4990,17 +4938,6 @@ fn extract_py_get_value<'py>(
     Ok(None)
 }
 
-fn py_value_to_float_or_sum(value: &Bound<'_, PyAny>) -> PyResult<f64> {
-    if let Ok(scalar) = value.extract::<f64>() {
-        return Ok(scalar);
-    }
-    let mut total = 0.0;
-    for item in value.try_iter()? {
-        total += item?.extract::<f64>()?;
-    }
-    Ok(total)
-}
-
 fn json_lookup_f64(payload: &serde_json::Value, keys: &[&str]) -> Option<f64> {
     let object = payload.as_object()?;
     for key in keys {
@@ -5013,41 +4950,11 @@ fn json_lookup_f64(payload: &serde_json::Value, keys: &[&str]) -> Option<f64> {
     None
 }
 
-fn json_lookup_edf(payload: &serde_json::Value, keys: &[&str]) -> Option<f64> {
-    let object = payload.as_object()?;
-    for key in keys {
-        if let Some(value) = object.get(*key) {
-            if let Some(scalar) = json_number_to_f64(value) {
-                return Some(scalar);
-            }
-            if let Some(values) = value.as_array() {
-                return values.iter().try_fold(0.0, |acc, value| {
-                    json_number_to_f64(value).map(|number| acc + number)
-                });
-            }
-        }
-    }
-    None
-}
-
 fn json_number_to_f64(value: &serde_json::Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_i64().map(|value| value as f64))
         .or_else(|| value.as_u64().map(|value| value as f64))
-}
-
-fn json_output_dim(payload: &serde_json::Value) -> f64 {
-    let Some(coefficients) = payload.get("coefficients") else {
-        return 1.0;
-    };
-    let Some(rows) = coefficients.as_array() else {
-        return 1.0;
-    };
-    let Some(first) = rows.first() else {
-        return 1.0;
-    };
-    first.as_array().map_or(1.0, |row| row.len() as f64)
 }
 
 #[pyfunction(signature = (x, y, penalty, weights, ridge_lambda))]
