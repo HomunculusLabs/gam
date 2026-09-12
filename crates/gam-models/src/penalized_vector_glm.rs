@@ -300,7 +300,7 @@ impl VectorGlmStall {
     /// non-convergence error. Family adapters supply only the objective stage
     /// and a human-readable entry-point name; the evidence and resumable
     /// coefficient state come from the solver that produced the stall.
-    pub fn into_nonconvergence_error(
+    pub(crate) fn into_nonconvergence_error(
         self,
         stage: FixedLambdaSolverStage,
         context: impl Into<String>,

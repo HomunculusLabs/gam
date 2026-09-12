@@ -98,7 +98,7 @@ pub struct SurvivalMarginalSlopeTermSpec {
     pub latent_z_policy: LatentZPolicy,
 }
 
-pub const DEFAULT_SURVIVAL_MARGINAL_SLOPE_DERIVATIVE_GUARD: f64 = 1e-6;
+pub(crate) const DEFAULT_SURVIVAL_MARGINAL_SLOPE_DERIVATIVE_GUARD: f64 = 1e-6;
 
 pub(crate) const SURVIVAL_INTERCEPT_ABS_RESIDUAL_TOL: f64 = 1e-12;
 

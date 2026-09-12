@@ -107,7 +107,7 @@ pub fn working_model_from_flattened(
 /// linear-inequality penalty.  Returns the assembled working model that
 /// the engine drives during fitting; errors are `SurvivalError` cases
 /// (`DimensionMismatch` if the offset views are partially present).
-pub fn working_model_from_time_covariateshared(
+pub(crate) fn working_model_from_time_covariateshared(
     penalties: PenaltyBlocks,
     monotonicity: SurvivalMonotonicityPenalty,
     spec: SurvivalSpec,

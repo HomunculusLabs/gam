@@ -76,7 +76,7 @@ const FAMILY_TRANSFORMATION_NORMAL: &str = "transformation-normal";
 /// This is the single source of truth for that conversion; the CLI and FFI
 /// payload builders both route through it so the serialized flex contract
 /// cannot diverge between the two save paths.
-pub fn serialize_anchored_deviation_runtime(runtime: &DeviationRuntime) -> SavedCompiledFlexBlock {
+pub(crate) fn serialize_anchored_deviation_runtime(runtime: &DeviationRuntime) -> SavedCompiledFlexBlock {
     let mut anchor_correction: Option<Vec<Vec<f64>>> = None;
     let mut anchor_components: Vec<SavedAnchorComponent> = Vec::new();
     if let Some(installed) = runtime.installed_flex_block() {

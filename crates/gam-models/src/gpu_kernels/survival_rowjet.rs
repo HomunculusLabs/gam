@@ -192,7 +192,7 @@ fn survival_rowjet_source() -> &'static str {
 
 /// Compile the exact CUDA source used by the production survival V/G/H module.
 #[cfg(target_os = "linux")]
-pub fn compile_survival_rowjet_ptx() -> Result<Ptx, GpuError> {
+pub(crate) fn compile_survival_rowjet_ptx() -> Result<Ptx, GpuError> {
     gam_gpu::device_cache::compile_ptx_arch(survival_rowjet_source())
 }
 

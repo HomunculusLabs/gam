@@ -673,7 +673,7 @@ pub const TRANSFORMATION_NORMAL_BAND_Z_MAX: f64 = 4.0;
 /// `p`-quantile is exactly `h⁻¹(Φ⁻¹(p) | x)` — quantiles map through the
 /// monotone inverse transform; they are NOT `E[Y|x] ± z·σ` in latent-normal
 /// units.
-pub fn transformation_normal_band_z_nodes() -> Array1<f64> {
+pub(crate) fn transformation_normal_band_z_nodes() -> Array1<f64> {
     Array1::from_shape_fn(TRANSFORMATION_NORMAL_BAND_Z_NODES, |j| {
         -TRANSFORMATION_NORMAL_BAND_Z_MAX
             + 2.0 * TRANSFORMATION_NORMAL_BAND_Z_MAX * (j as f64)

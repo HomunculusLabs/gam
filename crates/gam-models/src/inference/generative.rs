@@ -486,7 +486,7 @@ fn check_dispersion_len(
 }
 
 /// Draw one synthetic observation vector from a generative spec.
-pub fn sampleobservations<R: rand::Rng + ?Sized>(
+pub(crate) fn sampleobservations<R: rand::Rng + ?Sized>(
     spec: &GenerativeSpec,
     rng: &mut R,
 ) -> Result<Array1<f64>, EstimationError> {

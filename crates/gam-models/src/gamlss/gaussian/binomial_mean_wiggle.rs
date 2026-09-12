@@ -108,7 +108,7 @@ impl BinomialMeanWiggleFamily {
     }
 
     pub const BLOCK_ETA: usize = 0;
-    pub const BLOCK_WIGGLE: usize = 1;
+    pub(crate) const BLOCK_WIGGLE: usize = 1;
 
     pub(crate) fn wiggle_geometry(
         &self,

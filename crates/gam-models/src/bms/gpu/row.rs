@@ -3095,7 +3095,7 @@ pub(crate) fn launch_bms_flex_row_dense(
 /// per-CTA shared-memory accumulator (`p_total² * 8` bytes) would exceed
 /// the V100 48 KiB/block cap above that threshold.
 #[cfg(target_os = "linux")]
-pub fn launch_bms_flex_row_dense_block(
+pub(crate) fn launch_bms_flex_row_dense_block(
     storage: &DeviceResidentRowHess,
 ) -> Result<Vec<f64>, GpuError> {
     let p_total = storage.block.p_total;

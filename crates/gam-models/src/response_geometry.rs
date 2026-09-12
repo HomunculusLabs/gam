@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::inference::model::FittedModel;
 
 const FIT_CONTEXT: &str = "shared-tangent Gaussian REML";
-pub const RESPONSE_GEOMETRY_MODEL_VERSION: u32 = 1;
+pub(crate) const RESPONSE_GEOMETRY_MODEL_VERSION: u32 = 1;
 
 /// One compact predictor-space smoothing penalty.
 ///

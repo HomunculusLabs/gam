@@ -230,7 +230,7 @@ pub fn residual_distribution_inverse_link(distribution: ResidualDistribution) ->
 /// standard links — those carry their full state via `payload.link` and have
 /// no `ResidualDistribution` representation.
 #[inline]
-pub fn residual_distribution_from_inverse_link(link: &InverseLink) -> Option<ResidualDistribution> {
+pub(crate) fn residual_distribution_from_inverse_link(link: &InverseLink) -> Option<ResidualDistribution> {
     match link {
         InverseLink::Standard(StandardLink::Probit) => Some(ResidualDistribution::Gaussian),
         InverseLink::Standard(StandardLink::CLogLog) => Some(ResidualDistribution::Gumbel),

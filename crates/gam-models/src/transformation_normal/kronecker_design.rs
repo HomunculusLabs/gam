@@ -547,7 +547,7 @@ impl CtnTensorPenaltyLayout {
 
     /// Indices of the response-roughness penalties (`S_{y,m} ⊗ G_x`) — the only
     /// penalties carrying the κ-moving covariate mass Gram.
-    pub fn response_indices(&self) -> std::ops::Range<usize> {
+    pub(crate) fn response_indices(&self) -> std::ops::Range<usize> {
         self.n_covariate..self.n_covariate + self.n_response
     }
 }

@@ -100,11 +100,11 @@ impl GaussianLocationScaleFamily {
         Ok(rows)
     }
 
-    pub fn parameternames() -> &'static [&'static str] {
+    pub(crate) fn parameternames() -> &'static [&'static str] {
         &["mu", "log_sigma"]
     }
 
-    pub fn parameter_links() -> &'static [ParameterLink] {
+    pub(crate) fn parameter_links() -> &'static [ParameterLink] {
         &[ParameterLink::Identity, ParameterLink::Log]
     }
 

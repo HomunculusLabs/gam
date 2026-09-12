@@ -212,7 +212,7 @@ pub enum LatentZNormalizationMode {
     Frozen { mean: f64, sd: f64 },
 }
 
-pub const DEFAULT_EMPIRICAL_LATENT_GRID_SIZE: usize = 65;
+pub(crate) const DEFAULT_EMPIRICAL_LATENT_GRID_SIZE: usize = 65;
 pub(crate) const AUTO_Z_NORMAL_SKEW_TOL: f64 = 0.10;
 pub(crate) const AUTO_Z_NORMAL_KURT_TOL: f64 = 0.25;
 pub(crate) const AUTO_Z_NORMAL_KS_TOL: f64 = 0.025;
@@ -588,7 +588,7 @@ pub struct LatentZPolicy {
 }
 
 impl LatentZPolicy {
-    pub fn frozen_transformation_normal() -> Self {
+    pub(crate) fn frozen_transformation_normal() -> Self {
         // Defaults relaxed to `WarnOnly` with the same thresholds the
         // exploratory-weighted preset uses (skew ≤ 4.0, |excess kurt| ≤ 20.0).
         // Rationale: the upstream conditional transformation-normal

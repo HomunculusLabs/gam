@@ -61,7 +61,7 @@ impl GuardPolicy {
     /// structured guard-range failure so each family can render an accurate
     /// message without re-encoding the policy.
     #[inline]
-    pub fn range_description(self) -> &'static str {
+    pub(crate) fn range_description(self) -> &'static str {
         match self {
             GuardPolicy::NonNegative => ">= 0",
             GuardPolicy::Positive => "> 0",

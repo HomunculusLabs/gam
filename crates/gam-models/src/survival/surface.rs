@@ -488,7 +488,7 @@ impl SurvivalSurfaceChunkPolicy {
         n_rows.saturating_mul(n_times) > self.target_cells
     }
 
-    pub fn resolve_shape(
+    pub(crate) fn resolve_shape(
         self,
         people: Option<usize>,
         times: Option<usize>,

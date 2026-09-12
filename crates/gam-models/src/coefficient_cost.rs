@@ -27,7 +27,7 @@ use crate::custom_family::{
 /// matrix-free op-count or dense build cost differs structurally (e.g. the
 /// Khatri–Rao conditional transformation model) can supply their own values
 /// while sharing the gate-and-branch structure.
-pub fn operator_aware_hessian_cost(
+pub(crate) fn operator_aware_hessian_cost(
     p_total: u64,
     n: u64,
     matrix_free_cost: u64,
@@ -49,7 +49,7 @@ pub fn operator_aware_hessian_cost(
 /// Bernoulli/survival marginal-slope kernels. `n` is the family's observation
 /// count (`self.y.len()` / `self.n`); `specs` are the assembled parameter
 /// blocks (also used to derive `p_total` and the dense joint cost).
-pub fn joint_coupled_operator_aware_hessian_cost(n: u64, specs: &[ParameterBlockSpec]) -> u64 {
+pub(crate) fn joint_coupled_operator_aware_hessian_cost(n: u64, specs: &[ParameterBlockSpec]) -> u64 {
     let p_total: u64 = specs
         .iter()
         .map(|s| s.design.ncols() as u64)

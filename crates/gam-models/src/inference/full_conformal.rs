@@ -1148,7 +1148,7 @@ impl<'a> GaussianRemlRhoResponse<'a> {
     /// Newton with a `±5` widening, a `1e-12` curvature floor and a `1e-13`
     /// step tolerance that returned its last iterate after 100 steps (#2469,
     /// #2670; SPEC forbids grid search and hand-supplied boxes outright).
-    pub fn select_rho(&self, z: Option<f64>) -> Result<f64, String> {
+    pub(crate) fn select_rho(&self, z: Option<f64>) -> Result<f64, String> {
         use gam_problem::{Derivative, HessianValue, OuterEval};
         use gam_solve::estimate::EstimationError;
         use gam_solve::rho_optimizer::OuterProblem;
@@ -2291,7 +2291,7 @@ pub struct JackknifePlusInterval {
 /// prove only `P(Y_* ∈ Ĉ_α) ≥ 1 − 2α − (1 − K/n)/(K + 1)` for CV+. The extra
 /// slack vanishes at K = n (where CV+ IS jackknife+); any CV+ caller must
 /// state that bound, not the jackknife+ one.
-pub fn jackknife_plus_interval(
+pub(crate) fn jackknife_plus_interval(
     loo_test_predictions: &Array1<f64>,
     loo_abs_residuals: &Array1<f64>,
     alpha: f64,

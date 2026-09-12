@@ -230,7 +230,7 @@ impl CtnTransformTable {
     /// the affine exterior, and `width / slope(t)` of the bracketing Hermite
     /// cell inside. Consumers that interpolate the quantile function use this
     /// derivative instead of differencing tabulated quantiles.
-    pub fn invert_with_slope(&self, row: usize, target: f64) -> (f64, f64) {
+    pub(crate) fn invert_with_slope(&self, row: usize, target: f64) -> (f64, f64) {
         let g = self.grid_y.len();
         let h = self.h.row(row);
         let slope = self.h_prime.row(row);

@@ -19,11 +19,11 @@ pub struct ParameterBlockInput {
 }
 
 impl ParameterBlockInput {
-    pub fn intospec(self, name: &str) -> Result<ParameterBlockSpec, String> {
+    pub(crate) fn intospec(self, name: &str) -> Result<ParameterBlockSpec, String> {
         self.intospec_with_gauge_priority(name, DEFAULT_GAUGE_PRIORITY)
     }
 
-    pub fn intospec_with_gauge_priority(
+    pub(crate) fn intospec_with_gauge_priority(
         self,
         name: &str,
         gauge_priority: u8,

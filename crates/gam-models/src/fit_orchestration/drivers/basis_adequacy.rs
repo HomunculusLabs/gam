@@ -121,7 +121,7 @@ impl BasisAdequacyRow {
     /// `None` — never `false` — when no test ran: "not measured" and "measured
     /// and adequate" are different states and a caller must be able to tell
     /// them apart.
-    pub fn is_inadequate_at(&self, level: f64) -> Option<bool> {
+    pub(crate) fn is_inadequate_at(&self, level: f64) -> Option<bool> {
         self.p_value.map(|p| p < level)
     }
 }
@@ -620,7 +620,7 @@ pub(crate) fn basis_adequacy_rows_lacking_fit(
 /// Only `Inadequate` terms produce a note. An `Undetermined` row is not an
 /// advisory — it is an absence of evidence, and saying so at fit time on every
 /// random-effect term would drown the channel it shares.
-pub fn basis_adequacy_notes(rows: &[BasisAdequacyRow]) -> Vec<String> {
+pub(crate) fn basis_adequacy_notes(rows: &[BasisAdequacyRow]) -> Vec<String> {
     basis_adequacy_rows_lacking_fit(rows)
         .map(|row| {
             let p_value = row.p_value.unwrap_or(f64::NAN);

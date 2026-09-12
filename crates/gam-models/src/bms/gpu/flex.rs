@@ -30,7 +30,7 @@ pub fn row_primary_hessian_decision(n: usize, r: usize) -> Result<GpuDecision, G
 
 /// Same as [`row_primary_hessian_decision`] but turns
 /// `gpu=required`-without-support into an `Err` string at the call site.
-pub fn require_row_primary_hessian_supported(n: usize, r: usize) -> Result<GpuDecision, String> {
+pub(crate) fn require_row_primary_hessian_supported(n: usize, r: usize) -> Result<GpuDecision, String> {
     let decision = row_primary_hessian_decision(n, r).map_err(String::from)?;
     decision.clone().log();
     decision.require_supported()?;

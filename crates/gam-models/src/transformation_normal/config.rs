@@ -79,7 +79,7 @@ pub const TRANSFORMATION_MONOTONICITY_EPS: f64 = 1.0e-8;
 /// guard, not a statistical plausibility filter: startup seeds can temporarily
 /// land outside practically observable normal quantiles before the line search
 /// moves them back into the likelihood's high-density region.
-pub const TRANSFORMATION_NORMAL_H_ABS_MAX: f64 = 1.0e6;
+pub(crate) const TRANSFORMATION_NORMAL_H_ABS_MAX: f64 = 1.0e6;
 
 /// Number of dense-spectral factor columns processed per exact ψψ HVP row pass.
 /// At large-scale CTN dimensions p≈800, this keeps the per-worker accumulator well
