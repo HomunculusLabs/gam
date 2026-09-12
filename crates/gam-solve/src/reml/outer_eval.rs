@@ -26,7 +26,7 @@ pub(crate) use crate::persistent_warm_start::{
     PersistentWarmStartRecord, load_record, store_record,
 };
 pub(crate) use crate::pirls::PirlsWorkspace;
-pub(crate) use gam_linalg::utils::{boundary_hit_indices, symmetric_spectrum_condition_number};
+pub(crate) use gam_linalg::utils::symmetric_spectrum_condition_number;
 pub(crate) use gam_problem::{
     GlmLikelihoodSpec, InverseLink, LikelihoodSpec, LinkFunction, ResponseFamily, RhoPrior,
     SasLinkState, StandardLink,

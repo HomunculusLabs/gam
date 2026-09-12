@@ -891,24 +891,6 @@ pub fn predict_gam_dimension_mismatch_message(
     None::<String>
 }
 
-pub fn boundary_hit_indices(
-    values: ArrayView1<'_, f64>,
-    bound: f64,
-    tolerance: f64,
-) -> (Vec<usize>, Vec<usize>) {
-    let at_lower = values
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &value)| (value <= -bound + tolerance).then_some(idx))
-        .collect();
-    let at_upper = values
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &value)| (value >= bound - tolerance).then_some(idx))
-        .collect();
-    (at_lower, at_upper)
-}
-
 /// SPD-only spectrum condition number: the exact ratio λ_max / λ_min on the
 /// principal (positive-eigenvalue) spectrum, with **no** hidden floor — a
 /// near-singular λ_min yields a correspondingly large (or infinite) ratio,

@@ -6066,5 +6066,13 @@
     ],
     "reason": "The two-tier Fisher harvest module, which nothing constructed after cb9376b4f: pub struct TieredHarvest with n_rows and coverage, and the private FisherTier, whose fields no code read.",
     "evidence": "MSI job 554731 ran source_removal_guard.py on 748c493fe..be604ec10 and produced exactly these guarded identities. The gam-inference pub use re-export and the gam-sae mod declaration went in the same commit."
+  },
+  {
+    "base": "29829777211aa66f95229596593f292fe58e69a5",
+    "items": [
+      "crates/gam-linalg/src/utils.rs:fn:boundary_hit_indices"
+    ],
+    "reason": "#2902 row 8: the REML cost's refused-trial diagnostic logged coordinates within 1e-8 of +-RHO_BOUND, the rails of a box no standard-REML arm searches since 9f2a290c0 and 0b7075c3b. The terminal certificate reports each railed coordinate with the interval it was judged against (railed_facts, #2530). boundary_hit_indices had no other reader.",
+    "evidence": "git grep -w boundary_hit_indices over the base finds its definition in crates/gam-linalg/src/utils.rs, the crate-private re-export in crates/gam-solve/src/reml/outer_eval.rs, and the two diagnostic calls in crates/gam-solve/src/reml/objective.rs, all removed in this commit. No test or other crate reads it."
   }
 ]

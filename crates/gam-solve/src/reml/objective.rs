@@ -264,15 +264,6 @@ impl<'a> RemlState<'a> {
                 log::debug!(
                     "P-IRLS flagged ill-conditioning for current rho; returning +inf cost to retreat."
                 );
-                // Diagnostics: which rho are at bounds
-                let (at_lower, at_upper) = boundary_hit_indices(p.view(), RHO_BOUND, 1e-8);
-                if !(at_lower.is_empty() && at_upper.is_empty()) {
-                    log::debug!(
-                        "[Diag] rho bounds: lower={:?} upper={:?}",
-                        at_lower,
-                        at_upper
-                    );
-                }
                 return Ok(f64::INFINITY);
             }
             Err(EstimationError::PerfectSeparationDetected { .. })
@@ -285,14 +276,6 @@ impl<'a> RemlState<'a> {
             }
             Err(e) => {
                 self.cache_manager.invalidate_eval_bundle();
-                let (at_lower, at_upper) = boundary_hit_indices(p.view(), RHO_BOUND, 1e-8);
-                if !(at_lower.is_empty() && at_upper.is_empty()) {
-                    log::debug!(
-                        "[Diag] rho bounds: lower={:?} upper={:?}",
-                        at_lower,
-                        at_upper
-                    );
-                }
                 return Err(e);
             }
         };
