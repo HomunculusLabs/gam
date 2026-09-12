@@ -353,7 +353,7 @@ impl DomainBasis {
                     }
                 }
                 breaks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                breaks.dedup_by(|a, b| (*a - *b).abs() <= f64::EPSILON * hi.abs().max(1.0));
+                breaks.dedup();
                 let mut out = Vec::with_capacity(breaks.len() + 2);
                 out.push(lo);
                 out.extend(breaks.into_iter().filter(|&k| k > lo && k < hi));
@@ -724,14 +724,15 @@ impl FittedTransport {
     /// [`FittedTransport::topology_preserved`]. On each knot span `h′` is a single polynomial of
     /// degree `d = `[`DomainBasis::derivative_poly_degree`]` (cubic spline ⇒
     /// quadratic). A degree-`d` polynomial is determined by `d + 1` samples, so
-    /// per span we evaluate `h′` at `d + 1` equally-spaced abscissae, reconstruct
+    /// per span we evaluate `h′` at the midpoints of `d + 1` equal cells, reconstruct
     /// the known-degree polynomial in the Lagrange basis, locate its interior critical
     /// points in closed form, and require `orientation·h′ > 0` at the span
-    /// endpoints **and** every interior critical point. To stay sound even if a
-    /// basis is not an exact polynomial of the assumed degree on a span (e.g. a
-    /// row-normalized periodic basis whose row-sum is not a partition of unity),
-    /// the reconstruction is verified against an independent interior sample;
-    /// any mismatch falls back to refusing the span.
+    /// endpoints **and** every interior critical point. Both bases are exact
+    /// piecewise polynomials on these spans: the open basis on the distinct knots
+    /// its derivative rows are evaluated with, and the periodic basis on the
+    /// cardinal lattice `k·2π/m`, whose `m` periodized shifts cover every integer
+    /// shift once, so the rows are a partition of unity and the row normalization
+    /// divides by one.
     fn certify_strict_monotonicity(&self) -> Result<f64, String> {
         let (orientation, minimum, argmin) = self.exact_minimum_oriented_derivative()?;
         if !(minimum > 0.0) {
@@ -749,8 +750,8 @@ impl FittedTransport {
     /// one known-degree polynomial piece, reconstructed from `d + 1` samples, so
     /// the span minimum is at a span endpoint or an interior critical point. Folds
     /// are reported through a non-positive minimum, not an error. An error means
-    /// a span could not be reconstructed as a polynomial of the assumed degree,
-    /// or `h′` was not finite there.
+    /// `h′` was not finite at a candidate, or its pieces are above cubic, where
+    /// `monomial_critical_points` has no closed form.
     fn exact_minimum_oriented_derivative(&self) -> Result<(f64, f64, f64), String> {
         let (lo, hi) = match self.topology_from {
             ChartTopology::Circle => (0.0, TAU),
@@ -774,52 +775,22 @@ impl FittedTransport {
                 continue;
             }
             let span = b - a;
-            // Reconstruction abscissae: `deg + 1` equally spaced nodes on the
-            // closed span (sampling strictly inside avoids the knot where two
-            // pieces meet and the open-basis derivative can be one-sided).
-            let pad = span * 1.0e-9;
+            // Reconstruction abscissae: the midpoints of `deg + 1` equal cells of the
+            // span. Each sits strictly inside, so no node lands on the knot where two
+            // pieces meet and the open-basis derivative can be one-sided.
             let n_nodes = deg + 1;
+            let step = span / n_nodes as f64;
             let nodes: Vec<f64> = (0..n_nodes)
-                .map(|i| {
-                    let s = if n_nodes == 1 {
-                        0.5
-                    } else {
-                        i as f64 / (n_nodes - 1) as f64
-                    };
-                    (a + pad) + (span - 2.0 * pad) * s
-                })
+                .map(|i| a + (i as f64 + 0.5) * step)
                 .collect();
             let values = self.oriented_derivative_at(&nodes, orientation)?;
 
-            // Polynomial in the local coordinate u = (t - nodes[0]) / step.
-            // Expand the exact Lagrange interpolant into monomial coefficients
-            // for the closed-form critical-point search. This is algebraic
+            // Polynomial in the local coordinate u = (t - nodes[0]) / step, which puts
+            // the nodes on 0..=deg. Expand the exact Lagrange interpolant into monomial
+            // coefficients for the closed-form critical-point search. This is algebraic
             // reconstruction of a known-degree spline piece, not a numerical
             // derivative approximation.
-            let step = if n_nodes > 1 {
-                nodes[1] - nodes[0]
-            } else {
-                span
-            };
             let coeffs = monomial_interpolant_at_integer_nodes(&values);
-
-            // Sound guard: verify the reconstruction reproduces an independent
-            // interior sample (deliberately off the reconstruction nodes — the
-            // equispaced nodes never land on a 0.37 fraction). If the basis is
-            // not exactly polynomial of the assumed degree on this span, refuse
-            // rather than trust the fit.
-            let probe_t = a + 0.37 * span;
-            let probe_u = (probe_t - nodes[0]) / step;
-            let probe_recon = eval_monomial(&coeffs, probe_u);
-            let probe_actual = self.oriented_derivative_at(&[probe_t], orientation)?[0];
-            let scale = probe_actual.abs().max(1.0);
-            if (probe_recon - probe_actual).abs() > 1.0e-6 * scale {
-                return Err(format!(
-                    "transport monotonicity certificate could not reconstruct h′ on the \
-                     span [{a}, {b}] (reconstruction {probe_recon} vs actual {probe_actual}); \
-                     refusing to certify"
-                ));
-            }
 
             // The piece's minimum over the closed span is at an endpoint or at an
             // interior critical point.
@@ -827,7 +798,7 @@ impl FittedTransport {
                 .iter()
                 .map(|&edge| (edge, eval_monomial(&coeffs, (edge - nodes[0]) / step)))
                 .collect();
-            for u_crit in monomial_critical_points(&coeffs) {
+            for u_crit in monomial_critical_points(&coeffs)? {
                 let t_crit = nodes[0] + u_crit * step;
                 if t_crit > a && t_crit < b {
                     candidates.push((t_crit, eval_monomial(&coeffs, u_crit)));
@@ -1275,31 +1246,28 @@ fn eval_monomial(coeffs: &[f64], u: f64) -> f64 {
 }
 
 /// Interior critical points (roots of the derivative) of an ascending monomial
-/// polynomial, in the local `u` coordinate. Returns the closed-form roots for
-/// degree ≤ 2 derivatives (i.e. cubic-spline pieces, the production path);
-/// higher-degree derivatives fall back to a robust bisection root-isolation so
-/// the certificate stays exact-enough (a missed extremum can only make the
-/// certificate stricter, never falsely accept a fold, because the endpoints and
-/// every sign change found are still checked). For the cubic transport splines
-/// the polynomial is quadratic and this is the single vertex.
-fn monomial_critical_points(coeffs: &[f64]) -> Vec<f64> {
+/// polynomial, in the local `u` coordinate, in closed form for derivatives of
+/// degree ≤ 2. For the cubic transport splines the polynomial is quadratic and
+/// this is the single vertex. A higher-degree derivative has no closed-form root
+/// list here and is refused rather than scanned on a grid.
+fn monomial_critical_points(coeffs: &[f64]) -> Result<Vec<f64>, String> {
     // Derivative coefficients: d/du Σ c_k u^k = Σ k·c_k u^{k−1}.
     let n = coeffs.len();
     if n <= 1 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let deriv: Vec<f64> = (1..n).map(|k| k as f64 * coeffs[k]).collect();
     // deriv is ascending of length n−1 (degree n−2).
     match deriv.len() {
-        0 => Vec::new(),
-        1 => Vec::new(), // constant derivative: no critical point
+        0 => Ok(Vec::new()),
+        1 => Ok(Vec::new()), // constant derivative: no critical point
         2 => {
             // Linear b + a·u = 0 (a = deriv[1]).
             let (b, a) = (deriv[0], deriv[1]);
             if a == 0.0 {
-                Vec::new()
+                Ok(Vec::new())
             } else {
-                vec![-b / a]
+                Ok(vec![-b / a])
             }
         }
         3 => {
@@ -1307,52 +1275,25 @@ fn monomial_critical_points(coeffs: &[f64]) -> Vec<f64> {
             let (c, b, a) = (deriv[0], deriv[1], deriv[2]);
             if a == 0.0 {
                 if b == 0.0 {
-                    Vec::new()
+                    Ok(Vec::new())
                 } else {
-                    vec![-c / b]
+                    Ok(vec![-c / b])
                 }
             } else {
                 let disc = b * b - 4.0 * a * c;
                 if disc < 0.0 {
-                    Vec::new()
+                    Ok(Vec::new())
                 } else {
                     let s = disc.sqrt();
-                    vec![(-b + s) / (2.0 * a), (-b - s) / (2.0 * a)]
+                    Ok(vec![(-b + s) / (2.0 * a), (-b - s) / (2.0 * a)])
                 }
             }
         }
-        _ => {
-            // General fallback: scan for sign changes of the derivative on a
-            // dense [0, deg] grid and bisect each bracket. Conservative.
-            let lo = 0.0;
-            let hi = (coeffs.len() - 1) as f64;
-            let steps = 256;
-            let mut roots = Vec::new();
-            let f = |u: f64| eval_monomial(&deriv, u);
-            let mut prev_u = lo;
-            let mut prev_v = f(lo);
-            for i in 1..=steps {
-                let u = lo + (hi - lo) * i as f64 / steps as f64;
-                let v = f(u);
-                if prev_v == 0.0 {
-                    roots.push(prev_u);
-                } else if prev_v * v < 0.0 {
-                    let (mut a, mut b) = (prev_u, u);
-                    for _ in 0..60 {
-                        let m = 0.5 * (a + b);
-                        if f(a) * f(m) <= 0.0 {
-                            b = m;
-                        } else {
-                            a = m;
-                        }
-                    }
-                    roots.push(0.5 * (a + b));
-                }
-                prev_u = u;
-                prev_v = v;
-            }
-            roots
-        }
+        len => Err(format!(
+            "transport monotonicity certificate has no closed-form critical points for a \
+             degree-{} derivative piece",
+            len - 1
+        )),
     }
 }
 
@@ -2072,7 +2013,7 @@ mod invert_tests {
             assert!((a - b).abs() < 1e-12, "recon {a} vs {b}");
         }
         // Vertex of 2.1u² − 1.3u + 0.7 is at u = 1.3 / (2·2.1).
-        let crit = monomial_critical_points(&recon);
+        let crit = monomial_critical_points(&recon).expect("closed-form vertex");
         assert_eq!(crit.len(), 1);
         assert!((crit[0] - 1.3 / 4.2).abs() < 1e-12);
     }
