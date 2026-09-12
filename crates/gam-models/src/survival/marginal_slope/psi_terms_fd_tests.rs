@@ -971,6 +971,182 @@ fn slope_design_psi_on_a_follow_up_margin_matches_finite_difference_2767() {
     }
 }
 
+// ── The learned frailty scale: log σ ─────────────────────────────────────────
+//
+// A learned Gaussian-shift frailty scale is an outer coordinate `log σ`. Its ψ
+// terms are the family's own objective, score and joint Hessian differentiated in
+// `log σ` at fixed β, and in the follow-up frame the scale moves all three slope
+// channels (gam#2767). The time-constant frame runs the compiled lowering and the
+// follow-up frame the parameter-jet one; the gates difference both against the
+// family's own hooks.
+
+/// The drift fixture carrying a Gaussian-shift frailty scale `σ = exp(log_sigma)`.
+fn frailty_family_at(
+    frame: SlopeFrame,
+    log_sigma: f64,
+) -> (SurvivalMarginalSlopeFamily, Array1<f64>) {
+    let (mut family, beta) = drift_family_and_states(frame);
+    family.gaussian_frailty_sd = Some(log_sigma.exp());
+    (family, beta)
+}
+
+fn drift_specs(family: &SurvivalMarginalSlopeFamily) -> Vec<ParameterBlockSpec> {
+    vec![
+        fd_blockspec(family.design_exit.ncols()),
+        fd_blockspec(family.marginal_design.ncols()),
+        fd_blockspec(family.slope_layout.coefficient_design().ncols()),
+    ]
+}
+
+/// The family's `(NLL, NLL score, joint Hessian)` at fixed β as `log σ` moves.
+fn frailty_objective_score_hessian(
+    frame: SlopeFrame,
+    log_sigma: f64,
+) -> (f64, Array1<f64>, Array2<f64>) {
+    let (family, beta) = frailty_family_at(frame, log_sigma);
+    let states = states_at_beta(&family, &beta);
+    let evaluation = family
+        .exact_newton_joint_gradient_evaluation(&states, &drift_specs(&family))
+        .expect("joint gradient evaluation")
+        .expect("survival marginal-slope publishes a joint gradient evaluation");
+    let hessian = family
+        .exact_newton_joint_hessian(&states)
+        .expect("joint hessian")
+        .expect("survival marginal-slope publishes an explicit joint hessian");
+    (-evaluation.log_likelihood, -evaluation.gradient, hessian)
+}
+
+fn grade_log_sigma_terms(
+    label: &str,
+    objective: f64,
+    score: &Array1<f64>,
+    hessian: &Array2<f64>,
+    lower_order_at: impl Fn(f64) -> (f64, Array1<f64>, Array2<f64>),
+) {
+    let h = 1e-3;
+    let (coarse_plus, coarse_minus) = (lower_order_at(h), lower_order_at(-h));
+    let (fine_plus, fine_minus) = (lower_order_at(0.5 * h), lower_order_at(-0.5 * h));
+    let oracle = |plus: f64, minus: f64, fine_p: f64, fine_m: f64| {
+        ridders((plus - minus) / (2.0 * h), (fine_p - fine_m) / h)
+    };
+    assert_matches(
+        &format!("{label} objective"),
+        objective,
+        &oracle(coarse_plus.0, coarse_minus.0, fine_plus.0, fine_minus.0),
+        objective.abs(),
+    );
+    let dim = score.len();
+    let score_scale = max_abs(score.iter()).max(1e-12);
+    for i in 0..dim {
+        assert_matches(
+            &format!("{label} score[{i}]"),
+            score[i],
+            &oracle(coarse_plus.1[i], coarse_minus.1[i], fine_plus.1[i], fine_minus.1[i]),
+            score_scale,
+        );
+    }
+    let hessian_scale = max_abs(hessian.iter()).max(1e-12);
+    for r in 0..dim {
+        for c in 0..dim {
+            assert_matches(
+                &format!("{label} hessian[{r},{c}]"),
+                hessian[[r, c]],
+                &oracle(
+                    coarse_plus.2[[r, c]],
+                    coarse_minus.2[[r, c]],
+                    fine_plus.2[[r, c]],
+                    fine_minus.2[[r, c]],
+                ),
+                hessian_scale,
+            );
+        }
+    }
+}
+
+fn dense_psi_hessian(
+    operator: Option<&Arc<dyn HyperOperator>>,
+    dense: &Array2<f64>,
+    total: usize,
+) -> Array2<f64> {
+    match operator {
+        Some(operator) => operator.mul_mat(&Array2::<f64>::eye(total)),
+        None => dense.clone(),
+    }
+}
+
+/// `∂_{log σ}` of the family objective, score and joint Hessian, in both slope frames.
+#[test]
+fn log_sigma_psi_terms_match_finite_difference_2767() {
+    let options = BlockwiseFitOptions::default();
+    let log_sigma = 0.6_f64.ln();
+    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
+        let (family, beta) = frailty_family_at(frame, log_sigma);
+        let states = states_at_beta(&family, &beta);
+        let terms = family
+            .sigma_exact_joint_psi_terms_with_options(&states, &drift_specs(&family), &options)
+            .expect("log-sigma ψ terms")
+            .expect("a rigid marginal-slope family publishes log-sigma ψ terms");
+        let hessian = dense_psi_hessian(
+            terms.hessian_psi_operator.as_ref(),
+            &terms.hessian_psi,
+            beta.len(),
+        );
+        grade_log_sigma_terms(
+            &format!("{} log-sigma first order", frame.label()),
+            terms.objective_psi,
+            &terms.score_psi,
+            &hessian,
+            |t| frailty_objective_score_hessian(frame, log_sigma + t),
+        );
+    }
+}
+
+/// `∂²_{log σ}` of the family objective, score and joint Hessian, differenced from the
+/// first-order terms, in both slope frames.
+#[test]
+fn log_sigma_psi_second_order_terms_match_finite_difference_2767() {
+    let options = BlockwiseFitOptions::default();
+    let log_sigma = 0.6_f64.ln();
+    for frame in [SlopeFrame::Static, SlopeFrame::FollowUpVarying] {
+        let (family, beta) = frailty_family_at(frame, log_sigma);
+        let states = states_at_beta(&family, &beta);
+        let terms = family
+            .sigma_exact_joint_psisecond_order_terms_with_options(&states, &options)
+            .expect("log-sigma second-order ψ terms")
+            .expect("a rigid marginal-slope family publishes log-sigma second-order terms");
+        let total = beta.len();
+        let hessian = dense_psi_hessian(
+            terms.hessian_psi_psi_operator.as_ref(),
+            &terms.hessian_psi_psi,
+            total,
+        );
+        grade_log_sigma_terms(
+            &format!("{} log-sigma second order", frame.label()),
+            terms.objective_psi_psi,
+            &terms.score_psi_psi,
+            &hessian,
+            |t| {
+                let (family, beta) = frailty_family_at(frame, log_sigma + t);
+                let states = states_at_beta(&family, &beta);
+                let first = family
+                    .sigma_exact_joint_psi_terms_with_options(
+                        &states,
+                        &drift_specs(&family),
+                        &options,
+                    )
+                    .expect("log-sigma ψ terms")
+                    .expect("a rigid marginal-slope family publishes log-sigma ψ terms");
+                let hessian = dense_psi_hessian(
+                    first.hessian_psi_operator.as_ref(),
+                    &first.hessian_psi,
+                    total,
+                );
+                (first.objective_psi, first.score_psi, hessian)
+            },
+        );
+    }
+}
+
 // ── The β-drift of the joint Hessian: `D_β H[δ]` ────────────────────────────
 //
 // The outer criterion's `½ log|H(β̂(θ), θ) + S_λ|` has TWO derivative halves at

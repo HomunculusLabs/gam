@@ -322,15 +322,22 @@ impl SurvivalMarginalSlopeFamily {
         Ok(crate::survival::lognormal_kernel::ProbitFrailtyScaleJet::from_log_sigma(sigma.ln()))
     }
 
-    /// Evaluate the canonical rigid row program with its observed slope already
-    /// lifted through a jet-valued frailty scale. Passing `probit_scale = 1`
-    /// prevents a second scaling inside [`rigid_row_nll`]; probability tails,
-    /// event semantics, and monotonicity remain owned by that single source.
-    fn row_neglog_canonical_scale_jet<S: gam_math::jet_scalar::JetScalar<N_PRIMARY>>(
+    /// Evaluate the canonical rigid row program with every observed slope channel
+    /// already lifted through a jet-valued frailty scale. Passing
+    /// `probit_scale = 1` prevents a second scaling inside [`rigid_row_nll`];
+    /// probability tails, event semantics, and monotonicity remain owned by that
+    /// single source. In the follow-up frame the scale lifts `g₀`, `g₁` and `ġ₁`
+    /// alike, exactly as the geometry applies the probit scale to all three
+    /// (gam#2767).
+    fn row_neglog_canonical_scale_jet<
+        const P: usize,
+        G: SlopeRowGeometry<P>,
+        S: gam_math::jet_scalar::JetScalar<P>,
+    >(
         &self,
         row: usize,
         block_states: &[ParameterBlockState],
-        primaries: &[S; N_PRIMARY],
+        primaries: &[S; P],
         scale: &S,
     ) -> Result<S, String> {
         let mut inputs = rigid_row_inputs(
@@ -340,16 +347,14 @@ impl SurvivalMarginalSlopeFamily {
             "survival marginal-slope sigma canonical row program",
         )?;
         inputs.probit_scale = 1.0;
-        let observed_primaries = [
-            primaries[0],
-            primaries[1],
-            primaries[2],
-            primaries[3].mul(scale),
-        ];
-        rigid_row_nll::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry, _>(
-            &observed_primaries,
-            &inputs,
-        )
+        let observed_primaries: [S; P] = std::array::from_fn(|axis| {
+            if axis >= PRIMARY_SLOPE {
+                primaries[axis].mul(scale)
+            } else {
+                primaries[axis]
+            }
+        });
+        rigid_row_nll::<P, G, _>(&observed_primaries, &inputs)
     }
 
     fn row_sigma_primary_terms(
@@ -357,13 +362,50 @@ impl SurvivalMarginalSlopeFamily {
         row: usize,
         block_states: &[ParameterBlockState],
         second_sigma: bool,
-    ) -> Result<CompiledSigmaPrimaryTerms, String> {
+    ) -> Result<crate::marginal_slope_shared::DirectionalPrimaryTerms, String> {
+        let scale = self.sigma_scale_derivatives()?;
+        if self.slope_is_follow_up_varying() {
+            // The compiled lowering below is written for the four-primary frame.
+            // The follow-up frame differentiates the same row program in log σ
+            // through parameter jets.
+            let primaries = rigid_row_kernel_primaries::<
+                DYNAMIC_SLOPE_PRIMARIES,
+                DynamicSlopeGeometry,
+            >(self, block_states, row)?;
+            return if second_sigma {
+                crate::marginal_slope_shared::second_parameter_order2_terms(
+                    primaries,
+                    scale.s,
+                    scale.ds,
+                    scale.d2s,
+                    |variables, parameter| {
+                        self.row_neglog_canonical_scale_jet::<
+                            DYNAMIC_SLOPE_PRIMARIES,
+                            DynamicSlopeGeometry,
+                            _,
+                        >(row, block_states, variables, parameter)
+                    },
+                )
+            } else {
+                crate::marginal_slope_shared::first_parameter_order2_terms(
+                    primaries,
+                    scale.s,
+                    scale.ds,
+                    |variables, parameter| {
+                        self.row_neglog_canonical_scale_jet::<
+                            DYNAMIC_SLOPE_PRIMARIES,
+                            DynamicSlopeGeometry,
+                            _,
+                        >(row, block_states, variables, parameter)
+                    },
+                )
+            };
+        }
         let primaries = rigid_row_kernel_primaries::<STATIC_SLOPE_PRIMARIES, StaticSlopeGeometry>(
             self,
             block_states,
             row,
         )?;
-        let scale = self.sigma_scale_derivatives()?;
         let mut inputs = rigid_row_inputs(
             self,
             block_states,
@@ -371,7 +413,15 @@ impl SurvivalMarginalSlopeFamily {
             "survival marginal-slope sigma compiled row program",
         )?;
         inputs.probit_scale = 1.0;
-        compiled_sigma_primary_terms(primaries, scale, &inputs, second_sigma)
+        let terms = compiled_sigma_primary_terms(primaries, scale, &inputs, second_sigma)?;
+        Ok(crate::marginal_slope_shared::DirectionalPrimaryTerms {
+            objective: terms.objective,
+            grad: Array1::from_vec(terms.grad.to_vec()),
+            hess: Array2::from_shape_fn(
+                (STATIC_SLOPE_PRIMARIES, STATIC_SLOPE_PRIMARIES),
+                |(axis, other)| terms.hess[axis][other],
+            ),
+        })
     }
 
     pub(crate) fn sigma_exact_joint_psi_terms(
@@ -440,17 +490,13 @@ impl SurvivalMarginalSlopeFamily {
                     let w = row_weights[row];
                     if w != 1.0 {
                         terms.objective *= w;
-                        for axis in 0..4 {
-                            terms.grad[axis] *= w;
-                            for other in 0..4 {
-                                terms.hess[axis][other] *= w;
-                            }
-                        }
+                        terms.grad.mapv_inplace(|value| value * w);
+                        terms.hess.mapv_inplace(|value| value * w);
                     }
                     a.0 += terms.objective;
                     let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
-                    let grad = ndarray::ArrayView1::from(&terms.grad);
-                    let hess = ndarray::ArrayView2::from(&terms.hess);
+                    let grad = terms.grad.view();
+                    let hess = terms.hess.view();
                     self.accumulate_score_with_q_geometry(
                         row, &q_geom, &grad, &mut a.1, &mut a.2, &mut a.3,
                     )?;
@@ -543,17 +589,13 @@ impl SurvivalMarginalSlopeFamily {
                     let w = row_weights[row];
                     if w != 1.0 {
                         terms.objective *= w;
-                        for axis in 0..4 {
-                            terms.grad[axis] *= w;
-                            for other in 0..4 {
-                                terms.hess[axis][other] *= w;
-                            }
-                        }
+                        terms.grad.mapv_inplace(|value| value * w);
+                        terms.hess.mapv_inplace(|value| value * w);
                     }
                     a.0 += terms.objective;
                     let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
-                    let grad = ndarray::ArrayView1::from(&terms.grad);
-                    let hess = ndarray::ArrayView2::from(&terms.hess);
+                    let grad = terms.grad.view();
+                    let hess = terms.hess.view();
                     self.accumulate_score_with_q_geometry(
                         row, &q_geom, &grad, &mut a.1, &mut a.2, &mut a.3,
                     )?;
@@ -646,20 +688,25 @@ impl SurvivalMarginalSlopeFamily {
                     &slices,
                     d_beta_flat,
                 )?;
-                let primaries = rigid_row_kernel_primaries::<
-                    STATIC_SLOPE_PRIMARIES,
-                    StaticSlopeGeometry,
-                >(self, block_states, row)?;
-                let direction = std::array::from_fn(|axis| row_dir[axis]);
-                let terms = first_parameter_directional_order2_terms(
-                    primaries,
-                    &direction,
-                    scale.s,
-                    scale.ds,
-                    |variables, parameter| {
-                        self.row_neglog_canonical_scale_jet(row, block_states, variables, parameter)
-                    },
-                )?;
+                let terms = in_slope_frame!(self, P, Frame, {
+                    let primaries =
+                        rigid_row_kernel_primaries::<P, Frame>(self, block_states, row)?;
+                    let direction: [f64; P] = std::array::from_fn(|axis| row_dir[axis]);
+                    first_parameter_directional_order2_terms(
+                        primaries,
+                        &direction,
+                        scale.s,
+                        scale.ds,
+                        |variables, parameter| {
+                            self.row_neglog_canonical_scale_jet::<P, Frame, _>(
+                                row,
+                                block_states,
+                                variables,
+                                parameter,
+                            )
+                        },
+                    )
+                })?;
                 let mut grad = terms.grad;
                 let mut hess = terms.hess;
                 let q_geom = self.row_dynamic_q_geometry(row, block_states)?;

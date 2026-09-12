@@ -195,31 +195,16 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         &spec.slope_template,
     )?;
     if slope_follow_up.is_some() {
-        // The learned-frailty scale jet and the flex/time-wiggle surfaces all
-        // evaluate the row program through the four-primary frame. Each is a real
-        // combination to support, and each is a separate piece of chain rule;
-        // refusing by name is honest, whereas running them would silently
-        // differentiate a model that is not the one being fitted. A spatial term
-        // on the slope surface is supported: the ψ calculus lifts the covariate
-        // derivative onto the three channel designs from the stored margin
-        // (gam#2767). So is a FIXED Gaussian-shift frailty: its scale reaches the
-        // row program only as the probit-scale input, which the follow-up frame
-        // applies to all three slope features. Only a learned scale adds the
-        // log-σ hyperparameter, whose calculus runs in the four-primary frame.
-        if matches!(
-            spec.frailty,
-            FrailtySpec::GaussianShift {
-                scale: FrailtyScale::Learned { .. }
-            }
-        ) {
-            return Err(SurvivalMarginalSlopeError::InvalidInput {
-                reason: "a follow-up-varying slope is not yet supported together with a \
-                         learned Gaussian-shift frailty scale: the log-sigma hyperparameter \
-                         calculus is lowered through the time-constant primary frame"
-                    .to_string(),
-            }
-            .into());
-        }
+        // The flex/time-wiggle surfaces all evaluate the row program through the
+        // four-primary frame. Each is a real combination to support, and each is a
+        // separate piece of chain rule; refusing by name is honest, whereas running
+        // them would silently differentiate a model that is not the one being
+        // fitted. A spatial term on the slope surface is supported: the ψ calculus
+        // lifts the covariate derivative onto the three channel designs from the
+        // stored margin (gam#2767). So is a Gaussian-shift frailty, fixed or
+        // learned: its scale reaches the row program as the probit-scale input the
+        // follow-up frame applies to all three slope features, and the log-σ
+        // hyperparameter calculus differentiates that same frame.
         if spec.score_warp.is_some() || spec.link_dev.is_some() {
             return Err(SurvivalMarginalSlopeError::InvalidInput {
                 reason: "a follow-up-varying slope is not yet supported together with a \
