@@ -2599,6 +2599,98 @@ impl WorkingModelSurvival {
         Ok(b_dir)
     }
 
+    /// Second directional derivative `D²_β H[u, v]` of the unpenalized NLL
+    /// Hessian: the survival term of the outer LAML ρ-Hessian (#2912).
+    ///
+    /// On the linear Royston-Parmar row
+    /// `w·[exp(η1) − 1{has_entry}·exp(η0) − δ·(η1 + log s)]` the Hessian is
+    /// `exp(η1)·a1a1ᵀ − 1{has_entry}·exp(η0)·a0a0ᵀ + δ·ddᵀ/s²`, so
+    /// `D²H[u, v] = exp(η1)(a1ᵀu)(a1ᵀv)·a1a1ᵀ − 1{has_entry}·exp(η0)(a0ᵀu)(a0ᵀv)·a0a0ᵀ
+    /// + 6δ·(dᵀu)(dᵀv)·ddᵀ/s⁴`. The event term is absent on the floored clamp
+    /// branch, exactly as in [`Self::survival_hessian_derivative_correction`].
+    pub(crate) fn survival_hessian_second_derivative_correction(
+        &self,
+        beta: &Array1<f64>,
+        u: &Array1<f64>,
+        v: &Array1<f64>,
+    ) -> Result<Array2<f64>, EstimationError> {
+        let p = beta.len();
+        let n = self.nrows();
+
+        let eta_entry = self.entry_dot(beta) + &self.offset_eta_entry;
+        let eta_exit = self.exit_dot(beta) + &self.offset_eta_exit;
+        let deriv_raw = self.derivative_dot(beta) + &self.offset_derivative_exit;
+        let guard = self.derivative_guard();
+        let (_, _, derivative_band) = self.predictor_bands(beta);
+
+        let mut row_exit = vec![0.0_f64; p];
+        let mut row_entry = vec![0.0_f64; p];
+        let mut row_derivative = vec![0.0_f64; p];
+        let mut d2h = Array2::<f64>::zeros((p, p));
+
+        let dot = |row: &[f64], direction: &Array1<f64>| {
+            row.iter().zip(direction.iter()).map(|(a, b)| a * b).sum::<f64>()
+        };
+        let add_scaled_outer = |target: &mut Array2<f64>, row: &[f64], scale: f64| {
+            for r in 0..p {
+                let scaled = scale * row[r];
+                if scaled == 0.0 {
+                    continue;
+                }
+                for c in 0..p {
+                    target[[r, c]] += scaled * row[c];
+                }
+            }
+        };
+
+        for i in 0..n {
+            let w_i = self.sampleweight[i];
+            if w_i <= 0.0 {
+                continue;
+            }
+            self.fill_exit_row(i, &mut row_exit);
+            self.fill_entry_row(i, &mut row_entry);
+            self.fill_derivative_row(i, &mut row_derivative);
+
+            let exit_scale = w_i * eta_exit[i].exp() * dot(&row_exit, u) * dot(&row_exit, v);
+            add_scaled_outer(&mut d2h, &row_exit, exit_scale);
+            if !self.entry_at_origin[i] {
+                let entry_scale =
+                    w_i * eta_entry[i].exp() * dot(&row_entry, u) * dot(&row_entry, v);
+                add_scaled_outer(&mut d2h, &row_entry, -entry_scale);
+            }
+
+            let (s_i, s_slope) = self
+                .stabilized_structural_derivative(deriv_raw[i], derivative_band[i])
+                .unwrap_or((deriv_raw[i], 1.0));
+            if !s_i.is_finite() {
+                return Err(EstimationError::ParameterConstraintViolation(format!(
+                    "survival monotonicity violated in unified second-order contraction at row {i}: \
+                     d_eta/dt={s_i:.3e} <= tolerance={guard:.3e}",
+                )));
+            }
+            if self.event_target[i] > 0 && s_slope != 0.0 {
+                if s_i < self.derivative_floor(true, derivative_band[i]) {
+                    return Err(EstimationError::ParameterConstraintViolation(format!(
+                        "survival monotonicity violated in unified second-order contraction at row {i}: \
+                         d_eta/dt={s_i:.3e} <= tolerance={guard:.3e} (band {:.3e})",
+                        derivative_band[i]
+                    )));
+                }
+                let inv_s2 = 1.0 / (s_i * s_i);
+                let event_scale = 6.0
+                    * w_i
+                    * dot(&row_derivative, u)
+                    * dot(&row_derivative, v)
+                    * inv_s2
+                    * inv_s2;
+                add_scaled_outer(&mut d2h, &row_derivative, event_scale);
+            }
+        }
+
+        Ok(d2h)
+    }
+
     /// Per-observation gradients of the unpenalized survival NLL with respect
     /// to each additive offset channel, at the given β.
     ///
@@ -3159,6 +3251,26 @@ impl gam_solve::estimate::reml::reml_outer_engine::HessianDerivativeProvider
             Ok(correction) => Ok(Some(correction)),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// The outer-Hessian drift for the ρ pair `(k, l)`: `D_β H[u_kl]` plus
+    /// `D²_β H[−v_l, −v_k] = D²_β H[v_k, v_l]`, the same two terms the joint
+    /// custom-family providers assemble (#2912).
+    fn hessian_second_derivative_correction(
+        &self,
+        v_k: &Array1<f64>,
+        v_l: &Array1<f64>,
+        u_kl: &Array1<f64>,
+    ) -> Result<Option<Array2<f64>>, String> {
+        let mut correction = self
+            .model
+            .survival_hessian_derivative_correction(&self.beta, u_kl)
+            .map_err(|e| e.to_string())?;
+        correction += &self
+            .model
+            .survival_hessian_second_derivative_correction(&self.beta, v_k, v_l)
+            .map_err(|e| e.to_string())?;
+        Ok(Some(correction))
     }
 
     fn has_corrections(&self) -> bool {
@@ -4266,6 +4378,81 @@ mod tests {
                     "∂²(½ deviance)/∂β[{k}]∂β[{j}]: analytic={:.9e} fd={:.9e}",
                     hessian[[k, j]],
                     fd_row[k]
+                );
+            }
+        }
+    }
+
+    /// `D²_β H[u, v]` is the derivative of the first-order Hessian drift along
+    /// `v`: central differences of the analytic `D_β H[u]` on the delayed-entry
+    /// fixture, which carries entry, exit and event rows (#2912).
+    #[test]
+    fn survival_hessian_second_derivative_matches_central_difference_of_first_2912() {
+        let age_entry = array![0.5_f64, 0.0, 0.3, 0.9];
+        let age_exit = array![1.4_f64, 1.0, 2.0, 1.1];
+        let event_target = array![1u8, 1u8, 0u8, 1u8];
+        let event_competing = array![0u8, 0u8, 0u8, 0u8];
+        let sampleweight = array![1.0_f64, 2.5, 0.7, 1.3];
+        let rows = age_entry.len();
+        let mut x_entry = Array2::<f64>::zeros((rows, 2));
+        let mut x_exit = Array2::<f64>::zeros((rows, 2));
+        let mut x_derivative = Array2::<f64>::zeros((rows, 2));
+        for i in 0..rows {
+            x_entry[[i, 0]] = 1.0;
+            x_entry[[i, 1]] = age_entry[i].max(1e-8).ln();
+            x_exit[[i, 0]] = 1.0;
+            x_exit[[i, 1]] = age_exit[i].ln();
+            x_derivative[[i, 1]] = 1.0 / age_exit[i];
+        }
+        let o_entry = array![0.2_f64, 0.0, 0.1, 0.05];
+        let o_exit = array![0.4_f64, 0.5, 0.7, 0.3];
+        let o_deriv = array![0.3_f64, 0.8, 0.5, 0.6];
+        let model = survival_model_with_offsets(
+            survival_inputs(
+                &age_entry,
+                &age_exit,
+                &event_target,
+                &event_competing,
+                &sampleweight,
+                &x_entry,
+                &x_exit,
+                &x_derivative,
+            ),
+            Some(SurvivalBaselineOffsets {
+                eta_entry: o_entry.view(),
+                eta_exit: o_exit.view(),
+                derivative_exit: o_deriv.view(),
+            }),
+            PenaltyBlocks::new(Vec::new()),
+            SurvivalMonotonicityPenalty { tolerance: 1e-8 },
+            SurvivalSpec::Net,
+        )
+        .expect("model build");
+        let beta = array![-0.7_f64, 0.6];
+        let u = array![0.3_f64, -0.2];
+        let v = array![-0.15_f64, 0.25];
+        let analytic = model
+            .survival_hessian_second_derivative_correction(&beta, &u, &v)
+            .expect("second-order drift");
+        let h = 1e-5;
+        let plus = model
+            .survival_hessian_derivative_correction(&(&beta + &(&v * h)), &u)
+            .expect("first-order drift at beta + h v");
+        let minus = model
+            .survival_hessian_derivative_correction(&(&beta - &(&v * h)), &u)
+            .expect("first-order drift at beta - h v");
+        let fd = (plus - minus) / (2.0 * h);
+        assert!(
+            analytic.iter().any(|value| value.abs() > 1e-3),
+            "the fixture must exercise a non-zero second-order drift: {analytic:?}"
+        );
+        for r in 0..beta.len() {
+            for c in 0..beta.len() {
+                assert!(
+                    (analytic[[r, c]] - fd[[r, c]]).abs() <= 1e-6 * (1.0 + fd[[r, c]].abs()),
+                    "D²H[u, v][{r},{c}]: analytic={:.9e} fd={:.9e}",
+                    analytic[[r, c]],
+                    fd[[r, c]]
                 );
             }
         }
