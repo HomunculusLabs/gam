@@ -4,10 +4,9 @@
 use crate::cli_args::FitEventsArgs;
 use gam::families::custom_family::BlockwiseFitOptions;
 use gam::event_history::{
-    CovariateSegment, Event, EventHistoryCohort, EventHistorySpec, ForecastRequest, FutureSegment,
-    MarkKind, PopulationForecastRequest, ReferenceStrata, SubjectHistory,
-    covariate_spec_from_formula, design_rows, fit_event_history, forecast, latent_state,
-    pit_uniform_distance, population_forecast, predictive_pit,
+    CovariateSegment, Event, EventHistoryCohort, ForecastRequest, FutureSegment, MarkKind,
+    PopulationForecastRequest, ReferenceStrata, SubjectHistory, fit_event_history_formulas,
+    forecast, latent_state, pit_uniform_distance, population_forecast, predictive_pit,
 };
 use ndarray::Array2;
 use serde_json::{Map, Value, json};
@@ -277,18 +276,14 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
             subject: subject_stratum.clone(),
         })
     };
-    let rows = design_rows(&cohort, EventHistorySpec::new(Vec::new()).quadrature_order)
-        .map_err(|e| e.to_string())?;
-    let mut spec = EventHistorySpec::new(
-        formulas
-            .iter()
-            .map(|formula| covariate_spec_from_formula(formula, rows.view(), &cohort))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?,
-    );
-    spec.options = BlockwiseFitOptions::default();
-    spec.reference = reference;
-    let fit = fit_event_history(&mut cohort, &spec).map_err(|e| e.to_string())?;
+    let has_reference = reference.is_some();
+    let fit = fit_event_history_formulas(
+        &mut cohort,
+        &formulas,
+        BlockwiseFitOptions::default(),
+        reference,
+    )
+    .map_err(|e| e.to_string())?;
 
     let mut summary = Map::new();
     summary.insert("marks".to_string(), json!(mark_names));
@@ -307,7 +302,7 @@ pub(crate) fn run_fit_events(args: FitEventsArgs) -> Result<(), String> {
         },
     );
     summary.insert("rank".to_string(), json!(fit.rank()));
-    if spec.reference.is_some() {
+    if has_reference {
         // Reference-grid discrepancies evaluated at fixed coefficients.
         summary.insert(
             "reference_refinements".to_string(),

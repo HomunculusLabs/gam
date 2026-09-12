@@ -1447,25 +1447,18 @@ pub fn mark_block_spec(name: &str, design: &TermCollectionDesign) -> ParameterBl
     }
 }
 
-/// Fit an event-history model from a formula right-hand side shared by every
-/// mark, such as `x + s(time)`.
-pub fn fit_event_history_formula(
-    cohort: &mut EventHistoryCohort,
-    formula: &str,
-    options: BlockwiseFitOptions,
-) -> Result<EventHistoryFit, EventHistoryError> {
-    fit_event_history_formulas(cohort, std::slice::from_ref(&formula), options)
-}
-
-/// Fit an event-history model from formula right-hand sides: one formula
-/// that every mark uses (with its own coefficients), or one formula per mark
-/// in the cohort's mark order, so that a mark's log-intensity carries only
-/// the terms that belong to it — a disease its own score, not every score
-/// of every other disease.
+/// Fit an event-history model from formula right-hand sides such as
+/// `x + s(time)`: one formula that every mark uses (with its own
+/// coefficients), or one formula per mark in the cohort's mark order, so that
+/// a mark's log-intensity carries only the terms that belong to it — a disease
+/// its own score, not every score of every other disease. `reference` is the
+/// population whose incidence the baselines follow; `None` keeps the
+/// stationary prior's centring.
 pub fn fit_event_history_formulas<F: AsRef<str>>(
     cohort: &mut EventHistoryCohort,
     formulas: &[F],
     options: BlockwiseFitOptions,
+    reference: Option<ReferenceStrata>,
 ) -> Result<EventHistoryFit, EventHistoryError> {
     cohort.validate()?;
     let marks = cohort.marks();
@@ -1496,6 +1489,7 @@ pub fn fit_event_history_formulas<F: AsRef<str>>(
         covariates.push(terms);
     }
     spec.covariates = covariates;
+    spec.reference = reference;
     fit_event_history(cohort, &spec)
 }
 

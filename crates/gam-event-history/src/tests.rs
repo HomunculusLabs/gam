@@ -11,7 +11,7 @@ use super::covariance::{
 };
 use super::family::{
     Directional, EventHistoryFamily, EventHistoryFit, EventHistorySpec, RankStart,
-    fit_event_history, fit_event_history_formula, fit_event_history_formulas,
+    fit_event_history, fit_event_history_formulas,
 };
 use super::forecast::{
     ForecastRequest, FutureSegment, HistoryForecastRequest, PopulationForecastRequest, SpellPit,
@@ -2619,8 +2619,9 @@ fn an_observed_score_enters_as_a_penalised_slope_surface() {
     let mut cohort = simulate_score_cohort(300, 6.0, -0.5, &truth, 1.0, 19);
     let events: usize = cohort.subjects.iter().map(|s| s.events.len()).sum();
     let started = std::time::Instant::now();
-    let fit = fit_event_history_formula(&mut cohort, formula, BlockwiseFitOptions::default())
-        .expect("fit with a declining score effect");
+    let fit =
+        fit_event_history_formulas(&mut cohort, &[formula], BlockwiseFitOptions::default(), None)
+            .expect("fit with a declining score effect");
     let slope = fitted_score_slope(&fit, &times);
     emit(&format!(
         "[score-slope] declining arm: {events} events, {:.1}s, outer_iterations={} log_lambdas={:?}",
@@ -2660,8 +2661,9 @@ fn an_observed_score_enters_as_a_penalised_slope_surface() {
     let mut null = simulate_score_cohort(300, 6.0, -0.5, &|_| 0.0, 0.0, 23);
     let null_events: usize = null.subjects.iter().map(|s| s.events.len()).sum();
     let started = std::time::Instant::now();
-    let null_fit = fit_event_history_formula(&mut null, formula, BlockwiseFitOptions::default())
-        .expect("fit with an uninformative score");
+    let null_fit =
+        fit_event_history_formulas(&mut null, &[formula], BlockwiseFitOptions::default(), None)
+            .expect("fit with an uninformative score");
     let null_slope = fitted_score_slope(&null_fit, &times);
     emit(&format!(
         "[score-slope] null arm: {null_events} events, {:.1}s, outer_iterations={} log_lambdas={:?}",
@@ -3576,13 +3578,14 @@ fn per_mark_formulas_give_each_mark_its_own_terms() {
         &mut cohort,
         &["x", "1", "x"],
         BlockwiseFitOptions::default(),
+        None,
     )
     .expect("fit with one formula per mark");
     assert_eq!(fit.mark_coefficients(0).len(), 2, "intercept and x");
     assert_eq!(fit.mark_coefficients(1).len(), 1, "intercept alone");
     assert_eq!(fit.mark_coefficients(2).len(), 2);
     let refused =
-        fit_event_history_formulas(&mut cohort, &["x", "1"], BlockwiseFitOptions::default())
+        fit_event_history_formulas(&mut cohort, &["x", "1"], BlockwiseFitOptions::default(), None)
             .err()
             .expect("two formulas for three marks must be refused");
     assert!(refused.to_string().contains("one per mark"), "{refused}");

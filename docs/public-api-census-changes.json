@@ -1757,5 +1757,13 @@
     },
     "reason": "SPEC rule 20 (#2902, table row 24): the literal [ln 1e-8, ln 100] search box of the measure-jet ln τ ψ dial is deleted along with the dial. The energy uses the exact weighted affine projection, so τ moves nothing and every ln τ jet was an exact zero.",
     "evidence": "At the base, git grep -n MEASURE_JET_PSI_LN_TAU_BOUNDS finds the declaration and its one use in measure_jet_psi_bound_values, both in crates/gam-terms/src/smooth/measure_jet_psi.rs. The MeasureJetBasisSpec::tau0 docs state that the energy is independent of τ, and build_measure_jet_basis_psi_derivatives filled every ln τ first, second and cross slot with zeros. The per-level ψ layout becomes [ln ℓ?, α], and seed, bounds, write-back and the producer change together. The census difference was applied by hand and public_api_census.py was not run locally (user directive: no local runs)."
+  },
+  {
+    "base": "310c4d816fbdcaafed15357c580ea2c635968423",
+    "removed": {
+      "crates/gam-event-history/src/family.rs::fit_event_history_formula": 1
+    },
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). fit_event_history_formula was a one-formula wrapper that only tests called. gam-cli and gam-pyffi now fit through fit_event_history_formulas, which gains their reference-strata argument (SPEC rule 18).",
+    "evidence": "At db0e784da, git grep -w finds fit_event_history_formula only at its definition, the crate-root re-export, gam-event-history tests.rs lines 14, 2622 and 2663, and tests/event_history_scaling.rs lines 17 and 82, all rewritten in this commit. The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) lists no product reference."
   }
 ]

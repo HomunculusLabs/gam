@@ -34,7 +34,7 @@ pub use covariance::{
 pub use family::{
     EventHistoryFamily, EventHistoryFit, EventHistorySpec, JointEvaluation, QuadratureCertificate,
     RankStart, RankStep, ReferenceTables, RefinementCheck, RiskSetCentring, fit_event_history,
-    fit_event_history_formula, fit_event_history_formulas, latent_block_spec, mark_block_spec,
+    fit_event_history_formulas, latent_block_spec, mark_block_spec,
 };
 pub use forecast::{
     Forecast, ForecastRequest, FutureSegment, HistoryForecastRequest, PopulationForecastRequest,

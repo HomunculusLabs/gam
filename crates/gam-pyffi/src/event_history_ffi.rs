@@ -6,12 +6,10 @@
 use crate::ffi::ffi_errors::{detach_py_result, py_value_error};
 use gam::families::custom_family::BlockwiseFitOptions;
 use gam::event_history::{
-    CovariateSegment, Event, EventHistoryCohort, EventHistoryFit, EventHistorySpec,
-    ForecastRequest, FutureSegment, HistoryForecastRequest, MarkKind, PopulationForecastRequest,
-    ReferenceStrata, SubjectHistory, covariate_spec_from_formula, design_rows,
-    fit_event_history as fit_event_history_model,
-    forecast, forecast_history, latent_state, pit_uniform_distance, population_forecast,
-    predictive_pit,
+    CovariateSegment, Event, EventHistoryCohort, EventHistoryFit, ForecastRequest, FutureSegment,
+    HistoryForecastRequest, MarkKind, PopulationForecastRequest, ReferenceStrata, SubjectHistory,
+    fit_event_history_formulas, forecast, forecast_history, latent_state, pit_uniform_distance,
+    population_forecast, predictive_pit,
 };
 use ndarray::{Array2, Array3};
 use numpy::{PyArray1, PyArray2, PyArray3, PyReadonlyArray2};
@@ -565,17 +563,13 @@ fn fit_event_history(
         })
     };
     let (fit, cohort) = detach_py_result(py, "event-history fit", move || {
-        cohort.validate().map_err(|e| e.to_string())?;
-        let mut spec = EventHistorySpec::new(Vec::new());
-        let rows = design_rows(&cohort, spec.quadrature_order).map_err(|e| e.to_string())?;
-        spec.covariates = formulas
-            .iter()
-            .map(|formula| covariate_spec_from_formula(formula, rows.view(), &cohort))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        spec.options = BlockwiseFitOptions::default();
-        spec.reference = reference;
-        let fit = fit_event_history_model(&mut cohort, &spec).map_err(|e| e.to_string())?;
+        let fit = fit_event_history_formulas(
+            &mut cohort,
+            &formulas,
+            BlockwiseFitOptions::default(),
+            reference,
+        )
+        .map_err(|e| e.to_string())?;
         Ok((fit, cohort))
     })?;
     let strata = if fit.centring.is_none() {

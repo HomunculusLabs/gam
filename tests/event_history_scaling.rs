@@ -14,7 +14,7 @@
 use gam::families::custom_family::BlockwiseFitOptions;
 use gam::event_history::{
     CovariateSegment, Event, EventHistoryCohort, MarkKind, SubjectHistory,
-    fit_event_history_formula,
+    fit_event_history_formulas,
 };
 use ndarray::Array2;
 use std::time::Instant;
@@ -79,8 +79,9 @@ fn the_fit_reports_its_cost_against_the_mark_count() {
     for &marks in &[2usize, 4, 8, 16] {
         let mut data = cohort(subjects, marks, follow_up, 20_260_909);
         let started = Instant::now();
-        let fit = fit_event_history_formula(&mut data, "x", BlockwiseFitOptions::default())
-            .expect("the scaling fixture must fit");
+        let fit =
+            fit_event_history_formulas(&mut data, &["x"], BlockwiseFitOptions::default(), None)
+                .expect("the scaling fixture must fit");
         let seconds = started.elapsed().as_secs_f64();
         // Every fit object comes from a converged optimisation, so reaching
         // one at all is the assertion; the rank is the evidence's verdict and
