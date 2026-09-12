@@ -676,7 +676,10 @@ def _fit_single_constrained(
     init_log = None
     if init_lambdas is not None:
         import math as _math
-        init_log = _math.log(max(float(init_lambdas), 1e-300))
+        init_value = float(init_lambdas)
+        if not _math.isfinite(init_value) or init_value <= 0.0:
+            raise ValueError("init_lambdas must be finite and strictly positive")
+        init_log = _math.log(init_value)
     out = gaussian_reml_fit_with_constraints(
         design.to(torch.float64),
         response.to(torch.float64),
@@ -729,14 +732,16 @@ def _fit_independent(
     penalties: list[torch.Tensor] = []
     coefficient_transforms: list[torch.Tensor | None] = []
     if init_lambdas is not None:
-        init_lam_arr = init_lambdas.detach().reshape(-1)
+        init_lam_arr = init_lambdas.detach().to(torch.float64).reshape(-1)
         if init_lam_arr.numel() != F:
             raise ValueError(
                 f"init_lambdas must have length F={F}; got {init_lam_arr.numel()}"
             )
-        init_log_lambdas = torch.log(
-            init_lambdas.to(torch.float64).reshape(-1).clamp_min(1.0e-300)
-        )
+        if not bool(torch.isfinite(init_lam_arr).all()) or not bool(
+            (init_lam_arr > 0.0).all()
+        ):
+            raise ValueError("init_lambdas must be finite and strictly positive")
+        init_log_lambdas = torch.log(init_lam_arr)
     else:
         init_log_lambdas = None
 

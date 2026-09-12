@@ -946,31 +946,24 @@ def gaussian_reml_fit_additive(
     # additive estimator so it keeps one λ per smooth instead of collapsing
     # to a single block-diagonal λ.
     response_is_2d = response.dim() == 2 and response.shape[1] > 1
+    init_log = None
+    if init_lambda is not None:
+        init_value = float(init_lambda)
+        if not np.isfinite(init_value) or init_value <= 0.0:
+            raise ValueError("init_lambda must be finite and strictly positive")
+        init_log = torch.full(
+            (len(designs),),
+            float(np.log(init_value)),
+            dtype=torch.float64,
+            device=modulated[0].device,
+        )
     if not response_is_2d:
-        if init_lambda is None:
-            init_log = None
-        else:
-            init_log = torch.full(
-                (len(designs),),
-                float(np.log(max(float(init_lambda), 1e-300))),
-                dtype=torch.float64,
-                device=modulated[0].device,
-            )
         return gaussian_reml_fit_blocks(
             modulated,
             list(penalties),
             response,
             weights=weights,
             init_log_lambdas=init_log,
-        )
-
-    init_log = None
-    if init_lambda is not None:
-        init_log = torch.full(
-            (len(designs),),
-            float(np.log(max(float(init_lambda), 1e-300))),
-            dtype=torch.float64,
-            device=modulated[0].device,
         )
     return _gaussian_reml_fit_blocks_orthogonal(
         modulated,
