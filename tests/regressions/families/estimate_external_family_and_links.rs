@@ -70,6 +70,51 @@ fn heuristic_rho_seed_produces_a_finite_optimized_reml_fit() {
     );
 }
 
+/// #2158: the binomial `loglog` and `cauchit` links are ordinary state-less
+/// probability links (full 5-jet Fisher weights via `fisher_weight_jet5`), so
+/// the external-design route — the very function whose allow-list was missing
+/// them — must fit them exactly like probit/cloglog. This exercises
+/// `resolve_external_family` directly (unlike the formula-level regression),
+/// pinning the fix at the machinery it lives in. Each must fit and report the
+/// requested standard link back in `likelihood_family` (a silent fallback to
+/// logit would report the wrong link here).
+#[test]
+fn resolve_external_family_fits_binomial_loglog_and_cauchit_2158() {
+    for link in [StandardLink::LogLog, StandardLink::Cauchit] {
+        let (x, y, w, offset, s) = tiny_problem();
+        let opts = base_opts();
+        let family = LikelihoodSpec::new(ResponseFamily::Binomial, InverseLink::Standard(link));
+        let fit = fit_gamwith_heuristic_lambdas(
+            x.view(),
+            y.view(),
+            w.view(),
+            offset.view(),
+            &s,
+            None,
+            family.clone(),
+            &opts,
+        )
+        .unwrap_or_else(|e| {
+            panic!("binomial {link:?} must fit on the external route (#2158): {e}")
+        });
+
+        assert!(
+            fit.deviance.is_finite(),
+            "binomial {link:?}: deviance must be finite, got {}",
+            fit.deviance
+        );
+        assert!(
+            matches!(
+                fit.likelihood_family.as_ref().map(|f| &f.link),
+                Some(InverseLink::Standard(l)) if *l == link
+            ),
+            "binomial {link:?}: fit must report the requested standard link in likelihood_family, \
+             got {:?} — a silent fallback would be caught here",
+            fit.likelihood_family.as_ref().map(|f| &f.link)
+        );
+    }
+}
+
 #[test]
 fn firth_accepted_for_binomial_loglog_and_cauchit_2158() {
     let (x, y, w, offset, penalties) = tiny_problem();
