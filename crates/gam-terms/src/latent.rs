@@ -63,6 +63,8 @@
 //! REML-selectable `μ`, fixing the gauge without an auxiliary signal `u`.
 
 use crate::basis::{BasisError, RadialScalarKind};
+use faer::Side;
+use gam_linalg::faer_ndarray::FaerEigh;
 use gam_problem::LatentRetractionRegistry;
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -75,15 +77,15 @@ fn next_latent_coord_id() -> u64 {
 
 /// Choice of auxiliary-prior conditional mean estimator `ĥ(u)`.
 ///
-/// `Ridge` is the cheap default that closes form (one `K_u × K_u` solve);
-/// `Linear` is equivalent to `Ridge` with zero ridge and is intended for
+/// `Ridge` is the cheap default that closes form (one `K_u × K_u` eigensolve);
+/// `Linear` is the same projection through a Cholesky solve and is intended for
 /// auxiliaries `u` that are already low-dimensional and well-conditioned.
 #[derive(Debug, Clone, Copy)]
 pub enum AuxPriorFamily {
-    /// Ridge regression `t ≈ U · A` with a small diagonal regularizer.
-    /// The default ridge strength is `1e-6 · trace(UᵀU)/p`, which is
-    /// numerically benign and never under-constrains the fit when
-    /// `n_obs > p`.
+    /// Minimum-norm least squares `t ≈ U · A`, `A = (UᵀU)⁺ Uᵀt`: the projection
+    /// of `t` onto the column space of `U`, which the pseudo-inverse determines
+    /// uniquely even when `U` is rank deficient. Eigendirections of `UᵀU` inside
+    /// the eigensolver band `p·ε·λ_max` resolve no column and are dropped.
     Ridge,
     /// Plain linear projection (no ridge). Errors out at construction if
     /// `UᵀU` is singular.
@@ -1448,16 +1450,6 @@ pub fn aux_prior_targets(
             }
         }
     }
-    let ridge_eps = match family {
-        AuxPriorFamily::Ridge => {
-            let trace: f64 = (0..p).map(|i| gram[[i, i]]).sum();
-            (1e-6 * trace / p as f64).max(1e-12)
-        }
-        AuxPriorFamily::Linear => 0.0,
-    };
-    for i in 0..p {
-        gram[[i, i]] += ridge_eps;
-    }
     // rhs = UᵀT  (p × d)
     let mut rhs = Array2::<f64>::zeros((p, d));
     for n in 0..n_obs {
@@ -1467,7 +1459,10 @@ pub fn aux_prior_targets(
             }
         }
     }
-    let coeffs = solve_spd(gram.view(), rhs.view())?;
+    let coeffs = match family {
+        AuxPriorFamily::Ridge => minimum_norm_coefficients(&gram, &rhs)?,
+        AuxPriorFamily::Linear => solve_spd(gram.view(), rhs.view())?,
+    };
     // targets = U · coeffs  (n_obs × d)
     let mut targets = Array2::<f64>::zeros((n_obs, d));
     for n in 0..n_obs {
@@ -1480,6 +1475,28 @@ pub fn aux_prior_targets(
         }
     }
     Ok(targets)
+}
+
+/// Minimum-norm least-squares coefficients `(UᵀU)⁺ UᵀT` from the Gram `UᵀU` and
+/// `UᵀT`, through the Gram's eigendecomposition. An eigenvalue at or below the
+/// eigensolver band `p·ε·λ_max` is indistinguishable from zero, so its direction
+/// contributes nothing to the pseudo-inverse.
+fn minimum_norm_coefficients(
+    gram: &Array2<f64>,
+    rhs: &Array2<f64>,
+) -> Result<Array2<f64>, String> {
+    let p = gram.nrows();
+    let (evals, evecs) = gram
+        .eigh(Side::Lower)
+        .map_err(|err| format!("aux_prior_targets: Gram eigensolve failed: {err}"))?;
+    let lambda_max = evals.iter().fold(0.0_f64, |acc, &value| acc.max(value.abs()));
+    let band = p as f64 * f64::EPSILON * lambda_max;
+    let mut rotated = evecs.t().dot(rhs);
+    for (k, &lambda) in evals.iter().enumerate() {
+        let inverse = if lambda > band { 1.0 / lambda } else { 0.0 };
+        rotated.row_mut(k).mapv_inplace(|value| value * inverse);
+    }
+    Ok(evecs.dot(&rotated))
 }
 
 /// Lightweight Cholesky-based SPD solve. Keeps this module dependency-free
