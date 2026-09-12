@@ -1507,6 +1507,18 @@ pub trait MarginalSlopePsiFamily: Send + Sync {
         total: usize,
     ) -> Result<Option<Vec<gam_problem::DriftDerivResult>>, String>;
 
+    /// [`gam_problem::ExactNewtonJointPsiWorkspace::hessian_all_beta_axes_contractions`]
+    /// over the non-σ derivative axes. Default `None` keeps the family on the
+    /// materializing route. The generic workspace calls this only when no axis is
+    /// σ-auxiliary.
+    fn psi_hessian_all_beta_axes_contractions(
+        &self,
+        _kernels: &dyn Fn() -> Vec<Array2<f64>>,
+        _mixed_weights: &[Array2<f64>],
+    ) -> Result<Option<Vec<(Array2<f64>, Array1<f64>)>>, String> {
+        Ok(None)
+    }
+
     /// Hessian directional derivative for the σ-auxiliary parameter, returned
     /// as a dense matrix (the generic wraps it into
     /// [`DriftDerivResult::Dense`](gam_problem::DriftDerivResult::Dense)).
@@ -1614,6 +1626,19 @@ impl<F: MarginalSlopePsiFamily> gam_problem::ExactNewtonJointPsiWorkspace
     ) -> Result<Option<Vec<gam_problem::DriftDerivResult>>, String> {
         self.family
             .hessian_directional_derivatives_all_beta_axes(psi_index, total)
+    }
+
+    fn hessian_all_beta_axes_contractions(
+        &self,
+        kernels: &dyn Fn() -> Vec<Array2<f64>>,
+        mixed_weights: &[Array2<f64>],
+    ) -> Result<Option<Vec<(Array2<f64>, Array1<f64>)>>, String> {
+        // A σ-auxiliary axis has no directional row kernel in the family's pass.
+        if (0..mixed_weights.len()).any(|psi_index| self.family.is_sigma_aux(psi_index)) {
+            return Ok(None);
+        }
+        self.family
+            .psi_hessian_all_beta_axes_contractions(kernels, mixed_weights)
     }
 
     fn hessian_directional_derivative(

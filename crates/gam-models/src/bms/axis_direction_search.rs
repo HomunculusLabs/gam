@@ -2661,6 +2661,238 @@ impl BernoulliMarginalSlopeFamily {
             .map(Some)
     }
 
+    /// [`Self::rigid_psi_hessian_all_beta_axes`] for every ψ axis at once, contracted on
+    /// the two information slots instead of materialized. For ψ axis `i`, with `T_i[a]`
+    /// the matrix the sweep builds, `kernel_contractions[[a, b]] = ⟨T_i[a], K_b⟩` and
+    /// `mixed_contractions[a] = ⟨T_i[a], W_i⟩` for symmetric `K_b` and `W_i`.
+    ///
+    /// A row adds `w·(T4·u·x⊗x⊗x + T3·(xu⊗x⊗x + x⊗xu⊗x + x⊗x⊗xu))`, and the tensor entry
+    /// of an index triple reads its sorted primaries. Splitting `x` by primary,
+    /// contracting the last two slots with a symmetric `M` gives
+    /// `x_a·(u·Σ T4[pa,pc,pd;β]·s[pc,pd] + 2·Σ_q T3[pa,β,q]·r[q]) + xu_a·Σ T3[β,pc,pd]·s[pc,pd]`,
+    /// with `s[pc,pd] = x_pcᵀ M x_pd`, `r[q] = xuᵀ M x_q`, and `β` the primary the ψ
+    /// loading enters. The kernel products `K_b·x_q` are shared by every ψ axis, so a
+    /// row costs `O(p³)` once and `O(p²)` per ψ axis, where the sweep pays `O(p³)` per
+    /// ψ axis (gam#979).
+    pub(super) fn rigid_psi_hessian_all_beta_axes_contractions(
+        &self,
+        states: &[ParameterBlockState],
+        axes: &[PsiAxisSpec],
+        cache: &BernoulliMarginalSlopeExactEvalCache,
+        options: &BlockwiseFitOptions,
+        kernels: &[Array2<f64>],
+        mixed_weights: &[Array2<f64>],
+    ) -> Result<Vec<(Array2<f64>, Array1<f64>)>, String> {
+        let p = cache.slices.total;
+        let pm = cache.slices.marginal.len();
+        let n = self.y.len();
+        let k = axes.len();
+        if kernels.len() != p || kernels.iter().any(|kernel| kernel.dim() != (p, p)) {
+            return Err(format!(
+                "rigid psi axis contractions need {p} kernels of shape ({p}, {p}), got {}",
+                kernels.len()
+            ));
+        }
+        if mixed_weights.len() != k || mixed_weights.iter().any(|weight| weight.dim() != (p, p)) {
+            return Err(format!(
+                "rigid psi axis contractions need {k} mixed weights of shape ({p}, {p}), got {}",
+                mixed_weights.len()
+            ));
+        }
+        let mut weights = vec![0.0; n];
+        for row in cache.outer_weighted_rows_cached(options, n).iter() {
+            weights[row.index] += row.weight;
+        }
+        if n > 0 {
+            // Publish the lazily built row tensor tables before the fold, so no
+            // rayon worker below triggers their full-n parallel build.
+            self.rigid_third_full_cached(states, cache, 0)?;
+            self.rigid_fourth_full_cached(states, cache, 0)?;
+        }
+        let kernels: Vec<ndarray::CowArray<'_, f64, ndarray::Ix2>> =
+            kernels.iter().map(|kernel| kernel.as_standard_layout()).collect();
+        let mixed_weights: Vec<ndarray::CowArray<'_, f64, ndarray::Ix2>> = mixed_weights
+            .iter()
+            .map(|weight| weight.as_standard_layout())
+            .collect();
+        let dot = |left: &[f64], right: &[f64]| -> f64 {
+            left.iter().zip(right).map(|(&l, &r)| l * r).sum()
+        };
+        let stride = p * p + p;
+        let totals = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+            n,
+            |range| -> Result<Vec<f64>, String> {
+                let mut acc = vec![0.0; k * stride];
+                let xm = self
+                    .marginal_design
+                    .try_row_chunk(range.clone())
+                    .map_err(|e| e.to_string())?;
+                let xg = self
+                    .slope_design
+                    .try_row_chunk(range.clone())
+                    .map_err(|e| e.to_string())?;
+                let xpsi = axes
+                    .iter()
+                    .map(|axis| axis.psi_map.row_chunk(range.clone()).map_err(|e| e.to_string()))
+                    .collect::<Result<Vec<_>, String>>()?;
+                let mut x = vec![0.0; p];
+                // `kernel_x[2·b·p + q·p + c] = (K_b·x_q)[c]`.
+                let mut kernel_x = vec![0.0; 2 * p * p];
+                // `quadratic[j·p + b]` holds `s[0,0]`, `s[0,1]`, `s[1,1]` against `K_b`.
+                let mut quadratic = vec![0.0; 3 * p];
+                let mut weight_x = vec![0.0; 2 * p];
+                let mut along_x = vec![0.0; 2 * p];
+                let mut along_xu = vec![0.0; p];
+                for row in range.clone() {
+                    let weight = weights[row];
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let local_row = row - range.start;
+                    for (a, slot) in x.iter_mut().enumerate() {
+                        *slot = if a < pm {
+                            xm[[local_row, a]]
+                        } else {
+                            xg[[local_row, a - pm]]
+                        };
+                    }
+                    let t3 = self.rigid_third_full_cached(states, cache, row)?;
+                    let t4 = self.rigid_fourth_full_cached(states, cache, row)?;
+                    let k3 = |i: usize, j: usize, l: usize| {
+                        let mut sorted = [i, j, l];
+                        sorted.sort_unstable();
+                        t3[sorted[0]][sorted[1]][sorted[2]]
+                    };
+                    let k4 = |i: usize, j: usize, l: usize, psi_primary: usize| {
+                        let mut sorted = [i, j, l];
+                        sorted.sort_unstable();
+                        t4[sorted[0]][sorted[1]][sorted[2]][psi_primary]
+                    };
+                    for (b, kernel) in kernels.iter().enumerate() {
+                        let kernel = kernel.as_slice().expect("standard-layout kernel");
+                        let (kx0, kx1) = kernel_x[2 * b * p..2 * (b + 1) * p].split_at_mut(p);
+                        for c in 0..p {
+                            let kernel_row = &kernel[c * p..(c + 1) * p];
+                            kx0[c] = dot(&kernel_row[..pm], &x[..pm]);
+                            kx1[c] = dot(&kernel_row[pm..], &x[pm..]);
+                        }
+                        quadratic[b] = dot(&x[..pm], &kx0[..pm]);
+                        quadratic[p + b] = dot(&x[..pm], &kx1[..pm]);
+                        quadratic[2 * p + b] = dot(&x[pm..], &kx1[pm..]);
+                    }
+                    for (i, axis) in axes.iter().enumerate() {
+                        let psi_primary = axis.idx_primary;
+                        let offset = if psi_primary == 0 { 0 } else { pm };
+                        let psi_row = xpsi[i].row(local_row);
+                        let u = psi_row.dot(&states[axis.block_idx].beta);
+                        let psi_row = psi_row.as_standard_layout();
+                        let loadings = psi_row.as_slice().expect("standard-layout psi row");
+                        let width = loadings.len();
+                        let base = i * stride;
+                        let (kernel_acc, mixed_acc) = acc[base..base + stride].split_at_mut(p * p);
+                        // `C[a, b] += w·(x_a·along_x[pa][b] + xu_a·along_xu[b])`.
+                        for b in 0..p {
+                            let start = 2 * b * p;
+                            let r0 = dot(loadings, &kernel_x[start + offset..start + offset + width]);
+                            let r1 = dot(
+                                loadings,
+                                &kernel_x[start + p + offset..start + p + offset + width],
+                            );
+                            let (s00, s01, s11) =
+                                (quadratic[b], quadratic[p + b], quadratic[2 * p + b]);
+                            for pa in 0..2 {
+                                along_x[pa * p + b] = u
+                                    * (k4(pa, 0, 0, psi_primary) * s00
+                                        + 2.0 * k4(pa, 0, 1, psi_primary) * s01
+                                        + k4(pa, 1, 1, psi_primary) * s11)
+                                    + 2.0
+                                        * (k3(pa, psi_primary, 0) * r0
+                                            + k3(pa, psi_primary, 1) * r1);
+                            }
+                            along_xu[b] = k3(psi_primary, 0, 0) * s00
+                                + 2.0 * k3(psi_primary, 0, 1) * s01
+                                + k3(psi_primary, 1, 1) * s11;
+                        }
+                        for a in 0..p {
+                            let scale = weight * x[a];
+                            if scale == 0.0 {
+                                continue;
+                            }
+                            let pa = usize::from(a >= pm);
+                            for (dst, &value) in kernel_acc[a * p..(a + 1) * p]
+                                .iter_mut()
+                                .zip(&along_x[pa * p..(pa + 1) * p])
+                            {
+                                *dst += scale * value;
+                            }
+                        }
+                        for (local, &loading) in loadings.iter().enumerate() {
+                            let scale = weight * loading;
+                            if scale == 0.0 {
+                                continue;
+                            }
+                            let a = offset + local;
+                            for (dst, &value) in
+                                kernel_acc[a * p..(a + 1) * p].iter_mut().zip(&along_xu)
+                            {
+                                *dst += scale * value;
+                            }
+                        }
+                        // The same contraction against `W_i`.
+                        let weight_matrix = mixed_weights[i]
+                            .as_slice()
+                            .expect("standard-layout mixed weight");
+                        for c in 0..p {
+                            let weight_row = &weight_matrix[c * p..(c + 1) * p];
+                            weight_x[c] = dot(&weight_row[..pm], &x[..pm]);
+                            weight_x[p + c] = dot(&weight_row[pm..], &x[pm..]);
+                        }
+                        let s00 = dot(&x[..pm], &weight_x[..pm]);
+                        let s01 = dot(&x[..pm], &weight_x[p..p + pm]);
+                        let s11 = dot(&x[pm..], &weight_x[p + pm..]);
+                        let r0 = dot(loadings, &weight_x[offset..offset + width]);
+                        let r1 = dot(loadings, &weight_x[p + offset..p + offset + width]);
+                        let mixed_x = |pa: usize| {
+                            u * (k4(pa, 0, 0, psi_primary) * s00
+                                + 2.0 * k4(pa, 0, 1, psi_primary) * s01
+                                + k4(pa, 1, 1, psi_primary) * s11)
+                                + 2.0 * (k3(pa, psi_primary, 0) * r0 + k3(pa, psi_primary, 1) * r1)
+                        };
+                        let mixed_along_x = [mixed_x(0), mixed_x(1)];
+                        let mixed_along_xu = k3(psi_primary, 0, 0) * s00
+                            + 2.0 * k3(psi_primary, 0, 1) * s01
+                            + k3(psi_primary, 1, 1) * s11;
+                        for (a, dst) in mixed_acc.iter_mut().enumerate() {
+                            *dst += weight * x[a] * mixed_along_x[usize::from(a >= pm)];
+                        }
+                        for (local, &loading) in loadings.iter().enumerate() {
+                            mixed_acc[offset + local] += weight * loading * mixed_along_xu;
+                        }
+                    }
+                }
+                Ok(acc)
+            },
+            |mut left, right| -> Result<Vec<f64>, String> {
+                for (sum, value) in left.iter_mut().zip(&right) {
+                    *sum += value;
+                }
+                Ok(left)
+            },
+        )?
+        .unwrap_or_else(|| vec![0.0; k * stride]);
+        (0..k)
+            .map(|i| {
+                let base = i * stride;
+                let kernel_contractions =
+                    Array2::from_shape_vec((p, p), totals[base..base + p * p].to_vec())
+                        .map_err(|e| e.to_string())?;
+                let mixed_contractions =
+                    Array1::from_vec(totals[base + p * p..base + stride].to_vec());
+                Ok((kernel_contractions, mixed_contractions))
+            })
+            .collect()
+    }
+
     pub(crate) fn exact_newton_joint_psihessian_directional_derivative_operator_from_cache_with_options(
         &self,
         block_states: &[ParameterBlockState],
