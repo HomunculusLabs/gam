@@ -744,13 +744,18 @@ fn reparameterize_slope_design_reduced(
         let st = fast_ab(&full, t); // p_g × r
         let mut s_reduced = fast_atb(t, &st); // r × r
         s_reduced = (&s_reduced + &s_reduced.t()) * 0.5;
-        // Null-space dimension of the reduced penalty = r − rank(S_reduced).
+        // Null-space dimension of the reduced penalty = r − rank(S_reduced), with
+        // the rank counted on the REML engine's positive eigenspace, so the
+        // declared nullspace is the one the penalty pseudo-logdet resolves.
         let (evals, _) = s_reduced
             .eigh(Side::Lower)
             .map_err(|e| format!("reduced slope penalty eigendecomposition failed: {e:?}"))?;
-        let max_eval = evals.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
-        let pen_tol = (max_eval * 1.0e-12).max(f64::EPSILON);
-        let rank = evals.iter().filter(|&&v| v.abs() > pen_tol).count();
+        let threshold = gam_solve::estimate::reml::reml_outer_engine::positive_eigenvalue_threshold(
+            evals
+                .as_slice()
+                .ok_or_else(|| "reduced slope penalty eigenvalues are not contiguous".to_string())?,
+        );
+        let rank = evals.iter().filter(|&&v| v > threshold).count();
         let nullspace_dim = r.saturating_sub(rank);
         new_penalties.push(gam_terms::smooth::BlockwisePenalty::new(0..r, s_reduced));
         new_nullspace_dims.push(nullspace_dim);
