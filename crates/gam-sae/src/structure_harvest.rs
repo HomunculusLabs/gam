@@ -7844,12 +7844,24 @@ pub fn run_production_structure_search(
     )
 }
 
-/// Serialize the per-round ledgers to a JSON string for the fit payload — the
+/// Serialize a structure search to a JSON string for the fit payload — the
 /// honesty surface the python boundary attaches under an additive
-/// `structure_search` key. Byte-deterministic for identical inputs.
-pub fn rounds_to_json(rounds: &[SearchLedger]) -> Result<String, String> {
-    serde_json::to_string(rounds)
-        .map_err(|e| format!("rounds_to_json: serialize search ledger: {e}"))
+/// `structure_search` key. The object carries the per-round ledgers (`rounds`)
+/// and the unified migration ledger folded from them (`migration`), so a fit that
+/// ran the search reports every birth, death and refusal in one currency, with
+/// its `pc_reseed_events` invariant (#2023). Byte-deterministic for identical
+/// inputs.
+pub fn rounds_to_json(
+    rounds: &[SearchLedger],
+    migration: &SaeMigrationLedger,
+) -> Result<String, String> {
+    let rounds = serde_json::to_value(rounds)
+        .map_err(|e| format!("rounds_to_json: serialize search ledger: {e}"))?;
+    serde_json::to_string(&serde_json::json!({
+        "rounds": rounds,
+        "migration": migration.to_json(),
+    }))
+    .map_err(|e| format!("rounds_to_json: serialize structure search: {e}"))
 }
 
 #[cfg(test)]

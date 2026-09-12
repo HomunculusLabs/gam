@@ -1250,7 +1250,10 @@ fn finalize_sae_fit_report(
                 structure_changed = result.structure_changed();
                 term = result.term;
                 rho = result.rho;
-                Some(structure_harvest::rounds_to_json(&result.rounds)?)
+                Some(structure_harvest::rounds_to_json(
+                    &result.rounds,
+                    &result.migration,
+                )?)
             }
             Err(e) => {
                 // Structure search is a post-fit audit pass; a failure must not
