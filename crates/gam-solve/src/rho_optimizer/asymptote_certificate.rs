@@ -198,7 +198,7 @@ impl AsymptoteWindow {
 
 /// The tolerances an asymptote assessment is measured against.
 #[derive(Clone, Copy, Debug)]
-pub struct AsymptoteTolerances {
+pub(crate) struct AsymptoteTolerances {
     /// `|grad|` at or below this is interior-stationary — no asymptote to
     /// certify. (The fixed outer gradient bound.)
     pub interior_grad_tol: f64,
@@ -245,7 +245,7 @@ impl AsymptoteTolerances {
 
 /// The result of assessing one coordinate against its recent history.
 #[derive(Clone, Debug, PartialEq)]
-pub enum AsymptoteVerdict {
+pub(crate) enum AsymptoteVerdict {
     /// The coordinate is on a confirmed exponential tail AND the fitted model
     /// already equals the rail-limit fit to within `estimand_tol`. It may be
     /// certified stationary despite a gradient above the fixed bound.

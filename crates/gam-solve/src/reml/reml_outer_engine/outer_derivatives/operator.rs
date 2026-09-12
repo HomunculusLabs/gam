@@ -138,7 +138,7 @@ impl HyperOperator for BorrowedStoredDriftOperator<'_> {
 /// per-term linear combination) into a single matrix-free operator that
 /// implements the same `HyperOperator` trait, so callers downstream do not
 /// need to handle a vector of (weight, op) pairs themselves.
-pub struct WeightedHyperOperator {
+pub(crate) struct WeightedHyperOperator {
     pub(crate) terms: Vec<(f64, Arc<dyn HyperOperator>)>,
     pub(crate) dim_hint: usize,
 }

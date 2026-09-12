@@ -277,7 +277,7 @@ impl HessianDerivativeProvider for GaussianDerivatives {
 /// The link-parameter ext_coord path (build_sas_link_ext_coords /
 /// build_mixture_link_ext_coords) independently uses observed weight
 /// derivatives computed inline.
-pub struct SinglePredictorGlmDerivatives {
+pub(crate) struct SinglePredictorGlmDerivatives {
     /// c_array: dW_obs/dη, the first eta-derivative of the observed
     /// working curvature.  For canonical links this equals c_F.
     pub c_array: Array1<f64>,
@@ -418,7 +418,7 @@ impl HessianDerivativeProvider for SinglePredictorGlmDerivatives {
 ///   H_{kl} = base_second(v_k, v_l, u_kl) − D(Hφ)[B_{kl}] − D²(Hφ)[B_k, B_l]
 ///
 /// where B_k = −v_k (mode response) and the Firth operators use δη = X·B_k.
-pub struct FirthAwareGlmDerivatives {
+pub(crate) struct FirthAwareGlmDerivatives {
     pub(crate) base: SinglePredictorGlmDerivatives,
     pub(crate) firth_op: std::sync::Arc<super::super::FirthDenseOperator>,
 }
@@ -843,7 +843,7 @@ impl BarrierConfig {
 /// Barrier-aware Hessian derivative provider wrapping an inner provider.
 ///
 /// Adds C_bar\[u\] = −2τ·diag(u ⊙ d^(3)) and Q_bar\[u,v\] = 6τ·diag(u ⊙ v ⊙ d^(4)).
-pub struct BarrierDerivativeProvider<'a> {
+pub(crate) struct BarrierDerivativeProvider<'a> {
     pub(crate) inner: &'a dyn HessianDerivativeProvider,
     pub(crate) tau: f64,
     pub(crate) constrained_indices: &'a [usize],

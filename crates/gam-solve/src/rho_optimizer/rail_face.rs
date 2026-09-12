@@ -229,7 +229,7 @@ pub struct RailFaceProof {
 
 /// Verdict of the analytic face certificate.
 #[derive(Clone, Debug, PartialEq)]
-pub enum RailFaceVerdict {
+pub(crate) enum RailFaceVerdict {
     /// `C ≻ 0`: the criterion strictly increases for every finite smoothing
     /// parameter on the face and on every sub-face.
     Certified(RailFaceProof),

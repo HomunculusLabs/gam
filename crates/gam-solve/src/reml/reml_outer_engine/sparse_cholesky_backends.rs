@@ -579,7 +579,7 @@ impl HessianFactorization for SparseCholeskyOperator {
 /// the `O(9·p³)` full eigendecomposition of [`DenseSpectralOperator`], giving
 /// a multi-× speedup at the small and medium dense dimensions where exact outer
 /// derivatives are required.
-pub struct DenseCholeskyOperator {
+pub(crate) struct DenseCholeskyOperator {
     /// LLT Cholesky factor.
     pub(crate) chol: gam_linalg::faer_ndarray::FaerCholeskyFactor,
     /// `2 · Σ ln(diag L)` — cached at construction time.

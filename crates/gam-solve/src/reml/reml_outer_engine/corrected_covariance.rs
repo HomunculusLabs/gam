@@ -79,7 +79,7 @@ impl std::error::Error for CorrectedCovarianceError {}
 
 /// Result describing the corrected covariance plus structural diagnostics.
 #[derive(Debug, Clone)]
-pub struct CorrectedCovariance {
+pub(crate) struct CorrectedCovariance {
     /// The p×p corrected covariance V*_α.
     pub matrix: Array2<f64>,
     /// θ-indices that were treated as active on a bound and excluded from V_θ.
@@ -407,7 +407,7 @@ pub(crate) fn compute_corrected_covariance_diagonal(
 /// diagnostics. See `compute_corrected_covariance_with_constraints` for the
 /// full version (the inertia gate logic is identical).
 #[derive(Debug, Clone)]
-pub struct CorrectedCovarianceDiagonal {
+pub(crate) struct CorrectedCovarianceDiagonal {
     pub diagonal: Array1<f64>,
     pub active_constraints: Vec<usize>,
     pub rank_deficient_directions: Vec<usize>,

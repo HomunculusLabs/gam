@@ -671,7 +671,7 @@ impl CriterionAtom for JeffreysLogdetAtom {
 /// `Flat` remains exact zero. The objective assembly reads value, first
 /// derivative, and diagonal Hessian from this same object, so configured-prior
 /// cost and gradient can no longer come from separate wrapper calls.
-pub struct ConfiguredRhoPriorAtom {
+pub(crate) struct ConfiguredRhoPriorAtom {
     // #1521: `RhoPriorEval` is `pub(crate)`; keep this field `pub(crate)` so the
     // now-`pub` `atoms` module does not expose a private-in-public type
     // (`private_interfaces` under `warnings = "deny"`). The field is only read
@@ -861,7 +861,7 @@ pub(crate) trait ThetaCorrectionProjection: CriterionAtom {
 /// is stronger than the previous application-layer wrapper: the live TK kernel
 /// itself is a `CriterionAtom`, so objective, gradient, and Hessian assembly
 /// cannot route around its single owner.
-pub struct TierneyKadaneAtom {
+pub(crate) struct TierneyKadaneAtom {
     terms: super::outer_eval::TkCorrectionTerms,
 }
 
@@ -919,7 +919,7 @@ impl ThetaCorrectionProjection for TierneyKadaneAtom {
 /// cost, gradient, and Hessian are projected from one object, so the caller
 /// cannot add the scalar value while forgetting or shape-shifting its analytic
 /// derivative. It is θ-only, so β-channel and stratum are both absent.
-pub struct ThetaOnlyCorrectionAtom {
+pub(crate) struct ThetaOnlyCorrectionAtom {
     pub label: &'static str,
     pub value: f64,
     pub gradient: Option<Array1<f64>>,

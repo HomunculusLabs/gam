@@ -18,7 +18,7 @@ use super::*;
 /// missing even after a successful inner solve (when the predictor was
 /// rejected by the |Δρ| cap and a flat warm-start was used instead).
 #[derive(Clone, Debug)]
-pub struct InnerProgressFeedback {
+pub(crate) struct InnerProgressFeedback {
     pub cap: Arc<AtomicUsize>,
     /// Count of accepted outer steps observed via the
     /// `OuterAcceptObserver` plugged into `opt`'s solver. Replaces
