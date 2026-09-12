@@ -235,7 +235,7 @@ impl From<Inertia> for InertiaWire {
 
 /// Why a stabilization δ was chosen at this site.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub(crate) enum StabilizationRule {
+pub enum StabilizationRule {
     /// δ is a hard-coded constant in the source.
     FixedConstant,
     /// δ chosen so the SPD floor τ is met: δ = max(0, τ - λ_min(H)).
@@ -287,7 +287,7 @@ struct StabilizationLedgerWire {
 /// Canonical validated record of one stabilization applied at one site.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "StabilizationLedgerWire", into = "StabilizationLedgerWire")]
-pub(crate) struct StabilizationLedger {
+pub struct StabilizationLedger {
     kind: StabilizationKind,
     delta: f64,
     matrix_form: RidgeMatrixForm,

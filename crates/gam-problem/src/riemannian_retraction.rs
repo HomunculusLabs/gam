@@ -7,7 +7,7 @@ pub trait Retraction {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct EuclideanRetraction;
+pub struct EuclideanRetraction;
 
 impl Retraction for EuclideanRetraction {
     fn retract(&self, base: &mut ArrayViewMut1<f64>, tangent: ArrayView1<f64>) {
@@ -22,7 +22,7 @@ impl Retraction for EuclideanRetraction {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct CircleRetraction;
+pub struct CircleRetraction;
 
 impl Retraction for CircleRetraction {
     fn retract(&self, base: &mut ArrayViewMut1<f64>, tangent: ArrayView1<f64>) {
@@ -36,7 +36,7 @@ impl Retraction for CircleRetraction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct SphereRetraction {
+pub struct SphereRetraction {
     pub dim: usize,
 }
 

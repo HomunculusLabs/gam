@@ -669,7 +669,7 @@ fn validate_hmc_arrays(
 /// quadratic `−½ zᵀMz` inside the leapfrog hot loop.  Optionally adds
 /// the identifiable-subspace Firth/Jeffreys term to keep posterior modes
 /// away from infinity under separation.
-pub(crate) struct NutsPosterior {
+pub struct NutsPosterior {
     /// Shared read-only data (Arc prevents duplication)
     data: SharedData,
     /// Transform: L where L L^T = H^{-1} (computed from Hessian)
@@ -4379,7 +4379,7 @@ pub struct GlmFlatInputs<'a> {
 }
 
 /// Flat survival inputs for engine-facing HMC APIs.
-pub(crate) struct SurvivalFlatInputs<'a> {
+pub struct SurvivalFlatInputs<'a> {
     pub age_entry: ArrayView1<'a, f64>,
     pub age_exit: ArrayView1<'a, f64>,
     pub event_target: ArrayView1<'a, u8>,
@@ -5568,7 +5568,7 @@ mod survival_hmc {
 
     /// Whitened log-posterior target for survival models with analytical gradients.
     #[derive(Clone)]
-    pub(crate) struct SurvivalPosterior {
+    pub struct SurvivalPosterior {
         /// Shared read-only data (Arc prevents duplication)
         data: SharedSurvivalData,
         /// Transform: L where L L^T = H^{-1}

@@ -65,7 +65,7 @@ pub struct CorrectedEdf {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CorrectedEdfUnavailable {
+pub enum CorrectedEdfUnavailable {
     MissingWeightedGram,
     MissingSmoothingCorrection,
     MissingCovarianceScale,

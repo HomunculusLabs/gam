@@ -63,7 +63,7 @@ use crate::polya_gamma::PolyaGamma;
 /// implementation's draws across runs; CPU and GPU consume the bits through
 /// different distribution transforms.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PgSeed(pub u64);
+pub struct PgSeed(pub u64);
 
 impl Default for PgSeed {
     fn default() -> Self {
@@ -133,7 +133,7 @@ const WORD_GAMMA: u64 = 0x0F1E_2D3C_4B5A_6978;
 /// `curandStateXORWOW_t` for the five state lanes plus the addition
 /// counter; we omit the boxmuller cache (PG sampler doesn’t use it).
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct XorwowState {
+pub struct XorwowState {
     pub s: [u32; 5],
     pub d: u32,
 }

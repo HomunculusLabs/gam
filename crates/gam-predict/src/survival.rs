@@ -64,7 +64,7 @@ fn inverse_link_survival_tail_value_and_failure_density(
     ))
 }
 
-pub(crate) struct SurvivalPredictor {
+pub struct SurvivalPredictor {
     pub beta_threshold: Array1<f64>,
     pub beta_log_sigma: Array1<f64>,
     pub covariance: Option<Array2<f64>>,

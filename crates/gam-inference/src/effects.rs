@@ -79,7 +79,7 @@ fn covariance_by_source(fit: &UnifiedFitResult, source: CovarianceSource) -> Opt
 
 /// Configuration for a pointwise normal-theory confidence band.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct PointwiseBandOptions {
+pub struct PointwiseBandOptions {
     pub level: f64,
 }
 
@@ -93,7 +93,7 @@ impl Default for PointwiseBandOptions {
 
 /// Configuration for a simulated simultaneous confidence band.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct SimultaneousBandOptions {
+pub struct SimultaneousBandOptions {
     pub level: f64,
     pub simulations: usize,
     pub seed: u64,
@@ -111,7 +111,7 @@ impl Default for SimultaneousBandOptions {
 
 /// Confidence-band procedure for a linear effect curve.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum BandOptions {
+pub enum BandOptions {
     /// Independent marginal normal intervals at each contrast row.
     Pointwise(PointwiseBandOptions),
     /// A common critical value calibrated from the supremum of the standardized
@@ -127,7 +127,7 @@ impl Default for BandOptions {
 
 /// A matrix-level effect report, with one entry per contrast-design row.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct EffectReport {
+pub struct EffectReport {
     pub center: Array1<f64>,
     pub se: Array1<f64>,
     pub lower: Array1<f64>,
