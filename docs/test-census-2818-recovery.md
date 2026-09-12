@@ -857,3 +857,29 @@ defining file.
   landed minutes before the restoration. `94fc37dd1` then deleted the pin and its
   two private helpers, `exact_orthant_expectation` and `normal_infeasible_mass`,
   so gam-solve's lib tests compile. It is retired: its subject is gone.
+
+### Two #2515 print-only scans not restored
+
+`c0a21b554` removed both scans with `tests_exact_a_bundle_2515.rs`. Neither body
+reaches an assertion: each prints a table and returns. `scripts/assertionless_tests.py`,
+which `test-census.yml` runs on every push, refuses a `#[test]` like that, so restoring
+either scan would turn that gate red. The #2712 section above already declined to
+bring back a print-only experiment as a passing gate.
+
+- `zz_scan_exact_a_admitted_alpha_2515` prints, for nine ARD precisions, the worst
+  per-row eigenvalue of `B` and `A`, the clamped-row count, and whether dense and
+  streaming exact-`A` evidence factor. Its witness builders, `ExactAWitness2515`,
+  `exact_a_witness_2515` and `exact_a_witness_2515_at_alpha`, had no other caller
+  among the restored pins, so they stay deleted too.
+- `zz_attribute_the_broken_rung_through_production_2515` prints both routes' value
+  and gradient across six smoothing strengths. The asserted half of that sweep is
+  restored as `forced_streaming_has_a_gradient_wherever_the_dense_route_does_2515`,
+  which walks four of those strengths and fails on a streaming refusal or a
+  disagreement wherever the dense route ranks the state.
+
+The other ten pins in the census's last undispositioned rows are restored. `170bf96fa`
+and `3cfc54e0d` bring back the #2712 trace pair, the #2144, #1625 and #2330 logdet
+finite-difference pins and the #2712 row-selected inverse gate. They run on the
+finite-difference anchor harness in `tests_recovery_split_780.rs`, rebuilt without the
+deleted derivative oracle. `deea7ad64` restores the three #2515 route-parity pins in a
+recreated `tests_exact_a_bundle_2515.rs`.
