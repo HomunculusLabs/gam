@@ -1745,12 +1745,13 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
     }
 
     fn joint_jeffreys_information_third_directional_available(&self) -> bool {
-        // The closed-form third information derivative covers only the rigid
-        // two-primary path: a configured score-warp or link-deviation runtime
-        // widens the primary space, and the hook below returns `None` for it.
-        // Declaring the capability there would plan an outer Hessian whose
-        // completion then has no derivative to consume.
-        !self.flex_active()
+        // The rigid two-primary path has a closed-form row contraction. A FLEX
+        // row under an empirical latent measure evaluates the frozen row program,
+        // whose laned order-five traversal gives the contraction. A FLEX row under
+        // the standard-normal measure runs the hand cell-moment kernel, which stops
+        // at order four, so the capability is not declared there: an outer Hessian
+        // planned on it would have no derivative to consume.
+        !self.flex_active() || self.latent_measure.is_empirical()
     }
 
     fn joint_jeffreys_information_third_directional_all_axes_with_specs(
@@ -1760,13 +1761,19 @@ impl CustomFamily for BernoulliMarginalSlopeFamily {
         d_beta_u_flat: &Array1<f64>,
         d_beta_v_flat: &Array1<f64>,
     ) -> Result<Option<Vec<Array2<f64>>>, String> {
-        if self.effective_flex_active(block_states)? {
+        let flex = self.effective_flex_active(block_states)?;
+        if flex && !self.latent_measure.is_empirical() {
             return Ok(None);
         }
         if !self.outer_default_trustworthy_for_joint_hessian(specs)
             && !self.joint_hessian_is_structurally_coupled(block_states)?
         {
             return Ok(None);
+        }
+        if flex {
+            return self
+                .empirical_flex_third_information_all_axes(block_states, d_beta_u_flat, d_beta_v_flat)
+                .map(Some);
         }
         rigid_third_information_all_axes(self, block_states, d_beta_u_flat, d_beta_v_flat)
             .map(Some)

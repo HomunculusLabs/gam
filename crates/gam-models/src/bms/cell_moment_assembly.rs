@@ -16,8 +16,8 @@ use super::*;
 
 use crate::fnv1a::Fnv1a;
 use gam_math::jet_scalar::{
-    DynamicJetBatchWorkspace, DynamicOneSeedBatch, DynamicTwoSeedBatch, FixedRuntimeJet, OneSeed,
-    TwoSeed,
+    DynamicJetBatchWorkspace, DynamicOneSeedBatch, DynamicThreeSeedBatch, DynamicTwoSeedBatch,
+    FixedRuntimeJet, OneSeed, TwoSeed,
 };
 
 thread_local! {
@@ -29,6 +29,10 @@ thread_local! {
     /// Per-worker empirical FLEX fourth-order pair workspace. A caller may
     /// evaluate several `(u,v)` contractions in one row-plan traversal.
     static EMPIRICAL_BMS_FOURTH_WORKSPACE: std::cell::RefCell<DynamicJetBatchWorkspace> =
+        std::cell::RefCell::new(DynamicJetBatchWorkspace::new(1));
+    /// Per-worker empirical FLEX fifth-order workspace: one shared `(u,v)` pair
+    /// and a chunk of laned third directions per row-plan traversal.
+    static EMPIRICAL_BMS_FIFTH_WORKSPACE: std::cell::RefCell<DynamicJetBatchWorkspace> =
         std::cell::RefCell::new(DynamicJetBatchWorkspace::new(1));
 }
 
@@ -870,10 +874,13 @@ impl BernoulliMarginalSlopeFamily {
                 beta_w,
             )?;
             let eta = eval_coeff4_at(&obs.coeff, node);
+            let cdf_stack = unary_derivatives_normal_cdf(eta);
             calibration.push(BmsFlexCalibrationProgramNode {
                 index,
                 weight,
-                cdf_stack: unary_derivatives_normal_cdf(eta),
+                cdf_stack,
+                // Φ⁽⁵⁾(η) = (η⁴ − 6η² + 3)·φ(η), with φ(η) = Φ′(η) = cdf_stack[1].
+                cdf_fifth: (eta.powi(4) - 6.0 * eta * eta + 3.0) * cdf_stack[1],
             });
         }
 
@@ -912,10 +919,12 @@ impl BernoulliMarginalSlopeFamily {
         )?;
         BmsFlexRowProgram::from_parts(
             point,
+            marginal.mu5,
             calibration,
             observed,
             observed_sign,
             observed_neglog_stack,
+            signed_probit_neglog_unary_stack_fifth(signed, self.weights[row])[5],
         )
     }
 
@@ -1350,6 +1359,196 @@ impl BernoulliMarginalSlopeFamily {
                     Ok(contracted)
                 }),
         }
+    }
+
+    /// The r×r slabs `T_c = Σ_{de} ℓ_{abcde} u_d v_e` of one empirical FLEX row
+    /// over every primary axis `c`, from one frozen row plan. Axis lanes are
+    /// chunked by the tape budget the lower orders use.
+    pub(super) fn empirical_flex_row_fifth_axis_slabs(
+        &self,
+        row: usize,
+        primary: &PrimarySlices,
+        q: f64,
+        b: f64,
+        beta_h: Option<&Array1<f64>>,
+        beta_w: Option<&Array1<f64>>,
+        row_ctx: &BernoulliMarginalSlopeRowExactContext,
+        dir_u: &Array1<f64>,
+        dir_v: &Array1<f64>,
+        grid: &EmpiricalZGrid,
+    ) -> Result<Vec<Array2<f64>>, String> {
+        let r = primary.total;
+        if dir_u.len() != r || dir_v.len() != r {
+            return Err(format!(
+                "bernoulli empirical flex fifth contraction direction lengths ({},{}) != primary dimension {r}",
+                dir_u.len(),
+                dir_v.len()
+            ));
+        }
+        if dir_u.iter().all(|value| *value == 0.0) || dir_v.iter().all(|value| *value == 0.0) {
+            return Ok((0..r).map(|_| Array2::<f64>::zeros((r, r))).collect());
+        }
+        if !(row_ctx.intercept.is_finite() && row_ctx.m_a.is_finite() && row_ctx.m_a > 0.0) {
+            return Err("non-finite empirical flexible row context in fifth contraction".into());
+        }
+        let plan = self.compile_empirical_bms_row_program(
+            row,
+            primary,
+            q,
+            b,
+            beta_h,
+            beta_w,
+            row_ctx.intercept,
+            grid,
+        )?;
+        let point = Self::intercept_primary_point(q, b, beta_h, beta_w);
+        let lanes = empirical_bms_runtime_batch_lanes(r);
+        EMPIRICAL_BMS_FIFTH_WORKSPACE.with(|workspace| {
+            let mut workspace = workspace.borrow_mut();
+            let mut slabs = Vec::with_capacity(r);
+            for axis_start in (0..r).step_by(lanes) {
+                let active_lanes = (r - axis_start).min(lanes);
+                workspace.reset(active_lanes);
+                let vars = workspace.alloc_slice_fill_with(r, |axis| {
+                    DynamicThreeSeedBatch::seed_direction_triples(
+                        point[axis],
+                        axis,
+                        r,
+                        &workspace,
+                        dir_u[axis],
+                        dir_v[axis],
+                        |lane| if axis_start + lane == axis { 1.0 } else { 0.0 },
+                    )
+                });
+                let jet = plan.evaluate_fifth(vars, &workspace)?;
+                for lane in 0..active_lanes {
+                    slabs.push(
+                        Array2::from_shape_vec((r, r), jet.contracted_fifth(lane).to_vec())
+                            .map_err(|error| {
+                                format!("empirical BMS fifth-contraction shape: {error}")
+                            })?,
+                    );
+                }
+            }
+            Ok(slabs)
+        })
+    }
+
+    /// `{D³H[u, v, e_k]}` over every coefficient axis `k` of an empirical-latent
+    /// FLEX family.
+    ///
+    /// A coefficient enters a row only through its primary direction: a marginal
+    /// or slope column scales the q or slope slab by its design entry, and a
+    /// score-warp or link-deviation coefficient selects its own primary slab.
+    /// Each scaled slab is pulled back through the accumulator the Hessian paths
+    /// use, one accumulator per output axis.
+    pub(super) fn empirical_flex_third_information_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        d_beta_u_flat: &Array1<f64>,
+        d_beta_v_flat: &Array1<f64>,
+    ) -> Result<Vec<Array2<f64>>, String> {
+        let cache = self.build_exact_eval_cache(block_states)?;
+        let slices = &cache.slices;
+        let primary = &cache.primary;
+        let p = slices.total;
+        if d_beta_u_flat.len() != p || d_beta_v_flat.len() != p {
+            return Err(format!(
+                "BMS FLEX third information derivative expected two directions of length {p}"
+            ));
+        }
+        let accumulated = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+            self.y.len(),
+            |rows| -> Result<Vec<BernoulliBlockHessianAccumulator>, String> {
+                let mut axes: Vec<BernoulliBlockHessianAccumulator> = (0..p)
+                    .map(|_| BernoulliBlockHessianAccumulator::new(slices))
+                    .collect();
+                for row in rows {
+                    let grid = self
+                        .latent_measure
+                        .empirical_grid_for_training_row(row)?
+                        .ok_or_else(|| {
+                            "BMS FLEX third information derivative needs an empirical latent measure"
+                                .to_string()
+                        })?;
+                    let point = self.primary_point_from_block_states(row, block_states, primary)?;
+                    let (q, b, beta_h, beta_w) = self.primary_point_components(&point, primary);
+                    let row_u =
+                        self.row_primary_direction_from_flat(row, slices, primary, d_beta_u_flat)?;
+                    let row_v =
+                        self.row_primary_direction_from_flat(row, slices, primary, d_beta_v_flat)?;
+                    let slabs = self.empirical_flex_row_fifth_axis_slabs(
+                        row,
+                        primary,
+                        q,
+                        b,
+                        beta_h.as_ref(),
+                        beta_w.as_ref(),
+                        Self::row_ctx(&cache, row),
+                        &row_u,
+                        &row_v,
+                        &grid,
+                    )?;
+                    let marginal_row = self
+                        .marginal_design
+                        .try_row_chunk(row..row + 1)
+                        .map_err(|e| format!("BMS FLEX third information marginal design: {e}"))?;
+                    for (column, &entry) in marginal_row.row(0).iter().enumerate() {
+                        if entry != 0.0 {
+                            axes[slices.marginal.start + column].add_pullback(
+                                self,
+                                row,
+                                slices,
+                                primary,
+                                &(&slabs[primary.q] * entry),
+                            );
+                        }
+                    }
+                    let slope_row = self
+                        .slope_design
+                        .try_row_chunk(row..row + 1)
+                        .map_err(|e| format!("BMS FLEX third information slope design: {e}"))?;
+                    for (column, &entry) in slope_row.row(0).iter().enumerate() {
+                        if entry != 0.0 {
+                            axes[slices.slope.start + column].add_pullback(
+                                self,
+                                row,
+                                slices,
+                                primary,
+                                &(&slabs[primary.slope] * entry),
+                            );
+                        }
+                    }
+                    for (block, range) in [
+                        (slices.h.as_ref(), primary.h.as_ref()),
+                        (slices.w.as_ref(), primary.w.as_ref()),
+                    ] {
+                        if let (Some(block), Some(range)) = (block, range) {
+                            for (local, global) in block.clone().enumerate() {
+                                axes[global].add_pullback(
+                                    self,
+                                    row,
+                                    slices,
+                                    primary,
+                                    &slabs[range.start + local],
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(axes)
+            },
+            |mut left, right| -> Result<Vec<BernoulliBlockHessianAccumulator>, String> {
+                for (axis, other) in left.iter_mut().zip(&right) {
+                    axis.add(other);
+                }
+                Ok(left)
+            },
+        )?;
+        Ok(match accumulated {
+            Some(axes) => axes.iter().map(|axis| axis.to_dense(slices)).collect(),
+            None => (0..p).map(|_| Array2::<f64>::zeros((p, p))).collect(),
+        })
     }
 
     /// Trace-contract every Hessian index of the full third derivative from one
@@ -4643,6 +4842,68 @@ mod empirical_flex_jet_oracle_tests {
                     .contracted_fourth()[row * r + column]
             }
             _ => panic!("canonical flex oracle supports channels through order four"),
+        }
+    }
+
+    /// The laned fifth slabs of the canonical row plan are the primary-axis
+    /// derivatives of its fourth contraction: `T_c[a][b]` with `(u, v) = (e_cu, e_cv)`
+    /// must match a Richardson difference of `ℓ_{ab cu cv}` along primary `c`,
+    /// recompiled (calibration root included) at each shifted point (#2898).
+    #[test]
+    fn empirical_flex_fifth_slabs_differentiate_the_fourth_contraction() {
+        for is_score_warp in [true, false] {
+            let fx = make_fixture(is_score_warp);
+            let r = fx.primary.total;
+            let dev_range = if is_score_warp {
+                fx.primary.h.clone().unwrap()
+            } else {
+                fx.primary.w.clone().unwrap()
+            };
+            let mut p0 = vec![0.0; r];
+            p0[fx.primary.q] = 0.2;
+            p0[fx.primary.slope] = 0.35;
+            for (k, i) in dev_range.clone().enumerate() {
+                p0[i] = fx.beta_dev[k];
+            }
+            let (cu, cv) = (fx.primary.q, dev_range.start);
+            let plan = compiled_flex_fixture_program(&fx, &p0);
+            let workspace = gam_math::jet_scalar::DynamicJetBatchWorkspace::new(r);
+            let vars = workspace.alloc_slice_fill_with(r, |axis| {
+                gam_math::jet_scalar::DynamicThreeSeedBatch::seed_direction_triples(
+                    p0[axis],
+                    axis,
+                    r,
+                    &workspace,
+                    f64::from(axis == cu),
+                    f64::from(axis == cv),
+                    |lane| f64::from(lane == axis),
+                )
+            });
+            let jet = plan
+                .evaluate_fifth(vars, &workspace)
+                .expect("canonical fifth row");
+            for c in [fx.primary.q, fx.primary.slope, dev_range.start] {
+                for (a, b) in [
+                    (fx.primary.q, fx.primary.q),
+                    (fx.primary.q, fx.primary.slope),
+                    (fx.primary.slope, dev_range.start),
+                ] {
+                    let shifted = |h: f64| {
+                        let mut point = p0.clone();
+                        point[c] += h;
+                        prod_flex_coeff(&fx, &point, &[a, b, cu, cv])
+                    };
+                    let central = |h: f64| (shifted(h) - shifted(-h)) / (2.0 * h);
+                    let (coarse, fine) = (central(2e-3), central(1e-3));
+                    let richardson = (4.0 * fine - coarse) / 3.0;
+                    let fifth = jet.contracted_fifth(c)[a * r + b];
+                    let tolerance = 1e-5 * fifth.abs().max(1.0);
+                    assert!(
+                        (fifth - richardson).abs() <= tolerance,
+                        "score_warp={is_score_warp} c={c} a={a} b={b}: fifth={fifth:+.6e} richardson={richardson:+.6e} coarse={coarse:+.6e}"
+                    );
+                }
+            }
         }
     }
 

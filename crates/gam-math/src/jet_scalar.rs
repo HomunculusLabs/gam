@@ -3412,6 +3412,267 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicTwoSeed<'arena> {
     }
 }
 
+/// Runtime-sized batch of three-seed contractions for a Hessian-contracted
+/// fifth derivative: one shared direction pair and one laned third direction.
+///
+/// ε, δ and γ are nilpotent (`ε² = δ² = γ² = 0`) with every mixed product
+/// retained. Seeding ε with `u`, δ with `v` and lane `l`'s γ with `w_l` makes
+/// lane `l`'s εδγ Hessian channel the contracted fifth
+/// `Σ_{cde} ℓ_{abcde} u_c v_d w_{l,e}`, and the shared εδ Hessian channel the
+/// contracted fourth `Σ_{cd} ℓ_{abcd} u_c v_d`. A channel without γ does not
+/// depend on the lane, so value, ε, δ and εδ are stored once and only the four
+/// γ-carrying channels are laned: `O((4 + 4·lanes)·K²)` storage, and the
+/// all-axes slab `{D³H[u, v, e_c]}` is one evaluation with `w_l = e_l`.
+///
+/// A unary composition at this order reads the outer function through `f⁽⁵⁾`,
+/// so the algebra composes only through [`Self::compose_unary_fifth`].
+#[derive(Clone, Copy, Debug)]
+pub struct DynamicThreeSeedBatch<'arena> {
+    /// Shared value/gradient/Hessian channels.
+    pub base: DynamicOrder2<'arena>,
+    eps: DynamicOrder2<'arena>,
+    del: DynamicOrder2<'arena>,
+    eps_del: DynamicOrder2<'arena>,
+    gam: &'arena [DynamicOrder2<'arena>],
+    eps_gam: &'arena [DynamicOrder2<'arena>],
+    del_gam: &'arena [DynamicOrder2<'arena>],
+    eps_del_gam: &'arena [DynamicOrder2<'arena>],
+}
+
+impl<'arena> DynamicThreeSeedBatch<'arena> {
+    /// Seed one primary with the shared pair `(u_axis, v_axis)` and one third
+    /// direction component per lane.
+    #[inline(always)]
+    #[must_use]
+    pub fn seed_direction_triples(
+        x: f64,
+        axis: usize,
+        dimension: usize,
+        workspace: &'arena DynamicJetBatchWorkspace,
+        u_axis: f64,
+        v_axis: f64,
+        mut third_at: impl FnMut(usize) -> f64,
+    ) -> Self {
+        let arena = &workspace.arena;
+        let zero = DynamicOrder2::constant(0.0, dimension, arena);
+        let zeros = arena.alloc_slice_fill_with(workspace.lanes, |_| zero);
+        Self {
+            base: DynamicOrder2::variable(x, axis, dimension, arena),
+            eps: DynamicOrder2::constant(u_axis, dimension, arena),
+            del: DynamicOrder2::constant(v_axis, dimension, arena),
+            eps_del: zero,
+            gam: arena.alloc_slice_fill_with(workspace.lanes, |lane| {
+                DynamicOrder2::constant(third_at(lane), dimension, arena)
+            }),
+            eps_gam: zeros,
+            del_gam: zeros,
+            eps_del_gam: zeros,
+        }
+    }
+
+    /// A constant with every derivative channel exactly zero.
+    #[inline(always)]
+    #[must_use]
+    pub fn constant(c: f64, dimension: usize, workspace: &'arena DynamicJetBatchWorkspace) -> Self {
+        let arena = &workspace.arena;
+        let zero = DynamicOrder2::constant(0.0, dimension, arena);
+        let zeros = arena.alloc_slice_fill_with(workspace.lanes, |_| zero);
+        Self {
+            base: DynamicOrder2::constant(c, dimension, arena),
+            eps: zero,
+            del: zero,
+            eps_del: zero,
+            gam: zeros,
+            eps_gam: zeros,
+            del_gam: zeros,
+            eps_del_gam: zeros,
+        }
+    }
+
+    /// Number of laned third directions.
+    #[inline(always)]
+    #[must_use]
+    pub fn lanes(&self) -> usize {
+        self.gam.len()
+    }
+
+    /// Row-major contracted fifth `Σ_{cde} ℓ_{abcde} u_c v_d w_{l,e}` of lane `l`.
+    #[inline(always)]
+    #[must_use]
+    pub fn contracted_fifth(&self, lane: usize) -> &[f64] {
+        self.eps_del_gam[lane].h()
+    }
+
+    #[inline(always)]
+    #[must_use]
+    pub fn dimension(&self) -> usize {
+        self.base.g.len()
+    }
+
+    #[inline(always)]
+    fn assert_compatible(&self, other: &Self) {
+        self.base.assert_compatible(&other.base);
+        assert_eq!(
+            self.gam.len(),
+            other.gam.len(),
+            "dynamic three-seed batch lane mismatch"
+        );
+    }
+
+    #[inline(always)]
+    #[must_use]
+    pub fn add(&self, other: &Self) -> Self {
+        self.assert_compatible(other);
+        let arena = self.base.arena;
+        let lanes = self.lanes();
+        Self {
+            base: self.base.add(&other.base),
+            eps: self.eps.add(&other.eps),
+            del: self.del.add(&other.del),
+            eps_del: self.eps_del.add(&other.eps_del),
+            gam: arena.alloc_slice_fill_with(lanes, |l| self.gam[l].add(&other.gam[l])),
+            eps_gam: arena.alloc_slice_fill_with(lanes, |l| self.eps_gam[l].add(&other.eps_gam[l])),
+            del_gam: arena.alloc_slice_fill_with(lanes, |l| self.del_gam[l].add(&other.del_gam[l])),
+            eps_del_gam: arena
+                .alloc_slice_fill_with(lanes, |l| self.eps_del_gam[l].add(&other.eps_del_gam[l])),
+        }
+    }
+
+    #[inline(always)]
+    #[must_use]
+    pub fn sub(&self, other: &Self) -> Self {
+        self.assert_compatible(other);
+        let arena = self.base.arena;
+        let lanes = self.lanes();
+        Self {
+            base: self.base.sub(&other.base),
+            eps: self.eps.sub(&other.eps),
+            del: self.del.sub(&other.del),
+            eps_del: self.eps_del.sub(&other.eps_del),
+            gam: arena.alloc_slice_fill_with(lanes, |l| self.gam[l].sub(&other.gam[l])),
+            eps_gam: arena.alloc_slice_fill_with(lanes, |l| self.eps_gam[l].sub(&other.eps_gam[l])),
+            del_gam: arena.alloc_slice_fill_with(lanes, |l| self.del_gam[l].sub(&other.del_gam[l])),
+            eps_del_gam: arena
+                .alloc_slice_fill_with(lanes, |l| self.eps_del_gam[l].sub(&other.eps_del_gam[l])),
+        }
+    }
+
+    #[inline(always)]
+    #[must_use]
+    pub fn scale(&self, s: f64) -> Self {
+        let arena = self.base.arena;
+        let lanes = self.lanes();
+        Self {
+            base: self.base.scale(s),
+            eps: self.eps.scale(s),
+            del: self.del.scale(s),
+            eps_del: self.eps_del.scale(s),
+            gam: arena.alloc_slice_fill_with(lanes, |l| self.gam[l].scale(s)),
+            eps_gam: arena.alloc_slice_fill_with(lanes, |l| self.eps_gam[l].scale(s)),
+            del_gam: arena.alloc_slice_fill_with(lanes, |l| self.del_gam[l].scale(s)),
+            eps_del_gam: arena.alloc_slice_fill_with(lanes, |l| self.eps_del_gam[l].scale(s)),
+        }
+    }
+
+    #[inline(always)]
+    #[must_use]
+    pub fn neg(&self) -> Self {
+        self.scale(-1.0)
+    }
+
+    /// Exact truncated product: every monomial of `{ε, δ, γ}` collects the
+    /// products of its complementary factor pairs.
+    #[inline(always)]
+    #[must_use]
+    pub fn mul(&self, other: &Self) -> Self {
+        self.assert_compatible(other);
+        let arena = self.base.arena;
+        let lanes = self.lanes();
+        let (xb, xe, xd, xed) = (&self.base, &self.eps, &self.del, &self.eps_del);
+        let (yb, ye, yd, yed) = (&other.base, &other.eps, &other.del, &other.eps_del);
+        Self {
+            base: xb.mul(yb),
+            eps: xb.mul(ye).add(&xe.mul(yb)),
+            del: xb.mul(yd).add(&xd.mul(yb)),
+            eps_del: xb
+                .mul(yed)
+                .add(&xe.mul(yd))
+                .add(&xd.mul(ye))
+                .add(&xed.mul(yb)),
+            gam: arena.alloc_slice_fill_with(lanes, |l| {
+                xb.mul(&other.gam[l]).add(&self.gam[l].mul(yb))
+            }),
+            eps_gam: arena.alloc_slice_fill_with(lanes, |l| {
+                xb.mul(&other.eps_gam[l])
+                    .add(&xe.mul(&other.gam[l]))
+                    .add(&self.gam[l].mul(ye))
+                    .add(&self.eps_gam[l].mul(yb))
+            }),
+            del_gam: arena.alloc_slice_fill_with(lanes, |l| {
+                xb.mul(&other.del_gam[l])
+                    .add(&xd.mul(&other.gam[l]))
+                    .add(&self.gam[l].mul(yd))
+                    .add(&self.del_gam[l].mul(yb))
+            }),
+            eps_del_gam: arena.alloc_slice_fill_with(lanes, |l| {
+                xb.mul(&other.eps_del_gam[l])
+                    .add(&xe.mul(&other.del_gam[l]))
+                    .add(&xd.mul(&other.eps_gam[l]))
+                    .add(&self.gam[l].mul(yed))
+                    .add(&xed.mul(&other.gam[l]))
+                    .add(&self.eps_gam[l].mul(yd))
+                    .add(&self.del_gam[l].mul(ye))
+                    .add(&self.eps_del_gam[l].mul(yb))
+            }),
+        }
+    }
+
+    /// Exact unary composition from the certified stack `[f, f′, f″, f‴, f⁗]`
+    /// and `f⁽⁵⁾`, by Faà di Bruno on the nilpotent part:
+    /// the εδγ coefficient is `f′·edc + f″·(e·dc + d·ec + c·ed) + f‴·e·d·c`.
+    #[inline(always)]
+    #[must_use]
+    pub fn compose_unary_fifth(&self, derivatives: [f64; 5], fifth: f64) -> Self {
+        let arena = self.base.arena;
+        let lanes = self.lanes();
+        let [_, d1, d2, d3, d4] = derivatives;
+        // An order-two composition reads only the first three stack entries.
+        let first = self.base.compose_unary([d1, d2, d3, 0.0, 0.0]);
+        let second = self.base.compose_unary([d2, d3, d4, 0.0, 0.0]);
+        let third = self.base.compose_unary([d3, d4, fifth, 0.0, 0.0]);
+        let (e, d, ed) = (&self.eps, &self.del, &self.eps_del);
+        let e_d = e.mul(d);
+        Self {
+            base: self.base.compose_unary(derivatives),
+            eps: first.mul(e),
+            del: first.mul(d),
+            eps_del: first.mul(ed).add(&second.mul(&e_d)),
+            gam: arena.alloc_slice_fill_with(lanes, |l| first.mul(&self.gam[l])),
+            eps_gam: arena.alloc_slice_fill_with(lanes, |l| {
+                first
+                    .mul(&self.eps_gam[l])
+                    .add(&second.mul(&e.mul(&self.gam[l])))
+            }),
+            del_gam: arena.alloc_slice_fill_with(lanes, |l| {
+                first
+                    .mul(&self.del_gam[l])
+                    .add(&second.mul(&d.mul(&self.gam[l])))
+            }),
+            eps_del_gam: arena.alloc_slice_fill_with(lanes, |l| {
+                let c = &self.gam[l];
+                let pairs = e
+                    .mul(&self.del_gam[l])
+                    .add(&d.mul(&self.eps_gam[l]))
+                    .add(&c.mul(ed));
+                first
+                    .mul(&self.eps_del_gam[l])
+                    .add(&second.mul(&pairs))
+                    .add(&third.mul(&e_d.mul(c)))
+            }),
+        }
+    }
+}
+
 // ── Order2<K> ergonomic operator overloads (doc §A.1) ───────────────────
 //
 // The dispersion-family row NLLs are written with `+`/`-`/`*` operators over
@@ -6929,6 +7190,111 @@ mod tests {
                         expected[a][b],
                     );
                 }
+            }
+        }
+    }
+
+    /// The laned three-seed batch reproduces the analytic fifth derivative of a
+    /// product of ridge functions `g(w·x)·h(z·x)` lane by lane, and its shared
+    /// εδ channel reproduces the two-seed batch's contracted fourth (#2898).
+    #[test]
+    fn dynamic_three_seed_batch_contracts_the_fifth_derivative_2898() {
+        const K: usize = 4;
+        let values = [0.3, -0.4, 0.7, 0.2];
+        let w = [0.6, -0.3, 0.2, 0.5];
+        let z = [0.4, 0.3, 0.5, 0.6];
+        let u = [0.5, -0.2, 0.7, -0.4];
+        let v = [-0.3, 0.8, 0.2, 0.6];
+        let dot = |a: &[f64; K], b: &[f64; K]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+        let e = dot(&w, &values).exp();
+        let t = dot(&z, &values);
+        assert!(t > 0.0, "the ln ridge must be evaluated inside its domain");
+        let g = [e; 6];
+        let h = [
+            t.ln(),
+            1.0 / t,
+            -1.0 / t.powi(2),
+            2.0 / t.powi(3),
+            -6.0 / t.powi(4),
+            24.0 / t.powi(5),
+        ];
+        // Leibniz over the 2⁵ assignments of the five slots (a, b, u, v, e_l)
+        // to the g factor (weights w) or the h factor (weights z).
+        let analytic = |a: usize, b: usize, lane: usize| -> f64 {
+            let slot = |mask: u32, bit: u32, from_w: f64, from_z: f64| {
+                if mask & (1 << bit) != 0 { from_w } else { from_z }
+            };
+            (0u32..32)
+                .map(|mask| {
+                    let k = mask.count_ones() as usize;
+                    g[k] * h[5 - k]
+                        * slot(mask, 0, w[a], z[a])
+                        * slot(mask, 1, w[b], z[b])
+                        * slot(mask, 2, dot(&w, &u), dot(&z, &u))
+                        * slot(mask, 3, dot(&w, &v), dot(&z, &v))
+                        * slot(mask, 4, w[lane], z[lane])
+                })
+                .sum()
+        };
+        let close = |actual: f64, expected: f64| {
+            let tolerance = 1.0e-10 * (1.0 + actual.abs().max(expected.abs()));
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "{actual:+.16e} vs {expected:+.16e}"
+            );
+        };
+
+        let workspace = DynamicJetBatchWorkspace::new(K);
+        let vars = workspace.alloc_slice_fill_with(K, |axis| {
+            DynamicThreeSeedBatch::seed_direction_triples(
+                values[axis],
+                axis,
+                K,
+                &workspace,
+                u[axis],
+                v[axis],
+                |lane| f64::from(lane == axis),
+            )
+        });
+        let ridge = |weights: &[f64; K]| {
+            vars.iter().zip(weights).fold(
+                DynamicThreeSeedBatch::constant(0.0, K, &workspace),
+                |sum, (var, &weight)| sum.add(&var.scale(weight)),
+            )
+        };
+        let product = ridge(&w)
+            .compose_unary_fifth([g[0], g[1], g[2], g[3], g[4]], g[5])
+            .mul(&ridge(&z).compose_unary_fifth([h[0], h[1], h[2], h[3], h[4]], h[5]));
+        assert_eq!(product.lanes(), K);
+        for lane in 0..K {
+            for a in 0..K {
+                for b in 0..K {
+                    close(product.contracted_fifth(lane)[a * K + b], analytic(a, b, lane));
+                }
+            }
+        }
+
+        let pair_workspace = DynamicJetBatchWorkspace::new(1);
+        let pair_vars = pair_workspace.alloc_slice_fill_with(K, |axis| {
+            DynamicTwoSeedBatch::seed_direction_pairs(values[axis], axis, K, &pair_workspace, |_| {
+                (u[axis], v[axis])
+            })
+        });
+        let pair_ridge = |weights: &[f64; K]| {
+            pair_vars.iter().zip(weights).fold(
+                DynamicTwoSeedBatch::constant(0.0, K, &pair_workspace),
+                |sum, (var, &weight)| sum.add(&var.scale(weight)),
+            )
+        };
+        let pair_product = pair_ridge(&w)
+            .compose_unary([g[0], g[1], g[2], g[3], g[4]])
+            .mul(&pair_ridge(&z).compose_unary([h[0], h[1], h[2], h[3], h[4]]));
+        for a in 0..K {
+            for b in 0..K {
+                close(
+                    product.eps_del.h()[a * K + b],
+                    pair_product.contracted_fourth(0)[a * K + b],
+                );
             }
         }
     }
