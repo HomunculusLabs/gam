@@ -2533,5 +2533,13 @@
     },
     "reason": "#2902 row 9: the standard-REML prepass placed its data-derived starts in a literal (-12, 12) seed box whose upper edge OrderedRhoBounds::with_upper_at_least widened to the derived domain. The prepass box is now the envelope of the #2812 resolvability domain, both faces, so the widening helper and its unit test have no subject.",
     "evidence": "git grep -w with_upper_at_least over the base finds its definition and its one unit test in crates/gam-problem/src/seeding.rs and its only production call in crates/gam-solve/src/estimate/optimizer.rs, replaced in this commit."
+  },
+  {
+    "base": "2f6be1d1a8f9be682f4c136cfee8b14b382f2183",
+    "removed": {
+      "crates/gam-math/src/jet_scalar.rs::g": 1
+    },
+    "reason": "#2899 dead code: DynamicOrder1::g is the public inherent method of the deleted DynamicOrder1, which nothing instantiates.",
+    "evidence": "public_api_census.py --base 6d11cc207 --head 0c093d47f reports exactly this identity (12035 -> 12034) (/scratch.global/sauer354/pool/prune-api-a/slice26.census.json)."
   }
 ]
