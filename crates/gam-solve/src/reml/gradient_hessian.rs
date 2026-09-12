@@ -8481,11 +8481,10 @@ pub(crate) fn predict_warm_start_beta_ift_inner_with_outcome(
     let mut max_abs_drho = 0.0_f64;
     let model_upper_bounds = current_outer_rho_model_upper_bounds_for_ift();
     let upper_active = |idx: usize| -> bool {
-        let upper = model_upper_bounds
+        model_upper_bounds
             .as_ref()
             .and_then(|bounds| bounds.get(idx))
-            .unwrap_or(RHO_BOUND);
-        upper.is_finite() && cache.rho[idx] >= upper - 1.0e-8
+            .is_some_and(|upper| cache.rho[idx] >= upper - 1.0e-8)
     };
 
     let drho: Array1<f64> = (0..k)
@@ -8742,11 +8741,10 @@ pub(crate) fn predict_warm_start_beta_ift_from_mode_response_cols(
     let mut max_abs_drho = 0.0_f64;
     let model_upper_bounds = current_outer_rho_model_upper_bounds_for_ift();
     let upper_active = |idx: usize| -> bool {
-        let upper = model_upper_bounds
+        model_upper_bounds
             .as_ref()
             .and_then(|bounds| bounds.get(idx))
-            .unwrap_or(RHO_BOUND);
-        upper.is_finite() && cache.rho[idx] >= upper - 1.0e-8
+            .is_some_and(|upper| cache.rho[idx] >= upper - 1.0e-8)
     };
 
     let drho: Array1<f64> = (0..k)

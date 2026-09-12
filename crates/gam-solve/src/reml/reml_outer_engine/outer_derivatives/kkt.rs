@@ -251,6 +251,11 @@ pub(crate) fn solve_kkt_residual_kernel(
 /// A singleton active-set search interval is solver geometry, not a model
 /// constraint. Letting its upper endpoint enter this mask erases a real inward
 /// derivative at a model lower rail (#2514).
+///
+/// The face is the one the outer engine recorded for this θ. With no face
+/// recorded there is no rail to freeze on: reading a fixed ±RHO_BOUND instead
+/// froze an interior ρ̂ above 30 on a derived domain whose face is wider
+/// (#2902 row 8).
 pub(crate) fn active_upper_rho_mask(rho: &[f64]) -> Vec<bool> {
     let latest_theta = outer_eval::latest_outer_theta_for_ift();
     let matching_outer_theta = latest_theta.as_ref().is_some_and(|theta| {
@@ -267,11 +272,10 @@ pub(crate) fn active_upper_rho_mask(rho: &[f64]) -> Vec<bool> {
     rho.iter()
         .enumerate()
         .map(|(idx, &value)| {
-            let upper = model_upper_bounds
+            model_upper_bounds
                 .as_ref()
                 .and_then(|bounds| bounds.get(idx))
-                .unwrap_or(crate::estimate::RHO_BOUND);
-            upper.is_finite() && value >= upper - 1.0e-8
+                .is_some_and(|upper| value >= upper - 1.0e-8)
         })
         .collect()
 }

@@ -7565,6 +7565,16 @@ pub(crate) fn rho_gradient_at_upper_bound_is_zero_envelope_and_ift_consistent_is
     // the active coord must still come out exactly 0.
     let beta_hat = array![0.7, -0.4, 0.2];
 
+    // The mask freezes only on a model upper face recorded for this θ
+    // (#2902 row 8), so the fixture declares the face its pinned coordinate
+    // sits on, as the outer engine does before every evaluation.
+    crate::estimate::reml::outer_eval::record_current_outer_theta_for_ift(
+        &ndarray::Array1::from_vec(rho.clone()),
+    );
+    crate::estimate::reml::outer_eval::record_current_outer_rho_model_upper_bounds_for_ift(
+        &ndarray::Array1::from_elem(rho.len(), crate::estimate::RHO_BOUND),
+    );
+
     // Envelope path (no residual attached).
     let sol_envelope = build_gaussian_solution_at_beta(&rho, beta_hat.clone(), false);
     let result_env =
