@@ -7483,25 +7483,13 @@ pub enum OperatorTrustRegionStopReason {
 /// Callers should declare only the primary capability and, at most, whether
 /// automatic fallback is enabled at all.
 ///
-/// Bound on the certify-last checkpoint-resume loop (#2273/#2374). When a
-/// solver CLAIMS convergence but the mandatory analytic certificate refuses,
-/// the loop re-runs the outer search seeded AT the refused checkpoint (with a
-/// fresh metric for gradient-only outers, since `final_hessian` is `None`)
-/// while each resume strictly reduces the objective — real descent the claim
-/// left unexploited. #2273 introduced this as a SINGLE retry for the
-/// stale-tolerance desync (one reseed re-anchors the in-loop tolerance to the
-/// terminal cost scale and certifies). #2374 generalized it to a
-/// progress-bounded loop: a gradient-only `opt::Bfgs` outer in log-λ space can
-/// exit its flat-valley `StallPolicy` at `‖g‖∞ ≤ tol·(1 + ‖ρ‖∞)` — a gate
-/// inflated ~10× by a railed coordinate — reporting `Ok(converged)` at a
-/// checkpoint whose projected gradient the un-inflated certificate correctly
-/// rejects, and a single fresh-metric reseed rarely lands the optimum in one
-/// hop (the transformation-survival LAML of #2373 needed two). This bound caps
-/// how many such reseeds are attempted before the honest non-convergence is
-/// surfaced; a fit that certifies on the first pass never enters the loop, and
-/// a reseed that fails to reduce the objective (a genuine non-stationary floor
-/// a fresh metric cannot escape) stops the loop immediately regardless of the
-/// remaining budget.
+/// Bound on the certify-last reseed loop. When the mandatory analytic
+/// certificate refuses and publishes a strategy change (a saddle escape, a
+/// confirmed-tail snap, a wrong-rail pull-back or an active-set reduction), the
+/// loop re-runs the outer search from that reseed while each re-run strictly
+/// reduces the objective. A refusal that publishes no reseed is returned as is:
+/// re-running from the refused checkpoint only continued the same search with
+/// more iterations (SPEC rules 21 and 23, #2817).
 const OUTER_CERTIFY_RESUME_BUDGET: usize = 16;
 
 /// Max **interior** strict-saddle escape resumes (#2357/#2155/#2612).
@@ -7534,17 +7522,105 @@ const OUTER_CERTIFY_RESUME_BUDGET: usize = 16;
 pub(crate) const OUTER_SADDLE_ESCAPE_BUDGET: usize = 3;
 
 /// Roundoff-relative scale below which a certify-last reseed's objective
-/// reduction is numerical noise rather than exploited descent (#2374). A
-/// fresh-metric BFGS restart seeded AT the refused checkpoint can only reduce
-/// the objective from that checkpoint, so `retried == prior` (to roundoff)
-/// means the restart found no descent — a genuine stationary floor — while a
-/// false flat-valley stall yields a reduction orders of magnitude above this
-/// scale. The progress gate MUST anchor on roundoff, not the much larger
+/// reduction is numerical noise rather than exploited descent (#2374). A re-run
+/// from a certificate's reseed that ends no lower than the refused checkpoint
+/// (to roundoff) found no descent — a genuine floor — while exploited descent
+/// yields a reduction orders of magnitude above this scale. The progress gate MUST anchor on roundoff, not the much larger
 /// cost-stall relative floor: a flat valley crawls out in per-reseed steps far
 /// smaller than `rel_cost·(1 + |cost|)` (the transformation-survival LAML moves
 /// ~4e-5 relative per reseed), and gating on that coarser floor stops the crawl
 /// after a single hop and refuses a well-posed fit.
 const CERTIFY_RESUME_PROGRESS_REL: f64 = 32.0 * f64::EPSILON;
+
+/// The kind of strategy change a refused mint certificate published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CertifyReseedKind {
+    /// A negative-curvature escape stepped strictly below a strict saddle
+    /// (#2357/#2155) that stays inside the box and retires no coordinate.
+    InteriorSaddleEscape,
+    /// A negative-curvature escape that landed on the box face: it retired a
+    /// previously-free coordinate onto a rail, and there are only `n` of those
+    /// (#2612).
+    FaceSaddleEscape,
+    /// A confirmed-tail snapped face (#2348 Inc 2b, #2349).
+    TailSnap,
+    /// A wrong-rail pull-back to the coordinate's clean-band interior (#2392).
+    WrongRail,
+    /// An active-set reduction: railed coordinates frozen so the interior
+    /// polishes in the reduced box (#2392).
+    ActiveSet,
+}
+
+/// A strategy change a refused mint certificate published: where the re-run
+/// starts, and for an active-set reduction the reduced search box.
+struct CertifyReseed {
+    rho: Array1<f64>,
+    search_bounds_override: Option<(Array1<f64>, Array1<f64>)>,
+    kind: CertifyReseedKind,
+}
+
+/// Take the reseed a refused certificate published, in precedence order: a
+/// saddle escape, then a confirmed-tail snap, then a wrong-rail pull-back, then
+/// an active-set reduction. Every lower-precedence reseed is taken and dropped,
+/// so no stale reseed leaks into a later iteration.
+///
+/// A published reseed is first-order evidence of where the search should go,
+/// so it is taken whether or not the solver claimed convergence: for
+/// exact-Hessian link-wiggle families the terminal certificate, not the in-loop
+/// gate, is where stationarity is first reached. `None` means the certificate
+/// published no strategy change, and the refusal stands: re-running the same
+/// search from the refused checkpoint only continued it with more iterations
+/// (SPEC rules 21 and 23, #2817).
+fn take_certify_reseed(result: &mut OuterResult, config: &OuterConfig) -> Option<CertifyReseed> {
+    let saddle_escape = result.saddle_escape_reseed.take();
+    let tail_snap = result.tail_snap_reseed.take();
+    let wrong_rail = result.wrong_rail_reseed.take();
+    let active_set = result.active_set_reseed.take();
+    if let Some(reseed) = saddle_escape {
+        // Did this escape retire a free coordinate onto a rail (#2612)? It is a
+        // property of the two points and the box: the escape direction is exactly
+        // zero on every already-railed coordinate, so a reseed on a bound that the
+        // refused checkpoint held strictly inside has retired that coordinate.
+        let (lower, upper) = outer_model_domain_bounds_template(config, reseed.len());
+        let retires_a_coordinate = (0..reseed.len()).any(|i| {
+            let on_bound = reseed[i] <= lower[i] || reseed[i] >= upper[i];
+            let was_interior = result
+                .rho
+                .get(i)
+                .is_some_and(|held| *held > lower[i] && *held < upper[i]);
+            on_bound && was_interior
+        });
+        let kind = if retires_a_coordinate {
+            CertifyReseedKind::FaceSaddleEscape
+        } else {
+            CertifyReseedKind::InteriorSaddleEscape
+        };
+        return Some(CertifyReseed {
+            rho: reseed,
+            search_bounds_override: None,
+            kind,
+        });
+    }
+    if let Some(reseed) = tail_snap {
+        return Some(CertifyReseed {
+            rho: reseed,
+            search_bounds_override: None,
+            kind: CertifyReseedKind::TailSnap,
+        });
+    }
+    if let Some(reseed) = wrong_rail {
+        return Some(CertifyReseed {
+            rho: reseed,
+            search_bounds_override: None,
+            kind: CertifyReseedKind::WrongRail,
+        });
+    }
+    active_set.map(|reseed| CertifyReseed {
+        rho: reseed.rho,
+        search_bounds_override: Some(reseed.bounds),
+        kind: CertifyReseedKind::ActiveSet,
+    })
+}
 
 pub(crate) fn run_outer(
     obj: &mut dyn OuterObjective,
@@ -7694,23 +7770,11 @@ pub(crate) fn run_outer(
         }
         certify_outer_optimality(obj, config, context, result)
     };
-    // Certify-last checkpoint-resume loop (#2273 stale-tolerance desync,
-    // generalized by #2374). A solver that CLAIMS convergence but fails the
-    // mandatory analytic certificate is re-run once per iteration seeded AT the
-    // refused checkpoint — re-anchoring the in-loop tolerance to the terminal
-    // cost scale and, for gradient-only outers (`final_hessian == None`),
-    // restarting `opt::Bfgs` with a fresh inverse-Hessian metric that breaks the
-    // flat-valley `StallPolicy` false stop the accumulated metric crawled into.
-    // Looping (rather than the original single retry) matters because that stall
-    // gate is inflated by `(1 + ‖ρ‖∞)` in log-λ space, so one fresh-metric
-    // reseed rarely lands the optimum in a single hop. The loop stops the moment
-    // certification passes; it also stops — regardless of remaining budget —
-    // when a reseed fails to strictly reduce the objective, because a point that
-    // a fresh-metric restart cannot improve is a genuine non-stationary floor
-    // (or a true flat valley), not an exploitable false stall, and further
-    // reseeds would only re-derive the same refusal. A result that never claimed
-    // convergence (e.g. a budget-exhausted `MaxIterationsReached`) is refused
-    // immediately with no reseed: its non-convergence is genuine.
+    // Certify-last reseed loop (#2357, #2348, #2392). When the mandatory analytic
+    // certificate refuses and publishes a strategy change (`take_certify_reseed`),
+    // the search re-runs from that reseed with a fresh metric, and the loop stops
+    // the moment certification passes or a re-run fails to strictly reduce the
+    // objective. A refusal that publishes no reseed is returned as is (#2817).
     let mut resumes_remaining = OUTER_CERTIFY_RESUME_BUDGET;
     // INTERIOR strict-saddle escapes are bounded separately and tightly: one that
     // lands inside the box retires nothing, so a count is the only bound there is
@@ -7730,136 +7794,26 @@ pub(crate) fn run_outer(
     // cascade replays the recorded verdict instead of re-deriving it.
     let mut refused_seed_points: Vec<Array1<f64>> = Vec::new();
     let certificate = loop {
-        let claimed_converged = result.solver_claimed_convergence();
         match certify_diagnose_and_install(obj, &mut result) {
             Ok(certificate) => break certificate,
             Err(refusal) => {
-                // #2357/#2155 — interior strict-saddle escape. When the refusal
-                // is a first-order-stationary point whose reduced (off-railed)
-                // Hessian is indefinite, the certificate publishes a
-                // negative-curvature reseed stepped strictly BELOW the saddle
-                // (`adjudicate_negative_curvature`). Reseeding the resume at the
-                // refused checkpoint itself would re-descend straight back to that
-                // zero-gradient saddle — the #2273/#2374 stale-tolerance resume
-                // anchors the tolerance and breaks flat-valley stalls, but it
-                // cannot break a genuine saddle. Seed at the escape point instead,
-                // off the ridge, and start from a FRESH outer metric so the
-                // saddle's indefinite curvature is not transferred into the
-                // restart. This is the run_outer-level consumer of the reseed that
-                // the multistart-loop consumer (`run_outer_with_plan`) mints only
-                // when a per-seed claim is already stationary; the terminal
-                // certificate is where stationarity is reached for the binomial
-                // link-wiggle families, so without this the reseed was minted and
-                // then dropped.
-                let saddle_escape_reseed = result.saddle_escape_reseed.take();
-                let resume_from_saddle_escape = saddle_escape_reseed.is_some();
-                // Did this escape RETIRE a free coordinate onto a rail (#2612)?
-                //
-                // Read off the reseed rather than plumbed down from the
-                // adjudication, because it is a property of the two points and
-                // the box and nothing else: a coordinate the refused checkpoint
-                // held strictly inside the box now sits on a bound. The escape
-                // direction is exactly zero on every already-railed coordinate,
-                // so the ray's box intersection can only be set by a free one —
-                // which is why "landed on the face" and "retired a free
-                // coordinate" are the same event.
-                let saddle_escape_retires_a_coordinate =
-                    saddle_escape_reseed.as_ref().is_some_and(|reseed| {
-                        let (lower, upper) =
-                            outer_model_domain_bounds_template(config, reseed.len());
-                        (0..reseed.len()).any(|i| {
-                            let on_bound = reseed[i] <= lower[i] || reseed[i] >= upper[i];
-                            let was_interior = result
-                                .rho
-                                .get(i)
-                                .is_some_and(|held| *held > lower[i] && *held < upper[i]);
-                            on_bound && was_interior
-                        })
-                    });
-                // #2348 Inc 2b, completed (#2349 round 8): a confirmed-tail
-                // snap that needs a re-descent publishes the snapped face as
-                // `tail_snap_reseed` — previously minted and then DROPPED
-                // (declared, set, never consumed), so every ConfirmedNeedsReseed
-                // outcome fell through to the plain refusal. The joint tail law
-                // is first-order evidence of WHERE the optimum is, so the retry
-                // is warranted regardless of the solver's convergence claim,
-                // exactly like the saddle-escape reseed (measured on the #2349
-                // fixture: the face snap descends 3.86 with |Pg| dropping
-                // 2.05 → 0.35; the retry lets over-snapped coordinates relax
-                // back to their interior optima while the rest hold the rail).
-                let tail_snap_reseed = if resume_from_saddle_escape {
-                    result.tail_snap_reseed.take();
-                    None
-                } else {
-                    result.tail_snap_reseed.take()
+                let Some(reseed) = take_certify_reseed(&mut result, config) else {
+                    return Err(refusal);
                 };
-                let resume_from_tail_snap = tail_snap_reseed.is_some();
-                // #2392 — wrong-rail pull-back and active-set reduction reseeds,
-                // consumed with LOWER precedence than the saddle/tail-snap
-                // reseeds. A higher-precedence reseed DROPS them (take-and-discard)
-                // so no stale reseed leaks into a later iteration, exactly as the
-                // saddle escape drops a co-minted tail snap above. Both are
-                // first-order evidence (a proven inward descent / a poisoned-rail
-                // interior), so — like the tail snap — they fire regardless of the
-                // solver's convergence claim.
-                let higher_precedence_reseed = resume_from_saddle_escape || resume_from_tail_snap;
-                let wrong_rail_reseed = if higher_precedence_reseed {
-                    result.wrong_rail_reseed.take();
-                    None
-                } else {
-                    result.wrong_rail_reseed.take()
-                };
-                let resume_from_wrong_rail = wrong_rail_reseed.is_some();
-                let active_set_reseed = if higher_precedence_reseed || resume_from_wrong_rail {
-                    result.active_set_reseed.take();
-                    None
-                } else {
-                    result.active_set_reseed.take()
-                };
-                let resume_from_active_set = active_set_reseed.is_some();
-                let active_set_rho = active_set_reseed.as_ref().map(|a| a.rho.clone());
-                let active_set_bounds = active_set_reseed.map(|a| a.bounds);
-                // A published reseed means the refused point IS first-order
-                // stationary (the escape mint gate requires `is_stationary`), so
-                // it is a genuine saddle escapable regardless of whether the
-                // solver "claimed" convergence: for exact-Hessian link-wiggle
-                // families the terminal certificate — not the in-loop gate — is
-                // where stationarity is first reached, so they arrive here with
-                // `converged == false` yet stationary. The #2273/#2374
-                // stale-tolerance resume, which reseeds AT the refused checkpoint,
-                // still requires a genuine convergence claim (a budget-exhausted
-                // non-stationary iterate has no desync to remove).
-                if (!claimed_converged
-                    && !resume_from_saddle_escape
-                    && !resume_from_tail_snap
-                    && !resume_from_wrong_rail
-                    && !resume_from_active_set)
-                    || resumes_remaining == 0
-                    || (resume_from_saddle_escape
-                        && !saddle_escape_retires_a_coordinate
+                if resumes_remaining == 0
+                    || (reseed.kind == CertifyReseedKind::InteriorSaddleEscape
                         && interior_saddle_escapes_remaining == 0)
                 {
                     return Err(refusal);
                 }
                 resumes_remaining -= 1;
-                if resume_from_saddle_escape && !saddle_escape_retires_a_coordinate {
-                    // An INTERIOR escape retires nothing, so it can in principle
-                    // repeat forever — a pathological objective (a bimodal inner
-                    // solve whose warm re-descent keeps reporting a phantom
-                    // improvement the cold certificate cannot reproduce, #2155 /
-                    // #2363) would otherwise burn the whole resume budget
-                    // re-escaping a family of shallow saddles that never
-                    // certifies. A count is the only bound available for that, so
-                    // the small cap stands and past it the honest refusal is
-                    // taken.
-                    //
-                    // An escape that landed on the box FACE is a different event
-                    // (#2612): it retired a previously-free coordinate onto a
-                    // rail, there are only `n` coordinates to retire, and the
-                    // criterion strictly decreased on the way. It is bounded by
-                    // `resumes_remaining` above, like every other reseed kind, and
-                    // by the descent gate below, which stops the loop the moment a
-                    // resume fails to strictly improve.
+                if reseed.kind == CertifyReseedKind::InteriorSaddleEscape {
+                    // An interior escape retires nothing, so it can in principle
+                    // repeat: a bimodal inner solve whose warm re-descent reports a
+                    // phantom improvement the cold certificate cannot reproduce
+                    // (#2155/#2363) would re-escape a family of shallow saddles. A
+                    // face escape retires a coordinate and is bounded by
+                    // `resumes_remaining` and the descent gate below (#2612).
                     interior_saddle_escapes_remaining -= 1;
                 }
                 let prior_iterations = result.iterations;
@@ -7867,28 +7821,24 @@ pub(crate) fn run_outer(
                 log::info!(
                     "[OUTER] {context}: analytic certification refused after \
                      {prior_iterations} iteration(s) (final_value={prior_value:.6e}); re-running \
-                     seeded {} so the in-loop tolerance anchors to the terminal cost scale \
-                     ({resumes_remaining} resume(s) left after this one; #2273/#2374/#2155)",
-                    if resume_from_saddle_escape {
-                        "off the negative-curvature saddle ridge"
-                    } else if resume_from_tail_snap {
-                        "at the confirmed-tail snapped face"
-                    } else if resume_from_wrong_rail {
-                        "at the wrong-rail coordinate's clean-band interior scale"
-                    } else if resume_from_active_set {
-                        "with the poisoned rail frozen so the interior polishes in the reduced box"
-                    } else {
-                        "at the refused checkpoint"
+                     from the certificate's reseed {} ({resumes_remaining} resume(s) left after \
+                     this one; #2357/#2348/#2392)",
+                    match reseed.kind {
+                        CertifyReseedKind::InteriorSaddleEscape
+                        | CertifyReseedKind::FaceSaddleEscape => {
+                            "off the negative-curvature saddle ridge"
+                        }
+                        CertifyReseedKind::TailSnap => "at the confirmed-tail snapped face",
+                        CertifyReseedKind::WrongRail => {
+                            "at the wrong-rail coordinate's clean-band interior scale"
+                        }
+                        CertifyReseedKind::ActiveSet => {
+                            "with the poisoned rail frozen so the interior polishes in the reduced box"
+                        }
                     }
                 );
                 let mut retry_cfg = config.clone();
-                retry_cfg.initial_rho = Some(
-                    saddle_escape_reseed
-                        .or(tail_snap_reseed)
-                        .or(wrong_rail_reseed)
-                        .or(active_set_rho)
-                        .unwrap_or_else(|| result.rho.clone()),
-                );
+                retry_cfg.initial_rho = Some(reseed.rho);
                 // Active-set reduction (#2392): the polish runs in the REDUCED
                 // (frozen) box so the interior converges without the railed
                 // coordinate's ill-conditioned Hessian row poisoning the step. The
@@ -7907,7 +7857,7 @@ pub(crate) fn run_outer(
                 // wrong freeze, and the only path back off a frozen bound is the
                 // wrong-rail pull-back, which needs a clean opposite-sign
                 // exponential tail and declines on any coordinate without one.
-                if let Some(frozen_bounds) = active_set_bounds {
+                if let Some(frozen_bounds) = reseed.search_bounds_override {
                     retry_cfg.search_bounds_override = Some(frozen_bounds);
                 }
                 retry_cfg.heuristic_lambdas = None;
@@ -7928,32 +7878,20 @@ pub(crate) fn run_outer(
                     }
                 }
                 retry_cfg.previously_refused_seed_points = refused_seed_points.clone();
-                // Every reseed kind lands at a genuinely different point, so the
-                // refused checkpoint's metric (trust radius, outer Hessian)
-                // must not be transferred into the restart.
-                let fresh_metric = resume_from_saddle_escape
-                    || resume_from_tail_snap
-                    || resume_from_wrong_rail
-                    || resume_from_active_set;
-                retry_cfg.operator_initial_trust_radius = if fresh_metric {
-                    None
-                } else {
-                    result.operator_trust_radius
-                };
-                retry_cfg.warm_start_outer_hessian = if fresh_metric {
-                    None
-                } else {
-                    result.final_hessian.clone()
-                };
+                // Every reseed lands at a genuinely different point, so the refused
+                // checkpoint's metric (trust radius, outer Hessian) must not be
+                // transferred into the restart.
+                retry_cfg.operator_initial_trust_radius = None;
+                retry_cfg.warm_start_outer_hessian = None;
                 obj.reset();
                 match run_outer_uncertified(obj, &retry_cfg, context) {
                     Ok(mut retried) => {
                         retried.iterations = retried.iterations.saturating_add(prior_iterations);
-                        // Progress gate. A fresh-metric reseed seeded AT the
-                        // checkpoint can only descend from it, so a reduction at
-                        // roundoff scale means it found no descent — a genuine
-                        // stationary floor — while a false flat-valley stall
-                        // yields a reduction orders of magnitude larger. Gate on
+                        // Progress gate. A re-run that ends no lower than the
+                        // refused checkpoint beyond roundoff found no descent from
+                        // the certificate's evidence — a genuine floor — while
+                        // exploited descent yields a reduction orders of magnitude
+                        // larger. Gate on
                         // roundoff (NOT the coarser cost-stall floor) so a valley
                         // that crawls out in tiny per-reseed steps is not cut off
                         // after one hop; stop only when a reseed truly stalls, so

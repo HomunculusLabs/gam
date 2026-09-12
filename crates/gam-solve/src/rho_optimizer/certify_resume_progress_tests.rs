@@ -1,13 +1,14 @@
-//! Unit coverage for the certify-last checkpoint-resume progress gate
-//! (#2374). The generalized loop keeps reseeding at the refused checkpoint
-//! only while each reseed exploits real descent; `certify_resume_made_progress`
-//! is the exact predicate that decides "real descent" vs "genuine floor", so
-//! pinning it directly pins the loop's termination contract independent of the
-//! solver dynamics that produce the reseeds.
+//! Unit coverage for the certify-last reseed loop (#2374, #2817). The loop
+//! re-runs from a strategy change the refused certificate published, and only
+//! while each re-run exploits real descent: `take_certify_reseed` decides whether
+//! there is a strategy change at all, and `certify_resume_made_progress` is the
+//! exact predicate that decides "real descent" vs "genuine floor".
 use super::{
-    CERTIFY_RESUME_PROGRESS_REL, OuterConfig, certify_resume_made_progress,
-    outer_rel_cost_floor,
+    ActiveSetReseed, CERTIFY_RESUME_PROGRESS_REL, CertifyReseedKind, HessianSource, OuterConfig,
+    OuterPlan, OuterResult, Solver, certify_resume_made_progress, outer_rel_cost_floor,
+    take_certify_reseed,
 };
+use ndarray::array;
 
 fn config_with_rel_cost(rel_cost: Option<f64>, tolerance: f64) -> OuterConfig {
     OuterConfig {
@@ -105,4 +106,54 @@ fn roundoff_gate_rejects_noise_and_non_descent() {
     // Uphill / non-finite are never progress.
     assert!(!certify_resume_made_progress(455.40, 455.41, rel));
     assert!(!certify_resume_made_progress(455.40, f64::NAN, rel));
+}
+
+fn arc_plan_2817() -> OuterPlan {
+    OuterPlan {
+        solver: Solver::Arc,
+        hessian_source: HessianSource::Analytic,
+    }
+}
+
+/// #2817 (lead ruling 09-12): a refused certificate that publishes no strategy
+/// change returns the refusal. The resume at the refused checkpoint re-ran the
+/// same search with more iterations under a picked count, so a checkpoint whose
+/// solver claimed convergence but carries no reseed yields no re-run at all.
+#[test]
+fn a_refused_checkpoint_without_a_strategy_change_returns_the_refusal_2817() {
+    let mut claimed = OuterResult::new(array![0.25, -1.5], 3.0, 12, true, arc_plan_2817());
+    assert!(
+        claimed.solver_claimed_convergence(),
+        "fixture precondition: the solver claimed convergence at the refused checkpoint"
+    );
+    assert!(
+        take_certify_reseed(&mut claimed, &OuterConfig::default()).is_none(),
+        "a refusal with no published reseed must stand, not re-run the search from the checkpoint"
+    );
+}
+
+/// The strategy changes a refused certificate can publish are taken in
+/// precedence order, and every lower-precedence reseed is dropped with them.
+#[test]
+fn a_published_reseed_is_taken_in_precedence_order_and_the_rest_dropped_2817() {
+    let mut result = OuterResult::new(array![1.0, 2.0], 3.0, 4, false, arc_plan_2817());
+    result.tail_snap_reseed = Some(array![1.0, 3.0]);
+    result.wrong_rail_reseed = Some(array![1.5, 2.0]);
+    result.active_set_reseed = Some(ActiveSetReseed {
+        rho: array![1.0, 2.0],
+        bounds: (array![-4.0, 2.0], array![4.0, 2.0]),
+    });
+    let reseed = take_certify_reseed(&mut result, &OuterConfig::default())
+        .expect("a confirmed-tail snap was published");
+    assert_eq!(reseed.kind, CertifyReseedKind::TailSnap);
+    assert_eq!(reseed.rho, array![1.0, 3.0]);
+    assert!(reseed.search_bounds_override.is_none());
+    assert!(
+        result.wrong_rail_reseed.is_none() && result.active_set_reseed.is_none(),
+        "lower-precedence reseeds are dropped with the one taken"
+    );
+    assert!(
+        take_certify_reseed(&mut result, &OuterConfig::default()).is_none(),
+        "no reseed survives into the next iteration"
+    );
 }
