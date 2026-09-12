@@ -18,7 +18,6 @@ into a :class:`CompositePenalty`.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import numpy as np
@@ -30,6 +29,7 @@ from ._penalty_bridge import (
     call_value_grad as _call_value_grad,
     ordered_beta_bernoulli_descriptor,
     mechanism_sparsity_descriptor,
+    torch_value_grad_from_rust,
 )
 from ._protocol import PenaltyDescriptor, _require_torch
 
@@ -57,46 +57,6 @@ def _infer_shape(t: Any) -> tuple[int, int]:
     raise ValueError(f"penalty target must be 1-D or 2-D, got {ndim}-D")
 
 
-class _PenaltyValueFn:
-    """Wrap the value/grad/hvp Rust calls behind a torch autograd.Function.
-
-    Implemented as a class factory because ``torch`` may not be importable
-    at module load time; we build the autograd.Function on first use.
-    """
-
-    _impl = None
-
-    @classmethod
-    def get(cls) -> Any:
-        if cls._impl is not None:
-            return cls._impl
-        torch = _require_torch()
-
-        class _Impl(torch.autograd.Function):
-            @staticmethod
-            def forward(ctx: Any, t: Any, n: int, d: int, target_name: str, descriptor_json: str) -> Any:
-                descriptor = json.loads(descriptor_json)
-                t_np = _to_numpy_f64(t)
-                value, grad, _ = _call_value_grad(t_np, n, d, target_name, descriptor)
-                ctx.save_for_backward(t.detach())
-                ctx.n = n
-                ctx.d = d
-                ctx.target_name = target_name
-                ctx.descriptor_json = descriptor_json
-                ctx.grad_cache = grad
-                return torch.as_tensor(value, dtype=t.dtype, device=t.device)
-
-            @staticmethod
-            def backward(ctx: Any, grad_output: Any) -> tuple[Any, None, None, None, None]:
-                (t,) = ctx.saved_tensors
-                grad = ctx.grad_cache
-                grad_t = torch.as_tensor(grad, dtype=t.dtype, device=t.device).reshape_as(t)
-                return grad_output.to(dtype=t.dtype, device=t.device) * grad_t, None, None, None, None
-
-        cls._impl = _Impl
-        return cls._impl
-
-
 class _RustPenaltyDescriptor(PenaltyDescriptor):
     """Mixin for analytic penalties whose ``value / value_grad / hvp`` is
     delegated to ``analytic_penalty_value_grad`` / ``analytic_penalty_hvp``.
@@ -116,24 +76,8 @@ class _RustPenaltyDescriptor(PenaltyDescriptor):
         once; the output type matches the input frame. Torch / JAX outputs
         carry an autograd graph back to ``t``.
         """
-        from ._frame import Frame, detect_frame
-
-        frame = detect_frame(t)
-        if frame is Frame.NUMPY:
-            v, _g = self.value_grad(t)
-            return v
-        if frame is Frame.JAX:
-            v, _g = self.value_grad(t)
-            return v
-        torch = _require_torch()
-        if not isinstance(t, torch.Tensor):
-            t = torch.as_tensor(t, dtype=torch.float64)
-        if not torch.is_floating_point(t):
-            t = t.to(torch.float64)
-        n, d = _infer_shape(t)
-        descriptor = self._descriptor(n, d)
-        fn = _PenaltyValueFn.get()
-        return fn.apply(t.contiguous(), n, d, self.target_name, json.dumps(descriptor))
+        value, _grad = self.value_grad(t)
+        return value
 
     def value_grad(self, t: Any) -> tuple[Any, Any]:
         """``(value, ∂value/∂t)`` in the frame of ``t``.
@@ -160,11 +104,19 @@ class _RustPenaltyDescriptor(PenaltyDescriptor):
             t = t.to(torch.float64)
         n, d = _infer_shape(t)
         descriptor = self._descriptor(n, d)
-        t_np = _to_numpy_f64(t)
-        value, grad, _ = _call_value_grad(t_np, n, d, self.target_name, descriptor)
-        v = torch.as_tensor(value, dtype=t.dtype, device=t.device)
-        g = torch.as_tensor(grad, dtype=t.dtype, device=t.device).reshape_as(t)
-        return v, g
+
+        def value_grad_np(x_np: np.ndarray) -> tuple[float, np.ndarray]:
+            value, grad, _ = _call_value_grad(
+                x_np.reshape(-1), n, d, self.target_name, descriptor
+            )
+            return value, grad.reshape(x_np.shape)
+
+        def hvp_np(x_np: np.ndarray, v_np: np.ndarray) -> np.ndarray:
+            return _call_hvp(
+                x_np.reshape(-1), v_np.reshape(-1), n, d, self.target_name, descriptor
+            ).reshape(x_np.shape)
+
+        return torch_value_grad_from_rust(t, value_grad_np, hvp_np)
 
     def to_rust_descriptor(self) -> dict[str, Any]:
         """Return the JSON descriptor consumed by the Rust analytic-penalty

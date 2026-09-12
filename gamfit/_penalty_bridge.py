@@ -38,6 +38,7 @@ __all__ = [
     "penalty_json",
     "call_value_grad",
     "call_hvp",
+    "torch_value_grad_from_rust",
     "call_rust_value_grad",
     "jax_value_grad_from_rust",
     "ard_descriptor",
@@ -130,6 +131,51 @@ def call_hvp(
         None,
     )
     return np.asarray(out, dtype=np.float64)
+
+
+def torch_value_grad_from_rust(
+    t: Any,
+    value_grad_np: Any,
+    hvp_np: Any,
+) -> tuple[Any, Any]:
+    """Torch ``(value, grad)`` at ``t`` from the Rust gradient and HVP kernels.
+
+    ``value_grad_np(x) -> (value, grad)`` and ``hvp_np(x, v) -> H·v`` take and
+    return NumPy arrays shaped like ``t``. ``value`` is autograd-connected to
+    ``t`` through the Rust gradient, and that gradient is itself connected
+    through the Rust Hessian-vector product, so differentiating a
+    ``create_graph=True`` gradient of ``value`` reaches the analytic Hessian
+    instead of a detached constant.
+    """
+    from ._frame_torch import from_numpy_like, to_numpy_f64
+
+    torch = _torch()
+    value_np, grad_np = value_grad_np(to_numpy_f64(t))
+
+    class _Grad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx: Any, x: Any) -> Any:
+            ctx.save_for_backward(x)
+            _value, grad = value_grad_np(to_numpy_f64(x))
+            return from_numpy_like(grad, x)
+
+        @staticmethod
+        def backward(ctx: Any, v: Any) -> Any:
+            (x,) = ctx.saved_tensors
+            return from_numpy_like(hvp_np(to_numpy_f64(x), to_numpy_f64(v)), x)
+
+    class _Value(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx: Any, x: Any) -> Any:
+            ctx.save_for_backward(x)
+            return torch.as_tensor(float(value_np), dtype=x.dtype, device=x.device)
+
+        @staticmethod
+        def backward(ctx: Any, grad_out: Any) -> Any:
+            (x,) = ctx.saved_tensors
+            return _Grad.apply(x) * grad_out
+
+    return _Value.apply(t), from_numpy_like(grad_np, t)
 
 
 def call_rust_value_grad(

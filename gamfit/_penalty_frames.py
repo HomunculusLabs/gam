@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 
 from ._penalties import _penalty_value_grad_via_rust, _penalty_hvp_via_rust
+from ._penalty_bridge import torch_value_grad_from_rust
 
 
 # ---------------------------------------------------------------------------
@@ -26,39 +27,17 @@ from ._penalties import _penalty_value_grad_via_rust, _penalty_hvp_via_rust
 
 
 def torch_penalty_value_grad(wrapper: Any, t: Any) -> tuple[Any, Any]:
-    """Torch-frame ``(value, grad)`` with autograd connected to ``t``.
+    """Torch-frame ``(value, grad)``, autograd-connected to ``t`` to second order.
 
-    The forward pass calls the Rust kernel once. ``grad`` is the analytic
-    Rust gradient already shaped like ``t``. The returned ``value`` tensor
-    is autograd-connected to ``t`` through a
-    :class:`torch.autograd.Function` whose backward consults the Rust
-    kernel again — so ``torch.autograd.grad(value, t)`` matches ``grad``
-    exactly.
+    ``torch.autograd.grad(value, t)`` runs the Rust gradient, and a second
+    gradient through it runs the Rust Hessian-vector product (see
+    :func:`gamfit._penalty_bridge.torch_value_grad_from_rust`).
     """
-    from ._frame import import_torch
-    from ._frame_torch import from_numpy_like, to_numpy_f64
-
-    torch = import_torch()
-    t_np = to_numpy_f64(t)
-    value_np, grad_np = _penalty_value_grad_via_rust(wrapper, t_np)
-
-    class _Fn(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx: Any, x: Any) -> Any:
-            ctx.save_for_backward(x)
-            return torch.as_tensor(value_np, dtype=x.dtype, device=x.device)
-
-        @staticmethod
-        def backward(ctx: Any, grad_out: Any) -> Any:
-            (x,) = ctx.saved_tensors
-            x_np = to_numpy_f64(x)
-            _v, g_np = _penalty_value_grad_via_rust(wrapper, x_np)
-            g_t = from_numpy_like(np.asarray(g_np, dtype=np.float64), x)
-            return g_t * grad_out.to(dtype=g_t.dtype, device=g_t.device)
-
-    value_t = _Fn.apply(t)
-    grad_t = from_numpy_like(np.asarray(grad_np, dtype=np.float64), t)
-    return value_t, grad_t
+    return torch_value_grad_from_rust(
+        t,
+        lambda x: _penalty_value_grad_via_rust(wrapper, x),
+        lambda x, v: _penalty_hvp_via_rust(wrapper, x, v),
+    )
 
 
 def torch_penalty_hvp(wrapper: Any, t: Any, v: Any) -> Any:
