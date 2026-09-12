@@ -83,7 +83,7 @@ use std::sync::Arc;
 /// embarrassingly parallel O(K) step assembly — is the only path that scales to
 /// the `10^4`–`10^5` ARD-per-atom regime. The threshold is auto-derived from
 /// the coordinate count alone; there is no flag.
-pub const PER_ATOM_EFS_MIN_RHO_DIM: usize = 64;
+pub(crate) const PER_ATOM_EFS_MIN_RHO_DIM: usize = 64;
 
 /// Maximum absolute step in log-λ for any single per-atom update, mirroring the
 /// `EFS_MAX_STEP` clamp the unified EFS path applies, so one outer iteration
@@ -105,7 +105,7 @@ pub(crate) const PER_ATOM_COST_DESCENT_TOL: f64 = 1e-12;
 /// Magic-by-default: derived from the ρ-dimension only. The caller passes the
 /// number of penalty-like smoothing coordinates (`rho_dim`); no flag, no env.
 #[inline]
-pub fn is_frontier_rho_scale(rho_dim: usize) -> bool {
+pub(crate) fn is_frontier_rho_scale(rho_dim: usize) -> bool {
     rho_dim >= PER_ATOM_EFS_MIN_RHO_DIM
 }
 
@@ -190,14 +190,14 @@ impl SharedBorderTopology {
 
     /// Indices of the shared-border axes (sorted, deduplicated, in range).
     #[inline]
-    pub fn border_axes(&self) -> &[usize] {
+    pub(crate) fn border_axes(&self) -> &[usize] {
         &self.border_axes
     }
 
     /// Number of shared-border axes `m`. The coupled correction solves an
     /// `m × m` system; when `m == 0` it is skipped entirely.
     #[inline]
-    pub fn border_count(&self) -> usize {
+    pub(crate) fn border_count(&self) -> usize {
         self.border_axes.len()
     }
 

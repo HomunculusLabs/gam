@@ -316,7 +316,7 @@ impl PenaltyPseudologdet {
     /// unweighted active penalty span and then applied to the current weighted
     /// spectrum. That keeps real range-space modes active even when one lambda
     /// is tiny relative to another same-block penalty.
-    pub fn from_penalties(
+    pub(crate) fn from_penalties(
         penalties: &[gam_terms::construction::CanonicalPenalty],
         lambdas: &[f64],
         ridge: f64,
@@ -1433,7 +1433,7 @@ impl PenaltyPseudologdet {
 
     /// Block-local variant of `rho_derivatives()` that consumes canonical
     /// penalties directly without materializing global `p x p` penalty matrices.
-    pub fn rho_derivatives_from_penalties(
+    pub(crate) fn rho_derivatives_from_penalties(
         &self,
         penalties: &[gam_terms::construction::CanonicalPenalty],
         lambdas: &[f64],

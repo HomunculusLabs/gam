@@ -103,7 +103,7 @@ impl SmoothingCorrectionOutcome {
     /// cubature-approximated) WPS correction — the corrected-EDF/AIC channel
     /// — has it available even when the primary pair escalated to cubature
     /// for some other consumer's benefit.
-    pub fn into_correction_with_method(
+    pub(crate) fn into_correction_with_method(
         self,
     ) -> (
         Option<Array2<f64>>,
@@ -156,7 +156,7 @@ impl SmoothingCorrectionOutcome {
     }
 
     /// Human-readable label naming the branch taken.
-    pub fn branch_label(&self) -> &'static str {
+    pub(crate) fn branch_label(&self) -> &'static str {
         match self {
             SmoothingCorrectionOutcome::Cubature { .. } => "cubature",
             SmoothingCorrectionOutcome::Unavailable { .. } => "unavailable",

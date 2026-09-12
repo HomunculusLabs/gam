@@ -3460,7 +3460,7 @@ impl JeffreysHphiDriftBase {
 
     /// Prepare from an already-authoritative reduced-information plan.  The
     /// derivative provider is never touched when the plan's gate is inactive.
-    pub fn prepare_from_plan<BaseFn>(
+    pub(crate) fn prepare_from_plan<BaseFn>(
         plan: JointJeffreysPlan,
         base_hessian_dir: BaseFn,
     ) -> Result<Option<JeffreysHphiDriftBase>, String>

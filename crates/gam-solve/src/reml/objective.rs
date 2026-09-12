@@ -442,7 +442,7 @@ impl<'a> RemlState<'a> {
     /// Outside of screening mode this delegates to [`Self::compute_cost`] so
     /// the optimization objective itself is never changed by this method's
     /// presence.
-    pub fn compute_screening_proxy(&self, p: &Array1<f64>) -> Result<f64, EstimationError> {
+    pub(crate) fn compute_screening_proxy(&self, p: &Array1<f64>) -> Result<f64, EstimationError> {
         let in_screening = self.screening_max_inner_iterations.load(Ordering::Relaxed) > 0;
         if !in_screening {
             return self.compute_cost(p);
@@ -2484,7 +2484,7 @@ impl<'a> RemlState<'a> {
     /// unified `reml_laml_evaluate` function. Both `compute_cost` and
     /// `compute_gradient` ultimately delegate here, ensuring that cost and
     /// gradient share the exact same formula.
-    pub fn evaluate_unified(
+    pub(crate) fn evaluate_unified(
         &self,
         rho: &Array1<f64>,
         bundle: &EvalShared,
@@ -2514,7 +2514,7 @@ impl<'a> RemlState<'a> {
     }
 
     /// Sparse-exact bridge: delegates to `build_sparse_assembly` + `assemble_and_evaluate`.
-    pub fn evaluate_unified_sparse(
+    pub(crate) fn evaluate_unified_sparse(
         &self,
         rho: &Array1<f64>,
         bundle: &EvalShared,
@@ -2576,7 +2576,7 @@ impl<'a> RemlState<'a> {
     /// X(ψ) and penalties S(ψ) corresponding to the current ψ values before
     /// calling this method. The unified evaluator then preserves the backend:
     /// dense spectral paths stay dense, and sparse exact paths stay sparse.
-    pub fn evaluate_unified_with_psi_ext(
+    pub(crate) fn evaluate_unified_with_psi_ext(
         &self,
         rho: &Array1<f64>,
         cache_theta: Option<&Array1<f64>>,
@@ -2665,7 +2665,7 @@ impl<'a> RemlState<'a> {
     ///
     /// This is the entry point called by the EFS branch of `run_outer` via
     /// the `OuterObjective::eval_efs` method.
-    pub fn compute_efs_steps(
+    pub(crate) fn compute_efs_steps(
         &self,
         p: &Array1<f64>,
     ) -> Result<gam_problem::EfsEval, EstimationError> {
@@ -2687,7 +2687,7 @@ impl<'a> RemlState<'a> {
     }
 
     /// EFS evaluation with anisotropic or isotropic ψ ext_coords injected.
-    pub fn compute_efs_steps_with_psi_ext(
+    pub(crate) fn compute_efs_steps_with_psi_ext(
         &self,
         rho: &Array1<f64>,
         hyper_dirs: &[crate::estimate::reml::DirectionalHyperParam],
@@ -2834,7 +2834,7 @@ impl<'a> RemlState<'a> {
         Ok((eval.cost, eval.gradient))
     }
 
-    pub fn compute_outer_eval_with_order(
+    pub(crate) fn compute_outer_eval_with_order(
         &self,
         p: &Array1<f64>,
         order: crate::rho_optimizer::OuterEvalOrder,
@@ -3170,7 +3170,7 @@ impl<'a> RemlState<'a> {
         Ok(())
     }
 
-    pub fn evaluate_unified_with_link_ext(
+    pub(crate) fn evaluate_unified_with_link_ext(
         &self,
         rho: &Array1<f64>,
         mode: super::reml_outer_engine::EvalMode,
@@ -3283,7 +3283,7 @@ impl<'a> RemlState<'a> {
     }
 
     /// EFS evaluation with link-parameter ext_coords injected.
-    pub fn compute_efs_steps_with_link_ext(
+    pub(crate) fn compute_efs_steps_with_link_ext(
         &self,
         rho: &Array1<f64>,
     ) -> Result<gam_problem::EfsEval, EstimationError> {

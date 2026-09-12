@@ -831,7 +831,7 @@ impl JeffreysLogdetAtom {
     /// directional-Hessian completion remains in
     /// `joint_jeffreys_second_order_completion`; this method owns the
     /// divided-difference body that `joint_jeffreys_term` consumes directly.
-    pub fn second_order_curvature(&self, axis_count: usize) -> Result<Array2<f64>, String> {
+    pub(crate) fn second_order_curvature(&self, axis_count: usize) -> Result<Array2<f64>, String> {
         let m = self.eigvals.len();
         let psi = floored_inverse_divided_differences(&self.eigvals, self.floor);
         let mut a_rows = Array2::<f64>::zeros((axis_count, m * m));
