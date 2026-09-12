@@ -3295,6 +3295,54 @@ fn prediction_model_class_label(model: &FittedModel) -> String {
     }
 }
 
+/// The saved model's class decisions, from its fitted family state and
+/// `prediction_model_class_label`, so the Python `Model` never mirrors the
+/// class taxonomy: survival (including latent survival), marginal-slope
+/// (bernoulli or survival), transformation-normal, whether the likelihood is a
+/// binary response (which selects the classification diagnostics panel), and
+/// the response-scale point column of the class's prediction payload.
+#[pyfunction]
+fn saved_model_class_traits(py: Python<'_>, model_bytes: Vec<u8>) -> PyResult<Py<PyDict>> {
+    let model: FittedModel = serde_json::from_slice(&model_bytes)
+        .map_err(|err| py_value_error(format!("saved model payload must be JSON: {err}")))?;
+    let label = prediction_model_class_label(&model);
+    let family_state = &model.payload().family_state;
+    let binary_response = match family_state {
+        FittedFamily::LatentBinary { .. } => true,
+        FittedFamily::Standard { likelihood, .. }
+        | FittedFamily::LocationScale { likelihood, .. }
+        | FittedFamily::MarginalSlope { likelihood, .. } => {
+            matches!(likelihood.response, ResponseFamily::Binomial)
+        }
+        FittedFamily::Survival { .. }
+        | FittedFamily::TransformationNormal { .. }
+        | FittedFamily::LatentSurvival { .. } => false,
+    };
+    let out = PyDict::new(py);
+    out.set_item(
+        "is_survival",
+        matches!(
+            family_state,
+            FittedFamily::Survival { .. } | FittedFamily::LatentSurvival { .. }
+        ),
+    )?;
+    out.set_item(
+        "is_marginal_slope",
+        matches!(
+            label.as_str(),
+            "bernoulli marginal-slope" | "survival marginal-slope"
+        ),
+    )?;
+    out.set_item(
+        "is_transformation_normal",
+        matches!(family_state, FittedFamily::TransformationNormal { .. }),
+    )?;
+    out.set_item("binary_response", binary_response)?;
+    out.set_item("point_column", model.predict_model_class().point_column())?;
+    out.set_item("model_class", label)?;
+    Ok(out.unbind())
+}
+
 /// The columns a prediction frame *must* carry for this model. Delegates to the
 /// single shared authority on the formula→columns contract
 /// (`FittedModel::prediction_required_columns`) so the CLI and PyFFI predict

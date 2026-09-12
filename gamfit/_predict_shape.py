@@ -213,9 +213,8 @@ def _point_payload_spec(
       and ``posterior_mean`` always, plus ``posterior_mean_standard_error`` /
       ``posterior_mean_lower`` / ``posterior_mean_upper`` when an interval was
       set, and ``noise_scale`` when the family fits a response-side scale).
-      The Rust ``PredictModelClass::publishes_estimand_explicit_schema`` is the
-      owner of which classes emit these names; :func:`point_column_name` is its
-      Python-side mirror.
+      The Rust ``PredictModelClass::publishes_estimand_explicit_schema`` owns
+      which classes emit these names.
 
     The shared "return the vector, else restore a table" tail lives in
     :func:`_shape_point_payload`; this function owns only the differences.
@@ -330,23 +329,6 @@ def _restore_with_optional_id(
     )
 
 
-def point_column_name(model_class: str, family: str) -> str:
-    """Name of the response-scale point column in a point-payload predict table.
-
-    Mirrors the Rust ``PredictModelClass::point_column``: the transformation-
-    normal and Bernoulli marginal-slope classes keep their class-specific
-    ``mean`` column; every other point-payload class (standard GAM / GLM and
-    the location-scale classes) publishes the estimand-explicit
-    ``posterior_mean``. Interval bands, when present, are the same stem with
-    ``_lower`` / ``_upper`` appended in both schemas.
-    """
-    if model_class in _TRANSFORMATION_NORMAL_MODEL_CLASSES or _is_bernoulli_marginal_slope(
-        model_class, family
-    ):
-        return "mean"
-    return "posterior_mean"
-
-
 def _is_bernoulli_marginal_slope(model_class: str, family: str) -> bool:
     """Distinguish Bernoulli marginal-slope from survival marginal-slope.
 
@@ -365,7 +347,6 @@ def _is_bernoulli_marginal_slope(model_class: str, family: str) -> bool:
 
 
 __all__ = [
-    "point_column_name",
     "shape_predict_response",
     "wants_table",
 ]

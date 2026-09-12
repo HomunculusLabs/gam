@@ -11,36 +11,10 @@ from __future__ import annotations
 from typing import Any, TYPE_CHECKING
 
 from ._diagnostics import Diagnostics
-from ._predict_shape import point_column_name
-from ._survival import _BERNOULLI_FAMILY_PREFIXES
 from ._tables import coerce_numeric_vector, table_columns
 
 if TYPE_CHECKING:
     from ._model import Model
-
-
-def _is_binary_family(family_name: str) -> bool:
-    """Return whether ``family_name`` is a binary-classification likelihood.
-
-    Drives ``diagnose`` to report the classification metric panel (AUC /
-    PR-AUC / Brier / log-loss / Nagelkerke-R^2 / ECE) for Bernoulli /
-    binomial fits rather than regression metrics (MAE / RMSE) that are
-    meaningless on a ``{0, 1}`` response. The selection is automatic from the
-    fitted family; there is no user-facing flag.
-
-    The model's ``family_name`` is the human-readable likelihood label (e.g.
-    ``"Binomial Logit"``, ``"Binomial Probit"``, ``"Latent CLogLog
-    Binomial"``, ``"Bernoulli marginal-slope"``). Every binomial / Bernoulli
-    link variant carries one of the family tokens somewhere in that label, so
-    a substring test over the normalized name covers them all -- including the
-    ``"Latent CLogLog Binomial"`` ordering where the family token is not a
-    prefix. The ``"Negative-Binomial"`` count family also embeds ``binomial``
-    but is *not* a binary response, so it is excluded explicitly.
-    """
-    normalized = family_name.strip().lower().replace("_", "-")
-    if "negative" in normalized:
-        return False
-    return any(token in normalized for token in _BERNOULLI_FAMILY_PREFIXES)
 
 
 def diagnose(
@@ -76,8 +50,10 @@ def diagnose(
         return_type="dict",
     )
     observed = coerce_numeric_vector(columns[response_name], label=response_name)
-    point_column = point_column_name(model.model_class, model.family_name)
-    if _is_binary_family(model.family_name):
+    # The Rust fitted family decides the metric panel and the point column.
+    traits = model._class_traits()
+    point_column = str(traits["point_column"])
+    if traits["binary_response"]:
         return Diagnostics.from_binary_classification(
             formula=model.formula,
             response_name=response_name,

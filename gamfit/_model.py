@@ -28,9 +28,6 @@ from ._survival import (
     CompetingRisksPrediction,
     SurvivalPrediction,
     TermBlock,
-    _MARGINAL_SLOPE_MODEL_CLASSES,
-    _SURVIVAL_MODEL_CLASSES,
-    _TRANSFORMATION_NORMAL_MODEL_CLASSES,
     competing_risks_cif,
     extract_row_ids,
     term_blocks_for_model,
@@ -1200,17 +1197,20 @@ class Model:
     def model_class(self) -> str:
         return self._model_class_from_payload()
 
+    def _class_traits(self) -> dict[str, Any]:
+        return rust_module().saved_model_class_traits(self._model_bytes)
+
     @property
     def is_survival(self) -> bool:
-        return self.model_class in _SURVIVAL_MODEL_CLASSES
+        return bool(self._class_traits()["is_survival"])
 
     @property
     def is_marginal_slope(self) -> bool:
-        return self.model_class in _MARGINAL_SLOPE_MODEL_CLASSES
+        return bool(self._class_traits()["is_marginal_slope"])
 
     @property
     def is_transformation_normal(self) -> bool:
-        return self.model_class in _TRANSFORMATION_NORMAL_MODEL_CLASSES
+        return bool(self._class_traits()["is_transformation_normal"])
 
     @property
     def response_name(self) -> str | None:

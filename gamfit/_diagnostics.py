@@ -99,8 +99,8 @@ class Diagnostics:
             Name of the response-scale point series in ``predicted``:
             ``"posterior_mean"`` (the default, and the standard / location-scale
             predict schema) or ``"mean"`` for the transformation-normal and
-            Bernoulli marginal-slope classes. :func:`gamfit._predict_shape.point_column_name`
-            resolves it from a model's class.
+            Bernoulli marginal-slope classes. The Rust extension's
+            ``saved_model_class_traits`` resolves it from a model's class.
 
         Returns
         -------
