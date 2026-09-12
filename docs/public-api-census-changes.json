@@ -2213,5 +2213,35 @@
     },
     "reason": "#2829 product-root rule: no product (gam-cli, gam-pyffi with the Python package, examples/) and no other crate's production code uses these functions. Only tests, or their own private helpers, called them, so they are deleted rather than kept restored in place.",
     "evidence": "Consumer scan job 539356 and narrow scan job 541705 at 0bf5b572b gave verdict no_production_user. MSI validation job 545537 ran the census and the source-removal guard on the built commit and measured exactly this removal set. git grep -w over crates, src, tests, examples, bench, benches, gamfit and python at the landed tree leaves only homonyms: two `0..num_components` comments in evidence.rs; for absorb, other types' methods (gam-linalg matrix hashing, gam-sae score route stats, gam-terms structure evidence), a test-local fn in gam-terms tests, and the English word in comments."
+  },
+  {
+    "base": "d50e543eef1e542be1d68d479a84f11a05094ffa",
+    "removed": {
+      "crates/gam-sae/src/manifold/construction_row_jet_logdet_channels.rs::contracted_softmax_trace_adjoint": 1
+    },
+    "reason": "#2333. ce8253f4c routed every gate family's logdet theta-adjoint through the resident Trace row-jet seam. It replaced the softmax-only consumer contracted_softmax_trace_adjoint with contracted_trace_adjoint in the same file, which runs the gate program each row names (SaeRowGateProgram). The acknowledgement was missing from ce8253f4c.",
+    "evidence": "The census job for ce8253f4c (GitHub Actions run 34711257076, BASE_SHA d50e543ee, HEAD_SHA ce8253f4c) failed with exactly this identity. Emulating the census predicate finds one pub(crate) declaration at d50e543ee and none at ce8253f4c, and git grep -w finds the name in no crate at the base of this acknowledgement commit."
+  },
+  {
+    "base": "303c5ec520c3c321fab79877a08039fa399ec516",
+    "removed": {
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs::assemble_exact_fixed_stratum_outer_hessian": 1,
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs::ch5_twist_leg_cross": 1,
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs::exact_fixed_stratum_outer_hessian": 1,
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs::logdet_daleckii_krein_hessian": 1,
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs::outer_explicit_smoothness_ard_hessian": 1,
+      "crates/gam-sae/src/manifold/construction_rank_charge_derivative.rs::rank_charge_direct_rho_hessian": 1
+    },
+    "reason": "#2253/#2333. a39a27a17 stopped assembling the exact fixed-stratum outer Hessian that every dense SAE outer evaluation built and then discarded (the objective's capability declares no outer Hessian), and deleted that assembly chain with the test-support twist probe that drove it. The acknowledgement was missing from a39a27a17.",
+    "evidence": "Emulating the census predicate over a39a27a17^ and a39a27a17 finds one pub(crate) declaration of each name before and none after; materialize_joint_inverse moved into the same file's test_support module and keeps its identity. git grep -w finds none of the six names in any crate at the base of this acknowledgement commit."
+  },
+  {
+    "base": "d6d8ddf73d77daa28efec5d79cd53b49bd702681",
+    "removed": {
+      "crates/gam-sae/src/manifold/construction_exact_hessian.rs::penalty_curvature_operators_by_flat": 1,
+      "crates/gam-sae/src/manifold/construction_quasi_laplace.rs::row_deflation_map_derivative": 1
+    },
+    "reason": "#2333 fix-forward. After a39a27a17, fddfa46c8 and 3f04ee7e4 removed their production callers, the conditioned curvature operator map and its operator-form deflation differential were dead code under warnings=deny. 0577f536d deleted them with their private helper and the tests that only drove the map. The acknowledgement was missing from 0577f536d.",
+    "evidence": "The shared tip compile check at cc5641ab2 (/scratch.global/sauer354/sw-status/tip.latest) reported both as never used. Emulating the census predicate finds one pub(crate) declaration of each at d6d8ddf73 and none at 0577f536d, and git grep -w finds neither name in any crate at the base of this acknowledgement commit."
   }
 ]
