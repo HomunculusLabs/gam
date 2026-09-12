@@ -727,8 +727,10 @@ fn polish_affine_rho(
     let mut rho = initial_rho.clamp(lower, upper);
     loop {
         let current = profile.evaluate(rho)?;
-        let at_lower = rho <= lower + bound_resolution * lower.abs().max(1.0);
-        let at_upper = rho >= upper - bound_resolution * upper.abs().max(1.0);
+        // The same band this box hands opt as its tolerance, so the polish and the
+        // solver agree on which endpoint a coordinate sits at (#2469).
+        let at_lower = rho <= lower + bound_resolution;
+        let at_upper = rho >= upper - bound_resolution;
         if (at_lower && current.rho_gradient >= 0.0) || (at_upper && current.rho_gradient <= 0.0) {
             return Ok(current);
         }
