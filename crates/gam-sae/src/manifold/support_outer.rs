@@ -205,7 +205,7 @@ pub struct SaeSupportSmoothingLayout {
 }
 
 impl SaeSupportSmoothingLayout {
-    pub fn from_term(term: &SaeSupportSparseTerm) -> Self {
+    pub(crate) fn from_term(term: &SaeSupportSparseTerm) -> Self {
         let mut keys = BTreeMap::<String, ()>::new();
         let atom_keys = term
             .atoms
