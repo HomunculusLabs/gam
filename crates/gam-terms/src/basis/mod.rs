@@ -21,8 +21,6 @@ mod sphere_spec;
 mod sphere_spectral;
 
 // ---- Measure-jet smooth (V0 / V∞) ----
-mod measure_jet_anisotropy;
-mod measure_jet_moments;
 mod measure_jet_predict;
 mod measure_jet_smooth;
 
@@ -82,11 +80,6 @@ pub use constant_curvature_smooth::{
     realized_constant_curvature_length_scale,
 };
 
-pub use measure_jet_moments::{
-    MeasureJetJetStats, MeasureJetMomentTable, accumulate_moment_table, jet_sufficient_stats,
-    merge_moment_tables, recenter_moment_table,
-};
-
 pub use measure_jet_predict::{
     MeasureJetExtrapolationSpectrum, measure_jet_ambient_gradient,
     measure_jet_extrapolation_variance,
@@ -104,11 +97,6 @@ pub use measure_jet_smooth::{
     measure_jet_range_feasibility_ceiling,
     measure_jet_support_curve,
     realized_measure_jet_length_scale,
-};
-
-pub use measure_jet_anisotropy::{
-    LIndex, MeasureJetAnisotropyJets, lower_triangular_indices, measure_jet_anisotropy_energy_form,
-    measure_jet_anisotropy_energy_form_with_jets,
 };
 
 pub use sphere_spec::{

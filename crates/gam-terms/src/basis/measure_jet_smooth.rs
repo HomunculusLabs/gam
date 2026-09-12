@@ -106,8 +106,7 @@
 //! `O(diam²/ε²)` relative scale for smooth Gaussian-weighted functionals,
 //! not an estimand-preserving identity.
 //! The long-form home for the ladder and the substrate contracts is the
-//! frame notes (`docs/measure_jet_frame.md`); its §2 moment substrate is
-//! `measure_jet_moments.rs`, its §5 extrapolation pricing
+//! frame notes (`docs/measure_jet_frame.md`); its §5 extrapolation pricing is
 //! `measure_jet_predict.rs`.
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
