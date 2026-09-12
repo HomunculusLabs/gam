@@ -5328,7 +5328,9 @@ impl SaeManifoldTerm {
             }
             owner[row] = best;
         }
-        let bias = self.assignment.mode.temperature().max(f64::MIN_POSITIVE);
+        // Every relaxed mode's temperature is validated finite and positive, and the
+        // hard gate reports 1.
+        let bias = self.assignment.mode.temperature();
         for row in 0..n {
             for atom in 0..k {
                 let delta = if atom == owner[row] { bias } else { -bias };

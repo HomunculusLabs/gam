@@ -1767,7 +1767,8 @@ impl SaeManifoldOuterObjective {
         if !plan.direct_logdet_admitted() {
             let loss = self.term.loss(self.target.view(), &rho)?;
             let n_scalar = (self.term.n_obs().saturating_mul(self.term.output_dim())).max(1) as f64;
-            let dispersion = (2.0 * loss.data_fit / n_scalar).max(f64::MIN_POSITIVE);
+            // An exact fit reports zero dispersion.
+            let dispersion = 2.0 * loss.data_fit / n_scalar;
             return Ok(self.term.unavailable_shape_uncertainty(dispersion));
         }
         // Re-form the strict undamped joint factor at the settled ρ. A failure is

@@ -744,7 +744,8 @@ impl SaeManifoldTerm {
             // unavailability rather than substituting a different covariance.
             let loss = self.loss(target, rho)?;
             let n_scalar = (self.n_obs().saturating_mul(self.output_dim())).max(1) as f64;
-            let dispersion = (2.0 * loss.data_fit / n_scalar).max(f64::MIN_POSITIVE);
+            // An exact fit reports zero dispersion.
+            let dispersion = 2.0 * loss.data_fit / n_scalar;
             return Ok(self.unavailable_shape_uncertainty(dispersion));
         }
         let (_cost, loss, cache) = self
