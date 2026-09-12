@@ -653,7 +653,7 @@ pub fn audit_identifiability(
 }
 
 /// Implementation body shared by [`audit_identifiability`] and
-/// [`audit_identifiability_with_state`]. The two public entry points differ
+/// `audit_identifiability_with_state`. The two public entry points differ
 /// only in how they construct the [`FamilyLinearizationState`] — every other
 /// step (gauge-priority sort, joint RRQR, pairwise overlap scan, drop
 /// attribution, gauge-resolves-rank-deficiency logic, hard-alias / fatal
@@ -3139,7 +3139,7 @@ pub fn maybe_log_audit_drift(
 /// only the [`FamilyLinearizationState`] handed to each block's
 /// `effective_jacobian_at` differs. For families without a `jacobian_callback`
 /// the design is returned as-is regardless of `state`.
-pub fn audit_identifiability_with_state(
+pub(crate) fn audit_identifiability_with_state(
     specs: &[ParameterBlockSpec],
     state: &gam_problem::FamilyLinearizationState<'_>,
 ) -> Result<IdentifiabilityAudit, EstimationError> {

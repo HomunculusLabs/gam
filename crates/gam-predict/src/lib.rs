@@ -3008,7 +3008,7 @@ where
 /// predictor is independent of every calibration point, split-conformal needs
 /// no leave-one-out correction — the nonconformity score is the plain held-out
 /// residual `r_i = y_cal_i − μ̂(x_cal_i)`, normalized by `s(x_cal_i)`. See
-/// [`crate::conformal::ConformalCalibrator::from_held_out_fold`].
+/// `crate::conformal::ConformalCalibrator::from_held_out_fold`.
 pub struct ConformalCalibrationFold<'a> {
     /// Predict input over the held-out calibration design (design + offset, and
     /// any noise/auxiliary blocks the model needs).

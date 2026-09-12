@@ -54,7 +54,7 @@
 //!   residual `r_i = y_cal_i − μ̂(x_cal_i)` normalized by the effective scale
 //!   derived from the model's predict-time response-scale SE `s(x_cal_i)`.
 //!   This is
-//!   [`ConformalCalibrator::from_held_out_fold`], driven by
+//!   `ConformalCalibrator::from_held_out_fold`, driven by
 //!   `gam_predict::predict_full_uncertainty_conformal` over a
 //!   `gam_predict::ConformalCalibrationFold`. The fold carries
 //!   its own design and may be of ANY size, fully decoupled from the training
@@ -249,7 +249,7 @@ impl ConformalCalibrator {
     /// held-out response. No fit geometry, no ALO, and no binding of the fold
     /// to the training rows is involved — so a calibration fold of any size is
     /// accepted.
-    pub fn from_held_out_fold(
+    pub(crate) fn from_held_out_fold(
         y_cal: ArrayView1<'_, f64>,
         mu_cal: ArrayView1<'_, f64>,
         scale_cal: ArrayView1<'_, f64>,

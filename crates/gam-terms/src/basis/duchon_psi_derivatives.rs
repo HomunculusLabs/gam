@@ -289,7 +289,7 @@ pub(crate) fn duchon_partial_fraction_kernel_psi_triplet(
 /// `Global` is the all-ones direction of that frame — moving every `ψ_a` by the
 /// same amount leaves every contrast fixed and multiplies `κ`. That is not a
 /// convention, it is an identity, and it is what
-/// [`duchon_axis_log_kappa_derivatives`] reproduces by construction:
+/// `duchon_axis_log_kappa_derivatives` reproduces by construction:
 /// summing its first derivative over `a`, and its second over `(a, b)`, gives
 /// `scaled_log_kappa_derivatives` exactly. The isotropic route is therefore a
 /// contraction of the anisotropic one rather than a parallel derivation that
@@ -329,7 +329,7 @@ pub enum DuchonPsiDirection {
 /// Contracting over the all-ones direction returns the isotropic jet:
 /// `Σ_a first = E F + r F_r` and `Σ_{a,b} second = E² F + (2E+1) r F_r + r² F_rr`.
 #[inline(always)]
-pub fn duchon_axis_log_kappa_derivatives(
+pub(crate) fn duchon_axis_log_kappa_derivatives(
     value: f64,
     radial_first: f64,
     radialsecond: f64,
@@ -676,7 +676,7 @@ pub(crate) fn duchon_radial_jets(
 /// so every radial scalar this file forms is `κ^E G(κ r)` for some exponent
 /// `E`: `φ` at `δ`, `q = φ_r/r` and `Δφ` at `δ + 2`, `t = q_r/r` at `δ + 4`.
 /// `scaled_log_kappa_derivatives` contracts that along the isotropic
-/// direction; [`duchon_axis_log_kappa_derivatives`] contracts it per axis, and
+/// direction; `duchon_axis_log_kappa_derivatives` contracts it per axis, and
 /// summing the latter reproduces the former exactly. Splitting the value jet
 /// from the contraction makes the DIRECTION the only thing that differs
 /// between the two routes, so a global and a per-axis derivative can never be
@@ -1485,7 +1485,7 @@ pub(crate) fn duchon_operator_penalties_requested(spec: &DuchonOperatorPenaltySp
 /// half is the `_in_directions` entries, called once with `[Axis(0) … Axis(d−1)]`
 /// so the whole per-axis surface costs one pass over the pairs.
 ///
-/// Callers must have cleared [`crate::basis::duchon_spec_supports_axis_psi`]
+/// Callers must have cleared `crate::basis::duchon_spec_supports_axis_psi`
 /// first: this refuses rather than silently degrading, because a per-axis
 /// coordinate whose derivative came from the isotropic route would be a
 /// value/gradient desync rather than an approximation.

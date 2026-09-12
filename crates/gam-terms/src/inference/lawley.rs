@@ -381,7 +381,7 @@ fn lawley_epsilon_from_geometry(
     Ok(epsilon)
 }
 
-pub fn lawley_epsilon(
+pub(crate) fn lawley_epsilon(
     x: ArrayView2<'_, f64>,
     kappas: &[RowKappas],
     penalty: Option<ArrayView2<'_, f64>>,
@@ -400,7 +400,7 @@ pub const LAWLEY_PAIR_MATRIX_MAX_ROWS: usize = 2048;
 /// for the null "the coefficients in `tested` are zero" inside the `k`-column
 /// model `x`: `E[W] = q + ε_k − ε_{k−q} + O(n⁻²)` (Lawley 1956; module docs).
 ///
-/// * `ε_k` is [`lawley_epsilon`] on the full design (with `penalty` folded in).
+/// * `ε_k` is `lawley_epsilon` on the full design (with `penalty` folded in).
 /// * `ε_{k−q}` is the same on the nuisance design — the tested columns removed
 ///   and the matching rows/columns of `penalty` dropped. When the tested block
 ///   is the whole design the null model is fully specified and `ε_0 = 0`.
@@ -980,7 +980,7 @@ mod tests {
 
     /// DELIVERABLE (2) — penalty deterministic-shift term is consumed. The
     /// Lawley ε folds `S_λ` into the information `J = X'WX + S_λ`
-    /// ([`lawley_epsilon`]); adding the penalty therefore moves ε on any family
+    /// (`lawley_epsilon`); adding the penalty therefore moves ε on any family
     /// whose `ε ≠ 0`. This regression proves the penalty arm is live (not
     /// dropped) and that a larger λ shrinks |ε| monotonically — the penalty
     /// stiffens the information `J = X'WX + S_λ`, which moves the finite-sample

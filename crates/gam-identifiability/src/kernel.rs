@@ -405,11 +405,11 @@ impl AnchorConsistencyReport {
 /// `>= threshold`, the next representable `f64` above one-half implements that
 /// theorem-derived strict inequality without an arbitrary robustness margin.
 /// Callers that want a stronger practical margin may request one explicitly.
-pub const ANCHOR_DOMINANCE_DEFAULT: f64 = f64::from_bits(0.5_f64.to_bits() + 1);
+pub(crate) const ANCHOR_DOMINANCE_DEFAULT: f64 = f64::from_bits(0.5_f64.to_bits() + 1);
 
 /// Run the full anchor-consistency identifiability check and return the typed
 /// verdict. `assignments` is `(N, K)`; `anchor_dominance` defaults to
-/// [`ANCHOR_DOMINANCE_DEFAULT`] when `None`.
+/// `ANCHOR_DOMINANCE_DEFAULT` when `None`.
 pub fn anchor_consistency_report(
     assignments: ArrayView2<f64>,
     anchor_dominance: Option<f64>,

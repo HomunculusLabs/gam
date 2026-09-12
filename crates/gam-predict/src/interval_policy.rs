@@ -42,7 +42,7 @@ pub struct ResponseBounds(Option<(f64, f64)>);
 
 impl ResponseBounds {
     /// Unbounded response — endpoints are passed through unclamped.
-    pub const UNBOUNDED: Self = Self(None);
+    pub(crate) const UNBOUNDED: Self = Self(None);
     /// Closed unit interval `[0, 1]` (probabilities, survival tails).
     pub(crate) const UNIT_PROBABILITY: Self = Self(Some((0.0, 1.0)));
 
@@ -53,14 +53,14 @@ impl ResponseBounds {
 
     /// The response-support clamp for a [`ResponseFamily`], matching
     /// [`ResponseFamily::mean_clamp_bounds`].
-    pub fn for_family(response: &ResponseFamily) -> Self {
+    pub(crate) fn for_family(response: &ResponseFamily) -> Self {
         Self(response.mean_clamp_bounds())
     }
 
     /// The clamp applied to the **observation (prediction) interval** of a
     /// [`ResponseFamily`], matching [`ResponseFamily::response_support_bounds`].
     ///
-    /// Distinct from [`Self::for_family`] (the *mean*-interval clamp): the
+    /// Distinct from `Self::for_family` (the *mean*-interval clamp): the
     /// observation band (symmetric `μ ± z·σ_pred` for most families, equal-tailed
     /// Gamma quantiles for the skewed Gamma arm, see `family_observation_band`)
     /// crosses the support floor for a small fitted mean even when the
@@ -138,7 +138,7 @@ pub(crate) fn symmetric_interval(
 /// silently substitute a different uncertainty estimand. Degenerate all-zero
 /// count responses are rejected at the family-validation boundary before a fit
 /// is minted (#2255).
-pub fn transform_eta_interval<F>(
+pub(crate) fn transform_eta_interval<F>(
     eta_lower: &Array1<f64>,
     eta_upper: &Array1<f64>,
     bounds: ResponseBounds,
@@ -208,7 +208,7 @@ pub enum MeanBoundMethod<'a> {
 }
 
 /// Compute response-scale `(mean_lower, mean_upper)` for the requested method.
-pub fn mean_bounds(
+pub(crate) fn mean_bounds(
     eta_lower: &Array1<f64>,
     eta_upper: &Array1<f64>,
     mean: &Array1<f64>,
@@ -265,7 +265,7 @@ pub enum ObservationInterval<'a> {
     /// response-scale noise standard deviation.
     Symmetric {
         noise_sd: &'a Array1<f64>,
-        /// Response-support clamp; [`ResponseBounds::UNBOUNDED`] for real-line
+        /// Response-support clamp; `ResponseBounds::UNBOUNDED` for real-line
         /// responses.
         bounds: ResponseBounds,
     },
@@ -333,7 +333,7 @@ pub(crate) fn symmetric_predictive_band(
 /// (`eta`, `mean`, the two standard errors) plus the policy choices
 /// (`eta_interval`, `method`); the engine owns everything else so interval
 /// construction cannot drift between families.
-pub fn assemble_uncertainty_result(
+pub(crate) fn assemble_uncertainty_result(
     confidence_level: f64,
     eta: Array1<f64>,
     mean: Array1<f64>,
@@ -381,7 +381,7 @@ pub fn assemble_uncertainty_result(
 /// `mean_lower` / `mean_upper`. When no level is supplied the bounds are left
 /// `None`. `eta` / `eta_se` are taken from `result`, so a predictor whose η
 /// interval is not meaningful supplies `EtaInterval::Collapsed`.
-pub fn assemble_posterior_mean_bounds(
+pub(crate) fn assemble_posterior_mean_bounds(
     result: &mut PredictPosteriorMeanResult,
     confidence_level: Option<f64>,
     eta_interval: EtaInterval,
@@ -420,7 +420,7 @@ pub enum PredictPass {
 
 /// How a transform forms the *response-scale* confidence interval from the
 /// η-scale state. This is the per-family policy split the predictors used to
-/// inline directly into [`assemble_uncertainty_result`] / [`mean_bounds`]; a
+/// inline directly into `assemble_uncertainty_result` / `mean_bounds`; a
 /// [`PredictionTransform`] now declares it once and the generic drivers thread
 /// it through both the full-uncertainty and posterior-mean pipelines.
 pub enum ResponseInterval {
@@ -493,13 +493,13 @@ pub struct LinearState {
 ///
 /// Everything else — confidence-level validation, η/mean interval construction,
 /// support clamping, observation intervals, and result-struct assembly — lives
-/// in the generic drivers [`predict_full_uncertainty_generic`] and
-/// [`predict_posterior_mean_generic`], so the pipeline is one source of truth.
+/// in the generic drivers `predict_full_uncertainty_generic` and
+/// `predict_posterior_mean_generic`, so the pipeline is one source of truth.
 pub trait PredictionTransform {
     /// The fit-free point state: η, μ, and the covariance-derived standard
     /// errors (`None` when no predictor covariance is available). This is the
     /// state behind the point-prediction drivers
-    /// [`predict_plugin_response_generic`] and [`predict_with_uncertainty_generic`],
+    /// `predict_plugin_response_generic` and `predict_with_uncertainty_generic`,
     /// and the default source for the full-uncertainty pass of
     /// [`linear_state`](PredictionTransform::linear_state).
     fn point_state(&self, input: &PredictInput) -> Result<LinearState, EstimationError>;
@@ -533,7 +533,7 @@ pub trait PredictionTransform {
     }
 
     /// Response map μ = T(η), used to transform η-interval endpoints onto the
-    /// response scale through [`transform_eta_interval`]. It must be monotone in
+    /// response scale through `transform_eta_interval`. It must be monotone in
     /// `η`, which every inverse link is.
     fn response(&self, eta: &Array1<f64>) -> Result<Array1<f64>, EstimationError>;
 
@@ -633,8 +633,8 @@ fn eta_interval_for(policy: &ResponseInterval) -> EtaInterval {
 /// The single full-uncertainty driver. Runs the predict pipeline once for any
 /// [`PredictionTransform`]: compute the η-scale state, require its standard
 /// errors, attach the optional observation interval, and assemble the result
-/// through [`assemble_uncertainty_result`].
-pub fn predict_full_uncertainty_generic<T: PredictionTransform>(
+/// through `assemble_uncertainty_result`.
+pub(crate) fn predict_full_uncertainty_generic<T: PredictionTransform>(
     transform: &T,
     input: &PredictInput,
     fit: &UnifiedFitResult,
@@ -749,8 +749,8 @@ pub fn predict_full_uncertainty_generic<T: PredictionTransform>(
 /// The single posterior-mean driver. Runs the predict pipeline once for any
 /// [`PredictionTransform`]: compute the η-scale state and attach response-scale
 /// confidence bounds (when a level is supplied) through
-/// [`assemble_posterior_mean_bounds`].
-pub fn predict_posterior_mean_generic<T: PredictionTransform>(
+/// `assemble_posterior_mean_bounds`.
+pub(crate) fn predict_posterior_mean_generic<T: PredictionTransform>(
     transform: &T,
     input: &PredictInput,
     fit: &UnifiedFitResult,
@@ -928,7 +928,7 @@ pub fn predict_posterior_mean_generic<T: PredictionTransform>(
 
 /// The single plug-in response driver: the transform's fit-free point state,
 /// keeping only η and μ.
-pub fn predict_plugin_response_generic<T: PredictionTransform>(
+pub(crate) fn predict_plugin_response_generic<T: PredictionTransform>(
     transform: &T,
     input: &PredictInput,
 ) -> Result<PredictResult, EstimationError> {
@@ -941,7 +941,7 @@ pub fn predict_plugin_response_generic<T: PredictionTransform>(
 
 /// The single point-with-SE driver: the transform's fit-free point state,
 /// carrying the (optional) η/mean standard errors through unchanged.
-pub fn predict_with_uncertainty_generic<T: PredictionTransform>(
+pub(crate) fn predict_with_uncertainty_generic<T: PredictionTransform>(
     transform: &T,
     input: &PredictInput,
 ) -> Result<PredictionWithSE, EstimationError> {

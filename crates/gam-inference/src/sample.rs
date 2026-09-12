@@ -347,7 +347,7 @@ pub fn sample_saved_model(
 /// `rationale` is a short label appearing in error messages so callers
 /// can tell which class fell back to this path. We mark `rhat = 1.0`
 /// and `ess = n_total` because the draws are iid by construction.
-pub fn laplace_gaussian_fallback(
+pub(crate) fn laplace_gaussian_fallback(
     model: &SavedModel,
     cfg: &NutsConfig,
     rationale: &'static str,
@@ -814,7 +814,7 @@ fn laplace_fallback_route(
     Ok(LaplaceFallbackRoute::UnconstrainedGaussian)
 }
 
-/// [`laplace_gaussian_fallback`] for the model classes that can carry a
+/// `laplace_gaussian_fallback` for the model classes that can carry a
 /// coefficient cone, routed through the persisted truncated posterior whenever
 /// the fit certified one.
 ///

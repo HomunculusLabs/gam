@@ -97,7 +97,7 @@ const MAX_BOUNCES_BASE: usize = 256;
 /// * `penalized_hessian` — the *unscaled* penalised Hessian `H` (no φ).
 /// * `sqrt_phi` — `√φ` (dispersion square root); `1.0` for fixed-scale
 ///   families (Binomial / Poisson). Scales the posterior covariance to
-///   `φ·H⁻¹`, exactly as [`crate::sample::laplace_gaussian_fallback`].
+///   `φ·H⁻¹`, exactly as `crate::sample::laplace_gaussian_fallback`.
 /// * `constraints` — `A` (`m × p`) and `b` (`m`), meaning `A β ≥ b`.
 pub fn sample_truncated_gaussian_posterior(
     center: &Array1<f64>,

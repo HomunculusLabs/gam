@@ -1406,7 +1406,7 @@ impl ResidentBytes for CellDerivativeMomentState {
 /// bivariate normal CDF representation — 20 points give >30-digit accuracy for
 /// the smooth arcsin-transformed integrand, ensuring the BVN value is exact to
 /// f64 precision for all (h, k, ρ).
-pub const GL20_NODES: [f64; 20] = [
+pub(crate) const GL20_NODES: [f64; 20] = [
     -0.993_128_599_185_094_9,
     -0.963_971_927_277_913_8,
     -0.912_234_428_251_326,
@@ -1429,7 +1429,7 @@ pub const GL20_NODES: [f64; 20] = [
     0.993_128_599_185_094_9,
 ];
 
-/// Companion weights to [`GL20_NODES`]. Symmetric, summing to 2.
+/// Companion weights to `GL20_NODES`. Symmetric, summing to 2.
 pub(crate) const GL20_WEIGHTS: [f64; 20] = [
     0.017_614_007_139_152_12,
     0.040_601_429_800_386_94,

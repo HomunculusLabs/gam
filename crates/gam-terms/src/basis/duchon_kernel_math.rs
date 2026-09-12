@@ -704,7 +704,7 @@ pub(crate) fn duchon_p_from_nullspace_order(order: DuchonNullspaceOrder) -> usiz
 /// Lebesgue blocks included, so they move with ψ only through `κ`, and
 /// `build_duchon_operator_penalty_psi_derivatives_in_directions` ships their
 /// per-axis jets as the isotropic jets scaled by `1/d` and `1/d²`.
-pub fn duchon_spec_supports_axis_psi(spec: &DuchonBasisSpec, dim: usize) -> bool {
+pub(crate) fn duchon_spec_supports_axis_psi(spec: &DuchonBasisSpec, dim: usize) -> bool {
     if dim <= 1 || spec.length_scale.is_none() || spec.periodic.is_some() {
         return false;
     }

@@ -293,7 +293,7 @@ pub fn cyclic_bspline_derivative_penalty_matrix(
 }
 
 /// Constructive energy factor for the exact cyclic B-spline roughness.
-pub fn cyclic_bspline_derivative_penalty_factor(
+pub(crate) fn cyclic_bspline_derivative_penalty_factor(
     degree: usize,
     num_basis: usize,
     period: f64,
@@ -397,7 +397,7 @@ fn validate_cyclic_roughness(
 /// ```
 ///
 /// against `period · ω^{2m} Σ_k k^{2m} |c_k|²` for the derivative roughness
-/// [`cyclic_bspline_derivative_penalty_factor`]: the two agree asymptotically
+/// `cyclic_bspline_derivative_penalty_factor`: the two agree asymptotically
 /// in `k` and differ in not charging the fundamental harmonic, which on the
 /// circle plays the part the linear trend plays on an open interval.
 ///

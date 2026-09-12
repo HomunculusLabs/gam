@@ -71,12 +71,12 @@ pub const EXP_SATURATION_MAX_ARG: f64 = 709.78271289338;
 /// `exp(-701) ≈ 5e-305` (essentially zero); a two-sided clamp would destroy
 /// far-tail exact derivatives.
 #[inline]
-pub fn exp_neg_stable(x: f64) -> f64 {
+pub(crate) fn exp_neg_stable(x: f64) -> f64 {
     (-x).min(EXP_SATURATION_MAX_ARG).exp()
 }
 
 /// Inverse exp-link `1/σ = exp(-η)` with the one-sided representability
-/// guard from [`exp_neg_stable`]: exact for every η whose `exp(-η)` fits in
+/// guard from `exp_neg_stable`: exact for every η whose `exp(-η)` fits in
 /// `f64`, saturating near `f64::MAX` only past that boundary. Required by
 /// every solver path that forms products like `t · exp(-η_ls)` — without the
 /// guard, very negative η_ls produces `+inf`, which propagates as `NaN`

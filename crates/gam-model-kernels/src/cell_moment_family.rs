@@ -28,11 +28,11 @@
 //! A family is only usable if [`ChebMomentFamily::build`] returns
 //! `Ok(Some(_))`, which requires BOTH
 //! 1. the Chebyshev coefficient tail (the highest-order row and column of
-//!    the tensor) to carry at most [`FAMILY_CERT_RTOL`] of the family scale —
+//!    the tensor) to carry at most `FAMILY_CERT_RTOL` of the family scale —
 //!    the standard geometric-decay certificate for analytic interpolands; and
 //! 2. a deterministic interior spot check against the direct ladder
-//!    evaluation at [`FAMILY_SPOT_CHECK_POINTS`] off-grid points to agree to
-//!    [`FAMILY_SPOT_RTOL`] of the family scale.
+//!    evaluation at `FAMILY_SPOT_CHECK_POINTS` off-grid points to agree to
+//!    `FAMILY_SPOT_RTOL` of the family scale.
 //!
 //! A box that straddles a kink line, contains `b ≈ 0`, or degenerates a cell
 //! fails the certificate (or errors during the build) and the caller falls
@@ -67,14 +67,14 @@ pub fn forest_coverage_counts() -> (u64, u64) {
 /// tail mass for a family to certify. Analytic interpolands decay
 /// geometrically, so a truncation whose last row/column already sits at this
 /// level has interpolation error of the same order.
-pub const FAMILY_CERT_RTOL: f64 = 1.0e-12;
+pub(crate) const FAMILY_CERT_RTOL: f64 = 1.0e-12;
 
 /// Relative agreement required between the interpolant and the direct ladder
 /// evaluation at the off-grid spot-check points.
-pub const FAMILY_SPOT_RTOL: f64 = 1.0e-11;
+pub(crate) const FAMILY_SPOT_RTOL: f64 = 1.0e-11;
 
 /// Number of deterministic off-grid interior spot-check points.
-pub const FAMILY_SPOT_CHECK_POINTS: usize = 3;
+pub(crate) const FAMILY_SPOT_CHECK_POINTS: usize = 3;
 
 /// A fixed `(score_span, link_span, edge-pair)` combination whose moments
 /// form a smooth two-parameter family in the row scalars `(a, b)`. Edge
@@ -351,9 +351,9 @@ pub(crate) const FOREST_MAX_DEPTH: usize = 12;
 /// like the quadrature ladder, the build accepts the first rung whose
 /// certificate passes; wider boxes need higher order to reach the tail
 /// tolerance, narrower boxes certify cheaply at the bottom rung.
-pub const FOREST_NODE_LADDER: [usize; 4] = [8, 12, 16, 20];
+pub(crate) const FOREST_NODE_LADDER: [usize; 4] = [8, 12, 16, 20];
 
-/// Build a family at the first node count on [`FOREST_NODE_LADDER`] whose
+/// Build a family at the first node count on `FOREST_NODE_LADDER` whose
 /// certificate passes; `None` when no rung certifies (⇒ ladder fallback).
 pub(crate) fn build_family_escalating(
     spec: &CellMomentFamilySpec,

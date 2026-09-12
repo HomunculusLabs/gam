@@ -23,14 +23,14 @@
 //!
 //! [`RadialProfile::build`] returns `None` (callers fall back to exact
 //! per-point evaluation) unless BOTH
-//! 1. the Chebyshev coefficient tail decays below [`PROFILE_CERT_RTOL`] of
+//! 1. the Chebyshev coefficient tail decays below `PROFILE_CERT_RTOL` of
 //!    each channel's scale — the geometric-decay certificate for analytic
 //!    interpolands, with node-count escalation; and
 //! 2. deterministic off-grid spot checks against the exact evaluator agree
-//!    to [`PROFILE_SPOT_RTOL`].
+//!    to `PROFILE_SPOT_RTOL`.
 //!
 //! Radii outside the built range (or any non-finite evaluation) are answered
-//! by the exact evaluator via [`RadialProfile::eval_or_exact`] — the same
+//! by the exact evaluator via `RadialProfile::eval_or_exact` — the same
 //! certified-or-fallback discipline as the non-affine quadrature ladder and
 //! the cell-moment families.
 
@@ -57,18 +57,18 @@ use super::{BasisError, RadialScalarKind};
 /// — not cancellation — sets the floor. Certification still requires genuine
 /// geometric decay to this verified floor; failing it merely falls the caller
 /// back to exact per-point evaluation (the value path is unaffected).
-pub const PROFILE_CERT_RTOL: f64 = 3.0e-12;
+pub(crate) const PROFILE_CERT_RTOL: f64 = 3.0e-12;
 
 /// Relative agreement required at the off-grid spot checks.
 ///
-/// Same multi-decade-dynamic-range floor as [`PROFILE_CERT_RTOL`]: the
+/// Same multi-decade-dynamic-range floor as `PROFILE_CERT_RTOL`: the
 /// off-grid spot check compares the Clenshaw interpolant against the exact
 /// evaluator at interior points, and at the small-magnitude (large-radius)
 /// samples the exact operator scalars carry ~1e-10 relative rounding, so the
 /// interpolant — which fits a slightly smoothed series — disagrees with the
 /// raw exact value at that level. The interpolant is nonetheless correct to
 /// the channel scale; this gate certifies that, not an unattainable 1e-12.
-pub const PROFILE_SPOT_RTOL: f64 = 3.0e-9;
+pub(crate) const PROFILE_SPOT_RTOL: f64 = 3.0e-9;
 
 /// Node-count escalation ladder for the profile build.
 pub(crate) const PROFILE_NODE_LADDER: [usize; 3] = [64, 128, 256];
@@ -217,7 +217,7 @@ impl RadialProfile {
 
     /// `true` when `r` lies inside the certified interpolation range.
     #[inline]
-    pub fn covers(&self, r: f64) -> bool {
+    pub(crate) fn covers(&self, r: f64) -> bool {
         if !(r > 0.0) {
             return false;
         }
@@ -226,7 +226,7 @@ impl RadialProfile {
     }
 
     /// Interpolated `(φ, q, t)` for an in-range radius (caller must have
-    /// checked [`Self::covers`]). Clenshaw over the three channels sharing
+    /// checked `Self::covers`). Clenshaw over the three channels sharing
     /// one basis recurrence.
     #[inline]
     pub(crate) fn eval_inside(&self, r: f64) -> (f64, f64, f64) {
@@ -250,7 +250,7 @@ impl RadialProfile {
 
     /// `(φ, q, t)` at `r`: interpolated when in range, exact otherwise.
     #[inline]
-    pub fn eval_or_exact(
+    pub(crate) fn eval_or_exact(
         &self,
         kind: &RadialScalarKind,
         r: f64,

@@ -218,7 +218,7 @@ impl EProcess {
     /// dictionary-level FDR certificate (current evidence, not the sup —
     /// e-BH's guarantee is stated for e-values at the chosen stopping
     /// time).
-    pub fn current_e_value_log(&self) -> f64 {
+    pub(crate) fn current_e_value_log(&self) -> f64 {
         self.log_e
     }
 }
@@ -511,7 +511,7 @@ impl AtomBirthGate {
 ///     [`AtomBirthGate::certified_at_step`]; but
 ///   * the dictionary-level CERTIFICATE ([`StructureLedger::certify`] →
 ///     [`e_benjamini_hochberg`]) consumes the CURRENT log e-value
-///     ([`EProcess::current_e_value_log`]) under a multiplicity correction
+///     (`EProcess::current_e_value_log`) under a multiplicity correction
 ///     whose bar `ln(m/(α·k))` is strictly higher for m > 1 claims.
 /// Stopping at the single-hypothesis bar banked just enough evidence for the
 /// move's own verdict but starved the FDR certificate, so a genuinely real

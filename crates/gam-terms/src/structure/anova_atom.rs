@@ -109,7 +109,7 @@ use gam_linalg::faer_ndarray::FaerEigh;
 /// panels carry fractions orders of magnitude larger, and the companion binding
 /// Wald test resolves small-but-real interactions besides. Auto-applied — no
 /// knob.
-pub const FISSION_MAX_INTERACTION_FRACTION: f64 = 1e-4;
+pub(crate) const FISSION_MAX_INTERACTION_FRACTION: f64 = 1e-4;
 
 /// Which binding notion a carve report speaks about (see module docs).
 ///
@@ -207,7 +207,7 @@ impl ChildDecoder {
 /// main-effect blocks. Gauge choice (documented, fixed): the grand mean
 /// `g₀` rides with child A; child B is centered. The interaction energy
 /// the split discards is DECLARED in `reconstruction_defect` — by the
-/// fission rule it is ≤ [`FISSION_MAX_INTERACTION_FRACTION`], but it is
+/// fission rule it is ≤ `FISSION_MAX_INTERACTION_FRACTION`, but it is
 /// never silently zero.
 #[derive(Clone, Debug)]
 pub struct FissionPlan {
@@ -885,7 +885,7 @@ pub struct CarveInput<'a> {
 /// binding and always blocks the split; the test NOT rejecting is only
 /// absence of evidence, so the split additionally requires the
 /// interaction to be energetically negligible
-/// ([`FISSION_MAX_INTERACTION_FRACTION`]). An atom with a fat but
+/// (`FISSION_MAX_INTERACTION_FRACTION`). An atom with a fat but
 /// unproven interaction stays whole and contested — route its
 /// `edge_p_value` into the evidence ledger and let the probe loop earn
 /// the verdict.
