@@ -4074,14 +4074,43 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
             // the explicit decision label makes the inference
             // immediate instead of requiring step/radius arithmetic
             // in the reader's head.
+            //
+            // `prop_pred` is the same model's decrease at the WHOLE proposal
+            // the chord was taken from (gam#2714). When the chord is that
+            // proposal scaled to the region, a convex model reads at least
+            // `pred` there, so `prop_pred < pred` says the proposal and the
+            // model it is judged on disagree about curvature along it; read
+            // only when the line is printed.
+            let proposal_pred = if log::log_enabled!(log::Level::Info) {
+                let mut proposal_hpen = Array1::<f64>::zeros(total_p);
+                let mut proposal_penalty_scratch = Array1::<f64>::zeros(total_p);
+                JointTrustRegionModel {
+                    source: effective_hessian_source,
+                    ranges: &ranges,
+                    s_lambdas: &s_lambdas,
+                    diagonal_ridge: joint_mode_diagonal_ridge,
+                    joint_bundle,
+                    jeffreys_curvature: head_jeffreys_curvature.as_ref(),
+                }
+                .predicted_reduction_at(
+                    &rhs,
+                    &search_delta,
+                    &mut proposal_hpen,
+                    &mut proposal_penalty_scratch,
+                )
+                .unwrap_or(f64::NAN)
+            } else {
+                f64::NAN
+            };
             let tr_attempt_sig = format!(
-                "{:<9}  ρ={:+.3e}  Δobj={:+.3e}  pred={:+.3e}  ray={:+.3e} convex={}  {}  decision={:<22}  |δ|={:.3e}  |δ|∞={:.3e}  |prop|∞={:.3e}",
+                "{:<9}  ρ={:+.3e}  Δobj={:+.3e}  pred={:+.3e}  ray={:+.3e} convex={}  prop_pred={:+.3e}  {}  decision={:<22}  |δ|={:.3e}  |δ|∞={:.3e}  |prop|∞={:.3e}",
                 phase,
                 trust_update.rho,
                 actual_reduction,
                 predicted_reduction,
                 reduction_along_ray,
                 model_certified_convex,
+                proposal_pred,
                 radius_field,
                 trust_update.decision.label(),
                 step_norm,
