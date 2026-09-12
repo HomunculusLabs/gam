@@ -576,8 +576,6 @@ fn finite_signed_product(
     Ok(value)
 }
 
-const MULTIBLOCK_ALO_MEMORY_BUDGET_BYTES: usize = 256 * 1024 * 1024;
-
 /// Number of observation columns solved per blocked right-hand-side batch in the
 /// scalar-leverage path. Sizes the reusable `(p, .)` and `(e_rank, .)` scratch
 /// buffers so the dense multi-RHS solve stays BLAS-3 (good cache reuse) without
@@ -589,14 +587,17 @@ const ALO_MAX_RHS_BLOCK_COLS: usize = 8192;
 /// One column retains `X'H^-1` input (`p`), the certified solution and its
 /// product/residual workspaces (conservatively `4p`), and `X H^-1 x_i` (`n`).
 /// The old fixed width of 8192 made the supposedly blocked `n x width` scratch
-/// consume multiple GiB on ordinary large fits. Saturating dimension arithmetic
-/// makes even an impossible allocation request resolve to a one-column attempt
-/// instead of wrapping the budget calculation.
+/// consume multiple GiB on ordinary large fits, so the width is the number of
+/// columns whose scratch fits the process's single-materialization cap.
+/// Saturating dimension arithmetic makes even an impossible allocation request
+/// resolve to a one-column attempt instead of wrapping the budget calculation.
 #[inline]
 fn alo_rhs_block_cols(n: usize, p: usize) -> usize {
     let scalars_per_col = n.saturating_add(p.saturating_mul(5)).max(1);
     let bytes_per_col = std::mem::size_of::<f64>().saturating_mul(scalars_per_col);
-    (MULTIBLOCK_ALO_MEMORY_BUDGET_BYTES / bytes_per_col.max(1))
+    let budget =
+        gam_runtime::resource::ResourcePolicy::default_library().max_single_materialization_bytes;
+    (budget / bytes_per_col.max(1))
         .max(1)
         .min(ALO_MAX_RHS_BLOCK_COLS)
 }
@@ -1292,11 +1293,12 @@ fn multiblock_alo_parallel_plan(
         .saturating_mul(std::mem::size_of::<f64>())
         .max(1);
     let workers = rayon::current_num_threads().max(1);
-    let max_concurrent_chunks = (MULTIBLOCK_ALO_MEMORY_BUDGET_BYTES / bytes_per_obs)
-        .max(1)
-        .min(workers);
-    let per_worker_budget =
-        (MULTIBLOCK_ALO_MEMORY_BUDGET_BYTES / max_concurrent_chunks).max(bytes_per_obs);
+    // The live chunks together are one materialization, admitted against the
+    // process's single-materialization cap.
+    let budget =
+        gam_runtime::resource::ResourcePolicy::default_library().max_single_materialization_bytes;
+    let max_concurrent_chunks = (budget / bytes_per_obs).max(1).min(workers);
+    let per_worker_budget = (budget / max_concurrent_chunks).max(bytes_per_obs);
     let budget_obs = (per_worker_budget / bytes_per_obs).max(1);
     (budget_obs.min(n_obs), max_concurrent_chunks)
 }
