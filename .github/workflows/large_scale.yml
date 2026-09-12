@@ -46,6 +46,14 @@ jobs:
         # build.rs gate under a multi-lane push burst) hid an unexpired
         # artifact built 20 minutes before the window began, and every
         # scheduled Large-scale run refused to start.
+        #
+        # The runtime SHA is read from the artifact name, not from the run. A
+        # commissioned build (`wheel-nightly.yml -f build_sha=<sha>`) runs with
+        # the dispatch ref's tip as its headSha but uploads
+        # `gamfit-runtime-<build_sha>`, so keying on headSha skipped every
+        # commissioned runtime unless main had not moved since the dispatch.
+        # Candidates are taken newest-created first, so the most recently
+        # commissioned runtime on this history wins.
         id: runtime
         shell: bash
         env:
@@ -55,17 +63,17 @@ jobs:
           runtime_run_id=""
           runtime_sha=""
           runtime_artifact=""
-          while IFS=$'\t' read -r candidate_run candidate_sha; do
-            if [[ -z "$candidate_run" || ! "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]; then
+          while read -r candidate_run; do
+            if [[ -z "$candidate_run" ]]; then
               continue
             fi
-            candidate_artifact="gamfit-runtime-${candidate_sha}"
-            artifact_count=$(gh api \
+            candidate_artifact=$(gh api \
               "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run}/artifacts?per_page=100" \
-              --jq ".artifacts | map(select(.name == \"${candidate_artifact}\" and (.expired == false))) | length")
-            if [[ "$artifact_count" -ne 1 ]]; then
+              --jq '[.artifacts[] | select((.name | test("^gamfit-runtime-[0-9a-f]{40}$")) and (.expired == false)) | .name] | if length == 1 then .[0] else "" end')
+            if [[ -z "$candidate_artifact" ]]; then
               continue
             fi
+            candidate_sha="${candidate_artifact#gamfit-runtime-}"
             merge_base=$(gh api \
               "repos/${GITHUB_REPOSITORY}/compare/${candidate_sha}...${GITHUB_SHA}" \
               --jq .merge_base_commit.sha)
@@ -81,8 +89,8 @@ jobs:
             --branch main \
             --status success \
             --limit 50 \
-            --json databaseId,headSha \
-            --jq '.[] | [.databaseId, .headSha] | @tsv')
+            --json databaseId \
+            --jq '.[].databaseId')
           if [[ -z "$runtime_run_id" ]]; then
             echo "::error::No unexpired warm runtime artifact exists on the ancestry of ${GITHUB_SHA}; refusing a source-build fallback."
             exit 1

@@ -2548,6 +2548,227 @@ pub(crate) fn thin_plate_kernel_psi_triplet_from_distance(
     Ok((value, psi, psi_psi))
 }
 
+pub(crate) fn create_thin_plate_spline_basis_scaledwithworkspace(
+    data: ArrayView2<f64>,
+    knots: ArrayView2<f64>,
+    length_scale: f64,
+    frozen_radial_reparam: Option<&Array2<f64>>,
+    workspace: &mut BasisWorkspace,
+) -> Result<ThinPlateSplineBasis, BasisError> {
+    let n = data.nrows();
+    let k = knots.nrows();
+    let d = data.ncols();
+
+    if d == 0 {
+        crate::bail_invalid_basis!("thin-plate spline requires at least one covariate dimension");
+    }
+    if d != knots.ncols() {
+        crate::bail_dim_basis!(
+            "thin-plate spline dimension mismatch: data has {} columns, knots have {} columns",
+            d,
+            knots.ncols()
+        );
+    }
+    let poly_cols = thin_plate_polynomial_basis_dimension(d);
+    if k < poly_cols {
+        crate::bail_invalid_basis!(
+            "thin-plate spline requires at least {} knots to span the degree-{} polynomial null space in dimension {}; got {}",
+            poly_cols,
+            thin_plate_polynomial_degree(d),
+            d,
+            k
+        );
+    }
+    if data.iter().any(|v| !v.is_finite()) || knots.iter().any(|v| !v.is_finite()) {
+        crate::bail_invalid_basis!("thin-plate spline requires finite data and knot values");
+    }
+    if !length_scale.is_finite() || length_scale <= 0.0 {
+        crate::bail_invalid_basis!("thin-plate length_scale must be finite and positive");
+    }
+
+    // Translation-invariant frame (#1269). The thin-plate kernel reads only
+    // coordinate *differences* `data − knots`, so it is already invariant to a
+    // covariate translation `x → x + c`; the polynomial null-space block
+    // `P = {1, x, x², …}` and the side-constraint nullspace `P(knots)ᵀα = 0`,
+    // however, are assembled at the *absolute* coordinate. When the covariate is
+    // offset (e.g. a centred-vs-raw "year", or this term's standardized axis
+    // carrying a large mean), the `{1, x}` columns become near-collinear, the
+    // design ill-conditions, and REML λ-selection lands in a slightly different
+    // basin — moving the fit by ~1% of signal range even though the model space
+    // is identical (`{1, x − x̄}` spans the same null space). Subtract the knot
+    // cloud's per-axis mean from both `data` and `knots` so the polynomial block
+    // is built in a location-standardized, well-conditioned frame. The knots are
+    // frozen (`UserProvided`) after fit, so this offset is identical at predict;
+    // and under `x → x + c` the knots (selected from the data) shift by the same
+    // `c`, so the centred coordinate — hence the whole basis — is invariant.
+    let knot_mean: Vec<f64> = (0..d)
+        .map(|c| knots.column(c).sum() / (k.max(1) as f64))
+        .collect();
+    let mut data_centered = data.to_owned();
+    let mut knots_centered = knots.to_owned();
+    for c in 0..d {
+        let mu = knot_mean[c];
+        data_centered.column_mut(c).mapv_inplace(|v| v - mu);
+        knots_centered.column_mut(c).mapv_inplace(|v| v - mu);
+    }
+    let data = data_centered.view();
+    let knots = knots_centered.view();
+
+    // K block: radial basis evaluations data -> knots
+    let mut kernel_block = Array2::<f64>::zeros((n, k));
+    let kernel_result: Result<(), BasisError> = kernel_block
+        .axis_iter_mut(Axis(0))
+        .into_par_iter()
+        .enumerate()
+        .try_for_each(|(i, mut row)| {
+            for j in 0..k {
+                let mut dist2 = 0.0;
+                for c in 0..d {
+                    let delta = data[[i, c]] - knots[[j, c]];
+                    dist2 += delta * delta;
+                }
+                row[j] = thin_plate_kernel_from_dist2(dist2 / (length_scale * length_scale), d)?;
+            }
+            Ok(())
+        });
+    kernel_result?;
+
+    // P block: all TPS null-space monomials of total degree < m.
+    let poly_block = thin_plate_polynomial_block(data);
+
+    // Omega block on knots
+    let mut omega = Array2::<f64>::zeros((k, k));
+    let length_scale_sq = length_scale * length_scale;
+    fill_symmetric_from_row_kernel(&mut omega, |i, j| {
+        let mut dist2 = 0.0;
+        for c in 0..d {
+            let delta = knots[[i, c]] - knots[[j, c]];
+            dist2 += delta * delta;
+        }
+        thin_plate_kernel_from_dist2(dist2 / length_scale_sq, d)
+    })?;
+
+    // Enforce TPS side-constraint P(knots)^T α = 0 by projecting onto
+    // the nullspace of P(knots)^T.
+    let z = thin_plate_kernel_constraint_nullspace(knots, &mut workspace.cache)?;
+    let kernel_constrained = fast_ab(&kernel_block, &z);
+    let omega_constrained = {
+        let zt_o = fast_atb(&z, &omega);
+        symmetrize_penalty(&fast_ab(&zt_o, &z))
+    };
+    let omega_psd = validate_psd_penalty(
+        &omega_constrained,
+        &format!("thin_plate bending penalty (dimension={d})"),
+        "thin-plate kernel and side-constraint assembly must yield a PSD penalty on the constrained subspace",
+    )?;
+    assert!(
+        omega_psd.min_eigenvalue >= -omega_psd.tolerance,
+        "thin-plate constrained penalty PSD validation violated tolerance after validation: min_eigenvalue={}, tolerance={}",
+        omega_psd.min_eigenvalue,
+        omega_psd.tolerance
+    );
+    assert!(
+        omega_psd.max_abs_eigenvalue.is_finite(),
+        "thin-plate constrained penalty has non-finite max eigenvalue after validation: max_abs_eigenvalue={}",
+        omega_psd.max_abs_eigenvalue
+    );
+    assert!(
+        omega_psd.effective_rank <= omega_constrained.nrows(),
+        "thin-plate constrained penalty rank exceeds constrained rows: effective_rank={}, rows={}",
+        omega_psd.effective_rank,
+        omega_constrained.nrows()
+    );
+
+    let constrained_kernel_cols = kernel_constrained.ncols();
+
+    // Radial penalty eigenspace reparameterization. Eigendecompose
+    // Ω_constrained = V Λ V' and rotate the radial design columns into the
+    // same basis. This preserves the TPS model space while making the bending
+    // block diagonal. Numerically near-null radial directions are not part of
+    // the polynomial null space; keeping them as almost-free columns lets REML
+    // spend EDF on wiggle with effectively zero curvature cost (#1271). Drop
+    // them from the exposed basis so only genuinely penalized radial directions
+    // remain.
+    let (radial_reparam, radial_eigvals): (Array2<f64>, Array1<f64>) = if let Some(frozen) =
+        frozen_radial_reparam
+    {
+        if frozen.nrows() != constrained_kernel_cols {
+            crate::bail_dim_basis!(
+                "thin-plate frozen radial reparam shape {:?} does not match constrained radial dimension {}",
+                frozen.dim(),
+                constrained_kernel_cols
+            );
+        }
+        let v = frozen.to_owned();
+        let vt_omega_v = fast_atb(&v, &omega_constrained);
+        let lambda_diag = fast_ab(&vt_omega_v, &v);
+        let mut evals = Array1::<f64>::zeros(v.ncols());
+        for i in 0..v.ncols() {
+            evals[i] = lambda_diag[[i, i]].max(0.0);
+        }
+        (v, evals)
+    } else if constrained_kernel_cols == 0 {
+        (Array2::<f64>::zeros((0, 0)), Array1::<f64>::zeros(0))
+    } else {
+        // #1347: reparameterize in the realized data metric so the bending
+        // spectrum acquires mgcv's cliff (curvature per unit data-variance),
+        // rather than the cliff-less raw knot-Gram spectrum that lets REML buy
+        // near-free wiggle on near-linear data. G_c = (K Z)ᵀ (K Z).
+        // Canonical row order so the Gram is row-permutation invariant (#1378).
+        let design_gram = data_metric_design_gram(kernel_constrained.view());
+        thin_plate_radial_reparam_data_metric(&omega_constrained, &design_gram)?
+    };
+    let kernel_cols = radial_eigvals.len();
+    let total_cols = kernel_cols + poly_cols;
+
+    let kernel_rotated = if kernel_cols == 0 {
+        Array2::<f64>::zeros((n, 0))
+    } else {
+        fast_ab(&kernel_constrained, &radial_reparam)
+    };
+
+    let mut basis = Array2::<f64>::zeros((n, total_cols));
+    basis
+        .slice_mut(s![.., 0..kernel_cols])
+        .assign(&kernel_rotated);
+    basis.slice_mut(s![.., kernel_cols..]).assign(&poly_block);
+
+    let mut penalty_bending = Array2::<f64>::zeros((total_cols, total_cols));
+    for i in 0..kernel_cols {
+        penalty_bending[[i, i]] = radial_eigvals[i];
+    }
+    // Evaluate the active raw chart on its frozen knot support.  The resulting
+    // Gram is a compact domain quadrature for the represented function, so the
+    // double penalty measures the L2 size of the polynomial/null component
+    // instead of the arbitrary Euclidean size of its coefficient vector.
+    let center_kernel_rotated = if kernel_cols == 0 {
+        Array2::<f64>::zeros((k, 0))
+    } else {
+        fast_ab(&fast_ab(&omega, &z), &radial_reparam)
+    };
+    let center_poly = thin_plate_polynomial_block(knots);
+    let mut center_design = Array2::<f64>::zeros((k, total_cols));
+    center_design
+        .slice_mut(s![.., 0..kernel_cols])
+        .assign(&center_kernel_rotated);
+    center_design
+        .slice_mut(s![.., kernel_cols..])
+        .assign(&center_poly);
+    let function_gram = symmetrize_penalty(&fast_ata(&center_design));
+    let penalty_ridge = function_space_nullspace_shrinkage(&penalty_bending, &function_gram)?
+        .unwrap_or_else(|| Array2::<f64>::zeros((total_cols, total_cols)));
+
+    Ok(ThinPlateSplineBasis {
+        basis,
+        penalty_bending,
+        penalty_ridge,
+        num_kernel_basis: kernel_cols,
+        num_polynomial_basis: poly_cols,
+        dimension: d,
+        radial_reparam,
+    })
+}
+
 pub(crate) fn active_thin_plate_penalty_derivatives(
     penalties: &[ActivePenalty],
     primary_derivative: &Array2<f64>,
