@@ -5269,6 +5269,20 @@ impl SaeManifoldTerm {
                 }
             }
         }
+        // #2915 — under the exact observed information this trace differentiates
+        // `A = B + ΔC`. `assignment_prior_log_strength_hdiag_weighted` reads the
+        // gate's PSD clamp `∂B/∂ρ_sparse`, so add the non-positive remainder from
+        // the producer the dense delta map uses. Both are degree one in
+        // `λ_sparse`, so `∂ΔC/∂ρ_sparse` is the remainder itself.
+        if operator.is_exact_a()
+            && matches!(self.assignment.mode, AssignmentMode::ThresholdGate { .. })
+        {
+            hdiag += &crate::assignment::threshold_gate_negative_hessian_remainder_weighted(
+                &self.assignment,
+                rho,
+                self.row_loss_weights.as_deref(),
+            )?;
+        }
         let assignment_dim = self.assignment.assignment_coord_dim();
         let row_loss_weights = self.row_loss_weights.as_deref();
         let mut trace = 0.0_f64;
