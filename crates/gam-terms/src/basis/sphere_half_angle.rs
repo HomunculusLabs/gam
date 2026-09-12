@@ -302,3 +302,28 @@ pub(crate) fn half_angle_partials(a: SphereTrig<f64>, b: SphereTrig<f64>) -> (f6
     let du_dlon = 0.5 * a.cos_lat * b.cos_lat * sin_dlon;
     (du_dlat, du_dlon)
 }
+
+/// Second partials of `u = sin²(γ/2)` with respect to the first point's latitude
+/// `φ` and longitude `ψ`, in radians, from the same precomputed trigonometry as
+/// [`half_angle_partials`]:
+///
+/// ```text
+/// ∂²u/∂φ²  = ½ cos(Δφ) − cos φ · cos φ_c · sin²(Δψ/2)
+/// ∂²u/∂φ∂ψ = −½ sin φ · cos φ_c · sin(Δψ)
+/// ∂²u/∂ψ²  = ½ cos φ · cos φ_c · cos(Δψ)
+/// ```
+///
+/// Returns `(∂²u/∂φ², ∂²u/∂φ∂ψ, ∂²u/∂ψ²)`.
+#[inline]
+pub(crate) fn half_angle_second_partials(a: SphereTrig<f64>, b: SphereTrig<f64>) -> (f64, f64, f64) {
+    let cos_dlat = a.cos_lat * b.cos_lat + a.sin_lat * b.sin_lat;
+    let sin_dlon = a.sin_lon * b.cos_lon - a.cos_lon * b.sin_lon;
+    let cos_dlon = a.cos_lon * b.cos_lon + a.sin_lon * b.sin_lon;
+    let d_sin_lon = a.sin_lon - b.sin_lon;
+    let d_cos_lon = a.cos_lon - b.cos_lon;
+    let hav_lon = 0.25 * (d_sin_lon * d_sin_lon + d_cos_lon * d_cos_lon);
+    let d2u_dlat2 = 0.5 * cos_dlat - a.cos_lat * b.cos_lat * hav_lon;
+    let d2u_dlat_dlon = -0.5 * a.sin_lat * b.cos_lat * sin_dlon;
+    let d2u_dlon2 = 0.5 * a.cos_lat * b.cos_lat * cos_dlon;
+    (d2u_dlat2, d2u_dlat_dlon, d2u_dlon2)
+}

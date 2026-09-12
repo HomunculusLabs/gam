@@ -399,6 +399,52 @@ pub(crate) fn build_wahba_decomposed_jet(
     }
 }
 
+/// Input-location HESSIAN companion of [`build_wahba_decomposed_jet`], shape
+/// `(N, K, 2, 2)`. The decomposed design is linear in the per-row kernel and
+/// harmonic functions, so every `(a, b)` derivative slice is mapped exactly as
+/// one jet axis is.
+pub(crate) fn build_wahba_decomposed_hessian(
+    raw_kernel_hessian: &ndarray::Array4<f64>,
+    low_hessian: Option<&ndarray::Array4<f64>>,
+    decomposition: &WahbaLowDegreeDecomposition,
+) -> ndarray::Array4<f64> {
+    let n = raw_kernel_hessian.shape()[0];
+    let kernel_cols = decomposition.kernel_basis.ncols();
+    match (
+        &decomposition.kernel_low_projection,
+        low_hessian,
+        &decomposition.low_degree_centers,
+    ) {
+        (Some(kernel_low_projection), Some(low_hessian), Some(_)) => {
+            let low_cols = decomposition.low_degree_cols;
+            let low_hessian = low_hessian.select(Axis(1), &decomposition.low_degree_columns);
+            let mut out = ndarray::Array4::<f64>::zeros((n, kernel_cols + low_cols, 2, 2));
+            for a in 0..2 {
+                for b in 0..2 {
+                    let raw_ab = raw_kernel_hessian.slice(s![.., .., a, b]);
+                    let low_ab = low_hessian.slice(s![.., .., a, b]);
+                    let kernel_ab =
+                        raw_ab.dot(&decomposition.kernel_basis) - low_ab.dot(kernel_low_projection);
+                    out.slice_mut(s![.., 0..kernel_cols, a, b]).assign(&kernel_ab);
+                    out.slice_mut(s![.., kernel_cols.., a, b]).assign(&low_ab);
+                }
+            }
+            out
+        }
+        _ => {
+            let mut out = ndarray::Array4::<f64>::zeros((n, kernel_cols, 2, 2));
+            for a in 0..2 {
+                for b in 0..2 {
+                    let raw_ab = raw_kernel_hessian.slice(s![.., .., a, b]);
+                    out.slice_mut(s![.., .., a, b])
+                        .assign(&raw_ab.dot(&decomposition.kernel_basis));
+                }
+            }
+            out
+        }
+    }
+}
+
 fn build_wahba_decomposed_penalty(
     center_kernel: ArrayView2<'_, f64>,
     decomposition: &WahbaLowDegreeDecomposition,

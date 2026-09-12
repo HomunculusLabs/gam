@@ -116,3 +116,41 @@ pub(crate) fn sphere_truncated_spectral_derivative_eval(cos_gamma: f64, coeffs: 
     }
     acc
 }
+
+/// Exact second derivative `d²/d(cos γ)² [ Σ_ℓ c_ℓ P_ℓ(cos γ) ]` of
+/// [`sphere_truncated_spectral_eval`], from the recurrence obtained by
+/// differentiating the `P'` recurrence of
+/// [`sphere_truncated_spectral_derivative_eval`] once more,
+///
+/// ```text
+///   P''_ℓ(x) = (2ℓ - 1)·P'_{ℓ-1}(x) + P''_{ℓ-2}(x),    P''_0 = P''_1 = 0
+/// ```
+///
+/// so one sweep carries `P`, `P'` and `P''` over the closed interval, poles
+/// included.
+pub(crate) fn sphere_truncated_spectral_second_derivative_eval(cos_gamma: f64, coeffs: &[f64]) -> f64 {
+    let x = cos_gamma.clamp(-1.0, 1.0);
+    let lmax = coeffs.len().saturating_sub(1);
+    let mut p_prev = 1.0_f64; // P_{ℓ-2}, seeded at P_0
+    let mut p_curr = x; // P_{ℓ-1}, seeded at P_1
+    let mut d_prev = 0.0_f64; // P'_{ℓ-2}, seeded at P'_0
+    let mut d_curr = 1.0_f64; // P'_{ℓ-1}, seeded at P'_1
+    let mut s_prev = 0.0_f64; // P''_{ℓ-2}, seeded at P''_0
+    let mut s_curr = 0.0_f64; // P''_{ℓ-1}, seeded at P''_1
+    let mut acc = 0.0_f64;
+    for ell in 2..=lmax {
+        let lf = ell as f64;
+        let two_l_minus_1 = 2.0 * lf - 1.0;
+        let s_next = two_l_minus_1 * d_curr + s_prev;
+        let d_next = two_l_minus_1 * p_curr + d_prev;
+        let p_next = (two_l_minus_1 * x * p_curr - (lf - 1.0) * p_prev) / lf;
+        acc += coeffs[ell] * s_next;
+        p_prev = p_curr;
+        p_curr = p_next;
+        d_prev = d_curr;
+        d_curr = d_next;
+        s_prev = s_curr;
+        s_curr = s_next;
+    }
+    acc
+}

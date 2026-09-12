@@ -11,6 +11,7 @@ use super::sphere_spec::SphereWahbaKernel;
 use super::sphere_spectral::{
     pseudo_s2_truncated_coefficients, sobolev_s2_truncated_coefficients,
     sphere_truncated_spectral_derivative_eval, sphere_truncated_spectral_eval,
+    sphere_truncated_spectral_second_derivative_eval,
 };
 
 /// Exact coincident-point value `K_m^{pseudo}(γ = 0)` of the pseudo-spline
@@ -290,17 +291,23 @@ pub(crate) fn wahba_sphere_kernel_sobolev(sep: HalfAngleSeparation, m: usize) ->
     }
 }
 
+/// Truncation degree of the Sobolev spectral series, shared by the kernel value
+/// and its first and second derivatives so all three sum the same partial sum.
+fn sobolev_spectral_l_max(m: usize) -> usize {
+    match m {
+        1 => 4096,
+        2 => 256,
+        3 => 128,
+        _ => 96,
+    }
+}
+
 /// Spectral Legendre-series evaluation of the Sobolev kernel
 /// `K_m^{Sobolev}(gamma) = (1/4pi) sum_{l >= 1} (2l+1) *
 /// [l(l+1)]^{-m} * P_l(cos gamma)`.
 #[inline]
 pub(crate) fn wahba_sphere_kernel_sobolev_spectral(cos_gamma: f64, m: usize) -> f64 {
-    let l_max = match m {
-        1 => 4096_usize,
-        2 => 256,
-        3 => 128,
-        _ => 96,
-    };
+    let l_max = sobolev_spectral_l_max(m);
     let x = cos_gamma.clamp(-1.0, 1.0);
     let m_i = m as i32;
     let four_pi = 4.0 * std::f64::consts::PI;
@@ -536,12 +543,7 @@ pub(crate) fn wahba_sphere_kernel_sobolev_derivative_dhav(
         return wahba_sphere_kernel_sobolev_closed_form_derivative_dhav(sep, m);
     }
 
-    let l_max = match m {
-        1 => 4096_usize,
-        2 => 256,
-        3 => 128,
-        _ => 96,
-    };
+    let l_max = sobolev_spectral_l_max(m);
     let x = sep.cos_gamma();
     let m_i = m as i32;
     let four_pi = 4.0 * std::f64::consts::PI;
@@ -619,6 +621,152 @@ pub(crate) fn wahba_sphere_kernel_derivative_dhav_kind(
         SphereWahbaKernel::PseudoTruncated { lmax } => {
             let coeffs = pseudo_s2_truncated_coefficients(lmax as usize, penalty_order);
             -2.0 * sphere_truncated_spectral_derivative_eval(sep.cos_gamma(), &coeffs)
+        }
+    }
+}
+
+/// `d²K_m^{Sobolev}/du²`. For `m ∈ {1, 2, 3}` this differentiates the closed
+/// forms of [`wahba_sphere_kernel_sobolev_closed_form_derivative_dhav`] once more
+/// (`dv/du = −1`, `d Li₂(u)/du = −ln v / u`):
+///
+/// ```text
+///   m=1:  1/(4π u²)
+///   m=2:  (v/u + ln u) / (4π v²)
+///   m=3:  [ (Li₂(u) + u·ln u / v + ln u · ln v)/u² − (v/u + ln u)/v² ] / (4π)
+/// ```
+///
+/// all three divergent at coincidence, where the caller never asks for them.
+/// `m = 4` differentiates the same truncated spectral series as the first
+/// derivative, which converges there.
+fn wahba_sphere_kernel_sobolev_second_derivative_dhav(sep: HalfAngleSeparation, m: usize) -> f64 {
+    if !(1..=3).contains(&m) {
+        let coeffs = sobolev_s2_truncated_coefficients(sobolev_spectral_l_max(m), m);
+        // The sweep produces `d²K/d(cos γ)²`, and `(d(cos γ)/du)² = 4`.
+        return 4.0 * sphere_truncated_spectral_second_derivative_eval(sep.cos_gamma(), &coeffs);
+    }
+    let four_pi = 4.0 * std::f64::consts::PI;
+    let u = sep.u;
+    let v = sep.v;
+    assert!(
+        u > 0.0,
+        "Sobolev m={m} second derivative diverges at coincidence (u = sin²(γ/2) = {u}); \
+         the caller resolves coincidence without it"
+    );
+    // `ln u` and `ln v`, each from whichever exact half is small, as in the
+    // first derivative.
+    let ln_u = if v <= 0.5 { (-v).ln_1p() } else { u.ln() };
+    let ln_v = if u <= 0.5 { (-u).ln_1p() } else { v.ln() };
+    // `(v/u + ln u)/v²` is `0/0` at the antipode with the finite limit `½`, since
+    // `v/u + ln u = v²/2 + 2v³/3 + …`. Away from it the cancellation costs
+    // `O(ε/v)` relative, and the `(∂u)² = O(v)` factor it multiplies in the
+    // Hessian brings that back to `O(ε)`.
+    let antipode = if v == 0.0 { 0.5 } else { (v / u + ln_u) / (v * v) };
+    match m {
+        1 => 1.0 / (four_pi * u * u),
+        2 => antipode / four_pi,
+        _ => {
+            let ln_u_over_v = if v == 0.0 { -1.0 } else { ln_u / v };
+            let cross = if v == 0.0 { 0.0 } else { ln_u * ln_v };
+            ((dilog_unit(u) + u * ln_u_over_v + cross) / (u * u) - antipode) / four_pi
+        }
+    }
+}
+
+/// Exact `d²K_m^{pseudo}/du²` of [`wahba_sphere_kernel_pseudo`], differentiating
+/// its polynomial in `w = u` twice with `a = ln(1 + 1/√w)` and `c = 2√w`:
+///
+/// ```text
+///   a'  = −1/(2w(√w + 1)),   a'' = (3√w + 2)/(4w²(√w + 1)²)
+///   c'  = 1/√w,              c'' = −1/(2w^{3/2})
+/// ```
+fn wahba_sphere_kernel_pseudo_second_derivative_dhav(sep: HalfAngleSeparation, m: usize) -> f64 {
+    let w = sep.u;
+    assert!(
+        w > 0.0,
+        "pseudo-spline second derivative called at coincidence (u = sin²(γ/2) = {w}); \
+         the caller resolves coincidence without it"
+    );
+    let c0 = w.sqrt();
+    let a = (1.0 + 1.0 / c0).ln();
+    let c = 2.0 * c0;
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let da = -1.0 / (2.0 * w * (c0 + 1.0));
+    let d2a = (3.0 * c0 + 2.0) / (4.0 * w * w * (c0 + 1.0) * (c0 + 1.0));
+    let dc = 1.0 / c0;
+    let d2c = -1.0 / (2.0 * w * c0);
+    match m {
+        1 => (4.0 * da + 2.0 * w * d2a - d2c) / two_pi,
+        2 => {
+            let d2q2 = d2a * (6.0 * w * w - 2.0 * w) + 2.0 * da * (12.0 * w - 2.0) + 12.0 * a
+                - 3.0 * (d2c * w + 2.0 * dc);
+            (d2q2 / 2.0) / two_pi
+        }
+        3 => {
+            let w2 = w * w;
+            let w3 = w2 * w;
+            let d2inner = d2a * (60.0 * w3 - 36.0 * w2)
+                + 2.0 * da * (180.0 * w2 - 72.0 * w)
+                + a * (360.0 * w - 72.0)
+                + 60.0
+                + d2c * (8.0 * w - 30.0 * w2)
+                + 2.0 * dc * (8.0 - 60.0 * w)
+                - 60.0 * c;
+            (d2inner / 18.0) / two_pi
+        }
+        _ => {
+            let w2 = w * w;
+            let w3 = w2 * w;
+            let w4 = w3 * w;
+            let d2q4 = d2a * (70.0 * w4 - 60.0 * w3 + 6.0 * w2)
+                + 2.0 * da * (280.0 * w3 - 180.0 * w2 + 12.0 * w)
+                + a * (840.0 * w2 - 360.0 * w + 12.0)
+                + 35.0 * (6.0 * w * (1.0 - c) - 6.0 * w2 * dc - w3 * d2c)
+                + (55.0 / 3.0) * (d2c * w2 + 4.0 * dc * w + 2.0 * c)
+                - 25.0;
+            (d2q4 / 24.0) / two_pi
+        }
+    }
+}
+
+/// Unified `d²K/du²` for any [`SphereWahbaKernel`] kind, the second-order
+/// companion of [`wahba_sphere_kernel_derivative_dhav_kind`]. The Sobolev
+/// `m ≤ 3` and pseudo arms are only defined for `u > 0`.
+pub(crate) fn wahba_sphere_kernel_second_derivative_dhav_kind(
+    sep: HalfAngleSeparation,
+    penalty_order: usize,
+    kernel: SphereWahbaKernel,
+) -> f64 {
+    match kernel {
+        SphereWahbaKernel::Sobolev => {
+            wahba_sphere_kernel_sobolev_second_derivative_dhav(sep, penalty_order)
+        }
+        SphereWahbaKernel::Pseudo => {
+            wahba_sphere_kernel_pseudo_second_derivative_dhav(sep, penalty_order)
+        }
+        SphereWahbaKernel::SobolevTruncated { lmax } => {
+            let coeffs = sobolev_s2_truncated_coefficients(lmax as usize, penalty_order);
+            4.0 * sphere_truncated_spectral_second_derivative_eval(sep.cos_gamma(), &coeffs)
+        }
+        SphereWahbaKernel::PseudoTruncated { lmax } => {
+            let coeffs = pseudo_s2_truncated_coefficients(lmax as usize, penalty_order);
+            4.0 * sphere_truncated_spectral_second_derivative_eval(sep.cos_gamma(), &coeffs)
+        }
+    }
+}
+
+/// Whether the kernel's input-location Hessian exists where an evaluation point
+/// coincides with a center, which is exactly when `dK/du` is finite at `u = 0`:
+/// there `∂u = 0` and the Hessian is `K'(0)·∂²u`. The Sobolev spectral sum for
+/// `K'(0)` goes like `Σ ℓ^{3−2m}` and the pseudo one like `Σ ℓ^{1−m}`, so both
+/// need `m ≥ 3`. Every truncated kernel is a polynomial in `cos γ` and smooth.
+pub(crate) fn wahba_sphere_kernel_hessian_exists_at_coincidence(
+    penalty_order: usize,
+    kernel: SphereWahbaKernel,
+) -> bool {
+    match kernel {
+        SphereWahbaKernel::Sobolev | SphereWahbaKernel::Pseudo => penalty_order >= 3,
+        SphereWahbaKernel::SobolevTruncated { .. } | SphereWahbaKernel::PseudoTruncated { .. } => {
+            true
         }
     }
 }

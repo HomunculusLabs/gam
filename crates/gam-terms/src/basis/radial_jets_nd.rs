@@ -1892,6 +1892,111 @@ pub(crate) fn spherical_wahba_kernel_jet_with_kind(
     Ok(out)
 }
 
+/// Raw Wahba kernel HESSIAN `∂²K(x, c)/∂(lat, lon)²`, shape `(N, K, 2, 2)`, in
+/// the units of the raw input.
+///
+/// With `u = sin²(γ/2)`, `∂²K/∂a∂b = K''(u)·∂u/∂a·∂u/∂b + K'(u)·∂²u/∂a∂b`, every
+/// factor from [`super::sphere_half_angle`] and [`super::sphere_kernels`]. At a
+/// point that coincides with a center `∂u = 0` exactly and the Hessian is
+/// `K'(0)·∂²u` when `K'(0)` is finite. The kernels whose `K'` diverges there
+/// (Sobolev and pseudo `m ≤ 2`) have no Hessian at a center, and the build is
+/// refused rather than handed a value.
+pub(crate) fn spherical_wahba_kernel_hessian_with_kind(
+    data: ArrayView2<'_, f64>,
+    centers: ArrayView2<'_, f64>,
+    penalty_order: usize,
+    radians: bool,
+    kernel: SphereWahbaKernel,
+) -> Result<ndarray::Array4<f64>, BasisError> {
+    validate_lat_lon_matrix(data, "spherical spline hessian data", radians)?;
+    validate_lat_lon_matrix(centers, "spherical spline hessian centers", radians)?;
+    if !(1..=4).contains(&penalty_order) {
+        crate::bail_invalid_basis!(
+            "spherical spline hessian penalty_order must be one of 1, 2, 3, 4; got {penalty_order}"
+        );
+    }
+    let n = data.nrows();
+    let k = centers.nrows();
+    let deg = if radians {
+        1.0
+    } else {
+        std::f64::consts::PI / 180.0
+    };
+    let deg2 = deg * deg;
+    let smooth_at_coincidence =
+        wahba_sphere_kernel_hessian_exists_at_coincidence(penalty_order, kernel);
+    let center_trig: Vec<SphereTrig<f64>> = centers
+        .outer_iter()
+        .map(|c| SphereTrig::from_radians(c[0] * deg, c[1] * deg))
+        .collect();
+    let mut out = ndarray::Array4::<f64>::zeros((n, k, 2, 2));
+    let singular_coincidence = std::sync::atomic::AtomicBool::new(false);
+    let non_finite = std::sync::atomic::AtomicBool::new(false);
+    out.axis_chunks_iter_mut(ndarray::Axis(0), 256)
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(chunk_idx, mut block)| {
+            let row_offset = chunk_idx * 256;
+            for (local_i, mut out_row) in block.outer_iter_mut().enumerate() {
+                let i = row_offset + local_i;
+                let row = SphereTrig::from_radians(data[(i, 0)] * deg, data[(i, 1)] * deg);
+                for (j, &center) in center_trig.iter().enumerate() {
+                    let sep = half_angle_separation_scalar(row, center);
+                    let dk_du = wahba_sphere_kernel_derivative_dhav_kind(sep, penalty_order, kernel);
+                    let (d2u_aa, d2u_ab, d2u_bb) = half_angle_second_partials(row, center);
+                    let (h_aa, h_ab, h_bb) = if sep.u <= 0.0 {
+                        if !smooth_at_coincidence {
+                            singular_coincidence.store(true, std::sync::atomic::Ordering::Relaxed);
+                            return;
+                        }
+                        (dk_du * d2u_aa, dk_du * d2u_ab, dk_du * d2u_bb)
+                    } else {
+                        let d2k_du2 =
+                            wahba_sphere_kernel_second_derivative_dhav_kind(sep, penalty_order, kernel);
+                        let (du_a, du_b) = half_angle_partials(row, center);
+                        (
+                            d2k_du2 * du_a * du_a + dk_du * d2u_aa,
+                            d2k_du2 * du_a * du_b + dk_du * d2u_ab,
+                            d2k_du2 * du_b * du_b + dk_du * d2u_bb,
+                        )
+                    };
+                    let (h_aa, h_ab, h_bb) = (h_aa * deg2, h_ab * deg2, h_bb * deg2);
+                    if !(h_aa.is_finite() && h_ab.is_finite() && h_bb.is_finite()) {
+                        non_finite.store(true, std::sync::atomic::Ordering::Relaxed);
+                        return;
+                    }
+                    write_symmetric_hessian_entry(&mut out_row, j, h_aa, h_ab, h_bb);
+                }
+            }
+        });
+    if singular_coincidence.load(std::sync::atomic::Ordering::Relaxed) {
+        crate::bail_invalid_basis!(
+            "spherical spline kernel hessian does not exist where an evaluation point coincides \
+             with a center of the penalty_order={penalty_order} {kernel:?} kernel, whose dK/du \
+             diverges there; evaluate away from the centers or use penalty_order >= 3"
+        );
+    }
+    if non_finite.load(std::sync::atomic::Ordering::Relaxed) {
+        crate::bail_invalid_basis!("spherical spline kernel hessian produced a non-finite value");
+    }
+    Ok(out)
+}
+
+/// Write one column's symmetric `2 × 2` input-location Hessian.
+#[inline]
+fn write_symmetric_hessian_entry(
+    out_row: &mut ndarray::ArrayViewMut3<'_, f64>,
+    col: usize,
+    aa: f64,
+    ab: f64,
+    bb: f64,
+) {
+    out_row[[col, 0, 0]] = aa;
+    out_row[[col, 0, 1]] = ab;
+    out_row[[col, 1, 0]] = ab;
+    out_row[[col, 1, 1]] = bb;
+}
+
 /// Apply the `(K × K')` identifiability transform `z` to a raw Wahba jet
 /// `(N, K, 2)`, producing the realized-design jet `(N, K', 2)` whose column
 /// `c` aligns with column `c` of `raw_design.dot(z)`. The transform is linear
@@ -1913,6 +2018,32 @@ pub(crate) fn apply_identifiability_to_jet(raw_jet: &Array3<f64>, z: &Array2<f64
         let raw_axis: ndarray::ArrayView2<'_, f64> = raw_jet.index_axis(ndarray::Axis(2), axis);
         let projected = raw_axis.dot(z);
         out.slice_mut(ndarray::s![.., .., axis]).assign(&projected);
+    }
+    out
+}
+
+/// Hessian companion of [`apply_identifiability_to_jet`]: each `(a, b)` slice of
+/// the raw `(N, K, 2, 2)` Hessian is contracted with `z`, aligned with
+/// `raw_design · z`.
+pub(crate) fn apply_identifiability_to_hessian(
+    raw_hessian: &ndarray::Array4<f64>,
+    z: &Array2<f64>,
+) -> ndarray::Array4<f64> {
+    let n = raw_hessian.shape()[0];
+    let k = raw_hessian.shape()[1];
+    assert_eq!(
+        z.nrows(),
+        k,
+        "apply_identifiability_to_hessian: identifiability transform rows ({}) must match raw hessian basis dim ({})",
+        z.nrows(),
+        k
+    );
+    let mut out = ndarray::Array4::<f64>::zeros((n, z.ncols(), 2, 2));
+    for a in 0..2 {
+        for b in 0..2 {
+            let projected = raw_hessian.slice(ndarray::s![.., .., a, b]).dot(z);
+            out.slice_mut(ndarray::s![.., .., a, b]).assign(&projected);
+        }
     }
     out
 }
@@ -2090,6 +2221,251 @@ pub(crate) fn spherical_harmonic_jet(
     Ok(out)
 }
 
+/// Real-spherical-harmonic DESIGN hessian `∂²Φ/∂(lat, lon)²`, shape
+/// `(N, p, 2, 2)`, with the column order of [`spherical_harmonic_jet`].
+///
+/// The latitude part applies that jet's pole-free colatitude identity twice:
+/// `d²P_{l,0}/dlat² = −dP_{l,1}/dlat`, and for `m ≥ 1`
+/// `d²P_{l,m}/dlat² = ½[(l+m)(l−m+1)·dP_{l,m−1}/dlat − dP_{l,m+1}/dlat]`, so every
+/// entry is a combination of Legendre values the recurrence already holds. The
+/// longitude factor `T_m ∈ {sin mψ, 1, cos mψ}` contributes `T'_m` and
+/// `T''_m = −m²·T_m`. Radian-space entries are scaled by `deg²`.
+pub(crate) fn spherical_harmonic_hessian(
+    data: ArrayView2<'_, f64>,
+    max_degree: usize,
+    radians: bool,
+) -> Result<ndarray::Array4<f64>, BasisError> {
+    validate_lat_lon_matrix(data, "spherical-harmonic hessian", radians)?;
+    if max_degree < 1 {
+        crate::bail_invalid_basis!("spherical-harmonic hessian max_degree must be >= 1");
+    }
+    if max_degree > 32 {
+        crate::bail_invalid_basis!(
+            "spherical-harmonic hessian max_degree {max_degree} too large; cap is 32"
+        );
+    }
+    let n = data.nrows();
+    let p = max_degree * (max_degree + 2);
+    let deg = if radians {
+        1.0
+    } else {
+        std::f64::consts::PI / 180.0
+    };
+    let deg2 = deg * deg;
+    let norms = precompute_harmonic_norms(max_degree);
+    let l_cap = max_degree + 1;
+    let idx = |l: usize, m: usize| l * l_cap + m;
+    let mut out = ndarray::Array4::<f64>::zeros((n, p, 2, 2));
+    out.axis_chunks_iter_mut(ndarray::Axis(0), 1024)
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(chunk_idx, mut block)| {
+            let mut p_buf = vec![0.0_f64; l_cap * l_cap];
+            let row_offset = chunk_idx * 1024;
+            for (local_i, mut out_row) in block.outer_iter_mut().enumerate() {
+                let i = row_offset + local_i;
+                let lat = (data[(i, 0)] * deg)
+                    .clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2);
+                let lon = data[(i, 1)] * deg;
+                let (x, cos_lat) = lat.sin_cos();
+                // Associated Legendre P_{l,m}(x) — identical recurrence to
+                // `fill_real_spherical_harmonics_row`.
+                for slot in p_buf.iter_mut() {
+                    *slot = 0.0;
+                }
+                p_buf[idx(0, 0)] = 1.0;
+                for m in 1..=max_degree {
+                    p_buf[idx(m, m)] = -((2 * m - 1) as f64) * cos_lat * p_buf[idx(m - 1, m - 1)];
+                }
+                for m in 0..max_degree {
+                    p_buf[idx(m + 1, m)] = ((2 * m + 1) as f64) * x * p_buf[idx(m, m)];
+                }
+                for m in 0..=max_degree {
+                    for l in (m + 2)..=max_degree {
+                        p_buf[idx(l, m)] = (((2 * l - 1) as f64) * x * p_buf[idx(l - 1, m)]
+                            - ((l + m - 1) as f64) * p_buf[idx(l - 2, m)])
+                            / ((l - m) as f64);
+                    }
+                }
+                let p_at = |l: usize, m: usize| -> f64 {
+                    if m <= l {
+                        p_buf[idx(l, m)]
+                    } else {
+                        0.0
+                    }
+                };
+                let dp_dlat = |l: usize, m: usize| -> f64 {
+                    if m == 0 {
+                        return -p_at(l, 1);
+                    }
+                    0.5 * (((l + m) * (l - m + 1)) as f64 * p_at(l, m - 1) - p_at(l, m + 1))
+                };
+                let d2p_dlat2 = |l: usize, m: usize| -> f64 {
+                    if m == 0 {
+                        return -dp_dlat(l, 1);
+                    }
+                    let upper = if m + 1 <= l { dp_dlat(l, m + 1) } else { 0.0 };
+                    0.5 * (((l + m) * (l - m + 1)) as f64 * dp_dlat(l, m - 1) - upper)
+                };
+                let (sin1, cos1) = lon.sin_cos();
+                let mut sin_buf = [0.0_f64; 33];
+                let mut cos_buf = [0.0_f64; 33];
+                cos_buf[0] = 1.0;
+                sin_buf[1] = sin1;
+                cos_buf[1] = cos1;
+                let two_cos1 = 2.0 * cos1;
+                for m in 2..=max_degree {
+                    sin_buf[m] = two_cos1 * sin_buf[m - 1] - sin_buf[m - 2];
+                    cos_buf[m] = two_cos1 * cos_buf[m - 1] - cos_buf[m - 2];
+                }
+                let mut col = 0usize;
+                for l in 1..=max_degree {
+                    // sin(mψ) columns for m = l, l-1, ..., 1.
+                    for m in (1..=l).rev() {
+                        let nlm = norms[idx(l, m)];
+                        let mf = m as f64;
+                        write_symmetric_hessian_entry(
+                            &mut out_row,
+                            col,
+                            nlm * sin_buf[m] * d2p_dlat2(l, m) * deg2,
+                            nlm * mf * cos_buf[m] * dp_dlat(l, m) * deg2,
+                            -nlm * mf * mf * sin_buf[m] * p_at(l, m) * deg2,
+                        );
+                        col += 1;
+                    }
+                    // m = 0: no longitude factor.
+                    let nl0 = norms[idx(l, 0)];
+                    write_symmetric_hessian_entry(
+                        &mut out_row,
+                        col,
+                        nl0 * d2p_dlat2(l, 0) * deg2,
+                        0.0,
+                        0.0,
+                    );
+                    col += 1;
+                    // cos(mψ) columns for m = 1, ..., l.
+                    for m in 1..=l {
+                        let nlm = norms[idx(l, m)];
+                        let mf = m as f64;
+                        write_symmetric_hessian_entry(
+                            &mut out_row,
+                            col,
+                            nlm * cos_buf[m] * d2p_dlat2(l, m) * deg2,
+                            -nlm * mf * sin_buf[m] * dp_dlat(l, m) * deg2,
+                            -nlm * mf * mf * cos_buf[m] * p_at(l, m) * deg2,
+                        );
+                        col += 1;
+                    }
+                }
+            }
+        });
+    if out.iter().any(|v| !v.is_finite()) {
+        crate::bail_invalid_basis!("spherical-harmonic hessian produced a non-finite value");
+    }
+    Ok(out)
+}
+
+/// How the spherical-spline forward design is built, which its input-location
+/// derivatives mirror column for column: harmonic columns through `max_degree`
+/// (the harmonic method, and the pseudo kernel, whose forward routes through
+/// harmonics), or the Wahba decomposed design over realized centers.
+enum SphericalDesignRoute {
+    Harmonic {
+        max_degree: usize,
+    },
+    Wahba {
+        centers: Array2<f64>,
+        decomposition: WahbaLowDegreeDecomposition,
+    },
+}
+
+fn spherical_design_route(
+    data: ArrayView2<'_, f64>,
+    spec: &SphericalSplineBasisSpec,
+    context: &str,
+) -> Result<SphericalDesignRoute, BasisError> {
+    if matches!(spec.method, SphereMethod::Harmonic) {
+        let max_degree = spec
+            .max_degree
+            .unwrap_or_else(|| default_spherical_harmonic_degree(data.nrows()));
+        if !(1..=4).contains(&spec.penalty_order) {
+            crate::bail_invalid_basis!(
+                "spherical-harmonic {context} penalty_order must be one of 1, 2, 3, 4; got {}",
+                spec.penalty_order
+            );
+        }
+        return Ok(SphericalDesignRoute::Harmonic { max_degree });
+    }
+    // The Pseudo Wahba kernel forward build routes through the harmonic basis
+    // (see `build_spherical_spline_basis`), so its derivatives mirror that
+    // routing — degree-mapped harmonic columns — rather than the raw Wahba
+    // kernel, or they would have a different column count than the forward
+    // design they differentiate.
+    if matches!(spec.wahba_kernel, SphereWahbaKernel::Pseudo) {
+        let max_degree = spec
+            .max_degree
+            .unwrap_or_else(|| harmonic_degree_for_wahba_basis_width(spec, data.nrows()));
+        return Ok(SphericalDesignRoute::Harmonic { max_degree });
+    }
+    validate_lat_lon_matrix(data, &format!("spherical spline {context}"), spec.radians)?;
+    let centers = match realized_center_strategy(&spec.center_strategy) {
+        CenterStrategy::FarthestPoint { num_centers } => {
+            select_spherical_farthest_point_centers(data, *num_centers, spec.radians)?
+        }
+        _ => select_centers_by_strategy(data, &spec.center_strategy)?,
+    };
+    validate_lat_lon_matrix(
+        centers.view(),
+        &format!("spherical spline {context} centers"),
+        spec.radians,
+    )?;
+    if centers.nrows() < 2 {
+        return Err(BasisError::InsufficientColumnsForConstraint {
+            found: centers.nrows(),
+        });
+    }
+    // The Wahba (Sobolev) forward design is the low-degree *decomposed* design,
+    // not the raw kernel design: `[ raw_kernel·kernel_basis −
+    // low·kernel_low_projection | low ]` (see `build_wahba_decomposed_design`).
+    // Derivatives are built against the same decomposition so they align column
+    // for column with the forward design (width = decomposed width, not
+    // centers.nrows()).
+    let center_kernel = spherical_wahba_kernel_matrix_with_kind(
+        centers.view(),
+        centers.view(),
+        spec.penalty_order,
+        spec.radians,
+        spec.wahba_kernel,
+    )?;
+    let decomposition =
+        wahba_low_degree_decomposition(centers.view(), spec.radians, center_kernel.view())?;
+    Ok(SphericalDesignRoute::Wahba {
+        centers,
+        decomposition,
+    })
+}
+
+/// The identity-or-frozen transform `z` a derivative of width `raw_width` is
+/// contracted with, as the forward design is.
+fn spherical_design_identifiability(
+    spec: &SphericalSplineBasisSpec,
+    raw_width: usize,
+) -> Result<Array2<f64>, BasisError> {
+    match &spec.identifiability {
+        SphericalSplineIdentifiability::FrozenTransform { transform } => {
+            if transform.nrows() != raw_width {
+                crate::bail_dim_basis!(
+                    "frozen spherical identifiability transform mismatch: {} raw basis columns but transform has {} rows",
+                    raw_width,
+                    transform.nrows()
+                );
+            }
+            Ok(transform.clone())
+        }
+        SphericalSplineIdentifiability::CenterSumToZero => Ok(Array2::<f64>::eye(raw_width)),
+    }
+}
+
 /// Realized-design DESIGN jet `∂Φ/∂(lat, lon)` for the spherical-spline basis,
 /// matching the column layout of [`build_spherical_spline_basis`] with the
 /// given `spec`. Returns `(N, K, 2)` where `K` equals the forward design's
@@ -2105,56 +2481,15 @@ pub fn spherical_spline_design_jet(
     data: ArrayView2<'_, f64>,
     spec: &SphericalSplineBasisSpec,
 ) -> Result<Array3<f64>, BasisError> {
-    if matches!(spec.method, SphereMethod::Harmonic) {
-        let l_max = spec
-            .max_degree
-            .unwrap_or_else(|| default_spherical_harmonic_degree(data.nrows()));
-        if !(1..=4).contains(&spec.penalty_order) {
-            crate::bail_invalid_basis!(
-                "spherical-harmonic jet penalty_order must be one of 1, 2, 3, 4; got {}",
-                spec.penalty_order
-            );
+    let (centers, decomposition) = match spherical_design_route(data, spec, "jet")? {
+        SphericalDesignRoute::Harmonic { max_degree } => {
+            return spherical_harmonic_jet(data, max_degree, spec.radians);
         }
-        return spherical_harmonic_jet(data, l_max, spec.radians);
-    }
-    // The Pseudo Wahba kernel forward build routes through the harmonic basis
-    // (see `build_spherical_spline_basis`), so its design jet must mirror that
-    // routing — degree-mapped harmonic columns — rather than the raw Wahba
-    // kernel jet, or the analytic jet would have a different column count than
-    // the forward design it is meant to differentiate.
-    if matches!(spec.wahba_kernel, SphereWahbaKernel::Pseudo) {
-        let l_max = spec
-            .max_degree
-            .unwrap_or_else(|| harmonic_degree_for_wahba_basis_width(spec, data.nrows()));
-        return spherical_harmonic_jet(data, l_max, spec.radians);
-    }
-    validate_lat_lon_matrix(data, "spherical spline jet", spec.radians)?;
-    let centers = match realized_center_strategy(&spec.center_strategy) {
-        CenterStrategy::FarthestPoint { num_centers } => {
-            select_spherical_farthest_point_centers(data, *num_centers, spec.radians)?
-        }
-        _ => select_centers_by_strategy(data, &spec.center_strategy)?,
+        SphericalDesignRoute::Wahba {
+            centers,
+            decomposition,
+        } => (centers, decomposition),
     };
-    validate_lat_lon_matrix(centers.view(), "spherical spline jet centers", spec.radians)?;
-    if centers.nrows() < 2 {
-        return Err(BasisError::InsufficientColumnsForConstraint {
-            found: centers.nrows(),
-        });
-    }
-    // The Wahba (Sobolev) forward design is the low-degree *decomposed* design,
-    // not the raw kernel design: `[ raw_kernel·kernel_basis −
-    // low·kernel_low_projection | low ]` (see `build_wahba_decomposed_design`).
-    // Build the matching decomposed jet so it aligns column-for-column with the
-    // forward design (width = decomposed width, not centers.nrows()).
-    let center_kernel = spherical_wahba_kernel_matrix_with_kind(
-        centers.view(),
-        centers.view(),
-        spec.penalty_order,
-        spec.radians,
-        spec.wahba_kernel,
-    )?;
-    let decomposition =
-        wahba_low_degree_decomposition(centers.view(), spec.radians, center_kernel.view())?;
     let raw_kernel_jet = spherical_wahba_kernel_jet_with_kind(
         data,
         centers.view(),
@@ -2173,19 +2508,163 @@ pub fn spherical_spline_design_jet(
     };
     let decomposed_jet =
         build_wahba_decomposed_jet(&raw_kernel_jet, low_jet.as_ref(), &decomposition);
-    let raw_width = decomposed_jet.shape()[1];
-    let z = match &spec.identifiability {
-        SphericalSplineIdentifiability::FrozenTransform { transform } => {
-            if transform.nrows() != raw_width {
-                crate::bail_dim_basis!(
-                    "frozen spherical identifiability transform mismatch: {} raw basis columns but transform has {} rows",
-                    raw_width,
-                    transform.nrows()
-                );
-            }
-            transform.clone()
-        }
-        SphericalSplineIdentifiability::CenterSumToZero => Array2::<f64>::eye(raw_width),
-    };
+    let z = spherical_design_identifiability(spec, decomposed_jet.shape()[1])?;
     Ok(apply_identifiability_to_jet(&decomposed_jet, &z))
+}
+
+/// Realized-design DESIGN hessian `∂²Φ/∂(lat, lon)²` of the spherical-spline
+/// basis, shape `(N, K, 2, 2)` in the same angular units as the raw input. It is
+/// routed exactly as [`spherical_spline_design_jet`] is and aligns with it column
+/// for column. A Wahba basis refuses an evaluation point that coincides with a
+/// center of a kernel that has no Hessian there.
+pub fn spherical_spline_design_hessian(
+    data: ArrayView2<'_, f64>,
+    spec: &SphericalSplineBasisSpec,
+) -> Result<ndarray::Array4<f64>, BasisError> {
+    let (centers, decomposition) = match spherical_design_route(data, spec, "hessian")? {
+        SphericalDesignRoute::Harmonic { max_degree } => {
+            return spherical_harmonic_hessian(data, max_degree, spec.radians);
+        }
+        SphericalDesignRoute::Wahba {
+            centers,
+            decomposition,
+        } => (centers, decomposition),
+    };
+    let raw_kernel_hessian = spherical_wahba_kernel_hessian_with_kind(
+        data,
+        centers.view(),
+        spec.penalty_order,
+        spec.radians,
+        spec.wahba_kernel,
+    )?;
+    let low_hessian = if decomposition.low_degree_centers.is_some() {
+        Some(spherical_harmonic_hessian(
+            data,
+            SPHERE_UNPENALIZED_LOW_DEGREE,
+            spec.radians,
+        )?)
+    } else {
+        None
+    };
+    let decomposed_hessian =
+        build_wahba_decomposed_hessian(&raw_kernel_hessian, low_hessian.as_ref(), &decomposition);
+    let z = spherical_design_identifiability(spec, decomposed_hessian.shape()[1])?;
+    Ok(apply_identifiability_to_hessian(&decomposed_hessian, &z))
+}
+
+#[cfg(test)]
+mod spherical_design_hessian_tests {
+    use super::*;
+
+    fn points() -> Array2<f64> {
+        ndarray::array![
+            [0.17_f64, 0.35],
+            [-0.61, 2.44],
+            [0.96, -1.05],
+            [0.09, -2.97],
+            [-1.22, 0.79]
+        ]
+    }
+
+    fn centers() -> Array2<f64> {
+        ndarray::array![
+            [0.52_f64, 0.12],
+            [-0.33, -0.71],
+            [1.31, 2.05],
+            [-1.05, 1.62],
+            [0.02, -2.21],
+            [-0.47, 2.93]
+        ]
+    }
+
+    fn spec(
+        method: SphereMethod,
+        wahba_kernel: SphereWahbaKernel,
+        penalty_order: usize,
+    ) -> SphericalSplineBasisSpec {
+        let max_degree = matches!(method, SphereMethod::Harmonic).then_some(4);
+        SphericalSplineBasisSpec {
+            center_strategy: CenterStrategy::UserProvided(centers()),
+            penalty_order,
+            double_penalty: false,
+            radians: true,
+            method,
+            max_degree,
+            wahba_kernel,
+            identifiability: SphericalSplineIdentifiability::CenterSumToZero,
+        }
+    }
+
+    /// The analytic design hessian equals central differences of the analytic
+    /// design jet and is symmetric. The centers are user-provided and off the
+    /// points, so every perturbed evaluation shares one basis and no kernel is
+    /// evaluated at its singularity.
+    fn assert_hessian_matches_jet(spec: &SphericalSplineBasisSpec) {
+        let data = points();
+        let hessian = spherical_spline_design_hessian(data.view(), spec).expect("design hessian");
+        let jet = spherical_spline_design_jet(data.view(), spec).expect("design jet");
+        assert_eq!(hessian.shape()[..2], jet.shape()[..2], "hessian and jet widths differ");
+        let h = 1.0e-6;
+        for axis in 0..2 {
+            let mut plus = data.clone();
+            let mut minus = data.clone();
+            plus.column_mut(axis).mapv_inplace(|v| v + h);
+            minus.column_mut(axis).mapv_inplace(|v| v - h);
+            let jet_plus = spherical_spline_design_jet(plus.view(), spec).expect("jet at +h");
+            let jet_minus = spherical_spline_design_jet(minus.view(), spec).expect("jet at -h");
+            let fd = (&jet_plus - &jet_minus) / (2.0 * h);
+            let analytic = hessian.index_axis(ndarray::Axis(3), axis);
+            let scale = fd.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+            let err = fd
+                .iter()
+                .zip(analytic.iter())
+                .fold(0.0_f64, |acc, (a, b)| acc.max((a - b).abs()));
+            assert!(
+                scale > 0.0 && err <= 1.0e-6 * scale,
+                "hessian axis {axis} disagrees with central differences of the jet: \
+                 max|diff|={err:.3e}, scale={scale:.3e} ({:?}, {:?}, m={})",
+                spec.method,
+                spec.wahba_kernel,
+                spec.penalty_order
+            );
+        }
+        for row in hessian.axis_iter(ndarray::Axis(0)) {
+            for col in row.axis_iter(ndarray::Axis(0)) {
+                assert_eq!(col[[0, 1]], col[[1, 0]], "hessian must be symmetric");
+            }
+        }
+    }
+
+    #[test]
+    fn sobolev_design_hessian_matches_central_differences_of_the_jet() {
+        for m in [2_usize, 3, 4] {
+            assert_hessian_matches_jet(&spec(SphereMethod::Wahba, SphereWahbaKernel::Sobolev, m));
+        }
+    }
+
+    #[test]
+    fn truncated_pseudo_and_harmonic_design_hessians_match_central_differences_of_the_jet() {
+        assert_hessian_matches_jet(&spec(
+            SphereMethod::Wahba,
+            SphereWahbaKernel::SobolevTruncated { lmax: 16 },
+            2,
+        ));
+        assert_hessian_matches_jet(&spec(SphereMethod::Wahba, SphereWahbaKernel::Pseudo, 3));
+        assert_hessian_matches_jet(&spec(SphereMethod::Harmonic, SphereWahbaKernel::Sobolev, 2));
+    }
+
+    /// At a center the m=2 Sobolev kernel's dK/du diverges, so its Hessian does
+    /// not exist there and the build refuses; the m=3 kernel has one, `K'(0)·∂²u`.
+    #[test]
+    fn design_hessian_at_a_center_refuses_only_kernels_without_one() {
+        let on_centers = centers().slice(ndarray::s![0..2, ..]).to_owned();
+        let singular = spec(SphereMethod::Wahba, SphereWahbaKernel::Sobolev, 2);
+        let error = spherical_spline_design_hessian(on_centers.view(), &singular)
+            .expect_err("the m=2 Sobolev hessian does not exist at a center");
+        assert!(error.to_string().contains("coincides"), "unexpected refusal: {error}");
+        let smooth = spec(SphereMethod::Wahba, SphereWahbaKernel::Sobolev, 3);
+        let hessian = spherical_spline_design_hessian(on_centers.view(), &smooth)
+            .expect("the m=3 Sobolev hessian exists at a center");
+        assert!(hessian.iter().all(|v| v.is_finite()));
+    }
 }

@@ -944,12 +944,13 @@ pub enum SpatialIdentifiability {
 }
 
 pub(crate) use sphere_half_angle::{
-    SphereTrig, ambient_half_angle_separation, half_angle_partials, half_angle_separation,
-    half_angle_separation_scalar,
+    SphereTrig, ambient_half_angle_separation, half_angle_partials, half_angle_second_partials,
+    half_angle_separation, half_angle_separation_scalar,
 };
 
 pub(crate) use sphere_kernels::{
-    wahba_sphere_kernel_derivative_dhav_kind, wahba_sphere_kernel_kind,
+    wahba_sphere_kernel_derivative_dhav_kind, wahba_sphere_kernel_hessian_exists_at_coincidence,
+    wahba_sphere_kernel_kind, wahba_sphere_kernel_second_derivative_dhav_kind,
     wahba_sphere_kernel_simd_kind, wahba_sphere_kernel_sobolev_derivative_dhav,
 };
 
