@@ -22,7 +22,19 @@
 //! linear blocks, so the linear tier leaves residual a 1-coordinate curved chart can
 //! recover more cheaply. That budget pressure is what makes the Tier-2 delta a real
 //! measurement rather than a foregone zero.
+//!
+//! Before the K=2000 fit the harness runs a **planted-ring control** (#2023 lead
+//! ruling): a centered ring in two of `P = 4` columns, charted by the same curved
+//! dictionary on two targets — the Tier-0-centered data the public support-sparse
+//! fit charts, and the residual a linear peel at the derived width (`G = P`,
+//! `b = 1`, block TopK `s = 2`) leaves. Two linear atoms reconstruct a centered ring
+//! exactly, so the control measures whether the curved atoms can still find the
+//! ring on the peeled residual.
 
+use gam_sae::manifold::{
+    SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER, SaeSupportSparseFit, SaeSupportSparseFitRequest,
+    fit_sae_support_sparse,
+};
 use gam_sae::sparse_dict::{block_sparse_dictionary_transform, reconstruct_block_sparse_rows};
 use gam_sae::tiered::{TieredFitConfig, TieredSeedPolicy, fit_tiered};
 use ndarray::{Array1, Array2, ArrayView2, Axis};
@@ -157,7 +169,191 @@ fn ev_vs_mean(target: ArrayView2<'_, f32>, recon: ArrayView2<'_, f32>, mean: &Ar
     }
 }
 
+/// The curved dictionary both ring-control arms fit: 8 periodic atoms, TopK
+/// `s = 2`, at the public entry's inner tolerance.
+fn ring_curved_fit(target: ArrayView2<'_, f64>) -> Result<SaeSupportSparseFit, String> {
+    fit_sae_support_sparse(SaeSupportSparseFitRequest {
+        target,
+        atom_basis: vec!["periodic".to_string(); 8],
+        atom_dim: vec![1; 8],
+        support_k: 2,
+        initial_smoothness: 1.0,
+        max_outer_iter: 32,
+        max_inner_iter: SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER,
+        inner_tolerance: 1.0e-4,
+        trust_radius: 1.0,
+        random_state: 0xC0FF_EE00_D15E_A5E5,
+    })
+}
+
+/// How much of the planted ring a curved fit found.
+///
+/// `ring_ev` is the share of the ring's energy that the curved reconstruction
+/// (`fitted − training_mean`, in the fit's own target space) carries in the two
+/// ring columns. `phase_lock` is the largest per-atom phase-locking value
+/// `|mean exp(i(2πt ∓ θ))|` between an atom's chart coordinate `t` (period 1) and
+/// the planted phase `θ`, over atoms routed on at least a sixteenth of the rows;
+/// the returned count is that atom's routed rows.
+fn ring_scores(
+    fit: &SaeSupportSparseFit,
+    ring: ArrayView2<'_, f64>,
+    phase: &Array1<f64>,
+) -> (f64, f64, usize) {
+    let n = ring.nrows();
+    let mut rss = 0.0_f64;
+    let mut tss = 0.0_f64;
+    for i in 0..n {
+        for c in 0..2 {
+            let curved = fit.fitted[[i, c]] - fit.training_mean[c];
+            rss += (ring[[i, c]] - curved).powi(2);
+            tss += ring[[i, c]].powi(2);
+        }
+    }
+    let ring_ev = 1.0 - rss / tss;
+    let term = &fit.outer.term;
+    let k = term.k_atoms();
+    let mut sums = vec![[0.0_f64; 4]; k];
+    let mut counts = vec![0usize; k];
+    for i in 0..n {
+        for (slot, &atom) in term.assignment.support_indices(i).iter().enumerate() {
+            let angle = std::f64::consts::TAU * term.assignment.coords_for_slot(i, slot)[0];
+            let atom = atom as usize;
+            sums[atom][0] += (angle - phase[i]).cos();
+            sums[atom][1] += (angle - phase[i]).sin();
+            sums[atom][2] += (angle + phase[i]).cos();
+            sums[atom][3] += (angle + phase[i]).sin();
+            counts[atom] += 1;
+        }
+    }
+    let mut best = (0.0_f64, 0usize);
+    for atom in 0..k {
+        if counts[atom] * 16 < n {
+            continue;
+        }
+        let rows = counts[atom] as f64;
+        let lock = sums[atom][0]
+            .hypot(sums[atom][1])
+            .max(sums[atom][2].hypot(sums[atom][3]))
+            / rows;
+        if lock > best.0 {
+            best = (lock, counts[atom]);
+        }
+    }
+    (ring_ev, best.0, best.1)
+}
+
+/// The planted-ring control (#2023 lead ruling): does the curved dictionary find
+/// a centered ring on the Tier-0 target, and on the residual of a linear peel at
+/// the derived width? Refusals print their error; they are results too.
+fn ring_control() -> Result<(), String> {
+    let n = 512usize;
+    let p = 4usize;
+    let support_k = 2usize;
+    let mut z = Array2::<f64>::zeros((n, p));
+    let mut ring = Array2::<f64>::zeros((n, 2));
+    let mut phase = Array1::<f64>::zeros(n);
+    let mut s = 0x2023_0000_2576_0001_u64;
+    for i in 0..n {
+        let theta = std::f64::consts::TAU * i as f64 / n as f64;
+        phase[i] = theta;
+        ring[[i, 0]] = theta.cos();
+        ring[[i, 1]] = theta.sin();
+        for c in 0..p {
+            s = splitmix64(s);
+            let noise = (((s >> 11) as f64 / (1u64 << 53) as f64) - 0.5) * 0.04;
+            let signal = if c < 2 { ring[[i, c]] } else { 0.0 };
+            z[[i, c]] = signal + noise;
+        }
+    }
+    println!(
+        "[ring] N={n} P={p} ring in cols 0,1 + uniform noise ±0.02 on every column; curved: 8 \
+         periodic atoms, s={support_k}; peel: G={p} b=1 block_topk={support_k}"
+    );
+
+    let t0 = Instant::now();
+    match ring_curved_fit(z.view()) {
+        Ok(fit) => {
+            let (ring_ev, lock, rows) = ring_scores(&fit, ring.view(), &phase);
+            println!(
+                "[ring] tier0_target r2={:.6} ring_ev={ring_ev:.6} phase_lock={lock:.4} \
+                 (atom rows {rows}/{n}) retained={} outer_iters={} wall={:.1}s",
+                fit.reconstruction_r2,
+                fit.retained_atom_indices.len(),
+                fit.outer.outer_iterations,
+                t0.elapsed().as_secs_f64(),
+            );
+        }
+        Err(error) => println!(
+            "[ring] tier0_target refused after {:.1}s: {error}",
+            t0.elapsed().as_secs_f64()
+        ),
+    }
+
+    let mut peel = TieredFitConfig::linear_bulk(p, 1);
+    peel.tier1.block_topk = support_k;
+    peel.tier1.aux_k = support_k;
+    peel.tier1.max_epochs = 200;
+    let t1 = Instant::now();
+    let peel_report = match fit_tiered(z.view(), &peel) {
+        Ok(report) => report,
+        Err(error) => {
+            println!(
+                "[ring] peel refused after {:.1}s: {error}",
+                t1.elapsed().as_secs_f64()
+            );
+            return Ok(());
+        }
+    };
+    let mean = &peel_report.tier0.mean;
+    let centered = &z - &mean.view().insert_axis(Axis(0));
+    let centered_f32 = centered.mapv(|v| v as f32);
+    let (blocks, _gates, codes) = block_sparse_dictionary_transform(
+        centered_f32.view(),
+        peel_report.tier1.decoder.view(),
+        peel_report.tier1.gamma,
+        1,
+        peel_report.tier1.block_topk,
+        peel.tier1.block_tile,
+    )?;
+    let linear = reconstruct_block_sparse_rows(
+        peel_report.tier1.decoder.view(),
+        blocks.view(),
+        codes.view(),
+        1,
+    )?;
+    let residual = &centered - &linear.mapv(|v| v as f64);
+    let residual_share = residual.iter().map(|v| v * v).sum::<f64>()
+        / centered.iter().map(|v| v * v).sum::<f64>();
+    println!(
+        "[ring] peel tier1_ev={:.6} certified={} residual_energy_share={residual_share:.6} \
+         wall={:.1}s",
+        peel_report.tier1.explained_variance,
+        peel_report.tier1.convergence.certified,
+        t1.elapsed().as_secs_f64(),
+    );
+    let t2 = Instant::now();
+    match ring_curved_fit(residual.view()) {
+        Ok(fit) => {
+            let (ring_ev, lock, rows) = ring_scores(&fit, ring.view(), &phase);
+            println!(
+                "[ring] peeled_target r2={:.6} ring_ev={ring_ev:.6} phase_lock={lock:.4} \
+                 (atom rows {rows}/{n}) retained={} outer_iters={} wall={:.1}s",
+                fit.reconstruction_r2,
+                fit.retained_atom_indices.len(),
+                fit.outer.outer_iterations,
+                t2.elapsed().as_secs_f64(),
+            );
+        }
+        Err(error) => println!(
+            "[ring] peeled_target refused after {:.1}s: {error}",
+            t2.elapsed().as_secs_f64()
+        ),
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
+    ring_control()?;
     let args = parse_args()?;
     let z_train = planted(args.train_rows, args.p, args.n_circles, args.n_linear, 0);
     let z_test = planted(
