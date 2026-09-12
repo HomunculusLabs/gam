@@ -2265,6 +2265,9 @@ impl SaeManifoldTerm {
         let beta_dim = self.beta_dim();
         let mut exact = Array1::<f64>::zeros(beta_dim);
         let mut majorizer = Array1::<f64>::zeros(beta_dim);
+        // Whether each atom's block of `v` holds a nonzero entry, filled on first
+        // use by the edge loop below.
+        let mut live_blocks: Vec<Option<bool>> = vec![None; self.k_atoms()];
         for plan in plans {
             // (1) the overlap-space couplings, contracted through the carriers.
             let ne = plan.carriers.len();
@@ -2320,6 +2323,24 @@ impl SaeManifoldTerm {
                 }
                 let off_j = offsets[edge.j];
                 let off_k = offsets[edge.k];
+                // #2731 — for finite decoders, an edge whose two atom blocks are zero
+                // in `v` adds `α·(∂²o/∂B²·0)` and `lev·0`, both `±0`, to accumulators
+                // that start at `+0` and only ever receive `+=`. Under round-to-nearest
+                // such an accumulator is never `−0`, so a signed zero leaves every
+                // entry bit-identical, and the edge is skipped. A border probe of the
+                // dense exact-A build lifts one border coordinate into one atom block,
+                // so it pays only the edges incident to that atom rather than every
+                // realized edge. Job 539190's dense perf window read `matrixmultiply`
+                // kernels at 68.5 % and this function at 12.67 % of self time.
+                let live_j = *live_blocks[edge.j].get_or_insert_with(|| {
+                    (off_j..off_j + edge.run_j.len()).any(|idx| v[idx] != 0.0)
+                });
+                let live_k = *live_blocks[edge.k].get_or_insert_with(|| {
+                    (off_k..off_k + edge.run_k.len()).any(|idx| v[idx] != 0.0)
+                });
+                if !(live_j || live_k) {
+                    continue;
+                }
                 let bj = self.atoms[edge.j].decoder_coefficients();
                 let bk = self.atoms[edge.k].decoder_coefficients();
                 let (m_j, m_k) = (bj.nrows(), bk.nrows());
