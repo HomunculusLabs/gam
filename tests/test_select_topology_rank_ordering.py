@@ -4,9 +4,18 @@ import gamfit._select_topology as st
 
 
 def test_select_topology_uses_ranked_order_from_comparison_layer(monkeypatch):
+    class _Summary:
+        def __init__(self, fields):
+            self._fields = fields
+
+        def to_dict(self):
+            return dict(self._fields)
+
     class _Fit:
         def __init__(self, reml, edf):
-            self._summary = {"reml_score": reml, "effective_dim": edf, "coefficients": [0.0, 0.0]}
+            self._summary = _Summary(
+                {"reml_score": reml, "edf_total": edf, "coefficients": [{}, {}]}
+            )
 
         def summary(self):
             return self._summary
@@ -18,7 +27,9 @@ def test_select_topology_uses_ranked_order_from_comparison_layer(monkeypatch):
     ])
     monkeypatch.setattr(st, "_formula_for_candidate", lambda formula, candidate, *, strict_dimension: formula)
     monkeypatch.setattr(st, "fit", lambda data, formula, **kwargs: _Fit(-1.0 if "a" in formula else -2.0, 1.0))
-    monkeypatch.setattr(st, "_extract_reml_score_raw", lambda m: float(m.summary()["reml_score"]))
+    monkeypatch.setattr(
+        st, "_extract_reml_score_raw", lambda m: float(m.summary().to_dict()["reml_score"])
+    )
 
     class _Rust:
         def select_topology_candidate_lifecycle(self, request_json):

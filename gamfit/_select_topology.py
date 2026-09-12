@@ -89,13 +89,6 @@ _DEFAULT_TOPOLOGY_NAMES: tuple[TopologyName, ...] = (
     "cylinder",
 )
 
-_NULL_HESSIAN_LOGDET_KEYS: tuple[str, ...] = (
-    "null_space_logdet",
-    "null_hessian_logdet",
-    "h_null_logdet",
-    "logdet_h_null",
-)
-
 
 FailureStage: TypeAlias = Literal["assembly", "fit", "evidence"]
 
@@ -687,21 +680,23 @@ def _fitted_candidate_outcome(
     raw_reml: float,
     n_obs: int,
 ) -> dict[str, Any]:
-    """Marshal fit metadata without constructing or ranking any score."""
+    """Marshal fit metadata without constructing or ranking any score.
+
+    Every value is read under the one key the Rust summary publishes it as.
+    """
+    fields = fit_obj.summary().to_dict()
+    if fields.get("edf_total") is None:
+        raise ValueError("select_topology: the candidate summary publishes no edf_total")
     return {
         "status": "fitted",
         "name": candidate.name,
         "raw_reml": _lifecycle_number(raw_reml),
-        "laml": _optional_lifecycle_number(_extract_float_field(fit_obj, ("laml",))),
-        "deviance": _optional_lifecycle_number(
-            _extract_float_field(fit_obj, ("deviance",))
-        ),
-        "null_dim": _optional_lifecycle_number(_extract_null_dim(fit_obj)),
-        "null_space_logdet": _optional_lifecycle_number(
-            _extract_null_hessian_logdet(fit_obj)
-        ),
-        "effective_dim": _lifecycle_number(_effective_dim(fit_obj)),
-        "basis_size": _basis_size(fit_obj),
+        "laml": _optional_lifecycle_number(fields.get("laml")),
+        "deviance": _optional_lifecycle_number(fields.get("deviance")),
+        "null_dim": _optional_lifecycle_number(fields.get("null_dim")),
+        "null_space_logdet": _optional_lifecycle_number(fields.get("null_space_logdet")),
+        "effective_dim": _lifecycle_number(fields["edf_total"]),
+        "basis_size": len(fields["coefficients"]),
         "n_obs": int(n_obs),
     }
 
@@ -889,127 +884,6 @@ def _normalize_score_scale(score_scale: str) -> ScoreScale:
             "'per_effective_dim', 'raw'"
         )
     return score_scale
-
-
-def _extract_null_dim(fit_obj: Any) -> float | None:
-    return _extract_float_field(fit_obj, ("null_dim",))
-
-
-def _extract_null_hessian_logdet(fit_obj: Any) -> float | None:
-    return _extract_float_field(fit_obj, _NULL_HESSIAN_LOGDET_KEYS)
-
-
-def _basis_size(fit_obj: Any) -> int:
-    payload = _summary_payload(fit_obj)
-    if payload is not None:
-        coefficients = payload.get("coefficients")
-        if isinstance(coefficients, Sequence) and not isinstance(
-            coefficients,
-            (str, bytes, bytearray),
-        ):
-            return len(coefficients)
-        for key in ("n_coefficients", "n_coeffs", "basis_size"):
-            value = payload.get(key)
-            if value is not None:
-                return int(value)
-    if isinstance(fit_obj, Mapping):
-        coefficients = fit_obj.get("coefficients")
-        shape = getattr(coefficients, "shape", None)
-        if shape is not None and len(shape) >= 1:
-            return int(shape[-1] if len(shape) > 1 else shape[0])
-        if isinstance(coefficients, Sequence) and not isinstance(
-            coefficients,
-            (str, bytes, bytearray),
-        ):
-            return len(coefficients)
-    raise ValueError("select_topology could not determine fitted basis size")
-
-
-def _effective_dim(fit_obj: Any) -> float:
-    payload = _summary_payload(fit_obj)
-    if payload is not None:
-        value = _first_mapping_value(
-            payload,
-            ("effective_dim", "effective_dimension", "edf_total", "edf", "effective_dof"),
-        )
-        if value is not None:
-            return _effective_dim_value(value)
-    if isinstance(fit_obj, Mapping):
-        value = _first_mapping_value(
-            fit_obj,
-            ("effective_dim", "effective_dimension", "edf_total", "edf", "effective_dof"),
-        )
-        if value is not None:
-            return _effective_dim_value(value)
-    for key in ("effective_dim", "effective_dimension", "edf_total", "edf", "effective_dof"):
-        value = getattr(fit_obj, key, None)
-        if value is not None:
-            return _effective_dim_value(value)
-    raise ValueError("select_topology could not determine fitted effective_dim")
-
-
-def _first_mapping_value(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> Any | None:
-    for key in keys:
-        value = mapping.get(key)
-        if value is not None:
-            return value
-    return None
-
-
-def _effective_dim_value(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return float(sum(value))
-
-
-def _extract_float_field(fit_obj: Any, keys: tuple[str, ...]) -> float | None:
-    payload = _summary_payload(fit_obj)
-    if payload is not None:
-        for key in keys:
-            value = payload.get(key)
-            if value is not None:
-                return float(value)
-    if isinstance(fit_obj, Mapping):
-        for key in keys:
-            value = fit_obj.get(key)
-            if value is not None:
-                return float(value)
-    for key in keys:
-        value = getattr(fit_obj, key, None)
-        if value is not None:
-            return float(value)
-    return None
-
-
-def _summary_payload(fit_obj: Any) -> Mapping[str, Any] | None:
-    summary = getattr(fit_obj, "summary", None)
-    if not callable(summary):
-        return None
-    summary_obj = summary()
-    payload = getattr(summary_obj, "payload", summary_obj)
-    if isinstance(payload, Mapping):
-        return payload
-    # ``Model.summary()`` returns a ``gamfit._summary.Summary`` — a frozen
-    # dataclass that duck-types the mapping protocol (``__getitem__`` /
-    # ``__contains__`` / ``__iter__`` / ``.get`` / ``.to_dict``) but is not a
-    # ``collections.abc.Mapping`` instance. Gating on ``isinstance(..., Mapping)``
-    # would silently discard the entire summary and break downstream scoring
-    # (``_basis_size`` raising "could not determine fitted basis size"). Flatten
-    # it through its public ``to_dict`` so every key the engine emits is visible.
-    to_dict = getattr(payload, "to_dict", None)
-    if callable(to_dict):
-        flattened = to_dict()
-        if isinstance(flattened, Mapping):
-            return flattened
-    # Fall back to the mapping protocol directly for any future summary type
-    # that iterates keys + supports subscripting but lacks ``to_dict``.
-    if hasattr(payload, "get") and hasattr(payload, "__iter__"):
-        try:
-            return {str(key): payload[key] for key in payload}
-        except (TypeError, KeyError):
-            return None
-    return None
 
 
 @dataclass(frozen=True, slots=True)
