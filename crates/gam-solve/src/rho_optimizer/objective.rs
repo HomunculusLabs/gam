@@ -1759,7 +1759,8 @@ fn permute_to_native(canonical: &Array1<f64>, perm: &[usize]) -> Array1<f64> {
 
 /// Map an `OuterResult` produced in CANONICAL coordinate order back to the
 /// objective's native layout, in place. Permutes every per-coordinate array
-/// (ρ, gradient, Hessian) consistently; scalar and diagnostic fields are
+/// (ρ, gradient, Hessian, reseed and seed points) consistently and renames the
+/// coordinates the criterion certificate names by index; scalar fields are
 /// untouched.
 pub(crate) fn outer_result_to_native(mut result: OuterResult, perm: &[usize]) -> OuterResult {
     if result.rho.len() == perm.len() {
@@ -1783,7 +1784,59 @@ pub(crate) fn outer_result_to_native(mut result: OuterResult, perm: &[usize]) ->
         }
         result.final_hessian = Some(hn);
     }
+    if let Some(certificate) = result.criterion_certificate.as_mut() {
+        criterion_certificate_to_native(certificate, perm);
+    }
+    let reseeds = [
+        result.tail_snap_reseed.as_mut(),
+        result.saddle_escape_reseed.as_mut(),
+        result.wrong_rail_reseed.as_mut(),
+    ];
+    let active_set = result
+        .active_set_reseed
+        .as_mut()
+        .map(|reseed| [&mut reseed.rho, &mut reseed.bounds.0, &mut reseed.bounds.1]);
+    for point in reseeds
+        .into_iter()
+        .flatten()
+        .chain(active_set.into_iter().flatten())
+        .chain(result.refused_seed_points.iter_mut())
+        .chain(result.started_seed_points.iter_mut())
+    {
+        if point.len() == perm.len() {
+            *point = permute_to_native(point, perm);
+        }
+    }
     result
+}
+
+/// Rename the coordinates a criterion certificate names by index from canonical
+/// to native (`perm[c]` is the native coordinate at canonical slot `c`). The
+/// certificate is built inside the canonical run, so without this a report of a
+/// railed λ names a different smoothing parameter than the fit's native λ
+/// vector (#2735). An index past the permuted ρ block names a trailing
+/// coordinate the permutation does not cover and keeps its position.
+fn criterion_certificate_to_native(
+    certificate: &mut crate::model_types::OuterCriterionCertificate,
+    perm: &[usize],
+) {
+    let native = |canonical: usize| perm.get(canonical).copied().unwrap_or(canonical);
+    for index in certificate.lambdas_railed.iter_mut() {
+        *index = native(*index);
+    }
+    certificate.lambdas_railed.sort_unstable();
+    for fact in certificate.railed_facts.iter_mut() {
+        fact.index = native(fact.index);
+    }
+    certificate.railed_facts.sort_by_key(|fact| fact.index);
+    if let crate::model_types::OuterStationarityCertificate::AsymptoteRail { rails, .. } =
+        &mut certificate.stationarity
+    {
+        for rail in rails.iter_mut() {
+            rail.index = native(rail.index);
+        }
+        rails.sort_by_key(|rail| rail.index);
+    }
 }
 
 /// Wraps any [`OuterObjective`] so the optimizer can work in a CANONICAL
