@@ -15,13 +15,11 @@
 //! `RemlState` methods, and this engine holds no `RemlState`. That argument is
 //! correct, and it is still an argument about code rather than about numbers.
 //! The issue said what would settle it — *"evaluate each path's ρ-gradient at a
-//! saturated ρ and look for the 1.3333e-7 floor"* — and
-//! [`gam_solve::rho_optimizer::soft_rho_guard_floor`] is that check, with a
-//! positive control (`the_floor_classifier_reports_carried_on_the_live_mixture_sas_criterion`,
-//! gam-solve) proving it can see a floor when one is there.
+//! saturated ρ and look for the 1.3333e-7 floor"* — and this file reads that
+//! number from the engine's own published outer gradient.
 //!
-//! What a "carried" verdict here would have meant: every railed coordinate of
-//! every gamlss, spatial-adaptive, and custom-family fit carrying a standing
+//! What a floor here would have meant: every railed coordinate of every gamlss,
+//! spatial-adaptive, and custom-family fit carrying a standing
 //! `|Pg| ≥ w·a = 1.3333e-7` that no amount of convergence clears, and three more
 //! objectives owing the seam a publication.
 //!
@@ -29,12 +27,14 @@
 
 use super::*;
 use crate::tests::{OneBlockGaussianFamily, test_design_hyper_layout};
-use gam_solve::rho_optimizer::soft_rho_guard_floor::{
-    ABSENCE_MAGNITUDE_FRACTION, GuardLadderRung, SATURATED_RHO_LADDER, SoftRhoGuardFloor,
-    classify_soft_rho_guard_floor, soft_rho_guard_emission_at,
-};
 use ndarray::{Array1, Array2};
 use gam_problem::EvalMode;
+
+/// The saturated-ρ ladder #2450 established and #2545/#2629 measure on. `ρ ≥ 21`
+/// is past the REML part's own tail on the reference fixture, and `RHO_BOUND = 30`
+/// is the deepest point the box admits. Four rungs make the pencil's constancy
+/// three independent ratios, an observation rather than a definition.
+const SATURATED_RHO_LADDER: [f64; 4] = [21.0, 24.0, 27.0, 30.0];
 
 /// A Gaussian one-block fixture with a real λ→∞ face: an unpenalized intercept
 /// plus three penalized basis columns, so sending ρ to the box bound drives the
@@ -86,9 +86,9 @@ fn gaussian_face_fixture() -> (OneBlockGaussianFamily, Vec<ParameterBlockSpec>) 
 }
 
 /// Build the saturated-ρ ladder from the shared custom-family evaluator: one
-/// rung per probe, carrying the SIGNED outer ρ-gradient exactly as the engine
-/// reports it, with nothing subtracted.
-fn custom_family_rho_ladder(probes: &[f64]) -> Vec<GuardLadderRung> {
+/// `(ρ, g)` rung per probe, carrying the SIGNED outer ρ-gradient exactly as the
+/// engine reports it, with nothing subtracted.
+fn custom_family_rho_ladder(probes: &[f64]) -> Vec<(f64, f64)> {
     let (family, specs) = gaussian_face_fixture();
     let options = BlockwiseFitOptions {
         use_remlobjective: true,
@@ -125,12 +125,37 @@ fn custom_family_rho_ladder(probes: &[f64]) -> Vec<GuardLadderRung> {
                 1,
                 "this fixture declares exactly one rho coordinate"
             );
-            GuardLadderRung {
-                rho: probe,
-                rho_gradient: owned.result.gradient[0],
-            }
+            (probe, owned.result.gradient[0])
         })
         .collect()
+}
+
+/// The face pencil `ĉ_j = g_j·e^{ρ_j}` of a ladder, as `(spread, mean)` with
+/// `spread = (max|ĉ| − min|ĉ|)/max|ĉ|`. `None` when the pencil is not a finite
+/// single-signed run, so no face constant exists to be spread.
+///
+/// A bare `c·e^{−ρ}` face makes the pencil one constant. A floor `F` added at
+/// every rung moves rung `j` by `F·e^{ρ_j}`, which grows by `e^9 ≈ 8100` across
+/// the ladder, so no floor can sit inside a small spread.
+fn face_pencil(ladder: &[(f64, f64)]) -> Option<(f64, f64)> {
+    let pencil: Vec<f64> = ladder.iter().map(|&(rho, g)| g * rho.exp()).collect();
+    let finite = pencil.iter().all(|c| c.is_finite());
+    let single_signed = pencil.iter().all(|c| *c > 0.0) || pencil.iter().all(|c| *c < 0.0);
+    if pencil.is_empty() || !finite || !single_signed {
+        return None;
+    }
+    let max = pencil.iter().fold(0.0f64, |acc, c| acc.max(c.abs()));
+    let min = pencil.iter().fold(f64::MAX, |acc, c| acc.min(c.abs()));
+    let mean = pencil.iter().sum::<f64>() / pencil.len() as f64;
+    Some(((max - min) / max, mean))
+}
+
+fn render(ladder: &[(f64, f64)]) -> String {
+    ladder
+        .iter()
+        .map(|&(rho, g)| format!("(rho={rho:.0}, g={g:+.6e})"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// **The measurement.** The shared custom-family outer evaluator — the route
@@ -138,12 +163,12 @@ fn custom_family_rho_ladder(probes: &[f64]) -> Vec<GuardLadderRung> {
 /// NOT carry the soft ρ-guard barrier, so `None` is the correct answer for all
 /// three at [`OuterObjective::soft_rho_guard_gradient`].
 ///
-/// The verdict is whatever the classifier says; what this gate asserts is that
-/// it is one of the two ABSENT verdicts, and — separately and more strongly —
-/// that the gradient never comes near the floor. The second assertion is the one
-/// that does not depend on the classifier at all: if the barrier were in this
-/// criterion, `|g|` would be pinned within a hair of `w·a·tanh(a·ρ)` at every
-/// rung, and it demonstrably is not.
+/// The engine's outer gradient on the saturated ladder IS a bare face: its pencil
+/// is one constant to `1e-4`. Measured c = 2.230365e3 with a pencil spread of
+/// 2.08e-6 across three three-e-fold steps, 1.69e-6 at ρ=21 down to 2.09e-10 at
+/// ρ=30: six significant figures of `c·e^{−ρ}`. The barrier would add
+/// `w·a·tanh(a·ρ) ≈ 1.3333e-7` at every rung and move the ρ=30 pencil by
+/// `1.3333e-7·e^30 ≈ 1.42e6` against that `c`, a spread near one.
 ///
 /// The engine's own construction agrees, and is worth naming since it is the
 /// mechanism behind the number:
@@ -156,127 +181,42 @@ fn custom_family_rho_ladder(probes: &[f64]) -> Vec<GuardLadderRung> {
 #[test]
 fn the_custom_family_engine_carries_no_soft_rho_guard_floor_2629() {
     let ladder = custom_family_rho_ladder(&SATURATED_RHO_LADDER);
-    // The barrier acts on raw ρ here: this engine holds no `RemlState`, so
-    // there is no weight anchor to speak of and none to pass.
-    let verdict = classify_soft_rho_guard_floor(&ladder, 0.0);
-
-    let rendered = ladder
-        .iter()
-        .map(|rung| {
-            format!(
-                "(rho={:.0}, g={:+.6e}, guard={:.6e})",
-                rung.rho,
-                rung.rho_gradient,
-                soft_rho_guard_emission_at(rung.rho, 0.0)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    eprintln!(
-        "[#2629-table] custom-family engine: {} | {rendered}",
-        verdict.summary()
-    );
-
-    assert!(
-        verdict.is_absent(),
-        "#2629's table lists `gamlss mean-wiggle`, `spatial-adaptive` and \
-         `custom family` as carrying no soft rho-guard barrier, on the grounds \
-         that `RemlState::build_prior` is its only adder and this engine holds \
-         no RemlState. If that is wrong, THREE objective families each carry a \
-         standing |Pg| >= w*a at every railed coordinate and each owes the seam \
-         a publication. Verdict: {} | ladder {rendered}",
-        verdict.summary()
-    );
-    assert!(
-        !verdict.is_carried(),
-        "redundant with the above by construction, and stated anyway because it \
-         is the claim the issue's table makes"
-    );
-
-    // A second, classifier-independent statement, at the DEEPEST rung only.
-    //
-    // The magnitude argument is a statement about where the criterion's own
-    // tail has already gone, so it applies where the tail is smallest — not
-    // over the whole ladder. At rho=21 this fixture's face is still live at
-    // 1.69e-6, an order ABOVE the floor, and that is the tail, not a floor:
-    // three e-folds later it is 2.09e-10, which a saturating term cannot do.
-    // Asserting the max over all rungs would have demanded the fixture be
-    // *dead* at every rung, i.e. demanded exactly the blind ladder the control
-    // test below refuses to accept.
-    let deepest = ladder.last().expect("the ladder reaches RHO_BOUND");
-    let deepest_guard = soft_rho_guard_emission_at(deepest.rho, 0.0);
-    assert!(
-        deepest.rho_gradient.abs() <= ABSENCE_MAGNITUDE_FRACTION * deepest_guard,
-        "at rho={} the criterion's gradient is {:.6e}, which is NOT below the \
-         barrier's own {deepest_guard:.6e}. A criterion that ADDS the barrier is \
-         pinned within a hair of it here — its own tail has decayed four orders \
-         past it — so this would say the engine carries the floor after all. \
-         Ladder: {rendered}",
-        deepest.rho,
-        deepest.rho_gradient
-    );
-
-    // ...and the tail underneath is a real face, not a decay into roundoff.
-    // Measured c = 2.230365e3 with a pencil spread of 2.08e-6 across three
-    // three-e-fold steps: six significant figures of `c*e^-rho`, which is what
-    // makes "there is no floor here" a reading rather than an absence of signal.
-    let SoftRhoGuardFloor::AbsentDecayingFace { face, .. } = &verdict else {
+    let rendered = render(&ladder);
+    let pencil = face_pencil(&ladder);
+    eprintln!("[#2629-table] custom-family engine: pencil (spread, c) = {pencil:?} | {rendered}");
+    let Some((spread, constant)) = pencil else {
         panic!(
-            "this fixture's face is LIVE across the ladder (1.69e-6 down to \
-             2.09e-10), so the verdict must be the shape one — a magnitude-only \
-             absence would mean the fixture had nothing to say. Got: {}",
-            verdict.summary()
+            "this fixture's face is LIVE across the ladder (1.69e-6 down to 2.09e-10), \
+             so the bare pencil c = g*e^rho must be a finite single-signed run. A sign \
+             change or a zero rung means the gradient is not the face. Ladder: {rendered}"
         );
     };
     assert!(
-        face.spread <= 1.0e-4,
-        "the bare pencil c = g*e^rho must be CONSTANT to say the gradient IS the \
-         face and nothing else is hiding in it; got spread {:.3e} on c={:.6e}",
-        face.spread,
-        face.constant
+        spread <= 1.0e-4,
+        "#2629's table lists `gamlss mean-wiggle`, `spatial-adaptive` and `custom \
+         family` as carrying no soft rho-guard barrier. The bare pencil c = g*e^rho \
+         must be CONSTANT to say the gradient IS the face and nothing else is hiding \
+         in it; got spread {spread:.3e} on c={constant:.6e}. Ladder: {rendered}"
     );
-}
 
-/// The control that keeps the gate above from passing for the wrong reason.
-///
-/// A fixture whose gradient is identically zero at every rung would satisfy
-/// "absent" trivially and would prove nothing: a floor cannot be shown missing
-/// from a measurement that could not have shown it present. So: inject the
-/// barrier into this very ladder — the same rungs, the same evaluator, plus
-/// `w·a·tanh(a·ρ)` — and require the classifier to flip to CARRIED.
-///
-/// That is the real content of the measurement. It says the instrument, pointed
-/// at THIS fixture, would have caught the defect had it been there.
-#[test]
-fn the_same_custom_family_ladder_reads_carried_once_the_barrier_is_injected_2629() {
-    let bare = custom_family_rho_ladder(&SATURATED_RHO_LADDER);
-    let injected: Vec<GuardLadderRung> = bare
-        .iter()
-        .map(|rung| GuardLadderRung {
-            rho: rung.rho,
-            // Exactly what `RemlState::build_prior` would have added at this
-            // coordinate, from the same atom.
-            rho_gradient: rung.rho_gradient + soft_rho_guard_emission_at(rung.rho, 0.0),
-        })
-        .collect();
-
-    let verdict = classify_soft_rho_guard_floor(&injected, 0.0);
-    assert!(
-        verdict.is_carried() || matches!(verdict, SoftRhoGuardFloor::Indeterminate { .. }),
-        "injecting the barrier must move the verdict OFF absent — a fixture on \
-         which the floor is invisible cannot be used to certify its absence. \
-         Got: {}",
-        verdict.summary()
-    );
-    assert!(
-        !verdict.is_absent(),
-        "the ladder with the barrier explicitly added must not read as ABSENT; \
-         if it does, this fixture is blind to the very thing the gate above \
-         claims to have looked for. Got: {}",
-        verdict.summary()
-    );
+    // The control that keeps the gate above from passing for the wrong reason: a
+    // ladder whose pencil could not show a floor cannot certify that one is absent.
+    // Add a constant floor equal to the deepest rung's own gradient, about 600 times
+    // smaller than the barrier's w·a, to the same measurements, and require the
+    // pencil test to refuse it.
+    let floor = ladder.last().expect("the ladder reaches RHO_BOUND").1.abs();
+    let floored: Vec<(f64, f64)> = ladder.iter().map(|&(rho, g)| (rho, g + floor)).collect();
+    let floored_pencil = face_pencil(&floored);
     eprintln!(
-        "[#2629-control] custom-family engine + injected barrier: {}",
-        verdict.summary()
+        "[#2629-control] custom-family engine + floor {floor:.6e}: \
+         pencil (spread, c) = {floored_pencil:?}"
+    );
+    assert!(
+        floored_pencil.is_none_or(|(floored_spread, _)| floored_spread > 1.0e-4),
+        "adding a constant floor of {floor:.6e} to every rung must break the pencil's \
+         constancy. If it does not, this ladder is blind to a floor far smaller than \
+         the barrier and cannot certify the barrier's absence. Got {floored_pencil:?} \
+         on {}",
+        render(&floored)
     );
 }

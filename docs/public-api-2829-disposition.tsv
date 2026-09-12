@@ -1009,10 +1009,10 @@ crates/gam-solve/src/rho_optimizer/kl_certificate.rs	monotonicity_defect	restore
 crates/gam-solve/src/rho_optimizer/objective.rs	with_fixed_point_certificate	retired-no-surviving-dependent
 crates/gam-solve/src/rho_optimizer/run.rs	with_arc_initial_regularization	retired-no-surviving-dependent
 crates/gam-solve/src/rho_optimizer/run.rs	with_operator_initial_trust_radius	retired-no-surviving-dependent
-crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs	classify_soft_rho_guard_floor	restored-in-place
-crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs	is_absent	restored-in-place
-crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs	is_carried	restored-in-place
-crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs	soft_rho_guard_emission_at	restored-in-place
+crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs	classify_soft_rho_guard_floor	retired-no-product-user
+crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs	is_absent	retired-no-product-user
+crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs	is_carried	retired-no-product-user
+crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs	soft_rho_guard_emission_at	retired-no-product-user
 crates/gam-solve/src/row_sampling_measure.rs	bss_spectral_coreset_certified	retired-no-product-user
 crates/gam-solve/src/row_sampling_measure.rs	certify_margin	retired-no-product-user
 crates/gam-solve/src/row_sampling_measure.rs	designed_subsample	retired-no-product-user

@@ -2422,5 +2422,17 @@
     },
     "reason": "#2900 row 6.9, SPEC rules 6 and 10, under the lead's rule (D). use_joint_matrix_free_path chose the joint coefficient Hessian route at hand-picked cliffs: JOINT_MATRIX_FREE_MIN_DIM (p >= 512), JOINT_MATRIX_FREE_MIN_ROWS with JOINT_MATRIX_FREE_MIN_DIM_AT_LARGE_N (n >= 50,000 and p >= 128) and JOINT_MATRIX_FREE_MIN_LINEAR_WORK (n * p >= 4,000,000 and p >= 128). JointHessianWork::matrix_free_route now derives the route from the work (dense iff build + p^3/3 <= p * apply; PCG when the p x p Hessian exceeds the materialization cap), so the predicate, its constants and the tests pinning the cliffs go: use_joint_matrix_free_path_triggers_at_each_documented_threshold, the coefficient_cost anchors MIN_DIM, MIN_ROWS and MIN_DIM_AT_LARGE_N, gate_large_n_branch_boundary and gate_linear_work_branch. joint_coupled_wide_returns_matrix_free_n_times_p is renamed joint_coupled_wide_returns_one_operator_product because one row-pullback product is 2 * n * p. The owed_1395 p = 512 fixture has n = p rows and a materialized Hessian, so it now runs the dense route and its two tests are renamed from matrix_free to wide.",
     "evidence": "use_joint_matrix_free_path is declared once, as a pub fn in gam-custom-family covariance.rs, and use_joint_matrix_free_path_triggers_at_each_documented_threshold once, as a pub(crate) test in gam-custom-family tests.rs; both are deleted, so each census count falls by one. Not run through public_api_census.py locally (user directive)."
+  },
+  {
+    "base": "2b46140d5a757e2c85f9c7af19305425ed3b5a0b",
+    "removed": {
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs::classify_soft_rho_guard_floor": 1,
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs::is_absent": 1,
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs::is_carried": 1,
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs::soft_rho_guard_emission_at": 1,
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs::summary": 1
+    },
+    "reason": "#2829 product-root rule: the #2629 soft rho-guard floor classifier had no production caller. Only tests in gam-custom-family, gam-models and gam-sae called these functions. The lead ruled out a cfg(feature) quarantine because the root build.rs ban scanner rejects it, and the emission reaches pub(crate) atoms, so no test-support crate could carry it without widening production API.",
+    "evidence": "At the base, git grep -w over crates, src, tests, examples, bench and benches names classify_soft_rho_guard_floor, soft_rho_guard_emission_at, SoftRhoGuardFloor::is_absent and is_carried only in soft_rho_guard_floor.rs and the #2629 test modules. SoftRhoGuardFloor::summary is called only by those tests. MSI validation was unavailable (auth breaker set), so the identities follow public_api_census.py's explicit-pub-fn rule as read at this base."
   }
 ]

@@ -6001,5 +6001,31 @@
     ],
     "reason": "#2900 row 6.9, SPEC rules 6 and 10, under the lead's rule (D). use_joint_matrix_free_path chose the joint coefficient Hessian route at hand-picked cliffs: JOINT_MATRIX_FREE_MIN_DIM (p >= 512), JOINT_MATRIX_FREE_MIN_ROWS with JOINT_MATRIX_FREE_MIN_DIM_AT_LARGE_N (n >= 50,000 and p >= 128) and JOINT_MATRIX_FREE_MIN_LINEAR_WORK (n * p >= 4,000,000 and p >= 128). JointHessianWork::matrix_free_route now derives the route from the work (dense iff build + p^3/3 <= p * apply; PCG when the p x p Hessian exceeds the materialization cap), so the predicate, its constants and the tests pinning the cliffs go: use_joint_matrix_free_path_triggers_at_each_documented_threshold, the coefficient_cost anchors MIN_DIM, MIN_ROWS and MIN_DIM_AT_LARGE_N, gate_large_n_branch_boundary and gate_linear_work_branch. joint_coupled_wide_returns_matrix_free_n_times_p is renamed joint_coupled_wide_returns_one_operator_product because one row-pullback product is 2 * n * p. The owed_1395 p = 512 fixture has n = p rows and a materialized Hessian, so it now runs the dense route and its two tests are renamed from matrix_free to wide.",
     "evidence": "At the base, git grep -n over crates, src and tests finds use_joint_matrix_free_path called in assembly.rs (twice), inner_blockwise_fit.rs, joint_newton.rs, gam-models row_kernel.rs, survival location_scale family_solver.rs, bms custom_family_impl.rs and coefficient_cost.rs, each replaced here; every other occurrence is a test or a comment this change rewrites. The four constants occur only in covariance.rs, the gam-custom-family lib.rs re-export, row_kernel.rs and transformation_normal tests (JOINT_MATRIX_FREE_MIN_DIM) and prose in gam-models custom_family.rs and gam-solve jeffreys_subspace.rs, all updated. Outside crates, src and tests the only mentions are the two old owed_1395 test names in the historical bench/measurements/issue_2668 inventories, which record past runs. The items are the guard's identities by its rules (public or test-scoped declarations whose count falls). Not run through the guard or census locally (user directive); compile is covered by the tip check."
+  },
+  {
+    "base": "2b46140d5a757e2c85f9c7af19305425ed3b5a0b",
+    "items": [
+      "crates/gam-custom-family/src/soft_rho_guard_floor_2629_tests.rs:fn:the_same_custom_family_ladder_reads_carried_once_the_barrier_is_injected_2629",
+      "crates/gam-models/src/response_geometry.rs:fn:the_shared_tangent_criterion_carries_no_soft_rho_guard_floor_2629",
+      "crates/gam-sae/src/manifold/support_outer.rs:fn:assert_floor_absent_with_positive_control_2629",
+      "crates/gam-sae/src/manifold/support_outer.rs:fn:build_dense_floor_objective_2629",
+      "crates/gam-sae/src/manifold/support_outer.rs:fn:build_floor_objective_2629",
+      "crates/gam-sae/src/manifold/support_outer.rs:fn:manifold_outer_criterion_carries_no_soft_rho_guard_floor_2629",
+      "crates/gam-sae/src/manifold/support_outer.rs:fn:support_outer_criterion_carries_no_soft_rho_guard_floor_2629",
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs:const:ABSENCE_MAGNITUDE_FRACTION",
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs:const:PENCIL_CONSTANCY_TOL",
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs:const:SATURATED_RHO_LADDER",
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs:enum:SoftRhoGuardFloor",
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs:fn:classify_soft_rho_guard_floor",
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs:fn:from_residuals",
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs:fn:is_absent",
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs:fn:is_carried",
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs:fn:soft_rho_guard_emission_at",
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs:fn:summary",
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs:struct:GuardLadderRung",
+      "crates/gam-solve/src/rho_optimizer/soft_rho_guard_floor.rs:struct:PencilFit"
+    ],
+    "reason": "The whole soft_rho_guard_floor module went with its classifier: SATURATED_RHO_LADDER, PENCIL_CONSTANCY_TOL, ABSENCE_MAGNITUDE_FRACTION, GuardLadderRung, PencilFit with from_residuals, SoftRhoGuardFloor with is_absent, is_carried and summary, soft_rho_guard_emission_at and classify_soft_rho_guard_floor. Pins that could only be stated through its absence verdict or the barrier emission went too: the custom-family injected-barrier control, the gam-models shared-tangent pin, and the gam-sae support-outer and dense-manifold pins with the fixtures and helper only they used. The custom-family measurement survives, restated on the engine's own gradient.",
+    "evidence": "Before the push, the landing script checked git grep -w of every removed name over crates, src, tests, examples, bench and benches at the landed tree. The guarded identities follow source_removal_guard.py's rules as read at this base: public or test-scoped items, plus the private from_residuals, which had callers in the same file. MSI validation was unavailable (auth breaker set)."
   }
 ]
