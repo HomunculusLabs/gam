@@ -5177,6 +5177,13 @@ pub(crate) fn discover_primary_atom_topologies(
                 let frac = b.atan2(a) / std::f64::consts::TAU;
                 frac - frac.floor()
             };
+            // The race weights select this atom's cluster rows (out-of-cluster rows
+            // carry weight 0). They are built before the menu because the torus order
+            // is selected against them before the race.
+            let mut weights = Array1::<f64>::zeros(n_obs);
+            for &row in &rows {
+                weights[row] = 1.0;
+            }
             let mut specs: Vec<TopologyCandidateSpec> = Vec::with_capacity(4);
             // Circle: phase of the leading principal pair (unit-period
             // convention, matching the periodic seed refinement). The phase
@@ -5202,7 +5209,7 @@ pub(crate) fn discover_primary_atom_topologies(
                 coords
             };
             let mut sheet_coords: Option<Array2<f64>> = None;
-            let mut torus_coords: Option<Array2<f64>> = None;
+            let mut torus_order: Option<usize> = None;
             if max_dims[atom_idx] >= 2 {
                 // Flat 2-D patch: standardized leading principal projections.
                 let (sd0, sd1) = (cluster_sd(0), cluster_sd(1));
@@ -5332,42 +5339,47 @@ pub(crate) fn discover_primary_atom_topologies(
                         coords[[row, 0]] = phase(proj[[row, 0]], proj[[row, 1]]);
                         coords[[row, 1]] = phase(proj[[row, 2]], proj[[row, 3]]);
                     }
-                    specs.push(TopologyCandidateSpec::new(
-                        AutoTopologyKind::Torus,
-                        SaeAtomGeometryPlan::new(
-                            SaeAtomBasisKind::Torus,
-                            2,
-                            SaeBasisResolution::TorusHarmonics { per_axis_order: 2 },
-                            SaeReferenceMetricPlan::FlatRectangularTorus { tau: 0.0 },
-                        )?,
-                        LatentManifold::Product(vec![
-                            LatentManifold::Circle { period: 1.0 },
-                            LatentManifold::Circle { period: 1.0 },
-                        ]),
-                        coords.clone(),
-                    )?);
-                    specs.push(TopologyCandidateSpec::new(
-                        AutoTopologyKind::KleinBottle,
-                        SaeAtomGeometryPlan::klein_bottle(
-                    crate::basis::QuotientSpectralEvaluator::KLEIN_BOTTLE_MIN_HARMONICS,
-                )?,
-                        LatentManifold::Product(vec![
-                            LatentManifold::Circle { period: 1.0 },
-                            LatentManifold::Circle { period: 1.0 },
-                        ]),
-                        coords.clone(),
-                    )?);
-                    torus_coords = Some(coords);
+                    // #2243 — the torus and the Klein bottle race at the order a winner
+                    // installs: this chart's joint periodogram bandwidth, selected before
+                    // the race rather than after it, so no fixed race order handicaps a
+                    // factor whose angular content runs above it. A chart carrying no
+                    // angular energy realizes neither, so neither is offered.
+                    if let Some(per_axis_order) =
+                        select_torus_resolution(coords.view(), target, weights.view(), rows.len())
+                    {
+                        specs.push(TopologyCandidateSpec::new(
+                            AutoTopologyKind::Torus,
+                            SaeAtomGeometryPlan::new(
+                                SaeAtomBasisKind::Torus,
+                                2,
+                                SaeBasisResolution::TorusHarmonics { per_axis_order },
+                                SaeReferenceMetricPlan::FlatRectangularTorus { tau: 0.0 },
+                            )?,
+                            LatentManifold::Product(vec![
+                                LatentManifold::Circle { period: 1.0 },
+                                LatentManifold::Circle { period: 1.0 },
+                            ]),
+                            coords.clone(),
+                        )?);
+                        specs.push(TopologyCandidateSpec::new(
+                            AutoTopologyKind::KleinBottle,
+                            SaeAtomGeometryPlan::klein_bottle(per_axis_order.max(
+                                crate::basis::QuotientSpectralEvaluator::KLEIN_BOTTLE_MIN_HARMONICS,
+                            ))?,
+                            LatentManifold::Product(vec![
+                                LatentManifold::Circle { period: 1.0 },
+                                LatentManifold::Circle { period: 1.0 },
+                            ]),
+                            coords,
+                        )?);
+                        torus_order = Some(per_axis_order);
+                    }
                 }
             }
             if specs.is_empty() {
                 return Err(format!(
                     "discover_primary_atom_topologies: auto atom {atom_idx} produced no realizable candidates"
                 ));
-            }
-            let mut weights = Array1::<f64>::zeros(n_obs);
-            for &row in &rows {
-                weights[row] = 1.0;
             }
             // #2280 — proposal-time atlas prior on THIS atom's cluster-local
             // ambient rows at the atom's own chart rank (recognition-only,
@@ -5501,27 +5513,17 @@ pub(crate) fn discover_primary_atom_topologies(
             } else {
                 None
             };
-            // #2243 — for a torus winner, GROW the per-axis harmonic order by
-            // the same REML evidence (the circle pattern lifted to the tensor-
-            // product torus): the race ran the torus at a fixed low order only
-            // to discriminate topology, but a genuinely toroidal factor with
-            // high-frequency angular content on either circle factor is capped
-            // by that order.
+            // #2243 — a torus or Klein winner raced at the order its chart's
+            // periodogram selected, so that order is the one it installs.
             let n_torus_harmonics = if matches!(
                 &fit_kind,
                 SaeAtomBasisKind::Torus | SaeAtomBasisKind::KleinBottle
             ) {
-                let coords = torus_coords.as_ref().ok_or_else(|| {
+                let selected = torus_order.ok_or_else(|| {
                     format!(
-                        "discover_primary_atom_topologies: torus-cover winner without a 2-D chart for auto atom {atom_idx}"
+                        "discover_primary_atom_topologies: torus-cover winner without a selected order for auto atom {atom_idx}"
                     )
                 })?;
-                let selected = select_torus_resolution(
-                    coords.view(),
-                    target,
-                    weights.view(),
-                    rows.len(),
-                )?;
                 Some(if fit_kind == SaeAtomBasisKind::KleinBottle {
                     selected.max(crate::basis::QuotientSpectralEvaluator::KLEIN_BOTTLE_MIN_HARMONICS)
                 } else {
@@ -5541,31 +5543,9 @@ pub(crate) fn discover_primary_atom_topologies(
                     coords[[row, col]] = fit.coords[[row, col]];
                 }
             }
-            let grown_torus_geometry = if fit_kind == SaeAtomBasisKind::Torus {
-                let per_axis_order = n_torus_harmonics.ok_or_else(|| {
-                    format!(
-                        "discover_primary_atom_topologies: torus winner without selected resolution for auto atom {atom_idx}"
-                    )
-                })?;
-                let grown_spec = TopologyCandidateSpec::new(
-                    AutoTopologyKind::Torus,
-                    SaeAtomGeometryPlan::new(
-                        SaeAtomBasisKind::Torus,
-                        2,
-                        SaeBasisResolution::TorusHarmonics { per_axis_order },
-                        SaeReferenceMetricPlan::FlatRectangularTorus { tau: 0.0 },
-                    )?,
-                    fit.manifold.clone(),
-                    fit.coords.clone(),
-                )?;
-                Some(
-                    fit_torus_metric_candidate(&grown_spec, target, weights.view())?
-                        .fit_handle
-                        .geometry,
-                )
-            } else {
-                None
-            };
+            // A torus or Klein winner's plan is the race fit's own: the race scored it
+            // at the selected order, the torus through its metric fit, so the default
+            // arm installs it unchanged.
             let geometry = match &fit_kind {
                 SaeAtomBasisKind::Periodic => SaeAtomGeometryPlan::new(
                     SaeAtomBasisKind::Periodic,
@@ -5578,18 +5558,6 @@ pub(crate) fn discover_primary_atom_topologies(
                         })?,
                     },
                     SaeReferenceMetricPlan::UnitCircle,
-                )?,
-                SaeAtomBasisKind::Torus => grown_torus_geometry.ok_or_else(|| {
-                    format!(
-                        "discover_primary_atom_topologies: torus winner metric refit was not produced for auto atom {atom_idx}"
-                    )
-                })?,
-                SaeAtomBasisKind::KleinBottle => SaeAtomGeometryPlan::klein_bottle(
-                    n_torus_harmonics.ok_or_else(|| {
-                        format!(
-                            "discover_primary_atom_topologies: Klein winner without selected resolution for auto atom {atom_idx}"
-                        )
-                    })?,
                 )?,
                 SaeAtomBasisKind::Duchon => {
                     let center_count = n_duchon_centers.ok_or_else(|| {
@@ -6094,8 +6062,10 @@ fn select_periodic_resolution(
     Ok(bandwidth.min(ident_ceiling).max(1))
 }
 
-/// Evidence-driven per-axis harmonic order for a torus primary winner (#2243 —
-/// the circle resolution-growth pattern lifted to the tensor-product torus).
+/// Evidence-driven per-axis harmonic order for a torus chart (#2243 — the circle
+/// resolution-growth pattern lifted to the tensor-product torus), selected before
+/// the topology race so the torus and the Klein bottle race at the order a winner
+/// installs.
 /// The historical fixed order (`SAE_DEFAULT_TORUS_HARMONICS = 3`) under-resolves
 /// a genuinely toroidal factor whose angular content on either circle factor
 /// runs above third order, capping reconstruction below the fidelity the data
@@ -6108,15 +6078,15 @@ fn select_periodic_resolution(
 /// with the seed builder's dense guard `(2H+1)^2 ≤ 4·SAE_MAX_PERIODIC_HARMONICS`,
 /// so the selected order always builds. Same spectral criterion as the circle
 /// (see [`select_periodic_resolution`]): over-provisioning is smoothed away by
-/// the fit's own REML λ. A target with no angular energy returns an error (the
-/// caller surfaces it as a discovery failure rather than silently pinning a
-/// resolution).
+/// the fit's own REML λ. A chart carrying no angular energy returns `None`: it
+/// realizes no torus, so the caller offers no torus candidate rather than pinning
+/// a resolution.
 fn select_torus_resolution(
     torus_coords: ArrayView2<'_, f64>,
     target: ArrayView2<'_, f64>,
     weights: ArrayView1<'_, f64>,
     n_cluster: usize,
-) -> Result<usize, String> {
+) -> Option<usize> {
     let n_obs = target.nrows();
     let p_out = target.ncols();
     // Solve (2H+1)^2 < n_cluster for the identifiability ceiling on the per-axis
@@ -6162,9 +6132,7 @@ fn select_torus_resolution(
         }
     }
     if !(peak_energy > 0.0) {
-        return Err(
-            "select_torus_resolution: the torus winner carries no angular energy".to_string(),
-        );
+        return None;
     }
     // Per-axis resolution = the joint periodogram's bandwidth (the largest
     // per-axis order of any cell clearing the measured noise floor), bounded by
@@ -6192,7 +6160,7 @@ fn select_torus_resolution(
         .map(|(order, _)| *order)
         .max()
         .unwrap_or(1);
-    Ok(bandwidth.min(hard_ceiling).max(1))
+    Some(bandwidth.min(hard_ceiling).max(1))
 }
 
 /// Resolve every `"auto"` entry of a primary seed dictionary to the concrete
