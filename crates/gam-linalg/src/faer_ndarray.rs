@@ -1,9 +1,7 @@
 use dyn_stack::{MemBuffer, MemStack};
 use faer::diag::{Diag, DiagRef};
-use faer::linalg::solvers::{self, Solve};
-pub use faer::linalg::solvers::{
-    Lblt as FaerLblt, Ldlt as FaerLdlt, Llt as FaerLlt, Solve as FaerSolve,
-};
+use faer::linalg::solvers::{self, Lblt as FaerLblt, Ldlt as FaerLdlt, Solve};
+pub use faer::linalg::solvers::Llt as FaerLlt;
 use faer::linalg::svd::{self, ComputeSvdVectors};
 use faer::prelude::ReborrowMut;
 use faer::{Conj, Mat, MatMut, MatRef, Par, Side, Unbind, get_global_parallelism};
