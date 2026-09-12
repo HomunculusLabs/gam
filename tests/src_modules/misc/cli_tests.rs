@@ -8100,3 +8100,98 @@ fn survival_location_scale_live_warp_fits_linkwiggle_degree3_2695() {
 fn survival_location_scale_live_warp_fits_linkwiggle_degree4_2695() {
     fit_survival_location_scale_live_warp_2695(4, 4);
 }
+
+/// gam#2904: a SAS survival location-scale fit selects the link shape together
+/// with ρ by the LAML, as auxiliary coordinates of one certified outer. The truth
+/// is a Weibull AFT, whose log-time residual law is the skewed Gumbel minimum and
+/// not the Gaussian that the default SAS seed `(ε, log δ) = (0, 0)` encodes, so the
+/// outer has a shape gradient to follow. Inert shape axes would save the seed
+/// bitwise.
+#[test]
+fn survival_location_scale_sas_link_shape_is_selected_by_the_outer_2904() {
+    gam_runtime::test_support::install_diagnostic_logger();
+    let dir = tempdir().unwrap_or_else(|e| panic!("{} failed: {:?}", "tempdir", e));
+    let csv_path = dir.path().join("sas_shape.csv");
+    let mut rows = String::from("entry,exit,event,x\n");
+    let n = 240usize;
+    let golden = 0.5 * (5.0_f64.sqrt() - 1.0);
+    for i in 0..n {
+        let u = (i as f64 + 0.5) / (n as f64);
+        // A low-discrepancy covariate independent of the residual quantile.
+        let x = -1.0 + 2.0 * (i as f64 * golden).fract();
+        let t = (1.5 + 0.4 * x + 0.6 * (-(1.0 - u).ln()).ln()).exp();
+        let event = usize::from(i % 5 != 0);
+        rows.push_str(&format!("0,{t:.6},{event},{x:.6}\n"));
+    }
+    std::fs::write(&csv_path, rows).unwrap_or_else(|e| panic!("{} failed: {:?}", "write csv", e));
+    let seed = match parse_config_survival_inverse_link(SurvivalInverseLinkInput {
+        link: Some("sas"),
+        mixture_rho: None,
+        sas_init: None,
+        beta_logistic_init: None,
+        survival_distribution: "gaussian",
+    })
+    .expect("default survival SAS link")
+    {
+        InverseLink::Sas(state) => state,
+        _ => panic!("survival --link sas did not parse to an SAS link"),
+    };
+    let out_path = dir.path().join("sas_shape.model.json");
+    super::run_survival(SurvivalArgs {
+        data: csv_path.clone(),
+        entry: Some("entry".to_string()),
+        exit: "exit".to_string(),
+        event: "event".to_string(),
+        formula: "1 + x".to_string(),
+        predict_noise: None,
+        survival_likelihood: "location-scale".to_string(),
+        survival_distribution: "gaussian".to_string(),
+        link: Some("sas".to_string()),
+        mixture_rho: None,
+        sas_init: None,
+        beta_logistic_init: None,
+        survival_time_anchor: None,
+        baseline_target: "linear".to_string(),
+        baseline_scale: None,
+        baseline_shape: None,
+        baseline_rate: None,
+        baseline_makeham: None,
+        time_basis: "ispline".to_string(),
+        time_degree: 3,
+        time_num_internal_knots: 6,
+        threshold_time_k: None,
+        threshold_time_degree: 3,
+        sigma_time_k: None,
+        sigma_time_degree: 3,
+        slope_time_k: None,
+        slope_time_degree: 3,
+        scale_dimensions: false,
+        out: Some(out_path.clone()),
+        slope_formula: None,
+        z_column: None,
+        weights_column: None,
+        offset_column: None,
+        noise_offset_column: None,
+        frailty: gam::families::survival::lognormal_kernel::FrailtySpec::None,
+        persistent_warm_start_store: None,
+    })
+    .unwrap_or_else(|e| panic!("SAS survival location-scale fit failed: {e}"));
+    let saved = SavedModel::load_from_path(&out_path).expect("load saved SAS survival model");
+    let fitted = match saved.resolved_inverse_link().expect("saved inverse link") {
+        Some(InverseLink::Sas(state)) => state,
+        _ => panic!("a survival --link sas fit saved a non-SAS inverse link"),
+    };
+    assert!(
+        fitted.epsilon.is_finite() && fitted.log_delta.is_finite(),
+        "fitted SAS shape is not finite: epsilon={}, log_delta={}",
+        fitted.epsilon,
+        fitted.log_delta
+    );
+    assert!(
+        fitted.epsilon.to_bits() != seed.epsilon.to_bits()
+            || fitted.log_delta.to_bits() != seed.log_delta.to_bits(),
+        "the certified outer left the SAS shape at its seed (epsilon={}, log_delta={})",
+        fitted.epsilon,
+        fitted.log_delta
+    );
+}
