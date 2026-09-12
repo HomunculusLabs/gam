@@ -177,25 +177,6 @@ impl OrderedRhoBounds {
     pub fn clamp(self, value: f64) -> f64 {
         value.clamp(self.lo, self.hi)
     }
-
-    /// Raise the upper endpoint to at least `floor`, preserving orderedness.
-    ///
-    /// The criterion-ranked prepass widens its over-smoothing bound to the full
-    /// range the outer optimizer can reach (`RHO_BOUND`) so a genuinely large λ
-    /// seed is not clipped to the seed band. This only ever *raises* `hi`, so the
-    /// interval stays valid by construction. A non-finite `floor` is ignored to
-    /// preserve the finiteness invariant (callers pass the finite `RHO_BOUND`).
-    #[inline]
-    pub fn with_upper_at_least(self, floor: f64) -> Self {
-        if floor.is_finite() && floor > self.hi {
-            Self {
-                lo: self.lo,
-                hi: floor,
-            }
-        } else {
-            self
-        }
-    }
 }
 
 #[cfg(test)]
@@ -318,21 +299,5 @@ mod tests {
         assert_eq!(b.clamp(1.0), 1.0);
         assert_eq!(b.clamp(-10.0), -3.0);
         assert_eq!(b.clamp(100.0), 5.0);
-    }
-
-    #[test]
-    fn ordered_rho_bounds_with_upper_only_raises_and_stays_ordered() {
-        let b = OrderedRhoBounds::new(-12.0, 8.0).unwrap();
-        // Widening to a larger ceiling raises the upper endpoint.
-        let widened = b.with_upper_at_least(30.0);
-        assert_eq!(widened.lower(), -12.0);
-        assert_eq!(widened.upper(), 30.0);
-        // Widening to a floor already below `hi` is a no-op (never lowers `hi`).
-        let unchanged = b.with_upper_at_least(2.0);
-        assert_eq!(unchanged.upper(), 8.0);
-        // A non-finite floor is ignored so the finiteness invariant is preserved.
-        let finite = b.with_upper_at_least(f64::INFINITY);
-        assert!(finite.upper().is_finite());
-        assert_eq!(finite.upper(), 8.0);
     }
 }

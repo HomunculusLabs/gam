@@ -1199,46 +1199,30 @@ where
             // identifiable. Same machinery as the gam#1266 double-penalty rescue.
             let caller_seeded_rho = rho_warm_start.is_some_and(|h| h.len() == k);
             let prepass_candidates: Vec<Array1<f64>> = {
-                // Validate the seed ρ-box ONCE, at the boundary where it enters the
-                // seed machinery, and REFUSE an inverted/non-finite interval rather
-                // than silently reordering it (#2379). An inverted `[lo, hi]` means
-                // the ρ lower wall and the over-smoothing ceiling — two
-                // independently-owned constants — have drifted apart (the #2370
-                // disease); a swap here would make the optimizer solve a different,
-                // silently substituted box and still return a fitted model.
-                // `run_outer_uncertified` already enforces this contract at the outer
-                // entry; the prepass must not undercut it. Crucially the raw pair is
-                // validated BEFORE the widening below, so the widening
-                // can never silently un-invert a drifted box.
-                let bnds = reml_seed_config.bounds;
-                let raw_bounds = OrderedRhoBounds::new(bnds.0, bnds.1)?;
-                // The criterion-ranked prepass evaluates the TRUE REML/LAML cost, so
-                // it is safe — and necessary — to let it explore the full
-                // over-smoothing range the outer optimizer itself can reach
-                // (the derived domain's upper edge), not just the narrower default
-                // seed-placement band.
-                // A double-penalty (null-space-shrinkage) smooth on data living in
-                // one penalty's null space has its global REML optimum at a LARGE
-                // wiggliness λ (range block fully smoothed), often beyond the seed
-                // band; the cost surface also has a shallower local optimum at a
-                // moderate λ that leaves wiggle under-penalized (EDF inflated,
-                // gam#1266). If the prepass cannot seed past that local optimum, the
-                // outer EFS — which only takes cost-improving steps — relaxes back
-                // into it. The collapsing-kernel spatial smooth (gam#1464) has the
-                // same shape: the high-λ basin sits beyond a shallow low-λ trap.
-                // Widening only the upper (over-smoothing) bound lets the prepass
-                // place the seed in the correct high-λ basin; the lower
-                // (under-smoothing) bound stays at the default so we never seed an
-                // overfit origin. The seed is still only adopted when it strictly
-                // lowers the REML cost, so well-balanced and single-penalty fits are
-                // unaffected.
-                // Widen only the upper (over-smoothing) bound to the full range the
-                // outer optimizer can reach. `with_upper_at_least` only ever *raises*
-                // `hi`, so the box stays ordered by construction (the derived upper
-                // edge is finite) — no re-validation needed.
-                let seed_bounds = raw_bounds.with_upper_at_least(
-                    rho_model_domain.1.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                );
+                // The prepass scores its analytic candidates against the TRUE
+                // REML/LAML cost and adopts one only on strict improvement, so its
+                // window is the domain the outer optimizer itself searches: the
+                // envelope of the #2812 resolvability domain, both faces (#2902
+                // row 9). A double-penalty null-space smooth (gam#1266) or a
+                // collapsing-kernel spatial smooth (gam#1464) has its global REML
+                // optimum at a large λ beyond a fixed seed band, and a
+                // well-determined smooth can have its commensurate-curvature start
+                // below one. Clamping either to a picked wall moves a data-derived
+                // start onto a face the search does not have. The default anchor is
+                // itself data-derived (the risk shift on the weight scale), so the
+                // lower face is a clamp, not an origin. With no penalty there is no
+                // coordinate to place, and the precision box stands in for the empty
+                // envelope. `OrderedRhoBounds::new` still refuses a non-finite or
+                // inverted interval (#2379).
+                let (envelope_lower, envelope_upper) = if rho_model_domain.0.is_empty() {
+                    crate::estimate::rho_domain::coordinate_domain(None, None)
+                } else {
+                    (
+                        rho_model_domain.0.iter().copied().fold(f64::INFINITY, f64::min),
+                        rho_model_domain.1.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                    )
+                };
+                let seed_bounds = OrderedRhoBounds::new(envelope_lower, envelope_upper)?;
                 // risk_shift is the default seed bias when no caller warm-start is given;
                 // it is NOT applied on top of a caller-supplied rho seed.
                 let risk_shift: f64 = match reml_seed_config.risk_profile {
@@ -1263,7 +1247,7 @@ where
                 // weight-anchored origin). A smooth whose penalized subspace carries
                 // little data support gets a large `λ_j` by construction, so the
                 // #1266/#1464 high-λ basin is reached analytically without a lattice
-                // search; `seed_bounds` already widens `hi` to the domain's upper face so a
+                // search; `seed_bounds` spans the domain's faces so a
                 // genuinely large `λ_j` is not clipped to the seed band. The seed is
                 // order-independent, so no canonical permutation is needed.
                 // Two principled, data-derived candidates are scored against the

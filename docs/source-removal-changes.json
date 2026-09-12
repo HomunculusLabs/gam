@@ -6282,5 +6282,14 @@
     ],
     "reason": "#2829 product-root rule: these restored getters had no caller in any crate. The narrow scan had counted their own field or a same-named local as a production user. Every field behind them is still read elsewhere, so only the getters go.",
     "evidence": "At the base, git grep over crates, src, tests, examples, bench, benches, gamfit and python finds no `.name(` or `::name(` call for any of them, apart from one cgroup v1 fixture assertion and two #2253 layout assertions, which this commit rewrites or drops. The landing script refuses the push if any call survives at the landed tree. MSI validation is re-run after landing; these identities follow public_api_census.py and source_removal_guard.py as read at this base."
+  },
+  {
+    "base": "0121b3a972af91f120c3f4805479707e171946d4",
+    "items": [
+      "crates/gam-problem/src/seeding.rs:fn:ordered_rho_bounds_with_upper_only_raises_and_stays_ordered",
+      "crates/gam-problem/src/seeding.rs:fn:with_upper_at_least"
+    ],
+    "reason": "#2902 row 9: the standard-REML prepass placed its data-derived starts in a literal (-12, 12) seed box whose upper edge OrderedRhoBounds::with_upper_at_least widened to the derived domain. The prepass box is now the envelope of the #2812 resolvability domain, both faces, so the widening helper and its unit test have no subject.",
+    "evidence": "git grep -w with_upper_at_least over the base finds its definition and its one unit test in crates/gam-problem/src/seeding.rs and its only production call in crates/gam-solve/src/estimate/optimizer.rs, replaced in this commit."
   }
 ]
