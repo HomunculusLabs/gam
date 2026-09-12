@@ -285,7 +285,7 @@ pub struct SearchOutcome<S> {
 /// fissions, fusions, births), then the kind's trigger direction, then
 /// structural hash. Pure — no RNG, no clock — so the search path, and with it
 /// the ledger, is a function of the inputs alone.
-pub fn canonical_order(proposals: &mut [MoveProposal]) {
+pub(crate) fn canonical_order(proposals: &mut [MoveProposal]) {
     proposals.sort_by(|x, y| {
         let xr = x.mv.kind_rank();
         let yr = y.mv.kind_rank();

@@ -263,7 +263,7 @@ pub fn evaluate(
 
 /// Strict evaluation: always errors on a malformed prior. Policy mapping lives
 /// in [`evaluate`].
-pub fn evaluate_strict(prior: &RhoPrior, rho: &Array1<f64>) -> Result<RhoPriorEval, RhoPriorError> {
+pub(crate) fn evaluate_strict(prior: &RhoPrior, rho: &Array1<f64>) -> Result<RhoPriorEval, RhoPriorError> {
     let len = rho.len();
     match prior {
         RhoPrior::Flat => Ok(RhoPriorEval {

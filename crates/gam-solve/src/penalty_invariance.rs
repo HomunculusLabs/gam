@@ -597,7 +597,7 @@ impl PenaltyMapInvariance {
     ///
     /// Returns `None` when there is nothing to deflate, so callers stay on the
     /// bit-identical legacy path.
-    pub fn theta_directions(
+    pub(crate) fn theta_directions(
         &self,
         lambdas: &Array1<f64>,
         theta_dimension: usize,
@@ -811,7 +811,7 @@ pub fn judged_subspace_basis(
 /// different subspace than the one the verdict was taken on.
 ///
 /// Same `I - Z Z'` projector construction, with the same O(1) selection margin.
-pub fn deflated_directions(dimension: usize, basis: &Array2<f64>) -> Option<Array2<f64>> {
+pub(crate) fn deflated_directions(dimension: usize, basis: &Array2<f64>) -> Option<Array2<f64>> {
     use gam_linalg::faer_ndarray::FaerEigh;
     if basis.nrows() != dimension || dimension == 0 || basis.ncols() >= dimension {
         return None;
@@ -873,7 +873,7 @@ pub fn deflated_directions(dimension: usize, basis: &Array2<f64>) -> Option<Arra
 /// mismatch, a gradient of the wrong length) or when the residual is not
 /// finite: an absent measurement must stay absent rather than become a zero,
 /// which would silently assert that the assembly is exact.
-pub fn invariance_residual_2norm(
+pub(crate) fn invariance_residual_2norm(
     hessian_rho: &Array2<f64>,
     outer_gradient: &Array1<f64>,
     directions: &Array2<f64>,
@@ -915,7 +915,7 @@ pub fn invariance_residual_2norm(
 }
 
 /// Compress a symmetric matrix onto the judged subspace: `Z' H Z`.
-pub fn compress_to_judged_subspace(matrix: &Array2<f64>, basis: &Array2<f64>) -> Array2<f64> {
+pub(crate) fn compress_to_judged_subspace(matrix: &Array2<f64>, basis: &Array2<f64>) -> Array2<f64> {
     let mut compressed = basis.t().dot(matrix).dot(basis);
     gam_linalg::matrix::symmetrize_in_place(&mut compressed);
     compressed

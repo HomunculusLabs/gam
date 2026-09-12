@@ -74,10 +74,10 @@ pub const PSI_GRAM_SPOT_RTOL: f64 = 1.0e-10;
 /// accepted only after its series tail reaches its floating-point accumulation
 /// floor and exact off-node Gram/RHS checks pass. The former fixed 513-node
 /// build paid for the largest degree even on a low-degree interpoland (#2827).
-pub const PSI_GRAM_NODE_LADDER: [usize; 6] = [17, 33, 65, 129, 257, 513];
+pub(crate) const PSI_GRAM_NODE_LADDER: [usize; 6] = [17, 33, 65, 129, 257, 513];
 
 /// Number of deterministic off-node spot-check ψ values.
-pub const PSI_GRAM_SPOT_POINTS: usize = 3;
+pub(crate) const PSI_GRAM_SPOT_POINTS: usize = 3;
 
 /// Rank-revealing relative eigenvalue cutoff for the reduced-basis (range)
 /// projector witness [`PsiGramTensor::reduced_basis_equal`] (#1264). An
@@ -1054,7 +1054,7 @@ impl PsiGramTensor {
     /// small value here as "the subspaces coincide" is exactly the mistake the
     /// bound exists to stop — compare the two to attribute a refusal to a real
     /// rotation rather than to an unresolvable eigen-gap.
-    pub fn reduced_basis_subspace_distance(&self, psi_ref: f64, psi_new: f64) -> Option<f64> {
+    pub(crate) fn reduced_basis_subspace_distance(&self, psi_ref: f64, psi_new: f64) -> Option<f64> {
         if !(self.contains(psi_ref) && self.contains(psi_new)) {
             return None;
         }
@@ -1184,7 +1184,7 @@ impl PsiGramTensor {
     /// what keeps the decision honest.
     ///
     /// `None` for an off-window / non-finite / all-zero Gram. Purely k-space.
-    pub fn rank_decision(&self, psi: f64) -> Option<RankDecision> {
+    pub(crate) fn rank_decision(&self, psi: f64) -> Option<RankDecision> {
         let spectrum = self.gram_spectrum(psi)?;
         let lambda_max = spectrum[0];
         Some(certified_rank(

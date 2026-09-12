@@ -158,16 +158,16 @@ impl AutoTopologyKind {
 
     /// `true` iff this candidate is the discrete-mixture model class (as
     /// opposed to a smooth manifold / Euclidean latent topology).
-    pub const fn is_discrete_mixture(self) -> bool {
+    pub(crate) const fn is_discrete_mixture(self) -> bool {
         matches!(self, AutoTopologyKind::Mixture { .. })
     }
 
-    pub const fn is_ring_of_clusters(self) -> bool {
+    pub(crate) const fn is_ring_of_clusters(self) -> bool {
         matches!(self, AutoTopologyKind::RingOfClusters { .. })
     }
 
     /// `true` iff this candidate is the structured-union composite class (#907).
-    pub const fn is_structured_union(self) -> bool {
+    pub(crate) const fn is_structured_union(self) -> bool {
         matches!(self, AutoTopologyKind::Union { .. })
     }
 
@@ -260,7 +260,7 @@ impl AutoTopologyKind {
     /// must keep racing as separate candidates.) The fitted-κ
     /// [`ConstantCurvature`](AutoTopologyKind::ConstantCurvature) candidate is
     /// itself the fusion target, not a member to be fused.
-    pub const fn is_fixed_constant_curvature_form(self) -> bool {
+    pub(crate) const fn is_fixed_constant_curvature_form(self) -> bool {
         matches!(self, AutoTopologyKind::Euclidean | AutoTopologyKind::Sphere)
     }
 
@@ -279,7 +279,7 @@ impl AutoTopologyKind {
     /// candidate takes the position of the first fixed form it replaces; all
     /// non-family candidates (`Circle`/`Torus`/`Cylinder`/`Mixture`/`Union`) and
     /// any duplicates keep their relative order. Idempotent.
-    pub fn fuse_constant_curvature_family(
+    pub(crate) fn fuse_constant_curvature_family(
         candidates: &[Self],
         curvature_is_estimable: bool,
         subsumes: &[AutoTopologyKind],
@@ -384,7 +384,7 @@ impl PredictiveCandidateKind {
 
     /// Adaptive classes require honest outer-fold refitting even when every
     /// entry in the race is a discrete class.
-    pub const fn requires_predictive_stacking(self) -> bool {
+    pub(crate) const fn requires_predictive_stacking(self) -> bool {
         matches!(
             self,
             PredictiveCandidateKind::MixtureClass | PredictiveCandidateKind::RingOfClustersClass
@@ -1522,7 +1522,7 @@ fn topology_score_disagreement_warnings(
     }
 }
 
-pub fn bic_score(deviance: f64, n_obs: usize, basis_size: usize) -> Result<f64, String> {
+pub(crate) fn bic_score(deviance: f64, n_obs: usize, basis_size: usize) -> Result<f64, String> {
     if n_obs <= 1 {
         return Err("BIC scoring requires at least two observations".to_string());
     }
@@ -1695,7 +1695,7 @@ fn eligible_adaptive_orders(
 /// neighbours fitted and worse). If the cap binds, the rung returns
 /// [`AdaptiveRungError::RefinementBudgetExhausted`]; it never treats an
 /// unbracketed best-so-far order as a certified winner.
-pub const MIXTURE_REFINEMENT_MAX_PROBES: usize = 16;
+pub(crate) const MIXTURE_REFINEMENT_MAX_PROBES: usize = 16;
 
 /// Fit the discrete-mixture rung over a fixed `k`-ladder, then **refine
 /// locally around the winner**, and rank in-class by BIC. Each order is priced

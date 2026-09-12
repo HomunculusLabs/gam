@@ -96,7 +96,7 @@ impl<'a> FitSensitivity<'a> {
         }
     }
 
-    pub fn from_projected(basis: &'a Array2<f64>, reduced_inverse: &'a Array2<f64>) -> Self {
+    pub(crate) fn from_projected(basis: &'a Array2<f64>, reduced_inverse: &'a Array2<f64>) -> Self {
         let dim = basis.nrows();
         Self {
             inverse: FittedInverse::Projected {

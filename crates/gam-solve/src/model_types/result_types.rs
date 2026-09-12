@@ -867,7 +867,7 @@ impl OuterStationarityCertificate {
     /// Each variant has its own label, so an `AsymptoteRail` certificate is
     /// never reported as an analytic gradient in the evidence map a reader
     /// consults to find out which route ran.
-    pub fn kind_label(&self) -> &'static str {
+    pub(crate) fn kind_label(&self) -> &'static str {
         match self {
             Self::AnalyticGradient { .. } => "analytic_gradient",
             Self::FixedPoint { .. } => "fixed_point",
@@ -1134,7 +1134,7 @@ impl CurvatureEvidence {
     /// means the route had no analytic Hessian to test. Sites that mean
     /// [`Self::NotSpent`] or [`Self::NoEstimand`] must say so explicitly —
     /// that is the point of the type.
-    pub fn from_measurement(psd: Option<bool>) -> Self {
+    pub(crate) fn from_measurement(psd: Option<bool>) -> Self {
         match psd {
             Some(psd) => Self::Measured { psd },
             None => Self::NotAvailable,
@@ -1312,7 +1312,7 @@ impl OuterCriterionCertificate {
     /// [`Self::refusal`] needs. This is deliberately not named
     /// `curvature_admissible`: "did not refuse" and "was found admissible" are
     /// different claims, and conflating them is what #2578 was.
-    pub fn curvature_not_refused(&self) -> bool {
+    pub(crate) fn curvature_not_refused(&self) -> bool {
         !matches!(
             self.curvature_verdict(),
             CurvatureAdmissibility::Inadmissible { .. }
@@ -4727,7 +4727,7 @@ impl UnifiedFitResult {
     }
 
     /// Get owned row-wise diagonal working evidence if available.
-    pub fn working_geometry(&self) -> Option<&WorkingGeometry> {
+    pub(crate) fn working_geometry(&self) -> Option<&WorkingGeometry> {
         self.geometry
             .as_ref()
             .and_then(|geometry| geometry.working.as_ref())

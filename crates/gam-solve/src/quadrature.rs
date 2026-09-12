@@ -429,7 +429,7 @@ const LOG_SURVIVAL_PANEL_MAX_NODES: usize = 4097;
 /// `log_kernel_bundle` asks for `k + 4` rungs at most, so 8 covers every
 /// shipped consumer with room; the bound exists so the tower is a fixed-size
 /// array rather than a heap allocation on a per-row path.
-pub const LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER: usize = 8;
+pub(crate) const LOG_SURVIVAL_MAX_MU_DERIVATIVE_ORDER: usize = 8;
 /// Largest tolerated cancellation, as `ln(Σ|terms| / |Σ terms|)`, before the
 /// direct Hermite μ-derivative tower is refused.
 ///
@@ -777,7 +777,7 @@ pub fn logit_posterior_meanwith_deriv(
 }
 
 #[inline]
-pub fn probit_posterior_meanwith_deriv_exact(mu: f64, sigma: f64) -> IntegratedMeanDerivative {
+pub(crate) fn probit_posterior_meanwith_deriv_exact(mu: f64, sigma: f64) -> IntegratedMeanDerivative {
     // Exact Gaussian-probit convolution.
     //
     // If eta ~ N(mu, sigma^2), then
@@ -3132,7 +3132,7 @@ pub fn integrated_inverse_link_mean_and_derivative(
 }
 
 #[inline]
-pub fn integrated_inverse_link_jet(
+pub(crate) fn integrated_inverse_link_jet(
     quadctx: &QuadratureContext,
     link: LinkFunction,
     mu: f64,
@@ -4411,7 +4411,7 @@ where
 ///   = phi(eta / sqrt(1 + se_eta^2)) / sqrt(1 + se_eta^2),
 /// which is exactly the integrated derivative IRLS would need.
 #[inline]
-pub fn probit_posterior_mean(eta: f64, se_eta: f64) -> f64 {
+pub(crate) fn probit_posterior_mean(eta: f64, se_eta: f64) -> f64 {
     if se_eta < 1e-10 {
         return gam_math::probability::normal_cdf(eta);
     }

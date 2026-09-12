@@ -288,7 +288,7 @@ impl FitArtifact {
     /// the schema matches, the global summary is finite, and every term's
     /// numeric payload is finite. A failing artifact must be ignored (cold
     /// fallback), never error a fit.
-    pub fn is_usable(&self) -> bool {
+    pub(crate) fn is_usable(&self) -> bool {
         self.schema == FIT_ARTIFACT_SCHEMA
             && self.global.outer_objective.is_finite()
             && self.terms.iter().all(TermArtifact::is_finite)

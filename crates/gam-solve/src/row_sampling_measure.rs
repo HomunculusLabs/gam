@@ -136,7 +136,7 @@ impl CoresetCertificate {
 
     /// Worst-case log-determinant transfer error implied by the spectral
     /// certificate.
-    pub fn logdet_error_bound(&self) -> f64 {
+    pub(crate) fn logdet_error_bound(&self) -> f64 {
         self.dim_effective as f64 * ((1.0 + self.eps_spectral) / (1.0 - self.eps_spectral)).ln()
     }
 

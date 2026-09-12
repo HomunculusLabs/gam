@@ -111,7 +111,7 @@ impl ProjectedKktResidual {
     /// removed" without saying which or how many. Supplying a made-up
     /// tolerance just to reach `with_metadata` would be worse: a number where
     /// a measurement belongs.
-    pub fn with_free_rank(mut self, free_rank: usize) -> Self {
+    pub(crate) fn with_free_rank(mut self, free_rank: usize) -> Self {
         self.free_rank = Some(free_rank);
         self
     }

@@ -63,7 +63,7 @@ impl RhoUncertaintyDiagnostic {
     }
 }
 
-pub fn cost_gate_allows(rho_dim: usize, gate: RhoUncertaintyCostGate) -> Result<usize, String> {
+pub(crate) fn cost_gate_allows(rho_dim: usize, gate: RhoUncertaintyCostGate) -> Result<usize, String> {
     if rho_dim == 0 {
         return Err("no smoothing parameters".to_string());
     }
@@ -91,7 +91,7 @@ pub fn cost_gate_allows(rho_dim: usize, gate: RhoUncertaintyCostGate) -> Result<
     Ok(sample_count)
 }
 
-pub fn rho_uncertainty_diagnostic<F>(
+pub(crate) fn rho_uncertainty_diagnostic<F>(
     rho_hat: &Array1<f64>,
     outer_hessian_rho: &Array2<f64>,
     gate: RhoUncertaintyCostGate,

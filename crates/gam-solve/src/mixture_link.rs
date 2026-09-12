@@ -1144,7 +1144,7 @@ fn sas_delta_from_raw_log_delta(raw_log_delta: f64) -> f64 {
     ld_eff.exp()
 }
 
-pub fn validate_mixturespec(spec: &MixtureLinkSpec) -> Result<(), String> {
+pub(crate) fn validate_mixturespec(spec: &MixtureLinkSpec) -> Result<(), String> {
     if spec.components.is_empty() {
         return Err("mixture link requires at least 1 component".to_string());
     }
@@ -1199,7 +1199,7 @@ pub fn validate_mixturespec(spec: &MixtureLinkSpec) -> Result<(), String> {
     Ok(())
 }
 
-pub fn softmax_last_fixedzero(rho: &Array1<f64>) -> Array1<f64> {
+pub(crate) fn softmax_last_fixedzero(rho: &Array1<f64>) -> Array1<f64> {
     let k = rho.len() + 1;
     let mut logits = Vec::with_capacity(k);
     let mut maxv = 0.0_f64;
@@ -2078,7 +2078,7 @@ pub fn mixture_inverse_link_jet(state: &MixtureLinkState, eta: f64) -> InverseLi
 ///   d mu'    / d rho_j = pi_j (mu_j'    - mu')
 ///   d mu''   / d rho_j = pi_j (mu_j''   - mu'')
 ///   d mu'''  / d rho_j = pi_j (mu_j'''  - mu''')
-pub fn mixture_inverse_link_jetwith_rho_partials(
+pub(crate) fn mixture_inverse_link_jetwith_rho_partials(
     state: &MixtureLinkState,
     eta: f64,
 ) -> MixtureJetWithRhoPartials {
@@ -2626,7 +2626,7 @@ pub fn beta_logistic_inverse_link_jet(
     InverseLinkJet { mu, d1, d2, d3 }
 }
 
-pub fn beta_logistic_inverse_link_pdfthird_derivative(
+pub(crate) fn beta_logistic_inverse_link_pdfthird_derivative(
     eta: f64,
     log_shape_center: f64,
     epsilon: f64,
@@ -2670,7 +2670,7 @@ pub fn beta_logistic_inverse_link_pdfthird_derivative(
 ///   d5 = d1 * [t^4 - 6c*t^2*u' - 4c*t*u'' + 3c^2*u'^2 - c*u''']
 ///
 /// where u' = u(1-u), u'' = u'(1-2u), u''' = u''(1-2u) - 2*u'^2.
-pub fn beta_logistic_inverse_link_pdffourth_derivative(
+pub(crate) fn beta_logistic_inverse_link_pdffourth_derivative(
     eta: f64,
     log_shape_center: f64,
     epsilon: f64,
@@ -2847,7 +2847,7 @@ pub fn sas_inverse_link_jet(
 
 /// Fourth eta derivative of the SAS inverse-link CDF on the same finite domain
 /// as [`sas_inverse_link_jet`].
-pub fn sas_inverse_link_pdfthird_derivative(
+pub(crate) fn sas_inverse_link_pdfthird_derivative(
     eta: f64,
     epsilon: f64,
     log_delta: f64,
@@ -2945,7 +2945,7 @@ pub fn sas_inverse_link_pdfthird_derivative(
 ///            + 10*Phi2*z2*z3 + 5*Phi2*z1*z4 + Phi1*z5
 ///
 /// Non-finite eta is rejected by the shared SAS finite-domain contract.
-pub fn sas_inverse_link_pdffourth_derivative(
+pub(crate) fn sas_inverse_link_pdffourth_derivative(
     eta: f64,
     epsilon: f64,
     log_delta: f64,

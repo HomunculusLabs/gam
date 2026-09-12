@@ -65,7 +65,7 @@ fn gaussian_logpdf(y: f64, mean: f64, sd: f64) -> f64 {
 /// vector per candidate, each of length `n_rows`), matching the per-candidate
 /// column layout the Python builder filled. Returns an `(n_rows, n_cand)` matrix
 /// with `−∞` wherever the candidate could not score the row.
-pub fn gaussian_log_density_table(
+pub(crate) fn gaussian_log_density_table(
     y: &[f64],
     means: &[Vec<f64>],
     lowers: &[Vec<f64>],
