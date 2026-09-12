@@ -55,7 +55,7 @@ use super::fit_drivers::GaugeOrbitDescent;
 /// then prices atoms through the SAME `rank_dof_from_grams` MP hard count as the
 /// dense path (the dense-vs-streaming parity guarantee).
 #[derive(Default)]
-pub(crate) struct StreamingRankInputs {
+pub struct StreamingRankInputs {
     pub(crate) grams: Vec<Array2<f64>>,
     pub(crate) n_eff: Vec<f64>,
 }
@@ -946,7 +946,7 @@ impl SaeManifoldTerm {
     /// Install the fitted reconstruction dispersion used by
     /// `dictionary_incoherence_report_with_dispersion`. This is a pure diagnostic scalar and
     /// does not feed any loss, criterion, penalty, or optimizer state.
-    pub(crate) fn set_certificate_dispersion(&mut self, dispersion: f64) -> Result<(), String> {
+    pub fn set_certificate_dispersion(&mut self, dispersion: f64) -> Result<(), String> {
         if !dispersion.is_finite() || dispersion <= 0.0 {
             return Err(format!(
                 "SaeManifoldTerm::set_certificate_dispersion: dispersion must be finite and positive, got {dispersion}"
@@ -1304,7 +1304,7 @@ impl SaeManifoldTerm {
     /// the exact unweighted (full-pass) path. Used by the #997 structure-search
     /// wiring to clear the internal estimation/evaluation mask off the adopted
     /// term before the payload reconstruction is read over all rows.
-    pub(crate) fn clear_row_loss_weights(&mut self) {
+    pub fn clear_row_loss_weights(&mut self) {
         self.row_loss_weights = None;
     }
 
@@ -1747,7 +1747,7 @@ impl SaeManifoldTerm {
     }
 
     /// SAC — whether the Layer-1 collapse-guard stack is armed on this term.
-    pub(crate) fn guards_enabled(&self) -> bool {
+    pub fn guards_enabled(&self) -> bool {
         self.guards_enabled
     }
 
@@ -1756,7 +1756,7 @@ impl SaeManifoldTerm {
     /// `p_x + p_y` equals the term's actual `output_dim()` (the caller must have
     /// built the atoms at the augmented width) and that its row count matches, so
     /// the descriptor cannot silently disagree with the decoders it describes.
-    pub(crate) fn set_behavior_block(
+    pub fn set_behavior_block(
         &mut self,
         block: crate::manifold::BehaviorBlock,
     ) -> Result<(), String> {
@@ -1780,7 +1780,7 @@ impl SaeManifoldTerm {
     }
 
     /// Rung-2 — the behavioral data block, if this is a two-block term.
-    pub(crate) fn behavior_block(&self) -> Option<&crate::manifold::BehaviorBlock> {
+    pub fn behavior_block(&self) -> Option<&crate::manifold::BehaviorBlock> {
         self.behavior.as_ref()
     }
 
@@ -2016,7 +2016,7 @@ impl SaeManifoldTerm {
     /// support is read through [`SupportMeasure`] so the
     /// trust scores use the same occupancy/effective-N convention as coordinate
     /// fidelity, persistence, and rank charge.
-    pub(crate) fn trust_diagnostics_report(
+    pub fn trust_diagnostics_report(
         &self,
         assignments: ArrayView2<'_, f64>,
     ) -> Result<SaeTrustDiagnostics, String> {
@@ -2911,7 +2911,7 @@ impl SaeManifoldTerm {
     ///
     /// Homogeneous coord dims (including `K == 1`) always pass, as does a
     /// heterogeneous dictionary that carries only composing penalties.
-    pub(crate) fn validate_heterogeneous_atom_compatibility(
+    pub fn validate_heterogeneous_atom_compatibility(
         &self,
         registry: Option<&AnalyticPenaltyRegistry>,
         // Retained for FFI signature stability and self-documentation. Post-F6 it
@@ -3069,7 +3069,7 @@ impl SaeManifoldTerm {
     /// assembly / step-lift branch on to decide whether the β-tier is built in
     /// the factored coordinate layout. Named to read as the question
     /// "is the factored path engaged?" at its call sites.
-    pub(crate) fn any_frame_active(&self) -> bool {
+    pub fn any_frame_active(&self) -> bool {
         self.frames_active()
     }
 
@@ -3080,7 +3080,7 @@ impl SaeManifoldTerm {
     /// equals `beta_offsets`. Distinct from [`Self::factored_border_offsets`]
     /// only in name (both compute the identical prefix sum) — this method is the
     /// one the frame transform reads, mirroring `beta_offsets` at the call site.
-    pub(crate) fn factored_beta_offsets(&self) -> Vec<usize> {
+    pub fn factored_beta_offsets(&self) -> Vec<usize> {
         self.factored_border_offsets()
     }
 
@@ -3088,7 +3088,7 @@ impl SaeManifoldTerm {
     /// Returns the active frame `U_k` (`p × r_k`) when atom `k` is framed, else
     /// the identity `I_p` (the `r_k == p`, `U_k == I_p` full-`B` special case) so
     /// the projection / lift code is uniform across a mixed dictionary.
-    pub(crate) fn frame_output_matrix(&self, atom_idx: usize) -> Array2<f64> {
+    pub fn frame_output_matrix(&self, atom_idx: usize) -> Array2<f64> {
         let atom = &self.atoms[atom_idx];
         match &atom.decoder_frame {
             Some(frame) => frame.frame().to_owned(),
@@ -3104,7 +3104,7 @@ impl SaeManifoldTerm {
     /// `U` is `I_p`, so a same-atom un-framed pair gives `I_p` (the clean full-`B`
     /// `G ⊗ I_p` collapse) and a framed/un-framed cross pair gives the rectangular
     /// `U_iᵀ` / `U_j` overlap.
-    pub(crate) fn frame_cross_factor(&self, atom_i: usize, atom_j: usize) -> Array2<f64> {
+    pub fn frame_cross_factor(&self, atom_i: usize, atom_j: usize) -> Array2<f64> {
         let ui = self.frame_output_matrix(atom_i);
         let uj = self.frame_output_matrix(atom_j);
         // `U_iᵀ U_j`: `(r_i × p) · (p × r_j)`. `fast_atb` forms `U_iᵀ U_j` directly.
@@ -4090,7 +4090,7 @@ impl SaeManifoldTerm {
         self.try_fitted_with_rho(None, true)
     }
 
-    pub(crate) fn try_fitted_for_rho(&self, rho: &SaeManifoldRho) -> Result<Array2<f64>, String> {
+    pub fn try_fitted_for_rho(&self, rho: &SaeManifoldRho) -> Result<Array2<f64>, String> {
         // Fitting reconstruction: the pure CURVED image at a specific `rho` (the
         // joint fit and the #1026 adjudication both require the uncollapsed
         // curve). Exposed for callers that need the rho-specific curved image
@@ -4386,7 +4386,7 @@ impl SaeManifoldTerm {
         )
     }
 
-    pub(crate) fn per_atom_loao_explained_variance(
+    pub fn per_atom_loao_explained_variance(
         &self,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
@@ -4457,7 +4457,7 @@ impl SaeManifoldTerm {
     /// are the fitted assignment masses for the same target the dictionary was fit
     /// against; an external corpus reuses the per-row masses the assignment
     /// produces for it upstream (passed in `amplitudes`, one column per atom).
-    pub(crate) fn amortized_encode_target(
+    pub fn amortized_encode_target(
         &self,
         targets: ArrayView2<'_, f64>,
         amplitudes: ArrayView2<'_, f64>,
@@ -4625,7 +4625,7 @@ impl SaeManifoldTerm {
     /// amplitudes `z_k` the amortized encode recovers `t` against), as an
     /// `n × K` matrix. These are the posterior assignment intensities `a_{ik}`
     /// that `Self::try_fitted_with_rho` multiplies into each atom's decoded row.
-    pub(crate) fn fitted_assignment_amplitudes(&self) -> Result<Array2<f64>, String> {
+    pub fn fitted_assignment_amplitudes(&self) -> Result<Array2<f64>, String> {
         let n = self.n_obs();
         let k_atoms = self.k_atoms();
         let mut amplitudes = Array2::<f64>::zeros((n, k_atoms));
@@ -4744,7 +4744,7 @@ impl SaeManifoldTerm {
     /// instrumentation / tests. A first-build dictionary with no usable charts, or
     /// an already-converged one whose seeds are all rejected, simply warm-starts
     /// nothing and returns 0 (the inner state is left byte-for-byte unchanged).
-    pub(crate) fn warm_start_latents_from_amortized_encoder(
+    pub fn warm_start_latents_from_amortized_encoder(
         &mut self,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
@@ -4869,7 +4869,7 @@ impl SaeManifoldTerm {
     /// penalty is counted exactly once across a pass while the per-row data,
     /// assignment-prior, and ARD terms sum naturally. `penalty_scale == 1.0`
     /// recovers the full-batch objective.
-    pub(crate) fn loss_scaled(
+    pub fn loss_scaled(
         &self,
         target: ArrayView2<'_, f64>,
         rho: &SaeManifoldRho,
@@ -5076,7 +5076,7 @@ impl SaeManifoldTerm {
         })
     }
 
-    pub(crate) fn analytic_penalty_value_total(
+    pub fn analytic_penalty_value_total(
         &self,
         registry: &AnalyticPenaltyRegistry,
         penalty_scale: f64,
@@ -5231,7 +5231,7 @@ impl SaeManifoldTerm {
     /// zero DIRECT ρ-derivative
     /// (their weights are not ρ coordinates), so the analytic outer-gradient
     /// channels are unchanged — this only restores value/gradient consistency.
-    pub(crate) fn reml_extra_penalty_value_total(
+    pub fn reml_extra_penalty_value_total(
         &self,
         registry: Option<&AnalyticPenaltyRegistry>,
     ) -> Result<f64, ArrowSchurError> {
