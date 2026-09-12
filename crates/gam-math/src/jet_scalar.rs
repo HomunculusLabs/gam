@@ -1390,6 +1390,15 @@ impl DynamicJetArena {
         self.bump.alloc_slice_fill_copy(len, 0.0)
     }
 
+    /// A fresh arena copy of `source`. A kernel whose every entry reads one
+    /// input channel at the same index starts from this copy and rewrites it
+    /// in place, so the result is written once and the inner loop runs over
+    /// whole rows (gam#2892).
+    #[inline(always)]
+    fn copy(&self, source: &[f64]) -> &mut [f64] {
+        self.bump.alloc_slice_copy(source)
+    }
+
     /// Allocate and initialize a runtime-sized slice in the arena. Row programs
     /// use this for their primary-scalar arrays so those arrays share the same
     /// reusable workspace as derivative channels.
@@ -2052,13 +2061,37 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
         let gradient = arena_vector(self.arena, dimension, |i| {
             self.v * right.g[i] + self.g[i] * right.v + addend.g[i]
         });
-        let hessian = arena_square(self.arena, dimension, |i, j, ij| {
-            self.v * right.h[ij]
-                + self.g[i] * right.g[j]
-                + self.g[j] * right.g[i]
-                + self.h[ij] * right.v
-                + addend.h[ij]
-        });
+        // Each entry evaluates the per-(i, j) formula
+        // `left.v·right.h_ij + left.g_i·right.g_j + left.g_j·right.g_i
+        //  + left.h_ij·right.v + addend.h_ij` with the same operands in the
+        // same order, so the result is bit-identical to the closure form, but
+        // the loop runs row by row over whole slices without bounds checks.
+        // The closure form was 12.7% of the flex fit's samples (gam#2892).
+        let hessian = self.arena.copy(right.h);
+        if dimension > 0 {
+            let (left_value, right_value) = (self.v, right.v);
+            for ((((row, left_h_row), addend_h_row), &left_g_i), &right_g_i) in hessian
+                .chunks_exact_mut(dimension)
+                .zip(self.h.chunks_exact(dimension))
+                .zip(addend.h.chunks_exact(dimension))
+                .zip(self.g)
+                .zip(right.g)
+            {
+                for ((((entry, &left_h), &addend_h), &left_g_j), &right_g_j) in row
+                    .iter_mut()
+                    .zip(left_h_row)
+                    .zip(addend_h_row)
+                    .zip(self.g)
+                    .zip(right.g)
+                {
+                    *entry = left_value * *entry
+                        + left_g_i * right_g_j
+                        + left_g_j * right_g_i
+                        + left_h * right_value
+                        + addend_h;
+                }
+            }
+        }
         Self {
             arena: self.arena,
             v: self.v * right.v + addend.v,
@@ -2157,7 +2190,10 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
         self.assert_compatible(o);
         let dimension = self.dimension();
         let g = arena_vector(self.arena, dimension, |i| self.g[i] + o.g[i]);
-        let h = arena_square(self.arena, dimension, |_, _, ij| self.h[ij] + o.h[ij]);
+        let h = self.arena.copy(self.h);
+        for (entry, &other) in h.iter_mut().zip(o.h) {
+            *entry += other;
+        }
         Self {
             arena: self.arena,
             v: self.v + o.v,
@@ -2171,7 +2207,10 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
         self.assert_compatible(o);
         let dimension = self.dimension();
         let g = arena_vector(self.arena, dimension, |i| self.g[i] - o.g[i]);
-        let h = arena_square(self.arena, dimension, |_, _, ij| self.h[ij] - o.h[ij]);
+        let h = self.arena.copy(self.h);
+        for (entry, &other) in h.iter_mut().zip(o.h) {
+            *entry -= other;
+        }
         Self {
             arena: self.arena,
             v: self.v - o.v,
@@ -2185,9 +2224,27 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
         self.assert_compatible(o);
         let n = self.dimension();
         let g = arena_vector(self.arena, n, |i| self.v * o.g[i] + self.g[i] * o.v);
-        let h = arena_square(self.arena, n, |i, j, ij| {
-            self.v * o.h[ij] + self.g[i] * o.g[j] + self.g[j] * o.g[i] + self.h[ij] * o.v
-        });
+        // The per-(i, j) product formula with the same operands in the same
+        // order as the closure form, row by row (see `multiply_add`).
+        let h = self.arena.copy(o.h);
+        if n > 0 {
+            let (left_value, right_value) = (self.v, o.v);
+            for (((row, left_h_row), &left_g_i), &right_g_i) in h
+                .chunks_exact_mut(n)
+                .zip(self.h.chunks_exact(n))
+                .zip(self.g)
+                .zip(o.g)
+            {
+                for (((entry, &left_h), &left_g_j), &right_g_j) in
+                    row.iter_mut().zip(left_h_row).zip(self.g).zip(o.g)
+                {
+                    *entry = left_value * *entry
+                        + left_g_i * right_g_j
+                        + left_g_j * right_g_i
+                        + left_h * right_value;
+                }
+            }
+        }
         Self {
             arena: self.arena,
             v: self.v * o.v,
@@ -2205,7 +2262,10 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
     fn scale(&self, s: f64) -> Self {
         let dimension = self.dimension();
         let g = arena_vector(self.arena, dimension, |i| self.g[i] * s);
-        let h = arena_square(self.arena, dimension, |_, _, ij| self.h[ij] * s);
+        let h = self.arena.copy(self.h);
+        for entry in h.iter_mut() {
+            *entry *= s;
+        }
         Self {
             arena: self.arena,
             v: self.v * s,
@@ -2218,9 +2278,17 @@ impl<'arena> RuntimeJetScalar<'arena> for DynamicOrder2<'arena> {
     fn compose_unary(&self, d: [f64; 5]) -> Self {
         let n = self.dimension();
         let g = arena_vector(self.arena, n, |i| d[1] * self.g[i]);
-        let h = arena_square(self.arena, n, |i, j, ij| {
-            d[1] * self.h[ij] + d[2] * self.g[i] * self.g[j]
-        });
+        // `d[1]·h_ij + (d[2]·g_i)·g_j`: the closure form's operations in its
+        // order, with `d[2]·g_i` taken once per row.
+        let h = self.arena.copy(self.h);
+        if n > 0 {
+            for (row, &g_i) in h.chunks_exact_mut(n).zip(self.g) {
+                let scaled = d[2] * g_i;
+                for (entry, &g_j) in row.iter_mut().zip(self.g) {
+                    *entry = d[1] * *entry + scaled * g_j;
+                }
+            }
+        }
         Self {
             arena: self.arena,
             v: d[0],
