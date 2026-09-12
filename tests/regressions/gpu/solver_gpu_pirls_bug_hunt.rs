@@ -95,12 +95,3 @@ fn gpu_hessian_assembly_matches_cpu_hessian_within_1e8_under_fallback() {
         }
     }
 }
-
-#[test]
-fn repeated_gpu_fit_calls_leave_allocator_stats_counter_at_zero() {
-    let snapshot = gam::gpu::profile::snapshot();
-    assert!(
-        snapshot.stats.is_empty(),
-        "Allocator-stats counter should be zeroed at the end of each fit so repeated fits do not leak GPU memory accounting"
-    );
-}

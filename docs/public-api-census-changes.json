@@ -1826,5 +1826,15 @@
     },
     "reason": "#2900 SPEC rule 6: the pub(crate) Firth problem-scale gate firth_problem_scale_allows is deleted, together with the unit test that pinned its cutoffs. A Firth fit's Tierney-Kadane refinement now runs at every problem scale through the exact design-tensor route chosen by predicted work (a1cfce3a3, 5e4a9a39b). The Jeffreys operator already has been built at every scale since 002830f8c.",
     "evidence": "At base, git grep -n -w firth_problem_scale_allows over crates, src and tests finds its declaration, one production call in gradient_hessian.rs tierney_kadane_terms (removed in this commit), comments rewritten in this commit, and the deleted unit test firth_problem_scale_gate_blocks_large_quadratic_work (declared pub(crate) fn inside reml/mod.rs mod tests, which the census counts). The removed map lists exactly the two pub(crate) fn declarations this commit deletes. Not compiled locally (user directive); compile rests on the shared tip check."
+  },
+  {
+    "base": "21c7f16b9ef33c66584676dd3cbb396c571ef2e7",
+    "removed": {
+      "crates/gam-gpu/src/profile.rs::clear": 1,
+      "crates/gam-gpu/src/profile.rs::record": 1,
+      "crates/gam-gpu/src/profile.rs::snapshot": 1
+    },
+    "reason": "#2899 group-A sweep: gam_gpu::profile::{record, snapshot, clear} were the write path and the test-only read and reset paths of a dispatch ring that no product reads. They are deleted with the module.",
+    "evidence": "public_api_census.py --base fd9798b80 --head f9bce8b7f reports exactly these three identities (/scratch.global/sauer354/pool/prune-api-a/slice9.census.json). Callers at the base: record at linalg_dispatch.rs:600, and snapshot/clear only in two root regression tests."
   }
 ]

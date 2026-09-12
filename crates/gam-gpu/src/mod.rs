@@ -31,7 +31,6 @@ pub mod numerics_device;
 pub mod numerics_host;
 pub mod policy;
 pub mod pool;
-pub mod profile;
 pub mod solver;
 
 // Domain-specific GPU kernels are isolated from the infrastructure modules.
@@ -46,7 +45,6 @@ pub use dictionary_score::{
 pub use gpu_error::GpuError;
 pub use policy::{GpuDispatchPolicy, GpuMixedPrecisionPolicy};
 pub use pool::{balanced_partition, scatter_batched};
-pub use profile::{KernelStat, KernelStatsSnapshot};
 
 // ---------------------------------------------------------------------------
 // User-facing policy and instrumentation hooks (formerly src/gpu.rs).

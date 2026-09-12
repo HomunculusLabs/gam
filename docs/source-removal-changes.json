@@ -4641,5 +4641,36 @@
     ],
     "reason": "#2900 SPEC rule 6: firth_problem_scale_allows returned a zero Tierney-Kadane correction above n = 20,000, p = 256, n*p = 2e6 or n*p^2 = 1e8, so a Firth fit's REML objective changed at a data-size window. The TK value, gradient and rho-Hessian now have an exact design-tensor route chosen by predicted work (a1cfce3a3, 5e4a9a39b), and 002830f8c already built the Jeffreys operator at every scale. The gate, its four cutoff constants and the unit test that pinned those cutoffs are deleted.",
     "evidence": "At base, git grep -n -w over crates, src and tests finds firth_problem_scale_allows only at its declaration in crates/gam-solve/src/reml/mod.rs, its one remaining production call in tierney_kadane_terms (crates/gam-solve/src/reml/gradient_hessian.rs, removed here), three comments in gradient_hessian.rs (rewritten here) and the unit test (deleted here). The four FIRTH_MAX_* constants are named only inside firth_problem_scale_allows and in comments in gradient_hessian.rs that this change rewrites. Not compiled locally (user directive); compile rests on the shared tip check."
+  },
+  {
+    "base": "21c7f16b9ef33c66584676dd3cbb396c571ef2e7",
+    "items": [
+      "crates/gam-gpu/src/profile.rs:const:MAX_STATS",
+      "crates/gam-gpu/src/profile.rs:const:PER_THREAD",
+      "crates/gam-gpu/src/profile.rs:const:RING_BLOCK",
+      "crates/gam-gpu/src/profile.rs:const:THREADS",
+      "crates/gam-gpu/src/profile.rs:fn:a_rings_capacity_drops_the_oldest_attempt",
+      "crates/gam-gpu/src/profile.rs:fn:claim",
+      "crates/gam-gpu/src/profile.rs:fn:claimed",
+      "crates/gam-gpu/src/profile.rs:fn:clear",
+      "crates/gam-gpu/src/profile.rs:fn:clear_empties_every_ring_and_recording_resumes",
+      "crates/gam-gpu/src/profile.rs:fn:every_thread_dispatch_reaches_one_snapshot",
+      "crates/gam-gpu/src/profile.rs:fn:exclusive",
+      "crates/gam-gpu/src/profile.rs:fn:new",
+      "crates/gam-gpu/src/profile.rs:fn:record",
+      "crates/gam-gpu/src/profile.rs:fn:snapshot",
+      "crates/gam-gpu/src/profile.rs:fn:stat",
+      "crates/gam-gpu/src/profile.rs:static:EXCLUSIVE",
+      "crates/gam-gpu/src/profile.rs:static:RING",
+      "crates/gam-gpu/src/profile.rs:static:RING_ARENA",
+      "crates/gam-gpu/src/profile.rs:struct:KernelStat",
+      "crates/gam-gpu/src/profile.rs:struct:KernelStatsSnapshot",
+      "crates/gam-gpu/src/profile.rs:struct:RingArena",
+      "crates/gam-gpu/src/profile.rs:type:DispatchRing",
+      "tests/regressions/gpu/gpu_bug_hunt_runtime_driver_diagnostics_memory.rs:fn:diagnostics_counters_increment_on_every_dispatch_and_reset_clears_them",
+      "tests/regressions/gpu/solver_gpu_pirls_bug_hunt.rs:fn:repeated_gpu_fit_calls_leave_allocator_stats_counter_at_zero"
+    ],
+    "reason": "#2899 group-A public-surface sweep: delete the gam-gpu dispatch profile ring. try_fast_ab wrote a KernelStat on every dense-product dispatch attempt into a per-thread ring (record, RingArena, RING, RING_ARENA, DispatchRing), and no product reads it: no production code in any crate calls profile::snapshot or profile::clear. The only readers were two root regression tests that assert on the ring itself (dispatch appends and clear empties; the ring is empty) and three in-module tests of the ring invariants. The deleted module doc records that this recording once took 19.5% of a #979 run under a global mutex. Even per-thread it still paid a lock per dispatch. The module, its re-export, its tests and the two root tests are deleted. try_fast_ab now resolves its runtime only in the Linux arm, exactly as try_fast_atb does.",
+    "evidence": "At fd9798b80, git grep -n over crates, src, examples, tests and gamfit for profile::record, profile::snapshot, profile::clear, KernelStat and KernelStatsSnapshot finds only the record call at linalg_dispatch.rs:600, the mod.rs pub use, and tests/regressions/gpu/gpu_bug_hunt_runtime_driver_diagnostics_memory.rs:40-49 and solver_gpu_pirls_bug_hunt.rs:101. The item list is source_removal_guard.py --base fd9798b80 --head f9bce8b7f (/scratch.global/sauer354/pool/prune-api-a/slice9.srg.out). The compile check is the lead shared tip check."
   }
 ]

@@ -590,29 +590,13 @@ pub fn try_fast_ab(a: ArrayView2<'_, f64>, b: ArrayView2<'_, f64>) -> Option<Arr
     if m == 0 || n == 0 || k == 0 {
         return decline_gpu("A·B", "the workload has an empty dimension");
     }
-    // Record every dispatch attempt — including ones that fall back to CPU
-    // because either the runtime is unavailable or the workload is below
-    // policy threshold. The diagnostics snapshot is what downstream telemetry
-    // uses to attribute CPU vs GPU time, so it must reflect *attempts*, not
-    // just successful device launches.
-    let runtime = route_through_gpu(DispatchOp::Gemm { m, n, k });
-    let used_gpu = runtime.is_some();
-    super::profile::record(super::profile::KernelStat {
-        name: "try_fast_ab",
-        n: m,
-        p: n,
-        k,
-        flops_est: (DispatchOp::Gemm { m, n, k }.flops().min(usize::MAX as u128)) as usize,
-        gpu_ms: if used_gpu { Some(0.0) } else { None },
-        ..Default::default()
-    });
     #[cfg(not(target_os = "linux"))]
     {
         decline_gpu("A·B", "the CUDA backend is not compiled on this platform")
     }
     #[cfg(target_os = "linux")]
     {
-        let runtime = runtime?;
+        let runtime = route_through_gpu(DispatchOp::Gemm { m, n, k })?;
         Some(complete_gpu_attempt(
             "A·B",
             cuda_backend::gemm(runtime, a, b, false, false),

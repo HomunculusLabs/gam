@@ -1,5 +1,4 @@
 use gam::gpu::{self, GpuEligibility, GpuKernel, GpuRuntime};
-use ndarray::Array2;
 use std::thread;
 
 #[test]
@@ -33,24 +32,6 @@ fn gpu_policy_auto_falls_back_to_cpu_when_runtime_is_unavailable_and_sets_cpu_re
             "available eligible runtime must select GPU"
         );
     }
-}
-
-#[test]
-fn diagnostics_counters_increment_on_every_dispatch_and_reset_clears_them() {
-    gam::gpu::profile::clear();
-    let a = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).expect("shape");
-    drop(gam::gpu::try_fast_ab(a.view(), a.view()));
-    let after_dispatch = gam::gpu::profile::snapshot();
-    assert!(
-        !after_dispatch.stats.is_empty(),
-        "dispatch diagnostics counter should increment for every dispatch attempt"
-    );
-    gam::gpu::profile::clear();
-    let after_reset = gam::gpu::profile::snapshot();
-    assert!(
-        after_reset.stats.is_empty(),
-        "reset should clear all diagnostics counters"
-    );
 }
 
 #[test]
