@@ -18,8 +18,7 @@
 //! The original fixture used
 //!   mu*(x)    = sin(x),
 //!   sigma*(x) = 0.15 + 0.1*cos(x),
-//! and gam lost the mu channel to gamlss by 2.4x. That gap is very largely an
-//! artifact of the REFERENCE's penalty, not of gam.
+//! and gam lost the mu channel to gamlss by 2.4x.
 //!
 //! `gamlss::pbc()` builds its second-order circular difference operator with the
 //! stencil `c(-1, 2*cos(2*pi/n), -1)` (see `gamlss:::pbc`, the `sin = TRUE`
@@ -28,26 +27,28 @@
 //! rather than the constant: as lambda grows, a pbc fit converges onto a 2-df
 //! pure first-harmonic model instead of onto a constant. Measured on this
 //! fixture, pbc selects `mu.df = 2.004` on every one of 25 seeds and leaves
-//! 8e-7 of energy above mode 1.
+//! 8e-7 of energy above mode 1. `mu*(x) = sin(x)` IS that null space (its
+//! amplitude above k=1 is 5e-17).
 //!
-//! `mu*(x) = sin(x)` IS that null space (its amplitude above k=1 is 5e-17), so on
-//! the original truth the "mature reference" is an oracle-parametric model with
-//! no approximation bias and ~2 parameters of variance. No general-purpose
-//! cyclic smoother can match that, and matching it is not a quality claim about
-//! gam. Paired over 25 seeds, gamlss's mu advantage is 1.832x on that truth and
-//! 1.063x once the truth carries content above the fundamental; against
-//! `mgcv gaulss` (a general cyclic location-scale smoother, no null-space
-//! advantage) gam is 3.2% / 9.0% behind.
+//! gam's cyclic roughness used to be the plain derivative seminorm `∮(f'')²`,
+//! which charges the fundamental, so the fundamental arm compared a smoother
+//! against a model whose null space is the truth. Paired over 25 seeds before
+//! the change, gamlss's mu advantage was 1.832x on that truth and 1.063x once
+//! the truth carries content above the fundamental (commit `e9fa87f5f`); against
+//! `mgcv gaulss`, whose `bs="cc"` penalty also charges the fundamental, gam was
+//! 3.2% / 9.0% behind. Since `7ebbacd3d` gam's cyclic roughness is the harmonic
+//! seminorm `∮(f'' + ω²(f − f̄))²`, whose null space is `{1, sin, cos}`, with its
+//! own ridge shrinking that null component. Both engines now leave the
+//! fundamental unpenalized, so the fundamental arm is a like-for-like
+//! comparison.
 //!
-//! The same mechanism predicts the SIGN of the other channel of this same test:
-//! `log sigma*(x) = log(0.15 + 0.1 cos x)` is a nonlinear function of a
+//! The derivative-roughness mechanism also predicted the SIGN of the other
+//! channel: `log sigma*(x) = log(0.15 + 0.1 cos x)` is a nonlinear function of a
 //! fundamental, so it carries cos2 = -0.146, cos3 = +0.037, ... — 11% of its
-//! energy above k=1, outside pbc's null space — and gam WINS that channel.
+//! energy above k=1, outside pbc's null space — and gam won that channel.
 //!
-//! So this test runs BOTH truths. The ORIGINAL arm is kept (a loss that is
-//! understood is worth more than a loss that is deleted); the ABOVE-FUNDAMENTAL
-//! arm is the one that measures cyclic smoothing rather than a null-space
-//! coincidence. Full measurement: issue #1561, commit `e9fa87f5f`.
+//! So this test runs BOTH truths: a pure fundamental, and a truth carrying
+//! content above the fundamental, which no cyclic penalty's null space contains.
 //!
 //! PAIRED over seeds, not one draw (#2395)
 //! ---------------------------------------
@@ -448,10 +449,9 @@ fn run_cyclic_location_scale_arm(truth: Truth) {
 
     // MATCH-OR-BEAT on the JOINT location-scale object, paired across the K shared
     // noise draws. See the header: the two engines trade error between the mean and
-    // the log-scale block, and on the `fundamental` truth gamlss's mu arm is an
-    // oracle for a reason that has nothing to do with estimation quality. Measured
-    // paired effect: -0.118 (fundamental) / -0.066 (above-fundamental), both
-    // resolved in gam's favour.
+    // the log-scale block. Measured paired effect before the harmonic cyclic
+    // roughness (`7ebbacd3d`): -0.118 (fundamental) / -0.066 (above-fundamental),
+    // both resolved in gam's favour.
     assert_paired_match_or_beat(&format!("cyclic_ls::{label}::joint"), &joint_panel, 1.10);
 }
 
