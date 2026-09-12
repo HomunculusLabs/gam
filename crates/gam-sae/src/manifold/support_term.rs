@@ -1195,6 +1195,17 @@ impl SaeSupportSparseTerm {
         self.assignment.n_obs()
     }
 
+    /// The smallest decrease of the penalized objective that is a measured descent
+    /// rather than two roundings of one number (#2634). `penalized_objective` sums
+    /// `n_obs · output_dim` residual cells plus the penalty blocks, so its
+    /// resolution is `√cells · EPSILON · |f|`. Installing a state that a smaller
+    /// "decrease" bought is motion the loop manufactures and then refuses to
+    /// certify.
+    fn objective_descent_resolution(&self, objective: f64) -> f64 {
+        let cells = (self.n_obs() * self.output_dim()).max(1) as f64;
+        cells.sqrt() * f64::EPSILON * objective.abs()
+    }
+
     /// Intensive iterate scale paired with the componentwise curvature-scaled
     /// stationarity residual. Every installed active coordinate and decoder
     /// coefficient participates; non-finite state is a typed refusal.
@@ -6785,7 +6796,7 @@ impl SaeSupportSparseTerm {
                             Ok(_) => {
                                 let after = moved
                                     .penalized_objective(target, lambda_smooth, ard_precisions)?;
-                                if after < objective {
+                                if objective - after > self.objective_descent_resolution(objective) {
                                     log::info!(
                                         "support move accepted at cycle {iteration}: objective \
                                          {objective:.6e} -> {after:.6e}"
@@ -6922,7 +6933,7 @@ impl SaeSupportSparseTerm {
                                     lambda_smooth,
                                     ard_precisions,
                                 )?;
-                                if after < objective {
+                                if objective - after > self.objective_descent_resolution(objective) {
                                     log::info!(
                                         "plateau support move accepted at cycle {iteration}: \
                                          objective {objective:.6e} -> {after:.6e}"
@@ -6981,7 +6992,7 @@ impl SaeSupportSparseTerm {
                         lambda_smooth,
                         ard_precisions,
                     )?;
-                    if extrapolated < objective {
+                    if objective - extrapolated > self.objective_descent_resolution(objective) {
                         accepted_extrapolations += 1;
                         taken_step.extend_from_slice(&proposal);
                         std::mem::swap(&mut fitted_state, &mut trial_fitted);
