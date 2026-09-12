@@ -4,7 +4,7 @@
 
 use super::*;
 
-pub struct VarianceJet {
+pub(crate) struct VarianceJet {
     pub v: f64,
     pub v1: f64,
     pub v2: f64,
@@ -753,7 +753,7 @@ pub(crate) fn observed_weight_negative_binomial_log(
 /// independent of the link function. It is used by `observed_weight_dispatch`
 /// to select closed-form weight specializations.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum WeightFamily {
+pub(crate) enum WeightFamily {
     Gaussian,
     Binomial,
     Poisson,
@@ -768,7 +768,7 @@ pub enum WeightFamily {
 /// Identifies the link function for selecting closed-form weight
 /// specializations in `observed_weight_dispatch`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WeightLink {
+pub(crate) enum WeightLink {
     Log,
     /// Any other link — falls back to the generic noncanonical formula.
     Other,
@@ -866,7 +866,7 @@ pub(crate) fn observed_weight_dispatch(
 }
 
 #[derive(Clone)]
-pub enum DirectionalWorkingCurvature {
+pub(crate) enum DirectionalWorkingCurvature {
     /// Directional derivative of the PIRLS curvature when the working
     /// curvature is diagonal in observation space:
     ///   W_τ = diag(w_τ).

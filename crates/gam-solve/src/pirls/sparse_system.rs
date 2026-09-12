@@ -3,7 +3,7 @@
 
 use super::*;
 
-pub struct SparsePirlsDecision {
+pub(crate) struct SparsePirlsDecision {
     pub path: PirlsLinearSolvePath,
     pub reason: &'static str,
     pub p: usize,

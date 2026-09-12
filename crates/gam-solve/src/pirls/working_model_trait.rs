@@ -272,7 +272,7 @@ pub(crate) struct IntegratedWorkingInput<'a> {
     pub sas_link_state: Option<&'a SasLinkState>,
 }
 
-pub struct WorkingDerivativeBuffersMut<'a> {
+pub(crate) struct WorkingDerivativeBuffersMut<'a> {
     pub(crate) c: &'a mut Array1<f64>,
     pub(crate) d: &'a mut Array1<f64>,
     pub(crate) dmu_deta: &'a mut Array1<f64>,
