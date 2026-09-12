@@ -114,62 +114,6 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
         crate::coefficient_cost::joint_coupled_operator_aware_hessian_cost(self.n as u64, specs)
     }
 
-    fn outer_derivative_policy(
-        &self,
-        specs: &[ParameterBlockSpec],
-        psi_dim: usize,
-        options: &BlockwiseFitOptions,
-    ) -> crate::custom_family::OuterDerivativePolicy {
-        use crate::custom_family::OuterDerivativePolicy;
-
-        let capability = self.exact_outer_derivative_order(specs, options);
-        let rho_dim = specs
-            .iter()
-            .map(|spec| spec.penalties.len() as u128)
-            .sum::<u128>();
-        let k = rho_dim.saturating_add(psi_dim as u128).max(1);
-
-        let predicted_hessian_work = if !self.flex_active() && !self.flex_timewiggle_active() {
-            // Rigid survival marginal-slope evaluates outer rho/psi
-            // coordinate corrections and projected logdet traces through
-            // row-kernel/HVP paths.  The projected subspace trace reductions
-            // are batched in `reml::reml_outer_engine`, so the shared X·U_S work is
-            // paid once per derivative group rather than once per coordinate.
-            // Model the work that actually executes: one row-kernel pass per
-            // outer coordinate and coefficient axis, plus the fixed four
-            // primary survival channels.
-            let p_total = specs
-                .iter()
-                .map(|spec| spec.design.ncols() as u128)
-                .sum::<u128>();
-            (self.n as u128)
-                .saturating_mul(k)
-                .saturating_mul(p_total.saturating_add(N_PRIMARY as u128))
-        } else {
-            // Flex/time-wiggle survival paths have higher-order dynamic-q
-            // row geometry. Keep the generic dense policy there until those
-            // paths have their own measured row-work model.
-            let (gradient_work, hessian_work) =
-                crate::custom_family::default_outer_derivative_policy_costs(
-                    specs,
-                    psi_dim,
-                    self.coefficient_gradient_cost(specs),
-                    self.coefficient_hessian_cost(specs),
-                );
-            return OuterDerivativePolicy {
-                capability,
-                predicted_gradient_work: gradient_work,
-                predicted_hessian_work: hessian_work,
-            };
-        };
-
-        OuterDerivativePolicy {
-            capability,
-            predicted_gradient_work: predicted_hessian_work / 2,
-            predicted_hessian_work,
-        }
-    }
-
     fn exact_newton_joint_psi_workspace_for_first_order_terms(&self) -> bool {
         true
     }

@@ -1527,10 +1527,7 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
     // joint Hessian (hazard multipliers depend on current β); the
     // Wood-Fasiolo PSD invariant that justifies EFS fails here, so
     // disable fixed-point at plan time.
-    let outer_policy = {
-        let psi_dim = setup.theta0().len() - setup.rho_dim();
-        initial_family.outer_derivative_policy(&initial_blocks, psi_dim, options)
-    };
+    let outer_policy = initial_family.outer_derivative_policy(&initial_blocks, options);
     let exact_spatial_outer_tol = kappa_options_ref.rel_tol;
     let solved = optimize_spatial_length_scale_exact_joint(
         data,

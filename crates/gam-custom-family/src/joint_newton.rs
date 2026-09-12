@@ -1160,17 +1160,9 @@ pub fn custom_family_outer_derivatives<F: CustomFamily + ?Sized>(
 ) -> (gam_problem::Derivative, gam_problem::DeclaredHessianForm) {
     use gam_problem::{DeclaredHessianForm, Derivative};
 
-    // The capability-vs-policy split: capability tells us *what the family
-    // can compute*; policy tells us *what we should ask for at this size*.
-    //
-    // For the outer-strategy declaration here we have only `specs` and
-    // `options` (no resolved psi_dim), so policy is queried at
-    // psi_dim = 0 — the gradient/Hessian forms returned here are the
-    // pre-psi declarations consumed by the outer planner ladder. The
-    // per-iter clamp in `optimize_spatial_length_scale_exact_joint`
-    // consults `outer_derivative_policy` again with the realized
-    // psi_dim for the κ optimizer.
-    let policy = family.outer_derivative_policy(specs, 0, options);
+    // The outer declaration follows the family's capability: what it can
+    // compute analytically, whatever the problem size.
+    let policy = family.outer_derivative_policy(specs, options);
     let gradient = if policy.capability.has_gradient() {
         Derivative::Analytic
     } else {

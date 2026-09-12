@@ -2382,18 +2382,16 @@ pub fn fit_custom_family_with_rho_prior<F: CustomFamily + Clone + Send + Sync + 
     let n_rho = rho0.len();
     let (cap_gradient, cap_hessian) =
         custom_family_outer_derivatives(family, specs, &outer_options);
-    let derivative_policy = family.outer_derivative_policy(specs, 0, &outer_options);
+    let derivative_policy = family.outer_derivative_policy(specs, &outer_options);
     let hessian = cap_hessian;
     let need_outer_hessian = hessian.is_analytic();
     log::info!(
-        "[OUTER] custom family derivative-policy: n_params={} gradient={:?} hessian={:?} capability={:?} requested_outer_hessian={} predicted_gradient_work={} predicted_hessian_work={} inner_hvp_available={} outer_hvp_available={} outer_dense_available={}",
+        "[OUTER] custom family derivative-policy: n_params={} gradient={:?} hessian={:?} capability={:?} requested_outer_hessian={} inner_hvp_available={} outer_hvp_available={} outer_dense_available={}",
         n_rho,
         cap_gradient,
         hessian,
         derivative_policy.capability,
         need_outer_hessian,
-        derivative_policy.predicted_gradient_work,
-        derivative_policy.predicted_hessian_work,
         family.inner_coefficient_hessian_hvp_available(specs),
         family.outer_hyper_hessian_hvp_available(specs),
         family.outer_hyper_hessian_dense_available(specs),

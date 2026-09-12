@@ -2239,8 +2239,6 @@ pub(super) fn run_two_block_exact_joint_optimize(
     let noise_terms = spatial_length_scale_term_indices(noisespec);
     let policy = gam_model_api::families::custom_family::OuterDerivativePolicy {
         capability: gam_problem::ExactOuterDerivativeOrder::Second,
-        predicted_hessian_work: 0,
-        predicted_gradient_work: 0,
     };
     optimize_spatial_length_scale_exact_joint(
         data,

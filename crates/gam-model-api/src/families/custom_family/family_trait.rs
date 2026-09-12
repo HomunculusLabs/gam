@@ -14,7 +14,7 @@ use crate::families::custom_family::options::{
     assert_block_local_beta_direction, assert_block_local_eta_direction,
     assert_blockstates_are_a_point, assert_hyper_layout_matches_specs, assert_psi_index_in_layout,
     assert_rho_matches_specs, assert_states_match_specs, assert_valid_blockspecs,
-    assert_valid_options, default_coefficient_hessian_cost, default_outer_derivative_policy_costs,
+    assert_valid_options, default_coefficient_hessian_cost,
     exact_outer_order_with_outer_hvp, validate_hessian_workspace_ready,
 };
 use crate::families::custom_family::psi_design::{
@@ -521,35 +521,15 @@ pub trait CustomFamily {
         )
     }
 
-    /// Realized outer-derivative policy at the current problem size.
-    ///
-    /// Combines the capability query [`Self::exact_outer_derivative_order`]
-    /// with predicted per-eval costs from [`Self::coefficient_gradient_cost`] /
-    /// [`Self::coefficient_hessian_cost`] and the joint outer-coordinate
-    /// dimension `rho_dim + psi_dim`. Capability decides derivative order;
-    /// predicted costs inform dense/operator routing and staged κ schedules.
-    ///
-    /// Families with non-generic cost models (Khatri–Rao CTN, matrix-free
-    /// HVP families, marginal-slope row-third workloads) should override
-    /// this directly and set the `predicted_*_work` fields from their own
-    /// cost model. The default uses the generic
-    /// `n × (rho_dim + psi_dim) × p_total` shape via
-    /// [`default_outer_derivative_policy_costs`].
+    /// Realized outer-derivative policy: the capability query
+    /// [`Self::exact_outer_derivative_order`], wrapped for the outer planner.
     fn outer_derivative_policy(
         &self,
         specs: &[ParameterBlockSpec],
-        psi_dim: usize,
         options: &BlockwiseFitOptions,
     ) -> OuterDerivativePolicy {
-        let capability = self.exact_outer_derivative_order(specs, options);
-        let grad_cost = self.coefficient_gradient_cost(specs);
-        let hess_cost = self.coefficient_hessian_cost(specs);
-        let (predicted_gradient_work, predicted_hessian_work) =
-            default_outer_derivative_policy_costs(specs, psi_dim, grad_cost, hess_cost);
         OuterDerivativePolicy {
-            capability,
-            predicted_gradient_work,
-            predicted_hessian_work,
+            capability: self.exact_outer_derivative_order(specs, options),
         }
     }
 

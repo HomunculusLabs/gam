@@ -235,53 +235,6 @@ impl CustomFamily for TransformationNormalFamily {
         self.coefficient_hessian_cost(specs) / 2
     }
 
-    fn outer_derivative_policy(
-        &self,
-        specs: &[crate::custom_family::ParameterBlockSpec],
-        psi_dim: usize,
-        options: &crate::custom_family::BlockwiseFitOptions,
-    ) -> crate::custom_family::OuterDerivativePolicy {
-        // The generic default model in `CustomFamily::outer_derivative_policy`
-        // uses `coefficient_hessian_cost × (rho_dim + psi_dim)`, which
-        // overstates CTN's actual per-eval Hessian work because the SCOP
-        // joint-Hessian path is row-streaming through the Khatri-Rao jet
-        // (its `O(n · p)` matrix-free HVP, not `O(n · p²)` dense build).
-        // Use a CTN-specific shape:
-        //
-        // * gradient ≈ `n · (rho_dim + psi_dim) · p_total`
-        //   (one directional jet sweep per outer coordinate, row-streamed)
-        // * Hessian  ≈ min(dense build, matrix-free HVP loop)
-        //   * dense  ≈ `n · (rho_dim + psi_dim) · p_total^2`
-        //   * mfree  ≈ `n · (rho_dim + psi_dim) · p_total · rho_dim`
-        let capability = self.exact_outer_derivative_order(specs, options);
-        let n = specs.first().map_or(0u128, |s| s.design.nrows() as u128);
-        let p_total: u128 = specs
-            .iter()
-            .map(|s| s.design.ncols() as u128)
-            .fold(0u128, |acc, x| acc.saturating_add(x));
-        let rho_dim: u128 = specs
-            .iter()
-            .map(|s| s.penalties.len() as u128)
-            .fold(0u128, |acc, x| acc.saturating_add(x));
-        let k = rho_dim.saturating_add(psi_dim as u128).max(1);
-        let p_eff = p_total.max(1);
-        // Gradient work: one row sweep per outer coordinate.
-        let work_grad = n.saturating_mul(k).saturating_mul(p_eff);
-        // Hessian work: pick whichever access shape would dominate. The
-        // amortization gate in `should_build_dense` (P2.2) picks the
-        // cheaper path at execution time; the policy budget mirrors that
-        // by taking the min so that genuinely Hessian-prohibitive
-        // problems still downgrade through the budget ceiling.
-        let dense_hess = work_grad.saturating_mul(p_eff);
-        let mfree_hess = work_grad.saturating_mul(rho_dim.max(1));
-        let work_hess = dense_hess.min(mfree_hess);
-        crate::custom_family::OuterDerivativePolicy {
-            capability,
-            predicted_hessian_work: work_hess,
-            predicted_gradient_work: work_grad,
-        }
-    }
-
     fn outer_seed_config(&self, n_params: usize) -> gam_solve::seeding::SeedConfig {
         gam_solve::seeding::SeedConfig {
             bounds: (-12.0, 12.0),

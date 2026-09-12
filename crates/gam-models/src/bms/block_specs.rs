@@ -2805,10 +2805,7 @@ pub(crate) fn fit_bernoulli_marginal_slope_terms(
     // joint Hessian: EFS/HybridEFS fixed-point structural invariant fails,
     // so we disable fixed-point at plan time rather than burning cycles on
     // a stalled first attempt that silently falls back.
-    let outer_policy = {
-        let psi_dim = setup.theta0().len() - setup.rho_dim();
-        initial_family.outer_derivative_policy(&initial_blocks, psi_dim, options)
-    };
+    let outer_policy = initial_family.outer_derivative_policy(&initial_blocks, options);
     let exact_spatial_outer_tol = kappa_options_ref.rel_tol;
     let solved = optimize_spatial_length_scale_exact_joint(
         data_view,

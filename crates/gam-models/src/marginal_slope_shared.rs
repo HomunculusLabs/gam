@@ -900,9 +900,9 @@ pub struct AutoOuterKChoice {
 /// work cap beyond `K ≤ n`.
 ///
 /// Calibration recipe: from a profiled run,
-///     outer_work_per_k_unit = predicted_gradient_work / K.
+///     outer_work_per_k_unit = predicted outer-gradient work / K.
 /// For the large-scale survival marginal-slope reference
-/// (predicted_gradient_work ≈ 4.33×10⁹ at K=19_661), this gives
+/// (predicted outer-gradient work ≈ 4.33×10⁹ at K=19_661), this gives
 /// ~220_000; that family uses 250_000 as a conservative upper bound. With
 /// `AUTO_OUTER_WORK_BUDGET = 5×10⁸` that caps K at ~2_000.
 ///

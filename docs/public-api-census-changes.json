@@ -2434,5 +2434,14 @@
     },
     "reason": "#2829 product-root rule: the #2629 soft rho-guard floor classifier had no production caller. Only tests in gam-custom-family, gam-models and gam-sae called these functions. The lead ruled out a cfg(feature) quarantine because the root build.rs ban scanner rejects it, and the emission reaches pub(crate) atoms, so no test-support crate could carry it without widening production API.",
     "evidence": "At the base, git grep -w over crates, src, tests, examples, bench and benches names classify_soft_rho_guard_floor, soft_rho_guard_emission_at, SoftRhoGuardFloor::is_absent and is_carried only in soft_rho_guard_floor.rs and the #2629 test modules. SoftRhoGuardFloor::summary is called only by those tests. MSI validation was unavailable (auth breaker set), so the identities follow public_api_census.py's explicit-pub-fn rule as read at this base."
+  },
+  {
+    "base": "7874a4a71badd487fef89054d8bf1965dd752fb5",
+    "removed": {
+      "crates/gam-model-api/src/families/custom_family/options.rs::default_outer_derivative_policy_costs": 1,
+      "crates/gam-model-api/src/families/custom_family/options.rs::outer_coord_dim_for_policy": 1
+    },
+    "reason": "#2897, SPEC rules 23 and 25. These two functions built the predicted work fields of OuterDerivativePolicy. After 7fbdcd955 no decision read those fields, only a log line, so the fields and their cost model are removed.",
+    "evidence": "At base 45e58748, git grep -n -w default_outer_derivative_policy_costs over crates, src, tests, examples and python finds its declaration, the family_trait.rs import and doc, the trait default, bms and survival marginal slope; this change removes all of them. outer_coord_dim_for_policy is called only by default_outer_derivative_policy_costs. No gam-cli, gam-pyffi, python or examples code names either."
   }
 ]

@@ -3174,20 +3174,10 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
             // for hundreds of seconds before the runner falls back.
             let gamlss_disable_fixed_point = true;
             let outer_policy = {
-                // GAMLSS spatial path: psi_dim = log_kappa_dim + auxiliary_dim,
-                // matching the (theta_dim - rho_dim) decomposition the
-                // optimizer uses internally. Build realized ParameterBlockSpecs
-                // at the seed rho so the family's own cost model — which
-                // multiplies coefficient-gradient / coefficient-Hessian
-                // per-row cost by the joint outer-coordinate dimension and
-                // total p — produces honest `predicted_*_work` estimates.
-                // Previously this fed `predicted_*_work: 0` to the planner,
-                // which then ungated dense outer Hessian work that costs
-                // hundreds of seconds per eval at large scale (see
-                // `OuterDerivativePolicy::OUTER_HESSIAN_WORK_BUDGET`).
+                // Realize the blocks at the seed rho so the family reports its
+                // capability on the realized designs.
                 let theta_seed = joint_setup.theta0();
                 let rho_dim = joint_setup.rho_dim();
-                let psi_dim = theta_seed.len() - rho_dim;
                 let rho_seed = theta_seed.slice(s![..rho_dim]).to_owned();
                 let policy_blocks_res = builder.build_blocks(
                     &rho_seed,
@@ -3203,18 +3193,13 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                         crate::custom_family::CustomFamily::outer_derivative_policy(
                             &policy_family,
                             &policy_blocks,
-                            psi_dim,
                             options,
                         )
                     }
                     Err(err) => {
                         // Block construction at the seed should not fail for
                         // any in-tree family, but if it does, fall back to a
-                        // policy that names the capability honestly and
-                        // declines to predict cost. Setting work to
-                        // `u128::MAX` routes the planner through gradient-only
-                        // BFGS (the universal Hessian-work budget is
-                        // saturating, so a sentinel is fine here).
+                        // policy that names the capability honestly.
                         log::warn!(
                             "[GAMLSS spatial] failed to realize policy blocks at seed rho ({err}); \
                              routing outer optimizer through gradient-only BFGS"
@@ -3226,8 +3211,6 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                         };
                         crate::custom_family::OuterDerivativePolicy {
                             capability,
-                            predicted_gradient_work: u128::MAX,
-                            predicted_hessian_work: u128::MAX,
                         }
                     }
                 };

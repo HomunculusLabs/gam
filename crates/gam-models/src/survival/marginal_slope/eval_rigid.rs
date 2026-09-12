@@ -101,7 +101,7 @@ impl SurvivalMarginalSlopeFamily {
             "survival-mgs",
             // Per-K work-unit cost for the survival marginal-slope outer
             // gradient kernel. Calibrated from the large-scale repro
-            // (n=195_780, K=19_661, predicted_gradient_work ≈ 4.33×10⁹):
+            // (n=195_780, K=19_661, predicted outer-gradient work ≈ 4.33×10⁹):
             //   per_K-unit cost ≈ 4.33e9 / 19_661 ≈ 220_000 units.
             // With `AUTO_OUTER_WORK_BUDGET = 5×10⁸`, this caps
             //   K_work ≈ 5e8 / 250_000 ≈ 2_000,

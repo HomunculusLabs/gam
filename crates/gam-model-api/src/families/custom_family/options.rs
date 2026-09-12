@@ -292,37 +292,26 @@ pub fn exact_outer_order_with_outer_hvp(
     }
 }
 
-/// Realized outer-derivative policy at the current problem size.
+/// Realized outer-derivative policy: the family's capability, wrapped for the
+/// outer planner.
 ///
 /// Capability (the family can produce exact second-order calculus) controls
-/// whether the Hessian is declared. Runtime cost controls only representation
-/// and staging choices below this layer. Large problems must stay on the exact
-/// analytic Hessian path and use an operator representation when dense assembly
-/// is too expensive; they are not demoted to first-order BFGS here.
+/// whether the Hessian is declared. Problem size selects only representation
+/// below this layer. Large problems stay on the exact analytic Hessian path and
+/// use an operator representation when dense assembly is too expensive; they
+/// are not demoted to first-order BFGS here.
 ///
-/// `OuterDerivativePolicy` records the family's *capability*, the *predicted
-/// per-eval cost* for both gradient-only and Hessian paths, and exposes the
-/// two policy queries the outer optimizer actually needs:
+/// `OuterDerivativePolicy` exposes the two policy queries the outer optimizer
+/// needs:
 ///
 /// * [`order_for_evaluation`](Self::order_for_evaluation) — clamp a requested
 ///   evaluation order against the policy gate.
 /// * [`declared_hessian_form`](Self::declared_hessian_form) — what shape the
 ///   outer-strategy planner should declare to its plan ladder.
-///
-/// The cost model is the family's own `coefficient_gradient_cost` /
-/// `coefficient_hessian_cost` scaled by the joint outer-coordinate dimension,
-/// with `saturating_mul` so overflow saturates rather than wrapping silently.
 #[derive(Clone, Copy, Debug)]
 pub struct OuterDerivativePolicy {
     /// What exact calculus the family advertises in principle.
     pub capability: ExactOuterDerivativeOrder,
-    /// Predicted per-eval work for one `ValueGradientHessian` evaluation.
-    /// Rounded conservatively *up* via `saturating_mul`. Informational for
-    /// representation and diagnostics; it does not disable Hessian capability.
-    pub predicted_hessian_work: u128,
-    /// Predicted per-eval work for one `ValueAndGradient` evaluation.
-    /// Rounded conservatively *up* via `saturating_mul`.
-    pub predicted_gradient_work: u128,
 }
 
 impl OuterDerivativePolicy {
@@ -355,9 +344,8 @@ impl OuterDerivativePolicy {
 
     /// Outer Hessian declaration for the outer-strategy planner.
     ///
-    /// `Either` ⇔ capability has Hessian. Work estimates select dense vs
-    /// operator assembly later; they must not erase analytic second-order
-    /// capability from the planner.
+    /// `Either` ⇔ capability has Hessian. Representation routing happens later
+    /// and must not erase analytic second-order capability from the planner.
     pub fn declared_hessian_form(&self) -> gam_problem::DeclaredHessianForm {
         use gam_problem::DeclaredHessianForm;
         if !self.capability.has_hessian() {
@@ -365,42 +353,6 @@ impl OuterDerivativePolicy {
         }
         DeclaredHessianForm::Either
     }
-}
-
-/// Total outer-coordinate dimensionality used by the default policy work
-/// model: `rho_dim + psi_dim`. Each outer evaluation propagates one
-/// directional derivative per outer coordinate through the inner solve.
-#[inline]
-pub(crate) fn outer_coord_dim_for_policy(specs: &[ParameterBlockSpec], psi_dim: usize) -> u128 {
-    let rho_total: u128 = specs
-        .iter()
-        .map(|s| s.penalties.len() as u128)
-        .fold(0u128, |acc, k| acc.saturating_add(k));
-    rho_total.saturating_add(psi_dim as u128)
-}
-
-/// Default predicted-cost model for [`OuterDerivativePolicy`]:
-///
-/// * gradient work ≈ `coefficient_gradient_cost · (rho_dim + psi_dim)`
-/// * Hessian work  ≈ `coefficient_hessian_cost  · (rho_dim + psi_dim)`
-///
-/// Each outer coordinate triggers one analytic directional derivative
-/// through the inner solve; the dense Hessian assembly carries the extra
-/// `O(p_total)` factor already captured by `coefficient_hessian_cost`.
-///
-/// All multiplications saturate so an overflow rounds *up* to the gate
-/// ceiling: we'd rather drop one Hessian evaluation that we could have
-/// afforded than crash on a 600 s eval.
-pub fn default_outer_derivative_policy_costs(
-    specs: &[ParameterBlockSpec],
-    psi_dim: usize,
-    grad_cost: u64,
-    hess_cost: u64,
-) -> (u128, u128) {
-    let k = outer_coord_dim_for_policy(specs, psi_dim);
-    let grad = (grad_cost as u128).saturating_mul(k.max(1));
-    let hess = (hess_cost as u128).saturating_mul(k.max(1));
-    (grad, hess)
 }
 
 /// Default coefficient-space Hessian cost: `Σ_b n_b · p_b²`, summed across
