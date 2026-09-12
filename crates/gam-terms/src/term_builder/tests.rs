@@ -1258,7 +1258,7 @@ fn univariate_smooth_accepts_mgcv_cubic_regression_aliases() {
 }
 
 #[test]
-fn non_intercept_linear_effects_default_to_mle_with_explicit_null_recovery() {
+fn non_intercept_linear_effects_default_to_null_recovery_with_explicit_opt_out() {
     let ds = continuous_dataset(
         &["y", "x", "z"],
         (0..24)
@@ -1269,26 +1269,46 @@ fn non_intercept_linear_effects_default_to_mle_with_explicit_null_recovery() {
             })
             .collect(),
     );
-    let parsed = parse_formula("y ~ x + z + x:z").expect("parse linear defaults");
-    let mut notes = Vec::new();
-    let terms = build_termspec(
-        &parsed.terms,
-        &ds,
-        &ds.column_map(),
-        &mut notes,
-        &gam_runtime::resource::ResourcePolicy::default_library(),
-    )
-    .expect("build linear defaults");
+    let build = |formula: &str| {
+        let parsed = parse_formula(formula)
+            .unwrap_or_else(|error| panic!("{formula} must parse: {error:?}"));
+        let mut notes = Vec::new();
+        build_termspec(
+            &parsed.terms,
+            &ds,
+            &ds.column_map(),
+            &mut notes,
+            &gam_runtime::resource::ResourcePolicy::default_library(),
+        )
+        .unwrap_or_else(|error| panic!("{formula} must build: {error}"))
+    };
+    // SPEC rules 12 and 14: every non-intercept effect carries the REML-selected
+    // null-recovery ridge unless the user opts out, so the default can recover
+    // the null instead of making users opt in to shrinkage.
+    let terms = build("y ~ x + z + x:z");
     assert!(!terms.linear_terms.is_empty());
     assert!(
-        terms.linear_terms.iter().all(|term| !term.double_penalty),
-        "ordinary parametric effects must be unpenalized by default: {:?}",
+        terms.linear_terms.iter().all(|term| term.double_penalty),
+        "ordinary parametric effects must carry the null-recovery ridge by default: {:?}",
         terms
             .linear_terms
             .iter()
             .map(|term| (&term.name, term.double_penalty))
             .collect::<Vec<_>>()
     );
+    for formula in [
+        "y ~ linear(x)",
+        "y ~ constrain(x, min=0, max=2)",
+        "y ~ nonnegative(x)",
+        "y ~ nonpositive(x)",
+    ] {
+        let terms = build(formula);
+        assert_eq!(terms.linear_terms.len(), 1, "{formula}");
+        assert!(
+            terms.linear_terms[0].double_penalty,
+            "{formula} must default to the null-recovery ridge"
+        );
+    }
 
     // `bounded()` is an exact interval transform and likewise defaults to
     // no shrinkage ridge. It also structurally rejects combining the
@@ -1311,29 +1331,21 @@ fn non_intercept_linear_effects_default_to_mle_with_explicit_null_recovery() {
     );
 
     for formula in [
-        "y ~ linear(x, double_penalty=true)",
-        "y ~ linear(x:z, double_penalty=true)",
+        "y ~ linear(x, double_penalty=false)",
+        "y ~ linear(x:z, double_penalty=false)",
+        "y ~ nonnegative(x, double_penalty=false)",
     ] {
-        let parsed = parse_formula(formula).expect("parse explicit linear shrinkage");
-        let mut notes = Vec::new();
-        let terms = build_termspec(
-            &parsed.terms,
-            &ds,
-            &ds.column_map(),
-            &mut notes,
-            &gam_runtime::resource::ResourcePolicy::default_library(),
-        )
-        .unwrap_or_else(|error| panic!("{formula} must build: {error}"));
+        let terms = build(formula);
         assert_eq!(terms.linear_terms.len(), 1, "{formula}");
         assert!(
-            terms.linear_terms[0].double_penalty,
-            "{formula} must preserve the explicit shrinkage opt-in"
+            !terms.linear_terms[0].double_penalty,
+            "{formula} must preserve the explicit opt-out"
         );
     }
 
     assert!(
-        parse_formula("y ~ linear(x, double_penalty=ture)").is_err(),
-        "a misspelled opt-in must be rejected instead of silently using the default"
+        parse_formula("y ~ linear(x, double_penalty=flase)").is_err(),
+        "a misspelled opt-out must be rejected instead of silently using the default"
     );
 }
 

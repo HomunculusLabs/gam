@@ -4293,5 +4293,13 @@
     ],
     "reason": "#2901 (SPEC rules 2 and 25). crates/gam-solve/src/estimate/hessian_fd_probes.rs held one pub method, ExternalJointHyperEvaluator::debug_full_h, a DEBUG ONLY accessor whose stated purpose was to let tests difference the dense effective Hessian. Nothing calls it, in production or in tests: the gam-models regression guards its module comment names no longer use it. The file and its mod declaration are deleted, and estimate/mod.rs leaves the FD scanner allowlist because it no longer declares an FD-named module.",
     "evidence": "At the base, git grep -n -w debug_full_h over the whole repository finds only its declaration in hessian_fd_probes.rs, the mod.rs comment removed here, and its restored-in-place row in docs/public-api-2829-disposition.tsv, which becomes retired-no-product-user with the counts table in docs/rust-library-surface.md adjusted by one. Its callees keep other callers: prepare_eval_state_cost_only (joint_hyper.rs), compute_cost, and objective_innerhessian (smoothing_correction.rs). The item list applies source_removal_guard.py's ITEM regex to the base blob by hand, and debug_full_h is public, so it is guarded. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "b4551a9aa38ca8a3448f2bbb745450b9da9795a0",
+    "items": [
+      "crates/gam-terms/src/term_builder/tests.rs:fn:non_intercept_linear_effects_default_to_mle_with_explicit_null_recovery"
+    ],
+    "reason": "SPEC rules 12 and 14 (#2901 V8). Formula linear effects (bare x, a:b, linear(), constrain(), nonnegative(), nonpositive()) now carry the REML-selected function-mass null-recovery ridge by default, and double_penalty=false opts out. The test that pinned the old unpenalized default is rewritten to pin the new default and the explicit opt-out, under a name that states the new contract.",
+    "evidence": "The removed identity is a #[test] fn in crates/gam-terms/src/term_builder/tests.rs. Its replacement non_intercept_linear_effects_default_to_null_recovery_with_explicit_opt_out in the same file keeps the bounded() default-false check and the misspelled-option rejection, and asserts the new default for x + z + x:z, linear(x), constrain(x, min=0, max=2), nonnegative(x) and nonpositive(x), plus the explicit double_penalty=false opt-out for linear(x), linear(x:z) and nonnegative(x). No other file names the old test."
   }
 ]

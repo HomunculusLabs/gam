@@ -1235,9 +1235,11 @@ pub struct LinearTermSpec {
     /// in which case the realized column is exactly the numeric product.
     #[serde(default)]
     pub categorical_levels: Vec<(usize, u64)>,
-    /// Optional zero-centered shrinkage ridge with a REML-selected `λ`.
-    /// Parametric effects are unpenalized/MLE by default;
-    /// `linear(x, double_penalty=true)` opts into shrinkage.
+    /// Zero-centered shrinkage ridge on the effect's function mass with a
+    /// REML-selected `λ`. Formula terms carry it by default so the null is
+    /// recoverable (SPEC rules 12, 14); `linear(x, double_penalty=false)` opts
+    /// out. A saved model that predates the field was fitted without it, so the
+    /// serde default stays `false`.
     #[serde(default = "default_linear_term_double_penalty")]
     pub double_penalty: bool,
     #[serde(default)]
