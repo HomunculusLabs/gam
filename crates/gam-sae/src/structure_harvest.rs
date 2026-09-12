@@ -4598,6 +4598,76 @@ fn race_birth_topology(
     Ok(winner.map(|outcome| outcome.fit))
 }
 
+/// #2243 — re-realize a birth menu's harmonic candidates at the order a born atom
+/// installs. A born atom is seeded from its race's winning fit and nothing regrows its
+/// resolution, so the order has to be right before the race: a circle takes its phase
+/// chart's periodogram bandwidth and a torus or Klein bottle its phase pair's, each
+/// selected against the birth image and the rows its weights select. A chart carrying
+/// no angular energy realizes neither kind, so that candidate is dropped. Every other
+/// candidate passes through unchanged.
+fn realize_birth_harmonic_orders(
+    specs: Vec<TopologyCandidateSpec>,
+    target: ArrayView2<'_, f64>,
+    weights: ArrayView1<'_, f64>,
+) -> Result<Vec<TopologyCandidateSpec>, String> {
+    let n_active = weights.iter().filter(|&&weight| weight > 0.0).count();
+    let mut realized = Vec::with_capacity(specs.len());
+    for spec in specs {
+        match spec.kind {
+            AutoTopologyKind::Circle => {
+                if let Some(order) =
+                    select_periodic_resolution(spec.coords.view(), target, weights, n_active)
+                {
+                    realized.push(TopologyCandidateSpec::new(
+                        AutoTopologyKind::Circle,
+                        SaeAtomGeometryPlan::new(
+                            SaeAtomBasisKind::Periodic,
+                            1,
+                            SaeBasisResolution::PeriodicHarmonics { order },
+                            SaeReferenceMetricPlan::UnitCircle,
+                        )?,
+                        spec.manifold,
+                        spec.coords,
+                    )?);
+                }
+            }
+            AutoTopologyKind::Torus => {
+                if let Some(per_axis_order) =
+                    select_torus_resolution(spec.coords.view(), target, weights, n_active)
+                {
+                    realized.push(TopologyCandidateSpec::new(
+                        AutoTopologyKind::Torus,
+                        SaeAtomGeometryPlan::new(
+                            SaeAtomBasisKind::Torus,
+                            2,
+                            SaeBasisResolution::TorusHarmonics { per_axis_order },
+                            SaeReferenceMetricPlan::FlatRectangularTorus { tau: 0.0 },
+                        )?,
+                        spec.manifold,
+                        spec.coords,
+                    )?);
+                }
+            }
+            AutoTopologyKind::KleinBottle => {
+                if let Some(per_axis_order) =
+                    select_torus_resolution(spec.coords.view(), target, weights, n_active)
+                {
+                    realized.push(TopologyCandidateSpec::new(
+                        AutoTopologyKind::KleinBottle,
+                        SaeAtomGeometryPlan::klein_bottle(per_axis_order.max(
+                            crate::basis::QuotientSpectralEvaluator::KLEIN_BOTTLE_MIN_HARMONICS,
+                        ))?,
+                        spec.manifold,
+                        spec.coords,
+                    )?);
+                }
+            }
+            _ => realized.push(spec),
+        }
+    }
+    Ok(realized)
+}
+
 /// The PCA/template-coordinate topology race: the historical born-atom path,
 /// returning the winning fit AND its TK-normalized evidence so the intrinsic
 /// challenger in [`race_birth_topology`] can be compared on the same scale.
@@ -4608,7 +4678,11 @@ fn race_template_coords(
     d_k: usize,
     atlas: Option<&AtlasTopologyReadout>,
 ) -> Result<Option<TopologyRaceOutcome>, String> {
-    let base_specs = topology_candidates_for_dim(CandidateBases::with_ambient(coords, target), d_k)?;
+    let base_specs = realize_birth_harmonic_orders(
+        topology_candidates_for_dim(CandidateBases::with_ambient(coords, target), d_k)?,
+        target,
+        weights,
+    )?;
     if base_specs.is_empty() {
         return Ok(None);
     }
@@ -4628,7 +4702,9 @@ fn race_template_coords(
             // (a degenerate d=2 fit, an empty ranking) fall back to the base race
             // so a radial-flagged birth never regresses relative to the un-promoted
             // path — the promotion can only ever ADD adjudicated candidates.
-            if let Ok(Some(fit)) = race_spec_set(promoted, target, weights, atlas) {
+            if let Ok(Some(fit)) = realize_birth_harmonic_orders(promoted, target, weights)
+                .and_then(|promoted| race_spec_set(promoted, target, weights, atlas))
+            {
                 return Ok(Some(fit));
             }
         }
@@ -4679,7 +4755,11 @@ fn race_intrinsic_coords(
             coords[[r, col]] = (embed[[r, col]] - lo) / span - 0.5;
         }
     }
-    let specs = topology_candidates_for_dim(CandidateBases::with_ambient(coords.view(), target), d_k)?;
+    let specs = realize_birth_harmonic_orders(
+        topology_candidates_for_dim(CandidateBases::with_ambient(coords.view(), target), d_k)?,
+        target,
+        weights,
+    )?;
     if specs.is_empty() {
         return Ok(None);
     }
