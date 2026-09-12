@@ -5313,9 +5313,9 @@ impl SaeSupportSparseTerm {
         let gamma =
             evaluation_ops as f64 * f64::EPSILON / (1.0 - evaluation_ops as f64 * f64::EPSILON);
         let objective_resolution = gamma * row_objective_scale;
-        for halving in 0..=24 {
+        let mut step = 1.0_f64;
+        loop {
             self.assignment.project_row_coords(row, old_coords, coords_row)?;
-            let step = 2.0_f64.powi(-(halving as i32));
             for (target_slot, value) in trial_delta.iter_mut().zip(delta.iter()) {
                 *target_slot = step * value;
             }
@@ -5416,6 +5416,13 @@ impl SaeSupportSparseTerm {
                 accepted = Some(step);
                 break;
             }
+            // Past this rung the step's whole first-order change `step·rhsᵀδ` is within
+            // the objective's round-off resolution, so neither test can tell a smaller
+            // step from the current point. The negated comparison also stops on NaN.
+            if !(step * directional > objective_resolution) {
+                break;
+            }
+            step *= 0.5;
         }
         match accepted {
             Some(step) => {
@@ -5425,34 +5432,22 @@ impl SaeSupportSparseTerm {
             }
             None => {
                 self.assignment.project_row_coords(row, old_coords, coords_row)?;
-                // The floor rung's REQUIRED Armijo decrease. When even that is
-                // below the objective's own round-off resolution, the search
-                // has bottomed out demanding verification of a decrease it
-                // cannot measure -- no trial at any smaller step could ever
-                // certify. Measured on the #2502 REML lane (row 228530):
-                // required 9.5e-13 against resolution 1.7e-11, raw KKT 31 --
-                // a real gradient whose descent is unresolvable at f64. Taking
-                // no step leaves the row's KKT high, so the outer certificate
-                // honestly refuses to certify; erroring instead discarded a
-                // whole fitted model over one unmeasurable row.
-                let floor_required = 1.0e-4 * 2.0_f64.powi(-24) * directional;
-                if floor_required <= objective_resolution {
-                    log::debug!(
-                        "coordinate row {row}: line search unmeasurable at its floor \
-                         (required decrease {floor_required:.3e} <= objective resolution \
-                         {objective_resolution:.3e}, raw KKT max={raw_gradient_max:.3e}); \
-                         taking no step"
-                    );
-                    return Ok(max_change);
-                }
-                return Err(format!(
-                    "SaeSupportSparseTerm::coordinate_sweep: row {row} has a raw descent direction but manifold line search found no decreasing step \
-                     (raw KKT max={raw_gradient_max:.17e}, rhs_dot_delta={directional:.17e}, \
-                     delta_max={delta_max:.17e}, best_step={best_step:.17e}, \
-                     best_objective_delta={best_objective_delta:.17e}, \
-                     best_armijo_bound={best_armijo_bound:.17e}, gap={best_gap:.17e}, \
-                     objective_resolution={objective_resolution:.17e})"
-                ));
+                // The search stops only at the rung whose whole first-order change
+                // `step·rhsᵀδ` is within the objective's own round-off resolution, so no
+                // trial at any smaller step could certify a decrease. Measured on the #2502
+                // REML lane (row 228530): a real gradient (raw KKT 31) whose descent is
+                // unresolvable at f64. Taking no step leaves the row's KKT high, so the
+                // outer certificate honestly refuses to certify; erroring instead would
+                // discard a whole fitted model over one unmeasurable row.
+                log::debug!(
+                    "coordinate row {row}: line search unmeasurable \
+                     (rhs_dot_delta={directional:.3e}, delta_max={delta_max:.3e}, \
+                     objective resolution {objective_resolution:.3e}, best_step={best_step:.3e}, \
+                     best_objective_delta={best_objective_delta:.3e}, \
+                     best_armijo_bound={best_armijo_bound:.3e}, gap={best_gap:.3e}, \
+                     raw KKT max={raw_gradient_max:.3e}); taking no step"
+                );
+                return Ok(max_change);
             }
         }
         Ok(max_change)
