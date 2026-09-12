@@ -3179,7 +3179,7 @@ impl SaeManifoldTerm {
         max_rounds: usize,
     ) -> Result<GaugeOrbitDescent, String> {
         // #2267 — name this phase to the process monitor for every exit of the call.
-        let _gauge_orbit_scope = gam_runtime::process_monitor::track_scope(format!(
+        let gauge_orbit_scope = gam_runtime::process_monitor::track_scope(format!(
             "sae gauge-orbit descent max_rounds={max_rounds}"
         ));
         let mut outcome = GaugeOrbitDescent::default();
@@ -3422,6 +3422,7 @@ impl SaeManifoldTerm {
                 outcome.max_directional_derivative,
             );
         }
+        drop(gauge_orbit_scope);
         Ok(outcome)
     }
 
@@ -7032,7 +7033,7 @@ impl SaeManifoldTerm {
         let fixed_logits = self.assignment.fixed_logit_mask();
         let inv_tau = 1.0 / self.assignment.mode.temperature();
         let softmax = matches!(self.assignment.mode, AssignmentMode::Softmax { .. });
-        let second_jets = self.atom_second_jets().ok();
+        let second_jets = self.atom_second_jets()?;
         let layout = self.last_row_layout.as_ref();
         let whitens = self
             .row_metric
@@ -7087,27 +7088,25 @@ impl SaeManifoldTerm {
             };
             let mut curvature = Array2::<f64>::zeros((q_row, q_row));
             // Coordinate–coordinate, same atom: `a_k·⟨Mr, ∂²f_k/∂t_a∂t_b⟩`.
-            if let Some(jets) = second_jets.as_ref() {
-                let mut second = vec![0.0_f64; p];
-                for &(atom, start) in &blocks {
-                    let a_k = assignments[atom];
-                    let d = self.assignment.coords[atom].latent_dim();
-                    let jet = &jets[atom];
-                    let decoder = self.atoms[atom].decoder_coefficients();
-                    for axis_a in 0..d {
-                        for axis_b in 0..d {
-                            second.fill(0.0);
-                            for basis in 0..decoder.nrows() {
-                                let jet_value = jet[[row, basis, axis_a, axis_b]];
-                                if jet_value == 0.0 {
-                                    continue;
-                                }
-                                for out in 0..p {
-                                    second[out] += jet_value * decoder[[basis, out]];
-                                }
+            let mut second = vec![0.0_f64; p];
+            for &(atom, start) in &blocks {
+                let a_k = assignments[atom];
+                let d = self.assignment.coords[atom].latent_dim();
+                let jet = &second_jets[atom];
+                let decoder = self.atoms[atom].decoder_coefficients();
+                for axis_a in 0..d {
+                    for axis_b in 0..d {
+                        second.fill(0.0);
+                        for basis in 0..decoder.nrows() {
+                            let jet_value = jet[[row, basis, axis_a, axis_b]];
+                            if jet_value == 0.0 {
+                                continue;
                             }
-                            curvature[[start + axis_a, start + axis_b]] += a_k * contract(&second);
+                            for out in 0..p {
+                                second[out] += jet_value * decoder[[basis, out]];
+                            }
                         }
+                        curvature[[start + axis_a, start + axis_b]] += a_k * contract(&second);
                     }
                 }
             }
