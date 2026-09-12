@@ -417,12 +417,18 @@ fn render_cuda_devroye_constants() -> String {
     let pi_squared = PI * PI;
     let sqrt_two_over_pi = two_over_pi.sqrt();
     let sqrt_pi_over_two = FRAC_PI_2.sqrt();
+    // The host moments' limit switches, so the device normal kernel takes each
+    // `c → 0` limit exactly where the host does.
+    let mean_limit_tilt = crate::pg_moments::pg_mean_limit_tilt();
+    let variance_limit_tilt = crate::pg_moments::pg_variance_limit_tilt();
     format!(
         "#define PG_FRAC_2_PI       ({two_over_pi:.20e})\n\
          #define PG_PI              ({PI:.20e})\n\
          #define PG_PI_SQ           ({pi_squared:.20e})\n\
          #define PG_SQRT_2_OVER_PI  ({sqrt_two_over_pi:.20e})\n\
-         #define PG_SQRT_PI_OVER_2  ({sqrt_pi_over_two:.20e})\n",
+         #define PG_SQRT_PI_OVER_2  ({sqrt_pi_over_two:.20e})\n\
+         #define PG_MEAN_LIMIT_TILT     ({mean_limit_tilt:.20e})\n\
+         #define PG_VARIANCE_LIMIT_TILT ({variance_limit_tilt:.20e})\n",
     )
 }
 
@@ -732,16 +738,16 @@ extern "C" __global__ void normal_kernel(
     xorwow_seed(&st, seed, (unsigned long long)row);
     double b = (double)shapes[row];
     double c = fabs(tilts[row]);
-    double mean;
+    // Each `c -> 0` limit is taken where the host `pg_mean` / `pg_variance` takes
+    // it; both switches are rendered from the host derivation as #defines.
+    double mean = (c < PG_MEAN_LIMIT_TILT) ? 0.25 * b : b * tanh(0.5 * c) / (2.0 * c);
     double var;
-    if (c < 1.0e-8) {
-        mean = 0.25 * b;
-        var  = b / 24.0;
+    if (c < PG_VARIANCE_LIMIT_TILT) {
+        var = b / 24.0;
     } else {
-        mean = b * tanh(0.5 * c) / (2.0 * c);
         // (sinh c - c)/(1 + cosh c) == tanh(c/2) - c/(1 + cosh c): stable when
         // cosh overflows (tanh saturates, second term -> 0), unlike the raw
-        // form's inf/inf = NaN. Matches the Rust pg_variance helper.
+        // form's inf/inf = NaN.
         double ratio = tanh(0.5 * c) - c / (1.0 + cosh(c));
         var = b * ratio / (2.0 * c * c * c);
     }

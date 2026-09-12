@@ -43,18 +43,35 @@ pub struct PgMoments {
 #[inline]
 pub fn pg_mean(b: f64, c: f64) -> f64 {
     let c_abs = c.abs();
-    if c_abs < 1e-8 {
+    if c_abs < pg_mean_limit_tilt() {
         0.25 * b
     } else {
         b * (0.5 * c_abs).tanh() / (2.0 * c_abs)
     }
 }
 
+/// `|c|` below which [`pg_mean`]'s limit `b/4` is at least as accurate as the
+/// closed form (#2469). The limit's relative truncation error is `c²/12`, and the
+/// closed form's four rounded operations carry `γ₄` with no cancellation, so the
+/// two agree once `c² ≤ 12·γ₄`.
+pub fn pg_mean_limit_tilt() -> f64 {
+    (12.0 * gam_linalg::roundoff::accumulation_growth(4)).sqrt()
+}
+
+/// `|c|` below which [`pg_variance`]'s limit `b/24` is at least as accurate as the
+/// closed form (#2469). `tanh(c/2) − c/(1 + cosh c)` cancels two `≈ c/2` terms
+/// formed by about six rounded operations: an absolute error of `γ₆·c` against a
+/// true value of `c³/12`, a relative error of `12·γ₆/c²`. The limit's relative
+/// truncation error is `c²/5`, and the two cross at `c⁴ = 60·γ₆`.
+pub fn pg_variance_limit_tilt() -> f64 {
+    (60.0 * gam_linalg::roundoff::accumulation_growth(6)).sqrt().sqrt()
+}
+
 /// Variance of `PG(b, c)`: `Var = b · (sinh c − c)/(2 c³ (1 + cosh c))`, limit `b/24`.
 #[inline]
 pub fn pg_variance(b: f64, c: f64) -> f64 {
     let c_abs = c.abs();
-    if c_abs < 1e-6 {
+    if c_abs < pg_variance_limit_tilt() {
         b / 24.0
     } else {
         // (sinh c − c)/(1 + cosh c) ≡ tanh(c/2) − c/(1 + cosh c): the raw form
