@@ -2816,8 +2816,8 @@ fn solve_component(
     } else {
         0.0
     };
-    // With no positive lower bound κ is infinite, and the cap below falls back to
-    // the `m` steps exact CG needs.
+    // With no positive lower bound κ is infinite and there is no condition bound to
+    // budget by, so the cap below falls back to the component dimension `m`.
     let lambda_min = lambda_min_bound.max(ridge_floor);
     let kappa_bound = (lambda_max_bound / lambda_min).max(1.0);
     stats.record_kappa_bound(kappa_bound);
@@ -2827,10 +2827,19 @@ fn solve_component(
     // residual correction, making this a genuine UPPER bound on the iterations
     // needed — a well-conditioned block still converges well inside it (no early
     // cut, since κ̂ ≥ κ), while a giant near-singular block is bounded instead of
-    // spinning. Exact CG terminates in at most `m` steps in exact arithmetic; a
-    // cap hit in floating point is typed non-convergence.
+    // spinning. That bound, not the component dimension `m`, is the iteration
+    // budget in floating point: exact CG terminates within `m` steps only in exact
+    // arithmetic, and on an ill-conditioned block loss of orthogonality delays it
+    // past `m` while the interval bound still holds (Greenbaum 1989). Capping it at
+    // `m` recorded a solvable block as non-converged, which forbids the fit (#2576
+    // corrected the same premise in the rational log-det surrogate). A cap hit is
+    // still typed non-convergence.
     let chebyshev = 0.5 * root * (2.0 * root / residual_tolerance).ln();
-    let jacobi_cap = (chebyshev.max(0.0).ceil() as usize).min(m).max(1);
+    let jacobi_cap = if kappa_bound.is_finite() {
+        (chebyshev.max(0.0).ceil() as usize).max(1)
+    } else {
+        m.max(1)
+    };
 
     // Split live columns from dead ones (an exactly zero right-hand side, whose
     // solution is zero). Dead columns are zeroed and never enter CG or the solve
@@ -4289,8 +4298,8 @@ mod exact_solve_tests {
             kappa_bound > 1.0e6,
             "near-singular block must report a large a-priori kappa bound, got {kappa_bound}"
         );
-        // BOUNDED: iterations never exceed the derived cap (`≤ m·p` across the tile),
-        // so a near-singular block can never spin unbounded.
+        // BOUNDED: this path graph resolves within its dimension per column (`≤ m·p`
+        // across the tile), well inside the derived Chebyshev cap.
         assert!(
             stats.cg_iterations <= k * p,
             "iterations must be bounded by the derived cap, got {}",
