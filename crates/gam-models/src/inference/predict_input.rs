@@ -21,7 +21,8 @@ use crate::survival::predict::{
 };
 use crate::transformation_normal::{
     CTN_LOCATION_COLUMNS, CtnRowBases, CtnRowFloors, CtnTransformTable,
-    TRANSFORMATION_MONOTONICITY_EPS, ctn_endpoint_bases, ctn_response_bases_at, ctn_row_geometry,
+    TRANSFORMATION_MONOTONICITY_EPS, ctn_endpoint_bases, ctn_laplace_quantile_correction,
+    ctn_response_bases_at, ctn_response_second_derivative_basis_at, ctn_row_geometry,
     transformation_normal_pit_score,
 };
 use gam_problem::BlockRole;
@@ -374,6 +375,32 @@ impl SavedCtnChart {
         Ok((value, derivative))
     }
 
+    /// `[0, M′_k(y)·T]` at arbitrary response values, on the frozen basis: the
+    /// curvature basis the posterior-mean correction reads `h″` off.
+    fn second_derivative_basis_at(
+        &self,
+        y: &Array1<f64>,
+    ) -> Result<Array2<f64>, PredictInputError> {
+        let second = ctn_response_second_derivative_basis_at(
+            y.view(),
+            self.knots.view(),
+            self.degree,
+            Some(&self.transform),
+        )
+        .map_err(|reason| PredictInputError::InvalidInput { reason })?;
+        if second.ncols() != self.p_resp {
+            return Err(PredictInputError::DimensionMismatch {
+                reason: format!(
+                    "rebuilt transformation-normal curvature basis has {} columns, saved layout \
+                     requires {}",
+                    second.ncols(),
+                    self.p_resp
+                ),
+            });
+        }
+        Ok(second)
+    }
+
     /// The coefficient matrix `A` (`p_resp × p_cov`) behind a saved fit.
     fn coefficient_matrix<'a>(
         &self,
@@ -681,11 +708,176 @@ pub(crate) fn transformation_normal_band_z_nodes() -> Array1<f64> {
     })
 }
 
-/// The response-scale conditional mean `E[Y|x] = E_{Z~N(0,1)}[h⁻¹(Z|x)]` for
-/// each row of a CTM transform table, by averaging the inverse over a
-/// standard-normal midpoint quadrature in probability space (see the predict
-/// branch for the derivation). Used by BOTH the predict mean (#1612) and the
-/// generate sampler's reference mean (#1613), so they agree by construction.
+/// The standard-normal midpoint quadrature nodes `z_k = Φ⁻¹((k + ½)/QUAD)` that
+/// the CTM mean averages the inverse transform over. The plug-in mean and its
+/// posterior-mean correction read the same nodes.
+fn transformation_normal_mean_z_nodes() -> Result<Vec<f64>, PredictInputError> {
+    const QUAD: usize = TRANSFORMATION_NORMAL_MEAN_QUADRATURE;
+    (0..QUAD)
+        .map(|k| {
+            let p = ((k as f64) + 0.5) / (QUAD as f64);
+            standard_normal_quantile(p)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| PredictInputError::InvalidInput { reason: e })
+}
+
+/// The Laplace-order posterior-mean correction to the plug-in CTM mean `E[Y|x]`
+/// (SPEC rule 3: the default prediction is the posterior mean, never the plug-in).
+///
+/// The CTM transform is affine in the covariate-side coordinates,
+/// `h(y|x; α) = a(y)ᵀα + offset + ε·(y − median)` with `α = ψ(x)ᵀA`, so the
+/// coefficient posterior `vec(A) ~ N(Â, V)` induces `α ~ N(α̂, Σ_α)` with
+/// `Σ_α[k, l] = ψᵀ V[(k, ·), (l, ·)] ψ`. The response-scale posterior mean is
+/// `E_Z E_α[h⁻¹(Z|x; α)]`. To the order of the Laplace approximation itself each
+/// quantile moves by `½tr(Σ_α∇²y)` (see [`ctn_laplace_quantile_correction`]),
+/// averaged over the same Z nodes as the plug-in mean.
+///
+/// The exact expectation under that Gaussian does not exist. Its predictive CDF
+/// has the closed form `F(t|x) = Φ(ĥ(t)/√(1 + s²(t)))`, `s²(t) = a(t)ᵀΣ_α a(t)`,
+/// but in the affine tails both `ĥ` and `s` grow linearly in `t`, so `1 − F(t)`
+/// tends to a positive constant and `∫(1 − F)` diverges. The Gaussian puts mass on
+/// tail slopes `γ ≤ 0` that the monotone likelihood forbids, and `E[1/γ]`
+/// diverges near `γ = 0` however small that mass is. The true posterior carries
+/// the `log h′` Jacobian, so its density vanishes as `γ → 0` and its mean is
+/// finite. The consistent posterior mean is therefore this same-order Laplace
+/// (Tierney–Kadane) correction, not a Gaussian integral taken past the region
+/// where the approximation is valid.
+///
+/// The correction needs the fit's coefficient posterior covariance. A saved model
+/// without one is refused rather than silently reporting the plug-in.
+fn transformation_normal_posterior_mean_correction(
+    model: &FittedModel,
+    design: &gam_terms::smooth::TermCollectionDesign,
+    n: usize,
+    offset: &Array1<f64>,
+    table: &CtnTransformTable,
+) -> Result<Array1<f64>, PredictInputError> {
+    if table.nrows() != n {
+        return Err(PredictInputError::DimensionMismatch {
+            reason: format!(
+                "transformation-normal posterior mean: the transform table has {} rows, expected \
+                 {n}",
+                table.nrows()
+            ),
+        });
+    }
+    let offset = design
+        .compose_offset(offset.view(), "transformation-normal posterior mean")
+        .map_err(|error| PredictInputError::InvalidInput {
+            reason: error.to_string(),
+        })?;
+    let saved = SavedCtnChart::from_model(model)?;
+    let p_cov = design.design.ncols();
+    let coefficients = saved.coefficient_matrix(model, p_cov)?;
+    let covariance = model
+        .unified()
+        .and_then(|fit| fit.beta_covariance())
+        .ok_or_else(|| PredictInputError::MissingMetadata {
+            reason: "transformation-normal posterior mean requires the saved coefficient \
+                     posterior covariance; refit the model with this runtime"
+                .to_string(),
+        })?;
+    let p_resp = saved.p_resp;
+    let p_total = p_resp * p_cov;
+    if covariance.dim() != (p_total, p_total) {
+        return Err(PredictInputError::DimensionMismatch {
+            reason: format!(
+                "transformation-normal coefficient covariance is {:?}, the saved layout requires \
+                 {p_total}x{p_total}",
+                covariance.dim()
+            ),
+        });
+    }
+    let cov_mat = design
+        .design
+        .try_row_chunk(0..n)
+        .map_err(|error| PredictInputError::InvalidInput {
+            reason: error.to_string(),
+        })?;
+    let z_nodes = transformation_normal_mean_z_nodes()?;
+    let saved_ref = &saved;
+    let coefficients_ref = &coefficients;
+    let cov_mat_ref = &cov_mat;
+    let offset_ref = &offset;
+    let z_nodes_ref = &z_nodes;
+    let rows: Vec<Result<f64, String>> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let cov_row = cov_mat_ref.row(i);
+            let alpha = saved_ref.alpha_row(coefficients_ref, cov_row);
+            // Σ_α = (I ⊗ ψᵀ) V (I ⊗ ψ) in the row-major layout of `vec(A)`.
+            let mut alpha_covariance = Array2::<f64>::zeros((p_resp, p_resp));
+            for k in 0..p_resp {
+                for l in k..p_resp {
+                    let mut acc = 0.0_f64;
+                    for c in 0..p_cov {
+                        let psi_c = cov_row[c];
+                        if psi_c == 0.0 {
+                            continue;
+                        }
+                        let row_index = k * p_cov + c;
+                        for d in 0..p_cov {
+                            acc += psi_c * covariance[[row_index, l * p_cov + d]] * cov_row[d];
+                        }
+                    }
+                    alpha_covariance[[k, l]] = acc;
+                    alpha_covariance[[l, k]] = acc;
+                }
+            }
+            let quantiles = Array1::from_iter(z_nodes_ref.iter().map(|&z| table.invert(i, z)));
+            let (value, derivative) = saved_ref.bases_at(&quantiles).map_err(String::from)?;
+            let second = saved_ref
+                .second_derivative_basis_at(&quantiles)
+                .map_err(String::from)?;
+            let mut acc = 0.0_f64;
+            for (k, &y) in quantiles.iter().enumerate() {
+                let geometry = ctn_row_geometry(
+                    saved_ref.chart,
+                    alpha.view(),
+                    CtnRowBases {
+                        value: value.row(k),
+                        derivative: derivative.row(k),
+                        lower: saved_ref.lower_basis.view(),
+                        upper: saved_ref.upper_basis.view(),
+                    },
+                    saved_ref.floors(y, offset_ref[i]),
+                );
+                acc += ctn_laplace_quantile_correction(
+                    value.row(k),
+                    derivative.row(k),
+                    second.row(k),
+                    alpha.view(),
+                    alpha_covariance.view(),
+                    geometry.h_prime,
+                );
+            }
+            let correction = acc / (z_nodes_ref.len() as f64);
+            if correction.is_finite() {
+                Ok(correction)
+            } else {
+                Err(format!(
+                    "transformation-normal posterior-mean correction at row {i} is not finite \
+                     ({correction})"
+                ))
+            }
+        })
+        .collect();
+    let mut correction = Array1::<f64>::zeros(n);
+    for (i, row) in rows.into_iter().enumerate() {
+        correction[i] = row.map_err(|reason| PredictInputError::InvalidInput {
+            reason: format!("prediction failed: {reason}"),
+        })?;
+    }
+    Ok(correction)
+}
+
+/// The plug-in response-scale conditional mean `E[Y|x] = E_{Z~N(0,1)}[h⁻¹(Z|x)]`
+/// at the table's coefficients, for each row of a CTM transform table, by
+/// averaging the inverse over a standard-normal midpoint quadrature in probability
+/// space (see the predict branch for the derivation). The generate sampler's
+/// reference mean (#1613) and each posterior draw's mean read this directly;
+/// `predict` adds [`transformation_normal_posterior_mean_correction`] to it.
 ///
 /// The outermost quadrature nodes routinely fall past the tabulated latent
 /// range — `Φ(h(y_lo|x))` is around `1/(n+1)` for a well-calibrated fit, and the
@@ -697,20 +889,13 @@ fn transformation_normal_conditional_mean(
     table: &CtnTransformTable,
 ) -> Result<Array1<f64>, PredictInputError> {
     let n = table.nrows();
-    const QUAD: usize = TRANSFORMATION_NORMAL_MEAN_QUADRATURE;
-    let z_nodes: Vec<f64> = (0..QUAD)
-        .map(|k| {
-            let p = ((k as f64) + 0.5) / (QUAD as f64);
-            standard_normal_quantile(p)
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| PredictInputError::InvalidInput { reason: e })?;
+    let z_nodes = transformation_normal_mean_z_nodes()?;
     let mean = Array1::<f64>::from_shape_fn(n, |i| {
         let mut acc = 0.0_f64;
         for &z in &z_nodes {
             acc += table.invert(i, z);
         }
-        acc / (QUAD as f64)
+        acc / (z_nodes.len() as f64)
     });
     if mean.iter().any(|value| !value.is_finite()) {
         return Err(PredictInputError::InvalidInput {
@@ -730,9 +915,10 @@ pub struct TransformationNormalQuantileGrid {
     /// inverse-transform sampler and the `E[Y|x]` quadrature invert, so neither
     /// can truncate the predictive law at the training range (gam#2600).
     pub table: CtnTransformTable,
-    /// Response-scale conditional mean `E[Y|x_i]` — the same value `predict`
-    /// returns (#1612), provided so the generate spec's reference mean and the
-    /// prediction mean cannot diverge.
+    /// Plug-in response-scale conditional mean `E[Y|x_i]` at the grid's
+    /// coefficients: the generate spec's reference mean, and each posterior
+    /// draw's mean. `predict` reports it plus the Laplace-order posterior-mean
+    /// correction (#1612, SPEC rule 3).
     pub conditional_mean: Array1<f64>,
 }
 
@@ -1032,6 +1218,12 @@ fn build_predict_input_for_model_inner(
             // weights.
             let table = transformation_normal_quantile_grid(model, &design, n, offset)?;
             let conditional_mean = transformation_normal_conditional_mean(&table)?;
+            // SPEC rule 3: the default prediction is the posterior mean, so the
+            // plug-in mean above is carried together with its Laplace-order
+            // posterior-mean correction (see the function's doc for why this, and
+            // not the Gaussian predictive integral, is the posterior mean).
+            let posterior_mean_correction =
+                transformation_normal_posterior_mean_correction(model, &design, n, offset, &table)?;
             // Response-scale predictive quantile ladder: `Y|x = h⁻¹(Z|x)` with
             // `Z ~ N(0,1)`, so the p-quantile of `Y|x` is `h⁻¹(Φ⁻¹(p)|x)`.
             // Tabulating `h⁻¹` on the fixed z ladder lets the predictor build
@@ -1052,15 +1244,17 @@ fn build_predict_input_for_model_inner(
                     quantile_ladder[[i, m + j]] = slope;
                 }
             }
-            // The predictor passes the offset through unchanged as `eta` and
-            // `mean`, so storing E[Y|x] here yields a y-independent response-scale
-            // prediction for both columns on a covariate-only frame.
+            // `offset` carries the plug-in conditional mean and `auxiliary_scalar`
+            // its posterior-mean correction, so the predictor's default
+            // posterior-mean pass reports their sum and the explicit plug-in pass
+            // reports `offset` alone. Both are y-independent response-scale
+            // predictions on a covariate-only frame.
             Ok(PredictInput {
                 design: DesignMatrix::from(ndarray::Array2::from_shape_fn((n, 1), |_| 1.0)),
                 offset: conditional_mean,
                 design_noise: None,
                 offset_noise: None,
-                auxiliary_scalar: None,
+                auxiliary_scalar: Some(posterior_mean_correction),
                 auxiliary_matrix: Some(quantile_ladder),
             })
         }

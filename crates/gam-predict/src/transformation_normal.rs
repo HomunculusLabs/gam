@@ -3,12 +3,14 @@ use crate::input::{TRANSFORMATION_NORMAL_BAND_Z_MAX, TRANSFORMATION_NORMAL_BAND_
 
 /// Predictor for transformation-normal (CTM) models.
 ///
-/// The response-scale conditional mean `E[Y|x]` is precomputed in
-/// `build_predict_input_for_model` (issue #1612) and stored in the PredictInput
-/// offset. `E[Y|x] = E_{Z~N(0,1)}[h⁻¹(Z|x)]` is a function of the covariates
-/// alone, so prediction is covariate-only and does not require the outcome
-/// column. This predictor passes the precomputed value through unchanged as both
-/// the linear predictor and the mean: eta = mean = E[Y|x].
+/// `build_predict_input_for_model` (issue #1612) precomputes the plug-in
+/// response-scale conditional mean `E_{Z~N(0,1)}[h⁻¹(Z|x; β̂)]` into the
+/// PredictInput offset, and its Laplace-order posterior-mean correction into
+/// `auxiliary_scalar` (SPEC rule 3). Both are functions of the covariates alone,
+/// so prediction is covariate-only and does not require the outcome column. The
+/// default posterior-mean pass reports their sum as both the linear predictor and
+/// the mean (eta = mean = E[Y|x]). The explicit plug-in pass reports the offset
+/// alone.
 ///
 /// ## Uncertainty contract
 ///
@@ -86,6 +88,29 @@ fn ladder_quantile(ladder_row: ndarray::ArrayView1<'_, f64>, z: f64) -> f64 {
         + (t3 - t2) * step * m1
 }
 
+/// The Laplace-order posterior mean `E[Y|x]` (SPEC rule 3): the plug-in
+/// conditional mean the input builder stores in `offset`, plus the posterior-mean
+/// correction it stores in `auxiliary_scalar`. The plug-in pass reads `offset`
+/// alone.
+fn posterior_mean_response(input: &PredictInput) -> Result<Array1<f64>, EstimationError> {
+    let correction = input.auxiliary_scalar.as_ref().ok_or_else(|| {
+        EstimationError::InvalidInput(
+            "transformation-normal prediction input is missing the posterior-mean correction \
+             (auxiliary_scalar)"
+                .to_string(),
+        )
+    })?;
+    if correction.len() != input.offset.len() {
+        return Err(EstimationError::InvalidInput(format!(
+            "transformation-normal posterior-mean correction has {} rows but the plug-in mean \
+             has {}",
+            correction.len(),
+            input.offset.len()
+        )));
+    }
+    Ok(&input.offset + correction)
+}
+
 impl PredictionTransform for TransformationNormalPredictor {
 
     fn response_family(&self) -> ResponseFamily {
@@ -108,10 +133,12 @@ impl PredictionTransform for TransformationNormalPredictor {
         }
     }
     fn point_state(&self, input: &PredictInput) -> Result<LinearState, EstimationError> {
-        // The offset carries the precomputed response-scale conditional mean
-        // `E[Y|x]`. No covariance-propagated SE exists for this quantity (see
-        // the struct-level uncertainty contract), so the SEs are `None` —
-        // reporting zero would claim certainty the posterior does not have.
+        // This is the explicit plug-in state: the offset carries the precomputed
+        // plug-in conditional mean `E[Y|x; β̂]`, and the posterior-mean passes add
+        // its correction in `posterior_mean_response`. No covariance-propagated
+        // SE exists for this quantity (see the struct-level uncertainty contract),
+        // so the SEs are `None` — reporting zero would claim certainty the
+        // posterior does not have.
         let h = input.offset.clone();
         Ok(LinearState {
             eta: h.clone(),
@@ -145,8 +172,8 @@ impl PredictableModel for TransformationNormalPredictor {
         input: &PredictInput,
     ) -> Result<PredictionWithSE, EstimationError> {
         // The CTM predictor reports no covariance-derived SEs on the point path;
-        // it passes through the precomputed E[Y|x] offset as eta and mean.
-        let h = input.offset.clone();
+        // its point is the Laplace-order posterior mean E[Y|x].
+        let h = posterior_mean_response(input)?;
         Ok(PredictionWithSE {
             eta: h.clone(),
             mean: h,
@@ -184,8 +211,9 @@ impl PredictableModel for TransformationNormalPredictor {
         fit: &UnifiedFitResult,
         options: &PosteriorMeanOptions,
     ) -> Result<PredictPosteriorMeanResult, EstimationError> {
-        // The posterior mean is read entirely off the persisted quantile
-        // ladder; the fit contributes no coefficient state here, but a
+        // The posterior mean is precomputed by the input builder: the plug-in
+        // conditional mean in `offset` plus its Laplace-order correction in
+        // `auxiliary_scalar`. The fit contributes no coefficient state here, but a
         // non-finite fitted log-likelihood marks a corrupted payload.
         if !fit.log_likelihood.is_finite() {
             return Err(EstimationError::InvalidInput(
@@ -193,7 +221,7 @@ impl PredictableModel for TransformationNormalPredictor {
                     .to_string(),
             ));
         }
-        let h = input.offset.clone();
+        let h = posterior_mean_response(input)?;
         let n = h.len();
         let mut result = PredictPosteriorMeanResult {
             eta: h.clone(),

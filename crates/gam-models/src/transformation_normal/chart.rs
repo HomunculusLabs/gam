@@ -47,7 +47,7 @@ use super::{
     ispline_modelling_interval, ispline_value_and_first_derivative,
 };
 use crate::inference::model::TransformationNormalParameterization;
-use ndarray::{Array1, Array2, ArrayView1};
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
 /// Number of leading response-basis columns that carry the unconstrained
 /// location field `b(x)` rather than a monotone shape coordinate. The location
@@ -454,6 +454,86 @@ pub fn ctn_response_bases_at(
     Ok((value, derivative))
 }
 
+/// `[0, M′_1(y)·T, …]`, the second derivative of the CTN value basis, on the same
+/// frozen frame [`ctn_response_bases_at`] evaluates.
+///
+/// Past the modelling interval the transform continues affinely, so its
+/// curvature there is exactly zero and those rows are zero. At the boundary knots
+/// the interior one-sided value is kept, the convention the first derivative uses.
+pub fn ctn_response_second_derivative_basis_at(
+    response: ArrayView1<'_, f64>,
+    knots: ArrayView1<'_, f64>,
+    degree: usize,
+    transform: Option<&Array2<f64>>,
+) -> Result<Array2<f64>, String> {
+    let (left, right) = ispline_modelling_interval(knots, degree)
+        .map_err(|error| format!("CTN response I-spline knot vector is unusable: {error}"))?
+        .ok_or_else(|| {
+            format!(
+                "CTN response I-spline modelling interval is degenerate for degree {degree} on \
+                 {} knot(s)",
+                knots.len()
+            )
+        })?;
+    let mut raw = gam_terms::basis::create_ispline_derivative_dense(
+        response,
+        &knots.to_owned(),
+        degree,
+        2,
+    )
+    .map_err(|error| format!("CTN response I-spline second-derivative basis failed: {error}"))?;
+    for (row, &y) in response.iter().enumerate() {
+        if y < left || y > right {
+            raw.row_mut(row).fill(0.0);
+        }
+    }
+    let shape = match transform {
+        Some(t) => {
+            if raw.ncols() != t.nrows() {
+                return Err(format!(
+                    "CTN response transform has {} rows but the I-spline curvature basis has {} \
+                     columns",
+                    t.nrows(),
+                    raw.ncols()
+                ));
+            }
+            raw.dot(t)
+        }
+        None => raw,
+    };
+    let mut second = Array2::<f64>::zeros((shape.nrows(), shape.ncols() + CTN_LOCATION_COLUMNS));
+    second
+        .slice_mut(ndarray::s![.., CTN_LOCATION_COLUMNS..])
+        .assign(&shape);
+    Ok(second)
+}
+
+/// The Laplace-order posterior-mean correction to one CTN quantile.
+///
+/// For fixed `z` the plug-in quantile `ŷ` solves `h(ŷ; α̂) = z`, with `h` affine in
+/// the covariate-side coordinates `α`. Differentiating that identity gives the
+/// implicit quantile's gradient `∇y = −a/h′` and Hessian
+/// `∇²y = (a′aᵀ + aa′ᵀ)/h′² − h″·aaᵀ/h′³`, where `a` and `a′` are the value and
+/// derivative bases at `ŷ` and `h′`, `h″` the transform's slope and curvature
+/// there. Under the Laplace posterior `α ~ N(α̂, Σ)`,
+/// `E[y] = ŷ + ½tr(Σ∇²y) + O(‖Σ‖²)`, and this returns
+/// `½tr(Σ∇²y) = a′ᵀΣa/h′² − ½·h″·aᵀΣa/h′³`.
+pub fn ctn_laplace_quantile_correction(
+    value: ArrayView1<'_, f64>,
+    derivative: ArrayView1<'_, f64>,
+    second_derivative: ArrayView1<'_, f64>,
+    alpha: ArrayView1<'_, f64>,
+    alpha_covariance: ArrayView2<'_, f64>,
+    h_prime: f64,
+) -> f64 {
+    let sigma_value = alpha_covariance.dot(&value);
+    let value_energy = value.dot(&sigma_value);
+    let cross_energy = derivative.dot(&sigma_value);
+    let curvature = second_derivative.dot(&alpha);
+    let slope_squared = h_prime * h_prime;
+    cross_energy / slope_squared - 0.5 * curvature * value_energy / (slope_squared * h_prime)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -831,5 +911,155 @@ mod tests {
                 assert!((scaled[[i, k]] - 2.0 * raw_value[[i, k]]).abs() < 1e-12);
             }
         }
+    }
+
+    /// The curvature basis is the derivative of the slope basis: central differences
+    /// of [`ctn_response_bases_at`]'s derivative rows match it inside the modelling
+    /// interval, and past the knots, where the transform is affine, it is zero.
+    /// Finite differences are sanctioned in tests.
+    #[test]
+    fn response_second_derivative_basis_matches_differences_of_the_slope_basis() {
+        let knots = Array1::from_vec(vec![0.0, 0.0, 0.0, 0.0, 0.3, 0.6, 1.0, 1.0, 1.0, 1.0]);
+        let degree = 2;
+        let step = 1.0e-5;
+        for &y in &[0.12_f64, 0.45, 0.83] {
+            let second = ctn_response_second_derivative_basis_at(
+                Array1::from_vec(vec![y]).view(),
+                knots.view(),
+                degree,
+                None,
+            )
+            .expect("curvature basis");
+            let (_, up) =
+                ctn_response_bases_at(Array1::from_vec(vec![y + step]).view(), knots.view(), degree, None)
+                    .expect("slope basis above");
+            let (_, down) =
+                ctn_response_bases_at(Array1::from_vec(vec![y - step]).view(), knots.view(), degree, None)
+                    .expect("slope basis below");
+            assert_eq!(second[[0, 0]], 0.0, "the location column carries no curvature");
+            for k in CTN_LOCATION_COLUMNS..second.ncols() {
+                let numeric = (up[[0, k]] - down[[0, k]]) / (2.0 * step);
+                assert!(
+                    (second[[0, k]] - numeric).abs() <= 1.0e-6 * numeric.abs().max(1.0),
+                    "curvature column {k} at y={y}: {} vs central difference {numeric}",
+                    second[[0, k]]
+                );
+            }
+        }
+        let exterior = ctn_response_second_derivative_basis_at(
+            Array1::from_vec(vec![-0.4, 1.7]).view(),
+            knots.view(),
+            degree,
+            None,
+        )
+        .expect("exterior curvature basis");
+        assert!(
+            exterior.iter().all(|&value| value == 0.0),
+            "the affine tails carry no curvature: {exterior:?}"
+        );
+    }
+
+    /// #2901 V20: the Laplace posterior-mean correction is `½tr(Σ∇²y)` of the implicit
+    /// quantile `y(α)` solving `h(y; α) = z`. It is checked against central second
+    /// differences of the plug-in quantile along the eigenvectors of `Σ` (finite
+    /// differences sanctioned in tests), and it is material, so the default
+    /// prediction differs from the plug-in.
+    #[test]
+    fn laplace_quantile_correction_is_half_the_trace_of_the_quantile_hessian() {
+        let knots = Array1::from_vec(vec![0.0, 0.0, 0.0, 0.0, 0.3, 0.6, 1.0, 1.0, 1.0, 1.0]);
+        let degree = 2;
+        let median = 0.5_f64;
+        let bases = |y: f64| {
+            ctn_response_bases_at(Array1::from_vec(vec![y]).view(), knots.view(), degree, None)
+                .expect("response bases")
+        };
+        let p = bases(median).0.ncols();
+        let alpha = Array1::from_shape_fn(p, |k| if k == 0 { -1.0 } else { 0.5 + 0.25 * k as f64 });
+        let transform = |y: f64, a: &Array1<f64>| -> (f64, f64) {
+            let (value, derivative) = bases(y);
+            (
+                value.row(0).dot(a) + TRANSFORMATION_MONOTONICITY_EPS * (y - median),
+                derivative.row(0).dot(a) + TRANSFORMATION_MONOTONICITY_EPS,
+            )
+        };
+        let y_hat = 0.45_f64;
+        let (z, h_prime) = transform(y_hat, &alpha);
+        let quantile = |a: &Array1<f64>| -> f64 {
+            let mut y = y_hat;
+            for _ in 0..100 {
+                let (h, slope) = transform(y, a);
+                let update = (h - z) / slope;
+                y -= update;
+                if update.abs() <= 1.0e-15 {
+                    break;
+                }
+            }
+            y
+        };
+        // Σ with a known eigenbasis: rotated pairs of coordinates with distinct
+        // eigenvalues, so the off-diagonal Hessian entries are exercised.
+        let half = std::f64::consts::FRAC_1_SQRT_2;
+        let mut eigen: Vec<(f64, Array1<f64>)> = Vec::new();
+        let mut k = 0;
+        while k + 1 < p {
+            let mut plus = Array1::<f64>::zeros(p);
+            plus[k] = half;
+            plus[k + 1] = half;
+            let mut minus = Array1::<f64>::zeros(p);
+            minus[k] = half;
+            minus[k + 1] = -half;
+            eigen.push((0.010 * (k + 1) as f64, plus));
+            eigen.push((0.004 * (k + 2) as f64, minus));
+            k += 2;
+        }
+        if k < p {
+            let mut last = Array1::<f64>::zeros(p);
+            last[k] = 1.0;
+            eigen.push((0.02, last));
+        }
+        let mut sigma = Array2::<f64>::zeros((p, p));
+        for (lambda, direction) in &eigen {
+            for i in 0..p {
+                for j in 0..p {
+                    sigma[[i, j]] += lambda * direction[i] * direction[j];
+                }
+            }
+        }
+        let (value, derivative) = bases(y_hat);
+        let second = ctn_response_second_derivative_basis_at(
+            Array1::from_vec(vec![y_hat]).view(),
+            knots.view(),
+            degree,
+            None,
+        )
+        .expect("curvature basis");
+        let analytic = ctn_laplace_quantile_correction(
+            value.row(0),
+            derivative.row(0),
+            second.row(0),
+            alpha.view(),
+            sigma.view(),
+            h_prime,
+        );
+        let base = quantile(&alpha);
+        assert!(
+            (base - y_hat).abs() <= 1.0e-12,
+            "the plug-in quantile must solve h(y) = z: {base} vs {y_hat}"
+        );
+        let step = 1.0e-4;
+        let mut numeric = 0.0_f64;
+        for (lambda, direction) in &eigen {
+            let up = quantile(&(&alpha + &(direction * step)));
+            let down = quantile(&(&alpha - &(direction * step)));
+            numeric += 0.5 * lambda * (up - 2.0 * base + down) / (step * step);
+        }
+        assert!(
+            analytic.abs() > 1.0e-4,
+            "the fixture's correction must be material, or the check is vacuous: {analytic:e}"
+        );
+        assert!(
+            (analytic - numeric).abs() <= 1.0e-4 * numeric.abs(),
+            "analytic ½tr(Σ∇²y) {analytic:e} vs central second differences {numeric:e}"
+        );
     }
 }
