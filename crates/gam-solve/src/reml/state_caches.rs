@@ -926,6 +926,49 @@ pub(crate) struct TkSharedIntermediates {
     pub(crate) x_m: Array1<f64>,
     pub(crate) y: Array1<f64>,
     pub(crate) active_blocks: Vec<TkActiveBlock>,
+    /// `Some` when the row-pair sums run through the `TkRowPairTensor` route.
+    pub(crate) row_pair_tensor: Option<TkRowPairTensor>,
+}
+
+/// How the Tierney-Kadane row-pair sums `Σ_ij c_i c_j K_ij^m (…)`, with
+/// `K_ij = x_iᵀH⁻¹x_j`, are evaluated. Both routes are exact and agree to
+/// roundoff; they differ only in work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TkRowPairRoute {
+    /// The blocked row-pair gram: `O(active²·p)`.
+    RowPairs,
+    /// Contraction through `T = Σ_j c_j x_j⊗x_j⊗x_j`: `O((active + n)·p³)` time
+    /// and `p³` working memory.
+    Tensor,
+}
+
+impl TkRowPairRoute {
+    /// The route with less leading work for `n` rows, `active` of them with a
+    /// nonzero weight, and `p` columns: the row-pair gram forms `active²·p`
+    /// products, the tensor route `active·p³` to build `T` and `n·p³` to
+    /// contract it against every row.
+    pub(crate) fn predicted(n: usize, active: usize, p: usize) -> Self {
+        let p_cubed = p.saturating_mul(p).saturating_mul(p);
+        let row_pairs = active.saturating_mul(active).saturating_mul(p);
+        let tensor = active.saturating_add(n).saturating_mul(p_cubed);
+        if tensor < row_pairs {
+            Self::Tensor
+        } else {
+            Self::RowPairs
+        }
+    }
+}
+
+/// Per-row contractions of `T = Σ_j c_j x_j⊗x_j⊗x_j` against `z_i = H⁻¹x_i`.
+pub(crate) struct TkRowPairTensor {
+    /// Row `i` is `r_i = T[z_i, z_i, ·] = Σ_j c_j K_ij² x_j`.
+    pub(crate) r: Array2<f64>,
+    /// `s_i = r_iᵀz_i = Σ_j c_j K_ij³`.
+    pub(crate) s: Array1<f64>,
+    /// `H⁻¹` as a dense matrix.
+    pub(crate) h_inv: Array2<f64>,
+    /// The ledger charge for `r` and `s`.
+    pub(crate) _reservation: gam_runtime::resource::MemoryReservation,
 }
 
 pub(crate) struct TkActiveBlock {

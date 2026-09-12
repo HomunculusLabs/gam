@@ -534,8 +534,32 @@ impl<'a> RemlState<'a> {
     where
         S: Fn(&Array1<f64>) -> Result<Array1<f64>, EstimationError>,
     {
+        let active = c_array.iter().filter(|value| **value != 0.0).count();
+        let route = TkRowPairRoute::predicted(x_dense.nrows(), active, x_dense.ncols());
+        Self::tk_shared_intermediates_with_route(x_dense, z, c_array, context, h_inv_solve, route)
+    }
+
+    /// [`Self::tk_shared_intermediates`] with the row-pair route chosen by the
+    /// caller instead of by predicted work.
+    pub(crate) fn tk_shared_intermediates_with_route<S>(
+        x_dense: &Array2<f64>,
+        z: &Array2<f64>,
+        c_array: &Array1<f64>,
+        context: &str,
+        h_inv_solve: &S,
+        route: TkRowPairRoute,
+    ) -> Result<TkSharedIntermediates, EstimationError>
+    where
+        S: Fn(&Array1<f64>) -> Result<Array1<f64>, EstimationError>,
+    {
         let n = x_dense.nrows();
         let active_blocks = Self::tk_active_blocks(c_array);
+        let row_pair_tensor = match route {
+            TkRowPairRoute::RowPairs => None,
+            TkRowPairRoute::Tensor => {
+                Self::tk_row_pair_tensor(x_dense, z, c_array, context, h_inv_solve)?
+            }
+        };
         use rayon::prelude::*;
         // `z` is `H⁻¹Xᵀ` stored `p × n`, so its column `i` is a stride-`n`
         // walk: a per-row dot against it is a cache miss per element and
@@ -567,7 +591,203 @@ impl<'a> RemlState<'a> {
             x_m,
             y,
             active_blocks,
+            row_pair_tensor,
         })
+    }
+
+    /// Contract the TK row-pair sums through `T = Σ_j c_j x_j⊗x_j⊗x_j`.
+    ///
+    /// With `z_i = H⁻¹x_i` and `K_ij = x_iᵀz_j` (symmetric, because `H` is),
+    /// every row-pair sum the TK value and gradient need is a contraction of `T`:
+    ///
+    /// ```text
+    ///   r_i = T[z_i, z_i, ·] = Σ_j c_j K_ij² x_j,     s_i = r_iᵀz_i = Σ_j c_j K_ij³,
+    ///   Σ_ij c_i c_j K_ij³           = Σ_i c_i s_i,
+    ///   Σ_ij c'_i c_j K_ij³          = Σ_i c'_i s_i,
+    ///   Σ_ij c_i c_j K_ij² z_i z_jᵀ  = (Σ_i c_i z_i r_iᵀ) H⁻¹,
+    ///   Σ_ij c_i c_j K_ij² x'_iᵀz_j  = Σ_i c_i x'_iᵀ H⁻¹ r_i.
+    /// ```
+    ///
+    /// Building `T` and every `r_i` costs `O(n·p³)` products with `p³` working
+    /// memory, against `O(n²·p)` for the row-pair gram. `T` is held as a `p²×p`
+    /// matrix and rows are processed `p` at a time, so the one chunk of
+    /// `vec(x xᵀ)` or `vec(z zᵀ)` rows alive beside it has the same `p³`
+    /// footprint. Returns `None` when the memory ledger cannot admit the working
+    /// set, in which case the row-pair route runs.
+    fn tk_row_pair_tensor<S>(
+        x_dense: &Array2<f64>,
+        z: &Array2<f64>,
+        c_array: &Array1<f64>,
+        context: &str,
+        h_inv_solve: &S,
+    ) -> Result<Option<TkRowPairTensor>, EstimationError>
+    where
+        S: Fn(&Array1<f64>) -> Result<Array1<f64>, EstimationError>,
+    {
+        let n = x_dense.nrows();
+        let p = x_dense.ncols();
+        let governor = gam_runtime::resource::MemoryGovernor::global();
+        let working = match governor.try_reserve_dense_f64_copies(p.saturating_mul(p), p, 2, context)
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                log::info!(
+                    "{context}: Tierney-Kadane tensor working set refused by the memory ledger \
+                     ({error}); evaluating row pairs"
+                );
+                return Ok(None);
+            }
+        };
+        let results = match governor.try_reserve_dense_f64(n, p.saturating_add(1), context) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                log::info!(
+                    "{context}: Tierney-Kadane tensor results refused by the memory ledger \
+                     ({error}); evaluating row pairs"
+                );
+                return Ok(None);
+            }
+        };
+        let chunk = p.max(1);
+        let mut outer = Array2::<f64>::zeros((chunk, p * p));
+        let mut weighted = Array2::<f64>::zeros((chunk, p));
+        let mut t_mat = Array2::<f64>::zeros((p * p, p));
+        for start in (0..n).step_by(chunk) {
+            let end = (start + chunk).min(n);
+            for (offset, row) in (start..end).enumerate() {
+                let x_row = x_dense.row(row);
+                let weight = c_array[row];
+                for a in 0..p {
+                    let x_a = x_row[a];
+                    for b in 0..p {
+                        outer[[offset, a * p + b]] = x_a * x_row[b];
+                    }
+                    weighted[[offset, a]] = weight * x_a;
+                }
+            }
+            let rows = end - start;
+            t_mat += &gam_linalg::faer_ndarray::fast_atb(
+                &outer.slice(s![..rows, ..]),
+                &weighted.slice(s![..rows, ..]),
+            );
+        }
+        drop(weighted);
+
+        // Contiguous rows of `Zᵀ` (see `tk_shared_intermediates_with_route`).
+        let z_transposed = z.t();
+        let z_rows = z_transposed.as_standard_layout();
+        let mut r = Array2::<f64>::zeros((n, p));
+        for start in (0..n).step_by(chunk) {
+            let end = (start + chunk).min(n);
+            for (offset, row) in (start..end).enumerate() {
+                let z_row = z_rows.row(row);
+                for a in 0..p {
+                    let z_a = z_row[a];
+                    for b in 0..p {
+                        outer[[offset, a * p + b]] = z_a * z_row[b];
+                    }
+                }
+            }
+            let rows = end - start;
+            let block = gam_linalg::faer_ndarray::fast_ab(&outer.slice(s![..rows, ..]), &t_mat);
+            r.slice_mut(s![start..end, ..]).assign(&block);
+        }
+        drop(outer);
+        drop(t_mat);
+        drop(working);
+
+        let mut s_vec = Array1::<f64>::zeros(n);
+        ndarray::Zip::from(&mut s_vec)
+            .and(r.rows())
+            .and(z_rows.rows())
+            .par_for_each(|out, r_row, z_row| *out = r_row.dot(&z_row));
+        if let Some(row) = s_vec.iter().position(|value| !value.is_finite()) {
+            crate::bail_invalid_estim!(
+                "{context}: Tierney-Kadane tensor contraction is non-finite at row {row}"
+            );
+        }
+
+        let mut h_inv = Array2::<f64>::zeros((p, p));
+        let mut unit = Array1::<f64>::zeros(p);
+        for column in 0..p {
+            unit[column] = 1.0;
+            let solved = h_inv_solve(&unit)?;
+            unit[column] = 0.0;
+            if solved.len() != p {
+                crate::bail_invalid_estim!(
+                    "{context}: H⁻¹ column solve returned length {}, expected {p}",
+                    solved.len()
+                );
+            }
+            h_inv.column_mut(column).assign(&solved);
+        }
+        gam_linalg::matrix::symmetrize_in_place(&mut h_inv);
+
+        Ok(Some(TkRowPairTensor {
+            r,
+            s: s_vec,
+            h_inv,
+            _reservation: results,
+        }))
+    }
+
+    /// `Σ_i c_i values_i` over the weighted rows of `active_blocks`.
+    fn tk_active_weighted_sum(active_blocks: &[TkActiveBlock], values: &Array1<f64>) -> f64 {
+        let mut total = 0.0;
+        for block in active_blocks {
+            for &(offset, c_i) in &block.entries {
+                total += c_i * values[block.start + offset];
+            }
+        }
+        total
+    }
+
+    /// The direct `c`-derivative of `¹⁄₁₂ Σ_ij c_i c_j K_ij³` along `c'`, which is
+    /// `¹⁄₁₂ Σ_ij (c'_i c_j + c_i c'_j) K_ij³ = ¹⁄₆ Σ_i c'_i s_i`.
+    fn tk_tensor_direct_c_term(c_prime: &Array1<f64>, tensor: &TkRowPairTensor) -> f64 {
+        c_prime.dot(&tensor.s) / 6.0
+    }
+
+    /// `−¼ Σ_ij c_i c_j K_ij² z_i z_jᵀ = −¼ (Σ_i c_i z_i r_iᵀ) H⁻¹`, symmetrized.
+    fn tk_tensor_active_total(
+        z: &Array2<f64>,
+        active_blocks: &[TkActiveBlock],
+        tensor: &TkRowPairTensor,
+    ) -> Array2<f64> {
+        let mut weighted_z = Array2::<f64>::zeros(z.raw_dim());
+        for block in active_blocks {
+            for &(offset, c_i) in &block.entries {
+                let row = block.start + offset;
+                weighted_z
+                    .column_mut(row)
+                    .assign(&z.column(row).mapv(|value| c_i * value));
+            }
+        }
+        // `weighted_z` is p×n with columns `c_i z_i`; `r` is n×p with rows `r_i`.
+        let g = gam_linalg::faer_ndarray::fast_ab(&weighted_z, &tensor.r);
+        let mut total = gam_linalg::faer_ndarray::fast_ab(&g, &tensor.h_inv);
+        gam_linalg::matrix::symmetrize_in_place(&mut total);
+        total.mapv_inplace(|value| -0.25 * value);
+        total
+    }
+
+    /// `Σ_i c_i x'_iᵀ H⁻¹ r_i = ⟨H⁻¹, Σ_i c_i x'_i r_iᵀ⟩`, the tensor form of
+    /// `Σ_ij c_i c_j K_ij² x'_iᵀz_j`.
+    fn tk_tensor_design_k_term(
+        x_theta: &Array2<f64>,
+        c_array: &Array1<f64>,
+        tensor: &TkRowPairTensor,
+    ) -> f64 {
+        let mut weighted_x = x_theta.to_owned();
+        for (mut row, &c_i) in weighted_x.rows_mut().into_iter().zip(c_array.iter()) {
+            row.mapv_inplace(|value| c_i * value);
+        }
+        let pairing = gam_linalg::faer_ndarray::fast_atb(&weighted_x, &tensor.r);
+        pairing
+            .iter()
+            .zip(tensor.h_inv.iter())
+            .map(|(&left, &right)| left * right)
+            .sum::<f64>()
     }
 
     pub(crate) fn tk_scalar_from_shared(
@@ -585,24 +805,30 @@ impl<'a> RemlState<'a> {
                 .sum::<f64>();
         let t2_term = 0.125 * shared.x_m.dot(&shared.y);
 
-        let mut t1_sum = 0.0_f64;
-        for (j_block_idx, j_block) in shared.active_blocks.iter().enumerate() {
-            let j0 = j_block.start;
-            let j1 = j_block.end;
-            for i_block in &shared.active_blocks[..=j_block_idx] {
-                let i0 = i_block.start;
-                let i1 = i_block.end;
-                Self::tk_fill_gram_block(x_dense, z, i0, i1, j0, j1, gram);
-                let mut block_sum = 0.0_f64;
-                for &(bi, ci) in &i_block.entries {
-                    for &(bj, cj) in &j_block.entries {
-                        let kij = gram[[bi, bj]];
-                        block_sum += ci * cj * kij * kij * kij;
+        let t1_sum = match shared.row_pair_tensor.as_ref() {
+            Some(tensor) => Self::tk_active_weighted_sum(&shared.active_blocks, &tensor.s),
+            None => {
+                let mut t1_sum = 0.0_f64;
+                for (j_block_idx, j_block) in shared.active_blocks.iter().enumerate() {
+                    let j0 = j_block.start;
+                    let j1 = j_block.end;
+                    for i_block in &shared.active_blocks[..=j_block_idx] {
+                        let i0 = i_block.start;
+                        let i1 = i_block.end;
+                        Self::tk_fill_gram_block(x_dense, z, i0, i1, j0, j1, gram);
+                        let mut block_sum = 0.0_f64;
+                        for &(bi, ci) in &i_block.entries {
+                            for &(bj, cj) in &j_block.entries {
+                                let kij = gram[[bi, bj]];
+                                block_sum += ci * cj * kij * kij * kij;
+                            }
+                        }
+                        t1_sum += if i0 == j0 { block_sum } else { 2.0 * block_sum };
                     }
                 }
-                t1_sum += if i0 == j0 { block_sum } else { 2.0 * block_sum };
+                t1_sum
             }
-        }
+        };
 
         let value = q_term + t1_sum / 12.0 + t2_term;
         if !value.is_finite() {
@@ -771,63 +997,68 @@ impl<'a> RemlState<'a> {
             }
         }
 
-        let active_pairs: Vec<(usize, usize)> = (0..shared.active_blocks.len())
-            .flat_map(|j_block_idx| {
-                (0..=j_block_idx).map(move |i_block_idx| (i_block_idx, j_block_idx))
-            })
-            .collect();
-        // Same deterministic tree over the active block-pair list (order is
-        // the deterministic `active_pairs` construction above).
-        let active_total = gam_linalg::pairwise_reduce::par_deterministic_block_fold(
-            active_pairs.len(),
-            |pair_range: core::ops::Range<usize>| {
-                let mut local = Array2::<f64>::zeros((p, p));
-                for &(i_block_idx, j_block_idx) in &active_pairs[pair_range] {
-                    let i_block = &shared.active_blocks[i_block_idx];
-                    let j_block = &shared.active_blocks[j_block_idx];
-                    let sym_factor = if i_block_idx == j_block_idx { 1.0 } else { 2.0 };
-                    for &(bi, ci) in &i_block.entries {
-                        let ii = i_block.start + bi;
-                        for &(bj, cj) in &j_block.entries {
-                            let jj = j_block.start + bj;
-                            let gij = (0..p)
-                                .map(|col| x_dense[[ii, col]] * z[[col, jj]])
-                                .sum::<f64>();
-                            let weight = ci * cj * gij * gij;
-                            let scale = -0.25 * weight * sym_factor;
-                            if ii == jj {
-                                for a in 0..p {
-                                    let za = z[[a, ii]];
-                                    for b in a..p {
-                                        let val = scale * za * z[[b, ii]];
-                                        local[[a, b]] += val;
-                                        if a != b {
-                                            local[[b, a]] += val;
+        let active_total = match shared.row_pair_tensor.as_ref() {
+            Some(tensor) => Self::tk_tensor_active_total(z, &shared.active_blocks, tensor),
+            None => {
+                let active_pairs: Vec<(usize, usize)> = (0..shared.active_blocks.len())
+                    .flat_map(|j_block_idx| {
+                        (0..=j_block_idx).map(move |i_block_idx| (i_block_idx, j_block_idx))
+                    })
+                    .collect();
+                // Same deterministic tree over the active block-pair list (order is
+                // the deterministic `active_pairs` construction above).
+                gam_linalg::pairwise_reduce::par_deterministic_block_fold(
+                    active_pairs.len(),
+                    |pair_range: core::ops::Range<usize>| {
+                        let mut local = Array2::<f64>::zeros((p, p));
+                        for &(i_block_idx, j_block_idx) in &active_pairs[pair_range] {
+                            let i_block = &shared.active_blocks[i_block_idx];
+                            let j_block = &shared.active_blocks[j_block_idx];
+                            let sym_factor = if i_block_idx == j_block_idx { 1.0 } else { 2.0 };
+                            for &(bi, ci) in &i_block.entries {
+                                let ii = i_block.start + bi;
+                                for &(bj, cj) in &j_block.entries {
+                                    let jj = j_block.start + bj;
+                                    let gij = (0..p)
+                                        .map(|col| x_dense[[ii, col]] * z[[col, jj]])
+                                        .sum::<f64>();
+                                    let weight = ci * cj * gij * gij;
+                                    let scale = -0.25 * weight * sym_factor;
+                                    if ii == jj {
+                                        for a in 0..p {
+                                            let za = z[[a, ii]];
+                                            for b in a..p {
+                                                let val = scale * za * z[[b, ii]];
+                                                local[[a, b]] += val;
+                                                if a != b {
+                                                    local[[b, a]] += val;
+                                                }
+                                            }
                                         }
-                                    }
-                                }
-                            } else {
-                                let half_scale = 0.5 * scale;
-                                for a in 0..p {
-                                    let z_ii_a = z[[a, ii]];
-                                    let z_jj_a = z[[a, jj]];
-                                    for b in 0..p {
-                                        local[[a, b]] += half_scale
-                                            * (z_ii_a * z[[b, jj]] + z_jj_a * z[[b, ii]]);
+                                    } else {
+                                        let half_scale = 0.5 * scale;
+                                        for a in 0..p {
+                                            let z_ii_a = z[[a, ii]];
+                                            let z_jj_a = z[[a, jj]];
+                                            for b in 0..p {
+                                                local[[a, b]] += half_scale
+                                                    * (z_ii_a * z[[b, jj]] + z_jj_a * z[[b, ii]]);
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                }
-                local
-            },
-            |mut left, right| {
-                left += &right;
-                left
-            },
-        )
-        .unwrap_or_else(|| Array2::<f64>::zeros((p, p)));
+                        local
+                    },
+                    |mut left, right| {
+                        left += &right;
+                        left
+                    },
+                )
+                .unwrap_or_else(|| Array2::<f64>::zeros((p, p)))
+            }
+        };
         p_total += &active_total;
 
         let xp = gam_linalg::faer_ndarray::fast_ab(x_dense, &p_total);
@@ -1062,59 +1293,69 @@ impl<'a> RemlState<'a> {
             c_primes.push(c_prime);
         }
 
-        // Union active-block structure over all directions (see doc comment):
-        // filling each gram block once and letting every direction sum over the
-        // union is bit-identical to per-direction blocks.
-        let mut blocks: Vec<TkActiveBlock> = Vec::with_capacity(n.div_ceil(TK_BLOCK_SIZE));
-        for start in (0..n).step_by(TK_BLOCK_SIZE) {
-            let end = (start + TK_BLOCK_SIZE).min(n);
-            let mut entries: Vec<(usize, f64)> = Vec::new();
-            for offset in 0..(end - start) {
-                let row = start + offset;
-                let active = c_array[row] != 0.0 || c_primes.iter().any(|cp| cp[row] != 0.0);
-                if active {
-                    entries.push((offset, 0.0));
-                }
-            }
-            if !entries.is_empty() {
-                blocks.push(TkActiveBlock {
-                    start,
-                    end,
-                    entries,
-                });
-            }
-        }
-
-        let mut c_terms = vec![0.0_f64; k];
-        for (j_block_idx, j_block) in blocks.iter().enumerate() {
-            let j0 = j_block.start;
-            let j1 = j_block.end;
-            for i_block in &blocks[..=j_block_idx] {
-                let i0 = i_block.start;
-                let i1 = i_block.end;
-                // Fill the gram block ONCE; consume it for every direction.
-                Self::tk_fill_gram_block(x_dense, z, i0, i1, j0, j1, gram);
-                let sym_factor = if i0 == j0 { 1.0 } else { 2.0 };
-                for idx in 0..k {
-                    let cp = &c_primes[idx];
-                    let mut block_sum = 0.0_f64;
-                    for &(bi, _) in &i_block.entries {
-                        let ii = i0 + bi;
-                        let ci = c_array[ii];
-                        let cpi = cp[ii];
-                        for &(bj, _) in &j_block.entries {
-                            let jj = j0 + bj;
-                            let cj = c_array[jj];
-                            let gij = gram[[bi, bj]];
-                            let cpj = cp[jj];
-                            let c_direct = (cpi * cj + ci * cpj) * gij * gij * gij / 12.0;
-                            block_sum += c_direct;
+        let c_terms: Vec<f64> = match shared.row_pair_tensor.as_ref() {
+            Some(tensor) => c_primes
+                .iter()
+                .map(|c_prime| Self::tk_tensor_direct_c_term(c_prime, tensor))
+                .collect(),
+            None => {
+                // Union active-block structure over all directions (see doc comment):
+                // filling each gram block once and letting every direction sum over the
+                // union is bit-identical to per-direction blocks.
+                let mut blocks: Vec<TkActiveBlock> = Vec::with_capacity(n.div_ceil(TK_BLOCK_SIZE));
+                for start in (0..n).step_by(TK_BLOCK_SIZE) {
+                    let end = (start + TK_BLOCK_SIZE).min(n);
+                    let mut entries: Vec<(usize, f64)> = Vec::new();
+                    for offset in 0..(end - start) {
+                        let row = start + offset;
+                        let active =
+                            c_array[row] != 0.0 || c_primes.iter().any(|cp| cp[row] != 0.0);
+                        if active {
+                            entries.push((offset, 0.0));
                         }
                     }
-                    c_terms[idx] += sym_factor * block_sum;
+                    if !entries.is_empty() {
+                        blocks.push(TkActiveBlock {
+                            start,
+                            end,
+                            entries,
+                        });
+                    }
                 }
+
+                let mut c_terms = vec![0.0_f64; k];
+                for (j_block_idx, j_block) in blocks.iter().enumerate() {
+                    let j0 = j_block.start;
+                    let j1 = j_block.end;
+                    for i_block in &blocks[..=j_block_idx] {
+                        let i0 = i_block.start;
+                        let i1 = i_block.end;
+                        // Fill the gram block ONCE; consume it for every direction.
+                        Self::tk_fill_gram_block(x_dense, z, i0, i1, j0, j1, gram);
+                        let sym_factor = if i0 == j0 { 1.0 } else { 2.0 };
+                        for idx in 0..k {
+                            let cp = &c_primes[idx];
+                            let mut block_sum = 0.0_f64;
+                            for &(bi, _) in &i_block.entries {
+                                let ii = i0 + bi;
+                                let ci = c_array[ii];
+                                let cpi = cp[ii];
+                                for &(bj, _) in &j_block.entries {
+                                    let jj = j0 + bj;
+                                    let cj = c_array[jj];
+                                    let gij = gram[[bi, bj]];
+                                    let cpj = cp[jj];
+                                    let c_direct = (cpi * cj + ci * cpj) * gij * gij * gij / 12.0;
+                                    block_sum += c_direct;
+                                }
+                            }
+                            c_terms[idx] += sym_factor * block_sum;
+                        }
+                    }
+                }
+                c_terms
             }
-        }
+        };
 
         let mut out = Vec::with_capacity(k);
         for idx in 0..k {
@@ -1196,74 +1437,95 @@ impl<'a> RemlState<'a> {
                     .map(|((&d, &h), &hp)| d * h * hp)
                     .sum::<f64>();
 
-        let direct_blocks = Self::tk_cd_direct_active_blocks(c_array, &c_prime);
-        let mut c_term_prime = 0.0_f64;
-        // Hoist per-block-pair scratch outside the double loop. Both buffers
-        // are sized at TK_BLOCK_SIZE × TK_BLOCK_SIZE; per-iteration we take
-        // sub-views matching the actual (rows, cols) of the current block.
-        let mut block_scratch = Array2::<f64>::zeros((TK_BLOCK_SIZE, TK_BLOCK_SIZE));
-        let mut reverse_scratch = Array2::<f64>::zeros((TK_BLOCK_SIZE, TK_BLOCK_SIZE));
-        for (j_block_idx, j_block) in direct_blocks.iter().enumerate() {
-            let j0 = j_block.start;
-            let j1 = j_block.end;
-            for i_block in &direct_blocks[..=j_block_idx] {
-                let i0 = i_block.start;
-                let i1 = i_block.end;
-                if use_dense_kernels {
-                    Self::tk_fill_gram_block(x_dense, z, i0, i1, j0, j1, gram);
-                } else {
-                    Self::tk_fill_gram_block_entries_scalar(x_dense, z, i_block, j_block, gram);
-                }
-
-                let design_gram_active = if has_design_deriv && use_dense_kernels {
-                    let x_theta = x_fixed.expect("design derivative checked above");
-                    let rows = i1 - i0;
-                    let cols = j1 - j0;
-                    let mut block = block_scratch.slice_mut(s![..rows, ..cols]);
-                    let x_theta_i = x_theta.slice(s![i0..i1, ..]);
-                    let z_j = z.slice(s![.., j0..j1]);
-                    ndarray::linalg::general_mat_mul(1.0, &x_theta_i, &z_j, 0.0, &mut block);
-                    let mut reverse = reverse_scratch.slice_mut(s![..cols, ..rows]);
-                    let x_theta_j = x_theta.slice(s![j0..j1, ..]);
-                    let z_i = z.slice(s![.., i0..i1]);
-                    ndarray::linalg::general_mat_mul(1.0, &x_theta_j, &z_i, 0.0, &mut reverse);
-                    true
-                } else {
-                    false
-                };
-
-                let mut block_sum = 0.0_f64;
-                for &(bi, _) in &i_block.entries {
-                    let ii = i0 + bi;
-                    let ci = c_array[ii];
-                    let cpi = c_prime[ii];
-                    for &(bj, _) in &j_block.entries {
-                        let jj = j0 + bj;
-                        let cj = c_array[jj];
-                        let gij = gram[[bi, bj]];
-                        let cpj = c_prime[jj];
-                        let c_direct = (cpi * cj + ci * cpj) * gij * gij * gij / 12.0;
-                        let k_direct = if design_gram_active {
-                            let kp = block_scratch[[bi, bj]] + reverse_scratch[[bj, bi]];
-                            0.25 * ci * cj * gij * gij * kp
-                        } else if let Some(x_theta) = x_fixed {
-                            let kp = (0..x_dense.ncols())
-                                .map(|col| {
-                                    x_theta[[ii, col]] * z[[col, jj]]
-                                        + x_theta[[jj, col]] * z[[col, ii]]
-                                })
-                                .sum::<f64>();
-                            0.25 * ci * cj * gij * gij * kp
+        let c_term_prime = match shared.row_pair_tensor.as_ref() {
+            Some(tensor) => {
+                // `¹⁄₄ Σ_ij c_i c_j K_ij² K'_ij` with `K'_ij = x'_iᵀz_j + x'_jᵀz_i` is
+                // `¹⁄₂ Σ_ij c_i c_j K_ij² x'_iᵀz_j` by the symmetry of `K`.
+                let design_term = x_fixed.map_or(0.0, |x_theta| {
+                    0.5 * Self::tk_tensor_design_k_term(x_theta, c_array, tensor)
+                });
+                Self::tk_tensor_direct_c_term(&c_prime, tensor) + design_term
+            }
+            None => {
+                let direct_blocks = Self::tk_cd_direct_active_blocks(c_array, &c_prime);
+                let mut c_term_prime = 0.0_f64;
+                // Hoist per-block-pair scratch outside the double loop. Both buffers
+                // are sized at TK_BLOCK_SIZE × TK_BLOCK_SIZE; per-iteration we take
+                // sub-views matching the actual (rows, cols) of the current block.
+                let mut block_scratch = Array2::<f64>::zeros((TK_BLOCK_SIZE, TK_BLOCK_SIZE));
+                let mut reverse_scratch = Array2::<f64>::zeros((TK_BLOCK_SIZE, TK_BLOCK_SIZE));
+                for (j_block_idx, j_block) in direct_blocks.iter().enumerate() {
+                    let j0 = j_block.start;
+                    let j1 = j_block.end;
+                    for i_block in &direct_blocks[..=j_block_idx] {
+                        let i0 = i_block.start;
+                        let i1 = i_block.end;
+                        if use_dense_kernels {
+                            Self::tk_fill_gram_block(x_dense, z, i0, i1, j0, j1, gram);
                         } else {
-                            0.0
+                            Self::tk_fill_gram_block_entries_scalar(
+                                x_dense, z, i_block, j_block, gram,
+                            );
+                        }
+
+                        let design_gram_active = if has_design_deriv && use_dense_kernels {
+                            let x_theta = x_fixed.expect("design derivative checked above");
+                            let rows = i1 - i0;
+                            let cols = j1 - j0;
+                            let mut block = block_scratch.slice_mut(s![..rows, ..cols]);
+                            let x_theta_i = x_theta.slice(s![i0..i1, ..]);
+                            let z_j = z.slice(s![.., j0..j1]);
+                            ndarray::linalg::general_mat_mul(1.0, &x_theta_i, &z_j, 0.0, &mut block);
+                            let mut reverse = reverse_scratch.slice_mut(s![..cols, ..rows]);
+                            let x_theta_j = x_theta.slice(s![j0..j1, ..]);
+                            let z_i = z.slice(s![.., i0..i1]);
+                            ndarray::linalg::general_mat_mul(
+                                1.0,
+                                &x_theta_j,
+                                &z_i,
+                                0.0,
+                                &mut reverse,
+                            );
+                            true
+                        } else {
+                            false
                         };
-                        block_sum += c_direct + k_direct;
+
+                        let mut block_sum = 0.0_f64;
+                        for &(bi, _) in &i_block.entries {
+                            let ii = i0 + bi;
+                            let ci = c_array[ii];
+                            let cpi = c_prime[ii];
+                            for &(bj, _) in &j_block.entries {
+                                let jj = j0 + bj;
+                                let cj = c_array[jj];
+                                let gij = gram[[bi, bj]];
+                                let cpj = c_prime[jj];
+                                let c_direct = (cpi * cj + ci * cpj) * gij * gij * gij / 12.0;
+                                let k_direct = if design_gram_active {
+                                    let kp = block_scratch[[bi, bj]] + reverse_scratch[[bj, bi]];
+                                    0.25 * ci * cj * gij * gij * kp
+                                } else if let Some(x_theta) = x_fixed {
+                                    let kp = (0..x_dense.ncols())
+                                        .map(|col| {
+                                            x_theta[[ii, col]] * z[[col, jj]]
+                                                + x_theta[[jj, col]] * z[[col, ii]]
+                                        })
+                                        .sum::<f64>();
+                                    0.25 * ci * cj * gij * gij * kp
+                                } else {
+                                    0.0
+                                };
+                                block_sum += c_direct + k_direct;
+                            }
+                        }
+                        let sym_factor = if i0 == j0 { 1.0 } else { 2.0 };
+                        c_term_prime += sym_factor * block_sum;
                     }
                 }
-                let sym_factor = if i0 == j0 { 1.0 } else { 2.0 };
-                c_term_prime += sym_factor * block_sum;
+                c_term_prime
             }
-        }
+        };
 
         let value = d_term_prime + c_term_prime + q_term_prime;
         if !value.is_finite() {
@@ -8829,12 +9091,15 @@ mod firth_hessian_direction_reuse_tests {
         }
 
         let solve = |rhs: &Array1<f64>| -> Result<Array1<f64>, EstimationError> { Ok(rhs.clone()) };
-        let shared = RemlState::tk_shared_intermediates(
+        // Row pairs explicitly: this fixture's `z` is not `H⁻¹Xᵀ`, and the gram
+        // batching is what it pins.
+        let shared = RemlState::tk_shared_intermediates_with_route(
             &x_dense,
             &z,
             &c_array,
             "batched-bit-identity test",
             &solve,
+            TkRowPairRoute::RowPairs,
         )
         .expect("shared TK intermediates");
 
@@ -8896,6 +9161,117 @@ mod firth_hessian_direction_reuse_tests {
         }
     }
 
+    // #2900: the tensor route contracts the same row-pair sums through
+    // `T = Σ_j c_j x_j⊗x_j⊗x_j` instead of the row-pair gram. With a genuine
+    // `z = H⁻¹Xᵀ` both routes must give the TK value and the whole gradient
+    // (canonical directions and an ext coordinate with a design derivative) to
+    // roundoff. The magnitude floors keep agreement from passing on zeros, and
+    // the `is_some` check keeps a silent ledger fallback from comparing row
+    // pairs with themselves.
+    #[test]
+    fn tk_tensor_route_matches_row_pairs_2900() {
+        let (x_dense, _beta, _op, penalties, lambdas) = synthetic_logit_setup();
+        let n = x_dense.nrows();
+        let p = x_dense.ncols();
+        let mut h = x_dense.t().dot(&x_dense);
+        for j in 0..p {
+            h[[j, j]] += 0.5 * (j as f64 + 1.0);
+        }
+        let chol = h.cholesky(Side::Lower).expect("chol(H)");
+        let mut z = x_dense.t().to_owned();
+        chol.solve_mat_in_place(&mut z);
+        let solve = |rhs: &Array1<f64>| -> Result<Array1<f64>, EstimationError> {
+            Ok(chol.solvevec(rhs))
+        };
+        let c_array = Array1::from_shape_fn(n, |i| 0.2 + 0.15 * ((i as f64) * 0.61).sin());
+        let d_array = Array1::from_shape_fn(n, |i| 0.1 * ((i as f64) * 0.43).cos() - 0.04);
+        let e_array = Array1::from_shape_fn(n, |i| 0.07 * ((i as f64) * 0.29).sin() + 0.02);
+        let k = penalties.len();
+        let x_vks: Vec<Array1<f64>> = (0..k + 1)
+            .map(|idx| {
+                Array1::from_shape_fn(n, |i| 0.3 * ((i as f64 + 1.0) * (idx as f64 + 0.7)).sin())
+            })
+            .collect();
+        let beta_dirs: Vec<Array1<f64>> = (0..k + 1).map(|_| Array1::zeros(p)).collect();
+        let drift = Array2::from_shape_fn((p, p), |(a, b)| {
+            0.05 * (((a + b) as f64) * 0.9).cos() + if a == b { 0.1 } else { 0.0 }
+        });
+        let eta_fixed = Array1::from_shape_fn(n, |i| 0.04 * ((i as f64) * 1.7).cos());
+        let x_fixed =
+            Array2::from_shape_fn((n, p), |(i, j)| 0.03 * ((i as f64) * (j as f64 + 1.1)).sin());
+
+        let pairs = RemlState::tk_shared_intermediates_with_route(
+            &x_dense,
+            &z,
+            &c_array,
+            "tensor route test",
+            &solve,
+            TkRowPairRoute::RowPairs,
+        )
+        .expect("row-pair shared intermediates");
+        let tensor = RemlState::tk_shared_intermediates_with_route(
+            &x_dense,
+            &z,
+            &c_array,
+            "tensor route test",
+            &solve,
+            TkRowPairRoute::Tensor,
+        )
+        .expect("tensor shared intermediates");
+        assert!(pairs.row_pair_tensor.is_none());
+        assert!(
+            tensor.row_pair_tensor.is_some(),
+            "the ledger must admit a {p}-column tensor, or this test compares row pairs with themselves"
+        );
+
+        let mut gram = Array2::<f64>::zeros((TK_BLOCK_SIZE, TK_BLOCK_SIZE));
+        let value_pairs = RemlState::tk_scalar_from_shared(&x_dense, &z, &d_array, &pairs, &mut gram)
+            .expect("row-pair TK value");
+        let value_tensor =
+            RemlState::tk_scalar_from_shared(&x_dense, &z, &d_array, &tensor, &mut gram)
+                .expect("tensor TK value");
+        assert!(value_pairs.abs() > 1e-8, "TK value {value_pairs:e} is too small to compare");
+        let value_rel = (value_pairs - value_tensor).abs() / value_pairs.abs();
+        assert!(
+            value_rel < 1e-10,
+            "TK value: row pairs {value_pairs:.15e}, tensor {value_tensor:.15e}, rel {value_rel:e}"
+        );
+
+        let gradient = |shared: &TkSharedIntermediates, gram: &mut Array2<f64>| {
+            RemlState::tk_gradient_from_shared(
+                &x_dense,
+                &z,
+                &c_array,
+                &d_array,
+                &e_array,
+                &penalties,
+                &lambdas,
+                std::slice::from_ref(&drift),
+                &[Some(eta_fixed.clone())],
+                &[Some(x_fixed.clone())],
+                &x_vks,
+                &beta_dirs,
+                None,
+                shared,
+                gram,
+            )
+            .expect("TK gradient")
+        };
+        let grad_pairs = gradient(&pairs, &mut gram);
+        let grad_tensor = gradient(&tensor, &mut gram);
+        assert_eq!(grad_pairs.len(), k + 1);
+        for idx in 0..grad_pairs.len() {
+            let left = grad_pairs[idx];
+            let right = grad_tensor[idx];
+            assert!(left.abs() > 1e-10, "gradient[{idx}] = {left:e} is too small to compare");
+            let rel = (left - right).abs() / left.abs();
+            assert!(
+                rel < 1e-10,
+                "TK gradient[{idx}]: row pairs {left:.15e}, tensor {right:.15e}, rel {rel:e}"
+            );
+        }
+    }
+
     // #1575 measurement: at the `n` where the default-ON binomial/logit Firth path
     // pays its dominant `O(n²·p)` direct-gradient cost, the shared-gram batched
     // path is materially faster than refilling the gram `k` times — while staying
@@ -8933,7 +9309,14 @@ mod firth_hessian_direction_reuse_tests {
 
         let solve = |rhs: &Array1<f64>| -> Result<Array1<f64>, EstimationError> { Ok(rhs.clone()) };
         let shared =
-            RemlState::tk_shared_intermediates(&x_dense, &z, &c_array, "perf test", &solve)
+            RemlState::tk_shared_intermediates_with_route(
+                &x_dense,
+                &z,
+                &c_array,
+                "perf test",
+                &solve,
+                TkRowPairRoute::RowPairs,
+            )
                 .expect("shared TK intermediates");
 
         let reps = 20usize;
