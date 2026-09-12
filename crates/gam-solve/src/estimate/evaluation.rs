@@ -69,6 +69,20 @@ pub(crate) fn sas_effective_epsilon_second(raw_epsilon: f64) -> (f64, f64, f64) 
     (bound * t, first, second)
 }
 
+/// The raw-ε interval the `sas_epsilon_bound()·tanh(raw/bound)` chart resolves
+/// (#2902 row 8). The chart's slope `sech²(raw/bound)` falls to `√ε` at
+/// `|raw| = bound·acosh(ε^{−1/4})`; past that a unit raw step moves ε by less
+/// than `√ε`, the resolution every derived ρ-domain edge is placed at
+/// ([`log_gradient_resolution`](crate::estimate::rho_domain::log_gradient_resolution)).
+pub(crate) fn sas_epsilon_domain() -> (f64, f64) {
+    let bound = sas_epsilon_bound();
+    let edge = bound
+        * (-0.5 * crate::estimate::rho_domain::log_gradient_resolution())
+            .exp()
+            .acosh();
+    (-edge, edge)
+}
+
 #[inline]
 pub(crate) fn sas_log_delta_edge_barriercostgradhess(raw_log_delta: f64) -> (f64, f64, f64) {
     let w = sas_log_delta_edge_barrierweight();
@@ -247,4 +261,28 @@ where
     let cost = reml_state.compute_cost(rho)?;
     let ridge = reml_state.last_ridge_used().unwrap_or(0.0);
     Ok((cost, ridge))
+}
+
+#[cfg(test)]
+mod sas_epsilon_domain_tests {
+    use super::*;
+
+    /// #2902 row 8: the outer box on raw SAS ε ends where its tanh chart's slope
+    /// falls to `√ε`, so the search box is the range the chart resolves.
+    #[test]
+    fn the_sas_epsilon_domain_ends_where_the_chart_slope_falls_to_root_epsilon_2902() {
+        let root_epsilon = f64::EPSILON.sqrt();
+        let (lower, upper) = sas_epsilon_domain();
+        assert_eq!(lower, -upper);
+        let slope = |raw: f64| sas_effective_epsilon(raw).1;
+        let edge = slope(upper);
+        assert!(
+            (edge - root_epsilon).abs() <= 1.0e-6 * root_epsilon,
+            "the chart slope at the domain edge must be √ε, got {edge:.6e}"
+        );
+        assert!(
+            slope(0.99 * upper) > root_epsilon && slope(1.01 * upper) < root_epsilon,
+            "the chart slope must cross √ε at the domain edge"
+        );
+    }
 }

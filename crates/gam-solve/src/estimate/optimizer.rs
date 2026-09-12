@@ -1048,19 +1048,11 @@ where
     let mut negbin_alternation_round: usize = 0;
     let mut negbin_rho_seed: Option<Array1<f64>> = None;
     let mut negbin_best_checkpoint: Option<NegbinJointCheckpoint> = None;
-    // The box the outer arm searches the ρ block in, and so the box its
-    // certificate judges rails against. The ρ-only arm searches the #2812
-    // resolvability domain; the mixture/SAS arm still searches the ±RHO_BOUND box
-    // (#2902 row 8). Every post-fit projection below reads this one box (#2412),
-    // so a coordinate railed on a derived face is scored as railed there too.
-    let rho_model_domain: (Array1<f64>, Array1<f64>) = if mixture_dim == 0 && sas_dim == 0 {
-        (rho_domain_lower, rho_domain_upper)
-    } else {
-        (
-            Array1::from_elem(k, -crate::estimate::RHO_BOUND),
-            Array1::from_elem(k, crate::estimate::RHO_BOUND),
-        )
-    };
+    // The box every outer arm searches the ρ block in, and so the box its
+    // certificate judges rails against: the #2812 resolvability domain (#2902
+    // row 8). Every post-fit projection below reads this one box (#2412), so a
+    // coordinate railed on a derived face is scored as railed there too.
+    let rho_model_domain: (Array1<f64>, Array1<f64>) = (rho_domain_lower, rho_domain_upper);
     loop {
         (
             final_rho,
@@ -1588,6 +1580,38 @@ where
             // property of the data since #2613 -- an undeclared route falls
             // back to the bare absolute tolerance, which at large n is orders
             // below the residual a converged fit floors at.
+            // #2902 row 8: the θ box is derived per coordinate, not the ±RHO_BOUND
+            // box. ρ is searched in the #2812 resolvability domain. A link
+            // coordinate has no penalty spectrum, so it takes the range its own
+            // chart resolves: a mixture free logit is a log-scale coordinate
+            // (`precision_box`), SAS raw ε is a tanh chart (`sas_epsilon_domain`),
+            // and SAS raw log δ and the beta-logistic `[ε, log δ]` pass through
+            // `smooth_bound_jet`, which stops moving at the edge of its support
+            // (`smooth_bound_support`). Every beta-logistic shape-argument pair
+            // `(log δ − ε, log δ + ε)` inside that support is reached from inside
+            // the axis box, and a point outside repeats one reached inside.
+            let (link_lower, link_upper): (Vec<f64>, Vec<f64>) = if use_mixture {
+                let (lower, upper) = crate::estimate::rho_domain::precision_box();
+                (vec![lower; mixture_dim], vec![upper; mixture_dim])
+            } else if use_beta_logistic {
+                let (lower, upper) = crate::mixture_link::smooth_bound_support(
+                    crate::mixture_link::BETA_LOGISTIC_LOG_SHAPE_BOUND,
+                );
+                (vec![lower; sas_dim], vec![upper; sas_dim])
+            } else {
+                let (epsilon_lower, epsilon_upper) =
+                    crate::estimate::evaluation::sas_epsilon_domain();
+                let (log_delta_lower, log_delta_upper) =
+                    crate::mixture_link::smooth_bound_support(crate::mixture_link::SAS_LOG_DELTA_BOUND);
+                (
+                    vec![epsilon_lower, log_delta_lower],
+                    vec![epsilon_upper, log_delta_upper],
+                )
+            };
+            let theta_lower =
+                Array1::from_iter(rho_model_domain.0.iter().copied().chain(link_lower));
+            let theta_upper =
+                Array1::from_iter(rho_model_domain.1.iter().copied().chain(link_upper));
             let n_obs = y_o.len();
             let problem = OuterProblem::new(theta_dim)
                 .with_gradient(Derivative::Analytic)
@@ -1609,7 +1633,7 @@ where
                 .with_seed_config(reml_seed_config_mix)
                 .with_screening_cap(Arc::clone(&reml_state.screening_max_inner_iterations))
                 .with_outer_inner_cap(reml_inner_progress_feedback(&reml_state))
-                .with_rho_bound(crate::estimate::RHO_BOUND);
+                .with_bounds(theta_lower, theta_upper);
             let problem = if let Some(h) = heuristic_theta_ref {
                 problem.with_heuristic_lambdas(h.to_vec())
             } else {

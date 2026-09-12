@@ -25,9 +25,9 @@ pub(crate) const LOG_LINK_SOLVER_ETA_MIN: f64 = -700.0;
 /// Inclusive upper endpoint of the standard log-link solver domain.
 pub(crate) const LOG_LINK_SOLVER_ETA_MAX: f64 = 700.0;
 /// Bound B used by the bounded sinh-arcsinh log-delta parameterisation:
-/// `delta = exp(B * tanh(raw_log_delta / B))`. Exposed for the outer-strategy
-/// edge-barrier helpers in `solver/estimate.rs` that previously had to
-/// hard-code the same `12.0` with a "must match" comment.
+/// `delta = exp(g(raw_log_delta))` with `g = smooth_bound_jet(·, B)`. Exposed
+/// for the outer-strategy edge-barrier helpers in `solver/estimate.rs` that
+/// previously had to hard-code the same `12.0` with a "must match" comment.
 pub(crate) const SAS_LOG_DELTA_BOUND: f64 = 12.0;
 
 /// Bound `B` on each beta-logistic log-shape: `a = exp(g(log δ − ε))` and
@@ -58,6 +58,18 @@ pub(crate) const SAS_LOG_DELTA_BOUND: f64 = 12.0;
 /// The map is the exact identity on `|x| ≤ 0.8·B`, so every fit whose shapes
 /// are in that range is bitwise unchanged.
 pub(crate) const BETA_LOGISTIC_LOG_SHAPE_BOUND: f64 = 1.5;
+
+/// The raw interval on which `smooth_bound_jet(·, bound)` still depends on its
+/// argument (#2902 row 8). At `|x| = a + 2·(B − a)`, `a = SPLICE_INTERIOR_FRAC·B`,
+/// the map reaches `±B` with every derivative exactly zero and stays there, so a
+/// point outside the interval moves nothing a point on its edge does not. The
+/// edge is formed with the same operations `smooth_bound_jet` compares against,
+/// so the saturated branch holds exactly at it.
+pub(crate) fn smooth_bound_support(bound: f64) -> (f64, f64) {
+    let interior = SPLICE_INTERIOR_FRAC * bound;
+    let edge = interior + 2.0 * (bound - interior);
+    (-edge, edge)
+}
 
 #[inline]
 fn latent_cloglog_quadctx() -> &'static crate::quadrature::QuadratureContext {
@@ -4394,6 +4406,34 @@ mod tests {
             "bounded beta-logistic link sensitivity collapsed at the runaway              theta: d1={} (canonical logit is 0.25)",
             jet.d1
         );
+    }
+
+    /// #2902 row 8: the outer box on a coordinate charted by `smooth_bound_jet` is
+    /// the map's own support. Just inside its edge the map still moves; at the
+    /// edge and beyond it is exactly `±B` with a zero slope, so every point outside
+    /// repeats a value the box already holds.
+    #[test]
+    fn a_bounded_map_support_ends_where_the_map_stops_moving_2902() {
+        for bound in [SAS_LOG_DELTA_BOUND, BETA_LOGISTIC_LOG_SHAPE_BOUND] {
+            let (lower, upper) = smooth_bound_support(bound);
+            assert_eq!(lower, -upper);
+            let inside = smooth_bound_jet(0.99 * upper, bound);
+            assert!(
+                inside.d1 > 0.0,
+                "bound={bound}: the map must still move just inside its support, d1={}",
+                inside.d1
+            );
+            for beyond in [upper, 2.0 * upper] {
+                let saturated = smooth_bound_jet(beyond, bound);
+                assert_eq!(saturated.g, bound, "bound={bound} x={beyond}");
+                assert_eq!(saturated.d1, 0.0, "bound={bound} x={beyond}");
+                assert_eq!(
+                    smooth_bound_jet(-beyond, bound).g,
+                    -bound,
+                    "bound={bound} x=-{beyond}"
+                );
+            }
+        }
     }
 
     /// #2685: the bounded map's chain rule reaches the analytic parameter
