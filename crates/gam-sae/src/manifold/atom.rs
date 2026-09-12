@@ -683,7 +683,7 @@ impl SaeManifoldAtom {
     /// This is the ENTIRE κ channel of the criterion: a constant-curvature
     /// atom's basis is a monomial patch in the tangent coordinate and carries no
     /// κ, so the design does not move and only the penalty does.
-    pub fn smooth_penalty_kappa_derivative(&self) -> Option<&Array2<f64>> {
+    pub(crate) fn smooth_penalty_kappa_derivative(&self) -> Option<&Array2<f64>> {
         self.smooth_penalty_kappa_derivative.as_ref()
     }
 
@@ -1136,7 +1136,7 @@ impl SaeManifoldAtom {
     /// agree. Attachment is one-shot: replacing a plan could otherwise change
     /// the declared metric independently of the frozen Gram. There is no width
     /// or harmonic-order inference from the realized arrays.
-    pub fn with_geometry_plan(mut self, plan: SaeAtomGeometryPlan) -> Result<Self, String> {
+    pub(crate) fn with_geometry_plan(mut self, plan: SaeAtomGeometryPlan) -> Result<Self, String> {
         if self.geometry_plan.is_some() {
             return Err(
                 "SaeManifoldAtom::with_geometry_plan: geometry plan is already installed; replacement is forbidden"
@@ -1616,7 +1616,7 @@ impl SaeManifoldAtom {
     /// arrow-Schur border (issue #972). `r == p` (full output dim) when no
     /// Grassmann frame is active — the historical full-`B` border width. When a
     /// frame is active the border holds only `M_k · r` coordinates.
-    pub fn border_frame_rank(&self) -> usize {
+    pub(crate) fn border_frame_rank(&self) -> usize {
         match &self.decoder_frame {
             Some(frame) => frame.rank(),
             None => self.output_dim(),
@@ -1625,7 +1625,7 @@ impl SaeManifoldAtom {
 
     /// Per-atom arrow-Schur border coefficient count: `M_k · r` when a frame is
     /// active (the factored width), else the full `M_k · p` (issue #972).
-    pub fn border_coeff_count(&self) -> usize {
+    pub(crate) fn border_coeff_count(&self) -> usize {
         self.basis_size() * self.border_frame_rank()
     }
 
@@ -1633,7 +1633,7 @@ impl SaeManifoldAtom {
     /// this atom (issue #972). `0` when no frame is active. This is the number
     /// of frame degrees of freedom that must enter the quasi-Laplace score
     /// dimension accounting (evidence honesty).
-    pub fn frame_manifold_dimension(&self) -> usize {
+    pub(crate) fn frame_manifold_dimension(&self) -> usize {
         match &self.decoder_frame {
             Some(frame) => frame.manifold_dimension(),
             None => 0,
@@ -1644,7 +1644,7 @@ impl SaeManifoldAtom {
     /// singular values, with the relative cutoff `SAE_FRAME_RANK_CUTOFF`. This
     /// is the smallest frame rank `r` that captures `B_k`'s span up to that
     /// energy floor; the auto-activation heuristic compares it against `p`.
-    pub fn decoder_numerical_rank(&self) -> Result<usize, String> {
+    pub(crate) fn decoder_numerical_rank(&self) -> Result<usize, String> {
         let p = self.output_dim();
         if p == 0 || self.basis_size() == 0 {
             return Ok(0);
@@ -1674,7 +1674,7 @@ impl SaeManifoldAtom {
     /// Because `rank(B_k) <= M_k`, a cold LSQ decoder with `p >= 896` and
     /// `M_k <= 16` always satisfies the shrink predicate (`16 << 0.75p`) unless
     /// the decoder has no output dimension or no basis columns.
-    pub fn decoder_frame_activation_rank(&self) -> Result<Option<usize>, String> {
+    pub(crate) fn decoder_frame_activation_rank(&self) -> Result<Option<usize>, String> {
         let p = self.output_dim();
         if p == 0 || self.basis_size() == 0 {
             return Ok(None);
@@ -1773,7 +1773,7 @@ impl SaeManifoldAtom {
 
     /// Coordinate matrix `C_k = B_k · U` (`M_k × r`) that the border stores when
     /// a frame is active (issue #972). Returns `None` on the full-`B` path.
-    pub fn factored_coordinates(&self) -> Result<Option<Array2<f64>>, String> {
+    pub(crate) fn factored_coordinates(&self) -> Result<Option<Array2<f64>>, String> {
         match &self.decoder_frame {
             Some(frame) => Ok(Some(
                 frame.project_decoder(self.decoder_coefficients.view())?,
@@ -1801,7 +1801,7 @@ impl SaeManifoldAtom {
     /// re-project the coordinates so `B_k` is unchanged in span. The frame
     /// update happens OUTSIDE the border; the coordinate matrix is re-derived by
     /// projection onto the new frame. No-op (error) when no frame is active.
-    pub fn refresh_frame_from_cross_moment(
+    pub(crate) fn refresh_frame_from_cross_moment(
         &mut self,
         cross_moment: ArrayView2<'_, f64>,
     ) -> Result<(), String> {

@@ -247,7 +247,7 @@ impl SaeManifoldRho {
     /// restores the curvature-free layout. Atom indices must be strictly
     /// increasing so the mapping is canonical and flat-index lookup is exact.
     #[must_use]
-    pub fn with_curvature(mut self, curvature: Vec<(usize, f64)>) -> Self {
+    pub(crate) fn with_curvature(mut self, curvature: Vec<(usize, f64)>) -> Self {
         self.kappa_atoms = curvature.iter().map(|(atom, _)| *atom).collect();
         self.kappa = curvature.into_iter().map(|(_, value)| value).collect();
         self
@@ -347,13 +347,13 @@ impl SaeManifoldRho {
 
     /// First flat coordinate occupied by per-atom smoothness.
     #[must_use]
-    pub fn smooth_flat_start(&self) -> usize {
+    pub(crate) fn smooth_flat_start(&self) -> usize {
         usize::from(self.sparse_flat_index().is_some())
     }
 
     /// Flat coordinate for atom `atom`'s smoothness strength.
     #[must_use]
-    pub fn smooth_flat_index(&self, atom: usize) -> usize {
+    pub(crate) fn smooth_flat_index(&self, atom: usize) -> usize {
         assert!(
             atom < self.k_atoms(),
             "SaeManifoldRho::smooth_flat_index: atom {atom} outside K={}",
@@ -373,7 +373,7 @@ impl SaeManifoldRho {
     /// every atom). This is the number of SHARED outer ARD coordinates in
     /// [`ArdSharing::Shared`] mode.
     #[must_use]
-    pub fn max_ard_axes(&self) -> usize {
+    pub(crate) fn max_ard_axes(&self) -> usize {
         self.log_ard.iter().map(|a| a.len()).max().unwrap_or(0)
     }
 
@@ -415,7 +415,7 @@ impl SaeManifoldRho {
     /// the next time a tail is appended — the block gradient made exactly that
     /// mistake — so it is derived forwards from the same prefix arithmetic
     /// `ard_flat_index` uses.
-    pub fn kappa_flat_index(&self, atom: usize) -> Option<usize> {
+    pub(crate) fn kappa_flat_index(&self, atom: usize) -> Option<usize> {
         let curvature_index = self.kappa_atoms.binary_search(&atom).ok()?;
         let k = self.log_lambda_smooth.len();
         let prefix = self.smooth_flat_start();
@@ -599,7 +599,7 @@ impl SaeManifoldRho {
     /// (#1556). The vector is returned only after every coordinate validates, so
     /// a caller never observes a partially converted table.
     #[must_use]
-    pub fn lambda_smooth_vec(&self) -> Result<Vec<f64>, String> {
+    pub(crate) fn lambda_smooth_vec(&self) -> Result<Vec<f64>, String> {
         checked_exp_log_strengths(self.log_lambda_smooth.iter().copied())
             .map_err(|error| format!("smoothness log strength: {error}"))
     }

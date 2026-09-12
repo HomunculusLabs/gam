@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// three of the five and so was not closed under rotation. It is the smallest
 /// degree at which a sphere atom is `SO(3)`-covariant, which is why it is the
 /// default rather than a tuned constant.
-pub const SAE_AMBIENT_SPHERE_DEFAULT_DEGREE: usize = 2;
+pub(crate) const SAE_AMBIENT_SPHERE_DEFAULT_DEGREE: usize = 2;
 
 /// Harmonic order of the circle atom the #2233 pre-screen prices a span-`≤2`
 /// residual against.
@@ -32,7 +32,7 @@ pub const SAE_PRESCREEN_CIRCLE_HARMONIC_ORDER: usize = 1;
 /// span-`≥4` residual against — the order the birth topology race builds at
 /// `d_k = 2`, giving `(2·order + 1)² = 25` columns. Same anti-drift contract as
 /// [`SAE_PRESCREEN_CIRCLE_HARMONIC_ORDER`].
-pub const SAE_PRESCREEN_TORUS_PER_AXIS_ORDER: usize = 2;
+pub(crate) const SAE_PRESCREEN_TORUS_PER_AXIS_ORDER: usize = 2;
 
 /// Basis-native resolution of one analytic atom family.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -329,7 +329,7 @@ impl SaeAtomGeometryPlan {
         )
     }
 
-    pub fn klein_bottle(per_axis_order: usize) -> Result<Self, String> {
+    pub(crate) fn klein_bottle(per_axis_order: usize) -> Result<Self, String> {
         Self::new(
             SaeAtomBasisKind::KleinBottle,
             2,
@@ -918,7 +918,7 @@ pub fn anisotropic_flat_product_torus_penalty(
 /// [`anisotropic_flat_product_torus_penalty`]. The flat family is diagonal in
 /// the tensor Fourier basis, so differentiating its eigenvalue
 /// `k^2/A^2 + l^2` is exact and allocation-linear in the basis width.
-pub fn anisotropic_flat_product_torus_penalty_aspect_derivative(
+pub(crate) fn anisotropic_flat_product_torus_penalty_aspect_derivative(
     per_axis_order: usize,
     aspect: f64,
 ) -> Result<Array2<f64>, String> {
@@ -1225,7 +1225,7 @@ pub fn embedded_donut_torus_reference_penalty(
 /// [`embedded_donut_torus_reference_penalty`]. Closed form throughout: no finite
 /// differences or autodiff. Used to propagate the smoothing/aspect coupling into
 /// the outer objective.
-pub fn embedded_donut_torus_reference_penalty_aspect_derivative(
+pub(crate) fn embedded_donut_torus_reference_penalty_aspect_derivative(
     per_axis_order: usize,
     aspect: f64,
 ) -> Result<Array2<f64>, String> {

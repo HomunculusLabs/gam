@@ -115,7 +115,7 @@ impl AngleFidelityVerdict {
 /// [`UNIT_SPEED_INLOOP_DEFECT_TOL`] (the same tolerance below which the in-loop
 /// retraction treats a chart as already arc-length and skips it). A `None`
 /// reading (arc length ill-defined) is `Degenerate`.
-pub fn angle_fidelity_verdict(reading: Option<&ChartArcLengthReading>) -> AngleFidelityVerdict {
+pub(crate) fn angle_fidelity_verdict(reading: Option<&ChartArcLengthReading>) -> AngleFidelityVerdict {
     match reading {
         Some(r) if r.min_speed_over_mean > SAE_FLOW_DIFFEO_MIN_DET => {
             if r.speed_cv < UNIT_SPEED_INLOOP_DEFECT_TOL {
@@ -318,7 +318,7 @@ fn coordinate_uniformity_impl(
 /// Weighted Watson `U²` against the uniform invariant measure. `weights` are the
 /// unnormalised support masses for the same rows as `u`; zero-weight rows do not
 /// contribute. For equal unit weights this reduces to [`watson_u2_uniform`].
-pub fn watson_u2_uniform_weighted(
+pub(crate) fn watson_u2_uniform_weighted(
     u: &[f64],
     weights: ArrayView1<'_, f64>,
 ) -> Option<WatsonUniformity> {
@@ -403,7 +403,7 @@ pub fn watson_u2_uniform_weighted(
 /// structure choice (like [`MIXTURE_K_LADDER`](crate) / the topology ladder),
 /// not a grid search — each `k` is priced by its own free-parameter count and
 /// ranked by evidence. Includes `7` (weekday-cyclic) and `12` (month-cyclic).
-pub const OCCUPANCY_ANCHOR_LADDER: &[usize] = &[2, 3, 4, 5, 6, 7, 9, 12];
+pub(crate) const OCCUPANCY_ANCHOR_LADDER: &[usize] = &[2, 3, 4, 5, 6, 7, 9, 12];
 
 /// The occupancy law of a fitted `d = 1` coordinate ON its honest chart: which
 /// measure the data draws from. Adjudicated by evidence (`classify_occupancy`),
@@ -496,7 +496,7 @@ pub fn classify_occupancy_weighted(u: &[f64], weights: ArrayView1<'_, f64>) -> O
 /// last anchors and misread a range-filling uniform coordinate as non-uniform.
 /// [`classify_occupancy_weighted`] is the circular counterpart for genuinely
 /// cyclic (circle-chart) coordinates.
-pub fn classify_occupancy_interval_weighted(
+pub(crate) fn classify_occupancy_interval_weighted(
     u: &[f64],
     weights: ArrayView1<'_, f64>,
 ) -> OccupancyLaw {
@@ -1433,7 +1433,7 @@ pub fn prefer_candidate_basin(
 /// objective itself; it must not be borrowed from the much coarser,
 /// dimensionless EV negligibility band. Within the objective convergence band,
 /// `ev_tol` controls the EV/uniformity tie-break.
-pub fn prefer_candidate_state(
+pub(crate) fn prefer_candidate_state(
     candidate_objective: f64,
     candidate_ev: f64,
     candidate_uniformity: Option<f64>,

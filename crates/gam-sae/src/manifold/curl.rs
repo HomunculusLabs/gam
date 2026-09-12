@@ -300,7 +300,7 @@ impl CircleSeed {
 /// and the paired coords `(α, β)`. `u, v` are the two ambient directions
 /// (length `p`) the flat pair lives in — they need NOT be orthonormal; the seed
 /// reconstructs the ring exactly in whatever frame it was parked. `harmonics ≥ 1`.
-pub fn curl_seed(
+pub(crate) fn curl_seed(
     u: ArrayView1<f64>,
     v: ArrayView1<f64>,
     alpha: ArrayView1<f64>,
@@ -373,7 +373,7 @@ pub struct FlattenVerdict {
 /// Gaussian blob — demote to rank 2. A diameter collapse (second resultant ≈ 1,
 /// the angle mass on one line) means it is rank 1. A healthy ring (κ ≈ 1, angles
 /// covering the circle) is left alone.
-pub fn flatten_verdict(
+pub(crate) fn flatten_verdict(
     radii: ArrayView1<f64>,
     angles: ArrayView1<f64>,
 ) -> Result<FlattenVerdict, String> {
@@ -411,7 +411,7 @@ pub fn flatten_verdict(
 /// Gram–Schmidt orthonormalize a candidate plane frame `(u, v)` and project the
 /// ambient rows `x` (`n×p`) onto it, returning the paired coords `(α, β)`. This
 /// is the projection the pair-κ co-firing screen's plane feeds `curl_verdict`.
-pub fn orthonormal_pair_coords(
+pub(crate) fn orthonormal_pair_coords(
     x: ArrayView2<f64>,
     u: ArrayView1<f64>,
     v: ArrayView1<f64>,
@@ -690,7 +690,7 @@ pub fn coalesce_antipodal(
 /// `(B+1)·1{no surrogate reaches the observation}`, whose null mean is 1 under
 /// exchangeability with NO dependence assumption, and which is what an e-BH ledger
 /// consumes.
-pub fn ring_permutation_evidence(
+pub(crate) fn ring_permutation_evidence(
     alpha: ArrayView1<f64>,
     beta: ArrayView1<f64>,
     replicates: usize,
@@ -864,7 +864,7 @@ pub struct CurlCooldownLedger {
 }
 
 /// Order-independent hash of an atom set (the cooldown key).
-pub fn atom_set_hash(atoms: &[usize]) -> u64 {
+pub(crate) fn atom_set_hash(atoms: &[usize]) -> u64 {
     let mut sorted: Vec<usize> = atoms.to_vec();
     sorted.sort_unstable();
     sorted.dedup();

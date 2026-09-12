@@ -91,7 +91,7 @@ pub struct CrosscoderDriftReport {
 
 impl CrosscoderDriftReport {
     /// Number of consecutive layer steps per atom (`L − 1`).
-    pub fn num_steps(&self) -> usize {
+    pub(crate) fn num_steps(&self) -> usize {
         self.layer_chain.len().saturating_sub(1)
     }
 
@@ -99,7 +99,7 @@ impl CrosscoderDriftReport {
     ///
     /// # Panics
     /// If `k >= num_atoms`.
-    pub fn atom_drift_profile(&self, k: usize) -> Vec<f64> {
+    pub(crate) fn atom_drift_profile(&self, k: usize) -> Vec<f64> {
         assert!(
             k < self.num_atoms,
             "atom_drift_profile: atom {k} out of range (K = {})",
@@ -118,7 +118,7 @@ impl CrosscoderDriftReport {
     ///
     /// # Panics
     /// If `k >= num_atoms`.
-    pub fn atom_total_drift(&self, k: usize) -> f64 {
+    pub(crate) fn atom_total_drift(&self, k: usize) -> f64 {
         self.atom_drift_profile(k)
             .into_iter()
             .filter(|d| d.is_finite())
@@ -143,13 +143,13 @@ impl CrosscoderDriftReport {
 
     /// The atom with the largest total drift (the feature that rotates the most
     /// through the stack). `None` when there are no atoms or no finite drift.
-    pub fn most_drifting_atom(&self) -> Option<usize> {
+    pub(crate) fn most_drifting_atom(&self) -> Option<usize> {
         self.extremal_atom(true)
     }
 
     /// The atom with the smallest total drift (the most layer-stable feature).
     /// `None` when there are no atoms or no finite drift.
-    pub fn most_stable_atom(&self) -> Option<usize> {
+    pub(crate) fn most_stable_atom(&self) -> Option<usize> {
         self.extremal_atom(false)
     }
 
@@ -177,7 +177,7 @@ impl CrosscoderDriftReport {
 ///
 /// Requires `layout.total_dim() == term.output_dim()` (the layout describes this
 /// term's augmented columns) and at least one output block (`L ≥ 2`).
-pub fn measure_crosscoder_drift(
+pub(crate) fn measure_crosscoder_drift(
     term: &SaeManifoldTerm,
     layout: &CrosscoderLayout,
 ) -> Result<CrosscoderDriftReport, String> {

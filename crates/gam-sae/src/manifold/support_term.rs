@@ -95,7 +95,7 @@ impl SaeSupportStationarity {
     /// Accept either of the two mathematically valid first-order currencies:
     /// the extensive raw gradient relative to the objective, or the
     /// componentwise curvature-scaled displacement relative to the iterate.
-    pub fn kkt_certifies(
+    pub(crate) fn kkt_certifies(
         self,
         objective_scale: f64,
         parameter_scale: f64,
@@ -965,7 +965,7 @@ impl SaeSupportSparseTerm {
 
     /// Total width of the compact coordinate state `T` — the concatenation of
     /// every row's active coordinate block.
-    pub fn coordinate_state_len(&self) -> usize {
+    pub(crate) fn coordinate_state_len(&self) -> usize {
         (0..self.n_obs())
             .map(|row| self.assignment.coords_row(row).len())
             .sum()
@@ -3387,7 +3387,7 @@ impl SaeSupportSparseTerm {
 
     /// Raw response residual `target - fitted`, deliberately before any
     /// smoothing or coordinate-prior transformation.
-    pub fn raw_residual(&self, target: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+    pub(crate) fn raw_residual(&self, target: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
         if target.dim() != (self.n_obs(), self.output_dim) {
             return Err(format!(
                 "SaeSupportSparseTerm::raw_residual: target {:?} != ({}, {})",
@@ -3462,7 +3462,7 @@ impl SaeSupportSparseTerm {
     }
 
     /// [`Self::penalized_objective`] against a caller-supplied residual.
-    pub fn penalized_objective_with_residual(
+    pub(crate) fn penalized_objective_with_residual(
         &self,
         residual: &Array2<f64>,
         lambda_smooth: &[f64],
@@ -3975,7 +3975,7 @@ impl SaeSupportSparseTerm {
     /// loop that holds the fit still (the joint hyperparameter solve) can
     /// compute it once instead of once per sweep -- fifty full
     /// reconstructions per round at 250k x 8096, all of them identical.
-    pub fn fellner_schall_smoothing_with_residual(
+    pub(crate) fn fellner_schall_smoothing_with_residual(
         &self,
         lambda_smooth: &[f64],
         residual: &Array2<f64>,
