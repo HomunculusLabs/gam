@@ -72,7 +72,8 @@ pub use block_scoring_gpu::{
     DEVICE_BLOCK_GATE_MIN_ELEMS, route_and_code_blocks_required, route_blocks_required,
 };
 pub use block_stream::{
-    BlockEpochStats, BlockShardStats, BlockSparseStreamArtifact, BlockSparseStreamState,
+    BlockEpochStats, BlockShardStats, BlockSparseStreamArtifact, BlockSparseStreamConvergence,
+    BlockSparseStreamState,
 };
 pub use codes::SparseCode;
 pub use coordinate::{

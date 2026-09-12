@@ -6275,7 +6275,15 @@ fn block_sparse_dictionary_fit_payload<'py>(
     convergence.set_item("ev_residual", fit.convergence.ev_residual)?;
     convergence.set_item("gamma_residual", fit.convergence.gamma_residual)?;
     convergence.set_item("frame_residual", fit.convergence.frame_residual)?;
+    convergence.set_item("routing_residual", fit.convergence.routing_residual)?;
+    convergence.set_item(
+        "reconstruction_residual",
+        fit.convergence.reconstruction_residual,
+    )?;
+    convergence.set_item("accepted_births", fit.convergence.accepted_births)?;
+    convergence.set_item("polar_failures", fit.convergence.polar_failures)?;
     convergence.set_item("tolerance", fit.convergence.tolerance)?;
+    convergence.set_item("certified", fit.convergence.certified)?;
     out.set_item("convergence", convergence)?;
     out.set_item("block_topk", fit.block_topk)?;
     out.set_item("block_size", fit.block_size)?;
@@ -6881,8 +6889,10 @@ impl BlockSparseDictStream {
 
     /// Hand back the converged block frames (`K×P`) + γ + per-block report +
     /// metadata: `{decoder, gamma, block_topk, block_size, block_utilization,
-    /// block_stable_rank, epochs, explained_variance}`. Raises if the streaming
-    /// loop has not converged — the handle stays resumable (SPEC 20).
+    /// block_stable_rank, epochs, explained_variance, convergence}`, where
+    /// `convergence` is `{corpus_rows, epoch, ev_residual, gamma_residual,
+    /// frame_residual, accepted_births, tolerance}`. Raises if the streaming loop
+    /// has not converged — the handle stays resumable (SPEC 20).
     fn finalize(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
         let artifact = self.inner.finalize().map_err(py_value_error)?;
         let out = PyDict::new(py);
@@ -6894,6 +6904,15 @@ impl BlockSparseDictStream {
         out.set_item("block_stable_rank", artifact.block_stable_rank)?;
         out.set_item("epochs", artifact.epochs)?;
         out.set_item("explained_variance", artifact.explained_variance)?;
+        let convergence = PyDict::new(py);
+        convergence.set_item("corpus_rows", artifact.convergence.corpus_rows)?;
+        convergence.set_item("epoch", artifact.convergence.epoch)?;
+        convergence.set_item("ev_residual", artifact.convergence.ev_residual)?;
+        convergence.set_item("gamma_residual", artifact.convergence.gamma_residual)?;
+        convergence.set_item("frame_residual", artifact.convergence.frame_residual)?;
+        convergence.set_item("accepted_births", artifact.convergence.accepted_births)?;
+        convergence.set_item("tolerance", artifact.convergence.tolerance)?;
+        out.set_item("convergence", convergence)?;
         Ok(out.unbind())
     }
 

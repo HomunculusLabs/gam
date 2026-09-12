@@ -1445,6 +1445,15 @@ impl BlockSparseStreamState {
             epochs: self.epochs_run,
             explained_variance: self.last_ev,
             decoder_solve_stats: self.last_decoder_solve_stats,
+            convergence: BlockSparseStreamConvergence {
+                corpus_rows: self.last_rows,
+                epoch: self.epochs_run,
+                ev_residual: self.last_ev_residual,
+                gamma_residual: self.last_gamma_residual,
+                frame_residual: self.last_frame_residual,
+                accepted_births: self.last_accepted_births,
+                tolerance: self.config.tolerance,
+            },
         })
     }
 
@@ -1540,6 +1549,26 @@ impl BlockSparseStreamState {
     }
 }
 
+/// The fixed-point certificate a streaming fit was finalized on: the certifying
+/// epoch's residuals against the configured tolerance, and the corpus it measured.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockSparseStreamConvergence {
+    /// Rows streamed through the certifying epoch.
+    pub corpus_rows: usize,
+    /// The certifying epoch (epochs closed so far, inclusive).
+    pub epoch: usize,
+    /// `|ΔEV|` between the certifying epoch and the epoch before it.
+    pub ev_residual: f64,
+    /// Relative change of γ in the certifying epoch.
+    pub gamma_residual: f64,
+    /// The certifying epoch's frame residual.
+    pub frame_residual: f64,
+    /// Accepted block births in the certifying epoch; zero on a certified fit.
+    pub accepted_births: usize,
+    /// The configured tolerance the residuals were certified against.
+    pub tolerance: f64,
+}
+
 /// The artifact [`BlockSparseStreamState::finalize`] returns: the trained block
 /// frames + γ + per-block report + run metadata. No `N×k` routing — the streamed
 /// corpus is re-encoded shard-by-shard through the frozen frames, not held here.
@@ -1565,6 +1594,8 @@ pub struct BlockSparseStreamArtifact {
     /// refreshes its frames by a dense Rayleigh–Ritz step, not the matrix-free
     /// CG/percolation solver that serves the atom/dict lane.
     pub decoder_solve_stats: DecoderSolveStats,
+    /// The fixed-point certificate the stream was finalized on.
+    pub convergence: BlockSparseStreamConvergence,
 }
 
 fn validate_config(config: &BlockSparseConfig) -> Result<(), String> {

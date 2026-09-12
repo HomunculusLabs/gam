@@ -418,11 +418,31 @@ class SparseDictStream:
 
 @dataclass(frozen=True, slots=True)
 class BlockSparseDictionaryConvergence:
-    """Read-only fixed-point certificate for a block-sparse fit."""
+    """Read-only fixed-point certificate for a block-sparse fit, every native
+    channel of the Rust ``BlockSparseConvergence``."""
 
     ev_residual: float
     gamma_residual: float
     frame_residual: float
+    routing_residual: float
+    reconstruction_residual: float
+    accepted_births: int
+    polar_failures: int
+    tolerance: float
+    certified: bool
+
+
+@dataclass(frozen=True, slots=True)
+class BlockSparseStreamConvergence:
+    """Read-only certificate a streaming block-sparse fit was finalized on: the
+    certifying epoch's residuals, its tolerance, and the corpus it measured."""
+
+    corpus_rows: int
+    epoch: int
+    ev_residual: float
+    gamma_residual: float
+    frame_residual: float
+    accepted_births: int
     tolerance: float
 
 
@@ -466,7 +486,8 @@ class BlockSparseDictionaryFit:
     fitted:
         ``N x P`` dense reconstruction of the training rows (FP32).
     convergence:
-        Read-only EV, shared-``gamma``, and gauge-invariant frame residuals.
+        The read-only fixed-point certificate: the one-shot fit's own, or, for a
+        sample routed through a :class:`BlockSparseStreamArtifact`, the stream's.
     explained_variance, epochs, block_topk, block_size:
         Run metadata.
     """
@@ -482,7 +503,7 @@ class BlockSparseDictionaryFit:
     fitted: np.ndarray
     explained_variance: float
     epochs: int
-    convergence: BlockSparseDictionaryConvergence
+    convergence: BlockSparseDictionaryConvergence | BlockSparseStreamConvergence
     block_topk: int
     block_size: int
 
@@ -862,7 +883,12 @@ def _block_sparse_fit_from_payload(payload: Any) -> BlockSparseDictionaryFit:
             ev_residual=float(convergence["ev_residual"]),
             gamma_residual=float(convergence["gamma_residual"]),
             frame_residual=float(convergence["frame_residual"]),
+            routing_residual=float(convergence["routing_residual"]),
+            reconstruction_residual=float(convergence["reconstruction_residual"]),
+            accepted_births=int(convergence["accepted_births"]),
+            polar_failures=int(convergence["polar_failures"]),
             tolerance=float(convergence["tolerance"]),
+            certified=bool(convergence["certified"]),
         ),
         block_topk=int(data["block_topk"]),
         block_size=int(data["block_size"]),
@@ -889,8 +915,10 @@ class BlockSparseStreamArtifact:
         Shared tied-encoder scalar ``γ``.
     block_utilization, block_stable_rank:
         Length-``G`` per-block report from the final epoch.
-    block_topk, block_size, epochs, explained_variance, converged:
+    block_topk, block_size, epochs, explained_variance:
         Run metadata.
+    convergence:
+        The read-only certificate the stream was finalized on.
     """
 
     decoder: np.ndarray
@@ -901,7 +929,7 @@ class BlockSparseStreamArtifact:
     block_stable_rank: np.ndarray
     epochs: int
     explained_variance: float
-    converged: bool
+    convergence: BlockSparseStreamConvergence
 
     @property
     def n_blocks(self) -> int:
@@ -942,10 +970,11 @@ class BlockSparseStreamArtifact:
             gamma=float(self.gamma),
             block_utilization=np.ascontiguousarray(self.block_utilization, dtype=np.float32),
             block_stable_rank=np.ascontiguousarray(self.block_stable_rank, dtype=np.float32),
+            matryoshka_prefix_losses=(),
             fitted=np.ascontiguousarray(fitted),
             explained_variance=float(self.explained_variance),
             epochs=int(self.epochs),
-            converged=bool(self.converged),
+            convergence=self.convergence,
             block_topk=int(self.block_topk),
             block_size=int(b),
         )
@@ -1055,6 +1084,7 @@ class BlockSparseDictStream:
         """Hand back the trained block frames + γ + per-block report as a
         :class:`BlockSparseStreamArtifact`."""
         data = dict(self._handle.finalize())
+        convergence = dict(data["convergence"])
         return BlockSparseStreamArtifact(
             decoder=np.ascontiguousarray(data["decoder"], dtype=np.float32),
             gamma=float(data["gamma"]),
@@ -1064,7 +1094,15 @@ class BlockSparseDictStream:
             block_stable_rank=np.ascontiguousarray(data["block_stable_rank"], dtype=np.float32),
             epochs=int(data["epochs"]),
             explained_variance=float(data["explained_variance"]),
-            converged=bool(data["converged"]),
+            convergence=BlockSparseStreamConvergence(
+                corpus_rows=int(convergence["corpus_rows"]),
+                epoch=int(convergence["epoch"]),
+                ev_residual=float(convergence["ev_residual"]),
+                gamma_residual=float(convergence["gamma_residual"]),
+                frame_residual=float(convergence["frame_residual"]),
+                accepted_births=int(convergence["accepted_births"]),
+                tolerance=float(convergence["tolerance"]),
+            ),
         )
 
     @property
