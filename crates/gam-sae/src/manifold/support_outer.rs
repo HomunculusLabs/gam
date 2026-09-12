@@ -1142,6 +1142,61 @@ pub fn fit_sae_support_sparse(
     })
 }
 
+/// A public overcomplete support-sparse fit together with its linear-bulk census.
+pub struct SaeSupportSparseCensusedFit {
+    /// The curved fit of the Tier-0-centered target.
+    pub fit: SaeSupportSparseFit,
+    /// The linear bulk at the derived width and its code-space census
+    /// ([`crate::tiered::linear_bulk_census`]), or why it refused. It audits the
+    /// curved fit and never changes it, so a refusal is reported, not raised.
+    pub linear_bulk_census: Result<crate::tiered::TieredFitReport, String>,
+}
+
+impl SaeSupportSparseCensusedFit {
+    /// The census as a payload record, or `{"refused": reason}`.
+    #[must_use]
+    pub fn census_json(&self) -> serde_json::Value {
+        match &self.linear_bulk_census {
+            Ok(report) => report.census_json(),
+            Err(reason) => serde_json::json!({ "refused": reason }),
+        }
+    }
+}
+
+/// The public overcomplete support-sparse entry (#2023 lead ruling). It runs the
+/// curved fit of the Tier-0-centered target through [`fit_sae_support_sparse`], plus
+/// the Tier-1 linear bulk at the derived width with its code-space census: the
+/// adjudicated account, in bits, of which linear communities would curve.
+pub fn fit_sae_support_sparse_with_census(
+    request: SaeSupportSparseFitRequest<'_>,
+) -> Result<SaeSupportSparseCensusedFit, String> {
+    let target = request.target;
+    let support_k = request.support_k;
+    let fit = fit_sae_support_sparse(request)?;
+    let d_max = sae_support_effective_atom_dims(&fit.atom_basis, &fit.atom_dim)?
+        .into_iter()
+        .max()
+        .unwrap_or(1);
+    let linear_bulk_census = crate::tiered::linear_bulk_census(target, d_max, support_k);
+    match &linear_bulk_census {
+        Ok(report) => log::info!(
+            "support-sparse linear-bulk census: {} blocks of size {}, EV {:.6}, {} of {} \
+             communities curve ({:.1} bits saved)",
+            report.tier1.block_utilization.len(),
+            report.tier1.block_size,
+            report.tier1.explained_variance,
+            report.code_space.n_accepted,
+            report.code_space.n_communities,
+            report.code_space.dl_saved_bits,
+        ),
+        Err(reason) => log::warn!("support-sparse linear-bulk census refused: {reason}"),
+    }
+    Ok(SaeSupportSparseCensusedFit {
+        fit,
+        linear_bulk_census,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -47,6 +47,7 @@ pub use code_space::{
 };
 pub use fit::{
     LinearPeel, LinearPeelConfig, TieredFitConfig, TieredFitReport, TieredSeedPolicy, fit_tiered,
+    linear_bulk_census,
 };
 
 use std::collections::{BTreeMap, BTreeSet};

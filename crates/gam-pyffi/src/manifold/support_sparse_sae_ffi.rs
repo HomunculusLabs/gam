@@ -9,7 +9,7 @@
 use gam::terms::sae::manifold::{
     SAE_SUPPORT_INNER_FIXED_POINT_MAX_ITER, SaeSupportFixedPointReport, SaeSupportRehydrateRequest,
     SaeSupportSparseFit, SaeSupportSparseFitRequest, SaeSupportSparseTerm, SaeSupportStationarity,
-    fit_sae_support_sparse, rehydrate_sae_support_term,
+    fit_sae_support_sparse_with_census, rehydrate_sae_support_term,
 };
 use ndarray::{Array1, Array2, ArrayView2};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
@@ -705,17 +705,7 @@ pub(crate) fn fit_support_sparse_manifold_sae(
     py: Python<'_>,
     request: SupportSparseFitRequest<'_>,
 ) -> PyResult<PyObject> {
-    let SaeSupportSparseFit {
-        outer,
-        requested_atoms,
-        retained_atom_indices,
-        atom_basis,
-        atom_dim,
-        training_mean,
-        fitted,
-        reconstruction_r2,
-        migration,
-    } = fit_sae_support_sparse(SaeSupportSparseFitRequest {
+    let censused = fit_sae_support_sparse_with_census(SaeSupportSparseFitRequest {
         target: request.target,
         atom_basis: request.atom_basis,
         atom_dim: request.atom_dim,
@@ -730,6 +720,18 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         random_state: request.random_state,
     })
     .map_err(py_value_error)?;
+    let linear_bulk_census = censused.census_json();
+    let SaeSupportSparseFit {
+        outer,
+        requested_atoms,
+        retained_atom_indices,
+        atom_basis,
+        atom_dim,
+        training_mean,
+        fitted,
+        reconstruction_r2,
+        migration,
+    } = censused.fit;
     let fixed = fixed_point_json(&outer.fixed_point);
     let outer_certificate = serde_json::to_value(&outer.outer_certificate)
         .map_err(|error| py_value_error(error.to_string()))?;
@@ -738,6 +740,7 @@ pub(crate) fn fit_support_sparse_manifold_sae(
         "inner_fixed_point": fixed,
         "outer_stationarity": outer_certificate,
         "migration": migration.to_json(),
+        "linear_bulk_census": linear_bulk_census,
     });
     let termination = serde_json::json!({
         "verdict": "converged",

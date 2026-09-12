@@ -11,10 +11,11 @@
 //! alternation via `sae_manifold_fit`).
 //!
 //! This module keeps the in-crate orchestrator [`fit_tiered`] that expresses that
-//! schedule directly in Rust. Its callers are its own tests and the
-//! `tiered_dominance`, `tiered_gpu_scale` and `tiered_k2000_measure` examples; no
-//! production entry reaches it. The seed half is the [`fit_linear_peel`] stage and
-//! the full cadence is:
+//! schedule directly in Rust. Production reaches its linear-bulk half through
+//! [`linear_bulk_census`], which the public support-sparse fit runs as its
+//! code-space census (#2023 lead ruling). The full cadence is reached only by its
+//! tests and the `tiered_dominance`, `tiered_gpu_scale` and `tiered_k2000_measure`
+//! examples. The seed half is the [`fit_linear_peel`] stage and the full cadence is:
 //!
 //! **(a) Seed policy** — Tier-0 peels the shared column mean ([`Tier0Mean`]; the
 //!    bulk is fit on `R0 = z − μ`), then Tier-1 warm-starts the linear bulk: the
@@ -361,9 +362,9 @@ pub struct TieredFitReport {
 /// Tier-0 mean + Tier-1 block-sparse linear warm start (the seed) → Tier-2 curved
 /// support-sparse refinement on the Tier-1 residual.
 ///
-/// **No production entry reaches this.** The public tiered FFI/Python surface was
-/// deleted in unification Increment 4; this orchestrator is the in-Rust expression
-/// of the schedule, called by its tests and the `tiered_*` examples.
+/// Production reaches it with Tier-2 off, through [`linear_bulk_census`]. The public
+/// tiered FFI/Python surface was deleted in unification Increment 4, so the full
+/// cadence is called only by its tests and the `tiered_*` examples.
 ///
 /// The curved tier is fit on the Tier-1 residual through the canonical
 /// support-sparse engine (`fit_tier2_support` → [`fit_sae_support_sparse`]),
@@ -460,6 +461,88 @@ pub fn fit_tiered(
         ledger,
         explained_variance,
     })
+}
+
+/// The linear bulk the public support-sparse fit audits with (#2023 lead ruling):
+/// `G = ⌊P/b⌋` blocks of size `b`, the widest chart the curved dictionary uses, with
+/// block TopK `min(s, G)`. Every other knob is the block lane's own default.
+fn derived_linear_bulk_config(
+    output_dim: usize,
+    block_size: usize,
+    support_k: usize,
+) -> Result<TieredFitConfig, String> {
+    if block_size == 0 || support_k == 0 {
+        return Err(format!(
+            "linear_bulk_census requires block_size >= 1 and support_k >= 1; got \
+             b={block_size}, s={support_k}"
+        ));
+    }
+    let n_blocks = output_dim / block_size;
+    if n_blocks == 0 {
+        return Err(format!(
+            "linear_bulk_census: a block of size {block_size} does not fit in P={output_dim}"
+        ));
+    }
+    let mut config = TieredFitConfig::linear_bulk(n_blocks, block_size);
+    config.tier1.block_topk = support_k.min(n_blocks);
+    Ok(config)
+}
+
+/// Tier-1 linear bulk at the derived width and its code-space census, fit on the
+/// Tier-0-centered target (#2023 lead ruling).
+///
+/// The public curved fit charts the target itself, never this bulk's residual: two
+/// linear atoms reconstruct a centered ring exactly, so a chart of the residual is
+/// blind to in-span curvature (`code_space`). This bulk is the adjudicated account
+/// beside it instead: its dead blocks, and which linear communities the census
+/// prices, in bits, as curving.
+pub fn linear_bulk_census(
+    z: ArrayView2<'_, f64>,
+    block_size: usize,
+    support_k: usize,
+) -> Result<TieredFitReport, String> {
+    let config = derived_linear_bulk_config(z.ncols(), block_size, support_k)?;
+    fit_tiered(z, &config)
+}
+
+impl TieredFitReport {
+    /// The linear bulk and its code-space census as a payload record: the bulk's
+    /// geometry, fit and certificate, the census tallies in bits, and the migration
+    /// ledger of its dead blocks and adjudicated promotions.
+    #[must_use]
+    pub fn census_json(&self) -> serde_json::Value {
+        let tier1 = &self.tier1;
+        let census = &self.code_space;
+        let live_blocks = tier1
+            .block_utilization
+            .iter()
+            .filter(|&&utilization| utilization > 0.0)
+            .count();
+        serde_json::json!({
+            "linear_bulk": {
+                "n_blocks": tier1.block_utilization.len(),
+                "block_size": tier1.block_size,
+                "block_topk": tier1.block_topk,
+                "live_blocks": live_blocks,
+                "explained_variance": tier1.explained_variance,
+                "epochs": tier1.epochs,
+                "certified": tier1.convergence.certified,
+                "frame_residual": tier1.convergence.frame_residual,
+                "tolerance": tier1.convergence.tolerance,
+            },
+            "census": {
+                "n_blocks_scanned": census.n_blocks_scanned,
+                "n_communities": census.n_communities,
+                "n_accepted": census.n_accepted,
+                "pair_proposals": census.pair_proposals.len(),
+                "dl_saved_bits": census.dl_saved_bits,
+                "fraction_curved": census.fraction_curved,
+                "distortion_floor": census.tolerance,
+                "l0": census.l0,
+            },
+            "ledger": self.ledger.to_json(),
+        })
+    }
 }
 
 /// Fit the Tier-2 curved refinement: the overcomplete hard-TopK support-sparse
@@ -1085,5 +1168,45 @@ mod fit_tests {
             "the refusal must be the support engine's own non-recurrence or missing \
              outer certificate, got: {error}"
         );
+    }
+
+    /// #2023 ruling: the public fit's linear bulk is `G = ⌊P/b⌋` blocks of size
+    /// `b` with block TopK `min(s, G)`, and a block wider than the corpus refuses.
+    #[test]
+    fn derived_linear_bulk_width_follows_the_chart_width_and_support_2023() {
+        let narrow = derived_linear_bulk_config(4, 1, 2).expect("P=4, b=1, s=2");
+        assert_eq!(
+            (narrow.tier1.n_blocks, narrow.tier1.block_size, narrow.tier1.block_topk),
+            (4, 1, 2)
+        );
+        assert!(!narrow.tier2_enabled, "the census runs no curved tier");
+        let capped = derived_linear_bulk_config(5, 2, 3).expect("P=5, b=2, s=3");
+        assert_eq!(
+            (capped.tier1.n_blocks, capped.tier1.block_size, capped.tier1.block_topk),
+            (2, 2, 2)
+        );
+        assert!(derived_linear_bulk_config(2, 3, 1).is_err());
+        assert!(derived_linear_bulk_config(4, 1, 0).is_err());
+    }
+
+    /// The census record carries the bulk's geometry and certificate, the census
+    /// tallies and the ledger, on the certified two-circle linear bulk.
+    #[test]
+    fn census_json_records_the_bulk_census_and_ledger_2023() {
+        let z = two_circle_fixture_2634();
+        let mut config = TieredFitConfig::linear_bulk(2, 1);
+        config.tier1.block_topk = 1;
+        config.tier1.aux_k = 2;
+        config.tier1.max_epochs = 200;
+        let report = fit_tiered(z.view(), &config).expect("linear-bulk fit runs");
+        let record = report.census_json();
+        assert_eq!(record["linear_bulk"]["n_blocks"].as_u64(), Some(2));
+        assert_eq!(record["linear_bulk"]["block_size"].as_u64(), Some(1));
+        assert_eq!(
+            record["census"]["n_blocks_scanned"].as_u64(),
+            Some(report.code_space.n_blocks_scanned as u64)
+        );
+        assert_eq!(record["ledger"]["pc_reseed_events"].as_u64(), Some(0));
+        assert!(record["ledger"]["moves"].is_array());
     }
 }
