@@ -260,7 +260,6 @@ impl SparseCholeskyOperator {
         range_start: usize,
         range_end: usize,
     ) -> f64 {
-        let t_start = std::time::Instant::now();
         let chunk = Self::OPERATOR_SOLVE_CHUNK.min(self.n_dim.max(1));
         let mut op_rhs_block = Array2::<f64>::zeros((self.n_dim, chunk));
         let mut eye_rhs_block = Array2::<f64>::zeros((self.n_dim, chunk));
@@ -320,15 +319,6 @@ impl SparseCholeskyOperator {
             start = end;
         }
 
-        let elapsed_ms = t_start.elapsed().as_secs_f64() * 1000.0;
-        if elapsed_ms > REML_TRACE_SLOW_LOG_MS {
-            log::info!(
-                "[REML-trace] matrix_block_op_cross_exact | n_dim={} | block={} | {:.1}ms",
-                self.n_dim,
-                range_end - range_start,
-                elapsed_ms
-            );
-        }
         trace
     }
 

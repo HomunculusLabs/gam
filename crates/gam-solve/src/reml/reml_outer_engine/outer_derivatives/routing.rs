@@ -5,8 +5,6 @@
 //! avoiding large dense `p × p` drift storage and pairwise row assembly when
 //! the model's `(n, p, K)` shape says those dominate.
 
-pub(crate) const HESSIAN_UNAVAILABLE_PREFIX: &str = "outer Hessian unavailable:";
-
 /// Minimum coefficient dimension at which the matrix-free operator path is
 /// selected unconditionally — once `p` is this large the dense `p × p`
 /// assembly itself dominates and operator HVPs win regardless of `n` or `K`.
@@ -45,11 +43,6 @@ pub(crate) const CALLBACK_OUTER_HESSIAN_ROW_PAIR_WORK_THRESHOLD: usize = 25_000_
 /// estimator's variance is not worth trading for; above it the stochastic
 /// estimator's O(p²·m) cost wins.
 pub(crate) const STOCHASTIC_TRACE_DIM_THRESHOLD: usize = 500;
-
-/// Elapsed-time (ms) above which a sparse-Cholesky trace path emits a timing
-/// diagnostic. Purely observational — surfaces slow per-eval trace solves to the
-/// bench runner without affecting the fit.
-pub(crate) const REML_TRACE_SLOW_LOG_MS: f64 = 100.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OuterHessianRoutePlan {
@@ -218,8 +211,4 @@ pub fn outer_hessian_route_plan(
 /// and pairwise row assembly when the model says those dominate.
 pub fn prefer_outer_hessian_operator(n: usize, p: usize, k: usize) -> bool {
     generic_outer_hessian_scale_decision(n, p, k).prefers_operator
-}
-
-pub(crate) fn is_hessian_unavailable(error: &str) -> bool {
-    error.starts_with(HESSIAN_UNAVAILABLE_PREFIX)
 }

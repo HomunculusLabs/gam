@@ -2039,10 +2039,6 @@ pub(crate) fn reml_laml_evaluate(
                     }
                     hessian
                 }
-                Err(err) if is_hessian_unavailable(&err) => {
-                    log::warn!("{err}");
-                    gam_problem::HessianValue::Unavailable
-                }
                 Err(err) => return Err(err),
             }
         } else {
@@ -2094,10 +2090,6 @@ pub(crate) fn reml_laml_evaluate(
                         sl += ph;
                     }
                     gam_problem::HessianValue::Dense(h)
-                }
-                Err(err) if is_hessian_unavailable(&err) => {
-                    log::warn!("{err}");
-                    gam_problem::HessianValue::Unavailable
                 }
                 Err(err) => return Err(err),
             }
