@@ -167,7 +167,6 @@ pub(crate) fn prebuilt_ctn_family_uses_explicit_rho_without_reseeding() {
         DesignMatrix::Dense(DenseDesignMatrix::from(covariate)),
         vec![],
         &config,
-        None,
     )
     .expect("prebuilt CTN family");
 
@@ -231,7 +230,6 @@ pub(crate) fn tensor_psi_penalty_derivatives_carry_response_mass_gram_layout() {
         DesignMatrix::Dense(DenseDesignMatrix::from(cov_design.clone())),
         vec![],
         &toy_scop_ctn_config(),
-        None,
     )
     .expect("toy transformation family");
 
@@ -317,7 +315,6 @@ pub(crate) fn ctn_tensor_penalty_layout_orders_covariate_response_double() {
         DesignMatrix::Dense(DenseDesignMatrix::from(cov_design)),
         vec![PenaltyMatrix::Dense(s_cov.clone())],
         &config,
-        None,
     )
     .expect("toy transformation family");
 
@@ -520,7 +517,6 @@ pub(crate) fn tensor_psi_row_chunks_are_window_consistent() {
         DesignMatrix::Dense(DenseDesignMatrix::from(cov_design)),
         vec![],
         &toy_scop_ctn_config(),
-        None,
     )
     .expect("toy transformation family");
 
@@ -701,7 +697,6 @@ fn toy_family_and_derivatives_with_penalty_mode(
         DesignMatrix::Dense(DenseDesignMatrix::from(cov_design)),
         vec![],
         &toy_scop_ctn_config(),
-        None,
     )
     .expect("toy transformation family");
     let derivative_blocks =
@@ -984,10 +979,16 @@ pub(crate) fn warm_start_absorbs_offset_into_affine_seed() {
         (cov_rows, 1),
         1.0,
     )));
-    let warm_start = TransformationWarmStart {
-        location: Array1::from_elem(response.len(), 1.0),
-        scale: Array1::from_elem(response.len(), 2.0),
-    };
+    // The family seeds from the default warm start. On an intercept-only design its
+    // location and scale are the same at every row, so the affine seed below is
+    // `(y − location)/scale` exactly.
+    let warm_start =
+        super::warm_start::estimate_default_warm_start(&response, &weights, &covariate_design, &[])
+            .expect("default warm start on an intercept-only design");
+    let location = warm_start.location[0];
+    let scale = warm_start.scale[0];
+    assert!(warm_start.location.iter().all(|&value| value == location));
+    assert!(warm_start.scale.iter().all(|&value| value == scale));
     let family = TransformationNormalFamily::from_prebuilt_response_basis(
         &response,
         val_basis,
@@ -1001,7 +1002,6 @@ pub(crate) fn warm_start_absorbs_offset_into_affine_seed() {
         covariate_design,
         vec![],
         &toy_scop_ctn_config(),
-        Some(&warm_start),
     )
     .expect("transformation family");
 
@@ -1010,11 +1010,12 @@ pub(crate) fn warm_start_absorbs_offset_into_affine_seed() {
         .expect("row quantities at initial beta");
     let h = row.h.as_ref();
     let h_prime = row.h_prime.as_ref();
-    // expected_h[i] = (response[i] - location)/scale = (y - 1)/2.
+    // expected_h[i] = (response[i] - location)/scale.
     let expected_h: Array1<f64> = response.mapv(|y| {
-        (y - 1.0) / 2.0 + TRANSFORMATION_MONOTONICITY_EPS * (y - family.response_median())
+        (y - location) / scale + TRANSFORMATION_MONOTONICITY_EPS * (y - family.response_median())
     });
-    let expected_h_prime = Array1::from_elem(response.len(), 0.5 + TRANSFORMATION_MONOTONICITY_EPS);
+    let expected_h_prime =
+        Array1::from_elem(response.len(), 1.0 / scale + TRANSFORMATION_MONOTONICITY_EPS);
 
     for i in 0..expected_h.len() {
         assert!(
@@ -2084,7 +2085,6 @@ pub(crate) fn ctn_coefficient_hessian_cost_switches_to_matvec_when_matrix_free_a
         DesignMatrix::Dense(DenseDesignMatrix::from(cov_design)),
         vec![],
         &toy_scop_ctn_config(),
-        None,
     )
     .expect("matrix-free-eligible CTN family");
     let p_resp = family.response_val_basis.ncols() as u64;
@@ -2821,7 +2821,6 @@ pub(crate) fn ctn_covariate_penalty_is_response_mass_gram_function_roughness() {
         DesignMatrix::Dense(DenseDesignMatrix::from(cov_design)),
         vec![PenaltyMatrix::Dense(s_cov.clone())],
         &toy_scop_ctn_config(),
-        None,
     )
     .expect("toy transformation family");
 
@@ -2930,7 +2929,6 @@ pub(crate) fn ctn_covariate_penalty_is_basis_change_invariant() {
             DesignMatrix::Dense(DenseDesignMatrix::from(cov)),
             vec![PenaltyMatrix::Dense(pen)],
             &toy_scop_ctn_config(),
-            None,
         )
         .expect("toy transformation family");
         (family.tensor_penalties[0].clone(), p_resp)
@@ -3108,7 +3106,6 @@ pub(crate) fn ctn_shape_penalties_annihilate_the_affine_transformation_2600() {
         DesignMatrix::Dense(DenseDesignMatrix::from(Array2::<f64>::ones((n, 1)))),
         vec![],
         &config,
-        None,
     )
     .expect("intercept-only CTN family");
     assert_eq!(
@@ -3526,7 +3523,6 @@ pub(crate) fn ctn_penalized_objective_is_coercive_in_the_location_column_2600() 
         DesignMatrix::Dense(DenseDesignMatrix::from(Array2::<f64>::ones((n, 1)))),
         vec![],
         &config,
-        None,
     )
     .expect("intercept-only CTN family");
     let rho = family
@@ -3707,7 +3703,6 @@ pub(crate) fn ctn_penalized_objective_never_prefers_the_constant_transformation_
         DesignMatrix::Dense(DenseDesignMatrix::from(Array2::<f64>::ones((n, 1)))),
         vec![],
         &config,
-        None,
     )
     .expect("intercept-only CTN family");
     // Ten e-folds above the data-scaled seed: far past the strength at which the

@@ -188,7 +188,6 @@ pub struct TransformationNormalFitRequest<'a> {
     pub config: TransformationNormalConfig,
     pub options: BlockwiseFitOptions,
     pub kappa_options: SpatialLengthScaleOptimizationOptions,
-    pub warm_start: Option<TransformationWarmStart>,
 }
 pub enum FitRequest<'a> {
     Standard(StandardFitRequest<'a>),

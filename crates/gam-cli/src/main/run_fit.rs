@@ -1092,7 +1092,6 @@ pub(crate) fn run_fit_transformation_normal(
             config,
             options,
             kappa_options: kappa_options.clone(),
-            warm_start: None,
         },
     )) {
         Ok(FitResult::TransformationNormal(result)) => result,

@@ -8,10 +8,10 @@ pub(crate) fn beta_bits_match(cached: &Array1<f64>, candidate: &Array1<f64>) -> 
             .all(|(&left, &right)| left.to_bits() == right.to_bits())
 }
 
-/// Optional warm-start for the transformation model: per-observation location and
-/// scale values from a prior mean/SD normalizer.
+/// Per-observation location and scale that seed the transformation model's affine
+/// coefficients (see `estimate_default_warm_start`).
 #[derive(Clone, Debug)]
-pub struct TransformationWarmStart {
+pub(crate) struct TransformationWarmStart {
     /// μ(x_i): conditional mean of the response at each observation's covariates.
     pub location: Array1<f64>,
     /// τ(x_i): conditional standard deviation at each observation's covariates.
@@ -254,7 +254,6 @@ impl TransformationNormalFamily {
     /// * `covariate_design` - Pre-built covariate-side design operator (n × p_cov).
     /// * `covariate_penalties` - Penalty matrices for the covariate basis.
     /// * `config` - Response-direction basis configuration.
-    /// * `warm_start` - Optional location/scale from a prior normalizer.
     pub fn new(
         response: &Array1<f64>,
         weights: &Array1<f64>,
@@ -262,7 +261,6 @@ impl TransformationNormalFamily {
         covariate_design: DesignMatrix,
         covariate_penalties: Vec<PenaltyMatrix>,
         config: &TransformationNormalConfig,
-        warm_start: Option<&TransformationWarmStart>,
     ) -> Result<Self, String> {
         let n = response.len();
         if covariate_design.nrows() != n {
@@ -353,7 +351,6 @@ impl TransformationNormalFamily {
             &covariate_penalties,
             p_resp,
             p_cov,
-            warm_start,
         )?;
 
         // ----- 4. Tensor penalties (Kronecker-separable) -----
@@ -431,7 +428,6 @@ impl TransformationNormalFamily {
         covariate_design: DesignMatrix,
         covariate_penalties: Vec<PenaltyMatrix>,
         config: &TransformationNormalConfig,
-        warm_start: Option<&TransformationWarmStart>,
     ) -> Result<Self, String> {
         let n = response_val_basis.nrows();
         if n == 0 {
@@ -552,7 +548,6 @@ impl TransformationNormalFamily {
             &covariate_penalties,
             p_resp,
             p_cov,
-            warm_start,
         )?;
 
         // Tensor penalties (Kronecker-separable).

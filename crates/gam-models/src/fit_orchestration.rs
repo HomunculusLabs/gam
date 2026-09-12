@@ -48,7 +48,7 @@ use crate::survival::marginal_slope::{
 };
 
 use crate::transformation_normal::{
-    TransformationNormalConfig, TransformationNormalFitResult, TransformationWarmStart,
+    TransformationNormalConfig, TransformationNormalFitResult,
     fit_transformation_normal,
 };
 

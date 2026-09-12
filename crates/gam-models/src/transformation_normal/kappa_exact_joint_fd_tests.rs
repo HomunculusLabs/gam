@@ -200,7 +200,6 @@ impl CtnKappaFixture {
                 .map(|bp| bp.to_penalty_matrix(cov_design.design.ncols()))
                 .collect(),
             &self.config,
-            None,
         )
     }
 

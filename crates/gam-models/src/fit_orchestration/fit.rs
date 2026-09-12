@@ -3761,7 +3761,6 @@ pub(crate) fn fit_transformation_normal_model(
         &request.config,
         &request.options,
         &request.kappa_options,
-        request.warm_start.as_ref(),
     )
 }
 

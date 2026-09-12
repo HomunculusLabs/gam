@@ -21,7 +21,6 @@ pub(crate) fn compute_warm_start(
     covariate_penalties: &[PenaltyMatrix],
     p_resp: usize,
     p_cov: usize,
-    warm_start: Option<&TransformationWarmStart>,
 ) -> Result<Array1<f64>, String> {
     let n = response.len();
     let p_total = p_resp * p_cov;
@@ -34,19 +33,7 @@ pub(crate) fn compute_warm_start(
         .into());
     }
 
-    let default_ws;
-    let ws = match warm_start {
-        Some(ws) => ws,
-        None => {
-            default_ws = estimate_default_warm_start(
-                response,
-                weights,
-                covariate_design,
-                covariate_penalties,
-            )?;
-            &default_ws
-        }
-    };
+    let ws = estimate_default_warm_start(response, weights, covariate_design, covariate_penalties)?;
     if ws.location.len() != n || ws.scale.len() != n {
         return Err(TransformationNormalError::InvalidInput {
             reason: "warm start location/scale length mismatch".to_string(),

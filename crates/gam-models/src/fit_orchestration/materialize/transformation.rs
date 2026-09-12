@@ -65,7 +65,6 @@ pub(crate) fn materialize_transformation_normal<'a>(
                 ..BlockwiseFitOptions::default()
             },
             kappa_options: config.spatial_optimization.clone(),
-            warm_start: None,
         }),
         inference_notes,
     })

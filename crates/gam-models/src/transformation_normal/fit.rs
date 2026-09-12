@@ -150,7 +150,6 @@ pub(crate) fn fit_transformation_normal(
     config: &TransformationNormalConfig,
     options: &BlockwiseFitOptions,
     kappa_options: &SpatialLengthScaleOptimizationOptions,
-    warm_start: Option<&TransformationWarmStart>,
 ) -> Result<TransformationNormalFitResult, String> {
     let mut options = options.clone();
     // CTN advertises profiled outer-Hessian HVP support and supplies the
@@ -261,7 +260,6 @@ pub(crate) fn fit_transformation_normal(
                 .map(|bp| bp.to_penalty_matrix(cov_design.design.ncols()))
                 .collect(),
             &effective_config,
-            warm_start,
         )?;
         let rho0 = family.penalty_scale_log_lambdas()?;
         let blocks = vec![family.block_spec(&rho0)?];
@@ -355,7 +353,6 @@ pub(crate) fn fit_transformation_normal(
             .map(|bp| bp.to_penalty_matrix(probe_design.design.ncols()))
             .collect(),
         &effective_config,
-        warm_start,
     )?;
     let rho0 = probe_family.penalty_scale_log_lambdas()?;
     let probe_block = probe_family.block_spec(&rho0)?;
@@ -440,7 +437,6 @@ pub(crate) fn fit_transformation_normal(
     let rt = resp_transform.clone();
     let rdeg = effective_config.response_degree;
     let cfg = effective_config.clone();
-    let ws = warm_start.cloned();
 
     // Helper: build family from prebuilt response basis + covariate design.
     let make_family =
@@ -465,7 +461,6 @@ pub(crate) fn fit_transformation_normal(
                     .map(|bp| bp.to_penalty_matrix(cov_design.design.ncols()))
                     .collect(),
                 &cfg,
-                ws.as_ref(),
             )
         };
 
