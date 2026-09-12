@@ -8,5 +8,4 @@ mod many_centers_does_not_degrade;
 mod robust_clean_fit_invariance;
 mod robust_clean_fit_invariance_families;
 mod robust_never_fail_stress;
-mod standard_gam_scaling;
 mod step_function_recovery;

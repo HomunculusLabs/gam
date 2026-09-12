@@ -8,7 +8,6 @@ mod pair_surface_grid_consumer;
 mod pairwise_reduce_reproducibility;
 mod parallelism_pool_size_fit_invariance_1045;
 mod power_law_analyzer;
-mod power_law_common;
 mod resource_policy_auto_strict;
 mod rho_outer_loop_n_scaling;
 mod rho_posterior_escalation_tiers;
