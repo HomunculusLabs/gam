@@ -2264,9 +2264,11 @@ impl MultinomialSavedModel {
         Array2::from_shape_vec((d, d), flat.clone()).ok()
     }
 
-    /// Default posterior-mean class probabilities. This integrates
-    /// `softmax(eta)` under the per-row Gaussian predictor posterior rather than
-    /// evaluating softmax at the coefficient mode.
+    /// Default posterior-mean class probabilities `E[softmax(η)]`, as the ratio of
+    /// Laplace normalising constants `multinomial_predictive` computes. It neither
+    /// evaluates softmax at the coefficient mode nor integrates it over the
+    /// Gaussian `N(β̂, H⁻¹)`, which that module shows is not an approximation of
+    /// this estimand on a separated fit.
     pub(crate) fn predict_probabilities(
         &self,
         x_new: ArrayView2<'_, f64>,
