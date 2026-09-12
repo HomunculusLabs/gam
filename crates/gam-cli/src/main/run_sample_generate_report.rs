@@ -1195,9 +1195,12 @@ fn report_family_residuals(
     // Residual degrees of freedom for the Pearson dispersion estimates.
     let residual_dof = (n as f64 - edf_total).max(1.0);
     let mut rng = StdRng::seed_from_u64(REPORT_RESIDUAL_SEED);
-    // Predictive CDF value → normal scale, clamped away from the exact
-    // endpoints so every plotted point stays finite.
-    let to_normal = |u: f64| standard_normal_quantile(u.clamp(1e-12, 1.0 - 1e-12));
+    // Predictive CDF value → normal scale. Only the exact endpoints have no
+    // finite quantile, so u is held inside the representable open interval:
+    // the smallest positive double and the largest double below one.
+    let to_normal = |u: f64| {
+        standard_normal_quantile(u.clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON / 2.0))
+    };
 
     match response {
         ResponseFamily::Gaussian => {
@@ -1247,10 +1250,16 @@ fn report_family_residuals(
             let values = (0..n)
                 .map(|i| {
                     let k = discrete_count_response(y[i], "Poisson")?;
-                    let dist = Poisson::new(mu[i].max(f64::MIN_POSITIVE))
-                        .map_err(|e| format!("Poisson residual at μ={}: {e}", mu[i]))?;
-                    let lower = if k == 0 { 0.0 } else { dist.cdf(k - 1) };
-                    let u = lower + rng.random::<f64>() * dist.pmf(k);
+                    // A zero mean is the point mass at 0: F(−1) = 0, P(0) = 1, and
+                    // every positive count has F(k−1) = 1 and P(k) = 0.
+                    let (lower, mass) = if mu[i] == 0.0 {
+                        if k == 0 { (0.0, 1.0) } else { (1.0, 0.0) }
+                    } else {
+                        let dist = Poisson::new(mu[i])
+                            .map_err(|e| format!("Poisson residual at μ={}: {e}", mu[i]))?;
+                        (if k == 0 { 0.0 } else { dist.cdf(k - 1) }, dist.pmf(k))
+                    };
+                    let u = lower + rng.random::<f64>() * mass;
                     to_normal(u)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1269,7 +1278,7 @@ fn report_family_residuals(
                     let k = discrete_count_response(y[i], "negative-binomial")?;
                     // Failures-before-r-th-success parameterization: r = θ and
                     // p = θ/(θ+μ) give mean μ and variance μ + μ²/θ.
-                    let p = theta / (theta + mu[i].max(f64::MIN_POSITIVE));
+                    let p = theta / (theta + mu[i]);
                     let dist = NegativeBinomial::new(theta, p)
                         .map_err(|e| format!("negative-binomial residual at μ={}: {e}", mu[i]))?;
                     let lower = if k == 0 { 0.0 } else { dist.cdf(k - 1) };
