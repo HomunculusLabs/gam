@@ -2402,9 +2402,10 @@ fn spherical_design_route(
     // kernel, or they would have a different column count than the forward
     // design they differentiate.
     if matches!(spec.wahba_kernel, SphereWahbaKernel::Pseudo) {
-        let max_degree = spec
-            .max_degree
-            .unwrap_or_else(|| harmonic_degree_for_wahba_basis_width(spec, data.nrows()));
+        let max_degree = match spec.max_degree {
+            Some(degree) => degree,
+            None => harmonic_degree_for_wahba_basis_width(spec, data.nrows())?,
+        };
         return Ok(SphericalDesignRoute::Harmonic { max_degree });
     }
     validate_lat_lon_matrix(data, &format!("spherical spline {context}"), spec.radians)?;
@@ -2651,6 +2652,25 @@ mod spherical_design_hessian_tests {
         ));
         assert_hessian_matches_jet(&spec(SphereMethod::Wahba, SphereWahbaKernel::Pseudo, 3));
         assert_hessian_matches_jet(&spec(SphereMethod::Harmonic, SphereWahbaKernel::Sobolev, 2));
+    }
+
+    /// The pseudo kernel routes through harmonics of degree at most 32, which
+    /// cannot carry more than 1088 columns; asking for more is refused instead of
+    /// falling back to a smaller, row-count-dependent basis.
+    #[test]
+    fn pseudo_kernel_beyond_the_harmonic_degree_cap_is_refused() {
+        let wide = Array2::from_shape_fn((1089, 2), |(i, j)| {
+            if j == 0 {
+                -1.4 + 2.8 * (i as f64) / 1088.0
+            } else {
+                -3.0 + 6.0 * (((i * 37) % 1089) as f64) / 1088.0
+            }
+        });
+        let mut pseudo = spec(SphereMethod::Wahba, SphereWahbaKernel::Pseudo, 2);
+        pseudo.center_strategy = CenterStrategy::UserProvided(wide);
+        let error = spherical_spline_design_jet(points().view(), &pseudo)
+            .expect_err("1089 pseudo columns exceed the degree-32 harmonic cap");
+        assert!(error.to_string().contains("cap of 32"), "unexpected refusal: {error}");
     }
 
     /// At a center the m=2 Sobolev kernel's dK/du diverges, so its Hessian does

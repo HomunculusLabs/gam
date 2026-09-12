@@ -803,9 +803,7 @@ class Sphere(Smooth):
             if degree is None:
                 raise ValueError(
                     f"Sphere.basis_size: a pseudo kernel with {k} centers exceeds the "
-                    "degree-32 harmonic cap (1088 columns), where the Rust builder picks "
-                    "the degree from the evaluation row count instead, so the width is "
-                    "not a property of the descriptor"
+                    "degree-32 harmonic cap (1088 columns), which the Rust builder refuses"
                 )
             degree = max(degree, 8)
             return degree * (degree + 2)
