@@ -133,7 +133,6 @@ fn kappa_options(max_outer_iter: usize) -> SpatialLengthScaleOptimizationOptions
         enabled: true,
         max_outer_iter,
         rel_tol: 1e-5,
-        log_step: std::f64::consts::LN_2,
     }
 }
 

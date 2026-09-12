@@ -4322,8 +4322,6 @@ pub struct SpatialLengthScaleOptimizationOptions {
     pub max_outer_iter: usize,
     /// Relative improvement threshold for terminating the outer solve.
     pub rel_tol: f64,
-    /// Initial log(length_scale) perturbation used for seed construction.
-    pub log_step: f64,
 }
 
 impl Default for SpatialLengthScaleOptimizationOptions {
@@ -4332,7 +4330,6 @@ impl Default for SpatialLengthScaleOptimizationOptions {
             enabled: true,
             max_outer_iter: 80,
             rel_tol: 1e-4,
-            log_step: std::f64::consts::LN_2,
         }
     }
 }
@@ -4346,7 +4343,6 @@ impl SpatialLengthScaleOptimizationOptions {
     ///
     /// Invariants:
     ///   * `rel_tol > 0`, finite
-    ///   * `log_step > 0`, finite
     ///
     /// These invariants are what the outer optimizer assumes. Without
     /// validation, invalid options produce silent NaN-propagation inside it.
@@ -4357,13 +4353,6 @@ impl SpatialLengthScaleOptimizationOptions {
             return Err(SmoothError::invalid_config(format!(
                 "SpatialLengthScaleOptimizationOptions::rel_tol must be > 0 and finite, got {}",
                 self.rel_tol
-            ))
-            .into());
-        }
-        if !self.log_step.is_finite() || self.log_step <= 0.0 {
-            return Err(SmoothError::invalid_config(format!(
-                "SpatialLengthScaleOptimizationOptions::log_step must be > 0 and finite, got {}",
-                self.log_step
             ))
             .into());
         }

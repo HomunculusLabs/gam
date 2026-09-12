@@ -84,7 +84,6 @@ fn aniso_matern_recovers_signal_axis() {
         enabled: true,
         max_outer_iter: 30,
         rel_tol: 1e-5,
-        log_step: std::f64::consts::LN_2,
     };
 
     let result = gam::fit_model(FitRequest::Standard(StandardFitRequest {

@@ -1,3 +1,10 @@
+/// Per-iteration BFGS step budget on the ψ axes (log κ and the anisotropy log-scales):
+/// one doubling of the kernel length scale. `opt`'s per-axis trust budget exists because
+/// ρ (natural step ≈ 5 in log λ) and ψ step on very different natural magnitudes, and a
+/// single radius either starves ρ or lets the kernel scale jump orders of magnitude per
+/// iteration (#1053/#1066/#1069).
+const SPATIAL_PSI_BFGS_STEP_CAP: f64 = std::f64::consts::LN_2;
+
 fn try_build_spatial_term_log_kappa_derivative(
     data: ArrayView2<'_, f64>,
     resolvedspec: &TermCollectionSpec,
@@ -3968,8 +3975,8 @@ fn run_exact_joint_spatial_optimization(
         // Rho-axis BFGS cap: log-λ's natural step is ≈ 5. Anything tighter
         // throttles BFGS on flat REML valleys.
         Some(5.0),
-        // Psi-axis BFGS cap: kappa / aniso-log-scale needs ~ln 2 per iter.
-        Some(kappa_options.log_step.clamp(0.25, 1.0)),
+        // Psi-axis BFGS cap: one doubling of the kernel length scale per iteration.
+        Some(SPATIAL_PSI_BFGS_STEP_CAP),
         None,
         // Calibrate the outer to the n-scaled profiled REML/LAML objective for
         // every family — the iso-κ non-convergence cure (#1053 1-D Matérn,
@@ -7754,8 +7761,8 @@ where
         kappa_options.max_outer_iter.max(1),
         // Rho-axis cap: log-λ natural step ≈ 5.
         Some(5.0),
-        // Psi-axis cap: kappa scale needs ~ln 2 per iter.
-        Some(kappa_options.log_step.clamp(0.25, 1.0)),
+        // Psi-axis cap: one doubling of the kernel length scale per iteration.
+        Some(SPATIAL_PSI_BFGS_STEP_CAP),
         screening_cap.clone(),
         // n-scaled profiled-criterion calibration for every family (#1053 /
         // #1066 / #1069 iso-κ non-convergence cure).
@@ -8989,9 +8996,6 @@ fn spatial_kappa_incumbent(
     }
     if kappa_options.max_outer_iter == 0 {
         crate::bail_invalid_estim!("spatial kappa optimization requires max_outer_iter >= 1");
-    }
-    if !(kappa_options.log_step.is_finite() && kappa_options.log_step > 0.0) {
-        crate::bail_invalid_estim!("spatial kappa optimization requires log_step > 0");
     }
     // #1376: the geometry-only anisotropy seed (`initial_aniso_contrasts`, from
     // per-axis knot-coordinate spread) is blind to the response, so a signal

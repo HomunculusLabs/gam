@@ -180,7 +180,6 @@ fn run_fit(n: usize, kappa_enabled: bool, aniso: bool) -> Result<FitTiming, Stri
             1
         },
         rel_tol: 1e-5,
-        log_step: std::f64::consts::LN_2,
     };
 
     let t0 = Instant::now();

@@ -176,7 +176,6 @@ fn rung(n: usize) -> Result<String, String> {
         enabled: true,
         max_outer_iter: 15,
         rel_tol: 1e-5,
-        log_step: std::f64::consts::LN_2,
     };
     let result = gam::fit_model(FitRequest::Standard(StandardFitRequest {
         data: gam::solver::fit_orchestration::StandardFitData::shared(x),

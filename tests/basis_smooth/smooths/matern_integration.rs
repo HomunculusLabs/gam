@@ -208,7 +208,6 @@ fn matern_3d_aniso_fits_successfully() {
         enabled: true,
         max_outer_iter: 3,
         rel_tol: 1e-5,
-        log_step: std::f64::consts::LN_2,
     };
 
     let fitted: FittedTermCollectionWithSpec =
