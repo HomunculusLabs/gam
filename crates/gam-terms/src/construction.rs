@@ -195,14 +195,13 @@ fn sanitize_symmetric_faer(matrix: &Mat<f64>) -> Mat<f64> {
         }
     }
 
-    let scale = mat_max_abs_element(sanitized.as_ref());
-    let tiny = (scale * 1e-14).max(1e-30);
+    // Finite entries are kept as computed, however small. Before an
+    // eigendecomposition, `classify_eigenvalues_strict` already snaps roundoff at
+    // `max(64·ε·p, REL_PSD_FLOOR)·λ_max`, and every entry-level roundoff is bounded
+    // by it because `|M_ij| ≤ ‖M‖₂`.
     for i in 0..rows {
         for j in 0..cols {
-            let val = sanitized[(i, j)];
-            if !val.is_finite() {
-                sanitized[(i, j)] = 0.0;
-            } else if val.abs() < tiny {
+            if !sanitized[(i, j)].is_finite() {
                 sanitized[(i, j)] = 0.0;
             }
         }
@@ -413,8 +412,8 @@ where
 {
     validate_input(matrix, context)?;
 
-    // The sanitize step only enforces exact symmetry by averaging M and M^T and
-    // zeros sub-eps noise; it never adds a diagonal ridge. Adding ridge changes
+    // The sanitize step only enforces exact symmetry by averaging M and M^T; it
+    // neither zeroes small entries nor adds a diagonal ridge. Either would change
     // the matrix being decomposed, which silently changes the optimisation
     // objective downstream. If eigh genuinely fails on a finite symmetric input,
     // surface the error instead of mutating the spectrum.
