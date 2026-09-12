@@ -1119,7 +1119,7 @@ impl SaeManifoldTerm {
         // monitor scope, so every heartbeat of an SAE fit read `instrumented_threads=0
         // active=<idle>` whatever the fit was doing. The guard lives to every exit of
         // this function.
-        let _criterion_scope = gam_runtime::process_monitor::track_scope(format!(
+        let criterion_scope = gam_runtime::process_monitor::track_scope(format!(
             "sae criterion inner converge inner_max_iter={inner_max_iter}"
         ));
         // #2228 Stage-2 / #2132 — whether the terminal exact-Newton polish
@@ -1319,6 +1319,7 @@ impl SaeManifoldTerm {
                     step_norm_sq.sqrt(),
                     quotient_step_norm_sq.sqrt(),
                 );
+                drop(criterion_scope);
                 return Ok(cache);
             }
             // NON-stationary refine round: per-row-only undamped feasibility
@@ -1506,6 +1507,7 @@ impl SaeManifoldTerm {
                              (tol {grad_tolerance:.6e}) ½λ²/scale={predicted_relative_decrease:.6e} \
                              after {total_inner_iter} inner iterations"
                         );
+                        drop(criterion_scope);
                         return Ok(limit_factor.cache);
                     }
                     // #2267 — try the superlinear finish before paying for the first
@@ -1721,6 +1723,7 @@ impl SaeManifoldTerm {
                                      \u{2192} {best_g:.6e}, ½λ²/scale {excursion_cert:.6e} \
                                      \u{2192} {best_cert:.6e} after {total_inner_iter} iters"
                                 );
+                                drop(criterion_scope);
                                 return Ok(best_factor.cache);
                             }
                             // Re-factor at best-seen failed: restore the
@@ -1734,6 +1737,7 @@ impl SaeManifoldTerm {
                                  ½λ²/scale={excursion_cert:.6e} after \
                                  {total_inner_iter} inner iterations"
                             );
+                            drop(criterion_scope);
                             return Ok(final_cache);
                         }
                     }
@@ -1975,6 +1979,7 @@ impl SaeManifoldTerm {
                         stationary_quotient_grad_norm,
                         grad_tolerance,
                     ) {
+                        drop(criterion_scope);
                         return Ok(stationary_cache);
                     }
                     // Affine-invariant stationarity certificate (#2226). The raw and
@@ -2043,6 +2048,7 @@ impl SaeManifoldTerm {
                     // trusts it was inconsistent, and no budget can close a gap
                     // that the objective's own resolution cannot express.)
                     if Self::inner_decrement_certifies(predicted_relative_decrease) {
+                        drop(criterion_scope);
                         return Ok(stationary_cache);
                     }
                     // #2267/#2283 — permitted at every armed plateau. What re-arms
@@ -2970,7 +2976,7 @@ impl SaeManifoldTerm {
             let step_started = std::time::Instant::now();
             // #2267 — name each step to the process monitor; the guard ends with the
             // loop body on every exit.
-            let _polish_step_scope = gam_runtime::process_monitor::track_scope(format!(
+            let polish_step_scope = gam_runtime::process_monitor::track_scope(format!(
                 "sae terminal Newton polish step {}/{max_steps}",
                 step + 1
             ));
@@ -3357,6 +3363,7 @@ impl SaeManifoldTerm {
                 accepted.trial_merits.ambient,
                 (2.0 * accepted.trial_merits.ambient).max(0.0).sqrt(),
             );
+            drop(polish_step_scope);
         }
         Ok(made_progress)
     }
