@@ -2326,5 +2326,13 @@
     },
     "reason": "#2905: completion_drift_action, a rotate-then-delegate wrapper over completion_drift_from_rows, has no product caller. Production uses completion_drift_action_from_rotated, and the two test callers now call completion_drift_from_rows on the rotated objects.",
     "evidence": "At the base, git grep -n completion_drift_action over the whole repository, excluding completion_drift_action_from_rotated, finds one pub fn declaration (crates/gam-solve/src/reml/jeffreys_subspace/mixed.rs), two rustdoc links and two calls inside mod tests. It is declared once, so the census falls by one. Not run through public_api_census.py locally (user directive)."
+  },
+  {
+    "base": "78d51833eeee7b0261f7af2b9f837fa1e8f98d69",
+    "removed": {
+      "crates/gam-solve/src/rho_optimizer/objective.rs::with_sampled_pilot": 1
+    },
+    "reason": "#2897. ClosureObjective::with_sampled_pilot set the sampled-pilot query for the staged spatial kappa schedule. 7fbdcd955 removed that schedule, so nothing calls it.",
+    "evidence": "At the base, git grep -n -F with_sampled_pilot over crates, src, tests, examples and python finds only its declaration, in gam-solve rho_optimizer/objective.rs."
   }
 ]

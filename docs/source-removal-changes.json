@@ -5723,5 +5723,14 @@
     ],
     "reason": "#2905: JeffreysHphiDriftBase::completion_drift_action rotated H[u] and the axis rows into the base eigenbasis, then delegated to completion_drift_from_rows. Production reads the completion drift through completion_drift_action_from_rotated, which takes already-rotated objects. completion_drift_action has no product caller. Its two test callers now form the same rotated objects with symmetric_basis_contraction and rotate_axis_rows and call completion_drift_from_rows directly.",
     "evidence": "At the base, git grep -n completion_drift_action over the whole repository, excluding completion_drift_action_from_rotated, finds five lines, all under crates/gam-solve/src/reml: the pub fn declaration in jeffreys_subspace/mixed.rs, two rustdoc links (on completion_drift_from_rows in mixed.rs and on completion_drift_action_from_rotated in jeffreys_subspace.rs), and two calls inside mod tests (jeffreys_subspace.rs and mixed.rs). The links and calls are rewritten here. The production callers of the completion drift, in crates/gam-custom-family/src/jeffreys.rs and psi_hyper.rs, call completion_drift_action_from_rotated. Not compiled or run locally (user directive)."
+  },
+  {
+    "base": "78d51833eeee7b0261f7af2b9f837fa1e8f98d69",
+    "items": [
+      "crates/gam-solve/src/rho_optimizer/objective.rs:fn:sampled_pilot_active",
+      "crates/gam-solve/src/rho_optimizer/objective.rs:fn:with_sampled_pilot"
+    ],
+    "reason": "#2897. 7fbdcd955 removed the staged spatial kappa pilot, which was the only producer of a sampled pilot measure. Nothing remains to produce one. That leaves dead: OuterObjective::sampled_pilot_active (the trait default, two forwarding impls and the ClosureObjective impl), its only consumer in finalize_outer_result, ClosureObjective::with_sampled_pilot, and the sampled_pilot_fn field it set. Every query already answered false, so the finalize skip could not fire.",
+    "evidence": "At the base, git grep -n -F sampled_pilot over crates, src, tests, examples and python finds only: objective.rs (the trait default, the finalize_outer_result branch, the two forwarding impls, and the ClosureObjective field, impl, builder and conversion line); three sampled_pilot_fn: None lines in run.rs; and five in run_plan_tests.rs. 7fbdcd955 dropped the call in spatial_optimization.rs, the only caller of with_sampled_pilot. Compile is covered by the lead shared tip check."
   }
 ]
