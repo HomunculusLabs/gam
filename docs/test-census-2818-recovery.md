@@ -813,3 +813,16 @@ September 11 section.
 - `contracted_trace_device_matches_cpu_reduction_when_admitted_2304`
 - `device_direct_applies_beta_gauge_quotient_at_composed_cofit_shape_2660`
 - `moving_ridge_takes_no_host_rebuild_and_matches_independent_2539`
+
+### Root-suite pins whose production subject is gone
+
+These pins live in root `tests/` binaries. A whole-file scan of each pin's
+d484a091a^ file found a production callee that no `.rs` file on origin/main
+defines. Each subject's removing commit was found with `git log -S` on its
+defining file.
+
+| Deleted subject | Removing commit | Retired pins |
+| --- | --- | --- |
+| `analytic_outer_rho_gradient_at_converged` | `e6fd4251e` | `sae_ift_uses_exact_stationarity_jacobian_softmax_high_residual_1418`, `sae_ift_uses_exact_stationarity_jacobian_threshold_gate_high_residual_1418` (`tests/regressions/misc/owed_1418.rs`); `sae_outer_rho_gradient_channel_decomposition_ordered_beta_bernoulli_2087`, `sae_outer_rho_gradient_channel_decomposition_softmax_2087` (`tests/sae/sae/sae_outer_gradient_fd_gate.rs`, whose module is no longer registered) |
+| `fit_pair_surface` in `gam-terms` `structure::anova_atom`, now named only in two root-test module docs | `843e0fc20` | `carve_classifies_bound_vs_separable_feature_pairs_975` (`tests/sae/sae/owed_975.rs`, whose module is no longer registered) |
+| `weighted_chi_square_sf` | `368528959` | `zz_measure_size_under_candidate_reference_shapes_2672` |
