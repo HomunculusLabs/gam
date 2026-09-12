@@ -124,13 +124,6 @@ impl GpuDispatchPolicy {
     /// is used defensively.
     pub const REFINEMENT_MAX_STEPS: usize = 3;
 
-    /// Relative residual tolerance for declaring convergence.
-    ///
-    /// `‖r‖ / ‖b‖ ≤ tol` is considered a converged solve. 10⁻¹² is two
-    /// orders of magnitude above the fp64 machine epsilon times a moderate
-    /// condition number, leaving the policy conservative.
-    pub const REFINEMENT_TOL: f64 = 1e-12;
-
     /// Return `true` when the policy and problem size together suggest that
     /// attempting fp32 factorization + iterative refinement will be profitable.
     ///

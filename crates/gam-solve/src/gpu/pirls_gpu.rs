@@ -551,9 +551,9 @@ extern "C" __global__ void chol_logdet_col_major(
     /// Apply one fp64 iterative-refinement correction to a Newton step solve.
     ///
     /// Compute `r = g − H_step·x` (host, p-vector). When `p ≥ REFINEMENT_MIN_P`
-    /// and `‖r‖/‖g‖ > REFINEMENT_TOL`, apply one POTRS correction and return
-    /// `x + e`. Returns `direction_raw` unchanged when `p` is too small, the
-    /// residual is already tight, or `‖g‖ = 0`.
+    /// and `‖r‖` exceeds its own fp64 rounding band, apply one POTRS correction
+    /// and return `x + e`. Returns `direction_raw` unchanged when `p` is too
+    /// small, the residual is already inside that band, or `‖g‖ = 0`.
     ///
     /// `H_step·x = penalized_hessian·x + step_lm_delta·x`.
     fn newton_step_refine_once(
@@ -588,8 +588,16 @@ extern "C" __global__ void chol_logdet_col_major(
             })
             .collect();
         let residual: Vec<f64> = g.iter().zip(hx.iter()).map(|(gi, hxi)| gi - hxi).collect();
-        let rel_res = residual.iter().map(|v| v * v).sum::<f64>().sqrt() / norm_g;
-        if rel_res <= GpuDispatchPolicy::REFINEMENT_TOL {
+        let norm_r = residual.iter().map(|v| v * v).sum::<f64>().sqrt();
+        // Each residual component is a `p`-term inner product, the shift product and
+        // two additions, so it rounds by at most `γ_{p+2}·(|H||x| + |δ||x| + |g|)`,
+        // whose 2-norm is at most `γ_{p+2}·((‖H‖_F + |δ|)‖x‖₂ + ‖g‖₂)`. A residual
+        // inside that band is as small as fp64 resolves; a correction cannot help.
+        let hessian_frobenius = penalized_hessian.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let norm_x = direction_raw.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let attainable = gam_linalg::roundoff::accumulation_growth(p + 2)
+            * ((hessian_frobenius + step_lm_delta.abs()) * norm_x + norm_g);
+        if norm_r <= attainable {
             return Ok(direction_raw);
         }
         stream

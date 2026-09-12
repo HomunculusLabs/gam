@@ -526,7 +526,8 @@ mod cuda {
     ///    to f64.
     /// 3. Loop up to `max_steps`:
     ///    a. `r = b − A·x` accumulated in fp64 (cuBLAS Dgemv).
-    ///    b. `‖r‖ / ‖b‖ ≤ tol` → converged, break.
+    ///    b. `‖r‖ ≤ γ_{p+1}·(‖A‖_F‖x‖ + ‖b‖)`, the residual's own rounding
+    ///       band → converged, break.
     ///    c. Residual did not drop below previous step → bail, return `Err`.
     ///    d. Cast `r` to f32. Solve `A e = r` in fp32. `x += e` (f64).
     /// 4. Return `(x, ‖r‖/‖b‖, refinement_steps)`.
@@ -544,7 +545,6 @@ mod cuda {
             return Err("iterative_refinement_solve: dimension mismatch".to_string());
         }
         let max_steps = GpuDispatchPolicy::REFINEMENT_MAX_STEPS;
-        let tol = GpuDispatchPolicy::REFINEMENT_TOL;
 
         let (_, stream) = context_and_stream()?;
         let solver = DnHandle::new(stream.clone()).map_err(|e| format!("cusolver init: {e}"))?;
@@ -577,13 +577,22 @@ mod cuda {
         // Compute ‖b‖ for relative residual.
         let norm_b = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
         let norm_b_safe = if norm_b > 0.0 { norm_b } else { 1.0 };
+        // Refinement has converged once the fp64 residual `b − A·x` is inside its own
+        // rounding: each component is a `p`-term inner product and a subtraction, so it
+        // rounds by at most `γ_{p+1}·(|A||x| + |b|)`, whose 2-norm is at most
+        // `γ_{p+1}·(‖A‖_F‖x‖₂ + ‖b‖₂)`. No correction resolves a smaller residual.
+        let hessian_frobenius = hessian.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let growth = gam_linalg::roundoff::accumulation_growth(p + 1);
+        let attainable = |x: &[f64]| {
+            growth * (hessian_frobenius * x.iter().map(|v| v * v).sum::<f64>().sqrt() + norm_b)
+        };
 
         let mut x_dev_f64 = pinned_htod(&stream, &x).map_err(|e| format!("upload f64 x: {e}"))?;
         let (r0, norm_r0) = residual_norm_and_vec(&blas, &stream, p, &a_dev_f64, &x_dev_f64, rhs)?;
         let mut rel_residual = norm_r0 / norm_b_safe;
 
         // Early exit: already converged after initial solve.
-        if rel_residual <= tol {
+        if norm_r0 <= attainable(&x) {
             return Ok(super::RefinementOutcome {
                 solution: ndarray::Array1::from_vec(x),
                 relative_residual: rel_residual,
@@ -628,7 +637,7 @@ mod cuda {
             prev_norm_r = norm_r_new;
             r = r_new;
 
-            if rel_residual <= tol {
+            if norm_r_new <= attainable(&x) {
                 break;
             }
         }
