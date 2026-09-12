@@ -1673,13 +1673,25 @@ pub(crate) fn validate_second_order_seed_hessian(
     layout: OuterThetaLayout,
     eval: &OuterEval,
 ) -> Result<(), ObjectiveEvalError> {
-    if layout.n_params > SECOND_ORDER_GEOMETRY_PROBE_MAX_PARAMS || !eval.hessian.is_analytic() {
+    if !eval.hessian.is_analytic() {
         return Ok(());
     }
-    if matches!(
-        &eval.hessian,
-        HessianValue::Operator(op) if !op.materialization().is_available()
-    ) {
+    // Probe the seed Hessian only where materializing it is admitted work: a dense
+    // Hessian whose `k × k` copy fits the process's single-materialization budget,
+    // or an operator `operator_hessian_densifies` admits. An operator that would pay
+    // Hessian-vector products per column stays matrix-free (#2469).
+    let admitted = match &eval.hessian {
+        HessianValue::Dense(_) => {
+            crate::estimate::reml::reml_outer_engine::saturating_f64_matrix_bytes(
+                layout.n_params,
+                layout.n_params,
+            ) <= gam_runtime::resource::ResourcePolicy::default_library()
+                .max_single_materialization_bytes
+        }
+        HessianValue::Operator(op) => operator_hessian_densifies(op.as_ref()),
+        HessianValue::Unavailable => false,
+    };
+    if !admitted {
         return Ok(());
     }
 

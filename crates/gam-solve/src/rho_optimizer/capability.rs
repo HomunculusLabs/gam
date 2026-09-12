@@ -21,8 +21,6 @@ use super::*;
 /// objectives with no fixed-point hook (or after `disable_fixed_point`).
 pub(crate) const SMALL_OUTER_BFGS_MAX_PARAMS: usize = 0;
 
-pub(crate) const SECOND_ORDER_GEOMETRY_PROBE_MAX_PARAMS: usize = 64;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OuterThetaLayout {
     pub n_params: usize,

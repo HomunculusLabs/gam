@@ -5485,5 +5485,13 @@
     ],
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). gam-solve's GaussianRemlWarmStart (a lambda plus eigen-cache carrier with an empty impl) and CLogLogConvolutionDerivatives (a CLogLog Gauss-Hermite derivative carrier) are named by no code in any crate, tests included. The #2829 deletions of the allocation-free Gaussian REML batch path and of the CLogLog GHQ derivative entry point left them with no producer or consumer.",
     "evidence": "The prune-api-c type census at 524486bd1 (/scratch.global/sauer354/pool/prune-api-c/verify_types.tsv) finds no production use of either. At the base, git grep -w finds GaussianRemlWarmStart only at its definition, its empty impl and one test doc comment reworded here, and CLogLogConvolutionDerivatives only at its definition. The item list comes from emulating source_removal_guard.py's ITEM rule over the before and after blobs: two pub structs, and no fn removed, so there is no public-api-census entry."
+  },
+  {
+    "base": "93c25dc029df708ed5299825aef4fcee5e4896cd",
+    "items": [
+      "crates/gam-solve/src/rho_optimizer/capability.rs:const:SECOND_ORDER_GEOMETRY_PROBE_MAX_PARAMS"
+    ],
+    "reason": "#2469 (SPEC rule 23): SECOND_ORDER_GEOMETRY_PROBE_MAX_PARAMS (64) was a picked dimension above which validate_second_order_seed_hessian skipped materializing and checking the analytic outer Hessian at the seed. The check costs one dense k x k materialization and a finiteness scan, so the admission that decides it is the materialization work model gam-solve already uses for densifying an outer Hessian (rho_optimizer/hessian_operator.rs operator_hessian_densifies): an Explicit operator, or a Dense Hessian, is validated when k^2 * 8 bytes fit gam_runtime::resource::ResourcePolicy::default_library().max_single_materialization_bytes; a BatchedHvp or RepeatedHvp operator, which would pay Hessian-vector products per column, is not densified here at any k.",
+    "evidence": "git grep -n -w SECOND_ORDER_GEOMETRY_PROBE_MAX_PARAMS over the base finds two lines, both production: the declaration at crates/gam-solve/src/rho_optimizer/capability.rs:24 and its single use in validate_second_order_seed_hessian at crates/gam-solve/src/rho_optimizer/objective.rs:1676, whose only caller is rho_optimizer/run_plan.rs:1349. No test names it. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
   }
 ]
