@@ -470,34 +470,39 @@ pub(crate) enum CenterStrategyKind {
 pub fn default_num_centers(n: usize, d: usize) -> usize {
     const K_MIN: usize = 200;
     const K_MAX: usize = 2000;
-    const ALPHA: f64 = 0.4;
     const C: f64 = 8.0;
     /// Per-extra-dimension growth in the center count: each covariate axis
     /// beyond the first widens the basis by 15% to keep the per-axis mesh
     /// density roughly constant as the smooth's domain dimensionality grows.
     const PER_DIM_GROWTH: f64 = 0.15;
-    /// Divisor for the data-proportional floor: the `K_MIN` floor only engages
-    /// once `n` exceeds `K_MIN * FLOOR_N_DIVISOR`, so small samples are not
-    /// forced up to a dense `K_MIN`-column design.
-    const FLOOR_N_DIVISOR: usize = 8;
     /// Divisor for the conditioning cap: the center count never exceeds `n /
     /// COND_N_DIVISOR`, keeping the penalty matrices well-conditioned relative
     /// to the data.
     const COND_N_DIVISOR: usize = 4;
 
     let d_factor = 1.0 + PER_DIM_GROWTH * (d.max(1) - 1) as f64;
-    let raw = (C * d_factor * (n as f64).powf(ALPHA)).ceil() as usize;
+    let raw = (C * d_factor * (n as f64).powf(CENTER_GROWTH_EXPONENT)).ceil() as usize;
 
-    // Data-proportional floor: never inflate beyond n/FLOOR_N_DIVISOR, so the
-    // K_MIN-center floor only takes effect once n is large enough (~1600) to
-    // genuinely support that many basis columns.
-    let floor = K_MIN.min(n / FLOOR_N_DIVISOR);
+    // Data-proportional floor: never inflate beyond n/ROWS_PER_SUPPORTED_CENTER,
+    // so the K_MIN-center floor only takes effect once n is large enough (~1600)
+    // to genuinely support that many basis columns.
+    let floor = K_MIN.min(n / ROWS_PER_SUPPORTED_CENTER);
     let k = raw.clamp(floor, K_MAX);
 
     // Never exceed n itself; cap at n/COND_N_DIVISOR to keep the penalty
     // matrices well-conditioned relative to the data.
     k.min(n).min(n / COND_N_DIVISOR)
 }
+
+/// Sample-size growth exponent of the production center budget:
+/// [`default_num_centers`] grows as `n^0.4`, and the adaptive pilot grows at the
+/// same rate so the two scale together.
+const CENTER_GROWTH_EXPONENT: f64 = 0.4;
+
+/// Rows per center below which a center count is not data-supported. The
+/// production budget's `min(K_MIN, n / 8)` floor engages only at this density,
+/// and the adaptive pilot anchors its growth at the same density.
+const ROWS_PER_SUPPORTED_CENTER: usize = 8;
 
 /// Conservative center count for a *secondary* (distributional) predictor's
 /// spatial smooth — e.g. the log-σ scale model in a Gaussian location-scale
@@ -518,25 +523,41 @@ pub fn conservative_secondary_centers(n: usize, d: usize) -> usize {
     default_num_centers(n, d).min(modest).max(1)
 }
 
-/// Low-rank starting center count for saturation-driven spatial fitting.
+/// Starting center count for saturation-driven spatial fitting.
 ///
 /// The structural minimum (`d + 1` polynomial directions plus one radial
 /// direction) is only enough to make the algebra identifiable. It is not an
 /// adequate pilot function space: structure orthogonal to that single radial
 /// direction is absorbed into the residual, so REML can legitimately shrink
 /// the direction and report EDF below its ceiling even when the surface is
-/// badly under-resolved (#1689). Start from the project's established
-/// thin-plate-style low-rank resolution `10 * 3^(d - 1)` instead. This is the
-/// same dimension rule already used by the automatic Duchon builder, capped by
-/// [`default_num_centers`] so the pilot never exceeds the validated production
-/// basis at small sample sizes.
+/// badly under-resolved (#1689). The pilot therefore starts from the low-rank
+/// resolution `k0 = 10 * 3^(d - 1)` while the sample holds at most eight rows
+/// per pilot center (`n <= 8 * k0`, the density at which the production
+/// budget's floor engages), and beyond that grows at the production budget's
+/// own `n^0.4` rate: `ceil(k0 * (n / (8 * k0))^0.4)`.
+///
+/// A constant pilot cannot track the resolution more data supports, and the
+/// growth loop cannot always see what a pilot misses. On the #1561 2-D
+/// default-rank Duchon fixture at n=1500 a 30-center pilot reaches truth rmse
+/// 0.0214 against 0.0137–0.0142 for 49–187 centers, while its EDF sits 1.25
+/// below capacity, the REML resolution of that EDF is 0.31, and the #2774
+/// lack-of-fit test reads p = 0.156: no evidence the fit keeps says "grow". The
+/// grown pilot is 63 centers there, and 37 at the fixture's n=400 arm, between
+/// the 30- and 60-center fits that both already beat mgcv.
+///
+/// Capped by [`default_num_centers`] so the pilot never exceeds the validated
+/// production basis.
 pub fn starting_num_centers(n: usize, d: usize) -> usize {
     let low_rank_resolution = 10usize
         .saturating_mul(3usize.saturating_pow(d.saturating_sub(1).min(u32::MAX as usize) as u32));
-    low_rank_resolution
-        .min(default_num_centers(n, d))
-        .min(n)
-        .max(1)
+    let supported_rows = low_rank_resolution.saturating_mul(ROWS_PER_SUPPORTED_CENTER);
+    let pilot = if n > supported_rows {
+        let density_ratio = n as f64 / supported_rows as f64;
+        (low_rank_resolution as f64 * density_ratio.powf(CENTER_GROWTH_EXPONENT)).ceil() as usize
+    } else {
+        low_rank_resolution
+    };
+    pilot.min(default_num_centers(n, d)).min(n).max(1)
 }
 
 /// Next evidence-backed center count for a saturated spatial basis, bounded by
@@ -3324,8 +3345,16 @@ mod saturation_escalation_tests {
 
     #[test]
     fn starting_count_is_a_supported_low_rank_pilot_capped_by_default() {
-        assert_eq!(starting_num_centers(800, 2), 30);
-        assert_eq!(starting_num_centers(100_000, 1), 10);
+        // Up to eight rows per pilot center the pilot is the low-rank resolution.
+        assert_eq!(starting_num_centers(240, 2), 30);
+        assert_eq!(starting_num_centers(80, 1), 10);
+        // Beyond that density it grows at the production budget's n^0.4 rate,
+        // ceil(30 * (n / 240)^0.4) in 2-D (#1561).
+        assert_eq!(starting_num_centers(400, 2), 37);
+        assert_eq!(starting_num_centers(800, 2), 49);
+        assert_eq!(starting_num_centers(1500, 2), 63);
+        assert_eq!(starting_num_centers(100_000, 1), 174);
+        assert!(starting_num_centers(100_000, 1) <= default_num_centers(100_000, 1));
         // The generic conditioning ceiling is `n / 4` and therefore reports
         // zero below four rows; the pilot retains the basis-wide one-center
         // degenerate minimum, which materialization subsequently raises to the

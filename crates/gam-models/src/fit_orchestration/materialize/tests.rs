@@ -1542,9 +1542,11 @@ fn adaptive_spatial_start_is_activated_only_by_its_orchestrator() {
         starting_num_centers(data.values.nrows(), 2)
     );
     // #1757 made the IMPLICIT 2-D Duchon default the low-rank thin-plate
-    // representer rank `10 * 3^(d - 1)`, which is the same rule
-    // `starting_num_centers` uses for the adaptive pilot. The raw default and
-    // the pilot start therefore COINCIDE, at every n, for d = 2 — so the
+    // representer rank `10 * 3^(d - 1)`, which is where `starting_num_centers`
+    // starts the adaptive pilot while the sample holds at most eight rows per
+    // pilot center (240 rows in 2-D; above that the pilot grows at the
+    // production budget's `n^0.4` rate, #1561). At this 72-row fixture the raw
+    // default and the pilot start therefore COINCIDE — so the
     // `raw_centers > adaptive_centers` this replaces was unsatisfiable rather
     // than merely unmet, and could not have distinguished the two paths.
     // What separates them is the grow CEILING, not the start: only the
