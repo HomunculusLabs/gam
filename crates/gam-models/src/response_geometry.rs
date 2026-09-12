@@ -453,9 +453,11 @@ pub fn fit_shared_tangent_reml(
             },
         )
     } else {
+        let (rho_lower, rho_upper) = prepared.resolvability_domain();
         let mut problem = OuterProblem::new(n_outer)
             .with_gradient(Derivative::Analytic)
             .with_hessian(DeclaredHessianForm::Dense)
+            .with_bounds(rho_lower, rho_upper)
             .with_disable_fixed_point(true)
             // The closed-form QR/root evaluation resolves the per-output
             // smoothing score to the floating-point floor. The generic outer
@@ -662,6 +664,55 @@ impl OuterObjective for SharedTangentObjective<'_> {
 }
 
 impl PreparedSharedTangent {
+    /// The #2812 resolvability domain of each strength (#2902 row 8): the data
+    /// Gram on a penalty's columns against that penalty. With an isotropic metric
+    /// the Gram is `XᵀWX ⊗ I_D`, whose generalized eigenvalues against `S_b ⊗ I_D`
+    /// are those of `XᵀWX` against `S_b`, each repeated `D` times, so the `K × K`
+    /// root Gram serves. A varying metric reads the joint Gram against
+    /// `S_b ⊗ I_D` on the same columns.
+    fn resolvability_domain(&self) -> (Array1<f64>, Array1<f64>) {
+        let rho_dim = self.penalties.len();
+        match &self.statistics {
+            SufficientStatistics::Isotropic { root, .. } => {
+                let gram = root.t().dot(root);
+                gam_solve::estimate::rho_domain::resolvability_domain_from_gram_blocks(
+                    &gram,
+                    self.penalties.iter().map(|penalty| {
+                        (
+                            penalty.column_start..penalty.column_start + penalty.local.nrows(),
+                            &penalty.local,
+                        )
+                    }),
+                    rho_dim,
+                )
+            }
+            SufficientStatistics::Fisher { gram, .. } => {
+                let d = self.n_outputs;
+                let joint_penalties: Vec<Array2<f64>> = self
+                    .penalties
+                    .iter()
+                    .map(|penalty| {
+                        let q = penalty.local.nrows() * d;
+                        let mut joint = Array2::<f64>::zeros((q, q));
+                        add_base_penalty_to_joint(&mut joint, &penalty.local, d);
+                        joint
+                    })
+                    .collect();
+                gam_solve::estimate::rho_domain::resolvability_domain_from_gram_blocks(
+                    gram,
+                    self.penalties.iter().zip(&joint_penalties).map(|(penalty, joint)| {
+                        (
+                            penalty.column_start * d
+                                ..(penalty.column_start + penalty.local.nrows()) * d,
+                            joint,
+                        )
+                    }),
+                    rho_dim,
+                )
+            }
+        }
+    }
+
     fn from_request(request: SharedTangentRemlRequest) -> Result<Self, EstimationError> {
         let SharedTangentRemlRequest {
             design,
@@ -1685,6 +1736,41 @@ mod tests {
         assert_array1_close(&left.gradient, &right.gradient, 2.0e-10);
         assert_array2_close(&left.hessian, &right.hessian, 2.0e-9);
         assert_array2_close(&left.coefficients, &right.coefficients, 2.0e-11);
+    }
+
+    /// #2902 row 8: each shared-tangent strength is searched in the #2812
+    /// resolvability domain of the data Gram on its penalty's columns. Under an
+    /// identity metric the isotropic `K × K` root Gram and the joint Fisher Gram
+    /// against `S_b ⊗ I_D` carry the same generalized eigenvalues, so the two
+    /// paths must derive the same domain, and neither may fall back to the
+    /// precision box.
+    #[test]
+    fn shared_tangent_strengths_are_searched_in_their_resolvability_domain_2902() {
+        let isotropic_request = fixture_request(None);
+        let n = isotropic_request.response.nrows();
+        let d = isotropic_request.response.ncols();
+        let mut identity_metric = Array3::<f64>::zeros((n, d, d));
+        for row in 0..n {
+            for output in 0..d {
+                identity_metric[[row, output, output]] = 1.0;
+            }
+        }
+        let isotropic =
+            PreparedSharedTangent::from_request(isotropic_request).expect("prepare isotropic");
+        let fisher = PreparedSharedTangent::from_request(fixture_request(Some(identity_metric)))
+            .expect("prepare Fisher");
+        let (isotropic_lower, isotropic_upper) = isotropic.resolvability_domain();
+        let (fisher_lower, fisher_upper) = fisher.resolvability_domain();
+        let (box_lower, box_upper) = gam_solve::estimate::rho_domain::precision_box();
+        assert_eq!(isotropic_lower.len(), isotropic.penalties.len());
+        for k in 0..isotropic_lower.len() {
+            assert!(
+                isotropic_lower[k] != box_lower && isotropic_upper[k] != box_upper,
+                "coordinate {k} fell back to the precision box"
+            );
+            assert_close(isotropic_lower[k], fisher_lower[k], 1.0e-9);
+            assert_close(isotropic_upper[k], fisher_upper[k], 1.0e-9);
+        }
     }
 
     #[test]
