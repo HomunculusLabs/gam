@@ -1517,6 +1517,92 @@ impl SurvivalMarginalSlopeFamily {
         Ok(result)
     }
 
+    /// Third directional derivative `D³H[u, v, e_a]` of the joint Hessian along every
+    /// coefficient axis, for flex without a time wiggle (gam#2893).
+    ///
+    /// Without a wiggle `q` is linear in β, so the q-map curvature vanishes and every
+    /// primary Jacobian `J` is constant: `D³H[u, v, w] = Jᵀ F₅[J u, J v, J w] J`, with `F₅`
+    /// the contracted fifth of the row NLL. `F₅` is linear in its third slot, so each row
+    /// contracts once per primary axis, and every coefficient axis combines those matrices
+    /// with its own primary image `J e_a` before one pullback.
+    pub(crate) fn exact_newton_joint_hessian_third_directional_derivative_flex_no_wiggle_all_axes(
+        &self,
+        block_states: &[ParameterBlockState],
+        d_u: &Array1<f64>,
+        d_v: &Array1<f64>,
+    ) -> Result<Vec<Array2<f64>>, String> {
+        let slices = block_slices(self, block_states);
+        let primary = flex_primary_slices(self);
+        let p_total = slices.total;
+        let identity_blocks = flex_identity_block_pairs(&primary, &slices);
+        let zeros = || vec![Array2::<f64>::zeros((p_total, p_total)); p_total];
+        let result = gam_linalg::pairwise_reduce::par_deterministic_try_block_fold(
+            self.n,
+            |range| -> Result<Vec<Array2<f64>>, String> {
+                let mut acc = zeros();
+                let zero_gradient = Array1::<f64>::zeros(primary.total);
+                for row in range {
+                    let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
+                    let u_pi = self.row_primary_direction_from_flat_dynamic_with_q_geometry(
+                        row,
+                        block_states,
+                        &slices,
+                        &q_geom,
+                        d_u,
+                    )?;
+                    let v_pi = self.row_primary_direction_from_flat_dynamic_with_q_geometry(
+                        row,
+                        block_states,
+                        &slices,
+                        &q_geom,
+                        d_v,
+                    )?;
+                    let base = self.build_row_flex_fifth_base_with_states(row, block_states, &primary)?;
+                    let fifth =
+                        self.row_flex_fifth_contract_all_primary_axes_from_base(&base, &u_pi, &v_pi)?;
+                    for axis_idx in 0..p_total {
+                        let mut axis = Array1::<f64>::zeros(p_total);
+                        axis[axis_idx] = 1.0;
+                        let w_pi = self.row_primary_direction_from_flat_dynamic_with_q_geometry(
+                            row,
+                            block_states,
+                            &slices,
+                            &q_geom,
+                            &axis,
+                        )?;
+                        if w_pi.iter().all(|weight| *weight == 0.0) {
+                            continue;
+                        }
+                        let mut contracted = Array2::<f64>::zeros((primary.total, primary.total));
+                        for (primary_axis, &weight) in w_pi.iter().enumerate() {
+                            if weight != 0.0 {
+                                contracted.scaled_add(weight, &fifth[primary_axis]);
+                            }
+                        }
+                        self.accumulate_directional_joint_hessian_row(
+                            row,
+                            &slices,
+                            &q_geom,
+                            &identity_blocks,
+                            zero_gradient.view(),
+                            contracted.view(),
+                            &mut acc[axis_idx],
+                        )?;
+                    }
+                }
+                Ok(acc)
+            },
+            |mut a, b| -> Result<_, String> {
+                for (ai, bi) in a.iter_mut().zip(b.into_iter()) {
+                    *ai += &bi;
+                }
+                Ok(a)
+            },
+        )?
+        .unwrap_or_else(zeros);
+        Ok(result)
+    }
+
     /// Exact second directional derivative for flex without timewiggle.
     /// J constant ⇒ D²H[d,e] = J^T Q[u^d,u^e] J + Σ (T_d·u^e)_r K_r.
     pub(crate) fn exact_newton_joint_hessiansecond_directional_derivative_flex_no_wiggle(

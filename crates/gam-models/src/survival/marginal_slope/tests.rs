@@ -6975,6 +6975,179 @@ fn survival_flex_third_contraction_from_base_reads_influence_offset_2893() {
     );
 }
 
+/// Block states of the flex no-wiggle fixture at a flat β (marginal, slope, score warp),
+/// with every `η` rebuilt from β.
+fn flex_no_wiggle_states_at_beta(
+    family: &SurvivalMarginalSlopeFamily,
+    beta: &Array1<f64>,
+) -> Vec<ParameterBlockState> {
+    let n = family.n;
+    let score_dim = family
+        .score_warp
+        .as_ref()
+        .map_or(0, |runtime| runtime.basis_dim());
+    assert_eq!(beta.len(), 2 + score_dim);
+    let m_design = family.marginal_design.to_dense().to_owned();
+    let g_design = family
+        .slope_layout
+        .coefficient_design()
+        .to_dense()
+        .to_owned();
+    let m_beta = beta.slice(s![0..1]).to_owned();
+    let g_beta = beta.slice(s![1..2]).to_owned();
+    vec![
+        ParameterBlockState {
+            beta: Array1::zeros(0),
+            eta: Array1::zeros(n),
+        },
+        ParameterBlockState {
+            eta: m_design.dot(&m_beta),
+            beta: m_beta,
+        },
+        ParameterBlockState {
+            eta: g_design.dot(&g_beta),
+            beta: g_beta,
+        },
+        ParameterBlockState {
+            beta: beta.slice(s![2..]).to_owned(),
+            eta: Array1::zeros(n),
+        },
+    ]
+}
+
+/// A flat β for the flex no-wiggle fixture with small alternating score-warp coefficients.
+fn flex_no_wiggle_beta(family: &SurvivalMarginalSlopeFamily) -> Array1<f64> {
+    let score_dim = family
+        .score_warp
+        .as_ref()
+        .map_or(0, |runtime| runtime.basis_dim());
+    Array1::from_shape_fn(2 + score_dim, |i| match i {
+        0 => 0.15,
+        1 => 0.25,
+        _ if i % 2 == 0 => 0.03,
+        _ => -0.02,
+    })
+}
+
+/// Grade `analytic` against a Ridders-certified central difference of `at(t)` at `t = 0`.
+fn assert_matches_ridders_2893(label: &str, analytic: &Array2<f64>, at: &dyn Fn(f64) -> Array2<f64>) {
+    let h = 1e-3;
+    let coarse = (at(h) - at(-h)) / (2.0 * h);
+    let fine = (at(0.5 * h) - at(-0.5 * h)) / h;
+    let scale = analytic
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()))
+        .max(1e-12);
+    for ((index, &want), (&c, &f)) in analytic
+        .indexed_iter()
+        .zip(coarse.iter().zip(fine.iter()))
+    {
+        let value = (4.0 * f - c) / 3.0;
+        let uncertainty = (f - c).abs() / 3.0;
+        let denominator = scale.max(want.abs()).max(value.abs());
+        assert!(
+            uncertainty <= 0.05 * denominator,
+            "{label} {index:?}: the difference oracle did not resolve (value={value:.6e}, uncertainty={uncertainty:.3e})"
+        );
+        assert!(
+            (want - value).abs() <= 1e-5 * denominator + 4.0 * uncertainty,
+            "{label} {index:?}: analytic={want:.9e} fd={value:.9e} uncertainty={uncertainty:.3e} scale={scale:.3e}"
+        );
+    }
+}
+
+/// gam#2893: the order-five flex contraction of one row, combined along the primary image of
+/// a coefficient direction, matches a Ridders-certified central difference of the exact
+/// fourth contraction along that direction. Without a time wiggle the primary map is linear,
+/// so moving β along `d` moves the primaries along `J d`.
+#[test]
+fn survival_flex_fifth_contraction_matches_differenced_fourth_2893() {
+    let family = make_flex_no_wiggle_test_family(40);
+    let beta = flex_no_wiggle_beta(&family);
+    let states = flex_no_wiggle_states_at_beta(&family, &beta);
+    assert!(family.effective_flex_active(&states).unwrap());
+    let primary = flex_primary_slices(&family);
+    let slices = block_slices(&family, &states);
+    let direction = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 2) % 7) as f64 / 7.0 - 0.4);
+    let u = Array1::from_shape_fn(primary.total, |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
+    let v = Array1::from_shape_fn(primary.total, |i| ((i * 3 + 1) % 13) as f64 / 13.0 - 0.5);
+    for row in [0usize, 7, 19] {
+        let q_geom = family.row_dynamic_q_geometry(row, &states).expect("q geometry");
+        let w = family
+            .row_primary_direction_from_flat_dynamic_with_q_geometry(
+                row, &states, &slices, &q_geom, &direction,
+            )
+            .expect("primary image of the direction");
+        let base = family
+            .build_row_flex_fifth_base_with_states(row, &states, &primary)
+            .expect("fifth-order row base");
+        let axes = family
+            .row_flex_fifth_contract_all_primary_axes_from_base(&base, &u, &v)
+            .expect("fifth contraction");
+        let mut analytic = Array2::<f64>::zeros((primary.total, primary.total));
+        for (axis, &weight) in w.iter().enumerate() {
+            analytic.scaled_add(weight, &axes[axis]);
+        }
+        assert!(
+            analytic.iter().any(|value| value.abs() > 1e-8),
+            "row {row}: the fifth contraction must be nonzero on this fixture"
+        );
+        assert_matches_ridders_2893(&format!("row {row}"), &analytic, &|t| {
+            family
+                .row_flex_primary_fourth_contracted_exact(
+                    row,
+                    &flex_no_wiggle_states_at_beta(&family, &(&beta + &(&direction * t))),
+                    &u,
+                    &v,
+                )
+                .expect("fourth contraction")
+        });
+    }
+}
+
+/// gam#2893: the flex no-wiggle joint third information derivative `D³H[u, v, e_a]`, served
+/// by the Jeffreys hook, matches a Ridders-certified central difference of `D²H[u, v]` along
+/// every coefficient axis.
+#[test]
+fn survival_flex_joint_third_information_matches_differenced_second_directional_2893() {
+    let family = make_flex_no_wiggle_test_family(40);
+    let beta = flex_no_wiggle_beta(&family);
+    let states = flex_no_wiggle_states_at_beta(&family, &beta);
+    let score_dim = beta.len() - 2;
+    let specs = vec![
+        dummy_blockspec(0),
+        dummy_blockspec(1),
+        dummy_blockspec(1),
+        dummy_blockspec(score_dim),
+    ];
+    assert!(family.joint_jeffreys_information_third_directional_available());
+    let u = Array1::from_shape_fn(beta.len(), |i| ((i * 7 + 3) % 11) as f64 / 11.0 - 0.45);
+    let v = Array1::from_shape_fn(beta.len(), |i| ((i * 5 + 1) % 13) as f64 / 13.0 - 0.5);
+    let axes = family
+        .joint_jeffreys_information_third_directional_all_axes_with_specs(&states, &specs, &u, &v)
+        .expect("third information derivative")
+        .expect("flex without a time wiggle publishes the third information derivative");
+    assert_eq!(axes.len(), beta.len());
+    assert!(
+        axes.iter().any(|matrix| matrix.iter().any(|value| value.abs() > 1e-8)),
+        "the joint third information derivative must be nonzero on this fixture"
+    );
+    for (axis_idx, analytic) in axes.iter().enumerate() {
+        let mut axis = Array1::<f64>::zeros(beta.len());
+        axis[axis_idx] = 1.0;
+        assert_matches_ridders_2893(&format!("axis {axis_idx}"), analytic, &|t| {
+            family
+                .exact_newton_joint_hessiansecond_directional_derivative(
+                    &flex_no_wiggle_states_at_beta(&family, &(&beta + &(&axis * t))),
+                    &u,
+                    &v,
+                )
+                .expect("D2_beta H")
+                .expect("flex publishes D2_beta H")
+        });
+    }
+}
+
 #[test]
 fn survival_jointhessian_flex_no_wiggle_operator_subsample_half_scales_correctly() {
     use crate::outer_subsample::OuterScoreSubsample;

@@ -82,6 +82,16 @@ pub(crate) struct FlexTimepointBidirectionalPack {
     pub(crate) d_uv_uv: Vec<f64>,
 }
 
+/// Mixed third-direction extension of the canonical timepoint channels: the
+/// triple-seed Hessian `Σ_{cde} ∂⁵(·)[a, b, c, d, e]·u_c·v_d·w_e` of η, χ and D
+/// (gam#2893).
+#[derive(Clone, Debug)]
+pub(crate) struct FlexTimepointTridirectionalPack {
+    pub(crate) eta_uvw: Vec<f64>,
+    pub(crate) chi_uvw: Vec<f64>,
+    pub(crate) d_uvw: Vec<f64>,
+}
+
 /// Motion of every family-owned scalar entering one FLEX row along one outer
 /// direction.
 ///
@@ -1471,6 +1481,228 @@ impl FlexJet for Jet4 {
     }
 }
 
+// ── Jet5: three-seed, contracted fifth (gam#2893) ───────────────────────────
+
+/// Numeric cell-moment degree an order-five timepoint jet reads: the base moments
+/// through `M_4`, shifted by the `6·ORDER` z-degree of `e^{−Δq}` (the moment-degree
+/// budget of `base_moment_jets`).
+pub(crate) const FLEX_ORDER_FIVE_MOMENT_DEGREE: usize = 4 + 6 * <Jet5 as FlexJet>::ORDER;
+
+/// An [`Jet2`] base plus ε, δ, γ (`ε² = δ² = γ² = 0`, every mixed product
+/// retained) — eight [`Jet2`] parts. After seeding with three directions, the
+/// εδγ-Hessian of the NLL is `Σ_{cde} ℓ_{abcde} u_c v_d w_e`.
+#[derive(Clone)]
+struct Jet5 {
+    base: Jet2,
+    eps: Jet2,
+    del: Jet2,
+    gam: Jet2,
+    eps_del: Jet2,
+    eps_gam: Jet2,
+    del_gam: Jet2,
+    eps_del_gam: Jet2,
+}
+
+impl Jet5 {
+    fn primary(x: f64, axis: usize, p: usize, du: f64, dv: f64, dw: f64) -> Self {
+        let zero = vec![0.0; p];
+        Jet5 {
+            base: Jet2::primary(x, axis, p),
+            eps: Jet2::from_parts(du, &zero, &[]),
+            del: Jet2::from_parts(dv, &zero, &[]),
+            gam: Jet2::from_parts(dw, &zero, &[]),
+            eps_del: Jet2::from_parts(0.0, &zero, &[]),
+            eps_gam: Jet2::from_parts(0.0, &zero, &[]),
+            del_gam: Jet2::from_parts(0.0, &zero, &[]),
+            eps_del_gam: Jet2::from_parts(0.0, &zero, &[]),
+        }
+    }
+
+    fn contracted_fifth(&self) -> Vec<f64> {
+        self.eps_del_gam.h.clone()
+    }
+
+    fn map_parts(&self, mut f: impl FnMut(&Jet2) -> Jet2) -> Self {
+        Jet5 {
+            base: f(&self.base),
+            eps: f(&self.eps),
+            del: f(&self.del),
+            gam: f(&self.gam),
+            eps_del: f(&self.eps_del),
+            eps_gam: f(&self.eps_gam),
+            del_gam: f(&self.del_gam),
+            eps_del_gam: f(&self.eps_del_gam),
+        }
+    }
+
+    fn zip_parts(&self, o: &Self, mut f: impl FnMut(&Jet2, &Jet2) -> Jet2) -> Self {
+        Jet5 {
+            base: f(&self.base, &o.base),
+            eps: f(&self.eps, &o.eps),
+            del: f(&self.del, &o.del),
+            gam: f(&self.gam, &o.gam),
+            eps_del: f(&self.eps_del, &o.eps_del),
+            eps_gam: f(&self.eps_gam, &o.eps_gam),
+            del_gam: f(&self.del_gam, &o.del_gam),
+            eps_del_gam: f(&self.eps_del_gam, &o.eps_del_gam),
+        }
+    }
+}
+
+impl JetField for Jet5 {
+    #[inline]
+    fn value(&self) -> f64 {
+        self.base.v
+    }
+    fn add(&self, o: &Self) -> Self {
+        self.zip_parts(o, |a, b| a.add(b))
+    }
+    fn sub(&self, o: &Self) -> Self {
+        self.zip_parts(o, |a, b| a.sub(b))
+    }
+    fn mul(&self, o: &Self) -> Self {
+        let base = self.base.mul(&o.base);
+        let eps = self.base.mul(&o.eps).add(&self.eps.mul(&o.base));
+        let del = self.base.mul(&o.del).add(&self.del.mul(&o.base));
+        let gam = self.base.mul(&o.gam).add(&self.gam.mul(&o.base));
+        let eps_del = self
+            .base
+            .mul(&o.eps_del)
+            .add(&self.eps.mul(&o.del))
+            .add(&self.del.mul(&o.eps))
+            .add(&self.eps_del.mul(&o.base));
+        let eps_gam = self
+            .base
+            .mul(&o.eps_gam)
+            .add(&self.eps.mul(&o.gam))
+            .add(&self.gam.mul(&o.eps))
+            .add(&self.eps_gam.mul(&o.base));
+        let del_gam = self
+            .base
+            .mul(&o.del_gam)
+            .add(&self.del.mul(&o.gam))
+            .add(&self.gam.mul(&o.del))
+            .add(&self.del_gam.mul(&o.base));
+        let eps_del_gam = self
+            .base
+            .mul(&o.eps_del_gam)
+            .add(&self.eps.mul(&o.del_gam))
+            .add(&self.del.mul(&o.eps_gam))
+            .add(&self.gam.mul(&o.eps_del))
+            .add(&self.eps_del.mul(&o.gam))
+            .add(&self.eps_gam.mul(&o.del))
+            .add(&self.del_gam.mul(&o.eps))
+            .add(&self.eps_del_gam.mul(&o.base));
+        Jet5 {
+            base,
+            eps,
+            del,
+            gam,
+            eps_del,
+            eps_gam,
+            del_gam,
+            eps_del_gam,
+        }
+    }
+    fn scale(&self, s: f64) -> Self {
+        self.map_parts(|part| part.scale(s))
+    }
+    #[inline]
+    fn neg(&self) -> Self {
+        self.scale(-1.0)
+    }
+    /// The order-four stack cannot reach the triple-seed channel, which reads `f⁽⁵⁾`.
+    /// That channel is left `NaN`, so a lowering that reaches this composition refuses
+    /// rather than reporting a truncated tensor; every flex-plan composition goes
+    /// through [`FlexJet::compose_unary_order5`].
+    fn compose_unary(&self, d: [f64; 5]) -> Self {
+        self.compose_unary_order5([d[0], d[1], d[2], d[3], d[4], f64::NAN])
+    }
+    fn constant_like(&self, v: f64) -> Self {
+        let zero = self.base.constant_like(0.0);
+        Jet5 {
+            base: self.base.constant_like(v),
+            eps: zero.clone(),
+            del: zero.clone(),
+            gam: zero.clone(),
+            eps_del: zero.clone(),
+            eps_gam: zero.clone(),
+            del_gam: zero.clone(),
+            eps_del_gam: zero,
+        }
+    }
+    fn with_value(&self, v: f64) -> Self {
+        let mut out = self.clone();
+        out.base = self.base.with_value(v);
+        out
+    }
+}
+
+impl FlexJet for Jet5 {
+    const ORDER: usize = 5;
+
+    #[inline]
+    fn scale_homogeneous_orders(&self, factors: [f64; 6]) -> Self {
+        Jet5 {
+            base: self.base.scale_homogeneous_from(0, factors),
+            eps: self.eps.scale_homogeneous_from(1, factors),
+            del: self.del.scale_homogeneous_from(1, factors),
+            gam: self.gam.scale_homogeneous_from(1, factors),
+            eps_del: self.eps_del.scale_homogeneous_from(2, factors),
+            eps_gam: self.eps_gam.scale_homogeneous_from(2, factors),
+            del_gam: self.del_gam.scale_homogeneous_from(2, factors),
+            eps_del_gam: self.eps_del_gam.scale_homogeneous_from(3, factors),
+        }
+    }
+
+    fn compose_unary_order5(&self, d: [f64; 6]) -> Self {
+        // A Jet2 composition reads only `[f, f′, f″]`, so the trailing entries of each
+        // shifted stack are never observed.
+        let base = self.base.compose_unary([d[0], d[1], d[2], d[3], d[4]]);
+        let fprime = self.base.compose_unary([d[1], d[2], d[3], d[4], d[5]]);
+        let fsecond = self.base.compose_unary([d[2], d[3], d[4], d[5], d[5]]);
+        let fthird = self.base.compose_unary([d[3], d[4], d[5], d[5], d[5]]);
+        let eps = fprime.mul(&self.eps);
+        let del = fprime.mul(&self.del);
+        let gam = fprime.mul(&self.gam);
+        let eps_del = fsecond
+            .mul(&self.eps)
+            .mul(&self.del)
+            .add(&fprime.mul(&self.eps_del));
+        let eps_gam = fsecond
+            .mul(&self.eps)
+            .mul(&self.gam)
+            .add(&fprime.mul(&self.eps_gam));
+        let del_gam = fsecond
+            .mul(&self.del)
+            .mul(&self.gam)
+            .add(&fprime.mul(&self.del_gam));
+        // Faà di Bruno through three nilpotent seeds: f‴·x_ε·x_δ·x_γ
+        // + f″·(x_εδ·x_γ + x_εγ·x_δ + x_δγ·x_ε) + f′·x_εδγ.
+        let pairs = self
+            .eps_del
+            .mul(&self.gam)
+            .add(&self.eps_gam.mul(&self.del))
+            .add(&self.del_gam.mul(&self.eps));
+        let eps_del_gam = fthird
+            .mul(&self.eps)
+            .mul(&self.del)
+            .mul(&self.gam)
+            .add(&fsecond.mul(&pairs))
+            .add(&fprime.mul(&self.eps_del_gam));
+        Jet5 {
+            base,
+            eps,
+            del,
+            gam,
+            eps_del,
+            eps_gam,
+            del_gam,
+            eps_del_gam,
+        }
+    }
+}
+
 /// `Σ_i x[i]·y[i]` over equal-length slices.
 #[inline]
 fn dot(x: &[f64], y: &[f64]) -> f64 {
@@ -1539,6 +1771,24 @@ pub(crate) struct FlexFourthPacks<'a> {
     pub exit_ext_v: &'a FlexTimepointDirectionalPack,
     pub entry_bi: &'a FlexTimepointBidirectionalPack,
     pub exit_bi: &'a FlexTimepointBidirectionalPack,
+}
+
+/// Entry and exit packs for the contracted fifth `Σ_{cde} ℓ_{abcde} u_c v_d w_e`:
+/// the base, the three directional extensions, the three mixed pairs and the triple
+/// (gam#2893).
+pub(crate) struct FlexFifthPacks<'a> {
+    pub entry_base: &'a FlexTimepointBasePack,
+    pub exit_base: &'a FlexTimepointBasePack,
+    pub entry_ext: [&'a FlexTimepointDirectionalPack; 3],
+    pub exit_ext: [&'a FlexTimepointDirectionalPack; 3],
+    pub entry_bi_uv: &'a FlexTimepointBidirectionalPack,
+    pub exit_bi_uv: &'a FlexTimepointBidirectionalPack,
+    pub entry_bi_uw: &'a FlexTimepointBidirectionalPack,
+    pub exit_bi_uw: &'a FlexTimepointBidirectionalPack,
+    pub entry_bi_vw: &'a FlexTimepointBidirectionalPack,
+    pub exit_bi_vw: &'a FlexTimepointBidirectionalPack,
+    pub entry_tri: &'a FlexTimepointTridirectionalPack,
+    pub exit_tri: &'a FlexTimepointTridirectionalPack,
 }
 
 impl SurvivalMarginalSlopeFamily {
@@ -1791,6 +2041,155 @@ impl SurvivalMarginalSlopeFamily {
         let qd1j = Jet4::primary(qd1, primary.qd1, p, dir_u[primary.qd1], dir_v[primary.qd1]);
         let out = flex_row_nll(&eta0, &eta1, &chi1, &d1, &q1j, &qd1j, surv0, surv1, wi, di);
         Array2::from_shape_vec((p, p), out.contracted_fourth()).map_err(|e| e.to_string())
+    }
+
+    /// Single-source flex contracted fifth `Σ_{cde} ℓ_{abcde} u_c v_d w_e` from the
+    /// entry/exit base, directional, mixed-pair and triple packs: the canonical flex-row
+    /// plan at fifth order (gam#2893).
+    pub(crate) fn flex_row_nll_fifth_contracted(
+        &self,
+        row: usize,
+        primary: &FlexPrimarySlices,
+        q1: f64,
+        qd1: f64,
+        dirs: [&[f64]; 3],
+        packs: FlexFifthPacks<'_>,
+    ) -> Result<Array2<f64>, String> {
+        let FlexFifthPacks {
+            entry_base,
+            exit_base,
+            entry_ext,
+            exit_ext,
+            entry_bi_uv,
+            exit_bi_uv,
+            entry_bi_uw,
+            exit_bi_uw,
+            entry_bi_vw,
+            exit_bi_vw,
+            entry_tri,
+            exit_tri,
+        } = packs;
+        let [u, v, w] = dirs;
+        let p = primary.total;
+        let wi = self.weights[row];
+        let di = self.event[row];
+        let surv0 = surv_stack(entry_base.eta)?;
+        let surv1 = surv_stack(exit_base.eta)?;
+
+        // Each nilpotent part is the (value, gradient, Hessian) of one directional
+        // derivative of a timepoint scalar: the value of a mixed part is the quadratic
+        // form of the next-lower Hessian, and its gradient contracts that Hessian once.
+        let mk = |base_v: f64,
+                  base_g: &[f64],
+                  base_h: &[f64],
+                  ext_g: [&[f64]; 3],
+                  ext_h: [&[f64]; 3],
+                  bi_uv: &[f64],
+                  bi_uw: &[f64],
+                  bi_vw: &[f64],
+                  tri: &[f64]|
+         -> Jet5 {
+            Jet5 {
+                base: Jet2::from_parts(base_v, base_g, base_h),
+                eps: Jet2::from_parts(dot(base_g, u), ext_g[0], ext_h[0]),
+                del: Jet2::from_parts(dot(base_g, v), ext_g[1], ext_h[1]),
+                gam: Jet2::from_parts(dot(base_g, w), ext_g[2], ext_h[2]),
+                eps_del: Jet2::from_parts(quad_form(base_h, u, v, p), &mat_vec(ext_h[0], v, p), bi_uv),
+                eps_gam: Jet2::from_parts(quad_form(base_h, u, w, p), &mat_vec(ext_h[0], w, p), bi_uw),
+                del_gam: Jet2::from_parts(quad_form(base_h, v, w, p), &mat_vec(ext_h[1], w, p), bi_vw),
+                eps_del_gam: Jet2::from_parts(
+                    quad_form(ext_h[2], u, v, p),
+                    &mat_vec(bi_uv, w, p),
+                    tri,
+                ),
+            }
+        };
+        let eta0 = mk(
+            entry_base.eta,
+            &entry_base.eta_u,
+            &entry_base.eta_uv,
+            [
+                entry_ext[0].eta_u_dir.as_slice(),
+                entry_ext[1].eta_u_dir.as_slice(),
+                entry_ext[2].eta_u_dir.as_slice(),
+            ],
+            [
+                entry_ext[0].eta_uv_dir.as_slice(),
+                entry_ext[1].eta_uv_dir.as_slice(),
+                entry_ext[2].eta_uv_dir.as_slice(),
+            ],
+            &entry_bi_uv.eta_uv_uv,
+            &entry_bi_uw.eta_uv_uv,
+            &entry_bi_vw.eta_uv_uv,
+            &entry_tri.eta_uvw,
+        );
+        let eta1 = mk(
+            exit_base.eta,
+            &exit_base.eta_u,
+            &exit_base.eta_uv,
+            [
+                exit_ext[0].eta_u_dir.as_slice(),
+                exit_ext[1].eta_u_dir.as_slice(),
+                exit_ext[2].eta_u_dir.as_slice(),
+            ],
+            [
+                exit_ext[0].eta_uv_dir.as_slice(),
+                exit_ext[1].eta_uv_dir.as_slice(),
+                exit_ext[2].eta_uv_dir.as_slice(),
+            ],
+            &exit_bi_uv.eta_uv_uv,
+            &exit_bi_uw.eta_uv_uv,
+            &exit_bi_vw.eta_uv_uv,
+            &exit_tri.eta_uvw,
+        );
+        let chi1 = mk(
+            exit_base.chi,
+            &exit_base.chi_u,
+            &exit_base.chi_uv,
+            [
+                exit_ext[0].chi_u_dir.as_slice(),
+                exit_ext[1].chi_u_dir.as_slice(),
+                exit_ext[2].chi_u_dir.as_slice(),
+            ],
+            [
+                exit_ext[0].chi_uv_dir.as_slice(),
+                exit_ext[1].chi_uv_dir.as_slice(),
+                exit_ext[2].chi_uv_dir.as_slice(),
+            ],
+            &exit_bi_uv.chi_uv_uv,
+            &exit_bi_uw.chi_uv_uv,
+            &exit_bi_vw.chi_uv_uv,
+            &exit_tri.chi_uvw,
+        );
+        let d1 = mk(
+            exit_base.d,
+            &exit_base.d_u,
+            &exit_base.d_uv,
+            [
+                exit_ext[0].d_u_dir.as_slice(),
+                exit_ext[1].d_u_dir.as_slice(),
+                exit_ext[2].d_u_dir.as_slice(),
+            ],
+            [
+                exit_ext[0].d_uv_dir.as_slice(),
+                exit_ext[1].d_uv_dir.as_slice(),
+                exit_ext[2].d_uv_dir.as_slice(),
+            ],
+            &exit_bi_uv.d_uv_uv,
+            &exit_bi_uw.d_uv_uv,
+            &exit_bi_vw.d_uv_uv,
+            &exit_tri.d_uvw,
+        );
+        let q1j = Jet5::primary(q1, primary.q1, p, u[primary.q1], v[primary.q1], w[primary.q1]);
+        let qd1j = Jet5::primary(qd1, primary.qd1, p, u[primary.qd1], v[primary.qd1], w[primary.qd1]);
+        let out = flex_row_nll(&eta0, &eta1, &chi1, &d1, &q1j, &qd1j, surv0, surv1, wi, di);
+        let fifth = out.contracted_fifth();
+        if fifth.iter().any(|value| !value.is_finite()) {
+            return Err(format!(
+                "survival flex contracted fifth row {row}: non-finite channel"
+            ));
+        }
+        Array2::from_shape_vec((p, p), fifth).map_err(|e| e.to_string())
     }
 }
 
@@ -3085,6 +3484,68 @@ impl SurvivalMarginalSlopeFamily {
             eta_uv_uv: eta.eps_del.h.clone(),
             chi_uv_uv: chi.eps_del.h.clone(),
             d_uv_uv: d.eps_del.h.clone(),
+        })
+    }
+
+    /// The mixed third-directional timepoint extension `D_{d1} D_{d2} D_{d3}` of
+    /// `(eta_uv, chi_uv, d_uv)` via the single-source builder at [`Jet5`] (three
+    /// nilpotent seeds). Returns the triple pack, the εδγ-Hessian channel. Only
+    /// derivative channels are read, so the influence offset's constant shift of η
+    /// does not enter, exactly as in the bidirectional builder (gam#2893).
+    pub(crate) fn compute_survival_timepoint_tridirectional_jet_from_cached(
+        &self,
+        row: usize,
+        primary: &FlexPrimarySlices,
+        q: f64,
+        q_index: usize,
+        a: f64,
+        b: f64,
+        beta_h: Option<&Array1<f64>>,
+        beta_w: Option<&Array1<f64>>,
+        cached: &CachedPartitionCells,
+        dirs: [&Array1<f64>; 3],
+    ) -> Result<FlexTimepointTridirectionalPack, String> {
+        let p = primary.total;
+        let d_check = self.evaluate_survival_denom_d(a, b, beta_h, beta_w)?;
+        let z_obs = self.observed_score_projection(row);
+        let (obs_coeff, obs_fixed) = observed_fixed_for(self, primary, row, a, b, beta_h, beta_w)?;
+        let cells = cells_from_cached(cached);
+        let [dir1, dir2, dir3] = dirs;
+
+        let template = Jet5::primary(0.0, usize::MAX, p, 0.0, 0.0, 0.0);
+        let b_jet = Jet5::primary(
+            b,
+            primary.g,
+            p,
+            dir1[primary.g],
+            dir2[primary.g],
+            dir3[primary.g],
+        );
+        let du: Vec<Jet5> = (0..p)
+            .map(|u| Jet5::primary(0.0, u, p, dir1[u], dir2[u], dir3[u]))
+            .collect();
+        let q_jet = add_const(&du[q_index], q);
+        let (eta, chi, d) = flex_timepoint_inputs_generic(
+            &template,
+            &b_jet,
+            &du,
+            a,
+            d_check,
+            primary.g,
+            primary.infl,
+            &q_jet,
+            &const_jet_like(&template, 1.0),
+            z_obs,
+            0.0,
+            obs_coeff,
+            &obs_fixed,
+            &cells,
+        )?;
+
+        Ok(FlexTimepointTridirectionalPack {
+            eta_uvw: eta.eps_del_gam.h.clone(),
+            chi_uvw: chi.eps_del_gam.h.clone(),
+            d_uvw: d.eps_del_gam.h.clone(),
         })
     }
 }

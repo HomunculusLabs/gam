@@ -82,7 +82,12 @@ impl SurvivalMarginalSlopeFamily {
             return Ok(Array2::<f64>::zeros((p, p)));
         }
 
-        let geometry = self.prepare_row_flex_third_geometry(row, block_states, &primary)?;
+        let geometry = self.prepare_row_flex_third_geometry(
+            row,
+            block_states,
+            &primary,
+            super::partition::FLEX_ORDER_FOUR_MOMENT_DEGREE,
+        )?;
         let (entry_base, entry_ext, exit_base, exit_ext) =
             super::flex_jet::with_flex_third_jet_arena(|jet_arena| -> Result<_, String> {
                 let (entry_base, entry_ext) = self
@@ -136,6 +141,7 @@ impl SurvivalMarginalSlopeFamily {
         row: usize,
         block_states: &[ParameterBlockState],
         primary: &FlexPrimarySlices,
+        moment_order: usize,
     ) -> Result<FlexThirdRowGeometry, String> {
         let q_geom = self.row_dynamic_q_geometry(row, block_states)?;
         let q0 = q_geom.q0;
@@ -169,10 +175,22 @@ impl SurvivalMarginalSlopeFamily {
             beta_w.as_ref(),
             Some((row, SurvivalInterceptSlotKind::Exit)),
         )?;
-        let entry_cached =
-            self.build_cached_partition(primary, a0, g, beta_h.as_ref(), beta_w.as_ref())?;
-        let exit_cached =
-            self.build_cached_partition(primary, a1, g, beta_h.as_ref(), beta_w.as_ref())?;
+        let entry_cached = self.build_cached_partition_with_moment_order(
+            primary,
+            a0,
+            g,
+            beta_h.as_ref(),
+            beta_w.as_ref(),
+            moment_order,
+        )?;
+        let exit_cached = self.build_cached_partition_with_moment_order(
+            primary,
+            a1,
+            g,
+            beta_h.as_ref(),
+            beta_w.as_ref(),
+            moment_order,
+        )?;
 
         Ok(FlexThirdRowGeometry {
             row,
@@ -208,7 +226,40 @@ impl SurvivalMarginalSlopeFamily {
         block_states: &[ParameterBlockState],
         primary: &FlexPrimarySlices,
     ) -> Result<FlexThirdRowBase, String> {
-        let geometry = self.prepare_row_flex_third_geometry(row, block_states, primary)?;
+        self.build_row_flex_third_base_with_moment_order(
+            row,
+            block_states,
+            primary,
+            super::partition::FLEX_ORDER_FOUR_MOMENT_DEGREE,
+        )
+    }
+
+    /// [`Self::build_row_flex_third_base_with_states`] with the cell partitions built
+    /// through `FLEX_ORDER_FIVE_MOMENT_DEGREE`, the numeric moments an order-five
+    /// timepoint jet reads (gam#2893).
+    pub(crate) fn build_row_flex_fifth_base_with_states(
+        &self,
+        row: usize,
+        block_states: &[ParameterBlockState],
+        primary: &FlexPrimarySlices,
+    ) -> Result<FlexThirdRowBase, String> {
+        self.build_row_flex_third_base_with_moment_order(
+            row,
+            block_states,
+            primary,
+            super::flex_jet::FLEX_ORDER_FIVE_MOMENT_DEGREE,
+        )
+    }
+
+    fn build_row_flex_third_base_with_moment_order(
+        &self,
+        row: usize,
+        block_states: &[ParameterBlockState],
+        primary: &FlexPrimarySlices,
+        moment_order: usize,
+    ) -> Result<FlexThirdRowBase, String> {
+        let geometry =
+            self.prepare_row_flex_third_geometry(row, block_states, primary, moment_order)?;
 
         // The contracted base timepoint is the Jet2 instance of the same
         // single-source expression used by the Jet3/Jet4 contractions.
@@ -512,6 +563,156 @@ impl SurvivalMarginalSlopeFamily {
                 exit_bi: &exit_bi,
             },
         )
+    }
+
+    /// The contracted fifth `Σ_{cde} ℓ_{abcde} u_c v_d (e_k)_e` of one row for every
+    /// primary axis `k`, sharing the direction-independent base and every pack that
+    /// reads only `u` and `v`. The base must carry partitions built through
+    /// `FLEX_ORDER_FIVE_MOMENT_DEGREE` (gam#2893).
+    pub(crate) fn row_flex_fifth_contract_all_primary_axes_from_base(
+        &self,
+        base: &FlexThirdRowBase,
+        dir_u: &Array1<f64>,
+        dir_v: &Array1<f64>,
+    ) -> Result<Vec<Array2<f64>>, String> {
+        let p = base.p;
+        if dir_u.iter().all(|value| value.abs() == 0.0)
+            || dir_v.iter().all(|value| value.abs() == 0.0)
+        {
+            return Ok(vec![Array2::<f64>::zeros((p, p)); p]);
+        }
+        let primary = flex_primary_slices(self);
+        let beta_h = base.beta_h.as_ref();
+        let beta_w = base.beta_w.as_ref();
+        let directional = |dir: &Array1<f64>| -> Result<_, String> {
+            super::flex_jet::with_flex_third_jet_arena(|jet_arena| -> Result<_, String> {
+                let (_, entry) = self.compute_survival_timepoint_directional_jet_from_cached(
+                    base.row,
+                    &primary,
+                    base.q0,
+                    base.q0_index,
+                    base.a0,
+                    base.g,
+                    beta_h,
+                    beta_w,
+                    base.o_infl,
+                    &base.entry_cached,
+                    dir,
+                    jet_arena,
+                )?;
+                jet_arena.reset();
+                let (_, exit) = self.compute_survival_timepoint_directional_jet_from_cached(
+                    base.row,
+                    &primary,
+                    base.q1,
+                    base.q1_index,
+                    base.a1,
+                    base.g,
+                    beta_h,
+                    beta_w,
+                    base.o_infl,
+                    &base.exit_cached,
+                    dir,
+                    jet_arena,
+                )?;
+                Ok((entry, exit))
+            })
+        };
+        let bidirectional = |d1: &Array1<f64>, d2: &Array1<f64>| -> Result<_, String> {
+            let entry = self.compute_survival_timepoint_bidirectional_jet_from_cached(
+                base.row,
+                &primary,
+                base.q0,
+                base.q0_index,
+                base.a0,
+                base.g,
+                beta_h,
+                beta_w,
+                &base.entry_cached,
+                d1,
+                d2,
+            )?;
+            let exit = self.compute_survival_timepoint_bidirectional_jet_from_cached(
+                base.row,
+                &primary,
+                base.q1,
+                base.q1_index,
+                base.a1,
+                base.g,
+                beta_h,
+                beta_w,
+                &base.exit_cached,
+                d1,
+                d2,
+            )?;
+            Ok((entry, exit))
+        };
+        let (entry_ext_u, exit_ext_u) = directional(dir_u)?;
+        let (entry_ext_v, exit_ext_v) = directional(dir_v)?;
+        let (entry_bi_uv, exit_bi_uv) = bidirectional(dir_u, dir_v)?;
+        let u = dir_u
+            .as_slice()
+            .ok_or_else(|| "fifth contraction: dir_u must be contiguous".to_string())?;
+        let v = dir_v
+            .as_slice()
+            .ok_or_else(|| "fifth contraction: dir_v must be contiguous".to_string())?;
+        let mut out = Vec::with_capacity(p);
+        for axis in 0..p {
+            let mut dir_w = Array1::<f64>::zeros(p);
+            dir_w[axis] = 1.0;
+            let (entry_ext_w, exit_ext_w) = directional(&dir_w)?;
+            let (entry_bi_uw, exit_bi_uw) = bidirectional(dir_u, &dir_w)?;
+            let (entry_bi_vw, exit_bi_vw) = bidirectional(dir_v, &dir_w)?;
+            let entry_tri = self.compute_survival_timepoint_tridirectional_jet_from_cached(
+                base.row,
+                &primary,
+                base.q0,
+                base.q0_index,
+                base.a0,
+                base.g,
+                beta_h,
+                beta_w,
+                &base.entry_cached,
+                [dir_u, dir_v, &dir_w],
+            )?;
+            let exit_tri = self.compute_survival_timepoint_tridirectional_jet_from_cached(
+                base.row,
+                &primary,
+                base.q1,
+                base.q1_index,
+                base.a1,
+                base.g,
+                beta_h,
+                beta_w,
+                &base.exit_cached,
+                [dir_u, dir_v, &dir_w],
+            )?;
+            let w = dir_w
+                .as_slice()
+                .ok_or_else(|| "fifth contraction: axis direction must be contiguous".to_string())?;
+            out.push(self.flex_row_nll_fifth_contracted(
+                base.row,
+                &primary,
+                base.q1,
+                base.qd1,
+                [u, v, w],
+                super::flex_jet::FlexFifthPacks {
+                    entry_base: &base.entry_base,
+                    exit_base: &base.exit_base,
+                    entry_ext: [&entry_ext_u, &entry_ext_v, &entry_ext_w],
+                    exit_ext: [&exit_ext_u, &exit_ext_v, &exit_ext_w],
+                    entry_bi_uv: &entry_bi_uv,
+                    exit_bi_uv: &exit_bi_uv,
+                    entry_bi_uw: &entry_bi_uw,
+                    exit_bi_uw: &exit_bi_uw,
+                    entry_bi_vw: &entry_bi_vw,
+                    exit_bi_vw: &exit_bi_vw,
+                    entry_tri: &entry_tri,
+                    exit_tri: &exit_tri,
+                },
+            )?);
+        }
+        Ok(out)
     }
 
     pub(crate) fn row_primary_third_contracted_general(
