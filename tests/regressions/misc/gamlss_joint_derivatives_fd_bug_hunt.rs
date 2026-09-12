@@ -1,8 +1,7 @@
 use gam::ResourcePolicy;
 use gam::custom_family::{CustomFamily, ParameterBlockSpec, ParameterBlockState};
 use gam::families::gamlss::{
-    BinomialLocationScaleFamily, BinomialMeanWiggleFamily, GammaLogFamily,
-    GaussianLocationScaleFamily, PoissonLogFamily,
+    BinomialLocationScaleFamily, BinomialMeanWiggleFamily, GaussianLocationScaleFamily,
 };
 use gam::matrix::DesignMatrix;
 use gam::types::{InverseLink, StandardLink};
@@ -60,8 +59,6 @@ fn gamlss_joint_derivatives_match_finite_difference() {
     let z = array![[0.2], [1.1], [-0.5], [0.7], [-1.4]];
     let y_g = array![0.5, -0.1, 0.8, 1.6, -0.4];
     let y_b = array![1.0, 0.0, 1.0, 0.0, 1.0];
-    let y_p = array![2.0, 0.0, 1.0, 3.0, 4.0];
-    let y_ga = array![1.2, 0.8, 2.0, 1.5, 0.6];
     let w = Array1::ones(5);
 
     // The Gaussian location-scale (log σ, log σ) diagonal and (μ, log σ) cross
@@ -154,25 +151,6 @@ fn gamlss_joint_derivatives_match_finite_difference() {
             vec![spec("eta", &x), spec("wiggle", &z)],
             array![0.05, 0.02],
             Some((0, 1)),
-        ),
-        (
-            Box::new(PoissonLogFamily {
-                y: y_p.clone(),
-                weights: w.clone(),
-            }),
-            vec![spec("eta", &x)],
-            array![0.25],
-            None,
-        ),
-        (
-            Box::new(GammaLogFamily {
-                y: y_ga.clone(),
-                weights: w.clone(),
-                shape: 2.4,
-            }),
-            vec![spec("eta", &x)],
-            array![0.2],
-            None,
         ),
     ];
 

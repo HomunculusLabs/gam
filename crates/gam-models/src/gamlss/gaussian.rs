@@ -32,9 +32,6 @@
 //!                                workspace).
 //! - [`binomial_mean_wiggle`]   — the `BinomialMeanWiggleFamily` mean-only wiggle
 //!                                family and its workspace.
-//! - [`log_link`]               — the `PoissonLogFamily` and `GammaLogFamily`
-//!                                log-link families and the shared diagonal-IRLS
-//!                                evaluation kernel.
 //! - [`binomial_locscale_decl`] — the `BinomialLocationScaleFamily` struct
 //!                                declaration plus the macro that wires both
 //!                                Binomial location-scale families into the shared
@@ -61,9 +58,6 @@ pub use wiggle::*;
 
 mod binomial_mean_wiggle;
 pub use binomial_mean_wiggle::*;
-
-mod log_link;
-pub use log_link::*;
 
 mod binomial_locscale_decl;
 pub use binomial_locscale_decl::*;

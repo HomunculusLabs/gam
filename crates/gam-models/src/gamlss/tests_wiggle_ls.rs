@@ -318,48 +318,6 @@ pub(crate) fn binomial_location_scale_generative_matches_coremu() {
     }
 }
 
-#[test]
-pub(crate) fn poisson_extreme_eta_uses_exact_exp_and_refuses_only_unrepresentable_geometry() {
-    use crate::custom_family::{CustomFamily, ParameterBlockState};
-    let poisson = PoissonLogFamily {
-        y: Array1::from_vec(vec![1.0, 2.0, 3.0]),
-        weights: Array1::from_vec(vec![1.0, 1.0, 1.0]),
-    };
-    let extreme_eta = Array1::from_vec(vec![0.5, 709.0, -0.3]);
-    let eval_result = poisson.evaluate(&[ParameterBlockState {
-        beta: Array1::zeros(0),
-        eta: extreme_eta,
-    }]);
-    let eval =
-        eval_result.expect("Poisson evaluate must succeed while exact geometry is representable");
-    match &eval.blockworking_sets[0] {
-        crate::custom_family::BlockWorkingSet::Diagonal {
-            working_response,
-            working_weights,
-        } => {
-            let all_finite = working_response.iter().all(|v| v.is_finite())
-                && working_weights.iter().all(|v| v.is_finite())
-                && eval.log_likelihood.is_finite();
-            assert!(
-                all_finite,
-                "Poisson evaluate should produce finite outputs for all eta, \
-                     but got non-finite values: ll={}, z={:?}, w={:?}",
-                eval.log_likelihood, working_response, working_weights
-            );
-        }
-        _ => panic!("expected Diagonal block"),
-    }
-
-    let refused = match poisson.evaluate(&[ParameterBlockState {
-        beta: Array1::zeros(0),
-        eta: Array1::from_vec(vec![0.5, 710.0, -0.3]),
-    }]) {
-        Ok(_) => panic!("overflowing exact exp geometry must be refused"),
-        Err(err) => err,
-    };
-    assert!(refused.contains("row 1"), "unexpected refusal: {refused}");
-}
-
 /// The batched outer-gradient override on `BinomialLocationScaleFamily`
 /// must produce a gradient that agrees with the central finite
 /// difference of the same family's outer cost. This is the strongest

@@ -1523,5 +1523,20 @@
     },
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). gam-event-history's factor_covariance and training_eta have no caller in gam-cli, gam-pyffi, gamfit, examples or another crate's production code, and no test calls them.",
     "evidence": "The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes both DELETE with zero references in every category. At 6272b6588, git grep -w finds each name only at its definition and in the gam-event-history crate-root re-export removed in this commit."
+  },
+  {
+    "base": "83787ff535eba1a5142adb845f9de8302958da03",
+    "removed": {
+      "crates/gam-models/src/gamlss/gaussian/log_link.rs::metadata": 2,
+      "crates/gam-models/src/gamlss/gaussian/log_link.rs::parameter_links": 2,
+      "crates/gam-models/src/gamlss/gaussian/log_link.rs::parameternames": 2,
+      "crates/gam-models/src/gamlss/gaussian/wiggle.rs::expect_single_block": 1,
+      "crates/gam-models/src/gamlss/tests.rs::gamma_log_noncanonical_diagonal_uses_observed_not_fisher_weight_and_dw": 1,
+      "crates/gam-models/src/gamlss/tests.rs::log_link_rows_remain_exact_beyond_former_clamp": 1,
+      "crates/gam-models/src/gamlss/tests.rs::poisson_log_canonical_diagonal_weight_is_fisher_and_observed": 1,
+      "crates/gam-models/src/gamlss/tests_wiggle_ls.rs::poisson_extreme_eta_uses_exact_exp_and_refuses_only_unrepresentable_geometry": 1
+    },
+    "reason": "#2903: the removed pub and pub(crate) functions belong to PoissonLogFamily and GammaLogFamily (parameternames, parameter_links, metadata), to expect_single_block, whose only callers were in log_link.rs, and to four unit tests that exercised only those families. Neither family has a product user.",
+    "evidence": "At the base, git grep -n over the whole tree finds PoissonLogFamily and GammaLogFamily only in log_link.rs, the gaussian.rs module doc, gamlss/tests.rs, gamlss/tests_wiggle_ls.rs and two tests/regressions/misc files. git grep -w expect_single_block finds only its declaration and its log_link.rs callers."
   }
 ]

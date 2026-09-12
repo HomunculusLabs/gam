@@ -18,7 +18,6 @@ mod diagnose_drops_response_column;
 mod dispersion_location_scale_observation_interval_symmetric_1346;
 mod faer_ndarray_bug_hunt;
 mod fingerprinter_type_tag_does_not_disambiguate;
-mod gamlss_2_3;
 mod gamlss_joint_derivatives_fd_bug_hunt;
 mod inference_bug_hunt;
 mod inference_model;

@@ -2821,11 +2821,3 @@ impl CustomFamilyGenerative for GaussianLocationScaleWiggleFamily {
         })
     }
 }
-
-pub(crate) fn expect_single_block<'a>(
-    block_states: &'a [ParameterBlockState],
-    family_name: &str,
-) -> Result<&'a ParameterBlockState, String> {
-    validate_block_count::<GamlssError>(family_name, 1, block_states.len())?;
-    Ok(&block_states[0])
-}
