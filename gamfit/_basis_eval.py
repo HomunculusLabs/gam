@@ -619,8 +619,8 @@ def sphere_evaluate(spec: Any, coords: Any) -> Any:
     """Evaluate a :class:`gamfit.Sphere` basis at ``(B, 2)`` coords.
 
     Routes through :func:`gamfit.torch._basis.sphere_basis`, which calls
-    the Rust ``sphere_basis`` kernel. Forward only — the Rust binding does
-    not expose a derivative basis through ``points``.
+    the Rust ``sphere_basis`` kernel. Its backward to ``points`` is analytic:
+    the Rust design jet, whose own backward is the Rust design hessian.
     """
     from .torch._basis import sphere_basis
 

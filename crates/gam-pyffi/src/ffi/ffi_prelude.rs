@@ -119,7 +119,7 @@ pub(crate) use gam::terms::basis::{
     matern_radial_first_derivative_nd, periodic_bspline_derivative_nd,
     periodic_bspline_first_derivative_nd,
     resolve_duchon_orders, select_spherical_farthest_point_centers, sphere_first_derivative_nd,
-    spherical_spline_design_jet,
+    spherical_spline_design_hessian, spherical_spline_design_jet,
 };
 
 pub(crate) use gam::terms::basis::input_loc_derivatives::contract_input_loc_gradient;

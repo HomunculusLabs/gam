@@ -113,7 +113,13 @@ def _duchon_1d() -> tuple[Any, list[torch.Tensor]]:
 
 
 def _sphere() -> tuple[Any, list[torch.Tensor]]:
-    spec = gamfit.Sphere(n_centers=6, penalty_order=2, kernel="sobolev", radians=True)
+    # Explicit centers off the evaluation rows: the m=2 Sobolev kernel's dK/du
+    # diverges at a center, so its Hessian exists only away from the centers,
+    # and farthest-point centers resolved from these rows would sit on them.
+    centers = np.array(
+        [[0.5, 0.1], [-0.4, 1.2], [1.2, 2.9], [0.05, -1.3], [-1.0, 2.2], [0.8, -2.6]]
+    )
+    spec = gamfit.Sphere(centers=centers, penalty_order=2, kernel="sobolev", radians=True)
     # Stay away from poles and the seam.
     lat = torch.linspace(0.2, 1.0, 8, dtype=torch.float64)
     lon = torch.linspace(0.3, 2.5, 8, dtype=torch.float64)

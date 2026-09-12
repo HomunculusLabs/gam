@@ -55,12 +55,12 @@ def test_sphere_basis_size_default_no_eval():
     (n_centers=50) without first evaluating on >=50 rows. It must not
     probe Rust with a 2-row synthetic input.
 
-    The Sphere kernel basis carries one identifiability (sum-to-zero)
-    constraint, so basis_size is n_centers - 1 = 49 for the default."""
+    The Wahba design has one column per center, so basis_size is
+    n_centers = 50 for the default."""
     spec = gamfit.Sphere()  # default n_centers=50
     size = spec.basis_size
     assert isinstance(size, int)
-    assert size >= 49
+    assert size == 50
 
 
 def test_sphere_basis_size_custom_centers_before_evaluate():
@@ -69,19 +69,16 @@ def test_sphere_basis_size_custom_centers_before_evaluate():
     spec = gamfit.Sphere(n_centers=37)
     size = spec.basis_size
     assert isinstance(size, int)
-    # n_centers - 1 (one identifiability constraint) = 36.
-    assert size >= 36
+    assert size == 37
 
 
 def test_sphere_basis_size_then_evaluate_consistent():
     """basis_size queried first must agree with the column count of the
     eventual evaluation (even when eval has fewer rows than centers).
 
-    The raw evaluate() design exposes one column per center (n_centers),
-    while basis_size reports the identifiable dimension after the single
-    sum-to-zero constraint is applied: basis_size == n_centers - 1, so the
-    raw design has exactly basis_size + 1 columns. Either way the count is a
-    property of the spec's centers, NOT of the eval row count (issue #224)."""
+    The evaluate() design exposes one column per center, and basis_size is
+    that column count: a property of the spec's centers, NOT of the eval row
+    count (issue #224)."""
     spec = gamfit.Sphere(n_centers=20)
     size = spec.basis_size
 
@@ -89,23 +86,23 @@ def test_sphere_basis_size_then_evaluate_consistent():
     lat = rng.uniform(-60.0, 60.0, size=8)
     lon = rng.uniform(-180.0, 180.0, size=8)
     design = np.asarray(spec.evaluate(lat, lon, backend="numpy"))
-    assert design.shape[1] == size + 1
+    assert design.shape[1] == size == 20
 
 
 def test_sphere_explicit_centers_round_trip_if_supported():
     """Explicit ``centers=`` are stored verbatim and decouple basis size from
-    eval row count: 10 supplied centers evaluated on 3 rows give a 3-row raw
-    design with one column per center (``basis_size + 1``, the sum-to-zero
-    constraint removing one), with no row-count requirement."""
+    eval row count: 10 supplied centers evaluated on 3 rows give a 3-row
+    design with one column per center (``basis_size``), with no row-count
+    requirement."""
     rng = np.random.default_rng(3)
     centers = np.column_stack(
         [rng.uniform(-60.0, 60.0, size=10), rng.uniform(-180.0, 180.0, size=10)]
     )
     spec = gamfit.Sphere(centers=centers)
     np.testing.assert_array_equal(np.asarray(spec.centers, dtype=np.float64), centers)
-    assert spec.basis_size == 9
+    assert spec.basis_size == 10
 
     lat = rng.uniform(-60.0, 60.0, size=3)  # far fewer rows than centers
     lon = rng.uniform(-180.0, 180.0, size=3)
     design = np.asarray(spec.evaluate(lat, lon, backend="numpy"))
-    assert design.shape == (3, spec.basis_size + 1)
+    assert design.shape == (3, spec.basis_size)

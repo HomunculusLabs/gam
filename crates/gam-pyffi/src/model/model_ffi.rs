@@ -3814,6 +3814,71 @@ fn sphere_basis_jet_with_centers<'py>(
     Ok(jet.into_pyarray(py).unbind())
 }
 
+/// Analytic DESIGN hessian `∂²Φ/∂(lat, lon)²` of the spherical-spline basis,
+/// shape `(N, K, 2, 2)` in the same angular units as the input. With `centers`
+/// it mirrors `sphere_basis_jet_with_centers`, otherwise `sphere_basis_jet`
+/// (auto farthest-point centers, or harmonic degree `L = n_centers`), column for
+/// column. A Wahba basis refuses an evaluation point that coincides with a
+/// center of a kernel that has no Hessian there.
+#[pyfunction(signature = (points, n_centers, centers = None, penalty_order = 2, kernel = "sobolev", radians = false))]
+fn sphere_basis_hessian<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<'py, f64>,
+    n_centers: usize,
+    centers: Option<PyReadonlyArray2<'py, f64>>,
+    penalty_order: usize,
+    kernel: &str,
+    radians: bool,
+) -> PyResult<Py<PyArray4<f64>>> {
+    let pts = points.as_array();
+    if pts.ncols() != 2 {
+        return Err(py_value_error(format!(
+            "sphere_basis_hessian expects points of shape (N, 2) [lat, lon]; got d={}",
+            pts.ncols()
+        )));
+    }
+    if !(1..=4).contains(&penalty_order) {
+        return Err(py_value_error(format!(
+            "sphere_basis_hessian penalty_order must be one of 1, 2, 3, 4; got {penalty_order}"
+        )));
+    }
+    let (method, wahba_kernel) = sphere_kernel_kind_from_str(kernel, "sphere_basis_hessian")?;
+    let harmonic = matches!(method, SphereMethod::Harmonic);
+    let (center_strategy, max_degree) = match centers.as_ref() {
+        Some(ctrs) => {
+            let ctrs = ctrs.as_array();
+            if ctrs.ncols() != 2 {
+                return Err(py_value_error(format!(
+                    "sphere_basis_hessian expects centers of shape (K, 2) [lat, lon]; got d={}",
+                    ctrs.ncols()
+                )));
+            }
+            (
+                CenterStrategy::UserProvided(ctrs.to_owned()),
+                harmonic.then_some(ctrs.nrows()),
+            )
+        }
+        None => (
+            CenterStrategy::FarthestPoint {
+                num_centers: n_centers,
+            },
+            harmonic.then_some(n_centers),
+        ),
+    };
+    let spec = SphericalSplineBasisSpec {
+        center_strategy,
+        penalty_order,
+        double_penalty: false,
+        radians,
+        method,
+        max_degree,
+        wahba_kernel,
+        identifiability: SphericalSplineIdentifiability::CenterSumToZero,
+    };
+    let hessian = spherical_spline_design_hessian(pts, &spec).map_err(basis_error_to_pyerr)?;
+    Ok(hessian.into_pyarray(py).unbind())
+}
+
 /// Real spherical harmonics on `S²` in AMBIENT coordinates, with analytic jet.
 ///
 /// `t` is an `(N, 3)` array of unit vectors `(x, y, z)`. The columns are the

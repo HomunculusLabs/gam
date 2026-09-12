@@ -5039,6 +5039,7 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(ambient_sphere_basis_with_jet, module)?)?;
     module.add_function(wrap_pyfunction!(sphere_basis_jet, module)?)?;
     module.add_function(wrap_pyfunction!(sphere_basis_jet_with_centers, module)?)?;
+    module.add_function(wrap_pyfunction!(sphere_basis_hessian, module)?)?;
     module.add_function(wrap_pyfunction!(thin_plate_penalty, module)?)?;
     module.add_function(wrap_pyfunction!(auto_knots_1d, module)?)?;
     module.add_function(wrap_pyfunction!(auto_centers_1d, module)?)?;

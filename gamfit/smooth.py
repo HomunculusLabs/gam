@@ -777,13 +777,17 @@ class Sphere(Smooth):
 
     @property
     def basis_size(self) -> int:
-        """Analytic basis dimension — no Rust call required.
+        """Analytic basis dimension, the column count of :meth:`evaluate` — no
+        Rust call required.
 
-        - ``kernel='sobolev' | 'pseudo'``: ``K = n_centers - 1`` after the
-          area-weighted sum-to-zero identifiability transform applied by
-          the Rust builder.
+        - ``kernel='sobolev'``: ``K = n_centers``. The Rust builder's
+          ``CenterSumToZero`` identifiability is the identity on the decomposed
+          Wahba design, whose width is the center count.
         - ``kernel='harmonic'``: ``K = L * (L + 2)`` where ``L = n_centers``
           is the truncation degree.
+        - ``kernel='pseudo'``: the Rust builder routes through harmonics of the
+          smallest degree ``L`` with ``L * (L + 2) >= n_centers``, and at least
+          8, so ``K = L * (L + 2)``.
         """
         if self.centers is not None:
             import numpy as np
@@ -791,9 +795,21 @@ class Sphere(Smooth):
             k = int(np.asarray(self.centers, dtype=np.float64).shape[0])
         else:
             k = int(self.n_centers)
-        if str(self.kernel).lower() == "harmonic":
+        kernel = str(self.kernel).lower()
+        if kernel == "harmonic":
             return k * (k + 2)
-        return k - 1
+        if kernel == "pseudo":
+            degree = next((l for l in range(1, 33) if l * (l + 2) >= k), None)
+            if degree is None:
+                raise ValueError(
+                    f"Sphere.basis_size: a pseudo kernel with {k} centers exceeds the "
+                    "degree-32 harmonic cap (1088 columns), where the Rust builder picks "
+                    "the degree from the evaluation row count instead, so the width is "
+                    "not a property of the descriptor"
+                )
+            degree = max(degree, 8)
+            return degree * (degree + 2)
+        return k
 
     def _resolve_centers(self, coords: Any) -> Any:
         """Resolve and cache the basis center matrix.

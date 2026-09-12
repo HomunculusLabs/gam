@@ -393,6 +393,81 @@ class _DuchonBasisFn(torch.autograd.Function):
         return grad_pts, None, None, None, None
 
 
+class _SphereJetFn(torch.autograd.Function):
+    """Input-location jet ``∂design/∂(lat, lon)`` of the spherical-spline design.
+
+    Forward returns the Rust jet ``(N, K, 2)``. Backward contracts the upstream
+    cotangent with the Rust design hessian ``∂²design/∂(lat, lon)²`` of shape
+    ``(N, K, 2, 2)``, so a second autograd pass — the descriptor's ``hessian``
+    (autograd of ``jacobian``) — is exact rather than finite-differenced.
+    """
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        points: torch.Tensor,
+        n_centers: int,
+        penalty_order: int,
+        kernel: str,
+        radians: bool,
+        centers: Any,
+    ) -> torch.Tensor:
+        import numpy as np
+
+        pts_np = to_numpy_f64(points)
+        if centers is None:
+            jet_np = _api.sphere_basis_jet(
+                pts_np,
+                int(n_centers),
+                penalty_order=int(penalty_order),
+                kernel=str(kernel),
+                radians=bool(radians),
+            )
+        else:
+            ctrs_np = np.ascontiguousarray(np.asarray(centers, dtype=np.float64))
+            jet_np = _api.rust_module().sphere_basis_jet_with_centers(
+                pts_np,
+                ctrs_np,
+                int(penalty_order),
+                str(kernel),
+                bool(radians),
+            )
+        ctx.save_for_backward(points)
+        ctx.n_centers = int(n_centers)
+        ctx.penalty_order = int(penalty_order)
+        ctx.kernel = str(kernel)
+        ctx.radians = bool(radians)
+        ctx.centers = centers
+        return from_numpy_like(np.asarray(jet_np, dtype=float), points)
+
+    @staticmethod
+    def backward(
+        ctx: Any, *grad_outputs: torch.Tensor
+    ) -> tuple[torch.Tensor, None, None, None, None, None]:
+        import numpy as np
+
+        (grad_jet,) = grad_outputs  # (N, K, 2)
+        (points,) = ctx.saved_tensors
+        ctrs_np = (
+            None
+            if ctx.centers is None
+            else np.ascontiguousarray(np.asarray(ctx.centers, dtype=np.float64))
+        )
+        hess_np = _api.rust_module().sphere_basis_hessian(
+            to_numpy_f64(points),
+            ctx.n_centers,
+            ctrs_np,
+            ctx.penalty_order,
+            ctx.kernel,
+            ctx.radians,
+        )
+        hess = from_numpy_like(np.asarray(hess_np, dtype=float), points)  # (N, K, 2, 2)
+        grad_points = torch.einsum(
+            "nkj,nkji->ni", grad_jet.to(dtype=hess.dtype), hess
+        )
+        return grad_points, None, None, None, None, None
+
+
 class _SphereBasisFn(torch.autograd.Function):
     """Autograd Function for the spherical-spline (S²) design with grad wrt points.
 
@@ -402,7 +477,9 @@ class _SphereBasisFn(torch.autograd.Function):
     with the Rust input-location jet ``∂design/∂(lat, lon)`` of shape
     ``(N, K, 2)``: ``grad_points[n, j] = Σ_k grad_design[n, k] · jet[n, k, j]``.
     The jet is in the same units as the passed ``points`` (it includes the
-    deg→rad factor when ``radians=False``).
+    deg→rad factor when ``radians=False``). It is routed through
+    :class:`_SphereJetFn`, whose backward uses the Rust design hessian, so
+    autograd of the Jacobian is exact.
     """
 
     @staticmethod
@@ -447,31 +524,18 @@ class _SphereBasisFn(torch.autograd.Function):
     def backward(
         ctx: Any, *grad_outputs: torch.Tensor
     ) -> tuple[torch.Tensor, None, None, None, None, None]:
-        import numpy as np
-
         (grad_design,) = grad_outputs  # (N, K)
         (points,) = ctx.saved_tensors
-        pts_np = to_numpy_f64(points)
-        if ctx.centers is None:
-            jet_np = _api.sphere_basis_jet(
-                pts_np,
-                ctx.n_centers,
-                penalty_order=ctx.penalty_order,
-                kernel=ctx.kernel,
-                radians=ctx.radians,
-            )
-        else:
-            ctrs_np = np.ascontiguousarray(
-                np.asarray(ctx.centers, dtype=np.float64)
-            )
-            jet_np = _api.rust_module().sphere_basis_jet_with_centers(
-                pts_np,
-                ctrs_np,
-                ctx.penalty_order,
-                ctx.kernel,
-                ctx.radians,
-            )
-        jet = from_numpy_like(np.asarray(jet_np, dtype=float), points)  # (N, K, 2)
+        # The jet is autograd-tracked through ``points``, so a second backward
+        # (the input-location Hessian) routes through ``_SphereJetFn.backward``.
+        jet = cast(Callable[..., torch.Tensor], _SphereJetFn.apply)(
+            points,
+            ctx.n_centers,
+            ctx.penalty_order,
+            ctx.kernel,
+            ctx.radians,
+            ctx.centers,
+        )  # (N, K, 2)
         grad_points = torch.einsum(
             "nk,nkj->nj", grad_design.to(dtype=jet.dtype), jet
         )
