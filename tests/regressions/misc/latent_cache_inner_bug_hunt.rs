@@ -1,6 +1,6 @@
 use gam::solver::arrow_schur::ArrowSchurSystem;
 use gam::solver::latent_inner::{ArrowSystemAssembler, LatentInnerOptions, LatentInnerSolver};
-use gam::terms::latent::{LatentCoordValues, LatentIdMode};
+use gam::terms::latent::{LatentCoordValues, LatentIdMode, LatentManifold};
 use ndarray::{Array1, Array2, ArrayView1, array};
 
 struct QuadraticAssembler {
@@ -48,7 +48,7 @@ impl ArrowSystemAssembler for QuadraticAssembler {
 #[test]
 fn latent_inner_solver_converges_from_documented_initial_point_toy_problem() {
     let mut latent =
-        LatentCoordValues::from_matrix(array![[0.0_f64], [0.0_f64]].view(), LatentIdMode::None);
+        LatentCoordValues::from_matrix_with_manifold(array![[0.0_f64], [0.0_f64]].view(), LatentIdMode::None, LatentManifold::Euclidean);
     let beta0 = array![3.0_f64, -2.0_f64];
     let target = array![1.25_f64, -0.75_f64];
     let mut solver = LatentInnerSolver::new(

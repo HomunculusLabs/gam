@@ -483,7 +483,7 @@ fn iterate_norm(beta: ArrayView1<'_, f64>, t: ArrayView1<'_, f64>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gam_terms::latent::{LatentCoordValues, LatentIdMode};
+    use gam_terms::latent::{LatentCoordValues, LatentIdMode, LatentManifold};
     use ndarray::array;
 
     struct ZeroAssembler {
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn zero_assembler_converges_immediately() {
         let m = array![[0.0_f64, 0.0], [0.0, 0.0]];
-        let mut latent = LatentCoordValues::from_matrix(m.view(), LatentIdMode::None);
+        let mut latent = LatentCoordValues::from_matrix_with_manifold(m.view(), LatentIdMode::None, LatentManifold::Euclidean);
         let beta = Array1::<f64>::zeros(3);
         let assembler = ZeroAssembler { n: 2, d: 2, k: 3 };
         let mut solver =

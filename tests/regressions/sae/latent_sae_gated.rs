@@ -110,7 +110,7 @@ impl gam::terms::sae::basis::SaeBasisSecondJet for IdentityBasis {
 #[test]
 fn latent_coord_assignment_decode_roundtrip_matches_dictionary_atom() {
     let coords =
-        LatentCoordValues::from_matrix(array![[0.3, -0.7], [1.2, 0.5]].view(), LatentIdMode::None);
+        LatentCoordValues::from_matrix_with_manifold(array![[0.3, -0.7], [1.2, 0.5]].view(), LatentIdMode::None, LatentManifold::Euclidean);
     let logits = array![[20.0, -20.0], [-20.0, 20.0]];
     let assignment = SaeAssignment::from_blocks_with_mode_and_manifolds(
         logits,

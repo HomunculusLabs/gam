@@ -867,11 +867,6 @@ pub struct LatentCoordValues {
 }
 
 impl LatentCoordValues {
-    /// Construct from a dense `(n_obs, latent_dim)` matrix.
-    pub fn from_matrix(matrix: ArrayView2<'_, f64>, id_mode: LatentIdMode) -> Self {
-        Self::from_matrix_with_manifold(matrix, id_mode, LatentManifold::Euclidean)
-    }
-
     /// Construct from a dense matrix and explicit latent manifold.
     pub fn from_matrix_with_manifold(
         matrix: ArrayView2<'_, f64>,
@@ -1561,9 +1556,9 @@ mod tests {
     use ndarray::array;
 
     #[test]
-    fn from_matrix_roundtrip() {
+    fn from_matrix_with_manifold_roundtrip() {
         let m = array![[1.0_f64, 2.0], [3.0, 4.0], [5.0, 6.0]];
-        let lc = LatentCoordValues::from_matrix(m.view(), LatentIdMode::None);
+        let lc = LatentCoordValues::from_matrix_with_manifold(m.view(), LatentIdMode::None, LatentManifold::Euclidean);
         assert_eq!(lc.n_obs(), 3);
         assert_eq!(lc.latent_dim(), 2);
         let back = lc.as_matrix();
@@ -1573,7 +1568,7 @@ mod tests {
     #[test]
     fn row_access() {
         let m = array![[1.0_f64, 2.0], [3.0, 4.0]];
-        let lc = LatentCoordValues::from_matrix(m.view(), LatentIdMode::None);
+        let lc = LatentCoordValues::from_matrix_with_manifold(m.view(), LatentIdMode::None, LatentManifold::Euclidean);
         assert_eq!(lc.row(0), &[1.0, 2.0]);
         assert_eq!(lc.row(1), &[3.0, 4.0]);
     }
