@@ -39,7 +39,6 @@
 //!
 
 use super::*;
-use crate::bms::signed_probit_neglog_unary_stack;
 use crate::survival::marginal_slope::timewiggle_geometry::{
     TimewiggleBasisDerivativeRows, TimewiggleQBaseValues, timewiggle_q_from_basis_derivative_rows,
 };
@@ -160,27 +159,34 @@ pub(crate) fn with_flex_third_jet_arena<R>(evaluate: impl FnOnce(&mut DynamicJet
 /// supplies the canonical entry/exit survival derivatives consumed by every
 /// generated flex-row lowering.
 #[inline]
-fn surv_stack(eta: f64) -> Result<[f64; 5], String> {
+fn surv_stack(eta: f64) -> Result<[f64; 6], String> {
     let signed_margin = -eta;
     if signed_margin != f64::INFINITY && !signed_margin.is_finite() {
         return Err(format!(
             "non-finite signed margin in exact probit derivative helper: {signed_margin}"
         ));
     }
-    // `weight = -1` makes the fused BMS primitive return the derivative stack
-    // of `logΦ(m)` from ONE Mills-ratio evaluation. Compose with `m = -η` by
-    // flipping odd derivative orders. This replaces the old two-call sequence
-    // (one `logcdf`, then another `logcdf` discarded by the derivative helper).
-    let m_stack = signed_probit_neglog_unary_stack(signed_margin, -1.0);
-    Ok([m_stack[0], -m_stack[1], m_stack[2], -m_stack[3], m_stack[4]])
+    // `logΦ(m)` and its derivatives through the fifth from ONE Mills-ratio
+    // evaluation; the first five entries are the order-four stack itself. Compose
+    // with `m = -η` by flipping odd derivative orders. Only the order-five algebra
+    // reads the fifth (gam#2893).
+    let m_stack = gam_math::probability::normal_logcdf_derivatives_through_fifth(signed_margin);
+    Ok([m_stack[0], -m_stack[1], m_stack[2], -m_stack[3], m_stack[4], -m_stack[5]])
 }
 
-/// The `[f64; 5]` Faà di Bruno stack of `ln(x)`.
+/// The `[f64; 6]` Faà di Bruno stack of `ln(x)`, through the fifth derivative.
 #[inline]
-fn ln_stack(x: f64) -> [f64; 5] {
+fn ln_stack(x: f64) -> [f64; 6] {
     let inv = 1.0 / x;
     let inv2 = inv * inv;
-    [x.ln(), inv, -inv2, 2.0 * inv2 * inv, -6.0 * inv2 * inv2]
+    [
+        x.ln(),
+        inv,
+        -inv2,
+        2.0 * inv2 * inv,
+        -6.0 * inv2 * inv2,
+        24.0 * inv2 * inv2 * inv,
+    ]
 }
 
 /// A runtime-`K` truncated-Taylor scalar: the row loss is written once against
@@ -203,14 +209,24 @@ trait FlexJet: JetField + Clone {
     /// `factors[r]` applies to channels carrying exactly `r` derivatives.
     /// This is the representation-independent Euler-operator seam used by the
     /// distinguished calibration projector.
-    fn scale_homogeneous_orders(&self, factors: [f64; 5]) -> Self;
+    fn scale_homogeneous_orders(&self, factors: [f64; 6]) -> Self;
+
+    /// Faà di Bruno composition with the outer function's derivatives through the
+    /// fifth, `d = [f, f′, f″, f‴, f⁗, f⁽⁵⁾]`. [`JetField::compose_unary`] carries
+    /// orders zero through four, every derivative an algebra of order at most four
+    /// can read, so such an algebra keeps that composition and ignores `d[5]`. The
+    /// order-five algebra overrides this, because its triple-seed channel reads
+    /// `f⁽⁵⁾` (gam#2893).
+    fn compose_unary_order5(&self, d: [f64; 6]) -> Self {
+        self.compose_unary([d[0], d[1], d[2], d[3], d[4]])
+    }
 }
 
 impl FlexJet for f64 {
     const ORDER: usize = 0;
 
     #[inline]
-    fn scale_homogeneous_orders(&self, factors: [f64; 5]) -> Self {
+    fn scale_homogeneous_orders(&self, factors: [f64; 6]) -> Self {
         factors[0] * self
     }
 }
@@ -227,7 +243,7 @@ impl<J: FlexJet> FlexJet for Dual2<J> {
     const ORDER: usize = if J::ORDER >= 2 { 4 } else { J::ORDER + 2 };
 
     #[inline]
-    fn scale_homogeneous_orders(&self, factors: [f64; 5]) -> Self {
+    fn scale_homogeneous_orders(&self, factors: [f64; 6]) -> Self {
         let shifted = |outer_order: usize| {
             std::array::from_fn(|inner_order| {
                 factors
@@ -270,7 +286,7 @@ impl FlexOuterSource {
 
 #[derive(Clone, Copy)]
 enum FlexOuterTransform {
-    Compose([f64; 5]),
+    Compose([f64; 6]),
     Square,
 }
 
@@ -296,7 +312,7 @@ impl FlexOuterTerm {
     fn evaluate<J: FlexJet>(&self, sources: &FlexJetSources<'_, J>) -> J {
         let source = sources.get(self.source);
         let transformed = match self.transform {
-            FlexOuterTransform::Compose(stack) => source.compose_unary(stack),
+            FlexOuterTransform::Compose(stack) => source.compose_unary_order5(stack),
             FlexOuterTransform::Square => source.mul(source),
         };
         transformed.scale(self.scale)
@@ -356,8 +372,8 @@ impl FlexOuterPlan {
         chi1: f64,
         d1: f64,
         qd1: f64,
-        surv0: [f64; 5],
-        surv1: [f64; 5],
+        surv0: [f64; 6],
+        surv1: [f64; 6],
         wi: f64,
         di: f64,
     ) -> Self {
@@ -455,8 +471,8 @@ fn flex_row_nll<J: FlexJet>(
     d1: &J,
     q1: &J,
     qd1: &J,
-    surv0: [f64; 5],
-    surv1: [f64; 5],
+    surv0: [f64; 6],
+    surv1: [f64; 6],
     wi: f64,
     di: f64,
 ) -> J {
@@ -653,7 +669,7 @@ impl Jet2 {
     }
 
     #[inline]
-    fn scale_homogeneous_from(&self, offset: usize, factors: [f64; 5]) -> Self {
+    fn scale_homogeneous_from(&self, offset: usize, factors: [f64; 6]) -> Self {
         assert!(offset + 2 < factors.len());
         Jet2 {
             v: factors[offset] * self.v,
@@ -781,7 +797,7 @@ impl FlexJet for Jet2 {
     const ORDER: usize = 2;
 
     #[inline]
-    fn scale_homogeneous_orders(&self, factors: [f64; 5]) -> Self {
+    fn scale_homogeneous_orders(&self, factors: [f64; 6]) -> Self {
         self.scale_homogeneous_from(0, factors)
     }
 }
@@ -882,7 +898,7 @@ impl FlexJet for Jet1 {
     const ORDER: usize = 1;
 
     #[inline]
-    fn scale_homogeneous_orders(&self, factors: [f64; 5]) -> Self {
+    fn scale_homogeneous_orders(&self, factors: [f64; 6]) -> Self {
         Jet1 {
             v: factors[0] * self.v,
             g: self.g.iter().map(|&channel| factors[1] * channel).collect(),
@@ -976,7 +992,7 @@ impl FlexJet for Jet3 {
     const ORDER: usize = 3;
 
     #[inline]
-    fn scale_homogeneous_orders(&self, factors: [f64; 5]) -> Self {
+    fn scale_homogeneous_orders(&self, factors: [f64; 6]) -> Self {
         Jet3 {
             base: self.base.scale_homogeneous_from(0, factors),
             eps: self.eps.scale_homogeneous_from(1, factors),
@@ -1152,7 +1168,7 @@ impl FlexJet for ArenaJet3<'_> {
     const ORDER: usize = 3;
 
     #[inline]
-    fn scale_homogeneous_orders(&self, factors: [f64; 5]) -> Self {
+    fn scale_homogeneous_orders(&self, factors: [f64; 6]) -> Self {
         let dimension = self.inner.base.g.len();
         let scale_order2 = |channels: &DynamicOrder2<'_>, offset: usize| {
             DynamicOrder2::from_channel_functions(
@@ -1251,7 +1267,7 @@ impl<const K: usize> FlexJet for FixedJet3<K> {
     const ORDER: usize = 3;
 
     #[inline]
-    fn scale_homogeneous_orders(&self, factors: [f64; 5]) -> Self {
+    fn scale_homogeneous_orders(&self, factors: [f64; 6]) -> Self {
         let scale_order2 = |channels: &Order2<K>, offset: usize| {
             let mut scaled = Tower2::<K>::zero();
             scaled.v = factors[offset] * channels.0.v;
@@ -1445,7 +1461,7 @@ impl FlexJet for Jet4 {
     const ORDER: usize = 4;
 
     #[inline]
-    fn scale_homogeneous_orders(&self, factors: [f64; 5]) -> Self {
+    fn scale_homogeneous_orders(&self, factors: [f64; 6]) -> Self {
         Jet4 {
             base: self.base.scale_homogeneous_from(0, factors),
             eps: self.eps.scale_homogeneous_from(1, factors),
@@ -1796,20 +1812,21 @@ fn recip<J: FlexJet>(x: &J) -> J {
     let v = x.value();
     let inv = 1.0 / v;
     let inv2 = inv * inv;
-    x.compose_unary([
+    x.compose_unary_order5([
         inv,
         -inv2,
         2.0 * inv2 * inv,
         -6.0 * inv2 * inv2,
         24.0 * inv2 * inv2 * inv,
+        -120.0 * inv2 * inv2 * inv2,
     ])
 }
 fn exp_jet<J: FlexJet>(x: &J) -> J {
     let e = x.value().exp();
-    x.compose_unary([e, e, e, e, e])
+    x.compose_unary_order5([e, e, e, e, e, e])
 }
 fn add_const<J: FlexJet>(x: &J, c: f64) -> J {
-    x.compose_unary([x.value() + c, 1.0, 0.0, 0.0, 0.0])
+    x.compose_unary_order5([x.value() + c, 1.0, 0.0, 0.0, 0.0, 0.0])
 }
 
 /// The calibration residual term `C·M` as a **distinguished-derivative
@@ -1869,8 +1886,8 @@ trait MomentTerm: FlexJet {
         // partition and its multiplicity; the two order maps below therefore
         // generate the complete projector for every represented order without
         // an order-specific coefficient table.
-        const EULER: [f64; 5] = [0.0, 1.0, 2.0, 3.0, 4.0];
-        const EULER_INVERSE: [f64; 5] = [0.0, 1.0, 0.5, 1.0 / 3.0, 0.25];
+        const EULER: [f64; 6] = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        const EULER_INVERSE: [f64; 6] = [0.0, 1.0, 0.5, 1.0 / 3.0, 0.25, 0.2];
         self.scale_homogeneous_orders(EULER)
             .mul(moment)
             .scale_homogeneous_orders(EULER_INVERSE)
@@ -1919,8 +1936,8 @@ fn base_moment_jets<J: FlexJet>(
     numeric_moments: &[f64],
 ) -> [J; 5] {
     assert!(
-        (1..=4).contains(&J::ORDER),
-        "base_moment_jets supports exact derivative orders 1 through 4"
+        (1..=5).contains(&J::ORDER),
+        "base_moment_jets supports exact derivative orders 1 through 5"
     );
     let required_moments = 5 + 6 * J::ORDER;
     assert!(
@@ -1965,9 +1982,11 @@ fn base_moment_jets<J: FlexJet>(
     // jet for `M_n` therefore needs numeric base moments through `n + 6p`: for
     // p=4 that is `n+24` (n≤4 base moments → M_28; n≤3 calibration → M_27). The
     // cached partition builds to 32 (margin), which is why 27/32 are not magic.
+    // An order-five jet reaches `M_{n+30}` (M_34 for the base moments); the
+    // `required_moments` guard above refuses any partition built short of that.
     let mut s_poly: Vec<J> = vec![const_jet_like(&c[0], 1.0)];
     let mut power: Vec<J> = s_poly.clone();
-    let factorials = [1.0_f64, 1.0, 2.0, 6.0, 24.0];
+    let factorials = [1.0_f64, 1.0, 2.0, 6.0, 24.0, 120.0];
     for fact in factorials.iter().take(J::ORDER + 1).skip(1) {
         power = conv(&power, &neg_dq);
         for (m, coeff) in power.iter().enumerate() {
@@ -2014,7 +2033,7 @@ fn base_moment_jets<J: FlexJet>(
 /// The moving-edge sliver `∫_{z_E0}^{z_E(θ)} zⁿ e^{−q(z,θ)} dz` as a jet (value
 /// 0, derivative channels = the §D moving-boundary flux to all orders). With
 /// `δ = z_E − z_E0` (jet, value 0) and `g(z) = zⁿ e^{−q}`,
-/// `∫_{z_E0}^{z_E} g dz = g·δ + ½ g_z δ² + ⅙ g_zz δ³ + (1/24) g_zzz δ⁴` (Taylor
+/// `∫_{z_E0}^{z_E} g dz = g·δ + ½ g_z δ² + ⅙ g_zz δ³ + (1/24) g_zzz δ⁴ + (1/120) g_zzzz δ⁵` (Taylor
 /// in δ; the instantiated [`FlexJet::ORDER`] selects the exact prefix because
 /// the next δ power vanishes in that nilpotent quotient). `g`, `g_z`, … are
 /// evaluated at the FIXED edge `z_E0` but with the θ-dependent coefficient jets
@@ -2098,11 +2117,10 @@ fn edge_sliver_jet<J: FlexJet>(n: usize, c: &[J; 4], z_e: &J, finite: bool) -> O
         return Some(sliver);
     }
 
-    // The fourth-order quotient is the only one that can observe g_zzz·δ⁴.
-    assert_eq!(
-        J::ORDER,
-        4,
-        "edge sliver supports derivative orders 1 through 4"
+    // g_zzz·δ⁴ first contributes at the fourth order.
+    assert!(
+        J::ORDER <= 5,
+        "edge sliver supports derivative orders 1 through 5"
     );
     let eta_zzz = c[3].scale(6.0); // 6c3
     let q_zzz = eta_z.scale(3.0).mul(&eta_zz).add(&eta.mul(&eta_zzz));
@@ -2117,7 +2135,37 @@ fn edge_sliver_jet<J: FlexJet>(n: usize, c: &[J; 4], z_e: &J, finite: bool) -> O
     )
     .mul(&w);
     let d4 = d3.mul(&delta);
-    Some(sliver.add(&g_zzz.mul(&d4).scale(1.0 / 24.0)))
+    sliver = sliver.add(&g_zzz.mul(&d4).scale(1.0 / 24.0));
+    if J::ORDER == 4 {
+        return Some(sliver);
+    }
+
+    // The fifth-order quotient observes g_zzzz·δ⁵. η is cubic in z, so η_zzzz = 0 and
+    // q_zzzz = 3η_zz² + 4η_z·η_zzz; the weight is the fourth Bell polynomial of −q,
+    // q_z⁴ − 6q_z²q_zz + 3q_zz² + 4q_z·q_zzz − q_zzzz (gam#2893).
+    let q_zzzz = eta_zz
+        .mul(&eta_zz)
+        .scale(3.0)
+        .add(&eta_z.mul(&eta_zzz).scale(4.0));
+    let p4 = polynomial_derivative(4);
+    let q_z_sq = q_z.mul(&q_z);
+    let weight_fourth = q_z_sq
+        .mul(&q_z_sq)
+        .sub(&q_z_sq.mul(&q_zz).scale(6.0))
+        .add(&q_zz.mul(&q_zz).scale(3.0))
+        .add(&q_z.mul(&q_zzz).scale(4.0))
+        .sub(&q_zzzz);
+    let g_zzzz = add_const(
+        &weight_fourth
+            .scale(p0)
+            .add(&weight_third.scale(4.0 * p1))
+            .add(&weight_second.scale(6.0 * p2))
+            .sub(&q_z.scale(4.0 * p3)),
+        p4,
+    )
+    .mul(&w);
+    let d5 = d4.mul(&delta);
+    Some(sliver.add(&g_zzzz.mul(&d5).scale(1.0 / 120.0)))
 }
 
 /// #932 item-2 STEP 3c: the GENERIC-order timepoint `(eta, chi, d)` builder over
@@ -2381,7 +2429,9 @@ fn calibration_residual_jet<J: FlexJet + MomentTerm>(
     let g2 = q * phi_q;
     let g3 = (1.0 - q * q) * phi_q;
     let g4 = (q * q * q - 3.0 * q) * phi_q;
-    let q_self = add_const(&q_jet.compose_unary([g0, g1, g2, g3, g4]), -g0);
+    // g⁽⁵⁾(q) = (6q² − q⁴ − 3)·φ(q), read only by the order-five algebra.
+    let g5 = (6.0 * q * q - q * q * q * q - 3.0) * phi_q;
+    let q_self = add_const(&q_jet.compose_unary_order5([g0, g1, g2, g3, g4, g5]), -g0);
     r = r.add(&q_self);
     r
 }
@@ -3896,7 +3946,7 @@ mod moment_engine_tests {
 
     #[test]
     fn dual2_flexjet_scales_runtime_channels_by_total_homogeneous_order() {
-        let factors = [2.0, 3.0, 5.0, 7.0, 11.0];
+        let factors = [2.0, 3.0, 5.0, 7.0, 11.0, 13.0];
         let original = Dual2 {
             v: Jet2::from_parts(1.0, &[2.0, 3.0], &[4.0, 5.0, 6.0, 7.0]),
             g: Jet2::from_parts(8.0, &[9.0, 10.0], &[11.0, 12.0, 13.0, 14.0]),
@@ -4009,7 +4059,7 @@ mod moment_engine_tests {
     impl<J: FlexJet> FlexJet for ForcedOrder4<J> {
         const ORDER: usize = 4;
 
-        fn scale_homogeneous_orders(&self, factors: [f64; 5]) -> Self {
+        fn scale_homogeneous_orders(&self, factors: [f64; 6]) -> Self {
             Self(self.0.scale_homogeneous_orders(factors))
         }
     }
@@ -5796,8 +5846,8 @@ mod compiled_order2_oracle_tests {
             for _ in 0..2200 {
                 let wi = (xorshift(&mut st) + 1.5).abs() + 0.1;
                 let di = if xorshift(&mut st) > 0.0 { 1.0 } else { 0.0 };
-                let surv0: [f64; 5] = std::array::from_fn(|_| xorshift(&mut st));
-                let surv1: [f64; 5] = std::array::from_fn(|_| xorshift(&mut st));
+                let surv0: [f64; 6] = std::array::from_fn(|_| xorshift(&mut st));
+                let surv1: [f64; 6] = std::array::from_fn(|_| xorshift(&mut st));
                 let (e0v, e0g, e0h) = rand_dense(p, &mut st);
                 let (e1v, e1g, e1h) = rand_dense(p, &mut st);
                 let (mut cv, cg, ch) = rand_dense(p, &mut st);
@@ -5895,8 +5945,8 @@ mod compiled_order2_oracle_tests {
         for di in [0.0_f64, 1.0] {
             let mut st = 0xA5F0_3C11_9D2E_7B41u64 ^ di.to_bits();
             let wi = (xorshift(&mut st) + 1.5).abs() + 0.1;
-            let surv0: [f64; 5] = std::array::from_fn(|_| xorshift(&mut st));
-            let surv1: [f64; 5] = std::array::from_fn(|_| xorshift(&mut st));
+            let surv0: [f64; 6] = std::array::from_fn(|_| xorshift(&mut st));
+            let surv1: [f64; 6] = std::array::from_fn(|_| xorshift(&mut st));
             let (e0v, e0g, e0h) = rand_dense(p, &mut st);
             let (e1v, e1g, e1h) = rand_dense(p, &mut st);
             let (mut cv, cg, ch) = rand_dense(p, &mut st);
