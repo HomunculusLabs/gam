@@ -3975,5 +3975,14 @@
     ],
     "reason": "#2469: GpuDispatchPolicy::REFINEMENT_TOL = 1e-12 declared fp32-factor iterative refinement converged when ||r||/||b|| <= 1e-12. Its doc justified it as two orders above machine epsilon times a moderate condition number, a number chosen for problems of no particular size or scale. The attainable residual of fp64 refinement is its own rounding band. Each residual component b - A*x is a p-term inner product and a subtraction, bounded by gamma_{p+1}*(|A||x| + |b|), and in 2-norm by gamma_{p+1}*(||A||_F*||x|| + ||b||). iterative_refinement_solve_impl now stops once the residual is inside that band. gam-solve's newton_step_refine_once skips its correction inside the matching band of g - (H + delta*I)x, gamma_{p+2}*((||H||_F + |delta|)*||x|| + ||g||). The constant has no remaining user.",
     "evidence": "git grep -w REFINEMENT_TOL at the base over crates, src, tests, gamfit, python and examples finds only its declaration in crates/gam-gpu/src/policy.rs, its read in crates/gam-gpu/src/solver.rs, and its read and one doc line in crates/gam-solve/src/gpu/pirls_gpu.rs. All are rewritten in this commit. The GPU policy tests and tests/arrow_gpu/misc/owed_1412.rs read REFINEMENT_MIN_P only. The item list applies source_removal_guard.py's ITEM regex by hand. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "0073ba7cb23cd3bf8f6cedeffec108901f73b588",
+    "items": [
+      "crates/gam-event-history/src/covariance.rs:fn:factor_covariance",
+      "crates/gam-event-history/src/forecast.rs:fn:training_eta"
+    ],
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). gam-event-history's factor_covariance (A times its transpose) and training_eta (a copy of each mark's fitted eta into one matrix) have no caller in gam-cli, gam-pyffi, gamfit, examples or another crate's production code, and no test calls them.",
+    "evidence": "The prune-api-c census over ac3c0b807 (census_c.py run on acn112 against the sw0b object store; /scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes both DELETE, with zero references in every category. At 6272b6588, git grep -w finds each name only at its definition and in the crate-root re-export removed here. The item list follows source_removal_guard.py's ITEM rule over the removed hunks: two pub fn declarations, and no private declaration is removed."
   }
 ]

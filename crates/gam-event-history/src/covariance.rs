@@ -27,11 +27,6 @@ use faer::Side;
 use gam_linalg::faer_ndarray::strict_symmetric_eigh;
 use ndarray::{Array1, Array2};
 
-/// `A Aᵀ`.
-pub fn factor_covariance(loadings: &Array2<f64>) -> Array2<f64> {
-    loadings.dot(&loadings.t())
-}
-
 /// `C(Δ) = Σ_k C_k e^{−r_k |Δ|}` for one covariance share `C_k = E[a_k a_kᵀ]`
 /// per atom and rates in the data's time unit.
 pub fn temporal_covariance(

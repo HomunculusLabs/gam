@@ -29,7 +29,7 @@ pub use cohort::{
 };
 pub use covariance::{
     DirectionEvidence, DirectionProfile, RidgeProfile, effective_rank, eigenmodes,
-    empirical_bayes_ridge, factor_covariance, quartic_moments, temporal_covariance,
+    empirical_bayes_ridge, quartic_moments, temporal_covariance,
 };
 pub use family::{
     EventHistoryFamily, EventHistoryFit, EventHistorySpec, JointEvaluation, QuadratureCertificate,
@@ -40,8 +40,7 @@ pub use family::{
 pub use forecast::{
     Forecast, ForecastRequest, FutureSegment, HistoryForecastRequest, PopulationForecastRequest,
     SmoothedLatentState, SpellPit, forecast, forecast_history, kolmogorov_smirnov_uniform,
-    latent_state, pit_uniform_distance, population_forecast, predictive_pit, training_eta,
-    baseline_log_rates,
+    latent_state, pit_uniform_distance, population_forecast, predictive_pit, baseline_log_rates,
 };
 pub use formula::{TIME_COLUMN, covariate_spec_from_formula, node_dataset};
 pub use marginal::transition_score_polynomials;

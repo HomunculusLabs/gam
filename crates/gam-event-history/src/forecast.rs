@@ -1101,17 +1101,3 @@ pub fn kolmogorov_smirnov_uniform(pits: &[f64]) -> Option<f64> {
     }
     Some(distance)
 }
-
-/// Convenience: the fitted per-mark linear predictor on the training nodes.
-pub fn training_eta(fit: &EventHistoryFit) -> Array2<f64> {
-    let marks = fit.marks();
-    let total = fit.nodes.total_nodes;
-    let mut out = Array2::<f64>::zeros((total, marks));
-    for d in 0..marks {
-        let eta: &Array1<f64> = fit.mark_eta(d);
-        for row in 0..total {
-            out[[row, d]] = eta[row];
-        }
-    }
-    out
-}

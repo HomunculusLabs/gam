@@ -1514,5 +1514,14 @@
     },
     "reason": "#2899 group-A public-surface sweep, under the #2829 rule: a pub fn that no product uses is deleted. DesignMatrix::apply_weighted_normal, solve_system and factorize_system were inherent wrappers over the same-named LinearOperator trait methods, with no product caller. The solve_system tests now call the trait method. SparseHessianAccumulator::from_multi_csr had no production caller left after bfbb194b2, and its test uses build_symbolic with from_symbolic.",
     "evidence": "public_api_census.py --base 4bf15f660 --head 16b4ca50d reports exactly these four identities (/scratch.global/sauer354/pool/prune-api-a/slice2b.census.json). git grep -n -w at 4bf15f660 finds no product caller of the inherent methods or of from_multi_csr."
+  },
+  {
+    "base": "0073ba7cb23cd3bf8f6cedeffec108901f73b588",
+    "removed": {
+      "crates/gam-event-history/src/covariance.rs::factor_covariance": 1,
+      "crates/gam-event-history/src/forecast.rs::training_eta": 1
+    },
+    "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). gam-event-history's factor_covariance and training_eta have no caller in gam-cli, gam-pyffi, gamfit, examples or another crate's production code, and no test calls them.",
+    "evidence": "The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes both DELETE with zero references in every category. At 6272b6588, git grep -w finds each name only at its definition and in the gam-event-history crate-root re-export removed in this commit."
   }
 ]
