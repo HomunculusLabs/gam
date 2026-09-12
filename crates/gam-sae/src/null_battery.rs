@@ -32,7 +32,7 @@ pub const COVARIANCE_EXACT_HADAMARD_MAX_BLOCK_ROWS: usize = 1_024;
 /// independently of the corpus row count. The separate dense mean-fixing
 /// reflection owns one `n`-vector plus `O(p)` scales/projections. Binary tail
 /// blocks reuse the tile workspaces in later waves.
-pub const COVARIANCE_EXACT_HADAMARD_MAX_PARALLEL_WORKSPACES: usize = 8;
+pub(crate) const COVARIANCE_EXACT_HADAMARD_MAX_PARALLEL_WORKSPACES: usize = 8;
 
 /// Maximum aggregate float64 workspace actively transformed in parallel.
 ///
@@ -41,10 +41,11 @@ pub const COVARIANCE_EXACT_HADAMARD_MAX_PARALLEL_WORKSPACES: usize = 8;
 /// 8-MiB tiles or four 28–32-MiB tiles. More active state increased RSS and
 /// tail latency without increasing useful bandwidth. Column banding makes this
 /// a hard portable memory bound rather than a shape-specific dispatch table.
-pub const COVARIANCE_EXACT_HADAMARD_PARALLEL_WORKSPACE_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+pub(crate) const COVARIANCE_EXACT_HADAMARD_PARALLEL_WORKSPACE_BUDGET_BYTES: usize =
+    128 * 1024 * 1024;
 
 /// Target upper bound for one cache-local Hadamard tile.
-pub const COVARIANCE_EXACT_HADAMARD_TARGET_TILE_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const COVARIANCE_EXACT_HADAMARD_TARGET_TILE_BYTES: usize = 32 * 1024 * 1024;
 
 const HADAMARD_PERMUTATION_SEED_DOMAIN: u64 = 0x4841_4441_5045_524D;
 const HADAMARD_SIGN_SEED_DOMAIN: u64 = 0x4841_4441_5349_474E;
@@ -80,7 +81,7 @@ pub struct EmpiricalPValue {
 /// This is the single plus-one correction used by every native null-calibrated
 /// report. Ties count as extreme in the requested tail, so a null statistic equal
 /// to the observation is evidence against rejection rather than a free win.
-pub fn empirical_p_value(
+pub(crate) fn empirical_p_value(
     observed: f64,
     null_samples: &[f64],
     tail: Tail,
@@ -375,7 +376,7 @@ pub struct ClaimNullCalibration {
 }
 
 impl ClaimNullCalibration {
-    pub fn from_calibrated_roc(report: CalibratedRocClaimReport) -> Result<Self, String> {
+    pub(crate) fn from_calibrated_roc(report: CalibratedRocClaimReport) -> Result<Self, String> {
         let (null_pvalue, null_z) = primary_null_metrics(&report.nulls)?;
         Ok(Self {
             claim: report.claim,
@@ -393,7 +394,7 @@ impl ClaimNullCalibration {
 
 /// Conservative headline across every available structure-destroying control.
 /// Returns `(maximum p-value, minimum z-score)` in one allocation-free pass.
-pub fn primary_null_metrics(report: &NullBatteryReport) -> Result<(f64, f64), String> {
+pub(crate) fn primary_null_metrics(report: &NullBatteryReport) -> Result<(f64, f64), String> {
     if report.summaries.is_empty() {
         return Err("primary null calibration requires at least one null summary".to_string());
     }
@@ -1631,7 +1632,7 @@ pub fn covariance_matched_gaussian_null(
 /// Rows are sampled with replacement after centering, so the calibration sees the
 /// empirical residual covariance, marginal tails, and row-level outliers rather
 /// than an idealized Gaussian null.
-pub fn empirical_residual_bootstrap(
+pub(crate) fn empirical_residual_bootstrap(
     residuals: ArrayView2<'_, f64>,
     seed: u64,
 ) -> Result<Array2<f64>, String> {
@@ -1704,7 +1705,7 @@ pub fn residual_surrogate_from_moments(
 }
 
 /// Draw a surrogate matrix using moments estimated from a residual donor.
-pub fn residual_surrogate_matching(
+pub(crate) fn residual_surrogate_matching(
     residuals: ArrayView2<'_, f64>,
     seed: u64,
 ) -> Result<Array2<f64>, String> {
@@ -1714,7 +1715,9 @@ pub fn residual_surrogate_matching(
 }
 
 /// Estimate the moment specification used by [`residual_surrogate_from_moments`].
-pub fn residual_moment_spec(residuals: ArrayView2<'_, f64>) -> Result<ResidualMomentSpec, String> {
+pub(crate) fn residual_moment_spec(
+    residuals: ArrayView2<'_, f64>,
+) -> Result<ResidualMomentSpec, String> {
     validate_matrix(residuals, "residual moment donor")?;
     let StablePopulationMoments {
         location,
@@ -1773,7 +1776,7 @@ pub fn residual_moment_spec(residuals: ArrayView2<'_, f64>) -> Result<ResidualMo
 ///
 /// `snr` is signal RMS divided by the input matrix RMS. The returned matrix keeps
 /// the original residuals and adds the synthetic ground-truth circle.
-pub fn inject_circle_spike(
+pub(crate) fn inject_circle_spike(
     noise: ArrayView2<'_, f64>,
     snr: f64,
     seed: u64,
@@ -1811,7 +1814,7 @@ pub fn inject_circle_spike(
 
 /// Inject a product torus into a random four-plane of the supplied residual
 /// matrix at controlled RMS SNR.
-pub fn inject_torus_spike(
+pub(crate) fn inject_torus_spike(
     noise: ArrayView2<'_, f64>,
     snr: f64,
     seed: u64,
@@ -1856,7 +1859,7 @@ pub fn inject_torus_spike(
 }
 
 /// Inject the configured synthetic topology at controlled RMS SNR.
-pub fn inject_spike(
+pub(crate) fn inject_spike(
     noise: ArrayView2<'_, f64>,
     shape: SpikeInShape,
     snr: f64,
@@ -1963,7 +1966,7 @@ where
 }
 
 /// Convenience wrapper for [`default_spike_in_detection_pipeline`].
-pub fn default_spike_in_roc_curve(
+pub(crate) fn default_spike_in_roc_curve(
     residual_noise: ArrayView2<'_, f64>,
     config: &SpikeInRocConfig,
 ) -> Result<Vec<SpikeInRocPoint>, String> {
@@ -1975,7 +1978,7 @@ pub fn default_spike_in_roc_curve(
 
 /// Build a calibrated claim report from a spike-in ROC curve at the requested
 /// false-positive-rate operating point.
-pub fn calibrated_roc_claim_report(
+pub(crate) fn calibrated_roc_claim_report(
     claim: impl Into<String>,
     claimed_snr: f64,
     claimed_false_positive_rate: f64,
@@ -2036,7 +2039,7 @@ pub fn calibrated_roc_claim_report(
 /// first harmonic, then scores whether that plane is dominated by frequency-1
 /// energy with balanced quadrature components. Selecting a top-2 variance plane
 /// is not enough to score well.
-pub fn harmonic_circle_detector_stat(data: ArrayView2<'_, f64>) -> Result<f64, String> {
+pub(crate) fn harmonic_circle_detector_stat(data: ArrayView2<'_, f64>) -> Result<f64, String> {
     validate_matrix(data, "harmonic-circle detector input")?;
     let n = data.nrows();
     let p = data.ncols();
@@ -2414,7 +2417,7 @@ fn mix_seed(a: u64, b: u64, c: u64) -> u64 {
 /// `samples` remains in draw order in the returned artifact. Quantiles are
 /// computed from a separate sorted copy so a seed and draw index can reproduce
 /// every persisted statistic exactly.
-pub fn summarize_null_distribution(
+pub(crate) fn summarize_null_distribution(
     kind: NullKind,
     observed: f64,
     samples: Vec<f64>,
