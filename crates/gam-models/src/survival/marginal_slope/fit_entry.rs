@@ -202,12 +202,20 @@ pub(crate) fn fit_survival_marginal_slope_terms_impl(
         // differentiate a model that is not the one being fitted. A spatial term
         // on the slope surface is supported: the ψ calculus lifts the covariate
         // derivative onto the three channel designs from the stored margin
-        // (gam#2767).
-        if !matches!(spec.frailty, FrailtySpec::None) {
+        // (gam#2767). So is a FIXED Gaussian-shift frailty: its scale reaches the
+        // row program only as the probit-scale input, which the follow-up frame
+        // applies to all three slope features. Only a learned scale adds the
+        // log-σ hyperparameter, whose calculus runs in the four-primary frame.
+        if matches!(
+            spec.frailty,
+            FrailtySpec::GaussianShift {
+                scale: FrailtyScale::Learned { .. }
+            }
+        ) {
             return Err(SurvivalMarginalSlopeError::InvalidInput {
                 reason: "a follow-up-varying slope is not yet supported together with a \
-                         Gaussian-shift frailty: the frailty scale jet is lowered through the \
-                         time-constant primary frame"
+                         learned Gaussian-shift frailty scale: the log-sigma hyperparameter \
+                         calculus is lowered through the time-constant primary frame"
                     .to_string(),
             }
             .into());
