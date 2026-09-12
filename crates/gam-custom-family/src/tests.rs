@@ -4722,6 +4722,54 @@ pub(crate) fn jeffreys_second_order_completion_exact_pairwise_when_hook_absent()
     );
 }
 
+/// #1082: the rotated second-derivative hook's default is the materialized all-axes derivative
+/// rotated by `jeffreys_rotated_axis_rows`, bit for bit and in batch order. The Jeffreys drift
+/// rotated those same axes with that same helper before the hook existed, so a family that does
+/// not override the hook feeds the drift unchanged rows.
+#[test]
+pub(crate) fn default_rotated_second_information_hook_rotates_the_materialized_axes_bitwise_1082() {
+    let family = PairwiseJeffreysSeamFamily;
+    let specs = vec![jeffreys_seam_spec(2)];
+    let states = vec![jeffreys_seam_state(Array1::zeros(2))];
+    let directions = vec![array![0.7, -0.3], array![-0.2, 1.1]];
+    let basis = array![[0.8, 0.1], [-0.3, 0.9]];
+    let mut rotated: Vec<Option<Array2<f64>>> = vec![None; directions.len()];
+    let complete = family
+        .joint_jeffreys_information_second_directional_rotated_all_axes_each_with_specs(
+            &states,
+            &specs,
+            &directions,
+            basis.view(),
+            &mut |index, rows| {
+                rotated[index] = Some(rows);
+                Ok(())
+            },
+        )
+        .expect("default rotated second-derivative hook");
+    assert!(complete, "the default hook covers every direction the family can derive");
+    for (index, direction) in directions.iter().enumerate() {
+        let axes = family
+            .joint_jeffreys_information_second_directional_all_axes_with_specs(&states, &specs, direction)
+            .expect("materialized second information derivative")
+            .expect("materialized second information derivative present");
+        let expected = gam_model_api::jeffreys_rotated_axis_rows(&axes, basis.view())
+            .expect("rotated materialized axes");
+        let actual = rotated[index].as_ref().expect("one row set per direction");
+        assert_eq!(actual.dim(), expected.dim(), "direction {index}");
+        assert!(
+            actual
+                .iter()
+                .zip(expected.iter())
+                .all(|(left, right)| left.to_bits() == right.to_bits()),
+            "direction {index}: default hook {actual:?} vs rotated materialized axes {expected:?}"
+        );
+        assert!(
+            expected.iter().any(|value| *value != 0.0),
+            "positive control: the rotated derivative along direction {index} does not vanish"
+        );
+    }
+}
+
 /// gam#2893: `H''[u, v] = 2(u·v)·I + 2(uvᵀ + vuᵀ)` is the second directional derivative of the
 /// Hessian of `¼‖β‖⁴`, a fully symmetric fourth derivative, so exact assembly contracts it along
 /// the span directions and must reproduce the pairwise form.
