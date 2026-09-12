@@ -5786,7 +5786,7 @@ fn unsupported_matern_nu_message(raw: &str) -> String {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum DuchonPowerPolicy {
+pub(crate) enum DuchonPowerPolicy {
     Explicit(f64),
     /// No explicit `power=` given: defer to the cubic structural default, which
     /// the builder resolves dimension-aware as `s = (d − 1)/2` (so `φ(r) = r³`

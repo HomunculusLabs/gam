@@ -54,7 +54,7 @@ impl SpatialKernelEvaluator for Arc<dyn SpatialKernelEvaluator> {
 /// The optional `kernel_gauge` restricts the kernel coefficient block through
 /// a Gauge section, so the effective design is [K_reduced | poly] instead of
 /// [K | poly].
-pub struct ChunkedKernelDesignOperator<K: SpatialKernelEvaluator> {
+pub(crate) struct ChunkedKernelDesignOperator<K: SpatialKernelEvaluator> {
     /// Observation data points (n × d).
     data: Arc<Array2<f64>>,
     /// Radial basis centers (k × d).

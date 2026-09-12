@@ -61,13 +61,13 @@ pub struct FormulaDslParse {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CallArgSpec {
+pub(crate) enum CallArgSpec {
     Positional(String),
     Named { key: String, value: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FunctionCallSpec {
+pub(crate) struct FunctionCallSpec {
     pub name: String,
     pub args: Vec<CallArgSpec>,
 }

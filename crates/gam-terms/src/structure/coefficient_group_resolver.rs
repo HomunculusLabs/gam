@@ -37,7 +37,7 @@ pub struct ResolvedGroup<C: Ord + Clone> {
 /// groups, child ⊆ parent, interior coordinates == union of children). After
 /// construction, callers walk `groups` in their original order and request the
 /// concatenated penalty components per group.
-pub struct ResolvedGroupHierarchy<C: Ord + Clone> {
+pub(crate) struct ResolvedGroupHierarchy<C: Ord + Clone> {
     groups: Vec<ResolvedGroup<C>>,
     coordinates_by_label: BTreeMap<String, BTreeSet<C>>,
     children_by_parent: BTreeMap<String, Vec<String>>,

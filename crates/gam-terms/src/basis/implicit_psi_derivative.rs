@@ -3458,7 +3458,7 @@ impl ImplicitDesignPsiDerivative {
 /// `scale == 1.0` is the identity chart (Matérn, thin-plate, sphere, and any
 /// Duchon block whose kernel did not underflow).
 #[derive(Clone, Copy, Debug)]
-pub struct DesignKernelChart {
+pub(crate) struct DesignKernelChart {
     pub scale: f64,
     pub reference_pair: Option<(usize, usize)>,
 }

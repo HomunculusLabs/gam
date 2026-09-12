@@ -37,7 +37,7 @@ use cudarc::driver::{CudaContext, CudaModule, CudaSlice, CudaStream};
 /// the CPU `SphereWahbaKernel::{SobolevTruncated, PseudoTruncated}` so
 /// parity tests are well-defined.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum SphereSpectralKernelKind {
+pub(crate) enum SphereSpectralKernelKind {
     /// `c_ℓ = (2ℓ+1) / (4π · [ℓ(ℓ+1)]^m)` — true `H^m(S²)` Sobolev RKHS.
     Sobolev,
     /// `c_ℓ = 2 / (4π · Π_{k=1..m+1}(ℓ + k))` — Wahba 1981 pseudo-spline.
@@ -72,7 +72,7 @@ impl SphereSpectralKernelKind {
 /// pipeline downstream of this kernel (cuBLAS GEMM, cuSOLVER GEQRF)
 /// requires column-major.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum DeviceMatrixLayout {
+pub(crate) enum DeviceMatrixLayout {
     ColumnMajor,
 }
 
@@ -455,7 +455,7 @@ impl Drop for PinnedLease {
 /// computed via [`latlon_to_xyz_host`]. `coeffs` has length `lmax + 1`,
 /// indexed as `coeffs[ℓ] = c_ℓ` with `c_0 = 0`.
 #[derive(Clone, Debug)]
-pub struct S2KernelBuildInputs<'a> {
+pub(crate) struct S2KernelBuildInputs<'a> {
     pub n: usize,
     pub m: usize,
     pub lmax: usize,
@@ -693,7 +693,7 @@ void s2_wahba_householder_constrained_colmajor(
 /// shapes are baked into the kernel source so they are implicit in the
 /// flavor tag and don't appear here.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct S2ModuleCacheKey {
+pub(crate) struct S2ModuleCacheKey {
     pub cc_major: i32,
     pub cc_minor: i32,
     pub lmax: u32,

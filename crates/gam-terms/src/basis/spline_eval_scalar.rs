@@ -764,7 +764,7 @@ pub(crate) fn create_ispline_dense(
 /// owns that whole chain so a tight evaluation loop can amortise the
 /// allocations across many points. Buffers grow on demand and are reused.
 #[derive(Default)]
-pub struct BsplineDerivativeWorkspace {
+pub(crate) struct BsplineDerivativeWorkspace {
     /// Lower-order derivative buffers, one per recursion level (`chain[depth]`
     /// holds the order-`m-1` derivative consumed by the order-`m` step).
     pub(crate) chain: Vec<Vec<f64>>,
