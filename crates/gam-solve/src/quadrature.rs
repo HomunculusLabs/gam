@@ -3520,7 +3520,6 @@ pub fn integrated_family_moments_jet(
     eta: f64,
     se_eta: f64,
 ) -> Result<IntegratedMomentsJet, EstimationError> {
-    const PROB_EPS: f64 = 1e-12;
     if !(eta.is_finite() && (-700.0..=700.0).contains(&eta)) {
         crate::bail_invalid_estim!(
             "integrated moments eta must be finite and within [-700, 700]; got {eta}"
@@ -3544,7 +3543,7 @@ pub fn integrated_family_moments_jet(
                 let mean = jet.mean;
                 Ok(IntegratedMomentsJet {
                     mean,
-                    variance: (mean * (1.0 - mean)).max(PROB_EPS),
+                    variance: mean * (1.0 - mean),
                     d1: jet.d1,
                     d2: jet.d2,
                     d3: jet.d3,
@@ -3556,7 +3555,7 @@ pub fn integrated_family_moments_jet(
                 let mean = jet.mean;
                 Ok(IntegratedMomentsJet {
                     mean,
-                    variance: (mean * (1.0 - mean)).max(PROB_EPS),
+                    variance: mean * (1.0 - mean),
                     d1: jet.d1,
                     d2: jet.d2,
                     d3: jet.d3,
@@ -3568,7 +3567,7 @@ pub fn integrated_family_moments_jet(
                 let mean = jet.mean;
                 Ok(IntegratedMomentsJet {
                     mean,
-                    variance: (mean * (1.0 - mean)).max(PROB_EPS),
+                    variance: mean * (1.0 - mean),
                     d1: jet.d1,
                     d2: jet.d2,
                     d3: jet.d3,
@@ -3591,7 +3590,7 @@ pub fn integrated_family_moments_jet(
                 let mean = jet.mean;
                 Ok(IntegratedMomentsJet {
                     mean,
-                    variance: (mean * (1.0 - mean)).max(PROB_EPS),
+                    variance: mean * (1.0 - mean),
                     d1: jet.d1,
                     d2: jet.d2,
                     d3: jet.d3,
@@ -3610,7 +3609,7 @@ pub fn integrated_family_moments_jet(
                 let mean = jet.mean;
                 Ok(IntegratedMomentsJet {
                     mean,
-                    variance: (mean * (1.0 - mean)).max(PROB_EPS),
+                    variance: mean * (1.0 - mean),
                     d1: jet.d1,
                     d2: jet.d2,
                     d3: jet.d3,
@@ -3622,7 +3621,7 @@ pub fn integrated_family_moments_jet(
                 let mean = jet.mean;
                 Ok(IntegratedMomentsJet {
                     mean,
-                    variance: (mean * (1.0 - mean)).max(PROB_EPS),
+                    variance: mean * (1.0 - mean),
                     d1: jet.d1,
                     d2: jet.d2,
                     d3: jet.d3,
@@ -3658,7 +3657,7 @@ pub fn integrated_family_moments_jet(
             let mean = (1.0 - jet.mean).clamp(0.0, 1.0);
             Ok(IntegratedMomentsJet {
                 mean,
-                variance: (mean * (1.0 - mean)).max(PROB_EPS),
+                variance: mean * (1.0 - mean),
                 d1: -jet.d1,
                 d2: -jet.d2,
                 d3: -jet.d3,
@@ -3670,10 +3669,10 @@ pub fn integrated_family_moments_jet(
                 .beta_precision()
                 .map_err(|error| EstimationError::InvalidInput(error.to_string()))?;
             let jet = integrated_inverse_link_jet(quadctx, LinkFunction::Logit, e, se)?;
-            let mean = jet.mean.clamp(PROB_EPS, 1.0 - PROB_EPS);
+            let mean = jet.mean;
             Ok(IntegratedMomentsJet {
                 mean,
-                variance: (mean * (1.0 - mean) / (1.0 + precision)).max(PROB_EPS),
+                variance: mean * (1.0 - mean) / (1.0 + precision),
                 d1: jet.d1,
                 d2: jet.d2,
                 d3: jet.d3,

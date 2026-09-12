@@ -5270,5 +5270,13 @@
     ],
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). gam-solve's tweedie_exact_loglik_total_from_eta, the exact Tweedie log-likelihood summed over rows, is called by no production code in any crate. Its one user is the pirls tweedie_exact_series_tests module, which profiles the variance power. That module now carries its own row-sum over the surviving pub(crate) per-row series tweedie_exact_series_loglik_from_eta, so the test's name, assertions and profile comparison are unchanged.",
     "evidence": "The prune-api-c census v2 over cc3ae0022 (/scratch.global/sauer354/pool/prune-api-c/census2.tsv) classes tweedie_exact_loglik_total_from_eta DELETE, with two gam-solve unit-test references. At the base, git grep -w finds it only at its definition in pirls/deviance.rs, in a doc mention and the import in pirls/tests.rs, and at the profile call site. The item list follows source_removal_guard.py's ITEM rule over the removed hunk: one pub fn. The test-module helper of the same name is an addition in test scope."
+  },
+  {
+    "base": "baa5ef1b779b60123830839fac7d3d80bc4bdffe",
+    "items": [
+      "crates/gam-solve/src/quadrature.rs:const:PROB_EPS"
+    ],
+    "reason": "#2469: PROB_EPS (1e-12) was a picked floor inside integrated_family_moments_jet. It floored the observation variance mean*(1 - mean) of the six Binomial link arms and the RoystonParmar arm, and it both clamped the Beta arm's integrated mean to [1e-12, 1 - 1e-12] and floored its variance. A Bernoulli mean at exactly 0 or 1 has observation variance exactly 0, and the floor replaced that with an invented 1e-12, while the clamp returned a Beta mean the integral never produced. Every arm now returns the integrated mean as computed and the exact observation variance. Nothing downstream divides by this variance: its production callers, gam-models family_runtime.rs:272 and :372, read only .mean, and no test reads .variance.",
+    "evidence": "git grep -n -w PROB_EPS over the base finds ten lines, all in crates/gam-solve/src/quadrature.rs production code (the first #[cfg(test)] is at :4541): the function-local declaration at :3523, the seven variance floors at :3547, :3559, :3571, :3594, :3613, :3625 and :3661, and the Beta arm's mean clamp at :3673 and variance floor at :3676. No other file names it. git grep -n integrated_family_moments_jet outside quadrature.rs finds only gam-models family_runtime.rs:272 and :372, both reading .mean; git grep -n -F .variance finds no reader in quadrature.rs or family_runtime.rs. Not compiled or run locally (user directive); compile is covered by the lead's shared tip check."
   }
 ]
