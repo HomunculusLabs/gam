@@ -41,8 +41,9 @@
 use super::scoring::TileScorer;
 use super::residual_reservoir::{ResidualReservoir, residual_rounding_energy};
 use super::update::{
-    DecoderNormalEq, DecoderRecycleSpace, DecoderSolveStats, route_and_code_all, seed_decoder,
-    solve_decoder_with_routability_gate_recycled, unit_norm_rows,
+    DecoderNormalEq, DecoderRecycleSpace, DecoderSolveStats, polish_unit_rows_against_normal_eq,
+    route_and_code_all, seed_decoder, solve_decoder_with_routability_gate_recycled,
+    unit_norm_rows,
 };
 use super::{ScoreRouteStats, SparseDictConfig};
 use ndarray::{Array2, ArrayView2};
@@ -322,6 +323,8 @@ impl SparseDictStreamState {
             self.config.score_mode,
             &mut self.decoder_recycle,
         )?;
+        let refresh: Vec<bool> = gate.iter().map(|decision| decision.refresh).collect();
+        polish_unit_rows_against_normal_eq(&mut self.decoder, &self.eq, &refresh)?;
         self.eq.clear_refreshed_atoms(&gate);
         unit_norm_rows(&mut self.decoder)?;
 

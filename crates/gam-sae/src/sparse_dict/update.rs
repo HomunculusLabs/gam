@@ -740,15 +740,17 @@ fn run_from_decoder(
                 ..DecoderSolveStats::default()
             }
         } else {
-            solve_decoder_with_routability_gate_recycled(
+            let (solve_stats, gate) = solve_decoder_with_routability_gate_recycled(
                 &mut decoder,
                 &normal_eq,
                 config.decoder_ridge as f64,
                 sigma,
                 config.score_mode,
                 decoder_recycle,
-            )?
-            .0
+            )?;
+            let refresh: Vec<bool> = gate.iter().map(|decision| decision.refresh).collect();
+            polish_unit_rows_against_normal_eq(&mut decoder, &normal_eq, &refresh)?;
+            solve_stats
         };
         decoder_solve_stats = stats;
         let refresh_secs = epoch_start.elapsed().as_secs_f64();
@@ -3485,6 +3487,103 @@ fn cholesky_solve_block(mat: &Array2<f64>, rhs: &Array2<f64>) -> Option<Array2<f
 
     let factor = mat.cholesky(Side::Lower).ok()?;
     Some(factor.solve_mat(rhs))
+}
+
+/// Unit-constrained coordinate polish of the refreshed decoder rows against the
+/// normal equations of the codes that produced this refresh (#2822).
+///
+/// With those codes `C` held fixed, the reconstruction loss restricted to one unit
+/// row is `‖X − C D‖²_F = const − 2·d_aᵀg_a`, where `g_a = b_a − Σ_{b≠a} A_ab d_b`,
+/// `A = CᵀC` and `B = CᵀX`. The ridge and `A_aa` are constant on the unit sphere, so
+/// the conditional optimum is `d_a = g_a/‖g_a‖`. Normalizing the unconstrained MOD
+/// solution is not that optimum once rows co-fire, so the refresh was not a fixed
+/// point of the unit-constrained problem the trainer certifies.
+///
+/// Each update is an exact conditional minimization and lowers the loss by
+/// `2(‖g_a‖ − d_aᵀg_a) ≥ 0`. A sweep stops the polish when its total decrease is
+/// inside the f32 rounding of the rows it wrote. Deferred rows (`refresh[a]` false)
+/// stay fixed and still enter their neighbours' `g`. Rows are normalized here
+/// without orientation, because `A` carries the codes' signs; the caller orients
+/// afterwards.
+pub(super) fn polish_unit_rows_against_normal_eq(
+    decoder: &mut Array2<f32>,
+    eq: &DecoderNormalEq,
+    refresh: &[bool],
+) -> Result<usize, String> {
+    let (k, p) = decoder.dim();
+    if eq.diag.len() != k || eq.b.dim() != (k, p) || refresh.len() != k {
+        return Err(format!(
+            "decoder polish: decoder {:?}, normal equations ({}, {:?}) and refresh mask {} disagree",
+            decoder.dim(),
+            eq.diag.len(),
+            eq.b.dim(),
+            refresh.len()
+        ));
+    }
+    let mut neigh: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
+    for (&(a, b), &value) in eq.off.iter() {
+        neigh[a as usize].push((b as usize, value));
+        neigh[b as usize].push((a as usize, value));
+    }
+    for list in neigh.iter_mut() {
+        list.sort_by_key(|&(nb, _)| nb);
+    }
+    for atom in (0..k).filter(|&atom| refresh[atom]) {
+        let mut row = decoder.row_mut(atom);
+        let norm = row
+            .iter()
+            .map(|v| f64::from(*v) * f64::from(*v))
+            .sum::<f64>()
+            .sqrt();
+        if !norm.is_finite() {
+            return Err(format!("decoder polish: atom {atom} has a non-finite MOD row"));
+        }
+        if norm > 0.0 {
+            row.mapv_inplace(|v| (f64::from(v) / norm) as f32);
+        }
+    }
+    let row_rounding = f64::from(f32::EPSILON) * (p as f64).sqrt();
+    let mut g = vec![0.0_f64; p];
+    let mut sweeps = 0usize;
+    loop {
+        sweeps += 1;
+        let mut decrease = 0.0_f64;
+        let mut resolution = 0.0_f64;
+        for atom in (0..k).filter(|&atom| refresh[atom]) {
+            for (c, slot) in g.iter_mut().enumerate() {
+                *slot = eq.b[[atom, c]];
+            }
+            for &(nb, value) in &neigh[atom] {
+                let row = decoder.row(nb);
+                for (slot, &entry) in g.iter_mut().zip(row.iter()) {
+                    *slot -= value * f64::from(entry);
+                }
+            }
+            let g_norm = g.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if !g_norm.is_finite() {
+                return Err(format!(
+                    "decoder polish: atom {atom} has a non-finite conditional direction"
+                ));
+            }
+            if g_norm == 0.0 {
+                continue;
+            }
+            let mut row = decoder.row_mut(atom);
+            let aligned = row
+                .iter()
+                .zip(g.iter())
+                .map(|(&entry, &gc)| f64::from(entry) * gc)
+                .sum::<f64>();
+            decrease += 2.0 * (g_norm - aligned);
+            resolution += 2.0 * row_rounding * g_norm;
+            for (entry, &gc) in row.iter_mut().zip(g.iter()) {
+                *entry = (gc / g_norm) as f32;
+            }
+        }
+        if !(decrease > resolution) {
+            return Ok(sweeps);
+        }
+    }
 }
 
 pub(super) fn unit_norm_rows(decoder: &mut Array2<f32>) -> Result<(), String> {
