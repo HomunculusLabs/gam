@@ -1194,6 +1194,38 @@ impl HessianFactorization for TangentProjectedHessianOperator {
         let zbz = op.projected_matrix(&self.z);
         self.h_t_op.trace_logdet_gradient(&zbz)
     }
+    fn trace_hinv_operator(&self, op: &dyn HyperOperator) -> f64 {
+        // tr(Z H_T⁻¹ Zᵀ · B) = tr(H_T⁻¹ · ZᵀBZ) (cyclic permutation), with `ZᵀBZ`
+        // taken through the operator's own action exactly as in
+        // `trace_logdet_operator`: m ≤ p HVPs and no dense p×p B. The trait default
+        // would densify B below its Hutch++ dimension and estimate the trace
+        // stochastically above it, although this backend holds an exact factor of
+        // H_T; the value and logdet traces of one drift must share that factor.
+        let zbz = op.projected_matrix(&self.z);
+        self.h_t_op.trace_hinv_product(&zbz)
+    }
+    fn trace_hinv_matrix_operator_cross(
+        &self,
+        matrix: &Array2<f64>,
+        op: &dyn HyperOperator,
+    ) -> f64 {
+        // tr(H⁺_T A H⁺_T B) = tr(H_T⁻¹ · ZᵀAZ · H_T⁻¹ · ZᵀBZ) (cyclic permutation).
+        let zaz = self.z.t().dot(matrix).dot(&self.z);
+        let zbz = op.projected_matrix(&self.z);
+        self.h_t_op.trace_hinv_product_cross(&zaz, &zbz)
+    }
+    fn trace_hinv_operator_cross(
+        &self,
+        left: &dyn HyperOperator,
+        right: &dyn HyperOperator,
+    ) -> f64 {
+        let zaz = left.projected_matrix(&self.z);
+        if std::ptr::addr_eq(left, right) {
+            return self.h_t_op.trace_hinv_product_cross(&zaz, &zaz);
+        }
+        let zbz = right.projected_matrix(&self.z);
+        self.h_t_op.trace_hinv_product_cross(&zaz, &zbz)
+    }
     fn is_dense(&self) -> bool {
         self.h_t_op.is_dense()
     }
