@@ -2292,6 +2292,80 @@ mod canonical_hessian_order_tests {
 }
 
 #[cfg(test)]
+mod native_certificate_index_tests {
+    use super::*;
+    use crate::model_types::{
+        CertifiedRung, CurvatureEvidence, OuterCriterionCertificate, OuterStationarityCertificate,
+        RailCoordinate, RailTailEvidence, RailedCoordinateFact,
+    };
+    use crate::rho_optimizer::asymptote_certificate::AsymptoteSide;
+
+    fn rail(index: usize) -> RailCoordinate {
+        RailCoordinate {
+            index,
+            side: AsymptoteSide::Lower,
+            tail_constant: 0.0,
+            value_gap: 0.0,
+            estimand_travel_bound: 0.0,
+            evidence: RailTailEvidence::AnalyticFaceProof {
+                min_curvature: 0.0,
+                curvature_margin: 0.0,
+            },
+        }
+    }
+
+    fn fact(index: usize) -> RailedCoordinateFact {
+        RailedCoordinateFact {
+            index,
+            theta: index as f64,
+            lower: -1.0,
+            upper: 1.0,
+            margin: 0.5,
+        }
+    }
+
+    /// #2735: a certificate built inside the canonical run names canonical
+    /// slots. After the map back, each index is the native coordinate at its
+    /// slot, the lists stay ascending, a fact keeps its own θ, and an index past
+    /// the permuted ρ block keeps its position.
+    #[test]
+    fn certificate_indices_name_native_coordinates() {
+        let perm = canonical_permutation(&[30, 10, 40, 20]).expect("keys out of canonical order");
+        assert_eq!(perm, vec![1, 3, 0, 2]);
+        let mut certificate = OuterCriterionCertificate {
+            stationarity: OuterStationarityCertificate::AsymptoteRail {
+                interior_projected_grad_norm: 0.0,
+                bound: 1.0,
+                rung: CertifiedRung {
+                    label: "native_certificate_index_tests".to_string(),
+                    derived_standard: false,
+                },
+                rails: vec![rail(0), rail(2)],
+            },
+            curvature: CurvatureEvidence::NotSpent,
+            lambdas_railed: vec![0, 3, 5],
+            railed_facts: vec![fact(0), fact(3)],
+            curvature_floor: None,
+        };
+        criterion_certificate_to_native(&mut certificate, &perm);
+        assert_eq!(certificate.lambdas_railed, vec![1, 2, 5]);
+        let facts: Vec<(usize, f64)> = certificate
+            .railed_facts
+            .iter()
+            .map(|fact| (fact.index, fact.theta))
+            .collect();
+        assert_eq!(facts, vec![(1, 0.0), (2, 3.0)]);
+        let rails: Vec<usize> = certificate
+            .stationarity
+            .rails()
+            .iter()
+            .map(|rail| rail.index)
+            .collect();
+        assert_eq!(rails, vec![0, 1]);
+    }
+}
+
+#[cfg(test)]
 mod trial_infeasibility_classification_tests {
     use super::*;
     use gam_problem::CustomFamilyError;
