@@ -5708,18 +5708,24 @@ fn sheet_specs_on_local_chart(
     // chart found no second dimension — the challenger is not realizable, so bail
     // and keep the PCA winner.
     let inv_count = 1.0 / rows.len().max(1) as f64;
-    let mut coords = Array2::<f64>::zeros((n_obs, 2));
-    for col in 0..2 {
+    let mut sd = [0.0_f64; 2];
+    for (col, spread) in sd.iter_mut().enumerate() {
         let mut acc = 0.0_f64;
         for local_row in 0..rows.len() {
             acc += chart[[local_row, col]] * chart[[local_row, col]];
         }
-        let sd = (acc * inv_count).sqrt();
-        if !(sd > 1e-12) || !sd.is_finite() {
-            return Ok(None);
-        }
+        *spread = (acc * inv_count).sqrt();
+    }
+    // An axis whose spread sits within the numerical-rank resolution `max(rows, 2)·ε`
+    // of the larger axis cannot be told from zero at the chart's precision.
+    let resolution = rows.len().max(2) as f64 * f64::EPSILON * sd[0].max(sd[1]);
+    if sd.iter().any(|&spread| !spread.is_finite() || spread <= resolution) {
+        return Ok(None);
+    }
+    let mut coords = Array2::<f64>::zeros((n_obs, 2));
+    for col in 0..2 {
         for (local_row, &global_row) in rows.iter().enumerate() {
-            coords[[global_row, col]] = chart[[local_row, col]] / sd;
+            coords[[global_row, col]] = chart[[local_row, col]] / sd[col];
         }
     }
     let mut specs: Vec<TopologyCandidateSpec> = Vec::with_capacity(2);
