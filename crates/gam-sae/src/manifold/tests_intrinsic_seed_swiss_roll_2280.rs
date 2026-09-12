@@ -201,6 +201,60 @@ fn leading_principal_chart(z: &Array2<f64>) -> Array2<f64> {
     centered.dot(&vt.slice(ndarray::s![0..2, ..]).t())
 }
 
+/// The held-out thin-plate residual fraction of the WORST ambient column. A pooled
+/// fraction is blind to a chart that drops a low-variance direction: the zoo roll's
+/// height carries about 1% of the ambient variance, so the two-PC chart, which
+/// collapses the sheet along its height and reconstructs none of it, loses only 1%
+/// pooled. Per column, that collapse costs the whole column.
+fn worst_column_heldout_residual(coords: &Array2<f64>, z: &Array2<f64>) -> f64 {
+    (0..z.ncols())
+        .map(|column| {
+            1.0 - heldout_tps_r2(coords, &z.slice(ndarray::s![.., column..column + 1]).to_owned())
+        })
+        .fold(f64::NEG_INFINITY, f64::max)
+}
+
+/// #2280 — the atlas's developing map unrolls the planted roll that the atlas names a
+/// disk, with no roll-specific code. The chart is glued from the local charts along
+/// the least-residual spanning tree of their transitions. It must reconstruct held-out
+/// rows nearer the planted isometric chart than the two-PC seed does, decided the way
+/// the acceptance test below decides the automatic seed: worst ambient column, on the
+/// log scale, against the geometric mean of the two measured arms.
+#[test]
+fn developed_swiss_roll_chart_is_unrolled_2280() {
+    let z = super::tests_topology_fixtures::swiss_roll(80, 16);
+    let atlas = LocalAtlas::build(z.view(), LocalAtlasConfig::balanced(z.nrows(), 2))
+        .expect("the planted roll's atlas builds");
+    let readout = observe_atlas_topology(&atlas).expect("the planted roll's readout computes");
+    let developed = atlas
+        .developed_coordinates(z.view())
+        .expect("the planted roll's atlas develops");
+    let oracle = worst_column_heldout_residual(&zoo_swiss_roll_unrolled_chart(&z), &z);
+    let linear = worst_column_heldout_residual(&leading_principal_chart(&z), &z);
+    let glued = worst_column_heldout_residual(&developed, &z);
+    let boundary = (oracle * linear).sqrt();
+    eprintln!(
+        "[2280-developed] 80x16 worst-column held-out residual: oracle={oracle:.4e} \
+         linear={linear:.4e} developed={glued:.4e} boundary={boundary:.4e}"
+    );
+    assert_eq!(
+        readout.observed_manifold(),
+        Some(GraphCompressionKind::Disk),
+        "the developed chart is a global chart only on a disk: {readout}"
+    );
+    assert!(
+        oracle < linear,
+        "the two-PC seed must collapse the roll (oracle worst-column residual {oracle:.4e} vs \
+         linear {linear:.4e}), or this comparison measures nothing"
+    );
+    assert!(
+        glued < boundary,
+        "the developed chart must reconstruct held-out rows nearer the planted unrolled chart \
+         than the two-PC seed: developed {glued:.4e}, oracle {oracle:.4e}, linear {linear:.4e}, \
+         geometric-mean boundary {boundary:.4e}"
+    );
+}
+
 /// #2280 acceptance — planted swiss roll (1.5 turns): recognized as a sheet, with
 /// unrolled coordinates whose held-out reconstruction matches an oracle unrolled
 /// fit, and no roll-specific code on the path.
@@ -220,6 +274,12 @@ fn leading_principal_chart(z: &Array2<f64>) -> Array2<f64> {
 /// scale is the one on which "nearer" is free of units. The oracle's residual must
 /// itself be below the linear seed's, or the roll is not folded for the linear seed
 /// and the comparison measures nothing.
+///
+/// Every residual is the WORST ambient column's. The zoo roll's height carries about
+/// 1% of the ambient variance, so the pooled fraction put the two-PC seed, which drops
+/// the height entirely, below the oracle (measured at `fe919657d`, job 531104:
+/// pooled 1.09e-2 vs 3.13e-2), and the manipulation check failed on a seed that
+/// reconstructs none of one ambient coordinate (its height column read 1.20).
 #[test]
 fn planted_swiss_roll_is_a_sheet_with_unrolled_coordinates_2280() {
     for (n_t, n_h) in [(30usize, 12usize), (40, 12), (60, 14), (80, 16), (100, 20)] {
@@ -253,13 +313,13 @@ fn planted_swiss_roll_is_a_sheet_with_unrolled_coordinates_2280() {
         initial_coords: None,
     })
     .expect("the automatic seed of the planted roll builds");
-    let residual = |chart: &Array2<f64>| 1.0 - heldout_tps_r2(chart, &z);
+    let residual = |chart: &Array2<f64>| worst_column_heldout_residual(chart, &z);
     let oracle = residual(&zoo_swiss_roll_unrolled_chart(&z));
     let linear = residual(&leading_principal_chart(&z));
     let automatic = residual(&chart_of(&report.initial_coords, 0));
     let boundary = (oracle * linear).sqrt();
     eprintln!(
-        "[2280-swiss] 80x16 held-out residual fraction: oracle={oracle:.4e} linear={linear:.4e} \
+        "[2280-swiss] 80x16 worst-column held-out residual fraction: oracle={oracle:.4e} linear={linear:.4e} \
          automatic={automatic:.4e} boundary={boundary:.4e} automatic plan={:?}",
         report.geometry_plans[0]
     );
