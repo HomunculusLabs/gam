@@ -3579,8 +3579,10 @@ impl SaeManifoldTerm {
                     direction[row] += coeff * gauge_span[basis_idx][row];
                 }
             }
+            // An orthonormal combination with a unit eigenvector column has unit norm,
+            // so only an exactly zero or non-finite direction is refused.
             let norm_sq = direction.iter().map(|v| v * v).sum::<f64>();
-            if !(norm_sq.is_finite() && norm_sq > 1.0e-24) {
+            if !(norm_sq.is_finite() && norm_sq > 0.0) {
                 continue;
             }
             let inv_norm = norm_sq.sqrt().recip();

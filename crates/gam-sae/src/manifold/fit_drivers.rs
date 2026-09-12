@@ -2498,8 +2498,10 @@ impl SaeManifoldTerm {
                 if channel.len() != p {
                     continue;
                 }
+                // `vt`'s rows are orthonormal, so only an exactly zero or non-finite
+                // row is refused.
                 let norm_sq = channel.iter().map(|v| v * v).sum::<f64>();
-                if !(norm_sq.is_finite() && norm_sq > 1.0e-24) {
+                if !(norm_sq.is_finite() && norm_sq > 0.0) {
                     continue;
                 }
                 // One candidate per basis row carrying this ambient channel.
@@ -2746,8 +2748,10 @@ impl SaeManifoldTerm {
                 if channel.len() != p {
                     continue;
                 }
+                // `vt`'s rows are orthonormal, so only an exactly zero or non-finite
+                // row is refused.
                 let norm_sq = channel.iter().map(|v| v * v).sum::<f64>();
-                if !(norm_sq.is_finite() && norm_sq > 1.0e-24) {
+                if !(norm_sq.is_finite() && norm_sq > 0.0) {
                     continue;
                 }
                 // `S (B c)` carries every column's slope at once:
