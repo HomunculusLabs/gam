@@ -1,6 +1,6 @@
 //! Device-side sigma-cubature stream-pool dispatch.
 //!
-//! The live GPU entry is [`try_gpu_sigma_stream_pool_eval`]. It runs each
+//! The live GPU entry is `try_gpu_sigma_stream_pool_eval`. It runs each
 //! sigma point through the unified PIRLS stream-pool executor, returns the
 //! per-point `(H_original^-1, beta_original)` pairs, and hands the shared
 //! covariance accumulation back to
@@ -118,7 +118,7 @@ fn pool_size(m: usize) -> usize {
 /// runtime), `Err(_)` on driver / shape failure.
 /// `x_original`: Original (pre-reparameterization) dense design matrix X_original, shape n × p.
 /// Uploaded to device once and reused across all sigma points.
-pub fn try_gpu_sigma_stream_pool_eval(
+pub(crate) fn try_gpu_sigma_stream_pool_eval(
     x_original: ndarray::ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
     prior_w: ArrayView1<'_, f64>,

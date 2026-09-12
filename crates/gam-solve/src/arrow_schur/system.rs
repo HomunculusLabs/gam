@@ -2148,7 +2148,7 @@ pub struct ArrowFactorCache {
     ///
     /// On the matrix-free large-`k` SAE evidence path this is set from the
     /// Stochastic Lanczos Quadrature reduced-Schur log-determinant (see
-    /// [`Self::undamped_arrow_log_det_with_schur`] and
+    /// `Self::undamped_arrow_log_det_with_schur` and
     /// [`crate::arrow_schur::slq_logdet`]) so no dense `k × k` Cholesky is ever
     /// formed; [`Self::arrow_log_det`] returns THIS field and never rebuilds it
     /// from the `schur_factor` diagonal.
@@ -2395,7 +2395,7 @@ impl ArrowFactorCache {
         (0..self.undamped_factor_count()).map(|row| self.undamped_factor(row))
     }
 
-    pub fn compute_undamped_arrow_log_det(&self) -> Option<f64> {
+    pub(crate) fn compute_undamped_arrow_log_det(&self) -> Option<f64> {
         // When the shared β block is empty (`k == 0`) the joint Hessian is
         // exactly the block diagonal of the per-row latent blocks: there is no
         // reduced Schur complement to form, so the dense Direct path leaves
@@ -2444,9 +2444,9 @@ impl ArrowFactorCache {
     /// never Cholesky-factored, so `schur_factor` is `None` and `log|S|` comes
     /// from Stochastic Lanczos Quadrature ([`crate::arrow_schur::slq_logdet`]).
     /// The per-row latent-block term is computed exactly as in
-    /// [`Self::compute_undamped_arrow_log_det`], with the same ridge,
+    /// `Self::compute_undamped_arrow_log_det`, with the same ridge,
     /// positivity, and finiteness guards.
-    pub fn undamped_arrow_log_det_with_schur(&self, schur_log_det: f64) -> Option<f64> {
+    pub(crate) fn undamped_arrow_log_det_with_schur(&self, schur_log_det: f64) -> Option<f64> {
         if self.ridge_t != 0.0 || self.ridge_beta != 0.0 {
             return None;
         }

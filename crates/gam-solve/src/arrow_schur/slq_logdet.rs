@@ -102,7 +102,7 @@ fn slq_lanczos_options(steps: usize) -> SymmetricLanczosOptions {
 
 /// Run one Rademacher-probe Lanczos and return the tridiagonal eigenpairs, or
 /// `None` if the Lanczos run declines (non-finite matvec / start). Shared by the
-/// plain [`slq_logdet`] and the unit-deflated [`slq_logdet_unit_deflated`]
+/// plain [`slq_logdet`] and the unit-deflated `slq_logdet_unit_deflated`
 /// estimators so both draw the IDENTICAL probe vector and build the IDENTICAL
 /// Krylov space for a given `(dim, matvec, probe_seed, options)` — the two
 /// estimators then differ ONLY in the spectral function applied to the shared
@@ -307,7 +307,7 @@ impl SlqUnitDeflatedLogDet {
 /// [`slq_logdet`]; the two share `probe_lanczos_eigenpairs`, so for a fixed
 /// `(dim, matvec, num_probes, lanczos_steps, seed)` the two estimators build
 /// bit-identical Krylov spaces and differ ONLY in the applied spectral function.
-pub fn slq_logdet_unit_deflated(
+pub(crate) fn slq_logdet_unit_deflated(
     dim: usize,
     matvec: impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync,
     num_probes: usize,
@@ -397,7 +397,7 @@ struct ExactAProbeRitzGeometry {
 /// A negative Ritz value is only a Rayleigh quotient of the raw observed
 /// information.  It is not itself a saddle verdict.  This routine lifts every
 /// Ritz direction back through the Lanczos basis, reduces it immediately to
-/// `(v'Bv, v'Ev)`, and then applies [`classify_exact_a_direction`] against the
+/// `(v'Bv, v'Ev)`, and then applies `classify_exact_a_direction` against the
 /// shared spectral scale.  Numerical nulls contribute `log(1) = 0`, bounded
 /// clamp wrinkles contribute `log(v'(A+E)v)`, and only a typed `Saddle` is
 /// refused.  The lifted `dimension × steps` block is dropped before the probe

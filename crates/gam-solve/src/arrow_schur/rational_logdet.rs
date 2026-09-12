@@ -383,7 +383,7 @@ impl RationalLogdetPlan {
     /// (which doubles the rank until the error bar clears) spend its entire
     /// budget inside `build_inverse_deflation_basis` (#2576). The basis only
     /// steers variance reduction, so this cannot bias the value either way.
-    pub fn with_two_sided_deflation_preconditioned(
+    pub(crate) fn with_two_sided_deflation_preconditioned(
         mut self,
         matvec: &(impl Fn(ArrayView1<f64>) -> Array1<f64> + Sync),
         preconditioner: &ShiftedDiagonalPreconditioner,
@@ -1176,7 +1176,7 @@ fn build_deflation_basis(
 /// replaced by `S⁻¹` (applied matrix-free by plain CG through `matvec`), so the
 /// rounds `Q ← orthonormalise(S⁻¹·Q)` amplify the SMALLEST eigenvalues instead of
 /// the largest. This is the second arm of the two-sided control variate
-/// ([`RationalLogdetPlan::with_two_sided_deflation_preconditioned`]): the Hutchinson variance of
+/// (`RationalLogdetPlan::with_two_sided_deflation_preconditioned`): the Hutchinson variance of
 /// the surrogate rides on the off-diagonal Frobenius mass of `log(S/c)`, which a
 /// wide spectrum loads SYMMETRICALLY onto both tails (`log(λ_max/c) = +½lnκ` and
 /// `log(λ_min/c) = −½lnκ`), so peeling only the top leaves the entire bottom-tail

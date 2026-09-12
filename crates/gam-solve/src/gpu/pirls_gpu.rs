@@ -132,7 +132,7 @@ pub struct PirlsStepStreamDeviceInput<'a, 'b> {
 
 /// Shared, batch-wide GPU state for stream-pool sigma-cubature PIRLS.
 ///
-/// Construct once per model via [`upload_shared_pirls_gpu`] and hand a
+/// Construct once per model via `upload_shared_pirls_gpu` and hand a
 /// shared reference to many [`SigmaPirlsGpuWorkspace`]s. X_original, y,
 /// prior_w, and offset are uploaded once and reused across all ρ / σ
 /// points. Per ρ / σ point, only the small `Qs` reparam matrix is
@@ -3745,7 +3745,7 @@ pub fn solve_pirls_step_gpu(input: PirlsGpuInput<'_>) -> Result<PirlsGpuStep, St
 /// cached per-ordinal `CudaContext` alive so all peer workspaces bind to
 /// the same context and can interleave on its asynchronous engines.
 #[cfg(target_os = "linux")]
-pub fn upload_shared_pirls_gpu(
+pub(crate) fn upload_shared_pirls_gpu(
     x: ndarray::ArrayView2<'_, f64>,
     y: ndarray::ArrayView1<'_, f64>,
     prior_w: ndarray::ArrayView1<'_, f64>,
@@ -3771,7 +3771,7 @@ pub(crate) fn allocate_sigma_pirls_workspace(
 /// `pirls_loop_on_stream`. When no reparameterisation is active, pass an
 /// identity matrix.
 #[cfg(target_os = "linux")]
-pub fn upload_qs_pirls(
+pub(crate) fn upload_qs_pirls(
     ws: &mut SigmaPirlsGpuWorkspace,
     qs: ndarray::ArrayView2<'_, f64>,
 ) -> Result<(), String> {
@@ -3779,7 +3779,7 @@ pub fn upload_qs_pirls(
 }
 
 /// Upload an identity Qs for the current ρ / σ point. Equivalent to
-/// [`upload_qs_pirls`] with an identity matrix; avoids host allocation.
+/// `upload_qs_pirls` with an identity matrix; avoids host allocation.
 #[cfg(target_os = "linux")]
 pub(crate) fn upload_qs_identity_pirls(ws: &mut SigmaPirlsGpuWorkspace) -> Result<(), String> {
     cuda::upload_qs_identity(ws)
@@ -3801,7 +3801,7 @@ pub fn solve_pirls_step_on_stream(
 
 /// Stage 3.2 device-input PIRLS step. Reads `w_solver` and `grad_eta`
 /// from caller-supplied device buffers (typically populated by
-/// [`crate::gpu_kernels::pirls_row::launch_row_reweight_on_stream`]) instead of
+/// `crate::gpu_kernels::pirls_row::launch_row_reweight_on_stream`) instead of
 /// uploading them from host arrays. Math is bit-identical to
 /// [`solve_pirls_step_on_stream`]; this entry differs only by skipping
 /// the per-iter `weights` and `gradient` host-to-device transfers — only

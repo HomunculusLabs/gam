@@ -20,7 +20,7 @@ use opt::{
 use crate::estimate::EstimationError;
 use gam_gpu::policy::RemlOuterAdmission;
 
-/// Input bundle handed to [`run_reml_outer_on_device`] by the host
+/// Input bundle handed to `run_reml_outer_on_device` by the host
 /// outer-strategy dispatch site. Everything needed to seed the device-resident
 /// BFGS driver and reconstruct the outer `OuterResult` after convergence.
 ///
@@ -116,7 +116,7 @@ pub struct RemlOuterDeviceEval {
 /// Threading the evaluator in as a closure
 /// keeps this driver agnostic of how the host wires up the REML evaluator
 /// while still letting every per-step kernel run on the device.
-pub fn run_reml_outer_on_device<E>(
+pub(crate) fn run_reml_outer_on_device<E>(
     input: RemlOuterGpuInput,
     mut evaluator: E,
 ) -> Result<RemlOuterGpuOutcome, EstimationError>

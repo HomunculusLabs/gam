@@ -221,9 +221,9 @@ fn ridge_bump_to_make_pd_colmajor(block: &[f64], d: usize) -> f64 {
 /// Tikhonov floor. The host Direct path owns both canonical contracts:
 ///
 /// * the quotient operations in
-/// [`ArrowBetaGaugeQuotient::pin_reduced_schur`](crate::arrow_schur::ArrowBetaGaugeQuotient::pin_reduced_schur)
+/// `ArrowBetaGaugeQuotient::pin_reduced_schur`
 /// and
-/// [`ArrowBetaGaugeQuotient::project_complement`](crate::arrow_schur::ArrowBetaGaugeQuotient::project_complement);
+/// `ArrowBetaGaugeQuotient::project_complement`;
 /// * Jacobi/Van-der-Sluis equilibration, the PD/condition-number gate, and the
 /// optional spectral floor in
 /// [`solve_dense_reduced_system`](crate::arrow_schur::solve_dense_reduced_system).
@@ -992,7 +992,7 @@ impl ResidentBaseRidgeFactorsHandle {
 /// factor, and scatters `H_βt^(i)·w_i` through the sparse transpose operator
 /// (`O(m_i · p)`, replacing the old `O(K)` column-probe). This is the
 /// row-procedural `a_ik · Φ_k[i,m]` Kronecker apply over the active atoms only.
-pub fn gpu_schur_matvec_backend(
+pub(crate) fn gpu_schur_matvec_backend(
     sys: &ArrowSchurSystem,
     ridge_t: f64,
     ridge_beta: f64,
@@ -1370,14 +1370,14 @@ pub fn solve_sae_matrix_free_pcg(
 /// #1017 device-resident SAE frame across the LM ridge ladder.
 ///
 /// A single inner Newton step drives the proximal ridge ladder (up to
-/// [`crate::arrow_schur::DEFAULT_PROXIMAL_MAX_ATTEMPTS`] trials) at a FIXED
+/// `crate::arrow_schur::DEFAULT_PROXIMAL_MAX_ATTEMPTS` trials) at a FIXED
 /// system: only `ridge_t`/`ridge_beta` change per trial. In the per-trial
 /// [`solve_sae_matrix_free_pcg`] path, `flatten_device_sae_frame_data` re-marshals
 /// AND re-uploads every device operand each trial — yet the ONLY ridge-dependent
 /// buffer is the per-row factored inverse `ainv = (H_tt + ridge_t·I)⁻¹` (the
 /// smooth `λ S_k`, the framed `G ⊗ W`, and the dense per-row cross `H_tβ` are all
 /// ridge-independent and constant across the ladder). This handle uploads the
-/// ridge-independent buffers ONCE (at [`build_sae_resident_frame`]) and, per trial,
+/// ridge-independent buffers ONCE (at `build_sae_resident_frame`) and, per trial,
 /// recomputes only `ainv` before running the identical framed PCG loop — so the
 /// numbers are bit-identical to the per-trial re-flatten path while the
 /// `(trials − 1) × (ridge-independent operand bytes)` re-upload is eliminated.
@@ -1415,11 +1415,11 @@ pub trait SaeResidentFrame {
 /// Build the device-resident SAE frame for the LM ridge ladder.
 /// `Err(Unavailable)` is the decline signal — non-CUDA host, no framed device
 /// data, or the offload predicate rejects the shape — exactly the contract of
-/// the sibling device entry points ([`gpu_schur_matvec_backend`]): the caller
+/// the sibling device entry points (`gpu_schur_matvec_backend`): the caller
 /// keeps the established per-trial re-flatten path completely unchanged.
 /// `cg_iters` is the CG budget the offload gate scores (same value the
 /// per-trial framed solve uses).
-pub fn build_sae_resident_frame(
+pub(crate) fn build_sae_resident_frame(
     sys: &ArrowSchurSystem,
     cg_iters: usize,
 ) -> Result<
@@ -1451,7 +1451,7 @@ pub fn build_sae_resident_frame(
 
 /// The ridge-INDEPENDENT host operands of the framed SAE reduced-Schur system,
 /// marshalled into the contiguous upload layout `flatten_device_sae_frame_data`
-/// consumes. Split out (with [`compute_ainv_host`], the sole ridge-DEPENDENT
+/// consumes. Split out (with `compute_ainv_host`, the sole ridge-DEPENDENT
 /// buffer) so a single source builds both the per-trial flatten and the resident
 /// frame, and so the host-marshalling cost is measurable off-device. Every field
 /// here is a pure function of `(sys, data, frame)` — invariant across the ridge
@@ -1743,7 +1743,7 @@ pub(crate) fn flatten_frame_host_operands(
 /// nonnegative-pivot guard, dense inverse via unit-column back-substitution, and
 /// the Gershgorin `RidgeBumpRequired` deficit on a non-PD block).
 #[cfg(target_os = "linux")]
-pub fn compute_ainv_host(
+pub(crate) fn compute_ainv_host(
     sys: &ArrowSchurSystem,
     q_of: &[i32],
     max_q: usize,
@@ -1907,7 +1907,7 @@ pub fn solve_arrow_newton_step_dense_reference(
 /// accumulation order matches the device kernels exactly.
 ///
 /// `out` is OVERWRITTEN: first set to `ρ_β·x`, then the penalty blocks add in.
-pub fn sae_framed_penalty_matvec_cpu(
+pub(crate) fn sae_framed_penalty_matvec_cpu(
     data: &DeviceSaePcgData,
     ridge_beta: f64,
     x: &[f64],
@@ -1968,7 +1968,7 @@ pub fn sae_framed_penalty_matvec_cpu(
 
 /// Frames-engaged FULL reduced-Schur matvec `out = S·x` purely from the device
 /// data, where `S = (P_ββ + ρ_β I) − Σ_i H_βt^(i)(H_tt^(i)+ρ_t I)⁻¹ H_tβ^(i)`
-/// (issue #1017/#1026). The penalty side is [`sae_framed_penalty_matvec_cpu`];
+/// (issue #1017/#1026). The penalty side is `sae_framed_penalty_matvec_cpu`;
 /// the per-row reduced term reads the dense `frame.row_htbeta[i]`
 /// (`q_i × border_dim`, row-major), solves against the row's
 /// `H_tt^(i)+ρ_t I` Cholesky factor, and scatters the transpose back. This is
@@ -6963,7 +6963,7 @@ extern "C" __global__ void arrow_sae_frame_diag_sub(
     /// the ridge-independent framed operands ONCE ([`ResidentSaeFrameHandle`]),
     /// primes `ainv` at the single evidence `ridge_t`, and returns a closure that
     /// per apply crosses only `x` (down) and `out` (up): the deterministic host
-    /// penalty ([`super::sae_framed_penalty_matvec_cpu`]) plus the atomics-free
+    /// penalty (`super::sae_framed_penalty_matvec_cpu`) plus the atomics-free
     /// device reduced-Schur term ([`launch_sae_frame_reduced_schur_det`]). `None`
     /// on any decline (no device / shape / offload floor / non-PD at this ridge),
     /// so the caller keeps the CPU row-procedural matvec. A per-apply device fault

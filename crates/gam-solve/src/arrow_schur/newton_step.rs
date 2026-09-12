@@ -589,7 +589,7 @@ fn build_resident_base_frame_if_admitted(
 /// the frame across its ridge ladder because only
 /// `ainv = (H_tt + ridge_t·I)⁻¹` depends on the ridge. Hand the runtime/offload
 /// gate + the one-time upload to
-/// [`crate::gpu_kernels::arrow_schur::build_sae_resident_frame`]. Whenever this
+/// `crate::gpu_kernels::arrow_schur::build_sae_resident_frame`. Whenever this
 /// returns `Some`, the per-trial device solve it replaces would ALSO have run on
 /// the device — the resident frame changes only how the (identical) solve is fed.
 fn build_resident_sae_frame_if_admitted(
@@ -1026,7 +1026,7 @@ where
 /// Use this only for internal LM rejection logic that needs the damped model
 /// (e.g. checking whether a candidate step satisfies a trust-region condition
 /// against the augmented quadratic). For gain-ratio computations against the
-/// bare penalized objective, use [`arrow_bare_quadratic_model_reduction`].
+/// bare penalized objective, use `arrow_bare_quadratic_model_reduction`.
 pub(crate) fn arrow_damped_quadratic_model_reduction(
     sys: &ArrowSchurSystem,
     delta_t: ArrayView1<'_, f64>,
@@ -1097,7 +1097,7 @@ pub(crate) fn arrow_damped_quadratic_model_reduction(
 ///
 /// Use this for PIRLS gain-ratio computations and any other place where the
 /// accept/reject criterion compares against the bare (non-augmented) objective.
-pub fn arrow_bare_quadratic_model_reduction(
+pub(crate) fn arrow_bare_quadratic_model_reduction(
     sys: &ArrowSchurSystem,
     delta_t: ArrayView1<'_, f64>,
     delta_beta: ArrayView1<'_, f64>,
@@ -1175,7 +1175,7 @@ pub(crate) struct ArrowNewtonStepArtifacts {
     /// matrix-free evidence path (Stochastic Lanczos Quadrature) so the Laplace
     /// normaliser need not Cholesky-factor a dense `k × k` Schur. When `Some`, it
     /// supersedes the `schur_factor` diagonal sum in
-    /// [`ArrowFactorCache::compute_undamped_arrow_log_det`]; `None` on every
+    /// `ArrowFactorCache::compute_undamped_arrow_log_det`; `None` on every
     /// exact dense-factor path (small `k`, streaming), which keeps
     /// the bit-identical Cholesky log-determinant.
     pub(crate) schur_log_det_override: Option<f64>,

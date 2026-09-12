@@ -271,7 +271,7 @@ pub(crate) fn sigma_cubature_dispatch(
 ///   2. Materialises `x_transformed = X_original · Qs` on the host
 ///      (dense-only; sparse design returns `Ok(None)`).
 ///   3. Passes the per-sigma inputs to
-///      [`crate::gpu_kernels::sigma_cubature::try_gpu_sigma_stream_pool_eval`]
+///      `crate::gpu_kernels::sigma_cubature::try_gpu_sigma_stream_pool_eval`
 ///      which allocates a stream pool (N_streams = min(8, M)), rotates
 ///      sigma points across streams, runs `pirls_loop_on_stream` on each,
 ///      and returns one `(H_original⁻¹, β_original)` pair per point.

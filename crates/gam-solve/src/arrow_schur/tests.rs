@@ -4206,7 +4206,7 @@ fn cholesky_lower_faer_path_matches_scalar_reference_on_wide_schur() {
 }
 
 /// Top eigenvalue of a symmetric matrix from a dense eigendecomposition: the
-/// oracle for [`reduced_schur_lambda_max`].
+/// oracle for `reduced_schur_lambda_max`.
 ///
 /// A power iteration cannot serve as this oracle. In `dense_direct_system` every
 /// row's `htbeta` block repeats one vector in each of its `d` rows, so the Schur

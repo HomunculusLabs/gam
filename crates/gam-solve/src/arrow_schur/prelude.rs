@@ -43,9 +43,9 @@ pub(crate) const DEFAULT_TRUST_REGION_RADIUS: f64 = f64::INFINITY;
 /// The ladder is only ever escalated on a REJECTED step and never lowered, so
 /// this rung's job is to be small enough that an accepted first attempt is
 /// effectively the undamped Newton step, while still being nonzero so
-/// [`DEFAULT_PROXIMAL_RIDGE_GROWTH`] has something to multiply. Its reach is
+/// `DEFAULT_PROXIMAL_RIDGE_GROWTH` has something to multiply. Its reach is
 /// what is actually derived: `1e-8 · 10^21 ≈ 1e14`, on
-/// [`DEFAULT_PROXIMAL_MAX_ATTEMPTS`].
+/// `DEFAULT_PROXIMAL_MAX_ATTEMPTS`.
 pub const DEFAULT_PROXIMAL_INITIAL_RIDGE: f64 = 1e-8;
 
 pub(crate) const F32_UNIT_ROUNDOFF: f64 = (f32::EPSILON as f64) * 0.5;
@@ -65,8 +65,8 @@ pub(crate) const MIXED_PRECISION_KAPPA_MARGIN_CEILING: f64 = 1.0;
 /// for `ArrowSolveOptions::ridge_growth`. One decade per rejection, which is
 /// what fixes the ladder's reach at
 /// `DEFAULT_PROXIMAL_INITIAL_RIDGE · 10^(DEFAULT_PROXIMAL_MAX_ATTEMPTS − 1)`;
-/// see [`DEFAULT_PROXIMAL_MAX_ATTEMPTS`] for why that reach is the requirement.
-pub const DEFAULT_PROXIMAL_RIDGE_GROWTH: f64 = 10.0;
+/// see `DEFAULT_PROXIMAL_MAX_ATTEMPTS` for why that reach is the requirement.
+pub(crate) const DEFAULT_PROXIMAL_RIDGE_GROWTH: f64 = 10.0;
 
 /// Number of geometric proximal-ridge escalations the adaptive correction
 /// attempts before giving up. Raised from 16 to 22 so the ridge can climb from
@@ -76,7 +76,7 @@ pub const DEFAULT_PROXIMAL_RIDGE_GROWTH: f64 = 10.0;
 /// enough to either find descent or reach the near-stationary resolution floor
 /// that triggers the convergence exit. The cost of the extra attempts is paid
 /// only on configs that would otherwise have failed.
-pub const DEFAULT_PROXIMAL_MAX_ATTEMPTS: usize = 22;
+pub(crate) const DEFAULT_PROXIMAL_MAX_ATTEMPTS: usize = 22;
 
 /// Armijo sufficient-decrease constant — sourced from the shared optimizer
 /// constants so the workspace has exactly one `c₁`.

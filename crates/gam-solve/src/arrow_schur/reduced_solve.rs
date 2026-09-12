@@ -1726,10 +1726,10 @@ pub(crate) fn schur_matvec<B: BatchedBlockSolver + Sync>(
 ///
 /// The rational-logdet criterion (`matrix_free_arrow_evidence_log_det_surrogate`)
 /// walks SEVERAL shift ladders inside ONE evaluation: the `λ_max` power iteration
-/// ([`reduced_schur_lambda_max`]), the pilot / deflation-derived plan build
-/// ([`rational_reduced_schur_plan_derived`]), the value [`RationalLogdetPlan::
+/// (`reduced_schur_lambda_max`), the pilot / deflation-derived plan build
+/// (`rational_reduced_schur_plan_derived`), the value [`RationalLogdetPlan::
 /// evaluate`], and the `(probes, S⁻¹·probes)` gradient bundle
-/// ([`reduced_schur_inverse_probe_solves`]). Each formerly re-captured its own
+/// (`reduced_schur_inverse_probe_solves`). Each formerly re-captured its own
 /// inline `schur_matvec` closure over `(sys, htt_factors, ρ_β, backend,
 /// resident)`. On CPU those captures are free; on the device lane they are the
 /// per-solve FLATTEN — every ladder would re-marshal and re-upload the
@@ -2074,7 +2074,7 @@ pub(crate) fn maybe_build_evidence_gpu_matvec(
 /// count, seeds, quadrature/CG tolerances, and derived-rank deflation budget the
 /// [`SurrogateLaneState`] plan is (re)built with. The caller (the SAE streaming
 /// criterion) supplies these once; `deflation_target_std_err_rel` is the derived
-/// bar `0.1 · STALL_REL_TOL` (see [`rational_reduced_schur_plan_derived`]).
+/// bar `0.1 · STALL_REL_TOL` (see `rational_reduced_schur_plan_derived`).
 #[derive(Clone)]
 pub struct SurrogateLaneConfig {
     pub num_probes: usize,
@@ -2776,7 +2776,7 @@ fn price_certified_bottom_mode<B: BatchedBlockSolver + Sync>(
 /// `None` when `k == 0`, when the dominant-magnitude Ritz value is not positive
 /// (an operator whose most negative eigenvalue dominates has no positive top
 /// bracket to report), or when the solve does not certify.
-pub fn reduced_schur_lambda_max<B: BatchedBlockSolver + Sync>(
+pub(crate) fn reduced_schur_lambda_max<B: BatchedBlockSolver + Sync>(
     sys: &ArrowSchurSystem,
     htt_factors: &ArrowFactorSlab,
     ridge_beta: f64,
@@ -2878,7 +2878,7 @@ pub struct ReducedSchurNegativeCurvature {
 /// is now the end we want. The fold is an exact similarity on the eigenvectors
 /// — it changes which eigenvalue is extreme and nothing else — and `σ` is the
 /// `λ_max` the surrogate's spectral bracket already estimates
-/// ([`reduced_schur_lambda_max`]), so no new spectral information is needed.
+/// (`reduced_schur_lambda_max`), so no new spectral information is needed.
 ///
 /// # Why this is a statement about the ITERATE
 ///
@@ -2996,7 +2996,7 @@ pub(crate) fn reduced_schur_negative_curvature<B: BatchedBlockSolver + Sync>(
 /// gradient) is closed by construction, not by tolerance tuning.
 ///
 /// The spectral bracket is estimated matrix-free: `λ_max` as a certified Lanczos
-/// upper bracket ([`reduced_schur_lambda_max`]), `λ_min` from the deflation-floor
+/// upper bracket (`reduced_schur_lambda_max`), `λ_min` from the deflation-floor
 /// convention `SPECTRAL_DEFLATION_REL_FLOOR·λ_max` (the operative lower bound of
 /// the unit-deflated spectrum). Every shifted solve's iteration budget is the
 /// plan's Chebyshev bound (`RationalLogdetPlan::cg_iteration_bound`), not a
@@ -3092,7 +3092,7 @@ pub struct DerivedRationalLogdetPlan {
     pub entry_evaluation: RationalLogdetEval,
 }
 
-pub fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
+pub(crate) fn rational_reduced_schur_plan_derived<B: BatchedBlockSolver + Sync>(
     sys: &ArrowSchurSystem,
     htt_factors: &ArrowFactorSlab,
     ridge_beta: f64,
@@ -3843,7 +3843,7 @@ pub fn matrix_free_arrow_operator_apply(
 /// The returned [`ReducedSchurCgReport`] is the bundle's WEAKEST member — a
 /// bundle is only as certified as its least-converged solve, and every trace
 /// estimated from it averages over all of them.
-pub fn reduced_schur_inverse_probe_solves<B: BatchedBlockSolver + Sync>(
+pub(crate) fn reduced_schur_inverse_probe_solves<B: BatchedBlockSolver + Sync>(
     sys: &ArrowSchurSystem,
     htt_factors: &ArrowFactorSlab,
     ridge_beta: f64,
@@ -3885,7 +3885,7 @@ pub fn reduced_schur_inverse_probe_solves<B: BatchedBlockSolver + Sync>(
 /// Hutchinson estimate `tr(S⁻¹ M) ≈ (1/m) Σ_j (S⁻¹ v_j)ᵀ (M v_j)` for the reduced
 /// Schur `S` and a SYMMETRIC channel operator `M` supplied by its matvec
 /// `m_matvec(v) = M·v`. `sinv_probes[j] = S⁻¹ v_j` is the bundle from
-/// [`reduced_schur_inverse_probe_solves`] and `probes` the matching probe set.
+/// `reduced_schur_inverse_probe_solves` and `probes` the matching probe set.
 ///
 /// The general umbrella (#2080): every dense-`S⁻¹` consumer in the SAE outer
 /// gradient — the per-row selected-inverse deflation corrections
@@ -6367,11 +6367,11 @@ impl ArrowSchurError {
     /// refusal as a fatal defect. So the wording lives beside its reader, both
     /// producers interpolate it, and [`Self::rendered_is_indefinite_evidence`]
     /// matches the same function.
-    pub fn indefinite_evidence_marker() -> &'static str {
+    pub(crate) fn indefinite_evidence_marker() -> &'static str {
         "evidence operator carries RESOLVED NEGATIVE curvature"
     }
 
-    /// Whether a rendered refusal is the [`Self::indefinite_evidence_marker`]
+    /// Whether a rendered refusal is the `Self::indefinite_evidence_marker`
     /// class. `contains` rather than equality because callers wrap the rendered
     /// text in their own context before it arrives.
     pub fn rendered_is_indefinite_evidence(rendered: &str) -> bool {

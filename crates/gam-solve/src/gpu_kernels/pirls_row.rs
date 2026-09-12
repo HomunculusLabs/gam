@@ -905,7 +905,7 @@ impl PirlsRowBackend {
 
     /// Compile (or fetch from cache) the kernel module for `(family, curvature)`
     /// in the given [`KernelMode`]. This is the single source of truth behind
-    /// [`module_for`], [`module_for_solve`], and [`module_for_ladder`]; the only
+    /// [`module_for`], `module_for_solve`, and `module_for_ladder`; the only
     /// per-mode variation is which CUDA source generator is used (selected by
     /// `mode`) and the error label `label` woven into compile/load diagnostics.
     #[cfg(target_os = "linux")]
@@ -973,7 +973,7 @@ impl PirlsRowBackend {
     /// `(family, curvature)`. Writes only `grad_eta`, `w_solver`, `deviance`,
     /// `status` — used on every hot Newton iteration.
     #[cfg(target_os = "linux")]
-    pub fn module_for_solve(
+    pub(crate) fn module_for_solve(
         &self,
         family: PirlsRowFamily,
         curvature: CurvatureMode,
@@ -982,10 +982,10 @@ impl PirlsRowBackend {
     }
 
     /// Compile (or fetch from cache) the **alpha-ladder** kernel module for
-    /// `(family, curvature)`. Evaluates all [`ALPHA_LADDER_LEN`] step sizes in
+    /// `(family, curvature)`. Evaluates all `ALPHA_LADDER_LEN` step sizes in
     /// a single launch, accumulating `objective[]` and `status[]` per alpha slot.
     #[cfg(target_os = "linux")]
-    pub fn module_for_ladder(
+    pub(crate) fn module_for_ladder(
         &self,
         family: PirlsRowFamily,
         curvature: CurvatureMode,
@@ -1011,7 +1011,7 @@ impl PirlsRowBackend {
 ///   `dev`, and update `status`. The shell
 ///   wraps it in the canonical
 ///   `extern "C" __global__ void pirls_row_jit_{spec_id}(...)`
-///   signature that [`launch_row_reweight_on_stream`] expects.
+///   signature that `launch_row_reweight_on_stream` expects.
 #[derive(Clone, Debug)]
 pub struct JitFamilySpec {
     /// Process-unique identifier for this spec; the module cache uses
@@ -1070,7 +1070,7 @@ impl JitFamilySpec {
     /// Build the full CUDA source ready for NVRTC compilation. The
     /// shell + prolog match the built-in `cuda_source_for` so the JIT
     /// kernel ABI is bit-identical to the cached built-ins;
-    /// [`launch_row_reweight_on_stream`] cannot tell the difference.
+    /// `launch_row_reweight_on_stream` cannot tell the difference.
     #[cfg(target_os = "linux")]
     pub fn cuda_source(&self, curvature: CurvatureMode) -> String {
         let curvature_define = match curvature {
@@ -1122,7 +1122,7 @@ extern "C" __global__ void {kernel_name}(
 ///
 /// **final-row mode**: the five production numerical fields plus status,
 /// length `n`. Written
-/// once at convergence by [`launch_row_reweight_on_stream`]. For the hot
+/// once at convergence by `launch_row_reweight_on_stream`. For the hot
 /// inner-loop use [`SolveRowBuffers`]; for line-search use
 /// [`AlphaLadderDevBuffers`].
 #[cfg(target_os = "linux")]
@@ -1168,7 +1168,7 @@ impl RowOutputDevBuffers {
 /// iteration: `grad_eta` (score for Xᵀg RHS), `w_solver` (working weight
 /// for XᵀWX assembly), `deviance` (per-row deviance for convergence check),
 /// and `status` (one exact refusal code per row). Written
-/// by [`launch_solve_row_on_stream`]; used instead of [`RowOutputDevBuffers`]
+/// by `launch_solve_row_on_stream`; used instead of [`RowOutputDevBuffers`]
 /// during the hot inner loop to reduce device memory and kernel store traffic.
 #[cfg(target_os = "linux")]
 pub struct SolveRowBuffers {
@@ -1208,15 +1208,15 @@ impl SolveRowBuffers {
 }
 
 /// Number of alpha step sizes in the fused alpha ladder.
-pub const ALPHA_LADDER_LEN: usize = 7;
+pub(crate) const ALPHA_LADDER_LEN: usize = 7;
 
 /// The fixed alpha step-size ladder: `[1, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625]`.
-pub const ALPHA_LADDER: [f64; ALPHA_LADDER_LEN] =
+pub(crate) const ALPHA_LADDER: [f64; ALPHA_LADDER_LEN] =
     [1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625];
 
 /// Device buffers for the fused alpha-ladder candidate-objective kernel.
 ///
-/// **candidate-objective mode**: for each of the [`ALPHA_LADDER_LEN`] step
+/// **candidate-objective mode**: for each of the `ALPHA_LADDER_LEN` step
 /// sizes α_k the kernel evaluates `η_trial_i = η_i + α_k · xδ_i`, computes
 /// the per-row deviance, and atomically accumulates the sum into
 /// `objective_dev[k]`. Each row writes its refusal code to
@@ -1225,7 +1225,7 @@ pub const ALPHA_LADDER: [f64; ALPHA_LADDER_LEN] =
 /// deviance descent — no per-α kernel launch, no full row-output write.
 #[cfg(target_os = "linux")]
 pub struct AlphaLadderDevBuffers {
-    /// Device: summed deviance for each alpha step, length [`ALPHA_LADDER_LEN`].
+    /// Device: summed deviance for each alpha step, length `ALPHA_LADDER_LEN`.
     pub objective_dev: cudarc::driver::CudaSlice<f64>,
     /// Device: row refusal codes in alpha-major order, length
     /// `ALPHA_LADDER_LEN * n`.
@@ -1276,7 +1276,7 @@ impl AlphaLadderDevBuffers {
 /// families compile a ten-argument kernel and ignore this value. Pass `1.0`
 /// for non-Gamma fits.
 #[cfg(target_os = "linux")]
-pub fn launch_row_reweight_on_stream(
+pub(crate) fn launch_row_reweight_on_stream(
     backend: &PirlsRowBackend,
     family: PirlsRowFamily,
     curvature: CurvatureMode,
@@ -1346,16 +1346,16 @@ pub fn launch_row_reweight_on_stream(
 /// `status`. The CUDA kernel is compiled from a specialised source
 /// (`solve_row_source_for`) that skips the `mu` and `w_hessian` stores,
 /// reducing both bandwidth and register
-/// pressure relative to [`launch_row_reweight_on_stream`].
+/// pressure relative to `launch_row_reweight_on_stream`.
 ///
 /// Call once per Newton step on the accepted η. At convergence, call
-/// [`launch_row_reweight_on_stream`] (final-row mode) to populate the full
+/// `launch_row_reweight_on_stream` (final-row mode) to populate the full
 /// output surface before downloading.
 ///
 /// `gamma_shape`: active Gamma dispersion shape (α > 0). Forwarded as a kernel
 /// argument only for `PirlsRowFamily::GammaLog`. Pass `1.0` for non-Gamma fits.
 #[cfg(target_os = "linux")]
-pub fn launch_solve_row_on_stream(
+pub(crate) fn launch_solve_row_on_stream(
     backend: &PirlsRowBackend,
     family: PirlsRowFamily,
     curvature: CurvatureMode,
@@ -2157,7 +2157,7 @@ extern "C" __global__ void {kernel_name}(
 // ────────────────────────────────────────────────────────────────────────
 
 /// The alpha constants embedded into the ladder kernel source as a
-/// `__constant__` array. Must stay in sync with [`ALPHA_LADDER`].
+/// `__constant__` array. Must stay in sync with `ALPHA_LADDER`.
 #[cfg(target_os = "linux")]
 const ALPHA_LADDER_CUDA_ARRAY: &str =
     "__constant__ double PIRLS_ALPHAS[7] = {1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125, 0.015625};";

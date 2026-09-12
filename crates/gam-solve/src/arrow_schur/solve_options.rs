@@ -52,7 +52,7 @@ pub fn exact_a_direction_floor(
 /// negative direction is tested against the exactly known clamp curvature
 /// `v^T E v` before it may be called a saddle.
 #[must_use]
-pub fn classify_exact_a_direction(
+pub(crate) fn classify_exact_a_direction(
     curvature: f64,
     spectral_dimension: usize,
     spectral_norm: f64,
@@ -774,7 +774,7 @@ impl ArrowBetaGaugeQuotient {
     }
 
     /// `P x`, where `P = I - Q Q^T`.
-    pub fn project_complement(&self, x: ArrayView1<'_, f64>) -> Array1<f64> {
+    pub(crate) fn project_complement(&self, x: ArrayView1<'_, f64>) -> Array1<f64> {
         assert_eq!(x.len(), self.border_dim());
         let mut out = x.to_owned();
         for direction in self.directions.iter() {
@@ -785,7 +785,7 @@ impl ArrowBetaGaugeQuotient {
     }
 
     /// Dense Faddeev--Popov pin `P S P + Q Q^T`.
-    pub fn pin_reduced_schur(&self, schur: ArrayView2<'_, f64>) -> Array2<f64> {
+    pub(crate) fn pin_reduced_schur(&self, schur: ArrayView2<'_, f64>) -> Array2<f64> {
         let dim = self.border_dim();
         assert_eq!(schur.dim(), (dim, dim));
 
