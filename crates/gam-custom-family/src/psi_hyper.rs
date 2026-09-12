@@ -2540,13 +2540,15 @@ fn evaluate_custom_family_hyper_internal_shared<F: CustomFamily + Clone + Send +
                 let r_inf = r.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
                 // The KKT correction's leading term `−coord.gᵀ(H⁻¹r)` is bounded
                 // by `‖H⁻¹‖·‖coord.g‖·‖r‖`; treat the residual as exact only when
-                // its inf-norm is at the inner solve's own KKT tolerance floor
-                // (defaulting to a tight `1e-8` when the producer attached none),
-                // so the fast batched path is taken on well-converged fits and
-                // the unified correction path is taken whenever `r` is materially
-                // nonzero.
-                let tol = residual.residual_tol().unwrap_or(1.0e-8).max(1.0e-12);
-                r_inf <= tol
+                // its inf-norm is at the inner solve's own KKT tolerance, so the
+                // fast batched path is taken on well-converged fits and the
+                // unified correction path is taken whenever `r` is materially
+                // nonzero. A residual whose producer attached no tolerance cannot
+                // be certified negligible, so it takes the unified path.
+                match residual.residual_tol() {
+                    Some(tol) => r_inf <= tol,
+                    None => false,
+                }
             }
         };
         let mut batched_gradient_override: Option<Array1<f64>> = None;
