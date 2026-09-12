@@ -58,7 +58,7 @@ Sources: [issue and original deployment plan](https://github.com/SauersML/gam/is
 | Runtime-width SLS wiggle, orders two through four | Runtime-sized analytic hand opponent and complete channel parity/timing | Incomplete: current test measures allocation policy |
 | Constrained Firth/Jeffreys root cause | Correction enabled on identifiable geometry and converged constrained binomial-wiggle/Matérn fit, plus affected-family regressions | Incomplete: disabling rationale remains in production |
 | Large-scale flex end-to-end benchmark | A real converged fit selecting the intended branch, cold/warm cache attribution, comparable baseline and timing | Pending; per-row allocation test is insufficient; inspect current Criterion target's capped-fit semantics |
-| Retired hand fourth-order oracle reduced to finiteness | Independent numerical agreement through fourth order on the live route | Pending; finite-only agreement is not sufficient |
+| Retired hand fourth-order oracle reduced to finiteness | Independent numerical agreement through fourth order on the live route | BMS FLEX route covered on main by `standard_normal_flex_canonical_derivative_ladder_matches_vgh_t3_t4_932`: central differences through the production `lower_bms_flex_row_order2_with_moments` / `row_primary_third_contracted_with_moments` / `row_primary_fourth_contracted_ordered` along one mixed direction; V→G 2e-7, G→H 2e-6, H→t3 2e-5, t3→t4 2e-4; exact symmetry and nonzero-signal asserts. Not run in the 09-12 pass; other flex routes not yet enumerated |
 | Block10 fourth-order FD convergence omissions | Every required entry covered by a converged independent witness or exact oracle | Fixed and verified on MSI: all four fixtures, no skipped matrix entries, exact-zero checks for zero directions; original error bounds retained |
 | Loosened oracle tolerances and narrowed fixtures | Justified numerical error bounds, wider relevant fixtures, corruption sensitivity | Pending; inspect each affected oracle, not only the repaired rigid test |
 | Removed hand-oracle coverage | Independent replacement for each still-live channel, not a comparison of one lowering with itself | Pending |
@@ -515,11 +515,14 @@ the ten closures in source order by their v0 disambiguators:
 workflow sets no `target-cpu`, so every host runs this machine code, and whether
 the generated arm wins depends on the host.
 
-One saving remains on the generated side: it multiplies all ten slots by
-`outcome_sign`, where composing on `s·x` needs only the stack powers `s^k`. A
-strongest-hand schedule can use the same identity, so that saving cannot give a
-robust margin. Whether the third cells keep a strict `faster` contract at parity is
-an open decision.
+The generated side multiplies all ten slots by `outcome_sign`, where composing on the
+unscaled binding needs only the stack powers `s^k`. This change has already been
+measured and rejected. The dense compose arm of `row_program.rs` records that the
+same rule emitted the same arithmetic minus the sign multiplies, yet lost 10–35% on
+three hosts: LLVM scheduled the observed-scale inverse-power chain and its spills
+ahead of the probit call. The order-2 emitter keeps the absorption because there it
+wins on every host. Code shape therefore leaves no robust margin for the third cells
+at parity. Whether they keep a strict `faster` contract is an open decision.
 
 ### Live-family derivative census, continued: the coefficient-space pullbacks
 
