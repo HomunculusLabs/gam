@@ -2,8 +2,8 @@
 // before the outer ψ search refines it.
 //
 // `include!`d into `drivers/mod.rs` exactly like `constant_curvature_profile.rs`,
-// whose shape this file deliberately copies: a cheap value-only bracket that
-// picks the basin, then the existing exact machinery refines inside it.
+// whose machinery this file reuses: the λ-profiled Gaussian REML ψ-jet, driven
+// by the workspace's outer engine over a derived window.
 //
 // ## The defect this closes
 //
@@ -42,11 +42,13 @@
 // the same mgcv-`sp=` convention the range already follows).
 //
 // The screening criterion is the closed-form profiled Gaussian REML of the term
-// ALONE against the response, with the double-penalty component off — the exact
-// object `constant_curvature_psi_profile_value` screens κ with, for the same
-// reason: the bracket needs a ranking, not a fit, and a per-node full-collection
-// multi-ρ solve would multiply the cost of every measure-jet fit by the node
-// count. Two consequences are accepted openly:
+// ALONE against the response, with the double-penalty component off — the same
+// object `constant_curvature_psi_profile_jet` differentiates, for the same
+// reason: a full-collection multi-ρ solve at every trial range would multiply
+// the cost of every measure-jet fit by the number of trials. It is minimized
+// from each node of the term's scale band by the outer engine on its exact
+// `ln ℓ` jet, and only certified searches compete (see
+// `screen_measure_jet_range`). Two consequences are accepted openly:
 //
 //   * on a multi-term formula the screen ranks the term's own fit to `y`, not
 //     its fit to the partial residual. It is a seed; the joint ψ/ρ search that
@@ -55,74 +57,144 @@
 //     scale. Still strictly more informed than the geometry-only heuristic it
 //     replaces, which never looks at `y` at all.
 
-/// One screening evaluation: the profiled Gaussian REML of `[1 | X(ℓ)]` with
-/// the term's single jet-energy penalty, at one candidate range.
+/// The screening criterion and its exact `ln ℓ` derivatives at one range:
+/// `(V, V′, V″)` for the profiled Gaussian REML of `[1 | X(ℓ)]` with the term's
+/// single jet-energy penalty, with λ profiled out.
 ///
-/// `data` is the term's feature columns in the STANDARDIZED frame the basis is
-/// realized in, and `ell` is a standardized range, so this never has to reason
-/// about the input-frame conversion the term-collection builder owns.
+/// `data` holds the term's feature columns in the STANDARDIZED frame the basis is
+/// realized in, and `ln_ell` is a standardized log range, so this never has to
+/// reason about the input-frame conversion the term-collection builder owns.
 ///
-/// Returns `None` (never an error) when the candidate cannot be realized or
-/// scored: a bracket node that refuses is simply not a candidate, and one
-/// unbuildable range must not fail an otherwise healthy fit.
-fn measure_jet_range_screen_value(
+/// The design and penalty jets come from
+/// [`gam_terms::basis::build_measure_jet_basis_psi_derivatives`], realized in the
+/// basis chart at this ℓ. [`profiled_gaussian_reml_psi_jet`] turns them into
+/// the λ-profiled jet: the envelope gradient and the Schur-complemented
+/// curvature. That routine carries two coordinates `(κ, η)`. The screen has only
+/// `η = ln ℓ`, so the κ blocks are exact zeros and only the η entries are read.
+fn measure_jet_range_screen_jet(
     data: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
     weights: Option<ArrayView1<'_, f64>>,
     spec: &gam_terms::basis::MeasureJetBasisSpec,
-    ell: f64,
-) -> Option<f64> {
+    ln_ell: f64,
+) -> Result<(f64, f64, f64), EstimationError> {
+    let ell = ln_ell.exp();
     if !(ell.is_finite() && ell > 0.0) {
-        return None;
+        crate::bail_invalid_estim!(
+            "measure-jet range screen probed a non-representable range ln ℓ = {ln_ell}"
+        );
     }
     let mut screen = spec.clone();
     screen.length_scale = ell;
     // The screen ranks SPANS. The null-component candidate is a second REML
     // coordinate, not a property of the span, and carrying it would make every
-    // node a multi-ρ solve; the shipped fit still gets it.
+    // evaluation a multi-ρ solve; the shipped fit still gets it.
     screen.double_penalty = false;
-    screen.learn_length_scale = false;
-    let basis = gam_terms::basis::build_measure_jet_basis(data, &screen).ok()?;
+    // Enrols the `ln ℓ` coordinate in the jet producer. The realized basis is
+    // the same either way.
+    screen.learn_length_scale = true;
+    let basis = gam_terms::basis::build_measure_jet_basis(data, &screen)
+        .map_err(EstimationError::from)?;
     if basis.active_penalties.len() != 1 {
-        return None;
+        crate::bail_invalid_estim!(
+            "measure-jet range screen expected one active penalty; got {}",
+            basis.active_penalties.len()
+        );
     }
+    let jets = gam_terms::basis::build_measure_jet_basis_psi_derivatives(data, &screen)
+        .map_err(EstimationError::from)?;
+    let candidate = basis.active_penalties[0].info.original_index;
+    let (Some(design_first), Some(design_second), Some(penalty_first), Some(penalty_second)) = (
+        jets.design_first.first(),
+        jets.design_second_diag.first(),
+        jets.penalties_first
+            .first()
+            .and_then(|blocks| blocks.get(candidate)),
+        jets.penalties_second_diag
+            .first()
+            .and_then(|blocks| blocks.get(candidate)),
+    ) else {
+        crate::bail_invalid_estim!(
+            "measure-jet range screen: the ψ jets carry no ln ℓ coordinate for the primary penalty"
+        );
+    };
     let smooth_design = basis.design.to_dense();
     let (n, p) = smooth_design.dim();
-    if n != y.len() || p == 0 {
-        return None;
+    if n != y.len()
+        || p == 0
+        || design_first.dim() != (n, p)
+        || design_second.dim() != (n, p)
+        || penalty_first.dim() != (p, p)
+        || penalty_second.dim() != (p, p)
+    {
+        crate::bail_invalid_estim!("measure-jet range screen: design and jet shapes disagree");
     }
-    let mut design = Array2::<f64>::ones((n, p + 1));
-    design
-        .slice_mut(ndarray::s![.., 1..])
-        .assign(&smooth_design);
-    let mut penalty = Array2::<f64>::zeros((p + 1, p + 1));
-    penalty
-        .slice_mut(ndarray::s![1.., 1..])
-        .assign(&basis.active_penalties[0].matrix);
-    // Rank-reveal, exactly as the term collection does at fit time. A Gaussian
-    // representer design LOSES COLUMNS as the range grows — that is the whole
-    // reason the range is worth screening — and a criterion that keeps the
-    // dependent columns does not merely score them badly, it REFUSES: the
-    // profiled evaluator classifies the penalty in the `XᵀWX` metric, and a
-    // singular `X` turns an exactly-PSD penalty into one with a negative
-    // eigenvalue. A screen that refuses at every long range would report the
-    // seed basin as the optimum for the second time (gam#2750), which is the
-    // defect, not a measurement of it.
-    let (design, penalty) = whiten_to_identifiable_subspace(&design, &penalty)?;
-    let response = y.insert_axis(ndarray::Axis(1));
-    let fit = gam_solve::gaussian_reml::gaussian_reml_multi_closed_form(
-        design.view(),
-        response,
-        penalty.view(),
-        weights,
-        None,
-    )
-    .ok()?;
-    fit.reml_score.is_finite().then_some(fit.reml_score)
+    // The intercept column is ℓ-free, so it borders every jet with zeros.
+    let border_design = |block: &Array2<f64>| -> Array2<f64> {
+        let mut out = Array2::<f64>::zeros((n, p + 1));
+        out.slice_mut(s![.., 1..]).assign(block);
+        out
+    };
+    let border_penalty = |block: &Array2<f64>| -> Array2<f64> {
+        let mut out = Array2::<f64>::zeros((p + 1, p + 1));
+        out.slice_mut(s![1.., 1..]).assign(block);
+        out
+    };
+    let mut design = border_design(&smooth_design);
+    design.column_mut(0).fill(1.0);
+    let mut first = border_design(design_first);
+    let mut second = border_design(design_second);
+    let mut response = y.to_owned();
+    // `√w` on every row: weighted Gaussian REML is ordinary REML on the scaled
+    // rows, up to a `log|W|` constant that does not move with ℓ.
+    if let Some(weights) = weights {
+        for (row, &weight) in weights.iter().enumerate() {
+            let root = weight.sqrt();
+            design.row_mut(row).mapv_inplace(|value| value * root);
+            first.row_mut(row).mapv_inplace(|value| value * root);
+            second.row_mut(row).mapv_inplace(|value| value * root);
+            response[row] *= root;
+        }
+    }
+    let transform = whiten_to_identifiable_subspace(&design).ok_or_else(|| {
+        EstimationError::InvalidInput(
+            "measure-jet range screen: the representer design identifies no direction".to_string(),
+        )
+    })?;
+    let chart = |block: &Array2<f64>| fast_ab(block, &transform);
+    // The congruence is symmetric in exact arithmetic; make it so in floating
+    // point as well, because the evaluator's spectral classification refuses a
+    // matrix that is not exactly self-adjoint.
+    let congruence = |block: &Array2<f64>| -> Array2<f64> {
+        let half = fast_ab(block, &transform);
+        let full = fast_atb(&transform, &half);
+        (&full + &full.t()) * 0.5
+    };
+    let design = chart(&design);
+    let first = chart(&first);
+    let second = chart(&second);
+    let penalty = congruence(&border_penalty(&basis.active_penalties[0].matrix));
+    let penalty_first = congruence(&border_penalty(penalty_first));
+    let penalty_second = congruence(&border_penalty(penalty_second));
+    let kept = transform.ncols();
+    let zero_design = Array2::<f64>::zeros((n, kept));
+    let zero_penalty = Array2::<f64>::zeros((kept, kept));
+    let jet = profiled_gaussian_reml_psi_jet(
+        &design,
+        &penalty,
+        &PsiCoordinateBlocks {
+            design_first: [&zero_design, &first],
+            design_second: [&zero_design, &zero_design, &second],
+            penalty_first: [&zero_penalty, &penalty_first],
+            penalty_second: [&zero_penalty, &zero_penalty, &penalty_second],
+        },
+        response.view(),
+    )?;
+    Ok((jet.value, jet.gradient[1], jet.hessian[1][1]))
 }
 
-/// Restrict `(design, penalty)` to the subspace the design actually identifies,
-/// in a chart where the Gram is the identity.
+/// The chart `T` (`p × k`) that restricts a design to the subspace it actually
+/// identifies, with the Gram the identity there: `(XT)ᵀ(XT) = I`.
 ///
 /// ## Why this is needed at all
 ///
@@ -143,19 +215,19 @@ fn measure_jet_range_screen_value(
 /// `2 ln|det T|` and the deviance is invariant, so the `2 ln|det T|` cancels in
 /// the difference. Whitening is therefore a free change of chart, not a change
 /// of model — and it makes the Gram exactly `I`, so the congruence above is the
-/// identity and the evaluator sees the penalty as it was assembled.
+/// identity and the evaluator sees the penalty as it was assembled. The same
+/// `T` carries the ℓ-jets, `∂X → ∂X·T` and `∂S → Tᵀ∂S T`: on a stretch of ranges
+/// where the identified rank does not change the criterion does not depend on
+/// which chart of the identified subspace it is read in.
 ///
 /// The map is only non-invertible where it drops directions, and dropping is
 /// the honest reading there: the collection's own realization drops columns at
 /// the same ranges. The cut is at `√ε` of the leading Gram eigenvalue — the
 /// half-mantissa bar, i.e. the point past which a direction cannot survive
 /// being squared into a Gram and inverted back out with any significant digits.
-fn whiten_to_identifiable_subspace(
-    design: &Array2<f64>,
-    penalty: &Array2<f64>,
-) -> Option<(Array2<f64>, Array2<f64>)> {
+fn whiten_to_identifiable_subspace(design: &Array2<f64>) -> Option<Array2<f64>> {
     let p = design.ncols();
-    if p == 0 || penalty.nrows() != p || penalty.ncols() != p {
+    if p == 0 {
         return None;
     }
     let gram = gam_linalg::faer_ndarray::fast_ata(design);
@@ -177,155 +249,96 @@ fn whiten_to_identifiable_subspace(
             transform[(row, column)] = vectors[(row, index)] * inverse_root;
         }
     }
-    let whitened_design = gam_linalg::faer_ndarray::fast_ab(design, &transform);
-    let half = gam_linalg::faer_ndarray::fast_ab(penalty, &transform);
-    let mut whitened_penalty = gam_linalg::faer_ndarray::fast_atb(&transform, &half);
-    // The congruence is symmetric in exact arithmetic; make it so in floating
-    // point as well, because the evaluator's spectral classification refuses a
-    // matrix that is not exactly self-adjoint.
-    let transposed = whitened_penalty.t().to_owned();
-    whitened_penalty += &transposed;
-    whitened_penalty *= 0.5;
-    Some((whitened_design, whitened_penalty))
+    Some(transform)
 }
 
 /// The screened range for ONE measure-jet term, in standardized units, or
-/// `None` when no candidate scored.
+/// `None` when no search converged.
 ///
-/// Walks the term's realized scale band (see
-/// [`gam_terms::basis::measure_jet_range_bracket`]), extends geometrically at
-/// the band's own log step while an endpoint keeps improving and the node cloud
-/// still admits distinct representers, and finishes with one parabolic step
-/// through the three points around the argmin.
+/// The range is searched over the term's own `ln ℓ` window
+/// ([`gam_terms::basis::measure_jet_ln_range_window`]: the node-spacing floor and
+/// the feasibility ceiling) by the workspace's outer engine, on the exact
+/// criterion jet [`measure_jet_range_screen_jet`] supplies. The criterion is not
+/// unimodal in `ln ℓ` (see the module docs), so one search from one seed is
+/// caged in its first basin. So the engine starts from each node of the term's
+/// realized scale band ([`gam_terms::basis::measure_jet_range_bracket`]): lengths
+/// the basis already derived, not a lattice this screen chose. Only a search the
+/// engine certifies converged, at an interior stationary point or at a face of
+/// the window, may compete, and the lowest certified criterion wins. No node's
+/// value is ever the answer.
+///
+/// This replaces a scan of the band nodes, an upward walk at the band's log step
+/// while the value improved, and one parabolic step through three values
+/// (#2902: SPEC rules 18 and 19).
 fn screen_measure_jet_range(
     data: ArrayView2<'_, f64>,
     y: ArrayView1<'_, f64>,
     weights: Option<ArrayView1<'_, f64>>,
     spec: &gam_terms::basis::MeasureJetBasisSpec,
 ) -> Option<f64> {
+    use gam_problem::{Derivative, HessianValue, OuterEval};
+    use gam_solve::rho_optimizer::OuterProblem;
     let bracket = gam_terms::basis::measure_jet_range_bracket(data, spec).ok()?;
-    if bracket.nodes.len() < 2 || !(bracket.log_step.is_finite() && bracket.log_step > 0.0) {
+    let (lower, upper) = gam_terms::basis::measure_jet_ln_range_window(data, spec).ok()?;
+    if !(lower.is_finite() && upper.is_finite() && upper > lower) {
         return None;
     }
-    // `(ln ell, value)`, kept sorted by ln ell so the parabolic step below can
-    // read its three points off neighbouring entries.
-    let mut scored: Vec<(f64, f64)> = bracket
-        .nodes
-        .iter()
-        .filter_map(|&ell| {
-            measure_jet_range_screen_value(data, y, weights, spec, ell).map(|v| (ell.ln(), v))
-        })
-        .collect();
-    if scored.is_empty() {
-        return None;
-    }
-    // Endpoint walk. The criterion is still descending at a band end whenever
-    // the band's resolution is coarser than the basin, and refusing to look is
-    // how a bracket silently reports its own edge as an optimum.
-    //
-    // The walk is UPWARD ONLY, and that is a statement about the coordinate, not
-    // a simplification. The band's bottom node IS the physical floor — the median
-    // nearest-node spacing, below which neighbouring representers stop
-    // overlapping, the design stops being a partition of unity, and rows between
-    // nodes fall outside every representer's support — and the band's bottom node
-    // is already scored. There is nowhere below it to walk to.
-    //
-    // It used to walk downward as well, under a guard that could not fire
-    // (gam#2750): `next_ln < floor_ln - log_step * scored.len()` recedes by one
-    // log step for every node the walk pushes, exactly as fast as `next_ln`
-    // descends, so the comparison is false at every iteration for any bracket
-    // with two or more nodes. The only stops were "the criterion stopped
-    // improving" and "the basis refused to build", i.e. the documented floor was
-    // not enforced at all and the screen could seed a range below the one the
-    // outer search's own window (`measure_jet_ln_range_window`) is floored at —
-    // which the #2454 incumbent-containment rule would then have widened that
-    // window to admit, reintroducing exactly the region the floor excludes.
-    //
-    // The cap is the bracket's own feasibility ceiling, so the walk still
-    // introduces no length of its own.
-    //
-    // It used to be the node bounding-box DIAMETER, and on a frozen-ℓ term that
-    // turned a stopping rule into a model wall (#2761). Measured on the #1041
-    // parity fixture: band `[1.08074, 1.43607, 1.90823]`, `log_step = 0.284265`,
-    // diameter `3.81645`; the walk's nodes are `2.53562`, `3.36930`, `4.47708`,
-    // and the range the shipped screen chose was `3.36930` — the last node
-    // BELOW the diameter. Since the walk pushes a node and only then breaks if
-    // it failed to improve, an argmin that is the last pushed node improved, so
-    // the loop left through this test with the criterion still descending.
-    //
-    // What that was worth, measured after the change rather than assumed from
-    // the shape of the defect: the walk now scores `4.47708`, which does NOT
-    // improve, so the criterion has an interior optimum here and the old
-    // ceiling cut just past it. The gain is the PARABOLIC REFINEMENT below,
-    // which cannot fire on an argmin that is the last element — with a
-    // neighbour on both sides it lands at `3.10543` with a better criterion
-    // value and held-out RMSE `0.04185 → 0.04179`. A stop that cannot be
-    // stepped past also cannot be refined at, and that was the invisible half
-    // of its cost. The much larger held-out number further out on the same
-    // sweep (`0.03788` at `ℓ = 68.5`) is NOT what this recovers — the criterion
-    // does not want to go there — and belongs to whoever takes the criterion
-    // question.
-    //
-    // Safe by the walk's own rule, which only continues while the criterion
-    // improves: on the gam#2750 fixture, where the criterion drops from −256.3
-    // to −198.5 just past the diameter, the walk still stops on the first
-    // non-improving node. This cap only ever binds where the criterion is still
-    // descending, which is exactly where stopping is wrong.
-    let ceiling_ln = bracket.feasibility_ceiling.max(bracket.nodes[0]).ln();
-    loop {
-        let (best_ln, best_value) =
-            scored
-                .iter()
-                .copied()
-                .fold((f64::NAN, f64::INFINITY), |acc, node| {
-                    if node.1 < acc.1 { node } else { acc }
-                });
-        let edge = scored.last().copied()?;
-        if edge.0 != best_ln || edge.1 != best_value {
-            break;
+    // A range whose basis or jet cannot be realized is a property of that trial,
+    // so the search retreats from it instead of abandoning the screen.
+    let refuse = |error: EstimationError| EstimationError::TrialPointRefused {
+        reason: error.to_string(),
+    };
+    let mut best: Option<(f64, f64)> = None;
+    for &node in &bracket.nodes {
+        let start = node.ln();
+        if !start.is_finite() {
+            continue;
         }
-        let next_ln = edge.0 + bracket.log_step;
-        if next_ln > ceiling_ln {
-            break;
-        }
-        let Some(value) = measure_jet_range_screen_value(data, y, weights, spec, next_ln.exp())
-        else {
-            break;
+        let mut seed_config = gam_problem::SeedConfig::default();
+        seed_config.bounds = (lower, upper);
+        seed_config.max_seeds = 1;
+        seed_config.seed_budget = 1;
+        let problem = OuterProblem::new(1)
+            .with_gradient(Derivative::Analytic)
+            .with_hessian(gam_problem::DeclaredHessianForm::Dense)
+            .with_bounds(Array1::from_vec(vec![lower]), Array1::from_vec(vec![upper]))
+            .with_initial_rho(Array1::from_vec(vec![start.clamp(lower, upper)]))
+            .with_seed_config(seed_config);
+        let mut objective = problem.build_objective(
+            (),
+            |_: &mut (), rho: &Array1<f64>| {
+                measure_jet_range_screen_jet(data, y, weights, spec, rho[0])
+                    .map(|(value, _, _)| value)
+                    .map_err(refuse)
+            },
+            |_: &mut (), rho: &Array1<f64>| {
+                let (cost, gradient, curvature) =
+                    measure_jet_range_screen_jet(data, y, weights, spec, rho[0]).map_err(refuse)?;
+                Ok(OuterEval {
+                    cost,
+                    gradient: Array1::from_vec(vec![gradient]),
+                    hessian: HessianValue::Dense(Array2::from_elem((1, 1), curvature)),
+                    inner_beta_hint: None,
+                })
+            },
+            None::<fn(&mut ())>,
+            None::<fn(&mut (), &Array1<f64>) -> Result<gam_problem::EfsEval, EstimationError>>,
+        );
+        let Ok(result) = problem.run(&mut objective, "measure-jet representer range screen") else {
+            continue;
         };
-        scored.push((next_ln, value));
-        if value >= edge.1 {
-            break;
+        if !result.converged() {
+            continue;
+        }
+        let (ln_ell, value) = (result.rho[0], result.final_value);
+        if ln_ell.is_finite()
+            && value.is_finite()
+            && best.is_none_or(|(_, incumbent)| value < incumbent)
+        {
+            best = Some((ln_ell, value));
         }
     }
-    let argmin = (0..scored.len()).fold(0usize, |best, idx| {
-        if scored[idx].1 < scored[best].1 {
-            idx
-        } else {
-            best
-        }
-    });
-    let mut chosen = scored[argmin];
-    // One parabolic step through the bracketing triple. Cheap, deterministic,
-    // and kept only if it actually scores better than the node it refines.
-    if argmin > 0 && argmin + 1 < scored.len() {
-        let (x0, f0) = scored[argmin - 1];
-        let (x1, f1) = scored[argmin];
-        let (x2, f2) = scored[argmin + 1];
-        let denominator = (x1 - x0) * (f1 - f2) - (x1 - x2) * (f1 - f0);
-        if denominator.abs() > f64::EPSILON {
-            let numerator = (x1 - x0) * (x1 - x0) * (f1 - f2) - (x1 - x2) * (x1 - x2) * (f1 - f0);
-            let vertex = x1 - 0.5 * numerator / denominator;
-            if vertex.is_finite() && vertex > x0 && vertex < x2 {
-                if let Some(value) =
-                    measure_jet_range_screen_value(data, y, weights, spec, vertex.exp())
-                    && value < chosen.1
-                {
-                    chosen = (vertex, value);
-                }
-            }
-        }
-    }
-    Some(chosen.0.exp())
+    best.map(|(ln_ell, _)| ln_ell.exp())
 }
 
 /// The screening response for the SLOPE surface of a marginal-slope family.

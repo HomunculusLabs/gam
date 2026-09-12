@@ -4114,5 +4114,13 @@
     ],
     "reason": "User directive 2026-09-12: delete public API that no product uses (#2899). Three gam-solve items have no caller in gam-cli, gam-pyffi, gamfit, examples, another crate's production code or any test. is_fixed_point was a predicate that kind_label superseded. SchurPreconditionerKind was an enum that nothing constructs or matches. BlockPenaltyOp was a BetaPenaltyOp implementation that nothing constructs. The seven fn identities in penalty_ops.rs are the method declarations of BlockPenaltyOp's BetaPenaltyOp impl; the same methods on the surviving operators are untouched.",
     "evidence": "The prune-api-c census over ac3c0b807 (/scratch.global/sauer354/pool/prune-api-c/census_direct.tsv) classes all three DELETE with no references outside their own definitions or impls. At 6272b6588, git grep -w finds is_fixed_point only at its definition and in two comments reworded here. It finds SchurPreconditionerKind only in reduced_solve.rs: the definition, a section header and a doc link, the last two reworded here. It finds BlockPenaltyOp only at its definition, its impl, and two ArrowSchurSystem doc lines reworded here. The item list follows source_removal_guard.py's ITEM rule over the removed hunks."
+  },
+  {
+    "base": "95175c26251e3328f55ea9004a11d94eb543f87a",
+    "items": [
+      "crates/gam-models/src/fit_orchestration/drivers/measure_jet_range_seed.rs:fn:measure_jet_range_screen_value"
+    ],
+    "reason": "SPEC rules 18 and 19 (#2902): the measure-jet representer range screen now minimizes the profiled Gaussian REML over its derived ln-range window with the outer engine on the exact ln ℓ jet (measure_jet_range_screen_jet), starting from each band node and keeping only certified searches. The value-only evaluator that fed the node scan, the upward walk and the parabolic step has no remaining caller.",
+    "evidence": "At the base, git grep -n measure_jet_range_screen_value finds the declaration and its three call sites (the node scan, the walk and the parabolic refinement), all inside screen_measure_jet_range in crates/gam-models/src/fit_orchestration/drivers/measure_jet_range_seed.rs, and nothing outside that file. This change replaces all three with OuterProblem searches on measure_jet_range_screen_jet, which computes the same criterion and its ln ℓ derivatives. The item list applies source_removal_guard.py's ITEM regex by hand, and the guard was not run locally (user directive: no local runs). Compile is covered by the lead's shared tip check."
   }
 ]
