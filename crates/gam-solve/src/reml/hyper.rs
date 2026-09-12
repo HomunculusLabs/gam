@@ -1953,13 +1953,19 @@ impl<'a> RemlState<'a> {
             // --- ld_s_j: penalty pseudo-logdet derivative ---
             // ld_s_j = tr(S⁺ S_{τ_j}).
             let ld_s_j = penalty_logdet.tau_gradient_component(&s_tau_j);
-            Self::ensure_transformed_x_tau_dense(
-                &mut x_tau_j_dense,
-                &hyper_dirs[j],
-                &reparam_result.qs,
-                free_basis_opt.as_ref(),
-            )?;
-            let tk_x_fixed = x_tau_j_dense.take();
+            // The Tierney-Kadane correction reads this carrier only under a robust
+            // Jeffreys link, the same condition that builds `firth_op`.
+            let tk_x_fixed = if firth_op.is_some() {
+                Self::ensure_transformed_x_tau_dense(
+                    &mut x_tau_j_dense,
+                    &hyper_dirs[j],
+                    &reparam_result.qs,
+                    free_basis_opt.as_ref(),
+                )?;
+                x_tau_j_dense.take()
+            } else {
+                None
+            };
 
             let stored_g_j = if let Some(firth_g_j) = firth_g_j.as_ref() {
                 -&g_j - &(2.0 * firth_g_j)
@@ -2393,7 +2399,9 @@ impl<'a> RemlState<'a> {
                 is_penalty_like: dir.is_penalty_like,
                 firth_g: firth_g_j,
                 tk_eta_fixed: Some(x_tau_beta_j),
-                tk_x_fixed: Some(dir.x_tau_dense()),
+                // Read by the Tierney-Kadane correction only under a robust Jeffreys
+                // link, the same condition that builds `firth_op_original`.
+                tk_x_fixed: firth_op_original.as_ref().map(|_| dir.x_tau_dense()),
             });
         }
 
