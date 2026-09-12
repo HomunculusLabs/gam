@@ -4951,6 +4951,8 @@ fn rust_extension(module: &Bound<'_, PyModule>) -> PyResult<()> {
         required_saved_model_payload_string,
         module
     )?)?;
+    module.add_function(wrap_pyfunction!(saved_model_kind, module)?)?;
+    module.add("RESPONSE_GEOMETRY_SCHEMA", RESPONSE_GEOMETRY_SCHEMA)?;
     module.add_function(wrap_pyfunction!(saved_model_predict_class_name, module)?)?;
     module.add_function(wrap_pyfunction!(saved_model_class_traits, module)?)?;
     module.add_function(wrap_pyfunction!(build_extend_group_payload_json, module)?)?;

@@ -1259,10 +1259,7 @@ def model_from_dict(payload: Any) -> Any:
 def load(path: str | Path) -> Any:
     """Load a fitted model previously written with :func:`gamfit.save`.
 
-    Auto-detects format: JSON files containing a ``gamfit.ManifoldSAE/v6``
-    schema header are returned as :class:`gamfit.ManifoldSAE`; everything
-    else is treated as a binary :class:`Model` archive and dispatched to
-    :func:`loads`.
+    Reads the file and dispatches through :func:`loads`.
 
     Parameters
     ----------
@@ -1271,7 +1268,7 @@ def load(path: str | Path) -> Any:
 
     Returns
     -------
-    Model or ManifoldSAE
+    Model, MultinomialModel, ResponseGeometryModel, ManifoldSAE or ManifoldSAESupport
         Fitted model ready for prediction.
 
     Examples
@@ -1279,16 +1276,7 @@ def load(path: str | Path) -> Any:
     >>> model = gamfit.load("model.gam")
     >>> model.predict(test_df)
     """
-    raw = Path(path).read_bytes()
-    # Only manifold-SAE payloads are JSON carrying a schema tag. Both the dense
-    # and the overcomplete tag begin "gamfit.ManifoldSAE", so the sniff selects
-    # JSON and the *exact* tag then selects the class -- a substring test sent
-    # overcomplete payloads to a parser pinned to /v6, which claimed the file
-    # and then rejected it (#2567).
-    head = raw[:256].lstrip()
-    if head.startswith(b"{") and b"gamfit.ManifoldSAE" in raw[:512]:
-        return model_from_dict(json.loads(raw.decode("utf-8")))
-    return loads(raw)
+    return loads(Path(path).read_bytes())
 
 
 def save(model: Any, path: str | Path) -> None:
@@ -1306,8 +1294,12 @@ def save(model: Any, path: str | Path) -> None:
     saver(path)
 
 
-def loads(model_bytes: bytes) -> Model:
-    """Load a fitted :class:`Model` from an in-memory bytes payload.
+def loads(model_bytes: bytes) -> Any:
+    """Load a fitted model from an in-memory bytes payload.
+
+    The Rust ``saved_model_kind`` reads the payload header and selects the
+    loader: manifold SAE (the ``schema`` names the class, #2567), response
+    geometry, multinomial, or the scalar :class:`Model` archive.
 
     Parameters
     ----------
@@ -1317,7 +1309,7 @@ def loads(model_bytes: bytes) -> Model:
 
     Returns
     -------
-    Model
+    Model, MultinomialModel, ResponseGeometryModel, ManifoldSAE or ManifoldSAESupport
         Fitted model ready for prediction.
 
     Raises
@@ -1330,36 +1322,21 @@ def loads(model_bytes: bytes) -> Model:
     >>> with open("model.gam", "rb") as fh:
     ...     model = gamfit.loads(fh.read())
     """
-    # Response-geometry payloads are a small JSON container (schema-tagged) that
-    # embeds the constituent tangent `Model` archives plus the base point /
-    # coordinate chart / geometry metadata (#2114). They are neither a scalar
-    # `Model` archive nor a multinomial payload, so detect them first by the
-    # schema tag and reconstruct a `ResponseGeometryModel`.
-    head = model_bytes[:256].lstrip()
-    if head.startswith(b"{") and b"gamfit.ResponseGeometryModel" in model_bytes[:512]:
-        payload = json.loads(model_bytes.decode("utf-8"))
-        if str(payload.get("schema", "")).startswith("gamfit.ResponseGeometryModel/"):
-            return _reconstruct_response_geometry(payload)
-    # Multinomial-logit payloads carry a different on-disk schema than the
-    # scalar `Model` archive (`load_model` rejects them with a missing
-    # `model_type` field). Detect them positively: only a genuine multinomial
-    # payload deserialises through the multinomial-metadata FFI into a dict
-    # carrying `class_levels`. If that succeeds, reconstruct a
-    # `MultinomialModel`; otherwise fall through to the scalar `Model` path so a
-    # genuinely malformed payload still raises the mapped GamError there.
-    multinomial_metadata = None
-    try:
-        candidate = rust_module().multinomial_model_metadata_pyfunc(model_bytes)
-        if isinstance(candidate, dict) and "class_levels" in candidate:
-            multinomial_metadata = candidate
-    except Exception:
-        multinomial_metadata = None
-    if multinomial_metadata is not None:
+    kind = rust_module().saved_model_kind(model_bytes)
+    if kind == "manifold_sae":
+        return model_from_dict(json.loads(model_bytes.decode("utf-8")))
+    if kind == "response_geometry":
+        return _reconstruct_response_geometry(json.loads(model_bytes.decode("utf-8")))
+    if kind == "multinomial":
         from ._model import MultinomialModel  # local import avoids cycle
 
+        try:
+            metadata = rust_module().multinomial_model_metadata_pyfunc(model_bytes)
+        except Exception as exc:
+            raise map_exception(exc) from exc
         return MultinomialModel(
             _model_bytes=model_bytes,
-            _training_table_kind=str(multinomial_metadata["training_table_kind"]),
+            _training_table_kind=str(metadata["training_table_kind"]),
         )
     try:
         training_table_kind = rust_module().required_saved_model_payload_string(

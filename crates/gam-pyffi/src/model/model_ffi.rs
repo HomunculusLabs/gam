@@ -1811,6 +1811,47 @@ fn required_saved_model_payload_string(model_bytes: Vec<u8>, key: &str) -> PyRes
     required_saved_model_payload_string_value(&model_bytes, key)
 }
 
+/// Schema tag of the response-geometry saved-model container (#2114).
+pub(crate) const RESPONSE_GEOMETRY_SCHEMA: &str = "gamfit.ResponseGeometryModel/v1";
+
+/// The kind of a saved gamfit model payload, read from its JSON header. A
+/// `gamfit.ManifoldSAE` schema of any version is `"manifold_sae"`, so a stale
+/// version reaches its own refusal; the response-geometry container is
+/// `"response_geometry"`; the multinomial envelope is `"multinomial"`. Every
+/// other payload, including bytes that are not JSON, is `"scalar"`, whose
+/// loader reports what is wrong with it.
+#[pyfunction]
+fn saved_model_kind(model_bytes: Vec<u8>) -> &'static str {
+    #[derive(Deserialize)]
+    struct SavedModelHeader {
+        #[serde(default)]
+        schema: Option<String>,
+        #[serde(default)]
+        model_class: Option<String>,
+    }
+    let Ok(header) = serde_json::from_slice::<SavedModelHeader>(&model_bytes) else {
+        return "scalar";
+    };
+    let schema_family = header
+        .schema
+        .as_deref()
+        .and_then(|schema| schema.split_once('/'))
+        .map(|(family, _)| family);
+    let manifold_family = crate::manifold::manifold_sae_payload::SCHEMA_TAG
+        .split_once('/')
+        .map(|(family, _)| family);
+    if schema_family.is_some() && schema_family == manifold_family {
+        return "manifold_sae";
+    }
+    if header.schema.as_deref() == Some(RESPONSE_GEOMETRY_SCHEMA) {
+        return "response_geometry";
+    }
+    if header.model_class.as_deref() == Some(gam::families::multinomial::MULTINOMIAL_MODEL_CLASS) {
+        return "multinomial";
+    }
+    "scalar"
+}
+
 /// The canonical fine-grained prediction class label for a saved model — e.g.
 /// `"bernoulli marginal-slope"`, `"survival marginal-slope"`, `"competing
 /// risks survival"`, `"latent survival"`, `"gaussian location-scale"`,

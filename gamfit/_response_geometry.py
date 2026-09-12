@@ -465,7 +465,7 @@ class ResponseGeometryModel:
                 "fit": {str(k): _jsonable(v) for k, v in f.fit.items()},
             }
         return {
-            "schema": _RESPONSE_GEOMETRY_SCHEMA,
+            "schema": rust_module().RESPONSE_GEOMETRY_SCHEMA,
             "response_geometry": self.response_geometry,
             "response_columns": list(self.response_columns),
             "base_point": [
@@ -495,9 +495,6 @@ class ResponseGeometryModel:
         from pathlib import Path
 
         Path(path).write_bytes(self.dumps())
-
-
-_RESPONSE_GEOMETRY_SCHEMA = "gamfit.ResponseGeometryModel/v1"
 
 
 def fit_response_geometry(
