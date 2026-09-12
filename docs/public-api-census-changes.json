@@ -2289,5 +2289,13 @@
     },
     "reason": "prune-api-b product-use sweep (#2899) and #2829 retirement, per api2829. The public methods of the unused 2-D grid spline engine (build, build_multi, num_coeffs, lower_corner, cell_widths, num_rows, num_responses, penalty_value, fit_at, fit_reml, posterior, to_state, from_state, predict) and axis_basis_at are removed with the engine; cholesky_logdet and chol_solve, which gam-solve residual_cascade.rs imports, stay.",
     "evidence": "scripts/public_api_census.py over probe commit 385f0b1f2 on base d2968d715 (MSI acn112, python3.12; sliceI.census.out) reports exactly these fifteen crates/gam-terms/src/grid_spline_2d.rs identities, one declaration each. Seven are #2829 restored-in-place rows relabeled retired-no-product-user in docs/public-api-2829-disposition.tsv in the same commit."
+  },
+  {
+    "base": "1105c048f7c180f95cc76db43b2b07f3ffc2b8f0",
+    "removed": {
+      "crates/gam-solve/src/reml/jeffreys_subspace/mixed.rs::completion_second_drift_frozen": 1
+    },
+    "reason": "#2905: the production completion_second closure in gam-custom-family prices D² completion through completion_second_drift_matrix, which covers the frozen policy and the gate/floor motion together. completion_second_drift_frozen, the frozen-policy half as a vector, has no product caller. It is deleted with its test-only harness and its two central-difference tests.",
+    "evidence": "At the base, git grep -n completion_second_drift_frozen over the whole repository finds the pub fn declaration in crates/gam-solve/src/reml/jeffreys_subspace/mixed.rs, one call in the harness jeffreys_frozen_completion_second_drift_error_2894 (inside mod tests of crates/gam-solve/src/reml/jeffreys_subspace.rs, deleted here), and one historical mention in docs/source-removal-changes.json. It is declared once, so the census falls by one. Not run through public_api_census.py locally (user directive)."
   }
 ]

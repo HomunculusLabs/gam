@@ -425,95 +425,10 @@ impl JeffreysHphiDriftBase {
         Ok(result)
     }
 
-    /// `D_w` of [`Self::completion_drift_action`] along a second coefficient direction,
-    /// with `u` and `v` held fixed (gam#2894): the frozen-policy half of
-    /// `D² completion[u, w]·v`. The frozen completion is `−½·g·⟨K, H²[v, e_a]⟩`, so
-    ///
-    /// ```text
-    /// −½[ g_uw⟨K,A⟩ + g_u⟨K_w,A⟩ + g_w⟨K_u,A⟩ + g⟨K_uw,A⟩
-    ///     + g_u⟨K,T_vw⟩ + g_w⟨K,T_uv⟩ + g⟨K_u,T_vw⟩ + g⟨K_w,T_uv⟩ + g⟨K,Q⟩ ]
-    /// ```
-    ///
-    /// with `A = H²[v,e_a]`, `T_uv = H³[u,v,e_a]`, `T_vw = H³[v,w,e_a]`,
-    /// `Q = H⁴[u,v,w,e_a]` in the base eigenbasis, `⟨K,X⟩ = Σ_i f(λ_i)·X_ii`, and `K_u`,
-    /// `K_uw` the first and second Fréchet derivatives of the capped inverse, floor
-    /// motion included. The gate/floor motion drift is not part of this half.
-    pub fn completion_second_drift_frozen(
-        &self,
-        pert_u: &Array2<f64>,
-        pert_w: &Array2<f64>,
-        pert_uw: &Array2<f64>,
-        axes_v: &[Array2<f64>],
-        moving_uv: &[Array2<f64>],
-        moving_vw: &[Array2<f64>],
-        fourth_uvw: &[Array2<f64>],
-    ) -> Result<Array1<f64>, String> {
-        if [pert_u, pert_w, pert_uw].iter().any(|h| h.dim() != (self.p, self.p)) {
-            return Err("Jeffreys completion second drift information dimension mismatch".into());
-        }
-        self.refuse_inverse_kernel_branch_boundary()?;
-        let basis = self.ambient_eigenbasis.view();
-        let e_u = symmetric_basis_contraction(pert_u.view(), basis);
-        let e_w = symmetric_basis_contraction(pert_w.view(), basis);
-        let e_uw = symmetric_basis_contraction(pert_uw.view(), basis);
-        let a = self.rotate_axis_rows(axes_v)?;
-        let t_uv = self.rotate_axis_rows(moving_uv)?;
-        let t_vw = self.rotate_axis_rows(moving_vw)?;
-        let q = self.rotate_axis_rows(fourth_uvw)?;
-        let (m, p) = (self.m, self.p);
-        let FrozenSecondDriftWeights {
-            gate_u: g_u,
-            gate_w: g_w,
-            gate_uw: g_uw,
-            kernel,
-            weight_u,
-            weight_w,
-            weight_uw,
-        } = self.frozen_second_drift_weights(&e_u, &e_w, &e_uw);
-        let g = self.gate_weight;
-        let contract_diagonal = |rows: &Array2<f64>, axis: usize| {
-            (0..m).map(|i| kernel[i] * rows[[axis, i * m + i]]).sum::<f64>()
-        };
-        let contract_full = |weight: &Array2<f64>, rows: &Array2<f64>, axis: usize| {
-            let mut sum = 0.0_f64;
-            for i in 0..m {
-                for j in 0..m {
-                    sum += weight[[i, j]] * rows[[axis, i * m + j]];
-                }
-            }
-            sum
-        };
-        let mut result = Array1::<f64>::zeros(p);
-        for axis in 0..p {
-            let k_a = contract_diagonal(&a, axis);
-            let k_t_uv = contract_diagonal(&t_uv, axis);
-            let k_t_vw = contract_diagonal(&t_vw, axis);
-            let k_q = contract_diagonal(&q, axis);
-            let ku_a = contract_full(&weight_u, &a, axis);
-            let kw_a = contract_full(&weight_w, &a, axis);
-            let kuw_a = contract_full(&weight_uw, &a, axis);
-            let ku_t_vw = contract_full(&weight_u, &t_vw, axis);
-            let kw_t_uv = contract_full(&weight_w, &t_uv, axis);
-            result[axis] = -0.5
-                * (g_uw * k_a
-                    + g_u * kw_a
-                    + g_w * ku_a
-                    + g * kuw_a
-                    + g_u * k_t_vw
-                    + g_w * k_t_uv
-                    + g * ku_t_vw
-                    + g * kw_t_uv
-                    + g * k_q);
-        }
-        if result.iter().any(|v| !v.is_finite()) {
-            return Err("Jeffreys completion second drift produced a nonfinite response".into());
-        }
-        Ok(result)
-    }
-
     /// The gate and floor channels along `u`, `w` and `(u, w)`, and the first and second
-    /// Fréchet weights of the capped inverse in the base eigenbasis: everything the frozen
-    /// second completion drift reads from two directions (gam#2894).
+    /// Fréchet weights of the capped inverse in the base eigenbasis: everything the
+    /// frozen-policy half of `completion_second_drift_matrix` reads from two directions
+    /// (gam#2894).
     fn frozen_second_drift_weights(
         &self,
         e_u: &Array2<f64>,
