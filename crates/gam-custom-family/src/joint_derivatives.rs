@@ -369,14 +369,72 @@ pub(crate) struct JeffreysHphiDriftBatchFn {
             + Send
             + Sync,
     >,
+    /// `D_β completion[δ]` along each direction, present exactly when the criterion
+    /// prices the complete Jeffreys curvature `H_Φ + completion` (gam#2894).
+    pub(crate) completion_first: Option<CompletionDriftFn>,
+    /// `D² completion[u, v]` for each pair, present with `completion_first`.
+    pub(crate) completion_second: Option<CompletionSecondDriftFn>,
 }
 
-impl std::ops::Deref for JeffreysHphiDriftBatchFn {
-    type Target =
-        dyn Fn(&[Array1<f64>]) -> Result<Vec<Option<Array2<f64>>>, CustomFamilyError> + Send + Sync;
+/// `D_β completion[δ]` for many directions (gam#2894).
+pub(crate) type CompletionDriftFn =
+    Arc<dyn Fn(&[Array1<f64>]) -> Result<Vec<Array2<f64>>, CustomFamilyError> + Send + Sync>;
 
-    fn deref(&self) -> &Self::Target {
-        self.first.as_ref()
+/// `D² completion[u, v]` for many pairs (gam#2894).
+pub(crate) type CompletionSecondDriftFn = Arc<
+    dyn Fn(&[(Array1<f64>, Array1<f64>)]) -> Result<Vec<Array2<f64>>, CustomFamilyError>
+        + Send
+        + Sync,
+>;
+
+impl JeffreysHphiDriftBatchFn {
+    /// Drift of the criterion's Jeffreys curvature along each `δβ`: `D_β H_Φ[δ]`, plus
+    /// `D_β completion[δ]` when the criterion prices the completion (gam#2894).
+    pub(crate) fn criterion_first(
+        &self,
+        deltas: &[Array1<f64>],
+    ) -> Result<Vec<Option<Array2<f64>>>, CustomFamilyError> {
+        let mut drifts = (self.first)(deltas)?;
+        if let Some(completion_first) = self.completion_first.as_ref() {
+            let completion = completion_first(deltas)?;
+            if completion.len() != drifts.len() {
+                return Err(CustomFamilyError::trial_point(format!(
+                    "priced Jeffreys completion drift returned {} results for {} directions",
+                    completion.len(),
+                    drifts.len()
+                )));
+            }
+            for (drift, completion) in drifts.iter_mut().zip(completion) {
+                match drift {
+                    Some(matrix) => *matrix += &completion,
+                    None => *drift = Some(completion),
+                }
+            }
+        }
+        Ok(drifts)
+    }
+
+    /// Mixed second drift of the criterion's Jeffreys curvature for each pair: `D² H_Φ`,
+    /// plus `D² completion` when the criterion prices the completion (gam#2894).
+    pub(crate) fn criterion_second(
+        &self,
+        pairs: &[(Array1<f64>, Array1<f64>)],
+    ) -> Result<Vec<Array2<f64>>, CustomFamilyError> {
+        let mut drifts = (self.second)(pairs)?;
+        if let Some(completion_second) = self.completion_second.as_ref() {
+            let completion = completion_second(pairs)?;
+            if completion.len() != drifts.len() {
+                return Err(CustomFamilyError::trial_point(format!(
+                    "priced Jeffreys completion second drift returned {} results for {} pairs",
+                    completion.len(),
+                    drifts.len()
+                )));
+            }
+            for (drift, completion) in drifts.iter_mut().zip(completion) {
+                *drift += &completion;
+            }
+        }
+        Ok(drifts)
     }
 }
 
@@ -423,7 +481,7 @@ impl<'a> JeffreysHphiAwareJointDerivatives<'a> {
         v_ks: &[Array1<f64>],
     ) -> Result<Vec<Option<Array2<f64>>>, CustomFamilyError> {
         let deltas: Vec<Array1<f64>> = v_ks.iter().map(|v| v.mapv(|value| -value)).collect();
-        (self.drift)(&deltas)
+        self.drift.criterion_first(&deltas)
     }
 
     /// `D_β H_Φ[δβ]` for a SINGLE mode-response direction. Routes through the
@@ -449,7 +507,7 @@ impl<'a> JeffreysHphiAwareJointDerivatives<'a> {
         &self,
         delta: &Array1<f64>,
     ) -> Result<Option<Array2<f64>>, CustomFamilyError> {
-        let mut out = (self.drift)(std::slice::from_ref(delta))?;
+        let mut out = self.drift.criterion_first(std::slice::from_ref(delta))?;
         Ok(out.pop().flatten())
     }
 }
@@ -607,7 +665,7 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
             .map_err(|error| error.to_string())?;
         // D²Hφ[-v_k,-v_l] has two minus signs, so the bilinear callback can
         // consume the original response vectors directly.
-        let mut mixed = (self.drift.second)(&[(v_k.clone(), v_l.clone())])
+        let mut mixed = self.drift.criterion_second(&[(v_k.clone(), v_l.clone())])
             .map_err(|error| error.to_string())?;
         if mixed.len() != 1 {
             return Err("Jeffreys mixed drift did not return exactly one matrix".to_string());
@@ -632,12 +690,12 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
         // is prepared once for the whole outer-Hessian assembly rather than once
         // per pair — the same amortization the first-order path relies on.
         let deltas: Vec<Array1<f64>> = triples.iter().map(|(_, _, u_kl)| u_kl.clone()).collect();
-        let mut drifts = (self.drift)(&deltas).map_err(|error| error.to_string())?;
+        let mut drifts = self.drift.criterion_first(&deltas).map_err(|error| error.to_string())?;
         let pairs: Vec<_> = triples
             .iter()
             .map(|(u, v, _)| (u.clone(), v.clone()))
             .collect();
-        let mixed = (self.drift.second)(&pairs).map_err(|error| error.to_string())?;
+        let mixed = self.drift.criterion_second(&pairs).map_err(|error| error.to_string())?;
         if mixed.len() != drifts.len() {
             return Err("Jeffreys mixed drift batch length mismatch".to_string());
         }
@@ -685,7 +743,7 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
         Some(OuterHessianDerivativeKernel::Callback {
             first: Arc::new(move |direction| {
                 let inner = first(direction)?;
-                let mut drift = (drift_first)(std::slice::from_ref(direction))
+                let mut drift = drift_first.criterion_first(std::slice::from_ref(direction))
                     .map_err(|error| error.to_string())?;
                 if drift.len() != 1 {
                     return Err("Jeffreys first callback batch length mismatch".to_string());
@@ -694,7 +752,7 @@ impl HessianDerivativeProvider for JeffreysHphiAwareJointDerivatives<'_> {
             }),
             second: Arc::new(move |u, v| {
                 let inner = second(u, v)?;
-                let mut drift = (drift_second.second)(&[(u.clone(), v.clone())])
+                let mut drift = drift_second.criterion_second(&[(u.clone(), v.clone())])
                     .map_err(|error| error.to_string())?;
                 if drift.len() != 1 {
                     return Err("Jeffreys second callback batch length mismatch".to_string());
@@ -960,6 +1018,8 @@ mod jeffreys_drift_composition_tests {
                     .map(|(u, _)| Array2::zeros((u.len(), u.len())))
                     .collect())
             }),
+            completion_first: None,
+            completion_second: None,
         }
     }
 
@@ -990,6 +1050,39 @@ mod jeffreys_drift_composition_tests {
             "the second-order Jeffreys drift must be taken along `u_kl` itself; \
              `-u_kl` would be the same magnitude with the wrong sign"
         );
+    }
+
+    /// gam#2894: a criterion priced on the complete Jeffreys curvature adds the completion's
+    /// β-drift to `D_β H_Φ` along the same negated mode response and the same unnegated second
+    /// response, and adds its second drift to the mixed Jeffreys drift.
+    #[test]
+    fn priced_completion_drifts_ride_with_the_jeffreys_drifts_2894() {
+        let mut drift = identity_drift();
+        let completion_first: CompletionDriftFn = Arc::new(|deltas: &[Array1<f64>]| {
+            Ok(deltas
+                .iter()
+                .map(|delta| Array2::from_diag(&delta.mapv(|value| 2.0 * value)))
+                .collect())
+        });
+        let completion_second: CompletionSecondDriftFn =
+            Arc::new(|pairs: &[(Array1<f64>, Array1<f64>)]| {
+                Ok(pairs.iter().map(|(u, v)| Array2::from_diag(&(u * v))).collect())
+            });
+        drift.completion_first = Some(completion_first);
+        drift.completion_second = Some(completion_second);
+        let composed = JeffreysHphiAwareJointDerivatives::new(Box::new(SilentInner), drift, 2);
+        let v_k = array![0.25, -1.5];
+        let first = composed
+            .hessian_derivative_correction(&v_k)
+            .expect("the composed correction evaluates")
+            .expect("the drifts contribute");
+        assert_eq!(first, Array2::from_diag(&array![-0.75, 4.5]));
+        let (v_l, u_kl) = (array![-0.75, 0.5], array![2.0, -3.0]);
+        let second = composed
+            .hessian_second_derivative_correction(&v_k, &v_l, &u_kl)
+            .expect("the composed correction evaluates")
+            .expect("the drifts contribute");
+        assert_eq!(second, Array2::from_diag(&array![5.8125, -9.75]));
     }
 
     #[test]

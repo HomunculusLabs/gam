@@ -928,9 +928,10 @@ pub(crate) fn joint_outer_evaluate(
     // `H_Φ` and its (optional) second-order completion, all from the same term
     // evaluation. The value is folded into the LAML cost (`cost −= Φ`) so the
     // outer criterion is the Laplace approximation of the SAME Firth-augmented
-    // objective the inner Newton converged on; the completion is folded into
-    // the mode-response OPERATOR only (see
-    // `custom_family_outer_jeffreys_hphi` for the chain-rule split) (gam#979).
+    // objective the inner Newton converged on. The completion is folded into
+    // the mode-response operator, and into the criterion when the family
+    // supplies its β-drifts (see `custom_family_outer_jeffreys_hphi`) (gam#979,
+    // gam#2894).
     robust_jeffreys_phi_hphi: Option<(f64, Array2<f64>, Option<Array2<f64>>)>,
     // Companion mode-response drift `D_β H_Φ[δβ]` for the outer gradient's trace
     // identity. `Some` exactly when `robust_jeffreys_phi_hphi` is `Some` (same
@@ -955,7 +956,8 @@ pub(crate) fn joint_outer_evaluate(
     // second-order completion when available — the TRUE Hessian of the
     // Φ-augmented inner objective, which is what `v_k = ∂β̂/∂ρ_k` solves
     // against. The logdet VALUE and its trace kernel keep the bare `H_Φ`
-    // (value↔drift consistency); see `custom_family_outer_jeffreys_hphi`.
+    // unless the projected criterion prices the completion together with its
+    // β-drifts (gam#2894); see `custom_family_outer_jeffreys_hphi`.
     //
     // #2765: the log-determinant operator must NEVER carry a term whose drift
     // the gradient cannot produce — on ANY route, not merely on the routes that
@@ -1008,6 +1010,34 @@ pub(crate) fn joint_outer_evaluate(
         .as_ref()
         .map(|hphi| hphi.mapv(|value| rho_curvature_scale * value));
 
+    // gam#2894 (option A). The projected route owns the scalar criterion and its traces, so
+    // it prices `½·log|Zᵀ M Z|₊` on the inner mode's active face (`Z = I` when no row is
+    // active). `M` carries the complete Jeffreys curvature `H_Φ + completion` when the family
+    // supplies the completion's β-drifts, so the value, its traces and the mode response all
+    // read `M_true`. An explicit ψ-motion of the completion has no trace derivative here, so a
+    // ψ coordinate that moves the completion keeps `M_DD` in the criterion, and the
+    // completion then stays in the IFT operator alone (#2612).
+    let projected_criterion = project_hessian_logdet
+        && include_logdet_h
+        && include_logdet_s
+        && pseudo_logdet_mode == PseudoLogdetMode::Smooth;
+    let completion_priced = projected_criterion
+        && robust_jeffreys_completion.is_some()
+        && ext_bundle
+            .as_ref()
+            .map_or(true, |bundle| bundle.completion_psi.is_none())
+        && jeffreys_hphi_drift.as_ref().is_some_and(|drift| {
+            drift.completion_first.is_some() && drift.completion_second.is_some()
+        });
+    let scaled_criterion_jeffreys: Option<Array2<f64>> =
+        match (robust_jeffreys_hphi.as_ref(), robust_jeffreys_completion.as_ref()) {
+            (Some(hphi), Some(completion)) if completion_priced => {
+                Some((hphi + completion).mapv(|value| rho_curvature_scale * value))
+            }
+            _ => scaled_robust_jeffreys_hphi,
+        };
+    let face_tangent = criterion_face_tangent(inner)?;
+
     // Build derivative provider from the caller-supplied closures.
     let base_provider_box: Box<dyn HessianDerivativeProvider + '_> =
         if let (Some(owned_dh), Some(owned_d2h)) = (owned_compute_dh, owned_compute_d2h) {
@@ -1036,6 +1066,10 @@ pub(crate) fn joint_outer_evaluate(
     // exists for. `None` ⇒ provider used unwrapped (byte-identical released path).
     let provider_box: Box<dyn HessianDerivativeProvider + '_> = match jeffreys_hphi_drift {
         Some(mut drift) => {
+            if !completion_priced {
+                drift.completion_first = None;
+                drift.completion_second = None;
+            }
             drift.completion_psi = ext_bundle.as_ref().and_then(|bundle| bundle.completion_psi.clone());
             drift.response_scale = rho_curvature_scale;
             Box::new(JeffreysHphiAwareJointDerivatives::new(
@@ -1314,11 +1348,10 @@ pub(crate) fn joint_outer_evaluate(
     // `v_k = ∂β̂/∂ρ_k` is a property of the inner stationarity system, so it
     // solves against `M_true = H + S_λ + H_Φ + completion` — the exact Hessian
     // of the Φ-augmented objective the inner Newton converged on. The logdet
-    // VALUE and its trace kernel must instead share ONE object, and that object
-    // is the divided-difference `M_DD = H + S_λ + H_Φ`: folding the completion
-    // into the scalar would require the completion's own β-drift (third
-    // directional derivatives no family exposes) to keep the trace consistent
-    // with it.
+    // VALUE and its trace kernel must instead share ONE object whose β-drift the
+    // provider supplies: `M_true` on the active face when the family supplies the
+    // completion's drifts (gam#2894), and the divided-difference
+    // `M_DD = H + S_λ + H_Φ` otherwise.
     //
     // Under the projected/`Smooth` route those two roles are ALREADY separate —
     // the projected kernel owns the value and the traces, so `hessian_op` is
@@ -1463,19 +1496,16 @@ pub(crate) fn joint_outer_evaluate(
     // (`rank == 0`, or every eigenpair below threshold) the old code still
     // applied `0 − hop.logdet()` and silently deleted `½log|H_pen|` from the
     // cost while the gradient kept its `½tr(H⁻¹∂H)` derivative.
-    let penalty_subspace_trace = if project_hessian_logdet
-        && include_logdet_h
-        && include_logdet_s
-        && pseudo_logdet_mode == PseudoLogdetMode::Smooth
-    {
+    let penalty_subspace_trace = if projected_criterion {
         let (projected_logdet, kernel) = joint_penalty_subspace_trace_parts(
             &h_joint_unpen,
             ranges,
             &scaled_s_lambdas,
             total,
             scaled_joint_trace_diagonal_ridge,
-            scaled_robust_jeffreys_hphi.as_ref(),
+            scaled_criterion_jeffreys.as_ref(),
             scaled_joint_penalty.as_ref(),
+            face_tangent.as_ref(),
         )?;
         kernel.map(|mut kernel| {
             kernel.logdet_correction = projected_logdet - hessian_op.logdet();
@@ -1898,6 +1928,7 @@ pub(crate) fn joint_outer_evaluate_efs(
             scaled_joint_trace_diagonal_ridge,
             None,
             scaled_joint_penalty.as_ref(),
+            criterion_face_tangent(inner)?.as_ref(),
         )?;
         kernel.map(|mut kernel| {
             kernel.logdet_correction = projected_logdet - hessian_op.logdet();
@@ -1931,6 +1962,24 @@ pub(crate) fn joint_outer_evaluate_efs(
         provider_box,
         ext_bundle.map(|bundle| bundle.scaled(rho_curvature_scale)),
     )
+}
+
+/// Orthonormal tangent `Z` of the inner mode's active constraint face (gam#2894), or `None`
+/// when no row is active. A fully pinned face keeps the full-space criterion: it has no
+/// tangent to integrate, and its mode response is zero.
+fn criterion_face_tangent(
+    inner: &BlockwiseInnerResult,
+) -> Result<Option<Array2<f64>>, CustomFamilyError> {
+    let Some(active) = inner.active_constraints.as_deref() else {
+        return Ok(None);
+    };
+    if active.a.nrows() == 0 {
+        return Ok(None);
+    }
+    Ok(match active_constraint_tangent_geometry(&active.a)? {
+        ActiveConstraintTangentGeometry::Tangent(z) => Some(z),
+        ActiveConstraintTangentGeometry::FullyPinned => None,
+    })
 }
 
 /// Evaluate the rho-only custom-family outer objective through the unified

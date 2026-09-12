@@ -793,19 +793,18 @@ pub(crate) fn custom_family_outer_jeffreys_hphi<F: CustomFamily + Clone + Send +
     // SECOND-ORDER COMPLETION AT THE MODE (gam#979), returned SEPARATELY. The
     // divided-difference `H_Φ` omits the second-directional-Hessian remainder
     // `½ tr(K·D_ab)`, so the TRUE Hessian of the Φ-augmented inner objective
-    // is `M_true = H + S_λ + H_Φ + completion`. The chain rule fixes where
-    // each belongs in the outer gradient of `V = f(β̂) + ½log|M_DD|₊ − ½log|S|₊`:
-    //   * the logdet VALUE and its trace kernel must share ONE object
-    //     (`M_DD = H + S_λ + H_Φ`), whose drift `D_β H_Φ[v]` the wrapper
-    //     supplies exactly — folding the completion THERE would desync value
-    //     from drift (the completion's own β-motion needs third directional
-    //     derivatives no family exposes; measured: ~38% gradient / ~70%
-    //     Hessian FD bias when tried);
-    //   * the mode response `v_k = ∂β̂/∂ρ_k = −(∇²f)⁻¹ Ṡ_k β̂` must be solved
-    //     on `M_true` — it is a property of the inner stationarity system,
-    //     not of the criterion (measured: ~10% uniform FD bias when solved
-    //     on `M_DD`).
-    // Callers therefore fold this term into the mode-response OPERATOR only.
+    // is `M_true = H + S_λ + H_Φ + completion`, and the Laplace normalizer is
+    // `½log|M_true|`. The chain rule fixes where each piece belongs:
+    //   * the logdet VALUE and its trace kernel must share ONE object, and that
+    //     object's β-drift must be supplied exactly. A family declaring
+    //     `joint_jeffreys_completion_outer_derivatives_available` supplies the
+    //     completion's β-drifts, so the projected criterion prices `M_true`
+    //     (gam#2894). Every other family keeps `M_DD = H + S_λ + H_Φ`, whose drift
+    //     `D_β H_Φ[v]` the wrapper supplies (folding the completion without its
+    //     drift measured ~38% gradient / ~70% Hessian FD bias);
+    //   * the mode response `v_k = ∂β̂/∂ρ_k = −(∇²f)⁻¹ Ṡ_k β̂` is always solved
+    //     on `M_true`, since it is a property of the inner stationarity system
+    //     (measured: ~10% uniform FD bias when solved on `M_DD`).
     // The contracted trace hook may supply it in one family pass. The generic
     // pairwise `p(p+1)/2` assembly is intentionally not selected here: in
     // production large-n fits a "small" p still means hundreds of row-streamed
@@ -948,6 +947,18 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
         }).clone())
     };
     let prepare_first = Arc::clone(&prepare_base);
+    // gam#2894: a family that exposes the completion's contracted-trace derivatives can
+    // have its criterion priced on the complete curvature. The drifts read this snapshot.
+    let completion_derivatives = family
+        .joint_jeffreys_completion_outer_derivatives_available()
+        .then(|| {
+            (
+                Arc::clone(&prepare_base),
+                Arc::clone(&family_owned),
+                Arc::clone(&states_owned),
+                Arc::clone(&specs_owned),
+            )
+        });
     let completion_beta = {
         let prepare = Arc::clone(&prepare_base);
         let family = Arc::clone(&family_owned);
@@ -1154,7 +1165,176 @@ pub(crate) fn custom_family_outer_jeffreys_hphi_drift_batched<
             .into_iter()
             .collect::<Result<Vec<_>, CustomFamilyError>>()
     });
-    Ok(Some(JeffreysHphiDriftBatchFn { first, second, completion_beta, completion_psi: None, response_scale: 1.0 }))
+    // gam#2894: the criterion's completion drifts, `D_β completion[δ]` and `D² completion[u, w]`,
+    // formed on the same drift base as `H_Φ`'s.
+    let (completion_first, completion_second): (
+        Option<CompletionDriftFn>,
+        Option<CompletionSecondDriftFn>,
+    ) = match completion_derivatives {
+        Some((prepare, family, states, specs)) => {
+            let missing = |derivative: &str| {
+                CustomFamilyError::trial_point(format!(
+                    "a criterion priced on the complete Jeffreys curvature requires exact \
+                     {derivative} (gam#2894)"
+                ))
+            };
+            let completion_first: CompletionDriftFn = {
+                let (prepare, family, states, specs) = (
+                    Arc::clone(&prepare),
+                    Arc::clone(&family),
+                    Arc::clone(&states),
+                    Arc::clone(&specs),
+                );
+                Arc::new(move |deltas: &[Array1<f64>]| {
+                    let base = prepare()?;
+                    deltas
+                        .iter()
+                        .map(|delta| -> Result<Array2<f64>, CustomFamilyError> {
+                            let information = family
+                                .joint_jeffreys_information_directional_derivative_with_specs(
+                                    &states, &specs, delta,
+                                )?
+                                .ok_or_else(|| missing("first information derivatives"))?;
+                            let axes = family
+                                .joint_jeffreys_information_second_directional_all_axes_with_specs(
+                                    &states, &specs, delta,
+                                )?
+                                .ok_or_else(|| missing("second information derivatives"))?;
+                            let rotated = base.rotate_axes(&axes)?;
+                            let contracted =
+                                |weight: &Array2<f64>| -> Result<Array2<f64>, String> {
+                                    family
+                                        .joint_jeffreys_information_contracted_trace_hessian_with_specs(
+                                            &states, &specs, weight,
+                                        )?
+                                        .ok_or_else(|| {
+                                            "priced Jeffreys completion requires the contracted \
+                                             trace Hessian"
+                                                .to_string()
+                                        })
+                                };
+                            let along = |weight: &Array2<f64>| -> Result<Array2<f64>, String> {
+                                family
+                                    .joint_jeffreys_information_contracted_trace_hessian_directional_with_specs(
+                                        &states, &specs, weight, delta,
+                                    )?
+                                    .ok_or_else(|| {
+                                        "priced Jeffreys completion requires the directional \
+                                         contracted trace Hessian"
+                                            .to_string()
+                                    })
+                            };
+                            let mut drift = base.completion_drift_matrix(
+                                &information,
+                                &rotated,
+                                &contracted,
+                                &along,
+                            )?;
+                            if strength != 1.0 {
+                                drift *= strength;
+                            }
+                            Ok(drift)
+                        })
+                        .collect::<Result<Vec<_>, CustomFamilyError>>()
+                })
+            };
+            let completion_second: CompletionSecondDriftFn =
+                Arc::new(move |pairs: &[(Array1<f64>, Array1<f64>)]| {
+                    let base = prepare()?;
+                    if base.hessian_motion_active() {
+                        return Err(CustomFamilyError::trial_point(
+                            "the outer Hessian of a criterion priced on the complete Jeffreys \
+                             curvature needs the gate and floor motion half of D² completion, \
+                             and this snapshot's conditioning gate or relative floor moves with \
+                             β (gam#2894)"
+                                .to_string(),
+                        ));
+                    }
+                    pairs
+                        .iter()
+                        .map(|(u, w)| -> Result<Array2<f64>, CustomFamilyError> {
+                            let information =
+                                |direction: &Array1<f64>| -> Result<Array2<f64>, CustomFamilyError> {
+                                    family
+                                        .joint_jeffreys_information_directional_derivative_with_specs(
+                                            &states, &specs, direction,
+                                        )?
+                                        .ok_or_else(|| missing("first information derivatives"))
+                                };
+                            let pert_u = information(u)?;
+                            let pert_w = information(w)?;
+                            let pert_uw = family
+                                .joint_jeffreys_information_second_directional_derivative_with_specs(
+                                    &states, &specs, u, w,
+                                )?
+                                .ok_or_else(|| missing("second information derivatives"))?;
+                            let contracted =
+                                |weight: &Array2<f64>| -> Result<Array2<f64>, String> {
+                                    family
+                                        .joint_jeffreys_information_contracted_trace_hessian_with_specs(
+                                            &states, &specs, weight,
+                                        )?
+                                        .ok_or_else(|| {
+                                            "priced Jeffreys completion requires the contracted \
+                                             trace Hessian"
+                                                .to_string()
+                                        })
+                                };
+                            let along = |weight: &Array2<f64>,
+                                         direction: &Array1<f64>|
+                             -> Result<Array2<f64>, String> {
+                                family
+                                    .joint_jeffreys_information_contracted_trace_hessian_directional_with_specs(
+                                        &states, &specs, weight, direction,
+                                    )?
+                                    .ok_or_else(|| {
+                                        "priced Jeffreys completion requires the directional \
+                                         contracted trace Hessian"
+                                            .to_string()
+                                    })
+                            };
+                            let along_u = |weight: &Array2<f64>| along(weight, u);
+                            let along_w = |weight: &Array2<f64>| along(weight, w);
+                            let along_uw = |weight: &Array2<f64>| -> Result<Array2<f64>, String> {
+                                family
+                                    .joint_jeffreys_information_contracted_trace_hessian_second_directional_with_specs(
+                                        &states, &specs, weight, u, w,
+                                    )?
+                                    .ok_or_else(|| {
+                                        "priced Jeffreys completion requires the second \
+                                         directional contracted trace Hessian"
+                                            .to_string()
+                                    })
+                            };
+                            let mut drift = base.frozen_completion_second_drift_matrix(
+                                &pert_u,
+                                &pert_w,
+                                &pert_uw,
+                                &contracted,
+                                &along_u,
+                                &along_w,
+                                &along_uw,
+                            )?;
+                            if strength != 1.0 {
+                                drift *= strength;
+                            }
+                            Ok(drift)
+                        })
+                        .collect::<Result<Vec<_>, CustomFamilyError>>()
+                });
+            (Some(completion_first), Some(completion_second))
+        }
+        None => (None, None),
+    };
+    Ok(Some(JeffreysHphiDriftBatchFn {
+        first,
+        second,
+        completion_beta,
+        completion_psi: None,
+        response_scale: 1.0,
+        completion_first,
+        completion_second,
+    }))
 }
 
 /// The value kept for `direction`, matched by exact bit pattern, or `compute`'s

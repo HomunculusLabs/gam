@@ -1317,14 +1317,16 @@ impl HessianFactorization for FullyPinnedModeResponse {
 }
 
 /// If the inner solution carries a non-empty active inequality-constraint
-/// set, keep the LAML criterion on the fitted model's full coefficient space
-/// and restrict only the implicit response of its constrained mode.
+/// set, restrict the implicit response of its constrained mode to the face and
+/// keep whatever value/trace geometry the solution's kernel carries.
 ///
-/// The constraint polytope is part of the model, but the rows a numerical QP
-/// happens to list as active are not a new statistical model and cannot change
-/// the dimension of its Laplace integral. In particular, listing a row that is
-/// tight with zero multiplier changes neither the mode nor the likelihood, so
-/// it must not change 1/2 log|H(beta_hat)| - 1/2 log|S(rho)|+.
+/// A producer that installs a `penalty_subspace_trace` owns the criterion's
+/// geometry. The custom-family projected route builds that kernel on the active
+/// face, pricing 1/2 log|Z' M_true Z|+ with u_s = Z V (gam#2894, option A). That
+/// supersedes 4c3c7f960's full-space value for constrained families: a
+/// full-space pseudo-determinant drops an eigenvalue crossing zero off the face,
+/// and its gradient never vanishes there. A solution without a kernel keeps the
+/// full-space operator determinant.
 ///
 /// Active geometry enters through the derivative of the constrained mode. With
 /// Z an orthonormal basis of null(A_act),
@@ -1333,7 +1335,7 @@ impl HessianFactorization for FullyPinnedModeResponse {
 ///
 /// where M_true is the inner stationarity system (which may deliberately
 /// differ from the log-determinant operator; #2612). The borrowed solution
-/// therefore retains every full-space value/trace object and installs only this
+/// therefore retains the solution's value/trace objects and installs only this
 /// tangent-restricted mode-response operator. Clearing active_constraints on
 /// it prevents recursion; the constraint's first-order effect is already
 /// represented by the installed operator.
@@ -1459,8 +1461,9 @@ pub(crate) fn try_tangent_projected_evaluate(
     let constrained = InnerSolution {
         log_likelihood: solution.log_likelihood,
         penalty_quadratic: solution.penalty_quadratic,
-        // Value and trace geometry stay on the fitted model's full coefficient
-        // space. Only the constrained mode response is tangent-restricted.
+        // Value and trace geometry are the kernel's: on the face for the
+        // custom-family projected route (gam#2894). Only the constrained mode
+        // response is installed here.
         hessian_op: Arc::clone(&solution.hessian_op),
         mode_response_op: Some(constrained_mode_response),
         beta: solution.beta.clone(),

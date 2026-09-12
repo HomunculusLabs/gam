@@ -2007,6 +2007,10 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
     // `½tr(H⁻¹∂H)` derivative, desyncing value and gradient. `None` ⇒ no joint
     // penalty (every per-block-only family) keeps this byte-identical.
     joint_penalty: Option<&Array2<f64>>,
+    // gam#2894: an orthonormal basis `Z` of the active constraint face's tangent
+    // `null(A_act)`. `Some` prices `log|Zᵀ M Z|₊` and builds the kernel on the face;
+    // `None` keeps the full coefficient space.
+    face_tangent: Option<&Array2<f64>>,
 ) -> Result<(f64, Option<PenaltySubspaceTrace>), CustomFamilyError> {
     if total == 0 {
         return Ok((0.0, None));
@@ -2099,13 +2103,39 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
         m += hphi;
     }
     symmetrize_dense_in_place(&mut m);
-    let (m_evals, m_evecs) = m.eigh(Side::Lower).map_err(|e| {
+    // gam#2894 (option A): at a constrained mode the Laplace normalizer integrates the
+    // active face only. With `Z` an orthonormal basis of `null(A_act)`, the criterion
+    // prices `½·log|Zᵀ M Z|₊` and the trace kernel comes from the same eigendecomposition,
+    // `u_s = Z·V` and `h_proj_inverse = diag(1/σ)`. Value, gradient traces and Hessian
+    // cross-traces then describe one face determinant, and curvature normal to the face
+    // is neither integrated nor differentiated. This supersedes 4c3c7f960 ("keep
+    // active-set bookkeeping out of the criterion value") for constrained families: a
+    // full-space pseudo-determinant silently drops an eigenvalue that crosses zero off the
+    // face, and its gradient never vanishes there. With `Z = I` every object below is the
+    // full-space one bit for bit.
+    let precision = match face_tangent {
+        Some(z) => {
+            if z.nrows() != total {
+                return Err(CustomFamilyError::DimensionMismatch {
+                    reason: format!(
+                        "joint penalty subspace face tangent has {} rows, expected {total}",
+                        z.nrows()
+                    ),
+                });
+            }
+            let mut face = z.t().dot(&m).dot(z);
+            symmetrize_dense_in_place(&mut face);
+            face
+        }
+        None => m,
+    };
+    let (m_evals, m_evecs) = precision.eigh(Side::Lower).map_err(|e| {
         format!("joint penalty subspace full Hessian eigendecomposition failed: {e}")
     })?;
     let m_slice = m_evals
         .as_slice()
         .expect("eigh returns an owned standard-layout eigenvalue vector");
-    let kept = laplace_precision_kept_eigenpairs(&m, m_slice);
+    let kept = laplace_precision_kept_eigenpairs(&precision, m_slice);
     let logdet: f64 = kept.iter().map(|&eig_idx| m_evals[eig_idx].ln()).sum();
     // Full Moore–Penrose pseudo-inverse `M⁺` (drop ker(H+Sλ)) in spectral
     // form: kept eigenvectors as the kernel basis, diag(1/σ) as the reduced
@@ -2117,14 +2147,19 @@ pub(crate) fn joint_penalty_subspace_trace_parts(
         return Ok((0.0, None));
     }
     let r_kept = kept.len();
-    let mut u_m = Array2::<f64>::zeros((total, r_kept));
+    let precision_dim = m_evecs.nrows();
+    let mut kept_basis = Array2::<f64>::zeros((precision_dim, r_kept));
     let mut h_proj_inverse = Array2::<f64>::zeros((r_kept, r_kept));
     for (out_col, &src_col) in kept.iter().enumerate() {
-        for row in 0..total {
-            u_m[[row, out_col]] = m_evecs[[row, src_col]];
+        for row in 0..precision_dim {
+            kept_basis[[row, out_col]] = m_evecs[[row, src_col]];
         }
         h_proj_inverse[[out_col, out_col]] = 1.0 / m_evals[src_col];
     }
+    let u_m = match face_tangent {
+        Some(z) => z.dot(&kept_basis),
+        None => kept_basis,
+    };
 
     Ok((
         logdet,

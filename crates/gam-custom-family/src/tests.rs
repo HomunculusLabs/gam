@@ -424,6 +424,7 @@ pub(crate) fn joint_penalty_subspace_trace_matches_projected_logdet_derivative()
         0.0,
         None,
         None,
+        None,
     )
     .expect("projection parts build");
     let kernel = kernel.expect("rank-deficient penalty still has an identified subspace");
@@ -450,6 +451,7 @@ pub(crate) fn joint_penalty_subspace_trace_matches_projected_logdet_derivative()
         0.0,
         None,
         None,
+        None,
     )
     .expect("plus projection parts build");
     let (logdet_minus, _) = joint_penalty_subspace_trace_parts(
@@ -458,6 +460,7 @@ pub(crate) fn joint_penalty_subspace_trace_matches_projected_logdet_derivative()
         &penalties,
         3,
         0.0,
+        None,
         None,
         None,
     )
@@ -489,6 +492,7 @@ pub(crate) fn joint_penalty_subspace_logdet_keeps_weak_curvature_beside_a_stiff_
         0.0,
         None,
         None,
+        None,
     )
     .expect("projection parts build");
     let kernel = kernel.expect("a positive-definite precision has a kernel");
@@ -497,6 +501,90 @@ pub(crate) fn joint_penalty_subspace_logdet_keeps_weak_curvature_beside_a_stiff_
     assert_relative_eq!(logdet, expected, epsilon = 1e-10);
     let strict = strict_exact_pseudo_logdet(&(&h + &penalties[0]), 3).expect("strict logdet");
     assert_relative_eq!(strict, expected, epsilon = 1e-10);
+}
+
+/// gam#2894 positive control for the face geometry. With the identity as the face
+/// tangent, the projected precision, its eigendecomposition, the value and the kernel are
+/// the full-space ones bit for bit. The unified evaluator reads the criterion's value,
+/// gradient traces and Hessian cross-traces off this kernel alone, so all three are
+/// unchanged whenever no constraint row is active.
+#[test]
+pub(crate) fn identity_face_tangent_reproduces_the_full_space_kernel_bit_for_bit_2894() {
+    let ranges = vec![(0, 3)];
+    let penalties = vec![array![[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.0]]];
+    let h = array![[4.0, 0.2, 7.0], [0.2, 9.0, -3.0], [7.0, -3.0, 30.0]];
+    let hphi = array![[0.3, -0.1, 0.05], [-0.1, 0.2, 0.0], [0.05, 0.0, 0.4]];
+    let parts = |tangent: Option<&Array2<f64>>| {
+        joint_penalty_subspace_trace_parts(
+            &JointHessianSource::Dense(h.clone()),
+            &ranges,
+            &penalties,
+            3,
+            1e-9,
+            Some(&hphi),
+            None,
+            tangent,
+        )
+        .expect("projection parts build")
+    };
+    let (full_logdet, full_kernel) = parts(None);
+    let identity = Array2::<f64>::eye(3);
+    let (face_logdet, face_kernel) = parts(Some(&identity));
+    let full_kernel = full_kernel.expect("a positive-definite precision has a kernel");
+    let face_kernel = face_kernel.expect("a positive-definite precision has a kernel");
+    let bits = |matrix: &Array2<f64>| matrix.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+    assert_eq!(full_logdet.to_bits(), face_logdet.to_bits());
+    assert_eq!(bits(&full_kernel.u_s), bits(&face_kernel.u_s));
+    assert_eq!(bits(&full_kernel.h_proj_inverse), bits(&face_kernel.h_proj_inverse));
+}
+
+/// gam#2894: on an active face the criterion prices `log|Zᵀ M Z|` and the kernel
+/// differentiates it. `M` is indefinite off the face (the `[[1, 2], [2, 1]]` block has a
+/// `−1` eigenvalue) and positive definite on its tangent. The full-space
+/// pseudo-determinant drops the negative eigenvalue and prices a different number, which
+/// is the control that this fixture discriminates the two geometries.
+#[test]
+pub(crate) fn face_tangent_kernel_prices_and_differentiates_the_face_determinant_2894() {
+    let ranges = vec![(0, 3)];
+    let penalties = vec![array![[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.5]]];
+    let h = array![[4.0, 0.3, 0.2], [0.3, -1.0, 2.0], [0.2, 2.0, 0.5]];
+    let active = array![[0.0, 1.0, -1.0]];
+    let ActiveConstraintTangentGeometry::Tangent(z) =
+        active_constraint_tangent_geometry(&active).expect("one active row has a face tangent")
+    else {
+        panic!("one active row cannot pin a three-coefficient face");
+    };
+    let parts = |h: &Array2<f64>, tangent: Option<&Array2<f64>>| {
+        joint_penalty_subspace_trace_parts(
+            &JointHessianSource::Dense(h.clone()),
+            &ranges,
+            &penalties,
+            3,
+            0.0,
+            None,
+            None,
+            tangent,
+        )
+        .expect("projection parts build")
+    };
+    let (logdet, kernel) = parts(&h, Some(&z));
+    let kernel = kernel.expect("a positive-definite face precision has a kernel");
+    assert_eq!(kernel.u_s.ncols(), 2);
+    // `M = H + S`; the face spans `e₁` and `(e₂ + e₃)/√2`, so
+    // `Zᵀ M Z ≅ [[5, 0.5/√2], [0.5/√2, 3]]` with determinant `15 − 0.125`.
+    assert_relative_eq!(logdet, 14.875_f64.ln(), epsilon = 1e-12);
+    let (full_logdet, _) = parts(&h, None);
+    assert!(
+        (full_logdet - logdet).abs() > 1e-2,
+        "the full-space pseudo-determinant must differ on this fixture: full={full_logdet} face={logdet}"
+    );
+    let drift = array![[0.7, -0.4, 0.2], [-0.4, 1.3, 0.5], [0.2, 0.5, 2.0]];
+    let analytic = kernel.trace_projected_logdet(&drift);
+    let step = 1e-6;
+    let finite_difference = (parts(&(&h + &(&drift * step)), Some(&z)).0
+        - parts(&(&h - &(&drift * step)), Some(&z)).0)
+        / (2.0 * step);
+    assert_relative_eq!(analytic, finite_difference, epsilon = 1e-8, max_relative = 1e-8);
 }
 
 #[test]
@@ -638,6 +726,7 @@ pub(crate) fn joint_outer_gradient_uses_projected_trace_for_rank_deficient_penal
         std::slice::from_ref(&s_lambda),
         3,
         0.0,
+        None,
         None,
         None,
     )
