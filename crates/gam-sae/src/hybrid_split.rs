@@ -77,7 +77,7 @@ use gam_terms::latent::LatentManifold;
 /// The rank-aware Laplace negative-log-evidence of a reduced per-atom Gaussian
 /// reconstruction sub-model: `residual_objective + ½ log|H|` with no smoothing
 /// penalty logdet and a full-rank design (no null space), which is the form
-/// [`gam_solve::evidence::laplace_evidence`] reduces to on this comparison.
+/// the rank-aware Laplace evidence reduces to on this comparison.
 /// Kept inline (rather than routed through `EvidenceLogDetSource`) because both
 /// candidates' Hessian logdets are already the closed-form scalar moments of
 /// their shared design — no factor cache or HVP callback to assemble.

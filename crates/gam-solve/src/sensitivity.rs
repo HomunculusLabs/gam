@@ -35,7 +35,7 @@
 //! The channels, each a one-line restatement of the identity above:
 //!
 //! - [`mode_response`](FitSensitivity::mode_response) — `−H⁻¹ ∂g/∂t`, the
-//!   REML outer gradient's `∂β̂/∂ρ` (evidence `ift_dbeta_drho`).
+//!   REML outer gradient's `∂β̂/∂ρ`.
 //! - [`mode_response_coned`](FitSensitivity::mode_response_coned) — the same
 //!   response confined to its cone of influence (#779); the lazy/local form
 //!   the smoothing-correction IFT uses.

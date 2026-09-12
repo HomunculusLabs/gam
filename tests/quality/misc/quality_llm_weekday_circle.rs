@@ -11,7 +11,7 @@
 //!      each spread by a wide angular jitter that fills the ring into a genuine
 //!      continuum plus a tight radial jitter). The representational topology
 //!      race — the exact
-//!      `fit_mixture_rung` + `adjudicate_predictive_race` machinery the
+//!      `adjudicate_predictive_race` machinery the
 //!      production fit drives — must select the smooth **S¹ atom** over the
 //!      discrete **7-cluster** null, and must do so with a *reported evidence
 //!      margin*: the held-out stacking mass on the circle strictly exceeds the

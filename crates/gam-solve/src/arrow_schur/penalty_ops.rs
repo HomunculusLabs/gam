@@ -374,7 +374,7 @@ pub trait BetaPenaltyOp: Send + Sync {
     fn to_dense(&self) -> Array2<f64>;
     /// Mix the operator's defining state into `hasher` for cache-validity
     /// fingerprinting. Must change whenever `matvec` / `to_dense` would change,
-    /// so the factorization / evidence cache (`cache_matches_system`) is
+    /// so the factorization / evidence cache is
     /// invalidated when the β-block content changes. Implementations hash their
     /// own compact defining data (e.g. Kronecker factors, block matrices)
     /// rather than the full `K×K` dense form, which would defeat the structured

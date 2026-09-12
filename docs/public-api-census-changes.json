@@ -1974,5 +1974,42 @@
     },
     "reason": "#2899 public API sweep of gam-sae (prune-api-d): SaeAssignment::from_blocks_with_mode, the Euclidean special case of from_blocks_with_mode_and_manifolds, had no production caller; its test and benchmark callers now call the production constructor directly.",
     "evidence": "At 8376b160b, git grep -n -w finds from_blocks_with_mode called only from test code and one benchmark fixture, every one rewritten here. The removed map is public_api_census.py's census difference over this change, computed on MSI."
+  },
+  {
+    "base": "332bfbdb40e5e307a016b21cc0a78ab1b0359c66",
+    "removed": {
+      "crates/gam-solve/src/evidence.rs::cache_matches_system": 1,
+      "crates/gam-solve/src/evidence.rs::complexity_rank": 1,
+      "crates/gam-solve/src/evidence.rs::evidence_grad_rho": 1,
+      "crates/gam-solve/src/evidence.rs::evidence_hessian_log_det": 1,
+      "crates/gam-solve/src/evidence.rs::evidence_ift_gradient_correction": 1,
+      "crates/gam-solve/src/evidence.rs::fit_union_ladder": 1,
+      "crates/gam-solve/src/evidence.rs::fit_union_structure": 1,
+      "crates/gam-solve/src/evidence.rs::hessian_log_det_from_hvp": 1,
+      "crates/gam-solve/src/evidence.rs::ift_dbeta_drho": 1,
+      "crates/gam-solve/src/evidence.rs::ift_du_dbeta": 1,
+      "crates/gam-solve/src/evidence.rs::laplace_evidence": 1,
+      "crates/gam-solve/src/evidence.rs::resume_gaussian_mixture": 1,
+      "crates/gam-solve/src/evidence.rs::resume_stacking_weights": 1,
+      "crates/gam-solve/src/evidence.rs::select_topology": 1,
+      "crates/gam-solve/src/evidence.rs::stacked_predictive_mean": 1,
+      "crates/gam-solve/src/evidence.rs::union_per_point_log_density": 1,
+      "crates/gam-solve/src/evidence.rs::union_responsibility_split": 1,
+      "crates/gam-solve/src/topology_selector.rs::deterministic_cv_folds": 1,
+      "crates/gam-solve/src/topology_selector.rs::fit_mixture_rung": 1,
+      "crates/gam-solve/src/topology_selector.rs::fit_union_candidate": 1,
+      "crates/gam-solve/src/topology_selector.rs::fit_union_rung": 1,
+      "crates/gam-solve/src/topology_selector.rs::mixture_density_provider": 1,
+      "crates/gam-solve/src/topology_selector.rs::profile_closure_within_smooth_class": 1,
+      "crates/gam-solve/src/topology_selector.rs::race_verdict": 1,
+      "crates/gam-solve/src/topology_selector.rs::ring_of_clusters_density_provider": 1,
+      "crates/gam-solve/src/topology_selector.rs::select_topology_with_fit_parallel": 1,
+      "crates/gam-solve/src/topology_selector.rs::tied_with_winner": 1,
+      "crates/gam-solve/src/topology_selector.rs::topology_scores_are_resolvably_ordered": 1,
+      "crates/gam-solve/src/topology_selector.rs::union_density_provider": 1,
+      "crates/gam-solve/src/topology_selector.rs::winner_is_resolved": 1
+    },
+    "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. No product uses these restored-in-place gam-solve evidence.rs and topology_selector.rs identities: the Laplace evidence and IFT gradient entry points, the resume/stacked helpers, select_topology (gamfit.select_topology goes through select_topology_candidate_lifecycle), the union-structure ladder, and the mixture/union rungs and density providers. Once those callers go, further pub functions have no caller left: complexity_rank, evidence_hessian_log_det, evidence_ift_gradient_correction, hessian_log_det_from_hvp, union_responsibility_split, tied_with_winner and topology_scores_are_resolvably_ordered.",
+    "evidence": "restored_consumers_2829.py at a39a27a17 (MSI job 536241, /scratch.global/sauer354/pool/api2829/consumers.a39a27a17e9346a0b7039f4f25996837a9fe3a52.rows.tsv) scores the TSV-listed identities as unreferenced, and select_topology as python_build_or_rename_only. At the base, git grep -w over crates, src, tests, examples, python and gamfit finds no user outside evidence.rs, topology_selector.rs and gam-solve mod.rs. The product entry points that survive (select_topology_with_fit, select_topology_candidate_lifecycle, adjudicate_predictive_race, fit_free_cluster_rung, fit_ring_of_clusters_rung, tk_normalized_score, solve_stacking_weights) keep their gam-sae and gam-pyffi users. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 539304, /scratch.global/sauer354/pool/api2829/validate.539304.log)."
   }
 ]
