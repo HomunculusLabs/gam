@@ -263,17 +263,17 @@ impl DecreaseWindow {
     }
 
     /// Lifetime total decrease `Σ_k d_k` (compensated).
-    pub(crate) fn total_decrease(&self) -> f64 {
+    pub fn total_decrease(&self) -> f64 {
         self.total_decrease.sum()
     }
 
     /// Lifetime total squared step norm `Σ_k ‖x_{k+1} − x_k‖²` (compensated).
-    pub(crate) fn total_step_norm_sq(&self) -> f64 {
+    pub fn total_step_norm_sq(&self) -> f64 {
         self.total_step_norm_sq.sum()
     }
 
     /// Total number of accepted steps ever recorded (includes evicted ones).
-    pub(crate) fn observed_count(&self) -> u64 {
+    pub fn observed_count(&self) -> u64 {
         self.observed_count
     }
 

@@ -3,14 +3,13 @@ use faer::Mat as FaerMat;
 use faer::linalg::matmul::matmul;
 use faer::prelude::ReborrowMut;
 use faer::{Accum, Par};
-use gam_linalg::faer_ndarray::{FaerArrayView, FaerCholesky};
+use gam_linalg::faer_ndarray::FaerArrayView;
 use gam_linalg::matrix::{DesignMatrix, PsdWeightsView, SignedWeightsView};
 use gam_linalg::utils::{
     CertifiedSpdFactor, certified_spd_factorize, symmetric_extremes,
     validate_finite_symmetric_matrix,
 };
 use gam_math::probability::signed_log_sum_exp;
-use gam_problem::Dispersion;
 use ndarray::{Array1, Array2, ArrayView1, ShapeBuilder, s};
 use opt::{BacktrackConfig, backtracking_line_search};
 use std::convert::Infallible;
