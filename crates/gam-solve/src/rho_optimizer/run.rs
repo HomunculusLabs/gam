@@ -8352,6 +8352,7 @@ pub(crate) fn run_outer_uncertified(
                     last_error = Some(EstimationError::RemlOptimizationFailed(
                         request.reason().to_string(),
                     ));
+                    spent_iterations = spent_iterations.saturating_add(request.spent_iterations());
                     continue 'plan_attempts;
                 }
                 Ok(PlanRunOutcome::FixedPointContinuationRequested(request)) => {

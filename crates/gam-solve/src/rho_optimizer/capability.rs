@@ -374,17 +374,30 @@ pub struct OuterPlan {
 #[derive(Clone, Debug)]
 pub(crate) struct FirstOrderFallbackRequest {
     reason: String,
+    /// Iterations the plan attempt had spent when the request left it: every
+    /// seed it started before the one whose evaluation asked (#2817).
+    spent_iterations: usize,
 }
 
 impl FirstOrderFallbackRequest {
     pub(crate) fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
+            spent_iterations: 0,
         }
     }
 
     pub(crate) fn reason(&self) -> &str {
         &self.reason
+    }
+
+    pub(crate) fn with_spent_iterations(mut self, spent_iterations: usize) -> Self {
+        self.spent_iterations = spent_iterations;
+        self
+    }
+
+    pub(crate) fn spent_iterations(&self) -> usize {
+        self.spent_iterations
     }
 }
 

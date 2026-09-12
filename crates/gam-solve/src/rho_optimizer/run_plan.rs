@@ -2714,7 +2714,11 @@ pub(crate) fn run_outer_with_plan(
                         return Ok(PlanRunOutcome::FixedPointContinuationRequested(request));
                     }
                     Err(FixedPointOuterRunError::ImmediateFallback(request)) => {
-                        return Ok(PlanRunOutcome::FirstOrderFallbackRequested(request));
+                        // This seed's own evaluation asked, but the attempt's earlier
+                        // seeds already spent iterations (#2817).
+                        return Ok(PlanRunOutcome::FirstOrderFallbackRequested(
+                            request.with_spent_iterations(spent_seed_iterations),
+                        ));
                     }
                     Err(FixedPointOuterRunError::Failed(err)) => {
                         note_started_seed(&mut started_seeds, &mut started_seed_points, seed_as_generated);
@@ -2766,7 +2770,11 @@ pub(crate) fn run_outer_with_plan(
                         return Ok(PlanRunOutcome::FixedPointContinuationRequested(request));
                     }
                     Err(FixedPointOuterRunError::ImmediateFallback(request)) => {
-                        return Ok(PlanRunOutcome::FirstOrderFallbackRequested(request));
+                        // This seed's own evaluation asked, but the attempt's earlier
+                        // seeds already spent iterations (#2817).
+                        return Ok(PlanRunOutcome::FirstOrderFallbackRequested(
+                            request.with_spent_iterations(spent_seed_iterations),
+                        ));
                     }
                     Err(FixedPointOuterRunError::Failed(err)) => {
                         note_started_seed(&mut started_seeds, &mut started_seed_points, seed_as_generated);
