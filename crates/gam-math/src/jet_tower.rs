@@ -1090,6 +1090,15 @@ pub fn trigamma(x: f64) -> f64 {
     polygamma_positive::<1>(x)
 }
 
+/// Scalar tetragamma ψ″(x) for x>0. Bit-identical to
+/// `digamma_derivative_stack(x)[2]` and `ln_gamma_derivative_stack_order3(x)[3]`
+/// (all use `polygamma_positive::<2>(x)`), but evaluates only ψ″. Used by the
+/// dispersion-channel third-order row derivatives.
+#[inline]
+pub fn tetragamma(x: f64) -> f64 {
+    polygamma_positive::<2>(x)
+}
+
 fn digamma_positive(mut x: f64) -> f64 {
     if !(x.is_finite() && x > 0.0) {
         return f64::NAN;

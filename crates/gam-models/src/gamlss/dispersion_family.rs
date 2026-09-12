@@ -4,8 +4,6 @@
 //! dispersion-channel joint-curvature corrections.
 
 use super::weighted_design_products::{mirror_upper_to_lower, xt_diag_x_design, xt_diag_y_design};
-// Concrete `Order2` algebra methods live on the shared `JetField` supertrait;
-// keep it in scope alongside `JetScalar` so the row programs resolve them.
 use super::{
     BlockwiseTermFitResult, GamlssLambdaLayout, LOCATION_SCALE_N_OUTPUTS,
     LocationScaleFamilyBuilder, build_location_scale_block, fit_location_scale_terms,
@@ -19,8 +17,6 @@ use crate::custom_family::{
 use crate::gamlss::GamlssError;
 use crate::model_types::UnifiedFitResult;
 use gam_linalg::matrix::LinearOperator;
-use gam_math::jet_scalar::JetScalar;
-use gam_math::nested_dual::JetField;
 use gam_terms::smooth::{
     SpatialLengthScaleOptimizationOptions, TermCollectionDesign, TermCollectionSpec,
     get_spatial_length_scale, spatial_term_uses_per_axis_psi,
@@ -320,6 +316,9 @@ fn validate_dispersion_row_kernel_output(
 #[cfg(test)]
 mod test_support {
     use super::*;
+    use crate::gamlss::test_support::order2_ln_gamma;
+    use gam_math::jet_scalar::JetScalar;
+    use gam_math::nested_dual::JetField;
 
     /// Test-oracle NB2 row NLL over a generic [`JetScalar<2>`], seeded on the
     /// natural parameters `(μ, θ)`.
@@ -540,22 +539,14 @@ mod test_support {
     }
 }
 
-#[inline]
-fn order2_ln_gamma<const K: usize>(
-    x: &gam_math::jet_scalar::Order2<K>,
-) -> gam_math::jet_scalar::Order2<K> {
-    gam_math::jet_scalar::Order2(
-        x.0.compose_unary(gam_math::jet_tower::ln_gamma_derivative_stack_order2(x.0.v)),
-    )
-}
-
 // ============================================================================
 // Dispersion-channel row derivatives (SPEC rule 1, #2901).
 //
-// The row kernel below derives every dispersion score and information by hand.
-// The pruned single-axis towers that used to supply them (#1591) are test oracles
-// in `test_support`, pinned bit-for-bit against the full `Order2<2>` towers and
-// channel-for-channel against the hand-derived kernel.
+// The row kernel, the observed η-space Hessian, its directional derivative and
+// the saved-model ALO geometry all use hand-derived row derivatives. The jet
+// towers that used to supply them are test oracles: the pruned single-axis
+// towers in `test_support` above, and the η-space order-2/order-3 towers in
+// `crate::gamlss::test_support`.
 // ============================================================================
 
 // ============================================================================
@@ -723,93 +714,119 @@ pub(crate) fn dispersion_row_loglik(
     }
 }
 
-/// Observed η-space row NLL tower: both exact predictors are jet variables
-/// (`η_μ` axis 0, `η_d` axis 1) and the full mean-link / precision-link
-/// chains are carried by the jet algebra, so `h()` is the exact per-row
-/// OBSERVED Hessian in `(η_μ, η_d)` — including the inverse-link
-/// second-derivative terms and the mean/dispersion cross curvature that the
-/// expected (Fisher) working weights do not represent. Example: Gamma with
-/// log links at `y = 4, μ = 2, ν = 3` has exact per-row `∂²NLL/∂η_μ² =
-/// νy/μ = 6` and `∂²NLL/∂η_μ∂η_ν = ν(1 − y/μ) = −3`, where the Fisher
-/// working weights give `ν = 3` and `0`.
-pub(crate) fn dispersion_eta_nll_order2(
+/// Per-row log-likelihood derivatives in the predictor coordinates `(η_μ, η_d)`
+/// through second order, `([ℓ_μ, ℓ_d], [ℓ_μμ, ℓ_μd, ℓ_dd])`, derived by hand for
+/// every member (SPEC rule 1).
+///
+/// The mean-link and precision-link chains, the inverse-link second-derivative
+/// terms and the mean/dispersion cross curvature are all included, so `−w` times
+/// this is the exact per-row OBSERVED Hessian rather than the expected (Fisher)
+/// working weights. Example: Gamma with log links at `y = 4, μ = 2, ν = 3` has
+/// `∂²NLL/∂η_μ² = νy/μ = 6` and `∂²NLL/∂η_μ∂η_ν = ν(1 − y/μ) = −3`, where the
+/// Fisher working weights give `ν = 3` and `0`. The oracle is
+/// `crate::gamlss::test_support::dispersion_eta_nll_order2`.
+fn dispersion_eta_loglik_second(
     kind: DispersionFamilyKind,
     yi: f64,
     em: f64,
     ed: f64,
-    wi: f64,
-) -> gam_math::jet_scalar::Order2<2> {
-    type O2 = gam_math::jet_scalar::Order2<2>;
-    let eta_mu = O2::variable(em, 0);
-    let eta_d = O2::variable(ed, 1);
+) -> ([f64; 2], [f64; 3]) {
+    use gam_math::jet_tower::{digamma, trigamma};
     match kind {
         DispersionFamilyKind::NegativeBinomial => {
-            // The NB log-likelihood below is written directly in the linear
-            // predictors (log-scale) via `log_total`, so the mean `exp(eta_mu)`
-            // is never materialized here (unlike the Gamma arm).
-            let theta = eta_d.exp();
-            let theta_plus_y = theta.add(&O2::constant(yi));
-            let log_total = if em >= ed {
-                eta_mu.add(&eta_d.sub(&eta_mu).exp().add(&O2::constant(1.0)).ln())
-            } else {
-                eta_d.add(&eta_mu.sub(&eta_d).exp().add(&O2::constant(1.0)).ln())
-            };
-            let loglik = order2_ln_gamma(&theta_plus_y)
-                .sub(&order2_ln_gamma(&theta))
-                .sub(&O2::constant(ln_gamma(yi + 1.0)))
-                .add(&theta.mul(&eta_d.sub(&log_total)))
-                .add(&eta_mu.sub(&log_total).scale(yi));
-            loglik.scale(-wi)
+            // ℓ = ln Γ(θ + y) − ln Γ(θ) − ln Γ(y + 1) + θ ln r + y ln q, with
+            // q = μ/(μ + θ) and r = θ/(μ + θ), so ∂q/∂η_μ = −∂q/∂η_d = qr.
+            let mu = em.exp();
+            let theta = ed.exp();
+            let q = positive_share(mu, theta);
+            let r = positive_share(theta, mu);
+            let s = q * r;
+            let log_r = log_positive_share(theta, mu);
+            let psi_gap = digamma(theta + yi) - digamma(theta);
+            let tri_gap = trigamma(theta + yi) - trigamma(theta);
+            let total = theta + yi;
+            let l_m = yi * r - theta * q;
+            let l_d = theta * (psi_gap + log_r + q) - yi * r;
+            let l_dd = theta * (psi_gap + log_r) + theta * theta * tri_gap + 2.0 * theta * q
+                - total * s;
+            ([l_m, l_d], [-total * s, total * s - theta * q, l_dd])
         }
         DispersionFamilyKind::Gamma => {
-            let mu = eta_mu.exp();
-            let nu = eta_d.exp();
-            let y_pos = yi;
-            let loglik = nu
-                .mul(&nu.ln())
-                .sub(&nu.mul(&mu.ln()))
-                .sub(&order2_ln_gamma(&nu))
-                .add(&nu.sub(&O2::constant(1.0)).scale(y_pos.ln()))
-                .sub(&nu.mul(&mu.recip().scale(yi)));
-            loglik.scale(-wi)
+            // ℓ = νη_d − νη_μ − ln Γ(ν) + (ν − 1) ln y − ν·(y/μ), with μ = e^{η_μ}
+            // and ν = e^{η_d}; `shape_score` is ∂ℓ/∂ν.
+            let mu = em.exp();
+            let nu = ed.exp();
+            let ratio = (1.0 / mu) * yi;
+            let shape_score = ed + 1.0 - em - digamma(nu) + yi.ln() - ratio;
+            let l_m = nu * (ratio - 1.0);
+            let l_d = nu * shape_score;
+            (
+                [l_m, l_d],
+                [-nu * ratio, l_m, l_d + nu - nu * nu * trigamma(nu)],
+            )
         }
         DispersionFamilyKind::Beta => {
-            let mu = eta_mu.scale(-1.0).exp().add(&O2::constant(1.0)).recip();
-            let phi = eta_d.exp();
-            let one_minus_mu = O2::constant(1.0).sub(&mu);
-            let yc = yi;
-            let a = mu.mul(&phi);
-            let b = one_minus_mu.mul(&phi);
-            let loglik = order2_ln_gamma(&phi)
-                .sub(&order2_ln_gamma(&a))
-                .sub(&order2_ln_gamma(&b))
-                .add(&a.sub(&O2::constant(1.0)).scale(yc.ln()))
-                .add(&b.sub(&O2::constant(1.0)).scale((-yc).ln_1p()));
-            loglik.scale(-wi)
+            // ℓ(μ, φ) = ln Γ(φ) − ln Γ(a) − ln Γ(b) + (a − 1) ln y + (b − 1) ln(1 − y),
+            // with a = μφ, b = (1 − μ)φ, μ = logistic(η_μ) and φ = e^{η_d}. The
+            // (μ, φ) partials are chained through dμ/dη_μ and φ = dφ/dη_d.
+            let logit = gam_solve::mixture_link::logit_inverse_link_jet5(em);
+            let (mu, d1, d2) = (logit.mu, logit.d1, logit.d2);
+            let phi = ed.exp();
+            let one_minus_mu = 1.0 - mu;
+            let a = mu * phi;
+            let b = one_minus_mu * phi;
+            let psi_a = digamma(a);
+            let psi_b = digamma(b);
+            let tri_a = trigamma(a);
+            let tri_b = trigamma(b);
+            let ln_y = yi.ln();
+            let ln_one_minus_y = (-yi).ln_1p();
+            let k = psi_b - psi_a + ln_y - ln_one_minus_y;
+            let cross = one_minus_mu * tri_b - mu * tri_a;
+            let l_mu = phi * k;
+            let l_phi = digamma(phi) - mu * psi_a - one_minus_mu * psi_b
+                + mu * ln_y
+                + one_minus_mu * ln_one_minus_y;
+            let l_mumu = -phi * phi * (tri_a + tri_b);
+            let l_muphi = k + phi * cross;
+            let l_phiphi =
+                trigamma(phi) - mu * mu * tri_a - one_minus_mu * one_minus_mu * tri_b;
+            (
+                [l_mu * d1, l_phi * phi],
+                [
+                    l_mumu * d1 * d1 + l_mu * d2,
+                    l_muphi * d1 * phi,
+                    l_phiphi * phi * phi + l_phi * phi,
+                ],
+            )
         }
         DispersionFamilyKind::Tweedie { p } => {
+            // κ = 1/φ = e^{η_d}. Positive y: ℓ = −½·dev·κ + ½η_d + const, where
+            // ∂dev/∂η_μ = 2(μ^{2−p} − yμ^{1−p}). y = 0: ℓ = −cκ with
+            // c = μ^{2−p}/(2−p), so ∂c/∂η_μ = μ^{2−p}.
             let one_minus_p = 1.0 - p;
             let two_minus_p = 2.0 - p;
-            let mu = eta_mu.exp();
-            let phi = eta_d.scale(-1.0).exp();
+            let mu = em.exp();
+            let kappa = ed.exp();
+            let mu_two = mu.powf(two_minus_p);
             if yi > 0.0 {
-                let dev = mu
-                    .powf(two_minus_p)
-                    .scale(1.0 / two_minus_p)
-                    .sub(&mu.powf(one_minus_p).scale(yi / one_minus_p))
-                    .add(&O2::constant(
-                        yi.powf(two_minus_p) / (one_minus_p * two_minus_p),
-                    ))
-                    .scale(2.0);
-                let loglik = dev
-                    .mul(&phi.recip().scale(-0.5))
-                    .sub(&phi.scale(2.0 * std::f64::consts::PI).ln().scale(0.5))
-                    .sub(&O2::constant(0.5 * p * yi.ln()));
-                loglik.scale(-wi)
+                let mu_one = mu.powf(one_minus_p);
+                let dev = 2.0
+                    * (mu_two / two_minus_p - yi * mu_one / one_minus_p
+                        + yi.powf(two_minus_p) / (one_minus_p * two_minus_p));
+                let dev_m = 2.0 * (mu_two - yi * mu_one);
+                let dev_mm = 2.0 * (two_minus_p * mu_two - one_minus_p * yi * mu_one);
+                let half_kappa = 0.5 * kappa;
+                (
+                    [-half_kappa * dev_m, 0.5 - half_kappa * dev],
+                    [-half_kappa * dev_mm, -half_kappa * dev_m, -half_kappa * dev],
+                )
             } else {
-                let c = mu.powf(two_minus_p).scale(1.0 / two_minus_p);
-                let loglik = c.mul(&phi.recip()).scale(-1.0);
-                loglik.scale(-wi)
+                let c = mu_two / two_minus_p;
+                (
+                    [-kappa * mu_two, -kappa * c],
+                    [-kappa * two_minus_p * mu_two, -kappa * mu_two, -kappa * c],
+                )
             }
         }
     }
@@ -827,138 +844,135 @@ pub(crate) fn dispersion_row_observed_hessian_weights(
     if prior_weight <= 0.0 {
         return (0.0, 0.0, 0.0);
     }
-    let tower = dispersion_eta_nll_order2(kind, yi, eta_mu, eta_d, prior_weight);
-    let h = tower.h();
-    (h[0][0], h[0][1], h[1][1])
+    let (_, [l_mm, l_md, l_dd]) = dispersion_eta_loglik_second(kind, yi, eta_mu, eta_d);
+    (
+        -prior_weight * l_mm,
+        -prior_weight * l_md,
+        -prior_weight * l_dd,
+    )
 }
 
-/// Order-3 alias for the two-predictor η-space NLL tower.
-type O3 = gam_math::jet_tower::Tower3<2>;
-
-fn o3_exp(x: &O3) -> O3 {
-    x.compose_unary_with(|v| {
-        let e = v.exp();
-        [e, e, e, e]
-    })
-}
-
-fn o3_ln(x: &O3) -> O3 {
-    x.compose_unary_with(|v| [v.ln(), v.recip(), -v.powi(-2), 2.0 * v.powi(-3)])
-}
-
-fn o3_recip(x: &O3) -> O3 {
-    x.compose_unary_with(|v| [v.recip(), -v.powi(-2), 2.0 * v.powi(-3), -6.0 * v.powi(-4)])
-}
-
-fn o3_powf(x: &O3, a: f64) -> O3 {
-    x.compose_unary_with(|v| {
-        [
-            v.powf(a),
-            a * v.powf(a - 1.0),
-            a * (a - 1.0) * v.powf(a - 2.0),
-            a * (a - 1.0) * (a - 2.0) * v.powf(a - 3.0),
-        ]
-    })
-}
-
-fn o3_ln_gamma(x: &O3) -> O3 {
-    x.compose_unary_with(gam_math::jet_tower::ln_gamma_derivative_stack_order3)
-}
-
-/// Observed η-space row NLL tower to THIRD order: the order-3 sibling of
-/// [`dispersion_eta_nll_order2`], written with the identical expression
-/// structure per family so the `v`/`g`/`h` channels agree with the order-2
-/// tower and `t3` is the exact per-row third-derivative tensor
-/// `∂³NLL/∂η_a∂η_b∂η_c`.
-///
-/// This tensor is what the β-directional derivative of the observed joint
-/// Hessian contracts row-wise — the object the Jeffreys/Firth gradient
-/// (`joint_jeffreys_term`'s `Hdot[e_k]`) and the outer mode-response
-/// correction (`D_β H_L[u]`) both need. Before it existed the family declined
-/// the directional-derivative hook, and `joint_jeffreys_term` degraded to
-/// `(Φ, 0, 0)`: the Firth value entered the inner merit while its gradient
-/// was silently zero, desynchronizing the inner joint-Newton objective from
-/// its KKT residual whenever the conditioning gate armed (the flat-residual
-/// stall on Beta/NB/Tweedie dispersion location-scale fits — #1561's
-/// `quality_vs_gamlss_beta_dispersion_location_scale_1060` null-model
-/// collapse).
-pub(crate) fn dispersion_eta_nll_order3(
+/// Per-row third log-likelihood derivatives in `(η_μ, η_d)`,
+/// `[ℓ_μμμ, ℓ_μμd, ℓ_μdd, ℓ_ddd]`, derived by hand with the same notation as
+/// [`dispersion_eta_loglik_second`]. The oracle is
+/// `crate::gamlss::test_support::dispersion_eta_nll_order3`.
+fn dispersion_eta_loglik_third(
     kind: DispersionFamilyKind,
     yi: f64,
     em: f64,
     ed: f64,
-    wi: f64,
-) -> O3 {
-    let eta_mu = O3::variable(em, 0);
-    let eta_d = O3::variable(ed, 1);
+) -> [f64; 4] {
+    use gam_math::jet_tower::{digamma, tetragamma, trigamma};
     match kind {
         DispersionFamilyKind::NegativeBinomial => {
-            let theta = o3_exp(&eta_d);
-            let theta_plus_y = theta.add(&O3::constant(yi));
-            let log_total = if em >= ed {
-                eta_mu.add(&o3_ln(
-                    &o3_exp(&eta_d.sub(&eta_mu)).add(&O3::constant(1.0)),
-                ))
-            } else {
-                eta_d.add(&o3_ln(
-                    &o3_exp(&eta_mu.sub(&eta_d)).add(&O3::constant(1.0)),
-                ))
-            };
-            let loglik = o3_ln_gamma(&theta_plus_y)
-                .sub(&o3_ln_gamma(&theta))
-                .sub(&O3::constant(ln_gamma(yi + 1.0)))
-                .add(&theta.mul(&eta_d.sub(&log_total)))
-                .add(&eta_mu.sub(&log_total).scale(yi));
-            loglik.scale(-wi)
+            // ∂s/∂η_μ = s(r − q) and ∂s/∂η_d = s(q − r) for s = qr.
+            let mu = em.exp();
+            let theta = ed.exp();
+            let q = positive_share(mu, theta);
+            let r = positive_share(theta, mu);
+            let s = q * r;
+            let log_r = log_positive_share(theta, mu);
+            let psi_gap = digamma(theta + yi) - digamma(theta);
+            let tri_gap = trigamma(theta + yi) - trigamma(theta);
+            let tetra_gap = tetragamma(theta + yi) - tetragamma(theta);
+            let total = theta + yi;
+            let spread = total * s * (q - r);
+            [
+                spread,
+                -theta * s - spread,
+                -theta * q + 2.0 * theta * s + spread,
+                theta * (psi_gap + log_r)
+                    + 3.0 * theta * theta * tri_gap
+                    + theta.powi(3) * tetra_gap
+                    + 3.0 * theta * q
+                    - 3.0 * theta * s
+                    - spread,
+            ]
         }
         DispersionFamilyKind::Gamma => {
-            let mu = o3_exp(&eta_mu);
-            let nu = o3_exp(&eta_d);
-            let y_pos = yi;
-            let loglik = nu
-                .mul(&o3_ln(&nu))
-                .sub(&nu.mul(&o3_ln(&mu)))
-                .sub(&o3_ln_gamma(&nu))
-                .add(&nu.sub(&O3::constant(1.0)).scale(y_pos.ln()))
-                .sub(&nu.mul(&o3_recip(&mu).scale(yi)));
-            loglik.scale(-wi)
+            let mu = em.exp();
+            let nu = ed.exp();
+            let ratio = (1.0 / mu) * yi;
+            let shape_score = ed + 1.0 - em - digamma(nu) + yi.ln() - ratio;
+            [
+                nu * ratio,
+                -nu * ratio,
+                nu * (ratio - 1.0),
+                nu * shape_score + 2.0 * nu
+                    - 3.0 * nu * nu * trigamma(nu)
+                    - nu.powi(3) * tetragamma(nu),
+            ]
         }
         DispersionFamilyKind::Beta => {
-            let mu = o3_recip(&o3_exp(&eta_mu.scale(-1.0)).add(&O3::constant(1.0)));
-            let phi = o3_exp(&eta_d);
-            let one_minus_mu = O3::constant(1.0).sub(&mu);
-            let yc = yi;
-            let a = mu.mul(&phi);
-            let b = one_minus_mu.mul(&phi);
-            let loglik = o3_ln_gamma(&phi)
-                .sub(&o3_ln_gamma(&a))
-                .sub(&o3_ln_gamma(&b))
-                .add(&a.sub(&O3::constant(1.0)).scale(yc.ln()))
-                .add(&b.sub(&O3::constant(1.0)).scale((-yc).ln_1p()));
-            loglik.scale(-wi)
+            let logit = gam_solve::mixture_link::logit_inverse_link_jet5(em);
+            let (mu, d1, d2, d3) = (logit.mu, logit.d1, logit.d2, logit.d3);
+            let phi = ed.exp();
+            let one_minus_mu = 1.0 - mu;
+            let a = mu * phi;
+            let b = one_minus_mu * phi;
+            let psi_a = digamma(a);
+            let psi_b = digamma(b);
+            let tri_a = trigamma(a);
+            let tri_b = trigamma(b);
+            let tetra_a = tetragamma(a);
+            let tetra_b = tetragamma(b);
+            let ln_y = yi.ln();
+            let ln_one_minus_y = (-yi).ln_1p();
+            let k = psi_b - psi_a + ln_y - ln_one_minus_y;
+            let cross = one_minus_mu * tri_b - mu * tri_a;
+            let l_mu = phi * k;
+            let l_phi = digamma(phi) - mu * psi_a - one_minus_mu * psi_b
+                + mu * ln_y
+                + one_minus_mu * ln_one_minus_y;
+            let l_mumu = -phi * phi * (tri_a + tri_b);
+            let l_muphi = k + phi * cross;
+            let l_phiphi =
+                trigamma(phi) - mu * mu * tri_a - one_minus_mu * one_minus_mu * tri_b;
+            let l_mumumu = -phi.powi(3) * (tetra_a - tetra_b);
+            let l_mumuphi =
+                -2.0 * phi * (tri_a + tri_b) - phi * phi * (mu * tetra_a + one_minus_mu * tetra_b);
+            let l_muphiphi = 2.0 * cross
+                + phi * (one_minus_mu * one_minus_mu * tetra_b - mu * mu * tetra_a);
+            let l_phiphiphi =
+                tetragamma(phi) - mu.powi(3) * tetra_a - one_minus_mu.powi(3) * tetra_b;
+            [
+                l_mumumu * d1.powi(3) + 3.0 * l_mumu * d1 * d2 + l_mu * d3,
+                (l_mumuphi * d1 * d1 + l_muphi * d2) * phi,
+                (l_muphiphi * phi * phi + l_muphi * phi) * d1,
+                l_phiphiphi * phi.powi(3) + 3.0 * l_phiphi * phi * phi + l_phi * phi,
+            ]
         }
         DispersionFamilyKind::Tweedie { p } => {
             let one_minus_p = 1.0 - p;
             let two_minus_p = 2.0 - p;
-            let mu = o3_exp(&eta_mu);
-            let phi = o3_exp(&eta_d.scale(-1.0));
+            let mu = em.exp();
+            let kappa = ed.exp();
+            let mu_two = mu.powf(two_minus_p);
             if yi > 0.0 {
-                let dev = o3_powf(&mu, two_minus_p)
-                    .scale(1.0 / two_minus_p)
-                    .sub(&o3_powf(&mu, one_minus_p).scale(yi / one_minus_p))
-                    .add(&O3::constant(
-                        yi.powf(two_minus_p) / (one_minus_p * two_minus_p),
-                    ))
-                    .scale(2.0);
-                let loglik = dev
-                    .mul(&o3_recip(&phi).scale(-0.5))
-                    .sub(&o3_ln(&phi.scale(2.0 * std::f64::consts::PI)).scale(0.5))
-                    .sub(&O3::constant(0.5 * p * yi.ln()));
-                loglik.scale(-wi)
+                let mu_one = mu.powf(one_minus_p);
+                let dev = 2.0
+                    * (mu_two / two_minus_p - yi * mu_one / one_minus_p
+                        + yi.powf(two_minus_p) / (one_minus_p * two_minus_p));
+                let dev_m = 2.0 * (mu_two - yi * mu_one);
+                let dev_mm = 2.0 * (two_minus_p * mu_two - one_minus_p * yi * mu_one);
+                let dev_mmm = 2.0
+                    * (two_minus_p * two_minus_p * mu_two
+                        - one_minus_p * one_minus_p * yi * mu_one);
+                let half_kappa = 0.5 * kappa;
+                [
+                    -half_kappa * dev_mmm,
+                    -half_kappa * dev_mm,
+                    -half_kappa * dev_m,
+                    -half_kappa * dev,
+                ]
             } else {
-                let c = o3_powf(&mu, two_minus_p).scale(1.0 / two_minus_p);
-                let loglik = c.mul(&o3_recip(&phi)).scale(-1.0);
-                loglik.scale(-wi)
+                let c = mu_two / two_minus_p;
+                [
+                    -kappa * two_minus_p * two_minus_p * mu_two,
+                    -kappa * two_minus_p * mu_two,
+                    -kappa * mu_two,
+                    -kappa * c,
+                ]
             }
         }
     }
@@ -966,8 +980,8 @@ pub(crate) fn dispersion_eta_nll_order3(
 
 /// Per-row directional derivative of the observed η-space Hessian channels
 /// `(∂²NLL/∂η_μ², ∂²NLL/∂η_μ∂η_d, ∂²NLL/∂η_d²)` along the per-row η-motion
-/// `(du_mu, du_d)` — the row-wise contraction of the exact third-derivative
-/// tensor from [`dispersion_eta_nll_order3`].
+/// `(du_mu, du_d)`: the row-wise contraction of the third-derivative tensor from
+/// [`dispersion_eta_loglik_third`].
 pub(crate) fn dispersion_row_observed_hessian_directional(
     kind: DispersionFamilyKind,
     yi: f64,
@@ -980,12 +994,12 @@ pub(crate) fn dispersion_row_observed_hessian_directional(
     if prior_weight <= 0.0 {
         return (0.0, 0.0, 0.0);
     }
-    let tower = dispersion_eta_nll_order3(kind, yi, eta_mu, eta_d, prior_weight);
-    let t3 = &tower.t3;
+    let [l_mmm, l_mmd, l_mdd, l_ddd] = dispersion_eta_loglik_third(kind, yi, eta_mu, eta_d);
+    let scale = -prior_weight;
     (
-        t3[0][0][0] * du_mu + t3[0][0][1] * du_d,
-        t3[0][1][0] * du_mu + t3[0][1][1] * du_d,
-        t3[1][1][0] * du_mu + t3[1][1][1] * du_d,
+        scale * (l_mmm * du_mu + l_mmd * du_d),
+        scale * (l_mmd * du_mu + l_mdd * du_d),
+        scale * (l_mdd * du_mu + l_ddd * du_d),
     )
 }
 
@@ -1006,9 +1020,9 @@ pub struct DispersionAloRowGeometry {
 /// Replay the exact fitted row likelihood in its two affine predictor
 /// coordinates for saved-model ALO.
 ///
-/// This is intentionally a thin public boundary over the same order-two jet
-/// program used by the fitter, so diagnostics cannot drift onto a second,
-/// hand-maintained approximation of the dispersion likelihood.
+/// This is intentionally a thin public boundary over the same hand-derived row
+/// derivatives the fitter's observed Hessian uses, so diagnostics cannot drift
+/// onto a second approximation of the dispersion likelihood.
 pub fn dispersion_alo_row_geometry(
     kind: DispersionFamilyKind,
     row: usize,
@@ -1024,11 +1038,11 @@ pub fn dispersion_alo_row_geometry(
             observed_hessian: [[0.0; 2]; 2],
         });
     }
-    let tower = dispersion_eta_nll_order2(kind, y, eta_mu, eta_d, prior_weight);
-    let (_, gradient, hessian) = tower.into_channels();
+    let ([l_m, l_d], [l_mm, l_md, l_dd]) = dispersion_eta_loglik_second(kind, y, eta_mu, eta_d);
+    let scale = -prior_weight;
     let geometry = DispersionAloRowGeometry {
-        nll_score: gradient,
-        observed_hessian: hessian,
+        nll_score: [scale * l_m, scale * l_d],
+        observed_hessian: [[scale * l_mm, scale * l_md], [scale * l_md, scale * l_dd]],
     };
     if geometry
         .nll_score
@@ -1532,7 +1546,7 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
     /// (`dispersion_row_observed_hessian_weights`): the full mean-link and
     /// precision-link chains, the inverse-link second-derivative terms, and
     /// the mean/dispersion cross curvature are all carried exactly by the
-    /// `Order2<2>` jet tower. This is deliberately NOT the Fisher-scoring
+    /// hand-derived row derivatives. This is deliberately NOT the Fisher-scoring
     /// working-weight matrix that `evaluate` returns for the inner IRLS —
     /// expected information is a legitimate inner-solve preconditioner (the
     /// working response keeps the exact score, so the optimum is unchanged),
@@ -1586,8 +1600,8 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
             )?;
         }
 
-        // Per-row observed `(∂²/∂η_μ², ∂²/∂η_μ∂η_d, ∂²/∂η_d²)` weights — one
-        // full `Order2<2>` η-space tower per row. Row-independent, so fan it
+        // Per-row observed `(∂²/∂η_μ², ∂²/∂η_μ∂η_d, ∂²/∂η_d²)` weights, one
+        // hand-derived second-order row evaluation each. Row-independent, so fan it
         // out for large `n` (off a rayon worker) into a per-row buffer —
         // index-ordered, no reduction, so byte-identical to the serial map.
         let observed: Vec<(f64, f64, f64)> =
@@ -1679,8 +1693,8 @@ impl CustomFamily for DispersionGlmLocationScaleFamily {
     }
 
     /// Exact β-directional derivative of the observed joint Hessian,
-    /// `D_β H_L[u]`, assembled row-wise from the third-order η-space tower
-    /// ([`dispersion_eta_nll_order3`]): with per-row η-motion
+    /// `D_β H_L[u]`, assembled row-wise from the hand-derived third-order η-space
+    /// row derivatives (`dispersion_eta_loglik_third`): with per-row η-motion
     /// `du_μ = X_μ u_μ`, `du_d = X_d u_d`, each Hessian channel drifts by the
     /// exact tensor contraction `dW_ab = Σ_c (∂³NLL/∂η_a∂η_b∂η_c) du_c`, and
     /// the blocks are the same `Xᵀ diag(dW) X` grams the Hessian itself uses.
@@ -2419,7 +2433,11 @@ mod tests {
         dispersion_nb_nll_order2, dispersion_tweedie_disp_order2,
     };
     use super::*;
-    use crate::gamlss::test_support::dispersion_tweedie_nll_generic;
+    use crate::gamlss::test_support::{
+        dispersion_eta_nll_order2, dispersion_eta_nll_order3, dispersion_tweedie_nll_generic,
+        order2_ln_gamma,
+    };
+    use gam_math::jet_scalar::JetScalar;
     use gam_math::nested_dual::JetField;
 
     #[test]
@@ -3116,6 +3134,81 @@ mod tests {
                     "tweedie disp response",
                     row.disp_response,
                     ed + s_eta / curvature_eta,
+                );
+            }
+        }
+    }
+
+    /// SPEC rule 1 (#2901): the observed η-space Hessian, its directional
+    /// derivative and the saved-model ALO geometry are derived by hand. They
+    /// must match the jet towers they replaced, on randomized rows of every
+    /// member and both Tweedie density branches.
+    #[test]
+    fn eta_space_closed_form_derivatives_match_the_towers() {
+        let mut state: u64 = 0x2901_E7A5_0A11_0002;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let close = |label: &str, hand: f64, tower: f64| {
+            let band = 1e-9 * (1.0 + hand.abs().max(tower.abs()));
+            assert!(
+                (hand - tower).abs() <= band,
+                "{label}: hand-derived {hand:.17e} vs tower {tower:.17e}"
+            );
+        };
+        for _ in 0..400 {
+            let wi = 0.25 + 3.0 * next();
+            let em = -2.5 + 5.0 * next();
+            let ed = -2.0 + 4.0 * next();
+            let du_mu = -1.0 + 2.0 * next();
+            let du_d = -1.0 + 2.0 * next();
+            let p = 1.1 + 0.8 * next();
+            let rows = [
+                (DispersionFamilyKind::NegativeBinomial, (next() * 12.0).floor()),
+                (DispersionFamilyKind::Gamma, 0.01 + 8.0 * next()),
+                (DispersionFamilyKind::Beta, 0.005 + 0.99 * next()),
+                (DispersionFamilyKind::Tweedie { p }, 0.0),
+                (DispersionFamilyKind::Tweedie { p }, 0.01 + 9.0 * next()),
+            ];
+            for (kind, yi) in rows {
+                let label = format!("{kind:?} y={yi} em={em} ed={ed}");
+                let tower2 = dispersion_eta_nll_order2(kind, yi, em, ed, wi);
+                let g2 = tower2.g();
+                let h2 = tower2.h();
+                let (h_mm, h_md, h_dd) =
+                    dispersion_row_observed_hessian_weights(kind, yi, em, ed, wi);
+                close(&format!("{label} h_mm"), h_mm, h2[0][0]);
+                close(&format!("{label} h_md"), h_md, h2[0][1]);
+                close(&format!("{label} h_dd"), h_dd, h2[1][1]);
+                let geometry = dispersion_alo_row_geometry(kind, 0, yi, em, ed, wi)
+                    .expect("finite dispersion row geometry");
+                close(&format!("{label} score_mu"), geometry.nll_score[0], g2[0]);
+                close(&format!("{label} score_d"), geometry.nll_score[1], g2[1]);
+                close(
+                    &format!("{label} alo cross"),
+                    geometry.observed_hessian[1][0],
+                    h2[1][0],
+                );
+                let t3 = dispersion_eta_nll_order3(kind, yi, em, ed, wi).t3;
+                let (d_mm, d_md, d_dd) =
+                    dispersion_row_observed_hessian_directional(kind, yi, em, ed, wi, du_mu, du_d);
+                close(
+                    &format!("{label} dH_mm"),
+                    d_mm,
+                    t3[0][0][0] * du_mu + t3[0][0][1] * du_d,
+                );
+                close(
+                    &format!("{label} dH_md"),
+                    d_md,
+                    t3[0][1][0] * du_mu + t3[0][1][1] * du_d,
+                );
+                close(
+                    &format!("{label} dH_dd"),
+                    d_dd,
+                    t3[1][1][0] * du_mu + t3[1][1][1] * du_d,
                 );
             }
         }

@@ -9,6 +9,10 @@
 
 use gam_math::jet_scalar::JetScalar;
 use gam_problem::InverseLink;
+use gam_math::nested_dual::JetField;
+use statrs::function::gamma::ln_gamma;
+
+use super::dispersion_family::DispersionFamilyKind;
 
 /// Dense all-channel binomial location-scale oracle shared by the row-program
 /// pins and the family-level behavior tests. It spells the row NLL in predictor
@@ -138,5 +142,221 @@ pub(crate) fn dispersion_tweedie_nll_generic<S: JetScalar<2>>(
         let c = mu.powf(two_minus_p).scale(1.0 / two_minus_p);
         let loglik = c.mul(&phi.recip()).scale(-1.0);
         loglik.scale(-wi)
+    }
+}
+
+/// `ln Γ` lifted onto an `Order2<K>` jet through its derivative stack, shared by
+/// the dispersion-family tower oracles.
+#[inline]
+pub(crate) fn order2_ln_gamma<const K: usize>(
+    x: &gam_math::jet_scalar::Order2<K>,
+) -> gam_math::jet_scalar::Order2<K> {
+    gam_math::jet_scalar::Order2(
+        x.0.compose_unary(gam_math::jet_tower::ln_gamma_derivative_stack_order2(x.0.v)),
+    )
+}
+
+/// Observed η-space row NLL tower, both predictors as jet variables (`η_μ` axis 0,
+/// `η_d` axis 1). Oracle for the hand-derived production row derivatives in
+/// `dispersion_family` (`eta_space_closed_form_derivatives_match_the_towers`).
+pub(crate) fn dispersion_eta_nll_order2(
+    kind: DispersionFamilyKind,
+    yi: f64,
+    em: f64,
+    ed: f64,
+    wi: f64,
+) -> gam_math::jet_scalar::Order2<2> {
+    type O2 = gam_math::jet_scalar::Order2<2>;
+    let eta_mu = O2::variable(em, 0);
+    let eta_d = O2::variable(ed, 1);
+    match kind {
+        DispersionFamilyKind::NegativeBinomial => {
+            // The NB log-likelihood below is written directly in the linear
+            // predictors (log-scale) via `log_total`, so the mean `exp(eta_mu)`
+            // is never materialized here (unlike the Gamma arm).
+            let theta = eta_d.exp();
+            let theta_plus_y = theta.add(&O2::constant(yi));
+            let log_total = if em >= ed {
+                eta_mu.add(&eta_d.sub(&eta_mu).exp().add(&O2::constant(1.0)).ln())
+            } else {
+                eta_d.add(&eta_mu.sub(&eta_d).exp().add(&O2::constant(1.0)).ln())
+            };
+            let loglik = order2_ln_gamma(&theta_plus_y)
+                .sub(&order2_ln_gamma(&theta))
+                .sub(&O2::constant(ln_gamma(yi + 1.0)))
+                .add(&theta.mul(&eta_d.sub(&log_total)))
+                .add(&eta_mu.sub(&log_total).scale(yi));
+            loglik.scale(-wi)
+        }
+        DispersionFamilyKind::Gamma => {
+            let mu = eta_mu.exp();
+            let nu = eta_d.exp();
+            let y_pos = yi;
+            let loglik = nu
+                .mul(&nu.ln())
+                .sub(&nu.mul(&mu.ln()))
+                .sub(&order2_ln_gamma(&nu))
+                .add(&nu.sub(&O2::constant(1.0)).scale(y_pos.ln()))
+                .sub(&nu.mul(&mu.recip().scale(yi)));
+            loglik.scale(-wi)
+        }
+        DispersionFamilyKind::Beta => {
+            let mu = eta_mu.scale(-1.0).exp().add(&O2::constant(1.0)).recip();
+            let phi = eta_d.exp();
+            let one_minus_mu = O2::constant(1.0).sub(&mu);
+            let yc = yi;
+            let a = mu.mul(&phi);
+            let b = one_minus_mu.mul(&phi);
+            let loglik = order2_ln_gamma(&phi)
+                .sub(&order2_ln_gamma(&a))
+                .sub(&order2_ln_gamma(&b))
+                .add(&a.sub(&O2::constant(1.0)).scale(yc.ln()))
+                .add(&b.sub(&O2::constant(1.0)).scale((-yc).ln_1p()));
+            loglik.scale(-wi)
+        }
+        DispersionFamilyKind::Tweedie { p } => {
+            let one_minus_p = 1.0 - p;
+            let two_minus_p = 2.0 - p;
+            let mu = eta_mu.exp();
+            let phi = eta_d.scale(-1.0).exp();
+            if yi > 0.0 {
+                let dev = mu
+                    .powf(two_minus_p)
+                    .scale(1.0 / two_minus_p)
+                    .sub(&mu.powf(one_minus_p).scale(yi / one_minus_p))
+                    .add(&O2::constant(
+                        yi.powf(two_minus_p) / (one_minus_p * two_minus_p),
+                    ))
+                    .scale(2.0);
+                let loglik = dev
+                    .mul(&phi.recip().scale(-0.5))
+                    .sub(&phi.scale(2.0 * std::f64::consts::PI).ln().scale(0.5))
+                    .sub(&O2::constant(0.5 * p * yi.ln()));
+                loglik.scale(-wi)
+            } else {
+                let c = mu.powf(two_minus_p).scale(1.0 / two_minus_p);
+                let loglik = c.mul(&phi.recip()).scale(-1.0);
+                loglik.scale(-wi)
+            }
+        }
+    }
+}
+
+/// Order-3 alias for the two-predictor η-space NLL tower.
+type O3 = gam_math::jet_tower::Tower3<2>;
+
+fn o3_exp(x: &O3) -> O3 {
+    x.compose_unary_with(|v| {
+        let e = v.exp();
+        [e, e, e, e]
+    })
+}
+
+fn o3_ln(x: &O3) -> O3 {
+    x.compose_unary_with(|v| [v.ln(), v.recip(), -v.powi(-2), 2.0 * v.powi(-3)])
+}
+
+fn o3_recip(x: &O3) -> O3 {
+    x.compose_unary_with(|v| [v.recip(), -v.powi(-2), 2.0 * v.powi(-3), -6.0 * v.powi(-4)])
+}
+
+fn o3_powf(x: &O3, a: f64) -> O3 {
+    x.compose_unary_with(|v| {
+        [
+            v.powf(a),
+            a * v.powf(a - 1.0),
+            a * (a - 1.0) * v.powf(a - 2.0),
+            a * (a - 1.0) * (a - 2.0) * v.powf(a - 3.0),
+        ]
+    })
+}
+
+fn o3_ln_gamma(x: &O3) -> O3 {
+    x.compose_unary_with(gam_math::jet_tower::ln_gamma_derivative_stack_order3)
+}
+
+/// Observed η-space row NLL tower to third order, the order-3 sibling of
+/// [`dispersion_eta_nll_order2`] with the identical expression structure per
+/// family, so `t3` is the per-row tensor `∂³NLL/∂η_a∂η_b∂η_c`. Oracle for the
+/// hand-derived production directional Hessian derivative.
+pub(crate) fn dispersion_eta_nll_order3(
+    kind: DispersionFamilyKind,
+    yi: f64,
+    em: f64,
+    ed: f64,
+    wi: f64,
+) -> gam_math::jet_tower::Tower3<2> {
+    let eta_mu = O3::variable(em, 0);
+    let eta_d = O3::variable(ed, 1);
+    match kind {
+        DispersionFamilyKind::NegativeBinomial => {
+            let theta = o3_exp(&eta_d);
+            let theta_plus_y = theta.add(&O3::constant(yi));
+            let log_total = if em >= ed {
+                eta_mu.add(&o3_ln(
+                    &o3_exp(&eta_d.sub(&eta_mu)).add(&O3::constant(1.0)),
+                ))
+            } else {
+                eta_d.add(&o3_ln(
+                    &o3_exp(&eta_mu.sub(&eta_d)).add(&O3::constant(1.0)),
+                ))
+            };
+            let loglik = o3_ln_gamma(&theta_plus_y)
+                .sub(&o3_ln_gamma(&theta))
+                .sub(&O3::constant(ln_gamma(yi + 1.0)))
+                .add(&theta.mul(&eta_d.sub(&log_total)))
+                .add(&eta_mu.sub(&log_total).scale(yi));
+            loglik.scale(-wi)
+        }
+        DispersionFamilyKind::Gamma => {
+            let mu = o3_exp(&eta_mu);
+            let nu = o3_exp(&eta_d);
+            let y_pos = yi;
+            let loglik = nu
+                .mul(&o3_ln(&nu))
+                .sub(&nu.mul(&o3_ln(&mu)))
+                .sub(&o3_ln_gamma(&nu))
+                .add(&nu.sub(&O3::constant(1.0)).scale(y_pos.ln()))
+                .sub(&nu.mul(&o3_recip(&mu).scale(yi)));
+            loglik.scale(-wi)
+        }
+        DispersionFamilyKind::Beta => {
+            let mu = o3_recip(&o3_exp(&eta_mu.scale(-1.0)).add(&O3::constant(1.0)));
+            let phi = o3_exp(&eta_d);
+            let one_minus_mu = O3::constant(1.0).sub(&mu);
+            let yc = yi;
+            let a = mu.mul(&phi);
+            let b = one_minus_mu.mul(&phi);
+            let loglik = o3_ln_gamma(&phi)
+                .sub(&o3_ln_gamma(&a))
+                .sub(&o3_ln_gamma(&b))
+                .add(&a.sub(&O3::constant(1.0)).scale(yc.ln()))
+                .add(&b.sub(&O3::constant(1.0)).scale((-yc).ln_1p()));
+            loglik.scale(-wi)
+        }
+        DispersionFamilyKind::Tweedie { p } => {
+            let one_minus_p = 1.0 - p;
+            let two_minus_p = 2.0 - p;
+            let mu = o3_exp(&eta_mu);
+            let phi = o3_exp(&eta_d.scale(-1.0));
+            if yi > 0.0 {
+                let dev = o3_powf(&mu, two_minus_p)
+                    .scale(1.0 / two_minus_p)
+                    .sub(&o3_powf(&mu, one_minus_p).scale(yi / one_minus_p))
+                    .add(&O3::constant(
+                        yi.powf(two_minus_p) / (one_minus_p * two_minus_p),
+                    ))
+                    .scale(2.0);
+                let loglik = dev
+                    .mul(&o3_recip(&phi).scale(-0.5))
+                    .sub(&o3_ln(&phi.scale(2.0 * std::f64::consts::PI)).scale(0.5))
+                    .sub(&O3::constant(0.5 * p * yi.ln()));
+                loglik.scale(-wi)
+            } else {
+                let c = o3_powf(&mu, two_minus_p).scale(1.0 / two_minus_p);
+                let loglik = c.mul(&o3_recip(&phi)).scale(-1.0);
+                loglik.scale(-wi)
+            }
+        }
     }
 }

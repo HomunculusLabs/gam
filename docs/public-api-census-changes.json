@@ -1949,5 +1949,14 @@
     },
     "reason": "#2829 public-surface rule (docs/rust-library-surface.md, 6e5362f23): a pub item that no product uses is deleted. No product uses gam-sae's designed-corpus and residual-stratified corpus modules (corpus/designed_target.rs, corpus/residual_stratify.rs), so both files are deleted whole. Nor does any product use dictionary_report, with_designed_tier, reconstruct_decoder_coefficients, classify_occupancy, block_gate_block_cpu, the four coordinate.rs readouts, score_block_required or fit_tier05_sink_atom.",
     "evidence": "restored_consumers_2829.py at a39a27a17 (MSI job 536241, /scratch.global/sauer354/pool/api2829/consumers.a39a27a17e9346a0b7039f4f25996837a9fe3a52.rows.tsv) scores the listed identities as unreferenced, and residual_stratify's `new` as exempt_name. At the base, git grep -w over crates, src, tests, examples, python and bench finds every pub item of both corpus modules only in its own file and corpus/mod.rs. The one exception is Stratum, whose other hits are a gam-sae example's own struct and a gam-problem doc word. The removed identities are public_api_census.py's own difference for the unpushed tree, computed on MSI (job 538036, /scratch.global/sauer354/pool/api2829/validate.538036.log)."
+  },
+  {
+    "base": "9c3bba8ebb5237b388f9fda9f8154f4b16d8d6e3",
+    "removed": {
+      "crates/gam-models/src/gamlss/dispersion_family.rs::dispersion_eta_nll_order2": 1,
+      "crates/gam-models/src/gamlss/dispersion_family.rs::dispersion_eta_nll_order3": 1
+    },
+    "reason": "SPEC rule 1 (#2901 V1): dispersion_eta_nll_order2 and dispersion_eta_nll_order3 are no longer production derivative sources; the dispersion family derives its eta-space row derivatives by hand. Both towers move into crate::gamlss::test_support as oracles.",
+    "evidence": "public_api_census.py's public_functions predicate over crates/gam-models/src/gamlss/dispersion_family.rs yields dispersion_eta_nll_order2 and dispersion_eta_nll_order3 as the removed pub(crate) fns. Both are re-declared pub(crate) in crates/gam-models/src/gamlss/test_support.rs, a cfg(test) module. crates/gam-math/src/jet_tower.rs gains tetragamma and loses nothing, and no other changed file loses a pub fn."
   }
 ]

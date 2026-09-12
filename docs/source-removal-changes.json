@@ -4893,5 +4893,22 @@
     ],
     "reason": "#2829 public-surface rule: no product uses these gam-sae items. Two whole corpus modules go, with their tests and constants. Private helpers and carriers only the deleted functions reached go with them: DictionaryReport, atom_inference_reports and atom_smooth_significance; classify_occupancy_impl and wrapped_gaussian_mixture_bic; is_sink.",
     "evidence": "The item list is source_removal_guard.py's own blocked set for the unpushed tree, computed on MSI by validate_2829.py (job 538036, /scratch.global/sauer354/pool/api2829/validate.538036.log). Each touched file's orphan cascade was closed to a fixed point, and the imports only the deleted code used are dropped. Prose and rustdoc links that named deleted items are reworded: corpus/mod.rs, object_store.rs, shard_reader.rs, manifold/term.rs, coordinate_fidelity.rs, outer_objective.rs, block_scoring_gpu.rs, coordinate.rs, ledger_store.rs, gam-terms structure_evidence.rs and gam-pyffi latent_basis_and_sae_ffi.rs. The two gam-terms higher_order.rs rows nu3 and nu4, deleted by 1517f78324 without a ledger update, are relabelled retired-by-later-deletion:1517f78324. Compile is covered by the lead's shared tip check."
+  },
+  {
+    "base": "9c3bba8ebb5237b388f9fda9f8154f4b16d8d6e3",
+    "items": [
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:dispersion_eta_nll_order2",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:dispersion_eta_nll_order3",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:o3_exp",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:o3_ln",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:o3_ln_gamma",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:o3_powf",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:o3_recip",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:order2_ln_gamma",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:type:O2",
+      "crates/gam-models/src/gamlss/dispersion_family.rs:type:O3"
+    ],
+    "reason": "SPEC rule 1 (#2901 V1): the dispersion location-scale families took their observed eta-space Hessian (exact joint Hessian and saved-model ALO geometry) and its beta-directional derivative from forward-mode jet towers, and no speed gate compares those towers with hand-derived code. The production path now derives the NegativeBinomial, Gamma, Beta and Tweedie row derivatives in (eta_mu, eta_d) by hand, through third order, in dispersion_eta_loglik_second and dispersion_eta_loglik_third. The towers dispersion_eta_nll_order2 and dispersion_eta_nll_order3, their Tower3 helpers and order2_ln_gamma move into crate::gamlss::test_support as oracles, so the identities below leave dispersion_family.rs.",
+    "evidence": "At the base, git grep -n -w shows these production callers of dispersion_eta_nll_order2: dispersion_row_observed_hessian_weights and dispersion_alo_row_geometry. The only production caller of dispersion_eta_nll_order3 is dispersion_row_observed_hessian_directional. All three now call the hand-derived functions. The other callers are tests: tests_dispersion_tower.rs, re-pointed to super::test_support, and dispersion_family's unit tests. The o3_* helpers, the O3 alias, order2_ln_gamma and one declaration of the type alias O2 (inside dispersion_eta_nll_order2) served only those towers. Every moved item is re-declared in crates/gam-models/src/gamlss/test_support.rs. The new test eta_space_closed_form_derivatives_match_the_towers compares the observed Hessian weights, the ALO score and Hessian, and the directional derivative with the towers on randomized rows of every member. The item list applies source_removal_guard.py's ITEM regex to the base and changed blobs by hand. The two tower fns are pub(crate), and every private name occurs at least twice tree-wide. Compile is covered by the lead's shared tip check."
   }
 ]

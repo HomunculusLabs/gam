@@ -10,11 +10,11 @@ use gam_math::nested_dual::JetField as _;
 use ndarray::{Array1, Array2};
 
 /// #1561 order-3 dispersion tower, part 1: the third-order tower's value,
-/// gradient, and Hessian channels must reproduce the production `Order2<2>`
-/// tower (same expression structure, one order deeper) on every family arm.
+/// gradient, and Hessian channels must reproduce the `Order2<2>` tower (same
+/// expression structure, one order deeper) on every family arm.
 #[test]
 fn dispersion_order3_tower_matches_order2_through_second_order() {
-    use super::dispersion_family::{dispersion_eta_nll_order2, dispersion_eta_nll_order3};
+    use super::test_support::{dispersion_eta_nll_order2, dispersion_eta_nll_order3};
     let cases = [
         (DispersionFamilyKind::NegativeBinomial, 6.0, 2.0, 3.0, 1.3),
         (DispersionFamilyKind::NegativeBinomial, 0.0, -1.5, 0.4, 0.7),
@@ -51,9 +51,8 @@ fn dispersion_order3_tower_matches_order2_through_second_order() {
 /// predictor directions, on every family arm.
 #[test]
 fn dispersion_order3_third_channels_match_finite_difference() {
-    use super::dispersion_family::{
-        dispersion_eta_nll_order3, dispersion_row_observed_hessian_weights,
-    };
+    use super::dispersion_family::dispersion_row_observed_hessian_weights;
+    use super::test_support::dispersion_eta_nll_order3;
     let cases = [
         (DispersionFamilyKind::NegativeBinomial, 6.0, 2.0, 3.0, 1.3),
         (DispersionFamilyKind::Gamma, 9.0, 1.7, 2.0, 1.1),
