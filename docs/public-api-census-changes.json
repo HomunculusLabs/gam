@@ -1836,5 +1836,13 @@
     },
     "reason": "#2899 group-A sweep: gam_gpu::profile::{record, snapshot, clear} were the write path and the test-only read and reset paths of a dispatch ring that no product reads. They are deleted with the module.",
     "evidence": "public_api_census.py --base fd9798b80 --head f9bce8b7f reports exactly these three identities (/scratch.global/sauer354/pool/prune-api-a/slice9.census.json). Callers at the base: record at linalg_dispatch.rs:600, and snapshot/clear only in two root regression tests."
+  },
+  {
+    "base": "d1143abd3a7464e253db09fdc6e857b6fbbb2ab7",
+    "removed": {
+      "crates/gam-models/src/gamlss/dispersion_family.rs::tower_score_info": 1
+    },
+    "reason": "SPEC rule 1 (#2901 V1): tower_score_info read a dispersion row's score and information off a jet tower for the row kernel, which now derives both by hand, so the helper has no caller.",
+    "evidence": "public_api_census.py's public_functions predicate over crates/gam-models/src/gamlss/dispersion_family.rs at the base and after the change yields tower_score_info as the only removed pub or pub(crate) fn. The three towers that move into test_support stay pub(super) fns in the same file. git grep -n -w tower_score_info at the base finds no caller outside dispersion_row_kernel."
   }
 ]

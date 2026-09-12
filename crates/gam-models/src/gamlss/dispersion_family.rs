@@ -397,12 +397,9 @@ mod test_support {
 
     /// #1591 jet-prune oracle: full `Order2<2>` (value/grad/Hessian) NB2 row NLL.
     ///
-    /// Production no longer consumes the mean (`μ`-axis) derivative channels of
-    /// this tower — the NB mean block is Fisher-orthogonal and hand-written
-    /// exactly in [`dispersion_row_kernel`] — so the hot path uses the pruned
-    /// single-axis [`dispersion_nb_disp_order2`] instead. This `K=2` form
-    /// survives only as the dense-`Tower4<2>` oracle pin
-    /// (`order2_matches_dense_tower_all_channels`).
+    /// The NB row kernel derives its mean and dispersion channels by hand in
+    /// [`dispersion_row_kernel`], so this `K=2` form survives only as the
+    /// dense-`Tower4<2>` oracle pin (`order2_matches_dense_tower_all_channels`).
     #[inline]
     pub(super) fn dispersion_nb_nll_order2(
         yi: f64,
@@ -427,8 +424,7 @@ mod test_support {
     }
 
     /// #1591 jet-prune oracle: full `Order2<2>` Gamma row NLL. As with NB, the
-    /// mean axis is unused in production (hand-written, Fisher-orthogonal); the
-    /// hot path uses the single-axis [`dispersion_gamma_disp_order2`]. Kept only
+    /// row kernel derives the Gamma channels by hand, so this form is kept only
     /// as the dense-tower oracle pin.
     #[inline]
     pub(super) fn dispersion_gamma_nll_order2(
@@ -450,31 +446,98 @@ mod test_support {
             .sub(&nu.mul(&mu.recip().scale(yi)));
         loglik.scale(-wi)
     }
-}
 
-/// Production `Order2<2>` Beta row NLL (value/grad/Hessian hot path; the cross
-/// channel `h()[0][1]` feeds the Beta observed cross weight).
-#[inline]
-pub(crate) fn dispersion_beta_nll_order2(
-    yi: f64,
-    mu_value: f64,
-    phi_value: f64,
-    wi: f64,
-) -> gam_math::jet_scalar::Order2<2> {
-    type O2 = gam_math::jet_scalar::Order2<2>;
+    /// Full `Order2<2>` Beta row NLL seeded on `(μ, φ)`. The row kernel derives
+    /// the Beta score by hand; this tower is its oracle
+    /// (`row_kernel_closed_form_dispersion_channels_match_the_towers`) and the
+    /// dense-tower pin's subject.
+    #[inline]
+    pub(super) fn dispersion_beta_nll_order2(
+        yi: f64,
+        mu_value: f64,
+        phi_value: f64,
+        wi: f64,
+    ) -> gam_math::jet_scalar::Order2<2> {
+        type O2 = gam_math::jet_scalar::Order2<2>;
 
-    let mu = O2::variable(mu_value, 0);
-    let phi = O2::variable(phi_value, 1);
-    let one_minus_mu = O2::constant(1.0).sub(&mu);
-    let yc = yi;
-    let a = mu.mul(&phi);
-    let b = one_minus_mu.mul(&phi);
-    let loglik = order2_ln_gamma(&phi)
-        .sub(&order2_ln_gamma(&a))
-        .sub(&order2_ln_gamma(&b))
-        .add(&a.sub(&O2::constant(1.0)).scale(yc.ln()))
-        .add(&b.sub(&O2::constant(1.0)).scale((-yc).ln_1p()));
-    loglik.scale(-wi)
+        let mu = O2::variable(mu_value, 0);
+        let phi = O2::variable(phi_value, 1);
+        let one_minus_mu = O2::constant(1.0).sub(&mu);
+        let yc = yi;
+        let a = mu.mul(&phi);
+        let b = one_minus_mu.mul(&phi);
+        let loglik = order2_ln_gamma(&phi)
+            .sub(&order2_ln_gamma(&a))
+            .sub(&order2_ln_gamma(&b))
+            .add(&a.sub(&O2::constant(1.0)).scale(yc.ln()))
+            .add(&b.sub(&O2::constant(1.0)).scale((-yc).ln_1p()));
+        loglik.scale(-wi)
+    }
+
+    /// Pruned single-axis Gamma dispersion tower: `ν` is the sole jet variable
+    /// (axis 0), `μ` a constant. Consumed channels match
+    /// `dispersion_gamma_nll_order2` index-1 bit-for-bit, and the row kernel's
+    /// hand-derived dispersion score and information match this tower.
+    #[inline]
+    pub(super) fn dispersion_gamma_disp_order2(
+        yi: f64,
+        y_pos: f64,
+        mu_value: f64,
+        nu_value: f64,
+        wi: f64,
+    ) -> gam_math::jet_scalar::Order2<1> {
+        type O1 = gam_math::jet_scalar::Order2<1>;
+
+        let mu = O1::constant(mu_value);
+        let nu = O1::variable(nu_value, 0);
+        let loglik = nu
+            .mul(&nu.ln())
+            .sub(&nu.mul(&mu.ln()))
+            .sub(&order2_ln_gamma(&nu))
+            .add(&nu.sub(&O1::constant(1.0)).scale(y_pos.ln()))
+            .sub(&nu.mul(&mu.recip().scale(yi)));
+        loglik.scale(-wi)
+    }
+
+    /// Pruned single-axis Tweedie dispersion tower seeded on the predictor `η_d`
+    /// (axis 0), with `η_μ` a constant (so `μ = exp(η_μ)` carries no jet). The
+    /// `φ = exp(−η_d)` chain and its nonlinear `∂²φ/∂η_d²` curvature are carried
+    /// exactly as in `dispersion_tweedie_nll_generic`; `value`/`g[0]`/`h[0][0]`
+    /// match that program's `value`/`g[1]`/`h[1][1]` bit-for-bit.
+    #[inline]
+    pub(super) fn dispersion_tweedie_disp_order2(
+        yi: f64,
+        eta_mu: f64,
+        eta_d: f64,
+        p: f64,
+        wi: f64,
+    ) -> gam_math::jet_scalar::Order2<1> {
+        type O1 = gam_math::jet_scalar::Order2<1>;
+
+        let one_minus_p = 1.0 - p;
+        let two_minus_p = 2.0 - p;
+        let mu = O1::constant(eta_mu).exp();
+        let phi = O1::variable(eta_d, 0).scale(-1.0).exp();
+        if yi > 0.0 {
+            let dev = mu
+                .powf(two_minus_p)
+                .scale(1.0 / two_minus_p)
+                .sub(&mu.powf(one_minus_p).scale(yi / one_minus_p))
+                .add(&O1::constant(
+                    yi.powf(two_minus_p) / (one_minus_p * two_minus_p),
+                ))
+                .scale(2.0);
+            let loglik = dev
+                .mul(&phi.recip().scale(-0.5))
+                .sub(&phi.scale(2.0 * std::f64::consts::PI).ln().scale(0.5))
+                .sub(&O1::constant(0.5 * p * yi.ln()));
+            loglik.scale(-wi)
+        } else {
+            let c = mu.powf(two_minus_p).scale(1.0 / two_minus_p);
+            let loglik = c.mul(&phi.recip()).scale(-1.0);
+            loglik.scale(-wi)
+        }
+    }
 }
 
 #[inline]
@@ -487,95 +550,13 @@ fn order2_ln_gamma<const K: usize>(
 }
 
 // ============================================================================
-// #1591 jet-prune: single-axis (`K=1`) dispersion-channel towers.
+// Dispersion-channel row derivatives (SPEC rule 1, #2901).
 //
-// For NegativeBinomial / Gamma / Tweedie the production row kernel consumes ONLY
-// the dispersion-axis derivatives (`g[disp]`, `h[disp][disp]`) and the value;
-// the mean block is Fisher-orthogonal and assembled in closed form. Seeding the
-// mean as a CONSTANT and the dispersion parameter as the SOLE jet variable
-// therefore yields a tower whose `(value, g[0], h[0][0])` are `to_bits`-
-// identical to the consumed `(value, g[1], h[1][1])` of the old `Order2<2>`
-// tower — the mean seed only ever populated the now-discarded `g[mean]` /
-// `h[mean][·]` channels (Leibniz/Faà-di-Bruno never read the dispersion-axis
-// channels off the mean seed). Collapsing `K=2 → K=1` quarters the Hessian
-// tensor (1 entry vs 4) and halves the gradient, with no change to any consumed
-// float bit. The `ln_gamma` derivative stacks are unchanged (the irreducible
-// transcendental cost), so this trims the rational composition, not the special
-// functions.
+// The row kernel below derives every dispersion score and information by hand.
+// The pruned single-axis towers that used to supply them (#1591) are test oracles
+// in `test_support`, pinned bit-for-bit against the full `Order2<2>` towers and
+// channel-for-channel against the hand-derived kernel.
 // ============================================================================
-
-// `dispersion_nb_disp_order1` / `dispersion_nb_disp_order2` — the pruned
-// `Order1<1>` / `Order2<1>` NB2 dispersion oracle pins used only by
-// `prune_towers_*` — now live in the `#[cfg(test)] mod tests` below, next to
-// their sole consumer (they are genuinely test-support, not production —
-// the real NB2 dispersion row kernel below computes score/curvature in
-// closed form via `digamma`/`nb_log_precision_fisher_jensen`, never through
-// either jet tower — so they belong in a `#[cfg(test)]` mod rather than
-// carrying `allow(dead_code)`).
-
-/// Pruned single-axis Gamma dispersion tower: `ν` is the sole jet variable
-/// (axis 0), `μ` a constant. Consumed channels match
-/// `dispersion_gamma_nll_order2` index-1 bit-for-bit.
-#[inline]
-pub(crate) fn dispersion_gamma_disp_order2(
-    yi: f64,
-    y_pos: f64,
-    mu_value: f64,
-    nu_value: f64,
-    wi: f64,
-) -> gam_math::jet_scalar::Order2<1> {
-    type O1 = gam_math::jet_scalar::Order2<1>;
-
-    let mu = O1::constant(mu_value);
-    let nu = O1::variable(nu_value, 0);
-    let loglik = nu
-        .mul(&nu.ln())
-        .sub(&nu.mul(&mu.ln()))
-        .sub(&order2_ln_gamma(&nu))
-        .add(&nu.sub(&O1::constant(1.0)).scale(y_pos.ln()))
-        .sub(&nu.mul(&mu.recip().scale(yi)));
-    loglik.scale(-wi)
-}
-
-/// Pruned single-axis Tweedie dispersion tower seeded on the predictor `η_d`
-/// (axis 0), with `η_μ` a constant (so `μ = exp(η_μ)` carries no jet). The
-/// `φ = exp(−η_d)` chain and its nonlinear `∂²φ/∂η_d²` curvature are carried
-/// exactly as in `dispersion_tweedie_nll_generic`; `value`/`g[0]`/`h[0][0]`
-/// match that program's `value`/`g[1]`/`h[1][1]` bit-for-bit.
-#[inline]
-pub(crate) fn dispersion_tweedie_disp_order2(
-    yi: f64,
-    eta_mu: f64,
-    eta_d: f64,
-    p: f64,
-    wi: f64,
-) -> gam_math::jet_scalar::Order2<1> {
-    type O1 = gam_math::jet_scalar::Order2<1>;
-
-    let one_minus_p = 1.0 - p;
-    let two_minus_p = 2.0 - p;
-    let mu = O1::constant(eta_mu).exp();
-    let phi = O1::variable(eta_d, 0).scale(-1.0).exp();
-    if yi > 0.0 {
-        let dev = mu
-            .powf(two_minus_p)
-            .scale(1.0 / two_minus_p)
-            .sub(&mu.powf(one_minus_p).scale(yi / one_minus_p))
-            .add(&O1::constant(
-                yi.powf(two_minus_p) / (one_minus_p * two_minus_p),
-            ))
-            .scale(2.0);
-        let loglik = dev
-            .mul(&phi.recip().scale(-0.5))
-            .sub(&phi.scale(2.0 * std::f64::consts::PI).ln().scale(0.5))
-            .sub(&O1::constant(0.5 * p * yi.ln()));
-        loglik.scale(-wi)
-    } else {
-        let c = mu.powf(two_minus_p).scale(1.0 / two_minus_p);
-        let loglik = c.mul(&phi.recip()).scale(-1.0);
-        loglik.scale(-wi)
-    }
-}
 
 // ============================================================================
 // #1591 jet-prune: value-only (`K=0`) row negative-log-likelihood.
@@ -1060,18 +1041,6 @@ pub fn dispersion_alo_row_geometry(
     Ok(geometry)
 }
 
-#[inline]
-pub(crate) fn tower_score_info<const K: usize>(
-    tower: &gam_math::jet_scalar::Order2<K>,
-    idx: usize,
-    wi: f64,
-) -> (f64, f64) {
-    if wi == 0.0 {
-        (0.0, 0.0)
-    } else {
-        (-tower.g()[idx] / wi, tower.h()[idx][idx] / wi)
-    }
-}
 
 /// Evaluate the row log-likelihood and the (mean, log-precision) Fisher-scoring
 /// working sets for one observation. `eta_mu`/`eta_d` already include any
@@ -1170,13 +1139,17 @@ pub(super) fn dispersion_row_kernel(
         DispersionFamilyKind::Gamma => {
             let mu = em.exp();
             let nu = ed.exp(); // precision = shape ν
-            let tower = dispersion_gamma_disp_order2(yi, yi, mu, nu, wi);
-            let (s_nu, info_nu_raw) = tower_score_info(&tower, 0, wi);
-            let loglik = -tower.value();
+            let loglik = dispersion_gamma_loglik(yi, yi, mu, nu, wi);
+            // ℓ(ν) = ν ln ν − ν ln μ − ln Γ(ν) + (ν − 1) ln y − ν y/μ, so the
+            // shape score is ℓ_ν = ln ν + 1 − ln μ − ψ(ν) + ln y − y/μ and the
+            // observed information is −ℓ_νν = ψ′(ν) − 1/ν, positive for ν > 0.
+            let s_nu = nu.ln() + 1.0 - mu.ln() - gam_math::jet_tower::digamma(nu) + yi.ln()
+                - (1.0 / mu) * yi;
+            let info_nu = gam_math::jet_tower::trigamma(nu) - nu.recip();
             let mean_weight = wi * nu;
             let mean_response = em + (yi - mu) / mu;
-            let disp_weight = wi * nu * nu * info_nu_raw;
-            let disp_response = ed + s_nu / (nu * info_nu_raw);
+            let disp_weight = wi * nu * nu * info_nu;
+            let disp_response = ed + s_nu / (nu * info_nu);
             DispersionRowKernel {
                 loglik,
                 mean_weight,
@@ -1191,17 +1164,26 @@ pub(super) fn dispersion_row_kernel(
             let mu = logit.mu;
             let phi = ed.exp(); // precision
             let q = logit.d1;
-            let tower = dispersion_beta_nll_order2(yi, mu, phi, wi);
-            let (score_mu, _) = tower_score_info(&tower, 0, wi);
-            let (s_phi, _) = tower_score_info(&tower, 1, wi);
-            let loglik = -tower.value();
+            let loglik = dispersion_beta_loglik(yi, mu, phi, wi);
+            let one_minus_mu = 1.0 - mu;
             let a = mu * phi;
-            let b = (1.0 - mu) * phi;
+            let b = one_minus_mu * phi;
+            // ℓ(μ, φ) = ln Γ(φ) − ln Γ(a) − ln Γ(b) + (a − 1) ln y + (b − 1) ln(1 − y)
+            // with a = μφ and b = (1 − μ)φ, so
+            //   ℓ_μ = φ (ψ(b) − ψ(a) + ln y − ln(1 − y)),
+            //   ℓ_φ = ψ(φ) − μ ψ(a) − (1 − μ) ψ(b) + μ ln y + (1 − μ) ln(1 − y).
+            let psi_a = gam_math::jet_tower::digamma(a);
+            let psi_b = gam_math::jet_tower::digamma(b);
+            let ln_y = yi.ln();
+            let ln_one_minus_y = (-yi).ln_1p();
+            let score_mu = phi * (psi_b - psi_a + ln_y - ln_one_minus_y);
+            let s_phi = gam_math::jet_tower::digamma(phi) - mu * psi_a - one_minus_mu * psi_b
+                + mu * ln_y
+                + one_minus_mu * ln_one_minus_y;
             let tri_a = gam_math::jet_tower::trigamma(a);
             let tri_b = gam_math::jet_tower::trigamma(b);
             let tri_phi = gam_math::jet_tower::trigamma(phi);
             let info_mu = phi * phi * (tri_a + tri_b);
-            let one_minus_mu = 1.0 - mu;
             let info_phi = mu * mu * tri_a + one_minus_mu * one_minus_mu * tri_b - tri_phi;
             let mean_weight = wi * q * q * info_mu;
             let mean_response = em + score_mu / (q * info_mu);
@@ -1227,21 +1209,25 @@ pub(super) fn dispersion_row_kernel(
             // NB/Gamma mean arms do.
             let mean_weight = wi * mu.powf(two_minus_p) / phi;
             let mean_response = em + (yi - mu) / mu;
-            // Dispersion channel: the η_d-space score and OBSERVED information
-            // come straight off the single-expression tower seeded on `η_d`
-            // (#932), so the saddlepoint/point-mass branch split, the
-            // `φ = exp(−η_d)` chain and its nonlinear `∂²φ/∂η_d²` curvature
-            // correction are all mechanically carried — no per-branch
-            // `s_phi`/`s_eta`/`curvature_eta` hand calculus. #1591: only the
-            // η_d axis is consumed, so the tower is the pruned single-axis
-            // `Order2<1>` (`η_μ` enters as a constant).
-            let tower = dispersion_tweedie_disp_order2(yi, em, ed, p, wi);
-            let loglik = -tower.value();
-            // η_d-space score and observed information off the tower, via the
-            // same helper the NB/Gamma/Beta arms use (returns `(0, 0)` when the
-            // prior weight is zero, so the row stays excluded below).
-            let (s_eta, info_eta_raw) = tower_score_info(&tower, 0, wi);
-            let curvature_eta = if yi > 0.0 { 0.5 } else { info_eta_raw };
+            // Dispersion channel in η_d, where φ = exp(−η_d) and so 1/φ = exp(η_d).
+            // Positive y (saddlepoint density):
+            //   ℓ = −dev/(2φ) − ½ ln(2πφ) − ½ p ln y, so ℓ′ = ½ − dev/(2φ).
+            // y = 0 (point mass), with c = μ^{2−p}/(2−p):
+            //   ℓ = −c/φ, so ℓ′ = ℓ″ = −c/φ.
+            // The positive branch keeps the constant curvature ½; the point mass
+            // uses its observed information c/φ.
+            let loglik = dispersion_tweedie_loglik(yi, em, ed, p, wi);
+            let one_minus_p = 1.0 - p;
+            let (s_eta, curvature_eta) = if yi > 0.0 {
+                let dev = (mu.powf(two_minus_p) * (1.0 / two_minus_p)
+                    - mu.powf(one_minus_p) * (yi / one_minus_p)
+                    + yi.powf(two_minus_p) / (one_minus_p * two_minus_p))
+                    * 2.0;
+                (0.5 - 0.5 * dev / phi, 0.5)
+            } else {
+                let info = mu.powf(two_minus_p) * (1.0 / two_minus_p) / phi;
+                (-info, info)
+            };
             let disp_weight = wi * curvature_eta;
             let disp_response = ed + s_eta / curvature_eta;
             DispersionRowKernel {
@@ -2428,7 +2414,10 @@ pub fn fit_dispersion_glm_location_scale_terms(
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{dispersion_gamma_nll_order2, dispersion_nb_nll_order2};
+    use super::test_support::{
+        dispersion_beta_nll_order2, dispersion_gamma_disp_order2, dispersion_gamma_nll_order2,
+        dispersion_nb_nll_order2, dispersion_tweedie_disp_order2,
+    };
     use super::*;
     use crate::gamlss::test_support::dispersion_tweedie_nll_generic;
     use gam_math::nested_dual::JetField;
@@ -3043,6 +3032,92 @@ mod tests {
                 ll_ref,
                 1e-9,
             );
+        }
+    }
+
+    /// SPEC rule 1 (#2901): the row kernel derives the Gamma, Beta and Tweedie
+    /// dispersion score and information by hand. Its working sets must match
+    /// the ones the pruned jet towers produce, across randomized rows and both
+    /// Tweedie density branches.
+    #[test]
+    fn row_kernel_closed_form_dispersion_channels_match_the_towers() {
+        let mut state: u64 = 0x2901_D15C_0A11_0001;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let close = |label: &str, hand: f64, tower: f64| {
+            let band = 1e-10 * (1.0 + hand.abs().max(tower.abs()));
+            assert!(
+                (hand - tower).abs() <= band,
+                "{label}: hand-derived {hand:.17e} vs tower {tower:.17e}"
+            );
+        };
+        for _ in 0..500 {
+            let wi = 0.25 + 3.0 * next();
+            let em = -3.0 + 6.0 * next();
+            let ed = -3.0 + 6.0 * next();
+
+            let yi = 0.01 + 8.0 * next();
+            let row = dispersion_row_kernel(DispersionFamilyKind::Gamma, yi, em, ed, wi);
+            let (mu, nu) = (em.exp(), ed.exp());
+            let tower = dispersion_gamma_disp_order2(yi, yi, mu, nu, wi);
+            let s_nu = -tower.g()[0] / wi;
+            let info_nu = tower.h()[0][0] / wi;
+            close("gamma loglik", row.loglik, -tower.value());
+            close("gamma disp weight", row.disp_weight, wi * nu * nu * info_nu);
+            close(
+                "gamma disp response",
+                row.disp_response,
+                ed + s_nu / (nu * info_nu),
+            );
+
+            let yi = 0.005 + 0.99 * next();
+            let em_beta = -2.5 + 5.0 * next();
+            let ed_beta = -1.0 + 4.0 * next();
+            let row = dispersion_row_kernel(DispersionFamilyKind::Beta, yi, em_beta, ed_beta, wi);
+            let logit = gam_solve::mixture_link::logit_inverse_link_jet5(em_beta);
+            let (mu, phi) = (logit.mu, ed_beta.exp());
+            let tower = dispersion_beta_nll_order2(yi, mu, phi, wi);
+            let score_mu = -tower.g()[0] / wi;
+            let s_phi = -tower.g()[1] / wi;
+            let tri_a = gam_math::jet_tower::trigamma(mu * phi);
+            let tri_b = gam_math::jet_tower::trigamma((1.0 - mu) * phi);
+            let info_mu = phi * phi * (tri_a + tri_b);
+            let info_phi = mu * mu * tri_a + (1.0 - mu) * (1.0 - mu) * tri_b
+                - gam_math::jet_tower::trigamma(phi);
+            close("beta loglik", row.loglik, -tower.value());
+            close(
+                "beta mean response",
+                row.mean_response,
+                em_beta + score_mu / (logit.d1 * info_mu),
+            );
+            close(
+                "beta disp response",
+                row.disp_response,
+                ed_beta + s_phi / (phi * info_phi),
+            );
+
+            let p = 1.1 + 0.8 * next();
+            for yi in [0.0, 0.01 + 9.0 * next()] {
+                let row = dispersion_row_kernel(DispersionFamilyKind::Tweedie { p }, yi, em, ed, wi);
+                let tower = dispersion_tweedie_disp_order2(yi, em, ed, p, wi);
+                let s_eta = -tower.g()[0] / wi;
+                let curvature_eta = if yi > 0.0 {
+                    0.5
+                } else {
+                    tower.h()[0][0] / wi
+                };
+                close("tweedie loglik", row.loglik, -tower.value());
+                close("tweedie disp weight", row.disp_weight, wi * curvature_eta);
+                close(
+                    "tweedie disp response",
+                    row.disp_response,
+                    ed + s_eta / curvature_eta,
+                );
+            }
         }
     }
 }

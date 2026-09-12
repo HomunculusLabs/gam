@@ -4680,5 +4680,13 @@
     ],
     "reason": "#2253/#2333, SPEC rule 25. After a39a27a17 removed SoftmaxSparseMixed and ArdMixed, ThetaAdjointDhChannel had the single variant All. Every caller passed it, and logdet_theta_adjoint_dense derived want_data, want_entropy, want_ard and include from it as constant true. The enum and the channel parameter are deleted, and the constant conditionals are unwrapped. No computation changes.",
     "evidence": "At the base, git grep -w ThetaAdjointDhChannel finds the declaration, two doc mentions, the parameter and three matches! in logdet_theta_adjoint_dense, one production call, the test_support import and call, and test imports and calls in construction_row_jet_logdet_channels.rs, tests.rs, tests_deflated_from_probes_2712.rs, tests_exact_a_probes_2828.rs, tests_sparse_curvature_operator_2500.rs and tests_trace_whitening_2333.rs. All are removed here. Not compiled locally (user directive); compile rests on the shared tip check."
+  },
+  {
+    "base": "d1143abd3a7464e253db09fdc6e857b6fbbb2ab7",
+    "items": [
+      "crates/gam-models/src/gamlss/dispersion_family.rs:fn:tower_score_info"
+    ],
+    "reason": "SPEC rule 1 (#2901 V1): the dispersion location-scale row kernel took the Gamma, Beta and Tweedie dispersion score and information from forward-mode jet towers, which no speed gate compares with a hand-derived path. The kernel now derives them by hand (digamma/trigamma closed forms and the Tweedie saddlepoint/point-mass derivatives in eta_d). tower_score_info, the helper that read score and information off a tower for that kernel, loses its only caller and is deleted. The three pruned towers move into the file's cfg(test) test_support module as oracles.",
+    "evidence": "At the base, git grep -n -w tower_score_info finds only its declaration and its four calls in dispersion_row_kernel (crates/gam-models/src/gamlss/dispersion_family.rs), and all four are replaced here. dispersion_beta_nll_order2, dispersion_gamma_disp_order2 and dispersion_tweedie_disp_order2 keep their declarations in the same file, so the guard sees no removal for them. The new test row_kernel_closed_form_dispersion_channels_match_the_towers checks the hand-derived working sets against the towers. The item list applies source_removal_guard.py's ITEM regex to the base and changed blobs by hand, and tower_score_info is pub(crate), so it is guarded. Compile is covered by the lead's shared tip check."
   }
 ]
