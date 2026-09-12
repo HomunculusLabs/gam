@@ -1712,10 +1712,12 @@ pub(super) fn fit_exact_joint<F: CustomFamily + Clone + Send + Sync + 'static>(
                         "[JN-REFLECT-DIAG #1040] cycle={cycle} CONSTRAINED_QP lambda_min_signed_raw={min_eval_raw:.3e} lambda_min_signed_reflected={min_eval_refl:.3e} nullity={} condition={:.3e} (reflection {})",
                         constrained_geometry.nullity,
                         constrained_geometry.condition,
-                        if min_eval_refl > min_eval_raw + min_eval_raw.abs() * 1e-9 {
+                        // Both minima are read off one eigendecomposition, so a
+                        // stabilization that moved no eigenvalue leaves them equal.
+                        if min_eval_refl != min_eval_raw {
                             "CHANGED the spectrum"
                         } else {
-                            "NO-OP (already PSD)"
+                            "NO-OP"
                         },
                     );
                 }
