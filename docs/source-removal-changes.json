@@ -4620,5 +4620,13 @@
     ],
     "reason": "SPEC rule 16 (#2627; reported by surv2714): every test in joint_newton_isotropic_tr_starvation.rs scores a hand-written copy of joint-Newton trust-region primitives: the historical raw-L2 truncation, a block-metric truncation, a boundary-block shrink, and update_radius_joint_rho, a 4-argument mirror of update_joint_trust_region_radius with fixed rho thresholds 0.25/0.75 and no noise floor (the production controller takes 9 arguments and delegates to opt::TrustRegionPolicy::noise_aware). The file imports nothing from gam, so no product behaviour can turn any of its tests red.",
     "evidence": "At the base, the file contains no gam:: path, and its only reference in crates, src, tests, docs, scripts and .config is `mod joint_newton_isotropic_tr_starvation;` in tests/perf_scale/misc/mod.rs, which this commit removes. The production primitives stay under in-crate tests: crates/gam-custom-family/src/tests/inner_solver_numerics.rs calls update_joint_trust_region_radius (lines 549, 576, 599, 617) and shrink_active_joint_block_trust_radii (5911, 6158). The item list applies source_removal_guard.py's ITEM regex to the base blob. Not compiled or run locally (user directive)."
+  },
+  {
+    "base": "4a0a78a759aeaad2383255ee3e55837fed2720c3",
+    "items": [
+      "crates/gam-sae/src/manifold/intrinsic_seed.rs:const:MDS_EIGENVALUE_FLOOR_FRAC"
+    ],
+    "reason": "#2469: MDS_EIGENVALUE_FLOOR_FRAC (1e-9 of the leading eigenvalue) was a picked cutoff for the intrinsic seed's classical-MDS axes. An axis now counts only when it clears the eigensolver backward error l*eps*lambda_max and the magnitude of the most negative MDS eigenvalue. The latter measures, on the same spectrum, the non-embeddability of the geodesic metric, which spreads spurious eigenvalues of both signs.",
+    "evidence": "git grep -n MDS_EIGENVALUE_FLOOR_FRAC at the base finds only its declaration and one use, at crates/gam-sae/src/manifold/intrinsic_seed.rs:409 (the MDS axis selection), and no test names it. Nothing here was compiled or run locally (user directive); compile is covered by the lead's shared tip check."
   }
 ]

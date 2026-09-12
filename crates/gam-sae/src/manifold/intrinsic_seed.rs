@@ -42,16 +42,6 @@ use std::collections::BinaryHeap;
 
 use faer::Side;
 
-/// An MDS eigenvalue counts as a genuine embedding axis only when it is POSITIVE
-/// and clears this fraction of the leading (largest) eigenvalue. Classical MDS on
-/// a geodesic (non-Euclidean) distance matrix produces small negative and
-/// near-zero eigenvalues from the metric's slight non-embeddability; those axes
-/// carry no coordinate signal and their `1/√λ` extension weight blows up, so they
-/// are dropped rather than fed a vanishing denominator. `1e-9` sits ~7 orders
-/// above the f64 eigensolver noise on a normalized Gram and ~all the way below any
-/// axis carrying real spread.
-const MDS_EIGENVALUE_FLOOR_FRAC: f64 = 1.0e-9;
-
 /// Neighborhood degree `k` for the intrinsic seed's kNN graph, derived from the
 /// embedding dimension and the sample size rather than a tuned scalar — the SAME
 /// principled rule the topology seed uses (`super::pca_seed::topology_seed_knn`):
@@ -406,7 +396,14 @@ pub fn intrinsic_geodesic_embedding(
     if !(leading > 0.0) {
         return Ok(out); // degenerate (all rows coincide): zero embedding
     }
-    let floor = leading * MDS_EIGENVALUE_FLOOR_FRAC;
+    // An axis counts only when it clears both the eigensolver's backward error
+    // `l·ε·λ_max` and the metric's measured non-embeddability. Classical MDS on a
+    // geodesic distance that is not exactly Euclidean spreads spurious eigenvalues
+    // of both signs, and the most negative one reads their magnitude off this
+    // spectrum. Such axes carry no coordinate signal and their `1/√λ` extension
+    // weight blows up.
+    let most_negative = evals.iter().cloned().fold(0.0_f64, f64::min);
+    let floor = (evals.len() as f64 * f64::EPSILON * leading).max(-most_negative);
     let mut order: Vec<usize> = (0..evals.len()).collect();
     order.sort_by(|&i, &j| evals[j].total_cmp(&evals[i]).then_with(|| i.cmp(&j)));
     let axes: Vec<usize> = order
