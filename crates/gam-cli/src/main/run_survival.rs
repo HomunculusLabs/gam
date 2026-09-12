@@ -7,8 +7,13 @@ pub(crate) fn survival_time_initial_log_lambdas(
     if penalties.is_empty() {
         None
     } else {
-        let lambda0 = time_build.smooth_lambda.unwrap_or(1e-2).max(1e-12).ln();
-        Some(Array1::from_elem(penalties.len(), lambda0))
+        // The seed the library's survival routes use: the basis's configured
+        // `time_smooth_lambda`, or `FitConfig`'s default when it carries none,
+        // taken as it is.
+        let seed_lambda = time_build
+            .smooth_lambda
+            .unwrap_or_else(|| FitConfig::default().time_smooth_lambda);
+        Some(Array1::from_elem(penalties.len(), seed_lambda.ln()))
     }
 }
 
