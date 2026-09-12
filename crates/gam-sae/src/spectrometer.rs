@@ -494,6 +494,23 @@ fn fit_scaling_law(rungs: &[(usize, f64)]) -> Result<ScalingLaw, String> {
         );
     }
 
+    // Rung losses that are all equal carry no decay information. The log-excess
+    // response `ln(L − σ²)` is then one constant at every `σ²`, so the excess
+    // regression's slope and RSS are exactly zero across the whole floor domain: the
+    // profile is identically flat and has no minimizer to select, and its derivatives
+    // are only rounding amplified by `1/(L − σ²)`. The law is known in closed form:
+    // no decay (`m = 0`, floor saturated), any floor below `L_min` explains the rungs
+    // (the smallest, `σ² = 0`, is reported), and `d = −2/m` has no finite value.
+    if losses.iter().all(|&loss| loss == losses[0]) {
+        return Ok(ScalingLaw {
+            sigma2: 0.0,
+            slope: 0.0,
+            slope_se: 0.0,
+            d_hat: f64::INFINITY,
+            d_hat_se: f64::INFINITY,
+            floor_saturated: true,
+        });
+    }
     let sigma2 = profile_noise_floor(&losses, &t, t_bar, stt)?;
 
     let fit = ols_log_excess(&losses, &t, t_bar, stt, sigma2)
@@ -543,9 +560,10 @@ fn fit_scaling_law(rungs: &[(usize, f64)]) -> Result<ScalingLaw, String> {
 /// `dRSS/dσ² = 2·rᵀu`,  `d²RSS/dσ²² = 2·‖P⊥u‖² − 2·Σ r_i·u_i²`
 ///
 /// (`du_i/dσ² = −u_i²`). The search runs in the scale-free coordinate
-/// `s = σ²/L_min ∈ [0, 1]` through the workspace's outer engine, with a single
-/// start and its mandatory certificate. At `s = 1` the smallest excess vanishes,
-/// so a trial there is refused rather than priced. A search the engine cannot
+/// `s = σ²/L_min ∈ [0, 1 − 2ε]` through the workspace's outer engine, with a single
+/// start and its mandatory certificate. The smallest excess vanishes at `s = 1`, so
+/// the box closes at `s = 1 − 2ε`, the largest `s` where that excess is resolvably
+/// positive. A search the engine cannot
 /// certify is an error, never a returned floor.
 fn profile_noise_floor(losses: &[f64], t: &[f64], t_bar: f64, stt: f64) -> Result<f64, String> {
     use gam_solve::estimate::EstimationError;
@@ -608,7 +626,14 @@ fn profile_noise_floor(losses: &[f64], t: &[f64], t_bar: f64, stt: f64) -> Resul
         .with_gradient(Derivative::Analytic)
         .with_hessian(DeclaredHessianForm::Dense)
         .with_psi_dim(1)
-        .with_bounds(Array1::from_vec(vec![0.0]), Array1::from_vec(vec![1.0]))
+        // The box closes where the smallest excess is still resolvably positive:
+        // `σ² = s·L_min` rounds by `ε/2` of `L_min` and `L_min − σ²` is exact
+        // (Sterbenz), so at `s = 1 − 2ε` the smallest excess is at least `1.5ε·L_min`.
+        // Every point of the declared box, its upper face included, is priced.
+        .with_bounds(
+            Array1::from_vec(vec![0.0]),
+            Array1::from_vec(vec![1.0 - 2.0 * f64::EPSILON]),
+        )
         .with_initial_rho(Array1::from_vec(vec![0.5]))
         .with_seed_config(gam_solve::seeding::SeedConfig {
             max_seeds: 1,
