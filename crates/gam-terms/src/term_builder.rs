@@ -437,9 +437,9 @@ pub fn build_termspec(
                         feature_col: col,
                         feature_cols: vec![col],
                         categorical_levels: vec![],
-                        // Parametric terms are unpenalized/MLE by default.
-                        // `double_penalty=true` is an explicit shrinkage choice
-                        // carried by the parsed term.
+                        // Parametric terms carry the null-recovery ridge by
+                        // default (SPEC rules 12, 14); `double_penalty=false` is
+                        // the explicit opt-out carried by the parsed term.
                         double_penalty: *double_penalty,
                         coefficient_geometry: LinearCoefficientGeometry::Unconstrained,
                         coefficient_min: *coefficient_min,
@@ -454,8 +454,8 @@ pub fn build_termspec(
                                 feature_col: col,
                                 feature_cols: vec![col],
                                 categorical_levels: vec![],
-                                // Preserve the parser's explicit opt-in. Bare
-                                // numeric terms arrive as `false`.
+                                // Preserve the parser's choice. Bare numeric terms
+                                // arrive as `true` unless opted out.
                                 double_penalty: *double_penalty,
                                 coefficient_geometry: LinearCoefficientGeometry::Unconstrained,
                                 coefficient_min: *coefficient_min,
@@ -639,29 +639,28 @@ pub fn build_termspec(
                                         .unwrap_or(false),
                                     _ => false,
                                 });
-                            // Add an unpenalized treatment-coded fixed main
-                            // effect for a standalone factor-by smooth, unless
-                            // the same factor already has an explicit
-                            // `group(factor)` term OR a bare categorical `+
-                            // factor` that was auto-promoted to a penalized
-                            // random block (#1457).  In those mixed-model forms
-                            // the penalized random intercept is the coherent
-                            // owner of level offsets; adding a no-pooling fixed
-                            // factor effect would bypass random-effect
-                            // shrinkage and degrade BLUP-style predictions.
+                            // Add the factor main effect for a standalone
+                            // factor-by smooth, unless the same factor already has
+                            // an explicit `group(factor)` term OR a bare categorical
+                            // `+ factor` that was auto-promoted to a penalized
+                            // random block (#1457), which already owns the level
+                            // offsets. The main effect is that same penalized
+                            // full-level block, the one a bare `+ factor` lowers
+                            // to: its REML variance can shrink every offset to the
+                            // null (SPEC rules 12, 14), where an unpenalized
+                            // treatment-coded effect could never be removed.
                             if !random_terms.iter().any(|rt| rt.name == by_name)
                                 && !penalized_group_owner_present
                             {
                                 random_terms.push(RandomEffectTermSpec {
                                     name: by_name.clone(),
                                     feature_col: by_col,
-                                    drop_first_level: true,
-                                    penalized: false,
+                                    drop_first_level: false,
+                                    penalized: true,
                                     frozen_levels: None,
-                                    // Unpenalized treatment-coded FIXED factor main
-                                    // effect for a factor-by smooth: an unseen level
-                                    // is out of contract and must raise, not center
-                                    // (#2102).
+                                    // A FIXED factor main effect, like a bare `+ g`:
+                                    // an unseen level is out of contract and must
+                                    // raise, not center (#2102).
                                     lenient_unseen: false,
                                 });
                             }

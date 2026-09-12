@@ -3080,7 +3080,7 @@ fn sz_penalty_metadata_is_emitted_in_matrix_order_2289() {
 /// two `g` design blocks. The bare `+ g` is auto-promoted to a single
 /// penalized random-effect block owning the factor's full level offsets; the
 /// `by=` branch must then recognize that owner and skip adding its own
-/// unpenalized treatment-coded main effect. Before the fix the dedup guard
+/// main effect. Before the fix the dedup guard
 /// recognized only explicit `group(g)` (a `ParsedTerm::RandomEffect`), so the
 /// auto-promoted bare-`+ g` block slipped past and a spurious second `g`
 /// block (plus an extra smoothing parameter) was added. Assert exactly ONE
@@ -3229,8 +3229,8 @@ fn factor_by_smooth_plus_bare_categorical_does_not_duplicate_factor_block() {
     };
 
     // Baseline: the standalone factor-by smooth carries exactly ONE `g`
-    // block (the unpenalized treatment-coded factor main effect added by the
-    // `by=` branch).
+    // block: the penalized full-level factor main effect the `by=` branch adds,
+    // so the level offsets can shrink to the null (SPEC rule 14).
     let by_only = g_blocks("y ~ s(x, by=g, k=10)");
     assert_eq!(
         by_only, 1,
@@ -3245,7 +3245,7 @@ fn factor_by_smooth_plus_bare_categorical_does_not_duplicate_factor_block() {
         by_plus_bare, 1,
         "`y ~ s(x, by=g) + g` must collapse to ONE `g` block (#1457): the bare \
              `+ g` already owns the factor's level offsets, so the `by=` branch \
-             must not add a second, treatment-coded main effect"
+             must not add a second main effect"
     );
 
     // The bare `+ g` adds no spurious extra `g` block versus the baseline.
