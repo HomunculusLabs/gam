@@ -3389,12 +3389,14 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                         warm_start.as_ref(),
                         eval_mode,
                     ).map_err(|error| error.to_string())?;
-                    *hyper_warm_start_cell.borrow_mut() = Some(owned.result.warm_start.clone());
+                    // An unconverged inner state is neither a fit nor a seed
+                    // (#2902): the next trial warm-starts from the last converged mode.
                     if !owned.result.inner_converged {
                         return Err(
                             "exact two-block spatial inner solve did not converge".to_string(),
                         );
                     }
+                    *hyper_warm_start_cell.borrow_mut() = Some(owned.result.warm_start.clone());
                     if matches!(eval_mode, EvalMode::ValueGradientHessian)
                         && !owned.result.outer_hessian.is_analytic()
                     {
@@ -3462,12 +3464,12 @@ pub(crate) fn fit_location_scale_terms<B: LocationScaleFamilyBuilder>(
                         &hyper_layout,
                         warm_start.as_ref(),
                     ).map_err(|error| error.to_string())?;
-                    *hyper_warm_start_cell.borrow_mut() = Some(owned.result.warm_start.clone());
                     if !owned.result.inner_converged {
                         return Err(
                             "exact two-block spatial EFS inner solve did not converge".to_string(),
                         );
                     }
+                    *hyper_warm_start_cell.borrow_mut() = Some(owned.result.warm_start.clone());
                     Ok(ExactJointEfsEvaluation {
                         evaluation: owned.result.efs_eval,
                         mode: owned.mode,

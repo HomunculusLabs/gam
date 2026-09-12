@@ -960,12 +960,15 @@ pub(crate) fn fit_survival_location_scale_terms(
                 effective_mode,
             )
             .map_err(|e| e.to_string())?;
-            exact_warm_start.replace(Some(owned.result.warm_start.clone()));
+            // An unconverged inner state (a SlowGeometricRate or stall exit) is
+            // neither a fit nor a seed (#2902): the next trial warm-starts from
+            // the last converged mode.
             if !owned.result.inner_converged {
                 return Err(
                     "survival location-scale exact joint inner solve did not converge".to_string(),
                 );
             }
+            exact_warm_start.replace(Some(owned.result.warm_start.clone()));
             Ok(ExactJointEvaluation {
                 objective: owned.result.objective,
                 gradient: owned.result.gradient,
@@ -1044,13 +1047,13 @@ pub(crate) fn fit_survival_location_scale_terms(
                 exact_warm_start.borrow().as_ref(),
             )
             .map_err(|e| e.to_string())?;
-            exact_warm_start.replace(Some(owned.result.warm_start.clone()));
             if !owned.result.inner_converged {
                 return Err(
                     "survival location-scale exact joint EFS inner solve did not converge"
                         .to_string(),
                 );
             }
+            exact_warm_start.replace(Some(owned.result.warm_start.clone()));
             Ok(ExactJointEfsEvaluation {
                 evaluation: owned.result.efs_eval,
                 mode: owned.mode,
