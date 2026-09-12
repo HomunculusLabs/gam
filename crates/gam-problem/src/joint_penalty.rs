@@ -189,7 +189,7 @@ impl JointPenaltySpec {
     /// This is the rank used by the REML pseudo-logdet under the
     /// no-numerical-thresholds policy in the surrounding code.
     #[inline]
-    pub fn pseudo_rank(&self) -> usize {
+    pub(crate) fn pseudo_rank(&self) -> usize {
         self.dim().saturating_sub(self.nullspace_dim)
     }
 

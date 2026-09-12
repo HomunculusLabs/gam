@@ -111,7 +111,7 @@ fn effective_scale(scale: f64, idx: usize, role: &str) -> Result<f64, Estimation
 /// are mapped to `f64::MIN_POSITIVE` by the same effective-scale transform used
 /// at prediction time. Returns an `EstimationError::InvalidInput` otherwise —
 /// never a silently degenerate score vector.
-pub fn nonconformity_scores(
+pub(crate) fn nonconformity_scores(
     residuals: ArrayView1<'_, f64>,
     scales: ArrayView1<'_, f64>,
 ) -> Result<Array1<f64>, EstimationError> {
@@ -148,7 +148,7 @@ pub fn nonconformity_scores(
 /// and the only honest multiplier is `+∞` (the unbounded interval). Uses the
 /// exact order statistic — no interpolation — so the finite-sample coverage
 /// guarantee is preserved.
-pub fn conformal_multiplier(
+pub(crate) fn conformal_multiplier(
     scores: ArrayView1<'_, f64>,
     alpha: f64,
 ) -> Result<f64, EstimationError> {
@@ -209,7 +209,7 @@ impl ConformalCalibrator {
     /// Build a calibrator directly from held-out residuals and per-point
     /// raw scales. This is the pure core both
     /// `ConformalCalibrator::from_held_out_fold` and the e2e tests route through.
-    pub fn from_residuals_and_scales(
+    pub(crate) fn from_residuals_and_scales(
         residuals: ArrayView1<'_, f64>,
         scales: ArrayView1<'_, f64>,
         alpha: f64,
@@ -283,7 +283,7 @@ impl ConformalCalibrator {
     /// calibration. When `q̂ = +∞` the interval is unbounded (`(−∞, +∞)`, then
     /// clamped to the support) — the honest answer when the calibration set
     /// could not certify coverage.
-    pub fn calibrated_interval(
+    pub(crate) fn calibrated_interval(
         &self,
         mean: &Array1<f64>,
         scale: &Array1<f64>,

@@ -17,11 +17,11 @@ use std::error::Error;
 use std::fmt;
 
 /// Default confidence level for effect bands.
-pub const DEFAULT_BAND_LEVEL: f64 = 0.95;
+pub(crate) const DEFAULT_BAND_LEVEL: f64 = 0.95;
 /// Default Monte Carlo draw count for simultaneous bands.
-pub const DEFAULT_SIMULATIONS: usize = 10_000;
+pub(crate) const DEFAULT_SIMULATIONS: usize = 10_000;
 /// Default deterministic random seed for simultaneous bands.
-pub const DEFAULT_SIMULATION_SEED: u64 = 12_345;
+pub(crate) const DEFAULT_SIMULATION_SEED: u64 = 12_345;
 
 /// The coefficient covariance definition used by an effect report.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,7 +79,7 @@ fn covariance_by_source(fit: &UnifiedFitResult, source: CovarianceSource) -> Opt
 
 /// Configuration for a pointwise normal-theory confidence band.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PointwiseBandOptions {
+pub(crate) struct PointwiseBandOptions {
     pub level: f64,
 }
 
@@ -93,7 +93,7 @@ impl Default for PointwiseBandOptions {
 
 /// Configuration for a simulated simultaneous confidence band.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SimultaneousBandOptions {
+pub(crate) struct SimultaneousBandOptions {
     pub level: f64,
     pub simulations: usize,
     pub seed: u64,
@@ -111,7 +111,7 @@ impl Default for SimultaneousBandOptions {
 
 /// Confidence-band procedure for a linear effect curve.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum BandOptions {
+pub(crate) enum BandOptions {
     /// Independent marginal normal intervals at each contrast row.
     Pointwise(PointwiseBandOptions),
     /// A common critical value calibrated from the supremum of the standardized
@@ -127,7 +127,7 @@ impl Default for BandOptions {
 
 /// A matrix-level effect report, with one entry per contrast-design row.
 #[derive(Clone, Debug, PartialEq)]
-pub struct EffectReport {
+pub(crate) struct EffectReport {
     pub center: Array1<f64>,
     pub se: Array1<f64>,
     pub lower: Array1<f64>,
@@ -258,7 +258,7 @@ impl Error for EffectError {}
 /// standardized Gaussian curve and factor whichever covariance space is
 /// smaller: coefficient space when `p <= m`, projected curve space otherwise.
 /// Positive-semidefinite singular matrices are supported without a ridge.
-pub fn effect_report(
+pub(crate) fn effect_report(
     beta: ArrayView1<'_, f64>,
     covariance: ArrayView2<'_, f64>,
     contrast_design: ArrayView2<'_, f64>,

@@ -336,7 +336,7 @@ pub struct ContractFeasibleStep {
 
 impl ContractFeasibleStep {
     /// The unlimited answer: the whole direction is admissible.
-    pub const UNLIMITED: Self = Self {
+    pub(crate) const UNLIMITED: Self = Self {
         fraction: 1.0,
         blocking_row: None,
         blocking_scaled_slack: f64::INFINITY,

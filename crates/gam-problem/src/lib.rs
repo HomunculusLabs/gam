@@ -525,7 +525,7 @@ impl Default for ProjectedFactorCache {
 }
 
 impl ProjectedFactorCache {
-    pub const DEFAULT_BUDGET_BYTES: usize = 2 * 1024 * 1024 * 1024;
+    pub(crate) const DEFAULT_BUDGET_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
     pub fn with_budget(budget_bytes: usize) -> Self {
         Self {

@@ -99,10 +99,10 @@ impl gam_problem::rho_posterior::RhoPosteriorEscalator for HmcIoRhoPosteriorEsca
 
 /// Largest `K` for which the Tier-1 Gauss-Hermite product grid is affordable
 /// (3–5 nodes per axis ⇒ at most 81–125 criterion evaluations).
-pub const TIER1_MAX_DIM: usize = 4;
+pub(crate) const TIER1_MAX_DIM: usize = 4;
 /// Largest `K` for which the Tier-2 NUTS escalation runs; beyond this the fit
 /// honestly reports that escalation is unavailable.
-pub const TIER2_MAX_DIM: usize = 16;
+pub(crate) const TIER2_MAX_DIM: usize = 16;
 /// Post-warmup draw budget for the auto-selected Tier-2 escalation. Each
 /// leapfrog step is one warm inner profile solve, so the budget is deliberately
 /// modest: the whitened `ρ`-posterior is a smooth, near-Gaussian, low-dim

@@ -669,7 +669,7 @@ fn validate_hmc_arrays(
 /// quadratic `−½ zᵀMz` inside the leapfrog hot loop.  Optionally adds
 /// the identifiable-subspace Firth/Jeffreys term to keep posterior modes
 /// away from infinity under separation.
-pub struct NutsPosterior {
+pub(crate) struct NutsPosterior {
     /// Shared read-only data (Arc prevents duplication)
     data: SharedData,
     /// Transform: L where L L^T = H^{-1} (computed from Hessian)
@@ -3857,7 +3857,7 @@ fn sample_standard_normal<R: rand::Rng + ?Sized>(rng: &mut R) -> f64 {
 ///
 /// For weighted data, this implementation is defined for weights ≈ 1.0 because it
 /// samples PG(1,·) latent variables.
-pub fn run_logit_polya_gamma_gibbs(
+pub(crate) fn run_logit_polya_gamma_gibbs(
     x: ArrayView2<f64>,
     y: ArrayView1<f64>,
     weights: ArrayView1<f64>,
@@ -4279,7 +4279,7 @@ where
 ///
 /// Returns draws in the ORIGINAL `ρ` space (un-whitened), with split-R̂/ESS
 /// diagnostics.
-pub fn run_rho_criterion_nuts<F>(
+pub(crate) fn run_rho_criterion_nuts<F>(
     rho_hat: ArrayView1<f64>,
     outer_hessian: ArrayView2<f64>,
     mut criterion_and_grad: F,
@@ -4379,7 +4379,7 @@ pub struct GlmFlatInputs<'a> {
 }
 
 /// Flat survival inputs for engine-facing HMC APIs.
-pub struct SurvivalFlatInputs<'a> {
+pub(crate) struct SurvivalFlatInputs<'a> {
     pub age_entry: ArrayView1<'a, f64>,
     pub age_exit: ArrayView1<'a, f64>,
     pub event_target: ArrayView1<'a, u8>,
@@ -5568,7 +5568,7 @@ mod survival_hmc {
 
     /// Whitened log-posterior target for survival models with analytical gradients.
     #[derive(Clone)]
-    pub struct SurvivalPosterior {
+    pub(crate) struct SurvivalPosterior {
         /// Shared read-only data (Arc prevents duplication)
         data: SharedSurvivalData,
         /// Transform: L where L L^T = H^{-1}
@@ -5779,7 +5779,7 @@ mod survival_hmc {
 }
 
 /// Engine-facing flattened survival NUTS entrypoint.
-pub fn run_survival_nuts_sampling_flattened<'a>(
+pub(crate) fn run_survival_nuts_sampling_flattened<'a>(
     flat: SurvivalFlatInputs<'a>,
     penalties: gam_models::survival::PenaltyBlocks,
     monotonicity: gam_models::survival::SurvivalMonotonicityPenalty,

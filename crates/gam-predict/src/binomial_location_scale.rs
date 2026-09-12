@@ -11,7 +11,7 @@ use super::*;
 ///
 /// Delta-method SEs propagate through the chain rule of q0 w.r.t. both
 /// linear predictors.
-pub struct BinomialLocationScalePredictor {
+pub(crate) struct BinomialLocationScalePredictor {
     pub beta_threshold: Array1<f64>,
     pub beta_noise: Array1<f64>,
     pub covariance: Option<Array2<f64>>,

@@ -45,7 +45,7 @@ impl ResponseBounds {
     /// Unbounded response — endpoints are passed through unclamped.
     pub const UNBOUNDED: Self = Self(None);
     /// Closed unit interval `[0, 1]` (probabilities, survival tails).
-    pub const UNIT_PROBABILITY: Self = Self(Some((0.0, 1.0)));
+    pub(crate) const UNIT_PROBABILITY: Self = Self(Some((0.0, 1.0)));
 
     /// Explicit closed bounds.
     pub fn closed(lo: f64, hi: f64) -> Self {
@@ -67,7 +67,7 @@ impl ResponseBounds {
     /// crosses the support floor for a small fitted mean even when the
     /// mean-interval clamp is `None`. See
     /// [`ResponseFamily::response_support_bounds`].
-    pub fn response_support(response: &ResponseFamily) -> Self {
+    pub(crate) fn response_support(response: &ResponseFamily) -> Self {
         Self(response.response_support_bounds())
     }
 
@@ -82,7 +82,7 @@ impl ResponseBounds {
     }
 
     /// Clamp every entry of `values` in place into the support.
-    pub fn clamp_in_place(&self, values: &mut Array1<f64>) {
+    pub(crate) fn clamp_in_place(&self, values: &mut Array1<f64>) {
         if let Some((lo, hi)) = self.0 {
             values.mapv_inplace(|v| v.clamp(lo, hi));
         }
@@ -95,14 +95,14 @@ impl ResponseBounds {
 /// This is the single source of truth for the confidence-level convention used
 /// throughout the predict path; every predictor's interval construction routes
 /// its quantile through here so the convention cannot diverge.
-pub fn central_z(level: f64) -> Result<f64, EstimationError> {
+pub(crate) fn central_z(level: f64) -> Result<f64, EstimationError> {
     gam_math::probability::standard_normal_quantile(0.5 + 0.5 * level)
         .map_err(EstimationError::InvalidInput)
 }
 
 /// Validate that a confidence level is a usable probability in the open unit
 /// interval, returning the corresponding central multiplier.
-pub fn validated_central_z(level: f64) -> Result<f64, EstimationError> {
+pub(crate) fn validated_central_z(level: f64) -> Result<f64, EstimationError> {
     if !(level.is_finite() && level > 0.0 && level < 1.0) {
         return Err(EstimationError::InvalidInput(format!(
             "confidence_level must be in (0,1), got {level}"
@@ -113,7 +113,7 @@ pub fn validated_central_z(level: f64) -> Result<f64, EstimationError> {
 
 /// The symmetric interval `center ± z·se`, returned as `(lower, upper)`.
 #[inline]
-pub fn symmetric_interval(
+pub(crate) fn symmetric_interval(
     center: &Array1<f64>,
     se: &Array1<f64>,
     z: f64,
@@ -201,7 +201,7 @@ where
 
 /// Response-scale interval built by the delta method `μ ± z·SE(μ)`, then
 /// clamped to `bounds`.
-pub fn delta_mean_interval(
+pub(crate) fn delta_mean_interval(
     mean: &Array1<f64>,
     mean_se: &Array1<f64>,
     z: f64,
@@ -332,7 +332,7 @@ pub struct UncertaintyProvenance {
 /// the same fit. They previously held that agreement — and this
 /// `√(mean_se² + obsvar)` convention, shared with `family_observation_band` — by
 /// asserting it in a comment in each copy rather than by sharing a call.
-pub fn symmetric_predictive_band(
+pub(crate) fn symmetric_predictive_band(
     mean: &Array1<f64>,
     mean_standard_error: &Array1<f64>,
     noise_sd: &Array1<f64>,

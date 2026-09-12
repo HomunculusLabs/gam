@@ -186,7 +186,7 @@ pub struct ScalarSkovgaardResult {
 
 /// The materiality threshold (#939 deliverable 4): a correction is material when
 /// it moves the result by more than 10%.
-pub const SKOVGAARD_MATERIAL_THRESHOLD: f64 = 0.10;
+pub(crate) const SKOVGAARD_MATERIAL_THRESHOLD: f64 = 0.10;
 
 /// Assemble the scalar Skovgaard `r*` from its ingredients.
 ///

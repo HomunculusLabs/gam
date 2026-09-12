@@ -269,7 +269,7 @@ fn count_quantile_bracket_bisect(cdf: impl Fn(f64) -> f64, seed: f64, p: f64) ->
 /// has no zero atom and grossly over-covers the lower tail on low-mean counts
 /// (#1193). A normal-approximation seed brackets the root, then an exact
 /// bisection on the incomplete-beta CDF finds the smallest qualifying integer.
-pub fn negative_binomial_quantile(p: f64, mu: f64, theta: f64) -> f64 {
+pub(crate) fn negative_binomial_quantile(p: f64, mu: f64, theta: f64) -> f64 {
     if !(mu.is_finite() && mu >= 0.0 && theta.is_finite() && theta > 0.0) {
         return f64::NAN;
     }
@@ -383,7 +383,7 @@ fn poisson_cdf_at(k: f64, mu: f64) -> f64 {
 /// low-rate counts and under-covers the upper tail (the #817 defect, Poisson
 /// sibling of #1193). A normal-approximation seed brackets the root, then an
 /// exact bisection on the gamma-tail CDF finds the smallest qualifying integer.
-pub fn poisson_quantile(p: f64, mu: f64) -> f64 {
+pub(crate) fn poisson_quantile(p: f64, mu: f64) -> f64 {
     if !(mu.is_finite() && mu >= 0.0) {
         return f64::NAN;
     }
@@ -547,7 +547,7 @@ fn tweedie_cdf_at(y: f64, mu: f64, phi: f64, power: f64) -> f64 {
 /// on the Tweedie moments brackets the root, which is then refined by bisection
 /// on `tweedie_cdf_at` — the continuous part above the atom is strictly
 /// increasing, so the bracket converges.
-pub fn tweedie_quantile(q: f64, mu: f64, phi: f64, power: f64) -> f64 {
+pub(crate) fn tweedie_quantile(q: f64, mu: f64, phi: f64, power: f64) -> f64 {
     if !(mu.is_finite()
         && mu > 0.0
         && phi.is_finite()

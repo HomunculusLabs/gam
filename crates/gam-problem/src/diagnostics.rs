@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 // Pattern: show first occurrence, then every Nth occurrence, with count indicator.
 
 /// Decade of the last Hessian minimum eigenvalue the diagnostic emitted.
-pub static H_MIN_EIG_LOG_BUCKET: AtomicI32 = AtomicI32::new(i32::MIN);
+pub(crate) static H_MIN_EIG_LOG_BUCKET: AtomicI32 = AtomicI32::new(i32::MIN);
 
 /// Diagnostic formatter shared across the outer optimizer and the custom-family
 /// fitter: shows the `max_items` entries of `values` with largest absolute
@@ -71,14 +71,14 @@ pub struct PredictionDiagnostics {
 /// Individual log-loss and Nagelkerke APIs accept an explicit clipping value;
 /// this named policy keeps the combined Rust/Python diagnostic contract in one
 /// core location.
-pub const DEFAULT_PROBABILITY_CLIP: f64 = 1.0e-12;
+pub(crate) const DEFAULT_PROBABILITY_CLIP: f64 = 1.0e-12;
 
 /// Smallest standard deviation used by the bundled Gaussian score panel.
 pub const DEFAULT_GAUSSIAN_SCALE_FLOOR: f64 = 1.0e-12;
 
 /// Number of equal-width probability bins in the bundled expected-calibration
 /// error diagnostic.
-pub const DEFAULT_CALIBRATION_BINS: usize = 20;
+pub(crate) const DEFAULT_CALIBRATION_BINS: usize = 20;
 
 /// Production classification scores computed from one prediction vector.
 #[derive(Clone, Debug, PartialEq)]
@@ -378,7 +378,7 @@ pub fn nagelkerke_r_squared_from_predictions(
 /// Trapezoidal area under the precision-recall curve. Equal predicted scores
 /// enter as one threshold group, so row order within a tie cannot change the
 /// score.
-pub fn precision_recall_auc_from_predictions(
+pub(crate) fn precision_recall_auc_from_predictions(
     observed: &[f64],
     predicted_mean: &[f64],
 ) -> Result<f64, String> {
@@ -421,7 +421,7 @@ pub fn precision_recall_auc_from_predictions(
 }
 
 /// Equal-width-bin expected calibration error.
-pub fn expected_calibration_error_from_predictions(
+pub(crate) fn expected_calibration_error_from_predictions(
     observed: &[f64],
     predicted_mean: &[f64],
     n_bins: usize,

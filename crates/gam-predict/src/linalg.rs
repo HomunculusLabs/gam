@@ -286,7 +286,7 @@ where
     Ok(assemble_local_covariance_chunks(n_rows, local_dim, chunks))
 }
 
-pub fn rowwise_local_covariances_parallel<F>(
+pub(crate) fn rowwise_local_covariances_parallel<F>(
     backend: &PredictionCovarianceBackend<'_>,
     n_rows: usize,
     local_dim: usize,

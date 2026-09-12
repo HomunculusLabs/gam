@@ -311,7 +311,7 @@ impl Gauge {
 
     /// Wrap an already-assembled global affine section `β = Tθ + a` given the
     /// per-block raw and reduced width partitions.
-    pub fn from_t_with_shift(
+    pub(crate) fn from_t_with_shift(
         t_full: Array2<f64>,
         raw_widths: &[usize],
         reduced_widths: &[usize],

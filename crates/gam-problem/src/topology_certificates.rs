@@ -223,7 +223,7 @@ impl CertificateLedger {
 
     /// Record a pre-built entry (for certificates whose owning type lives behind
     /// a boundary that only hands back the folded record).
-    pub fn record_entry(&mut self, entry: LedgerEntry) {
+    pub(crate) fn record_entry(&mut self, entry: LedgerEntry) {
         match self.entries.get(entry.claim.id) {
             Some(existing) if existing.verdict <= entry.verdict => {
                 // Existing is weaker-or-equal: keep the conservative one.

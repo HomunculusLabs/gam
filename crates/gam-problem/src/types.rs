@@ -235,7 +235,7 @@ impl From<Inertia> for InertiaWire {
 
 /// Why a stabilization δ was chosen at this site.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum StabilizationRule {
+pub(crate) enum StabilizationRule {
     /// δ is a hard-coded constant in the source.
     FixedConstant,
     /// δ chosen so the SPD floor τ is met: δ = max(0, τ - λ_min(H)).
@@ -287,7 +287,7 @@ struct StabilizationLedgerWire {
 /// Canonical validated record of one stabilization applied at one site.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "StabilizationLedgerWire", into = "StabilizationLedgerWire")]
-pub struct StabilizationLedger {
+pub(crate) struct StabilizationLedger {
     kind: StabilizationKind,
     delta: f64,
     matrix_form: RidgeMatrixForm,
@@ -372,7 +372,7 @@ impl StabilizationLedger {
         }
     }
 
-    pub fn with_inertia(
+    pub(crate) fn with_inertia(
         mut self,
         before: Option<Inertia>,
         after: Option<Inertia>,
@@ -422,14 +422,14 @@ impl StabilizationLedger {
         self.matrix_form
     }
 
-    pub const fn chosen_by(self) -> StabilizationRule {
+    pub(crate) const fn chosen_by(self) -> StabilizationRule {
         self.chosen_by
     }
 
     /// Exact determinant/objective provenance for an explicit prior or
     /// objective-accounted algorithmic stabilization. `None` for every
     /// solver-only, numerical, and approximation-only perturbation.
-    pub const fn objective_policy(self) -> Option<RidgePolicy> {
+    pub(crate) const fn objective_policy(self) -> Option<RidgePolicy> {
         self.objective_policy
     }
 
@@ -437,11 +437,11 @@ impl StabilizationLedger {
         self.backward_error_bound
     }
 
-    pub const fn inertia_before(self) -> Option<Inertia> {
+    pub(crate) const fn inertia_before(self) -> Option<Inertia> {
         self.inertia_before
     }
 
-    pub const fn inertia_after(self) -> Option<Inertia> {
+    pub(crate) const fn inertia_after(self) -> Option<Inertia> {
         self.inertia_after
     }
 

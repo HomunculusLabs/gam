@@ -26,7 +26,7 @@ use crate::input::{TRANSFORMATION_NORMAL_BAND_Z_MAX, TRANSFORMATION_NORMAL_BAND_
 ///   the band interpolates that ladder. Adding standard-normal quantiles to
 ///   `E[Y|x]` directly would be off by exactly the (row-dependent) scale of
 ///   `h⁻¹` — for `h(y) = 10·y` the true 95% band is `±0.196`, not `±1.96`.
-pub struct TransformationNormalPredictor {
+pub(crate) struct TransformationNormalPredictor {
     pub covariance: Option<Array2<f64>>,
 }
 

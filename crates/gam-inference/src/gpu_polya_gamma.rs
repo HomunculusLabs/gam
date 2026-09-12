@@ -63,7 +63,7 @@ use crate::polya_gamma::PolyaGamma;
 /// implementation's draws across runs; CPU and GPU consume the bits through
 /// different distribution transforms.
 #[derive(Clone, Copy, Debug)]
-pub struct PgSeed(pub u64);
+pub(crate) struct PgSeed(pub u64);
 
 impl Default for PgSeed {
     fn default() -> Self {
@@ -77,7 +77,7 @@ impl Default for PgSeed {
 /// * `(PG1_MAX_B, SADDLE_MIN_B)` — host convolution-of-PG(1) regime.
 /// * `[SADDLE_MIN_B, SADDLE_MAX_B]` — saddlepoint-rejection regime.
 /// * `b > SADDLE_MAX_B` — normal-approximation regime.
-pub const PG1_MAX_B: u32 = 1;
+pub(crate) const PG1_MAX_B: u32 = 1;
 pub const SADDLE_MIN_B: u32 = 14;
 pub const SADDLE_MAX_B: u32 = 170;
 
@@ -133,7 +133,7 @@ const WORD_GAMMA: u64 = 0x0F1E_2D3C_4B5A_6978;
 /// `curandStateXORWOW_t` for the five state lanes plus the addition
 /// counter; we omit the boxmuller cache (PG sampler doesn’t use it).
 #[derive(Clone, Copy, Debug)]
-pub struct XorwowState {
+pub(crate) struct XorwowState {
     pub s: [u32; 5],
     pub d: u32,
 }
@@ -256,14 +256,14 @@ fn upstream_pg1() -> &'static PolyaGamma {
 
 /// CPU distribution oracle for one `PG(1, c)` draw. `XorwowState` supplies the
 /// caller-owned random stream and the upstream adapter owns the sampling math.
-pub fn pg1_draw_cpu_oracle(state: &mut XorwowState, tilt: f64) -> f64 {
+pub(crate) fn pg1_draw_cpu_oracle(state: &mut XorwowState, tilt: f64) -> f64 {
     upstream_pg1().draw(state, tilt)
 }
 
 /// Higher-shape draw on host via convolution: PG(b, c) =_d Σ_{j=1..b} PG(1, c).
 /// Used by host for the `2 ≤ b ≤ 13` band and as the parity oracle for the
 /// saddlepoint kernel at modest `b`.
-pub fn pg_convolution_cpu_oracle(state: &mut XorwowState, b: u32, tilt: f64) -> f64 {
+pub(crate) fn pg_convolution_cpu_oracle(state: &mut XorwowState, b: u32, tilt: f64) -> f64 {
     (0..b).map(|_| pg1_draw_cpu_oracle(state, tilt)).sum()
 }
 
@@ -281,7 +281,7 @@ pub fn pg_convolution_cpu_oracle(state: &mut XorwowState, b: u32, tilt: f64) -> 
 /// reference the device sp_kernel matches in distribution; both fall
 /// back to the convolution oracle when `b` is small enough that the
 /// saddlepoint approximation has noticeable bias (validated by §12.4 test).
-pub fn pg_saddlepoint_cpu_oracle(state: &mut XorwowState, b: u32, tilt: f64) -> f64 {
+pub(crate) fn pg_saddlepoint_cpu_oracle(state: &mut XorwowState, b: u32, tilt: f64) -> f64 {
     // For now, use the convolution identity as the oracle. The saddlepoint
     // *kernel* is what we ship on device; the host oracle just needs to
     // produce the correct distribution for parity tests, and PG(b, c) =
@@ -302,7 +302,7 @@ pub use crate::pg_moments::{pg_mean, pg_variance};
 
 /// Lyapunov-CLT closed-form draw for `b > SADDLE_MAX_B`. Truncated at
 /// zero because PG support is `(0, +∞)`.
-pub fn pg_normal_cpu_oracle(state: &mut XorwowState, b: u32, tilt: f64) -> f64 {
+pub(crate) fn pg_normal_cpu_oracle(state: &mut XorwowState, b: u32, tilt: f64) -> f64 {
     let mean = pg_mean(b as f64, tilt);
     let var = pg_variance(b as f64, tilt);
     let sd = var.sqrt();

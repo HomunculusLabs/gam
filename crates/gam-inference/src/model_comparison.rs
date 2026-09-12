@@ -65,7 +65,7 @@ pub struct CorrectedEdf {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CorrectedEdfUnavailable {
+pub(crate) enum CorrectedEdfUnavailable {
     MissingWeightedGram,
     MissingSmoothingCorrection,
     MissingCovarianceScale,
@@ -111,7 +111,7 @@ pub struct ModelComparison {
 ///
 /// Missing artifacts or method provenance produce `corrected=None` with a
 /// typed reason; malformed present inputs are errors.
-pub fn corrected_edf(
+pub(crate) fn corrected_edf(
     edf_conditional: f64,
     weighted_gram: Option<ArrayView2<'_, f64>>,
     smoothing_correction: Option<ArrayView2<'_, f64>>,
@@ -477,7 +477,7 @@ pub fn model_comparison_from_unified(
 /// leave-one-out linear predictors. No eta-to-mean-to-eta round trip is allowed:
 /// doing so rounds representable tail predictors onto boundary means and
 /// desynchronizes comparison values from the likelihood score surface.
-pub fn alo_elpd_from_family(
+pub(crate) fn alo_elpd_from_family(
     y: ArrayView1<'_, f64>,
     eta_hat: ArrayView1<'_, f64>,
     eta_loo: ArrayView1<'_, f64>,
