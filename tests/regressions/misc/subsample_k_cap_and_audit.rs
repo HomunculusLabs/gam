@@ -112,7 +112,6 @@ fn h1c_maybe_install_honors_outer_work_per_k_unit_argument() {
         &rho,
         &counter,
         &last,
-        12,
         "h1c-test",
         SURVIVAL_WORK_PER_K_UNIT,
     )

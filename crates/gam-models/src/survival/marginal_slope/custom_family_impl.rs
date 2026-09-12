@@ -12,7 +12,7 @@ impl CustomFamily for SurvivalMarginalSlopeFamily {
     ) -> Option<crate::custom_family::OuterDerivativePilotSchedule> {
         Some(crate::custom_family::OuterDerivativePilotSchedule::new(
             Arc::clone(&self.auto_subsample_phase_counter),
-            SURVIVAL_MGS_AUTO_SUBSAMPLE_PHASE1_BUDGET,
+            crate::marginal_slope_shared::AUTO_OUTER_PHASE1_BUDGET,
         ))
     }
 

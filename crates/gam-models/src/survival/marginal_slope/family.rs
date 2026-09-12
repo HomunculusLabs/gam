@@ -186,7 +186,7 @@ pub(crate) struct SurvivalMarginalSlopeFamily {
     /// outer step (detected via the concatenated-beta proxy stored in
     /// `auto_subsample_last_rho`). Drives the same two-phase
     /// auto-subsample schedule used by `BernoulliMarginalSlopeFamily`:
-    /// the first `SURVIVAL_MGS_AUTO_SUBSAMPLE_PHASE1_BUDGET` evaluations
+    /// the first `AUTO_OUTER_PHASE1_BUDGET` evaluations
     /// install a stratified Horvitz-Thompson mask (Phase 1, ≈ 1 %
     /// gradient noise); subsequent evaluations revert to full data
     /// (Phase 2). The counter resets per fit because each fit
@@ -245,11 +245,6 @@ impl SurvivalMarginalSlopeFamily {
         }
     }
 }
-
-/// Number of outer evaluations the survival auto-subsample schedule
-/// spends in Phase 1 before reverting to full data. Mirrors the BMS
-/// budget so the two families share an empirical noise-floor schedule.
-pub(crate) const SURVIVAL_MGS_AUTO_SUBSAMPLE_PHASE1_BUDGET: usize = 12;
 
 impl SurvivalMarginalSlopeFamily {
     pub(crate) fn family_hyper_role(

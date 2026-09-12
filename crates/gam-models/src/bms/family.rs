@@ -45,7 +45,7 @@ pub(super) struct BernoulliMarginalSlopeFamily {
     /// Per-fit counter of outer rho-gradient evaluations. Increments
     /// on every call to `batched_outer_gradient_terms`. Drives the
     /// two-phase auto-subsample schedule: while
-    /// `count < BMS_AUTO_SUBSAMPLE_PHASE1_BUDGET` and
+    /// `count < AUTO_OUTER_PHASE1_BUDGET` and
     /// `auto_outer_subsample` is enabled, the family installs a
     /// stratified Horvitz–Thompson mask. Once the budget is
     /// exhausted, every subsequent eval reverts to full data so the

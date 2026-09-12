@@ -98,7 +98,6 @@ impl SurvivalMarginalSlopeFamily {
             rho_slice,
             &self.auto_subsample_phase_counter,
             &self.auto_subsample_last_rho,
-            SURVIVAL_MGS_AUTO_SUBSAMPLE_PHASE1_BUDGET,
             "survival-mgs",
             // Per-K work-unit cost for the survival marginal-slope outer
             // gradient kernel. Calibrated from the large-scale repro

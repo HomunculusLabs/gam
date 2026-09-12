@@ -16,9 +16,8 @@
 //! `maybe_install_auto_outer_subsample` is the entry point family
 //! impls call: it consults the per-family phase counter and the
 //! per-family last-ρ mutex (used to detect distinct outer steps),
-//! installs a stratified mask for the first
-//! `BMS_AUTO_SUBSAMPLE_PHASE1_BUDGET` (or family analog) outer
-//! evaluations, and reverts to full data afterward so the BFGS/ARC
+//! installs a stratified mask for the first `AUTO_OUTER_PHASE1_BUDGET`
+//! outer evaluations, and reverts to full data afterward so the BFGS/ARC
 //! convergence target `outer_tol` is reached on exact gradients
 //! rather than chasing the stochastic noise floor.
 //!
@@ -846,6 +845,12 @@ pub const AUTO_OUTER_WORK_BUDGET: u64 = 500_000_000;
 /// usable for BFGS Phase 1 progress when the family is very expensive.
 pub const AUTO_OUTER_MIN_K_FLOOR: usize = 1_000;
 
+/// Number of distinct outer steps a marginal-slope family evaluates on the
+/// sampled measure (Phase 1) before it reverts to full data. Every family
+/// shares one budget, and both the installer and the family's
+/// `outer_derivative_pilot_schedule` read it, so the two cannot disagree.
+pub(crate) const AUTO_OUTER_PHASE1_BUDGET: usize = 12;
+
 /// Reason the auto schedule chose the reported `K`. Used by the
 /// `[family auto-subsample]` log line so operators can tell whether the
 /// noise model, the work budget, the `MIN_K_FLOOR`, or `n` itself
@@ -982,7 +987,7 @@ pub fn auto_outer_score_subsample(
 /// Returns `Some(cloned_options)` carrying a freshly stratified
 /// Horvitz-Thompson mask when `options.auto_outer_subsample` is enabled, the
 /// caller has not already supplied a mask, and
-/// the per-family phase counter is below `phase1_budget`. Returns `None`
+/// the per-family phase counter is below `AUTO_OUTER_PHASE1_BUDGET`. Returns `None`
 /// when the caller's options should be used unchanged (either subsample
 /// is disabled / pre-installed, the budget is exhausted, or the problem
 /// is too small for `auto_outer_score_subsample` to find a benefit).
@@ -997,7 +1002,7 @@ pub fn auto_outer_score_subsample(
 /// > minimal coordination needed: `(counter, last_rho)` must update
 /// > together so two threads cannot both decide "new ρ" and double-bump.
 ///
-/// The transition at `phase_idx == phase1_budget` is logged exactly
+/// The transition at `phase_idx == AUTO_OUTER_PHASE1_BUDGET` is logged exactly
 /// once via `log::info!` with the supplied `family_label`. Each phase-1
 /// install also logs the planned mask size and predicted gradient
 /// noise. Callers running with auto-subsample disabled see no logging.
@@ -1008,7 +1013,6 @@ pub fn maybe_install_auto_outer_subsample(
     outer_rho_key: &[f64],
     phase_counter: &Arc<std::sync::atomic::AtomicUsize>,
     last_rho: &Arc<std::sync::Mutex<Option<Array1<f64>>>>,
-    phase1_budget: usize,
     family_label: &'static str,
     outer_work_per_k_unit: u64,
 ) -> Option<crate::custom_family::BlockwiseFitOptions> {
@@ -1052,30 +1056,30 @@ pub fn maybe_install_auto_outer_subsample(
         } else {
             let current = phase_counter.load(std::sync::atomic::Ordering::SeqCst);
             // The generic runner can promote an early-stopped pilot directly
-            // to `phase1_budget` while remaining at the same rho checkpoint.
+            // to `AUTO_OUTER_PHASE1_BUDGET` while remaining at the same rho checkpoint.
             // Preserve that exact-phase marker; subtract one only while the
             // counter still denotes an ordinary repeated Phase-1 evaluation.
-            if current >= phase1_budget {
+            if current >= AUTO_OUTER_PHASE1_BUDGET {
                 current
             } else {
                 current.saturating_sub(1)
             }
         }
     };
-    if phase_idx >= phase1_budget {
+    if phase_idx >= AUTO_OUTER_PHASE1_BUDGET {
         // Mark the exact phase explicitly. A raw counter equal to the budget
         // can also mean "the last sampled evaluation just completed"; the
         // post-budget sentinel lets the generic runner distinguish that state
         // from a full-data evaluation that has already occurred.
         phase_counter.fetch_max(
-            phase1_budget.saturating_add(1),
+            AUTO_OUTER_PHASE1_BUDGET.saturating_add(1),
             std::sync::atomic::Ordering::SeqCst,
         );
-        if phase_idx == phase1_budget {
+        if phase_idx == AUTO_OUTER_PHASE1_BUDGET {
             log::info!(
                 "[{family_label} auto-subsample] Phase 1 budget exhausted after {} evals; \
                  Phase 2 (full data) for remaining iterations",
-                phase1_budget
+                AUTO_OUTER_PHASE1_BUDGET
             );
         }
         return None;
@@ -1086,7 +1090,7 @@ pub fn maybe_install_auto_outer_subsample(
     log::info!(
         "[{family_label} auto-subsample] phase=1 eval={}/{} n={} K={} fraction={:.3} expected_grad_noise={:.2}% work_per_k_unit={} k_noise={} k_work={} cap_reason={}",
         phase_idx + 1,
-        phase1_budget,
+        AUTO_OUTER_PHASE1_BUDGET,
         n_full,
         k,
         k as f64 / n_full.max(1) as f64,
@@ -1984,7 +1988,7 @@ mod tests {
         let options = crate::custom_family::BlockwiseFitOptions::default();
         let phase_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let last_rho = Arc::new(std::sync::Mutex::new(None));
-        let phase_budget = 12;
+        let phase_budget = AUTO_OUTER_PHASE1_BUDGET;
         let rho = [0.25, -0.5];
 
         // A small problem never installs a sample and therefore must not ask
@@ -1998,7 +2002,6 @@ mod tests {
                 &rho,
                 &phase_counter,
                 &last_rho,
-                phase_budget,
                 "test-small",
                 1,
             )
@@ -2023,7 +2026,6 @@ mod tests {
                 &rho,
                 &phase_counter,
                 &last_rho,
-                phase_budget,
                 "test-large",
                 1,
             )
@@ -2058,7 +2060,6 @@ mod tests {
                 &rho,
                 &phase_counter,
                 &last_rho,
-                phase_budget,
                 "test-large",
                 1,
             )

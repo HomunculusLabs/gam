@@ -2517,9 +2517,7 @@ pub(crate) fn weighted_tail_mass(
 // Cross-module constants — declared here so all submodules can reach them
 // via `use super::*` without promoting implementation details to pub(crate).
 // ---------------------------------------------------------------------------
-pub(super) const BMS_AUTO_SUBSAMPLE_PHASE1_BUDGET: usize = 12;
 pub(super) const BERNOULLI_LINK_PROBABILITY_EPS: f64 = 1e-12;
-pub(super) const BMS_DERIV_TOL: f64 = 1e-8;
 /// Upper bound (and large-`n` default) for rows-per-chunk in the parallel
 /// row-accumulation phases.
 ///
