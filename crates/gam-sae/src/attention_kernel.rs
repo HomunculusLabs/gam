@@ -96,7 +96,7 @@ impl StationaryKernelFit {
             .max_by(|left, right| left.amplitude.total_cmp(&right.amplitude))
     }
 
-    pub fn harmonic_content(&self) -> Vec<HarmonicContent> {
+    pub(crate) fn harmonic_content(&self) -> Vec<HarmonicContent> {
         harmonic_content(&self.harmonics)
     }
 
@@ -156,7 +156,7 @@ impl CoordinateMapFit {
             .max_by(|left, right| left.amplitude.total_cmp(&right.amplitude))
     }
 
-    pub fn harmonic_content(&self) -> Vec<HarmonicContent> {
+    pub(crate) fn harmonic_content(&self) -> Vec<HarmonicContent> {
         harmonic_content(&self.harmonics)
     }
 
@@ -201,7 +201,7 @@ pub fn fit_attention_kernel(
     })
 }
 
-pub fn fit_stationary_kernel(
+pub(crate) fn fit_stationary_kernel(
     query_t: &[f64],
     key_t: &[f64],
     scores: ArrayView2<'_, f64>,
@@ -240,7 +240,7 @@ pub fn fit_stationary_kernel(
     })
 }
 
-pub fn fit_separable_kernel(
+pub(crate) fn fit_separable_kernel(
     query_t: &[f64],
     key_t: &[f64],
     scores: ArrayView2<'_, f64>,

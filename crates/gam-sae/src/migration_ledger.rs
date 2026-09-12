@@ -89,7 +89,7 @@ pub enum BirthSeed {
 impl BirthSeed {
     /// `true` for the one forbidden seed (a principal-component reseed).
     #[must_use]
-    pub fn is_pc_reseed(self) -> bool {
+    pub(crate) fn is_pc_reseed(self) -> bool {
         matches!(self, BirthSeed::PrincipalComponent)
     }
 
@@ -130,7 +130,7 @@ impl MoveEvidence {
     /// Evidence carrying only a `dl_bits` charge (the tiered co-fit currency);
     /// the REML delta is unscored and no rank is charged at this granularity.
     #[must_use]
-    pub fn from_dl_bits(dl_bits: f64) -> Self {
+    pub(crate) fn from_dl_bits(dl_bits: f64) -> Self {
         Self {
             reml_delta: f64::NAN,
             rank_charge: 0.0,
@@ -141,7 +141,7 @@ impl MoveEvidence {
     /// Evidence for a structure-search move whose e-process banked `log_e` nats;
     /// the description-length charge is that evidence in bits.
     #[must_use]
-    pub fn from_log_e(log_e: f64) -> Self {
+    pub(crate) fn from_log_e(log_e: f64) -> Self {
         Self {
             reml_delta: f64::NAN,
             rank_charge: 0.0,
@@ -398,7 +398,7 @@ impl SaeMigrationLedger {
     /// the SAME record — the predicted-vs-realized calibration pair. A birth not in
     /// the map (a curl birth, or any round scored before the pre-screen existed) is
     /// left `None`; pass an empty map when no predictions are available.
-    pub fn record_search_round(
+    pub(crate) fn record_search_round(
         &mut self,
         round: usize,
         ledger: &SearchLedger,

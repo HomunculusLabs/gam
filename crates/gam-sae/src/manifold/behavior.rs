@@ -165,7 +165,7 @@ impl SphereTangentEmbedding {
 
     /// Behavioral tangent dimension `p_y = V - 1` (the width of the behavior
     /// decoder block `C_k` and of the nats-unit target `Y`).
-    pub fn behavior_dim(&self) -> usize {
+    pub(crate) fn behavior_dim(&self) -> usize {
         self.tangent_basis.ncols()
     }
 
@@ -223,7 +223,7 @@ impl SphereTangentEmbedding {
     /// past the hemisphere boundary, which no embedded row produces) the radial
     /// term is clamped to zero so the result stays a finite point on the
     /// equator rather than becoming imaginary.
-    pub fn decode_sphere(&self, y: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
+    pub(crate) fn decode_sphere(&self, y: ArrayView1<'_, f64>) -> Result<Array1<f64>, String> {
         let py = self.behavior_dim();
         if y.len() != py {
             return Err(format!(
@@ -262,7 +262,7 @@ impl SphereTangentEmbedding {
     /// probability distributions.  This is the batched public inverse used by
     /// the behavior-fit report; it delegates every row to [`Self::decode`] so
     /// the scalar and batched hemisphere/normalization contracts cannot drift.
-    pub fn decode_rows(&self, y: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+    pub(crate) fn decode_rows(&self, y: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
         if y.ncols() != self.behavior_dim() {
             return Err(format!(
                 "SphereTangentEmbedding::decode_rows: coordinates have {} columns; chart tangent dim is {}",
@@ -319,7 +319,7 @@ impl SphereTangentEmbedding {
     /// against [`Self::predicted_nats`]; terms where `p_a[j] = 0` contribute `0`
     /// (the `0·log 0` convention), and a `p_b[j] = 0` against a positive
     /// `p_a[j]` is `+∞` (genuinely infinite divergence), surfaced as such.
-    pub fn exact_kl(p_a: ArrayView1<'_, f64>, p_b: ArrayView1<'_, f64>) -> Result<f64, String> {
+    pub(crate) fn exact_kl(p_a: ArrayView1<'_, f64>, p_b: ArrayView1<'_, f64>) -> Result<f64, String> {
         if p_a.len() != p_b.len() {
             return Err(format!(
                 "SphereTangentEmbedding::exact_kl: length mismatch {} vs {}",
@@ -459,12 +459,12 @@ impl BehaviorBlock {
     }
 
     /// Behavior tangent width `p_y = V - 1`.
-    pub fn behavior_dim(&self) -> usize {
+    pub(crate) fn behavior_dim(&self) -> usize {
         self.embedding.behavior_dim()
     }
 
     /// Augmented output width `p̃ = p_x + p_y`.
-    pub fn augmented_dim(&self) -> usize {
+    pub(crate) fn augmented_dim(&self) -> usize {
         self.activation_dim + self.behavior_dim()
     }
 
@@ -475,7 +475,7 @@ impl BehaviorBlock {
 
     /// `√λ_y`, the per-column scaling applied to the behavior target so a single
     /// shared dispersion realizes the block variance ratio.
-    pub fn sqrt_lambda_y(&self) -> f64 {
+    pub(crate) fn sqrt_lambda_y(&self) -> f64 {
         self.sqrt_lambda_y
     }
 
@@ -519,7 +519,7 @@ impl BehaviorBlock {
     /// `Y` is stored **unscaled**, only the scalar weight changes — the chart and
     /// the embedded behavior are untouched — so a two-block REML fit can sweep
     /// `λ_y` without ever re-embedding.
-    pub fn with_log_lambda_y(&self, log_lambda_y: f64) -> Result<Self, String> {
+    pub(crate) fn with_log_lambda_y(&self, log_lambda_y: f64) -> Result<Self, String> {
         let lambda_y = gam_problem::checked_exp_log_strength(log_lambda_y)
             .map_err(|error| format!("BehaviorBlock::with_log_lambda_y: {error}"))?;
         let sqrt_lambda_y =

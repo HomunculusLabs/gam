@@ -126,7 +126,7 @@ impl EvVsKCurve {
     /// EV at the smallest `K` for which `EV(K) >= target`, if any. The curve is
     /// scanned in ascending `K` order, so this is the *cheapest* dictionary
     /// reaching the target. Returns `None` when the target is never reached.
-    pub fn k_reaching(&self, target_ev: f64) -> Option<usize> {
+    pub(crate) fn k_reaching(&self, target_ev: f64) -> Option<usize> {
         self.points.iter().find(|p| p.ev >= target_ev).map(|p| p.k)
     }
 }
@@ -214,13 +214,13 @@ impl MeasuredCoding {
     /// One atom's storage cost in nats, `d_eff,atom · ln n_eff` — the numerator
     /// of the Theorem-4 right-hand side. Twice the per-atom rank charge
     /// `½·d_eff·ln n_eff` (storage-vs-evidence convention).
-    pub fn atom_storage_nats(&self) -> f64 {
+    pub(crate) fn atom_storage_nats(&self) -> f64 {
         self.d_eff_atom * self.n_eff.max(1.0).ln()
     }
 
     /// Total count of coded scalars `N · k̄ · d̄` over which a marginal residual
     /// saving is amortised — the denominator of the Theorem-4 right-hand side.
-    pub fn coded_scalar_count(&self) -> f64 {
+    pub(crate) fn coded_scalar_count(&self) -> f64 {
         self.n_rows * self.k_bar * self.d_bar
     }
 
@@ -608,7 +608,7 @@ impl ManifoldVsLinearAdvantage {
 /// is `linear_params / manifold_params`, so a manifold atom that reaches the
 /// target with a large basis is charged its true parameter cost instead of being
 /// credited one atom's worth.
-pub fn manifold_vs_linear_advantage(
+pub(crate) fn manifold_vs_linear_advantage(
     manifold: &EvVsKCurve,
     linear: &EvVsKCurve,
     target_ev: f64,

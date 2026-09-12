@@ -20,7 +20,7 @@ use crate::atom_codes::SparseAtomCodes;
 /// Bits to code one Gaussian scalar of variance `signal_var` to per-sample MSE
 /// `delta2`: the Gaussian rate-distortion law
 /// `½ max(log₂(signal_var / delta2), 0)`.
-pub fn scalar_rate_bits(signal_var: f64, delta2: f64) -> f64 {
+pub(crate) fn scalar_rate_bits(signal_var: f64, delta2: f64) -> f64 {
     if signal_var <= 0.0 {
         return 0.0;
     }
@@ -286,7 +286,7 @@ pub fn predicted_birth_dl_bits(p: &BirthMdlPrescreen) -> f64 {
 ///
 /// `a` is the circle radius, `delta = δ` the tolerance: the Theorem-3 gain at
 /// codimension one, with the circle's shape constant folded in.
-pub fn circle_coding_gain_bits(a: f64, delta: f64) -> f64 {
+pub(crate) fn circle_coding_gain_bits(a: f64, delta: f64) -> f64 {
     if !(a > 0.0) || !(delta > 0.0) {
         return 0.0;
     }
@@ -440,7 +440,7 @@ pub fn matched_dl(
 /// SAVES over the flat/line atom at the SAME firings. Positive ⇒ the curved chart is
 /// the shorter code (curvature pays in bits); negative ⇒ the flat atom is cheaper
 /// (the honest "curvature does not pay here" verdict).
-pub fn matched_dl_delta(flat: &MatchedDl, chart: &MatchedDl) -> f64 {
+pub(crate) fn matched_dl_delta(flat: &MatchedDl, chart: &MatchedDl) -> f64 {
     flat.total_dl_bits - chart.total_dl_bits
 }
 

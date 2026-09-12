@@ -44,7 +44,7 @@ use super::SaeManifoldTerm;
 /// resolution at which two values are the same f64 point at that axis's own
 /// magnitude), and for the same reason: the question "does this object affect
 /// the returned numbers?" has a representation answer, not a policy answer.
-pub fn load_bearing_atoms(assignments: ArrayView2<'_, f64>) -> Vec<bool> {
+pub(crate) fn load_bearing_atoms(assignments: ArrayView2<'_, f64>) -> Vec<bool> {
     let k = assignments.ncols();
     let mut load_bearing = vec![false; k];
     for row in assignments.rows() {
@@ -102,7 +102,7 @@ pub struct ChartDegeneracyReport {
 }
 
 impl ChartDegeneracyReport {
-    pub fn degenerate_axes(&self) -> impl Iterator<Item = &ChartAxisDispersion> {
+    pub(crate) fn degenerate_axes(&self) -> impl Iterator<Item = &ChartAxisDispersion> {
         self.axes.iter().filter(|axis| axis.degenerate())
     }
 
@@ -134,7 +134,7 @@ impl ChartDegeneracyReport {
     /// has no chart is a point masquerading as a manifold inside an otherwise
     /// healthy dictionary — the case where one atom's collapse hides behind
     /// another's, which a fit-level aggregate cannot see.
-    pub fn chart_less_load_bearing_atoms(&self, assignments: ArrayView2<'_, f64>) -> Vec<usize> {
+    pub(crate) fn chart_less_load_bearing_atoms(&self, assignments: ArrayView2<'_, f64>) -> Vec<usize> {
         let load_bearing = load_bearing_atoms(assignments);
         self.atoms_without_a_chart()
             .into_iter()
@@ -204,7 +204,7 @@ impl ChartDegeneracyReport {
 impl SaeManifoldTerm {
     /// Measure every chart axis's dispersion in its own manifold. Pure read of
     /// the fitted coordinates — no target, no reconstruction, no EV.
-    pub fn chart_degeneracy_report(&self) -> ChartDegeneracyReport {
+    pub(crate) fn chart_degeneracy_report(&self) -> ChartDegeneracyReport {
         let mut axes = Vec::new();
         for (atom_idx, coord) in self.assignment.coords.iter().enumerate() {
             let periods = coord.effective_axis_periods();

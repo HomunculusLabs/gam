@@ -86,7 +86,7 @@ impl PersistenceBar {
     }
 
     /// Whether the class never dies within the filtration.
-    pub fn is_essential(&self) -> bool {
+    pub(crate) fn is_essential(&self) -> bool {
         !self.death.is_finite()
     }
 }
@@ -255,7 +255,7 @@ pub enum TopologyResolution {
 impl TopologyResolution {
     /// True only when the Betti readout is licensed to be compared against a
     /// raced type's prediction.
-    pub fn is_resolved(self) -> bool {
+    pub(crate) fn is_resolved(self) -> bool {
         matches!(self, Self::Resolved)
     }
 
@@ -1251,7 +1251,7 @@ fn support_summary(weights: Option<ArrayView1<'_, f64>>, full: usize) -> (f64, f
 /// carries no library prediction ([`SaeAtomBasisKind::Precomputed`]) or the
 /// cloud is too small to resolve H₁ (fewer than four points — a triangle plus
 /// one is the minimum that can kill a loop).
-pub fn topology_persistence_verdict(
+pub(crate) fn topology_persistence_verdict(
     points: ArrayView2<'_, f64>,
     raced_kind: &SaeAtomBasisKind,
 ) -> Option<AtomTopologyPersistence> {
@@ -1459,7 +1459,7 @@ fn topology_persistence_verdict_impl(
 /// residual-space position is the decoded image `g_k(t_{ik}) = Φ_k(t_{ik}) B_k`.
 /// Returns `None` when the atom's topology is caller-supplied or too few
 /// positive-support rows are present to resolve H₁.
-pub fn atom_topology_persistence(
+pub(crate) fn atom_topology_persistence(
     term: &SaeManifoldTerm,
     atom_idx: usize,
 ) -> Option<AtomTopologyPersistence> {

@@ -162,12 +162,12 @@ impl SaeSoftmaxRowJetInput {
     }
 
     #[inline]
-    pub fn n_primaries(&self) -> usize {
+    pub(crate) fn n_primaries(&self) -> usize {
         self.primaries.len()
     }
 
     #[inline]
-    pub fn n_beta_borders(&self) -> usize {
+    pub(crate) fn n_beta_borders(&self) -> usize {
         self.beta_atoms.len()
     }
 
@@ -733,7 +733,7 @@ fn finite_or_err(label: &str, values: &[f64]) -> Result<(), String> {
 /// never materializing the packed channel tensors on the host. Device failures
 /// propagate; the CPU path evaluates the identical reduction against the
 /// authoritative row program one row at a time.
-pub fn execute_softmax_row_jet_tile_contracted(
+pub(crate) fn execute_softmax_row_jet_tile_contracted(
     rows: &[SaeSoftmaxRowJetInput],
     inv_tau: f64,
     path: SaeRowJetPath,
@@ -1082,7 +1082,7 @@ impl SaeRowJetMemoryLedger {
     /// resident, and the only row-varying host↔device traffic is the `p` probe
     /// upload plus the `q + n_beta` reduced scalars downloaded. This models the
     /// `Linear`/`Bilinear` contracted tiles — the live contracted callers.
-    pub fn for_contracted_shape(
+    pub(crate) fn for_contracted_shape(
         k: usize,
         q: usize,
         p: usize,
@@ -1309,7 +1309,7 @@ pub struct SaeRowJetExecutionPlan {
 }
 
 /// Decide the backend and bounded tile width before any CUDA launch.
-pub fn plan_softmax_row_jets(
+pub(crate) fn plan_softmax_row_jets(
     total_rows: usize,
     k: usize,
     q: usize,
@@ -1334,7 +1334,7 @@ pub fn plan_softmax_row_jets(
 /// rows per host/device budget than the elementwise plan admits. Used by the
 /// resident-contraction consumers (`contracted_softmax_linear_rhs`,
 /// `contracted_softmax_bilinear_hvp`).
-pub fn plan_softmax_row_jets_contracted(
+pub(crate) fn plan_softmax_row_jets_contracted(
     total_rows: usize,
     k: usize,
     q: usize,
@@ -1354,7 +1354,7 @@ pub fn plan_softmax_row_jets_contracted(
 
 /// Decide the bounded resident-Trace tile width with its tower and
 /// selected-inverse operands charged explicitly (#2333).
-pub fn plan_softmax_row_jets_trace(
+pub(crate) fn plan_softmax_row_jets_trace(
     total_rows: usize,
     k: usize,
     q: usize,
@@ -1726,7 +1726,7 @@ fn cpu_tile(
 
 /// Direct centered-moment CUDA implementation. No per-primary jet arrays are
 /// materialized; each thread writes one packed output element.
-pub const COMPLETE_SOFTMAX_KERNEL_SOURCE: &str = r#"
+pub(crate) const COMPLETE_SOFTMAX_KERNEL_SOURCE: &str = r#"
 extern "C" __global__ void sae_rowjet_first(
     const double* z, const int* active, const int* kind, const int* atom,
     const double* decoded, const double* d1, const double* sqrt_w,

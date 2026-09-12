@@ -1064,7 +1064,7 @@ pub struct FittedSaeManifold {
 impl FittedSaeManifold {
     /// Total flattened free-parameter dimension `Σ_k output_dim_k · latent_dim_k`
     /// (the decoder-frame coordinates the generators are tangent directions in).
-    pub fn param_dim(&self) -> usize {
+    pub(crate) fn param_dim(&self) -> usize {
         self.atoms.iter().map(|a| a.frame.len()).sum()
     }
 
@@ -1795,7 +1795,7 @@ pub struct OrbitPenaltyOperator {
 /// The stiffness `σ_max²` is `μ` times the largest unit-coordinate-motion gram
 /// curvature `max_n σ_max(∂g_n/∂t)²`, so the reported relative fraction is on the
 /// same convention as the frame certificate.
-pub fn isometry_orbit_penalty_operator(
+pub(crate) fn isometry_orbit_penalty_operator(
     view: &AtomParameterView,
     weight: f64,
 ) -> Option<OrbitPenaltyOperator> {
@@ -3075,7 +3075,7 @@ fn measure_streamed(
 /// curvature whose root has fewer rows than columns is reduced through its dual
 /// Gram. Both are exact — same spectrum, same rank decision — so the variant is
 /// a cost statement, never an accuracy one.
-pub fn residual_gauge_exact_from_curvature(
+pub(crate) fn residual_gauge_exact_from_curvature(
     model: &FittedSaeManifold,
     views: &[Option<AtomParameterView>],
     penalty_ops: &[Option<OrbitPenaltyOperator>],

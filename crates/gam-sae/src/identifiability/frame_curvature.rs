@@ -213,7 +213,7 @@ impl FrameColumnLayout {
 
     /// `param_dim = p · D`.
     #[inline]
-    pub fn param_dim(&self) -> usize {
+    pub(crate) fn param_dim(&self) -> usize {
         self.param_dim
     }
 
@@ -226,7 +226,7 @@ impl FrameColumnLayout {
     /// Atom `k`'s first local axis index `dstart_k`, so its axis `a` is local
     /// axis `local_axis_base(k) + a`.
     #[inline]
-    pub fn local_axis_base(&self, atom: usize) -> usize {
+    pub(crate) fn local_axis_base(&self, atom: usize) -> usize {
         self.atoms[atom].axis_start
     }
 
@@ -240,7 +240,7 @@ impl FrameColumnLayout {
     /// Gather the `D` entries of `v` that live on output coordinate `output`
     /// into `out` (length `D`), in local-axis order.
     #[inline]
-    pub fn gather_output(&self, v: ArrayView1<'_, f64>, output: usize, out: &mut [f64]) {
+    pub(crate) fn gather_output(&self, v: ArrayView1<'_, f64>, output: usize, out: &mut [f64]) {
         for (local, slot) in self.locals.iter().enumerate() {
             out[local] = v[slot.offset + output * slot.axes + slot.axis];
         }
@@ -312,7 +312,7 @@ impl OutputBlockRootAccumulator {
     /// Fold one observation's frame Jacobian `g` (`p × D`, `g[i, l]`) in: it
     /// contributes the rank-one term `g(i)g(i)ᵀ` to output coordinate `i`'s
     /// block and nothing anywhere else.
-    pub fn push_row_jacobian(&mut self, g: &Array2<f64>) {
+    pub(crate) fn push_row_jacobian(&mut self, g: &Array2<f64>) {
         let d = self.layout.block_dim();
         for i in 0..self.layout.output_dim() {
             let mut any = false;
@@ -333,7 +333,7 @@ impl OutputBlockRootAccumulator {
     /// that is NOT output-coordinate diagonal — the isometry pin's `Σ_k d_k`
     /// rows, each spread across every output coordinate — as a
     /// `(rows, param_dim)` matrix. Empty when no pin is installed.
-    pub fn finish_with_rows(
+    pub(crate) fn finish_with_rows(
         self,
         dense_rows: Array2<f64>,
         root_rows: usize,
@@ -416,7 +416,7 @@ impl TriangularRootAccumulator {
     /// A row of the wrong width is a caller that built its root against a
     /// different parameterization, which the fold would silently absorb into
     /// the leading columns; it is refused rather than folded.
-    pub fn push_root_row(&mut self, row: &mut [f64]) -> Result<(), String> {
+    pub(crate) fn push_root_row(&mut self, row: &mut [f64]) -> Result<(), String> {
         if row.len() != self.factor.ncols() {
             return Err(format!(
                 "residual gauge curvature: root row has {} entries but the factor is over {} \
@@ -446,7 +446,7 @@ impl TriangularRootAccumulator {
     /// parameters but over a small basis of them — the `G × G` factor of `R Ξ`
     /// that [`StreamedFrameCurvature::project_root`] returns — so wrapping it in
     /// a [`ResidualGaugeCurvature`] would misdescribe what it is a curvature of.
-    pub fn into_factor(self) -> Array2<f64> {
+    pub(crate) fn into_factor(self) -> Array2<f64> {
         self.factor
     }
 
@@ -806,7 +806,7 @@ impl ResidualGaugeCurvature {
     }
 
     /// The parameter dimension this curvature is defined over.
-    pub fn param_dim(&self) -> usize {
+    pub(crate) fn param_dim(&self) -> usize {
         match self {
             Self::OutputBlockRoots { layout, .. } => layout.param_dim(),
             Self::DualRoot { root, .. } => root.ncols(),

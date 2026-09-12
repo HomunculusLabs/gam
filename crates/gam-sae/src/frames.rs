@@ -693,7 +693,7 @@ impl GrassmannFrame {
     /// frame's column ordering (issue #972). Exposed so the serialization /
     /// canonicalization path can read the recorded gauge and reproduce the same
     /// span byte-for-byte (no run-to-run rotation drift).
-    pub fn gauge_singular_values(&self) -> &Array1<f64> {
+    pub(crate) fn gauge_singular_values(&self) -> &Array1<f64> {
         &self.gauge_singular_values
     }
 
@@ -786,7 +786,7 @@ impl GrassmannFrame {
     /// `B_k = C_k · Uᵀ` (`M_k × p`) — the reconstruction used wherever the
     /// full-`B` consumers (assembly, decode, smoothness pullback) read the
     /// decoder. `fast_abt` computes `C_k · Uᵀ` without materializing `Uᵀ`.
-    pub fn reconstruct_decoder(&self, coords: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+    pub(crate) fn reconstruct_decoder(&self, coords: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
         if coords.ncols() != self.rank() {
             return Err(format!(
                 "GrassmannFrame::reconstruct_decoder: coord cols {} must equal frame rank {}",
@@ -803,7 +803,7 @@ impl GrassmannFrame {
     /// `C_k = B_k U` recovers the in-span coordinates exactly and discards the
     /// component of `B_k` orthogonal to the frame (zero when `B_k`'s span lies in
     /// `range(U)`, i.e. when the frame rank matched the decoder rank).
-    pub fn project_decoder(&self, decoder: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
+    pub(crate) fn project_decoder(&self, decoder: ArrayView2<'_, f64>) -> Result<Array2<f64>, String> {
         if decoder.ncols() != self.output_dim() {
             return Err(format!(
                 "GrassmannFrame::project_decoder: decoder cols {} must equal output dim {}",
@@ -896,7 +896,7 @@ impl GrassmannFrame {
     ///
     /// Returns `None` for an empty decoder or one whose largest singular value is
     /// not finite-positive (a dead atom carries no ambient span to compare).
-    pub fn from_decoder_row_space(decoder: ArrayView2<'_, f64>) -> Option<Self> {
+    pub(crate) fn from_decoder_row_space(decoder: ArrayView2<'_, f64>) -> Option<Self> {
         let (m, p) = decoder.dim();
         if m == 0 || p == 0 {
             return None;
@@ -982,7 +982,7 @@ impl GrassmannCrossMoment {
     /// Read the accumulated `p × r` cross-moment.
     /// Add a precomputed `targetsᵀ·coords` block (p × r), the per-chunk form
     /// of [`Self::accumulate`] (#2731).
-    pub fn add_block(&mut self, block: ArrayView2<'_, f64>) -> Result<(), String> {
+    pub(crate) fn add_block(&mut self, block: ArrayView2<'_, f64>) -> Result<(), String> {
         if block.nrows() != self.moment.nrows() || block.ncols() != self.moment.ncols() {
             return Err(format!(
                 "GrassmannCrossMoment::add_block: expected ({}, {}); got ({}, {})",

@@ -54,7 +54,7 @@ use crate::atom_codes::SparseAtomCodes;
 /// per-round move caps), large enough that the per-pair null mean/standard
 /// deviation are stable and small enough that the whole null is cheap next to a
 /// fit. Not a statistical knob — the exceedance threshold is derived separately.
-pub const NULL_REPLICATES: usize = 200;
+pub(crate) const NULL_REPLICATES: usize = 200;
 
 /// Curveball state: each row's active-atom index list (kept sorted so a trade's
 /// shared/exclusive split is a linear merge) plus the driving RNG. Preserves
@@ -68,7 +68,7 @@ impl CurveballSampler {
     /// Seed a sampler from the discrete active supports of `codes`. The RNG seed
     /// is a content hash of the support matrix (dimensions + per-row supports) so
     /// the chain is reproducible for identical inputs.
-    pub fn from_codes(codes: &SparseAtomCodes) -> Self {
+    pub(crate) fn from_codes(codes: &SparseAtomCodes) -> Self {
         let n_atoms = codes.k_atoms();
         let mut rows: Vec<Vec<usize>> = Vec::with_capacity(codes.n_obs());
         // Content hash (SplitMix64 fold) of the support matrix → deterministic seed.
@@ -91,7 +91,7 @@ impl CurveballSampler {
 
     /// Total number of active entries (ones) in the matrix — the natural scale for
     /// the mixing budget (each 1 gets ~one chance to move per sweep).
-    pub fn n_ones(&self) -> usize {
+    pub(crate) fn n_ones(&self) -> usize {
         self.rows.iter().map(|r| r.len()).sum()
     }
 
@@ -206,7 +206,7 @@ impl CurveballSampler {
 /// Returns standardized excess values aligned with `pairs`. It never allocates or
 /// scans a dense `K²` pair table; every replicate accumulates only co-firing pairs
 /// that are present in `pairs`.
-pub fn coactivation_exceedance_for_pairs(
+pub(crate) fn coactivation_exceedance_for_pairs(
     codes: &SparseAtomCodes,
     pairs: &[(usize, usize)],
     replicates: usize,
@@ -472,7 +472,7 @@ impl LiveAmplitudeMoments {
     }
 }
 
-pub fn live_amplitude_moments(route: &AuditSparseRoute) -> Vec<LiveAmplitudeMoments> {
+pub(crate) fn live_amplitude_moments(route: &AuditSparseRoute) -> Vec<LiveAmplitudeMoments> {
     let mut moments = vec![LiveAmplitudeMoments::default(); route.n_units];
     for row in 0..route.nrows() {
         for slot in 0..route.width() {
@@ -488,7 +488,7 @@ pub fn live_amplitude_moments(route: &AuditSparseRoute) -> Vec<LiveAmplitudeMome
     moments
 }
 
-pub fn resample_sparse_architecture_null<R: rand::Rng + ?Sized>(
+pub(crate) fn resample_sparse_architecture_null<R: rand::Rng + ?Sized>(
     observed: &AuditSparseRoute,
     donor: &AuditSparseRoute,
     rng: &mut R,

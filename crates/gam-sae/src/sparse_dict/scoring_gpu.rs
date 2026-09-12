@@ -381,15 +381,15 @@ void sparse_dict_fold_top_s(
 /// Output-tile dimensions the [`SCORE_BLOCK_KERNEL_SOURCE`] kernel is written
 /// for (`BM`/`BN`); the host grid uses them to tile the `n_rows × n_atoms`
 /// output. Kept in sync with the `#define`s at the top of the kernel string.
-pub const SCORE_BLOCK_TILE_M: u32 = 64;
-pub const SCORE_BLOCK_TILE_N: u32 = 64;
+pub(crate) const SCORE_BLOCK_TILE_M: u32 = 64;
+pub(crate) const SCORE_BLOCK_TILE_N: u32 = 64;
 
 /// Thread-block dimensions (`TM`/`TN`) for the register-blocked kernel: each
 /// thread owns an `(BM/TM) × (BN/TN)` micro-tile of outputs, so the launch uses
 /// a `TN × TM` thread block over the `BM × BN` output tile. Kept in sync with the
 /// `#define`s at the top of the kernel string.
-pub const SCORE_BLOCK_THREADS_M: u32 = 16;
-pub const SCORE_BLOCK_THREADS_N: u32 = 16;
+pub(crate) const SCORE_BLOCK_THREADS_M: u32 = 16;
+pub(crate) const SCORE_BLOCK_THREADS_N: u32 = 16;
 
 /// Prepend the `PP` shape macro so the NVRTC compile is a pure `compile_ptx`
 /// (mirrors `sae_rowjet::softmax_kernel_source` / `arrow_schur_nvrtc`).

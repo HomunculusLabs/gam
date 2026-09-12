@@ -143,7 +143,7 @@ pub fn sae_residual_seed_logits(
     Ok(logits)
 }
 
-pub fn sae_output_energy_cluster_labels(z: ArrayView2<'_, f64>, k_atoms: usize) -> Vec<usize> {
+pub(crate) fn sae_output_energy_cluster_labels(z: ArrayView2<'_, f64>, k_atoms: usize) -> Vec<usize> {
     let (n_obs, p_out) = z.dim();
     let mut labels = vec![0usize; n_obs];
     if n_obs == 0 || p_out == 0 || k_atoms <= 1 {
@@ -255,7 +255,7 @@ pub fn sae_output_energy_cluster_labels(z: ArrayView2<'_, f64>, k_atoms: usize) 
     labels
 }
 
-pub fn sae_refine_periodic_seed_coords_by_cluster(
+pub(crate) fn sae_refine_periodic_seed_coords_by_cluster(
     z: ArrayView2<'_, f64>,
     atom_kinds: &[SaeAtomBasisKind],
     labels: &[usize],
@@ -501,7 +501,7 @@ pub(crate) fn mobius_double_cover_coords_from_projection(
 
 /// Replace cold generic PCA coordinates for every Möbius atom with the
 /// quotient-aware double-cover chart recovered from that atom's cluster.
-pub fn sae_refine_mobius_seed_coords_by_cluster(
+pub(crate) fn sae_refine_mobius_seed_coords_by_cluster(
     z: ArrayView2<'_, f64>,
     atom_kinds: &[SaeAtomBasisKind],
     labels: &[usize],
@@ -863,7 +863,7 @@ pub fn sae_decoder_lsq_init(
 /// Only invoked for cold-start multi-atom softmax / ordered Beta--Bernoulli
 /// fits; the smooth threshold gate keeps its threshold-centered seed and warm
 /// starts are respected verbatim.
-pub fn sae_refine_routing_seed(
+pub(crate) fn sae_refine_routing_seed(
     term: &mut SaeManifoldTerm,
     z: ArrayView2<'_, f64>,
     basis_sizes: &[usize],

@@ -116,7 +116,7 @@ pub fn debias_with_dense_hessian(
     debias_with_sensitivity(input, &sensitivity)
 }
 
-pub fn debias_with_sensitivity(
+pub(crate) fn debias_with_sensitivity(
     input: &RieszInput<'_>,
     sensitivity: &FitSensitivity<'_>,
 ) -> Result<RieszDebiasReport, EstimationError> {
@@ -167,14 +167,14 @@ pub fn debias_with_sensitivity(
     })
 }
 
-pub fn average_derivative_gradient(
+pub(crate) fn average_derivative_gradient(
     derivative_design: ArrayView2<'_, f64>,
     weights: Option<ArrayView1<'_, f64>>,
 ) -> Result<Array1<f64>, EstimationError> {
     weighted_row_mean(derivative_design, weights, "average-derivative")
 }
 
-pub fn contrast_gradient(
+pub(crate) fn contrast_gradient(
     design_row_a: ArrayView1<'_, f64>,
     design_row_b: ArrayView1<'_, f64>,
 ) -> Result<Array1<f64>, EstimationError> {
