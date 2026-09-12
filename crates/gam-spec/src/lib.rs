@@ -1344,7 +1344,7 @@ pub enum FamilySpecKind {
 impl FamilySpecKind {
     /// Short identifier matching the legacy `LikelihoodSpec::name()` strings.
     #[inline]
-    pub const fn name(&self) -> &'static str {
+    pub(crate) const fn name(&self) -> &'static str {
         match self {
             Self::GaussianIdentity => "gaussian",
             Self::PoissonLog => "poisson-log",
@@ -1367,7 +1367,7 @@ impl FamilySpecKind {
 
     /// Human-readable label matching the legacy `LikelihoodSpec::pretty_name()` strings.
     #[inline]
-    pub const fn pretty_name(&self) -> &'static str {
+    pub(crate) const fn pretty_name(&self) -> &'static str {
         match self {
             Self::GaussianIdentity => "Gaussian Identity",
             Self::PoissonLog => "Poisson Log",
@@ -1389,7 +1389,7 @@ impl FamilySpecKind {
     }
 
     #[inline]
-    pub const fn is_binomial(&self) -> bool {
+    pub(crate) const fn is_binomial(&self) -> bool {
         matches!(
             self,
             Self::BinomialLogit
@@ -1405,32 +1405,32 @@ impl FamilySpecKind {
     }
 
     #[inline]
-    pub const fn is_gaussian_identity(&self) -> bool {
+    pub(crate) const fn is_gaussian_identity(&self) -> bool {
         matches!(self, Self::GaussianIdentity)
     }
 
     #[inline]
-    pub const fn is_royston_parmar(&self) -> bool {
+    pub(crate) const fn is_royston_parmar(&self) -> bool {
         matches!(self, Self::RoystonParmar)
     }
 
     #[inline]
-    pub const fn is_latent_cloglog(&self) -> bool {
+    pub(crate) const fn is_latent_cloglog(&self) -> bool {
         matches!(self, Self::BinomialLatentCLogLog(_))
     }
 
     #[inline]
-    pub const fn is_binomial_mixture(&self) -> bool {
+    pub(crate) const fn is_binomial_mixture(&self) -> bool {
         matches!(self, Self::BinomialMixture(_))
     }
 
     #[inline]
-    pub const fn is_binomial_sas(&self) -> bool {
+    pub(crate) const fn is_binomial_sas(&self) -> bool {
         matches!(self, Self::BinomialSas(_))
     }
 
     #[inline]
-    pub const fn is_binomial_beta_logistic(&self) -> bool {
+    pub(crate) const fn is_binomial_beta_logistic(&self) -> bool {
         matches!(self, Self::BinomialBetaLogistic(_))
     }
 

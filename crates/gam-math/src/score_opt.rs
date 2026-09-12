@@ -87,7 +87,7 @@ impl ClosedInterval {
     }
 
     #[inline]
-    pub const fn entire() -> Self {
+    pub(crate) const fn entire() -> Self {
         Self {
             lo: f64::NEG_INFINITY,
             hi: f64::INFINITY,

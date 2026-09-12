@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Stable identity of the serialized fit-request document.
-pub const FIT_REQUEST_SCHEMA: &str = "gam.fit-request";
+pub(crate) const FIT_REQUEST_SCHEMA: &str = "gam.fit-request";
 
 /// Current fit-request schema version.
-pub const FIT_REQUEST_SCHEMA_VERSION: u32 = 1;
+pub(crate) const FIT_REQUEST_SCHEMA_VERSION: u32 = 1;
 
 /// A complete, frontend-neutral formula fit request.
 ///
@@ -40,7 +40,7 @@ impl FitRequestDocument {
         Ok(document)
     }
 
-    pub fn from_json(raw: &str) -> Result<Self, String> {
+    pub(crate) fn from_json(raw: &str) -> Result<Self, String> {
         let document = serde_json::from_str::<Self>(raw)
             .map_err(|error| format!("invalid fit request document: {error}"))?;
         document.validate()?;

@@ -16,10 +16,9 @@ use ndarray::Array1;
 mod fit_request_document;
 
 pub use fit_request_document::{
-    AnalyticPenaltiesDocument, CtnStage1ConfigDocument, CtnStage1Document, FIT_REQUEST_SCHEMA,
-    FIT_REQUEST_SCHEMA_VERSION, FitRequestConfigDocument, FitRequestDocument,
-    LatentCoordinateDocument, LatentCoordinatesDocument, PrecisionHyperpriorDocument,
-    SmoothDescriptorsDocument,
+    AnalyticPenaltiesDocument, CtnStage1ConfigDocument, CtnStage1Document, FitRequestConfigDocument,
+    FitRequestDocument, LatentCoordinateDocument, LatentCoordinatesDocument,
+    PrecisionHyperpriorDocument, SmoothDescriptorsDocument,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
