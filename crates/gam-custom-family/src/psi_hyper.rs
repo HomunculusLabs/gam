@@ -1016,7 +1016,7 @@ pub fn build_psi_hyper_coords<F: CustomFamily + Clone + Send + Sync + 'static>(
 /// for one spectrum — which is what this cache removes. Each axis's weights are
 /// prepared on first use, so an evaluation that never reaches an axis keeps its
 /// exact previous outcome, including a stratum refusal it never provoked.
-pub struct JeffreysPsiWeightCache {
+pub(crate) struct JeffreysPsiWeightCache {
     plan: gam_solve::estimate::reml::jeffreys_subspace::JointJeffreysPlan,
     /// `∂_{ψ_a}H_info|_β` for every ψ axis, in layout order.
     pub pert_first: Vec<Array2<f64>>,
