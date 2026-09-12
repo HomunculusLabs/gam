@@ -26,7 +26,7 @@ APIs such as a matrix kernel.
 | Fit-time conformal substrate and inference retention | request document | `--precompute-conformal`, `--inference` | `config=` request fields | Parity through shared request |
 | Prediction and posterior-mean uncertainty | `gam::predict` saved-model machinery | `predict`, `--uncertainty`, `--level`, `--covariance-mode`, offsets and IDs | `Model.predict`, `predict_array`; interval, observation interval, covariance mode, IDs | Parity; Python exposes richer typed return objects |
 | CTN observed-response score | saved-model prediction machinery | `transformation-score` | `Model.transformation_score` | Parity |
-| Diagnostics / ALO | `gam::inference::alo`, saved-model ALO | `diagnose [--alo]`; report may include diagnostics | `Model.diagnose`, `check`, `basis_check`, `curvature`, `smooth_significance` | Core diagnostics shared; Python methods are programmatic views |
+| Diagnostics / ALO | `gam::inference::alo`, saved-model ALO | `diagnose`; report may include diagnostics | `Model.diagnose`, `check`, `basis_check`, `curvature`, `smooth_significance` | Core diagnostics shared; Python methods are programmatic views |
 | Posterior coefficient sampling | `gam::inference::sample` / `gam::hmc` | `sample --chains --samples --warmup --seed` | `Model.sample` with the same controls | Same Rust sampler |
 | Posterior predictive / response generation | `gam::predict::generative` | `generate --n-draws --seed` | `sample_replicates`, `iter_replicates`; multinomial `posterior_predict` | Same Rust generator |
 | Summary and HTML report | saved model / `gam::report` | `report` | `summary`, `report` | Parity |
@@ -45,7 +45,7 @@ The one global flag is `--log-level`.
 | `fit` | `DATA`, `FORMULA`; `--request`, `--ctn-stage1`, `--precision-hyperpriors`, `--latent-coordinates`, `--analytic-penalties`, `--smooth-descriptors`, `--predict-noise`, `--slope-formula`, `--z-column`, `--weights-column`, `--offset-column`, `--noise-offset-column`, `--frailty-kind`, `--frailty-sd`, `--hazard-loading`, `--transformation-normal`, `--firth`, `--family`, `--negative-binomial-theta`, `--expectile-tau`, `--survival-likelihood`, baseline and time-basis controls, `--scale-dimensions`, `--precompute-conformal`, `--inference`, `--persistent-warm-start-root`, `--out` |
 | `predict` | `MODEL NEW_DATA --out`; offset/noise-offset/ID, `--uncertainty`, `--level`, `--covariance-mode` |
 | `transformation-score` | `MODEL LABELLED_DATA --out`; offset and ID columns |
-| `diagnose` | `MODEL DATA [--alo]` |
+| `diagnose` | `MODEL DATA` |
 | `sample` | `MODEL DATA`; `--chains`, `--samples`, `--warmup`, `--seed`, `--out` |
 | `generate` | `MODEL DATA`; `--n-draws`, `--seed`, `--out` |
 | `report` | `MODEL [DATA] [OUT]` |
