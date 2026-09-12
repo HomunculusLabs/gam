@@ -80,6 +80,7 @@ use crate::penalized_vector_glm::{
 use crate::vector_response::{MultinomialLogitLikelihood, validate_multinomial_simplex};
 use gam_data::ColumnKindTag;
 use gam_data::EncodedDataset;
+use gam_linalg::faer_ndarray::FaerCholesky;
 use gam_problem::{
     FixedLambdaCheckpoint, FixedLambdaResidualKind, FixedLambdaSolverStage, FixedLambdaStallReason,
     FixedLambdaStationarityEvidence, ResponseColumnKind,
@@ -2164,13 +2165,14 @@ impl MultinomialSavedModel {
         Ok(())
     }
 
-    /// The training frame and penalty this model carries, as the borrowed view
-    /// [`crate::multinomial_predictive`] consumes.
+    /// The training frame, penalty and terminal precision this model carries, as
+    /// the borrowed view [`crate::multinomial_predictive`] consumes.
     pub fn predictive_model<'a>(
         &'a self,
         training_design: ndarray::ArrayView2<'a, f64>,
         training_weights: ndarray::ArrayView1<'a, f64>,
         joint_penalty: ndarray::ArrayView2<'a, f64>,
+        terminal_precision: Option<ndarray::ArrayView2<'a, f64>>,
     ) -> crate::multinomial_predictive::MultinomialPredictiveModel<'a> {
         crate::multinomial_predictive::MultinomialPredictiveModel {
             training_design,
@@ -2178,6 +2180,7 @@ impl MultinomialSavedModel {
             training_weights,
             joint_penalty,
             n_classes: self.class_levels.len(),
+            terminal_precision,
         }
     }
 
@@ -2510,7 +2513,28 @@ impl MultinomialSavedModel {
         let penalty = self.joint_penalty()?;
         let weights = Array1::from(self.training_weights.clone());
         let mode = self.stacked_mode()?;
-        let model = self.predictive_model(design.view(), weights.view(), penalty.view());
+        // A fit that armed a proper prior published the mode of `ℓ − ½θ'S_λθ + Φ`,
+        // and its saved covariance is the inverse of that objective's terminal
+        // precision `H + S_λ + H_Φ + completion`. The predictive integrates the same
+        // posterior, so it receives that precision (#1082).
+        let terminal_precision = if self.separation_evidence.is_some() {
+            let covariance = self.coefficient_covariance()?;
+            let factor = covariance.cholesky(faer::Side::Lower).map_err(|error| {
+                EstimationError::InvalidInput(format!(
+                    "multinomial predictive: the saved posterior covariance is not positive \
+                     definite ({error}), so it carries no terminal precision to integrate"
+                ))
+            })?;
+            Some(factor.solve_mat(&Array2::<f64>::eye(covariance.nrows())))
+        } else {
+            None
+        };
+        let model = self.predictive_model(
+            design.view(),
+            weights.view(),
+            penalty.view(),
+            terminal_precision.as_ref().map(|precision| precision.view()),
+        );
         model.predictive_moments(mode.view(), x_new, want_second_moments)
     }
 

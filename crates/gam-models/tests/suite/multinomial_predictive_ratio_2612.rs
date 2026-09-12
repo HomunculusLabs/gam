@@ -48,7 +48,14 @@ fn training_frame() -> (Array2<f64>, Vec<u32>, Array1<f64>) {
     (design, labels, Array1::from_elem(N_TRAIN, 1.0))
 }
 
-fn log_posterior(design: &Array2<f64>, labels: &[u32], theta: &[f64]) -> f64 {
+/// The exact penalized log-posterior, with an optional proper-prior quadratic
+/// `−½(θ − anchor)ᵀ A (θ − anchor)`.
+fn log_posterior(
+    design: &Array2<f64>,
+    labels: &[u32],
+    theta: &[f64],
+    prior: Option<(&Array2<f64>, [f64; 2])>,
+) -> f64 {
     let mut total = 0.0;
     for row in 0..design.nrows() {
         let eta = theta[0] * design[[row, 0]] + theta[1] * design[[row, 1]];
@@ -61,7 +68,20 @@ fn log_posterior(design: &Array2<f64>, labels: &[u32], theta: &[f64]) -> f64 {
         let picked = if labels[row] == 0 { eta } else { 0.0 };
         total += picked - log_partition;
     }
-    total - 0.5 * WALL * (theta[0] * theta[0] + theta[1] * theta[1])
+    let penalized = total - 0.5 * WALL * (theta[0] * theta[0] + theta[1] * theta[1]);
+    match prior {
+        None => penalized,
+        Some((curvature, anchor)) => {
+            let offset = [theta[0] - anchor[0], theta[1] - anchor[1]];
+            let mut quadratic = 0.0;
+            for i in 0..2 {
+                for j in 0..2 {
+                    quadratic += offset[i] * curvature[[i, j]] * offset[j];
+                }
+            }
+            penalized - 0.5 * quadratic
+        }
+    }
 }
 
 /// Exact posterior mean of `p_class0(x)` at each `TEST_X`, by dense quadrature.
@@ -73,6 +93,7 @@ fn exact_posterior_means(
     centre: [f64; 2],
     half_width: [f64; 2],
     nodes: usize,
+    prior: Option<(&Array2<f64>, [f64; 2])>,
 ) -> ([f64; TEST_X.len()], f64) {
     let mut log_values = vec![0.0_f64; nodes * nodes];
     let mut grid_a = vec![0.0_f64; nodes];
@@ -85,7 +106,7 @@ fn exact_posterior_means(
     let mut best = f64::NEG_INFINITY;
     for i in 0..nodes {
         for j in 0..nodes {
-            let value = log_posterior(design, labels, &[grid_a[i], grid_b[j]]);
+            let value = log_posterior(design, labels, &[grid_a[i], grid_b[j]], prior);
             log_values[i * nodes + j] = value;
             if value > best {
                 best = value;
@@ -153,6 +174,7 @@ fn ratio_predictive_matches_the_exact_posterior_where_the_gaussian_does_not_2612
         training_weights: weights.view(),
         joint_penalty: penalty.view(),
         n_classes: 2,
+        terminal_precision: None,
     };
 
     let mut x_new = Array2::<f64>::zeros((TEST_X.len(), 2));
@@ -184,6 +206,7 @@ fn ratio_predictive_matches_the_exact_posterior_where_the_gaussian_does_not_2612
             14.0 * covariance[[1, 1]].sqrt(),
         ],
         601,
+        None,
     );
     assert!(
         edge_mass < 1e-6,
@@ -291,6 +314,98 @@ fn newton_mode(design: &Array2<f64>, labels: &[u32]) -> ([f64; 2], Array2<f64>) 
         }
     }
     (theta, precision)
+}
+
+/// #1082: a fit that armed a proper prior published the mode of
+/// `ℓ − ½θ'S_λθ + Φ`, and its terminal precision carries `Φ`'s curvature. With
+/// `terminal_precision` the ratio predictive integrates that posterior. Without it
+/// the predictive integrates the bare penalized likelihood, whose width along the
+/// separated direction the prior does not allow.
+#[test]
+fn ratio_predictive_integrates_the_fitted_prior_curvature_1082() {
+    let (design, labels, weights) = training_frame();
+    let penalty = Array2::from_diag(&Array1::from_vec(vec![WALL, WALL]));
+    // `newton_mode` returns `Xᵀ W X + S_λ` at the mode. A fixed positive-definite
+    // curvature stands in for `−∇²Φ(β̂)`: O(1) where the likelihood is flat.
+    let (mode, base_precision) = newton_mode(&design, &labels);
+    let prior = ndarray::array![[2.0, 0.3], [0.3, 3.0]];
+    let terminal = &base_precision + &prior;
+
+    let mut x_new = Array2::<f64>::zeros((TEST_X.len(), 2));
+    for (row, x) in TEST_X.iter().enumerate() {
+        x_new[[row, 0]] = 1.0;
+        x_new[[row, 1]] = *x;
+    }
+    let start = Array1::from_vec(vec![mode[0], mode[1]]);
+    let with_prior = MultinomialPredictiveModel {
+        training_design: design.view(),
+        training_class_index: &labels,
+        training_weights: weights.view(),
+        joint_penalty: penalty.view(),
+        n_classes: 2,
+        terminal_precision: Some(terminal.view()),
+    }
+    .predictive_moments(start.view(), x_new.view(), false)
+    .expect("ratio predictive moments with the fitted prior curvature");
+    let without_prior = MultinomialPredictiveModel {
+        training_design: design.view(),
+        training_class_index: &labels,
+        training_weights: weights.view(),
+        joint_penalty: penalty.view(),
+        n_classes: 2,
+        terminal_precision: None,
+    }
+    .predictive_moments(start.view(), x_new.view(), false)
+    .expect("ratio predictive moments without the prior curvature");
+
+    // The window is sized by the prior-augmented width: the prior narrows the
+    // posterior far below the bare likelihood's, and a grid sized by the wider
+    // one would not resolve it.
+    let covariance = invert_two_by_two(&terminal);
+    let (exact, edge_mass) = exact_posterior_means(
+        &design,
+        &labels,
+        mode,
+        [
+            14.0 * covariance[[0, 0]].sqrt(),
+            14.0 * covariance[[1, 1]].sqrt(),
+        ],
+        601,
+        Some((&prior, mode)),
+    );
+    assert!(
+        edge_mass < 1e-6,
+        "the quadrature window must contain the prior-augmented posterior; edge mass {edge_mass:e}"
+    );
+
+    let mut worst_with = 0.0_f64;
+    let mut worst_without = 0.0_f64;
+    for (index, x) in TEST_X.iter().enumerate() {
+        let with = with_prior.class_mean[[index, 0]];
+        let without = without_prior.class_mean[[index, 0]];
+        eprintln!(
+            "[#1082] x={x:+.2} exact_with_prior={:.8} ratio_with={with:.8} \
+             ratio_without={without:.8} mass_defect_with={:.3e}",
+            exact[index],
+            with_prior.mass_defect[index],
+        );
+        worst_with = worst_with.max((with - exact[index]).abs());
+        worst_without = worst_without.max((without - exact[index]).abs());
+    }
+    assert!(
+        worst_with < 1.0e-3,
+        "the ratio predictive with the fitted prior curvature is {worst_with:e} from the exact \
+         prior-augmented posterior mean"
+    );
+    // Positive control: dropping the curvature integrates a different posterior at a
+    // resolvable scale, so the bar above is not met by a fixture the prior does not
+    // move.
+    assert!(
+        worst_without > 20.0 * worst_with,
+        "without the prior curvature the ratio is {worst_without:e} from the prior-augmented \
+         posterior mean, not an order of magnitude above the {worst_with:e} with it; the \
+         fixture has stopped exercising the curvature"
+    );
 }
 
 fn invert_two_by_two(matrix: &Array2<f64>) -> Array2<f64> {
