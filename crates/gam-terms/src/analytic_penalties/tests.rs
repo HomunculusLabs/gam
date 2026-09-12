@@ -1715,10 +1715,23 @@ fn nuclear_norm_right_gram_divided_difference_uses_shared_eigen_shift() {
     let f1 = lambda1.powf(-0.5);
     let expected = ((f0 - f1) / (lambda0 - lambda1)) * a;
 
+    // The code evaluates the filter on the eigensolver's eigenvalues, not on a² and
+    // b². A backward-stable eigh returns each within p·ε·λ_max of the exact value
+    // (Weyl), and the small shifted eigenvalue λ₀ = 2e-20 sits far below
+    // λ_max = 4e-14, so that band is a relative p·ε·λ_max/λ₀ ≈ 9e-10 of it. The
+    // coefficient is dominated by f₀ = λ₀^{-1/2}, which moves by half that relative
+    // amount. λ₁ moves it by at most p·ε·λ_max/λ₁, and the two evaluations' own
+    // roundings (about ten operations each) add γ₂₀. Under the retired 1e-15 floor
+    // the coefficient is 265× smaller, far outside this band, so the bar still pins
+    // the shift the name promises.
+    let eigen_band = p as f64 * f64::EPSILON * lambda1;
+    let relative_band = eigen_band / (2.0 * lambda0)
+        + eigen_band / lambda1
+        + gam_linalg::roundoff::accumulation_growth(20);
     assert_abs_diff_eq!(
         right_filter_derivative[[0, 1]],
         expected,
-        epsilon = expected.abs() * 1.0e-12
+        epsilon = expected.abs() * relative_band
     );
 }
 
