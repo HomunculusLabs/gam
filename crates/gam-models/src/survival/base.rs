@@ -2812,16 +2812,19 @@ impl WorkingModelSurvival {
     ///
     /// Evaluate the survival outer objective and gradient via the unified REML/LAML
     /// evaluator, using the canonical assembly module.
-    /// Returns `(cost, ∂cost/∂ρ, resolution)`, where the resolution is the
-    /// criterion's round-off band — machine precision times the sum of the
-    /// magnitudes of its four additive terms (#2812).
+    /// Returns `(cost, ∂cost/∂ρ, ∂²cost/∂ρ², resolution)`, where the resolution
+    /// is the criterion's round-off band — machine precision times the sum of
+    /// the magnitudes of its four additive terms (#2812). The ρ-Hessian is the
+    /// evaluator's analytic one when `mode` requests it, assembled from the
+    /// provider's second-order drift (#2912).
     pub(crate) fn unified_lamlobjective_and_rhogradient(
         &self,
         beta: &Array1<f64>,
         state: &WorkingState,
         rho: &Array1<f64>,
-    ) -> Result<(f64, Array1<f64>, f64), EstimationError> {
-        use gam_problem::{EvalMode, PseudoLogdetMode};
+        mode: gam_problem::EvalMode,
+    ) -> Result<(f64, Array1<f64>, gam_problem::HessianValue, f64), EstimationError> {
+        use gam_problem::PseudoLogdetMode;
         use gam_solve::estimate::reml::assembly::InnerAssembly;
         use gam_solve::estimate::reml::reml_outer_engine::{
             DenseSpectralOperator, DispersionHandling,
@@ -3198,7 +3201,7 @@ impl WorkingModelSurvival {
         }
         .evaluate(
             rho.as_slice().expect("rho must be contiguous"),
-            EvalMode::ValueAndGradient,
+            mode,
             None,
         )
         .map_err(EstimationError::InvalidInput)?;
@@ -3210,7 +3213,7 @@ impl WorkingModelSurvival {
                 + result.criterion_components.logdet_h.abs()
                 + result.criterion_components.logdet_s.abs()
                 + result.criterion_components.kkt.abs());
-        Ok((result.cost, gradient, resolution))
+        Ok((result.cost, gradient, result.hessian, resolution))
     }
 
 }
@@ -4453,6 +4456,123 @@ mod tests {
                     "D²H[u, v][{r},{c}]: analytic={:.9e} fd={:.9e}",
                     analytic[[r, c]],
                     fd[[r, c]]
+                );
+            }
+        }
+    }
+
+    /// The survival LAML ρ-Hessian is the derivative of its ρ-gradient: central
+    /// differences of the analytic gradient, each side at its own certified
+    /// inner mode, on the delayed-entry fixture with one penalty per
+    /// coefficient so the mixed ρ-drift is exercised (#2912).
+    #[test]
+    fn survival_laml_rho_hessian_matches_central_difference_of_rho_gradient_2912() {
+        let age_entry = array![0.5_f64, 0.0, 0.3, 0.9];
+        let age_exit = array![1.4_f64, 1.0, 2.0, 1.1];
+        let event_target = array![1u8, 1u8, 0u8, 1u8];
+        let event_competing = array![0u8, 0u8, 0u8, 0u8];
+        let sampleweight = array![1.0_f64, 2.5, 0.7, 1.3];
+        let rows = age_entry.len();
+        let mut x_entry = Array2::<f64>::zeros((rows, 2));
+        let mut x_exit = Array2::<f64>::zeros((rows, 2));
+        let mut x_derivative = Array2::<f64>::zeros((rows, 2));
+        for i in 0..rows {
+            x_entry[[i, 0]] = 1.0;
+            x_entry[[i, 1]] = age_entry[i].max(1e-8).ln();
+            x_exit[[i, 0]] = 1.0;
+            x_exit[[i, 1]] = age_exit[i].ln();
+            x_derivative[[i, 1]] = 1.0 / age_exit[i];
+        }
+        let o_entry = array![0.2_f64, 0.0, 0.1, 0.05];
+        let o_exit = array![0.4_f64, 0.5, 0.7, 0.3];
+        let o_deriv = array![0.3_f64, 0.8, 0.5, 0.6];
+        let ridge = |range: std::ops::Range<usize>| PenaltyBlock {
+            matrix: array![[1.0_f64]],
+            lambda: 1.0,
+            range,
+            nullspace_dim: 0,
+        };
+        let model = survival_model_with_offsets(
+            survival_inputs(
+                &age_entry,
+                &age_exit,
+                &event_target,
+                &event_competing,
+                &sampleweight,
+                &x_entry,
+                &x_exit,
+                &x_derivative,
+            ),
+            Some(SurvivalBaselineOffsets {
+                eta_entry: o_entry.view(),
+                eta_exit: o_exit.view(),
+                derivative_exit: o_deriv.view(),
+            }),
+            PenaltyBlocks::new(vec![ridge(0..1), ridge(1..2)]),
+            SurvivalMonotonicityPenalty { tolerance: 1e-8 },
+            SurvivalSpec::Net,
+        )
+        .expect("model build");
+        let options = gam_solve::pirls::WorkingModelPirlsOptions {
+            max_iterations: 400,
+            convergence_tolerance: crate::survival::SURVIVAL_LAML_STATIONARITY_RELATIVE_TOL,
+            adaptive_kkt_tolerance: None,
+            max_step_halving: 40,
+            min_step_size: 1e-12,
+            firth_bias_reduction: false,
+            coefficient_lower_bounds: None,
+            linear_constraints: None,
+            initial_lm_lambda: None,
+            arrow_schur: None,
+        };
+        let laml = |rho: &Array1<f64>, mode: gam_problem::EvalMode| {
+            let mut candidate = model.clone();
+            candidate
+                .set_penalty_lambdas(&[rho[0].exp(), rho[1].exp()])
+                .expect("penalty lambdas");
+            let summary = gam_solve::pirls::runworking_model_pirls(
+                &mut candidate,
+                gam_problem::Coefficients::new(array![-0.7_f64, 0.6]),
+                &options,
+                None,
+            )
+            .expect("inner solve");
+            assert!(
+                summary.status.is_converged(),
+                "inner solve at rho={rho:?} ended {:?}",
+                summary.status
+            );
+            let beta = summary.beta.as_ref().to_owned();
+            let state = candidate.update_state(&beta).expect("state");
+            candidate
+                .unified_lamlobjective_and_rhogradient(&beta, &state, rho, mode)
+                .expect("survival LAML")
+        };
+        let rho = array![0.3_f64, -0.4];
+        let (_, _, hessian, _) = laml(&rho, gam_problem::EvalMode::ValueGradientHessian);
+        let hessian = hessian
+            .materialize_dense()
+            .expect("rho-Hessian materializes")
+            .expect("the rho-Hessian was requested");
+        assert!(
+            hessian.iter().any(|value| value.abs() > 1e-3),
+            "the fixture must exercise a non-zero rho-Hessian: {hessian:?}"
+        );
+        let h = 1e-4;
+        for j in 0..rho.len() {
+            let mut plus = rho.clone();
+            let mut minus = rho.clone();
+            plus[j] += h;
+            minus[j] -= h;
+            let (_, gradient_plus, _, _) = laml(&plus, gam_problem::EvalMode::ValueAndGradient);
+            let (_, gradient_minus, _, _) = laml(&minus, gam_problem::EvalMode::ValueAndGradient);
+            let fd = (gradient_plus - gradient_minus) / (2.0 * h);
+            for k in 0..rho.len() {
+                assert!(
+                    (hessian[[k, j]] - fd[k]).abs() <= 1e-4 * (1.0 + fd[k].abs()),
+                    "∂²LAML/∂ρ[{k}]∂ρ[{j}]: analytic={:.9e} fd={:.9e}",
+                    hessian[[k, j]],
+                    fd[k]
                 );
             }
         }

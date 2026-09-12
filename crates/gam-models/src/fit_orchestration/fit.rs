@@ -1778,7 +1778,7 @@ fn optimize_survival_transformation_smoothing(
     structural_lower_bounds: Option<&Array1<f64>>,
 ) -> Result<Option<SurvivalSmoothingSelection>, String> {
     use gam_problem::{Derivative, HessianValue, OuterEval};
-    use gam_solve::rho_optimizer::OuterProblem;
+    use gam_solve::rho_optimizer::{OuterEvalOrder, OuterProblem};
     // One outer coordinate per penalty block: every block is REML-selected.
     let num_smoothing = penalty_blocks.len();
     if num_smoothing == 0 {
@@ -1827,19 +1827,22 @@ fn optimize_survival_transformation_smoothing(
     // ρ is restored. A non-converged probe never advances the seed (see below), so
     // a bad probe cannot corrupt the warm start for the next attempt.
     let warm_beta: std::cell::RefCell<Array1<f64>> = std::cell::RefCell::new(beta0.clone());
-    // Evaluate the LAML objective and ρ-gradient at a ρ proposal: set the
-    // λ, re-run the constrained inner PIRLS, and evaluate the unified survival
-    // LAML and its ρ-gradient.
-    let eval_at = |rho_smooth: &Array1<f64>| -> Result<
-        (f64, Array1<f64>),
+    // Evaluate the LAML objective and ρ-gradient at a ρ proposal, and its
+    // analytic ρ-Hessian when the order asks for curvature: set the λ, re-run
+    // the constrained inner PIRLS, and evaluate the unified survival LAML.
+    let eval_at = |rho_smooth: &Array1<f64>, order: OuterEvalOrder| -> Result<
+        (f64, Array1<f64>, HessianValue),
         gam_solve::estimate::EstimationError,
     > {
         let physical_smoothing =
             gam_problem::checked_exp_log_strengths(rho_smooth.iter().copied())?;
-        if let Some((cached_rho, cached_cost, cached_grad)) = eval_cache.borrow().as_ref()
+        // The cache holds no Hessian, so a curvature request always evaluates.
+        let wants_hessian = matches!(order, OuterEvalOrder::ValueGradientHessian);
+        if !wants_hessian
+            && let Some((cached_rho, cached_cost, cached_grad)) = eval_cache.borrow().as_ref()
             && cached_rho == rho_smooth
         {
-            return Ok((*cached_cost, cached_grad.clone()));
+            return Ok((*cached_cost, cached_grad.clone(), HessianValue::Unavailable));
         }
         let mut candidate = model.clone();
         candidate
@@ -1951,8 +1954,13 @@ fn optimize_survival_transformation_smoothing(
         // survival LAML evaluator requires: every block is an outer coordinate,
         // so the evaluator sees the optimizer's ρ itself rather than an
         // `exp`/`ln` round trip of it.
-        let (cost, grad_full, _resolution) = candidate
-            .unified_lamlobjective_and_rhogradient(&beta, &state, rho_smooth)
+        let mode = if wants_hessian {
+            gam_problem::EvalMode::ValueGradientHessian
+        } else {
+            gam_problem::EvalMode::ValueAndGradient
+        };
+        let (cost, grad_full, hessian, _resolution) = candidate
+            .unified_lamlobjective_and_rhogradient(&beta, &state, rho_smooth, mode)
             // Adding context must not change the verdict. Re-rendering the
             // source into `InvalidInput` overwrote the producer's "this trial
             // point, not this problem" with "this configuration is wrong", and
@@ -2006,7 +2014,7 @@ fn optimize_survival_transformation_smoothing(
             });
         }
         *eval_cache.borrow_mut() = Some((rho_smooth.to_owned(), cost, grad.clone()));
-        Ok((cost, grad))
+        Ok((cost, grad, hessian))
     };
 
     // The ρ domain is not a private `seed ± 12` box: that box was measured
@@ -2042,7 +2050,14 @@ fn optimize_survival_transformation_smoothing(
     // caller-owned retry budget.
     let problem = OuterProblem::new(num_smoothing)
         .with_gradient(Derivative::Analytic)
-        .with_hessian(gam_problem::DeclaredHessianForm::Unavailable)
+        // The analytic LAML ρ-Hessian is declared under #2359's
+        // optimize-3/certify-4 lifecycle: the search stays on BFGS over the
+        // analytic gradient, and the terminal mint requests
+        // `ValueGradientHessian` once, so the certificate carries curvature
+        // evidence and `final_hessian` holds the ρ-Hessian at the selected ρ
+        // (#2912).
+        .with_hessian(gam_problem::DeclaredHessianForm::Dense)
+        .with_prefer_gradient_only(true)
         .with_max_iter(120)
         .with_bounds(lower.clone(), upper.clone())
         .with_initial_rho(seed_rho.clone())
@@ -2051,15 +2066,26 @@ fn optimize_survival_transformation_smoothing(
             seed_budget: 1,
             ..Default::default()
         });
-    let mut obj = problem.build_objective(
+    let mut obj = problem.build_objective_with_eval_order(
         (),
-        |_: &mut (), rho: &Array1<f64>| eval_at(rho).map(|(c, _)| c),
         |_: &mut (), rho: &Array1<f64>| {
-            let (cost, gradient) = eval_at(rho)?;
+            eval_at(rho, OuterEvalOrder::ValueAndGradient).map(|(cost, _, _)| cost)
+        },
+        |_: &mut (), rho: &Array1<f64>| {
+            let (cost, gradient, hessian) = eval_at(rho, OuterEvalOrder::ValueAndGradient)?;
             Ok(OuterEval {
                 cost,
                 gradient,
-                hessian: HessianValue::Unavailable,
+                hessian,
+                inner_beta_hint: None,
+            })
+        },
+        |_: &mut (), rho: &Array1<f64>, order: OuterEvalOrder| {
+            let (cost, gradient, hessian) = eval_at(rho, order)?;
+            Ok(OuterEval {
+                cost,
+                gradient,
+                hessian,
                 inner_beta_hint: None,
             })
         },
