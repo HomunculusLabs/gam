@@ -6,7 +6,7 @@
 
 use ndarray::{Array2, ArrayView2};
 
-/// Outcome reported by [`iterative_refinement_cholesky_solve`].
+/// Outcome reported by `iterative_refinement_cholesky_solve`.
 #[derive(Clone, Debug)]
 pub struct RefinementOutcome {
     /// Solution vector `x` satisfying `A x ≈ b`.
@@ -932,7 +932,7 @@ pub use cuda::{
 /// Returns `(solution, logdet, Some(RefinementOutcome))` when the fp32 path
 /// succeeded, or `(solution, logdet, None)` on the fp64 fallback. When
 /// `need_logdet` is false and the fp32 path succeeds, the logdet field is `NaN`.
-pub fn iterative_refinement_cholesky_solve(
+pub(crate) fn iterative_refinement_cholesky_solve(
     hessian: ArrayView2<'_, f64>,
     rhs: ArrayView2<'_, f64>,
     need_logdet: bool,

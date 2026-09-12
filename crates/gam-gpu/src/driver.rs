@@ -926,7 +926,7 @@ pub fn array_from_row_major(values: Vec<f64>, rows: usize, cols: usize) -> Optio
 }
 
 /// Convert a column-major flat buffer back into row-major `Array2<f64>`.
-pub fn from_col_major_inplace(values: &[f64], out: &mut Array2<f64>) -> Option<()> {
+pub(crate) fn from_col_major_inplace(values: &[f64], out: &mut Array2<f64>) -> Option<()> {
     let (rows, cols) = out.dim();
     if values.len() != rows.checked_mul(cols)? {
         return None;
