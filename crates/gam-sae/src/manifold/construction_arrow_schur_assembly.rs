@@ -1523,7 +1523,10 @@ impl SaeManifoldTerm {
                     sys.rows.iter().map(|row| row.gt.clone()).collect();
                 self.apply_sae_riemannian_geometry(&mut sys);
                 let manifold = self.ext_coord_manifold();
-                if !frames_engaged && !manifold.is_euclidean() {
+                // A flat chart (Euclidean and Circle factors only) projects every
+                // Jacobian column to itself, so the column pass below would copy each
+                // one back unchanged (`LatentManifold::preserves_isometry_cross_block_coherence`).
+                if !frames_engaged && !manifold.preserves_isometry_cross_block_coherence() {
                     let ext = self.ext_coord_matrix();
                     // Project the local Jacobian columns onto the tangent space at
                     // each row's ext-coord point. Each column `j` of the row's
