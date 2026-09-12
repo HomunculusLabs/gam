@@ -72,8 +72,14 @@ fn fit_euclidean_curve(kind: CurveKind) -> f64 {
         .evaluate(coords.view())
         .expect("initial euclidean basis");
     let m = phi.ncols();
+    // The production penalty of a degree-2 flat patch: the function's Dirichlet energy over
+    // its reference rows (`SaeAtomGeometryPlan::build_reference_penalty`, #2901 V23). A
+    // second-difference penalty on the monomial coefficients {1, t, t²} charges
+    // β₀ − 2β₁ + β₂ rather than any derivative of the function, so the inner solve this
+    // test graded was not production's.
     let smooth_penalty =
-        gam::basis::create_difference_penalty_matrix(m, 2, None).expect("roughness penalty");
+        gam::geometry::constant_curvature_dirichlet_penalty(coords.view(), jet.view(), 0.0)
+            .unwrap_or_else(|error| panic!("flat Dirichlet penalty: {error}"));
     let atom = SaeManifoldAtom::new_with_provided_function_gram(
         "euclidean_curve",
         SaeAtomBasisKind::EuclideanPatch,
