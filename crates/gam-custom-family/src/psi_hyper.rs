@@ -231,7 +231,7 @@ fn prepare_explicit_jeffreys_curvature_drifts<F: CustomFamily + Clone + Send + S
 /// derivative of any information matrix.
 ///
 /// This is the materializing counterpart of
-/// [`build_psi_drift_deriv_callback`]: a present workspace is the exclusive
+/// `build_psi_drift_deriv_callback`: a present workspace is the exclusive
 /// authority, while the direct family hook is used only when no workspace was
 /// constructed.
 fn materialize_authoritative_psi_hessian_directional_derivative<
@@ -2099,7 +2099,7 @@ pub fn build_psi_pair_callbacks<F: CustomFamily + Clone + Send + Sync + 'static>
 /// `Some(callback)` when the family potentially provides the drift term.
 /// `None` when the family is Gaussian (B_i is β-independent for all
 /// coordinates, so M_i ≡ 0).
-pub fn build_psi_drift_deriv_callback<F: CustomFamily + Clone + Send + Sync + 'static>(
+pub(crate) fn build_psi_drift_deriv_callback<F: CustomFamily + Clone + Send + Sync + 'static>(
     family: &F,
     synced_states: &[ParameterBlockState],
     specs: &[ParameterBlockSpec],

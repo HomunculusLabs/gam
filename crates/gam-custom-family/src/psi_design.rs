@@ -54,14 +54,14 @@ impl EmbeddedImplicitPsiDerivativeOperator {
         })
     }
 
-    pub fn embed_vector(&self, local: Array1<f64>) -> Array1<f64> {
+    pub(crate) fn embed_vector(&self, local: Array1<f64>) -> Array1<f64> {
         let mut out = Array1::<f64>::zeros(self.total_p);
         out.slice_mut(ndarray::s![self.global_range.clone()])
             .assign(&local);
         out
     }
 
-    pub fn local_coeffs(
+    pub(crate) fn local_coeffs(
         &self,
         u: &ArrayView1<'_, f64>,
         context: &str,
@@ -264,7 +264,7 @@ impl EmbeddedDensePsiDerivativeOperator {
         })
     }
 
-    pub fn validate_axis(
+    pub(crate) fn validate_axis(
         &self,
         axis: usize,
         context: &str,
@@ -279,14 +279,14 @@ impl EmbeddedDensePsiDerivativeOperator {
         }
     }
 
-    pub fn embed_vector(&self, local: Array1<f64>) -> Array1<f64> {
+    pub(crate) fn embed_vector(&self, local: Array1<f64>) -> Array1<f64> {
         let mut out = Array1::<f64>::zeros(self.total_p);
         out.slice_mut(ndarray::s![self.global_range.clone()])
             .assign(&local);
         out
     }
 
-    pub fn local_coeffs(
+    pub(crate) fn local_coeffs(
         &self,
         u: &ArrayView1<'_, f64>,
         context: &str,
@@ -901,7 +901,7 @@ impl CustomFamilyPsiDesignAction {
         }
     }
 
-    pub fn absolute_rows(&self, rows: Range<usize>) -> Range<usize> {
+    pub(crate) fn absolute_rows(&self, rows: Range<usize>) -> Range<usize> {
         (self.row_range.start + rows.start)..(self.row_range.start + rows.end)
     }
 
@@ -1055,7 +1055,7 @@ impl CustomFamilyPsiSecondDesignAction {
         }
     }
 
-    pub fn absolute_rows(&self, rows: Range<usize>) -> Range<usize> {
+    pub(crate) fn absolute_rows(&self, rows: Range<usize>) -> Range<usize> {
         (self.row_range.start + rows.start)..(self.row_range.start + rows.end)
     }
 
