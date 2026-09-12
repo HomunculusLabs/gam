@@ -1,4 +1,3 @@
-use super::family::clamp_bernoulli_link_probability;
 use super::*;
 use gam_linalg::faer_ndarray::FaerEigh;
 use gam_linalg::matrix::{FiniteSignedWeightsView, LinearOperator};
@@ -454,13 +453,17 @@ pub(super) fn pilot_irls_hessian_row_metric_at_eta(
     let mut w = Array1::<f64>::zeros(n);
     for i in 0..n {
         let eta = eta_pilot[i];
-        let mu = clamp_bernoulli_link_probability(normal_cdf(eta));
-        // `var > 0` by the link clamp; `phi` underflows to 0 for |η| > 38.6, and
-        // a row whose density has underflowed carries no curvature — `w = 0` is
-        // the honest weight, not `1e-600/var`.
+        // `V = Φ(η)·Φ(−η)` is formed from both tails, so it has no `1 − μ`
+        // cancellation. `phi` underflows to 0 for |η| > 38.6 and `V` a little
+        // later. A row whose density or variance has underflowed carries no
+        // curvature, so `w = 0` is its honest weight.
         let phi = normal_pdf(eta);
-        let var = mu * (1.0 - mu);
-        w[i] = sample_weights[i] * (phi * phi) / var;
+        let var = normal_cdf(eta) * normal_cdf(-eta);
+        w[i] = if phi > 0.0 && var > 0.0 {
+            sample_weights[i] * (phi * phi) / var
+        } else {
+            0.0
+        };
     }
     w
 }
@@ -530,11 +533,14 @@ pub(super) fn pilot_eta_for_link_dev_orthogonalisation(
             .q;
         let eta = rigid_observed_eta(q_marg, b_pre, z[i], probit_scale);
         working_eta[i] = eta;
-        let mu = clamp_bernoulli_link_probability(normal_cdf(eta));
         let phi = normal_pdf(eta);
-        let var = mu * (1.0 - mu);
-        w_irls[i] = weights[i] * (phi * phi) / var;
-        score_residual[i] = phi * (y[i] - mu) / var;
+        let (mu, mu_complement) = (normal_cdf(eta), normal_cdf(-eta));
+        let var = mu * mu_complement;
+        if phi > 0.0 && var > 0.0 {
+            w_irls[i] = weights[i] * (phi * phi) / var;
+            // `y − μ = y·Φ(−η) − (1 − y)·Φ(η)`, formed without cancellation in either tail.
+            score_residual[i] = phi * (y[i] * mu_complement - (1.0 - y[i]) * mu) / var;
+        }
     }
     let p_marg = marginal_design.ncols();
     if p_marg == 0 {
