@@ -139,9 +139,55 @@ pub fn stack_topologies_gaussian(
         .map_err(|error| error.to_string())
 }
 
+/// Stacked response-scale predictive mean `Σ_k w_k μ_k(x)`: `weights[k]` scales
+/// candidate `k`'s mean column `means[k]` (indexed `[candidate][row]`). Weights
+/// must be finite and non-negative, and every candidate must predict the same
+/// rows.
+pub fn stacked_predictive_mean(weights: &[f64], means: &[Vec<f64>]) -> Result<Vec<f64>, String> {
+    if weights.len() != means.len() {
+        return Err(format!(
+            "stacked_predictive_mean: {} weights for {} candidate mean columns",
+            weights.len(),
+            means.len()
+        ));
+    }
+    let Some(n_rows) = means.first().map(Vec::len) else {
+        return Err("stacked_predictive_mean: at least one candidate is required".to_string());
+    };
+    if means.iter().any(|column| column.len() != n_rows) {
+        return Err(
+            "stacked_predictive_mean: candidates disagree on prediction row count".to_string(),
+        );
+    }
+    if let Some(weight) = weights
+        .iter()
+        .find(|weight| !(weight.is_finite() && **weight >= 0.0))
+    {
+        return Err(format!(
+            "stacked_predictive_mean: weights must be finite and non-negative, got {weight}"
+        ));
+    }
+    let mut out = vec![0.0; n_rows];
+    for (&weight, column) in weights.iter().zip(means) {
+        for (value, &mean) in out.iter_mut().zip(column) {
+            *value += weight * mean;
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stacked_predictive_mean_weights_each_candidate_column() {
+        let mean = stacked_predictive_mean(&[0.25, 0.75], &[vec![4.0, 8.0], vec![0.0, 4.0]])
+            .expect("equal-length columns stack");
+        assert_eq!(mean, vec![1.0, 5.0]);
+        assert!(stacked_predictive_mean(&[1.0, 0.0], &[vec![1.0], vec![1.0, 2.0]]).is_err());
+        assert!(stacked_predictive_mean(&[-0.5], &[vec![1.0]]).is_err());
+    }
 
     // Reference log-density tables captured from the CURRENT Python
     // `gamfit._select_topology` math (NormalDist().inv_cdf band quantile,

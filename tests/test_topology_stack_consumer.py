@@ -52,6 +52,17 @@ class _CapturingRust:
         self.captured_lowers = None
         self.captured_uppers = None
         self.captured_interval_level = None
+        self.captured_stack_weights = None
+        self.captured_stack_means = None
+
+    def stacked_predictive_mean(self, weights, means):
+        """Record the marshalled stack columns and return their weighted sum."""
+        self.captured_stack_weights = [float(w) for w in weights]
+        self.captured_stack_means = [list(column) for column in means]
+        return [
+            sum(w * column[i] for w, column in zip(weights, means))
+            for i in range(len(means[0]))
+        ]
 
     def stacking_weights_from_log_density(self, names, log_density_rows):
         self.captured_names = list(names)
@@ -180,6 +191,8 @@ def test_zero_weighted_candidate_is_not_predicted(monkeypatch):
 
     stack = st.stack_topologies(fits, holdout, "y")
     out = stack.predict({"x": [3.0, 4.0]})
+    assert rust.captured_stack_weights == [1.0]
+    assert rust.captured_stack_means == [[3.0, 4.0]]
     assert math.isclose(out[0], 3.0, rel_tol=1e-9)
     assert math.isclose(out[1], 4.0, rel_tol=1e-9)
 

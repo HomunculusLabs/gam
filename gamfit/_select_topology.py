@@ -72,6 +72,12 @@ class _TopologyRustModule(Protocol):
         interval_level: float,
     ) -> str: ...
 
+    def stacked_predictive_mean(
+        self,
+        weights: list[float],
+        means: list[list[float]],
+    ) -> list[float]: ...
+
 BasisSpec: TypeAlias = Smooth
 ScoreKind: TypeAlias = Literal["reml", "laml", "bic", "tk"]
 ScoreScale: TypeAlias = Literal["per_observation", "per_effective_dim", "raw"]
@@ -359,32 +365,23 @@ class TopologyStack:
     def predict(self, data: Any, **predict_kwargs: Any) -> "list[float]":
         """Stacked response-scale predictive mean at the rows of ``data``.
 
-        Each retained candidate predicts the response-scale mean over ``data``;
-        the per-candidate means are combined with the stacking weights. Extra
-        keyword arguments are forwarded to each candidate's ``predict``.
+        Each positively-weighted candidate predicts the response-scale mean over
+        ``data``; the Rust ``stacked_predictive_mean`` combines the columns with
+        the stacking weights. Extra keyword arguments are forwarded to each
+        candidate's ``predict``.
         """
-        cand_means: dict[str, list[float]] = {}
-        n_rows: int | None = None
-        for name in self.names:
-            weight = self.weights.get(name, 0.0)
-            if weight == 0.0:
-                continue
-            means = _predict_response_mean(self._fits[name], data, **predict_kwargs)
-            if n_rows is None:
-                n_rows = len(means)
-            elif len(means) != n_rows:
-                raise ValueError(
-                    "TopologyStack candidates disagree on prediction row count"
-                )
-            cand_means[name] = means
-        if n_rows is None:
+        active = [name for name in self.names if self.weights.get(name, 0.0) != 0.0]
+        if not active:
             raise ValueError("TopologyStack has no positively-weighted candidate")
-        out = [0.0] * n_rows
-        for name, means in cand_means.items():
-            weight = self.weights[name]
-            for i, value in enumerate(means):
-                out[i] += weight * value
-        return out
+        means = [
+            _predict_response_mean(self._fits[name], data, **predict_kwargs)
+            for name in active
+        ]
+        return list(
+            _topology_rust().stacked_predictive_mean(
+                [float(self.weights[name]) for name in active], means
+            )
+        )
 
 
 def stack_topologies(

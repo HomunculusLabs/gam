@@ -4490,6 +4490,14 @@ fn stack_topologies_gaussian(
         .map_err(|err| py_value_error(format!("stack_topologies_gaussian: serialise: {err}")))
 }
 
+/// Stacked response-scale predictive mean `Σ_k w_k μ_k(x)` over the candidates a
+/// `TopologyStack` predicts with; `means` is indexed `[candidate][row]`.
+#[pyfunction]
+fn stacked_predictive_mean(weights: Vec<f64>, means: Vec<Vec<f64>>) -> PyResult<Vec<f64>> {
+    gam::solver::topology_stack_gaussian::stacked_predictive_mean(&weights, &means)
+        .map_err(py_value_error)
+}
+
 // Each lookup below names the one `SummaryPayload` field that publishes the
 // quantity; there are no alternative spellings to probe.
 const REML_SCORE_KEYS: &[&str] = &["reml_score"];
