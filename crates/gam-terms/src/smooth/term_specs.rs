@@ -1160,7 +1160,7 @@ impl SmoothDesign {
 }
 
 #[derive(Debug, Clone)]
-pub struct RawSmoothDesign {
+pub(crate) struct RawSmoothDesign {
     pub term_designs: Vec<DesignMatrix>,
     /// Sum of every fixed affine term contribution on the realized rows.
     pub affine_offset: Array1<f64>,

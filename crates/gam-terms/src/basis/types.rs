@@ -120,7 +120,7 @@ pub enum KnotSource<'a> {
 /// For double-penalty GAMs, a second ridge penalty `I` is also returned so the
 /// caller can optimize `(lambda_bending, lambdaridge)` jointly.
 #[derive(Debug, Clone)]
-pub struct ThinPlateSplineBasis {
+pub(crate) struct ThinPlateSplineBasis {
     pub basis: Array2<f64>,
     pub penalty_bending: Array2<f64>,
     pub penalty_ridge: Array2<f64>,
@@ -177,7 +177,7 @@ impl MaternNu {
 
 /// Matérn radial basis and penalties.
 #[derive(Debug, Clone)]
-pub struct MaternSplineBasis {
+pub(crate) struct MaternSplineBasis {
     pub basis: Array2<f64>,
     pub penalty_kernel: Array2<f64>,
     pub num_polynomial_basis: usize,
