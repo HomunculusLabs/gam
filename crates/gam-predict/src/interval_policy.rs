@@ -9,8 +9,7 @@
 //!   1. the central normal multiplier `z = Φ⁻¹(½ + ½·level)`,
 //!   2. the η-scale interval `η ± z·SE(η)`,
 //!   3. the response-scale interval, either by transforming the η endpoints
-//!      through the inverse link (handling non-monotone maps) or by the
-//!      delta-method `μ ± z·SE(μ)`,
+//!      through the (monotone) inverse link or by the delta-method `μ ± z·SE(μ)`,
 //!   4. clamping the response-scale bounds to the family support, and
 //!   5. assembling [`PredictUncertaintyResult`] / [`PredictPosteriorMeanResult`].
 //!
@@ -122,28 +121,19 @@ pub(crate) fn symmetric_interval(
     (center - &half_width, center + &half_width)
 }
 
-/// Number of evaluation nodes (endpoints included) used to scan the response
-/// map over each η interval in [`transform_eta_interval`]. Odd, so the interval
-/// midpoint — the point predictor for a symmetric η interval — is always a
-/// node. Monotone maps attain their extrema at the endpoint nodes, so for them
-/// the scan is exact and reproduces the endpoint-only construction bit-for-bit;
-/// the interior nodes exist to catch extrema of non-monotone response maps
-/// (learnable link wiggles), for which endpoint-only transformation is false
-/// (e.g. `η²` on `[-1, 1]` has image `[0, 1]`, not `[1, 1]`).
-const TRANSFORM_INTERVAL_SCAN_NODES: usize = 17;
-
 /// Response-scale interval built by transforming the η-scale interval through
-/// a (possibly non-monotone) response map, then clamping to `bounds`.
+/// a monotone response map, then clamping to `bounds`.
 ///
-/// `response_map` is the predictor's inverse-link / response transform. The map
-/// is evaluated on `TRANSFORM_INTERVAL_SCAN_NODES` evenly spaced nodes across
-/// each row's η interval and the per-row min/max over the scan is returned, so
-/// interior extrema of a non-monotone transform (link wiggles) are captured
-/// rather than silently cut off by an endpoint-only image. Because some
-/// transforms (notably survival tails) are decreasing, the min/max also keeps
-/// the returned `(lower, upper)` genuinely ordered.
+/// `response_map` is the predictor's inverse-link / response transform, and
+/// every one routed here is monotone. The base inverse links are CDF-shaped
+/// (logit, probit, cloglog, SAS, beta-logistic, mixtures). The Bernoulli
+/// marginal-slope mean is `Φ(η)`. A learnable link wiggle is a monotone warp
+/// that already sits inside `η`. Survival tails decrease. The image of
+/// `[η_lo, η_hi]` is therefore exactly the span of the two endpoint images, so
+/// the endpoints are transformed and ordered, and nothing is scanned (SPEC rule
+/// 18, #2902). The ordering also handles a decreasing map.
 ///
-/// Every transformed node must be finite. A non-finite response image is a
+/// Both transformed endpoints must be finite. A non-finite response image is a
 /// typed prediction failure: changing that row to a delta-method interval would
 /// silently substitute a different uncertainty estimand. Degenerate all-zero
 /// count responses are rejected at the family-validation boundary before a fit
@@ -158,41 +148,21 @@ where
     F: Fn(&Array1<f64>) -> Result<Array1<f64>, EstimationError>,
 {
     let n = eta_lower.len();
-    // Scan the response map over each row's η interval. Node 0 is the lower
-    // endpoint and the last node is the upper endpoint, so a monotone map's
-    // extrema are reproduced exactly; interior nodes capture non-monotone
-    // extrema. All nodes must be finite for a row's scan to count — `f64::min`/
-    // `max` return the non-NaN argument, so a single `+inf`/NaN node would
-    // otherwise slip through as a finite-but-meaningless bound.
-    const K: usize = TRANSFORM_INTERVAL_SCAN_NODES;
-    let mut scan_min = Array1::<f64>::from_elem(n, f64::INFINITY);
-    let mut scan_max = Array1::<f64>::from_elem(n, f64::NEG_INFINITY);
-    let mut scan_finite = vec![true; n];
-    for k in 0..K {
-        let t = (k as f64) / ((K - 1) as f64);
-        let eta_node =
-            Array1::from_shape_fn(n, |i| eta_lower[i] + t * (eta_upper[i] - eta_lower[i]));
-        let transformed = response_map(&eta_node)?;
-        for i in 0..n {
-            let v = transformed[i];
-            if v.is_finite() {
-                scan_min[i] = scan_min[i].min(v);
-                scan_max[i] = scan_max[i].max(v);
-            } else {
-                scan_finite[i] = false;
-            }
-        }
-    }
+    let at_lower = response_map(eta_lower)?;
+    let at_upper = response_map(eta_upper)?;
     let mut mean_lower = Array1::<f64>::zeros(n);
     let mut mean_upper = Array1::<f64>::zeros(n);
     for i in 0..n {
-        if !scan_finite[i] {
+        let (first, second) = (at_lower[i], at_upper[i]);
+        // `f64::min`/`max` return the non-NaN argument, so a single `+inf`/NaN
+        // endpoint would otherwise slip through as a finite-but-meaningless bound.
+        if !(first.is_finite() && second.is_finite()) {
             return Err(EstimationError::InvalidInput(format!(
                 "response-scale interval transform produced a non-finite value at row {i}"
             )));
         }
-        mean_lower[i] = scan_min[i].min(scan_max[i]);
-        mean_upper[i] = scan_max[i].max(scan_min[i]);
+        mean_lower[i] = first.min(second);
+        mean_upper[i] = first.max(second);
     }
     bounds.clamp_in_place(&mut mean_lower);
     bounds.clamp_in_place(&mut mean_upper);
@@ -220,9 +190,9 @@ pub(crate) fn delta_mean_interval(
 /// (well-behaved for nonlinear links), Gaussian-identity families reuse the
 /// η interval directly, and dispersion families take the delta-method route.
 pub enum MeanBoundMethod<'a> {
-    /// Transform `η ± z·SE(η)` through the supplied response map (non-monotone
-    /// safe) and clamp to `bounds`. Non-finite transformed values are errors;
-    /// this path never substitutes a delta-method interval.
+    /// Transform `η ± z·SE(η)` through the supplied monotone response map and
+    /// clamp to `bounds`. Non-finite transformed values are errors; this path
+    /// never substitutes a delta-method interval.
     TransformEta {
         bounds: ResponseBounds,
         response_map: &'a (dyn Fn(&Array1<f64>) -> Result<Array1<f64>, EstimationError> + 'a),
@@ -454,8 +424,8 @@ pub enum PredictPass {
 /// [`PredictionTransform`] now declares it once and the generic drivers thread
 /// it through both the full-uncertainty and posterior-mean pipelines.
 pub enum ResponseInterval {
-    /// Transform the η endpoints `η ± z·SE(η)` through [`PredictionTransform::response`]
-    /// (non-monotone safe), then clamp to [`PredictionTransform::bounds`].
+    /// Transform the η endpoints `η ± z·SE(η)` through the monotone
+    /// [`PredictionTransform::response`], then clamp to [`PredictionTransform::bounds`].
     /// Used by families whose response is a smooth inverse-link image of η
     /// (standard link-wiggle, Bernoulli marginal-slope).
     TransformEta,
@@ -563,7 +533,8 @@ pub trait PredictionTransform {
     }
 
     /// Response map μ = T(η), used to transform η-interval endpoints onto the
-    /// response scale (non-monotone safe via [`transform_eta_interval`]).
+    /// response scale through [`transform_eta_interval`]. It must be monotone in
+    /// `η`, which every inverse link is.
     fn response(&self, eta: &Array1<f64>) -> Result<Array1<f64>, EstimationError>;
 
     /// Which [`ResponseInterval`] policy maps the η interval onto the response
@@ -1486,53 +1457,6 @@ mod parity_tests {
             some_result.mean_upper.as_ref().expect("mean upper"),
             &ref_mean_upper,
             "posterior mean upper",
-        );
-    }
-
-    /// A genuinely non-monotone response map must have its interior extrema
-    /// captured: `f(η) = η²` on the symmetric interval `[-c, c]` has image
-    /// `[0, c²]`, while endpoint-only transformation would report the
-    /// degenerate `[c², c²]`.
-    #[test]
-    fn transform_eta_non_monotone_captures_interior_extrema() {
-        let eta = array![0.0];
-        let square =
-            |e: &Array1<f64>| -> Result<Array1<f64>, EstimationError> { Ok(e.mapv(|x| x * x)) };
-        let mean = square(&eta).unwrap();
-        let eta_se = array![1.0];
-        let z = z95();
-        let c = z * eta_se[0];
-
-        let out = assemble_uncertainty_result(
-            LEVEL,
-            eta.clone(),
-            mean.clone(),
-            eta_se.clone(),
-            eta_se.clone(),
-            EtaInterval::Symmetric,
-            MeanBoundMethod::TransformEta {
-                bounds: ResponseBounds::UNBOUNDED,
-                response_map: &square,
-            },
-            None,
-            UncertaintyProvenance {
-                covariance_source: InferenceCovarianceMode::Conditional,
-            },
-        )
-        .expect("engine assembly");
-
-        // The interval midpoint η = 0 is a scan node, so the true interior
-        // minimum f(0) = 0 is found exactly; the maximum is at the endpoints.
-        assert!(
-            out.mean_lower[0].abs() < 1e-12,
-            "interior minimum not captured: lower = {}",
-            out.mean_lower[0]
-        );
-        assert!(
-            (out.mean_upper[0] - c * c).abs() < 1e-12,
-            "endpoint maximum wrong: upper = {}, expected {}",
-            out.mean_upper[0],
-            c * c
         );
     }
 
